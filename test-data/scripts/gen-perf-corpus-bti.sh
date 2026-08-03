@@ -245,6 +245,18 @@ mod.parse_widths(sys.argv[1])
 mod.parse_buckets(sys.argv[2])
 PYEOF
   CHUNKS=$(( (ROWS + CHUNK_ROWS - 1) / CHUNK_ROWS ))
+  # `pk` is a CQL `int`: chunk N's keys start at N * PK_STRIDE, so a plan with too
+  # many chunks cannot be represented. Checked HERE, before the container and the
+  # multi-GB load: an over-ceiling plan previously died at chunk 3 of 27 with a
+  # cqlsh ParseError, four minutes and three SSTables in (issue #3234). The
+  # arithmetic and the stride live in the row driver, the one module that owns them.
+  python3 - "$ROWS_PY" "$CHUNKS" "$CHUNK_ROWS" <<'PYEOF' || die "plan exceeds the \`pk int\` ceiling (see message above)"
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("rows", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.plan_fits_int32(int(sys.argv[2]), int(sys.argv[3]))
+PYEOF
   log "validated: rows=$ROWS chunk_rows=$CHUNK_ROWS chunks=$CHUNKS seed=$SEED ks=$KS tbl=$TBL out=$OUT"
 }
 

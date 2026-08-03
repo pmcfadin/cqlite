@@ -116,6 +116,21 @@ check_reject "a bad table"         "invalid table"         --out "$TMP/c" --tabl
 check_reject "an empty --seed"     "seed is empty"         --out "$TMP/c" --seed ""
 check_reject "a malformed --widths" "widths"               --out "$TMP/c" --widths "200"
 check_reject "duplicate bucket first bytes" "widths"       --out "$TMP/c" --buckets "alpha,ateam"
+# `pk` is a CQL `int`, so chunk N's key base (N * PK_STRIDE) has a hard ceiling.
+# REGRESSION (issue #3234): the original 1e9 stride made chunk 3 start at
+# 3,000,000,000 > INT32_MAX, and the 27-chunk production run died there — four
+# minutes and three SSTables in — with a cqlsh ParseError, while the 2-chunk
+# --smoke run never reached it. This pins the refusal at VALIDATE time (before any
+# container), and the two cases below pin the boundary itself so a future stride
+# change cannot silently reopen the hole.
+check_reject "a plan over the \`pk int\` ceiling" "INT32_MAX" \
+  --out "$TMP/c" --rows 2200000000 --chunk-rows 500000
+out=$(bash "$GEN" --validate-only --out "$TMP/c" --rows 13200000 --chunk-rows 500000 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "chunks=27 " <<<"$out"; then
+  pass "the 27-chunk production plan fits the \`pk int\` ceiling"
+else
+  fail "production plan (27 chunks) must validate (rc=$rc, out: $out)"
+fi
 
 # --------------------------------------- AC1/AC2 asserts via --verify-only ----
 # A fabricated `da` corpus: the asserts are file-level, so no container is needed.

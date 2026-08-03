@@ -19,7 +19,9 @@ Determinism contract:
   everywhere. Chunks are INDEPENDENT (no shared PRNG stream), so a chunk can be
   regenerated on its own.
 * partition keys are ``chunk_index * pk_stride + i``, so no two chunks share a
-  partition and every partition lives in exactly one SSTable.
+  partition and every partition lives in exactly one SSTable. `pk` is a CQL
+  ``int``, so the largest key is ``INT32_MAX``; :func:`plan_fits_int32` refuses an
+  over-ceiling plan at validate time and the write loop re-checks per key.
 * the plan record reports OBSERVED counts (rows/partitions actually written,
   the actual rows-per-partition histogram) -- never the requested numbers.
 
@@ -45,9 +47,48 @@ import random
 import sys
 from collections import Counter
 
-# 1e9 partitions of headroom per chunk: pk = chunk_index * PK_STRIDE + i, so
-# partition keys never collide across chunks (asserted below, not assumed).
-PK_STRIDE = 1_000_000_000
+# `pk` is a CQL `int`, i.e. SIGNED 32-BIT: the largest partition key the table can
+# hold is 2147483647. Since pk = chunk_index * PK_STRIDE + i, the stride bounds how
+# many chunks a run may have -- and an over-large stride is NOT a harmless waste of
+# key space, it is a hard failure part-way through a multi-GB load.
+#
+# MEASURED (issue #3234): with the original PK_STRIDE = 1_000_000_000, chunk 3's
+# pk_base was 3_000_000_000 > INT32_MAX, so `cqlsh COPY` rejected EVERY row of that
+# chunk with "'i' format requires -2147483648 <= number <= 2147483647" and the
+# generator died at chunk 3 of 27 -- after ~4 minutes and 3 SSTables of work. The
+# 2-chunk --smoke run never reached chunk 3, so the ceiling was invisible to it.
+# Hence: a stride with generous but FINITE headroom, plus the two fail-closed
+# asserts below (`plan_fits_int32` at validate time, the in-loop ceiling check at
+# write time). The ceiling is a property of the COLUMN TYPE, so it is checked here
+# rather than left to cqlsh to discover mid-load.
+INT32_MAX = 2_147_483_647
+
+# 1e6 partitions of headroom per chunk (~1400x the ~700 partitions a 500k-row chunk
+# actually produces), which admits chunk indices 0..2147 -- i.e. a 2147-SSTable
+# corpus, far beyond any profileable size. Partition keys still never collide
+# across chunks (asserted below, not assumed).
+PK_STRIDE = 1_000_000
+
+
+def plan_fits_int32(chunks: int, chunk_rows: int) -> None:
+    """Fail closed if a (chunks, chunk_rows) plan would overflow the `pk int` column.
+
+    Called by the generator's `validate_inputs` BEFORE any container starts, so an
+    over-sized plan is refused up front instead of dying part-way through the load
+    (issue #3234). `partitions <= rows` always, so `pk_base + chunk_rows` is a sound
+    upper bound on the largest key the last chunk can emit.
+    """
+    if chunks < 1 or chunk_rows < 1:
+        raise SystemExit(f"plan_fits_int32: chunks={chunks} chunk_rows={chunk_rows} must be >= 1")
+    max_pk = (chunks - 1) * PK_STRIDE + chunk_rows
+    if max_pk > INT32_MAX:
+        max_chunks = (INT32_MAX - chunk_rows) // PK_STRIDE + 1
+        raise SystemExit(
+            f"plan overflows the `pk int` column: {chunks} chunks x stride {PK_STRIDE} "
+            f"reaches pk {max_pk} > INT32_MAX ({INT32_MAX}). cqlsh COPY would reject "
+            f"every row of the first over-ceiling chunk. Use at most {max_chunks} "
+            f"chunks (raise --chunk-rows, or lower --rows)."
+        )
 
 
 def parse_widths(spec: str) -> list[tuple[int, int]]:
@@ -129,6 +170,11 @@ def main() -> int:
     seed_material = f"{args.seed}:{args.chunk_index}"
     rnd = random.Random(seed_material)
     pk_base = args.chunk_index * PK_STRIDE
+    if pk_base + args.rows > INT32_MAX:
+        raise SystemExit(
+            f"chunk {args.chunk_index}: pk_base {pk_base} + {args.rows} rows exceeds "
+            f"INT32_MAX ({INT32_MAX}); the `pk int` column cannot hold this chunk"
+        )
 
     # Hex payload: one getrandbits() per row (fast, deterministic). Hex is ~2:1
     # LZ4-compressible, i.e. field-shaped rather than either incompressible noise
@@ -152,6 +198,14 @@ def main() -> int:
                     f"({PK_STRIDE}); lower --chunk-rows or raise the stride"
                 )
             pk = pk_base + partitions
+            # Absolute ceiling, independent of the stride: `pk` is a CQL `int`.
+            # Without this, an over-ceiling key is only discovered by cqlsh, which
+            # reports it as a per-batch ParseError mid-load (issue #3234).
+            if pk > INT32_MAX:
+                raise SystemExit(
+                    f"chunk {args.chunk_index}: pk {pk} exceeds INT32_MAX "
+                    f"({INT32_MAX}) — the `pk int` column cannot hold it"
+                )
             # Partition-atomic, except the LAST partition of the chunk, which is
             # trimmed so the chunk emits EXACTLY --rows rows.
             width = min(rnd.choices(width_values, weights=width_weights, k=1)[0], remaining)
