@@ -674,6 +674,13 @@ fn encode_do_get(
 ) -> DoGetStream {
     let encoded = FlightDataEncoderBuilder::new()
         .with_schema(schema_ref)
+        // Issue #3096, lever 4: state the encoder's re-slicing target explicitly
+        // instead of inheriting arrow-flight's 2 MiB default, which is HALF this
+        // tree's `DEFAULT_MAX_BATCH_BYTES` and therefore re-sliced every batch the
+        // producer had already cut to its own cap. The derivation, the two
+        // currencies involved, and why this is not simply raised until the split
+        // disappears live on the constant.
+        .with_max_flight_data_size(crate::batch_bytes::FLIGHT_DATA_SIZE_TARGET_BYTES)
         .build(batch_stream)
         .map(move |res| res.map_err(|e| flight_error_to_status(e, &probe)));
     Box::pin(encoded)
@@ -755,3 +762,9 @@ mod tests;
 #[cfg(test)]
 #[path = "egress_budget_tests.rs"]
 mod egress_budget_tests;
+
+// The encoder's wire-side re-slicing target (issue #3096, lever 4), in its own
+// test module for the same campsite reason (epic #1135).
+#[cfg(test)]
+#[path = "streaming_framing_tests.rs"]
+mod streaming_framing_tests;

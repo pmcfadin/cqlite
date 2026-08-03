@@ -156,6 +156,67 @@ pub const DEFAULT_MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// Environment variable backing `--max-batch-bytes`.
 pub const ENV_MAX_BATCH_BYTES: &str = "CQLITE_MAX_BATCH_BYTES";
 
+/// The arrow-flight encoder's own batch **re-slicing** target, in Arrow buffer
+/// **CAPACITY** bytes (issue #3096, lever 4).
+///
+/// # Two different governors, two different currencies
+///
+/// [`DEFAULT_MAX_BATCH_BYTES`] is a **producer-side PAYLOAD cap**: the sum of
+/// Arrow buffer *lengths* in one emitted batch. `FlightDataEncoderBuilder`'s
+/// `max_flight_data_size` is a **wire-side CAPACITY target**: `split_batch_for_
+/// grpc_response` sums each column's `get_buffer_memory_size()` (buffer
+/// *capacity*) and zero-copy-slices the batch into
+/// `ceil(capacity / target)` pieces, each of which is framed as its own
+/// `FlightData` message. Capacity runs up to [`BATCH_BYTES_CAPACITY_FACTOR`]
+/// (2×) the payload, so the two numbers are NOT comparable directly — which is
+/// exactly how they drifted.
+///
+/// # What was wrong, measured
+///
+/// arrow-flight 53.4.1's default target is `GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES`
+/// = 2 MiB — HALF this tree's 4 MiB payload cap, so **every** batch the producer
+/// had already cut to its own cap was re-sliced by the encoder. Measured over
+/// the issue #3096 `ws0.events` corpus (701 B/row realized Arrow payload,
+/// `--batch-size 8192`, so the byte cap binds at 5,645 rows/batch), 400,000 rows
+/// produced **331** `FlightData` messages at the 2 MiB default: four ~1,411-row
+/// slices per batch plus a degenerate **1-row tail** (integer truncation in
+/// `rows_per_batch = num_rows / n_batches`), i.e. one in five messages carried a
+/// single row.
+///
+/// # Why 4 MiB, and why NOT "large enough to stop splitting"
+///
+/// The obvious move — raise the target until a full-cap batch is never split —
+/// is **wire-unsafe** and is deliberately rejected. Measured on the same corpus,
+/// a target of 8 MiB (or unbounded) does collapse the run to one message per
+/// producer batch (72 messages for 400,000 rows), but those messages carry
+/// **3.90 MB** of `data_body` each. The typical gRPC maximum message size is
+/// 4 MiB (tonic's and grpc-java's default `max_decoding_message_size`), and
+/// arrow-flight picked 2 MiB precisely because "this value would normally be
+/// 4MB, but the size calculation is somewhat inexact". A 3.90 MB body plus IPC
+/// and protobuf overhead sits on that ceiling, so an 8 MiB target would trade a
+/// framing micro-optimization for a Trino/JDBC interop break.
+///
+/// 4 MiB is the value that states the producer cap in the encoder's currency
+/// without crossing that ceiling: the same run drops to **189** messages (the
+/// 1-row tails and the 4-way slicing are gone; a full-cap batch is re-sliced at
+/// most once, purely by capacity overshoot) at **~1.49 MB** per message —
+/// comfortably inside every default gRPC limit, and still a hard wire-side
+/// backstop for any batch the producer cap did not govern.
+///
+/// # What this deliberately does NOT change
+///
+/// [`DEFAULT_MAX_BATCH_BYTES`] is untouched. It is the caller-facing,
+/// byte-bounded batching contract (`--max-batch-bytes`): no emitted batch may
+/// exceed a caller-supplied cap, and the narrow-shape headroom table above is
+/// derived from the 4 MiB value. Lowering the default to "align" would change
+/// observable default batching for every caller that never set one — including
+/// where the byte cap starts binding on the ~300 B/row shape — to buy the same
+/// framing effect. Fixing the encoder's side of the mismatch leaves the public
+/// contract exactly as published. A caller who raises `--max-batch-bytes` above
+/// 4 MiB still gets its larger batches; the encoder simply re-slices them for
+/// the wire, which is what a wire-side target is for.
+pub(crate) const FLIGHT_DATA_SIZE_TARGET_BYTES: usize = 4 * 1024 * 1024;
+
 /// Worst-case ratio of a batch's `get_array_memory_size()` (buffer **capacity**)
 /// to its payload bytes (buffer **lengths**).
 ///
