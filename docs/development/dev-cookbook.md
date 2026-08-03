@@ -7,6 +7,17 @@ For the agent gate (`scripts/agent-gate.sh`) see `CLAUDE.md` (contract) and
 `docs/development/gate-ops.md` (deep mechanics). For source layout see the
 [source map](https://pmcfadin.github.io/cqlite/agents-developing/source-map/).
 
+## roborev: scoping a review is a ROOT-checkout operation (#3229, #3234)
+
+**To change what a roborev review covers you must edit the ROOT checkout's `.roborev.toml` and
+restart the daemon.** The daemon binds the repo via `repos.root_path` and reads the root checkout's
+config, so an edit inside a worktree is a **silent no-op** — and it fails in the direction that looks
+like "`exclude_patterns` doesn't work" (measured on #3234: three rounds of added exclusions moved the
+reported prompt size only by the size of the comment added alongside them). `roborev config get` also
+answers differently depending on cwd, so it can confirm the worktree's file while the daemon uses
+another. Under 1:1:1:1 every issue lives in a worktree, so this is the default situation, not an edge
+case. Invocation itself stays `scripts/flow/roborev-review.sh` (see `CLAUDE.md`).
+
 ## Profiling loop
 
 See `docs/profiling.md`.

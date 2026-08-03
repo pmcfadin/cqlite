@@ -434,6 +434,10 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `~/.codex/config.toml` on the worker boxes; the bare `codex` default moved `gpt-5.5` → `gpt-5.6-sol` in
   the 0.142.5 → 0.145.0 upgrade, so a version bump can silently move it again. `codex --version` + a bare
   `codex exec` header is how you check what it actually resolves to.
+- **Scoping a review (`exclude_patterns`) is a ROOT-checkout operation (#3229/#3234).** The daemon binds
+  the repo via `repos.root_path` and reads the **ROOT checkout's** `.roborev.toml`, so editing it inside a
+  worktree is a silent no-op that looks exactly like "`exclude_patterns` doesn't work" — and `roborev
+  config get` answers differently depending on cwd. Edit the root checkout's file and restart the daemon.
 - **flow-closer (#2084/#2668)**: the full gate, the final roborev pass, and the merge run inside the
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
   summary-file path, ≤10 lines residual), never gate stdout or review churn. The closer has **no
