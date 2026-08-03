@@ -650,6 +650,25 @@ pub(crate) async fn build_aggregate_response(
     );
     let probe = StreamProbe::default();
     let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, probe.clone(), None, None);
+    // DELIBERATE ASYMMETRY, not an omission (issue #3096 review): the encoder
+    // stream is NOT wrapped in `time_encoder_framing` here, so the aggregate route
+    // emits no `stream_encode_framing` sub-phase sample.
+    //
+    // `stream_encode_framing` is a sub-phase OF the `stream` phase, and this route
+    // deliberately records no `stream` phase at all (issue #2162 — it materializes
+    // one row per GROUP BY group under `merge_setup` and never enters a client
+    // stream phase; the `_timer` above is what enforces that). Emitting a
+    // sub-phase whose parent phase is absent would publish a sample no consumer of
+    // `docs/reports/flight-metrics-reference.md` can attribute, and would break
+    // the #2819 ordering invariant that a sub-phase's emission sits inside its
+    // phase.
+    //
+    // The cost of the asymmetry is bounded and known: framing time on the
+    // aggregate route is unattributed. That is acceptable because the route's
+    // output is bounded by GROUP count — one row per group, so a handful of
+    // batches — which is exactly why it is not a framing-throughput surface. If a
+    // `stream` phase is ever introduced for aggregates, wire the framing timer at
+    // the same time.
     Ok(encode_do_get(metered, schema_ref, probe))
 }
 

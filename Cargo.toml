@@ -109,6 +109,10 @@ snap = "1.1"
 flate2 = "1.0"
 zstd = "0.13"
 crc32fast = "1.3"
+# SHA-256, for content digests (corpus identity in tools/ws0-corpus-gen, and
+# cqlite-core's own hashing). Declared here so the two consumers cannot drift to
+# different minor lines (issue #3096 review).
+sha2 = "0.10"
 
 # Collections and data structures
 crossbeam = "0.8"

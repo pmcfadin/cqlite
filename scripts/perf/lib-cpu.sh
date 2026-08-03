@@ -14,8 +14,18 @@
 set -euo pipefail
 
 # Expand a Linux CPU list ("0-3,8", "2,10") into one sorted, space-separated list.
+#
+# Two properties that are easy to lose in an edit (issue #3096 review):
+#
+#  * `_parts` is declared `local`. It used to leak into the SOURCING shell, where
+#    a caller's own `_parts` would be silently clobbered by any pinning check.
+#  * an EMPTY expansion returns empty rather than expanding an empty array. Under
+#    `set -u` on bash < 4.4, `"${out[@]}"` on an empty array is an unbound-variable
+#    error — so an empty/garbage CPU spec died here with a shell diagnostic instead
+#    of reaching `verify_sibling_pair`'s fail-closed "CPU list is empty" message.
 cpu_list_expand() {
-  local spec="$1" out=() part lo hi i
+  local spec="$1" part lo hi i
+  local -a out=() _parts=()
   IFS=',' read -r -a _parts <<<"$spec"
   for part in "${_parts[@]}"; do
     if [[ "$part" == *-* ]]; then
@@ -25,6 +35,9 @@ cpu_list_expand() {
       out+=("$part")
     fi
   done
+  if ((${#out[@]} == 0)); then
+    return 0
+  fi
   printf '%s\n' "${out[@]}" | sort -n -u | tr '\n' ' ' | sed 's/ $//'
 }
 

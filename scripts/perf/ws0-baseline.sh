@@ -255,12 +255,30 @@ measure_flight() {
   # the warm-handle registry, so the measured window is steady-state scan work
   # and not one-off setup. On the COLD arm this is deliberately skipped — a
   # prewarm would make "cold" meaningless.
+  #
+  # The outcome is RECORDED, not swallowed (issue #3096 review). A silently failed
+  # prewarm downgrades a "warm" claim to a partly-cold one, and the old `|| true`
+  # left nothing in results.json or summary.txt to say so. The bias runs AGAINST
+  # the Flight arm (a cold-ish arm measures slower), so it cannot manufacture a
+  # win — but an unrecorded degradation is still an unrecorded degradation. The
+  # run continues rather than aborting: a rep that is honestly labelled
+  # `prewarm-failed` is more useful than no rep, and ws0_report.py surfaces the
+  # label in every report it writes.
+  local prewarm_status="skipped-cold-arm"
   if [[ "$temp" == "warm" ]]; then
-    taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
-      --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
-      --shape full --ramp 1 --step-duration 20s --round prewarm --out /dev/null \
-      > "$OUT_DIR/$tag.prewarm.log" 2>&1 || true
+    if taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
+        --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
+        --shape full --ramp 1 --step-duration 20s --round prewarm --out /dev/null \
+        > "$OUT_DIR/$tag.prewarm.log" 2>&1; then
+      prewarm_status="ok"
+    else
+      prewarm_status="FAILED-exit-$?"
+      echo "  WARNING: prewarm FAILED for $tag ($prewarm_status) — this 'warm' rep is" >&2
+      echo "           partly cold. Recorded in results.json and summary.txt; see" >&2
+      echo "           $OUT_DIR/$tag.prewarm.log" >&2
+    fi
   fi
+  printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
 
   perf_stat_c "$OUT_DIR/perf-$tag.csv" \
     taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \

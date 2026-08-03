@@ -62,6 +62,32 @@ def spread(values: list[float]) -> dict[str, float]:
     }
 
 
+def require_complete(label: str, per_rep: list, reps: int, missing: list[str]) -> None:
+    """FAIL when fewer than `reps` reps were collected (issue #3096 review).
+
+    A rep with missing artifacts used to be silently skipped, so a session that
+    lost half its reps still printed a median — with only the `n=` field to betray
+    it, in a report whose whole contract is "median of N with the spread stated".
+    An INCOMPLETE collection is not a smaller sample of the same claim; it is a
+    different claim, and it is more often a crashed rep than a deliberate one.
+
+    Two cases are deliberately distinguished:
+
+    * `per_rep` empty AND nothing missing -> this (arm, temperature) was never
+      run; the caller's `--temp`/`--arm` selection says so. Not an error.
+    * `per_rep` empty but artifacts missing, or a PARTIAL collection -> fatal.
+    """
+    if not per_rep and not missing:
+        return
+    if len(per_rep) < reps:
+        sys.exit(
+            f"FATAL: {label} collected {len(per_rep)} of {reps} requested reps"
+            f" — missing artifacts: {', '.join(missing) or '<none named>'}."
+            " A median over fewer reps than requested is a different claim than the"
+            " one asked for; re-run the missing reps rather than reporting this."
+        )
+
+
 def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
@@ -69,10 +95,16 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
     rows_total = 0
     setup_cycles_total = 0
     per_rep = []
+    missing: list[str] = []
     for rep in range(1, reps + 1):
         tag = f"scan-{temp}-{rep}"
         payload_path = d / f"{tag}.json"
         if not payload_path.exists():
+            # A rep whose artifacts are missing is NOT a smaller sample: it is an
+            # incomplete run, and silently `continue`ing it published a median over
+            # fewer reps than the caller asked for with only `n=` to say so (issue
+            # #3096 review). Fail instead.
+            missing.append(payload_path.name)
             continue
         payload = json.loads(payload_path.read_text())
         rows = int(payload["rows_denominator"])
@@ -111,7 +143,12 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
             }
         )
     if not per_rep:
+        # Nothing collected at all: this (arm, temperature) was not run — the
+        # caller's `--temp`/`--arm` selection decides that, so it is not an error.
+        # A PARTIAL collection is.
+        require_complete(f"bare scan ({temp})", per_rep, reps, missing)
         return {}
+    require_complete(f"bare scan ({temp})", per_rep, reps, missing)
     return {
         "arm": "bare_scan",
         "surface": "cqlite_core::Database::execute_streaming",
@@ -131,10 +168,13 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
     ipc: list[float] = []
     rows_total = 0
     per_rep = []
+    missing: list[str] = []
+    prewarm: list[dict] = []
     for rep in range(1, reps + 1):
         tag = f"flight-{arm}-{temp}-{rep}"
         jsonl = d / f"{tag}.jsonl"
         if not jsonl.exists():
+            missing.append(jsonl.name)
             continue
         records = [json.loads(x) for x in jsonl.read_text().splitlines() if x.strip()]
         if not records:
@@ -145,6 +185,18 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
             sys.exit(f"FATAL: flight rep {tag} observed ZERO rows — not a measurement")
         if int(rec.get("requests_error", 0)) > 0:
             sys.exit(f"FATAL: flight rep {tag} had {rec['requests_error']} failed request(s)")
+        # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh. Absent
+        # file => the driver predates the recording (or the rep died before the
+        # prewarm), which is itself reported rather than assumed healthy.
+        status_path = d / f"{tag}.prewarm.status"
+        prewarm.append(
+            {
+                "rep": rep,
+                "status": (
+                    status_path.read_text().strip() if status_path.exists() else "unrecorded"
+                ),
+            }
+        )
         counters = read_perf_csv(d / f"perf-{tag}.csv")
         cyc = counters.get("cycles", 0)
         ins = counters.get("instructions", 0)
@@ -166,10 +218,13 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
                 "rows_per_sec": float(rec["rows_per_s"]),
                 "cycles": cyc,
                 "cycles_per_row": cyc / rows,
+                "prewarm": prewarm[-1]["status"],
             }
         )
     if not per_rep:
+        require_complete(f"flight do_get {arm} ({temp})", per_rep, reps, missing)
         return {}
+    require_complete(f"flight do_get {arm} ({temp})", per_rep, reps, missing)
     return {
         "arm": f"flight_do_get_{arm}",
         "surface": "arrow_flight FlightService::do_get (loopback gRPC)",
@@ -183,6 +238,13 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
         "setup_note": (
             "server start + (warm only) prewarm happen BEFORE the perf window opens, "
             "so setup is outside the window by construction rather than subtracted"
+        ),
+        # Issue #3096 review: a failed prewarm silently degraded a "warm" claim.
+        # Every rep's outcome is recorded here, and `prewarm_all_ok` is the single
+        # field a reader can check.
+        "prewarm": prewarm,
+        "prewarm_all_ok": all(
+            p["status"] in ("ok", "skipped-cold-arm") for p in prewarm
         ),
         "reps": per_rep,
     }
@@ -277,6 +339,13 @@ def main() -> int:
                 continue
             results["measurements"].append(fl)
             lines.append(fmt(f"flight do_get ({arm})", fl))
+            if not fl.get("prewarm_all_ok", True):
+                degraded = [p for p in fl["prewarm"] if p["status"] not in ("ok", "skipped-cold-arm")]
+                lines.append(
+                    "      !! PREWARM DEGRADED on rep(s) "
+                    + ", ".join(f"{p['rep']}={p['status']}" for p in degraded)
+                    + " — this 'warm' figure is partly cold (biased AGAINST do_get)"
+                )
             scan_rps = scan["rows_per_sec"]["median"]
             fl_rps = fl["rows_per_sec"]["median"]
             ratio = scan_rps / fl_rps if fl_rps else float("inf")
@@ -304,6 +373,8 @@ def main() -> int:
         "so cycles/row is a per-physical-core figure counted on two hardware threads.",
         "    Both arms are counted identically, so the ratio and the arm-to-arm "
         "delta are unaffected.",
+        "  * every flight rep's PREWARM outcome is recorded in results.json "
+        "(prewarm/prewarm_all_ok); a degraded prewarm is flagged above, never swallowed.",
         "  * the corpus is CQLite-written + CQLite-read: a PERFORMANCE FIXTURE ONLY "
         "(#3042), never a correctness oracle.",
         "  * the #3058/#3100 absolutes (240,100 / 312,155 rows/s) were corpus- and "

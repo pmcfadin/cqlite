@@ -36,8 +36,9 @@ clap = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Corpus identity digest. Already in the workspace lock via cqlite-core.
-sha2 = "0.10"
+# Corpus identity digest, taken from the workspace table so it can never drift
+# from the version cqlite-core resolves (issue #3096 review).
+sha2 = { workspace = true }
 
 [lints]
 workspace = true
