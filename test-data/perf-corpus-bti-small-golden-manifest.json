@@ -1,7 +1,7 @@
 {
   "issue": 3234,
   "purpose": "Profileable LZ4-compressed multi-SSTable Cassandra 5.0 BTI (`da`) corpus with wide partitions and a compound clustering key, for BTI read-path measurement (#3029 WS3, #3030 WS4) and as a Cassandra-written parity oracle.",
-  "generated_utc": "2026-08-03T18:02:07.971549+00:00",
+  "generated_utc": "2026-08-03T18:29:43.787418+00:00",
   "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
   "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
   "mode": "small_golden",
@@ -26,34 +26,33 @@
   "seed": "20260803",
   "seed_note": "the ROW SET (not the on-disk bytes) is reproducible from this seed alone: chunk N is generated with PRNG seed '<seed>:<N>' (see the row driver's determinism contract, and `reproducibility` for the write-timestamp caveat)",
   "row_driver_config": {
-    "rows_requested": 6000,
-    "chunk_rows": 6000,
+    "rows_requested": 600,
+    "chunk_rows": 600,
     "payload_bytes": 160,
-    "widths": "4000:20,800:30,200:50",
+    "widths": "400:20,80:30,20:50",
     "buckets": "alpha,bo,charlie-extended-bucket,delta,ep,foxtrot-long-bucket-name,golf,hh,india-bucket,jj"
   },
   "rows_per_partition": {
     "source": "row driver plan records (gen-perf-corpus-bti-rows.py), counted while writing each CSV chunk \u2014 observed, not requested",
-    "rows": 6000,
+    "rows": 600,
     "partitions": 5,
     "histogram": {
-      "200": 2,
-      "800": 2,
-      "4000": 1
+      "20": 2,
+      "80": 2,
+      "400": 1
     },
     "buckets_per_partition_histogram": {
-      "2": 2,
-      "8": 2,
-      "10": 1
+      "2": 4,
+      "4": 1
     },
-    "min": 200,
-    "max": 4000,
-    "mean": 1200.0,
+    "min": 20,
+    "max": 400,
+    "mean": 120.0,
     "chunks": [
       {
         "chunk": 0,
         "seed_material": "20260803:0",
-        "rows": 6000,
+        "rows": 600,
         "partitions": 5,
         "pk_min": 0,
         "pk_max": 4
@@ -110,17 +109,17 @@
     {
       "table": "wide_multiclustering_small",
       "keyspace_table": "test_da.wide_multiclustering_small",
-      "sstable_dir": "sstables/test_da/wide_multiclustering_small-6cf636608f6511f18f0f8ffe1ea52820",
+      "sstable_dir": "sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262",
       "format": "da",
       "sstable_count": 1,
-      "rows": 6000,
+      "rows": 600,
       "partitions": 5,
-      "data_db_bytes_total": 973239,
-      "data_db_bytes_largest": 973239,
-      "data_db_largest_gib": 0.0009,
+      "data_db_bytes_total": 97780,
+      "data_db_bytes_largest": 97780,
+      "data_db_largest_gib": 0.0001,
       "min_data_db_floor_bytes": 8388608,
       "meets_8mib_read_plane_floor": false,
-      "rows_db_bytes_total": 1348,
+      "rows_db_bytes_total": 197,
       "every_rows_db_non_empty": true,
       "clustering_key": [
         "bucket",
@@ -138,29 +137,29 @@
           "sstable_basename": "da-1-bti",
           "format": "da",
           "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
-          "data_db_bytes": 973239,
-          "data_db_mib": 0.928,
-          "data_db_sha256": "487dec609dc100f37d2ed642ff02e2d6de6bd22d8f57cae351d8a48fb4eb67c4",
+          "data_db_bytes": 97780,
+          "data_db_mib": 0.093,
+          "data_db_sha256": "d59cd894005ebefe9a57d418a0b8a3d55ab0886ee484f61f38bef4a5bb6d2eaa",
           "partitions_db_bytes": 70,
-          "rows_db_bytes": 1348,
-          "rows": 6000,
+          "rows_db_bytes": 197,
+          "rows": 600,
           "statistics": {
             "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
-            "total_rows": 6000,
-            "total_columns_set": 6000,
+            "total_rows": 600,
+            "total_columns_set": 600,
             "partition_count": 5,
             "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
-            "cassandra_compression_ratio": "0.8775865101449014",
+            "cassandra_compression_ratio": "0.8708030822680504",
             "sstable_level": 0,
             "estimated_droppable_tombstones": "0.0"
           },
           "components": {
-            "da-1-bti-CompressionInfo.db": 583,
-            "da-1-bti-Data.db": 973239,
+            "da-1-bti-CompressionInfo.db": 95,
+            "da-1-bti-Data.db": 97780,
             "da-1-bti-Digest.crc32": 10,
             "da-1-bti-Filter.db": 24,
             "da-1-bti-Partitions.db": 70,
-            "da-1-bti-Rows.db": 1348,
+            "da-1-bti-Rows.db": 197,
             "da-1-bti-Statistics.db": 5015,
             "da-1-bti-TOC.txt": 94
           },
@@ -180,13 +179,13 @@
             "options": {},
             "chunk_length_bytes": 16384,
             "chunk_length_kb": 16.0,
-            "chunk_count": 68,
-            "uncompressed_data_length_bytes": 1108685,
-            "compression_ratio_on_disk_over_logical": 0.877832
+            "chunk_count": 7,
+            "uncompressed_data_length_bytes": 112255,
+            "compression_ratio_on_disk_over_logical": 0.871053
           },
           "sstabledump_golden": {
             "file": "da-1-bti-Data.db.jsonl",
-            "bytes": 1916747,
+            "bytes": 192935,
             "tool": "cassandra sstabledump -l (line-delimited JSON, one partition per line)",
             "oracle": "Cassandra-WRITTEN bytes: usable as a parity oracle (issue #3042). A CQLite-written round-trip fixture is not."
           }
@@ -195,8 +194,8 @@
     }
   ],
   "row_count_cross_check": {
-    "row_driver_rows": 6000,
-    "statistics_db_rows": 6000,
+    "row_driver_rows": 600,
+    "statistics_db_rows": 600,
     "row_driver_partitions": 5,
     "statistics_db_partitions": 5,
     "agree": true,
