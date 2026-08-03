@@ -39,8 +39,11 @@
 -- `POINT_MMAP_MADV_RANDOM_MIN_BYTES` threshold, so the point-read and scan mappings
 -- are the SAME mapping here and any read-plane A/B measured on it is structurally
 -- zero. Read-path measurement belongs on the perf corpus (and the BTI mmap/trie plane
--- itself is unmeasured even there — see `read_path_measurement_scope` in
--- test-data/perf-corpus-bti-manifest.json).
+-- itself is unmeasured even there — the measurement scope lives in
+-- docs/development/dev-cookbook.md, "BTI (`da`) perf corpus", and `bti_perf_scan`
+-- prints `access_path` / `storage_route` beside every number it reports; the manifest
+-- deliberately records NO throughput figure, because nothing in the corpus bytes
+-- observes one).
 --
 -- PROVENANCE / REGENERATION (a fresh short container run; ~2 min, and it does NOT
 -- touch the 2 GiB perf corpus):
