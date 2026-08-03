@@ -16,6 +16,9 @@
 //!   the values were genuinely materialized. It is OFF by default because it
 //!   measurably inflates the scan (the #3026 harness measured +28.6% cycles);
 //!   report the unfolded number, use the folded one to prove materialization.
+//!   The fold is **REPRODUCIBLE between runs**: cells are folded in the pinned
+//!   `schema::COLUMNS` order, never in `HashMap` order, which is randomly seeded
+//!   per process — see [`fold_row`].
 //! * **Zero rows exits non-zero.** A scan that observed nothing is a failure, not
 //!   a measurement (spec R4).
 //! * **No Arrow.** This crate does not enable `cqlite-core`'s `arrow` feature: the
@@ -58,6 +61,8 @@ struct Cli {
     passes: u32,
 
     /// Fold every cell into a digest (anti-elision proof; inflates the number).
+    /// Reproducible run to run: folded in pinned schema-column order, not
+    /// `HashMap` order.
     #[arg(long)]
     fold: bool,
 
@@ -161,14 +166,9 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             .await?;
         while let Some(row) = it.next_async().await {
             let row = row?;
+            cells += row.values.len() as u64;
             if cli.fold {
-                for (name, value) in row.values.iter() {
-                    digest = fnv1a64_update(digest, name.as_bytes());
-                    digest = fnv1a64_update(digest, format!("{value:?}").as_bytes());
-                    cells += 1;
-                }
-            } else {
-                cells += row.values.len() as u64;
+                digest = fold_row(digest, &row)?;
             }
             std::hint::black_box(&row);
             rows += 1;
@@ -218,9 +218,58 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Fold one row into the running digest in the **pinned [`schema::COLUMNS`]
+/// order**, never in `HashMap` iteration order.
+///
+/// # Why this is not a style preference (issue #3096 review, blocker 2)
+///
+/// `QueryRow::values` is a `HashMap<Arc<str>, Value>`, and Rust's default hasher
+/// is **randomly seeded per process**. Folding `values.iter()` therefore produced
+/// a DIFFERENT digest on every run over byte-identical data — while the digest's
+/// whole stated purpose (see [`fnv1a64_update`]) is to be compared BETWEEN runs.
+/// Anyone using `--fold` as a cross-lever invariance check got a spurious
+/// mismatch, and a match would have meant nothing.
+///
+/// Fail-closed on an unexpected column name rather than skipping it: a digest that
+/// silently omits a column is worse than one that is merely unstable, because it
+/// would report invariance over data it never read. A projection narrower than
+/// `*` is fine — absent columns simply do not contribute.
+fn fold_row(mut digest: u64, row: &cqlite_core::query::QueryRow) -> Result<u64, String> {
+    let mut folded = 0usize;
+    for (name, _) in ws0_corpus_gen::schema::COLUMNS {
+        if let Some(value) = row.values.get(name) {
+            digest = fnv1a64_update(digest, name.as_bytes());
+            digest = fnv1a64_update(digest, format!("{value:?}").as_bytes());
+            folded += 1;
+        }
+    }
+    if folded != row.values.len() {
+        let known: Vec<&str> = ws0_corpus_gen::schema::COLUMNS
+            .iter()
+            .map(|c| c.0)
+            .collect();
+        let unknown: Vec<&str> = row
+            .values
+            .keys()
+            .map(|k| k.as_ref())
+            .filter(|k| !known.contains(k))
+            .collect();
+        return Err(format!(
+            "row carries {} column(s) absent from the pinned ws0.events schema ({unknown:?}) — \
+             folding only the known ones would digest less than was read, so this exits rather \
+             than reporting an invariance it did not check",
+            row.values.len() - folded
+        ));
+    }
+    Ok(digest)
+}
+
 /// FNV-1a 64 — a fixed, version-stable hash. `DefaultHasher` is explicitly NOT
 /// guaranteed stable across Rust releases, so it could never anchor a digest that
 /// is compared between runs.
+///
+/// Stability needs BOTH halves: a fixed hash function AND a fixed fold ORDER —
+/// see [`fold_row`], which supplies the second half.
 fn fnv1a64_update(mut h: u64, bytes: &[u8]) -> u64 {
     if h == 0 {
         h = 0xcbf2_9ce4_8422_2325;
