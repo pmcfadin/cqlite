@@ -113,7 +113,10 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 - **A markdown/docs-only diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
   (#3042).** If your diff touches no compiled input (no `src`, no `Cargo.*`, no build script, no
-  workflow, no test-data), it cannot have caused a test to fail. **NEVER patch source to turn such a
+  workflow, no test-data), it cannot have caused a test to fail. (Read "docs-only" here the same way
+  roborev doctrine does — a **code-free census**, not a `docs/` path prefix: a PR carrying
+  `docs/reports/*-artifacts/` harness executables ships real programs, so this waiver does not apply to
+  it.) **NEVER patch source to turn such a
   gate green** — that is a real change smuggled in under a docs diff, certified by nothing, and it
   masks the actual main-red. Instead: (1) confirm the diff really is non-compiling-input
   (`git diff --stat origin/main...HEAD`); (2) identify the failure as a known main-red issue or a
@@ -404,21 +407,34 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   (even one equal to HEAD), or a base-equal scope **aborts the round** — base-equality is the signature of
   the worktree bug. **(3)** `"contains no code changes to review"` on a
   NON-EMPTY diff is a **HARD FAIL**, never a pass. **(4)** A docs-only (code-free) diff **cannot be
-  roborev-certified at all**: roborev **EXCLUDES non-code paths from the diff it builds** (measured — 22
-  markdown absent from the prompt, 5 code present), so for prose-only the constructed diff is genuinely
-  EMPTY and that verdict is a truthful report of an empty input, not a malfunction. The wrapper's
+  roborev-certified at all** — and "docs-only" means a **CODE-FREE CENSUS as the wrapper classifies it,
+  NEVER a `docs/` path prefix** (#3229). The mechanism, stated correctly: **roborev drops exactly what
+  its configured `exclude_patterns` pathspecs match — it makes NO code/non-code judgement.** The measured
+  22-markdown-absent / 5-code-present split happened because `*.md` is CONFIGURED, not because the
+  reviewer recognised prose, so for prose-only the constructed diff is genuinely EMPTY and that verdict is
+  a truthful report of an empty input, not a malfunction. The wrapper's
   deterministic pre-enqueue `code-free:` check fails it before any review is enqueued, and
   `prompt-content:` therefore asserts the CODE subset of the census (an unretrievable prompt FAILs — there
   is no passing `UNAVAILABLE` there). The sanctioned substitute is
   primary-source verification recorded in the PR (e.g. `git show cassandra-5.0.8:<path>`), and no
-  docs-only change may ever record "roborev clean". Push first: an unpushed implementation commit is
+  docs-only change may ever record "roborev clean".
+  **The same mechanism cuts the other way, and did**: a configured `docs/**` discarded 33 EXECUTABLE
+  measurement-harness files on PR #3222 — the `docs/reports/*-artifacts/` harnesses this repo ships **by
+  convention are reviewed CODE**, so a PR carrying them is NOT a docs-only change and MUST be
+  roborev-certified. The deny-list is now narrowed to prose/artifact extensions, and the pre-enqueue
+  **`census-exclusion:`** key (immediately after `code-free:` in the block's fixed order) FAILs closed,
+  naming the swallowed paths and the pattern responsible, whenever the configured set would swallow census
+  code. Its asymmetry is deliberate — **noise, never blindness**: a new artifact extension under `docs/`
+  is re-admitted to review prompts (a token cost), while the swallow direction can only ever fail loudly. Push first: an unpushed implementation commit is
   itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** FOUR
   confirmed paths make roborev report clean having reviewed NOTHING (or only part), and a vacuous pass is
   TEXTUALLY IDENTICAL to a genuine one — (T1) from a worktree, `--branch` without `--repo` resolves
   against the ROOT checkout (normally on `main`) and enqueues the BASE commit: enqueued `39900e4db`
   (= origin/main) while branch HEAD was `4e7ab591e`; (T2) the two-positional range form anchors the range
-  at git's EMPTY TREE (`4b825dc6…`); (T3) a code-free diff is SILENTLY DISCARDED even with the right SHA
-  and the right `--repo`, so **SHA verification alone is insufficient**; (T4) a single-SHA review covers
+  at git's EMPTY TREE (`4b825dc6…`); (T3) a diff every path of which the configured
+  `exclude_patterns` match is SILENTLY DISCARDED even with the right SHA and the right `--repo` — a
+  code-free diff by default, and under a mis-scoped pattern like `docs/**` an EXECUTABLE one too — so
+  **SHA verification alone is insufficient**; (T4) a single-SHA review covers
   ONE COMMIT — a PARTIAL review whose enqueued sha EQUALS HEAD, so no sha check can see it (this is the
   form #2964's own AC2 asked for; the wrapper implements the AC's intent instead).
   Token accounting is the tell: genuine reviews

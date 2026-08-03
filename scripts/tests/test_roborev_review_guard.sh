@@ -729,8 +729,8 @@ assert_says 'case (c2d) a .yml file is not classified documentation' '^code-free
 #
 # What these pin, and why it could not be pinned before: `exclude_patterns` is
 # roborev's own configuration, and the wrapper used to ASSERT in a comment that
-# roborev "excludes non-code paths". It does not — it drops exactly what its
-# configured pathspecs match — and under `docs/**` that discarded 33 EXECUTABLE
+# roborev filtered out non-code paths by its own judgement. It does not — it drops
+# exactly what its configured pathspecs match — and under `docs/**` that discarded 33 EXECUTABLE
 # harness files on PR #3222 while every fixture here stayed green, because no
 # fixture could supply a configuration at all. `write_roborev_config` closes that.
 # ===========================================================================

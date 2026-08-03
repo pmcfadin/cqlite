@@ -85,12 +85,18 @@ roborev_check_prompt_content() {
     PROMPT_CONTENT="FAIL (prompt unretrievable — no evidence any diff was delivered)"
     DETAILS+=("ERROR: prompt-content: the prompt sent to the reviewer could not be retrieved for job '$JOB' (tried the job record's 'prompt' field, then 'roborev show <job> --prompt'), so there is NO authoritative evidence the reviewer received the ${#census_code_paths[@]} code file(s) in this census. Failing closed: a pass here would rest on nothing.")
   else
-    # Check the CODE subset of the census, not every path. MEASURED (issue #2964,
-    # round 5): roborev EXCLUDES non-code paths from the diff it builds — on a census of
-    # 22 markdown + 5 code files, the prompt carried diff headers for exactly the 5 code
-    # files. That is also the empirical mechanism behind the "code-free diff silently
-    # discarded" trigger: there is literally nothing left to review. Checking all 27
-    # would false-FAIL every branch that touches documentation, which is most of them.
+    # Check the CODE subset of the census, not every path. THE MECHANISM, stated
+    # correctly (#3229): **roborev drops exactly what its configured `exclude_patterns`
+    # pathspecs match — it makes NO code/non-code judgement of its own.** MEASURED
+    # (issue #2964, round 5): on a census of 22 markdown + 5 code files the prompt
+    # carried diff headers for exactly the 5 code files, because `*.md` is CONFIGURED —
+    # not because the reviewer recognised prose. Checking all 27 would therefore
+    # false-FAIL every branch that touches documentation, which is most of them.
+    # The CODE subset is the right subset only because this repo's configured set is a
+    # prose/artifact deny-list that MIRRORS the census classification, and that
+    # correspondence is not assumed: `census-exclusion:` computes it with git before the
+    # enqueue and FAILs closed if a configured pattern would swallow a code path (which
+    # `docs/**` did, for 33 executables, on PR #3222).
     # EVERY code path is checked against the prompt's actual `diff --git` HEADERS, never a
     # bare substring (codex, round 5): sampling let a partial prompt pass by naming the
     # sampled files, and a substring match is satisfied by any incidental mention —

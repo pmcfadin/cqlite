@@ -216,7 +216,10 @@ worktree (the manager never rebases someone else's branch).
   single-SHA review (reviews ONE COMMIT, not the branch — a partial review whose sha equals HEAD). `--repo`
   is what makes `--branch` correct, so the wrapper reviews the RANGE `<base>..HEAD` and asserts both
   endpoints from the job record; a docs-only diff cannot be roborev-certified at all, because roborev
-  excludes non-code paths from the diff it builds. Any non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW`
+  drops exactly what its configured `exclude_patterns` pathspecs match (it makes no code/non-code
+  judgement) and `*.md` is configured. "docs-only" is a code-free CENSUS, never a `docs/` path prefix —
+  `docs/reports/*-artifacts/` harness executables ARE reviewed code, and the pre-enqueue
+  `census-exclusion:` key FAILs closed when the configured set would swallow census code (#3229). Any non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW`
   included, is a failed round and a blocked merge — never "roborev clean". See CLAUDE.md +
   `docs/development/agent-machine-setup.md`.
 - Every GitHub write gets a short traceable comment.

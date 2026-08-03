@@ -14,11 +14,11 @@
 #     now asks the REMOTE via `git ls-remote`.
 #   * the census discarded `git diff`'s exit status, so a FAILED diff rendered as
 #     "0 files, genuinely empty" — asserting a measurement that never happened.
-#   * the exclusion reconciliation (#3229) replaces a PROSE COMMENT that asserted
-#     roborev "excludes non-code paths". It does not: **roborev drops exactly what its
-#     configured `exclude_patterns` pathspecs match — it makes NO code/non-code
-#     judgement.** Under the configured `docs/**` that discarded 33 EXECUTABLE harness
-#     files on PR #3222. The claim is now COMPUTED with git, pre-enqueue, not asserted.
+#   * the exclusion reconciliation (#3229) replaces a PROSE COMMENT that credited
+#     roborev with a code/non-code judgement it does not make. The truth is narrower:
+#     **roborev drops exactly what its configured `exclude_patterns` pathspecs match.**
+#     Under the configured `docs/**` that discarded 33 EXECUTABLE harness files on
+#     PR #3222. The claim is now COMPUTED with git, pre-enqueue, not asserted.
 # Keeping them in one sourced file also keeps the wrapper inside the campsite size
 # guidance (issue #1116's spirit; the gate's ratchet covers .rs only).
 #
@@ -271,9 +271,10 @@ roborev_census() {
   # no code/non-code judgement. A markdown-only diff arrives EMPTY because `*.md` is
   # configured, not because the reviewer recognised prose; so its
   # "contains no code changes to review" is a TRUTHFUL report of an empty input, and
-  # re-running or re-prompting can never change it. The earlier claim that roborev
-  # "EXCLUDES non-code paths" is FALSIFIED — under the configured `docs/**` the very
-  # same mechanism discarded 33 EXECUTABLE files on PR #3222 — which is why
+  # re-running or re-prompting can never change it. The earlier claim — that roborev
+  # filtered out non-code paths by a judgement of its own — is FALSIFIED: under the
+  # configured `docs/**` the very same mechanism discarded 33 EXECUTABLE files on PR
+  # #3222, i.e. it excluded CODE. Which is why
   # `census-exclusion:` below reconciles the census against the configured set instead
   # of trusting the correspondence.
   if [ "$census_non_code_files" -eq "$census_files" ]; then
@@ -290,10 +291,9 @@ roborev_census() {
 # roborev exclusion set, with git, BEFORE anything is enqueued (issue #3229).
 # =============================================================================
 #
-# WHY IT EXISTS. The wrapper used to ASSERT, in a prose comment, that roborev
-# "excludes non-code paths from the diff it builds". It does not. **roborev drops
-# exactly what its configured `exclude_patterns` pathspecs match — it makes NO
-# code/non-code judgement.** With `exclude_patterns = ['docs/**', '*.md']` that
+# WHY IT EXISTS. The wrapper used to ASSERT, in a prose comment, that roborev filtered
+# the diff by a code/non-code judgement of its own. It does not, and never did.
+# **roborev drops exactly what its configured `exclude_patterns` pathspecs match.** With `exclude_patterns = ['docs/**', '*.md']` that
 # discarded 33 EXECUTABLE harness files on PR #3222: a 136-path code census reached
 # the reviewer as an EMPTY prompt (`prompt-content: FAIL (136/136 code census paths
 # absent)`, 15,443 input / 89 output tokens). `prompt-content:` caught it — AFTER a

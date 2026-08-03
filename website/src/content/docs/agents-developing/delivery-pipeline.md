@@ -458,8 +458,13 @@ review (it reviews **one commit, not the branch**). Each can report clean having
 the single-SHA form, only the last commit — and a vacuous pass is textually identical to a genuine one.
 Measured: **`--repo` is what makes `--branch` correct**, so the wrapper reviews the RANGE `<base>..HEAD` and
 verifies BOTH endpoints against the job record (`reviewed-sha:` is a range, not a sha; `job-record:` reports
-the record's completeness). Note too that roborev excludes non-code paths from the diff it builds, so a
-docs-only diff cannot be roborev-certified at all. **Any** non-PASS terminal `RESULT` —
+the record's completeness). Note too that **roborev drops exactly what its configured `exclude_patterns` pathspecs match — it makes no
+code/non-code judgement** — so a docs-only diff cannot be roborev-certified at all. "docs-only" means a
+**code-free CENSUS**, never a `docs/` path prefix: the `docs/reports/*-artifacts/` measurement harnesses
+this repo ships by convention are executable code that IS reviewed, so a PR carrying them must be
+certified like any other code change (#3229). The pre-enqueue **`census-exclusion:`** key FAILs closed,
+naming the swallowed paths and the pattern responsible, when the configured set would swallow census code
+— which is exactly what a blanket `docs/**` did to 33 harness executables on PR #3222. **Any** non-PASS terminal `RESULT` —
 `NOTHING-TO-REVIEW` included — is a failed review round and a blocked merge, never a clean pass. Verify
 which reviewer a box can actually serve with `roborev check-agents`; why:
 [roborev findings](/cqlite/agents-developing/roborev-findings/) + CLAUDE.md.

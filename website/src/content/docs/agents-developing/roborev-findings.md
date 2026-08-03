@@ -24,6 +24,7 @@ Several of these delivery costs now FAIL in the fast `scripts/agent-gate.sh --li
 | clippy `manual_range_contains` | `cargo clippy -D warnings` | `clippy` (`--lite` + full) |
 | Wall-clock races in tests | `scripts/tests/check-no-wallclock-asserts.sh` (#2642) | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
 | Vacuous roborev reviews (a "clean" verdict that reviewed nothing) | `scripts/tests/test_roborev_review_guard.sh` (#2964) — hermetic regression check over every vacuity trigger of `scripts/flow/roborev-review.sh` | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
+| A configured `exclude_patterns` that would swallow census CODE (the PR #3222 class) | `scripts/tests/test_roborev_review_guard.sh` (#3229) — the `(cx*)` cases drive the wrapper's pre-enqueue `census-exclusion:` check against fixture-owned `.roborev.toml` files | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
 
 The other classes below (integer/decimal overflow, float ordering, no-heuristics,
 process-global counters, gitignored references) are **not mechanized**: they are semantic
@@ -163,9 +164,12 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
 3. **`"contains no code changes to review"` on a NON-EMPTY diff is a HARD FAIL**, never a pass. The
    wrapper judges the reviewer's claim against a *locally computed* `git` diff census, so a reviewer
    asserting the opposite of a census we measured ourselves has demonstrably not reviewed the change.
-4. **A docs-only (code-free) diff cannot be roborev-certified at all.** The mechanism is measured:
-   roborev **excludes non-code paths from the diff it builds** (of a 27-file census — 22 markdown, 5 code —
-   the prompt carried headers for exactly the 5 code files), so for a prose-only diff the constructed diff
+4. **A docs-only (code-free) diff cannot be roborev-certified at all** — where **"docs-only" means a
+   CODE-FREE CENSUS as the wrapper classifies it, never a `docs/` path prefix** (issue #3229).
+   The mechanism is measured, and it is *not* a code/non-code judgement: **roborev drops exactly what its
+   configured `exclude_patterns` pathspecs match.** Of a 27-file census — 22 markdown, 5 code — the prompt
+   carried headers for exactly the 5 code files **because `*.md` is configured**, not because the reviewer
+   recognised prose. So for a prose-only diff the constructed diff
    is genuinely EMPTY and the verdict is a *truthful report of an empty input*, not a reviewer malfunction.
    Re-running cannot help; the wrapper's deterministic
    pre-enqueue `code-free:` check fails it before any review is enqueued, rather than matching reviewer
@@ -173,6 +177,26 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    census — and why an unretrievable prompt is a `FAIL` there, never a passing `UNAVAILABLE`. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
    change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may
    ever record "roborev clean."**
+
+   **The same mechanism cuts the other way, and did.** A configured `docs/**` discarded **33 executable**
+   measurement-harness files on PR #3222 — a 136-path code census reaching the reviewer as an empty prompt
+   (`prompt-content: FAIL (136/136 code census paths absent)`, 15,443 in / 89 out). The
+   `docs/reports/*-artifacts/` measurement harnesses this repo ships **by convention are executable code
+   that IS reviewed**, so a PR carrying them is **not** a docs-only change and must be roborev-certified
+   like any other code change. Two things now hold that line: `exclude_patterns` is a narrowed
+   **prose/artifact deny-list** (`*.md` plus docs-scoped artifact extensions — never a blanket
+   `docs/**`), and the wrapper's pre-enqueue **`census-exclusion:`** key — immediately after `code-free:`
+   in the block's fixed order — reconciles the CODE census against the *effective* exclusion set by
+   porting roborev's own pathspec construction and letting **git** do the matching, FAILing closed and
+   naming both the swallowed paths and the pattern responsible.
+
+   That deny-list leans deliberately one way — **noise, never blindness**. A *new* artifact extension
+   appearing under `docs/` is silently re-admitted to review prompts, which costs tokens; the check can
+   only ever FAIL in the opposite direction, where a configured pattern would swallow census code. When you
+   add a pattern to `.roborev.toml`, add the extension to `CODE_FREE_ARTIFACT_EXTENSIONS` in
+   `scripts/flow/roborev-review-oracles.sh` in the same edit — and **never write a trailing slash**:
+   roborev trims it *before* deciding anchoring, so `docs/` resolves RECURSIVE (`**/docs`) — the opposite
+   of root-anchored `docs/**` — and `census-exclusion:` FAILs on that form unconditionally.
 
 ### Why: a vacuous roborev pass is textually identical to a genuine clean pass
 
@@ -188,11 +212,14 @@ one:
   since origin/main" and delivers every census code file — which is why the sanctioned invocation uses it.
 - **T2 — the two-positional commit-range form** anchors the reviewed range at git's **EMPTY-TREE** hash
   (`4b825dc6…..<head40>`) rather than at the base you named, delivering 3 of 5 census code files.
-- **T3 — a code-free diff is silently discarded** even on a correctly targeted run: right SHA, right
+- **T3 — a diff whose every path the configured `exclude_patterns` match is silently discarded** even on
+  a correctly targeted run: right SHA, right
   `--repo`, and still *"No issues found. Summary: The provided diff contains no code changes to
   review."* Reproducible (jobs 4658/4659). **This one passes the SHA check, so SHA verification alone is
-  insufficient** — hence rules 3 and 4. The mechanism is rule 4's: non-code paths never reach the
-  constructed diff, so there is genuinely nothing to review.
+  insufficient** — hence rules 3 and 4. The mechanism is rule 4's: the configured pathspecs remove those
+  paths before the diff is constructed, so there is genuinely nothing to review. By default that is
+  prose; under a mis-scoped pattern it was **executable code** (PR #3222), which is why
+  `census-exclusion:` now computes the same fact pre-enqueue.
 - **T4 — a single-SHA review covers ONE COMMIT.** `roborev review <sha>` enqueues `git_ref = <head40>` —
   *correct*, and still partial: 3 of 5 census code files reached the prompt on a 17-commit branch. Every
   sha-equality check passes while the reviewer saw only the last commit, so this is a PARTIAL review
