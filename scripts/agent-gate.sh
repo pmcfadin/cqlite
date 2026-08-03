@@ -4802,7 +4802,12 @@ run_compaction_byte_parity() {
 # both files asserts instead of skipping.
 #
 # point_vs_full_differential is run in a SECOND invocation, deliberately WITHOUT
-# CQLITE_REQUIRE_FIXTURES: most of its corpus (test_tomb/**) is FETCHED and gitignored,
+# CQLITE_REQUIRE_FIXTURES — enforced with `env -u`, not merely by omitting it: plain
+# `env` INHERITS an exported value, and exporting CQLITE_REQUIRE_FIXTURES=1 is routine
+# after a manual fail-closed run. Inherited, the target's `skipped.is_empty()` branch
+# fires on any box lacking the fetched test_tomb corpus and this component FAILs for a
+# reason unrelated to the fixture it exists to guard (#3220 review B3/R1).
+# Why it must not be pinned: most of its corpus (test_tomb/**) is FETCHED and gitignored,
 # so pinning that variable here would make this component depend on the fetched corpus
 # and break its "no fetched corpus at all" contract below. Its fail-closure instead
 # comes from the target itself — `TableCase::must_run`, asserted UNCONDITIONALLY, so
@@ -4839,13 +4844,17 @@ run_bti_multiclustering() {
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
+  # An ARRAY, not `${VAR:+NAME="$VAR"}`: the unquoted parameter-expansion form
+  # word-splits a root containing whitespace, and `env` would then run its second
+  # word as the command.
+  local -a ds_env=()
+  [ -n "${CQLITE_DATASETS_ROOT:-}" ] && ds_env=(CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT")
   echo ">>> [$name] compound-clustering BTI trie shape + SELECT + point-vs-full lanes, fail-closed (#3032/#3220)"
-  if env CQLITE_REQUIRE_FIXTURES=1 \
-      ${CQLITE_DATASETS_ROOT:+CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT"} \
+  if env CQLITE_REQUIRE_FIXTURES=1 "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test issue_3032_multiclustering_rows_trie_shape \
         --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1 \
-    && env ${CQLITE_DATASETS_ROOT:+CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT"} \
+    && env -u CQLITE_REQUIRE_FIXTURES "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test point_vs_full_differential >>"$log" 2>&1 \
     && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1; then
