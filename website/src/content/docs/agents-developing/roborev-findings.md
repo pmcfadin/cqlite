@@ -184,17 +184,58 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    `docs/reports/*-artifacts/` measurement harnesses this repo ships **by convention are executable code
    that IS reviewed**, so a PR carrying them is **not** a docs-only change and must be roborev-certified
    like any other code change. Two things now hold that line: `exclude_patterns` is a narrowed
-   **prose/artifact deny-list** (`*.md` plus docs-scoped artifact extensions — never a blanket
-   `docs/**`), and the wrapper's pre-enqueue **`census-exclusion:`** key — immediately after `code-free:`
+   **prose/artifact deny-list** (`*.md` plus artifact extensions scoped to artifact-bearing
+   **directories** — never a blanket `docs/**`), and the wrapper's pre-enqueue **`census-exclusion:`** key
+   — immediately after `code-free:`
    in the block's fixed order — reconciles the CODE census against the *effective* exclusion set by
    porting roborev's own pathspec construction and letting **git** do the matching, FAILing closed and
    naming both the swallowed paths and the pattern responsible.
 
-   That deny-list leans deliberately one way — **noise, never blindness**. A *new* artifact extension
-   appearing under `docs/` is silently re-admitted to review prompts, which costs tokens; the check can
-   only ever FAIL in the opposite direction, where a configured pattern would swallow census code. When you
-   add a pattern to `.roborev.toml`, add the extension to `CODE_FREE_ARTIFACT_EXTENSIONS` in
-   `scripts/flow/roborev-review-oracles.sh` in the same edit — and **never write a trailing slash**:
+   That deny-list leans deliberately one way — **noise, never blindness**. A *new* artifact **directory**
+   (or a new artifact extension inside one of the four below) is silently re-admitted to review prompts,
+   which costs tokens; the check can
+   only ever FAIL in the opposite direction, where a configured pattern would swallow census code.
+
+   #### Why the exclusions are scoped to DIRECTORIES, not extensions across `docs/`
+
+   The intermediate form — `docs/**/*.txt`, `docs/**/*.json`, … — **did not satisfy the claim above**, and
+   #3229 retired it. The asymmetry holds for `.txt`/`.log`/`.err` run dumps, which carry nothing but
+   output. It does **not** hold for `.json`/`.html`/`.svg`, which carry *functional configuration*: for a
+   code-bearing format, exclusion is **blindness**, not noise. Two live cases falsified it:
+
+   - `docs/observability/grafana/dashboards/cqlite-overview.json` — a dashboard the **full agent gate
+     guards with its own `kit-dashboard-drift` component**, so the repo already treats it as
+     correctness-bearing. Under `docs/**/*.json` a PR editing it was dropped from the reviewer's diff *and*
+     classified code-free: unreviewable by construction, in both directions at once.
+   - `docs/reports/delivery-telemetry.schema.json` — the schema governing the delivery ledger, hidden the
+     same way.
+
+   So every artifact pattern is now `<artifact-dir-glob>/**/*.<ext>` over exactly four directories:
+
+   | directory glob | what it holds |
+   |---|---|
+   | `docs/reports/*-artifacts/` | per-issue measurement artifacts (the #3229 convention) |
+   | `docs/round-artifacts/` | soak/round measurement output |
+   | `docs/**/jfr-reports/` | JFR profiling output |
+   | `docs/sstables-definitive-guide/diagrams/` | generated diagram renders |
+
+   Everything else under `docs/` is **reviewed**. Measured when the change landed: 672 tracked `docs/`
+   files carry an artifact extension, 667 sit inside those four directories and stay excluded, and the 5
+   that do not are now delivered to the reviewer.
+
+   It stays **extension-scoped within** each directory — never a blanket `<dir>/**` — because these
+   directories deliberately hold executable code beside their output: 63 tracked
+   `.sh`/`.py`/`.rs`/`.c`/`.bt`/`.cql`/`.yaml`/`.toml` files under `docs/reports/*-artifacts/` alone.
+   Those harnesses *are* the 136-path census `docs/**` swallowed on PR #3222, so a blanket directory
+   exclude would reintroduce this issue's original defect.
+
+   When you add a pattern to `.roborev.toml`, add the extension to `CODE_FREE_ARTIFACT_EXTENSIONS` (or the
+   directory to `CODE_FREE_ARTIFACT_DIR_GLOBS`) in
+   `scripts/flow/roborev-review-oracles.sh` in the same edit. That mirror is **asserted structurally**:
+   `scripts/tests/test_roborev_review_guard.sh` derives the expected pattern set from those constants and
+   compares it for **set equality** against the committed `.roborev.toml`, so a one-sided edit FAILs
+   `--lite` rather than showing up later as a puzzling `census-exclusion:` failure on someone else's
+   report PR. And **never write a trailing slash**:
    roborev trims it *before* deciding anchoring, so `docs/` resolves RECURSIVE (`**/docs`) — the opposite
    of root-anchored `docs/**` — and `census-exclusion:` FAILs on that form unconditionally.
 
@@ -207,6 +248,25 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    patterns pinned to **v0.61.2** and extracted from the executable itself. Every `census-exclusion:`
    value names WHICH source is responsible for each swallowed path, and ends with
    `built-in-set: OK|DIVERGED|UNAVAILABLE`.
+
+   The two halves reach git by **different mechanisms**, and the pathspec **count** is part of the
+   contract. A *configured* pattern is a user pattern that `git.FormatExcludeArgs` anchors and expands into
+   **two** pathspecs, `<body>` and `<body>/**`. A *built-in* is not a user pattern at all: it is a
+   **pre-formatted pathspec constant appended to git's argv verbatim**, contributing **exactly one**
+   pathspec, never re-anchored and never given a `/**` sibling. That was established from the v0.61.2
+   binary rather than assumed — the `:(exclude,glob)` prefix sits *inside* each of the 24 string literals,
+   which Go's length-ordered rodata packing proves is not linker coincidence (equal-length runs at deltas
+   of exactly `15 + len(pattern)`), and only **two** bare `:(exclude,glob)` constants exist among the 26
+   total occurrences, so there is no shared prefix for 24 patterns to be formatted against. Corroborating
+   shape: the *directory* built-ins carry `/**` hand-written into the literal (`**/.beads/**`) while the
+   *file* built-ins do not (`**/Cargo.lock`) — nobody writes `/**` onto a string about to be handed to a
+   formatter that appends it.
+
+   Getting that count wrong is a false PASS **in either direction**, which is why it is pinned both ways.
+   Running built-ins through the formatter invented a `**/Cargo.lock/**` exclusion roborev never applies;
+   **over**-modelling the exclusion set makes `prompt-content:` *excuse* paths from coverage. Dropping the
+   sibling from *configured* patterns is the mirror-image error: it reports paths as SURVIVING that roborev
+   really drops. Re-verify both on every roborev upgrade — the same obligation the pin itself carries.
 
    #### The verdict rule — apply it to any call of this shape, without asking
 

@@ -421,16 +421,38 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   **The same mechanism cuts the other way, and did**: a configured `docs/**` discarded 33 EXECUTABLE
   measurement-harness files on PR #3222 — the `docs/reports/*-artifacts/` harnesses this repo ships **by
   convention are reviewed CODE**, so a PR carrying them is NOT a docs-only change and MUST be
-  roborev-certified. The deny-list is now narrowed to prose/artifact extensions, and the pre-enqueue
+  roborev-certified. The deny-list is now narrowed to `*.md` plus artifact extensions **scoped to
+  artifact-bearing DIRECTORIES**, and the pre-enqueue
   **`census-exclusion:`** key (immediately after `code-free:` in the block's fixed order) FAILs closed,
   naming the swallowed paths and the pattern responsible, whenever the configured set would swallow census
-  code. Its asymmetry is deliberate — **noise, never blindness**: a new artifact extension under `docs/`
-  is re-admitted to review prompts (a token cost), while the swallow direction can only ever fail loudly.
+  code. Its asymmetry is deliberate — **noise, never blindness**: a new artifact *directory* is
+  re-admitted to review prompts (a token cost), while the swallow direction can only ever fail loudly.
+  **An extension sweep across ALL of `docs/` did NOT satisfy that claim, and was retired (#3229):** for a
+  code-bearing format, exclusion is *blindness*, not noise. `docs/**/*.json` hid
+  `docs/observability/grafana/dashboards/cqlite-overview.json` — a dashboard the full gate guards with its
+  own `kit-dashboard-drift` component — from the reviewer's diff *and* classified it code-free, i.e.
+  unreviewable by construction; `docs/reports/delivery-telemetry.schema.json` went the same way. So the
+  patterns are `<artifact-dir-glob>/**/*.<ext>` over exactly four directories
+  (`docs/reports/*-artifacts/`, `docs/round-artifacts/`, `docs/**/jfr-reports/`,
+  `docs/sstables-definitive-guide/diagrams/`) and everything else under `docs/` is **reviewed**. Still
+  extension-scoped *within* each directory, never a blanket `<dir>/**` — those directories hold the
+  executable harnesses that ARE the census `docs/**` swallowed. The census-side mirror
+  (`CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS`) is asserted **structurally** against
+  the committed `.roborev.toml` for set equality, so a one-sided edit FAILs `--lite` instead of surfacing
+  as a puzzling `census-exclusion:` failure on someone else's report PR.
   **The effective exclusion set is FOUR things, not one** — the `--repo` checkout's `.roborev.toml`, the
   **ROOT checkout's** (see the ordering property below), `~/.roborev/config.toml`, **and roborev's own
   compiled-in lockfile/cache deny-list** (`**/Cargo.lock`, `**/go.sum`, `**/.cache/**`, … 24 patterns
   pinned to v0.61.2). Every value line names WHICH source is responsible, and ends with
-  `built-in-set: OK|DIVERGED|UNAVAILABLE`.
+  `built-in-set: OK|DIVERGED|UNAVAILABLE`. **The two halves reach git by DIFFERENT mechanisms, and the
+  count matters:** a *configured* pattern is anchored by `git.FormatExcludeArgs` into **two** pathspecs
+  (`<body>` and `<body>/**`), whereas a *built-in* is a **pre-formatted pathspec constant appended
+  verbatim — exactly one pathspec**, never re-anchored and never given a `/**` sibling (established from
+  the v0.61.2 binary: the `:(exclude,glob)` prefix sits inside each string literal, which Go's
+  length-ordered rodata packing proves is not linker coincidence). Modelling built-ins through the
+  formatter invented a `**/Cargo.lock/**` exclusion roborev never applies, and **over**-modelling the
+  exclusion set drops paths from `prompt-content` coverage — a false PASS, exactly like **under**-modelling
+  it reports paths as surviving that roborev really drops.
   **The verdict split follows ONE rule, and it generalizes beyond this key — apply it to any call of
   this shape without asking: FAIL where the author can act; NOTICE where only the information is
   actionable; never silence.** Concretely: a *configured* pattern swallowing census code is a **FAIL**
