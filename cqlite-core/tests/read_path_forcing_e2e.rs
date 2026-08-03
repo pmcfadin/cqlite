@@ -38,70 +38,17 @@ fn require_fixtures() -> bool {
         .unwrap_or(false)
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
-}
+// TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
+// (issue #3220): this file used to carry a private, byte-identical copy of a
+// KEYSPACE-granular `sstables_root` + `table_has_data` pair, which selects a corpus
+// root that may not hold the table and then reports the table as absent.
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
 
-fn sstables_root() -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .map(|r| PathBuf::from(r).join("sstables")),
-        Some(
-            repo_root()
-                .join("test-data")
-                .join("datasets")
-                .join("sstables"),
-        ),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|root| root.join(KEYSPACE).is_dir())
-}
+use datasets_root::{describe_search, sstables_root_for_table};
 
 fn schema_path() -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT").ok().and_then(|r| {
-            PathBuf::from(r)
-                .parent()
-                .map(|p| p.join("schemas").join(SCHEMA))
-        }),
-        Some(repo_root().join("test-data").join("schemas").join(SCHEMA)),
-    ];
-    candidates.into_iter().flatten().find(|p| p.exists())
-}
-
-fn table_has_data(root: &Path) -> bool {
-    let ks_dir = root.join(KEYSPACE);
-    let Ok(entries) = std::fs::read_dir(&ks_dir) else {
-        return false;
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&format!("{TABLE}-")))
-                    .unwrap_or(false)
-        })
-        .any(|dir| {
-            std::fs::read_dir(&dir)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok()).any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|n| n.ends_with("-Data.db"))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        })
+    datasets_root::schema_path(SCHEMA)
 }
 
 async fn open_db(root: &Path, schema: &Path, mode: Option<ReadPathMode>) -> Database {
@@ -137,14 +84,10 @@ fn normalize(rows: &[QueryRow]) -> Vec<String> {
 
 /// Resolve the fixture paths, or `None` (SKIP / fail-closed) when absent.
 fn resolve() -> Option<(PathBuf, PathBuf)> {
-    let Some(root) = sstables_root() else {
-        handle_absent("keyspace absent");
+    let Some(root) = sstables_root_for_table(KEYSPACE, TABLE) else {
+        handle_absent(&describe_search(KEYSPACE, TABLE));
         return None;
     };
-    if !table_has_data(&root) {
-        handle_absent("no fetched *-Data.db");
-        return None;
-    }
     let Some(schema) = schema_path() else {
         handle_absent("schema absent");
         return None;

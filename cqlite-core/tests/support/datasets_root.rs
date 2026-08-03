@@ -130,6 +130,17 @@ pub fn sstables_root_for_table(keyspace: &str, table: &str) -> Option<PathBuf> {
         .find(|root| table_has_data(root, keyspace, table))
 }
 
+/// A diagnostic naming every candidate root, for callers whose fixture lookup is not
+/// `<keyspace>/<table>-*` shaped (e.g. the oracle's `fixture_dir_prefix` form).
+pub fn describe_roots() -> String {
+    let roots = sstables_root_candidates()
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("searched [{roots}] (fetch: bash test-data/scripts/fetch-datasets.sh)")
+}
+
 /// A diagnostic naming EVERY root searched for `<keyspace>.<table>` — so a SKIP or a
 /// fail-closed message says where the lane looked, not merely that something was
 /// "absent" (issue #3220: the previous message named neither the table nor the roots,

@@ -41,6 +41,11 @@
 //! seam is never mutated concurrently by a sibling test in this binary.
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
+// TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
+// (issue #3220).
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -112,45 +117,39 @@ struct Case {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// Repo root = the parent of this crate's manifest dir (`<repo>/cqlite-core`).
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
-}
+// Repo root, candidate `sstables/` roots and committed-schema resolution come from
+// the shared, TABLE-granular resolver (issue #3220). This file used to carry a
+// private copy of a KEYSPACE-granular `sstables_root`, byte-identical to the copies
+// in `point_vs_full_differential.rs` and `read_path_forcing_e2e.rs` — so the same
+// absence (a root holding the keyspace but not the table) surfaced as a confusing
+// hard FAIL here and a silent SKIP there.
+use datasets_root::{repo_root, schema_path};
 
-/// The `sstables/` root. Prefer `CQLITE_DATASETS_ROOT` when it actually holds the
-/// committed keyspace; otherwise fall back to the in-repo committed corpus (these
-/// fixtures are committed, not gitignored, so the repo copy is always present).
-fn sstables_root(keyspace: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .map(|r| PathBuf::from(r).join("sstables")),
-        Some(
-            repo_root()
-                .join("test-data")
-                .join("datasets")
-                .join("sstables"),
-        ),
-    ];
+/// The candidate root that actually carries THIS case's fixture.
+///
+/// Table-granular (issue #3220): every candidate root is probed with the case's own
+/// `fixture_dir_prefix`/`sstable_prefix` and the first one holding the `Data.db`
+/// wins, so a `CQLITE_DATASETS_ROOT` corpus lacking a git-committed table falls
+/// through to the checkout instead of being committed to. When NO root resolves the
+/// fixture, a root merely holding the keyspace is returned so the caller's
+/// "dir absent" / "not fetched" messages still name a real path.
+fn sstables_root_for_case(case: &Case) -> Option<PathBuf> {
+    let candidates = datasets_root::sstables_root_candidates();
+    let data_db = format!("{}-Data.db", case.sstable_prefix);
     candidates
-        .into_iter()
-        .flatten()
-        .find(|root| root.join(keyspace).is_dir())
-}
-
-fn schema_path(file: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT").ok().and_then(|r| {
-            PathBuf::from(r)
-                .parent()
-                .map(|p| p.join("schemas").join(file))
-        }),
-        Some(repo_root().join("test-data").join("schemas").join(file)),
-    ];
-    candidates.into_iter().flatten().find(|p| p.exists())
+        .iter()
+        .find(|root| {
+            fixture_dir(
+                root,
+                &case.keyspace,
+                &case.fixture_dir_prefix,
+                &case.sstable_prefix,
+            )
+            .map(|dir| dir.join(&data_db).exists())
+            .unwrap_or(false)
+        })
+        .or_else(|| candidates.iter().find(|r| r.join(&case.keyspace).is_dir()))
+        .cloned()
 }
 
 /// Resolve `<sstables>/<keyspace>/<prefix><uuid>/` for a case.
@@ -358,8 +357,16 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         }
     }
 
-    let Some(root) = sstables_root(&case.keyspace) else {
-        let msg = format!("case {}: keyspace {} absent", case.id, case.keyspace);
+    let Some(root) = sstables_root_for_case(case) else {
+        // Names the table AND every root searched: "keyspace absent" was actively
+        // misleading when the keyspace existed and only the table did not (#3220).
+        let msg = format!(
+            "case {}: no candidate sstables root holds {}.{}* — {}",
+            case.id,
+            case.keyspace,
+            case.fixture_dir_prefix,
+            datasets_root::describe_roots()
+        );
         if require_fixtures() {
             return Err(format!("REQUIRE_FIXTURES: {msg}"));
         }
