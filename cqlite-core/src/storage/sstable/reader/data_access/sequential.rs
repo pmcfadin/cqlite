@@ -1,15 +1,19 @@
 //! Sequential / index-driven read paths: range scans, full scans, the
-//! `scan_for_key` fallback, the cell-metadata scan, and the bounded streaming
-//! scan.
+//! `scan_for_key` fallback, and the cell-metadata scan. The two bounded STREAMING
+//! scans live in the sibling files included at the bottom of this one
+//! (`per_row_scan_stream.rs`, `batched_scan_stream.rs`).
 //!
 //! These cover the BIG (`nb`) `V5CompressedLegacy` formats (chunk-stitched) and
 //! the non-stitching block-by-block formats. BTI (`da`) range/full scans are
-//! routed here only to delegate to [`SSTableReader::bti_scan_with_metadata`].
+//! routed here only to delegate to [`SSTableReader::bti_scan_with_metadata`] —
+//! `scan`, `sequential_scan` and `scan_with_cell_metadata` each gate on
+//! `bti_partitions_db.is_some()` before touching the block loop (issue #3109).
 //!
 //! File-size note (campsite rule, epic #1116): this file was already over the
 //! ~800-line source threshold before issue #2346's `scan_cancel` per-call
-//! parameter change (`sequential_scan`), which nudges it slightly further.
-//! Splitting it by responsibility is out of #2346's scope; tracked under #1116.
+//! parameter change (`sequential_scan`), which nudged it further. Issue #3109
+//! moved the batched streaming scan out to its own file, shrinking it; it is still
+//! over the target and further splits are tracked under #1116.
 
 use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};

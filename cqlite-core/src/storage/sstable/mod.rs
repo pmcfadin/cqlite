@@ -2019,7 +2019,10 @@ impl SSTableManager {
     /// * any BTI (`da`) reader: `run_scan_stream`'s BTI branch (issue #1577) drives
     ///   the trie-walk `bti_scan_with_metadata`, which fully materializes the
     ///   (index-less) reconciled table before streaming — so a bounded consumer
-    ///   never decode-stops for a BTI table, regardless of generation count;
+    ///   never decode-stops for a BTI table, regardless of generation count. Since
+    ///   issue #3109 the BATCHED surface takes that same shared dispatch
+    ///   (`stream_bti_scan`), so this report is now exactly true of both streaming
+    ///   surfaces rather than only the per-row one;
     /// * the default (non-`tombstones`) build's `write-support` cross-generation
     ///   branch is LAZY since #1579 (streams via
     ///   `generation_merge::stream_generations_for_read`), so a bounded consumer
