@@ -459,7 +459,8 @@ perf_capability_competing_files() {
   # boxes have no /run/sysctl.d at all). One that exists but cannot be READ is an UNKNOWN
   # and returns rc 1, so the caller reports a failed scan instead of the reassuring "no
   # competing file" — this diagnostic exists to replace an unknown with a named file, so
-  # it may not answer an unknown with good news.
+  # it may not answer an unknown with good news. The SAME rule applies per FILE inside a
+  # readable directory (R8-4, in the loop below).
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     if [ "${entry##*/}" = sysctl.conf ]; then
@@ -471,7 +472,20 @@ perf_capability_competing_files() {
     [ -e "$entry" ] || continue
     [ -d "$entry" ] && [ -r "$entry" ] || return 1
     for f in "$entry"/*.conf; do
-      [ -f "$f" ] && [ -r "$f" ] || continue
+      # AN UNMATCHED GLOB IS NOT AN UNREADABLE FILE (issue #3249 review R8-4). With no
+      # match bash leaves the PATTERN itself in $f (nullglob is not set) and it does not
+      # exist — that directory genuinely holds no competitor, skip it. But a file that
+      # EXISTS and cannot be READ is an UNKNOWN, and `sysctl --system` runs as ROOT: it
+      # can read and APPLY exactly the file we could not open. Skipping it would let the
+      # caller print "no other file sets these keys" about an unexamined competitor —
+      # the reassuring answer this whole diagnostic exists to stop giving. Fail the scan.
+      if [ ! -r "$f" ]; then
+        [ -e "$f" ] || continue
+        printf 'perf-capability: could not scan %s — it exists but is unreadable, and a privileged `sysctl --system` CAN read it, so whether it competes for perf_event_paranoid/kptr_restrict is UNKNOWN.\n' \
+          "'$f'" >&2
+        return 1
+      fi
+      [ -f "$f" ] || continue   # readable but a directory/socket named *.conf: sysctl reads none
       name="${f##*/}"
       [ "$name" = "$base" ] && continue
       # MASKING (see the precedence rules above): a higher-precedence directory already

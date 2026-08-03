@@ -572,6 +572,36 @@ else
   ok "perf-capability: an UNREADABLE sysctl.d directory fails the scan (rc 1) instead of claiming no competitor"
 fi
 chmod 755 "$unreadable_d"
+# ...and the same rule PER FILE, with the two shapes distinguished (issue #3249 review
+# R8-4). `for f in "$dir"/*.conf` leaves the PATTERN in $f when nothing matches, so one
+# `[ -f ] && [ -r ] || continue` conflated "this directory holds no .conf" (genuinely no
+# competitor) with "this .conf exists but I cannot read it" (an UNKNOWN — and a
+# privileged `sysctl --system` CAN read and apply it). The second must fail the scan.
+unrf_d="$tmp/perf-unreadable-file.d"; mkdir -p "$unrf_d"
+printf 'kernel.perf_event_paranoid = 3\n' >"$unrf_d/10-secret.conf"; chmod 000 "$unrf_d/10-secret.conf"
+noglob_d="$tmp/perf-noglob.d"; mkdir -p "$noglob_d"
+printf 'not a sysctl file\n' >"$noglob_d/README.txt"   # readable dir, glob matches NOTHING
+noglob_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$noglob_d" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); noglob_rc=$?
+if [ -r "$unrf_d/10-secret.conf" ]; then
+  # real root ignores the mode bits; the unreadable-FILE half is unobservable here
+  ok "perf-capability: (skipped under real root) unreadable competing .conf — mode bits do not apply"
+else
+  unrf_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$unrf_d" \
+    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); unrf_rc=$?
+  if [ "$unrf_rc" -ne 0 ] && printf '%s\n' "$unrf_out" | grep -q "could not scan .*10-secret.conf" \
+     && ! printf '%s\n' "$unrf_out" | grep -qE '^(earlier|override|last) '; then
+    ok "perf-capability: an EXISTING but UNREADABLE competing .conf fails the scan (rc 1, 'could not scan' naming the file) instead of being silently skipped into a clean bill"
+  else
+    bad "perf-capability: an unreadable competing .conf was skipped silently (rc=$unrf_rc, '$unrf_out')"
+  fi
+fi
+if [ "$noglob_rc" -eq 0 ] && [ -z "$noglob_out" ]; then
+  ok "perf-capability: a readable directory whose *.conf glob matches NOTHING is no competitor (rc 0, no output) — the unmatched glob is not treated as an unreadable file"
+else
+  bad "perf-capability: an unmatched *.conf glob did not scan clean (rc=$noglob_rc, '$noglob_out')"
+fi
+chmod 644 "$unrf_d/10-secret.conf"
 
 # 1e. THE IDENTITY DIMENSION, at the helper level (issue #3249 review R4-1/R4-2). Every
 #     assert here is the same shape: an UNKNOWN or UNVERIFIABLE identity must NOT resolve
