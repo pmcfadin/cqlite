@@ -181,6 +181,55 @@ print-only, the link probe, the managed-block write, idempotency, user-config
 preservation, and the Darwin no-op). See fleet-runbook for the one-time sccache
 cold-rebuild note at enablement.
 
+### The `perf=` profiling-capability token (Linux only, issue #3249)
+
+After `mold=`, a Linux `accelerators:` line carries a `perf=` token answering *can this
+box be profiled at all?*
+
+```
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+```
+
+It is a **free** read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through
+shell builtins — no `perf` exec, no new binary dependency (the functional
+`perf stat -C 0 -e cycles` verification is **bootstrap's** job, not the gate's). "Free"
+is a *measured* cost, enforced by `test_agent_gate_summary.sh` case `perf-free`: the
+emit-time path performs **0 external processes and 0 command substitutions** — each
+`$( )` is a forked subshell, so the token is returned through a caller-named variable
+(`perf_capability_token_into <outvar>`) rather than stdout — and
+`scripts/perf-capability.sh` is sourced **once per gate run**, never per summary. The
+test asserts both halves: the substitution count statically, and the extracted path
+re-executed with an unresolvable `PATH` under xtrace subshell counting (so a
+stderr-silenced exec cannot hide). State values (Linux only):
+- `perf=ok` — unprivileged per-CPU profiling **and** kernel symbol resolution available.
+- `perf=paranoid-<N>` — `perf_event_paranoid = N >= 1`. Cumulative: `>= 1` forbids
+  **CPU-wide** event access, which is exactly what the mandated `perf stat -C <cpu>`
+  needs, so it is **denied**. Agent images ship `4`; on Debian/Ubuntu kernels `>= 3`
+  denies unprivileged perf entirely. This is a **permission** verdict whose "access
+  limited" help text reads like a missing *capability* — the confusion that cost two
+  measurement cycles.
+- `perf=kptr-restricted` — paranoid is fine, `kptr_restrict != 0`: kernel frames render
+  as bare addresses (a **silent attribution loss**, not an error).
+- `perf=absent` — the `/proc` controls are not present (container without a writable
+  procfs → tune the HOST). `perf=unknown` — present but unparseable, never guessed.
+
+Anything but `ok` on a box you intend to measure means **re-run
+`bash scripts/bootstrap-agent-machine.sh --yes`** (installs + applies + verifies
+`/etc/sysctl.d/99-cqlite-perf.conf`), not "perf is unavailable here". Rationale
+(`-1`, not `1`), the BPF-still-needs-sudo caveat, the single-tenant security posture
+and the `/etc/sysctl.conf` precedence trap: `docs/development/fleet-runbook.md`.
+
+Self-test coverage: `scripts/tests/test_agent_gate_summary.sh` (cases 9f* assert every
+state via the test seam, the Darwin no-token contract, **and** the production branch
+against a real `/proc` fixture with the seam unset) and
+the pair `scripts/tests/test_perf_capability.sh` (the helper's unit contract) +
+`scripts/tests/test_perf_capability_bootstrap.sh` (the bootstrap
+write/read-back/verify path, including the silent-revert and denied-`perf` cases),
+which share `scripts/tests/lib/perf-capability-test-lib.sh`. Both are in the
+`tooling-tests` `&&`-chain; together they also pin the fail-closed identity rules (an
+unusable `id -u`, an inconsistent `SUDO_USER`) and the enforced hermeticity of test
+mode (both path seams mandatory, no production fallback).
+
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
 Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent

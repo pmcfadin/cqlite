@@ -161,8 +161,12 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
   read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
   its gate runs).
-- Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state) — degradation there is
-  actionable, not noise. Self-test: `bash scripts/tests/test_agent_gate_summary.sh`.
+- Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
+  a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
+  actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
+  PERMISSION verdict, not a missing capability): re-run `bash scripts/bootstrap-agent-machine.sh
+  --yes`, which installs + verifies `/etc/sysctl.d/99-cqlite-perf.conf`. Self-test:
+  `bash scripts/tests/test_agent_gate_summary.sh`.
 
 ## Core Commands
 

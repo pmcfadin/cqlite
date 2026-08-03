@@ -189,3 +189,241 @@ active in the resolved cargo config), `overridden` (managed block active but a n
 - **THEN** the `accelerators:` line SHALL contain no `mold=` token and SHALL be
   byte-identical in format to pre-change output
 
+### Requirement: The gate summary SHALL stamp perf profiling capability on Linux hosts
+
+On Linux, every `scripts/agent-gate.sh` summary's `accelerators:` line SHALL carry a
+`perf=` token, after the `mold=` token, with one of five states read from
+`/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}`: `ok` (`perf_event_paranoid <= 0`
+AND `kptr_restrict == 0` — unprivileged per-CPU profiling and kernel symbol resolution
+both available), `paranoid-<N>` (`perf_event_paranoid = N >= 1`, which forbids CPU-wide
+event access and therefore DENIES the `perf stat -C <cpu>` collection the measurement
+doctrine mandates), `kptr-restricted` (paranoid permissive but `kptr_restrict != 0`, so
+kernel frames resolve to bare addresses — a silent attribution loss), `absent` (the
+`/proc` controls are not present, e.g. a container), or `unknown` (present but
+unparseable — never guessed). The read SHALL be free, and free SHALL be enforced by a
+test rather than asserted in prose: the gate's emit-time path SHALL exec no `perf`, SHALL
+spawn no external process, and SHALL contain no command substitution (each `$( )` forks
+a subshell, so the token SHALL be returned through a caller-named variable rather than
+stdout); the helper SHALL be sourced once per gate run, not per summary. On Darwin the
+`accelerators:` line SHALL be unchanged (no `perf=` token), since both controls are Linux
+kernel knobs.
+
+#### Scenario: a profileable Linux worker stamps ok
+- **GIVEN** a Linux host whose `perf_event_paranoid` is `<= 0` and `kptr_restrict` is `0`
+- **WHEN** any gate mode emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=ok`
+
+#### Scenario: the shipped-image denial is visible
+- **GIVEN** a Linux host with `perf_event_paranoid = 4` (the value agent images ship)
+- **WHEN** the gate emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=paranoid-4`, never `perf=ok` —
+  a PERMISSION verdict made visible in every pasted block rather than discovered at the
+  start of a measurement cycle
+
+#### Scenario: kernel symbols unavailable is visible
+- **GIVEN** a Linux host with a permissive `perf_event_paranoid` but `kptr_restrict != 0`
+- **WHEN** the gate emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=kptr-restricted`
+
+#### Scenario: an unreadable or unparseable control is never guessed
+- **GIVEN** a Linux host where a `/proc` control is missing or holds a non-integer
+- **WHEN** the gate emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=absent` or `perf=unknown`
+  respectively, and SHALL NOT infer a capability from the surrounding state
+
+#### Scenario: Darwin summary unchanged by the perf token
+- **WHEN** the gate emits its summary on a macOS host
+- **THEN** the `accelerators:` line SHALL contain no `perf=` token
+
+#### Scenario: the free-read cost is enforced by a test, not claimed
+- **GIVEN** the gate's emit-time perf path (its token functions plus every helper
+  function they reach)
+- **WHEN** the tooling suite audits it
+- **THEN** the audit SHALL count zero command substitutions statically AND SHALL
+  re-execute that same extracted path with an unresolvable `PATH`, asserting the correct
+  token, zero spawned subshells and zero attempted external commands — so a
+  reintroduced `$( )` or exec FAILS the fast loop instead of surviving as prose
+
+### Requirement: Bootstrap SHALL install and VERIFY the perf sysctl drop-in on Linux
+
+On Linux, `scripts/bootstrap-agent-machine.sh` SHALL install the reboot-surviving
+drop-in `/etc/sysctl.d/99-cqlite-perf.conf` (`kernel.perf_event_paranoid = -1`,
+`kernel.kptr_restrict = 0`) idempotently, apply it, and then verify the outcome — never
+assume it. The verdict SHALL come from reading the values back out of `/proc/sys/kernel`
+(a `sysctl` write's return code proves nothing) and from a FUNCTIONAL
+`perf stat -C 0 -e cycles` collection requiring BOTH exit 0 AND a non-zero cycle count.
+An overall "VERIFIED" report SHALL require BOTH the `/proc` token `ok` AND that functional
+pass; a functional result that is not accompanied by both SHALL be reported as PARTIAL
+DIAGNOSTIC INFORMATION, explicitly subordinate to the `/proc` verdict, and no run SHALL
+emit a non-`ok` token diagnosis and an unqualified "VERIFIED" together. Because
+`perf_event_paranoid` restricts UNPRIVILEGED users and ROOT BYPASSES IT, the functional
+collection SHALL be attributed to an identity: when bootstrap runs as root it SHALL DROP
+PRIVILEGE for the probe where a mechanism exists (`setpriv`, else `runuser -u <name>`, else
+`sudo -u '#<uid>'`) targeting an unprivileged identity resolved from `SUDO_UID`/`SUDO_GID`
+else the passwd database's `nobody` — never an invented uid — and where no mechanism or no
+such identity exists it SHALL label the root result as NOT evidence of unprivileged
+capability and SHALL NOT report it as verification.
+
+NO PATH SHALL REACH A CAPABLE/VERIFIED VERDICT FROM AN UNVALIDATED INPUT. Specifically:
+the process's own privilege SHALL be determined from an `id -u` that exists, exits 0 and
+prints a validated non-negative integer — an unusable `id -u` SHALL yield an explicit
+`identity-unknown` state that is NOT evidence of unprivileged capability, and SHALL NEVER
+be substituted with an assumed uid; a `SUDO_USER` name SHALL be used only when the passwd
+database confirms it resolves to exactly the validated NON-ZERO `SUDO_UID`/`SUDO_GID` and
+the name is shell-token safe, otherwise the numeric ids alone SHALL carry the drop; and
+the drop-in comparison SHALL be BYTE-exact including trailing newlines, so a file
+differing only in a missing final newline or an extra trailing blank line SHALL be judged
+NOT current and rewritten.
+
+The privileged destination path SHALL be a hardcoded literal, never derived from the
+environment, and every variable the section's control flow reads SHALL be initialised by
+the section BEFORE the platform/library guards, so no inherited environment value can
+enter a Linux-only implementation on another platform or without its helper library. The
+test-only path seams SHALL be inert without their explicit marker, and UNDER the marker
+BOTH seams SHALL be MANDATORY, absolute and outside `/etc`, `/proc` and `/sys`: a missing
+or production-shaped seam SHALL be a loud refusal in the env guard AND in the path
+resolvers, so a test-mode run can never fall back to a production directory and mutate the
+host. On every path that WRITES or gates a write, that judgement SHALL be made on the
+seam's CANONICAL destination — `.`, `..` and symlinked ancestors resolved — and not on its
+spelling, since a textual check accepts an unbounded set of paths that resolve into the
+production directory. The emit-time read path, which writes nothing and is contractually
+fork-free, MAY validate textually (rejecting `.`/`..` components and a symlinked seam).
+
+When the read-back reports a restrictive `perf_event_paranoid`/`kptr_restrict` state, the
+diagnostics SHALL NAME the competing configuration files across the COMPLETE
+`sysctl --system` search path — `/etc/sysctl.d`, `/run/sysctl.d`,
+`/usr/local/lib/sysctl.d`, `/usr/lib/sysctl.d`, `/lib/sysctl.d` and `/etc/sysctl.conf` —
+honouring same-basename masking (a basename supplied by a higher-precedence directory makes
+the lower copy inert, so naming it would point at a file that is not in effect), and SHALL
+distinguish one whose basename sorts AFTER the managed drop-in (an actual override, since
+the last assignment wins) from one that sorts before it, and from `/etc/sysctl.conf` (which
+is applied after every drop-in and therefore wins regardless of name); a run with no
+competitor SHALL say so explicitly. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
+apply command's exit status, and the apply command's own failure SHALL be reported
+separately from the capability verdict — `sysctl --system` applies every drop-in on the
+box, so a non-zero exit may belong to an unrelated pre-existing entry, and no wording
+SHALL claim "nothing was applied" alongside a good read-back (or the reverse). The
+section SHALL be advisory: a box without non-interactive root, without `perf`, or without
+the `/proc` controls SHALL warn with an actionable remedy — a write-AND-apply remedy when
+the drop-in is missing, an APPLY-ONLY remedy (root-shell or interactive `sudo`, matching
+the detected privilege state) when the drop-in is already current — and the run SHALL
+still exit 0. On Darwin the section SHALL be an explicit no-op.
+
+#### Scenario: a failing apply whose controls DID take is reported honestly
+- **GIVEN** a Linux host where `sysctl --system` exits non-zero (an unrelated
+  pre-existing sysctl entry failed) while our controls DID take
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL still read `/proc` back, SHALL report the good verdict from that
+  read, SHALL report the command's non-zero exit as a DISTINCT fact about the command,
+  SHALL NOT claim that nothing was applied, and SHALL exit 0
+
+#### Scenario: a current drop-in that cannot be applied still prints a runnable remedy
+- **GIVEN** a Linux host whose drop-in is already current, whose runtime controls are not
+  profileable, and where bootstrap has no non-interactive privilege
+- **WHEN** bootstrap runs
+- **THEN** it SHALL print an apply remedy runnable ON THAT BOX — `sysctl -q --system` from
+  a root shell where no `sudo` binary exists, `sudo sysctl -q --system` where `sudo` needs
+  a password — never a diagnosis with no remedy
+
+#### Scenario: an applied value that did not take is reported, not claimed
+- **GIVEN** a Linux host where `sysctl --system` exits 0 but `/proc` still reports a
+  restrictive value (container, read-only procfs, a later-sorting drop-in or
+  `/etc/sysctl.conf` overriding ours)
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL warn that the value did NOT take, SHALL NOT report a successful
+  read-back, and SHALL exit 0
+
+#### Scenario: an rc-0 collection with an unusable counter is NOT verified
+- **GIVEN** a `perf stat` that exits 0 while reporting `<not supported>`, `<not counted>`
+  or a zero count (a virtualised or masked PMU)
+- **WHEN** bootstrap runs the functional verification
+- **THEN** it SHALL report the capability as NOT verified
+
+#### Scenario: a functional pass never overrides a non-ok /proc verdict
+- **GIVEN** a Linux host whose `/proc` reports `paranoid-4` (or `kptr-restricted`) while
+  `perf stat -C 0 -e cycles` succeeds with a non-zero count
+- **WHEN** bootstrap runs
+- **THEN** it SHALL NOT report an unqualified "VERIFIED", SHALL report the functional
+  result as partial diagnostic information subordinate to `/proc`, SHALL name `/proc` as
+  the authority with the token it read, and SHALL exit 0
+
+#### Scenario: a root-run functional pass is not evidence of unprivileged capability
+- **GIVEN** a Linux host where bootstrap runs AS ROOT (e.g. under `sudo`) and
+  `perf stat -C 0 -e cycles` succeeds
+- **WHEN** a privilege-dropping mechanism and an unprivileged identity are available
+- **THEN** bootstrap SHALL run the probe with privilege dropped, SHALL state which
+  identity it measured, and only then MAY report VERIFIED (given `/proc` = `ok`)
+- **WHEN** no such mechanism or identity is available
+- **THEN** bootstrap SHALL label the result as NOT evidence that an unprivileged process
+  can profile the box, SHALL NOT report VERIFIED even with `/proc` = `ok`, and SHALL exit 0
+
+#### Scenario: an unknown identity is not evidence of unprivileged capability
+- **GIVEN** a Linux host on which `id -u` is missing, exits non-zero, or prints
+  unparseable output, while `perf stat -C 0 -e cycles` succeeds and `/proc` reports `ok`
+- **WHEN** bootstrap runs
+- **THEN** it SHALL report the identity as UNKNOWN, SHALL NOT report VERIFIED, SHALL NOT
+  assert that the probe ran as root either, and SHALL exit 0
+
+#### Scenario: an inconsistent SUDO_USER cannot become the drop target
+- **GIVEN** `SUDO_UID=1000` with `SUDO_USER=root` (stale or inconsistent) and no `setpriv`
+- **WHEN** the privilege-dropping prefix is resolved
+- **THEN** the name SHALL be rejected and the drop SHALL use the validated numeric uid
+  (`sudo -u '#1000'`), so the probe can never run as root under a "dropped" label
+
+#### Scenario: test mode without a sandbox refuses to act
+- **GIVEN** the test-mode marker set, a root identity, and NO path seams set
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL refuse the section with a loud diagnosis, SHALL invoke no privileged
+  command, SHALL write nothing (in particular not the real `/etc/sysctl.d` drop-in), SHALL
+  claim no verdict, and SHALL exit 0
+
+#### Scenario: a test seam that RESOLVES into production refuses to act
+- **GIVEN** the test-mode marker set, a root identity, and a sysctl path seam that passes
+  every textual non-production check but resolves into `/etc/sysctl.d` — `/tmp/../etc/sysctl.d`,
+  or `<symlink-to-/etc>/sysctl.d`
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL refuse the section with a loud diagnosis, SHALL invoke no privileged
+  command, SHALL leave the real drop-in byte- and metadata-unchanged, SHALL name no write
+  target at all, and SHALL exit 0
+
+#### Scenario: re-run writes nothing
+- **WHEN** bootstrap runs twice on the same host
+- **THEN** the second run SHALL report the drop-in as already current and SHALL NOT
+  re-write it, invoking no privileged write command
+
+#### Scenario: a non-canonical drop-in is rewritten
+- **GIVEN** an existing drop-in whose bytes differ from the canonical content only in
+  trailing newlines (a missing final newline, or an extra trailing blank line), or which
+  carries the canonical content followed by a NUL byte and arbitrary trailing bytes
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL NOT report "already current", SHALL rewrite the file, and the result
+  SHALL be byte-identical to the canonical content
+
+#### Scenario: a competing sysctl file is named, anywhere on the search path
+- **GIVEN** a Linux host whose read-back is non-`ok` and whose `sysctl --system` search path
+  holds other files setting `perf_event_paranoid`/`kptr_restrict` — the stock Ubuntu
+  `/etc/sysctl.d/10-kernel-hardening.conf`, a later-sorting file in a LOWER-precedence
+  directory such as `/run/sysctl.d`, an `/etc/sysctl.conf` entry, and a same-basename copy
+  masked by a higher-precedence directory
+- **WHEN** bootstrap runs
+- **THEN** the diagnostics SHALL name each competing file that is IN EFFECT by path, SHALL
+  flag the later-sorting one as an actual OVERRIDE, SHALL flag `/etc/sysctl.conf` as applied
+  after every drop-in (winning regardless of name), SHALL state that the earlier-sorting one
+  loses to the managed `99-` prefix, and SHALL NOT name the masked copy
+
+#### Scenario: an inherited environment variable cannot enter the section
+- **GIVEN** an ambient `PERF_SECTION_OK=1` in bootstrap's environment
+- **WHEN** bootstrap runs on macOS, or on a checkout with no `scripts/perf-capability.sh`
+- **THEN** the section SHALL take its no-op / missing-library path, SHALL call no helper
+  from the Linux-only implementation, and SHALL exit 0
+
+#### Scenario: check mode mutates nothing
+- **WHEN** bootstrap runs without `--yes` on a Linux host lacking the drop-in
+- **THEN** it SHALL write no file and invoke no privileged mutating command, and SHALL
+  print the complete write-AND-apply remedy using the detected privilege prefix
+
+#### Scenario: Darwin bootstrap no-op
+- **WHEN** bootstrap runs on a macOS host
+- **THEN** the perf section SHALL state that the controls are Linux-only, write nothing,
+  and exit 0
+
