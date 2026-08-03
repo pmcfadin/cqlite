@@ -16,7 +16,9 @@ use crate::query::{ColumnInfo, QueryRow};
 use crate::schema::CqlType;
 use crate::types::{DataType, Value};
 use crate::RowKey;
-use arrow::array::{Array, Int32Array};
+use arrow::array::{Array, Float32Array, Int32Array, StringArray};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Build a `ColumnInfo` for a single test column.
 fn col(name: &str, data_type: DataType, cql_type: Option<CqlType>) -> ColumnInfo {
