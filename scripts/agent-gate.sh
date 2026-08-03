@@ -747,22 +747,25 @@ _mold_accel_token() {
 # SUMMARY instead of being discovered at the start of a measurement cycle.
 #
 # HARD CONSTRAINT: this is the FREE /proc read from scripts/perf-capability.sh and
-# nothing else — no `perf stat` exec, no new binary dependency, no measurable time
-# cost in the gate's path. The functional verification (which DOES exec perf) is
+# nothing else — no `perf stat` exec, no new binary dependency, no subprocess at all
+# (perf_capability_proc_value reads through the `read` builtin), so no measurable
+# time cost in the gate's path. The functional verification (which DOES exec perf) is
 # bootstrap's job, not the gate's.
-_PERF_STATE=""
+#
+# NO MEMOIZATION here, deliberately: every call site is inside a `$( )`, so an
+# assignment to a script-level cache would land in a subshell and be discarded — a
+# cache that looks real and never hits. Two `read`-builtin /proc reads cost nothing,
+# so the honest implementation is to just do them.
 _perf_state() {
-  [ -n "$_PERF_STATE" ] && { printf '%s' "$_PERF_STATE"; return; }
+  local state=""
   if [ -n "${AGENT_GATE_TEST_PERF_STATE:-}" ]; then
-    _PERF_STATE="$AGENT_GATE_TEST_PERF_STATE"
+    state="$AGENT_GATE_TEST_PERF_STATE"
   elif [ -r "$REPO_ROOT/scripts/perf-capability.sh" ] &&
        . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then
-    _PERF_STATE="$(perf_capability_token)"
-  else
-    _PERF_STATE=unknown
+    state="$(perf_capability_token)"
   fi
-  [ -n "$_PERF_STATE" ] || _PERF_STATE=unknown
-  printf '%s' "$_PERF_STATE"
+  [ -n "$state" ] || state=unknown
+  printf '%s' "$state"
 }
 
 # _perf_accel_token: the ` perf=<state>` suffix on Linux hosts, empty elsewhere —

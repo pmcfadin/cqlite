@@ -30,15 +30,24 @@ PERFLIB="$SCRIPT_DIR/../perf-capability.sh"
 
 PASS=0
 FAIL=0
-# Wall-clock stamp used ONLY to attribute a pre-existing host file (the last case
-# asks "did WE create /etc/sysctl.d/99-cqlite-perf.conf, or was the box already
-# bootstrapped?"). Never a threshold on a measured duration. perf-gate-allow
-SUITE_START=$(date +%s)
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
+# sudo_perf_offenders <tripwire-log>: the recorded `sudo` lines belonging to the PERF
+# path (its `-n` availability probe, its `tee`, its `sysctl`) that do NOT carry `-n`.
+# `-n` is what makes bootstrap unpromptable on an unattended worker, so dropping it
+# from PERF_ROOT is a defect every functional assert would still pass. Lines from other
+# bootstrap sections (e.g. the mold `sudo apt-get install`) are out of this issue's scope.
+sudo_perf_offenders() {
+  grep -E '^sudo ' "$1" 2>/dev/null | grep -E '(\btee\b|\bsysctl\b|\btrue\b)' | grep -v '^sudo -n ' || true
+}
+
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/perf-cap-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
+# Reference file for the "did WE create the real /etc/sysctl.d drop-in?" attribution
+# in the final case: a plain `-nt` comparison against a file created NOW, so no
+# `stat -c %Y` (GNU-only) and no wall-clock arithmetic anywhere in this suite.
+suite_ref="$tmp/.suite-start"; : >"$suite_ref"
 
 # Global-state isolation, same posture as test_bootstrap_agent_machine.sh: the
 # bootstrap runs below read/write git config and read board env, and this suite runs
@@ -49,6 +58,31 @@ export GIT_CONFIG_NOSYSTEM=1
 unset CQLITE_PROJECT_NUMBER CQLITE_PROJECT_OWNER CQLITE_PROJECT_ACCOUNT PROJECT_TITLE
 # A worker shell may export the seams themselves; a test must set exactly what it means.
 unset CQLITE_PERF_PROC_DIR CQLITE_PERF_SYSCTL_DIR
+# The two path seams are INERT unless this marker is set, and the marker itself
+# forbids reaching a real sudo/sysctl (the shim dir is declared per case in
+# CQLITE_PERF_TEST_PRIV_DIR). Cases that must exercise the PRODUCTION defaults run
+# with `env -u CQLITE_PERF_TEST_MODE`.
+export CQLITE_PERF_TEST_MODE=1
+
+# mkuname <dir> <sysname>: a `uname` stub, so the Linux/Darwin branch under test is
+# the one selected by the CASE, not by whatever host runs the suite. Without this the
+# whole suite was silently Linux-host-only: on a Darwin gate host every bootstrap run
+# below would take the "nothing to configure on macos" path and 10 cases would fail.
+# `-r`/`-m` answer too, because bootstrap uses them elsewhere.
+mkuname() {
+  # rm FIRST: several dirs below `ln -sf` the real uname into place, and writing
+  # through that symlink would clobber the host's /usr/bin/uname.
+  rm -f "$1/uname"
+  cat >"$1/uname" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  -r) echo 6.0.0-cqlite-test ;;
+  -m) echo x86_64 ;;
+  *)  echo $2 ;;
+esac
+EOF
+  chmod +x "$1/uname"
+}
 
 # Inert shims for the tools the surrounding bootstrap sections would otherwise
 # reach (network / installs). Only the perf-specific shims below are functional.
@@ -64,6 +98,7 @@ mkshim brew
 mkshim cargo
 mkshim roborev
 mkshim gh
+mkuname "$tmp" Linux   # every bootstrap run below that includes $tmp in PATH is Linux
 host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # --- 1. The shared helper: scripts/perf-capability.sh ------------------------------
@@ -167,10 +202,78 @@ else
   bad "perf-capability: drop-in content is missing a control, the rationale or the posture"
   printf '%s\n' "$dropin"
 fi
-if [ "$(CQLITE_PERF_SYSCTL_DIR=/etc/sysctl.d bash "$PERFLIB" --drop-in-path)" = /etc/sysctl.d/99-cqlite-perf.conf ]; then
-  ok "perf-capability: drop-in path is /etc/sysctl.d/99-cqlite-perf.conf (survives reboot)"
+# 1c-i. The PRODUCTION defaults, asserted with the seams OFF. Every other case here
+#       sets both seams, so a default changed to /tmp/bogus-* would have gone
+#       unnoticed; these two read-only string asserts pin the real literals. They
+#       stay hermetic — nothing is read or written, only the resolved path printed.
+if [ "$(env -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_SYSCTL_DIR -u CQLITE_PERF_PROC_DIR \
+          bash "$PERFLIB" --drop-in-path)" = /etc/sysctl.d/99-cqlite-perf.conf ]; then
+  ok "perf-capability: the DEFAULT drop-in path is /etc/sysctl.d/99-cqlite-perf.conf (survives reboot)"
 else
-  bad "perf-capability: unexpected drop-in path"
+  bad "perf-capability: unexpected default drop-in path"
+fi
+default_proc=$(env -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_SYSCTL_DIR -u CQLITE_PERF_PROC_DIR \
+  bash -c '. "$1"; perf_capability_proc_dir' _ "$PERFLIB")
+if [ "$default_proc" = /proc/sys/kernel ]; then
+  ok "perf-capability: the DEFAULT proc dir is /proc/sys/kernel"
+else
+  bad "perf-capability: unexpected default proc dir: '$default_proc'"
+fi
+
+# 1c-ii. The test seams are INERT without the marker, and a PRIVILEGED caller REFUSES
+#        outright. This is the security property: bootstrap pipes the drop-in through
+#        `sudo tee <path>`, so an env-derived destination let one stray export
+#        (CQLITE_PERF_SYSCTL_DIR=/etc/sudoers.d) make ROOT write an env-chosen file
+#        while the real drop-in was never installed — and an unparsable sudoers entry
+#        can wedge `sudo` outright. Same for a fake /proc fabricating a verdict.
+seam_no_marker_path=$(env -u CQLITE_PERF_TEST_MODE CQLITE_PERF_SYSCTL_DIR="$tmp/evil-sysctl.d" \
+  bash "$PERFLIB" --drop-in-path)
+if [ "$seam_no_marker_path" = /etc/sysctl.d/99-cqlite-perf.conf ]; then
+  ok "perf-capability: CQLITE_PERF_SYSCTL_DIR is INERT without CQLITE_PERF_TEST_MODE=1 (path stays the hardcoded literal)"
+else
+  bad "perf-capability: a seam without the marker steered the drop-in path to '$seam_no_marker_path'"
+fi
+seam_no_marker_proc=$(env -u CQLITE_PERF_TEST_MODE CQLITE_PERF_PROC_DIR="$perfproc" \
+  bash -c '. "$1"; perf_capability_proc_dir' _ "$PERFLIB")
+if [ "$seam_no_marker_proc" = /proc/sys/kernel ]; then
+  ok "perf-capability: CQLITE_PERF_PROC_DIR is INERT without the marker (no fabricated /proc verdict)"
+else
+  bad "perf-capability: a seam without the marker steered the /proc read to '$seam_no_marker_proc'"
+fi
+guard_out=$(env -u CQLITE_PERF_TEST_MODE CQLITE_PERF_SYSCTL_DIR="$tmp/evil-sysctl.d" \
+  bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); guard_rc=$?
+if [ "$guard_rc" -ne 0 ] && printf '%s' "$guard_out" | grep -qi 'REFUSING'; then
+  ok "perf-capability: env guard REFUSES loudly when a seam is set without the marker"
+else
+  bad "perf-capability: env guard allowed a marker-less seam (rc=$guard_rc, out='$guard_out')"
+fi
+# ...and the marker is itself hermetic: with it set, a REAL sudo/sysctl on PATH is a
+# refusal, so test mode can never reach a real privileged tool.
+realpriv="$tmp/realpriv"; mkdir -p "$realpriv"
+for t in sudo sysctl; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$realpriv/$t"; chmod +x "$realpriv/$t"
+done
+guard2_out=$(PATH="$realpriv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$tmp/some-other-dir" \
+  bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); guard2_rc=$?
+if [ "$guard2_rc" -ne 0 ] && printf '%s' "$guard2_out" | grep -q 'outside the declared shim dir'; then
+  ok "perf-capability: test mode REFUSES when sudo resolves outside the declared shim dir"
+else
+  bad "perf-capability: test mode accepted an undeclared sudo (rc=$guard2_rc, out='$guard2_out')"
+fi
+# ...and `sysctl` is guarded as strictly as `sudo` (a real `sysctl --system` would
+# reconfigure the HOST kernel, marker or not).
+guard3_out=$(PATH="$realpriv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$tmp/only-sudo-here" \
+  bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1)
+if printf '%s' "$guard3_out" | grep -q 'sysctl resolves to\|sudo resolves to'; then
+  ok "perf-capability: test mode guards BOTH sudo and sysctl against a real binary"
+else
+  bad "perf-capability: test mode did not name the offending privileged tool: '$guard3_out'"
+fi
+if PATH="$realpriv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$realpriv" \
+     bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>/dev/null; then
+  ok "perf-capability: test mode ACCEPTS a sudo inside the declared shim dir"
+else
+  bad "perf-capability: test mode rejected its own declared shim dir"
 fi
 
 # 1d. The FUNCTIONAL verification is HONOURED, not merely attempted — the #3119
@@ -184,6 +287,24 @@ mkperfshim() { # mkperfshim <csv-count-field>
 echo "perf \$*" >>"\$PERFSHIM_LOG"
 printf '%s\n' '$1,,cycles,100000000,100.00,,'
 exit 0
+EOF
+  chmod +x "$perfbin/perf"
+}
+# mkperfshim_raw <exit-code> <stdout-line>...: the general shim — an EXACT exit code
+# and arbitrary CSV rows (or none). The `perf stat` failure and empty-output paths are
+# the REAL states on an unbootstrapped box (paranoid=4 denies the syscall outright, so
+# perf exits non-zero), and every shim above exits 0 — so without this those two
+# branches were never driven and a mutation making either RETURN SUCCESS survived.
+mkperfshim_raw() {
+  local rc="$1"; shift
+  local data="$perfbin/perf.rows" line
+  : >"$data"
+  for line in "$@"; do printf '%s\n' "$line" >>"$data"; done
+  cat >"$perfbin/perf" <<EOF
+#!/usr/bin/env bash
+echo "perf \$*" >>"\$PERFSHIM_LOG"
+cat "$data"
+exit $rc
 EOF
   chmod +x "$perfbin/perf"
 }
@@ -208,6 +329,89 @@ done
 if [ "$ver_fail" -eq 0 ]; then
   ok "perf-capability: verify requires a NON-ZERO cycle count (0 / <not supported> / <not counted> all FAIL)"
 fi
+# 1d-i. HYBRID PMU (Intel 12th-gen+ P/E cores): perf reports one row per PMU with
+#       QUALIFIED event names (`cpu_core/cycles/`, `cpu_atom/cycles/`), routinely with
+#       `<not supported>` on the sibling that did not run. A parser keyed on a literal
+#       leading `cycles` calls that good collection `no-cycles-row`, i.e. reports a
+#       profileable box as broken. Accept the qualified name and the positive row.
+hybrid_v=$(mkperfshim_raw 0 '<not supported>,,cpu_atom/cycles/,0,100.00,,' '31415926,,cpu_core/cycles/,100000000,100.00,,'
+  PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1)
+if [ "$hybrid_v" = "cycles=31415926" ]; then
+  ok "perf-capability: a hybrid-PMU qualified cycle row (cpu_core/cycles/) is accepted, sibling <not supported> ignored"
+else
+  bad "perf-capability: hybrid-PMU rows misparsed: '$hybrid_v'"
+fi
+# ...and the order must not matter (positive row first, unsupported sibling second).
+hybrid2_v=$(mkperfshim_raw 0 '2718281,,cpu_core/cycles/,100000000,100.00,,' '<not supported>,,cpu_atom/cycles/,0,100.00,,'
+  PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1)
+if [ "$hybrid2_v" = "cycles=2718281" ]; then
+  ok "perf-capability: a hybrid-PMU positive row is accepted regardless of row order"
+else
+  bad "perf-capability: hybrid-PMU row order changed the verdict: '$hybrid2_v'"
+fi
+# ...while a hybrid box where NO PMU counted is still a failure, not a pass.
+hybrid3_v=$(mkperfshim_raw 0 '<not supported>,,cpu_atom/cycles/,0,100.00,,' '<not counted>,,cpu_core/cycles/,0,100.00,,'
+  PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1); hybrid3_rc=$?
+if [ "$hybrid3_rc" -ne 0 ] && printf '%s' "$hybrid3_v" | grep -q 'counter-not-supported'; then
+  ok "perf-capability: a hybrid box where NO PMU counted still FAILS (counter-not-supported)"
+else
+  bad "perf-capability: an all-unsupported hybrid collection was accepted (rc=$hybrid3_rc, '$hybrid3_v')"
+fi
+
+# 1d-ii. `perf stat` EXITING NON-ZERO is the actual paranoid=4 state — the denial this
+#        whole issue is about — and every shim above exits 0, so the branch shipped
+#        untested: a mutation making it print `cycles=1` and return 0 survived. Drive
+#        it with the real help text a denied perf prints.
+mkperfshim_raw 1 'Error:' 'Access to performance monitoring and observability operations is limited.' \
+  'Consider adjusting /proc/sys/kernel/perf_event_paranoid setting to open' >/dev/null
+denied_v=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1); denied_rc=$?
+if [ "$denied_rc" -ne 0 ] && printf '%s' "$denied_v" | grep -q '^perf-stat-failed rc=1' \
+   && printf '%s' "$denied_v" | grep -qi 'observability operations is limited'; then
+  ok "perf-capability: a DENIED perf (non-zero exit, 'access limited') fails with perf-stat-failed rc=1 + the text"
+else
+  bad "perf-capability: a non-zero perf exit was not surfaced (rc=$denied_rc, '$denied_v')"
+fi
+# 1d-iii. rc 0 with NO output at all: a masked/absent PMU. Must be no-cycles-row, not
+#         a pass (that branch was equally untested).
+empty_v=$(mkperfshim_raw 0 >/dev/null; PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1); empty_rc=$?
+if [ "$empty_rc" -ne 0 ] && printf '%s' "$empty_v" | grep -q 'no-cycles-row'; then
+  ok "perf-capability: rc-0 perf with EMPTY output fails with no-cycles-row"
+else
+  bad "perf-capability: rc-0 perf with empty output was accepted (rc=$empty_rc, '$empty_v')"
+fi
+# 1d-iv. An OVERSIZED/malformed count must fail CLOSED and SILENTLY: `[ 999…9 -le 0 ]`
+#        returns 2 (neither true nor false), so an unvalidated operand fell through to
+#        the VERIFIED return while leaking "integer expression expected" to stderr.
+mkperfshim 99999999999999999999999
+big_out=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>/dev/null); big_rc=$?
+big_err=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1 >/dev/null)
+if [ "$big_rc" -ne 0 ] && printf '%s' "$big_out" | grep -q 'unparseable-count=' && [ -z "$big_err" ]; then
+  ok "perf-capability: an oversized cycle count fails CLOSED as unparseable-count, with no stderr leak"
+else
+  bad "perf-capability: oversized count mishandled (rc=$big_rc, out='$big_out', err='$big_err')"
+fi
+mkperfshim '12x'
+mal_out=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>/dev/null); mal_rc=$?
+mal_err=$(PATH="$perfbin:$PATH" bash "$PERFLIB" --verify 2>&1 >/dev/null)
+if [ "$mal_rc" -ne 0 ] && printf '%s' "$mal_out" | grep -q 'unparseable-count=12x' && [ -z "$mal_err" ]; then
+  ok "perf-capability: a malformed cycle count fails CLOSED as unparseable-count, with no stderr leak"
+else
+  bad "perf-capability: malformed count mishandled (rc=$mal_rc, out='$mal_out', err='$mal_err')"
+fi
+# 1d-v. The idempotency byte-compare must not depend on `diff`: without diffutils
+#       `diff -q` exits 127, which reads as "different" — so every --yes run re-wrote
+#       the file AND then falsely reported it could not write it.
+nodiff="$tmp/nodiff-bin"; mkdir -p "$nodiff"
+for t in bash cat; do s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$nodiff/$t"; done
+nodiff_dir="$tmp/nodiff-sysctl.d"; mkdir -p "$nodiff_dir"
+bash "$PERFLIB" --drop-in >"$nodiff_dir/99-cqlite-perf.conf"
+if PATH="$nodiff" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$nodiff_dir" \
+     bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB" 2>/dev/null; then
+  ok "perf-capability: the idempotency compare works with NO 'diff' binary on PATH"
+else
+  bad "perf-capability: the idempotency compare needs diffutils (a box without it re-writes forever)"
+fi
+
 # ...and it must actually run the per-CPU collection the doctrine mandates.
 if grep -q 'stat .*-C 0' "$PERFSHIM_LOG" && grep -q '\-e cycles' "$PERFSHIM_LOG"; then
   ok "perf-capability: verify runs 'perf stat -C 0 -e cycles' (per-CPU, as doctrine requires)"
@@ -258,7 +462,7 @@ printf '1\n' >"$perf_proc/kptr_restrict"
 mkperfroot "$tmp/perf-root-check"
 mkperfshim 999999
 check_out=$(PATH="$perfshims:$perfbin:$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$perf_sysctl_d" \
+  CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$perf_sysctl_d" CQLITE_PERF_TEST_PRIV_DIR="$perfshims" \
   bash "$tmp/perf-root-check/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 check_rc=$?
 if printf '%s' "$check_out" | grep -q 'Perf profiling capability'; then
@@ -276,14 +480,34 @@ else
   bad "perf section: default run mutated state (rc=$check_rc, dir='$(ls -A "$perf_sysctl_d")', tripwire below)"
   cat "$perftrip"
 fi
-# It must instead PRINT the exact remedy — including the reboot-persistent file and
-# the apply — plus the AC5 posture and the BPF caveat (#3217).
-if printf '%s' "$check_out" | grep -q 'perf-capability.sh --drop-in | sudo tee .*99-cqlite-perf.conf' \
-   && printf '%s' "$check_out" | grep -q 're-run with --yes'; then
-  ok "perf section: prints the exact drop-in remedy line instead of running it"
+# Whatever it DID invoke must be non-interactive: every recorded sudo line begins
+# `sudo -n `, so no code path can sit on a password prompt on an unattended worker.
+check_bare_sudo=$(sudo_perf_offenders "$perftrip")
+if grep -q '^sudo -n true$' "$perftrip" && [ -z "$check_bare_sudo" ]; then
+  ok "perf section: the default run's sudo probe carries -n (never interactive)"
 else
-  bad "perf section: no exact remedy line printed"
+  bad "perf section: a sudo invocation without -n was recorded (or the probe never ran): $(cat "$perftrip")"
+fi
+# It must instead PRINT the exact remedy, and the remedy must WRITE **AND APPLY**: a
+# write-only line leaves the operator with a reboot-persistent file and an
+# unprofileable box until reboot — the very failure the functional verification
+# exists to prevent, on the path most people take (no --yes). Plus the AC5 posture
+# and the BPF caveat (#3217).
+if printf '%s' "$check_out" | grep -q 'perf-capability.sh --drop-in | sudo tee .*99-cqlite-perf.conf >/dev/null && sudo sysctl -q --system' \
+   && printf '%s' "$check_out" | grep -q 're-run with --yes'; then
+  ok "perf section: prints the complete WRITE-AND-APPLY remedy line instead of running it"
+else
+  bad "perf section: the printed remedy is missing the apply (or absent)"
   printf '%s\n' "$check_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+# The PRE-state line is asserted SPECIFICALLY (not just "a line somewhere mentions
+# paranoid-4"): it is the diagnosis an operator reads first, and a later warn line
+# carrying the same token would otherwise satisfy a loose grep.
+if printf '%s\n' "$check_out" | grep -q 'runtime now: perf_event_paranoid=4 kptr_restrict=1 .*gate stamps perf=paranoid-4'; then
+  ok "perf section: the pre-state line reports the ACTUAL /proc values and the token the gate will stamp"
+else
+  bad "perf section: the pre-state line is wrong or missing"
+  printf '%s\n' "$check_out" | grep 'runtime now' || true
 fi
 if printf '%s' "$check_out" | grep -qi 'BPF collectors .* require sudo' \
    && printf '%s' "$check_out" | grep -qi 'never apply it to a shared or multi-tenant host'; then
@@ -340,7 +564,7 @@ mkperfroot "$tmp/perf-root-yes"
 mkperfshim 7777777
 yes_home="$tmp/perf-yes-home"; mkdir -p "$yes_home/.cargo"
 yes_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
-  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 yes_rc=$?
 if [ "$yes_rc" -eq 0 ]; then
@@ -361,6 +585,15 @@ else
   bad "perf section: --yes did not use sudo tee + sysctl --system"
   cat "$yestrip"
 fi
+# ...and EVERY privileged invocation carried `-n`: an unattended worker must never be
+# able to sit on a password prompt, so `PERF_ROOT=(sudo)` (no -n) is a defect even
+# though every functional assert above would still pass.
+yes_bare_sudo=$(sudo_perf_offenders "$yestrip")
+if [ -z "$yes_bare_sudo" ] && grep -q '^sudo -n tee ' "$yestrip" && grep -q '^sudo -n sysctl ' "$yestrip"; then
+  ok "perf section: every --yes privileged call went through 'sudo -n' (write AND apply, never interactive)"
+else
+  bad "perf section: a privileged call did not carry sudo -n: $(cat "$yestrip")"
+fi
 # ORDER: the apply must precede the read-back verdict, and the functional verify
 # must come last (it is the verdict on the whole section).
 yes_perf_block=$(printf '%s\n' "$yes_out" | sed -n '/Perf profiling capability/,/^$/p')
@@ -377,7 +610,7 @@ fi
 # Idempotency: a SECOND --yes run must write nothing (byte-compare no-op).
 : >"$yestrip"
 yes2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
-  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 if printf '%s' "$yes2_out" | grep -q 'drop-in already current' \
    && ! grep -q 'tee .*99-cqlite-perf.conf' "$yestrip"; then
@@ -393,7 +626,7 @@ fi
 #      to AC2: without it, "the check exists" would pass while the box is unusable.
 mkperfshim '<not supported>'
 unsup_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
-  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 unsup_rc=$?
 if printf '%s' "$unsup_out" | grep -q 'perf capability NOT verified' \
@@ -407,7 +640,7 @@ fi
 # 4b. Zero cycles is the virtualised-PMU case — same verdict.
 mkperfshim 0
 zero_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
-  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 if printf '%s' "$zero_out" | grep -q 'perf capability NOT verified' \
    && ! printf '%s' "$zero_out" | grep -q 'perf capability VERIFIED'; then
@@ -416,33 +649,233 @@ else
   bad "perf section: a zero cycle count was accepted as verified"
   printf '%s\n' "$zero_out" | sed -n '/Perf profiling/,/^$/p'
 fi
-# 4c. A box with NO sudo at all: warn + the exact remedy, no write, still exit 0.
+# 4c. A box with NO sudo BINARY: warn + a remedy that actually works there, no write,
+#      still exit 0. The generic `... | sudo tee` line is USELESS on this box, so the
+#      case asserts the root-shell remedy AND the absence of the sudo one — the two
+#      `sudo -n` failure modes (no binary vs needs a password) are different boxes.
 nosudo="$tmp/perf-nosudo"; mkdir -p "$nosudo"
-for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp uname id \
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp id \
          diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find; do
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$nosudo/$t"
 done
+mkuname "$nosudo" Linux
 ln -sf "$perfbin/perf" "$nosudo/perf"
 mkperfshim 5555555
 nosudo_sysctl="$tmp/perf-nosudo.d"; mkdir -p "$nosudo_sysctl"
 nosudo_out=$(PATH="$nosudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
-  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$nosudo_sysctl" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$nosudo_sysctl" CQLITE_PERF_TEST_PRIV_DIR="$nosudo" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 nosudo_rc=$?
 if [ "$nosudo_rc" -eq 0 ] && [ -z "$(ls -A "$nosudo_sysctl")" ] \
-   && printf '%s' "$nosudo_out" | grep -q 'no non-interactive root' \
-   && printf '%s' "$nosudo_out" | grep -q 'sudo tee .*99-cqlite-perf.conf'; then
-  ok "perf section: no-sudo box warns with the exact remedy, writes nothing, exits 0"
+   && printf '%s' "$nosudo_out" | grep -q "no 'sudo' binary on this box" \
+   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*--drop-in > .*99-cqlite-perf.conf && sysctl -q --system' \
+   && ! printf '%s' "$nosudo_out" | grep -q 'sudo tee .*99-cqlite-perf.conf'; then
+  ok "perf section: a box with no sudo BINARY warns + prints the root-shell remedy (never a useless 'sudo tee'), writes nothing, exits 0"
 else
   bad "perf section: no-sudo box mishandled (rc=$nosudo_rc, dir='$(ls -A "$nosudo_sysctl")')"
   printf '%s\n' "$nosudo_out" | sed -n '/Perf profiling/,/^$/p'
 fi
-# 4d. Nothing in this whole suite may have touched the REAL /etc/sysctl.d.
+
+# 4c-ii. A box WITH sudo whose `sudo -n` fails (a password is required) is a DIFFERENT
+#        box: the `sudo tee` line does work there, interactively. Bootstrap must say so
+#        and must still never prompt.
+pwsudo="$tmp/perf-pwsudo"; mkdir -p "$pwsudo"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp id \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$pwsudo/$t"
+done
+mkuname "$pwsudo" Linux
+ln -sf "$perfbin/perf" "$pwsudo/perf"
+pwtrip="$tmp/perf-pwsudo-tripwire.log"; : >"$pwtrip"
+cat >"$pwsudo/sudo" <<EOF
+#!/usr/bin/env bash
+echo "sudo \$*" >>"$pwtrip"
+exit 1
+EOF
+chmod +x "$pwsudo/sudo"
+pwsudo_sysctl="$tmp/perf-pwsudo.d"; mkdir -p "$pwsudo_sysctl"
+pwsudo_out=$(PATH="$pwsudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$pwsudo_sysctl" CQLITE_PERF_TEST_PRIV_DIR="$pwsudo" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+pwsudo_rc=$?
+if [ "$pwsudo_rc" -eq 0 ] && [ -z "$(ls -A "$pwsudo_sysctl")" ] \
+   && printf '%s' "$pwsudo_out" | grep -q 'sudo needs a password' \
+   && printf '%s' "$pwsudo_out" | grep -q 'sudo tee .*99-cqlite-perf.conf.*&& sudo sysctl -q --system' \
+   && ! printf '%s' "$pwsudo_out" | grep -q "no 'sudo' binary"; then
+  ok "perf section: a password-requiring sudo is diagnosed distinctly (not 'no sudo binary') with the interactive remedy, writes nothing, exits 0"
+else
+  bad "perf section: password-requiring sudo mishandled (rc=$pwsudo_rc, dir='$(ls -A "$pwsudo_sysctl")')"
+  printf '%s\n' "$pwsudo_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+# Whatever it invoked, it must have been non-interactive: EVERY recorded sudo line
+# begins `sudo -n `, so no code path can sit on a password prompt on a worker.
+pw_bad_sudo=$(sudo_perf_offenders "$pwtrip")
+if grep -q '^sudo -n true$' "$pwtrip" && [ -z "$pw_bad_sudo" ]; then
+  ok "perf section: every sudo invocation carries -n (never interactive)"
+else
+  bad "perf section: a sudo invocation without -n was recorded (or none at all): $(cat "$pwtrip")"
+fi
+
+# 4d. THE SILENT REVERT — the real-world trap this whole issue exists to fix, and so
+#      the path that must be best-tested. `sysctl` exits 0 while the value does NOT
+#      take (container, read-only /proc, a later-sorting drop-in or /etc/sysctl.conf
+#      winning), so the verdict may never come from the apply's return code. Here the
+#      sysctl shim succeeds but does NOT touch the fake procfs, and perf is DENIED
+#      (non-zero, as a real paranoid-4 box denies it): bootstrap must warn "did NOT
+#      take", must NOT claim a READ BACK, and must NOT claim VERIFIED — while still
+#      exiting 0. Trusting sysctl's rc keeps every other case green.
+revert_proc="$tmp/perf-proc-revert"; mkdir -p "$revert_proc"
+printf '4\n' >"$revert_proc/perf_event_paranoid"
+printf '1\n' >"$revert_proc/kptr_restrict"
+revert_shims="$tmp/perf-revert-shims"; mkdir -p "$revert_shims"
+revert_trip="$tmp/perf-revert-tripwire.log"; : >"$revert_trip"
+cat >"$revert_shims/sudo" <<EOF
+#!/usr/bin/env bash
+echo "sudo \$*" >>"$revert_trip"
+while [ "\${1:-}" = "-n" ]; do shift; done
+exec "\$@"
+EOF
+cat >"$revert_shims/sysctl" <<EOF
+#!/usr/bin/env bash
+echo "sysctl \$*" >>"$revert_trip"
+exit 0
+EOF
+for t in apt-get apt dnf yum pacman; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$revert_shims/$t"
+done
+chmod +x "$revert_shims"/*
+revert_sysctl_d="$tmp/perf-revert.d"; mkdir -p "$revert_sysctl_d"
+mkperfshim_raw 1 'Error:' 'Access to performance monitoring and observability operations is limited.'
+revert_out=$(PATH="$revert_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$revert_sysctl_d" CQLITE_PERF_TEST_PRIV_DIR="$revert_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+revert_rc=$?
+if [ "$revert_rc" -eq 0 ] \
+   && printf '%s' "$revert_out" | grep -q 'the value did NOT take' \
+   && printf '%s' "$revert_out" | grep -q 'perf=paranoid-4' \
+   && ! printf '%s' "$revert_out" | grep -q 'READ BACK from /proc' \
+   && ! printf '%s' "$revert_out" | grep -q 'perf capability VERIFIED' \
+   && grep -q 'sysctl -q --system' "$revert_trip"; then
+  ok "perf section: a sysctl that exits 0 without the value taking is reported as 'did NOT take' from /proc (no READ BACK, no VERIFIED), rc 0"
+else
+  bad "perf section: the silent revert was not caught (rc=$revert_rc)"
+  printf '%s\n' "$revert_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+# ...and the diagnostics must name /etc/sysctl.conf, which BOTH `sysctl --system` and
+# systemd-sysctl apply AFTER the sysctl.d drop-ins — so a stale entry there beats our
+# 99- file and is the likeliest cause of exactly this state.
+if printf '%s' "$revert_out" | grep -q '/etc/sysctl.conf' \
+   && printf '%s' "$revert_out" | grep -qi 'applied AFTER the sysctl.d drop-ins'; then
+  ok "perf section: the did-NOT-take diagnostics name /etc/sysctl.conf and its precedence over the drop-ins"
+else
+  bad "perf section: diagnostics omit the /etc/sysctl.conf precedence trap"
+fi
+
+# 4d-ii. CHECK mode with the drop-in already on disk but the runtime NOT profileable:
+#         the apply was only PRINTED, so bootstrap must NOT claim it was applied, and
+#         must still WARN (this branch was previously unreachable — the mismatch
+#         produced no [warn] at all and counted no WARNING).
+checkapply_d="$tmp/perf-checkapply.d"; mkdir -p "$checkapply_d"
+bash "$PERFLIB" --drop-in >"$checkapply_d/99-cqlite-perf.conf"
+checkapply_trip="$tmp/perf-checkapply-tripwire.log"; : >"$checkapply_trip"
+checkapply_shims="$tmp/perf-checkapply-shims"; mkdir -p "$checkapply_shims"
+for t in sudo sysctl tee; do
+  cat >"$checkapply_shims/$t" <<EOF
+#!/usr/bin/env bash
+echo "$t \$*" >>"$checkapply_trip"
+exit 0
+EOF
+done
+chmod +x "$checkapply_shims"/*
+mkperfshim 4242
+checkapply_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$checkapply_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+checkapply_rc=$?
+checkapply_mutating=$(grep -vE '^sudo -n true$' "$checkapply_trip" | grep -E '^(sudo|sysctl|tee) ' | head -5)
+if [ "$checkapply_rc" -eq 0 ] \
+   && printf '%s' "$checkapply_out" | grep -q 'drop-in already current' \
+   && printf '%s' "$checkapply_out" | grep -q 'has NOT been applied to the running kernel' \
+   && ! printf '%s' "$checkapply_out" | grep -q 'READ BACK from /proc' \
+   && ! printf '%s' "$checkapply_out" | grep -q 'sysctl --system reported success' \
+   && [ -z "$checkapply_mutating" ]; then
+  ok "perf section: check mode with a current drop-in but a non-ok runtime WARNs that it is not applied (and applies nothing)"
+else
+  bad "perf section: check-mode drop-in/runtime mismatch mishandled (rc=$checkapply_rc, tripwire='$checkapply_mutating')"
+  printf '%s\n' "$checkapply_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 4e. A box with NO `perf` at all must WARN + print the install remedy and STILL exit
+#      0 — bootstrap is the fleet provisioning entry point, so a hard exit here would
+#      break every box without linux-tools. Every other case has perf on PATH, so an
+#      `exit 1` inserted in this branch previously survived the whole suite.
+noperfbox="$tmp/perf-noperfbox"; mkdir -p "$noperfbox"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp id \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find tee; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$noperfbox/$t"
+done
+mkuname "$noperfbox" Linux
+cat >"$noperfbox/sudo" <<EOF
+#!/usr/bin/env bash
+while [ "\${1:-}" = "-n" ]; do shift; done
+exec "\$@"
+EOF
+printf '#!/usr/bin/env bash\nexit 0\n' >"$noperfbox/sysctl"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$noperfbox/apt-get"
+chmod +x "$noperfbox/sudo" "$noperfbox/sysctl" "$noperfbox/apt-get"
+noperfbox_d="$tmp/perf-noperfbox.d"; mkdir -p "$noperfbox_d"
+noperfbox_out=$(PATH="$noperfbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$noperfbox_d" CQLITE_PERF_TEST_PRIV_DIR="$noperfbox" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+noperfbox_rc=$?
+if [ "$noperfbox_rc" -eq 0 ] \
+   && printf '%s' "$noperfbox_out" | grep -q 'perf MISSING' \
+   && printf '%s' "$noperfbox_out" | grep -q 'install perf:.*linux-tools' \
+   && ! printf '%s' "$noperfbox_out" | grep -q 'perf capability VERIFIED'; then
+  ok "perf section: a box with no 'perf' binary warns UNVERIFIED + prints the linux-tools remedy and still exits 0"
+else
+  bad "perf section: missing-perf box mishandled (rc=$noperfbox_rc)"
+  printf '%s\n' "$noperfbox_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 4f. DARWIN no-op: perf_event_paranoid/kptr_restrict are Linux kernel controls, so on
+#      macOS the section must say so, write nothing, and exit 0. Without a `uname`
+#      stub this whole suite was silently Linux-host-only (a Darwin gate host would
+#      have reddened `tooling-tests` on 10 cases while this path had no assertion).
+darwin_dir="$tmp/perf-darwin-bin"; mkdir -p "$darwin_dir"
+mkuname "$darwin_dir" Darwin
+darwin_d="$tmp/perf-darwin.d"; mkdir -p "$darwin_d"
+darwin_trip="$tmp/perf-darwin-tripwire.log"; : >"$darwin_trip"
+for t in sudo sysctl tee; do
+  cat >"$darwin_dir/$t" <<EOF
+#!/usr/bin/env bash
+echo "$t \$*" >>"$darwin_trip"
+exit 0
+EOF
+done
+chmod +x "$darwin_dir"/*
+darwin_out=$(PATH="$darwin_dir:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$darwin_d" CQLITE_PERF_TEST_PRIV_DIR="$darwin_dir" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+darwin_rc=$?
+darwin_mutating=$(grep -vE '^sudo -n true$' "$darwin_trip" | grep -E '^(sudo|sysctl|tee) ' | head -5)
+if [ "$darwin_rc" -eq 0 ] \
+   && printf '%s' "$darwin_out" | grep -q 'nothing to configure on macos' \
+   && [ -z "$(ls -A "$darwin_d")" ] && [ -z "$darwin_mutating" ] \
+   && ! printf '%s' "$darwin_out" | grep -q 'perf capability VERIFIED'; then
+  ok "perf section: on Darwin the section is an explicit no-op — no write, no privileged call, rc 0"
+else
+  bad "perf section: Darwin no-op mishandled (rc=$darwin_rc, dir='$(ls -A "$darwin_d")', tripwire='$darwin_mutating')"
+  printf '%s\n' "$darwin_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 4g. Nothing in this whole suite may have touched the REAL /etc/sysctl.d.
 if [ ! -e /etc/sysctl.d/99-cqlite-perf.conf ] || [ -n "${CQLITE_PERF_ALLOW_REAL_DROPIN:-}" ]; then
   ok "perf section: the suite never created the real /etc/sysctl.d/99-cqlite-perf.conf"
 else
   # Pre-existing on a bootstrapped box is legitimate; only report if WE made it.
-  if [ "$(stat -c %Y /etc/sysctl.d/99-cqlite-perf.conf 2>/dev/null || echo 0)" -gt "$SUITE_START" ]; then
+  # `-nt` against a file stamped at suite start — no GNU-only `stat -c %Y`.
+  if [ /etc/sysctl.d/99-cqlite-perf.conf -nt "$suite_ref" ]; then
     bad "perf section: the suite wrote the REAL /etc/sysctl.d/99-cqlite-perf.conf"
   else
     ok "perf section: the real drop-in pre-dates this suite (not written by it)"

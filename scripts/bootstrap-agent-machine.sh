@@ -406,7 +406,7 @@ else
   # CQLITE_PERF_TEST_MODE=1, and the marker itself forbids a reachable real
   # sudo/sysctl (see scripts/perf-capability.sh).
   if ! perf_capability_env_guard; then
-    warn "perf capability SKIPPED — a test-only env seam is set without a hermetic CQLITE_PERF_TEST_MODE=1 (details on stderr); refusing to run a privileged write against an env-chosen path"
+    warn "perf capability SKIPPED — the test-only env seams are misconfigured (a seam set without CQLITE_PERF_TEST_MODE=1, or test mode with a reachable real sudo/sysctl; details on stderr) — refusing to run a privileged write against an env-chosen path"
     PERF_SECTION_OK=0
   else
     PERF_SECTION_OK=1
