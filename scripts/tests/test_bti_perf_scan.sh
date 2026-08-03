@@ -68,28 +68,34 @@ TBL=multiclustering_table
 # to report success (the gap its sibling had): `fails=0` is necessary but not
 # sufficient, so the floor below asserts the suite actually RAN.
 #
-# This suite has NO SKIPPABLE cases by design -- the fixtures are committed source
-# (absence = FAIL, #3148), a build failure is a FAIL, and the corruption step needs
-# no interpreter -- so there is nothing legitimate to skip and the floor is a plain
-# `passes >= MIN_CASES`. The one BRANCH (build here vs reuse
-# CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the floor is
-# identical on both paths (roborev #3234 F4).
-MIN_CASES=77
+# Nothing here may be skipped for a MISSING DEPENDENCY -- the fixtures are committed
+# source (absence = FAIL, #3148), a build failure is a FAIL, and the corruption step needs
+# no interpreter. Exactly ONE case is conditional, and not on a dependency: the
+# unobservable-entry control (roborev #3234 round-12 F1) drops `x` from a directory, which
+# a uid-0 process bypasses, so as root it is DECLARED SKIPPED and its case count credited
+# against the floor rather than reported as a pass it did not earn. The one BRANCH (build
+# here vs reuse CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the
+# floor is identical on both paths (roborev #3234 F4).
+MIN_CASES=92
+# The case count of that one conditional block, so the floor is identical as root.
+SKIP_UID0_CASES=2
 
 fails=0
 passes=0
+skipped_cases=0
 pass() { echo "ok   - $1"; passes=$((passes + 1)); }
 fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 summary() {
   echo
-  if [ "$passes" -lt "$MIN_CASES" ]; then
-    echo "FAIL - case-count floor: only $passes case(s) ran, under the $MIN_CASES this suite" \
-      "declares (and it declares no skippable cases). A suite that stopped running cases must" \
-      "not report success."
+  if [ "$((passes + skipped_cases))" -lt "$MIN_CASES" ]; then
+    echo "FAIL - case-count floor: $passes case(s) ran + $skipped_cases declared skipped =" \
+      "$((passes + skipped_cases)), under the $MIN_CASES this suite declares. A suite that" \
+      "stopped running cases must not report success."
     fails=$((fails + 1))
   fi
-  echo "test_bti_perf_scan: passes=$passes fails=$fails (declared floor $MIN_CASES)"
+  echo "test_bti_perf_scan: passes=$passes fails=$fails skipped-cases=$skipped_cases" \
+    "(declared floor $MIN_CASES)"
   if [ "$fails" -eq 0 ]; then
     echo "test_bti_perf_scan: ALL PASS ($passes cases)"
     exit 0
@@ -138,7 +144,9 @@ fi
 
 TMP="$(mktemp -d)"
 # shellcheck disable=SC2317  # invoked indirectly by the EXIT trap below
-cleanup() { rm -rf "$TMP"; }
+# One case below drops `x` from a corpus directory (the unobservable-entry control), and
+# `rm -rf` cannot descend into that, so put the bits back first.
+cleanup() { chmod -R u+rwX "$TMP" 2>/dev/null || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
 # Build the throwaway corpora the cases run against, in the layout the
@@ -180,6 +188,35 @@ cp -r "$FIXTURE_DIR" "$EXTEND/sstables/$KS/$TBL-backup"
 EMPTY="$TMP/empty"
 mkdir -p "$EMPTY/sstables/$KS/$(basename "$FIXTURE_DIR")"
 cp "$FIXTURE_SCHEMA" "$EMPTY/schema.cql"
+
+# --- entries named `*-Data.db` that are NOT regular files (roborev #3234 round-12 F1) ---
+# `count_generations` counted by NAME alone, so a DIRECTORY or a SYMLINK named
+# `da-<n>-bti-Data.db` was counted as a generation. That number is not decoration: it is
+# printed as `generations:` and it SELECTS the reported route
+# (`generations > 1 && schema_resolved` => generation_merge::stream_generations_for_read).
+# Measured on the pre-fix binary, one of each beside the single real generation made the
+# harness report `generations: 3` and attribute its own figure to the multi-generation
+# merge route -- while `rows_scanned` stayed 468 and the exit code stayed 0, i.e. the
+# instrument misreporting its own measurement with every other assert green. One corpus
+# per kind, so each is observed on its own.
+NONREG_DIR="$(mk_corpus nonreg-dir)"
+mkdir -p "$NONREG_DIR/sstables/$KS/$FIXTURE_BASE/da-9-bti-Data.db"
+NONREG_LINK="$(mk_corpus nonreg-link)"
+ln -s "$NONREG_LINK/sstables/$KS/$FIXTURE_BASE/da-2-bti-Data.db" \
+  "$NONREG_LINK/sstables/$KS/$FIXTURE_BASE/da-8-bti-Data.db"
+# A SYMLINKED table directory: `<table>-<32 hex>` by name, but not a directory Cassandra
+# wrote, and resolving it would measure bytes from outside the corpus. It must not be a
+# candidate at all, so the root reads as EMPTY rather than as one measurable generation.
+LINKTBL="$TMP/linktbl"
+mkdir -p "$LINKTBL/sstables/$KS"
+cp "$FIXTURE_SCHEMA" "$LINKTBL/schema.cql"
+ln -s "$FIXTURE_DIR" "$LINKTBL/sstables/$KS/$FIXTURE_BASE"
+# An entry whose TYPE CANNOT BE OBSERVED: the table directory keeps `r` (so read_dir
+# still lists it) and loses `x` (so lstat of every child fails with EACCES). `flatten()`
+# and a name-only filter both SWALLOW that -- the count silently shrinks -- and a
+# generation count this run cannot stand behind must refuse instead.
+UNREADABLE="$(mk_corpus unreadable)"
+UNREADABLE_DIR="$UNREADABLE/sstables/$KS/$FIXTURE_BASE"
 
 # Corrupt the middle of the LZ4-compressed Data.db, leaving every other component
 # intact: the reader OPENS fine and fails while DECODING -- exactly the
@@ -237,6 +274,22 @@ printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":
   "$KS" "$TBL" "$FIXTURE_ROWS" "$FIXTURE_REL" >"$TMP/m-tables-foreign.json"
 printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":"nope"}\n' \
   "$KS" "$TBL" "$FIXTURE_ROWS" >"$TMP/m-tables-notarray.json"
+# DUPLICATE `tables[]` records for this table (roborev #3234 round-12 F3). The lookup was
+# `.find()`, so a manifest describing this table TWICE was accepted and the authoritative
+# ingest scope became a function of ARRAY ORDER: the run would measure whichever record
+# came first and never mention the other, which names a different directory and therefore
+# possibly a different generation count and a different scan route. Two shapes, because
+# both must be refused: records that DISAGREE (the order-dependent one) and records that
+# agree (there is still no single authoritative answer, and refusing on the COUNT is what
+# makes the guard independent of what the duplicates happen to say).
+dup_manifest() { # dup_manifest <file> <sstable_dir-a> <sstable_dir-b>
+  printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[' \
+    "$KS" "$TBL" "$FIXTURE_ROWS" >"$1"
+  printf '{"table":"%s","sstable_dir":"%s"},' "$TBL" "$2" >>"$1"
+  printf '{"table":"%s","sstable_dir":"%s"}]}\n' "$TBL" "$3" >>"$1"
+}
+dup_manifest "$TMP/m-dup-diff.json" "$FIXTURE_REL" "sstables/$KS/$TBL-$SECOND_UUID"
+dup_manifest "$TMP/m-dup-same.json" "$FIXTURE_REL" "$FIXTURE_REL"
 # The IN-PROGRESS marker gen-perf-corpus-bti.sh installs in the authoritative manifest
 # position before it mutates a published corpus (roborev #3234 M2). It is well-formed
 # JSON and deliberately carries no keyspace/table/row count, so a harness run over a
@@ -590,10 +643,107 @@ run_case 8 "an sstable_dir naming ANOTHER table is rejected" \
   "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-othertable.json"
 run_case 8 "an sstable_dir naming another KEYSPACE is rejected" \
   "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-otherks.json"
-run_case 8 "a tables[] with no entry for this table refuses to measure" \
-  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-tables-foreign.json"
+if run_case 8 "a tables[] with no entry for this table refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-tables-foreign.json"; then
+  if grep -q "\`tables\[\]\` has no entry for \`$TBL\`" <<<"$out"; then
+    pass "the missing-record refusal names the table it looked for"
+  else
+    fail "expected a 'has no entry for' diagnosis; got: $(tail -3 <<<"$out")"
+  fi
+fi
 run_case 8 "a tables that is not an array refuses to measure" \
   "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-tables-notarray.json"
+
+# --- EXACTLY ONE `tables[]` record, not "the first" (roborev #3234 round-12 F3) --------
+# `.find()` resolved the ingest scope from whichever duplicate came first in the array.
+if run_case 8 "DUPLICATE tables[] records for this table (different dirs) refuse to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-dup-diff.json"; then
+  if grep -q "has 2 entries for \`$TBL\`" <<<"$out" && grep -q "array ORDER" <<<"$out" \
+    && grep -q "$TBL-$SECOND_UUID" <<<"$out"; then
+    pass "the duplicate refusal names the COUNT, the order-dependence and both dirs"
+  else
+    fail "expected a '2 entries for' diagnosis naming both dirs; got: $(tail -4 <<<"$out")"
+  fi
+fi
+if run_case 8 "duplicate tables[] records that AGREE are refused too (it is the count)" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-dup-same.json"; then
+  if grep -q "has 2 entries for \`$TBL\`" <<<"$out"; then
+    pass "agreeing duplicates are refused on the count, not resolved because they match"
+  else
+    fail "expected the same '2 entries for' refusal for agreeing duplicates; got: $(tail -3 <<<"$out")"
+  fi
+fi
+# The positive control for both: the COMMITTED production manifest has exactly ONE
+# `tables[]` record, so it must still resolve -- the refusal it earns here is the
+# keyspace/table mismatch (this corpus is test_da), which is only reachable AFTER the
+# record resolved. A duplicate/missing refusal instead would mean the real manifest no
+# longer parses.
+if run_case 8 "the COMMITTED manifest's tables[] still resolves to exactly one record" \
+  "${SCAN_GOOD[@]}" --no-min-seconds \
+  --manifest "$REPO_ROOT/test-data/perf-corpus-bti-manifest.json"; then
+  if grep -q "describes perf_bti.wide_multiclustering" <<<"$out" \
+    && ! grep -q "tables\[\]" <<<"$out"; then
+    pass "the committed manifest reaches the keyspace check (no tables[] refusal)"
+  else
+    fail "the committed manifest must fail on the keyspace, not on tables[]; got: $(tail -3 <<<"$out")"
+  fi
+fi
+
+# --- `*-Data.db` entries that are NOT regular files (roborev #3234 round-12 F1) --------
+# Asserted on the OBSERVED generation count and on the ROUTE derived from it, never on a
+# log line: on the pre-fix binary these two corpora reported `generations: 3` and named
+# generation_merge::stream_generations_for_read, with rows_scanned 468 and exit 0.
+nonreg_counts_ok() { # nonreg_counts_ok <label>
+  if grep -qE "^generations: +1\$" <<<"$out" \
+    && grep -qE "^rows_scanned: +$FIXTURE_ROWS\$" <<<"$out" \
+    && grep -q "^storage_route:    per-reader SSTableManager::scan_stream" <<<"$out"; then
+    pass "$label: generations: 1, $FIXTURE_ROWS rows, and the single-generation route"
+  else
+    fail "$label: expected generations: 1 + the per-reader route; got: \
+$(grep -E '^(generations|rows_scanned|storage_route):' <<<"$out" | cut -c1-120 | tr '\n' ' ')"
+  fi
+}
+if run_case 0 "a DIRECTORY named da-9-bti-Data.db is not counted as a generation" \
+  --corpus "$NONREG_DIR" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-good.json"; then
+  nonreg_counts_ok "directory named *-Data.db"
+fi
+if run_case 0 "a SYMLINK named da-8-bti-Data.db is not counted as a generation" \
+  --corpus "$NONREG_LINK" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-good.json"; then
+  nonreg_counts_ok "symlink named *-Data.db"
+fi
+# A SYMLINKED table directory is not a candidate directory either.
+if run_case 3 "a SYMLINKED <table>-<uuid> directory is not a measurable corpus dir" \
+  --corpus "$LINKTBL" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-good.json"; then
+  if grep -q "no \`$TBL-<uuid>\` directory under" <<<"$out"; then
+    pass "the symlinked table directory was not a candidate at all"
+  else
+    fail "expected a 'no <table>-<uuid> directory' refusal; got: $(tail -3 <<<"$out")"
+  fi
+fi
+# An entry whose type cannot be OBSERVED must be an ERROR, not a silently smaller count.
+# A permission control cannot be constructed against a process that bypasses permission
+# checks, so as root this case is DECLARED SKIPPED (and credited against the floor) rather
+# than reported as a pass it did not earn.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "SKIP - the unobservable-entry control needs a process that permission bits apply to (running as uid 0)"
+  skipped_cases=$((skipped_cases + SKIP_UID0_CASES))
+else
+  chmod a-x "$UNREADABLE_DIR"
+  if run_case 3 "an entry whose type cannot be lstat'ed REFUSES instead of counting short" \
+    --corpus "$UNREADABLE" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+    --manifest "$TMP/m-good.json"; then
+    if grep -q "cannot determine what " <<<"$out" \
+      && grep -q "da-2-bti-Data.db" <<<"$out"; then
+      pass "the refusal names the entry it could not classify"
+    else
+      fail "expected an lstat-failure diagnosis naming the entry; got: $(tail -3 <<<"$out")"
+    fi
+  fi
+  chmod u+x "$UNREADABLE_DIR"
+fi
 
 # --------------------- the IN-PROGRESS marker (roborev #3234 M2) ---------------
 # The generator vacates the authoritative manifest position BEFORE it mutates a

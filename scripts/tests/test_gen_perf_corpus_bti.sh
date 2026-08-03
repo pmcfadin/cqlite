@@ -101,7 +101,7 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # the EXACT full-suite pass count (not a slack lower bound), so deleting or
 # short-circuiting any single case drops `passes` below it and reds the suite. Proven
 # by mutation, not by inspection (see the header note on the roborev M1 finding).
-MIN_CASES=154
+MIN_CASES=158
 SKIP_PY_CASES=64
 SKIP_E2E_CASES=27
 
@@ -600,6 +600,65 @@ if [ "$rc" -ne 0 ] && grep -q "AC1: non-BTI descriptor" <<<"$out"; then
   pass "--verify-only HARD-FAILS on an nb-* descriptor (AC1)"
 else
   fail "AC1 nb-* case: expected a hard failure (rc=$rc, out: $out)"
+fi
+
+# --- AC1, the NON-Data half: a MALFORMED `da` descriptor (roborev #3234 round-12 F2) ---
+# The foreign-descriptor check globbed `da-*-bti-*`, which ACCEPTS
+# `da-x-bti-Statistics.db`: a descriptor with a NON-NUMERIC generation, which Cassandra
+# never wrote. The numeric test lived only on the discovered `*-Data.db` files, so
+# --verify-only could print VERIFY-OK over a corpus carrying a malformed non-Data
+# component -- the verifier passing a corpus it had not verified. Every component
+# basename is now checked against `^da-[0-9]+-bti-`, whatever component it names, so
+# both halves (Data.db and everything else) get the same rule.
+root="$TMP/malformed-nondata"
+d="$root/sstables/perf_bti/wide_multiclustering-d123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096
+truncate -s 64 "$d/da-x-bti-Statistics.db"
+out=$(verify "$root"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'AC1: malformed `da` descriptor' <<<"$out" \
+   && grep -q "da-x-bti-Statistics.db" <<<"$out" && ! grep -q "VERIFY-OK" <<<"$out"; then
+  pass "--verify-only HARD-FAILS on a malformed NON-Data descriptor (da-x-bti-Statistics.db)"
+else
+  fail "malformed non-Data descriptor: expected a hard failure naming it, no VERIFY-OK (rc=$rc, out: $out)"
+fi
+# The same rule reaches Data.db itself, so the two halves cannot drift apart again.
+root="$TMP/malformed-data"
+d="$root/sstables/perf_bti/wide_multiclustering-e123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096
+truncate -s 64 "$d/da-x-bti-Data.db"
+out=$(verify "$root"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'AC1: malformed `da` descriptor' <<<"$out" \
+   && grep -q "da-x-bti-Data.db" <<<"$out" && ! grep -q "VERIFY-OK" <<<"$out"; then
+  pass "--verify-only HARD-FAILS on a malformed Data.db descriptor by the SAME rule"
+else
+  fail "malformed Data.db descriptor: expected the malformed-descriptor failure (rc=$rc, out: $out)"
+fi
+# ...and a file that is no descriptor at all. The old check only looked at `*.db`, so a
+# non-component file hid behind any other extension.
+root="$TMP/strayfile"
+d="$root/sstables/perf_bti/wide_multiclustering-f123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096
+printf 'not a component\n' >"$d/notes.txt"
+out=$(verify "$root"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "AC1: non-BTI descriptor(s) or stray file(s)" <<<"$out" \
+   && grep -q "notes.txt" <<<"$out" && ! grep -q "VERIFY-OK" <<<"$out"; then
+  pass "--verify-only HARD-FAILS on a stray non-descriptor file in the SSTable dir"
+else
+  fail "stray-file case: expected a hard failure naming notes.txt (rc=$rc, out: $out)"
+fi
+# The one legitimate non-descriptor file: the schema install_schema() copies BESIDE the
+# components. The production corpus carries it, so exempting it is load-bearing -- and a
+# positive control is the only thing that proves the three refusals above are not simply
+# rejecting everything.
+root="$TMP/schemabeside"
+d="$root/sstables/perf_bti/wide_multiclustering-0223456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096
+printf 'CREATE TABLE perf_bti.wide_multiclustering (pk int PRIMARY KEY);\n' >"$d/schema.cql"
+out=$(verify "$root"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out"; then
+  pass "--verify-only accepts the installed schema.cql beside the components (positive control)"
+else
+  fail "schema-beside-components case: expected VERIFY-OK (rc=$rc, out: $out)"
 fi
 
 # AC2 negative control: an empty Rows.db means no row-index trie to profile.
