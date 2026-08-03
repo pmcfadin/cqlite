@@ -32,11 +32,8 @@
 # `PERF_CAPABILITY_*` constants (nothing runs, no shell options are changed, no variables
 # outside those namespaces are touched). Every function is `set -u` safe.
 #
-# Usage (executed):
-#   bash scripts/perf-capability.sh --token        # free /proc read -> one token
-#   bash scripts/perf-capability.sh --verify       # functional perf stat check
-#   bash scripts/perf-capability.sh --drop-in      # canonical sysctl.d file bytes
-#   bash scripts/perf-capability.sh --drop-in-path # where that file belongs
+# Usage when executed: `bash scripts/perf-capability.sh --help` (the modes are listed by
+# perf_capability_usage below, so they are not duplicated here).
 #
 # TEST-ONLY ENV SEAMS — INERT UNLESS CQLITE_PERF_TEST_MODE=1 (issue #3249 review).
 # The PRODUCTION paths below are HARDCODED LITERALS (/etc/sysctl.d, /proc/sys/kernel) because
@@ -59,22 +56,20 @@
 #                               optional, test mode only
 #   CQLITE_PERF_TEST_PRIV_DIR   absolute dir holding the suite's sudo/sysctl shims
 #
-# POSITIVE CONTAINMENT, NOT A LIST OF FORBIDDEN PLACES (review R6-1/R6-2). Four rounds
-# each closed ONE MORE SPELLING of "the production directory": the raw path (B3), then a
-# symlinked seam, then `..` (R5-1), then `//etc` (R6-1 — POSIX leaves two leading slashes
-# implementation-defined, `pwd -P` may PRESERVE them, and on Linux `//etc` IS `/etc`). A
-# denylist over path spellings cannot be completed — `.`, `..`, symlinks, `//`, trailing
-# slashes, bind mounts, `/proc/self/root/…` all name the same directory — and a scattered
-# set of prohibitions also lets a NEW entry point silently miss them (R6-2). So the rule is
-# INVERTED and there is exactly ONE: a seam is usable IFF it is strictly contained in the
-# declared sandbox root. Every spelling of "somewhere else" — including every future one —
-# fails that single check for the same reason: it is not inside the sandbox.
-# TEST MODE HAS NO FALLBACK (R4-3). Under the marker the sandbox root and BOTH path seams
-# are MANDATORY. The earlier shape — marker set, seam unset, fall back to the real
-# directory — meant test mode could pass the env guard (sudo/sysctl absent, or present as
-# declared shims) and a subsequent root `--yes` run would then invoke a bare `tee` against
-# the REAL /etc/sysctl.d, mutating the host from a test run. "Hermetic" cannot be a claim
-# that depends on a variable being set: it is enforced here, fail-closed and loudly.
+# POSITIVE CONTAINMENT, NOT A LIST OF FORBIDDEN PLACES (review R6-1/R6-2). Four rounds each
+# closed ONE MORE SPELLING of "the production directory": the raw path (B3), a symlinked seam,
+# `..` (R5-1), then `//etc` (R6-1 — POSIX leaves two leading slashes implementation-defined,
+# `pwd -P` may PRESERVE them, and on Linux `//etc` IS `/etc`). A denylist over path spellings
+# cannot be completed — `.`, `..`, symlinks, `//`, trailing slashes, bind mounts,
+# `/proc/self/root/…` all name the same directory — and scattered prohibitions also let a NEW
+# entry point silently miss them (R6-2). So the rule is INVERTED and there is exactly ONE: a
+# seam is usable IFF it is strictly contained in the declared sandbox root. Every spelling of
+# "somewhere else", including every future one, fails that single check for the same reason.
+# TEST MODE HAS NO FALLBACK (R4-3). Under the marker the sandbox root and BOTH path seams are
+# MANDATORY. The earlier shape — marker set, seam unset, fall back to the real directory —
+# meant test mode could pass the env guard (sudo/sysctl absent, or present as declared shims)
+# and a subsequent root `--yes` run would `tee` the REAL /etc/sysctl.d, mutating the host from
+# a test run. "Hermetic" cannot be a claim that depends on a variable being set.
 
 # FAIL-OPEN AUDIT — every path that can reach a POSITIVE verdict, and what validates it
 # (review round 4; four findings in this file were one defect class: "identity/state unknown
@@ -84,11 +79,11 @@
 #                               both `is_int`-validated AND paranoid <= 0 AND kptr == 0.
 #                               Whitespace trimmed, never TRUNCATED — `0 1` stays malformed.
 #   verify -> cycles=<n>, rc 0  `perf` present, collection rc 0, a cycles row whose count is a
-#                               positive integer by BOTH awk's `^[0-9]+$` and `is_int` +
-#                               `-le 0`. `<not supported>`/`<not counted>`/empty/oversized/
-#                               malformed all return 1.
-#   state = self-unprivileged   `self_uid_into` succeeded (an `id -u` that EXISTS, exits 0,
-#                               prints a validated non-negative int) AND that uid != 0. An
+#                               positive integer by BOTH awk's `^[0-9]+$` and `is_int` + `-le
+#                               0`. `<not supported>`/`<not counted>`/empty/oversized/malformed
+#                               all return 1.
+#   state = self-unprivileged   `self_uid_into` succeeded (an `id -u` that EXISTS, exits 0 and
+#                               prints a validated non-negative int) AND that uid != 0; an
 #                               unusable `id -u` => identity-unknown, rc 1.
 #   state = dropped:setpriv     numeric uid+gid, both validated ints AND both > 0.
 #   state = dropped:runuser     the same numerics PLUS a `SUDO_USER` the passwd database
@@ -102,7 +97,7 @@
 #   dropin_path rc 0            its directory came from `sysctl_dir`, i.e. RESOLVES inside the
 #                               sandbox — the single gate between the bytes and a root `tee`.
 #   dropin_current rc 0         a BYTE-exact compare (trailing newlines included) against the
-#                               generated canonical content, from a read that reached EOF — a
+#                               canonical content from a read that reached EOF — a
 #                               NUL-delimited read is NOT current (R5-3).
 # KNOWN RESIDUALS, deliberately not papered over:
 #   * "dropped:<mech>" asserts the mechanism was INVOKED; it cannot prove the kernel changed
@@ -136,31 +131,25 @@ perf_capability_seam_set() {
 
 # ---- ONE GATE: POSITIVE SANDBOX CONTAINMENT (review R6-1/R6-2) --------------------
 # THE sandbox root is caller-declared (CQLITE_PERF_TEST_SANDBOX) and must PROVE itself: an
-# absolute, canonically spelled, existing directory carrying the stamp file below. The
-# stamp is what makes the declaration unforgeable by environment alone — a stray
-# CQLITE_PERF_TEST_SANDBOX=/etc cannot turn /etc into a sandbox, because the proof lives on
-# the FILESYSTEM and writing it into a system directory already needs the privilege this
-# guard protects. No denylist appears anywhere below: a path is usable because it is
-# provably INSIDE the sandbox, never because it failed to look like somewhere forbidden.
+# absolute, canonically spelled, existing directory carrying the stamp file below. The stamp is
+# what makes the declaration unforgeable by environment alone — a stray
+# CQLITE_PERF_TEST_SANDBOX=/etc cannot turn /etc into a sandbox, because the proof lives on the
+# FILESYSTEM and writing it into a system directory already needs the privilege this guard
+# protects. No denylist appears below: a path is usable because it is provably INSIDE the
+# sandbox, never because it failed to look like somewhere forbidden.
 #
 # FIVE thin functions, ONE predicate — everything ends in perf_capability_path_within:
 #   sandbox_root_into O        the declared root, validated; rc 1 + empty when unproven
 #   path_within P R            THE predicate (below)
-#   sandbox_ok P               FORK-FREE entry point, for the gate's emit-time token chain
-#                              (contractually free of external processes AND command
-#                              substitutions): judges the SPELLING. Sound there because that
-#                              path only READS a caller-chosen file — its contract is "seams
-#                              are honoured only under the test marker, never set in
-#                              production" — so a mis-accepted spelling can at worst make the
-#                              token `absent`/`unknown`; it can never write.
-#   sandbox_ok_resolved P      for every path WRITTEN, or whose CONTENTS are read (host
-#                              configuration): canonicalizes candidate AND root (`.`, `..`,
-#                              symlinked ancestors and a `//`-rooted `pwd -P` answer all
-#                              included), then the SAME predicate. An unenterable path
-#                              resolves to nothing and is refused — fail-closed, and correct
-#                              for a write target, which must exist to be written into.
-#   sandbox_file_ok_resolved F the file form (the optional `sysctl.conf` entry): the PARENT is
-#                              canonicalized and the RESULTING FILE PATH is validated.
+#   sandbox_ok P               FORK-FREE entry point (the gate's emit-time token chain, which
+#                              may not fork): judges the SPELLING — sound there for the reason
+#                              in the fail-open audit's second residual above
+#   sandbox_ok_resolved P      every path WRITTEN, or whose CONTENTS are read: canonicalizes
+#                              candidate AND root, then the SAME predicate. An unenterable
+#                              path resolves to nothing and is refused — fail-closed, and
+#                              correct for a write target, which must exist to be written into
+#   sandbox_file_ok_resolved F the FILE form (the optional `sysctl.conf` entry): judged by
+#                              canonicalizing its PARENT, plus a plain-basename check
 # `cd -P` + `pwd -P` is the canonicalizer: one subshell, no external binary, correct on bash
 # 3.2 (no `realpath`, no `readlink -f` — absent or non-GNU on some supported hosts).
 PERF_CAPABILITY_SANDBOX_STAMP='.cqlite-perf-sandbox'
@@ -193,46 +182,35 @@ perf_capability_sandbox_ok() {
   perf_capability_path_within "${1:-}" "$__pso_root"
 }
 
-# the root CANONICALIZED, so both sides of a resolved containment test are in one form
-perf_capability_sandbox_root_resolved_into() {
-  local __prr_v=''
-  eval "$1="
-  perf_capability_sandbox_root_into __prr_v || return 1
-  __prr_v=$(cd -P -- "$__prr_v" 2>/dev/null && pwd -P) || return 1
-  eval "$1=\${__prr_v%/}"
-}
-
 perf_capability_sandbox_ok_resolved() {
   local __pdr_root='' __pdr_real=''
-  perf_capability_sandbox_root_resolved_into __pdr_root || return 1
+  perf_capability_sandbox_root_into __pdr_root || return 1
+  # BOTH sides canonicalized the same way, so the comparison is between destinations
+  __pdr_root=$(cd -P -- "$__pdr_root" 2>/dev/null && pwd -P) || return 1
   __pdr_real=$(cd -P -- "${1:-/dev/null/never}" 2>/dev/null && pwd -P) || return 1
-  perf_capability_path_within "$__pdr_real" "$__pdr_root"
+  perf_capability_path_within "$__pdr_real" "${__pdr_root%/}"
 }
 
 perf_capability_sandbox_file_ok_resolved() {
-  local __pfr_root='' __pfr_real='' __pfr_base=''
   case "${1:-}" in */?*) ;; *) return 1 ;; esac
-  __pfr_base="${1##*/}"
-  case "$__pfr_base" in ''|.|..) return 1 ;; esac
-  perf_capability_sandbox_root_resolved_into __pfr_root || return 1
-  __pfr_real=$(cd -P -- "${1%/*}" 2>/dev/null && pwd -P) || return 1
-  perf_capability_path_within "${__pfr_real%/}/$__pfr_base" "$__pfr_root"
+  case "${1##*/}" in ''|.|..) return 1 ;; esac
+  # the FILE path is judged by canonicalizing its PARENT: a canonical parent strictly inside
+  # the sandbox puts <parent>/<basename> strictly inside it too, for any plain basename.
+  perf_capability_sandbox_ok_resolved "${1%/*}"
 }
 
-# perf_capability_seam_refusal <VARNAME> <value> <root>: ONE message shape for both
-# mandatory seams. The refusal must NAME the offending seam — that is what makes it
-# actionable — so this is parameterised rather than duplicated per seam.
+# ONE message shape for both mandatory seams: the refusal must NAME the offending seam (that
+# is what makes it actionable), so it is parameterised rather than duplicated per seam.
 perf_capability_seam_refusal() {
   printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 requires %s INSIDE the declared sandbox %s — its RESOLVED destination (. / .. / // / symlinked ancestors and all) must be strictly contained there; got %s. Test mode NEVER falls back to the real directory.\n' \
     "${1:-<seam>}" "'${3:-}'" "'${2:-<unset>}'" >&2
 }
 
 # perf_capability_test_seams_ok: rc 0 iff test mode has a PROVEN sandbox root and BOTH
-# mandatory seams RESOLVING strictly inside it. This is the gate on every privileged
-# action below, so it takes the resolving form: refusing here is what stops a root `--yes`
-# test run from resolving a seam back into the production directory and overwriting the
-# host's own drop-in. Refuses loudly and names what failed, because the failure it
-# prevents is silent otherwise.
+# mandatory seams RESOLVING strictly inside it. This is the gate on every privileged action
+# below, so it takes the resolving form: refusing here is what stops a root `--yes` test run
+# from resolving a seam back into the production directory and overwriting the host's own
+# drop-in. It refuses loudly, because the failure it prevents is silent otherwise.
 perf_capability_test_seams_ok() {
   local ok=0 root=''
   if ! perf_capability_sandbox_root_into root; then
@@ -274,8 +252,8 @@ perf_capability_env_guard() {
       *) printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 with a reachable real %s and no absolute CQLITE_PERF_TEST_PRIV_DIR — test mode must PATH-shim every privileged tool.\n' "$tool" >&2
          return 1 ;;
     esac
-    # The same containment predicate as the seams, one level down: the tool must be
-    # strictly inside the DECLARED shim dir (not merely spelled that way).
+    # The seams' containment predicate, one level down: the tool must be strictly inside the
+    # DECLARED shim dir, not merely spelled that way.
     perf_capability_path_within "$resolved" "${dir%/}" || {
       printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 but %s resolves to %s, outside the declared shim dir %s — test mode may never invoke a real privileged tool.\n' \
         "$tool" "$resolved" "$dir" >&2
@@ -319,11 +297,10 @@ perf_capability_proc_dir() {
   perf_capability_proc_dir_into __pcd_v || return 1
   printf '%s' "$__pcd_v"
 }
-# perf_capability_sysctl_dir: the sysctl.d directory — the WRITE side (a root `tee` is
-# pointed inside it) and the directory whose CONTENTS the competing-file scan reads, so it
-# takes the RESOLVING gate: the canonical DESTINATION is what gets written, not the
-# spelling. Every consumer of the sysctl.d location goes through this one function, so
-# there is exactly one place the check can be forgotten — and it is here.
+# perf_capability_sysctl_dir: the sysctl.d directory — the WRITE side (a root `tee` is aimed
+# inside it) and the directory whose CONTENTS the competing-file scan reads, so it takes the
+# RESOLVING gate. EVERY consumer of that location comes through this one function, so there is
+# exactly one place the check could be forgotten — and it is here.
 perf_capability_sysctl_dir() {
   if perf_capability_test_mode; then
     perf_capability_sandbox_ok_resolved "${CQLITE_PERF_SYSCTL_DIR:-}" || {
@@ -336,10 +313,10 @@ perf_capability_sysctl_dir() {
   fi
   printf '%s' "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"
 }
-# perf_capability_dropin_path: the path a root `tee` is pointed at. The containment gate
-# lives in perf_capability_sysctl_dir — the single place that directory comes from — and
-# it RESOLVES the destination, so there is deliberately no second copy of the check here:
-# one gate, not a prohibition a future entry point could skip (R6-2).
+# perf_capability_dropin_path: the path a root `tee` is pointed at. Its gate lives in
+# perf_capability_sysctl_dir (the single source of that directory) and RESOLVES the
+# destination, so there is deliberately no second copy here — one gate, not a prohibition a
+# future entry point could skip (R6-2).
 perf_capability_dropin_path() {
   local __pdi_d
   __pdi_d=$(perf_capability_sysctl_dir) || return 1
@@ -430,12 +407,10 @@ perf_capability_dropin_current() {
 # diagnostic exists to end.
 #
 # In TEST MODE the path is the sandbox seam plus the optional colon-separated
-# CQLITE_PERF_SYSCTL_EXTRA_DIRS (lower-precedence stand-ins, in the same descending
-# order): the real /run and /usr/lib are never read, so a case's verdict can never depend
-# on the host's own drop-ins. EVERY entry goes through the SAME RESOLVING gate as the
+# CQLITE_PERF_SYSCTL_EXTRA_DIRS (lower-precedence stand-ins, same descending order): the real
+# /run and /usr/lib are never read. EVERY entry goes through the SAME RESOLVING gate as the
 # write path (R6-2 — this entry point once used the syntactic one, so a symlinked ancestor
-# could point a "sandboxed" scan at the host's real configuration). A `sysctl.conf` entry
-# is a FILE, so its parent is canonicalized and the resulting file path validated.
+# could point a "sandboxed" scan at the host's real configuration).
 perf_capability_sysctl_search_path() {
   local __psp_d __psp_e __psp_ok
   if perf_capability_test_mode; then
@@ -464,9 +439,9 @@ perf_capability_sysctl_search_path() {
                 /lib/sysctl.d /etc/sysctl.conf
 }
 
-# perf_capability_file_sets_controls <path>: rc 0 iff the file ASSIGNS either control.
-# Both spellings sysctl accepts are matched (`kernel.x` and `kernel/x`, sysctl.d(5)) plus
-# the optional leading `-` ignore-failure prefix; a commented-out line assigns nothing.
+# rc 0 iff the file ASSIGNS either control. Both spellings sysctl accepts are matched
+# (`kernel.x` and `kernel/x`, sysctl.d(5)) plus the optional leading `-` ignore-failure
+# prefix; a commented-out line assigns nothing.
 perf_capability_file_sets_controls() {
   grep -Eq '^[[:space:]]*-?kernel[./](perf_event_paranoid|kptr_restrict)[[:space:]]*=' "$1" 2>/dev/null
 }
@@ -528,9 +503,9 @@ perf_capability_competing_files() {
       [ -f "$f" ] || continue   # readable but a directory/socket named *.conf: sysctl reads none
       name="${f##*/}"
       [ "$name" = "$base" ] && continue
-      # MASKING (see the precedence rules above): a higher-precedence directory already
-      # supplied this basename, so sysctl ignores THIS file entirely. Recorded BEFORE the
-      # content test, because a same-named file that sets nothing still masks one that does.
+      # MASKING (precedence rules above): a higher-precedence directory already supplied this
+      # basename, so sysctl ignores THIS file. Recorded BEFORE the content test, because a
+      # same-named file that sets nothing still masks one that does.
       case "$seen" in *"$lf$name$lf"*) continue ;; esac
       seen="$seen$name$lf"
       perf_capability_file_sets_controls "$f" || continue
@@ -576,8 +551,8 @@ perf_capability_proc_read() {
   eval "$__pcr_out=\$__pcr_v"
 }
 
-# perf_capability_proc_value <name>: the stdout form of the read above, for CLI and
-# bootstrap use (NOT the gate path — reading it costs the caller a `$( )`).
+# the stdout form of the read above, for CLI/bootstrap use — NOT the gate path (reading it
+# costs the caller a `$( )`).
 perf_capability_proc_value() {
   local __pcv_v
   perf_capability_proc_read __pcv_v "$1" || return 1
@@ -627,9 +602,8 @@ perf_capability_token_into() {
   eval "$__pct_out=ok"
 }
 
-# perf_capability_token: the stdout form, for the `--token` CLI and bootstrap. NOT the
-# gate path — reading stdout costs the caller a `$( )` fork, which is precisely what
-# the `_into` core above exists to avoid.
+# the stdout form, for the `--token` CLI and bootstrap. NOT the gate path — reading stdout
+# costs the caller the very `$( )` fork the `_into` core above exists to avoid.
 perf_capability_token() {
   local __ptk_v
   perf_capability_token_into __ptk_v
@@ -856,9 +830,9 @@ perf_capability_main() {
     --token)        perf_capability_token; printf '\n' ;;
     --verify)       local v rc=0; v=$(perf_capability_verify) || rc=1; printf '%s\n' "$v"; return $rc ;;
     --verify-unpriv)
-      # Identity-aware form: rc 0 requires BOTH a functional pass AND that the pass
-      # came from an unprivileged identity. A root run with no way to drop privilege
-      # reports its result AND that the result is not evidence about an agent process.
+      # rc 0 requires BOTH a functional pass AND that it came from an unprivileged
+      # identity: a root run with no way to drop privilege reports its result AND that
+      # the result is not evidence about an agent process.
       local pre='' state='' v rc=0 unpriv=0
       perf_capability_drop_prefix_into pre state && unpriv=1
       # shellcheck disable=SC2086  # deliberate split of our own literal prefix tokens
@@ -867,17 +841,16 @@ perf_capability_main() {
       [ "$unpriv" = 1 ] || rc=1
       return $rc ;;
     --drop-in)      perf_capability_dropin_content ;;
-    # rc PROPAGATED, never masked by the trailing newline: under an unsandboxed test
-    # mode the path cannot be resolved at all (R4-3), and a caller must see that as a
-    # failure rather than as an empty-but-successful answer.
+    # rc PROPAGATED, never masked by the trailing newline: an unsandboxed test mode can
+    # resolve no path at all (R4-3), and that is a failure, not an empty success.
     --drop-in-path) perf_capability_dropin_path || return 1; printf '\n' ;;
     -h|--help|'')   perf_capability_usage ;;
     *)              printf 'perf-capability: unknown arg: %s\n' "$1" >&2; perf_capability_usage >&2; return 2 ;;
   esac
 }
 
-# Executed directly (never when sourced): shell options are set HERE, inside the
-# guard, so sourcing can never change a caller's `set` flags.
+# Executed directly (never when sourced): shell options are set HERE, inside the guard, so
+# sourcing can never change a caller's `set` flags.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -uo pipefail
   perf_capability_main "$@"
