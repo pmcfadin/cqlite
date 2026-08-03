@@ -31,7 +31,14 @@ refine_min_severity = ''
 # Minimum severity for reviews in this repo: critical, high, medium, low.
 review_min_severity = ''
 # Filenames or glob patterns to exclude from review diffs for this repo.
-exclude_patterns = ['docs/**', '*.md']
+# '*.jsonl' (issue #3234): every .jsonl in this repo is GENERATED, never human-authored
+# code — sstabledump goldens under test-data/datasets/ and measurement artifacts under
+# docs/reports/ (212 files, 0 exceptions). They are unreviewable by construction, and a
+# single golden is large enough to break review outright: committing a 1.9 MB / 5-line
+# golden pushed the review prompt to 2,262,805 chars against codex's hard ceiling of
+# 1,048,576, failing the round with input_too_large. Excluding them keeps the CODE
+# reviewable; it removes nothing a reviewer could act on.
+exclude_patterns = ['docs/**', '*.md', '*.jsonl']
 # Repo-local directory for temporary oversized diff snapshots.
 snapshot_dir = ''
 # Automatic post-commit review mode for this repo: commit or branch.
