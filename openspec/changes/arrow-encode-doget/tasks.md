@@ -7,11 +7,30 @@ issue #3248.** Stated plainly, with no optimistic framing:
 
 | | |
 |---|---|
-| delivered | **+2.0%** — 213,471 → 217,791 rows/s (median of 10 interleaved rounds per arm) |
-| ratio | 1.560x → **1.529x** (target 1.3x) |
-| AC1 target on that session's control | **256,131 rows/s** |
-| shortfall | **−38,340 rows/s = 15.0% short** |
+| delivered throughput | **ZERO, measured** — see the re-measurement row below |
+| ratio (shipped target, re-measured session) | **1.553x** (target 1.3x) |
+| AC1 target on that session's control | **275,223 rows/s** (control median 357,790) |
+| shortfall | **−44,902 rows/s = 16.3% short** |
 | **AC1 verdict** | **UNMET** — re-anchored to **#3248**; lever 1 routes to **#3231** |
+
+**RE-MEASURED after the review's wire-safety fix (2026-08-03, 8 rounds / 3 arms /
+24 runs — `abc-interleaved-2026-08-03.md` §10).** The review found the
+flight-data target sitting exactly ON `GRPC_DEFAULT_MAX_MESSAGE_BYTES` behind a
+`<=` guard that admitted it; the target moved to 4,063,232 B (ceiling − 64 KiB
+framing reserve − 64 KiB inexactness margin). At the shipped target:
+
+| | |
+|---|---|
+| lever 4 (isolated, `L4P` − `NOTGT`) | **−72 rows/s (−0.03%)**, 4/8 rounds positive — **measured at ZERO** |
+| cumulative (`L4P` − `BASE`) | **−573 rows/s (−0.25%)**, 3/8 rounds positive — also zero |
+| the SUPERSEDED figure | +2.0% / 213,471 → 217,791 rows/s was measured AT the 4 MiB target and is **not** the delivered figure |
+| cycles/row | lever 4' cuts a median 136.9 cycles/row (~0.6%) with rows/s unmoved — **spec R1 forbids reporting that as a win**, and it is not |
+
+**So BOTH landed levers now measure at zero at the shipped target.** Lever 4 is
+retained for **wire safety** (every `data_body` under the reserved ceiling, at a
+capacity/payload ratio of ~1.0 — asserted by
+`cqlite-flight/src/streaming_framing_tests.rs`), lever 6 for being strictly less
+work per batch. Neither is retained on a throughput claim.
 
 **Spec R5 (owner-approved) makes a correctly-measured, correctly-reported
 negative result a satisfying outcome of THIS change. It does not make AC1
@@ -22,9 +41,11 @@ negative result through an optimistic title. The **C** intent audit should recor
 **What the change delivers instead, all of it verifiable:** the committed
 reproduction rig (`tools/ws0-corpus-gen` + `scripts/perf/`), the in-repo
 Arrow-buffer digest oracle, the closed IPC-framing attribution blind spot
-(**313.0 ns/row**, previously attributable to nothing), lever 4 (**+1.7%**,
-9/10 rounds positive), lever 6 (**measured at zero**, recorded as such), the
-cross-session drift finding, and the honest 15.0% gap with its per-run evidence.
+(**313.0 ns/row**, previously attributable to nothing), lever 4 (a **wire-safety**
+lever: bodies provably under the reserved gRPC ceiling; **throughput measured at
+zero** at the shipped target), lever 6 (**measured at zero**, recorded as such),
+the cross-session drift finding — observed TWICE now — and the honest 16.3% gap
+with its per-run evidence.
 
 **The 82% is a COMPLEMENT, not an attribution** (`1,746 − 313 = 1,432.9 ns/row`,
 labeled "array build" from the call graph, **no per-function data inside it**).

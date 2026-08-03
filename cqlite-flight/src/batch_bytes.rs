@@ -403,6 +403,26 @@ pub(crate) const MEASURED_DATA_BODY_BYTES_AT_SUPERSEDED_TARGET: usize = 1_490_00
 /// The arrow-flight encoder's own batch **re-slicing** target, in Arrow buffer
 /// **CAPACITY** bytes (issue #3096, lever 4).
 ///
+/// # This is a WIRE-SAFETY governor. It is NOT a throughput lever.
+///
+/// Stated first because the throughput claim it originally shipped with does not
+/// hold. Re-measured at THIS target over 8 interleaved rounds / 3 arms / 24 runs
+/// against the same corpus and pinning
+/// (`docs/reports/ws0-3096-artifacts/abc-interleaved-2026-08-03.md` §10), stating
+/// the target instead of inheriting arrow-flight's 2 MiB default moves `do_get`
+/// throughput by a paired within-round median of **−72 rows/s (−0.03%)**, 4 of 8
+/// rounds positive, against per-arm spreads of 5.5–9.8% — i.e. **zero**. The
+/// **+4,817 rows/s / +2.3%** recorded when this lever landed was measured at the
+/// SUPERSEDED 4 MiB target and did not reproduce. cycles/row does fall by a median
+/// ~137 (~0.6%) with rows/s unmoved, which spec R1 explicitly forbids reporting as
+/// a gain.
+///
+/// What this constant IS for: keeping every `data_body` under
+/// [`FLIGHT_DATA_RESERVED_CEILING_BYTES`] even at a capacity/payload ratio of ~1.0
+/// (asserted over the real `encode_do_get` in `streaming_framing_tests.rs`), and
+/// stating the producer cap in the encoder's currency so framing is deliberate
+/// rather than inherited.
+///
 /// # Two different governors, two different currencies
 ///
 /// [`DEFAULT_MAX_BATCH_BYTES`] is a **producer-side PAYLOAD cap**: the sum of

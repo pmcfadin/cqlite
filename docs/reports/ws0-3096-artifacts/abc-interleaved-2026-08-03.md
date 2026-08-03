@@ -11,6 +11,21 @@ issue #3248.** Spec R5 (owner-approved) makes a correctly-measured,
 correctly-reported negative result a satisfying outcome of this change; it does
 not make AC1 satisfied, and nothing here is framed as if it did.
 
+> ## SUPERSEDED IN PART — read §10 before quoting any lever-4 number here
+>
+> **Every figure in §§1–7 was measured with the flight-data re-slicing target at
+> 4 MiB.** The #3096 review found that value sat exactly ON
+> `GRPC_DEFAULT_MAX_MESSAGE_BYTES` behind a `<=` guard that admitted it, and the
+> target moved to **4,063,232 B (3.875 MiB)** — ceiling less a 64 KiB framing
+> reserve less a 64 KiB inexactness margin. That changes framing geometry, so
+> lever 4's **+4,817 rows/s / +2.3% / −441 cycles/row is NOT the delivered
+> figure**.
+>
+> **Re-measured at the shipped target (§10, 8 rounds, 3 arms, 24 runs): lever 4
+> measures at ZERO — median −72 rows/s (−0.03%), 4 of 8 rounds positive.** The
+> +2.3% did not reproduce. It is kept here as a measurement AT the superseded
+> target, labelled as such, and it is never restated as delivered.
+
 > **THE ONE RULE THIS RECORD EXISTS TO ENFORCE.** No absolute on this box is
 > reusable across sessions — the *untouched* bare scan drifted **370,134 →
 > 333,206 rows/s (~10%)** within this single delivery. Compare arms only inside
@@ -152,7 +167,7 @@ Notes on the columns:
 
 ---
 
-## 4. Per-arm medians and spreads
+## 4. Per-arm medians and spreads — AT THE SUPERSEDED 4 MiB TARGET
 
 Flight `do_get` (bypass), n = 10 per arm:
 
@@ -178,7 +193,7 @@ round it to 217,792.)*
 
 ---
 
-## 5. Paired within-round attribution — each lever on its own (spec R5)
+## 5. Paired within-round attribution — each lever on its own (spec R5), AT THE SUPERSEDED 4 MiB TARGET
 
 A round's three runs sit within ~5 minutes of each other, so differencing
 **within** a round cancels session drift that the medians cannot. Deltas are
@@ -192,11 +207,13 @@ A round's three runs sit within ~5 minutes of each other, so differencing
 
 Read plainly:
 
-* **Lever 4 (encoder re-slicing target) is a real, small win.** 9 of 10 rounds
-  positive, median **+3,602 rows/s (+1.7%)**. One round negative. Its
-  mechanism is independently verified on message counts, not on throughput
-  alone: `cqlite-flight/src/streaming_framing_tests.rs` drives the real
-  `encode_do_get` and pins the framing.
+* **Lever 4 (encoder re-slicing target) was a real, small win AT THE 4 MiB
+  TARGET.** 9 of 10 rounds positive, median **+3,602 rows/s (+1.7%)**. One round
+  negative. Its mechanism is independently verified on message counts, not on
+  throughput alone: `cqlite-flight/src/streaming_framing_tests.rs` drives the real
+  `encode_do_get` and pins the framing. **At the SHIPPED 3.875 MiB target this
+  gain does NOT reproduce — see §10, where it measures at zero.** The framing
+  mechanism survives; the throughput number does not.
 * **Lever 6 (build the egress Arrow schema once per merge) does not move
   throughput.** 5 of 10 rounds positive, median **−320 rows/s** — indistinguishable
   from noise at this spread, in either direction. It is retained because it is
@@ -207,7 +224,7 @@ Read plainly:
 
 ---
 
-## 6. Conclusion — AC1 is UNMET
+## 6. Conclusion — AC1 is UNMET (at the superseded target; §10 restates it at the shipped one)
 
 | | |
 |---|---|
@@ -318,3 +335,127 @@ Re-derive from a clean checkout:
 cargo run --release -p ws0-corpus-gen --bin ws0-corpus-gen -- --out /data/ws0-3096
 scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096   # per arm, interleaved, rotated
 ```
+
+---
+
+## 10. THE REVIEW RE-MEASUREMENT — lever 4 at the SHIPPED 3.875 MiB target (2026-08-03, 16:19–16:59 UTC)
+
+**Why this session exists.** The #3096 review found
+`FLIGHT_DATA_SIZE_TARGET_BYTES` set to exactly `GRPC_DEFAULT_MAX_MESSAGE_BYTES`
+(4 MiB) behind a `<=` compile-time guard that therefore ADMITTED the one value the
+module declared unsafe. The target is now **derived**: `4,194,304 − 65,536
+(framing reserve) − 65,536 (the encoder's documented inexactness) = 4,063,232 B
+(3.875 MiB)`. Changing the target changes framing geometry, so **§§4–6's lever-4
+numbers stopped being certified** and had to be re-measured rather than
+re-narrated.
+
+### 10.1 Design — three arms, and why the third one is the honest isolation
+
+| | |
+|---|---|
+| `BASE` | `f4f8ce9` release binary — the **same** BASE §1 used, for continuity |
+| `NOTGT` | `HEAD` with the `with_max_flight_data_size` call **REMOVED** (so it inherits arrow-flight 53.4.1's 2 MiB default) |
+| `L4P` | `HEAD` **as shipped**: target 4,063,232 B |
+| reps | 1 rep at a time, **8 rounds per arm**, **24 measured runs** |
+| rotation | arm order rotated per round, period 3: `BASE/NOTGT/L4P` → `NOTGT/L4P/BASE` → `L4P/BASE/NOTGT` → … |
+| drift control | the bare scan in **every** run — and here the `ws0-scan-bench` and `flight-loadgen` binaries are **literally identical** across arms (only `cqlite-flight` is swapped), which is stronger than §1's code-identical control |
+| binary md5 | `BASE` `bd5a7b4c180d6dc25f5c81a0449b3c04`, `NOTGT` `72d5b96a1ac45ceebe5168501aa93bdd`, `L4P` `21823b6e81e9d561da3495a5e177a0a4` — **recorded this time**, closing the §1 rig gap |
+| driver | the COMMITTED rig: `scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --reps 1 --temp warm --arm bypass --no-build`, once per (arm, round) |
+| corpus / pinning / counters | unchanged from §1: `/data/ws0-3096`, server `taskset -c 2,10` (verified siblings), `perf stat -C 2,10` (CPU-WIDE, never `-p`) |
+| prewarm | `ok` on all 24 runs (now recorded per rep in `results.json` — see the nit fix in this same change) |
+
+`NOTGT` is the arm that actually answers the question. `L4P − BASE` also carries
+the split and lever 6; only `L4P − NOTGT` isolates the encoder target with
+everything else byte-identical.
+
+### 10.2 Every per-run number (24 runs)
+
+| round | arm order | arm | `do_get` rows/s | `do_get` cycles/row | `do_get` IPC | control rows/s | control cycles/row |
+|--:|---|---|--:|--:|--:|--:|--:|
+| 1 | BASE/NOTGT/L4P | `BASE` | 232,687 | 24,192 | 1.482 | 359,004 | 18,735 |
+|  |  | `NOTGT` | 214,268 | 25,726 | 1.407 | 355,660 | 18,892 |
+|  |  | `L4P` | 226,364 | 24,468 | 1.471 | 353,920 | 18,986 |
+| 2 | NOTGT/L4P/BASE | `BASE` | 226,913 | 24,686 | 1.470 | 359,225 | 18,809 |
+|  |  | `NOTGT` | 234,987 | 24,050 | 1.488 | 357,025 | 18,897 |
+|  |  | `L4P` | 226,016 | 24,571 | 1.469 | 359,843 | 18,808 |
+| 3 | L4P/BASE/NOTGT | `BASE` | 227,208 | 24,726 | 1.468 | 360,383 | 18,759 |
+|  |  | `NOTGT` | 237,173 | 23,921 | 1.495 | 359,304 | 18,803 |
+|  |  | `L4P` | 236,237 | 23,835 | 1.504 | 358,019 | 18,918 |
+| 4 | BASE/NOTGT/L4P | `BASE` | 236,336 | 24,066 | 1.478 | 357,561 | 18,926 |
+|  |  | `NOTGT` | 235,362 | 24,044 | 1.494 | 355,104 | 19,000 |
+|  |  | `L4P` | 228,402 | 24,323 | 1.483 | 360,405 | 18,766 |
+| 5 | NOTGT/L4P/BASE | `BASE` | 238,692 | 23,931 | 1.487 | 356,295 | 18,956 |
+|  |  | `NOTGT` | 233,935 | 24,164 | 1.484 | 360,100 | 18,793 |
+|  |  | `L4P` | 238,442 | 23,765 | 1.493 | 357,435 | 18,897 |
+| 6 | L4P/BASE/NOTGT | `BASE` | 229,222 | 24,567 | 1.479 | 358,084 | 18,891 |
+|  |  | `NOTGT` | 231,448 | 24,308 | 1.481 | 357,068 | 18,959 |
+|  |  | `L4P` | 232,240 | 24,121 | 1.491 | 357,145 | 18,913 |
+| 7 | BASE/NOTGT/L4P | `BASE` | 233,726 | 24,247 | 1.473 | 358,560 | 18,865 |
+|  |  | `NOTGT` | 228,475 | 23,466 | 1.509 | 359,738 | 18,769 |
+|  |  | `L4P` | 226,017 | 24,108 | 1.486 | 331,886 | 18,766 |
+| 8 | NOTGT/L4P/BASE | `BASE` | 231,802 | 24,299 | 1.473 | 359,482 | 18,718 |
+|  |  | `NOTGT` | 226,646 | 24,312 | 1.476 | 347,355 | 18,796 |
+|  |  | `L4P` | 238,638 | 23,531 | 1.493 | 356,738 | 18,761 |
+
+### 10.3 Per-arm medians and spreads (n = 8 per arm)
+
+| arm | rows/s (median) | spread | cycles/row (median) | spread | IPC |
+|---|--:|--:|--:|--:|--:|
+| `BASE` | **232,245** | 5.1% | **24,273** | 3.3% | 1.476 |
+| `NOTGT` | **232,691** | 9.8% | **24,107** | 9.4% | 1.486 |
+| `L4P` (shipped) | **230,321** | 5.5% | **24,115** | 4.3% | 1.489 |
+
+Bare-scan **drift control**, n = **24**: median **357,790 rows/s**
+(331,886..360,405, spread 8.0%), cycles/row 18,837 (1.5%). The 8.0% is driven by
+ONE run (`L4P-7`, 331,886); over the other 23 the control spread is **3.6%**
+(347,355..360,405, median 358,019). The outlier is **recorded, not trimmed** — it
+stays in every median above. Per-arm control medians agree to within **0.5%**
+(`BASE` 358,782 / `NOTGT` 357,047 / `L4P` 357,290), so no arm effect leaks into
+the control.
+
+### 10.4 Paired within-round attribution
+
+| comparison | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 | positive | median rows/s | median cycles/row |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| **lever 4' isolated** (`L4P` − `NOTGT`) | +12,095 | -8,970 | -937 | -6,960 | +4,508 | +792 | -2,458 | +11,992 | 4/8 | **−72.2 (−0.03%)** | −136.9 |
+| cumulative (`L4P` − `BASE`) | -6,323 | -897 | +9,028 | -7,933 | -249 | +3,018 | -7,709 | +6,835 | 3/8 | **−573.1 (−0.25%)** | −152.1 |
+| no-target vs BASE (`NOTGT` − `BASE`) | -18,419 | +8,073 | +9,965 | -974 | -4,757 | +2,225 | -5,251 | -5,156 | 3/8 | **−2,865.2 (−1.23%)** | −140.2 |
+
+### 10.5 Conclusion, stated plainly
+
+* **Lever 4's throughput gain does NOT survive the wire-safety fix. At the shipped
+  3.875 MiB target it measures at ZERO** — median **−72 rows/s (−0.03%)**, 4 of 8
+  rounds positive, against per-arm spreads of 5.5–9.8%. The recorded **+4,817
+  rows/s / +2.3% / −441 cycles/row was measured AT the superseded 4 MiB target**
+  and is superseded, not re-labelled.
+* **The cumulative figure is also indistinguishable from zero** in this session:
+  `L4P − BASE` median **−573 rows/s (−0.25%)**, 3 of 8 rounds positive. §6's
+  +2.0% belongs to the superseded target.
+* **Lever 4' does cut cycles/row** by a median **136.9 (~0.6%)** with rows/s
+  unmoved. **Spec R1 forbids reporting that as a win** — a profile improvement
+  with unmoved throughput is explicitly not evidence of a gain (the #2877 shape),
+  and it is not claimed as one here.
+* **What lever 4 is retained for is WIRE SAFETY, and secondarily framing** — both
+  positively verified in-repo, not by throughput:
+  `cqlite-flight/src/streaming_framing_tests.rs` drives the real `encode_do_get`
+  and asserts the message counts plus, at a capacity/payload ratio of ~1.0, that
+  **every** emitted `data_body` stays under the reserved ceiling.
+* **AC1 remains UNMET, by a wider margin in this session:** control median
+  357,790 ÷ `do_get` 230,321 = ratio **1.553x**; AC1's target on this session's
+  control is **275,223 rows/s**; shortfall **−44,902 rows/s (−16.3%)**.
+  Re-anchored to **#3248**.
+* **The cross-session rule holds again.** This session's untouched control sits
+  ~7% ABOVE the morning session's (357,790 vs 332,970 rows/s) on the same box over
+  the same bytes, nine hours apart. Second observation, same lesson: compare only
+  within one interleaved session.
+
+**So both landed levers are now measured at zero at the shipped target.** That is
+the honest result, and spec R5 makes a correctly-measured, correctly-reported
+negative result a satisfying outcome of this change. It is not padded, not
+re-narrated, and no number here is laundered.
+
+Machine-readable twin: `abc-interleaved-runs.json` →
+`review_remeasurement_2026_08_03` (design, all 24 runs with binary md5s, per-arm
+medians, the paired deltas, and this conclusion). Per-run raw (`perf` CSVs,
+loadgen JSONL, `results.json`, `summary.txt`): `/data/ws0-arms/session/<ARM>-<n>/`
+— build output, not committed.
