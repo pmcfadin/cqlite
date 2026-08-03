@@ -43,6 +43,22 @@
 # ingested (#3234 F1) -- and against the `<table>-<32 hex>` shape the manifest validator
 # only CLAIMED to require (#3234 F2).
 #
+# Three more groups, each closing a way the harness could MISREPORT its own measurement --
+# i.e. name the wrong corpus or the wrong authority for a published figure (roborev job 27):
+#
+#   B1  manifest-candidate presence is OBSERVED (`symlink_metadata`), never `Path::exists()`:
+#       a dangling symlink / an ENOTDIR parent used to read as "absent" and fall through to
+#       the COMMITTED manifest, which describes a DIFFERENT corpus. MEASURED pre-fix: the
+#       run silently verified against `test-data/perf-corpus-bti-manifest.json`.
+#   B2  the `tables[]` record's `sstable_count` + `sstable_generations` are compared against
+#       the observed descriptors BEFORE scanning. MEASURED pre-fix: a second generation
+#       carrying DUPLICATE logical rows gave `rows_scanned: 468` (row-count assert green),
+#       `generations: 2` and `storage_route: generation_merge::...`, exit 0 -- a PASS for a
+#       corpus the manifest no longer described.
+#   B3  both scope branches require REAL directory components inside the corpus root. MEASURED
+#       pre-fix: an `sstable_dir` symlinked to a directory OUTSIDE the corpus root reported
+#       `RESULT: PASS` over 468 rows read from outside the corpus.
+#
 # HERMETIC, and CHEAP. No perf corpus (the AC3 corpus is ~2 GiB / 13.2 M rows and
 # takes ~2 minutes to scan), no docker, no network, no CQLITE_DATASETS_ROOT, no
 # fetched fixtures. Everything runs against the GIT-COMMITTED BTI (`da`) fixture
@@ -61,6 +77,10 @@ FIXTURE_SCHEMA="$REPO_ROOT/test-data/schemas/multiclustering-table-bti.cql"
 # The fixture's row count, from its committed schema header and its own
 # sstabledump JSONL golden -- Cassandra-written, not a CQLite output.
 FIXTURE_ROWS=468
+# The fixture's ONE generation identifier, from its committed descriptor
+# `da-2-bti-Data.db` (`<version>-<generation>-<format>-Data.db`). A manifest's
+# `sstable_generations` for this directory is exactly this set (roborev job 27 B2).
+FIXTURE_GEN=2
 KS=test_da
 TBL=multiclustering_table
 
@@ -76,7 +96,7 @@ TBL=multiclustering_table
 # against the floor rather than reported as a pass it did not earn. The one BRANCH (build
 # here vs reuse CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the
 # floor is identical on both paths (roborev #3234 F4).
-MIN_CASES=92
+MIN_CASES=127
 # The case count of that one conditional block, so the floor is identical as root.
 SKIP_UID0_CASES=2
 
@@ -218,6 +238,57 @@ ln -s "$FIXTURE_DIR" "$LINKTBL/sstables/$KS/$FIXTURE_BASE"
 UNREADABLE="$(mk_corpus unreadable)"
 UNREADABLE_DIR="$UNREADABLE/sstables/$KS/$FIXTURE_BASE"
 
+# --- roborev job 27 B1: manifest-candidate presence is OBSERVED, not `Path::exists()` ---
+# `exists()` answers FALSE for a path it cannot look at, so a PRESENT-BUT-UNREADABLE
+# corpus-local manifest silently fell through to the COMMITTED one -- which describes a
+# different corpus, so the harness would then verify its row count against a manifest that
+# does not describe the bytes it scanned. Two mechanisms, neither of them permission bits
+# (a uid-0 process bypasses those, so a chmod control proves nothing as root):
+#   * a DANGLING SYMLINK in the corpus-local manifest position, and
+#   * a candidate whose PARENT component is a regular file (ENOTDIR, not ENOENT).
+BROKENMAN="$(mk_corpus broken-manifest)"
+ln -s "$TMP/no-such-manifest-target.json" "$BROKENMAN/manifest-bti-3234.json"
+printf 'this is a file, not a directory\n' >"$TMP/notadir"
+NOTADIR_MANIFEST="$TMP/notadir/manifest-bti-3234.json"
+# The POSITIVE control for both: a corpus-local manifest that is a real regular file must
+# still be SELECTED (and preferred over the committed one).
+LOCALMAN="$(mk_corpus local-manifest)"
+
+# --- roborev job 27 B2: the documented GENERATION SET, compared before scanning ---------
+# An extra generation carrying the SAME logical rows: reconciliation still yields 468, so
+# the row-count assert stays green, while the generation count -- which selects the storage
+# route the AC3 figure is attributed to -- changes. This is the case that PASSED before the
+# fix (measured: `generations: 2`, the multi-generation merge route, exit 0).
+EXTRAGEN="$(mk_corpus extra-gen)"
+for f in "$EXTRAGEN/sstables/$KS/$FIXTURE_BASE/da-$FIXTURE_GEN-bti-"*; do
+  case "$f" in *.jsonl) continue ;; esac
+  cp "$f" "${f/da-$FIXTURE_GEN-bti-/da-3-bti-}"
+done
+# A `*-Data.db` regular file whose descriptor carries no readable generation identifier:
+# the manifest documents WHICH generations, so an unidentifiable one is a refusal.
+BADDESC="$(mk_corpus bad-descriptor)"
+: >"$BADDESC/sstables/$KS/$FIXTURE_BASE/da-x-bti-Data.db"
+
+# --- roborev job 27 B3: REAL directory components, inside the corpus root --------------
+# The documented branch accepted `dir.is_dir()`, which FOLLOWS symlinks, while the fallback
+# branch lstat'ed its table directory -- so a correctly shaped `sstable_dir` could redirect
+# ingestion (and the measurement) OUTSIDE the corpus root.
+#   (a) the documented table directory IS a symlink, to a directory outside the corpus;
+SYMOUT="$TMP/symout"
+mkdir -p "$SYMOUT/sstables/$KS"
+cp "$FIXTURE_SCHEMA" "$SYMOUT/schema.cql"
+ln -s "$FIXTURE_DIR" "$SYMOUT/sstables/$KS/$TBL-$SECOND_UUID"
+#   (b) a symlinked COMPONENT inside the path: `sstables/<keyspace>` is the symlink, and
+#       the table directory under it is real -- so only a per-component check sees it. The
+#       same corpus is run through BOTH branches, because both must refuse.
+SYMCOMP_REAL="$TMP/symcomp-real"
+mkdir -p "$SYMCOMP_REAL"
+cp -r "$FIXTURE_DIR" "$SYMCOMP_REAL/"
+SYMCOMP="$TMP/symcomp"
+mkdir -p "$SYMCOMP/sstables"
+cp "$FIXTURE_SCHEMA" "$SYMCOMP/schema.cql"
+ln -s "$SYMCOMP_REAL" "$SYMCOMP/sstables/$KS"
+
 # Corrupt the middle of the LZ4-compressed Data.db, leaving every other component
 # intact: the reader OPENS fine and fails while DECODING -- exactly the
 # distinction between exit 3 and exit 7. Deterministic (a fixed 0xFF run, not
@@ -237,9 +308,23 @@ printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":0}}\n' "$KS" 
   >"$TMP/m-zero.json"
 # A manifest that documents the directory its counts were read from, the way every
 # generator-written manifest does -- this is what SCOPES ingestion (roborev #3234 M1).
-scoped_manifest() { # scoped_manifest <file> <sstable_dir>
-  printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[{"table":"%s","sstable_dir":"%s"}]}\n' \
-    "$KS" "$TBL" "$FIXTURE_ROWS" "$TBL" "$2" >"$1"
+#
+# It also documents WHICH generations that directory holds (`sstable_count` +
+# `sstable_generations`, roborev job 27 B2). The fixture's one generation is `da-2-bti`, so
+# the documented set is exactly {2}; the reader compares that against the observed
+# `*-Data.db` descriptors BEFORE scanning, because pinning the directory does NOT pin the
+# workload -- see the B2 cases below.
+raw_table_manifest() { # raw_table_manifest <file> <tables[0]-json>
+  printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[%s]}\n' \
+    "$KS" "$TBL" "$FIXTURE_ROWS" "$2" >"$1"
+}
+scoped_manifest_gens() { # scoped_manifest_gens <file> <sstable_dir> <count> <generations-json>
+  raw_table_manifest "$1" \
+    "$(printf '{"table":"%s","sstable_dir":"%s","sstable_count":%s,"sstable_generations":%s}' \
+      "$TBL" "$2" "$3" "$4")"
+}
+scoped_manifest() { # scoped_manifest <file> <sstable_dir>  (the fixture's one generation)
+  scoped_manifest_gens "$1" "$2" 1 "[$FIXTURE_GEN]"
 }
 FIXTURE_REL="sstables/$KS/$(basename "$FIXTURE_DIR")"
 scoped_manifest "$TMP/m-scoped.json" "$FIXTURE_REL"
@@ -268,6 +353,40 @@ scoped_manifest "$TMP/m-scoped-backup.json" "sstables/$KS/$TBL-backup"
 scoped_manifest "$TMP/m-scoped-hex31.json" "sstables/$KS/$TBL-$ID31"
 scoped_manifest "$TMP/m-scoped-hex33.json" "sstables/$KS/$TBL-$ID33"
 scoped_manifest "$TMP/m-scoped-nonhex.json" "sstables/$KS/$TBL-$ID32_NONHEX"
+# --- roborev job 27 B1/B2/B3 manifests -------------------------------------------------
+# B1's positive control: a corpus-local manifest that IS a real regular file must still be
+# selected (and preferred over the committed one), or the strictness above would be refusing
+# everything rather than refusing the unreadable.
+scoped_manifest "$LOCALMAN/manifest-bti-3234.json" "$FIXTURE_REL"
+# B2: what the record says about generations, vs what is on disk. The extra-generation case
+# reuses m-scoped.json (count 1, generations [2]) against the EXTRAGEN corpus.
+scoped_manifest_gens "$TMP/m-gen-missing.json" "$FIXTURE_REL" 2 "[$FIXTURE_GEN,3]"
+scoped_manifest_gens "$TMP/m-gen-swapped.json" "$FIXTURE_REL" 1 "[7]"
+# ...and each way the record can fail to STATE its generation set at all. A `tables[]`
+# record that scopes the measurement without documenting the workload inside that scope
+# cannot gate it, so every one of these is a refusal rather than an ungated pass.
+gen_entry() { # gen_entry <extra-fields-json>  -> one tables[] record for the fixture dir
+  printf '{"table":"%s","sstable_dir":"%s"%s}' "$TBL" "$FIXTURE_REL" "$1"
+}
+raw_table_manifest "$TMP/m-gen-nocount.json" \
+  "$(gen_entry ",\"sstable_generations\":[$FIXTURE_GEN]")"
+raw_table_manifest "$TMP/m-gen-strcount.json" \
+  "$(gen_entry ",\"sstable_count\":\"1\",\"sstable_generations\":[$FIXTURE_GEN]")"
+raw_table_manifest "$TMP/m-gen-zerocount.json" \
+  "$(gen_entry ',"sstable_count":0,"sstable_generations":[]')"
+raw_table_manifest "$TMP/m-gen-nogens.json" "$(gen_entry ',"sstable_count":1')"
+raw_table_manifest "$TMP/m-gen-gensnotarray.json" \
+  "$(gen_entry ',"sstable_count":1,"sstable_generations":"nope"')"
+raw_table_manifest "$TMP/m-gen-genstr.json" \
+  "$(gen_entry ",\"sstable_count\":1,\"sstable_generations\":[\"$FIXTURE_GEN\"]")"
+raw_table_manifest "$TMP/m-gen-lenmismatch.json" \
+  "$(gen_entry ",\"sstable_count\":2,\"sstable_generations\":[$FIXTURE_GEN]")"
+raw_table_manifest "$TMP/m-gen-dup.json" \
+  "$(gen_entry ",\"sstable_count\":2,\"sstable_generations\":[$FIXTURE_GEN,$FIXTURE_GEN]")"
+# B3: a documented `sstable_dir` of exactly the right SHAPE that is a symlink out of the
+# corpus root (the SYMOUT corpus above).
+scoped_manifest "$TMP/m-scoped-symlink.json" "sstables/$KS/$TBL-$SECOND_UUID"
+
 # `tables` present but describing something else / not an array at all: the counts'
 # provenance is then unknown, which is a refusal, not a fall-through.
 printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[{"table":"other","sstable_dir":"%s"}]}\n' \
@@ -285,8 +404,10 @@ printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":
 dup_manifest() { # dup_manifest <file> <sstable_dir-a> <sstable_dir-b>
   printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[' \
     "$KS" "$TBL" "$FIXTURE_ROWS" >"$1"
-  printf '{"table":"%s","sstable_dir":"%s"},' "$TBL" "$2" >>"$1"
-  printf '{"table":"%s","sstable_dir":"%s"}]}\n' "$TBL" "$3" >>"$1"
+  printf '{"table":"%s","sstable_dir":"%s","sstable_count":1,"sstable_generations":[%s]},' \
+    "$TBL" "$2" "$FIXTURE_GEN" >>"$1"
+  printf '{"table":"%s","sstable_dir":"%s","sstable_count":1,"sstable_generations":[%s]}]}\n' \
+    "$TBL" "$3" "$FIXTURE_GEN" >>"$1"
 }
 dup_manifest "$TMP/m-dup-diff.json" "$FIXTURE_REL" "sstables/$KS/$TBL-$SECOND_UUID"
 dup_manifest "$TMP/m-dup-same.json" "$FIXTURE_REL" "$FIXTURE_REL"
@@ -778,5 +899,191 @@ run_case 8 "a cross-check with no rows_per_partition.partitions to check against
 # or the strictness above would be proving nothing.
 run_case 0 "a COMPLETE, agreeing cross-check PASSES (positive control for the nine above)" \
   "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-cross-ok.json"
+
+# ===== roborev job 27 B1: candidate presence is OBSERVED, never `Path::exists()` ========
+# `exists()` is FALSE for a path it cannot look at, so a present-but-unreadable
+# corpus-local manifest silently DEGRADED to the committed fallback -- which describes a
+# DIFFERENT corpus. The measurement would then have been verified against a manifest that
+# does not describe the bytes it scanned. Both cases here exit 8 either way, so what is
+# asserted is the DIAGNOSIS: the unreadable candidate is named, and the run did NOT fall
+# through to the committed manifest (whose refusal names perf_bti.wide_multiclustering).
+if run_case 8 "a DANGLING SYMLINK in the corpus-local manifest position refuses, without falling back" \
+  --corpus "$BROKENMAN" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds; then
+  if grep -q "is PRESENT but is not a regular file" <<<"$out" \
+    && grep -q "symbolic link" <<<"$out" && grep -q "DANGLING" <<<"$out"; then
+    pass "the refusal names the corpus-local candidate as present-but-not-a-regular-file"
+  else
+    fail "expected a present-but-unreadable diagnosis; got: $(tail -3 <<<"$out")"
+  fi
+  if ! grep -q "describes perf_bti.wide_multiclustering" <<<"$out"; then
+    pass "it did NOT fall through to the COMMITTED manifest (the silent-degradation defect)"
+  else
+    fail "the run fell through to the committed manifest: $(tail -3 <<<"$out")"
+  fi
+fi
+# A candidate whose PARENT component is a regular file: ENOTDIR, not ENOENT. `exists()`
+# calls that absent too. (Permission bits would be the obvious mechanism and are NOT used:
+# a uid-0 process bypasses them, so that control would prove nothing as root.)
+if run_case 8 "a candidate whose parent component is a FILE (ENOTDIR) refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$NOTADIR_MANIFEST"; then
+  if grep -q "cannot determine whether this manifest candidate exists" <<<"$out"; then
+    pass "an unobservable candidate is an error, not an absent one"
+  else
+    fail "expected an lstat-failure diagnosis for the candidate; got: $(tail -3 <<<"$out")"
+  fi
+fi
+# The two POSITIVE controls, so the strictness above is not just refusing everything:
+#   * a genuinely ABSENT candidate is still reported as absent and still falls through
+#     (the fall-through itself is proved by the "DEFAULT path consults the committed
+#     manifest" case above, which runs on a corpus that has no manifest of its own), and
+#   * a REAL corpus-local manifest file is still selected, in preference to the committed one.
+if run_case 8 "a genuinely absent candidate is classified as absent (not as unreadable)" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/nope.json"; then
+  if grep -q "nope.json (absent)" <<<"$out" \
+    && ! grep -q "is PRESENT but is not a regular file" <<<"$out"; then
+    pass "absence and unreadability are DISTINCT diagnoses"
+  else
+    fail "expected an '(absent)' classification; got: $(tail -3 <<<"$out")"
+  fi
+fi
+if run_case 0 "a REAL corpus-local manifest is selected in preference to the committed one" \
+  --corpus "$LOCALMAN" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds; then
+  if grep -q "^row_count_assert: $FIXTURE_ROWS (authoritative: $LOCALMAN/manifest-bti-3234.json" \
+    <<<"$out"; then
+    pass "the authority is the corpus's OWN manifest (the first candidate, a regular file)"
+  else
+    fail "expected the corpus-local manifest as the authority; got: $(grep '^row_count_assert' <<<"$out")"
+  fi
+fi
+
+# ===== roborev job 27 B2: the DOCUMENTED generation set, compared before scanning =======
+# Pinning the DIRECTORY is not pinning the WORKLOAD. An extra generation carrying the same
+# logical rows leaves reconciliation yielding $FIXTURE_ROWS -- so the row-count assert is
+# green -- while the generation count changes the merge workload AND the storage route the
+# AC3 figure is attributed to. Measured on the pre-fix binary this corpus reported
+# `generations: 2`, named generation_merge::stream_generations_for_read, and exited 0.
+if run_case 3 "an EXTRA generation holding DUPLICATE rows refuses (the row count cannot see it)" \
+  --corpus "$EXTRAGEN" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-scoped.json"; then
+  if grep -q 'documents `tables\[\].sstable_count` = 1 generation(s)' <<<"$out" \
+    && grep -q 'but 2 `\*-Data.db` generation(s) are present' <<<"$out" \
+    && grep -q "observed generations:   \[$FIXTURE_GEN, 3\]" <<<"$out"; then
+    pass "the refusal names expected-vs-observed counts AND both generation sets"
+  else
+    fail "expected an expected-vs-observed generation diagnosis; got: $(tail -5 <<<"$out")"
+  fi
+fi
+if run_case 3 "a MISSING generation refuses too (the mismatch is symmetric)" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-missing.json"; then
+  if grep -q '= 2 generation(s)' <<<"$out" \
+    && grep -q 'but 1 `\*-Data.db` generation(s) are present' <<<"$out"; then
+    pass "the missing-generation refusal names both counts"
+  else
+    fail "expected a 2-vs-1 generation diagnosis; got: $(tail -5 <<<"$out")"
+  fi
+fi
+# The COUNT alone is not enough: one generation swapped for another preserves it.
+if run_case 3 "the same COUNT with a different generation SET is refused" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-swapped.json"; then
+  if grep -q "documents generations \[7\]" <<<"$out" \
+    && grep -q "the same COUNT, a different SET" <<<"$out"; then
+    pass "the exact identifier set is compared, not just its cardinality"
+  else
+    fail "expected a same-count-different-set diagnosis; got: $(tail -5 <<<"$out")"
+  fi
+fi
+if run_case 3 "a *-Data.db whose descriptor carries no readable generation id is refused" \
+  --corpus "$BADDESC" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-scoped.json"; then
+  if grep -q "readable generation identifier" <<<"$out" \
+    && grep -q "da-x-bti-Data.db" <<<"$out"; then
+    pass "the refusal names the descriptor whose generation could not be read"
+  else
+    fail "expected an unreadable-generation-identifier diagnosis; got: $(tail -4 <<<"$out")"
+  fi
+fi
+# A record that scopes the measurement but does not STATE its generation set cannot gate
+# it, so every malformed/absent form is a refusal (exit 8), never an ungated pass.
+if run_case 8 "a tables[] record with no sstable_count refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-nocount.json"; then
+  if grep -q 'has no `sstable_count`' <<<"$out"; then
+    pass "the refusal names the field the record is missing"
+  else
+    fail "expected a 'has no sstable_count' diagnosis; got: $(tail -3 <<<"$out")"
+  fi
+fi
+run_case 8 "an sstable_count that is not an unsigned integer refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-strcount.json"
+run_case 8 "an sstable_count of 0 refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-zerocount.json"
+run_case 8 "a tables[] record with no sstable_generations refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-nogens.json"
+run_case 8 "an sstable_generations that is not an array refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-gensnotarray.json"
+run_case 8 "a non-integer generation id refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-genstr.json"
+if run_case 8 "an sstable_count disagreeing with len(sstable_generations) refuses" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-lenmismatch.json"; then
+  if grep -q "disagrees with ITSELF" <<<"$out"; then
+    pass "a record inconsistent with itself is refused on that, before any comparison"
+  else
+    fail "expected a self-disagreement diagnosis; got: $(tail -3 <<<"$out")"
+  fi
+fi
+run_case 8 "a DUPLICATE generation id in sstable_generations refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-gen-dup.json"
+# The positive control for all of the above: the fixture corpus, whose ONE generation is
+# exactly what m-scoped.json documents, must still measure and still report `generations: 1`.
+if run_case 0 "a documented generation set that MATCHES the corpus still measures" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped.json"; then
+  if grep -qE "^generations: +1\$" <<<"$out" \
+    && grep -qE "^rows_scanned: +$FIXTURE_ROWS\$" <<<"$out"; then
+    pass "the generation gate passes the corpus its manifest describes (generations: 1)"
+  else
+    fail "expected generations: 1 + $FIXTURE_ROWS rows; got: $(grep -E '^(generations|rows_scanned):' <<<"$out")"
+  fi
+fi
+
+# ===== roborev job 27 B3: REAL directory components, beneath the corpus root ============
+# The documented branch accepted `dir.is_dir()`, which FOLLOWS symlinks, while the fallback
+# branch lstat'ed its table directory: inconsistent hardening, in favour of the branch a
+# MANIFEST controls. So a correctly shaped `sstable_dir` (right keyspace, `<table>-<32 hex>`
+# name) could redirect ingestion -- and the measurement -- outside the corpus root, and
+# exact ingestion canonicalizes through symlinks, so nothing downstream noticed.
+if run_case 3 "a documented sstable_dir that is a SYMLINK out of the corpus root refuses" \
+  --corpus "$SYMOUT" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-scoped-symlink.json"; then
+  if grep -q "is not a directory" <<<"$out" && grep -q "symbolic link" <<<"$out" \
+    && grep -q "$FIXTURE_DIR" <<<"$out"; then
+    pass "the refusal names the symlink AND the directory outside the corpus it points at"
+  else
+    fail "expected a symlinked-scope diagnosis naming the target; got: $(tail -4 <<<"$out")"
+  fi
+fi
+# A symlinked COMPONENT inside the path (`sstables/<keyspace>`), with a REAL table directory
+# under it: only a per-component check sees this. Both branches must refuse it -- the
+# documented one and the sole-directory fallback -- which is the consistency this fix is about.
+if run_case 3 "a SYMLINKED path component refuses in the DOCUMENTED branch" \
+  --corpus "$SYMCOMP" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-scoped.json"; then
+  if grep -q "is not a directory" <<<"$out" && grep -q "symbolic link" <<<"$out" \
+    && grep -q "$SYMCOMP/sstables/$KS" <<<"$out"; then
+    pass "the documented branch names the symlinked component it refused to measure through"
+  else
+    fail "expected a symlinked-component diagnosis; got: $(tail -4 <<<"$out")"
+  fi
+fi
+if run_case 3 "a SYMLINKED path component refuses in the FALLBACK branch too" \
+  --corpus "$SYMCOMP" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-good.json"; then
+  if grep -q "is not a directory" <<<"$out" && grep -q "symbolic link" <<<"$out"; then
+    pass "both branches are equally strict (the inconsistency this finding was about)"
+  else
+    fail "expected the fallback branch to refuse the symlinked component; got: $(tail -4 <<<"$out")"
+  fi
+fi
+# The positive control: an ordinary corpus of REAL directories still resolves in BOTH
+# branches -- proved by every exit-0 case above (m-good.json takes the fallback branch,
+# m-scoped.json the documented one) on the very same fixture layout.
 
 summary
