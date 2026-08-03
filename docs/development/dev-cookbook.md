@@ -55,11 +55,23 @@ bash test-data/scripts/gen-perf-corpus-bti.sh --help              # every flag +
 
 The final line printed is the `export CQLITE_DATASETS_ROOT=<abs>` to use.
 
-**Economics** (measured by the commissioning run on a fleet worker box): **162 B/row on disk** at
-`--payload-bytes 160` with LZ4 `chunk_length_in_kb=16`, and ~34k rows/s end-to-end including CSV
-generation. So ~2 GiB ≈ 13.2 M rows ≈ **~8 min** and ~5 GiB ≈ 33 M rows ≈ **~17 min**, plus ~80 s of
-container boot/restart. `--chunk-rows 500000` gives ~78 MiB per `Data.db`, an order of magnitude over
-the 8 MiB floor.
+**Economics** (measured by the **production** commissioning run on a fleet worker box, 27 chunks →
+1.995 GiB): **162.3 B/row on disk** at `--payload-bytes 160` with LZ4 `chunk_length_in_kb=16`, and
+**~68k rows/s** end-to-end including CSV generation (13.2 M rows loaded in 194 s). Phase breakdown of
+that 7.3-minute run: ~3.2 min of container boot + BTI restart + yaml verification, ~3.2 min of load,
+~40 s of asserts + the one `sstabledump` golden. So ~5 GiB ≈ 33 M rows ≈ **~12 min**.
+`--chunk-rows 500000` gives ~77.4 MiB per `Data.db` (measured largest 81,151,240 B), an order of
+magnitude over the 8 MiB floor; the last chunk is the `--rows` remainder and is smaller (32.4 MiB
+here) but still over the floor.
+
+**`pk` is a CQL `int`, so the chunk count has a hard ceiling.** Chunk *N*'s partition keys start at
+`N * PK_STRIDE`, and the largest key an `int` column can hold is 2,147,483,647. The generator's
+`plan_fits_int32` refuses an over-ceiling `(chunks, chunk-rows)` plan at `--validate-only` time —
+*before* any container starts — because the failure mode otherwise costs a partial multi-GB load: at
+the original 1e9 stride, chunk 3 of 27 began at 3,000,000,000 and `cqlsh COPY` rejected **every** row
+of it (`'i' format requires -2147483648 <= number <= 2147483647`), four minutes and three SSTables
+in, while the 2-chunk `--smoke` run never reached chunk 3. The stride is now 1e6, admitting 2147
+chunks.
 
 **The two mandatory `cassandra.yaml` settings.** A stock Cassandra 5.0 node emits **`nb` (BIG)**,
 because it ships `storage_compatibility_mode: CASSANDRA_4`. Both of these are required, and both
@@ -97,6 +109,31 @@ BIG-only `Index.db`/`Summary.db`; and rows loaded == `Statistics.db` `totalRows`
   ran on the same bytes; catch silent corruption or an accidental replacement), **not** a regeneration
   check. A sha mismatch after regenerating is expected, not a defect.
 
+**Timing a sustained warm scan over it** — `cqlite-core/examples/bti_perf_scan.rs` (committed, so the
+measurement is reproducible). It drives the **bare read path** (`Database::execute_streaming` to
+exhaustion), not the Flight `do_get` plane: per issue #3233 BTI is denied the Flight bypass arm, and a
+criterion bench would spend minutes of warm-up + samples to report a distribution where a profile
+needs one sustained window.
+
+```bash
+cargo build --release -p cqlite-core --example bti_perf_scan --features cli-helpers
+bash test-data/scripts/perf-run-contained.sh --mem 12G --swap 0 -- \
+  ./target/release/examples/bti_perf_scan \
+    --corpus /data/corpus-3234-bti --keyspace perf_bti --table wide_multiclustering \
+    --warm-passes 1 --min-seconds 10 --expect-rows 13200000
+```
+
+It is fail-closed on all three ways a dataset-dependent measurement can lie: zero rows exits `4`
+(never 0), a row count disagreeing with `--expect-rows` exits `5`, and a window under `--min-seconds`
+exits `6` while printing the row count that *would* reach the floor — so an under-sized corpus is
+diagnosed, never silently accepted.
+
+**MEASURED on the 1.995 GiB / 13.2 M-row production corpus** (fleet worker box, warm page cache, one
+discarded warming pass): **125.6 s** wall clock, 13,200,000 rows, **105,073 rows/s** — 12.5× the ≥10 s
+window issue #3234 AC3 asks for, so the window survives even a 10× read-path speed-up. Open cost is
+negligible (27 SSTables discovered in 0.033 s). The two passes agreed to within 1.2 % (127.1 s vs
+125.6 s), which is what confirms the measured pass was steady-state warm rather than fault-bound.
+
 Every number in the manifest is read back from the written bytes (`sstablemetadata` on
 `Statistics.db`, the `CompressionInfo.db` header, each `TOC.txt`) and **nothing is inherited from a
 previous manifest**. A `mode` field marks whether a manifest describes a `smoke` validation run or
@@ -108,7 +145,11 @@ CQLite-written round-trip fixture cannot: both halves make the identical framing
 round-trip closes while real Cassandra-written data reads wrong. Goldens run ~2× the `Data.db` size,
 so only a bounded subset is dumped (`--dump-generations`, default 1) and they live beside the
 (gitignored) corpus — the `git add -f` convention applies to the small `test_da` correctness
-goldens, never to these.
+goldens, never to these. **Measured**: the one golden for a 500k-row generation is 160,752,721 B
+(153.3 MiB), **1.98×** its `Data.db`, with 711 partition lines and exactly 500,000 row objects —
+matching that generation's `Statistics.db` `totalRows` and `partition_count`. At 153 MiB it is far too
+large to commit; regenerate it on demand instead (a *committable* BTI golden means a dedicated small
+table, not a slice of this corpus).
 
 ## CLI
 
