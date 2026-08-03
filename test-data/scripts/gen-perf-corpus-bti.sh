@@ -542,6 +542,35 @@ assert_corpus() {  # $1 = published sstable dir
        component; this is not a BTI SSTable (TOC: $(tr '\n' ' ' <"$toc"))"
       [ ! -f "$dest/$base-$comp" ] || die "AC: $base has a $comp file (BIG-only component present)"
     done
+    # ...and the TOC is only a MANIFEST: every component it lists must EXIST as a
+    # regular file, and the directory must hold no component the TOC does not list
+    # (roborev #3234 M3). This loop used to read the TOC alone, so deleting
+    # Statistics.db, CompressionInfo.db, Partitions.db or Filter.db while leaving the
+    # TOC untouched still printed VERIFY-OK — a fail-closed hole in the verifier
+    # itself, and exactly the shape a half-copied or half-pruned corpus has. Both
+    # directions are checked: a TOC entry with no file is a missing component, a file
+    # with no TOC entry is a component Cassandra will not open.
+    local toc_sorted disk_sorted
+    toc_sorted="$(grep -v '^[[:space:]]*$' "$toc" | sort -u)"
+    while IFS= read -r comp; do
+      [ -n "$comp" ] || continue
+      [ -f "$dest/$base-$comp" ] || die "AC: $base-TOC.txt lists $comp but $base-$comp is
+       not a regular file. The TOC is a manifest, not evidence: a component deleted (or
+       never written) while the TOC still advertises it fails at OPEN time in Cassandra
+       and CQLite, so it must fail HERE. (TOC: $(tr '\n' ' ' <"$toc"))"
+    done <<<"$toc_sorted"
+    # The on-disk component set, excluding the sstabledump goldens (`*-Data.db.jsonl`),
+    # which are derived JSON and deliberately not SSTable components.
+    disk_sorted="$(find "$dest" -maxdepth 1 -type f -name "$base-*" ! -name '*.jsonl' \
+      -printf '%f\n' | sed "s/^$base-//" | sort -u)"
+    if [ "$disk_sorted" != "$toc_sorted" ]; then
+      die "AC: $base component set disagrees with its TOC.txt.
+       TOC lists : $(tr '\n' ' ' <<<"$toc_sorted")
+       on disk   : $(tr '\n' ' ' <<<"$disk_sorted")
+       Both directions are a hard failure: a TOC entry with no file is a missing
+       component, and a component file the TOC does not list is one Cassandra will not
+       open (and one this manifest would not describe)."
+    fi
     log "  [assert] $base: Data.db $sz B, Rows.db $rsz B, TOC ok ($(wc -l <"$toc" | tr -d ' ') components)"
   done
 
