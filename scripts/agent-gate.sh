@@ -118,13 +118,16 @@
 #                      the write-support-gated targets derived from Cargo.toml
 #                      required-features + two self-gated ground-truth targets. New
 #                      files are auto-covered; fails closed on zero targets.
-#   bti-multiclustering  the compound-clustering BTI ('da') lane (issue #3032):
+#   bti-multiclustering  the compound-clustering BTI ('da') lane (issue #3032/#3220):
 #                      issue_3032_multiclustering_rows_trie_shape +
 #                      issue_3032_multiclustering_clustering_slice_select against the
 #                      COMMITTED test_da/multiclustering_table fixture, pinned to
 #                      CQLITE_REQUIRE_FIXTURES=1 so an absent fixture FAILs rather
-#                      than silently skipping. Unconditionally fail-closed (the
-#                      fixture is in git, so it is present in every checkout).
+#                      than silently skipping, PLUS point_vs_full_differential (#3220)
+#                      whose AC6 case compares the point and full READ PATHS over that
+#                      same fixture and is fail-closed by its own must_run assertion.
+#                      Unconditionally fail-closed (the fixtures are in git, so they
+#                      are present in every checkout).
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
@@ -4781,17 +4784,36 @@ run_compaction_byte_parity() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
-# bti-multiclustering: the compound-clustering BTI (`da`) lane (issue #3032). The
-# two targets read the real Cassandra 5.0 `test_da/multiclustering_table` fixture —
-# a 3-component PRIMARY KEY ((pk), bucket, seq) whose Rows.db trie is the only
-# in-corpus oracle for the OSS50 byte-comparable clustering encoding and for the
-# `ClusteringPrefix.Kind` bound markers.
+# bti-multiclustering: the compound-clustering BTI (`da`) lane (issue #3032, extended
+# by #3220). The targets read the real Cassandra 5.0 `test_da/multiclustering_table`
+# fixture — a 3-component PRIMARY KEY ((pk), bucket, seq) whose Rows.db trie is the
+# only in-corpus oracle for the OSS50 byte-comparable clustering encoding and for the
+# `ClusteringPrefix.Kind` bound markers. Coverage:
+#   * issue_3032_multiclustering_rows_trie_shape          (trie/byte shape)
+#   * issue_3032_multiclustering_clustering_slice_select  (SELECT vs JSONL golden)
+#   * point_vs_full_differential                          (#3220: the AC6 point-vs-full
+#     differential case over the SAME fixture — the only lane comparing the two READ
+#     PATHS on a multi-component clustering key)
 #
-# Why a DEDICATED component (issue #3032 roborev B1): both targets self-skip when
-# the fixture is missing, and core-tests runs them WITHOUT CQLITE_REQUIRE_FIXTURES —
-# so a deleted/renamed fixture would turn both into silent green no-ops. This lane
-# pins them to CQLITE_REQUIRE_FIXTURES=1, under which every absence path in both
-# files asserts instead of skipping.
+# Why a DEDICATED component (issue #3032 roborev B1): the targets self-skip when the
+# fixture is missing, and core-tests runs them WITHOUT CQLITE_REQUIRE_FIXTURES — so a
+# deleted/renamed fixture would turn them into silent green no-ops. This lane pins the
+# two #3032 targets to CQLITE_REQUIRE_FIXTURES=1, under which every absence path in
+# both files asserts instead of skipping.
+#
+# point_vs_full_differential is run in a SECOND invocation, deliberately WITHOUT
+# CQLITE_REQUIRE_FIXTURES: most of its corpus (test_tomb/**) is FETCHED and gitignored,
+# so pinning that variable here would make this component depend on the fetched corpus
+# and break its "no fetched corpus at all" contract below. Its fail-closure instead
+# comes from the target itself — `TableCase::must_run`, asserted UNCONDITIONALLY, so
+# every COMMITTED-fixture case (both test_da cases + the two committed
+# test_compaction_tombstone_ttl ones) must have run while the fetched-only cases still
+# SKIP cleanly on a minimal checkout (#3220).
+#
+# Ordering note (#3220): this is only meaningful because that target now resolves its
+# root TABLE-granularly (cqlite-core/tests/support/datasets_root.rs) and therefore
+# falls back to the in-repo committed fixture when CQLITE_DATASETS_ROOT names a corpus
+# that lacks it. Under the previous keyspace-granular resolution the case skipped.
 #
 # Fixture policy: FAIL-CLOSED, unconditionally. Unlike the fetched-corpus lanes,
 # these fixtures are COMMITTED to git (test-data/datasets/sstables/test_da/
@@ -4808,12 +4830,15 @@ run_bti_multiclustering() {
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
-  echo ">>> [$name] compound-clustering BTI trie shape + SELECT lanes, fail-closed (#3032)"
+  echo ">>> [$name] compound-clustering BTI trie shape + SELECT + point-vs-full lanes, fail-closed (#3032/#3220)"
   if env CQLITE_REQUIRE_FIXTURES=1 \
       ${CQLITE_DATASETS_ROOT:+CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT"} \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test issue_3032_multiclustering_rows_trie_shape \
-        --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1; then
+        --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1 \
+    && env ${CQLITE_DATASETS_ROOT:+CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT"} \
+      cargo test -p cqlite-core --features "state_machine cli-helpers" \
+        --test point_vs_full_differential >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
