@@ -281,7 +281,14 @@ line — the actionable half must never be hidden behind the unactionable one, i
 **`NOTICE*` SHALL NOT be failing-capable** and both FAIL forms SHALL be. The wrapper's single verdict scan
 fails a run whose value begins `FAIL`, `FINDINGS`, `ERROR` or `INCONSISTENT`; that correspondence SHALL be
 asserted STRUCTURALLY against the scan itself, because a value reading NOTICE while `RESULT:` goes FAIL
-(or a FAIL that does not red the run) is the decorative-key defect mirrored.
+(or a FAIL that does not red the run) is the decorative-key defect mirrored. **"Against the scan itself"
+SHALL mean against the scan STATEMENT** — the extracted `for verdict in … ; do` key list and the `case`
+line bounded inside that loop — and SHALL NOT be a whole-file search for the key's name: the summary
+block's own `printf 'census-exclusion: %s\n' "$CENSUS_EXCLUSION"` satisfies a file-wide search, so such an
+assert would keep passing with the key DELETED from the scan, making the assert that forbids a decorative
+key itself decorative. Nor can a behavioural case substitute: every failing assignment to the key is
+immediately followed by the terminal FAIL, so the scan never observes a failing value and its registration
+there is purely defensive.
 
 **A TOTAL built-in swallow SHALL FAIL; only a PARTIAL one is a NOTICE.** When EVERY code census path is
 dropped by a pinned built-in — so the reviewer would receive an EMPTY prompt — `census-exclusion:` SHALL
@@ -465,7 +472,8 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 
 #### Scenario: NOTICE is not failing-capable and both FAIL forms are
 - **WHEN** the wrapper's verdict scan is inspected directly, rather than inferred from a case's exit code
-- **THEN** its failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`, `NOTICE*` is absent from it, and `census-exclusion:` still participates in the scan — so a NOTICE cannot red the run while a configured swallow still does
+- **THEN** its failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`, `NOTICE*` is absent from it, and `census-exclusion:` is named in the scan's own key list — so a NOTICE cannot red the run while a configured swallow still does
+- **AND** each of those three asserts reads the extracted scan STATEMENT (the `for verdict in … ; do` key list, and the `case` line bounded inside that loop), never a whole-file search: deleting `census-exclusion:` from the key list while leaving the rest of the wrapper untouched SHALL red this check, which a file-wide search cannot do because the summary block's own emit line satisfies it
 
 #### Scenario: An empty parse is corroborated by the binary, never assumed
 - **GIVEN** a configuration file the parser recognises no `exclude_patterns` key in, and an invocable `roborev` whose `config get exclude_patterns` reports `docs/**`

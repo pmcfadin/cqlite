@@ -3035,17 +3035,50 @@ printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
 # would make the built-in ruling a lie. Asserted against the SCAN ITSELF, not just against
 # a case's observed exit code, so a future edit that adds NOTICE* to the failing set is
 # caught here rather than by whichever case happens to exercise it.
-_scan_line=$(grep -nE 'case "\$verdict" in' "$WRAPPER" | head -1 || printf '')
-if [ -z "$_scan_line" ]; then
-  bad 'structural: could not locate the wrapper verdict scan to inspect'
+#
+# EVERY assert below is anchored to the SCAN STATEMENT, never to a file-wide grep. That
+# distinction is the whole point and it is not pedantry: a file-wide `grep '"$CENSUS_EXCLUSION"'`
+# is satisfied by the `printf 'census-exclusion: %s\n' "$CENSUS_EXCLUSION"` inside
+# `emit_summary()`, so it would keep passing with the key DELETED from the scan — i.e. the assert
+# meant to forbid the decorative-key defect would itself be decorative. Nor can a behavioural
+# case cover it: every `CENSUS_EXCLUSION="FAIL (…)"` assignment is (correctly) followed
+# immediately by `finish FAIL 1`, so the scan never observes a failing value and the
+# registration is purely defensive — only a structural assert can pin it (#3229).
+#
+# So the scan is extracted ONCE, as a statement, and the asserts read that extract:
+#   _scan_block = the whole `for verdict in … done` loop (bounds the `case` to INSIDE it)
+#   _scan_keys  = the `for … ; do` KEY LIST alone (continuation-aware; this is what must
+#                 name every per-check key)
+#   _scan_case  = the classifying `case` line from within the loop
+_scan_start=$(grep -nE '^[[:space:]]*for verdict in ' "$WRAPPER" | head -1 | cut -d: -f1 || printf '')
+_scan_end=''
+if [ -n "$_scan_start" ]; then
+  _scan_end=$(awk -v s="$_scan_start" 'NR>s && /^[[:space:]]*done[[:space:]]*$/ {print NR; exit}' "$WRAPPER")
+fi
+_scan_block=''
+_scan_keys=''
+_scan_case=''
+if [ -n "$_scan_start" ] && [ -n "$_scan_end" ]; then
+  _scan_block=$(sed -n "${_scan_start},${_scan_end}p" "$WRAPPER")
+  # The key list ends at the first line that does not continue with a trailing backslash.
+  _scan_keys=$(printf '%s\n' "$_scan_block" | awk '{print} !/\\$/{exit}')
+  _scan_case=$(printf '%s\n' "$_scan_block" | grep -E 'case "\$verdict" in' | head -1 || printf '')
+fi
+if [ -z "$_scan_block" ] || [ -z "$_scan_keys" ] || [ -z "$_scan_case" ]; then
+  bad 'structural: could not locate the wrapper verdict scan STATEMENT (for verdict in … case … done) to inspect'
 else
-  ok "structural: the verdict scan is a single case over the per-check keys (${_scan_line%%:*})"
-  if grep -qE 'case "\$verdict" in FAIL\*\|FINDINGS\*\|ERROR\*\|INCONSISTENT\*\)' "$WRAPPER"; then
+  ok "structural: the verdict scan is a single case over the per-check keys (lines $_scan_start-$_scan_end)"
+  if printf '%s\n' "$_scan_keys" | grep -qE '; do[[:space:]]*$'; then
+    ok 'structural: the extracted key list is the complete for-statement (terminates at "; do")'
+  else
+    bad 'structural: the extracted verdict-scan key list does not terminate at "; do" — the extraction is truncated, so the per-key asserts below would be unreliable'
+  fi
+  if printf '%s\n' "$_scan_case" | grep -qE 'case "\$verdict" in FAIL\*\|FINDINGS\*\|ERROR\*\|INCONSISTENT\*\)'; then
     ok 'structural: the failing-capable set is exactly FAIL*|FINDINGS*|ERROR*|INCONSISTENT*'
   else
     bad 'structural: the failing-capable verdict set is not the expected FAIL*|FINDINGS*|ERROR*|INCONSISTENT*'
   fi
-  if grep -E 'case "\$verdict" in' "$WRAPPER" | grep -q 'NOTICE'; then
+  if printf '%s\n' "$_scan_case" | grep -q 'NOTICE'; then
     bad 'structural: NOTICE* appears in the failing-capable verdict scan — a census-exclusion NOTICE would red RESULT:'
   else
     ok 'structural: NOTICE* is absent from the failing-capable verdict scan'
@@ -3055,10 +3088,11 @@ else
   else
     bad 'structural: census-exclusion is not emitted in the summary block'
   fi
-  if grep -qE '"\$CENSUS_EXCLUSION"' "$WRAPPER"; then
-    ok 'structural: census-exclusion still participates in the verdict scan (a FAIL there still reds RESULT:)'
+  # Anchored to $_scan_keys — the scan's own key list — NOT to the file. See the note above.
+  if printf '%s\n' "$_scan_keys" | grep -qE '"\$CENSUS_EXCLUSION"'; then
+    ok 'structural: census-exclusion is named in the verdict scan KEY LIST itself (a FAIL there still reds RESULT:)'
   else
-    bad 'structural: census-exclusion is absent from the verdict scan — a configured swallow would not red RESULT:'
+    bad 'structural: census-exclusion is absent from the verdict-scan KEY LIST — a configured swallow would not red RESULT: (note: a file-wide grep would still pass here, satisfied by the emit_summary printf; this assert reads the for-statement)'
   fi
 fi
 
