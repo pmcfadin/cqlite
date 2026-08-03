@@ -1168,12 +1168,20 @@ if printf '%s' "$accel_fn_text" | grep -q '_perf_accel_token_into' \
 else
   bad "perf-free: accelerators_line reads the perf token through a command substitution"
 fi
-# (b) RUNTIME: run the gate's OWN extracted path with an EMPTY PATH (so ANY external
-#     command fails loudly) and with xtrace stamping ${BASH_SUBSHELL} (so ANY subshell
-#     — command substitution, pipeline, `( )` — is visible). A static scan can be
-#     fooled by an indirection; this cannot. Correct token + no subshell + no failed
-#     exec is the whole claim, executed.
+# (b) RUNTIME: run the gate's OWN extracted path with PATH pointing at a NONEXISTENT
+#     directory (so no external command can resolve) and with xtrace stamping
+#     ${BASH_SUBSHELL} (so ANY subshell — command substitution, pipeline, `( )` — is
+#     visible). A static scan can be fooled by an indirection; this cannot. Correct
+#     token + no subshell + no attempted exec is the whole claim, executed.
+#     Every attempted exec is recorded by `command_not_found_handle`, which appends to
+#     a FILE — deliberately NOT to stderr, because a `2>/dev/null` on the offending
+#     line inside the code under test hides a stderr-only signal completely (measured:
+#     a `id -u >/dev/null 2>&1` mutation was invisible until this handler existed).
+#     PATH must name a MISSING DIRECTORY, not be empty: an empty PATH is one empty
+#     element = the current directory, so bash tries `./id`, reports ENOENT and never
+#     consults the handler. bash 4+; on bash 3.2 the xtrace/stderr grep still fires.
 perf_probe="$tmp/perf-free-probe.sh"
+perf_extlog="$tmp/perf-free-external.txt"; : >"$perf_extlog"
 {
   printf '%s\n' 'set -uo pipefail'
   printf '%s\n' '. "$1"'
@@ -1182,7 +1190,8 @@ perf_probe="$tmp/perf-free-probe.sh"
   printf '%s\n' '_PERF_CAP_LOADED=1'
   printf '%s\n' '_AGENT_GATE_OS=Linux'
   printf '%s\n' 'tok=""'
-  printf '%s\n' 'PATH=""'
+  printf 'command_not_found_handle() { printf "EXTERNAL:%%s\\n" "$1" >>"%s"; return 127; }\n' "$perf_extlog"
+  printf 'PATH=%s\n' "$tmp/perf-free-no-such-bin"
   printf '%s\n' "PS4='+SUB\${BASH_SUBSHELL} '"
   printf '%s\n' 'set -x'
   printf '%s\n' '_perf_accel_token_into tok'
@@ -1195,11 +1204,13 @@ perf_probe_out=$(env -u AGENT_GATE_TEST_PERF_STATE -u AGENT_GATE_TEST_OS \
   bash "$perf_probe" "$PERF_LIB" 2>"$perf_trace")
 perf_probe_subshells=$(grep -c 'SUB[1-9]' "$perf_trace" 2>/dev/null || true)
 perf_probe_execfail=$(grep -c 'No such file or directory\|command not found' "$perf_trace" 2>/dev/null || true)
+perf_probe_ext=$(grep -c '^EXTERNAL:' "$perf_extlog" 2>/dev/null || true)
 if [ "$perf_probe_out" = 'TOKEN[ perf=paranoid-4]' ] \
-   && [ "${perf_probe_subshells:-0}" -eq 0 ] && [ "${perf_probe_execfail:-0}" -eq 0 ]; then
-  ok "perf-free: the extracted path yields perf=paranoid-4 with an EMPTY PATH and spawns 0 subshells (xtrace-verified)"
+   && [ "${perf_probe_subshells:-0}" -eq 0 ] && [ "${perf_probe_execfail:-0}" -eq 0 ] \
+   && [ "${perf_probe_ext:-0}" -eq 0 ]; then
+  ok "perf-free: the extracted path yields perf=paranoid-4 with an unresolvable PATH, 0 subshells and 0 external commands (xtrace + not-found-handler verified)"
 else
-  bad "perf-free: runtime probe failed (out='$perf_probe_out' subshells=$perf_probe_subshells exec-failures=$perf_probe_execfail)"
+  bad "perf-free: runtime probe failed (out='$perf_probe_out' subshells=$perf_probe_subshells exec-failures=$perf_probe_execfail external=$perf_probe_ext: $(head -3 "$perf_extlog" | tr '\n' ' '))"
   head -20 "$perf_trace"
 fi
 perf_nopath="$tmp/perf-nopath.txt"
