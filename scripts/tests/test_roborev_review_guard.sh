@@ -264,6 +264,8 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   `$REPO/.roborev.toml` is NOT the file roborev's daemon reads
 #   cargo-lock      Cargo.lock beside a .rs file — a path roborev ALWAYS excludes
 #                   through a hard-coded built-in, with no configuration involved
+#   cargo-lock-and-docs-exec  the same lockfile PLUS a docs/ harness .sh, so a
+#                   CONFIGURED swallow and a BUILT-IN one occur in one run
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
   # NOTE: separate statements on purpose — `local` is a builtin, so ALL of its
   # arguments are expanded before any assignment takes effect; `local a=$1 b=$a`
@@ -406,6 +408,16 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add Cargo.lock main.rs
       git_q "$work" commit -q -m 'a lockfile beside code'
+      ;;
+    cargo-lock-and-docs-exec)
+      # BOTH causes at once: a built-in eats Cargo.lock, a configured `docs/**` eats the
+      # harness script. The FAIL must win and both must be named.
+      mkdir -p "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
+      printf '[[package]]\nname = "x"\nversion = "0.1.0"\n' >"$work/Cargo.lock"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs Cargo.lock main.rs
+      git_q "$work" commit -q -m 'a lockfile and a docs harness script beside code'
       ;;
     pre-change-mix)
       mkdir -p "$work/docs/reports/x-artifacts/harness" "$work/website/src/content/docs" "$work/nested/deep"
@@ -1204,24 +1216,62 @@ else
   bad 'case (cx18b): no review was enqueued — the two-source read must not be a blanket FAIL'
 fi
 
-printf "== case (cx19): a roborev BUILT-IN exclude is modelled, and messaged as a built-in ==\n"
+printf "== case (cx19): a roborev BUILT-IN swallow is a NON-FAILING NOTICE that still names the path ==\n"
 reset_stub
 # `exclude_patterns` is not the whole exclusion set: the v0.61.2 binary ALWAYS appends a
 # hard-coded lockfile/cache deny-list. `Cargo.lock` has a `lock` extension, so the census
 # classifies it CODE — yet roborev silently drops it, and a check that modelled only the
 # configured half reported it SURVIVING. Same false-PASS class as blocker A.
+#
+# BUT IT IS A NOTICE, NOT A FAIL, and the asymmetry is about the available REMEDY: a
+# configured pattern is a one-token edit away, a built-in is compiled into the binary with
+# no opt-out. Cargo.lock churn is routine here, so FAILing would permanently red a
+# legitimate change class its author cannot fix — and a guard that fires with no available
+# fix is the guard that gets disabled, which is how #3229 happened. So: named loudly in
+# the value line, review still enqueued, RESULT not FAIL on this account.
 work=$(make_fixture case_cx19 cargo-lock)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# The prompt carries main.rs only — Cargo.lock is exactly what roborev drops.
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
 run_wrapper "$work"
-assert_verdict 'case (cx19)' FAIL 1
-assert_says 'case (cx19) the lockfile is reported swallowed, by the built-in, not by config' "^census-exclusion: FAIL \(1/2 code census paths excluded: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]\)\$"
-assert_says 'case (cx19) the built-in cause is messaged DISTINCTLY from a config cause' 'excluded by a ROBOREV BUILT-IN'
-assert_says 'case (cx19) and says editing .roborev.toml cannot fix it' 'editing \.roborev\.toml cannot fix it'
+assert_verdict 'case (cx19)' PASS 0
+assert_says 'case (cx19) the built-in swallow is a NOTICE naming the path and the built-in' "^census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; corroboration: UNAVAILABLE\)\$"
+assert_lacks 'case (cx19) it is NOT a FAIL' '^census-exclusion: FAIL'
+assert_lacks 'case (cx19) and RESULT does not FAIL on its account' '^RESULT: FAIL'
+assert_says 'case (cx19) the NOTICE says there is nothing to fix in any config file' 'NOTHING TO FIX'
+assert_says 'case (cx19) it states the remedy-based rationale for not failing' 'a check that fires on a legitimate change .* with no remedy available is a check that gets disabled'
 assert_says 'case (cx19) the built-in set is version-pinned' 'pinned to v0\.61\.2'
+assert_says 'case (cx19) a clean verdict is explicitly declared not to cover the path' 'does NOT cover those path\(s\)'
 assert_lacks 'case (cx19) it is NOT blamed on the operator config' 'excluded by YOUR CONFIGURATION'
 assert_lacks 'case (cx19) main.rs is not reported swallowed' 'main\.rs by'
-assert_never_enqueued 'case (cx19)'
+# The point of the ruling: the round still happens.
+if [ -s "$INVOKED" ]; then
+  ok 'case (cx19): the review WAS enqueued (a routine Cargo.lock touch is still reviewable)'
+else
+  bad 'case (cx19): no review was enqueued — a built-in swallow must not block the round'
+fi
+# ...and prompt-content must not re-report the SAME known absence as a discovery, which
+# would move the unfixable red one key down instead of removing it.
+assert_says 'case (cx19) prompt-content does not expect the built-in-excluded path' '^prompt-content: PASS \(1/1 code census paths present\) \(\+1 not expected: excluded by a roborev built-in — see census-exclusion:\)$'
+assert_lacks 'case (cx19) prompt-content does not FAIL on the known absence' '^prompt-content: FAIL'
+
+printf "== case (cx19c): a CONFIGURED swallow beside a built-in one still FAILs, naming BOTH ==\n"
+reset_stub
+# The ruling's boundary: NOTICE must not become a way for an actionable config defect to
+# ride along unfixed. Here `docs/**` (configured) eats the harness .sh AND the built-in
+# eats Cargo.lock.
+work=$(make_fixture case_cx19c cargo-lock-and-docs-exec)
+write_roborev_config "$work" "$BLANKET_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx19c)' FAIL 1
+assert_says 'case (cx19c) the FAIL wins over the NOTICE' '^census-exclusion: FAIL \(2/3 code census paths excluded:'
+assert_says 'case (cx19c) the configured cause is named' "run\.sh by 'docs/\*\*' \[repo-config\]"
+assert_says 'case (cx19c) the built-in cause is named too' "Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]"
+assert_says 'case (cx19c) the actionable half is called out' 'excluded by YOUR CONFIGURATION'
+assert_says 'case (cx19c) and the unactionable half does not soften the FAIL' 'does NOT soften this FAIL'
+assert_never_enqueued 'case (cx19c)'
 
 printf "== case (cx19b): the built-in set is a CONSTANT, extracted from the pinned binary ==\n"
 # Structural, so an upgrade that drops a pattern from the constant cannot pass unnoticed:
@@ -2306,7 +2356,12 @@ assert_says '--help names the non-configurable built-in source' '\[roborev-built
 assert_says '--help gives a concrete built-in consequence' 'A Cargo\.lock in your diff IS dropped'
 assert_says '--help says every value line names the pattern source' 'names the SOURCE of the pattern responsible'
 assert_says '--help says an empty parse must be corroborated' "CORROBORATED that nothing is configured"
-assert_says '--help distinguishes a builtin FAIL from a config FAIL' 'A FAIL naming \[roborev-builtin\] is'
+assert_says '--help distinguishes a builtin NOTICE from a config FAIL' 'A NOTICE naming \[roborev-builtin\] is not'
+assert_says '--help states the FAIL-vs-NOTICE rationale is about the remedy' 'FAIL vs NOTICE turns on the AVAILABLE REMEDY, not on severity'
+assert_says '--help says a built-in has no fix because it is compiled in' 'the deny-list is compiled into the'
+assert_says '--help warns that an unfixable guard gets disabled' 'is a check that gets disabled'
+assert_says '--help says the FAIL wins when both causes occur' 'If BOTH occur in one run the'
+assert_says '--help records that NOTICE is outside the verdict scan' 'outside the verdict scan'
 assert_says '--help extends the re-verify obligation to the built-in list' 'Re-verify BOTH the port and the built-in list'
 assert_never_enqueued '--help'
 
@@ -2353,6 +2408,38 @@ if [ -f "$ORACLES" ]; then
   fi
 else
   bad "structural: oracles file not found at $ORACLES"
+fi
+
+printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
+# The mirror of the decorative-key bug: a value that reads NOTICE while RESULT: goes FAIL
+# would make the built-in ruling a lie. Asserted against the SCAN ITSELF, not just against
+# a case's observed exit code, so a future edit that adds NOTICE* to the failing set is
+# caught here rather than by whichever case happens to exercise it.
+_scan_line=$(grep -nE 'case "\$verdict" in' "$WRAPPER" | head -1 || printf '')
+if [ -z "$_scan_line" ]; then
+  bad 'structural: could not locate the wrapper verdict scan to inspect'
+else
+  ok "structural: the verdict scan is a single case over the per-check keys (${_scan_line%%:*})"
+  if grep -qE 'case "\$verdict" in FAIL\*\|FINDINGS\*\|ERROR\*\|INCONSISTENT\*\)' "$WRAPPER"; then
+    ok 'structural: the failing-capable set is exactly FAIL*|FINDINGS*|ERROR*|INCONSISTENT*'
+  else
+    bad 'structural: the failing-capable verdict set is not the expected FAIL*|FINDINGS*|ERROR*|INCONSISTENT*'
+  fi
+  if grep -E 'case "\$verdict" in' "$WRAPPER" | grep -q 'NOTICE'; then
+    bad 'structural: NOTICE* appears in the failing-capable verdict scan — a census-exclusion NOTICE would red RESULT:'
+  else
+    ok 'structural: NOTICE* is absent from the failing-capable verdict scan'
+  fi
+  if grep -qE '^\s*printf .census-exclusion' "$WRAPPER"; then
+    ok 'structural: census-exclusion is still emitted as a block key (not decorative)'
+  else
+    bad 'structural: census-exclusion is not emitted in the summary block'
+  fi
+  if grep -qE '"\$CENSUS_EXCLUSION"' "$WRAPPER"; then
+    ok 'structural: census-exclusion still participates in the verdict scan (a FAIL there still reds RESULT:)'
+  else
+    bad 'structural: census-exclusion is absent from the verdict scan — a configured swallow would not red RESULT:'
+  fi
 fi
 
 printf '== structural: the AC2 live probe is NOT a gate component ==\n'

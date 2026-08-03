@@ -990,6 +990,46 @@ roborev_check_census_exclusion() {
     shown=$((shown + 1))
   done
   if [ "$m" -gt "$shown" ]; then joined="$joined (+$((m - shown)) more)"; fi
+
+  # === WHY A BUILT-IN SWALLOW IS A NOTICE AND A CONFIGURED SWALLOW IS A FAIL ======
+  # THE ASYMMETRY IS ABOUT THE AVAILABLE REMEDY, not about severity.
+  #
+  # A CONFIGURED pattern that swallows census code is a FAIL because the fix is a
+  # one-token edit to a file in this repo (or the operator's own global config). The
+  # author can act on it, immediately, before paying for a review round.
+  #
+  # A ROBOREV BUILT-IN that swallows census code has NO REMEDY AT ALL: the deny-list is
+  # compiled into the binary, there is no configuration switch, and no negation form
+  # exists at the instruction level (R5). Failing on it would mean a `Cargo.lock` touch —
+  # a ROUTINE, entirely legitimate change class in this repo — permanently reds a check
+  # its author cannot possibly satisfy. **A guard that fires on correct input with no
+  # available fix is the guard that gets disabled**, and a disabled census-exclusion is
+  # exactly #3229 again. So the built-in direction is reported LOUDLY and NON-FATALLY:
+  # the paths and the responsible built-in are named in the value line (never merely in a
+  # detail an agent skims past), the run proceeds, and `prompt-content:` is told not to
+  # expect those paths — because their absence from the prompt is now a KNOWN,
+  # DETERMINISTIC consequence of roborev's own mechanism, not evidence of anything.
+  #
+  # `NOTICE*` is deliberately OUTSIDE the wrapper's failing-capable verdict scan
+  # (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`), so this value cannot make `RESULT:` FAIL.
+  #
+  # IF BOTH CAUSES OCCUR IN ONE RUN THE FAIL WINS, and the message still names both — the
+  # actionable half must never be hidden behind the unactionable one.
+  if [ "$n_config_hits" -eq 0 ]; then
+    CENSUS_EXCLUSION="NOTICE ($((n_code - m))/$n_code code census paths survive $survive_of; $m code census path(s) excluded by a roborev built-in: $joined; corroboration: $_rx_corroboration)"
+    DETAILS+=("NOTICE: census-exclusion: $m of the $n_code CODE path(s) in this census are dropped from the diff roborev builds by a ROBOREV BUILT-IN exclude (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list). NO configured pattern is responsible, so there is NOTHING TO FIX in '$repo_cfg' or any other config file — the deny-list is compiled into the binary and has no opt-out. This is therefore a NOTICE, not a FAIL: a check that fires on a legitimate change (a routine Cargo.lock touch) with no remedy available is a check that gets disabled, which is how #3229 happened.")
+    DETAILS+=("NOTICE: census-exclusion: path(s) the reviewer will NOT receive, each with the built-in responsible:")
+    for path in "${swallowed[@]}"; do
+      DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'  [${_rx_blame_src[$path]:-<unattributed>}]")
+    done
+    DETAILS+=("NOTICE: census-exclusion: a clean verdict on this review does NOT cover those path(s) — verify them some other way (primary sources, a regenerate-and-diff, or by reviewing them outside roborev). 'prompt-content:' will not expect them either, because their absence is a deterministic property of roborev's mechanism rather than evidence about the reviewer.")
+    # Hand the set to `prompt-content:` so it does not re-report a KNOWN absence as a
+    # discovery. Scoped to BUILT-IN swallows ONLY: a configured swallow never reaches
+    # here, because it FAILs below before anything is enqueued.
+    CENSUS_BUILTIN_EXCLUDED=("${swallowed[@]}")
+    return 0
+  fi
+
   CENSUS_EXCLUSION="FAIL ($m/$n_code code census paths excluded: $joined)"
 
   DETAILS+=("ERROR: census-exclusion: the EFFECTIVE roborev exclusion set would remove $m of the $n_code CODE path(s) in this census from the diff roborev builds, so the reviewer would never see them and a clean verdict would be VACUOUS for those files. roborev drops exactly what its pathspecs match — it makes NO code/non-code judgement — so this is a CONFIGURATION defect (or a roborev built-in), not a reviewer one; do NOT go looking at prompt-content or the reviewer.")
@@ -1001,7 +1041,7 @@ roborev_check_census_exclusion() {
     DETAILS+=("ERROR: census-exclusion: $n_config_hits of the $m swallowed path(s) were excluded by YOUR CONFIGURATION — editable, and the remedy is to narrow the responsible pattern in the file its source tag names.")
   fi
   if [ "$n_builtin_hits" -gt 0 ]; then
-    DETAILS+=("ERROR: census-exclusion: $n_builtin_hits of the $m swallowed path(s) were excluded by a ROBOREV BUILT-IN (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list). That is NOT your configuration and editing .roborev.toml cannot fix it — roborev will never show a reviewer these paths, so they must be verified some other way (primary sources, a regenerate-and-diff, or by splitting them out of the reviewed range). Recorded here so a clean verdict is never read as covering them.")
+    DETAILS+=("ERROR: census-exclusion: $n_builtin_hits of the $m swallowed path(s) were excluded by a ROBOREV BUILT-IN (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list). That direction ALONE would be a NOTICE (it has no remedy — the deny-list is compiled in), but it does NOT soften this FAIL: the $n_config_hits configured swallow(s) above are actionable and the FAIL wins. Both causes are named so the actionable half is not hidden behind the unactionable one. Those built-in path(s) will not reach the reviewer even after you fix the configuration; verify them some other way.")
   fi
   DETAILS+=("ERROR: census-exclusion: swallowed path(s), each with the pattern responsible and its source:")
   for path in "${swallowed[@]}"; do

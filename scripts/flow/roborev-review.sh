@@ -92,6 +92,8 @@
 #                     set; corroboration: OK|NOTICE|UNAVAILABLE) |
 #                     PASS (no exclusion patterns configured; <k>/<n> ... survive the
 #                     <b> roborev v0.61.2 built-in exclude(s); corroboration: ...) |
+#                     NOTICE (<k>/<n> ... survive ...; <m> code census path(s) excluded
+#                     by a roborev built-in: <path> by '<pat>' [roborev-builtin]; ...) |
 #                     FAIL (<m>/<n> code census paths excluded: <path> by '<pat>'
 #                     [<source>], ...) |
 #                     FAIL (exclusion set unreadable: ...) |
@@ -100,7 +102,8 @@
 #   job-record        PASS | PASS (no token accounting in the record) |
 #                     DEGRADED (incomplete after <n> retries: <fields>) | SKIP
 #   sha-assert        PASS | FAIL (...) | SKIP
-#   prompt-content    PASS (<k>/<n> code census paths present) |
+#   prompt-content    PASS (<k>/<n> code census paths present)
+#                     [ (+<b> not expected: excluded by a roborev built-in — ...) ] |
 #                     FAIL (<k>/<n> code census paths absent from the prompt) |
 #                     FAIL (prompt unretrievable — ...) | SKIP
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
@@ -272,11 +275,23 @@ THE EFFECTIVE SET IS A UNION OF FOUR THINGS, and a swallow in ANY of them FAILs:
      **/package-lock.json, ... **/.beads/**, **/.cache/**), extracted from the pinned
      v0.61.2 binary. A Cargo.lock in your diff IS dropped from the reviewer's copy.
 Every value line names the SOURCE of the pattern responsible, because with several
-files in play "excluded by 'docs/**'" does not say which file to edit. Values:
+files in play "excluded by 'docs/**'" does not say which file to edit.
+FAIL vs NOTICE turns on the AVAILABLE REMEDY, not on severity: a CONFIGURED pattern
+(sources 1-3) is a FAIL because the fix is a one-token config edit, while a BUILT-IN
+(source 4) is a NOTICE because there IS no fix — the deny-list is compiled into the
+binary and has no opt-out or negation form. A check that fires on a legitimate change
+(a routine Cargo.lock touch) with no remedy available is a check that gets disabled,
+and a disabled census-exclusion is #3229 all over again. If BOTH occur in one run the
+FAIL wins and both causes are named. Values:
   PASS (<k>/<n> code census paths survive ...; corroboration: OK|NOTICE|UNAVAILABLE)
   PASS (no exclusion patterns configured; <k>/<n> ... survive the <b> roborev
        v0.61.2 built-in exclude(s); ...)  absent key/file or an empty list, and only
        once 'roborev config get' has CORROBORATED that nothing is configured
+  NOTICE (<k>/<n> ... survive ...; <m> code census path(s) excluded by a roborev
+       built-in: <path> by '<pattern>' [roborev-builtin]; ...)  NON-FAILING (NOTICE is
+       outside the verdict scan's FAIL*|FINDINGS*|ERROR*|INCONSISTENT* set) but the
+       paths ARE named: a clean verdict does not cover them, and prompt-content: is
+       told not to expect them
   FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>' [<source>], ...)
   FAIL (exclusion set unreadable: <cause>) present but unparseable, an unknown TOML
                                           escape, or an unresolvable ROOT checkout —
@@ -289,8 +304,8 @@ files in play "excluded by 'docs/**'" does not say which file to edit. Values:
        is caught, instead of reading as a green 'nothing configured'
   SKIP (<cause>)                          the step was not reached
 A FAIL naming a config source is a CONFIGURATION defect: fix the named file — do not
-investigate the reviewer or prompt-content:. A FAIL naming [roborev-builtin] is
-NEITHER: roborev will never show a reviewer that path, so verify it some other way.
+investigate the reviewer or prompt-content:. A NOTICE naming [roborev-builtin] is not
+fixable: roborev will never show a reviewer that path, so verify it some other way.
 Re-verify BOTH the port and the built-in list on any roborev version bump.
 
 Sanctioned invocation (measured, issue #2964 round 5):
@@ -415,6 +430,13 @@ census_files=0
 census_non_code_files=0
 census_paths=()
 census_code_paths=()
+# CODE census paths that `census-exclusion:` determined a ROBOREV BUILT-IN exclude drops
+# (never a configured pattern — that direction FAILs pre-enqueue and never gets here).
+# `prompt-content:` subtracts these, because their absence from the prompt is a
+# deterministic property of roborev's compiled-in deny-list, not evidence about the
+# reviewer — and re-reporting a known absence as a discovery would red a routine
+# Cargo.lock touch under a second key with no remedy behind either.
+CENSUS_BUILTIN_EXCLUDED=()
 PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"

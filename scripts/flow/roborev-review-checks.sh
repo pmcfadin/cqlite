@@ -111,8 +111,25 @@ roborev_check_prompt_content() {
     PROMPT_PATHS_FILE="$LOG.promptpaths"
     { grep -oE '^diff --git a/[^ ]+ b/[^ ]+$' "$PROMPT_FILE" 2>/dev/null || true; } \
       | sed -E 's|^diff --git a/([^ ]+) b/([^ ]+)$|\1\n\2|' | sort -u >"$PROMPT_PATHS_FILE"
-    checked_paths=("${census_code_paths[@]}")
-    census_total=${#census_code_paths[@]}
+    # SUBTRACT the paths `census-exclusion:` determined a ROBOREV BUILT-IN drops. Their
+    # absence from the prompt is not a finding: it is the deterministic consequence of a
+    # deny-list compiled into the binary, already reported LOUDLY (and non-fatally) under
+    # `census-exclusion: NOTICE`, with no remedy available under either key. Asserting
+    # their presence would red a routine `Cargo.lock` touch here after we deliberately
+    # chose not to red it there — the same self-defeating guard, moved one key down.
+    # Scoped to BUILT-IN swallows ONLY: a CONFIGURED swallow FAILs pre-enqueue, so this
+    # code is never reached with one, and the subtraction can never mask a config defect.
+    checked_paths=()
+    for census_path in "${census_code_paths[@]}"; do
+      builtin_excluded=0
+      for excluded_path in ${CENSUS_BUILTIN_EXCLUDED[@]+"${CENSUS_BUILTIN_EXCLUDED[@]}"}; do
+        [ "$census_path" != "$excluded_path" ] || builtin_excluded=1
+      done
+      [ "$builtin_excluded" -eq 0 ] || continue
+      checked_paths+=("$census_path")
+    done
+    census_total=${#checked_paths[@]}
+    n_builtin_skipped=$((${#census_code_paths[@]} - census_total))
     missing_paths=()
     for census_path in "${checked_paths[@]}"; do
       grep -Fxq -- "$census_path" "$PROMPT_PATHS_FILE" || missing_paths+=("$census_path")
@@ -128,6 +145,9 @@ roborev_check_prompt_content() {
       done
     else
       PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"
+      if [ "$n_builtin_skipped" -gt 0 ]; then
+        PROMPT_CONTENT="$PROMPT_CONTENT (+$n_builtin_skipped not expected: excluded by a roborev built-in — see census-exclusion:)"
+      fi
     fi
   fi
 }
