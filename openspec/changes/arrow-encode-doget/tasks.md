@@ -211,8 +211,11 @@ honored: no further lever was stacked on an unexplained result.
       post-lever binaries. Cold re-measurement carries to #3248.
 - [x] PASS = `do_get rows/s >= bare_scan rows/s / 1.3` in that same session. Never a CPU-share
       claim; a fall in "% cycles in Arrow encode" with unmoved rows/s is a **FAIL** (#2877 shape).
-      → the criterion was applied **exactly as specified and it returned NOT MET** (217,791 vs a
-      256,131 target, 15.0% short). Checked = "applied as specified", **NOT** "PASS achieved". No
+      → the criterion was applied **exactly as specified and it returned NOT MET**. Two sessions, both
+      NOT MET, neither comparable to the other (no absolute on this box is reusable cross-session):
+      at the **SUPERSEDED 4 MiB target**, 217,791 vs a 256,131 target (15.0% short); at the **SHIPPED
+      3.875 MiB target**, ratio 1.553x — 230,321 vs a 275,223 target (16.3% short, −44,902 rows/s),
+      which is the delivered figure. Checked = "applied as specified", **NOT** "PASS achieved". No
       CPU-share claim is made anywhere.
 - [x] Report each lever's individual delta, including any lever that cost throughput.
 - [x] **Kill criterion:** if the levers do not move rows/s materially, STOP — post the negative
