@@ -30,6 +30,10 @@ PASS=0
 FAIL=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# A case whose PROPERTY IS UNOBSERVABLE on this box (a Linux-only kernel control on
+# Darwin, an unreadable /proc entry) is reported as a SKIP — counted in neither total,
+# so it can never be mistaken for a passing assertion (issue #3249 AC3).
+skipped() { printf 'skip - %s\n' "$1"; }
 
 # assert_complete <label> <file>: file must contain start marker, end marker,
 # RESULT line, and a representative stage line.
@@ -1084,6 +1088,51 @@ for pair in "ok:$perf_fixture_ok" "paranoid-4:$perf_fixture_p4"; do
   assert_perf_token "perf-real-$want" "$real_file" "$want"
   assert_accelerators "perf-real-$want" "$real_file"
 done
+
+# 9f-host. THE HOST'S OWN /proc, WITH NO SEAM SET AT ALL (issue #3249 AC3(a)). Every
+#          case above — 9f-real included — sets the LIBRARY's fixture seams
+#          (CQLITE_PERF_TEST_MODE + CQLITE_PERF_PROC_DIR), so they prove the production
+#          BRANCH runs but not that it reads this box's real kernel state. Here every
+#          seam the code reads is unset (the five CQLITE_PERF_* seams plus both
+#          AGENT_GATE_TEST_* forcings), so the token can only come from
+#          /proc/sys/kernel. The expectation is DERIVED from the box's own two controls
+#          by the documented rule and asserted as an EXACT whole-field token — never
+#          hardcoded to `ok` (a paranoid-4 box MUST fail this case if the gate claims
+#          otherwise) and never as a member of the alternation (which every state
+#          satisfies). Skipped, not passed, off Linux or when a control is unreadable:
+#          a case that cannot observe the property must say so, not bank a green.
+perf_host_par_f=/proc/sys/kernel/perf_event_paranoid
+perf_host_kptr_f=/proc/sys/kernel/kptr_restrict
+perf_host_os=$(uname -s 2>/dev/null || echo unknown)
+if [ "$perf_host_os" != Linux ]; then
+  skipped "perf-host: host is $perf_host_os, not Linux — perf_event_paranoid/kptr_restrict are Linux controls (9f-darwin covers the no-token contract)"
+elif [ ! -r "$perf_host_par_f" ] || [ ! -r "$perf_host_kptr_f" ]; then
+  skipped "perf-host: $perf_host_par_f / $perf_host_kptr_f unreadable on this box — no real state to derive an expectation from"
+else
+  perf_host_par=$(tr -d '[:space:]' <"$perf_host_par_f")
+  perf_host_kptr=$(tr -d '[:space:]' <"$perf_host_kptr_f")
+  # The rule, from openspec/specs/agent-fleet-runtime/spec.md: paranoid <= 0 AND kptr == 0
+  # => ok; paranoid >= 1 => paranoid-<N>; else kptr != 0 => kptr-restricted.
+  if ! printf '%s' "$perf_host_par" | grep -Eq '^-?[0-9]+$' \
+     || ! printf '%s' "$perf_host_kptr" | grep -Eq '^-?[0-9]+$'; then
+    perf_host_want=unknown
+  elif [ "$perf_host_par" -ge 1 ]; then
+    perf_host_want="paranoid-$perf_host_par"
+  elif [ "$perf_host_kptr" -ne 0 ]; then
+    perf_host_want=kptr-restricted
+  else
+    perf_host_want=ok
+  fi
+  perf_host_file="$tmp/perf-host.txt"
+  env -u AGENT_GATE_TEST_PERF_STATE -u AGENT_GATE_TEST_OS \
+      -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
+      -u CQLITE_PERF_SYSCTL_EXTRA_DIRS -u CQLITE_PERF_TEST_PRIV_DIR \
+      AGENT_GATE_SUMMARY_FILE="$perf_host_file" \
+      bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_perf_token "perf-host (real /proc: paranoid=$perf_host_par kptr=$perf_host_kptr, no seam set)" \
+    "$perf_host_file" "$perf_host_want"
+  assert_accelerators "perf-host" "$perf_host_file"
+fi
 
 # 9f-free. The gate's emit-time perf path is documented as FREE — in the code, in
 #          openspec/specs/agent-fleet-runtime/spec.md, in gate-contract.md and in
