@@ -189,6 +189,14 @@ even a 10× read-path speed-up. Open cost is negligible (27 SSTables discovered 
 passes agreed to within 1.2 % (127.1 s vs 125.6 s), which is what confirms the measured pass was
 steady-state warm rather than fault-bound. The mmap/trie plane is **not** covered by this number.
 
+**Re-confirmed after the harness was hardened** (same box, same corpus, row-count assert ON and read
+from `/data/corpus-3234-bti-full/manifest-bti-3234.json`): **127.163 s**, 13,200,000 rows verified,
+**103,804 rows/s**, warm pass 126.231 s (0.7 % apart), `generations: 27`, `schema_resolved: true`,
+`access_path: fallback_full_scan (partition_key_not_fully_constrained)` — the honest CQL-level label
+for an unrestricted `SELECT *` — and `storage_route: generation_merge::stream_generations_for_read`.
+The access path is the *query*-level signal; `storage_route` is the plane, and both are printed on
+every run.
+
 Every number in the manifest is read back from the written bytes (`sstablemetadata` on
 `Statistics.db`, the `CompressionInfo.db` header, each `TOC.txt`) and **nothing is inherited from a
 previous manifest**. A `mode` field marks whether a manifest describes a `smoke` validation run or

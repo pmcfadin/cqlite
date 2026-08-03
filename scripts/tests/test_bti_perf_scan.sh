@@ -55,7 +55,7 @@ TBL=multiclustering_table
 # source (absence = FAIL, #3148), the build is mandatory (failure = FAIL), and the
 # corruption step needs no interpreter -- so there is nothing legitimate to skip
 # and the floor is a plain `passes >= MIN_CASES`.
-MIN_CASES=37
+MIN_CASES=38
 
 fails=0
 passes=0
@@ -247,14 +247,25 @@ if run_case 5 "a truncated WARM pass fails too (it is not silently discarded)" \
 fi
 
 # ------------------------------------------------ 6: WINDOW_TOO_SHORT --------
+# The floor here is deliberately a DAY, not the AC3 10 s: the assertion is "the
+# guard fires", and a threshold a loaded box could conceivably cross would make
+# this a wall-clock race (#2642). The 10.0 s DEFAULT is pinned separately, from
+# --help text, with no timing involved.
 if run_case 6 "a sub-floor window exits WINDOW_TOO_SHORT" \
-  "${SCAN_GOOD[@]}" --min-seconds 10 --manifest "$TMP/m-good.json"; then
-  if grep -q "under the 10.000 s AC3 floor" <<<"$out" \
+  "${SCAN_GOOD[@]}" --min-seconds 86400 --manifest "$TMP/m-good.json"; then
+  if grep -q "under the 86400.000 s AC3 floor" <<<"$out" \
     && grep -qE "needs ~[0-9]+ rows" <<<"$out"; then
     pass "the sub-floor failure reports the row count that WOULD reach the floor"
   else
     fail "expected an AC3-floor diagnosis with a target row count; got: $(tail -2 <<<"$out")"
   fi
+fi
+out="$("$BIN" --help 2>&1)"
+if grep -q -- "--min-seconds S .*AC3 floor) \[10.0\]" <<<"$out" \
+  && grep -qE "^ +8 authoritative row count unavailable" <<<"$out"; then
+  pass "--help documents the 10.0 s AC3 default and the exit-code set"
+else
+  fail "--help must document the AC3 default floor and the exit codes; got: $out"
 fi
 
 # ------------------------------------------------------ 7: SCAN_FAILED -------
