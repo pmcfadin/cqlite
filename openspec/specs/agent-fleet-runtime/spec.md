@@ -252,8 +252,21 @@ drop-in `/etc/sysctl.d/99-cqlite-perf.conf` (`kernel.perf_event_paranoid = -1`,
 assume it. The verdict SHALL come from reading the values back out of `/proc/sys/kernel`
 (a `sysctl` write's return code proves nothing) and from a FUNCTIONAL
 `perf stat -C 0 -e cycles` collection requiring BOTH exit 0 AND a non-zero cycle count.
-The privileged destination path SHALL be a hardcoded literal, never derived from the
-environment. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
+An overall "VERIFIED" report SHALL require BOTH the `/proc` token `ok` AND that functional
+pass; a functional result that is not accompanied by both SHALL be reported as PARTIAL
+DIAGNOSTIC INFORMATION, explicitly subordinate to the `/proc` verdict, and no run SHALL
+emit a non-`ok` token diagnosis and an unqualified "VERIFIED" together. Because
+`perf_event_paranoid` restricts UNPRIVILEGED users and ROOT BYPASSES IT, the functional
+collection SHALL be attributed to an identity: when bootstrap runs as root it SHALL DROP
+PRIVILEGE for the probe where a mechanism exists (`setpriv`, else `runuser`, else
+`sudo -u`) targeting an unprivileged identity resolved from `SUDO_UID`/`SUDO_GID` else the
+passwd database's `nobody` — never an invented uid — and where no mechanism or no such
+identity exists it SHALL label the root result as NOT evidence of unprivileged capability
+and SHALL NOT report it as verification. The privileged destination path SHALL be a
+hardcoded literal, never derived from the environment, and every variable the section's
+control flow reads SHALL be initialised by the section BEFORE the platform/library guards,
+so no inherited environment value can enter a Linux-only implementation on another
+platform or without its helper library. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
 apply command's exit status, and the apply command's own failure SHALL be reported
 separately from the capability verdict — `sysctl --system` applies every drop-in on the
 box, so a non-zero exit may belong to an unrelated pre-existing entry, and no wording
@@ -293,6 +306,30 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
   or a zero count (a virtualised or masked PMU)
 - **WHEN** bootstrap runs the functional verification
 - **THEN** it SHALL report the capability as NOT verified
+
+#### Scenario: a functional pass never overrides a non-ok /proc verdict
+- **GIVEN** a Linux host whose `/proc` reports `paranoid-4` (or `kptr-restricted`) while
+  `perf stat -C 0 -e cycles` succeeds with a non-zero count
+- **WHEN** bootstrap runs
+- **THEN** it SHALL NOT report an unqualified "VERIFIED", SHALL report the functional
+  result as partial diagnostic information subordinate to `/proc`, SHALL name `/proc` as
+  the authority with the token it read, and SHALL exit 0
+
+#### Scenario: a root-run functional pass is not evidence of unprivileged capability
+- **GIVEN** a Linux host where bootstrap runs AS ROOT (e.g. under `sudo`) and
+  `perf stat -C 0 -e cycles` succeeds
+- **WHEN** a privilege-dropping mechanism and an unprivileged identity are available
+- **THEN** bootstrap SHALL run the probe with privilege dropped, SHALL state which
+  identity it measured, and only then MAY report VERIFIED (given `/proc` = `ok`)
+- **WHEN** no such mechanism or identity is available
+- **THEN** bootstrap SHALL label the result as NOT evidence that an unprivileged process
+  can profile the box, SHALL NOT report VERIFIED even with `/proc` = `ok`, and SHALL exit 0
+
+#### Scenario: an inherited environment variable cannot enter the section
+- **GIVEN** an ambient `PERF_SECTION_OK=1` in bootstrap's environment
+- **WHEN** bootstrap runs on macOS, or on a checkout with no `scripts/perf-capability.sh`
+- **THEN** the section SHALL take its no-op / missing-library path, SHALL call no helper
+  from the Linux-only implementation, and SHALL exit 0
 
 #### Scenario: check mode mutates nothing
 - **WHEN** bootstrap runs without `--yes` on a Linux host lacking the drop-in

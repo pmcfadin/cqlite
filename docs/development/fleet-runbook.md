@@ -192,6 +192,32 @@ exact remedy line — bootstrap stays advisory and always exits 0. When the drop
 the remedy is **apply-only** (`sysctl -q --system`, prefixed with `sudo` only where a `sudo` binary
 exists), never a pointless re-write.
 
+**"VERIFIED" requires BOTH facts — the `/proc` token *and* the functional pass.** The functional
+result alone is never the verdict: a box whose `/proc` says `paranoid-2` or `kptr-restricted` would
+otherwise print its own diagnosis *and* a reassuring "VERIFIED" in the same run, and the reassuring
+line wins the reader's attention. A functional pass without a matching `/proc` verdict is labelled
+**partial diagnostic information**, explicitly subordinate to `/proc`.
+
+**If you run bootstrap under `sudo`, know what the functional check can and cannot prove.**
+`perf_event_paranoid` restricts **unprivileged** users — **root bypasses it entirely**. So
+`sudo bash scripts/bootstrap-agent-machine.sh` (a normal invocation, and the likeliest one, since
+installing the drop-in needs root) would run `perf stat -C 0 -e cycles` *as root*, where it **succeeds
+on a `paranoid=4` box on which every unprivileged agent process still gets `EACCES`** — a textbook
+false verification of an unprofileable box. Bootstrap therefore **drops privilege for the probe** when
+it can: `setpriv --reuid/--regid --clear-groups` (preferred), else `runuser -u`, else `sudo -n -u`,
+targeting `SUDO_UID`/`SUDO_GID` (the account that invoked `sudo` — the one whose capability is
+actually in question) and falling back to `nobody` resolved from the passwd database, never a
+hardcoded uid. The run says which identity it measured:
+`DROPS PRIVILEGE (dropped:setpriv:uid=1000)`. When **no** mechanism or no unprivileged account exists
+(`root-no-drop-mechanism` / `root-no-unprivileged-target`), the root result is labelled **not evidence
+that an unprivileged process can profile this box** and never reported as verification — the `/proc`
+token, which is identity-independent, stays the authority. Two operator consequences: install
+`util-linux` (for `setpriv`) on any box you provision as root, and to check by hand as the agent
+account use `sudo -u <agent-user> perf stat -C 0 -e cycles -- sleep 0.1` (or
+`bash scripts/perf-capability.sh --verify-unpriv`, which does the drop itself and fails when the
+result cannot be attributed to an unprivileged identity). Plain `--verify` measures **whoever runs
+it**, so as root it answers a question nobody asked.
+
 **The apply's exit code and the capability verdict are SEPARATE facts, reported separately.**
 `sysctl --system` applies *every* drop-in on the box, so it can apply ours perfectly and still exit
 non-zero because an unrelated pre-existing entry failed (a stale `/etc/sysctl.conf` line, a foreign
@@ -213,7 +239,9 @@ Verify by hand, in the same order bootstrap does:
 ```bash
 cat /proc/sys/kernel/perf_event_paranoid /proc/sys/kernel/kptr_restrict   # want -1 and 0
 bash scripts/perf-capability.sh --token                                   # want: ok
-bash scripts/perf-capability.sh --verify                                  # want: cycles=<non-zero>
+bash scripts/perf-capability.sh --verify-unpriv   # want: cycles=<non-zero> identity=self-unprivileged
+#   (as root, --verify-unpriv drops privilege first; plain --verify measures whoever runs it, and
+#    root BYPASSES perf_event_paranoid, so a root `--verify` pass proves nothing about an agent)
 # apply by hand (identical bytes to what bootstrap writes, so a later run is a no-op):
 bash scripts/perf-capability.sh --drop-in | sudo tee /etc/sysctl.d/99-cqlite-perf.conf >/dev/null
 sudo sysctl -q --system

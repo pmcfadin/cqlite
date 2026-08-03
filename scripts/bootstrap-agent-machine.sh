@@ -16,6 +16,10 @@
 #      / "ACCEL_LANES" / "mold link-accelerator") so the two can never disagree
 #      about whether an accelerator is present. The final health check below
 #      re-reads the state straight from the gate to reconcile.
+#      2c's functional check additionally reports WHOSE capability it measured: root
+#      BYPASSES perf_event_paranoid, so under `sudo bootstrap` the probe drops privilege
+#      (setpriv/runuser/sudo -u) and, where it cannot, says the result is not evidence
+#      about an unprivileged agent process. "VERIFIED" needs BOTH /proc=ok and that pass.
 #   2c. Perf profiling capability (issue #3249, LINUX only): the reboot-surviving
 #      /etc/sysctl.d/99-cqlite-perf.conf drop-in (kernel.perf_event_paranoid = -1,
 #      kernel.kptr_restrict = 0), applied now, READ BACK out of /proc — a `sysctl`
