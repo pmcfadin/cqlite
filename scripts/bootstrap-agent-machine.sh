@@ -471,10 +471,18 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
   # sudo binary at all (a printed `sudo tee` line is useless there — the fix is a
   # root shell or the image owner) versus a sudo that needs a password (the same line
   # works, just interactively). PERF_PRIV_STATE distinguishes them.
+  #
+  # The root test goes through perf_capability_self_uid_into, which reports rc 1 for an
+  # UNKNOWN identity instead of substituting a plausible uid (issue #3249 review R4-1):
+  # `$(id -u || echo 1000)` invented an unprivileged answer whenever `id` was missing or
+  # broken. Here an unknown identity simply is not root, so the `sudo -n` probe below
+  # decides — the fail-closed direction (no privilege claimed, nothing written unless
+  # sudo actually works).
   PERF_ROOT=()
   PERF_PRIV=0
   PERF_PRIV_STATE=unknown
-  if [ "$(id -u 2>/dev/null || echo 1000)" = 0 ]; then
+  PERF_SELF_UID=''
+  if perf_capability_self_uid_into PERF_SELF_UID && [ "$PERF_SELF_UID" = 0 ]; then
     PERF_PRIV=1; PERF_PRIV_STATE=root
   elif ! have sudo; then
     PERF_PRIV_STATE=no-sudo-binary
@@ -526,6 +534,33 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
       absent) info "/proc/sys/kernel/{perf_event_paranoid,kptr_restrict} not present — a container without a writable procfs cannot be tuned from here; tune the HOST" ;;
       unknown) info "the /proc controls are present but unparseable — never guessed; inspect them by hand" ;;
     esac
+    case "$1" in paranoid-*|kptr-restricted) perf_name_competitors ;; esac
+  }
+
+  # perf_name_competitors: NAME THE FILE THAT IS FIGHTING US, rather than reporting only
+  # that the value did not take. Stock Ubuntu ships
+  # /etc/sysctl.d/10-kernel-hardening.conf with `kernel.kptr_restrict = 1`, and that is
+  # the concrete mechanism behind the "it silently reverts" note in three separate
+  # measurement reports (ws0-3217, ws3-3029, the 2026-07-27 Cassandra baseline) — none of
+  # which identified a cause. A named file is actionable; "it reverts" is not.
+  #
+  # A competitor that sorts AFTER our 99- drop-in is an ACTUAL override (sysctl.d is
+  # applied in basename order, last assignment wins) and is reported as such; one that
+  # sorts before is reported as harmless, which also documents WHY the 99- prefix is
+  # load-bearing and must never be "tidied" to a lower number.
+  perf_name_competitors() {
+    local verdict path found=0
+    while IFS=' ' read -r verdict path; do
+      [ -n "$path" ] || continue
+      found=1
+      case "$verdict" in
+        override) warn "OVERRIDE: $path also sets perf_event_paranoid/kptr_restrict and its name sorts AFTER $PERF_CAPABILITY_DROPIN_BASENAME, so it is applied LAST and WINS — fix or rename that file" ;;
+        *)        info "competing file: $path also sets perf_event_paranoid/kptr_restrict but sorts BEFORE $PERF_CAPABILITY_DROPIN_BASENAME, so ours wins (this is exactly why the '99-' prefix is load-bearing — never rename the drop-in)" ;;
+      esac
+    done <<EOF
+$(perf_capability_competing_files)
+EOF
+    [ "$found" = 1 ] || info "no other file in the sysctl.d directory sets perf_event_paranoid/kptr_restrict"
   }
 
   # perf_inspect_lines: where a value that did not take actually comes from.
@@ -692,8 +727,16 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
       perf_diagnose_token "$PERF_TOKEN"
     fi
     if [ "$PERF_UNPRIV_EVIDENCE" = 0 ]; then
-      info "the probe ran AS ROOT ($PERF_DROP_STATE) and root BYPASSES perf_event_paranoid — its success is NOT evidence that an UNPRIVILEGED process can profile this box"
-      info "prove it as the agent account:  sudo -u <agent-user> perf stat -C 0 -e cycles -- sleep 0.1   (or install util-linux so bootstrap can drop privilege itself via setpriv)"
+      # `identity-unknown` is its own sentence: with `id -u` unusable we do NOT know the
+      # probe ran as root, and asserting it would be as unfounded as asserting it did
+      # not (issue #3249 review R4-1). Report the unknown as an unknown.
+      if [ "$PERF_DROP_STATE" = identity-unknown ]; then
+        info "the identity of this process could NOT be determined ('id -u' unusable), so the probe's success is NOT attributable to an unprivileged process — no capability claim is made from it"
+        info "install/repair coreutils so 'id -u' works, then re-run; or prove it as the agent account:  sudo -u <agent-user> perf stat -C 0 -e cycles -- sleep 0.1"
+      else
+        info "the probe ran AS ROOT ($PERF_DROP_STATE) and root BYPASSES perf_event_paranoid — its success is NOT evidence that an UNPRIVILEGED process can profile this box"
+        info "prove it as the agent account:  sudo -u <agent-user> perf stat -C 0 -e cycles -- sleep 0.1   (or install util-linux so bootstrap can drop privilege itself via setpriv)"
+      fi
     fi
   elif [ "$PERF_FUNC" = fail ]; then
     warn "perf capability NOT verified — perf stat -C 0 -e cycles: $PERF_VERIFY_OUT"

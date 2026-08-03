@@ -62,6 +62,14 @@
 #   CQLITE_PERF_PROC_DIR        stand-in for /proc/sys/kernel   (test mode only)
 #   CQLITE_PERF_SYSCTL_DIR      stand-in for /etc/sysctl.d      (test mode only)
 #   CQLITE_PERF_TEST_PRIV_DIR   absolute dir holding the suite's sudo/sysctl shims
+#
+# TEST MODE HAS NO FALLBACK (issue #3249 review R4-3). Under the marker BOTH path
+# seams are MANDATORY and must be absolute, non-production directories. The earlier
+# shape — marker set, seam unset, fall back to the real directory — meant test mode
+# could pass the env guard (sudo/sysctl absent, or present as declared shims) and a
+# subsequent root `--yes` run would then invoke a bare `tee` against the REAL
+# /etc/sysctl.d, mutating the host from a test run. "Hermetic" cannot be a claim that
+# depends on a variable being set: it is enforced here, fail-closed and loudly.
 
 # ---- production locations: HARDCODED. Never env-derived outside test mode. ----
 PERF_CAPABILITY_PROC_DIR_DEFAULT='/proc/sys/kernel'
@@ -76,11 +84,51 @@ perf_capability_seam_set() {
   [ -n "${CQLITE_PERF_PROC_DIR:-}" ] || [ -n "${CQLITE_PERF_SYSCTL_DIR:-}" ]
 }
 
+# perf_capability_test_dir_valid <value> <production-default>: rc 0 iff <value> is a
+# usable NON-PRODUCTION stand-in — non-empty, ABSOLUTE, and neither the production
+# directory itself nor a path under it, nor anywhere under the host's own
+# configuration surfaces (/proc, /sys, /etc). An unset or production-shaped seam is
+# NOT "use the real thing": in test mode it is a refusal (R4-3). Builtins only — this
+# is reached from the gate's fork-free token path.
+perf_capability_test_dir_valid() {
+  [ -n "${1:-}" ] || return 1
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in
+    "${2:-/dev/null/never}"|"${2:-/dev/null/never}"/*) return 1 ;;
+    /proc|/proc/*|/sys|/sys/*|/etc|/etc/*) return 1 ;;
+  esac
+  return 0
+}
+
+# perf_capability_test_seams_ok: rc 0 iff test mode has BOTH mandatory seams pointing
+# at explicit non-production directories. Refuses loudly and names the offending seam,
+# because the failure it prevents (a root test run writing the real /etc/sysctl.d) is
+# silent otherwise.
+perf_capability_test_seams_ok() {
+  local ok=0
+  if ! perf_capability_test_dir_valid "${CQLITE_PERF_PROC_DIR:-}" "$PERF_CAPABILITY_PROC_DIR_DEFAULT"; then
+    printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 requires an explicit NON-PRODUCTION CQLITE_PERF_PROC_DIR (absolute, outside %s and outside /proc /sys /etc); got %s. Test mode NEVER falls back to the real directory.\n' \
+      "$PERF_CAPABILITY_PROC_DIR_DEFAULT" "'${CQLITE_PERF_PROC_DIR:-<unset>}'" >&2
+    ok=1
+  fi
+  if ! perf_capability_test_dir_valid "${CQLITE_PERF_SYSCTL_DIR:-}" "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"; then
+    printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 requires an explicit NON-PRODUCTION CQLITE_PERF_SYSCTL_DIR (absolute, outside %s and outside /proc /sys /etc); got %s. Test mode NEVER falls back to the real directory.\n' \
+      "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT" "'${CQLITE_PERF_SYSCTL_DIR:-<unset>}'" >&2
+    ok=1
+  fi
+  [ "$ok" = 0 ]
+}
+
 # perf_capability_env_guard: rc 0 iff this process may act on the perf capability
-# path at all. Both refusals are LOUD on stderr and FAIL CLOSED (the caller does
+# path at all. Every refusal is LOUD on stderr and FAILS CLOSED (the caller does
 # nothing privileged and claims no verdict):
 #   * a seam set WITHOUT the marker — the seams are inert there, and a caller that
 #     was handed one is misconfigured, so nothing privileged may proceed;
+#   * the marker set WITHOUT both non-production path seams — test mode has no
+#     fallback (R4-3): allowing one would let a root `--yes` test run `tee` the REAL
+#     /etc/sysctl.d, which is exactly the host mutation the marker promises cannot
+#     happen. Checked FIRST, before the tool checks, because it is the more
+#     fundamental precondition: a test run with no sandbox has nowhere safe to act;
 #   * the marker set while a REAL sudo/sysctl is reachable — test mode is hermetic
 #     by construction, so a reachable real privileged tool is a bug in the harness,
 #     not something to run.
@@ -91,6 +139,7 @@ perf_capability_env_guard() {
       "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT" "$PERF_CAPABILITY_PROC_DIR_DEFAULT" >&2
     return 1
   fi
+  perf_capability_test_seams_ok || return 1
   local dir="${CQLITE_PERF_TEST_PRIV_DIR:-}" tool resolved
   for tool in sudo sysctl; do
     resolved=$(command -v "$tool" 2>/dev/null) || continue
@@ -123,27 +172,44 @@ perf_capability_env_guard() {
 #   word-splitting or globbing applies to the value. <outvar> must be a plain shell
 #   identifier; every caller passes a literal, and the `__pcd_`/`__pcr_`/`__pct_`
 #   local prefixes keep a caller-named variable from colliding with an internal one.
+#   In TEST MODE the seam is MANDATORY and validated (R4-3): an unset or
+#   production-shaped value is rc 1 with an empty answer, never a silent fallback to
+#   the real /proc or the real /etc/sysctl.d. Every caller propagates that rc, so an
+#   unsandboxed test run reads nothing and writes nothing.
 perf_capability_proc_dir_into() {
+  eval "$1="
   if perf_capability_test_mode; then
-    eval "$1=\${CQLITE_PERF_PROC_DIR:-\$PERF_CAPABILITY_PROC_DIR_DEFAULT}"
-  else
-    eval "$1=\$PERF_CAPABILITY_PROC_DIR_DEFAULT"
+    perf_capability_test_dir_valid "${CQLITE_PERF_PROC_DIR:-}" "$PERF_CAPABILITY_PROC_DIR_DEFAULT" || {
+      printf 'perf-capability: REFUSING to read /proc: CQLITE_PERF_TEST_MODE=1 with no valid non-production CQLITE_PERF_PROC_DIR (got %s) — test mode never falls back to %s.\n' \
+        "'${CQLITE_PERF_PROC_DIR:-<unset>}'" "$PERF_CAPABILITY_PROC_DIR_DEFAULT" >&2
+      return 1
+    }
+    eval "$1=\$CQLITE_PERF_PROC_DIR"
+    return 0
   fi
+  eval "$1=\$PERF_CAPABILITY_PROC_DIR_DEFAULT"
 }
 perf_capability_proc_dir() {
   local __pcd_v
-  perf_capability_proc_dir_into __pcd_v
+  perf_capability_proc_dir_into __pcd_v || return 1
   printf '%s' "$__pcd_v"
 }
 perf_capability_sysctl_dir() {
   if perf_capability_test_mode; then
-    printf '%s' "${CQLITE_PERF_SYSCTL_DIR:-$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT}"
-  else
-    printf '%s' "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"
+    perf_capability_test_dir_valid "${CQLITE_PERF_SYSCTL_DIR:-}" "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT" || {
+      printf 'perf-capability: REFUSING to resolve a sysctl.d path: CQLITE_PERF_TEST_MODE=1 with no valid non-production CQLITE_PERF_SYSCTL_DIR (got %s) — test mode never falls back to %s.\n' \
+        "'${CQLITE_PERF_SYSCTL_DIR:-<unset>}'" "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT" >&2
+      return 1
+    }
+    printf '%s' "$CQLITE_PERF_SYSCTL_DIR"
+    return 0
   fi
+  printf '%s' "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"
 }
 perf_capability_dropin_path() {
-  printf '%s/%s' "$(perf_capability_sysctl_dir)" "$PERF_CAPABILITY_DROPIN_BASENAME"
+  local __pdi_d
+  __pdi_d=$(perf_capability_sysctl_dir) || return 1
+  printf '%s/%s' "$__pdi_d" "$PERF_CAPABILITY_DROPIN_BASENAME"
 }
 
 # perf_capability_dropin_content: the EXACT bytes of the managed drop-in. It is a
@@ -163,6 +229,14 @@ perf_capability_dropin_content() {
 # kernel symbols resolve — otherwise kernel frames are unresolved addresses, a
 # silent attribution loss rather than an error.
 #
+# THE "99-" PREFIX IS LOAD-BEARING — DO NOT RENAME THIS FILE. sysctl.d drop-ins are
+# applied in lexicographic order of BASENAME and the LAST assignment wins. Stock Ubuntu
+# ships /etc/sysctl.d/10-kernel-hardening.conf containing `kernel.kptr_restrict = 1`,
+# so this file only wins because "99-cqlite-perf.conf" sorts after "10-...". Renaming it
+# to cqlite-perf.conf or any lower number silently hands kptr_restrict back to the
+# hardening drop-in at the next boot — the "it silently reverts" mystery in three
+# separate measurement reports.
+#
 # NOTE ON PRECEDENCE: /etc/sysctl.conf is applied AFTER every sysctl.d drop-in by
 # both `sysctl --system` and systemd-sysctl, so a stale perf_event_paranoid there
 # BEATS this file. Check it if the values do not take.
@@ -179,13 +253,58 @@ EOF
 # compare is an in-shell string compare, NOT `diff -q`: on a box without diffutils
 # `diff` exits 127, which would report "different" on every run — so bootstrap
 # would re-write the file each time AND then report it could not write it.
+#
+# TRAILING NEWLINES ARE PART OF THE BYTES (issue #3249 review R4-4). `$( )` strips
+# EVERY trailing newline from its output, so comparing two command substitutions made
+# a file missing its final newline — or carrying extra blank lines at the end —
+# compare EQUAL to the canonical content: "byte-exact" was a false claim, and such a
+# file was never rewritten. The file side is now read with `read -r -d ''`, which
+# consumes the whole file verbatim (builtin, so no `cat`/`diff` dependency), and the
+# canonical side carries an in-substitution sentinel so its own final newline survives
+# the stripping. A NUL byte in the file truncates the read and therefore compares
+# unequal — fail-closed, and correct: a file with a NUL is not our text drop-in.
 perf_capability_dropin_current() {
-  local path want got
-  path=$(perf_capability_dropin_path)
+  local path want got=''
+  path=$(perf_capability_dropin_path) || return 1
   [ -f "$path" ] && [ -r "$path" ] || return 1
-  want=$(perf_capability_dropin_content)
-  got=$(<"$path") || return 1
-  [ "$want" = "$got" ]
+  want=$(perf_capability_dropin_content; printf 'X')
+  IFS= read -r -d '' got <"$path"
+  [ "$want" = "${got}X" ]
+}
+
+# perf_capability_competing_files: every OTHER file in the sysctl.d directory that also
+# sets kernel.perf_event_paranoid or kernel.kptr_restrict, one per line as
+#   <override|earlier> <path>
+# `override` = its basename sorts AFTER ours, so `sysctl --system`/systemd-sysctl apply
+# it LAST and IT WINS; `earlier` = ours wins.
+#
+# WHY THIS EXISTS. Three separate reports (ws0-3217, ws3-3029, the 2026-07-27 Cassandra
+# baseline) recorded that a hand-set perf_event_paranoid/kptr_restrict "silently
+# reverts" and none identified the cause. The cause is a NAMED FILE: stock Ubuntu ships
+# /etc/sysctl.d/10-kernel-hardening.conf with `kernel.kptr_restrict = 1`, re-asserted at
+# every boot and by every `sysctl --system`. "It silently reverts" is unactionable;
+# "10-kernel-hardening.conf sets kptr_restrict = 1 and sorts BEFORE ours, so ours wins"
+# is a diagnosis. Ordering is lexicographic by BASENAME in BYTE order, which is what
+# systemd-sysctl/`sysctl --system` use — and `[ "$a" \> "$b" ]` is the right operator
+# for it: the `[` builtin compares with strcmp (verified: byte order even under a UTF-8
+# LC_ALL), whereas `[[ > ]]` would switch to locale collation and could mis-rank names
+# whose only difference is punctuation.
+perf_capability_competing_files() {
+  local dir base f name
+  dir=$(perf_capability_sysctl_dir) || return 1
+  base="$PERF_CAPABILITY_DROPIN_BASENAME"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.conf; do
+    [ -f "$f" ] && [ -r "$f" ] || continue
+    name="${f##*/}"
+    [ "$name" = "$base" ] && continue
+    grep -Eq '^[[:space:]]*kernel\.(perf_event_paranoid|kptr_restrict)[[:space:]]*=' "$f" 2>/dev/null || continue
+    if [ "$name" \> "$base" ]; then
+      printf 'override %s\n' "$f"
+    else
+      printf 'earlier %s\n' "$f"
+    fi
+  done
 }
 
 # perf_capability_proc_read <outvar> <name>: the CURRENT kernel value read straight
@@ -203,6 +322,7 @@ perf_capability_proc_read() {
   local __pcr_out="$1" __pcr_dir="" __pcr_v=""
   perf_capability_proc_dir_into __pcr_dir
   eval "$__pcr_out="
+  perf_capability_proc_dir_into __pcr_dir || return 1
   [ -r "$__pcr_dir/$2" ] || return 1
   read -r __pcr_v <"$__pcr_dir/$2" 2>/dev/null
   __pcr_v="${__pcr_v%%[[:space:]]*}"
@@ -288,6 +408,49 @@ perf_capability_token() {
 # when it can, and when it cannot it says so — the caller then subordinates the
 # functional result to the /proc token, which is identity-independent.
 #
+# perf_capability_self_uid_into <outvar>: THIS process's uid, and rc 0 ONLY when it is
+# genuinely known — `id -u` must EXIST, exit 0, and print a validated non-negative
+# integer. rc 1 (with <outvar> emptied) means "identity unknown", which is NOT the same
+# as "unprivileged" (issue #3249 review R4-1).
+#
+# The previous shape, `$(id -u 2>/dev/null || echo 1000)`, FAILED OPEN: a missing or
+# broken `id` made a ROOT process look unprivileged, so its root perf run was accepted
+# as unprivileged evidence and printed a false VERIFIED — the very R3-1 defect, through
+# the detector written to prevent it. An unknown identity can never resolve to the
+# reassuring case.
+perf_capability_self_uid_into() {
+  local __psu_v=''
+  eval "$1="
+  command -v id >/dev/null 2>&1 || return 1
+  __psu_v=$(id -u 2>/dev/null) || return 1
+  perf_capability_is_int "$__psu_v" || return 1
+  case "$__psu_v" in -*) return 1 ;; esac   # a negative uid is not an identity
+  eval "$1=\$__psu_v"
+}
+
+# perf_capability_name_is_uid <name> <uid> <gid>: rc 0 iff <name> is a real account in
+# the passwd database whose uid AND gid equal the supplied (already validated) numerics
+# and whose uid is non-zero.
+#
+# WHY (issue #3249 review R4-2). `runuser -u <name>` / `sudo -u <name>` drop to whatever
+# the NAME resolves to, not to the numeric ids we validated. SUDO_USER and SUDO_UID are
+# independent environment strings: `SUDO_UID=1000 SUDO_USER=root` (stale, hand-set, or
+# inconsistent) would run the probe AS ROOT while the code reported a successful
+# privilege drop — a false VERIFIED again. A name is therefore only usable once the
+# passwd database confirms it IS the validated uid/gid.
+# The shape check is equally load-bearing: the prefix is word-split by the caller, so a
+# name containing whitespace or glob characters could inject extra argv tokens.
+perf_capability_name_is_uid() {
+  local __pni_n="${1:-}" __pni_u="${2:-}" __pni_g="${3:-}" __pni_ru __pni_rg
+  [ -n "$__pni_n" ] || return 1
+  case "$__pni_n" in -*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  command -v id >/dev/null 2>&1 || return 1
+  __pni_ru=$(id -u "$__pni_n" 2>/dev/null) || return 1
+  __pni_rg=$(id -g "$__pni_n" 2>/dev/null) || return 1
+  perf_capability_is_int "$__pni_ru" && perf_capability_is_int "$__pni_rg" || return 1
+  [ "$__pni_ru" = "$__pni_u" ] && [ "$__pni_rg" = "$__pni_g" ] && [ "$__pni_ru" -gt 0 ]
+}
+
 # perf_capability_drop_target_into <outvar_uid> <outvar_gid> <outvar_name>:
 # resolve an UNPRIVILEGED identity to probe as. Never invented — a box that offers
 # none reports none (rc 1) rather than guessing a uid:
@@ -296,11 +459,21 @@ perf_capability_token() {
 #      Strongest available evidence.
 #   2. `nobody`, resolved from the passwd database (never a hardcoded 65534: a box
 #      without that account must report "no target", not probe a uid nobody owns).
+# THE NUMERIC IDS ARE THE TARGET; the NAME is optional and only ever set when the
+# passwd database confirms it resolves to exactly those non-zero ids (R4-2). An
+# unverifiable SUDO_USER is dropped, not trusted: the numeric-only mechanisms
+# (setpriv, `sudo -u '#<uid>'`) still work, and a name-requiring mechanism correctly
+# reports that it has nothing safe to use.
 perf_capability_drop_target_into() {
   local __pdt_u='' __pdt_g='' __pdt_n=''
   if perf_capability_is_int "${SUDO_UID:-}" && perf_capability_is_int "${SUDO_GID:-}" \
      && [ "${SUDO_UID:-0}" -gt 0 ] && [ "${SUDO_GID:-0}" -gt 0 ]; then
-    __pdt_u="${SUDO_UID}"; __pdt_g="${SUDO_GID}"; __pdt_n="${SUDO_USER:-}"
+    __pdt_u="${SUDO_UID}"; __pdt_g="${SUDO_GID}"
+    if perf_capability_name_is_uid "${SUDO_USER:-}" "$__pdt_u" "$__pdt_g"; then
+      __pdt_n="${SUDO_USER}"
+    else
+      __pdt_n=''
+    fi
   else
     __pdt_u=$(id -u nobody 2>/dev/null) || __pdt_u=''
     __pdt_g=$(id -g nobody 2>/dev/null) || __pdt_g=''
@@ -321,18 +494,29 @@ perf_capability_drop_target_into() {
 #   self-unprivileged             we are not root: the probe already measures the
 #                                 right thing, prefix empty (rc 0)
 #   dropped:<mech>:<identity>     root, and privilege is dropped for the probe (rc 0)
+#   identity-unknown              `id -u` is unusable, so WHO runs the probe is unknown
+#                                 and the result is not evidence either way (rc 1)
 #   root-no-unprivileged-target   root, and no unprivileged identity is resolvable (rc 1)
-#   root-no-drop-mechanism        root, target known, but no setpriv/runuser/sudo (rc 1)
+#   root-no-drop-mechanism        root, target known, but no usable setpriv/runuser/sudo (rc 1)
 # Mechanism order: `setpriv` (util-linux; a plain setresuid, no PAM, no session, no
-# shell), then `runuser`, then `sudo -n -u`. The prefix is composed ONLY of literal
-# tokens plus a validated numeric uid/gid or a passwd-resolved name, so the caller may
-# word-split it. A non-zero rc is NOT an error to fail on: it is the caller's cue to
-# label the functional result as what it is — not evidence about an unprivileged
-# process — and to let the /proc token be the authority.
+# shell), then `runuser`, then `sudo -n -u`. Two of the three take the VALIDATED NUMERIC
+# ids and never a name — `setpriv --reuid/--regid`, and `sudo -u '#<uid>'` (sudo's
+# documented numeric-uid form) — so no name has to be trusted (R4-2). `runuser` accepts
+# only a name and is therefore used ONLY with a passwd-confirmed one.
+#   The `#<uid>` token is safe through the caller's word-split: `#` only starts a comment
+#   during tokenisation of the source line, and this value arrives by EXPANSION
+#   afterwards, so it is passed to sudo as a literal argument.
+# The prefix is composed ONLY of literal tokens plus a validated numeric uid/gid or a
+# passwd-confirmed name, so the caller may word-split it. A non-zero rc is NOT an error
+# to fail on: it is the caller's cue to label the functional result as what it is — not
+# evidence about an unprivileged process — and to let the /proc token be the authority.
 perf_capability_drop_prefix_into() {
-  local __pdp_u='' __pdp_g='' __pdp_n=''
+  local __pdp_u='' __pdp_g='' __pdp_n='' __pdp_self=''
   eval "$1="
-  if [ "$(id -u 2>/dev/null || echo 1000)" != 0 ]; then
+  if ! perf_capability_self_uid_into __pdp_self; then
+    eval "$2=identity-unknown"; return 1
+  fi
+  if [ "$__pdp_self" != 0 ]; then
     eval "$2=self-unprivileged"; return 0
   fi
   if ! perf_capability_drop_target_into __pdp_u __pdp_g __pdp_n; then
@@ -348,9 +532,9 @@ perf_capability_drop_prefix_into() {
     eval "$2=\"dropped:runuser:\$__pdp_n\""
     return 0
   fi
-  if [ -n "$__pdp_n" ] && command -v sudo >/dev/null 2>&1; then
-    eval "$1=\"sudo -n -u \$__pdp_n --\""
-    eval "$2=\"dropped:sudo:\$__pdp_n\""
+  if command -v sudo >/dev/null 2>&1; then
+    eval "$1=\"sudo -n -u #\$__pdp_u --\""
+    eval "$2=\"dropped:sudo:uid=\$__pdp_u\""
     return 0
   fi
   eval "$2=root-no-drop-mechanism"
@@ -450,7 +634,10 @@ perf_capability_main() {
       [ "$unpriv" = 1 ] || rc=1
       return $rc ;;
     --drop-in)      perf_capability_dropin_content ;;
-    --drop-in-path) perf_capability_dropin_path; printf '\n' ;;
+    # rc PROPAGATED, never masked by the trailing newline: under an unsandboxed test
+    # mode the path cannot be resolved at all (R4-3), and a caller must see that as a
+    # failure rather than as an empty-but-successful answer.
+    --drop-in-path) perf_capability_dropin_path || return 1; printf '\n' ;;
     -h|--help|'')   perf_capability_usage ;;
     *)              printf 'perf-capability: unknown arg: %s\n' "$1" >&2; perf_capability_usage >&2; return 2 ;;
   esac
