@@ -290,6 +290,9 @@ fn real_main() -> i32 {
         );
         return exit::WINDOW_TOO_SHORT;
     }
-    println!("RESULT: PASS (warm window {secs:.3} s >= {:.3} s)", args.min_seconds);
+    println!(
+        "RESULT: PASS (warm window {secs:.3} s >= {:.3} s)",
+        args.min_seconds
+    );
     exit::OK
 }
