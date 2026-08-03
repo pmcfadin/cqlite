@@ -27,6 +27,10 @@ not a test), via env:
   STUB_IMPORT_SHORT=1    COPY reports one row fewer than the CSV held
   STUB_META_SHORT=1      sstablemetadata reports one row fewer than sstabledump
   STUB_NO_HISTOGRAM=1    sstablemetadata omits the "Partition Size:" histogram
+  STUB_META_EXIT=<n>     sstablemetadata prints a COMPLETE, valid-looking metadata
+                         block (real totalRows, real "Partition Size:" histogram) and
+                         then EXITS <n>: the "plausible output, nonzero status" case
+                         that must never be parsed into a manifest (roborev #3234 M1)
   STUB_ROWS_DELTA=<n>    add <n> to the rows sstablemetadata reports (manifest
                          row-count cross-check)
   STUB_PARTITIONS_DELTA=<n>  add <n> to the partition histogram total (manifest
@@ -187,7 +191,10 @@ def sstablemetadata(path: str) -> int:
         print(f"   1331         | {b}     50  OOOOOOOOOOOOOOOO")
     print("Percentiles")
     print("   50th      1109.0")
-    return 0
+    # Everything above is complete and plausible; only the STATUS says otherwise. This
+    # is the shape a reader that parses stdout without checking the exit code cannot
+    # distinguish from success (roborev #3234 M1).
+    return _delta("STUB_META_EXIT")
 
 
 DESCRIBE = """

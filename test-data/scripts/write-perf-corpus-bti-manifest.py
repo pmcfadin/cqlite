@@ -21,18 +21,27 @@ path, so a stale sha256 cannot survive a regeneration.
 * the rows-per-partition distribution from the row driver's plan records, which
   are counted while the CSV is written (observed, not requested).
 
-FAIL-CLOSED: a missing ``totalRows``, an unreadable ``Partition Size`` histogram, a
-non-``da`` descriptor, an empty or unreadable row plan, an empty SSTable list, a
-plan-vs-``Statistics.db`` disagreement on EITHER the row count or the partition
-count, or a row plan that does not describe THIS run's ``--seed`` /
-``--rows-requested`` / ``--chunk-rows`` (a stale plan) is an error -- never a
-fabricated 0 and never a silently-partial manifest.
+FAIL-CLOSED: a NONZERO ``sstablemetadata`` exit (however complete its output looks), a
+missing ``totalRows``, an unreadable ``Partition Size`` histogram, a non-``da``
+descriptor, an empty or unreadable row plan, an empty SSTable list, an SSTable count or
+generation set that is not one-per-planned-chunk, a plan-vs-``Statistics.db``
+disagreement on EITHER the row count or the partition count, or a row plan that does not
+describe THIS run's ``--seed`` / ``--rows-requested`` / ``--chunk-rows`` (a stale plan)
+is an error -- never a fabricated 0 and never a silently-partial manifest.
+
+PER-MODE METADATA: ``purpose``, the corpus-location fields (``corpus_root``,
+``corpus_committed``, ``committed_copy``, ``corpus_note``, ``datasets_root_usage``) and
+``read_path_measurement_scope`` are rendered per ``--mode``, and whether the corpus is
+COMMITTED is OBSERVED (the checkout is searched and every recorded sha256 re-hashed), not
+assumed. No field may be true of another corpus: the AC3 production figure and the
+500,000-row full-generation golden are recorded ONLY in the production manifest.
 
 Usage:
     write-perf-corpus-bti-manifest.py --corpus-root DIR --keyspace KS --table T \
         --sstable-dir DIR --image IMG --seed S --rows-requested N --chunk-rows N \
-        --payload-bytes N --widths SPEC --buckets LIST --mode smoke|production \
-        --row-plan FILE [--yaml-verified FILE] [--dumped=BASE ...] [--out FILE]
+        --payload-bytes N --widths SPEC --buckets LIST \
+        --mode smoke|production|small_golden --row-plan FILE \
+        [--min-data-db-floor N] [--yaml-verified FILE] [--dumped=BASE ...] [--out FILE]
 """
 
 from __future__ import annotations
@@ -115,8 +124,46 @@ AC3_RECORDED_FIGURE = {
 }
 
 
-def measurement_scope(observed_rows: int, generations: int) -> dict:
+# WHY a non-production corpus gets NO recorded figure and NO golden description
+# (roborev #3234 L3): the production-only blocks below were emitted VERBATIM for every
+# mode, so the COMMITTED small-golden manifest asserted that a 600-row committed
+# fixture was uncommitted and multi-GB and that a 500,000-row "full generation golden"
+# belonged to it. An OMITTED field cannot be false; a field labelled "does not apply"
+# is still there to be quoted out of context. So each mode gets only statements that
+# are true of the corpus it describes, and the AC3 figure stays with the one corpus it
+# was measured on.
+NOT_MEASURED_WHY = {
+    "small_golden": (
+        "this corpus is a CORRECTNESS ORACLE, not a profile target: its Data.db is far "
+        "below the 8 MiB MADV_RANDOM threshold, so the point-read and scan mappings are "
+        "the SAME mapping and a read-plane A/B on it is structurally zero. No throughput "
+        "figure was measured on it, and none may be attributed to it."
+    ),
+    "smoke": (
+        "this is the generator's small end-to-end validation run: it exercises every "
+        "fail-closed assert and is thrown away. No throughput figure was measured on it."
+    ),
+}
+AC3_FIGURE_LIVES = (
+    "the AC3 throughput figure was measured on the PRODUCTION corpus and is recorded in "
+    "the manifest that describes it (test-data/perf-corpus-bti-manifest.json, `mode: "
+    "production`), together with the route it measures and what that route excludes. It "
+    "describes THAT corpus's 27 generations, not this one — do not copy it here."
+)
+
+
+def measurement_scope(mode: str, observed_rows: int, generations: int) -> dict:
     """The route the AC3 figure measures, and what it therefore does NOT measure."""
+    if mode != "production":
+        return {
+            "measured": False,
+            "why_not_measured": NOT_MEASURED_WHY.get(
+                mode, "no throughput figure was measured on this corpus"
+            ),
+            "where_the_ac3_figure_lives": AC3_FIGURE_LIVES,
+            "generations_in_this_corpus": generations,
+            "rows_in_this_corpus": observed_rows,
+        }
     applies = (
         observed_rows == AC3_RECORDED_FIGURE["rows"]
         and generations == AC3_RECORDED_FIGURE["generations"]
@@ -185,6 +232,120 @@ def sha256_of(path: str) -> str:
     return h.hexdigest()
 
 
+# The checkout-relative datasets root the repo's committed fixtures live under, and
+# the repo root this script sits in (test-data/scripts/<this file>).
+COMMITTED_DATASETS_REL = "test-data/datasets"
+REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
+
+
+def committed_copy(sstable_dir: str, corpus_root: str, sstables: list[dict]) -> dict | None:
+    """Locate a COMMITTED copy of these SSTables in the checkout, and VERIFY it.
+
+    `corpus_committed` used to be the literal `False`, in every mode — which is how the
+    COMMITTED small-golden manifest came to state that the committed corpus is not
+    committed (roborev #3234 L3). It is now OBSERVED: the candidate directory is looked
+    up under the checkout's datasets root at the SAME corpus-relative path, and every
+    `Data.db` sha256 this manifest records is RE-HASHED from that copy and required to
+    match. So a `true` here means "these exact bytes are in the checkout", proven, and a
+    `false` means no such copy was found — never an assumption from `--mode`.
+    """
+    rel = os.path.relpath(os.path.abspath(sstable_dir), os.path.abspath(corpus_root))
+    if rel.startswith(".."):
+        return None
+    cand = os.path.join(REPO_ROOT, COMMITTED_DATASETS_REL, rel)
+    if not os.path.isdir(cand):
+        return None
+    for s in sstables:
+        data_db = os.path.join(cand, f"{s['sstable_basename']}-Data.db")
+        if not os.path.exists(data_db) or sha256_of(data_db) != s["data_db_sha256"]:
+            return None
+    files = sorted(e for e in os.listdir(cand)
+                   if os.path.isfile(os.path.join(cand, e)))
+    total = sum(os.path.getsize(os.path.join(cand, e)) for e in files)
+    return {
+        "path": f"{COMMITTED_DATASETS_REL}/{rel.replace(os.sep, '/')}",
+        "files": len(files),
+        "bytes": total,
+        "kib": round(total / 1024, 1),
+        "verified": (
+            "every Data.db sha256 recorded in this manifest was re-hashed from the "
+            "committed copy and matched, so this manifest describes the committed bytes"
+        ),
+    }
+
+
+def corpus_location(mode: str, corpus_root: str, committed: dict | None,
+                    corpus_bytes: int) -> dict:
+    """The four top-level fields that describe WHERE this corpus is and whether it ships.
+
+    Per MODE and per OBSERVATION — no field here may be true of another corpus (roborev
+    #3234 L3): the production note's "multi-GB and NOT committed" was emitted for the
+    600-row committed golden too.
+    """
+    if committed:
+        return {
+            "corpus_root": COMMITTED_DATASETS_REL,
+            "corpus_root_is_checkout_relative": True,
+            "datasets_root_usage": (
+                f"CQLITE_DATASETS_ROOT=<checkout>/{COMMITTED_DATASETS_REL}"
+            ),
+            "corpus_committed": True,
+            "committed_copy": committed,
+            "corpus_note": (
+                f"This corpus IS COMMITTED, at {committed['path']} — "
+                f"{committed['bytes']} B ({committed['kib']} KiB) over "
+                f"{committed['files']} file(s), force-added past .gitignore's `*.db` "
+                "(the `test_da` convention) so a Cassandra-WRITTEN `da` oracle travels "
+                "with the checkout. It is NOT multi-GB and needs no regeneration: read it "
+                "from the checkout. Regenerating it would replace committed bytes (and "
+                "every sha256 here) for no gain — the write timestamps alone make the "
+                "bytes differ. Nothing in this manifest is inherited from a previous one; "
+                "every number is re-read from the bytes on each run."
+            ),
+        }
+    gib = round(corpus_bytes / 1024**3, 4)
+    return {
+        "corpus_root": corpus_root,
+        "corpus_root_is_checkout_relative": False,
+        "datasets_root_usage": f"CQLITE_DATASETS_ROOT={corpus_root}",
+        "corpus_committed": False,
+        "committed_copy": None,
+        "corpus_note": (
+            f"This corpus is {corpus_bytes} B ({gib} GiB) of Data.db under {corpus_root} "
+            "and is NOT committed (.gitignore: `*.db`); no copy of these bytes was found "
+            f"under the checkout's {COMMITTED_DATASETS_REL}. Regenerate it with the "
+            "generator + the recorded seed. Nothing in this manifest is inherited from a "
+            "previous one; every number is re-read from the bytes on each run. See "
+            "`reproducibility` for exactly what the seed does and does not reproduce."
+            + (
+                ""
+                if mode == "production"
+                else f" (mode `{mode}`: this is not the profileable production corpus.)"
+            )
+        ),
+    }
+
+
+PURPOSE = {
+    "production": (
+        "Profileable LZ4-compressed multi-SSTable Cassandra 5.0 BTI (`da`) corpus with "
+        "wide partitions and a compound clustering key, for BTI read-path measurement "
+        "(#3029 WS3, #3030 WS4) and as a Cassandra-written parity oracle."
+    ),
+    "smoke": (
+        "Small end-to-end VALIDATION run of the BTI (`da`) perf-corpus generator: it "
+        "exercises every fail-closed assert at throwaway scale. NOT the profileable "
+        "production corpus and NOT a committed oracle."
+    ),
+    "small_golden": (
+        "COMMITTABLE small Cassandra-written Cassandra 5.0 BTI (`da`) oracle with a wide "
+        "partition and a compound clustering key, for BTI row/cell decode, `Rows.db` trie "
+        "descent and compound-clustering-slice PARITY work (#3042: Cassandra-WRITTEN "
+        "bytes). Deliberately NOT profileable — below the 8 MiB read-plane threshold."
+    ),
+}
+
+
 def sstable_metadata(data_db: str, image: str, docker: list[str], mem: str) -> dict:
     """Read ``Statistics.db`` back with Cassandra's own offline ``sstablemetadata``."""
     sstable_dir = os.path.dirname(os.path.abspath(data_db))
@@ -197,6 +358,25 @@ def sstable_metadata(data_db: str, image: str, docker: list[str], mem: str) -> d
         f"/data/{os.path.basename(data_db)}",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    # FAIL-CLOSED ON THE EXIT STATUS, BEFORE PARSING ANYTHING (roborev #3234 M1).
+    # The counts below are the manifest's authoritative row/partition provenance, and
+    # `sstablemetadata` can print a plausible-looking `totalRows:` / `Partition Size:`
+    # block and STILL fail afterwards — a partial read, a JVM error on a later
+    # component, an OOM kill inside the memory-capped container. Parsing that output
+    # would publish half-measured counts as measured, which is the same defect class as
+    # the `partitions: 0` coercion this file already fixed: a counter not observed is an
+    # error, never a fabricated value. EVERY nonzero code is rejected (a negative code is
+    # a signal, i.e. the OOM case), and BOTH streams are reported so the failure is
+    # diagnosable from the message alone.
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"sstablemetadata FAILED for {data_db} (exit {proc.returncode}) — refusing to "
+            "read row/partition provenance out of the output of a command that did not "
+            "succeed, however complete that output looks\n"
+            f"  cmd={' '.join(cmd)}\n"
+            f"  stdout={proc.stdout.strip()[:2000]}\n"
+            f"  stderr={proc.stderr.strip()[:2000]}"
+        )
     text = proc.stdout
     rows = re.search(r"^totalRows:\s*(\d+)\s*$", text, re.M)
     if not rows:
@@ -491,6 +671,67 @@ def assert_plan_describes_config(plan: dict, seed: str, rows_requested: int,
         )
 
 
+GENERATION_RE = re.compile(r"^da-(\d+)-bti$")
+
+
+def assert_one_sstable_per_chunk(basenames: list[str], plan: dict,
+                                 sstable_dir: str) -> list[int]:
+    """Fail closed unless the corpus is EXACTLY one SSTable per planned chunk.
+
+    roborev #3234 M2: nothing verified the SSTable COUNT against the plan's chunk
+    count. The aggregate row/partition cross-checks cannot see this — an unexpected
+    flush split (two SSTables for one chunk) or a compaction (one SSTable for two
+    chunks) preserves every row and every partition while VIOLATING the promised
+    one-SSTable-per-chunk shape.
+
+    It is not a cosmetic shape either: the GENERATION COUNT determines the scan route
+    and is what the AC3 figure is attributed to ("27 generations, served by
+    generation_merge::stream_generations_for_read"). A corpus that silently held a
+    different number of generations would make that attribution wrong.
+
+    The generation identifiers are additionally required to be exactly ``1..N``: that
+    is the flush order a freshly-created table emits, so a GAP or an offset is direct
+    evidence of the two failure modes above (a compaction promotes its output to a new,
+    higher generation and removes the inputs). Returns the observed generations.
+    """
+    expected = len(plan["chunks"])
+    problems: list[str] = []
+    gens: list[int] = []
+    unparsed: list[str] = []
+    for b in basenames:
+        m = GENERATION_RE.match(b)
+        if m:
+            gens.append(int(m.group(1)))
+        else:
+            unparsed.append(b)
+    if unparsed:
+        problems.append(
+            f"generation identifier: {unparsed} do not match 'da-<gen>-bti' — the "
+            "generation number is what the one-SSTable-per-chunk mapping is checked on"
+        )
+    if len(basenames) != expected:
+        problems.append(
+            f"SSTable count: {len(basenames)} SSTable(s) on disk, the row plan has "
+            f"{expected} chunk(s) — the generator flushes ONCE PER CHUNK, so these two "
+            "numbers must be equal"
+        )
+    if not unparsed and sorted(gens) != list(range(1, expected + 1)):
+        problems.append(
+            f"generation mapping: expected generations 1..{expected} (one per chunk, in "
+            f"flush order), got {sorted(gens)}"
+        )
+    if problems:
+        raise SystemExit(
+            f"one-SSTable-per-chunk check FAILED for {sstable_dir} — this corpus does not "
+            "have the shape this manifest would describe (an unexpected flush split, or a "
+            "compaction merged chunks: autocompaction must be disabled BEFORE the first "
+            "load). The generation COUNT also determines the scan route the AC3 figure is "
+            "attributed to, so refusing to publish a manifest whose sstable_count does not "
+            "match its own row plan:\n  - " + "\n  - ".join(problems)
+        )
+    return sorted(gens)
+
+
 def ddl_from_schema(path: str, keyspace: str, table: str) -> dict:
     if not os.path.exists(path):
         return {"source": "unavailable", "keyspace_ddl": None, "table_ddl": None}
@@ -529,6 +770,9 @@ def main() -> int:
     ap.add_argument("--mode", required=True,
                     choices=["smoke", "production", "small_golden"])
     ap.add_argument("--row-plan", required=True)
+    ap.add_argument("--min-data-db-floor", type=int, default=8 * 1024 * 1024,
+                    help="the largest-Data.db floor this run ENFORCED (the generator's "
+                         "--min-data-db-bytes; 0 for --small-golden)")
     ap.add_argument("--yaml-verified", default=None,
                     help="file holding the grep-verified cassandra.yaml lines")
     ap.add_argument("--dumped", action="append", default=[],
@@ -565,6 +809,10 @@ def main() -> int:
 
     docker = args.docker.split()
     basenames = [os.path.basename(p)[: -len("-Data.db")] for p in datas]
+    # Also BEFORE the containers, and for the same reason: the shape check is pure
+    # arithmetic over filenames, and a corpus that is not one-SSTable-per-chunk must not
+    # cost N `sstablemetadata` starts before it is rejected.
+    generations = assert_one_sstable_per_chunk(basenames, plan, sstable_dir)
     dumped = set(args.dumped)
     sstables = [
         sstable_record(sstable_dir, b, args.image, docker, args.metadata_mem, dumped)
@@ -617,14 +865,18 @@ def main() -> int:
     schema_path = os.path.join(sstable_dir, "schema.cql")
     ddl = ddl_from_schema(schema_path, args.keyspace, args.table)
     largest = max(s["data_db_bytes"] for s in sstables)
+    data_db_total = sum(s["data_db_bytes"] for s in sstables)
+    # WHERE this corpus is, and whether it ships — observed, then rendered per mode.
+    location = corpus_location(
+        args.mode,
+        args.corpus_root,
+        committed_copy(sstable_dir, args.corpus_root, sstables),
+        data_db_total,
+    )
 
     manifest = {
         "issue": 3234,
-        "purpose": (
-            "Profileable LZ4-compressed multi-SSTable Cassandra 5.0 BTI (`da`) corpus "
-            "with wide partitions and a compound clustering key, for BTI read-path "
-            "measurement (#3029 WS3, #3030 WS4) and as a Cassandra-written parity oracle."
-        ),
+        "purpose": PURPOSE[args.mode],
         "generated_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
         "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
@@ -685,16 +937,7 @@ def main() -> int:
             "buckets": args.buckets,
         },
         "rows_per_partition": plan,
-        "corpus_root": args.corpus_root,
-        "datasets_root_usage": f"CQLITE_DATASETS_ROOT={args.corpus_root}",
-        "corpus_committed": False,
-        "corpus_note": (
-            "The corpus itself is multi-GB and is NOT committed (.gitignore: *.db). "
-            "Regenerate it with the generator + the recorded seed. Nothing in this "
-            "manifest is inherited from a previous one; every number is re-read from "
-            "the bytes on each run. See `reproducibility` for exactly what the seed "
-            "does and does not reproduce."
-        ),
+        **location,
         "reproducibility": {
             "reproduced_by_the_seed": (
                 "the ROW SET: every pk/bucket/seq/payload value, the partition count, the "
@@ -757,8 +1000,23 @@ def main() -> int:
                 "plan is a hard failure, because matching aggregate totals alone cannot "
                 "prove the plan describes these bytes"
             ),
+            "one_sstable_per_chunk": (
+                "the SSTable COUNT was checked against the row plan's chunk count and the "
+                "generation identifiers against 1..N before this manifest was written; a "
+                "flush split or a compaction preserves the row and partition totals while "
+                "changing the generation count the scan route (and the AC3 attribution) "
+                "depends on, so a mismatch is a hard failure"
+            ),
+            "corpus_committed": (
+                "OBSERVED: a copy of these SSTables was looked for under the checkout's "
+                f"{COMMITTED_DATASETS_REL} at the same corpus-relative path and every "
+                "recorded Data.db sha256 re-hashed from it; `true` means those exact bytes "
+                "are committed, never an assumption from --mode"
+            ),
         },
-        "read_path_measurement_scope": measurement_scope(observed_rows, len(sstables)),
+        "read_path_measurement_scope": measurement_scope(
+            args.mode, observed_rows, len(sstables)
+        ),
         "tables": [
             {
                 "table": args.table,
@@ -770,12 +1028,20 @@ def main() -> int:
                 ),
                 "format": "da",
                 "sstable_count": len(sstables),
+                "sstable_generations": generations,
+                "one_sstable_per_planned_chunk": True,
                 "rows": observed_rows,
                 "partitions": observed_partitions,
-                "data_db_bytes_total": sum(s["data_db_bytes"] for s in sstables),
+                "data_db_bytes_total": data_db_total,
                 "data_db_bytes_largest": largest,
                 "data_db_largest_gib": round(largest / 1024**3, 4),
-                "min_data_db_floor_bytes": 8 * 1024 * 1024,
+                # The floor this run ENFORCED (--min-data-db-floor, 0 for the
+                # small-golden oracle, which is deliberately below the read-plane
+                # threshold) vs. the fixed 8 MiB MADV_RANDOM threshold itself. Emitting
+                # 8 MiB as "the floor" for a run that enforced 0 read as a violated
+                # requirement in the committed small-golden manifest (roborev #3234 L3).
+                "min_data_db_floor_bytes": args.min_data_db_floor,
+                "read_plane_threshold_bytes": 8 * 1024 * 1024,
                 "meets_8mib_read_plane_floor": largest > 8 * 1024 * 1024,
                 "rows_db_bytes_total": sum(s["rows_db_bytes"] for s in sstables),
                 "every_rows_db_non_empty": all(s["rows_db_bytes"] > 0 for s in sstables),

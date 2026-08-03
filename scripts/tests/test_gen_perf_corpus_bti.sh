@@ -501,21 +501,35 @@ fi
 # --------------------------------------- AC1/AC2 asserts via --verify-only ----
 # A fabricated `da` corpus: the asserts are file-level, so no container is needed.
 # Data.db is sparse (truncate), which is exactly what the size assert reads.
-make_corpus() { # make_corpus <dir> <data-bytes> <rows-db-bytes>
-  local dir="$1" data="$2" rows="$3"
+make_corpus() { # make_corpus <dir> <data-bytes> <rows-db-bytes> [generation]
+  local dir="$1" data="$2" rows="$3" g="${4:-1}" stem
+  stem="da-$g-bti"
   mkdir -p "$dir"
-  truncate -s "$data" "$dir/da-1-bti-Data.db"
-  if [ "$rows" -gt 0 ]; then truncate -s "$rows" "$dir/da-1-bti-Rows.db"; else : >"$dir/da-1-bti-Rows.db"; fi
+  truncate -s "$data" "$dir/$stem-Data.db"
+  if [ "$rows" -gt 0 ]; then truncate -s "$rows" "$dir/$stem-Rows.db"; else : >"$dir/$stem-Rows.db"; fi
   local c
   for c in Partitions.db Statistics.db CompressionInfo.db Filter.db; do
-    truncate -s 64 "$dir/da-1-bti-$c"
+    truncate -s 64 "$dir/$stem-$c"
   done
-  printf 'x\n' >"$dir/da-1-bti-Digest.crc32"
+  printf 'x\n' >"$dir/$stem-Digest.crc32"
   printf 'Data.db\nStatistics.db\nDigest.crc32\nTOC.txt\nCompressionInfo.db\nFilter.db\nPartitions.db\nRows.db\n' \
-    >"$dir/da-1-bti-TOC.txt"
+    >"$dir/$stem-TOC.txt"
 }
+# `--rows 1 --chunk-rows 1` => CHUNKS=1, which is what these fabricated one-SSTable
+# corpora hold: assert_corpus now requires the SSTable count to EQUAL the configured
+# chunk count and the generations to be 1..CHUNKS (roborev #3234 M2), so a verify run
+# must declare the shape it is verifying. The default (production) 27-chunk
+# configuration would legitimately reject a 1-SSTable corpus -- which is the point, and
+# is pinned by its own negative controls below.
 verify() { # verify <corpus-root>
-  bash "$GEN" --verify-only --out "$1" --keyspace perf_bti --table wide_multiclustering 2>&1
+  bash "$GEN" --verify-only --out "$1" --keyspace perf_bti --table wide_multiclustering \
+    --rows 1 --chunk-rows 1 2>&1
+}
+# verify_shape <corpus-root> <rows> <chunk-rows>: the same, with an explicit chunk plan,
+# for the one-SSTable-per-chunk cases (which need CHUNKS != the SSTable count).
+verify_shape() {
+  bash "$GEN" --verify-only --out "$1" --keyspace perf_bti --table wide_multiclustering \
+    --rows "$2" --chunk-rows "$3" 2>&1
 }
 
 root="$TMP/good"
@@ -578,6 +592,66 @@ if [ "$rc" -eq 0 ] && grep -q "largest_data_db=8388609" <<<"$out"; then
   pass "--verify-only accepts 8388609 B (one byte over the floor)"
 else
   fail "AC2 boundary+1: expected VERIFY-OK (rc=$rc, out: $out)"
+fi
+
+# ------------------------------- one SSTable per chunk (roborev #3234 M2) ------
+# NOBODY verified that the number of emitted SSTables equals the row plan's chunk
+# count. The aggregate row/partition cross-checks CANNOT see this: an unexpected flush
+# split or a compaction preserves every row and every partition while destroying the
+# promised one-SSTable-per-chunk shape -- and the GENERATION COUNT is what selects the
+# scan route and what the AC3 throughput figure is attributed to ("27 generations,
+# generation_merge::stream_generations_for_read"), so a corpus with a different
+# generation count silently makes that attribution wrong.
+#
+# Three negative controls, because there are three distinct ways to violate it:
+# too few, too many, and a GAP in the numbering at the right count (the compaction
+# signature -- a compaction promotes its output to a new, higher generation).
+root="$TMP/shape-few"
+make_corpus "$root/sstables/perf_bti/wide_multiclustering-9123456789abcdef0123456789abcdef" 9437184 4096
+out=$(verify_shape "$root" 2 1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "AC: 1 SSTable(s) in" <<<"$out" \
+   && grep -q "plans" <<<"$out" && grep -q "2 chunk(s)" <<<"$out"; then
+  pass "--verify-only HARD-FAILS when there are FEWER SSTables than planned chunks"
+else
+  fail "shape too-few case: expected a chunk-count failure naming both numbers (rc=$rc, out: $out)"
+fi
+
+root="$TMP/shape-many"
+d="$root/sstables/perf_bti/wide_multiclustering-a123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096 1
+make_corpus "$d" 9437184 4096 2
+out=$(verify_shape "$root" 1 1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "AC: 2 SSTable(s) in" <<<"$out" && grep -q "1 chunk(s)" <<<"$out"; then
+  pass "--verify-only HARD-FAILS when there are MORE SSTables than planned chunks"
+else
+  fail "shape too-many case: expected a chunk-count failure naming both numbers (rc=$rc, out: $out)"
+fi
+
+# The generation GAP: the count is RIGHT (2 == 2), so this case can only be caught by
+# the generation-mapping check -- i.e. it proves that check is independent of the count.
+root="$TMP/shape-gap"
+d="$root/sstables/perf_bti/wide_multiclustering-b123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096 1
+make_corpus "$d" 9437184 4096 3
+out=$(verify_shape "$root" 2 1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "AC: generation mapping" <<<"$out" \
+   && grep -q "expected generations" <<<"$out" && ! grep -q "SSTable(s) in" <<<"$out"; then
+  pass "--verify-only HARD-FAILS on a GAP in the generation numbering at the right count"
+else
+  fail "shape gap case: expected a generation-mapping failure (rc=$rc, out: $out)"
+fi
+
+# Positive control for the same assert: 2 SSTables, generations 1..2, 2 planned chunks.
+root="$TMP/shape-ok"
+d="$root/sstables/perf_bti/wide_multiclustering-c123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096 1
+make_corpus "$d" 9437184 4096 2
+out=$(verify_shape "$root" 2 1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out" && grep -q "sstables=2" <<<"$out" \
+   && grep -q "one SSTable per chunk: 2 == 2 chunk(s); generations 1 2" <<<"$out"; then
+  pass "--verify-only accepts 2 SSTables at generations 1..2 for 2 chunks (positive control)"
+else
+  fail "shape positive control: expected VERIFY-OK with sstables=2 (rc=$rc, out: $out)"
 fi
 
 # TOC contract: Index.db/Summary.db are BIG-only and must never appear.
@@ -1077,16 +1151,155 @@ PY
     "$TMP/plan-wide.jsonl"
   { plan_rec 0 77:0 400; plan_rec 1 77:1 400; } >"$TMP/plan-short.jsonl"
   plan_case "a plan SHORT of the configured chunk count" "chunk count" "$TMP/plan-short.jsonl"
-  # Positive control: a matching plan passes the config check, so the run proceeds to
-  # the (deliberately unavailable) sstablemetadata step instead of failing here.
-  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; plan_rec 2 77:2 200; } >"$TMP/plan-cfg-ok.jsonl"
+  # Positive control: a matching plan (ONE chunk, matching the one fabricated SSTable)
+  # passes BOTH the config check and the one-SSTable-per-chunk check, so the run proceeds
+  # to the (deliberately unavailable) sstablemetadata step instead of failing here.
+  # `not-docker` exits 1, so what it dies on is the writer's exit-status check.
+  { plan_rec 0 77:0 400; } >"$TMP/plan-cfg-ok.jsonl"
   rm -f "$TMP/plancfg-manifest.json"
-  out=$(python3 "$MANIFEST_PY" "${plancfg_args[@]}" --row-plan "$TMP/plan-cfg-ok.jsonl" 2>&1); rc=$?
+  out=$(python3 "$MANIFEST_PY" --corpus-root "$TMP" --keyspace perf_bti \
+          --table wide_multiclustering --image cassandra:5.0.2 --seed 77 \
+          --rows-requested 400 --chunk-rows 400 --payload-bytes 32 --widths 200:1 \
+          --buckets alpha,bo --mode production --sstable-dir "$TMP/plancfg" \
+          --docker "$TMP/bin/not-docker" --out "$TMP/plancfg-manifest.json" \
+          --row-plan "$TMP/plan-cfg-ok.jsonl" 2>&1); rc=$?
   if [ "$rc" -ne 0 ] && ! grep -q "row-plan/config check FAILED" <<<"$out" \
-     && grep -q "could not read totalRows" <<<"$out"; then
+     && ! grep -q "one-SSTable-per-chunk check FAILED" <<<"$out" \
+     && grep -q "sstablemetadata FAILED for" <<<"$out"; then
     pass "a plan that MATCHES the configuration passes the check (positive control)"
   else
     fail "plan/config positive control: expected to get past the plan check (rc=$rc, out: $out)"
+  fi
+
+  # ------------- one SSTable per planned chunk, in the WRITER (roborev #3234 M2) -------
+  # Same defect, second layer: the manifest writer published `sstable_count` without ever
+  # comparing it to `len(plan["chunks"])`. Hermetic -- the check runs BEFORE the
+  # per-SSTable `sstablemetadata` containers, so a wrong-shaped corpus costs no container
+  # start (and these cases need no docker).
+  #
+  # `mk_gens <dir> <gen>...` fabricates just the Data.db files the shape check reads.
+  mk_gens() {
+    local dir="$1"; shift
+    rm -rf "$dir"; mkdir -p "$dir"
+    local g
+    for g in "$@"; do truncate -s 1024 "$dir/da-$g-bti-Data.db"; done
+  }
+  # shape_case <label> <expect-substring> <dir> [must-not-appear]: the plan below has 3
+  # chunks (1000 rows / 400 per chunk), so the shape is varied by the DIRECTORY.
+  shape_case() {
+    local label="$1" expect="$2" dir="$3" absent="${4:-}"
+    rm -f "$TMP/shapecfg-manifest.json"
+    local o r
+    o=$(python3 "$MANIFEST_PY" --corpus-root "$TMP" --keyspace perf_bti \
+          --table wide_multiclustering --image cassandra:5.0.2 --seed 77 \
+          --rows-requested 1000 --chunk-rows 400 --payload-bytes 32 --widths 200:1 \
+          --buckets alpha,bo --mode production --sstable-dir "$dir" \
+          --docker "$TMP/bin/not-docker" --out "$TMP/shapecfg-manifest.json" \
+          --row-plan "$TMP/plan-cfg-shape.jsonl" 2>&1); r=$?
+    if [ "$r" -ne 0 ] && grep -q "one-SSTable-per-chunk check FAILED" <<<"$o" \
+       && grep -q "$expect" <<<"$o" && [ ! -f "$TMP/shapecfg-manifest.json" ] \
+       && { [ -z "$absent" ] || ! grep -q "$absent" <<<"$o"; }; then
+      pass "manifest writer HARD-FAILS on $label, and writes nothing"
+    else
+      fail "$label: expected a one-SSTable-per-chunk failure naming '$expect' (rc=$r, out: $o)"
+    fi
+  }
+  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; plan_rec 2 77:2 200; } >"$TMP/plan-cfg-shape.jsonl"
+  mk_gens "$TMP/shape-writer-few" 1 2
+  shape_case "FEWER SSTables than planned chunks" \
+    "2 SSTable(s) on disk, the row plan has 3 chunk(s)" "$TMP/shape-writer-few"
+  mk_gens "$TMP/shape-writer-many" 1 2 3 4
+  shape_case "MORE SSTables than planned chunks" \
+    "4 SSTable(s) on disk, the row plan has 3 chunk(s)" "$TMP/shape-writer-many"
+  # Right COUNT, wrong generations: only the generation-mapping half can catch it.
+  mk_gens "$TMP/shape-writer-gap" 1 2 4
+  shape_case "a GAP in the generation numbering at the right count" \
+    "expected generations 1..3" "$TMP/shape-writer-gap" "SSTable count:"
+
+  # ------- the COMMITTED small-golden manifest describes the COMMITTED bytes ------
+  # roborev #3234 L3: this manifest is a COMMITTED provenance artifact, and it stated
+  # that the 600-row committed corpus is uncommitted and multi-GB, and that a
+  # 500,000-row "full generation golden" belongs to it. Both were plainly untrue. This
+  # case pins the absence of every production-only claim, and the next one pins that the
+  # sha256s it records still match the committed bytes -- so a metadata-only rewrite can
+  # never drift from the fixture it describes.
+  SMALL_GOLDEN_MANIFEST="$REPO_ROOT/test-data/perf-corpus-bti-small-golden-manifest.json"
+  if [ ! -f "$SMALL_GOLDEN_MANIFEST" ]; then
+    fail "missing the committed small-golden manifest: $SMALL_GOLDEN_MANIFEST"
+  else
+    out=$(python3 - "$SMALL_GOLDEN_MANIFEST" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+blob = json.dumps(m)
+t = m["tables"][0]
+scope = m["read_path_measurement_scope"]
+bad = []
+if m["mode"] != "small_golden":
+    bad.append(f"mode: {m['mode']!r}")
+if m["corpus_committed"] is not True:
+    bad.append("corpus_committed must be True: this corpus IS committed")
+if not m.get("committed_copy"):
+    bad.append("committed_copy must name the verified committed path")
+elif "test-data/datasets" not in m["committed_copy"]["path"]:
+    bad.append(f"committed_copy.path: {m['committed_copy']['path']!r}")
+if "multi-GB" in blob or "multi-GB" in m["corpus_note"]:
+    bad.append("corpus_note still calls a 97,780 B committed fixture multi-GB")
+for k in ("recorded_figure", "full_generation_golden", "what_the_ac3_figure_measures"):
+    if k in scope:
+        bad.append(f"production-only key {k} present")
+if scope.get("measured") is not False:
+    bad.append(f"read_path_measurement_scope.measured: {scope.get('measured')!r}")
+# The production figure and the 500k-row golden must not appear ANYWHERE in the file.
+for claim in ("13200000", "103804", "160752721", "500,000 rows", "153.3"):
+    if claim in blob:
+        bad.append(f"production-only claim {claim!r} present")
+if "Profileable" in m["purpose"]:
+    bad.append("purpose calls a sub-8-MiB correctness oracle profileable")
+if t["min_data_db_floor_bytes"] != 0:
+    bad.append(
+        f"min_data_db_floor_bytes: {t['min_data_db_floor_bytes']} — --small-golden "
+        "enforces no read-plane floor, so reporting 8 MiB reads as a violated one"
+    )
+if t["sstable_count"] != len(m["rows_per_partition"]["chunks"]):
+    bad.append("sstable_count != planned chunk count")
+if t["sstable_generations"] != [1]:
+    bad.append(f"sstable_generations: {t['sstable_generations']!r}")
+print("SMALL-GOLDEN-SCOPE-OK" if not bad else "BAD: " + "; ".join(bad))
+PY
+    )
+    if [ "$out" = "SMALL-GOLDEN-SCOPE-OK" ]; then
+      pass "the committed small-golden manifest carries NO production-only claims"
+    else
+      fail "committed small-golden manifest: $out"
+    fi
+
+    # ...and it still describes the COMMITTED BYTES: every recorded sha256 re-hashed
+    # from the committed Data.db. A metadata-only rewrite must not have touched them.
+    out=$(python3 - "$SMALL_GOLDEN_MANIFEST" "$REPO_ROOT" <<'PY'
+import hashlib, json, os, sys
+m = json.load(open(sys.argv[1]))
+root = sys.argv[2]
+t = m["tables"][0]
+d = os.path.join(root, "test-data", "datasets", t["sstable_dir"])
+bad = []
+for s in t["sstables"]:
+    p = os.path.join(d, f"{s['sstable_basename']}-Data.db")
+    if not os.path.exists(p):
+        bad.append(f"missing committed {p}")
+        continue
+    h = hashlib.sha256(open(p, "rb").read()).hexdigest()
+    if h != s["data_db_sha256"]:
+        bad.append(f"{s['sstable_basename']}: recorded {s['data_db_sha256']}, on disk {h}")
+    if os.path.getsize(p) != s["data_db_bytes"]:
+        bad.append(f"{s['sstable_basename']}: size {os.path.getsize(p)} != recorded")
+print("SMALL-GOLDEN-BYTES-OK" if not bad else "BAD: " + "; ".join(bad))
+PY
+    )
+    if [ "$out" = "SMALL-GOLDEN-BYTES-OK" ]; then
+      pass "the committed small-golden manifest's sha256s match the committed Data.db"
+    else
+      fail "committed small-golden bytes: $out"
+    fi
   fi
 
   # ------------------------------- end-to-end through the stub `docker` ---------
@@ -1184,6 +1397,17 @@ eq("cross-check rows", m["row_count_cross_check"]["statistics_db_rows"], plan["r
 eq("cross-check partitions",
    m["row_count_cross_check"]["statistics_db_partitions"], plan["partitions"])
 eq("plan chunks", len(plan["chunks"]), 2)
+# One SSTable per planned chunk, and the generations are the flush order (#3234 M2).
+eq("sstable_generations", t["sstable_generations"], [1, 2])
+eq("one_sstable_per_planned_chunk", t["one_sstable_per_planned_chunk"], True)
+eq("min_data_db_floor_bytes (production default)", t["min_data_db_floor_bytes"], 8388608)
+# PRODUCTION mode keeps the AC3 figure -- the per-mode split must not delete it (#3234 L3)
+# -- and marks it historical, since this stub corpus is not the one it was measured on.
+scope = m["read_path_measurement_scope"]
+eq("recorded_figure present", "recorded_figure" in scope, True)
+eq("applies_to_this_corpus", scope["applies_to_this_corpus"], False)
+eq("corpus_committed (uncommitted stub corpus)", m["corpus_committed"], False)
+eq("committed_copy", m["committed_copy"], None)
 eq("seed_material of chunk 0", plan["chunks"][0]["seed_material"], "3234:0")
 eq("goldens", sum(1 for s in t["sstables"] if s["sstabledump_golden"]), 1)
 for s in t["sstables"]:
@@ -1253,6 +1477,38 @@ PY
       fail "no-histogram case: expected an unobserved-partition-count refusal (rc=$rc, tail: $(tail -6 "$TMP/e2e-no-hist.log"))"
     fi
 
+    # ---- roborev #3234 M1: PLAUSIBLE OUTPUT + a NONZERO EXIT ---------------------
+    # The manifest writer parsed `sstablemetadata` stdout without ever looking at the
+    # exit status, so a command that prints a complete, valid-looking metadata block
+    # (real totalRows, real "Partition Size:" histogram) and THEN fails -- a partial
+    # read, a JVM error, an OOM kill inside the memory-capped container -- produced an
+    # AUTHORITATIVE manifest out of counts nothing stands behind. `STUB_META_EXIT=42`
+    # is exactly that shape: nothing in the output distinguishes it from success.
+    # Goldens are off so the WRITER's readback is what hits it first.
+    STUB_META_EXIT=42 e2e_run meta-exit --dump-generations 0; rc=$?
+    if [ "$rc" -ne 0 ] \
+       && grep -q "sstablemetadata FAILED for" "$TMP/e2e-meta-exit.log" \
+       && grep -q "exit 42" "$TMP/e2e-meta-exit.log" \
+       && grep -q "refusing to read row/partition provenance" "$TMP/e2e-meta-exit.log" \
+       && [ ! -f "$TMP/e2e-meta-exit/manifest-bti-3234.json" ]; then
+      pass "manifest writer HARD-FAILS on a nonzero sstablemetadata exit WITH valid output"
+    else
+      fail "meta-exit case: expected an exit-status refusal (rc=$rc, tail: $(tail -8 "$TMP/e2e-meta-exit.log"))"
+    fi
+
+    # Same fault, the generator's own readback (goldens ON, so verify_dumped_row_counts
+    # reaches it first): it too must refuse to cross-check against the output of a
+    # command that did not succeed.
+    STUB_META_EXIT=42 e2e_run meta-exit-golden; rc=$?
+    if [ "$rc" -ne 0 ] \
+       && grep -q "sstablemetadata FAILED for" "$TMP/e2e-meta-exit-golden.log" \
+       && grep -q "refusing to" "$TMP/e2e-meta-exit-golden.log" \
+       && [ ! -f "$TMP/e2e-meta-exit-golden/manifest-bti-3234.json" ]; then
+      pass "the generator's row-count cross-check refuses a nonzero sstablemetadata exit"
+    else
+      fail "meta-exit-golden case: expected a generator-side refusal (rc=$rc, tail: $(tail -8 "$TMP/e2e-meta-exit-golden.log"))"
+    fi
+
     # ---- roborev #3234 F2: a --smoke run with the DEFAULT manifest resolution -----
     # This is the invocation the generator's own header advertises. It used to
     # overwrite the COMMITTED manifest with perf_bti_smoke metadata, after which the
@@ -1273,6 +1529,40 @@ PY
       pass "a DEFAULT --smoke run leaves the committed manifest byte-identical (sha256)"
     else
       fail "a --smoke run with the default manifest resolution OVERWROTE $COMMITTED_MANIFEST"
+    fi
+
+    # ---- roborev #3234 L3: PRODUCTION-ONLY metadata stays in the production manifest --
+    # Production-only blocks used to be emitted for EVERY mode, which is how the
+    # committed small-golden manifest came to carry the AC3 throughput figure and a
+    # description of a 500,000-row "full generation golden" belonging to it. A
+    # non-production manifest must carry NEITHER: an omitted field cannot be false.
+    if [ -f "$smoke_manifest" ]; then
+      out=$(python3 - "$smoke_manifest" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+scope = m["read_path_measurement_scope"]
+blob = json.dumps(m)
+bad = []
+if scope.get("measured") is not False:
+    bad.append(f"measured: {scope.get('measured')!r}, want False")
+for k in ("recorded_figure", "full_generation_golden", "what_the_ac3_figure_measures"):
+    if k in scope:
+        bad.append(f"production-only key {k} present in a smoke manifest")
+for claim in ("13200000", "103804", "500,000 rows", "multi-GB"):
+    if claim in blob:
+        bad.append(f"production-only claim {claim!r} present in a smoke manifest")
+if m["corpus_committed"] is not False:
+    bad.append("corpus_committed must be False for an uncommitted smoke corpus")
+if "Profileable" in m["purpose"]:
+    bad.append("a smoke run is not the profileable production corpus")
+print("SMOKE-SCOPE-OK" if not bad else "BAD: " + "; ".join(bad))
+PY
+      )
+      if [ "$out" = "SMOKE-SCOPE-OK" ]; then
+        pass "a non-production manifest carries NO AC3 figure and no production claims"
+      else
+        fail "smoke manifest scope: $out"
+      fi
     fi
 
     # No run above may touch the COMMITTED manifest.

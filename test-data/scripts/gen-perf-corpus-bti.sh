@@ -485,7 +485,7 @@ prune_stale_table_dirs() {  # $1 = basename to KEEP ("" keeps none)
 # already-published corpus with no container. These ARE issue #3234's ACs; each
 # is a hard failure with an actionable message, never a warning.
 assert_corpus() {  # $1 = published sstable dir
-  local dest="$1" f base gens=0 max_data=0 sz rows_db
+  local dest="$1" f base gens=0 max_data=0 sz rows_db gen_ids=()
   [ -d "$dest" ] || die "no published corpus dir at $dest"
 
   # AC1: `da` descriptors only. A stray `nb-*` means a yaml setting did not take;
@@ -505,6 +505,13 @@ assert_corpus() {  # $1 = published sstable dir
   for f in "${datas[@]}"; do
     base="$(basename "$f" -Data.db)"
     gens=$((gens + 1))
+    # The generation identifier, for the one-SSTable-per-chunk mapping check below.
+    # The descriptor is `da-<gen>-bti`; anything else already failed the AC1 glob.
+    local gen_id="${base#da-}"; gen_id="${gen_id%-bti}"
+    [[ "$gen_id" =~ ^[0-9]+$ ]] \
+      || die "AC: cannot read the generation number out of descriptor '$base'
+       (expected da-<gen>-bti-Data.db); the one-SSTable-per-chunk mapping is checked on it"
+    gen_ids+=("$gen_id")
     sz=$(stat -c %s "$f")
     if [ "$sz" -gt "$max_data" ]; then max_data=$sz; fi
 
@@ -539,7 +546,31 @@ assert_corpus() {  # $1 = published sstable dir
   [ "$max_data" -gt "$MIN_DATA_DB_BYTES" ] || die "AC2: largest Data.db is $max_data B, needs > $MIN_DATA_DB_BYTES B.
        Below 8 MiB MADV_RANDOM is not applied and the point-read/scan mappings are
        the SAME mapping, so a read-plane A/B measures nothing. Raise --chunk-rows."
+
+  # AC: ONE SSTABLE PER CHUNK, and the generations are the flush order 1..CHUNKS
+  # (roborev #3234 M2). The aggregate row/partition cross-checks in the manifest writer
+  # CANNOT see this: an unexpected flush split (two SSTables for one chunk) or a
+  # compaction (one for two chunks) keeps every row and every partition while destroying
+  # the promised shape. And it is not only shape — the GENERATION COUNT selects the scan
+  # route and is what the AC3 throughput figure is attributed to ("27 generations,
+  # generation_merge::stream_generations_for_read"), so a corpus with a different
+  # generation count would silently make that attribution wrong.
+  local want_gens_sorted have_gens_sorted
+  want_gens_sorted="$(seq 1 "$CHUNKS" | sort -n | tr '\n' ' ')"
+  have_gens_sorted="$(printf '%s\n' "${gen_ids[@]}" | sort -n | tr '\n' ' ')"
+  [ "$gens" -eq "$CHUNKS" ] || die "AC: $gens SSTable(s) in $dest, but this configuration plans
+       $CHUNKS chunk(s) (--rows $ROWS / --chunk-rows $CHUNK_ROWS) and the generator flushes
+       ONCE PER CHUNK, so the two must be equal. Fewer means a compaction merged chunks
+       (autocompaction must be disabled BEFORE the first load); more means a chunk was
+       split across flushes. If you are re-verifying a corpus that was generated with
+       OTHER flags, pass the same --rows/--chunk-rows to --verify-only."
+  [ "$have_gens_sorted" = "$want_gens_sorted" ] || die "AC: generation mapping — expected generations
+       1..$CHUNKS (one per chunk, in flush order), got: $have_gens_sorted
+       A gap or an offset is evidence of a compaction (its output is promoted to a new,
+       higher generation and the inputs are removed) or of a table that was not freshly
+       created. The generation count is what the AC3 figure is attributed to."
   log "[assert] $gens SSTable(s); largest Data.db $max_data B > floor $MIN_DATA_DB_BYTES B; every Rows.db non-empty"
+  log "[assert] one SSTable per chunk: $gens == $CHUNKS chunk(s); generations $have_gens_sorted"
   ASSERT_SSTABLE_COUNT=$gens
   ASSERT_MAX_DATA=$max_data
 }
@@ -776,11 +807,21 @@ dump_goldens() {
 # JSONL. A mismatch means the golden does not describe the bytes.
 verify_dumped_row_counts() {
   [ "${#DUMPED[@]}" -ge 1 ] || return 0
-  local stem base meta_rows dump_rows
+  local stem base meta_rows dump_rows meta_out meta_rc
   for stem in "${DUMPED[@]}"; do
     base="$stem-Data.db"
-    meta_rows="$($DOCKER exec "$CONTAINER" bash -lc \
-      "/opt/cassandra/tools/bin/sstablemetadata '$CONTAINER_SSTABLE_DIR/$base' 2>/dev/null" \
+    # The EXIT STATUS is checked EXPLICITLY, before the output is parsed (roborev #3234
+    # M1, the shell half): `sstablemetadata` can print a complete-looking `totalRows:`
+    # line and still fail afterwards, and cross-checking against the output of a command
+    # that did not succeed proves nothing. stderr is kept (it was `2>/dev/null`) so the
+    # failure is diagnosable rather than silent.
+    meta_out="$($DOCKER exec "$CONTAINER" bash -lc \
+      "/opt/cassandra/tools/bin/sstablemetadata '$CONTAINER_SSTABLE_DIR/$base'" 2>&1)" \
+      && meta_rc=0 || meta_rc=$?
+    [ "$meta_rc" -eq 0 ] || die "sstablemetadata FAILED for $base (exit $meta_rc) — refusing to
+       cross-check row counts against the output of a command that did not succeed.
+       Output: $(printf '%s' "$meta_out" | tail -5 | tr '\n' ' ')"
+    meta_rows="$(printf '%s\n' "$meta_out" \
       | sed -n 's/^totalRows: \([0-9]\+\)$/\1/p' | head -1)"
     [ -n "$meta_rows" ] || die "could not read totalRows from sstablemetadata for $base"
     dump_rows="$(python3 -c '
@@ -810,6 +851,7 @@ write_manifest() {
     --seed "$SEED" --rows-requested "$ROWS" --chunk-rows "$CHUNK_ROWS" \
     --payload-bytes "$PAYLOAD_BYTES" --widths "$WIDTHS" --buckets "$BUCKETS" \
     --mode "$mode" --row-plan "$PLAN" --yaml-verified "$yaml_file" \
+    --min-data-db-floor "$MIN_DATA_DB_BYTES" \
     ${DUMPED[@]+"${DUMPED[@]/#/--dumped=}"} \
     --out "$OUT/manifest-bti-3234.json" \
     || die "manifest generation failed"
