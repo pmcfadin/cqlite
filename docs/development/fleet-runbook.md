@@ -327,7 +327,8 @@ grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.c
   /run/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf /lib/sysctl.d/*.conf
 ```
 
-**Never set `CQLITE_PERF_PROC_DIR` / `CQLITE_PERF_SYSCTL_DIR` in a shell.** They are test-only path
+**Never set `CQLITE_PERF_PROC_DIR` / `CQLITE_PERF_SYSCTL_DIR` / `CQLITE_PERF_SYSCTL_EXTRA_DIRS` /
+`CQLITE_PERF_TEST_SANDBOX` in a shell.** They are test-only path
 seams for `scripts/tests/test_perf_capability*.sh` and are **inert** unless `CQLITE_PERF_TEST_MODE=1`
 is also set — which in turn refuses to run if a real `sudo`/`sysctl` is reachable. The privileged
 destination is a hardcoded `/etc/sysctl.d` literal precisely so no exported variable can ever steer
@@ -335,23 +336,39 @@ a `sudo tee` at another file, and bootstrap fails closed (skips the section with
 finds a seam set without the marker.
 
 **Test mode has NO production fallback (it is enforced, not conventional).** Under
-`CQLITE_PERF_TEST_MODE=1` **both** path seams are **mandatory** and each must be absolute and outside
-`/etc`, `/proc` and `/sys`. A missing or production-shaped seam is a loud refusal in the env guard
-*and* in the path resolvers, so an unsandboxed test-mode run resolves no drop-in path at all and reads
-no `/proc`. The earlier shape fell back to the real directories, which meant a root `--yes` run under
-the marker could `tee` the host's **real** `/etc/sysctl.d/99-cqlite-perf.conf` — a test run mutating
-the machine. There is deliberately no opt-out.
+`CQLITE_PERF_TEST_MODE=1` the sandbox root and **both** path seams are **mandatory**. An unusable seam
+is a loud refusal in the env guard *and* in the path resolvers, so an unsandboxed test-mode run
+resolves no drop-in path at all and reads no `/proc`. The earlier shape fell back to the real
+directories, which meant a root `--yes` run under the marker could `tee` the host's **real**
+`/etc/sysctl.d/99-cqlite-perf.conf` — a test run mutating the machine. There is deliberately no opt-out.
 
-**On the write path the seam is judged by its CANONICAL DESTINATION, not its spelling.** A textual
-check accepts an unbounded set of paths that *resolve* into production — `/tmp/../etc/sysctl.d`, or a
-seam under a symlinked ancestor (`ln -s /etc /tmp/a`, seam `/tmp/a/sysctl.d`) — and each of those
-would land a root `tee` on the host's own drop-in. So the env guard and the drop-in-path resolver
-canonicalize the whole path (`cd -P` + `pwd -P`: no `realpath`/`readlink -f` dependency, correct on
-bash 3.2) and validate the resolved destination; an unenterable path resolves to nothing and is
-refused too. The gate's **emit-time read path** is contractually fork-free and writes nothing, so it
-keeps the builtin-only textual check (which rejects `.`/`..` components and a symlinked seam): the
-worst a mis-accepted seam can do there is mis-read a stand-in `/proc`, which the token reports as
-`absent`/`unknown` rather than as a capability.
+**The rule is POSITIVE CONTAINMENT in one declared sandbox — not a list of forbidden places.** Four
+review rounds each closed one more *spelling* of "the production directory": the raw path, then a
+symlinked seam, then `..`, then `//etc` (POSIX leaves two leading slashes implementation-defined,
+`pwd -P` may preserve them, and on Linux `//etc` **is** `/etc`). A denylist over path spellings cannot
+be completed — `.`, `..`, symlinks, `//`, trailing slashes, bind mounts, `/proc/self/root/…` all name
+the same directory — and scattered prohibitions also let a *new* seam consumer miss them (that was the
+`CQLITE_PERF_SYSCTL_EXTRA_DIRS` defect). So test mode now takes **one** caller-declared sandbox root,
+`CQLITE_PERF_TEST_SANDBOX`, and a seam is usable **iff it is strictly inside it** (resolved-path prefix
+match with an explicit `/` boundary, so `/tmp/sandboxevil` is not inside `/tmp/sandbox`). Anything not
+provably inside is refused — every spelling above, and every future one, for the same single reason.
+
+- The **root itself must prove it is a sandbox**: absolute, canonically spelled, existing, and holding
+  the stamp file `.cqlite-perf-sandbox`. So `CQLITE_PERF_TEST_SANDBOX=/etc` cannot make containment
+  vacuous — the proof lives on the filesystem, where placing it already needs the privilege the guard
+  protects.
+- **Every** consumer routes through that one check: the env guard, the drop-in path a root `tee` is
+  aimed at, the `/proc` stand-in, and every configuration read (the lower-precedence search-path
+  entries, plus an optional `sysctl.conf` **file** entry, whose parent is canonicalized and the
+  resulting file path validated). `test_perf_capability.sh` enforces that **structurally**: it
+  enumerates from the source every function that dereferences a seam and fails if one does not reach
+  the containment check, so a new entry point cannot silently skip it.
+- Paths that **write** or that **read host configuration** canonicalize both sides (`cd -P` + `pwd -P`:
+  no `realpath`/`readlink -f` dependency, correct on bash 3.2); an unenterable path resolves to nothing
+  and is refused. The gate's **emit-time read path** is contractually fork-free and writes nothing, so
+  it applies the same containment check *syntactically* — its guarantee is that the seams are honoured
+  only under the marker, which is never set in production, and the worst a mis-accepted spelling can do
+  there is read a caller-chosen file, reported as `absent`/`unknown` rather than as a capability.
 
 Every gate SUMMARY's `accelerators:` line stamps the same state as a Linux-only `perf=` token
 (`ok` / `paranoid-<N>` / `kptr-restricted` / `absent` / `unknown`), so "this box cannot be profiled"
