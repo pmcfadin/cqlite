@@ -392,6 +392,17 @@ fi
 # assumption that writing the file worked.
 hdr "Perf profiling capability (issue #3249)"
 PERF_CAP_LIB="$REPO_ROOT/scripts/perf-capability.sh"
+# INITIALISE BEFORE THE GUARDS, never after (issue #3249 review). The gate below is
+# read as `${PERF_SECTION_OK:-0}`, so an INHERITED `PERF_SECTION_OK=1` from the
+# ambient environment would carry a macOS host — or a checkout with no
+# scripts/perf-capability.sh — straight into the Linux-only implementation, calling
+# helper functions that were never sourced. Every variable this section reads is
+# initialised here, so no ambient export can steer any of it.
+PERF_SECTION_OK=0
+PERF_DROPIN=''
+PERF_DROPIN_OK=0
+PERF_TOKEN=''
+PERF_TOKEN_BEFORE=''
 if [ ! -r "$PERF_CAP_LIB" ]; then
   warn "scripts/perf-capability.sh missing from this checkout — perf capability UNVERIFIED"
 elif [ "$PLATFORM" != linux ]; then
@@ -412,7 +423,7 @@ else
     PERF_SECTION_OK=1
   fi
 fi
-if [ "${PERF_SECTION_OK:-0}" = 1 ]; then
+if [ "$PERF_SECTION_OK" = 1 ]; then
   PERF_DROPIN=$(perf_capability_dropin_path)
 
   # perf_apply_now: run (under --yes) or PRINT (check mode) `sysctl -q --system`,
@@ -615,7 +626,34 @@ if [ "${PERF_SECTION_OK:-0}" = 1 ]; then
     fi
   fi
 
-  # ---- 3. FUNCTIONAL verification (AC2): run the collection, count the cycles ----
+  # ---- 3. FUNCTIONAL verification (AC2), attributed to the RIGHT IDENTITY -------
+  # Two rules, and together they make a FALSE "VERIFIED" unreachable (issue #3249
+  # review):
+  #
+  # (a) OVERALL verification requires BOTH facts: the /proc token = ok AND a
+  #     functional pass. Reporting the functional result alone as the verdict let a
+  #     box whose /proc says `paranoid-2`/`kptr-restricted` print its diagnosis AND
+  #     "VERIFIED" in the same run — contradictory output in which the reassuring line
+  #     wins the reader's attention. Anything short of both facts is reported as
+  #     PARTIAL DIAGNOSTIC INFORMATION, explicitly subordinate to the /proc verdict.
+  #
+  # (b) THE PRIVILEGE DIMENSION. perf_event_paranoid restricts UNPRIVILEGED users and
+  #     ROOT BYPASSES IT. `sudo bash scripts/bootstrap-agent-machine.sh` is a normal
+  #     invocation — arguably the most likely one, since this section needs root to
+  #     write /etc/sysctl.d — and as root `perf stat -C 0 -e cycles` SUCCEEDS on a
+  #     paranoid=4 box where every unprivileged agent process still gets EACCES. So a
+  #     root-run probe cannot demonstrate the property we care about ("an UNPRIVILEGED
+  #     process can collect CPU-wide cycles"). CHOSEN FIX: DROP PRIVILEGE for the
+  #     probe when a mechanism exists (setpriv/runuser/`sudo -u`, targeting SUDO_UID
+  #     — the account that invoked sudo — else `nobody`), because that measures the
+  #     real property; and when no mechanism exists, label the root result as NOT
+  #     evidence of unprivileged capability and let the identity-independent /proc
+  #     token be the authority. Never imply the stronger claim.
+  PERF_FUNC=untested            # untested | pass | fail
+  PERF_VERIFY_OUT=''
+  PERF_DROP_PREFIX=''
+  PERF_DROP_STATE=''
+  PERF_UNPRIV_EVIDENCE=0        # 1 iff the probe measured an UNPRIVILEGED process
   if ! have perf; then
     warn "perf MISSING — profiling capability UNVERIFIED on this machine"
     if have apt-get; then
@@ -623,12 +661,44 @@ if [ "${PERF_SECTION_OK:-0}" = 1 ]; then
     else
       info "install perf via your distro's linux-tools/perf package"
     fi
-  elif PERF_VERIFY_OUT=$(perf_capability_verify); then
-    ok "perf capability VERIFIED — perf stat -C 0 -e cycles reports $PERF_VERIFY_OUT"
   else
+    if perf_capability_drop_prefix_into PERF_DROP_PREFIX PERF_DROP_STATE; then
+      PERF_UNPRIV_EVIDENCE=1
+    fi
+    if [ -n "$PERF_DROP_PREFIX" ]; then
+      info "this run is ROOT and root BYPASSES perf_event_paranoid, so the probe DROPS PRIVILEGE ($PERF_DROP_STATE) — otherwise it would measure root's capability, not an agent's"
+    fi
+    # shellcheck disable=SC2086  # deliberate split of our own literal prefix tokens
+    if PERF_VERIFY_OUT=$(perf_capability_verify $PERF_DROP_PREFIX); then
+      PERF_FUNC=pass
+    else
+      PERF_FUNC=fail
+    fi
+  fi
+  if [ "$PERF_FUNC" = pass ] && [ "$PERF_TOKEN" = ok ] && [ "$PERF_UNPRIV_EVIDENCE" = 1 ]; then
+    ok "perf capability VERIFIED — /proc reports perf=ok and an UNPRIVILEGED perf stat -C 0 -e cycles reports $PERF_VERIFY_OUT"
+  elif [ "$PERF_FUNC" = pass ]; then
+    # A functional PASS that is NOT a verification: either /proc disagrees, or the
+    # probe could not be attributed to an unprivileged identity. Reported as partial
+    # information and never as a verdict — no run may print a non-ok token diagnosis
+    # and an unqualified "VERIFIED" together.
+    warn "perf capability NOT verified — the 'perf stat -C 0 -e cycles' probe succeeded ($PERF_VERIFY_OUT), but that is PARTIAL DIAGNOSTIC INFORMATION only, subordinate to the /proc verdict (gate stamps perf=$PERF_TOKEN)"
+    if [ "$PERF_TOKEN" != ok ]; then
+      info "/proc is the AUTHORITY here: perf=$PERF_TOKEN, so an unprivileged agent process is still restricted whatever this probe reported"
+      perf_diagnose_token "$PERF_TOKEN"
+    fi
+    if [ "$PERF_UNPRIV_EVIDENCE" = 0 ]; then
+      info "the probe ran AS ROOT ($PERF_DROP_STATE) and root BYPASSES perf_event_paranoid — its success is NOT evidence that an UNPRIVILEGED process can profile this box"
+      info "prove it as the agent account:  sudo -u <agent-user> perf stat -C 0 -e cycles -- sleep 0.1   (or install util-linux so bootstrap can drop privilege itself via setpriv)"
+    fi
+  elif [ "$PERF_FUNC" = fail ]; then
     warn "perf capability NOT verified — perf stat -C 0 -e cycles: $PERF_VERIFY_OUT"
     info "an rc-0 perf stat with a zero/<not supported> counter is NOT a working setup — a virtualised or masked PMU counts nothing"
-    info "reproduce by hand:  perf stat -C 0 -e cycles -- sleep 0.1"
+    if [ -n "$PERF_DROP_PREFIX" ]; then
+      info "the probe ran with privilege DROPPED ($PERF_DROP_STATE), so this failure may be the drop mechanism rather than perf itself — reproduce exactly:  $PERF_DROP_PREFIX perf stat -C 0 -e cycles -- sleep 0.1"
+    else
+      info "reproduce by hand:  perf stat -C 0 -e cycles -- sleep 0.1"
+    fi
   fi
   info "note: BPF collectors (bpftrace/bcc) still require sudo — a permissive perf_event_paranoid does NOT grant BPF map creation (#3217)"
   info "posture: this loosening is for DEDICATED SINGLE-TENANT measurement/agent boxes; never apply it to a shared or multi-tenant host"

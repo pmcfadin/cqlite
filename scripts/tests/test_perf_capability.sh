@@ -58,6 +58,14 @@ export GIT_CONFIG_NOSYSTEM=1
 unset CQLITE_PROJECT_NUMBER CQLITE_PROJECT_OWNER CQLITE_PROJECT_ACCOUNT PROJECT_TITLE
 # A worker shell may export the seams themselves; a test must set exactly what it means.
 unset CQLITE_PERF_PROC_DIR CQLITE_PERF_SYSCTL_DIR
+# ...and so may a `sudo bash scripts/tests/...` invocation export SUDO_UID/GID/USER,
+# which the privilege-drop target resolution reads. A case that means to exercise that
+# path sets them itself; inheriting them would make the suite's verdict depend on how
+# it was launched (the same env-inheritance class as PERF_SECTION_OK).
+unset SUDO_UID SUDO_GID SUDO_USER
+# The section under test must never be steered by an ambient export either: bootstrap
+# initialises PERF_SECTION_OK itself, and this suite proves it (case 4h).
+unset PERF_SECTION_OK
 # The two path seams are INERT unless this marker is set, and the marker itself
 # forbids reaching a real sudo/sysctl (the shim dir is declared per case in
 # CQLITE_PERF_TEST_PRIV_DIR). Cases that must exercise the PRODUCTION defaults run
@@ -84,22 +92,35 @@ EOF
   chmod +x "$1/uname"
 }
 
-# mkid <dir> <uid>: an `id` stub, so the ROOT / NON-ROOT branch under test is the one
-# selected by the CASE, not by whatever UID runs the suite. Without this the suite was
-# silently NON-ROOT-runner-only: nearly every case asserts the unprivileged behaviour
-# (a `sudo -n true` probe, a `sudo -n tee`, a printed `sudo` remedy), so running the
-# whole thing as root — a container, a CI image, anyone's `sudo bash` — took the root
-# branch and FAILED, reddening the mandatory `tooling-tests` gate component. Same class
-# as the Linux-host-only bug mkuname fixes, and the same `rm -f` first: several dirs
-# below `ln -sf` the real `id` into place, and writing through that symlink would
-# clobber the host's /usr/bin/id. The root-specific case (4c-iii) keeps its OWN uid-0
-# shim, which is the only place the root branch is exercised.
+# mkid <dir> <self-uid> [<other-uid>]: an `id` stub, so the ROOT / NON-ROOT branch
+# under test is the one selected by the CASE, not by whatever UID runs the suite.
+# Without this the suite was silently NON-ROOT-runner-only: nearly every case asserts
+# the unprivileged behaviour (a `sudo -n true` probe, a `sudo -n tee`, a printed `sudo`
+# remedy), so running the whole thing as root — a container, a CI image, anyone's
+# `sudo bash` — took the root branch and FAILED, reddening the mandatory
+# `tooling-tests` gate component. Same class as the Linux-host-only bug mkuname fixes,
+# and the same `rm -f` first: several dirs below `ln -sf` the real `id` into place, and
+# writing through that symlink would clobber the host's /usr/bin/id.
+#
+# <other-uid> answers a USER OPERAND (`id -u nobody` / `id -g nobody`), which the
+# privilege-drop target resolution asks for: a shim that answered its OWN uid there
+# would let a root case "resolve" root as the unprivileged probe identity — the exact
+# false verification the drop exists to prevent. Omitted => the operand form FAILS
+# (that box has no such account), which is the honest answer for a case that offers
+# no unprivileged identity.
 mkid() {
   rm -f "$1/id"
   cat >"$1/id" <<EOF
 #!/usr/bin/env bash
+other='${3:-}'
 case "\${1:-}" in
-  -u) echo $2 ;;
+  -u|-g)
+    if [ -n "\${2:-}" ]; then
+      [ -n "\$other" ] || exit 1        # no such account on this box
+      echo "\$other"
+    else
+      echo $2
+    fi ;;
   -un|-nu) echo cqlite-test-user ;;
   *)  echo $2 ;;
 esac
@@ -1058,6 +1079,240 @@ if [ "$darwin_rc" -eq 0 ] \
 else
   bad "perf section: Darwin no-op mishandled (rc=$darwin_rc, dir='$(ls -A "$darwin_d")', tripwire='$darwin_mutating')"
   printf '%s\n' "$darwin_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 4f-ii. AN INHERITED `PERF_SECTION_OK=1` MAY NOT STEER THE SECTION (issue #3249
+#        review). The gate was read as `${PERF_SECTION_OK:-0}` with no initialisation
+#        before the platform/library checks, so an ambient export carried a macOS host
+#        straight into the LINUX-ONLY implementation and called helper functions that
+#        were never sourced. Same env-inheritance class as the CQLITE_PERF_SYSCTL_DIR
+#        seam steering a privileged write. Asserted on BOTH pre-conditions the guard
+#        chain has: the wrong platform, and a checkout with no perf-capability.sh.
+darwin_inherit_out=$(PERF_SECTION_OK=1 PATH="$darwin_dir:$perfbin:$tmp:$PATH" \
+  HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$darwin_d" CQLITE_PERF_TEST_PRIV_DIR="$darwin_dir" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+darwin_inherit_rc=$?
+if [ "$darwin_inherit_rc" -eq 0 ] \
+   && printf '%s' "$darwin_inherit_out" | grep -q 'nothing to configure on macos' \
+   && [ -z "$(ls -A "$darwin_d")" ] \
+   && ! printf '%s' "$darwin_inherit_out" | grep -q 'runtime now: perf_event_paranoid' \
+   && ! printf '%s' "$darwin_inherit_out" | grep -q 'perf capability VERIFIED' \
+   && ! printf '%s' "$darwin_inherit_out" | grep -qi 'command not found'; then
+  ok "perf section: an INHERITED PERF_SECTION_OK=1 cannot drag a Darwin run into the Linux-only implementation"
+else
+  bad "perf section: an inherited PERF_SECTION_OK=1 steered the section (rc=$darwin_inherit_rc)"
+  printf '%s\n' "$darwin_inherit_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+nolib_root="$tmp/perf-root-nolib"; mkdir -p "$nolib_root/scripts/lib"
+cp "$BOOTSTRAP" "$nolib_root/scripts/bootstrap-agent-machine.sh"
+cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$nolib_root/scripts/lib/gate-notify.sh" 2>/dev/null || true
+nolib_d="$tmp/perf-nolib.d"; mkdir -p "$nolib_d"
+nolib_out=$(PERF_SECTION_OK=1 PATH="$checkapply_shims:$perfbin:$tmp:$PATH" \
+  HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$nolib_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
+  bash "$nolib_root/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+nolib_rc=$?
+if [ "$nolib_rc" -eq 0 ] \
+   && printf '%s' "$nolib_out" | grep -q 'perf-capability.sh missing from this checkout' \
+   && [ -z "$(ls -A "$nolib_d")" ] \
+   && ! printf '%s' "$nolib_out" | grep -q 'runtime now: perf_event_paranoid' \
+   && ! printf '%s' "$nolib_out" | grep -q 'perf capability VERIFIED' \
+   && ! printf '%s' "$nolib_out" | grep -qi 'command not found'; then
+  ok "perf section: an INHERITED PERF_SECTION_OK=1 cannot enter the implementation with no perf-capability.sh in the checkout"
+else
+  bad "perf section: an inherited PERF_SECTION_OK=1 entered the section without its library (rc=$nolib_rc)"
+  printf '%s\n' "$nolib_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# --- 5. THE FUNCTIONAL RESULT IS SUBORDINATE TO /proc, AND TO IDENTITY --------
+# 5a. A SUCCESSFUL perf stat while /proc says paranoid-4. Reporting the functional
+#     result as the overall verdict let a run print a `paranoid-*` diagnosis AND
+#     "VERIFIED" in the same output — contradictory, with the reassuring line winning
+#     the reader's attention. Overall verification now requires BOTH facts; a lone
+#     functional pass is PARTIAL DIAGNOSTIC INFORMATION and /proc governs.
+mkperfshim 8888888
+subord_d="$tmp/perf-subord.d"; mkdir -p "$subord_d"
+bash "$PERFLIB" --drop-in >"$subord_d/99-cqlite-perf.conf"   # current: only /proc disagrees
+subord_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$subord_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+subord_rc=$?
+if [ "$subord_rc" -eq 0 ] \
+   && ! printf '%s' "$subord_out" | grep -q 'perf capability VERIFIED' \
+   && printf '%s' "$subord_out" | grep -q 'perf capability NOT verified' \
+   && printf '%s' "$subord_out" | grep -q 'PARTIAL DIAGNOSTIC INFORMATION' \
+   && printf '%s' "$subord_out" | grep -q '/proc is the AUTHORITY here: perf=paranoid-4' \
+   && printf '%s' "$subord_out" | grep -qi 'PERMISSION verdict' \
+   && printf '%s' "$subord_out" | grep -q 'cycles=8888888'; then
+  ok "perf section: a SUCCESSFUL perf stat while /proc says paranoid-4 is never 'VERIFIED' — reported as partial info, /proc governs"
+else
+  bad "perf section: a functional pass overrode a non-ok /proc verdict (rc=$subord_rc)"
+  printf '%s\n' "$subord_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 5a-ii. The same rule on the OTHER non-ok token: kptr_restrict != 0 costs kernel
+#        SYMBOLS silently, and `perf stat -C 0 -e cycles` counts perfectly well without
+#        them — so this is the token most likely to be masked by a functional pass.
+kptr_proc="$tmp/perf-proc-kptr"; mkdir -p "$kptr_proc"
+printf -- '-1\n' >"$kptr_proc/perf_event_paranoid"
+printf '1\n'     >"$kptr_proc/kptr_restrict"
+kptr_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$kptr_proc" CQLITE_PERF_SYSCTL_DIR="$subord_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+kptr_rc=$?
+if [ "$kptr_rc" -eq 0 ] \
+   && ! printf '%s' "$kptr_out" | grep -q 'perf capability VERIFIED' \
+   && printf '%s' "$kptr_out" | grep -q 'perf capability NOT verified' \
+   && printf '%s' "$kptr_out" | grep -q '/proc is the AUTHORITY here: perf=kptr-restricted' \
+   && printf '%s' "$kptr_out" | grep -q 'kptr_restrict != 0'; then
+  ok "perf section: a SUCCESSFUL perf stat while /proc says kptr-restricted is never 'VERIFIED' (the silent symbol loss still governs)"
+else
+  bad "perf section: a functional pass masked a kptr-restricted verdict (rc=$kptr_rc)"
+  printf '%s\n' "$kptr_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 5b. THE PRIVILEGE DIMENSION — the most consequential case in this suite.
+#     perf_event_paranoid restricts UNPRIVILEGED users; ROOT BYPASSES IT. So under
+#     `sudo bash scripts/bootstrap-agent-machine.sh` — a normal provisioning
+#     invocation, and the likeliest one since writing /etc/sysctl.d needs root — a
+#     root `perf stat -C 0 -e cycles` SUCCEEDS on a paranoid=4 box where every
+#     unprivileged agent still gets EACCES. Bootstrap must therefore probe as an
+#     UNPRIVILEGED identity. Here the box offers `setpriv`, /proc is ALREADY ok, and
+#     the drop-in is current: the run must (1) say it dropped privilege, (2) actually
+#     route the collection through setpriv with the resolved uid/gid, and (3) only
+#     THEN report VERIFIED.
+droproot="$tmp/perf-droproot"; mkdir -p "$droproot"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find tee; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$droproot/$t"
+done
+mkuname "$droproot" Linux
+mkid "$droproot" 0 1000       # we are root; `nobody` resolves to the unprivileged 1000
+droptrip="$tmp/perf-droproot-tripwire.log"; : >"$droptrip"
+# setpriv shim: records the exact drop it was asked for, then execs the collection —
+# so the assertion below proves the PROBE went through it, not merely that a line
+# claiming so was printed.
+cat >"$droproot/setpriv" <<EOF
+#!/usr/bin/env bash
+echo "setpriv \$*" >>"$droptrip"
+while [ \$# -gt 0 ]; do case "\$1" in --*) shift ;; *) break ;; esac; done
+exec "\$@"
+EOF
+printf '#!/usr/bin/env bash\necho "sysctl $*" >>"%s"\nexit 0\n' "$droptrip" >"$droproot/sysctl"
+chmod +x "$droproot/setpriv" "$droproot/sysctl"
+ln -sf "$perfbin/perf" "$droproot/perf"
+mkperfshim 1212121
+drop_proc="$tmp/perf-proc-drop"; mkdir -p "$drop_proc"
+printf -- '-1\n' >"$drop_proc/perf_event_paranoid"
+printf '0\n'     >"$drop_proc/kptr_restrict"
+drop_d="$tmp/perf-drop.d"; mkdir -p "$drop_d"
+bash "$PERFLIB" --drop-in >"$drop_d/99-cqlite-perf.conf"
+drop_out=$(PATH="$droproot" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$drop_proc" CQLITE_PERF_SYSCTL_DIR="$drop_d" CQLITE_PERF_TEST_PRIV_DIR="$droproot" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+drop_rc=$?
+if [ "$drop_rc" -eq 0 ] \
+   && printf '%s' "$drop_out" | grep -q 'this run is ROOT and root BYPASSES perf_event_paranoid' \
+   && printf '%s' "$drop_out" | grep -q 'DROPS PRIVILEGE (dropped:setpriv:uid=1000)' \
+   && grep -q 'setpriv --reuid=1000 --regid=1000 --clear-groups' "$droptrip" \
+   && printf '%s' "$drop_out" | grep -q 'perf capability VERIFIED .*UNPRIVILEGED perf stat -C 0 -e cycles reports cycles=1212121'; then
+  ok "perf section: a ROOT run DROPS PRIVILEGE for the probe (setpriv, resolved uid/gid) and only then reports VERIFIED"
+else
+  bad "perf section: the root run did not probe as an unprivileged identity (rc=$drop_rc, tripwire='$(cat "$droptrip")')"
+  printf '%s\n' "$drop_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 5b-ii. THE FALSE VERIFICATION ITSELF: the same ALREADY-ok box, the same succeeding
+#        perf — but no setpriv/runuser/sudo to drop privilege with. The functional
+#        result then says nothing about an unprivileged process, and reporting it as
+#        "VERIFIED" is exactly the false verification of an unprofileable box. It must
+#        be labelled as NOT evidence, with /proc left as the authority.
+nodroproot="$tmp/perf-nodroproot"; mkdir -p "$nodroproot"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find tee; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$nodroproot/$t"
+done
+mkuname "$nodroproot" Linux
+mkid "$nodroproot" 0 1000     # root, an unprivileged target exists, but no mechanism
+nodroptrip="$tmp/perf-nodroproot-tripwire.log"; : >"$nodroptrip"
+printf '#!/usr/bin/env bash\necho "sysctl $*" >>"%s"\nexit 0\n' "$nodroptrip" >"$nodroproot/sysctl"
+chmod +x "$nodroproot/sysctl"
+ln -sf "$perfbin/perf" "$nodroproot/perf"
+mkperfshim 2323232
+nodrop_out=$(PATH="$nodroproot" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$drop_proc" CQLITE_PERF_SYSCTL_DIR="$drop_d" CQLITE_PERF_TEST_PRIV_DIR="$nodroproot" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+nodrop_rc=$?
+if [ "$nodrop_rc" -eq 0 ] \
+   && ! printf '%s' "$nodrop_out" | grep -q 'perf capability VERIFIED' \
+   && printf '%s' "$nodrop_out" | grep -q 'perf capability NOT verified' \
+   && printf '%s' "$nodrop_out" | grep -q 'ran AS ROOT (root-no-drop-mechanism) and root BYPASSES perf_event_paranoid' \
+   && printf '%s' "$nodrop_out" | grep -q 'NOT evidence that an UNPRIVILEGED process can profile this box' \
+   && printf '%s' "$nodrop_out" | grep -q 'sudo -u <agent-user> perf stat'; then
+  ok "perf section: a ROOT probe with NO way to drop privilege is labelled NOT evidence of unprivileged capability (never 'VERIFIED'), even with /proc ok"
+else
+  bad "perf section: a root-only functional pass was reported as verification (rc=$nodrop_rc)"
+  printf '%s\n' "$nodrop_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 5b-iii. ...and with NO unprivileged identity resolvable at all (no `nobody` on the
+#         box, no SUDO_UID), the state is distinct — nothing to probe AS, so nothing
+#         to claim. Root must not fall back to probing as itself and calling it good.
+notarget="$tmp/perf-notarget"; mkdir -p "$notarget"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find tee; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$notarget/$t"
+done
+mkuname "$notarget" Linux
+mkid "$notarget" 0            # root, and `id -u nobody` FAILS: no unprivileged account
+printf '#!/usr/bin/env bash\nexit 0\n' >"$notarget/sysctl"
+chmod +x "$notarget/sysctl"
+ln -sf "$perfbin/perf" "$notarget/perf"
+ln -sf "$droproot/setpriv" "$notarget/setpriv"   # a mechanism exists; a TARGET does not
+mkperfshim 3434343
+notarget_out=$(PATH="$notarget" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$drop_proc" CQLITE_PERF_SYSCTL_DIR="$drop_d" CQLITE_PERF_TEST_PRIV_DIR="$notarget" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+notarget_rc=$?
+if [ "$notarget_rc" -eq 0 ] \
+   && ! printf '%s' "$notarget_out" | grep -q 'perf capability VERIFIED' \
+   && printf '%s' "$notarget_out" | grep -q 'ran AS ROOT (root-no-unprivileged-target)'; then
+  ok "perf section: root with no resolvable unprivileged identity reports that distinctly and claims no verification"
+else
+  bad "perf section: root with no unprivileged target mishandled (rc=$notarget_rc)"
+  printf '%s\n' "$notarget_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 5b-iv. SUDO_UID is preferred over `nobody`: under `sudo bootstrap` it names the
+#        account whose profiling capability is actually in question, which is stronger
+#        evidence than an unrelated system account.
+sudouid_out=$(PATH="$droproot" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  SUDO_UID=1234 SUDO_GID=1235 SUDO_USER=agentuser \
+  CQLITE_PERF_PROC_DIR="$drop_proc" CQLITE_PERF_SYSCTL_DIR="$drop_d" CQLITE_PERF_TEST_PRIV_DIR="$droproot" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+sudouid_rc=$?
+if [ "$sudouid_rc" -eq 0 ] \
+   && printf '%s' "$sudouid_out" | grep -q 'DROPS PRIVILEGE (dropped:setpriv:uid=1234)' \
+   && grep -q 'setpriv --reuid=1234 --regid=1235 --clear-groups' "$droptrip"; then
+  ok "perf section: under sudo the probe drops to SUDO_UID/SUDO_GID (the account actually in question), not to nobody"
+else
+  bad "perf section: SUDO_UID was not preferred as the probe identity (rc=$sudouid_rc)"
+  printf '%s\n' "$sudouid_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 5c. The helper's identity-aware CLI, directly: `--verify-unpriv` must FAIL when the
+#     result cannot be attributed to an unprivileged process, even though the very same
+#     collection succeeded — and must report which state it was in. `--verify` keeps its
+#     narrower contract (this identity, whoever that is), so the two are not confusable.
+mkperfshim 5151515
+vu_self=$(PATH="$perfbin:$tmp:$PATH" bash "$PERFLIB" --verify-unpriv 2>&1); vu_self_rc=$?
+vu_root=$(PATH="$nodroproot" bash "$PERFLIB" --verify-unpriv 2>&1); vu_root_rc=$?
+if [ "$vu_self_rc" -eq 0 ] && printf '%s' "$vu_self" | grep -q 'cycles=5151515 identity=self-unprivileged' \
+   && [ "$vu_root_rc" -ne 0 ] && printf '%s' "$vu_root" | grep -q 'cycles=5151515 identity=root-no-drop-mechanism'; then
+  ok "perf-capability: --verify-unpriv passes only when the result is attributable to an unprivileged identity (and names the state)"
+else
+  bad "perf-capability: --verify-unpriv identity attribution wrong (self rc=$vu_self_rc '$vu_self'; root rc=$vu_root_rc '$vu_root')"
 fi
 
 # 4g. Nothing in this whole suite may have touched the REAL /etc/sysctl.d.

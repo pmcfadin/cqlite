@@ -273,13 +273,103 @@ perf_capability_token() {
   printf '%s' "$__ptk_v"
 }
 
-# perf_capability_verify: the FUNCTIONAL verification (issue #3249 AC2). A
-# bootstrap that silently leaves a box unprofileable is the failure mode being
+# ---- WHOSE capability? the privilege dimension (issue #3249 review) -----------
+# perf_event_paranoid restricts UNPRIVILEGED users; ROOT BYPASSES IT ENTIRELY. So
+# `perf stat -C 0 -e cycles` run by root SUCCEEDS on a paranoid=4 box on which every
+# unprivileged agent process still gets EACCES — and `sudo bash
+# scripts/bootstrap-agent-machine.sh` is a completely normal provisioning invocation
+# (arguably the most likely one, since installing /etc/sysctl.d/99-cqlite-perf.conf
+# needs root). A root-run functional check reported as "perf capability verified" is
+# therefore a FALSE verification of an unprofileable box: precisely the failure mode
+# the functional check exists to remove, reintroduced through the privilege dimension.
+#
+# The property actually under test is "an UNPRIVILEGED process can collect CPU-WIDE
+# cycles", and a root-run probe cannot demonstrate it. So the probe DROPS PRIVILEGE
+# when it can, and when it cannot it says so — the caller then subordinates the
+# functional result to the /proc token, which is identity-independent.
+#
+# perf_capability_drop_target_into <outvar_uid> <outvar_gid> <outvar_name>:
+# resolve an UNPRIVILEGED identity to probe as. Never invented — a box that offers
+# none reports none (rc 1) rather than guessing a uid:
+#   1. SUDO_UID/SUDO_GID/SUDO_USER — the identity that actually invoked `sudo
+#      bootstrap`, i.e. the very account whose profiling capability is in question.
+#      Strongest available evidence.
+#   2. `nobody`, resolved from the passwd database (never a hardcoded 65534: a box
+#      without that account must report "no target", not probe a uid nobody owns).
+perf_capability_drop_target_into() {
+  local __pdt_u='' __pdt_g='' __pdt_n=''
+  if perf_capability_is_int "${SUDO_UID:-}" && perf_capability_is_int "${SUDO_GID:-}" \
+     && [ "${SUDO_UID:-0}" -gt 0 ] && [ "${SUDO_GID:-0}" -gt 0 ]; then
+    __pdt_u="${SUDO_UID}"; __pdt_g="${SUDO_GID}"; __pdt_n="${SUDO_USER:-}"
+  else
+    __pdt_u=$(id -u nobody 2>/dev/null) || __pdt_u=''
+    __pdt_g=$(id -g nobody 2>/dev/null) || __pdt_g=''
+    if perf_capability_is_int "$__pdt_u" && perf_capability_is_int "$__pdt_g" \
+       && [ "${__pdt_u:-0}" -gt 0 ]; then
+      __pdt_n=nobody
+    else
+      __pdt_u=''; __pdt_g=''; __pdt_n=''
+    fi
+  fi
+  eval "$1=\$__pdt_u"; eval "$2=\$__pdt_g"; eval "$3=\$__pdt_n"
+  [ -n "$__pdt_u" ]
+}
+
+# perf_capability_drop_prefix_into <outvar_prefix> <outvar_state>: the command prefix
+# that makes the probe UNPRIVILEGED, plus the honest state label for it. rc 0 iff the
+# result IS evidence about an unprivileged process.
+#   self-unprivileged             we are not root: the probe already measures the
+#                                 right thing, prefix empty (rc 0)
+#   dropped:<mech>:<identity>     root, and privilege is dropped for the probe (rc 0)
+#   root-no-unprivileged-target   root, and no unprivileged identity is resolvable (rc 1)
+#   root-no-drop-mechanism        root, target known, but no setpriv/runuser/sudo (rc 1)
+# Mechanism order: `setpriv` (util-linux; a plain setresuid, no PAM, no session, no
+# shell), then `runuser`, then `sudo -n -u`. The prefix is composed ONLY of literal
+# tokens plus a validated numeric uid/gid or a passwd-resolved name, so the caller may
+# word-split it. A non-zero rc is NOT an error to fail on: it is the caller's cue to
+# label the functional result as what it is — not evidence about an unprivileged
+# process — and to let the /proc token be the authority.
+perf_capability_drop_prefix_into() {
+  local __pdp_u='' __pdp_g='' __pdp_n=''
+  eval "$1="
+  if [ "$(id -u 2>/dev/null || echo 1000)" != 0 ]; then
+    eval "$2=self-unprivileged"; return 0
+  fi
+  if ! perf_capability_drop_target_into __pdp_u __pdp_g __pdp_n; then
+    eval "$2=root-no-unprivileged-target"; return 1
+  fi
+  if command -v setpriv >/dev/null 2>&1; then
+    eval "$1=\"setpriv --reuid=\$__pdp_u --regid=\$__pdp_g --clear-groups\""
+    eval "$2=\"dropped:setpriv:uid=\$__pdp_u\""
+    return 0
+  fi
+  if [ -n "$__pdp_n" ] && command -v runuser >/dev/null 2>&1; then
+    eval "$1=\"runuser -u \$__pdp_n --\""
+    eval "$2=\"dropped:runuser:\$__pdp_n\""
+    return 0
+  fi
+  if [ -n "$__pdp_n" ] && command -v sudo >/dev/null 2>&1; then
+    eval "$1=\"sudo -n -u \$__pdp_n --\""
+    eval "$2=\"dropped:sudo:\$__pdp_n\""
+    return 0
+  fi
+  eval "$2=root-no-drop-mechanism"
+  return 1
+}
+
+# perf_capability_verify [prefix-word...]: the FUNCTIONAL verification (issue #3249
+# AC2). A bootstrap that silently leaves a box unprofileable is the failure mode being
 # fixed, so the verdict comes from RUNNING the collection the doctrine mandates —
 # `perf stat -C 0 -e cycles` — and requires BOTH exit 0 AND a non-zero cycle
 # count. `perf stat` exits 0 while printing `<not supported>` / `<not counted>`
 # (and a virtualised PMU can report a flat 0), so an rc-only check is exactly the
 # false green this exists to prevent.
+#
+# Any arguments are a command prefix the collection runs under — the
+# privilege-dropping prefix above. This function makes NO claim about identity: it
+# runs what it is given and reports the counter. Deciding WHOSE capability was
+# measured (and whether that answers the question) is the caller's job, because the
+# caller is the one that owns the verdict.
 #
 # CSV mode (`-x,`) is parsed rather than the human table: the human renderer is
 # locale-formatted (`1.234.567`) and column layout has changed across perf
@@ -288,11 +378,14 @@ perf_capability_token() {
 perf_capability_verify() {
   command -v perf >/dev/null 2>&1 || { printf 'no-perf-binary'; return 1; }
   local bound="" out rc count
+  local -a pre=()
+  [ "$#" -eq 0 ] || pre=("$@")
   bound=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+  # `timeout` stays OUTERMOST so the bound covers the privilege-dropping helper too.
   if [ -n "$bound" ]; then
-    out=$(LC_ALL=C "$bound" 30 perf stat -x, -e cycles -C 0 -- sleep 0.1 2>&1); rc=$?
+    out=$(LC_ALL=C "$bound" 30 ${pre[@]+"${pre[@]}"} perf stat -x, -e cycles -C 0 -- sleep 0.1 2>&1); rc=$?
   else
-    out=$(LC_ALL=C perf stat -x, -e cycles -C 0 -- sleep 0.1 2>&1); rc=$?
+    out=$(LC_ALL=C ${pre[@]+"${pre[@]}"} perf stat -x, -e cycles -C 0 -- sleep 0.1 2>&1); rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     printf 'perf-stat-failed rc=%s: %s' "$rc" "$(printf '%s' "$out" | tr '\n' ';' | cut -c1-160)"
@@ -331,9 +424,12 @@ perf_capability_verify() {
 }
 
 perf_capability_usage() {
-  printf 'usage: %s --token | --verify | --drop-in | --drop-in-path\n' "${0##*/}"
+  printf 'usage: %s --token | --verify | --verify-unpriv | --drop-in | --drop-in-path\n' "${0##*/}"
   printf '  --token         free /proc capability read: ok|paranoid-<N>|kptr-restricted|absent|unknown\n'
-  printf '  --verify        functional check: perf stat -C 0 -e cycles (rc 0 = verified)\n'
+  printf '  --verify        functional check AS THIS USER: perf stat -C 0 -e cycles (rc 0 = it worked\n'
+  printf '                  for THIS identity; run as root that proves nothing about an agent process)\n'
+  printf '  --verify-unpriv the same check as an UNPRIVILEGED identity (drops privilege when root);\n'
+  printf '                  prints "<result> identity=<state>" — rc 0 only when the state is unprivileged\n'
   printf '  --drop-in       print the canonical /etc/sysctl.d/99-cqlite-perf.conf bytes\n'
   printf '  --drop-in-path  print where that file belongs\n'
 }
@@ -342,6 +438,17 @@ perf_capability_main() {
   case "${1:-}" in
     --token)        perf_capability_token; printf '\n' ;;
     --verify)       local v rc=0; v=$(perf_capability_verify) || rc=1; printf '%s\n' "$v"; return $rc ;;
+    --verify-unpriv)
+      # Identity-aware form: rc 0 requires BOTH a functional pass AND that the pass
+      # came from an unprivileged identity. A root run with no way to drop privilege
+      # reports its result AND that the result is not evidence about an agent process.
+      local pre='' state='' v rc=0 unpriv=0
+      perf_capability_drop_prefix_into pre state && unpriv=1
+      # shellcheck disable=SC2086  # deliberate split of our own literal prefix tokens
+      v=$(perf_capability_verify $pre) || rc=1
+      printf '%s identity=%s\n' "$v" "$state"
+      [ "$unpriv" = 1 ] || rc=1
+      return $rc ;;
     --drop-in)      perf_capability_dropin_content ;;
     --drop-in-path) perf_capability_dropin_path; printf '\n' ;;
     -h|--help|'')   perf_capability_usage ;;
