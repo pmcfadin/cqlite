@@ -96,6 +96,12 @@ pub enum ArrowConvertError {
     /// REORDERED (or renamed) among same-typed columns is accepted by Arrow and
     /// silently mislabels every affected column — this variant is what makes
     /// that a rejection instead.
+    ///
+    /// The two in-crate error-conversion boundaries (`ParquetExportError`,
+    /// `DeltaParquetError`) carry it as their `InvalidValue` **through `Display`**,
+    /// so the prefix above survives the hop. Neither writer supplies its own
+    /// schema today, so neither can raise it; they map it rather than drop it so a
+    /// future caller that does gets the reason instead of a bare Arrow error.
     #[error("Arrow schema does not match the column set: {0}")]
     SchemaMismatch(String),
 }
