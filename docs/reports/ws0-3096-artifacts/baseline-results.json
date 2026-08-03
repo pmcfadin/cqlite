@@ -1,0 +1,286 @@
+{
+  "issue": "#3096",
+  "corpus": "/data/ws0-3096",
+  "corpus_identity": {
+    "seed": 30960001,
+    "rows": 4000000,
+    "partitions": 40000,
+    "cells_per_row": 12,
+    "data_db_bytes": 2774760422,
+    "data_db_sha256": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+    "bytes_per_row": 693.6901055
+  },
+  "pinning": {
+    "server_cpus": "2,10",
+    "client_cpus": "4,12,5,13,6,14,7,15",
+    "counter_mode": "perf stat -C 2,10 (CPU-WIDE; never -p)",
+    "verified": "thread_siblings_list, fail-closed (scripts/perf/lib-cpu.sh)"
+  },
+  "reps": 3,
+  "step_duration": "45s/1s",
+  "scan_passes": 1,
+  "measurements": [
+    {
+      "arm": "bare_scan",
+      "surface": "cqlite_core::Database::execute_streaming",
+      "temperature": "warm",
+      "rows_per_sec": {
+        "median": 370134.2760070011,
+        "min": 364370.2404125959,
+        "max": 372077.87539441034,
+        "spread_abs": 7707.634981814423,
+        "spread_pct_of_median": 2.0823888738336223,
+        "n": 3
+      },
+      "cycles_per_row": {
+        "median": 18813.9156855,
+        "min": 18785.590485,
+        "max": 19076.01207475,
+        "spread_abs": 290.42158974999984,
+        "spread_pct_of_median": 1.5436530842637375,
+        "n": 3
+      },
+      "ipc": {
+        "median": 1.4524387147546516,
+        "min": 1.4496178661641894,
+        "max": 1.4541537779254912,
+        "spread_abs": 0.0045359117613017474,
+        "spread_pct_of_median": 0.31229625837038927,
+        "n": 3
+      },
+      "row_denominator_total": 12000000,
+      "setup_cycles_subtracted_total": 50281138,
+      "reps": [
+        {
+          "rep": 1,
+          "rows": 4000000,
+          "secs": 10.97784494,
+          "rows_per_sec": 364370.2404125959,
+          "cycles_total": 76330999102,
+          "cycles_setup": 26950803,
+          "cycles_scan": 76304048299,
+          "cycles_per_row": 19076.01207475,
+          "setup_secs": 0.001074145
+        },
+        {
+          "rep": 2,
+          "rows": 4000000,
+          "secs": 10.806888903,
+          "rows_per_sec": 370134.2760070011,
+          "cycles_total": 75267497417,
+          "cycles_setup": 11834675,
+          "cycles_scan": 75255662742,
+          "cycles_per_row": 18813.9156855,
+          "setup_secs": 0.001121549
+        },
+        {
+          "rep": 3,
+          "rows": 4000000,
+          "secs": 10.750437649,
+          "rows_per_sec": 372077.87539441034,
+          "cycles_total": 75153857600,
+          "cycles_setup": 11495660,
+          "cycles_scan": 75142361940,
+          "cycles_per_row": 18785.590485,
+          "setup_secs": 0.001086276
+        }
+      ]
+    },
+    {
+      "arm": "flight_do_get_bypass",
+      "surface": "arrow_flight FlightService::do_get (loopback gRPC)",
+      "temperature": "warm",
+      "forced_merge_path": "bypass",
+      "rows_per_sec": {
+        "median": 249041.060299646,
+        "min": 244632.5734903836,
+        "max": 264412.949094078,
+        "spread_abs": 19780.37560369438,
+        "spread_pct_of_median": 7.942616201478844,
+        "n": 3
+      },
+      "cycles_per_row": {
+        "median": 23511.311055416667,
+        "min": 22768.803719583335,
+        "max": 23905.66631383333,
+        "spread_abs": 1136.8625942499966,
+        "spread_pct_of_median": 4.835385791844559,
+        "n": 3
+      },
+      "ipc": {
+        "median": 1.5227719725672912,
+        "min": 1.5217798074662063,
+        "max": 1.5330439715223696,
+        "spread_abs": 0.011264164056163262,
+        "spread_pct_of_median": 0.7397144325668562,
+        "n": 3
+      },
+      "row_denominator_total": 36000000,
+      "setup_cycles_subtracted_total": 0,
+      "setup_note": "server start + (warm only) prewarm happen BEFORE the perf window opens, so setup is outside the window by construction rather than subtracted",
+      "reps": [
+        {
+          "rep": 1,
+          "rows": 12000000,
+          "requests_ok": 3,
+          "rows_per_scan_observed": 4000000.0,
+          "duration_s": 45.383556445,
+          "rows_per_sec": 264412.949094078,
+          "cycles": 273225644635,
+          "cycles_per_row": 22768.803719583335
+        },
+        {
+          "rep": 2,
+          "rows": 12000000,
+          "requests_ok": 3,
+          "rows_per_scan_observed": 4000000.0,
+          "duration_s": 48.184825368,
+          "rows_per_sec": 249041.060299646,
+          "cycles": 282135732665,
+          "cycles_per_row": 23511.311055416667
+        },
+        {
+          "rep": 3,
+          "rows": 12000000,
+          "requests_ok": 3,
+          "rows_per_scan_observed": 4000000.0,
+          "duration_s": 49.053156858,
+          "rows_per_sec": 244632.5734903836,
+          "cycles": 286867995766,
+          "cycles_per_row": 23905.66631383333
+        }
+      ]
+    },
+    {
+      "arm": "bare_scan",
+      "surface": "cqlite_core::Database::execute_streaming",
+      "temperature": "cold",
+      "rows_per_sec": {
+        "median": 194637.69896682337,
+        "min": 194513.7463679814,
+        "max": 198392.1838834552,
+        "spread_abs": 3878.437515473808,
+        "spread_pct_of_median": 1.9926445575864007,
+        "n": 3
+      },
+      "cycles_per_row": {
+        "median": 17939.17969225,
+        "min": 17849.55606625,
+        "max": 18021.4242995,
+        "spread_abs": 171.86823324999932,
+        "spread_pct_of_median": 0.9580607151409996,
+        "n": 3
+      },
+      "ipc": {
+        "median": 1.462290486392113,
+        "min": 1.454451857460968,
+        "max": 1.4630059037949374,
+        "spread_abs": 0.0085540463339695,
+        "spread_pct_of_median": 0.5849758590083404,
+        "n": 3
+      },
+      "row_denominator_total": 12000000,
+      "setup_cycles_subtracted_total": 84415448,
+      "reps": [
+        {
+          "rep": 1,
+          "rows": 4000000,
+          "secs": 20.162084623,
+          "rows_per_sec": 198392.1838834552,
+          "cycles_total": 71783746450,
+          "cycles_setup": 27027681,
+          "cycles_scan": 71756718769,
+          "cycles_per_row": 17939.17969225,
+          "setup_secs": 0.030519336
+        },
+        {
+          "rep": 2,
+          "rows": 4000000,
+          "secs": 20.551003332,
+          "rows_per_sec": 194637.69896682337,
+          "cycles_total": 71425197124,
+          "cycles_setup": 26972859,
+          "cycles_scan": 71398224265,
+          "cycles_per_row": 17849.55606625,
+          "setup_secs": 0.030121874
+        },
+        {
+          "rep": 3,
+          "rows": 4000000,
+          "secs": 20.564099323,
+          "rows_per_sec": 194513.7463679814,
+          "cycles_total": 72116112106,
+          "cycles_setup": 30414908,
+          "cycles_scan": 72085697198,
+          "cycles_per_row": 18021.4242995,
+          "setup_secs": 0.030479383
+        }
+      ]
+    },
+    {
+      "arm": "flight_do_get_bypass",
+      "surface": "arrow_flight FlightService::do_get (loopback gRPC)",
+      "temperature": "cold",
+      "forced_merge_path": "bypass",
+      "rows_per_sec": {
+        "median": 197832.24606160235,
+        "min": 196836.81809211592,
+        "max": 197846.80407848724,
+        "spread_abs": 1009.9859863713209,
+        "spread_pct_of_median": 0.5105264720377408,
+        "n": 3
+      },
+      "cycles_per_row": {
+        "median": 24411.58329475,
+        "min": 24124.26260925,
+        "max": 24948.41386,
+        "spread_abs": 824.151250750001,
+        "spread_pct_of_median": 3.376066356692417,
+        "n": 3
+      },
+      "ipc": {
+        "median": 1.4810328019270844,
+        "min": 1.4640593754764657,
+        "max": 1.489580483155219,
+        "spread_abs": 0.025521107678753374,
+        "spread_pct_of_median": 1.723196653412802,
+        "n": 3
+      },
+      "row_denominator_total": 12000000,
+      "setup_cycles_subtracted_total": 0,
+      "setup_note": "server start + (warm only) prewarm happen BEFORE the perf window opens, so setup is outside the window by construction rather than subtracted",
+      "reps": [
+        {
+          "rep": 1,
+          "rows": 4000000,
+          "requests_ok": 1,
+          "rows_per_scan_observed": 4000000.0,
+          "duration_s": 20.219150718,
+          "rows_per_sec": 197832.24606160235,
+          "cycles": 97646333179,
+          "cycles_per_row": 24411.58329475
+        },
+        {
+          "rep": 2,
+          "rows": 4000000,
+          "requests_ok": 1,
+          "rows_per_scan_observed": 4000000.0,
+          "duration_s": 20.217662947,
+          "rows_per_sec": 197846.80407848724,
+          "cycles": 96497050437,
+          "cycles_per_row": 24124.26260925
+        },
+        {
+          "rep": 3,
+          "rows": 4000000,
+          "requests_ok": 1,
+          "rows_per_scan_observed": 4000000.0,
+          "duration_s": 20.321401447,
+          "rows_per_sec": 196836.81809211592,
+          "cycles": 99793655440,
+          "cycles_per_row": 24948.41386
+        }
+      ]
+    }
+  ]
+}
