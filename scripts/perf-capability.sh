@@ -99,6 +99,20 @@ perf_capability_proc_value() {
   printf '%s' "$v"
 }
 
+# perf_capability_is_int <value>: rc 0 iff <value> is a plain optionally-negative
+# integer NARROW ENOUGH for shell arithmetic. Both halves are load-bearing: `[ 1abc
+# -ge 1 ]` and `[ 99999999999999999999999 -ge 1 ]` do NOT compare — each prints
+# "integer expression expected" to stderr and returns FALSE, so a malformed or
+# oversized value would fall past the `>= 1` test and be reported as `ok` (a WRONG
+# capability claim) while leaking an error line into the gate's output. Validate the
+# shape here instead of trusting the read.
+perf_capability_is_int() {
+  local body="${1#-}"
+  [ -n "$body" ] || return 1
+  case "$body" in *[!0-9]*) return 1 ;; esac
+  [ "${#body}" -le 10 ]
+}
+
 # perf_capability_token: the FREE capability read — pure /proc, ZERO subprocesses
 # that fork a binary beyond `cat`, no `perf` exec, no measurable time cost. This is
 # what the gate's accelerators line calls, so it may never grow an exec.
@@ -111,8 +125,8 @@ perf_capability_token() {
   local p k
   p=$(perf_capability_proc_value perf_event_paranoid) || { printf 'absent'; return 0; }
   k=$(perf_capability_proc_value kptr_restrict) || { printf 'absent'; return 0; }
-  case "$p" in -[0-9]*|[0-9]*) : ;; *) printf 'unknown'; return 0 ;; esac
-  case "$k" in -[0-9]*|[0-9]*) : ;; *) printf 'unknown'; return 0 ;; esac
+  perf_capability_is_int "$p" || { printf 'unknown'; return 0; }
+  perf_capability_is_int "$k" || { printf 'unknown'; return 0; }
   if [ "$p" -ge 1 ]; then printf 'paranoid-%s' "$p"; return 0; fi
   if [ "$k" -ne 0 ]; then printf 'kptr-restricted'; return 0; fi
   printf 'ok'

@@ -121,6 +121,21 @@ check_token 2 0 paranoid-2
 check_token -1 1 kptr-restricted
 check_token 0 2 kptr-restricted
 check_token garbage 0 unknown
+# A malformed or oversized value must NOT slip past the `>= 1` comparison and be
+# reported as `ok`: `[ 1abc -ge 1 ]` / `[ 99999999999999999999999 -ge 1 ]` do not
+# compare — they print "integer expression expected" and return FALSE.
+check_token '1abc' 0 unknown
+check_token 99999999999999999999999 0 unknown
+check_token -1 '0x0' unknown
+# ...and that rejection must be SILENT: this runs inside the gate's summary emit,
+# where a stray stderr line lands in the gate's own output.
+noise=$(printf '1abc\n' >"$perfproc/perf_event_paranoid"; printf '0\n' >"$perfproc/kptr_restrict"
+  CQLITE_PERF_PROC_DIR="$perfproc" bash "$PERFLIB" --token 2>&1 >/dev/null)
+if [ -z "$noise" ]; then
+  ok "perf-capability: a malformed /proc value is rejected SILENTLY (no stderr noise)"
+else
+  bad "perf-capability: malformed value leaked to stderr: $noise"
+fi
 if [ "$tok_fail" -eq 0 ]; then
   ok "perf-capability: token reflects /proc exactly (ok / paranoid-N / kptr-restricted / unknown)"
 fi
