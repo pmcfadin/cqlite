@@ -41,6 +41,12 @@ no source available:
 
 - `exclude_patterns` is implemented as **git pathspec** exclusion (`:(exclude,glob)`), so the
   semantics are git wildmatch with `WM_PATHNAME`: anchored at the repo root, `*` does not cross `/`.
+  The construction function `git.FormatExcludeArgs` was subsequently **disassembled** out of the stripped
+  binary and is now fully specified (see `design.md`): a pattern with an interior or leading `/` is
+  root-anchored and passed verbatim, a slash-less pattern is `**/`-prefixed, every pattern emits both
+  `<p>` and `<p>/**`, a trailing slash is trimmed BEFORE the anchoring test (so `docs/` and `docs/**`
+  behave OPPOSITELY), and there is **no negation/re-include capability at all** — which is why the fix
+  must be a deny-list.
 - Replaying **21 real reviews** from `~/.roborev/reviews.db` against their recorded `git_ref` ranges,
   the ONLY paths ever dropped from a prompt were **25 paths, every one a `.md`** — including
   `.claude/agents/*.md`, `openspec/**/*.md`, `website/**/*.md` and `CLAUDE.md`. `docs/**` cannot
@@ -75,9 +81,9 @@ review of every program the repo ships beside a report. It is fleet-wide and rec
 4. **A recorded live demonstration (AC2).** The sanctioned wrapper is run against a PR
    #3222-shaped diff (executables under `docs/reports/*-artifacts/`) and the census counts, the
    `prompt-content:` line and the input/cached/output token counts are **recorded** in the PR — showing
-   the genuine-review band rather than the vacuous baseline. The same probe resolves the one residual
-   unknown left by the stripped binary: whether a pattern that CONTAINS a `/` is passed verbatim or is
-   ALSO `**/`-prefixed (which would make `docs/**/*.json` hide `website/src/content/docs/**/*.json` too).
+   the genuine-review band rather than the vacuous baseline. The probe also CONFIRMS end to end the
+   root-anchoring the disassembly established — a deny-listed extension under `website/src/content/docs/`
+   is still delivered to the reviewer, because a pattern containing an interior `/` is passed verbatim.
 5. **Hermetic regression tests (AC5).** `scripts/tests/test_roborev_review_guard.sh` gains cases in its
    existing style: executables under `docs/` yield a PASS-eligible census and ARE enqueued; a prose-only
    diff under `docs/` still reports `code-free: FAIL` and is never enqueued; a config that WOULD swallow

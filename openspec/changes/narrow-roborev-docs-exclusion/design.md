@@ -13,8 +13,9 @@ notice if it is ever wrong again.
 ### What is actually known about `exclude_patterns` (and how)
 
 `roborev` is an **external, stripped Go binary** — `roborev v0.61.2` at `/usr/local/bin/roborev`, no
-source available — so its behaviour was established by symbol inspection plus an empirical replay, not
-by reading code. Three findings are load-bearing for everything below.
+source available — so its behaviour was established by symbol inspection, an empirical replay, and finally
+by **DISASSEMBLING the responsible function** (next section). Three findings from the observational phase
+are load-bearing for everything below; the disassembly then made the mechanism exact.
 
 1. **It is git pathspec, not a bespoke matcher.** The binary carries the symbols
    `git.FormatExcludeArgs` and `config.ResolveExcludePatterns`, and both string constants
@@ -35,22 +36,85 @@ by reading code. Three findings are load-bearing for everything below.
    cause of executables under `docs/` being discarded. Deleting nothing but `docs/**` would already fix
    AC1 — at a token cost this design refuses to pay (see the rejected alternatives).
 
-### The one residual the stripped binary cannot answer
+### RESOLVED: the exact algorithm, recovered by disassembly
 
-Whether a pattern that **contains a `/`** is passed verbatim (`:(exclude,glob)docs/**`) or is **also**
-`**/`-prefixed (`:(exclude,glob)**/docs/**`) is **not recoverable** — both constants exist and no
-observed review carried a `docs/`-scoped non-`.md` exclusion to discriminate them. It matters: if
-patterns are force-prefixed, `docs/**/*.json` would also exclude
-`website/src/content/docs/**/*.json`. This design therefore does **two** things rather than guessing:
+The one question the observational phase could not answer — whether a pattern CONTAINING a `/` is passed
+verbatim or is ALSO `**/`-prefixed — is **no longer open**. `git.FormatExcludeArgs` was recovered from the
+stripped binary by parsing `.gopclntab` for symbols (real text base `0x401000`) and disassembling it. It is
+eight lines:
 
-- **AC2's live probe resolves it** by including a file under a NESTED `docs` directory
-  (`website/src/content/docs/`) in the probe diff and observing whether it is excluded. The final pattern
-  list is not committed as "done" until the probe has reported.
-- **The new check is interpretation-agnostic and fail-closed**: for any pattern containing a `/` it
-  evaluates **both** candidate pathspecs and treats a path as swallowed if **either** interpretation
-  excludes it (i.e. it takes the union of exclusions / the intersection of survivors). A false FAIL from
-  the conservative reading is loud, rare, and names a genuine ambiguity; a missed swallow is silent and
-  is exactly the defect this issue exists to eliminate.
+```go
+p = strings.TrimSpace(pattern)
+p = strings.TrimRight(p, "/")
+if p == "" { continue }
+b0 = p[0]                       // read BEFORE TrimLeft
+p = strings.TrimLeft(p, "/")
+if p == "" { continue }
+if b0 == '/' || strings.Index(p, "/") >= 0 {
+    prefix = ":(exclude,glob)"       // verbatim, ROOT-ANCHORED
+} else {
+    prefix = ":(exclude,glob)**/"    // RECURSIVE
+}
+out = append(out, prefix+p, prefix+p+"/**")   // TWO pathspecs per pattern
+```
+
+It is on the **real diff path**, not a dead helper: callers are `git.GetDiffCtx`, `GetDiffLimitedCtx`,
+`GetRangeDiffCtx`, `GetRangeDiffLimitedCtx`, `GetDirtyDiff`, and
+`prompt.(*Builder).buildSinglePrompt` / `buildRangePrompt` / `resolveExcludes`.
+
+**R1 — a slash-containing pattern is VERBATIM and ROOT-ANCHORED.** `docs/**/*.json` does **not** match
+`website/src/content/docs/c.json`. The residual resolves in the *narrow* direction, which is the blast
+radius this design wanted: the docs-scoped deny-list is exactly scoped and hides nothing elsewhere in the
+tree.
+
+**R2 — every pattern silently emits TWO pathspecs**, `prefix+p` and `prefix+p+"/**"`. That is how a bare
+directory name excludes its whole subtree, and any port that emits only the first would under-count
+exclusions (i.e. miss a swallow).
+
+**R3 — the trailing-slash INVERSION, and it is the real trap.** `TrimRight(p, "/")` runs *before* the
+contains-`/` test, so `docs/` → `docs` → slash-less → `**/docs` + `**/docs/**` = **RECURSIVE**, while
+`docs/**` keeps its slash and stays root-anchored. **`docs/` and `docs/**` behave OPPOSITELY**, and the
+trailing-slash form would also swallow `website/src/content/docs/**`. A trailing slash is a *silent
+widening* of unbounded depth that reads like a harmless tidy-up.
+
+**Decision: a trailing-slash pattern is a FAIL, not a NOTICE.** It is a configuration defect knowable
+from the config alone, with no diff needed; the widening it causes is depth-unbounded and invisible in
+every summary block that would otherwise read `PASS`; the remedy is a one-token edit (`docs/**`, or a
+deliberate slash-less `docs` if recursion really is wanted); and a NOTICE in a block agents skim is
+exactly how the original `docs/**` survived for months. Fail-closed also matches the key's existing
+contract — the value grammar has no non-failing state that blocks anything, so a NOTICE could not stop
+the very edit that reintroduces the bug. The cost is honest and accepted: because the check is
+diff-independent here, a bad config edit reds *every* review round fleet-wide until it is fixed — which is
+the intended pressure, not a side effect.
+
+**R4 — a leading `/` root-anchors an otherwise-recursive slash-less name.** `/README.md` →
+`:(exclude,glob)README.md` (root only) vs `README.md` → `:(exclude,glob)**/README.md` (any depth). It is
+the ONLY way to root-anchor a slash-less name, and it is why `b0` is captured *before* `TrimLeft`.
+
+**R5 — no negation / re-include capability, VERIFIED at the instruction level.** `FormatExcludeArgs`
+performs only TrimSpace / TrimRight / TrimLeft / `Index`; there is no `!` handling and no re-include path.
+This **upgrades "an allow-list is not expressible" from a working assumption to a verified fact**, which
+retroactively proves the deny-list of D1 was *forced*, not a preference. Empty-after-trim patterns are
+silently skipped.
+
+**R6 — the model closes against the observations.** Today's `['docs/**', '*.md']` resolves to
+root-anchored `docs/**` + `docs/**/**` and recursive `**/*.md` + `**/*.md/**`. That reproduces the 21-review
+replay *exactly*: only `.md` ever dropped, at arbitrary depth, repo-wide, and never a non-`.md`. No
+residual inconsistency remains between the disassembly and the measurements.
+
+**R7 — the check must REPLICATE, not query.** No roborev flag prints the resolved pathspecs (`review
+--help` has no `--dry-run`; `-v` is global-only), so the resolved set is simply not obtainable from the
+tool. `config.ResolveExcludePatterns` / `loadRepoExcludePatterns` merge the global
+`~/.roborev/config.toml` with the repo `.roborev.toml` (global is currently `[]`), which confirms the union
+read. Two adjacent mechanisms are deliberately NOT in scope and must not be conflated: `max_prompt_size`,
+`exclude_branches` and commit-message exclusion (`IsCommitMessageExcluded`) are separate keys, and
+`git.EnsureLocalExcludePattern` / `infoExcludePath` writes `.git/info/exclude` — a different mechanism
+entirely.
+
+**Maintenance obligation.** All of the above is pinned to **`roborev v0.61.2`**. An upgrade could change
+`FormatExcludeArgs`, which would silently invalidate the port while every summary block still read `PASS`,
+so the version is recorded beside the ported code and re-verification on upgrade is a stated obligation
+(the same discipline the #2964 live probe already carries for version bumps).
 
 ### What lives under `docs/`, measured
 
@@ -83,12 +147,16 @@ only** — at minimum the high-count raw-output and binary/image classes from th
 
 (`docs/**/*.x` matches `docs/a.x` as well as `docs/a/b/c.x` — git's `**/` matches zero or more
 components.) The consequence is that `.py`, `.sh`, `.bt`, `.c`, `.rs`, `.toml`, `.cql`, `.yml`, `.yaml`
-under `docs/` are **reviewed**, which is AC1.
+under `docs/` are **reviewed**, which is AC1. Each of these patterns contains an interior `/`, so by R1 it
+is **root-anchored** — the scope is exactly `docs/`, and nothing under `website/src/content/docs/` or any
+other nested `docs` directory is affected. **None of them may be written with a trailing slash** (R3): a
+`docs/` form would invert to recursive and re-widen the blast radius, which is why the wrapper FAILs on a
+trailing-slash pattern.
 
-**A deny-list is forced, not preferred.** `exclude_patterns` has no negation and no allow-list: git
-pathspec supports no `!` inside `:(exclude)`, and no negation handling exists in the binary. "Review
-these extensions and nothing else" is therefore **not expressible**; the only lever is narrower
-excludes.
+**A deny-list is forced, not preferred — and this is now VERIFIED, not assumed.** `git.FormatExcludeArgs`
+does only TrimSpace / TrimRight / TrimLeft / `Index`: there is no `!` handling and no re-include path at
+the instruction level, and git pathspec supports none inside `:(exclude)` either. "Review these extensions
+and nothing else" is therefore **not expressible**; the only lever is narrower excludes.
 
 **The deny-list's known weakness, stated up front.** A *new* artifact extension appearing under `docs/`
 is silently re-admitted to review prompts. That is a **token-cost** problem, never a correctness one:
@@ -117,18 +185,29 @@ which is precisely why the fix cannot be a config edit alone.
 
 ### D2 — defence in depth: reconcile the census against the effective exclusion set with git (AC3, AC4)
 
-This is the key idea. A new **pre-enqueue** check, under its own greppable key **`census-exclusion:`**,
-does *not* re-implement glob matching and does *not* trust the reviewer's narration. It **reproduces
-roborev's mechanism with git**:
+This is the key idea, and the disassembly makes it **exact rather than approximate**. A new **pre-enqueue**
+check, under its own greppable key **`census-exclusion:`**, does *not* re-implement glob matching and does
+*not* trust the reviewer's narration. It **ports roborev's pathspec construction and lets git do the
+matching**:
 
-1. Read the effective `exclude_patterns`.
-2. Convert each pattern to the pathspec roborev would build: `:(exclude,glob)**/<p>` for a slash-less
-   pattern; for a pattern containing `/`, evaluate **both** `:(exclude,glob)<p>` and
-   `:(exclude,glob)**/<p>` and take the union of exclusions (the F5 residual, handled fail-closed).
+1. Read the effective `exclude_patterns` (repo ∪ global, per `ResolveExcludePatterns`).
+2. **Construct the pathspecs as an exact port of `git.FormatExcludeArgs`** (the eight lines above):
+   trim; skip if empty; capture `b0` BEFORE `TrimLeft`; root-anchored `:(exclude,glob)<p>` when `b0 == '/'`
+   or `<p>` contains `/`, else recursive `:(exclude,glob)**/<p>`; and emit **both** `<p>` and `<p>/**`.
+   FAIL on a trailing-slash pattern (R3's inversion) rather than silently resolving it recursively.
 3. Ask git which census paths survive:
    `git diff --name-only -z --no-renames <base>...HEAD -- <pathspecs>`.
 4. **Swallowed set = the census's CODE paths − the survivors.** Non-empty ⇒ **FAIL, before anything is
    enqueued**, naming the swallowed paths and the pattern that ate each.
+
+The split of labour matters: **construction** is a port of a fully specified 8-line function, and
+**matching** is delegated to git, which is the same matcher roborev delegates to. Neither half is guessed,
+so the reconciliation of AC4 is exact — a materially stronger position than the earlier
+"evaluate-both-readings and fail on either" stance, which the disassembly showed would have been not
+conservative but simply **WRONG**: a census path under `website/src/content/docs/` would have been reported
+swallowed while roborev in fact delivers it, i.e. a false FAIL on legitimate report PRs. Because
+construction is a port, the pinned version (`roborev v0.61.2`) is recorded beside it and re-verification on
+upgrade is a maintenance obligation.
 
 `--no-renames` is passed because the census itself is computed with `--no-renames`; without it the two
 path sets would not be comparable. The read is **NUL-safe** (`-z`, bash arrays, no word splitting): one
@@ -173,10 +252,9 @@ to be moved before it. Tradeoffs accepted and mitigated:
   not a parseable bracketed array ⇒ `FAIL (exclusion set unreadable: …)`. A genuinely absent key or
   absent config file ⇒ `PASS (no exclusion patterns configured)`, because "no exclusions" cannot swallow
   anything. "We could not tell" is never aliased to "nothing is excluded".
-- The **global/repo merge semantics are unverifiable** from a stripped binary (today the global list is
-  empty, so the repo list is the whole effective set). The check takes the **union**, which is the
-  fail-closed direction: if the real rule is "repo overrides global", a union can only produce a loud
-  false FAIL, never a missed swallow.
+- The **global/repo merge is a UNION**, per `config.ResolveExcludePatterns` / `loadRepoExcludePatterns`
+  (today the global list is `[]`, so the repo list is the whole effective set). This is no longer a
+  fail-closed guess; the check takes the union because that is what the tool does.
 - When `roborev` *is* invocable, the parsed set is **corroborated** against
   `roborev config get exclude_patterns` (which prints the comma-joined repo value). A pattern the binary
   reports that our parse lacks is `FAIL (exclusion set drift: …)` — that direction could hide a swallow.
@@ -240,13 +318,11 @@ baseline (~18.7k in / 0 cached / 53–56 out, ~8s)** — the signature PR #3222 
 15,443 in / 89 out.
 
 The probe diff **must also include a file under a nested `docs` directory** (e.g. under
-`website/src/content/docs/`) with one of the deny-listed extensions, so the recorded prompt content
-resolves the verbatim-vs-`**/`-prefixed residual. Both outcomes are acceptable and both are recorded:
-
-- verbatim ⇒ the `docs/**/*.<ext>` patterns are exactly scoped, nothing further needed;
-- `**/`-prefixed ⇒ the same patterns also hide same-extension artifacts under **any** nested `docs/`
-  directory. That is recorded as a known residual (with `website/src/content/docs/` named), and the
-  check's conservative union already keeps it fail-closed rather than silent.
+`website/src/content/docs/`) with one of the deny-listed extensions — no longer to *resolve* an ambiguity
+(the disassembly did that) but as the **end-to-end confirmation of R1**: because a pattern with an interior
+`/` is root-anchored, that nested path must still be DELIVERED to the reviewer. Presence confirms the port
+live; **absence would falsify it** and is a blocking finding, not an acceptable outcome to record — the
+pattern list and the check's construction both rest on R1 being right.
 
 The probe needs the network and a live reviewer, so like the #2964 worktree probe it is **documented and
 recorded, never gate-run**.
@@ -272,7 +348,12 @@ family's `(c2*)` lettering. The fixture helper gains the ability to write the wo
    patterns configured";
 6. **a path with spaces and a literal quote** survives the comparison (the NUL-safety regression);
 7. **corroboration `UNAVAILABLE`** when the stub does not answer `config get`, and the drift FAIL when it
-   reports a pattern the parse lacks.
+   reports a pattern the parse lacks;
+8. **the ported construction itself, case by case** (R1–R5) — a slash-containing pattern leaves a NESTED
+   `docs`-directory census path SURVIVING (the false-FAIL regression the earlier both-readings design would
+   have shipped); a bare directory name excludes its subtree through the `<p>/**` sibling; `/README.md`
+   excludes only the root file while `README.md` excludes at any depth; a **trailing-slash** pattern FAILs
+   naming the inversion; a whitespace-only pattern is skipped, not treated as match-everything.
 
 The suite runs under the `roborev-lints` gate component, which is in **both** `COMPONENTS` and
 `LITE_COMPONENTS` — so a regression FAILs the fast loop rather than costing a review round. Its tally
@@ -322,6 +403,11 @@ recorded in the PR). Leaving it unaddressed is the only failing outcome.
   correctness-gate change in one PR would make both harder to certify.
 - **Upstream ask on roborev:** an allow-list / negation form for `exclude_patterns`, and a non-zero exit
   when the constructed diff is empty because everything was excluded.
+- **Re-verify the port on any roborev upgrade.** The construction is a port of `git.FormatExcludeArgs` as
+  it exists in **`roborev v0.61.2`**; an upstream change to that function would silently invalidate the
+  check while every summary block still read `PASS`. The version is recorded beside the ported code, and a
+  version bump obliges re-disassembly (or an upstream source read, if one becomes available) before the
+  check is trusted again — the same discipline #2964's live probe carries for version bumps.
 - **Deny-list drift watch:** a new artifact extension under `docs/` is re-admitted as review noise until
   the pattern list is extended (bounded, non-correctness — see D1).
 
