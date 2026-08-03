@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -252,7 +253,11 @@ def do_exec(argv: list[str]) -> int:
         return 0
     if tool == "bash":
         cmd = rest[-1]
-        if "cassandra.yaml" in cmd:
+        # The yaml flip is the one command matched on CONTENT rather than on a tool
+        # name: the generator sends a multi-statement `sed`+`grep` snippet, whose
+        # subject is the yaml PATH. Legitimately a substring test — there is no single
+        # invoked binary to compare.
+        if "/cassandra.yaml" in cmd:
             if not YAML:
                 sys.stderr.write("stub-docker: STUB_YAML is unset\n")
                 return 92
@@ -271,9 +276,16 @@ def do_exec(argv: list[str]) -> int:
                 return 1
             print(f"{CONTAINER_DATA}/data/{KS}/{TBL}-{TABLE_UUID}")
             return 0
-        if "sstabledump" in cmd:
+        # Dispatch on the INVOKED BINARY's exact basename, not on `"sstabledump" in
+        # cmd` (issue #3234 F1/F2 audit). The substring form was ordering-dependent —
+        # any command mentioning either tool name anywhere routed to whichever `in`
+        # test came first — and this fixture's answers are what the generator's
+        # cross-checks are compared against, so a misroute is a wrong oracle.
+        tool_m = re.match(r"\s*(\S*/)?(?P<tool>[A-Za-z0-9_.-]+)\s", cmd)
+        invoked = tool_m.group("tool") if tool_m else ""
+        if invoked == "sstabledump":
             return sstabledump(cmd.split("'")[1])
-        if "sstablemetadata" in cmd:
+        if invoked == "sstablemetadata":
             return sstablemetadata(cmd.split("'")[1])
         return 0
     return 0

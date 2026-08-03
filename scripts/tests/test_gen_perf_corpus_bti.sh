@@ -338,7 +338,7 @@ fi
 
 # --smoke lowers rows/chunk-rows and defaults the keyspace away from production.
 out=$(bash "$GEN" --smoke --validate-only --out "$TMP/c" 2>&1)
-if grep -q "keyspace=perf_bti_smoke" <<<"$out" && ! grep -q "rows=10200000" <<<"$out"; then
+if grep -q "keyspace=perf_bti_smoke" <<<"$out" && ! grep -qE "rows=10200000( |$)" <<<"$out"; then
   pass "--smoke lowers the row count and defaults keyspace=perf_bti_smoke"
 else
   fail "--smoke: expected a lowered row count + perf_bti_smoke (out: $out)"
@@ -436,7 +436,7 @@ fi
 # pinned too: the committed fixture is sized to the repo convention (#3032's
 # multiclustering_table, 468 rows / 121,020 B golden), and a silent widths change
 # would silently resize a committed fixture on the next regeneration.
-if grep -q "widths=400:20,80:30,20:50" <<<"$out"; then
+if grep -qE "widths=400:20,80:30,20:50$" <<<"$out"; then
   pass "--small-golden pins the rows-per-partition mix that fixes the fixture's size"
 else
   fail "--small-golden widths default changed (out: $out)"
@@ -515,7 +515,7 @@ fi
 check_reject "a plan over the \`pk int\` ceiling" "INT32_MAX" \
   --rows 2200000000 --chunk-rows 500000
 out=$(bash "$GEN" --validate-only --out "$TMP/c" --rows 13200000 --chunk-rows 500000 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "chunks=27 " <<<"$out"; then
+if [ "$rc" -eq 0 ] && grep -qE "chunks=27 " <<<"$out"; then
   pass "the 27-chunk production plan fits the \`pk int\` ceiling"
 else
   fail "production plan (27 chunks) must validate (rc=$rc, out: $out)"
@@ -558,13 +558,13 @@ verify_shape() {
 root="$TMP/good"
 make_corpus "$root/sstables/perf_bti/wide_multiclustering-0123456789abcdef0123456789abcdef" 9437184 4096
 out=$(verify "$root"); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out" && grep -q "largest_data_db=9437184" <<<"$out"; then
+if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out" && grep -qE "largest_data_db=9437184( |$)" <<<"$out"; then
   pass "--verify-only accepts a well-formed da corpus (positive control)"
 else
   fail "--verify-only on a good corpus: expected VERIFY-OK (rc=$rc, out: $out)"
 fi
 # The ambiguity check is REPORTED on the success line, so a pasted VERIFY-OK shows it ran.
-if grep -q "corpus_dirs=1" <<<"$out"; then
+if grep -qE "corpus_dirs=1$" <<<"$out"; then
   pass "VERIFY-OK reports the corpus-dir count the ambiguity check counted"
 else
   fail "expected corpus_dirs=1 on the VERIFY-OK line; out: $out"
@@ -636,7 +636,7 @@ fi
 root="$TMP/exact8m1"
 make_corpus "$root/sstables/perf_bti/wide_multiclustering-7123456789abcdef0123456789abcdef" 8388609 4096
 out=$(verify "$root"); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "largest_data_db=8388609" <<<"$out"; then
+if [ "$rc" -eq 0 ] && grep -qE "largest_data_db=8388609( |$)" <<<"$out"; then
   pass "--verify-only accepts 8388609 B (one byte over the floor)"
 else
   fail "AC2 boundary+1: expected VERIFY-OK (rc=$rc, out: $out)"
@@ -695,7 +695,7 @@ d="$root/sstables/perf_bti/wide_multiclustering-c123456789abcdef0123456789abcdef
 make_corpus "$d" 9437184 4096 1
 make_corpus "$d" 9437184 4096 2
 out=$(verify_shape "$root" 2 1); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out" && grep -q "sstables=2" <<<"$out" \
+if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out" && grep -qE "sstables=2 " <<<"$out" \
    && grep -q "one SSTable per chunk: 2 == 2 chunk(s); generations 1 2" <<<"$out"; then
   pass "--verify-only accepts 2 SSTables at generations 1..2 for 2 chunks (positive control)"
 else

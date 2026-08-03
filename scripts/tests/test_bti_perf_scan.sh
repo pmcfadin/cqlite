@@ -413,7 +413,7 @@ fi
 if run_case 7 "a mid-scan decode failure exits SCAN_FAILED, not OPEN_FAILED" \
   --corpus "$CORRUPT" --keyspace "$KS" --table "$TBL" --warm-passes 0 \
   --no-min-seconds --manifest "$TMP/m-good.json"; then
-  if grep -q "^open: 1 sstables discovered" <<<"$out"; then
+  if grep -qE "^open: 1 sstables discovered " <<<"$out"; then
     pass "SCAN_FAILED is reported AFTER a successful open (so 3 vs 7 really do differ)"
   else
     fail "expected the corrupt corpus to OPEN before failing; got: $(head -3 <<<"$out")"
@@ -425,7 +425,7 @@ fi
 # would be proving nothing.
 if run_case 0 "the fixture corpus PASSES with the row-count assert ON" \
   "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-good.json"; then
-  if grep -q "^rows_scanned:     $FIXTURE_ROWS" <<<"$out" \
+  if grep -qE "^rows_scanned: +$FIXTURE_ROWS\$" <<<"$out" \
     && grep -q "^row_count_assert: $FIXTURE_ROWS (authoritative:" <<<"$out"; then
     pass "the result block reports the verified row count and its authority"
   else
@@ -434,8 +434,8 @@ if run_case 0 "the fixture corpus PASSES with the row-count assert ON" \
   # S3: the route must be printed beside the number.
   if grep -q "^access_path:      " <<<"$out" \
     && grep -q "^storage_route:    " <<<"$out" \
-    && grep -q "^generations:      1" <<<"$out" \
-    && grep -q "^schema_resolved:  true" <<<"$out"; then
+    && grep -qE "^generations: +1\$" <<<"$out" \
+    && grep -qE "^schema_resolved: +true\$" <<<"$out"; then
     pass "the result block names the ROUTE (access_path + storage_route + inputs)"
   else
     fail "expected access_path/storage_route/generations/schema_resolved; got: $(tail -6 <<<"$out")"
@@ -488,7 +488,7 @@ run_case 3 "an ambiguous root is refused under --no-expect-rows too (no manifest
 if run_case 0 "a documented sstable_dir scopes ingestion inside an ambiguous root" \
   --corpus "$TWO" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
   --manifest "$TMP/m-scoped.json"; then
-  if grep -q "^generations:      1" <<<"$out"; then
+  if grep -qE "^generations: +1\$" <<<"$out"; then
     pass "the OBSERVED generation count is 1 -- only the manifest's directory was ingested"
   else
     fail "expected generations: 1 from a scoped ingest; got: $(grep '^generations' <<<"$out")"
@@ -505,7 +505,7 @@ fi
 if run_case 0 "a sibling table whose name has this table's name as a PREFIX is ignored" \
   --corpus "$PREFIX" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
   --manifest "$TMP/m-good.json"; then
-  if grep -q "^generations:      1" <<<"$out"; then
+  if grep -qE "^generations: +1\$" <<<"$out"; then
     pass "the prefix-sharing sibling contributed no generation"
   else
     fail "expected generations: 1 beside a ${TBL}_small dir; got: $(grep '^generations' <<<"$out")"
@@ -523,8 +523,8 @@ fi
 # alone was never able to see this, and why both numbers are asserted together.
 extend_counts_ok() { # extend_counts_ok <label>
   local label="$1"
-  if grep -q "^generations:      1" <<<"$out" \
-    && grep -q "^rows_scanned:     $FIXTURE_ROWS" <<<"$out"; then
+  if grep -qE "^generations: +1\$" <<<"$out" \
+    && grep -qE "^rows_scanned: +$FIXTURE_ROWS\$" <<<"$out"; then
     pass "$label: exactly 1 generation and $FIXTURE_ROWS rows were OBSERVED"
   else
     fail "$label: expected generations: 1 + rows_scanned: $FIXTURE_ROWS; got: \
@@ -537,7 +537,7 @@ if run_case 0 "a documented scope beside '<dir>-backup' and '<table>-backup' mea
   extend_counts_ok "documented scope"
   # ...and the two siblings ARE discoverable (else the case above would prove nothing):
   # discovery's unfiltered total is 3, so 2 SSTables were left outside the scope.
-  if grep -q "^generations_observed_in: 1 directory/ies" <<<"$out" \
+  if grep -qE "^generations_observed_in: 1 directory/ies\$" <<<"$out" \
     && grep -q "^note: 2 sstable(s) under .* were NOT ingested" <<<"$out"; then
     pass "the two name-extending siblings were DISCOVERED and left outside the scope"
   else

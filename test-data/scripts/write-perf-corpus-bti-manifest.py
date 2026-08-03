@@ -272,13 +272,23 @@ def sstable_metadata(data_db: str, image: str, docker: list[str], mem: str) -> d
 def sstable_record(sstable_dir: str, basename: str, image: str, docker: list[str],
                    mem: str, dumped: set[str]) -> dict:
     """One record per SSTable generation, all of it read back from the bytes."""
-    prefix = f"{basename}-"
+    # An entry belongs to this SSTable when its DESCRIPTOR equals `basename` exactly --
+    # split on the last `-`-separated descriptor boundary and compare, rather than
+    # `e.startswith(f"{basename}-")` (issue #3234 F1/F2 audit). The prefix form decides
+    # component MEMBERSHIP, i.e. which files this manifest describes, from a string
+    # prefix; the split form cannot confuse one descriptor with another.
+    def component_of(entry: str) -> str | None:
+        m = re.match(r"^(?P<desc>da-\d+-bti)-(?P<comp>.+)$", entry)
+        if m is None or m.group("desc") != basename or entry.endswith(".jsonl"):
+            return None
+        return m.group("comp")
+
     components = {
         e: os.path.getsize(os.path.join(sstable_dir, e))
         for e in sorted(os.listdir(sstable_dir))
-        if e.startswith(prefix) and not e.endswith(".jsonl")
+        if component_of(e) is not None
     }
-    suffixes = {e[len(prefix):] for e in components}
+    suffixes = {component_of(e) for e in components}
     missing = [c for c in EXPECTED_COMPONENTS if c not in suffixes]
     if missing:
         raise SystemExit(f"{basename}: missing component(s) {missing}")
