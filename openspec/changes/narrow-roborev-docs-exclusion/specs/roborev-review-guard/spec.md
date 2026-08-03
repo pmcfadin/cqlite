@@ -194,17 +194,70 @@ The check SHALL REPLICATE the algorithm rather than QUERY the binary, because **
 the resolved pathspecs** — `review` has no `--dry-run` and `-v` is a global-only flag — so the resolved
 set is not obtainable from the tool at all.
 
-The effective set SHALL be read from the configuration FILES (the repository `.roborev.toml` and the
-global `~/.roborev/config.toml`), not from the `roborev` binary, so the check stays hermetic and
-stub-testable and so no reordering of the wrapper's existing `command -v roborev` validation is required.
-The parse SHALL respect TOML table scoping (a same-named key inside a `[table]` is NOT the top-level key)
-and SHALL fail closed rather than guess. Repository and global patterns SHALL be combined as a UNION,
-which is what `config.ResolveExcludePatterns` / `loadRepoExcludePatterns` do (the global list is
-currently empty, so the repository list is today's whole effective set). When `roborev` IS invocable
-the parsed set SHALL be CORROBORATED against `roborev config get exclude_patterns`; a pattern the binary
-reports that the parse LACKS SHALL be `FAIL (exclusion set drift: …)` because that direction can hide a
-swallow, the reverse direction SHALL be a non-failing NOTICE, and an absent binary SHALL report the
-corroboration as `UNAVAILABLE` without failing.
+The effective set SHALL be read from the configuration FILES, not from the `roborev` binary, so the check
+stays hermetic and stub-testable and so no reordering of the wrapper's existing `command -v roborev`
+validation is required. The parse SHALL respect TOML table scoping (a same-named key inside a `[table]`
+is NOT the top-level key) and SHALL fail closed rather than guess.
+
+**THREE config sources SHALL be read, and a swallow in ANY of them SHALL FAIL.** roborev's daemon binds a
+repository by its `repos.root_path` — the **ROOT checkout** — and reads THAT checkout's `.roborev.toml`.
+Under 1:1:1:1 the wrapper's `$REPO` is a LINKED WORKTREE, so reading only `$REPO/.roborev.toml` certifies
+a file roborev may never consult: on this change's own branch that produced
+`census-exclusion: PASS (7/7 survive)` from the worktree's narrowed set while the real review applied the
+root checkout's blanket `['docs/**','*.md']` and returned
+`prompt-content: FAIL (1/7 code census paths absent)`. The sources SHALL therefore be
+(a) `$REPO/.roborev.toml`, (b) the ROOT checkout's `.roborev.toml` when `$REPO` is a linked worktree, and
+(c) the global `~/.roborev/config.toml`, combined as a UNION — which is also what
+`config.ResolveExcludePatterns` / `loadRepoExcludePatterns` do. Which of (a) and (b) a given roborev build
+PREFERS is an internal detail the check SHALL NOT bet on; the union is the only reading that cannot
+produce a false PASS in either direction. The root checkout SHALL be resolved from git
+(`rev-parse --path-format=absolute --git-common-dir`, with a relative-path fallback for git older than
+2.31 and `git worktree list --porcelain` as a last resort) and SHALL FAIL CLOSED when none of those
+answer — reading one file and reporting a PASS about it is the defect, not the remedy. When `$REPO` IS
+the root checkout there is only ONE repository file and it SHALL NOT be double-reported.
+
+**Every FAIL and PASS value SHALL name WHICH source each pattern came from.** With more than one config
+file in play, "excluded by `docs/**`" is not an actionable instruction; the swallowed-path list, the
+trailing-slash FAIL and the resolved-pathspec listing SHALL each carry a source tag, and a FAIL SHALL
+additionally enumerate every source path it read.
+
+**roborev's own BUILT-IN excludes SHALL be modelled too.** `exclude_patterns` is not the whole exclusion
+set: the binary ALWAYS appends a hard-coded lockfile/cache deny-list (extracted from the pinned v0.61.2
+executable as literal `:(exclude,glob)**/…` pathspecs — the `Cargo.lock`/`go.sum`/`package-lock.json`/…
+family plus `**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml`), with no
+configuration switch. A census path one of those eats is exactly as invisible to the reviewer as a
+configured swallow, so it SHALL be evaluated in the same reconciliation and SHALL FAIL — but it SHALL be
+messaged DISTINCTLY from a configured pattern ("excluded by a roborev built-in" ≠ "excluded by your
+config"), because editing `.roborev.toml` cannot remedy it. This list SHALL carry the same
+re-verify-on-upgrade obligation as the ported algorithm.
+
+When `roborev` IS invocable the parsed set SHALL be CORROBORATED against
+`roborev config get exclude_patterns`, run from **every** checkout whose config was read (that command
+resolves the repo config relative to its CWD, so asking only from `$REPO` reproduces the same blind spot
+inside the corroboration). A pattern the binary reports that the parse LACKS SHALL be
+`FAIL (exclusion set drift: …)` because that direction can hide a swallow, the reverse direction SHALL be
+a non-failing NOTICE, and a binary that answers NOWHERE SHALL report the corroboration as `UNAVAILABLE`
+without failing. A binary that answers with an EMPTY list is an ANSWER, not an absence, and SHALL
+corroborate rather than degrade to `UNAVAILABLE`.
+
+**Corroboration SHALL run on EVERY path, including when the parse found NO configured pattern.** An empty
+parse SHALL NOT be reported as "no exclusion patterns configured" until the binary has confirmed it:
+"our parser recognised no key" is not "nothing is configured", and where the parse is empty this
+cross-check is the ONLY oracle available. The parse SHALL additionally accept the QUOTED TOML key
+spellings `"exclude_patterns"` and `'exclude_patterns'`, which are the same key and ARE honoured by
+roborev (measured on v0.61.2) — but accepting them is NOT sufficient on its own, because any other
+unenumerated-yet-honoured spelling would silently disable the guard; the corroboration is what covers
+that residual. A parse that found nothing while the binary reports at least one pattern SHALL be DRIFT →
+FAIL, and the failure text SHALL say that this state is issue #3229 reintroduced under the key meant to
+prevent it.
+
+An UNKNOWN or UNTRANSLATED backslash escape inside a TOML basic-string pattern SHALL be REFUSED fail-closed
+rather than have its backslash swallowed: `"a\tb"` is `a<TAB>b`, and silently yielding `atb` would compare a
+pattern DIFFERENT from the one roborev applies — the very failure mode this check exists to detect.
+
+Census paths SHALL be normalised for comparison WITHOUT command substitution, which strips trailing
+newlines: a tracked path ending in a `\012` escape would otherwise lose a byte and both mis-compare
+against the `-z` survivor set and risk COLLIDING with a shorter sibling path.
 
 The two classifications SHALL remain INDEPENDENT — the census's extension-based classification and the
 configured pathspec set — because deriving either from the other would make the comparison vacuous and
@@ -260,6 +313,46 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **GIVEN** an invocable `roborev` whose `config get exclude_patterns` reports a pattern absent from the wrapper's parsed set
 - **WHEN** the check corroborates
 - **THEN** it reads `FAIL (exclusion set drift: '<pattern>' reported by roborev config get is absent from the parsed set)` and no review is enqueued, because an unparsed pattern could be excluding census code invisibly
+
+#### Scenario: From a linked worktree, the ROOT checkout's configuration is evaluated
+- **GIVEN** `$REPO` is a linked worktree whose `.roborev.toml` carries the narrowed set, while the ROOT checkout backing it still carries `['docs/**', '*.md']`, and the census contains executables under `docs/`
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` FAILs naming those executables, attributes each to `docs/**` with a `root-config` source tag, enumerates both repository config paths it read, and states that roborev binds the repository by its `repos.root_path` so a narrowed worktree config does NOT override the root one — and no review is enqueued
+
+#### Scenario: The same worktree layout passes once both configurations are narrowed
+- **GIVEN** the same linked-worktree layout with the narrowed set in BOTH the worktree and the root checkout
+- **WHEN** the wrapper runs
+- **THEN** every `docs/` executable is reported SURVIVING, the review IS enqueued, and no pattern is double-reported — so the two-source read is a correctness fix, not a blanket refusal to review from a worktree
+
+#### Scenario: The root checkout cannot be resolved, so the check fails closed
+- **GIVEN** an environment in which neither `git rev-parse --git-common-dir` nor `git worktree list --porcelain` names a usable root checkout for `$REPO`
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** it FAILs closed saying the exclusion set roborev will apply is UNKNOWN, rather than reading `$REPO/.roborev.toml` alone and reporting a PASS about a file roborev may never consult
+
+#### Scenario: A roborev built-in exclude is modelled and messaged as a built-in
+- **GIVEN** a census containing `Cargo.lock` (which the census classifies as CODE) beside a `.rs` file, under a configuration that excludes neither
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` FAILs naming `Cargo.lock` as excluded by `**/Cargo.lock` with a `roborev-builtin` source tag, states that this is NOT the operator's configuration and that editing `.roborev.toml` cannot fix it, names the pinned version the built-in list was extracted from, does NOT blame the operator's configuration, and reports the `.rs` file as surviving
+
+#### Scenario: An empty parse is corroborated by the binary, never assumed
+- **GIVEN** a configuration file the parser recognises no `exclude_patterns` key in, and an invocable `roborev` whose `config get exclude_patterns` reports `docs/**`
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** it FAILs as drift, says explicitly that the parse found no configured pattern while the binary reports at least one, names that state as issue #3229 reintroduced under the key meant to prevent it, never emits a `census-exclusion: PASS`, and enqueues no review
+
+#### Scenario: A genuinely absent key passes only with the binary's confirmation
+- **GIVEN** a configuration file with no `exclude_patterns` key and an invocable `roborev` that ANSWERS with an EMPTY list
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** the value reads `PASS (no exclusion patterns configured; …)` with the corroboration recorded as `OK` and the roborev built-in excludes still named, counted and reconciled — so "nothing is configured" can never be read as "nothing is excluded"
+
+#### Scenario: A quoted TOML key spelling is parsed, not skipped
+- **GIVEN** a configuration whose key is written `"exclude_patterns"` (or `'exclude_patterns'`) with a value that would swallow census code
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** the swallow is named directly by the primary reconciliation — not merely caught by the drift backstop — and the value is never `PASS (no exclusion patterns configured…)`
+
+#### Scenario: An unknown TOML escape is refused rather than swallowed
+- **GIVEN** a configured pattern written as a TOML basic string containing an escape TOML does not define
+- **WHEN** the check parses it
+- **THEN** it FAILs closed as an unreadable exclusion set naming the escape, explains that dropping the backslash would compare a different pattern than roborev applies, and enqueues no review
 
 #### Scenario: The declared residual direction is noise, never a swallow
 - **GIVEN** a census path the wrapper classifies as a non-code artifact which the configuration does NOT exclude
@@ -563,6 +656,15 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 #### Scenario: The exclusion cases stay hermetic
 - **WHEN** the new cases run on a machine with no network access and no real roborev binary installed
 - **THEN** they complete using the stub reviewer, the fixture's own git repository and the fixture's own configuration file, with the corroboration reported `UNAVAILABLE` rather than causing a failure or a skip
+
+#### Scenario: Every wrapper invocation in the suite redirects HOME
+- **GIVEN** the reconciliation check reads the GLOBAL `$HOME/.roborev/config.toml` into the effective set
+- **WHEN** the regression suite is inspected for invocations of the wrapper, including the hand-rolled ones that do not go through the shared runner
+- **THEN** every one of them redirects `HOME` to the throwaway fixture home, so a host whose real global config carries a pattern cannot make a case fail on `census-exclusion:` before its own assertion is ever reached
+
+#### Scenario: No case blesses a guard that has silently self-disabled
+- **WHEN** the cases that expect `PASS (no exclusion patterns configured…)` are inspected
+- **THEN** each of them supplies a binary that ANSWERS with an empty list and asserts the corroboration is `OK`, so no case in the suite records a green verdict for the state a guard reaches when it fails to recognise a configured key
 
 #### Scenario: The tally line cannot be mistaken for a gate or wrapper verdict
 - **WHEN** the regression check finishes

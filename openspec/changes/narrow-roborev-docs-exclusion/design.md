@@ -237,6 +237,97 @@ remains non-vacuous because its verdict is computed from **what the config file 
 restoring `docs/**` — or any hand edit, or a `roborev config set` rewrite — still FAILs even though the
 constant is untouched.
 
+#### D2a — WHICH `.roborev.toml`: the ROOT checkout's, not just the worktree's (blocker, measured)
+
+The first implementation read `$REPO/.roborev.toml` and nothing else, and that produced a **false PASS on
+this change's own branch**. roborev's daemon binds a repository by its **`repos.root_path`** — the ROOT
+checkout — and reads THAT checkout's config. Under 1:1:1:1 every issue runs in a linked worktree, so
+`$REPO` is `…/cqlite-wt/issue-N` while roborev is reading `…/workspace/repo/.roborev.toml`. Measured on
+this branch:
+
+| Source | `exclude_patterns` | What the check said |
+|---|---|---|
+| worktree `…/cqlite-wt/issue-3229/.roborev.toml` | the narrowed 16-pattern set | `census-exclusion: PASS (7/7 survive)` |
+| root `…/workspace/repo/.roborev.toml` | `['docs/**', '*.md']` (pre-change) | what roborev **actually applied** |
+| the real review | — | `prompt-content: FAIL (1/7 code census paths absent)` |
+
+Replaying the ported construction with the OLD set reproduced exactly the 6 files present in the real
+prompt (6/6), while the NEW set predicted 7 — so the port was right and the *input* was wrong. The
+corroboration could not catch it either, because `roborev config get` was run with `cd "$REPO"` and
+`config get` resolves the repo config **relative to its CWD**: from the worktree it answers the new set,
+from the root checkout `docs/**,*.md`.
+
+The fix evaluates **both** repository files plus the global one as a UNION, and fails if **any** would
+swallow a census code path. Deliberately *not* "pick the one roborev prefers": which file wins is an
+internal roborev detail, and betting on it is how a false PASS gets reintroduced on the next upgrade. The
+root checkout is resolved from git — `rev-parse --path-format=absolute --git-common-dir` (a linked
+worktree's `--git-dir` is `<root>/.git/worktrees/<name>`, its `--git-common-dir` is `<root>/.git`), with a
+relative-path fallback for git < 2.31 where `--path-format` does not exist, and
+`git worktree list --porcelain` (whose first entry is the MAIN worktree) as a last resort for a
+non-standard `$GIT_DIR` name. If none of those answer, the check **FAILs closed**: reading one file and
+reporting a PASS about it is the defect being fixed, so "we could not tell which file roborev reads" must
+never degrade to "we read the one we could". When `$REPO` *is* the root checkout, `_rx_root` is emptied so
+the single file is never double-reported. Corroboration now runs `roborev config get` from **every**
+checkout whose config was read.
+
+Because three sources are now in play, **every value line names the source** (`worktree-config` /
+`root-config` / `repo-config` / `global-config` / `roborev-builtin`): "excluded by `docs/**`" does not tell
+an operator which file to edit. The FAIL details additionally enumerate every source path read, and a
+worktree run states explicitly that a narrowed worktree config does **not** override the root one.
+
+#### D2b — `exclude_patterns` is not the whole exclusion set: roborev's BUILT-INS
+
+The binary also **always** appends a hard-coded lockfile/cache deny-list, with no configuration switch.
+Extracted from the pinned v0.61.2 executable as literal pathspec strings
+(`strings -a <bin> | grep -o ':(exclude,glob)[^ ]*'`), 24 of them: the lock family
+(`**/Cargo.lock`, `**/cargo.lock`, `**/go.sum`, `**/package-lock.json`, `**/pnpm-lock.yaml`,
+`**/yarn.lock`, `**/bun.lock`, `**/bun.lockb`, `**/poetry.lock`, `**/pdm.lock`, `**/uv.lock`,
+`**/Pipfile.lock`, `**/composer.lock`, `**/Gemfile.lock`, `**/mix.lock`, `**/pubspec.lock`,
+`**/Podfile.lock`, `**/Package.resolved`, `**/packages.lock.json`, `**/flake.lock`) plus
+`**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml`.
+
+Modelling only the configured half was the **same false-PASS class as D2a**: `Cargo.lock` has a `lock`
+extension, so the census classifies it CODE, and a PR touching it had it silently dropped from the
+reviewer's diff while `census-exclusion:` reported it surviving. The built-ins are therefore folded into
+the same reconciliation. They are already-resolved pathspec bodies rather than user patterns, so passing
+them through the `FormatExcludeArgs` port is a no-op on anchoring (each contains a `/`, so it stays
+verbatim) and merely adds the `/**` sibling.
+
+They are **messaged apart** from configured patterns, because the remedy differs completely: a built-in is
+not editable, so `.roborev.toml` cannot fix it — the honest statement is "roborev will never show a
+reviewer these paths, verify them another way", not "narrow your config". The list carries the same
+re-verify-on-upgrade obligation as the ported algorithm, since an upstream addition would silently widen
+the real exclusion set while every summary block still read `PASS`.
+
+#### D2c — an EMPTY parse must be corroborated, not trusted (blocker, measured)
+
+The first implementation returned `PASS (no exclusion patterns configured)` and `return 0` **before**
+corroboration ever ran. So "our parser recognised no key" was aliased to "nothing is configured" — the
+precise epistemic error the rest of the check refuses, and worse than the unreadable case, because it
+reads green.
+
+It is reachable in the real world. Measured against roborev v0.61.2: a config containing the **quoted key**
+`"exclude_patterns" = ['docs/**', '*.md']` — valid TOML, the *same* key — is honoured (`roborev config get`
+answers `docs/**,*.md`), while the bare-key pattern match skipped the line entirely. The guard then
+reported "nothing configured" and enqueued a review from which every `docs/reports/*-artifacts/**`
+executable was silently dropped: **#3229 reintroduced under the key whose whole job is preventing it.**
+
+Two changes, and both are needed:
+
+1. **Corroboration runs unconditionally, before every early return.** Parsed-nothing while the binary
+   reports something is DRIFT → FAIL, with a detail naming the state for what it is. Where the parse is
+   empty this cross-check is the *only* oracle, so skipping it there was skipping it exactly where it
+   mattered. A binary that answers with an **empty list** is an ANSWER and corroborates; only a binary
+   that answers nowhere is `UNAVAILABLE`.
+2. **The quoted key spellings are accepted** (`"exclude_patterns"`, `'exclude_patterns'`). On its own this
+   is insufficient — any other unenumerated-yet-honoured spelling would disable the guard again — which is
+   why (1) is the load-bearing half and (2) merely moves the common case from the backstop to the primary
+   path.
+
+The regression suite's `cx5b`/`cx5c` previously **locked in** the un-corroborated PASS (both left the stub's
+`config get` unsupported), so a green suite blessed a self-disabled guard; they now supply an
+answering-but-empty binary and assert `corroboration: OK`. `cx5d` pins the drift direction directly.
+
 **Reading the effective set: files, not the binary.** The check parses `.roborev.toml` (repo) and
 `~/.roborev/config.toml` (global) directly, rather than shelling out to `roborev config get`. Two
 reasons: it keeps the check **hermetic and stub-testable** (the existing suite drives a stub `roborev`
@@ -250,8 +341,16 @@ to be moved before it. Tradeoffs accepted and mitigated:
   refuse to guess.
 - **Brittle-TOML risk is answered by failing closed, not by best-effort.** A key present whose value is
   not a parseable bracketed array ⇒ `FAIL (exclusion set unreadable: …)`. A genuinely absent key or
-  absent config file ⇒ `PASS (no exclusion patterns configured)`, because "no exclusions" cannot swallow
-  anything. "We could not tell" is never aliased to "nothing is excluded".
+  absent config file ⇒ `PASS (no exclusion patterns configured; …)` **once the binary has confirmed it**
+  (D2c), because "no exclusions" cannot swallow anything but "we did not recognise the key" can hide
+  everything. "We could not tell" is never aliased to "nothing is excluded". The same rule governs
+  **escapes**: an unknown or untranslated backslash escape inside a basic string is REFUSED, not
+  swallowed — `"a\tb"` is `a<TAB>b`, and quietly yielding `atb` would compare a pattern *different* from
+  the one roborev applies, which is the exact failure mode the check exists to catch.
+- **Path normalisation avoids command substitution.** `$(…)` strips trailing newlines, so a tracked path
+  ending in a `\012` escape would come back a byte short — mis-comparing against the `-z` survivor set and
+  able to COLLIDE with a genuinely shorter sibling. The un-quoting helper returns through a named global and
+  expands octal escapes with `printf -v`.
 - The **global/repo merge is a UNION**, per `config.ResolveExcludePatterns` / `loadRepoExcludePatterns`
   (today the global list is `[]`, so the repo list is the whole effective set). This is no longer a
   fail-closed guess; the check takes the union because that is what the tool does.

@@ -90,8 +90,10 @@
 #   push-assert / census-check / code-free / review-completed  PASS | FAIL (...) | SKIP
 #   census-exclusion  PASS (<k>/<n> code census paths survive the effective exclusion
 #                     set; corroboration: OK|NOTICE|UNAVAILABLE) |
-#                     PASS (no exclusion patterns configured) |
-#                     FAIL (<m>/<n> code census paths excluded: <path> by '<pat>', ...) |
+#                     PASS (no exclusion patterns configured; <k>/<n> ... survive the
+#                     <b> roborev v0.61.2 built-in exclude(s); corroboration: ...) |
+#                     FAIL (<m>/<n> code census paths excluded: <path> by '<pat>'
+#                     [<source>], ...) |
 #                     FAIL (exclusion set unreadable: ...) |
 #                     FAIL (trailing-slash pattern ...) |
 #                     FAIL (exclusion set drift: ...) | SKIP (<cause>)
@@ -252,22 +254,44 @@ RESULT: PASS|FAIL|NOTHING-TO-REVIEW. Exit 0=PASS, 1=FAIL, 3=NOTHING-TO-REVIEW,
 2=usage error. Retain the block, never the transcript.
 
 census-exclusion: (PRE-ENQUEUE, immediately after code-free: in the fixed key
-order) reconciles the CODE census against the EFFECTIVE exclude_patterns — repo
-.roborev.toml UNIONed with ~/.roborev/config.toml — by porting roborev v0.61.2's
-git.FormatExcludeArgs and letting GIT match. roborev drops exactly what its
-configured pathspecs match and makes no code/non-code judgement, which is why this
-is computed, not assumed (#3229: a configured 'docs/**' discarded 33 executable
-harness files on PR #3222). Values:
+order) reconciles the CODE census against the EFFECTIVE exclusion set by porting
+roborev v0.61.2's git.FormatExcludeArgs and letting GIT match.
+roborev drops exactly what its pathspecs match and makes NO code/non-code judgement,
+which is why this is computed, not assumed (#3229: a configured 'docs/**' discarded
+33 executable harness files on PR #3222).
+THE EFFECTIVE SET IS A UNION OF FOUR THINGS, and a swallow in ANY of them FAILs:
+  1. the wrapper's --repo checkout .roborev.toml   [worktree-config|repo-config]
+  2. the ROOT checkout's .roborev.toml        [root-config]  <-- when --repo is a
+     LINKED WORKTREE. roborev's daemon binds a repo by its repos.root_path, i.e. the
+     ROOT checkout, and reads THAT file: a narrowed worktree config does NOT override
+     it, and reading only (1) reported '7/7 survive' on a branch whose real review
+     came back 'prompt-content: FAIL (1/7 absent)'.
+  3. ~/.roborev/config.toml                   [global-config]
+  4. roborev's own BUILT-IN excludes          [roborev-builtin]  <-- NOT configurable:
+     the hard-coded lockfile/cache deny-list (**/Cargo.lock, **/go.sum,
+     **/package-lock.json, ... **/.beads/**, **/.cache/**), extracted from the pinned
+     v0.61.2 binary. A Cargo.lock in your diff IS dropped from the reviewer's copy.
+Every value line names the SOURCE of the pattern responsible, because with several
+files in play "excluded by 'docs/**'" does not say which file to edit. Values:
   PASS (<k>/<n> code census paths survive ...; corroboration: OK|NOTICE|UNAVAILABLE)
-  PASS (no exclusion patterns configured)  absent key/file or an empty list
-  FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>', ...)
-  FAIL (exclusion set unreadable: <cause>) present but unparseable — DISTINCT from
-                                          'no exclusion patterns configured'
-  FAIL (trailing-slash pattern '<p>/' resolves RECURSIVE ...)  diff-independent
-  FAIL (exclusion set drift: '<pattern>' reported by roborev config get ...)
+  PASS (no exclusion patterns configured; <k>/<n> ... survive the <b> roborev
+       v0.61.2 built-in exclude(s); ...)  absent key/file or an empty list, and only
+       once 'roborev config get' has CORROBORATED that nothing is configured
+  FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>' [<source>], ...)
+  FAIL (exclusion set unreadable: <cause>) present but unparseable, an unknown TOML
+                                          escape, or an unresolvable ROOT checkout —
+                                          DISTINCT from 'no exclusion patterns
+                                          configured'
+  FAIL (trailing-slash pattern '<p>/' from <source> resolves RECURSIVE ...)
+                                          diff-independent
+  FAIL (exclusion set drift: '<pattern>' reported by roborev config get ...)  also
+       how a key spelling this parser does not recognise — but roborev DOES honour —
+       is caught, instead of reading as a green 'nothing configured'
   SKIP (<cause>)                          the step was not reached
-A FAIL here is a CONFIGURATION defect: fix .roborev.toml — do not investigate the
-reviewer or prompt-content:. Re-verify the port on any roborev version bump.
+A FAIL naming a config source is a CONFIGURATION defect: fix the named file — do not
+investigate the reviewer or prompt-content:. A FAIL naming [roborev-builtin] is
+NEITHER: roborev will never show a reviewer that path, so verify it some other way.
+Re-verify BOTH the port and the built-in list on any roborev version bump.
 
 Sanctioned invocation (measured, issue #2964 round 5):
   roborev review --branch --base <base> --repo <abs> --agent <a> --model <m> --wait

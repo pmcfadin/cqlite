@@ -2295,6 +2295,19 @@ assert_says '--help names the drift FAIL' 'FAIL \(exclusion set drift'
 assert_says '--help sends a FAIL to the config, not the reviewer' 'is a CONFIGURATION defect'
 assert_says '--help defines docs-only as a code-free CENSUS, not a path prefix' 'CENSUS as code-free: classifies it, NEVER a .docs/. path prefix'
 assert_says '--help names the harness convention as reviewed code' 'docs/reports/\*-artifacts/ are executable code'
+# The four-source union and the built-in half are the two facts an operator reading a
+# census-exclusion FAIL most needs, so --help states them rather than leaving them in the
+# oracles file's comments.
+assert_says '--help enumerates the four exclusion sources' 'THE EFFECTIVE SET IS A UNION OF FOUR THINGS'
+assert_says '--help names the ROOT-checkout config source' '\[root-config\]'
+assert_says '--help explains why the root checkout is read' 'binds a repo by its repos\.root_path'
+assert_says '--help says a worktree config does not override the root one' 'does NOT override'
+assert_says '--help names the non-configurable built-in source' '\[roborev-builtin\]  <-- NOT configurable'
+assert_says '--help gives a concrete built-in consequence' 'A Cargo\.lock in your diff IS dropped'
+assert_says '--help says every value line names the pattern source' 'names the SOURCE of the pattern responsible'
+assert_says '--help says an empty parse must be corroborated' "CORROBORATED that nothing is configured"
+assert_says '--help distinguishes a builtin FAIL from a config FAIL' 'A FAIL naming \[roborev-builtin\] is'
+assert_says '--help extends the re-verify obligation to the built-in list' 'Re-verify BOTH the port and the built-in list'
 assert_never_enqueued '--help'
 
 

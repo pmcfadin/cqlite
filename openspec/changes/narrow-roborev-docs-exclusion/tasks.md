@@ -141,6 +141,47 @@
       excluded) in the PR as a non-blocking follow-up. (Recorded in `design.md` "Follow-ups"; restate in
       the PR body.)
 
+## 8b. Blocker round from the first sanctioned roborev pass (two false-PASS classes)
+The first sanctioned round returned `RESULT: FAIL` with `prompt-content: FAIL (1/7 code census paths
+absent)` while `census-exclusion:` said `PASS (7/7 survive)` — i.e. the new guard itself reported green
+about a swallow it exists to catch. Two independent root causes, both false PASSes:
+- [x] **A — the wrong config file.** The oracle read `$REPO/.roborev.toml` (the WORKTREE) while roborev's
+      daemon binds the repo by `repos.root_path` (the ROOT checkout) and reads THAT file. Fix: resolve the
+      root checkout from git (`--path-format=absolute --git-common-dir`, relative fallback for git < 2.31,
+      `worktree list --porcelain` last resort, FAIL CLOSED if none answer), evaluate ALL config sources as
+      a UNION and fail on a swallow in ANY, corroborate with `roborev config get` run from EVERY checkout
+      read, and NAME the source file in every FAIL/PASS value (incl. the trailing-slash FAIL).
+- [x] **B — corroboration skipped exactly where it is the only oracle.** `_rx_found=0` returned
+      `PASS (no exclusion patterns configured)` BEFORE corroboration ran, aliasing "our parser recognised
+      no key" to "nothing is configured". Verified live on v0.61.2: a QUOTED key `"exclude_patterns"` IS
+      honoured while the bare-key match skipped it. Fix: corroborate unconditionally and before every early
+      return (parsed-none-while-binary-reports-some ⇒ DRIFT → FAIL), accept the quoted key spellings, and a
+      binary answering with an EMPTY list corroborates rather than degrading to `UNAVAILABLE`.
+- [x] Model roborev's BUILT-IN excludes (the hard-coded lockfile/cache deny-list extracted from the pinned
+      v0.61.2 binary) in the same reconciliation, messaged DISTINCTLY from a configured pattern.
+- [x] Refuse an unknown/untranslated TOML basic-string escape fail-closed instead of swallowing the
+      backslash; return un-quoted paths through a named global so `$(…)` cannot strip a trailing newline
+      byte; declare `line` local in `roborev_check_census_exclusion`.
+- [x] Redirect `HOME` in the two hand-rolled wrapper invocations (t7, t9) that bypassed `run_wrapper`'s
+      fixture home — both now reach `census-exclusion`, which reads the GLOBAL config, so a host global with
+      a pattern would have reded them on the wrong key.
+- [x] New hermetic cases: `cx5d` (empty parse + binary reports ⇒ DRIFT FAIL, never enqueued), `cx5e`/`cx5f`
+      (quoted / single-quoted key spellings parsed), `cx5g` (unknown TOML escape refused), `cx18` (linked
+      worktree: blanket ROOT config caught, attributed `[root-config]`), `cx18b` (its PASS complement),
+      `cx19` (`Cargo.lock` swallowed by a built-in, messaged apart), `cx19b` (structural: the built-in
+      constant + its re-extract obligation). `cx5b`/`cx5c` no longer bless an un-corroborated PASS.
+- [x] Specify all of it — the multi-source rule, the built-in excludes, the corroborate-on-empty-parse
+      rule — in the delta spec and `design.md` (§D2a/D2b/D2c), not only in code.
+- [x] EXPECTED CONSEQUENCE, recorded not suppressed: with A fixed, `census-exclusion:` now correctly FAILs
+      on this very branch, because the ROOT checkout's `.roborev.toml` still carries the blanket `docs/**`
+      and the diff contains `docs/reports/3229-artifacts/probe-census-exclusion.sh`. Observed verbatim:
+      `census-exclusion: FAIL (1/7 code census paths excluded:
+      docs/reports/3229-artifacts/probe-census-exclusion.sh by 'docs/**' [root-config])`. That FAIL is the
+      guard working. The narrowed config only takes effect on the root checkout once this PR MERGES, so the
+      pre-merge roborev round on this branch is unavoidably scoped by the old set — a scheduling
+      consequence for the owner, never a reason to weaken the check, special-case the probe, or hand-edit
+      the root checkout's config.
+
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` + `roborev` on the
       lite-green diff (the diff contains code — shell + config — so it IS roborev-certifiable and MUST be).
