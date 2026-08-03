@@ -281,6 +281,30 @@ blocks), and its `sstabledump -l` golden at **1,916,747 B (1.83 MiB)**. Recorded
   A/B on it is structurally zero. Read-path measurement belongs on the perf corpus above.
 - Regenerating it is a **fresh short container run** and never touches the perf corpus.
 
+### The CQLite-written BTI fixture — a PERFORMANCE DRIFT CONTROL ONLY
+
+`cqlite-core/tests/issue_3234_cqlite_written_bti_drift_control.rs` writes a small BTI (`da`) fixture
+through the **production** write surface (`SSTableWriter::with_format(.., SSTableFormat::Bti)`, default
+features, **uncompressed** — compressed production writes are fail-closed per #1406, partitions in
+Murmur3 token order): 4 partitions / 248 rows, one of them wide enough (200 × ~2 KiB) that `Rows.db` is
+non-empty. Identity: `test-data/cqlite-written-bti-drift-control-identity.json`; DDL:
+`test-data/schemas/cqlite-written-bti-drift-control.cql` (asserted against the test's in-code DDL).
+
+```bash
+cargo test -p cqlite-core --test issue_3234_cqlite_written_bti_drift_control
+CQLITE_RECORD_DRIFT_IDENTITY=1 cargo test -p cqlite-core --test issue_3234_cqlite_written_bti_drift_control
+```
+
+- **NEVER a correctness oracle.** CQLite-written + CQLite-read is invariant to a *uniform* framing
+  error (#3042) — for BTI that is #3002, which hid behind exactly such a symmetric test. The oracle is
+  always Cassandra-written bytes (`test_da/**`) or pinned Cassandra 5.0.8 source.
+- **What it is for:** read-path *performance* drift. Its bytes are reproducible from a recorded seed, so
+  two measurements weeks apart provably ran on identical input — which the Cassandra-written corpora
+  cannot offer (wall-clock write timestamps change even a same-seed `Data.db` length). **Verified, not
+  asserted:** the test writes three times and compares every component byte for byte — all 7 components
+  identical across 3 runs, and stable across processes. A recorded-identity mismatch is the drift signal;
+  re-record deliberately and review the diff.
+
 ## CLI
 
 ```bash

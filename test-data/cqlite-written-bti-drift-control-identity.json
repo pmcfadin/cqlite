@@ -1,0 +1,43 @@
+{
+  "issue": 3234,
+  "what": "CQLite-WRITTEN BTI (`da`) drift-control fixture identity",
+  "purpose_limit": "PERFORMANCE DRIFT CONTROL ONLY — never a correctness oracle (#3042; for BTI see #3002). The correctness oracle is Cassandra-written bytes under test-data/datasets/sstables/test_da/.",
+  "written_by": "cqlite_core::storage::sstable::writer::SSTableWriter::with_format(.., SSTableFormat::Bti)",
+  "compression": "none (uncompressed; CQLite's production write surface, #1406)",
+  "generated_by_test": "cqlite-core/tests/issue_3234_cqlite_written_bti_drift_control.rs",
+  "seed": 3234,
+  "keyspace_table": "drift_control.bti_written_small",
+  "rows": 248,
+  "partitions": 4,
+  "partition_order": "Murmur3 token order (DecoratedKey::token)",
+  "byte_shape": {
+    "da-1-bti-Data.db": {
+      "bytes": 418135,
+      "sha256": "6e323c0d833f1c86a1c0f52af92b6f9ec6985a7f3b1f7cf82e6eeee11b5371ca"
+    },
+    "da-1-bti-Digest.crc32": {
+      "bytes": 10,
+      "sha256": "999430097e11a024a751e74f28f3a5a9d736f87512375fd1b3f7f55fe27fdd60"
+    },
+    "da-1-bti-Filter.db": {
+      "bytes": 16,
+      "sha256": "ccf90a90fd6d43d1a5f6d2b4195e18b835ba147905ff3a4227b72b35e5ee017b"
+    },
+    "da-1-bti-Partitions.db": {
+      "bytes": 181,
+      "sha256": "59ba7aa77cb4e683bd6b0a2ef4fac6ce2cfb50963272ebee1ebdbf39af4c07bf"
+    },
+    "da-1-bti-Rows.db": {
+      "bytes": 248,
+      "sha256": "df5b96e8e33bb15031adf7b9efbad89e15b91d26df7e66e4a8a3a01fd326edfb"
+    },
+    "da-1-bti-Statistics.db": {
+      "bytes": 4951,
+      "sha256": "57b9e17dc7b1e14a4c5c350bbcad0958282d471e0254d78b50720fdb3105ca22"
+    },
+    "da-1-bti-TOC.txt": {
+      "bytes": 75,
+      "sha256": "a10aca0cb891e5c990dafb72eba1fce1946a532bc7be164c689ed60facfc82d5"
+    }
+  }
+}
