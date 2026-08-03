@@ -5,9 +5,9 @@
 //!
 //! FOUR lanes carried a private, byte-identical copy of the same broken selection —
 //! the three in `cqlite-core/tests` reconciled here (`point_vs_full_differential.rs`
-//! + its `one_vs_n_generation` submodule, `query_semantics_oracle_parity.rs`,
-//! `read_path_forcing_e2e.rs`) and a fourth, `cqlite-flight/tests/
-//! query_semantics_flight_parity.rs`, which is **NOT** reconciled (see below):
+//! with its `one_vs_n_generation` submodule, `query_semantics_oracle_parity.rs` and
+//! `read_path_forcing_e2e.rs`) plus a fourth in `cqlite-flight`
+//! (`query_semantics_flight_parity.rs`) which is **NOT** reconciled (see below):
 //!
 //! ```ignore
 //! candidates.into_iter().flatten().find(|root| root.join(keyspace).is_dir())
