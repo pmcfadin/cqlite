@@ -158,6 +158,46 @@ fail-closed/SKIP contract as the query-semantics oracle:</p>
 <p>The <code dir="auto">CQLITE_READ_PATH</code> knob is a <strong>test/debug</strong> control (not a perf recommendation);
 <code dir="auto">point</code> fails closed rather than silently full-scanning. See the CLI reference for the
 user-facing knob docs.</p>
+<div class="sl-heading-wrapper level-h4"><h4 id="fixture-roots-resolve-per-table-and-committed-cases-must-run-issue-3220">Fixture roots resolve per TABLE, and committed cases must RUN (issue #3220)</h4><a class="sl-anchor-link" href="#fixture-roots-resolve-per-table-and-committed-cases-must-run-issue-3220"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Fixture roots resolve per TABLE, and committed cases must RUN (issue #3220)”</span></a></div>
+<p>A dataset lane that picks its corpus root by <strong>keyspace</strong> can pass without ever running.
+Three lanes did exactly that (<code dir="auto">point_vs_full_differential</code>, <code dir="auto">query_semantics_oracle_parity</code>,
+<code dir="auto">read_path_forcing_e2e</code>): each selected the first candidate root whose <code dir="auto">&#x3C;keyspace>/</code> was a
+directory and then <strong>committed to it with no fallback</strong>, although what each needs is a
+specific <strong>table</strong>. On a machine whose <code dir="auto">CQLITE_DATASETS_ROOT</code> corpus held <code dir="auto">test_da/</code> but
+not the git-committed <code dir="auto">test_da/multiclustering_table-*</code>, the env root won, the table was
+declared absent, and the #3032 multi-component clustering case <strong>skipped silently</strong> behind
+a green suite.</p>
+<p>Two rules now close it, and both apply to any new dataset lane:</p>
+<ul>
+<li><strong>Resolve TABLE-granularly.</strong> <code dir="auto">cqlite-core/tests/support/datasets_root.rs</code> —
+<code dir="auto">sstables_root_for_table(keyspace, table)</code> walks <em>every</em> candidate root
+(<code dir="auto">CQLITE_DATASETS_ROOT</code>, then the checkout’s committed corpus) and returns the first that
+actually carries <code dir="auto">&#x3C;keyspace>/&#x3C;table>-*/…-Data.db</code>. Presence is judged on a real <code dir="auto">*-Data.db</code>
+component, never on directory existence: the repo commits JSONL sidecars for fixtures whose
+binaries are gitignored. Schemas keep resolving checkout-relative through
+<code dir="auto">test-data/support/fixture_roots.rs</code> (#3148) — never by climbing <code dir="auto">..</code> from the datasets root.</li>
+<li><strong>Assert per CASE, not suite-wide.</strong> <code dir="auto">assert!(ran > 0)</code> over a whole corpus cannot see one
+case skipping behind its siblings. Every case whose binaries are <strong>committed to git</strong> carries
+<code dir="auto">must_run: true</code> and is fail-closed <strong>unconditionally</strong> (with or without
+<code dir="auto">CQLITE_REQUIRE_FIXTURES</code>, because <code dir="auto">core-tests</code> does not set it); under
+<code dir="auto">CQLITE_REQUIRE_FIXTURES=1</code> <em>every</em> case must run, matching the query-semantics oracle’s
+per-case <code dir="auto">assert!(skipped.is_empty())</code>.</li>
+</ul>
+<p><strong>Resolve by evidence, not by preference — and why no ordering can be fixed here.</strong> Neither root is
+a superset of the other. Measured on a fleet box, <code dir="auto">/data/datasets</code> holds 144 <code dir="auto">*-Data.db</code> across 122
+tables but lacks the one git-committed <code dir="auto">test_da/multiclustering_table</code>; the checkout holds only its
+31 committed parity references, which include it. Env-first loses that committed fixture,
+checkout-first loses 92 fetched tables — so a <em>preference ordering</em> is wrong for one set of tables
+whichever way you point it, and only “walk every candidate, take the first that actually holds THIS
+table’s <code dir="auto">*-Data.db</code>” is right for both. That supersedes issue <strong>#3104</strong>’s suggested “prefer the
+already-exported <code dir="auto">CQLITE_DATASETS_ROOT</code>” fix <strong>for the lanes on this resolver</strong>. #3104 stays <strong>open</strong>
+for the work the resolver does not reach: the whole-corpus <code dir="auto">#2078</code> preflight fail-close, a diagnostic
+naming the found <code dir="auto">Data.db</code> count and the overridden candidate root, the <code dir="auto">--lite</code>
+implausibly-small-corpus warning, and the CLAUDE.md / flow-* / <code dir="auto">agents-developing/test-data</code> text
+that still tells agents to override the exported root with the checkout path.</p>
+<p>Defense in depth: the agent-gate <code dir="auto">bti-multiclustering</code> component also runs
+<code dir="auto">point_vs_full_differential</code>, so the committed BTI fixtures are covered by a fail-closed gate
+component rather than by <code dir="auto">core-tests</code> alone.</p>
 <div class="sl-heading-wrapper level-h4"><h4 id="second-axis-1-generation-vs-n-generations-issue-3129">Second axis: 1 generation vs N generations (issue #3129)</h4><a class="sl-anchor-link" href="#second-axis-1-generation-vs-n-generations-issue-3129"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Second axis: 1 generation vs N generations (issue #3129)”</span></a></div>
 <p>The point-vs-full comparison above holds the <strong>generation count fixed</strong>, so both of its
 arms route through the same reconciliation kernel and a disagreement between the
