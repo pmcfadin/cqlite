@@ -729,16 +729,54 @@ _mold_accel_token() {
   esac
 }
 
+# ---- perf profiling capability token (Linux only, issue #3249) --------------
+# Agent boxes ship with kernel.perf_event_paranoid = 4, which denies ALL
+# unprivileged perf use — a PERMISSION verdict that reads like a missing
+# CAPABILITY, and one that reverts on reboot when no /etc/sysctl.d drop-in exists.
+# Stamping it here makes "this box cannot be profiled" visible in every pasted
+# SUMMARY instead of being discovered at the start of a measurement cycle.
+#
+# HARD CONSTRAINT: this is the FREE /proc read from scripts/perf-capability.sh and
+# nothing else — no `perf stat` exec, no new binary dependency, no measurable time
+# cost in the gate's path. The functional verification (which DOES exec perf) is
+# bootstrap's job, not the gate's.
+_PERF_STATE=""
+_perf_state() {
+  [ -n "$_PERF_STATE" ] && { printf '%s' "$_PERF_STATE"; return; }
+  if [ -n "${AGENT_GATE_TEST_PERF_STATE:-}" ]; then
+    _PERF_STATE="$AGENT_GATE_TEST_PERF_STATE"
+  elif [ -r "$REPO_ROOT/scripts/perf-capability.sh" ] &&
+       . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then
+    _PERF_STATE="$(perf_capability_token)"
+  else
+    _PERF_STATE=unknown
+  fi
+  [ -n "$_PERF_STATE" ] || _PERF_STATE=unknown
+  printf '%s' "$_PERF_STATE"
+}
+
+# _perf_accel_token: the ` perf=<state>` suffix on Linux hosts, empty elsewhere —
+# the controls are Linux kernel knobs, so Darwin output stays byte-identical
+# (same contract as _mold_accel_token above).
+_perf_accel_token() {
+  local os="${AGENT_GATE_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+  case "$os" in
+    Linux|linux) printf ' perf=%s' "$(_perf_state)" ;;
+    *) : ;;
+  esac
+}
+
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
 # See the ACCEL_* detection above (#1848). The trailing sccache-health token
 # (na|ok|warn, issue #2641) surfaces sccache's own corruption counters. On Linux
 # a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
-# #2859); Darwin output is unchanged.
+# #2859), then ` perf=ok|paranoid-<N>|kptr-restricted|absent|unknown` (issue
+# #3249); Darwin output is unchanged.
 accelerators_line() {
-  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s' \
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
-    "$(_sccache_health)" "$(_mold_accel_token)"
+    "$(_sccache_health)" "$(_mold_accel_token)" "$(_perf_accel_token)"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------

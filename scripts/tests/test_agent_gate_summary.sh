@@ -77,7 +77,11 @@ trap 'rm -rf "$tmp"' EXIT
 #     which names the offending line and points here. That is loud and uniform by
 #     design — one grammar to extend, not N per-token asserts to chase. Do NOT relax
 #     it to a `.*` tail; that is the failure mode this design prevents.
-ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?$'
+# The ` perf=` group (issue #3249) is appended AFTER the optional ` mold=` group,
+# because that is the order accelerators_line emits them; both are Linux-only and
+# therefore both are optional here, so a Darwin line (which ends at
+# sccache-health) and a Linux line (which carries both) satisfy one grammar.
+ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$'
 
 # accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
 # print nothing (rc 1). `grep -m1` + capture-to-a-variable, deliberately with NO
@@ -144,6 +148,10 @@ accel_token_is() {
 # by the 9c-iv regression guard, which must assert both the TRUE and the FALSE outcome.
 mold_token_is()          { accel_token_is "$1" mold "$2"; }
 accel_health_token_is()  { accel_token_is "$1" sccache-health "$2"; }
+# perf_token_is: the same tier-1 whole-field idiom for the ` perf=` token (#3249).
+# Today it is the LAST token, i.e. the most exposed to the next appended one — so it
+# is built from accel_token_is rather than an end-anchored match, by construction.
+perf_token_is()          { accel_token_is "$1" perf "$2"; }
 
 # assert_mold_token <label> <file> <expected>: assert the accelerators line's mold
 # token (issue #2859). <expected> is a state (linked|present-unconfigured|absent)
@@ -160,6 +168,25 @@ assert_mold_token() {
     ok "$label: mold=$expected present"
   else
     bad "$label: expected mold=$expected, got: '$line'"
+  fi
+}
+
+# assert_perf_token <label> <file> <expected>: assert the accelerators line's perf
+# capability token (issue #3249). <expected> is a state
+# (ok|paranoid-<N>|kptr-restricted|absent|unknown) or the literal "none" to require
+# NO perf token (the Darwin contract — perf_event_paranoid is a Linux control).
+assert_perf_token() {
+  local label="$1" file="$2" expected="$3" line
+  line=$(accel_line_of "$file")
+  if [ "$expected" = none ]; then
+    case " $line " in
+      *" perf="*) bad "$label: perf token present but expected none ($line)" ;;
+      *)          ok  "$label: no perf token (Darwin contract)" ;;
+    esac
+  elif perf_token_is "$file" "$expected"; then
+    ok "$label: perf=$expected present"
+  else
+    bad "$label: expected perf=$expected, got: '$line'"
   fi
 }
 
@@ -913,23 +940,24 @@ fi
 #        could ever legitimately ship as an accelerator token: a plausible name (say
 #        `lto=thin`) would turn this guard into a false accusation on the day someone
 #        correctly adds that token AND extends $ACCEL_LINE_RE.
-#        The base fixture forces OS=Linux + mold=linked + sccache-health=ok so the
-#        line deterministically carries BOTH tier-1 tokens on any host, and the
-#        sentinel lands immediately after ` mold=` — the position tomorrow's token
-#        will actually occupy.
+#        The base fixture forces OS=Linux + mold=linked + perf=ok +
+#        sccache-health=ok so the line deterministically carries EVERY tier-1 token
+#        on any host, and the sentinel lands immediately after the CURRENT last
+#        token (` perf=` since #3249) — the position tomorrow's token will actually
+#        occupy. When a token is appended, move this expectation to the new last one.
 FUTURE_TOKEN='__unknown-future-token__=x'
 future_base="$tmp/health-future-base.txt"
 future_accel="$tmp/health-future-token.txt"
 AGENT_GATE_SUMMARY_FILE="$future_base" \
-  AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE=linked \
+  AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE=linked AGENT_GATE_TEST_PERF_STATE=ok \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 # The UNMUTATED base must satisfy the grammar — otherwise the canary below would be
 # "armed" by a pre-existing defect rather than by the synthesized token.
 assert_accelerators "accel-future-token-base" "$future_base"
 sed "s/^accelerators: .*/& $FUTURE_TOKEN/" "$future_base" >"$future_accel"
-if grep -qF " mold=linked $FUTURE_TOKEN" "$future_accel"; then
-  ok "accel-future-token: guard fixture really carries an unknown token after ' mold='"
+if grep -qF " perf=ok $FUTURE_TOKEN" "$future_accel"; then
+  ok "accel-future-token: guard fixture really carries an unknown token after the last known token"
 else
   bad "accel-future-token: guard fixture did not gain a trailing token (guard is vacuous)"
   grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
@@ -943,6 +971,8 @@ else
   grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
 fi
 assert_mold_token "accel-future-token" "$future_accel" linked
+# ...and the CURRENT last token, the one most exposed to an appended sibling (#3249).
+assert_perf_token "accel-future-token" "$future_accel" ok
 # ...and neither may have been weakened into accepting a WRONG value, nor a value of
 # which the truth is a prefix/superstring. Tolerating a new token != tolerating a
 # bad token value. (The negative direction is asserted through the same predicates
@@ -960,8 +990,14 @@ for wrong in absent overridden present-unconfigured linke linkedx; do
     wrong_val_ok=0
   fi
 done
+for wrong in absent unknown kptr-restricted paranoid-4 o okx; do
+  if perf_token_is "$future_accel" "$wrong"; then
+    bad "accel-future-token: perf assert wrongly matched perf=$wrong (value check weakened)"
+    wrong_val_ok=0
+  fi
+done
 if [ "$wrong_val_ok" -eq 1 ]; then
-  ok "accel-future-token: wrong/partial health+mold values still FAIL (values matched exactly)"
+  ok "accel-future-token: wrong/partial health+mold+perf values still FAIL (values matched exactly)"
 fi
 # Tier 2: the whole-line grammar is the canary and must REJECT the unknown token, so
 # a future token addition reddens the assert_accelerators call sites with an
@@ -997,6 +1033,61 @@ AGENT_GATE_SUMMARY_FILE="$mold_darwin" \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 assert_mold_token "mold-darwin" "$mold_darwin" none
 assert_accelerators "mold-darwin" "$mold_darwin"
+
+# 9e. perf profiling capability token (issue #3249). Boxes ship with
+#     kernel.perf_event_paranoid = 4, which denies ALL unprivileged perf use — a
+#     PERMISSION verdict that reads like a missing CAPABILITY, and one that reverts
+#     on reboot when no /etc/sysctl.d drop-in exists. The token makes "this box
+#     cannot be profiled" visible in every pasted SUMMARY. Linux-only, same
+#     contract as mold: NO token on Darwin. State forced via
+#     AGENT_GATE_TEST_PERF_STATE so every value asserts deterministically
+#     regardless of the host's real sysctls.
+for state in ok paranoid-4 paranoid-2 kptr-restricted absent unknown; do
+  perf_file="$tmp/perf-$state.txt"
+  AGENT_GATE_SUMMARY_FILE="$perf_file" \
+    AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE=linked AGENT_GATE_TEST_PERF_STATE="$state" \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_perf_token "perf-linux-$state" "$perf_file" "$state"
+  assert_accelerators "perf-linux-$state" "$perf_file"
+done
+
+# 9e-darwin. perf_event_paranoid/kptr_restrict are Linux kernel controls, so Darwin
+#            emits NO perf token even with a forced state — its line still ends at
+#            sccache-health, byte-identical to pre-#3249 output.
+perf_darwin="$tmp/perf-darwin.txt"
+AGENT_GATE_SUMMARY_FILE="$perf_darwin" \
+  AGENT_GATE_TEST_OS=Darwin AGENT_GATE_TEST_MOLD_STATE=linked AGENT_GATE_TEST_PERF_STATE=ok \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_perf_token "perf-darwin" "$perf_darwin" none
+assert_accelerators "perf-darwin" "$perf_darwin"
+
+# 9e-free. The gate's token must stay a FREE /proc read: if it ever grew a `perf
+#          stat` exec, every gate on every box would pay a new subprocess (and a new
+#          binary dependency) for a diagnostic line. Assert BOTH directions —
+#          structurally, that the gate's token function does not exec perf, and
+#          behaviourally, that a run emits a real token with `perf` REMOVED from PATH
+#          (which an exec-based implementation could not do).
+perf_fn_body=$(sed -n '/^_perf_state()/,/^}/p;/^_perf_accel_token()/,/^}/p' "$GATE")
+if [ -n "$perf_fn_body" ] && ! body_mentions "$perf_fn_body" 'perf stat'; then
+  ok "perf-free: the gate's token functions never exec 'perf stat' (free /proc read only)"
+else
+  bad "perf-free: the gate's perf token function execs perf stat (or was not found)"
+fi
+perf_nopath="$tmp/perf-nopath.txt"
+nopath_dir="$tmp/nopath-bin"; mkdir -p "$nopath_dir"
+for t in bash sed awk grep cat env date mktemp uname tr cut sort head tail wc git printf sleep python3 rm mv cp mkdir touch dirname basename find id hostname stat diff; do
+  src=$(command -v "$t" 2>/dev/null) && ln -sf "$src" "$nopath_dir/$t"
+done
+(
+  PATH="$nopath_dir" AGENT_GATE_SUMMARY_FILE="$perf_nopath" AGENT_GATE_TEST_OS=Linux \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+)
+if [ -s "$perf_nopath" ] && grep -qE '^accelerators: .* perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+)' "$perf_nopath"; then
+  ok "perf-free: a real perf token is stamped with no 'perf' binary on PATH (no exec dependency)"
+else
+  bad "perf-free: no perf token stamped without the perf binary on PATH"
+  grep '^accelerators:' "$perf_nopath" 2>/dev/null || cat "$perf_nopath" 2>/dev/null
+fi
 
 # 9e. REAL detection (NO AGENT_GATE_TEST_MOLD_STATE override): exercise the actual
 #     `command -v mold` + `_mold_block_active` + RUSTFLAGS branches. A stub `mold` is
