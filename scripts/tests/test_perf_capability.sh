@@ -84,6 +84,29 @@ EOF
   chmod +x "$1/uname"
 }
 
+# mkid <dir> <uid>: an `id` stub, so the ROOT / NON-ROOT branch under test is the one
+# selected by the CASE, not by whatever UID runs the suite. Without this the suite was
+# silently NON-ROOT-runner-only: nearly every case asserts the unprivileged behaviour
+# (a `sudo -n true` probe, a `sudo -n tee`, a printed `sudo` remedy), so running the
+# whole thing as root — a container, a CI image, anyone's `sudo bash` — took the root
+# branch and FAILED, reddening the mandatory `tooling-tests` gate component. Same class
+# as the Linux-host-only bug mkuname fixes, and the same `rm -f` first: several dirs
+# below `ln -sf` the real `id` into place, and writing through that symlink would
+# clobber the host's /usr/bin/id. The root-specific case (4c-iii) keeps its OWN uid-0
+# shim, which is the only place the root branch is exercised.
+mkid() {
+  rm -f "$1/id"
+  cat >"$1/id" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  -u) echo $2 ;;
+  -un|-nu) echo cqlite-test-user ;;
+  *)  echo $2 ;;
+esac
+EOF
+  chmod +x "$1/id"
+}
+
 # Inert shims for the tools the surrounding bootstrap sections would otherwise
 # reach (network / installs). Only the perf-specific shims below are functional.
 mkshim() {
@@ -99,6 +122,7 @@ mkshim cargo
 mkshim roborev
 mkshim gh
 mkuname "$tmp" Linux   # every bootstrap run below that includes $tmp in PATH is Linux
+mkid "$tmp" 1000       # ...and is a NON-ROOT runner, whatever UID runs the suite
 host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # --- 1. The shared helper: scripts/perf-capability.sh ------------------------------
@@ -654,11 +678,12 @@ fi
 #      case asserts the root-shell remedy AND the absence of the sudo one — the two
 #      `sudo -n` failure modes (no binary vs needs a password) are different boxes.
 nosudo="$tmp/perf-nosudo"; mkdir -p "$nosudo"
-for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp id \
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
          diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find; do
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$nosudo/$t"
 done
 mkuname "$nosudo" Linux
+mkid "$nosudo" 1000    # non-root, whatever UID runs the suite
 ln -sf "$perfbin/perf" "$nosudo/perf"
 mkperfshim 5555555
 nosudo_sysctl="$tmp/perf-nosudo.d"; mkdir -p "$nosudo_sysctl"
@@ -680,11 +705,12 @@ fi
 #        box: the `sudo tee` line does work there, interactively. Bootstrap must say so
 #        and must still never prompt.
 pwsudo="$tmp/perf-pwsudo"; mkdir -p "$pwsudo"
-for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp id \
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
          diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find; do
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$pwsudo/$t"
 done
 mkuname "$pwsudo" Linux
+mkid "$pwsudo" 1000    # non-root, whatever UID runs the suite
 ln -sf "$perfbin/perf" "$pwsudo/perf"
 pwtrip="$tmp/perf-pwsudo-tripwire.log"; : >"$pwtrip"
 cat >"$pwsudo/sudo" <<EOF
@@ -846,11 +872,12 @@ fi
 #      break every box without linux-tools. Every other case has perf on PATH, so an
 #      `exit 1` inserted in this branch previously survived the whole suite.
 noperfbox="$tmp/perf-noperfbox"; mkdir -p "$noperfbox"
-for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp id \
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
          diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find tee; do
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$noperfbox/$t"
 done
 mkuname "$noperfbox" Linux
+mkid "$noperfbox" 1000    # non-root, whatever UID runs the suite
 cat >"$noperfbox/sudo" <<EOF
 #!/usr/bin/env bash
 while [ "\${1:-}" = "-n" ]; do shift; done

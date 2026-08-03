@@ -415,17 +415,35 @@ fi
 if [ "${PERF_SECTION_OK:-0}" = 1 ]; then
   PERF_DROPIN=$(perf_capability_dropin_path)
 
-  # perf_do_or_print <label> <cmd...>: run_or_print's exact semantics (do it under
-  # --yes, else print the line verbatim) with CONFIG-APPLY wording — run_or_print's
-  # text says "install <label>", which would be misleading for a sysctl write.
-  perf_do_or_print() {
-    local label="$1"; shift
-    if [ "$AUTO_YES" = 1 ]; then
-      info "$label: $*"
-      if "$@"; then return 0; else warn "$label FAILED — run manually: $*"; return 1; fi
+  # perf_apply_now: run (under --yes) or PRINT (check mode) `sysctl -q --system`,
+  # recording THREE INDEPENDENT FACTS instead of collapsing them into one rc:
+  #   PERF_APPLY_RAN  1 iff the command actually executed (0 = check mode printed it)
+  #   PERF_APPLY_RC   that command's exit status when it ran ('' otherwise)
+  # and, separately, the /proc read-back the caller performs afterwards.
+  #
+  # WHY THE SPLIT (issue #3249 review). `sysctl --system` applies EVERY drop-in on the
+  # box, so it can apply OURS perfectly and still exit non-zero because an unrelated
+  # pre-existing entry failed (a stale /etc/sysctl.conf line, a foreign drop-in naming
+  # a knob this kernel lacks). Gating the read-back on its rc therefore left the token
+  # STALE and printed "nothing was applied" on a box that had just become profileable —
+  # a FALSE verdict, and the verdict is the whole point of AC2. "The apply command
+  # failed" and "the controls are not in effect" are independent facts and are reported
+  # as such: the read-back happens after EVERY attempt, whatever the rc.
+  PERF_APPLY_RAN=0
+  PERF_APPLY_RC=''
+  perf_apply_now() {
+    PERF_APPLY_RAN=0
+    PERF_APPLY_RC=''
+    local -a cmd=(${PERF_ROOT[@]+"${PERF_ROOT[@]}"} sysctl -q --system)
+    if [ "$AUTO_YES" != 1 ]; then
+      info "apply the drop-in now:  ${cmd[*]}"
+      return 0
     fi
-    info "$label:  $*"
-    return 1
+    info "apply the drop-in now: ${cmd[*]}"
+    PERF_APPLY_RAN=1
+    "${cmd[@]}"
+    PERF_APPLY_RC=$?
+    return 0
   }
 
   # Privilege is OPTIONAL: probe it non-interactively (`sudo -n`) so bootstrap can
@@ -467,6 +485,19 @@ if [ "${PERF_SECTION_OK:-0}" = 1 ]; then
       info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
     else
       info "write + apply the drop-in:  bash scripts/perf-capability.sh --drop-in | ${PERF_RUN_AS}tee $PERF_DROPIN >/dev/null && ${PERF_RUN_AS}sysctl -q --system"
+    fi
+  }
+
+  # perf_apply_remedy_line: the APPLY-ONLY remedy, for the box whose drop-in is ALREADY
+  # current — re-writing the file is not the fix there, applying it is. Same no-sudo /
+  # needs-a-password / already-root split as perf_remedy_line above, because a printed
+  # `sudo` is un-runnable on a box with no sudo binary and wrong on a root box.
+  perf_apply_remedy_line() {
+    if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
+      info "no 'sudo' on this box — apply it from a ROOT shell:  sysctl -q --system"
+      info "(or ask the image/host owner; the drop-in is already on disk, so this is the only step left)"
+    else
+      info "apply the drop-in now:  ${PERF_RUN_AS}sysctl -q --system"
     fi
   }
 
@@ -532,34 +563,56 @@ if [ "${PERF_SECTION_OK:-0}" = 1 ]; then
   if [ "$PERF_TOKEN" = ok ]; then
     ok "kernel controls verified from /proc: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid) kptr_restrict=$(perf_capability_proc_value kptr_restrict)"
   elif [ "$PERF_DROPIN_OK" = 1 ] && [ "$PERF_PRIV" = 1 ]; then
-    PERF_APPLIED=0
-    if perf_do_or_print "apply the drop-in now" ${PERF_ROOT[@]+"${PERF_ROOT[@]}"} sysctl -q --system; then
-      PERF_APPLIED=1
+    perf_apply_now
+    # READ BACK after EVERY attempt, regardless of the command's exit status: the rc
+    # says something about `sysctl --system`, the /proc read says something about THIS
+    # BOX, and only the latter is the capability verdict.
+    if [ "$PERF_APPLY_RAN" = 1 ]; then
       PERF_TOKEN=$(perf_capability_token)
+      # FACT 1, reported on its own line and never mixed with the verdict: the command
+      # itself failed. It applies every drop-in on the box, so this may be an unrelated
+      # entry — it does NOT mean our controls are unset (the read-back below answers
+      # that, and the two lines are allowed to disagree).
+      if [ "${PERF_APPLY_RC:-0}" != 0 ]; then
+        warn "'sysctl -q --system' exited $PERF_APPLY_RC — it applies EVERY sysctl drop-in on this box, so an UNRELATED pre-existing entry may be the failure; the perf verdict below comes from /proc, not from this exit code"
+        perf_inspect_lines
+      fi
     fi
+    # FACT 2, independent of FACT 1: what /proc reports now.
     if [ "$PERF_TOKEN" = ok ]; then
-      ok "kernel controls applied and READ BACK from /proc: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid) kptr_restrict=$(perf_capability_proc_value kptr_restrict)"
-    elif [ "$PERF_APPLIED" = 1 ]; then
+      ok "kernel controls READ BACK from /proc as profileable: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid) kptr_restrict=$(perf_capability_proc_value kptr_restrict)"
+    elif [ "$PERF_APPLY_RAN" = 1 ] && [ "${PERF_APPLY_RC:-0}" = 0 ]; then
       # The apply RAN and reported success, and /proc still disagrees — the silent
       # revert this whole section exists to catch.
       warn "sysctl --system reported success but /proc still reports perf=$PERF_TOKEN — the value did NOT take (container, read-only /proc, or a later-sorting drop-in / /etc/sysctl.conf overrides ours)"
       perf_diagnose_token "$PERF_TOKEN"
       perf_inspect_lines
+    elif [ "$PERF_APPLY_RAN" = 1 ]; then
+      # The command failed AND the controls are not in effect. Both facts are already
+      # on the record; state only the second one here, with no claim about which
+      # drop-in failed.
+      warn "/proc still reports perf=$PERF_TOKEN after the apply — the controls are NOT in effect (and the apply command itself exited $PERF_APPLY_RC; see above)"
+      perf_diagnose_token "$PERF_TOKEN"
     else
-      # The apply did NOT run (check mode printed the line) or FAILED — do not claim
-      # it was applied. Without this branch a check-mode run with a current drop-in
-      # and a non-ok runtime printed NO warn at all and never counted a WARNING.
-      if [ "$AUTO_YES" = 1 ]; then
-        warn "the sysctl apply did not succeed — /proc still reports perf=$PERF_TOKEN (nothing was applied)"
-      else
-        warn "kernel controls NOT in the profileable state (gate stamps perf=$PERF_TOKEN) — the drop-in is on disk but has NOT been applied to the running kernel"
-        info "apply it now (or re-run with --yes):  ${PERF_RUN_AS}sysctl -q --system"
-      fi
+      # The apply did NOT run: check mode printed the line. Never claim it was applied.
+      # Without this branch a check-mode run with a current drop-in and a non-ok
+      # runtime printed NO warn at all and never counted a WARNING.
+      warn "kernel controls NOT in the profileable state (gate stamps perf=$PERF_TOKEN) — the drop-in is on disk but has NOT been applied to the running kernel"
+      info "apply it now (or re-run with --yes):  ${PERF_RUN_AS}sysctl -q --system"
       perf_diagnose_token "$PERF_TOKEN"
     fi
   else
     warn "kernel controls NOT in the profileable state (gate stamps perf=$PERF_TOKEN)"
     perf_diagnose_token "$PERF_TOKEN"
+    # The drop-in is already on disk (so there is nothing to WRITE) but we have no
+    # non-interactive privilege to apply it. Without this the branch diagnosed the
+    # state and offered NO remedy at all, contradicting every other unprivileged path
+    # in this section — the no-sudo / needs-a-password boxes are exactly the ones that
+    # need a runnable command printed.
+    if [ "$PERF_DROPIN_OK" = 1 ]; then
+      info "the drop-in is on disk but has NOT been applied to the running kernel, and bootstrap has no non-interactive privilege to apply it"
+      perf_apply_remedy_line
+    fi
   fi
 
   # ---- 3. FUNCTIONAL verification (AC2): run the collection, count the cycles ----
