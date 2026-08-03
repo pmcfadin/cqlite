@@ -7,9 +7,9 @@
 //! two call sites (the batch and streaming `Decimal128` array builders) are
 //! unchanged.
 
-use super::arrow_convert::{
-    bigint_to_i128, ArrowConvertError, DECIMAL_FIXED_SCALE, DECIMAL_MAX_PRECISION,
-};
+use super::arrow_convert::ArrowConvertError;
+use super::arrow_convert_util::bigint_to_i128;
+use super::arrow_schema::{DECIMAL_FIXED_SCALE, DECIMAL_MAX_PRECISION};
 use num_bigint::BigInt;
 use std::sync::LazyLock;
 

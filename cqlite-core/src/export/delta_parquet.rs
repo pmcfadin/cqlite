@@ -52,7 +52,8 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 
-use crate::export::arrow_convert::{build_typed_value_array, ArrowConvertError};
+use crate::export::arrow_convert::ArrowConvertError;
+use crate::export::arrow_typed_value::build_typed_value_array;
 use crate::export::delta_schema::{derive_delta_schema, DeltaSchemaError, DeltaSchemaOpts};
 use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::reader::delta_scan::{CellDelta, DeltaRecord, RangeBound};

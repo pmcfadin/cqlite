@@ -65,21 +65,7 @@ use super::arrow_builders_scalar::{
 };
 use super::arrow_convert_util::{unwrap_frozen_type, Cells};
 use super::arrow_schema::column_to_field;
-
-// ============================================================================
-// Compatibility re-exports
-// ============================================================================
-//
-// These items moved to the sibling modules above in the epic #1116 split. They
-// are re-exported here so every existing `export::arrow_convert::…` path in the
-// crate (`parquet`, `delta_parquet`, `delta_schema`, `arrow_decimal`) keeps
-// resolving unchanged.
-
-pub(crate) use super::arrow_convert_util::bigint_to_i128;
-pub(crate) use super::arrow_schema::{
-    cql_type_to_arrow_data_type, DECIMAL_FIXED_SCALE, DECIMAL_MAX_PRECISION,
-};
-pub(crate) use super::arrow_typed_value::build_typed_value_array;
+use super::arrow_typed_value::build_typed_value_array;
 
 // ============================================================================
 // Error type
