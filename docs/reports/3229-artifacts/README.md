@@ -1,55 +1,34 @@
 # #3229 artifacts — the AC2 live probe, and the AC7 backfill ruling
 
-This directory is itself part of the change. It carries an **executable** under `docs/`, which is the
-exact shape that `exclude_patterns = ['docs/**', '*.md']` used to make invisible to roborev — so this
-pull request is a #3222-shaped demonstration of its own fix.
-
 | File | What it is |
 |---|---|
-| `probe-census-exclusion.sh` | The AC2 live probe **and** the specimen. Runs the sanctioned wrapper and prints the summary-block lines to record. Not a gate component. |
-| `../../../website/src/content/docs/_3229-root-anchoring-probe.json` | A deny-listed extension (`.json`) under a **nested** `docs` directory — the end-to-end confirmation that a slash-containing pattern is ROOT-ANCHORED. |
+| `live-probe-procedure.md` | The AC2 demonstration, as **prose** and as a **post-merge** step — with the reason it cannot be pre-merge, the expected summary values, and how to read the token line. |
+| `../../../website/src/content/docs/_3229-root-anchoring-probe.json` | A deny-listed extension (`.json`) under a **nested** `docs` directory — the end-to-end confirmation that a slash-containing pattern is ROOT-ANCHORED. Kept on the branch because it survives **both** the old and the new configuration. |
 
-## The live probe (AC2) — procedure and expected values
+## Why there is no `probe-census-exclusion.sh` here any more
 
-```bash
-bash docs/reports/3229-artifacts/probe-census-exclusion.sh --repo "$(git rev-parse --show-toplevel)"
+This directory originally carried an **executable** under `docs/` on purpose: that is the exact shape
+`exclude_patterns = ['docs/**', '*.md']` made invisible to roborev, so the PR would have been a
+#3222-shaped demonstration of its own fix.
+
+It cannot be. roborev's daemon resolves `exclude_patterns` from the **repo root path**, not from the
+worktree, and it **snapshots that config at start** — so the narrowed set does not apply to this PR's
+own review at all. An executable under root `docs/` therefore makes `census-exclusion:` FAIL,
+**correctly**, for as long as the change is unmerged:
+
+```
+census-exclusion: FAIL (1/7 code census paths excluded:
+  docs/reports/3229-artifacts/probe-census-exclusion.sh by 'docs/**' [root-config])
 ```
 
-It needs the network and a live reviewer, so it is **documented and recorded, never gate-run** (the
-hermetic half is the `(cx*)` case family in `scripts/tests/test_roborev_review_guard.sh`, which runs in
-`--lite` and the full gate). Record these lines from the emitted block:
+A pre-merge self-demonstration was a **deadlock**, not a test — the specimen that proves the fix is
+the specimen the unfixed configuration eats. The executable was removed; the procedure lives in
+`live-probe-procedure.md` and is scheduled for after the merge. The requirement is rescheduled, not
+dropped, and it carries a named trigger (board `In Review`, not `Done`, until the evidence is posted).
 
-| Line | Expected |
-|---|---|
-| `census:` | the branch's `git diff --numstat --no-renames origin/main...HEAD` counts |
-| `code-free:` | `PASS` — a `docs/` path prefix never makes a program documentation |
-| `census-exclusion:` | `PASS (<n>/<n> code census paths survive the effective exclusion set; corroboration: OK)` |
-| `prompt-content:` | `PASS (<n>/<n> code census paths present)` |
-| `reviewed-sha:` | the RANGE `<base40>..<head40>`, head endpoint = branch HEAD |
-| `tokens:` | the **genuine-review band**: 398k–649k input / 314k–554k cached / 5.0k–6.3k output, minutes of wall time |
-
-**Read the tokens before the verdict.** A signature near the **vacuous baseline** — ~18.7k input, 0
-cached, 53–56 output, ~8s; PR #3222 itself measured **15,443 in / 89 out** beside
-`prompt-content: FAIL (136/136 code census paths absent)` — means the defect persists, whatever `RESULT:`
-says. A `RESULT` of `FINDINGS`/`FAIL` because the reviewer found real issues is **not** a probe failure:
-the probe is about scope, not verdict.
-
-**The second, independent assertion.** `website/src/content/docs/_3229-root-anchoring-probe.json` MUST be
-PRESENT in the prompt actually sent:
-
-```bash
-bash docs/reports/3229-artifacts/probe-census-exclusion.sh --check-nested   # prints the assertion
-roborev show <job> --prompt | grep -F 'website/src/content/docs/_3229-root-anchoring-probe.json'
-```
-
-Present ⇒ the disassembly-recovered `git.FormatExcludeArgs` is confirmed live. **Absent ⇒ the port is
-FALSIFIED and the change is BLOCKED** — both the pattern list in `.roborev.toml` and the ported
-construction in `scripts/flow/roborev-review-oracles.sh` rest on that root-anchoring result. It is not an
-acceptable outcome to merely record.
-
-Everything here is pinned to **`roborev v0.61.2`**. Re-run the probe, and re-verify the port, after any
-roborev version bump: an upstream change to `FormatExcludeArgs` would silently invalidate the port while
-every summary block still read `PASS`.
+**The primary AC2 evidence is a real PR, not this probe.** The first post-merge PR that carries an
+executable under `docs/` proves the fix on a diff nobody shaped for it, which is strictly better
+evidence; the documented procedure is the fallback. See `live-probe-procedure.md`.
 
 ## The AC7 backfill ruling — ACCEPT AS-IS (owner, 2026-08-03)
 

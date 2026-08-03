@@ -29,17 +29,49 @@ proves the fix is the specimen the unfixed configuration eats. So the executable
 branch and its procedure kept here, to be run once the ordering allows it. The requirement is not
 dropped — it is rescheduled, and this file is where the result gets recorded.
 
-**A daemon restart may also be required.** The daemon observed during this work had **4d15h** uptime,
-and it could not be established whether it re-reads the root path's config **per job** or **caches it
-at startup**. So after the merge, if the probe still shows the old behaviour, restart the daemon
-before concluding anything about the configuration.
+**A daemon RESTART is also required.** The daemon **snapshots config at start**, so an edit to the
+root checkout's `.roborev.toml` does not take effect for a running daemon — the one observed during
+this work had **4d15h** uptime. Independently corroborated by #3234, whose single daemon restart
+happened to precede every config edit it made and never followed one, which is why that investigation
+measured `exclude_patterns` as having "no observable effect". So after the merge: update the root
+checkout, **restart the daemon**, and only then run the probe.
+
+Both of these properties have now cost real rounds — (1) a `census-exclusion: PASS` that certified a
+config roborev never read, (2) a whole investigation's null result. They are not theoretical.
 
 This is the same shape as the `required`-check property already recorded in CLAUDE.md — *`required`
 evaluates the aggregator **and** the registry from the PR's **BASE** ref, so a registry/aggregator
-change lands only after it merges.* Both are cases of **a change to the machinery that governs a PR's
-own verification not applying to that PR**. Recognising the shape is the point: when you change a
-config, workflow, or registry that a gate reads from somewhere other than your branch, assume your own
-PR is evaluated under the OLD version and plan the demonstration for after the merge.
+change lands only after it merges.* Stated generally, and this is the form to remember:
+
+> **Any PR whose subject is a config the daemon (or gate) reads from root cannot certify itself.**
+
+When you change a config, workflow, or registry that a verifier reads from somewhere other than your
+branch, assume your own PR is evaluated under the OLD version, and plan the demonstration for after
+the merge.
+
+## The PRIMARY evidence is a real PR, not this probe
+
+**Do not treat this procedure as AC2's primary evidence.** The first post-merge PR that happens to
+carry an executable under `docs/` demonstrates the fix end to end for free — #3234 ships harnesses
+now, #3096's successor will, #3249's artifacts may — and that is *strictly better* evidence than a
+probe written to pass: it proves the fix on a diff **nobody shaped for it**.
+
+- **AC2's record** = that PR's `census-exclusion:` + `prompt-content:` lines, pasted into #3229.
+- **This procedure** = the documented **fallback**, for when no such PR arrives promptly or the
+  natural evidence is ambiguous.
+
+### The named trigger — an unowned post-merge obligation is not an obligation
+
+Post-merge intentions decay. #3232 existed only as prose in #3100's close; #3103 shipped while its
+producer stayed uncommitted, after which three separate issues rebuilt a corpus. So this obligation
+carries mechanism, not goodwill:
+
+1. On merge, **#3229 goes to `In Review`, NOT `Done`** — `Done` auto-closes the issue and the
+   obligation would vanish with it.
+2. The PR is finalized and delivery telemetry is stamped as usual. Neither waits on this.
+3. #3229 flips to **`Done` only once the AC2 evidence is posted** on the issue.
+4. If the demonstration has not happened **within a few days**, it is **filed as a tracked issue** —
+   never left to live in a comment thread.
 
 ## Procedure
 
@@ -54,7 +86,6 @@ git push                                    # an unpushed commit is itself an em
 
 # 1. The SANCTIONED invocation, unmodified: --agent AND --model, an explicit absolute
 #    --repo (what makes --branch correct from a worktree), transcript to a log.
-bash scripts/flow/roborev-review-scripts_placeholder 2>/dev/null || true   # (see next line)
 bash scripts/flow/roborev-review.sh \
   --agent codex --model claude-opus-5 \
   --repo "$(pwd -P)" --base origin/main \

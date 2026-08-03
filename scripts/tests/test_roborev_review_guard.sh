@@ -2577,7 +2577,7 @@ fi
 
 printf '== structural: the AC2 live probe is NOT a gate component ==\n'
 GATE="$SCRIPT_DIR/../agent-gate.sh"
-PROBE_REL='docs/reports/3229-artifacts/probe-census-exclusion.sh'
+PROBE_REL='docs/reports/3229-artifacts/live-probe-procedure.md'
 if [ -f "$GATE" ]; then
   if grep -qF "$PROBE_REL" "$GATE"; then
     bad "structural: $PROBE_REL is referenced by the agent gate — the live probe needs network + a live reviewer and must never be gate-run"
@@ -2586,6 +2586,30 @@ if [ -f "$GATE" ]; then
   fi
 else
   printf 'SKIP - agent-gate.sh not found; the live-probe/gate separation could not be checked\n'
+fi
+# The probe must NOT be a committed executable under root `docs/` (#3229 ⑤a): roborev
+# resolves exclude_patterns from the repo ROOT path and snapshots it at daemon start, so
+# such a file makes census-exclusion FAIL correctly and permanently until this change
+# merges — a deadlock, not a test. Asserted structurally so it cannot be reintroduced.
+_probe_exec_count=$(find "$SCRIPT_DIR/../../docs/reports/3229-artifacts" -maxdepth 1 \
+  \( -name '*.sh' -o -name '*.py' -o -name '*.bt' \) 2>/dev/null | wc -l | tr -d '[:space:]')
+if [ "${_probe_exec_count:-0}" -eq 0 ]; then
+  ok 'structural: the #3229 artifacts dir carries NO executable (a pre-merge self-demonstration is a deadlock)'
+else
+  bad "structural: $_probe_exec_count executable(s) under docs/reports/3229-artifacts/ — an executable under root docs/ makes census-exclusion FAIL until this change merges"
+fi
+if [ -f "$SCRIPT_DIR/../../docs/reports/3229-artifacts/live-probe-procedure.md" ]; then
+  ok 'structural: the probe procedure is kept as committed prose'
+  for _phrase in 'cannot certify itself' 'snapshots config at start' 'In Review' \
+    'filed as a tracked issue' 'strictly better'; do
+    if grep -qF -- "$_phrase" "$SCRIPT_DIR/../../docs/reports/3229-artifacts/live-probe-procedure.md"; then
+      ok "structural: the probe procedure records '$_phrase'"
+    else
+      bad "structural: the probe procedure does not record '$_phrase'"
+    fi
+  done
+else
+  bad 'structural: docs/reports/3229-artifacts/live-probe-procedure.md is missing — the AC2 requirement was dropped rather than rescheduled'
 fi
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
