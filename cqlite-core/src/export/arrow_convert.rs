@@ -65,7 +65,10 @@ use super::arrow_builders_scalar::{
 };
 use super::arrow_convert_util::{unwrap_frozen_type, Cells};
 use super::arrow_schema::column_to_field;
-use super::arrow_typed_value::build_typed_value_array;
+// Also re-exported (`pub(crate)`) so `delta_parquet` keeps reaching the recursive
+// builder through its existing `export::arrow_convert::…` path — the epic #1116
+// split must not grow that already-over-threshold file with a new import line.
+pub(crate) use super::arrow_typed_value::build_typed_value_array;
 
 // ============================================================================
 // Error type
