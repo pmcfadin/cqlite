@@ -64,7 +64,7 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # MIN_CASES is the full-suite pass count; SKIP_PY / SKIP_E2E are the case counts of
 # the two conditional blocks (python3-only cases, of which the stub end-to-end cases
 # are the inner block). Growing the suite means growing these.
-MIN_CASES=102
+MIN_CASES=103
 SKIP_PY_CASES=30
 SKIP_E2E_CASES=12
 
@@ -207,12 +207,21 @@ fi
 # ---------------------------------------- --small-golden (the committable oracle) --
 out=$(bash "$GEN" --small-golden --validate-only --out "$TMP/c" 2>&1); rc=$?
 if [ "$rc" -eq 0 ] \
-   && grep -q "rows=6000 chunk_rows=6000 chunks=1 " <<<"$out" \
+   && grep -q "rows=600 chunk_rows=600 chunks=1 " <<<"$out" \
    && grep -q "keyspace=test_da table=wide_multiclustering_small " <<<"$out" \
    && grep -q "mode=small_golden" <<<"$out"; then
   pass "--small-golden plans ONE small SSTable under test_da.wide_multiclustering_small"
 else
   fail "--small-golden defaults changed (rc=$rc, out: $out)"
+fi
+# The width mix is what fixes the golden's SIZE and partition shape, so it is
+# pinned too: the committed fixture is sized to the repo convention (#3032's
+# multiclustering_table, 468 rows / 121,020 B golden), and a silent widths change
+# would silently resize a committed fixture on the next regeneration.
+if grep -q "widths=400:20,80:30,20:50" <<<"$out"; then
+  pass "--small-golden pins the rows-per-partition mix that fixes the fixture's size"
+else
+  fail "--small-golden widths default changed (out: $out)"
 fi
 out=$(bash "$GEN" --small-golden --validate-only --out "$TMP/c" --rows 900 --chunk-rows 300 \
         --table mine 2>&1)

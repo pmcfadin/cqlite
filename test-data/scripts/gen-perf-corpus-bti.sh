@@ -154,8 +154,10 @@ modes
                          so it can never clobber a production corpus
   --small-golden         generate the COMMITTABLE small Cassandra-written BTI golden
                          (a CORRECTNESS ORACLE, not a profile target): same
-                         PRIMARY KEY (pk, bucket, seq) shape, ~6k rows, one SSTable,
+                         PRIMARY KEY (pk, bucket, seq) shape, 600 rows, one SSTable,
                          no 8 MiB floor; defaults to test_da.wide_multiclustering_small
+                         and is sized to the repo's committed-golden convention
+                         (#3032's multiclustering_table), not to a row count
   --validate-only        validate flags and exit 0; starts no container, writes nothing
   --prune-dry-run        --validate-only + list the stale corpus dirs a run WOULD remove
                          (PRUNE_KEEP=<basename> excludes one, as publish() does)
@@ -258,12 +260,24 @@ fi
 # read-plane floor is deliberately dropped to 0 (this fixture is a correctness
 # oracle, never a profile target), and the width mix guarantees at least one
 # partition wide enough to populate Rows.db.
+#
+# SIZED TO THE REPO'S CONVENTION, not to a row count: the closest committed
+# analogue is #3032's test_da/multiclustering_table (same PRIMARY KEY
+# (pk, bucket, seq) shape) at 468 rows / 3 partitions and a 121,020 B
+# `sstabledump -l` golden. A golden's worth as a Cassandra-written oracle does
+# NOT scale with row count, but the committed golden's size does (~320 B/row),
+# so these defaults are the previous 6000-row shape divided by exactly 10: the
+# same width WEIGHTS and therefore the same partition-count / bucket-spread
+# structure, one order of magnitude smaller. The widest class (400 rows x ~185 B
+# = ~74 KiB) still exceeds the image's `column_index_size` default of 4KiB by
+# ~18x, so its partition spans many row-index blocks and Rows.db is populated
+# (the fail-closed every-Rows.db-non-empty assert below would catch it if not).
 if [ "$SMALL_GOLDEN" = 1 ]; then
-  [ "$ROWS_EXPLICIT" = 1 ] || ROWS="${SMALL_GOLDEN_ROWS:-6000}"
-  [ "$CHUNK_ROWS_EXPLICIT" = 1 ] || CHUNK_ROWS="${SMALL_GOLDEN_CHUNK_ROWS:-6000}"
+  [ "$ROWS_EXPLICIT" = 1 ] || ROWS="${SMALL_GOLDEN_ROWS:-600}"
+  [ "$CHUNK_ROWS_EXPLICIT" = 1 ] || CHUNK_ROWS="${SMALL_GOLDEN_CHUNK_ROWS:-600}"
   [ "$KS_EXPLICIT" = 1 ] || KS="test_da"
   [ "$TBL_EXPLICIT" = 1 ] || TBL="wide_multiclustering_small"
-  [ "$WIDTHS_EXPLICIT" = 1 ] || WIDTHS="4000:20,800:30,200:50"
+  [ "$WIDTHS_EXPLICIT" = 1 ] || WIDTHS="400:20,80:30,20:50"
   [ "$MIN_DATA_DB_EXPLICIT" = 1 ] || MIN_DATA_DB_BYTES=0
 fi
 [ -n "$KS" ] || KS="perf_bti"
@@ -825,7 +839,11 @@ if [ "$VALIDATE_ONLY" = 1 ]; then
   # dir a real run must NOT delete), so the `keep` exclusion of a function that
   # `rm -rf`s multi-GB paths is exercisable without a container.
   if [ "$PRUNE_DRY_RUN" = 1 ]; then prune_stale_table_dirs "${PRUNE_KEEP:-}"; fi
-  echo "VALIDATE-OK rows=$ROWS chunk_rows=$CHUNK_ROWS chunks=$CHUNKS seed=$SEED keyspace=$KS table=$TBL out=$OUT mode=$RUN_MODE manifest_out=${MANIFEST_OUT:-(none)}"
+  # `widths=` is reported because the rows-per-partition mix is what makes a run's
+  # SIZE and partition shape what they are — the small-golden defaults are sized to
+  # the committed-golden convention, and a silent change to them is a silent change
+  # to a committed fixture's size. Reported LAST so appending it breaks no grep.
+  echo "VALIDATE-OK rows=$ROWS chunk_rows=$CHUNK_ROWS chunks=$CHUNKS seed=$SEED keyspace=$KS table=$TBL out=$OUT mode=$RUN_MODE manifest_out=${MANIFEST_OUT:-(none)} widths=$WIDTHS"
   exit 0
 fi
 
