@@ -358,15 +358,32 @@ fn read_manifest_rows(
     }
 
     // The production manifest also records the generator's fail-closed cross-check
-    // (row-driver plan vs each `Statistics.db`). If it is present it must agree,
-    // and it must agree with the count we are about to assert on.
+    // (row-driver plan vs each `Statistics.db`). If it is present, the two sides must
+    // agree with each other AND with the count we are about to assert on.
+    //
+    // This reads the four NUMBERS. It used to read an `agree: true` flag beside them,
+    // which the writer emitted as a literal — i.e. it trusted a claim where the evidence
+    // for that claim was in the same object. The flag is gone from the manifest
+    // (issue #3234 review round 10: a field is observed or absent), and comparing the
+    // numbers is a strictly stronger check than believing the flag was.
     if let Some(x) = json.get("row_count_cross_check") {
-        if x.get("agree").and_then(|v| v.as_bool()) != Some(true) {
-            return Err(format!(
-                "{}: `row_count_cross_check.agree` is not true — the manifest itself reports \
-                 a row-count disagreement",
-                path.display()
-            ));
+        for (a, b) in [
+            ("row_driver_rows", "statistics_db_rows"),
+            ("row_driver_partitions", "statistics_db_partitions"),
+        ] {
+            match (
+                x.get(a).and_then(|v| v.as_u64()),
+                x.get(b).and_then(|v| v.as_u64()),
+            ) {
+                (Some(va), Some(vb)) if va != vb => {
+                    return Err(format!(
+                        "{}: `row_count_cross_check.{a}` = {va} disagrees with `{b}` = {vb} — \
+                         the manifest itself reports a cross-check disagreement",
+                        path.display()
+                    ))
+                }
+                _ => {}
+            }
         }
         for name in ["row_driver_rows", "statistics_db_rows"] {
             if let Some(v) = x.get(name).and_then(|v| v.as_u64()) {

@@ -57,7 +57,7 @@ TBL=multiclustering_table
 # `passes >= MIN_CASES`. The one BRANCH (build here vs reuse
 # CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the floor is
 # identical on both paths (roborev #3234 F4).
-MIN_CASES=38
+MIN_CASES=39
 
 fails=0
 passes=0
@@ -160,8 +160,18 @@ printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":0}}\n' "$KS" 
   >"$TMP/m-zero.json"
 printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},' "$KS" "$TBL" \
   "$FIXTURE_ROWS" >"$TMP/m-disagree.json"
-printf '"row_count_cross_check":{"agree":true,"statistics_db_rows":471}}\n' \
+printf '"row_count_cross_check":{"statistics_db_rows":471}}\n' \
   >>"$TMP/m-disagree.json"
+# The other half of the cross-check: the two sides disagreeing WITH EACH OTHER, while the
+# row count itself matches. The harness used to read an `agree: true` literal here; it now
+# compares the four numbers (the literal is gone from the manifest -- #3234 round 10: a
+# field is observed or absent), so this is the negative control for that comparison.
+printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},' "$KS" "$TBL" \
+  "$FIXTURE_ROWS" >"$TMP/m-pair-disagree.json"
+printf '"row_count_cross_check":{"row_driver_rows":%s,"statistics_db_rows":%s,' \
+  "$FIXTURE_ROWS" "$FIXTURE_ROWS" >>"$TMP/m-pair-disagree.json"
+printf '"row_driver_partitions":5,"statistics_db_partitions":7}}\n' \
+  >>"$TMP/m-pair-disagree.json"
 printf '{"keyspace":"%s",\n' "$KS" >"$TMP/m-truncated.json"
 
 # run_case <expected-rc> <description> <args...>
@@ -215,6 +225,8 @@ run_case 8 "a manifest whose rows is 0 refuses to measure" \
   "${SCAN_GOOD[@]}" --manifest "$TMP/m-zero.json"
 run_case 8 "a manifest whose Statistics.db cross-check disagrees refuses to measure" \
   "${SCAN_GOOD[@]}" --manifest "$TMP/m-disagree.json"
+run_case 8 "a manifest whose cross-check PAIR disagrees (partitions) refuses to measure" \
+  "${SCAN_GOOD[@]}" --manifest "$TMP/m-pair-disagree.json"
 # With no --manifest, resolution falls through to the COMMITTED production
 # manifest, which describes perf_bti.wide_multiclustering -- so this corpus gets
 # the same refusal rather than a vacuous pass. This case also proves the default

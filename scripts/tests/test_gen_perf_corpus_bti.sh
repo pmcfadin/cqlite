@@ -1406,13 +1406,18 @@ for k in ("sstable_count", "sstable_generations", "one_sstable_per_planned_chunk
           "rows", "partitions", "data_db_bytes_total", "data_db_bytes_largest",
           "min_data_db_floor_bytes", "read_plane_threshold_bytes",
           "meets_8mib_read_plane_floor", "rows_db_bytes_total", "every_rows_db_non_empty",
-          "clustering_key", "clustering_arity", "ddl", "sstables"):
+          "ddl", "sstables"):
     if k not in t:
         bad.append(f"tables[0] key {k} MISSING")
 for k in ("read_path_measurement_scope", "recorded_figure", "applies_to_this_corpus",
           "full_generation_golden", "corpus_committed", "committed_copy", "corpus_note"):
     if k in blob:
         bad.append(f"deleted key {k} is back")
+# ...and the three LITERALS that asserted what the evidence beside them already shows.
+for owner, k in ((t, "clustering_key"), (t, "clustering_arity"),
+                 (m["row_count_cross_check"], "agree")):
+    if k in owner:
+        bad.append(f"deleted literal {k} is back")
 # roborev #3234 M1, at the STRONGEST point: this manifest describes the very corpus the
 # AC3 figure was measured on -- the one corpus for which "it applies" would have been
 # true -- and it still records NO throughput number. Omission is unconditional, so there
@@ -1640,8 +1645,16 @@ eq("sstable_dir (corpus-root relative)", t["sstable_dir"], sys.argv[2])
 eq("meets_8mib_read_plane_floor", t["meets_8mib_read_plane_floor"], True)
 eq("every_rows_db_non_empty", t["every_rows_db_non_empty"], True)
 eq("ddl.extracted_statements", t["ddl"]["extracted_statements"], True)
-eq("clustering_arity", t["clustering_arity"], 2)
-eq("cross-check agree", m["row_count_cross_check"]["agree"], True)
+# The key shape is read from the captured DDL, not from a `clustering_arity` literal.
+eq("clustering_arity literal deleted", "clustering_arity" in t, False)
+eq("clustering_key literal deleted", "clustering_key" in t, False)
+eq("PRIMARY KEY in the captured DDL", "PRIMARY KEY (pk, bucket, seq)" in t["ddl"]["table_ddl"], True)
+# The cross-check is the two NUMBERS agreeing, not an `agree: true` literal beside them.
+eq("agree literal deleted", "agree" in m["row_count_cross_check"], False)
+eq("cross-check rows agree", m["row_count_cross_check"]["row_driver_rows"],
+   m["row_count_cross_check"]["statistics_db_rows"])
+eq("cross-check partitions agree", m["row_count_cross_check"]["row_driver_partitions"],
+   m["row_count_cross_check"]["statistics_db_partitions"])
 eq("cross-check rows", m["row_count_cross_check"]["statistics_db_rows"], plan["rows"])
 eq("cross-check partitions",
    m["row_count_cross_check"]["statistics_db_partitions"], plan["partitions"])

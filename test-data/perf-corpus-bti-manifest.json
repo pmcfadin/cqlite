@@ -1,7 +1,7 @@
 {
   "issue": 3234,
   "purpose": "Profileable LZ4-compressed multi-SSTable Cassandra 5.0 BTI (`da`) corpus with wide partitions and a compound clustering key, for BTI read-path measurement (#3029 WS3, #3030 WS4) and as a Cassandra-written parity oracle.",
-  "generated_utc": "2026-08-03T20:05:41.704759+00:00",
+  "generated_utc": "2026-08-03T20:16:46.530105+00:00",
   "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
   "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
   "mode": "production",
@@ -350,11 +350,6 @@
       "meets_8mib_read_plane_floor": true,
       "rows_db_bytes_total": 3634853,
       "every_rows_db_non_empty": true,
-      "clustering_key": [
-        "bucket",
-        "seq"
-      ],
-      "clustering_arity": 2,
       "ddl": {
         "source": "schema.cql captured at generation time (cqlsh DESCRIBE KEYSPACE, alongside the SSTable components)",
         "keyspace_ddl": "CREATE KEYSPACE perf_bti WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}  AND durable_writes = false;",
@@ -1779,7 +1774,6 @@
     "statistics_db_rows": 13200000,
     "row_driver_partitions": 17299,
     "statistics_db_partitions": 17299,
-    "agree": true,
     "note": "fail-closed: a rows OR partitions disagreement aborts before the manifest is written, and an UNOBSERVED partition count is an error rather than a 0"
   }
 }

@@ -1,7 +1,7 @@
 {
   "issue": 3234,
   "purpose": "COMMITTABLE small Cassandra-written Cassandra 5.0 BTI (`da`) oracle with a wide partition and a compound clustering key, for BTI row/cell decode, `Rows.db` trie descent and compound-clustering-slice PARITY work (#3042: Cassandra-WRITTEN bytes). Deliberately NOT profileable \u2014 below the 8 MiB read-plane threshold.",
-  "generated_utc": "2026-08-03T20:06:34.690894+00:00",
+  "generated_utc": "2026-08-03T20:16:23.939425+00:00",
   "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
   "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
   "mode": "small_golden",
@@ -104,11 +104,6 @@
       "meets_8mib_read_plane_floor": false,
       "rows_db_bytes_total": 197,
       "every_rows_db_non_empty": true,
-      "clustering_key": [
-        "bucket",
-        "seq"
-      ],
-      "clustering_arity": 2,
       "ddl": {
         "source": "schema.cql captured at generation time (cqlsh DESCRIBE KEYSPACE, alongside the SSTable components)",
         "keyspace_ddl": "CREATE KEYSPACE test_da WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}  AND durable_writes = false;",
@@ -181,7 +176,6 @@
     "statistics_db_rows": 600,
     "row_driver_partitions": 5,
     "statistics_db_partitions": 5,
-    "agree": true,
     "note": "fail-closed: a rows OR partitions disagreement aborts before the manifest is written, and an UNOBSERVED partition count is an error rather than a 0"
   }
 }

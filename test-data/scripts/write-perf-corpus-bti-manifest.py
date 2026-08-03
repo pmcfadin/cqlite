@@ -887,8 +887,12 @@ def main() -> int:
                 "meets_8mib_read_plane_floor": largest > 8 * 1024 * 1024,
                 "rows_db_bytes_total": sum(s["rows_db_bytes"] for s in sstables),
                 "every_rows_db_non_empty": all(s["rows_db_bytes"] > 0 for s in sstables),
-                "clustering_key": ["bucket", "seq"],
-                "clustering_arity": 2,
+                # NO hardcoded `clustering_key` / `clustering_arity`: they were literals
+                # describing a schema this script never read. The captured DDL below IS
+                # the observed schema — a consumer that needs the key shape reads it
+                # there rather than trusting a constant (roborev #3234 M1/M2 rule: a
+                # field is OBSERVED or ABSENT, and deriving these would cost a DDL parser
+                # to substantiate two fields the DDL already states).
                 "ddl": ddl,
                 "sstables": sstables,
             }
@@ -898,7 +902,8 @@ def main() -> int:
             "statistics_db_rows": observed_rows,
             "row_driver_partitions": plan["partitions"],
             "statistics_db_partitions": observed_partitions,
-            "agree": True,
+            # NO `agree: true`. It was a literal asserting what the four numbers beside it
+            # already show, i.e. a claim in place of the evidence for it.
             "note": (
                 "fail-closed: a rows OR partitions disagreement aborts before the "
                 "manifest is written, and an UNOBSERVED partition count is an error "
