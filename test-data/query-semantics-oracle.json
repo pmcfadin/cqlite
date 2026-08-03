@@ -458,6 +458,74 @@
         { "pk": 3, "bucket": "golf", "seq": 14 },
         { "pk": 3, "bucket": "golf", "seq": 15 }
       ]
+    },
+    {
+      "id": "ttl_table_bti__full_scan_live",
+      "keyspace": "test_da",
+      "table": "ttl_table",
+      "fixture_dir_prefix": "ttl_table-",
+      "sstable_prefix": "da-2-bti",
+      "schema": "da-test.cql",
+      "ddl": "CREATE TABLE test_da.ttl_table (id uuid PRIMARY KEY, data text, expiring_value int)",
+      "query": "SELECT data, expiring_value FROM test_da.ttl_table",
+      "reconciliation": ["ttl_not_yet_expired_at_pinned_now"],
+      "pinned_now_secs": 1781136000,
+      "pinned_now_note": "2026-06-11T00:00:00Z — BEFORE both rows' TTL expiry (expires_at 2026-06-11T16:17:37Z, epoch 1781194657) and after both writes (tstamp 2026-06-10T16:17:37Z), so every row is LIVE. This is the non-vacuous half of the pair: with the sibling `__full_scan_expired` case it pins that the pin SELECTS between rows rather than the reader returning a constant.",
+      "physical_row_count": 2,
+      "note": [
+        "Issue #3109: the FIRST oracle case that drives a BTI (`da`) table through the",
+        "BATCHED streaming surface. Every other test_da case carries a WHERE clause and so",
+        "takes the partition-targeted lookup path; a WHERE-less SELECT falls through to the",
+        "full-scan streaming path, which consumes `scan_stream_batched`",
+        "(query/select_executor/streaming.rs, query/executor.rs) -> SSTableManager's",
+        "single-reader fast path -> SSTableReader::scan_stream_batched.",
+        "",
+        "That surface had NO `bti_partitions_db.is_some()` dispatch, so a `da` reader decoded",
+        "through the V5UncompressedOA state machine, which honours neither read_shadowing nor",
+        "a caller-pinned now_secs. Both halves of this pair therefore exercise exactly the",
+        "posture #3109 restored: this one that a pinned now BEFORE expiry keeps rows,",
+        "`__full_scan_expired` that a pinned now AFTER expiry hides them.",
+        "",
+        "Oracle derivation: the committed sstabledump golden (da-2-bti-Data.db.jsonl) records",
+        "both rows with `\"ttl\": 86400` and `\"expires_at\": \"2026-06-11T16:17:37Z\"`; the",
+        "expected values are read straight off that golden's cells. Projection excludes the",
+        "uuid partition key deliberately — both lanes' scalar renderers cover int/text only.",
+        "",
+        "flight_lane: default (true) — a WHERE-less whole-table projection IS expressible on",
+        "the Flight ticket surface, so this case runs on both lanes."
+      ],
+      "expected_rows": [
+        { "data": "BTI TTL row 1", "expiring_value": 42 },
+        { "data": "BTI TTL row 2", "expiring_value": 99 }
+      ]
+    },
+    {
+      "id": "ttl_table_bti__full_scan_expired",
+      "keyspace": "test_da",
+      "table": "ttl_table",
+      "fixture_dir_prefix": "ttl_table-",
+      "sstable_prefix": "da-2-bti",
+      "schema": "da-test.cql",
+      "ddl": "CREATE TABLE test_da.ttl_table (id uuid PRIMARY KEY, data text, expiring_value int)",
+      "query": "SELECT data, expiring_value FROM test_da.ttl_table",
+      "reconciliation": ["ttl_expired_at_pinned_now"],
+      "pinned_now_secs": 1782950400,
+      "pinned_now_note": "2026-07-02T00:00:00Z (the same pin the compaction-tombstone-ttl cases use) — AFTER both rows' TTL expiry (expires_at 2026-06-11T16:17:37Z, epoch 1781194657), so Cassandra's SELECT returns NOTHING while the physical dump still shows both rows.",
+      "physical_row_count": 2,
+      "expect_empty": true,
+      "note": [
+        "Issue #3109, the shadowing half of the BTI-through-the-batched-surface pair. This is",
+        "the case the bug FAILED: with no BTI dispatch on `run_scan_stream_batched` the `da`",
+        "reader decoded through the state machine, which drops `read_shadowing`, so both",
+        "TTL-expired rows were surfaced where `scan` and the per-row stream hide them.",
+        "",
+        "`expect_empty` is legitimate here and provable: physical_row_count is 2 (re-derived",
+        "from the committed golden by the harness), so the rows demonstrably exist on disk and",
+        "are reconciled away at read time — not an empty or misconfigured fixture. Its sibling",
+        "`__full_scan_live` runs the SAME query at a pin BEFORE the expiry and requires both",
+        "rows, so neither case can pass by a reader that always returns a constant."
+      ],
+      "expected_rows": []
     }
   ]
 }

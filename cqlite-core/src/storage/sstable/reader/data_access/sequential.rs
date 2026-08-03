@@ -1,15 +1,19 @@
 //! Sequential / index-driven read paths: range scans, full scans, the
-//! `scan_for_key` fallback, the cell-metadata scan, and the bounded streaming
-//! scan.
+//! `scan_for_key` fallback, and the cell-metadata scan. The two bounded STREAMING
+//! scans live in the sibling files included at the bottom of this one
+//! (`per_row_scan_stream.rs`, `batched_scan_stream.rs`).
 //!
 //! These cover the BIG (`nb`) `V5CompressedLegacy` formats (chunk-stitched) and
 //! the non-stitching block-by-block formats. BTI (`da`) range/full scans are
-//! routed here only to delegate to [`SSTableReader::bti_scan_with_metadata`].
+//! routed here only to delegate to [`SSTableReader::bti_scan_with_metadata`] —
+//! `scan`, `sequential_scan` and `scan_with_cell_metadata` each gate on
+//! `bti_partitions_db.is_some()` before touching the block loop (issue #3109).
 //!
 //! File-size note (campsite rule, epic #1116): this file was already over the
 //! ~800-line source threshold before issue #2346's `scan_cancel` per-call
-//! parameter change (`sequential_scan`), which nudges it slightly further.
-//! Splitting it by responsibility is out of #2346's scope; tracked under #1116.
+//! parameter change (`sequential_scan`), which nudged it further. Issue #3109
+//! moved the batched streaming scan out to its own file, shrinking it; it is still
+//! over the target and further splits are tracked under #1116.
 
 use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
@@ -89,7 +93,7 @@ impl SSTableReader {
         // correct, but emitting ALL partitions instead of stopping at the first.
         if self.bti_partitions_db.is_some() {
             let entries = self
-                .bti_scan_with_metadata(start_key, end_key, limit, schema, true)
+                .bti_scan_with_metadata(start_key, end_key, limit, schema, true, None)
                 .await?;
             return Ok(entries.into_iter().map(|(k, v, _meta)| (k, v)).collect());
         }
@@ -255,7 +259,7 @@ impl SSTableReader {
                 self.header.keyspace, self.header.table_name
             ));
             let entries = self
-                .bti_scan_with_metadata(None, None, None, None, false)
+                .bti_scan_with_metadata(None, None, None, None, false, None)
                 .await?;
             return Ok(entries
                 .into_iter()
@@ -302,205 +306,6 @@ impl SSTableReader {
         results.retain(|(_tid, _key, value)| self.filter_tombstone(value));
 
         Ok(results)
-    }
-
-    /// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
-    /// [`scan_stream`](Self::scan_stream) whose channel item is a `Vec` BATCH of
-    /// `(RowKey, ScanRow)` entries rather than a single entry. Forwarding one batch
-    /// per channel send collapses the one-async-wake-per-row cost the internal
-    /// windowed pipeline (issue #1143) was designed to amortize but the public
-    /// forwarder then re-flattened away.
-    ///
-    /// Order and content are identical to [`scan_stream`](Self::scan_stream):
-    /// flattening the batches yields exactly the per-row stream. Backpressure is
-    /// preserved — the channel is bounded (in BATCHES) and every send observes it.
-    pub fn scan_stream_batched(
-        self: std::sync::Arc<Self>,
-        table_id: TableId,
-        start_key: Option<RowKey>,
-        end_key: Option<RowKey>,
-        schema: Option<crate::schema::TableSchema>,
-        buffer_size: usize,
-    ) -> BatchedScanStream {
-        self.scan_stream_batched_admitted(
-            table_id,
-            start_key,
-            end_key,
-            schema,
-            buffer_size,
-            ScanAdmission::Acquire,
-            None,
-        )
-    }
-
-    /// [`scan_stream_batched`](Self::scan_stream_batched) with an explicit
-    /// admission context (issue #1594), mirroring
-    /// [`scan_stream_admitted`](Self::scan_stream_admitted).
-    /// `now_secs` (issue #3058): a caller-pinned read-time TTL clock, threaded to
-    /// the read-shadowing decoder so a caller that already captured ONE
-    /// reconciliation instant for the request (the Flight single-source fast
-    /// path) expires TTL cells at exactly that instant instead of an ambient
-    /// wall-clock sample. `None` keeps the ambient sample.
-    pub(crate) fn scan_stream_batched_admitted(
-        self: std::sync::Arc<Self>,
-        table_id: TableId,
-        start_key: Option<RowKey>,
-        end_key: Option<RowKey>,
-        schema: Option<crate::schema::TableSchema>,
-        buffer_size: usize,
-        admission: ScanAdmission,
-        now_secs: Option<i64>,
-    ) -> BatchedScanStream {
-        // The public channel carries BATCHES; sizing it to
-        // `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps the resident-row
-        // budget of this channel comparable to the per-row surface's `buffer_size`
-        // rather than `buffer_size * BATCH_EMIT_ROWS`.
-        let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
-        let (tx, rx) = mpsc::channel(cap);
-        let task = tokio::spawn(async move {
-            if let Err(e) = self
-                .run_scan_stream_batched(
-                    table_id,
-                    start_key,
-                    end_key,
-                    schema,
-                    tx.clone(),
-                    admission,
-                    now_secs,
-                )
-                .await
-            {
-                let _ = tx.send(Err(e)).await;
-            }
-        });
-        BatchedScanStream::new(rx, task)
-    }
-
-    async fn run_scan_stream_batched(
-        self: std::sync::Arc<Self>,
-        table_id: TableId,
-        start_key: Option<RowKey>,
-        end_key: Option<RowKey>,
-        schema: Option<crate::schema::TableSchema>,
-        tx: mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
-        admission: ScanAdmission,
-        // Issue #3058: caller-pinned read-time TTL clock (`None` = ambient).
-        now_secs: Option<i64>,
-    ) -> Result<()> {
-        // Admission control (issue #1594, F4): identical discipline to the per-row
-        // `run_scan_stream` — one permit per top-level scan operation, held via RAII.
-        let _admission = match admission {
-            ScanAdmission::Acquire => Some(scan_admission::admit().await),
-            ScanAdmission::Exempt => None,
-        };
-
-        let cursor = self.open_batched_scan_cursor().await?;
-        let header_size = self.calculate_header_size();
-        {
-            let mut file_guard = cursor.file.lock().await;
-            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-        }
-
-        if self.requires_chunk_stitching() {
-            // Forward the windowed driver's internal batches straight through — no
-            // flatten, no re-batch (issue #1592). Same driver, same order/content
-            // as the per-row path; only the output surface differs.
-            self.run_scan_stream_windowed(
-                table_id,
-                start_key,
-                end_key,
-                schema,
-                &cursor,
-                now_secs,
-                WindowedOut::Batched(tx.clone()),
-            )
-            .await
-        } else {
-            // Non-stitching formats read block-by-block; emit surviving entries
-            // in BATCH_EMIT_ROWS-capped batches (issue #1592). A block with more
-            // than BATCH_EMIT_ROWS surviving entries is split across multiple
-            // batches so every emitted batch respects `batch.len() <=
-            // BATCH_EMIT_ROWS` (the resident-row budget behind the channel cap);
-            // the remainder carries over to the next block so we still wake the
-            // consumer at most once per full batch.
-            //
-            // Confirmed rows from successfully-parsed prior blocks live in `batch`
-            // until it fills. If a LATER block's read/parse errors mid-scan, flush
-            // those confirmed rows to the consumer BEFORE surfacing the terminal
-            // error — matching both the per-row `run_scan_stream` contract (each row
-            // is sent the instant it is parsed) and the stitching path's
-            // `flush_pending` (issue #1143 / #1592, roborev Finding 1). Propagating
-            // the error via `?` here would silently drop up to BATCH_EMIT_ROWS-1
-            // confirmed rows.
-            let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
-            // Work-probe (issue #2398, extended by #3058): same "changed partition
-            // key = one more partition body decoded" accounting `sequential_scan`
-            // does, so the single-source `do_get` fast path's full-ring scan is
-            // visible to the scan-work counter instead of silently unrecorded.
-            let mut prev_partition_key: Option<RowKey> = None;
-            loop {
-                let block = match self.read_next_block(&cursor).await {
-                    Ok(Some(block)) => block,
-                    Ok(None) => break,
-                    Err(e) => {
-                        if !batch.is_empty() {
-                            let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
-                        }
-                        return Err(e);
-                    }
-                };
-                let entries = match self.parse_batched_block(&block, schema.as_ref(), now_secs) {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        if !batch.is_empty() {
-                            let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
-                        }
-                        return Err(e);
-                    }
-                };
-                for (entry_table_id, entry_key, entry_value) in entries {
-                    // Counted BEFORE every filter — including the table-id filter —
-                    // exactly like the sibling sites (`sequential_scan`'s two loops
-                    // and the stitched walk): the partition body was DECODED
-                    // regardless of whether its rows survive, and a `Data.db` whose
-                    // entries carry a non-matching `TableId` (path/header keyspace
-                    // mismatch, or `scan_table_id`'s `"default"` fallback) must not
-                    // report 0 bodies where `sequential_scan` reports N (roborev,
-                    // issue #3058).
-                    if prev_partition_key.as_ref() != Some(&entry_key) {
-                        crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
-                        prev_partition_key = Some(entry_key.clone());
-                    }
-                    if !table_ids_match(&entry_table_id, &table_id) {
-                        continue;
-                    }
-                    if let Some(ref start) = start_key {
-                        if &entry_key < start {
-                            continue;
-                        }
-                    }
-                    if let Some(ref end) = end_key {
-                        if &entry_key > end {
-                            continue;
-                        }
-                    }
-                    if !self.filter_tombstone(&entry_value) {
-                        continue;
-                    }
-                    batch.push((entry_key, entry_value));
-                    if batch.len() >= BATCH_EMIT_ROWS {
-                        if tx.send(Ok(std::mem::take(&mut batch))).await.is_err() {
-                            return Ok(()); // consumer dropped
-                        }
-                        batch.reserve(BATCH_EMIT_ROWS);
-                    }
-                }
-            }
-            if !batch.is_empty() && tx.send(Ok(batch)).await.is_err() {
-                return Ok(()); // consumer dropped
-            }
-            Ok(())
-        }
     }
 
     pub(super) async fn scan_for_key(
@@ -647,12 +452,35 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
         scan_cancel: &ScanCancel,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
-        tracing::debug!("SSTableReader::sequential_scan - Starting sequential scan");
-        tracing::debug!("SSTableReader::sequential_scan - Table ID: {}", table_id);
         tracing::debug!(
-            "SSTableReader::sequential_scan - Has schema: {}",
+            "SSTableReader::sequential_scan - starting: table_id={table_id}, has_schema={}",
             schema.is_some()
         );
+
+        // Issue #3109: BTI (`da`) readers decode through the authoritative trie
+        // walk, NEVER the block loop below. `iterate_all_partitions` is the one
+        // caller that reaches here with a `da` reader (both its index branches are
+        // gated on `bti_partitions_db.is_none()`), and that loop's state machine
+        // drops `read_shadowing` (and fails outright on a schema-required fixture).
+        // Posture is otherwise identical: both apply `filter_tombstone` + the key
+        // range + sort-then-`limit`. The PER-CALL `scan_cancel` is threaded through
+        // (#2264/#2346) — the non-cancellable wrapper polls the READER's own field
+        // instead, so a cancelled walk would stitch+parse the whole data section
+        // and return `Ok(every row)`.
+        if self.bti_partitions_db.is_some() {
+            let entries = self
+                .bti_scan_with_metadata_cancellable(
+                    start_key,
+                    end_key,
+                    limit,
+                    schema,
+                    true,
+                    None,
+                    scan_cancel,
+                )
+                .await?;
+            return Ok(entries.into_iter().map(|(k, v, _meta)| (k, v)).collect());
+        }
 
         // Issue #815: each scan uses its own cursor (private file position and
         // chunk index), so concurrent scans on this reader run in parallel
@@ -913,7 +741,7 @@ impl SSTableReader {
         // plain BTI scan, but surfaces per-cell write metadata for WRITETIME/TTL.
         if self.bti_partitions_db.is_some() {
             return self
-                .bti_scan_with_metadata(start_key, end_key, limit, schema, true)
+                .bti_scan_with_metadata(start_key, end_key, limit, schema, true, None)
                 .await;
         }
 
@@ -1484,3 +1312,8 @@ mod tests {
 // ~800-line campsite target (epic #1116).
 #[path = "per_row_scan_stream.rs"]
 mod per_row_scan_stream;
+
+// The BATCHED streaming scan (`scan_stream_batched`, issue #1592) and its issue-#3109
+// BTI dispatch — split out of this file for the same campsite reason (epic #1116).
+#[path = "batched_scan_stream.rs"]
+mod batched_scan_stream;

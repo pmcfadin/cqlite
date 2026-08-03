@@ -143,40 +143,24 @@ impl SSTableReader {
         // Issue #1577 (owner-chosen fix, 2026-07-06): BTI (`da`) readers MUST use
         // the SAME per-reader decode path `SSTableReader::scan` uses — the trie-walk
         // `bti_scan_with_metadata` — NOT the block-by-block `read_next_block` +
-        // `parse_block_entries_with_schema` decoder below. The block-by-block path
-        // diverges for BTI: it can under/over-produce, reorder, or (as here) fail
-        // outright ("Blob fallback not allowed for V5_0Bti"), while D1's LIMIT
-        // pushdown (`capped_fallback_scan`) trusts the streamed first-`cap` rows to
-        // be byte-identical to `scan`'s first-`cap` rows. Driving the identical
-        // authoritative decoder makes `scan_stream` PREFIX-AUTHORITATIVE with `scan`
-        // for BTI BY CONSTRUCTION (same rows, same `sort_by_token_order`, same
-        // key-range + `filter_tombstone` filtering — all applied INSIDE
-        // `bti_scan_with_metadata`), so no runtime reconcile against `scan` is
-        // needed. This gates on the SAME `self.bti_partitions_db.is_some()`
-        // condition `scan` uses, so the two can never disagree on which readers are
-        // BTI. BTI decode fully materializes the (small, index-less) reconciled
-        // table before streaming — mirrored by `scan_stream_materializes` returning
-        // `true` for BTI, so a bounded LIMIT consumer charges the true decoded count
-        // rather than assuming a lazy decode-stop.
+        // `parse_block_entries_with_schema` decoder below. Issue #3109 moved that
+        // dispatch into the SHARED `stream_bti_scan`, which the batched surface
+        // (`run_scan_stream_batched`) now calls too: it was added without this branch
+        // and silently reproduced the identical #1577 defect. See `stream_bti_scan`
+        // for the full rationale (prefix-authority with `scan`, why the
+        // block-by-block route is wrong for `da`, and the emission contract). The
+        // per-row surface has no request-scoped clock to pin, so it passes
+        // `now_secs = None` (the ambient sample), unchanged from #1577.
         if self.bti_partitions_db.is_some() {
-            let entries = self
-                .bti_scan_with_metadata(
+            return self
+                .stream_bti_scan(
                     start_key.as_ref(),
                     end_key.as_ref(),
-                    None,
                     schema.as_ref(),
-                    true,
+                    None,
+                    &WindowedOut::PerRow(tx.clone()),
                 )
-                .await?;
-            for (entry_key, entry_value, _meta) in entries {
-                // `bti_scan_with_metadata` already applied the key-range and
-                // tombstone filters and token-ordered the rows; forward as-is so
-                // the stream is byte-identical to `scan`'s BTI path.
-                if tx.send(Ok((entry_key, entry_value))).await.is_err() {
-                    return Ok(()); // consumer dropped
-                }
-            }
-            return Ok(());
+                .await;
         }
 
         // Issue #815: independent per-scan cursor — no cross-scan serialization.
