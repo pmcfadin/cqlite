@@ -239,14 +239,34 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
 
    - **A `0/0` is never a pass.** With no census path left to look for, the key has no subject and so no
      verdict to give: it FAILs, and it can never print `PASS (0/0 …)`.
-   - **Paths are compared NORMALISED, in every header shape git emits.** The census C-quotes a path with
-     a quote, a backslash or a non-ASCII byte; the prompt's headers may be unquoted, **space-bearing**
-     (`diff --git a/a b.txt b/a b.txt`) or **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`). Both sides
-     run through the same quoted-path decoder `census-exclusion:` uses, and a space-bearing header —
-     unsplittable by any regex — is matched by probing the literal header line. Accepting only
-     `a/[^ ]+ b/[^ ]+` **false-FAILED** correct input (measured: `census-exclusion: PASS (2/2 survive)`
-     beside `prompt-content: FAIL (1/2 absent)`), and a key that reds on correct input is the key agents
-     learn to waive. This repo already tracks 40 space-bearing paths under `docs/`, including the
+   - **Paths are normalised ONCE, at the census — one boundary, and it is the fix for SIX blockers.**
+     Rounds 2–4 of review on #3229 produced six blockers and **every one was a path-normalisation defect
+     in a different consumer**, because normalisation was scattered: the census did not normalise at all,
+     `census-exclusion:` unquoted at one point, `prompt-content:` did something else again. Patch the
+     reported consumer and the next round finds the next one. So:
+
+     - the census reads `git diff --numstat -z` and the survivor set `--name-only -z`, so paths arrive
+       **RAW**, and RAW is the single representation used for classification, comparison and display;
+     - the one quoted-path decoder survives only for text we did **not** get from git plumbing — the
+       reviewer's prompt — with exactly **one caller**, the canonical matcher
+       `roborev_diff_header_has_path`. Every consumer asks that matcher instead of parsing headers;
+     - it reads every shape git emits: unquoted, **space-bearing** (`diff --git a/a b.txt b/a b.txt`),
+       **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`), and the **MIXED** shape
+       (`diff --git a/<ascii> "b/<quoted>"`) that occurs **only on renames** — and our census runs
+       `--no-renames` while the reviewer's diff has rename detection ON;
+     - the invariant is asserted **structurally** (no path-reading `git diff` without `-z`; the decoder
+       called only from the matcher; no header regex or delimiter-based membership anywhere else), because
+       a behavioural case can only cover the shapes someone already thought of.
+
+     Both failure directions were measured. False FAIL: classifying a *quoted* spelling read
+     `docs/é notes.md` as extension `md"`, so PROSE counted as **code** and the configured `*.md` reported a
+     swallow ⇒ `census-exclusion: FAIL` **pre-enqueue** on an ordinary docs+code branch (reproduced against
+     the tracked `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`); a `[^ ]+` header
+     regex likewise gave `census-exclusion: PASS (2/2 survive)` beside `prompt-content: FAIL (1/2 absent)`.
+     False PASS: a newline-delimited path set probed with `grep -Fxq` turned `a<LF>b.rs` into the
+     alternatives {`a`, `b.rs`}, so a prompt naming only `a` reported `PASS (2/2 present)` for a file the
+     reviewer never received. A key that reds on correct input is the key agents learn to waive; a key that
+     greens on absent input is worse. This repo tracks 40 space-bearing paths under `docs/`, including the
      directory `docs/storage engine/`.
 
    #### A `.roborev.toml` change cannot certify itself — three properties, one generalization

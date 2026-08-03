@@ -451,13 +451,25 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `prompt-content: PASS (0/0 code census paths present)` and `RESULT: PASS`, exit 0 — a vacuous pass
   **textually identical to a genuine one** — on any dependency-bump branch whose only non-prose file is a
   lockfile (`code-free:` does not catch it: a `.lock` extension classifies as CODE). Hence also:
-  **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give — and it
-  compares census paths against prompt headers **NORMALISED** (both sides through the C-quoted-path
-  decoder), recognising every header shape git emits: unquoted, **space-bearing**
-  (`diff --git a/a b.txt b/a b.txt` — this repo tracks 40 space-bearing paths under `docs/`), and
-  **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`). Accepting only `a/[^ ]+ b/[^ ]+` false-FAILED the
-  wrapper's strongest anti-vacuity key, and a key that reds on correct input is the key agents learn to
-  waive.
+  **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
+  **Paths are normalised ONCE, at the census, and that boundary is the fix for SIX blockers (#3229).**
+  Rounds 2–4 of review produced six, and every one was a path-normalisation defect in a *different*
+  consumer, because normalisation was scattered. Now the census reads `git diff --numstat -z` (and the
+  survivor set `--name-only -z`), so paths arrive **RAW**, and RAW is the single representation used for
+  classification, comparison and display; the one quoted-path decoder survives for the reviewer's prompt
+  alone, with exactly one caller — the canonical matcher `roborev_diff_header_has_path`, which every
+  consumer must ask rather than parsing headers itself. It reads every shape git emits: unquoted,
+  **space-bearing** (`diff --git a/a b.txt b/a b.txt` — this repo tracks 40 space-bearing paths under
+  `docs/`), **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`), and the **MIXED** shape a rename produces
+  (`diff --git a/<ascii> "b/<quoted>"`). Two measured costs of getting this wrong, in both directions: the
+  census classifying a *quoted* spelling read `docs/é notes.md` as extension `md"` and called PROSE **code**,
+  so `*.md` then reported a swallow ⇒ `census-exclusion: FAIL` **pre-enqueue** on an ordinary docs+code
+  branch (reproduced against the tracked `docs/research/CQLite Writes (M5) — …md`); and a
+  newline-delimited path set with `grep -Fxq` membership made a path's first line "prove" its presence ⇒ a
+  genuine **false PASS**. A key that reds on correct input is the key agents learn to waive; a key that
+  greens on absent input is worse. The invariant is asserted **structurally** in
+  `scripts/tests/test_roborev_review_guard.sh` (no path-reading `git diff` without `-z`; the decoder called
+  only from the matcher), because behavioural cases only cover the shapes someone already thought of.
   **A `.roborev.toml` change cannot certify itself (#3229) — three properties, one generalization:**
   **(1)** roborev's daemon binds a repository by its **`repos.root_path`** and reads **that ROOT
   checkout's** `.roborev.toml` — a *worktree* `.roborev.toml` edit is **invisible** to it, so under
