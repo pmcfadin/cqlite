@@ -194,7 +194,11 @@ options (env var in parentheses; all have defaults)
                          metadata would describe another table and make the default
                          full-corpus scan reject the manifest (PUBLISH_MANIFEST=1)
   --keep-container       leave the container running after a successful run
-  --no-prune             keep previous <table>-<uuid> corpus dirs (PRUNE_STALE=0)
+  --no-prune             keep previous <table>-<uuid> corpus dirs (PRUNE_STALE=0).
+                         The result is an AMBIGUOUS corpus root: --verify-only and
+                         bti_perf_scan both REFUSE it (the generation count selects
+                         the scan route), so retained generations must be moved out
+                         of the corpus tree before anything measures it
   -h, --help             this text
 
 Unrecognized arguments exit 2.
@@ -785,6 +789,58 @@ capture_schema() {  # $1 = destination
   log "captured schema -> $out ($(wc -c <"$out" | tr -d ' ') bytes)"
 }
 
+# The corpus-local manifest is the FIRST candidate bti_perf_scan reads (ahead of the
+# committed one), so it is the corpus's authoritative provenance. It must never
+# describe bytes other than the ones sitting beside it.
+LOCAL_MANIFEST_NAME="manifest-bti-3234.json"
+# Presence of this key is what makes the marker below UNREADABLE as a manifest. The
+# harness refuses on the KEY, not on its value (bti_perf_scan::read_manifest_rows):
+# a field is observed or absent, and "in progress" is not a row count.
+IN_PROGRESS_KEY="generation_in_progress"
+
+# Replace the corpus-local manifest with an IN-PROGRESS marker BEFORE the published
+# corpus is mutated (roborev #3234 M2).
+#
+# publish() replaced/pruned the SSTable dir and only then, several steps later, wrote
+# the manifest — so a failure in ANY of the steps between (the file-level asserts, the
+# sstabledump goldens, the sstablemetadata readback, the manifest write itself) left
+# the PREVIOUS run's manifest sitting beside the NEW corpus, in the exact path
+# bti_perf_scan treats as most-specific-and-authoritative. That manifest is
+# syntactically perfect and describes different bytes: row count, sha256s, generation
+# list and sstable_dir all belong to the corpus that was just deleted. Nothing
+# downstream could detect it.
+#
+# So the authoritative position is vacated first and made FAIL-CLOSED: the old
+# manifest is moved aside for forensics under a name the harness never looks for, and
+# a marker carrying $IN_PROGRESS_KEY (and deliberately NO keyspace/table/row count)
+# takes its place. A run that dies anywhere after this point therefore leaves a
+# corpus whose provenance says "generation did not finish", and the next harness run
+# REFUSES (exit 8) instead of reading stale numbers. write_manifest() ends the window
+# by renaming the finished manifest over the marker in one atomic step.
+quarantine_local_manifest() {
+  local m="$OUT/$LOCAL_MANIFEST_NAME" stamp aside
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  if [ -e "$m" ]; then
+    aside="$m.superseded-$stamp"
+    mv -f -- "$m" "$aside" 2>/dev/null || $SUDO mv -f -- "$m" "$aside" \
+      || die "cannot move the previous corpus manifest aside ($m -> $aside).
+       It describes the corpus that is about to be REPLACED, so leaving it in place
+       would publish stale provenance beside new bytes."
+    log "[publish] previous corpus manifest moved aside -> $(basename "$aside")"
+  fi
+  cat >"$m" <<EOF || die "cannot write the in-progress manifest marker $m"
+{
+  "issue": 3234,
+  "$IN_PROGRESS_KEY": true,
+  "started_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "note": "A corpus generation is in progress (or FAILED) in this directory. This file is a MARKER, not a manifest: it carries no keyspace, table or row count, so any consumer that reads corpus provenance from it must refuse rather than measure. gen-perf-corpus-bti.sh writes it before it mutates the published SSTable directory and replaces it with the real manifest atomically on success (roborev #3234 M2).",
+  "if_you_are_seeing_this": "the generation did not reach write_manifest. Re-run: bash test-data/scripts/gen-perf-corpus-bti.sh --out $OUT --keyspace $KS --table $TBL",
+  "previous_manifest_if_any": "$LOCAL_MANIFEST_NAME.superseded-*"
+}
+EOF
+  log "[publish] authoritative manifest position now holds an IN-PROGRESS marker"
+}
+
 CONTAINER_SSTABLE_DIR=""
 DEST=""
 publish() {
@@ -797,6 +853,9 @@ publish() {
   [ -d "$host_dir" ] || die "host bind-mount dir missing: $host_dir"
   DEST="$OUT/sstables/$KS/$name"
   mkdir -p "$OUT/sstables/$KS"
+  # BEFORE the first mutation of the published corpus, and before the prune: from
+  # here on the old manifest cannot describe what is on disk (roborev #3234 M2).
+  quarantine_local_manifest
   if [ "$PRUNE_STALE" = 1 ]; then prune_stale_table_dirs "$name"; fi
   assert_under_out "$DEST"
   $SUDO rm -rf -- "$DEST"
@@ -877,6 +936,11 @@ write_manifest() {
   local yaml_file="$WORK/yaml-verified.txt"
   printf '%s\n' "$YAML_VERIFIED" >"$yaml_file"
   local mode="$RUN_MODE"
+  # Written to a sibling temp and RENAMED into place, so the authoritative path only
+  # ever holds the in-progress marker or a COMPLETE manifest — never a half-written
+  # one (roborev #3234 M2). Same directory, so the rename is atomic.
+  local final="$OUT/$LOCAL_MANIFEST_NAME" staged="$OUT/.$LOCAL_MANIFEST_NAME.staged.$$"
+  rm -f -- "$staged"
   python3 "$MANIFEST_PY" \
     --corpus-root "$OUT" --keyspace "$KS" --table "$TBL" \
     --sstable-dir "$DEST" --image "$IMAGE" --docker "$DOCKER" \
@@ -885,13 +949,22 @@ write_manifest() {
     --mode "$mode" --row-plan "$PLAN" --yaml-verified "$yaml_file" \
     --min-data-db-floor "$MIN_DATA_DB_BYTES" \
     ${DUMPED[@]+"${DUMPED[@]/#/--dumped=}"} \
-    --out "$OUT/manifest-bti-3234.json" \
-    || die "manifest generation failed"
+    --out "$staged" \
+    || { rm -f -- "$staged"; die "manifest generation failed (the corpus keeps its
+       IN-PROGRESS marker, so no consumer can read provenance for it)"; }
+  [ -s "$staged" ] || { rm -f -- "$staged"; die "the manifest writer produced an EMPTY
+       $staged — refusing to publish it"; }
+  mv -f -- "$staged" "$final" \
+    || { rm -f -- "$staged"; die "cannot rename $staged -> $final"; }
+  log "manifest published (atomically): $final"
   if [ -n "$MANIFEST_OUT" ]; then
-    cp "$OUT/manifest-bti-3234.json" "$MANIFEST_OUT"
+    # Same discipline for the second destination: copy to a sibling temp, then rename.
+    local copy_tmp="$MANIFEST_OUT.staged.$$"
+    cp "$final" "$copy_tmp" && mv -f -- "$copy_tmp" "$MANIFEST_OUT" \
+      || { rm -f -- "$copy_tmp"; die "cannot publish the manifest copy to $MANIFEST_OUT"; }
     log "manifest ALSO copied to: $MANIFEST_OUT"
   else
-    log "manifest written only inside the corpus ($OUT/manifest-bti-3234.json);"
+    log "manifest written only inside the corpus ($final);"
     log "  pass --publish-manifest (production runs only) to replace $COMMITTED_MANIFEST"
   fi
 }
@@ -930,11 +1003,28 @@ if [ "$VERIFY_ONLY" = 1 ]; then
   found=("$ks_dir/$TBL"-*)
   shopt -u nullglob
   [ ${#found[@]} -ge 1 ] || die "no $TBL-<uuid> dir under $ks_dir"
+  # An AMBIGUOUS root is a hard failure, not a per-dir loop (roborev #3234 M1). This
+  # used to verify each matching dir INDEPENDENTLY and then print one VERIFY-OK, so a
+  # root left holding several generations by --no-prune passed while the SSTable
+  # count in the manifest described only one of them. That matters beyond tidiness: a
+  # consumer scanning the discoverable tree sees the UNION, so the generation count —
+  # which selects the scan route and is what any read-path figure is attributed to —
+  # silently changes with no assertion anywhere disagreeing.
+  if [ ${#found[@]} -gt 1 ]; then
+    die "AMBIGUOUS corpus root: ${#found[@]} '$TBL-<uuid>' directories under $ks_dir:
+       $(printf '%s ' "${found[@]##*/}")
+       A measurement corpus must hold exactly ONE, because the generation count
+       selects the scan route. Remove the stale ones (a normal run prunes them; this
+       state comes from --no-prune), or point --out at a dedicated directory."
+  fi
   for d in "${found[@]}"; do
     log "verifying $d ..."
     assert_corpus "$d"
   done
-  echo "VERIFY-OK corpus=$OUT keyspace=$KS table=$TBL sstables=$ASSERT_SSTABLE_COUNT largest_data_db=$ASSERT_MAX_DATA"
+  # corpus_dirs is reported (always 1 — the ambiguity check above is what makes it so)
+  # so a pasted VERIFY-OK line SHOWS that the check ran. Appended LAST so it breaks no
+  # existing grep.
+  echo "VERIFY-OK corpus=$OUT keyspace=$KS table=$TBL sstables=$ASSERT_SSTABLE_COUNT largest_data_db=$ASSERT_MAX_DATA corpus_dirs=${#found[@]}"
   log "Use with: export CQLITE_DATASETS_ROOT=$OUT"
   exit 0
 fi
