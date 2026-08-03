@@ -21,9 +21,10 @@ path, so a stale sha256 cannot survive a regeneration.
 * the rows-per-partition distribution from the row driver's plan records, which
   are counted while the CSV is written (observed, not requested).
 
-FAIL-CLOSED: a missing ``totalRows``, a non-``da`` descriptor, an empty SSTable
-list, or a plan-vs-Statistics.db row-count disagreement is an error -- never a
-fabricated 0 and never a silently-partial manifest.
+FAIL-CLOSED: a missing ``totalRows``, an unreadable ``Partition Size`` histogram, a
+non-``da`` descriptor, an empty or unreadable row plan, an empty SSTable list, or a
+plan-vs-``Statistics.db`` disagreement on EITHER the row count or the partition
+count is an error -- never a fabricated 0 and never a silently-partial manifest.
 
 Usage:
     write-perf-corpus-bti-manifest.py --corpus-root DIR --keyspace KS --table T \
@@ -114,6 +115,12 @@ def sstable_metadata(data_db: str, image: str, docker: list[str], mem: str) -> d
 
     # Partition count = the sum of the "Partition Size:" histogram bucket counts,
     # rendered as "   <size> (<human>) | <count> (<pct>) OOO..." under that header.
+    # FAIL-CLOSED (issue #3234 review): a histogram this parser cannot read is an
+    # UNOBSERVED counter, and an unobserved counter is an error — never a 0. The
+    # previous shape returned None here and the caller coerced it with `or 0`, which
+    # would have published "partitions: 0" (or a partial sum) as measured
+    # provenance. CLAUDE.md: "a counter not observed is an error, never a
+    # fabricated 0".
     partitions = None
     in_hist = False
     for line in text.splitlines():
@@ -126,6 +133,12 @@ def sstable_metadata(data_db: str, image: str, docker: list[str], mem: str) -> d
             bucket = re.match(r"\s*\d+.*?\|\s*(\d+)\s", line)
             if bucket:
                 partitions = (partitions or 0) + int(bucket.group(1))
+    if partitions is None:
+        raise SystemExit(
+            "could not read the 'Partition Size:' histogram from sstablemetadata for "
+            f"{data_db} — refusing to publish an unobserved partition count\n"
+            f"  exit={proc.returncode}\n  stderr={proc.stderr.strip()[:2000]}"
+        )
     return {
         "source": f"cassandra sstablemetadata ({image}) reading Statistics.db",
         "total_rows": int(rows.group(1)),
@@ -228,18 +241,48 @@ def sstable_record(sstable_dir: str, basename: str, image: str, docker: list[str
     }
 
 
+PLAN_RECORD_FIELDS = (
+    "chunk", "seed_material", "rows", "partitions", "pk_min", "pk_max",
+    "rows_per_partition_histogram", "buckets_per_partition_histogram",
+)
+
+
 def aggregate_row_plan(path: str) -> dict:
-    """Aggregate the row driver's per-chunk plan records (observed counts)."""
+    """Aggregate the row driver's per-chunk plan records (observed counts).
+
+    Every malformed-input path is an actionable ``SystemExit``: a truncated or
+    hand-edited plan line must name the file and the line number, not surface as a
+    bare ``JSONDecodeError``/``KeyError`` traceback from inside the aggregation.
+    """
     widths: Counter[int] = Counter()
     buckets: Counter[int] = Counter()
     rows = partitions = 0
     chunks = []
     with open(path) as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    f"row plan {path}:{lineno} is not valid JSON ({exc}) — refusing to "
+                    "write a manifest from an unreadable plan"
+                ) from None
+            if not isinstance(rec, dict):
+                raise SystemExit(
+                    f"row plan {path}:{lineno} is not a JSON object — refusing to write "
+                    "a manifest from an unreadable plan"
+                )
+            absent = [k for k in PLAN_RECORD_FIELDS if k not in rec]
+            if absent:
+                raise SystemExit(
+                    f"row plan {path}:{lineno} is missing field(s) {absent} — the row "
+                    "driver (gen-perf-corpus-bti-rows.py) writes all of "
+                    f"{list(PLAN_RECORD_FIELDS)}; refusing to write a manifest from a "
+                    "partial plan record"
+                )
             rows += rec["rows"]
             partitions += rec["partitions"]
             for w, c in rec["rows_per_partition_histogram"].items():
@@ -256,6 +299,11 @@ def aggregate_row_plan(path: str) -> dict:
             })
     if not chunks:
         raise SystemExit(f"row plan {path} is empty — refusing to write a manifest")
+    if rows < 1 or partitions < 1:
+        raise SystemExit(
+            f"row plan {path} accounts for {rows} row(s) in {partitions} partition(s) — "
+            "a plan that wrote nothing cannot describe a corpus"
+        )
     ordered = sorted(widths)
     return {
         "source": (
@@ -346,14 +394,41 @@ def main() -> int:
     plan = aggregate_row_plan(args.row_plan)
 
     observed_rows = sum(s["rows"] for s in sstables)
-    observed_partitions = sum(
-        s["statistics"]["partition_count"] or 0 for s in sstables
-    )
+    # FAIL-CLOSED on an unobserved partition count. `sstable_metadata` already
+    # refuses to return None, so this is the second half of the same contract: no
+    # arithmetic here may coerce a missing measurement into a number (the previous
+    # `or 0` did exactly that, publishing FALSE partition provenance).
+    unobserved = [
+        s["sstable_basename"] for s in sstables
+        if not isinstance(s["statistics"]["partition_count"], int)
+    ]
+    if unobserved:
+        raise SystemExit(
+            f"partition count was NOT OBSERVED for {unobserved} — refusing to write a "
+            "manifest that reports a fabricated partition count"
+        )
+    observed_partitions = sum(s["statistics"]["partition_count"] for s in sstables)
     if observed_rows != plan["rows"]:
         raise SystemExit(
             f"row-count cross-check FAILED: the row driver wrote {plan['rows']} rows, "
             f"Statistics.db across {len(sstables)} SSTable(s) accounts for "
             f"{observed_rows} — the load was partial or something was compacted away"
+        )
+    # Partitions cross-check, same shape as the rows one. Sound as an EQUALITY: the
+    # row driver gives chunk N the partition-key range [N*PK_STRIDE, ...), so no two
+    # chunks share a partition and no partition can be counted twice; and the
+    # Partition Size histogram's BUCKET BOUNDARIES are estimated while its bucket
+    # COUNTS are exact, so the sum is the exact partition count of that SSTable.
+    # Verified against the production corpus: 17299 planned == 17299 observed over 27
+    # SSTables. A disagreement means a partial load, an unexpected compaction, or a
+    # plan that does not describe these bytes.
+    if observed_partitions != plan["partitions"]:
+        raise SystemExit(
+            f"partition-count cross-check FAILED: the row driver wrote "
+            f"{plan['partitions']} partitions, the Statistics.db partition-size "
+            f"histograms across {len(sstables)} SSTable(s) account for "
+            f"{observed_partitions} — the load was partial, something was compacted "
+            "away, or this row plan does not describe these SSTables"
         )
 
     yaml_verified = None
@@ -467,7 +542,11 @@ def main() -> int:
                 "Cassandra sstablemetadata totalRows (Statistics.db) per SSTable; "
                 "fail-closed, never a fabricated 0"
             ),
-            "partitions": "sstablemetadata Partition Size histogram bucket counts",
+            "partitions": (
+                "sstablemetadata Partition Size histogram bucket counts, cross-checked "
+                "against the row driver's planned partition count; fail-closed, never a "
+                "fabricated 0"
+            ),
             "rows_per_partition": "row driver plan records, counted while writing the CSV",
             "toc": "read from each SSTable's own TOC.txt",
             "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)",
@@ -501,8 +580,14 @@ def main() -> int:
         "row_count_cross_check": {
             "row_driver_rows": plan["rows"],
             "statistics_db_rows": observed_rows,
+            "row_driver_partitions": plan["partitions"],
+            "statistics_db_partitions": observed_partitions,
             "agree": True,
-            "note": "fail-closed: a disagreement aborts before the manifest is written",
+            "note": (
+                "fail-closed: a rows OR partitions disagreement aborts before the "
+                "manifest is written, and an UNOBSERVED partition count is an error "
+                "rather than a 0"
+            ),
         },
     }
 
