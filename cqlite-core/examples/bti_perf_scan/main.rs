@@ -66,6 +66,19 @@
 //! banner in the result block and in the `RESULT:` line, so a measurement taken
 //! without its guards is self-identifying.
 //!
+//! There is a third fail-closed guard, and it is not about the row count at all: the
+//! **ingest scope** (`scope.rs`, roborev #3234 M1). The row-count assert cannot see a
+//! workload change — a retained `<table>-<uuid>` generation beside the measured one
+//! holds the SAME rows, so reconciliation yields the same count while the GENERATION
+//! COUNT (which selects the scan route) silently doubles. So ingestion is confined to
+//! the manifest's exact `tables[].sstable_dir`, an ambiguous root is refused
+//! (`OPEN_FAILED`), and the resolved directory + how it was chosen are printed as
+//! `ingest_scope:`.
+//!
+//! Module layout (split per the campsite rule, epic #1116): `main.rs` = flags, the
+//! timed scan and the result block; `manifest.rs` = the authoritative row count and the
+//! documented scope, read fail-closed; `scope.rs` = which directory may be ingested.
+//!
 //! ## Containment
 //!
 //! The corpus is multi-GB. ALWAYS run it under
@@ -137,38 +150,13 @@ mod exit {
     pub const MANIFEST_UNREADABLE: i32 = 8;
 }
 
-/// How the measured row count is verified. ON by default (`Manifest`).
+/// The authoritative row count + the documented ingest scope (fail-closed manifest
+/// reading, roborev #3234 L3/M2).
 #[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
-enum RowsAssert {
-    /// Read from a manifest: `(rows, provenance)`.
-    Manifest(u64, String),
-    /// Operator-supplied `--expect-rows N`.
-    Explicit(u64),
-    /// Operator opted out with `--no-expect-rows`.
-    Disabled,
-}
-
+mod manifest;
+/// The ONE corpus directory this run may ingest (roborev #3234 M1).
 #[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
-impl RowsAssert {
-    fn expected(&self) -> Option<u64> {
-        match self {
-            RowsAssert::Manifest(n, _) | RowsAssert::Explicit(n) => Some(*n),
-            RowsAssert::Disabled => None,
-        }
-    }
-
-    fn describe(&self) -> String {
-        match self {
-            RowsAssert::Manifest(n, src) => format!("{n} (authoritative: {src})"),
-            RowsAssert::Explicit(n) => {
-                format!("{n} (--expect-rows, OPERATOR-SUPPLIED — not the committed manifest)")
-            }
-            RowsAssert::Disabled => "*** DISABLED (--no-expect-rows) — a SILENTLY TRUNCATED scan \
-                                     CANNOT be detected; this measurement is unverified ***"
-                .to_string(),
-        }
-    }
-}
+mod scope;
 
 #[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 struct Args {
@@ -299,155 +287,6 @@ fn parse_args() -> std::result::Result<Args, String> {
     })
 }
 
-/// Candidate manifests, most specific first: the corpus's own manifest (written by
-/// the generator for *these* bytes), then the committed one resolved from the
-/// checkout this binary was built in, then a CWD-relative fallback.
-#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
-fn manifest_candidates(corpus: &std::path::Path) -> Vec<std::path::PathBuf> {
-    vec![
-        corpus.join("manifest-bti-3234.json"),
-        std::path::PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../test-data/perf-corpus-bti-manifest.json"
-        )),
-        std::path::PathBuf::from("test-data/perf-corpus-bti-manifest.json"),
-    ]
-}
-
-/// Read the authoritative row count out of a #3234 corpus manifest.
-///
-/// Returns `(keyspace, table, rows)`. Every failure is an `Err`: a manifest that
-/// is present but unreadable must NEVER degrade into "assert off" (rust-reviewer
-/// B1) — that is exactly how a truncated scan measures as a PASS.
-#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
-fn read_manifest_rows(
-    path: &std::path::Path,
-) -> std::result::Result<(String, String, u64), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("{}: not valid JSON: {e}", path.display()))?;
-
-    let string_field = |name: &str| -> std::result::Result<String, String> {
-        json.get(name)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("{}: missing string field `{name}`", path.display()))
-    };
-    let keyspace = string_field("keyspace")?;
-    let table = string_field("table")?;
-
-    // `rows_per_partition.rows` is the count OBSERVED while writing the CSV chunks
-    // (the manifest records its own provenance as "observed, not requested"), which
-    // is why it — and not `row_driver_config.rows_requested` — is authoritative.
-    let rows = json
-        .get("rows_per_partition")
-        .and_then(|v| v.get("rows"))
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| {
-            format!(
-                "{}: missing unsigned-integer field `rows_per_partition.rows`",
-                path.display()
-            )
-        })?;
-    if rows == 0 {
-        return Err(format!(
-            "{}: `rows_per_partition.rows` is 0 — a manifest describing an empty corpus \
-             cannot verify a measurement",
-            path.display()
-        ));
-    }
-
-    // The production manifest also records the generator's fail-closed cross-check
-    // (row-driver plan vs each `Statistics.db`). If it is present, the two sides must
-    // agree with each other AND with the count we are about to assert on.
-    //
-    // This reads the four NUMBERS. It used to read an `agree: true` flag beside them,
-    // which the writer emitted as a literal — i.e. it trusted a claim where the evidence
-    // for that claim was in the same object. The flag is gone from the manifest
-    // (issue #3234 review round 10: a field is observed or absent), and comparing the
-    // numbers is a strictly stronger check than believing the flag was.
-    if let Some(x) = json.get("row_count_cross_check") {
-        for (a, b) in [
-            ("row_driver_rows", "statistics_db_rows"),
-            ("row_driver_partitions", "statistics_db_partitions"),
-        ] {
-            match (
-                x.get(a).and_then(|v| v.as_u64()),
-                x.get(b).and_then(|v| v.as_u64()),
-            ) {
-                (Some(va), Some(vb)) if va != vb => {
-                    return Err(format!(
-                        "{}: `row_count_cross_check.{a}` = {va} disagrees with `{b}` = {vb} — \
-                         the manifest itself reports a cross-check disagreement",
-                        path.display()
-                    ))
-                }
-                _ => {}
-            }
-        }
-        for name in ["row_driver_rows", "statistics_db_rows"] {
-            if let Some(v) = x.get(name).and_then(|v| v.as_u64()) {
-                if v != rows {
-                    return Err(format!(
-                        "{}: `row_count_cross_check.{name}` = {v} disagrees with \
-                         `rows_per_partition.rows` = {rows}",
-                        path.display()
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok((keyspace, table, rows))
-}
-
-/// Resolve the row-count assert, fail-closed. `Err(message)` => exit `MANIFEST_UNREADABLE`.
-#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
-fn resolve_rows_assert(args: &Args) -> std::result::Result<RowsAssert, String> {
-    if args.expect_rows_off {
-        return Ok(RowsAssert::Disabled);
-    }
-    if let Some(n) = args.expect_rows {
-        return Ok(RowsAssert::Explicit(n));
-    }
-
-    let candidates: Vec<std::path::PathBuf> = match &args.manifest {
-        Some(p) => vec![p.clone()],
-        None => manifest_candidates(&args.corpus),
-    };
-    // The FIRST candidate that exists is authoritative. A present-but-broken
-    // manifest is an error, never a reason to fall through to another one.
-    let found = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
-        format!(
-            "no #3234 corpus manifest found, so the authoritative row count is unknown and a \
-             truncated scan could not be detected.\n  looked at:\n{}\n  \
-             remedy: pass --manifest PATH, or --expect-rows N, or --no-expect-rows to measure \
-             without the truncation guard (reported loudly).",
-            candidates
-                .iter()
-                .map(|p| format!("    {}", p.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    })?;
-
-    let (ks, tbl, rows) = read_manifest_rows(found)?;
-    if ks != args.keyspace || tbl != args.table {
-        return Err(format!(
-            "{} describes {ks}.{tbl}, but this run scans {}.{} — its row count is not \
-             authoritative here.\n  remedy: pass --manifest PATH for the right corpus, or \
-             --expect-rows N, or --no-expect-rows.",
-            found.display(),
-            args.keyspace,
-            args.table
-        ));
-    }
-    Ok(RowsAssert::Manifest(
-        rows,
-        format!("{} rows_per_partition.rows", found.display()),
-    ))
-}
-
 /// Rows/second as text. Never prints `inf`/`NaN`: a window at or below the clock
 /// resolution has no meaningful rate (rust-reviewer B2).
 #[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
@@ -471,6 +310,7 @@ fn rate(rows: u64, secs: f64) -> Option<f64> {
 fn real_main() -> i32 {
     use cqlite_core::ingestion::{ingest, IngestionConfig};
     use cqlite_core::query::result::StreamingConfig;
+    use manifest::{resolve_rows_assert, RowsAssert};
 
     let args = match parse_args() {
         Ok(a) => a,
@@ -481,8 +321,9 @@ fn real_main() -> i32 {
     };
 
     // Resolve the row-count assert BEFORE spending minutes on a scan whose result
-    // could not be verified anyway.
-    let rows_assert = match resolve_rows_assert(&args) {
+    // could not be verified anyway. It also yields the ingest scope the manifest
+    // DOCUMENTS, which is what the scan is then confined to (roborev #3234 M1).
+    let (rows_assert, documented_scope) = match resolve_rows_assert(&args) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -490,9 +331,11 @@ fn real_main() -> i32 {
         }
     };
 
-    let data_dir = args.corpus.join("sstables");
     let schema = args.corpus.join("schema.cql");
-    for (label, path) in [("sstables dir", &data_dir), ("schema.cql", &schema)] {
+    for (label, path) in [
+        ("sstables dir", &args.corpus.join("sstables")),
+        ("schema.cql", &schema),
+    ] {
         if !path.exists() {
             eprintln!(
                 "error: {label} not found at {}\n  \
@@ -503,6 +346,22 @@ fn real_main() -> i32 {
             return exit::OPEN_FAILED;
         }
     }
+
+    // The ONE directory this run may ingest, resolved and NAMED before anything opens:
+    // the manifest's exact `sstable_dir` when it documents one, else the sole
+    // `<table>-<uuid>` directory — an ambiguous root is refused, never silently unioned.
+    let scope = match scope::resolve(
+        &args.corpus,
+        &args.keyspace,
+        &args.table,
+        documented_scope.as_ref(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return exit::OPEN_FAILED;
+        }
+    };
 
     let qualified = format!("{}.{}", args.keyspace, args.table);
     let sql = format!("SELECT * FROM {qualified}");
@@ -517,28 +376,41 @@ fn real_main() -> i32 {
 
     let cfg = IngestionConfig {
         schema_paths: vec![schema],
-        data_dir: data_dir.clone(),
+        data_dir: scope.data_dir.clone(),
         version_hint: Some("5.0".to_string()),
         core_config: cqlite_core::Config::default(),
-        table_directory_filter: Some(format!("/{}/{}", args.keyspace, args.table)),
+        table_directory_filter: Some(scope.filter.clone()),
     };
 
     let open_start = std::time::Instant::now();
     let ingested = match rt.block_on(ingest(cfg)) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("error: ingest of {} failed: {e}", data_dir.display());
+            eprintln!("error: ingest of {} failed: {e}", scope.data_dir.display());
             return exit::OPEN_FAILED;
         }
     };
     let open_elapsed = open_start.elapsed();
     let db = ingested.database;
-    let generations = ingested.discovery_summary.sstables_found;
+    // The generation count is the `*-Data.db` count of the SCOPED directory — the
+    // readers the Database was actually built from. `sstables_found` is discovery's
+    // UNFILTERED total over the whole tree, so reporting that as `generations` would
+    // misattribute the route the moment anything else sat in the tree (roborev #3234 M1).
+    let generations = scope.generations;
+    let discovered_total = ingested.discovery_summary.sstables_found;
     println!(
         "open: {generations} sstables discovered in {:.3} s ({})",
         open_elapsed.as_secs_f64(),
-        data_dir.display()
+        scope.dir.display()
     );
+    println!("ingest_scope: {}", scope.provenance);
+    if discovered_total > generations {
+        println!(
+            "note: {} sstable(s) under {} are OUTSIDE this scope and were NOT ingested",
+            discovered_total - generations,
+            scope.data_dir.display()
+        );
+    }
 
     // One streaming scan to exhaustion. Returns the row count. Rows are dropped as
     // they arrive, so THIS consumer holds only the streaming window — but see the
@@ -662,6 +534,8 @@ fn real_main() -> i32 {
         ),
     }
     println!("generations:      {generations}");
+    // The workload travels WITH the number: which directory, decided how.
+    println!("ingest_scope:     {}", scope.provenance);
     println!("schema_resolved:  {schema_resolved}");
     println!("access_path:      {access_path}");
     println!("storage_route:    {storage_route}");

@@ -163,7 +163,7 @@ a test with no Cassandra. `--smoke` overrides only the DEFAULTS: an explicit `--
   ran on the same bytes; catch silent corruption or an accidental replacement), **not** a regeneration
   check. A sha mismatch after regenerating is expected, not a defect.
 
-**Timing a sustained warm scan over it** — `cqlite-core/examples/bti_perf_scan.rs` (committed, so the
+**Timing a sustained warm scan over it** — `cqlite-core/examples/bti_perf_scan/` (committed, so the
 measurement is reproducible). It drives `Database::execute_streaming` to exhaustion, not the Flight
 `do_get` plane: per issue #3233 BTI is denied the Flight bypass arm, and a criterion bench would spend
 minutes of warm-up + samples to report a distribution where a profile needs one sustained window.

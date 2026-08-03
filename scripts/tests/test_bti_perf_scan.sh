@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Self-test for the issue-#3234 AC3 warm-scan harness
-# (cqlite-core/examples/bti_perf_scan.rs).
+# (cqlite-core/examples/bti_perf_scan/ — main.rs + manifest.rs + scope.rs).
 #
 # WHY THIS EXISTS
 #

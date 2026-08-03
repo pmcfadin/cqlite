@@ -274,7 +274,7 @@
 #                      both row-count cross-checks FIRING on injected disagreement.
 #                      Also runs scripts/tests/test_bti_perf_scan.sh (#3234), the
 #                      automated executor for the AC3 warm-scan harness
-#                      (cqlite-core/examples/bti_perf_scan.rs): it builds the example
+#                      (cqlite-core/examples/bti_perf_scan/): it builds the example
 #                      and asserts its EXIT CODE for every documented failure mode
 #                      (usage incl. `--min-seconds nan`, corpus-absent, zero-rows,
 #                      row-count mismatch = the silent-truncation guard, sub-floor
@@ -5403,7 +5403,7 @@ run_tooling_tests() {
   fi
 
   # AC3 warm-scan harness guard (#3234): the automated executor for
-  # cqlite-core/examples/bti_perf_scan.rs, the instrument every #3234 throughput
+  # cqlite-core/examples/bti_perf_scan/, the instrument every #3234 throughput
   # number comes from. Its guards had never been OBSERVED to fire, and its worst
   # failure mode is silent — a TRUNCATED scan reporting `RESULT: PASS` with a short
   # row count. This drives the real binary and asserts its exit code for each
