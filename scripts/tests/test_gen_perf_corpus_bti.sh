@@ -101,9 +101,9 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # the EXACT full-suite pass count (not a slack lower bound), so deleting or
 # short-circuiting any single case drops `passes` below it and reds the suite. Proven
 # by mutation, not by inspection (see the header note on the roborev M1 finding).
-MIN_CASES=141
-SKIP_PY_CASES=53
-SKIP_E2E_CASES=16
+MIN_CASES=149
+SKIP_PY_CASES=59
+SKIP_E2E_CASES=22
 
 fails=0
 passes=0
@@ -562,6 +562,31 @@ if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out" && grep -q "largest_data_db
   pass "--verify-only accepts a well-formed da corpus (positive control)"
 else
   fail "--verify-only on a good corpus: expected VERIFY-OK (rc=$rc, out: $out)"
+fi
+# The ambiguity check is REPORTED on the success line, so a pasted VERIFY-OK shows it ran.
+if grep -q "corpus_dirs=1" <<<"$out"; then
+  pass "VERIFY-OK reports the corpus-dir count the ambiguity check counted"
+else
+  fail "expected corpus_dirs=1 on the VERIFY-OK line; out: $out"
+fi
+
+# AMBIGUOUS root (roborev #3234 M1). --no-prune leaves several <table>-<uuid> dirs in
+# the DISCOVERABLE tree. This used to verify each one independently and still print
+# VERIFY-OK, while the SSTable count it reported described only the last -- and a
+# consumer scanning that tree sees the UNION, so the generation count (which selects
+# the scan route and is what any read-path figure is attributed to) silently changed
+# with no assertion anywhere disagreeing. Both dirs here are individually VALID, which
+# is the point: nothing else in the verifier can see the problem.
+root="$TMP/ambiguous"
+make_corpus "$root/sstables/perf_bti/wide_multiclustering-4123456789abcdef0123456789abcdef" 9437184 4096
+make_corpus "$root/sstables/perf_bti/wide_multiclustering-5123456789abcdef0123456789abcdef" 9437184 4096
+out=$(verify "$root"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "AMBIGUOUS corpus root: 2 " <<<"$out" \
+   && grep -q "generation count" <<<"$out" && grep -q -- "--no-prune" <<<"$out" \
+   && ! grep -q "VERIFY-OK" <<<"$out"; then
+  pass "--verify-only HARD-FAILS on an ambiguous corpus root and prints no VERIFY-OK"
+else
+  fail "ambiguous-root case: expected a hard failure naming --no-prune (rc=$rc, out: $out)"
 fi
 
 # AC1 negative control: an `nb-*` descriptor is the SILENT failure mode of a
@@ -1556,6 +1581,19 @@ PY
     fail "data_db_sha256_also_match_at: $out"
   fi
 
+  # "The failed run published no provenance", asserted the way it has to be asserted
+  # after roborev #3234 M2. The corpus-local manifest path is the FIRST candidate
+  # bti_perf_scan reads, so what matters is not that the path is EMPTY but that nothing
+  # AUTHORITATIVE is at it: either no file, or the IN-PROGRESS marker the generator
+  # installs before it mutates the published corpus. A file carrying `keyspace` there is
+  # a readable manifest and therefore a failure -- which is exactly the old defect (the
+  # PREVIOUS run's manifest surviving beside the new corpus).
+  no_authoritative_manifest() { # no_authoritative_manifest <corpus-root>
+    local m="$1/manifest-bti-3234.json"
+    [ -e "$m" ] || return 0
+    grep -q '"generation_in_progress"' "$m" && ! grep -q '"keyspace"' "$m"
+  }
+
   # ------------------------------- end-to-end through the stub `docker` ---------
   # The generator's two row-count cross-checks and the manifest writer's HAPPY PATH
   # only execute when a container answers. They are exercised here against
@@ -1582,9 +1620,12 @@ SUDOEOF
   # runs. The ONE case that must exercise the DEFAULT resolution clears this array
   # (see the smoke-default case).
   E2E_MANIFEST_ARGS=(--manifest-out "")
+  # E2E_ROOT_NAME lets a case run into a root ANOTHER case already populated (the #3234
+  # M2 stale-provenance control needs a second run over the same published corpus) while
+  # keeping its own log.
   e2e_run() { # e2e_run <name> [extra generator args...]; env prefixes are honored
     local name="$1"; shift
-    E2E_ROOT="$TMP/e2e-$name"
+    E2E_ROOT="$TMP/e2e-${E2E_ROOT_NAME:-$name}"
     E2E_LOG="$TMP/e2e-$name.log"
     cp "$YAML_FIXTURE" "$TMP/yaml-$name.yaml"
     DOCKER="python3 $STUB" SUDO="$SUDO_STUB" \
@@ -1742,7 +1783,7 @@ PY
     # ---- direction 2: each cross-check must FAIL when the two sides disagree ----
     STUB_IMPORT_SHORT=1 e2e_run import-short; rc=$?
     if [ "$rc" -ne 0 ] && grep -q "partial load" "$TMP/e2e-import-short.log" \
-       && [ ! -f "$TMP/e2e-import-short/manifest-bti-3234.json" ]; then
+       && no_authoritative_manifest "$TMP/e2e-import-short"; then
       pass "COPY importing one row fewer than the CSV is a HARD failure, no manifest"
     else
       fail "import-short case: expected a partial-load failure (rc=$rc, tail: $(tail -6 "$TMP/e2e-import-short.log"))"
@@ -1750,7 +1791,7 @@ PY
 
     STUB_META_SHORT=1 e2e_run meta-short; rc=$?
     if [ "$rc" -ne 0 ] && grep -q "row-count mismatch for" "$TMP/e2e-meta-short.log" \
-       && [ ! -f "$TMP/e2e-meta-short/manifest-bti-3234.json" ]; then
+       && no_authoritative_manifest "$TMP/e2e-meta-short"; then
       pass "Statistics.db totalRows != sstabledump rows is a HARD failure, no manifest"
     else
       fail "meta-short case: expected a row-count mismatch (rc=$rc, tail: $(tail -6 "$TMP/e2e-meta-short.log"))"
@@ -1760,7 +1801,7 @@ PY
     # sstabledump check cannot pre-empt them).
     STUB_ROWS_DELTA=1 e2e_run rows-delta --dump-generations 0; rc=$?
     if [ "$rc" -ne 0 ] && grep -q "row-count cross-check FAILED" "$TMP/e2e-rows-delta.log" \
-       && [ ! -f "$TMP/e2e-rows-delta/manifest-bti-3234.json" ]; then
+       && no_authoritative_manifest "$TMP/e2e-rows-delta"; then
       pass "manifest writer HARD-FAILS when Statistics.db rows != the row plan"
     else
       fail "rows-delta case: expected 'row-count cross-check FAILED' (rc=$rc, tail: $(tail -6 "$TMP/e2e-rows-delta.log"))"
@@ -1769,7 +1810,7 @@ PY
     STUB_PARTITIONS_DELTA=1 e2e_run parts-delta --dump-generations 0; rc=$?
     if [ "$rc" -ne 0 ] \
        && grep -q "partition-count cross-check FAILED" "$TMP/e2e-parts-delta.log" \
-       && [ ! -f "$TMP/e2e-parts-delta/manifest-bti-3234.json" ]; then
+       && no_authoritative_manifest "$TMP/e2e-parts-delta"; then
       pass "manifest writer HARD-FAILS when Statistics.db partitions != the row plan"
     else
       fail "parts-delta case: expected 'partition-count cross-check FAILED' (rc=$rc, tail: $(tail -6 "$TMP/e2e-parts-delta.log"))"
@@ -1780,7 +1821,7 @@ PY
     STUB_NO_HISTOGRAM=1 e2e_run no-hist --dump-generations 0; rc=$?
     if [ "$rc" -ne 0 ] \
        && grep -q "refusing to publish an unobserved partition count" "$TMP/e2e-no-hist.log" \
-       && [ ! -f "$TMP/e2e-no-hist/manifest-bti-3234.json" ]; then
+       && no_authoritative_manifest "$TMP/e2e-no-hist"; then
       pass "an unreadable Partition Size histogram is an ERROR, not a fabricated 0"
     else
       fail "no-histogram case: expected an unobserved-partition-count refusal (rc=$rc, tail: $(tail -6 "$TMP/e2e-no-hist.log"))"
@@ -1799,7 +1840,7 @@ PY
        && grep -q "sstablemetadata FAILED for" "$TMP/e2e-meta-exit.log" \
        && grep -q "exit 42" "$TMP/e2e-meta-exit.log" \
        && grep -q "refusing to read row/partition provenance" "$TMP/e2e-meta-exit.log" \
-       && [ ! -f "$TMP/e2e-meta-exit/manifest-bti-3234.json" ]; then
+       && no_authoritative_manifest "$TMP/e2e-meta-exit"; then
       pass "manifest writer HARD-FAILS on a nonzero sstablemetadata exit WITH valid output"
     else
       fail "meta-exit case: expected an exit-status refusal (rc=$rc, tail: $(tail -8 "$TMP/e2e-meta-exit.log"))"
@@ -1819,10 +1860,64 @@ PY
             "$TMP/e2e-meta-exit-golden.log" \
        && ! grep -q "refusing to read row/partition provenance" \
             "$TMP/e2e-meta-exit-golden.log" \
-       && [ ! -f "$TMP/e2e-meta-exit-golden/manifest-bti-3234.json" ]; then
+       && no_authoritative_manifest "$TMP/e2e-meta-exit-golden"; then
       pass "the generator's row-count cross-check refuses a nonzero sstablemetadata exit"
     else
       fail "meta-exit-golden case: expected a generator-side refusal (rc=$rc, tail: $(tail -8 "$TMP/e2e-meta-exit-golden.log"))"
+    fi
+
+    # ---- roborev #3234 M2: a FAILED regeneration must not leave the PREVIOUS -------
+    #      manifest beside the NEW corpus.
+    # The injected failure is deliberately one that fires AFTER the corpus is published
+    # (STUB_META_SHORT hits verify_dumped_row_counts, several steps past the prune +
+    # rm -rf + copy) and BEFORE the manifest write -- the exact window that used to
+    # leave a syntactically perfect manifest describing bytes that no longer exist.
+    # Direction 1: the corpus is regenerated successfully into a root, so a real,
+    # readable manifest is sitting there.
+    E2E_ROOT_NAME=staleman e2e_run staleman-ok; rc=$?
+    stale_root="$TMP/e2e-staleman"
+    stale_manifest="$stale_root/manifest-bti-3234.json"
+    if [ "$rc" -eq 0 ] && grep -q '"keyspace"' "$stale_manifest" 2>/dev/null; then
+      pass "M2 setup: a successful run leaves a readable manifest in the corpus"
+    else
+      fail "M2 setup: expected a readable manifest at $stale_manifest (rc=$rc, tail: $(tail -6 "$TMP/e2e-staleman-ok.log"))"
+    fi
+    stale_before="$(sha256sum "$stale_manifest" 2>/dev/null | cut -d' ' -f1)"
+    # Direction 2: regenerate the SAME root and fail after publish.
+    STUB_META_SHORT=1 E2E_ROOT_NAME=staleman e2e_run staleman-fail; rc=$?
+    if [ "$rc" -ne 0 ] && grep -q "row-count mismatch for" "$TMP/e2e-staleman-fail.log"; then
+      pass "M2: the second run fails AFTER the corpus was published (post-publish window)"
+    else
+      fail "M2: expected a post-publish failure (rc=$rc, tail: $(tail -6 "$TMP/e2e-staleman-fail.log"))"
+    fi
+    if no_authoritative_manifest "$stale_root"; then
+      pass "M2: the failed run leaves NO readable manifest beside the new corpus"
+    else
+      fail "M2: a readable manifest survived a failed regeneration at $stale_manifest -- \
+stale provenance in the authoritative position (sha $stale_before)"
+    fi
+    stale_aside="$(ls "$stale_root"/manifest-bti-3234.json.superseded-* 2>/dev/null | head -1)"
+    if [ -n "$stale_aside" ] \
+      && [ "$(sha256sum "$stale_aside" | cut -d' ' -f1)" = "$stale_before" ]; then
+      pass "M2: the previous manifest survives ONLY under a superseded-* name (forensics)"
+    else
+      fail "M2: expected the previous manifest moved aside as manifest-bti-3234.json.superseded-* \
+(got: ${stale_aside:-none})"
+    fi
+    if grep -q "authoritative manifest position now holds an IN-PROGRESS marker" \
+      "$TMP/e2e-staleman-fail.log" \
+      && grep -q "previous corpus manifest moved aside" "$TMP/e2e-staleman-fail.log"; then
+      pass "M2: the generator REPORTS the quarantine as it happens"
+    else
+      fail "M2: expected the quarantine to be logged (tail: $(tail -6 "$TMP/e2e-staleman-fail.log"))"
+    fi
+    # ...and the marker carries nothing a consumer could mistake for provenance.
+    if [ -f "$stale_manifest" ] \
+      && ! grep -qE '"(keyspace|table|rows_per_partition)"' "$stale_manifest" \
+      && grep -q '"generation_in_progress": true' "$stale_manifest"; then
+      pass "M2: the marker carries no keyspace/table/row count, only generation_in_progress"
+    else
+      fail "M2: the in-progress marker must carry no provenance fields (got: $(head -c 200 "$stale_manifest" 2>/dev/null))"
     fi
 
     # ---- roborev #3234 F2: a --smoke run with the DEFAULT manifest resolution -----
