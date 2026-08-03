@@ -49,7 +49,7 @@ bash test-data/scripts/gen-perf-corpus-bti.sh --out /data/corpus-3234-bti
 bash test-data/scripts/gen-perf-corpus-bti.sh --rows 33000000     # ~5 GiB
 
 # The COMMITTABLE small Cassandra-written BTI golden (a correctness oracle, NOT a profile
-# target): ~2 min, one 973 KB SSTable + a 1.83 MiB `sstabledump -l` golden. Does NOT touch
+# target): ~2 min, one 97.8 KB SSTable + a 188.4 KiB `sstabledump -l` golden. Does NOT touch
 # the perf corpus. See "The committed small BTI golden" below.
 bash test-data/scripts/gen-perf-corpus-bti.sh --small-golden --out /data/corpus-3234-small-golden
 
@@ -266,20 +266,32 @@ golden therefore means a dedicated small table, not a slice of this corpus — w
 
 ### The committed small BTI golden (a Cassandra-written oracle, `--small-golden`)
 
-`test-data/datasets/sstables/test_da/wide_multiclustering_small-6cf636608f6511f18f0f8ffe1ea52820/` is
-**committed** (`git add -f`, the `test_da` convention) with all 8 components + `schema.cql`: 6,000 rows
-over 5 partitions, `PRIMARY KEY (pk, bucket, seq)`, LZ4 `chunk_length_in_kb=16`, `Data.db` 973,239 B
-(sha256 `487dec60…`), `Rows.db` 1,348 B (non-empty — one 4,000-row partition spans several row-index
-blocks), and its `sstabledump -l` golden at **1,916,747 B (1.83 MiB)**. Recorded identity:
+`test-data/datasets/sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262/` is
+**committed** (`git add -f`, the `test_da` convention) with all 8 components + `schema.cql`: 600 rows
+over 5 partitions, `PRIMARY KEY (pk, bucket, seq)`, LZ4 `chunk_length_in_kb=16`, `Data.db` 97,780 B
+(sha256 `d59cd894…`), `Rows.db` 197 B (non-empty — the 400-row partition is ~74 KiB uncompressed,
+~18× the image's `column_index_size` default of `4KiB`), and its `sstabledump -l` golden at
+**192,935 B (188.4 KiB)**. Recorded identity:
 `test-data/perf-corpus-bti-small-golden-manifest.json` (`mode: small_golden`); DDL + provenance:
 `test-data/schemas/wide-multiclustering-small-bti.cql`.
 
 - **It IS a correctness oracle** (issue #3042): Cassandra 5.0.2 wrote every byte, so the JSONL golden
   can back BTI row/cell decode, `Rows.db` trie descent and compound-clustering-slice parity work.
-- **It is NOT a profile target.** At 973 KB its `Data.db` is far below the 8 MiB
+- **Its SIZE follows the repo's convention, not a row count.** The closest committed analogue is
+  #3032's `test_da/multiclustering_table` — the *same* `PRIMARY KEY (pk, bucket, seq)` shape — at 468
+  rows / 3 partitions with a 121,020 B golden. A golden's worth as a Cassandra-written oracle does not
+  scale with row count, but its committed size does (~320 B/row), so this fixture is the first cut's
+  6,000-row shape divided by exactly 10: the same width **weights**, hence the same partition-count and
+  bucket-spread structure, one order of magnitude smaller (2,898,284 B → 297,374 B for the directory).
+  The generator's `--small-golden` defaults (`--rows 600`, `--widths 400:20,80:30,20:50`) are pinned by
+  `scripts/tests/test_gen_perf_corpus_bti.sh`, because the width mix is what fixes the committed
+  fixture's size.
+- **It is NOT a profile target.** At 97.8 KB its `Data.db` is far below the 8 MiB
   `MADV_RANDOM` threshold, so the point-read and scan mappings are the same mapping and a read-plane
   A/B on it is structurally zero. Read-path measurement belongs on the perf corpus above.
-- Regenerating it is a **fresh short container run** and never touches the perf corpus.
+- Regenerating it is a **fresh short container run** and never touches the perf corpus. Verified on
+  regeneration: `da` descriptor from the TOC, `Statistics.db` `totalRows` == `sstabledump` rows == 600,
+  and a CQLite CLI read-back over the committed directory returning `(600 rows)`.
 
 ### The CQLite-written BTI fixture — a PERFORMANCE DRIFT CONTROL ONLY
 
