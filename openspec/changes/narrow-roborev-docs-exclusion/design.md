@@ -382,7 +382,7 @@ accepted **after merge**, by fetching the page and grepping for a distinctive ph
 change — never by an HTTP 200, since the CDN can serve the previous page for ~3 minutes after a
 successful deploy.
 
-### D7 — the backfill ruling is recorded, and the decision stays the owner's (AC7)
+### D7 — the backfill ruling is recorded, and the decision stays the owner's (AC7) — RULED: accept as-is
 
 AC7 asks for a *recorded decision* about the already-merged, never-reviewed harness code from #3026 /
 #3100 / #3217, not for a particular decision. The requirement is therefore written as "the change
@@ -391,6 +391,40 @@ retroactive review pass (the natural mechanism: run the sanctioned wrapper over 
 reconstructed branch containing those paths, now that they are reviewable) or explicit
 acceptance-as-is with the reason stated (e.g. #3222's harness already had a full adversarial hand review
 recorded in the PR). Leaving it unaddressed is the only failing outcome.
+
+#### THE RULING (owner, 2026-08-03): ACCEPT AS-IS. No retroactive review pass.
+
+Recorded here in full, because an unrecorded "we decided it was fine" is indistinguishable from nobody
+having looked. The reasoning, not merely the verdict:
+
+1. **The exposure is BOUNDED by what the code is.** Every affected file is a *measurement harness* —
+   a Part A/B driver, an off-CPU classifier, a demangler, a counter parser, a summarisation tool. None of
+   it ships in the library, none of it is imported by `cqlite-core`/`cqlite-cli`/the bindings, and none of
+   it runs in CI or the agent gate. A defect in it can corrupt a *report's numbers*; it cannot corrupt a
+   release, a user's data, or a gate verdict. That is a materially different risk class from unreviewed
+   library code, and it is the reason the decision can go this way at all.
+2. **The largest tranche ALREADY had a full adversarial pass.** #3222's 34 executables were hand-reviewed
+   file by file when the wrapper refused to certify them, and that review is recorded in the PR. It found
+   **no blockers**, and it *did* find real defects — a 4th silent-failure instance where every driver log
+   fabricated `rc=0` (`$(…)` resets `$?`) plus two provenance defects — all fixed before the PR merged. So
+   the biggest slice of the exposure is not unreviewed; it is reviewed by a *more* expensive mechanism
+   than roborev.
+3. **The class cannot recur silently, which is what a backfill would actually be buying.** The value of a
+   retroactive pass is mostly the assurance that the *next* one will not slip through. That assurance now
+   comes from a mechanism instead: `exclude_patterns` no longer contains a blanket directory glob, the
+   pre-enqueue `census-exclusion:` check FAILs closed (naming the paths and the pattern) if it ever does
+   again, and the `(cx*)` hermetic cases fail the `--lite` loop on a regression. A backfill adds no part
+   of that.
+4. **Retroactively reviewing code whose outputs are already banked buys audit theatre, not safety.** The
+   reports those harnesses produced are merged and have already been acted on. A finding now would not
+   un-bank a number; it would produce a comment on a historical artifact. Spending review rounds — and
+   a reviewer's attention — on that instead of on live code is a worse allocation, and pretending
+   otherwise would be the dishonest part.
+
+**What would change this ruling:** any of that harness code being promoted into a shipped path (a gate
+component, a CI step, an imported module). At that moment it stops being a measurement artifact and
+inherits the review obligation of the surface it joins. That is a rule about *promotion*, not about
+history, and it is the standing follow-up this ruling leaves behind.
 
 ## Follow-ups (named here, deliberately not fixed here)
 
