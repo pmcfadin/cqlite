@@ -34,7 +34,9 @@
 # BPF IS A DIFFERENT PERMISSION. A permissive perf_event_paranoid does NOT grant
 # BPF map creation — bpftrace/bcc collectors still need sudo (#3217 finding).
 #
-# Sourceable AND executable. Sourcing has NO side effects: this file only defines
+# Sourceable AND executable. Source it ONCE (the gate does, at script scope) and call
+# the functions; a per-use re-source re-reads 300+ lines for nothing. Sourcing has NO
+# side effects: this file only defines
 # `perf_capability_*` functions plus the three `PERF_CAPABILITY_*` path constants
 # (nothing runs, no shell options are changed, no variables outside those namespaces
 # are touched). Every function is `set -u` safe.
@@ -108,12 +110,30 @@ perf_capability_env_guard() {
 }
 
 # ---- resolved locations (the seams apply ONLY in test mode) -------------------
-perf_capability_proc_dir() {
+# THE `*_into <outvar>` CONVENTION. The gate's summary path calls the token chain
+# below and is contractually FREE — no external process AND no command substitution
+# (each `$( )` forks a subshell, which is a process too). A function that answers on
+# stdout therefore CANNOT be on that path: its caller must fork to read it. So every
+# function the gate touches has an `_into <outvar>` core that assigns through a
+# caller-named variable, and the stdout-printing form is a thin wrapper kept for the
+# CLI/bootstrap ergonomics — the wrapper is the ONLY place a fork is paid, and it is
+# not on the gate's path.
+#   Assignment is `eval "$1=\$var"`, NOT a `local -n` nameref: bash 3.2 (macOS
+#   /bin/bash, a supported gate host) has no namerefs. The RHS is an assignment, so no
+#   word-splitting or globbing applies to the value. <outvar> must be a plain shell
+#   identifier; every caller passes a literal, and the `__pcd_`/`__pcr_`/`__pct_`
+#   local prefixes keep a caller-named variable from colliding with an internal one.
+perf_capability_proc_dir_into() {
   if perf_capability_test_mode; then
-    printf '%s' "${CQLITE_PERF_PROC_DIR:-$PERF_CAPABILITY_PROC_DIR_DEFAULT}"
+    eval "$1=\${CQLITE_PERF_PROC_DIR:-\$PERF_CAPABILITY_PROC_DIR_DEFAULT}"
   else
-    printf '%s' "$PERF_CAPABILITY_PROC_DIR_DEFAULT"
+    eval "$1=\$PERF_CAPABILITY_PROC_DIR_DEFAULT"
   fi
+}
+perf_capability_proc_dir() {
+  local __pcd_v
+  perf_capability_proc_dir_into __pcd_v
+  printf '%s' "$__pcd_v"
 }
 perf_capability_sysctl_dir() {
   if perf_capability_test_mode; then
@@ -168,22 +188,34 @@ perf_capability_dropin_current() {
   [ "$want" = "$got" ]
 }
 
-# perf_capability_proc_value <name>: the CURRENT kernel value read straight from
-# /proc/sys/kernel/<name> (rc 1 + no output when unreadable). NEVER trust a
-# `sysctl -w`'s return code — a write can report success while the value does not
-# take (container, read-only sysfs, a competing drop-in applied later). Read back.
-# Fork-free (`read` is a builtin): this sits in the gate's summary path, which may
-# not grow a subprocess for a diagnostic line. `read` returns non-zero at EOF on a
-# file with no trailing newline yet still assigns, so emptiness — not read's rc —
-# is the failure test.
+# perf_capability_proc_read <outvar> <name>: the CURRENT kernel value read straight
+# from /proc/sys/kernel/<name> into <outvar> (rc 1 + <outvar> emptied when
+# unreadable). NEVER trust a `sysctl -w`/`--system` return code — a write can report
+# success while the value does not take (container, read-only sysfs, a competing
+# drop-in applied later), and it can report FAILURE for an unrelated entry while ours
+# applied fine. Read back.
+# Fully fork-free: `read` is a builtin, the directory comes back through a variable,
+# and nothing here is wrapped in `$( )`. This sits in the gate's summary path, which
+# may not grow a process for a diagnostic line. `read` returns non-zero at EOF on a
+# file with no trailing newline yet still assigns, so emptiness — not read's rc — is
+# the failure test.
+perf_capability_proc_read() {
+  local __pcr_out="$1" __pcr_dir="" __pcr_v=""
+  perf_capability_proc_dir_into __pcr_dir
+  eval "$__pcr_out="
+  [ -r "$__pcr_dir/$2" ] || return 1
+  read -r __pcr_v <"$__pcr_dir/$2" 2>/dev/null
+  __pcr_v="${__pcr_v%%[[:space:]]*}"
+  [ -n "$__pcr_v" ] || return 1
+  eval "$__pcr_out=\$__pcr_v"
+}
+
+# perf_capability_proc_value <name>: the stdout form of the read above, for CLI and
+# bootstrap use (NOT the gate path — reading it costs the caller a `$( )`).
 perf_capability_proc_value() {
-  local f v=""
-  f="$(perf_capability_proc_dir)/$1"
-  [ -r "$f" ] || return 1
-  read -r v <"$f" 2>/dev/null
-  v="${v%%[[:space:]]*}"
-  [ -n "$v" ] || return 1
-  printf '%s' "$v"
+  local __pcv_v
+  perf_capability_proc_read __pcv_v "$1" || return 1
+  printf '%s' "$__pcv_v"
 }
 
 # perf_capability_is_int <value>: rc 0 iff <value> is a plain optionally-negative
@@ -200,9 +232,13 @@ perf_capability_is_int() {
   [ "${#body}" -le 10 ]
 }
 
-# perf_capability_token: the FREE capability read — pure /proc through shell
-# builtins: no `perf` exec, no forked binary, no measurable time cost. This is what
-# the gate's accelerators line calls, so it may never grow one.
+# perf_capability_token_into <outvar>: the FREE capability read, and THE function the
+# gate's accelerators line calls. Free is a hard contract, enforced by
+# test_agent_gate_summary.sh case 9f-free: pure /proc through shell builtins — no
+# `perf` exec, no external process of ANY kind, and no command substitution anywhere
+# in the chain (which is why the answer comes back through <outvar> rather than
+# stdout; every `$( )` is a forked subshell, and the gate emits this line on every
+# summary).
 #   ok               unprivileged per-CPU profiling AND kernel symbols available
 #   paranoid-<N>     perf_event_paranoid = N >= 1 -> CPU-wide `perf stat -C` denied
 #   kptr-restricted  paranoid is fine but kptr_restrict != 0 -> no kernel symbols
@@ -210,19 +246,31 @@ perf_capability_is_int() {
 #   unknown          present but unparseable (never guess a capability)
 # A seam exported without the marker cannot steer this read (the seams are inert
 # there), but it IS reported once on stderr so a stray export is never silent.
-perf_capability_token() {
-  local p k
+perf_capability_token_into() {
+  local __pct_out="$1" __pct_p="" __pct_k=""
   if ! perf_capability_test_mode && perf_capability_seam_set; then
     printf 'perf-capability: ignoring CQLITE_PERF_PROC_DIR/CQLITE_PERF_SYSCTL_DIR — TEST-ONLY seams, inert without CQLITE_PERF_TEST_MODE=1; reading %s\n' \
       "$PERF_CAPABILITY_PROC_DIR_DEFAULT" >&2
   fi
-  p=$(perf_capability_proc_value perf_event_paranoid) || { printf 'absent'; return 0; }
-  k=$(perf_capability_proc_value kptr_restrict) || { printf 'absent'; return 0; }
-  perf_capability_is_int "$p" || { printf 'unknown'; return 0; }
-  perf_capability_is_int "$k" || { printf 'unknown'; return 0; }
-  if [ "$p" -ge 1 ]; then printf 'paranoid-%s' "$p"; return 0; fi
-  if [ "$k" -ne 0 ]; then printf 'kptr-restricted'; return 0; fi
-  printf 'ok'
+  if ! perf_capability_proc_read __pct_p perf_event_paranoid \
+     || ! perf_capability_proc_read __pct_k kptr_restrict; then
+    eval "$__pct_out=absent"; return 0
+  fi
+  if ! perf_capability_is_int "$__pct_p" || ! perf_capability_is_int "$__pct_k"; then
+    eval "$__pct_out=unknown"; return 0
+  fi
+  if [ "$__pct_p" -ge 1 ]; then eval "$__pct_out=\"paranoid-\$__pct_p\""; return 0; fi
+  if [ "$__pct_k" -ne 0 ]; then eval "$__pct_out=kptr-restricted"; return 0; fi
+  eval "$__pct_out=ok"
+}
+
+# perf_capability_token: the stdout form, for the `--token` CLI and bootstrap. NOT the
+# gate path — reading stdout costs the caller a `$( )` fork, which is precisely what
+# the `_into` core above exists to avoid.
+perf_capability_token() {
+  local __ptk_v
+  perf_capability_token_into __ptk_v
+  printf '%s' "$__ptk_v"
 }
 
 # perf_capability_verify: the FUNCTIONAL verification (issue #3249 AC2). A
