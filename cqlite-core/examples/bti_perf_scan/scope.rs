@@ -1,5 +1,5 @@
 //! What this harness is allowed to ingest — resolved BEFORE the scan, fail-closed
-//! (roborev #3234 M1).
+//! (roborev #3234 M1/F1).
 //!
 //! The harness used to point `IngestionConfig::data_dir` at `<corpus>/sstables` with a
 //! `table_directory_filter` of `/<keyspace>/<table>`, i.e. a SUBSTRING match over
@@ -29,6 +29,16 @@
 //! In both cases the resolved directory, its generation count and the provenance of
 //! that decision are printed in the result block, so the workload a number describes
 //! travels with the number.
+//!
+//! **"Scoped" means EXACT, and a filter is not exact (roborev #3234 F1).** Round 11
+//! implemented (1) by handing `ingest` a `table_directory_filter` of
+//! `/<keyspace>/<resolved dir>` — still a SUBSTRING match, so a sibling whose full name
+//! EXTENDS the resolved one (`<table>-<uuid>-backup`) was ALSO ingested while
+//! `generations` was counted in the selected directory alone: extra SSTables scanned,
+//! the smaller count reported, the route attribution wrong again. Ingestion therefore
+//! now goes through `ingest_with_selection(.., TableDirSelection::Exact(&[dir]))`, which
+//! compares complete path components, and `main.rs` reports the generation count
+//! OBSERVED in what was actually selected rather than in what was intended.
 
 use super::manifest::ManifestScope;
 use std::path::{Path, PathBuf};
@@ -37,26 +47,44 @@ pub struct IngestScope {
     /// `IngestionConfig::data_dir` — the corpus's `sstables` tree (unchanged, so
     /// discovery behaves exactly as before).
     pub data_dir: PathBuf,
-    /// `IngestionConfig::table_directory_filter` — the resolved directory's EXACT
-    /// `/<keyspace>/<dir>` suffix, not the table name prefix.
-    pub filter: String,
-    /// The one corpus directory that will be measured.
+    /// The one corpus directory that will be measured. Handed to
+    /// `TableDirSelection::Exact`; there is deliberately no filter STRING here, because
+    /// a substring filter cannot express this (roborev #3234 F1).
     pub dir: PathBuf,
-    /// `*-Data.db` files in `dir`: the generation count that selects the scan route.
+    /// `*-Data.db` files in `dir`: the generation count this scope EXPECTS. What is
+    /// reported is the count observed in the directories ingestion actually selected
+    /// (`main.rs`); a disagreement is a refusal, never a silently smaller number.
     pub generations: usize,
     /// How this scope was decided, for the result block.
     pub provenance: String,
 }
 
-/// `<table>` exactly, or `<table>-<hex…>` — the Cassandra table-directory shape.
-/// Deliberately NOT a prefix match: `wide_multiclustering_small-<uuid>` must not be
-/// picked up by `--table wide_multiclustering`.
-fn is_table_dir(name: &str, table: &str) -> bool {
-    if name == table {
-        return true;
-    }
+/// The number of hex digits in a Cassandra table-directory id: a UUID with its dashes
+/// removed. Cassandra's own `Directories`/`Descriptor` layout writes `<table>-<32 hex>`,
+/// and `discovery::scanner::has_cassandra_table_uuid_suffix` reads exactly that.
+pub const TABLE_ID_HEX_LEN: usize = 32;
+
+/// `<table>-<32 hex>` — the Cassandra 5.0 table-directory shape, EXACTLY (roborev
+/// #3234 F1/F2).
+///
+/// Every part of this is a deliberate exactness choice, because each looser form is a
+/// directory a measurement could be silently redirected into:
+///
+/// - not a prefix match on the table name: `wide_multiclustering_small-<uuid>` must not
+///   be picked up by `--table wide_multiclustering`;
+/// - not "any hex-ish suffix": `<table>-backup` and `<table>-<31 hex>` are not table
+///   directories, and accepting them is how a backup copy becomes the measured corpus;
+/// - no bare `<table>` form: Cassandra 5.0 always writes the id, so accepting a bare
+///   name would accept something Cassandra never wrote.
+///
+/// This is the ONE definition of the shape — `manifest.rs` validates
+/// `tables[].sstable_dir` with it too, so the two cannot drift into disagreeing about
+/// what a table directory is.
+pub fn is_table_dir(name: &str, table: &str) -> bool {
     match name.strip_prefix(table).and_then(|r| r.strip_prefix('-')) {
-        Some(suffix) => !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_hexdigit()),
+        Some(id) => {
+            id.len() == TABLE_ID_HEX_LEN && id.chars().all(|c| c.is_ascii_hexdigit())
+        }
         None => false,
     }
 }
@@ -79,7 +107,13 @@ fn matching_dirs(ks_dir: &Path, table: &str) -> std::result::Result<Vec<PathBuf>
     Ok(out)
 }
 
-fn count_generations(dir: &Path) -> std::result::Result<usize, String> {
+/// `*-Data.db` files in one directory — one per generation.
+///
+/// The predicate is a SUFFIX match on the file NAME, and deliberately so: it is the
+/// exact rule `discovery::scanner` counts SSTables with (`ends_with("-Data.db") || ==
+/// "Data.db"`), and this count is compared against what discovery selected. A stricter
+/// rule here would disagree with the thing it is checking.
+pub fn count_generations(dir: &Path) -> std::result::Result<usize, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot read the corpus directory {}: {e}", dir.display()))?;
     Ok(entries
@@ -163,14 +197,12 @@ pub fn resolve(
         }
     };
 
-    let name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .ok_or_else(|| format!("{} has no final path component", dir.display()))?;
+    if dir.file_name().is_none() {
+        return Err(format!("{} has no final path component", dir.display()));
+    }
     let generations = count_generations(&dir)?;
     Ok(IngestScope {
         data_dir,
-        filter: format!("/{keyspace}/{name}"),
         dir,
         generations,
         provenance,

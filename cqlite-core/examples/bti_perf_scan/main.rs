@@ -306,9 +306,69 @@ fn rate(rows: u64, secs: f64) -> Option<f64> {
     }
 }
 
+/// The generation count OBSERVED in the directories ingestion actually selected
+/// (roborev #3234 F1).
+///
+/// This is deliberately NOT `scope.generations` (the count of the directory this run
+/// INTENDED to ingest). Reporting the intended count is exactly how round 11's substring
+/// filter could open a `<table>-<uuid>-backup` sibling's SSTables and still print the
+/// smaller number — and since the generation count selects the scan route, that
+/// misattributes every figure printed beside it. An unreadable selected directory is an
+/// error, never a count silently short by one.
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
+fn observed_generations(selected: &[std::path::PathBuf]) -> std::result::Result<usize, String> {
+    let mut total = 0usize;
+    for dir in selected {
+        total += scope::count_generations(dir)?;
+    }
+    Ok(total)
+}
+
+/// The selected set must be EXACTLY the resolved scope — one complete-path-component
+/// identity, nothing extending it, nothing missing (roborev #3234 F1).
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
+fn verify_scope_exact(
+    selected: &[std::path::PathBuf],
+    scope: &scope::IngestScope,
+) -> std::result::Result<(), String> {
+    let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize())
+    {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    };
+    let foreign: Vec<String> = selected
+        .iter()
+        .filter(|d| !same(d, &scope.dir))
+        .map(|d| d.display().to_string())
+        .collect();
+    if !foreign.is_empty() {
+        return Err(format!(
+            "ingestion selected {} directory/ies OUTSIDE the resolved scope {}:\n    {}\n  \
+             The generation count selects the scan route, so a measurement over an unintended \
+             union describes a workload no manifest documents. Refusing.",
+            foreign.len(),
+            scope.dir.display(),
+            foreign.join("\n    ")
+        ));
+    }
+    // Nothing selected is legitimate only when there was nothing to select: an EMPTY
+    // table directory. Otherwise discovery skipped the scope and a scan would measure
+    // nothing at all while the scope claims generations.
+    if selected.is_empty() && scope.generations > 0 {
+        return Err(format!(
+            "discovery returned NONE of the {} `*-Data.db` generation(s) in the resolved scope \
+             {} — nothing was ingested, so the scan below would measure nothing while the scope \
+             claims otherwise. Refusing.",
+            scope.generations,
+            scope.dir.display()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 fn real_main() -> i32 {
-    use cqlite_core::ingestion::{ingest, IngestionConfig};
+    use cqlite_core::ingestion::{ingest_with_selection, IngestionConfig, TableDirSelection};
     use cqlite_core::query::result::StreamingConfig;
     use manifest::{resolve_rows_assert, RowsAssert};
 
@@ -379,11 +439,18 @@ fn real_main() -> i32 {
         data_dir: scope.data_dir.clone(),
         version_hint: Some("5.0".to_string()),
         core_config: cqlite_core::Config::default(),
-        table_directory_filter: Some(scope.filter.clone()),
+        // NOT a filter: a substring filter of `/<ks>/<dir>` also matches a sibling whose
+        // full name extends it (roborev #3234 F1). The scope is expressed as EXACT path
+        // identity below, and this field is left off so no second, looser scope exists.
+        table_directory_filter: None,
     };
 
     let open_start = std::time::Instant::now();
-    let ingested = match rt.block_on(ingest(cfg)) {
+    let wanted = [scope.dir.clone()];
+    let ingested = match rt.block_on(ingest_with_selection(
+        cfg,
+        TableDirSelection::Exact(&wanted),
+    )) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("error: ingest of {} failed: {e}", scope.data_dir.display());
@@ -391,19 +458,35 @@ fn real_main() -> i32 {
         }
     };
     let open_elapsed = open_start.elapsed();
+    // The generation count is OBSERVED in the directories ingestion actually selected,
+    // never in the one this run intended to select (roborev #3234 F1). Reporting the
+    // intended count is precisely how round 11's substring filter could scan extra
+    // SSTables while printing the smaller number — and the generation count selects the
+    // scan route, so that misattributes every figure below it.
+    let selected = ingested.discovery_summary.table_directories.clone();
+    let generations = match observed_generations(&selected) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return exit::OPEN_FAILED;
+        }
+    };
     let db = ingested.database;
-    // The generation count is the `*-Data.db` count of the SCOPED directory — the
-    // readers the Database was actually built from. `sstables_found` is discovery's
-    // UNFILTERED total over the whole tree, so reporting that as `generations` would
-    // misattribute the route the moment anything else sat in the tree (roborev #3234 M1).
-    let generations = scope.generations;
     let discovered_total = ingested.discovery_summary.sstables_found;
+    // Printed BEFORE the exactness refusal below, so an over-wide ingest is VISIBLE as
+    // the number it really was — the diagnosis is "3 generations were selected", not a
+    // bare exit code.
     println!(
         "open: {generations} sstables discovered in {:.3} s ({})",
         open_elapsed.as_secs_f64(),
         scope.dir.display()
     );
     println!("ingest_scope: {}", scope.provenance);
+    println!("generations_observed_in: {} directory/ies", selected.len());
+    if let Err(e) = verify_scope_exact(&selected, &scope) {
+        eprintln!("error: {e}");
+        return exit::OPEN_FAILED;
+    }
     if discovered_total > generations {
         println!(
             "note: {} sstable(s) under {} are OUTSIDE this scope and were NOT ingested",

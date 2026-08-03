@@ -94,6 +94,16 @@ pub fn manifest_candidates(corpus: &Path) -> Vec<PathBuf> {
 ///
 /// Fail-closed because this string SELECTS THE BYTES THAT GET MEASURED: an absolute
 /// path, a `..` escape or another table's directory would silently redirect the scan.
+///
+/// **The check IS the claim (roborev #3234 F2).** Round 11's version told the reader it
+/// required `sstables/<keyspace>/<table>-<uuid>` and then accepted any `<table>-*` —
+/// so `<table>-backup` passed, which is a non-Cassandra backup copy sitting inside the
+/// keyspace directory, and it slipped past the ambiguity guard too (that guard only ever
+/// sees real table directories). A comment stricter than its code is the defect class
+/// this whole round is about, so the final component is now validated with
+/// `scope::is_table_dir` — the single definition of `<table>-<32 hex>`, shared with the
+/// directory scan, so the manifest path and the corpus scan cannot disagree about what
+/// a table directory is.
 fn validated_sstable_dir(
     rel: &str,
     keyspace: &str,
@@ -104,8 +114,10 @@ fn validated_sstable_dir(
         format!(
             "{}: `tables[].sstable_dir` = {rel:?} {why}. This path selects the bytes the \
              measurement runs on, so it must be a corpus-relative \
-             `sstables/<keyspace>/<table>-<uuid>` directory naming {keyspace}.{table}.",
-            path.display()
+             `sstables/<keyspace>/<table>-<id>` directory naming {keyspace}.{table}, where \
+             `<id>` is exactly {} hex digits (a Cassandra table id).",
+            path.display(),
+            crate::scope::TABLE_ID_HEX_LEN
         )
     };
     let parts: Vec<&str> = rel.split('/').collect();
@@ -121,8 +133,10 @@ fn validated_sstable_dir(
     if parts.len() != 3 || parts[0] != "sstables" || parts[1] != keyspace {
         return Err(bad("is not `sstables/<keyspace>/<dir>` for this keyspace"));
     }
-    if parts[2] != table && !parts[2].starts_with(&format!("{table}-")) {
-        return Err(bad("does not name this table's directory"));
+    if !crate::scope::is_table_dir(parts[2], table) {
+        return Err(bad(
+            "does not name this table's Cassandra directory (`<table>-<32 hex>`)",
+        ));
     }
     Ok(rel.to_string())
 }
