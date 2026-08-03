@@ -42,10 +42,6 @@ sudo_perf_offenders() {
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/perf-cap-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
-# Reference file for the "did WE create the real /etc/sysctl.d drop-in?" attribution
-# in the host-clean assert: a plain `-nt` comparison against a file created NOW, so no
-# `stat -c %Y` (GNU-only) and no wall-clock arithmetic anywhere in these suites.
-suite_ref="$tmp/.suite-start"; : >"$suite_ref"
 
 # Global-state isolation, same posture as test_bootstrap_agent_machine.sh: the
 # bootstrap runs below read/write git config and read board env, and these suites run
@@ -183,21 +179,46 @@ EOF
   chmod +x "$perfbin/perf"
 }
 
-# perf_test_assert_host_clean: nothing in the suite may have touched the REAL
-# /etc/sysctl.d. Run LAST by every suite that sources this lib — each suite asserts it
-# for itself, because "the other file checked it" is not a property either file can rely
-# on when they are run independently.
-perf_test_assert_host_clean() {
-  if [ ! -e /etc/sysctl.d/99-cqlite-perf.conf ] || [ -n "${CQLITE_PERF_ALLOW_REAL_DROPIN:-}" ]; then
-    ok "perf section: the suite never created the real /etc/sysctl.d/99-cqlite-perf.conf"
+# perf_test_real_dropin_state [path]: the content-AND-metadata identity of the REAL
+# managed drop-in, for a BEFORE/AFTER "this run changed nothing" comparison.
+#
+# WHY NOT "IT DOES NOT EXIST" (issue #3249 review R5-2). The obvious assertion — the real
+# /etc/sysctl.d/99-cqlite-perf.conf must not exist — is SELF-DEFEATING: the whole purpose
+# of this change is to install that file on the fleet, so the moment a host is legitimately
+# bootstrapped the mandatory `tooling-tests` gate component would go red on exactly the
+# machines where the feature WORKED. Hermeticity is "this run changed nothing", not "this
+# file has never existed", so it is asserted as a before/after comparison of the real path
+# (plus the tripwire proving no mutating command was invoked at all).
+# `ls -ldn` + the bytes, so a create, a delete, a content change and a mode/owner change
+# all show up; no GNU-only `stat -c`. The path is an argument so the comparator itself is
+# testable against a file the suite may legitimately write (case 6c).
+perf_test_real_dropin_state() {
+  local p="${1:-/etc/sysctl.d/99-cqlite-perf.conf}"
+  if [ -e "$p" ]; then
+    ls -ldn "$p" 2>/dev/null || printf 'unstatable\n'
+    cat "$p" 2>/dev/null || printf 'unreadable\n'
   else
-    # Pre-existing on a bootstrapped box is legitimate; only report if WE made it.
-    # `-nt` against a file stamped at suite start — no GNU-only `stat -c %Y`.
-    if [ /etc/sysctl.d/99-cqlite-perf.conf -nt "$suite_ref" ]; then
-      bad "perf section: the suite wrote the REAL /etc/sysctl.d/99-cqlite-perf.conf"
-    else
-      ok "perf section: the real drop-in pre-dates this suite (not written by it)"
-    fi
+    printf 'absent\n'
+  fi
+}
+
+# The real drop-in's state as it was when this suite STARTED — the baseline every
+# host-clean assertion compares against.
+perf_real_dropin_before="$tmp/.real-dropin-before"
+perf_test_real_dropin_state >"$perf_real_dropin_before" 2>/dev/null
+
+# perf_test_assert_host_clean: nothing in the suite may have CHANGED the real
+# /etc/sysctl.d drop-in. Run LAST by every suite that sources this lib — each suite
+# asserts it for itself, because "the other file checked it" is not a property either
+# file can rely on when they are run independently.
+perf_test_assert_host_clean() {
+  local after="$tmp/.real-dropin-after"
+  perf_test_real_dropin_state >"$after" 2>/dev/null
+  if cmp -s "$perf_real_dropin_before" "$after"; then
+    ok "perf section: the real /etc/sysctl.d/99-cqlite-perf.conf is byte- and metadata-identical to its pre-suite state (this suite changed nothing)"
+  else
+    bad "perf section: the suite CHANGED the real /etc/sysctl.d/99-cqlite-perf.conf (before/after differ)"
+    diff "$perf_real_dropin_before" "$after" 2>/dev/null | head -6
   fi
 }
 

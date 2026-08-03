@@ -898,12 +898,23 @@ exit 0
 EOF
   chmod +x "$noseambox/$t"
 done
+#     HERMETICITY IS "THIS RUN CHANGED NOTHING", NOT "THAT FILE HAS NEVER EXISTED" (issue
+#     #3249 review R5-2). This case used to assert `[ ! -e /etc/sysctl.d/99-cqlite-perf.conf ]`
+#     absolutely — which would red the MANDATORY `tooling-tests` component on every host this
+#     change had successfully bootstrapped, i.e. on exactly the machines where the feature
+#     worked. The tripwire (no mutating command invoked at all) plus a BEFORE/AFTER
+#     content-and-metadata comparison of the real path prove the same property without
+#     depending on the feature never having been used.
 mkperfshim 9191919
+noseam_before="$tmp/perf-noseam-real-before"
+perf_test_real_dropin_state >"$noseam_before" 2>/dev/null
 noseam_out=$(env -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
   PATH="$noseambox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$noseambox" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 noseam_rc=$?
+noseam_after="$tmp/perf-noseam-real-after"
+perf_test_real_dropin_state >"$noseam_after" 2>/dev/null
 noseam_mutating=$(grep -E '^(sudo|sysctl|tee) ' "$noseam_trip" | head -5)
 if [ "$noseam_rc" -eq 0 ] \
    && printf '%s' "$noseam_out" | grep -q 'perf capability SKIPPED' \
@@ -911,11 +922,60 @@ if [ "$noseam_rc" -eq 0 ] \
    && [ -z "$noseam_mutating" ] \
    && ! printf '%s' "$noseam_out" | grep -q 'wrote /etc/sysctl.d' \
    && ! printf '%s' "$noseam_out" | grep -q 'perf capability VERIFIED' \
-   && [ ! -e /etc/sysctl.d/99-cqlite-perf.conf ]; then
-  ok "perf section: test mode + ROOT + NO seams REFUSES to act — no privileged command, no production write, no verdict, rc 0"
+   && cmp -s "$noseam_before" "$noseam_after"; then
+  ok "perf section: test mode + ROOT + NO seams REFUSES to act — no privileged command, no verdict, rc 0, and the real drop-in is byte/metadata-unchanged"
 else
-  bad "perf section: unsandboxed test mode was allowed to act as root (rc=$noseam_rc, tripwire='$noseam_mutating')"
+  bad "perf section: unsandboxed test mode was allowed to act as root (rc=$noseam_rc, tripwire='$noseam_mutating', real-dropin-changed=$(cmp -s "$noseam_before" "$noseam_after" || echo yes))"
   printf '%s\n' "$noseam_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 6a-ii. A SEAM THAT *RESOLVES* INTO PRODUCTION IS THE SAME HOLE (issue #3249 review R5-1).
+#        `/tmp/../etc/sysctl.d` and `<symlinked ancestor>/sysctl.d` pass every TEXTUAL
+#        non-production check while a root `--yes` run resolves them to the REAL directory
+#        and overwrites the host's drop-in. Both must refuse, invoke nothing privileged, and
+#        leave the real file untouched — asserted the same before/after way as 6a. A
+#        relative seam is covered by the helper suite's guard loop.
+symanc="$tmp/perf-symlinked-ancestor"; rm -f "$symanc"; ln -s /etc "$symanc"
+resolve_fail=0
+for badseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d"; do
+  : >"$noseam_trip"
+  rs_before="$tmp/perf-resolve-before"; perf_test_real_dropin_state >"$rs_before" 2>/dev/null
+  rs_out=$(env PATH="$noseambox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+    CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$noseambox" \
+    CQLITE_PERF_PROC_DIR="$drop_proc" CQLITE_PERF_SYSCTL_DIR="$badseam" \
+    bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+  rs_rc=$?
+  rs_after="$tmp/perf-resolve-after"; perf_test_real_dropin_state >"$rs_after" 2>/dev/null
+  rs_mutating=$(grep -E '^(sudo|sysctl|tee) ' "$noseam_trip" | head -5)
+  if [ "$rs_rc" -eq 0 ] \
+     && printf '%s' "$rs_out" | grep -q 'perf capability SKIPPED' \
+     && printf '%s' "$rs_out" | grep -q 'REFUSING' \
+     && [ -z "$rs_mutating" ] \
+     && cmp -s "$rs_before" "$rs_after"; then
+    :
+  else
+    bad "perf section: a seam RESOLVING into production ('$badseam') was accepted (rc=$rs_rc, tripwire='$rs_mutating')"
+    resolve_fail=1
+  fi
+done
+[ "$resolve_fail" -ne 0 ] || ok "perf section: a sysctl seam that RESOLVES into /etc/sysctl.d (via .. or a symlinked ancestor) is REFUSED as root — nothing privileged ran and the real drop-in is unchanged"
+
+# 6c. THE HOST-MUTATION COMPARATOR MUST BE SENSITIVE. 6a/6a-ii assert "nothing changed" by
+#     comparing before/after states, so a comparator that could not SEE a write would make
+#     both cases vacuous. Point it at a file the suite may legitimately write and prove a
+#     write is detected — the same assertion shape, driven the other way.
+sens_f="$tmp/perf-comparator-target.conf"
+sens_absent="$tmp/perf-sens-absent"; perf_test_real_dropin_state "$sens_f" >"$sens_absent"
+bash "$PERFLIB" --drop-in >"$sens_f"
+sens_created="$tmp/perf-sens-created"; perf_test_real_dropin_state "$sens_f" >"$sens_created"
+printf '# tampered\n' >>"$sens_f"
+sens_changed="$tmp/perf-sens-changed"; perf_test_real_dropin_state "$sens_f" >"$sens_changed"
+if grep -q '^absent$' "$sens_absent" \
+   && ! cmp -s "$sens_absent" "$sens_created" \
+   && ! cmp -s "$sens_created" "$sens_changed"; then
+  ok "perf section: the before/after host-mutation comparator DETECTS both a create and a content change (so 6a's 'changed nothing' is not vacuous)"
+else
+  bad "perf section: the host-mutation comparator cannot see a write — 6a's hermeticity assertion would be vacuous"
 fi
 
 # 6b. A drop-in that differs ONLY in its trailing newline must be REWRITTEN (R4-4). The
@@ -991,12 +1051,50 @@ bash "$PERFLIB" --drop-in >"$nocomp_d/99-cqlite-perf.conf"
 nocomp_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
   CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$nocomp_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
-if printf '%s' "$nocomp_out" | grep -q 'no other file in the sysctl.d directory sets perf_event_paranoid/kptr_restrict' \
+if printf '%s' "$nocomp_out" | grep -q "no other file on the 'sysctl --system' search path" \
+   && printf '%s' "$nocomp_out" | grep -q '/run/sysctl.d' \
    && ! printf '%s' "$nocomp_out" | grep -q 'OVERRIDE:'; then
-  ok "perf section: with no competing file the scan says so explicitly (a silent scan is indistinguishable from no scan)"
+  ok "perf section: with no competing file the scan says so explicitly AND names the whole search path it covered (a silent scan is indistinguishable from no scan)"
 else
   bad "perf section: the no-competitor case printed no scan result"
   printf '%s\n' "$nocomp_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 7b-ii. THE SCAN COVERS THE WHOLE `sysctl --system` SEARCH PATH (issue #3249 review R5-4).
+#        Scanning only /etc/sysctl.d meant a later-sorting file in /run/sysctl.d or
+#        /usr/lib/sysctl.d silently overrode our drop-in while bootstrap reported NO
+#        competitor — the same "reverts and nobody knows why" mystery this diagnostic exists
+#        to end. Fixtures live in TWO lower-precedence stand-in directories plus an
+#        /etc/sysctl.conf stand-in, and include a SHADOWING pair: the same basename exists in
+#        the higher-precedence dir, so `sysctl --system` ignores the lower copy entirely and
+#        naming it would point at a file that is not in effect.
+multi_hi="$tmp/perf-multi-hi.d"; mkdir -p "$multi_hi"
+multi_run="$tmp/perf-multi-run.d"; mkdir -p "$multi_run"
+multi_lib="$tmp/perf-multi-lib.d"; mkdir -p "$multi_lib"
+multi_conf_d="$tmp/perf-multi-conf"; mkdir -p "$multi_conf_d"
+bash "$PERFLIB" --drop-in >"$multi_hi/99-cqlite-perf.conf"
+printf 'kernel.kptr_restrict = 1\n'          >"$multi_hi/50-shadow.conf"   # masks the copy below
+printf 'kernel.perf_event_paranoid = 3\n'    >"$multi_run/50-shadow.conf"  # IGNORED by sysctl
+printf 'kernel.perf_event_paranoid = 3\n'    >"$multi_run/99-zzz-run.conf" # later-sorting: WINS
+printf 'kernel/kptr_restrict = 1\n'          >"$multi_lib/95-usrlib.conf"  # slash spelling
+printf 'kernel.perf_event_paranoid = 2\n'    >"$multi_conf_d/sysctl.conf"  # applied LAST of all
+multi_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$multi_hi" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$multi_run:$multi_lib:$multi_conf_d/sysctl.conf" \
+  CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+multi_rc=$?
+if [ "$multi_rc" -eq 0 ] \
+   && printf '%s' "$multi_out" | grep -q "OVERRIDE: $multi_run/99-zzz-run.conf" \
+   && printf '%s' "$multi_out" | grep -q "OVERRIDE: $multi_conf_d/sysctl.conf" \
+   && printf '%s' "$multi_out" | grep -q 'applied AFTER every sysctl.d drop-in' \
+   && printf '%s' "$multi_out" | grep -q "competing file: $multi_hi/50-shadow.conf" \
+   && printf '%s' "$multi_out" | grep -q "competing file: $multi_lib/95-usrlib.conf" \
+   && ! printf '%s' "$multi_out" | grep -q "$multi_run/50-shadow.conf"; then
+  ok "perf section: the competitor scan covers every search-path directory (a later-sorting /run file is an OVERRIDE, /etc/sysctl.conf is flagged as applied-last, and a SHADOWED same-basename copy is not named)"
+else
+  bad "perf section: the multi-directory search-path scan is wrong (rc=$multi_rc)"
+  printf '%s\n' "$multi_out" | sed -n '/Perf profiling/,/^$/p'
 fi
 
 # 7c. AN UNKNOWN IDENTITY IS REPORTED AS UNKNOWN (R4-1, bootstrap side). With `id`

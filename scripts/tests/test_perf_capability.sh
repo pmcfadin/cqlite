@@ -275,7 +275,31 @@ guard_rejects_seam SYSCTL "$seamed_proc" "$symseam" || {
   bad "perf-capability: test mode ACCEPTED a sysctl seam that is a SYMLINK to /etc/sysctl.d"; badseam_fail=1; }
 guard_rejects_seam PROC "$symproc" "$seamed_d" || {
   bad "perf-capability: test mode ACCEPTED a proc seam that is a SYMLINK to /proc/sys/kernel"; badseam_fail=1; }
-[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects an empty/relative/production-shaped/SYMLINKED seam on BOTH sandbox dirs, naming the offending seam"
+# ...and the SPELLING is not the destination (issue #3249 review R5-1): `/tmp/../etc/sysctl.d`
+# and `<symlink-to-/etc>/sysctl.d` pass every textual test above, and a root `--yes` run
+# resolves BOTH to the production directory. Each escape so far was one more spelling of
+# "somewhere else", so the write-side guard now judges the CANONICAL destination. An
+# UNENTERABLE path resolves to nothing and is refused too — a write target must exist.
+symanc="$tmp/symlinked-ancestor"; rm -f "$symanc"; ln -s /etc "$symanc"
+for resolveseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d" "$tmp/./nonexistent-sandbox.d" \
+                   "$tmp/no-such-sandbox.d"; do
+  guard_rejects_seam SYSCTL "$seamed_proc" "$resolveseam" || {
+    bad "perf-capability: test mode ACCEPTED a sysctl seam that RESOLVES outside its sandbox: '$resolveseam'"; badseam_fail=1; }
+done
+guard_rejects_seam PROC "$symanc/sysctl.d" "$seamed_d" || {
+  bad "perf-capability: test mode ACCEPTED a proc seam with a SYMLINKED ANCESTOR into /etc"; badseam_fail=1; }
+[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects an empty/relative/production-shaped/SYMLINKED seam AND one that merely RESOLVES into production (.. or a symlinked ancestor), on BOTH sandbox dirs, naming the offending seam"
+# ...and the write TARGET is re-validated independently of the guard: --drop-in-path may
+# never NAME a production file, because that string is what a root `tee` is pointed at.
+for resolveseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d"; do
+  rp=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$resolveseam" \
+         bash "$PERFLIB" --drop-in-path 2>/dev/null); rp_rc=$?
+  if [ "$rp_rc" -eq 0 ] || [ -n "$rp" ]; then
+    bad "perf-capability: --drop-in-path named a write target from a seam resolving into production ('$resolveseam' -> '$rp')"
+    dropinpath_fail=1
+  fi
+done
+[ -n "${dropinpath_fail:-}" ] || ok "perf-capability: the drop-in write TARGET is refused (rc 1, empty) for a seam that resolves into production, independently of the env guard"
 # ...and the refusal reaches the RESOLVERS, not only the guard: an unsandboxed test mode
 # must not be able to name a production path at all (this is what the `tee` would use).
 noseam_path=$(env -u CQLITE_PERF_SYSCTL_DIR CQLITE_PERF_TEST_MODE=1 bash "$PERFLIB" --drop-in-path 2>/dev/null)
@@ -429,7 +453,21 @@ if dropin_current_is "$bytes_d"; then
   bad "perf-capability: a drop-in with altered trailing whitespace on a value line was judged current"
   bytes_fail=1
 fi
-[ "$bytes_fail" -ne 0 ] || ok "perf-capability: the idempotency compare is BYTE-exact — a missing final newline, an extra blank line and altered trailing whitespace are all NOT current"
+# variant 4/5: THE NUL CASE (issue #3249 review R5-3). `read -d ''` stops at a NUL and
+# returns SUCCESS, leaving only the bytes BEFORE it in the variable — so canonical content
+# followed by a NUL and ARBITRARY trailing bytes compared EQUAL and the file was never
+# rewritten. Both a bare trailing NUL and a NUL with junk after it must be NOT current.
+bash "$PERFLIB" --drop-in >"$bytes_f"; printf '\0' >>"$bytes_f"
+if dropin_current_is "$bytes_d"; then
+  bad "perf-capability: canonical content + a trailing NUL was judged current"
+  bytes_fail=1
+fi
+bash "$PERFLIB" --drop-in >"$bytes_f"; printf '\0kernel.perf_event_paranoid = 4\n' >>"$bytes_f"
+if dropin_current_is "$bytes_d"; then
+  bad "perf-capability: canonical content + NUL + arbitrary trailing bytes was judged current (the read stopped at the NUL and never saw them)"
+  bytes_fail=1
+fi
+[ "$bytes_fail" -ne 0 ] || ok "perf-capability: the idempotency compare is BYTE-exact — a missing final newline, an extra blank line, altered trailing whitespace, a trailing NUL and a NUL followed by arbitrary bytes are all NOT current"
 
 # 1d-vii. THE '99-' PREFIX IS LOAD-BEARING, and the drop-in says so in its own bytes.
 #         This box ships /etc/sysctl.d/10-kernel-hardening.conf with
@@ -467,12 +505,59 @@ if printf '%s\n' "$comp_out" | grep -q "^earlier $comp_d/10-kernel-hardening.con
 else
   bad "perf-capability: competing-file detection wrong: '$comp_out'"
 fi
-if [ -z "$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$tmp/perf-nocomp.d" \
+nocomp_empty_d="$tmp/perf-nocomp-empty.d"; mkdir -p "$nocomp_empty_d"
+if [ -z "$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$nocomp_empty_d" \
              bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>/dev/null)" ]; then
-  ok "perf-capability: a missing/empty sysctl.d directory yields no competitors (and no error output)"
+  ok "perf-capability: an empty sysctl.d directory yields no competitors (and no error output)"
 else
   bad "perf-capability: an empty sysctl.d dir produced competitor output"
 fi
+
+# 1d-ix. THE SCAN COVERS THE WHOLE `sysctl --system` SEARCH PATH, WITH MASKING (issue #3249
+#        review R5-4). `sysctl --system`/systemd-sysctl load /etc/sysctl.d, /run/sysctl.d,
+#        /usr/local/lib/sysctl.d, /usr/lib/sysctl.d, /lib/sysctl.d and finally the FILE
+#        /etc/sysctl.conf; scanning only the first meant a later-sorting file in one of the
+#        others overrode our drop-in while the diagnostic reported NO competitor. Two
+#        independent rules are asserted here:
+#          MASKING  a basename supplied by a HIGHER-precedence directory makes the lower
+#                   copy ignored entirely — and it masks even when the higher copy sets
+#                   NOTHING, which is the subtle half.
+#          ORDERING among the surviving files, basename order decides; /etc/sysctl.conf is
+#                   applied after them all, so it gets the distinct `last` verdict.
+sp_hi="$tmp/perf-sp-hi.d";   mkdir -p "$sp_hi"
+sp_run="$tmp/perf-sp-run.d"; mkdir -p "$sp_run"
+sp_lib="$tmp/perf-sp-lib.d"; mkdir -p "$sp_lib"
+sp_conf_d="$tmp/perf-sp-conf"; mkdir -p "$sp_conf_d"
+bash "$PERFLIB" --drop-in >"$sp_hi/99-cqlite-perf.conf"
+printf 'kernel.kptr_restrict = 1\n'       >"$sp_hi/10-hardening.conf"
+printf '# nothing set here at all\n'      >"$sp_hi/60-inert.conf"     # masks the copy below
+printf 'kernel.perf_event_paranoid = 3\n' >"$sp_run/60-inert.conf"    # IGNORED (masked)
+printf 'kernel.perf_event_paranoid = 3\n' >"$sp_run/99-zzz-run.conf"  # later-sorting: WINS
+printf '%s\n' '-kernel/kptr_restrict = 1' >"$sp_lib/95-usrlib.conf"   # slash + `-` spelling
+printf 'kernel.perf_event_paranoid = 2\n' >"$sp_conf_d/sysctl.conf"   # applied LAST of all
+sp_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$sp_hi" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$sp_run:$sp_lib:$sp_conf_d/sysctl.conf" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1)
+if printf '%s\n' "$sp_out" | grep -q "^earlier $sp_hi/10-hardening.conf$" \
+   && printf '%s\n' "$sp_out" | grep -q "^override $sp_run/99-zzz-run.conf$" \
+   && printf '%s\n' "$sp_out" | grep -q "^earlier $sp_lib/95-usrlib.conf$" \
+   && printf '%s\n' "$sp_out" | grep -q "^last $sp_conf_d/sysctl.conf$" \
+   && ! printf '%s\n' "$sp_out" | grep -q "$sp_run/60-inert.conf"; then
+  ok "perf-capability: competing files are found across the WHOLE search path, ranked by basename, /etc/sysctl.conf gets the applied-last verdict, and a masked same-basename copy is skipped"
+else
+  bad "perf-capability: search-path scan wrong: '$sp_out'"
+fi
+# ...and an EXTRA-DIRS entry that is not an absolute non-production path fails the whole
+# scan CLOSED (rc 1, no output): a test-mode scan may never read the host's real /run or
+# /usr/lib, and a bad entry is an UNKNOWN, not "no competitor".
+for spbad in /etc/sysctl.d relative/dir "/tmp/../etc/sysctl.d"; do
+  sp_bad_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$sp_hi" \
+    CQLITE_PERF_SYSCTL_EXTRA_DIRS="$spbad" \
+    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>/dev/null) && sp_bad_fail=1
+  [ -z "$sp_bad_out" ] || sp_bad_fail=1
+  [ -z "${sp_bad_fail:-}" ] || bad "perf-capability: a production/relative CQLITE_PERF_SYSCTL_EXTRA_DIRS entry '$spbad' did not fail the scan closed"
+done
+[ -n "${sp_bad_fail:-}" ] || ok "perf-capability: a production-shaped/relative/resolving-into-production extra search-path entry fails the scan CLOSED (rc 1, no output)"
 # ...and an UNREADABLE directory is an UNKNOWN (rc 1), never "no competing file": this
 # diagnostic exists to replace an unknown with a named file, so answering an unknown with
 # the reassuring line would recreate the mystery it was written to end.
