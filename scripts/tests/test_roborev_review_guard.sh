@@ -476,6 +476,40 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add Cargo.lock main.rs
       git_q "$work" commit -q -m 'a lockfile beside code'
       ;;
+    cargo-lock-dir)
+      # THE PHANTOM SIBLING (#3229 round-6 blocker 1). A tracked DIRECTORY whose name is
+      # `Cargo.lock`, holding code. The real built-in is the single pre-formatted pathspec
+      # `:(exclude,glob)**/Cargo.lock`, which matches the FILE name only — so
+      # `Cargo.lock/inner.rs` must SURVIVE. Running built-ins through
+      # `FormatExcludeArgs` invented a `**/Cargo.lock/**` sibling that swallowed it,
+      # OVER-modelling the exclusion set and dropping the path from `prompt-content`
+      # coverage: the false-PASS direction.
+      #
+      # Contrived on purpose — that is the POINT. The defect is unreachable in this repo
+      # today, so only a fixture can reach it, and an unreachable defect left unpinned is
+      # one refactor away from becoming reachable.
+      mkdir -p "$work/Cargo.lock"
+      printf 'fn inner() {}\n' >"$work/Cargo.lock/inner.rs"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add Cargo.lock main.rs
+      git_q "$work" commit -q -m 'a directory named Cargo.lock holding code'
+      ;;
+    docs-functional-config)
+      # THE BLINDNESS F2 NAMES. Functional configuration under `docs/` that is NOT in an
+      # artifact directory: the Grafana dashboard the FULL AGENT GATE guards with its own
+      # `kit-dashboard-drift` component, and the delivery-telemetry schema. Both carry
+      # artifact EXTENSIONS, so an extension sweep across all of `docs/` hid them; scoped
+      # to artifact DIRECTORIES they are CODE and must reach the reviewer.
+      mkdir -p "$work/docs/observability/grafana/dashboards" "$work/docs/reports"
+      printf '{"panels":[]}\n' >"$work/docs/observability/grafana/dashboards/cqlite-overview.json"
+      printf '{"type":"object"}\n' >"$work/docs/reports/delivery-telemetry.schema.json"
+      # ...beside a REAL artifact in a REAL artifact directory, so the same case proves
+      # the narrowing did not simply stop excluding things.
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf 'raw\n' >"$work/docs/reports/x-artifacts/a.txt"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'functional docs config beside a real artifact'
+      ;;
     cargo-lock-only)
       # THE TOTAL BUILT-IN SWALLOW (#3229 round 3, blocker F1). The census's ONLY
       # non-prose file is a lockfile, so `code-free:` PASSes (a `.lock` extension
@@ -682,10 +716,18 @@ write_roborev_config_raw() { # write_roborev_config_raw <work> <verbatim body>
   printf '%s\n' "$2" >"$1/.roborev.toml"
 }
 
-# The narrowed set this repo actually ships (a subset is enough for the fixtures).
-NARROWED_PATTERNS="['*.md', 'docs/**/*.txt', 'docs/**/*.json', 'docs/**/*.jsonl', 'docs/**/*.log', 'docs/**/*.err', 'docs/**/*.csv', 'docs/**/*.svg']"
+# The narrowed set this repo actually ships (a subset of the extensions is enough for the
+# fixtures, but the SHAPE must be the shipped one): each artifact pattern is scoped to an
+# artifact-bearing DIRECTORY GLOB, not to an extension across all of `docs/` (#3229
+# round 6). Keeping the old `docs/**/*.<ext>` shape here would have left the whole family
+# certifying a form the repo no longer ships.
+NARROWED_PATTERNS="['*.md', 'docs/reports/*-artifacts/**/*.txt', 'docs/reports/*-artifacts/**/*.json', 'docs/reports/*-artifacts/**/*.jsonl', 'docs/reports/*-artifacts/**/*.log', 'docs/reports/*-artifacts/**/*.err', 'docs/reports/*-artifacts/**/*.csv', 'docs/reports/*-artifacts/**/*.svg']"
 # The PRE-change value this issue exists to retire.
 BLANKET_PATTERNS="['docs/**', '*.md']"
+# The INTERMEDIATE value round 6 retired: artifact extensions swept across ALL of `docs/`.
+# It hid FUNCTIONAL CONFIG (a `kit-dashboard-drift`-guarded Grafana dashboard, the
+# delivery-telemetry schema) rather than just artifacts, which is blindness, not noise.
+DOCS_WIDE_EXT_PATTERNS="['*.md', 'docs/**/*.txt', 'docs/**/*.json', 'docs/**/*.jsonl', 'docs/**/*.log', 'docs/**/*.err', 'docs/**/*.csv', 'docs/**/*.svg']"
 
 # Fixture-integrity guard: a narrow-refspec fixture that accidentally grew a
 # feature mirror ref would silently stop testing the condition it exists for.
@@ -1957,6 +1999,182 @@ if bash "$cx21_probe" "$ORACLES_SRC" "$CHECKS_SRC" "$tmp" >"$cx21_out" 2>&1; the
   fi
 else
   bad "case (cx21): the unit probe did not run: $(cat "$cx21_out")"
+fi
+
+printf "== case (cx22): a BUILT-IN contributes ONE verbatim pathspec — no phantom /** sibling ==\n"
+reset_stub
+# #3229 round-6 blocker 1. Built-ins are PRE-FORMATTED pathspec constants the binary
+# appends to git's argv VERBATIM (established from the v0.61.2 binary: the
+# `:(exclude,glob)` prefix is inside each string literal, proven non-coincidental by Go's
+# length-ordered rodata packing, and only 2 bare prefix constants exist for 26 total
+# occurrences). They do NOT pass through `git.FormatExcludeArgs`, so they never acquire
+# the `/**` sibling a CONFIGURED pattern does.
+#
+# The observable: a tracked DIRECTORY named `Cargo.lock`. The real pathspec
+# `:(exclude,glob)**/Cargo.lock` matches the file name only, so `Cargo.lock/inner.rs`
+# SURVIVES and must be expected in the prompt. With the phantom sibling it was swallowed —
+# an exclusion roborev does not apply, which drops the path from `prompt-content` coverage.
+# That is the FALSE-PASS direction, so this asserts BOTH keys.
+work=$(make_fixture case_cx22 cargo-lock-dir)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/Cargo.lock/inner.rs b/Cargo.lock/inner.rs\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx22)' PASS 0
+assert_says 'case (cx22) BOTH code paths survive — the built-in eats neither' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_lacks 'case (cx22) Cargo.lock/inner.rs is NOT reported swallowed' 'Cargo\.lock/inner\.rs by'
+assert_lacks 'case (cx22) no NOTICE, because nothing was excluded at all' '^census-exclusion: NOTICE'
+# The false-PASS direction, asserted where it would actually land: an over-modelled
+# exclusion set silently EXCUSES the path from prompt coverage.
+assert_says 'case (cx22) prompt-content covers BOTH paths, excusing neither' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx22) no path is excused as built-in-excluded' 'not expected: excluded by a roborev built-in'
+
+printf "== case (cx22b): the built-in still eats the FILE — the fix did not under-model it ==\n"
+reset_stub
+# The MIRROR-IMAGE error the fix must not commit. "One pathspec for built-ins" is only
+# correct if that one pathspec still WORKS: a real `Cargo.lock` FILE must still be seen as
+# swallowed. Without this, cx22 could be satisfied by dropping built-in modelling
+# altogether, which reports paths as surviving that roborev really drops — a false PASS in
+# the other place. cx19's NOTICE and cx20's total-swallow FAIL both depend on this too.
+work=$(make_fixture case_cx22b cargo-lock)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx22b)' PASS 0
+assert_says 'case (cx22b) the lockfile FILE is still attributed to the built-in' "census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]"
+
+printf "== case (cx23): FUNCTIONAL CONFIG under docs/ is CODE and REACHES the reviewer ==\n"
+reset_stub
+# #3229 round-6 blocker 2. The `kit-dashboard-drift`-guarded Grafana dashboard and the
+# delivery-telemetry schema both carry artifact EXTENSIONS but are NOT in an artifact
+# directory. Under the retired `docs/**/*.<ext>` form they were dropped from the diff AND
+# counted code-free — unreviewable by construction, which falsified "noise, never
+# blindness" for code-bearing formats. Scoped to artifact DIRECTORIES they are CODE, they
+# survive, and the real artifact beside them is still excluded — so this one case pins
+# both halves: no blindness, and the narrowing did not simply stop excluding things.
+work=$(make_fixture case_cx23 docs-functional-config)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/observability/grafana/dashboards/cqlite-overview.json b/docs/observability/grafana/dashboards/cqlite-overview.json\ndiff --git a/docs/reports/delivery-telemetry.schema.json b/docs/reports/delivery-telemetry.schema.json'
+run_wrapper "$work"
+assert_verdict 'case (cx23)' PASS 0
+assert_says 'case (cx23) both functional config files are CODE census paths that SURVIVE' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_lacks 'case (cx23) neither is swallowed by the configured set' 'cqlite-overview\.json by'
+assert_lacks 'case (cx23) the telemetry schema is not swallowed either' 'delivery-telemetry\.schema\.json by'
+# NOT code-free: the census is 3 files (2 config + 1 artifact) and the config half is CODE.
+assert_says 'case (cx23) the change is NOT classified code-free' '^code-free: PASS$'
+# ...and the genuine artifact in a genuine artifact directory is STILL non-code, so the
+# narrowing did not degenerate into "review everything under docs/".
+assert_says 'case (cx23) the real artifact is still non-code, so only 2 of 3 are code' '^census: 3 files'
+assert_says 'case (cx23) prompt-content covers exactly the 2 code paths' '^prompt-content: PASS \(2/2 code census paths present\)$'
+
+printf "== case (cx23b): the RETIRED docs-wide form is what hid it (the defect, reproduced) ==\n"
+reset_stub
+# The complement that gives cx23 its meaning: with the INTERMEDIATE `docs/**/*.<ext>`
+# configuration the very same fixture has its functional config SWALLOWED. Without this,
+# cx23 could pass under either configuration and would pin nothing about the narrowing.
+# The census classification (now directory-scoped) calls these files CODE while this
+# retired configuration excludes them — which is exactly the swallow `census-exclusion:`
+# exists to FAIL on, and the reason the two representations must be edited together.
+work=$(make_fixture case_cx23b docs-functional-config)
+write_roborev_config "$work" "$DOCS_WIDE_EXT_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/observability/grafana/dashboards/cqlite-overview.json b/docs/observability/grafana/dashboards/cqlite-overview.json'
+run_wrapper "$work"
+assert_verdict 'case (cx23b)' FAIL 1
+assert_says 'case (cx23b) the docs-wide form swallows the gate-guarded dashboard' '^census-exclusion: FAIL'
+assert_says 'case (cx23b) and names it with the pattern responsible' "cqlite-overview\.json by 'docs/\*\*/\*\.json'"
+assert_never_enqueued 'case (cx23b)'
+
+printf "== case (cx24): the census/config MIRROR is asserted STRUCTURALLY against .roborev.toml ==\n"
+# #3260 item 2: `CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS` and the
+# committed `.roborev.toml` are the SAME FACT WRITTEN TWICE, and a one-sided edit is the
+# standing hazard — it surfaces as a `census-exclusion:` FAIL on an unrelated report PR,
+# a long way from its cause. So the expected pattern set is DERIVED from the constants and
+# compared for SET EQUALITY against the committed configuration, using the wrapper's OWN
+# TOML parser rather than a second ad-hoc one (a private parser could disagree with the
+# one that produces the verdict and certify a file the check never reads the same way).
+#
+# Deliberately reads the COMMITTED repo file, not a fixture: the drift being guarded is a
+# real edit to a real file, and no fixture can stand in for it.
+cx24_probe="$tmp/cx24-probe.sh"
+cx24_out="$tmp/cx24-out.txt"
+cat >"$cx24_probe" <<'CX24'
+set -uo pipefail
+. "$1"   # oracles: the constants AND roborev_toml_exclude_patterns
+cfg="$2"
+# The parser's contract (it appends into these):
+_rx_patterns=(); _rx_sources=(); _rx_error=""; _rx_found=0
+roborev_toml_exclude_patterns "$cfg" committed
+if [ -n "$_rx_error" ]; then printf 'MIRROR: PARSE-ERROR %s\n' "$_rx_error"; exit 0; fi
+if [ "$_rx_found" -ne 1 ]; then printf 'MIRROR: NO-KEY\n'; exit 0; fi
+# DERIVE the expected set from the constants.
+expected=("$CODE_FREE_PROSE_PATTERN")
+for d in "${CODE_FREE_ARTIFACT_DIR_GLOBS[@]}"; do
+  # shellcheck disable=SC2086
+  for e in $CODE_FREE_ARTIFACT_EXTENSIONS; do expected+=("$d/**/*.$e"); done
+done
+# SET comparison, order-insensitive: the file is MACHINE-MANAGED (`roborev config set`
+# rewrites it), so pinning order would produce a false FAIL on a legitimate rewrite.
+printf '%s\n' "${expected[@]}" | LC_ALL=C sort >"$3/exp.txt"
+printf '%s\n' "${_rx_patterns[@]}" | LC_ALL=C sort >"$3/got.txt"
+if cmp -s "$3/exp.txt" "$3/got.txt"; then
+  printf 'MIRROR: OK (%s patterns)\n' "${#expected[@]}"
+else
+  printf 'MIRROR: DRIFT\n'
+  printf 'only-in-constants: %s\n' "$(LC_ALL=C comm -23 "$3/exp.txt" "$3/got.txt" | tr '\n' ' ')"
+  printf 'only-in-config: %s\n' "$(LC_ALL=C comm -13 "$3/exp.txt" "$3/got.txt" | tr '\n' ' ')"
+fi
+# The RETIRED FORMS, judged on the PARSED PATTERN SET rather than by grepping the file.
+# A file-wide grep cannot tell a live pattern from this file's own prose: `.roborev.toml`
+# DOCUMENTS `docs/**` and `docs/**/*.json` as the forms it retired, so a whole-file grep
+# reports the history as a regression. Only the parsed value can answer the question.
+retired=""
+for p in "${_rx_patterns[@]}"; do
+  case "$p" in
+    'docs/**' | 'docs/**/**') retired="$retired blanket:$p" ;;
+    'docs/**/*.'*) retired="$retired docs-wide-ext:$p" ;;
+  esac
+done
+if [ -n "$retired" ]; then
+  printf 'RETIRED-FORM:%s\n' "$retired"
+else
+  printf 'RETIRED-FORM: none\n'
+fi
+CX24
+REPO_TOML="$SCRIPT_DIR/../../.roborev.toml"
+if [ ! -f "$REPO_TOML" ]; then
+  bad 'case (cx24): the committed .roborev.toml is missing — the mirror cannot be asserted'
+elif bash "$cx24_probe" "$ORACLES_SRC" "$REPO_TOML" "$tmp" >"$cx24_out" 2>&1; then
+  if grep -q '^MIRROR: OK' "$cx24_out"; then
+    ok "case (cx24): the constants and the committed .roborev.toml agree exactly ($(sed -n 's/^MIRROR: OK (\(.*\))$/\1/p' "$cx24_out"))"
+  else
+    bad "case (cx24): census/config mirror DRIFT — edit CODE_FREE_ARTIFACT_* and .roborev.toml together: $(tr '\n' '|' <"$cx24_out")"
+  fi
+  # The assert must be a SET comparison over a NON-EMPTY derived set: an empty `expected`
+  # would compare equal to an empty parse and pass vacuously.
+  if grep -qE '^MIRROR: OK \([1-9][0-9]* patterns\)$' "$cx24_out"; then
+    ok 'case (cx24): the mirror was asserted over a NON-EMPTY derived pattern set'
+  else
+    bad "case (cx24): the derived pattern set was empty or unreported — a vacuous mirror assert: $(tr '\n' '|' <"$cx24_out")"
+  fi
+  # And the shipped configuration must carry NEITHER retired form — read off the PARSED
+  # value, so this file's own prose describing what it retired cannot read as a
+  # regression.
+  if grep -q '^RETIRED-FORM: none$' "$cx24_out"; then
+    ok 'case (cx24): the committed exclude_patterns carries neither retired form (no blanket docs/**, no docs-wide extension sweep)'
+  else
+    bad "case (cx24): the committed exclude_patterns reintroduced a retired form: $(grep '^RETIRED-FORM:' "$cx24_out")"
+  fi
+  # The retired-form probe must have RUN and reported, not merely failed to say `none`.
+  if grep -qE '^RETIRED-FORM:' "$cx24_out"; then
+    ok 'case (cx24): the retired-form probe reported a verdict'
+  else
+    bad "case (cx24): the retired-form probe emitted nothing — the check did not run: $(tr '\n' '|' <"$cx24_out")"
+  fi
+else
+  bad "case (cx24): the mirror probe did not run: $(cat "$cx24_out")"
 fi
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
