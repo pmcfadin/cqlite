@@ -716,6 +716,42 @@ else
   bad "perf section: a sudo invocation without -n was recorded (or none at all): $(cat "$pwtrip")"
 fi
 
+# 4c-iii. ALREADY ROOT: the printed remedy must carry NO `sudo` prefix — many root
+#         images have no sudo installed at all, so a hardcoded `sudo tee` line is
+#         un-runnable exactly where it is printed. Check mode, so nothing is written.
+rootbox="$tmp/perf-rootbox"; mkdir -p "$rootbox"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find tee; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$rootbox/$t"
+done
+mkuname "$rootbox" Linux
+printf '#!/usr/bin/env bash\ncase "${1:-}" in -u) echo 0 ;; *) echo 0 ;; esac\n' >"$rootbox/id"
+chmod +x "$rootbox/id"
+roottrip="$tmp/perf-rootbox-tripwire.log"; : >"$roottrip"
+for t in sudo sysctl; do
+  cat >"$rootbox/$t" <<EOF
+#!/usr/bin/env bash
+echo "$t \$*" >>"$roottrip"
+exit 0
+EOF
+  chmod +x "$rootbox/$t"
+done
+ln -sf "$perfbin/perf" "$rootbox/perf"
+mkperfshim 3333333
+rootbox_d="$tmp/perf-rootbox.d"; mkdir -p "$rootbox_d"
+rootbox_out=$(PATH="$rootbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$rootbox_d" CQLITE_PERF_TEST_PRIV_DIR="$rootbox" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+rootbox_rc=$?
+rootbox_remedy=$(printf '%s\n' "$rootbox_out" | grep 'write + apply the drop-in' || true)
+if [ "$rootbox_rc" -eq 0 ] && [ -z "$(ls -A "$rootbox_d")" ] \
+   && printf '%s' "$rootbox_remedy" | grep -q '| tee .*99-cqlite-perf.conf >/dev/null && sysctl -q --system' \
+   && ! printf '%s' "$rootbox_remedy" | grep -q 'sudo'; then
+  ok "perf section: when ALREADY ROOT the printed write+apply remedy carries no 'sudo' prefix"
+else
+  bad "perf section: root-box remedy line wrong (rc=$rootbox_rc, line='$rootbox_remedy')"
+fi
+
 # 4d. THE SILENT REVERT — the real-world trap this whole issue exists to fix, and so
 #      the path that must be best-tested. `sysctl` exits 0 while the value does NOT
 #      take (container, read-only /proc, a later-sorting drop-in or /etc/sysctl.conf
