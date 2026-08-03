@@ -1,0 +1,94 @@
+WS0 benchmark corpus -- PROVENANCE (CQLite issue #3217)
+=======================================================
+STATUS: REGENERATION. This corpus is a fresh generation of the #3026/#3100 WS0
+recipe on a new box. It is NOT byte-identical to #3100's corpus and was never
+expected to be: cassandra-stress draws values from a non-deterministic seed
+stream, so the Data.db sha256 differs. The accepted bar is MATCHED GEOMETRY +
+a documented new sha, and that bar is met (see the comparison table below).
+
+Generated on        : 2026-08-02 (UTC), host ip-172-31-5-109, 16 hw threads / 30 GiB RAM, no swap
+Cassandra           : apache-cassandra-5.0.8 (binary tarball), ReleaseVersion 5.0.8
+  unpacked at       : /data/ws0/apache-cassandra-5.0.8
+  tarball           : /data/ws0/apache-cassandra-5.0.8-bin.tar.gz
+JDK                 : OpenJDK 11.0.31 (/usr/lib/jvm/java-11-openjdk-amd64)
+                      openjdk version "11.0.31" 2026-04-21;OpenJDK Runtime Environment (build 11.0.31+11-post-1ubuntu1-24.04.2-Ubuntu);OpenJDK 64-Bit Server VM (build 11.0.31+11-post-1ubuntu1-24.04.2-Ubuntu, mixed mode, sharing);
+  (#3100 used JDK 17; this box has only JDK 11, which Cassandra 5.0 supports.
+   The daemon started clean on 11 and no JDK-17 install was needed.)
+Daemon heap         : MAX_HEAP_SIZE=8G (nodetool info reported 8192.00 MB max).
+                      Same deliberate non-stock deviation as #3026/#3100: stock
+                      auto-sizing picks ~15.4 GiB on a 30 GiB no-swap box and
+                      gets OOM-killed.
+cassandra.yaml      : stock except paths+addresses (pristine copy kept at
+                      /data/ws0/apache-cassandra-5.0.8/conf/cassandra.yaml.stock).
+                      Structurally the SAME diff as the committed
+                      docs/reports/ws0-3026-artifacts/ws0-corpus/cassandra.yaml.diff
+                      (identical line numbers 97/395-396/408/611/981/1090), with
+                      the path root /home/ubuntu/ws0 -> /data/ws0:
+                        hints_directory        : /data/ws0/cassandra-data/hints
+                        data_file_directories  : [/data/ws0/cassandra-data/data]
+                        commitlog_directory    : /data/ws0/cassandra-data/commitlog
+                        saved_caches_directory : /data/ws0/cassandra-data/saved_caches
+                        listen_address/rpc_address : 127.0.0.1
+                      VERIFIED at runtime: the SSTables landed under
+                      /data/ws0/cassandra-data/data/ws0/events-*, i.e. the patched
+                      dir -- NOT the CASSANDRA_HOME-relative default that #3100 hit
+                      (#3100's corpus sat in .../apache-cassandra-5.0.8/data/data/).
+Generation command  : bash gen-corpus.sh 200000 375 6 96 3 96 16 2 10 8 50000
+  (= partitions=200000 payload=375B/pop6 blob_a=96B/pop3 blob_b=96B/pop16
+     seq_cluster=2 event_time_cluster=10 threads=8 batch_partitions=50000)
+  script copy used  : /data/ws0/ws0-corpus/gen-corpus.sh (relocated copy of the
+                      committed docs/reports/ws0-3026-artifacts/ws0-corpus/gen-corpus.sh)
+  profile generated : /data/ws0/ws0-corpus/.gen-p200000-pl375x6-ba96x3-bb96x16-cl2x10.yaml
+  stress logs       : /data/ws0/ws0-corpus/.stress-*-b{1..4}.log (0 errors in all 4 batches)
+  run log           : /data/ws0/logs/gen-corpus.log
+Schema              : ws0.events, no compression clause -> Cassandra 5.0 stock
+                      LZ4Compressor / chunk_length_in_kb=16 (VERIFIED from the
+                      on-disk CompressionInfo.db header, not assumed).
+Compaction          : nodetool flush ws0 events (per 50k-partition batch) then
+                      nodetool flush + nodetool compact -> exactly ONE SSTable
+                      (compact took 17.5 s wall).
+Staged dataset      : /data/ws0/ws0-h2h/datasets/sstables/ws0/events-1aeab5508eaa11f18f9875578d68601b
+                      (cp -p of all 8 components; staged sha256 == source sha256)
+                      Serve with: cqlite-flight --data-dir /data/ws0/ws0-h2h/datasets/sstables
+                      Schema file: /data/ws0/ws0-h2h/schemas/ws0-events.cql
+                      Flight ticket template: /data/ws0/ws0-h2h/ws0-events-template.json
+
+sha256(Data.db)     : 3a4ee5cd5ef5937ae52a703cca0ee0359df8ecb959915dea66b3b89f9a9c7c1e
+  (#3100's was      : 2c297a0caf76338be0568be486570fe63b61c2ca9bfa6e68e7368f34c189d9a2 -- DIFFERENT, as expected)
+
+Geometry vs #3100 (docs/reports/ws0-3100-artifacts/corpus-geometry.txt)
+-----------------------------------------------------------------------
+  metric                         this run          #3100            delta
+  rows                           3999890           3999890          0
+  totalColumnsSet                35999010          35999010         0
+  partitions (estimate)          198130            198130           0
+  uncompressed B/row             693.29            692.70           +0.085%
+  Data.db bytes (compressed)     784334710         784116369        +0.028%
+  uncompressed dataLength        2773081150        2772051730       +0.037%
+  LZ4 ratio (header-derived)     3.5356x           3.5353x          +0.008%
+  chunk count (16 KiB chunks)    169257            169194           +63
+  compressor / chunk_length      LZ4 / 16 KiB      LZ4 / 16 KiB     same
+  droppable tombstones           0.0               0.0              same
+  SSTable count / format         1 / nb-16-big     1 / nb-16-big    same
+
+Deviations from #3100's recipe (all called out)
+-----------------------------------------------
+1. JDK 11.0.31 instead of JDK 17 (only JDK available here; Cassandra 5.0
+   supports both; daemon and cassandra-stress both ran clean).
+2. Root path /data/ws0 instead of /home/ubuntu/ws0 (this box's large volume).
+3. cassandra.yaml IS patched here, so the data dir is /data/ws0/cassandra-data/data.
+   #3100's corpus actually landed in the CASSANDRA_HOME-relative default
+   (.../apache-cassandra-5.0.8/data/data). Location only -- no format/geometry effect.
+4. gen-corpus.sh's final row-count step was changed from
+   'SELECT count(*) FROM ws0.events' (which server-side-timeouts over 4M rows --
+   already documented as failing in rerun.sh) to
+   'sstablemetadata <Data.db> | awk /totalRows/'. Measurement-only change; the
+   count was independently confirmed by fullscan.py 512 (3999890, exact agreement).
+5. cql.py / measure-sstable.py / fullscan.py run under the venv interpreter
+   /data/ws0/venv/bin/python (cassandra-driver 3.30.1); the system Python 3.12 is
+   externally-managed and cqlsh is unusable on 3.12.
+6. verify-claims.sh (#3026's bpftrace claim verification) was NOT run -- out of
+   scope for #3217, which needs the corpus only.
+
+Daemon state on completion: STOPPED (pid 2157502 terminated after the
+measurements above; nothing Cassandra-side is left competing for CPU).
