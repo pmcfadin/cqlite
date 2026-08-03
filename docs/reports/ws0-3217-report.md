@@ -685,6 +685,7 @@ The measured discount (0.711–0.873) lands **inside** #2817's assumed **0.6–0
 | `partB-results/scheduler/` | 6 × `runqlat.{txt,json}` + 2 × `scheduler-cost.{jsonl,txt}` |
 | `partB-results/counters/` | 3 × `perf-stat.csv` + `microarch-counters.json` |
 | `partB-results/` | `partB-analysis.{txt,json}`, `cpu-topology.json`, `raw-capture-inventory.txt` |
+| `partC/` | the Part C deliverables as **drafts, not posted/filed** — `POST-TO-2817.md` (marginal-efficiency table + the lever call), `POST-TO-3100.md` (AC2 shape verdict + the off-CPU answer to #3100's declined section), `PROPOSED-FOLLOWUPS.md` (5 proposed issues + the candidates dropped for lack of evidence). Posting and filing are the owner's. |
 
 **Retained on the measurement box with paths recorded** (too bulky to commit; full listing in
 `results/raw-capture-inventory.txt` and `partB-results/raw-capture-inventory.txt`, box
