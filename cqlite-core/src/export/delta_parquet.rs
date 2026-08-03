@@ -90,6 +90,11 @@ impl From<ArrowConvertError> for DeltaParquetError {
         match e {
             ArrowConvertError::Arrow(a) => DeltaParquetError::Arrow(a),
             ArrowConvertError::InvalidValue(s) => DeltaParquetError::InvalidValue(s),
+            // See the same arm in `parquet.rs`: preserved as a message rather
+            // than collapsed into a bare Arrow error (issue #3096 review).
+            ArrowConvertError::SchemaMismatch(s) => DeltaParquetError::InvalidValue(format!(
+                "Arrow schema does not match the column set: {s}"
+            )),
         }
     }
 }

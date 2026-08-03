@@ -87,6 +87,17 @@ pub enum ArrowConvertError {
     /// A value could not be represented in the target Arrow type.
     #[error("{0}")]
     InvalidValue(String),
+    /// A caller-supplied Arrow schema does not describe the column set it was
+    /// passed with (issue #3096 review).
+    ///
+    /// Raised by [`rows_to_record_batch_with_schema`], which is the only entry
+    /// point that accepts a schema it did not build. `RecordBatch::try_new`
+    /// checks field TYPES and array lengths only, so a schema whose fields are
+    /// REORDERED (or renamed) among same-typed columns is accepted by Arrow and
+    /// silently mislabels every affected column — this variant is what makes
+    /// that a rejection instead.
+    #[error("Arrow schema does not match the column set: {0}")]
+    SchemaMismatch(String),
 }
 
 // ============================================================================
@@ -133,20 +144,78 @@ pub fn rows_to_record_batch(
 /// then dropped it again. Reusing the `Arc` makes the per-batch cost a refcount
 /// bump (issue #3096, lever 6).
 ///
+/// # What is validated, exactly (issue #3096 review)
+///
+/// This function accepts a schema it did not build, so the mismatch question is
+/// real. Two independent checks cover it, and the split matters:
+///
+/// * **Field arity, NAMES and ORDER** — checked HERE, by
+///   [`check_schema_matches_columns`], against `columns[i].name`. `Field`'s name
+///   is always `col.name` ([`build_arrow_schema`] → `column_to_field`), so this
+///   is an exact equality check, not a heuristic.
+/// * **Field TYPES and array lengths** — checked by `RecordBatch::try_new`.
+///
+/// The name/order half is checked here **because `RecordBatch::try_new` does not
+/// check it**: it compares field data types and lengths only, so a schema whose
+/// fields are REORDERED among columns of the same Arrow type is accepted and
+/// every one of those columns is silently mislabeled on the wire. The doc comment
+/// this function shipped with claimed `try_new` covered that; it does not, and
+/// this check is what makes the claim true.
+///
+/// Cost is one `usize` comparison plus one `str` comparison per COLUMN per batch
+/// (12 short comparisons for `ws0.events`), against per-batch work proportional
+/// to rows x columns — so it does not undo lever 6's `Arc` reuse.
+///
 /// # Errors
 ///
-/// Returns [`ArrowConvertError`] if any value cannot be represented in the target
-/// Arrow type, or if the Arrow array construction fails or the arrays do not
-/// match `schema` (`RecordBatch::try_new` validates that, so a mismatched schema
-/// is rejected rather than silently mislabeling the batch).
+/// Returns [`ArrowConvertError::SchemaMismatch`] if `schema`'s field count,
+/// names, or order do not match `columns`; [`ArrowConvertError::InvalidValue`] if
+/// a value cannot be represented in the target Arrow type; and
+/// [`ArrowConvertError::Arrow`] if array construction fails or the built arrays
+/// do not match `schema`'s field TYPES or lengths.
 pub fn rows_to_record_batch_with_schema(
     schema: Arc<Schema>,
     columns: &[ColumnInfo],
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
+    check_schema_matches_columns(&schema, columns)?;
     let arrays = convert_to_arrays(columns, rows)?;
     let batch = RecordBatch::try_new(schema, arrays)?;
     Ok(batch)
+}
+
+/// Reject a caller-supplied `schema` whose fields are not `columns`' fields, in
+/// `columns`' order (issue #3096 review).
+///
+/// Only the arity/name/order half is checked: field TYPES and array lengths are
+/// `RecordBatch::try_new`'s job, and duplicating that here would be dead weight.
+/// Name equality is exact because [`build_arrow_schema`]'s `column_to_field`
+/// names every field `col.name` verbatim — nothing is inferred from the name's
+/// shape (no-heuristics, #28).
+fn check_schema_matches_columns(
+    schema: &Schema,
+    columns: &[ColumnInfo],
+) -> Result<(), ArrowConvertError> {
+    let fields = schema.fields();
+    if fields.len() != columns.len() {
+        return Err(ArrowConvertError::SchemaMismatch(format!(
+            "schema has {} field(s) but {} column(s) were supplied",
+            fields.len(),
+            columns.len()
+        )));
+    }
+    for (i, (field, col)) in fields.iter().zip(columns.iter()).enumerate() {
+        if field.name() != &col.name {
+            return Err(ArrowConvertError::SchemaMismatch(format!(
+                "field {i} is '{}' but column {i} is '{}' — a reordered or renamed \
+                 schema is accepted by RecordBatch::try_new whenever the Arrow types \
+                 line up, and would mislabel the batch",
+                field.name(),
+                col.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 // =========================================================================

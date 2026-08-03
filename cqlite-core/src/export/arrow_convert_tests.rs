@@ -679,3 +679,128 @@ fn normal_collections_still_build_through_checked_offsets() {
     let batch = rows_to_record_batch(&map_cols, &map_rows).expect("map must build");
     assert_eq!(batch.num_rows(), 1);
 }
+
+// =========================================================================
+// `rows_to_record_batch_with_schema`'s schema contract (issue #3096 review)
+// =========================================================================
+
+/// A two-column, two-`Text` fixture: same Arrow type for both columns, which is
+/// the shape a reorder can hide behind.
+fn two_text_columns() -> (Vec<ColumnInfo>, Vec<QueryRow>) {
+    let columns = vec![
+        col("alpha", DataType::Text, Some(CqlType::Text)),
+        col("beta", DataType::Text, Some(CqlType::Text)),
+    ];
+    let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+    values.insert("alpha".into(), Value::Text("A".into()));
+    values.insert("beta".into(), Value::Text("B".into()));
+    let rows = vec![QueryRow {
+        values,
+        key: RowKey::new(Vec::new()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    }];
+    (columns, rows)
+}
+
+/// **The finding, pinned.** The doc comment used to assert that
+/// `RecordBatch::try_new` rejects a mismatched schema. It does not: it compares
+/// field TYPES and lengths only, so a REORDERED schema over same-typed columns is
+/// accepted and every affected column is silently mislabeled.
+///
+/// Both halves are asserted, because the second is what makes the first
+/// non-vacuous:
+///
+/// 1. `rows_to_record_batch_with_schema` now REJECTS the reordered schema; and
+/// 2. `RecordBatch::try_new` — handed the very same schema and arrays — ACCEPTS
+///    it, and hands back a batch whose first column is labelled `beta` while
+///    holding `alpha`'s values.
+#[test]
+fn a_reordered_same_type_schema_is_rejected_not_silently_mislabeled() {
+    let (columns, rows) = two_text_columns();
+    let reordered: Vec<ColumnInfo> = columns.iter().rev().cloned().collect();
+    let reordered_schema = Arc::new(build_arrow_schema(&reordered).expect("schema"));
+    assert_eq!(
+        reordered_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["beta", "alpha"],
+        "the fixture must actually be reordered"
+    );
+
+    // (1) The contract this function documents now holds.
+    let err = rows_to_record_batch_with_schema(Arc::clone(&reordered_schema), &columns, &rows)
+        .expect_err("a reordered schema must be rejected");
+    match &err {
+        ArrowConvertError::SchemaMismatch(msg) => {
+            assert!(
+                msg.contains("field 0 is 'beta'") && msg.contains("column 0 is 'alpha'"),
+                "the error must name the offending position and both names, got: {msg}"
+            );
+        }
+        other => panic!("expected SchemaMismatch, got {other:?}"),
+    }
+
+    // (2) Non-vacuity: Arrow itself would have accepted it. This is the assertion
+    // that would fail if `RecordBatch::try_new` ever grew a name/order check,
+    // making the guard above redundant — at which point the doc can be simplified.
+    let arrays = convert_to_arrays(&columns, &rows).expect("arrays");
+    let arrow_accepted = arrow::record_batch::RecordBatch::try_new(reordered_schema, arrays)
+        .expect("RecordBatch::try_new compares field TYPES and lengths only");
+    assert_eq!(
+        arrow_accepted.schema().field(0).name(),
+        "beta",
+        "Arrow labelled column 0 'beta'…"
+    );
+    let mislabeled = arrow_accepted
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("utf8");
+    assert_eq!(
+        mislabeled.value(0),
+        "A",
+        "…while it holds ALPHA's value — exactly the silent mislabeling the \
+         rejection above prevents"
+    );
+}
+
+/// A schema with the wrong field COUNT is rejected here rather than surfacing as
+/// an opaque Arrow error.
+#[test]
+fn a_schema_with_the_wrong_field_count_is_rejected() {
+    let (columns, rows) = two_text_columns();
+    let one_column_schema = Arc::new(build_arrow_schema(&columns[..1]).expect("schema"));
+    let err = rows_to_record_batch_with_schema(one_column_schema, &columns, &rows)
+        .expect_err("an arity mismatch must be rejected");
+    assert!(
+        matches!(&err, ArrowConvertError::SchemaMismatch(m)
+            if m.contains("1 field(s)") && m.contains("2 column(s)")),
+        "got {err:?}"
+    );
+}
+
+/// The path every real caller takes — the schema built from the same columns —
+/// is unaffected: same arity, same order, and identical to the
+/// schema-building-per-call entry point's output.
+#[test]
+fn the_matching_schema_path_is_unchanged() {
+    let (columns, rows) = two_text_columns();
+    let schema = Arc::new(build_arrow_schema(&columns).expect("schema"));
+    let with_schema = rows_to_record_batch_with_schema(schema, &columns, &rows)
+        .expect("the matching schema must be accepted");
+    let built_inline = rows_to_record_batch(&columns, &rows).expect("inline schema");
+    assert_eq!(with_schema.schema(), built_inline.schema());
+    assert_eq!(with_schema.num_rows(), built_inline.num_rows());
+    assert_eq!(
+        with_schema
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+}

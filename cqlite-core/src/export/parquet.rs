@@ -113,6 +113,12 @@ impl From<ArrowConvertError> for ParquetExportError {
         match e {
             ArrowConvertError::Arrow(a) => ParquetExportError::Arrow(a),
             ArrowConvertError::InvalidValue(s) => ParquetExportError::InvalidValue(s),
+            // Unreachable from this writer today — it never supplies its own
+            // schema — but mapped rather than collapsed so the reason survives if
+            // it ever does (issue #3096 review).
+            ArrowConvertError::SchemaMismatch(s) => ParquetExportError::InvalidValue(format!(
+                "Arrow schema does not match the column set: {s}"
+            )),
         }
     }
 }
