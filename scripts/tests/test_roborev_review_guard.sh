@@ -2931,6 +2931,105 @@ else
   bad "structural: oracles file not found at $ORACLES"
 fi
 
+printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
+# THE INVARIANT THAT STOPS THE NEXT ROUND (#3229 round 4). Rounds 2, 3 and 4 produced six
+# blockers and every one was a path-normalisation defect in a DIFFERENT consumer, because
+# normalisation was scattered: the census did not normalise at all, `census-exclusion:`
+# unquoted at one point, `prompt-content:` did something else again. Patching the reported
+# consumer each round is a losing game, so the boundary itself is asserted here:
+#   (1) every git path read is `-z`, so paths arrive RAW and there is nothing to unquote;
+#   (2) RAW is the single internal representation — no consumer unquotes a census path;
+#   (3) there is ONE unquoting implementation and ONE header matcher, with the unquoter
+#       called only from the matcher;
+#   (4) no consumer re-implements header parsing or newline-delimited path membership.
+CHECKS_FILE="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+FLOW_FILES=("$ORACLES" "$CHECKS_FILE" "$WRAPPER")
+for _f in "${FLOW_FILES[@]}"; do
+  if [ ! -f "$_f" ]; then bad "structural: missing $_f"; continue; fi
+  # (1) EVERY `git diff` that reads PATHS must be NUL-delimited. A `--numstat`/`--name-only`
+  #     read without `-z` C-quotes odd paths and re-creates the whole defect class.
+  _bad_reads=$(grep -nE 'git .*diff .*(--numstat|--name-only)' "$_f" \
+    | grep -v '^[0-9]*: *#' | grep -vF -- ' -z ' || true)
+  if [ -z "$_bad_reads" ]; then
+    ok "structural: every path-reading git diff in $(basename "$_f") is NUL-delimited (-z)"
+  else
+    bad "structural: a path-reading git diff without -z in $(basename "$_f"): ${_bad_reads%%$'\n'*}"
+  fi
+done
+# (2) + (3): the unquoter is DEFINED once and CALLED only from the canonical matcher.
+_unq_defs=$(grep -cE '^roborev_unquote_path\(\) \{' "$ORACLES" || true)
+if [ "${_unq_defs:-0}" -eq 1 ]; then
+  ok 'structural: roborev_unquote_path is defined exactly once, in the oracles file'
+else
+  bad "structural: expected exactly 1 definition of roborev_unquote_path, found ${_unq_defs:-0}"
+fi
+_unq_callers=$(grep -nE '(^|[^#])roborev_unquote_path ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" \
+  | grep -v '^[^:]*:[0-9]*: *#' || true)
+_unq_caller_files=$(printf '%s\n' "$_unq_callers" | sed -n 's|^\([^:]*\):.*|\1|p' | sort -u | wc -l | tr -d '[:space:]')
+if [ "${_unq_caller_files:-0}" -eq 1 ] && printf '%s' "$_unq_callers" | grep -qF 'roborev-review-oracles.sh'; then
+  ok 'structural: roborev_unquote_path is called ONLY from the oracles file (one boundary)'
+else
+  bad "structural: roborev_unquote_path is called from $_unq_caller_files file(s) — a second consumer normalises on its own"
+fi
+# Every call site must sit inside `roborev_diff_header_has_path`, the one place text we did
+# NOT get from git plumbing is normalised. Bounded by the next top-level function.
+_matcher_start=$(grep -nE '^roborev_diff_header_has_path\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+if [ -z "$_matcher_start" ]; then
+  bad 'structural: roborev_diff_header_has_path is not defined — the canonical matcher is gone'
+else
+  _matcher_end=$(awk -v s="$_matcher_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  _outside=0
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _n="${_line#*:}"; _n="${_n%%:*}"
+    case "$_line" in "$ORACLES":*) ;; *) _outside=$((_outside + 1)); continue ;; esac
+    if [ "$_n" -lt "$_matcher_start" ] || [ "$_n" -gt "${_matcher_end:-$_matcher_start}" ]; then
+      _outside=$((_outside + 1))
+    fi
+  done <<<"$_unq_callers"
+  if [ "$_outside" -eq 0 ]; then
+    ok "structural: every roborev_unquote_path call is inside roborev_diff_header_has_path (lines $_matcher_start-${_matcher_end:-?})"
+  else
+    bad "structural: $_outside roborev_unquote_path call(s) outside the canonical matcher"
+  fi
+fi
+# (4) no consumer re-implements header parsing or newline-delimited membership. These are
+#     the exact three mechanisms that were wrong: a `[^ ]+` header regex, a `.promptpaths`
+#     path-set file, and `grep -Fxq` membership over newline-delimited paths.
+# COMMENT LINES ARE EXEMPT: the file DOCUMENTS what was retired and why, which is the
+# record that keeps a future edit from reintroducing it. Only executable lines are checked.
+for _pat in 'diff --git a/\[\^ \]' 'promptpaths' 'grep -Fxq'; do
+  if grep -nE -- "$_pat" "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+    bad "structural: roborev-review-checks.sh still EXECUTES the retired mechanism '$_pat'"
+  else
+    ok "structural: the retired mechanism '$_pat' is not executed by roborev-review-checks.sh"
+  fi
+done
+if grep -qE '^ *if roborev_diff_header_has_path ' "$CHECKS_FILE"; then
+  ok 'structural: prompt-content decides membership through the canonical matcher, per header'
+else
+  bad 'structural: prompt-content does not call roborev_diff_header_has_path — it has its own matcher again'
+fi
+# The census must classify the RAW path. Asserted by the absence of any normalisation call
+# in the census loop AND by the `-z` read above: a quoted spelling reaching the extension
+# test is exactly blocker F1 (`docs/é notes.md` ⇒ ext `md"` ⇒ CODE).
+_census_start=$(grep -nE '^roborev_census\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+if [ -n "$_census_start" ]; then
+  _census_end=$(awk -v s="$_census_start" 'NR>s && /^  \}$/ {print NR; exit}' "$ORACLES")
+  if sed -n "${_census_start},${_census_end:-$_census_start}p" "$ORACLES" | grep -q 'roborev_unquote_path '; then
+    bad 'structural: the census normalises inside its own loop — it must read raw paths instead (-z)'
+  else
+    ok 'structural: the census classifies the RAW path (no unquoting inside the census loop)'
+  fi
+  if sed -n "${_census_start},${_census_end:-$_census_start}p" "$ORACLES" | grep -qF 'read -r -d '; then
+    ok 'structural: the census reads NUL-terminated records (a newline-bearing path survives)'
+  else
+    bad 'structural: the census does not read NUL-terminated records — a newline-bearing path would split'
+  fi
+else
+  bad 'structural: roborev_census is not defined'
+fi
+
 printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
 # The mirror of the decorative-key bug: a value that reads NOTICE while RESULT: goes FAIL
 # would make the built-in ruling a lie. Asserted against the SCAN ITSELF, not just against

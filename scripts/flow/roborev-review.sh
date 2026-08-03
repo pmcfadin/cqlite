@@ -107,9 +107,12 @@
 #                     FAIL (<k>/<n> code census paths absent from the prompt) |
 #                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
 #                     FAIL (prompt unretrievable — ...) | SKIP
-#                     Paths are compared NORMALISED (both sides through
-#                     roborev_unquote_path) and EVERY header shape git emits is
-#                     recognised: unquoted, space-bearing, and C-quoted.
+#                     Paths are normalised ONCE, at the census (`git diff --numstat -z`,
+#                     so they arrive RAW) and compared RAW everywhere; membership is
+#                     decided per `diff --git` header by the single canonical matcher
+#                     `roborev_diff_header_has_path`, which reads EVERY shape git emits:
+#                     unquoted, space-bearing, C-quoted, and the MIXED-quoting shape a
+#                     rename produces (`diff --git a/<ascii> "b/<quoted>"`).
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
@@ -376,7 +379,7 @@ a worktree; the gate's hermetic check uses a stub reviewer.
          sha: either means the review never reached the worktree's own commits, which
          is the root-checkout resolution this probe exists to rule out;
        - prompt-content: PASS with the full code census covered;
-       - census matching 'git diff --numstat --no-renames <base>...HEAD';
+       - census matching 'git diff --numstat -z --no-renames <base>...HEAD';
        - job-record: PASS and tokens above both thresholds.
      RESULT is PASS (exit 0) only when the review is also finding-free; a review with
      open findings correctly reports FINDINGS and exits 1 — that is not a probe
