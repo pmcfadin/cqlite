@@ -283,13 +283,22 @@ test-only path seams SHALL be inert without their explicit marker, and UNDER the
 BOTH seams SHALL be MANDATORY, absolute and outside `/etc`, `/proc` and `/sys`: a missing
 or production-shaped seam SHALL be a loud refusal in the env guard AND in the path
 resolvers, so a test-mode run can never fall back to a production directory and mutate the
-host.
+host. On every path that WRITES or gates a write, that judgement SHALL be made on the
+seam's CANONICAL destination — `.`, `..` and symlinked ancestors resolved — and not on its
+spelling, since a textual check accepts an unbounded set of paths that resolve into the
+production directory. The emit-time read path, which writes nothing and is contractually
+fork-free, MAY validate textually (rejecting `.`/`..` components and a symlinked seam).
 
 When the read-back reports a restrictive `perf_event_paranoid`/`kptr_restrict` state, the
-diagnostics SHALL NAME the competing configuration files — every other file in the
-`sysctl.d` directory that also sets either control — and SHALL distinguish one whose
-basename sorts AFTER the managed drop-in (an actual override, since the last assignment
-wins) from one that sorts before it; a run with no competitor SHALL say so explicitly. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
+diagnostics SHALL NAME the competing configuration files across the COMPLETE
+`sysctl --system` search path — `/etc/sysctl.d`, `/run/sysctl.d`,
+`/usr/local/lib/sysctl.d`, `/usr/lib/sysctl.d`, `/lib/sysctl.d` and `/etc/sysctl.conf` —
+honouring same-basename masking (a basename supplied by a higher-precedence directory makes
+the lower copy inert, so naming it would point at a file that is not in effect), and SHALL
+distinguish one whose basename sorts AFTER the managed drop-in (an actual override, since
+the last assignment wins) from one that sorts before it, and from `/etc/sysctl.conf` (which
+is applied after every drop-in and therefore wins regardless of name); a run with no
+competitor SHALL say so explicitly. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
 apply command's exit status, and the apply command's own failure SHALL be reported
 separately from the capability verdict — `sysctl --system` applies every drop-in on the
 box, so a non-zero exit may belong to an unrelated pre-existing entry, and no wording
@@ -368,21 +377,34 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
   command, SHALL write nothing (in particular not the real `/etc/sysctl.d` drop-in), SHALL
   claim no verdict, and SHALL exit 0
 
+#### Scenario: a test seam that RESOLVES into production refuses to act
+- **GIVEN** the test-mode marker set, a root identity, and a sysctl path seam that passes
+  every textual non-production check but resolves into `/etc/sysctl.d` — `/tmp/../etc/sysctl.d`,
+  or `<symlink-to-/etc>/sysctl.d`
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL refuse the section with a loud diagnosis, SHALL invoke no privileged
+  command, SHALL leave the real drop-in byte- and metadata-unchanged, SHALL name no write
+  target at all, and SHALL exit 0
+
 #### Scenario: a non-canonical drop-in is rewritten
 - **GIVEN** an existing drop-in whose bytes differ from the canonical content only in
-  trailing newlines (a missing final newline, or an extra trailing blank line)
+  trailing newlines (a missing final newline, or an extra trailing blank line), or which
+  carries the canonical content followed by a NUL byte and arbitrary trailing bytes
 - **WHEN** bootstrap runs with `--yes`
 - **THEN** it SHALL NOT report "already current", SHALL rewrite the file, and the result
   SHALL be byte-identical to the canonical content
 
-#### Scenario: a competing sysctl file is named
-- **GIVEN** a Linux host whose read-back is non-`ok` and whose `sysctl.d` directory holds
-  another file setting `perf_event_paranoid`/`kptr_restrict` (e.g. the stock Ubuntu
-  `10-kernel-hardening.conf`, plus one sorting after the managed drop-in)
+#### Scenario: a competing sysctl file is named, anywhere on the search path
+- **GIVEN** a Linux host whose read-back is non-`ok` and whose `sysctl --system` search path
+  holds other files setting `perf_event_paranoid`/`kptr_restrict` — the stock Ubuntu
+  `/etc/sysctl.d/10-kernel-hardening.conf`, a later-sorting file in a LOWER-precedence
+  directory such as `/run/sysctl.d`, an `/etc/sysctl.conf` entry, and a same-basename copy
+  masked by a higher-precedence directory
 - **WHEN** bootstrap runs
-- **THEN** the diagnostics SHALL name each competing file by path, SHALL flag the
-  later-sorting one as an actual OVERRIDE, and SHALL state that the earlier-sorting one
-  loses to the managed `99-` prefix
+- **THEN** the diagnostics SHALL name each competing file that is IN EFFECT by path, SHALL
+  flag the later-sorting one as an actual OVERRIDE, SHALL flag `/etc/sysctl.conf` as applied
+  after every drop-in (winning regardless of name), SHALL state that the earlier-sorting one
+  loses to the managed `99-` prefix, and SHALL NOT name the masked copy
 
 #### Scenario: an inherited environment variable cannot enter the section
 - **GIVEN** an ambient `PERF_SECTION_OK=1` in bootstrap's environment

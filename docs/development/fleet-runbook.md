@@ -273,18 +273,43 @@ any prefix below `10-` — silently hands `kptr_restrict` back to the hardening 
 boot, with no error anywhere. **Never "tidy" the filename.** The managed file's own header says so
 too, so the warning travels with the bytes.
 
-**Bootstrap names the competitor for you.** Whenever the read-back shows a non-`ok` token, the
-diagnostics scan the `sysctl.d` directory and report every *other* file that sets
-`perf_event_paranoid`/`kptr_restrict`, ranked by whether it actually wins:
+**Bootstrap names the competitor for you — across the WHOLE `sysctl --system` search path.**
+Whenever the read-back shows a non-`ok` token, the diagnostics scan every location `sysctl --system`
+and `systemd-sysctl` load and report each *other* file that sets
+`perf_event_paranoid`/`kptr_restrict`, ranked by whether it actually wins. **The search path, in
+descending name-masking precedence** (`sysctl(8)` SYSTEM FILE PRECEDENCE / `sysctl.d(5)`):
+
+| # | location | notes |
+|---|----------|-------|
+| 1 | `/etc/sysctl.d/*.conf` | where our managed `99-cqlite-perf.conf` lives |
+| 2 | `/run/sysctl.d/*.conf` | volatile; a package or unit can drop a file here at runtime |
+| 3 | `/usr/local/lib/sysctl.d/*.conf` | |
+| 4 | `/usr/lib/sysctl.d/*.conf` | vendor drop-ins |
+| 5 | `/lib/sysctl.d/*.conf` | usually a symlink to #4 on merged-`/usr` systems |
+| 6 | `/etc/sysctl.conf` | **applied after every drop-in — wins regardless of filename** |
+
+Two *independent* rules decide the outcome, and the scan implements both:
+
+- **Masking** — "once a file of a given filename is loaded, any file of the same name in subsequent
+  directories is ignored". So `/etc/sysctl.d/50-x.conf` replaces `/usr/lib/sysctl.d/50-x.conf`
+  outright, and the diagnostic deliberately does **not** name the masked copy: it is not in effect.
+- **Ordering** — the surviving files are applied in lexicographic **basename** order regardless of
+  which directory they came from, and the **last** assignment wins. (`/etc/sysctl.conf` is outside
+  this contest — it runs after all of them.)
 
 ```text
-[warn] OVERRIDE: /etc/sysctl.d/99-zzz-late.conf also sets perf_event_paranoid/kptr_restrict and its
+[warn] OVERRIDE: /run/sysctl.d/99-zzz-late.conf also sets perf_event_paranoid/kptr_restrict and its
        name sorts AFTER 99-cqlite-perf.conf, so it is applied LAST and WINS — fix or rename that file
+[warn] OVERRIDE: /etc/sysctl.conf also sets perf_event_paranoid/kptr_restrict and is applied AFTER
+       every sysctl.d drop-in ... so it WINS regardless of our filename — fix that file
 [info] competing file: /etc/sysctl.d/10-kernel-hardening.conf also sets
        perf_event_paranoid/kptr_restrict but sorts BEFORE 99-cqlite-perf.conf, so ours wins
 ```
 
-A run with no competitor says so explicitly, so a silent scan can never be mistaken for no scan.
+A run with no competitor says so explicitly **and names the path it covered**, so a silent scan can
+never be mistaken for no scan. Scanning only `/etc/sysctl.d` used to let a later-sorting file in
+`/run/sysctl.d` or `/usr/lib/sysctl.d` override us while bootstrap reported *no competitor* — the
+same "reverts and nobody knows why" mystery wearing a different directory.
 
 Verify by hand, in the same order bootstrap does:
 
@@ -298,7 +323,8 @@ bash scripts/perf-capability.sh --verify-unpriv   # want: cycles=<non-zero> iden
 bash scripts/perf-capability.sh --drop-in | sudo tee /etc/sysctl.d/99-cqlite-perf.conf >/dev/null
 sudo sysctl -q --system
 # still restricted? the override is almost always here (applied AFTER the drop-ins):
-grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.conf
+grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.conf \
+  /run/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf /lib/sysctl.d/*.conf
 ```
 
 **Never set `CQLITE_PERF_PROC_DIR` / `CQLITE_PERF_SYSCTL_DIR` in a shell.** They are test-only path
@@ -315,6 +341,17 @@ finds a seam set without the marker.
 no `/proc`. The earlier shape fell back to the real directories, which meant a root `--yes` run under
 the marker could `tee` the host's **real** `/etc/sysctl.d/99-cqlite-perf.conf` — a test run mutating
 the machine. There is deliberately no opt-out.
+
+**On the write path the seam is judged by its CANONICAL DESTINATION, not its spelling.** A textual
+check accepts an unbounded set of paths that *resolve* into production — `/tmp/../etc/sysctl.d`, or a
+seam under a symlinked ancestor (`ln -s /etc /tmp/a`, seam `/tmp/a/sysctl.d`) — and each of those
+would land a root `tee` on the host's own drop-in. So the env guard and the drop-in-path resolver
+canonicalize the whole path (`cd -P` + `pwd -P`: no `realpath`/`readlink -f` dependency, correct on
+bash 3.2) and validate the resolved destination; an unenterable path resolves to nothing and is
+refused too. The gate's **emit-time read path** is contractually fork-free and writes nothing, so it
+keeps the builtin-only textual check (which rejects `.`/`..` components and a symlinked seam): the
+worst a mis-accepted seam can do there is mis-read a stand-in `/proc`, which the token reports as
+`absent`/`unknown` rather than as a capability.
 
 Every gate SUMMARY's `accelerators:` line stamps the same state as a Linux-only `perf=` token
 (`ok` / `paranoid-<N>` / `kptr-restricted` / `absent` / `unknown`), so "this box cannot be profiled"
