@@ -652,8 +652,15 @@ SUDOEOF
         --manifest-out "" "$@" >"$E2E_LOG" 2>&1
   }
 
+  # The generator's own preflight demands >= 4 GiB free under --out (it sizes for a
+  # real multi-GB load), so the stub run needs that much on TMPDIR's filesystem.
+  # Reported LOUDLY when it is absent -- never silently dropped.
+  tmp_avail_gib="$(df -BG --output=avail "$TMP" 2>/dev/null | tail -1 | tr -dc '0-9')"
   if [ ! -f "$STUB" ]; then
     fail "missing the stub docker: $STUB"
+  elif [ "${tmp_avail_gib:-0}" -lt 5 ]; then
+    echo "SKIP - only ${tmp_avail_gib:-?} GiB free under $TMP; the generator's preflight"
+    echo "SKIP   needs >= 4 GiB, so the stub end-to-end cases were not run"
   else
     # ---- positive control: the whole pipeline, and the manifest it writes -------
     e2e_run ok; rc=$?
