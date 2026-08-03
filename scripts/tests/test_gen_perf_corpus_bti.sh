@@ -110,16 +110,27 @@ skip() {
 # `set -uo pipefail` is on (above). The two guards below cover the defect class `-e`
 # would have covered here:
 #
-#   1. RUNTIME: a call to a name that is not a command/function is a HARD exit,
-#      not a printed warning that leaves `fails` at 0.
+#   1. RUNTIME: a call to a name that is not a command/function records a NAMED
+#      failure the summary reds on, not a printed warning that leaves `fails` at 0.
 #   2. STATIC: `self_audit_helper_order` (run as its own case, first thing) re-reads
 #      THIS file and fails if any helper it defines is invoked on a line ABOVE its
 #      definition -- i.e. it detects the exact M1 shape mechanically, for every
 #      helper, including ones added later.
+#
+# MEASURED, and the reason the sentinel FILE exists: bash invokes
+# `command_not_found_handle` "in a separate execution environment", so its `exit 97`
+# ends only the handler -- the run continues and no in-shell counter it touches
+# survives. So it appends the offending name to a sentinel file, which the summary
+# turns into a counted `fail`. (`CNF_EXPECT=1` marks the one deliberate probe.)
+CNF_SENTINEL=""   # set to a real path once TMP exists
+CNF_EXPECT=0
 command_not_found_handle() {
   echo "FAIL - internal: '$1' is not a command or function -- a typo, or a helper" \
-    "invoked BEFORE it was defined. Refusing to continue: an unrun case must never" \
-    "be able to look like a passing one." >&2
+    "invoked BEFORE it was defined. An unrun case must never be able to look like a" \
+    "passing one." >&2
+  if [ "$CNF_EXPECT" != 1 ] && [ -n "$CNF_SENTINEL" ]; then
+    printf '%s\n' "$1" >>"$CNF_SENTINEL"
+  fi
   exit 97
 }
 
@@ -133,6 +144,11 @@ helper_order_findings() {
     # terminator. (Needed because this suite embeds python and a shell fixture in
     # heredocs; `<<<"$x"` here-STRINGS are not openers and must not match.)
     in_heredoc { if ($0 == hd_tag) in_heredoc = 0; next }
+    # COMMENTS FIRST, and that order is load-bearing: a comment is not a call, and a
+    # comment that merely MENTIONS `<<TAG` must not be read as a heredoc opener --
+    # doing so swallowed the rest of the file and made this auditor miss the very
+    # mutation it exists to catch (found by mutation-testing it, not by reading it).
+    /^[ \t]*#/ { next }
     match($0, /<<-?[ \t]*'"'"'?[A-Za-z_][A-Za-z0-9_]*'"'"'?/) {
       hd_tag = substr($0, RSTART, RLENGTH)
       gsub(/[<'"'"'\- \t]/, "", hd_tag)
@@ -146,9 +162,6 @@ helper_order_findings() {
       if (!(name in defline)) defline[name] = NR
       next
     }
-    # comments are not calls (a helper is routinely NAMED in the comment that
-    # documents it, one line above its own definition)
-    /^[ \t]*#/ { next }
     { lines[NR] = $0 }
     END {
       for (name in defline) {
@@ -200,7 +213,9 @@ CTLEOF
   # handler's `exit` ends the probe rather than this run; the captured text is
   # deliberately NOT echoed (it contains the word FAIL).
   local probe_out probe_rc
+  CNF_EXPECT=1
   probe_out=$(this_helper_does_not_exist_probe 2>&1); probe_rc=$?
+  CNF_EXPECT=0
   if [ "$probe_rc" -eq 97 ] && grep -q "is not a command or function" <<<"$probe_out"; then
     pass "an undefined name is a HARD failure (command_not_found_handle, exit 97)"
   else
@@ -263,6 +278,7 @@ for f in "$GEN" "$ROWS_PY" "$MANIFEST_PY"; do
 done
 
 TMP="$(mktemp -d)"
+CNF_SENTINEL="$TMP/command-not-found-names"
 # shellcheck disable=SC2317  # invoked indirectly by the EXIT trap below
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -1221,6 +1237,13 @@ else
 fi
 
 echo
+# Any name bash could not resolve during the run is a counted failure -- the runtime
+# half of the roborev #3234 M1 guard (the handler's own `exit` cannot red the run: it
+# executes in a separate execution environment).
+if [ -s "$CNF_SENTINEL" ]; then
+  fail "unresolved command name(s) during the run -- a typo, or a helper called" \
+    "before it was defined; the case(s) that used them did NOT run: $(tr '\n' ' ' <"$CNF_SENTINEL")"
+fi
 # Case-count floor: a suite that silently stopped running cases must not be able to
 # report success on `fails=0` alone. Every legitimate skip declared its case count
 # above, so passes + skipped must still reach the declared total.
