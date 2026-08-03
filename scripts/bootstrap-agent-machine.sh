@@ -417,11 +417,11 @@ else
   # FAIL CLOSED on a misused test seam BEFORE anything privileged happens: this
   # section pipes the drop-in through `sudo tee <path>`, so a stray
   # CQLITE_PERF_SYSCTL_DIR / CQLITE_PERF_PROC_DIR export must never steer that write
-  # or fabricate a /proc verdict. The seams are inert without
-  # CQLITE_PERF_TEST_MODE=1, and the marker itself forbids a reachable real
-  # sudo/sysctl (see scripts/perf-capability.sh).
+  # or fabricate a /proc verdict. The seams are inert without CQLITE_PERF_TEST_MODE=1;
+  # under the marker each must be provably INSIDE the declared sandbox root, and the
+  # marker itself forbids a reachable real sudo/sysctl (see scripts/perf-capability.sh).
   if ! perf_capability_env_guard; then
-    warn "perf capability SKIPPED — the test-only env seams are misconfigured (a seam set without CQLITE_PERF_TEST_MODE=1; or test mode WITHOUT both non-production path seams, which has no production fallback; or test mode with a reachable real sudo/sysctl — details on stderr) — refusing to run a privileged write against an env-chosen path"
+    warn "perf capability SKIPPED — the test-only env seams are misconfigured (a seam set without CQLITE_PERF_TEST_MODE=1; or test mode without a proven CQLITE_PERF_TEST_SANDBOX and both path seams strictly inside it, which has no production fallback; or test mode with a reachable real sudo/sysctl — details on stderr) — refusing to run a privileged write against an env-chosen path"
     PERF_SECTION_OK=0
   else
     PERF_SECTION_OK=1
