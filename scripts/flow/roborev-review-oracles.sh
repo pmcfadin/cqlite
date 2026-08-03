@@ -1001,8 +1001,20 @@ roborev_corroborate_exclude_patterns() {
     answered=1
     # The binary prints the configured value (comma-joined, possibly bracketed/quoted).
     out="${out#*=}"
-    out="${out//[/}"
-    out="${out//]/}"
+    # STRIP ONLY A VERIFIED OUTER `[…]` CONTAINER (#3229 round 5, blocker 3 / #3260 item
+    # 1). The previous revision deleted EVERY `[` and `]` in the string (`${out//[/}` +
+    # `${out//]/}`), which DESTROYS a glob CHARACTER CLASS inside a pattern:
+    # `src/[Tt]est.rs` came back as `src/Ttest.rs`, matched nothing in the parsed set,
+    # and reported `corroboration: DRIFT` ⇒ a pre-enqueue FAIL on a CORRECT
+    # configuration. That direction is fail-closed and loud, so it could never certify
+    # unreviewed code — but a guard that reds a legitimate config is the guard that gets
+    # disabled, which is how #3229 happened in the first place.
+    # Trim first, so the container test sees the brackets at the string's edges.
+    out="${out#"${out%%[![:space:]]*}"}"
+    out="${out%"${out##*[![:space:]]}"}"
+    case "$out" in
+      '['*']') out="${out#\[}"; out="${out%\]}" ;;
+    esac
     # `read -a` with IFS=',' — NEVER an unquoted `for item in $out`, which would
     # PATHNAME-EXPAND a pattern like `*.md` against $PWD.
     local -a reported_raw=()

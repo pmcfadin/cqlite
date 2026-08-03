@@ -1370,6 +1370,24 @@ run_wrapper "$work"
 assert_verdict 'case (cx7b)' PASS 0
 assert_says 'case (cx7b) corroboration is reported OK' 'corroboration: OK; built-in-set: UNAVAILABLE\)$'
 
+printf '== case (cx7c): a pattern carrying a GLOB CHARACTER CLASS corroborates, brackets intact ==\n'
+reset_stub
+# #3229 round 5, blocker 3 (#3260 item 1). The corroboration parse used to delete EVERY
+# `[` and `]` in the binary's answer (`${out//[/}`), so `src/[Tt]est.rs` came back as
+# `src/Ttest.rs`, matched nothing in the parsed set, and reported `corroboration: DRIFT`
+# ⇒ a pre-enqueue FAIL on a CORRECT configuration. Only a VERIFIED OUTER container is
+# stripped now. The stub answers in the BRACKETED form, so this one case pins both halves:
+# the container IS removed, the class inside a pattern is NOT.
+work=$(make_fixture case_cx7c docs-executables)
+write_roborev_config "$work" "['*.md', 'src/[Tt]est.rs']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_CONFIG_PATTERNS="['*.md', 'src/[Tt]est.rs']"
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx7c)' PASS 0
+assert_says 'case (cx7c) the glob class survives the container strip, so corroboration is OK' 'corroboration: OK; built-in-set: UNAVAILABLE\)$'
+assert_lacks 'case (cx7c) no false DRIFT from a destroyed character class' '^census-exclusion: FAIL \(exclusion set drift'
+
 printf '== case (cx8): a slash-containing pattern is ROOT-ANCHORED, so a nested docs path SURVIVES ==\n'
 reset_stub
 # R1 from the disassembly. Evaluating BOTH a verbatim and a `**/`-prefixed reading and
