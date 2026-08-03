@@ -38,7 +38,11 @@ review_min_severity = ''
 # golden pushed the review prompt to 2,262,805 chars against codex's hard ceiling of
 # 1,048,576, failing the round with input_too_large. Excluding them keeps the CODE
 # reviewable; it removes nothing a reviewer could act on.
-exclude_patterns = ['docs/**', '*.md', '*.jsonl']
+#
+# NOTE the glob form: a bare '*.jsonl' does NOT match nested paths here (measured —
+# it left a 1.9 MB golden in the diff and the round failed identically), so the
+# recursive '**/*.jsonl' form is required. The same caveat applies to '*.md' above.
+exclude_patterns = ['docs/**', '*.md', '**/*.md', '**/*.jsonl', 'test-data/datasets/**']
 # Repo-local directory for temporary oversized diff snapshots.
 snapshot_dir = ''
 # Automatic post-commit review mode for this repo: commit or branch.
