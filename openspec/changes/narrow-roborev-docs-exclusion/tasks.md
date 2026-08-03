@@ -22,8 +22,10 @@
 
 ## 2. Narrow the exclusion configuration (surface: `.roborev.toml`)
 - [x] Replace `exclude_patterns = ['docs/**', '*.md']` with `*.md` (unchanged — it already excludes every
-      tracked `.md` repo-wide) plus docs-scoped artifact patterns for at minimum
-      `txt json jsonl log err csv png svg gz pdf jfr html mmd tex diff`.
+      tracked `.md` repo-wide) plus artifact patterns for at minimum
+      `txt json jsonl log err csv png svg gz pdf jfr html mmd tex diff`, each scoped to an ARTIFACT-BEARING
+      DIRECTORY as `<artifact-dir-glob>/**/*.<ext>` — **not** swept across all of `docs/`, which hid
+      functional config (round 6, §8f / design D1a).
 - [x] Keep the value a SINGLE-LINE array so the wrapper's parser stays minimal, write every docs-scoped
       pattern WITH an interior `/` and WITHOUT a trailing slash (root-anchored per R1; a trailing slash would
       invert to recursive per R3), and verify by `git ls-files -- <the pathspec forms>` that no
@@ -319,6 +321,51 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       `emit_summary` value goes through `emit_kv` (all 23 keys), `emit_kv`/`finish` neutralise, and
       `"${DETAILS[@]}"` is no longer bulk-printed. Every new assert verified to FAIL under a deliberate
       mutation of its own fix, and the whole `cx6*` hostile-path family re-run green.
+
+## 8f. Round-6 roborev blockers (job 30 — certified genuine: `prompt-content: PASS (6/6)`, 261k in / 183k cached / 10.4k out)
+- [x] **A built-in exclude contributes ONE verbatim pathspec, not two** (blocker 1). The port emitted
+      `<p>` **and** `<p>/**` for built-ins too, manufacturing `:(exclude,glob)**/Cargo.lock/**` — an
+      exclusion roborev never applies. OVER-modelling is a false PASS: a path wrongly believed excluded is
+      SUBTRACTED from `prompt-content:` coverage. **Established from the v0.61.2 binary, not inferred**
+      (see D2b-0): the `:(exclude,glob)` prefix is inside each of the 24 string literals, proven
+      non-coincidental by Go's length-ordered rodata packing (equal-length runs at deltas of exactly
+      `15 + len(pattern)`), and only 2 bare prefix constants exist among 26 occurrences — so built-ins are
+      pre-formatted constants appended verbatim and never reach `FormatExcludeArgs`. Built-ins now bypass
+      the port entirely; CONFIGURED patterns keep both pathspecs. Blame lookup and the pathspec listing are
+      driven off the same `_rx_owner_single` flag so no output advertises an exclusion git was not asked for.
+- [x] **Artifact exclusions are scoped to artifact-bearing DIRECTORIES** (blocker 2, owner-approved posture).
+      The `docs/**/*.<ext>` sweep hid FUNCTIONAL CONFIG, falsifying "noise, never blindness" for code-bearing
+      formats: `docs/observability/grafana/dashboards/cqlite-overview.json` is guarded by the gate's own
+      `kit-dashboard-drift` component yet was dropped from the diff AND classified code-free, and
+      `docs/reports/delivery-telemetry.schema.json` went the same way. Now
+      `<artifact-dir-glob>/**/*.<ext>` over 4 directories × 15 extensions + `*.md` = 61 patterns. Verified
+      with `git ls-files`: 672 tracked `docs/` artifact-extension files → **667 still excluded** (incl. all
+      **577** under `docs/reports/*-artifacts/`), **5 now reviewed** (both functional-config files + the
+      telemetry ledger + 2 guide artifacts), and **63** harness code files under `docs/reports/*-artifacts/`
+      still reviewed — so no blanket `<dir>/**` and no #3229 regression.
+- [x] Census mirror follows the same shape (`CODE_FREE_ARTIFACT_DIR_GLOBS` ∩
+      `CODE_FREE_ARTIFACT_EXTENSIONS`), matched COMPONENT-WISE to git `:(glob)` semantics rather than with a
+      bash `case` (whose `*` crosses `/` and would match `docs/reports/a/b-artifacts/x`). Held in an ARRAY:
+      as a space-separated string, unquoted iteration pathname-expanded the globs against `$PWD`, silently
+      reducing the classification to "the directories that exist in this checkout" — caught by its own probe.
+- [x] **STRUCTURAL mirror assert** (#3260 item 2, previously unguarded): `cx24` derives the expected pattern
+      set from the constants and asserts SET EQUALITY against the committed `.roborev.toml` via the wrapper's
+      OWN TOML parser, refuses a vacuous empty-set comparison, and rejects both retired forms off the PARSED
+      set — never a file-wide grep, since `.roborev.toml` documents the forms it retired (that exact
+      over-broad grep was caught red-handed on first run).
+- [x] Tests: `cx22` (a tracked DIRECTORY named `Cargo.lock` — both keys asserted, incl. the false-PASS
+      `prompt-content` excusal), `cx22b` (the built-in still eats the real FILE, so the fix did not
+      UNDER-model), `cx23` (functional config is CODE and survives while a real artifact stays non-code),
+      `cx23b` (the retired form reproduced, swallowing the dashboard — without it `cx23` would pass under
+      either config), `cx24` (the mirror). `NARROWED_PATTERNS` moved to the shipped directory-scoped shape;
+      the old value kept as `DOCS_WIDE_EXT_PATTERNS` to drive `cx23b`.
+- [x] Every new assert MUTATION-TESTED both directions in a scratch copy — 6 mutations, each RED, restore
+      green: M1 restore the phantom sibling (5 `cx22` asserts RED), M2 under-model configured patterns
+      (`cx9` RED), M3 revert the config to docs-wide (3 `cx24` asserts RED, exact both-sides diff), M4
+      one-sided constant drift (2 `cx24` RED), M5 revert the classification to the bare `docs/` prefix (6
+      asserts across `cx23`/`cx23b` RED), M6 dir-globs back to an unquoted string (9 asserts across
+      `cx3`/`cx6f`/`cx17`/`cx24` RED). Named regression set re-run green: `cx1`, `cx3`, `cx6`, `cx6c`–`cx6n`,
+      `cx6p`, `cx7c`, `cx8`, `cx11`, `cx13`, `cx18`, `cx19*`, `cx20*`, `cx21`. Suite: 681 asserts, 0 failed.
 
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` + `roborev` on the

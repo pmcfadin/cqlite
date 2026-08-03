@@ -132,26 +132,70 @@ are what the reviewer must see.
 
 ## Recommended design
 
-### D1 — the config: a prose/artifact deny-list, not a blanket path glob (AC1)
+### D1 — the config: artifact exclusions scoped to artifact-bearing DIRECTORIES (AC1)
 
 `exclude_patterns` becomes: **`*.md` kept unchanged** (it already performs all prose exclusion,
-repo-wide), and `docs/**` replaced by **docs-scoped exclusions of the non-code artifact extensions
-only** — at minimum the high-count raw-output and binary/image classes from the histogram:
+repo-wide), and `docs/**` replaced by the **intersection of a non-code artifact extension and an
+artifact-bearing directory** — `<artifact-dir-glob>/**/*.<ext>` over exactly four directory globs:
 
-```
-'*.md',
-'docs/**/*.txt', 'docs/**/*.json', 'docs/**/*.jsonl', 'docs/**/*.log', 'docs/**/*.err',
-'docs/**/*.csv', 'docs/**/*.png', 'docs/**/*.svg', 'docs/**/*.gz', 'docs/**/*.pdf',
-'docs/**/*.jfr', 'docs/**/*.html', 'docs/**/*.mmd', 'docs/**/*.tex', 'docs/**/*.diff'
-```
+| directory glob | what it holds | artifact files (measured) |
+|---|---|---|
+| `docs/reports/*-artifacts` | per-issue measurement artifacts (the #3229 convention) | 577 |
+| `docs/round-artifacts` | soak/round measurement output | 53 |
+| `docs/**/jfr-reports` | JFR profiling output | 7 |
+| `docs/sstables-definitive-guide/diagrams` | generated diagram renders | 30 |
 
-(`docs/**/*.x` matches `docs/a.x` as well as `docs/a/b/c.x` — git's `**/` matches zero or more
+crossed with the high-count raw-output and binary/image classes from the histogram: `txt json jsonl log
+err csv png svg gz pdf jfr html mmd tex diff` — 4 × 15 + `*.md` = **61 patterns**.
+
+(`<dir>/**/*.x` matches `<dir>/a.x` as well as `<dir>/a/b/c.x` — git's `**/` matches zero or more
 components.) The consequence is that `.py`, `.sh`, `.bt`, `.c`, `.rs`, `.toml`, `.cql`, `.yml`, `.yaml`
 under `docs/` are **reviewed**, which is AC1. Each of these patterns contains an interior `/`, so by R1 it
-is **root-anchored** — the scope is exactly `docs/`, and nothing under `website/src/content/docs/` or any
+is **root-anchored** — nothing under `website/src/content/docs/` or any
 other nested `docs` directory is affected. **None of them may be written with a trailing slash** (R3): a
 `docs/` form would invert to recursive and re-widen the blast radius, which is why the wrapper FAILs on a
 trailing-slash pattern.
+
+#### D1a — why DIRECTORY-scoped, and why the intermediate `docs/**/*.<ext>` form was retired
+
+The first revision of this change wrote the artifact patterns as `docs/**/*.<ext>` — an extension sweep
+across **all** of `docs/`. That form does **not** satisfy this change's own stated asymmetry ("noise, never
+blindness"), and round 6 retired it. The asymmetry is sound for `.txt`/`.log`/`.err` run dumps, which
+contain nothing but output. It is **false** for `.json`/`.html`/`.svg`, which carry *functional
+configuration*, and for a code-bearing format exclusion is **blindness**, not noise. Two live cases in this
+repository prove it:
+
+- **`docs/observability/grafana/dashboards/cqlite-overview.json`** — guarded by the **full agent gate's own
+  `kit-dashboard-drift` component**, so the repository already treats it as correctness-bearing. Under
+  `docs/**/*.json` a PR editing it was dropped from the reviewer's diff **and** classified code-free: the
+  gate says "this is correctness-bearing" while the review path says "there is nothing here to review".
+- **`docs/reports/delivery-telemetry.schema.json`** — the schema governing the delivery ledger, hidden the
+  same way.
+
+Measured on this branch: 672 tracked `docs/` files carry an artifact extension; **667** lie inside the four
+directories above and remain excluded, and the **5** that do not are now delivered to the reviewer (the two
+above, `docs/reports/delivery-telemetry.jsonl`, and two `sstables-definitive-guide` artifacts that sit
+beside the prose rather than in `diagrams/`). With the scoping in place the asymmetry is **true as
+written**: a *new artifact directory* is silently re-admitted to **review** (noise, a token cost), and
+functional configuration under `docs/` can no longer be hidden (no blindness).
+
+**It stays extension-scoped WITHIN each directory — never a blanket `<dir>/**`.** That was the tempting
+simplification and it would reintroduce this issue's original defect: these directories deliberately hold
+executable code beside their output. Measured: **63** tracked `.sh`/`.py`/`.rs`/`.c`/`.bt`/`.cql`/`.yaml`/
+`.toml` files under `docs/reports/*-artifacts/` alone, plus a `.py` under `docs/round-artifacts/`. Those
+harnesses *are* the 136-path census `docs/**` swallowed on PR #3222.
+
+The census-side mirror follows the same shape (`CODE_FREE_ARTIFACT_EXTENSIONS` ∩
+`CODE_FREE_ARTIFACT_DIR_GLOBS`), matched **component-wise** to git's `:(glob)` semantics rather than with a
+shell `case` — bash's `*` crosses `/`, so `docs/reports/*-artifacts/*` would also match
+`docs/reports/a/b-artifacts/x`, which git's `*` does not. The globs are held in an **array**: as a
+space-separated string, unquoted iteration pathname-expands them against `$PWD`, silently reducing the
+classification to "the directories that exist in this checkout" (measured while writing it —
+`docs/**/jfr-reports` collapsed to the single existing one and `docs/jfr-reports/a.html` stopped matching).
+Because the two representations are one fact written twice, the regression suite **derives** the expected
+pattern set from the constants and asserts **set equality** against the committed `.roborev.toml` using the
+wrapper's own TOML parser, rejecting both retired forms off the *parsed* set (never a file-wide grep — this
+very file documents the forms it retired).
 
 **A deny-list is forced, not preferred — and this is now VERIFIED, not assumed.** `git.FormatExcludeArgs`
 does only TrimSpace / TrimRight / TrimLeft / `Index`: there is no `!` handling and no re-include path at
@@ -327,9 +371,49 @@ Extracted from the pinned v0.61.2 executable as literal pathspec strings
 Modelling only the configured half was the **same false-PASS class as D2a**: `Cargo.lock` has a `lock`
 extension, so the census classifies it CODE, and a PR touching it had it silently dropped from the
 reviewer's diff while `census-exclusion:` reported it surviving. The built-ins are therefore folded into
-the same reconciliation. They are already-resolved pathspec bodies rather than user patterns, so passing
-them through the `FormatExcludeArgs` port is a no-op on anchoring (each contains a `/`, so it stays
-verbatim) and merely adds the `/**` sibling.
+the same reconciliation.
+
+##### D2b-0 — a built-in is appended VERBATIM, one pathspec, and is NOT re-formatted
+
+The first cut ran the built-ins through the `FormatExcludeArgs` port on the reasoning that they are
+"already-resolved pathspec bodies", so the port would be a no-op on anchoring and would merely add the
+`/**` sibling. **That was wrong, and round 6 fixed it.** The port's second pathspec manufactured
+`:(exclude,glob)**/Cargo.lock/**` — an exclusion roborev *never applies*. **Over**-modelling the exclusion
+set is not the safe direction: a path wrongly believed excluded is *subtracted from `prompt-content:`
+coverage*, so the check stops asserting it reached the reviewer. That is a false PASS, in the same family
+as the defect this change exists to close. (Its mirror image is equally bad: dropping the sibling from
+*configured* patterns would report paths as SURVIVING that roborev really drops. Both arities are pinned by
+test — `cx22`/`cx22b` for built-ins, `cx9` for configured patterns.)
+
+**The mechanism, established from the binary rather than reasoned about.** The question was whether roborev
+hands its built-ins to `FormatExcludeArgs` or appends them as finished constants. Three measurements on
+`/usr/local/bin/roborev` (v0.61.2) settle it on the second answer:
+
+1. **The prefix is inside the literal.** Each of the 24 appears as the contiguous byte string
+   `:(exclude,glob)<pattern>`. A pattern *destined* for the formatter would be stored **bare** — prepending
+   `:(exclude,glob)` is the formatter's whole job — so a baked-in prefix means the string is already a
+   finished git argument.
+2. **Length-bucket packing proves (1) is not linker coincidence.** Go's linker packs the rodata string blob
+   in **length order** with no terminators, and these 24 pack back-to-back in runs of equal total length
+   *including* the 15-byte prefix: `…**/bun.lock` / `…**/pdm.lock` / `…**/mix.lock` at deltas of exactly
+   26 = 15 + 11, and `…**/Pipfile.lock` / `Gemfile.lock` / `pubspec.lock` / `Podfile.lock` at deltas of
+   exactly 30. Adjacency in a length-sorted blob is only possible if the prefix is part of the sorted string.
+3. **Only two bare `:(exclude,glob)` constants exist**, and Go deduplicates identical literals — so there is
+   no shared prefix constant for 24 patterns to be formatted against. The 26 total occurrences decompose
+   exactly as the pin already claimed: 24 finished pathspecs + the 2 runtime prefix constants
+   (`:(exclude,glob)` root-anchored, `:(exclude,glob)**/` recursive) the formatter concatenates for
+   **configured** patterns.
+
+Corroborating shape: the *directory* built-ins carry `/**` **hand-written** into the literal
+(`**/.beads/**`, `**/.cache/**`, `**/.gocache/**`) while the *file* built-ins do not (`**/Cargo.lock`) —
+nobody writes `/**` onto a string about to be handed to a formatter that appends it. And no
+`:(exclude,glob)**/<file>/**` sibling literal exists for any file built-in (0 hits across all 8 probed).
+
+So a built-in bypasses the port entirely: one pathspec, no trimming, no anchoring test, no sibling. Anything
+derived from that arity — the blame attribution, and the listing of emitted pathspecs in a FAIL detail — is
+driven off the same flag, so no output can advertise an exclusion git was not asked for. The
+re-verify-on-upgrade obligation covers this too: if a future roborev *did* start formatting its built-ins,
+the arity would flip and the pin comment says so.
 
 They are **messaged apart** from configured patterns, because the remedy differs completely: a built-in is
 not editable, so `.roborev.toml` cannot fix it — the honest statement is "roborev will never show a

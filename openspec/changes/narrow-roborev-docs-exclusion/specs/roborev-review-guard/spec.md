@@ -54,19 +54,52 @@ is a standing property of the configuration, not a one-time edit.
 Prose exclusion SHALL be retained: `*.md` stays, and it is SUFFICIENT for prose — because a slash-less
 pattern is applied recursively, `*.md` alone already excludes every tracked `.md` file repo-wide
 (measured: ~1404 files; `git ls-files -- ':(exclude,glob)*.md'` leaves 1393 while
-`':(exclude,glob)**/*.md'` leaves 0, matching the observed drops). Non-code ARTIFACT exclusion SHALL be
-expressed **docs-scoped** (`docs/**/*.<ext>`), covering at minimum the high-volume raw-output and
-binary/image classes measured under `docs/`: `txt`, `json`, `jsonl`, `log`, `err`, `csv`, `png`, `svg`,
-`gz`, `pdf`, `jfr`, `html`, `mmd`, `tex`, `diff`.
+`':(exclude,glob)**/*.md'` leaves 0, matching the observed drops).
+
+Non-code ARTIFACT exclusion SHALL be scoped to ARTIFACT-BEARING DIRECTORIES, expressed
+`<artifact-dir-glob>/**/*.<ext>`, covering at minimum the high-volume raw-output and binary/image classes
+measured under `docs/` — `txt`, `json`, `jsonl`, `log`, `err`, `csv`, `png`, `svg`, `gz`, `pdf`, `jfr`,
+`html`, `mmd`, `tex`, `diff` — over exactly these directory globs: `docs/reports/*-artifacts`,
+`docs/round-artifacts`, `docs/**/jfr-reports`, `docs/sstables-definitive-guide/diagrams`.
+
+An extension sweep across ALL of `docs/` (`docs/**/*.<ext>`) SHALL NOT be used, and this is a CORRECTNESS
+requirement, not a preference: it hides FUNCTIONAL CONFIGURATION, not merely artifacts. The falsifying
+cases are `docs/observability/grafana/dashboards/cqlite-overview.json` — guarded by the full agent gate's
+own `kit-dashboard-drift` component, so the repository already treats it as correctness-bearing, yet a PR
+editing it was BOTH dropped from the reviewer's diff AND classified code-free, i.e. unreviewable by
+construction — and `docs/reports/delivery-telemetry.schema.json`, the schema governing the delivery
+ledger. Everything under `docs/` outside those four directories SHALL be REVIEWED. (Measured: of 672
+tracked `docs/` files carrying an artifact extension, 667 lie inside the four directories and remain
+excluded; the 5 that do not are delivered to the reviewer.)
+
+A BLANKET directory exclude (`<artifact-dir-glob>/**`) SHALL NOT be used either: these directories
+deliberately hold EXECUTABLE code beside their output — 63 tracked `.sh`/`.py`/`.rs`/`.c`/`.bt`/`.cql`/
+`.yaml`/`.toml` files under `docs/reports/*-artifacts/` alone, plus a `.py` under
+`docs/round-artifacts/` — and those harnesses ARE the census `docs/**` swallowed. The exclusion SHALL
+therefore remain the INTERSECTION of an artifact extension and an artifact directory.
 
 A deny-list SHALL be used because an allow-list is **NOT EXPRESSIBLE** — now a VERIFIED fact rather than a
 working assumption: `git.FormatExcludeArgs`, read at the instruction level, performs only
 TrimSpace/TrimRight/TrimLeft/`Index` and has no negation or re-include handling whatsoever (and git
-pathspec supports none inside `:(exclude)`), so "review these extensions" cannot be written. The deny-list's known weakness SHALL be recorded rather than papered over — a NEW artifact
-extension appearing under `docs/` is re-admitted to review prompts — and that weakness SHALL remain a
-TOKEN-COST issue only, never a correctness one, which is what the pre-enqueue reconciliation check
-guarantees. Globally-scoped (slash-less) exclusion of artifact extensions SHALL NOT be used, because it
-would apply repo-wide and hide real configuration and data files outside `docs/` from review.
+pathspec supports none inside `:(exclude)`), so "review these extensions" cannot be written. The
+deny-list's known weakness SHALL be recorded rather than papered over — a NEW artifact DIRECTORY, or a new
+artifact extension inside one of the four, is re-admitted to review prompts — and that weakness SHALL
+remain a TOKEN-COST issue only, never a correctness one. With the directory scoping above, the stated
+asymmetry **"noise, never blindness" SHALL be true as written**: the leak direction costs tokens, and no
+pattern reaches outside a directory whose whole purpose is committed run output, so functional
+configuration under `docs/` cannot be hidden. Globally-scoped (slash-less) exclusion of artifact
+extensions SHALL NOT be used, because it would apply repo-wide and hide real configuration and data files
+outside `docs/` from review.
+
+#### Scenario: Functional configuration under `docs/` is reviewed, while a real artifact is excluded
+- **GIVEN** a diff containing `docs/observability/grafana/dashboards/cqlite-overview.json`, `docs/reports/delivery-telemetry.schema.json` and `docs/reports/x-artifacts/a.txt`
+- **WHEN** the pre-enqueue reconciliation runs against the configured set
+- **THEN** both configuration files are CODE census paths reported as SURVIVING, the change is NOT classified code-free, and the artifact under the artifact directory is still classified non-code — so the narrowing neither hides functional config nor degenerates into reviewing every artifact
+
+#### Scenario: The retired docs-wide form is what hid the gate-guarded dashboard
+- **GIVEN** the retired configuration `docs/**/*.json` and a census code path `docs/observability/grafana/dashboards/cqlite-overview.json`
+- **WHEN** the pre-enqueue reconciliation runs
+- **THEN** `census-exclusion:` FAILs, naming the swallowed path and `docs/**/*.json` as the pattern responsible, and no review is enqueued
 
 #### Scenario: An executable committed under a report's artifact directory is reviewed
 - **GIVEN** the narrowed `exclude_patterns` and a diff containing `docs/reports/ws0-3217-artifacts/harness/run.sh`, `.../classify.py` and `.../offcpu.bt`
@@ -173,8 +206,10 @@ Four consequences SHALL be replicated, not approximated:
    as SURVIVING. Evaluating both a verbatim and a `**/`-prefixed reading and failing on either is
    FORBIDDEN: it is not conservative but WRONG, and would emit false `census-exclusion: FAIL`s on
    legitimate report PRs.
-2. **Every pattern emits TWO pathspecs**, `<p>` and `<p>/**`, which is how a bare directory name excludes
-   recursively.
+2. **Every CONFIGURED pattern emits TWO pathspecs**, `<p>` and `<p>/**`, which is how a bare directory
+   name excludes recursively. This SHALL apply to configured patterns ONLY — see the built-in arity
+   requirement below; a check that emits one pathspec per configured pattern UNDER-models the exclusion
+   set and reports paths as SURVIVING that roborev really drops.
 3. **A TRAILING SLASH INVERTS the anchoring.** `TrimRight(p, "/")` runs BEFORE the contains-`/` test, so
    `docs/` becomes `docs`, is treated as slash-less, and resolves RECURSIVE (`**/docs` + `**/docs/**`) —
    the OPPOSITE of `docs/**`, which stays root-anchored. Because that is a SILENT WIDENING of unbounded
@@ -229,6 +264,32 @@ configuration switch. A census path one of those eats is exactly as invisible to
 configured swallow, so it SHALL be evaluated in the same reconciliation, and it SHALL be messaged
 DISTINCTLY from a configured pattern ("excluded by a roborev built-in" ≠ "excluded by your config"). This
 list SHALL carry the same re-verify-on-upgrade obligation as the ported algorithm.
+
+**A BUILT-IN SHALL CONTRIBUTE EXACTLY ONE PATHSPEC, APPENDED VERBATIM, AND SHALL NOT BE RE-FORMATTED.**
+The built-ins are NOT user patterns: each is a PRE-FORMATTED pathspec CONSTANT that the binary appends to
+git's argv as-is, so a built-in SHALL NOT be trimmed, SHALL NOT be re-anchored, and SHALL NOT be given the
+`/**` sibling a CONFIGURED pattern receives. This mechanism SHALL be established from the pinned binary
+rather than assumed, and the evidence SHALL be recorded beside the pin: the `:(exclude,glob)` prefix is
+part of each of the 24 string literals (a pattern destined for the formatter would be stored bare); Go's
+length-ordered rodata packing places them back-to-back in equal-length runs at deltas of exactly
+`15 + len(pattern)`, which is only possible if the prefix is inside the string being sorted; and only TWO
+bare `:(exclude,glob)` constants exist among the 26 total occurrences, so there is no shared prefix
+constant for 24 patterns to be formatted against. Corroborating shape: the DIRECTORY built-ins carry `/**`
+written into the literal (`**/.beads/**`) while the FILE built-ins do not (`**/Cargo.lock`).
+
+Both arities SHALL be pinned by test, because each error is a FALSE PASS in a different place:
+OVER-modelling (a phantom `**/Cargo.lock/**`) invents an exclusion roborev never applies and makes
+`prompt-content:` EXCUSE a covered path, while UNDER-modelling (dropping the sibling from configured
+patterns) reports paths as SURVIVING that roborev really drops. Anything derived from a built-in's arity —
+the blame attribution that names the responsible pattern, and any listing of the emitted pathspecs — SHALL
+use the same arity, so no output can advertise an exclusion git was not asked for.
+
+#### Scenario: A built-in matches the FILE it names, not a same-named directory's subtree
+- **GIVEN** a census containing `Cargo.lock/inner.rs` (a tracked DIRECTORY named `Cargo.lock`) beside `main.rs`, and the built-in `**/Cargo.lock`
+- **WHEN** the pre-enqueue reconciliation runs
+- **THEN** BOTH paths are reported as SURVIVING, `census-exclusion:` emits neither a FAIL nor a NOTICE, and `prompt-content:` covers both without excusing either as built-in-excluded
+- **AND GIVEN** the same built-in and a census containing a real `Cargo.lock` FILE beside `main.rs`
+- **THEN** the lockfile IS reported swallowed and attributed to `**/Cargo.lock` — so the single pathspec still works and the model is not merely narrower
 
 **THE VERDICT SHALL FOLLOW ONE RULE, STATED IN DOCTRINE VERBATIM:**
 
@@ -895,10 +956,30 @@ amount of re-running or re-prompting will change the outcome — and why the cen
 against the effective exclusion set under `census-exclusion:`, so a configured pattern that would swallow
 CODE fails before the enqueue instead of masquerading as a code-free diff.
 
-Classification SHALL be by file EXTENSION against a declared prose-extension set, plus a declared
-docs-scoped ARTIFACT-extension set mirroring the configuration's docs-scoped exclusions (raw run output
-and binary/image blobs under the declared prose directories), with a path assist limited to EXTENSIONLESS
-files under those directories. A file with an executable/config-as-code extension anywhere in the tree —
+Classification SHALL be by file EXTENSION against a declared prose-extension set, plus the INTERSECTION of
+a declared ARTIFACT-extension set and a declared set of ARTIFACT-BEARING DIRECTORY GLOBS, mirroring the
+configuration's `<artifact-dir-glob>/**/*.<ext>` exclusions (raw run output and binary/image blobs
+committed inside a directory whose purpose is committed run output), with a path assist limited to
+EXTENSIONLESS files under the declared prose directories. An artifact EXTENSION alone SHALL NOT make a file
+non-code: a `.json` outside those directories — notably `docs/observability/**` — is functional
+configuration and SHALL count as CODE. The directory-glob match SHALL follow git `:(glob)` component
+semantics (`*` matches within one path component, `**` matches zero or more components), so a shell-style
+match whose `*` crosses `/` (which would classify `docs/reports/a/b-artifacts/x.json` as an artifact) is
+FORBIDDEN, and the declared globs SHALL be held in a form that cannot be PATHNAME-EXPANDED against the
+current directory (they contain `*`; an unquoted string iteration silently reduces them to the directories
+that happen to exist in the checkout).
+
+**THE MIRROR SHALL BE ASSERTED STRUCTURALLY AGAINST THE COMMITTED CONFIGURATION.** The classification
+constants and `.roborev.toml`'s `exclude_patterns` are the SAME FACT WRITTEN TWICE, and a one-sided edit is
+the standing hazard: it surfaces as a `census-exclusion:` FAIL on an unrelated report PR, far from its
+cause. The regression suite SHALL therefore DERIVE the expected pattern set from the constants and assert
+SET EQUALITY (order-insensitive, because the file is machine-managed) against the committed
+`.roborev.toml`, parsed with the wrapper's OWN TOML parser rather than a second ad-hoc one. The assert
+SHALL be non-vacuous (an empty derived set SHALL NOT compare equal to an empty parse and pass) and SHALL
+additionally reject the retired forms — a blanket `docs/**` and any `docs/**/*.<ext>` sweep — judged on the
+PARSED pattern set, never by grepping the file, since the file DOCUMENTS the forms it retired.
+
+A file with an executable/config-as-code extension anywhere in the tree —
 including `docs/foo.py`, `docs/reports/*-artifacts/**/*.sh`, `*.bt` and `.github/workflows/*.yml` — SHALL
 count as CODE, so neither the check nor the configuration may treat a program as documentation merely
 because it lives under `docs/`. `code-free:` SHALL NEVER be satisfied by the presence of a directory
@@ -907,6 +988,11 @@ prefix alone.
 This requirement is deliberately STRONGER than a prose-matched detection: an earlier revision computed
 the same classification and used it only for attribution wording, which let a docs-only diff reach
 `RESULT: PASS` whenever the reviewer's verdict happened not to carry the vacuity phrase.
+
+#### Scenario: The census/configuration mirror is asserted against the committed configuration
+- **GIVEN** the declared artifact-extension set, the declared artifact-directory globs and the committed `.roborev.toml`
+- **WHEN** the regression suite derives the expected pattern set and compares it to the parsed `exclude_patterns`
+- **THEN** the two are exactly equal over a NON-EMPTY set, the parsed set carries neither a blanket `docs/**` nor any `docs/**/*.<ext>` sweep, and a one-sided edit to EITHER side fails the suite while naming which side carries the surplus
 
 #### Scenario: A markdown-only census fails deterministically before a review is enqueued
 - **GIVEN** a pushed branch whose census against the base is entirely markdown
