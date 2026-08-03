@@ -151,10 +151,99 @@ use cqlite_core::query::{ColumnInfo, QueryRow};
 /// pessimistic 300 B/row the *capacity* reading of a full narrow batch is
 /// already 4,227,256 B, above 4 MiB: precisely why the cap must be
 /// payload-denominated.
+///
+/// # Do NOT lower this to "align" it with the encoder's wire target
+///
+/// Recorded here because this constant is where a batch-bytes tuner looks first
+/// (issue #3096, lever 4). Two reasons, both binding:
+///
+/// * It is the **caller-facing byte-bounded batching contract** (`--max-batch-bytes`,
+///   spec R6): no emitted batch may exceed a caller-supplied cap. Lowering the
+///   default changes observable default batching for every caller that never set
+///   one.
+/// * **The narrow-shape headroom table above is derived from the 4 MiB value.**
+///   Halving it moves where the byte-cap starts binding on the ~300 B/row shape,
+///   so the table would have to be re-derived to buy a framing effect that
+///   belongs on the other side of the mismatch.
+///
+/// The encoder's side is [`FLIGHT_DATA_SIZE_TARGET_BYTES`] — a *wire-side
+/// capacity* target, a different governor in a different currency, bounded by
+/// [`GRPC_DEFAULT_MAX_MESSAGE_BYTES`]. Fix the mismatch there.
 pub const DEFAULT_MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 /// Environment variable backing `--max-batch-bytes`.
 pub const ENV_MAX_BATCH_BYTES: &str = "CQLITE_MAX_BATCH_BYTES";
+
+/// The default gRPC **maximum inbound message size**: 4 MiB.
+///
+/// **This is the interop ceiling every wire-side size decision in this module is
+/// measured against, and it is named rather than narrated so the next person to
+/// tune batch bytes finds it by READING THE CODE instead of by breaking a
+/// client** (issue #3096).
+///
+/// It is the shared default of `tonic`'s `max_decoding_message_size` and
+/// grpc-java's `maxInboundMessageSize`, so it is the size a Trino/JDBC consumer
+/// will refuse at **without any configuration on our side**. arrow-flight itself
+/// defaults its own re-slicing target BELOW this (2 MiB) and says why: "this
+/// value would normally be 4MB, but the size calculation is somewhat inexact".
+///
+/// A `FlightData` body is not the whole gRPC message — IPC metadata and protobuf
+/// framing ride on top — so a body *at* this value is already over it.
+pub(crate) const GRPC_DEFAULT_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// The flight-data re-slicing target that was **measured and REJECTED**: 8 MiB
+/// (issue #3096, lever 4).
+///
+/// Recorded as a named constant, not as prose in a report, because "just raise
+/// the target until batches stop being split" is the obvious move and it is
+/// **wire-unsafe**. See [`MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET`] for the
+/// number that rejects it and [`MEASURED_FLIGHT_DATA_MESSAGES`] for what it buys.
+/// An unbounded target measures the same as this one on the #3096 corpus: one
+/// message per producer batch.
+pub(crate) const REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES: usize = 8 * 1024 * 1024;
+
+/// Rows the framing measurements in this module were taken over (issue #3096,
+/// `ws0.events` corpus, `--batch-size 8192`).
+pub(crate) const MEASURED_FRAMING_ROWS: usize = 400_000;
+
+/// Realized Arrow **payload** bytes per row of the #3096 `ws0.events` corpus, as
+/// measured — the width that turns [`MEASURED_FLIGHT_DATA_MESSAGES`] into a
+/// per-message body size. (At this width the 4 MiB payload cap binds at 5,645
+/// rows/batch, before the 8192-row cap.)
+pub(crate) const MEASURED_ARROW_PAYLOAD_BYTES_PER_ROW: usize = 701;
+
+/// `FlightData` **data** messages measured for [`MEASURED_FRAMING_ROWS`] rows at
+/// three encoder targets: `(target_bytes, messages)`.
+///
+/// | target | messages | mean `data_body` | verdict |
+/// |---|--:|--:|---|
+/// | 2 MiB — arrow-flight 53.4.1's own default | 331 | ~847 KB | inherited by accident; four ~1,411-row slices per batch **plus a degenerate 1-row tail** |
+/// | 4 MiB — [`FLIGHT_DATA_SIZE_TARGET_BYTES`], shipped | 189 | **~1.49 MB** | slicing and 1-row tails gone; a hard wire backstop retained |
+/// | 8 MiB — [`REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES`] | 72 | **3.90 MB** | **REJECTED** — sits on [`GRPC_DEFAULT_MAX_MESSAGE_BYTES`] |
+///
+/// The 2 MiB body figure is derived from the row width, not separately measured;
+/// the 4 MiB and 8 MiB ones are the measured means recorded below.
+pub(crate) const MEASURED_FLIGHT_DATA_MESSAGES: [(usize, usize); 3] = [
+    (2 * 1024 * 1024, 331),
+    (FLIGHT_DATA_SIZE_TARGET_BYTES, 189),
+    (REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES, 72),
+];
+
+/// Mean `data_body` bytes per `FlightData` message measured at
+/// [`REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES`]: **3.90 MB**.
+///
+/// **This single number is the whole rejection.** 3.90 MB of body, plus IPC
+/// metadata and protobuf framing, sits on the 4 MiB
+/// [`GRPC_DEFAULT_MAX_MESSAGE_BYTES`] ceiling — so an 8 MiB target trades a
+/// framing micro-optimization for a **Trino/JDBC interop break**. The framing
+/// win it buys (72 messages instead of 189) is real and is not worth that.
+pub(crate) const MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET: usize = 3_900_000;
+
+/// Mean `data_body` bytes per `FlightData` message measured at the target
+/// actually shipped, [`FLIGHT_DATA_SIZE_TARGET_BYTES`]: **~1.49 MB** — about a
+/// third of [`GRPC_DEFAULT_MAX_MESSAGE_BYTES`], i.e. comfortably inside every
+/// default gRPC limit.
+pub(crate) const MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET: usize = 1_490_000;
 
 /// The arrow-flight encoder's own batch **re-slicing** target, in Arrow buffer
 /// **CAPACITY** bytes (issue #3096, lever 4).
@@ -187,14 +276,14 @@ pub const ENV_MAX_BATCH_BYTES: &str = "CQLITE_MAX_BATCH_BYTES";
 ///
 /// The obvious move — raise the target until a full-cap batch is never split —
 /// is **wire-unsafe** and is deliberately rejected. Measured on the same corpus,
-/// a target of 8 MiB (or unbounded) does collapse the run to one message per
-/// producer batch (72 messages for 400,000 rows), but those messages carry
-/// **3.90 MB** of `data_body` each. The typical gRPC maximum message size is
-/// 4 MiB (tonic's and grpc-java's default `max_decoding_message_size`), and
-/// arrow-flight picked 2 MiB precisely because "this value would normally be
-/// 4MB, but the size calculation is somewhat inexact". A 3.90 MB body plus IPC
-/// and protobuf overhead sits on that ceiling, so an 8 MiB target would trade a
-/// framing micro-optimization for a Trino/JDBC interop break.
+/// a target of [`REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES`] (8 MiB — or unbounded)
+/// does collapse the run to one message per producer batch (72 messages for
+/// 400,000 rows), but those messages carry
+/// [`MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET`] — **3.90 MB** — of `data_body`
+/// each. That sits on [`GRPC_DEFAULT_MAX_MESSAGE_BYTES`], the 4 MiB ceiling both
+/// tonic and grpc-java apply by default, once IPC and protobuf overhead is added,
+/// so an 8 MiB target would trade a framing micro-optimization for a
+/// **Trino/JDBC interop break**.
 ///
 /// 4 MiB is the value that states the producer cap in the encoder's currency
 /// without crossing that ceiling: the same run drops to **189** messages (the
@@ -216,6 +305,76 @@ pub const ENV_MAX_BATCH_BYTES: &str = "CQLITE_MAX_BATCH_BYTES";
 /// 4 MiB still gets its larger batches; the encoder simply re-slices them for
 /// the wire, which is what a wire-side target is for.
 pub(crate) const FLIGHT_DATA_SIZE_TARGET_BYTES: usize = 4 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// The 8 MiB rejection, enforced at COMPILE TIME (issue #3096).
+//
+// The reasoning above is only a landmine-remover if raising the target trips
+// something. These guards make "just raise it until batches stop splitting"
+// fail the BUILD rather than a Trino/JDBC client, and keep the recorded
+// measurements internally consistent so one of them cannot be edited alone.
+//
+// Proven non-vacuous by perturbation: setting FLIGHT_DATA_SIZE_TARGET_BYTES to
+// 8 MiB fails `cargo build -p cqlite-flight` with `error[E0080]` quoting the
+// interop-break message below.
+// ---------------------------------------------------------------------------
+
+/// Raising the wire target past the default gRPC message ceiling is the trap.
+const _: () = assert!(
+    FLIGHT_DATA_SIZE_TARGET_BYTES <= GRPC_DEFAULT_MAX_MESSAGE_BYTES,
+    "FLIGHT_DATA_SIZE_TARGET_BYTES is above GRPC_DEFAULT_MAX_MESSAGE_BYTES (4 MiB, \
+     tonic's and grpc-java's default max inbound message size). That is a \
+     Trino/JDBC interop break, not an optimization — see \
+     REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES and \
+     MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET (3.90 MB bodies measured at 8 MiB)."
+);
+
+/// The rejected target is over the ceiling, and its measured bodies sat ON it.
+const _: () = assert!(
+    REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES > GRPC_DEFAULT_MAX_MESSAGE_BYTES
+        && MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET * 10 > GRPC_DEFAULT_MAX_MESSAGE_BYTES * 9,
+    "the recorded 8 MiB rejection no longer states a rejection: either the target \
+     is no longer above the gRPC ceiling, or its measured data_body no longer sits \
+     within 10% of it"
+);
+
+/// The shipped target's measured bodies sit well inside the ceiling.
+const _: () = assert!(
+    MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET * 2 < GRPC_DEFAULT_MAX_MESSAGE_BYTES,
+    "the shipped target's measured data_body is no longer comfortably inside the \
+     gRPC ceiling — re-measure before shipping it"
+);
+
+/// The recorded framing table, the recorded corpus width and the recorded body
+/// sizes must agree: `rows x bytes_per_row / messages` is the mean body size, so
+/// editing one figure without re-measuring the others fails the build.
+const _: () = {
+    let total_payload = MEASURED_FRAMING_ROWS * MEASURED_ARROW_PAYLOAD_BYTES_PER_ROW;
+    let shipped = total_payload / MEASURED_FLIGHT_DATA_MESSAGES[1].1;
+    let rejected = total_payload / MEASURED_FLIGHT_DATA_MESSAGES[2].1;
+    assert!(
+        shipped * 100 < MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET * 105
+            && shipped * 105 > MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET * 100,
+        "MEASURED_FLIGHT_DATA_MESSAGES's shipped-target message count is not within \
+         5% of MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET at the recorded row width"
+    );
+    assert!(
+        rejected * 100 < MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET * 105
+            && rejected * 105 > MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET * 100,
+        "MEASURED_FLIGHT_DATA_MESSAGES's rejected-target message count is not within \
+         5% of MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET at the recorded row width"
+    );
+    assert!(
+        MEASURED_FLIGHT_DATA_MESSAGES[0].0 < MEASURED_FLIGHT_DATA_MESSAGES[1].0
+            && MEASURED_FLIGHT_DATA_MESSAGES[1].0 == FLIGHT_DATA_SIZE_TARGET_BYTES
+            && MEASURED_FLIGHT_DATA_MESSAGES[2].0 == REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES
+            && MEASURED_FLIGHT_DATA_MESSAGES[0].1 > MEASURED_FLIGHT_DATA_MESSAGES[1].1
+            && MEASURED_FLIGHT_DATA_MESSAGES[1].1 > MEASURED_FLIGHT_DATA_MESSAGES[2].1,
+        "MEASURED_FLIGHT_DATA_MESSAGES must stay ordered by target with strictly \
+         falling message counts, and its middle/last targets must be the shipped and \
+         rejected constants"
+    );
+};
 
 /// Worst-case ratio of a batch's `get_array_memory_size()` (buffer **capacity**)
 /// to its payload bytes (buffer **lengths**).

@@ -115,6 +115,98 @@ async fn a_batch_over_the_target_still_splits_for_the_wire() {
     }
 }
 
+/// The 8 MiB rejection, pinned against the CONSTANTS that record it
+/// (`batch_bytes.rs`, issue #3096) rather than against a report.
+///
+/// Two independent things are checked, because either alone is weak:
+///
+/// 1. **The interop ceiling relations.** The shipped target is inside
+///    `GRPC_DEFAULT_MAX_MESSAGE_BYTES`; the rejected one is outside it and its
+///    measured bodies sat on it. (Also guarded at compile time in
+///    `batch_bytes.rs` — a raised target fails the BUILD. This test is what says
+///    *why* when someone reads the failure.)
+/// 2. **Internal consistency of the recorded measurements.** The mean body size
+///    is `rows x payload_bytes_per_row / messages`, so the recorded message
+///    counts, the recorded corpus width and the recorded body sizes cannot be
+///    edited independently. This is what stops the numbers rotting into
+///    plausible-looking fiction.
+#[test]
+fn the_rejected_8mib_target_is_recorded_as_a_grpc_interop_break() {
+    use crate::batch_bytes::{
+        GRPC_DEFAULT_MAX_MESSAGE_BYTES, MEASURED_ARROW_PAYLOAD_BYTES_PER_ROW,
+        MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET, MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET,
+        MEASURED_FLIGHT_DATA_MESSAGES, MEASURED_FRAMING_ROWS,
+        REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES,
+    };
+
+    assert_eq!(
+        GRPC_DEFAULT_MAX_MESSAGE_BYTES,
+        4 * 1024 * 1024,
+        "the recorded interop ceiling is tonic's and grpc-java's 4 MiB default \
+         max inbound message size; changing it re-opens the whole rejection"
+    );
+    assert!(
+        FLIGHT_DATA_SIZE_TARGET_BYTES <= GRPC_DEFAULT_MAX_MESSAGE_BYTES,
+        "the shipped wire target ({FLIGHT_DATA_SIZE_TARGET_BYTES} B) must stay inside \
+         the {GRPC_DEFAULT_MAX_MESSAGE_BYTES} B gRPC ceiling"
+    );
+    assert!(
+        REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES > GRPC_DEFAULT_MAX_MESSAGE_BYTES,
+        "the rejected target must be recorded as ABOVE the ceiling — that is the \
+         reason it was rejected"
+    );
+    // 3.90 MB of body, plus IPC metadata and protobuf framing, on a 4 MiB ceiling.
+    assert!(
+        MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET * 10 > GRPC_DEFAULT_MAX_MESSAGE_BYTES * 9,
+        "the measured body at the rejected target ({MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET} B) \
+         must be recorded as sitting ON the {GRPC_DEFAULT_MAX_MESSAGE_BYTES} B ceiling"
+    );
+    assert!(
+        MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET * 2 < GRPC_DEFAULT_MAX_MESSAGE_BYTES,
+        "the measured body at the shipped target must be recorded as comfortably \
+         inside the ceiling"
+    );
+
+    // The recorded measurements must be mutually consistent at the recorded width.
+    let total_payload = MEASURED_FRAMING_ROWS * MEASURED_ARROW_PAYLOAD_BYTES_PER_ROW;
+    for (target, messages, recorded_body) in [
+        (
+            MEASURED_FLIGHT_DATA_MESSAGES[1].0,
+            MEASURED_FLIGHT_DATA_MESSAGES[1].1,
+            MEASURED_DATA_BODY_BYTES_AT_SHIPPED_TARGET,
+        ),
+        (
+            MEASURED_FLIGHT_DATA_MESSAGES[2].0,
+            MEASURED_FLIGHT_DATA_MESSAGES[2].1,
+            MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET,
+        ),
+    ] {
+        let derived = total_payload / messages;
+        let delta_pct =
+            (derived as f64 - recorded_body as f64).abs() / recorded_body as f64 * 100.0;
+        assert!(
+            delta_pct < 5.0,
+            "at a {target}-byte target the recorded {messages} messages over \
+             {MEASURED_FRAMING_ROWS} rows x {MEASURED_ARROW_PAYLOAD_BYTES_PER_ROW} B/row imply \
+             {derived} B/message, {delta_pct:.1}% from the recorded {recorded_body} B — one of \
+             these figures was edited without re-measuring the others"
+        );
+    }
+
+    // Raising the target buys fewer messages; that is never in dispute, and is not
+    // the reason 8 MiB was rejected.
+    assert!(
+        MEASURED_FLIGHT_DATA_MESSAGES[0].1 > MEASURED_FLIGHT_DATA_MESSAGES[1].1
+            && MEASURED_FLIGHT_DATA_MESSAGES[1].1 > MEASURED_FLIGHT_DATA_MESSAGES[2].1,
+        "the recorded framing table must show message counts falling as the target \
+         rises: {MEASURED_FLIGHT_DATA_MESSAGES:?}"
+    );
+    assert_eq!(
+        MEASURED_FLIGHT_DATA_MESSAGES[0].0, ARROW_FLIGHT_DEFAULT_TARGET,
+        "the framing table's first row is arrow-flight's own default target"
+    );
+}
+
 /// The relationship the constant's doc rests on, asserted rather than narrated:
 /// the target sits ABOVE arrow-flight's default (so a producer-capped batch stops
 /// being re-sliced) and NOT above the producer's own payload cap (so the wire
