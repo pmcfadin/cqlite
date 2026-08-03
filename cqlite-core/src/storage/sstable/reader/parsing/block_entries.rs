@@ -123,16 +123,11 @@ impl SSTableReader {
         // route. It is unreachable from the single-source query path today only
         // because `supports_streaming_query_scan()` refuses BTI readers — an
         // implicit, undocumented dependency, which #3108 owns making explicit.
-        //
-        // Issue #3109 removed one reason a guard here could not fire: the four
-        // read surfaces that DO apply shadowing (`scan`, `sequential_scan`, the
-        // per-row and the batched streaming scans) now ALL dispatch BTI readers to
-        // the trie walk (`stream_bti_scan` / `bti_scan_with_metadata`) before
-        // reaching this function, so none of them arrives here with a `da` reader
-        // and `read_shadowing = true` any more. Adding the guard is still #3108's
-        // call, not this function's: the remaining callers are the physical
-        // (`read_shadowing = false`) consumers, and deciding their posture is that
-        // issue's scope.
+        // Issue #3109 removed one reason a guard could not fire: the four
+        // shadowing surfaces (`scan`, `sequential_scan`, the per-row and batched
+        // streaming scans) now ALL dispatch BTI readers to the trie walk before
+        // reaching here, so none arrives with a `da` reader and
+        // `read_shadowing = true`. Adding the guard is still #3108's call.
 
         let mut entries = Vec::new();
 
