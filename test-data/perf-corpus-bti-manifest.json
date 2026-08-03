@@ -1,0 +1,233 @@
+{
+  "issue": 3234,
+  "purpose": "Profileable LZ4-compressed multi-SSTable Cassandra 5.0 BTI (`da`) corpus with wide partitions and a compound clustering key, for BTI read-path measurement (#3029 WS3, #3030 WS4) and as a Cassandra-written parity oracle.",
+  "generated_utc": "2026-08-03T15:55:17.547064+00:00",
+  "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
+  "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
+  "mode": "smoke",
+  "mode_note": "smoke = the small end-to-end validation run (--smoke); it exercises every fail-closed assert but is NOT the profileable production corpus",
+  "method": "recorded-seed deterministic CSV -> chunked cqlsh COPY -> explicit `nodetool flush` per chunk (one SSTable per chunk), with autocompaction DISABLED before the first load so STCS cannot merge the chunks. durable_writes=false is generation-time only and changes no SSTable byte. Deliberately NOT cassandra-stress (its row values are not reproducible from anything a manifest can record).",
+  "cassandra_image": "cassandra:5.0.2",
+  "cassandra_yaml_settings_required": {
+    "storage_compatibility_mode": "NONE",
+    "sstable.selected_format": "bti",
+    "why": "Cassandra 5.0 ships storage_compatibility_mode: CASSANDRA_4, which pins the BIG (`nb`) format. A miss on either setting emits `nb` with no error.",
+    "verified_in_container": [
+      "1142:sstable:",
+      "1143:  selected_format: bti",
+      "2249:storage_compatibility_mode: NONE"
+    ],
+    "verification": "grep-verified in the generating container before the table was created; the emitted descriptors are then asserted to be da-*-bti-*"
+  },
+  "keyspace": "perf_bti_smoke",
+  "table": "wide_multiclustering",
+  "keyspace_table": "perf_bti_smoke.wide_multiclustering",
+  "keyspace_ddl": "CREATE KEYSPACE perf_bti_smoke WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}  AND durable_writes = false;",
+  "seed": "20260803",
+  "seed_note": "the row set is reproducible from this seed alone: chunk N is generated with PRNG seed '<seed>:<N>' (see the row driver's determinism contract)",
+  "row_driver_config": {
+    "rows_requested": 240000,
+    "chunk_rows": 120000,
+    "payload_bytes": 160,
+    "widths": "200:60,800:30,4000:10",
+    "buckets": "alpha,bo,charlie-extended-bucket,delta,ep,foxtrot-long-bucket-name,golf,hh,india-bucket,jj"
+  },
+  "rows_per_partition": {
+    "source": "row driver plan records (gen-perf-corpus-bti-rows.py), counted while writing each CSV chunk \u2014 observed, not requested",
+    "rows": 240000,
+    "partitions": 327,
+    "histogram": {
+      "200": 206,
+      "600": 2,
+      "800": 87,
+      "4000": 32
+    },
+    "buckets_per_partition_histogram": {
+      "2": 206,
+      "6": 2,
+      "8": 87,
+      "10": 32
+    },
+    "min": 200,
+    "max": 4000,
+    "mean": 733.945,
+    "chunks": [
+      {
+        "chunk": 0,
+        "seed_material": "20260803:0",
+        "rows": 120000,
+        "partitions": 164,
+        "pk_min": 0,
+        "pk_max": 163
+      },
+      {
+        "chunk": 1,
+        "seed_material": "20260803:1",
+        "rows": 120000,
+        "partitions": 163,
+        "pk_min": 1000000000,
+        "pk_max": 1000000162
+      }
+    ]
+  },
+  "corpus_root": "/data/corpus-3234-bti",
+  "datasets_root_usage": "CQLITE_DATASETS_ROOT=/data/corpus-3234-bti",
+  "corpus_committed": false,
+  "corpus_note": "The corpus itself is multi-GB and is NOT committed (.gitignore: *.db). Regenerate it with the generator + this seed, then re-run to reproduce this manifest; the per-SSTable Data.db sha256 recorded here is the reproducibility check. Nothing here is inherited from a previous manifest.",
+  "provenance": {
+    "sizes": "os.stat of each component file",
+    "data_db_sha256": "sha256 of the Data.db bytes, recomputed every run",
+    "compression": "CompressionInfo.db header (authoritative, not the DDL)",
+    "rows": "Cassandra sstablemetadata totalRows (Statistics.db) per SSTable; fail-closed, never a fabricated 0",
+    "partitions": "sstablemetadata Partition Size histogram bucket counts",
+    "rows_per_partition": "row driver plan records, counted while writing the CSV",
+    "toc": "read from each SSTable's own TOC.txt",
+    "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)"
+  },
+  "tables": [
+    {
+      "table": "wide_multiclustering",
+      "keyspace_table": "perf_bti_smoke.wide_multiclustering",
+      "sstable_dir": "sstables/perf_bti_smoke/wide_multiclustering-8b73b6b08f5311f1b804237b59b4c761",
+      "format": "da",
+      "sstable_count": 2,
+      "rows": 240000,
+      "partitions": 327,
+      "data_db_bytes_total": 38939376,
+      "data_db_bytes_largest": 19474015,
+      "data_db_largest_gib": 0.0181,
+      "min_data_db_floor_bytes": 8388608,
+      "meets_8mib_read_plane_floor": true,
+      "rows_db_bytes_total": 66978,
+      "every_rows_db_non_empty": true,
+      "clustering_key": [
+        "bucket",
+        "seq"
+      ],
+      "clustering_arity": 2,
+      "ddl": {
+        "source": "schema.cql captured at generation time (cqlsh DESCRIBE KEYSPACE, alongside the SSTable components)",
+        "keyspace_ddl": "CREATE KEYSPACE perf_bti_smoke WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}  AND durable_writes = false;",
+        "table_ddl": "CREATE TABLE perf_bti_smoke.wide_multiclustering (\n    pk int,\n    bucket text,\n    seq int,\n    payload text,\n    PRIMARY KEY (pk, bucket, seq)\n) WITH CLUSTERING ORDER BY (bucket ASC, seq ASC)\n    AND additional_write_policy = '99p'\n    AND allow_auto_snapshot = true\n    AND bloom_filter_fp_chance = 0.01\n    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}\n    AND cdc = false\n    AND comment = ''\n    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}\n    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}\n    AND memtable = 'default'\n    AND crc_check_chance = 1.0\n    AND default_time_to_live = 0\n    AND extensions = {}\n    AND gc_grace_seconds = 864000\n    AND incremental_backups = true\n    AND max_index_interval = 2048\n    AND memtable_flush_period_in_ms = 0\n    AND min_index_interval = 128\n    AND read_repair = 'BLOCKING'\n    AND speculative_retry = '99p';",
+        "extracted_statements": true
+      },
+      "sstables": [
+        {
+          "sstable_basename": "da-1-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 19474015,
+          "data_db_mib": 18.572,
+          "data_db_sha256": "8a5a645b56c2124e07d8f0da18fecd9eeb0fa9508ecb098b840a3bf0905f99f8",
+          "partitions_db_bytes": 1239,
+          "rows_db_bytes": 35219,
+          "rows": 120000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 120000,
+            "total_columns_set": 120000,
+            "partition_count": 164,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8755552895168841",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-1-bti-CompressionInfo.db": 10903,
+            "da-1-bti-Data.db": 19474015,
+            "da-1-bti-Digest.crc32": 9,
+            "da-1-bti-Filter.db": 216,
+            "da-1-bti-Partitions.db": 1239,
+            "da-1-bti-Rows.db": 35219,
+            "da-1-bti-Statistics.db": 5486,
+            "da-1-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 1358,
+            "uncompressed_data_length_bytes": 22235698,
+            "compression_ratio_on_disk_over_logical": 0.8758
+          },
+          "sstabledump_golden": {
+            "file": "da-1-bti-Data.db.jsonl",
+            "bytes": 38543047,
+            "tool": "cassandra sstabledump -l (line-delimited JSON, one partition per line)",
+            "oracle": "Cassandra-WRITTEN bytes: usable as a parity oracle (issue #3042). A CQLite-written round-trip fixture is not."
+          }
+        },
+        {
+          "sstable_basename": "da-2-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 19465361,
+          "data_db_mib": 18.564,
+          "data_db_sha256": "b66dff3bff76292d50a2b191a7651945aaa9611d87cf9e88571cc14fc26129ea",
+          "partitions_db_bytes": 1223,
+          "rows_db_bytes": 31759,
+          "rows": 120000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 120000,
+            "total_columns_set": 120000,
+            "partition_count": 163,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8770009235577809",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-2-bti-CompressionInfo.db": 10879,
+            "da-2-bti-Data.db": 19465361,
+            "da-2-bti-Digest.crc32": 10,
+            "da-2-bti-Filter.db": 216,
+            "da-2-bti-Partitions.db": 1223,
+            "da-2-bti-Rows.db": 31759,
+            "da-2-bti-Statistics.db": 5481,
+            "da-2-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 1355,
+            "uncompressed_data_length_bytes": 22189191,
+            "compression_ratio_on_disk_over_logical": 0.877245
+          },
+          "sstabledump_golden": null
+        }
+      ]
+    }
+  ],
+  "row_count_cross_check": {
+    "row_driver_rows": 240000,
+    "statistics_db_rows": 240000,
+    "agree": true,
+    "note": "fail-closed: a disagreement aborts before the manifest is written"
+  }
+}

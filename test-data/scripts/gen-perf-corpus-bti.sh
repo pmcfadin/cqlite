@@ -54,8 +54,8 @@
 #
 # Usage:
 #   bash test-data/scripts/gen-perf-corpus-bti.sh --smoke        # ~2 min, validates the pipeline
-#   bash test-data/scripts/gen-perf-corpus-bti.sh                # production default (~2 GB)
-#   bash test-data/scripts/gen-perf-corpus-bti.sh --rows 25600000  # ~5 GB
+#   bash test-data/scripts/gen-perf-corpus-bti.sh                # production default (~2 GiB)
+#   bash test-data/scripts/gen-perf-corpus-bti.sh --rows 33000000  # ~5 GiB
 #   bash test-data/scripts/gen-perf-corpus-bti.sh --validate-only  # flags only, runs nothing
 #   bash test-data/scripts/gen-perf-corpus-bti.sh --verify-only    # assert an EXISTING corpus
 #   bash test-data/scripts/gen-perf-corpus-bti.sh --help
@@ -78,9 +78,10 @@ SUDO="${SUDO:-sudo -n}"
 OUT="${OUT-/data/corpus-3234-bti}"
 KS="${KS-}"                       # defaulted after --smoke is known
 TBL="${TBL-wide_multiclustering}"
-# 2 GB target at the commissioning-probe density (~210 B/row on disk).
-ROWS="${ROWS:-10200000}"
-# 500k rows/chunk => ~100 MiB Data.db per SSTable, comfortably over the 8 MiB floor.
+# ~2.0 GiB at the density MEASURED by this generator's commissioning run
+# (162 B/row on disk at --payload-bytes 160, LZ4/16 KiB). 5 GiB ~= 33000000 rows.
+ROWS="${ROWS:-13200000}"
+# 500k rows/chunk => ~78 MiB Data.db per SSTable, comfortably over the 8 MiB floor.
 CHUNK_ROWS="${CHUNK_ROWS:-500000}"
 SEED="${SEED:-20260803}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-160}"
@@ -530,18 +531,19 @@ publish() {
 dump_goldens() {
   DUMPED=()
   [ "$DUMP_GENERATIONS" -gt 0 ] || { log "golden generation disabled (--dump-generations 0)"; return 0; }
-  local n=0 f base
+  local n=0 f base stem
   shopt -s nullglob
   for f in "$DEST"/da-*-bti-Data.db; do
     [ "$n" -lt "$DUMP_GENERATIONS" ] || break
     base="$(basename "$f")"
+    stem="${base%-Data.db}"
     log "[golden] sstabledump -l $base (bounded subset: $((n + 1))/$DUMP_GENERATIONS)..."
     # sstabledump is not on $PATH in the image; absolute path required.
     $DOCKER exec "$CONTAINER" bash -lc \
       "/opt/cassandra/tools/bin/sstabledump '$CONTAINER_SSTABLE_DIR/$base' -l" >"$DEST/$base.jsonl" \
       || die "[golden] sstabledump failed for $base"
     [ -s "$DEST/$base.jsonl" ] || die "[golden] sstabledump -l produced an EMPTY golden for $base"
-    DUMPED+=("$base")
+    DUMPED+=("$stem")
     n=$((n + 1))
   done
   shopt -u nullglob
@@ -554,8 +556,9 @@ dump_goldens() {
 # JSONL. A mismatch means the golden does not describe the bytes.
 verify_dumped_row_counts() {
   [ "${#DUMPED[@]}" -ge 1 ] || return 0
-  local base meta_rows dump_rows
-  for base in "${DUMPED[@]}"; do
+  local stem base meta_rows dump_rows
+  for stem in "${DUMPED[@]}"; do
+    base="$stem-Data.db"
     meta_rows="$($DOCKER exec "$CONTAINER" bash -lc \
       "/opt/cassandra/tools/bin/sstablemetadata '$CONTAINER_SSTABLE_DIR/$base' 2>/dev/null" \
       | sed -n 's/^totalRows: \([0-9]\+\)$/\1/p' | head -1)"
