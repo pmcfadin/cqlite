@@ -601,10 +601,20 @@ async fn two_concurrent_scans_on_shared_reader_cancel_independently() {
 /// `Index.db` entry and never re-probes, so `index_probes` is 0 on the fixed path
 /// — the body-decode work-probe is the surviving non-vacuous signal.
 fn datasets_root() -> Option<std::path::PathBuf> {
+    // `CQLITE_DATASETS_ROOT` first, then the in-repo committed corpus, so a plain
+    // local `cargo test` (no env var) still reaches the fixtures instead of
+    // silently skipping every real-fixture test in this file. Both candidates are
+    // filtered on `is_dir()`, and each caller additionally requires the specific
+    // (gitignored) `Data.db` binary, so a JSONL-only checkout still SKIPs.
+    let in_repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|repo| repo.join("test-data").join("datasets"));
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
         .map(std::path::PathBuf::from)
-        .filter(|p| p.is_dir())
+        .into_iter()
+        .chain(in_repo)
+        .find(|p| p.is_dir())
 }
 
 /// `test_basic.multi_partition_table`: a real fixture with Summary.db +
@@ -858,5 +868,113 @@ async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
         probes, 0,
         "a full materialising scan must not re-probe the index per partition — got \
          {probes} probes for {partition_count} partitions (pre-#2430 this equalled N)"
+    );
+}
+
+/// `test_da.simple_table`: a REAL Cassandra 5.0.2 BTI (`da`) SSTable — no
+/// `Index.db`/`Summary.db`, a `Partitions.db` trie instead, and (unlike its
+/// `ttl_table` sibling) no TTL, so its rows are live under any clock and the
+/// uncancelled control below is non-vacuous forever.
+///
+/// Requires the gitignored `Data.db` AND `Partitions.db`: without the latter
+/// `SSTableReader::open` leaves `bti_partitions_db` unset and the reader would not
+/// take the BTI branch this test exists to cover.
+fn real_bti_fixture() -> Option<std::path::PathBuf> {
+    let base = datasets_root()?.join("sstables/test_da");
+    let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(&base)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("simple_table-"))
+                .unwrap_or(false)
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().find_map(|dir| {
+        let data = dir.join("da-2-bti-Data.db");
+        (data.is_file() && dir.join("da-2-bti-Partitions.db").is_file()).then_some(data)
+    })
+}
+
+/// Issue #3109 (roborev BLOCKER 1): the BTI (`da`) early-return that #3109 added to
+/// `sequential_scan` must honour the walk's PER-CALL cancel token (#2264/#2346).
+///
+/// Red-then-green. As first written the branch called `bti_scan_with_metadata`,
+/// which polls NOTHING of the caller's token: it stitches through the
+/// NON-cancellable `stitch_all_chunks`, i.e. the READER's OWN `scan_cancel` field.
+/// A caller driving the walk with its own token — exactly what
+/// `iterate_all_partitions_cancellable` does for a shared/cached reader that has no
+/// `&mut self` to set the field on (#2346) — therefore got `Ok(every row)` back
+/// after a full stitch + parse of a scan it had ALREADY cancelled. The
+/// `Err(Cancelled)` assertion below FAILS against that code and passes after the
+/// branch was routed through `bti_scan_with_metadata_cancellable`.
+///
+/// The token is deliberately NOT `reader.scan_cancel`: that IS the distinction
+/// under test, and a test cancelling the reader's own field would have passed
+/// against the broken code, since the non-cancellable stitch polls precisely that
+/// flag. The uncancelled control uses a second independent token, proving the walk
+/// yields every row when the caller's token is clear — so the abort is cutting real
+/// work short rather than passing on an empty scan.
+///
+/// Pre-cancel is the DETERMINISTIC discriminator (same convention as
+/// `stitched_sequential_scan_honors_per_call_cancel` above): `sequential_scan`
+/// materialises a `Vec` with no emit callback, so a concurrent mid-scan cancel
+/// would be a wall-clock race, while a pre-cancelled token proves the poll fires
+/// before any row is returned with no timing dependency.
+#[tokio::test]
+async fn bti_sequential_scan_honors_per_call_cancel() {
+    use crate::types::TableId;
+    let Some(data_path) = real_bti_fixture() else {
+        eprintln!(
+            "Skipping (BTI per-call cancel): real test_da/simple_table `da` fixture not \
+             present (set CQLITE_DATASETS_ROOT and fetch the datasets)"
+        );
+        return;
+    };
+    let reader = open_reader(&data_path).await;
+
+    // Non-vacuity: this must be a BTI reader, or the walk never reaches the branch
+    // under test and the assertions below would pass for the wrong reason.
+    assert!(
+        reader.bti_partitions_db.is_some(),
+        "fixture must open as a BTI (`da`) reader for the #3109 branch to be exercised"
+    );
+
+    // `table_id` is ignored on the BTI branch (as on the stitched branch), so any
+    // value serves.
+    let table_id = TableId::from("test_da.simple_table");
+
+    // Positive control: with a CLEAR per-call token the BTI branch returns rows.
+    let live = ScanCancel::new();
+    let rows = reader
+        .sequential_scan(&table_id, None, None, None, None, &live)
+        .await
+        .expect("uncancelled BTI sequential scan must succeed");
+    assert!(
+        !rows.is_empty(),
+        "the BTI fixture must decode to at least one live row, else the cancelled \
+         assertion below is vacuous"
+    );
+
+    // The fix: a PER-CALL token (never the reader's own field) that is already
+    // cancelled aborts the BTI walk with `Error::Cancelled`.
+    let cancel = ScanCancel::new();
+    cancel.cancel();
+    assert!(
+        !reader.scan_cancel.is_cancelled(),
+        "the reader's OWN flag must stay clear — cancelling it would make this test \
+         pass against the pre-fix code that polls exactly that flag"
+    );
+    let result = reader
+        .sequential_scan(&table_id, None, None, None, None, &cancel)
+        .await;
+    assert!(
+        matches!(result, Err(crate::Error::Cancelled)),
+        "a pre-cancelled PER-CALL token must abort the BTI sequential-scan branch with \
+         Error::Cancelled (issue #3109 / #2264 / #2346); got {:?}",
+        result.map(|r| r.len())
     );
 }
