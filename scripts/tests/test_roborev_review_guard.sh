@@ -99,6 +99,16 @@ set -uo pipefail
 cmd="${1:-}"
 shift || true
 
+# json_prompt: STUB_PROMPT with its double quotes ESCAPED, so the record stays VALID
+# JSON. The real binary emits a JSON string; embedding a prompt verbatim broke the
+# record for exactly the cases whose PROMPT carries a quote (a C-quoted `diff --git
+# "a/..." "b/..."` header, or a path with a literal quote) — which then degraded the
+# whole record and false-FAILed `sha-assert:`, hiding what those cases exist to pin.
+json_prompt() {
+  local p="${STUB_PROMPT:-}"
+  printf '%s' "${p//\"/\\\"}"
+}
+
 emit_job_object() {
   local usage="" extra=""
   if [ -n "${STUB_HAS_TOKEN_DATA:-}" ]; then
@@ -118,7 +128,7 @@ emit_job_object() {
     "${STUB_STATUS:-done}" \
     "${STUB_MODEL:-gpt-5.6-sol}" \
     "${STUB_REQUESTED_MODEL:-gpt-5.6-sol}" \
-    "${STUB_PROMPT:-}" \
+    "$(json_prompt)" \
     "$usage$extra"
 }
 
@@ -153,7 +163,7 @@ case "$cmd" in
       # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
       # `id` (equal to the job id) that NESTS the job row under a "job" key.
       printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_PROMPT:-}"
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -162,7 +172,7 @@ case "$cmd" in
       # The REAL `show --json` shape: the REVIEW row — id/agent/prompt, and no
       # git_ref / status / verdict / token_usage.
       printf '{"id":%s,"job_id":%s,"agent":"codex","prompt":"%s"}\n' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_PROMPT:-}"
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
       exit 0
     fi
     emit_job_object; printf '\n'
@@ -264,6 +274,14 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   `$REPO/.roborev.toml` is NOT the file roborev's daemon reads
 #   cargo-lock      Cargo.lock beside a .rs file — a path roborev ALWAYS excludes
 #                   through a hard-coded built-in, with no configuration involved
+#   cargo-lock-only Cargo.lock beside PROSE only: the census's whole CODE half is eaten
+#                   by the built-in, so the reviewer would get an EMPTY prompt — the
+#                   TOTAL swallow, which must FAIL rather than NOTICE
+#   docs-space-dir  docs/storage engine/probe.sh + a .rs file — a CODE census path whose
+#                   directory carries a SPACE (the repo tracks 40 such paths), the header
+#                   shape `diff --git a/a b.txt b/a b.txt` no regex can split
+#   docs-nonascii-name  docs/reports/x-artifacts/é.sh + a .rs file — the C-QUOTED header
+#                   shape `diff --git "a/\303\251.sh" "b/..."` git emits for non-ASCII
 #   cargo-lock-and-docs-exec  the same lockfile PLUS a docs/ harness .sh, so a
 #                   CONFIGURED swallow and a BUILT-IN one occur in one run
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
@@ -408,6 +426,37 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add Cargo.lock main.rs
       git_q "$work" commit -q -m 'a lockfile beside code'
+      ;;
+    cargo-lock-only)
+      # THE TOTAL BUILT-IN SWALLOW (#3229 round 3, blocker F1). The census's ONLY
+      # non-prose file is a lockfile, so `code-free:` PASSes (a `.lock` extension
+      # classifies as CODE) — yet the built-in `**/Cargo.lock` drops it, leaving the
+      # reviewer an EMPTY prompt. Any dependency-bump branch (`Cargo.lock` / `go.sum` /
+      # `pnpm-lock.yaml`) is this shape.
+      printf '[[package]]\nname = "x"\nversion = "0.1.0"\n' >"$work/Cargo.lock"
+      printf 'doc line\n' >>"$work/README.md"
+      git_q "$work" add Cargo.lock README.md
+      git_q "$work" commit -q -m 'a lockfile bump beside prose'
+      ;;
+    docs-space-dir)
+      # A CODE census path whose DIRECTORY carries a space — the real repo already tracks
+      # `docs/storage engine/`. git does NOT quote a space-only path, so the header it
+      # emits is `diff --git a/a b.txt b/a b.txt`, which no `a/<x> b/<y>` regex can split.
+      mkdir -p "$work/docs/storage engine"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/storage engine/probe.sh"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a code path under a space-bearing docs directory'
+      ;;
+    docs-nonascii-name)
+      # A NON-ASCII CODE census path: `git diff --numstat` C-QUOTES it
+      # (`"docs/reports/x-artifacts/\303\251.sh"`) and so does the `diff --git` header
+      # roborev's diff carries (`diff --git "a/..." "b/..."`). Both sides must normalise.
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/é.sh"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a code path with a non-ASCII name'
       ;;
     cargo-lock-and-docs-exec)
       # BOTH causes at once: a built-in eats Cargo.lock, a configured `docs/**` eats the
@@ -1061,8 +1110,49 @@ write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/docs/reports/x-artifacts/harness/odd "q" name.sh b/docs/reports/x-artifacts/harness/odd "q" name.sh'
 run_wrapper "$work"
+# ASSERT THE VERDICT, not just one key (#3229 round 3, blocker F3). This case used to
+# assert `census-exclusion:` alone and therefore reported `ok` twice while the SAME
+# hostile path false-FAILed `prompt-content:` (MEASURED: `census-exclusion: PASS (2/2
+# survive)` beside `prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`) — a case that
+# passes while the behaviour it names is broken is worse than no case at all.
+assert_verdict 'case (cx6)' PASS 0
 assert_says 'case (cx6) the odd-named .sh is NOT reported swallowed' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_lacks 'case (cx6) no false FAIL from a quoting artefact' '^census-exclusion: FAIL'
+assert_says 'case (cx6) prompt-content compares the quoted census path against the prompt NORMALISED' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6) prompt-content does not false-FAIL on a quoting artefact' '^prompt-content: FAIL'
+
+printf '== case (cx6c): a CODE path under a SPACE-bearing directory does not false-FAIL prompt-content ==\n'
+reset_stub
+# `docs/storage engine/` is a real tracked directory in this repo (40 space-bearing paths
+# under docs/), and this change promotes docs/-scoped executables to CODE census paths.
+# git does not quote a space-only path, so the header is `diff --git a/a b.sh b/a b.sh`,
+# which `a/[^ ]+ b/[^ ]+` cannot split — matched instead by probing the LITERAL header.
+work=$(make_fixture case_cx6c docs-space-dir)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/docs/storage engine/probe.sh b/docs/storage engine/probe.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx6c)' PASS 0
+assert_says 'case (cx6c) the space-bearing path is a surviving CODE census path' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_says 'case (cx6c) prompt-content recognises the space-bearing diff header' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6c) prompt-content does not false-FAIL on a space' '^prompt-content: FAIL'
+
+printf '== case (cx6d): a NON-ASCII CODE path is compared through the C-QUOTED header shape ==\n'
+reset_stub
+# `git diff --numstat` renders the census path as `"docs/.../\303\251.sh"` and the diff
+# header roborev carries is `diff --git "a/docs/.../\303\251.sh" "b/..."`. BOTH sides go
+# through `roborev_unquote_path`, so the two spellings compare EQUAL. (The stub emits the
+# prompt through `printf %b`, hence the doubled backslashes here: they render as the
+# single-backslash octal escapes git actually writes.)
+work=$(make_fixture case_cx6d docs-nonascii-name)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git "a/docs/reports/x-artifacts/\\303\\251.sh" "b/docs/reports/x-artifacts/\\303\\251.sh"'
+run_wrapper "$work"
+assert_verdict 'case (cx6d)' PASS 0
+assert_says 'case (cx6d) the non-ASCII path is a surviving CODE census path' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_says 'case (cx6d) prompt-content recognises the C-quoted diff header' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6d) prompt-content does not false-FAIL on an octal-escaped path' '^prompt-content: FAIL'
 
 printf '== case (cx6b): the same odd-named path is named RAW when a blanket glob eats it ==\n'
 reset_stub
@@ -1447,6 +1537,91 @@ if grep -qE '^ROBOREV_BUILTIN_PATHSPEC_LITERALS=[0-9]+' "$_oracles_src"; then
   ok 'structural: the :(exclude,glob) literal count is pinned, so an ADDED built-in is observable'
 else
   bad 'structural: no pinned :(exclude,glob) literal count — an added built-in could not be detected'
+fi
+
+printf "== case (cx20): a TOTAL built-in swallow FAILs pre-enqueue — an empty prompt certifies nothing ==\n"
+reset_stub
+# THE WORST DEFECT CLASS THIS WRAPPER CAN HAVE (#3229 round 3, blocker F1): a vacuous
+# PASS textually identical to a genuine one. A lockfile-only bump PASSes `code-free:` (a
+# `.lock` extension classifies as CODE) and its single CODE path is then eaten by the
+# built-in `**/Cargo.lock`, so the reviewer receives an EMPTY prompt. Left as a NOTICE
+# (the partial-swallow ruling) the block read `census-exclusion: NOTICE (0/1 survive)`,
+# `prompt-content: PASS (0/0 ...)`, `RESULT: PASS`, exit 0 — and flow-closer would arm
+# `--auto` on an unreviewed diff. This is NOT an exception to the NOTICE ruling: it is the
+# same rule ("FAIL where the author can act; NOTICE where only the information is
+# actionable; never silence") reaching the case that ruling does not cover, and the remedy
+# is the one `code-free:` already prescribes.
+work=$(make_fixture case_cx20 cargo-lock-only)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx20)' FAIL 1
+assert_says 'case (cx20) the lockfile still classifies as CODE, so code-free does not catch it' '^code-free: PASS$'
+assert_says 'case (cx20) the total swallow is a FAIL naming the empty diff' "^census-exclusion: FAIL \(0/1 code census paths survive the effective exclusion set; ALL 1 code census path\(s\) excluded by a roborev built-in, so the reviewer would receive an EMPTY diff: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)\$"
+assert_lacks 'case (cx20) it is NOT downgraded to a NOTICE' '^census-exclusion: NOTICE'
+assert_says 'case (cx20) it states the diff cannot be roborev-certified at all' 'CANNOT be roborev-certified at all'
+assert_says 'case (cx20) it prescribes the code-free remedy' 'primary-source verification recorded in the PR'
+assert_says 'case (cx20) it explains that a PARTIAL swallow still stays a NOTICE' 'a PARTIAL built-in swallow stays a NOTICE'
+assert_says 'case (cx20) it names the unifying rule rather than claiming an exception' 'applied consistently, not an exception to it'
+assert_never_enqueued 'case (cx20)'
+assert_says 'case (cx20) prompt-content is never consulted' '^prompt-content: SKIP$'
+assert_lacks 'case (cx20) a 0/0 PASS is never printed' 'prompt-content: PASS \(0/0'
+assert_one_block 'case (cx20)'
+
+printf "== case (cx20b): the SAME lockfile beside real code stays the NOTICE (the ruling is intact) ==\n"
+reset_stub
+# The complement, so cx20 is not read as "a built-in swallow is a FAIL again". One code
+# path survives, so the review IS enqueued and census-exclusion is a NOTICE — the exact
+# cx19 outcome. The boundary is TOTAL vs PARTIAL, nothing else.
+work=$(make_fixture case_cx20b cargo-lock)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx20b)' PASS 0
+assert_says 'case (cx20b) a PARTIAL swallow is still the NOTICE' '^census-exclusion: NOTICE \(1/2 code census paths survive'
+assert_lacks 'case (cx20b) the total-swallow FAIL does not fire on a partial swallow' 'EMPTY diff'
+
+printf "== case (cx21): prompt-content: can NEVER emit a 0/0 PASS (direct unit probe) ==\n"
+# Belt-and-braces behind cx20, exercised DIRECTLY because the wrapper now refuses the
+# condition upstream: with every code census path built-in-excluded there is no subject
+# left, and `PASS (0/0 code census paths present)` would be indistinguishable from a
+# genuine pass. Driven through the real function in the real files, so a future change
+# that removes the census-exclusion FAIL cannot silently restore the vacuous PASS.
+CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
+cx21_probe="$tmp/cx21-probe.sh"
+cx21_out="$tmp/cx21-out.txt"
+cat >"$cx21_probe" <<'CX21'
+set -uo pipefail
+. "$1"   # oracles (roborev_unquote_path)
+. "$2"   # checks  (roborev_check_prompt_content)
+LOG="$3/cx21.log"
+PROMPT_FILE="$LOG.prompt"
+printf 'Review this diff:\ndiff --git a/main.rs b/main.rs\n' >"$PROMPT_FILE"
+CENSUS='2 files, +2/-0'
+BASE='origin/main'
+JOB=4600
+census_code_paths=("Cargo.lock")
+CENSUS_BUILTIN_EXCLUDED=("Cargo.lock")
+DETAILS=()
+PROMPT_CONTENT=""
+roborev_check_prompt_content
+printf 'prompt-content: %s\n' "$PROMPT_CONTENT"
+CX21
+if bash "$cx21_probe" "$ORACLES_SRC" "$CHECKS_SRC" "$tmp" >"$cx21_out" 2>&1; then
+  if grep -qE '^prompt-content: FAIL \(no code census path was checkable — a 0/0 is never a pass\)$' "$cx21_out"; then
+    ok 'case (cx21): a zero-subject prompt-content is a FAIL, with the reason in the value line'
+  else
+    bad "case (cx21): expected the 0/0 refusal, got '$(cat "$cx21_out")'"
+  fi
+  if grep -qE '^prompt-content: PASS \(0/0' "$cx21_out"; then
+    bad 'case (cx21): prompt-content emitted the vacuous PASS (0/0 ...) form'
+  else
+    ok 'case (cx21): prompt-content never emits PASS (0/0 ...)'
+  fi
+else
+  bad "case (cx21): the unit probe did not run: $(cat "$cx21_out")"
 fi
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
