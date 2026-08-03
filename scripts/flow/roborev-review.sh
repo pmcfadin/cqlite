@@ -27,13 +27,19 @@
 #   3. the single-SHA form (`roborev review <sha>`) reviews ONE COMMIT, not the
 #      branch: on a multi-commit branch it certifies the branch from its last commit
 #      alone — a PARTIAL review reported as a complete one. => NON-SANCTIONED.
-#   4. a code-free (docs/spec/workflow-only) diff is DISCARDED and still reported as
+#   4. a code-free (docs/spec-prose-only) diff is DISCARDED and still reported as
 #      "No issues found" — with the CORRECT sha enqueued, so no sha check can catch
-#      it. Mechanism MEASURED: roborev omits non-code paths from the diff it builds
-#      (on a census of 22 markdown + 5 code files the prompt carried diff headers for
-#      exactly the 5 code files), so a docs-only diff leaves nothing to review. => a docs-only diff CANNOT be roborev-certified at
-#      all; the sanctioned substitute is primary-source verification recorded in
-#      the PR (e.g. `git show cassandra-5.0.8:<path>`).
+#      it. Mechanism MEASURED, and it is NOT a code/non-code judgement: **roborev
+#      drops exactly what its configured `exclude_patterns` pathspecs match.** On a
+#      census of 22 markdown + 5 code files the prompt carried diff headers for
+#      exactly the 5 code files because `*.md` is CONFIGURED, so a prose-only diff
+#      leaves nothing to review. => a docs-only diff — meaning a CODE-FREE CENSUS,
+#      never a `docs/` path prefix — CANNOT be roborev-certified at all; the
+#      sanctioned substitute is primary-source verification recorded in the PR (e.g.
+#      `git show cassandra-5.0.8:<path>`). The same mechanism cuts the other way and
+#      did: under a configured `docs/**` it discarded 33 EXECUTABLE harness files on
+#      PR #3222 (#3229), which is why `census-exclusion:` now reconciles the census
+#      against the configured set BEFORE anything is enqueued.
 #
 # This wrapper judges the reviewer's claims against a LOCALLY COMPUTED `git` diff
 # census — never against the reviewer's own prose — and fails closed.
@@ -75,13 +81,20 @@
 #
 #   ==== ROBOREV REVIEW SUMMARY ====
 #   repo: / branch: / base: / head-sha: / reviewed-sha: / job: / model: / census:
-#   tokens: / push-assert: / census-check: / code-free: / job-record: / sha-assert:
-#   review-completed: / prompt-content: / vacuity-tier1: / vacuity-tier2:
-#   findings: / roborev-exit: / log:
+#   tokens: / push-assert: / census-check: / code-free: / census-exclusion: /
+#   job-record: / sha-assert: / review-completed: / prompt-content: /
+#   vacuity-tier1: / vacuity-tier2: / findings: / roborev-exit: / log:
 #   RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 #
 # Per-check values, as built:
 #   push-assert / census-check / code-free / review-completed  PASS | FAIL (...) | SKIP
+#   census-exclusion  PASS (<k>/<n> code census paths survive the effective exclusion
+#                     set; corroboration: OK|NOTICE|UNAVAILABLE) |
+#                     PASS (no exclusion patterns configured) |
+#                     FAIL (<m>/<n> code census paths excluded: <path> by '<pat>', ...) |
+#                     FAIL (exclusion set unreadable: ...) |
+#                     FAIL (trailing-slash pattern ...) |
+#                     FAIL (exclusion set drift: ...) | SKIP (<cause>)
 #   job-record        PASS | PASS (no token accounting in the record) |
 #                     DEGRADED (incomplete after <n> retries: <fields>) | SKIP
 #   sha-assert        PASS | FAIL (...) | SKIP
@@ -110,7 +123,8 @@
 #
 # WHICH CHECKS CARRY THE VERDICT. The DETERMINISTIC ones, each judged against data we
 # obtained ourselves: `push-assert` (the remote, via ls-remote), `census-check` (our
-# own git diff), `code-free` (our own census classification), `sha-assert` (the job
+# own git diff), `code-free` (our own census classification), `census-exclusion` (our
+# census vs the configured exclusion set, matched by git — #3229), `sha-assert` (the job
 # record's git_ref, asserting BOTH endpoints of the reviewed range against the census
 # range), `review-completed` (job status + an allow-list of terminal verdict markers),
 # `prompt-content` (the CODE subset of our census inside the prompt actually sent). Prose matching (`vacuity-tier1`) and token accounting (`vacuity-tier2`)
@@ -121,7 +135,7 @@
 #                           no vacuity signal. PASS requires POSITIVE evidence; it is
 #                           never inferred from the absence of a bad phrase.
 #   1  FAIL               — any failed check: push-assert, census-check, code-free,
-#                           sha-assert, review-completed, prompt-content,
+#                           census-exclusion, sha-assert, review-completed, prompt-content,
 #                           vacuity-tier1, vacuity-tier2, findings (INCONSISTENT), or
 #                           roborev-exit (FINDINGS or ERROR). Each names itself under
 #                           its own key. NOT reportable as "roborev clean".
@@ -237,6 +251,27 @@ Outcome: one '==== ROBOREV REVIEW SUMMARY ====' block on stdout, terminal
 RESULT: PASS|FAIL|NOTHING-TO-REVIEW. Exit 0=PASS, 1=FAIL, 3=NOTHING-TO-REVIEW,
 2=usage error. Retain the block, never the transcript.
 
+census-exclusion: (pre-enqueue, immediately after code-free: in the fixed key
+order) reconciles the CODE census against the EFFECTIVE exclude_patterns — the
+repo .roborev.toml UNIONed with ~/.roborev/config.toml — by porting roborev
+v0.61.2's git.FormatExcludeArgs and letting GIT do the matching. roborev drops
+exactly what its configured pathspecs match; it makes no code/non-code judgement,
+which is why this is computed rather than assumed (issue #3229: a configured
+'docs/**' discarded 33 executable harness files on PR #3222). Values:
+  PASS (<k>/<n> code census paths survive the effective exclusion set;
+        corroboration: OK|NOTICE|UNAVAILABLE)
+  PASS (no exclusion patterns configured)     absent key/file, or an empty list
+  FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>', ...)
+  FAIL (exclusion set unreadable: <cause>)    a present but unparseable value;
+        deliberately DISTINCT from 'no exclusion patterns configured'
+  FAIL (trailing-slash pattern '<p>/' resolves RECURSIVE (**/<p>), opposite to
+        '<p>/**' ...)                         diff-independent, by decision
+  FAIL (exclusion set drift: '<pattern>' reported by roborev config get is absent
+        from the parsed set)
+  SKIP (<cause>)                              the step was not reached
+A FAIL here is a CONFIGURATION defect: fix .roborev.toml, do not investigate the
+reviewer or prompt-content:. Re-verify the port on any roborev version bump.
+
 Sanctioned invocation (measured, issue #2964 round 5):
   roborev review --branch --base <base> --repo <abs> --agent <a> --model <m> --wait
 which reviews the RANGE <base>..HEAD, i.e. exactly the census. Non-sanctioned:
@@ -245,7 +280,10 @@ worktree); the two-positional commit-range form (anchors the range at git's EMPT
 TREE); and a single-sha review (covers ONE COMMIT, so it certifies a branch from
 its last commit alone).
 A docs-only diff cannot be roborev-certified at all — record primary-source
-verification in the PR instead of "roborev clean".
+verification in the PR instead of "roborev clean". "docs-only" means a CODE-FREE
+CENSUS as code-free: classifies it, NEVER a 'docs/' path prefix: the measurement
+harnesses this repo ships under docs/reports/*-artifacts/ are executable code that
+IS reviewed, so a PR carrying them is not a docs-only change (issue #3229).
 
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
@@ -359,6 +397,10 @@ census_code_paths=()
 PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"
+# The census-vs-configured-exclusion reconciliation (#3229). An explicit SKIP CAUSE,
+# never a blank: this key's whole job is to say whether the configured exclusion set
+# would swallow the census's CODE paths, and a blank value would read as a pass.
+CENSUS_EXCLUSION="SKIP (not reached)"
 JOB_RECORD="SKIP"
 SHA_ASSERT="SKIP"
 # The POSITIVE "a review actually happened" assert. Absence of a vacuous phrase is
@@ -400,6 +442,9 @@ emit_summary() {
   printf 'push-assert: %s\n' "$PUSH_ASSERT"
   printf 'census-check: %s\n' "$CENSUS_CHECK"
   printf 'code-free: %s\n' "$CODE_FREE"
+  # Immediately after `code-free:` — mirroring the pre-enqueue evaluation order, and
+  # part of the block's FIXED key contract (#3229).
+  printf 'census-exclusion: %s\n' "$CENSUS_EXCLUSION"
   printf 'job-record: %s\n' "$JOB_RECORD"
   printf 'sha-assert: %s\n' "$SHA_ASSERT"
   printf 'review-completed: %s\n' "$REVIEW_COMPLETED"
@@ -459,9 +504,20 @@ if [ "$(type -t roborev_push_assert)" != function ] || [ "$(type -t roborev_cens
   DETAILS+=("ERROR: '$ORACLES_FILE' did not define roborev_push_assert and roborev_census, so the push assert and the diff census cannot run. Failing closed — the file is truncated or corrupt.")
   finish FAIL 1
 fi
+if [ "$(type -t roborev_check_census_exclusion)" != function ]; then
+  DETAILS+=("ERROR: '$ORACLES_FILE' did not define roborev_check_census_exclusion, so the census could not be reconciled against roborev's configured exclusion set. Failing closed — the file is truncated or corrupt.")
+  finish FAIL 1
+fi
 
 roborev_push_assert
 roborev_census
+# Reconcile the CODE census against the EFFECTIVE `exclude_patterns` (#3229). Placed
+# HERE — after the census/`code-free:` classification it consumes, and BEFORE the
+# checks-file validation and the enqueue — so a configuration that would swallow census
+# code costs no review round, and reports itself under its own key rather than
+# surfacing later as `prompt-content:` (which would send the reader to investigate the
+# reviewer for a defect entirely in configuration).
+roborev_check_census_exclusion
 
 # --- the per-review checks (sourced) ------------------------------------------
 # Same contract as the oracles file: resolved from BASH_SOURCE, and FAIL CLOSED if it is
@@ -787,7 +843,7 @@ roborev_check_tier2
 # NOTICE / DEGRADED never do (NOTICE is tier 1's non-failing value; DEGRADED reports
 # an incomplete job record, whose consequences are carried by the dependent asserts).
 failed=0
-for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
+for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$CENSUS_EXCLUSION" "$SHA_ASSERT" \
   "$REVIEW_COMPLETED" "$PROMPT_CONTENT" "$TIER1" "$TIER2" "$FINDINGS" "$ROBOREV_EXIT"; do
   case "$verdict" in FAIL*|FINDINGS*|ERROR*|INCONSISTENT*) failed=1 ;; esac
 done
