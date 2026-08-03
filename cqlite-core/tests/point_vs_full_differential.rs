@@ -175,6 +175,21 @@ struct TableCase {
     /// A declarative flag (rather than a table name hardcoded in the terminal
     /// assertion) so a future committed fixture opts in where it is defined.
     ///
+    /// AUTHORITY for the value is `git ls-files`, NEVER directory presence in the
+    /// working tree: `fetch-datasets.sh` unpacks the fetched corpus into
+    /// `test-data/datasets/` by default, so a GITIGNORED fixture is routinely present
+    /// on disk in a checkout where another machine has nothing. Re-derive with
+    ///
+    /// ```text
+    /// git ls-files 'test-data/datasets/sstables/**-Data.db'
+    /// ```
+    ///
+    /// which (as of #3220) covers exactly four of this corpus's tables —
+    /// `test_tomb/static_with_tombstones`, both `test_compaction_tombstone_ttl`
+    /// tables and both `test_da` tables, i.e. FIVE of the nine cases. Every other
+    /// `test_tomb` table here ships only its `*-Data.db.jsonl` / `*-Statistics.db.txt`
+    /// sidecars, so its binaries are fetched and its absence is legitimate.
+    ///
     /// Why it is load-bearing: `CQLITE_REQUIRE_FIXTURES` is NOT set by the
     /// `core-tests` component that runs this target, and the terminal check used to
     /// be a suite-wide `ran > 0` — so a single case that resolved to no fixture
@@ -211,6 +226,8 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
         clustering_slice_predicates: &[],
     },
@@ -221,6 +238,8 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
         clustering_slice_predicates: &[],
     },
@@ -232,6 +251,8 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2],
         divergence_classes: &["multi_generation", "tombstone"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
         clustering_slice_predicates: &[],
     },
@@ -243,6 +264,8 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["ttl"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
         must_run: false,
         clustering_slice_predicates: &[],
     },
@@ -254,7 +277,12 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["tombstone"],
-        must_run: false,
+        // COMMITTED: `git ls-files` lists nb-1-big-{Data,Index,Filter,Summary,
+        // Statistics,CompressionInfo}.db under
+        // test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780…/ —
+        // the ONLY test_tomb table in this corpus whose binaries are in git. Present in
+        // every checkout, so a SKIP can only mean the lane failed to RESOLVE it.
+        must_run: true,
         clustering_slice_predicates: &[],
     },
     // Post-major-compaction tombstone/TTL fixtures (single output SSTable).
