@@ -51,10 +51,12 @@ TBL=multiclustering_table
 # to report success (the gap its sibling had): `fails=0` is necessary but not
 # sufficient, so the floor below asserts the suite actually RAN.
 #
-# This suite has NO conditional cases by design -- the fixtures are committed
-# source (absence = FAIL, #3148), the build is mandatory (failure = FAIL), and the
-# corruption step needs no interpreter -- so there is nothing legitimate to skip
-# and the floor is a plain `passes >= MIN_CASES`.
+# This suite has NO SKIPPABLE cases by design -- the fixtures are committed source
+# (absence = FAIL, #3148), a build failure is a FAIL, and the corruption step needs
+# no interpreter -- so there is nothing legitimate to skip and the floor is a plain
+# `passes >= MIN_CASES`. The one BRANCH (build here vs reuse
+# CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the floor is
+# identical on both paths (roborev #3234 F4).
 MIN_CASES=38
 
 fails=0
@@ -90,8 +92,16 @@ done
 # CQLITE_BTI_PERF_SCAN_BIN lets a caller reuse an already-built binary (e.g. the
 # release build a profiling run just made). Otherwise build it here: a build
 # failure is a FAILURE, never a skip -- the harness is the artifact under test.
+#
+# EITHER branch records exactly ONE case, so the declared MIN_CASES floor holds on
+# both paths. Before this (roborev #3234 F4) the prebuilt branch skipped the build
+# case WITHOUT recording anything while the floor stayed at 38, so the documented
+# binary-reuse path reported 37 and failed its own floor -- a suite that could not
+# pass in the mode its own comment advertises.
 BIN="${CQLITE_BTI_PERF_SCAN_BIN:-}"
-if [ -z "$BIN" ]; then
+if [ -n "$BIN" ]; then
+  pass "a prebuilt harness binary was supplied (CQLITE_BTI_PERF_SCAN_BIN=$BIN); build case not needed"
+else
   build_log="$(mktemp)"
   if (cd "$REPO_ROOT" && cargo build -p cqlite-core --example bti_perf_scan \
     --features cli-helpers >"$build_log" 2>&1); then

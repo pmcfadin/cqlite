@@ -22,9 +22,11 @@ path, so a stale sha256 cannot survive a regeneration.
   are counted while the CSV is written (observed, not requested).
 
 FAIL-CLOSED: a missing ``totalRows``, an unreadable ``Partition Size`` histogram, a
-non-``da`` descriptor, an empty or unreadable row plan, an empty SSTable list, or a
+non-``da`` descriptor, an empty or unreadable row plan, an empty SSTable list, a
 plan-vs-``Statistics.db`` disagreement on EITHER the row count or the partition
-count is an error -- never a fabricated 0 and never a silently-partial manifest.
+count, or a row plan that does not describe THIS run's ``--seed`` /
+``--rows-requested`` / ``--chunk-rows`` (a stale plan) is an error -- never a
+fabricated 0 and never a silently-partial manifest.
 
 Usage:
     write-perf-corpus-bti-manifest.py --corpus-root DIR --keyspace KS --table T \
@@ -75,6 +77,87 @@ BIG_ONLY_COMPONENTS = ["Index.db", "Summary.db"]
 SSTABLEMETADATA = "/opt/cassandra/tools/bin/sstablemetadata"
 # Descriptor of an in-scope Cassandra 5.0 BTI SSTable: "da-<gen>-bti-<Component>".
 DESCRIPTOR_RE = re.compile(r"^da-\d+-bti-")
+
+
+# --------------------------------------------------------------------------
+# SCOPE OF THE AC3 FIGURE (issue #3234, owner-required, PART 3).
+#
+# The AC3 throughput number was taken through the GENERATION-MERGE STITCH, not the
+# BTI mmap/trie plane: a full scan of this corpus is not partition-key-constrained,
+# so it resolves to the fallback full scan and is served by
+# `generation_merge::stream_generations_for_read` across all 27 generations. The
+# per-generation BTI mmap/trie work is inside that, but what the wall clock measures
+# is the stitch. Recording it HERE (and in docs/development/dev-cookbook.md) so the
+# limitation is not discoverable only by reading the issue thread.
+#
+# `recorded_figure` is a HISTORICAL measurement with its provenance attached, not a
+# counter this run observed — hence `applies_to_this_corpus`, computed by comparing
+# the corpus it was measured on against the corpus being described.
+AC3_RECORDED_FIGURE = {
+    "access_path": "fallback_full_scan (partition_key_not_fully_constrained)",
+    "storage_route": "generation_merge::stream_generations_for_read",
+    "generations": 27,
+    "wall_seconds": 127.163,
+    "rows": 13200000,
+    "rows_per_second": 103804,
+    "measured_by": (
+        "cqlite-core/examples/bti_perf_scan (the AC3 warm-scan harness), against the "
+        "27-generation production corpus described by this manifest"
+    ),
+    "measured_on_utc": "2026-08-03",
+}
+
+
+def measurement_scope(observed_rows: int, generations: int) -> dict:
+    """The route the AC3 figure measures, and what it therefore does NOT measure."""
+    applies = (
+        observed_rows == AC3_RECORDED_FIGURE["rows"]
+        and generations == AC3_RECORDED_FIGURE["generations"]
+    )
+    return {
+        "what_the_ac3_figure_measures": (
+            "the GENERATION-MERGE STITCH route. A full scan of this corpus is not "
+            "partition-key-constrained, so it takes the fallback full-scan access path and "
+            "is served by generation_merge::stream_generations_for_read across every "
+            "generation."
+        ),
+        "LIMITATION": (
+            "This corpus is PROFILEABLE and this figure measures the generation-merge "
+            "stitch; the BTI mmap/trie plane is UNMEASURED here. Per-generation BTI trie "
+            "descent and mmap behaviour happen inside the stitch but are not isolated by "
+            "this measurement, so it must not be quoted as a BTI index-plane number "
+            "(#3029 WS3 / #3030 WS4 are where that plane gets measured)."
+        ),
+        "recorded_figure": AC3_RECORDED_FIGURE,
+        "applies_to_this_corpus": applies,
+        "applies_to_this_corpus_note": (
+            "true only when the corpus described here has the same row count and "
+            "generation count the figure was measured on; a regenerated corpus of a "
+            "different shape makes the recorded figure historical only — re-measure with "
+            "the harness rather than editing the number"
+        ),
+        "full_generation_golden": {
+            "committed": False,
+            "generated_on_demand": True,
+            "bytes": 160752721,
+            "mib": 153.3,
+            "what": (
+                "`sstabledump -l` of ONE generation (da-1-bti-Data.db) of this corpus, "
+                "i.e. 500,000 rows across 711 partitions"
+            ),
+            "verified": (
+                "correct: 711 partitions and EXACTLY 500,000 row objects, cross-checked "
+                "against that SSTable's own Statistics.db (totalRows) by the generator's "
+                "verify_dumped_row_counts step"
+            ),
+            "why_not_committed": (
+                "153.3 MiB of derived JSON. It stays generated-on-demand "
+                "(--dump-generations 1 during generation, or sstabledump -l against the "
+                "corpus); the COMMITTABLE Cassandra-written BTI oracle is the separate "
+                "small golden (gen-perf-corpus-bti.sh --small-golden)."
+            ),
+        },
+    }
 
 
 def sha256_of(path: str) -> str:
@@ -321,6 +404,76 @@ def aggregate_row_plan(path: str) -> dict:
     }
 
 
+def assert_plan_describes_config(plan: dict, seed: str, rows_requested: int,
+                                 chunk_rows: int, path: str) -> None:
+    """Fail closed unless the row plan is the plan THIS configuration produced.
+
+    The aggregate row/partition cross-checks against ``Statistics.db`` cannot see a
+    STALE plan (roborev #3234 F3): a plan from an earlier run with a different seed
+    can carry coincidentally-matching totals, and the manifest would then publish a
+    declared ``seed`` and generation plan that do not describe the corpus. So every
+    structural property the generator's own arithmetic fixes is re-derived here and
+    compared against the plan records:
+
+    * the chunk COUNT — ``ceil(rows_requested / chunk_rows)``;
+    * the chunk INDEX SET — exactly ``0..N-1``, contiguous, no duplicates
+      (a gap means a chunk's rows are in the corpus but not in the plan);
+    * each record's ``seed_material`` — the row driver's ``"<seed>:<chunk>"``, which
+      is the only thing that ties the plan to the DECLARED seed;
+    * each record's row count — ``chunk_rows`` for every chunk but the last, whose
+      remainder is fixed by the same arithmetic; and
+    * the total — ``rows_requested``.
+    """
+    if chunk_rows < 1 or rows_requested < 1:
+        raise SystemExit(
+            "row-plan/config check FAILED: --rows-requested and --chunk-rows must both "
+            f"be >= 1 (got {rows_requested} and {chunk_rows})"
+        )
+    expected_chunks = -(-rows_requested // chunk_rows)  # ceil
+    records = plan["chunks"]
+    problems: list[str] = []
+    if len(records) != expected_chunks:
+        problems.append(
+            f"chunk count: the plan holds {len(records)} record(s), this configuration "
+            f"({rows_requested} rows / {chunk_rows} per chunk) produces {expected_chunks}"
+        )
+    indices = [r["chunk"] for r in records]
+    if sorted(indices) != list(range(expected_chunks)):
+        problems.append(
+            f"chunk index set: expected a contiguous 0..{expected_chunks - 1}, got "
+            f"{sorted(indices)}"
+        )
+    for rec in records:
+        idx = rec["chunk"]
+        want_material = f"{seed}:{idx}"
+        if str(rec["seed_material"]) != want_material:
+            problems.append(
+                f"chunk {idx}: seed_material is {rec['seed_material']!r}, this run declares "
+                f"seed {seed!r} so it must be {want_material!r}"
+            )
+        if not isinstance(idx, int) or not 0 <= idx < expected_chunks:
+            continue  # already reported by the index-set check
+        want_rows = min(chunk_rows, max(rows_requested - idx * chunk_rows, 0))
+        if rec["rows"] != want_rows:
+            problems.append(
+                f"chunk {idx}: the plan records {rec['rows']} row(s), this configuration "
+                f"puts {want_rows} there"
+            )
+    if plan["rows"] != rows_requested:
+        problems.append(
+            f"total rows: the plan accounts for {plan['rows']}, --rows-requested is "
+            f"{rows_requested}"
+        )
+    if problems:
+        raise SystemExit(
+            f"row-plan/config check FAILED for {path} — this plan does not describe the "
+            "requested generation (a STALE plan file, or a plan from a different run: "
+            "matching aggregate totals are NOT sufficient, so refusing to publish a "
+            "manifest whose declared seed and generation plan do not describe the "
+            "corpus):\n  - " + "\n  - ".join(problems)
+        )
+
+
 def ddl_from_schema(path: str, keyspace: str, table: str) -> dict:
     if not os.path.exists(path):
         return {"source": "unavailable", "keyspace_ddl": None, "table_ddl": None}
@@ -356,7 +509,8 @@ def main() -> int:
     ap.add_argument("--payload-bytes", type=int, required=True)
     ap.add_argument("--widths", required=True)
     ap.add_argument("--buckets", required=True)
-    ap.add_argument("--mode", required=True, choices=["smoke", "production"])
+    ap.add_argument("--mode", required=True,
+                    choices=["smoke", "production", "small_golden"])
     ap.add_argument("--row-plan", required=True)
     ap.add_argument("--yaml-verified", default=None,
                     help="file holding the grep-verified cassandra.yaml lines")
@@ -384,6 +538,14 @@ def main() -> int:
             "node emits 'nb' (BIG); both yaml settings must have been applied"
         )
 
+    # The row plan is read and checked against THIS run's configuration BEFORE the
+    # per-SSTable `sstablemetadata` containers: a stale plan is a hard failure, and
+    # discovering it cheaply beats discovering it after N container starts.
+    plan = aggregate_row_plan(args.row_plan)
+    assert_plan_describes_config(
+        plan, args.seed, args.rows_requested, args.chunk_rows, args.row_plan
+    )
+
     docker = args.docker.split()
     basenames = [os.path.basename(p)[: -len("-Data.db")] for p in datas]
     dumped = set(args.dumped)
@@ -391,7 +553,6 @@ def main() -> int:
         sstable_record(sstable_dir, b, args.image, docker, args.metadata_mem, dumped)
         for b in basenames
     ]
-    plan = aggregate_row_plan(args.row_plan)
 
     observed_rows = sum(s["rows"] for s in sstables)
     # FAIL-CLOSED on an unobserved partition count. `sstable_metadata` already
@@ -451,12 +612,22 @@ def main() -> int:
         "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
         "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
         "mode": args.mode,
-        "mode_note": (
-            "smoke = the small end-to-end validation run (--smoke); it exercises every "
-            "fail-closed assert but is NOT the profileable production corpus"
-            if args.mode == "smoke" else
-            "production = the full-scale corpus a read-path profile runs against"
-        ),
+        "mode_note": {
+            "smoke": (
+                "smoke = the small end-to-end validation run (--smoke); it exercises every "
+                "fail-closed assert but is NOT the profileable production corpus"
+            ),
+            "production": (
+                "production = the full-scale corpus a read-path profile runs against"
+            ),
+            "small_golden": (
+                "small_golden = the COMMITTABLE small Cassandra-written BTI (`da`) oracle "
+                "(--small-golden). Same PRIMARY KEY (pk, bucket, seq) shape as the perf "
+                "corpus at a committable size; it is a CORRECTNESS oracle (#3042: "
+                "Cassandra-WRITTEN bytes), NOT a profile target — it is deliberately below "
+                "the 8 MiB read-plane floor."
+            ),
+        }[args.mode],
         "method": (
             "recorded-seed deterministic CSV -> chunked cqlsh COPY -> explicit "
             "`nodetool flush` per chunk (one SSTable per chunk), with autocompaction "
@@ -550,7 +721,15 @@ def main() -> int:
             "rows_per_partition": "row driver plan records, counted while writing the CSV",
             "toc": "read from each SSTable's own TOC.txt",
             "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)",
+            "row_plan_matches_config": (
+                "the row plan's chunk count, contiguous chunk index set, per-chunk row "
+                "counts and per-chunk seed material were checked against --seed / "
+                "--rows-requested / --chunk-rows before this manifest was written; a stale "
+                "plan is a hard failure, because matching aggregate totals alone cannot "
+                "prove the plan describes these bytes"
+            ),
         },
+        "read_path_measurement_scope": measurement_scope(observed_rows, len(sstables)),
         "tables": [
             {
                 "table": args.table,

@@ -84,6 +84,7 @@ SUDO="${SUDO:-sudo -n}"
 # multi-GB paths under $OUT.
 OUT="${OUT-/data/corpus-3234-bti}"
 KS="${KS-}"                       # defaulted after --smoke is known
+TBL_EXPLICIT=0; [ -z "${TBL+x}" ] || TBL_EXPLICIT=1
 TBL="${TBL-wide_multiclustering}"
 # ROWS/CHUNK_ROWS track whether the CALLER supplied them, because --smoke is a
 # DEFAULTS override: it may lower only values nobody asked for. `${VAR+x}` (set,
@@ -102,6 +103,7 @@ PAYLOAD_BYTES="${PAYLOAD_BYTES:-160}"
 # rows-per-partition distribution, "<rows>:<weight>". Every class is wide enough
 # that its partition spans several 16 KiB row-index blocks, so Rows.db is
 # populated for every partition (the fail-closed assert below would catch it if not).
+WIDTHS_EXPLICIT=0; [ -z "${WIDTHS+x}" ] || WIDTHS_EXPLICIT=1
 WIDTHS="${WIDTHS:-200:60,800:30,4000:10}"
 # Distinct FIRST BYTES + heterogeneous lengths: the depth-1 transition spread is
 # what keeps the row-index trie from degenerating (gen-multiclustering-bti.sh, #3032).
@@ -110,6 +112,7 @@ BUCKETS="${BUCKETS:-alpha,bo,charlie-extended-bucket,delta,ep,foxtrot-long-bucke
 # (issue #3234 AC5). 0 disables golden generation entirely.
 DUMP_GENERATIONS="${DUMP_GENERATIONS:-1}"
 # The read-plane floor (POINT_MMAP_MADV_RANDOM_MIN_BYTES). See the header.
+MIN_DATA_DB_EXPLICIT=0; [ -z "${MIN_DATA_DB_BYTES+x}" ] || MIN_DATA_DB_EXPLICIT=1
 MIN_DATA_DB_BYTES="${MIN_DATA_DB_BYTES:-8388608}"
 MAX_HEAP="${MAX_HEAP:-8G}"
 HEAP_NEW="${HEAP_NEW:-1600M}"
@@ -126,6 +129,12 @@ ASSERT_SSTABLE_COUNT=0
 ASSERT_MAX_DATA=0
 DUMPED=()
 
+# The COMMITTED provenance artifact. Replacing it requires an EXPLICIT opt-in
+# (--publish-manifest, or --manifest-out naming it) AND production mode — see the
+# MANIFEST_OUT resolution below.
+COMMITTED_MANIFEST="$SCRIPT_DIR/../perf-corpus-bti-manifest.json"
+PUBLISH_MANIFEST="${PUBLISH_MANIFEST:-0}"
+
 log() { echo "[gen-perf-bti] $*"; }
 die() { echo "[gen-perf-bti] FATAL: $*" >&2; exit 1; }
 
@@ -140,6 +149,10 @@ modes
   --smoke                small end-to-end run (~2 min) that still exercises every
                          fail-closed assert; defaults the keyspace to perf_bti_smoke
                          so it can never clobber a production corpus
+  --small-golden         generate the COMMITTABLE small Cassandra-written BTI golden
+                         (a CORRECTNESS ORACLE, not a profile target): same
+                         PRIMARY KEY (pk, bucket, seq) shape, ~6k rows, one SSTable,
+                         no 8 MiB floor; defaults to test_da.wide_multiclustering_small
   --validate-only        validate flags and exit 0; starts no container, writes nothing
   --prune-dry-run        --validate-only + list the stale corpus dirs a run WOULD remove
                          (PRUNE_KEEP=<basename> excludes one, as publish() does)
@@ -164,7 +177,14 @@ options (env var in parentheses; all have defaults)
   --min-data-db-bytes N  per-SSTable Data.db floor (MIN_DATA_DB_BYTES) [$MIN_DATA_DB_BYTES]
   --image IMG            Cassandra image (IMAGE) [$IMAGE]
   --container NAME       container name (CONTAINER) [$CONTAINER]
-  --manifest-out PATH    committed-manifest destination; "" disables (MANIFEST_OUT)
+  --manifest-out PATH    ALSO copy the manifest to PATH; "" (the default) copies
+                         nowhere and leaves \$OUT/manifest-bti-3234.json the only one
+                         (MANIFEST_OUT)
+  --publish-manifest     replace the COMMITTED production manifest
+                         (test-data/perf-corpus-bti-manifest.json). Production mode
+                         ONLY: a --smoke / --small-golden run is refused, because its
+                         metadata would describe another table and make the default
+                         full-corpus scan reject the manifest (PUBLISH_MANIFEST=1)
   --keep-container       leave the container running after a successful run
   --no-prune             keep previous <table>-<uuid> corpus dirs (PRUNE_STALE=0)
   -h, --help             this text
@@ -175,18 +195,23 @@ EOF
 
 # ---------------------------------------------------------- arg parsing ------
 SMOKE=0
+SMALL_GOLDEN="${SMALL_GOLDEN:-0}"
 VALIDATE_ONLY=0
 PRUNE_DRY_RUN=0
 VERIFY_ONLY=0
 YAML_FLIP_CHECK=""
 KS_EXPLICIT=0
 if [ -n "$KS" ]; then KS_EXPLICIT=1; fi
+# Set even to "" through the environment counts as explicit (`${VAR+x}`), so an
+# operator's `MANIFEST_OUT=` is honored rather than silently re-defaulted.
+MANIFEST_OUT_EXPLICIT=0; [ -z "${MANIFEST_OUT+x}" ] || MANIFEST_OUT_EXPLICIT=1
 
 need_arg() { [ $# -ge 2 ] || { echo "$0: $1 requires a value" >&2; exit 2; }; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --smoke) SMOKE=1; shift ;;
+    --small-golden) SMALL_GOLDEN=1; shift ;;
     --validate-only) VALIDATE_ONLY=1; shift ;;
     --prune-dry-run) VALIDATE_ONLY=1; PRUNE_DRY_RUN=1; shift ;;
     --verify-only) VERIFY_ONLY=1; shift ;;
@@ -204,7 +229,8 @@ while [ $# -gt 0 ]; do
     --min-data-db-bytes) need_arg "$@"; MIN_DATA_DB_BYTES="$2"; shift 2 ;;
     --image) need_arg "$@"; IMAGE="$2"; shift 2 ;;
     --container) need_arg "$@"; CONTAINER="$2"; shift 2 ;;
-    --manifest-out) need_arg "$@"; MANIFEST_OUT="$2"; shift 2 ;;
+    --manifest-out) need_arg "$@"; MANIFEST_OUT="$2"; MANIFEST_OUT_EXPLICIT=1; shift 2 ;;
+    --publish-manifest) PUBLISH_MANIFEST=1; shift ;;
     --keep-container) KEEP_CONTAINER=1; shift ;;
     --no-prune) PRUNE_STALE=0; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -217,18 +243,90 @@ done
 # their ROWS/CHUNK_ROWS/KS env equivalents all count as explicit). The smoke
 # defaults stay large enough that the 8 MiB Data.db floor and the Rows.db assert
 # are genuinely exercised.
+[ "$SMOKE" = 0 ] || [ "$SMALL_GOLDEN" = 0 ] \
+  || { echo "$0: --smoke and --small-golden are mutually exclusive" >&2; exit 2; }
 if [ "$SMOKE" = 1 ]; then
   [ "$ROWS_EXPLICIT" = 1 ] || ROWS="${SMOKE_ROWS:-240000}"
   [ "$CHUNK_ROWS_EXPLICIT" = 1 ] || CHUNK_ROWS="${SMOKE_CHUNK_ROWS:-120000}"
   [ "$KS_EXPLICIT" = 1 ] || KS="perf_bti_smoke"
 fi
+# --small-golden: a DIFFERENT ARTIFACT from the perf corpus (see the header).
+# Same defaults-only discipline as --smoke. One chunk => one SSTable; the 8 MiB
+# read-plane floor is deliberately dropped to 0 (this fixture is a correctness
+# oracle, never a profile target), and the width mix guarantees at least one
+# partition wide enough to populate Rows.db.
+if [ "$SMALL_GOLDEN" = 1 ]; then
+  [ "$ROWS_EXPLICIT" = 1 ] || ROWS="${SMALL_GOLDEN_ROWS:-6000}"
+  [ "$CHUNK_ROWS_EXPLICIT" = 1 ] || CHUNK_ROWS="${SMALL_GOLDEN_CHUNK_ROWS:-6000}"
+  [ "$KS_EXPLICIT" = 1 ] || KS="test_da"
+  [ "$TBL_EXPLICIT" = 1 ] || TBL="wide_multiclustering_small"
+  [ "$WIDTHS_EXPLICIT" = 1 ] || WIDTHS="4000:20,800:30,200:50"
+  [ "$MIN_DATA_DB_EXPLICIT" = 1 ] || MIN_DATA_DB_BYTES=0
+fi
 [ -n "$KS" ] || KS="perf_bti"
-MANIFEST_OUT="${MANIFEST_OUT-$SCRIPT_DIR/../perf-corpus-bti-manifest.json}"
+
+# RUN_MODE is what the manifest records and what gates publication of the
+# COMMITTED manifest.
+RUN_MODE=production
+[ "$SMOKE" = 0 ] || RUN_MODE=smoke
+[ "$SMALL_GOLDEN" = 0 ] || RUN_MODE=small_golden
+
+# MANIFEST_OUT resolution (roborev #3234 F2). It used to DEFAULT to the committed
+# production manifest, so the advertised `--smoke` invocation silently overwrote a
+# committed provenance artifact with perf_bti_smoke metadata — after which the
+# default full-corpus scan rejects that manifest as describing another table
+# (bti_perf_scan exit 8). Now: nothing outside $OUT is written unless the caller
+# says so, and naming the committed manifest additionally requires production mode.
+MANIFEST_OUT="${MANIFEST_OUT-}"
+if [ "$PUBLISH_MANIFEST" = 1 ]; then
+  [ "$MANIFEST_OUT_EXPLICIT" = 0 ] \
+    || { echo "$0: --publish-manifest and --manifest-out are mutually exclusive" >&2; exit 2; }
+  MANIFEST_OUT="$COMMITTED_MANIFEST"
+fi
 
 # ------------------------------------------------------- input validation ----
 # Runs BEFORE the container, the load, and any deletion: an unvalidated typo must
 # never start a multi-GB run or overwrite the COMMITTED manifest.
 is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# Canonical (symlink-resolved, `..`-collapsed) form of $1. Components need not
+# exist — this runs BEFORE the corpus root is created. `realpath -m` is coreutils;
+# python3 (already a hard requirement) is the fallback so no box lacks it.
+canon_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m -- "$1"
+  else
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"
+  fi
+}
+
+# Canonical paths this script must never treat as a corpus root: it does
+# `rm -rf "$OUT/cassandra-data"` (as root, via $SUDO) and `rm -rf "$OUT/work"`.
+# A LEXICAL check on the raw argument is not enough — `/tmp/..`, `/data/../`, and a
+# symlink pointing at `/` all pass a `!= "/"` test and then resolve to `/`, which
+# would delete an unrelated `/cassandra-data` (roborev #3234 F1). Hence: canonicalize
+# FIRST, validate the CANONICAL path, and derive every destructive target from it.
+UNSAFE_OUT_ROOTS=(
+  / /bin /boot /dev /etc /home /lib /lib32 /lib64 /libx32 /media /mnt /opt
+  /proc /root /run /sbin /srv /sys /tmp /usr /var
+)
+
+OUT_CANON=""
+# Refuse to delete anything that is not a STRICT descendant of the validated
+# canonical corpus root. Called immediately before every `rm -rf` in this script,
+# so a future destructive target cannot skip the check by construction.
+assert_under_out() {  # $1 = path about to be removed
+  local target="$1" canon
+  [ -n "$OUT_CANON" ] \
+    || die "internal error: destructive target '$target' reached before --out was canonicalized"
+  canon="$(canon_path "$target")" \
+    || die "cannot canonicalize destructive target '$target' — refusing to delete"
+  case "$canon" in
+    "$OUT_CANON"/?*) : ;;
+    *) die "refusing to delete '$target' (resolves to '$canon'): not a strict descendant of the
+       validated corpus root '$OUT_CANON'" ;;
+  esac
+}
 
 CHUNKS=0
 validate_inputs() {
@@ -236,8 +334,22 @@ validate_inputs() {
   [ -f "$ROWS_PY" ] || die "missing row driver: $ROWS_PY"
   [ -f "$MANIFEST_PY" ] || die "missing manifest writer: $MANIFEST_PY"
   [[ -n "${OUT// }" ]] || die "--out/OUT is empty"
+  # Checked BEFORE canonicalization: `realpath -m` would silently resolve a
+  # relative path against $PWD and mask the caller's mistake.
   [[ "$OUT" == /* ]] || die "--out must be an absolute path, got '$OUT'"
-  [[ "$(printf '%s' "$OUT" | sed 's:/*$::')" != "" ]] || die "refusing to use '/' as --out"
+  OUT_CANON="$(canon_path "$OUT")" || die "cannot canonicalize --out '$OUT'"
+  [[ "$OUT_CANON" == /* ]] || die "--out '$OUT' did not canonicalize to an absolute path ('$OUT_CANON')"
+  local unsafe
+  for unsafe in "${UNSAFE_OUT_ROOTS[@]}"; do
+    [[ "$OUT_CANON" != "$unsafe" ]] || die "refusing to use '$OUT' as --out: it resolves to '$OUT_CANON',
+       a system root. This script does 'rm -rf \$OUT/cassandra-data' (as root) and
+       'rm -rf \$OUT/work', so a root-resolving --out would delete unrelated paths.
+       Point --out at a dedicated directory, e.g. /data/corpus-3234-bti."
+  done
+  # From here on the CANONICAL path is the corpus root: every destructive target
+  # (cassandra-data, work, the published <table>-<uuid> dir) is derived from it,
+  # never from the raw argument.
+  OUT="$OUT_CANON"
   [[ "$KS" =~ ^[a-z_][a-z0-9_]*$ ]] || die "invalid keyspace '$KS' (unquoted CQL identifier expected)"
   [[ "$TBL" =~ ^[a-z_][a-z0-9_]*$ ]] || die "invalid table '$TBL' (unquoted CQL identifier expected)"
   for pair in "rows:$ROWS" "chunk-rows:$CHUNK_ROWS" "payload-bytes:$PAYLOAD_BYTES" \
@@ -285,6 +397,21 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 mod.plan_fits_int32(int(sys.argv[2]), int(sys.argv[3]))
 PYEOF
+  # Replacing the COMMITTED production manifest is production-mode ONLY. A smoke /
+  # small-golden manifest describes ANOTHER table, and the AC3 scan harness then
+  # rejects the committed manifest as foreign (exit 8) — a live footgun, not a
+  # cosmetic one (roborev #3234 F2).
+  if [ -n "$MANIFEST_OUT" ] && [ "$RUN_MODE" != production ]; then
+    local mo_canon committed_canon
+    mo_canon="$(canon_path "$MANIFEST_OUT")" || die "cannot canonicalize --manifest-out '$MANIFEST_OUT'"
+    committed_canon="$(canon_path "$COMMITTED_MANIFEST")" \
+      || die "cannot canonicalize the committed manifest path '$COMMITTED_MANIFEST'"
+    [ "$mo_canon" != "$committed_canon" ] \
+      || die "refusing to write the COMMITTED production manifest from a $RUN_MODE run:
+       $committed_canon describes the production corpus, and $RUN_MODE metadata would make
+       the default full-corpus scan reject it as describing another table (exit 8).
+       Drop --publish-manifest/--manifest-out, or point --manifest-out somewhere else."
+  fi
   log "validated: rows=$ROWS chunk_rows=$CHUNK_ROWS chunks=$CHUNKS seed=$SEED ks=$KS tbl=$TBL out=$OUT"
 }
 
@@ -326,6 +453,7 @@ prune_stale_table_dirs() {  # $1 = basename to KEEP ("" keeps none)
       echo "WOULD-PRUNE $real"
       continue
     fi
+    assert_under_out "$real"
     log "[prune] removing stale corpus dir $real"
     $SUDO rm -rf -- "$real"
   done
@@ -433,8 +561,12 @@ DATA_DIR=""
 start_container() {
   log "removing any stale container + data dir..."
   $DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  # Derived from the VALIDATED CANONICAL root (validate_inputs replaced $OUT with
+  # its canonical form) and re-checked here, because the next line is a privileged
+  # recursive delete (roborev #3234 F1).
   DATA_DIR="$OUT/cassandra-data"
-  $SUDO rm -rf "$DATA_DIR"
+  assert_under_out "$DATA_DIR"
+  $SUDO rm -rf -- "$DATA_DIR"
   # MUST exist and be owned by uid 999 (the image's `cassandra` user) BEFORE
   # `docker run`, or the node never starts on the bind mount.
   $SUDO mkdir -p "$DATA_DIR"
@@ -517,7 +649,8 @@ WORK=""
 PLAN=""
 load_chunks() {
   WORK="$OUT/work"
-  rm -rf "$WORK" 2>/dev/null || $SUDO rm -rf "$WORK"
+  assert_under_out "$WORK"
+  rm -rf -- "$WORK" 2>/dev/null || $SUDO rm -rf -- "$WORK"
   mkdir -p "$WORK"
   PLAN="$WORK/row-plan.jsonl"
   : >"$PLAN"
@@ -582,7 +715,8 @@ publish() {
   DEST="$OUT/sstables/$KS/$name"
   mkdir -p "$OUT/sstables/$KS"
   if [ "$PRUNE_STALE" = 1 ]; then prune_stale_table_dirs "$name"; fi
-  $SUDO rm -rf "$DEST"
+  assert_under_out "$DEST"
+  $SUDO rm -rf -- "$DEST"
   mkdir -p "$DEST"
   # Hardlink on the same filesystem (instant, and the corpus survives deletion of
   # the Cassandra data dir); fall back to a copy across filesystems.
@@ -649,8 +783,7 @@ print(rows)' "$DEST/$base.jsonl")"
 write_manifest() {
   local yaml_file="$WORK/yaml-verified.txt"
   printf '%s\n' "$YAML_VERIFIED" >"$yaml_file"
-  local mode=production
-  if [ "$SMOKE" = 1 ]; then mode=smoke; fi
+  local mode="$RUN_MODE"
   python3 "$MANIFEST_PY" \
     --corpus-root "$OUT" --keyspace "$KS" --table "$TBL" \
     --sstable-dir "$DEST" --image "$IMAGE" --docker "$DOCKER" \
@@ -662,7 +795,10 @@ write_manifest() {
     || die "manifest generation failed"
   if [ -n "$MANIFEST_OUT" ]; then
     cp "$OUT/manifest-bti-3234.json" "$MANIFEST_OUT"
-    log "committed-path manifest: $MANIFEST_OUT"
+    log "manifest ALSO copied to: $MANIFEST_OUT"
+  else
+    log "manifest written only inside the corpus ($OUT/manifest-bti-3234.json);"
+    log "  pass --publish-manifest (production runs only) to replace $COMMITTED_MANIFEST"
   fi
 }
 
@@ -683,7 +819,7 @@ if [ "$VALIDATE_ONLY" = 1 ]; then
   # dir a real run must NOT delete), so the `keep` exclusion of a function that
   # `rm -rf`s multi-GB paths is exercisable without a container.
   if [ "$PRUNE_DRY_RUN" = 1 ]; then prune_stale_table_dirs "${PRUNE_KEEP:-}"; fi
-  echo "VALIDATE-OK rows=$ROWS chunk_rows=$CHUNK_ROWS chunks=$CHUNKS seed=$SEED keyspace=$KS table=$TBL out=$OUT"
+  echo "VALIDATE-OK rows=$ROWS chunk_rows=$CHUNK_ROWS chunks=$CHUNKS seed=$SEED keyspace=$KS table=$TBL out=$OUT mode=$RUN_MODE manifest_out=${MANIFEST_OUT:-(none)}"
   exit 0
 fi
 
