@@ -54,22 +54,105 @@ CODE_FREE_EXTENSIONLESS_PREFIXES="openspec/ docs/ website/ .claude/"
 # imported, never redeclared (`scripts/ci/classify-docs-only.sh` will import it —
 # issue #3250).
 #
-# It exists because the census and `.roborev.toml`'s docs-scoped deny-list must AGREE
+# It exists because the census and `.roborev.toml`'s artifact deny-list must AGREE
 # on what an artifact is. The prose set above is only `md markdown mdx txt rst adoc`,
-# so `.json`/`.jsonl`/`.log`/`.err`/`.csv`/`.svg` under `docs/` would otherwise count as
-# CODE while the configuration excludes them — and `census-exclusion:` would FAIL on
-# every legitimate report PR. It MIRRORS the configured `docs/**/*.<ext>` patterns; add
-# an extension here in the same edit that adds it there.
+# so `.json`/`.jsonl`/`.log`/`.err`/`.csv`/`.svg` in an artifact directory would otherwise
+# count as CODE while the configuration excludes them — and `census-exclusion:` would FAIL
+# on every legitimate report PR.
 #
-# Scoped to `docs/` ONLY (not the wider prose-directory list): the configuration's
-# deny-list is root-anchored at `docs/`, so a `.json` under `website/src/content/docs/`
-# is CODE to the census AND delivered to the reviewer — the two views agree.
+# SCOPED TO ARTIFACT-BEARING DIRECTORIES, NOT TO `docs/` AS A WHOLE (#3229 round-6
+# blocker 2). The intermediate form was a bare `docs/` PREFIX test mirroring
+# `docs/**/*.<ext>`, and it classified FUNCTIONAL CONFIG as an artifact: the gate's own
+# `kit-dashboard-drift` component guards
+# `docs/observability/grafana/dashboards/cqlite-overview.json`, yet a PR editing it was
+# both dropped from the reviewer's diff and counted code-free — unreviewable by
+# construction. `docs/reports/delivery-telemetry.schema.json` was hidden the same way. A
+# path is an artifact only when its extension is in the set below AND it sits under one of
+# the four directory globs — the exact intersection `.roborev.toml` configures.
 #
-# The two classifications stay INDEPENDENT (extension-vs-pathspec); this constant only
-# keeps them in agreement on artifacts. A configuration regression is still caught,
-# because the verdict is computed from what the config FILE says, not from this list.
+# ONE MIRROR, TWO REPRESENTATIONS, ASSERTED STRUCTURALLY. These constants and
+# `.roborev.toml`'s `exclude_patterns` are the same fact written twice, and a one-sided
+# edit is the standing hazard (#3260 item 2). `scripts/tests/test_roborev_review_guard.sh`
+# therefore DERIVES the expected pattern set from the constants below and asserts SET
+# EQUALITY against the committed `.roborev.toml`, so drift in either direction FAILs
+# `--lite` instead of appearing later as a mystifying `census-exclusion:` failure on
+# someone else's report PR. Add an extension or a directory HERE and THERE in one edit.
+#
+# The two classifications stay INDEPENDENT at RUNTIME (extension+dir here, pathspec
+# there); this constant only keeps them in agreement on artifacts. A configuration
+# regression is still caught, because the verdict is computed from what the config FILE
+# says, not from this list.
 CODE_FREE_ARTIFACT_EXTENSIONS="txt json jsonl log err csv png svg gz pdf jfr html mmd tex diff"
-CODE_FREE_ARTIFACT_PREFIXES="docs/"
+# The DIRECTORY GLOBS, in git `:(glob)` pathspec spelling: `*` matches within a single
+# path component, `**` matches zero or more components. The configured pattern for each is
+# `<glob>/**/*.<ext>` — never a blanket `<glob>/**`, because these directories hold
+# EXECUTABLE harness code beside their output and swallowing it is precisely #3229.
+#
+# AN ARRAY, NOT A SPACE-SEPARATED STRING, for the same load-bearing reason
+# `ROBOREV_BUILTIN_EXCLUDES` is one: these values CONTAIN `*`, so iterating an unquoted
+# string would PATHNAME-EXPAND them against `$PWD`. Measured while writing this: run from
+# the repo root, `docs/reports/*-artifacts` collapsed to the four directories that happen
+# to exist today and `docs/**/jfr-reports` to the single existing one, so
+# `docs/jfr-reports/a.html` stopped matching — the classification silently became "the
+# directories present in this checkout" instead of "the configured globs". An array
+# removes the hazard structurally rather than by remembering to quote.
+CODE_FREE_ARTIFACT_DIR_GLOBS=(
+  'docs/reports/*-artifacts'
+  'docs/round-artifacts'
+  'docs/**/jfr-reports'
+  'docs/sstables-definitive-guide/diagrams'
+)
+# The PROSE pattern the configuration carries alongside them (slash-less ⇒ RECURSIVE,
+# repo-wide), named here so the structural mirror assert can account for every configured
+# pattern rather than ignoring the ones it does not generate.
+CODE_FREE_PROSE_PATTERN="*.md"
+
+# roborev_path_in_artifact_dir <path>: 0 when `<path>` lies STRICTLY BENEATH a directory
+# matching one of `CODE_FREE_ARTIFACT_DIR_GLOBS`, else 1.
+#
+# Component-wise on purpose. The obvious `case "$path" in docs/round-artifacts/*)` would
+# be wrong for the two globbed entries: bash's `case` lets `*` cross `/`, so
+# `docs/reports/*-artifacts/*` would also match `docs/reports/a/b-artifacts/x` — which
+# git's `:(glob)` `*` does NOT. Matching one component at a time keeps the shell's `*`
+# inside a slash-free string, so it cannot cross a separator, and `**` is handled
+# explicitly as "zero or more components". That makes this function agree with the
+# pathspec git is actually given rather than approximate it.
+roborev_path_in_artifact_dir() {
+  local path="$1" glob
+  local -a _pc=() _gc=()
+  IFS='/' read -r -a _pc <<<"$path"
+  for glob in "${CODE_FREE_ARTIFACT_DIR_GLOBS[@]}"; do
+    _gc=()
+    IFS='/' read -r -a _gc <<<"$glob"
+    if _rx_dirglob_match 0 0; then return 0; fi
+  done
+  return 1
+}
+
+# _rx_dirglob_match <glob-index> <path-index>: do the glob components `_gc[gi..]` match
+# path components `_pc[pi..]` while leaving AT LEAST ONE path component unconsumed? The
+# leftover is what makes this "under the directory" rather than "is the directory" — a
+# file named exactly `docs/round-artifacts` is not inside it.
+_rx_dirglob_match() {
+  local gi="$1" pi="$2" k
+  if [ "$gi" -ge "${#_gc[@]}" ]; then
+    [ "$pi" -lt "${#_pc[@]}" ] && return 0
+    return 1
+  fi
+  if [ "${_gc[$gi]}" = '**' ]; then
+    for ((k = pi; k <= ${#_pc[@]}; k++)); do
+      if _rx_dirglob_match "$((gi + 1))" "$k"; then return 0; fi
+    done
+    return 1
+  fi
+  [ "$pi" -lt "${#_pc[@]}" ] || return 1
+  # UNQUOTED on the right so the component is treated as a PATTERN; the left side is a
+  # single path component and therefore slash-free, so `*` cannot cross a separator.
+  case "${_pc[$pi]}" in
+    ${_gc[$gi]}) _rx_dirglob_match "$((gi + 1))" "$((pi + 1))" && return 0 ;;
+  esac
+  return 1
+}
 
 # ROBOREV'S BUILT-IN EXCLUDES — PINNED TO `roborev v0.61.2` (issue #3229).
 #
@@ -319,12 +402,15 @@ roborev_census() {
     census_paths+=("$path")
     census_added=$((census_added + add))
     census_deleted=$((census_deleted + del))
-    # Non-code classification: a documented prose EXTENSION, a docs-scoped ARTIFACT
-    # extension (#3229 — mirroring the configured `docs/**/*.<ext>` deny-list), or an
-    # EXTENSIONLESS file under a documented prose directory. Anything else — including
-    # `docs/foo.py`, `docs/reports/*-artifacts/**/*.sh`, `*.bt` and
-    # `.github/workflows/*.yml` — is CODE. A `docs/` path PREFIX never makes a file
-    # non-code on its own.
+    # Non-code classification: a documented prose EXTENSION, an ARTIFACT extension inside
+    # an ARTIFACT-BEARING DIRECTORY (#3229 — mirroring the configured
+    # `<artifact-dir>/**/*.<ext>` deny-list), or an EXTENSIONLESS file under a documented
+    # prose directory. Anything else — including `docs/foo.py`,
+    # `docs/reports/*-artifacts/**/*.sh`, `*.bt` and `.github/workflows/*.yml` — is CODE.
+    # A `docs/` path PREFIX never makes a file non-code on its own, and since round 6 it
+    # does not make an artifact EXTENSION non-code either: `docs/observability/**/*.json`
+    # is functional config the gate's own `kit-dashboard-drift` component guards, so it is
+    # CODE and must reach the reviewer.
     #
     # CLASSIFIED ON THE RAW PATH (#3229): `$path` came out of `--numstat -z`, so it is
     # never C-quoted and the extension/prefix tests below see the real bytes. Reading a
@@ -340,10 +426,7 @@ roborev_census() {
       done
       if [ "$file_non_code" -eq 0 ]; then
         artifact_dir=0
-        # shellcheck disable=SC2086 # deliberate split of the space-separated constant
-        for prefix in $CODE_FREE_ARTIFACT_PREFIXES; do
-          case "$path" in "$prefix"*) artifact_dir=1 ;; esac
-        done
+        if roborev_path_in_artifact_dir "$path"; then artifact_dir=1; fi
         if [ "$artifact_dir" -eq 1 ]; then
           # shellcheck disable=SC2086 # deliberate split of the space-separated constant
           for candidate in $CODE_FREE_ARTIFACT_EXTENSIONS; do

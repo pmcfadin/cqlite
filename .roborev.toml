@@ -39,7 +39,10 @@ review_min_severity = ''
 # reviewer as an EMPTY prompt. `docs/**` MUST NOT be reintroduced.
 #
 # MECHANISM (roborev v0.61.2 `git.FormatExcludeArgs`, recovered by disassembly; each
-# pattern becomes TWO git pathspecs, `<p>` and `<p>/**`):
+# CONFIGURED pattern becomes TWO git pathspecs, `<p>` and `<p>/**` — roborev's own 24
+# hard-coded built-in excludes are NOT configured patterns and do NOT go through this:
+# they are pre-formatted pathspec constants appended verbatim, one pathspec each, and are
+# not editable here at all):
 #   * a pattern containing an interior (or leading) `/` is passed VERBATIM and is
 #     ROOT-ANCHORED — so `docs/**/*.json` scopes to this `docs/` only and leaves
 #     `website/src/content/docs/*.json` visible to the reviewer;
@@ -53,18 +56,52 @@ review_min_severity = ''
 #     pattern for exactly this reason.
 #   * there is NO negation / re-include form, so an allow-list is not expressible.
 #
-# ASYMMETRY, BY DESIGN — "noise, never blindness". A NEW artifact extension appearing
-# under `docs/` is silently re-admitted to review prompts, which costs tokens; the
-# deny-list can only ever leak in that harmless direction, because the wrapper's
+# SCOPED TO ARTIFACT-BEARING DIRECTORIES, NOT TO EXTENSIONS ACROSS ALL OF `docs/`
+# (#3229 round-6 blocker 2). The intermediate form was `docs/**/*.<ext>`, and it did NOT
+# satisfy the asymmetry stated below: for a CODE-BEARING format an extension sweep over
+# the whole tree is BLINDNESS, not noise. The concrete case that falsified it is
+# `docs/observability/grafana/dashboards/cqlite-overview.json` — a dashboard the FULL
+# AGENT GATE guards with its own `kit-dashboard-drift` component, i.e. this repo already
+# treats it as correctness-bearing. Under `docs/**/*.json` a PR editing it was dropped
+# from the reviewer's diff AND classified code-free: unreviewable by construction.
+# `docs/reports/delivery-telemetry.schema.json` (the schema governing the delivery
+# ledger) was hidden the same way. The asymmetry holds for `.txt`/`.log`/`.err` run
+# dumps; it does not hold for `.json`/`.html`/`.svg`, which carry functional config.
+#
+# So each pattern is `<artifact-dir-glob>/**/*.<ext>`, over exactly four directories:
+#   docs/reports/*-artifacts/   per-issue measurement artifacts (the #3229 convention)
+#   docs/round-artifacts/       soak/round measurement output
+#   docs/**/jfr-reports/        JFR profiling output
+#   docs/sstables-definitive-guide/diagrams/   generated diagram renders
+# Everything else under `docs/` is REVIEWED. Measured on this branch: 672 tracked `docs/`
+# files carry an artifact extension; 667 are inside those four directories and stay
+# excluded, and the 5 that are not are now delivered to the reviewer.
+#
+# STILL EXTENSION-SCOPED WITHIN each directory, never a blanket `<dir>/**`: these
+# directories deliberately hold EXECUTABLE code beside their output — 63 tracked
+# `.sh`/`.py`/`.rs`/`.c`/`.bt`/`.cql`/`.yaml`/`.toml` files under
+# `docs/reports/*-artifacts/` alone, plus a `.py` under `docs/round-artifacts/`. Those
+# harnesses ARE the 136-path census `docs/**` swallowed on PR #3222, so a blanket
+# directory exclude would reintroduce this issue's original defect.
+#
+# ASYMMETRY, BY DESIGN — "noise, never blindness", and with the directory scoping above
+# this is now TRUE AS STATED. A NEW artifact DIRECTORY (or a new artifact extension
+# inside one of the four) is silently re-admitted to review prompts, which costs tokens;
+# the deny-list can only ever leak in that harmless direction, because (a) the wrapper's
 # pre-enqueue `census-exclusion:` check FAILs closed on the swallow direction (a
-# configured pattern that would eat a code census path). Extend the list when a new
-# artifact class shows up — and extend `CODE_FREE_ARTIFACT_EXTENSIONS` in
-# scripts/flow/roborev-review-oracles.sh in the same edit, or the check will say so.
+# configured pattern that would eat a code census path), and (b) no pattern reaches
+# outside a directory whose whole purpose is committed run output, so functional config
+# under `docs/` can no longer be hidden. Extend the list when a new artifact class shows
+# up — and extend `CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS` in
+# scripts/flow/roborev-review-oracles.sh in the SAME edit. That mirror is asserted
+# structurally against THIS FILE by scripts/tests/test_roborev_review_guard.sh, so a
+# one-sided edit FAILs `--lite` rather than surfacing as a puzzling `census-exclusion:`
+# failure on someone else's report PR.
 #
 # This file is MACHINE-MANAGED (`roborev config set` rewrites it, comments and all):
 # re-check this list after any `roborev config` write. `census-exclusion:` is the
 # standing detector — see scripts/flow/roborev-review-oracles.sh.
-exclude_patterns = ['*.md', 'docs/**/*.txt', 'docs/**/*.json', 'docs/**/*.jsonl', 'docs/**/*.log', 'docs/**/*.err', 'docs/**/*.csv', 'docs/**/*.png', 'docs/**/*.svg', 'docs/**/*.gz', 'docs/**/*.pdf', 'docs/**/*.jfr', 'docs/**/*.html', 'docs/**/*.mmd', 'docs/**/*.tex', 'docs/**/*.diff']
+exclude_patterns = ['*.md', 'docs/reports/*-artifacts/**/*.txt', 'docs/reports/*-artifacts/**/*.json', 'docs/reports/*-artifacts/**/*.jsonl', 'docs/reports/*-artifacts/**/*.log', 'docs/reports/*-artifacts/**/*.err', 'docs/reports/*-artifacts/**/*.csv', 'docs/reports/*-artifacts/**/*.png', 'docs/reports/*-artifacts/**/*.svg', 'docs/reports/*-artifacts/**/*.gz', 'docs/reports/*-artifacts/**/*.pdf', 'docs/reports/*-artifacts/**/*.jfr', 'docs/reports/*-artifacts/**/*.html', 'docs/reports/*-artifacts/**/*.mmd', 'docs/reports/*-artifacts/**/*.tex', 'docs/reports/*-artifacts/**/*.diff', 'docs/round-artifacts/**/*.txt', 'docs/round-artifacts/**/*.json', 'docs/round-artifacts/**/*.jsonl', 'docs/round-artifacts/**/*.log', 'docs/round-artifacts/**/*.err', 'docs/round-artifacts/**/*.csv', 'docs/round-artifacts/**/*.png', 'docs/round-artifacts/**/*.svg', 'docs/round-artifacts/**/*.gz', 'docs/round-artifacts/**/*.pdf', 'docs/round-artifacts/**/*.jfr', 'docs/round-artifacts/**/*.html', 'docs/round-artifacts/**/*.mmd', 'docs/round-artifacts/**/*.tex', 'docs/round-artifacts/**/*.diff', 'docs/**/jfr-reports/**/*.txt', 'docs/**/jfr-reports/**/*.json', 'docs/**/jfr-reports/**/*.jsonl', 'docs/**/jfr-reports/**/*.log', 'docs/**/jfr-reports/**/*.err', 'docs/**/jfr-reports/**/*.csv', 'docs/**/jfr-reports/**/*.png', 'docs/**/jfr-reports/**/*.svg', 'docs/**/jfr-reports/**/*.gz', 'docs/**/jfr-reports/**/*.pdf', 'docs/**/jfr-reports/**/*.jfr', 'docs/**/jfr-reports/**/*.html', 'docs/**/jfr-reports/**/*.mmd', 'docs/**/jfr-reports/**/*.tex', 'docs/**/jfr-reports/**/*.diff', 'docs/sstables-definitive-guide/diagrams/**/*.txt', 'docs/sstables-definitive-guide/diagrams/**/*.json', 'docs/sstables-definitive-guide/diagrams/**/*.jsonl', 'docs/sstables-definitive-guide/diagrams/**/*.log', 'docs/sstables-definitive-guide/diagrams/**/*.err', 'docs/sstables-definitive-guide/diagrams/**/*.csv', 'docs/sstables-definitive-guide/diagrams/**/*.png', 'docs/sstables-definitive-guide/diagrams/**/*.svg', 'docs/sstables-definitive-guide/diagrams/**/*.gz', 'docs/sstables-definitive-guide/diagrams/**/*.pdf', 'docs/sstables-definitive-guide/diagrams/**/*.jfr', 'docs/sstables-definitive-guide/diagrams/**/*.html', 'docs/sstables-definitive-guide/diagrams/**/*.mmd', 'docs/sstables-definitive-guide/diagrams/**/*.tex', 'docs/sstables-definitive-guide/diagrams/**/*.diff']
 # Repo-local directory for temporary oversized diff snapshots.
 snapshot_dir = ''
 # Automatic post-commit review mode for this repo: commit or branch.
