@@ -611,7 +611,9 @@ fi
 
 if [ "$VERIFY_ONLY" = 1 ]; then
   ks_dir="$(corpus_keyspace_dir)"
-  [ -n "$ks_dir" ] && [ -d "$ks_dir" ] || die "no corpus at $OUT/sstables/$KS — generate it first"
+  if [ -z "$ks_dir" ] || [ ! -d "$ks_dir" ]; then
+    die "no corpus at $OUT/sstables/$KS — generate it first"
+  fi
   shopt -s nullglob
   found=("$ks_dir/$TBL"-*)
   shopt -u nullglob

@@ -41,6 +41,7 @@ for f in "$GEN" "$ROWS_PY" "$MANIFEST_PY"; do
 done
 
 TMP="$(mktemp -d)"
+# shellcheck disable=SC2317  # invoked indirectly by the EXIT trap below
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
@@ -270,6 +271,7 @@ PY
   done
 
   # ------------------------------------------- manifest writer fail-closed ----
+  # shellcheck disable=SC2054  # the commas are inside flag VALUES (--widths/--buckets)
   man_args=(--corpus-root "$TMP" --keyspace perf_bti --table wide_multiclustering
             --image cassandra:5.0.2 --seed 1 --rows-requested 10 --chunk-rows 10
             --payload-bytes 32 --widths 200:1 --buckets alpha,bo --mode smoke
