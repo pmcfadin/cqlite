@@ -45,6 +45,18 @@
 #      misattributes a published number.
 #   8d. The COMMITTED small-golden manifest carries NO production-only claim (roborev
 #      #3234 L3) and its recorded sha256s still match the committed bytes.
+#   8e. A manifest field is OBSERVED or ABSENT (roborev #3234 M1/M2). The deleted claims
+#      -- the fixed AC3 throughput figure, the flag that labelled it inapplicable while
+#      still printing it, `full_generation_golden`, and the
+#      corpus_committed/committed_copy/corpus_note narrative inferred from a Data.db-only
+#      hash match -- must not reappear in the writer OR in either committed manifest, and
+#      the one surviving location field is asserted to be exactly as wide as its check.
+#   8f. The COMMITTED manifests cannot fall behind the WRITER (roborev #3234 L4): the
+#      production artifact's key set is compared against a manifest the suite has just
+#      written, and against the small golden's, so staleness is a test failure.
+#   8g. The TOC is a MANIFEST, not evidence (roborev #3234 M3): --verify-only must reject a
+#      component that is listed but absent (one control per component) and one present but
+#      unlisted.
 #   9. The suite ITSELF cannot report success while having stopped running cases:
 #      passes are counted against a declared floor, and each of the two legitimate
 #      skips (no python3; < 5 GiB free) declares the case count it drops so that
@@ -89,9 +101,9 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # the EXACT full-suite pass count (not a slack lower bound), so deleting or
 # short-circuiting any single case drops `passes` below it and reds the suite. Proven
 # by mutation, not by inspection (see the header note on the roborev M1 finding).
-MIN_CASES=130
-SKIP_PY_CASES=48
-SKIP_E2E_CASES=15
+MIN_CASES=141
+SKIP_PY_CASES=53
+SKIP_E2E_CASES=16
 
 fails=0
 passes=0
@@ -705,6 +717,50 @@ else
   fail "TOC-omission case: expected a hard failure (rc=$rc, out: $out)"
 fi
 
+# ---- the TOC is a MANIFEST, not evidence: the files must EXIST (roborev #3234 M3) ----
+# assert_corpus checked that the expected component NAMES appear in TOC.txt and never
+# that the corresponding files exist, so DELETING Statistics.db, CompressionInfo.db,
+# Partitions.db or Filter.db while leaving the TOC untouched still printed VERIFY-OK.
+# That is a fail-closed hole in the verifier itself -- and the exact shape of a
+# half-copied, half-pruned or partially-published corpus, i.e. the thing --verify-only
+# exists to catch. One negative control per component, plus the other direction (a
+# component file the TOC does not list), plus the positive control that the intact corpus
+# still verifies (above).
+for missing in Statistics.db CompressionInfo.db Partitions.db Filter.db; do
+  root="$TMP/tocfile-$missing"
+  d="$root/sstables/perf_bti/wide_multiclustering-9123456789abcdef0123456789abcdef"
+  make_corpus "$d" 9437184 4096
+  rm "$d/da-1-bti-$missing"
+  out=$(verify "$root"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "lists $missing but da-1-bti-$missing is" <<<"$out"; then
+    pass "--verify-only HARD-FAILS when $missing is DELETED but still in the TOC"
+  else
+    fail "deleted-$missing case: expected a TOC-lists-but-absent failure (rc=$rc, out: $out)"
+  fi
+done
+root="$TMP/tocextra"
+d="$root/sstables/perf_bti/wide_multiclustering-a123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096
+truncate -s 32 "$d/da-1-bti-Bogus.db"
+out=$(verify "$root"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "component set disagrees with its TOC" <<<"$out"; then
+  pass "--verify-only HARD-FAILS on a component FILE the TOC does not list"
+else
+  fail "unlisted-component case: expected a component-set disagreement (rc=$rc, out: $out)"
+fi
+# ...and a `*-Data.db.jsonl` sstabledump golden beside the components is NOT a component:
+# the real corpus carries one, so excluding it from that comparison is load-bearing.
+root="$TMP/tocgolden"
+d="$root/sstables/perf_bti/wide_multiclustering-b123456789abcdef0123456789abcdef"
+make_corpus "$d" 9437184 4096
+printf '{"partition":{}}\n' >"$d/da-1-bti-Data.db.jsonl"
+out=$(verify "$root"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "VERIFY-OK " <<<"$out"; then
+  pass "--verify-only accepts an sstabledump golden beside the components (not a component)"
+else
+  fail "golden-beside-components case: expected VERIFY-OK (rc=$rc, out: $out)"
+fi
+
 out=$(bash "$GEN" --verify-only --out "$TMP/nonexistent-root" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "no corpus at" <<<"$out"; then
   pass "--verify-only fails closed when there is no corpus"
@@ -1243,25 +1299,26 @@ import json, sys
 m = json.load(open(sys.argv[1]))
 blob = json.dumps(m)
 t = m["tables"][0]
-scope = m["read_path_measurement_scope"]
 bad = []
 if m["mode"] != "small_golden":
     bad.append(f"mode: {m['mode']!r}")
-if m["corpus_committed"] is not True:
-    bad.append("corpus_committed must be True: this corpus IS committed")
-if not m.get("committed_copy"):
-    bad.append("committed_copy must name the verified committed path")
-elif "test-data/datasets" not in m["committed_copy"]["path"]:
-    bad.append(f"committed_copy.path: {m['committed_copy']['path']!r}")
-if "multi-GB" in blob or "multi-GB" in m["corpus_note"]:
-    bad.append("corpus_note still calls a 97,780 B committed fixture multi-GB")
-for k in ("recorded_figure", "full_generation_golden", "what_the_ac3_figure_measures"):
-    if k in scope:
-        bad.append(f"production-only key {k} present")
-if scope.get("measured") is not False:
-    bad.append(f"read_path_measurement_scope.measured: {scope.get('measured')!r}")
+# roborev #3234 M2: the committed-ness NARRATIVE is gone. What is left is the one field
+# whose name is its whole claim -- and for this corpus it must be PRESENT and must point
+# into the checkout, because the committed Data.db is exactly what this manifest
+# describes.
+if m.get("data_db_sha256_also_match_at") != (
+    "test-data/datasets/" + t["sstable_dir"]
+):
+    bad.append(f"data_db_sha256_also_match_at: {m.get('data_db_sha256_also_match_at')!r}")
+for k in ("corpus_committed", "committed_copy", "corpus_note",
+          "read_path_measurement_scope", "recorded_figure", "full_generation_golden",
+          "applies_to_this_corpus", "what_the_ac3_figure_measures"):
+    if k in blob:
+        bad.append(f"deleted key {k} is back")
+if "multi-GB" in blob:
+    bad.append("a 97,780 B committed fixture is described as multi-GB")
 # The production figure and the 500k-row golden must not appear ANYWHERE in the file.
-for claim in ("13200000", "103804", "160752721", "500,000 rows", "153.3"):
+for claim in ("13200000", "103804", "127.163", "160752721", "500,000 rows", "153.3"):
     if claim in blob:
         bad.append(f"production-only claim {claim!r} present")
 if "Profileable" in m["purpose"]:
@@ -1311,6 +1368,182 @@ PY
     else
       fail "committed small-golden bytes: $out"
     fi
+  fi
+
+  # ---- the COMMITTED PRODUCTION manifest is not STALE against the writer (#3234 L4) ----
+  # It had fallen three contracts behind the writer that produced it: no
+  # `sstable_generations`, no `one_sstable_per_planned_chunk`, no
+  # `read_plane_threshold_bytes`. The PRINCIPAL committed artifact therefore did not
+  # record the guarantees the writer publishes -- a review finding that should have been a
+  # test failure. These cases make staleness fail:
+  #
+  #   1. the contract keys are PRESENT, and the deleted claims are ABSENT;
+  #   2. the manifest is self-consistent (counts, generations, sums, maxima all agree
+  #      with the per-SSTable records it carries) -- so a hand-edit is caught too;
+  #   3. both committed manifests carry the SAME key set, so one cannot drift alone.
+  #
+  # Hermetic: pure JSON arithmetic, no corpus and no container. The writer-vs-committed
+  # key-set comparison (which needs a freshly written manifest) is in the e2e block below.
+  PROD_MANIFEST="$REPO_ROOT/test-data/perf-corpus-bti-manifest.json"
+  if [ ! -f "$PROD_MANIFEST" ]; then
+    fail "missing the committed production manifest: $PROD_MANIFEST"
+  else
+    out=$(python3 - "$PROD_MANIFEST" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+t = m["tables"][0]
+plan = m["rows_per_partition"]
+blob = json.dumps(m)
+bad = []
+for k in ("issue", "mode", "generated_utc", "generator", "row_driver", "method",
+          "cassandra_image", "cassandra_yaml_settings_required", "keyspace", "table",
+          "keyspace_ddl", "seed", "row_driver_config", "rows_per_partition",
+          "corpus_root", "datasets_root_usage", "reproducibility", "provenance",
+          "tables", "row_count_cross_check"):
+    if k not in m:
+        bad.append(f"top-level key {k} MISSING")
+for k in ("sstable_count", "sstable_generations", "one_sstable_per_planned_chunk",
+          "rows", "partitions", "data_db_bytes_total", "data_db_bytes_largest",
+          "min_data_db_floor_bytes", "read_plane_threshold_bytes",
+          "meets_8mib_read_plane_floor", "rows_db_bytes_total", "every_rows_db_non_empty",
+          "clustering_key", "clustering_arity", "ddl", "sstables"):
+    if k not in t:
+        bad.append(f"tables[0] key {k} MISSING")
+for k in ("read_path_measurement_scope", "recorded_figure", "applies_to_this_corpus",
+          "full_generation_golden", "corpus_committed", "committed_copy", "corpus_note"):
+    if k in blob:
+        bad.append(f"deleted key {k} is back")
+# roborev #3234 M1, at the STRONGEST point: this manifest describes the very corpus the
+# AC3 figure was measured on -- the one corpus for which "it applies" would have been
+# true -- and it still records NO throughput number. Omission is unconditional, so there
+# is no identity a near-match can satisfy to inherit one.
+for claim in ("103804", "127.163", "160,752,721", "153.3"):
+    if claim in blob:
+        bad.append(f"throughput/derived-golden claim {claim!r} present")
+# Self-consistency: every aggregate must equal what the per-SSTable records say.
+if t["sstable_count"] != len(t["sstables"]):
+    bad.append("sstable_count != len(sstables)")
+if t["sstable_count"] != len(plan["chunks"]):
+    bad.append("sstable_count != planned chunk count")
+if t["sstable_generations"] != list(range(1, t["sstable_count"] + 1)):
+    bad.append(f"sstable_generations: {t['sstable_generations']!r}")
+if t["one_sstable_per_planned_chunk"] is not True:
+    bad.append("one_sstable_per_planned_chunk must be True")
+if t["rows"] != sum(s["rows"] for s in t["sstables"]) or t["rows"] != plan["rows"]:
+    bad.append("rows != sum(per-SSTable rows) or != the row plan")
+if t["partitions"] != sum(s["statistics"]["partition_count"] for s in t["sstables"]):
+    bad.append("partitions != sum(per-SSTable partition_count)")
+if t["data_db_bytes_total"] != sum(s["data_db_bytes"] for s in t["sstables"]):
+    bad.append("data_db_bytes_total != sum(per-SSTable data_db_bytes)")
+if t["data_db_bytes_largest"] != max(s["data_db_bytes"] for s in t["sstables"]):
+    bad.append("data_db_bytes_largest != max(per-SSTable data_db_bytes)")
+if t["read_plane_threshold_bytes"] != 8 * 1024 * 1024:
+    bad.append(f"read_plane_threshold_bytes: {t['read_plane_threshold_bytes']}")
+if t["meets_8mib_read_plane_floor"] is not (t["data_db_bytes_largest"] > 8 * 1024 * 1024):
+    bad.append("meets_8mib_read_plane_floor disagrees with the recorded bytes")
+if any(len(s["data_db_sha256"]) != 64 for s in t["sstables"]):
+    bad.append("a data_db_sha256 is not 64 hex chars")
+if {c["seed_material"] for c in plan["chunks"]} != {
+        f"{m['seed']}:{c['chunk']}" for c in plan["chunks"]}:
+    bad.append("a chunk's seed_material does not derive from the recorded seed")
+print("PROD-MANIFEST-CONTRACT-OK" if not bad else "BAD: " + "; ".join(bad))
+PY
+    )
+    if [ "$out" = "PROD-MANIFEST-CONTRACT-OK" ]; then
+      pass "the committed production manifest records the writer's contracts and is self-consistent"
+    else
+      fail "committed production manifest: $out"
+    fi
+
+    out=$(python3 - "$PROD_MANIFEST" "$SMALL_GOLDEN_MANIFEST" <<'PY'
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+# `data_db_sha256_also_match_at` is emitted only when such a path exists (the small
+# golden has one, the multi-GB production corpus does not), so it is the ONE key allowed
+# to differ. Everything else must match, in both directions and at every level.
+OPTIONAL = {"data_db_sha256_also_match_at"}
+bad = []
+if set(a) - OPTIONAL != set(b) - OPTIONAL:
+    bad.append(f"top-level: only in production {sorted(set(a)-set(b)-OPTIONAL)}, "
+               f"only in small_golden {sorted(set(b)-set(a)-OPTIONAL)}")
+if set(a["tables"][0]) != set(b["tables"][0]):
+    bad.append(f"tables[0]: {sorted(set(a['tables'][0]) ^ set(b['tables'][0]))}")
+if set(a["tables"][0]["sstables"][0]) != set(b["tables"][0]["sstables"][0]):
+    bad.append("sstables[0]: "
+               f"{sorted(set(a['tables'][0]['sstables'][0]) ^ set(b['tables'][0]['sstables'][0]))}")
+if set(a["provenance"]) != set(b["provenance"]):
+    bad.append(f"provenance: {sorted(set(a['provenance']) ^ set(b['provenance']))}")
+print("MANIFEST-KEYSETS-AGREE" if not bad else "BAD: " + "; ".join(bad))
+PY
+    )
+    if [ "$out" = "MANIFEST-KEYSETS-AGREE" ]; then
+      pass "both committed manifests carry the same key set (neither can drift alone)"
+    else
+      fail "committed manifest key sets: $out"
+    fi
+  fi
+
+  # ---- the writer holds no throughput constant AT ALL (roborev #3234 M1) --------------
+  # The figure was a module constant, and every attempt to keep it honest added another
+  # guard. A grep is the durable form of "it is not there": re-adding the number reds the
+  # suite, whatever guard comes with it.
+  if grep -qE '103804|127\.163|rows_per_second|wall_seconds' "$MANIFEST_PY"; then
+    fail "the manifest writer carries a throughput figure again ($(grep -nE '103804|127\.163|rows_per_second' "$MANIFEST_PY" | head -2 | tr '\n' ' '))"
+  else
+    pass "the manifest writer holds NO throughput constant and no inheritable AC3 field"
+  fi
+
+  # ---- data_db_sha256_also_match_at claims EXACTLY what it checks (roborev #3234 M2) ---
+  # The claim used to be `corpus_committed: true` + a `committed_copy` block reporting a
+  # file count, a byte total and "describes the committed bytes" -- all from a Data.db-ONLY
+  # hash comparison. The claim is now the size of the check, so these cases pin the check:
+  # it must match on the real committed Data.db bytes, and it must return NOTHING (no
+  # `false`, no partial block) when the recorded hash differs or the path is absent.
+  out=$(python3 - "$MANIFEST_PY" "$REPO_ROOT" <<'PY'
+import glob, hashlib, importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("w", sys.argv[1])
+w = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(w)
+root = sys.argv[2]
+cand = sorted(glob.glob(os.path.join(
+    root, "test-data", "datasets", "sstables", "test_da",
+    "wide_multiclustering_small-*")))
+bad = []
+if not cand:
+    bad.append("no committed small-golden corpus to check against")
+else:
+    rel = os.path.relpath(cand[0], os.path.join(root, "test-data", "datasets"))
+    # A corpus root somewhere else entirely, whose SSTable dir sits at the SAME
+    # corpus-relative path as the committed copy -- which is how the real writer finds it.
+    corpus_root, sstable_dir = "/nonexistent/corpus", os.path.join("/nonexistent/corpus", rel)
+    data_db = os.path.join(cand[0], "da-1-bti-Data.db")
+    real = hashlib.sha256(open(data_db, "rb").read()).hexdigest()
+    got = w.data_db_sha256_match_path(
+        sstable_dir, corpus_root, [{"sstable_basename": "da-1-bti", "data_db_sha256": real}])
+    if got != f"test-data/datasets/{rel}":
+        bad.append(f"positive control: got {got!r}")
+    got = w.data_db_sha256_match_path(
+        sstable_dir, corpus_root, [{"sstable_basename": "da-1-bti", "data_db_sha256": "0" * 64}])
+    if got is not None:
+        bad.append(f"a DIFFERING Data.db must yield nothing, got {got!r}")
+    got = w.data_db_sha256_match_path(
+        sstable_dir, corpus_root,
+        [{"sstable_basename": "da-1-bti", "data_db_sha256": real},
+         {"sstable_basename": "da-99-bti", "data_db_sha256": real}])
+    if got is not None:
+        bad.append(f"an SSTable with NO committed Data.db must yield nothing, got {got!r}")
+    got = w.data_db_sha256_match_path(
+        "/nonexistent/corpus/sstables/ks/no_such_table-0", "/nonexistent/corpus",
+        [{"sstable_basename": "da-1-bti", "data_db_sha256": real}])
+    if got is not None:
+        bad.append(f"no candidate directory must yield nothing, got {got!r}")
+print("MATCH-PATH-OK" if not bad else "BAD: " + "; ".join(bad))
+PY
+  )
+  if [ "$out" = "MATCH-PATH-OK" ]; then
+    pass "data_db_sha256_also_match_at is present only on a full Data.db sha256 match"
+  else
+    fail "data_db_sha256_also_match_at: $out"
   fi
 
   # ------------------------------- end-to-end through the stub `docker` ---------
@@ -1412,13 +1645,27 @@ eq("plan chunks", len(plan["chunks"]), 2)
 eq("sstable_generations", t["sstable_generations"], [1, 2])
 eq("one_sstable_per_planned_chunk", t["one_sstable_per_planned_chunk"], True)
 eq("min_data_db_floor_bytes (production default)", t["min_data_db_floor_bytes"], 8388608)
-# PRODUCTION mode keeps the AC3 figure -- the per-mode split must not delete it (#3234 L3)
-# -- and marks it historical, since this stub corpus is not the one it was measured on.
-scope = m["read_path_measurement_scope"]
-eq("recorded_figure present", "recorded_figure" in scope, True)
-eq("applies_to_this_corpus", scope["applies_to_this_corpus"], False)
-eq("corpus_committed (uncommitted stub corpus)", m["corpus_committed"], False)
-eq("committed_copy", m["committed_copy"], None)
+# roborev #3234 M1/M2: a field is OBSERVED or ABSENT. Not one of these may reappear in
+# ANY mode -- a fixed throughput figure (nothing here observed it), the flag that used to
+# label it inapplicable while still printing it, the fixed full-generation-golden block,
+# or the corpus_committed/committed_copy/corpus_note narrative inferred from a
+# Data.db-only hash comparison. This corpus is an uncommitted stub, so the one surviving
+# location field must be absent too.
+blob = json.dumps(m)
+for k in ("read_path_measurement_scope", "recorded_figure", "applies_to_this_corpus",
+          "full_generation_golden", "corpus_committed", "committed_copy", "corpus_note",
+          "corpus_identity"):
+    eq(f"{k} absent", k in blob, False)
+# ...and this stub corpus has no committed copy, so the one surviving location field is
+# absent. Checked at the TOP LEVEL, because `provenance` legitimately DESCRIBES the field.
+eq("data_db_sha256_also_match_at absent", "data_db_sha256_also_match_at" in m, False)
+for claim in ("103804", "127.163", "13200000"):
+    eq(f"inheritable figure {claim} absent", claim in blob, False)
+# The two surviving location fields: this run's own --out, and the env line derived from
+# it. (Compared to each other, not to a literal: the generator canonicalizes --out.)
+eq("corpus_root is this run's --out", m["corpus_root"].endswith("e2e-ok"), True)
+eq("datasets_root_usage", m["datasets_root_usage"],
+   f"CQLITE_DATASETS_ROOT={m['corpus_root']}")
 eq("seed_material of chunk 0", plan["chunks"][0]["seed_material"], "3234:0")
 eq("goldens", sum(1 for s in t["sstables"] if s["sstabledump_golden"]), 1)
 for s in t["sstables"]:
@@ -1438,6 +1685,39 @@ PY
         pass "the manifest's happy-path fields are all read back from the bytes"
       else
         fail "manifest fields: $out"
+      fi
+
+      # ---- the COMMITTED manifest cannot fall behind the WRITER (roborev #3234 L4) ----
+      # This is the direct, mechanical form of the L4 finding: `$manifest` was just
+      # written by the CURRENT writer, so comparing its key set against the committed
+      # production artifact's makes "the committed manifest no longer records what the
+      # writer publishes" a TEST FAILURE instead of a review finding. It catches the
+      # class in both directions -- a writer that adds a contract, and a committed
+      # manifest that keeps a field the writer dropped.
+      out=$(python3 - "$manifest" "$REPO_ROOT/test-data/perf-corpus-bti-manifest.json" <<'PY'
+import json, sys
+fresh, committed = (json.load(open(p)) for p in sys.argv[1:3])
+OPTIONAL = {"data_db_sha256_also_match_at"}
+bad = []
+def cmp(label, a, b):
+    only_fresh, only_committed = set(a) - set(b) - OPTIONAL, set(b) - set(a) - OPTIONAL
+    if only_fresh or only_committed:
+        bad.append(f"{label}: writer emits {sorted(only_fresh)} the committed manifest "
+                   f"lacks; committed manifest has {sorted(only_committed)} the writer "
+                   "no longer emits")
+cmp("top-level", fresh, committed)
+cmp("tables[0]", fresh["tables"][0], committed["tables"][0])
+cmp("tables[0].sstables[0]", fresh["tables"][0]["sstables"][0],
+    committed["tables"][0]["sstables"][0])
+cmp("provenance", fresh["provenance"], committed["provenance"])
+cmp("reproducibility", fresh["reproducibility"], committed["reproducibility"])
+print("COMMITTED-MANIFEST-CURRENT" if not bad else "BAD: " + "; ".join(bad))
+PY
+      )
+      if [ "$out" = "COMMITTED-MANIFEST-CURRENT" ]; then
+        pass "the committed production manifest's key set matches a FRESHLY written one"
+      else
+        fail "committed production manifest is STALE vs the writer: $out"
       fi
     fi
 
@@ -1558,19 +1838,18 @@ PY
       out=$(python3 - "$smoke_manifest" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
-scope = m["read_path_measurement_scope"]
 blob = json.dumps(m)
 bad = []
-if scope.get("measured") is not False:
-    bad.append(f"measured: {scope.get('measured')!r}, want False")
-for k in ("recorded_figure", "full_generation_golden", "what_the_ac3_figure_measures"):
-    if k in scope:
-        bad.append(f"production-only key {k} present in a smoke manifest")
-for claim in ("13200000", "103804", "500,000 rows", "multi-GB"):
+for k in ("read_path_measurement_scope", "recorded_figure", "full_generation_golden",
+          "what_the_ac3_figure_measures", "applies_to_this_corpus", "corpus_committed",
+          "committed_copy", "corpus_note"):
+    if k in blob:
+        bad.append(f"deleted key {k} present in a smoke manifest")
+for claim in ("13200000", "103804", "127.163", "500,000 rows", "multi-GB"):
     if claim in blob:
         bad.append(f"production-only claim {claim!r} present in a smoke manifest")
-if m["corpus_committed"] is not False:
-    bad.append("corpus_committed must be False for an uncommitted smoke corpus")
+if "data_db_sha256_also_match_at" in m:
+    bad.append("an uncommitted smoke corpus must claim no checkout sha256 match")
 if "Profileable" in m["purpose"]:
     bad.append("a smoke run is not the profileable production corpus")
 print("SMOKE-SCOPE-OK" if not bad else "BAD: " + "; ".join(bad))
