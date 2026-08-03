@@ -251,25 +251,22 @@ Outcome: one '==== ROBOREV REVIEW SUMMARY ====' block on stdout, terminal
 RESULT: PASS|FAIL|NOTHING-TO-REVIEW. Exit 0=PASS, 1=FAIL, 3=NOTHING-TO-REVIEW,
 2=usage error. Retain the block, never the transcript.
 
-census-exclusion: (pre-enqueue, immediately after code-free: in the fixed key
-order) reconciles the CODE census against the EFFECTIVE exclude_patterns — the
-repo .roborev.toml UNIONed with ~/.roborev/config.toml — by porting roborev
-v0.61.2's git.FormatExcludeArgs and letting GIT do the matching. roborev drops
-exactly what its configured pathspecs match; it makes no code/non-code judgement,
-which is why this is computed rather than assumed (issue #3229: a configured
-'docs/**' discarded 33 executable harness files on PR #3222). Values:
-  PASS (<k>/<n> code census paths survive the effective exclusion set;
-        corroboration: OK|NOTICE|UNAVAILABLE)
-  PASS (no exclusion patterns configured)     absent key/file, or an empty list
+census-exclusion: (PRE-ENQUEUE, immediately after code-free: in the fixed key
+order) reconciles the CODE census against the EFFECTIVE exclude_patterns — repo
+.roborev.toml UNIONed with ~/.roborev/config.toml — by porting roborev v0.61.2's
+git.FormatExcludeArgs and letting GIT match. roborev drops exactly what its
+configured pathspecs match and makes no code/non-code judgement, which is why this
+is computed, not assumed (#3229: a configured 'docs/**' discarded 33 executable
+harness files on PR #3222). Values:
+  PASS (<k>/<n> code census paths survive ...; corroboration: OK|NOTICE|UNAVAILABLE)
+  PASS (no exclusion patterns configured)  absent key/file or an empty list
   FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>', ...)
-  FAIL (exclusion set unreadable: <cause>)    a present but unparseable value;
-        deliberately DISTINCT from 'no exclusion patterns configured'
-  FAIL (trailing-slash pattern '<p>/' resolves RECURSIVE (**/<p>), opposite to
-        '<p>/**' ...)                         diff-independent, by decision
-  FAIL (exclusion set drift: '<pattern>' reported by roborev config get is absent
-        from the parsed set)
-  SKIP (<cause>)                              the step was not reached
-A FAIL here is a CONFIGURATION defect: fix .roborev.toml, do not investigate the
+  FAIL (exclusion set unreadable: <cause>) present but unparseable — DISTINCT from
+                                          'no exclusion patterns configured'
+  FAIL (trailing-slash pattern '<p>/' resolves RECURSIVE ...)  diff-independent
+  FAIL (exclusion set drift: '<pattern>' reported by roborev config get ...)
+  SKIP (<cause>)                          the step was not reached
+A FAIL here is a CONFIGURATION defect: fix .roborev.toml — do not investigate the
 reviewer or prompt-content:. Re-verify the port on any roborev version bump.
 
 Sanctioned invocation (measured, issue #2964 round 5):

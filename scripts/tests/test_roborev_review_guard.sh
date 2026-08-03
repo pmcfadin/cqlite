@@ -2050,6 +2050,18 @@ assert_says '--help states the probe expectation in range terms' 'reviewed-sha i
 assert_says '--help says the range must end in the worktree HEAD' 'ENDS IN that same head-sha'
 assert_lacks '--help no longer asks for reviewed-sha == head-sha' 'reviewed-sha == head-sha'
 assert_says '--help requires both agent and model' 'Both are required'
+# #3229: the new key is documented — its meaning, its position, and its value grammar.
+assert_says '--help documents the census-exclusion key' '^census-exclusion: \(PRE-ENQUEUE, immediately after code-free:'
+assert_says '--help states the CORRECTED mechanism, not the falsified one' 'roborev drops exactly what its'
+assert_lacks '--help never restates the falsified claim' '[Ee]xcludes non-code paths'
+assert_says '--help pins the ported version' 'git\.FormatExcludeArgs'
+assert_says '--help carries the swallowed-paths FAIL grammar' 'FAIL \(<m>/<n> code census paths excluded'
+assert_says '--help distinguishes unreadable from absent' 'DISTINCT from'
+assert_says '--help names the trailing-slash FAIL' 'FAIL \(trailing-slash pattern'
+assert_says '--help names the drift FAIL' 'FAIL \(exclusion set drift'
+assert_says '--help sends a FAIL to the config, not the reviewer' 'is a CONFIGURATION defect'
+assert_says '--help defines docs-only as a code-free CENSUS, not a path prefix' 'CENSUS as code-free: classifies it, NEVER a .docs/. path prefix'
+assert_says '--help names the harness convention as reviewed code' 'docs/reports/\*-artifacts/ are executable code'
 assert_never_enqueued '--help'
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
