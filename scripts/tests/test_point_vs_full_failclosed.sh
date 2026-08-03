@@ -9,6 +9,16 @@
 # suite reported PASS. So a green run alone means nothing here; each case below
 # stages a layout the lane MUST reject, and asserts the rejection text.
 #
+# ASSERTION CONTRACT — every check here is held to the standard #3220 is about: it must
+# be UNSATISFIABLE by output that does not demonstrate the property claimed. Two forms
+# are therefore banned in the two failure cases: a bare nonzero exit code (it proves
+# only that SOMETHING failed, not that the STAGED case was rejected) and a bare mention
+# of the table name (the SUCCESS line `PASS test_da.multiclustering_table — …` carries
+# it too, so a fallback to the healthy fixture would satisfy the control meant to rule
+# that out). Each rejection is instead pinned to a message naming the staged case AND
+# the specific guard, on ONE line; the success line is separately rejected; and the
+# terminal `EXPECTED_CHECKS` anchor keeps a dropped case from reading as green.
+#
 # The three cases:
 #   control  — the ambient corpus: the lane PASSES and the committed BTI case RUNS.
 #              Without this, the two failures below could equally be a broken harness.
@@ -100,7 +110,11 @@ else
 failure cases below prove nothing until this passes; see $control_out"
   sed -n '1,40p' "$control_out"
 fi
-if grep -q "PASS test_da.multiclustering_table" "$control_out"; then
+# Anchored at line start: the lane prints this line ONLY at the end of a successful
+# `run_case`, so an anchored match cannot be satisfied by a diagnostic that merely
+# quotes the table name (the `ran: [...]`/`skipped: [...]` lists of the must-run
+# assertion do, for instance).
+if grep -qE "^PASS test_da\.multiclustering_table " "$control_out"; then
   ok "control: the committed BTI case actually RAN (not skipped behind its siblings)"
 else
   bad "control: no 'PASS test_da.multiclustering_table' line — the #3220 case did not run"
@@ -162,7 +176,7 @@ see $absent_out"
 fi
 # The sibling committed case still ran in that same run: the failure above is the
 # guard firing for the hidden fixture, not the corpus being unavailable.
-if grep -q "PASS test_da.wide_table" "$absent_out"; then
+if grep -qE "^PASS test_da\.wide_table " "$absent_out"; then
   ok "absent: sibling committed cases still ran (the staging hid one fixture only)"
 else
   bad "absent: test_da.wide_table did not run — the staging hid more than intended, so \
@@ -198,19 +212,64 @@ failure, not an absence; see $empty_out"
 else
   ok "empty: the case did not degrade into a SKIP"
 fi
-if grep -qE "must yield exactly|no partition keys to probe|multiclustering_table" "$empty_out"; then
-  ok "empty: the failure is attributed to the multiclustering case"
+# TARGET-SPECIFIC, in BOTH directions. The rc check above proves only that SOMETHING
+# in the run failed, and the bare substring `multiclustering_table` is carried by the
+# SUCCESS line too (`PASS test_da.multiclustering_table — …`) — so accepting it would
+# let a run in which resolution fell back to the HEALTHY checkout fixture (the case
+# passing, some sibling supplying the nonzero exit) satisfy the very control that
+# exists to rule that out. Hence: the case must NOT report PASS, and the failure must
+# be THIS case's own anti-vacuous anchor, named on one line.
+if grep -qE "^PASS test_da\.multiclustering_table " "$empty_out"; then
+  bad "empty: 'PASS test_da.multiclustering_table' — the case SUCCEEDED against a \
+0-byte Data.db, so resolution fell back to a healthy fixture and the empty one was \
+never rejected; see $empty_out"
 else
-  bad "empty: the failure does not mention the multiclustering case; see $empty_out"
+  ok "empty: the multiclustering case did not report PASS"
+fi
+# The two anchors are the only ways this case can legitimately reject an empty
+# fixture: the clustering-slice row-count anchor (`must yield exactly N`, the one that
+# fires while `probe_keys` are declared) or the partition-key discovery guard. Both are
+# required to name the case on the SAME line, so a sibling's failure cannot satisfy it.
+if grep -qE "case test_da\.multiclustering_table: .*(must yield exactly [0-9]+|no partition keys to probe)" "$empty_out"; then
+  ok "empty: the rejection is THIS case's anti-vacuous anchor (slice row count or \
+partition-key discovery), not merely a nonzero exit"
+else
+  bad "empty: no 'case test_da.multiclustering_table: … must yield exactly N' (or \
+'… no partition keys to probe') line — the run failed for some OTHER reason, which \
+does not prove the empty fixture was rejected; see $empty_out"
 fi
 
 # ---------------------------------------------------------------------------
 # 4. SAFETY: neither the tracked fixture nor the ambient corpus was mutated.
 # ---------------------------------------------------------------------------
-if [ -z "$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null)" ]; then
-  ok "safety: the git-tracked fixture is untouched"
-else
+# `git status` is the evidence, so a git that could not ANSWER (not a repo, git
+# missing) must not read as "untouched" — an unanswerable question is not a clean
+# answer. The `-s` check is the independent second leg: case 3 truncates a COPY, and a
+# staging bug that truncated the ORIGINAL in place would leave a 0-byte tracked file.
+fixture_status=$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/dev/null)
+fixture_status_rc=$?
+if [ "$fixture_status_rc" -ne 0 ]; then
+  bad "safety: 'git status' failed (rc=$fixture_status_rc) — the untouched-fixture \
+check has no evidence and must not report green"
+elif [ -n "$fixture_status" ]; then
   bad "safety: this self-test dirtied the tracked fixture $FIXTURE_REL"
+elif [ ! -s "$REPO/$FIXTURE_REL/$DATA_DB" ]; then
+  bad "safety: the tracked $FIXTURE_REL/$DATA_DB is now EMPTY — case 3 truncated the \
+original instead of its copy"
+else
+  ok "safety: the git-tracked fixture is untouched (git-clean and non-empty)"
+fi
+
+# Anti-vacuity for THIS harness, mirroring the row-count anchors the lane itself uses:
+# `failed: 0` is only meaningful if every case actually asserted. A deleted case, an
+# early `exit`, or a block skipped by an editing accident would otherwise report green.
+EXPECTED_CHECKS=12
+total_checks=$((PASS + FAIL))
+if [ "$total_checks" -ne "$EXPECTED_CHECKS" ]; then
+  printf 'FAIL - harness: %d assertions ran, expected %d — a dropped or short-circuited \
+case must never read as green (update EXPECTED_CHECKS when adding one)\n' \
+    "$total_checks" "$EXPECTED_CHECKS"
+  FAIL=$((FAIL + 1))
 fi
 
 printf '\n%s\n' "----------------------------------------"
