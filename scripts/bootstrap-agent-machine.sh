@@ -363,6 +363,130 @@ if [ "$PLATFORM" = linux ]; then
   fi
 fi
 
+# ---- 2c. Perf profiling capability (issue #3249) ----------------------------
+# Agent/worker images ship with kernel.perf_event_paranoid = 4 and set it NOWHERE
+# in /etc/sysctl.conf or /etc/sysctl.d, so every profiling run starts from a hard
+# EACCES whose help text ("access limited") reads like a CAPABILITY verdict when it
+# is a PERMISSION verdict — two measurement cycles were lost to that. A box left
+# permissive by a hand-probe is no better: with no drop-in, it reverts on
+# reboot/reprovision, i.e. the fleet is profileable only by accident.
+#
+# Posture mirrors mold above: PROBE FIRST, write only what is needed, and never
+# fail the run — a box without sudo or without perf degrades to a warn plus the
+# exact remedy line. What is NOT advisory is the VERDICT: a bootstrap that
+# silently leaves a box unprofileable is the failure mode being fixed, so the
+# section ends with a FUNCTIONAL `perf stat -C 0` verification (AC2), never with an
+# assumption that writing the file worked.
+hdr "Perf profiling capability (issue #3249)"
+PERF_CAP_LIB="$REPO_ROOT/scripts/perf-capability.sh"
+if [ ! -r "$PERF_CAP_LIB" ]; then
+  warn "scripts/perf-capability.sh missing from this checkout — perf capability UNVERIFIED"
+elif [ "$PLATFORM" != linux ]; then
+  info "perf_event_paranoid/kptr_restrict are Linux kernel controls — nothing to configure on $PLATFORM"
+else
+  # shellcheck source=scripts/perf-capability.sh
+  . "$PERF_CAP_LIB"
+  PERF_DROPIN=$(perf_capability_dropin_path)
+
+  # perf_do_or_print <label> <cmd...>: run_or_print's exact semantics (do it under
+  # --yes, else print the line verbatim) with CONFIG-APPLY wording — run_or_print's
+  # text says "install <label>", which would be misleading for a sysctl write.
+  perf_do_or_print() {
+    local label="$1"; shift
+    if [ "$AUTO_YES" = 1 ]; then
+      info "$label: $*"
+      if "$@"; then return 0; else warn "$label FAILED — run manually: $*"; return 1; fi
+    fi
+    info "$label:  $*"
+    return 1
+  }
+
+  # Privilege is OPTIONAL: probe it non-interactively (`sudo -n`) so bootstrap can
+  # never block on a password prompt on an unattended worker.
+  # Every privileged call below goes through PERF_ROOT (an ARRAY: empty when we are
+  # already root) and always carries `-n`, so no code path can ever sit on a
+  # password prompt.
+  PERF_ROOT=()
+  PERF_PRIV=0
+  if [ "$(id -u 2>/dev/null || echo 1000)" = 0 ]; then
+    PERF_PRIV=1
+  elif have sudo && bounded 10 sudo -n true >/dev/null 2>&1; then
+    PERF_PRIV=1; PERF_ROOT=(sudo -n)
+  fi
+
+  PERF_TOKEN_BEFORE=$(perf_capability_token)
+  info "runtime now: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid || echo '<unreadable>') kptr_restrict=$(perf_capability_proc_value kptr_restrict || echo '<unreadable>')  (gate stamps perf=$PERF_TOKEN_BEFORE)"
+
+  # ---- 1. the reboot-surviving drop-in (AC1), applied idempotently ----
+  if perf_capability_dropin_current; then
+    ok "drop-in already current: $PERF_DROPIN (survives reboot) — wrote nothing"
+    PERF_DROPIN_OK=1
+  elif [ "$PERF_PRIV" = 0 ]; then
+    PERF_DROPIN_OK=0
+    warn "no non-interactive root (sudo -n) — cannot install $PERF_DROPIN; this box reverts to perf_event_paranoid=4 on reboot"
+    info "run as a user with sudo:  bash scripts/perf-capability.sh --drop-in | sudo tee $PERF_DROPIN >/dev/null && sudo sysctl -q --system"
+  else
+    PERF_DROPIN_OK=0
+    if [ "$AUTO_YES" = 1 ]; then
+      info "writing perf sysctl drop-in: $PERF_DROPIN"
+      if perf_capability_dropin_content | ${PERF_ROOT[@]+"${PERF_ROOT[@]}"} tee "$PERF_DROPIN" >/dev/null 2>&1 \
+         && perf_capability_dropin_current; then
+        ok "wrote $PERF_DROPIN (kernel.perf_event_paranoid = -1, kernel.kptr_restrict = 0)"
+        PERF_DROPIN_OK=1
+      else
+        warn "could NOT write $PERF_DROPIN — run manually: bash scripts/perf-capability.sh --drop-in | sudo tee $PERF_DROPIN >/dev/null"
+      fi
+    else
+      info "write the drop-in:  bash scripts/perf-capability.sh --drop-in | sudo tee $PERF_DROPIN >/dev/null"
+      info "(re-run with --yes to write it automatically)"
+    fi
+  fi
+
+  # ---- 2. apply now + READ BACK from /proc (never trust the write's rc) ----
+  # A `sysctl -w`/`--system` can report success while the value does not take
+  # (container, read-only /proc, a later-sorting drop-in overriding ours), so the
+  # verdict is always the value read back out of /proc/sys/kernel.
+  PERF_TOKEN=$(perf_capability_token)
+  if [ "$PERF_TOKEN" = ok ]; then
+    ok "kernel controls verified from /proc: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid) kptr_restrict=$(perf_capability_proc_value kptr_restrict)"
+  elif [ "$PERF_DROPIN_OK" = 1 ] && [ "$PERF_PRIV" = 1 ]; then
+    if perf_do_or_print "apply the drop-in now" ${PERF_ROOT[@]+"${PERF_ROOT[@]}"} sysctl -q --system; then
+      PERF_TOKEN=$(perf_capability_token)
+    fi
+    if [ "$PERF_TOKEN" = ok ]; then
+      ok "kernel controls applied and READ BACK from /proc: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid) kptr_restrict=$(perf_capability_proc_value kptr_restrict)"
+    elif [ "$AUTO_YES" = 1 ]; then
+      warn "sysctl was applied but /proc still reports perf=$PERF_TOKEN — the value did NOT take (container, read-only /proc, or a later-sorting drop-in overrides ours)"
+      info "inspect:  sysctl -a --pattern 'perf_event_paranoid|kptr_restrict'; ls /etc/sysctl.d"
+    fi
+  else
+    warn "kernel controls NOT in the profileable state (gate stamps perf=$PERF_TOKEN)"
+    case "$PERF_TOKEN" in
+      paranoid-*) info "perf_event_paranoid >= 1 forbids CPU-WIDE events, so 'perf stat -C <cpu>' is DENIED — this is a PERMISSION verdict, not a missing capability" ;;
+      kptr-restricted) info "kptr_restrict != 0 — kernel frames resolve to bare addresses (a SILENT attribution loss, not an error)" ;;
+      absent) info "/proc/sys/kernel/{perf_event_paranoid,kptr_restrict} not present — a container without a writable procfs cannot be tuned from here; tune the HOST" ;;
+    esac
+  fi
+
+  # ---- 3. FUNCTIONAL verification (AC2): run the collection, count the cycles ----
+  if ! have perf; then
+    warn "perf MISSING — profiling capability UNVERIFIED on this machine"
+    if have apt-get; then
+      info "install perf:  sudo apt-get install -y linux-tools-common linux-tools-\$(uname -r)"
+    else
+      info "install perf via your distro's linux-tools/perf package"
+    fi
+  elif PERF_VERIFY_OUT=$(perf_capability_verify); then
+    ok "perf capability VERIFIED — perf stat -C 0 -e cycles reports $PERF_VERIFY_OUT"
+  else
+    warn "perf capability NOT verified — perf stat -C 0 -e cycles: $PERF_VERIFY_OUT"
+    info "an rc-0 perf stat with a zero/<not supported> counter is NOT a working setup — a virtualised or masked PMU counts nothing"
+    info "reproduce by hand:  perf stat -C 0 -e cycles -- sleep 0.1"
+  fi
+  info "note: BPF collectors (bpftrace/bcc) still require sudo — a permissive perf_event_paranoid does NOT grant BPF map creation (#3217)"
+  info "posture: this loosening is for DEDICATED SINGLE-TENANT measurement/agent boxes; never apply it to a shared or multi-tenant host"
+fi
+
 # ---- 3. GitHub board access + project scope (Path A, #1886; #2942) ----
 # The board is the SOLE dispatch authority, so "can this machine use the board?"
 # must be answered by TRYING it. Until #2942 this section matched the `project`
