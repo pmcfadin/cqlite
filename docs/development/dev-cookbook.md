@@ -82,14 +82,25 @@ BIG-only `Index.db`/`Summary.db`; and rows loaded == `Statistics.db` `totalRows`
 
 **Manifest identity** — `test-data/perf-corpus-bti-manifest.json` (committed; mirrors
 `perf-corpus-3068-manifest.json`). The corpus itself is multi-GB and **not** committed
-(`.gitignore`: `*.db`). Reproducibility rests on the recorded **seed**: the row driver
-(`gen-perf-corpus-bti-rows.py`) seeds chunk *N* with `"<seed>:<N>"`, so the row set — not merely the
-row *count* — is reproducible, and the manifest's per-SSTable `Data.db` **sha256** is therefore a
-real check. That is the deliberate divergence from the `#3068` BIG sibling, whose `cassandra-stress`
-profile cannot be reproduced from anything a manifest can record. Every number in the manifest is
-read back from the written bytes (`sstablemetadata` on `Statistics.db`, the `CompressionInfo.db`
-header, each `TOC.txt`) and **nothing is inherited from a previous manifest**. A `mode` field marks
-whether a manifest describes a `smoke` validation run or the `production` corpus.
+(`.gitignore`: `*.db`), so what is reproducible matters — and the two halves are different:
+
+- **The seed reproduces the ROW SET.** The row driver (`gen-perf-corpus-bti-rows.py`) seeds chunk *N*
+  with `"<seed>:<N>"`, so every value, the partition count, the rows-per-partition distribution and
+  the chunk→SSTable split are a pure function of `(seed, chunk-index)` — not merely the row *count*.
+  That is the deliberate divergence from the `#3068` BIG sibling, whose `cassandra-stress` profile
+  cannot be reproduced from anything a manifest can record.
+- **The seed does NOT reproduce the `Data.db` bytes.** Cassandra stamps a wall-clock write timestamp
+  on every row, serialized as an unsigned VInt *delta* from the `Statistics.db` `min_timestamp`
+  baseline (Ch.5 §"temporal deltas"), so a later run shifts some deltas across a VInt width boundary
+  and even the file length changes — **measured**: two same-seed smoke runs produced 19,474,015 B and
+  19,474,397 B. The per-SSTable **sha256** is therefore an *instance identity* (prove two measurements
+  ran on the same bytes; catch silent corruption or an accidental replacement), **not** a regeneration
+  check. A sha mismatch after regenerating is expected, not a defect.
+
+Every number in the manifest is read back from the written bytes (`sstablemetadata` on
+`Statistics.db`, the `CompressionInfo.db` header, each `TOC.txt`) and **nothing is inherited from a
+previous manifest**. A `mode` field marks whether a manifest describes a `smoke` validation run or
+the `production` corpus.
 
 **This is a parity oracle, not just a throughput fixture.** Every byte is **Cassandra-written**, so
 the `sstabledump -l` JSONL goldens emitted beside the corpus can back parity work. Per issue #3042 a

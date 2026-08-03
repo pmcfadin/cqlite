@@ -410,8 +410,9 @@ def main() -> int:
         "keyspace_ddl": ddl["keyspace_ddl"],
         "seed": args.seed,
         "seed_note": (
-            "the row set is reproducible from this seed alone: chunk N is generated with "
-            "PRNG seed '<seed>:<N>' (see the row driver's determinism contract)"
+            "the ROW SET (not the on-disk bytes) is reproducible from this seed alone: chunk "
+            "N is generated with PRNG seed '<seed>:<N>' (see the row driver's determinism "
+            "contract, and `reproducibility` for the write-timestamp caveat)"
         ),
         "row_driver_config": {
             "rows_requested": args.rows_requested,
@@ -426,13 +427,41 @@ def main() -> int:
         "corpus_committed": False,
         "corpus_note": (
             "The corpus itself is multi-GB and is NOT committed (.gitignore: *.db). "
-            "Regenerate it with the generator + this seed, then re-run to reproduce this "
-            "manifest; the per-SSTable Data.db sha256 recorded here is the "
-            "reproducibility check. Nothing here is inherited from a previous manifest."
+            "Regenerate it with the generator + the recorded seed. Nothing in this "
+            "manifest is inherited from a previous one; every number is re-read from "
+            "the bytes on each run. See `reproducibility` for exactly what the seed "
+            "does and does not reproduce."
         ),
+        "reproducibility": {
+            "reproduced_by_the_seed": (
+                "the ROW SET: every pk/bucket/seq/payload value, the partition count, the "
+                "rows-per-partition distribution and the chunk->SSTable split are a pure "
+                "function of (seed, chunk-index) — see the row driver's determinism contract"
+            ),
+            "NOT_reproduced_by_the_seed": (
+                "the Data.db BYTES. Cassandra stamps a wall-clock write timestamp on every "
+                "row, serialized as an unsigned VInt DELTA from the Statistics.db "
+                "min_timestamp baseline (docs/sstables-definitive-guide/chapters/"
+                "05-data-db-format.md:77-78, :623), so a later run shifts some deltas across "
+                "a VInt width boundary and the file length itself changes. MEASURED: two "
+                "same-seed smoke runs of this generator produced Data.db of 19,474,015 B and "
+                "19,474,397 B (a 382 B difference). Do NOT treat a sha256 mismatch after a "
+                "regeneration as a defect."
+            ),
+            "what_the_sha256_is_for": (
+                "identifying THIS corpus instance: a consumer can prove two measurements ran "
+                "against the same bytes, and silent corruption or an accidental replacement "
+                "is caught. It is an instance identity, not a regeneration check."
+            ),
+            "data_db_bytes_reproducible": False,
+        },
         "provenance": {
             "sizes": "os.stat of each component file",
-            "data_db_sha256": "sha256 of the Data.db bytes, recomputed every run",
+            "data_db_sha256": (
+                "sha256 of the Data.db bytes, recomputed every run; identifies this corpus "
+                "INSTANCE (see `reproducibility` — write timestamps make the bytes "
+                "non-reproducible even at a fixed seed)"
+            ),
             "compression": "CompressionInfo.db header (authoritative, not the DDL)",
             "rows": (
                 "Cassandra sstablemetadata totalRows (Statistics.db) per SSTable; "

@@ -31,9 +31,16 @@
 # `cassandra-stress` user profile. cassandra-stress's row values cannot be
 # reproduced from anything a manifest can record, so a regenerated corpus could
 # only ever be compared on aggregate counts; a recorded seed makes the ROW SET
-# itself reproducible, which is what gives the manifest's per-Data.db sha256
-# meaning for a corpus nobody commits (issue #3234 AC6). See
+# itself reproducible from the committed script alone (issue #3234 AC6). See
 # gen-perf-corpus-bti-rows.py for the determinism contract.
+#
+# WHAT THE SEED DOES *NOT* REPRODUCE: the Data.db BYTES. Cassandra stamps a
+# wall-clock write timestamp on every row, serialized as an unsigned VInt delta
+# from the Statistics.db min_timestamp baseline, so a later run shifts some deltas
+# across a VInt width boundary and even the file LENGTH changes. Measured here:
+# two same-seed smoke runs produced 19,474,015 B and 19,474,397 B. The manifest's
+# per-SSTable sha256 is therefore an INSTANCE IDENTITY (prove two measurements ran
+# on the same bytes; catch silent corruption), not a regeneration check.
 #
 # MULTI-SSTable BY CONSTRUCTION: autocompaction is disabled BEFORE the first load
 # and each chunk is followed by an explicit `nodetool flush`, so chunk N becomes
