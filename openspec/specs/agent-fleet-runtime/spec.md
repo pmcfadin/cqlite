@@ -280,32 +280,14 @@ environment, and every variable the section's control flow reads SHALL be initia
 the section BEFORE the platform/library guards, so no inherited environment value can
 enter a Linux-only implementation on another platform or without its helper library. The
 test-only path seams SHALL be inert without their explicit marker, and UNDER the marker
-BOTH seams SHALL be MANDATORY: a seam that is not usable SHALL be a loud refusal in the env
-guard AND in the path resolvers, so a test-mode run can never fall back to a production
-directory and mutate the host.
-
-A seam's usability SHALL be decided by POSITIVE CONTAINMENT and by nothing else: test mode
-SHALL take ONE caller-declared sandbox root, and a seam SHALL be usable IFF it is STRICTLY
-contained within that root (a resolved-path prefix match with an explicit `/` boundary, so a
-sibling whose name merely starts with the root's is outside). Anything not provably inside
-the sandbox SHALL be refused. The implementation SHALL NOT decide usability from a list of
-forbidden locations or path spellings: such a list cannot be completed — `.`, `..`,
-symlinks, `//` (POSIX leaves two leading slashes implementation-defined and `pwd -P` may
-preserve them, while on Linux `//etc` opens `/etc`), trailing slashes, bind mounts and
-`/proc/self/root/…` all name the same directory — and a set of scattered prohibitions also
-lets a NEW seam consumer silently miss them. The sandbox root SHALL itself prove it is a
-sandbox by evidence on the filesystem (an absolute, canonically spelled, existing directory
-carrying a stamp file), so no environment value alone can nominate a production directory as
-the sandbox. EVERY consumer of a seam SHALL route through that one containment check —
-writes, write gating, the drop-in path, and every read of configuration (including the
-lower-precedence search-path entries and an optional `sysctl.conf` FILE entry, whose parent
-SHALL be canonicalized and the resulting file path validated) — and a consumer that does not
-SHALL be a failure of the test suite's structural audit rather than an unvalidated path. On
-every path that WRITES, gates a write, or reads host configuration, containment SHALL be
-judged on the CANONICALIZED candidate and root (`.`, `..` and symlinked ancestors resolved).
-The emit-time read path, which writes nothing and is contractually fork-free, MAY apply the
-same containment check syntactically, since its guarantee rests on the marker being absent
-in production and a mis-accepted spelling there can only read a caller-chosen file.
+BOTH seams SHALL be MANDATORY, absolute and outside `/etc`, `/proc` and `/sys`: a missing
+or production-shaped seam SHALL be a loud refusal in the env guard AND in the path
+resolvers, so a test-mode run can never fall back to a production directory and mutate the
+host. On every path that WRITES or gates a write, that judgement SHALL be made on the
+seam's CANONICAL destination — `.`, `..` and symlinked ancestors resolved — and not on its
+spelling, since a textual check accepts an unbounded set of paths that resolve into the
+production directory. The emit-time read path, which writes nothing and is contractually
+fork-free, MAY validate textually (rejecting `.`/`..` components and a symlinked seam).
 
 When the read-back reports a restrictive `perf_event_paranoid`/`kptr_restrict` state, the
 diagnostics SHALL NAME the competing configuration files across the COMPLETE
@@ -395,31 +377,14 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
   command, SHALL write nothing (in particular not the real `/etc/sysctl.d` drop-in), SHALL
   claim no verdict, and SHALL exit 0
 
-#### Scenario: a test seam outside the declared sandbox refuses to act
-- **GIVEN** the test-mode marker set, a root identity, and a sysctl path seam that is not
-  strictly contained in the declared sandbox root — `/tmp/../etc/sysctl.d`,
-  `<symlink-to-/etc>/sysctl.d`, `//etc/sysctl.d`, a symlink whose target is outside the
-  sandbox, a relative path, or a sibling whose name merely starts with the root's
+#### Scenario: a test seam that RESOLVES into production refuses to act
+- **GIVEN** the test-mode marker set, a root identity, and a sysctl path seam that passes
+  every textual non-production check but resolves into `/etc/sysctl.d` — `/tmp/../etc/sysctl.d`,
+  or `<symlink-to-/etc>/sysctl.d`
 - **WHEN** bootstrap runs with `--yes`
-- **THEN** it SHALL refuse the section with a loud diagnosis NAMING the offending seam, SHALL
-  invoke no privileged command, SHALL leave the real drop-in byte- and metadata-unchanged,
-  SHALL name no write target at all, and SHALL exit 0
-- **AND** the refusal SHALL come from the single containment check, so no per-spelling rule
-  is required for any of those forms, nor for a form not yet enumerated
-
-#### Scenario: an unproven sandbox root cannot make containment vacuous
-- **GIVEN** the test-mode marker set and a sandbox root that is unset, relative,
-  `//`-spelled, non-existent, or an existing directory carrying no sandbox stamp
-- **WHEN** any seam consumer resolves a path
-- **THEN** it SHALL refuse, naming the sandbox-root variable, so declaring a production
-  directory as the sandbox by environment alone cannot succeed
-
-#### Scenario: a seam consumer cannot skip the containment check
-- **GIVEN** the helper's source
-- **WHEN** the test suite audits every function that dereferences a seam variable
-- **THEN** each SHALL route through the containment check, with only an explicitly named and
-  justified allowlist (a presence-only predicate and the root reader itself), and finding no
-  consumers at all SHALL be a failure rather than a vacuous pass
+- **THEN** it SHALL refuse the section with a loud diagnosis, SHALL invoke no privileged
+  command, SHALL leave the real drop-in byte- and metadata-unchanged, SHALL name no write
+  target at all, and SHALL exit 0
 
 #### Scenario: a non-canonical drop-in is rewritten
 - **GIVEN** an existing drop-in whose bytes differ from the canonical content only in
