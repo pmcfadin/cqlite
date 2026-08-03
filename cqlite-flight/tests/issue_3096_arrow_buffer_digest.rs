@@ -54,7 +54,7 @@
 //! `issue_3058_forced_path_differential.rs` established. Add a case to the list,
 //! never a second `#[test]`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, ArrayData};
 use arrow::record_batch::RecordBatch;
@@ -281,11 +281,11 @@ fn ticket() -> serde_json::Value {
 /// One corpus case: the arms must agree, and the result must be non-vacuous.
 async fn assert_arms_agree(
     label: &str,
-    corpus_root: &PathBuf,
+    corpus_root: &Path,
     expect_rows: u64,
     failures: &mut Vec<String>,
 ) -> Option<BufferDigest> {
-    let svc = CqliteFlightService::new(corpus_root.clone(), BATCH_SIZE);
+    let svc = CqliteFlightService::new(corpus_root.to_path_buf(), BATCH_SIZE);
     let t = ticket();
 
     std::env::set_var(TTL_NOW_ENV, PINNED_NOW_SECS.to_string());
@@ -383,7 +383,7 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
 
     let observed = rt.block_on(assert_arms_agree(
         "ci-fixture/select-star",
-        &temp.path().to_path_buf(),
+        temp.path(),
         CI_FIXTURE_ROWS_OBSERVED,
         &mut failures,
     ));

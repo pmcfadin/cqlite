@@ -110,12 +110,11 @@ pub mod attr {
     /// behind the admission semaphore in `admission`, or stuck parsing/validating
     /// a malformed ticket in `validate`) from metrics alone.
     ///
-    /// Cardinality (issue #2819; extended by #3096): on
-    /// [`super::RPC_PHASE_DURATION`] the `do_get` method ALSO carries SIX
-    /// in-`stream` sub-phase values (`"stream_cold_fault"`, `"stream_decompress"`,
-    /// `"stream_merge"`, `"stream_encode"`, `"stream_encode_framing"`,
-    /// `"stream_grpc_write"`), so `do_get`'s phase.duration value set is ELEVEN,
-    /// not five. The sub-phase values are gated to `do_get` + `phase.duration` only —
+    /// Cardinality (#2819; extended by #3096): on [`super::RPC_PHASE_DURATION`] the
+    /// `do_get` method ALSO carries SIX in-`stream` sub-phase values
+    /// (`"stream_cold_fault"`, `"stream_decompress"`, `"stream_merge"`, `"stream_encode"`,
+    /// `"stream_encode_framing"`, `"stream_grpc_write"`), so its phase.duration value
+    /// set is ELEVEN. Those values are gated to `do_get` + `phase.duration` only —
     /// they are NOT added to [`super::RPC_PHASE_ACTIVE`], which stays the five
     /// top-level values per method. Still a closed, static, low-cardinality set.
     pub const RPC_PHASE: &str = "cqlite.rpc.phase";
