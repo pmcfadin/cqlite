@@ -241,24 +241,24 @@ fi
 noseam_out=$(env -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR CQLITE_PERF_TEST_MODE=1 \
   bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); noseam_rc=$?
 if [ "$noseam_rc" -ne 0 ] \
-   && printf '%s' "$noseam_out" | grep -q 'requires an explicit NON-PRODUCTION CQLITE_PERF_PROC_DIR' \
-   && printf '%s' "$noseam_out" | grep -q 'requires an explicit NON-PRODUCTION CQLITE_PERF_SYSCTL_DIR' \
+   && printf '%s' "$noseam_out" | grep -q 'requires CQLITE_PERF_PROC_DIR INSIDE the declared sandbox' \
+   && printf '%s' "$noseam_out" | grep -q 'requires CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' \
    && printf '%s' "$noseam_out" | grep -q 'NEVER falls back'; then
   ok "perf-capability: test mode with NO path seams REFUSES loudly and names BOTH missing sandbox dirs"
 else
   bad "perf-capability: test mode without seams was allowed to act (rc=$noseam_rc, out='$noseam_out')"
 fi
-# A seam pointing AT production (or anywhere under /etc, /proc, /sys) is the same hole
-# wearing a seam, and a RELATIVE path is not a sandbox either.
-# Each rejection is asserted BY ITS REASON, not merely by a non-zero rc: this guard has a
-# second refusal (a real sudo/sysctl on PATH) that would otherwise satisfy an rc-only
-# check and let a seam-validation regression pass unnoticed.
+# A seam pointing AT production (or anywhere under /etc, /proc, /sys) is refused because it
+# is not inside the sandbox — no forbidden name is consulted — and a RELATIVE path is not a
+# sandbox path either. Each rejection is asserted BY ITS REASON, not merely by a non-zero rc:
+# this guard has a second refusal (a real sudo/sysctl on PATH) that would otherwise satisfy
+# an rc-only check and let a containment regression pass unnoticed.
 guard_rejects_seam() { # guard_rejects_seam <which:PROC|SYSCTL> <proc-seam> <sysctl-seam>
   local out
   out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$realpriv" \
           CQLITE_PERF_PROC_DIR="$2" CQLITE_PERF_SYSCTL_DIR="$3" \
           bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1) && return 1
-  printf '%s' "$out" | grep -q "NON-PRODUCTION CQLITE_PERF_${1}_DIR"
+  printf '%s' "$out" | grep -q "CQLITE_PERF_${1}_DIR INSIDE the declared sandbox"
 }
 for badseam in /etc/sysctl.d /etc/sysctl.d/sub /etc /proc /proc/sys/kernel /sys relative/dir ''; do
   guard_rejects_seam SYSCTL "$seamed_proc" "$badseam" || {
@@ -275,20 +275,70 @@ guard_rejects_seam SYSCTL "$seamed_proc" "$symseam" || {
   bad "perf-capability: test mode ACCEPTED a sysctl seam that is a SYMLINK to /etc/sysctl.d"; badseam_fail=1; }
 guard_rejects_seam PROC "$symproc" "$seamed_d" || {
   bad "perf-capability: test mode ACCEPTED a proc seam that is a SYMLINK to /proc/sys/kernel"; badseam_fail=1; }
-# ...and the SPELLING is not the destination (issue #3249 review R5-1): `/tmp/../etc/sysctl.d`
-# and `<symlink-to-/etc>/sysctl.d` pass every textual test above, and a root `--yes` run
-# resolves BOTH to the production directory. Each escape so far was one more spelling of
-# "somewhere else", so the write-side guard now judges the CANONICAL destination. An
-# UNENTERABLE path resolves to nothing and is refused too — a write target must exist.
+# ...and the SPELLING is not the destination. `/tmp/../etc/sysctl.d`, `<symlink-to-/etc>/…`
+# and — the R6-1 escape — `//etc/sysctl.d` (POSIX leaves two leading slashes
+# implementation-defined and `pwd -P` may PRESERVE them, while on Linux `//etc` IS `/etc`)
+# each passed the textual checks of an earlier round. There is no per-spelling check any
+# more: containment refuses all of them, plus every future spelling, for the SAME reason.
+# An UNENTERABLE path resolves to nothing and is refused too — a write target must exist.
 symanc="$tmp/symlinked-ancestor"; rm -f "$symanc"; ln -s /etc "$symanc"
+symout="$tmp/symlink-out-of-sandbox"; rm -f "$symout"; ln -s /tmp "$symout"
 for resolveseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d" "$tmp/./nonexistent-sandbox.d" \
-                   "$tmp/no-such-sandbox.d"; do
+                   "$tmp/no-such-sandbox.d" "//etc/sysctl.d" "//etc/sysctl.d/sub" \
+                   "$symout" "$tmp"; do
   guard_rejects_seam SYSCTL "$seamed_proc" "$resolveseam" || {
-    bad "perf-capability: test mode ACCEPTED a sysctl seam that RESOLVES outside its sandbox: '$resolveseam'"; badseam_fail=1; }
+    bad "perf-capability: test mode ACCEPTED a sysctl seam that is not strictly inside its sandbox: '$resolveseam'"; badseam_fail=1; }
 done
-guard_rejects_seam PROC "$symanc/sysctl.d" "$seamed_d" || {
-  bad "perf-capability: test mode ACCEPTED a proc seam with a SYMLINKED ANCESTOR into /etc"; badseam_fail=1; }
-[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects an empty/relative/production-shaped/SYMLINKED seam AND one that merely RESOLVES into production (.. or a symlinked ancestor), on BOTH sandbox dirs, naming the offending seam"
+for resolveseam in "$symanc/sysctl.d" "//proc/sys/kernel" "$symout"; do
+  guard_rejects_seam PROC "$resolveseam" "$seamed_d" || {
+    bad "perf-capability: test mode ACCEPTED a proc seam outside its sandbox: '$resolveseam'"; badseam_fail=1; }
+done
+[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects an empty/relative/production-shaped/SYMLINKED seam, one that RESOLVES out of the sandbox (.., a symlinked ancestor, a symlink to /tmp), the '//etc' double-slash spelling, a sibling-prefix path and the sandbox ROOT itself — on BOTH sandbox dirs, naming the offending seam"
+# 1c-iii-b. THE CONTAINMENT BOUNDARY AND THE SANDBOX ROOT ITSELF (issue #3249 review
+#           R6-1/R6-2). Containment is only as good as its boundary and its root:
+#             * `/tmp/sandboxevil` must NOT count as inside `/tmp/sandbox` — a plain string
+#               prefix would accept it, which is why the `/` boundary is explicit;
+#             * a path genuinely inside the declared root must still WORK, so the guard is
+#               not vacuously refusing everything (the failure mode a negative-only test
+#               cannot see);
+#             * the ROOT must PROVE itself — unset, relative, `//`-spelled, non-existent, or
+#               an existing directory with no stamp are all refusals NAMING
+#               CQLITE_PERF_TEST_SANDBOX. Without that, `CQLITE_PERF_TEST_SANDBOX=/etc`
+#               would make containment vacuous, and the inversion would have bought nothing.
+sbx="$tmp/sandbox"; mkdir -p "$sbx/inside" "$sbx/inside-proc"; : >"$sbx/.cqlite-perf-sandbox"
+mkdir -p "${sbx}evil"                       # the sibling whose NAME starts with the root's
+nostamp="$tmp/unstamped-root"; mkdir -p "$nostamp/inside"
+guard_with_root() { # guard_with_root <sandbox-root> <proc-seam> <sysctl-seam> -> rc + stderr
+  # $realpriv FIRST on PATH with the same dir declared: the guard's OTHER refusal (a real
+  # sudo/sysctl reachable) must not be what decides these cases.
+  env PATH="$realpriv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$realpriv" \
+    CQLITE_PERF_TEST_SANDBOX="$1" CQLITE_PERF_PROC_DIR="$2" CQLITE_PERF_SYSCTL_DIR="$3" \
+    bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1
+}
+bnd_fail=0
+guard_with_root "$sbx" "$sbx/inside-proc" "$sbx/inside" >/dev/null 2>&1 \
+  || { bad "perf-capability: a seam genuinely INSIDE the declared sandbox was refused (the guard is vacuous)"; bnd_fail=1; }
+bnd_out=$(guard_with_root "$sbx" "$sbx/inside-proc" "${sbx}evil") && bnd_fail=1
+printf '%s' "$bnd_out" | grep -q 'CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' || bnd_fail=1
+[ "$bnd_fail" -eq 0 ] || bad "perf-capability: '${sbx}evil' was treated as inside '$sbx' (prefix match without a / boundary), or a contained seam was refused"
+[ "$bnd_fail" -ne 0 ] || ok "perf-capability: containment is boundary-exact — a seam inside the declared sandbox is ACCEPTED while the sibling '<root>evil' is REFUSED by name"
+root_fail=0
+for badroot in '' relative/sandbox "//$tmp" "$tmp/no-such-root" "$nostamp"; do
+  ro=$(guard_with_root "$badroot" "$sbx/inside-proc" "$sbx/inside") && root_fail=1
+  printf '%s' "$ro" | grep -q 'requires CQLITE_PERF_TEST_SANDBOX' || root_fail=1
+  [ "$root_fail" -eq 0 ] || { bad "perf-capability: sandbox root '$badroot' was accepted (or refused without naming CQLITE_PERF_TEST_SANDBOX)"; break; }
+done
+[ "$root_fail" -ne 0 ] || ok "perf-capability: the sandbox ROOT must prove itself — unset/relative/'//'-spelled/absent/UNSTAMPED are refusals naming CQLITE_PERF_TEST_SANDBOX (so a stray CQLITE_PERF_TEST_SANDBOX=/etc cannot make containment vacuous)"
+# ...and the FORK-FREE read path applies the same containment: a `//`-spelled or
+# out-of-sandbox proc seam reads NOTHING (token `absent`), never the host's real /proc —
+# whose paranoid/kptr values would otherwise show up as ok/paranoid-N/kptr-restricted here.
+read_fail=0
+for badproc in "//proc/sys/kernel" "$symanc/sysctl.d" "/proc/sys/kernel" "${sbx}evil"; do
+  rt=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$sbx" \
+         CQLITE_PERF_PROC_DIR="$badproc" bash "$PERFLIB" --token 2>/dev/null)
+  [ "$rt" = absent ] || { bad "perf-capability: the read path used an out-of-sandbox proc seam '$badproc' (token '$rt', expected 'absent')"; read_fail=1; }
+done
+[ "$read_fail" -ne 0 ] || ok "perf-capability: the fork-free READ path refuses an out-of-sandbox proc seam (including the '//proc' spelling) — token 'absent', the real /proc never read"
 # ...and the write TARGET is re-validated independently of the guard: --drop-in-path may
 # never NAME a production file, because that string is what a root `tee` is pointed at.
 for resolveseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d"; do
@@ -547,17 +597,24 @@ if printf '%s\n' "$sp_out" | grep -q "^earlier $sp_hi/10-hardening.conf$" \
 else
   bad "perf-capability: search-path scan wrong: '$sp_out'"
 fi
-# ...and an EXTRA-DIRS entry that is not an absolute non-production path fails the whole
-# scan CLOSED (rc 1, no output): a test-mode scan may never read the host's real /run or
-# /usr/lib, and a bad entry is an UNKNOWN, not "no competitor".
-for spbad in /etc/sysctl.d relative/dir "/tmp/../etc/sysctl.d"; do
+# ...and an EXTRA-DIRS entry that is not provably inside the sandbox fails the whole scan
+# CLOSED (rc 1, no output): a test-mode scan may never read the host's real /run or /usr/lib,
+# and a bad entry is an UNKNOWN, not "no competitor". THIS ENTRY POINT IS R6-2: it used the
+# textual validator while the write path canonicalized, so a SYMLINKED ANCESTOR (and the
+# `//etc` spelling) could point a "sandboxed" scan at the host's real configuration. It now
+# goes through the same resolving gate — dirs and the `sysctl.conf` FILE entry alike.
+for spbad in /etc/sysctl.d relative/dir "/tmp/../etc/sysctl.d" "//etc/sysctl.d" \
+             "$symanc/sysctl.d" "$symanc/sysctl.conf" "$symout" "$tmp/../etc/sysctl.d"; do
+  sp_this=0
   sp_bad_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$sp_hi" \
     CQLITE_PERF_SYSCTL_EXTRA_DIRS="$spbad" \
-    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>/dev/null) && sp_bad_fail=1
-  [ -z "$sp_bad_out" ] || sp_bad_fail=1
-  [ -z "${sp_bad_fail:-}" ] || bad "perf-capability: a production/relative CQLITE_PERF_SYSCTL_EXTRA_DIRS entry '$spbad' did not fail the scan closed"
+    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>/dev/null) && sp_this=1
+  # No output at all, and in particular NOT ONE host path: this is the "no host file read"
+  # half of the property, so it is asserted rather than inferred from the rc.
+  [ -z "$sp_bad_out" ] || sp_this=1
+  [ "$sp_this" -eq 0 ] || { bad "perf-capability: CQLITE_PERF_SYSCTL_EXTRA_DIRS entry '$spbad' did not fail the scan closed (out='$sp_bad_out')"; sp_bad_fail=1; }
 done
-[ -n "${sp_bad_fail:-}" ] || ok "perf-capability: a production-shaped/relative/resolving-into-production extra search-path entry fails the scan CLOSED (rc 1, no output)"
+[ -n "${sp_bad_fail:-}" ] || ok "perf-capability: an extra search-path entry outside the sandbox — production-shaped, relative, '//etc'-spelled, or reached through a SYMLINKED ANCESTOR (dir or sysctl.conf FILE) — fails the scan CLOSED (rc 1, no output, no host path named)"
 # ...and an UNREADABLE directory is an UNKNOWN (rc 1), never "no competing file": this
 # diagnostic exists to replace an unknown with a named file, so answering an unknown with
 # the reassuring line would recreate the mystery it was written to end.
@@ -713,6 +770,62 @@ else
     *no-perf-binary*) ok "perf-capability: verify fails with 'no-perf-binary' when perf is absent" ;;
     *) bad "perf-capability: unexpected no-perf verdict: $noperf_out" ;;
   esac
+fi
+
+# 1f. THE GATE IS SINGULAR AND UNSKIPPABLE — a STRUCTURAL audit (issue #3249 review R6-2).
+#     R6-2 was not a wrong check, it was a MISSING one: CQLITE_PERF_SYSCTL_EXTRA_DIRS was a
+#     new seam consumer, and the canonicalizing validation added for the write path simply
+#     never reached it. No behavioural case can catch that class, because the defect is a
+#     path nobody thought to test. So this audit enumerates, FROM THE SOURCE, every function
+#     that dereferences a seam variable and requires each one to route through the
+#     containment family (`perf_capability_sandbox_*` / `perf_capability_path_within`) — with
+#     ONE named, justified allowlist entry. A future entry point that reads a seam without
+#     the gate FAILS here, and joining the allowlist is a visible, reviewable act.
+#
+#     Same shape as the fork-free audit in test_agent_gate_summary.sh: parse the function
+#     bodies (a column-0 `name() {` … column-0 `}`), and treat FINDING NOTHING as a failure,
+#     so a parser that stops matching can never pass this vacuously.
+seam_audit=$(awk \
+  -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX)' \
+  -v gatere='perf_capability_(sandbox_|path_within)' '
+  /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
+    fn = $1; sub(/\(\)$/, "", fn); seam = 0; gate = 0
+    if ($0 ~ seamre) seam = 1
+    if ($0 ~ gatere) gate = 1
+    if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, seam, gate; inb = 0 }
+    else inb = 1
+    next
+  }
+  inb && /^\}/ { printf "%s %d %d\n", fn, seam, gate; inb = 0; next }
+  inb {
+    if ($0 ~ seamre) seam = 1
+    if ($0 ~ gatere) gate = 1
+  }
+' "$PERFLIB")
+# The ONLY function allowed to read a seam without the gate, and why: it asks whether a seam
+# was handed to us AT ALL (for the marker-less refusal) and never uses the value as a path.
+# The containment family's own root reader is the gate, so it is named here too.
+seam_audit_allow=' perf_capability_seam_set perf_capability_sandbox_root_into '
+seam_consumers=0; seam_ungated=''
+while read -r fn seam gate; do
+  [ -n "$fn" ] || continue
+  [ "$seam" = 1 ] || continue
+  seam_consumers=$((seam_consumers + 1))
+  case "$seam_audit_allow" in *" $fn "*) continue ;; esac
+  [ "$gate" = 1 ] || seam_ungated="$seam_ungated $fn"
+done <<EOF
+$seam_audit
+EOF
+# 4 is the count at the time of writing (proc_dir_into, sysctl_dir, sysctl_search_path,
+# test_seams_ok) plus the two allowlisted readers; the assert is a FLOOR, so adding a
+# consumer is fine and losing the parse is not.
+if [ "$seam_consumers" -ge 5 ] && [ -z "$seam_ungated" ] \
+   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_sysctl_search_path 1 1$' \
+   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_proc_dir_into 1 1$'; then
+  ok "perf-capability: STRUCTURAL — all $seam_consumers seam-dereferencing functions route through the single containment gate (only the documented presence-check + the root reader are allowlisted), so a new entry point cannot silently skip it"
+else
+  bad "perf-capability: STRUCTURAL audit failed — seam consumers found: $seam_consumers; UNGATED:${seam_ungated:- none}"
+  printf '%s\n' "$seam_audit"
 fi
 
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
