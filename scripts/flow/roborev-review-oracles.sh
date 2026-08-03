@@ -234,6 +234,15 @@ ROBOREV_BUILTIN_SRC_LABEL="roborev-builtin"
 # `roborev_observe_builtin_excludes` for why a count is used rather than a blind
 # full-set re-extraction.
 ROBOREV_BUILTIN_PATHSPEC_LITERALS=26
+# THE VERSION EVERYTHING ABOVE IS PINNED TO, as a MACHINE-CHECKED value rather than only
+# prose (#3229 round-7 blocker). Both this deny-list AND the `git.FormatExcludeArgs` port
+# were derived from THIS build; the standing obligation on an upgrade is to RE-VERIFY both
+# before the check is trusted. `roborev_observe_builtin_excludes` therefore ASKS the
+# executable which version it is (`roborev version` prints `roborev v0.61.2`; there is no
+# `--version` flag) and treats a mismatch as DIVERGENCE — not as a workaround for a
+# missing right boundary, but because "the pin holds" is exactly the claim the version
+# answers. A version that cannot be read is UNAVAILABLE, never a blessing.
+ROBOREV_PINNED_VERSION="v0.61.2"
 
 # roborev_push_assert: sets PUSH_ASSERT (and REMOTE/REMOTE_SHA); calls `finish` on
 # failure, so it never returns when the branch is not pushed.
@@ -1151,14 +1160,15 @@ roborev_format_exclude_args() {
 # silently, the failure would look like normal operation, and we would be blind again:
 # exactly the class this issue exists to close. So divergence FAILs.
 #
-# WHY A PRESENCE-CHECK PLUS A COUNT, NOT A BLIND RE-EXTRACTION. Go string literals are
-# concatenated into one blob with no terminators, so a scan for
-# `:(exclude,glob)<something>` cannot reliably delimit each pattern — MEASURED on this
+# WHAT `built-in-set:` VERIFIES, AND WHY AN UNBOUNDED SUBSTRING TEST IS NOT ENOUGH.
+# Go string literals are concatenated into one rodata blob with NO terminators, so a scan
+# for `:(exclude,glob)<something>` cannot reliably delimit each pattern — MEASURED on this
 # very binary, a naive extraction yields truncations (`**/.be`, `**/f`, `**/mix.l`),
 # junk-suffixed hits (`**/.cache/**add…`, `**/go.sumBinary file…`) and, worst, a phantom
 # `**/git` that is really the bare RECURSIVE PREFIX constant followed by an unrelated
-# string. Basing a FAIL on that would red every run. Two reliable signals are used
-# instead:
+# string. Basing a FAIL on that would red every run. So the check is built from FOUR
+# signals, each individually reliable:
+#
 #   1. REMOVALS, named exactly: each pinned pattern is looked for as a FIXED string
 #      `:(exclude,glob)<pattern>`. Hit or no hit — no delimiting required.
 #   2. ADDITIONS, detected numerically: the COUNT of `:(exclude,glob)` literals. Any
@@ -1166,20 +1176,66 @@ roborev_format_exclude_args() {
 #      moves if roborev introduces an unrelated `:(exclude,glob)` string — but that is
 #      still a mechanism change in precisely this area, with precisely this remedy, so
 #      reporting it is correct rather than a false alarm.
-# Declared residual: a NEW pattern that has a PINNED one as a prefix
-# (`**/Cargo.lock.bak`) is invisible to (1) and would only move the count in (2).
+#   3. THE VERSION THE PIN IS FOR (`ROBOREV_PINNED_VERSION`), asked of the executable
+#      itself. Every fact modelled in this file — the 24 patterns, their arity, the ported
+#      `git.FormatExcludeArgs` — was derived from the v0.61.2 build, and an upgrade
+#      obliges a re-verification of ALL of it. So a version mismatch IS the divergence the
+#      pin encodes, reported with the observed and pinned versions named. This is the
+#      GENERAL signal: any upgrade or rebuild moves it, whatever it did to the patterns.
+#   4. A RIGHT BOUNDARY for (1), from the blob's LENGTH-BUCKET ADJACENCY.
 #
-# UNAVAILABLE, never FAIL, when the set cannot be observed at all — `roborev` absent from
-# PATH, an unreadable target, or a target carrying ZERO `:(exclude,glob)` literals (a
-# wrapper script rather than the Go executable). That is what keeps the hermetic suite,
-# which puts a shell stub on PATH, fully exercisable: "we could not look" is never a
-# failure and never a blessing.
+# (4) EXISTS BECAUSE (1) ALONE IS A FALSE-PASS (#3229 round-7 blocker, REPRODUCED). A
+# fixed-string search for `:(exclude,glob)<pattern>` has an exact LEFT boundary (the
+# 15-byte prefix) and NO RIGHT ONE, so `**/Cargo.lock` matches INSIDE
+# `**/Cargo.lock.bak`. Combined with (2) being a bare count, an equal-length substitution
+# is INVISIBLE: patching the v0.61.2 binary so its bucket-28 run reads
+# `:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock`
+# (4 bytes taken from the preceding string, file size unchanged) leaves the count at
+# EXACTLY 26 and the missing list EMPTY — verdict `built-in-set: OK` while the modelled
+# exclusion set no longer matches reality. Measured, not hypothesised.
+#
+# THE BOUNDARY, AND WHY IT IS DERIVED RATHER THAN PINNED. Go's linker packs the rodata
+# string blob in LENGTH order, so the 24 finished pathspec literals fall into LENGTH
+# BUCKETS, and MEASURED against v0.61.2 each bucket is stored as ONE CONTIGUOUS RUN: the
+# 12 buckets are (total literal length → members) 24→go.sum; 25→uv.lock;
+# 26→bun/pdm/mix.lock; 27→yarn.lock/bun.lockb/.beads/.cache; 28→Cargo/cargo/flake.lock;
+# 29→poetry.lock/.gocache; 30→Pipfile/Gemfile/pubspec/Podfile.lock; 31→composer.lock;
+# 32→pnpm-lock.yaml; 34→Package.resolved/.kata.local.toml; 35→package-lock.json;
+# 36→packages.lock.json. Inside a run, the byte AFTER a literal is the `:` of the NEXT
+# literal — a genuine right boundary. So the invariant checked is, per bucket of k
+# members: EXACTLY k-1 of them are immediately followed by another `:(exclude,glob)`
+# literal, and exactly one (the run's last) is not. That is DERIVED FROM THE PINNED
+# PATTERN LIST ALONE (group by length; expect k-1) — it pins NO foreign bytes and NO
+# within-bucket ORDER, so it cannot false-FAIL on a rebuild that merely permutes a bucket.
+# Summed over the 12 buckets: 12 bounded, 12 run-enders. The tamper above moves bucket 28
+# from 2 bounded to 1, and FAILs naming the bucket and the unbounded member.
+#
+# DECLARED RESIDUALS, both narrowed by (3):
+#   * the LAST literal of each of the 12 runs has no derivable right boundary — its
+#     successor is an unrelated Go string, and pinning those bytes would pin foreign,
+#     build-specific data whose drift would FALSE-FAIL a correct binary (the failure mode
+#     that gets a guard disabled). An in-place equal-length extension of a run-ENDER
+#     inside v0.61.2 therefore stays invisible; any upstream change that really did it
+#     would move the version (3) or the count (2).
+#   * a NEW pattern that has a PINNED one as a prefix is still not NAMED by (1) — it is
+#     detected, as an addition, by (2) and/or as a broken run by (4).
+#
+# UNAVAILABLE, never FAIL, when the set cannot be observed — `roborev` absent from PATH,
+# an unreadable target, a target carrying ZERO `:(exclude,glob)` literals (a wrapper
+# script rather than the Go executable), or a target that will not report its version.
+# That is what keeps the hermetic suite, which puts a shell stub on PATH, fully
+# exercisable: "we could not look" is never a failure and never a blessing. Note the
+# asymmetry that keeps this from self-disabling: an unreadable version withholds only the
+# OK BLESSING — a positively OBSERVED divergence (1/2/4) still FAILs without it.
 roborev_observe_builtin_excludes() {
   _rx_builtin_state="UNAVAILABLE"
   _rx_builtin_missing=()
   _rx_builtin_count=""
   _rx_builtin_count_note=""
-  local bin="" p n
+  _rx_builtin_version=""
+  _rx_builtin_version_note=""
+  _rx_builtin_bucket_note=""
+  local bin="" p n lit len ver want got k
   bin=$(command -v roborev 2>/dev/null) || bin=""
   { [ -n "$bin" ] && [ -f "$bin" ] && [ -r "$bin" ]; } || return 0
   set +e
@@ -1190,14 +1246,75 @@ roborev_observe_builtin_excludes() {
   # observable, so not a verdict in either direction.
   [ "$n" -gt 0 ] || return 0
   _rx_builtin_count="$n"
+
+  # --- (1) presence AND (4) its right boundary, bucketed by literal length -----------
+  # `b_bounded` counts the members whose literal is IMMEDIATELY FOLLOWED by another
+  # `:(exclude,glob)` literal. A bounded hit PROVES presence, so the presence-only grep
+  # runs on the else branch — the two signals are one pass over the pinned list.
+  local -A b_k=() b_bounded=() b_members=() b_bounded_names=() b_unbounded_names=() b_missing=()
   for p in "${ROBOREV_BUILTIN_EXCLUDES[@]}"; do
-    LC_ALL=C grep -qFa ":(exclude,glob)$p" "$bin" || _rx_builtin_missing+=("$p")
+    lit=":(exclude,glob)$p"
+    len=${#lit}
+    b_k[$len]=$((${b_k[$len]:-0} + 1))
+    b_members[$len]="${b_members[$len]:-}${b_members[$len]:+ }$p"
+    if LC_ALL=C grep -qFa "$lit:(exclude,glob)" "$bin"; then
+      b_bounded[$len]=$((${b_bounded[$len]:-0} + 1))
+      b_bounded_names[$len]="${b_bounded_names[$len]:-}${b_bounded_names[$len]:+, }$p"
+    elif LC_ALL=C grep -qFa "$lit" "$bin"; then
+      b_unbounded_names[$len]="${b_unbounded_names[$len]:-}${b_unbounded_names[$len]:+, }$p"
+    else
+      _rx_builtin_missing+=("$p")
+      b_missing[$len]=1
+    fi
   done
+  local -a b_lens=()
+  mapfile -t b_lens < <(printf '%s\n' "${!b_k[@]}" | sort -n)
+  for len in ${b_lens[@]+"${b_lens[@]}"}; do
+    # A bucket with a MISSING member has had its run broken BY that removal, so its
+    # arithmetic is a CONSEQUENCE of a divergence already named exactly by (1). Reporting
+    # both would bury the actionable name under derived noise.
+    [ -z "${b_missing[$len]:-}" ] || continue
+    k="${b_k[$len]}"
+    want=$((k - 1))
+    got="${b_bounded[$len]:-0}"
+    [ "$got" -ne "$want" ] || continue
+    _rx_builtin_bucket_note="${_rx_builtin_bucket_note:-}${_rx_builtin_bucket_note:+; }literal length $len [${b_members[$len]}]: $got of $k bounded on the right by an adjacent ':(exclude,glob)' literal, pinned $want (a length bucket is stored as ONE run, so exactly one member ends it); bounded: ${b_bounded_names[$len]:-<none>}; UNBOUNDED: ${b_unbounded_names[$len]:-<none>}"
+  done
+  if [ -n "$_rx_builtin_bucket_note" ]; then
+    _rx_builtin_bucket_note="pinned pattern(s) present but NOT right-bounded as pinned (an unbounded substring hit also matches a LONGER pattern, e.g. '**/Cargo.lock' inside '**/Cargo.lock.bak'): $_rx_builtin_bucket_note"
+  fi
+
+  # --- (2) additions, numerically ----------------------------------------------------
   if [ "$n" -ne "$ROBOREV_BUILTIN_PATHSPEC_LITERALS" ]; then
     _rx_builtin_count_note="observed $n ':(exclude,glob)' literal(s), pinned $ROBOREV_BUILTIN_PATHSPEC_LITERALS (= 24 built-in patterns + 2 prefix constants)"
   fi
-  if [ "${#_rx_builtin_missing[@]}" -gt 0 ] || [ -n "$_rx_builtin_count_note" ]; then
+
+  # --- (3) the version the pin is FOR ------------------------------------------------
+  # Asked of `$bin` — the SAME file the literals were read from, never a bare `roborev`
+  # that PATH might resolve elsewhere. `timeout` when available: this check must not be
+  # the thing that hangs a review round. `version`, not `--version`: the latter does not
+  # exist.
+  set +e
+  if command -v timeout >/dev/null 2>&1; then
+    ver=$(timeout 20 "$bin" version 2>/dev/null | head -n 1)
+  else
+    ver=$("$bin" version 2>/dev/null | head -n 1)
+  fi
+  set -e
+  if [[ "${ver:-}" =~ (^|[[:space:]])(v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)([[:space:]]|$) ]]; then
+    _rx_builtin_version="${BASH_REMATCH[2]}"
+  fi
+  if [ -n "$_rx_builtin_version" ] && [ "$_rx_builtin_version" != "$ROBOREV_PINNED_VERSION" ]; then
+    _rx_builtin_version_note="the executable reports $_rx_builtin_version, but every fact modelled here was derived from $ROBOREV_PINNED_VERSION"
+  fi
+
+  if [ "${#_rx_builtin_missing[@]}" -gt 0 ] || [ -n "$_rx_builtin_count_note" ] ||
+    [ -n "$_rx_builtin_bucket_note" ] || [ -n "$_rx_builtin_version_note" ]; then
     _rx_builtin_state="DIVERGED"
+  elif [ -z "$_rx_builtin_version" ]; then
+    # Everything observable AGREED, but the version — the thing the pin is TO — could not
+    # be read, so the pin is unconfirmed. Withhold the blessing, never invent a failure.
+    _rx_builtin_state="UNAVAILABLE"
   else
     _rx_builtin_state="OK"
   fi
@@ -1211,10 +1328,10 @@ roborev_observe_builtin_excludes() {
 roborev_builtin_state_details() {
   case "$_rx_builtin_state" in
     OK)
-      DETAILS+=("NOTICE: census-exclusion: built-in-set: OK — the live roborev built-in exclude set MATCHES the pinned v0.61.2 set (every pinned pattern found in the executable; $_rx_builtin_count ':(exclude,glob)' literal(s) observed, exactly as pinned). The pin is corroborated, not assumed.")
+      DETAILS+=("NOTICE: census-exclusion: built-in-set: OK — the live roborev built-in exclude set MATCHES the pinned v0.61.2 set, on FOUR observations rather than an assumption: the executable reports $_rx_builtin_version (the build every fact here was derived from, so the pin's re-verify-on-upgrade obligation is satisfied for this run); every pinned pattern is present as the literal ':(exclude,glob)<pattern>'; every pattern is RIGHT-BOUNDED by the pinned length-bucket adjacency, so a presence hit cannot be a substring of a LONGER pattern; and $_rx_builtin_count ':(exclude,glob)' literal(s) are present, exactly as pinned. The right-boundary half is load-bearing: an unbounded substring test alone reported OK for a binary whose '**/Cargo.lock' had been replaced by '**/Cargo.lock.bak' at equal length (count 26/26, missing 0).")
       ;;
     UNAVAILABLE)
-      DETAILS+=("NOTICE: census-exclusion: built-in-set: UNAVAILABLE — the roborev executable could not be read for its hard-coded deny-list ('roborev' absent from PATH, unreadable, or a wrapper/stub carrying no ':(exclude,glob)' literals), so whether the live built-in set still matches the pinned v0.61.2 set is UNKNOWN. This is deliberately NEITHER a failure NOR a blessing: 'we could not look' is reported in the value line so it cannot be mistaken for agreement.")
+      DETAILS+=("NOTICE: census-exclusion: built-in-set: UNAVAILABLE — the live roborev built-in deny-list could not be confirmed against the pinned v0.61.2 set ('roborev' absent from PATH, unreadable, a wrapper/stub carrying no ':(exclude,glob)' literals, or a target that would not report its version), so whether it still matches is UNKNOWN. This is deliberately NEITHER a failure NOR a blessing: 'we could not look' is reported in the value line so it cannot be mistaken for agreement. It withholds only the OK blessing — an OBSERVED divergence (a missing pattern, a broken adjacency run, a changed literal count) still FAILs without a readable version.")
       ;;
   esac
 }
@@ -1446,12 +1563,23 @@ roborev_check_census_exclusion() {
   # a coexisting configured swallow.
   local builtin_div="" builtin_div_missing=""
   if [ "$_rx_builtin_state" = DIVERGED ]; then
+    # VERSION first: it is the GENERAL signal, and it reframes every other fragment — on a
+    # different build the patterns, the count and the port all need re-deriving, so a
+    # reader must not diagnose a moved pattern before knowing the binary moved.
+    if [ -n "$_rx_builtin_version_note" ]; then
+      builtin_div="$_rx_builtin_version_note"
+    fi
     if [ "${#_rx_builtin_missing[@]}" -gt 0 ]; then
       builtin_div_missing=$(
         IFS=,
         printf '%s' "${_rx_builtin_missing[*]}"
       )
-      builtin_div="pinned pattern(s) no longer present in the binary: ${builtin_div_missing//,/, }"
+      [ -z "$builtin_div" ] || builtin_div="$builtin_div; "
+      builtin_div="${builtin_div}pinned pattern(s) no longer present in the binary: ${builtin_div_missing//,/, }"
+    fi
+    if [ -n "$_rx_builtin_bucket_note" ]; then
+      [ -z "$builtin_div" ] || builtin_div="$builtin_div; "
+      builtin_div="$builtin_div$_rx_builtin_bucket_note"
     fi
     if [ -n "$_rx_builtin_count_note" ]; then
       [ -z "$builtin_div" ] || builtin_div="$builtin_div; "
@@ -1650,6 +1778,12 @@ roborev_check_census_exclusion() {
 
   if [ "$_rx_builtin_state" = DIVERGED ]; then
     DETAILS+=("ERROR: census-exclusion: the LIVE roborev built-in exclude set no longer matches the set PINNED to v0.61.2 in ROBOREV_BUILTIN_EXCLUDES. Divergence: $builtin_div. This is a MECHANISM change, and unlike a pinned built-in it HAS a remedy, which is why it FAILs rather than reporting a NOTICE: re-extract the deny-list from the binary (LC_ALL=C grep -a -o ':(exclude,glob)[^ ]*' \"\$(command -v roborev)\"), update ROBOREV_BUILTIN_EXCLUDES and ROBOREV_BUILTIN_PATHSPEC_LITERALS, and JUDGE the new built-in — an upgrade that started excluding '*.rs' or 'scripts/**' would otherwise be absorbed silently while the block still read green. Re-verify the ported git.FormatExcludeArgs in the same pass.")
+    if [ -n "$_rx_builtin_version_note" ]; then
+      DETAILS+=("ERROR: census-exclusion: the executable is NOT the build this model was derived from — it reports $_rx_builtin_version, pinned $ROBOREV_PINNED_VERSION. That alone is the divergence: the 24 built-in patterns, their one-pathspec arity AND the ported git.FormatExcludeArgs were all read out of the $ROBOREV_PINNED_VERSION binary, so on any other build EVERY one of them is unverified and the check would be reconciling this diff against a mechanism that is no longer in play. Re-verify all three against the new binary and move ROBOREV_PINNED_VERSION in the same commit — this is the standing re-verify-on-upgrade obligation the pin has always carried, now enforced rather than remembered.")
+    fi
+    if [ -n "$_rx_builtin_bucket_note" ]; then
+      DETAILS+=("ERROR: census-exclusion: a pinned pattern is PRESENT but no longer RIGHT-BOUNDED, which is a divergence a bare presence test cannot see. Go packs the rodata string blob in LENGTH order with no terminator, so a fixed-string search for ':(exclude,glob)<pattern>' has an exact LEFT boundary and NO right one: '**/Cargo.lock' matches inside '**/Cargo.lock.bak'. The boundary used instead is the blob's own structure — each LENGTH BUCKET is stored as ONE contiguous run, so exactly k-1 of a k-member bucket must be immediately followed by another ':(exclude,glob)' literal. A bucket that no longer satisfies that either gained a longer pattern sharing a pinned prefix or had one renamed at equal length; the count (2) and the missing list (1) are both blind to it. Re-extract the deny-list, re-derive the buckets, and JUDGE what the new literal excludes before re-pinning.")
+    fi
   fi
   if [ "$m" -eq 0 ]; then
     DETAILS+=("ERROR: census-exclusion: no census code path is currently swallowed — this FAIL is about the MECHANISM having moved under us, not about this diff. It is deliberately diff-independent for the same reason the trailing-slash FAIL is.")
