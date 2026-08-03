@@ -485,42 +485,72 @@ vacuous green. Its regression case therefore drives the function **directly** (t
 wrapper-level fixture, by construction) — a test that could only be written against the current control
 flow would evaporate with the next refactor.
 
-##### D2b-iv — `prompt-content:` must compare paths NORMALISED, and know every header shape git emits
+##### D2b-iv — ONE canonical path-normalisation boundary (the fix for six blockers, not two)
 
-The comparison is between two renderings of the same path, produced by two different git surfaces, and they
-do not agree by default:
+**The pattern is the finding.** Rounds 2, 3 and 4 of review produced **six blockers and every one was a
+path-normalisation defect** — in a different consumer each time: the oracle compared paths from the wrong
+config source; a total built-in swallow certified an empty prompt; `prompt-content:` could not parse
+space-bearing or C-quoted headers; the **census classified a C-quoted path by its quoted spelling**; rename
+and mixed-quoted headers were unreachable; a newline-delimited path set turned one path into two grep
+alternatives. The root cause was structural: **normalisation was scattered.** `roborev_census` did not
+normalise at all, `census-exclusion:` unquoted at one point, `prompt-content:` did something different again.
+Patch the reported consumer and the next round finds the next consumer. So the design changes the shape of
+the problem instead of the symptom.
+
+**THE BOUNDARY.** Paths are normalised **once, at the census**, by asking git for them **NUL-delimited**:
 
 | Source | Rendering of `docs/é.sh` | Rendering of `docs/a b.sh` |
 |---|---|---|
-| the census (`git diff --numstat`, no `-z`) | `"docs/\303\251.sh"` (C-quoted) | `docs/a b.sh` (unquoted) |
-| the prompt's diff header | `diff --git "a/docs/\303\251.sh" "b/…"` | `diff --git a/docs/a b.sh b/docs/a b.sh` |
+| the census (`git diff --numstat -z`) | `docs/é.sh` (RAW) | `docs/a b.sh` (RAW) |
+| the survivor set (`git diff --name-only -z`) | `docs/é.sh` (RAW) | `docs/a b.sh` (RAW) |
+| the prompt's diff header (produced by roborev, not by us) | `diff --git "a/docs/\303\251.sh" "b/…"` | `diff --git a/docs/a b.sh b/docs/a b.sh` |
 
-The first implementation accepted `^diff --git a/[^ ]+ b/[^ ]+$` only, and compared the **C-quoted** census
-path against those **unquoted** captures — never calling the `roborev_unquote_path` decoder that
-`census-exclusion:` uses for exactly this reason. Both columns above therefore false-FAILED. Measured on the
-suite's own hostile-path fixture: `census-exclusion: PASS (2/2 survive)` beside
-`prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`.
+With `-z` there is **no quoted spelling to reconcile** on any git-sourced path: `census_paths` /
+`census_code_paths` / `CENSUS_BUILTIN_EXCLUDED` / the survivor map all hold the same RAW bytes, and RAW is
+the single representation used for classification, comparison **and** display. `census-exclusion:` became a
+direct byte comparison; the census's extension/prefix tests now see `md`, not `md"`. Records are read with
+`read -r -d ''`, so a path containing a NEWLINE survives — something a line-oriented read cannot do at all.
+
+The only text that still arrives quoted is text **we did not get from git plumbing**: the reviewer's prompt.
+So `roborev_unquote_path` survives with exactly **one caller**, `roborev_diff_header_has_path`, and that
+matcher is the **only** way any consumer may ask "is this census path in the prompt?".
+
+**THE MATCHER, and why each shape is decidable.** A quoted side is unambiguous (a C-quoted body holds no
+unescaped `"`, so the first unescaped one ends the token, spaces and all); an unquoted side holds no `"` at
+all when git wrote it. That yields four shapes, three of them exactly parseable:
+
+1. `diff --git "a/<q>" "b/<q>"` — both quoted: both sides decoded exactly.
+2. `diff --git "a/<q>" b/<raw>` and `diff --git a/<raw> "b/<q>"` — **MIXED**, emitted when only one side
+   needs quoting. This occurs **only on renames**, which is why a both-sides-quoted parse never reached it
+   and both census sides were reported absent. (Confirmed: `--no-renames` is absent from the roborev
+   binary's strings, so the reviewer's diff has rename detection ON while our census splits renames.)
+3. `diff --git a/<raw> b/<raw>` — genuinely ambiguous when a name carries a space (`a/x y b/z w` has several
+   readings). Not split at all: the wanted path is tested in each **position** it could occupy, with the
+   path quoted inside the bash pattern so `*`, `?` and `[` match literally.
+
+Membership is decided **per header, in bash** — no regex, no path-set file, no `grep -Fxq` over
+newline-delimited paths. That is what closes the newline false PASS: with census `{a, a<LF>b.rs}` and a
+prompt naming only `a`, the old set-and-`grep` mechanism reported `PASS (2/2 present)` because a multi-line
+pattern is a list of alternatives. The path is now either named by a header or reported ABSENT.
 
 **The false-FAIL direction is the dangerous one here.** `prompt-content:` is the wrapper's strongest
 deterministic anti-vacuity key; a key that reds on correct input is the key agents learn to waive, and a
-waived `prompt-content:` defeats the entire purpose of this change. Reachability is not theoretical: the
-repository already tracks **40 space-bearing paths under `docs/`**, including the directory
-`docs/storage engine/`, and this change *promotes* `docs/reports/*-artifacts/**` executables to CODE census
-paths.
+waived `prompt-content:` defeats the entire purpose of this change. Symmetrically, `census-exclusion:`
+false-FAILing **pre-enqueue** blocks a review outright: the quoted-prose misclassification made any PR
+touching the tracked file `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md` alongside code
+FAIL with `census-exclusion: FAIL (1/2 code census paths excluded: … by '*.md' [repo-config])`. Reachability
+is not theoretical: the repository tracks that file, **40 space-bearing paths under `docs/`** including the
+directory `docs/storage engine/`, and this change *promotes* `docs/reports/*-artifacts/**` executables to
+CODE census paths.
 
-Three matching layers, in order, so each shape is handled by the mechanism that is exact for it:
-
-1. **the normalised path SET** — headers of both the unquoted and the C-quoted shape are collected, each
-   side decoded through `roborev_unquote_path`, and the census path is decoded the same way. This is also
-   what keeps the rename reconciliation working (the two header sides differ).
-2. **the LITERAL raw header line** (`diff --git a/<p> b/<p>`) — the only sound test for a space-bearing
-   path, because `a/<x> b/<y>` cannot be split unambiguously by any regex. Probing the exact line the
-   census path *would* produce sidesteps the ambiguity without relaxing to a substring match.
-3. **the LITERAL C-quoted header line** — for a producer whose quoting layer 1 could not round-trip.
-
-The same normalisation is applied to the built-in-subtraction comparison: `CENSUS_BUILTIN_EXCLUDED` holds
-raw paths, so matching a quoted census spelling against it would have failed to subtract an odd-named
-built-in swallow.
+**THE INVARIANT IS PINNED STRUCTURALLY, because that is what stops round 5.** Behavioural cases can only
+cover the shapes someone thought of — and each round proved someone had not. The guard suite therefore
+asserts the boundary itself: every path-reading `git diff` carries `-z`; the census does not normalise inside
+its classification loop and reads NUL-terminated records; the quoted-path decoder is defined once and called
+**only** from inside `roborev_diff_header_has_path`; and the three retired mechanisms (a `[^ ]+` header
+regex, the `.promptpaths` set file, `grep -Fxq` membership) are absent from the executable lines of the
+consumer. Each assert was verified to FAIL under a deliberate mutation, so it is a live check rather than
+decoration.
 
 **Test-quality consequence.** The case that named this behaviour (`cx6`) asserted only `census-exclusion:`
 and so reported two `ok`s while `prompt-content:` false-FAILed and the run terminated `RESULT: FAIL` — 565

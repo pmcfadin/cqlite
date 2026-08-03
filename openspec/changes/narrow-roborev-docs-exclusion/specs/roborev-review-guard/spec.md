@@ -492,6 +492,81 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **WHEN** the wrapper runs
 - **THEN** no key fails on account of it, the path is simply delivered to the reviewer, and the documented residual states that this direction can only add review noise while the opposite direction is always a pre-enqueue FAIL
 
+### Requirement: File paths are normalised ONCE, at the census, and every consumer uses the normalised form
+Every path the wrapper reasons about SHALL be normalised at **exactly one boundary — the census** — and the
+**RAW bytes SHALL be the single internal representation** used for classification, comparison and display.
+No other consumer SHALL normalise, unquote, or re-derive a path spelling.
+
+**THE MECHANISM.** Paths SHALL be obtained from git **NUL-delimited** (`git diff --numstat -z`,
+`git diff --name-only -z`), so they arrive RAW and no unquoting step exists to get wrong; the census
+records SHALL be read with a NUL record separator, so a path containing a NEWLINE survives intact. Where a
+path spelling arrives from a producer we do NOT control — the reviewer's prompt, whose `diff --git` headers
+are C-quoted by roborev's own `git diff` — it SHALL be normalised by the **single** quoted-path decoder, at
+the **single** call site that needs it: the canonical header matcher. A consumer SHALL ask that matcher
+whether a header names a path; it SHALL NOT parse header shapes, build a path SET, or perform delimiter-based
+membership of its own.
+
+**WHY THIS IS A REQUIREMENT AND NOT AN IMPLEMENTATION DETAIL.** Scattered normalisation produced a BLOCKER
+IN EVERY REVIEW ROUND of this change — six in total, all the same defect class in a different consumer:
+the oracle compared paths from the wrong config source; a total built-in swallow certified an empty prompt;
+`prompt-content:` could not parse space-bearing or C-quoted headers; the **census classified a C-quoted path
+by its QUOTED spelling** (`docs/é notes.md` read as extension `md"` and prefix `"docs/`, so PROSE counted as
+CODE and the configured `*.md` then reported a swallow ⇒ `census-exclusion: FAIL`, pre-enqueue, on an
+ordinary docs+code branch — REPRODUCED against the repository's own tracked
+`docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`); rename and MIXED-quoted headers were
+unreachable; and a newline-delimited path set turned a newline-bearing path into grep ALTERNATIVES, so its
+first line "proved" its presence — a genuine FALSE PASS. Patching the reported consumer each round is
+demonstrably a losing strategy: the invariant, not the symptom, is what SHALL be pinned.
+
+**THE HEADER SHAPES the canonical matcher SHALL recognise**, because git emits all of them:
+`diff --git a/<raw> b/<raw>` (including SPACE-bearing, which no regex can split unambiguously),
+`diff --git "a/<q>" "b/<q>"` (both quoted), and — **only on renames, which is why it was unreachable** —
+the MIXED shapes `diff --git "a/<q>" b/<raw>` and `diff --git a/<raw> "b/<q>"`, emitted when only one side
+needs quoting. Since our census runs `--no-renames` while the reviewer's diff has rename detection ON, a
+rename SHALL be counted as covered when a single header names either census side.
+
+**THE INVARIANT SHALL BE ASSERTED STRUCTURALLY**, not merely by behavioural cases: the hermetic regression
+check SHALL fail when a path-reading `git diff` lacks `-z`, when the census normalises inside its own
+classification loop, when the quoted-path decoder is defined more than once or called from outside the
+canonical matcher, or when a consumer reintroduces header-regex parsing or delimiter-based path membership.
+A behavioural case can only cover the shapes someone thought of; a structural assert covers the next
+consumer nobody has written yet.
+
+#### Scenario: A non-ASCII prose path is classified by its raw bytes, not its quoted spelling
+- **GIVEN** a census containing a non-ASCII documentation path (which a non-`-z` `git diff --numstat` would render C-quoted) beside a real code file, and a configuration excluding `*.md`
+- **WHEN** the wrapper runs the pre-enqueue reconciliation
+- **THEN** the documentation path is classified NON-code, only the code file is a CODE census path, `census-exclusion:` reads `PASS (1/1 code census paths survive …)`, and the terminal `RESULT:` is `PASS` — the ordinary docs+code branch is never false-FAILed
+
+#### Scenario: A non-ASCII docs artifact is classified by its raw bytes too
+- **GIVEN** a census containing a non-ASCII docs-scoped artifact (`docs/reports/*-artifacts/é.json`) beside a code file, with the artifact's extension in the configured docs-scoped deny-list
+- **WHEN** the wrapper runs the pre-enqueue reconciliation
+- **THEN** the artifact is classified NON-code, `census-exclusion:` reads `PASS`, and no configured-swallow FAIL is reported
+
+#### Scenario: A rename whose BOTH names carry a space is matched
+- **GIVEN** a census that splits a rename into two paths, both of which contain a space, and a prompt carrying the single header `diff --git a/docs/storage engine/old probe.sh b/docs/storage engine/new probe.sh`
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** both census sides count as covered, `prompt-content:` reads `PASS (2/2 code census paths present)`, and the match is decided per header by the canonical matcher rather than by any regex
+
+#### Scenario: A MIXED-quoted rename header, where only one side needs quoting, is matched
+- **GIVEN** a rename from an ASCII name to a non-ASCII one, for which git emits `diff --git a/<ascii> "b/<quoted>"`
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** both census sides count as covered and `prompt-content:` reads `PASS (2/2 code census paths present)` — a shape that occurs only on renames SHALL NOT be structurally unreachable
+
+#### Scenario: A newline-bearing census path cannot be proved present by its first line
+- **GIVEN** a census containing a path with a literal newline (`a<LF>b.rs`) beside a path equal to its first line (`a`), and a prompt whose only header names `a`
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** the newline-bearing path is reported ABSENT — `prompt-content: FAIL (1/2 code census paths absent from the prompt)` — because membership is decided per header with no delimiter, never by a line-oriented pattern match that would treat the two lines as alternatives
+
+#### Scenario: The same newline-bearing path counts as present when its header IS in the prompt
+- **GIVEN** the same census and a prompt additionally carrying the C-quoted header git emits for that path
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** it reads `PASS (2/2 code census paths present)`, so the absent verdict above is a real measurement and not a blanket "newline ⇒ absent" rule
+
+#### Scenario: The boundary is pinned structurally, so a new consumer cannot re-scatter it
+- **GIVEN** the hermetic regression check
+- **WHEN** a path-reading `git diff` loses its `-z`, or a second consumer calls the quoted-path decoder outside the canonical matcher
+- **THEN** the check FAILs with a message naming the offending file and mechanism, so the regression is caught by the fast `--lite` loop rather than by a review round
+
 ### Requirement: A recorded live probe demonstrates the narrowed exclusion, POST-MERGE, on a real harness PR
 The change SHALL be demonstrated by a **recorded live run** — run, not asserted — of the sanctioned wrapper
 against a diff of the shape that failed: executable harness files under `docs/reports/*-artifacts/`.
@@ -640,14 +715,15 @@ two paths) while the reviewer's diff may have rename detection ON (one `a/old b/
 same-path-only matching FALSELY REJECTED every review containing a detected rename. Collecting both sides
 reconciles the two rename behaviours WITHOUT weakening exact-header strictness to a substring test.
 
-**PATHS SHALL BE COMPARED NORMALISED, AND EVERY HEADER SHAPE GIT EMITS SHALL BE RECOGNISED (#3229).** The
-census is built from `git diff --numstat`, which C-QUOTES a path containing a double quote, a backslash or
-a non-ASCII byte; the prompt's headers may carry the raw spelling, the C-quoted spelling
-(`diff --git "a/\303\251.txt" "b/\303\251.txt"`), or an unquoted spelling containing SPACES
-(`diff --git a/a b.txt b/a b.txt`). BOTH sides SHALL therefore be normalised through the same
-quoted-path decoder `census-exclusion:` already uses, and a space-bearing path — which the
-`a/<x> b/<y>` header form cannot be split on unambiguously — SHALL be matched by probing the LITERAL
-header line the census path would produce. Accepting only `^diff --git a/[^ ]+ b/[^ ]+$`, and comparing a
+**PATHS SHALL BE COMPARED IN THE NORMALISED (RAW) FORM ESTABLISHED AT THE CENSUS, AND EVERY HEADER SHAPE
+GIT EMITS SHALL BE RECOGNISED (#3229).** This key SHALL perform NO normalisation of its own: census paths
+reach it RAW (the census reads `git diff --numstat -z`), and membership SHALL be decided **per `diff --git`
+header, by the single canonical matcher** specified under *File paths are normalised ONCE, at the census* —
+which recognises the raw, SPACE-bearing, C-quoted and MIXED-quoted shapes. This key SHALL NOT build a path
+SET, apply a header regex, or perform delimiter-based membership: a `[^ ]+` regex cannot split a
+space-bearing header, a both-sides-quoted parse cannot read a rename's mixed header, and a
+newline-delimited set makes a newline-bearing path's first line "prove" its presence. Accepting only
+`^diff --git a/[^ ]+ b/[^ ]+$`, and comparing a
 C-quoted census path against unquoted captures, FALSE-FAILED both shapes (MEASURED: a census whose two
 code paths both survived the exclusion set reported `census-exclusion: PASS (2/2 survive)` beside
 `prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`). That direction is the DANGEROUS one for this key
@@ -708,19 +784,24 @@ one is a real anomaly.
 - **THEN** it requires EVERY code census path to be present, so a prompt naming only a sampled subset cannot pass
 
 #### Scenario: A census path carrying spaces and a literal quote is not a false failure
-- **GIVEN** a census whose code paths include a filename with spaces and a literal double quote, which `git diff --numstat` therefore C-QUOTES, and a prompt carrying that path in its raw spelling
+- **GIVEN** a census whose code paths include a filename with spaces and a literal double quote, and a prompt carrying that path in an UNQUOTED header (a producer that is not git)
 - **WHEN** the wrapper evaluates prompt content
-- **THEN** both sides are normalised through the quoted-path decoder, `prompt-content:` reads `PASS (2/2 code census paths present)`, and the terminal `RESULT:` is `PASS` — the verdict itself is asserted, not just the `census-exclusion:` key
+- **THEN** the canonical matcher recognises the path positionally in that header, `prompt-content:` reads `PASS (2/2 code census paths present)`, and the terminal `RESULT:` is `PASS` — the verdict itself is asserted, not just the `census-exclusion:` key
 
-#### Scenario: A space-bearing directory in a code path is matched by its literal header line
+#### Scenario: The same path in the header shape git REALLY emits for a quote is matched
+- **GIVEN** the same census path and the header git actually writes for it, with the whole side C-quoted and the inner quotes ESCAPED (`diff --git "a/…odd \"q\" name.sh" "b/…"`)
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** the escaped-quote spelling decodes to the census's raw bytes and counts as present, so the raw and quoted readings are both pinned rather than one being assumed to follow from the other
+
+#### Scenario: A space-bearing directory in a code path is matched positionally
 - **GIVEN** a code census path under a directory containing a space (the repository tracks `docs/storage engine/`), whose diff header is therefore `diff --git a/docs/storage engine/probe.sh b/docs/storage engine/probe.sh`
 - **WHEN** the wrapper evaluates prompt content
-- **THEN** the path counts as present, `prompt-content:` reads `PASS`, and the ambiguity is resolved by probing the literal header line rather than by relaxing the match to a substring
+- **THEN** the path counts as present, `prompt-content:` reads `PASS`, and the ambiguity is resolved by testing the positions the path could occupy in that header — never by relaxing the match to a substring
 
 #### Scenario: A non-ASCII code path is matched through the C-quoted header shape
-- **GIVEN** a code census path with a non-ASCII name, which git renders as `"docs/reports/x-artifacts/\303\251.sh"` in the census and as `diff --git "a/docs/reports/x-artifacts/\303\251.sh" "b/…"` in the prompt
+- **GIVEN** a code census path with a non-ASCII name, which the census records RAW and the prompt carries as `diff --git "a/docs/reports/x-artifacts/\303\251.sh" "b/…"`
 - **WHEN** the wrapper evaluates prompt content
-- **THEN** both spellings decode to the same raw bytes and compare equal, `prompt-content:` reads `PASS`, and no octal-escaped path is reported absent
+- **THEN** the canonical matcher decodes the quoted header to the same raw bytes, they compare equal, `prompt-content:` reads `PASS`, and no octal-escaped path is reported absent
 
 #### Scenario: A zero-subject prompt-content refuses to report a pass
 - **GIVEN** a state in which every code census path has been dropped from the diff roborev builds, so no path remains to be checked

@@ -74,7 +74,7 @@ review". The wrapper SHALL NOT fetch on the caller's behalf to repair an unresol
 - **THEN** `census-check:` reads `FAIL (base 'origin/main' unresolvable)`, the terminal `RESULT:` is `FAIL` (not `NOTHING-TO-REVIEW`), no review is enqueued, and the message states that an unresolvable base is "we cannot tell", never "there is nothing to review"
 
 #### Scenario: A failed git diff is not "genuinely empty"
-- **GIVEN** a repository in which `git diff --numstat --no-renames <base>...HEAD` exits non-zero
+- **GIVEN** a repository in which `git diff --numstat -z --no-renames <base>...HEAD` exits non-zero
 - **WHEN** the wrapper computes the census
 - **THEN** `census-check:` reads `FAIL (git diff failed)`, the message reproduces what git said, and the outcome is `RESULT: FAIL` rather than `NOTHING-TO-REVIEW`
 

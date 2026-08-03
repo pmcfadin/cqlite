@@ -255,6 +255,33 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       PASS) is WORSE than an unguarded path: it consumes the review budget that would otherwise have found
       the bug, and converts "nobody checked" into "we checked and it was fine".
 
+## 8b. ONE canonical path-normalisation boundary (round 4 — the pattern behind SIX blockers)
+
+- [x] **Normalise ONCE, at the census.** `roborev_census` reads `git diff --numstat -z --no-renames` and
+      parses NUL-terminated records (`read -r -d ''`), so paths arrive RAW and a newline-bearing path
+      survives. RAW is the SINGLE internal representation for classification, comparison and display.
+- [x] **Every consumer audited, not just the two reported**: the census classification loop (was reading
+      the QUOTED extension — `md"`/`json"` — so PROSE counted as CODE ⇒ false pre-enqueue
+      `census-exclusion: FAIL` under `*.md`); `census-exclusion:`'s survivor comparison (dropped its own
+      unquote — both sides are `-z` now); `CENSUS_BUILTIN_EXCLUDED` + the `prompt-content:` subtraction;
+      `prompt-content:` membership; the wrapper's `--help`/key documentation.
+- [x] **ONE matcher for prompt headers**: `roborev_diff_header_has_path` (in the oracles file, beside the
+      boundary) is the only way to ask whether a header names a path, and `roborev_unquote_path` has exactly
+      one caller — it. It reads every shape git emits, including the MIXED-quoted rename header
+      (`diff --git a/<ascii> "b/<quoted>"`), which occurs only on renames and was structurally unreachable.
+- [x] **The retired mechanisms are gone**: the `[^ ]+` header regex, the `.promptpaths` path-set file, and
+      `grep -Fxq` membership over newline-delimited paths (which reported a genuine FALSE PASS —
+      `PASS (2/2 present)` for census `{a, a<LF>b.rs}` against a prompt naming only `a`).
+- [x] Tests: `cx6e` (non-ASCII PROSE ⇒ non-code, no false swallow), `cx6f` (non-ASCII docs ARTIFACT),
+      `cx6g` (rename with a space in BOTH names), `cx6h` (MIXED-quoted rename), `cx6i` (newline path
+      reported ABSENT), `cx6j` (the same path PRESENT when its header is there), `cx6k` (the escaped-quote
+      header shape git really emits). The new fixtures are PROSE/artifact on purpose: the only pre-existing
+      non-ASCII fixture is a `.sh`, i.e. CODE *by accident*, which is why nothing covered this.
+- [x] **STRUCTURAL asserts pin the boundary** (this is what stops round 5): every path-reading `git diff`
+      carries `-z`; the census does not normalise in its loop and reads NUL records; the decoder is defined
+      once and called only from the canonical matcher; the three retired mechanisms are absent from
+      executable lines. Each verified to FAIL under a deliberate mutation.
+
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` + `roborev` on the
       lite-green diff (the diff contains code — shell + config — so it IS roborev-certifiable and MUST be).
