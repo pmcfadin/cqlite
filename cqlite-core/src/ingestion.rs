@@ -3,7 +3,7 @@
 //! This module orchestrates schema loading and SSTable discovery to build
 //! a fully-configured Database instance for one-shot query execution.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -32,9 +32,77 @@ pub struct IngestionConfig {
     /// Core database configuration
     pub core_config: Config,
 
-    /// Optional filter for table directories (e.g., contains "/test_basic/")
-    /// Only table directories matching this pattern will be loaded
+    /// Optional filter for table directories: a **SUBSTRING** match over the whole
+    /// directory path (e.g. `/test_basic/`). Only table directories whose path
+    /// CONTAINS this string are loaded.
+    ///
+    /// The substring semantics are stated here because they are load-bearing and
+    /// surprising: a filter of `/<ks>/<table>-<uuid>` also matches a SIBLING whose
+    /// name EXTENDS it (`<table>-<uuid>-backup`, `<table>-backup`), which silently
+    /// adds generations to the ingest. A caller that needs EXACTLY one directory must
+    /// not express it as a filter — use [`TableDirSelection::Exact`] via
+    /// [`ingest_with_selection`], which compares complete path components (issue
+    /// #3234).
     pub table_directory_filter: Option<String>,
+}
+
+/// Which discovered table directories the `Database` is built from.
+///
+/// Two genuinely different semantics, kept apart so neither can be mistaken for the
+/// other (issue #3234 roborev F1):
+///
+/// - [`TableDirSelection::Filter`] — the historical
+///   [`IngestionConfig::table_directory_filter`] SUBSTRING match. Loose by design
+///   (`/test_basic/` selects a whole keyspace) and **cannot express "exactly this
+///   directory"**: any sibling whose full name extends the filter also matches.
+/// - [`TableDirSelection::Exact`] — exactly the named directories, compared as
+///   complete path components after canonicalization. No substring, prefix or glob
+///   semantics anywhere in the path, so a `<table>-<uuid>-backup` sibling contributes
+///   nothing. This matters beyond tidiness: an extra directory changes the GENERATION
+///   COUNT, and the generation count selects the scan route.
+#[derive(Debug, Clone, Copy)]
+pub enum TableDirSelection<'a> {
+    /// Substring match over the whole path, from `table_directory_filter`.
+    Filter,
+    /// Exactly these directories, by complete-path-component identity.
+    Exact(&'a [PathBuf]),
+}
+
+/// Complete-path-component identity: canonicalize both sides (absolute,
+/// symlink-free, `.`/`..` resolved) and compare. `Path`'s `Eq` is component-wise, so
+/// this is an exact component comparison and NEVER a substring or prefix one — a
+/// canonicalized `<table>-<uuid>` can no longer match `<table>-<uuid>-backup`.
+///
+/// A path that cannot be canonicalized (it does not exist, or is unreadable) matches
+/// nothing: fail-closed, so an unresolvable request can never widen the selection.
+fn is_same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Apply a [`TableDirSelection`] to discovery's table directories.
+fn select_table_dirs(
+    discovered: &[PathBuf],
+    filter: Option<&str>,
+    selection: TableDirSelection<'_>,
+) -> Vec<PathBuf> {
+    match selection {
+        TableDirSelection::Filter => match filter {
+            Some(pattern) => discovered
+                .iter()
+                .filter(|path| path.to_string_lossy().contains(pattern))
+                .cloned()
+                .collect(),
+            None => discovered.to_vec(),
+        },
+        TableDirSelection::Exact(wanted) => discovered
+            .iter()
+            .filter(|path| wanted.iter().any(|w| is_same_dir(path, w)))
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Result of ingestion operation
@@ -81,6 +149,18 @@ pub struct DiscoverySummary {
 /// Returns Error::Io for discovery/data-dir failures (exit code 4)
 /// Returns Error::QueryExecution for query engine setup failures (exit code 5)
 pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
+    ingest_with_selection(config, TableDirSelection::Filter).await
+}
+
+/// [`ingest`], with the table-directory selection stated explicitly.
+///
+/// `TableDirSelection::Filter` is exactly what [`ingest`] does. `Exact` is for a
+/// caller whose measurement or correctness claim depends on ingesting EXACTLY one
+/// directory and no sibling that happens to share a prefix (issue #3234 roborev F1).
+pub async fn ingest_with_selection(
+    config: IngestionConfig,
+    selection: TableDirSelection<'_>,
+) -> Result<IngestionResult> {
     // Step 1: Validate data directory exists
     if !config.data_dir.exists() {
         return Err(Error::Io(std::io::Error::new(
@@ -179,17 +259,12 @@ pub async fn ingest(config: IngestionConfig) -> Result<IngestionResult> {
         }
     })?;
 
-    // Step 5: Filter table directories if a filter is specified
-    let filtered_table_dirs = if let Some(ref filter_pattern) = config.table_directory_filter {
-        service_summary
-            .table_directories
-            .iter()
-            .filter(|path| path.to_string_lossy().contains(filter_pattern))
-            .cloned()
-            .collect()
-    } else {
-        service_summary.table_directories.clone()
-    };
+    // Step 5: Select the table directories this Database is built from.
+    let filtered_table_dirs = select_table_dirs(
+        &service_summary.table_directories,
+        config.table_directory_filter.as_deref(),
+        selection,
+    );
 
     // Step 6: Build Database with discovered (and optionally filtered) SSTables
     // Pass the loaded schema_registry to the Database so schemas are available to the query engine
@@ -277,5 +352,100 @@ mod tests {
         let ingestion_result = result.unwrap();
         assert_eq!(ingestion_result.schema_load_result.schemas_loaded, 0);
         assert_eq!(ingestion_result.schema_load_result.udts_loaded, 0);
+    }
+
+    /// A keyspace tree holding the wanted `<table>-<uuid>` directory plus two
+    /// siblings whose full names EXTEND it. Returns `(root, wanted, siblings)`.
+    fn tree_with_name_extending_siblings() -> (TempDir, PathBuf, Vec<PathBuf>) {
+        let root = TempDir::new().unwrap();
+        let ks = root.path().join("perf_bti");
+        let uuid = "a1b2c3d40000000000000000000000ff";
+        let wanted = ks.join(format!("wide_multiclustering-{uuid}"));
+        // Both of these are what a substring/prefix matcher cannot distinguish from
+        // `wanted`: the first EXTENDS its complete name, the second extends the bare
+        // table name.
+        let siblings = vec![
+            ks.join(format!("wide_multiclustering-{uuid}-backup")),
+            ks.join("wide_multiclustering-backup"),
+        ];
+        for dir in std::iter::once(&wanted).chain(siblings.iter()) {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("da-1-bti-Data.db"), b"x").unwrap();
+        }
+        (root, wanted, siblings)
+    }
+
+    /// Issue #3234 roborev F1: `Exact` selects the named directory and NOTHING whose
+    /// name merely extends it.
+    #[test]
+    fn exact_selection_excludes_name_extending_siblings() {
+        let (_root, wanted, siblings) = tree_with_name_extending_siblings();
+        let mut discovered = vec![wanted.clone()];
+        discovered.extend(siblings.iter().cloned());
+
+        let selected = select_table_dirs(
+            &discovered,
+            // A filter is present AND would over-match; `Exact` must ignore it
+            // entirely rather than intersect with it.
+            Some("/perf_bti/wide_multiclustering"),
+            TableDirSelection::Exact(std::slice::from_ref(&wanted)),
+        );
+        assert_eq!(
+            selected,
+            vec![wanted],
+            "Exact must select exactly the named directory"
+        );
+    }
+
+    /// The control for the test above: the SUBSTRING filter really does sweep in the
+    /// name-extending siblings, which is why `Exact` exists and why a filter of
+    /// `/<ks>/<table>-<uuid>` was never an exact scope (issue #3234 roborev F1).
+    #[test]
+    fn substring_filter_matches_name_extending_siblings() {
+        let (_root, wanted, siblings) = tree_with_name_extending_siblings();
+        let mut discovered = vec![wanted.clone()];
+        discovered.extend(siblings.iter().cloned());
+
+        let wanted_name = wanted.file_name().unwrap().to_string_lossy().to_string();
+        let selected = select_table_dirs(
+            &discovered,
+            Some(&format!("/perf_bti/{wanted_name}")),
+            TableDirSelection::Filter,
+        );
+        assert_eq!(
+            selected.len(),
+            2,
+            "the substring filter matches the wanted dir AND the sibling extending its \
+             full name: {selected:?}"
+        );
+        assert!(selected.contains(&siblings[0]));
+    }
+
+    /// `Exact` is fail-closed on a path that cannot be canonicalized: an unresolvable
+    /// request selects nothing rather than widening the selection.
+    #[test]
+    fn exact_selection_of_a_nonexistent_dir_selects_nothing() {
+        let (root, wanted, _siblings) = tree_with_name_extending_siblings();
+        let absent = root.path().join("perf_bti/wide_multiclustering-00000000");
+        let selected = select_table_dirs(
+            &[wanted],
+            None,
+            TableDirSelection::Exact(std::slice::from_ref(&absent)),
+        );
+        assert!(selected.is_empty(), "got {selected:?}");
+    }
+
+    /// Canonicalization means an equivalent spelling of the SAME directory still
+    /// matches — exactness is about identity, not about string form.
+    #[test]
+    fn exact_selection_matches_an_equivalent_spelling() {
+        let (_root, wanted, _siblings) = tree_with_name_extending_siblings();
+        let indirect = wanted.join("..").join(wanted.file_name().unwrap());
+        let selected = select_table_dirs(
+            &[wanted.clone()],
+            None,
+            TableDirSelection::Exact(std::slice::from_ref(&indirect)),
+        );
+        assert_eq!(selected, vec![wanted]);
     }
 }
