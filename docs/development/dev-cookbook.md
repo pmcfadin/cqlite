@@ -250,7 +250,8 @@ for an unrestricted `SELECT *` — and `storage_route: generation_merge::stream_
 The access path is the *query*-level signal; `storage_route` is the plane, and both are printed on
 every run.
 
-**SCOPE OF THAT FIGURE — a stated LIMITATION, recorded in the committed artifact.** The measured
+**SCOPE OF THAT FIGURE — a stated LIMITATION, and THIS page plus the harness's own runtime output
+are where it lives.** The measured
 `generation_merge` route **EXCLUDES the BTI mmap/trie plane, which is therefore ENTIRELY UNMEASURED**
 — not merely un-isolated. Every producer on that route **re-opens its SSTable with `use_mmap = false`
 / `DiskAccessMode::Buffered`** (`storage/write_engine/merge/producer_iter.rs:364-388`) and walks
@@ -269,14 +270,21 @@ WS4). The concrete values:
 | `generations` | 27 |
 | wall clock / rows / throughput | 127.163 s / 13,200,000 rows / 103,804 rows/s |
 
-The same statement lives in the committed manifest under
-`read_path_measurement_scope` (`what_the_ac3_figure_measures`, `LIMITATION`, `recorded_figure`) — and
-in what `bti_perf_scan` prints at runtime, so **all three say the same thing** — so it travels with
-the artifact rather than being discoverable only from the issue thread. That block also
-carries `applies_to_this_corpus`, computed by comparing the recorded rows/generations against the
-corpus the manifest describes — regenerate to a different shape and the recorded figure is marked
-historical instead of silently mis-describing the new corpus. `read_path_measurement_scope
-.full_generation_golden` records the 153.3 MiB on-demand golden below the same way.
+`bti_perf_scan` prints `access_path` and `storage_route` beside the number on **every** run, so the
+scope statement travels with the measurement itself rather than being discoverable only from the issue
+thread.
+
+**The manifest deliberately records NO throughput figure**, and that is the fix for a real defect
+rather than a gap (#3234 review round 10, M1). It used to carry the number as a module constant in
+`read_path_measurement_scope`, with an `applies_to_this_corpus` flag computed from **rows +
+generations only** — so a corpus with a different seed, payload size or width mix INHERITED an
+unrelated result, and even when the flag said `false` the number was still sitting there to be quoted.
+A manifest field is now **OBSERVED or ABSENT**: a harness measurement is not derivable from any byte
+in the corpus, so it is not a manifest field at all (nor is the fixed `full_generation_golden` block —
+the on-demand golden's real size and row count are already recorded, observed, in the per-SSTable
+`sstabledump_golden` + `statistics` records). The suite enforces this: the committed production
+manifest — **the very corpus this figure was measured on** — is asserted to contain no throughput
+number, and the writer is asserted to hold no such constant.
 
 Every number in the manifest is read back from the written bytes (`sstablemetadata` on
 `Statistics.db`, the `CompressionInfo.db` header, each `TOC.txt`) and **nothing is inherited from a
@@ -295,16 +303,28 @@ count, which selects the scan route and is what the AC3 figure is attributed to*
 `--verify-only` derives the expected chunk count from `--rows`/`--chunk-rows`, pass the same values
 the corpus was generated with (the production defaults describe the production corpus).
 
-**A `mode` field marks whether a manifest describes a `smoke` validation run, the `production`
-corpus, or the `small_golden` committed oracle — and the mode-specific metadata is generated PER
-MODE**: `purpose`, the corpus-location fields and `read_path_measurement_scope` say only what is true
-of the corpus at hand, so a non-production manifest carries **no** AC3 figure and **no**
-`full_generation_golden` block at all (an omitted field cannot be false; a field labelled "does not
-apply" is still there to be quoted out of context). `corpus_committed` is **observed**, not derived
-from the mode: the checkout's `test-data/datasets` is searched at the same corpus-relative path and
-every recorded `Data.db` sha256 re-hashed from it, so `true` means those exact bytes are committed.
-`min_data_db_floor_bytes` records the floor the run actually **enforced** (0 under `--small-golden`),
-beside the fixed `read_plane_threshold_bytes`.
+**A manifest field is OBSERVED or ABSENT — there is no third state, and no field is inferred from a
+partial match.** Four review rounds on this writer produced one defect in many costumes: a claim
+asserted beyond what was checked. So the claims were **deleted**, not defended with another guard —
+the fixed AC3 figure and `full_generation_golden` (above), and the
+`corpus_committed`/`committed_copy`/`corpus_note` narrative, which declared "committed exact bytes"
+from a **`Data.db`-only** hash comparison while counting and summing files it never read and never
+consulting git. What is left is one optional field, **`data_db_sha256_also_match_at`**, whose *name is
+the whole claim*: a checkout path at the same corpus-relative position where every recorded `Data.db`
+sha256 was re-hashed and matched — no other component compared, git tracking not checked — and simply
+**absent** when there is no such path (never `false`, which would invite reading it as "not
+committed", a thing the check cannot determine). A `mode` field still marks `smoke` / `production` /
+`small_golden`, and `min_data_db_floor_bytes` records the floor the run actually **enforced** (0 under
+`--small-golden`) beside the fixed `read_plane_threshold_bytes`.
+
+**A committed manifest cannot fall behind the writer** (#3234 review round 10, L4 — the committed
+production artifact had drifted three contracts behind: no `sstable_generations`, no
+`one_sstable_per_planned_chunk`, no `read_plane_threshold_bytes`). `test_gen_perf_corpus_bti.sh`
+compares the committed manifest's key set against a manifest it has **just written with the current
+writer**, and against the small golden's, in both directions — so staleness is a test failure, not a
+review finding. Both manifests are regenerated **metadata-only** from the existing corpora (their row
+plans and grep-verified `cassandra.yaml` lines are kept beside them under `work/`); the recorded
+`Data.db` sha256s come out identical, which is the evidence that nothing but metadata moved.
 
 **This is a parity oracle, not just a throughput fixture.** Every byte is **Cassandra-written**, so
 the `sstabledump -l` JSONL goldens emitted beside the corpus can back parity work. Per issue #3042 a
@@ -328,10 +348,9 @@ over 5 partitions, `PRIMARY KEY (pk, bucket, seq)`, LZ4 `chunk_length_in_kb=16`,
 ~18× the image's `column_index_size` default of `4KiB`), and its `sstabledump -l` golden at
 **192,935 B (188.4 KiB)**. Recorded identity:
 `test-data/perf-corpus-bti-small-golden-manifest.json` (`mode: small_golden`); DDL + provenance:
-`test-data/schemas/wide-multiclustering-small-bti.cql`. That manifest states `corpus_committed: true`
-with a `committed_copy` block naming the checkout path and the real 297,374 B directory size, and it
-carries **none** of the production AC3 metadata (the figure and the 153.3 MiB full-generation golden
-belong to the *perf* corpus, not to this 600-row fixture). It is regenerated **metadata-only** — the
+`test-data/schemas/wide-multiclustering-small-bti.cql`. That manifest names this checkout path in
+`data_db_sha256_also_match_at` (every recorded `Data.db` sha256 re-hashed from it and matched), and it
+carries **none** of the production AC3 metadata — which no manifest does any more. It is regenerated **metadata-only** — the
 committed SSTable bytes and every recorded sha256 stay unchanged, which
 `scripts/tests/test_gen_perf_corpus_bti.sh` pins by re-hashing the committed `Data.db` against the
 manifest.

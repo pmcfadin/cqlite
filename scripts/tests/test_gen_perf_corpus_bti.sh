@@ -1420,6 +1420,11 @@ for k in ("read_path_measurement_scope", "recorded_figure", "applies_to_this_cor
 for claim in ("103804", "127.163", "160,752,721", "153.3"):
     if claim in blob:
         bad.append(f"throughput/derived-golden claim {claim!r} present")
+# A missing key would make every arithmetic check below raise, and an empty FAIL message
+# is a bad diagnostic -- report the missing keys and stop.
+if bad:
+    print("BAD: " + "; ".join(bad))
+    raise SystemExit(0)
 # Self-consistency: every aggregate must equal what the per-SSTable records say.
 if t["sstable_count"] != len(t["sstables"]):
     bad.append("sstable_count != len(sstables)")
