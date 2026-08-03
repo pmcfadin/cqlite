@@ -28,7 +28,10 @@
 #     the drop happens once per REP while `--scan-passes N` runs N passes inside
 #     ONE bench process, a cold run with N>1 is REFUSED below rather than
 #     reporting pass 1 (cold) blended with passes 2..N (warm) as one "cold"
-#     number.
+#     number. Symmetrically, EVERY warm rep of BOTH arms runs an untimed prewarm
+#     before its perf window (`prewarm_status`, recorded per rep in results.json)
+#     so a "warm" figure is never a partly-cold one. Arm A fails closed on a
+#     prewarm failure; arm B records and continues — see the bias argument at each.
 #  4. SETUP IS SUBTRACTED, AND SAID SO. Arm A runs `--setup-only` under its own
 #     `perf stat` and the driver reports `(cycles_total - cycles_setup) / rows`.
 #     Arm B starts and prewarms the server BEFORE the perf window opens, so its
@@ -307,6 +310,50 @@ perf_stat_c() {
 measure_scan() {
   local temp="$1" rep="$2" tag="scan-$temp-$rep"
   drop_caches_if_cold "$temp"
+
+  # --- untimed PREWARM (warm arm only) -----------------------------------------
+  # A full scan OUTSIDE every perf window, before the measured legs, so the warm
+  # arm measures warm work (issue #3096 review, finding 1).
+  #
+  # Why this is not optional. `--setup-only` opens the corpus and ingests the
+  # schema; it does NOT read the `Data.db` pages the scan streams. So on a
+  # genuinely cold page cache — a fresh box, or a `--temp cold` rep earlier in the
+  # same session having dropped the caches — the FIRST "warm" rep faulted those
+  # pages in from disk and was measured partly cold. At `--reps 1` that partly-cold
+  # rep IS the reported median, and nothing in the output said so: the warm/cold
+  # separation spec R2/AC5 requires had silently broken. The Flight arm has always
+  # prewarmed (below); this arm did not, and it is the DENOMINATOR of the 1.3x
+  # ratio.
+  #
+  # FAIL CLOSED here, unlike the Flight arm's record-and-continue. The bias
+  # direction is what differs: a partly-cold BARE SCAN reads SLOWER, which SHRINKS
+  # `bare/flight` and makes the 1.3x target EASIER to hit — a degradation that can
+  # manufacture a win. (A degraded Flight prewarm biases against do_get, so
+  # continuing with a recorded label is honest there.) A prewarm scan that fails
+  # while the timed scan would succeed is also not a thing: same binary, same
+  # arguments, same corpus.
+  #
+  # Skipped on the cold arm BY DESIGN — a prewarm there would make "cold"
+  # meaningless.
+  local prewarm_status="skipped-cold-arm"
+  if [[ "$temp" == "warm" ]]; then
+    if taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
+        --corpus "$CORPUS" --passes 1 \
+        > "$OUT_DIR/$tag.prewarm.json" 2> "$OUT_DIR/$tag.prewarm.err"; then
+      prewarm_status="ok"
+    else
+      prewarm_status="FAILED-exit-$?"
+      printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
+      echo "FATAL: bare-scan PREWARM failed for $tag ($prewarm_status)." >&2
+      echo "       Without it this 'warm' rep is partly cold, which makes the bare scan" >&2
+      echo "       read SLOWER and the 1.3x bare/flight target EASIER — a degradation" >&2
+      echo "       that can manufacture a win, so it is refused rather than labelled." >&2
+      echo "       See $OUT_DIR/$tag.prewarm.err" >&2
+      exit 1
+    fi
+  fi
+  printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
+
   # Setup-only leg: the corpus open + schema ingest, under its OWN perf window,
   # so its cycles can be SUBTRACTED from the full run (spec R2).
   perf_stat_c "$OUT_DIR/perf-$tag-setup.csv" \

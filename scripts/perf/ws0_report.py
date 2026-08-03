@@ -7,7 +7,10 @@ Reporting rules this file enforces, from issue #3096 spec R1/R2:
   here that emits a CPU-SHARE ("% of cycles in X"): a share can fall while rows/s
   is unmoved, which the spec records as a FAIL, so the rig never produces the
   number that could be mistaken for a win.
-* **Warm and cold are separate rows**, never averaged into one claim.
+* **Warm and cold are separate rows**, never averaged into one claim. Every warm
+  rep of BOTH arms carries the outcome of an untimed prewarm (`prewarm`,
+  `prewarm_all_ok`); an unrecorded or failed one is flagged in the summary, because
+  an unprewarmed "warm" rep is a partly-cold measurement wearing a warm label.
 * The **median** of N reps is reported and the **spread** (min..max, and its
   percentage of the median) is printed beside it. No silent mean.
 * **Setup is subtracted** from the bare scan's cycles: the driver measured a
@@ -88,6 +91,40 @@ def require_complete(label: str, per_rep: list, reps: int, missing: list[str]) -
         )
 
 
+OK_PREWARM = ("ok", "skipped-cold-arm")
+
+
+def read_prewarm(d: pathlib.Path, tag: str) -> str:
+    """The prewarm outcome THIS rep recorded, or `unrecorded`.
+
+    Absent file => the driver predates the recording, or the rep died before its
+    prewarm. Either way the warm/cold separation is UNVERIFIED for that rep, which
+    is reported rather than assumed healthy (issue #3096 review, finding 1).
+    """
+    p = d / f"{tag}.prewarm.status"
+    return p.read_text().strip() if p.exists() else "unrecorded"
+
+
+def prewarm_block(prewarm: list[dict]) -> dict:
+    return {
+        "prewarm": prewarm,
+        "prewarm_all_ok": all(p["status"] in OK_PREWARM for p in prewarm),
+    }
+
+
+def prewarm_warning(block: dict, arm_label: str) -> list[str]:
+    """The loud summary line for a degraded prewarm. Never swallowed."""
+    if block.get("prewarm_all_ok", True):
+        return []
+    degraded = [p for p in block["prewarm"] if p["status"] not in OK_PREWARM]
+    return [
+        f"      !! PREWARM DEGRADED on {arm_label} rep(s) "
+        + ", ".join(f"{p['rep']}={p['status']}" for p in degraded)
+        + " — this 'warm' figure may be partly cold; the warm/cold separation"
+        " (spec R2/AC5) is UNVERIFIED for those reps"
+    ]
+
+
 def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
@@ -96,6 +133,7 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
     setup_cycles_total = 0
     per_rep = []
     missing: list[str] = []
+    prewarm: list[dict] = []
     for rep in range(1, reps + 1):
         tag = f"scan-{temp}-{rep}"
         payload_path = d / f"{tag}.json"
@@ -124,6 +162,11 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
                 f"{total.get('cycles', 0)}, setup={setup.get('cycles', 0)}) — "
                 "the subtraction is not meaningful; re-run"
             )
+        # This arm's prewarm outcome, recorded by ws0-baseline.sh exactly as the
+        # Flight arm's is (issue #3096 review, finding 1): the bare scan is the
+        # DENOMINATOR of the 1.3x ratio, so an unprewarmed "warm" rep biases the
+        # ratio in the claim's favour and must be visible in the artifact.
+        prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
         rows_per_sec.append(rows / secs)
         cycles_per_row.append(cyc / rows)
         ipc.append(ins / cyc if cyc else 0.0)
@@ -140,6 +183,7 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
                 "cycles_scan": cyc,
                 "cycles_per_row": cyc / rows,
                 "setup_secs": payload.get("setup_secs"),
+                "prewarm": prewarm[-1]["status"],
             }
         )
     if not per_rep:
@@ -158,6 +202,10 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
         "ipc": spread(ipc),
         "row_denominator_total": rows_total,
         "setup_cycles_subtracted_total": setup_cycles_total,
+        # Issue #3096 review, finding 1: the warm bare-scan arm had no untimed
+        # prewarm at all, so `prewarm_all_ok` here is the single field a reader can
+        # check that this arm's "warm" really was warm.
+        **prewarm_block(prewarm),
         "reps": per_rep,
     }
 
@@ -185,18 +233,8 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
             sys.exit(f"FATAL: flight rep {tag} observed ZERO rows — not a measurement")
         if int(rec.get("requests_error", 0)) > 0:
             sys.exit(f"FATAL: flight rep {tag} had {rec['requests_error']} failed request(s)")
-        # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh. Absent
-        # file => the driver predates the recording (or the rep died before the
-        # prewarm), which is itself reported rather than assumed healthy.
-        status_path = d / f"{tag}.prewarm.status"
-        prewarm.append(
-            {
-                "rep": rep,
-                "status": (
-                    status_path.read_text().strip() if status_path.exists() else "unrecorded"
-                ),
-            }
-        )
+        # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
+        prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
         counters = read_perf_csv(d / f"perf-{tag}.csv")
         cyc = counters.get("cycles", 0)
         ins = counters.get("instructions", 0)
@@ -242,10 +280,7 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
         # Issue #3096 review: a failed prewarm silently degraded a "warm" claim.
         # Every rep's outcome is recorded here, and `prewarm_all_ok` is the single
         # field a reader can check.
-        "prewarm": prewarm,
-        "prewarm_all_ok": all(
-            p["status"] in ("ok", "skipped-cold-arm") for p in prewarm
-        ),
+        **prewarm_block(prewarm),
         "reps": per_rep,
     }
 
@@ -333,19 +368,14 @@ def main() -> int:
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")
         lines.append(fmt("bare scan (execute_streaming)", scan))
+        lines += prewarm_warning(scan, "bare-scan")
         for arm in arms:
             fl = collect_flight(d, temp, arm, args.reps)
             if not fl:
                 continue
             results["measurements"].append(fl)
             lines.append(fmt(f"flight do_get ({arm})", fl))
-            if not fl.get("prewarm_all_ok", True):
-                degraded = [p for p in fl["prewarm"] if p["status"] not in ("ok", "skipped-cold-arm")]
-                lines.append(
-                    "      !! PREWARM DEGRADED on rep(s) "
-                    + ", ".join(f"{p['rep']}={p['status']}" for p in degraded)
-                    + " — this 'warm' figure is partly cold (biased AGAINST do_get)"
-                )
+            lines += prewarm_warning(fl, f"flight/{arm}")
             scan_rps = scan["rows_per_sec"]["median"]
             fl_rps = fl["rows_per_sec"]["median"]
             ratio = scan_rps / fl_rps if fl_rps else float("inf")
@@ -373,8 +403,10 @@ def main() -> int:
         "so cycles/row is a per-physical-core figure counted on two hardware threads.",
         "    Both arms are counted identically, so the ratio and the arm-to-arm "
         "delta are unaffected.",
-        "  * every flight rep's PREWARM outcome is recorded in results.json "
+        "  * every rep of BOTH arms records its PREWARM outcome in results.json "
         "(prewarm/prewarm_all_ok); a degraded prewarm is flagged above, never swallowed.",
+        "    A warm rep is prewarmed by an UNTIMED full pass outside its perf window; "
+        "the cold arm is deliberately never prewarmed.",
         "  * the corpus is CQLite-written + CQLite-read: a PERFORMANCE FIXTURE ONLY "
         "(#3042), never a correctness oracle.",
         "  * the #3058/#3100 absolutes (240,100 / 312,155 rows/s) were corpus- and "
