@@ -16,6 +16,15 @@
 # can be exercised in both directions. Everything lives under one temp dir removed
 # on EXIT. No wall-clock threshold assert anywhere in the correctness path (#2642).
 #
+# FILE SIZE (campsite rule, issue #1135): this file is over the ~1500-line test target
+# and grew further in #3229 (the `(cx*)` census-exclusion family). It is a single
+# responsibility — the sanctioned wrapper's guard contract — driven end to end through
+# ONE public surface (the wrapper's own summary block) by ONE stub and ONE fixture
+# helper, so splitting it would duplicate that scaffolding across files and make a
+# missing case harder to see, not easier. The gate's file-size ratchet covers `.rs`
+# only, so this is recorded rather than suppressed; revisit under #1135 if the fixture
+# helper and the stub ever want separate homes.
+#
 # Run standalone:   bash scripts/tests/test_roborev_review_guard.sh
 # Or via the gate:  scripts/agent-gate.sh --lite   (roborev-lints component)
 #                   scripts/agent-gate.sh          (roborev-lints + tooling-tests)
@@ -224,6 +233,8 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   #3222 shape: 100% under docs/, 100% executable CODE
 #   docs-prose      markdown only, UNDER docs/ (distinct from docs-only, which puts
 #                   its markdown at the repo root)
+#   docs-artifacts-mixed  a docs-scoped artifact the config does NOT exclude, beside a
+#                   .rs file — the declared residual (noise, never a swallow)
 #   docs-artifacts  markdown + declared docs-scoped artifacts (.txt/.json/.log/.err/
 #                   .jsonl) under docs/reports/x-artifacts/ — still code-free
 #   nested-docs-json  website/src/content/docs/c.json + a .rs file: a NESTED `docs`
@@ -317,6 +328,16 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf '# notes\n' >"$work/docs/notes.md"
       git_q "$work" add docs
       git_q "$work" commit -q -m 'prose under docs/'
+      ;;
+    docs-artifacts-mixed)
+      # A docs-scoped ARTIFACT (non-code by classification) that the configuration does
+      # NOT exclude, beside a real code file: the DECLARED RESIDUAL direction — noise
+      # delivered to the reviewer, never a failure.
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '{"k":1}\n' >"$work/docs/reports/x-artifacts/b.json"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'an un-excluded docs artifact beside code'
       ;;
     docs-artifacts)
       mkdir -p "$work/docs/reports/x-artifacts"
@@ -2063,6 +2084,64 @@ assert_says '--help sends a FAIL to the config, not the reviewer' 'is a CONFIGUR
 assert_says '--help defines docs-only as a code-free CENSUS, not a path prefix' 'CENSUS as code-free: classifies it, NEVER a .docs/. path prefix'
 assert_says '--help names the harness convention as reviewed code' 'docs/reports/\*-artifacts/ are executable code'
 assert_never_enqueued '--help'
+
+
+printf '== case (cx17): the declared RESIDUAL direction is noise, never a failure ==\n'
+reset_stub
+# A census path the wrapper classifies NON-CODE that the configuration does NOT exclude
+# is delivered to the reviewer as bounded noise. It must fail NO key: the only failing
+# direction is the opposite one (config excludes what the census calls CODE).
+work=$(make_fixture case_cx17 docs-artifacts-mixed)
+write_roborev_config "$work" "['*.md']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx17)' PASS 0
+assert_says 'case (cx17) the un-excluded artifact costs nothing but noise' '^census-exclusion: PASS \(1/1 code census paths survive'
+assert_says 'case (cx17) the artifact is classified non-code, so prompt-content ignores it' '^prompt-content: PASS \(1/1 code census paths present\)$'
+
+printf '== structural: the exclusion view is GIT-matched, VERSION-PINNED, and not a hand-rolled matcher ==\n'
+reset_stub
+ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
+if [ -f "$ORACLES" ]; then
+  if grep -qF ':(exclude,glob)' "$ORACLES"; then
+    ok 'structural: the check constructs :(exclude,glob) git pathspecs'
+  else
+    bad 'structural: no :(exclude,glob) pathspec construction found — the matcher may have been re-implemented'
+  fi
+  if grep -qE 'git -C "\$REPO" diff --name-only -z --no-renames' "$ORACLES"; then
+    ok 'structural: survivors come from git diff --name-only -z --no-renames (NUL-safe, census-comparable)'
+  else
+    bad 'structural: the survivor query is not the NUL-safe git diff the census is comparable with'
+  fi
+  # A second, independent wildmatch implementation is the class of error this check exists
+  # to catch, so its absence is asserted rather than assumed.
+  if grep -qE 'roborev v0\.61\.2' "$ORACLES"; then
+    ok 'structural: the ported construction names the pinned roborev version'
+  else
+    bad 'structural: the port does not name the roborev version it was derived from'
+  fi
+  if grep -qiE 're-?verif' "$ORACLES"; then
+    ok 'structural: the port states the re-verify-on-upgrade maintenance obligation'
+  else
+    bad 'structural: the port does not state the re-verify-on-upgrade obligation'
+  fi
+else
+  bad "structural: oracles file not found at $ORACLES"
+fi
+
+printf '== structural: the AC2 live probe is NOT a gate component ==\n'
+GATE="$SCRIPT_DIR/../agent-gate.sh"
+PROBE_REL='docs/reports/3229-artifacts/probe-census-exclusion.sh'
+if [ -f "$GATE" ]; then
+  if grep -qF "$PROBE_REL" "$GATE"; then
+    bad "structural: $PROBE_REL is referenced by the agent gate — the live probe needs network + a live reviewer and must never be gate-run"
+  else
+    ok 'structural: the live probe is absent from the agent gate (documented + recorded, never gate-run)'
+  fi
+else
+  printf 'SKIP - agent-gate.sh not found; the live-probe/gate separation could not be checked\n'
+fi
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
