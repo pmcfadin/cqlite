@@ -715,6 +715,54 @@ else
   esac
 fi
 
+# 1x. THE HARNESS'S OWN `mktemp` GUARD, OBSERVED FIRING (issue #3249 review R8-3). The
+#     shared lib derives EVERY path from `$tmp`, and these suites run WITHOUT `set -e`
+#     inside the MANDATORY tooling-tests component, sometimes under a root identity — so
+#     an unchecked `tmp=$(mktemp -d …)` was a host-damage defect, not a style nit: with
+#     `tmp` empty the setup lines write /global-gitconfig, /perfbin, /perfshim.log and
+#     /host-home, and `rm -f` /uname and /id. A guard nobody has WATCHED FIRE is not
+#     evidence (a hardcoded `_PERF_STATE="ok"` once survived 118/118 asserts), so BOTH
+#     failure shapes are driven here through a PATH shim — a non-zero `mktemp`, and an
+#     rc-0 `mktemp` that prints an empty path — and the refusal must be named, non-zero,
+#     must never reach the suite body, and must create no root-level path.
+mtg="$tmp/mktemp-guard"; mkdir -p "$mtg/fail-rc" "$mtg/empty-out"
+for t in bash dirname cat sed awk grep printf tr cut sort head tail wc env date chmod mkdir rm ln id uname; do
+  s=$(command -v "$t" 2>/dev/null) || continue
+  ln -sf "$s" "$mtg/fail-rc/$t"; ln -sf "$s" "$mtg/empty-out/$t"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1'                >"$mtg/fail-rc/mktemp"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "\n"' 'exit 0'  >"$mtg/empty-out/mktemp"
+chmod +x "$mtg/fail-rc/mktemp" "$mtg/empty-out/mktemp"
+printf '%s\n' '. "$1"' 'echo REACHED-SUITE-BODY' >"$mtg/probe.sh"
+# The root-level paths the harness would create with an empty `$tmp`. Compared
+# BEFORE/AFTER rather than asserted absent, so a box that legitimately has one of these
+# names cannot make the case fail for the wrong reason.
+mtg_state() {
+  local p
+  for p in /global-gitconfig /perfbin /perfshim.log /host-home /brew /cargo /gh /roborev /uname /id; do
+    [ -e "$p" ] && printf '%s\n' "$p"
+  done
+  return 0
+}
+mtg_before=$(mtg_state)
+mtg_fail=0
+for variant in fail-rc empty-out; do
+  mtg_out=$(PATH="$mtg/$variant" bash "$mtg/probe.sh" \
+    "$PERF_TEST_LIB_DIR/perf-capability-test-lib.sh" 2>&1); mtg_rc=$?
+  case "$mtg_out" in
+    *'REFUSING TO RUN (reason: unusable-temp-dir)'*) ;;
+    *) bad "perf-lib: a $variant mktemp did not produce the NAMED refusal: '$mtg_out'"; mtg_fail=1 ;;
+  esac
+  [ "$mtg_rc" -ne 0 ] || { bad "perf-lib: a $variant mktemp still exited 0"; mtg_fail=1; }
+  case "$mtg_out" in
+    *REACHED-SUITE-BODY*) bad "perf-lib: a $variant mktemp did not stop the suite body"; mtg_fail=1 ;;
+  esac
+  if [ "$(mtg_state)" != "$mtg_before" ]; then
+    bad "perf-lib: a $variant mktemp let the harness create a ROOT-LEVEL path ($(mtg_state))"; mtg_fail=1
+  fi
+done
+[ "$mtg_fail" -ne 0 ] || ok "perf-capability-test-lib: an unusable 'mktemp -d' (non-zero rc, or rc 0 with an empty path) REFUSES with a named reason, exits non-zero, never reaches the suite body, and creates no root-level path"
+
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
 perf_test_report

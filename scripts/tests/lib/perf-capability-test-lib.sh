@@ -40,7 +40,27 @@ sudo_perf_offenders() {
   grep -E '^sudo ' "$1" 2>/dev/null | grep -E '(\btee\b|\bsysctl\b|\btrue\b)' | grep -v '^sudo -n ' || true
 }
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/perf-cap-test.XXXXXX")
+# `mktemp` IS A COMMAND THAT CAN FAIL, and these suites deliberately run WITHOUT
+# `set -e` (issue #3249 review R8-3). An unchecked `tmp=$(mktemp -d …)` that fails —
+# full/read-only $TMPDIR, a hostile PATH `mktemp`, a container out of inodes — leaves
+# `tmp` EMPTY while every path below is spelled "$tmp/…", so the very next lines would
+# write ROOT-LEVEL paths (/global-gitconfig, /perfbin, /perfshim.log, /host-home) and
+# the EXIT trap would `rm -rf ""`. These suites run in the MANDATORY `tooling-tests`
+# gate component, sometimes under a root identity, so that is host damage caused by a
+# test run. Four things must hold — rc 0, non-empty, absolute, and actually a
+# directory — or NOTHING happens at all. `exit`, not `return`: this file is sourced by
+# a suite with no `set -e`, where a `return 1` would be ignored and execution would
+# continue with the empty `tmp` this guard exists to stop.
+# Observed firing: case 1x of scripts/tests/test_perf_capability.sh drives both
+# failure shapes (non-zero rc, and rc 0 with empty output) and asserts no root-level
+# path is created.
+if ! tmp=$(mktemp -d "${TMPDIR:-/tmp}/perf-cap-test.XXXXXX"); then tmp=''; fi
+case "$tmp" in /*) ;; *) tmp='' ;; esac
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'perf-capability-test-lib: REFUSING TO RUN (reason: unusable-temp-dir): `mktemp -d` did not yield an existing absolute directory (got %s). Every path in these suites is "$tmp/...", so continuing would write ROOT-LEVEL paths on a box that may be running this suite as root. Check TMPDIR=%s.\n' \
+    "'${tmp:-<empty>}'" "'${TMPDIR:-/tmp}'" >&2
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
 
 # Global-state isolation, same posture as test_bootstrap_agent_machine.sh: the
