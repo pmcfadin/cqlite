@@ -24,7 +24,11 @@
 #     `thread_siblings_list` and the run FAILS CLOSED if it is not one physical
 #     core's siblings (`lib-cpu.sh`). Never assumed from CPU numbers.
 #  3. WARM AND COLD ARE SEPARATE CLAIMS. Never averaged together. Cold does
-#     `sync; echo 3 > /proc/sys/vm/drop_caches` before EVERY rep.
+#     `sync; echo 3 > /proc/sys/vm/drop_caches` before EVERY rep — and, since
+#     the drop happens once per REP while `--scan-passes N` runs N passes inside
+#     ONE bench process, a cold run with N>1 is REFUSED below rather than
+#     reporting pass 1 (cold) blended with passes 2..N (warm) as one "cold"
+#     number.
 #  4. SETUP IS SUBTRACTED, AND SAID SO. Arm A runs `--setup-only` under its own
 #     `perf stat` and the driver reports `(cycles_total - cycles_setup) / rows`.
 #     Arm B starts and prewarms the server BEFORE the perf window opens, so its
@@ -83,7 +87,10 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
                        short: the loadgen finishes its in-flight request, so this yields
                        exactly ONE cold scan. A long cold step would blend one cold scan
                        with warm ones inside a single "cold" claim.
-  --scan-passes N      Timed passes per bare-scan rep (default $SCAN_PASSES).
+  --scan-passes N      Timed passes per bare-scan rep (default $SCAN_PASSES). REFUSED with
+                       N>1 when --temp includes cold: caches are dropped once per rep, so
+                       pass 1 would be cold and passes 2..N warm, blended into one "cold"
+                       number (spec R2/AC5 forbids blending).
   --port N             Loopback port for the Flight server (default $PORT).
   --out DIR            Results dir (default \$REPO/target/perf-ws0-3096/<timestamp>).
   --no-build           Skip the release build; use the binaries already in target/release.
@@ -135,6 +142,38 @@ if grep -nE 'perf stat[^|]*(-p |--pid)' "${BASH_SOURCE[0]}" | grep -v 'self-chec
   echo "FATAL: this script contains a per-process 'perf stat -p' invocation." >&2
   echo "       Per-process counting measured >2x observer cost on this workload;" >&2
   echo "       CPU-wide 'perf stat -C <cpu-list>' is mandatory (issue #3096 spec R2)." >&2
+  exit 2
+fi
+
+# --- trap 3 enforcement: COLD is ONE pass, or it is not a cold claim ----------
+# `--scan-passes N` runs N timed passes INSIDE ONE ws0-scan-bench process, and
+# `drop_caches_if_cold` runs ONCE per rep — before that process starts. So at
+# N>1 the reported "cold" figure is pass 1 (genuinely cold) folded together with
+# passes 2..N (already warm, reading the page cache pass 1 just filled): a
+# BLENDED number presented as a separate claim, which is exactly what spec
+# R2/AC5 forbids ("warm and cold SHALL be reported as SEPARATE claims, never
+# blended"). Dropping caches BETWEEN passes is not available to us — the passes
+# run inside the bench process, which is unprivileged by design — so the only
+# honest options are one pass per cold rep or no cold measurement, and this
+# fails closed on the blend rather than reporting it (issue #3096 review).
+#
+# The WARM arm is unaffected: N>1 there is a legitimate way to amortize process
+# start, and every pass is warm by construction.
+case "$SCAN_PASSES" in
+  ''|*[!0-9]*) echo "FATAL: --scan-passes must be a positive integer (got '$SCAN_PASSES')" >&2; exit 2 ;;
+  0) echo "FATAL: --scan-passes must be at least 1" >&2; exit 2 ;;
+esac
+case "$PORT" in
+  ''|*[!0-9]*) echo "FATAL: --port must be a positive integer (got '$PORT')" >&2; exit 2 ;;
+esac
+if [[ " $TEMPS " == *" cold "* && "$SCAN_PASSES" -gt 1 ]]; then
+  echo "FATAL: --temp ${TEMPS// /+} with --scan-passes $SCAN_PASSES would BLEND one cold pass" >&2
+  echo "       with $((SCAN_PASSES - 1)) already-warm pass(es) into a single number reported as" >&2
+  echo "       'cold'. Caches are dropped once per REP, before the bench process starts, and" >&2
+  echo "       the bench sums rows and seconds over all its timed passes." >&2
+  echo "       Spec R2/AC5: warm and cold are SEPARATE claims, never blended." >&2
+  echo "       Use --scan-passes 1 for any run that includes a cold temperature, or" >&2
+  echo "       --temp warm to keep multi-pass amortization." >&2
   exit 2
 fi
 
