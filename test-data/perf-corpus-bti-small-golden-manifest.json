@@ -1,7 +1,7 @@
 {
   "issue": 3234,
   "purpose": "COMMITTABLE small Cassandra-written Cassandra 5.0 BTI (`da`) oracle with a wide partition and a compound clustering key, for BTI row/cell decode, `Rows.db` trie descent and compound-clustering-slice PARITY work (#3042: Cassandra-WRITTEN bytes). Deliberately NOT profileable \u2014 below the 8 MiB read-plane threshold.",
-  "generated_utc": "2026-08-03T19:44:16.525939+00:00",
+  "generated_utc": "2026-08-03T20:06:34.690894+00:00",
   "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
   "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
   "mode": "small_golden",
@@ -59,18 +59,9 @@
       }
     ]
   },
-  "corpus_root": "test-data/datasets",
-  "corpus_root_is_checkout_relative": true,
-  "datasets_root_usage": "CQLITE_DATASETS_ROOT=<checkout>/test-data/datasets",
-  "corpus_committed": true,
-  "committed_copy": {
-    "path": "test-data/datasets/sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262",
-    "files": 10,
-    "bytes": 297374,
-    "kib": 290.4,
-    "verified": "every Data.db sha256 recorded in this manifest was re-hashed from the committed copy and matched, so this manifest describes the committed bytes"
-  },
-  "corpus_note": "This corpus IS COMMITTED, at test-data/datasets/sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262 \u2014 297374 B (290.4 KiB) over 10 file(s), force-added past .gitignore's `*.db` (the `test_da` convention) so a Cassandra-WRITTEN `da` oracle travels with the checkout. At this size it needs no regeneration: read it from the checkout. Regenerating it would replace committed bytes (and every sha256 here) for no gain \u2014 the write timestamps alone make the bytes differ. Nothing in this manifest is inherited from a previous one; every number is re-read from the bytes on each run.",
+  "corpus_root": "/data/corpus-3234-small-golden",
+  "datasets_root_usage": "CQLITE_DATASETS_ROOT=/data/corpus-3234-small-golden",
+  "data_db_sha256_also_match_at": "test-data/datasets/sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262",
   "reproducibility": {
     "reproduced_by_the_seed": "the ROW SET: every pk/bucket/seq/payload value, the partition count, the rows-per-partition distribution and the chunk->SSTable split are a pure function of (seed, chunk-index) \u2014 see the row driver's determinism contract",
     "row_set_determinism_guaranteed_by": "the row driver VENDORS its PRNG (MT19937 with CPython's str seeding) and both selection algorithms (weighted width draw, bucket sampling), so the seed identity recorded here does not depend on any standard-library implementation detail or on which `python3` runs it (roborev #3234 M2 \u2014 random.choices()/random.sample() are documented as changeable). Enforced by `gen-perf-corpus-bti-rows.py --self-check`: pinned CSV sha256 digests for fixed configurations, run as a case of scripts/tests/test_gen_perf_corpus_bti.sh. If that check ever fails, the seed identity recorded in this manifest is void \u2014 find what changed rather than re-pinning the digests.",
@@ -88,15 +79,9 @@
     "toc": "read from each SSTable's own TOC.txt",
     "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)",
     "row_plan_matches_config": "the row plan's chunk count, contiguous chunk index set, per-chunk row counts and per-chunk seed material were checked against --seed / --rows-requested / --chunk-rows before this manifest was written; a stale plan is a hard failure, because matching aggregate totals alone cannot prove the plan describes these bytes",
-    "one_sstable_per_chunk": "the SSTable COUNT was checked against the row plan's chunk count and the generation identifiers against 1..N before this manifest was written; a flush split or a compaction preserves the row and partition totals while changing the generation count the scan route (and the AC3 attribution) depends on, so a mismatch is a hard failure",
-    "corpus_committed": "OBSERVED: a copy of these SSTables was looked for under the checkout's test-data/datasets at the same corpus-relative path and every recorded Data.db sha256 re-hashed from it; `true` means those exact bytes are committed, never an assumption from --mode"
-  },
-  "read_path_measurement_scope": {
-    "measured": false,
-    "why_not_measured": "this corpus is a CORRECTNESS ORACLE, not a profile target: its Data.db is far below the 8 MiB MADV_RANDOM threshold, so the point-read and scan mappings are the SAME mapping and a read-plane A/B on it is structurally zero. No throughput figure was measured on it, and none may be attributed to it.",
-    "where_the_ac3_figure_lives": "the AC3 throughput figure was measured on the PRODUCTION corpus and is recorded in the manifest that describes it (test-data/perf-corpus-bti-manifest.json, `mode: production`), together with the route it measures and what that route excludes. It describes THAT corpus's 27 generations, not this one \u2014 do not copy it here.",
-    "generations_in_this_corpus": 1,
-    "rows_in_this_corpus": 600
+    "one_sstable_per_chunk": "the SSTable COUNT was checked against the row plan's chunk count and the generation identifiers against 1..N before this manifest was written; a flush split or a compaction preserves the row and partition totals while changing the generation count the scan route depends on, so a mismatch is a hard failure",
+    "data_db_sha256_also_match_at": "present only when a directory at the same corpus-relative path under the checkout's test-data/datasets holds a Data.db per SSTable whose sha256 equals the one recorded here. That is ALL it asserts: no other component was compared and git tracking was not checked",
+    "read_path_measurement": "NONE. This manifest records only what was read back from the corpus bytes, and a throughput measurement is not one of those things (roborev #3234 M1: a fixed AC3 figure recorded here was inherited by any corpus with a matching row + generation count). The AC3 warm-scan figure, the route it measures and the BTI mmap/trie plane that route EXCLUDES are in docs/development/dev-cookbook.md, and cqlite-core/examples/bti_perf_scan prints them beside the number at runtime."
   },
   "tables": [
     {
