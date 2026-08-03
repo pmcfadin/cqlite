@@ -25,12 +25,19 @@
 //! are present" (whether they DECODE is the lanes' own business, and a truncated one
 //! makes them fail loudly — the second AC2 direction, exercised end-to-end in the PR).
 
-#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+//! DELIBERATELY UNGATED by cargo features: this target parses no SSTable and calls
+//! no feature-gated API, so a `#![cfg(all(feature = "state_machine", feature =
+//! "cli-helpers"))]` (copied from the lanes that DO need them) would compile the only
+//! pins on the resolution rule away under a plain `cargo test -p cqlite-core` — a
+//! rule guarded by nothing in the very default build most developers run.
 
 #[path = "support/datasets_root.rs"]
 mod datasets_root;
 
-use datasets_root::{first_root_with_table, table_has_data};
+use datasets_root::{
+    first_root_with_table, sstables_root_candidates, table_has_data,
+    CHECKOUT_SSTABLES_ROOT_OVERRIDE_ENV,
+};
 use std::path::{Path, PathBuf};
 
 /// Create `<root>/<keyspace>/<table>-<uuid>/` and populate it with `files`.
@@ -155,6 +162,70 @@ fn a_sidecar_only_directory_does_not_count_as_present() {
         first_root_with_table(&roots, "test_tomb", "resurrection_gc0"),
         Some(real_root.as_path())
     );
+}
+
+/// The CHECKOUT corpus must ALWAYS be a candidate root — the property the whole
+/// fail-closed contract rests on: a `must_run` case may assert unconditionally only
+/// because a committed fixture is reachable whatever `CQLITE_DATASETS_ROOT` names.
+/// Drop the checkout from the candidate list (say, by "preferring" the env root) and
+/// every committed-fixture guard in the sibling lanes turns into a false failure.
+///
+/// NON-RACY: it mutates nothing. The override seam is read ONCE into a local (a second
+/// `var_os` could observe a different value if a sibling test wrote the environment),
+/// and the expectation is derived from that single observation — so this test neither
+/// sets a process-global nor depends on another test's timing.
+#[test]
+fn the_checkout_corpus_is_always_a_candidate_root() {
+    let override_root = match std::env::var_os(CHECKOUT_SSTABLES_ROOT_OVERRIDE_ENV) {
+        Some(v) if !v.is_empty() => Some(PathBuf::from(v)),
+        _ => None,
+    };
+    let expected = override_root.clone().unwrap_or_else(|| {
+        datasets_root::fixture_roots::checkout_test_data_dir()
+            .join("datasets")
+            .join("sstables")
+    });
+
+    let candidates = sstables_root_candidates();
+    assert!(
+        !candidates.is_empty(),
+        "the candidate list must never be empty: the checkout root is unconditional"
+    );
+    assert!(
+        candidates.contains(&expected),
+        "the checkout corpus {} must always be a candidate root, whatever \
+         CQLITE_DATASETS_ROOT names; got {candidates:?}",
+        expected.display()
+    );
+    assert_eq!(
+        candidates.last(),
+        Some(&expected),
+        "the checkout root is the LAST candidate: an env corpus that can serve the request \
+         wins the tie, and the checkout is the always-present fallback"
+    );
+    // Deduplicated: a CQLITE_DATASETS_ROOT that already points at the checkout must not
+    // report the same path twice.
+    let mut deduped = candidates.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(
+        deduped.len(),
+        candidates.len(),
+        "candidate roots must be deduplicated: {candidates:?}"
+    );
+
+    // And it is not merely a path: with no override in force, the checkout candidate
+    // really carries a git-committed fixture, which is what makes `must_run: true`
+    // assertable unconditionally in the sibling lanes. (Skipped when the harness
+    // override is in force — that seam exists precisely to hide fixtures.)
+    if override_root.is_none() {
+        assert!(
+            table_has_data(&expected, "test_da", "multiclustering_table"),
+            "the checkout candidate {} must carry the committed #3032 fixture; remedy: \
+             git restore --source=HEAD -- test-data/datasets/sstables",
+            expected.display()
+        );
+    }
 }
 
 /// `<table>-` is a PREFIX match, so a longer table name sharing the prefix must not

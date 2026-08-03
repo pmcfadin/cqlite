@@ -3,9 +3,11 @@
 //!
 //! # The defect this module exists to remove
 //!
-//! Three lanes — `point_vs_full_differential.rs` (+ its `one_vs_n_generation`
-//! submodule), `query_semantics_oracle_parity.rs` and `read_path_forcing_e2e.rs` —
-//! each carried a private, byte-identical copy of:
+//! FOUR lanes carried a private, byte-identical copy of the same broken selection —
+//! the three in `cqlite-core/tests` reconciled here (`point_vs_full_differential.rs`
+//! + its `one_vs_n_generation` submodule, `query_semantics_oracle_parity.rs`,
+//! `read_path_forcing_e2e.rs`) and a fourth, `cqlite-flight/tests/
+//! query_semantics_flight_parity.rs`, which is **NOT** reconciled (see below):
 //!
 //! ```ignore
 //! candidates.into_iter().flatten().find(|root| root.join(keyspace).is_dir())
@@ -36,6 +38,28 @@
 //! Presence is judged by an actual `*-Data.db` component, never by directory
 //! existence: the repo commits JSONL sidecars for fixtures whose binaries are
 //! gitignored, so `<table>-<uuid>/` can exist with no readable SSTable in it.
+//!
+//! # The FOURTH lane, and why it is deliberately not reconciled here
+//!
+//! `cqlite-flight/tests/query_semantics_flight_parity.rs` still carries the
+//! keyspace-granular `sstables_root(keyspace)` copy. It is LOWER RISK — its gate
+//! component pins `CQLITE_REQUIRE_FIXTURES=1`, so a miss FAILs there instead of
+//! skipping silently — and reconciling it is NOT a mechanical swap:
+//!
+//!   * it is a DIFFERENT CRATE, so it cannot reach this module without real
+//!     plumbing (a shared test-support crate wired as a `dev-dependency`, or a
+//!     cross-crate `#[path]` include whose own nested `#[path]` to
+//!     `test-data/support/fixture_roots.rs` then resolves from a foreign manifest);
+//!   * its lookup is GENERATION-granular, not table-granular: `fixture_dir` requires
+//!     a specific `<sstable_prefix>-Data.db` (`nb-1-big-…`) inside a
+//!     `<prefix><uuid>/` directory, where [`table_has_data`] accepts ANY `*-Data.db`,
+//!     so the shared helper would need a new generation-aware entry point; and
+//!   * its `schema_path` climbs `..` from `CQLITE_DATASETS_ROOT` — the #3148 trap
+//!     this module refuses — so swapping it in is a behaviour change to that lane,
+//!     not a refactor.
+//!
+//! Tracked as follow-up work rather than smuggled into #3220. Update this note (and
+//! the count above) if that lane moves onto the shared helper.
 //!
 //! # Roots, and which one owns what
 //!
