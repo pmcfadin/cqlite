@@ -1,0 +1,9 @@
+{
+  "issue": 3229,
+  "purpose": "END-TO-END confirmation of R1 (root anchoring) for the AC2 live probe.",
+  "why_here": "This is a DENY-LISTED extension (.json) under a NESTED 'docs' directory. roborev v0.61.2's git.FormatExcludeArgs passes a pattern containing an interior '/' VERBATIM, so 'docs/**/*.json' is ROOT-ANCHORED at the repository's own docs/ and CANNOT match this path. This file must therefore be PRESENT in the prompt roborev builds.",
+  "expected": "present in the prompt actually sent",
+  "if_absent": "the recovered algorithm is FALSIFIED — a BLOCKING finding, not an acceptable recorded outcome; the pattern list in .roborev.toml and the ported construction in scripts/flow/roborev-review-oracles.sh both depend on R1",
+  "leading_underscore": "keeps the file out of Starlight's docs content collection glob, so it is inert to the website build",
+  "check": "bash docs/reports/3229-artifacts/probe-census-exclusion.sh --check-nested"
+}
