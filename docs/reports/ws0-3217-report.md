@@ -62,6 +62,13 @@ throughput at every core count, but flat instructions/row means it is **not** sp
 for the *scaling discount*. Those are two different claims and this report keeps them separate
 (§8).
 
+**And the #1 next step is neither fix — it is a MEASUREMENT.** Both candidate levers are currently
+unfounded with respect to the scaling discount (one costs nothing; the other's relevance is
+unknown), so the highest-value action is establishing the microarchitectural cause of the IPC decay
+on a host with working LLC / memory-bandwidth counters. That single result decides whether *any*
+per-row-work lever moves the slope. It is two endpoint points and one afternoon, gated only on host
+selection. **Fund it before either fix** (§8).
+
 ### What is NOT established
 
 The **microarchitectural cause of the IPC decay**. `LLC-loads`, `LLC-load-misses` and
@@ -511,7 +518,17 @@ Note the AC5 sidecar's known bias: per-TID delta accounting over `/proc/<pid>/ta
 
 ---
 
-## 5. The ~1,960-parks-per-batch question — answered
+## 5. The ~1,960-parks-per-batch question — answered by SITE; predicted by geometry for `core_raw_chunk` ONLY
+
+> **Read this before the tables.** Every park in these captures is attributed to a **named site**,
+> and the site attribution is what acquits the handoff — that part is settled. But "geometry
+> predicts the parks" holds **tightly for `core_raw_chunk` only** (347 predicted sends vs 265–327
+> measured parks). `core_query_rows` records **3.1–3.4× MORE parks than it has sends** (64
+> predicted, 201–220 measured) and `core_windowed_batch` exceeds its send count at the busiest
+> point (32 predicted, 43 measured). The explanation offered below — that both endpoints of a
+> channel park and that a std `sync_channel`'s blocking path can switch more than once per transfer
+> — is a **HYPOTHESIS, and it is unmeasured**. A mid-run claim on the issue thread that "geometry
+> predicts these" was overstated for two of the three channels and is corrected here (§ Corrections).
 
 Part A produced one number that made the handoff hypothesis look alive: at **S=6/N=1**, ~39,115
 voluntary switches/s against ~20 batches/s ≈ **~1,960 voluntary parks per 8,192-row batch**. A
@@ -541,12 +558,17 @@ once** at any point.
 
 **Where the geometry does *not* close, stated plainly.** `core_query_rows` records **3.1–3.4×
 more parks than it has sends**, and `core_windowed_batch` exceeds its send count at the busiest
-point (43 vs 32). Parks are *sched_switch events*, not sends: **both endpoints** of a channel park
-(producer on full, consumer on empty), and `core_query_rows` is a **std `sync_channel`**, whose
-blocking path can produce more than one switch per transfer. So the geometry predicts the
-*order* of all three channels and the *magnitude* of the dominant one; it does not close to the
-event for the std-channel term. That residual is a property of the counting, not evidence of an
-unidentified site — every park in the capture is attributed to a named site, with `other` = 0.
+point (43 vs 32). **The offered explanation is a hypothesis and was not measured**: parks are
+*sched_switch events*, not sends, so **both endpoints** of a channel can park (producer on full,
+consumer on empty), and `core_query_rows` is a **std `sync_channel`** whose blocking path may
+produce more than one switch per transfer. Nothing in these captures distinguishes producer-side
+from consumer-side parks, so that account is plausible and untested; confirming it needs a
+per-endpoint park breakdown, which is a follow-up measurement, not a claim this run can make.
+
+What the data *does* establish, independent of that hypothesis: the geometry predicts the *order*
+of all three channels and the *magnitude* of the dominant one, and the residual is a property of
+the counting rather than evidence of an unidentified site — **every park in the capture is
+attributed to a named site, with `other` = 0**.
 
 **The conclusion the numbers force:** "the mpsc handoff" was never one channel. Splitting by
 channel identity is what turned a plausible story into a measurement, and the channel #3217 named
@@ -633,10 +655,25 @@ mechanism for the "more cores makes N=1 slower" effect.
 
 ---
 
-## 8. Ordering recommendation — handoff fix vs #3096
+## 8. Ordering recommendation — the #1 next step is a MEASUREMENT, not either fix
 
-**The call: neither lever attacks the measured scaling discount, and of the two, a `do_get`
-handoff fix is ordered LAST.**
+> ### THE SINGLE MOST DECISION-RELEVANT SENTENCE IN THIS RUN
+>
+> **The #1 next step is not a fix. It is measuring the microarchitectural cause of the IPC decay on
+> a host with working LLC / memory-bandwidth counters — because BOTH candidate fixes are currently
+> unfounded with respect to the scaling discount.** The handoff is measured at ~0 cost, so a
+> handoff fix cannot address the discount. #3096 (Arrow encode) reduces per-row work, but the
+> discount is 25.4 of 29 pp of *IPC decay at flat instructions/row*, and this run **cannot tell**
+> whether cutting per-row work flattens the curve or only raises it. ~87% of the +8,593 cycles/row
+> is unattributed because the counters that would attribute it are `<not supported>` on this host.
+> **That one measurement — two endpoint points, one afternoon, gated only on host selection —
+> decides whether ANY per-row-work lever moves the slope. Fund it before either fix.**
+
+Only after that measurement does the fix ordering below become a real ranking rather than a
+provisional one.
+
+**The call between the two fixes: neither is shown to attack the measured scaling discount, and of
+the two, a `do_get` handoff fix is ordered LAST.**
 
 The reasoning, kept honest about what each claim rests on:
 
@@ -658,9 +695,11 @@ The reasoning, kept honest about what each claim rests on:
    slope alone. **This report cannot distinguish those two cases** — that is precisely the LLC
    measurement it could not make (§7). Anyone claiming #3096 fixes the scaling discount is
    claiming something this data does not support.
-4. **Therefore the highest-value next measurement is not a fix at all** — it is establishing the
-   microarchitectural cause on a host with working LLC/memory-bandwidth counters, because that
-   single answer decides whether *any* per-row-work lever moves the slope.
+4. **Therefore the highest-value next step is not a fix at all** — it is the LLC / memory-bandwidth
+   measurement in the box at the top of this section. Restated because it is the point most likely
+   to be skimmed past: **both fixes are unfounded with respect to the scaling discount until that
+   measurement exists.** One is unfounded because its site costs nothing; the other is unfounded
+   because nobody yet knows whether per-row work is what the memory system is choking on.
 
 The measured discount (0.711–0.873) lands **inside** #2817's assumed **0.6–0.75** band at the
 6-core point and above it at 2 and 4 cores. The projections built on that assumption therefore
@@ -751,13 +790,32 @@ from a superseded capture.
 
 ---
 
+## Corrections — mid-run claims that were walked back
+
+Recorded here because **this report is the durable artefact**: a reader should not have to
+reconcile it against a comment thread to find out which mid-run statements did not survive. Walking
+a claim back is part of the method, not an embarrassment — the alternative is a published number
+nobody can trace.
+
+| # | Mid-run claim (posted to the issue thread while Parts A/B were running) | Correction | Where the corrected figure lives |
+|--:|---|---|---|
+| C1 | "**90 points**" — quoted for warmth (`read_bytes` = 0) and admission (`requests_unavailable` = 0) | **83 points.** 5 curve arms × 5 N × 3 reps (75) + 2 merge reference arms × 3 reps (6) + 2 reps=1 calibration probes (2) = **83**. The verified properties are unchanged — `read_bytes` = 0 and `requests_unavailable` = 0 hold on **all 83**; only the count was wrong. | `results/partA-analysis.json` → `warmth.points` = 83, with a per-sweep `points_by_sweep` breakdown so the total is auditable rather than asserted; §2.7 |
+| C2 | "**Geometry predicts these**" — said of all three `cqlite-core` channels' parks-per-batch | **Overstated for two of the three.** It holds tightly for **`core_raw_chunk` only** (347 predicted sends vs 265–327 measured parks). `core_query_rows` records **3.1–3.4× more parks than sends** (64 vs 201–220) and `core_windowed_batch` exceeds its send count at the busiest point (32 vs 43). The both-endpoints-park / std-`sync_channel` explanation is a **hypothesis and unmeasured**. The site attribution itself is unaffected: every park is attributed to a named site, `other` = 0, and the handoff records zero. | §5, including its opening callout |
+| C3 | The `self_normalisation_warning` string in `partA-analysis.json` labelled the own-N=1 series "S=1 216229, S=2 212578, S=4 205129, S=6 175872" | **Off by one label.** It zipped the first four entries of a per-arm list that holds **two S=1 arms** (`cn-s1` and the independent `cn-s1-ac5` re-run) onto the labels 1/2/4/6. Correct series: **S=1 216229, S=2 205129, S=4 175872, S=6 163510 rows/s.** The `.txt` table and the `per_arm` JSON were always correct — only the prose warning was wrong. Fixed **in the generator** (`partA-run/analyze-partA.py`, now derived from each arm's own `S_physical_cores` and spelling out the arm label) and the artefact regenerated, so the next run cannot reproduce it. | `results/partA-analysis.json` → `cross_S_scaling.self_normalisation_warning`; §3.2 |
+
+A fourth item is a qualification rather than a correction: **AC3's PASS is not "fully symbolized"**
+— 17.2–17.8% of frame instances are DSO-only `[libc.so.6]` and escape the gate's metric. Carried
+on the AC table row itself so it cannot be read in isolation (§4.1).
+
+---
+
 ## Acceptance criteria
 
 | AC | Status | Evidence |
 |--:|:--|:--|
 | 1 — full-box C(N) at N=1..16, warm, median of ≥3, dispersion, aggregate + per-stream + marginal efficiency, admission clean | ✅ | §3.1–3.2; `results/partA-analysis.*`; `requests_unavailable`=0 on all 83 points |
 | 2 — pinned-core control reproduces #3100's shape (or divergence explained) | ✅ reproduced within ≤1.8 pp | §3.3 |
-| 3 — on-CPU flame graphs, pinned + full-box, unsymbolized <10% | ✅ 6/6 PASS (0.009–0.028%) | §4.1; `partB-results/oncpu/` |
+| 3 — on-CPU flame graphs, pinned + full-box, unsymbolized <10% | ✅ 6/6 PASS (0.009–0.028%) — **QUALIFIED: this is NOT "fully symbolized."** 17.2–17.8% of frame instances resolve only to the DSO `[libc.so.6]` (the un-symbolized system allocator) and are **not counted by the gate**, because they carry a DSO name. The gate's metric is satisfied; ~18% of frames remain opaque at function granularity. Do not read this row in isolation. | §4.1 (caveat); remedy proposed as F4 in `partC/PROPOSED-FOLLOWUPS.md`; `partB-results/oncpu/` |
 | 4 — off-CPU flame graphs + ranked attribution, every class quantified or explicitly absent | ✅ all 7 buckets + 5-way channel split, explicit zeros | §4.2; `partB-results/offcpu/` |
 | 5 — context switches + run-queue latency per N | ✅ | §4.5; `partB-results/scheduler/` |
 | 6 — byte basis named on every throughput figure; geometry + sha recorded; `now`-pinning N/A | ✅ | §2.3; three bases carried throughout |
@@ -778,5 +836,6 @@ from a superseded capture.
 - The AC5 per-TID sidecar can slightly **under**-count under tokio thread churn, never over-count.
   The bias direction is stated so the numbers can be read correctly.
 - 83 measured points are recorded across all arms (5 sweep arms × 5 N × 3 reps, 2 merge reference
-  arms × 3 reps, 2 reps=1 calibration probes). An earlier in-flight note quoted 90; 83 is the
+  arms × 3 reps, 2 reps=1 calibration probes) — see **Corrections C1**, and `points_by_sweep` in
+  `results/partA-analysis.json` for the auditable breakdown. An earlier in-flight note quoted 90; 83 is the
   count in the committed artefacts and is the figure of record.

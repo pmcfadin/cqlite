@@ -1320,7 +1320,7 @@
   "common_reference_B_S1_PEAK_rows_per_s": 252419.79883210367,
   "common_reference_B_peak_N": 2,
   "reference_choice_note": "Reference B (S=1's PEAK, N=2) is the primary denominator: it is the most the engine achieves on ONE physical core, so it is the fair 'perfect scaling' unit, and it is the CONSERVATIVE choice (it yields LOWER efficiencies than reference A). Reference A (S=1 at N=1) is reported alongside because it is the naive baseline. Both are shown so the denominator is never silently chosen.",
-  "self_normalisation_warning": "Per-arm speedup columns divide by that arm's OWN N=1, which DECLINES with core count (S=1 216229, S=2 212578, S=4 205129, S=6 175872 rows/s) because a single stream cannot fill more cores. Those columns are NOT comparable across S.",
+  "self_normalisation_warning": "Per-arm speedup columns divide by that arm's OWN N=1, which DECLINES with core count (S=1 216229 rows/s [cn-s1], S=2 205129 rows/s [cn-s2], S=4 175872 rows/s [cn-s4], S=6 163510 rows/s [cn-s6]) because a single stream cannot fill more cores. Those columns are NOT comparable across S.",
   "per_arm": [
    {
     "S_physical_cores": 1,
@@ -1417,6 +1417,18 @@
  "warmth": {
   "total_read_bytes_all_points": 0,
   "points": 83,
+  "points_by_sweep": {
+   "calib-s6-n1": 1,
+   "calib-s6-n16": 1,
+   "cn-s1": 15,
+   "cn-s1-ac5": 15,
+   "cn-s1-merge-n1": 3,
+   "cn-s2": 15,
+   "cn-s4": 15,
+   "cn-s6": 15,
+   "cn-s6-merge-n1": 3
+  },
+  "points_breakdown_note": "83 = 5 curve arms x 5 N x 3 reps (75) + 2 merge reference arms x 3 reps (6) + 2 reps=1 calibration probes (2). Every recorded point is counted here, including the calib probes that are EXCLUDED from every curve.",
   "note": "/proc/<pid>/io read_bytes summed across every point; 0 = every read served from page cache. rchar/syscr are tiny because Data.db is mmap'd, so page-cache hits are faults, not read() syscalls."
  }
 }

@@ -298,11 +298,20 @@ def main():
                 "Reference A (S=1 at N=1) is reported alongside because it is the naive baseline. "
                 "Both are shown so the denominator is never silently chosen."
                 % ref_peak_rec["N"]),
+            # Derived from per_arm BY ITS OWN S, never by list position. The list can hold
+            # MORE THAN ONE ARM PER S (e.g. the independent cn-s1-ac5 re-run), so zipping the
+            # first four entries onto the S labels 1/2/4/6 silently shifts every label by one
+            # — the exact bug this string shipped with in the first cut of the analysis. Each
+            # S is represented by its PRIMARY arm (first at that S in sorted order) and the
+            # arm label is spelled out so the reader can check the mapping.
             "self_normalisation_warning": (
                 "Per-arm speedup columns divide by that arm's OWN N=1, which DECLINES with core "
-                "count (S=1 %.0f, S=2 %.0f, S=4 %.0f, S=6 %.0f rows/s) because a single stream "
-                "cannot fill more cores. Those columns are NOT comparable across S."
-                % tuple([r["own_N1_rows_per_s_median"] for r in rows][:4] + [0] * (4 - len(rows)))),
+                "count (%s) because a single stream cannot fill more cores. Those columns are "
+                "NOT comparable across S."
+                % ", ".join(
+                    "S=%d %.0f rows/s [%s]" % (S, r["own_N1_rows_per_s_median"], r["arm"])
+                    for S, r in sorted(
+                        {r["S_physical_cores"]: r for r in reversed(rows)}.items()))),
             "per_arm": rows,
         }
         lines.append("")
@@ -350,13 +359,25 @@ def main():
     # ---- warmth --------------------------------------------------------------
     tot_rb = sum(sum((p["server_io_delta"].get("read_bytes") or 0) for p in pts)
                  for pts in sweeps.values())
-    npts = sum(len(p) for p in sweeps.values())
+    per_sweep_pts = {lab: len(p) for lab, p in sorted(sweeps.items())}
+    npts = sum(per_sweep_pts.values())
     out["warmth"] = {"total_read_bytes_all_points": tot_rb, "points": npts,
+                     # Auditable, not asserted: the total is the sum of this breakdown, so a
+                     # reader can check it instead of taking the headline count on trust.
+                     "points_by_sweep": per_sweep_pts,
+                     "points_breakdown_note": (
+                         "%d = 5 curve arms x 5 N x 3 reps (75) + 2 merge reference arms x 3 reps "
+                         "(6) + 2 reps=1 calibration probes (2). Every recorded point is counted "
+                         "here, including the calib probes that are EXCLUDED from every curve."
+                         % npts),
                      "note": ("/proc/<pid>/io read_bytes summed across every point; 0 = every read "
                               "served from page cache. rchar/syscr are tiny because Data.db is "
                               "mmap'd, so page-cache hits are faults, not read() syscalls.")}
     lines.append("")
     lines.append("warmth: total read_bytes across all %d points = %d (0 == fully page-cached)" % (npts, tot_rb))
+    lines.append("points: %d total = %s" % (
+        npts, " + ".join("%s %d" % (k, v) for k, v in per_sweep_pts.items())))
+    lines.append("        (5 curve arms x 5 N x 3 reps = 75) + (2 merge refs x 3 = 6) + (2 calib probes = 2)")
 
     txt = "\n".join(lines) + "\n"
     open(os.path.join(RESULTS, "partA-analysis.json"), "w").write(json.dumps(out, indent=1) + "\n")

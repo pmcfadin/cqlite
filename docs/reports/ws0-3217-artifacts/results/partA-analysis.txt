@@ -123,3 +123,5 @@ s1   bypass=216229       merge=72632         merge/bypass=0.3359  (-66.41%)
 s6   bypass=163510       merge=63762         merge/bypass=0.3900  (-61.00%)
 
 warmth: total read_bytes across all 83 points = 0 (0 == fully page-cached)
+points: 83 total = calib-s6-n1 1 + calib-s6-n16 1 + cn-s1 15 + cn-s1-ac5 15 + cn-s1-merge-n1 3 + cn-s2 15 + cn-s4 15 + cn-s6 15 + cn-s6-merge-n1 3
+        (5 curve arms x 5 N x 3 reps = 75) + (2 merge refs x 3 = 6) + (2 calib probes = 2)

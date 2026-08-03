@@ -113,6 +113,14 @@ Corpus geometry predicts the dominant term: 3,999,890 rows / 169,257 16-KiB chun
 rows/chunk** → **347 raw-chunk sends per 8,192-row batch**, against 265–327 measured parks. The
 `do_get` channel does 1 reserve + 1 emit per 8,192 rows and never parked once.
 
+One honest scoping note, since a looser version of this claim went out mid-run: the geometry
+prediction closes **tightly for `core_raw_chunk` only**. `core_query_rows` records **3.1–3.4× more
+parks than it has sends** (64 predicted, 201–220 measured) and `core_windowed_batch` exceeds its
+send count at the busiest point (32 vs 43). Parks are switch *events*, so both endpoints of a
+channel can park and a std `sync_channel` may switch more than once per transfer — but that account
+is a **hypothesis and was not measured**. What is settled regardless: every park in the capture is
+attributed to a **named site**, `other` = 0, and the `do_get` handoff's site count is zero.
+
 **Is your ~13.5% now accounted for? Mechanism named and quantified — exact figure not reconciled.**
 At the comparable arm (S=1/N=1, where 22% of the pinned set is idle), the causal blocking is:
 `core_raw_chunk` **27.08 s (49.2%)**, `core_query_rows` 15.53 s (28.2%), `core_windowed_batch`
