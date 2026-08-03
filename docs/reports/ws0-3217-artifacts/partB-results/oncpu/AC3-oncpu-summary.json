@@ -1,5 +1,5 @@
 {
- "schema": "ws0-3217.oncpu-summary/v1",
+ "schema": "ws0-3217.oncpu-summary/v2",
  "profiles": [
   {
    "total_weight": 147832034917,
@@ -7,6 +7,11 @@
    "server_share_of_capture": 0.9759552458640259,
    "frame_weighted_unsym_all": 0.00026336489833393494,
    "frame_weighted_unsym_server_threads_only": 0.00026856064998221247,
+   "frame_weighted_dso_only_any_all": 0.17075171561325495,
+   "frame_weighted_dso_only_any_server_threads_only": 0.17410063967405648,
+   "frame_weighted_dso_only_libc_all": 0.1707418527880836,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.1740974592096608,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
    "by_comm": [
     {
      "comm": "tokio-rt-worker",
@@ -155,6 +160,11 @@
    "server_share_of_capture": 0.9999330717036065,
    "frame_weighted_unsym_all": 0.00012432235494644746,
    "frame_weighted_unsym_server_threads_only": 0.0001243304960919851,
+   "frame_weighted_dso_only_any_all": 0.1762499205885075,
+   "frame_weighted_dso_only_any_server_threads_only": 0.17626146216729374,
+   "frame_weighted_dso_only_libc_all": 0.17624866615383092,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.1762602076504716,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
    "by_comm": [
     {
      "comm": "tokio-rt-worker",
@@ -295,6 +305,11 @@
    "server_share_of_capture": 0.9999663099762042,
    "frame_weighted_unsym_all": 9.418040771490726e-05,
    "frame_weighted_unsym_server_threads_only": 9.418318895978189e-05,
+   "frame_weighted_dso_only_any_all": 0.17937258986808352,
+   "frame_weighted_dso_only_any_server_threads_only": 0.1793778869262331,
+   "frame_weighted_dso_only_libc_all": 0.1793712988263752,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.179376595846399,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
    "by_comm": [
     {
      "comm": "tokio-rt-worker",
@@ -435,6 +450,11 @@
    "server_share_of_capture": 0.791640140680678,
    "frame_weighted_unsym_all": 0.00027530735169119654,
    "frame_weighted_unsym_server_threads_only": 0.00026916524670489303,
+   "frame_weighted_dso_only_any_all": 0.1604510008352727,
+   "frame_weighted_dso_only_any_server_threads_only": 0.1782663795248408,
+   "frame_weighted_dso_only_libc_all": 0.1424756846314537,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.17249956311190667,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
    "by_comm": [
     {
      "comm": "tokio-rt-worker",
@@ -583,6 +603,11 @@
    "server_share_of_capture": 0.9501411508342898,
    "frame_weighted_unsym_all": 0.00023579208456959557,
    "frame_weighted_unsym_server_threads_only": 0.00023921735434286138,
+   "frame_weighted_dso_only_any_all": 0.16261448708803058,
+   "frame_weighted_dso_only_any_server_threads_only": 0.16882155144050726,
+   "frame_weighted_dso_only_libc_all": 0.16195885225678525,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.16857762638456525,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
    "by_comm": [
     {
      "comm": "tokio-rt-worker",
@@ -731,6 +756,11 @@
    "server_share_of_capture": 0.9883187251931502,
    "frame_weighted_unsym_all": 0.00018878105434318323,
    "frame_weighted_unsym_server_threads_only": 0.0001887986222384044,
+   "frame_weighted_dso_only_any_all": 0.17003330967288727,
+   "frame_weighted_dso_only_any_server_threads_only": 0.17155981656508512,
+   "frame_weighted_dso_only_libc_all": 0.16987487335177076,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.17149148640803435,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
    "by_comm": [
     {
      "comm": "tokio-rt-worker",
@@ -873,5 +903,13 @@
     "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
    }
   }
+ ],
+ "dso_only_libc_band_server_threads_only_pct": [
+  16.857762638456524,
+  17.9376595846399
+ ],
+ "dso_only_libc_band_all_frames_pct": [
+  14.247568463145369,
+  17.93712988263752
  ]
 }

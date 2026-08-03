@@ -11,7 +11,8 @@ tokio_scheduler                  149.5773   71.11%      126
 other                              0.0000    0.00%        2
 TOTAL                            210.3490  100.00%
 
-`other` broken out by NAMED cause (AC4 fixes 7 buckets; nothing is left unnamed):
+`other` broken out by NAMED cause (AC4 fixes 7 buckets; any residue is shown as
+`unclassified_residual`, bounded and quantified - NOT claimed to be absent):
     mmap_munmap                          0.0000 s    0.00%
     glibc_malloc_arena_lock              0.0000 s    0.00%
 

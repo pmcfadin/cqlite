@@ -1,12 +1,18 @@
 ==== WS0 #3217 AC3 ON-CPU SUMMARY ====
 
-profile            unsym all  unsym server      gate(<10%)     server%
-oncpu-s1-N1          0.0263%       0.0269%            PASS       97.6%
-oncpu-s1-N8          0.0124%       0.0124%            PASS      100.0%
-oncpu-s1-N16         0.0094%       0.0094%            PASS      100.0%
-oncpu-s6-N1          0.0275%       0.0269%            PASS       79.2%
-oncpu-s6-N8          0.0236%       0.0239%            PASS       95.0%
-oncpu-s6-N16         0.0189%       0.0189%            PASS       98.8%
+profile            unsym all  unsym server      gate(<10%)     server%  DSO-only srv%
+oncpu-s1-N1          0.0263%       0.0269%            PASS       97.6%         17.41%
+oncpu-s1-N8          0.0124%       0.0124%            PASS      100.0%         17.63%
+oncpu-s1-N16         0.0094%       0.0094%            PASS      100.0%         17.94%
+oncpu-s6-N1          0.0275%       0.0269%            PASS       79.2%         17.25%
+oncpu-s6-N8          0.0236%       0.0239%            PASS       95.0%         16.86%
+oncpu-s6-N16         0.0189%       0.0189%            PASS       98.8%         17.15%
+
+DSO-only srv%: [libc.so.6] frames as a fraction of SERVER-thread frame instances.
+These are NOT counted by the <10% unsymbolized gate (they carry a DSO name), so a
+PASS above does NOT mean 'fully symbolized'. All-frames basis, and any-DSO vs libc,
+are both in the JSON; the server-only [libc.so.6] column is the quotable figure.
+BAND: server-threads-only [libc.so.6] = 16.86%-17.94%   (all-frames basis 14.25%-17.94%)
 
 --- oncpu-s1-N1 : on-CPU cost centres (% of SERVER-thread samples) ---
     by crate: cqlite_core 57.1%, alloc 10.7%, tokio 8.9%, std 8.7%, cqlite_flight 7.6%, arrow 5.6%, tonic 1.1%, h2 0.2%, hyper 0.1%, prost 0.0%

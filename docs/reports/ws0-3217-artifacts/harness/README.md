@@ -83,7 +83,15 @@ only when the thread is switched back *in*, so a process that never wakes inside
 contributes nothing. This bit the dry run; it also means an off-CPU window must be long
 enough to contain wake-ups of the intervals you care about.
 
-**6. A corpus still being written misparses.** `corpus-basis.py`'s
+**6. The Part B parsers need `rust_demangler`, and its absence is SILENT-ish.** bcc and bpftrace
+emit RAW Rust v0 symbols; `demangle_helper.py` falls back to returning a frame UNCHANGED when the
+`rust_demangler` module is missing, so `classify-offcpu-v2.py` still runs, still produces a
+plausible-looking table, and **mis-buckets almost everything** (measured while re-deriving these
+artefacts: `mpsc_send_park` collapsed 50.57 s -> 2.89 s). Run the Part B parsers with an
+interpreter that has it (`/data/ws0/venv-demangle/bin/python` on this box) and sanity-check that
+no `_RN`-prefixed symbol survives into the output table.
+
+**7. A corpus still being written misparses.** `corpus-basis.py`'s
 `ceil(dataLength/chunkLength) == chunkCount` cross-check legitimately fails mid-flush. It is
 a visible warning, not a rejection — but re-measure the basis on the **final** corpus.
 

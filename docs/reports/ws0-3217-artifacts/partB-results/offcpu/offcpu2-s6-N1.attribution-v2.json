@@ -1,7 +1,7 @@
 {
  "schema": "ws0-3217.offcpu-attribution/v2",
  "label": "offcpu2-s6-N1",
- "folded_file": "/data/ws0/profiles/offcpu2-s6/offcpu-N1.folded",
+ "folded_file": "partB-results/offcpu/offcpu2-s6-N1.folded.gz",
  "total_blocked_time_us": 210348968,
  "unique_stacks": 375,
  "value_unit": "microseconds of off-CPU (blocked) time, summed over all threads",
@@ -159,7 +159,7 @@
    "pct_of_total_blocked": 0.0
   },
   {
-   "cause": "unnamed",
+   "cause": "unclassified_residual",
    "blocked_time_us": 0,
    "pct_of_total_blocked": 0.0
   }
@@ -186,7 +186,7 @@
    "pct_of_total_blocked": 0.0
   },
   {
-   "cause": "unnamed",
+   "cause": "unclassified_residual",
    "blocked_time_us": 0,
    "pct_of_total_blocked": 0.0
   }

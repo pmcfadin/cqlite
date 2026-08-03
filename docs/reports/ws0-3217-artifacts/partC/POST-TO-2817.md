@@ -8,12 +8,21 @@
 quoting from an assumption. Full method, artefacts and the attribution that backs the ordering
 call: `docs/reports/ws0-3217-report.md`.
 
-**One box** (Intel Xeon Platinum 8488C, 8 physical / 16 logical, SMT on, 1 NUMA node, kernel
+**One box** (Intel Xeon Platinum 8488C, **8 physical** / 16 logical, SMT on, 1 NUMA node, kernel
 6.17.0-1019-aws), CQLite `main` @ `693ae41` (post-#3058), Flight `do_get` bypass path, warm
 (page-cached, `read_bytes` = 0 verified on all 83 points), server pinned to S physical cores
 (both SMT siblings each), client fixed at 2 physical cores for every arm. Corpus: one
 `nb-16-big` SSTable, 3,999,890 rows, **693.29 B/row logical / 196.09 B/row on-disk**, no TTL and
 no tombstones (so `now`-pinning is N/A). Medians of 3 reps.
+
+**Read "full box" precisely, because this table will be quoted.** The widest arm is **S=6 — six of
+the box's eight physical cores** — and the server is **pinned** to those six, not spread across all
+eight. The remaining two physical cores are reserved for the client, which the issue's own
+"client isolated" requirement forces: a client sharing server cores would make `perf stat -C
+<server-cpus>` count loadgen work as engine work. **There is no S=8 point and none is claimed.** So
+the 0.711 figure is "6 pinned cores vs 1 pinned core", and any projection to a full 8- or 16-core
+box is an extrapolation beyond what was measured — the curve's shape (0.873 / 0.811 / 0.711)
+supports extrapolating, but the endpoint is not a measurement.
 
 ### The table
 

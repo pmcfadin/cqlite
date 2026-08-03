@@ -190,10 +190,13 @@ classifier; bpftrace `ustack` leaves ~50% raw hex where `perf script` symbolizes
 `--call-graph=dwarf` hangs on this binary). None of this is #3217-specific — the next agent that
 reaches for an off-CPU profile will hit all of it.
 
-A related, smaller hygiene gap from the same run: **17.2–17.8% of on-CPU frame instances resolve
-only to the DSO `[libc.so.6]`** with no function symbol (the un-symbolized system allocator), and
-those frames are **not** counted by the AC3 unsymbolized gate because they carry a DSO name. The
-gate reads 0.009–0.028% while ~18% of frames are opaque at function granularity. Installing glibc
+A related, smaller hygiene gap from the same run: **16.86–17.94% of SERVER-thread on-CPU frame
+instances resolve only to the DSO `[libc.so.6]`** with no function symbol (the un-symbolized system
+allocator; all-frames basis 14.25–17.94%), and those frames are **not** counted by the AC3
+unsymbolized gate because they carry a DSO name. The gate reads 0.009–0.028% while ~17% of server
+frames are opaque at function granularity. (The band is emitted per profile into
+`partB-results/oncpu/AC3-oncpu-summary.json` and is recomputable from the committed
+`oncpu/*.folded.gz`; an earlier in-flight note quoted an unsourced, narrower 17.2–17.8%.) Installing glibc
 debug symbols would close the gap that F3 most needs closed.
 
 ### Routing

@@ -213,7 +213,14 @@ same picture; only the guard tells you which one you are looking at.
 8. **`kernel.perf_event_paranoid` silently reverts to 4** on its own schedule; re-asserted (and
    asserted to have taken) before every capture. A stale value surfaces as unsymbolized kernel
    frames — i.e. as an AC3 failure with a misleading cause.
-9. **`pkill -f '<pattern>'` matches the launching shell.** Part A's runner killed its own sampler
+9. **The Part B parsers depend on `rust_demangler`, and its absence degrades quietly.** bcc and
+   bpftrace emit raw Rust v0 symbols; `demangle_helper.py` returns an undecodable frame *unchanged*
+   rather than failing, so `classify-offcpu-v2.py` without the module still runs, still emits a
+   plausible table, and **mis-buckets nearly everything** — measured while re-deriving these
+   artefacts, `mpsc_send_park` at s6-N1 collapsed from 50.57 s to 2.89 s. Same family as traps 1–3:
+   a broken instrument that produces output rather than an error. Run the Part B parsers with an
+   interpreter that has the module and check that no `_RN`-prefixed symbol survives into the table.
+10. **`pkill -f '<pattern>'` matches the launching shell.** Part A's runner killed its own sampler
    this way. Nothing here calls `pkill`; `ws0_stop_server` takes an explicit PID and `selftest.sh`
    asserts the launching shell survives.
 
@@ -355,11 +362,36 @@ Artefacts: `ws0-3217-artifacts/partB-results/` (`partB-analysis.{txt,json}`, `on
 All six pass by ~500×. The lower server share at s6-N1 is the box being 88% idle at that point
 (`swapper` is 19.0% of the capture) — expected, not a defect.
 
-**Caveat that qualifies the gate.** 17.2–17.8% of *frame instances* resolve only to the DSO
-`[libc.so.6]` with no function symbol — that is the glibc allocator, shipped without symbols.
-Those frames are *not* counted as unsymbolized by the gate (they carry a DSO name), so the
-0.009–0.028% figure understates how much of the profile is opaque at function granularity.
-`[libc.so.6]` is the single largest leaf in every profile (21.9–24.7% of server weight). The
+**Caveat that qualifies the gate — this is NOT "fully symbolized."** **16.86–17.94%** of
+*frame instances on server threads* resolve only to the DSO `[libc.so.6]` with no function symbol
+— that is the glibc allocator, shipped without symbols. Those frames are *not* counted as
+unsymbolized by the gate (they carry a DSO name), so the 0.009–0.028% figure understates how much
+of the profile is opaque at function granularity.
+
+| profile | DSO-only `[libc.so.6]`, **server threads** | same, all frames in capture |
+|---|--:|--:|
+| oncpu-s1-N1 | 17.41% | 17.07% |
+| oncpu-s1-N8 | 17.63% | 17.62% |
+| oncpu-s1-N16 | **17.94%** | 17.94% |
+| oncpu-s6-N1 | 17.25% | 14.25% |
+| oncpu-s6-N8 | **16.86%** | 16.20% |
+| oncpu-s6-N16 | 17.15% | 16.99% |
+
+**Definition and artefact, so the figure is checkable rather than asserted.** A *DSO-only* frame is
+one `perf script` prints as a bare `[<dso>]`: the address mapped to a shared object but to no
+function symbol. The metric is **weighted frame instances** — `sum(weight × matching frames) /
+sum(weight × frames)` — excluding `[unknown]` (that is the gate's own metric) and pseudo-DSOs
+`[[vdso]]` / `[[anon:*]]`. The **server-threads-only** basis is the quotable one, because the claim
+is about the *server's* opacity; the all-frames basis is diluted by `swapper`/loadgen/`bash` stacks
+that carry no libc frames at all (visible above at s6-N1, where the box is 88% idle: 14.25% vs
+17.25%). Both bases, plus an any-DSO variant, are emitted per profile by
+`partB-run/summarize-oncpu.py` into **`partB-results/oncpu/AC3-oncpu-summary.json`** (fields
+`frame_weighted_dso_only_libc_server_threads_only` / `…_all`, band under
+`dso_only_libc_band_server_threads_only_pct`) and printed as the `DSO-only srv%` column of
+`AC3-oncpu-summary.txt`. The roll-up reads the **committed** `oncpu/*.folded.gz`, so the band is
+reproducible from this repo alone after the measurement box is gone.
+
+`[libc.so.6]` is also the single largest *leaf* in every profile (21.9–24.7% of server weight). The
 allocator's *presence* is therefore well established; its internal breakdown is not.
 
 Cost centres are stable across the matrix — at s6-N16: `cqlite_core` 59.5%, `alloc` 11.1%,
@@ -382,9 +414,14 @@ over a 30 s window; **an explicit 0 means measured absent**, never omitted.
 | s6-N16 | 1963.72 | 0.0014 | 990.42 | 190.95 | 19.35 | **0.0000** | 760.32 | 2.68 |
 
 `disk_io` = 0 is correct and expected — the corpus is fully page-cached (§2.7). `other` is ≤0.14%
-everywhere and is fully broken out by named cause, never left as an unnamed residue.
-`tokio_scheduler` is 100% idle-runtime park (at s6-N16: io-driver epoll 306.6 s, blocking-pool idle
-233.6 s, idle worker park 220.0 s, timer 0.05 s) — i.e. threads with nothing to do, not overhead.
+of total blocked time everywhere and is broken out by named cause, with whatever matches no named
+cause shown as an explicit **`unclassified_residual`** line — **≤0.11% of total blocked time on
+every capture, reported not hidden** (worst case s6-N16: 2.13 s of 1,963.72 s). `tokio_scheduler`
+is **≥99.99% idle-runtime park** (at s6-N16: io-driver epoll 306.6 s, blocking-pool idle 233.6 s,
+idle worker park 220.0 s, timer 0.05 s, `unclassified_residual` 0.06 s) — i.e. threads with nothing
+to do, not overhead. Neither claim is "nothing is left unnamed": a bounded, labelled, quantified
+residue exists in both, and saying otherwise while printing the residue line would be a
+self-contradiction a reader is entitled to hold against every other number here.
 
 **The channel-identity split — the load-bearing distinction.** The bypass read path stacks **four**
 bounded channels between SSTable and wire; lumping them into one "mpsc" bucket would attribute
@@ -480,8 +517,17 @@ visible because both ran.
 
 ### 4.5 AC5 — run-queue latency and context switches
 
+**Coverage differs between the two halves of AC5, and the table headings say which.** The
+context-switch half below is **complete across the whole Part A matrix** — all five N (1, 2, 4, 8,
+16) at every S, from the per-TID sidecar. The run-queue-latency half covers the **Part B capture
+matrix only — N ∈ {1, 8, 16} at S=1 and S=6** — because `runqlat` ran alongside the off-CPU
+captures, which were taken at those six points. N = 2 and N = 4 have context-switch data but no
+`runqlat` histogram; that is a coverage limit of the instrument's schedule, not a missing
+measurement at a point that was profiled.
+
 `runqlat-bpfcc`, log2 buckets, microseconds (bucket-bounded percentiles — the tool reports
-buckets, so a point estimate would be fabricated precision):
+buckets, so a point estimate would be fabricated precision). **Part B matrix: N ∈ {1, 8, 16}
+only:**
 
 | arm | N | p50 | p90 | p99 | wakeups |
 |---|--:|---|---|---|--:|
@@ -492,7 +538,9 @@ buckets, so a point estimate would be fabricated precision):
 | S=6 | 8 | [0,1] | [32,63] | [256,511] | 5,896,098 |
 | S=6 | 16 | [4,7] | [128,255] | [1024,2047] | 5,889,067 |
 
-Context switches per N (Part A, cpu-wide rate and — the load-bearing columns — **per 1,000 rows**,
+Context switches per N — **complete across all five N at every S** (extract below shows the
+endpoints; the full five-N-by-four-S table is `results/partA-analysis.txt`). Cpu-wide rate and —
+the load-bearing columns — **per 1,000 rows**,
 since a raw rate necessarily rises with throughput):
 
 | arm | N | cs/s cpu-wide | migrations/s | vol cs / 1k rows | nonvol cs / 1k rows |
@@ -779,12 +827,17 @@ from a superseded capture.
    Two of those cores were pure loss. Measure the client's actual budget at the busiest point once,
    then allocate. (The gate must stay: an unmeasured client is not a cheaper client, it is an
    invalid measurement.)
-6. **Write the classifier against real symbols, then keep the pre-symbol version as evidence.**
+6. **Pin the parser's own dependencies, and make a missing one FAIL rather than degrade.**
+   `demangle_helper.py` returns an undecodable symbol unchanged, so running the attribution without
+   `rust_demangler` silently produces a wrong table instead of an error (s6-N1 `mpsc_send_park`
+   50.57 s vs 2.89 s). Any analysis tool whose degraded mode is "plausible output" needs a startup
+   assertion, not a fallback.
+7. **Write the classifier against real symbols, then keep the pre-symbol version as evidence.**
    v1 was written before any real stack existed and put 76–83% into `other`; v2 demangles first
    and matches leaf-first. The revision is expected and correct — but it must be *recorded*, since
    "we changed how we bucket after seeing the data" is exactly the shape of a result that got
    fitted rather than measured. Both classifiers are committed.
-7. **Budget three reps everywhere from the start.** The two dispersion outliers (12.3%, 10.7%)
+8. **Budget three reps everywhere from the start.** The two dispersion outliers (12.3%, 10.7%)
    both sit at low N on wide core sets. At reps=1 they would have shipped invisibly, and one of
    them sits next to a headline.
 
@@ -803,9 +856,16 @@ nobody can trace.
 | C2 | "**Geometry predicts these**" — said of all three `cqlite-core` channels' parks-per-batch | **Overstated for two of the three.** It holds tightly for **`core_raw_chunk` only** (347 predicted sends vs 265–327 measured parks). `core_query_rows` records **3.1–3.4× more parks than sends** (64 vs 201–220) and `core_windowed_batch` exceeds its send count at the busiest point (32 vs 43). The both-endpoints-park / std-`sync_channel` explanation is a **hypothesis and unmeasured**. The site attribution itself is unaffected: every park is attributed to a named site, `other` = 0, and the handoff records zero. | §5, including its opening callout |
 | C3 | The `self_normalisation_warning` string in `partA-analysis.json` labelled the own-N=1 series "S=1 216229, S=2 212578, S=4 205129, S=6 175872" | **Off by one label.** It zipped the first four entries of a per-arm list that holds **two S=1 arms** (`cn-s1` and the independent `cn-s1-ac5` re-run) onto the labels 1/2/4/6. Correct series: **S=1 216229, S=2 205129, S=4 175872, S=6 163510 rows/s.** The `.txt` table and the `per_arm` JSON were always correct — only the prose warning was wrong. Fixed **in the generator** (`partA-run/analyze-partA.py`, now derived from each arm's own `S_physical_cores` and spelling out the arm label) and the artefact regenerated, so the next run cannot reproduce it. | `results/partA-analysis.json` → `cross_S_scaling.self_normalisation_warning`; §3.2 |
 
-A fourth item is a qualification rather than a correction: **AC3's PASS is not "fully symbolized"**
-— 17.2–17.8% of frame instances are DSO-only `[libc.so.6]` and escape the gate's metric. Carried
-on the AC table row itself so it cannot be read in isolation (§4.1).
+| C4 | "**17.2–17.8%** of frame instances resolve only to `[libc.so.6]`" — the AC3 opacity caveat | **Unsourced, and both ends were wrong.** No committed artefact produced that band. Recomputed from a stated definition (weighted frame instances of bare-`[<dso>]` frames, excluding `[unknown]` and pseudo-DSOs): **16.86–17.94% on server threads**, 14.25–17.94% on the all-frames basis. The figure is now **emitted by `partB-run/summarize-oncpu.py` into `partB-results/oncpu/AC3-oncpu-summary.json`** (+ a `DSO-only srv%` column in the `.txt`), computed from the **committed** `oncpu/*.folded.gz` so it is reproducible from this repo alone. Under this report's own AC8 standard an unsourced figure in a caveat is exactly what may not ship. | §4.1 (definition + per-profile table); AC3 row |
+| C5 | "`other` is **fully broken out by named cause, never left as an unnamed residue**" and "`tokio_scheduler` is **100%** idle-runtime park" | **Self-contradictory as written** — the generator printed those sentences directly above an `unnamed` line (2.13 s = 0.11% of blocked time at s6-N16; 0.06 s in the tokio breakdown). Corrected in **both** the report and the generator: the bucket is renamed **`unclassified_residual`** and the claim is now the true one — a residue exists, is bounded at **≤0.11% of total blocked time**, and is shown. The six `attribution-v2.{json,txt}` artefacts were **re-emitted** from the committed `offcpu/*.folded.gz` and verified **bit-identical to the originals modulo the rename** (only `folded_file` changes, now naming the committed input). | §4.2; `partB-run/classify-offcpu-v2.py` |
+
+A further item is a qualification rather than a correction: **AC3's PASS is not "fully symbolized"**
+— **16.86–17.94%** of *server-thread* frame instances are DSO-only `[libc.so.6]` and escape the
+gate's metric. An earlier in-flight note quoted a narrower **17.2–17.8%** band that no committed
+artefact backed; the figure is now emitted from a stated definition into
+`partB-results/oncpu/AC3-oncpu-summary.json` by `partB-run/summarize-oncpu.py`, computed from the
+**committed** `oncpu/*.folded.gz`, and the band is whatever that artefact says. Carried on the AC
+table row itself so it cannot be read in isolation (§4.1).
 
 ---
 
@@ -815,7 +875,7 @@ on the AC table row itself so it cannot be read in isolation (§4.1).
 |--:|:--|:--|
 | 1 — full-box C(N) at N=1..16, warm, median of ≥3, dispersion, aggregate + per-stream + marginal efficiency, admission clean | ✅ | §3.1–3.2; `results/partA-analysis.*`; `requests_unavailable`=0 on all 83 points |
 | 2 — pinned-core control reproduces #3100's shape (or divergence explained) | ✅ reproduced within ≤1.8 pp | §3.3 |
-| 3 — on-CPU flame graphs, pinned + full-box, unsymbolized <10% | ✅ 6/6 PASS (0.009–0.028%) — **QUALIFIED: this is NOT "fully symbolized."** 17.2–17.8% of frame instances resolve only to the DSO `[libc.so.6]` (the un-symbolized system allocator) and are **not counted by the gate**, because they carry a DSO name. The gate's metric is satisfied; ~18% of frames remain opaque at function granularity. Do not read this row in isolation. | §4.1 (caveat); remedy proposed as F4 in `partC/PROPOSED-FOLLOWUPS.md`; `partB-results/oncpu/` |
+| 3 — on-CPU flame graphs, pinned + full-box, unsymbolized <10% | ✅ 6/6 PASS (0.009–0.028%) — **QUALIFIED: this is NOT "fully symbolized."** **16.86–17.94%** of *server-thread* frame instances resolve only to the DSO `[libc.so.6]` (the un-symbolized system allocator) and are **not counted by the gate**, because they carry a DSO name (all-frames basis 14.25–17.94%). The gate's metric is satisfied; ~17% of server frames remain opaque at function granularity. Figure emitted from a stated definition into `AC3-oncpu-summary.json`, recomputable from the committed `oncpu/*.folded.gz`. Do not read this row in isolation. | §4.1 (caveat); remedy proposed as F4 in `partC/PROPOSED-FOLLOWUPS.md`; `partB-results/oncpu/` |
 | 4 — off-CPU flame graphs + ranked attribution, every class quantified or explicitly absent | ✅ all 7 buckets + 5-way channel split, explicit zeros | §4.2; `partB-results/offcpu/` |
 | 5 — context switches + run-queue latency per N | ✅ | §4.5; `partB-results/scheduler/` |
 | 6 — byte basis named on every throughput figure; geometry + sha recorded; `now`-pinning N/A | ✅ | §2.3; three bases carried throughout |

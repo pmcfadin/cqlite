@@ -11,8 +11,9 @@ tokio_scheduler                  103.5531   64.64%     2435
 other                              0.1225    0.08%      279
 TOTAL                            160.1944  100.00%
 
-`other` broken out by NAMED cause (AC4 fixes 7 buckets; nothing is left unnamed):
-    unnamed                              0.0667 s    0.04%
+`other` broken out by NAMED cause (AC4 fixes 7 buckets; any residue is shown as
+`unclassified_residual`, bounded and quantified - NOT claimed to be absent):
+    unclassified_residual                0.0667 s    0.04%
     unsymbolized_frames_only             0.0557 s    0.03%
     kernel_page_fault                    0.0000 s    0.00%
     thread_lifecycle                     0.0000 s    0.00%
@@ -21,7 +22,7 @@ TOTAL                            160.1944  100.00%
     io_driver_epoll_park                46.5935 s   29.09%
     blocking_pool_idle_thread           30.7364 s   19.19%
     idle_worker_park                    26.1011 s   16.29%
-    unnamed                              0.0953 s    0.06%
+    unclassified_residual                0.0953 s    0.06%
     timer_park                           0.0268 s    0.02%
 
 CHANNEL IDENTITY of send/recv/credit parks (55.0891 s total):

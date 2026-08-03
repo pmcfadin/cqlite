@@ -11,15 +11,16 @@ tokio_scheduler                  557.4528   27.75%     2369
 other                              0.2186    0.01%       47
 TOTAL                           2008.5551  100.00%
 
-`other` broken out by NAMED cause (AC4 fixes 7 buckets; nothing is left unnamed):
-    unnamed                              0.2179 s    0.01%
+`other` broken out by NAMED cause (AC4 fixes 7 buckets; any residue is shown as
+`unclassified_residual`, bounded and quantified - NOT claimed to be absent):
+    unclassified_residual                0.2179 s    0.01%
     unsymbolized_frames_only             0.0006 s    0.00%
 
 `tokio_scheduler` broken out (an IDLE runtime park is not a cost):
     io_driver_epoll_park               362.1451 s   18.03%
     blocking_pool_idle_thread          179.3970 s    8.93%
     idle_worker_park                    15.9107 s    0.79%
-    unnamed                              0.0000 s    0.00%
+    unclassified_residual                0.0000 s    0.00%
     timer_park                           0.0000 s    0.00%
 
 CHANNEL IDENTITY of send/recv/credit parks (1431.9190 s total):

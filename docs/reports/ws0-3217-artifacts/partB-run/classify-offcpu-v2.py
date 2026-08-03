@@ -31,7 +31,9 @@ the largest real cause v1 had no bucket for — **glibc malloc arena lock
 contention** (`__lll_lock_wait_private` under `_int_malloc`/`cfree`) — correctly
 lands in `other`. Hiding it there would be the whole failure mode this file
 exists to prevent, so `other` is broken out by named cause in `other_breakdown`,
-quantified, and NEVER left as an unnamed residue.
+quantified. What no named cause matches stays in an explicitly labelled
+`unclassified_residual` line (<=0.11% of total blocked time on every capture here) —
+reported, never hidden, and never described as though it were zero.
 
 CHANNEL IDENTITY IS THE LOAD-BEARING DISTINCTION (this is the point of Part B).
 `mpsc_send_park` is not one channel: the bypass read path stacks FOUR bounded
@@ -58,6 +60,7 @@ Usage: classify-offcpu-v2.py <folded> [--out-json f] [--out-table f] [--label L]
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import sys
 from collections import defaultdict
@@ -103,7 +106,10 @@ MATCH_TABLE: list[tuple[str, list[str]]] = [
 ]
 BUCKETS = [b for b, _ in MATCH_TABLE] + ["other"]
 
-# `other` is broken out by NAMED cause; nothing stays an unnamed residue.
+# `other` is broken out by NAMED cause. Whatever matches none of them lands in
+# `unclassified_residual` — a LABELLED line, not an absence. Claiming 'nothing is left
+# unnamed' while printing a residue line is a self-contradiction; the honest claim is
+# 'the residue is bounded, quantified and shown'.
 OTHER_CAUSES: list[tuple[str, list[str]]] = [
     ("glibc_malloc_arena_lock", ["__lll_lock_wait", "_int_malloc", "_int_free",
                                  "arena_get", "malloc_consolidate", "tcache",
@@ -192,7 +198,10 @@ def main() -> int:
     a = ap.parse_args()
 
     entries = []
-    for line in open(a.folded):
+    # Accept the COMMITTED gzipped folded file too, so the attribution is reproducible
+    # from the repo alone after the measurement box is gone (AC8).
+    _open = gzip.open if a.folded.endswith(".gz") else open
+    for line in _open(a.folded, "rt"):
         line = line.rstrip("\n")
         if not line.strip():
             continue
@@ -212,10 +221,10 @@ def main() -> int:
     bucket_us = {b: 0 for b in BUCKETS}
     bucket_stacks = defaultdict(list)
     other_us = {c[0]: 0 for c in OTHER_CAUSES}
-    other_us["unnamed"] = 0
+    other_us["unclassified_residual"] = 0
     other_unnamed = []
     tokio_us = {c[0]: 0 for c in TOKIO_SUB}
-    tokio_us["unnamed"] = 0
+    tokio_us["unclassified_residual"] = 0
     chan_us = {c[0]: 0 for c in CHANNELS}
     chan_us["unattributed_channel"] = 0
 
@@ -228,11 +237,11 @@ def main() -> int:
             if c:
                 other_us[c] += us
             else:
-                other_us["unnamed"] += us
+                other_us["unclassified_residual"] += us
                 other_unnamed.append((us, stack))
         if b == "tokio_scheduler":
             c, _ = first_match(stack, TOKIO_SUB)
-            tokio_us[c or "unnamed"] += us
+            tokio_us[c or "unclassified_residual"] += us
         if b in ("mpsc_send_park", "mpsc_recv_park", "egress_credit_acquire"):
             c, _ = first_match(stack, CHANNELS)
             chan_us[c or "unattributed_channel"] += us
@@ -301,7 +310,8 @@ def main() -> int:
             b["unique_stacks"], "   (explicit zero)" if not b["present"] else ""))
     L.append("%-26s %14.4f %7.2f%%" % ("TOTAL", total / 1e6, 100.0))
     L.append("")
-    L.append("`other` broken out by NAMED cause (AC4 fixes 7 buckets; nothing is left unnamed):")
+    L.append("`other` broken out by NAMED cause (AC4 fixes 7 buckets; any residue is shown as")
+    L.append("`unclassified_residual`, bounded and quantified - NOT claimed to be absent):")
     for o in doc["other_breakdown"]:
         if o["blocked_time_us"]:
             L.append("    %-30s %12.4f s  %6.2f%%" % (o["cause"], o["blocked_time_us"] / 1e6,
