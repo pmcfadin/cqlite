@@ -1,7 +1,7 @@
 {
   "issue": 3234,
   "purpose": "Profileable LZ4-compressed multi-SSTable Cassandra 5.0 BTI (`da`) corpus with wide partitions and a compound clustering key, for BTI read-path measurement (#3029 WS3, #3030 WS4) and as a Cassandra-written parity oracle.",
-  "generated_utc": "2026-08-03T16:31:22.436935+00:00",
+  "generated_utc": "2026-08-03T17:03:22.527860+00:00",
   "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
   "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
   "mode": "production",
@@ -295,7 +295,7 @@
     "data_db_sha256": "sha256 of the Data.db bytes, recomputed every run; identifies this corpus INSTANCE (see `reproducibility` \u2014 write timestamps make the bytes non-reproducible even at a fixed seed)",
     "compression": "CompressionInfo.db header (authoritative, not the DDL)",
     "rows": "Cassandra sstablemetadata totalRows (Statistics.db) per SSTable; fail-closed, never a fabricated 0",
-    "partitions": "sstablemetadata Partition Size histogram bucket counts",
+    "partitions": "sstablemetadata Partition Size histogram bucket counts, cross-checked against the row driver's planned partition count; fail-closed, never a fabricated 0",
     "rows_per_partition": "row driver plan records, counted while writing the CSV",
     "toc": "read from each SSTable's own TOC.txt",
     "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)"
@@ -1743,7 +1743,9 @@
   "row_count_cross_check": {
     "row_driver_rows": 13200000,
     "statistics_db_rows": 13200000,
+    "row_driver_partitions": 17299,
+    "statistics_db_partitions": 17299,
     "agree": true,
-    "note": "fail-closed: a disagreement aborts before the manifest is written"
+    "note": "fail-closed: a rows OR partitions disagreement aborts before the manifest is written, and an UNOBSERVED partition count is an error rather than a 0"
   }
 }
