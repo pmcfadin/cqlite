@@ -1146,6 +1146,40 @@ roborev_check_census_exclusion() {
       roborev_builtin_state_details
       return 0
     fi
+    # --- the TOTAL swallow: nothing reaches the reviewer at all ⇒ FAIL --------------
+    # A PARTIAL built-in swallow is a NOTICE (above/below): some of the diff still reaches
+    # the reviewer, the remainder has no remedy, and failing would red a routine
+    # `Cargo.lock` touch — the ruling this change deliberately made.
+    #
+    # THIS IS NOT A CONTRADICTION OF THAT RULING; it is the SAME rule — "FAIL where the
+    # author can act; NOTICE where only the information is actionable; NEVER SILENCE" —
+    # applied consistently to a case the NOTICE ruling does not cover. When EVERY code
+    # census path is swallowed the reviewer receives an EMPTY prompt, so a returned "no
+    # issues found" certifies NOTHING: it is the very same condition `code-free:` already
+    # FAILs pre-enqueue for a prose-only census, arrived at by the exclusion set rather
+    # than by classification. Reporting a NOTICE here would let `prompt-content:` go on to
+    # print `PASS (0/0 code census paths present)` and the block to read `RESULT: PASS` —
+    # a VACUOUS pass TEXTUALLY IDENTICAL to a genuine one, on which `flow-closer` would
+    # arm `--auto`. MEASURED (#3229 round 3, hermetic fixture `Cargo.lock` + `README.md`):
+    # `census-exclusion: NOTICE (0/1 ... survive)` ⇒ `prompt-content: PASS (0/0 ...)` ⇒
+    # `RESULT: PASS`, exit 0. Any dependency-bump branch whose only non-prose file is a
+    # `Cargo.lock` / `go.sum` / `pnpm-lock.yaml` reaches it, and `code-free:` does NOT
+    # catch it because a `.lock` extension classifies as CODE.
+    # The remedy is the ACTIONABLE one code-free already prescribes — verify another way
+    # and record it — so this FAILs, and it FAILs BEFORE the enqueue: a review of an empty
+    # prompt costs a round and certifies nothing.
+    if [ "$m" -ge "$n_code" ]; then
+      CENSUS_EXCLUSION="FAIL (${pass_prefix}0/$n_code code census paths survive $survive_of; ALL $n_code code census path(s) excluded by a roborev built-in, so the reviewer would receive an EMPTY diff: $joined; corroboration: $_rx_corroboration; $builtin_state_clause)"
+      DETAILS+=("ERROR: census-exclusion: EVERY ONE of the $n_code CODE path(s) in this census is dropped from the diff roborev builds by a ROBOREV BUILT-IN exclude (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list), so NOTHING would reach the reviewer. A verdict on an EMPTY prompt certifies nothing, and this diff therefore CANNOT be roborev-certified at all — exactly as a code-free (prose-only) census cannot. The sanctioned substitute is primary-source verification recorded in the PR; this change must NEVER record \"roborev clean\".")
+      DETAILS+=("ERROR: census-exclusion: a PARTIAL built-in swallow stays a NOTICE — some of the diff still reaches the reviewer and the rest has no remedy. A TOTAL one FAILs because it is the same condition 'code-free:' already fails pre-enqueue: this is the rule 'FAIL where the author can act; NOTICE where only the information is actionable; never silence' applied consistently, not an exception to it. The actionable remedy is the one code-free prescribes — verify these path(s) another way and record it.")
+      DETAILS+=("ERROR: census-exclusion: path(s) the reviewer would NOT receive, each with the built-in responsible:")
+      for path in "${swallowed[@]}"; do
+        DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'  [${_rx_blame_src[$path]:-<unattributed>}]")
+      done
+      DETAILS+=("ERROR: census-exclusion: no review was enqueued — an exclusion set that swallows the WHOLE code census is knowable BEFORE the enqueue, so it costs no review round.")
+      roborev_builtin_state_details
+      finish FAIL 1
+    fi
     CENSUS_EXCLUSION="NOTICE (${pass_prefix}$((n_code - m))/$n_code code census paths survive $survive_of; $m code census path(s) excluded by a roborev built-in: $joined; corroboration: $_rx_corroboration; $builtin_state_clause)"
     DETAILS+=("NOTICE: census-exclusion: $m of the $n_code CODE path(s) in this census are dropped from the diff roborev builds by a ROBOREV BUILT-IN exclude (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list), and the live built-in set still MATCHES that pin. NO configured pattern is responsible, so there is NOTHING TO FIX in '$repo_cfg' or any other config file — the deny-list is compiled into the binary and has no opt-out. Under the rule 'FAIL where the author can act; NOTICE where only the information is actionable; never silence', this is a NOTICE: a check that fires on a legitimate change (a routine Cargo.lock touch) with no remedy available is a check that gets disabled, which is how #3229 happened.")
     DETAILS+=("NOTICE: census-exclusion: path(s) the reviewer will NOT receive, each with the built-in responsible:")

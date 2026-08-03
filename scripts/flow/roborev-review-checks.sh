@@ -108,9 +108,42 @@ roborev_check_prompt_content() {
     # only same-path headers therefore FALSELY REJECTED any review containing a detected
     # rename. Extracting the path set from both sides and comparing whole-line makes the
     # two rename behaviours agree without weakening the check to a substring test.
+    #
+    # EVERY HEADER SHAPE GIT EMITS, and BOTH SIDES NORMALISED (codex round 7 — BLOCKER,
+    # #3229). The old parser accepted `^diff --git a/[^ ]+ b/[^ ]+$` ONLY and compared the
+    # census's C-QUOTED spelling against those unquoted captures, so it FALSE-FAILED on
+    # two shapes git really produces:
+    #   - a path with SPACES:  diff --git a/a b.txt b/a b.txt
+    #   - a C-QUOTED path:     diff --git "a/\303\251.txt" "b/\303\251.txt"
+    # That direction is the dangerous one: `prompt-content:` is this wrapper's STRONGEST
+    # deterministic anti-vacuity key, and a key that reds on correct input is the key
+    # agents learn to waive. Reachability is not theoretical — this repo already tracks
+    # 40 space-bearing paths under `docs/` (including the directory `docs/storage engine/`)
+    # and #3229 promotes `docs/reports/*-artifacts/**` executables to CODE census paths.
+    # So: the extracted set carries the quoted shape too, EVERY path is normalised through
+    # `roborev_unquote_path` on BOTH sides (exactly as `census-exclusion:` already does),
+    # and a space-bearing header — which no regex can split unambiguously — is matched by
+    # probing the LITERAL header line the census path would produce.
     PROMPT_PATHS_FILE="$LOG.promptpaths"
-    { grep -oE '^diff --git a/[^ ]+ b/[^ ]+$' "$PROMPT_FILE" 2>/dev/null || true; } \
-      | sed -E 's|^diff --git a/([^ ]+) b/([^ ]+)$|\1\n\2|' | sort -u >"$PROMPT_PATHS_FILE"
+    {
+      # (a) the unquoted, space-free shape: the common case, both sides captured.
+      { grep -oE '^diff --git a/[^ ]+ b/[^ ]+$' "$PROMPT_FILE" 2>/dev/null || true; } \
+        | sed -E 's|^diff --git a/([^ ]+) b/([^ ]+)$|\1\n\2|'
+      # (b) the C-quoted shape, unquoted back to the RAW bytes the census normalises to.
+      #     git quotes each side WHOLE (`"a/<body>"`), and neither `a` nor `/` is ever
+      #     escaped, so the body is the path's own quoted spelling.
+      while IFS= read -r prompt_hdr; do
+        [ -n "$prompt_hdr" ] || continue
+        prompt_qa="${prompt_hdr#diff --git \"a/}"
+        prompt_qa="${prompt_qa%%\" \"b/*}"
+        prompt_qb="${prompt_hdr##*\" \"b/}"
+        prompt_qb="${prompt_qb%\"}"
+        roborev_unquote_path "\"$prompt_qa\""
+        printf '%s\n' "$_rx_unquoted"
+        roborev_unquote_path "\"$prompt_qb\""
+        printf '%s\n' "$_rx_unquoted"
+      done < <({ grep -E '^diff --git "a/.*" "b/.*"$' "$PROMPT_FILE" 2>/dev/null || true; })
+    } | sort -u >"$PROMPT_PATHS_FILE"
     # SUBTRACT the paths `census-exclusion:` determined a ROBOREV BUILT-IN drops. Their
     # absence from the prompt is not a finding: it is the deterministic consequence of a
     # deny-list compiled into the binary, already reported LOUDLY (and non-fatally) under
@@ -119,22 +152,53 @@ roborev_check_prompt_content() {
     # chose not to red it there — the same self-defeating guard, moved one key down.
     # Scoped to BUILT-IN swallows ONLY: a CONFIGURED swallow FAILs pre-enqueue, so this
     # code is never reached with one, and the subtraction can never mask a config defect.
+    # `CENSUS_BUILTIN_EXCLUDED` holds RAW (already-unquoted) paths, so the census side is
+    # normalised BEFORE the comparison — matching a quoted census spelling against a raw
+    # exclusion entry would have failed to subtract an odd-named built-in swallow.
     checked_paths=()
+    checked_spellings=()
     for census_path in "${census_code_paths[@]}"; do
+      roborev_unquote_path "$census_path"
+      census_raw="$_rx_unquoted"
       builtin_excluded=0
       for excluded_path in ${CENSUS_BUILTIN_EXCLUDED[@]+"${CENSUS_BUILTIN_EXCLUDED[@]}"}; do
-        [ "$census_path" != "$excluded_path" ] || builtin_excluded=1
+        [ "$census_raw" != "$excluded_path" ] || builtin_excluded=1
       done
       [ "$builtin_excluded" -eq 0 ] || continue
-      checked_paths+=("$census_path")
+      checked_paths+=("$census_raw")
+      checked_spellings+=("$census_path")
     done
     census_total=${#checked_paths[@]}
     n_builtin_skipped=$((${#census_code_paths[@]} - census_total))
     missing_paths=()
-    for census_path in "${checked_paths[@]}"; do
-      grep -Fxq -- "$census_path" "$PROMPT_PATHS_FILE" || missing_paths+=("$census_path")
+    for ((cp_i = 0; cp_i < census_total; cp_i++)); do
+      census_raw="${checked_paths[$cp_i]}"
+      census_spelling="${checked_spellings[$cp_i]}"
+      # 1. the normalised path SET — covers renames (the two path sides differ) and every
+      #    quoted spelling, because both sides went through `roborev_unquote_path`.
+      if grep -Fxq -- "$census_raw" "$PROMPT_PATHS_FILE"; then continue; fi
+      # 2. the LITERAL same-path header in its raw spelling — the only sound test for a
+      #    path containing SPACES, which `a/<x> b/<y>` cannot be split on unambiguously.
+      if grep -Fxq -- "diff --git a/$census_raw b/$census_raw" "$PROMPT_FILE"; then continue; fi
+      # 3. ...and in the census's own C-quoted spelling, for a producer that quotes where
+      #    step (b) above could not round-trip it.
+      if [ "$census_spelling" != "$census_raw" ]; then
+        census_qbody="${census_spelling#\"}"
+        census_qbody="${census_qbody%\"}"
+        if grep -Fxq -- "diff --git \"a/$census_qbody\" \"b/$census_qbody\"" "$PROMPT_FILE"; then continue; fi
+      fi
+      missing_paths+=("$census_raw")
     done
-    if [ "${#missing_paths[@]}" -gt 0 ]; then
+    if [ "$census_total" -eq 0 ]; then
+      # A `0/0` IS NEVER A PASS (codex round 7 — BLOCKER, #3229). Belt-and-braces behind
+      # `census-exclusion:`, which now FAILs pre-enqueue when EVERY code census path is
+      # swallowed: with nothing left to check there is no evidence whatsoever that the
+      # reviewer received a diff, and `PASS (0/0 code census paths present)` is textually
+      # indistinguishable from a genuine pass. Refuse to print one — if this key has no
+      # subject, it has no verdict to give.
+      PROMPT_CONTENT="FAIL (no code census path was checkable — a 0/0 is never a pass)"
+      DETAILS+=("ERROR: prompt-content: there is not one CODE census path left to look for in the prompt (census code paths: ${#census_code_paths[@]}, all of them dropped from the diff roborev builds), so this key has NO subject and therefore no verdict to give. Failing closed: 'PASS (0/0 code census paths present)' would be textually identical to a genuine pass while the reviewer received an EMPTY prompt. See census-exclusion:, which fails pre-enqueue for the same reason.")
+    elif [ "${#missing_paths[@]}" -gt 0 ]; then
       PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
       DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a prompt that does not mention its files cannot have reviewed them. Missing (first 10):")
       printed=0

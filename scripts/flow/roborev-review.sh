@@ -105,7 +105,11 @@
 #   prompt-content    PASS (<k>/<n> code census paths present)
 #                     [ (+<b> not expected: excluded by a roborev built-in — ...) ] |
 #                     FAIL (<k>/<n> code census paths absent from the prompt) |
+#                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
 #                     FAIL (prompt unretrievable — ...) | SKIP
+#                     Paths are compared NORMALISED (both sides through
+#                     roborev_unquote_path) and EVERY header shape git emits is
+#                     recognised: unquoted, space-bearing, and C-quoted.
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
@@ -282,10 +286,20 @@ THE UNIFYING RULE, which decides every value below:
 It is not three ad-hoc calls but one rule applied three times:
   - a CONFIGURED pattern (sources 1-3) swallowing census code => FAIL. The remedy is a
     one-token edit to a NAMED file; act before paying for a review round.
-  - a PINNED built-in (source 4) swallowing census code => NOTICE. There IS no fix: the
-    deny-list is compiled in, with no opt-out and no negation form. A check that fires
-    on a legitimate change (a routine Cargo.lock touch) with no remedy available is a
-    check that gets DISABLED, and a disabled census-exclusion is #3229 all over again.
+  - a PINNED built-in (source 4) swallowing SOME census code => NOTICE. There IS no fix:
+    the deny-list is compiled in, with no opt-out and no negation form. A check that
+    fires on a legitimate change (a routine Cargo.lock touch) with no remedy available
+    is a check that gets DISABLED, and a disabled census-exclusion is #3229 all over
+    again.
+  - a PINNED built-in swallowing the WHOLE code census => FAIL. Not an exception to the
+    NOTICE above but the SAME rule reaching a case it does not cover: with nothing left,
+    the reviewer receives an EMPTY prompt, so any verdict certifies NOTHING — the very
+    condition code-free: already FAILs pre-enqueue for a prose-only census. The remedy
+    is code-free's: verify another way and record it in the PR. Left as a NOTICE it let
+    prompt-content: print 'PASS (0/0 code census paths present)' and the block read
+    'RESULT: PASS' — a vacuous pass textually identical to a genuine one (MEASURED on a
+    Cargo.lock + README.md fixture). Any lockfile-only dependency bump reaches it, and
+    code-free: does not catch it because a '.lock' extension classifies as CODE.
   - the LIVE built-in set DIVERGING from the pinned 24 => FAIL. This one HAS a remedy
     (re-extract, update the pin, judge the new built-in) and it is a MECHANISM change,
     which the v0.61.2 pin already obliges us to catch on upgrade. A NOTICE here would
@@ -301,10 +315,14 @@ Both FAIL causes outrank the NOTICE, and EVERY cause present is named. Values:
        v0.61.2 built-in exclude(s); ...)  absent key/file or an empty list, and only
        once 'roborev config get' has CORROBORATED that nothing is configured
   NOTICE (<k>/<n> ... survive ...; <m> code census path(s) excluded by a roborev
-       built-in: <path> by '<pattern>' [roborev-builtin]; ...)  NON-FAILING (NOTICE is
+       built-in: <path> by '<pattern>' [roborev-builtin]; ...)  PARTIAL swallow only
+       (a total one is the FAIL below); NON-FAILING (NOTICE is
        outside the verdict scan's FAIL*|FINDINGS*|ERROR*|INCONSISTENT* set) but the
        paths ARE named: a clean verdict does not cover them, and prompt-content: is
        told not to expect them
+  FAIL (0/<n> code census paths survive ...; ALL <n> code census path(s) excluded by a
+       roborev built-in, so the reviewer would receive an EMPTY diff: ...)  the TOTAL
+       swallow — uncertifiable, exactly as a code-free census is
   FAIL (roborev built-in exclude set DIVERGED from the pinned v0.61.2 set: <delta>)
        DIFF-INDEPENDENT — the mechanism moved under us; re-extract and re-pin
   FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>' [<source>], ...)
