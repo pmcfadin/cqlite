@@ -38,6 +38,21 @@
 #[cfg(feature = "arrow")]
 pub mod arrow_convert;
 
+// The CQL → Arrow converter, split by responsibility (epic #1116; issue #3096
+// Phase 0a). `arrow_convert` keeps the public entry points and the top-level
+// column dispatch and re-exports everything the rest of the crate used to reach
+// through it, so no `use` path outside this module changed.
+#[cfg(feature = "arrow")]
+mod arrow_builders_nested;
+#[cfg(feature = "arrow")]
+mod arrow_builders_scalar;
+#[cfg(feature = "arrow")]
+mod arrow_convert_util;
+#[cfg(feature = "arrow")]
+mod arrow_schema;
+#[cfg(feature = "arrow")]
+mod arrow_typed_value;
+
 // Per-column accessor resolution for Arrow conversion (issue #1495, AE1): resolves
 // each schema column once and transposes rows into per-column value slices,
 // killing the per-cell `values.get(name)` string-hash lookup (parser epic J1).
