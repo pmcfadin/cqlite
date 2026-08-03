@@ -2905,15 +2905,27 @@ printf '== structural: the exclusion view is GIT-matched, VERSION-PINNED, and no
 reset_stub
 ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 if [ -f "$ORACLES" ]; then
-  if grep -qF ':(exclude,glob)' "$ORACLES"; then
-    ok 'structural: the check constructs :(exclude,glob) git pathspecs'
+  # Anchored to the CONSTRUCTION STATEMENT on an EXECUTABLE line, not to a file-wide grep:
+  # the file carries ~20 further `:(exclude,glob)` occurrences in comments, in the pinned
+  # built-in extraction, and in DETAILS prose, so `grep -qF ':(exclude,glob)' "$ORACLES"`
+  # stays green with the construction replaced by a hand-rolled matcher (MEASURED: swapping
+  # it for `:!` left this assert `ok`). The pinned LITERAL COUNT is a separate obligation,
+  # asserted on ROBOREV_BUILTIN_PATHSPEC_LITERALS above.
+  if grep -nE '_rx_pathspecs\+=\(":\(exclude,glob\)' "$ORACLES" | grep -qv '^[0-9]*: *#'; then
+    ok 'structural: the check CONSTRUCTS :(exclude,glob) git pathspecs (executable statement, not a comment)'
   else
-    bad 'structural: no :(exclude,glob) pathspec construction found — the matcher may have been re-implemented'
+    bad 'structural: no executable :(exclude,glob) pathspec construction found — the matcher may have been re-implemented (note: a file-wide grep would still pass here, satisfied by the comments and the pinned-set extraction)'
   fi
-  if grep -qE 'git -C "\$REPO" diff --name-only -z --no-renames' "$ORACLES"; then
-    ok 'structural: survivors come from git diff --name-only -z --no-renames (NUL-safe, census-comparable)'
+  # Counted, not merely present: the oracles file runs the query TWICE (survivors, then
+  # per-pattern blame) and both must be NUL-safe, so a bare presence grep stays green with
+  # `-z` dropped from either one (MEASURED). The `-z` audit loop below covers the same
+  # property file-wide; this assert additionally pins the query's exact census-comparable shape.
+  _surv_reads=$(grep -cE 'git -C "\$REPO" diff --name-only' "$ORACLES" || true)
+  _surv_nulsafe=$(grep -cE 'git -C "\$REPO" diff --name-only -z --no-renames' "$ORACLES" || true)
+  if [ "${_surv_reads:-0}" -gt 0 ] && [ "${_surv_reads:-0}" -eq "${_surv_nulsafe:-0}" ]; then
+    ok "structural: all $_surv_reads survivor/blame queries are git diff --name-only -z --no-renames (NUL-safe, census-comparable)"
   else
-    bad 'structural: the survivor query is not the NUL-safe git diff the census is comparable with'
+    bad "structural: ${_surv_reads:-0} survivor/blame git-diff query/queries but only ${_surv_nulsafe:-0} in the NUL-safe --name-only -z --no-renames shape the census is comparable with"
   fi
   # A second, independent wildmatch implementation is the class of error this check exists
   # to catch, so its absence is asserted rather than assumed.
