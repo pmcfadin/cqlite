@@ -196,6 +196,60 @@ verify_sibling_pair "$CLIENT_CPUS" "client" 2>/dev/null \
   || echo "client CPUs: $CLIENT_CPUS (a multi-core set — only the SERVER set must be one physical core)"
 verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 
+# ---------------------------------------------------------------------------
+# Server lifecycle — ONLY the process THIS script started (issue #3096 review)
+# ---------------------------------------------------------------------------
+# This rig used to open each Flight rep with `pkill -x cqlite-flight`, which kills
+# EVERY matching process on the box — including a PEER LANE's Flight server on a
+# shared fleet machine (one worker per machine is the convention, but the fleet
+# runs concurrent gates, e2e tiers and loadgen lanes that start their own
+# servers). Clearing the box to make room for a measurement is a destructive
+# cross-lane action, and it is silent: the peer just dies.
+#
+# Instead: remember the PID we launched, kill only that, and treat an occupied
+# port as a FAILURE to be reported rather than an obstacle to be removed.
+SERVER_PID=""
+
+stop_server() {
+  [[ -n "$SERVER_PID" ]] || return 0
+  local pid="$SERVER_PID"
+  SERVER_PID=""
+  kill "$pid" 2>/dev/null || true
+  local i
+  for i in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# Runs on EVERY exit path — success, a FATAL, or a Ctrl-C — so no rep can leave
+# an orphaned server holding the port (which used to be what the next run's
+# `pkill` was cleaning up).
+trap stop_server EXIT
+
+# Is $PORT free? Fail closed if not: an occupied port means either an orphan of
+# ours (report it, do not silently reap something that might not be ours) or
+# another lane's server (never ours to kill). `--port` is the remedy.
+require_port_free() {
+  local where="$1" i
+  for i in $(seq 1 10); do
+    (echo >"/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  echo "FATAL: 127.0.0.1:$PORT is already accepting connections ($where)." >&2
+  echo "       This rig will NOT clear the box: a matching process may be another" >&2
+  echo "       lane's Flight server on a shared machine, and killing it is a" >&2
+  echo "       destructive cross-lane action (issue #3096 review)." >&2
+  echo "       Pick a free port with --port N, or stop the listener yourself after" >&2
+  echo "       confirming whose it is (e.g. 'ss -ltnp \"sport = :$PORT\"')." >&2
+  exit 2
+}
+
+# Fail BEFORE the release build, not after it.
+require_port_free "preflight"
+
 PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid)"
 if [[ "$PARANOID" != "-1" ]]; then
   echo "perf_event_paranoid is $PARANOID; CPU-wide counting needs -1. Trying sudo -n…"
@@ -276,14 +330,15 @@ measure_flight() {
   local temp="$1" rep="$2" arm="$3" tag="flight-$arm-$temp-$rep"
   local step="$STEP_DURATION"
   [[ "$temp" == "cold" ]] && step="$COLD_STEP_DURATION"
-  pkill -x cqlite-flight >/dev/null 2>&1 || true
-  sleep 1
+  # Only the previous rep's own server — never a `pkill` by name.
+  stop_server
+  require_port_free "before $tag"
   drop_caches_if_cold "$temp"
 
   CQLITE_FLIGHT_MERGE_PATH="$arm" taskset -c "$SERVER_CPUS" "$BIN/cqlite-flight" \
     --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
     > "$OUT_DIR/$tag.server.log" 2>&1 &
-  local srv=$!
+  SERVER_PID=$!
   local i
   for i in $(seq 1 120); do
     (echo >"/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1 && break
@@ -325,11 +380,9 @@ measure_flight() {
       --shape full --ramp 1 --step-duration "$step" \
       --round "$tag" --out "$OUT_DIR/$tag.jsonl" \
     > "$OUT_DIR/$tag.log" 2>&1 \
-    || { kill "$srv" 2>/dev/null || true; echo "FATAL: flight rep $tag failed — see $OUT_DIR/$tag.log" >&2; exit 1; }
+    || { stop_server; echo "FATAL: flight rep $tag failed — see $OUT_DIR/$tag.log" >&2; exit 1; }
 
-  kill "$srv" 2>/dev/null || true
-  sleep 1
-  kill -9 "$srv" 2>/dev/null || true
+  stop_server
   echo "  $tag done"
 }
 
