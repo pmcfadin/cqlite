@@ -324,8 +324,8 @@ fn read_manifest_rows(
     path: &std::path::Path,
 ) -> std::result::Result<(String, String, u64), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("{}: not valid JSON: {e}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{}: not valid JSON: {e}", path.display()))?;
 
     let string_field = |name: &str| -> std::result::Result<String, String> {
         json.get(name)
@@ -618,7 +618,11 @@ fn real_main() -> i32 {
          branch, which PRE-MATERIALIZES the whole reconciled table before streaming (issue #1577)."
     };
 
-    let label = if args.warm_passes == 0 { "COLD" } else { "WARM" };
+    let label = if args.warm_passes == 0 {
+        "COLD"
+    } else {
+        "WARM"
+    };
     println!("--- AC3 measured {label} full scan ---");
     println!("query:            {sql}");
     println!("rows_scanned:     {rows}");
@@ -691,7 +695,10 @@ fn real_main() -> i32 {
     if caveats.is_empty() {
         println!("RESULT: PASS ({window})");
     } else {
-        println!("RESULT: PASS ({window}) *** UNGUARDED: {} ***", caveats.join("; "));
+        println!(
+            "RESULT: PASS ({window}) *** UNGUARDED: {} ***",
+            caveats.join("; ")
+        );
     }
     exit::OK
 }

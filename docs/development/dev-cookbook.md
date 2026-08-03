@@ -123,29 +123,71 @@ a test with no Cassandra. `--smoke` overrides only the DEFAULTS: an explicit `--
   check. A sha mismatch after regenerating is expected, not a defect.
 
 **Timing a sustained warm scan over it** — `cqlite-core/examples/bti_perf_scan.rs` (committed, so the
-measurement is reproducible). It drives the **bare read path** (`Database::execute_streaming` to
-exhaustion), not the Flight `do_get` plane: per issue #3233 BTI is denied the Flight bypass arm, and a
-criterion bench would spend minutes of warm-up + samples to report a distribution where a profile
-needs one sustained window.
+measurement is reproducible). It drives `Database::execute_streaming` to exhaustion, not the Flight
+`do_get` plane: per issue #3233 BTI is denied the Flight bypass arm, and a criterion bench would spend
+minutes of warm-up + samples to report a distribution where a profile needs one sustained window.
 
 ```bash
 cargo build --release -p cqlite-core --example bti_perf_scan --features cli-helpers
 bash test-data/scripts/perf-run-contained.sh --mem 12G --swap 0 -- \
   ./target/release/examples/bti_perf_scan \
-    --corpus /data/corpus-3234-bti --keyspace perf_bti --table wide_multiclustering \
-    --warm-passes 1 --min-seconds 10 --expect-rows 13200000
+    --corpus /data/corpus-3234-bti-full --keyspace perf_bti --table wide_multiclustering \
+    --warm-passes 1 --min-seconds 10
 ```
 
-It is fail-closed on all three ways a dataset-dependent measurement can lie: zero rows exits `4`
-(never 0), a row count disagreeing with `--expect-rows` exits `5`, and a window under `--min-seconds`
-exits `6` while printing the row count that *would* reach the floor — so an under-sized corpus is
-diagnosed, never silently accepted.
+**WHICH PLANE the number describes — this is not "the BTI read path" in general.**
+`execute_streaming` is a library entry point, not one fixed storage route, and the route is a function
+of the corpus:
+
+- **27 generations + a resolved schema** (the production corpus) satisfies
+  `readers.len() > 1 && schema.is_some()` (`storage/sstable/mod.rs:2141-2148`, `write-support`) and
+  routes into `generation_merge::stream_generations_for_read`. Its `KWayMerger` drives one sequential
+  producer per generation, and each producer **re-opens its SSTable with `use_mmap = false` /
+  `DiskAccessMode::Buffered`** (`storage/write_engine/merge/producer_iter.rs:364-388`), walking
+  `Data.db` via `stream_all_partitions_for_compaction`. So the 125.6 s below measures the
+  **compaction-style BTI `Data.db` stitch + decode plus the k-way merge, over buffered I/O** — **not**
+  the mmap plane and **not** `run_scan_stream`'s BTI trie branch.
+- **One generation (or an unresolved schema)** falls through to the per-reader `scan_stream`, where a
+  BTI reader takes the trie branch. That is a **separate measurement** with a different memory
+  profile, and it is the one to run for the mmap/trie plane.
+
+The harness therefore **prints the route beside the number** — `generations:`, `schema_resolved:`,
+`access_path:` (the per-query probe reset at `select_executor/mod.rs:525`) and a `storage_route:` line
+naming the branch it took — so a throughput figure can never again be quoted without its plane.
+
+**Containment is not optional, and the streaming channel does not bound RSS on every route.** On the
+multi-generation merge route the consumer drops rows as they arrive, so the window is bounded; but a
+**single-generation** (or schema-less) invocation on a multi-GB BTI corpus takes the trie branch,
+which **pre-materializes the whole reconciled table** before streaming (issue #1577 — the exact
+condition `scan_stream_materializes` reports `true` on, `storage/sstable/mod.rs:2045-2054`). That is a
+multi-GB allocation and precisely the #3068 livelock shape. Always run under
+`test-data/scripts/perf-run-contained.sh`.
+
+It is fail-closed on every way a dataset-dependent measurement can lie. The **row-count assert is ON
+by default**: with no flag the harness reads the authoritative count from
+`<corpus>/manifest-bti-3234.json`, else the committed
+`test-data/perf-corpus-bti-manifest.json` (`rows_per_partition.rows`, recorded *observed, not
+requested*, and cross-checked against `row_count_cross_check`), and an absent / unparseable /
+other-table manifest exits `8` rather than degrading to "assert off". That is the guard that catches a
+**silently truncated** scan: `execute_streaming` surfaces producer *errors* as a terminal `Err`, but a
+producer *panic* drops its `JoinHandle` and closes the channel (the #3124 class), which the consumer
+sees as a clean end-of-stream — a short row count is the only signal there is. Exit codes: `2` usage
+(incl. a non-finite or non-positive `--min-seconds`, which `f64::parse` accepts), `3` corpus
+missing/open failed, `4` zero rows, `5` row-count mismatch (any pass, warming ones included), `6`
+window under the floor — printing the row count that *would* reach it — `7` a scan that started then
+failed mid-stream, `8` no authoritative row count. Both asserts have a loud opt-**out**
+(`--no-expect-rows`, `--no-min-seconds`) that stamps `*** UNGUARDED: … ***` on the `RESULT:` line, and
+`--warm-passes 0` labels its output `COLD` rather than passing a cold scan off as the AC3 number.
+Every one of those codes is observed firing by `scripts/tests/test_bti_perf_scan.sh` (37 hermetic
+cases against the committed 10 KiB `test_da` BTI fixture — no perf corpus, seconds to run), which the
+gate's `tooling-tests` component runs.
 
 **MEASURED on the 1.995 GiB / 13.2 M-row production corpus** (fleet worker box, warm page cache, one
-discarded warming pass): **125.6 s** wall clock, 13,200,000 rows, **105,073 rows/s** — 12.5× the ≥10 s
-window issue #3234 AC3 asks for, so the window survives even a 10× read-path speed-up. Open cost is
-negligible (27 SSTables discovered in 0.033 s). The two passes agreed to within 1.2 % (127.1 s vs
-125.6 s), which is what confirms the measured pass was steady-state warm rather than fault-bound.
+discarded warming pass, the multi-generation merge route above): **125.6 s** wall clock, 13,200,000
+rows, **105,073 rows/s** — 12.5× the ≥10 s window issue #3234 AC3 asks for, so the window survives
+even a 10× read-path speed-up. Open cost is negligible (27 SSTables discovered in 0.033 s). The two
+passes agreed to within 1.2 % (127.1 s vs 125.6 s), which is what confirms the measured pass was
+steady-state warm rather than fault-bound. The mmap/trie plane is **not** covered by this number.
 
 Every number in the manifest is read back from the written bytes (`sstablemetadata` on
 `Statistics.db`, the `CompressionInfo.db` header, each `TOC.txt`) and **nothing is inherited from a
