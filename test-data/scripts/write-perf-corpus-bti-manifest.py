@@ -701,6 +701,18 @@ def main() -> int:
                 "rows-per-partition distribution and the chunk->SSTable split are a pure "
                 "function of (seed, chunk-index) — see the row driver's determinism contract"
             ),
+            "row_set_determinism_guaranteed_by": (
+                "the row driver VENDORS its PRNG (MT19937 with CPython's str seeding) and "
+                "both selection algorithms (weighted width draw, bucket sampling), so the "
+                "seed identity recorded here does not depend on any standard-library "
+                "implementation detail or on which `python3` runs it (roborev #3234 M2 — "
+                "random.choices()/random.sample() are documented as changeable). Enforced "
+                "by `gen-perf-corpus-bti-rows.py --self-check`: pinned CSV sha256 digests "
+                "for fixed configurations, run as a case of "
+                "scripts/tests/test_gen_perf_corpus_bti.sh. If that check ever fails, the "
+                "seed identity recorded in this manifest is void — find what changed rather "
+                "than re-pinning the digests."
+            ),
             "NOT_reproduced_by_the_seed": (
                 "the Data.db BYTES. Cassandra stamps a wall-clock write timestamp on every "
                 "row, serialized as an unsigned VInt DELTA from the Statistics.db "
