@@ -1,0 +1,33 @@
+==== WS0 #3217 OFF-CPU BLOCKED-STACK ATTRIBUTION (v2) ====
+label: offcpu2-s1-N1   total blocked: 160.194 s across 7828 unique stacks
+
+bucket                        blocked (s)      pct   stacks
+egress_credit_acquire              0.0001    0.00%        6
+mpsc_send_park                    49.1228   30.66%     3469
+mpsc_recv_park                     5.9662    3.72%      274
+tonic_grpc_socket_write            1.4297    0.89%     1365
+disk_io                            0.0000    0.00%        0   (explicit zero)
+tokio_scheduler                  103.5531   64.64%     2435
+other                              0.1225    0.08%      279
+TOTAL                            160.1944  100.00%
+
+`other` broken out by NAMED cause (AC4 fixes 7 buckets; nothing is left unnamed):
+    unnamed                              0.0667 s    0.04%
+    unsymbolized_frames_only             0.0557 s    0.03%
+    kernel_page_fault                    0.0000 s    0.00%
+    thread_lifecycle                     0.0000 s    0.00%
+
+`tokio_scheduler` broken out (an IDLE runtime park is not a cost):
+    io_driver_epoll_park                46.5935 s   29.09%
+    blocking_pool_idle_thread           30.7364 s   19.19%
+    idle_worker_park                    26.1011 s   16.29%
+    unnamed                              0.0953 s    0.06%
+    timer_park                           0.0268 s    0.02%
+
+CHANNEL IDENTITY of send/recv/credit parks (55.0891 s total):
+    channel                  blocked(s)    %total  %handoff
+    do_get_batch                 0.0001     0.00%     0.00%   cap 4, ONE reserve + ONE emit per Flight RecordBatch (8192 rows)
+    core_raw_chunk              27.0801    16.90%    49.16%   cap 8, ONE send per 16 KiB compression chunk (23.63 rows/chunk o
+    core_query_rows             15.5255     9.69%    28.18%   std sync_channel, cap 4, ONE send per 128 rows
+    core_windowed_batch          9.4615     5.91%    17.17%   cap 2, ONE send per 256 rows
+    unattributed_channel         3.0218     1.89%     5.49%   send/recv park whose channel item type did not resolve

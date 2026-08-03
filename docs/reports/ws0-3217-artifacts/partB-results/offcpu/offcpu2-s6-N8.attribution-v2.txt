@@ -1,0 +1,33 @@
+==== WS0 #3217 OFF-CPU BLOCKED-STACK ATTRIBUTION (v2) ====
+label: offcpu2-s6-N8   total blocked: 947.008 s across 65109 unique stacks
+
+bucket                        blocked (s)      pct   stacks
+egress_credit_acquire              0.0005    0.00%       16
+mpsc_send_park                   468.2154   49.44%    26094
+mpsc_recv_park                    36.0256    3.80%      945
+tonic_grpc_socket_write            6.5957    0.70%     3392
+disk_io                            0.0001    0.00%        1
+tokio_scheduler                  435.8509   46.02%    33862
+other                              0.3202    0.03%      799
+TOTAL                            947.0083  100.00%
+
+`other` broken out by NAMED cause (AC4 fixes 7 buckets; nothing is left unnamed):
+    unnamed                              0.2526 s    0.03%
+    unsymbolized_frames_only             0.0582 s    0.01%
+    thread_lifecycle                     0.0057 s    0.00%
+    kernel_page_fault                    0.0037 s    0.00%
+
+`tokio_scheduler` broken out (an IDLE runtime park is not a cost):
+    idle_worker_park                   186.6790 s   19.71%
+    io_driver_epoll_park               154.7367 s   16.34%
+    blocking_pool_idle_thread           94.3225 s    9.96%
+    unnamed                              0.0653 s    0.01%
+    timer_park                           0.0475 s    0.01%
+
+CHANNEL IDENTITY of send/recv/credit parks (504.2415 s total):
+    channel                  blocked(s)    %total  %handoff
+    do_get_batch                 0.2940     0.03%     0.06%   cap 4, ONE reserve + ONE emit per Flight RecordBatch (8192 rows)
+    core_raw_chunk             229.0934    24.19%    45.43%   cap 8, ONE send per 16 KiB compression chunk (23.63 rows/chunk o
+    core_query_rows            138.0932    14.58%    27.39%   std sync_channel, cap 4, ONE send per 128 rows
+    core_windowed_batch         93.5332     9.88%    18.55%   cap 2, ONE send per 256 rows
+    unattributed_channel        43.2277     4.56%     8.57%   send/recv park whose channel item type did not resolve

@@ -1,0 +1,441 @@
+{
+ "schema": "ws0-3217.offcpu-attribution/v2",
+ "label": "offcpu2-s6-N8",
+ "folded_file": "/data/ws0/profiles/offcpu2-s6/offcpu-N8.folded",
+ "total_blocked_time_us": 947008346,
+ "unique_stacks": 65109,
+ "value_unit": "microseconds of off-CPU (blocked) time, summed over all threads",
+ "v2_note": "match table refined against REAL demangled symbols; v1 put 76-83% in `other` because bcc emits raw Rust v0 mangling and v1's patterns were the demangled spellings",
+ "buckets": [
+  {
+   "bucket": "egress_credit_acquire",
+   "blocked_time_us": 539,
+   "pct_of_total_blocked": 5.691607706274639e-05,
+   "unique_stacks": 16,
+   "present": true,
+   "absent_note": null,
+   "top_stacks": [
+    {
+     "blocked_time_us": 102,
+     "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- <cqlite_flight::metered_stream::ReceiverStream<core::result::Result<cqlite_flight::egress_credit::CreditedBatch, cqlite_flight::producer::ProducerErro <- <cqlite_flight::metered_stream::MeteredDoGetStream as futures_core::stream::Stream>::poll_next"
+    },
+    {
+     "blocked_time_us": 101,
+     "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- <tokio::sync::mpsc::list::Rx<core::result::Result<cqlite_flight::egress_credit::CreditedBatch, cqlite_flight::producer::ProducerError>>>::pop <- <cqlite_flight::metered_stream::ReceiverStream<core::result::Result<cqlite_flight::egress_credit::CreditedBatch, cqlite_flight::producer::ProducerErro"
+    },
+    {
+     "blocked_time_us": 82,
+     "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- core::ptr::drop_glue::<<cqlite_flight::egress_credit::EgressCredit>::acquire::{closure:#0}> <- <cqlite_flight::producer::MergeProducer>::flush_credited"
+    }
+   ]
+  },
+  {
+   "bucket": "mpsc_send_park",
+   "blocked_time_us": 468215370,
+   "pct_of_total_blocked": 49.44152519644214,
+   "unique_stacks": 26094,
+   "present": true,
+   "absent_note": null,
+   "top_stacks": [
+    {
+     "blocked_time_us": 18735050,
+     "stack": "tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}> <- std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi <- <std::sys::thread::unix::Thread>::new::thread_start"
+    },
+    {
+     "blocked_time_us": 17517106,
+     "stack": "tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}> <- std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi <- <std::sys::thread::unix::Thread>::new::thread_start"
+    },
+    {
+     "blocked_time_us": 17440404,
+     "stack": "tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}> <- std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi <- <std::sys::thread::unix::Thread>::new::thread_start"
+    }
+   ]
+  },
+  {
+   "bucket": "mpsc_recv_park",
+   "blocked_time_us": 36025616,
+   "pct_of_total_blocked": 3.804149789404285,
+   "unique_stacks": 945,
+   "present": true,
+   "absent_note": null,
+   "top_stacks": [
+    {
+     "blocked_time_us": 4650859,
+     "stack": "<cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowStream>::next_batch::{closure:#0} <- <cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowStream>::next_batch <- <cqlite_flight::bypass::ScanRowSource as cqlite_flight::row_source::RowSource>::next_step <- <cqlite_flight::producer::MergeProducer>::drive_row_source"
+    },
+    {
+     "blocked_time_us": 4530005,
+     "stack": "<cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowStream>::next_batch::{closure:#0} <- <cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowStream>::next_batch <- <cqlite_flight::bypass::ScanRowSource as cqlite_flight::row_source::RowSource>::next_step <- <cqlite_flight::producer::MergeProducer>::drive_row_source"
+    },
+    {
+     "blocked_time_us": 4427842,
+     "stack": "<cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowStream>::next_batch::{closure:#0} <- <cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowStream>::next_batch <- <cqlite_flight::bypass::ScanRowSource as cqlite_flight::row_source::RowSource>::next_step <- <cqlite_flight::producer::MergeProducer>::drive_row_source"
+    }
+   ]
+  },
+  {
+   "bucket": "tonic_grpc_socket_write",
+   "blocked_time_us": 6595675,
+   "pct_of_total_blocked": 0.6964748545098883,
+   "unique_stacks": 3392,
+   "present": true,
+   "absent_note": null,
+   "top_stacks": [
+    {
+     "blocked_time_us": 436618,
+     "stack": "<h2::proto::streams::streams::StreamRef<hyper::proto::h2::SendBuf<bytes::bytes::Bytes>>>::poll_reset <- <hyper::proto::h2::server::H2Stream<hyper_util::service::glue::TowerToHyperServiceFuture<tower::util::map_request::MapRequest<tower::util::boxed_clone <- std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi"
+    },
+    {
+     "blocked_time_us": 402401,
+     "stack": "<h2::proto::streams::streams::StreamRef<hyper::proto::h2::SendBuf<bytes::bytes::Bytes>>>::poll_reset <- <hyper::proto::h2::server::H2Stream<hyper_util::service::glue::TowerToHyperServiceFuture<tower::util::map_request::MapRequest<tower::util::boxed_clone <- std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi"
+    },
+    {
+     "blocked_time_us": 396537,
+     "stack": "<h2::proto::streams::streams::StreamRef<hyper::proto::h2::SendBuf<bytes::bytes::Bytes>>>::poll_reset <- <hyper::proto::h2::server::H2Stream<hyper_util::service::glue::TowerToHyperServiceFuture<tower::util::map_request::MapRequest<tower::util::boxed_clone <- std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi"
+    }
+   ]
+  },
+  {
+   "bucket": "disk_io",
+   "blocked_time_us": 60,
+   "pct_of_total_blocked": 6.3357414170033085e-06,
+   "unique_stacks": 1,
+   "present": true,
+   "absent_note": null,
+   "top_stacks": [
+    {
+     "blocked_time_us": 60,
+     "stack": "__cond_resched <- bdev_getblk <- ext4_getblk <- ext4_bread"
+    }
+   ]
+  },
+  {
+   "bucket": "tokio_scheduler",
+   "blocked_time_us": 435850888,
+   "pct_of_total_blocked": 46.02397537898784,
+   "unique_stacks": 33862,
+   "present": true,
+   "absent_note": null,
+   "top_stacks": [
+    {
+     "blocked_time_us": 25307953,
+     "stack": "std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi <- <std::sys::thread::unix::Thread>::new::thread_start <- [unknown]"
+    },
+    {
+     "blocked_time_us": 23681340,
+     "stack": "std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi <- <std::sys::thread::unix::Thread>::new::thread_start <- [unknown]"
+    },
+    {
+     "blocked_time_us": 23233907,
+     "stack": "std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()> <- <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::functi <- <std::sys::thread::unix::Thread>::new::thread_start <- [unknown]"
+    }
+   ]
+  },
+  {
+   "bucket": "other",
+   "blocked_time_us": 320198,
+   "pct_of_total_blocked": 0.033811528837360424,
+   "unique_stacks": 799,
+   "present": true,
+   "absent_note": null,
+   "top_stacks": [
+    {
+     "blocked_time_us": 11482,
+     "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+    },
+    {
+     "blocked_time_us": 10047,
+     "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+    },
+    {
+     "blocked_time_us": 9678,
+     "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+    }
+   ]
+  }
+ ],
+ "other_breakdown": [
+  {
+   "cause": "unnamed",
+   "blocked_time_us": 252626,
+   "pct_of_total_blocked": 0.0266762168535313
+  },
+  {
+   "cause": "unsymbolized_frames_only",
+   "blocked_time_us": 58181,
+   "pct_of_total_blocked": 0.006143662856377826
+  },
+  {
+   "cause": "thread_lifecycle",
+   "blocked_time_us": 5697,
+   "pct_of_total_blocked": 0.0006015786475444642
+  },
+  {
+   "cause": "kernel_page_fault",
+   "blocked_time_us": 3694,
+   "pct_of_total_blocked": 0.0003900704799068371
+  },
+  {
+   "cause": "glibc_malloc_arena_lock",
+   "blocked_time_us": 0,
+   "pct_of_total_blocked": 0.0
+  },
+  {
+   "cause": "mmap_munmap",
+   "blocked_time_us": 0,
+   "pct_of_total_blocked": 0.0
+  }
+ ],
+ "tokio_scheduler_breakdown": [
+  {
+   "cause": "idle_worker_park",
+   "blocked_time_us": 186678955,
+   "pct_of_total_blocked": 19.712493114606616
+  },
+  {
+   "cause": "io_driver_epoll_park",
+   "blocked_time_us": 154736671,
+   "pct_of_total_blocked": 16.339525586398583
+  },
+  {
+   "cause": "blocking_pool_idle_thread",
+   "blocked_time_us": 94322473,
+   "pct_of_total_blocked": 9.960046645671273
+  },
+  {
+   "cause": "unnamed",
+   "blocked_time_us": 65301,
+   "pct_of_total_blocked": 0.006895504171195551
+  },
+  {
+   "cause": "timer_park",
+   "blocked_time_us": 47488,
+   "pct_of_total_blocked": 0.005014528140177552
+  }
+ ],
+ "other_unnamed_top": [
+  {
+   "blocked_time_us": 11482,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 10047,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 9678,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 9539,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 8973,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 8752,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 8701,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 7965,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 7958,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  },
+  {
+   "blocked_time_us": 7799,
+   "stack": "irqentry_exit_to_user_mode <- irqentry_exit <- [Missed User Stack] <- tokio-rt-worker"
+  }
+ ],
+ "channel_identity": {
+  "note": "which bounded channel each send/recv park belongs to. The bypass read path stacks FOUR channels between SSTable and wire; only `do_get_batch` is the #3217 handoff.",
+  "total_handoff_blocked_us": 504241525,
+  "channels": [
+   {
+    "channel": "do_get_batch",
+    "blocked_time_us": 294040,
+    "pct_of_total_blocked": 0.031049356770927548,
+    "pct_of_handoff_blocked": 0.0583133251471108,
+    "description": "cap 4, ONE reserve + ONE emit per Flight RecordBatch (8192 rows) - THE #3217 handoff"
+   },
+   {
+    "channel": "core_raw_chunk",
+    "blocked_time_us": 229093355,
+    "pct_of_total_blocked": 24.19127096056237,
+    "pct_of_handoff_blocked": 45.43325839735234,
+    "description": "cap 8, ONE send per 16 KiB compression chunk (23.63 rows/chunk on this corpus)"
+   },
+   {
+    "channel": "core_query_rows",
+    "blocked_time_us": 138093202,
+    "pct_of_total_blocked": 14.582046988633405,
+    "pct_of_handoff_blocked": 27.386320870737492,
+    "description": "std sync_channel, cap 4, ONE send per 128 rows"
+   },
+   {
+    "channel": "core_windowed_batch",
+    "blocked_time_us": 93533194,
+    "pct_of_total_blocked": 9.87670218484009,
+    "pct_of_handoff_blocked": 18.54928429387088,
+    "description": "cap 2, ONE send per 256 rows"
+   },
+   {
+    "channel": "unattributed_channel",
+    "blocked_time_us": 43227734,
+    "pct_of_total_blocked": 4.564662411116703,
+    "pct_of_handoff_blocked": 8.57282311289218,
+    "description": "send/recv park whose channel item type did not resolve"
+   }
+  ]
+ },
+ "ranked_stacks": [
+  {
+   "rank": 1,
+   "blocked_time_us": 25307953,
+   "pct_of_total_blocked": 2.6724107666945525,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 2,
+   "blocked_time_us": 23681340,
+   "pct_of_total_blocked": 2.5006474441356192,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 3,
+   "blocked_time_us": 23233907,
+   "pct_of_total_blocked": 2.4534004476450515,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 4,
+   "blocked_time_us": 22690975,
+   "pct_of_total_blocked": 2.3960691683281112,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 5,
+   "blocked_time_us": 22454025,
+   "pct_of_total_blocked": 2.3710482695154624,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 6,
+   "blocked_time_us": 22243286,
+   "pct_of_total_blocked": 2.348795139340831,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 7,
+   "blocked_time_us": 18735050,
+   "pct_of_total_blocked": 1.9783405372437972,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 8,
+   "blocked_time_us": 18707035,
+   "pct_of_total_blocked": 1.9753822739805083,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 9,
+   "blocked_time_us": 17517106,
+   "pct_of_total_blocked": 1.8497308998372861,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 10,
+   "blocked_time_us": 17440404,
+   "pct_of_total_blocked": 1.8416314992011698,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 11,
+   "blocked_time_us": 17382977,
+   "pct_of_total_blocked": 1.8355674554952657,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 12,
+   "blocked_time_us": 17076157,
+   "pct_of_total_blocked": 1.8031685858025164,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 13,
+   "blocked_time_us": 16706618,
+   "pct_of_total_blocked": 1.7641468600108832,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 14,
+   "blocked_time_us": 16505294,
+   "pct_of_total_blocked": 1.7428879132602701,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 15,
+   "blocked_time_us": 16232713,
+   "pct_of_total_blocked": 1.7141045344071337,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 16,
+   "blocked_time_us": 16078208,
+   "pct_of_total_blocked": 1.6977894722798992,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 17,
+   "blocked_time_us": 15658957,
+   "pct_of_total_blocked": 1.653518373532898,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 18,
+   "blocked_time_us": 15031100,
+   "pct_of_total_blocked": 1.5872193802186407,
+   "bucket": "tokio_scheduler",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 19,
+   "blocked_time_us": 12913142,
+   "pct_of_total_blocked": 1.3635721432174157,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  },
+  {
+   "rank": 20,
+   "blocked_time_us": 12767895,
+   "pct_of_total_blocked": 1.3482346859908245,
+   "bucket": "mpsc_send_park",
+   "stack": "tokio-rt-worker;[unknown];[unknown];<std::sys::thread::unix::Thread>::new::thread_start;<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>::{closure:#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0};std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure:#0}, ()>;tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<cqlite_core::storage::sstable::reader::types::SSTableReader>::feed_raw_chunks_blocking::{closure:#0}::{closure:#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send::{closure:#0}>;syscall;entry_SYSCALL_64_after_hwframe;do_syscall_64;x64_sys_call;__x64_sys_futex;do_futex;futex_wait;__futex_wait;futex_do_wait;schedule;finish_task_switch.isra.0"
+  }
+ ]
+}
