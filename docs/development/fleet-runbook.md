@@ -204,10 +204,25 @@ line wins the reader's attention. A functional pass without a matching `/proc` v
 installing the drop-in needs root) would run `perf stat -C 0 -e cycles` *as root*, where it **succeeds
 on a `paranoid=4` box on which every unprivileged agent process still gets `EACCES`** — a textbook
 false verification of an unprofileable box. Bootstrap therefore **drops privilege for the probe** when
-it can: `setpriv --reuid/--regid --clear-groups` (preferred), else `runuser -u`, else `sudo -n -u`,
-targeting `SUDO_UID`/`SUDO_GID` (the account that invoked `sudo` — the one whose capability is
-actually in question) and falling back to `nobody` resolved from the passwd database, never a
-hardcoded uid. The run says which identity it measured:
+it can: `setpriv --reuid/--regid --clear-groups` (preferred), else `runuser -u <name>`, else
+`sudo -n -u '#<uid>'` (sudo's numeric form), targeting `SUDO_UID`/`SUDO_GID` (the account that invoked
+`sudo` — the one whose capability is actually in question) and falling back to `nobody` resolved from
+the passwd database, never a hardcoded uid.
+
+**The numeric ids are the target; the NAME is only used when passwd confirms it.** `SUDO_UID` and
+`SUDO_USER` are independent environment strings, so `SUDO_UID=1000 SUDO_USER=root` — stale, hand-set
+or simply inconsistent — would make a name-based `runuser -u root` run the probe **as root** while the
+run reported a successful privilege drop: a false "VERIFIED" through the drop mechanism itself. A name
+is therefore used only after `id -u`/`id -g` confirm it resolves to exactly the validated **non-zero**
+uid/gid (and only if it is shell-token safe, since the prefix is word-split); otherwise it is
+discarded and the numeric mechanisms carry the drop.
+
+**An unknown identity is never treated as "unprivileged".** If `id -u` is missing, fails, or prints
+something unparseable, the state is `identity-unknown` and the functional result is **not** evidence
+either way — the run says the identity could not be determined and makes no capability claim (it does
+not assert the probe ran as root either). Nothing substitutes a plausible uid.
+
+The run says which identity it measured:
 `DROPS PRIVILEGE (dropped:setpriv:uid=1000)`. When **no** mechanism or no unprivileged account exists
 (`root-no-drop-mechanism` / `root-no-unprivileged-target`), the root result is labelled **not evidence
 that an unprivileged process can profile this box** and never reported as verification — the `/proc`
@@ -234,6 +249,43 @@ so a stale `kernel.perf_event_paranoid` there wins over `99-cqlite-perf.conf` no
 sorts. That is the single likeliest cause of "applied, still restricted", and bootstrap's diagnostics
 name it explicitly.
 
+#### The "silent revert" has a NAME: `/etc/sysctl.d/10-kernel-hardening.conf`
+
+Three separate reports recorded that a hand-set `perf_event_paranoid`/`kptr_restrict` "silently
+reverts" without ever identifying a cause (`docs/reports/ws0-3217-report.md:214`,
+`ws3-3029-report.md:63`, `ws0-cassandra-baseline-2026-07-27.md:847`). The cause is a **stock Ubuntu
+drop-in**, present on the fleet boxes:
+
+```conf
+# /etc/sysctl.d/10-kernel-hardening.conf   (ships with the image; NOT ours, do not delete)
+kernel.kptr_restrict = 1
+```
+
+It is re-asserted at **every boot** and by **every `sysctl --system`** — including the one bootstrap
+runs. So a hand `sysctl -w kernel.kptr_restrict=0` survives only until the next boot or the next
+`--system`, which is exactly the "it reverts on its own" experience. Nothing is wrong with the box;
+a second file is simply also setting the knob.
+
+**This makes the `99-` prefix LOAD-BEARING, not cosmetic.** `sysctl.d` files are applied in
+lexicographic **basename** order and the **last** assignment wins, so `99-cqlite-perf.conf` beats
+`10-kernel-hardening.conf` *only because of the number*. Renaming ours to `cqlite-perf.conf` — or to
+any prefix below `10-` — silently hands `kptr_restrict` back to the hardening drop-in at the next
+boot, with no error anywhere. **Never "tidy" the filename.** The managed file's own header says so
+too, so the warning travels with the bytes.
+
+**Bootstrap names the competitor for you.** Whenever the read-back shows a non-`ok` token, the
+diagnostics scan the `sysctl.d` directory and report every *other* file that sets
+`perf_event_paranoid`/`kptr_restrict`, ranked by whether it actually wins:
+
+```text
+[warn] OVERRIDE: /etc/sysctl.d/99-zzz-late.conf also sets perf_event_paranoid/kptr_restrict and its
+       name sorts AFTER 99-cqlite-perf.conf, so it is applied LAST and WINS — fix or rename that file
+[info] competing file: /etc/sysctl.d/10-kernel-hardening.conf also sets
+       perf_event_paranoid/kptr_restrict but sorts BEFORE 99-cqlite-perf.conf, so ours wins
+```
+
+A run with no competitor says so explicitly, so a silent scan can never be mistaken for no scan.
+
 Verify by hand, in the same order bootstrap does:
 
 ```bash
@@ -250,11 +302,19 @@ grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.c
 ```
 
 **Never set `CQLITE_PERF_PROC_DIR` / `CQLITE_PERF_SYSCTL_DIR` in a shell.** They are test-only path
-seams for `scripts/tests/test_perf_capability.sh` and are **inert** unless `CQLITE_PERF_TEST_MODE=1`
+seams for `scripts/tests/test_perf_capability*.sh` and are **inert** unless `CQLITE_PERF_TEST_MODE=1`
 is also set — which in turn refuses to run if a real `sudo`/`sysctl` is reachable. The privileged
 destination is a hardcoded `/etc/sysctl.d` literal precisely so no exported variable can ever steer
 a `sudo tee` at another file, and bootstrap fails closed (skips the section with a `[warn]`) if it
 finds a seam set without the marker.
+
+**Test mode has NO production fallback (it is enforced, not conventional).** Under
+`CQLITE_PERF_TEST_MODE=1` **both** path seams are **mandatory** and each must be absolute and outside
+`/etc`, `/proc` and `/sys`. A missing or production-shaped seam is a loud refusal in the env guard
+*and* in the path resolvers, so an unsandboxed test-mode run resolves no drop-in path at all and reads
+no `/proc`. The earlier shape fell back to the real directories, which meant a root `--yes` run under
+the marker could `tee` the host's **real** `/etc/sysctl.d/99-cqlite-perf.conf` — a test run mutating
+the machine. There is deliberately no opt-out.
 
 Every gate SUMMARY's `accelerators:` line stamps the same state as a Linux-only `perf=` token
 (`ok` / `paranoid-<N>` / `kptr-restricted` / `absent` / `unknown`), so "this box cannot be profiled"

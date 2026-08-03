@@ -368,6 +368,205 @@ else
   bad "perf-capability: the idempotency compare needs diffutils (a box without it re-writes forever)"
 fi
 
+# 1d-vi. THE COMPARE IS ACTUALLY BYTE-EXACT (issue #3249 review R4-4). `$( )` strips
+#        EVERY trailing newline from its output, so comparing two command substitutions
+#        judged a file missing its final newline — or carrying extra trailing blank lines
+#        — as CURRENT, and it was never rewritten. That also made a documented claim
+#        ("byte-exact") false. Both variants must be NOT current; the canonical bytes
+#        must still be current, so the fix cannot be "always rewrite".
+dropin_current_is() { # dropin_current_is <dir>  -> rc of perf_capability_dropin_current
+  CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$1" \
+    bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB" 2>/dev/null
+}
+bytes_d="$tmp/perf-bytes.d"; mkdir -p "$bytes_d"
+bytes_f="$bytes_d/99-cqlite-perf.conf"
+bytes_fail=0
+bash "$PERFLIB" --drop-in >"$bytes_f"
+dropin_current_is "$bytes_d" || { bad "perf-capability: the CANONICAL drop-in bytes were judged NOT current"; bytes_fail=1; }
+# variant 1: the final newline stripped (exactly what a `$(...) > file` remedy produces)
+printf '%s' "$(bash "$PERFLIB" --drop-in)" >"$bytes_f"
+if dropin_current_is "$bytes_d"; then
+  bad "perf-capability: a drop-in MISSING its final newline was judged current (the compare is not byte-exact)"
+  bytes_fail=1
+fi
+# variant 2: an extra trailing blank line (an editor, or a doubled remedy paste)
+bash "$PERFLIB" --drop-in >"$bytes_f"; printf '\n' >>"$bytes_f"
+if dropin_current_is "$bytes_d"; then
+  bad "perf-capability: a drop-in with an EXTRA trailing blank line was judged current"
+  bytes_fail=1
+fi
+# variant 3: same bytes, one line's trailing whitespace added — content, not just newlines
+bash "$PERFLIB" --drop-in | sed 's/^kernel.kptr_restrict = 0$/kernel.kptr_restrict = 0 /' >"$bytes_f"
+if dropin_current_is "$bytes_d"; then
+  bad "perf-capability: a drop-in with altered trailing whitespace on a value line was judged current"
+  bytes_fail=1
+fi
+[ "$bytes_fail" -ne 0 ] || ok "perf-capability: the idempotency compare is BYTE-exact — a missing final newline, an extra blank line and altered trailing whitespace are all NOT current"
+
+# 1d-vii. THE '99-' PREFIX IS LOAD-BEARING, and the drop-in says so in its own bytes.
+#         This box ships /etc/sysctl.d/10-kernel-hardening.conf with
+#         `kernel.kptr_restrict = 1`; our file only wins because "99-…" sorts after
+#         "10-…". A future tidy-up to `cqlite-perf.conf` would silently hand kptr_restrict
+#         back to the hardening drop-in at the next boot — the "silent revert" three
+#         measurement reports recorded without ever naming a cause.
+if printf '%s\n' "$dropin" | grep -q '99-' \
+   && printf '%s\n' "$dropin" | grep -qi 'DO NOT RENAME' \
+   && printf '%s\n' "$dropin" | grep -q '10-kernel-hardening.conf'; then
+  ok "perf-capability: the drop-in header states that the '99-' prefix is load-bearing and NAMES 10-kernel-hardening.conf"
+else
+  bad "perf-capability: the drop-in header does not explain the 99- ordering / name the competing hardening file"
+fi
+
+# 1d-viii. NAME THE COMPETITOR. perf_capability_competing_files must find every OTHER
+#          file in the sysctl.d dir that sets perf_event_paranoid/kptr_restrict, and rank
+#          it by BASENAME order: one sorting AFTER ours is an actual override (applied
+#          last, wins); one sorting before is harmless. Unrelated knobs and our own file
+#          are not competitors.
+comp_d="$tmp/perf-competing.d"; mkdir -p "$comp_d"
+bash "$PERFLIB" --drop-in >"$comp_d/99-cqlite-perf.conf"
+printf '# stock ubuntu hardening\nkernel.kptr_restrict = 1\n' >"$comp_d/10-kernel-hardening.conf"
+printf 'kernel.perf_event_paranoid = 3\n'                     >"$comp_d/99-zzz-late.conf"
+printf 'vm.swappiness = 1\n'                                  >"$comp_d/50-unrelated.conf"
+printf '#kernel.kptr_restrict = 1\n'                          >"$comp_d/20-commented.conf"
+comp_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$comp_d" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1)
+if printf '%s\n' "$comp_out" | grep -q "^earlier $comp_d/10-kernel-hardening.conf$" \
+   && printf '%s\n' "$comp_out" | grep -q "^override $comp_d/99-zzz-late.conf$" \
+   && ! printf '%s\n' "$comp_out" | grep -q '50-unrelated' \
+   && ! printf '%s\n' "$comp_out" | grep -q '20-commented' \
+   && ! printf '%s\n' "$comp_out" | grep -q '99-cqlite-perf.conf'; then
+  ok "perf-capability: competing sysctl files are found and ranked (10-kernel-hardening=earlier, 99-zzz-late=override; unrelated/commented/own file ignored)"
+else
+  bad "perf-capability: competing-file detection wrong: '$comp_out'"
+fi
+if [ -z "$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$tmp/perf-nocomp.d" \
+             bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>/dev/null)" ]; then
+  ok "perf-capability: a missing/empty sysctl.d directory yields no competitors (and no error output)"
+else
+  bad "perf-capability: an empty sysctl.d dir produced competitor output"
+fi
+
+# 1e. THE IDENTITY DIMENSION, at the helper level (issue #3249 review R4-1/R4-2). Every
+#     assert here is the same shape: an UNKNOWN or UNVERIFIABLE identity must NOT resolve
+#     to the reassuring answer.
+idbox="$tmp/perf-idbox"; mkdir -p "$idbox"
+for t in bash cat awk printf tr cut sort head tail wc env command timeout; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$idbox/$t"
+done
+mkperfshim 7171717
+ln -sf "$perfbin/perf" "$idbox/perf"
+# 1e-i. `id -u` UNAVAILABLE. The old `$(id -u 2>/dev/null || echo 1000)` invented an
+#       unprivileged answer, so a ROOT run set PERF_UNPRIV_EVIDENCE=1 and printed a false
+#       VERIFIED — the R3-1 defect reintroduced through the detector meant to prevent it.
+noid_out=$(PATH="$idbox" bash "$PERFLIB" --verify-unpriv 2>&1); noid_rc=$?
+if [ "$noid_rc" -ne 0 ] && printf '%s' "$noid_out" | grep -q 'identity=identity-unknown' \
+   && ! printf '%s' "$noid_out" | grep -q 'self-unprivileged'; then
+  ok "perf-capability: with NO usable 'id' the identity is 'identity-unknown' and --verify-unpriv FAILS (never assumed unprivileged)"
+else
+  bad "perf-capability: a missing 'id' was treated as unprivileged (rc=$noid_rc, '$noid_out')"
+fi
+# ...and the same for an `id` that EXISTS but fails, or prints something unparseable.
+mkdir -p "$tmp/perf-idbad" && cp -a "$idbox"/. "$tmp/perf-idbad"/
+printf '#!/usr/bin/env bash\nexit 7\n' >"$tmp/perf-idbad/id"; chmod +x "$tmp/perf-idbad/id"
+mkdir -p "$tmp/perf-idjunk" && cp -a "$idbox"/. "$tmp/perf-idjunk"/
+printf '#!/usr/bin/env bash\necho "uid=0(root) gid=0(root)"\n' >"$tmp/perf-idjunk/id"; chmod +x "$tmp/perf-idjunk/id"
+idbad_out=$(PATH="$tmp/perf-idbad" bash "$PERFLIB" --verify-unpriv 2>&1); idbad_rc=$?
+idjunk_out=$(PATH="$tmp/perf-idjunk" bash "$PERFLIB" --verify-unpriv 2>&1); idjunk_rc=$?
+if [ "$idbad_rc" -ne 0 ] && printf '%s' "$idbad_out" | grep -q 'identity=identity-unknown' \
+   && [ "$idjunk_rc" -ne 0 ] && printf '%s' "$idjunk_out" | grep -q 'identity=identity-unknown'; then
+  ok "perf-capability: an 'id -u' that FAILS or prints unparseable output is 'identity-unknown', not unprivileged"
+else
+  bad "perf-capability: a broken 'id -u' was accepted (fail rc=$idbad_rc '$idbad_out'; junk rc=$idjunk_rc '$idjunk_out')"
+fi
+# 1e-ii. AN INCONSISTENT SUDO_USER MAY NOT BE TRUSTED. SUDO_UID and SUDO_USER are
+#        independent env strings: with `SUDO_UID=1000 SUDO_USER=root` and no setpriv, a
+#        name-based `runuser -u root` / `sudo -u root` would run the probe AS ROOT while
+#        the state claimed a successful drop. The name must be dropped and the VALIDATED
+#        NUMERIC uid used instead (sudo's documented `#<uid>` form).
+mkdir -p "$tmp/perf-idroot" && cp -a "$idbox"/. "$tmp/perf-idroot"/
+cat >"$tmp/perf-idroot/id" <<'EOF'
+#!/usr/bin/env bash
+# root shell; `root` resolves to uid/gid 0, `agentuser` to 1000/1000, nothing else exists
+case "${1:-}" in
+  -u) if [ -n "${2:-}" ]; then case "$2" in root) echo 0 ;; agentuser) echo 1000 ;; *) exit 1 ;; esac
+      else echo 0; fi ;;
+  -g) if [ -n "${2:-}" ]; then case "$2" in root) echo 0 ;; agentuser) echo 1000 ;; *) exit 1 ;; esac
+      else echo 0; fi ;;
+  *) echo 0 ;;
+esac
+EOF
+chmod +x "$tmp/perf-idroot/id"
+idroot_argv="$tmp/perf-idroot-argv.log"
+# sudo/runuser shims: record the FULL argv (so the assertions can prove WHICH identity the
+# probe was actually asked to run as), then strip their own options and exec the rest.
+for t in sudo runuser; do
+  cat >"$tmp/perf-idroot/$t" <<EOF
+#!/usr/bin/env bash
+echo "$t \$*" >>"$idroot_argv"
+while [ "\${1:-}" = -n ]; do shift; done
+[ "\${1:-}" = -u ] && shift 2
+[ "\${1:-}" = -- ] && shift
+exec "\$@"
+EOF
+  chmod +x "$tmp/perf-idroot/$t"
+done
+: >"$idroot_argv"
+stale_out=$(PATH="$tmp/perf-idroot" SUDO_UID=1000 SUDO_GID=1000 SUDO_USER=root \
+  bash "$PERFLIB" --verify-unpriv 2>&1); stale_rc=$?
+if [ "$stale_rc" -eq 0 ] \
+   && printf '%s' "$stale_out" | grep -q 'identity=dropped:sudo:uid=1000' \
+   && grep -q '^sudo -n -u #1000 -- perf stat' "$idroot_argv" \
+   && ! grep -q 'runuser' "$idroot_argv" \
+   && ! grep -q -- '-u root' "$idroot_argv"; then
+  ok "perf-capability: SUDO_USER=root with SUDO_UID=1000 is REJECTED as a name — the drop uses the validated numeric uid (sudo -u '#1000'), never 'runuser -u root'"
+else
+  bad "perf-capability: a stale SUDO_USER steered the drop (rc=$stale_rc, state='$stale_out', argv='$(cat "$idroot_argv")')"
+fi
+# ...while a CONSISTENT SUDO_USER (passwd says it IS that uid/gid) is still usable, so
+# the fix is a validation rather than a blanket refusal that would lose `runuser`.
+: >"$idroot_argv"
+good_out=$(PATH="$tmp/perf-idroot" SUDO_UID=1000 SUDO_GID=1000 SUDO_USER=agentuser \
+  bash "$PERFLIB" --verify-unpriv 2>&1); good_rc=$?
+if [ "$good_rc" -eq 0 ] && printf '%s' "$good_out" | grep -q 'identity=dropped:runuser:agentuser' \
+   && grep -q '^runuser -u agentuser -- perf stat' "$idroot_argv"; then
+  ok "perf-capability: a SUDO_USER whose passwd uid/gid MATCH the validated numerics is still used for 'runuser -u <name>'"
+else
+  bad "perf-capability: a consistent SUDO_USER was not usable (rc=$good_rc, '$good_out', argv='$(cat "$idroot_argv")')"
+fi
+# ...and a name that is not shell-token safe can never enter the word-split prefix.
+: >"$idroot_argv"
+inj_out=$(PATH="$tmp/perf-idroot" SUDO_UID=1000 SUDO_GID=1000 SUDO_USER='agent user; touch /tmp/pwn' \
+  bash "$PERFLIB" --verify-unpriv 2>&1)
+if printf '%s' "$inj_out" | grep -q 'identity=dropped:sudo:uid=1000' \
+   && ! grep -q 'agent user' "$idroot_argv" && [ ! -e /tmp/pwn ]; then
+  ok "perf-capability: a SUDO_USER containing shell metacharacters/whitespace never reaches the command prefix"
+else
+  bad "perf-capability: an unsafe SUDO_USER reached the prefix ('$inj_out', argv='$(cat "$idroot_argv")')"
+fi
+# 1e-iii. A NEGATIVE or oversized SUDO_UID is not an identity either (`[ -1 -gt 0 ]` is
+#         false, but a negative uid slipping into `setpriv --reuid=-1` would be worse than
+#         a refusal), and with no `nobody` on the box the state must be
+#         root-no-unprivileged-target — never a probe as root labelled a drop.
+mkdir -p "$tmp/perf-idnotarget" && cp -a "$tmp/perf-idroot"/. "$tmp/perf-idnotarget"/
+cat >"$tmp/perf-idnotarget/id" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -u|-g) if [ -n "${2:-}" ]; then exit 1; else echo 0; fi ;;   # no account resolves
+  *) echo 0 ;;
+esac
+EOF
+chmod +x "$tmp/perf-idnotarget/id"
+notgt_fail=0
+for badsudo in -1 0 abc 99999999999999999999999 ''; do
+  bs_out=$(PATH="$tmp/perf-idnotarget" SUDO_UID="$badsudo" SUDO_GID=1000 SUDO_USER=agentuser \
+    bash "$PERFLIB" --verify-unpriv 2>&1); bs_rc=$?
+  if [ "$bs_rc" -eq 0 ] || ! printf '%s' "$bs_out" | grep -q 'identity=root-no-unprivileged-target'; then
+    bad "perf-capability: SUDO_UID='$badsudo' did not fall through to root-no-unprivileged-target (rc=$bs_rc, '$bs_out')"
+    notgt_fail=1
+  fi
+done
+[ "$notgt_fail" -ne 0 ] || ok "perf-capability: a negative/zero/malformed/oversized/empty SUDO_UID is no identity — root with no 'nobody' reports root-no-unprivileged-target and FAILS"
+
 # ...and it must actually run the per-CPU collection the doctrine mandates.
 if grep -q 'stat .*-C 0' "$PERFSHIM_LOG" && grep -q '\-e cycles' "$PERFSHIM_LOG"; then
   ok "perf-capability: verify runs 'perf stat -C 0 -e cycles' (per-CPU, as doctrine requires)"

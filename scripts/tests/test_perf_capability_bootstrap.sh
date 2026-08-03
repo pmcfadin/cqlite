@@ -869,6 +869,164 @@ else
   bad "perf-capability: --verify-unpriv identity attribution wrong (self rc=$vu_self_rc '$vu_self'; root rc=$vu_root_rc '$vu_root')"
 fi
 
+# --- 6. TEST MODE IS HERMETIC BY ENFORCEMENT, NOT BY CONVENTION ---------------
+# 6a. TEST MODE + ROOT IDENTITY + NO SEAMS MUST REFUSE AND WRITE NOTHING (issue #3249
+#     review R4-3). The seams used to FALL BACK to the production directories under the
+#     marker, so this exact combination — marker set, sudo/sysctl present as declared
+#     shims, seams forgotten — passed the env guard, and a root `--yes` run then piped the
+#     drop-in through a bare `tee` into the REAL /etc/sysctl.d. That is a test run mutating
+#     the host, and it contradicted the hermetic-test-mode claim outright.
+#
+#     The `tee`/`sudo`/`sysctl` here are RECORDING shims: if the refusal regresses, the
+#     attempted production write is captured in the tripwire (and the suite's host-clean
+#     assert catches an actual write). The case asserts all three: the section refuses, it
+#     names the misconfiguration, and NOTHING privileged ran.
+noseambox="$tmp/perf-noseambox"; mkdir -p "$noseambox"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$noseambox/$t"
+done
+mkuname "$noseambox" Linux
+mkid "$noseambox" 0 1000        # ROOT: the identity that can actually write /etc/sysctl.d
+ln -sf "$perfbin/perf" "$noseambox/perf"
+noseam_trip="$tmp/perf-noseam-tripwire.log"; : >"$noseam_trip"
+for t in sudo sysctl tee setpriv; do
+  cat >"$noseambox/$t" <<EOF
+#!/usr/bin/env bash
+echo "$t \$*" >>"$noseam_trip"
+exit 0
+EOF
+  chmod +x "$noseambox/$t"
+done
+mkperfshim 9191919
+noseam_out=$(env -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
+  PATH="$noseambox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$noseambox" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+noseam_rc=$?
+noseam_mutating=$(grep -E '^(sudo|sysctl|tee) ' "$noseam_trip" | head -5)
+if [ "$noseam_rc" -eq 0 ] \
+   && printf '%s' "$noseam_out" | grep -q 'perf capability SKIPPED' \
+   && printf '%s' "$noseam_out" | grep -q 'REFUSING' \
+   && [ -z "$noseam_mutating" ] \
+   && ! printf '%s' "$noseam_out" | grep -q 'wrote /etc/sysctl.d' \
+   && ! printf '%s' "$noseam_out" | grep -q 'perf capability VERIFIED' \
+   && [ ! -e /etc/sysctl.d/99-cqlite-perf.conf ]; then
+  ok "perf section: test mode + ROOT + NO seams REFUSES to act — no privileged command, no production write, no verdict, rc 0"
+else
+  bad "perf section: unsandboxed test mode was allowed to act as root (rc=$noseam_rc, tripwire='$noseam_mutating')"
+  printf '%s\n' "$noseam_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 6b. A drop-in that differs ONLY in its trailing newline must be REWRITTEN (R4-4). The
+#     `$( )` compare judged it current, so the box kept a non-canonical file forever while
+#     bootstrap reported "already current" — and the byte-exactness claim was false. Here
+#     the file has no final newline: the run must NOT say "already current", must write
+#     through `tee`, and the file must end byte-identical to the canonical bytes.
+nlfix_d="$tmp/perf-nlfix.d"; mkdir -p "$nlfix_d"
+printf '%s' "$(bash "$PERFLIB" --drop-in)" >"$nlfix_d/99-cqlite-perf.conf"   # final newline stripped
+: >"$yestrip"
+mkperfshim 8181818
+nlfix_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$nlfix_d" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+nlfix_rc=$?
+if [ "$nlfix_rc" -eq 0 ] \
+   && ! printf '%s' "$nlfix_out" | grep -q 'drop-in already current' \
+   && grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" \
+   && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
+  ok "perf section: a drop-in MISSING its final newline is judged NOT current and REWRITTEN to the canonical bytes"
+else
+  bad "perf section: a non-canonical drop-in was left in place (rc=$nlfix_rc, tripwire='$(cat "$yestrip")')"
+  printf '%s\n' "$nlfix_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+# ...and the same for an EXTRA trailing blank line, which is what an editor leaves behind.
+printf '\n' >>"$nlfix_d/99-cqlite-perf.conf"
+: >"$yestrip"
+nlfix2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$nlfix_d" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+if ! printf '%s' "$nlfix2_out" | grep -q 'drop-in already current' \
+   && grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" \
+   && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
+  ok "perf section: a drop-in with an EXTRA trailing blank line is judged NOT current and REWRITTEN"
+else
+  bad "perf section: an extra-blank-line drop-in was reported current"
+  printf '%s\n' "$nlfix2_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# --- 7. THE DIAGNOSTICS NAME THE FILE THAT IS FIGHTING US --------------------
+# 7a. `kernel.kptr_restrict = 1` in the stock Ubuntu drop-in
+#     /etc/sysctl.d/10-kernel-hardening.conf is the CONCRETE MECHANISM behind the "it
+#     silently reverts" note in three separate measurement reports (ws0-3217:214,
+#     ws3-3029:63, ws0-cassandra-baseline-2026-07-27:847), none of which identified a
+#     cause. A non-ok read-back must therefore name the competing FILES, and rank them:
+#     one sorting AFTER our 99- drop-in actually overrides us; one sorting before does not
+#     (which is exactly why the 99- prefix is load-bearing).
+compbox_d="$tmp/perf-compbox.d"; mkdir -p "$compbox_d"
+bash "$PERFLIB" --drop-in >"$compbox_d/99-cqlite-perf.conf"
+printf '# stock ubuntu hardening\nkernel.kptr_restrict = 1\n' >"$compbox_d/10-kernel-hardening.conf"
+printf 'kernel.perf_event_paranoid = 3\n'                     >"$compbox_d/99-zzz-late.conf"
+printf 'vm.swappiness = 1\n'                                  >"$compbox_d/50-unrelated.conf"
+mkperfshim 4141414
+comp_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$compbox_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+comp_rc=$?
+if [ "$comp_rc" -eq 0 ] \
+   && printf '%s' "$comp_out" | grep -q "OVERRIDE: $compbox_d/99-zzz-late.conf" \
+   && printf '%s' "$comp_out" | grep -q 'sorts AFTER 99-cqlite-perf.conf' \
+   && printf '%s' "$comp_out" | grep -q "competing file: $compbox_d/10-kernel-hardening.conf" \
+   && printf '%s' "$comp_out" | grep -q "99-' prefix is load-bearing" \
+   && ! printf '%s' "$comp_out" | grep -q '50-unrelated'; then
+  ok "perf section: a non-ok read-back NAMES the competing sysctl.d files, flags the later-sorting one as an actual OVERRIDE, and says why the 99- prefix is load-bearing"
+else
+  bad "perf section: the diagnostics did not name the competing file (rc=$comp_rc)"
+  printf '%s\n' "$comp_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+# 7b. ...and with no competitor at all it says so, rather than leaving the reader to
+#      wonder whether the scan ran (an absent diagnosis reads like an absent check).
+nocomp_d="$tmp/perf-nocompbox.d"; mkdir -p "$nocomp_d"
+bash "$PERFLIB" --drop-in >"$nocomp_d/99-cqlite-perf.conf"
+nocomp_out=$(PATH="$checkapply_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$revert_proc" CQLITE_PERF_SYSCTL_DIR="$nocomp_d" CQLITE_PERF_TEST_PRIV_DIR="$checkapply_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if printf '%s' "$nocomp_out" | grep -q 'no other file in the sysctl.d directory sets perf_event_paranoid/kptr_restrict' \
+   && ! printf '%s' "$nocomp_out" | grep -q 'OVERRIDE:'; then
+  ok "perf section: with no competing file the scan says so explicitly (a silent scan is indistinguishable from no scan)"
+else
+  bad "perf section: the no-competitor case printed no scan result"
+  printf '%s\n' "$nocomp_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 7c. AN UNKNOWN IDENTITY IS REPORTED AS UNKNOWN (R4-1, bootstrap side). With `id`
+#     unusable the run cannot claim the probe was unprivileged — and must not claim it ran
+#     as root either. /proc is ok and perf succeeds here, so the ONLY thing standing between
+#     this run and a false "VERIFIED" is the identity check.
+idlessbox="$tmp/perf-idlessbox"; mkdir -p "$idlessbox"
+for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
+         diff timeout dirname basename ls rm mv cp mkdir touch git python3 hostname stat find tee; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$idlessbox/$t"
+done
+mkuname "$idlessbox" Linux
+# NO `id` shim at all: `have id` fails, so every identity question is unanswerable.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$idlessbox/sysctl"; chmod +x "$idlessbox/sysctl"
+ln -sf "$perfbin/perf" "$idlessbox/perf"
+mkperfshim 5252525
+idless_out=$(PATH="$idlessbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$drop_proc" CQLITE_PERF_SYSCTL_DIR="$drop_d" CQLITE_PERF_TEST_PRIV_DIR="$idlessbox" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+idless_rc=$?
+if [ "$idless_rc" -eq 0 ] \
+   && ! printf '%s' "$idless_out" | grep -q 'perf capability VERIFIED' \
+   && printf '%s' "$idless_out" | grep -q 'perf capability NOT verified' \
+   && printf '%s' "$idless_out" | grep -q "identity of this process could NOT be determined" \
+   && ! printf '%s' "$idless_out" | grep -q 'the probe ran AS ROOT'; then
+  ok "perf section: with 'id' unusable the run reports the identity as UNKNOWN and claims no verification (and does not assert it ran as root either)"
+else
+  bad "perf section: an unknown identity was resolved to a capability claim (rc=$idless_rc)"
+  printf '%s\n' "$idless_out" | sed -n '/Perf profiling/,/^$/p'
+fi
 
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean

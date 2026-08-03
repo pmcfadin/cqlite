@@ -258,15 +258,38 @@ DIAGNOSTIC INFORMATION, explicitly subordinate to the `/proc` verdict, and no ru
 emit a non-`ok` token diagnosis and an unqualified "VERIFIED" together. Because
 `perf_event_paranoid` restricts UNPRIVILEGED users and ROOT BYPASSES IT, the functional
 collection SHALL be attributed to an identity: when bootstrap runs as root it SHALL DROP
-PRIVILEGE for the probe where a mechanism exists (`setpriv`, else `runuser`, else
-`sudo -u`) targeting an unprivileged identity resolved from `SUDO_UID`/`SUDO_GID` else the
-passwd database's `nobody` — never an invented uid — and where no mechanism or no such
-identity exists it SHALL label the root result as NOT evidence of unprivileged capability
-and SHALL NOT report it as verification. The privileged destination path SHALL be a
-hardcoded literal, never derived from the environment, and every variable the section's
-control flow reads SHALL be initialised by the section BEFORE the platform/library guards,
-so no inherited environment value can enter a Linux-only implementation on another
-platform or without its helper library. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
+PRIVILEGE for the probe where a mechanism exists (`setpriv`, else `runuser -u <name>`, else
+`sudo -u '#<uid>'`) targeting an unprivileged identity resolved from `SUDO_UID`/`SUDO_GID`
+else the passwd database's `nobody` — never an invented uid — and where no mechanism or no
+such identity exists it SHALL label the root result as NOT evidence of unprivileged
+capability and SHALL NOT report it as verification.
+
+NO PATH SHALL REACH A CAPABLE/VERIFIED VERDICT FROM AN UNVALIDATED INPUT. Specifically:
+the process's own privilege SHALL be determined from an `id -u` that exists, exits 0 and
+prints a validated non-negative integer — an unusable `id -u` SHALL yield an explicit
+`identity-unknown` state that is NOT evidence of unprivileged capability, and SHALL NEVER
+be substituted with an assumed uid; a `SUDO_USER` name SHALL be used only when the passwd
+database confirms it resolves to exactly the validated NON-ZERO `SUDO_UID`/`SUDO_GID` and
+the name is shell-token safe, otherwise the numeric ids alone SHALL carry the drop; and
+the drop-in comparison SHALL be BYTE-exact including trailing newlines, so a file
+differing only in a missing final newline or an extra trailing blank line SHALL be judged
+NOT current and rewritten.
+
+The privileged destination path SHALL be a hardcoded literal, never derived from the
+environment, and every variable the section's control flow reads SHALL be initialised by
+the section BEFORE the platform/library guards, so no inherited environment value can
+enter a Linux-only implementation on another platform or without its helper library. The
+test-only path seams SHALL be inert without their explicit marker, and UNDER the marker
+BOTH seams SHALL be MANDATORY, absolute and outside `/etc`, `/proc` and `/sys`: a missing
+or production-shaped seam SHALL be a loud refusal in the env guard AND in the path
+resolvers, so a test-mode run can never fall back to a production directory and mutate the
+host.
+
+When the read-back reports a restrictive `perf_event_paranoid`/`kptr_restrict` state, the
+diagnostics SHALL NAME the competing configuration files — every other file in the
+`sysctl.d` directory that also sets either control — and SHALL distinguish one whose
+basename sorts AFTER the managed drop-in (an actual override, since the last assignment
+wins) from one that sorts before it; a run with no competitor SHALL say so explicitly. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
 apply command's exit status, and the apply command's own failure SHALL be reported
 separately from the capability verdict — `sysctl --system` applies every drop-in on the
 box, so a non-zero exit may belong to an unrelated pre-existing entry, and no wording
@@ -324,6 +347,42 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
 - **WHEN** no such mechanism or identity is available
 - **THEN** bootstrap SHALL label the result as NOT evidence that an unprivileged process
   can profile the box, SHALL NOT report VERIFIED even with `/proc` = `ok`, and SHALL exit 0
+
+#### Scenario: an unknown identity is not evidence of unprivileged capability
+- **GIVEN** a Linux host on which `id -u` is missing, exits non-zero, or prints
+  unparseable output, while `perf stat -C 0 -e cycles` succeeds and `/proc` reports `ok`
+- **WHEN** bootstrap runs
+- **THEN** it SHALL report the identity as UNKNOWN, SHALL NOT report VERIFIED, SHALL NOT
+  assert that the probe ran as root either, and SHALL exit 0
+
+#### Scenario: an inconsistent SUDO_USER cannot become the drop target
+- **GIVEN** `SUDO_UID=1000` with `SUDO_USER=root` (stale or inconsistent) and no `setpriv`
+- **WHEN** the privilege-dropping prefix is resolved
+- **THEN** the name SHALL be rejected and the drop SHALL use the validated numeric uid
+  (`sudo -u '#1000'`), so the probe can never run as root under a "dropped" label
+
+#### Scenario: test mode without a sandbox refuses to act
+- **GIVEN** the test-mode marker set, a root identity, and NO path seams set
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL refuse the section with a loud diagnosis, SHALL invoke no privileged
+  command, SHALL write nothing (in particular not the real `/etc/sysctl.d` drop-in), SHALL
+  claim no verdict, and SHALL exit 0
+
+#### Scenario: a non-canonical drop-in is rewritten
+- **GIVEN** an existing drop-in whose bytes differ from the canonical content only in
+  trailing newlines (a missing final newline, or an extra trailing blank line)
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL NOT report "already current", SHALL rewrite the file, and the result
+  SHALL be byte-identical to the canonical content
+
+#### Scenario: a competing sysctl file is named
+- **GIVEN** a Linux host whose read-back is non-`ok` and whose `sysctl.d` directory holds
+  another file setting `perf_event_paranoid`/`kptr_restrict` (e.g. the stock Ubuntu
+  `10-kernel-hardening.conf`, plus one sorting after the managed drop-in)
+- **WHEN** bootstrap runs
+- **THEN** the diagnostics SHALL name each competing file by path, SHALL flag the
+  later-sorting one as an actual OVERRIDE, and SHALL state that the earlier-sorting one
+  loses to the managed `99-` prefix
 
 #### Scenario: an inherited environment variable cannot enter the section
 - **GIVEN** an ambient `PERF_SECTION_OK=1` in bootstrap's environment

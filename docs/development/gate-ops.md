@@ -222,8 +222,13 @@ and the `/etc/sysctl.conf` precedence trap: `docs/development/fleet-runbook.md`.
 Self-test coverage: `scripts/tests/test_agent_gate_summary.sh` (cases 9f* assert every
 state via the test seam, the Darwin no-token contract, **and** the production branch
 against a real `/proc` fixture with the seam unset) and
-`scripts/tests/test_perf_capability.sh` (the helper contract + the bootstrap
-write/read-back/verify path, including the silent-revert and denied-`perf` cases).
+the pair `scripts/tests/test_perf_capability.sh` (the helper's unit contract) +
+`scripts/tests/test_perf_capability_bootstrap.sh` (the bootstrap
+write/read-back/verify path, including the silent-revert and denied-`perf` cases),
+which share `scripts/tests/lib/perf-capability-test-lib.sh`. Both are in the
+`tooling-tests` `&&`-chain; together they also pin the fail-closed identity rules (an
+unusable `id -u`, an inconsistent `SUDO_USER`) and the enforced hermeticity of test
+mode (both path seams mandatory, no production fallback).
 
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
