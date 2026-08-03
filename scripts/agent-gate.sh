@@ -259,7 +259,12 @@
 #                      process — and scripts/tests/test_gen_perf_corpus_3068.sh,
 #                      which pins the perf-corpus generator's TABLES validation, its
 #                      manifest writer's refusal of an empty table list, and the
-#                      tight scoping of its multi-GB stale-corpus pruning.
+#                      tight scoping of its multi-GB stale-corpus pruning. Also runs
+#                      scripts/tests/test_gen_perf_corpus_bti.sh (#3234), which pins
+#                      the BTI (`da`) perf-corpus generator's acceptance asserts in
+#                      BOTH directions (a negative control per assert: nb-* descriptor,
+#                      empty Rows.db, sub-8-MiB Data.db, BIG-only TOC entry) plus its
+#                      row driver's (seed, chunk-index) determinism.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -5350,6 +5355,29 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # BTI perf-corpus generator guard (#3234): hermetic (no docker/sudo/cassandra —
+  # only --help/--validate-only/--verify-only plus the row driver and the manifest
+  # writer's pre-container guards, none of which start a container). Pins issue
+  # #3234's ACCEPTANCE ASSERTS IN BOTH DIRECTIONS against fabricated corpora: a
+  # stock Cassandra 5.0 node silently emits `nb` (BIG) when either mandatory yaml
+  # setting misses, so an assert only ever observed on a good corpus is untested —
+  # every case here carries a negative control (`nb-*` descriptor, empty Rows.db,
+  # sub-8-MiB Data.db, a TOC listing the BIG-only Index.db). Also pins the row
+  # driver's (seed, chunk) determinism, which is what makes the manifest's
+  # per-Data.db sha256 a reproducibility check. A failure FAILs the component,
+  # mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_gen_perf_corpus_bti.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (BTI perf-corpus generator guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

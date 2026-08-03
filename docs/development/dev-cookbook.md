@@ -23,10 +23,81 @@ FD/RSS resource-leak soak (long-running open/scan/drop loop): see
 `docs/development/soak-resource-leak.md`.
 
 Measuring against a **multi-GB** corpus (cold/warm scans, large-I/O work): generate it with
-`test-data/scripts/gen-perf-corpus-3068.sh` and run every measurement through
+`test-data/scripts/gen-perf-corpus-3068.sh` (BIG/`nb`) or
+`test-data/scripts/gen-perf-corpus-bti.sh` (BTI/`da`, below) and run every measurement through
 `test-data/scripts/perf-run-contained.sh` — an *uncontained* cold read of an 8 GiB mmap'd `Data.db`
 hard-hung a swapless host for 75 minutes with no OOM kill. See
 `docs/development/perf-corpus-and-containment.md`.
+
+## BTI (`da`) perf corpus — `gen-perf-corpus-bti.sh` (issue #3234)
+
+Every committed `da-*-bti-*` fixture is a *correctness* fixture (largest: `test_da/wide_table`, a
+28 KB `Data.db`), so BTI read-path work needs a generated corpus. Two independent reasons:
+
+- a warm scan of the committed fixtures finishes in microseconds — ~6 orders of magnitude short of a
+  ≥10 s profiling window;
+- `MADV_RANDOM` is applied only at `file_size >= 8 MiB`, so below that the point-read and scan
+  mappings are **the same mapping** and a read-plane A/B is structurally zero, not merely noisy.
+
+```bash
+# End-to-end pipeline validation (~2.5 min: 60 s boot + 20 s restart + ~10 s load + golden).
+# Defaults the keyspace to perf_bti_smoke so it can never clobber a production corpus.
+bash test-data/scripts/gen-perf-corpus-bti.sh --smoke --out /data/corpus-3234-bti
+
+# Production corpus: ~2.0 GiB over 27 SSTables (default --rows 13200000 --chunk-rows 500000).
+bash test-data/scripts/gen-perf-corpus-bti.sh --out /data/corpus-3234-bti
+bash test-data/scripts/gen-perf-corpus-bti.sh --rows 33000000     # ~5 GiB
+
+bash test-data/scripts/gen-perf-corpus-bti.sh --validate-only     # flags only; no container, no writes
+bash test-data/scripts/gen-perf-corpus-bti.sh --verify-only        # re-assert an existing corpus, offline
+bash test-data/scripts/gen-perf-corpus-bti.sh --help              # every flag + its env var
+```
+
+The final line printed is the `export CQLITE_DATASETS_ROOT=<abs>` to use.
+
+**Economics** (measured by the commissioning run on a fleet worker box): **162 B/row on disk** at
+`--payload-bytes 160` with LZ4 `chunk_length_in_kb=16`, and ~34k rows/s end-to-end including CSV
+generation. So ~2 GiB ≈ 13.2 M rows ≈ **~8 min** and ~5 GiB ≈ 33 M rows ≈ **~17 min**, plus ~80 s of
+container boot/restart. `--chunk-rows 500000` gives ~78 MiB per `Data.db`, an order of magnitude over
+the 8 MiB floor.
+
+**The two mandatory `cassandra.yaml` settings.** A stock Cassandra 5.0 node emits **`nb` (BIG)**,
+because it ships `storage_compatibility_mode: CASSANDRA_4`. Both of these are required, and both
+must be in place *before* the table is created (the script applies them, restarts, and then
+`grep`-verifies each one):
+
+```yaml
+storage_compatibility_mode: NONE     # live in the shipped yaml (~line 2249)
+sstable:                             # COMMENTED OUT in the shipped yaml (~line 1142)
+  selected_format: bti
+```
+
+A miss on **either** silently produces `nb` with no error at all — which is why the yaml greps and
+the emitted descriptors are hard failures, not warnings. The fail-closed asserts (all of them
+re-runnable offline via `--verify-only`, and pinned by `scripts/tests/test_gen_perf_corpus_bti.sh`
+with a negative control each) are: `da-*-bti-*` descriptors only and **no `nb-*`**; ≥1 `Data.db`
+> 8 MiB; every `Rows.db` non-empty; each TOC lists `Partitions.db`/`Rows.db` and **not** the
+BIG-only `Index.db`/`Summary.db`; and rows loaded == `Statistics.db` `totalRows` ==
+`sstabledump` rows for each dumped generation.
+
+**Manifest identity** — `test-data/perf-corpus-bti-manifest.json` (committed; mirrors
+`perf-corpus-3068-manifest.json`). The corpus itself is multi-GB and **not** committed
+(`.gitignore`: `*.db`). Reproducibility rests on the recorded **seed**: the row driver
+(`gen-perf-corpus-bti-rows.py`) seeds chunk *N* with `"<seed>:<N>"`, so the row set — not merely the
+row *count* — is reproducible, and the manifest's per-SSTable `Data.db` **sha256** is therefore a
+real check. That is the deliberate divergence from the `#3068` BIG sibling, whose `cassandra-stress`
+profile cannot be reproduced from anything a manifest can record. Every number in the manifest is
+read back from the written bytes (`sstablemetadata` on `Statistics.db`, the `CompressionInfo.db`
+header, each `TOC.txt`) and **nothing is inherited from a previous manifest**. A `mode` field marks
+whether a manifest describes a `smoke` validation run or the `production` corpus.
+
+**This is a parity oracle, not just a throughput fixture.** Every byte is **Cassandra-written**, so
+the `sstabledump -l` JSONL goldens emitted beside the corpus can back parity work. Per issue #3042 a
+CQLite-written round-trip fixture cannot: both halves make the identical framing mistake, so the
+round-trip closes while real Cassandra-written data reads wrong. Goldens run ~2× the `Data.db` size,
+so only a bounded subset is dumped (`--dump-generations`, default 1) and they live beside the
+(gitignored) corpus — the `git add -f` convention applies to the small `test_da` correctness
+goldens, never to these.
 
 ## CLI
 
