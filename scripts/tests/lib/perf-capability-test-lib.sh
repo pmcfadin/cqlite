@@ -18,6 +18,13 @@
 # refuses to fall back to a production directory — so a case that forgets one fails
 # closed and loudly instead of writing the host's real drop-in.
 #
+# ONE SANDBOX ROOT (review R6-1/R6-2). Every seam must now be provably INSIDE the declared
+# root CQLITE_PERF_TEST_SANDBOX, which is exported ONCE here as this suite's `$tmp` and
+# proves itself with the stamp file the helper looks for. That is why every seam a case sets
+# is a path under `$tmp`: containment is the whole check, so anything outside — `//etc`,
+# `/tmp/../etc/sysctl.d`, a symlinked ancestor, a relative path — is refused without the
+# helper needing to know the name of a single forbidden place.
+#
 # Sourced, never executed. The sourcing suite must NOT have `set -e` (the cases test
 # failing commands on purpose); `set -uo pipefail` is what both use.
 
@@ -71,7 +78,7 @@ export GIT_CONFIG_NOSYSTEM=1
 : >"$GIT_CONFIG_GLOBAL"
 unset CQLITE_PROJECT_NUMBER CQLITE_PROJECT_OWNER CQLITE_PROJECT_ACCOUNT PROJECT_TITLE
 # A worker shell may export the seams themselves; a test must set exactly what it means.
-unset CQLITE_PERF_PROC_DIR CQLITE_PERF_SYSCTL_DIR
+unset CQLITE_PERF_PROC_DIR CQLITE_PERF_SYSCTL_DIR CQLITE_PERF_SYSCTL_EXTRA_DIRS
 # ...and so may a `sudo bash scripts/tests/...` invocation export SUDO_UID/GID/USER,
 # which the privilege-drop target resolution reads. A case that means to exercise that
 # path sets them itself; inheriting them would make the suite's verdict depend on how
@@ -80,11 +87,16 @@ unset SUDO_UID SUDO_GID SUDO_USER
 # The section under test must never be steered by an ambient export either: bootstrap
 # initialises PERF_SECTION_OK itself, and the bootstrap suite proves it.
 unset PERF_SECTION_OK
-# The two path seams are INERT unless this marker is set; under the marker they are
-# MANDATORY, must be absolute and non-production, and a real sudo/sysctl on PATH is a
-# hard refusal (the shim dir is declared per case in CQLITE_PERF_TEST_PRIV_DIR). Cases
-# that must exercise the PRODUCTION defaults run with `env -u CQLITE_PERF_TEST_MODE`.
+# The path seams are INERT unless this marker is set; under the marker they are MANDATORY,
+# must be provably INSIDE the declared sandbox root, and a real sudo/sysctl on PATH is a hard
+# refusal (the shim dir is declared per case in CQLITE_PERF_TEST_PRIV_DIR). Cases that must
+# exercise the PRODUCTION defaults run with `env -u CQLITE_PERF_TEST_MODE`.
 export CQLITE_PERF_TEST_MODE=1
+# THE sandbox root for both suites, STAMPED so the helper can PROVE the declaration instead
+# of trusting the variable (a bare CQLITE_PERF_TEST_SANDBOX=/etc buys nothing without a stamp
+# that only privilege could place there). Every seam any case sets lives under it.
+export CQLITE_PERF_TEST_SANDBOX="$tmp"
+: >"$tmp/.cqlite-perf-sandbox"
 
 # mkuname <dir> <sysname>: a `uname` stub, so the Linux/Darwin branch under test is
 # the one selected by the CASE, not by whatever host runs the suite. Without this the
