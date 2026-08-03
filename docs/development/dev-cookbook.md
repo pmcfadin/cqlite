@@ -280,12 +280,31 @@ historical instead of silently mis-describing the new corpus. `read_path_measure
 
 Every number in the manifest is read back from the written bytes (`sstablemetadata` on
 `Statistics.db`, the `CompressionInfo.db` header, each `TOC.txt`) and **nothing is inherited from a
-previous manifest**. A `mode` field marks whether a manifest describes a `smoke` validation run, the
-`production` corpus, or the `small_golden` committed oracle. The row plan is additionally checked
+previous manifest**. A **nonzero `sstablemetadata` exit is a hard failure before any of its output is
+parsed** — the tool can print a complete-looking `totalRows:` / `Partition Size:` block and still
+fail (a partial read, an OOM kill in the memory-capped container), and parsing that would publish
+half-measured counts as measured. The row plan is additionally checked
 **against the run's own configuration** before anything is written — chunk count, a contiguous chunk
 index set, per-chunk row counts and each record's `"<seed>:<N>"` seed material — because matching
 aggregate totals cannot detect a *stale* plan, and a stale plan would publish a declared seed and
-generation plan that do not describe the corpus.
+generation plan that do not describe the corpus. And the corpus **SHAPE** is verified in both layers
+(`assert_corpus` and the writer's `main`): the SSTable count must EQUAL the plan's chunk count, at
+generations `1..CHUNKS`. That is not cosmetic — an unexpected flush split or a compaction preserves
+every row and partition (so the aggregate cross-checks stay green) while changing the **generation
+count, which selects the scan route and is what the AC3 figure is attributed to**. Because
+`--verify-only` derives the expected chunk count from `--rows`/`--chunk-rows`, pass the same values
+the corpus was generated with (the production defaults describe the production corpus).
+
+**A `mode` field marks whether a manifest describes a `smoke` validation run, the `production`
+corpus, or the `small_golden` committed oracle — and the mode-specific metadata is generated PER
+MODE**: `purpose`, the corpus-location fields and `read_path_measurement_scope` say only what is true
+of the corpus at hand, so a non-production manifest carries **no** AC3 figure and **no**
+`full_generation_golden` block at all (an omitted field cannot be false; a field labelled "does not
+apply" is still there to be quoted out of context). `corpus_committed` is **observed**, not derived
+from the mode: the checkout's `test-data/datasets` is searched at the same corpus-relative path and
+every recorded `Data.db` sha256 re-hashed from it, so `true` means those exact bytes are committed.
+`min_data_db_floor_bytes` records the floor the run actually **enforced** (0 under `--small-golden`),
+beside the fixed `read_plane_threshold_bytes`.
 
 **This is a parity oracle, not just a throughput fixture.** Every byte is **Cassandra-written**, so
 the `sstabledump -l` JSONL goldens emitted beside the corpus can back parity work. Per issue #3042 a
@@ -309,7 +328,13 @@ over 5 partitions, `PRIMARY KEY (pk, bucket, seq)`, LZ4 `chunk_length_in_kb=16`,
 ~18× the image's `column_index_size` default of `4KiB`), and its `sstabledump -l` golden at
 **192,935 B (188.4 KiB)**. Recorded identity:
 `test-data/perf-corpus-bti-small-golden-manifest.json` (`mode: small_golden`); DDL + provenance:
-`test-data/schemas/wide-multiclustering-small-bti.cql`.
+`test-data/schemas/wide-multiclustering-small-bti.cql`. That manifest states `corpus_committed: true`
+with a `committed_copy` block naming the checkout path and the real 297,374 B directory size, and it
+carries **none** of the production AC3 metadata (the figure and the 153.3 MiB full-generation golden
+belong to the *perf* corpus, not to this 600-row fixture). It is regenerated **metadata-only** — the
+committed SSTable bytes and every recorded sha256 stay unchanged, which
+`scripts/tests/test_gen_perf_corpus_bti.sh` pins by re-hashing the committed `Data.db` against the
+manifest.
 
 - **It IS a correctness oracle** (issue #3042): Cassandra 5.0.2 wrote every byte, so the JSONL golden
   can back BTI row/cell decode, `Rows.db` trie descent and compound-clustering-slice parity work.

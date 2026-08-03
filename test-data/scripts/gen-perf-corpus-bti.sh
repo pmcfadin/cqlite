@@ -162,7 +162,10 @@ modes
   --prune-dry-run        --validate-only + list the stale corpus dirs a run WOULD remove
                          (PRUNE_KEEP=<basename> excludes one, as publish() does)
   --verify-only          re-assert an ALREADY-GENERATED corpus under --out and exit;
-                         no container, no writes, nothing mutated
+                         no container, no writes, nothing mutated. It also checks the
+                         SSTable count against --rows/--chunk-rows (one SSTable per
+                         chunk, generations 1..CHUNKS), so pass the SAME --rows and
+                         --chunk-rows the corpus was generated with
   --yaml-flip-check FILE self-test hook: run the PRODUCTION cassandra.yaml flip
                          (sed + the three verification greps) against a LOCAL yaml
                          copy — edits FILE IN PLACE, prints the verified lines,
