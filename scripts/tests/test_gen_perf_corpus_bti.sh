@@ -34,6 +34,17 @@
 #      CSV held M" and "Statistics.db totalRows == sstabledump rows", plus the
 #      manifest writer's plan-vs-Statistics.db rows AND partitions checks and its
 #      refusal to fabricate an unobserved partition count.
+#   8b. ...and neither layer trusts OUTPUT WITHOUT A STATUS (roborev #3234 M1): the
+#      stub can print a complete, valid-looking metadata block and then exit nonzero
+#      (STUB_META_EXIT), which both the writer and the generator must refuse -- that is
+#      the one shape a returncode-blind parser cannot tell from success.
+#   8c. The corpus SHAPE is verified, not assumed (roborev #3234 M2): one SSTable per
+#      planned chunk, at generations 1..N, in BOTH layers, with too-few / too-many / a
+#      GAP-at-the-right-count negative controls each. The generation count selects the
+#      scan route and is what the AC3 figure is attributed to, so a silent drift there
+#      misattributes a published number.
+#   8d. The COMMITTED small-golden manifest carries NO production-only claim (roborev
+#      #3234 L3) and its recorded sha256s still match the committed bytes.
 #   9. The suite ITSELF cannot report success while having stopped running cases:
 #      passes are counted against a declared floor, and each of the two legitimate
 #      skips (no python3; < 5 GiB free) declares the case count it drops so that
@@ -78,9 +89,9 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # the EXACT full-suite pass count (not a slack lower bound), so deleting or
 # short-circuiting any single case drops `passes` below it and reds the suite. Proven
 # by mutation, not by inspection (see the header note on the roborev M1 finding).
-MIN_CASES=118
-SKIP_PY_CASES=40
-SKIP_E2E_CASES=12
+MIN_CASES=130
+SKIP_PY_CASES=48
+SKIP_E2E_CASES=15
 
 fails=0
 passes=0
@@ -1499,10 +1510,17 @@ PY
     # Same fault, the generator's own readback (goldens ON, so verify_dumped_row_counts
     # reaches it first): it too must refuse to cross-check against the output of a
     # command that did not succeed.
+    # The expected substring is the GENERATOR's own wording, and the WRITER's wording
+    # must be ABSENT: both messages start "sstablemetadata FAILED for", so a laxer grep
+    # would be satisfied by the writer catching it later -- which is exactly what
+    # happened when this case was mutation-tested with the generator's check removed.
     STUB_META_EXIT=42 e2e_run meta-exit-golden; rc=$?
     if [ "$rc" -ne 0 ] \
        && grep -q "sstablemetadata FAILED for" "$TMP/e2e-meta-exit-golden.log" \
-       && grep -q "refusing to" "$TMP/e2e-meta-exit-golden.log" \
+       && grep -q "cross-check row counts against the output of a command" \
+            "$TMP/e2e-meta-exit-golden.log" \
+       && ! grep -q "refusing to read row/partition provenance" \
+            "$TMP/e2e-meta-exit-golden.log" \
        && [ ! -f "$TMP/e2e-meta-exit-golden/manifest-bti-3234.json" ]; then
       pass "the generator's row-count cross-check refuses a nonzero sstablemetadata exit"
     else

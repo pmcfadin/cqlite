@@ -1,7 +1,7 @@
 {
   "issue": 3234,
   "purpose": "COMMITTABLE small Cassandra-written Cassandra 5.0 BTI (`da`) oracle with a wide partition and a compound clustering key, for BTI row/cell decode, `Rows.db` trie descent and compound-clustering-slice PARITY work (#3042: Cassandra-WRITTEN bytes). Deliberately NOT profileable \u2014 below the 8 MiB read-plane threshold.",
-  "generated_utc": "2026-08-03T19:38:04.787768+00:00",
+  "generated_utc": "2026-08-03T19:44:16.525939+00:00",
   "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
   "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
   "mode": "small_golden",
@@ -70,7 +70,7 @@
     "kib": 290.4,
     "verified": "every Data.db sha256 recorded in this manifest was re-hashed from the committed copy and matched, so this manifest describes the committed bytes"
   },
-  "corpus_note": "This corpus IS COMMITTED, at test-data/datasets/sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262 \u2014 297374 B (290.4 KiB) over 10 file(s), force-added past .gitignore's `*.db` (the `test_da` convention) so a Cassandra-WRITTEN `da` oracle travels with the checkout. It is NOT multi-GB and needs no regeneration: read it from the checkout. Regenerating it would replace committed bytes (and every sha256 here) for no gain \u2014 the write timestamps alone make the bytes differ. Nothing in this manifest is inherited from a previous one; every number is re-read from the bytes on each run.",
+  "corpus_note": "This corpus IS COMMITTED, at test-data/datasets/sstables/test_da/wide_multiclustering_small-47f6a3008f6911f1bc0f8df8badcc262 \u2014 297374 B (290.4 KiB) over 10 file(s), force-added past .gitignore's `*.db` (the `test_da` convention) so a Cassandra-WRITTEN `da` oracle travels with the checkout. At this size it needs no regeneration: read it from the checkout. Regenerating it would replace committed bytes (and every sha256 here) for no gain \u2014 the write timestamps alone make the bytes differ. Nothing in this manifest is inherited from a previous one; every number is re-read from the bytes on each run.",
   "reproducibility": {
     "reproduced_by_the_seed": "the ROW SET: every pk/bucket/seq/payload value, the partition count, the rows-per-partition distribution and the chunk->SSTable split are a pure function of (seed, chunk-index) \u2014 see the row driver's determinism contract",
     "row_set_determinism_guaranteed_by": "the row driver VENDORS its PRNG (MT19937 with CPython's str seeding) and both selection algorithms (weighted width draw, bucket sampling), so the seed identity recorded here does not depend on any standard-library implementation detail or on which `python3` runs it (roborev #3234 M2 \u2014 random.choices()/random.sample() are documented as changeable). Enforced by `gen-perf-corpus-bti-rows.py --self-check`: pinned CSV sha256 digests for fixed configurations, run as a case of scripts/tests/test_gen_perf_corpus_bti.sh. If that check ever fails, the seed identity recorded in this manifest is void \u2014 find what changed rather than re-pinning the digests.",
