@@ -16,9 +16,25 @@ labelled **[API-CONTRACT]** and pinned to the resolved dependency versions.
 | **T1** | Near-zero-copy `ArrowToTrino` page build | 10–20× page-build CPU; **1.5–3× stream throughput** | **WEAKENED (hard)** | **~1.0× today; ~1.1–1.2× only after the server per-stream ceiling is fixed.** Isolated-step 10–20× survives; the label "zero-copy" is wrong (a per-column copy is required) but the per-CELL→per-COLUMN distinction holds. |
 | **T2** | Async Java-side prefetch (double-buffer) | 1.3–2× | **WEAKENED (hard)** | **~1.0× today.** Fills stream idle time that is ~99.9% server-produce wait at field rates. Compounds with T1 post-fix; combined T1+T2 ≤ ~1.1–1.3×, not the doc's 2–6× product. |
 | **T3** | HTTP/2 window sizing ("1.47 MB batch = 22× the 64 KB window → BDP stall") | 1.5–3× (network-bound) | **KILLED** | **~1.0×.** Double kill: (a) the binding receive window is the **grpc-java client's, defaulting to 1 MiB with BDP auto-tuning**, not 64 KB; the tonic *server* window knob the doc names is the wrong flow-control direction for `do_get` egress. (b) Even a 64 KB window has ~8× headroom over the actual 0.78 MB/s per-stream field byte rate. |
-| **T4** | Byte-bounded batch sizing | 1.0–1.3× | **SURVIVES (minor)** | **~1.0–1.1×.** Real robustness win for wide rows; but the gRPC message-ceiling motivation is moot (Flight defaults `maxInboundMessageSize` high). Keep as a correctness/robustness lever, not a throughput one. |
+| **T4** | Byte-bounded batch sizing | 1.0–1.3× | **SURVIVES (minor)** | **~1.0–1.1×.** Real robustness win for wide rows; the gRPC message-ceiling motivation is moot **for the Java Flight client only** (see the scoping note below). Keep as a correctness/robustness lever, not a throughput one. |
 | **T5** | Opt-in Flight LZ4/ZSTD body compression | 1.3–2× (net-bound); ≤1× (CPU-bound) | **WEAKENED → conditional** | **~1.0× today; net-NEGATIVE for narrow rows.** Since T3 shows the link is *not* binding at current per-stream rates, compression's throughput case is empty today. Survives only as a latent WAN lever + a mild egress-buffer (B4) reducer. |
 | **T6** | Fan-out past drain (gated on #2765) | 2–5× (post-ceiling only) | **SURVIVES (as stated)** | Correctly gated and correctly ordered *last*. This verification reinforces: it must not precede the server-side ceiling fix. |
+
+> **Scoping correction to T4's "maxInboundMessageSize high" (issue #3096 review, 2026-08-03).** That statement is
+> true **only of arrow-java's Flight client**, and it is NOT true of gRPC generally — so it must never be read as
+> "no gRPC message ceiling binds this server". From primary sources, at the versions this tree pins:
+>
+> | consumer | default max inbound message | source |
+> |---|--:|---|
+> | arrow-java Flight client (Trino connector, Flight-SQL JDBC) | `Integer.MAX_VALUE` | `flight/flight-core/.../flight/grpc/NettyClientBuilder.java:56`, applied `:228` (arrow-java v19.0.0); JDBC builds the same builder at `ArrowFlightSqlClientHandler.java:1037` |
+> | arrow-java `FlightServer` | `Integer.MAX_VALUE` | `FlightServer.java:76`, default at `:190` |
+> | **tonic** (any Rust `FlightServiceClient`, incl. this tree's `tools/flight-loadgen`) | **4 MiB** | `tonic-0.12.3/src/codec/mod.rs:100` `DEFAULT_MAX_RECV_MESSAGE_SIZE`; identical at 0.13.1 |
+> | **raw grpc-java channel** (no Flight builder) | **4 MiB** | grpc-java v1.79.0 `io/grpc/internal/GrpcUtil.java:212` `DEFAULT_MAX_MESSAGE_SIZE` |
+>
+> So the ceiling motivation is moot for the Java Flight consumers and **binding for every tonic consumer** — including
+> the load generator every #3096 throughput number was measured with. `cqlite-flight/src/batch_bytes.rs` states the
+> same split (it previously mis-attributed the 4 MiB refusal to "Trino/JDBC"; that attribution is gone) and keeps its
+> wire-side re-slicing target strictly under 4 MiB less a reserved framing overhead.
 
 **One-line program consequence:** the Phase-1.5 transport levers are aimed at the **last two links of the drain chain
 (network + Java page build), which are idle ~99.9% of the per-batch cycle at field rates.** The binding constraint is
