@@ -602,6 +602,178 @@ PY
   else
     fail "manifest writer on a mixed dir: expected a hard failure (rc=$rc, out: $out)"
   fi
+
+  # An unreadable / partial ROW PLAN must be an actionable SystemExit naming the
+  # line, not a JSONDecodeError or KeyError traceback out of the aggregation.
+  printf '{"chunk": 0, "rows": 10, ' >"$TMP/plan-truncated.jsonl"
+  out=$(python3 "$MANIFEST_PY" "${man_args[@]}" --sstable-dir "$TMP/empty-dir" \
+          --row-plan "$TMP/plan-truncated.jsonl" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && ! grep -q "Traceback" <<<"$out"; then
+    pass "manifest writer reports a truncated row-plan line without a traceback"
+  else
+    fail "truncated row plan: expected a clean failure (rc=$rc, out: $out)"
+  fi
+
+  # ------------------------------- end-to-end through the stub `docker` ---------
+  # The generator's two row-count cross-checks and the manifest writer's HAPPY PATH
+  # only execute when a container answers. They are exercised here against
+  # scripts/tests/fixtures/stub-docker-cassandra-bti.py: the real row driver, real
+  # CSVs, real file-level asserts, a real manifest -- and no container.
+  STUB="$REPO_ROOT/scripts/tests/fixtures/stub-docker-cassandra-bti.py"
+  COMMITTED_MANIFEST="$REPO_ROOT/test-data/perf-corpus-bti-manifest.json"
+  committed_before="$(sha256sum "$COMMITTED_MANIFEST" | cut -d' ' -f1)"
+  mkdir -p "$TMP/bin"
+  SUDO_STUB="$TMP/bin/sudo-stub"
+  # Stands in for `sudo -n`: runs the command, but never needs root for the two
+  # ownership fixups only a real bind mount requires.
+  cat >"$SUDO_STUB" <<'SUDOEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "-n" ] && shift
+case "${1:-}" in chown|chmod) exit 0 ;; esac
+exec "$@"
+SUDOEOF
+  chmod +x "$SUDO_STUB"
+
+  STUB_UUID="a1b2c3d40000000000000000000000ff"
+  e2e_run() { # e2e_run <name> [extra generator args...]; env prefixes are honored
+    local name="$1"; shift
+    E2E_ROOT="$TMP/e2e-$name"
+    E2E_LOG="$TMP/e2e-$name.log"
+    E2E_DEST="$E2E_ROOT/sstables/perf_bti_stub/wide_multiclustering-$STUB_UUID"
+    cp "$YAML_FIXTURE" "$TMP/yaml-$name.yaml"
+    DOCKER="python3 $STUB" SUDO="$SUDO_STUB" \
+    STUB_STATE="$TMP/stub-state-$name" STUB_KS=perf_bti_stub \
+    STUB_TBL=wide_multiclustering STUB_YAML="$TMP/yaml-$name.yaml" \
+    STUB_PLAN="$E2E_ROOT/work/row-plan.jsonl" \
+      bash "$GEN" --out "$E2E_ROOT" --keyspace perf_bti_stub \
+        --table wide_multiclustering --rows 1200 --chunk-rows 600 \
+        --payload-bytes 32 --widths 200:60,800:30 \
+        --buckets alpha,bo,charlie,delta --seed 3234 \
+        --manifest-out "" "$@" >"$E2E_LOG" 2>&1
+  }
+
+  if [ ! -f "$STUB" ]; then
+    fail "missing the stub docker: $STUB"
+  else
+    # ---- positive control: the whole pipeline, and the manifest it writes -------
+    e2e_run ok; rc=$?
+    manifest="$TMP/e2e-ok/manifest-bti-3234.json"
+    if [ "$rc" -eq 0 ] && [ -f "$manifest" ]; then
+      pass "end-to-end run against the stub docker succeeds and writes a manifest"
+    else
+      fail "stub end-to-end run failed (rc=$rc, tail: $(tail -12 "$TMP/e2e-ok.log"))"
+    fi
+    # Both cross-checks must have RUN, not merely not-failed.
+    if grep -q "COPY imported" "$TMP/e2e-ok.log" 2>/dev/null \
+       || grep -q "imported 600 rows" "$TMP/e2e-ok.log" 2>/dev/null; then
+      pass "the per-chunk COPY row-count check ran on every chunk"
+    else
+      fail "no COPY row-count check in the log (tail: $(tail -12 "$TMP/e2e-ok.log"))"
+    fi
+    if grep -q "Statistics.db totalRows == sstabledump rows ==" "$TMP/e2e-ok.log" 2>/dev/null; then
+      pass "the Statistics.db-vs-sstabledump row-count check ran"
+    else
+      fail "no Statistics.db/sstabledump cross-check in the log (tail: $(tail -12 "$TMP/e2e-ok.log"))"
+    fi
+    if [ -f "$manifest" ]; then
+      out=$(python3 - "$manifest" "sstables/perf_bti_stub/wide_multiclustering-$STUB_UUID" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+t = m["tables"][0]
+plan = m["rows_per_partition"]
+bad = []
+def eq(label, got, want):
+    if got != want:
+        bad.append(f"{label}: got {got!r}, want {want!r}")
+eq("sstable_count", t["sstable_count"], 2)
+eq("rows", t["rows"], plan["rows"])
+eq("partitions", t["partitions"], plan["partitions"])
+eq("sstable_dir (corpus-root relative)", t["sstable_dir"], sys.argv[2])
+eq("meets_8mib_read_plane_floor", t["meets_8mib_read_plane_floor"], True)
+eq("every_rows_db_non_empty", t["every_rows_db_non_empty"], True)
+eq("ddl.extracted_statements", t["ddl"]["extracted_statements"], True)
+eq("clustering_arity", t["clustering_arity"], 2)
+eq("cross-check agree", m["row_count_cross_check"]["agree"], True)
+eq("cross-check rows", m["row_count_cross_check"]["statistics_db_rows"], plan["rows"])
+eq("cross-check partitions",
+   m["row_count_cross_check"]["statistics_db_partitions"], plan["partitions"])
+eq("plan chunks", len(plan["chunks"]), 2)
+eq("seed_material of chunk 0", plan["chunks"][0]["seed_material"], "3234:0")
+eq("goldens", sum(1 for s in t["sstables"] if s["sstabledump_golden"]), 1)
+for s in t["sstables"]:
+    eq(f"{s['sstable_basename']} format", s["format"], "da")
+    eq(f"{s['sstable_basename']} compressor", s["compression"]["compressor"], "LZ4Compressor")
+    eq(f"{s['sstable_basename']} chunk_length_bytes", s["compression"]["chunk_length_bytes"], 16384)
+    eq(f"{s['sstable_basename']} sha256 length", len(s["data_db_sha256"]), 64)
+    eq(f"{s['sstable_basename']} rows>0", s["rows"] > 0, True)
+    eq(f"{s['sstable_basename']} partitions observed",
+       isinstance(s["statistics"]["partition_count"], int), True)
+    eq(f"{s['sstable_basename']} TOC has no BIG components",
+       [c for c in s["toc"] if c in ("Index.db", "Summary.db")], [])
+print("MANIFEST-FIELDS-OK" if not bad else "BAD: " + "; ".join(bad))
+PY
+      )
+      if [ "$out" = "MANIFEST-FIELDS-OK" ]; then
+        pass "the manifest's happy-path fields are all read back from the bytes"
+      else
+        fail "manifest fields: $out"
+      fi
+    fi
+
+    # ---- direction 2: each cross-check must FAIL when the two sides disagree ----
+    STUB_IMPORT_SHORT=1 e2e_run import-short; rc=$?
+    if [ "$rc" -ne 0 ] && grep -q "partial load" "$TMP/e2e-import-short.log" \
+       && [ ! -f "$TMP/e2e-import-short/manifest-bti-3234.json" ]; then
+      pass "COPY importing one row fewer than the CSV is a HARD failure, no manifest"
+    else
+      fail "import-short case: expected a partial-load failure (rc=$rc, tail: $(tail -6 "$TMP/e2e-import-short.log"))"
+    fi
+
+    STUB_META_SHORT=1 e2e_run meta-short; rc=$?
+    if [ "$rc" -ne 0 ] && grep -q "row-count mismatch for" "$TMP/e2e-meta-short.log" \
+       && [ ! -f "$TMP/e2e-meta-short/manifest-bti-3234.json" ]; then
+      pass "Statistics.db totalRows != sstabledump rows is a HARD failure, no manifest"
+    else
+      fail "meta-short case: expected a row-count mismatch (rc=$rc, tail: $(tail -6 "$TMP/e2e-meta-short.log"))"
+    fi
+
+    # The manifest writer's own cross-checks (goldens off, so the generator's
+    # sstabledump check cannot pre-empt them).
+    STUB_ROWS_DELTA=1 e2e_run rows-delta --dump-generations 0; rc=$?
+    if [ "$rc" -ne 0 ] && grep -q "row-count cross-check FAILED" "$TMP/e2e-rows-delta.log" \
+       && [ ! -f "$TMP/e2e-rows-delta/manifest-bti-3234.json" ]; then
+      pass "manifest writer HARD-FAILS when Statistics.db rows != the row plan"
+    else
+      fail "rows-delta case: expected 'row-count cross-check FAILED' (rc=$rc, tail: $(tail -6 "$TMP/e2e-rows-delta.log"))"
+    fi
+
+    STUB_PARTITIONS_DELTA=1 e2e_run parts-delta --dump-generations 0; rc=$?
+    if [ "$rc" -ne 0 ] \
+       && grep -q "partition-count cross-check FAILED" "$TMP/e2e-parts-delta.log" \
+       && [ ! -f "$TMP/e2e-parts-delta/manifest-bti-3234.json" ]; then
+      pass "manifest writer HARD-FAILS when Statistics.db partitions != the row plan"
+    else
+      fail "parts-delta case: expected 'partition-count cross-check FAILED' (rc=$rc, tail: $(tail -6 "$TMP/e2e-parts-delta.log"))"
+    fi
+
+    # A partition count that could not be OBSERVED must be an error, never a 0
+    # (CLAUDE.md: "a counter not observed is an error, never a fabricated 0").
+    STUB_NO_HISTOGRAM=1 e2e_run no-hist --dump-generations 0; rc=$?
+    if [ "$rc" -ne 0 ] \
+       && grep -q "refusing to publish an unobserved partition count" "$TMP/e2e-no-hist.log" \
+       && [ ! -f "$TMP/e2e-no-hist/manifest-bti-3234.json" ]; then
+      pass "an unreadable Partition Size histogram is an ERROR, not a fabricated 0"
+    else
+      fail "no-histogram case: expected an unobserved-partition-count refusal (rc=$rc, tail: $(tail -6 "$TMP/e2e-no-hist.log"))"
+    fi
+
+    # No run above may touch the COMMITTED manifest (every one passes --manifest-out "").
+    if [ "$(sha256sum "$COMMITTED_MANIFEST" | cut -d' ' -f1)" = "$committed_before" ]; then
+      pass "no stub run modified the committed perf-corpus-bti-manifest.json"
+    else
+      fail "a stub run OVERWROTE the committed manifest $COMMITTED_MANIFEST"
+    fi
+  fi
 else
   echo "SKIP - python3 unavailable: row-driver + manifest-writer cases not run"
 fi
