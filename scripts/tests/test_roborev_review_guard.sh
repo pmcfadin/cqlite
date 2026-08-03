@@ -75,6 +75,9 @@ trap 'rm -rf "$tmp"' EXIT
 #                        returns the REAL review-row shape (id/prompt, no git_ref or
 #                        status), forcing the richer `list --json` source; otherwise the
 #                        `list --json` fallback path
+#   STUB_CONFIG_PATTERNS what `roborev config get exclude_patterns` prints; EMPTY =>
+#                        the subcommand is unsupported (exit 64), i.e. the corroboration
+#                        state the check must report UNAVAILABLE rather than fail on
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
 # ---------------------------------------------------------------------------
 stubbin="$tmp/bin"
@@ -160,6 +163,18 @@ case "$cmd" in
     printf '['; emit_job_object; printf ']\n'
     exit 0
     ;;
+  config)
+    # `roborev config get exclude_patterns` — the OPTIONAL corroboration source
+    # (#3229). Unset STUB_CONFIG_PATTERNS => behave like a build that does not answer
+    # `config get` at all, which is the state the corroboration must report
+    # `UNAVAILABLE` for rather than failing on.
+    if [ -z "${STUB_CONFIG_PATTERNS:-}" ]; then
+      printf 'stub: config get not supported by this build\n' >&2
+      exit 64
+    fi
+    printf '%s\n' "$STUB_CONFIG_PATTERNS"
+    exit 0
+    ;;
   *) printf 'stub: unsupported roborev subcommand: %s\n' "$cmd" >&2; exit 64 ;;
 esac
 STUB
@@ -204,6 +219,24 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   deleted-remote  pushed (mirror ref present and EQUAL to HEAD), then the branch
 #                   DELETED from the bare origin — a stale proxy that would still
 #                   satisfy a mirror-ref fast path
+#   --- the #3229 exclusion family -------------------------------------------------
+#   docs-executables  .sh/.py/.bt under docs/reports/x-artifacts/harness/ — the PR
+#                   #3222 shape: 100% under docs/, 100% executable CODE
+#   docs-prose      markdown only, UNDER docs/ (distinct from docs-only, which puts
+#                   its markdown at the repo root)
+#   docs-artifacts  markdown + declared docs-scoped artifacts (.txt/.json/.log/.err/
+#                   .jsonl) under docs/reports/x-artifacts/ — still code-free
+#   nested-docs-json  website/src/content/docs/c.json + a .rs file: a NESTED `docs`
+#                   directory, which a ROOT-ANCHORED `docs/**/*.json` must NOT match
+#   docs-odd-name   a .sh under docs/ whose filename carries SPACES and a literal
+#                   double quote — the NUL-safety regression (`git diff --numstat`
+#                   C-QUOTES it, `-z` does not)
+#   depth-sh        tool.sh at the root AND sub/tool.sh — pins leading-`/` anchoring
+#                   against its slash-less twin
+#   build-subtree   build/gen.rs — pins the `<p>/**` sibling pathspec (a bare
+#                   directory name excludes its whole subtree only through it)
+#   pre-change-mix  .rs + website/src/content/docs/c.json + a docs/ harness .sh +
+#                   a nested .md: the faithfulness fixture for `['docs/**','*.md']`
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
   # NOTE: separate statements on purpose — `local` is a builtin, so ALL of its
   # arguments are expanded before any assignment takes effect; `local a=$1 b=$a`
@@ -270,6 +303,68 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add .github/workflows/ci.yml
       git_q "$work" commit -q -m 'workflow only'
       ;;
+    docs-executables)
+      mkdir -p "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
+      printf 'print("classify")\n' >"$work/docs/reports/x-artifacts/harness/classify.py"
+      printf 'BEGIN { exit(); }\n' >"$work/docs/reports/x-artifacts/harness/offcpu.bt"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'harness executables under docs/'
+      ;;
+    docs-prose)
+      mkdir -p "$work/docs/reports"
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      printf '# notes\n' >"$work/docs/notes.md"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'prose under docs/'
+      ;;
+    docs-artifacts)
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      printf 'raw\n' >"$work/docs/reports/x-artifacts/a.txt"
+      printf '{"k":1}\n' >"$work/docs/reports/x-artifacts/b.json"
+      printf 'log line\n' >"$work/docs/reports/x-artifacts/c.log"
+      printf 'stderr line\n' >"$work/docs/reports/x-artifacts/d.err"
+      printf '{"k":2}\n' >"$work/docs/reports/x-artifacts/e.jsonl"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'docs artifacts only'
+      ;;
+    nested-docs-json)
+      mkdir -p "$work/website/src/content/docs"
+      printf '{"nested":true}\n' >"$work/website/src/content/docs/c.json"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add website main.rs
+      git_q "$work" commit -q -m 'nested docs json plus code'
+      ;;
+    docs-odd-name)
+      mkdir -p "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/odd \"q\" name.sh"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a docs harness path with spaces and a quote'
+      ;;
+    depth-sh)
+      mkdir -p "$work/sub"
+      printf '#!/bin/sh\nexit 0\n' >"$work/tool.sh"
+      printf '#!/bin/sh\nexit 1\n' >"$work/sub/tool.sh"
+      git_q "$work" add tool.sh sub/tool.sh
+      git_q "$work" commit -q -m 'tool.sh at two depths'
+      ;;
+    build-subtree)
+      mkdir -p "$work/build"
+      printf 'fn generated() {}\n' >"$work/build/gen.rs"
+      git_q "$work" add build/gen.rs
+      git_q "$work" commit -q -m 'a code file inside build/'
+      ;;
+    pre-change-mix)
+      mkdir -p "$work/docs/reports/x-artifacts/harness" "$work/website/src/content/docs" "$work/nested/deep"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
+      printf '{"nested":true}\n' >"$work/website/src/content/docs/c.json"
+      printf '# deep notes\n' >"$work/nested/deep/notes.md"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs website nested main.rs
+      git_q "$work" commit -q -m 'the pre-change replication mix'
+      ;;
     *)
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add main.rs
@@ -318,6 +413,40 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
   printf '%s' "$work"
 }
 
+# ---------------------------------------------------------------------------
+# The fixture's OWN roborev configuration (issue #3229). Without this capability a
+# CONFIGURATION regression is not expressible at all — which is exactly why the
+# `docs/**` blind spot could ship behind a fully green suite.
+#
+# The file is written UNTRACKED at the work-tree root, so it never enters the census
+# it is meant to be evaluated against. Every generated file also carries a `[ci]`
+# table below the real key holding a DECOY `exclude_patterns = ['**']`: TOML table
+# scoping means that decoy is NOT the top-level key, so if the parser ever stopped
+# respecting scoping it would read `['**']`, swallow every census path, and FAIL every
+# case in this family at once.
+# ---------------------------------------------------------------------------
+write_roborev_config() { # write_roborev_config <work> <single-line array literal>
+  cat >"$1/.roborev.toml" <<EOF
+agent = 'codex'
+# Filenames or glob patterns to exclude from review diffs for this repo.
+exclude_patterns = $2
+snapshot_dir = ''
+
+[ci]
+# A DECOY: table-scoped, therefore NOT the top-level exclude_patterns key.
+exclude_patterns = ['**']
+EOF
+}
+
+write_roborev_config_raw() { # write_roborev_config_raw <work> <verbatim body>
+  printf '%s\n' "$2" >"$1/.roborev.toml"
+}
+
+# The narrowed set this repo actually ships (a subset is enough for the fixtures).
+NARROWED_PATTERNS="['*.md', 'docs/**/*.txt', 'docs/**/*.json', 'docs/**/*.jsonl', 'docs/**/*.log', 'docs/**/*.err', 'docs/**/*.csv', 'docs/**/*.svg']"
+# The PRE-change value this issue exists to retire.
+BLANKET_PATTERNS="['docs/**', '*.md']"
+
 # Fixture-integrity guard: a narrow-refspec fixture that accidentally grew a
 # feature mirror ref would silently stop testing the condition it exists for.
 assert_no_mirror_ref() { # assert_no_mirror_ref <label> <work> <remote>
@@ -335,6 +464,9 @@ CASE_N=0
 OUT=""
 RC=0
 INVOKED=""
+# A throwaway HOME for every wrapper run (see run_wrapper).
+FIXTURE_HOME="$tmp/home"
+mkdir -p "$FIXTURE_HOME"
 
 run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   local work="$1"; shift
@@ -353,7 +485,11 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
   # case pinned git_ref itself (or asked for it to be absent with `none`).
   if [ -z "${STUB_GIT_REF:-}" ]; then STUB_GIT_REF=$(range_ref "$work"); fi
-  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" \
+  # HOME is redirected to a throwaway directory (#3229): the exclusion check UNIONs the
+  # repo `.roborev.toml` with the GLOBAL `$HOME/.roborev/config.toml`, so a real global
+  # config on the host would make these cases machine-dependent. `$FIXTURE_HOME` is
+  # empty unless a case deliberately plants a global config in it.
+  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -435,6 +571,7 @@ export STUB_PAYLOAD_JOB=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
+export STUB_CONFIG_PATTERNS=''
 
 reset_stub() {
   STUB_JOB=4656
@@ -453,6 +590,7 @@ reset_stub() {
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
+  STUB_CONFIG_PATTERNS=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -584,6 +722,303 @@ STUB_PROMPT='Review this diff:\ndiff --git a/.github/workflows/ci.yml b/.github/
 run_wrapper "$work"
 assert_verdict 'case (c2d)' PASS 0
 assert_says 'case (c2d) a .yml file is not classified documentation' '^code-free: PASS$'
+
+# ===========================================================================
+# The (cx*) family: census-exclusion — the census reconciled against the
+# EFFECTIVE roborev exclusion set (issue #3229).
+#
+# What these pin, and why it could not be pinned before: `exclude_patterns` is
+# roborev's own configuration, and the wrapper used to ASSERT in a comment that
+# roborev "excludes non-code paths". It does not — it drops exactly what its
+# configured pathspecs match — and under `docs/**` that discarded 33 EXECUTABLE
+# harness files on PR #3222 while every fixture here stayed green, because no
+# fixture could supply a configuration at all. `write_roborev_config` closes that.
+# ===========================================================================
+
+printf '== case (cx1): executables under docs/ are CODE, survive the narrowed config, and ARE enqueued ==\n'
+reset_stub
+# The PR #3222 shape: 100% of the diff under docs/, 100% of it executable.
+work=$(make_fixture case_cx1 docs-executables)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx1)' PASS 0
+assert_says 'case (cx1) a docs/ path prefix does not make code documentation' '^code-free: PASS$'
+assert_says 'case (cx1) the narrowed config swallows nothing' '^census-exclusion: PASS \(3/3 code census paths survive the effective exclusion set; corroboration: UNAVAILABLE\)$'
+assert_says 'case (cx1) the reviewer got all three executables' '^prompt-content: PASS \(3/3 code census paths present\)$'
+if [ -s "$INVOKED" ]; then
+  ok 'case (cx1): the review WAS enqueued (the blind spot is closed)'
+else
+  bad 'case (cx1): no review was enqueued — executables under docs/ are still unreviewable'
+fi
+
+printf '== case (cx2): PROSE-only under docs/ is still code-free and still never enqueued ==\n'
+reset_stub
+# The guard must not have been INVERTED by the narrowing: prose is still uncertifiable.
+work=$(make_fixture case_cx2 docs-prose)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx2)' FAIL 1
+assert_says 'case (cx2) code-free still FAILs on prose under docs/' '^code-free: FAIL \(code-free census: 2/2 files are documentation/specification text\)$'
+assert_never_enqueued 'case (cx2)'
+assert_says 'case (cx2) the exclusion check is unreached, and says so' '^census-exclusion: SKIP \(not reached\)$'
+
+printf '== case (cx3): docs-scoped ARTIFACTS with no executables are still code-free ==\n'
+reset_stub
+# The narrowing must not have traded the old blind spot for a VACUOUS review of a diff
+# roborev would empty: .txt/.json/.log/.err/.jsonl under docs/ are declared artifacts.
+work=$(make_fixture case_cx3 docs-artifacts)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx3)' FAIL 1
+assert_says 'case (cx3) artifacts under docs/ classify non-code' '^code-free: FAIL \(code-free census: 6/6 files are documentation/specification text\)$'
+assert_never_enqueued 'case (cx3)'
+
+printf '== case (cx4): a RESTORED docs/** FAILs pre-enqueue, naming the swallowed paths ==\n'
+reset_stub
+# The regression this issue exists to prevent, now mechanized: the exact pre-change
+# value, against a census of executables under docs/.
+work=$(make_fixture case_cx4 docs-executables)
+write_roborev_config "$work" "$BLANKET_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx4)' FAIL 1
+assert_says 'case (cx4) census-exclusion FAILs with the count' '^census-exclusion: FAIL \(3/3 code census paths excluded:'
+assert_says 'case (cx4) names a swallowed path AND the pattern that ate it' "docs/reports/x-artifacts/harness/run\.sh by 'docs/\*\*'"
+assert_says 'case (cx4) names the second swallowed path' "classify\.py by 'docs/\*\*'"
+assert_says 'case (cx4) attributes the defect to configuration, not the reviewer' 'this is a CONFIGURATION defect, not a reviewer one'
+assert_says 'case (cx4) does not send the reader to prompt-content' 'do NOT go looking at prompt-content'
+assert_never_enqueued 'case (cx4)'
+assert_says 'case (cx4) prompt-content is never consulted' '^prompt-content: SKIP$'
+assert_one_block 'case (cx4)'
+
+printf '== case (cx5): an UNPARSEABLE exclusion set FAILs closed ==\n'
+reset_stub
+work=$(make_fixture case_cx5 docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+exclude_patterns = docs/**"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx5)' FAIL 1
+assert_says 'case (cx5) unreadable is its own value form' '^census-exclusion: FAIL \(exclusion set unreadable: '
+assert_says 'case (cx5) refuses to alias "cannot tell" to "nothing excluded"' "never 'nothing is excluded'"
+assert_lacks 'case (cx5) never reports the absent-config PASS' 'no exclusion patterns configured'
+assert_never_enqueued 'case (cx5)'
+
+printf '== case (cx5b): a genuinely ABSENT key PASSes, textually distinct from unreadable ==\n'
+reset_stub
+work=$(make_fixture case_cx5b docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+model = 'gpt-5.6-sol'"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx5b)' PASS 0
+assert_says 'case (cx5b) absent key is an explicit PASS' '^census-exclusion: PASS \(no exclusion patterns configured\)$'
+assert_lacks 'case (cx5b) is not reported as unreadable' 'exclusion set unreadable'
+
+printf '== case (cx5c): a TABLE-SCOPED exclude_patterns is NOT the top-level key ==\n'
+reset_stub
+# `exclude_patterns` under `[ci]` is a different key. Reading it as the effective set
+# would make the check both wrong and (with `['**']`) permanently red.
+work=$(make_fixture case_cx5c docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+
+[ci]
+exclude_patterns = ['**']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx5c)' PASS 0
+assert_says 'case (cx5c) table scoping is respected' '^census-exclusion: PASS \(no exclusion patterns configured\)$'
+
+printf '== case (cx6): a census path with SPACES and a literal quote compares correctly ==\n'
+reset_stub
+# NUL-safety. `git diff --numstat` C-QUOTES this path while `-z` output does not, so an
+# un-normalised comparison would report a SURVIVING path as swallowed (a false FAIL) —
+# the direction that gets a guard bypassed.
+work=$(make_fixture case_cx6 docs-odd-name)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/docs/reports/x-artifacts/harness/odd "q" name.sh b/docs/reports/x-artifacts/harness/odd "q" name.sh'
+run_wrapper "$work"
+assert_says 'case (cx6) the odd-named .sh is NOT reported swallowed' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_lacks 'case (cx6) no false FAIL from a quoting artefact' '^census-exclusion: FAIL'
+
+printf '== case (cx6b): the same odd-named path is named RAW when a blanket glob eats it ==\n'
+reset_stub
+work=$(make_fixture case_cx6b docs-odd-name)
+write_roborev_config "$work" "$BLANKET_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx6b)' FAIL 1
+assert_says 'case (cx6b) only the docs/ path is swallowed, main.rs survives' '^census-exclusion: FAIL \(1/2 code census paths excluded:'
+assert_says 'case (cx6b) the swallowed path is named with its real bytes' 'odd "q" name\.sh'
+assert_never_enqueued 'case (cx6b)'
+
+printf '== case (cx7): corroboration DRIFT — a pattern the binary reports that the parse lacks ==\n'
+reset_stub
+work=$(make_fixture case_cx7 docs-executables)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_CONFIG_PATTERNS="*.md, docs/**/*.txt, docs/**"
+run_wrapper "$work"
+assert_verdict 'case (cx7)' FAIL 1
+assert_says 'case (cx7) drift is its own value form' "^census-exclusion: FAIL \(exclusion set drift: 'docs/\*\*' reported by roborev config get is absent from the parsed set\)$"
+assert_says 'case (cx7) explains why that direction fails' 'could be excluding census code invisibly'
+assert_never_enqueued 'case (cx7)'
+
+printf '== case (cx7b): corroboration OK when the binary agrees ==\n'
+reset_stub
+work=$(make_fixture case_cx7b docs-executables)
+write_roborev_config "$work" "['*.md', 'docs/**/*.txt']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_CONFIG_PATTERNS="*.md, docs/**/*.txt"
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx7b)' PASS 0
+assert_says 'case (cx7b) corroboration is reported OK' 'corroboration: OK\)$'
+
+printf '== case (cx8): a slash-containing pattern is ROOT-ANCHORED, so a nested docs path SURVIVES ==\n'
+reset_stub
+# R1 from the disassembly. Evaluating BOTH a verbatim and a `**/`-prefixed reading and
+# failing on either would emit a false FAIL here — on a legitimate report PR.
+work=$(make_fixture case_cx8 nested-docs-json)
+write_roborev_config "$work" "['*.md', 'docs/**/*.json']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/website/src/content/docs/c.json b/website/src/content/docs/c.json'
+run_wrapper "$work"
+assert_verdict 'case (cx8)' PASS 0
+assert_says 'case (cx8) the nested docs/ path is a CODE census path that SURVIVES' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_lacks 'case (cx8) no false FAIL from a both-readings interpretation' '^census-exclusion: FAIL'
+
+printf '== case (cx9): a bare directory name excludes its whole subtree via the /** sibling ==\n'
+reset_stub
+# R2. `**/build` alone does NOT match `build/gen.rs`; only the `<p>/**` sibling does, so
+# a port that emitted one pathspec per pattern would MISS this swallow.
+work=$(make_fixture case_cx9 build-subtree)
+write_roborev_config "$work" "['build']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx9)' FAIL 1
+assert_says 'case (cx9) the subtree file is swallowed by the bare directory name' "^census-exclusion: FAIL \(1/1 code census paths excluded: build/gen\.rs by 'build'\)$"
+assert_says 'case (cx9) the emitted pathspecs include the /** sibling' ':\(exclude,glob\)\*\*/build/\*\*'
+assert_never_enqueued 'case (cx9)'
+
+printf '== case (cx10): a LEADING slash root-anchors an otherwise-recursive slash-less name ==\n'
+reset_stub
+# R4. `/tool.sh` => `:(exclude,glob)tool.sh` (root only).
+work=$(make_fixture case_cx10 depth-sh)
+write_roborev_config "$work" "['/tool.sh']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx10)' FAIL 1
+assert_says 'case (cx10) only the ROOT tool.sh is excluded' "^census-exclusion: FAIL \(1/2 code census paths excluded: tool\.sh by '/tool\.sh'\)$"
+assert_says 'case (cx10) the pathspec is emitted root-anchored, without the **/ prefix' ':\(exclude,glob\)tool\.sh$'
+assert_lacks 'case (cx10) sub/tool.sh is NOT reported swallowed' 'sub/tool\.sh by'
+
+printf '== case (cx10b): its slash-less twin excludes at ANY depth ==\n'
+reset_stub
+work=$(make_fixture case_cx10b depth-sh)
+write_roborev_config "$work" "['tool.sh']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx10b)' FAIL 1
+assert_says 'case (cx10b) BOTH depths are excluded' '^census-exclusion: FAIL \(2/2 code census paths excluded:'
+assert_says 'case (cx10b) the nested twin is named' "sub/tool\.sh by 'tool\.sh'"
+assert_says 'case (cx10b) the pathspec is **/-prefixed (RECURSIVE)' ':\(exclude,glob\)\*\*/tool\.sh$'
+
+printf '== case (cx11): a TRAILING-slash pattern FAILs naming the inversion, diff-independently ==\n'
+reset_stub
+# R3, and the decision that it is a FAIL rather than a NOTICE: this census has NO path
+# under docs/ at all, so the FAIL can only come from the CONFIGURATION.
+work=$(make_fixture case_cx11 pushed)
+write_roborev_config "$work" "['*.md', 'docs/']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx11)' FAIL 1
+assert_says 'case (cx11) the trailing-slash inversion is named in the value' "^census-exclusion: FAIL \(trailing-slash pattern 'docs/' resolves RECURSIVE \(\*\*/docs\), opposite to 'docs/\*\*' — drop the trailing slash deliberately or write 'docs/\*\*'\)$"
+assert_says 'case (cx11) the detail explains the trim-before-anchoring order' "trims a trailing '/' BEFORE deciding whether the pattern is root-anchored"
+assert_says 'case (cx11) the FAIL is explicitly diff-independent' 'independent of whether the pattern currently swallows a census path'
+assert_never_enqueued 'case (cx11)'
+
+printf '== case (cx12): a WHITESPACE-ONLY pattern is skipped, never a match-everything ==\n'
+reset_stub
+# The algorithm skips an empty-after-trim pattern. Treating it as a match-everything
+# would swallow the whole census and make the check permanently red.
+work=$(make_fixture case_cx12 pushed)
+write_roborev_config "$work" "['   ', '*.md']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx12)' PASS 0
+assert_says 'case (cx12) the whitespace-only pattern excluded nothing' '^census-exclusion: PASS \(1/1 code census paths survive'
+
+printf '== case (cx13): the port reproduces the PRE-change configuration faithfully ==\n'
+reset_stub
+# `['docs/**', '*.md']` resolves to a ROOT-ANCHORED `docs/**` plus a RECURSIVE
+# `**/*.md` — which is exactly what the 21-review replay measured (only `.md` was ever
+# dropped, at any depth, repo-wide, and never a non-`.md`). The census here carries a
+# docs/ harness .sh (must be swallowed), a NESTED docs/ .json (must SURVIVE, proving
+# root anchoring) and a .rs (must survive).
+work=$(make_fixture case_cx13 pre-change-mix)
+write_roborev_config "$work" "$BLANKET_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx13)' FAIL 1
+assert_says 'case (cx13) exactly ONE of the three code paths is swallowed' '^census-exclusion: FAIL \(1/3 code census paths excluded:'
+assert_says 'case (cx13) the swallowed one is the docs/ harness script' "docs/reports/x-artifacts/harness/run\.sh by 'docs/\*\*'"
+assert_lacks 'case (cx13) the NESTED docs json SURVIVES (docs/** is root-anchored)' 'website/src/content/docs/c\.json by'
+assert_says 'case (cx13) docs/** is emitted VERBATIM, root-anchored' ':\(exclude,glob\)docs/\*\*$'
+assert_says 'case (cx13) *.md is emitted **/-prefixed, RECURSIVE and repo-wide' ':\(exclude,glob\)\*\*/\*\.md$'
+
+printf '== case (cx14): census-exclusion sits EXACTLY ONCE, immediately after code-free ==\n'
+reset_stub
+work=$(make_fixture case_cx14 mixed)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx14)' PASS 0
+n_excl=$(grep -cE '^census-exclusion: ' "$OUT" || true)
+if [ "$n_excl" -eq 1 ]; then
+  ok 'case (cx14): census-exclusion: appears exactly once'
+else
+  bad "case (cx14): census-exclusion: appears $n_excl time(s) (want 1)"
+fi
+order=$(grep -nE '^(code-free|census-exclusion|job-record):' "$OUT" | cut -d: -f2 | paste -sd,)
+if [ "$order" = 'code-free,census-exclusion,job-record' ]; then
+  ok 'case (cx14): key order is code-free -> census-exclusion -> job-record'
+else
+  bad "case (cx14): unexpected key order: $order"
+fi
+
+printf '== case (cx15): an unreached exclusion check reads SKIP, never blank ==\n'
+reset_stub
+work=$(make_fixture case_cx15 unpushed)
+write_roborev_config "$work" "$BLANKET_PATTERNS"
+run_wrapper "$work"
+assert_verdict 'case (cx15)' FAIL 1
+assert_says 'case (cx15) push-assert is the failing key' '^push-assert: FAIL'
+assert_says 'case (cx15) census-exclusion carries an explicit SKIP cause' '^census-exclusion: SKIP \(not reached\)$'
+assert_lacks 'case (cx15) census-exclusion is never blank' '^census-exclusion: *$'
+
+printf '== case (cx16): the GLOBAL config is UNIONed with the repo one ==\n'
+reset_stub
+# config.ResolveExcludePatterns merges the two; a repo-only read would miss a swallow
+# configured globally.
+work=$(make_fixture case_cx16 docs-executables)
+write_roborev_config "$work" "['*.md']"
+mkdir -p "$FIXTURE_HOME/.roborev"
+printf "agent = 'codex'\nexclude_patterns = ['docs/**']\n" >"$FIXTURE_HOME/.roborev/config.toml"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+rm -rf "$FIXTURE_HOME/.roborev"
+assert_verdict 'case (cx16)' FAIL 1
+assert_says 'case (cx16) a GLOBALLY configured pattern is still caught' "^census-exclusion: FAIL \(3/3 code census paths excluded:.*by 'docs/\*\*'"
+assert_never_enqueued 'case (cx16)'
+
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub

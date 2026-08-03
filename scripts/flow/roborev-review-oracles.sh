@@ -378,14 +378,41 @@ roborev_census() {
 # `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`. Comparing the
 # two renderings directly would mismatch on precisely those paths, so normalise here.
 roborev_unquote_path() {
-  local p="$1"
+  local p="$1" out="" i n ch
   case "$p" in
-    '"'*'"')
-      # `%b` expands git's quote_c_style escapes (\" \\ \n \t and \nnn octal).
-      printf '%b' "${p:1:${#p}-2}"
-      ;;
-    *) printf '%s' "$p" ;;
+    '"'*'"') ;;
+    *) printf '%s' "$p"; return 0 ;;
   esac
+  p="${p:1:${#p}-2}"
+  n=${#p}
+  i=0
+  # A HAND-ROLLED scan, deliberately: `printf '%b'` does NOT expand `\"` (it is not an
+  # `echo -e` escape), so it would leave the backslash in place — which is exactly the
+  # mis-comparison this helper exists to prevent. Git's `quote_c_style` emits only
+  # \a \b \f \n \r \t \v \" \\ and \nnn octal, all of which are handled here.
+  while [ "$i" -lt "$n" ]; do
+    ch="${p:$i:1}"
+    if [ "$ch" != '\' ]; then
+      out+="$ch"
+      i=$((i + 1))
+      continue
+    fi
+    i=$((i + 1))
+    ch="${p:$i:1}"
+    case "$ch" in
+      '"' | '\' | '/') out+="$ch"; i=$((i + 1)) ;;
+      a) out+=$'\a'; i=$((i + 1)) ;;
+      b) out+=$'\b'; i=$((i + 1)) ;;
+      f) out+=$'\f'; i=$((i + 1)) ;;
+      n) out+=$'\n'; i=$((i + 1)) ;;
+      r) out+=$'\r'; i=$((i + 1)) ;;
+      t) out+=$'\t'; i=$((i + 1)) ;;
+      v) out+=$'\v'; i=$((i + 1)) ;;
+      [0-7]) out+=$(printf '%b' "\\0${p:$i:3}"); i=$((i + 3)) ;;
+      *) out+="$ch"; i=$((i + 1)) ;;
+    esac
+  done
+  printf '%s' "$out"
 }
 
 # _rx_has_slash <string>: true when the string contains a '/'.
