@@ -867,6 +867,135 @@ else
   printf '%s\n' "$checkapply_out" | sed -n '/Perf profiling/,/^$/p'
 fi
 
+# 4d-iii. THE APPLY COMMAND FAILED, THE CONTROLS TOOK ANYWAY. `sysctl --system` applies
+#         EVERY drop-in on the box, so it can apply OURS correctly and still exit
+#         non-zero because an unrelated pre-existing entry failed (a stale
+#         /etc/sysctl.conf line, a foreign drop-in naming a knob this kernel lacks) —
+#         and one such entry anywhere on a fleet box is enough. Gating the /proc
+#         read-back on that rc left the token STALE and printed "nothing was applied"
+#         about a box that had JUST become profileable: a false verdict, which is the
+#         one thing AC2 exists to prevent. The two facts are independent and must be
+#         reported independently — the command's failure named as the COMMAND's, and the
+#         capability verdict taken from /proc regardless. Here the sysctl shim exits 1
+#         AND updates the fake procfs.
+rcfail_proc="$tmp/perf-proc-rcfail"; mkdir -p "$rcfail_proc"
+printf '4\n' >"$rcfail_proc/perf_event_paranoid"
+printf '1\n' >"$rcfail_proc/kptr_restrict"
+rcfail_shims="$tmp/perf-rcfail-shims"; mkdir -p "$rcfail_shims"
+rcfail_trip="$tmp/perf-rcfail-tripwire.log"; : >"$rcfail_trip"
+cat >"$rcfail_shims/sudo" <<EOF
+#!/usr/bin/env bash
+echo "sudo \$*" >>"$rcfail_trip"
+while [ "\${1:-}" = "-n" ]; do shift; done
+exec "\$@"
+EOF
+cat >"$rcfail_shims/sysctl" <<EOF
+#!/usr/bin/env bash
+echo "sysctl \$*" >>"$rcfail_trip"
+case " \$* " in *" --system "*)
+  printf -- '-1\n' >"$rcfail_proc/perf_event_paranoid"
+  printf '0\n'     >"$rcfail_proc/kptr_restrict"
+  echo "sysctl: setting key \"vm.unrelated_stale_entry\": Invalid argument" >&2 ;;
+esac
+exit 1
+EOF
+for t in apt-get apt dnf yum pacman; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$rcfail_shims/$t"
+done
+chmod +x "$rcfail_shims"/*
+rcfail_d="$tmp/perf-rcfail.d"; mkdir -p "$rcfail_d"
+bash "$PERFLIB" --drop-in >"$rcfail_d/99-cqlite-perf.conf"   # already current: only the apply is left
+mkperfshim 6060606
+rcfail_out=$(PATH="$rcfail_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$rcfail_proc" CQLITE_PERF_SYSCTL_DIR="$rcfail_d" CQLITE_PERF_TEST_PRIV_DIR="$rcfail_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+rcfail_rc=$?
+# The read-back verdict must be GOOD (it is what /proc now says), the command failure
+# must be reported DISTINCTLY (naming the exit status and that it applies every
+# drop-in), and the two must not contradict: no "nothing was applied", no "did NOT
+# take", no "NOT in the profileable state" alongside a good read-back. rc still 0.
+if [ "$rcfail_rc" -eq 0 ] \
+   && printf '%s' "$rcfail_out" | grep -q "READ BACK from /proc as profileable: perf_event_paranoid=-1 kptr_restrict=0" \
+   && printf '%s' "$rcfail_out" | grep -q "'sysctl -q --system' exited 1" \
+   && printf '%s' "$rcfail_out" | grep -q 'UNRELATED pre-existing entry' \
+   && ! printf '%s' "$rcfail_out" | grep -q 'nothing was applied' \
+   && ! printf '%s' "$rcfail_out" | grep -q 'the value did NOT take' \
+   && ! printf '%s' "$rcfail_out" | grep -q 'NOT in the profileable state' \
+   && ! printf '%s' "$rcfail_out" | grep -q 'are NOT in effect' \
+   && grep -q 'sysctl -q --system' "$rcfail_trip"; then
+  ok "perf section: a sysctl that FAILS while the controls DO take reports the command failure distinctly and still reads the good verdict back from /proc, rc 0"
+else
+  bad "perf section: a failing sysctl suppressed the /proc read-back or contradicted it (rc=$rcfail_rc)"
+  printf '%s\n' "$rcfail_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+# ...and the run must still be honest when BOTH facts are bad: the same failing sysctl
+# with a procfs that does NOT change must name the command failure AND report the
+# controls as not in effect — never a good read-back.
+rcfail2_proc="$tmp/perf-proc-rcfail2"; mkdir -p "$rcfail2_proc"
+printf '4\n' >"$rcfail2_proc/perf_event_paranoid"
+printf '1\n' >"$rcfail2_proc/kptr_restrict"
+rcfail2_shims="$tmp/perf-rcfail2-shims"; mkdir -p "$rcfail2_shims"
+cp "$rcfail_shims/sudo" "$rcfail2_shims/sudo"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$rcfail2_shims/sysctl"
+for t in apt-get apt dnf yum pacman; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$rcfail2_shims/$t"
+done
+chmod +x "$rcfail2_shims"/*
+rcfail2_out=$(PATH="$rcfail2_shims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$rcfail2_proc" CQLITE_PERF_SYSCTL_DIR="$rcfail_d" CQLITE_PERF_TEST_PRIV_DIR="$rcfail2_shims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+rcfail2_rc=$?
+if [ "$rcfail2_rc" -eq 0 ] \
+   && printf '%s' "$rcfail2_out" | grep -q "'sysctl -q --system' exited 1" \
+   && printf '%s' "$rcfail2_out" | grep -q 'the controls are NOT in effect' \
+   && ! printf '%s' "$rcfail2_out" | grep -q 'READ BACK from /proc as profileable' \
+   && ! printf '%s' "$rcfail2_out" | grep -q 'reported success'; then
+  ok "perf section: a failing sysctl whose controls did NOT take reports BOTH facts (command exited 1 + controls not in effect), never a good read-back"
+else
+  bad "perf section: the both-bad case mishandled (rc=$rcfail2_rc)"
+  printf '%s\n' "$rcfail2_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 4d-iv. CURRENT DROP-IN + NO PRIVILEGE + non-ok runtime: nothing to WRITE (so the
+#        write remedy is not the fix) and no non-interactive privilege to APPLY, which
+#        used to print a diagnosis with NO remedy at all — contradicting every other
+#        unprivileged path in this section. Two boxes, two remedies: a box with no sudo
+#        BINARY needs the root-shell line (a `sudo` line is un-runnable there), a box
+#        whose sudo needs a password needs the same line WITH `sudo` (it works
+#        interactively).
+noapply_d="$tmp/perf-noapply.d"; mkdir -p "$noapply_d"
+bash "$PERFLIB" --drop-in >"$noapply_d/99-cqlite-perf.conf"
+noapply_ref="$tmp/perf-noapply-ref.conf"; cp "$noapply_d/99-cqlite-perf.conf" "$noapply_ref"
+noapply_out=$(PATH="$nosudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$noapply_d" CQLITE_PERF_TEST_PRIV_DIR="$nosudo" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+noapply_rc=$?
+if [ "$noapply_rc" -eq 0 ] \
+   && cmp -s "$noapply_ref" "$noapply_d/99-cqlite-perf.conf" \
+   && printf '%s' "$noapply_out" | grep -q 'drop-in already current' \
+   && printf '%s' "$noapply_out" | grep -q 'NOT in the profileable state' \
+   && printf '%s' "$noapply_out" | grep -q "no 'sudo' on this box — apply it from a ROOT shell:  sysctl -q --system" \
+   && ! printf '%s' "$noapply_out" | grep -q 'sudo sysctl'; then
+  ok "perf section: a current drop-in that cannot be applied (no sudo binary) still prints a RUNNABLE root-shell apply remedy, writes nothing, exits 0"
+else
+  bad "perf section: the current-drop-in/no-privilege branch printed no usable apply remedy (rc=$noapply_rc)"
+  printf '%s\n' "$noapply_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+noapply2_out=$(PATH="$pwsudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$perf_proc" CQLITE_PERF_SYSCTL_DIR="$noapply_d" CQLITE_PERF_TEST_PRIV_DIR="$pwsudo" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+noapply2_rc=$?
+if [ "$noapply2_rc" -eq 0 ] \
+   && cmp -s "$noapply_ref" "$noapply_d/99-cqlite-perf.conf" \
+   && printf '%s' "$noapply2_out" | grep -q 'NOT in the profileable state' \
+   && printf '%s' "$noapply2_out" | grep -q 'apply the drop-in now:  sudo sysctl -q --system' \
+   && ! printf '%s' "$noapply2_out" | grep -q "no 'sudo' on this box"; then
+  ok "perf section: the same branch on a password-requiring sudo prints the INTERACTIVE 'sudo sysctl -q --system' apply remedy"
+else
+  bad "perf section: the password-sudo current-drop-in branch remedy is wrong (rc=$noapply2_rc)"
+  printf '%s\n' "$noapply2_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
 # 4e. A box with NO `perf` at all must WARN + print the install remedy and STILL exit
 #      0 — bootstrap is the fleet provisioning entry point, so a hard exit here would
 #      break every box without linux-tools. Every other case has perf on PATH, so an
