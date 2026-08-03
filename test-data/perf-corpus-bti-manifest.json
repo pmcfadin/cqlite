@@ -298,7 +298,33 @@
     "partitions": "sstablemetadata Partition Size histogram bucket counts, cross-checked against the row driver's planned partition count; fail-closed, never a fabricated 0",
     "rows_per_partition": "row driver plan records, counted while writing the CSV",
     "toc": "read from each SSTable's own TOC.txt",
-    "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)"
+    "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)",
+    "row_plan_matches_config": "the row plan's chunk count, contiguous chunk index set, per-chunk row counts and per-chunk seed material were checked against --seed / --rows-requested / --chunk-rows before this manifest was written; a stale plan is a hard failure, because matching aggregate totals alone cannot prove the plan describes these bytes"
+  },
+  "read_path_measurement_scope": {
+    "what_the_ac3_figure_measures": "the GENERATION-MERGE STITCH route. A full scan of this corpus is not partition-key-constrained, so it takes the fallback full-scan access path and is served by generation_merge::stream_generations_for_read across every generation.",
+    "LIMITATION": "This corpus is PROFILEABLE and this figure measures the generation-merge stitch; the BTI mmap/trie plane is UNMEASURED here. Per-generation BTI trie descent and mmap behaviour happen inside the stitch but are not isolated by this measurement, so it must not be quoted as a BTI index-plane number (#3029 WS3 / #3030 WS4 are where that plane gets measured).",
+    "recorded_figure": {
+      "access_path": "fallback_full_scan (partition_key_not_fully_constrained)",
+      "storage_route": "generation_merge::stream_generations_for_read",
+      "generations": 27,
+      "wall_seconds": 127.163,
+      "rows": 13200000,
+      "rows_per_second": 103804,
+      "measured_by": "cqlite-core/examples/bti_perf_scan (the AC3 warm-scan harness), against the 27-generation production corpus described by this manifest",
+      "measured_on_utc": "2026-08-03"
+    },
+    "applies_to_this_corpus": true,
+    "applies_to_this_corpus_note": "true only when the corpus described here has the same row count and generation count the figure was measured on; a regenerated corpus of a different shape makes the recorded figure historical only \u2014 re-measure with the harness rather than editing the number",
+    "full_generation_golden": {
+      "committed": false,
+      "generated_on_demand": true,
+      "bytes": 160752721,
+      "mib": 153.3,
+      "what": "`sstabledump -l` of ONE generation (da-1-bti-Data.db) of this corpus, i.e. 500,000 rows across 711 partitions",
+      "verified": "correct: 711 partitions and EXACTLY 500,000 row objects, cross-checked against that SSTable's own Statistics.db (totalRows) by the generator's verify_dumped_row_counts step",
+      "why_not_committed": "153.3 MiB of derived JSON. It stays generated-on-demand (--dump-generations 1 during generation, or sstabledump -l against the corpus); the COMMITTABLE Cassandra-written BTI oracle is the separate small golden (gen-perf-corpus-bti.sh --small-golden)."
+    }
   },
   "tables": [
     {

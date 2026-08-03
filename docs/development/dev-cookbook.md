@@ -48,10 +48,30 @@ bash test-data/scripts/gen-perf-corpus-bti.sh --smoke --out /data/corpus-3234-bt
 bash test-data/scripts/gen-perf-corpus-bti.sh --out /data/corpus-3234-bti
 bash test-data/scripts/gen-perf-corpus-bti.sh --rows 33000000     # ~5 GiB
 
+# The COMMITTABLE small Cassandra-written BTI golden (a correctness oracle, NOT a profile
+# target): ~2 min, one 973 KB SSTable + a 1.83 MiB `sstabledump -l` golden. Does NOT touch
+# the perf corpus. See "The committed small BTI golden" below.
+bash test-data/scripts/gen-perf-corpus-bti.sh --small-golden --out /data/corpus-3234-small-golden
+
 bash test-data/scripts/gen-perf-corpus-bti.sh --validate-only     # flags only; no container, no writes
 bash test-data/scripts/gen-perf-corpus-bti.sh --verify-only        # re-assert an existing corpus, offline
 bash test-data/scripts/gen-perf-corpus-bti.sh --help              # every flag + its env var
 ```
+
+**Nothing outside `--out` is written unless you ask.** The manifest always lands at
+`$OUT/manifest-bti-3234.json`; replacing the **committed**
+`test-data/perf-corpus-bti-manifest.json` requires the explicit `--publish-manifest`, which is
+**production-mode only**. This is fail-closed because it was a live footgun: `MANIFEST_OUT` used
+to *default* to the committed path, so the advertised `--smoke` invocation overwrote a committed
+provenance artifact with `perf_bti_smoke` metadata — after which the default full-corpus scan
+rejects that manifest as describing another table (`bti_perf_scan` exit `8`). A `--smoke` /
+`--small-golden` run naming the committed manifest is refused at `--validate-only` time.
+
+**`--out` is canonicalized before anything is created or deleted.** The script does
+`rm -rf "$OUT/cassandra-data"` as root, so a lexical `!= "/"` check is not enough: `/tmp/..` and a
+symlink pointing at `/` both pass it and then resolve to `/`. `--out` is resolved first
+(`realpath -m`), a canonical `/` or any system root is refused, and every destructive target is
+derived from — and re-checked against — that validated canonical root.
 
 The final line printed is the `export CQLITE_DATASETS_ROOT=<abs>` to use.
 
@@ -178,9 +198,13 @@ window under the floor — printing the row count that *would* reach it — `7` 
 failed mid-stream, `8` no authoritative row count. Both asserts have a loud opt-**out**
 (`--no-expect-rows`, `--no-min-seconds`) that stamps `*** UNGUARDED: … ***` on the `RESULT:` line, and
 `--warm-passes 0` labels its output `COLD` rather than passing a cold scan off as the AC3 number.
-Every one of those codes is observed firing by `scripts/tests/test_bti_perf_scan.sh` (37 hermetic
+Every one of those codes is observed firing by `scripts/tests/test_bti_perf_scan.sh` (38 hermetic
 cases against the committed 10 KiB `test_da` BTI fixture — no perf corpus, seconds to run), which the
-gate's `tooling-tests` component runs.
+gate's `tooling-tests` component runs; its generator sibling
+`scripts/tests/test_gen_perf_corpus_bti.sh` runs 102. Both declare a case-count floor, so a suite that
+stops running cases cannot report success — and both report the same count on either branch of their
+one conditional (`CQLITE_BTI_PERF_SCAN_BIN` reuses a prebuilt harness binary instead of building one,
+and records that as its case).
 
 **MEASURED on the 1.995 GiB / 13.2 M-row production corpus** (fleet worker box, warm page cache, one
 discarded warming pass, the multi-generation merge route above): **125.6 s** wall clock, 13,200,000
@@ -197,10 +221,35 @@ for an unrestricted `SELECT *` — and `storage_route: generation_merge::stream_
 The access path is the *query*-level signal; `storage_route` is the plane, and both are printed on
 every run.
 
+**SCOPE OF THAT FIGURE — a stated LIMITATION, recorded in the committed artifact.** *This corpus is
+profileable and this figure measures the generation-merge stitch; the BTI mmap/trie plane is
+unmeasured here.* Per-generation BTI trie descent and mmap behaviour happen **inside** the stitch but
+are not isolated by it, so the number must never be quoted as a BTI index-plane result (that plane is
+what #3029 WS3 / #3030 WS4 measure). The concrete values:
+
+| field | value |
+|---|---|
+| `access_path` | `fallback_full_scan (partition_key_not_fully_constrained)` |
+| `storage_route` | `generation_merge::stream_generations_for_read` |
+| `generations` | 27 |
+| wall clock / rows / throughput | 127.163 s / 13,200,000 rows / 103,804 rows/s |
+
+The same statement lives in the committed manifest under
+`read_path_measurement_scope` (`what_the_ac3_figure_measures`, `LIMITATION`, `recorded_figure`), so it
+travels with the artifact rather than being discoverable only from the issue thread. That block also
+carries `applies_to_this_corpus`, computed by comparing the recorded rows/generations against the
+corpus the manifest describes — regenerate to a different shape and the recorded figure is marked
+historical instead of silently mis-describing the new corpus. `read_path_measurement_scope
+.full_generation_golden` records the 153.3 MiB on-demand golden below the same way.
+
 Every number in the manifest is read back from the written bytes (`sstablemetadata` on
 `Statistics.db`, the `CompressionInfo.db` header, each `TOC.txt`) and **nothing is inherited from a
-previous manifest**. A `mode` field marks whether a manifest describes a `smoke` validation run or
-the `production` corpus.
+previous manifest**. A `mode` field marks whether a manifest describes a `smoke` validation run, the
+`production` corpus, or the `small_golden` committed oracle. The row plan is additionally checked
+**against the run's own configuration** before anything is written — chunk count, a contiguous chunk
+index set, per-chunk row counts and each record's `"<seed>:<N>"` seed material — because matching
+aggregate totals cannot detect a *stale* plan, and a stale plan would publish a declared seed and
+generation plan that do not describe the corpus.
 
 **This is a parity oracle, not just a throughput fixture.** Every byte is **Cassandra-written**, so
 the `sstabledump -l` JSONL goldens emitted beside the corpus can back parity work. Per issue #3042 a
@@ -210,9 +259,27 @@ so only a bounded subset is dumped (`--dump-generations`, default 1) and they li
 (gitignored) corpus — the `git add -f` convention applies to the small `test_da` correctness
 goldens, never to these. **Measured**: the one golden for a 500k-row generation is 160,752,721 B
 (153.3 MiB), **1.98×** its `Data.db`, with 711 partition lines and exactly 500,000 row objects —
-matching that generation's `Statistics.db` `totalRows` and `partition_count`. At 153 MiB it is far too
-large to commit; regenerate it on demand instead (a *committable* BTI golden means a dedicated small
-table, not a slice of this corpus).
+matching that generation's `Statistics.db` `totalRows` and `partition_count` — i.e. it is **verified
+correct**, and it stays **generated-on-demand**: at 153 MiB it is not committable. A *committable* BTI
+golden therefore means a dedicated small table, not a slice of this corpus — which is what
+`--small-golden` produces:
+
+### The committed small BTI golden (a Cassandra-written oracle, `--small-golden`)
+
+`test-data/datasets/sstables/test_da/wide_multiclustering_small-6cf636608f6511f18f0f8ffe1ea52820/` is
+**committed** (`git add -f`, the `test_da` convention) with all 8 components + `schema.cql`: 6,000 rows
+over 5 partitions, `PRIMARY KEY (pk, bucket, seq)`, LZ4 `chunk_length_in_kb=16`, `Data.db` 973,239 B
+(sha256 `487dec60…`), `Rows.db` 1,348 B (non-empty — one 4,000-row partition spans several row-index
+blocks), and its `sstabledump -l` golden at **1,916,747 B (1.83 MiB)**. Recorded identity:
+`test-data/perf-corpus-bti-small-golden-manifest.json` (`mode: small_golden`); DDL + provenance:
+`test-data/schemas/wide-multiclustering-small-bti.cql`.
+
+- **It IS a correctness oracle** (issue #3042): Cassandra 5.0.2 wrote every byte, so the JSONL golden
+  can back BTI row/cell decode, `Rows.db` trie descent and compound-clustering-slice parity work.
+- **It is NOT a profile target.** At 973 KB its `Data.db` is far below the 8 MiB
+  `MADV_RANDOM` threshold, so the point-read and scan mappings are the same mapping and a read-plane
+  A/B on it is structurally zero. Read-path measurement belongs on the perf corpus above.
+- Regenerating it is a **fresh short container run** and never touches the perf corpus.
 
 ## CLI
 
