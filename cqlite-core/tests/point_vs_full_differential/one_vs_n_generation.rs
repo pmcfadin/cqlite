@@ -90,8 +90,8 @@ use cqlite_core::config::ReadPathMode;
 use cqlite_core::query::result::QueryRow;
 
 use super::{
-    discover_pk_ints, normalize, open_db, pin_read_clock, schema_path, skip_or_fail, sstables_root,
-    table_has_data, MAX_KEYS_PER_TABLE,
+    describe_search, discover_pk_ints, normalize, open_db, pin_read_clock, schema_path,
+    skip_or_fail, sstables_root_for_table, MAX_KEYS_PER_TABLE,
 };
 
 /// Sidecar files that live next to the real SSTable components in the committed
@@ -595,15 +595,12 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
             case.keyspace, case.table
         ));
     }
-    let Some(root) = sstables_root(case.keyspace) else {
-        return skip_or_fail(&format!("keyspace {} absent", case.keyspace));
+    // TABLE-granular root resolution (issue #3220): search every candidate root for
+    // THIS table's `*-Data.db` rather than committing to the first root that merely
+    // holds the keyspace.
+    let Some(root) = sstables_root_for_table(case.keyspace, case.table) else {
+        return skip_or_fail(&describe_search(case.keyspace, case.table));
     };
-    if !table_has_data(&root, case.keyspace, case.table) {
-        return skip_or_fail(&format!(
-            "table {}.{} has no fetched *-Data.db",
-            case.keyspace, case.table
-        ));
-    }
     let Some(schema) = schema_path(case.schema) else {
         return skip_or_fail(&format!("schema {} absent", case.schema));
     };

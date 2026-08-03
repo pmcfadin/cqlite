@@ -58,8 +58,14 @@
 #[path = "point_vs_full_differential/one_vs_n_generation.rs"]
 mod one_vs_n_generation;
 
+// TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
+// (issue #3220). Declared BEFORE first use so both this file and the submodule
+// (`use super::…`) resolve fixtures the same way.
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serial_test::serial;
 
@@ -344,76 +350,14 @@ fn case_id(case: &TableCase) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Path resolution (mirrors query_semantics_oracle_parity.rs)
+// Path resolution — the shared, TABLE-granular resolver (issue #3220)
 // ---------------------------------------------------------------------------
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
-}
-
-fn sstables_root(keyspace: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .map(|r| PathBuf::from(r).join("sstables")),
-        Some(
-            repo_root()
-                .join("test-data")
-                .join("datasets")
-                .join("sstables"),
-        ),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|root| root.join(keyspace).is_dir())
-}
-
-fn schema_path(file: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT").ok().and_then(|r| {
-            PathBuf::from(r)
-                .parent()
-                .map(|p| p.join("schemas").join(file))
-        }),
-        Some(repo_root().join("test-data").join("schemas").join(file)),
-    ];
-    candidates.into_iter().flatten().find(|p| p.exists())
-}
-
-/// True when the keyspace dir holds at least one `*-Data.db` for `table` — i.e.
-/// the (gitignored) binaries have actually been fetched, not just the JSONL.
-fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
-    let ks_dir = root.join(keyspace);
-    let Ok(entries) = std::fs::read_dir(&ks_dir) else {
-        return false;
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&format!("{table}-")))
-                    .unwrap_or(false)
-        })
-        .any(|dir| {
-            std::fs::read_dir(&dir)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok()).any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|n| n.ends_with("-Data.db"))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        })
-}
+// Re-exported for the `one_vs_n_generation` submodule (`use super::…`) and shared,
+// byte-for-byte, with `query_semantics_oracle_parity.rs` + `read_path_forcing_e2e.rs`.
+// A private per-file copy is what let the same absence read as a hard FAIL in one
+// lane and a silent SKIP in another.
+use datasets_root::{describe_search, schema_path, sstables_root_for_table};
 
 // ---------------------------------------------------------------------------
 // Result normalization (authoritative; never a byte-pattern guess)
@@ -539,15 +483,12 @@ async fn assert_point_full_equal(
 /// equality. `Ok(true)` = ran a comparison, `Ok(false)` = SKIPped (absent
 /// fixture, non-fail-closed).
 async fn run_case(case: &TableCase) -> Result<bool, String> {
-    let Some(root) = sstables_root(case.keyspace) else {
-        return skip_or_fail(&format!("keyspace {} absent", case.keyspace));
+    // TABLE-granular: every candidate root is searched for THIS table's `*-Data.db`,
+    // so a root holding the keyspace without the table falls through to the next one
+    // instead of being committed to (issue #3220).
+    let Some(root) = sstables_root_for_table(case.keyspace, case.table) else {
+        return skip_or_fail(&describe_search(case.keyspace, case.table));
     };
-    if !table_has_data(&root, case.keyspace, case.table) {
-        return skip_or_fail(&format!(
-            "table {}.{} has no fetched *-Data.db",
-            case.keyspace, case.table
-        ));
-    }
     let Some(schema) = schema_path(case.schema) else {
         return skip_or_fail(&format!("schema {} absent", case.schema));
     };
