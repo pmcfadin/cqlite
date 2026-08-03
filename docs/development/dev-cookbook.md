@@ -89,8 +89,21 @@ the emitted descriptors are hard failures, not warnings. The fail-closed asserts
 re-runnable offline via `--verify-only`, and pinned by `scripts/tests/test_gen_perf_corpus_bti.sh`
 with a negative control each) are: `da-*-bti-*` descriptors only and **no `nb-*`**; ≥1 `Data.db`
 > 8 MiB; every `Rows.db` non-empty; each TOC lists `Partitions.db`/`Rows.db` and **not** the
-BIG-only `Index.db`/`Summary.db`; and rows loaded == `Statistics.db` `totalRows` ==
-`sstabledump` rows for each dumped generation.
+BIG-only `Index.db`/`Summary.db`; rows loaded == `Statistics.db` `totalRows` == `sstabledump` rows
+for each dumped generation; and the manifest writer's plan-vs-`Statistics.db` cross-check on **both**
+the row count and the partition count (an unreadable `Partition Size` histogram is an error, never a
+fabricated 0).
+
+The `sed` that flips those two settings depends on the shipped file's exact comment markers and
+two-space indentation, so it lives in one snippet-emitting function used by two callers: the
+container path, and `--yaml-flip-check FILE`, a self-test hook that runs the **same text** against
+`scripts/tests/fixtures/cassandra-5.0.2-cassandra.yaml.excerpt` (a committed verbatim excerpt of the
+image's yaml). Two more hermetic hooks exist for the same reason: `--prune-dry-run`
+(+ `PRUNE_KEEP=<basename>`) enumerates the multi-GB dirs a run would `rm -rf` and deletes nothing,
+and `DOCKER=scripts/tests/fixtures/stub-docker-cassandra-bti.py` stands in for the container so the
+whole pipeline — including both row-count cross-checks and the manifest writer's happy path — runs in
+a test with no Cassandra. `--smoke` overrides only the DEFAULTS: an explicit `--rows`/`--chunk-rows`
+(or `ROWS`/`CHUNK_ROWS`) survives it.
 
 **Manifest identity** — `test-data/perf-corpus-bti-manifest.json` (committed; mirrors
 `perf-corpus-3068-manifest.json`). The corpus itself is multi-GB and **not** committed

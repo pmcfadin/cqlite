@@ -263,8 +263,15 @@
 #                      scripts/tests/test_gen_perf_corpus_bti.sh (#3234), which pins
 #                      the BTI (`da`) perf-corpus generator's acceptance asserts in
 #                      BOTH directions (a negative control per assert: nb-* descriptor,
-#                      empty Rows.db, sub-8-MiB Data.db, BIG-only TOC entry) plus its
-#                      row driver's (seed, chunk-index) determinism.
+#                      empty Rows.db, sub-8-MiB Data.db incl. the exact 8388608 B
+#                      boundary, BIG-only TOC entry or file), its row driver's
+#                      (seed, chunk-index) determinism, the cassandra.yaml BTI flip
+#                      against a COMMITTED cassandra:5.0.2 excerpt (a missed flip
+#                      silently emits `nb`), every guard on its multi-GB stale-corpus
+#                      pruning, and — through a stub `docker`
+#                      (scripts/tests/fixtures/stub-docker-cassandra-bti.py) — a full
+#                      hermetic end-to-end run: the manifest writer's happy path plus
+#                      both row-count cross-checks FIRING on injected disagreement.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
