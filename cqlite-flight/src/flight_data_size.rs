@@ -143,10 +143,18 @@ pub(crate) const FLIGHT_DATA_SIZE_INEXACTNESS_MARGIN_BYTES: usize = 64 * 1024;
 /// [`GRPC_DEFAULT_MAX_MESSAGE_BYTES`] minus the reserved per-message framing
 /// overhead (issue #3096 review).
 ///
-/// A `FlightData` whose body is at or below this value serializes to a gRPC
-/// message inside the 4 MiB default ceiling. It is the bound the framing tests
-/// assert EVERY emitted body against, including at a capacity/payload ratio of
-/// ~1.0 where the encoder's capacity-denominated target has no slack of its own.
+/// It is the bound `wire_partition::guard_message_within_ceiling` asserts every
+/// emitted message's **FULL SERIALIZED SIZE** against — body plus `data_header`
+/// plus `app_metadata` plus protobuf framing — and the bound the framing tests
+/// assert in that same currency, including at a capacity/payload ratio of ~1.0
+/// where the encoder's capacity-denominated target has no slack of its own.
+///
+/// Because the guard measures the whole message, this ceiling no longer has to be
+/// read as "a body this large leaves enough room for the rest": the 65,536-byte
+/// gap below [`GRPC_DEFAULT_MAX_MESSAGE_BYTES`] is now pure headroom under the raw
+/// limit, and [`FLIGHT_FRAMING_OVERHEAD_BYTES`]'s remaining job is sizing
+/// [`FLIGHT_DATA_SIZE_TARGET_BYTES`] so the pre-encode partition leaves room for a
+/// header rather than hitting the guard.
 pub(crate) const FLIGHT_DATA_RESERVED_CEILING_BYTES: usize =
     GRPC_DEFAULT_MAX_MESSAGE_BYTES - FLIGHT_FRAMING_OVERHEAD_BYTES;
 

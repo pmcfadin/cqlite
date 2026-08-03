@@ -700,16 +700,17 @@ fn encode_do_get(
         // currencies involved, and why this is not simply raised until the split
         // disappears live on the constant.
         .with_max_flight_data_size(crate::flight_data_size::FLIGHT_DATA_SIZE_TARGET_BYTES)
-        // …which is a TARGET the encoder meets by slicing uniformly BY ROW COUNT, so
-        // width-skewed rows can still frame one over-ceiling message (issue #3096
-        // review). `wire_partition` byte-partitions the input and checks every
-        // SERIALIZED body against the ceiling; its header quotes the encoder source.
+        // …which is a TARGET the encoder meets by slicing uniformly BY ROW COUNT and
+        // which governs the BODY only, so width-skewed rows can still frame one
+        // over-ceiling message (issue #3096 review). `wire_partition`
+        // byte-partitions the input and checks every emitted message's FULL
+        // SERIALIZED SIZE against the ceiling; its header quotes the encoder source.
         .build(crate::wire_partition::partition_for_wire(
             batch_stream,
             probe.clone(),
         ))
         .map(move |res| match res {
-            Ok(data) => crate::wire_partition::guard_body_within_ceiling(data, &probe),
+            Ok(data) => crate::wire_partition::guard_message_within_ceiling(data, &probe),
             Err(e) => Err(flight_error_to_status(e, &probe)),
         });
     Box::pin(encoded)

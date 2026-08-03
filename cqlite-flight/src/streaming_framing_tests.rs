@@ -431,23 +431,39 @@ fn skewed_binary_batch(widths: &[usize]) -> (RecordBatch, Arc<ArrowSchema>) {
     (batch, schema)
 }
 
-/// Drive `encode_do_get` over one batch, returning either every emitted body size
-/// or the `Status` the stream failed with.
-async fn body_sizes_or_status(
+/// One emitted `FlightData`'s two sizes.
+///
+/// `body` is the `data_body` alone — all the ceiling guard measured before the
+/// second #3096 review. `message` is the FULL protobuf-encoded size, which is the
+/// quantity tonic's `max_decoding_message_size` and grpc-java's
+/// `maxInboundMessageSize` are compared against, and therefore what the guard
+/// measures now.
+#[derive(Debug, Clone, Copy)]
+struct EmittedSizes {
+    body: usize,
+    message: usize,
+}
+
+/// Drive `encode_do_get` over one batch, returning either the sizes of EVERY
+/// emitted message — the header-only schema message included, so it is covered
+/// rather than skipped — or the `Status` the stream failed with.
+async fn emitted_sizes_or_status(
     batch: RecordBatch,
     schema: Arc<ArrowSchema>,
-) -> Result<Vec<usize>, Status> {
+) -> Result<Vec<EmittedSizes>, Status> {
     let stream = futures::stream::iter(vec![Ok::<_, FlightError>(batch)]);
     let mut encoded = encode_do_get(stream, schema, StreamProbe::default());
-    let mut bodies = Vec::new();
+    let mut emitted = Vec::new();
     while let Some(msg) = encoded.next().await {
         match msg {
-            Ok(data) if data.data_body.is_empty() => {}
-            Ok(data) => bodies.push(data.data_body.len()),
+            Ok(data) => emitted.push(EmittedSizes {
+                body: data.data_body.len(),
+                message: crate::wire_partition::serialized_message_bytes(&data),
+            }),
             Err(status) => return Err(status),
         }
     }
-    Ok(bodies)
+    Ok(emitted)
 }
 
 /// **The wire-safety regression test of the SECOND #3096 review.**
@@ -461,11 +477,18 @@ async fn body_sizes_or_status(
 /// Non-vacuity is asserted AND measured by perturbation: the encoder's first
 /// predicted slice is measured inline below and must exceed the reserved ceiling,
 /// and with `wire_partition::frame_for_wire_bounded` short-circuited to a
-/// pass-through this test fails with the serialized-body guard reporting a
-/// **14,495,104-byte** `data_body` — 3.5x the 4,128,768-byte ceiling. Both halves
-/// of the fix are therefore load-bearing on this fixture.
+/// pass-through this test fails with the guard reporting a **14,495,257-byte
+/// message** — measured: a 14,495,104-byte `data_body` plus 144 B of `data_header`,
+/// 0 B of `app_metadata` and 9 B of protobuf framing — 3.5x the 4,128,768-byte
+/// ceiling. Both halves of the fix are therefore load-bearing on this fixture.
+///
+/// What is asserted is the FULL SERIALIZED MESSAGE of every emitted `FlightData`,
+/// in the same currency the guard now enforces (issue #3096, second review): the
+/// body-only assertion this replaced could not see `data_header`,
+/// `app_metadata` or protobuf framing at all, and passed trivially for the
+/// header-only schema message — which is checked here too.
 #[tokio::test]
-async fn a_width_skewed_batch_frames_every_serialized_body_under_the_reserved_ceiling() {
+async fn a_width_skewed_batch_frames_every_serialized_message_under_the_reserved_ceiling() {
     const FAT: usize = 3_500_000;
     const NARROW: usize = 2_000;
     let mut widths = vec![FAT; 4];
@@ -497,30 +520,59 @@ async fn a_width_skewed_batch_frames_every_serialized_body_under_the_reserved_ce
          defect it closes"
     );
 
-    let bodies = body_sizes_or_status(batch, schema)
+    let emitted = emitted_sizes_or_status(batch, schema)
         .await
         .expect("a skewed batch of legal rows must be framed, not refused");
+    let bodies: Vec<usize> = emitted
+        .iter()
+        .filter(|e| e.body > 0)
+        .map(|e| e.body)
+        .collect();
     assert!(
         bodies.len() >= 5,
         "the fat rows must be split apart from each other and from the narrow tail; \
-         got {} message(s): {bodies:?}",
+         got {} data message(s): {bodies:?}",
         bodies.len()
     );
-    for (i, size) in bodies.iter().enumerate() {
+
+    // **The bound, in the currency the gRPC ceiling applies to.**
+    for (i, sizes) in emitted.iter().enumerate() {
         assert!(
-            *size < FLIGHT_DATA_RESERVED_CEILING_BYTES,
-            "SERIALIZED message {i} is {size} B, at or over the \
-             {FLIGHT_DATA_RESERVED_CEILING_BYTES}-byte reserved ceiling \
+            sizes.message < FLIGHT_DATA_RESERVED_CEILING_BYTES,
+            "SERIALIZED message {i} is {} B (data_body {} B plus header/metadata/framing), \
+             at or over the {FLIGHT_DATA_RESERVED_CEILING_BYTES}-byte reserved ceiling \
              ({GRPC_DEFAULT_MAX_MESSAGE_BYTES} B gRPC default less \
              {FLIGHT_FRAMING_OVERHEAD_BYTES} B of framing). A default tonic client refuses \
-             it. Sizes: {bodies:?}"
+             it. Sizes: {emitted:?}",
+            sizes.message,
+            sizes.body
+        );
+        assert!(
+            sizes.message > sizes.body,
+            "message {i} must be measured on MORE than its body ({} B vs {} B) — a \
+             message equal to its body means the non-body bytes are not on the scale",
+            sizes.message,
+            sizes.body
         );
     }
-    // Nothing was dropped to achieve that: the bodies carry at least the payload.
-    let emitted: usize = bodies.iter().sum();
+
+    // The header-only schema message is COVERED, not skipped: it has no body, so the
+    // superseded body-only guard compared 0 against the ceiling for it.
+    let header_only = emitted
+        .iter()
+        .find(|e| e.body == 0)
+        .expect("the encoder emits a header-only schema message first");
     assert!(
-        emitted >= widths.iter().sum::<usize>(),
-        "the emitted bodies ({emitted} B) must carry the whole payload — splitting \
+        header_only.message > 0,
+        "the header-only message must be measured on its data_header, not on its \
+         (empty) body"
+    );
+
+    // Nothing was dropped to achieve that: the bodies carry at least the payload.
+    let body_total: usize = bodies.iter().sum();
+    assert!(
+        body_total >= widths.iter().sum::<usize>(),
+        "the emitted bodies ({body_total} B) must carry the whole payload — splitting \
          must not lose rows"
     );
 }
@@ -534,7 +586,7 @@ async fn a_width_skewed_batch_frames_every_serialized_body_under_the_reserved_ce
 #[tokio::test]
 async fn a_row_wider_than_the_ceiling_is_refused_rather_than_framed_illegally() {
     let (batch, schema) = skewed_binary_batch(&[2_000, FLIGHT_DATA_RESERVED_CEILING_BYTES + 4_096]);
-    let status = body_sizes_or_status(batch, schema)
+    let status = emitted_sizes_or_status(batch, schema)
         .await
         .expect_err("a row wider than the ceiling must fail the stream closed");
     assert_eq!(status.code(), tonic::Code::OutOfRange, "code: {status:?}");

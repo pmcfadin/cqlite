@@ -246,3 +246,138 @@ fn a_sliced_list_column_is_not_over_measured_by_its_whole_child() {
         "expected ~512-640 B for a 64-element i64 list row, got {one_row}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The ceiling guard measures the FULL SERIALIZED MESSAGE (issue #3096, second
+// review of lever 4)
+// ---------------------------------------------------------------------------
+//
+// `guard_message_within_ceiling` used to measure `data_body` alone and lean on
+// `FLIGHT_FRAMING_OVERHEAD_BYTES` as a RESERVE for everything else, which made it
+// conditional on that reserve while claiming to be unconditional. These tests pin
+// the two message shapes a body-only check cannot see at all: a header-only
+// message (body length 0) and non-body bytes (`app_metadata`) pushing an otherwise
+// legal body over the limit.
+//
+// No wall-clock assertion appears here (#2642): every assertion is a byte size.
+
+/// A `FlightData` with the EXACT field lengths given, so each test's arithmetic is
+/// its own.
+fn flight_data(header_len: usize, metadata_len: usize, body_len: usize) -> FlightData {
+    FlightData {
+        data_header: prost::bytes::Bytes::from(vec![0xa5u8; header_len]),
+        app_metadata: prost::bytes::Bytes::from(vec![0x5au8; metadata_len]),
+        data_body: prost::bytes::Bytes::from(vec![0x11u8; body_len]),
+        ..Default::default()
+    }
+}
+
+/// The measured quantity is the message, and it is STRICTLY larger than the body:
+/// protobuf tags and length varints are bytes on the wire too.
+#[test]
+fn the_measured_size_is_the_whole_message_not_the_body() {
+    let data = flight_data(4_096, 128, 65_536);
+    let message = serialized_message_bytes(&data);
+    let parts = data.data_header.len() + data.app_metadata.len() + data.data_body.len();
+    assert!(
+        message > parts,
+        "the encoded message ({message} B) must exceed the sum of its payload fields \
+         ({parts} B) by the field tags and length varints"
+    );
+    assert!(
+        message < parts + 64,
+        "…and by no more than a few bytes of framing, got {message} B over {parts} B"
+    );
+}
+
+/// **A header-only message is MEASURED, not trivially passed.**
+///
+/// The schema `FlightData` (and every dictionary message) has an empty body, so the
+/// old body-only check compared 0 against the ceiling and accepted it whatever the
+/// `data_header` weighed. Non-vacuity is the body length itself: it is ZERO here,
+/// which is what the superseded check would have measured.
+#[test]
+fn a_header_only_message_over_the_ceiling_is_rejected_rather_than_trivially_passing() {
+    let data = flight_data(FLIGHT_DATA_RESERVED_CEILING_BYTES + 4_096, 0, 0);
+    assert!(
+        data.data_body.is_empty(),
+        "NON-VACUITY: the body must be EMPTY, so the body-only check this replaces \
+         measured 0 B and accepted this message"
+    );
+    let probe = StreamProbe::default();
+    let status = guard_message_within_ceiling(data, &probe)
+        .expect_err("a header over the ceiling must be refused");
+    assert_eq!(status.code(), tonic::Code::OutOfRange, "code: {status:?}");
+    let msg = status.message();
+    assert!(
+        msg.contains("data_body 0") && msg.contains("header-only"),
+        "the refusal must show the empty body and name the header-only case, got: {msg}"
+    );
+}
+
+/// **Non-body bytes count.** A body comfortably inside the ceiling plus
+/// `app_metadata` that carries the message over it is refused.
+///
+/// Non-vacuity is asserted in the guard's own currency: the BODY alone is under the
+/// ceiling, so the superseded body-only check accepted exactly this message.
+#[test]
+fn app_metadata_that_carries_the_message_over_the_ceiling_is_rejected() {
+    let body = FLIGHT_DATA_RESERVED_CEILING_BYTES - 1_024;
+    let data = flight_data(512, 8_192, body);
+    assert!(
+        data.data_body.len() <= FLIGHT_DATA_RESERVED_CEILING_BYTES,
+        "NON-VACUITY: the body alone ({} B) must be legal, so only the non-body bytes \
+         can be what makes this message illegal",
+        data.data_body.len()
+    );
+    let message = serialized_message_bytes(&data);
+    assert!(
+        message > FLIGHT_DATA_RESERVED_CEILING_BYTES,
+        "the fixture must serialize OVER the ceiling ({message} B vs \
+         {FLIGHT_DATA_RESERVED_CEILING_BYTES} B)"
+    );
+
+    let probe = StreamProbe::default();
+    let status = guard_message_within_ceiling(data, &probe)
+        .expect_err("a message over the ceiling must be refused");
+    assert_eq!(status.code(), tonic::Code::OutOfRange, "code: {status:?}");
+    assert!(
+        status.message().contains("app_metadata 8192"),
+        "the refusal must account for the non-body bytes, got: {}",
+        status.message()
+    );
+}
+
+/// **No false rejection.** The shapes the production path actually emits — a body
+/// at the encoder's target with a realistic header, and a small header-only schema
+/// message — pass unchanged.
+///
+/// The 65,536-byte gap between the target and the ceiling is what makes the first
+/// of these safe; this test is what would fail if the guard were tightened onto the
+/// target instead.
+#[test]
+fn a_message_at_the_encoder_target_with_a_realistic_header_still_passes() {
+    let probe = StreamProbe::default();
+    for (header, metadata, body) in [
+        (1_024usize, 0usize, FLIGHT_DATA_SIZE_TARGET_BYTES),
+        (512, 0, 0),
+        (0, 0, 0),
+    ] {
+        let data = flight_data(header, metadata, body);
+        let message = serialized_message_bytes(&data);
+        let passed = guard_message_within_ceiling(data, &probe)
+            .expect("a message inside the ceiling must pass");
+        assert_eq!(
+            serialized_message_bytes(&passed),
+            message,
+            "the guard must return the message unchanged"
+        );
+        assert!(
+            message <= FLIGHT_DATA_RESERVED_CEILING_BYTES,
+            "header {header} B + body {body} B serializes to {message} B, which must \
+             stay inside the {FLIGHT_DATA_RESERVED_CEILING_BYTES}-byte ceiling — the \
+             {}-byte gap from the target is what reserves room for the header",
+            FLIGHT_DATA_RESERVED_CEILING_BYTES - FLIGHT_DATA_SIZE_TARGET_BYTES
+        );
+    }
+}

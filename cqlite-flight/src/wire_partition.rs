@@ -48,13 +48,14 @@
 //!   the encoder sees it, so no slice reaching the encoder exceeds the target.
 //!   Any further row-uniform split the encoder applies to those slices can only
 //!   make bodies SMALLER, so the bound survives it.
-//! * [`guard_body_within_ceiling`] checks every emitted `FlightData`'s
-//!   **actually serialized** `data_body` against
+//! * [`guard_message_within_ceiling`] checks every emitted `FlightData`'s
+//!   **actually serialized SIZE — the whole message, not just its body** — against
 //!   [`FLIGHT_DATA_RESERVED_CEILING_BYTES`] and fails the stream closed if one is
-//!   over it. This is the unconditional guarantee: it is measured on the real
-//!   bytes, so it holds even where the pre-encode estimate does not (a single row
-//!   wider than the ceiling, or an Arrow layout this module measures
-//!   conservatively).
+//!   over it. It is measured on the real encoded bytes, so it holds even where the
+//!   pre-encode estimate does not (a single row wider than the ceiling, or an
+//!   Arrow layout this module measures conservatively), and it does not depend on
+//!   [`crate::flight_data_size::FLIGHT_FRAMING_OVERHEAD_BYTES`] being an accurate
+//!   reserve for the non-body bytes, because those bytes are ON the scale.
 //!
 //! An individually oversized row — one whose own payload exceeds the reserved
 //! ceiling — cannot be split at all (`rows_per_batch` is `.max(1)`, and one row is
@@ -75,7 +76,7 @@
 //! accept knowingly: it is pinned by `Cargo.lock`, it is asserted against the real
 //! encoder in `streaming_framing_tests.rs` (exact message counts), and if the
 //! dependency ever changes it the only consequence is that we under-intervene —
-//! [`guard_body_within_ceiling`] still refuses to put an illegal message on the
+//! [`guard_message_within_ceiling`] still refuses to put an illegal message on the
 //! wire.
 
 use arrow::array::{Array, LargeListArray, ListArray, MapArray, StructArray};
@@ -84,6 +85,9 @@ use arrow::record_batch::RecordBatch;
 use arrow_flight::error::FlightError;
 use arrow_flight::FlightData;
 use futures::{Stream, StreamExt};
+// `FlightData`'s own serializer, so the ceiling guard measures the bytes tonic will
+// actually put on the wire rather than a model of them.
+use prost::Message as _;
 use tonic::Status;
 
 use crate::flight_data_size::{FLIGHT_DATA_RESERVED_CEILING_BYTES, FLIGHT_DATA_SIZE_TARGET_BYTES};
@@ -150,36 +154,84 @@ pub(crate) fn partition_for_wire(
     })
 }
 
-/// Refuse to put a `FlightData` whose SERIALIZED body is over
-/// [`FLIGHT_DATA_RESERVED_CEILING_BYTES`] on the wire (issue #3096 review).
+/// Refuse to put a `FlightData` whose **FULL SERIALIZED SIZE** is over
+/// [`FLIGHT_DATA_RESERVED_CEILING_BYTES`] on the wire (issue #3096, second
+/// review).
 ///
-/// The unconditional half of the guarantee: it measures the encoded body, not an
-/// estimate of it, so it holds regardless of what the encoder did with the target
-/// or how conservatively [`slice_payload_bytes`] measured the input.
+/// # What is measured
+///
+/// The protobuf-encoded length of the WHOLE message —
+/// [`serialized_message_bytes`]: `data_body`, `data_header`, `app_metadata`, any
+/// `flight_descriptor`, and every field tag and length varint. That is the
+/// quantity a peer's limit applies to: tonic compares its
+/// `max_decoding_message_size` against the length in the gRPC length-prefixed
+/// frame, and grpc-java's `maxInboundMessageSize` does the same. The only bytes
+/// outside this number are that 5-byte frame prefix itself, four orders of
+/// magnitude inside the 65,536-byte gap between this ceiling and the raw 4 MiB
+/// limit.
+///
+/// # Why it is not `data_body` alone
+///
+/// It was, and that made the check **conditional on a reserve** while its own doc
+/// called it unconditional: the non-body bytes were assumed to fit inside
+/// [`crate::flight_data_size::FLIGHT_FRAMING_OVERHEAD_BYTES`] (plus a second,
+/// equal inexactness margin), so what the guard actually proved was
+/// "body ≤ ceiling", not "message ≤ gRPC limit". Those two constants keep their
+/// other job — they are how
+/// [`crate::flight_data_size::FLIGHT_DATA_SIZE_TARGET_BYTES`] is derived, which is
+/// what leaves the pre-encode partition room for a header — but this guard no
+/// longer depends on either being an accurate estimate of anything: whatever the
+/// header, metadata and framing really cost, they are ON the scale here.
+///
+/// A **header-only** message — the schema `FlightData` the encoder emits first,
+/// and any dictionary message — carries an empty body and so passed the old
+/// body-only check trivially, no matter how large its `data_header` flatbuffer
+/// was; nothing else on this path bounds a wide-enough schema's header. It is now
+/// measured like every other message.
 // The `Err` is `tonic::Status` because this function's output IS the `DoGetStream`
 // item type mandated by the arrow-flight `FlightService` trait; boxing it (clippy's
 // suggestion) would violate that contract — same rationale as
 // `streaming::encode_do_get` (#2856).
 #[allow(clippy::result_large_err)]
-pub(crate) fn guard_body_within_ceiling(
+pub(crate) fn guard_message_within_ceiling(
     data: FlightData,
     probe: &StreamProbe,
 ) -> Result<FlightData, Status> {
-    let body = data.data_body.len();
-    if body > FLIGHT_DATA_RESERVED_CEILING_BYTES {
+    let message = serialized_message_bytes(&data);
+    if message > FLIGHT_DATA_RESERVED_CEILING_BYTES {
+        let body = data.data_body.len();
+        let header = data.data_header.len();
+        let metadata = data.app_metadata.len();
         return Err(record_encoder_error(
             Status::out_of_range(format!(
-                "refusing to send a FlightData with a {body}-byte data_body: the largest \
-                 legal body is {FLIGHT_DATA_RESERVED_CEILING_BYTES} bytes (the 4 MiB default \
-                 gRPC message limit less the reserved IPC/protobuf framing overhead), and a \
-                 default tonic or grpc-java client refuses the message rather than reporting \
-                 this. The encoder's max_flight_data_size is a target met by slicing \
-                 uniformly by ROW COUNT, so a width-skewed batch can exceed it",
+                "refusing to send a FlightData that serializes to {message} bytes \
+                 (data_body {body} + data_header {header} + app_metadata {metadata}, plus \
+                 protobuf field framing): the largest legal message is \
+                 {FLIGHT_DATA_RESERVED_CEILING_BYTES} bytes (the 4 MiB default gRPC message \
+                 limit less the reserved IPC/protobuf framing overhead), and a default tonic \
+                 or grpc-java client refuses the message rather than reporting this. The \
+                 encoder's max_flight_data_size governs the BODY only and is a target met by \
+                 slicing uniformly by ROW COUNT, so a width-skewed batch — or a header-only \
+                 message over a very wide schema — can exceed it",
             )),
             probe,
         ));
     }
     Ok(data)
+}
+
+/// The exact number of bytes `data` occupies as a gRPC message payload.
+///
+/// `prost::Message::encoded_len` is the serializer's own length calculation, so
+/// this is the realized size, not a model of it — and it is what the guard above
+/// compares, which is why that guard no longer depends on a framing reserve. Cheap
+/// enough to call per message: the `bytes` fields report their own lengths and the
+/// rest is a handful of varint width computations.
+///
+/// Exposed to the tests so the wire-safety assertions can be made in the same
+/// currency the guard enforces.
+pub(crate) fn serialized_message_bytes(data: &FlightData) -> usize {
+    data.encoded_len()
 }
 
 /// [`partition_for_wire`]'s per-batch decision, at the shipped bounds.
