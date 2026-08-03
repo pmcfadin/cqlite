@@ -804,3 +804,345 @@ fn the_matching_schema_path_is_unchanged() {
         vec!["alpha", "beta"]
     );
 }
+
+// =========================================================================
+// FULL `Field` identity — the axes the arity/name-only guard left open
+// (issue #3096, second review)
+// =========================================================================
+//
+// `check_schema_matches_columns` now compares each field to
+// `column_to_field(col)` in full: name, data type, nullability and metadata (the
+// four axes Arrow's `Field: PartialEq` compares), plus empty schema-level
+// metadata. One test per rejection axis, and — for every axis Arrow does NOT
+// check — the non-vacuity half established by
+// `a_reordered_same_type_schema_is_rejected_not_silently_mislabeled`: the SAME
+// mismatched schema and the SAME arrays handed to `RecordBatch::try_new`, showing
+// it is ACCEPTED there.
+
+/// A uuid column (which carries the Arrow UUID extension metadata) plus a text
+/// column, with EVERY value PRESENT.
+///
+/// No nulls is load-bearing: `RecordBatch::try_new`'s only nullability check is
+/// "a non-nullable field holding actual nulls", so a null-free fixture is what
+/// makes the nullability axis below non-vacuous.
+fn uuid_and_text_columns() -> (Vec<ColumnInfo>, Vec<QueryRow>) {
+    let columns = vec![
+        col("id", DataType::Uuid, Some(CqlType::Uuid)),
+        col("label", DataType::Text, Some(CqlType::Text)),
+    ];
+    let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+    values.insert("id".into(), Value::Uuid([7u8; 16]));
+    values.insert("label".into(), Value::Text("L".into()));
+    let rows = vec![QueryRow {
+        values,
+        key: RowKey::new(Vec::new()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    }];
+    (columns, rows)
+}
+
+/// `build_arrow_schema(columns)` with `mutate` applied to its `Field`s — the only
+/// way these tests construct a mismatched schema, so each one differs from the
+/// real schema on exactly the axis it names.
+fn schema_with<F: FnMut(usize, Field) -> Field>(
+    columns: &[ColumnInfo],
+    mut mutate: F,
+) -> Arc<Schema> {
+    let built = build_arrow_schema(columns).expect("schema");
+    let fields: Vec<Field> = built
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| mutate(i, f.as_ref().clone()))
+        .collect();
+    Arc::new(Schema::new(fields))
+}
+
+/// The `SchemaMismatch` message, or a panic naming what came back instead.
+fn expect_schema_mismatch(res: Result<RecordBatch, ArrowConvertError>) -> String {
+    match res {
+        Err(ArrowConvertError::SchemaMismatch(msg)) => msg,
+        Err(other) => panic!("expected SchemaMismatch, got {other:?}"),
+        Ok(batch) => panic!(
+            "expected SchemaMismatch, got a batch labelled {:?}",
+            batch.schema()
+        ),
+    }
+}
+
+/// **Non-vacuity.** `RecordBatch::try_new`, handed the same schema and the same
+/// arrays, ACCEPTS the mismatch — so the rejection under test is work Arrow does
+/// not do. Returns the batch Arrow was willing to build, so each test can show
+/// what would have gone on the wire.
+fn try_new_accepts(schema: Arc<Schema>, columns: &[ColumnInfo], rows: &[QueryRow]) -> RecordBatch {
+    let arrays = convert_to_arrays(columns, rows).expect("arrays");
+    RecordBatch::try_new(schema, arrays)
+        .expect("RecordBatch::try_new must ACCEPT this schema, or the test proves nothing")
+}
+
+/// **Name axis.** A RENAMED field over the same Arrow type: rejected here,
+/// accepted by Arrow (`try_new` compares data types, never field names).
+#[test]
+fn a_renamed_same_type_field_is_rejected_and_arrow_would_accept_it() {
+    let (columns, rows) = two_text_columns();
+    let renamed = schema_with(&columns, |i, f| {
+        if i == 0 {
+            Field::new("renamed", f.data_type().clone(), f.is_nullable())
+        } else {
+            f
+        }
+    });
+
+    let msg = expect_schema_mismatch(rows_to_record_batch_with_schema(
+        Arc::clone(&renamed),
+        &columns,
+        &rows,
+    ));
+    assert!(
+        msg.contains("field 0 is 'renamed'") && msg.contains("column 0 is 'alpha'"),
+        "the message must name the position and both names, got: {msg}"
+    );
+
+    let accepted = try_new_accepts(renamed, &columns, &rows);
+    assert_eq!(
+        accepted.schema().field(0).name(),
+        "renamed",
+        "Arrow labelled alpha's values 'renamed' — the silent mislabeling the \
+         rejection prevents"
+    );
+}
+
+/// **Nullability axis.** A field flipped to non-nullable over data that happens
+/// to contain no nulls: rejected here, accepted by Arrow (its only nullability
+/// check is a non-nullable field holding ACTUAL nulls).
+#[test]
+fn a_nullability_flip_is_rejected_and_arrow_would_accept_it() {
+    let (columns, rows) = uuid_and_text_columns();
+    assert!(
+        columns.iter().all(|c| c.nullable),
+        "the fixture's columns must map to nullable fields for the flip to be a \
+         difference"
+    );
+    let flipped = schema_with(
+        &columns,
+        |i, f| if i == 1 { f.with_nullable(false) } else { f },
+    );
+
+    let msg = expect_schema_mismatch(rows_to_record_batch_with_schema(
+        Arc::clone(&flipped),
+        &columns,
+        &rows,
+    ));
+    assert!(
+        msg.contains("field 1 'label'")
+            && msg.contains("nullable=false")
+            && msg.contains("nullable=true"),
+        "the message must name the position and both nullability values, got: {msg}"
+    );
+
+    let accepted = try_new_accepts(flipped, &columns, &rows);
+    assert!(
+        !accepted.schema().field(1).is_nullable(),
+        "Arrow accepted the batch and declared a nullable column NON-nullable — a \
+         schema every consumer of this batch would read as a guarantee"
+    );
+    assert_eq!(
+        accepted.column(1).null_count(),
+        0,
+        "the fixture must be null-free, which is WHY Arrow accepted it"
+    );
+}
+
+/// **Field-metadata axis**, both directions: the Arrow UUID extension metadata
+/// DROPPED, and the same key ALTERED. Rejected here, accepted by Arrow
+/// (`try_new` never compares field metadata).
+///
+/// This is the axis with a consumer-visible consequence beyond labelling: the
+/// `ARROW:extension:name` = `arrow.uuid` key is what makes a Parquet writer emit
+/// the UUID logical type for a `FixedSizeBinary(16)` column.
+#[test]
+fn uuid_extension_metadata_dropped_or_altered_is_rejected_and_arrow_would_accept_it() {
+    let (columns, rows) = uuid_and_text_columns();
+    let built = build_arrow_schema(&columns).expect("schema");
+    assert_eq!(
+        built
+            .field(0)
+            .metadata()
+            .get("ARROW:extension:name")
+            .map(String::as_str),
+        Some("arrow.uuid"),
+        "the fixture's uuid column must actually carry the extension metadata, or \
+         neither half below is a difference"
+    );
+
+    // (1) Dropped.
+    let stripped = schema_with(&columns, |i, f| {
+        if i == 0 {
+            f.with_metadata(HashMap::new())
+        } else {
+            f
+        }
+    });
+    let msg = expect_schema_mismatch(rows_to_record_batch_with_schema(
+        Arc::clone(&stripped),
+        &columns,
+        &rows,
+    ));
+    assert!(
+        msg.contains("field 0 'id'") && msg.contains("metadata []") && msg.contains("arrow.uuid"),
+        "the message must name the position and both metadata sets, got: {msg}"
+    );
+    let accepted = try_new_accepts(stripped, &columns, &rows);
+    assert!(
+        accepted.schema().field(0).metadata().is_empty(),
+        "Arrow accepted a batch whose uuid column has NO extension metadata — a \
+         Parquet consumer of it loses the UUID logical type"
+    );
+
+    // (2) Altered — same key, wrong value.
+    let altered = schema_with(&columns, |i, f| {
+        if i == 0 {
+            f.with_metadata(HashMap::from([(
+                "ARROW:extension:name".to_string(),
+                "arrow.not_a_uuid".to_string(),
+            )]))
+        } else {
+            f
+        }
+    });
+    let msg = expect_schema_mismatch(rows_to_record_batch_with_schema(
+        Arc::clone(&altered),
+        &columns,
+        &rows,
+    ));
+    assert!(
+        msg.contains("arrow.not_a_uuid") && msg.contains("arrow.uuid"),
+        "the message must show both extension names, got: {msg}"
+    );
+    let accepted = try_new_accepts(altered, &columns, &rows);
+    assert_eq!(
+        accepted
+            .schema()
+            .field(0)
+            .metadata()
+            .get("ARROW:extension:name")
+            .map(String::as_str),
+        Some("arrow.not_a_uuid"),
+        "Arrow accepted the batch with a foreign extension name"
+    );
+}
+
+/// **Schema-level metadata axis.** `build_arrow_schema` builds with
+/// `Schema::new`, which sets no top-level metadata, so a schema carrying any is
+/// not its output: rejected here, accepted by Arrow (`try_new` never compares
+/// schema metadata).
+#[test]
+fn extra_schema_level_metadata_is_rejected_and_arrow_would_accept_it() {
+    let (columns, rows) = two_text_columns();
+    assert!(
+        build_arrow_schema(&columns)
+            .expect("schema")
+            .metadata()
+            .is_empty(),
+        "build_arrow_schema must set no schema metadata, or this axis is not a \
+         difference"
+    );
+    let tagged = Arc::new(build_arrow_schema(&columns).expect("schema").with_metadata(
+        HashMap::from([("origin".to_string(), "elsewhere".to_string())]),
+    ));
+
+    let msg = expect_schema_mismatch(rows_to_record_batch_with_schema(
+        Arc::clone(&tagged),
+        &columns,
+        &rows,
+    ));
+    assert!(
+        msg.contains("top-level metadata") && msg.contains("origin"),
+        "the message must name the offending metadata, got: {msg}"
+    );
+
+    let accepted = try_new_accepts(tagged, &columns, &rows);
+    assert_eq!(
+        accepted
+            .schema()
+            .metadata()
+            .get("origin")
+            .map(String::as_str),
+        Some("elsewhere"),
+        "Arrow accepted a batch labelled with metadata the columns never produced"
+    );
+}
+
+/// **Data-type axis.** This is the one axis Arrow DOES check, so there is no
+/// "try_new would accept it" half to assert — claiming one would be false. What
+/// is asserted instead is the two-sided truth: the rejection happens HERE, with
+/// the position and both Arrow types named, and Arrow's own refusal of the same
+/// pair is an opaque `ArrowError` that does not say which column set it was built
+/// from.
+#[test]
+fn a_differing_datatype_is_rejected_here_with_a_named_axis_before_arrow_sees_it() {
+    let (columns, rows) = two_text_columns();
+    let retyped = schema_with(&columns, |i, f| {
+        if i == 1 {
+            Field::new(f.name(), arrow::datatypes::DataType::Int64, f.is_nullable())
+        } else {
+            f
+        }
+    });
+
+    let msg = expect_schema_mismatch(rows_to_record_batch_with_schema(
+        Arc::clone(&retyped),
+        &columns,
+        &rows,
+    ));
+    assert!(
+        msg.contains("field 1 'beta'") && msg.contains("Int64") && msg.contains("Utf8"),
+        "the message must name the position and both Arrow types, got: {msg}"
+    );
+
+    // The contrast, not a non-vacuity claim: Arrow rejects it too, less usefully.
+    let arrays = convert_to_arrays(&columns, &rows).expect("arrays");
+    let arrow_err = RecordBatch::try_new(retyped, arrays)
+        .expect_err("Arrow compares field data types, so it refuses this as well");
+    assert!(
+        !arrow_err.to_string().contains("column 1 is"),
+        "Arrow's message is the opaque one this check front-runs, got: {arrow_err}"
+    );
+}
+
+/// **No false rejection**, the axis-by-axis complement: the matching schema of a
+/// METADATA-CARRYING column set — the shape the full-identity comparison could
+/// most plausibly break — is still accepted, and its batch keeps the extension
+/// metadata.
+///
+/// The production path this stands in for is `cqlite-flight`'s `EgressBatchPlan`,
+/// which derives `plan.schema` and the arrays from the same `&self.columns`; its
+/// own end-to-end coverage lives in that crate.
+#[test]
+fn a_matching_schema_with_uuid_extension_metadata_is_accepted() {
+    let (columns, rows) = uuid_and_text_columns();
+    let schema = Arc::new(build_arrow_schema(&columns).expect("schema"));
+    let batch = rows_to_record_batch_with_schema(Arc::clone(&schema), &columns, &rows)
+        .expect("the schema build_arrow_schema produced must be accepted");
+    assert_eq!(
+        batch.schema(),
+        schema,
+        "the batch keeps the supplied schema"
+    );
+    assert_eq!(
+        batch
+            .schema()
+            .field(0)
+            .metadata()
+            .get("ARROW:extension:name")
+            .map(String::as_str),
+        Some("arrow.uuid")
+    );
+    // Reusing ONE schema across successive batches (what the egress path does) is
+    // accepted every time — the guard is stateless.
+    for _ in 0..3 {
+        rows_to_record_batch_with_schema(Arc::clone(&schema), &columns, &rows)
+            .expect("the same schema must be accepted for every batch of a scan");
+    }
+}

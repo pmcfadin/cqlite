@@ -52,6 +52,7 @@ use crate::types::DataType;
 use arrow::array::ArrayRef;
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -92,8 +93,9 @@ pub enum ArrowConvertError {
     ///
     /// Raised by [`rows_to_record_batch_with_schema`], which is the only entry
     /// point that accepts a schema it did not build. `RecordBatch::try_new`
-    /// checks field TYPES and array lengths only, so a schema whose fields are
-    /// REORDERED (or renamed) among same-typed columns is accepted by Arrow and
+    /// checks field DATA TYPES and array lengths (plus a non-nullable field
+    /// holding actual nulls), so a schema whose fields are REORDERED, RENAMED,
+    /// re-flagged NULLABLE, or stripped of their METADATA is accepted by Arrow and
     /// silently mislabels every affected column — this variant is what makes
     /// that a rejection instead.
     ///
@@ -150,35 +152,66 @@ pub fn rows_to_record_batch(
 /// then dropped it again. Reusing the `Arc` makes the per-batch cost a refcount
 /// bump (issue #3096, lever 6).
 ///
-/// # What is validated, exactly (issue #3096 review)
+/// # What is validated, exactly (issue #3096, second review)
 ///
 /// This function accepts a schema it did not build, so the mismatch question is
-/// real. Two independent checks cover it, and the split matters:
+/// real — and what is enforced is that `schema` **IS** [`build_arrow_schema`]'s
+/// output for `columns`, not merely that it is compatible with the arrays:
 ///
-/// * **Field arity, NAMES and ORDER** — checked HERE, by
-///   [`check_schema_matches_columns`], against `columns[i].name`. `Field`'s name
-///   is always `col.name` ([`build_arrow_schema`] → `column_to_field`), so this
-///   is an exact equality check, not a heuristic.
-/// * **Field TYPES and array lengths** — checked by `RecordBatch::try_new`.
+/// * **Full `Field` identity, position by position** — checked HERE, by
+///   [`check_schema_matches_columns`], against `column_to_field(col)`: the exact
+///   function [`build_arrow_schema`] itself uses, so there is ONE source of truth
+///   and no re-derived mapping that can drift. Arrow's `Field: PartialEq`
+///   compares **name, data type, nullability and metadata** (deliberately
+///   excluding the IPC-only `dict_id`/`dict_is_ordered`, which arrow-schema
+///   documents as irrelevant to schema equality), so every one of those four axes
+///   is covered — including the `ARROW:extension:name` = `arrow.uuid` metadata a
+///   uuid/timeuuid column carries. Field ORDER and ARITY follow from comparing
+///   position by position.
+/// * **Schema-level metadata** — must be empty, because `build_arrow_schema`
+///   builds with `Schema::new`, which sets none.
+/// * **Array lengths** — left to `RecordBatch::try_new`, which owns them.
 ///
-/// The name/order half is checked here **because `RecordBatch::try_new` does not
-/// check it**: it compares field data types and lengths only, so a schema whose
-/// fields are REORDERED among columns of the same Arrow type is accepted and
-/// every one of those columns is silently mislabeled on the wire. The doc comment
-/// this function shipped with claimed `try_new` covered that; it does not, and
-/// this check is what makes the claim true.
+/// All of the above is checked here because **`RecordBatch::try_new` does not
+/// check it**: it compares field DATA TYPES and array lengths, and rejects a
+/// non-nullable field that actually holds nulls. It never compares field NAMES,
+/// field METADATA, or schema metadata, and a nullability difference the data does
+/// not contradict passes it. So a schema whose fields are REORDERED or RENAMED
+/// among columns of the same Arrow type, or which drops the uuid extension
+/// metadata, or which flips `nullable`, is accepted by Arrow and silently
+/// mislabels the batch. The first version of this guard checked arity and names
+/// only — leaving nullability and metadata unchecked while documenting the
+/// contract as enforced; the full-identity comparison is what makes the
+/// documented guarantee TRUE.
 ///
-/// Cost is one `usize` comparison plus one `str` comparison per COLUMN per batch
-/// (12 short comparisons for `ws0.events`), against per-batch work proportional
-/// to rows x columns — so it does not undo lever 6's `Arc` reuse.
+/// A near-miss worth naming: `cqlite-flight`'s `MergeProducer::arrow_schema()`
+/// (the WIRE schema for `GetFlightInfo`/`GetSchema`) augments every field with
+/// `cqlite:pushdown` metadata, so it is NOT this function's schema and is
+/// correctly rejected here. The egress path passes
+/// `build_arrow_schema(&self.columns)` unmodified and is unaffected.
+///
+/// # Cost
+///
+/// One `column_to_field` construction and one `Field` comparison per COLUMN per
+/// BATCH — for a 12-column table, 12 short `String` allocations plus one small
+/// metadata `HashMap` per uuid/timeuuid column, against per-batch work
+/// proportional to rows x columns. What the shared `Arc` still saves per batch is
+/// the `Schema`/`Fields` allocation and a fresh `SchemaRef` for every emitted
+/// batch; what it can no longer save is per-field construction, because a
+/// contract that is only documented is not enforced. The zero-per-batch
+/// alternative — a prevalidated-schema newtype owning both the schema and the
+/// columns it was built from, making a mismatch unconstructible — would change
+/// this public signature and its callers, so it is left as a possible follow-up
+/// rather than done here.
 ///
 /// # Errors
 ///
-/// Returns [`ArrowConvertError::SchemaMismatch`] if `schema`'s field count,
-/// names, or order do not match `columns`; [`ArrowConvertError::InvalidValue`] if
-/// a value cannot be represented in the target Arrow type; and
-/// [`ArrowConvertError::Arrow`] if array construction fails or the built arrays
-/// do not match `schema`'s field TYPES or lengths.
+/// Returns [`ArrowConvertError::SchemaMismatch`] if `schema` is not
+/// [`build_arrow_schema`]'s output for `columns` (field count, order, name, data
+/// type, nullability, field metadata, or schema-level metadata);
+/// [`ArrowConvertError::InvalidValue`] if a value cannot be represented in the
+/// target Arrow type; and [`ArrowConvertError::Arrow`] if array construction
+/// fails or the built arrays do not match `schema`'s field types or lengths.
 pub fn rows_to_record_batch_with_schema(
     schema: Arc<Schema>,
     columns: &[ColumnInfo],
@@ -190,18 +223,31 @@ pub fn rows_to_record_batch_with_schema(
     Ok(batch)
 }
 
-/// Reject a caller-supplied `schema` whose fields are not `columns`' fields, in
-/// `columns`' order (issue #3096 review).
+/// Reject a caller-supplied `schema` that is not [`build_arrow_schema`]'s output
+/// for `columns` (issue #3096, second review).
 ///
-/// Only the arity/name/order half is checked: field TYPES and array lengths are
-/// `RecordBatch::try_new`'s job, and duplicating that here would be dead weight.
-/// Name equality is exact because [`build_arrow_schema`]'s `column_to_field`
-/// names every field `col.name` verbatim — nothing is inferred from the name's
-/// shape (no-heuristics, #28).
+/// FULL `Field` identity — name, data type, nullability, metadata — position by
+/// position, plus empty schema-level metadata. See
+/// [`rows_to_record_batch_with_schema`] for which of those axes Arrow itself
+/// checks (data types, lengths) and which it silently accepts (everything else),
+/// and for the cost.
+///
+/// The expected field is CONSTRUCTED by `column_to_field`, the same function
+/// [`build_arrow_schema`] uses — nothing is inferred from a name's or a type's
+/// shape, and no part of the mapping is restated here where it could drift
+/// (no-heuristics, #28).
 fn check_schema_matches_columns(
     schema: &Schema,
     columns: &[ColumnInfo],
 ) -> Result<(), ArrowConvertError> {
+    if !schema.metadata().is_empty() {
+        return Err(ArrowConvertError::SchemaMismatch(format!(
+            "schema carries top-level metadata {:?} but build_arrow_schema sets none \
+             (it builds with Schema::new), so this is not the schema of the supplied \
+             columns; RecordBatch::try_new never compares schema metadata",
+            sorted_pairs(schema.metadata())
+        )));
+    }
     let fields = schema.fields();
     if fields.len() != columns.len() {
         return Err(ArrowConvertError::SchemaMismatch(format!(
@@ -211,17 +257,74 @@ fn check_schema_matches_columns(
         )));
     }
     for (i, (field, col)) in fields.iter().zip(columns.iter()).enumerate() {
-        if field.name() != &col.name {
-            return Err(ArrowConvertError::SchemaMismatch(format!(
-                "field {i} is '{}' but column {i} is '{}' — a reordered or renamed \
-                 schema is accepted by RecordBatch::try_new whenever the Arrow types \
-                 line up, and would mislabel the batch",
-                field.name(),
-                col.name
+        let expected = column_to_field(col);
+        if field.as_ref() != &expected {
+            return Err(ArrowConvertError::SchemaMismatch(field_mismatch_reason(
+                i, field, &expected,
             )));
         }
     }
     Ok(())
+}
+
+/// The FIRST axis on which `field` differs from the `expected` field of column
+/// `i`, as an operator-facing reason.
+///
+/// One named axis rather than two `Debug` dumps of a whole `Field`, and each arm
+/// says what Arrow would have done with that difference — which is the question a
+/// reader has when a batch is refused. The axes are exactly the four Arrow's
+/// `Field: PartialEq` compares, so the last arm is reached only for a metadata
+/// difference (all four matching means `==` held and this function was not
+/// called).
+fn field_mismatch_reason(i: usize, field: &Field, expected: &Field) -> String {
+    if field.name() != expected.name() {
+        return format!(
+            "field {i} is '{}' but column {i} is '{}' — a reordered or renamed \
+             schema is accepted by RecordBatch::try_new whenever the Arrow types \
+             line up, and would mislabel the batch",
+            field.name(),
+            expected.name()
+        );
+    }
+    if field.data_type() != expected.data_type() {
+        return format!(
+            "field {i} '{}' has Arrow type {:?} but column {i} maps to {:?}",
+            field.name(),
+            field.data_type(),
+            expected.data_type()
+        );
+    }
+    if field.is_nullable() != expected.is_nullable() {
+        return format!(
+            "field {i} '{}' is nullable={} but column {i} maps to nullable={} — \
+             RecordBatch::try_new only rejects a non-nullable field that actually \
+             holds nulls, so this difference is otherwise accepted silently",
+            field.name(),
+            field.is_nullable(),
+            expected.is_nullable()
+        );
+    }
+    format!(
+        "field {i} '{}' carries metadata {:?} but column {i} maps to {:?} — \
+         RecordBatch::try_new never compares field metadata, so dropping or altering \
+         the Arrow UUID extension key is otherwise accepted silently",
+        field.name(),
+        sorted_pairs(field.metadata()),
+        sorted_pairs(expected.metadata())
+    )
+}
+
+/// Metadata as key-sorted pairs, so a rejection message is deterministic.
+///
+/// `Field::metadata` is a `HashMap`, whose `Debug` order is not stable across
+/// runs; a message a test can assert on (and an operator can diff) must be.
+fn sorted_pairs(metadata: &HashMap<String, String>) -> Vec<(&str, &str)> {
+    let mut pairs: Vec<(&str, &str)> = metadata
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    pairs.sort_unstable();
+    pairs
 }
 
 // =========================================================================
