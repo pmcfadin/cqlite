@@ -699,7 +699,7 @@ fn encode_do_get(
         // producer had already cut to its own cap. The derivation, the two
         // currencies involved, and why this is not simply raised until the split
         // disappears live on the constant.
-        .with_max_flight_data_size(crate::batch_bytes::FLIGHT_DATA_SIZE_TARGET_BYTES)
+        .with_max_flight_data_size(crate::flight_data_size::FLIGHT_DATA_SIZE_TARGET_BYTES)
         .build(batch_stream)
         .map(move |res| res.map_err(|e| flight_error_to_status(e, &probe)));
     Box::pin(encoded)

@@ -1,6 +1,6 @@
 //! The arrow-flight encoder's wire-side re-slicing target (issue #3096, lever 4).
 //!
-//! [`crate::batch_bytes::FLIGHT_DATA_SIZE_TARGET_BYTES`] is only worth stating if
+//! [`crate::flight_data_size::FLIGHT_DATA_SIZE_TARGET_BYTES`] is only worth stating if
 //! it actually reaches `FlightDataEncoderBuilder`. These tests drive the REAL
 //! [`super::encode_do_get`] — the exact function the `do_get` chain calls
 //! (`service.rs do_get` → `spawn_streaming` → `encode_do_get`) — and count the
@@ -38,7 +38,7 @@
 //! a message count or a byte size.
 
 use super::*;
-use crate::batch_bytes::{
+use crate::flight_data_size::{
     FLIGHT_DATA_RESERVED_CEILING_BYTES, FLIGHT_DATA_SIZE_TARGET_BYTES,
     FLIGHT_FRAMING_OVERHEAD_BYTES, GRPC_DEFAULT_MAX_MESSAGE_BYTES,
     SUPERSEDED_FLIGHT_DATA_SIZE_TARGET_BYTES,
@@ -136,7 +136,7 @@ async fn body_sizes(batch: RecordBatch, schema: Arc<ArrowSchema>) -> Vec<usize> 
 #[tokio::test]
 async fn a_batch_under_the_target_is_framed_as_one_message() {
     // 3 MiB of capacity: above arrow-flight's own 2 MiB default (which would cut
-    // it in two), below this tree's 4 MiB target (which must not cut it at all).
+    // it in two), below this tree's 3.875 MiB target (which must not cut it at all).
     let (batch, schema) = batch_of_capacity_mib(3);
     let bodies = body_sizes(batch, schema).await;
     assert_eq!(
@@ -268,7 +268,7 @@ async fn a_raised_batch_cap_still_frames_every_body_under_the_reserved_ceiling()
 ///    plausible-looking fiction.
 #[test]
 fn the_rejected_8mib_target_is_recorded_as_a_grpc_interop_break() {
-    use crate::batch_bytes::{
+    use crate::flight_data_size::{
         MEASURED_ARROW_PAYLOAD_BYTES_PER_ROW, MEASURED_DATA_BODY_BYTES_AT_REJECTED_TARGET,
         MEASURED_DATA_BODY_BYTES_AT_SUPERSEDED_TARGET, MEASURED_FLIGHT_DATA_MESSAGES,
         MEASURED_FRAMING_ROWS, REJECTED_FLIGHT_DATA_SIZE_TARGET_BYTES,

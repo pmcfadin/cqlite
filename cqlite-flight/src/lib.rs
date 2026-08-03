@@ -31,6 +31,12 @@ mod egress_flush;
 // campsite rule (epic #1116).
 mod egress_observation;
 pub mod filter;
+// The WIRE-side FlightData framing governor: the arrow-flight encoder's re-slicing
+// target and the gRPC message ceiling it must stay under. Split out of
+// `batch_bytes.rs` (which governs the PRODUCER-side payload cap) so the two
+// governors' different currencies are structural, not a paragraph — issue #3096
+// review, campsite rule / epic #1116.
+pub(crate) mod flight_data_size;
 // The `do_get` drain side: metrics attribution, cancellation, and the deferred
 // egress-credit slot (split out of `streaming.rs`, epic #1116).
 mod metered_stream;
