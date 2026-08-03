@@ -40,24 +40,30 @@
 //!     --keyspace perf_bti --table wide_multiclustering
 //! ```
 //!
-//! Build: `cargo build --release --package cqlite-core --example bti_perf_scan`.
+//! Build (the `ingestion` module that opens a corpus lives behind `cli-helpers`,
+//! exactly as for `heap_profile`):
+//!
+//! ```text
+//! cargo build --release --package cqlite-core --example bti_perf_scan \
+//!     --features cli-helpers
+//! ```
 
-#[cfg(not(feature = "state_machine"))]
+#[cfg(not(all(feature = "cli-helpers", feature = "state_machine")))]
 fn main() {
     eprintln!(
-        "bti_perf_scan requires the default `state_machine` feature \
-         (it drives Database::execute_streaming)"
+        "bti_perf_scan requires `cli-helpers` (corpus ingestion) + `state_machine`\n  \
+         cargo build --release -p cqlite-core --example bti_perf_scan --features cli-helpers"
     );
     std::process::exit(2);
 }
 
-#[cfg(feature = "state_machine")]
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 fn main() {
     std::process::exit(real_main());
 }
 
 /// Exit codes, so a caller can distinguish "corpus missing" from "too fast".
-#[cfg(feature = "state_machine")]
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 mod exit {
     pub const OK: i32 = 0;
     pub const USAGE: i32 = 2;
@@ -67,7 +73,7 @@ mod exit {
     pub const WINDOW_TOO_SHORT: i32 = 6;
 }
 
-#[cfg(feature = "state_machine")]
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 struct Args {
     corpus: std::path::PathBuf,
     keyspace: String,
@@ -80,7 +86,7 @@ struct Args {
     expect_rows: u64,
 }
 
-#[cfg(feature = "state_machine")]
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 fn usage() -> String {
     "usage: bti_perf_scan --corpus DIR [--keyspace KS] [--table T]\n\
      \x20                    [--warm-passes N] [--min-seconds S] [--expect-rows N]\n\
@@ -94,7 +100,7 @@ fn usage() -> String {
         .to_string()
 }
 
-#[cfg(feature = "state_machine")]
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 fn parse_args() -> std::result::Result<Args, String> {
     let mut corpus: Option<std::path::PathBuf> = None;
     let mut keyspace = "perf_bti".to_string();
@@ -144,7 +150,7 @@ fn parse_args() -> std::result::Result<Args, String> {
     })
 }
 
-#[cfg(feature = "state_machine")]
+#[cfg(all(feature = "cli-helpers", feature = "state_machine"))]
 fn real_main() -> i32 {
     use cqlite_core::ingestion::{ingest, IngestionConfig};
     use cqlite_core::query::result::StreamingConfig;
