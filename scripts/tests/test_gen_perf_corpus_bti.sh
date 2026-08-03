@@ -62,11 +62,11 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # SKIP was a bare echo that no summary ever mentioned.
 #
 # MIN_CASES is the full-suite pass count; SKIP_PY / SKIP_E2E are the case counts of
-# the two conditional blocks (13 python3-only cases, of which the 10 stub
-# end-to-end cases are the inner block). Growing the suite means growing these.
-MIN_CASES=83
-SKIP_PY_CASES=23
-SKIP_E2E_CASES=10
+# the two conditional blocks (python3-only cases, of which the stub end-to-end cases
+# are the inner block). Growing the suite means growing these.
+MIN_CASES=102
+SKIP_PY_CASES=30
+SKIP_E2E_CASES=12
 
 fails=0
 passes=0
@@ -740,6 +740,20 @@ PY
   }
   mkdir -p "$TMP/plancfg" "$TMP/bin"
   make_corpus "$TMP/plancfg" 1024 64
+  # make_corpus's CompressionInfo.db is 64 zero bytes, which the (self-verifying)
+  # CompressionInfo parser rejects. The positive control has to get PAST the plan
+  # check and reach the metadata step, so give this one dir a REAL header:
+  # UTF compressor, option count, chunk length, max compressed length, data length,
+  # chunk count, chunk offsets (read-compression-info.py's documented layout).
+  python3 - "$TMP/plancfg/da-1-bti-CompressionInfo.db" <<'PY'
+import struct, sys
+def utf(s: str) -> bytes:
+    b = s.encode()
+    return struct.pack(">H", len(b)) + b
+buf = utf("LZ4Compressor") + struct.pack(">i", 1) + utf("chunk_length_in_kb") + utf("16")
+buf += struct.pack(">iiqi", 16384, 2147483647, 1024, 1) + struct.pack(">q", 0)
+open(sys.argv[1], "wb").write(buf)
+PY
   printf '#!/bin/sh\nexit 1\n' >"$TMP/bin/not-docker"; chmod +x "$TMP/bin/not-docker"
   # shellcheck disable=SC2054  # the commas are inside flag VALUES (--widths/--buckets)
   plancfg_args=(--corpus-root "$TMP" --keyspace perf_bti --table wide_multiclustering
@@ -747,10 +761,12 @@ PY
                 --payload-bytes 32 --widths 200:1 --buckets alpha,bo --mode production
                 --sstable-dir "$TMP/plancfg" --docker "$TMP/bin/not-docker"
                 --out "$TMP/plancfg-manifest.json")
-  # <label> <expect-substring> then the plan lines on stdin
+  # plan_case <label> <expect-substring> <plan-file>. NOT a pipeline stage: the
+  # right-hand side of a pipeline runs in a SUBSHELL, so `pass`/`fail` would print
+  # their line while their counter increment was discarded -- the case would then be
+  # invisible to the declared case-count floor.
   plan_case() {
-    local label="$1" expect="$2" plan="$TMP/plan-cfg.jsonl"
-    cat >"$plan"
+    local label="$1" expect="$2" plan="$3"
     rm -f "$TMP/plancfg-manifest.json"
     local o r
     o=$(python3 "$MANIFEST_PY" "${plancfg_args[@]}" --row-plan "$plan" 2>&1); r=$?
@@ -761,14 +777,15 @@ PY
       fail "$label: expected a row-plan/config failure naming '$expect' (rc=$r, out: $o)"
     fi
   }
-  { plan_rec 0 78:0 400; plan_rec 1 78:1 400; plan_rec 2 78:2 200; } \
-    | plan_case "a plan generated from ANOTHER seed" "seed_material"
-  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; plan_rec 3 77:3 200; } \
-    | plan_case "a NON-CONTIGUOUS chunk set" "chunk index set"
-  { plan_rec 0 77:0 500; plan_rec 1 77:1 400; plan_rec 2 77:2 200; } \
-    | plan_case "a plan whose chunk rows disagree with --chunk-rows" "puts 400 there"
-  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; } \
-    | plan_case "a plan SHORT of the configured chunk count" "chunk count"
+  { plan_rec 0 78:0 400; plan_rec 1 78:1 400; plan_rec 2 78:2 200; } >"$TMP/plan-seed.jsonl"
+  plan_case "a plan generated from ANOTHER seed" "seed_material" "$TMP/plan-seed.jsonl"
+  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; plan_rec 3 77:3 200; } >"$TMP/plan-gap.jsonl"
+  plan_case "a NON-CONTIGUOUS chunk set" "chunk index set" "$TMP/plan-gap.jsonl"
+  { plan_rec 0 77:0 500; plan_rec 1 77:1 400; plan_rec 2 77:2 200; } >"$TMP/plan-wide.jsonl"
+  plan_case "a plan whose chunk rows disagree with --chunk-rows" "puts 400 there" \
+    "$TMP/plan-wide.jsonl"
+  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; } >"$TMP/plan-short.jsonl"
+  plan_case "a plan SHORT of the configured chunk count" "chunk count" "$TMP/plan-short.jsonl"
   # Positive control: a matching plan passes the config check, so the run proceeds to
   # the (deliberately unavailable) sstablemetadata step instead of failing here.
   { plan_rec 0 77:0 400; plan_rec 1 77:1 400; plan_rec 2 77:2 200; } >"$TMP/plan-cfg-ok.jsonl"
@@ -802,6 +819,11 @@ SUDOEOF
   chmod +x "$SUDO_STUB"
 
   STUB_UUID="a1b2c3d40000000000000000000000ff"
+  # Belt and braces: every case below ALSO passes --manifest-out "" so a regression
+  # that re-defaults MANIFEST_OUT cannot reach the committed manifest through these
+  # runs. The ONE case that must exercise the DEFAULT resolution clears this array
+  # (see the smoke-default case).
+  E2E_MANIFEST_ARGS=(--manifest-out "")
   e2e_run() { # e2e_run <name> [extra generator args...]; env prefixes are honored
     local name="$1"; shift
     E2E_ROOT="$TMP/e2e-$name"
@@ -815,7 +837,7 @@ SUDOEOF
         --table wide_multiclustering --rows 1200 --chunk-rows 600 \
         --payload-bytes 32 --widths 200:60,800:30 \
         --buckets alpha,bo,charlie,delta --seed 3234 \
-        --manifest-out "" "$@" >"$E2E_LOG" 2>&1
+        ${E2E_MANIFEST_ARGS[@]+"${E2E_MANIFEST_ARGS[@]}"} "$@" >"$E2E_LOG" 2>&1
   }
 
   # The generator's own preflight demands >= 4 GiB free under --out (it sizes for a
@@ -940,7 +962,29 @@ PY
       fail "no-histogram case: expected an unobserved-partition-count refusal (rc=$rc, tail: $(tail -6 "$TMP/e2e-no-hist.log"))"
     fi
 
-    # No run above may touch the COMMITTED manifest (every one passes --manifest-out "").
+    # ---- roborev #3234 F2: a --smoke run with the DEFAULT manifest resolution -----
+    # This is the invocation the generator's own header advertises. It used to
+    # overwrite the COMMITTED manifest with perf_bti_smoke metadata, after which the
+    # default full-corpus scan rejects that manifest as describing another table
+    # (bti_perf_scan exit 8). NOTE the empty E2E_MANIFEST_ARGS: this case must run the
+    # REAL default resolution, so it is the one run that does NOT pass --manifest-out.
+    E2E_MANIFEST_ARGS=()
+    e2e_run smoke-default --smoke; rc=$?
+    E2E_MANIFEST_ARGS=(--manifest-out "")
+    smoke_manifest="$TMP/e2e-smoke-default/manifest-bti-3234.json"
+    if [ "$rc" -eq 0 ] && [ -f "$smoke_manifest" ] \
+       && grep -q '"mode": "smoke"' "$smoke_manifest"; then
+      pass "a --smoke run writes its manifest INSIDE the corpus, marked mode=smoke"
+    else
+      fail "smoke-default case: expected an in-corpus smoke manifest (rc=$rc, tail: $(tail -8 "$TMP/e2e-smoke-default.log"))"
+    fi
+    if [ "$(sha256sum "$COMMITTED_MANIFEST" | cut -d' ' -f1)" = "$committed_before" ]; then
+      pass "a DEFAULT --smoke run leaves the committed manifest byte-identical (sha256)"
+    else
+      fail "a --smoke run with the default manifest resolution OVERWROTE $COMMITTED_MANIFEST"
+    fi
+
+    # No run above may touch the COMMITTED manifest.
     if [ "$(sha256sum "$COMMITTED_MANIFEST" | cut -d' ' -f1)" = "$committed_before" ]; then
       pass "no stub run modified the committed perf-corpus-bti-manifest.json"
     else

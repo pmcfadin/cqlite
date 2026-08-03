@@ -57,7 +57,10 @@
 #   $OUT/sstables/$KS/$TBL-<uuid>/da-*-bti-*.db         (gitignored: *.db)
 #   $OUT/sstables/$KS/$TBL-<uuid>/da-<gen>-bti-Data.db.jsonl   (bounded goldens)
 #   $OUT/sstables/$KS/$TBL-<uuid>/schema.cql
-#   $OUT/manifest-bti-3234.json  (copied to test-data/perf-corpus-bti-manifest.json)
+#   $OUT/manifest-bti-3234.json  (copied to test-data/perf-corpus-bti-manifest.json
+#                                 ONLY with the explicit --publish-manifest, which is
+#                                 production-mode-only: a --smoke/--small-golden
+#                                 manifest describes another table)
 #
 # Usage:
 #   bash test-data/scripts/gen-perf-corpus-bti.sh --smoke        # ~2 min, validates the pipeline
@@ -221,12 +224,12 @@ while [ $# -gt 0 ]; do
     --chunk-rows) need_arg "$@"; CHUNK_ROWS="$2"; CHUNK_ROWS_EXPLICIT=1; shift 2 ;;
     --seed) need_arg "$@"; SEED="$2"; shift 2 ;;
     --payload-bytes) need_arg "$@"; PAYLOAD_BYTES="$2"; shift 2 ;;
-    --widths) need_arg "$@"; WIDTHS="$2"; shift 2 ;;
+    --widths) need_arg "$@"; WIDTHS="$2"; WIDTHS_EXPLICIT=1; shift 2 ;;
     --buckets) need_arg "$@"; BUCKETS="$2"; shift 2 ;;
     --keyspace) need_arg "$@"; KS="$2"; KS_EXPLICIT=1; shift 2 ;;
-    --table) need_arg "$@"; TBL="$2"; shift 2 ;;
+    --table) need_arg "$@"; TBL="$2"; TBL_EXPLICIT=1; shift 2 ;;
     --dump-generations) need_arg "$@"; DUMP_GENERATIONS="$2"; shift 2 ;;
-    --min-data-db-bytes) need_arg "$@"; MIN_DATA_DB_BYTES="$2"; shift 2 ;;
+    --min-data-db-bytes) need_arg "$@"; MIN_DATA_DB_BYTES="$2"; MIN_DATA_DB_EXPLICIT=1; shift 2 ;;
     --image) need_arg "$@"; IMAGE="$2"; shift 2 ;;
     --container) need_arg "$@"; CONTAINER="$2"; shift 2 ;;
     --manifest-out) need_arg "$@"; MANIFEST_OUT="$2"; MANIFEST_OUT_EXPLICIT=1; shift 2 ;;
@@ -401,12 +404,15 @@ PYEOF
   # small-golden manifest describes ANOTHER table, and the AC3 scan harness then
   # rejects the committed manifest as foreign (exit 8) — a live footgun, not a
   # cosmetic one (roborev #3234 F2).
-  if [ -n "$MANIFEST_OUT" ] && [ "$RUN_MODE" != production ]; then
-    local mo_canon committed_canon
-    mo_canon="$(canon_path "$MANIFEST_OUT")" || die "cannot canonicalize --manifest-out '$MANIFEST_OUT'"
+  if [ -n "$MANIFEST_OUT" ]; then
+    local committed_canon
+    # Canonical from here on, so the reported target and the eventual `cp`
+    # destination are the same unambiguous path.
+    MANIFEST_OUT="$(canon_path "$MANIFEST_OUT")" \
+      || die "cannot canonicalize --manifest-out '$MANIFEST_OUT'"
     committed_canon="$(canon_path "$COMMITTED_MANIFEST")" \
       || die "cannot canonicalize the committed manifest path '$COMMITTED_MANIFEST'"
-    [ "$mo_canon" != "$committed_canon" ] \
+    [ "$MANIFEST_OUT" != "$committed_canon" ] || [ "$RUN_MODE" = production ] \
       || die "refusing to write the COMMITTED production manifest from a $RUN_MODE run:
        $committed_canon describes the production corpus, and $RUN_MODE metadata would make
        the default full-corpus scan reject it as describing another table (exit 8).
