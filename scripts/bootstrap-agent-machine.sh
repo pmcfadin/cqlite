@@ -548,13 +548,19 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
   # applied in basename order, last assignment wins) and is reported as such; one that
   # sorts before is reported as harmless, which also documents WHY the 99- prefix is
   # load-bearing and must never be "tidied" to a lower number.
+  #
+  # THE SCAN COVERS THE WHOLE `sysctl --system` SEARCH PATH (issue #3249 review R5-4) —
+  # /etc/sysctl.d, /run/sysctl.d, /usr/local/lib/sysctl.d, /usr/lib/sysctl.d,
+  # /lib/sysctl.d and /etc/sysctl.conf — with same-basename masking honoured, because a
+  # later-sorting file in /run or /usr/lib overriding us while this reported "no
+  # competitor" is the same silent-revert mystery wearing a different directory.
   perf_name_competitors() {
     local scan verdict path found=0
     # A FAILED scan is reported as a failed scan, never as "no competitors" — the whole
     # point of this diagnostic is to replace an unknown with a named file, so silently
     # printing the reassuring line on an unreadable directory would recreate the mystery.
     if ! scan=$(perf_capability_competing_files); then
-      info "could not scan the sysctl.d directory for competing perf_event_paranoid/kptr_restrict settings — inspect it by hand"
+      info "could not scan the 'sysctl --system' search path for competing perf_event_paranoid/kptr_restrict settings — inspect it by hand"
       return 0
     fi
     while IFS=' ' read -r verdict path; do
@@ -562,12 +568,13 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
       found=1
       case "$verdict" in
         override) warn "OVERRIDE: $path also sets perf_event_paranoid/kptr_restrict and its name sorts AFTER $PERF_CAPABILITY_DROPIN_BASENAME, so it is applied LAST and WINS — fix or rename that file" ;;
+        last)     warn "OVERRIDE: $path also sets perf_event_paranoid/kptr_restrict and is applied AFTER every sysctl.d drop-in (both by 'sysctl --system' and systemd-sysctl), so it WINS regardless of our filename — fix that file" ;;
         *)        info "competing file: $path also sets perf_event_paranoid/kptr_restrict but sorts BEFORE $PERF_CAPABILITY_DROPIN_BASENAME, so ours wins (this is exactly why the '99-' prefix is load-bearing — never rename the drop-in)" ;;
       esac
     done <<EOF
 $scan
 EOF
-    [ "$found" = 1 ] || info "no other file in the sysctl.d directory sets perf_event_paranoid/kptr_restrict"
+    [ "$found" = 1 ] || info "no other file on the 'sysctl --system' search path (/etc/sysctl.d, /run/sysctl.d, /usr/local/lib/sysctl.d, /usr/lib/sysctl.d, /lib/sysctl.d, /etc/sysctl.conf) sets perf_event_paranoid/kptr_restrict"
   }
 
   # perf_inspect_lines: where a value that did not take actually comes from.
@@ -575,7 +582,7 @@ EOF
   # `sysctl --system` and systemd-sysctl, so a stale entry there BEATS our 99- file —
   # listing only /etc/sysctl.d would hide the most likely culprit.
   perf_inspect_lines() {
-    info "inspect:  sysctl -a --pattern 'perf_event_paranoid|kptr_restrict'; grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.conf"
+    info "inspect:  sysctl -a --pattern 'perf_event_paranoid|kptr_restrict'; grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.conf /run/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf /lib/sysctl.d/*.conf"
     info "precedence: /etc/sysctl.conf is applied AFTER the sysctl.d drop-ins (both by 'sysctl --system' and systemd-sysctl), so a stale entry THERE overrides our 99- file"
   }
 

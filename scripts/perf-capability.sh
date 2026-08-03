@@ -61,6 +61,10 @@
 #   CQLITE_PERF_TEST_MODE=1     the marker; without it the two seams below are INERT
 #   CQLITE_PERF_PROC_DIR        stand-in for /proc/sys/kernel   (test mode only)
 #   CQLITE_PERF_SYSCTL_DIR      stand-in for /etc/sysctl.d      (test mode only)
+#   CQLITE_PERF_SYSCTL_EXTRA_DIRS  colon-separated stand-ins for the LOWER-precedence
+#                               search-path entries (/run/sysctl.d, /usr/lib/sysctl.d, …
+#                               and a `sysctl.conf` file), in descending precedence;
+#                               optional, test mode only
 #   CQLITE_PERF_TEST_PRIV_DIR   absolute dir holding the suite's sudo/sysctl shims
 #
 # TEST MODE HAS NO FALLBACK (issue #3249 review R4-3). Under the marker BOTH path
@@ -92,21 +96,28 @@
 #                               safe for the caller's word-split.
 #   state = dropped:sudo        numeric uid only (sudo's `#<uid>` form) — no name trusted.
 #   env_guard rc 0              production: NO test seam set (paths are hardcoded literals).
-#                               test mode: BOTH seams present, absolute, outside the
-#                               production dirs and outside /etc /proc /sys, and not
-#                               symlinks; plus every reachable sudo/sysctl resolving inside
-#                               an absolute declared shim dir.
+#                               test mode: BOTH seams present and their CANONICAL
+#                               destinations (`.`, `..` and symlinked ancestors resolved)
+#                               absolute and outside the production dirs and /etc /proc
+#                               /sys; plus every reachable sudo/sysctl resolving inside an
+#                               absolute declared shim dir.
+#   dropin_path rc 0            in test mode, the seam RESOLVES inside its sandbox (R5-1) —
+#                               re-checked independently of the guard, because this is the
+#                               last thing between the canonical bytes and a root `tee`.
 #   dropin_current rc 0         a BYTE-exact compare (trailing newlines included) against
-#                               the generated canonical content.
+#                               the generated canonical content, from a read that reached
+#                               EOF — a NUL-delimited read is NOT current, whatever the
+#                               bytes before the NUL are (R5-3).
 # KNOWN RESIDUALS, deliberately not papered over:
 #   * "dropped:<mech>" asserts the mechanism was INVOKED; it cannot prove the kernel
 #     changed uid. Harmless by construction: the caller's verdict is `token = ok` AND the
 #     functional pass, and a box whose /proc says ok IS profileable by an unprivileged
 #     process, so a mislabelled drop cannot manufacture a capability that is absent.
-#   * a test seam with a SYMLINKED ANCESTOR (`/tmp/a -> /etc`, seam `/tmp/a/sysctl.d`)
-#     passes the textual + `[ -L ]` checks; detecting it needs `realpath`/`stat`, i.e. a
-#     fork on the gate's emit path. Bounded: it requires deliberately pointing a TEST-ONLY
-#     variable through a symlink into production.
+#   * the READ-side seam check is textual (fork-free, gate contract): it rejects `.`/`..`
+#     components and a symlinked seam, but a symlinked ANCESTOR could still steer a
+#     test-mode /proc STAND-IN read. Bounded and harmless: nothing on that path writes,
+#     and a wrong read yields `absent`/`unknown`, never a fabricated capability. Every
+#     WRITE-side check canonicalizes instead (R5-1).
 #
 # ---- production locations: HARDCODED. Never env-derived outside test mode. ----
 PERF_CAPABILITY_PROC_DIR_DEFAULT='/proc/sys/kernel'
@@ -121,42 +132,71 @@ perf_capability_seam_set() {
   [ -n "${CQLITE_PERF_PROC_DIR:-}" ] || [ -n "${CQLITE_PERF_SYSCTL_DIR:-}" ]
 }
 
-# perf_capability_test_dir_valid <value> <production-default>: rc 0 iff <value> is a
-# usable NON-PRODUCTION stand-in — non-empty, ABSOLUTE, and neither the production
-# directory itself nor a path under it, nor anywhere under the host's own
-# configuration surfaces (/proc, /sys, /etc). An unset or production-shaped seam is
-# NOT "use the real thing": in test mode it is a refusal (R4-3). Builtins only — this
-# is reached from the gate's fork-free token path.
+# TWO VALIDATORS, SPLIT BY WHAT THE CALLER DOES (issue #3249 review R5-1). Textual
+# validation of a path is the wrong tool for a guard that steers a privileged write:
+# each round closed one more SPELLING of "somewhere else" (raw production path, then a
+# symlinked seam, then `..`). So the two callers get different validators:
+#   READ side  (the gate's emit-time token chain) -> perf_capability_test_dir_valid:
+#              pure builtins, ZERO forks, because that path is contractually free. It
+#              never writes anything, so a mis-accepted seam there can only mis-READ a
+#              stand-in /proc, which the token then reports as `absent`/`unknown`.
+#   WRITE side (env guard + the drop-in path a root `tee` is pointed at) ->
+#              perf_capability_test_dir_resolved_valid: CANONICALIZES the whole path
+#              (resolving `.`, `..` AND symlinked ancestors) and validates the RESOLVED
+#              destination. A fork costs nothing there, and the destination — not its
+#              spelling — is what gets written.
 #
-# The final check is that the seam is not ITSELF a symlink: `ln -s /etc/sysctl.d /tmp/x`
-# passes every textual test above and would still land a root `tee` in the production
-# directory. `[ -L ]` is a builtin, so it costs no fork. A symlinked ANCESTOR is not
-# detectable without `realpath`/`stat` — i.e. a fork on the gate's emit path — so that
-# residual is recorded in the fail-open audit rather than papered over.
+# perf_capability_test_dir_valid <value> <production-default>: rc 0 iff <value> is a
+# usable NON-PRODUCTION stand-in — non-empty, ABSOLUTE, free of `.`/`..` components (a
+# path whose spelling is not its destination cannot be validated textually at all), and
+# neither the production directory itself nor a path under it, nor anywhere under the
+# host's own configuration surfaces (/proc, /sys, /etc), nor itself a symlink
+# (`ln -s /etc/sysctl.d /tmp/x` passes every other textual test). An unset or
+# production-shaped seam is NOT "use the real thing": in test mode it is a refusal
+# (R4-3). Builtins only — this is reached from the gate's fork-free token path.
 perf_capability_test_dir_valid() {
   [ -n "${1:-}" ] || return 1
   case "$1" in /*) ;; *) return 1 ;; esac
+  case "/$1/" in */../*|*/./*) return 1 ;; esac
   case "$1" in
     "${2:-/dev/null/never}"|"${2:-/dev/null/never}"/*) return 1 ;;
     /proc|/proc/*|/sys|/sys/*|/etc|/etc/*) return 1 ;;
   esac
-  # not a symlink either (see the note above the function)
   [ ! -L "$1" ]
 }
 
+# perf_capability_test_dir_resolved_valid <value> <production-default>: the WRITE-side
+# validator. It canonicalizes <value> and requires the RESOLVED path to satisfy the same
+# non-production predicate, so `/tmp/../etc/sysctl.d` and a symlinked ANCESTOR
+# (`ln -s /etc /tmp/a`, seam `/tmp/a/sysctl.d`) are refused by their DESTINATION rather
+# than by a new textual special case. `cd -P` + `pwd -P` is the canonicalizer: one
+# subshell, no external binary, and correct on bash 3.2 (no `realpath`, no `readlink -f`,
+# both of which are absent or non-GNU on some supported hosts). A path that cannot be
+# entered at all resolves to nothing and is refused — fail-closed, and correct for a
+# write target, which must exist to be written into.
+perf_capability_test_dir_resolved_valid() {
+  local __ptv_real=''
+  perf_capability_test_dir_valid "$1" "$2" || return 1
+  __ptv_real=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  [ -n "$__ptv_real" ] || return 1
+  perf_capability_test_dir_valid "$__ptv_real" "$2"
+}
+
 # perf_capability_test_seams_ok: rc 0 iff test mode has BOTH mandatory seams pointing
-# at explicit non-production directories. Refuses loudly and names the offending seam,
-# because the failure it prevents (a root test run writing the real /etc/sysctl.d) is
-# silent otherwise.
+# at explicit non-production directories, JUDGED BY THEIR CANONICAL DESTINATION (R5-1).
+# This is the gate on every privileged action below, so it takes the strict validator:
+# refusing here is what stops a root `--yes` test run from resolving a seam back into
+# the production directory and overwriting the host's own drop-in. Refuses loudly and
+# names the offending seam, because the failure it prevents is silent otherwise.
 perf_capability_test_seams_ok() {
   local ok=0
-  if ! perf_capability_test_dir_valid "${CQLITE_PERF_PROC_DIR:-}" "$PERF_CAPABILITY_PROC_DIR_DEFAULT"; then
-    printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 requires an explicit NON-PRODUCTION CQLITE_PERF_PROC_DIR (absolute, outside %s and outside /proc /sys /etc); got %s. Test mode NEVER falls back to the real directory.\n' \
+  if ! perf_capability_test_dir_resolved_valid "${CQLITE_PERF_PROC_DIR:-}" "$PERF_CAPABILITY_PROC_DIR_DEFAULT"; then
+    printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 requires an explicit NON-PRODUCTION CQLITE_PERF_PROC_DIR (absolute, and RESOLVING — . / .. / symlinked ancestors and all — outside %s and outside /proc /sys /etc); got %s. Test mode NEVER falls back to the real directory.\n' \
       "$PERF_CAPABILITY_PROC_DIR_DEFAULT" "'${CQLITE_PERF_PROC_DIR:-<unset>}'" >&2
     ok=1
   fi
-  if ! perf_capability_test_dir_valid "${CQLITE_PERF_SYSCTL_DIR:-}" "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"; then
-    printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 requires an explicit NON-PRODUCTION CQLITE_PERF_SYSCTL_DIR (absolute, outside %s and outside /proc /sys /etc); got %s. Test mode NEVER falls back to the real directory.\n' \
+  if ! perf_capability_test_dir_resolved_valid "${CQLITE_PERF_SYSCTL_DIR:-}" "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"; then
+    printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 requires an explicit NON-PRODUCTION CQLITE_PERF_SYSCTL_DIR (absolute, and RESOLVING — . / .. / symlinked ancestors and all — outside %s and outside /proc /sys /etc); got %s. Test mode NEVER falls back to the real directory.\n' \
       "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT" "'${CQLITE_PERF_SYSCTL_DIR:-<unset>}'" >&2
     ok=1
   fi
@@ -250,9 +290,20 @@ perf_capability_sysctl_dir() {
   fi
   printf '%s' "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"
 }
+# perf_capability_dropin_path: the path a root `tee` is pointed at, so this is the WRITE
+# side and it takes the STRICT validator (R5-1) — the seam's CANONICAL destination is
+# checked, not its spelling. Independent of the env guard on purpose: the guard is the
+# gate, this is the last line before the bytes land, and a write target may never be
+# named from a path that resolves into production.
 perf_capability_dropin_path() {
   local __pdi_d
   __pdi_d=$(perf_capability_sysctl_dir) || return 1
+  if perf_capability_test_mode \
+     && ! perf_capability_test_dir_resolved_valid "$__pdi_d" "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"; then
+    printf 'perf-capability: REFUSING to name a write target: CQLITE_PERF_SYSCTL_DIR=%s RESOLVES (through . / .. / a symlinked ancestor) outside its sandbox or is unenterable — the canonical DESTINATION is what a root tee writes, not the spelling.\n' \
+      "'$__pdi_d'" >&2
+    return 1
+  fi
   printf '%s/%s' "$__pdi_d" "$PERF_CAPABILITY_DROPIN_BASENAME"
 }
 
@@ -305,22 +356,87 @@ EOF
 # file was never rewritten. The file side is now read with `read -r -d ''`, which
 # consumes the whole file verbatim (builtin, so no `cat`/`diff` dependency), and the
 # canonical side carries an in-substitution sentinel so its own final newline survives
-# the stripping. A NUL byte in the file truncates the read and therefore compares
-# unequal — fail-closed, and correct: a file with a NUL is not our text drop-in.
+# the stripping.
+#
+# A NUL BYTE IS THE THIRD SPELLING OF "NOT EXACT" (issue #3249 review R5-3). `read -d ''`
+# stops at a NUL and returns SUCCESS, leaving `got` holding only the bytes BEFORE it — so
+# canonical content followed by a NUL and ARBITRARY trailing bytes compared EQUAL and was
+# judged current. Read's rc is therefore load-bearing: rc 0 means a NUL delimiter was
+# consumed, i.e. the file is not our text drop-in AND the rest of it was never even seen,
+# so it is NOT current; only an rc != 0 (EOF reached, whole file in `got`) may be compared.
 perf_capability_dropin_current() {
   local path want got=''
   path=$(perf_capability_dropin_path) || return 1
   [ -f "$path" ] && [ -r "$path" ] || return 1
   want=$(perf_capability_dropin_content; printf 'X')
-  IFS= read -r -d '' got <"$path"
+  if IFS= read -r -d '' got <"$path"; then
+    return 1
+  fi
   [ "$want" = "${got}X" ]
 }
 
-# perf_capability_competing_files: every OTHER file in the sysctl.d directory that also
-# sets kernel.perf_event_paranoid or kernel.kptr_restrict, one per line as
-#   <override|earlier> <path>
-# `override` = its basename sorts AFTER ours, so `sysctl --system`/systemd-sysctl apply
-# it LAST and IT WINS; `earlier` = ours wins.
+# perf_capability_sysctl_search_path: the COMPLETE set of locations `sysctl --system`
+# (procps-ng) and systemd-sysctl load, one per line, in DESCENDING NAME-MASKING
+# PRECEDENCE — the order both tools scan (sysctl(8) SYSTEM FILE PRECEDENCE, sysctl.d(5)
+# CONFIGURATION DIRECTORIES AND PRECEDENCE):
+#   /etc/sysctl.d  /run/sysctl.d  /usr/local/lib/sysctl.d  /usr/lib/sysctl.d
+#   /lib/sysctl.d  and finally the FILE /etc/sysctl.conf
+# TWO INDEPENDENT RULES decide who wins, and the scan below implements both:
+#   MASKING  "once a file of a given filename is loaded, any file of the same name in
+#            subsequent directories is ignored" — so /etc/sysctl.d/50-x.conf REPLACES
+#            /usr/lib/sysctl.d/50-x.conf outright, and reporting the masked one would
+#            name a file that is not in effect.
+#   ORDERING the surviving files are applied in lexicographic BASENAME order regardless
+#            of which directory they came from; the LAST assignment wins.
+#   /etc/sysctl.conf is applied AFTER every drop-in, so it wins on grounds that have
+#   nothing to do with its name — it gets its own verdict rather than a sort comparison.
+#
+# WHY THE WHOLE PATH (issue #3249 review R5-4). Scanning only /etc/sysctl.d meant a
+# later-sorting file in /run/sysctl.d or /usr/lib/sysctl.d could override our drop-in
+# while bootstrap reported NO competitor — recreating the exact "it silently reverts and
+# nobody knows why" mystery this diagnostic exists to end.
+#
+# In TEST MODE the path is the sandbox seam plus the optional colon-separated
+# CQLITE_PERF_SYSCTL_EXTRA_DIRS (lower-precedence stand-ins, in the same descending
+# order, each validated non-production): the real /run and /usr/lib are never read, so a
+# case's verdict can never depend on the host's own drop-ins.
+perf_capability_sysctl_search_path() {
+  local __psp_d __psp_e
+  if perf_capability_test_mode; then
+    __psp_d=$(perf_capability_sysctl_dir) || return 1
+    printf '%s\n' "$__psp_d"
+    local -a __psp_extra=()
+    # `read -a` splits on IFS WITHOUT globbing (an unquoted `for x in $var` would glob).
+    IFS=':' read -r -a __psp_extra <<<"${CQLITE_PERF_SYSCTL_EXTRA_DIRS:-}"
+    for __psp_e in ${__psp_extra[@]+"${__psp_extra[@]}"}; do
+      [ -n "$__psp_e" ] || continue
+      perf_capability_test_dir_valid "$__psp_e" "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT" || {
+        printf 'perf-capability: REFUSING: CQLITE_PERF_SYSCTL_EXTRA_DIRS entry %s is not an absolute NON-PRODUCTION path — a test-mode scan may never read the host'"'"'s real sysctl.d directories.\n' \
+          "'$__psp_e'" >&2
+        return 1
+      }
+      printf '%s\n' "$__psp_e"
+    done
+    return 0
+  fi
+  printf '%s\n' /etc/sysctl.d /run/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d \
+                /lib/sysctl.d /etc/sysctl.conf
+}
+
+# perf_capability_file_sets_controls <path>: rc 0 iff the file ASSIGNS either control.
+# Both spellings sysctl accepts are matched (`kernel.x` and `kernel/x`, sysctl.d(5)) plus
+# the optional leading `-` ignore-failure prefix; a commented-out line assigns nothing.
+perf_capability_file_sets_controls() {
+  grep -Eq '^[[:space:]]*-?kernel[./](perf_event_paranoid|kptr_restrict)[[:space:]]*=' "$1" 2>/dev/null
+}
+
+# perf_capability_competing_files: every OTHER file ANYWHERE ON THE SEARCH PATH ABOVE
+# that also sets kernel.perf_event_paranoid or kernel.kptr_restrict AND is actually in
+# effect (masked files are skipped), one per line as
+#   <override|earlier|last> <path>
+# `override` = its basename sorts AFTER ours, so it is applied LAST and IT WINS;
+# `earlier` = ours wins; `last` = /etc/sysctl.conf, applied after every drop-in, so it
+# wins regardless of name.
 #
 # WHY THIS EXISTS. Three separate reports (ws0-3217, ws3-3029, the 2026-07-27 Cassandra
 # baseline) recorded that a hand-set perf_event_paranoid/kptr_restrict "silently
@@ -334,26 +450,45 @@ perf_capability_dropin_current() {
 # LC_ALL), whereas `[[ > ]]` would switch to locale collation and could mis-rank names
 # whose only difference is punctuation.
 perf_capability_competing_files() {
-  local dir base f name
-  dir=$(perf_capability_sysctl_dir) || return 1
+  local base f name entry seen paths lf='
+'
   base="$PERF_CAPABILITY_DROPIN_BASENAME"
-  # A directory that does not exist genuinely holds no competitor (rc 0, no output). One
-  # that exists but cannot be READ is an UNKNOWN and returns rc 1, so the caller reports a
-  # failed scan instead of the reassuring "no competing file" — this diagnostic exists to
-  # replace an unknown with a named file, so it may not answer an unknown with good news.
-  [ -e "$dir" ] || return 0
-  [ -d "$dir" ] && [ -r "$dir" ] || return 1
-  for f in "$dir"/*.conf; do
-    [ -f "$f" ] && [ -r "$f" ] || continue
-    name="${f##*/}"
-    [ "$name" = "$base" ] && continue
-    grep -Eq '^[[:space:]]*kernel\.(perf_event_paranoid|kptr_restrict)[[:space:]]*=' "$f" 2>/dev/null || continue
-    if [ "$name" \> "$base" ]; then
-      printf 'override %s\n' "$f"
-    else
-      printf 'earlier %s\n' "$f"
+  paths=$(perf_capability_sysctl_search_path) || return 1
+  seen="$lf"
+  # An entry that does not exist genuinely holds no competitor (skipped, no output — most
+  # boxes have no /run/sysctl.d at all). One that exists but cannot be READ is an UNKNOWN
+  # and returns rc 1, so the caller reports a failed scan instead of the reassuring "no
+  # competing file" — this diagnostic exists to replace an unknown with a named file, so
+  # it may not answer an unknown with good news.
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if [ "${entry##*/}" = sysctl.conf ]; then
+      [ -e "$entry" ] || continue
+      [ -f "$entry" ] && [ -r "$entry" ] || return 1
+      perf_capability_file_sets_controls "$entry" && printf 'last %s\n' "$entry"
+      continue
     fi
-  done
+    [ -e "$entry" ] || continue
+    [ -d "$entry" ] && [ -r "$entry" ] || return 1
+    for f in "$entry"/*.conf; do
+      [ -f "$f" ] && [ -r "$f" ] || continue
+      name="${f##*/}"
+      [ "$name" = "$base" ] && continue
+      # MASKING (see the precedence rules above): a higher-precedence directory already
+      # supplied this basename, so sysctl ignores THIS file entirely. Recorded BEFORE the
+      # content test, because a same-named file that sets nothing still masks one that does.
+      case "$seen" in *"$lf$name$lf"*) continue ;; esac
+      seen="$seen$name$lf"
+      perf_capability_file_sets_controls "$f" || continue
+      if [ "$name" \> "$base" ]; then
+        printf 'override %s\n' "$f"
+      else
+        printf 'earlier %s\n' "$f"
+      fi
+    done
+  done <<EOF
+$paths
+EOF
 }
 
 # perf_capability_proc_read <outvar> <name>: the CURRENT kernel value read straight
