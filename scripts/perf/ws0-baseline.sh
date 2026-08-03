@@ -54,7 +54,13 @@ CLIENT_CPUS="4,12,5,13,6,14,7,15"
 REPS=3
 TEMPS="warm cold"
 ARMS="bypass"
-STEP_DURATION="60s"
+STEP_DURATION="45s"
+# A COLD rep must contain exactly ONE full scan. The load generator stops issuing
+# at its deadline but lets the in-flight request finish, so a short step yields a
+# single request — while a long cold step would run one COLD scan followed by
+# WARM ones and average them into a single "cold" number, which is precisely the
+# blending spec R2 forbids.
+COLD_STEP_DURATION="1s"
 SCAN_PASSES=1
 PORT=18815
 OUT_DIR=""
@@ -71,7 +77,12 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
   --reps N             Reps per (arm, temperature). Median reported, spread printed (default $REPS).
   --temp WHICH         warm | cold | both (default both).
   --arm WHICH          bypass | merge | both (default bypass).
-  --step-duration D    Flight loadgen step hold, e.g. 60s (default $STEP_DURATION).
+  --step-duration D    Flight loadgen step hold for WARM reps (default $STEP_DURATION).
+  --cold-step-duration D
+                       Step hold for COLD reps (default $COLD_STEP_DURATION). Deliberately
+                       short: the loadgen finishes its in-flight request, so this yields
+                       exactly ONE cold scan. A long cold step would blend one cold scan
+                       with warm ones inside a single "cold" claim.
   --scan-passes N      Timed passes per bare-scan rep (default $SCAN_PASSES).
   --port N             Loopback port for the Flight server (default $PORT).
   --out DIR            Results dir (default \$REPO/target/perf-ws0-3096/<timestamp>).
@@ -104,6 +115,7 @@ while [[ $# -gt 0 ]]; do
         *) echo "FATAL: --arm must be bypass|merge|both" >&2; exit 2 ;;
       esac; shift 2 ;;
     --step-duration) STEP_DURATION="$2"; shift 2 ;;
+    --cold-step-duration) COLD_STEP_DURATION="$2"; shift 2 ;;
     --scan-passes) SCAN_PASSES="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
@@ -223,6 +235,8 @@ measure_scan() {
 # ---------------------------------------------------------------------------
 measure_flight() {
   local temp="$1" rep="$2" arm="$3" tag="flight-$arm-$temp-$rep"
+  local step="$STEP_DURATION"
+  [[ "$temp" == "cold" ]] && step="$COLD_STEP_DURATION"
   pkill -x cqlite-flight >/dev/null 2>&1 || true
   sleep 1
   drop_caches_if_cold "$temp"
@@ -251,7 +265,7 @@ measure_flight() {
   perf_stat_c "$OUT_DIR/perf-$tag.csv" \
     taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
       --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
-      --shape full --ramp 1 --step-duration "$STEP_DURATION" \
+      --shape full --ramp 1 --step-duration "$step" \
       --round "$tag" --out "$OUT_DIR/$tag.jsonl" \
     > "$OUT_DIR/$tag.log" 2>&1 \
     || { kill "$srv" 2>/dev/null || true; echo "FATAL: flight rep $tag failed — see $OUT_DIR/$tag.log" >&2; exit 1; }
@@ -283,7 +297,7 @@ done
 python3 "$HERE/ws0_report.py" \
   --dir "$OUT_DIR" --corpus "$CORPUS" --server-cpus "$SERVER_CPUS" \
   --client-cpus "$CLIENT_CPUS" --reps "$REPS" --temps "$TEMPS" --arms "$ARMS" \
-  --step-duration "$STEP_DURATION" --scan-passes "$SCAN_PASSES" \
+  --step-duration "$STEP_DURATION/$COLD_STEP_DURATION" --scan-passes "$SCAN_PASSES" \
   | tee "$OUT_DIR/summary.txt"
 
 echo

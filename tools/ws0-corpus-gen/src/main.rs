@@ -101,17 +101,24 @@ async fn run(cli: Cli) -> GenResult<ExitCode> {
         start.elapsed().as_secs_f64()
     );
 
-    let identity_path = cli
-        .identity_out
-        .unwrap_or_else(|| spec.out.join("corpus-identity.json"));
-    identity.write_json(&identity_path)?;
+    // ALWAYS beside the corpus: every consumer (the measurement driver, the
+    // digest oracle's big-corpus case) reads the identity from the corpus root to
+    // learn the row count it must not be vacuous against. `--identity-out` writes
+    // an ADDITIONAL copy (the in-tree record), it does not move this one.
+    let corpus_identity_path = spec.out.join("corpus-identity.json");
+    identity.write_json(&corpus_identity_path)?;
+    let identity_path = cli.identity_out.unwrap_or(corpus_identity_path.clone());
+    if identity_path != corpus_identity_path {
+        identity.write_json(&identity_path)?;
+    }
 
     println!("corpus:         {}", spec.table_dir().display());
     println!(
         "ddl:            {}",
         spec.out.join("ws0-events.cql").display()
     );
-    println!("identity:       {}", identity_path.display());
+    println!("identity:       {}", corpus_identity_path.display());
+    println!("identity (rec): {}", identity_path.display());
     println!("rows:           {}", identity.rows);
     println!("partitions:     {}", identity.partitions);
     println!("cells/row:      {}", identity.cells_per_row);

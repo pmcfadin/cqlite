@@ -101,7 +101,11 @@ const CORPUS_DIR_ENV: &str = "CQLITE_WS0_CORPUS_DIR";
 ///
 /// To re-derive after an INTENDED output change, run this test and read the
 /// `observed` value from the failure message.
-const CI_FIXTURE_DIGEST: u64 = 0x0000_0000_0000_0000;
+///
+/// PINNED 2026-08-03 on the Phase-0 (pre-lever) binary, over the 500-row
+/// `ws0.events` CI fixture at `BATCH_SIZE` = 128: 4 batches (128/128/128/116),
+/// 12 columns, 12.0 cells/row, identical under `bypass` and `merge`.
+const CI_FIXTURE_DIGEST: u64 = 0xd001_4e42_e893_f87f;
 
 /// Row count of the CI fixture as observed through `do_get`. Pinned so a fixture
 /// that silently shrank cannot make the digest assertion vacuous.
