@@ -61,6 +61,10 @@ ORDER: k                # queue rank when several are Ready at once
    GitHub owns the CI-green wait** (#2667), and returns only a terminal packet. Any src change after the
    full gate INVALIDATES it — the closer re-runs the gate if a fix or rebase postdates it.
    No worker CI busy-wait (`ScheduleWakeup`-polling a PR's own CI is prohibited).
+   **Re-read the issue LIVE immediately before spawning the closer** (owner, 2026-08-03) — not from the
+   last status tick. A manager order can land between a poll and the spawn (it has), and the closer is
+   the one irreversible step in the pipeline, so it is the one step that must never run on stale
+   instructions. See `process_improvements.md` (2026-08-03 / #3249, entry 4).
 6. **Finalize follows the merge.** The merge event triggers `flow-finalize` (archive any OpenSpec change,
    **stamp the telemetry ledger** with the roborev blocker/nit split, remove the worktree, delete the origin
    claim branch + clear the heartbeat, close the issue with a traceable comment). Board → Done (built-in).
@@ -219,6 +223,14 @@ worktree (the manager never rebases someone else's branch).
   excludes non-code paths from the diff it builds. Any non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW`
   included, is a failed round and a blocked merge — never "roborev clean". See CLAUDE.md +
   `docs/development/agent-machine-setup.md`.
+- **Coverage is not equivalence — a per-slice review ledger is an audit trail, never a certification**
+  (owner, 2026-08-03). The only certifying review artifact is ONE genuine full-range `<base>...HEAD`
+  round with `prompt-content: PASS`; never slice the base to get a green. On a non-PASS round, raise
+  roborev's `default_max_prompt_size` (#3257/#3263) and re-run the FULL range — past the assembled-prompt
+  ceiling roborev spills the diff to a file the sandbox cannot read, so the model answers "No issues
+  found" having read zero lines, a vacuous PASS textually identical to a real one. On #3249 a complete
+  per-slice ledger over a `+4216` diff still missed 4 findings (1 High, 2 Medium) that the full range
+  found. See `process_improvements.md` (2026-08-03 / #3249, entry 3).
 - Every GitHub write gets a short traceable comment.
 
 ## Field round validation (separate from the agent gate, issue #2399)
