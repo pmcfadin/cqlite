@@ -94,23 +94,17 @@ DESCRIPTOR_RE = re.compile(r"^da-\d+-bti-")
 # ----------------------------------------------------------------------------
 # WHY THERE IS NO THROUGHPUT FIGURE IN THIS MANIFEST (roborev #3234 M1).
 #
-# The AC3 warm-scan figure (and the LIMITATION that the route it measures excludes the
-# BTI mmap/trie plane entirely) used to be recorded here, as a constant, for every
-# production corpus. It is a HISTORICAL measurement taken by a harness -- NOT a counter
-# this run observed and NOT derivable from any byte on disk -- so no corpus this script
-# reads can substantiate it. The previous guard compared row + generation counts and
-# called that "applies", which let a corpus with a different seed, payload size, width
-# mix or byte content INHERIT an unrelated number; an `applies_to_this_corpus: false`
-# printed beside a present figure is the same defect wearing a label, because the number
-# is still there to be quoted.
-#
-# The rule this file now follows is: A FIELD IS OBSERVED OR IT IS ABSENT. So the figure,
-# the identity comparator it would need, and the fixed `full_generation_golden` block
-# (whose bytes/rows/partitions are already recorded, OBSERVED, in the per-SSTable
-# `sstabledump_golden` + `statistics` records) are all DELETED rather than defended. The
-# figure and its LIMITATION are published where a measurement belongs: in
-# docs/development/dev-cookbook.md, and printed at runtime beside the number by
-# cqlite-core/examples/bti_perf_scan (access_path + storage_route).
+# The AC3 warm-scan figure is a HISTORICAL measurement taken by a harness, not derivable
+# from any byte on disk, so no corpus this script reads can substantiate it. It was a
+# module constant guarded by a row + generation comparison, which let a corpus with a
+# different seed, payload size or width mix INHERIT an unrelated number -- and an
+# `applies_to_this_corpus: false` printed beside a present figure is the same defect
+# wearing a label, since the number is still there to be quoted. So the figure, the
+# identity comparator it would need, and the fixed `full_generation_golden` block (already
+# recorded, OBSERVED, in the per-SSTable `sstabledump_golden` + `statistics` records) are
+# DELETED rather than defended: A FIELD IS OBSERVED OR IT IS ABSENT. The figure and its
+# LIMITATION live in docs/development/dev-cookbook.md, and cqlite-core/examples/
+# bti_perf_scan prints them at runtime beside the number.
 NO_MEASUREMENT_HERE = (
     "NONE. This manifest records only what was read back from the corpus bytes, and a "
     "throughput measurement is not one of those things (roborev #3234 M1: a fixed AC3 "
@@ -144,14 +138,13 @@ def data_db_sha256_match_path(sstable_dir: str, corpus_root: str,
     committed bytes"}` block built from a `Data.db`-ONLY hash comparison: it counted and
     summed files it never read, said nothing about git, and so reported "committed exact
     bytes" for a copy whose `Rows.db`/`Statistics.db`/`schema.cql` differed, or which was
-    untracked in every commit. Partial verification reading as full verification is the
-    same defect class as a vacuous review reading as clean.
+    untracked in every commit -- partial verification reading as full verification.
 
     Growing the check to cover that claim would have meant a second validator inside a
-    provenance writer, so the CLAIM was cut down to the evidence instead: one field, whose
-    NAME states precisely what was compared (`Data.db` sha256s) and nothing else. Absent
-    when no such path was found — never `false`, which invites reading it as "not
-    committed", a thing this function cannot determine.
+    provenance writer, so the CLAIM was cut to the evidence instead: one field whose NAME
+    states what was compared (`Data.db` sha256s) and nothing else, absent when no such path
+    was found — never `false`, which invites reading it as "not committed", a thing
+    this function cannot determine.
     """
     rel = os.path.relpath(os.path.abspath(sstable_dir), os.path.abspath(corpus_root))
     if rel.startswith(".."):
