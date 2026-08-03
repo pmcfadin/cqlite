@@ -350,7 +350,8 @@ One rule, three applications, which is why it replaces three ad-hoc judgements:
 | Cause | Verdict | Because |
 |---|---|---|
 | A **configured** pattern swallows census CODE | **FAIL** | The remedy is a one-token edit to a **named** file, available before a review round is paid for. (This is ④'s call.) |
-| A **pinned built-in** swallows census CODE | **NOTICE** | There is **no** remedy at all: compiled in, no opt-out, no negation form (R5). `Cargo.lock` churn is routine here, so FAILing would permanently red a legitimate change class against a check its author **cannot satisfy** — and *a guard that fires on correct input with no available fix is the guard that gets **disabled***, which is exactly how #3229 happened. (This is ⑥'s call.) |
+| A **pinned built-in** swallows **SOME** census CODE | **NOTICE** | There is **no** remedy at all: compiled in, no opt-out, no negation form (R5). `Cargo.lock` churn is routine here, so FAILing would permanently red a legitimate change class against a check its author **cannot satisfy** — and *a guard that fires on correct input with no available fix is the guard that gets **disabled***, which is exactly how #3229 happened. (This is ⑥'s call.) |
+| A **pinned built-in** swallows the **WHOLE** code census | **FAIL** | Nothing reaches the reviewer, so a returned verdict certifies *nothing* — and there **is** an actionable remedy: the one `code-free:` already prescribes (verify another way, record primary-source verification in the PR). See D2b-i-a. |
 | The **live built-in set diverges from the pin** | **FAIL** | This one **does** have a remedy — re-extract, re-pin, and **judge** the new built-in — and it is a **mechanism** change, which the v0.61.2 pin exists to catch rather than absorb. A NOTICE here would swallow an upgrade that began excluding `*.rs` or `scripts/**` while the block read like normal operation: the exact blindness this issue closes. |
 
 Two design consequences follow from the third clause, "never silence":
@@ -364,6 +365,52 @@ Two design consequences follow from the third clause, "never silence":
 `NOTICE*` sits outside the wrapper's failing-capable scan (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`) and both
 FAIL forms inside it. That correspondence is asserted **structurally against the scan itself**, because a
 NOTICE that reds the run — or a FAIL that does not — is the decorative-key defect mirrored.
+
+##### D2b-i-a — the boundary the NOTICE ruling does not cover: a TOTAL swallow
+
+⑥'s NOTICE ruling is about a swallow that leaves a diff behind. It says nothing about the case where the
+built-in eats **every** code census path, and that case is not a milder version of the same thing — it is a
+different condition:
+
+| | PARTIAL built-in swallow | TOTAL built-in swallow |
+|---|---|---|
+| What reaches the reviewer | a real diff, minus some paths | **nothing** |
+| What a clean verdict means | it covers what was sent; the rest is uncovered and named | **nothing at all** |
+| Remedy available to the author | none (compiled in) | **yes** — the `code-free:` remedy: verify another way and record it in the PR |
+| Verdict | **NOTICE** | **FAIL, pre-enqueue** |
+
+So the FAIL is **not an exception to the rule; it is the rule reaching a case ⑥ did not decide**. The third
+clause is the one that decides it: *never silence*. `code-free:` already FAILs pre-enqueue on exactly this
+condition when the cause is classification (a prose-only census); when the cause is the exclusion set the
+condition is identical and the answer must be identical, or the guard is inconsistent in the one direction
+that produces a false green.
+
+**This was measured, not theorised.** With the total case left as a NOTICE, a hermetic fixture of
+`Cargo.lock` + `README.md` produced:
+
+```
+code-free: PASS
+census-exclusion: NOTICE (0/1 code census paths survive …)
+prompt-content: PASS (0/0 code census paths present)
+RESULT: PASS            # exit 0 — the reviewer received an EMPTY prompt
+```
+
+That is the worst defect class this wrapper can have: **a vacuous PASS textually identical to a genuine
+one**, on which `flow-closer` arms `gh pr merge --auto`. Its trigger is ordinary — any dependency-bump
+branch whose only non-prose file is a lockfile (`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`). Nothing else in
+the block catches it: `code-free:` PASSes because a `.lock` extension classifies as CODE; vacuity tier 1
+greps a literal phrase the reviewer need not emit; tier 2 is `UNAVAILABLE` with no token payload (and is
+further weakened by `review_context_count = 1`, which inflates input/cached counts with prior-review
+context).
+
+Two mechanisms, deliberately both, because either alone can be removed by a later edit:
+
+1. **`census-exclusion:` FAILs pre-enqueue** when the surviving code path count is zero, carrying the
+   `code-free:` remedy wording and stating in the same detail that a *partial* swallow remains a NOTICE — so
+   a reader cannot conclude ⑥'s ruling was reversed.
+2. **`prompt-content:` refuses to print a `0/0` PASS** (D2b-iii below). Unreachable through the wrapper now
+   that (1) exists, and kept anyway: a `0/0` is the *signature* of the vacuity, and a key with no subject
+   has no verdict to give.
 
 ##### D2b-ii — how divergence is OBSERVED (and why not by re-extraction)
 
@@ -428,6 +475,59 @@ asserts something known-impossible.
 
 Scoped to **built-in** swallows only, and that scoping is load-bearing: a *configured* swallow FAILs
 pre-enqueue and never reaches this code, so the subtraction can never mask a configuration defect.
+
+**The subtraction has a floor: a `0/0` is never a pass.** Subtracting known-absent paths is right up to
+the point where there is nothing left to subtract *from*. At that point the key has no subject, and
+`PASS (0/0 code census paths present)` is indistinguishable from a genuine pass — so the check FAILs with
+`no code census path was checkable — a 0/0 is never a pass`. D2b-i-a's pre-enqueue FAIL makes the state
+unreachable through the wrapper; this floor exists so that removing that FAIL cannot silently restore the
+vacuous green. Its regression case therefore drives the function **directly** (the state has no
+wrapper-level fixture, by construction) — a test that could only be written against the current control
+flow would evaporate with the next refactor.
+
+##### D2b-iv — `prompt-content:` must compare paths NORMALISED, and know every header shape git emits
+
+The comparison is between two renderings of the same path, produced by two different git surfaces, and they
+do not agree by default:
+
+| Source | Rendering of `docs/é.sh` | Rendering of `docs/a b.sh` |
+|---|---|---|
+| the census (`git diff --numstat`, no `-z`) | `"docs/\303\251.sh"` (C-quoted) | `docs/a b.sh` (unquoted) |
+| the prompt's diff header | `diff --git "a/docs/\303\251.sh" "b/…"` | `diff --git a/docs/a b.sh b/docs/a b.sh` |
+
+The first implementation accepted `^diff --git a/[^ ]+ b/[^ ]+$` only, and compared the **C-quoted** census
+path against those **unquoted** captures — never calling the `roborev_unquote_path` decoder that
+`census-exclusion:` uses for exactly this reason. Both columns above therefore false-FAILED. Measured on the
+suite's own hostile-path fixture: `census-exclusion: PASS (2/2 survive)` beside
+`prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`.
+
+**The false-FAIL direction is the dangerous one here.** `prompt-content:` is the wrapper's strongest
+deterministic anti-vacuity key; a key that reds on correct input is the key agents learn to waive, and a
+waived `prompt-content:` defeats the entire purpose of this change. Reachability is not theoretical: the
+repository already tracks **40 space-bearing paths under `docs/`**, including the directory
+`docs/storage engine/`, and this change *promotes* `docs/reports/*-artifacts/**` executables to CODE census
+paths.
+
+Three matching layers, in order, so each shape is handled by the mechanism that is exact for it:
+
+1. **the normalised path SET** — headers of both the unquoted and the C-quoted shape are collected, each
+   side decoded through `roborev_unquote_path`, and the census path is decoded the same way. This is also
+   what keeps the rename reconciliation working (the two header sides differ).
+2. **the LITERAL raw header line** (`diff --git a/<p> b/<p>`) — the only sound test for a space-bearing
+   path, because `a/<x> b/<y>` cannot be split unambiguously by any regex. Probing the exact line the
+   census path *would* produce sidesteps the ambiguity without relaxing to a substring match.
+3. **the LITERAL C-quoted header line** — for a producer whose quoting layer 1 could not round-trip.
+
+The same normalisation is applied to the built-in-subtraction comparison: `CENSUS_BUILTIN_EXCLUDED` holds
+raw paths, so matching a quoted census spelling against it would have failed to subtract an odd-named
+built-in swallow.
+
+**Test-quality consequence.** The case that named this behaviour (`cx6`) asserted only `census-exclusion:`
+and so reported two `ok`s while `prompt-content:` false-FAILed and the run terminated `RESULT: FAIL` — 565
+asserts green over a broken key. *A case that passes while the behaviour it names is broken is worse than no
+case, because it is read as coverage.* Every hostile-path case now asserts `RESULT:` **and**
+`prompt-content:`, and the suite's stub JSON-escapes the prompt so a quote-bearing prompt cannot degrade the
+job record and mask the comparison.
 
 #### D2c — an EMPTY parse must be corroborated, not trusted (blocker, measured)
 
@@ -648,6 +748,19 @@ family's `(c2*)` lettering. The fixture helper gains the ability to write the wo
    have shipped); a bare directory name excludes its subtree through the `<p>/**` sibling; `/README.md`
    excludes only the root file while `README.md` excludes at any depth; a **trailing-slash** pattern FAILs
    naming the inversion; a whitespace-only pattern is skipped, not treated as match-everything.
+9. **the TOTAL/PARTIAL built-in boundary** (D2b-i-a) — a lockfile-only census (`Cargo.lock` + prose) ⇒
+   `code-free: PASS`, `census-exclusion: FAIL` naming the EMPTY diff, `assert_never_enqueued`,
+   `prompt-content: SKIP`, and no `PASS (0/0` anywhere; the **same** lockfile beside a surviving `.rs` file ⇒
+   `census-exclusion: NOTICE`, `RESULT: PASS`, review enqueued. Both sides, so neither can drift into the
+   other;
+10. **the `0/0` floor**, driven **directly** against `roborev_check_prompt_content` in the real files (the
+    state has no wrapper-level fixture once (9) exists) — asserts the refusal value AND the *absence* of any
+    `PASS (0/0` form;
+11. **every diff-header shape git emits** (D2b-iv) — a space-bearing directory (`docs/storage engine/`) and a
+    non-ASCII, octal-escaped name (`é.sh`) each ⇒ `prompt-content: PASS` and `RESULT: PASS`. Plus the
+    test-quality rule these cases exist to enforce: **a hostile-path case asserts the terminal `RESULT:` and
+    `prompt-content:`, never one intermediate key alone**, and the stub emits VALID JSON for a quote-bearing
+    prompt so the record cannot degrade and mask the comparison.
 
 The suite runs under the `roborev-lints` gate component, which is in **both** `COMPONENTS` and
 `LITE_COMPONENTS` — so a regression FAILs the fast loop rather than costing a review round. Its tally

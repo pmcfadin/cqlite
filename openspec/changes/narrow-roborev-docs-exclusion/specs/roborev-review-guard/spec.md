@@ -283,6 +283,28 @@ fails a run whose value begins `FAIL`, `FINDINGS`, `ERROR` or `INCONSISTENT`; th
 asserted STRUCTURALLY against the scan itself, because a value reading NOTICE while `RESULT:` goes FAIL
 (or a FAIL that does not red the run) is the decorative-key defect mirrored.
 
+**A TOTAL built-in swallow SHALL FAIL; only a PARTIAL one is a NOTICE.** When EVERY code census path is
+dropped by a pinned built-in — so the reviewer would receive an EMPTY prompt — `census-exclusion:` SHALL
+FAIL **before the enqueue**, with the value naming the empty diff and the detail carrying the same remedy
+`code-free:` prescribes (this diff cannot be roborev-certified at all; verify the paths another way and
+record primary-source verification in the pull request). This SHALL NOT be read as an exception to the
+pinned-built-in NOTICE ruling above: it is the SAME rule — *FAIL where the author can act; NOTICE where
+only the information is actionable; **never silence*** — reaching a case that ruling does not cover. A
+partial swallow leaves a diff the reviewer can genuinely review and an unactionable remainder, so it stays
+information; a total swallow leaves NOTHING, and a verdict on an empty prompt certifies nothing — the very
+condition `code-free:` already FAILs pre-enqueue for a prose-only census, arrived at through the exclusion
+set instead of through classification. The boundary is TOTAL vs PARTIAL and nothing else, and BOTH sides
+of it SHALL be pinned by the regression suite so neither can drift into the other.
+
+The consequence of NOT drawing this boundary is MEASURED, not hypothetical (hermetic fixture: a
+`Cargo.lock` bump beside a `README.md` edit): `census-exclusion: NOTICE (0/1 … survive)` let
+`prompt-content:` report `PASS (0/0 code census paths present)` and the block terminate `RESULT: PASS`
+with exit 0 — a VACUOUS pass TEXTUALLY IDENTICAL to a genuine one, on which `flow-closer` would arm
+`--auto` for an unreviewed diff. Any dependency-bump branch whose only non-prose file is a lockfile
+(`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`) reaches it, and `code-free:` does NOT catch it because a
+`.lock` extension classifies as CODE. Neither vacuity tier catches it either: tier 1 greps a literal
+phrase the reviewer need not emit, and tier 2 is `UNAVAILABLE` with no token payload.
+
 **A KNOWN built-in absence SHALL NOT be re-reported by `prompt-content:` as a discovery.** The set of
 census code paths a pinned built-in drops SHALL be handed to `prompt-content:`, which SHALL subtract them
 and SHALL say so in its value. Their absence from the prompt is a deterministic property of roborev's
@@ -392,6 +414,20 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **GIVEN** a census containing `Cargo.lock` (which the census classifies as CODE) beside a `.rs` file, under a configuration that excludes neither
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** `census-exclusion:` reads `NOTICE`, names `Cargo.lock` as excluded by `**/Cargo.lock` with a `roborev-builtin` source tag IN THE VALUE LINE, states that there is NOTHING TO FIX in any config file, states that a clean verdict does not cover that path, does NOT blame the operator's configuration, reports the `.rs` file as surviving — and the review IS enqueued with `RESULT:` not FAIL on that account
+
+#### Scenario: A TOTAL built-in swallow FAILs pre-enqueue, because nothing would reach the reviewer
+- **GIVEN** a census whose only non-prose file is a lockfile (a `Cargo.lock` bump beside a `README.md` edit), so `code-free:` PASSes because a `.lock` extension classifies as CODE, and whose single CODE path is dropped by the built-in `**/Cargo.lock`
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` reads `FAIL (0/1 code census paths survive …; ALL 1 code census path(s) excluded by a roborev built-in, so the reviewer would receive an EMPTY diff: …)`, NOT a NOTICE; the detail states the diff cannot be roborev-certified at all and prescribes primary-source verification recorded in the pull request; no review is enqueued; `prompt-content:` reads `SKIP`; and the terminal `RESULT:` is `FAIL`
+
+#### Scenario: The total-swallow FAIL is the NOTICE rule applied consistently, not an exception to it
+- **WHEN** the total-swallow failure detail is read
+- **THEN** it states that a PARTIAL built-in swallow stays a NOTICE and that this FAIL is the rule "FAIL where the author can act; NOTICE where only the information is actionable; never silence" applied consistently rather than an exception to it — so a reader cannot conclude the pinned-built-in NOTICE ruling was reversed
+
+#### Scenario: The same lockfile beside surviving code is still only a NOTICE
+- **GIVEN** the same built-in-excluded `Cargo.lock` in a census that ALSO carries a surviving `.rs` file
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` reads `NOTICE (1/2 code census paths survive …)`, the review IS enqueued, the terminal `RESULT:` is not FAIL on that account, and the total-swallow wording (`EMPTY diff`) is absent — so the boundary is TOTAL vs PARTIAL and nothing else
 
 #### Scenario: A known built-in absence is not re-reported by prompt-content
 - **GIVEN** the same run, whose prompt therefore carries the `.rs` file but not `Cargo.lock`
@@ -579,6 +615,117 @@ full adversarial hand review recorded in its pull request, which found no blocke
 - **THEN** the absence of any recorded ruling is a failure of this requirement, independently of whether the configuration and wrapper changes are complete
 
 ## MODIFIED Requirements
+
+### Requirement: The reviewer must demonstrably have received the census's own code files
+The wrapper SHALL assert, under its own greppable key `prompt-content:`, that the **CODE subset** of the
+census's changed file paths appears in the prompt ACTUALLY SENT to the reviewer, retrieved from the job
+record (the structured `prompt` field, else the reviewer's own prompt-retrieval command). This check
+SHALL be DETERMINISTIC and THRESHOLD-FREE: it catches "the reviewer never received the diff", the half of
+the defect space that a verdict-text comparison cannot see.
+
+**The code subset — not every census path — is what SHALL be required present**, because **roborev drops
+exactly what its configured `exclude_patterns` pathspecs match — it makes NO code/non-code judgement**
+(measured: on a census of 22 markdown + 5 code files the prompt carried `diff --git` headers for exactly
+the 5 code files, because `*.md` is CONFIGURED). Requiring all 27 would false-FAIL
+every branch that touches documentation, which is most of them. The code subset is the right subset only
+while the configured set is a prose/artifact deny-list MIRRORING the census classification, and that
+correspondence SHALL NOT be assumed — `census-exclusion:` computes it with git pre-enqueue (#3229).
+
+**EVERY code path SHALL be checked** — there SHALL be NO sampling cap. A sampled subset was a hole: a
+partial prompt naming just the sampled files passed. Matching SHALL be against the prompt's actual
+`diff --git` HEADER paths, never a bare substring (a substring is satisfied by any incidental mention,
+including this wrapper quoting a path in its own comments), and the header path set SHALL be collected
+from **BOTH sides** of each header and compared WHOLE-LINE: the census runs `--no-renames` (a rename is
+two paths) while the reviewer's diff may have rename detection ON (one `a/old b/new` header), so
+same-path-only matching FALSELY REJECTED every review containing a detected rename. Collecting both sides
+reconciles the two rename behaviours WITHOUT weakening exact-header strictness to a substring test.
+
+**PATHS SHALL BE COMPARED NORMALISED, AND EVERY HEADER SHAPE GIT EMITS SHALL BE RECOGNISED (#3229).** The
+census is built from `git diff --numstat`, which C-QUOTES a path containing a double quote, a backslash or
+a non-ASCII byte; the prompt's headers may carry the raw spelling, the C-quoted spelling
+(`diff --git "a/\303\251.txt" "b/\303\251.txt"`), or an unquoted spelling containing SPACES
+(`diff --git a/a b.txt b/a b.txt`). BOTH sides SHALL therefore be normalised through the same
+quoted-path decoder `census-exclusion:` already uses, and a space-bearing path — which the
+`a/<x> b/<y>` header form cannot be split on unambiguously — SHALL be matched by probing the LITERAL
+header line the census path would produce. Accepting only `^diff --git a/[^ ]+ b/[^ ]+$`, and comparing a
+C-quoted census path against unquoted captures, FALSE-FAILED both shapes (MEASURED: a census whose two
+code paths both survived the exclusion set reported `census-exclusion: PASS (2/2 survive)` beside
+`prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`). That direction is the DANGEROUS one for this key
+specifically: it is the wrapper's strongest deterministic anti-vacuity signal, so a key that reds on
+correct input is the key agents learn to waive. Reachability is not theoretical — the repository already
+tracks 40 space-bearing paths under `docs/`, including the directory `docs/storage engine/`, and this
+change promotes `docs/reports/*-artifacts/**` executables to CODE census paths.
+
+**A `0/0` SHALL NEVER BE A PASS.** When no code census path is left to look for — every one of them
+dropped from the diff roborev builds — this key has no subject and SHALL NOT report PASS; it SHALL FAIL,
+naming the reason. `PASS (0/0 code census paths present)` is textually indistinguishable from a genuine
+pass while the reviewer received an EMPTY prompt, which is precisely the vacuity this capability exists to
+prevent. This is belt-and-braces behind the pre-enqueue total-swallow FAIL in `census-exclusion:`: the
+condition is unreachable through the normal flow, and SHALL remain refused here anyway so that removing
+the upstream FAIL cannot silently restore a vacuous PASS.
+
+The value set SHALL be exactly:
+
+- `PASS (<n>/<n> code census paths present)` — every code path found, optionally suffixed
+  `(+<b> not expected: excluded by a roborev built-in — see census-exclusion:)`;
+- `FAIL (<k>/<n> code census paths absent from the prompt)` — `<k>` MISSING of `<n>` checked, naming the
+  missing paths (first ten). Note the two values carry the SAME denominator `<n>` but OPPOSITE numerator
+  senses (present on PASS, absent on FAIL), so a grep-based reader SHALL read the value word, never the
+  ratio alone;
+- `FAIL (no code census path was checkable — a 0/0 is never a pass)`;
+- `FAIL (prompt unretrievable — no evidence any diff was delivered)`;
+- `SKIP` — the step was never reached.
+
+**An unretrievable (empty or whitespace-only) prompt SHALL FAIL.** There SHALL be no non-failing
+`UNAVAILABLE` value for this key: with a NON-EMPTY code census an unretrievable prompt means there is NO
+authoritative evidence the reviewer received any diff, and a PASS resting on that contradicts this
+capability's entire purpose. It is also not an always-red risk — the prompt is measurably retrievable
+from the job record's `prompt` field AND from the reviewer's `show <job> --prompt` command, so an empty
+one is a real anomaly.
+
+#### Scenario: A prompt that does not mention the census's code files is a hard failure
+- **GIVEN** a pushed branch with a non-empty code census whose review returns a clean verdict with healthy token accounting
+- **WHEN** the prompt actually sent to the reviewer mentions none of the census's code file paths
+- **THEN** `prompt-content:` reads `FAIL (<k>/<n> code census paths absent from the prompt)`, the message names the missing paths and states that a prompt that does not mention the census's files cannot have reviewed them, and the terminal `RESULT:` is `FAIL`
+
+#### Scenario: An unretrievable prompt FAILS rather than passing on no evidence
+- **GIVEN** a job for which the prompt cannot be retrieved from either the job record's `prompt` field or the reviewer's prompt-retrieval command, while the code census is non-empty
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** `prompt-content:` reads `FAIL (prompt unretrievable — no evidence any diff was delivered)`, the message names both retrieval attempts and the number of code files that went unverified, and the terminal `RESULT:` is `FAIL`
+
+#### Scenario: A prompt carrying the census's code files passes and reports its coverage
+- **WHEN** every code census path appears on either side of a `diff --git` header in the prompt
+- **THEN** `prompt-content:` reads `PASS (<n>/<n> code census paths present)`, so a reader can see the coverage rather than trusting a bare PASS
+
+#### Scenario: A detected rename in the reviewer's diff is not a false rejection
+- **GIVEN** a census computed with `--no-renames` that lists a rename as two paths (`main.rs` deleted, `renamed.rs` added), and a prompt whose diff has rename detection ON and carries the single header `diff --git a/main.rs b/renamed.rs`
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** both census paths count as covered, `prompt-content:` reads `PASS (2/2 code census paths present)`, and the exact-header match is NOT weakened to a substring test to achieve it
+
+#### Scenario: Every code path is checked, with no sampling cap
+- **GIVEN** a census with many code paths
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** it requires EVERY code census path to be present, so a prompt naming only a sampled subset cannot pass
+
+#### Scenario: A census path carrying spaces and a literal quote is not a false failure
+- **GIVEN** a census whose code paths include a filename with spaces and a literal double quote, which `git diff --numstat` therefore C-QUOTES, and a prompt carrying that path in its raw spelling
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** both sides are normalised through the quoted-path decoder, `prompt-content:` reads `PASS (2/2 code census paths present)`, and the terminal `RESULT:` is `PASS` — the verdict itself is asserted, not just the `census-exclusion:` key
+
+#### Scenario: A space-bearing directory in a code path is matched by its literal header line
+- **GIVEN** a code census path under a directory containing a space (the repository tracks `docs/storage engine/`), whose diff header is therefore `diff --git a/docs/storage engine/probe.sh b/docs/storage engine/probe.sh`
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** the path counts as present, `prompt-content:` reads `PASS`, and the ambiguity is resolved by probing the literal header line rather than by relaxing the match to a substring
+
+#### Scenario: A non-ASCII code path is matched through the C-quoted header shape
+- **GIVEN** a code census path with a non-ASCII name, which git renders as `"docs/reports/x-artifacts/\303\251.sh"` in the census and as `diff --git "a/docs/reports/x-artifacts/\303\251.sh" "b/…"` in the prompt
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** both spellings decode to the same raw bytes and compare equal, `prompt-content:` reads `PASS`, and no octal-escaped path is reported absent
+
+#### Scenario: A zero-subject prompt-content refuses to report a pass
+- **GIVEN** a state in which every code census path has been dropped from the diff roborev builds, so no path remains to be checked
+- **WHEN** the check evaluates
+- **THEN** it reads `FAIL (no code census path was checkable — a 0/0 is never a pass)` with a detail explaining that a `0/0` PASS would be indistinguishable from a genuine one, and it NEVER emits `PASS (0/0 code census paths present)`
 
 ### Requirement: A code-free census is a deterministic failure before any review is enqueued
 Because roborev structurally discards a code-free diff, a census consisting ENTIRELY of
@@ -776,6 +923,25 @@ excludes only the root-level path while its slash-less twin excludes at any dept
 FAILs naming the recursive inversion, and an empty-after-trim pattern is skipped rather than treated as a
 match-everything.
 
+The check SHALL additionally pin the TOTAL/PARTIAL built-in boundary and the header-shape normalisation:
+(w) a LOCKFILE-ONLY census (a `Cargo.lock` bump beside prose) yields `code-free: PASS` and
+`census-exclusion: FAIL` naming the EMPTY diff, with NO review enqueued, no `NOTICE` value, and no
+`prompt-content: PASS (0/0 …)` anywhere; (x) the SAME lockfile beside a surviving `.rs` file still yields
+the `NOTICE` and IS enqueued, so the boundary is TOTAL vs PARTIAL and the pinned-built-in ruling is
+demonstrably intact; (y) `prompt-content:` refuses to report a pass when no census path is checkable, driven
+DIRECTLY against the function so the assertion survives the upstream pre-enqueue FAIL that makes the state
+unreachable through the wrapper; and (z) a code census path containing SPACES, one under a space-bearing
+DIRECTORY, and one with a NON-ASCII (octal-escaped) name each yield `prompt-content: PASS` and
+`RESULT: PASS`.
+
+**Every hostile-path or hostile-verdict case SHALL assert the terminal `RESULT:` and, where the path
+reaches the reviewer, `prompt-content:` — not one intermediate key alone.** A case that asserted only
+`census-exclusion:` reported two passes while the SAME fixture false-FAILed `prompt-content:` and the run
+terminated `RESULT: FAIL`: a case that passes while the behaviour it names is broken is worse than no case,
+because it is read as coverage. The suite's stub SHALL emit a VALID JSON job record for a prompt containing
+double quotes, so a quote-bearing prompt cannot degrade the record and mask the very comparison the case
+exists to pin.
+
 The check SHALL also pin the block's key ORDER — including `census-exclusion:` appearing EXACTLY ONCE
 immediately after `code-free:` — the distinctness of its header from all three
 agent-gate summary headers, the usage-error path emitting no block, and hermeticity itself. It SHALL be
@@ -786,7 +952,21 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 
 #### Scenario: Every trigger class is asserted against the block's own keys
 - **WHEN** the regression check runs
-- **THEN** it asserts each of the classes (a) through (u) above against the wrapper's terminal `RESULT`, its per-check key values and its exit code, and it reports an explicit pass/fail tally so a partial run cannot read as a pass
+- **THEN** it asserts each of the classes (a) through (z) above against the wrapper's terminal `RESULT`, its per-check key values and its exit code, and it reports an explicit pass/fail tally so a partial run cannot read as a pass
+
+#### Scenario: The total-swallow and partial-swallow cases are both pinned
+- **GIVEN** two hermetic fixtures under the narrowed configuration — one whose census is a `Cargo.lock` bump beside a prose edit, one whose census is the same lockfile beside a `.rs` file
+- **WHEN** the regression check runs the wrapper against each
+- **THEN** the first reports `census-exclusion: FAIL` naming the EMPTY diff with `RESULT: FAIL` and nothing enqueued, the second reports `census-exclusion: NOTICE` with `RESULT: PASS` and IS enqueued, and neither can drift into the other without failing the fast loop
+
+#### Scenario: A hostile-path case asserts the verdict, not one intermediate key
+- **WHEN** the suite's hostile-path cases (spaces, a literal quote, a space-bearing directory, a non-ASCII name) are inspected
+- **THEN** each asserts the terminal `RESULT:` and the `prompt-content:` value in addition to `census-exclusion:`, and the stub emits a VALID JSON record for a quote-bearing prompt so the record cannot degrade and mask the comparison
+
+#### Scenario: The zero-subject refusal is driven directly against the check
+- **GIVEN** that the pre-enqueue total-swallow FAIL makes a zero-subject `prompt-content:` unreachable through the wrapper
+- **WHEN** the regression check exercises the check function directly, in the real files, with every census code path built-in-excluded
+- **THEN** it asserts `FAIL (no code census path was checkable — a 0/0 is never a pass)` and asserts the ABSENCE of any `PASS (0/0` form, so removing the upstream FAIL cannot silently restore the vacuous pass
 
 #### Scenario: Executables under a docs artifact directory are enqueued, prose under docs is not
 - **GIVEN** two hermetic fixtures under the narrowed configuration — one whose diff is `.py`/`.sh`/`.bt` files under `docs/reports/x-artifacts/`, one whose diff is only markdown under `docs/`
