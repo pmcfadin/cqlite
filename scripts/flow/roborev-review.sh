@@ -86,6 +86,14 @@
 #   vacuity-tier1: / vacuity-tier2: / findings: / roborev-exit: / log:
 #   RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 #
+# EVERY value is ONE LINE, guaranteed (#3229 blocker 2). Diff-derived text reaches these
+# values — `census-exclusion:` names swallowed census paths — and a census path is
+# attacker-controlled, so a NEWLINE-bearing filename could otherwise make a value span
+# lines and inject its own `key:` lines, up to a forged `RESULT: PASS`. Every value goes
+# through `emit_kv` and every DETAILS line through `finish`, both of which neutralise
+# control characters into visible escapes (`\n`, `\r`, `\t`, else `\ooo`). See
+# `roborev_safe_line` below.
+#
 # Per-check values, as built:
 #   push-assert / census-check / code-free / review-completed  PASS | FAIL (...) | SKIP
 #   census-exclusion  PASS (<k>/<n> code census paths survive the effective exclusion
@@ -511,40 +519,103 @@ RESULT="FAIL"
 DETAILS=()
 EMITTED=0
 
+# ============ THE OUTPUT NEUTRALISATION BOUNDARY (#3229 round 5, blocker 2) ============
+# NO PATH MAY REACH A SUMMARY VALUE UN-NEUTRALISED, and this is the ONE place that is
+# enforced — at the single emit boundary, not per interpolation site.
+#
+# WHY. The block is LINE-ORIENTED and safety-critical: every reader (flow-closer, the
+# flow-* skills, this repo's own guard suite) retains only the block and greps it by
+# `^<key>: `, `^RESULT: ` deciding whether a merge proceeds. Diff-derived text reaches
+# those values — `census-exclusion:` names each swallowed census path, the NOTICE/FAIL
+# DETAILS prose names paths and the pattern that ate them — and a census path is
+# ATTACKER-CONTROLLED: it is whatever a PR branch chose to track. A filename containing a
+# NEWLINE therefore let a value SPAN LINES and introduce arbitrary `key:` lines, up to a
+# FORGED `RESULT: PASS`, into the block whose whole purpose is to be trusted. Configured
+# `exclude_patterns` are the same class of input (a TOML basic string `"a\nb"` decodes to a
+# real newline, and a PR may carry its own `.roborev.toml`).
+#
+# WHY CENTRALLY, AND NOT AT EACH SITE. A per-site escape is a list to keep complete, and
+# the next value that grows a path interpolation silently reopens the hole. Every value in
+# the block goes through `emit_kv`, and every DETAILS line goes through `finish`, so the
+# property is TOTAL and holds for keys that do not exist yet. The regression suite asserts
+# it structurally against `emit_summary` itself, so a raw `printf 'key: %s\n'` FAILs.
+#
+# WHAT IT DOES. Control characters are replaced with VISIBLE ESCAPES (`\n`, `\r`, `\t`,
+# else `\ooo` octal). Quotes, backslashes and spaces are deliberately LEFT ALONE: the block
+# names swallowed paths by their REAL BYTES (a path with a literal `"` must still read as
+# one — `docs/.../odd "q" name.sh`, pinned by case (cx6b)), and no non-control byte can
+# start a new line or a new `key:`.
+#
+# THE DECLARED RESIDUAL, stated rather than implied: the rendering is NOT reversible — a
+# path holding the two literal bytes `\` `n` renders identically to one holding a newline.
+# That is display fidelity, not a safety property, and the guarantee this boundary makes is
+# exactly "no value spans a line and no `key:` can be introduced". A caller needing the
+# exact bytes reads them from git, not from a summary block.
+roborev_safe_line() { # roborev_safe_line <text> -> sets _rx_safe
+  local s="$1" out="" i n ch
+  _rx_safe="$s"
+  case "$s" in
+    *[[:cntrl:]]*) ;;
+    *) return 0 ;;
+  esac
+  n=${#s}
+  for ((i = 0; i < n; i++)); do
+    ch="${s:$i:1}"
+    case "$ch" in
+      $'\n') out+='\n' ;;
+      $'\r') out+='\r' ;;
+      $'\t') out+='\t' ;;
+      [[:cntrl:]]) printf -v ch '\\%03o' "'$ch"; out+="$ch" ;;
+      *) out+="$ch" ;;
+    esac
+  done
+  _rx_safe="$out"
+}
+
+emit_kv() { # emit_kv <key> <value> — the ONLY way a value enters the block
+  roborev_safe_line "$2"
+  printf '%s: %s\n' "$1" "$_rx_safe"
+}
+
 emit_summary() {
   printf '==== ROBOREV REVIEW SUMMARY ====\n'
-  printf 'repo: %s\n' "$REPO"
-  printf 'branch: %s\n' "$BRANCH"
-  printf 'base: %s\n' "$BASE"
-  printf 'head-sha: %s\n' "${HEAD_SHA:--}"
-  printf 'reviewed-sha: %s\n' "$REVIEWED_SHA"
-  printf 'job: %s\n' "$JOB"
-  printf 'model: %s\n' "$MODEL_LINE"
-  printf 'census: %s\n' "$CENSUS"
-  printf 'tokens: %s\n' "$TOKENS"
-  printf 'push-assert: %s\n' "$PUSH_ASSERT"
-  printf 'census-check: %s\n' "$CENSUS_CHECK"
-  printf 'code-free: %s\n' "$CODE_FREE"
+  emit_kv 'repo' "$REPO"
+  emit_kv 'branch' "$BRANCH"
+  emit_kv 'base' "$BASE"
+  emit_kv 'head-sha' "${HEAD_SHA:--}"
+  emit_kv 'reviewed-sha' "$REVIEWED_SHA"
+  emit_kv 'job' "$JOB"
+  emit_kv 'model' "$MODEL_LINE"
+  emit_kv 'census' "$CENSUS"
+  emit_kv 'tokens' "$TOKENS"
+  emit_kv 'push-assert' "$PUSH_ASSERT"
+  emit_kv 'census-check' "$CENSUS_CHECK"
+  emit_kv 'code-free' "$CODE_FREE"
   # Immediately after `code-free:` — mirroring the pre-enqueue evaluation order, and
   # part of the block's FIXED key contract (#3229).
-  printf 'census-exclusion: %s\n' "$CENSUS_EXCLUSION"
-  printf 'job-record: %s\n' "$JOB_RECORD"
-  printf 'sha-assert: %s\n' "$SHA_ASSERT"
-  printf 'review-completed: %s\n' "$REVIEW_COMPLETED"
-  printf 'prompt-content: %s\n' "$PROMPT_CONTENT"
-  printf 'vacuity-tier1: %s\n' "$TIER1"
-  printf 'vacuity-tier2: %s\n' "$TIER2"
-  printf 'findings: %s\n' "$FINDINGS"
-  printf 'roborev-exit: %s\n' "$ROBOREV_EXIT"
-  printf 'log: %s\n' "$LOG"
-  printf 'RESULT: %s\n' "$RESULT"
+  emit_kv 'census-exclusion' "$CENSUS_EXCLUSION"
+  emit_kv 'job-record' "$JOB_RECORD"
+  emit_kv 'sha-assert' "$SHA_ASSERT"
+  emit_kv 'review-completed' "$REVIEW_COMPLETED"
+  emit_kv 'prompt-content' "$PROMPT_CONTENT"
+  emit_kv 'vacuity-tier1' "$TIER1"
+  emit_kv 'vacuity-tier2' "$TIER2"
+  emit_kv 'findings' "$FINDINGS"
+  emit_kv 'roborev-exit' "$ROBOREV_EXIT"
+  emit_kv 'log' "$LOG"
+  emit_kv 'RESULT' "$RESULT"
 }
 
 finish() { # finish <PASS|FAIL|NOTHING-TO-REVIEW> <exit-code>
   RESULT="$1"
-  if [ "${#DETAILS[@]}" -gt 0 ]; then
-    printf '%s\n' "${DETAILS[@]}"
-  fi
+  # DETAILS go through the SAME neutralisation as the block's values: they are printed to
+  # the same stdout a reader greps for `^RESULT: `, so a newline-bearing path in a DETAILS
+  # line could forge a verdict just as well as one in a value.
+  local _d
+  for _d in ${DETAILS[@]+"${DETAILS[@]}"}; do
+    roborev_safe_line "$_d"
+    printf '%s\n' "$_rx_safe"
+  done
   EMITTED=1
   emit_summary
   exit "$2"
