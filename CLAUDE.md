@@ -239,6 +239,21 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   reference files —
   [validation playbook](https://pmcfadin.github.io/cqlite/agents-developing/validation-playbook/)
 - Never let a dataset-dependent test pass on an empty dataset (0-rows-when-present = failure)
+- **Resolve fixture roots per TABLE, and assert per CASE (issue #3220)**: a lane that picks its
+  corpus root by KEYSPACE (`root.join(keyspace).is_dir()`) and commits to it can pass without ever
+  running — a `CQLITE_DATASETS_ROOT` holding `test_da/` but not the git-committed
+  `test_da/multiclustering_table-*` made the #3032 case skip silently behind a green suite. Use
+  `cqlite-core/tests/support/datasets_root.rs::sstables_root_for_table`, which walks EVERY candidate
+  root (env, then checkout) for that table's `*-Data.db`. And never terminate a corpus loop with a
+  suite-wide `assert!(ran > 0)`: it cannot see one case skipping behind its siblings — assert per
+  case (committed fixtures = `must_run`, fail-closed unconditionally).
+  Resolve by EVIDENCE, never by a preference ordering: neither root is a superset — a fleet
+  `/data/datasets` measured 144 `*-Data.db` over 122 tables yet lacks the one committed
+  `test_da/multiclustering_table`, which the checkout's 31 parity references carry — so *any* fixed
+  env-first/checkout-first rule picks wrong for one set of tables. That dissolves #3104's "prefer
+  the already-exported root" fix for the lanes on this resolver; **#3104 stays open** for what the
+  resolver does not reach (whole-corpus `#2078` preflight, count-naming diagnostics, `--lite`
+  small-corpus warning, and the doctrine text still telling agents to override the exported root).
 - **Two parity oracles (issue #1742)**: *physical-dump parity* (the `*-Data.db.jsonl` sstabledump
   goldens) enumerates every on-disk cell INCLUDING tombstones/deleted/expired-TTL rows, so it CANNOT
   catch a read-time-reconciliation bug (both sides keep the shadowed rows → green while a real
