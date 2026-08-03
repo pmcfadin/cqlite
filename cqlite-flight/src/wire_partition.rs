@@ -156,6 +156,11 @@ pub(crate) fn partition_for_wire(
 /// The unconditional half of the guarantee: it measures the encoded body, not an
 /// estimate of it, so it holds regardless of what the encoder did with the target
 /// or how conservatively [`slice_payload_bytes`] measured the input.
+// The `Err` is `tonic::Status` because this function's output IS the `DoGetStream`
+// item type mandated by the arrow-flight `FlightService` trait; boxing it (clippy's
+// suggestion) would violate that contract — same rationale as
+// `streaming::encode_do_get` (#2856).
+#[allow(clippy::result_large_err)]
 pub(crate) fn guard_body_within_ceiling(
     data: FlightData,
     probe: &StreamProbe,
