@@ -282,6 +282,21 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   shape `diff --git a/a b.txt b/a b.txt` no regex can split
 #   docs-nonascii-name  docs/reports/x-artifacts/é.sh + a .rs file — the C-QUOTED header
 #                   shape `diff --git "a/\303\251.sh" "b/..."` git emits for non-ASCII
+#   docs-nonascii-prose  docs/é notes.md + a .rs file — a NON-ASCII PROSE path. The only
+#                   pre-existing non-ASCII fixture is a `.sh`, i.e. CODE **by accident**,
+#                   which is precisely why nothing covered the census CLASSIFYING a quoted
+#                   path by its QUOTED spelling (ext `md"`, prefix `"docs/…`)
+#   docs-nonascii-artifact  docs/reports/x-artifacts/é.json + a .rs file — the same
+#                   misclassification for a docs-scoped ARTIFACT (ext `json"`)
+#   rename-space    a rename where BOTH names carry a space (`docs/storage engine/old
+#                   probe.sh` → `new probe.sh`): the header `diff --git a/<sp> b/<sp>`
+#                   is unsplittable by any `[^ ]+` regex AND is not a same-path header
+#   rename-mixed    a rename where only ONE side needs quoting (probe.sh → `é probe.sh`),
+#                   producing the MIXED header `diff --git a/… "b/…"`. Mixed headers occur
+#                   ONLY on renames, so they were unreachable by a both-sides-quoted parse
+#   newline-name    a file literally named `a` beside one named `a<LF>b.rs` — a newline in
+#                   a path, which a newline-DELIMITED prompt path set splits into two
+#                   records so `grep -Fxq` treats them as ALTERNATIVES (a false PASS)
 #   cargo-lock-and-docs-exec  the same lockfile PLUS a docs/ harness .sh, so a
 #                   CONFIGURED swallow and a BUILT-IN one occur in one run
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
@@ -311,6 +326,24 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
   if [ "$narrow" -eq 1 ]; then
     git_q "$work" config "remote.$remote.fetch" "+refs/heads/main:refs/remotes/$remote/main"
   fi
+  # PRE-BRANCH setup: a RENAME is only expressible in `origin/main...HEAD` when the OLD
+  # path exists at the BASE. Adding it on the feature branch instead would make the range
+  # a plain addition and the rename header unreachable — the fixture would then pin
+  # nothing, which is the failure mode this whole family exists to prevent.
+  case "$mode" in
+    rename-space)
+      mkdir -p "$work/docs/storage engine"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/storage engine/old probe.sh"
+      git_q "$work" add "docs/storage engine/old probe.sh"
+      git_q "$work" commit -q -m 'base: a space-bearing harness script'
+      ;;
+    rename-mixed)
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/probe.sh"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'base: an ASCII harness script'
+      ;;
+  esac
   git_q "$work" push -q "$remote" main
 
   git_q "$work" checkout -q -b feature main
@@ -457,6 +490,45 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add docs main.rs
       git_q "$work" commit -q -m 'a code path with a non-ASCII name'
+      ;;
+    docs-nonascii-prose)
+      # A NON-ASCII PROSE path. `git diff --numstat` (no `-z`) renders it C-QUOTED, so a
+      # census that classifies the QUOTED spelling reads the extension as `md"` and the
+      # prefix as `"docs/…` — and calls a MARKDOWN FILE CODE. The configuration then
+      # (correctly) excludes it via `*.md`, and `census-exclusion:` reports a CONFIGURED
+      # swallow ⇒ FAIL, pre-enqueue, on an ordinary docs+code branch.
+      mkdir -p "$work/docs"
+      printf '# notes\n' >"$work/docs/é notes.md"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a non-ASCII prose path beside code'
+      ;;
+    docs-nonascii-artifact)
+      # The same misclassification for a docs-scoped ARTIFACT: quoted, the extension reads
+      # `json"`, so the artifact classifies CODE while `docs/**/*.json` excludes it.
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '{"k":1}\n' >"$work/docs/reports/x-artifacts/é.json"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a non-ASCII docs artifact beside code'
+      ;;
+    rename-space)
+      git_q "$work" mv "docs/storage engine/old probe.sh" "docs/storage engine/new probe.sh"
+      git_q "$work" commit -q -m 'rename a space-bearing harness script'
+      ;;
+    rename-mixed)
+      git_q "$work" mv "docs/reports/x-artifacts/probe.sh" "docs/reports/x-artifacts/é probe.sh"
+      git_q "$work" commit -q -m 'rename an ASCII script to a non-ASCII name'
+      ;;
+    newline-name)
+      # A path with a LITERAL NEWLINE, beside a path equal to its FIRST LINE. That pairing
+      # is the whole point: a newline-delimited prompt path set + `grep -Fxq` turns the
+      # two-line pattern into two ALTERNATIVES, so the presence of `a` "proves" the
+      # presence of `a<LF>b.rs` — a false PASS on a file the reviewer never received.
+      printf 'plain\n' >"$work/a"
+      printf 'fn odd() {}\n' >"$work/$(printf 'a\nb.rs')"
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'a newline-bearing path beside its first line'
       ;;
     cargo-lock-and-docs-exec)
       # BOTH causes at once: a built-in eats Cargo.lock, a configured `docs/**` eats the
@@ -1153,6 +1225,102 @@ assert_verdict 'case (cx6d)' PASS 0
 assert_says 'case (cx6d) the non-ASCII path is a surviving CODE census path' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_says 'case (cx6d) prompt-content recognises the C-quoted diff header' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6d) prompt-content does not false-FAIL on an octal-escaped path' '^prompt-content: FAIL'
+
+printf '== case (cx6e): a NON-ASCII PROSE path is classified by its RAW bytes, not its quoted spelling ==\n'
+reset_stub
+# #3229 round 4, BLOCKER F1. The census read `git diff --numstat` WITHOUT `-z`, so this
+# path arrived C-QUOTED and was classified by that spelling: extension `md"` (not `md`),
+# prefix `"docs/…` (not `docs/`) ⇒ a MARKDOWN FILE counted as CODE. `*.md` then legitimately
+# excludes it and `census-exclusion:` reported a CONFIGURED swallow ⇒ FAIL, pre-enqueue, on
+# an ORDINARY docs+code branch. REPRODUCED against the repo's own tracked
+# `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`.
+# The pre-existing non-ASCII fixture is a `.sh` — CODE by accident — which is why no case
+# covered this. This one is deliberately PROSE.
+work=$(make_fixture case_cx6e docs-nonascii-prose)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx6e)' PASS 0
+assert_says 'case (cx6e) the non-ASCII .md is classified NON-code, so only main.rs is code' '^census-exclusion: PASS \(1/1 code census paths survive'
+assert_lacks 'case (cx6e) no false configured-swallow FAIL on a quoted prose path' '^census-exclusion: FAIL'
+assert_says 'case (cx6e) prompt-content has exactly the one code path to look for' '^prompt-content: PASS \(1/1 code census paths present\)$'
+
+printf '== case (cx6f): a NON-ASCII docs ARTIFACT is classified by its RAW bytes too ==\n'
+reset_stub
+# The same defect for the docs-scoped ARTIFACT half of the classification: quoted, the
+# extension reads `json"`, so a report artifact counted as CODE while `docs/**/*.json`
+# excludes it ⇒ the same false pre-enqueue FAIL on any report PR carrying a non-ASCII name.
+work=$(make_fixture case_cx6f docs-nonascii-artifact)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx6f)' PASS 0
+assert_says 'case (cx6f) the non-ASCII .json under docs/ is a NON-code census path' '^census-exclusion: PASS \(1/1 code census paths survive'
+assert_lacks 'case (cx6f) no false configured-swallow FAIL on a quoted artifact path' '^census-exclusion: FAIL'
+
+printf '== case (cx6g): a RENAME whose BOTH names carry a space is reachable ==\n'
+reset_stub
+# #3229 round 4, BLOCKER F2. The census runs `--no-renames` (two paths) while the
+# reviewer's diff has rename detection ON (confirmed: `--no-renames` is absent from the
+# roborev binary's strings), emitting ONE header `diff --git a/<old> b/<new>`. With a space
+# in each name, step (a)'s `[^ ]+` regex cannot split it, step (b) requires BOTH sides
+# quoted, and the literal fallback only probed the SAME-path header — so BOTH census sides
+# were reported absent and `prompt-content:` FAILed a correct review.
+work=$(make_fixture case_cx6g rename-space)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/storage engine/old probe.sh b/docs/storage engine/new probe.sh\nsimilarity index 100%'
+run_wrapper "$work"
+assert_verdict 'case (cx6g)' PASS 0
+assert_says 'case (cx6g) both space-bearing rename sides survive the exclusion set' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_says 'case (cx6g) one rename header covers both space-bearing census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6g) prompt-content does not false-FAIL on a space-bearing rename' '^prompt-content: FAIL'
+
+printf '== case (cx6h): a MIXED-QUOTED rename header (only one side quoted) is reachable ==\n'
+reset_stub
+# BROADER than reported (round 4): when only ONE side needs quoting git emits
+# `diff --git a/<ascii> "b/<quoted>"`, which neither the unquoted regex nor the
+# both-sides-quoted parse can read. Mixed headers occur ONLY on renames, so this shape was
+# structurally unreachable. (Doubled backslashes: the stub renders the prompt with
+# `printf %b`, so `\\303` becomes the single-backslash octal escape git writes.)
+work=$(make_fixture case_cx6h rename-mixed)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/probe.sh "b/docs/reports/x-artifacts/\\303\\251 probe.sh"\nsimilarity index 100%'
+run_wrapper "$work"
+assert_verdict 'case (cx6h)' PASS 0
+assert_says 'case (cx6h) both sides of the mixed-quoted rename survive' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_says 'case (cx6h) the mixed-quoted rename header covers both census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6h) prompt-content does not false-FAIL on a mixed-quoted header' '^prompt-content: FAIL'
+
+printf '== case (cx6i): a NEWLINE-bearing census path cannot be "proved present" by its first line ==\n'
+reset_stub
+# #3229 round 4, F3 (nit, fixed inside F2's edit). The prompt path set was
+# NEWLINE-DELIMITED and membership was `grep -Fxq`, so the census path `a<LF>b.rs` became
+# the two-alternative pattern {`a`, `b.rs`} and the presence of `a` alone reported
+# `prompt-content: PASS (2/2 present)` — a genuine FALSE PASS on a file the reviewer never
+# received. Membership is now judged PER HEADER in bash, with no delimiter at all.
+work=$(make_fixture case_cx6i newline-name)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/a b/a'
+run_wrapper "$work"
+assert_verdict 'case (cx6i)' FAIL 1
+assert_says 'case (cx6i) the newline path is reported ABSENT, not implied by its first line' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+
+printf '== case (cx6j): the same newline-bearing path IS matched when its header is present ==\n'
+reset_stub
+# The other direction, so (cx6i) cannot be satisfied by a blanket "newline ⇒ absent" rule:
+# with the C-quoted header git really emits for such a path, it must count as PRESENT.
+work=$(make_fixture case_cx6j newline-name)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/a b/a\ndiff --git "a/a\\nb.rs" "b/a\\nb.rs"'
+run_wrapper "$work"
+assert_verdict 'case (cx6j)' PASS 0
+assert_says 'case (cx6j) the quoted newline header counts as present' '^prompt-content: PASS \(2/2 code census paths present\)$'
 
 printf '== case (cx6b): the same odd-named path is named RAW when a blanket glob eats it ==\n'
 reset_stub
