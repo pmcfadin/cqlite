@@ -1,0 +1,38 @@
+==== WS0 #3217 PART B RAW-CAPTURE INVENTORY ====
+Bulky raw captures are NOT committed. They live on the measurement box at the
+paths below; everything derived from them (SVG, folded text, attribution tables,
+counter CSVs, the consolidated analysis) IS committed under partB-results/.
+Box: ip-172-31-5-109   kernel 6.17.0-1019-aws   recorded 2026-08-03T01:07:33Z
+
+SIZE           PATH                                                       KIND
+9.0M           /data/ws0/profiles/oncpu-s1-N1/perf.data                  oncpu
+127M           /data/ws0/profiles/oncpu-s1-N1/perf.script           oncpu-script
+11M            /data/ws0/profiles/oncpu-s1-N8/perf.data                  oncpu
+150M           /data/ws0/profiles/oncpu-s1-N8/perf.script           oncpu-script
+11M            /data/ws0/profiles/oncpu-s1-N16/perf.data                 oncpu
+149M           /data/ws0/profiles/oncpu-s1-N16/perf.script          oncpu-script
+17M            /data/ws0/profiles/oncpu-s6-N1/perf.data                  oncpu
+185M           /data/ws0/profiles/oncpu-s6-N1/perf.script           oncpu-script
+61M            /data/ws0/profiles/oncpu-s6-N8/perf.data                  oncpu
+852M           /data/ws0/profiles/oncpu-s6-N8/perf.script           oncpu-script
+61M            /data/ws0/profiles/oncpu-s6-N16/perf.data                 oncpu
+889M           /data/ws0/profiles/oncpu-s6-N16/perf.script          oncpu-script
+164M           /data/ws0/profiles/sched2-s6-N1/sched.data           sched-switch
+552M           /data/ws0/profiles/sched2-s6-N16/sched.data          sched-switch
+98M            /data/ws0/profiles/sched2-s1-N1/sched.data           sched-switch
+253M           /data/ws0/profiles/offcpu2-s6/ (offcpu-N*.folded, raw)     offcpu
+42M            /data/ws0/profiles/offcpu2-s1/ (offcpu-N*.folded, raw)     offcpu
+
+Superseded round-1 off-CPU captures (bcc's stock 10240-key counts map SATURATED,
+stacks silently dropped) are retained for provenance but MUST NOT be quoted:
+  31M          /data/ws0/profiles/offcpu-s6/
+  36M          /data/ws0/profiles/offcpu-s1/
+
+Superseded round-1 bpftrace park-count captures (~50% of user frames left as raw
+hex; superseded by the perf sched:sched_switch runs, which symbolize fully):
+  820K         /data/ws0/profiles/park-s6-N1/park-count.txt
+  5.6M         /data/ws0/profiles/park-s6-N16/park-count.txt
+  692K         /data/ws0/profiles/park-s1-N1/park-count.txt
+
+Loadgen step records + server logs per capture: /data/ws0/logs/<label>/
+Driver progress ledger: /data/ws0/logs/driver-partB/progress.txt
