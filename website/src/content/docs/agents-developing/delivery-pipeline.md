@@ -466,8 +466,12 @@ certified like any other code change (#3229). The pre-enqueue **`census-exclusio
 naming the swallowed paths and the pattern responsible, when the **configured** set would swallow census code
 — which is exactly what a blanket `docs/**` did to 33 harness executables on PR #3222. Its verdicts follow
 one rule: **FAIL where the author can act; NOTICE where only the information is actionable; never silence**
-— so a *configured* swallow FAILs, a *pinned* roborev built-in (`**/Cargo.lock`, `**/go.sum`, …) is a
-non-failing NOTICE that still names the path, and the built-in set *diverging from the v0.61.2 pin* FAILs.
+— so a *configured* swallow FAILs, a *pinned* roborev built-in (`**/Cargo.lock`, `**/go.sum`, …) eating
+**some** census code is a non-failing NOTICE that still names the path, and the built-in set *diverging
+from the v0.61.2 pin* FAILs. A built-in eating the **WHOLE** code census FAILs too — the reviewer would get
+an EMPTY prompt, so the verdict certifies nothing, which is the same condition `code-free:` fails on; the
+boundary is TOTAL vs PARTIAL. That is why a lockfile-only dependency bump is **not** roborev-certifiable,
+and why `prompt-content:` can never print a `PASS (0/0 …)`.
 Note also that **a `.roborev.toml` change cannot certify itself**: roborev reads `exclude_patterns` from the
 repo **root path** and snapshots it at daemon start, so a worktree edit is invisible and the demonstration
 belongs after the merge — generally, *any PR whose subject is a config a daemon or gate reads from root

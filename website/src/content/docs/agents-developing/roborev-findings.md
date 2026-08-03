@@ -218,13 +218,36 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    | Cause | Verdict | Why |
    |---|---|---|
    | A **configured** pattern swallows census CODE | **FAIL** | The remedy is a one-token edit to a **named** file. Act before paying for a review round. |
-   | A **pinned built-in** swallows census CODE | **NOTICE** | There is **no** remedy: the deny-list is compiled in, with no opt-out and no negation form. A guard that fires on a legitimate change (a routine `Cargo.lock` touch) with **no available fix** is the guard that gets **disabled** — which is how #3229 happened. So: paths named loudly in the value line, run proceeds, and `prompt-content:` is told not to expect them. |
+   | A **pinned built-in** swallows **SOME** census CODE | **NOTICE** | There is **no** remedy: the deny-list is compiled in, with no opt-out and no negation form. A guard that fires on a legitimate change (a routine `Cargo.lock` touch) with **no available fix** is the guard that gets **disabled** — which is how #3229 happened. So: paths named loudly in the value line, run proceeds, and `prompt-content:` is told not to expect them. |
+   | A **pinned built-in** swallows the **WHOLE** code census | **FAIL**, pre-enqueue | Nothing reaches the reviewer, so a verdict on an **EMPTY prompt** certifies nothing. Not an exception to the row above — the **same** rule reaching a case that row does not decide, and it *does* have a remedy: the one `code-free:` already prescribes (verify another way; record primary-source verification in the PR). |
    | The **live built-in set diverges from the pin** | **FAIL** | This one *does* have a remedy — re-extract, update the pin, and **judge** the new built-in. It is a **mechanism** change, which the version pin exists to catch rather than absorb: a NOTICE here would silently swallow an upgrade that began excluding `*.rs` or `scripts/**`, with the failure looking like normal operation. |
 
    "Never silence" is the load-bearing third clause. An **unobservable** built-in set (no roborev on
    PATH, an unreadable binary) reads `built-in-set: UNAVAILABLE` **in the value line** — never as an
    unstated assumption of agreement. `NOTICE*` sits deliberately outside the wrapper's failing-capable
    scan (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`), so a NOTICE cannot red `RESULT:`; both FAIL forms can.
+
+   The **TOTAL vs PARTIAL** boundary is the whole distinction, and it was measured rather than
+   theorised. Left as a NOTICE, a hermetic `Cargo.lock` + `README.md` fixture produced
+   `census-exclusion: NOTICE (0/1 survive)`, `prompt-content: PASS (0/0 code census paths present)` and
+   `RESULT: PASS`, exit 0 — **a vacuous pass textually identical to a genuine one**, on which
+   `flow-closer` would arm `--auto`. Its trigger is ordinary: any dependency-bump branch whose only
+   non-prose file is a lockfile. `code-free:` does not catch it (a `.lock` extension classifies as
+   CODE), tier 1 greps a phrase the reviewer need not emit, and tier 2 is `UNAVAILABLE`.
+
+   Two follow-throughs on `prompt-content:`, the wrapper's strongest deterministic anti-vacuity key:
+
+   - **A `0/0` is never a pass.** With no census path left to look for, the key has no subject and so no
+     verdict to give: it FAILs, and it can never print `PASS (0/0 …)`.
+   - **Paths are compared NORMALISED, in every header shape git emits.** The census C-quotes a path with
+     a quote, a backslash or a non-ASCII byte; the prompt's headers may be unquoted, **space-bearing**
+     (`diff --git a/a b.txt b/a b.txt`) or **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`). Both sides
+     run through the same quoted-path decoder `census-exclusion:` uses, and a space-bearing header —
+     unsplittable by any regex — is matched by probing the literal header line. Accepting only
+     `a/[^ ]+ b/[^ ]+` **false-FAILED** correct input (measured: `census-exclusion: PASS (2/2 survive)`
+     beside `prompt-content: FAIL (1/2 absent)`), and a key that reds on correct input is the key agents
+     learn to waive. This repo already tracks 40 space-bearing paths under `docs/`, including the
+     directory `docs/storage engine/`.
 
    #### A `.roborev.toml` change cannot certify itself — three properties, one generalization
 

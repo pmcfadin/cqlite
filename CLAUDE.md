@@ -434,8 +434,8 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   **The verdict split follows ONE rule, and it generalizes beyond this key — apply it to any call of
   this shape without asking: FAIL where the author can act; NOTICE where only the information is
   actionable; never silence.** Concretely: a *configured* pattern swallowing census code is a **FAIL**
-  (the remedy is a one-token edit to a named file); a *pinned built-in* swallowing census code is a
-  **NOTICE** (there is **no** remedy — the deny-list is compiled in with no opt-out or negation form, and
+  (the remedy is a one-token edit to a named file); a *pinned built-in* swallowing **SOME** census code is
+  a **NOTICE** (there is **no** remedy — the deny-list is compiled in with no opt-out or negation form, and
   a guard that fires on a legitimate change like a routine `Cargo.lock` touch with no available fix is
   the guard that gets **disabled**, which is how #3229 happened); the *live built-in set diverging from
   the pin* is a **FAIL** (that one HAS a remedy — re-extract, re-pin, judge the new built-in — and it is
@@ -443,6 +443,21 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   unobservable built-in set reads `UNAVAILABLE` **in the value line**, never as an unstated assumption of
   agreement. `NOTICE*` is deliberately outside the wrapper's failing-capable scan
   (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`).
+  **A built-in swallowing the WHOLE code census is a FAIL, and that is the same rule, not an exception**:
+  with nothing surviving, the reviewer gets an **EMPTY prompt**, so any verdict certifies nothing — the
+  identical condition `code-free:` already FAILs pre-enqueue for a prose-only census, and it carries the
+  identical remedy (verify another way; record primary-source verification in the PR). The boundary is
+  **TOTAL vs PARTIAL** and nothing else. Left as a NOTICE it was MEASURED to produce
+  `prompt-content: PASS (0/0 code census paths present)` and `RESULT: PASS`, exit 0 — a vacuous pass
+  **textually identical to a genuine one** — on any dependency-bump branch whose only non-prose file is a
+  lockfile (`code-free:` does not catch it: a `.lock` extension classifies as CODE). Hence also:
+  **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give — and it
+  compares census paths against prompt headers **NORMALISED** (both sides through the C-quoted-path
+  decoder), recognising every header shape git emits: unquoted, **space-bearing**
+  (`diff --git a/a b.txt b/a b.txt` — this repo tracks 40 space-bearing paths under `docs/`), and
+  **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`). Accepting only `a/[^ ]+ b/[^ ]+` false-FAILED the
+  wrapper's strongest anti-vacuity key, and a key that reds on correct input is the key agents learn to
+  waive.
   **A `.roborev.toml` change cannot certify itself (#3229) — three properties, one generalization:**
   **(1)** roborev's daemon binds a repository by its **`repos.root_path`** and reads **that ROOT
   checkout's** `.roborev.toml` — a *worktree* `.roborev.toml` edit is **invisible** to it, so under
