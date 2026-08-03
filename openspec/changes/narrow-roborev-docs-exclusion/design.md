@@ -388,6 +388,35 @@ Two reliable signals are used instead:
 **Declared residual:** a NEW pattern that has a PINNED one as a prefix (`**/Cargo.lock.bak`) is invisible
 to (1) and only moves the count in (2).
 
+###### The divergence check found a real bug in its first live run — in itself
+
+Worth recording, because the failure mode is one of this repo's named blind spots reproduced in shell.
+`ROBOREV_BUILTIN_EXCLUDES` was first written as a space-separated STRING and iterated unquoted, so bash
+**pathname-expanded** it: `**/package-lock.json` became the repo-relative `website/package-lock.json`
+(without `globstar`, `**` behaves as `*`). The presence check then looked for
+`:(exclude,glob)website/package-lock.json` in the binary, did not find it, and reported
+
+```
+census-exclusion: FAIL (roborev built-in exclude set DIVERGED from the pinned v0.61.2 set:
+  pinned pattern(s) no longer present in the binary: website/package-lock.json)
+```
+
+— a false FAIL on every run. This is the same hazard the corroboration code already warns about for
+`roborev config get` output ("NEVER an unquoted `for item in $out`, which would PATHNAME-EXPAND a pattern
+like `*.md` against `$PWD`"); the fix is a bash **array**, which removes it structurally instead of relying
+on remembering to quote.
+
+**Why the hermetic suite did not catch it.** The regression suite mirrors the pinned set in its own
+constant so it can plant literals into a stub binary — and that mirror was *also* a space-separated string
+iterated unquoted. **Both sides made the identical mistake**, so the planted literals and the presence
+check agreed with each other and `built-in-set: OK` passed. That is #3042's rule (a symmetric
+producer/consumer test is invariant to a uniform error, and two defects that cancel are undetectable *by
+construction*) reproduced in shell rather than in SSTable framing. What exposed it was the only asymmetric
+oracle available: running the check against the **real roborev binary**, which carries the pattern
+verbatim. Both constants are now arrays, and the structural assertions pin that — so a revert to a string
+makes the test's (correct) planted literal un-findable and `cx19d` fails, which is the detector the mirror
+should have been all along.
+
 ##### D2b-iii — the follow-through: `prompt-content:` must not re-report a known absence
 
 Making the built-in swallow a NOTICE would have been pointless on its own, because `prompt-content:` would

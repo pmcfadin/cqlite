@@ -95,12 +95,22 @@ CODE_FREE_ARTIFACT_PREFIXES="docs/"
 # MESSAGED DISTINCTLY, deliberately: a built-in swallow is NOT a defect in this repo's
 # configuration and editing `.roborev.toml` cannot fix it, so the two causes must never
 # share a remedy line.
-ROBOREV_BUILTIN_EXCLUDES="\
-**/.beads/** **/.cache/** **/.gocache/** **/.kata.local.toml \
-**/Cargo.lock **/cargo.lock **/Gemfile.lock **/Package.resolved **/Pipfile.lock \
-**/Podfile.lock **/bun.lock **/bun.lockb **/composer.lock **/flake.lock \
-**/go.sum **/mix.lock **/package-lock.json **/packages.lock.json **/pdm.lock \
-**/pnpm-lock.yaml **/poetry.lock **/pubspec.lock **/uv.lock **/yarn.lock"
+#
+# DECLARED AS AN ARRAY, NOT A SPACE-SEPARATED STRING, and that is load-bearing: iterating
+# an unquoted string performs PATHNAME EXPANSION, so `**/package-lock.json` silently
+# became the repo-relative `website/package-lock.json` — which then read as "a pinned
+# pattern is no longer present in the binary" and FAILed every run. (Caught by this very
+# check running against the real binary. The identical hazard is called out for
+# `roborev config get` parsing below; an array removes it structurally rather than by
+# remembering to quote.)
+ROBOREV_BUILTIN_EXCLUDES=(
+  '**/.beads/**' '**/.cache/**' '**/.gocache/**' '**/.kata.local.toml'
+  '**/Cargo.lock' '**/cargo.lock' '**/Gemfile.lock' '**/Package.resolved'
+  '**/Pipfile.lock' '**/Podfile.lock' '**/bun.lock' '**/bun.lockb'
+  '**/composer.lock' '**/flake.lock' '**/go.sum' '**/mix.lock'
+  '**/package-lock.json' '**/packages.lock.json' '**/pdm.lock' '**/pnpm-lock.yaml'
+  '**/poetry.lock' '**/pubspec.lock' '**/uv.lock' '**/yarn.lock'
+)
 ROBOREV_BUILTIN_SRC_LABEL="roborev-builtin"
 # The TOTAL number of `:(exclude,glob)` literals the pinned v0.61.2 executable carries:
 # the 24 patterns above PLUS the 2 bare PREFIX CONSTANTS the algorithm concatenates
@@ -761,8 +771,7 @@ roborev_observe_builtin_excludes() {
   # observable, so not a verdict in either direction.
   [ "$n" -gt 0 ] || return 0
   _rx_builtin_count="$n"
-  # shellcheck disable=SC2086 # deliberate split of the space-separated constant
-  for p in $ROBOREV_BUILTIN_EXCLUDES; do
+  for p in "${ROBOREV_BUILTIN_EXCLUDES[@]}"; do
     LC_ALL=C grep -qFa ":(exclude,glob)$p" "$bin" || _rx_builtin_missing+=("$p")
   done
   if [ "$n" -ne "$ROBOREV_BUILTIN_PATHSPEC_LITERALS" ]; then
@@ -941,8 +950,7 @@ roborev_check_census_exclusion() {
   # exactly like the configured ones, so a census path they eat is just as invisible to
   # the reviewer. Tagged distinctly so the remedy text can differ.
   local _builtin
-  # shellcheck disable=SC2086 # deliberate split of the space-separated constant
-  for _builtin in $ROBOREV_BUILTIN_EXCLUDES; do
+  for _builtin in "${ROBOREV_BUILTIN_EXCLUDES[@]}"; do
     _rx_patterns+=("$_builtin")
     _rx_sources+=("$ROBOREV_BUILTIN_SRC_LABEL")
   done
@@ -1198,7 +1206,7 @@ roborev_check_census_exclusion() {
     DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}")
     DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}/**")
   done
-  DETAILS+=("ERROR: census-exclusion: PLUS $n_builtin roborev v0.61.2 built-in exclude(s) — the hard-coded lockfile/cache deny-list ($ROBOREV_BUILTIN_EXCLUDES) — which are always applied and are not configurable.")
+  DETAILS+=("ERROR: census-exclusion: PLUS $n_builtin roborev v0.61.2 built-in exclude(s) — the hard-coded lockfile/cache deny-list (${ROBOREV_BUILTIN_EXCLUDES[*]}) — which are always applied and are not configurable.")
   DETAILS+=("ERROR: census-exclusion: no review was enqueued — a swallowing exclusion set is knowable BEFORE the enqueue, so it costs no review round.")
   finish FAIL 1
 }

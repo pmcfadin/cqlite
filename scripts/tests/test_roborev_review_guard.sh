@@ -554,11 +554,22 @@ mkdir -p "$FIXTURE_HOME"
 # ---------------------------------------------------------------------------
 # The pinned v0.61.2 set, mirrored here on purpose rather than imported: a test that read
 # the constant it is checking could not catch the constant being wrong.
-GUARD_PINNED_BUILTINS="**/.beads/** **/.cache/** **/.gocache/** **/.kata.local.toml \
-**/Cargo.lock **/cargo.lock **/Gemfile.lock **/Package.resolved **/Pipfile.lock \
-**/Podfile.lock **/bun.lock **/bun.lockb **/composer.lock **/flake.lock \
-**/go.sum **/mix.lock **/package-lock.json **/packages.lock.json **/pdm.lock \
-**/pnpm-lock.yaml **/poetry.lock **/pubspec.lock **/uv.lock **/yarn.lock"
+#
+# AN ARRAY, for the reason the production constant is one — and this mirroring is exactly
+# how the bug hid. Both sides were space-separated strings, so BOTH glob-expanded
+# `**/package-lock.json` to the repo-relative `website/package-lock.json`; the planted
+# literals and the presence check made the SAME mistake, agreed with each other, and
+# `built-in-set: OK` passed while the real binary (which carries the pattern verbatim)
+# FAILed. Two defects that cancel are undetectable by a symmetric test BY CONSTRUCTION —
+# the #3042 lesson, reproduced here in shell.
+GUARD_PINNED_BUILTINS=(
+  '**/.beads/**' '**/.cache/**' '**/.gocache/**' '**/.kata.local.toml'
+  '**/Cargo.lock' '**/cargo.lock' '**/Gemfile.lock' '**/Package.resolved'
+  '**/Pipfile.lock' '**/Podfile.lock' '**/bun.lock' '**/bun.lockb'
+  '**/composer.lock' '**/flake.lock' '**/go.sum' '**/mix.lock'
+  '**/package-lock.json' '**/packages.lock.json' '**/pdm.lock' '**/pnpm-lock.yaml'
+  '**/poetry.lock' '**/pubspec.lock' '**/uv.lock' '**/yarn.lock'
+)
 
 make_builtin_stub() { # make_builtin_stub <pinned|added|removed> -> prints a bin dir
   # SEPARATE statements, for the reason `make_fixture` documents: `local` is a builtin, so
@@ -571,7 +582,7 @@ make_builtin_stub() { # make_builtin_stub <pinned|added|removed> -> prints a bin
   cp "$stubbin/roborev" "$dir/roborev"
   {
     printf '# planted built-in deny-list literals (mode: %s)\n' "$mode"
-    for p in $GUARD_PINNED_BUILTINS; do
+    for p in "${GUARD_PINNED_BUILTINS[@]}"; do
       # `removed`: drop exactly one pinned pattern, so the presence check names it.
       if [ "$mode" = removed ] && [ "$p" = '**/Cargo.lock' ]; then continue; fi
       printf '# :(exclude,glob)%s\n' "$p"
@@ -1416,6 +1427,26 @@ if grep -qE 'RE-EXTRACTING this list' "$_oracles_src"; then
   ok 'structural: the built-in set states the re-extract-on-upgrade obligation'
 else
   bad 'structural: the built-in set does not state a re-extract-on-upgrade obligation'
+fi
+# GLOB-SAFETY, asserted structurally. Declared as a space-separated STRING and iterated
+# unquoted, `**/package-lock.json` PATHNAME-EXPANDS to the repo-relative
+# `website/package-lock.json` — which then reads as "a pinned pattern is no longer present
+# in the binary" and FAILs every run. An array removes the hazard structurally; this assert
+# stops it being reverted to a string.
+if grep -qE '^ROBOREV_BUILTIN_EXCLUDES=\(' "$_oracles_src"; then
+  ok 'structural: the built-in set is a bash ARRAY (no word-splitting, no pathname expansion)'
+else
+  bad 'structural: ROBOREV_BUILTIN_EXCLUDES is not an array — an unquoted iteration glob-expands **/package-lock.json against the repo'
+fi
+if grep -qE 'for [A-Za-z_]+ in \$ROBOREV_BUILTIN_EXCLUDES' "$_oracles_src"; then
+  bad 'structural: ROBOREV_BUILTIN_EXCLUDES is iterated UNQUOTED somewhere — that pathname-expands the patterns'
+else
+  ok 'structural: ROBOREV_BUILTIN_EXCLUDES is never iterated unquoted'
+fi
+if grep -qE '^ROBOREV_BUILTIN_PATHSPEC_LITERALS=[0-9]+' "$_oracles_src"; then
+  ok 'structural: the :(exclude,glob) literal count is pinned, so an ADDED built-in is observable'
+else
+  bad 'structural: no pinned :(exclude,glob) literal count — an added built-in could not be detected'
 fi
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'

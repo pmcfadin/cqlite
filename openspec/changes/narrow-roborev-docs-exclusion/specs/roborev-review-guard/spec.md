@@ -254,6 +254,13 @@ instead of re-litigated. It resolves the three cases:
    like normal operation: precisely the blindness this change exists to close. This FAIL SHALL be
    DIFF-INDEPENDENT, like the trailing-slash FAIL.
 
+**The pinned pattern list SHALL be held in a form that cannot be PATHNAME-EXPANDED** (a bash array, not a
+space-separated string iterated unquoted). This is not style: `**/package-lock.json` expands to the
+repo-relative `website/package-lock.json`, which then reads as a pinned pattern having vanished from the
+binary and FAILs every run. The regression suite's mirrored copy SHALL be held the same way — when both
+sides were strings they made the IDENTICAL mistake, agreed with each other, and a green suite blessed a
+check that FAILed against the real binary, which is the symmetric-oracle blindness of #3042 in shell.
+
 **Divergence SHALL be OBSERVED, not assumed**, by reading the roborev executable: each pinned pattern
 looked for as a FIXED string `:(exclude,glob)<pattern>` (which names removals exactly), plus a PINNED
 COUNT of `:(exclude,glob)` literals (which detects additions numerically). A blind full-set
@@ -415,6 +422,10 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **GIVEN** a run in which a configured pattern swallows census code AND the live built-in set has diverged from the pin
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** the single value line names the configured swallow AND the divergence, the configured cause keeps its own remedy detail, and no review is enqueued — the actionable half is never hidden behind the other
+
+#### Scenario: The pinned pattern list cannot be pathname-expanded
+- **WHEN** the oracles file is inspected
+- **THEN** `ROBOREV_BUILTIN_EXCLUDES` is declared as a bash array, is never iterated unquoted, and the pinned `:(exclude,glob)` literal count is present — so a pattern like `**/package-lock.json` can never glob into a repo-relative path and be reported as a vanished built-in
 
 #### Scenario: NOTICE is not failing-capable and both FAIL forms are
 - **WHEN** the wrapper's verdict scan is inspected directly, rather than inferred from a case's exit code
