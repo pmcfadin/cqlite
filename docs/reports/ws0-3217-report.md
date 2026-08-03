@@ -72,7 +72,8 @@ selection. **Fund it before either fix** (§8).
 ### What is NOT established
 
 The **microarchitectural cause of the IPC decay**. `LLC-loads`, `LLC-load-misses` and
-`cache-references` are `<not supported>` on this virtualized host. L1d (+7.5% relative) and dTLB
+`cache-references` carry no signal on this virtualized host (the two `LLC-*` events read
+`<not supported>`; `cache-references`/`cache-misses` program but return a constant 0). L1d (+7.5% relative) and dTLB
 (+40% relative) together account for only ~10–13% of the +8,593 cycles/row; **~87% is
 unattributed**. LLC / memory-bandwidth saturation is the natural hypothesis and it was **not
 measured**. That is the one genuinely open question this run leaves (§7, §10).
@@ -234,6 +235,21 @@ same picture; only the guard tells you which one you are looking at.
   `Data.db` is mmap'd, so cache hits are faults, not `read()` syscalls; the three are reported
   raw, side by side, and never divided by one another.)
 - **Admission clean.** `requests_unavailable` = 0 and `requests_error` = 0 on all 83 points.
+- **The retained driver logs' `rc=` field was UNRELIABLE for this run — do not audit from it.**
+  Every driver fabricated `rc=0` (Corrections C7). The run's cleanliness is established from the
+  artefacts instead, and those checks are independent of the ledger: 83/83 points present with exact
+  per-arm counts, `requests_unavailable` = `requests_error` = 0 everywhere, ≥3 reps with dispersion
+  on every curve point, `read_bytes` = 0 everywhere, identical byte bases throughout. The bug is
+  fixed in all six drivers so the next run's ledger can actually record a failure.
+- **The IPC-closure headline re-derives from committed inputs alone.** `instructions/row +0.1%`,
+  `cycles/row +34.1%`, `IPC −25.4%` are produced by the committed
+  `partB-run/parse-llc-counters.py` from the committed `partB-results/counters/`
+  `llc-*.perf-stat.csv` + `llc-*.step.jsonl` + `llc-capture-config.json` → `counters/llc.json`.
+  Previously the derivation step lived in an uncommitted ad-hoc script, so only the raw CSVs were
+  reproducible — an AC8 gap, now closed. The per-row window is read from the capture config rather
+  than hardcoded; the producer also derives the window independently from `task-clock ÷ hw threads`
+  (20.0034–20.0108 s vs the nominal 20 s, ≤0.06%) and emits both, and **IPC is invariant to the
+  window** because it is a ratio of two raw counters.
 - **≥3 reps per curve point** with min/median/max dispersion. The two `calib-*` rows are reps=1 and
   show `spr% 0.0`, which is **absent** dispersion, not a measured zero — they are labelled and
   excluded from every curve.
@@ -469,7 +485,7 @@ not a 990 s cost, and it is not 990 s of lost work. Two reasons:
 2. **The same run measures 96.7% server utilisation.** When one thread parks on a full bounded
    channel, another thread runs on that core. The blocked interval is **overlapped**, not lost.
    With only 3.3% of the pinned set idle, there is at most ~3.3% of throughput that *any* amount
-   of blocking could be costing — and Part B's own closure model attributes exactly 2.1 pp of the
+   of blocking could be costing — and Part B's own closure model attributes exactly 2.2 pp of the
    29% shortfall to residual idle (§6).
 
 The corroborating evidence that this is overlap and not cost: **instructions/row is flat (+0.1%)**
@@ -508,6 +524,17 @@ Voluntary parks per 8,192-row Flight batch, **by site** (an explicit 0 is measur
 | tokio_runtime_idle | 320 | 360 | 263 | 25.9% |
 | grpc_egress | 2 | 6 | 1 | 0.14% |
 | other | 0 | 0 | 0 | 0.00% |
+
+**Positive control — we looked, with proof that we could have seen it.** A zero is only evidence if
+the instrument can register a one. `ChannelSink` (the `do_get` handoff's own type, and the
+classifier's match key for it) appears **84×** across the six on-CPU folded profiles and **176×**
+across the six off-CPU folded profiles, and **0×** across the three `sched:sched_switch` folded
+captures — while those same sched captures carry **127** lines with other `cqlite_flight` frames, so
+they are demangled, they do resolve Flight symbols, and they are not blind to that crate.
+`CreditedBatch` (13× / 47× / **0×**) and `egress_credit` (13× / 50× / **0×**) behave identically.
+The handoff's symbols are therefore *present in the binary, present in profiles taken on the same
+runs, and absent only from the park record* — which is the statement "it never parked", not the
+statement "we could not see it".
 
 **Running only one of the two instruments would have given a confidently wrong answer in either
 direction.** glibc allocator arena contention is **64% of parks by count** at s6-N1 but only
@@ -641,23 +668,27 @@ The engine is not doing more work as cores are added. The **same work executes s
 physical core), rows/s per physical core ≈ utilisation × IPC ÷ instructions-per-row:
 
 ```
-predicted = IPC 0.7465  ×  instr/row 0.9990  ×  util 0.9719  =  0.7247
+predicted = IPC 0.7465  ×  instr/row 0.9990  ×  util 0.9705  =  0.7237
 measured  = 0.7111 (vs cn-s1 N=2)   /   0.7180 (vs the independent cn-s1-ac5 re-run)
-closure gap = +1.37 pp
+closure gap = +1.26 pp
 ```
 
-The 29% shortfall therefore splits as:
+The shortfall (1 − 0.7111 = **28.9 pp**) therefore splits as — components sum to the measured
+shortfall exactly, which is the check that the model closes rather than merely correlates:
 
 | component | contribution |
 |---|--:|
 | IPC decay | **25.4 pp** |
-| residual idle (3.3% of the pinned set) | 2.1 pp |
+| residual idle (3.3% of the pinned set) | 2.2 pp |
 | extra instructions | 0.1 pp |
-| unexplained | 1.4 pp |
+| unexplained | 1.3 pp |
 
-**What is not established.** `LLC-loads`, `LLC-load-misses` and `cache-references` all read
-`<not supported>` on this virtualized host, so the microarchitectural cause of the IPC decay is
-only *partially* measured — reported, not inferred. The counters that do work: L1d miss/row
+**What is not established.** `LLC-loads` and `LLC-load-misses` read `<not supported>` on this
+virtualized host, and `cache-references`/`cache-misses` do program but return a **constant 0** over
+40–240 CPU-seconds — physically impossible for this workload, so an unimplemented counter rather
+than a measurement (recorded as `null`, never `0`, in `counters/llc.json`). Either way no LLC signal
+exists here, so the microarchitectural cause of the IPC decay is only *partially* measured —
+reported, not inferred. The counters that do work: L1d miss/row
 +7.5% relative (2.93% → 3.14% of loads), dTLB miss/row +40.9% (7.56 → 10.65). Charging those at
 generous penalties accounts for roughly **10–13%** of the +8,593 cycles/row; **~87% is
 unattributed**. LLC / memory-bandwidth saturation across 6 cores is the natural hypothesis. It
@@ -679,6 +710,22 @@ blocked time at the worst point; `egress_credit_acquire` ≈ 0. Two independent 
 instruments' three known false-negative modes (§2.6 traps 1–3) were each identified and closed
 before the figures were taken — which matters, because all three would have produced an *empty*
 profile that reads exactly like this acquittal.
+
+**The acquittal has a bound, and it is larger than the acquitted quantity — state it, don't bury
+it.** At S=6/N=16, `unattributed_channel` holds **109.63 s (5.6% of total blocked time)**: send/recv
+parks the classifier could place in a bucket but could NOT attribute to a named channel from the
+item type in the symbol. That residue is **75× larger** than `do_get_batch`'s 1.46 s (0.07%). So the
+honest form of the verdict is: *the handoff's measured cost is ~0, and the uncertainty on that
+statement is bounded by 5.6%, not by 0.07%* — if the whole unattributed residue were secretly the
+handoff (it is not; see the positive control in §4.4), the handoff would still be a ~6% site, not
+the 2.5–4× box-level lever the collapse hypothesis needed. The conclusion survives its own error
+bar, which is why quoting the bound strengthens it rather than weakening it.
+
+**Two independent reasons the residue is not the handoff.** (1) The park-count instrument attributes
+by the same channel table and records **zero** handoff parks with **`other` = 0** — the two
+instruments would have to fail in the same direction, and they use different data (durations vs
+switch events). (2) The positive control in §4.4 shows the handoff's own symbols are visible to the
+sched capture when present, so their absence is a measurement, not a blind spot.
 
 **The full-box-collapse hypothesis is FALSIFIED.** 0.873 / 0.811 / 0.711 marginal efficiency at
 2 / 4 / 6 cores against the conservative denominator. No compounding, no box-level ceiling at
@@ -770,9 +817,18 @@ The measured discount (0.711–0.873) lands **inside** #2817's assumed **0.6–0
 | `partB-results/offcpu/` | 6 × (`.svg`, `.folded.gz`, `.attribution-v2.{json,txt}`) + 2 × `.run-config.json` |
 | `partB-results/park-counts/` | 3 × `sched2-*.{folded.gz,park-sites.json,park-sites.txt}` + 3 × superseded bpftrace captures (`.txt.gz`, `.run-config.json`) |
 | `partB-results/scheduler/` | 6 × `runqlat.{txt,json}` + 2 × `scheduler-cost.{jsonl,txt}` |
-| `partB-results/counters/` | 3 × `perf-stat.csv` + `microarch-counters.json` |
+| `partB-results/counters/` | 3 × `llc-*.perf-stat.csv` + 3 × `llc-*.step.jsonl` (rows/s) + `llc-capture-config.json` (window + hw threads as invoked) + the derived `llc.json` / `llc-counters.txt`. These four input files are everything `partB-run/parse-llc-counters.py` needs, so the IPC headline re-derives from the repo alone. (`microarch-counters.json` was the earlier **uncommitted-producer** emit of the same numbers; it is replaced by `llc.json`, which is numerically identical except that unprogrammable counters are now `null` rather than `0`.) |
 | `partB-results/` | `partB-analysis.{txt,json}`, `cpu-topology.json`, `raw-capture-inventory.txt` |
 | `partC/` | the Part C deliverables as **drafts, not posted/filed** — `POST-TO-2817.md` (marginal-efficiency table + the lever call), `POST-TO-3100.md` (AC2 shape verdict + the off-CPU answer to #3100's declined section), `PROPOSED-FOLLOWUPS.md` (5 proposed issues + the candidates dropped for lack of evidence). Posting and filing are the owner's. |
+
+**Provenance caveat on the committed drivers (P8).** The Part B drivers invoke **copies** of the
+capture scripts staged at `/data/ws0/*.sh` (`llc-run.sh`, `sched-switch-run.sh`, `park-count-run.sh`),
+not the in-repo files directly — a staging convenience during the run. The committed copies under
+`partB-run/` are therefore *the same scripts* but are **not provably byte-identical to what
+executed**, and this report does not claim they are. The derived artefacts are the evidence; the
+scripts are documentation of method. The analysis tools (`analyze-partB.py`, `parse-llc-counters.py`,
+`classify-offcpu-v2.py`, `parse-sched-switch.py`, `summarize-oncpu.py`) have no such gap — they now
+run from the committed tree against committed inputs, and no path in them points into a worktree.
 
 **Retained on the measurement box with paths recorded** (too bulky to commit; full listing in
 `results/raw-capture-inventory.txt` and `partB-results/raw-capture-inventory.txt`, box
@@ -834,10 +890,19 @@ from a superseded capture.
    assertion, not a fallback.
 7. **Write the classifier against real symbols, then keep the pre-symbol version as evidence.**
    v1 was written before any real stack existed and put 76–83% into `other`; v2 demangles first
-   and matches leaf-first. The revision is expected and correct — but it must be *recorded*, since
+   and matches leaf-first. **The load-bearing half of that fix was the DEMANGLING, not the
+   leaf-first ordering** (see Corrections C6) — a lesson worth carrying, because the intuitive
+   diagnosis was the wrong one. The revision is expected and correct — but it must be *recorded*, since
    "we changed how we bucket after seeing the data" is exactly the shape of a result that got
    fitted rather than measured. Both classifiers are committed.
-8. **Budget three reps everywhere from the start.** The two dispersion outliers (12.3%, 10.7%)
+8. **Mechanize the lost-record guard — no collector here has one.** bcc's dropped-stack count and
+   `perf`'s LOST-record count were both checked **by hand** on this run. That is the same failure
+   class as the four traps already on record (BPF maps needing sudo, `offcputime` charging on
+   switch-in, the 10,240-key truncation, the silent demangler): an instrument that loses data and
+   still emits a plausible profile. Every capture wrapper should assert its own loss counter and
+   fail — or at minimum stamp it into the run-config — rather than leaving it to whoever remembers
+   to look.
+9. **Budget three reps everywhere from the start.** The two dispersion outliers (12.3%, 10.7%)
    both sit at low N on wide core sets. At reps=1 they would have shipped invisibly, and one of
    them sits next to a headline.
 
@@ -858,6 +923,11 @@ nobody can trace.
 
 | C4 | "**17.2–17.8%** of frame instances resolve only to `[libc.so.6]`" — the AC3 opacity caveat | **Unsourced, and both ends were wrong.** No committed artefact produced that band. Recomputed from a stated definition (weighted frame instances of bare-`[<dso>]` frames, excluding `[unknown]` and pseudo-DSOs): **16.86–17.94% on server threads**, 14.25–17.94% on the all-frames basis. The figure is now **emitted by `partB-run/summarize-oncpu.py` into `partB-results/oncpu/AC3-oncpu-summary.json`** (+ a `DSO-only srv%` column in the `.txt`), computed from the **committed** `oncpu/*.folded.gz` so it is reproducible from this repo alone. Under this report's own AC8 standard an unsourced figure in a caveat is exactly what may not ship. | §4.1 (definition + per-profile table); AC3 row |
 | C5 | "`other` is **fully broken out by named cause, never left as an unnamed residue**" and "`tokio_scheduler` is **100%** idle-runtime park" | **Self-contradictory as written** — the generator printed those sentences directly above an `unnamed` line (2.13 s = 0.11% of blocked time at s6-N16; 0.06 s in the tokio breakdown). Corrected in **both** the report and the generator: the bucket is renamed **`unclassified_residual`** and the claim is now the true one — a residue exists, is bounded at **≤0.11% of total blocked time**, and is shown. The six `attribution-v2.{json,txt}` artefacts were **re-emitted** from the committed `offcpu/*.folded.gz` and verified **bit-identical to the originals modulo the rename** (only `folded_file` changes, now naming the committed input). | §4.2; `partB-run/classify-offcpu-v2.py` |
+
+| C6 | "v1 mis-attributed because it matched a pattern **anywhere in the stack**, so a producer stack containing an earlier `pread64` scored as `disk_io` (278 s at s6-N16); v2 fixes it by matching **leaf-first**" | **Wrong cause, right fix-set.** v1's own bucket table already ranked `mpsc_send_park` ABOVE `disk_io`, so on a stack where both matched, the send bucket would have won — ordering alone cannot produce that 278 s. **The real cause was raw Rust v0 mangling**: bcc emits `_RNv…` symbols, v1's patterns were the DEMANGLED spellings, so the Rust send/recv frames matched *nothing*, and the only frames left matching were the kernel's `pread64`/`vfs_read` — which the kernel always symbolizes — so the stack fell to `disk_io`. **The load-bearing fix was `demangle_helper`, not leaf-first.** Leaf-first is still correct and retained, on its own merits. Independently confirmed while re-deriving these artefacts: running the attribution *without* `rust_demangler` collapses `mpsc_send_park` at s6-N1 from 50.57 s to 2.89 s and inflates the kernel-matched buckets — the v1 failure, reproduced on demand (§2.6 trap 9). | `partB-run/classify-offcpu-v2.py` docstring; §10 item 7 |
+| C7 | The retained driver progress logs record **`rc=0` for every step** | **Fabricated, not measured.** All six drivers did `echo "$(date -u …) END <step> rc=$?"`; the `$(date …)` command substitution runs first and **resets `$?`**, so the field could only ever be 0 — a failed step was indistinguishable from a clean one in the only run ledger retained. Fixed in all six (`rc` captured into a variable *before* any other substitution; verified to record a real `rc=1`). **No figure in this report depends on that field**, and the independent evidence that this run's data is clean is in the artefacts, not the ledger: **83/83 points present** with exact per-arm counts (`points_by_sweep`), `requests_unavailable` = `requests_error` = **0** on every point, ≥3 reps with dispersion on every curve point, `read_bytes` = 0 on every point, and identical byte bases across all points. | §2.7; `partA-run/run-partA.sh`, `partB-run/run-partB{,2,3,4}.sh` |
+
+| C8 | closure "predicted **0.7247**, gap **+1.37 pp**, residual idle **2.1 pp**, unexplained **1.4 pp**" | **Refined, not wrong.** Those came from Part A utilisations HAND-TRANSCRIBED as 0.995 / 0.967. The analysis now READS them from `results/partA-analysis.json` (0.995919 / 0.966506), giving util factor 0.9705 (was 0.9719), **predicted 0.7237**, **gap +1.26 pp**, and a split of **IPC decay 25.4 | residual idle 2.2 | extra instructions 0.1 | unexplained 1.3 pp** (sum 28.9 pp = 1 − 0.7111, exact). Measured marginal efficiency, IPC, instructions/row and every headline are UNCHANGED — only the rounding of two inputs moved. Transcribed constants were also a staleness trap: correct until Part A is re-run, silently wrong after. | §6; `partB-run/analyze-partB.py` `partA_inputs` block |
 
 A further item is a qualification rather than a correction: **AC3's PASS is not "fully symbolized"**
 — **16.86–17.94%** of *server-thread* frame instances are DSO-only `[libc.so.6]` and escape the

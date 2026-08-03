@@ -12,9 +12,27 @@ import os
 import statistics
 import sys
 
-PROF = "/data/ws0/profiles"
-ANA = "/data/ws0/analysis"
-RES = "/data/ws0/results"
+# P8: nothing here may hardcode one agent's worktree. ARTE defaults to the artefacts
+# directory this script lives in (../ from partB-run), so the analysis runs from a
+# fresh clone; PROF/ANA/RES stay overridable for a live measurement box.
+ARTE = os.environ.get("WS0_ARTEFACTS",
+                      os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+PROF = os.environ.get("WS0_PROFILES", "/data/ws0/profiles")
+ANA = os.environ.get("WS0_ANALYSIS", "/data/ws0/analysis")
+RES = os.environ.get("WS0_RESULTS", "/data/ws0/results")
+OUT = os.environ.get("WS0_PARTB_OUT", os.path.join(ARTE, "partB-results"))
+
+
+def arte(*p):
+    """A path under the COMMITTED artefacts tree."""
+    return os.path.join(ARTE, *p)
+
+
+def prefer(*cands):
+    """First existing path. Committed artefacts win over the box's scratch dirs, so a
+    re-run from a clone reproduces the published numbers rather than silently reading
+    whatever a stale /data/ws0 happens to hold."""
+    return next((c for c in cands if os.path.exists(c)), cands[-1])
 BUCKETS = ["egress_credit_acquire", "mpsc_send_park", "mpsc_recv_park",
            "tonic_grpc_socket_write", "disk_io", "tokio_scheduler", "other"]
 PARK_SITES = ["do_get_mpsc_handoff", "egress_credit", "core_raw_chunk_chan",
@@ -31,9 +49,8 @@ def main() -> int:
     L = []
 
     # ---------------- AC3 ----------------
-    onc = jload("/home/ubuntu/workspace/repo/.claude/worktrees/"
-                "issue-3217-fullbox-cn-attribution/docs/reports/ws0-3217-artifacts/"
-                "partB-results/oncpu/AC3-oncpu-summary.json")
+    onc = jload(prefer(arte("partB-results/oncpu/AC3-oncpu-summary.json"),
+                       "%s/AC3-oncpu-summary.json" % ANA))
     out["ac3_oncpu"] = onc
     L += ["=== AC3: on-CPU flame graphs, unsymbolized-frame gate (<10%) ===",
           "%-14s %12s %14s %8s %10s" % ("profile", "unsym all", "unsym server", "gate", "server%")]
@@ -53,7 +70,8 @@ def main() -> int:
           "%-14s %10s " % ("capture", "total") + " ".join("%-13s" % b[:13] for b in BUCKETS)]
     for s in ("s1", "s6"):
         for n in (1, 8, 16):
-            d = jload("%s/offcpu2-%s-N%d.attribution-v2.json" % (ANA, s, n))
+            d = jload(prefer(arte("partB-results/offcpu/offcpu2-%s-N%d.attribution-v2.json" % (s, n)),
+                             "%s/offcpu2-%s-N%d.attribution-v2.json" % (ANA, s, n)))
             if not d:
                 continue
             key = "offcpu2-%s-N%d" % (s, n)
@@ -91,7 +109,8 @@ def main() -> int:
           "This is the instrument for the 'parks per Flight batch' question.",
           "%-14s %11s %12s %13s" % ("capture", "vol/s", "invol/s", "parks/batch")]
     for lab in ("sched2-s1-N1", "sched2-s6-N1", "sched2-s6-N16"):
-        d = jload("%s/%s.json" % (ANA, lab))
+        d = jload(prefer(arte("partB-results/park-counts/%s.park-sites.json" % lab),
+                         "%s/%s.json" % (ANA, lab)))
         if not d:
             continue
         sm = {s["site"]: s for s in d["sites"]}
@@ -123,7 +142,8 @@ def main() -> int:
           "%-10s %4s %14s %14s %16s %16s" % ("arm", "N", "p50", "p90", "p99", "wakeups")]
     for s in ("s1", "s6"):
         for n in (1, 8, 16):
-            d = jload("%s/offcpu2-%s/runqlat-N%d.json" % (PROF, s, n))
+            d = jload(prefer(arte("partB-results/scheduler/offcpu2-%s-N%d.runqlat.json" % (s, n)),
+                             "%s/offcpu2-%s/runqlat-N%d.json" % (PROF, s, n)))
             if not d:
                 continue
             f = lambda k: ("[%s,%s]" % tuple(d[k])) if d.get(k) else "n/a"
@@ -138,7 +158,10 @@ def main() -> int:
     L.append("")
 
     # ---------------- residual accounting ----------------
-    llc = jload("%s/llc.json" % ANA)
+    # P2: produced by the COMMITTED partB-run/parse-llc-counters.py from the committed
+    # counters/*.perf-stat.csv + *.step.jsonl + llc-capture-config.json, so the IPC
+    # headline re-derives from the repo alone.
+    llc = jload(prefer(arte("partB-results/counters/llc.json"), "%s/llc.json" % ANA))
     out["residual_accounting"] = {"counters": llc}
     if llc:
         a, b = llc["llc-s1-N2"], llc["llc-s6-N16"]
@@ -152,7 +175,11 @@ def main() -> int:
                         ("llc-s6-N16", "S=6 N=16 (S=6 peak)"),
                         ("llc-s6-N1", "S=6 N=1")):
             d = llc[lab]
-            r = d["rows_per_s"] * 20.0
+            # Window read from the capture record the producer emitted (P2), never a
+            # hardcoded 20.0. `rows_in_window` is rows_per_s x the window AS INVOKED;
+            # the producer also records the task-clock-derived window and their <=0.06%
+            # difference, which does not move IPC at all.
+            r = d.get("rows_in_window") or (d["rows_per_s"] * d["window_secs_nominal"])
             raw = d["raw"]
             L.append("%-24s %12.0f %12.0f %8.2f %14.1f %14.1f %14.1f" % (
                 nm, d["instr_per_row"], d["cycles_per_row"], d["ipc"],
@@ -174,9 +201,27 @@ def main() -> int:
     # run 2 SMT threads per physical core, so the comparison is like-for-like.
     if llc:
         a, b = llc["llc-s1-N2"], llc["llc-s6-N16"]
-        util1, util6 = 0.995, 0.967          # Part A measured server_cpu_utilization_of_pinned_set
-        meas_refB = (1076917.0 / 6) / 252420.0      # Part A cn-s1 N=2 reference
-        meas_ac5 = (1076917.0 / 6) / 249985.0       # Part A cn-s1-ac5 N=2 reference
+        # P3: READ Part A's numbers, never transcribe them. Hand-copied constants are
+        # correct exactly until Part A is re-run, and then they are silently wrong.
+        pa = jload(prefer(arte("results/partA-analysis.json"),
+                          "%s/partA-analysis.json" % RES))
+        if not pa:
+            raise SystemExit("closure needs partA-analysis.json (looked under %s and %s)"
+                             % (arte("results"), RES))
+        peak = {a2["arm"]: a2 for a2 in pa["cross_S_scaling"]["per_arm"]}
+        s1, s6 = peak["cn-s1"], peak["cn-s6"]
+        util1 = s1["server_util_at_peak"]
+        util6 = s6["server_util_at_peak"]
+        meas_refB = (s6["best_rows_per_s_median"] / s6["S_physical_cores"]) \
+            / s1["best_rows_per_s_median"]
+        meas_ac5 = (s6["best_rows_per_s_median"] / s6["S_physical_cores"]) \
+            / peak["cn-s1-ac5"]["best_rows_per_s_median"]
+        out["residual_accounting"]["partA_inputs"] = {
+            "source": "results/partA-analysis.json cross_S_scaling.per_arm (read, not transcribed)",
+            "s1_peak_rows_per_s": s1["best_rows_per_s_median"],
+            "s1_ac5_peak_rows_per_s": peak["cn-s1-ac5"]["best_rows_per_s_median"],
+            "s6_peak_rows_per_s": s6["best_rows_per_s_median"],
+            "s1_util_at_peak": util1, "s6_util_at_peak": util6}
         f_ipc = b["ipc"] / a["ipc"]
         f_instr = a["instr_per_row"] / b["instr_per_row"]
         f_util = util6 / util1
@@ -205,8 +250,9 @@ def main() -> int:
                  100 * f_ipc * f_util * (1 - f_instr), 100 * (pred - meas_refB)),
               ""]
 
-    open("%s/partB-analysis.json" % ANA, "w").write(json.dumps(out, indent=1) + "\n")
-    open("%s/partB-analysis.txt" % ANA, "w").write("\n".join(L) + "\n")
+    os.makedirs(OUT, exist_ok=True)
+    open("%s/partB-analysis.json" % OUT, "w").write(json.dumps(out, indent=1) + "\n")
+    open("%s/partB-analysis.txt" % OUT, "w").write("\n".join(L) + "\n")
     print("\n".join(L))
     return 0
 

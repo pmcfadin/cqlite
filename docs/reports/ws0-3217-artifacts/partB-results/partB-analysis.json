@@ -1269,78 +1269,128 @@
     "instr_per_row": 38343.197856969986,
     "cycles_per_row": 25200.33087120674,
     "ipc": 1.5215354930430676,
-    "llc_miss_per_row": 0.0,
-    "llc_miss_pct": NaN,
+    "llc_miss_per_row": null,
+    "llc_miss_pct": null,
     "l1d_miss_pct": 2.9334289058000746,
     "dtlb_miss_per_row": 7.5572189110099455,
     "rows_per_s": 250045.7208202624,
+    "window_secs_nominal": 20.0,
+    "window_secs_derived_from_task_clock": 20.0033894155,
+    "window_rel_diff_pct": 0.0169470774999958,
+    "unsupported_counters": [
+     "LLC-load-misses",
+     "LLC-loads"
+    ],
+    "unsupported_note": "recorded as null, never 0 \u2014 a counter the host could not program is not a measured zero",
+    "rows_in_window": 5000914.4164052475,
+    "inputs": {
+     "perf_csv": "llc-s1-N2.perf-stat.csv",
+     "step_record": "llc-s1-N2.step.jsonl"
+    },
     "raw": {
      "cycles": 126024697952.0,
      "instructions": 191751050934.0,
      "cache-references": 0.0,
      "cache-misses": 0.0,
+     "LLC-loads": null,
+     "LLC-load-misses": null,
      "L1-dcache-loads": 45245058688.0,
      "L1-dcache-load-misses": 1327231630.0,
      "dTLB-load-misses": 37793005.0,
      "branch-misses": 283162589.0,
-     "task-clock": 40006778831.0,
-     "rows_per_s": 250045.7208202624
+     "task-clock": 40006778831.0
     }
    },
    "llc-s6-N16": {
     "instr_per_row": 38381.95238707868,
     "cycles_per_row": 33793.43376927486,
     "ipc": 1.1357813665557632,
-    "llc_miss_per_row": 0.0,
-    "llc_miss_pct": NaN,
+    "llc_miss_per_row": null,
+    "llc_miss_pct": null,
     "l1d_miss_pct": 3.1403533939004555,
     "dtlb_miss_per_row": 10.646762900093723,
     "rows_per_s": 1086927.5909110487,
+    "window_secs_nominal": 20.0,
+    "window_secs_derived_from_task_clock": 20.01079965758333,
+    "window_rel_diff_pct": 0.05399828791665673,
+    "unsupported_counters": [
+     "LLC-load-misses",
+     "LLC-loads"
+    ],
+    "unsupported_note": "recorded as null, never 0 \u2014 a counter the host could not program is not a measured zero",
+    "rows_in_window": 21738551.818220973,
+    "inputs": {
+     "perf_csv": "llc-s6-N16.perf-stat.csv",
+     "step_record": "llc-s6-N16.step.jsonl"
+    },
     "raw": {
      "cycles": 734620311109.0,
      "instructions": 834368060851.0,
      "cache-references": 0.0,
      "cache-misses": 0.0,
+     "LLC-loads": null,
+     "LLC-load-misses": null,
      "L1-dcache-loads": 197587050682.0,
      "L1-dcache-load-misses": 6204931652.0,
      "dTLB-load-misses": 231445207.0,
      "branch-misses": 1286796641.0,
-     "task-clock": 240129595891.0,
-     "rows_per_s": 1086927.5909110487
+     "task-clock": 240129595891.0
     }
    },
    "llc-s6-N1": {
     "instr_per_row": 43240.92129803622,
     "cycles_per_row": 32321.996342404527,
     "ipc": 1.3378171583203453,
-    "llc_miss_per_row": 0.0,
-    "llc_miss_pct": NaN,
+    "llc_miss_per_row": null,
+    "llc_miss_pct": null,
     "l1d_miss_pct": 2.8388185798575907,
     "dtlb_miss_per_row": 14.408389994584704,
     "rows_per_s": 160734.93644122814,
+    "window_secs_nominal": 20.0,
+    "window_secs_derived_from_task_clock": 20.00635206633333,
+    "window_rel_diff_pct": 0.0317603316666526,
+    "unsupported_counters": [
+     "LLC-load-misses",
+     "LLC-loads"
+    ],
+    "unsupported_note": "recorded as null, never 0 \u2014 a counter the host could not program is not a measured zero",
+    "rows_in_window": 3214698.728824563,
+    "inputs": {
+     "perf_csv": "llc-s6-N1.perf-stat.csv",
+     "step_record": "llc-s6-N1.step.jsonl"
+    },
     "raw": {
      "cycles": 103905480555.0,
      "instructions": 139006534730.0,
      "cache-references": 0.0,
      "cache-misses": 0.0,
+     "LLC-loads": null,
+     "LLC-load-misses": null,
      "L1-dcache-loads": 32774968066.0,
      "L1-dcache-load-misses": 930421883.0,
      "dTLB-load-misses": 46318633.0,
      "branch-misses": 305352886.0,
-     "task-clock": 240076224796.0,
-     "rows_per_s": 160734.93644122814
+     "task-clock": 240076224796.0
     }
    }
   },
   "marginal_efficiency_predicted_from_counters_excl_util": 0.7457167875647782,
+  "partA_inputs": {
+   "source": "results/partA-analysis.json cross_S_scaling.per_arm (read, not transcribed)",
+   "s1_peak_rows_per_s": 252419.79883210367,
+   "s1_ac5_peak_rows_per_s": 249985.33332042032,
+   "s6_peak_rows_per_s": 1076917.1765396062,
+   "s1_util_at_peak": 0.9959194284443059,
+   "s6_util_at_peak": 0.9665060940967489
+  },
   "closure": {
-   "measured_marginal_efficiency_vs_cn_s1_N2": 0.7110615904709082,
-   "measured_marginal_efficiency_vs_cn_s1_ac5_N2": 0.7179877459314226,
+   "measured_marginal_efficiency_vs_cn_s1_N2": 0.7110622737217183,
+   "measured_marginal_efficiency_vs_cn_s1_ac5_N2": 0.7179869062953256,
    "factor_ipc": 0.7464705041380291,
    "factor_instructions_per_row": 0.9989902928929238,
-   "factor_utilisation": 0.971859296482412,
-   "predicted_marginal_efficiency": 0.7247317925378296,
-   "closure_gap_pp": 1.3670202066921378,
+   "factor_utilisation": 0.9704661506669243,
+   "predicted_marginal_efficiency": 0.7236929003156949,
+   "closure_gap_pp": 1.2630626593976624,
    "note": "rows/s per physical core ~ util * IPC / instructions_per_row at fixed clock and fixed SMT threads per core; both arms run 2 SMT threads per physical core."
   }
  }

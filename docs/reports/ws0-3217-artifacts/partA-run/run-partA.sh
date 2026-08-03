@@ -16,7 +16,12 @@ run() { # label  s-spec  ramp  step  reps  path
   echo "$(date -u +%FT%TZ) START $1" >> "$PROG"
   ./sweep.sh "$1" "$2" 6,7,14,15 "$3" "$4" "$5" "$6" \
     > "/data/ws0/logs/driver/$1.out" 2>&1 < /dev/null
-  echo "$(date -u +%FT%TZ) END   $1 rc=$?" >> "$PROG"
+  # rc MUST be captured BEFORE any other command substitution: $(date ...) runs a
+  # subshell and OVERWRITES $?, so `echo "$(date) END rc=$?"` always logs rc=0.
+  # That bug shipped in this run's driver logs (#3217 P1) - a failed step was
+  # indistinguishable from a clean one in the only retained progress ledger.
+  local rc=$?
+  echo "$(date -u +%FT%TZ) END   $1 rc=$rc" >> "$PROG"
 }
 
 run cn-s1 s1 1,2,4,8,16 120 3 bypass

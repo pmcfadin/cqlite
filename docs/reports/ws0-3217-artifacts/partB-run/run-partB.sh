@@ -10,7 +10,12 @@ run() { # <name> <cmd...>
   local n="$1"; shift
   echo "$(date -u +%FT%TZ) START $n" >> "$PROG"
   ( cd "$H" && "$@" ) > "/data/ws0/logs/driver-partB/$n.out" 2>&1 < /dev/null
-  echo "$(date -u +%FT%TZ) END   $n rc=$?" >> "$PROG"
+  # rc MUST be captured BEFORE any other command substitution: $(date ...) runs a
+  # subshell and OVERWRITES $?, so `echo "$(date) END rc=$?"` always logs rc=0.
+  # That bug shipped in this run's driver logs (#3217 P1) - a failed step was
+  # indistinguishable from a clean one in the only retained progress ledger.
+  local rc=$?
+  echo "$(date -u +%FT%TZ) END   $n rc=$rc" >> "$PROG"
   sleep 5
 }
 

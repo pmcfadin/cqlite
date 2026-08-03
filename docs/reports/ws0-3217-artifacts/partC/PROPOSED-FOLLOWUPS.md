@@ -19,7 +19,7 @@ Ranking below is by *evidential strength*, not by product priority.
 Between the 1-core peak (S=1/N=2) and the 6-core peak (S=6/N=16), CQLite's Flight read path
 executes **the same work more slowly**: instructions/row **38,343 → 38,382 (+0.1%, flat)**,
 cycles/row **25,200 → 33,793 (+34.1%)**, IPC **1.52 → 1.14 (−25.4%)**. The counter closure model
-(predicted 0.7247 vs measured 0.7111 marginal efficiency, gap 1.37 pp) attributes **25.4 of the
+(predicted 0.7237 vs measured 0.7111 marginal efficiency, gap 1.26 pp) attributes **25.4 of the
 29 pp scaling shortfall to IPC decay alone**. But the *cause* of that decay is unmeasured:
 `LLC-loads`, `LLC-load-misses` and `cache-references` all read `<not supported>` on #3217's
 virtualized host. The counters that did work — L1d miss/row +7.5% relative, dTLB miss/row +40.9%
@@ -82,7 +82,7 @@ both instruments agree it is this one, not the Flight handoff.
 that this costs *saturated aggregate throughput*. At S=6/N=16 the server runs at **96.7%
 utilisation** with **flat instructions/row (+0.1%)** — a thread parked on a full bounded channel is
 overlapped by another thread on the same core, and #3217's own closure model attributes only
-**2.1 pp** of the 29 pp shortfall to residual idle *in total*. So "coarsen the raw-chunk channel to
+**2.2 pp** of the 28.9 pp shortfall to residual idle *in total*. So "coarsen the raw-chunk channel to
 recover throughput" is **not** a claim #3217's data can back, and this proposal does not make it.
 What remains defensible is narrower and should be scoped as such: (a) **per-scan latency** — at
 S=1/N=16 the per-scan p50 is **302 s** against **31 s** at N=2, and pipeline serialization is the
@@ -285,7 +285,7 @@ guidance only", and "leave as-is" is a product decision, not an oracle question.
   a site measured at zero cost.
 - **"Raw-chunk channel is costing saturated throughput" — DROPPED as a claim**, and F2 was rewritten
   without it. At 96.7% utilisation with flat instructions/row, blocked time on one thread is
-  overlapped by others; the closure model leaves only 2.1 pp of the 29 pp shortfall for *all*
+  overlapped by others; the closure model leaves only 2.2 pp of the 28.9 pp shortfall for *all*
   residual idle combined. F2 survives on latency and low-concurrency grounds only, and is sequenced
   after F1.
 - **A standalone "single stream slows 24% with more cores" issue — FOLDED into F3.** The phenomenon

@@ -96,9 +96,9 @@ the 6-core peak:
 | cycles/row | 25,200 | 33,793 | **+34.1%** |
 | IPC | 1.52 | 1.14 | **−25.4%** |
 
-Closure: predicted 0.7247 (IPC 0.7465 × instr 0.9990 × util 0.9719) vs measured 0.7111 — a 1.37 pp
-gap. The 29% shortfall splits **IPC decay 25.4 pp | residual idle 2.1 pp | extra instructions
-0.1 pp | unexplained 1.4 pp**.
+Closure: predicted 0.7237 (IPC 0.7465 × instr 0.9990 × util 0.9705) vs measured 0.7111 — a 1.26 pp
+gap. The 28.9 pp shortfall splits **IPC decay 25.4 pp | residual idle 2.2 pp | extra instructions
+0.1 pp | unexplained 1.3 pp**.
 
 ### The distinction this epic should not blur
 

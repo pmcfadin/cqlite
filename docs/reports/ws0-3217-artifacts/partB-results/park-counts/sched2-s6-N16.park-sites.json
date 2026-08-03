@@ -17,6 +17,7 @@
   {
    "site": "core_raw_chunk_chan",
    "parks": 351090,
+   "present": true,
    "pct_of_voluntary": 26.057623797648734,
    "parks_per_s": 35109.0,
    "parks_per_flight_batch": 264.7718544335785,
@@ -41,7 +42,7 @@
     },
     {
      "comm": "tokio-rt-worker",
-     "matched": "Sender<bytes::bytes::Bytes>",
+     "matched": "decode_scan_chunk",
      "leaf_frames": [
       "perf_trace_sched_switch",
       "__schedule",
@@ -58,6 +59,7 @@
   {
    "site": "tokio_runtime_idle",
    "parks": 349087,
+   "present": true,
    "pct_of_voluntary": 25.908962712266952,
    "parks_per_s": 34908.7,
    "parks_per_flight_batch": 263.26130721084223,
@@ -82,7 +84,7 @@
      ]
     },
     {
-     "comm": "cqlite-query-ro",
+     "comm": "tokio-rt-worker",
      "matched": "epoll_wait",
      "leaf_frames": [
       "perf_trace_sched_switch",
@@ -100,6 +102,7 @@
   {
    "site": "glibc_malloc_arena_lock",
    "parks": 321608,
+   "present": true,
    "pct_of_voluntary": 23.86949293433084,
    "parks_per_s": 32160.8,
    "parks_per_flight_batch": 242.53822826248057,
@@ -141,6 +144,7 @@
   {
    "site": "core_query_rows_chan",
    "parks": 266391,
+   "present": true,
    "pct_of_voluntary": 19.771330602066264,
    "parks_per_s": 26639.1,
    "parks_per_flight_batch": 200.89674748473442,
@@ -165,8 +169,8 @@
      ]
     },
     {
-     "comm": "tokio-rt-worker",
-     "matched": "summary_scan::query_rows",
+     "comm": "cqlite-query-ro",
+     "matched": "QueryRowMsg",
      "leaf_frames": [
       "perf_trace_sched_switch",
       "__schedule",
@@ -183,6 +187,7 @@
   {
    "site": "core_windowed_batch_chan",
    "parks": 57232,
+   "present": true,
    "pct_of_voluntary": 4.247714048212801,
    "parks_per_s": 5723.2,
    "parks_per_flight_batch": 43.16107770925564,
@@ -207,7 +212,7 @@
     },
     {
      "comm": "tokio-rt-worker",
-     "matched": "Vec<(cqlite_core::types::RowKey",
+     "matched": "scan_stream_windowed",
      "leaf_frames": [
       "perf_trace_sched_switch",
       "__schedule",
@@ -224,6 +229,7 @@
   {
    "site": "grpc_egress",
    "parks": 1952,
+   "present": true,
    "pct_of_voluntary": 0.1448759054744092,
    "parks_per_s": 195.2,
    "parks_per_flight_batch": 1.4720859604498708,
@@ -261,6 +267,28 @@
      ]
     }
    ]
+  },
+  {
+   "site": "do_get_mpsc_handoff",
+   "parks": 0,
+   "present": false,
+   "pct_of_voluntary": 0.0,
+   "parks_per_s": 0.0,
+   "parks_per_flight_batch": 0.0,
+   "by_comm": {},
+   "description": "cqlite-flight do_get bounded mpsc, cap 4: 1 reserve + 1 emit per Flight batch",
+   "examples": []
+  },
+  {
+   "site": "egress_credit",
+   "parks": 0,
+   "present": false,
+   "pct_of_voluntary": 0.0,
+   "parks_per_s": 0.0,
+   "parks_per_flight_batch": 0.0,
+   "by_comm": {},
+   "description": "per-stream in-flight capacity-byte credit pool",
+   "examples": []
   }
  ]
 }

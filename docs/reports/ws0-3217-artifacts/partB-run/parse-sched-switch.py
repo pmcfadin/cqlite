@@ -25,6 +25,7 @@ Usage: parse-sched-switch.py [script.txt] [--rows-per-s R] [--window-secs W]
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import re
 import sys
@@ -79,8 +80,16 @@ def main() -> int:
     ap.add_argument("--out-json")
     ap.add_argument("--out-table")
     ap.add_argument("--out-folded")
+    # P4/AC8 re-derivation: re-run the SITE classification over the COMMITTED folded
+    # output instead of the 98-552 MB raw `perf script` stream (which is retained on the
+    # box, not in the repo). Exact, not approximate: every folded line IS one voluntary
+    # park stack and the folded counts sum to the recorded `voluntary` total (verified
+    # 254863/536660/1347360 across the three captures). Involuntary switches are not
+    # stack-sampled, so they are supplied from the original record.
+    ap.add_argument("--from-folded", help="collapsed voluntary-park stacks (.gz ok)")
+    ap.add_argument("--involuntary", type=int, default=0)
     a = ap.parse_args()
-    fh = open(a.src) if a.src else sys.stdin
+    fh = [] if a.from_folded else (open(a.src) if a.src else sys.stdin)
 
     vol = invol = 0
     site: Counter = Counter()
@@ -110,6 +119,28 @@ def main() -> int:
         frames = []
         cur_comm = cur_state = None
 
+    if a.from_folded:
+        opener = gzip.open if a.from_folded.endswith(".gz") else open
+        for line in opener(a.from_folded, "rt"):
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            stack, cnt = line.rsplit(" ", 1)
+            n = int(float(cnt))
+            parts = stack.split(";")
+            comm, frames_root_first = parts[0], parts[1:]
+            fr = list(reversed(frames_root_first))      # site_of expects LEAF-FIRST
+            nm, pat = site_of(fr)
+            vol += n
+            site[nm] += n
+            site_by_comm[nm][comm] += n
+            if a.out_folded:
+                folded[stack] += n
+            if len(examples[nm]) < 2 and fr:
+                examples[nm].append({"comm": comm, "matched": pat, "leaf_frames": fr[:8]})
+        invol = a.involuntary
+        fh = []
+
     for line in fh:
         m = HDR.match(line)
         if m:
@@ -134,15 +165,22 @@ def main() -> int:
         "flight_batches_per_s": bps,
         "voluntary_parks_per_flight_batch": (vol / w / bps) if bps else None,
         "voluntary_parks_per_1k_rows": (vol / w / a.rows_per_s * 1000) if a.rows_per_s else None,
+        # P4: EVERY site in the SITES table is emitted, including sites with ZERO
+        # observed parks, plus any unmatched bucket actually seen. Emitting only the
+        # OBSERVED sites made `do_get_mpsc_handoff` — the accused in #3217 — merely
+        # ABSENT from the primary artefact behind its own acquittal. An absence and a
+        # measured zero are not the same statement, and the artefact must make the
+        # zero explicit. `present` distinguishes the two for any future reader.
         "sites": [
-            {"site": nm, "parks": site[nm],
-             "pct_of_voluntary": 100.0 * site[nm] / vol if vol else 0.0,
-             "parks_per_s": site[nm] / w,
-             "parks_per_flight_batch": (site[nm] / w / bps) if bps else None,
+            {"site": nm, "parks": site.get(nm, 0), "present": site.get(nm, 0) > 0,
+             "pct_of_voluntary": 100.0 * site.get(nm, 0) / vol if vol else 0.0,
+             "parks_per_s": site.get(nm, 0) / w,
+             "parks_per_flight_batch": (site.get(nm, 0) / w / bps) if bps else None,
              "by_comm": dict(site_by_comm[nm]),
              "description": next((d for n, _, d in SITES if n == nm), "unmatched"),
              "examples": examples[nm]}
-            for nm in sorted(site, key=lambda k: -site[k])],
+            for nm in sorted(set(site) | {n for n, _, _ in SITES},
+                             key=lambda k: (-site.get(k, 0), k))],
     }
     L = ["==== WS0 #3217 VOLUNTARY PARKS BY SITE (perf sched:sched_switch, EVENT counts) ===="]
     L.append("label: %s   window=%.0fs" % (a.label, w))
@@ -155,9 +193,10 @@ def main() -> int:
     L.append("")
     L.append("%-26s %11s %8s %11s %12s" % ("site", "parks", "pct", "parks/s", "parks/batch"))
     for s_ in doc["sites"]:
-        L.append("%-26s %11d %7.2f%% %11.0f %12s" % (
+        L.append("%-26s %11d %7.2f%% %11.0f %12s%s" % (
             s_["site"], s_["parks"], s_["pct_of_voluntary"], s_["parks_per_s"],
-            ("%.0f" % s_["parks_per_flight_batch"]) if s_["parks_per_flight_batch"] else "n/a"))
+            ("%.0f" % s_["parks_per_flight_batch"]) if s_["parks_per_flight_batch"] else "0",
+            "" if s_["present"] else "   (EXPLICIT ZERO - site searched for, never observed)"))
     t = "\n".join(L) + "\n"
     if a.out_json:
         open(a.out_json, "w").write(json.dumps(doc, indent=1) + "\n")

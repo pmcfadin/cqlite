@@ -15,6 +15,7 @@
 #      that must classify as egress_credit_acquire, and a tonic-carrying stack
 #      that must classify as mpsc_recv_park)
 #   5  unsym-check.py PASS and FAIL paths
+#  11  partB-run analysis tools: classify-offcpu-v2, parse-sched-switch, parse-llc-counters
 #   6  summarize-sweep.py incl. the client-saturation exclusion and the
 #      marginal-efficiency arithmetic
 #   7  parse-runqlat.py against a synthetic histogram
@@ -355,6 +356,104 @@ else
     && ok "off-CPU pipeline end to end" || bad "off-CPU pipeline"
   [ -s /data/ws0/profiles/selftest-offcpu/offcpu-dryrun.folded ] \
     && ok "off-CPU folded capture non-empty (collector reachable under sudo)" || bad "off-CPU capture empty"
+fi
+
+# ---------------------------------------------------------------- 11
+# P7: sections 1-10 cover the harness/ tools only. The Part B ANALYSIS tools
+# (partB-run/) shipped untested, including the two that produce the acquittal:
+# classify-offcpu-v2.py and parse-sched-switch.py. These are smoke tests against
+# synthetic inputs with KNOWN answers - no corpus, no server, no BPF.
+step "11  partB-run analysis tools (classify-offcpu-v2, parse-sched-switch, parse-llc-counters)"
+PB="$HERE/../partB-run"
+TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
+
+# --- classify-offcpu-v2: channel identity + explicit zero + named residue -------
+cat > "$TD/v2.folded" <<'EOF'
+tokio-rt-worker;thread_start;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send> 1000
+tokio-rt-worker;thread_start;pread64;tokio::future::block_on::block_on::<<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::send> 2000
+tokio-rt-worker;thread_start;<std::sync::mpmc::Sender<cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowMsg>>::send 3000
+tokio-rt-worker;thread_start;__lll_lock_wait_private;_int_malloc 4000
+tokio-rt-worker;thread_start;some::totally::unmatched::frame 5000
+EOF
+if python3 "$PB/classify-offcpu-v2.py" "$TD/v2.folded" --already-demangled \
+     --label selftest --out-json "$TD/v2.json" >/dev/null 2>&1; then
+  python3 - "$TD/v2.json" <<'PY2' && ok "classify-offcpu-v2: buckets, channel identity, explicit zero, named residue" \
+    || bad "classify-offcpu-v2 smoke"
+import json,sys
+d=json.load(open(sys.argv[1]))
+b={x["bucket"]:x["blocked_time_us"] for x in d["buckets"]}
+o={x["cause"]:x["blocked_time_us"] for x in d["other_breakdown"]}
+c={x["channel"]:x["blocked_time_us"] for x in d["channel_identity"]["channels"]}
+assert b["mpsc_send_park"]==6000, b            # incl. the pread64 stack: LEAF-FIRST wins
+assert b["disk_io"]==0, b                      # the pread64 stack must NOT land here
+assert b["egress_credit_acquire"]==0, b        # explicit zero, present in the table
+assert o["glibc_malloc_arena_lock"]==4000, o
+assert o["unclassified_residual"]==5000, o     # residue LABELLED, not dropped
+assert c["core_raw_chunk"]==3000 and c["core_query_rows"]==3000, c
+assert c["do_get_batch"]==0, c                 # the accused: explicit zero
+PY2
+else
+  bad "classify-offcpu-v2 failed to run"
+fi
+
+# --- parse-sched-switch: --from-folded re-derivation + EXPLICIT ZERO sites ------
+cat > "$TD/sched.folded" <<'EOF'
+tokio-rt-worker;thread_start;send;Sender<bytes::bytes::Bytes> 300
+tokio-rt-worker;thread_start;alloc;__lll_lock_wait 100
+EOF
+if python3 "$PB/parse-sched-switch.py" --from-folded "$TD/sched.folded" --involuntary 7 \
+     --window-secs 10 --rows-per-s 81920 --label selftest \
+     --out-json "$TD/sched.json" >/dev/null 2>&1; then
+  python3 - "$TD/sched.json" <<'PY2' && ok "parse-sched-switch: --from-folded exact, unobserved sites emit EXPLICIT ZERO" \
+    || bad "parse-sched-switch smoke"
+import json,sys
+d=json.load(open(sys.argv[1]))
+s={x["site"]:x for x in d["sites"]}
+assert d["voluntary"]==400 and d["involuntary"]==7, d
+assert s["core_raw_chunk_chan"]["parks"]==300
+assert s["glibc_malloc_arena_lock"]["parks"]==100
+# The point of P4: the accused site is PRESENT in the artefact, as a measured zero.
+assert "do_get_mpsc_handoff" in s, sorted(s)
+assert s["do_get_mpsc_handoff"]["parks"]==0
+assert s["do_get_mpsc_handoff"]["present"] is False
+assert s["egress_credit"]["parks"]==0
+# 400 parks / (81920/8192 = 10 batches/s * 10 s) = 4 per batch
+assert abs(s["core_raw_chunk_chan"]["parks_per_flight_batch"]-3.0)<1e-9, s
+PY2
+else
+  bad "parse-sched-switch failed to run"
+fi
+
+# --- parse-llc-counters: <not supported> must be null, never 0 -----------------
+mkdir -p "$TD/ctr"
+cat > "$TD/ctr/llc-x-N1.perf-stat.csv" <<'EOF'
+# started on selftest
+1000000,,cycles,20000000000,100.00,,
+2000000,,instructions,20000000000,100.00,,
+<not supported>,,LLC-load-misses,0,100.00,,
+40000,,L1-dcache-loads,20000000000,100.00,,
+400,,L1-dcache-load-misses,20000000000,100.00,,
+200,,dTLB-load-misses,20000000000,100.00,,
+20000000000,,task-clock,20000000000,100.00,,
+EOF
+echo '{"rows_per_s": 50.0}' > "$TD/ctr/llc-x-N1.step.jsonl"
+cat > "$TD/ctr/llc-capture-config.json" <<'EOF'
+{"captures":{"x-N1":{"window_secs":20,"server_hw_threads":1}}}
+EOF
+if python3 "$PB/parse-llc-counters.py" "$TD/ctr" --out-json "$TD/llc.json" >/dev/null 2>&1; then
+  python3 - "$TD/llc.json" <<'PY2' && ok "parse-llc-counters: per-row from committed CSV; unsupported counter is NULL not 0" \
+    || bad "parse-llc-counters smoke"
+import json,sys
+d=json.load(open(sys.argv[1]))["llc-x-N1"]
+assert d["instr_per_row"]==2000.0, d          # 2e6 / (50 rows/s * 20 s = 1000 rows)
+assert d["cycles_per_row"]==1000.0, d
+assert abs(d["ipc"]-2.0)<1e-12, d
+assert d["llc_miss_per_row"] is None, d       # NEVER 0.0 for an unprogrammable counter
+assert "LLC-load-misses" in d["unsupported_counters"], d
+assert abs(d["window_secs_derived_from_task_clock"]-20.0)<1e-9, d
+PY2
+else
+  bad "parse-llc-counters failed to run"
 fi
 
 printf '\n==== #3217 HARNESS SELFTEST: %d passed, %d failed ====\n' "$PASS" "$FAIL"

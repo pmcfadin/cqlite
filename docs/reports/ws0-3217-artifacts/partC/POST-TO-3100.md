@@ -142,10 +142,11 @@ coexists with 96.7% utilisation and flat instructions/row. The attribution table
 costs. The report gives this its own subsection.
 
 **What the residual actually is.** Between the 1-core peak and the 6-core peak: instructions/row
-**+0.1% (flat)**, cycles/row **+34.1%**, IPC **−25.4%**. Closure: predicted 0.7247 vs measured
-0.7111. The 29% shortfall = IPC decay 25.4 pp | residual idle 2.1 pp | extra instructions 0.1 pp |
-unexplained 1.4 pp. **The microarchitectural cause is NOT established** — `LLC-loads`,
-`LLC-load-misses` and `cache-references` are `<not supported>` on this virtualized host, and L1d
+**+0.1% (flat)**, cycles/row **+34.1%**, IPC **−25.4%**. Closure: predicted 0.7237 vs measured
+0.7111. The 28.9 pp shortfall = IPC decay 25.4 pp | residual idle 2.2 pp | extra instructions 0.1 pp |
+unexplained 1.3 pp. **The microarchitectural cause is NOT established** — `LLC-loads`,
+`LLC-load-misses` read `<not supported>` and `cache-references`/`cache-misses` return a constant 0
+on this virtualized host, and L1d
 (+7.5% rel) / dTLB (+40% rel) explain only ~10–13% of the +8,593 cycles/row. ~87% unattributed.
 That is the one genuinely open question the run leaves.
 

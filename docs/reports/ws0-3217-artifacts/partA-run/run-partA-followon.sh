@@ -11,5 +11,10 @@ while ! grep -q ALL-DONE "$PROG" 2>/dev/null; do sleep 15; done
 echo "$(date -u +%FT%TZ) START cn-s1-ac5" >> "$PROG"
 ./sweep.sh cn-s1-ac5 s1 6,7,14,15 1,2,4,8,16 120 3 bypass \
   > /data/ws0/logs/driver/cn-s1-ac5.out 2>&1 < /dev/null
-echo "$(date -u +%FT%TZ) END   cn-s1-ac5 rc=$?" >> "$PROG"
+# rc MUST be captured BEFORE any other command substitution: $(date ...) runs a
+# subshell and OVERWRITES $?, so `echo "$(date) END rc=$?"` always logs rc=0.
+# That bug shipped in this run's driver logs (#3217 P1) - a failed step was
+# indistinguishable from a clean one in the only retained progress ledger.
+rc=$?
+echo "$(date -u +%FT%TZ) END   cn-s1-ac5 rc=$rc" >> "$PROG"
 echo "$(date -u +%FT%TZ) FOLLOWON-DONE" >> "$PROG"

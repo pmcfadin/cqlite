@@ -71,8 +71,8 @@ partially measured. Reported, not inferred.
 
 === Closure: can the counters reproduce the C(N) marginal efficiency? ===
 measured  (S=6 N=16 per core) / (S=1 N=2 per core) = 0.7111  [vs cn-s1]   0.7180  [vs cn-s1-ac5]
-predicted = IPC 0.7465  x  instr/row 0.9990  x  util 0.9719  =  0.7247
-closure gap = +1.37 percentage points
+predicted = IPC 0.7465  x  instr/row 0.9990  x  util 0.9705  =  0.7237
+closure gap = +1.26 percentage points
 
-So the residual splits as:  IPC decay 25.4 pp | residual idle 2.1 pp | extra instructions 0.1 pp | unexplained 1.4 pp
+So the residual splits as:  IPC decay 25.4 pp | residual idle 2.2 pp | extra instructions 0.1 pp | unexplained 1.3 pp
 

@@ -148,12 +148,25 @@ def first_match(stack: str, table) -> tuple[str, str]:
     """LEAF-FIRST frame scan. The reason a thread is off-CPU is the innermost
     thing it called, NOT whatever happens to appear anywhere in its stack.
 
-    v1 matched a pattern anywhere in the whole stack, which inverts causality on
-    every real stack: the producer thread's stack contains `pread64` (it read a
-    chunk earlier in the same call chain) AND `Sender::send` (where it is
-    actually parked), so a whole-stack match attributed a CHANNEL park to
-    `disk_io` (measured: v1 reported 278 s of `disk_io` at S=6/N=16 that is in
-    fact channel-send blocking). Folded stacks run root -> leaf, so scanning
+    CORRECTED CAUSAL ACCOUNT (#3217 P6 — an earlier version of this docstring, and an
+    issue comment that took its wording from here, blamed whole-stack matching; that
+    was WRONG and is corrected here). v1 DID also match anywhere in the stack, but
+    ordering alone cannot explain its 278 s of bogus `disk_io` at S=6/N=16: v1's own
+    table already ranked `mpsc_send_park` ABOVE `disk_io`, so on a stack where both
+    matched, the send bucket would have won regardless of leaf-first. **The real cause
+    was raw Rust v0 mangling.** bcc emits `_RNv…` symbols; v1's patterns were the
+    DEMANGLED spellings, so the Rust send/recv frames matched NOTHING, while the
+    kernel frames in the same stack — `pread64` / `vfs_read`, which the kernel always
+    symbolizes — matched `disk_io` and took the stack. The load-bearing fix was
+    therefore DEMANGLING (`demangle_helper`), not leaf-first ordering. Independently
+    confirmed while re-deriving these artefacts: running the attribution without the
+    `rust_demangler` module collapses `mpsc_send_park` at s6-N1 from 50.57 s to 2.89 s
+    and inflates the kernel-matched buckets — exactly the v1 failure, reproduced.
+
+    Leaf-first is still correct and is kept, but on its own merits rather than as the
+    explanation of v1: the reason a thread is off-CPU is the innermost thing it called,
+    so on a demangled stack carrying both `pread64` and `Sender::send` the innermost
+    frame is the honest attribution. Folded stacks run root -> leaf, so scanning
     reversed finds the innermost matching frame first; bucket table order only
     breaks ties WITHIN one frame."""
     frames = stack.split(";")
