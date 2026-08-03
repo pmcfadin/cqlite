@@ -1034,7 +1034,7 @@ AGENT_GATE_SUMMARY_FILE="$mold_darwin" \
 assert_mold_token "mold-darwin" "$mold_darwin" none
 assert_accelerators "mold-darwin" "$mold_darwin"
 
-# 9e. perf profiling capability token (issue #3249). Boxes ship with
+# 9f. perf profiling capability token (issue #3249). Boxes ship with
 #     kernel.perf_event_paranoid = 4, which denies ALL unprivileged perf use — a
 #     PERMISSION verdict that reads like a missing CAPABILITY, and one that reverts
 #     on reboot when no /etc/sysctl.d drop-in exists. The token makes "this box
@@ -1051,7 +1051,7 @@ for state in ok paranoid-4 paranoid-2 kptr-restricted absent unknown; do
   assert_accelerators "perf-linux-$state" "$perf_file"
 done
 
-# 9e-darwin. perf_event_paranoid/kptr_restrict are Linux kernel controls, so Darwin
+# 9f-darwin. perf_event_paranoid/kptr_restrict are Linux kernel controls, so Darwin
 #            emits NO perf token even with a forced state — its line still ends at
 #            sccache-health, byte-identical to pre-#3249 output.
 perf_darwin="$tmp/perf-darwin.txt"
@@ -1061,12 +1061,36 @@ AGENT_GATE_SUMMARY_FILE="$perf_darwin" \
 assert_perf_token "perf-darwin" "$perf_darwin" none
 assert_accelerators "perf-darwin" "$perf_darwin"
 
-# 9e-free. The gate's token must stay a FREE /proc read: if it ever grew a `perf
+# 9f-real. REAL detection, NO AGENT_GATE_TEST_PERF_STATE: the production branch of
+#          _perf_state, reading an actual /proc directory. Without this every case
+#          above set the test seam, so hardcoding `_PERF_STATE="ok"` — a gate stamping
+#          `perf=ok` on a paranoid-4 box, exactly what AC3 exists to prevent — passed
+#          the whole suite, and so did forcing the real branch to always yield
+#          `unknown`. The fixture is scripts/perf-capability.sh's own test seam, which
+#          is inert without its hermetic marker.
+perf_fixture_ok="$tmp/perf-proc-ok"; mkdir -p "$perf_fixture_ok"
+printf -- '-1\n' >"$perf_fixture_ok/perf_event_paranoid"
+printf '0\n'     >"$perf_fixture_ok/kptr_restrict"
+perf_fixture_p4="$tmp/perf-proc-p4"; mkdir -p "$perf_fixture_p4"
+printf '4\n' >"$perf_fixture_p4/perf_event_paranoid"
+printf '1\n' >"$perf_fixture_p4/kptr_restrict"
+for pair in "ok:$perf_fixture_ok" "paranoid-4:$perf_fixture_p4"; do
+  want="${pair%%:*}"; fixture="${pair#*:}"
+  real_file="$tmp/perf-real-$want.txt"
+  env -u AGENT_GATE_TEST_PERF_STATE \
+    AGENT_GATE_SUMMARY_FILE="$real_file" AGENT_GATE_TEST_OS=Linux \
+    CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$fixture" \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_perf_token "perf-real-$want" "$real_file" "$want"
+  assert_accelerators "perf-real-$want" "$real_file"
+done
+
+# 9f-free. The gate's token must stay a FREE /proc read: if it ever grew a `perf
 #          stat` exec, every gate on every box would pay a new subprocess (and a new
 #          binary dependency) for a diagnostic line. Assert BOTH directions —
 #          structurally, that the gate's token function does not exec perf, and
-#          behaviourally, that a run emits a real token with `perf` REMOVED from PATH
-#          (which an exec-based implementation could not do).
+#          behaviourally, that a run emits the token its /proc fixture implies with
+#          `perf` REMOVED from PATH (which an exec-based implementation could not do).
 perf_fn_body=$(sed -n '/^_perf_state()/,/^}/p;/^_perf_accel_token()/,/^}/p' "$GATE")
 if [ -n "$perf_fn_body" ] && ! body_mentions "$perf_fn_body" 'perf stat'; then
   ok "perf-free: the gate's token functions never exec 'perf stat' (free /proc read only)"
@@ -1079,15 +1103,15 @@ for t in bash sed awk grep cat env date mktemp uname tr cut sort head tail wc gi
   src=$(command -v "$t" 2>/dev/null) && ln -sf "$src" "$nopath_dir/$t"
 done
 (
-  PATH="$nopath_dir" AGENT_GATE_SUMMARY_FILE="$perf_nopath" AGENT_GATE_TEST_OS=Linux \
+  env -u AGENT_GATE_TEST_PERF_STATE PATH="$nopath_dir" \
+    AGENT_GATE_SUMMARY_FILE="$perf_nopath" AGENT_GATE_TEST_OS=Linux \
+    CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$perf_fixture_p4" \
     bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 )
-if [ -s "$perf_nopath" ] && grep -qE '^accelerators: .* perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+)' "$perf_nopath"; then
-  ok "perf-free: a real perf token is stamped with no 'perf' binary on PATH (no exec dependency)"
-else
-  bad "perf-free: no perf token stamped without the perf binary on PATH"
-  grep '^accelerators:' "$perf_nopath" 2>/dev/null || cat "$perf_nopath" 2>/dev/null
-fi
+# Asserted as an EXACT whole-field value (not a `.*` presence grep that any state
+# would satisfy — including the `unknown`/`absent` states a broken read produces).
+assert_perf_token "perf-nopath" "$perf_nopath" paranoid-4
+assert_accelerators "perf-nopath" "$perf_nopath"
 
 # 9e. REAL detection (NO AGENT_GATE_TEST_MOLD_STATE override): exercise the actual
 #     `command -v mold` + `_mold_block_active` + RUSTFLAGS branches. A stub `mold` is
