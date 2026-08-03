@@ -149,6 +149,22 @@ struct TableCase {
     /// Documented reconciliation classes this fixture covers (for the corpus
     /// coverage assertion; not used at query time).
     divergence_classes: &'static [&'static str],
+    /// This case MUST execute — a SKIP is a hard FAILURE, unconditionally (issue
+    /// #3220).
+    ///
+    /// Set for every case whose SSTable binaries are **committed to git** rather than
+    /// fetched: they are present in EVERY checkout, so there is no legitimate
+    /// absence and no reason to require `CQLITE_REQUIRE_FIXTURES=1` before saying so.
+    /// A declarative flag (rather than a table name hardcoded in the terminal
+    /// assertion) so a future committed fixture opts in where it is defined.
+    ///
+    /// Why it is load-bearing: `CQLITE_REQUIRE_FIXTURES` is NOT set by the
+    /// `core-tests` component that runs this target, and the terminal check used to
+    /// be a suite-wide `ran > 0` — so a single case that resolved to no fixture
+    /// skipped silently behind seven siblings that ran. That is exactly how the
+    /// #3032 `test_da.multiclustering_table` case never executed on a machine whose
+    /// `CQLITE_DATASETS_ROOT` held `test_da` without that table.
+    must_run: bool,
     /// Extra WITHIN-partition clustering predicates to run against EVERY probed
     /// partition key, as `(predicate, expected_row_count)` pairs evaluated as
     /// `WHERE <pk> = <k> AND <predicate>` (issue #3002). These exercise the
@@ -178,6 +194,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     TableCase {
@@ -187,6 +204,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     // Cross-generation partition tombstone + a tombstone-only partition.
@@ -197,6 +215,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2],
         divergence_classes: &["multi_generation", "tombstone"],
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     // TTL localDeletionTime boundary (expired vs live cells).
@@ -207,6 +226,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["ttl"],
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     // Live static cell surviving adjacent row/cell/range tombstones.
@@ -217,6 +237,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["tombstone"],
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     // Post-major-compaction tombstone/TTL fixtures (single output SSTable).
@@ -227,6 +248,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "id",
         probe_keys: &[],
         divergence_classes: &["tombstone"],
+        must_run: true,
         clustering_slice_predicates: &[],
     },
     TableCase {
@@ -236,6 +258,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "id",
         probe_keys: &[],
         divergence_classes: &["ttl"],
+        must_run: true,
         clustering_slice_predicates: &[],
     },
     // BTI (`da`) WIDE partition with a per-partition `Rows.db` row index (issue
@@ -253,6 +276,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2, 3],
         divergence_classes: &["bti_clustering_slice"],
+        must_run: true,
         // Every partition holds ck=0..=299, so each slice's row count is exact and
         // identical for pk=1/2/3 — and every one of them is strictly between 0 and the
         // partition's 300 rows, so neither an empty nor an unnarrowed result can pass.
@@ -282,6 +306,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2, 3],
         divergence_classes: &["bti_clustering_slice", "compound_clustering"],
+        must_run: true,
         // The fixture's partitions are DELIBERATELY non-uniform (pk=1: 3 buckets x
         // 60 rows = 180; pk=2: 5 x 32 = 160; pk=3: 8 x 16 = 128), which is what makes
         // their row-index tries differ structurally. This lane applies one expected
@@ -312,6 +337,11 @@ const CORPUS: &[TableCase] = &[
         ],
     },
 ];
+
+/// Stable identity of a corpus case, used by the per-case must-run bookkeeping.
+fn case_id(case: &TableCase) -> String {
+    format!("{}.{}", case.keyspace, case.table)
+}
 
 // ---------------------------------------------------------------------------
 // Path resolution (mirrors query_semantics_oracle_parity.rs)
@@ -655,7 +685,17 @@ async fn point_vs_full_differential_equality() {
         .iter()
         .flat_map(|c| c.divergence_classes.iter().copied())
         .collect();
-    for required in ["multi_generation", "tombstone", "ttl"] {
+    for required in [
+        "multi_generation",
+        "tombstone",
+        "ttl",
+        // The BTI (`da`) clustering-slice classes (#3002 / #3032): the point path's
+        // `Rows.db` row-index window, and its multi-component (`text` then `int`)
+        // clustering form. Listed so dropping either fixture reds this lane instead
+        // of quietly narrowing the corpus.
+        "bti_clustering_slice",
+        "compound_clustering",
+    ] {
         assert!(
             covered.contains(required),
             "corpus must cover the {required:?} reconciliation class (issue #1741 divergence set)"
@@ -667,13 +707,14 @@ async fn point_vs_full_differential_equality() {
     // AND this test is `#[serial]` against every sibling that writes the same var.
     let _clock = pin_read_clock();
 
-    let mut ran = 0usize;
+    let mut ran: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for case in CORPUS {
         match run_case(case).await {
-            Ok(true) => ran += 1,
-            Ok(false) => {}
-            Err(e) => failures.push(format!("{}.{}: {e}", case.keyspace, case.table)),
+            Ok(true) => ran.push(case_id(case)),
+            Ok(false) => skipped.push(case_id(case)),
+            Err(e) => failures.push(format!("{}: {e}", case_id(case))),
         }
     }
 
@@ -683,10 +724,50 @@ async fn point_vs_full_differential_equality() {
         failures.join("\n\n")
     );
 
+    // PER-CASE must-run, UNCONDITIONALLY (issue #3220). Every `must_run` fixture is
+    // COMMITTED to git, so it is present in every checkout and a SKIP can only mean
+    // the case failed to RESOLVE its fixture — the silent-skip defect this assertion
+    // exists to make impossible. Deliberately NOT gated on
+    // `CQLITE_REQUIRE_FIXTURES`: this target runs under `core-tests`, which does not
+    // set it, and that is exactly where the #3032 multiclustering case skipped
+    // unnoticed. Suite-wide `ran > 0` cannot see it — seven siblings ran.
+    let must_run_missing: Vec<&str> = CORPUS
+        .iter()
+        .filter(|c| c.must_run && !ran.iter().any(|id| id == &case_id(c)))
+        .map(|c| c.table)
+        .collect();
+    assert!(
+        must_run_missing.is_empty(),
+        "{} committed-fixture case(s) did NOT run: {:?} — these fixtures are COMMITTED to git, \
+         so absence means the lane failed to RESOLVE them, never that they are legitimately \
+         missing.\n  ran    : {:?}\n  skipped: {:?}\n  remedy : git restore --source=HEAD -- \
+         test-data/datasets/sstables (or fix root resolution — see \
+         tests/support/datasets_root.rs)",
+        must_run_missing.len(),
+        must_run_missing,
+        ran,
+        skipped
+    );
+
+    let ran = ran.len();
     if require_fixtures() {
+        // Fail closed per CASE, not merely suite-wide (matching the query-semantics
+        // oracle): this lane has no per-case opt-out, so under REQUIRE_FIXTURES every
+        // corpus case must have run. A suite-wide `ran > 0` would let a newly added
+        // case skip silently behind its siblings.
         assert!(
-            ran > 0,
-            "CQLITE_REQUIRE_FIXTURES=1 but no differential case ran (fixtures absent) — fail-closed"
+            skipped.is_empty(),
+            "CQLITE_REQUIRE_FIXTURES=1 but {} of {} differential cases SKIPped ({:?}) — \
+             fail-closed",
+            skipped.len(),
+            CORPUS.len(),
+            skipped
+        );
+        assert_eq!(
+            ran,
+            CORPUS.len(),
+            "CQLITE_REQUIRE_FIXTURES=1: {ran} of {} differential cases ran — fail-closed",
+            CORPUS.len()
         );
     } else if ran == 0 {
         eprintln!(
