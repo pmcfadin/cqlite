@@ -86,7 +86,9 @@ trap 'rm -rf "$tmp"' EXIT
 #                        `list --json` fallback path
 #   STUB_CONFIG_PATTERNS what `roborev config get exclude_patterns` prints; EMPTY =>
 #                        the subcommand is unsupported (exit 64), i.e. the corroboration
-#                        state the check must report UNAVAILABLE rather than fail on
+#                        state the check must report UNAVAILABLE rather than fail on;
+#                        `none` => the binary ANSWERS with an EMPTY list (exit 0), the
+#                        only state that can CORROBORATE an empty parse
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
 # ---------------------------------------------------------------------------
 stubbin="$tmp/bin"
@@ -173,10 +175,18 @@ case "$cmd" in
     exit 0
     ;;
   config)
-    # `roborev config get exclude_patterns` — the OPTIONAL corroboration source
-    # (#3229). Unset STUB_CONFIG_PATTERNS => behave like a build that does not answer
-    # `config get` at all, which is the state the corroboration must report
-    # `UNAVAILABLE` for rather than failing on.
+    # `roborev config get exclude_patterns` — the corroboration source (#3229). Three
+    # DISTINGUISHABLE states, because conflating any two of them is how the guard
+    # silently self-disabled:
+    #   unset  => a build that does not answer `config get` at all (exit 64). This is
+    #             the only state corroboration may report UNAVAILABLE for.
+    #   'none' => the binary ANSWERS, with an EMPTY list. That is real evidence that
+    #             nothing is configured, and is what CORROBORATES an empty parse.
+    #   else   => the comma-joined patterns the binary reports.
+    if [ "${STUB_CONFIG_PATTERNS:-}" = none ]; then
+      printf '\n'
+      exit 0
+    fi
     if [ -z "${STUB_CONFIG_PATTERNS:-}" ]; then
       printf 'stub: config get not supported by this build\n' >&2
       exit 64
@@ -248,6 +258,12 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   directory name excludes its whole subtree only through it)
 #   pre-change-mix  .rs + website/src/content/docs/c.json + a docs/ harness .sh +
 #                   a nested .md: the faithfulness fixture for `['docs/**','*.md']`
+#   worktree-docs-exec  the FLEET's real 1:1:1:1 layout: the ROOT checkout is left on
+#                   `main` and the census lives in a LINKED WORKTREE. `make_fixture`
+#                   returns the WORKTREE path, so `$REPO` is the worktree and
+#                   `$REPO/.roborev.toml` is NOT the file roborev's daemon reads
+#   cargo-lock      Cargo.lock beside a .rs file — a path roborev ALWAYS excludes
+#                   through a hard-coded built-in, with no configuration involved
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
   # NOTE: separate statements on purpose — `local` is a builtin, so ALL of its
   # arguments are expanded before any assignment takes effect; `local a=$1 b=$a`
@@ -377,6 +393,20 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add build/gen.rs
       git_q "$work" commit -q -m 'a code file inside build/'
       ;;
+    worktree-docs-exec)
+      mkdir -p "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
+      printf 'print("classify")\n' >"$work/docs/reports/x-artifacts/harness/classify.py"
+      printf 'BEGIN { exit(); }\n' >"$work/docs/reports/x-artifacts/harness/offcpu.bt"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'harness executables under docs/'
+      ;;
+    cargo-lock)
+      printf '[[package]]\nname = "x"\nversion = "0.1.0"\n' >"$work/Cargo.lock"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add Cargo.lock main.rs
+      git_q "$work" commit -q -m 'a lockfile beside code'
+      ;;
     pre-change-mix)
       mkdir -p "$work/docs/reports/x-artifacts/harness" "$work/website/src/content/docs" "$work/nested/deep"
       printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
@@ -429,6 +459,15 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       # The mirror ref stays, EQUAL to HEAD, while the branch is deleted from the
       # remote: a cached proxy that still "proves" a push that no longer exists.
       git -C "$root/origin.git" update-ref -d refs/heads/feature
+      ;;
+    worktree-docs-exec)
+      # Split the checkout: the ROOT stays on `main` (as the fleet's shared checkout
+      # does) and `feature` moves into a LINKED WORKTREE, which is what gets returned.
+      # `$REPO` is then the worktree while roborev's daemon binds `$root/work`.
+      git_q "$work" checkout -q main
+      git_q "$work" worktree add -q "$root/wt" feature
+      printf '%s' "$root/wt"
+      return 0
       ;;
   esac
   printf '%s' "$work"
@@ -492,8 +531,10 @@ mkdir -p "$FIXTURE_HOME"
 run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   local work="$1"; shift
   # Fail loudly on a broken fixture rather than letting the wrapper fall back to
-  # $PWD (which would silently run every assert against the REAL repo).
-  if [ -z "$work" ] || [ ! -d "$work/.git" ]; then
+  # $PWD (which would silently run every assert against the REAL repo). `-e`, not `-d`:
+  # a LINKED WORKTREE's `.git` is a FILE holding `gitdir: ...`, and the worktree
+  # fixtures are the ones that pin the root-checkout config source.
+  if [ -z "$work" ] || [ ! -e "$work/.git" ]; then
     bad "fixture setup failed: '$work' is not a git work tree"
     OUT="$tmp/empty-out.txt"; : >"$OUT"; INVOKED="$tmp/empty-invoked.txt"; : >"$INVOKED"; RC=99
     return 0
@@ -810,7 +851,12 @@ assert_verdict 'case (cx4)' FAIL 1
 assert_says 'case (cx4) census-exclusion FAILs with the count' '^census-exclusion: FAIL \(3/3 code census paths excluded:'
 assert_says 'case (cx4) names a swallowed path AND the pattern that ate it' "docs/reports/x-artifacts/harness/run\.sh by 'docs/\*\*'"
 assert_says 'case (cx4) names the second swallowed path' "classify\.py by 'docs/\*\*'"
-assert_says 'case (cx4) attributes the defect to configuration, not the reviewer' 'this is a CONFIGURATION defect, not a reviewer one'
+# The SOURCE tag is load-bearing now that three config files are evaluated: "excluded by
+# 'docs/**'" alone does not tell an operator which file to edit.
+assert_says 'case (cx4) names WHICH config file the pattern came from' "by 'docs/\*\*' \[repo-config\]"
+assert_says 'case (cx4) enumerates every config source it read' "config sources read, ALL of them"
+assert_says 'case (cx4) attributes the swallow to the configuration, not the reviewer' 'excluded by YOUR CONFIGURATION'
+assert_says 'case (cx4) attributes the defect to configuration, not the reviewer' 'this is a CONFIGURATION defect \(or a roborev built-in\), not a reviewer one'
 assert_says 'case (cx4) does not send the reader to prompt-content' 'do NOT go looking at prompt-content'
 assert_never_enqueued 'case (cx4)'
 assert_says 'case (cx4) prompt-content is never consulted' '^prompt-content: SKIP$'
@@ -835,10 +881,18 @@ work=$(make_fixture case_cx5b docs-executables)
 write_roborev_config_raw "$work" "agent = 'codex'
 model = 'gpt-5.6-sol'"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# `none` — the binary ANSWERS with an empty list, CORROBORATING the empty parse. The
+# previous revision left this unset (exit 64 => UNAVAILABLE), which locked in an
+# UN-CORROBORATED "no exclusion patterns configured" PASS: exactly the state the guard
+# reaches when it fails to recognise a key roborev honours, so a green case here blessed
+# a guard that had silently self-disabled.
+STUB_CONFIG_PATTERNS=none
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
 run_wrapper "$work"
 assert_verdict 'case (cx5b)' PASS 0
-assert_says 'case (cx5b) absent key is an explicit PASS' '^census-exclusion: PASS \(no exclusion patterns configured\)$'
+assert_says 'case (cx5b) absent key is an explicit PASS' '^census-exclusion: PASS \(no exclusion patterns configured; '
+assert_says 'case (cx5b) the PASS is CORROBORATED by the binary, not merely parsed' 'corroboration: OK\)$'
+assert_says 'case (cx5b) the built-in excludes are still evaluated and counted' 'roborev v0\.61\.2 built-in exclude\(s\)'
 assert_lacks 'case (cx5b) is not reported as unreadable' 'exclusion set unreadable'
 
 printf '== case (cx5c): a TABLE-SCOPED exclude_patterns is NOT the top-level key ==\n'
@@ -851,10 +905,78 @@ write_roborev_config_raw "$work" "agent = 'codex'
 [ci]
 exclude_patterns = ['**']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_CONFIG_PATTERNS=none
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
 run_wrapper "$work"
 assert_verdict 'case (cx5c)' PASS 0
-assert_says 'case (cx5c) table scoping is respected' '^census-exclusion: PASS \(no exclusion patterns configured\)$'
+assert_says 'case (cx5c) table scoping is respected' '^census-exclusion: PASS \(no exclusion patterns configured; '
+assert_says 'case (cx5c) and the empty parse is corroborated, never assumed' 'corroboration: OK\)$'
+
+printf '== case (cx5d): parse sees NOTHING while the binary reports a pattern => DRIFT FAIL ==\n'
+reset_stub
+# BLOCKER B, mechanized. The old code returned `PASS (no exclusion patterns configured)`
+# and `return 0` BEFORE corroboration ever ran, so "our parser recognised no key" was
+# aliased to "nothing is configured". Measured against roborev v0.61.2: a QUOTED key is
+# valid TOML and IS honoured, so this state is reachable in the real world — and it
+# enqueues a review from which every docs/ executable is silently dropped, i.e. #3229
+# reintroduced under the key meant to prevent it. Here the config file carries a key the
+# parser deliberately cannot see (an alien spelling) while the binary reports `docs/**`.
+work=$(make_fixture case_cx5d docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+exclude__patterns = ['docs/**']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_CONFIG_PATTERNS="docs/**"
+run_wrapper "$work"
+assert_verdict 'case (cx5d)' FAIL 1
+assert_says 'case (cx5d) an unparsed-but-honoured pattern is DRIFT, not a PASS' "^census-exclusion: FAIL \(exclusion set drift: 'docs/\*\*' reported by roborev config get is absent from the parsed set\)$"
+assert_says 'case (cx5d) the empty-parse case is called out explicitly' 'the parse found NO configured pattern at all while the binary reports at least one'
+assert_says 'case (cx5d) names the issue it would reintroduce' 'issue #3229 reintroduced under the key meant to prevent it'
+assert_lacks 'case (cx5d) never reports the un-corroborated absent-config PASS' '^census-exclusion: PASS'
+assert_never_enqueued 'case (cx5d)'
+
+printf '== case (cx5e): a QUOTED key spelling is recognised, not silently skipped ==\n'
+reset_stub
+# The concrete v0.61.2 measurement behind cx5d: `"exclude_patterns"` is the SAME key, is
+# honoured by the binary, and the bare-key match used to skip the line entirely. With the
+# quoted spelling recognised the swallow is caught by the primary path (a named swallowed
+# path), not merely by the drift backstop.
+work=$(make_fixture case_cx5e docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+\"exclude_patterns\" = ['docs/**', '*.md']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx5e)' FAIL 1
+assert_says 'case (cx5e) the quoted key is parsed, so the swallow is named directly' '^census-exclusion: FAIL \(3/3 code census paths excluded:'
+assert_says 'case (cx5e) with the pattern and its source file' "run\.sh by 'docs/\*\*' \[repo-config\]"
+assert_lacks 'case (cx5e) never reports the absent-config PASS' 'no exclusion patterns configured'
+assert_never_enqueued 'case (cx5e)'
+
+printf "== case (cx5f): a SINGLE-quoted key spelling is recognised too ==\n"
+reset_stub
+work=$(make_fixture case_cx5f docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+'exclude_patterns' = ['docs/**']"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx5f)' FAIL 1
+assert_says 'case (cx5f) the single-quoted key is parsed' '^census-exclusion: FAIL \(3/3 code census paths excluded:'
+assert_never_enqueued 'case (cx5f)'
+
+printf '== case (cx5g): an UNKNOWN TOML escape is refused, never silently swallowed ==\n'
+reset_stub
+# `"a\tb"` used to yield the 3-byte `atb` — a pattern SILENTLY DIFFERENT from the one
+# roborev applies, which is the whole failure mode this check exists to prevent. An
+# untranslated escape is "we could not tell", so it fails closed.
+work=$(make_fixture case_cx5g docs-executables)
+write_roborev_config_raw "$work" 'agent = '"'"'codex'"'"'
+exclude_patterns = ["docs\q**"]'
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx5g)' FAIL 1
+assert_says 'case (cx5g) the unknown escape is named' "^census-exclusion: FAIL \(exclusion set unreadable: unknown escape "
+assert_says 'case (cx5g) it explains why swallowing the backslash is wrong' 'is a<TAB>b, not atb'
+assert_lacks 'case (cx5g) never reports the absent-config PASS' 'no exclusion patterns configured'
+assert_never_enqueued 'case (cx5g)'
 
 printf '== case (cx6): a census path with SPACES and a literal quote compares correctly ==\n'
 reset_stub
@@ -925,7 +1047,7 @@ write_roborev_config "$work" "['build']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx9)' FAIL 1
-assert_says 'case (cx9) the subtree file is swallowed by the bare directory name' "^census-exclusion: FAIL \(1/1 code census paths excluded: build/gen\.rs by 'build'\)$"
+assert_says 'case (cx9) the subtree file is swallowed by the bare directory name' "^census-exclusion: FAIL \(1/1 code census paths excluded: build/gen\.rs by 'build' \[repo-config\]\)$"
 assert_says 'case (cx9) the emitted pathspecs include the /** sibling' ':\(exclude,glob\)\*\*/build/\*\*'
 assert_never_enqueued 'case (cx9)'
 
@@ -937,7 +1059,7 @@ write_roborev_config "$work" "['/tool.sh']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx10)' FAIL 1
-assert_says 'case (cx10) only the ROOT tool.sh is excluded' "^census-exclusion: FAIL \(1/2 code census paths excluded: tool\.sh by '/tool\.sh'\)$"
+assert_says 'case (cx10) only the ROOT tool.sh is excluded' "^census-exclusion: FAIL \(1/2 code census paths excluded: tool\.sh by '/tool\.sh' \[repo-config\]\)$"
 assert_says 'case (cx10) the pathspec is emitted root-anchored, without the **/ prefix' ':\(exclude,glob\)tool\.sh$'
 assert_lacks 'case (cx10) sub/tool.sh is NOT reported swallowed' 'sub/tool\.sh by'
 
@@ -961,7 +1083,7 @@ write_roborev_config "$work" "['*.md', 'docs/']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx11)' FAIL 1
-assert_says 'case (cx11) the trailing-slash inversion is named in the value' "^census-exclusion: FAIL \(trailing-slash pattern 'docs/' resolves RECURSIVE \(\*\*/docs\), opposite to 'docs/\*\*' — drop the trailing slash deliberately or write 'docs/\*\*'\)$"
+assert_says 'case (cx11) the trailing-slash inversion is named in the value, WITH its source file' "^census-exclusion: FAIL \(trailing-slash pattern 'docs/' from repo-config resolves RECURSIVE \(\*\*/docs\), opposite to 'docs/\*\*' — drop the trailing slash deliberately or write 'docs/\*\*'\)$"
 assert_says 'case (cx11) the detail explains the trim-before-anchoring order' "trims a trailing '/' BEFORE deciding whether the pattern is root-anchored"
 assert_says 'case (cx11) the FAIL is explicitly diff-independent' 'independent of whether the pattern currently swallows a census path'
 assert_never_enqueued 'case (cx11)'
@@ -1040,6 +1162,87 @@ assert_verdict 'case (cx16)' FAIL 1
 assert_says 'case (cx16) a GLOBALLY configured pattern is still caught' "^census-exclusion: FAIL \(3/3 code census paths excluded:.*by 'docs/\*\*'"
 assert_never_enqueued 'case (cx16)'
 
+
+printf '== case (cx18): from a LINKED WORKTREE, the ROOT checkout config is what roborev reads ==\n'
+reset_stub
+# BLOCKER A, mechanized — and it is the shape 1:1:1:1 puts EVERY issue in. The worktree
+# carries the NARROWED set, the root checkout still carries the blanket one; roborev's
+# daemon binds the repo by its `repos.root_path` (the ROOT checkout) and applies THAT
+# file. A repo-config-only read reported "3/3 survive" while the real review delivered an
+# emptied prompt. Both files are now evaluated and a swallow in EITHER fails.
+work=$(make_fixture case_cx18 worktree-docs-exec)
+root_work="${work%/wt}/work"
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+write_roborev_config "$root_work" "$BLANKET_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx18)' FAIL 1
+assert_says 'case (cx18) the ROOT checkout config is caught despite a narrowed worktree config' '^census-exclusion: FAIL \(3/3 code census paths excluded:'
+assert_says 'case (cx18) the swallow is attributed to the ROOT config, not the worktree one' "run\.sh by 'docs/\*\*' \[root-config\]"
+assert_says 'case (cx18) both repo config sources are named' 'worktree-config=.* UNION root-config='
+assert_says 'case (cx18) it explains that the worktree config does not override' 'A narrowed worktree config does NOT override it'
+assert_says 'case (cx18) it names repos.root_path as the binding mechanism' "binds the repository by its 'repos.root_path'"
+assert_never_enqueued 'case (cx18)'
+
+printf '== case (cx18b): the same worktree layout PASSes once the ROOT config is narrowed ==\n'
+reset_stub
+# The complement, so cx18 is not merely "worktrees always fail": with BOTH files narrowed
+# the three docs/ executables survive and the review IS enqueued. This also pins that a
+# worktree does not double-report its own patterns.
+work=$(make_fixture case_cx18b worktree-docs-exec)
+root_work="${work%/wt}/work"
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+write_roborev_config "$root_work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx18b)' PASS 0
+assert_says 'case (cx18b) all three executables survive both config sources' '^census-exclusion: PASS \(3/3 code census paths survive the effective exclusion set;'
+if [ -s "$INVOKED" ]; then
+  ok 'case (cx18b): the review WAS enqueued'
+else
+  bad 'case (cx18b): no review was enqueued — the two-source read must not be a blanket FAIL'
+fi
+
+printf "== case (cx19): a roborev BUILT-IN exclude is modelled, and messaged as a built-in ==\n"
+reset_stub
+# `exclude_patterns` is not the whole exclusion set: the v0.61.2 binary ALWAYS appends a
+# hard-coded lockfile/cache deny-list. `Cargo.lock` has a `lock` extension, so the census
+# classifies it CODE — yet roborev silently drops it, and a check that modelled only the
+# configured half reported it SURVIVING. Same false-PASS class as blocker A.
+work=$(make_fixture case_cx19 cargo-lock)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx19)' FAIL 1
+assert_says 'case (cx19) the lockfile is reported swallowed, by the built-in, not by config' "^census-exclusion: FAIL \(1/2 code census paths excluded: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]\)\$"
+assert_says 'case (cx19) the built-in cause is messaged DISTINCTLY from a config cause' 'excluded by a ROBOREV BUILT-IN'
+assert_says 'case (cx19) and says editing .roborev.toml cannot fix it' 'editing \.roborev\.toml cannot fix it'
+assert_says 'case (cx19) the built-in set is version-pinned' 'pinned to v0\.61\.2'
+assert_lacks 'case (cx19) it is NOT blamed on the operator config' 'excluded by YOUR CONFIGURATION'
+assert_lacks 'case (cx19) main.rs is not reported swallowed' 'main\.rs by'
+assert_never_enqueued 'case (cx19)'
+
+printf "== case (cx19b): the built-in set is a CONSTANT, extracted from the pinned binary ==\n"
+# Structural, so an upgrade that drops a pattern from the constant cannot pass unnoticed:
+# the lock family the v0.61.2 binary carries must all be present, and the maintenance
+# obligation must be stated beside them.
+_oracles_src="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
+for _bi in '\*\*/Cargo\.lock' '\*\*/go\.sum' '\*\*/package-lock\.json' '\*\*/pnpm-lock\.yaml' \
+  '\*\*/poetry\.lock' '\*\*/uv\.lock' '\*\*/composer\.lock' '\*\*/Podfile\.lock' \
+  '\*\*/Package\.resolved' '\*\*/\.kata\.local\.toml' '\*\*/yarn\.lock' '\*\*/bun\.lockb' \
+  '\*\*/flake\.lock' '\*\*/\.beads/\*\*' '\*\*/\.cache/\*\*'; do
+  if grep -qE "$_bi" "$_oracles_src"; then
+    ok "structural: the roborev built-in '$_bi' is modelled"
+  else
+    bad "structural: the roborev built-in '$_bi' is absent from ROBOREV_BUILTIN_EXCLUDES"
+  fi
+done
+if grep -qE 'RE-EXTRACTING this list' "$_oracles_src"; then
+  ok 'structural: the built-in set states the re-extract-on-upgrade obligation'
+else
+  bad 'structural: the built-in set does not state a re-extract-on-upgrade obligation'
+fi
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
@@ -1554,7 +1757,12 @@ CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
 INVOKED="$tmp/invoked-$CASE_N.txt"
 : >"$INVOKED"
-STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --repo "$tmp/case_t7/work" \
+# HOME is redirected for the same reason `run_wrapper` does it: `census-exclusion`
+# UNIONs the GLOBAL `$HOME/.roborev/config.toml` into the exclusion set, so on a box
+# whose real global config carries a pattern this case would fail on THAT key and its
+# own assertion would never be reached. This hand-rolled invocation must not skip it.
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+  bash "$WRAPPER" --repo "$tmp/case_t7/work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (t7)' FAIL 1
@@ -1597,7 +1805,11 @@ CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
 INVOKED="$tmp/invoked-$CASE_N.txt"
 : >"$INVOKED"
-STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --repo "$work" \
+# HOME redirected (see case t7): t9 now runs THROUGH `census-exclusion`, which reads the
+# global config, so a host global with a non-empty pattern would fail this case on the
+# wrong key and the EXIT-trap assertion below would never fire.
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+  bash "$WRAPPER" --repo "$work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/trapcase.log" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (t9)' FAIL 1
