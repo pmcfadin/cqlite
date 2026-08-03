@@ -71,6 +71,38 @@ CODE_FREE_EXTENSIONLESS_PREFIXES="openspec/ docs/ website/ .claude/"
 CODE_FREE_ARTIFACT_EXTENSIONS="txt json jsonl log err csv png svg gz pdf jfr html mmd tex diff"
 CODE_FREE_ARTIFACT_PREFIXES="docs/"
 
+# ROBOREV'S BUILT-IN EXCLUDES — PINNED TO `roborev v0.61.2` (issue #3229).
+#
+# `exclude_patterns` is NOT the whole exclusion set. The binary ALWAYS appends a
+# hard-coded lockfile/cache deny-list to the pathspecs it hands git, with no
+# configuration switch and no way to opt out. Modelling only the configured half is the
+# SAME false-PASS class as reading the wrong config file: today a PR touching
+# `Cargo.lock` has it silently dropped from the reviewer's diff while a
+# `census-exclusion:` that ignored the built-ins would report it SURVIVING.
+#
+# RECOVERED FROM THE BINARY, not from documentation or memory: these are the literal
+# `:(exclude,glob)`-prefixed pathspec strings present in the v0.61.2 executable
+# (`strings -a <bin> | grep -o ':(exclude,glob)[^ ]*'`). They are therefore already
+# RESOLVED pathspec bodies, not user patterns — every one carries an explicit `**/`, so
+# feeding them through the `FormatExcludeArgs` port below is a no-op on their anchoring
+# (each contains a `/`, so the port keeps it VERBATIM) and simply adds the `/**`
+# sibling, which is what makes `**/.beads` exclude its subtree.
+#
+# MAINTENANCE OBLIGATION, identical to the port's: a roborev UPGRADE requires
+# RE-EXTRACTING this list before the check is trusted. An upstream addition would
+# silently widen the real exclusion set while every summary block still read `PASS`.
+#
+# MESSAGED DISTINCTLY, deliberately: a built-in swallow is NOT a defect in this repo's
+# configuration and editing `.roborev.toml` cannot fix it, so the two causes must never
+# share a remedy line.
+ROBOREV_BUILTIN_EXCLUDES="\
+**/.beads/** **/.cache/** **/.gocache/** **/.kata.local.toml \
+**/Cargo.lock **/cargo.lock **/Gemfile.lock **/Package.resolved **/Pipfile.lock \
+**/Podfile.lock **/bun.lock **/bun.lockb **/composer.lock **/flake.lock \
+**/go.sum **/mix.lock **/package-lock.json **/packages.lock.json **/pdm.lock \
+**/pnpm-lock.yaml **/poetry.lock **/pubspec.lock **/uv.lock **/yarn.lock"
+ROBOREV_BUILTIN_SRC_LABEL="roborev-builtin"
+
 # roborev_push_assert: sets PUSH_ASSERT (and REMOTE/REMOTE_SHA); calls `finish` on
 # failure, so it never returns when the branch is not pushed.
 roborev_push_assert() {
@@ -377,11 +409,17 @@ roborev_census() {
 # repo tracks exactly such a path,
 # `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`. Comparing the
 # two renderings directly would mismatch on precisely those paths, so normalise here.
+# IT RETURNS THROUGH A NAMED GLOBAL (`_rx_unquoted`), NEVER THROUGH `$(...)`. Command
+# substitution STRIPS every trailing newline, so a tracked path ending in a `\012`
+# escape (`weird\n`) would come back a byte short — and a short path both mis-compares
+# against the `-z` survivor set AND can COLLIDE with a sibling that really is the
+# shorter name. `printf -v` is used for the octal expansion for the same reason.
 roborev_unquote_path() {
-  local p="$1" out="" i n ch
+  local p="$1" out="" i n ch oct
+  _rx_unquoted="$p"
   case "$p" in
     '"'*'"') ;;
-    *) printf '%s' "$p"; return 0 ;;
+    *) return 0 ;;
   esac
   p="${p:1:${#p}-2}"
   n=${#p}
@@ -408,19 +446,22 @@ roborev_unquote_path() {
       r) out+=$'\r'; i=$((i + 1)) ;;
       t) out+=$'\t'; i=$((i + 1)) ;;
       v) out+=$'\v'; i=$((i + 1)) ;;
-      [0-7]) out+=$(printf '%b' "\\0${p:$i:3}"); i=$((i + 3)) ;;
+      [0-7]) printf -v oct '%b' "\\0${p:$i:3}"; out+="$oct"; i=$((i + 3)) ;;
       *) out+="$ch"; i=$((i + 1)) ;;
     esac
   done
-  printf '%s' "$out"
+  _rx_unquoted="$out"
 }
 
 # _rx_has_slash <string>: true when the string contains a '/'.
 _rx_has_slash() { case "$1" in */*) return 0 ;; esac; return 1; }
 
 # roborev_parse_toml_array <value>: append the single-line TOML array's string items
-# to `_rx_patterns`. FAIL CLOSED (return 1 with `_rx_error` set) rather than guess —
-# "we could not tell" must NEVER be aliased to "nothing is excluded".
+# to `_rx_patterns` (each tagged into `_rx_sources` with `$_rx_src_label`, so a later
+# FAIL can name WHICH file the pattern came from — with up to three config sources in
+# play, "some file excludes this" is not an actionable message). FAIL CLOSED (return 1
+# with `_rx_error` set) rather than guess — "we could not tell" must NEVER be aliased to
+# "nothing is excluded".
 roborev_parse_toml_array() {
   local v="$1" i=0 n ch q item
   case "$v" in
@@ -449,6 +490,14 @@ roborev_parse_toml_array() {
       ch="${v:$i:1}"
       if [ "$ch" = "$q" ]; then i=$((i + 1)); break; fi
       # TOML basic strings ("...") take backslash escapes; literal strings ('...') do not.
+      #
+      # AN UNKNOWN ESCAPE IS REFUSED, NOT SWALLOWED. The previous revision took the
+      # character after the backslash VERBATIM, so `"a\tb"` yielded the 3-byte `atb`
+      # while roborev's TOML decoder yields `a<TAB>b` — a pattern SILENTLY DIFFERENT
+      # from the one actually applied, which is the whole failure mode this check
+      # exists to prevent. Translate the escapes TOML defines and fail closed on
+      # anything else, `\u`/`\U` included (an approximated code point is still a
+      # different pattern; write the literal character, or use a 'literal string').
       if [ "$q" = '"' ] && [ "$ch" = '\' ]; then
         i=$((i + 1))
         if [ "$i" -ge "$n" ]; then
@@ -456,23 +505,48 @@ roborev_parse_toml_array() {
           return 1
         fi
         ch="${v:$i:1}"
+        case "$ch" in
+          '"') ch='"' ;;
+          '\') ch='\' ;;
+          b) ch=$'\b' ;;
+          f) ch=$'\f' ;;
+          n) ch=$'\n' ;;
+          r) ch=$'\r' ;;
+          t) ch=$'\t' ;;
+          *)
+            _rx_error="unknown escape '\\$ch' inside a \"basic string\" exclude_patterns entry — TOML defines only \\\" \\\\ \\b \\f \\n \\r \\t \\uXXXX \\UXXXXXXXX, and dropping the backslash would compare a DIFFERENT pattern than roborev applies (\"a\\tb\" is a<TAB>b, not atb). Refusing to guess: write the literal character, or use a 'single-quoted literal string'"
+            return 1
+            ;;
+        esac
       fi
       item+="$ch"
       i=$((i + 1))
     done
     _rx_patterns+=("$item")
+    _rx_sources+=("$_rx_src_label")
   done
   _rx_error="unterminated exclude_patterns array — the committed value must be a SINGLE-LINE array"
   return 1
 }
 
-# roborev_toml_exclude_patterns <file>: read the file's TOP-LEVEL `exclude_patterns`
-# key. TABLE SCOPING is respected — a same-named key under `[ci]`, `[review]`, ... is
-# NOT the top-level key, and this repo's real file has both a top-level key and
-# several tables below it. Absent file / absent key contribute nothing (which is a
-# PASS: nothing configured cannot swallow anything); an unparseable value is an error.
+# roborev_toml_exclude_patterns <file> <source-label>: read the file's TOP-LEVEL
+# `exclude_patterns` key. TABLE SCOPING is respected — a same-named key under `[ci]`,
+# `[review]`, ... is NOT the top-level key, and this repo's real file has both a
+# top-level key and several tables below it. Absent file / absent key contribute
+# nothing (which is only a PASS once the BINARY has corroborated that nothing is
+# configured — see `roborev_check_census_exclusion`); an unparseable value is an error.
+#
+# KEY SPELLINGS. TOML admits a bare key AND a quoted key: `exclude_patterns`,
+# `"exclude_patterns"` and `'exclude_patterns'` are the SAME key, and roborev honours
+# all three (measured against v0.61.2: a file carrying `"exclude_patterns" = ['docs/**',
+# '*.md']` makes `roborev config get exclude_patterns` answer `docs/**,*.md`). A parser
+# that matched only the bare spelling therefore skipped the line, reported "nothing is
+# configured", and silently disabled this guard under the very key whose job is to keep
+# it armed. Recognising the quoted forms is still not sufficient on its own — the
+# binary corroboration is what covers any spelling not enumerated here.
 roborev_toml_exclude_patterns() {
   local file="$1" line t value
+  local _rx_src_label="${2:-$file}"
   [ -e "$file" ] || return 0
   if [ ! -r "$file" ]; then
     _rx_error="'$file' exists but is not readable"
@@ -488,6 +562,8 @@ roborev_toml_exclude_patterns() {
     [ "$in_table" -eq 0 ] || continue
     case "$t" in
       exclude_patterns[[:space:]]*=* | exclude_patterns=*) ;;
+      '"exclude_patterns"'[[:space:]]*=* | '"exclude_patterns"'=*) ;;
+      "'exclude_patterns'"[[:space:]]*=* | "'exclude_patterns'"=*) ;;
       *) continue ;;
     esac
     _rx_found=1
@@ -498,17 +574,90 @@ roborev_toml_exclude_patterns() {
   return 0
 }
 
+# roborev_resolve_root_checkout <repo>: sets `_rx_root` to the ROOT (main) checkout
+# backing `<repo>` — EMPTY when `<repo>` IS that checkout — or sets `_rx_root_error`
+# when it cannot be determined at all.
+#
+# WHY THIS EXISTS (the false PASS it closes, #3229). Under 1:1:1:1 every issue runs in a
+# LINKED WORKTREE, so `$REPO` is `.../cqlite-wt/issue-N` — but roborev's daemon binds
+# the repository by its `repos.root_path`, which is the ROOT checkout
+# (`.../workspace/repo`), and reads THAT checkout's `.roborev.toml`. Reading only
+# `$REPO/.roborev.toml` therefore certified a config roborev never consulted: on this
+# very branch the worktree carried the narrowed set (7/7 "survive") while the root
+# checkout still carried the blanket `['docs/**','*.md']` that the real review actually
+# applied (`prompt-content: FAIL (1/7 code census paths absent)`). Corroborating with
+# `roborev config get` did not catch it, because that ran from the same wrong cwd.
+#
+# BOTH FILES ARE EVALUATED, and a swallow in EITHER is a FAIL. Which of the two a given
+# roborev build prefers is an internal detail we must not bet on; the union is the only
+# reading that cannot produce a false PASS in either direction. When the two are the
+# SAME checkout `_rx_root` is emptied so the single file is never double-reported.
+roborev_resolve_root_checkout() {
+  local repo="$1" gcd="" rc=0 first="" rp_repo rp_root
+  _rx_root=""
+  _rx_root_error=""
+  # PRIMARY: the COMMON git dir. In a linked worktree `--git-dir` is
+  # `<root>/.git/worktrees/<name>` while `--git-common-dir` is `<root>/.git`.
+  set +e
+  gcd=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] || [ -z "$gcd" ]; then
+    # `--path-format` needs git >= 2.31. Without it `--git-common-dir` may answer a
+    # path RELATIVE to `$repo` — resolve it rather than reading one file and hoping.
+    set +e
+    gcd=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ] && [ -n "$gcd" ]; then
+      case "$gcd" in /*) ;; *) gcd="$repo/$gcd" ;; esac
+    else
+      gcd=""
+    fi
+  fi
+  case "$gcd" in
+    */.git) _rx_root="${gcd%/.git}" ;;
+    *) _rx_root="" ;;
+  esac
+  if [ -z "$_rx_root" ] || [ ! -d "$_rx_root" ]; then
+    # LAST RESORT: `git worktree list --porcelain` names the MAIN worktree FIRST. This
+    # also covers a non-standard `$GIT_DIR` name, where the `*/.git` munge above cannot
+    # apply.
+    set +e
+    first=$(git -C "$repo" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+    set -e
+    if [ -n "$first" ] && [ -d "$first" ]; then
+      _rx_root="$first"
+    else
+      _rx_root=""
+      _rx_root_error="neither 'git rev-parse --git-common-dir' nor 'git worktree list --porcelain' named a usable root checkout for '$repo'"
+      return 0
+    fi
+  fi
+  # Normalise BOTH sides before comparing: a symlinked or trailing-slash spelling of one
+  # and the same checkout must not read as two sources (it would double-report every
+  # pattern and name the wrong remedy).
+  rp_repo=$(cd "$repo" 2>/dev/null && pwd -P) || rp_repo="$repo"
+  rp_root=$(cd "$_rx_root" 2>/dev/null && pwd -P) || rp_root="$_rx_root"
+  if [ "$rp_repo" = "$rp_root" ]; then _rx_root=""; fi
+  return 0
+}
+
 # roborev_format_exclude_args: THE PORT (see the header block above). Fills
 # `_rx_pathspecs` (what git is asked) plus the parallel `_rx_owner_pattern` /
-# `_rx_owner_body` (so a FAIL can name the pattern responsible for each path), and
-# sets `_rx_trailing` when a pattern carries the R3 trailing slash.
+# `_rx_owner_body` / `_rx_owner_src` (so a FAIL can name the pattern responsible for
+# each path AND the file it came from), and sets `_rx_trailing` when a CONFIGURED
+# pattern carries the R3 trailing slash.
 roborev_format_exclude_args() {
-  local pattern p spaced b0 prefix
+  local pattern p spaced b0 prefix pidx=-1 psrc
   _rx_pathspecs=()
   _rx_owner_pattern=()
   _rx_owner_body=()
+  _rx_owner_src=()
   _rx_trailing=""
   for pattern in "${_rx_patterns[@]}"; do
+    pidx=$((pidx + 1))
+    psrc="${_rx_sources[$pidx]}"
     # strings.TrimSpace
     p="${pattern#"${pattern%%[![:space:]]*}"}"
     p="${p%"${p##*[![:space:]]}"}"
@@ -529,64 +678,105 @@ roborev_format_exclude_args() {
     fi
     # R3: the trailing slash was already trimmed above, BEFORE the anchoring test —
     # so recording it here is what makes the inversion visible instead of silent.
-    if [ -z "$_rx_trailing" ] && [ "$spaced" != "$p" ] && [ "${spaced%/}" != "$spaced" ]; then
+    #
+    # It names the SOURCE FILE too: with a worktree config, a root-checkout config and a
+    # global config all in play, "a trailing slash somewhere" is not an editable
+    # instruction. (A built-in carries no trailing slash, and is not editable at all, so
+    # it can never be the subject of this FAIL.)
+    if [ -z "$_rx_trailing" ] && [ "$psrc" != "$ROBOREV_BUILTIN_SRC_LABEL" ] &&
+      [ "$spaced" != "$p" ] && [ "${spaced%/}" != "$spaced" ]; then
       if [ "$prefix" = "**/" ]; then
-        _rx_trailing="FAIL (trailing-slash pattern '$p/' resolves RECURSIVE (**/$p), opposite to '$p/**' — drop the trailing slash deliberately or write '$p/**')"
+        _rx_trailing="FAIL (trailing-slash pattern '$p/' from $psrc resolves RECURSIVE (**/$p), opposite to '$p/**' — drop the trailing slash deliberately or write '$p/**')"
       else
         # Still a FAIL, unconditionally (the trailing slash is never load-bearing and
         # a one-character edit away from the inversion above), but do not misreport
         # the resolution: this form stayed root-anchored.
-        _rx_trailing="FAIL (trailing-slash pattern '$p/' is trimmed before the anchoring test, so the slash is at best redundant and one edit away from inverting to RECURSIVE — write '$p' or '$p/**')"
+        _rx_trailing="FAIL (trailing-slash pattern '$p/' from $psrc is trimmed before the anchoring test, so the slash is at best redundant and one edit away from inverting to RECURSIVE — write '$p' or '$p/**')"
       fi
     fi
     _rx_pathspecs+=(":(exclude,glob)$prefix$p" ":(exclude,glob)$prefix$p/**")
     _rx_owner_pattern+=("$pattern")
     _rx_owner_body+=("$prefix$p")
+    _rx_owner_src+=("$psrc")
   done
 }
 
-# roborev_corroborate_exclude_patterns: OPTIONAL cross-check against the binary.
+# roborev_corroborate_exclude_patterns: the cross-check against the BINARY.
 # A pattern the binary reports that our parse LACKS is a FAIL (that direction can hide
-# a swallow); the reverse is a NOTICE; an uninvocable binary is `UNAVAILABLE` and never
-# a failure — which is what keeps the whole check hermetically testable.
+# a swallow); the reverse is a NOTICE; a binary that answers NOWHERE is `UNAVAILABLE`
+# and never a failure — which is what keeps the whole check hermetically testable.
+#
+# IT IS RUN ON EVERY PATH, INCLUDING WHEN THE PARSE FOUND NOTHING (#3229). The previous
+# revision returned `PASS (no exclusion patterns configured)` BEFORE calling this — so
+# "our parser recognised no key" was aliased to "nothing is configured", the exact
+# epistemic error the rest of this file refuses. Measured against roborev v0.61.2: a
+# config carrying the QUOTED key `"exclude_patterns" = ['docs/**','*.md']` is HONOURED by
+# the binary while the old bare-key match skipped the line — the guard then reported a
+# green "nothing configured" and enqueued a review from which every
+# `docs/reports/*-artifacts/**` executable was silently dropped. That is #3229
+# reintroduced under the key whose whole job is preventing it. Where the parse is empty
+# this cross-check is the ONLY oracle, so it must run precisely there.
+#
+# IT ASKS FROM BOTH CHECKOUTS, for the reason `roborev_resolve_root_checkout` documents:
+# `roborev config get` resolves the repo config relative to its CWD, so asking only from
+# `$REPO` reproduces Blocker A's blind spot inside the corroboration itself.
+#
+# The comparison is against the CONFIGURED subset of `_rx_patterns` only: `config get`
+# reports configuration, never roborev's built-in lockfile/cache excludes, so including
+# those would make every run report a permanent NOTICE.
 roborev_corroborate_exclude_patterns() {
   _rx_corroboration="UNAVAILABLE"
   _rx_drift=""
+  _rx_drift_cwd=""
   command -v roborev >/dev/null 2>&1 || return 0
-  local out rc reported item known missing_here=0 extra_here=0 p
-  set +e
-  out=$(cd "$REPO" && roborev config get exclude_patterns 2>/dev/null)
-  rc=$?
-  set -e
-  { [ "$rc" -eq 0 ] && [ -n "$out" ]; } || return 0
-  # The binary prints the configured value (comma-joined, possibly bracketed/quoted).
-  out="${out#*=}"
-  out="${out//[/}"
-  out="${out//]/}"
-  # `read -a` with IFS=',' — NEVER an unquoted `for item in $out`, which would
-  # PATHNAME-EXPAND a pattern like `*.md` against $PWD.
-  local -a reported_raw=()
-  IFS=',' read -r -a reported_raw <<<"$out"
-  reported=()
-  for item in ${reported_raw[@]+"${reported_raw[@]}"}; do
-    item="${item#"${item%%[![:space:]]*}"}"
-    item="${item%"${item##*[![:space:]]}"}"
-    item="${item#\'}"; item="${item%\'}"
-    item="${item#\"}"; item="${item%\"}"
-    [ -n "$item" ] || continue
-    reported+=("$item")
+  local out rc item known missing_here=0 extra_here=0 p idx answered=0 j
+  local -a cwds=("$REPO") reported=() reported_cwd=()
+  if [ -n "$_rx_root" ]; then cwds+=("$_rx_root"); fi
+  for ((idx = 0; idx < ${#cwds[@]}; idx++)); do
+    set +e
+    out=$(cd "${cwds[$idx]}" && roborev config get exclude_patterns 2>/dev/null)
+    rc=$?
+    set -e
+    # rc==0 is AUTHORITATIVE even when the output is EMPTY: "the binary says nothing is
+    # configured" is corroboration, and treating it as UNAVAILABLE (as the previous
+    # revision did) throws away the only evidence available on the empty-parse path.
+    [ "$rc" -eq 0 ] || continue
+    answered=1
+    # The binary prints the configured value (comma-joined, possibly bracketed/quoted).
+    out="${out#*=}"
+    out="${out//[/}"
+    out="${out//]/}"
+    # `read -a` with IFS=',' — NEVER an unquoted `for item in $out`, which would
+    # PATHNAME-EXPAND a pattern like `*.md` against $PWD.
+    local -a reported_raw=()
+    IFS=',' read -r -a reported_raw <<<"$out"
+    for item in ${reported_raw[@]+"${reported_raw[@]}"}; do
+      item="${item#"${item%%[![:space:]]*}"}"
+      item="${item%"${item##*[![:space:]]}"}"
+      item="${item#\'}"; item="${item%\'}"
+      item="${item#\"}"; item="${item%\"}"
+      [ -n "$item" ] || continue
+      reported+=("$item")
+      reported_cwd+=("${cwds[$idx]}")
+    done
   done
-  for item in ${reported[@]+"${reported[@]}"}; do
+  [ "$answered" -eq 1 ] || return 0
+  for ((j = 0; j < ${#reported[@]}; j++)); do
+    item="${reported[$j]}"
     known=0
-    for p in "${_rx_patterns[@]}"; do
-      [ "$p" != "$item" ] || known=1
+    for ((idx = 0; idx < ${#_rx_patterns[@]}; idx++)); do
+      [ "${_rx_sources[$idx]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
+      [ "${_rx_patterns[$idx]}" != "$item" ] || known=1
     done
     if [ "$known" -eq 0 ]; then
       missing_here=1
       _rx_drift="$item"
+      _rx_drift_cwd="${reported_cwd[$j]}"
     fi
   done
-  for p in "${_rx_patterns[@]}"; do
+  for ((idx = 0; idx < ${#_rx_patterns[@]}; idx++)); do
+    [ "${_rx_sources[$idx]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
+    p="${_rx_patterns[$idx]}"
     known=0
     for item in ${reported[@]+"${reported[@]}"}; do
       [ "$p" != "$item" ] || known=1
@@ -608,24 +798,78 @@ roborev_corroborate_exclude_patterns() {
 roborev_check_census_exclusion() {
   local repo_cfg="$REPO/.roborev.toml"
   local global_cfg="${HOME:-}/.roborev/config.toml"
-  local -a _rx_patterns=() _rx_pathspecs=() _rx_owner_pattern=() _rx_owner_body=()
-  local _rx_error="" _rx_found=0 _rx_trailing="" _rx_corroboration="UNAVAILABLE" _rx_drift=""
+  local -a _rx_patterns=() _rx_sources=() _rx_pathspecs=() _rx_owner_pattern=() \
+    _rx_owner_body=() _rx_owner_src=()
+  local _rx_error="" _rx_found=0 _rx_trailing="" _rx_corroboration="UNAVAILABLE" \
+    _rx_drift="" _rx_drift_cwd="" _rx_unquoted="" _rx_root="" _rx_root_error="" \
+    _rx_src_label=""
+  local line
 
-  roborev_toml_exclude_patterns "$repo_cfg"
-  if [ -z "$_rx_error" ] && [ -n "${HOME:-}" ]; then
-    roborev_toml_exclude_patterns "$global_cfg"
+  # --- the CONFIG SOURCES, all of them ------------------------------------------
+  # THREE, not one: the worktree's own `.roborev.toml`, the ROOT checkout's (the file
+  # roborev's daemon actually binds through `repos.root_path` — see
+  # `roborev_resolve_root_checkout`) and the global one. Short SOURCE TAGS accompany
+  # every pattern into the FAIL/PASS text, because with more than one file in play
+  # "excluded by 'docs/**'" does not tell an operator which file to edit.
+  roborev_resolve_root_checkout "$REPO"
+  if [ -n "$_rx_root_error" ]; then
+    CENSUS_EXCLUSION="FAIL (exclusion set unreadable: the ROOT checkout backing '$REPO' could not be resolved)"
+    DETAILS+=("ERROR: census-exclusion: roborev binds a repository by its 'repos.root_path' — the ROOT checkout — and reads THAT checkout's .roborev.toml, so with the root unresolvable the exclusion set roborev will actually apply is UNKNOWN. Failing closed rather than reading only '$repo_cfg' and reporting a PASS about a file roborev may never consult. Cause: $_rx_root_error")
+    DETAILS+=("ERROR: census-exclusion: no review was enqueued. Re-run from a normal checkout or linked worktree (an exotic \$GIT_DIR layout is not supported by this check).")
+    finish FAIL 1
   fi
+  local root_cfg=""
+  local repo_tag="repo-config" root_tag="root-config" global_tag="global-config"
+  if [ -n "$_rx_root" ]; then
+    root_cfg="$_rx_root/.roborev.toml"
+    repo_tag="worktree-config"
+  fi
+
+  _rx_src_label="$repo_tag"
+  roborev_toml_exclude_patterns "$repo_cfg" "$repo_tag"
+  if [ -z "$_rx_error" ] && [ -n "$root_cfg" ]; then
+    roborev_toml_exclude_patterns "$root_cfg" "$root_tag"
+  fi
+  if [ -z "$_rx_error" ] && [ -n "${HOME:-}" ]; then
+    roborev_toml_exclude_patterns "$global_cfg" "$global_tag"
+  fi
+  local sources_line="$repo_tag='$repo_cfg'"
+  if [ -n "$root_cfg" ]; then sources_line="$sources_line UNION $root_tag='$root_cfg'"; fi
+  sources_line="$sources_line UNION $global_tag='$global_cfg'"
   if [ -n "$_rx_error" ]; then
     CENSUS_EXCLUSION="FAIL (exclusion set unreadable: $_rx_error)"
-    DETAILS+=("ERROR: census-exclusion: the effective roborev exclusion set could not be read, so whether it would swallow this census's CODE paths is UNKNOWN. Failing closed — 'we could not tell' is never 'nothing is excluded'. Sources: '$repo_cfg' (repo) UNION '$global_cfg' (global). Cause: $_rx_error")
+    DETAILS+=("ERROR: census-exclusion: the effective roborev exclusion set could not be read, so whether it would swallow this census's CODE paths is UNKNOWN. Failing closed — 'we could not tell' is never 'nothing is excluded'. Sources: $sources_line. Cause: $_rx_error")
     DETAILS+=("ERROR: census-exclusion: fix the exclude_patterns value (a single-line array of quoted patterns) and re-run. No review was enqueued.")
     finish FAIL 1
   fi
-  if [ "$_rx_found" -eq 0 ] || [ "${#_rx_patterns[@]}" -eq 0 ]; then
-    # An absent key/file or a genuinely empty list cannot swallow anything. This is
-    # TEXTUALLY DISTINCT from the unreadable FAIL above, on purpose.
-    CENSUS_EXCLUSION="PASS (no exclusion patterns configured)"
-    return 0
+  local n_configured=${#_rx_patterns[@]}
+
+  # --- roborev's OWN built-in excludes, folded into the SAME evaluation ----------
+  # They are not configurable and not reported by `config get`, but git applies them
+  # exactly like the configured ones, so a census path they eat is just as invisible to
+  # the reviewer. Tagged distinctly so the remedy text can differ.
+  local _builtin
+  # shellcheck disable=SC2086 # deliberate split of the space-separated constant
+  for _builtin in $ROBOREV_BUILTIN_EXCLUDES; do
+    _rx_patterns+=("$_builtin")
+    _rx_sources+=("$ROBOREV_BUILTIN_SRC_LABEL")
+  done
+  local n_builtin=$((${#_rx_patterns[@]} - n_configured))
+
+  # --- CORROBORATION, unconditionally and BEFORE any early return ----------------
+  # Especially when `n_configured` is 0: "our parser recognised no key" is NOT "nothing
+  # is configured", and here the binary is the only oracle that can tell them apart.
+  roborev_corroborate_exclude_patterns
+  if [ "$_rx_corroboration" = DRIFT ]; then
+    CENSUS_EXCLUSION="FAIL (exclusion set drift: '$_rx_drift' reported by roborev config get is absent from the parsed set)"
+    DETAILS+=("ERROR: census-exclusion: 'roborev config get exclude_patterns' run from '$_rx_drift_cwd' reports a pattern ('$_rx_drift') that this wrapper's parse of $sources_line did not see, so the effective set is WIDER than the set just reconciled — an unparsed pattern could be excluding census code invisibly. Failing closed. Bring the configuration back to a single-line array of quoted patterns the parser reads, or fix the parser. No review was enqueued.")
+    if [ "$n_configured" -eq 0 ]; then
+      DETAILS+=("ERROR: census-exclusion: the parse found NO configured pattern at all while the binary reports at least one — so the guard would otherwise have reported 'no exclusion patterns configured' and enqueued a review against a diff roborev silently narrows. That is issue #3229 reintroduced under the key meant to prevent it, which is why an empty parse is corroborated instead of trusted.")
+    fi
+    finish FAIL 1
+  fi
+  if [ "$_rx_corroboration" = NOTICE ]; then
+    DETAILS+=("NOTICE: census-exclusion: this wrapper parsed pattern(s) that 'roborev config get exclude_patterns' did not report. That direction can only make the reconciliation STRICTER than reality, so it is a NOTICE, not a failure.")
   fi
 
   roborev_format_exclude_args
@@ -636,17 +880,27 @@ roborev_check_census_exclusion() {
     # agents skim is exactly how the original `docs/**` survived for months.
     CENSUS_EXCLUSION="$_rx_trailing"
     DETAILS+=("ERROR: census-exclusion: roborev's git.FormatExcludeArgs trims a trailing '/' BEFORE deciding whether the pattern is root-anchored, so 'x/' and 'x/**' behave OPPOSITELY — 'x/' becomes the slash-less 'x' and resolves to the RECURSIVE pathspecs ':(exclude,glob)**/x' + ':(exclude,glob)**/x/**', matching every 'x' directory at ANY depth. This FAIL is deliberately independent of whether the pattern currently swallows a census path: the widening is unbounded and silent.")
-    DETAILS+=("ERROR: census-exclusion: no review was enqueued. Edit '$repo_cfg' (or the global config) to remove the trailing slash.")
+    DETAILS+=("ERROR: census-exclusion: no review was enqueued. The pattern's SOURCE is named in the value line above; edit that file ($sources_line) to remove the trailing slash.")
     finish FAIL 1
   fi
-  if [ "${#_rx_pathspecs[@]}" -eq 0 ]; then
-    CENSUS_EXCLUSION="PASS (${#_rx_patterns[@]} configured pattern(s), all empty after trimming — nothing is excluded)"
-    return 0
+
+  # How the PASS line describes the CONFIGURED half. The built-in half is always
+  # evaluated, so "nothing is configured" must never read as "nothing is excluded".
+  local n_conf_effective=0 idx
+  for ((idx = 0; idx < ${#_rx_owner_src[@]}; idx++)); do
+    [ "${_rx_owner_src[$idx]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
+    n_conf_effective=$((n_conf_effective + 1))
+  done
+  local conf_desc="the effective exclusion set"
+  if [ "$n_configured" -eq 0 ]; then
+    conf_desc="no exclusion patterns configured; the $n_builtin roborev v0.61.2 built-in exclude(s) only"
+  elif [ "$n_conf_effective" -eq 0 ]; then
+    conf_desc="$n_configured configured pattern(s), all empty after trimming — the $n_builtin roborev v0.61.2 built-in exclude(s) only"
   fi
 
   local n_code=${#census_code_paths[@]}
   if [ "$n_code" -eq 0 ]; then
-    CENSUS_EXCLUSION="PASS (0/0 code census paths survive the effective exclusion set; corroboration: SKIP (no code paths))"
+    CENSUS_EXCLUSION="PASS (0/0 code census paths survive $conf_desc; corroboration: SKIP (no code paths))"
     return 0
   fi
 
@@ -677,25 +931,17 @@ roborev_check_census_exclusion() {
   done <"$surv_file"
 
   local -a swallowed=()
-  local path raw
+  local path
   for path in "${census_code_paths[@]}"; do
-    raw=$(roborev_unquote_path "$path")
-    if [ -z "${_rx_survivor[$raw]:-}" ]; then
-      swallowed+=("$raw")
+    roborev_unquote_path "$path"
+    if [ -z "${_rx_survivor[$_rx_unquoted]:-}" ]; then
+      swallowed+=("$_rx_unquoted")
     fi
   done
 
   if [ "${#swallowed[@]}" -eq 0 ]; then
-    roborev_corroborate_exclude_patterns
-    if [ "$_rx_corroboration" = DRIFT ]; then
-      CENSUS_EXCLUSION="FAIL (exclusion set drift: '$_rx_drift' reported by roborev config get is absent from the parsed set)"
-      DETAILS+=("ERROR: census-exclusion: 'roborev config get exclude_patterns' reports a pattern ('$_rx_drift') that this wrapper's parse of '$repo_cfg' did not see, so the effective set is WIDER than the set just reconciled — an unparsed pattern could be excluding census code invisibly. Failing closed. Bring the configuration back to a single-line array of quoted patterns the parser reads, or fix the parser. No review was enqueued.")
-      finish FAIL 1
-    fi
-    if [ "$_rx_corroboration" = NOTICE ]; then
-      DETAILS+=("NOTICE: census-exclusion: this wrapper parsed pattern(s) that 'roborev config get exclude_patterns' did not report. That direction can only make the reconciliation STRICTER than reality, so it is a NOTICE, not a failure.")
-    fi
-    CENSUS_EXCLUSION="PASS ($n_code/$n_code code census paths survive the effective exclusion set; corroboration: $_rx_corroboration)"
+    # Corroboration already ran (unconditionally, above) and DRIFT already failed there.
+    CENSUS_EXCLUSION="PASS ($n_code/$n_code code census paths survive $conf_desc; corroboration: $_rx_corroboration)"
     return 0
   fi
 
@@ -703,7 +949,7 @@ roborev_check_census_exclusion() {
   # Attribution asks git once per pattern, using the POSITIVE form of the SAME two
   # pathspecs, so the blame is computed by the same matcher rather than guessed. Only
   # on the failure path, so the common case stays one git call.
-  local -A _rx_blame=()
+  local -A _rx_blame=() _rx_blame_src=()
   local i body matched
   for ((i = 0; i < ${#_rx_owner_body[@]}; i++)); do
     body="${_rx_owner_body[$i]}"
@@ -713,29 +959,56 @@ roborev_check_census_exclusion() {
     set -e
     while IFS= read -r -d '' matched; do
       [ -n "$matched" ] || continue
-      [ -n "${_rx_blame[$matched]:-}" ] || _rx_blame["$matched"]="${_rx_owner_pattern[$i]}"
+      if [ -z "${_rx_blame[$matched]:-}" ]; then
+        _rx_blame["$matched"]="${_rx_owner_pattern[$i]}"
+        _rx_blame_src["$matched"]="${_rx_owner_src[$i]}"
+      fi
     done <"$surv_file.blame"
+  done
+
+  # Was ANY swallow caused by a roborev BUILT-IN? The remedy differs completely (a
+  # built-in is not editable), so the two causes are counted and messaged apart.
+  local n_builtin_hits=0 n_config_hits=0
+  for path in "${swallowed[@]}"; do
+    if [ "${_rx_blame_src[$path]:-}" = "$ROBOREV_BUILTIN_SRC_LABEL" ]; then
+      n_builtin_hits=$((n_builtin_hits + 1))
+    else
+      n_config_hits=$((n_config_hits + 1))
+    fi
   done
 
   local m=${#swallowed[@]} shown=0 joined=""
   for path in "${swallowed[@]}"; do
     [ "$shown" -lt 10 ] || break
     [ -z "$joined" ] || joined="$joined, "
-    joined="$joined$path by '${_rx_blame[$path]:-<unattributed>}'"
+    joined="$joined$path by '${_rx_blame[$path]:-<unattributed>}' [${_rx_blame_src[$path]:-<unattributed>}]"
     shown=$((shown + 1))
   done
   if [ "$m" -gt "$shown" ]; then joined="$joined (+$((m - shown)) more)"; fi
   CENSUS_EXCLUSION="FAIL ($m/$n_code code census paths excluded: $joined)"
 
-  DETAILS+=("ERROR: census-exclusion: the EFFECTIVE roborev exclusion set would remove $m of the $n_code CODE path(s) in this census from the diff roborev builds, so the reviewer would never see them and a clean verdict would be VACUOUS for those files. roborev drops exactly what its configured pathspecs match — it makes NO code/non-code judgement — so this is a CONFIGURATION defect, not a reviewer one. Fix '$repo_cfg' (or the global '$global_cfg'); do NOT go looking at prompt-content or the reviewer.")
-  DETAILS+=("ERROR: census-exclusion: swallowed path(s), each with the pattern responsible:")
+  DETAILS+=("ERROR: census-exclusion: the EFFECTIVE roborev exclusion set would remove $m of the $n_code CODE path(s) in this census from the diff roborev builds, so the reviewer would never see them and a clean verdict would be VACUOUS for those files. roborev drops exactly what its pathspecs match — it makes NO code/non-code judgement — so this is a CONFIGURATION defect (or a roborev built-in), not a reviewer one; do NOT go looking at prompt-content or the reviewer.")
+  DETAILS+=("ERROR: census-exclusion: config sources read, ALL of them, and a swallow in ANY is a FAIL (which file a given roborev build prefers is an internal detail this check must not bet on): $sources_line.")
+  if [ -n "$root_cfg" ]; then
+    DETAILS+=("ERROR: census-exclusion: '$REPO' is a LINKED WORKTREE. roborev's daemon binds the repository by its 'repos.root_path' — the ROOT checkout '$_rx_root' — so '$root_cfg' is the file its reviews actually apply. A narrowed worktree config does NOT override it; edit the file the value line names.")
+  fi
+  if [ "$n_config_hits" -gt 0 ]; then
+    DETAILS+=("ERROR: census-exclusion: $n_config_hits of the $m swallowed path(s) were excluded by YOUR CONFIGURATION — editable, and the remedy is to narrow the responsible pattern in the file its source tag names.")
+  fi
+  if [ "$n_builtin_hits" -gt 0 ]; then
+    DETAILS+=("ERROR: census-exclusion: $n_builtin_hits of the $m swallowed path(s) were excluded by a ROBOREV BUILT-IN (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list). That is NOT your configuration and editing .roborev.toml cannot fix it — roborev will never show a reviewer these paths, so they must be verified some other way (primary sources, a regenerate-and-diff, or by splitting them out of the reviewed range). Recorded here so a clean verdict is never read as covering them.")
+  fi
+  DETAILS+=("ERROR: census-exclusion: swallowed path(s), each with the pattern responsible and its source:")
   for path in "${swallowed[@]}"; do
-    DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'")
+    DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'  [${_rx_blame_src[$path]:-<unattributed>}]")
   done
-  DETAILS+=("ERROR: census-exclusion: the ${#_rx_patterns[@]} configured pattern(s) resolved to these git pathspecs (an exact port of roborev v0.61.2's git.FormatExcludeArgs — a pattern with an interior or leading '/' is ROOT-ANCHORED and verbatim, a slash-less pattern is '**/'-prefixed and RECURSIVE, and every pattern emits BOTH itself and its '/**' sibling):")
-  for sp in "${_rx_pathspecs[@]}"; do
-    DETAILS+=("  $sp")
+  DETAILS+=("ERROR: census-exclusion: the $n_configured configured pattern(s) resolved to these git pathspecs (an exact port of roborev v0.61.2's git.FormatExcludeArgs — a pattern with an interior or leading '/' is ROOT-ANCHORED and verbatim, a slash-less pattern is '**/'-prefixed and RECURSIVE, and every pattern emits BOTH itself and its '/**' sibling):")
+  for ((i = 0; i < ${#_rx_owner_body[@]}; i++)); do
+    [ "${_rx_owner_src[$i]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
+    DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}")
+    DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}/**")
   done
-  DETAILS+=("ERROR: census-exclusion: no review was enqueued — a swallowing configuration is knowable BEFORE the enqueue, so it costs no review round.")
+  DETAILS+=("ERROR: census-exclusion: PLUS $n_builtin roborev v0.61.2 built-in exclude(s) — the hard-coded lockfile/cache deny-list ($ROBOREV_BUILTIN_EXCLUDES) — which are always applied and are not configurable.")
+  DETAILS+=("ERROR: census-exclusion: no review was enqueued — a swallowing exclusion set is knowable BEFORE the enqueue, so it costs no review round.")
   finish FAIL 1
 }
