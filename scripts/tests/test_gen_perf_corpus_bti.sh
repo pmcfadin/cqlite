@@ -78,8 +78,8 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # the EXACT full-suite pass count (not a slack lower bound), so deleting or
 # short-circuiting any single case drops `passes` below it and reds the suite. Proven
 # by mutation, not by inspection (see the header note on the roborev M1 finding).
-MIN_CASES=113
-SKIP_PY_CASES=35
+MIN_CASES=118
+SKIP_PY_CASES=40
 SKIP_E2E_CASES=12
 
 fails=0
@@ -861,6 +861,56 @@ PY
       fail "row driver accepted '$bad' (out: $out)"
     fi
   done
+
+  # ------------------------- the determinism claim is PINNED, not argued (M2) ----
+  # roborev #3234 M2: the driver used random.choices()/random.sample(), whose
+  # ALGORITHMS CPython documents as implementation details, under an unpinned
+  # `python3` -- so a different interpreter could silently change every partition
+  # width and payload while the manifests kept advertising the old seed identity. The
+  # PRNG and both selection algorithms are now VENDORED in the driver, and
+  # `--self-check` regenerates a fixed set of configurations and compares the CSV
+  # bytes against digests committed IN that file (one of them the committed small
+  # golden's exact row set).
+  out=$(python3 "$ROWS_PY" --self-check 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && grep -q "^SELF-CHECK-OK 4 pinned determinism vector" <<<"$out"; then
+    pass "the row driver's 4 pinned determinism vectors reproduce byte-for-byte"
+  else
+    fail "row-driver --self-check: expected SELF-CHECK-OK over 4 vectors (rc=$rc, out: $out)"
+  fi
+  out=$(python3 "$ROWS_PY" --self-check --rows 10 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "takes no other arguments" <<<"$out"; then
+    pass "--self-check refuses to be combined with generation flags"
+  else
+    fail "--self-check with extra args: expected a usage failure (rc=$rc, out: $out)"
+  fi
+  # ...and the pin is LIVE, in both layers. A digest nobody can make fail is
+  # decoration, so break the vendored PRNG core and then the vendored sampling, in
+  # COPIES of the driver, and require --self-check to catch each.
+  prng_mutation_case() { # prng_mutation_case <label> <sed-expression>
+    local label="$1" expr="$2" copy o r
+    copy="$TMP/rows-mutated-$RANDOM.py"
+    sed "$expr" "$ROWS_PY" >"$copy"
+    if cmp -s "$copy" "$ROWS_PY"; then
+      fail "$label: the mutation did not change the file (stale sed expression)"
+      return
+    fi
+    o=$(python3 "$copy" --self-check 2>&1); r=$?
+    if [ "$r" -ne 0 ] && grep -q "self-check FAILED" <<<"$o"; then
+      pass "--self-check CATCHES $label (the pinned digests are live)"
+    else
+      fail "$label: --self-check passed on a mutated driver (rc=$r, out: $o)"
+    fi
+  }
+  # NOTE on the chosen bits: flipping bit 0 of the tempering mask is NOT a valid
+  # mutation -- `y << 7` zeroes the low 7 bits, so mask bits 0..6 are unreachable and
+  # the output is unchanged. (Measured: that mutation passed --self-check. The digests
+  # were right; the mutation was vacuous. Bit 8 is reachable.)
+  prng_mutation_case "a one-bit change to MT19937's MATRIX_A recurrence constant" \
+    's/_MT_MATRIX_A = 0x9908B0DF/_MT_MATRIX_A = 0x9908B0DE/'
+  prng_mutation_case "a one-bit change to the MT19937 tempering mask (bit 8)" \
+    's/0x9D2C5680/0x9D2C5780/'
+  prng_mutation_case "a changed range in the vendored sampling algorithm" \
+    's/j = rnd\.below(n - i)/j = rnd.below(n)/'
 
   # ------------------------------- the `pk int` ceiling is INCLUSIVE (L4) --------
   # roborev #3234 L4: keys of chunk N span `N*PK_STRIDE .. N*PK_STRIDE + rows - 1`,
