@@ -746,38 +746,68 @@ _mold_accel_token() {
 # Stamping it here makes "this box cannot be profiled" visible in every pasted
 # SUMMARY instead of being discovered at the start of a measurement cycle.
 #
-# HARD CONSTRAINT: this is the FREE /proc read from scripts/perf-capability.sh and
-# nothing else — no `perf stat` exec, no new binary dependency, no subprocess at all
-# (perf_capability_proc_value reads through the `read` builtin), so no measurable
-# time cost in the gate's path. The functional verification (which DOES exec perf) is
-# bootstrap's job, not the gate's.
+# HARD CONSTRAINT — and it is ENFORCED, not asserted in prose (issue #3249 review):
+# the emit-time perf path is the FREE /proc read from scripts/perf-capability.sh and
+# NOTHING else: no `perf stat` exec, no new binary dependency, no external process,
+# and no command substitution — a `$( )` is a forked subshell, so "no subprocess" that
+# is read back through `$( )` would be self-contradictory. That is why the functions
+# below take an <outvar> and assign into it instead of printing (and why the helper is
+# sourced ONCE, at script scope, rather than re-read on every summary). Case 9f-free
+# of scripts/tests/test_agent_gate_summary.sh kills any regression: it runs this exact
+# code with an EMPTY PATH and with xtrace subshell-depth counting. The functional
+# verification (which DOES exec perf) is bootstrap's job, not the gate's.
 #
-# NO MEMOIZATION here, deliberately: every call site is inside a `$( )`, so an
+# NO MEMOIZATION of the state, deliberately: every emit runs inside a `$( )`, so an
 # assignment to a script-level cache would land in a subshell and be discarded — a
 # cache that looks real and never hits. Two `read`-builtin /proc reads cost nothing,
 # so the honest implementation is to just do them.
-_perf_state() {
-  local state=""
+#
+# Sourced HERE, at script scope: the helper is 300+ lines, and re-reading it on every
+# emit bought nothing (its functions are all a subshell inherits anyway). Sourcing it
+# is documented side-effect free — functions plus PERF_CAPABILITY_* constants only.
+_PERF_CAP_LOADED=0
+if [ -r "$REPO_ROOT/scripts/perf-capability.sh" ]; then
+  # shellcheck source=scripts/perf-capability.sh
+  if . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then _PERF_CAP_LOADED=1; fi
+fi
+
+# _AGENT_GATE_OS: the host OS, resolved ONCE per gate run. `uname` is an external
+# process, so the OS question cannot be asked inside the per-emit token path above;
+# asking it at script scope costs one fork per RUN instead of one per summary. The
+# AGENT_GATE_TEST_OS seam is honoured exactly as before (tests export it before the
+# gate starts, so call-time vs init-time resolution is equivalent).
+_AGENT_GATE_OS="${AGENT_GATE_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+
+# _perf_state_into <outvar>: the state token, assigned into <outvar>. Never left
+# empty — an empty token would emit a bare `perf=`, which no consumer can parse.
+_perf_state_into() {
+  local __ps_out="$1" __ps_v=""
   if [ -n "${AGENT_GATE_TEST_PERF_STATE:-}" ]; then
-    state="$AGENT_GATE_TEST_PERF_STATE"
-  elif [ -r "$REPO_ROOT/scripts/perf-capability.sh" ] &&
-       . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then
-    state="$(perf_capability_token)"
+    __ps_v="$AGENT_GATE_TEST_PERF_STATE"
+  elif [ "${_PERF_CAP_LOADED:-0}" = 1 ]; then
+    perf_capability_token_into __ps_v
   fi
-  [ -n "$state" ] || state=unknown
-  printf '%s' "$state"
+  [ -n "$__ps_v" ] || __ps_v=unknown
+  eval "$__ps_out=\$__ps_v"
 }
 
-# _perf_accel_token: the ` perf=<state>` suffix on Linux hosts, empty elsewhere —
-# the controls are Linux kernel knobs, so Darwin output stays byte-identical
-# (same contract as _mold_accel_token above).
-_perf_accel_token() {
-  local os="${AGENT_GATE_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
-  case "$os" in
-    Linux|linux) printf ' perf=%s' "$(_perf_state)" ;;
-    *) : ;;
+# _perf_accel_token_into <outvar>: the ` perf=<state>` suffix on Linux hosts, empty
+# elsewhere — the controls are Linux kernel knobs, so Darwin output stays
+# byte-identical (same contract as _mold_accel_token above).
+_perf_accel_token_into() {
+  local __pat_out="$1" __pat_state=""
+  case "${_AGENT_GATE_OS:-unknown}" in
+    Linux|linux)
+      _perf_state_into __pat_state
+      eval "$__pat_out=\" perf=\$__pat_state\"" ;;
+    *) eval "$__pat_out=" ;;
   esac
 }
+
+# stdout forms, for debugging/ad-hoc use only — NOT the emit path (reading them costs
+# the caller the very `$( )` the `_into` forms exist to avoid).
+_perf_state()       { local v; _perf_state_into v; printf '%s' "$v"; }
+_perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
 
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
@@ -786,10 +816,15 @@ _perf_accel_token() {
 # a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
 # #2859), then ` perf=ok|paranoid-<N>|kptr-restricted|absent|unknown` (issue
 # #3249); Darwin output is unchanged.
+# The perf token is fetched through a VARIABLE, not a `$( )`: its path is
+# contractually free of forks (see above), and reading it back through a command
+# substitution here would reintroduce exactly the subshell that contract excludes.
 accelerators_line() {
+  local perf_tok=""
+  _perf_accel_token_into perf_tok
   printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
-    "$(_sccache_health)" "$(_mold_accel_token)" "$(_perf_accel_token)"
+    "$(_sccache_health)" "$(_mold_accel_token)" "$perf_tok"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------

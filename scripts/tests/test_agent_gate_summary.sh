@@ -1085,17 +1085,122 @@ for pair in "ok:$perf_fixture_ok" "paranoid-4:$perf_fixture_p4"; do
   assert_accelerators "perf-real-$want" "$real_file"
 done
 
-# 9f-free. The gate's token must stay a FREE /proc read: if it ever grew a `perf
-#          stat` exec, every gate on every box would pay a new subprocess (and a new
-#          binary dependency) for a diagnostic line. Assert BOTH directions —
-#          structurally, that the gate's token function does not exec perf, and
-#          behaviourally, that a run emits the token its /proc fixture implies with
-#          `perf` REMOVED from PATH (which an exec-based implementation could not do).
-perf_fn_body=$(sed -n '/^_perf_state()/,/^}/p;/^_perf_accel_token()/,/^}/p' "$GATE")
-if [ -n "$perf_fn_body" ] && ! body_mentions "$perf_fn_body" 'perf stat'; then
-  ok "perf-free: the gate's token functions never exec 'perf stat' (free /proc read only)"
+# 9f-free. The gate's emit-time perf path is documented as FREE — in the code, in
+#          openspec/specs/agent-fleet-runtime/spec.md, in gate-contract.md and in
+#          gate-ops.md: no `perf` exec, NO EXTERNAL PROCESS AT ALL, and no command
+#          substitution. That last clause is not pedantry: a `$( )` forks a subshell,
+#          so a "no subprocess" claim whose value is read back through one is
+#          self-contradictory — and the original assert here only rejected a literal
+#          `perf stat`, so the claim shipped UNENFORCED while the path in fact forked
+#          several `$( )` per emit and re-sourced the 300-line helper each time.
+#          THE STATED COST IS ZERO: zero external processes, zero command
+#          substitutions, one source of the helper per gate RUN (not per emit).
+#          Asserted three ways below, because each catches a different regression.
+PERF_LIB="$(dirname "$GATE")/perf-capability.sh"
+
+# fn_text <file> <name>: a function's verbatim definition text, whether written as a
+# single line (`f() { …; }`) or a block ending in a column-0 `}`. Empty output means
+# NOT FOUND, which the asserts treat as a FAILURE — a renamed function must never drop
+# out of this audit silently.
+fn_text() {
+  awk -v n="$2" '
+    index($0, n "()") == 1 {
+      print
+      if ($0 ~ /\}[[:space:]]*$/) exit
+      inb = 1; next
+    }
+    inb { print; if ($0 ~ /^\}/) exit }
+  ' "$1"
+}
+
+# The FULL emit-time path: the gate's two token functions plus every helper function
+# they reach. Enumerated explicitly so the audit is a closed set, not a guess.
+perf_path_text=""
+perf_path_missing=""
+for _fn in _perf_state_into _perf_accel_token_into; do
+  _t=$(fn_text "$GATE" "$_fn")
+  [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
+  perf_path_text="$perf_path_text$_t
+"
+done
+for _fn in perf_capability_token_into perf_capability_proc_read \
+           perf_capability_proc_dir_into perf_capability_test_mode \
+           perf_capability_seam_set perf_capability_is_int; do
+  _t=$(fn_text "$PERF_LIB" "$_fn")
+  [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
+  perf_path_text="$perf_path_text$_t
+"
+done
+if [ -z "$perf_path_missing" ]; then
+  ok "perf-free: every function on the emit-time perf path was located (closed audit set)"
 else
-  bad "perf-free: the gate's perf token function execs perf stat (or was not found)"
+  bad "perf-free: perf-path function(s) not found — renamed without updating this audit?$perf_path_missing"
+fi
+# (a) STATIC: the whole path contains ZERO command substitutions and ZERO backticks.
+#     Counted (not merely grepped) so the failure message states the real number
+#     against the documented one.
+perf_subs=$(printf '%s\n' "$perf_path_text" | grep -o '\$(' | wc -l | tr -d ' ')
+perf_ticks=$(printf '%s\n' "$perf_path_text" | grep -o '`' | wc -l | tr -d ' ')
+if [ "$perf_subs" -eq 0 ] && [ "$perf_ticks" -eq 0 ]; then
+  ok "perf-free: the emit-time perf path contains 0 command substitutions (documented cost: 0)"
+else
+  bad "perf-free: the emit-time perf path forks $perf_subs command substitution(s) + $perf_ticks backtick(s) — documented cost is 0; either remove them or correct the claim in the code comment, the spec, gate-contract.md and gate-ops.md"
+fi
+if ! body_mentions "$perf_path_text" 'perf stat'; then
+  ok "perf-free: the emit-time perf path never execs 'perf stat' (free /proc read only)"
+else
+  bad "perf-free: the emit-time perf path execs perf stat"
+fi
+# ...and the 300-line helper is sourced ONCE at script scope, not from inside the
+# per-emit path (a per-emit source re-reads the file on every summary).
+if grep -q '^_PERF_CAP_LOADED=' "$GATE" \
+   && ! body_mentions "$perf_path_text" 'perf-capability.sh'; then
+  ok "perf-free: the helper is sourced once at script scope, never from the per-emit path"
+else
+  bad "perf-free: the perf helper is (re-)sourced inside the per-emit path, or the script-scope load flag is gone"
+fi
+# ...and the call site must consume the token through a VARIABLE: reading
+# `$(_perf_accel_token)` there would reintroduce the very fork the path excludes.
+accel_fn_text=$(fn_text "$GATE" accelerators_line)
+if printf '%s' "$accel_fn_text" | grep -q '_perf_accel_token_into' \
+   && ! printf '%s' "$accel_fn_text" | grep -q '\$(_perf_accel_token\|`_perf_accel_token'; then
+  ok "perf-free: accelerators_line consumes the perf token through a variable, not a subshell"
+else
+  bad "perf-free: accelerators_line reads the perf token through a command substitution"
+fi
+# (b) RUNTIME: run the gate's OWN extracted path with an EMPTY PATH (so ANY external
+#     command fails loudly) and with xtrace stamping ${BASH_SUBSHELL} (so ANY subshell
+#     — command substitution, pipeline, `( )` — is visible). A static scan can be
+#     fooled by an indirection; this cannot. Correct token + no subshell + no failed
+#     exec is the whole claim, executed.
+perf_probe="$tmp/perf-free-probe.sh"
+{
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' '. "$1"'
+  fn_text "$GATE" _perf_state_into
+  fn_text "$GATE" _perf_accel_token_into
+  printf '%s\n' '_PERF_CAP_LOADED=1'
+  printf '%s\n' '_AGENT_GATE_OS=Linux'
+  printf '%s\n' 'tok=""'
+  printf '%s\n' 'PATH=""'
+  printf '%s\n' "PS4='+SUB\${BASH_SUBSHELL} '"
+  printf '%s\n' 'set -x'
+  printf '%s\n' '_perf_accel_token_into tok'
+  printf '%s\n' 'set +x'
+  printf '%s\n' 'printf "TOKEN[%s]\n" "$tok"'
+} >"$perf_probe"
+perf_trace="$tmp/perf-free-trace.txt"
+perf_probe_out=$(env -u AGENT_GATE_TEST_PERF_STATE -u AGENT_GATE_TEST_OS \
+  CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$perf_fixture_p4" \
+  bash "$perf_probe" "$PERF_LIB" 2>"$perf_trace")
+perf_probe_subshells=$(grep -c 'SUB[1-9]' "$perf_trace" 2>/dev/null || true)
+perf_probe_execfail=$(grep -c 'No such file or directory\|command not found' "$perf_trace" 2>/dev/null || true)
+if [ "$perf_probe_out" = 'TOKEN[ perf=paranoid-4]' ] \
+   && [ "${perf_probe_subshells:-0}" -eq 0 ] && [ "${perf_probe_execfail:-0}" -eq 0 ]; then
+  ok "perf-free: the extracted path yields perf=paranoid-4 with an EMPTY PATH and spawns 0 subshells (xtrace-verified)"
+else
+  bad "perf-free: runtime probe failed (out='$perf_probe_out' subshells=$perf_probe_subshells exec-failures=$perf_probe_execfail)"
+  head -20 "$perf_trace"
 fi
 perf_nopath="$tmp/perf-nopath.txt"
 nopath_dir="$tmp/nopath-bin"; mkdir -p "$nopath_dir"
