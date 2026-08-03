@@ -34,6 +34,10 @@
 #      CSV held M" and "Statistics.db totalRows == sstabledump rows", plus the
 #      manifest writer's plan-vs-Statistics.db rows AND partitions checks and its
 #      refusal to fabricate an unobserved partition count.
+#   9. The suite ITSELF cannot report success while having stopped running cases:
+#      passes are counted against a declared floor, and each of the two legitimate
+#      skips (no python3; < 5 GiB free) declares the case count it drops so that
+#      count is credited against the floor and appears in the summary line.
 #
 # Hermetic: no docker, no sudo, no Cassandra, no network, no datasets. The
 # container-dependent paths (8, and the manifest happy path in 5) run against
@@ -49,9 +53,35 @@ GEN="$REPO_ROOT/test-data/scripts/gen-perf-corpus-bti.sh"
 ROWS_PY="$REPO_ROOT/test-data/scripts/gen-perf-corpus-bti-rows.py"
 MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 
+# Case accounting (rust-reviewer NIT on #3234). `fails=0` alone cannot tell "every
+# case passed" from "the suite stopped running cases half way and exited clean", so
+# the passes are counted and checked against a declared floor at the end. Two
+# blocks here are legitimately conditional (no python3; less than 5 GiB free under
+# TMPDIR), so each declares HOW MANY cases it drops via `skip`, the dropped count
+# is credited against the floor, and both reach the SUMMARY line -- previously a
+# SKIP was a bare echo that no summary ever mentioned.
+#
+# MIN_CASES is the full-suite pass count; SKIP_PY / SKIP_E2E are the case counts of
+# the two conditional blocks (13 python3-only cases, of which the 10 stub
+# end-to-end cases are the inner block). Growing the suite means growing these.
+MIN_CASES=83
+SKIP_PY_CASES=23
+SKIP_E2E_CASES=10
+
 fails=0
-pass() { echo "ok   - $1"; }
+passes=0
+skipped_cases=0
+skips=0
+pass() { echo "ok   - $1"; passes=$((passes + 1)); }
 fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
+# skip <cases-not-run> <reason...>
+skip() {
+  local n="$1"
+  shift
+  echo "SKIP - $* ($n case(s) NOT run)"
+  skipped_cases=$((skipped_cases + n))
+  skips=$((skips + 1))
+}
 
 for f in "$GEN" "$ROWS_PY" "$MANIFEST_PY"; do
   [ -f "$f" ] || { echo "FAIL - missing $f"; exit 1; }
@@ -639,7 +669,6 @@ SUDOEOF
     local name="$1"; shift
     E2E_ROOT="$TMP/e2e-$name"
     E2E_LOG="$TMP/e2e-$name.log"
-    E2E_DEST="$E2E_ROOT/sstables/perf_bti_stub/wide_multiclustering-$STUB_UUID"
     cp "$YAML_FIXTURE" "$TMP/yaml-$name.yaml"
     DOCKER="python3 $STUB" SUDO="$SUDO_STUB" \
     STUB_STATE="$TMP/stub-state-$name" STUB_KS=perf_bti_stub \
@@ -659,8 +688,8 @@ SUDOEOF
   if [ ! -f "$STUB" ]; then
     fail "missing the stub docker: $STUB"
   elif [ "${tmp_avail_gib:-0}" -lt 5 ]; then
-    echo "SKIP - only ${tmp_avail_gib:-?} GiB free under $TMP; the generator's preflight"
-    echo "SKIP   needs >= 4 GiB, so the stub end-to-end cases were not run"
+    skip "$SKIP_E2E_CASES" "only ${tmp_avail_gib:-?} GiB free under $TMP; the generator's" \
+      "preflight needs >= 4 GiB, so the stub end-to-end cases were not run"
   else
     # ---- positive control: the whole pipeline, and the manifest it writes -------
     e2e_run ok; rc=$?
@@ -782,12 +811,22 @@ PY
     fi
   fi
 else
-  echo "SKIP - python3 unavailable: row-driver + manifest-writer cases not run"
+  skip "$SKIP_PY_CASES" "python3 unavailable: row-driver + manifest-writer cases not run"
 fi
 
 echo
+# Case-count floor: a suite that silently stopped running cases must not be able to
+# report success on `fails=0` alone. Every legitimate skip declared its case count
+# above, so passes + skipped must still reach the declared total.
+if [ "$((passes + skipped_cases))" -lt "$MIN_CASES" ]; then
+  fail "case-count floor: $passes case(s) ran + $skipped_cases declared skipped =" \
+    "$((passes + skipped_cases)), under the $MIN_CASES this suite declares -- cases stopped" \
+    "running (or a skip's declared count is stale)."
+fi
+echo "test_gen_perf_corpus_bti: passes=$passes fails=$fails skips=$skips" \
+  "skipped-cases=$skipped_cases (declared floor $MIN_CASES)"
 if [ "$fails" -eq 0 ]; then
-  echo "test_gen_perf_corpus_bti: ALL PASS"
+  echo "test_gen_perf_corpus_bti: ALL PASS ($passes cases, $skipped_cases skipped)"
   exit 0
 fi
 echo "test_gen_perf_corpus_bti: $fails FAILURE(S)"

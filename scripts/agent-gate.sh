@@ -272,6 +272,15 @@
 #                      (scripts/tests/fixtures/stub-docker-cassandra-bti.py) — a full
 #                      hermetic end-to-end run: the manifest writer's happy path plus
 #                      both row-count cross-checks FIRING on injected disagreement.
+#                      Also runs scripts/tests/test_bti_perf_scan.sh (#3234), the
+#                      automated executor for the AC3 warm-scan harness
+#                      (cqlite-core/examples/bti_perf_scan.rs): it builds the example
+#                      and asserts its EXIT CODE for every documented failure mode
+#                      (usage incl. `--min-seconds nan`, corpus-absent, zero-rows,
+#                      row-count mismatch = the silent-truncation guard, sub-floor
+#                      window, mid-scan failure, and an unavailable authoritative row
+#                      count) against the git-committed 10 KiB `test_da` BTI fixture —
+#                      never the multi-GB perf corpus.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -5385,6 +5394,31 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (BTI perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # AC3 warm-scan harness guard (#3234): the automated executor for
+  # cqlite-core/examples/bti_perf_scan.rs, the instrument every #3234 throughput
+  # number comes from. Its guards had never been OBSERVED to fire, and its worst
+  # failure mode is silent — a TRUNCATED scan reporting `RESULT: PASS` with a short
+  # row count. This drives the real binary and asserts its exit code for each
+  # documented mode (2 usage incl. `--min-seconds nan`, 3 open-failed, 4 zero-rows,
+  # 5 row-count mismatch, 6 window-too-short, 7 scan-failed-mid-stream, 8 no
+  # authoritative row count) plus the guarded happy path as positive control.
+  # Hermetic and cheap: it runs against the GIT-COMMITTED 10 KiB `test_da`
+  # BTI (`da`) fixture (468 Cassandra-written rows), never the ~2 GiB perf corpus,
+  # and needs no docker/network/python3/datasets. It does `cargo build -p cqlite-core
+  # --example bti_perf_scan --features cli-helpers` (incremental; the full gate has
+  # already compiled that graph), and a build failure is a FAILURE, never a skip.
+  echo ">>> [$name] bash scripts/tests/test_bti_perf_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (AC3 warm-scan harness guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
