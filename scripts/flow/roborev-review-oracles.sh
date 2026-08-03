@@ -891,16 +891,21 @@ roborev_check_census_exclusion() {
     [ "${_rx_owner_src[$idx]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
     n_conf_effective=$((n_conf_effective + 1))
   done
-  local conf_desc="the effective exclusion set"
+  # `pass_prefix` leads the PASS parenthetical when the CONFIGURED half contributes
+  # nothing, so "nothing is configured" can never be mistaken for "nothing is excluded" —
+  # the built-in half is still named, counted and reconciled.
+  local pass_prefix="" survive_of="the effective exclusion set"
   if [ "$n_configured" -eq 0 ]; then
-    conf_desc="no exclusion patterns configured; the $n_builtin roborev v0.61.2 built-in exclude(s) only"
+    pass_prefix="no exclusion patterns configured; "
+    survive_of="the $n_builtin roborev v0.61.2 built-in exclude(s)"
   elif [ "$n_conf_effective" -eq 0 ]; then
-    conf_desc="$n_configured configured pattern(s), all empty after trimming — the $n_builtin roborev v0.61.2 built-in exclude(s) only"
+    pass_prefix="$n_configured configured pattern(s), all empty after trimming; "
+    survive_of="the $n_builtin roborev v0.61.2 built-in exclude(s)"
   fi
 
   local n_code=${#census_code_paths[@]}
   if [ "$n_code" -eq 0 ]; then
-    CENSUS_EXCLUSION="PASS (0/0 code census paths survive $conf_desc; corroboration: SKIP (no code paths))"
+    CENSUS_EXCLUSION="PASS (${pass_prefix}0/0 code census paths survive $survive_of; corroboration: SKIP (no code paths))"
     return 0
   fi
 
@@ -941,7 +946,7 @@ roborev_check_census_exclusion() {
 
   if [ "${#swallowed[@]}" -eq 0 ]; then
     # Corroboration already ran (unconditionally, above) and DRIFT already failed there.
-    CENSUS_EXCLUSION="PASS ($n_code/$n_code code census paths survive $conf_desc; corroboration: $_rx_corroboration)"
+    CENSUS_EXCLUSION="PASS (${pass_prefix}$n_code/$n_code code census paths survive $survive_of; corroboration: $_rx_corroboration)"
     return 0
   fi
 
