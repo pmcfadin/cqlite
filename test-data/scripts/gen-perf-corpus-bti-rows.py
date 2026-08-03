@@ -70,25 +70,61 @@ INT32_MAX = 2_147_483_647
 PK_STRIDE = 1_000_000
 
 
+def max_pk_of_plan(chunks: int, chunk_rows: int) -> int:
+    """The largest partition key a (chunks, chunk_rows) plan can emit.
+
+    Keys of chunk N span ``N * PK_STRIDE .. N * PK_STRIDE + partitions - 1`` and
+    ``partitions <= rows`` always, so the last chunk's ceiling is
+    ``(chunks - 1) * PK_STRIDE + chunk_rows - 1`` -- INCLUSIVE. The ``- 1`` is the
+    whole point (roborev #3234 L4): omitting it rejected a plan whose final key is
+    EXACTLY ``INT32_MAX``, which is a valid key.
+    """
+    return (chunks - 1) * PK_STRIDE + chunk_rows - 1
+
+
 def plan_fits_int32(chunks: int, chunk_rows: int) -> None:
     """Fail closed if a (chunks, chunk_rows) plan would overflow the `pk int` column.
 
     Called by the generator's `validate_inputs` BEFORE any container starts, so an
     over-sized plan is refused up front instead of dying part-way through the load
-    (issue #3234). `partitions <= rows` always, so `pk_base + chunk_rows` is a sound
-    upper bound on the largest key the last chunk can emit.
+    (issue #3234). The bound is INCLUSIVE (see :func:`max_pk_of_plan`): a plan whose
+    largest key is exactly ``INT32_MAX`` fits and is accepted.
     """
     if chunks < 1 or chunk_rows < 1:
         raise SystemExit(f"plan_fits_int32: chunks={chunks} chunk_rows={chunk_rows} must be >= 1")
-    max_pk = (chunks - 1) * PK_STRIDE + chunk_rows
+    max_pk = max_pk_of_plan(chunks, chunk_rows)
     if max_pk > INT32_MAX:
-        max_chunks = (INT32_MAX - chunk_rows) // PK_STRIDE + 1
+        # Largest chunk count that still fits, from the same inclusive arithmetic:
+        # (c - 1) * STRIDE + chunk_rows - 1 <= INT32_MAX.
+        max_chunks = (INT32_MAX - (chunk_rows - 1)) // PK_STRIDE + 1
+        advice = (
+            f"Use at most {max_chunks} chunks (raise --chunk-rows, or lower --rows)."
+            if max_chunks >= 1
+            else f"Even ONE chunk of {chunk_rows} rows cannot fit; lower --chunk-rows."
+        )
         raise SystemExit(
             f"plan overflows the `pk int` column: {chunks} chunks x stride {PK_STRIDE} "
             f"reaches pk {max_pk} > INT32_MAX ({INT32_MAX}). cqlsh COPY would reject "
-            f"every row of the first over-ceiling chunk. Use at most {max_chunks} "
-            f"chunks (raise --chunk-rows, or lower --rows)."
+            f"every row of the first over-ceiling chunk. {advice}"
         )
+
+
+def chunk_fits_int32(chunk_index: int, rows: int) -> int:
+    """Return chunk `chunk_index`'s key base, failing closed if the chunk cannot fit.
+
+    Same INCLUSIVE bound as :func:`plan_fits_int32`, applied to the ONE chunk this
+    process is about to write: keys span ``pk_base .. pk_base + rows - 1`` at worst
+    (one row per partition), so a chunk whose final key is exactly ``INT32_MAX``
+    is accepted (roborev #3234 L4).
+    """
+    pk_base = chunk_index * PK_STRIDE
+    if pk_base + rows - 1 > INT32_MAX:
+        raise SystemExit(
+            f"chunk {chunk_index}: pk_base {pk_base} + {rows} rows reaches pk "
+            f"{pk_base + rows - 1} > INT32_MAX ({INT32_MAX}); the `pk int` column "
+            f"cannot hold this chunk"
+        )
+    return pk_base
 
 
 def parse_widths(spec: str) -> list[tuple[int, int]]:
@@ -169,12 +205,7 @@ def main() -> int:
 
     seed_material = f"{args.seed}:{args.chunk_index}"
     rnd = random.Random(seed_material)
-    pk_base = args.chunk_index * PK_STRIDE
-    if pk_base + args.rows > INT32_MAX:
-        raise SystemExit(
-            f"chunk {args.chunk_index}: pk_base {pk_base} + {args.rows} rows exceeds "
-            f"INT32_MAX ({INT32_MAX}); the `pk int` column cannot hold this chunk"
-        )
+    pk_base = chunk_fits_int32(args.chunk_index, args.rows)
 
     # Hex payload: one getrandbits() per row (fast, deterministic). Hex is ~2:1
     # LZ4-compressible, i.e. field-shaped rather than either incompressible noise

@@ -38,6 +38,15 @@
 #      passes are counted against a declared floor, and each of the two legitimate
 #      skips (no python3; < 5 GiB free) declares the case count it drops so that
 #      count is credited against the floor and appears in the summary line.
+#  10. ...and it cannot report success while a case was never RUN AT ALL. roborev
+#      #3234 M1: two `check_reject` calls sat ABOVE the definition of check_reject,
+#      so bash printed "command not found", `fails` stayed 0, and the two
+#      committed-manifest protections (themselves the fix for an earlier finding)
+#      were asserted by nothing. Now: a `command_not_found_handle` makes an unknown
+#      name a HARD exit, `self_audit_helper_order` statically re-reads this file for
+#      call-before-definition, every helper is defined in the helpers section above
+#      its first use, and MIN_CASES is the EXACT pass count -- so deleting or
+#      short-circuiting any one case reds the suite (proven by mutation, see below).
 #
 # Hermetic: no docker, no sudo, no Cassandra, no network, no datasets. The
 # container-dependent paths (8, and the manifest happy path in 5) run against
@@ -64,8 +73,13 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # MIN_CASES is the full-suite pass count; SKIP_PY / SKIP_E2E are the case counts of
 # the two conditional blocks (python3-only cases, of which the stub end-to-end cases
 # are the inner block). Growing the suite means growing these.
-MIN_CASES=103
-SKIP_PY_CASES=30
+#
+# The floor is AUTHORITATIVE, and that is checked rather than asserted: it is set to
+# the EXACT full-suite pass count (not a slack lower bound), so deleting or
+# short-circuiting any single case drops `passes` below it and reds the suite. Proven
+# by mutation, not by inspection (see the header note on the roborev M1 finding).
+MIN_CASES=113
+SKIP_PY_CASES=35
 SKIP_E2E_CASES=12
 
 fails=0
@@ -83,6 +97,167 @@ skip() {
   skips=$((skips + 1))
 }
 
+# ------------------------------------------------------- vacuous-case guards ---
+# roborev #3234 M1: two `check_reject` calls were placed ABOVE the definition of
+# `check_reject`. With no `set -e` bash merely printed "command not found",
+# `fails` never moved, and the two committed-manifest protections were asserted by
+# NOTHING while the suite reported ALL PASS.
+#
+# `set -euo pipefail` is NOT usable here and that is a deliberate, load-bearing
+# choice: ~100 cases are built on the `out=$(bash "$GEN" ...); rc=$?` idiom, whose
+# whole point is to observe an EXPECTED non-zero exit. Under `set -e` the first such
+# assignment aborts the run, so `-e` would not harden this suite, it would delete it.
+# `set -uo pipefail` is on (above). The two guards below cover the defect class `-e`
+# would have covered here:
+#
+#   1. RUNTIME: a call to a name that is not a command/function is a HARD exit,
+#      not a printed warning that leaves `fails` at 0.
+#   2. STATIC: `self_audit_helper_order` (run as its own case, first thing) re-reads
+#      THIS file and fails if any helper it defines is invoked on a line ABOVE its
+#      definition -- i.e. it detects the exact M1 shape mechanically, for every
+#      helper, including ones added later.
+command_not_found_handle() {
+  echo "FAIL - internal: '$1' is not a command or function -- a typo, or a helper" \
+    "invoked BEFORE it was defined. Refusing to continue: an unrun case must never" \
+    "be able to look like a passing one." >&2
+  exit 97
+}
+
+# helper_order_findings <file>: prints one line per shell function in <file> whose
+# FIRST call site precedes its definition. Deliberately a STATIC pass over the file
+# text, so it also audits lines the current run never executes (a case inside a
+# skipped conditional block) -- which runtime detection cannot do.
+helper_order_findings() {
+  awk '
+    # A HEREDOC BODY is data, not shell: skip from the `<<TAG` opener to its
+    # terminator. (Needed because this suite embeds python and a shell fixture in
+    # heredocs; `<<<"$x"` here-STRINGS are not openers and must not match.)
+    in_heredoc { if ($0 == hd_tag) in_heredoc = 0; next }
+    match($0, /<<-?[ \t]*'"'"'?[A-Za-z_][A-Za-z0-9_]*'"'"'?/) {
+      hd_tag = substr($0, RSTART, RLENGTH)
+      gsub(/[<'"'"'\- \t]/, "", hd_tag)
+      in_heredoc = 1
+    }
+    # definition: optional indent, name, "() {"
+    match($0, /^[ \t]*[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{/) {
+      name = $0
+      sub(/^[ \t]*/, "", name)
+      sub(/\(\).*$/, "", name)
+      if (!(name in defline)) defline[name] = NR
+      next
+    }
+    # comments are not calls (a helper is routinely NAMED in the comment that
+    # documents it, one line above its own definition)
+    /^[ \t]*#/ { next }
+    { lines[NR] = $0 }
+    END {
+      for (name in defline) {
+        for (n = 1; n <= NR; n++) {
+          if (!(n in lines)) continue
+          # a CALL: the name in COMMAND POSITION (start of line, or after a
+          # separator / subshell open), followed by a word boundary.
+          if (lines[n] ~ ("(^[ \t]*|[;&|(][ \t]*|\\$\\([ \t]*)" name "([ \t]|$)")) {
+            if (n < defline[name]) {
+              printf "%s called at line %d but defined at line %d\n", name, n, defline[name]
+            }
+            break
+          }
+        }
+      }
+    }
+  ' "$1" | sort
+}
+
+# The audit runs as TWO cases: this file is clean, AND the auditor demonstrably
+# detects the M1 shape on a fabricated file. Without the negative control the clean
+# verdict would be exactly as trustworthy as the finding it is meant to prevent.
+self_audit_helper_order() {
+  local bad ctl_file ctl
+  bad=$(helper_order_findings "$0")
+  if [ -z "$bad" ]; then
+    pass "static self-audit: no helper in this file is called before it is defined"
+  else
+    fail "static self-audit found call-before-definition (the roborev M1 shape):
+$bad"
+  fi
+  ctl_file="$TMP/helper-order-negative-control.sh"
+  cat >"$ctl_file" <<'CTLEOF'
+#!/usr/bin/env bash
+later_helper "this call is above the definition"
+early_helper() { :; }
+early_helper ok
+later_helper() { :; }
+CTLEOF
+  ctl=$(helper_order_findings "$ctl_file")
+  if [ "$ctl" = "later_helper called at line 2 but defined at line 5" ]; then
+    pass "the static auditor DETECTS a call-before-definition (negative control)"
+  else
+    fail "helper-order auditor negative control: expected the line-2/line-5 finding, got: $ctl"
+  fi
+  # ...and the RUNTIME guard: calling a name that is not a command or function must
+  # be a hard non-zero exit, never bash's advisory "command not found" that leaves
+  # `fails` at 0 (exactly what let the M1 finding hide). Probed in a subshell so the
+  # handler's `exit` ends the probe rather than this run; the captured text is
+  # deliberately NOT echoed (it contains the word FAIL).
+  local probe_out probe_rc
+  probe_out=$(this_helper_does_not_exist_probe 2>&1); probe_rc=$?
+  if [ "$probe_rc" -eq 97 ] && grep -q "is not a command or function" <<<"$probe_out"; then
+    pass "an undefined name is a HARD failure (command_not_found_handle, exit 97)"
+  else
+    fail "command_not_found_handle did not fire (rc=$probe_rc)"
+  fi
+}
+
+# check_reject <label> <expect-substring> <args...>  (--validate-only --out prepended)
+#
+# Every rejection must be non-zero AND must not have created the corpus root it was
+# pointed at.
+#
+# The no-write half is asserted on the DESTINATION THE INVOCATION ACTUALLY
+# REQUESTED. The earlier shape counted leftovers in a scratch dir no invocation was
+# ever pointed at (every case passed --out "$TMP/c"), so `leftovers` was
+# structurally always 0 and eleven cases claimed a property nothing checked. The
+# per-case --out is unique, so the check is live: it fails the moment validation
+# starts creating (or pruning under) --out before the flags are checked.
+#
+# Defined HERE, above every use, because it used to be defined half way down the
+# file -- below two of its callers (roborev #3234 M1).
+check_reject() {
+  local label="$1" expect="$2"; shift 2
+  local dest="$TMP/rej-$RANDOM-$RANDOM/corpus"
+  local out rc existed
+  # A caller-supplied --out in "$@" deliberately WINS (later wins in the parser),
+  # which is how the bad---out cases are expressed; $dest must be untouched either way.
+  out=$(bash "$GEN" --validate-only --out "$dest" "$@" 2>&1); rc=$?
+  existed=no; [ -e "$dest" ] && existed=yes
+  if [ "$rc" -ne 0 ] && grep -q "$expect" <<<"$out" && [ "$existed" = no ]; then
+    pass "rejects $label"
+  else
+    fail "$label: expected non-zero + '$expect' + no $dest (rc=$rc, dest-created=$existed, out: $out)"
+  fi
+}
+
+# int32_probe <python-snippet>: runs the snippet with the row driver imported as
+# `mod`, printing whatever the snippet prints plus a terminal ACCEPTED, or
+# "REJECTED: <message>" when the snippet's ceiling check raises SystemExit. Lets the
+# `pk int` boundary be pinned on the FUNCTIONS (fast, exact) instead of only through
+# a multi-hundred-thousand-row generation run.
+int32_probe() {
+  python3 - "$ROWS_PY" "$1" <<'PROBEEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("rows", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+try:
+    exec(compile(sys.argv[2], "<int32-probe>", "exec"), {"mod": mod})
+except SystemExit as exc:
+    print(f"REJECTED: {exc}")
+else:
+    print("ACCEPTED")
+PROBEEOF
+}
+
 for f in "$GEN" "$ROWS_PY" "$MANIFEST_PY"; do
   [ -f "$f" ] || { echo "FAIL - missing $f"; exit 1; }
 done
@@ -91,6 +266,10 @@ TMP="$(mktemp -d)"
 # shellcheck disable=SC2317  # invoked indirectly by the EXIT trap below
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
+
+# First cases of the run: this file's own helpers are all defined before use, and the
+# auditor that says so is itself proven to detect the opposite (roborev #3234 M1).
+self_audit_helper_order
 
 # ------------------------------------------------------------------ usage -----
 out=$(bash "$GEN" --help 2>&1); rc=$?
@@ -237,29 +416,7 @@ else
   fail "--smoke --small-golden: expected exit 2 (rc=$rc, out: $out)"
 fi
 
-# Every rejection must be non-zero AND must not have created the corpus root it was
-# pointed at.
-#
-# The no-write half is asserted on the DESTINATION THE INVOCATION ACTUALLY
-# REQUESTED. The earlier shape counted leftovers in a scratch dir no invocation was
-# ever pointed at (every case passed --out "$TMP/c"), so `leftovers` was
-# structurally always 0 and eleven cases claimed a property nothing checked. The
-# per-case --out is unique, so the check is live: it fails the moment validation
-# starts creating (or pruning under) --out before the flags are checked.
-check_reject() { # check_reject <label> <expect-substring> <args...>  (--out prepended)
-  local label="$1" expect="$2"; shift 2
-  local dest="$TMP/rej-$RANDOM-$RANDOM/corpus"
-  local out rc existed
-  # A caller-supplied --out in "$@" deliberately WINS (later wins in the parser),
-  # which is how the bad---out cases are expressed; $dest must be untouched either way.
-  out=$(bash "$GEN" --validate-only --out "$dest" "$@" 2>&1); rc=$?
-  existed=no; [ -e "$dest" ] && existed=yes
-  if [ "$rc" -ne 0 ] && grep -q "$expect" <<<"$out" && [ "$existed" = no ]; then
-    pass "rejects $label"
-  else
-    fail "$label: expected non-zero + '$expect' + no $dest (rc=$rc, dest-created=$existed, out: $out)"
-  fi
-}
+# (`check_reject` itself is defined in the helpers section at the top of the file.)
 check_reject "--rows 0"            "must be >= 1"          --rows 0
 check_reject "a non-integer --rows" "non-negative integer" --rows 12x
 check_reject "--chunk-rows > --rows" "exceeds"             --rows 100 --chunk-rows 1000
@@ -688,6 +845,65 @@ PY
       fail "row driver accepted '$bad' (out: $out)"
     fi
   done
+
+  # ------------------------------- the `pk int` ceiling is INCLUSIVE (L4) --------
+  # roborev #3234 L4: keys of chunk N span `N*PK_STRIDE .. N*PK_STRIDE + rows - 1`,
+  # so the largest key a plan can emit is `(chunks-1)*PK_STRIDE + chunk_rows - 1`.
+  # Both ceiling checks compared `base + rows` (EXCLUSIVE), so a plan whose final key
+  # is EXACTLY INT32_MAX -- a perfectly valid `int` key -- was rejected. The boundary
+  # is pinned from BOTH sides, on both checks, plus the "use at most N chunks" advice
+  # the refusal prints (an off-by-one there would advise an unusable plan).
+  #
+  # 2148 chunks x stride 1,000,000 -> last base 2,147,000,000; + 483,648 rows - 1
+  # = 2,147,483,647 = INT32_MAX exactly.
+  got=$(int32_probe 'print("max_pk", mod.max_pk_of_plan(2148, 483648)); mod.plan_fits_int32(2148, 483648)')
+  if [ "$got" = "max_pk 2147483647
+ACCEPTED" ]; then
+    pass "plan_fits_int32 ACCEPTS a plan whose final key is EXACTLY INT32_MAX"
+  else
+    fail "plan_fits_int32 at the INT32_MAX boundary: expected max_pk 2147483647 + ACCEPTED, got: $got"
+  fi
+  got=$(int32_probe 'mod.plan_fits_int32(2148, 483649)')
+  if grep -q "^REJECTED: plan overflows" <<<"$got" && grep -q "reaches pk 2147483648" <<<"$got"; then
+    pass "plan_fits_int32 REJECTS the plan one key past INT32_MAX"
+  else
+    fail "plan_fits_int32 at INT32_MAX+1: expected a refusal naming 2147483648, got: $got"
+  fi
+  got=$(int32_probe 'print("base", mod.chunk_fits_int32(2147, 483648))')
+  if [ "$got" = "base 2147000000
+ACCEPTED" ]; then
+    pass "chunk_fits_int32 ACCEPTS a chunk whose final key is EXACTLY INT32_MAX"
+  else
+    fail "chunk_fits_int32 at the INT32_MAX boundary: expected base 2147000000 + ACCEPTED, got: $got"
+  fi
+  got=$(int32_probe 'mod.chunk_fits_int32(2147, 483649)')
+  if grep -q "^REJECTED: chunk 2147" <<<"$got" && grep -q "reaches pk 2147483648" <<<"$got"; then
+    pass "chunk_fits_int32 REJECTS the chunk one key past INT32_MAX"
+  else
+    fail "chunk_fits_int32 at INT32_MAX+1: expected a refusal naming 2147483648, got: $got"
+  fi
+  # The advised max chunk count must itself FIT, and one more must not -- i.e. the
+  # advice is the true maximum, not an off-by-one guess.
+  got=$(int32_probe '
+import re
+try:
+    mod.plan_fits_int32(9999, 500000)
+except SystemExit as exc:
+    n = int(re.search(r"Use at most (\d+) chunks", str(exc)).group(1))
+print("advised", n, "max_pk", mod.max_pk_of_plan(n, 500000))
+mod.plan_fits_int32(n, 500000)
+try:
+    mod.plan_fits_int32(n + 1, 500000)
+except SystemExit:
+    print("one-more REJECTED")
+')
+  if [ "$got" = "advised 2147 max_pk 2146499999
+one-more REJECTED
+ACCEPTED" ]; then
+    pass "the refusal's advised chunk count is exactly the largest one that fits"
+  else
+    fail "max_chunks advice is not the true maximum, got: $got"
+  fi
 
   # ------------------------------------------- manifest writer fail-closed ----
   # shellcheck disable=SC2054  # the commas are inside flag VALUES (--widths/--buckets)
