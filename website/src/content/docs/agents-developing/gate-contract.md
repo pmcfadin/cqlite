@@ -384,8 +384,14 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=
   (a global `RUSTFLAGS` is suppressing the wired flags — don't export one on a worker)
   · `present-unconfigured` (installed but not wired — re-run bootstrap) · `absent`.
 - **`perf`** (issue #3249, **Linux only**) — *can this box be profiled at all?* A free
-  read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` (no `perf` exec, no
-  subprocess — the gate pays nothing for it). States: `perf=ok` (unprivileged per-CPU
+  read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through shell builtins.
+  **Free is an enforced cost, not a slogan**: the emit-time path runs **zero external
+  processes and zero command substitutions** (a `$( )` forks a subshell, so a value read
+  back through one would not be free — hence the token comes back through a
+  caller-named variable), and the helper is sourced **once per gate run**, not per
+  summary. `test_agent_gate_summary.sh` case `perf-free` kills any regression: it counts
+  the substitutions statically and re-runs the extracted path with an unresolvable
+  `PATH` under xtrace subshell counting. States: `perf=ok` (unprivileged per-CPU
   profiling **and** kernel symbols available) · `paranoid-<N>` (`perf_event_paranoid`
   = N ≥ 1 forbids **CPU-wide** events, so the `perf stat -C <cpu>` the measurement
   doctrine mandates is **denied** — a *permission* verdict, not a missing capability;

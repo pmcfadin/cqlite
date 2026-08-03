@@ -200,9 +200,13 @@ event access and therefore DENIES the `perf stat -C <cpu>` collection the measur
 doctrine mandates), `kptr-restricted` (paranoid permissive but `kptr_restrict != 0`, so
 kernel frames resolve to bare addresses — a silent attribution loss), `absent` (the
 `/proc` controls are not present, e.g. a container), or `unknown` (present but
-unparseable — never guessed). The read SHALL be free: no `perf` exec and no subprocess
-in the gate's path. On Darwin the `accelerators:` line SHALL be unchanged (no `perf=`
-token), since both controls are Linux kernel knobs.
+unparseable — never guessed). The read SHALL be free, and free SHALL be enforced by a
+test rather than asserted in prose: the gate's emit-time path SHALL exec no `perf`, SHALL
+spawn no external process, and SHALL contain no command substitution (each `$( )` forks
+a subshell, so the token SHALL be returned through a caller-named variable rather than
+stdout); the helper SHALL be sourced once per gate run, not per summary. On Darwin the
+`accelerators:` line SHALL be unchanged (no `perf=` token), since both controls are Linux
+kernel knobs.
 
 #### Scenario: a profileable Linux worker stamps ok
 - **GIVEN** a Linux host whose `perf_event_paranoid` is `<= 0` and `kptr_restrict` is `0`
@@ -231,6 +235,15 @@ token), since both controls are Linux kernel knobs.
 - **WHEN** the gate emits its summary on a macOS host
 - **THEN** the `accelerators:` line SHALL contain no `perf=` token
 
+#### Scenario: the free-read cost is enforced by a test, not claimed
+- **GIVEN** the gate's emit-time perf path (its token functions plus every helper
+  function they reach)
+- **WHEN** the tooling suite audits it
+- **THEN** the audit SHALL count zero command substitutions statically AND SHALL
+  re-execute that same extracted path with an unresolvable `PATH`, asserting the correct
+  token, zero spawned subshells and zero attempted external commands — so a
+  reintroduced `$( )` or exec FAILS the fast loop instead of surviving as prose
+
 ### Requirement: Bootstrap SHALL install and VERIFY the perf sysctl drop-in on Linux
 
 On Linux, `scripts/bootstrap-agent-machine.sh` SHALL install the reboot-surviving
@@ -240,9 +253,32 @@ assume it. The verdict SHALL come from reading the values back out of `/proc/sys
 (a `sysctl` write's return code proves nothing) and from a FUNCTIONAL
 `perf stat -C 0 -e cycles` collection requiring BOTH exit 0 AND a non-zero cycle count.
 The privileged destination path SHALL be a hardcoded literal, never derived from the
-environment. The section SHALL be advisory: a box without non-interactive root, without
-`perf`, or without the `/proc` controls SHALL warn with an actionable write-AND-apply
-remedy and the run SHALL still exit 0. On Darwin the section SHALL be an explicit no-op.
+environment. The read-back SHALL happen after EVERY attempted apply, REGARDLESS of the
+apply command's exit status, and the apply command's own failure SHALL be reported
+separately from the capability verdict — `sysctl --system` applies every drop-in on the
+box, so a non-zero exit may belong to an unrelated pre-existing entry, and no wording
+SHALL claim "nothing was applied" alongside a good read-back (or the reverse). The
+section SHALL be advisory: a box without non-interactive root, without `perf`, or without
+the `/proc` controls SHALL warn with an actionable remedy — a write-AND-apply remedy when
+the drop-in is missing, an APPLY-ONLY remedy (root-shell or interactive `sudo`, matching
+the detected privilege state) when the drop-in is already current — and the run SHALL
+still exit 0. On Darwin the section SHALL be an explicit no-op.
+
+#### Scenario: a failing apply whose controls DID take is reported honestly
+- **GIVEN** a Linux host where `sysctl --system` exits non-zero (an unrelated
+  pre-existing sysctl entry failed) while our controls DID take
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL still read `/proc` back, SHALL report the good verdict from that
+  read, SHALL report the command's non-zero exit as a DISTINCT fact about the command,
+  SHALL NOT claim that nothing was applied, and SHALL exit 0
+
+#### Scenario: a current drop-in that cannot be applied still prints a runnable remedy
+- **GIVEN** a Linux host whose drop-in is already current, whose runtime controls are not
+  profileable, and where bootstrap has no non-interactive privilege
+- **WHEN** bootstrap runs
+- **THEN** it SHALL print an apply remedy runnable ON THAT BOX — `sysctl -q --system` from
+  a root shell where no `sudo` binary exists, `sudo sysctl -q --system` where `sudo` needs
+  a password — never a diagnosis with no remedy
 
 #### Scenario: an applied value that did not take is reported, not claimed
 - **GIVEN** a Linux host where `sysctl --system` exits 0 but `/proc` still reports a

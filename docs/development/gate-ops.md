@@ -191,9 +191,16 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=
 ```
 
 It is a **free** read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through
-shell builtins — no `perf` exec, no subprocess, no new binary dependency (the
-functional `perf stat -C 0 -e cycles` verification is **bootstrap's** job, not the
-gate's). State values (Linux only):
+shell builtins — no `perf` exec, no new binary dependency (the functional
+`perf stat -C 0 -e cycles` verification is **bootstrap's** job, not the gate's). "Free"
+is a *measured* cost, enforced by `test_agent_gate_summary.sh` case `perf-free`: the
+emit-time path performs **0 external processes and 0 command substitutions** — each
+`$( )` is a forked subshell, so the token is returned through a caller-named variable
+(`perf_capability_token_into <outvar>`) rather than stdout — and
+`scripts/perf-capability.sh` is sourced **once per gate run**, never per summary. The
+test asserts both halves: the substitution count statically, and the extracted path
+re-executed with an unresolvable `PATH` under xtrace subshell counting (so a
+stderr-silenced exec cannot hide). State values (Linux only):
 - `perf=ok` — unprivileged per-CPU profiling **and** kernel symbol resolution available.
 - `perf=paranoid-<N>` — `perf_event_paranoid = N >= 1`. Cumulative: `>= 1` forbids
   **CPU-wide** event access, which is exactly what the mandated `perf stat -C <cpu>`

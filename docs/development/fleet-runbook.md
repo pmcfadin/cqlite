@@ -188,7 +188,19 @@ later-sorting drop-in can swallow it), and finishes by running the collection it
 `perf stat -C 0 -e cycles -- sleep 0.1`, requiring exit 0 **and a non-zero cycle count**. An rc-0
 `perf stat` printing `<not supported>` (or a virtualised PMU counting a flat 0) is reported as
 **NOT verified**. No sudo, no `perf`, or an absent `/proc` control degrades to a `[warn]` plus the
-exact remedy line — bootstrap stays advisory and always exits 0.
+exact remedy line — bootstrap stays advisory and always exits 0. When the drop-in is already current
+the remedy is **apply-only** (`sysctl -q --system`, prefixed with `sudo` only where a `sudo` binary
+exists), never a pointless re-write.
+
+**The apply's exit code and the capability verdict are SEPARATE facts, reported separately.**
+`sysctl --system` applies *every* drop-in on the box, so it can apply ours perfectly and still exit
+non-zero because an unrelated pre-existing entry failed (a stale `/etc/sysctl.conf` line, a foreign
+drop-in naming a knob this kernel lacks) — one such entry anywhere is enough. Bootstrap therefore
+re-reads `/proc` after **every** attempted apply, whatever the rc, and prints the command's failure
+as a fact about the *command*. So a box can legitimately show "`sysctl -q --system` exited 1"
+**and** a good read-back on the same run; that is not a contradiction, and the verdict is always the
+`/proc` line. (Gating the read-back on that rc is what used to print "nothing was applied" about a
+box that had just become profileable.)
 
 **`/etc/sysctl.conf` BEATS our drop-in — check it first when the value does not take.** Both
 `sysctl --system` and `systemd-sysctl` apply `/etc/sysctl.conf` **after** every `sysctl.d` drop-in,
