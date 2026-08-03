@@ -24,13 +24,24 @@
 //! to guard.
 //!
 //! Anti-empty-pass / SKIP contract (matches the query-semantics oracle):
-//!   * When the committed corpus (or its `*.db` binaries) is absent, each case
-//!     SKIPs cleanly — UNLESS `CQLITE_REQUIRE_FIXTURES=1` (the agent-gate
-//!     integration-tests tier sets it), in which case an absent/empty fixture is
-//!     a hard FAIL so the lane can never green-pass without running.
+//!   * Every case whose SSTable binaries are COMMITTED to git carries
+//!     `must_run: true` and is fail-closed UNCONDITIONALLY — a SKIP is a hard
+//!     FAILURE with or without `CQLITE_REQUIRE_FIXTURES` (issue #3220). Those
+//!     fixtures exist in every checkout, so a SKIP can only mean the lane failed to
+//!     RESOLVE them.
+//!   * A case whose binaries are FETCHED (gitignored) SKIPs cleanly when the corpus
+//!     is absent — UNLESS `CQLITE_REQUIRE_FIXTURES=1` (the agent-gate
+//!     integration-tests tier sets it), under which EVERY case must run.
 //!   * A case that discovers ZERO partition keys in a present fixture is a hard
 //!     FAIL (a fixture with rows must yield at least one point query), never a
-//!     silent vacuous pass.
+//!     silent vacuous pass; every clustering slice is additionally anchored to an
+//!     exact expected row count, so a present-but-empty fixture FAILs rather than
+//!     comparing `0 == 0`.
+//!
+//! Fixture roots resolve TABLE-granularly via `support/datasets_root.rs` (#3220):
+//! a `CQLITE_DATASETS_ROOT` corpus holding the keyspace but not the table falls
+//! through to the checkout's committed copy instead of being committed to. The
+//! agent-gate `bti-multiclustering` component runs this target as defense in depth.
 //!
 //! The harness's divergence detection is itself regression-tested by
 //! `comparison_detects_a_seeded_divergence` below (feeding the compare helper two
@@ -347,6 +358,21 @@ const CORPUS: &[TableCase] = &[
 /// Stable identity of a corpus case, used by the per-case must-run bookkeeping.
 fn case_id(case: &TableCase) -> String {
     format!("{}.{}", case.keyspace, case.table)
+}
+
+/// PURE decision behind the must-run assertion: every `must_run` case absent from
+/// `ran`, by table name.
+///
+/// Factored out so the assertion has a proof it CAN fail
+/// (`must_run_violations_flags_a_committed_case_that_did_not_run`). A fail-closed
+/// guard whose failing branch is never exercised is indistinguishable from a guard
+/// that cannot fire — the exact shape of the #3220 defect it replaces.
+fn must_run_violations<'a>(cases: &'a [TableCase], ran: &[String]) -> Vec<&'a str> {
+    cases
+        .iter()
+        .filter(|c| c.must_run && !ran.iter().any(|id| id == &case_id(c)))
+        .map(|c| c.table)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -672,11 +698,7 @@ async fn point_vs_full_differential_equality() {
     // `CQLITE_REQUIRE_FIXTURES`: this target runs under `core-tests`, which does not
     // set it, and that is exactly where the #3032 multiclustering case skipped
     // unnoticed. Suite-wide `ran > 0` cannot see it — seven siblings ran.
-    let must_run_missing: Vec<&str> = CORPUS
-        .iter()
-        .filter(|c| c.must_run && !ran.iter().any(|id| id == &case_id(c)))
-        .map(|c| c.table)
-        .collect();
+    let must_run_missing = must_run_violations(CORPUS, &ran);
     assert!(
         must_run_missing.is_empty(),
         "{} committed-fixture case(s) did NOT run: {:?} — these fixtures are COMMITTED to git, \
@@ -716,6 +738,50 @@ async fn point_vs_full_differential_equality() {
              (set CQLITE_REQUIRE_FIXTURES=1 to fail-close)"
         );
     }
+}
+
+/// Regression-test the FAIL-CLOSED guard itself (issue #3220): the must-run decision
+/// must FIRE for a committed-fixture case that did not run, and must stay silent for
+/// a fetched-only case that skipped. Without this, the guard's failing branch is
+/// never exercised and "green" would not distinguish a guard that works from a guard
+/// that cannot fire.
+#[test]
+fn must_run_violations_flags_a_committed_case_that_did_not_run() {
+    // The real corpus, minus the #3032 case's id: exactly the state observed on a
+    // machine whose CQLITE_DATASETS_ROOT lacked the committed fixture.
+    let ran_without_multiclustering: Vec<String> = CORPUS
+        .iter()
+        .filter(|c| c.table != "multiclustering_table")
+        .map(case_id)
+        .collect();
+    assert_eq!(
+        must_run_violations(CORPUS, &ran_without_multiclustering),
+        vec!["multiclustering_table"],
+        "a committed-fixture case that did not run must be reported, even though every \
+         other case ran (the suite-wide `ran > 0` blind spot)"
+    );
+
+    // All cases ran: no violation.
+    let all: Vec<String> = CORPUS.iter().map(case_id).collect();
+    assert!(
+        must_run_violations(CORPUS, &all).is_empty(),
+        "no violation when every case ran"
+    );
+
+    // A FETCHED-only (must_run == false) case that skipped is NOT a violation: those
+    // binaries are gitignored, so their absence is legitimate on a minimal checkout.
+    let without_fetched: Vec<String> = CORPUS.iter().filter(|c| c.must_run).map(case_id).collect();
+    assert!(
+        must_run_violations(CORPUS, &without_fetched).is_empty(),
+        "a gitignored-fixture case that skipped must not trip the committed-fixture guard"
+    );
+
+    // The corpus must actually DECLARE some committed cases, else the guard above is
+    // vacuous (an all-`false` corpus can never produce a violation).
+    assert!(
+        CORPUS.iter().any(|c| c.must_run),
+        "at least one corpus case must be declared must_run, else the guard is vacuous"
+    );
 }
 
 /// Regression-test the harness itself: the compare logic MUST flag a divergence

@@ -125,9 +125,25 @@ pub fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
 /// it commits to a root that may not hold the table and reports a fixture that exists
 /// in the checkout as absent.
 pub fn sstables_root_for_table(keyspace: &str, table: &str) -> Option<PathBuf> {
-    sstables_root_candidates()
-        .into_iter()
+    first_root_with_table(&sstables_root_candidates(), keyspace, table).map(Path::to_path_buf)
+}
+
+/// PURE form of [`sstables_root_for_table`], parameterized on the candidate list.
+///
+/// Factored so the selection rule is testable against SYNTHETIC roots
+/// (`issue_3220_datasets_root_resolution.rs`): the real candidate list is half
+/// environment and half a COMPILE-TIME checkout path, so a test reading it can only
+/// ever observe this machine's layout — and the defect (#3220) was a rule that looked
+/// fine on a machine where every root happened to hold every table.
+pub fn first_root_with_table<'a>(
+    roots: &'a [PathBuf],
+    keyspace: &str,
+    table: &str,
+) -> Option<&'a Path> {
+    roots
+        .iter()
         .find(|root| table_has_data(root, keyspace, table))
+        .map(PathBuf::as_path)
 }
 
 /// A diagnostic naming every candidate root, for callers whose fixture lookup is not
