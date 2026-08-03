@@ -1,4 +1,5 @@
 {
+  "_ANNOTATION_ADDED_2026_08_03": "NO ABSOLUTE IN THIS FILE IS REUSABLE ACROSS SESSIONS. Data below is UNCHANGED. The warm bare scan here reads 370,134 rows/s; hours later in the same delivery the same scan on a functionally untouched scan path measured 333,206 rows/s (3 reps, 1.1% spread) and a 30-run interleaved control measured 332,970 rows/s (2.3% spread) - a ~10% session-to-session drift with nothing changed on the measured path. Reusing 370,134 as a reference point will report a FAKE ~10% regression. THE RULE: same-session interleaved A/B/C with a drift control that is code-identical across arms, or NO COMPARISON. This change's only licensed comparison is docs/reports/ws0-3096-artifacts/abc-interleaved-2026-08-03.md + abc-interleaved-runs.json. Still usable here: the method, the pinning, the corpus identity, the ratios and within-session deltas.",
   "issue": "#3096",
   "corpus": "/data/ws0-3096",
   "corpus_identity": {

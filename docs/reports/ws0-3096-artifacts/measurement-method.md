@@ -172,6 +172,43 @@ percentage of the median); there is no silent mean.
 
 ---
 
+## 3b. The drift rule — the rig produces NO cross-session absolute
+
+**Measured on this box, 2026-08-03, in one delivery: the warm bare scan read
+370,134 rows/s at 05:06 UTC and 333,206 rows/s at 06:05 UTC on a functionally
+untouched scan path — a ~10% drift with nothing changed on the measured path.** A
+30-run interleaved control later the same session sat at 332,970 rows/s (2.3%
+spread), so the second reading is the stable one and the first is not
+reproducible.
+
+**THE RULE, binding on every future use of this rig: same-session interleaved
+A/B/C with a drift control that is code-identical across arms, or NO
+COMPARISON.**
+
+Concretely, what a valid comparison looks like — the shape
+`abc-interleaved-2026-08-03.md` records:
+
+1. Build one binary per arm; run **one rep at a time**, never all reps of an arm
+   back to back.
+2. **Rotate the arm order every round** so no arm holds a fixed position.
+3. Carry the **drift control in every run** (this rig's bare-scan arm) and report
+   its median and spread over all runs.
+4. **Difference within a round**, and report the per-round deltas and how many
+   were positive — not the medians alone. At these spreads (5–10% per arm) a
+   median-vs-median difference of a couple of percent is not readable.
+5. Publish **rows/s AND cycles/row AND IPC** per run. The IPC + cycles/row
+   signature is what catches contamination: on the discarded attempt recorded in
+   `abc-interleaved-2026-08-03.md` §2 the **control did not move** while the
+   measured arm's IPC fell 1.52 → 1.44. **A quiet drift control is not proof of a
+   clean session.**
+6. Nothing else on the box. A concurrent `cargo` build on the pinned cores is
+   enough to invalidate a run; discard it and say so in the record.
+
+**Never** "re-baseline first, then compare across sessions", and never correct
+for drift after the fact.
+
+---
+
 ## 4. Known caveats, stated rather than hidden
 
 * **`cycles` is summed over BOTH SMT siblings** of the pinned physical core. Wall
