@@ -57,6 +57,8 @@
 #   $OUT/sstables/$KS/$TBL-<uuid>/da-*-bti-*.db         (gitignored: *.db)
 #   $OUT/sstables/$KS/$TBL-<uuid>/da-<gen>-bti-Data.db.jsonl   (bounded goldens)
 #   $OUT/sstables/$KS/$TBL-<uuid>/schema.cql
+#   $OUT/schema.cql              (the same capture, where bti_perf_scan reads it;
+#                                 installed only AFTER the in-progress marker, #3234 F3)
 #   $OUT/manifest-bti-3234.json  (copied to test-data/perf-corpus-bti-manifest.json
 #                                 ONLY with the explicit --publish-manifest, which is
 #                                 production-mode-only: a --smoke/--small-golden
@@ -777,7 +779,14 @@ load_chunks() {
   log "load complete: $ROWS rows in $((t1 - t0))s ($((ROWS / ((t1 - t0) > 0 ? (t1 - t0) : 1))) rows/s)"
 }
 
-capture_schema() {  # $1 = destination
+# The captured schema lands under $WORK, NOT in the published corpus (roborev #3234 F3).
+# It used to be written straight to $OUT/schema.cql BEFORE publish() installed the
+# in-progress marker, so a publish that died early — no SSTable dir in the container, a
+# missing host bind-mount dir — left the NEW schema published beside the PREVIOUS run's
+# manifest and SSTables, with nothing marking the corpus as mid-generation. That is the
+# same stale-provenance window the marker exists to close, reopened through a different
+# file. install_schema() puts it in place only after the marker is installed.
+capture_schema() {  # $1 = destination (under $WORK)
   local out="$1" tmp
   tmp="$(mktemp)"
   $DOCKER exec "$CONTAINER" cqlsh -e "DESCRIBE KEYSPACE $KS;" >"$tmp" 2>/dev/null \
@@ -787,6 +796,19 @@ capture_schema() {  # $1 = destination
   mv "$tmp" "$out"
   chmod 0644 "$out"
   log "captured schema -> $out ($(wc -c <"$out" | tr -d ' ') bytes)"
+}
+
+# Install the captured schema into the published corpus: the corpus root (where
+# bti_perf_scan reads it) and the SSTable dir (where the manifest writer reads it).
+# Called only AFTER publish() has installed the in-progress marker and populated $DEST,
+# so the published schema and the published bytes are never one generation apart.
+install_schema() {  # $1 = the captured schema under $WORK
+  local src="$1"
+  [ -f "$src" ] || die "install_schema: no captured schema at $src"
+  [ -n "$DEST" ] && [ -d "$DEST" ] || die "install_schema: publish() has not populated \$DEST"
+  cp "$src" "$OUT/schema.cql" || die "cannot install the schema at $OUT/schema.cql"
+  cp "$src" "$DEST/schema.cql" || die "cannot install the schema at $DEST/schema.cql"
+  log "schema installed -> $OUT/schema.cql and $DEST/schema.cql"
 }
 
 # The corpus-local manifest is the FIRST candidate bti_perf_scan reads (ahead of the
@@ -844,18 +866,33 @@ EOF
 CONTAINER_SSTABLE_DIR=""
 DEST=""
 publish() {
+  # FIRST — before anything about this publish can fail, and before ANY byte of the
+  # published corpus (schema included) is touched (roborev #3234 M2, tightened by F3).
+  # The two lookups below can each die: `ls -d` finding no table directory in the
+  # container, or the host bind-mount dir being absent. Quarantining after them left a
+  # window in which the corpus root already held the NEW schema while the PREVIOUS run's
+  # manifest and SSTables were still sitting there, authoritative. The invariant is now
+  # simply stated: from the moment publish() starts until write_manifest() renames the
+  # finished manifest into place, the corpus's provenance says "generation in progress".
+  quarantine_local_manifest
+  mkdir -p "$OUT/sstables/$KS"
+  # `|| CONTAINER_SSTABLE_DIR=""` is required, not defensive: under `set -e` an
+  # assignment from a FAILING command substitution exits the script immediately, so the
+  # guard below — the line whose whole purpose is to diagnose "the table directory is not
+  # there" — was unreachable, and the real failure mode (an `ls -d` glob matching
+  # nothing) killed the run with a bare `exit 1` and no message at all.
   CONTAINER_SSTABLE_DIR="$($DOCKER exec "$CONTAINER" bash -lc \
-    "ls -d /var/lib/cassandra/data/$KS/$TBL-* | head -1" | tr -d '\r')"
-  [ -n "$CONTAINER_SSTABLE_DIR" ] || die "no SSTable dir for $KS.$TBL in the container"
+    "ls -d /var/lib/cassandra/data/$KS/$TBL-* | head -1" | tr -d '\r')" \
+    || CONTAINER_SSTABLE_DIR=""
+  [ -n "$CONTAINER_SSTABLE_DIR" ] || die "no SSTable dir for $KS.$TBL in the container
+       (the node wrote no table directory under /var/lib/cassandra/data/$KS, or the
+       keyspace/table names do not match what was created). The published corpus keeps
+       its IN-PROGRESS marker, so nothing can read provenance for it."
   local name host_dir
   name="$(basename "$CONTAINER_SSTABLE_DIR")"
   host_dir="$DATA_DIR/data/$KS/$name"
   [ -d "$host_dir" ] || die "host bind-mount dir missing: $host_dir"
   DEST="$OUT/sstables/$KS/$name"
-  mkdir -p "$OUT/sstables/$KS"
-  # BEFORE the first mutation of the published corpus, and before the prune: from
-  # here on the old manifest cannot describe what is on disk (roborev #3234 M2).
-  quarantine_local_manifest
   if [ "$PRUNE_STALE" = 1 ]; then prune_stale_table_dirs "$name"; fi
   assert_under_out "$DEST"
   $SUDO rm -rf -- "$DEST"
@@ -1048,9 +1085,12 @@ start_container
 apply_bti_yaml
 create_schema
 load_chunks
-capture_schema "$OUT/schema.cql"
+# Order is load-bearing (roborev #3234 F3): the schema is captured into $WORK, publish()
+# installs the in-progress marker BEFORE it copies anything into the published corpus,
+# and only then is the schema installed at the corpus root and beside the SSTables.
+capture_schema "$WORK/schema.cql"
 publish
-cp "$OUT/schema.cql" "$DEST/schema.cql"
+install_schema "$WORK/schema.cql"
 assert_corpus "$DEST"
 dump_goldens
 verify_dumped_row_counts

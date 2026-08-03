@@ -101,9 +101,9 @@ MANIFEST_PY="$REPO_ROOT/test-data/scripts/write-perf-corpus-bti-manifest.py"
 # the EXACT full-suite pass count (not a slack lower bound), so deleting or
 # short-circuiting any single case drops `passes` below it and reds the suite. Proven
 # by mutation, not by inspection (see the header note on the roborev M1 finding).
-MIN_CASES=149
-SKIP_PY_CASES=59
-SKIP_E2E_CASES=22
+MIN_CASES=154
+SKIP_PY_CASES=64
+SKIP_E2E_CASES=27
 
 fails=0
 passes=0
@@ -1918,6 +1918,58 @@ stale provenance in the authoritative position (sha $stale_before)"
       pass "M2: the marker carries no keyspace/table/row count, only generation_in_progress"
     else
       fail "M2: the in-progress marker must carry no provenance fields (got: $(head -c 200 "$stale_manifest" 2>/dev/null))"
+    fi
+
+    # ---- roborev #3234 F3: the schema must not be published before the marker ------
+    # The window round 11's marker closed for the MANIFEST was still open for the
+    # SCHEMA: `capture_schema "$OUT/schema.cql"` ran BEFORE publish() installed the
+    # in-progress marker, so a publish that died while LOCATING the container's table
+    # directory left the NEW schema in the corpus root beside the PREVIOUS run's manifest
+    # and SSTables -- authoritative, syntactically perfect, and one generation apart.
+    #
+    # The injected failure is exactly that one (STUB_NO_SSTABLE_DIR: `ls -d` matches
+    # nothing and exits 1), and the two runs' schemas are made TEXTUALLY DISTINCT
+    # (STUB_SCHEMA_MARK) so "whose schema is published?" is decidable rather than
+    # asserted. Run 1 succeeds into the root; run 2 fails in publish over the same root.
+    STUB_SCHEMA_MARK=run1 E2E_ROOT_NAME=staleschema e2e_run staleschema-ok; rc=$?
+    schema_root="$TMP/e2e-staleschema"
+    if [ "$rc" -eq 0 ] && grep -q "mark: run1" "$schema_root/schema.cql" 2>/dev/null \
+      && grep -q '"keyspace"' "$schema_root/manifest-bti-3234.json" 2>/dev/null; then
+      pass "F3 setup: a successful run publishes its own schema + a readable manifest"
+    else
+      fail "F3 setup: expected run1's schema and a readable manifest at $schema_root \
+(rc=$rc, tail: $(tail -6 "$TMP/e2e-staleschema-ok.log"))"
+    fi
+    STUB_NO_SSTABLE_DIR=1 STUB_SCHEMA_MARK=run2 E2E_ROOT_NAME=staleschema \
+      e2e_run staleschema-fail; rc=$?
+    if [ "$rc" -ne 0 ] \
+      && grep -q "no SSTable dir for" "$TMP/e2e-staleschema-fail.log"; then
+      pass "F3: the injected failure fires INSIDE publish, between the schema capture and the copy"
+    else
+      fail "F3: expected publish to die locating the container table dir (rc=$rc, tail: \
+$(tail -6 "$TMP/e2e-staleschema-fail.log"))"
+    fi
+    # The refusal a subsequent harness run must make: nothing authoritative is left.
+    if no_authoritative_manifest "$schema_root"; then
+      pass "F3: the failed publish leaves the IN-PROGRESS marker, not run1's manifest"
+    else
+      fail "F3: a readable manifest survived a publish that failed before it copied \
+anything -- stale provenance in the authoritative position"
+    fi
+    # ...and the NEW schema was never published beside the OLD bytes: run2's capture went
+    # to $WORK and install_schema never ran, so the corpus root still holds run1's.
+    if grep -q "mark: run1" "$schema_root/schema.cql" 2>/dev/null \
+      && ! grep -q "mark: run2" "$schema_root/schema.cql" 2>/dev/null; then
+      pass "F3: run2's schema was NOT published into the corpus root (it stayed under \$WORK)"
+    else
+      fail "F3: the corpus root's schema.cql changed under a publish that never copied an \
+SSTable: $(grep -o 'mark: run[0-9]' "$schema_root/schema.cql" 2>/dev/null || echo '(no mark)')"
+    fi
+    # The previous manifest is still recoverable, under a name no consumer reads.
+    if ls "$schema_root"/manifest-bti-3234.json.superseded-* >/dev/null 2>&1; then
+      pass "F3: run1's manifest survives only under superseded-* (forensics)"
+    else
+      fail "F3: expected run1's manifest moved aside as manifest-bti-3234.json.superseded-*"
     fi
 
     # ---- roborev #3234 F2: a --smoke run with the DEFAULT manifest resolution -----

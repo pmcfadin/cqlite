@@ -35,6 +35,14 @@ not a test), via env:
                          row-count cross-check)
   STUB_PARTITIONS_DELTA=<n>  add <n> to the partition histogram total (manifest
                          partition-count cross-check)
+  STUB_NO_SSTABLE_DIR=1  `ls -d /var/lib/cassandra/data/<ks>/<tbl>-*` finds NOTHING and
+                         exits 1: publish() then dies while LOCATING the container's
+                         table directory, which is the failure the stale-provenance
+                         window (roborev #3234 F3) hinged on -- it fires after the
+                         schema is captured and before any SSTable is copied
+  STUB_SCHEMA_MARK=<s>   append `-- mark: <s>` to the DESCRIBE KEYSPACE output, so two
+                         runs over the same corpus root produce TEXTUALLY DISTINCT
+                         schema captures and "whose schema got published?" is decidable
 
 This is a TEST DOUBLE. It is not authority for any on-disk format: it fabricates
 only the metadata TEXT the generator parses, never SSTable content.
@@ -226,6 +234,9 @@ def do_exec(argv: list[str]) -> int:
             return 0
         if stmt.startswith("DESCRIBE KEYSPACE"):
             print(DESCRIBE.format(ks=KS, tbl=TBL))
+            mark = os.environ.get("STUB_SCHEMA_MARK", "")
+            if mark:
+                print(f"-- mark: {mark}")
             return 0
         if stmt.startswith("COPY "):
             n = int(get("csv_rows", "0"))
@@ -250,6 +261,14 @@ def do_exec(argv: list[str]) -> int:
                 ["bash", "-c", cmd.replace("/etc/cassandra/cassandra.yaml", YAML)]
             ).returncode
         if cmd.startswith("ls -d "):
+            if _flag("STUB_NO_SSTABLE_DIR"):
+                # What the real `ls -d <glob>` does when the glob matches nothing:
+                # no stdout, a diagnostic on stderr, nonzero status.
+                sys.stderr.write(
+                    f"ls: cannot access '{CONTAINER_DATA}/data/{KS}/{TBL}-*': "
+                    "No such file or directory\n"
+                )
+                return 1
             print(f"{CONTAINER_DATA}/data/{KS}/{TBL}-{TABLE_UUID}")
             return 0
         if "sstabledump" in cmd:
