@@ -4815,6 +4815,15 @@ run_compaction_byte_parity() {
 # falls back to the in-repo committed fixture when CQLITE_DATASETS_ROOT names a corpus
 # that lacks it. Under the previous keyspace-granular resolution the case skipped.
 #
+# Third invocation — scripts/tests/test_point_vs_full_failclosed.sh (#3220 AC2), the
+# POSITIVE CONTROL for everything above: a green lane proves nothing unless the same
+# lane FAILs on a fixture that is absent from every candidate root AND on one that is
+# present-but-empty. Both are staged in temp dirs (the tracked fixture and
+# $CQLITE_DATASETS_ROOT are never mutated — asserted by the self-test) and the absent
+# staging is surgical, hiding exactly one fixture, so the assertion cannot be satisfied
+# by some other case failing. It runs HERE rather than in tooling-tests because it
+# drives the very test binary this component has just built.
+#
 # Fixture policy: FAIL-CLOSED, unconditionally. Unlike the fetched-corpus lanes,
 # these fixtures are COMMITTED to git (test-data/datasets/sstables/test_da/
 # multiclustering_table-fd74ad508d2311f1a29b6d2c15dcffdf/**, 9 components incl. the
@@ -4838,7 +4847,8 @@ run_bti_multiclustering() {
         --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1 \
     && env ${CQLITE_DATASETS_ROOT:+CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT"} \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
-        --test point_vs_full_differential >>"$log" 2>&1; then
+        --test point_vs_full_differential >>"$log" 2>&1 \
+    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL

@@ -107,13 +107,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. ABSENT: no candidate root carries the table.
+# 2. ABSENT: no candidate root carries THIS table — while every other fixture
+#    stays resolvable.
+#
+#    The staging is deliberately SURGICAL, not "hide the whole corpus". Hiding
+#    everything makes every case skip, so the guard fires for some other committed
+#    case and the assertion passes even with `multiclustering_table`'s `must_run`
+#    removed — i.e. exactly the regression this file exists to catch would slip
+#    through (measured: a coarse staging did not discriminate). So the checkout
+#    candidate is mirrored by SYMLINK, table by table, minus the one fixture, and the
+#    expected message is the EXACT one-element list.
 # ---------------------------------------------------------------------------
-mkdir -p "$tmp/absent-env/sstables/test_da" "$tmp/absent-checkout/sstables/test_da"
+absent_checkout="$tmp/absent-checkout/sstables"
+mkdir -p "$absent_checkout" "$tmp/absent-env/sstables"
+src_sstables="$REPO/test-data/datasets/sstables"
+for ks_dir in "$src_sstables"/*/; do
+  [ -d "$ks_dir" ] || continue
+  ks_name=$(basename "$ks_dir")
+  mkdir -p "$absent_checkout/$ks_name"
+  for tbl_dir in "$ks_dir"*/; do
+    [ -d "$tbl_dir" ] || continue
+    tbl_name=$(basename "$tbl_dir")
+    case "$tbl_name" in
+      multiclustering_table-*) continue ;;   # the ONLY thing hidden
+    esac
+    ln -s "${tbl_dir%/}" "$absent_checkout/$ks_name/$tbl_name"
+  done
+done
+if [ -d "$absent_checkout/test_da" ] \
+   && [ -n "$(ls -A "$absent_checkout/test_da" 2>/dev/null)" ] \
+   && [ ! -e "$absent_checkout/test_da/$(basename "$FIXTURE_REL")" ]; then
+  ok "absent: staging is surgical (test_da present with sibling tables, fixture hidden)"
+else
+  bad "absent: staging is wrong — test_da must exist with siblings and without the fixture"
+fi
+
 absent_out="$tmp/absent.log"
 run_lane "$absent_out" \
   CQLITE_DATASETS_ROOT="$tmp/absent-env" \
-  CQLITE_TEST_CHECKOUT_SSTABLES_ROOT="$tmp/absent-checkout/sstables"
+  CQLITE_TEST_CHECKOUT_SSTABLES_ROOT="$absent_checkout"
 absent_rc=$?
 if [ "$absent_rc" -ne 0 ]; then
   ok "absent: the lane FAILS when no candidate root holds the fixture (rc=$absent_rc)"
@@ -121,15 +153,23 @@ else
   bad "absent: the lane PASSED with the fixture absent from every candidate root — \
 this is the #3220 silent-skip defect; see $absent_out"
 fi
-if grep -q "committed-fixture case(s) did NOT run" "$absent_out" \
-   && grep -q "multiclustering_table" "$absent_out"; then
-  ok "absent: the failure names the unconditional must_run guard and the case"
+if grep -q 'committed-fixture case(s) did NOT run: \["multiclustering_table"\]' "$absent_out"; then
+  ok "absent: the unconditional must_run guard names EXACTLY the hidden case"
 else
-  bad "absent: the failure does not name the must_run guard + multiclustering_table \
-(it may be failing for an unrelated reason); see $absent_out"
+  bad "absent: no 'did NOT run: [\"multiclustering_table\"]' — the guard did not fire \
+for the hidden fixture (a failure for any other reason does not prove the contract); \
+see $absent_out"
 fi
-# The keyspace dir EXISTS in both staged roots, so this case also pins the specific
-# defect: keyspace-granular selection would have accepted these roots.
+# The sibling committed case still ran in that same run: the failure above is the
+# guard firing for the hidden fixture, not the corpus being unavailable.
+if grep -q "PASS test_da.wide_table" "$absent_out"; then
+  ok "absent: sibling committed cases still ran (the staging hid one fixture only)"
+else
+  bad "absent: test_da.wide_table did not run — the staging hid more than intended, so \
+the guard's target is ambiguous; see $absent_out"
+fi
+# The keyspace dir EXISTS in the staged checkout, so this case also pins the specific
+# defect: keyspace-granular selection would have accepted that root.
 if grep -q "no \*-Data.db for test_da.multiclustering_table under any candidate" "$absent_out"; then
   ok "absent: resolution reports searching EVERY candidate root, per table"
 else
