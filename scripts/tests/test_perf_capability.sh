@@ -751,8 +751,7 @@ for t in bash cat sed awk grep printf tr cut sort head tail wc env date mktemp \
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$rootbox/$t"
 done
 mkuname "$rootbox" Linux
-printf '#!/usr/bin/env bash\ncase "${1:-}" in -u) echo 0 ;; *) echo 0 ;; esac\n' >"$rootbox/id"
-chmod +x "$rootbox/id"
+mkid "$rootbox" 0      # the ONLY case that exercises the already-root branch
 roottrip="$tmp/perf-rootbox-tripwire.log"; : >"$roottrip"
 for t in sudo sysctl; do
   cat >"$rootbox/$t" <<EOF
