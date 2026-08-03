@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# Self-test for the issue-#3234 AC3 warm-scan harness
+# (cqlite-core/examples/bti_perf_scan.rs).
+#
+# WHY THIS EXISTS
+#
+# The harness is the measuring instrument for AC3, and every claim it makes rests
+# on guards that had never been OBSERVED to fire: its shell sibling
+# (test_gen_perf_corpus_bti.sh) got negative controls per assert, this got none
+# (rust-reviewer S7). A guard nobody has watched fail is a guard that might not
+# exist -- and the failure mode here is the worst kind: a silently TRUNCATED scan
+# reporting `RESULT: PASS` with a short row count and a plausible rows/s.
+#
+# So this drives the REAL binary and asserts its EXIT CODE for every documented
+# failure mode:
+#
+#     2 USAGE               -- incl. --min-seconds nan/inf/-5/0, which f64::parse
+#                              accepts and which silently DISABLED the AC3 floor
+#                              before this round (rust-reviewer B2)
+#     3 OPEN_FAILED         -- corpus absent (distinct from 7, below)
+#     4 ZERO_ROWS           -- a scan over an empty corpus is a failure, not a pass
+#     5 ROW_COUNT_MISMATCH  -- the truncation guard, now ON BY DEFAULT (B1)
+#     6 WINDOW_TOO_SHORT    -- the AC3 >= 10 s floor
+#     7 SCAN_FAILED         -- a scan that STARTED then failed mid-stream; before
+#                              this round it exited 3 and was indistinguishable
+#                              from "corpus missing" (rust-reviewer S6)
+#     8 MANIFEST_UNREADABLE -- no authoritative row count => refuse to measure
+#
+# HERMETIC, and CHEAP. No perf corpus (the AC3 corpus is ~2 GiB / 13.2 M rows and
+# takes ~2 minutes to scan), no docker, no network, no CQLITE_DATASETS_ROOT, no
+# fetched fixtures. Everything runs against the GIT-COMMITTED BTI (`da`) fixture
+# test-data/datasets/sstables/test_da/multiclustering_table-* (10.4 KiB, 468 rows,
+# 3 partitions, LZ4) plus its committed schema -- a Cassandra-5.0.2-WRITTEN corpus,
+# per #3042 the only kind that can serve as an oracle. Whole suite: a few seconds
+# after the example is built.
+#
+# The committed fixture and schema are SOURCE, not fetched data, so their absence
+# is a FAILURE here, never a skip (#3148's reasoning).
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FIXTURE_DIR="$REPO_ROOT/test-data/datasets/sstables/test_da/multiclustering_table-fd74ad508d2311f1a29b6d2c15dcffdf"
+FIXTURE_SCHEMA="$REPO_ROOT/test-data/schemas/multiclustering-table-bti.cql"
+# The fixture's row count, from its committed schema header and its own
+# sstabledump JSONL golden -- Cassandra-written, not a CQLite output.
+FIXTURE_ROWS=468
+KS=test_da
+TBL=multiclustering_table
+
+# Declared case count. A suite that silently stops running cases must not be able
+# to report success (the gap its sibling had): `fails=0` is necessary but not
+# sufficient, so the floor below asserts the suite actually RAN.
+#
+# This suite has NO conditional cases by design -- the fixtures are committed
+# source (absence = FAIL, #3148), the build is mandatory (failure = FAIL), and the
+# corruption step needs no interpreter -- so there is nothing legitimate to skip
+# and the floor is a plain `passes >= MIN_CASES`.
+MIN_CASES=37
+
+fails=0
+passes=0
+pass() { echo "ok   - $1"; passes=$((passes + 1)); }
+fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
+
+summary() {
+  echo
+  if [ "$passes" -lt "$MIN_CASES" ]; then
+    echo "FAIL - case-count floor: only $passes case(s) ran, under the $MIN_CASES this suite" \
+      "declares (and it declares no skippable cases). A suite that stopped running cases must" \
+      "not report success."
+    fails=$((fails + 1))
+  fi
+  echo "test_bti_perf_scan: passes=$passes fails=$fails (declared floor $MIN_CASES)"
+  if [ "$fails" -eq 0 ]; then
+    echo "test_bti_perf_scan: ALL PASS ($passes cases)"
+    exit 0
+  fi
+  echo "test_bti_perf_scan: $fails FAILURE(S)"
+  exit 1
+}
+
+for f in "$FIXTURE_DIR/da-2-bti-Data.db" "$FIXTURE_SCHEMA"; do
+  if [ ! -f "$f" ]; then
+    echo "FAIL - missing COMMITTED fixture (source, not fetched data): $f"
+    exit 1
+  fi
+done
+
+# ------------------------------------------------------------------- build -----
+# CQLITE_BTI_PERF_SCAN_BIN lets a caller reuse an already-built binary (e.g. the
+# release build a profiling run just made). Otherwise build it here: a build
+# failure is a FAILURE, never a skip -- the harness is the artifact under test.
+BIN="${CQLITE_BTI_PERF_SCAN_BIN:-}"
+if [ -z "$BIN" ]; then
+  build_log="$(mktemp)"
+  if (cd "$REPO_ROOT" && cargo build -p cqlite-core --example bti_perf_scan \
+    --features cli-helpers >"$build_log" 2>&1); then
+    pass "the AC3 harness builds (cargo build --example bti_perf_scan --features cli-helpers)"
+  else
+    fail "the AC3 harness does not build; tail: $(tail -5 "$build_log" | tr '\n' ' ')"
+    rm -f "$build_log"
+    summary
+  fi
+  rm -f "$build_log"
+  BIN="$REPO_ROOT/target/debug/examples/bti_perf_scan"
+fi
+if [ ! -x "$BIN" ]; then
+  fail "harness binary not executable: $BIN"
+  summary
+fi
+
+TMP="$(mktemp -d)"
+# shellcheck disable=SC2317  # invoked indirectly by the EXIT trap below
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT
+
+# Build the three throwaway corpora the cases run against, in the layout the
+# harness expects (<corpus>/sstables/<ks>/<table>-<uuid>/ + <corpus>/schema.cql).
+mk_corpus() { # mk_corpus <name>  -> populated with the committed fixture
+  local root="$TMP/$1"
+  mkdir -p "$root/sstables/$KS"
+  cp -r "$FIXTURE_DIR" "$root/sstables/$KS/"
+  cp "$FIXTURE_SCHEMA" "$root/schema.cql"
+  echo "$root"
+}
+GOOD="$(mk_corpus good)"
+CORRUPT="$(mk_corpus corrupt)"
+# An "empty" corpus: the table directory exists (so discovery is scoped to it) but
+# holds no SSTable -- the shape a mis-pathed or half-generated corpus has.
+EMPTY="$TMP/empty"
+mkdir -p "$EMPTY/sstables/$KS/$(basename "$FIXTURE_DIR")"
+cp "$FIXTURE_SCHEMA" "$EMPTY/schema.cql"
+
+# Corrupt the middle of the LZ4-compressed Data.db, leaving every other component
+# intact: the reader OPENS fine and fails while DECODING -- exactly the
+# distinction between exit 3 and exit 7. Deterministic (a fixed 0xFF run, not
+# /dev/urandom) and dependency-free: no python3, so nothing in this suite can be
+# skipped for a missing interpreter.
+head -c 200 /dev/zero | tr '\000' '\377' |
+  dd of="$CORRUPT/sstables/$KS/$(basename "$FIXTURE_DIR")/da-2-bti-Data.db" \
+    bs=1 seek=200 count=200 conv=notrunc status=none
+
+manifest() { # manifest <file> <keyspace> <table> <rows>
+  printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s}}\n' "$2" "$3" "$4" >"$1"
+}
+manifest "$TMP/m-good.json" "$KS" "$TBL" "$FIXTURE_ROWS"
+manifest "$TMP/m-short.json" "$KS" "$TBL" 999
+manifest "$TMP/m-other.json" perf_bti wide_multiclustering "$FIXTURE_ROWS"
+printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":0}}\n' "$KS" "$TBL" \
+  >"$TMP/m-zero.json"
+printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},' "$KS" "$TBL" \
+  "$FIXTURE_ROWS" >"$TMP/m-disagree.json"
+printf '"row_count_cross_check":{"agree":true,"statistics_db_rows":471}}\n' \
+  >>"$TMP/m-disagree.json"
+printf '{"keyspace":"%s",\n' "$KS" >"$TMP/m-truncated.json"
+
+# run_case <expected-rc> <description> <args...>
+# Records the run's output in $out so a case can additionally grep it.
+out=""
+run_case() {
+  local want="$1" desc="$2"
+  shift 2
+  out="$("$BIN" "$@" 2>&1)"
+  local rc=$?
+  if [ "$rc" -eq "$want" ]; then
+    pass "$desc (exit $rc)"
+    return 0
+  fi
+  fail "$desc: expected exit $want, got $rc; tail: $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-220)"
+  return 1
+}
+
+# Shorthand: scan the good corpus with the guards we are not testing turned off.
+SCAN_GOOD=(--corpus "$GOOD" --keyspace "$KS" --table "$TBL" --warm-passes 0)
+
+# ------------------------------------------------------------ 2: USAGE ---------
+run_case 2 "--corpus is required" --keyspace "$KS"
+run_case 2 "rejects an unknown argument" --corpus "$GOOD" --bogus
+# B2: every one of these parses as f64 and used to leave the AC3 floor OFF while
+# the header printed a gate value ("min_seconds_gate: NaN").
+for bad in nan NaN inf -inf -5 0 -0.0; do
+  run_case 2 "rejects --min-seconds '$bad'" --corpus "$GOOD" --min-seconds "$bad"
+done
+run_case 2 "rejects --min-seconds with no value" --corpus "$GOOD" --min-seconds
+run_case 2 "rejects --expect-rows 0 (it used to mean 'assert off')" \
+  --corpus "$GOOD" --expect-rows 0
+run_case 2 "rejects --expect-rows together with --no-expect-rows" \
+  --corpus "$GOOD" --expect-rows 5 --no-expect-rows
+
+# ------------------------------------------------------- 3: OPEN_FAILED -------
+run_case 3 "absent corpus exits OPEN_FAILED" \
+  --corpus "$TMP/does-not-exist" --keyspace "$KS" --table "$TBL" \
+  --manifest "$TMP/m-good.json"
+
+# ------------------------------------------------ 8: MANIFEST_UNREADABLE ------
+# B1: the row-count assert is ON by default, so an unavailable authority must
+# REFUSE TO MEASURE rather than degrade to "assert off".
+run_case 8 "an absent --manifest refuses to measure" \
+  "${SCAN_GOOD[@]}" --manifest "$TMP/nope.json"
+run_case 8 "an unparseable manifest refuses to measure" \
+  "${SCAN_GOOD[@]}" --manifest "$TMP/m-truncated.json"
+run_case 8 "a manifest for ANOTHER table refuses to measure" \
+  "${SCAN_GOOD[@]}" --manifest "$TMP/m-other.json"
+run_case 8 "a manifest whose rows is 0 refuses to measure" \
+  "${SCAN_GOOD[@]}" --manifest "$TMP/m-zero.json"
+run_case 8 "a manifest whose Statistics.db cross-check disagrees refuses to measure" \
+  "${SCAN_GOOD[@]}" --manifest "$TMP/m-disagree.json"
+# With no --manifest, resolution falls through to the COMMITTED production
+# manifest, which describes perf_bti.wide_multiclustering -- so this corpus gets
+# the same refusal rather than a vacuous pass. This case also proves the default
+# (no-flag) path really does consult the committed manifest.
+if run_case 8 "the DEFAULT path consults the committed manifest and refuses a foreign table" \
+  "${SCAN_GOOD[@]}"; then
+  if grep -q "test-data/perf-corpus-bti-manifest.json describes perf_bti.wide_multiclustering" \
+    <<<"$out"; then
+    pass "the refusal names the committed manifest and the table it describes"
+  else
+    fail "expected the committed manifest to be named; got: $(tail -2 <<<"$out")"
+  fi
+fi
+
+# ------------------------------------------------------- 4: ZERO_ROWS ---------
+run_case 4 "a corpus with no SSTable exits ZERO_ROWS, never 0" \
+  --corpus "$EMPTY" --keyspace "$KS" --table "$TBL" --warm-passes 0 \
+  --no-min-seconds --manifest "$TMP/m-good.json"
+
+# ------------------------------------------------ 5: ROW_COUNT_MISMATCH -------
+if run_case 5 "a row count short of the manifest exits ROW_COUNT_MISMATCH" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-short.json"; then
+  if grep -q "scanned $FIXTURE_ROWS rows, expected 999" <<<"$out" \
+    && grep -q "TRUNCATED" <<<"$out"; then
+    pass "the mismatch names both counts and the truncation failure mode"
+  else
+    fail "expected a 'scanned N rows, expected M' + truncation diagnosis; got: $(tail -2 <<<"$out")"
+  fi
+fi
+# The warming passes are gated too: a truncated warm pass must not be discarded
+# silently. --warm-passes 1 fails on the WARM pass, before the measured one.
+if run_case 5 "a truncated WARM pass fails too (it is not silently discarded)" \
+  --corpus "$GOOD" --keyspace "$KS" --table "$TBL" --warm-passes 1 \
+  --no-min-seconds --manifest "$TMP/m-short.json"; then
+  if grep -q "warm pass 0: scanned" <<<"$out"; then
+    pass "the warm-pass failure is attributed to the warm pass"
+  else
+    fail "expected the failure attributed to 'warm pass 0'; got: $(tail -2 <<<"$out")"
+  fi
+fi
+
+# ------------------------------------------------ 6: WINDOW_TOO_SHORT --------
+if run_case 6 "a sub-floor window exits WINDOW_TOO_SHORT" \
+  "${SCAN_GOOD[@]}" --min-seconds 10 --manifest "$TMP/m-good.json"; then
+  if grep -q "under the 10.000 s AC3 floor" <<<"$out" \
+    && grep -qE "needs ~[0-9]+ rows" <<<"$out"; then
+    pass "the sub-floor failure reports the row count that WOULD reach the floor"
+  else
+    fail "expected an AC3-floor diagnosis with a target row count; got: $(tail -2 <<<"$out")"
+  fi
+fi
+
+# ------------------------------------------------------ 7: SCAN_FAILED -------
+# The corrupt corpus opens fine and fails while decoding: 7, NOT 3.
+if run_case 7 "a mid-scan decode failure exits SCAN_FAILED, not OPEN_FAILED" \
+  --corpus "$CORRUPT" --keyspace "$KS" --table "$TBL" --warm-passes 0 \
+  --no-min-seconds --manifest "$TMP/m-good.json"; then
+  if grep -q "^open: 1 sstables discovered" <<<"$out"; then
+    pass "SCAN_FAILED is reported AFTER a successful open (so 3 vs 7 really do differ)"
+  else
+    fail "expected the corrupt corpus to OPEN before failing; got: $(head -3 <<<"$out")"
+  fi
+fi
+
+# ------------------------------------------- 0: the guarded happy path --------
+# The positive control. Every negative case above must be able to pass, or they
+# would be proving nothing.
+if run_case 0 "the fixture corpus PASSES with the row-count assert ON" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-good.json"; then
+  if grep -q "^rows_scanned:     $FIXTURE_ROWS" <<<"$out" \
+    && grep -q "^row_count_assert: $FIXTURE_ROWS (authoritative:" <<<"$out"; then
+    pass "the result block reports the verified row count and its authority"
+  else
+    fail "expected a verified row count in the result block; got: $(tail -6 <<<"$out")"
+  fi
+  # S3: the route must be printed beside the number.
+  if grep -q "^access_path:      " <<<"$out" \
+    && grep -q "^storage_route:    " <<<"$out" \
+    && grep -q "^generations:      1" <<<"$out" \
+    && grep -q "^schema_resolved:  true" <<<"$out"; then
+    pass "the result block names the ROUTE (access_path + storage_route + inputs)"
+  else
+    fail "expected access_path/storage_route/generations/schema_resolved; got: $(tail -6 <<<"$out")"
+  fi
+  # S5: --warm-passes 0 must not label a COLD scan as the AC3 warm measurement.
+  if grep -q "AC3 measured COLD full scan" <<<"$out" \
+    && grep -q "NOT the AC3 warm measurement" <<<"$out" \
+    && grep -q "RESULT: PASS (COLD window" <<<"$out"; then
+    pass "--warm-passes 0 labels the scan COLD everywhere, incl. the RESULT line"
+  else
+    fail "expected COLD labelling with --warm-passes 0; got: $(tail -6 <<<"$out")"
+  fi
+  # A pass taken with a guard disabled must say so in RESULT.
+  if grep -q "UNGUARDED: window floor DISABLED" <<<"$out"; then
+    pass "a PASS taken with a disabled guard is marked UNGUARDED"
+  else
+    fail "expected an UNGUARDED marker on the RESULT line; got: $(tail -2 <<<"$out")"
+  fi
+fi
+if run_case 0 "--no-expect-rows passes but marks the measurement unverified" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --no-expect-rows; then
+  if grep -q "row_count_assert: \*\*\* DISABLED (--no-expect-rows)" <<<"$out" \
+    && grep -q "UNGUARDED: row-count assert DISABLED" <<<"$out"; then
+    pass "the row-count opt-OUT is loud in both the header and the RESULT line"
+  else
+    fail "expected a loud --no-expect-rows banner; got: $(tail -6 <<<"$out")"
+  fi
+fi
+
+summary
