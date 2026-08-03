@@ -142,6 +142,7 @@ modes
                          so it can never clobber a production corpus
   --validate-only        validate flags and exit 0; starts no container, writes nothing
   --prune-dry-run        --validate-only + list the stale corpus dirs a run WOULD remove
+                         (PRUNE_KEEP=<basename> excludes one, as publish() does)
   --verify-only          re-assert an ALREADY-GENERATED corpus under --out and exit;
                          no container, no writes, nothing mutated
   --yaml-flip-check FILE self-test hook: run the PRODUCTION cassandra.yaml flip
@@ -678,7 +679,10 @@ fi
 validate_inputs
 
 if [ "$VALIDATE_ONLY" = 1 ]; then
-  if [ "$PRUNE_DRY_RUN" = 1 ]; then prune_stale_table_dirs ""; fi
+  # PRUNE_KEEP stands in for the basename publish() is about to publish (the one
+  # dir a real run must NOT delete), so the `keep` exclusion of a function that
+  # `rm -rf`s multi-GB paths is exercisable without a container.
+  if [ "$PRUNE_DRY_RUN" = 1 ]; then prune_stale_table_dirs "${PRUNE_KEEP:-}"; fi
   echo "VALIDATE-OK rows=$ROWS chunk_rows=$CHUNK_ROWS chunks=$CHUNKS seed=$SEED keyspace=$KS table=$TBL out=$OUT"
   exit 0
 fi

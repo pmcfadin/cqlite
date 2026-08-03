@@ -7,9 +7,9 @@
 #      must never start a container, load millions of rows, and then overwrite the
 #      COMMITTED manifest (the lesson #3068's generator learned the hard way).
 #      Unrecognized arguments exit 2 (the fetch-datasets.sh convention).
-#   2. --smoke lowers the defaults but NEVER overrides an explicit --keyspace, and
-#      it defaults the keyspace to perf_bti_smoke so a smoke run cannot clobber a
-#      production corpus.
+#   2. --smoke lowers the DEFAULTS but NEVER overrides an explicit --keyspace,
+#      --rows or --chunk-rows (or their env equivalents), and it defaults the
+#      keyspace to perf_bti_smoke so a smoke run cannot clobber a production corpus.
 #   3. THE ACCEPTANCE ASSERTS ARE REAL, in both directions. Issue #3234 AC1/AC2 are
 #      "`da` descriptors only, >= 1 Data.db > 8 MiB, non-empty Rows.db, BTI TOC" --
 #      and a stock Cassandra 5.0 node silently emits `nb` when either yaml setting
@@ -20,11 +20,28 @@
 #      the requested row count -- that determinism is what makes the manifest's
 #      per-Data.db sha256 a reproducibility check rather than decoration.
 #   5. The manifest writer fails closed on an empty / non-BTI SSTable directory
-#      instead of emitting a manifest that describes nothing.
+#      instead of emitting a manifest that describes nothing -- AND its happy path
+#      actually runs (see 7), so the fields it publishes are asserted, not assumed.
+#   6. The cassandra.yaml flip is verified against a COMMITTED cassandra:5.0.2
+#      excerpt. It is the most consequential upstream guard in the generator: a
+#      stock node emits `nb` (BIG) with no error at all, and the `sed` addresses
+#      depend on the shipped file's exact comment markers and two-space indentation.
+#   7. Stale-corpus pruning `rm -rf`s multi-GB paths, so every guard (symlink skip,
+#      the <table>-<32 hex> name filter, the resolves-outside refusal, the `keep`
+#      exclusion, and dry-run deleting nothing) is pinned -- mirroring the BIG
+#      sibling test_gen_perf_corpus_3068.sh.
+#   8. BOTH row-count cross-checks FIRE, in both directions: "COPY imported N, the
+#      CSV held M" and "Statistics.db totalRows == sstabledump rows", plus the
+#      manifest writer's plan-vs-Statistics.db rows AND partitions checks and its
+#      refusal to fabricate an unobserved partition count.
 #
-# Hermetic: no docker, no sudo, no Cassandra, no network, no datasets. Only
-# --help / --validate-only / --verify-only / the row driver / the manifest writer's
-# pre-container guards are exercised, none of which start a container.
+# Hermetic: no docker, no sudo, no Cassandra, no network, no datasets. The
+# container-dependent paths (8, and the manifest happy path in 5) run against
+# scripts/tests/fixtures/stub-docker-cassandra-bti.py -- a stub `docker` handed to
+# the generator via DOCKER=/--docker, which fabricates the metadata TEXT Cassandra
+# would have printed. Everything else uses --help / --validate-only /
+# --verify-only / --yaml-flip-check / --prune-dry-run, none of which start
+# anything.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -84,6 +101,39 @@ if grep -q "keyspace=mine" <<<"$out"; then
 else
   fail "--smoke overrode an explicit --keyspace (out: $out)"
 fi
+# --smoke is DEFAULTS-only: an explicitly supplied --rows/--chunk-rows (or the
+# ROWS/CHUNK_ROWS env equivalent) must survive it. It used to replace both
+# unconditionally, silently ignoring what the caller asked for.
+out=$(bash "$GEN" --smoke --validate-only --out "$TMP/c" --rows 7000 --chunk-rows 3500 2>&1)
+if grep -q "VALIDATE-OK rows=7000 chunk_rows=3500 chunks=2 " <<<"$out"; then
+  pass "--smoke keeps an explicit --rows AND --chunk-rows"
+else
+  fail "--smoke overrode an explicit --rows/--chunk-rows (out: $out)"
+fi
+out=$(bash "$GEN" --smoke --validate-only --out "$TMP/c" --rows 600000 2>&1)
+if grep -q "rows=600000 chunk_rows=120000 chunks=5 " <<<"$out"; then
+  pass "--smoke keeps an explicit --rows and still lowers --chunk-rows"
+else
+  fail "--smoke did not combine an explicit --rows with the smoke chunk size (out: $out)"
+fi
+out=$(bash "$GEN" --smoke --validate-only --out "$TMP/c" --chunk-rows 60000 2>&1)
+if grep -q "rows=240000 chunk_rows=60000 chunks=4 " <<<"$out"; then
+  pass "--smoke keeps an explicit --chunk-rows and still lowers --rows"
+else
+  fail "--smoke overrode an explicit --chunk-rows (out: $out)"
+fi
+out=$(ROWS=900000 CHUNK_ROWS=300000 bash "$GEN" --smoke --validate-only --out "$TMP/c" 2>&1)
+if grep -q "rows=900000 chunk_rows=300000 chunks=3 " <<<"$out"; then
+  pass "--smoke keeps ROWS/CHUNK_ROWS supplied through the environment"
+else
+  fail "--smoke overrode the ROWS/CHUNK_ROWS env values (out: $out)"
+fi
+out=$(bash "$GEN" --smoke --validate-only --out "$TMP/c" 2>&1)
+if grep -q "rows=240000 chunk_rows=120000 chunks=2 " <<<"$out"; then
+  pass "--smoke lowers both defaults when neither was supplied"
+else
+  fail "--smoke default plan changed (out: $out)"
+fi
 out=$(bash "$GEN" --validate-only --out "$TMP/c" 2>&1)
 if grep -q "keyspace=perf_bti " <<<"$out"; then
   pass "production default keyspace is perf_bti"
@@ -91,31 +141,58 @@ else
   fail "expected keyspace=perf_bti by default (out: $out)"
 fi
 
-# Every rejection must be non-zero AND must not have written anything.
-check_reject() { # check_reject <label> <expect-substring> <args...>
+# Every rejection must be non-zero AND must not have created the corpus root it was
+# pointed at.
+#
+# The no-write half is asserted on the DESTINATION THE INVOCATION ACTUALLY
+# REQUESTED. The earlier shape counted leftovers in a scratch dir no invocation was
+# ever pointed at (every case passed --out "$TMP/c"), so `leftovers` was
+# structurally always 0 and eleven cases claimed a property nothing checked. The
+# per-case --out is unique, so the check is live: it fails the moment validation
+# starts creating (or pruning under) --out before the flags are checked.
+check_reject() { # check_reject <label> <expect-substring> <args...>  (--out prepended)
   local label="$1" expect="$2"; shift 2
-  local workdir="$TMP/rej-$RANDOM"
-  mkdir -p "$workdir"
-  local out rc leftovers
-  out=$(bash "$GEN" --validate-only "$@" 2>&1); rc=$?
-  leftovers=$(find "$workdir" -mindepth 1 | wc -l | tr -d ' ')
-  if [ "$rc" -ne 0 ] && grep -q "$expect" <<<"$out" && [ "$leftovers" = "0" ]; then
+  local dest="$TMP/rej-$RANDOM-$RANDOM/corpus"
+  local out rc existed
+  # A caller-supplied --out in "$@" deliberately WINS (later wins in the parser),
+  # which is how the bad---out cases are expressed; $dest must be untouched either way.
+  out=$(bash "$GEN" --validate-only --out "$dest" "$@" 2>&1); rc=$?
+  existed=no; [ -e "$dest" ] && existed=yes
+  if [ "$rc" -ne 0 ] && grep -q "$expect" <<<"$out" && [ "$existed" = no ]; then
     pass "rejects $label"
   else
-    fail "$label: expected non-zero + '$expect' + no writes (rc=$rc, leftovers=$leftovers, out: $out)"
+    fail "$label: expected non-zero + '$expect' + no $dest (rc=$rc, dest-created=$existed, out: $out)"
   fi
 }
-check_reject "--rows 0"            "must be >= 1"          --out "$TMP/c" --rows 0
-check_reject "a non-integer --rows" "non-negative integer" --out "$TMP/c" --rows 12x
-check_reject "--chunk-rows > --rows" "exceeds"             --out "$TMP/c" --rows 100 --chunk-rows 1000
+check_reject "--rows 0"            "must be >= 1"          --rows 0
+check_reject "a non-integer --rows" "non-negative integer" --rows 12x
+check_reject "--chunk-rows > --rows" "exceeds"             --rows 100 --chunk-rows 1000
 check_reject "a relative --out"    "absolute path"         --out relative/path
 check_reject "an empty --out"      "is empty"              --out ""
 check_reject "--out /"             "refusing to use"       --out /
-check_reject "a bad keyspace"      "invalid keyspace"      --out "$TMP/c" --keyspace "Bad-KS"
-check_reject "a bad table"         "invalid table"         --out "$TMP/c" --table "bad table"
-check_reject "an empty --seed"     "seed is empty"         --out "$TMP/c" --seed ""
-check_reject "a malformed --widths" "widths"               --out "$TMP/c" --widths "200"
-check_reject "duplicate bucket first bytes" "widths"       --out "$TMP/c" --buckets "alpha,ateam"
+check_reject "a bad keyspace"      "invalid keyspace"      --keyspace "Bad-KS"
+check_reject "a bad table"         "invalid table"         --table "bad table"
+check_reject "an empty --seed"     "seed is empty"         --seed ""
+check_reject "a malformed --widths" "widths"               --widths "200"
+check_reject "duplicate bucket first bytes" "widths"       --buckets "alpha,ateam"
+check_reject "an empty --rows"     "non-negative integer"  --rows ""
+# An explicitly EMPTY env value is a caller bug, not a request for the default.
+emptydest="$TMP/empty-env/corpus"
+out=$(ROWS="" bash "$GEN" --validate-only --out "$emptydest" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "non-negative integer" <<<"$out" && [ ! -e "$emptydest" ]; then
+  pass "rejects an empty ROWS in the environment (never silently the default)"
+else
+  fail "empty ROWS env: expected non-zero + no writes (rc=$rc, out: $out)"
+fi
+# A SUCCESSFUL --validate-only must also write nothing: it runs before preflight,
+# which is the only thing allowed to create the corpus root.
+okdest="$TMP/validate-writes-nothing/corpus"
+bash "$GEN" --validate-only --out "$okdest" --rows 1000 --chunk-rows 500 >/dev/null 2>&1
+if [ ! -e "$okdest" ]; then
+  pass "a passing --validate-only creates no corpus root either"
+else
+  fail "--validate-only created $okdest"
+fi
 # `pk` is a CQL `int`, so chunk N's key base (N * PK_STRIDE) has a hard ceiling.
 # REGRESSION (issue #3234): the original 1e9 stride made chunk 3 start at
 # 3,000,000,000 > INT32_MAX, and the 27-chunk production run died there — four
@@ -124,7 +201,7 @@ check_reject "duplicate bucket first bytes" "widths"       --out "$TMP/c" --buck
 # container), and the two cases below pin the boundary itself so a future stride
 # change cannot silently reopen the hole.
 check_reject "a plan over the \`pk int\` ceiling" "INT32_MAX" \
-  --out "$TMP/c" --rows 2200000000 --chunk-rows 500000
+  --rows 2200000000 --chunk-rows 500000
 out=$(bash "$GEN" --validate-only --out "$TMP/c" --rows 13200000 --chunk-rows 500000 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "chunks=27 " <<<"$out"; then
   pass "the 27-chunk production plan fits the \`pk int\` ceiling"
@@ -194,17 +271,53 @@ else
   fail "AC2 8MiB-floor case: expected a hard failure (rc=$rc, out: $out)"
 fi
 
-# TOC contract: Index.db/Summary.db are BIG-only and must never appear.
-root="$TMP/bigtoc"
-d="$root/sstables/perf_bti/wide_multiclustering-4123456789abcdef0123456789abcdef"
-make_corpus "$d" 9437184 4096
-printf 'Index.db\n' >>"$d/da-1-bti-TOC.txt"
+# The floor is STRICT (> 8388608, not >=): MADV_RANDOM is applied at
+# `file_size >= 8 MiB`, so a Data.db of EXACTLY 8 MiB leaves nothing above the
+# threshold to A/B against. Pin the boundary itself, not just a value far below it.
+root="$TMP/exact8m"
+make_corpus "$root/sstables/perf_bti/wide_multiclustering-6123456789abcdef0123456789abcdef" 8388608 4096
 out=$(verify "$root"); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "Index.db" <<<"$out"; then
-  pass "--verify-only HARD-FAILS when the TOC lists a BIG-only component"
+if [ "$rc" -ne 0 ] && grep -q "largest Data.db is 8388608 B, needs > 8388608" <<<"$out"; then
+  pass "--verify-only HARD-FAILS at EXACTLY 8388608 B (the floor is strict)"
 else
-  fail "TOC case: expected a hard failure (rc=$rc, out: $out)"
+  fail "AC2 exact-8MiB boundary: expected a hard failure (rc=$rc, out: $out)"
 fi
+root="$TMP/exact8m1"
+make_corpus "$root/sstables/perf_bti/wide_multiclustering-7123456789abcdef0123456789abcdef" 8388609 4096
+out=$(verify "$root"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "largest_data_db=8388609" <<<"$out"; then
+  pass "--verify-only accepts 8388609 B (one byte over the floor)"
+else
+  fail "AC2 boundary+1: expected VERIFY-OK (rc=$rc, out: $out)"
+fi
+
+# TOC contract: Index.db/Summary.db are BIG-only and must never appear.
+# The expected substring must be the ASSERT's own message, not a bare component
+# name: the die path echoes the whole TOC, so `grep -q "Index.db"` was satisfied by
+# the failure message of ANY unrelated TOC failure.
+for bigonly in Index.db Summary.db; do
+  root="$TMP/bigtoc-$bigonly"
+  d="$root/sstables/perf_bti/wide_multiclustering-4123456789abcdef0123456789abcdef"
+  make_corpus "$d" 9437184 4096
+  printf '%s\n' "$bigonly" >>"$d/da-1-bti-TOC.txt"
+  out=$(verify "$root"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "TOC.txt lists $bigonly" <<<"$out"; then
+    pass "--verify-only HARD-FAILS when the TOC lists BIG-only $bigonly"
+  else
+    fail "TOC $bigonly case: expected 'TOC.txt lists $bigonly' (rc=$rc, out: $out)"
+  fi
+  # ... and a BIG-only component FILE is fatal even when the TOC does not list it.
+  root="$TMP/bigfile-$bigonly"
+  d="$root/sstables/perf_bti/wide_multiclustering-8123456789abcdef0123456789abcdef"
+  make_corpus "$d" 9437184 4096
+  truncate -s 128 "$d/da-1-bti-$bigonly"
+  out=$(verify "$root"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "has a $bigonly file" <<<"$out"; then
+    pass "--verify-only HARD-FAILS on a stray BIG-only $bigonly file"
+  else
+    fail "stray $bigonly file: expected 'has a $bigonly file' (rc=$rc, out: $out)"
+  fi
+done
 
 # A missing BTI component in the TOC is also fatal.
 root="$TMP/notoc"
