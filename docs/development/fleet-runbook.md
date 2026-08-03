@@ -141,6 +141,67 @@ an unreadable committed `.cql` **or** on a rejected relative `CQLITE_SCHEMAS_ROO
 be absolute). It has **no opt-out** — committed source in a checkout is never legitimately absent.
 `--lite`/`--only` stay lenient.
 
+### Perf profiling capability (`perf_event_paranoid`) — Linux workers (#3249)
+
+Agent/worker images ship with `kernel.perf_event_paranoid = 4` — **all** unprivileged `perf` use
+denied — and set it in **no** sysctl file. So every profiling run started from a hard `EACCES` whose
+help text ("access limited") reads like a *capability* verdict when it is a *permission* verdict;
+that alone cost two measurement cycles. A box left permissive by a hand-probe is no better: with no
+drop-in it reverts on reboot/reprovision, i.e. the fleet was profileable only by accident.
+
+`bash scripts/bootstrap-agent-machine.sh --yes` now installs a reboot-surviving drop-in:
+
+```conf
+# /etc/sysctl.d/99-cqlite-perf.conf   (whole file is managed; byte-compared on re-run)
+kernel.perf_event_paranoid = -1
+kernel.kptr_restrict = 0
+```
+
+**Why `-1` and not `1`.** `perf_event_paranoid` is **cumulative** — higher is *more* restrictive and
+each level keeps the ones below it: `>= 2` no kernel profiling, `>= 1` **no CPU-wide event access**,
+`>= 0` no raw tracepoints, `-1` no restriction. CQLite's measurement doctrine mandates per-CPU
+collection (`perf stat -C <cpu>`), which is exactly what `>= 1` forbids — so `1` is not "almost
+right", it is a hard denial. `0` is the bare minimum that works; `-1` additionally lifts the perf
+mlock limit, avoiding `perf record` ring-buffer surprises. `kernel.kptr_restrict = 0` is a
+**separate** control needed for kernel *symbol* resolution — without it kernel frames render as
+unresolved addresses, a **silent attribution loss, not an error**.
+
+**BPF collectors still need `sudo`.** A permissive `perf_event_paranoid` does **not** grant BPF map
+creation, so `bpftrace`/`bcc` collectors remain root-only (the #3217 finding). This drop-in buys
+unprivileged `perf stat`/`perf record`, nothing more.
+
+**Security posture — read this before copying the file anywhere.** This is a **deliberate
+loosening**, appropriate for **dedicated single-tenant measurement/agent boxes** (what the fleet is:
+one worker per machine, no other tenants, no untrusted logins). It **must not** be applied to shared
+or multi-tenant hosts: unrestricted `perf_event_open` plus unmasked kernel pointers lets any local
+user observe other users' execution and leak kernel addresses.
+
+**Bootstrap verifies rather than assumes** — the whole point, since a bootstrap that silently leaves
+a box unprofileable is the failure mode being fixed. The section probes `/proc` first (writing
+nothing when the drop-in is already current), writes the managed file, applies it, **reads the values
+back out of `/proc/sys/kernel`** (a `sysctl` write's return code proves nothing — a container or a
+later-sorting drop-in can swallow it), and finishes by running the collection itself:
+`perf stat -C 0 -e cycles -- sleep 0.1`, requiring exit 0 **and a non-zero cycle count**. An rc-0
+`perf stat` printing `<not supported>` (or a virtualised PMU counting a flat 0) is reported as
+**NOT verified**. No sudo, no `perf`, or an absent `/proc` control degrades to a `[warn]` plus the
+exact remedy line — bootstrap stays advisory and always exits 0.
+
+Verify by hand, in the same order bootstrap does:
+
+```bash
+cat /proc/sys/kernel/perf_event_paranoid /proc/sys/kernel/kptr_restrict   # want -1 and 0
+bash scripts/perf-capability.sh --token                                   # want: ok
+bash scripts/perf-capability.sh --verify                                  # want: cycles=<non-zero>
+# apply by hand (identical bytes to what bootstrap writes, so a later run is a no-op):
+bash scripts/perf-capability.sh --drop-in | sudo tee /etc/sysctl.d/99-cqlite-perf.conf >/dev/null
+sudo sysctl -q --system
+```
+
+Every gate SUMMARY's `accelerators:` line stamps the same state as a Linux-only `perf=` token
+(`ok` / `paranoid-<N>` / `kptr-restricted` / `absent` / `unknown`), so "this box cannot be profiled"
+is visible in any pasted block instead of being discovered at the start of a measurement cycle.
+`paranoid-4` on a box you expected to profile means **re-run bootstrap**, not "perf is unavailable".
+
 ---
 
 ## Laptop A — your lead session (lead + worker)
