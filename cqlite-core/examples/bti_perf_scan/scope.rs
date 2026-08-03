@@ -82,9 +82,7 @@ pub const TABLE_ID_HEX_LEN: usize = 32;
 /// what a table directory is.
 pub fn is_table_dir(name: &str, table: &str) -> bool {
     match name.strip_prefix(table).and_then(|r| r.strip_prefix('-')) {
-        Some(id) => {
-            id.len() == TABLE_ID_HEX_LEN && id.chars().all(|c| c.is_ascii_hexdigit())
-        }
+        Some(id) => id.len() == TABLE_ID_HEX_LEN && id.chars().all(|c| c.is_ascii_hexdigit()),
         None => false,
     }
 }

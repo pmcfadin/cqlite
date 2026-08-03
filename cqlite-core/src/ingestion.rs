@@ -442,7 +442,7 @@ mod tests {
         let (_root, wanted, _siblings) = tree_with_name_extending_siblings();
         let indirect = wanted.join("..").join(wanted.file_name().unwrap());
         let selected = select_table_dirs(
-            &[wanted.clone()],
+            std::slice::from_ref(&wanted),
             None,
             TableDirSelection::Exact(std::slice::from_ref(&indirect)),
         );
