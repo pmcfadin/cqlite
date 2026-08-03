@@ -1393,6 +1393,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "ws0-corpus-gen",
 ]
 
 [[package]]

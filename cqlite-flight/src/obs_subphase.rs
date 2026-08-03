@@ -5,9 +5,9 @@
 //! (`pub use crate::obs_subphase::…` in `obs.rs`) so call sites keep the stable
 //! `crate::obs::{...}` path. This module owns:
 //!
-//! * the five bounded `cqlite.rpc.phase` VALUES that decompose the `stream`
+//! * the six bounded `cqlite.rpc.phase` VALUES that decompose the `stream`
 //!   phase (`stream_cold_fault`, `stream_decompress`, `stream_merge`,
-//!   `stream_encode`, `stream_grpc_write`), and
+//!   `stream_encode`, `stream_encode_framing`, `stream_grpc_write`), and
 //! * [`StreamSubPhaseEmitter`], the RAII that flushes the per-request accumulator
 //!   (five `AtomicU64` nanos counters filled on the concurrent pipeline threads
 //!   via `cqlite_core::observability::stream_subphase` — cold-fault/decompress on
@@ -35,25 +35,31 @@ pub const PHASE_STREAM_COLD_FAULT: &str = "stream_cold_fault";
 pub const PHASE_STREAM_DECOMPRESS: &str = "stream_decompress";
 /// k-way merge + reconcile + row materialize, merge-consumer thread.
 pub const PHASE_STREAM_MERGE: &str = "stream_merge";
-/// Arrow `RecordBatch` encode, merge-consumer thread.
+/// Arrow `RecordBatch` ARRAY BUILD, merge-consumer thread. Does NOT cover the
+/// arrow-flight encoder stage — see [`PHASE_STREAM_ENCODE_FRAMING`].
 pub const PHASE_STREAM_ENCODE: &str = "stream_encode";
+/// Arrow-flight IPC FRAMING of an already-built `RecordBatch` (dictionary
+/// hydration + encoder-target re-slicing + IPC serialization), recorded on the
+/// ASYNC gRPC task that polls the response stream (issue #3096).
+pub const PHASE_STREAM_ENCODE_FRAMING: &str = "stream_encode_framing";
 /// Egress channel `reserve()`/send incl. backpressure park, on the merge-consumer
 /// thread (`ChannelSink::emit`, not a separate egress thread) — CLIENT-PACED.
 pub const PHASE_STREAM_GRPC_WRITE: &str = "stream_grpc_write";
 
 /// The closed set of in-`stream` sub-phase `(StreamSubPhase, value)` pairs, in the
 /// fixed order the teardown emitter walks them.
-const STREAM_SUBPHASES: [(StreamSubPhase, &str); 5] = [
+const STREAM_SUBPHASES: [(StreamSubPhase, &str); 6] = [
     (StreamSubPhase::ColdFault, PHASE_STREAM_COLD_FAULT),
     (StreamSubPhase::Decompress, PHASE_STREAM_DECOMPRESS),
     (StreamSubPhase::Merge, PHASE_STREAM_MERGE),
     (StreamSubPhase::Encode, PHASE_STREAM_ENCODE),
+    (StreamSubPhase::EncodeFraming, PHASE_STREAM_ENCODE_FRAMING),
     (StreamSubPhase::GrpcWrite, PHASE_STREAM_GRPC_WRITE),
 ];
 
 /// Emit one `cqlite.rpc.phase.duration` sample per in-`stream` sub-phase that
 /// accumulated any wall time (issue #2819), tagged with the `do_get` method and
-/// the bounded `cqlite.rpc.phase = stream_*` value. Bounded to ≤5 samples per RPC
+/// the bounded `cqlite.rpc.phase = stream_*` value. Bounded to ≤6 samples per RPC
 /// (one per sub-phase that recorded time), emitted ONCE at stream teardown — never
 /// once per row/chunk. A sub-phase that recorded nothing emits no sample (never a
 /// fabricated zero), matching `PhaseTimer`'s "a phase never entered records none"
@@ -130,13 +136,34 @@ mod tests {
 
     #[test]
     fn subphase_values_are_the_bounded_closed_set() {
-        // The value table must stay a closed 5-value set of `stream_*` labels
+        // The value table must stay a closed 6-value set of `stream_*` labels
         // (never a ticket/key/query value) and align 1:1 with the StreamSubPhase
         // variants the core seam records into.
-        assert_eq!(STREAM_SUBPHASES.len(), 5);
+        assert_eq!(STREAM_SUBPHASES.len(), 6);
         for (_, v) in STREAM_SUBPHASES {
             assert!(v.starts_with("stream_"), "{v} must be a stream_* sub-phase");
         }
+        // Each value appears exactly once, and each variant is mapped exactly once
+        // — a copy/paste that mapped two variants to the same label would silently
+        // merge two buckets into one.
+        let mut values: Vec<&str> = STREAM_SUBPHASES.iter().map(|(_, v)| *v).collect();
+        values.sort_unstable();
+        values.dedup();
+        assert_eq!(
+            values.len(),
+            STREAM_SUBPHASES.len(),
+            "duplicate phase value"
+        );
+        // The framing bucket is the one issue #3096 added; assert it explicitly so
+        // a revert that drops it fails here rather than silently restoring the
+        // attribution blind spot.
+        assert!(
+            STREAM_SUBPHASES
+                .iter()
+                .any(|(p, v)| *p == StreamSubPhase::EncodeFraming
+                    && *v == PHASE_STREAM_ENCODE_FRAMING),
+            "the IPC-framing sub-phase must stay in the emitted set (issue #3096)"
+        );
     }
 
     #[test]

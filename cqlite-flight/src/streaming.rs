@@ -419,6 +419,12 @@ pub(crate) fn spawn_streaming(
     // emitter so the sub-phase samples carry the same span/exemplar association as
     // the top-level phase samples.
     let rpc_span = tracing::Span::current();
+    // Issue #3096: the IPC-framing accumulator lives OUT here, not inside the
+    // blocking closure, because the arrow-flight encoder stage runs on the ASYNC
+    // gRPC task that polls the response stream — a different thread, reached by no
+    // thread-local the merge closure installs. Cloned for the framing wrapper
+    // below; the span is cloned for its own teardown emitter.
+    let framing_span = rpc_span.clone();
 
     // Run the CPU-bound merge off the async runtime; it sends batches as it goes.
     // `error_tx` is a clone kept OUTSIDE the (potentially unwound) merge closure so
@@ -507,7 +513,76 @@ pub(crate) fn spawn_streaming(
         Some(handle.abort_handle()),
         Some(stream_cancelled),
     );
-    (encode_do_get(metered, schema_ref, probe), handle)
+    let encoded = encode_do_get(metered, schema_ref, probe);
+    (time_encoder_framing(encoded, framing_span), handle)
+}
+
+/// Wrap the arrow-flight encoder's output stream so its poll time lands in the
+/// `stream_encode_framing` sub-phase (issue #3096).
+///
+/// # The blind spot this closes
+///
+/// `StreamSubPhase::Encode` (`egress_flush.rs`) times ONLY `flush_buffer` — the
+/// Arrow ARRAY BUILD, on the merge-consumer thread. The arrow-flight encoder stage
+/// built in [`encode_do_get`] runs LATER, on the async gRPC task, and does the IPC
+/// framing, the dictionary hydration, and the re-slicing of any batch larger than
+/// the encoder's own target. None of that was inside ANY sub-phase, so a change
+/// aimed at it could not be attributed from in-process timings at all.
+///
+/// # Cost
+///
+/// Two `Instant::now()` per `poll_next` — and ONLY when a meter is installed. With
+/// metrics off (the default, and the state every `perf`-based measurement runs in)
+/// this function returns the stream UNWRAPPED, so the framing path is byte- and
+/// instruction-identical to before: the cost is one `metrics_active()` branch per
+/// RPC, not per poll.
+fn time_encoder_framing(inner: DoGetStream, rpc_span: tracing::Span) -> DoGetStream {
+    if !cqlite_core::observability::metrics_active() {
+        return inner;
+    }
+    let timings = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
+    Box::pin(FramingTimedStream {
+        inner,
+        timings: timings.clone(),
+        // Its OWN emitter, deliberately not the merge closure's: this accumulator
+        // is still being written after that closure has ended (the client may poll
+        // the last frames later), and reusing the merge emitter would either
+        // truncate the framing total or move the merge samples' emission point,
+        // breaking the #2819 roborev-B1 ordering invariant. Only the framing bucket
+        // is ever non-zero here, so this emits exactly one extra sample per RPC.
+        emitter: Some(crate::obs::StreamSubPhaseEmitter::new(rpc_span, timings)),
+    })
+}
+
+/// See [`time_encoder_framing`]. Constructed only when a meter is installed.
+struct FramingTimedStream {
+    inner: DoGetStream,
+    timings: Arc<cqlite_core::observability::StreamSubPhaseTimings>,
+    /// Flushes the framing sample when the response stream is dropped — i.e. after
+    /// the LAST poll, so a mid-stream client disconnect still records what it cost.
+    /// `Option` only so the field is explicitly owned and dropped; never taken.
+    emitter: Option<crate::obs::StreamSubPhaseEmitter>,
+}
+
+impl Stream for FramingTimedStream {
+    type Item = Result<FlightData, Status>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Every field is `Unpin` (a `Pin<Box<dyn Stream>>`, an `Arc`, and an
+        // emitter holding an `Arc` + a `Span`), so projecting through `get_mut` is
+        // sound and needs no pin-projection macro.
+        let this = self.get_mut();
+        let start = std::time::Instant::now();
+        let polled = this.inner.as_mut().poll_next(cx);
+        this.timings.add_nanos(
+            cqlite_core::observability::StreamSubPhase::EncodeFraming,
+            cqlite_core::observability::stream_subphase::elapsed_nanos(start),
+        );
+        polled
+    }
 }
 
 /// Materialize the (bounded) aggregate output and serve it as a stream, unchanged

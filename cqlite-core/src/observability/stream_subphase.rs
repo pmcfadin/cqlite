@@ -55,14 +55,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// One of the five in-`stream` data-plane sub-phases (issue #2819). Which thread
-/// records each is fixed by the pipeline architecture: `ColdFault`/`Decompress`
-/// on the per-SSTable PRODUCER thread(s) (where the page-in + decompress run
-/// synchronously), and `Merge`/`Encode`/`GrpcWrite` all on the MERGE-CONSUMER
-/// `spawn_blocking` thread (`GrpcWrite` is `ChannelSink::emit`, which runs on that
-/// thread, NOT a separate egress thread). The flight side maps these to the
-/// bounded `cqlite.rpc.phase` values `stream_cold_fault` / `stream_decompress` /
-/// `stream_merge` / `stream_encode` / `stream_grpc_write`.
+/// One of the six in-`stream` data-plane sub-phases (issue #2819; `EncodeFraming`
+/// added by issue #3096). Which thread records each is fixed by the pipeline
+/// architecture: `ColdFault`/`Decompress` on the per-SSTable PRODUCER thread(s)
+/// (where the page-in + decompress run synchronously), `Merge`/`Encode`/`GrpcWrite`
+/// all on the MERGE-CONSUMER `spawn_blocking` thread (`GrpcWrite` is
+/// `ChannelSink::emit`, which runs on that thread, NOT a separate egress thread),
+/// and `EncodeFraming` on the ASYNC gRPC task that polls the response stream. The
+/// flight side maps these to the bounded `cqlite.rpc.phase` values
+/// `stream_cold_fault` / `stream_decompress` / `stream_merge` / `stream_encode` /
+/// `stream_encode_framing` / `stream_grpc_write`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamSubPhase {
     /// Synchronous SSTable body-chunk page-in (cold-IO latency).
@@ -71,17 +73,39 @@ pub enum StreamSubPhase {
     Decompress,
     /// k-way merge + LWW/tombstone/TTL reconcile + per-row materialize.
     Merge,
-    /// Arrow `RecordBatch` conversion (encode).
+    /// Arrow `RecordBatch` conversion (encode) — the ARRAY BUILD only.
     Encode,
+    /// Arrow-flight IPC FRAMING of an already-built `RecordBatch`: everything
+    /// `FlightDataEncoderBuilder`'s stream does — dictionary hydration, splitting
+    /// a batch that exceeds the encoder's `GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES`, and
+    /// the IPC serialization into `FlightData` messages (issue #3096).
+    ///
+    /// # Why this is a SEPARATE bucket from [`Self::Encode`]
+    ///
+    /// [`Self::Encode`] wraps only the Arrow array build (`flush_buffer` →
+    /// `rows_to_record_batch`) on the merge-consumer thread. It has never covered
+    /// the encoder stage, which runs LATER and on a DIFFERENT thread (the async
+    /// gRPC task). Any change aimed at the framing stage — the batch-size/encoder
+    /// target alignment, or the dictionary-hydration rebuild — was therefore
+    /// UNFALSIFIABLE from in-process timings alone: the only bucket that could
+    /// have moved does not span the code being changed. This variant closes that
+    /// blind spot.
+    ///
+    /// It measures the framing stage's POLL time, so it also contains the (cheap,
+    /// non-blocking) downstream channel poll that returns `Pending` when the merge
+    /// has not yet produced a batch. It is a server-side CPU bucket in the same
+    /// sense as [`Self::Encode`], not a client-paced one like [`Self::GrpcWrite`].
+    EncodeFraming,
     /// Egress channel `reserve()`/send, including backpressure park/wake.
     GrpcWrite,
 }
 
 /// Per-request accumulator of in-`stream` sub-phase wall time, in nanoseconds.
 ///
-/// Five `AtomicU64` counters so RAII scopes running on the CONCURRENT pipeline
-/// threads (the per-SSTable producer thread(s) and the merge-consumer thread) all
-/// `fetch_add` into the same shared instance lock-free. The sub-phases OVERLAP in
+/// Six `AtomicU64` counters so RAII scopes running on the CONCURRENT pipeline
+/// threads (the per-SSTable producer thread(s), the merge-consumer thread, and —
+/// for [`StreamSubPhase::EncodeFraming`] — the async gRPC task) all `fetch_add`
+/// into the same shared instance lock-free. The sub-phases OVERLAP in
 /// wall-clock (the pipeline is concurrent), so the counters are NOT expected to
 /// sum to the `stream` phase's duration — the load-bearing signal is the
 /// cold−warm delta on the cold-fault counter (issue #2819, amended accounting
@@ -92,6 +116,7 @@ pub struct StreamSubPhaseTimings {
     decompress_nanos: AtomicU64,
     merge_nanos: AtomicU64,
     encode_nanos: AtomicU64,
+    encode_framing_nanos: AtomicU64,
     grpc_write_nanos: AtomicU64,
 }
 
@@ -102,6 +127,7 @@ impl StreamSubPhaseTimings {
             StreamSubPhase::Decompress => &self.decompress_nanos,
             StreamSubPhase::Merge => &self.merge_nanos,
             StreamSubPhase::Encode => &self.encode_nanos,
+            StreamSubPhase::EncodeFraming => &self.encode_framing_nanos,
             StreamSubPhase::GrpcWrite => &self.grpc_write_nanos,
         }
     }

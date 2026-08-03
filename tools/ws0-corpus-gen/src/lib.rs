@@ -41,6 +41,7 @@
 //! LZ4-compressed, which is why this corpus cannot and does not reproduce that
 //! corpus's absolute numbers — see `identity.rs`.
 
+pub mod generate;
 pub mod identity;
 pub mod rows;
 pub mod schema;
