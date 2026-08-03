@@ -549,7 +549,14 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
   # sorts before is reported as harmless, which also documents WHY the 99- prefix is
   # load-bearing and must never be "tidied" to a lower number.
   perf_name_competitors() {
-    local verdict path found=0
+    local scan verdict path found=0
+    # A FAILED scan is reported as a failed scan, never as "no competitors" — the whole
+    # point of this diagnostic is to replace an unknown with a named file, so silently
+    # printing the reassuring line on an unreadable directory would recreate the mystery.
+    if ! scan=$(perf_capability_competing_files); then
+      info "could not scan the sysctl.d directory for competing perf_event_paranoid/kptr_restrict settings — inspect it by hand"
+      return 0
+    fi
     while IFS=' ' read -r verdict path; do
       [ -n "$path" ] || continue
       found=1
@@ -558,7 +565,7 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
         *)        info "competing file: $path also sets perf_event_paranoid/kptr_restrict but sorts BEFORE $PERF_CAPABILITY_DROPIN_BASENAME, so ours wins (this is exactly why the '99-' prefix is load-bearing — never rename the drop-in)" ;;
       esac
     done <<EOF
-$(perf_capability_competing_files)
+$scan
 EOF
     [ "$found" = 1 ] || info "no other file in the sysctl.d directory sets perf_event_paranoid/kptr_restrict"
   }

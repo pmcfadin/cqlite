@@ -1125,7 +1125,8 @@ for _fn in _perf_state_into _perf_accel_token_into; do
 done
 for _fn in perf_capability_token_into perf_capability_proc_read \
            perf_capability_proc_dir_into perf_capability_test_mode \
-           perf_capability_seam_set perf_capability_is_int; do
+           perf_capability_seam_set perf_capability_is_int \
+           perf_capability_test_dir_valid; do
   _t=$(fn_text "$PERF_LIB" "$_fn")
   [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
   perf_path_text="$perf_path_text$_t

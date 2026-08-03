@@ -71,6 +71,43 @@
 # /etc/sysctl.d, mutating the host from a test run. "Hermetic" cannot be a claim that
 # depends on a variable being set: it is enforced here, fail-closed and loudly.
 
+# FAIL-OPEN AUDIT — every path that can reach a POSITIVE verdict, and what validates it
+# (issue #3249 review round 4; four findings in this file were all one defect class:
+# "identity/state unknown => assume the good case"). Keep this list closed: a new
+# positive-verdict path SHALL be added here with its validator, or it is a regression.
+#   token = ok                  both /proc values READ (non-empty) from the resolved dir
+#                               AND both `perf_capability_is_int`-validated AND
+#                               paranoid <= 0 AND kptr == 0. Whitespace is trimmed, never
+#                               TRUNCATED — `0 1` stays malformed -> `unknown`.
+#   verify -> cycles=<n>, rc 0  `perf` present, collection rc 0, a cycles row whose count
+#                               is a positive integer by BOTH awk's `^[0-9]+$` and
+#                               `is_int` + `-le 0`. `<not supported>`/`<not counted>`/
+#                               empty/oversized/malformed all return 1.
+#   state = self-unprivileged   `perf_capability_self_uid_into` succeeded (an `id -u` that
+#                               EXISTS, exits 0, prints a validated non-negative int) AND
+#                               that uid != 0. An unusable `id -u` => identity-unknown, rc 1.
+#   state = dropped:setpriv     numeric uid+gid, both validated ints AND both > 0.
+#   state = dropped:runuser     the same numerics PLUS a `SUDO_USER` the passwd database
+#                               confirms IS that non-zero uid/gid, and whose characters are
+#                               safe for the caller's word-split.
+#   state = dropped:sudo        numeric uid only (sudo's `#<uid>` form) — no name trusted.
+#   env_guard rc 0              production: NO test seam set (paths are hardcoded literals).
+#                               test mode: BOTH seams present, absolute, outside the
+#                               production dirs and outside /etc /proc /sys, and not
+#                               symlinks; plus every reachable sudo/sysctl resolving inside
+#                               an absolute declared shim dir.
+#   dropin_current rc 0         a BYTE-exact compare (trailing newlines included) against
+#                               the generated canonical content.
+# KNOWN RESIDUALS, deliberately not papered over:
+#   * "dropped:<mech>" asserts the mechanism was INVOKED; it cannot prove the kernel
+#     changed uid. Harmless by construction: the caller's verdict is `token = ok` AND the
+#     functional pass, and a box whose /proc says ok IS profileable by an unprivileged
+#     process, so a mislabelled drop cannot manufacture a capability that is absent.
+#   * a test seam with a SYMLINKED ANCESTOR (`/tmp/a -> /etc`, seam `/tmp/a/sysctl.d`)
+#     passes the textual + `[ -L ]` checks; detecting it needs `realpath`/`stat`, i.e. a
+#     fork on the gate's emit path. Bounded: it requires deliberately pointing a TEST-ONLY
+#     variable through a symlink into production.
+#
 # ---- production locations: HARDCODED. Never env-derived outside test mode. ----
 PERF_CAPABILITY_PROC_DIR_DEFAULT='/proc/sys/kernel'
 PERF_CAPABILITY_SYSCTL_DIR_DEFAULT='/etc/sysctl.d'
@@ -90,6 +127,12 @@ perf_capability_seam_set() {
 # configuration surfaces (/proc, /sys, /etc). An unset or production-shaped seam is
 # NOT "use the real thing": in test mode it is a refusal (R4-3). Builtins only — this
 # is reached from the gate's fork-free token path.
+#
+# The final check is that the seam is not ITSELF a symlink: `ln -s /etc/sysctl.d /tmp/x`
+# passes every textual test above and would still land a root `tee` in the production
+# directory. `[ -L ]` is a builtin, so it costs no fork. A symlinked ANCESTOR is not
+# detectable without `realpath`/`stat` — i.e. a fork on the gate's emit path — so that
+# residual is recorded in the fail-open audit rather than papered over.
 perf_capability_test_dir_valid() {
   [ -n "${1:-}" ] || return 1
   case "$1" in /*) ;; *) return 1 ;; esac
@@ -97,7 +140,8 @@ perf_capability_test_dir_valid() {
     "${2:-/dev/null/never}"|"${2:-/dev/null/never}"/*) return 1 ;;
     /proc|/proc/*|/sys|/sys/*|/etc|/etc/*) return 1 ;;
   esac
-  return 0
+  # not a symlink either (see the note above the function)
+  [ ! -L "$1" ]
 }
 
 # perf_capability_test_seams_ok: rc 0 iff test mode has BOTH mandatory seams pointing
@@ -293,7 +337,12 @@ perf_capability_competing_files() {
   local dir base f name
   dir=$(perf_capability_sysctl_dir) || return 1
   base="$PERF_CAPABILITY_DROPIN_BASENAME"
-  [ -d "$dir" ] || return 0
+  # A directory that does not exist genuinely holds no competitor (rc 0, no output). One
+  # that exists but cannot be READ is an UNKNOWN and returns rc 1, so the caller reports a
+  # failed scan instead of the reassuring "no competing file" — this diagnostic exists to
+  # replace an unknown with a named file, so it may not answer an unknown with good news.
+  [ -e "$dir" ] || return 0
+  [ -d "$dir" ] && [ -r "$dir" ] || return 1
   for f in "$dir"/*.conf; do
     [ -f "$f" ] && [ -r "$f" ] || continue
     name="${f##*/}"
@@ -317,15 +366,24 @@ perf_capability_competing_files() {
 # and nothing here is wrapped in `$( )`. This sits in the gate's summary path, which
 # may not grow a process for a diagnostic line. `read` returns non-zero at EOF on a
 # file with no trailing newline yet still assigns, so emptiness — not read's rc — is
-# the failure test.
+# the failure test. It also propagates the test-mode sandbox refusal (R4-3): with no
+# valid seam there is no directory to read, and that is rc 1, never the real /proc.
+#
+# WHITESPACE IS TRIMMED, NEVER TRUNCATED AT (fail-open audit, R4 round). The earlier
+# `${v%%[[:space:]]*}` cut the value at its FIRST space, so a malformed `0 1` became a
+# perfectly capable-looking `0` — an unknown resolving to the good case, in the one
+# function the gate's `perf=` token is computed from. Surrounding whitespace (including a
+# CRLF's `\r`) is stripped; anything interior is left in place so `is_int` rejects it and
+# the token becomes `unknown`. `IFS=` makes that independent of the caller's IFS, and both
+# trims are parameter expansions — no fork on the gate's emit path.
 perf_capability_proc_read() {
   local __pcr_out="$1" __pcr_dir="" __pcr_v=""
-  perf_capability_proc_dir_into __pcr_dir
   eval "$__pcr_out="
   perf_capability_proc_dir_into __pcr_dir || return 1
   [ -r "$__pcr_dir/$2" ] || return 1
-  read -r __pcr_v <"$__pcr_dir/$2" 2>/dev/null
-  __pcr_v="${__pcr_v%%[[:space:]]*}"
+  IFS= read -r __pcr_v <"$__pcr_dir/$2" 2>/dev/null
+  __pcr_v="${__pcr_v#"${__pcr_v%%[![:space:]]*}"}"
+  __pcr_v="${__pcr_v%"${__pcr_v##*[![:space:]]}"}"
   [ -n "$__pcr_v" ] || return 1
   eval "$__pcr_out=\$__pcr_v"
 }
@@ -477,8 +535,11 @@ perf_capability_drop_target_into() {
   else
     __pdt_u=$(id -u nobody 2>/dev/null) || __pdt_u=''
     __pdt_g=$(id -g nobody 2>/dev/null) || __pdt_g=''
+    # gid > 0 as well, matching the SUDO branch above: a target resolving to gid 0 is a
+    # partial drop, and "partially dropped" is not a state this code is allowed to
+    # report as an unprivileged probe (fail-open audit).
     if perf_capability_is_int "$__pdt_u" && perf_capability_is_int "$__pdt_g" \
-       && [ "${__pdt_u:-0}" -gt 0 ]; then
+       && [ "${__pdt_u:-0}" -gt 0 ] && [ "${__pdt_g:-0}" -gt 0 ]; then
       __pdt_n=nobody
     else
       __pdt_u=''; __pdt_g=''; __pdt_n=''

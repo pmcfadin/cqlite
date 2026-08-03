@@ -95,6 +95,21 @@ check_token garbage 0 unknown
 check_token '1abc' 0 unknown
 check_token 99999999999999999999999 0 unknown
 check_token -1 '0x0' unknown
+# ...and a value with INTERIOR whitespace must stay malformed. The read used to cut the
+# value at its first space (`${v%%[[:space:]]*}`), so `0 1` became a perfectly
+# capable-looking `0` — an unknown resolving to the GOOD case in the one function the
+# gate's `perf=` token comes from (fail-open audit, #3249 review round 4). Surrounding
+# whitespace is still trimmed, so a normal `-1\n` (or a CRLF file) reads fine.
+check_token '0 1' 0 unknown
+check_token '-1 junk' 0 unknown
+check_token 0 '0 1' unknown
+check_token '  -1  ' 0 ok
+printf -- '-1\r\n' >"$perfproc/perf_event_paranoid"; printf '0\r\n' >"$perfproc/kptr_restrict"
+if [ "$(CQLITE_PERF_PROC_DIR="$perfproc" bash "$PERFLIB" --token)" = ok ]; then
+  ok "perf-capability: a CRLF /proc value still reads as ok (surrounding whitespace trimmed, not truncated)"
+else
+  bad "perf-capability: a CRLF /proc value was misread"
+fi
 # ...and that rejection must be SILENT: this runs inside the gate's summary emit,
 # where a stray stderr line lands in the gate's own output.
 noise=$(printf '1abc\n' >"$perfproc/perf_event_paranoid"; printf '0\n' >"$perfproc/kptr_restrict"
@@ -235,19 +250,32 @@ else
 fi
 # A seam pointing AT production (or anywhere under /etc, /proc, /sys) is the same hole
 # wearing a seam, and a RELATIVE path is not a sandbox either.
-for badseam in /etc/sysctl.d /etc/sysctl.d/sub /etc /proc /proc/sys/kernel /sys relative/dir; do
-  if env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$seamed_proc" CQLITE_PERF_SYSCTL_DIR="$badseam" \
-       bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" >/dev/null 2>&1; then
-    bad "perf-capability: test mode ACCEPTED a production/relative sysctl seam '$badseam'"
-    badseam_fail=1
-  fi
-  if env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$seamed_d" CQLITE_PERF_PROC_DIR="$badseam" \
-       bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" >/dev/null 2>&1; then
-    bad "perf-capability: test mode ACCEPTED a production/relative proc seam '$badseam'"
-    badseam_fail=1
-  fi
+# Each rejection is asserted BY ITS REASON, not merely by a non-zero rc: this guard has a
+# second refusal (a real sudo/sysctl on PATH) that would otherwise satisfy an rc-only
+# check and let a seam-validation regression pass unnoticed.
+guard_rejects_seam() { # guard_rejects_seam <which:PROC|SYSCTL> <proc-seam> <sysctl-seam>
+  local out
+  out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$realpriv" \
+          CQLITE_PERF_PROC_DIR="$2" CQLITE_PERF_SYSCTL_DIR="$3" \
+          bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1) && return 1
+  printf '%s' "$out" | grep -q "NON-PRODUCTION CQLITE_PERF_${1}_DIR"
+}
+for badseam in /etc/sysctl.d /etc/sysctl.d/sub /etc /proc /proc/sys/kernel /sys relative/dir ''; do
+  guard_rejects_seam SYSCTL "$seamed_proc" "$badseam" || {
+    bad "perf-capability: test mode did not reject the sysctl seam '$badseam' as non-production"; badseam_fail=1; }
+  guard_rejects_seam PROC "$badseam" "$seamed_d" || {
+    bad "perf-capability: test mode did not reject the proc seam '$badseam' as non-production"; badseam_fail=1; }
 done
-[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects a production-shaped or relative seam (/etc*, /proc*, /sys*, relative) on BOTH sandbox dirs"
+# ...and a seam that is a SYMLINK to production passes every TEXTUAL check while still
+# landing a root `tee` in the real directory, so the seam itself may not be a symlink
+# (fail-open audit, #3249 review round 4).
+symseam="$tmp/symlink-to-production"; rm -f "$symseam"; ln -s /etc/sysctl.d "$symseam"
+symproc="$tmp/symlink-to-proc"; rm -f "$symproc"; ln -s /proc/sys/kernel "$symproc"
+guard_rejects_seam SYSCTL "$seamed_proc" "$symseam" || {
+  bad "perf-capability: test mode ACCEPTED a sysctl seam that is a SYMLINK to /etc/sysctl.d"; badseam_fail=1; }
+guard_rejects_seam PROC "$symproc" "$seamed_d" || {
+  bad "perf-capability: test mode ACCEPTED a proc seam that is a SYMLINK to /proc/sys/kernel"; badseam_fail=1; }
+[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects an empty/relative/production-shaped/SYMLINKED seam on BOTH sandbox dirs, naming the offending seam"
 # ...and the refusal reaches the RESOLVERS, not only the guard: an unsandboxed test mode
 # must not be able to name a production path at all (this is what the `tee` would use).
 noseam_path=$(env -u CQLITE_PERF_SYSCTL_DIR CQLITE_PERF_TEST_MODE=1 bash "$PERFLIB" --drop-in-path 2>/dev/null)
@@ -445,6 +473,20 @@ if [ -z "$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$tmp/perf-nocomp.d" \
 else
   bad "perf-capability: an empty sysctl.d dir produced competitor output"
 fi
+# ...and an UNREADABLE directory is an UNKNOWN (rc 1), never "no competing file": this
+# diagnostic exists to replace an unknown with a named file, so answering an unknown with
+# the reassuring line would recreate the mystery it was written to end.
+unreadable_d="$tmp/perf-unreadable.d"; mkdir -p "$unreadable_d"; chmod 000 "$unreadable_d"
+if [ -r "$unreadable_d" ]; then
+  # real root ignores the mode bits; the property under test is unobservable here
+  ok "perf-capability: (skipped under real root) unreadable sysctl.d dir — mode bits do not apply"
+elif CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$unreadable_d" \
+       bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" >/dev/null 2>&1; then
+  bad "perf-capability: an UNREADABLE sysctl.d dir reported success (an unknown became 'no competitor')"
+else
+  ok "perf-capability: an UNREADABLE sysctl.d directory fails the scan (rc 1) instead of claiming no competitor"
+fi
+chmod 755 "$unreadable_d"
 
 # 1e. THE IDENTITY DIMENSION, at the helper level (issue #3249 review R4-1/R4-2). Every
 #     assert here is the same shape: an UNKNOWN or UNVERIFIABLE identity must NOT resolve
