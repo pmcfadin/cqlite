@@ -4,9 +4,14 @@
 //! Two properties this module exists to hold, both of them earned:
 //!
 //! 1. **A manifest that is present but unreadable must never degrade into "assert
-//!    off"** (rust-reviewer B1). That is exactly how a truncated scan measures as a
+//!    off"** (rust-reviewer B1) — nor into "assert against a DIFFERENT manifest"
+//!    (roborev job 27 B1). That is exactly how a truncated scan measures as a
 //!    PASS: the guard that catches a `#3124`-class producer panic (short row count on
-//!    a clean end-of-stream) is the only signal there is.
+//!    a clean end-of-stream) is the only signal there is. Candidate presence is
+//!    therefore OBSERVED with `symlink_metadata` (`locate_manifest`), because
+//!    `Path::exists()` reports an unreadable path — a broken symlink, an untraversable
+//!    parent — as absent, and "absent" is the one state that legitimately falls through
+//!    to the next candidate.
 //! 2. **Partial verification must not read as full verification** (roborev #3234 L3).
 //!    The cross-check block used to be validated with a `match` whose unmatched arms
 //!    fell through, so a `row_count_cross_check` object with a missing or non-integer
@@ -14,6 +19,13 @@
 //!    Now: if the object exists, ALL FOUR of its counts must be unsigned integers,
 //!    both pairs must agree, and both pairs must equal the corresponding
 //!    `rows_per_partition` total.
+//! 3. **The manifest's `tables[]` record documents the WORKLOAD, not just the directory,
+//!    and both are enforced** (roborev job 27 B2). `sstable_count` +
+//!    `sstable_generations` are read here and compared against the observed descriptors
+//!    in `scope::resolve` before anything is scanned: an extra generation carrying the
+//!    same logical rows leaves the row count identical while changing the merge workload
+//!    and the storage route the AC3 figure is attributed to, so the row-count assert
+//!    cannot see it.
 
 use std::path::{Path, PathBuf};
 
@@ -73,6 +85,42 @@ impl RowsAssert {
 pub struct ManifestScope {
     pub manifest: PathBuf,
     pub sstable_dir_rel: String,
+    /// The generation set that directory is documented to hold, compared against the
+    /// observed descriptors BEFORE anything is scanned (roborev job 27 B2).
+    pub expected: ExpectedGenerations,
+}
+
+/// The generation set a `tables[]` record DOCUMENTS for its directory (roborev job 27 B2).
+///
+/// The reader used to ignore `sstable_count`/`sstable_generations` entirely, and that is
+/// the sharpest form of "the measurement describes something the manifest does not":
+/// adding a generation that carries the SAME logical rows leaves the reconciled row count
+/// IDENTICAL — so the row-count assert stays green — while the **generation count selects
+/// the storage route** (`generations > 1 && schema` picks
+/// `generation_merge::stream_generations_for_read`), which is exactly what an AC3
+/// throughput figure is attributed to. The harness would print `RESULT: PASS` for a corpus
+/// its own authority no longer describes.
+///
+/// Both fields are REQUIRED of a `tables[]` record, for the same reason the record's
+/// `sstable_dir` is: a record that scopes the measurement but does not document the
+/// workload inside that scope cannot gate it, and an optional gate is the "partial
+/// verification reading as full verification" shape this module exists to prevent. A
+/// hand-written minimal manifest that cannot supply them simply carries no `tables` array
+/// (the sole-directory resolution in `scope::resolve` then applies).
+pub struct ExpectedGenerations {
+    /// `tables[].sstable_count` — the number of `*-Data.db` generations.
+    pub count: usize,
+    /// `tables[].sstable_generations`, sorted ascending and verified duplicate-free: the
+    /// EXACT identifier set, so swapping one generation for another (which preserves the
+    /// count) is caught too.
+    pub ids: Vec<u64>,
+}
+
+/// A `tables[]` record's two authoritative statements about the bytes to be measured:
+/// WHICH directory, and WHICH generations inside it.
+struct DocumentedTable {
+    sstable_dir_rel: String,
+    expected: ExpectedGenerations,
 }
 
 /// Candidate manifests, most specific first: the corpus's own manifest (written by
@@ -144,11 +192,10 @@ fn validated_sstable_dir(
 /// Read the authoritative row count (and the documented ingest scope) out of a #3234
 /// corpus manifest.
 ///
-/// Returns `(keyspace, table, rows, documented_sstable_dir)`. Every failure is an
-/// `Err`.
+/// Returns `(keyspace, table, rows, documented_table)`. Every failure is an `Err`.
 fn read_manifest(
     path: &Path,
-) -> std::result::Result<(String, String, u64, Option<String>), String> {
+) -> std::result::Result<(String, String, u64, Option<DocumentedTable>), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let json: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("{}: not valid JSON: {e}", path.display()))?;
@@ -199,7 +246,7 @@ fn read_manifest(
     }
 
     check_cross_check(&json, path, rows, &total)?;
-    let documented = documented_sstable_dir(&json, path, &keyspace, &table)?;
+    let documented = documented_table(&json, path, &keyspace, &table)?;
     Ok((keyspace, table, rows, documented))
 }
 
@@ -277,16 +324,91 @@ fn check_cross_check(
     Ok(())
 }
 
-/// The `tables[]` entry for this manifest's own table, and the corpus-relative
-/// directory it documents. `None` only when the manifest carries no `tables` array at
-/// all (a hand-written minimal manifest); a `tables` array that exists must describe
-/// this table, and must do so completely.
-fn documented_sstable_dir(
+/// The generation set a `tables[]` record documents, parsed fail-closed (roborev job 27
+/// B2). Both fields are required; see [`ExpectedGenerations`] for why an optional one
+/// would be no gate at all.
+fn expected_generations(
+    entry: &serde_json::Value,
+    path: &Path,
+    table: &str,
+) -> std::result::Result<ExpectedGenerations, String> {
+    let bad = |why: String| {
+        format!(
+            "{}: `tables[]` entry for `{table}` {why}. That record documents the bytes this \
+             measurement runs on, so it must state BOTH `sstable_count` (an unsigned integer >= \
+             1) and `sstable_generations` (exactly that many distinct unsigned-integer \
+             generation ids). The generation COUNT selects the storage route (`generations > 1 && \
+             schema` => `generation_merge::stream_generations_for_read`), which is what an AC3 \
+             figure is attributed to — and an extra generation carrying the SAME logical rows \
+             changes the measured merge workload while leaving the row count identical, so the \
+             row-count assert cannot see it.",
+            path.display()
+        )
+    };
+    let count = match entry.get("sstable_count") {
+        None => return Err(bad("has no `sstable_count`".to_string())),
+        Some(v) => v.as_u64().ok_or_else(|| {
+            bad(format!(
+                "has `sstable_count` = {v}, not an unsigned integer"
+            ))
+        })?,
+    };
+    if count == 0 {
+        return Err(bad(
+            "has `sstable_count` = 0 — a directory documented to hold no generation cannot be \
+             the corpus of a measurement"
+                .to_string(),
+        ));
+    }
+    let count = usize::try_from(count).map_err(|_| {
+        bad(format!(
+            "has `sstable_count` = {count}, which does not fit in usize"
+        ))
+    })?;
+
+    let gens = match entry.get("sstable_generations") {
+        None => return Err(bad("has no `sstable_generations`".to_string())),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| bad(format!("has `sstable_generations` = {v}, not an array")))?,
+    };
+    let mut ids: Vec<u64> = Vec::with_capacity(gens.len());
+    for (i, v) in gens.iter().enumerate() {
+        ids.push(v.as_u64().ok_or_else(|| {
+            bad(format!(
+                "has `sstable_generations[{i}]` = {v}, not an unsigned integer"
+            ))
+        })?);
+    }
+    if ids.len() != count {
+        return Err(bad(format!(
+            "has `sstable_count` = {count} but {} `sstable_generations` entr(y/ies) — a record \
+             that disagrees with ITSELF about how many generations it documents cannot gate \
+             what is on disk",
+            ids.len()
+        )));
+    }
+    ids.sort_unstable();
+    if let Some(dup) = ids.windows(2).find(|w| w[0] == w[1]) {
+        return Err(bad(format!(
+            "lists generation {} TWICE in `sstable_generations` — a multiset is not a generation \
+             set, and one duplicate hides one missing generation from the comparison",
+            dup[0]
+        )));
+    }
+    Ok(ExpectedGenerations { count, ids })
+}
+
+/// The `tables[]` entry for this manifest's own table: the corpus-relative directory it
+/// documents AND the generation set inside it. `None` only when the manifest carries no
+/// `tables` array at all (a hand-written minimal manifest); a `tables` array that exists
+/// must describe this table, and must do so completely.
+fn documented_table(
     json: &serde_json::Value,
     path: &Path,
     keyspace: &str,
     table: &str,
-) -> std::result::Result<Option<String>, String> {
+) -> std::result::Result<Option<DocumentedTable>, String> {
     let Some(v) = json.get("tables") else {
         return Ok(None);
     };
@@ -347,7 +469,90 @@ fn documented_sstable_dir(
                 path.display()
             )
         })?;
-    Ok(Some(validated_sstable_dir(rel, keyspace, table, path)?))
+    // The directory is validated first, so a record naming an impossible path is
+    // diagnosed as that rather than as a missing generation field.
+    let sstable_dir_rel = validated_sstable_dir(rel, keyspace, table, path)?;
+    Ok(Some(DocumentedTable {
+        sstable_dir_rel,
+        expected: expected_generations(entry, path, table)?,
+    }))
+}
+
+/// The FIRST candidate manifest that is PRESENT, observed with `symlink_metadata` —
+/// never `Path::exists()` (roborev job 27 B1).
+///
+/// `Path::exists()` answers `false` for a path it cannot look at, not just for one that is
+/// absent: a broken symlink, a component that is not a directory, a parent directory it
+/// may not traverse. Every one of those used to read as "this candidate is absent", so a
+/// **present-but-unreadable corpus-local manifest silently degraded to the committed
+/// fallback** — and the committed fallback describes a DIFFERENT corpus, so the harness
+/// would then verify a row count against a manifest that does not describe the bytes it
+/// scanned. An authority that cannot be read is a refusal, never a reason to pick a
+/// different authority.
+///
+/// So exactly ONE outcome means "absent": `ErrorKind::NotFound`. Every other `lstat`
+/// error, and every entry that is not a REGULAR FILE (a symlink — including a dangling
+/// one — a directory, a fifo), is an authoritative manifest failure. A symlink is refused
+/// rather than followed for the same reason `scope.rs` requires real directories: the file
+/// that decides which numbers are authoritative must be the real thing, not a redirection.
+fn locate_manifest(candidates: &[PathBuf]) -> std::result::Result<&PathBuf, String> {
+    let mut absent: Vec<String> = Vec::new();
+    for path in candidates {
+        let md = match std::fs::symlink_metadata(path) {
+            Ok(md) => md,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                absent.push(format!("    {} (absent)", path.display()));
+                continue;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "{}: cannot determine whether this manifest candidate exists (lstat failed: \
+                     {e}). A candidate that cannot be OBSERVED must not be treated as absent: \
+                     skipping it would fall through to another manifest, which describes a \
+                     DIFFERENT corpus, and the row count would then be verified against bytes it \
+                     does not describe.\n  remedy: fix the path/permissions, or pass --manifest \
+                     PATH explicitly.",
+                    path.display()
+                ))
+            }
+        };
+        if md.file_type().is_file() {
+            return Ok(path);
+        }
+        let what = if md.file_type().is_symlink() {
+            let target = std::fs::read_link(path)
+                .map(|t| format!(" -> {}", t.display()))
+                .unwrap_or_default();
+            let dangling = if std::fs::metadata(path).is_err() {
+                ", which does not resolve (DANGLING)"
+            } else {
+                ""
+            };
+            format!("a symbolic link{target}{dangling}")
+        } else if md.file_type().is_dir() {
+            "a directory".to_string()
+        } else {
+            format!(
+                "neither a regular file nor a directory ({:?})",
+                md.file_type()
+            )
+        };
+        return Err(format!(
+            "{}: this manifest candidate is PRESENT but is not a regular file — it is {what}. \
+             `Path::exists()` reports such a path as absent, which used to fall through to the \
+             next candidate: a manifest describing a DIFFERENT corpus would then have verified \
+             this scan. An authority that cannot be read is a refusal.\n  remedy: replace it with \
+             the real manifest file, or pass --manifest PATH explicitly.",
+            path.display()
+        ));
+    }
+    Err(format!(
+        "no #3234 corpus manifest found, so the authoritative row count is unknown and a \
+         truncated scan could not be detected.\n  looked at:\n{}\n  \
+         remedy: pass --manifest PATH, or --expect-rows N, or --no-expect-rows to measure \
+         without the truncation guard (reported loudly).",
+        absent.join("\n")
+    ))
 }
 
 /// Resolve the row-count assert and the documented ingest scope, fail-closed.
@@ -366,21 +571,12 @@ pub fn resolve_rows_assert(
         Some(p) => vec![p.clone()],
         None => manifest_candidates(&args.corpus),
     };
-    // The FIRST candidate that exists is authoritative. A present-but-broken
-    // manifest is an error, never a reason to fall through to another one.
-    let found = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
-        format!(
-            "no #3234 corpus manifest found, so the authoritative row count is unknown and a \
-             truncated scan could not be detected.\n  looked at:\n{}\n  \
-             remedy: pass --manifest PATH, or --expect-rows N, or --no-expect-rows to measure \
-             without the truncation guard (reported loudly).",
-            candidates
-                .iter()
-                .map(|p| format!("    {}", p.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    })?;
+    // The FIRST candidate that is PRESENT is authoritative, and "present" is OBSERVED
+    // (`symlink_metadata`), not guessed at with `Path::exists()` (roborev job 27 B1). A
+    // present-but-unreadable manifest is an error, never a reason to fall through to
+    // another one — that fall-through is how a manifest describing a different corpus
+    // ends up verifying this scan.
+    let found = locate_manifest(&candidates)?;
 
     let (ks, tbl, rows, documented) = read_manifest(found)?;
     if ks != args.keyspace || tbl != args.table {
@@ -395,9 +591,10 @@ pub fn resolve_rows_assert(
     }
     Ok((
         RowsAssert::Manifest(rows, format!("{} rows_per_partition.rows", found.display())),
-        documented.map(|rel| ManifestScope {
+        documented.map(|d| ManifestScope {
             manifest: found.clone(),
-            sstable_dir_rel: rel,
+            sstable_dir_rel: d.sstable_dir_rel,
+            expected: d.expected,
         }),
     ))
 }

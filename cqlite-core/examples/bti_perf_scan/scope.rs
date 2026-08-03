@@ -41,6 +41,22 @@
 //! now goes through `ingest_with_selection(.., TableDirSelection::Exact(&[dir]))`, which
 //! compares complete path components, and `main.rs` reports the generation count
 //! OBSERVED in what was actually selected rather than in what was intended.
+//!
+//! Two further properties, both earned in roborev job 27:
+//!
+//! - **The manifest documents WHICH generations, and that is compared before scanning**
+//!   (B2, `verify_documented_generations`). Pinning the DIRECTORY is not pinning the
+//!   WORKLOAD: another generation dropped into the documented directory carrying the same
+//!   logical rows leaves the reconciled row count identical while changing the merge
+//!   workload and the storage route the AC3 figure is attributed to. So
+//!   `tables[].sstable_count` and `tables[].sstable_generations` are compared against the
+//!   observed `*-Data.db` descriptors — count AND exact identifier set — and a mismatch is
+//!   a refusal naming both.
+//! - **Both branches require REAL directories inside the corpus root** (B3,
+//!   `real_dir_beneath`). The documented branch accepted `dir.is_dir()`, which FOLLOWS
+//!   symlinks, while the fallback branch lstat'ed its table directory: inconsistent
+//!   hardening, in favour of the branch a manifest controls. A correctly shaped
+//!   `sstable_dir` could therefore redirect ingestion outside the corpus entirely.
 
 use super::manifest::ManifestScope;
 use std::path::{Path, PathBuf};
@@ -175,9 +191,16 @@ fn matching_dirs(ks_dir: &Path, table: &str) -> std::result::Result<Vec<PathBuf>
 /// non-regular entry is NOT a generation, and an entry whose type cannot be OBSERVED at
 /// all is an error rather than one silently left out of the count.
 pub fn count_generations(dir: &Path) -> std::result::Result<usize, String> {
+    Ok(data_db_entries(dir)?.len())
+}
+
+/// The `*-Data.db` regular-file entry NAMES in one directory — the descriptors the
+/// generation count and the generation-identifier set are both derived from, so the two
+/// can never be read from different observations of the directory.
+fn data_db_entries(dir: &Path) -> std::result::Result<Vec<String>, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot read the corpus directory {}: {e}", dir.display()))?;
-    let mut count = 0usize;
+    let mut out: Vec<String> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| {
             format!(
@@ -192,10 +215,208 @@ pub fn count_generations(dir: &Path) -> std::result::Result<usize, String> {
             continue;
         }
         if entry_file_type(&entry.path(), dir)?.is_file() {
-            count += 1;
+            out.push(name);
         }
     }
-    Ok(count)
+    out.sort();
+    Ok(out)
+}
+
+/// The generation identifier in a Cassandra 5.0 descriptor
+/// `<version>-<generation>-<format>-Data.db` (e.g. `da-7-bti-Data.db` => 7).
+///
+/// Exactly four `-`-separated components, and the generation is all ASCII digits: this is
+/// the same rule `test-data/scripts/write-perf-corpus-bti-manifest.py` derives
+/// `sstable_generations` with, so the manifest and this comparison cannot disagree about
+/// what a generation identifier is. `None` (an unrecognised descriptor) is an error at the
+/// call site, never a generation quietly left out of the set.
+fn generation_of(name: &str) -> Option<u64> {
+    let parts: Vec<&str> = name.split('-').collect();
+    if parts.len() != 4 || parts[3] != "Data.db" {
+        return None;
+    }
+    if parts[1].is_empty() || !parts[1].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    parts[1].parse::<u64>().ok()
+}
+
+/// The generation identifiers OBSERVED in `names`, sorted. An unrecognised descriptor is a
+/// refusal: the manifest states WHICH generations it documents, so a generation whose
+/// identifier cannot be read cannot be compared against that statement.
+fn observed_generation_ids(dir: &Path, names: &[String]) -> std::result::Result<Vec<u64>, String> {
+    let mut ids: Vec<u64> = Vec::with_capacity(names.len());
+    let mut unparsed: Vec<&str> = Vec::new();
+    for name in names {
+        match generation_of(name) {
+            Some(g) => ids.push(g),
+            None => unparsed.push(name.as_str()),
+        }
+    }
+    if !unparsed.is_empty() {
+        return Err(format!(
+            "{}: {} `*-Data.db` file(s) do not carry a readable generation identifier \
+             (`<version>-<generation>-<format>-Data.db`): {}. The manifest documents WHICH \
+             generations this directory holds, so a descriptor whose generation cannot be read \
+             cannot be checked against it — and the generation count selects the storage route \
+             the measurement is attributed to. Refusing.",
+            dir.display(),
+            unparsed.len(),
+            unparsed.join(", ")
+        ));
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+fn id_list(ids: &[u64]) -> String {
+    ids.iter()
+        .map(|g| g.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The documented generation set vs the observed one, BEFORE anything is scanned (roborev
+/// job 27 B2).
+///
+/// This is the one workload change the row-count assert is BLIND to, and it is the sharpest
+/// case of the whole class: adding a generation that carries the SAME logical rows leaves
+/// reconciliation yielding the identical count, so `rows_scanned` matches the manifest and
+/// the harness exits 0 — while the generation count has changed the measured merge workload
+/// AND the storage route (`generations > 1 && schema` selects
+/// `generation_merge::stream_generations_for_read`), which is exactly what the published AC3
+/// figure is attributed to. Both the COUNT and the exact identifier SET are compared, so
+/// swapping one generation for another (count preserved) is caught too.
+fn verify_documented_generations(
+    dir: &Path,
+    scope: &ManifestScope,
+    names: &[String],
+) -> std::result::Result<(), String> {
+    let observed = observed_generation_ids(dir, names)?;
+    let expected = &scope.expected;
+    let why = "The generation count selects the storage route \
+               (`generations > 1 && schema` => `generation_merge::stream_generations_for_read`) \
+               and the merge workload the throughput figure describes, and a generation holding \
+               the SAME logical rows leaves the row count unchanged — so the row-count assert \
+               cannot see this. Refusing.\n  remedy: measure the corpus this manifest describes, \
+               or pass --manifest PATH for the corpus you are actually scanning.";
+    if observed.len() != expected.count {
+        return Err(format!(
+            "{} documents `tables[].sstable_count` = {} generation(s) in {}, but {} \
+             `*-Data.db` generation(s) are present there.\n  documented generations: [{}]\n  \
+             observed generations:   [{}]\n  {why}",
+            scope.manifest.display(),
+            expected.count,
+            dir.display(),
+            observed.len(),
+            id_list(&expected.ids),
+            id_list(&observed)
+        ));
+    }
+    if observed != expected.ids {
+        return Err(format!(
+            "{} documents generations [{}] in {}, but the generations present there are [{}] — \
+             the same COUNT, a different SET, so this is a different set of bytes.\n  {why}",
+            scope.manifest.display(),
+            id_list(&expected.ids),
+            dir.display(),
+            id_list(&observed)
+        ));
+    }
+    Ok(())
+}
+
+/// A path under the corpus root whose every component BELOW that root is a REAL directory,
+/// and whose canonical form stays beneath the canonical corpus root (roborev job 27 B3).
+///
+/// The documented-scope branch used to accept `dir.is_dir()`, which FOLLOWS symlinks, while
+/// the fallback branch lstat'ed its table directory and refused symlinks — inconsistent
+/// hardening, in favour of the branch a MANIFEST controls. So a correctly shaped
+/// `sstable_dir` (right keyspace, right `<table>-<32 hex>` name) that happened to be a
+/// symlink redirected ingestion — and therefore the measurement — anywhere on the
+/// filesystem, and exact ingestion canonicalizes through symlinks too, so nothing
+/// downstream noticed. Both branches now go through this one function, so they cannot drift
+/// apart again.
+///
+/// Only components BELOW the corpus root are checked: the root itself is operator-supplied
+/// (`--corpus`), and requiring IT to be symlink-free would reject ordinary layouts like
+/// `/data -> /mnt/data`. Its symlinks are resolved once, by canonicalizing it, and the
+/// containment test is done in canonical space.
+fn real_dir_beneath(
+    corpus: &Path,
+    rel: &[&str],
+    documented_by: &str,
+) -> std::result::Result<PathBuf, String> {
+    let hardening = "Every component below the corpus root must be a REAL directory (lstat, no \
+                     symlink) and must stay beneath that root: a symlinked component redirects \
+                     ingestion — and the measurement — outside the corpus, so the figure would \
+                     describe bytes the corpus does not contain.\n  remedy: regenerate the \
+                     corpus, or pass --manifest PATH for the corpus you are actually scanning.";
+    let canonical_root = corpus.canonicalize().map_err(|e| {
+        format!(
+            "cannot resolve the corpus root {} ({e}), so no path can be proven to stay inside it.",
+            corpus.display()
+        )
+    })?;
+    let mut path = corpus.to_path_buf();
+    for component in rel {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(md) if md.is_dir() => {}
+            Ok(md) => {
+                let what = if md.file_type().is_symlink() {
+                    let target = std::fs::read_link(&path)
+                        .map(|t| format!(" -> {}", t.display()))
+                        .unwrap_or_default();
+                    format!("a symbolic link{target}")
+                } else if md.is_file() {
+                    "a regular file".to_string()
+                } else {
+                    format!("{:?}", md.file_type())
+                };
+                return Err(format!(
+                    "{documented_by}, but {} is not a directory — it is {what}.\n  {hardening}",
+                    path.display()
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "{documented_by}, but {} is not a directory: it does not exist. The manifest \
+                     describes a corpus that is not here, so its row count cannot verify a scan \
+                     of whatever is.\n  remedy: regenerate the corpus, or pass --manifest PATH \
+                     for the corpus you are actually scanning.",
+                    path.display()
+                ))
+            }
+            Err(e) => {
+                return Err(format!(
+                    "{documented_by}, but what {} is cannot be OBSERVED (lstat failed: {e}). A \
+                     component that cannot be classified is not one this run can measure \
+                     through.\n  {hardening}",
+                    path.display()
+                ))
+            }
+        }
+    }
+    // Belt and braces: with no symlinked component below the root this cannot fail, and it
+    // is asserted anyway because it is the property that actually matters.
+    let canonical = path.canonicalize().map_err(|e| {
+        format!(
+            "{documented_by}, but {} cannot be resolved ({e}), so it cannot be proven to be \
+             inside the corpus root.\n  {hardening}",
+            path.display()
+        )
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!(
+            "{documented_by}, but {} resolves to {}, which is OUTSIDE the corpus root {}.\n  \
+             {hardening}",
+            path.display(),
+            canonical.display(),
+            canonical_root.display()
+        ));
+    }
+    Ok(path)
 }
 
 /// Resolve the one directory this run may ingest. `Err(message)` => exit `OPEN_FAILED`
@@ -211,18 +432,19 @@ pub fn resolve(
 
     let (dir, provenance) = match documented {
         Some(m) => {
-            let dir = corpus.join(&m.sstable_dir_rel);
-            if !dir.is_dir() {
-                return Err(format!(
-                    "{} documents `tables[].sstable_dir` = {}, but {} is not a directory. The \
-                     manifest describes a corpus that is not here, so its row count cannot \
-                     verify a scan of whatever is.\n  remedy: regenerate the corpus, or pass \
-                     --manifest PATH for the corpus you are actually scanning.",
+            // REAL directory components only, and the result must stay beneath the corpus
+            // root (roborev job 27 B3): `is_dir()` follows symlinks, so a correctly shaped
+            // `sstable_dir` could point the measurement outside the corpus entirely.
+            let rel: Vec<&str> = m.sstable_dir_rel.split('/').collect();
+            let dir = real_dir_beneath(
+                corpus,
+                &rel,
+                &format!(
+                    "{} documents `tables[].sstable_dir` = {}",
                     m.manifest.display(),
-                    m.sstable_dir_rel,
-                    dir.display()
-                ));
-            }
+                    m.sstable_dir_rel
+                ),
+            )?;
             let provenance = format!(
                 "{} tables[].sstable_dir = {} (EXACT: anything else under {} is not ingested)",
                 m.manifest.display(),
@@ -232,7 +454,20 @@ pub fn resolve(
             (dir, provenance)
         }
         None => {
-            let mut found = matching_dirs(&ks_dir, table)?;
+            // The keyspace path is reached under the SAME rule as the documented branch
+            // (roborev job 27 B3). The fallback used to lstat only the TABLE directory, so
+            // a symlinked `sstables` or `sstables/<keyspace>` still redirected the scan out
+            // of the corpus: the two branches must be equally strict, and now share the
+            // one function that makes them so.
+            let ks_real = real_dir_beneath(
+                corpus,
+                &["sstables", keyspace],
+                &format!(
+                    "this run scans {keyspace}.{table} under the corpus root {}",
+                    corpus.display()
+                ),
+            )?;
+            let mut found = matching_dirs(&ks_real, table)?;
             match found.len() {
                 0 => {
                     return Err(format!(
@@ -241,7 +476,28 @@ pub fn resolve(
                     ))
                 }
                 1 => {
-                    let dir = found.remove(0);
+                    let selected = found.remove(0);
+                    let name = selected
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .ok_or_else(|| {
+                            format!(
+                                "the sole `{table}-<uuid>` directory under {} has no readable \
+                                 final path component",
+                                ks_dir.display()
+                            )
+                        })?
+                        .to_string();
+                    // Same containment rule as the documented branch, on the same path.
+                    let dir = real_dir_beneath(
+                        corpus,
+                        &["sstables", keyspace, &name],
+                        &format!(
+                            "this run resolved the sole `{table}-<uuid>` directory {name} under \
+                             the corpus root {}",
+                            corpus.display()
+                        ),
+                    )?;
                     let provenance = format!(
                         "the sole `{table}-<uuid>` directory under {} (this manifest documents \
                          no sstable_dir)",
@@ -273,7 +529,15 @@ pub fn resolve(
     if dir.file_name().is_none() {
         return Err(format!("{} has no final path component", dir.display()));
     }
-    let generations = count_generations(&dir)?;
+    // ONE observation of the directory, used for both the count and the identifier set.
+    let names = data_db_entries(&dir)?;
+    let generations = names.len();
+    // The manifest documents WHICH generations are in there, so that is checked BEFORE a
+    // scan spends minutes measuring a workload the authority does not describe (roborev
+    // job 27 B2).
+    if let Some(m) = documented {
+        verify_documented_generations(&dir, m, &names)?;
+    }
     Ok(IngestScope {
         data_dir,
         dir,
