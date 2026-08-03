@@ -35,8 +35,9 @@
 # BPF map creation — bpftrace/bcc collectors still need sudo (#3217 finding).
 #
 # Sourceable AND executable. Sourcing has NO side effects: this file only defines
-# `perf_capability_*` functions (nothing runs, no shell options are changed, no
-# variables outside that namespace are touched). Every function is `set -u` safe.
+# `perf_capability_*` functions plus the three `PERF_CAPABILITY_*` path constants
+# (nothing runs, no shell options are changed, no variables outside those namespaces
+# are touched). Every function is `set -u` safe.
 #
 # Usage (executed):
 #   bash scripts/perf-capability.sh --token        # free /proc read -> one token
