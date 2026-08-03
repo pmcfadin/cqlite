@@ -1,0 +1,46 @@
+# EXCERPT of /etc/cassandra/cassandra.yaml as SHIPPED by the `cassandra:5.0.2`
+# Docker image (the image test-data/scripts/gen-perf-corpus-bti.sh runs), captured
+# verbatim with:
+#
+#   docker run --rm --entrypoint cat cassandra:5.0.2 /etc/cassandra/cassandra.yaml
+#
+# Only the two stanzas the generator must flip are kept (source lines 1134-1143 and
+# 2228-2249 of the 2249-line file); the leading "#" comment markers and the EXACT
+# two-space indentation of "#  selected_format: big" are what the generator's sed
+# addresses match, so this fixture is what makes that match verifiable without a
+# container (issue #3234). Do not reflow or re-indent it.
+#
+# ---------------- source lines 1134-1143 (the sstable format stanza) ------------
+
+# The sstable formats configuration. SSTable formats implementations are
+# loaded using the service loader mechanism. In this section, one can select
+# the format for created sstables and pass additional parameters for the formats
+# available on the classpath.
+# The default format is "big", the legacy SSTable format in use since Cassandra 3.0.
+# Cassandra versions 5.0 and later also support the trie-indexed "bti" format,
+# which offers better performance.
+#sstable:
+#  selected_format: big
+# ------------- source lines 2228-2249 (storage compatibility mode) -------------
+# This will also determine if certain features that depend on newer formats are available. For example, extended TTL
+# (up to 2106) depends on the sstable, commit-log, hints, and messaging versions introduced by Cassandra 5.0, so that
+# feature won't be available if this property is set to CASSANDRA_4. See the upgrade guide for more details.
+#
+# Possible values are:
+#
+# ** CASSANDRA_4: Stays compatible with the 4.x line in features, formats and component versions.
+# ** UPGRADING:   The cluster monitors the version of each node during this interim stage. This has a cost but ensures
+#                all new features, formats, versions, etc. are enabled safely.
+# ** NONE:        Start with all the new features and formats enabled.
+#
+# A typical upgrade would be:
+#
+# . Do a rolling upgrade, starting all nodes in CASSANDRA_X compatibility mode.
+# . Once the new binary is rendered stable, do a rolling restart with the UPGRADING mode. The cluster will keep new
+#   features disabled until all nodes are started in the UPGRADING mode; when that happens, new features controlled by
+#   the storage compatibility mode are enabled.
+# . Do a rolling restart with all nodes starting with the NONE mode. This eliminates the cost of checking node versions
+#   and ensures stability. If Cassandra was started at the previous version by accident, a node with disabled
+#   compatibility mode would no longer toggle behaviors as when it was running in the UPGRADING mode.
+#
+storage_compatibility_mode: CASSANDRA_4

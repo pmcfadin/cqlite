@@ -85,11 +85,18 @@ SUDO="${SUDO:-sudo -n}"
 OUT="${OUT-/data/corpus-3234-bti}"
 KS="${KS-}"                       # defaulted after --smoke is known
 TBL="${TBL-wide_multiclustering}"
+# ROWS/CHUNK_ROWS track whether the CALLER supplied them, because --smoke is a
+# DEFAULTS override: it may lower only values nobody asked for. `${VAR+x}` (set,
+# even if empty) is the test, and the values themselves use `${VAR-default}` (not
+# `:-`) so an explicitly EMPTY value is a caller bug that fails validation rather
+# than silently becoming the default.
+ROWS_EXPLICIT=0; [ -z "${ROWS+x}" ] || ROWS_EXPLICIT=1
+CHUNK_ROWS_EXPLICIT=0; [ -z "${CHUNK_ROWS+x}" ] || CHUNK_ROWS_EXPLICIT=1
 # ~2.0 GiB at the density MEASURED by this generator's commissioning run
 # (162 B/row on disk at --payload-bytes 160, LZ4/16 KiB). 5 GiB ~= 33000000 rows.
-ROWS="${ROWS:-13200000}"
+ROWS="${ROWS-13200000}"
 # 500k rows/chunk => ~78 MiB Data.db per SSTable, comfortably over the 8 MiB floor.
-CHUNK_ROWS="${CHUNK_ROWS:-500000}"
+CHUNK_ROWS="${CHUNK_ROWS-500000}"
 SEED="${SEED:-20260803}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-160}"
 # rows-per-partition distribution, "<rows>:<weight>". Every class is wide enough
@@ -137,6 +144,10 @@ modes
   --prune-dry-run        --validate-only + list the stale corpus dirs a run WOULD remove
   --verify-only          re-assert an ALREADY-GENERATED corpus under --out and exit;
                          no container, no writes, nothing mutated
+  --yaml-flip-check FILE self-test hook: run the PRODUCTION cassandra.yaml flip
+                         (sed + the three verification greps) against a LOCAL yaml
+                         copy — edits FILE IN PLACE, prints the verified lines,
+                         exits non-zero if either setting did not take; no container
 
 options (env var in parentheses; all have defaults)
   --out DIR              corpus root (OUT) [$OUT]
@@ -166,6 +177,7 @@ SMOKE=0
 VALIDATE_ONLY=0
 PRUNE_DRY_RUN=0
 VERIFY_ONLY=0
+YAML_FLIP_CHECK=""
 KS_EXPLICIT=0
 if [ -n "$KS" ]; then KS_EXPLICIT=1; fi
 
@@ -177,9 +189,10 @@ while [ $# -gt 0 ]; do
     --validate-only) VALIDATE_ONLY=1; shift ;;
     --prune-dry-run) VALIDATE_ONLY=1; PRUNE_DRY_RUN=1; shift ;;
     --verify-only) VERIFY_ONLY=1; shift ;;
+    --yaml-flip-check) need_arg "$@"; YAML_FLIP_CHECK="$2"; shift 2 ;;
     --out) need_arg "$@"; OUT="$2"; shift 2 ;;
-    --rows) need_arg "$@"; ROWS="$2"; shift 2 ;;
-    --chunk-rows) need_arg "$@"; CHUNK_ROWS="$2"; shift 2 ;;
+    --rows) need_arg "$@"; ROWS="$2"; ROWS_EXPLICIT=1; shift 2 ;;
+    --chunk-rows) need_arg "$@"; CHUNK_ROWS="$2"; CHUNK_ROWS_EXPLICIT=1; shift 2 ;;
     --seed) need_arg "$@"; SEED="$2"; shift 2 ;;
     --payload-bytes) need_arg "$@"; PAYLOAD_BYTES="$2"; shift 2 ;;
     --widths) need_arg "$@"; WIDTHS="$2"; shift 2 ;;
@@ -199,11 +212,13 @@ while [ $# -gt 0 ]; do
 done
 
 # --smoke is a DEFAULTS override, so it must not silently undo an explicit flag:
-# only unset-by-the-user values are lowered. It stays large enough that the
-# 8 MiB Data.db floor and the Rows.db assert are genuinely exercised.
+# ONLY unset-by-the-caller values are lowered (--rows/--chunk-rows/--keyspace and
+# their ROWS/CHUNK_ROWS/KS env equivalents all count as explicit). The smoke
+# defaults stay large enough that the 8 MiB Data.db floor and the Rows.db assert
+# are genuinely exercised.
 if [ "$SMOKE" = 1 ]; then
-  ROWS="${SMOKE_ROWS:-240000}"
-  CHUNK_ROWS="${SMOKE_CHUNK_ROWS:-120000}"
+  [ "$ROWS_EXPLICIT" = 1 ] || ROWS="${SMOKE_ROWS:-240000}"
+  [ "$CHUNK_ROWS_EXPLICIT" = 1 ] || CHUNK_ROWS="${SMOKE_CHUNK_ROWS:-120000}"
   [ "$KS_EXPLICIT" = 1 ] || KS="perf_bti_smoke"
 fi
 [ -n "$KS" ] || KS="perf_bti"
@@ -250,6 +265,18 @@ PYEOF
   # multi-GB load: an over-ceiling plan previously died at chunk 3 of 27 with a
   # cqlsh ParseError, four minutes and three SSTables in (issue #3234). The
   # arithmetic and the stride live in the row driver, the one module that owns them.
+  #
+  # WHY `pk int` + a CEILING GUARD, and not `pk bigint` (which would make the guard
+  # unnecessary): the partition-key TYPE is part of the fixture's shape, and this
+  # corpus deliberately mirrors #3032's `test_da/multiclustering_table` — `pk int`,
+  # compound `(bucket text, seq int)` clustering — so a BTI read-path measurement
+  # taken here is comparable to the correctness fixture the same code paths are
+  # validated on, byte-comparable key encoding included (a 4-byte Int32Type key,
+  # not an 8-byte LongType one). Widening to `bigint` would silently change the
+  # partition-key encoding under test to buy key space no profileable corpus needs
+  # (the stride admits 2147 chunks). The cost of keeping `int` is exactly one
+  # fail-closed arithmetic check, run before anything expensive — which is cheaper
+  # than a fixture that no longer matches the shape it is supposed to represent.
   python3 - "$ROWS_PY" "$CHUNKS" "$CHUNK_ROWS" <<'PYEOF' || die "plan exceeds the \`pk int\` ceiling (see message above)"
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("rows", sys.argv[1])
@@ -426,20 +453,39 @@ start_container() {
 # cassandra.yaml `sstable:` / `selected_format: big` are COMMENTED OUT (~:1142)
 # and `storage_compatibility_mode: CASSANDRA_4` is live (~:2249). A missed edit
 # emits `nb` with no error at all, so both greps are hard failures.
+#
+# The sed expression and the three verification greps live in ONE snippet-emitting
+# function because the `sed` addresses depend on the shipped file's EXACT
+# indentation (`#  selected_format: big`, two spaces) — text nothing verifies until
+# it runs. That snippet is executed:
+#   * in the generating container by apply_bti_yaml (the production path), and
+#   * against the committed Cassandra 5.0.2 cassandra.yaml excerpt
+#     (scripts/tests/fixtures/cassandra-5.0.2-cassandra.yaml.excerpt) by
+#     scripts/tests/test_gen_perf_corpus_bti.sh, through --yaml-flip-check,
+# so the tested text IS the text that runs: no drifting copy of the expression.
+bti_yaml_flip_snippet() {  # $1 = path to a cassandra.yaml, EDITED IN PLACE
+  local yaml="$1"
+  cat <<SNIPPET
+[ -f '$yaml' ] || { echo "YAML-FLIP-FATAL: no such cassandra.yaml: $yaml" >&2; exit 1; }
+sed -i 's/storage_compatibility_mode: CASSANDRA_4/storage_compatibility_mode: NONE/g; s|#sstable:|sstable:|; s|#  selected_format: big|  selected_format: bti|' '$yaml' || exit 1
+grep -qE '^storage_compatibility_mode: NONE\$' '$yaml' || {
+  echo "YAML-FLIP-FATAL: storage_compatibility_mode was NOT set to NONE in $yaml — the node would emit 'nb' (BIG) silently" >&2; exit 1; }
+grep -qE '^sstable:\$' '$yaml' || {
+  echo "YAML-FLIP-FATAL: the sstable: block was NOT uncommented in $yaml — the node would emit 'nb' (BIG) silently" >&2; exit 1; }
+grep -qE '^  selected_format: bti\$' '$yaml' || {
+  echo "YAML-FLIP-FATAL: sstable.selected_format was NOT set to bti in $yaml — the node would emit 'nb' (BIG) silently" >&2; exit 1; }
+grep -nE '^storage_compatibility_mode:|^sstable:|^  selected_format:' '$yaml'
+SNIPPET
+}
+
 YAML_VERIFIED=""
 apply_bti_yaml() {
   local yaml=/etc/cassandra/cassandra.yaml
   log "applying storage_compatibility_mode: NONE + sstable.selected_format: bti ..."
-  $DOCKER exec "$CONTAINER" bash -lc \
-    "sed -i 's/storage_compatibility_mode: CASSANDRA_4/storage_compatibility_mode: NONE/g; s|#sstable:|sstable:|; s|#  selected_format: big|  selected_format: bti|' $yaml"
-  if ! $DOCKER exec "$CONTAINER" bash -lc "grep -qE '^storage_compatibility_mode: NONE\$' $yaml"; then
-    die "storage_compatibility_mode was NOT set to NONE in $yaml — the node would emit 'nb' (BIG) silently"
-  fi
-  if ! $DOCKER exec "$CONTAINER" bash -lc "grep -qE '^sstable:\$' $yaml && grep -qE '^  selected_format: bti\$' $yaml"; then
-    die "sstable.selected_format was NOT set to bti in $yaml — the node would emit 'nb' (BIG) silently"
-  fi
-  YAML_VERIFIED="$($DOCKER exec "$CONTAINER" bash -lc \
-    "grep -nE '^storage_compatibility_mode:|^sstable:|^  selected_format:' $yaml")"
+  YAML_VERIFIED="$($DOCKER exec "$CONTAINER" bash -lc "$(bti_yaml_flip_snippet "$yaml")")" \
+    || die "the cassandra.yaml BTI flip FAILED (see the YAML-FLIP-FATAL line above): without
+       BOTH storage_compatibility_mode: NONE and sstable.selected_format: bti the node
+       emits 'nb' (BIG) with no error at all"
   log "yaml verified:"; printf '%s\n' "$YAML_VERIFIED" | sed 's/^/    /'
   log "restarting container to apply BTI mode..."
   $DOCKER restart "$CONTAINER" >/dev/null
@@ -620,6 +666,15 @@ write_manifest() {
 }
 
 # ------------------------------------------------------------------- main ----
+# Self-test hook first: it needs none of the corpus flags and touches nothing but
+# the yaml copy it is handed.
+if [ -n "$YAML_FLIP_CHECK" ]; then
+  bash -c "$(bti_yaml_flip_snippet "$YAML_FLIP_CHECK")" \
+    || die "yaml flip check FAILED for $YAML_FLIP_CHECK (see the YAML-FLIP-FATAL line above)"
+  echo "YAML-FLIP-OK $YAML_FLIP_CHECK"
+  exit 0
+fi
+
 validate_inputs
 
 if [ "$VALIDATE_ONLY" = 1 ]; then
