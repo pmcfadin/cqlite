@@ -171,6 +171,63 @@ else
   fail "expected keyspace=perf_bti by default (out: $out)"
 fi
 
+# ------------------------------- the COMMITTED manifest is never a default ----
+# roborev #3234 F2: MANIFEST_OUT used to DEFAULT to the committed
+# test-data/perf-corpus-bti-manifest.json, so the advertised `--smoke` invocation
+# overwrote a committed provenance artifact with perf_bti_smoke metadata -- after
+# which the default full-corpus scan rejects that manifest as foreign (exit 8).
+COMMITTED_MANIFEST_REL="test-data/perf-corpus-bti-manifest.json"
+for mode_args in "" "--smoke" "--small-golden"; do
+  # shellcheck disable=SC2086  # deliberate word split of an optional single flag
+  out=$(bash "$GEN" $mode_args --validate-only --out "$TMP/c" 2>&1)
+  if grep -q "manifest_out=(none)" <<<"$out"; then
+    pass "the committed manifest is NOT a default destination (${mode_args:-production})"
+  else
+    fail "${mode_args:-production}: expected manifest_out=(none) (out: $out)"
+  fi
+done
+out=$(bash "$GEN" --publish-manifest --validate-only --out "$TMP/c" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "manifest_out=.*$COMMITTED_MANIFEST_REL" <<<"$out"; then
+  pass "--publish-manifest is the EXPLICIT opt-in that targets the committed manifest"
+else
+  fail "--publish-manifest: expected the committed manifest as the target (rc=$rc, out: $out)"
+fi
+check_reject "--publish-manifest from a --smoke run" \
+  "refusing to write the COMMITTED production manifest" --smoke --publish-manifest
+check_reject "--publish-manifest from a --small-golden run" \
+  "refusing to write the COMMITTED production manifest" --small-golden --publish-manifest
+out=$(bash "$GEN" --publish-manifest --manifest-out "$TMP/m.json" --validate-only \
+        --out "$TMP/c" 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && grep -q "mutually exclusive" <<<"$out"; then
+  pass "--publish-manifest and --manifest-out are mutually exclusive (exit 2)"
+else
+  fail "--publish-manifest + --manifest-out: expected exit 2 (rc=$rc, out: $out)"
+fi
+
+# ---------------------------------------- --small-golden (the committable oracle) --
+out=$(bash "$GEN" --small-golden --validate-only --out "$TMP/c" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] \
+   && grep -q "rows=6000 chunk_rows=6000 chunks=1 " <<<"$out" \
+   && grep -q "keyspace=test_da table=wide_multiclustering_small " <<<"$out" \
+   && grep -q "mode=small_golden" <<<"$out"; then
+  pass "--small-golden plans ONE small SSTable under test_da.wide_multiclustering_small"
+else
+  fail "--small-golden defaults changed (rc=$rc, out: $out)"
+fi
+out=$(bash "$GEN" --small-golden --validate-only --out "$TMP/c" --rows 900 --chunk-rows 300 \
+        --table mine 2>&1)
+if grep -q "rows=900 chunk_rows=300 chunks=3 " <<<"$out" && grep -q "table=mine " <<<"$out"; then
+  pass "--small-golden is DEFAULTS-only: an explicit --rows/--chunk-rows/--table wins"
+else
+  fail "--small-golden overrode explicit flags (out: $out)"
+fi
+out=$(bash "$GEN" --smoke --small-golden --validate-only --out "$TMP/c" 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && grep -q "mutually exclusive" <<<"$out"; then
+  pass "--smoke and --small-golden are mutually exclusive (exit 2)"
+else
+  fail "--smoke --small-golden: expected exit 2 (rc=$rc, out: $out)"
+fi
+
 # Every rejection must be non-zero AND must not have created the corpus root it was
 # pointed at.
 #
@@ -200,6 +257,26 @@ check_reject "--chunk-rows > --rows" "exceeds"             --rows 100 --chunk-ro
 check_reject "a relative --out"    "absolute path"         --out relative/path
 check_reject "an empty --out"      "is empty"              --out ""
 check_reject "--out /"             "refusing to use"       --out /
+# --out is CANONICALIZED before anything is created or deleted (roborev #3234 F1).
+# A lexical `!= "/"` test passed all three of these, and the script then ran
+# `rm -rf "$OUT/cassandra-data"` as root -- i.e. deleted an unrelated /cassandra-data.
+# Every case here asserts the REFUSAL; nothing is deleted by any of them.
+check_reject "an --out that resolves to / through .." "resolves to '/'" --out /tmp/..
+ln -sfn / "$TMP/slash-link"
+check_reject "an --out SYMLINK resolving to /" "resolves to '/'" --out "$TMP/slash-link"
+check_reject "an --out resolving to a system root" "a system root" --out /var/../var
+# Positive control for the same mechanism: a legitimate path is ACCEPTED, and the
+# resolved (symlink-free) form is what the run reports and therefore derives its
+# destructive targets from.
+mkdir -p "$TMP/canon-real/corpus"
+ln -sfn "$TMP/canon-real" "$TMP/canon-link"
+canon_expect="$(cd "$TMP/canon-real" && pwd -P)/corpus"
+out=$(bash "$GEN" --validate-only --out "$TMP/canon-link/corpus" --rows 100 --chunk-rows 100 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "out=$canon_expect mode=" <<<"$out"; then
+  pass "a symlinked --out is ACCEPTED and reported in its canonical form"
+else
+  fail "canonicalization positive control: expected out=$canon_expect (rc=$rc, out: $out)"
+fi
 check_reject "a bad keyspace"      "invalid keyspace"      --keyspace "Bad-KS"
 check_reject "a bad table"         "invalid table"         --table "bad table"
 check_reject "an empty --seed"     "seed is empty"         --seed ""
@@ -642,6 +719,66 @@ PY
     pass "manifest writer reports a truncated row-plan line without a traceback"
   else
     fail "truncated row plan: expected a clean failure (rc=$rc, out: $out)"
+  fi
+
+  # ----------------------- the row plan must describe THIS configuration --------
+  # roborev #3234 F3: the aggregate rows/partitions cross-checks against
+  # Statistics.db cannot see a STALE plan -- one from an earlier run, with a
+  # different seed, whose totals happen to match. The manifest would then declare a
+  # seed and a generation plan that do not describe the corpus. So the plan's chunk
+  # count, contiguity, per-chunk row counts and per-chunk seed material are checked
+  # against --seed/--rows-requested/--chunk-rows before anything is written.
+  #
+  # HERMETIC: the check runs BEFORE the per-SSTable `sstablemetadata` containers, so
+  # these cases need no docker. The positive control proves that ordering -- with a
+  # MATCHING plan the run gets past the plan check and dies at the metadata step,
+  # with `--docker` pointed at a command that is not docker.
+  plan_rec() { # plan_rec <chunk> <seed-material> <rows>
+    printf '{"chunk":%s,"seed_material":"%s","rows":%s,"partitions":2,"pk_min":0,' "$1" "$2" "$3"
+    printf '"pk_max":9,"rows_per_partition_histogram":{"200":1,"800":1},'
+    printf '"buckets_per_partition_histogram":{"4":2}}\n'
+  }
+  mkdir -p "$TMP/plancfg" "$TMP/bin"
+  make_corpus "$TMP/plancfg" 1024 64
+  printf '#!/bin/sh\nexit 1\n' >"$TMP/bin/not-docker"; chmod +x "$TMP/bin/not-docker"
+  # shellcheck disable=SC2054  # the commas are inside flag VALUES (--widths/--buckets)
+  plancfg_args=(--corpus-root "$TMP" --keyspace perf_bti --table wide_multiclustering
+                --image cassandra:5.0.2 --seed 77 --rows-requested 1000 --chunk-rows 400
+                --payload-bytes 32 --widths 200:1 --buckets alpha,bo --mode production
+                --sstable-dir "$TMP/plancfg" --docker "$TMP/bin/not-docker"
+                --out "$TMP/plancfg-manifest.json")
+  # <label> <expect-substring> then the plan lines on stdin
+  plan_case() {
+    local label="$1" expect="$2" plan="$TMP/plan-cfg.jsonl"
+    cat >"$plan"
+    rm -f "$TMP/plancfg-manifest.json"
+    local o r
+    o=$(python3 "$MANIFEST_PY" "${plancfg_args[@]}" --row-plan "$plan" 2>&1); r=$?
+    if [ "$r" -ne 0 ] && grep -q "row-plan/config check FAILED" <<<"$o" \
+       && grep -q "$expect" <<<"$o" && [ ! -f "$TMP/plancfg-manifest.json" ]; then
+      pass "manifest writer HARD-FAILS on $label, and writes nothing"
+    else
+      fail "$label: expected a row-plan/config failure naming '$expect' (rc=$r, out: $o)"
+    fi
+  }
+  { plan_rec 0 78:0 400; plan_rec 1 78:1 400; plan_rec 2 78:2 200; } \
+    | plan_case "a plan generated from ANOTHER seed" "seed_material"
+  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; plan_rec 3 77:3 200; } \
+    | plan_case "a NON-CONTIGUOUS chunk set" "chunk index set"
+  { plan_rec 0 77:0 500; plan_rec 1 77:1 400; plan_rec 2 77:2 200; } \
+    | plan_case "a plan whose chunk rows disagree with --chunk-rows" "puts 400 there"
+  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; } \
+    | plan_case "a plan SHORT of the configured chunk count" "chunk count"
+  # Positive control: a matching plan passes the config check, so the run proceeds to
+  # the (deliberately unavailable) sstablemetadata step instead of failing here.
+  { plan_rec 0 77:0 400; plan_rec 1 77:1 400; plan_rec 2 77:2 200; } >"$TMP/plan-cfg-ok.jsonl"
+  rm -f "$TMP/plancfg-manifest.json"
+  out=$(python3 "$MANIFEST_PY" "${plancfg_args[@]}" --row-plan "$TMP/plan-cfg-ok.jsonl" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && ! grep -q "row-plan/config check FAILED" <<<"$out" \
+     && grep -q "could not read totalRows" <<<"$out"; then
+    pass "a plan that MATCHES the configuration passes the check (positive control)"
+  else
+    fail "plan/config positive control: expected to get past the plan check (rc=$rc, out: $out)"
   fi
 
   # ------------------------------- end-to-end through the stub `docker` ---------
