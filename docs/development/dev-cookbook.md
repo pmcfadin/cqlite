@@ -196,6 +196,24 @@ The harness therefore **prints the route beside the number** — `generations:`,
 `access_path:` (the per-query probe reset at `select_executor/mod.rs:525`) and a `storage_route:` line
 naming the branch it took — so a throughput figure can never again be quoted without its plane.
 
+**The WORKLOAD is pinned too, and the row-count assert cannot do it (roborev #3234 M1).** The
+generation count selects the route above, so an extra `<table>-<uuid>` directory left in the
+discoverable tree by `--no-prune` changes the measured plane — and it changes NOTHING the row-count
+assert can see, because the retained generation holds the same rows and reconciliation yields the same
+count. So `bti_perf_scan` scopes ingestion to the manifest's exact `tables[].sstable_dir` (validated
+corpus-relative, right keyspace/table), refuses an ambiguous root that nothing documents (exit 3,
+`OPEN_FAILED`), reports `ingest_scope:` in the result block, and names any SSTable it left outside the
+scope. `gen-perf-corpus-bti.sh --verify-only` refuses the same shape and prints `corpus_dirs=`.
+
+**A failed regeneration leaves NO provenance, rather than the previous run's (roborev #3234 M2).**
+`publish()` replaces the SSTable directory several steps before the manifest is written, so a failure in
+between used to leave a syntactically perfect `manifest-bti-3234.json` — the harness's *first* and most
+specific candidate — describing bytes that had just been deleted. The generator now vacates that
+position first: the old manifest is moved aside as `manifest-bti-3234.json.superseded-<ts>` and a marker
+carrying `generation_in_progress` (and no keyspace/table/row count) takes its place, so any consumer
+**refuses** (`MANIFEST_UNREADABLE`, exit 8) instead of reading stale numbers; the finished manifest is
+renamed over it atomically on success.
+
 **Containment is not optional, and the streaming channel does not bound RSS on every route.** On the
 multi-generation merge route the consumer drops rows as they arrive, so the window is bounded; but a
 **single-generation** (or schema-less) invocation on a multi-GB BTI corpus takes the trie branch,
