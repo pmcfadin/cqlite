@@ -104,6 +104,19 @@ Two rules now close it, and both apply to any new dataset lane:
   `CQLITE_REQUIRE_FIXTURES=1` *every* case must run, matching the query-semantics oracle's
   per-case `assert!(skipped.is_empty())`.
 
+**Resolve by evidence, not by preference — and why no ordering can be fixed here.** Neither root is
+a superset of the other. Measured on a fleet box, `/data/datasets` holds 144 `*-Data.db` across 122
+tables but lacks the one git-committed `test_da/multiclustering_table`; the checkout holds only its
+31 committed parity references, which include it. Env-first loses that committed fixture,
+checkout-first loses 92 fetched tables — so a *preference ordering* is wrong for one set of tables
+whichever way you point it, and only "walk every candidate, take the first that actually holds THIS
+table's `*-Data.db`" is right for both. That supersedes issue **#3104**'s suggested "prefer the
+already-exported `CQLITE_DATASETS_ROOT`" fix **for the lanes on this resolver**. #3104 stays **open**
+for the work the resolver does not reach: the whole-corpus `#2078` preflight fail-close, a diagnostic
+naming the found `Data.db` count and the overridden candidate root, the `--lite`
+implausibly-small-corpus warning, and the CLAUDE.md / flow-* / `agents-developing/test-data` text
+that still tells agents to override the exported root with the checkout path.
+
 Defense in depth: the agent-gate `bti-multiclustering` component also runs
 `point_vs_full_differential`, so the committed BTI fixtures are covered by a fail-closed gate
 component rather than by `core-tests` alone.

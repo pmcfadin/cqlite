@@ -67,19 +67,54 @@ pub fn repo_root() -> PathBuf {
         .unwrap_or_else(|| manifest.parent().unwrap_or(manifest).to_path_buf())
 }
 
+/// TEST-HARNESS ONLY: substitute for the CHECKOUT candidate root.
+///
+/// # Why this seam has to exist
+///
+/// The fail-closed contract has two directions, and both must be DEMONSTRABLE
+/// (#3220 AC2): a fixture that is *present but empty* must fail, and a fixture that
+/// is *absent from every candidate root* must fail. The first is easy to stage —
+/// point `CQLITE_DATASETS_ROOT` at a temp root holding a truncated `Data.db`. The
+/// second is not: the checkout candidate is derived from `CARGO_MANIFEST_DIR`, a
+/// COMPILE-TIME constant, so no runtime environment can make a committed fixture
+/// invisible. Staging it for real would mean deleting a git-tracked fixture from the
+/// working tree — which also trips the gate's mid-run `tree-integrity` check — or
+/// recompiling the whole crate inside a throwaway worktree, far too slow for a
+/// committed self-test. So the candidate list takes this substitution instead.
+///
+/// # Why it cannot weaken anything
+///
+/// It can only ever REMOVE fixtures from view, never add or fake one: every
+/// resolution still requires a real `*-Data.db` under the substituted root. So the
+/// only reachable effect of a stray value is that lanes FAIL (a `must_run` case that
+/// did not run), never that one passes vacuously — the safe direction. It lives in
+/// test-support code compiled solely into test binaries, never into the library, and
+/// its own behavior is asserted by `scripts/tests/test_point_vs_full_failclosed.sh`.
+pub const CHECKOUT_SSTABLES_ROOT_OVERRIDE_ENV: &str = "CQLITE_TEST_CHECKOUT_SSTABLES_ROOT";
+
 /// Every `sstables/` root to search, in preference order: the `CQLITE_DATASETS_ROOT`
 /// corpus (when set and present) first, then the checkout's committed corpus.
 ///
 /// Deduplicated, so a `CQLITE_DATASETS_ROOT` that already points at the checkout does
 /// not report the same path twice in a diagnostic.
+///
+/// Note this is an ORDER, not a PREFERENCE: [`first_root_with_table`] picks by
+/// EVIDENCE (which root actually holds the table), so the order only breaks ties
+/// between roots that can both serve the request. Neither root is a superset of the
+/// other — the fetched corpus carries keyspaces the checkout does not, and the
+/// checkout carries committed parity fixtures the fetched corpus does not — so any
+/// fixed preference between them is wrong for one set of tables (#3104).
 pub fn sstables_root_candidates() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(env_root) = fixture_roots::datasets_root_if_present() {
         candidates.push(env_root.join("sstables"));
     }
-    let checkout = fixture_roots::checkout_test_data_dir()
-        .join("datasets")
-        .join("sstables");
+    let checkout = match std::env::var_os(CHECKOUT_SSTABLES_ROOT_OVERRIDE_ENV) {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => fixture_roots::checkout_test_data_dir()
+            .join("datasets")
+            .join("sstables"),
+    };
     if !candidates.contains(&checkout) {
         candidates.push(checkout);
     }
