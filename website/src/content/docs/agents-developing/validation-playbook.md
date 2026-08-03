@@ -77,6 +77,37 @@ The `CQLITE_READ_PATH` knob is a **test/debug** control (not a perf recommendati
 `point` fails closed rather than silently full-scanning. See the CLI reference for the
 user-facing knob docs.
 
+#### Fixture roots resolve per TABLE, and committed cases must RUN (issue #3220)
+
+A dataset lane that picks its corpus root by **keyspace** can pass without ever running.
+Three lanes did exactly that (`point_vs_full_differential`, `query_semantics_oracle_parity`,
+`read_path_forcing_e2e`): each selected the first candidate root whose `<keyspace>/` was a
+directory and then **committed to it with no fallback**, although what each needs is a
+specific **table**. On a machine whose `CQLITE_DATASETS_ROOT` corpus held `test_da/` but
+not the git-committed `test_da/multiclustering_table-*`, the env root won, the table was
+declared absent, and the #3032 multi-component clustering case **skipped silently** behind
+a green suite.
+
+Two rules now close it, and both apply to any new dataset lane:
+
+* **Resolve TABLE-granularly.** `cqlite-core/tests/support/datasets_root.rs` —
+  `sstables_root_for_table(keyspace, table)` walks *every* candidate root
+  (`CQLITE_DATASETS_ROOT`, then the checkout's committed corpus) and returns the first that
+  actually carries `<keyspace>/<table>-*/…-Data.db`. Presence is judged on a real `*-Data.db`
+  component, never on directory existence: the repo commits JSONL sidecars for fixtures whose
+  binaries are gitignored. Schemas keep resolving checkout-relative through
+  `test-data/support/fixture_roots.rs` (#3148) — never by climbing `..` from the datasets root.
+* **Assert per CASE, not suite-wide.** `assert!(ran > 0)` over a whole corpus cannot see one
+  case skipping behind its siblings. Every case whose binaries are **committed to git** carries
+  `must_run: true` and is fail-closed **unconditionally** (with or without
+  `CQLITE_REQUIRE_FIXTURES`, because `core-tests` does not set it); under
+  `CQLITE_REQUIRE_FIXTURES=1` *every* case must run, matching the query-semantics oracle's
+  per-case `assert!(skipped.is_empty())`.
+
+Defense in depth: the agent-gate `bti-multiclustering` component also runs
+`point_vs_full_differential`, so the committed BTI fixtures are covered by a fail-closed gate
+component rather than by `core-tests` alone.
+
 #### Second axis: 1 generation vs N generations (issue #3129)
 
 The point-vs-full comparison above holds the **generation count fixed**, so both of its
