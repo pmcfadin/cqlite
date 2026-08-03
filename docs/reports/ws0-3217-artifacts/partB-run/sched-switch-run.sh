@@ -12,6 +12,7 @@ source "$WT/docs/reports/ws0-3217-artifacts/harness/common.sh"
 
 LABEL="$1"; SRV_SPEC="$2"; N="$3"; WINDOW="${4:-10}"; MERGE_PATH="${5:-bypass}"
 STEADY_PRE="${WS0_STEADY_PRE_SECS:-20}"; TAIL="${WS0_TAIL_SECS:-10}"
+WS0_SUDO_PERF="${WS0_SUDO_PERF:-sudo -n}"
 SERVER_CPUS="$(ws0_cpulist_expand "$(ws0_server_cpus_for_s "${SRV_SPEC#s}")")"
 CLIENT_CPUS="$(ws0_cpulist_expand "$WS0_CLIENT_CPUS_DEFAULT")"
 OUTDIR="$WS0_PROFILES/$LABEL"; LOGDIR="$WS0_LOGS/$LABEL"; mkdir -p "$OUTDIR" "$LOGDIR"
@@ -30,14 +31,20 @@ taskset -c "$CLIENT_CPUS" "$WS0_LOADGEN_BIN" \
 LOADGEN_PID=$!
 sleep "$STEADY_PRE"
 
-perf record -e sched:sched_switch -g --call-graph=fp -p "$WS0_SERVER_PID" \
+# The sched tracepoint's control files are root:root 0640, so an unprivileged
+# perf fails with "can't access trace events" EVEN with perf_event_paranoid=-1
+# (that sysctl governs perf events, not tracefs file permissions - the same
+# distinction that forces sudo on the BPF collectors). Hence sudo here, and a
+# chown afterwards so the artefacts stay agent-readable.
+$WS0_SUDO_PERF perf record -e sched:sched_switch -g --call-graph=fp -p "$WS0_SERVER_PID" \
   -o "$OUTDIR/sched.data" -- sleep "$WINDOW" >"$LOGDIR/perf-record.log" 2>&1 \
   || ws0_warn "perf record non-zero; see $LOGDIR/perf-record.log"
+$WS0_SUDO_PERF chown "$(id -u):$(id -g)" "$OUTDIR/sched.data" 2>/dev/null || true
 
 wait "$LOADGEN_PID" 2>/dev/null || true; unset LOADGEN_PID
 ws0_stop_server; trap - EXIT INT TERM
 
-perf script -i "$OUTDIR/sched.data" -F comm,tid,event,trace,ip,sym,dso \
+$WS0_SUDO_PERF perf script -i "$OUTDIR/sched.data" -F comm,tid,event,trace,ip,sym,dso \
   >"$OUTDIR/sched.script" 2>"$LOGDIR/perf-script.log"
 gzip -f "$OUTDIR/sched.script"
 cat >"$OUTDIR/sched-config.json" <<EOJ

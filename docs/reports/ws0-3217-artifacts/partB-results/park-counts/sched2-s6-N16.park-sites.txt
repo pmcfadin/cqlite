@@ -1,0 +1,15 @@
+==== WS0 #3217 VOLUNTARY PARKS BY SITE (perf sched:sched_switch, EVENT counts) ====
+label: sched2-s6-N16   window=10s
+voluntary 1347360 (134736/s)   involuntary 593826 (59383/s)
+rows/s 1086267 -> 132.60 flight batches/s -> 1016 voluntary parks per 8192-row batch (124.0 per 1k rows)
+
+site                             parks      pct     parks/s  parks/batch
+core_raw_chunk_chan             351090   26.06%       35109          265
+tokio_runtime_idle              349087   25.91%       34909          263
+glibc_malloc_arena_lock         321608   23.87%       32161          243
+core_query_rows_chan            266391   19.77%       26639          201
+core_windowed_batch_chan         57232    4.25%        5723           43
+grpc_egress                       1952    0.14%         195            1
+do_get_mpsc_handoff                  0    0.00%           0            0   (EXPLICIT ZERO: measured absent)
+egress_credit                        0    0.00%           0            0   (EXPLICIT ZERO: measured absent)
+other                                0    0.00%           0            0   (EXPLICIT ZERO: measured absent)
