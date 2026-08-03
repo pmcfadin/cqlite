@@ -205,6 +205,29 @@ corpus-relative, right keyspace/table), refuses an ambiguous root that nothing d
 `OPEN_FAILED`), reports `ingest_scope:` in the result block, and names any SSTable it left outside the
 scope. `gen-perf-corpus-bti.sh --verify-only` refuses the same shape and prints `corpus_dirs=`.
 
+**Pinning the DIRECTORY is not pinning the WORKLOAD (roborev job 27 B2).** A second generation dropped
+into the documented directory carrying the *same logical rows* leaves reconciliation yielding the same
+count — measured on the pre-fix harness: `rows_scanned: 468` with the row-count assert green,
+`generations: 2`, and `storage_route: generation_merge::…`, exit 0 — i.e. a `RESULT: PASS` attributed to
+a route the manifest does not describe. So the record's `sstable_count` **and** `sstable_generations` are
+now compared against the observed `*-Data.db` descriptors *before* the scan (count and exact identifier
+set), and both fields are **required** of any `tables[]` record: a record that scopes a measurement
+without documenting the workload inside that scope cannot gate it. A hand-written minimal manifest
+simply carries no `tables` array and gets the sole-directory resolution instead.
+
+**Two hardening rules that keep the authority and the corpus honest.** The manifest candidate list is
+probed with `symlink_metadata`, and only `NotFound` falls through to the next candidate (job 27 B1):
+`Path::exists()` reports a *dangling symlink* or an untraversable parent as absent, so a
+present-but-unreadable `<corpus>/manifest-bti-3234.json` used to degrade silently to the committed
+manifest — which describes a **different** corpus. And both scope branches now require **real directory
+components beneath the canonical corpus root** (job 27 B3): the documented branch accepted
+`dir.is_dir()`, which *follows* symlinks, so a correctly shaped `sstable_dir` pointed the measurement
+outside the corpus entirely (measured pre-fix: `RESULT: PASS` over rows read from outside the corpus).
+A consequence worth knowing when re-running an old corpus: a `manifest-bti-3234.json` written by an
+earlier generator revision (partial `row_count_cross_check`, no `sstable_generations`) is **refused**,
+fail-closed — pass `--manifest test-data/perf-corpus-bti-manifest.json`, whose per-SSTable `sha256`
+values identify the bytes it describes.
+
 **A failed regeneration leaves NO provenance, rather than the previous run's (roborev #3234 M2).**
 `publish()` replaces the SSTable directory several steps before the manifest is written, so a failure in
 between used to leave a syntactically perfect `manifest-bti-3234.json` — the harness's *first* and most
