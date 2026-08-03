@@ -645,9 +645,10 @@ The reasoning, kept honest about what each claim rests on:
    throughput that is not being lost there. This is the strongest, most direct conclusion in the
    report.
 2. **#3096 (Arrow encode) reduces per-row work, so it should raise ABSOLUTE throughput at every
-   core count.** `rows_to_record_batch` is 6.6–9.1% of on-CPU server weight across the matrix and
-   `estimate_arrow_row_bytes` another 1.6–2.4%; the `alloc` crate is 10.7–11.4%. That is real,
-   removable work, and removing it lowers instructions/row.
+   core count.** `rows_to_record_batch` is 3.8–9.1% of on-CPU server weight across the matrix
+   (6.6–9.1% at the saturated N=8/N=16 points) and `estimate_arrow_row_bytes` another 1.6–2.4%
+   where it reaches the top-12; the `alloc` crate is 10.3–11.4%. That is real, removable work, and
+   removing it lowers instructions/row.
 3. **But #3096 is NOT obviously a fix for the SCALING DISCOUNT specifically.** The discount is
    an IPC effect at flat instructions/row: 25.4 of 29 pp. Cutting instructions/row raises the
    *level* of the whole curve; whether it also *flattens* the curve depends on whether the removed
