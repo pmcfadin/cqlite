@@ -1,0 +1,32 @@
+==== WS0 #3217 OFF-CPU BLOCKED-STACK ATTRIBUTION (v2) ====
+label: offcpu2-s1-N16   total blocked: 2008.555 s across 5895 unique stacks
+
+bucket                        blocked (s)      pct   stacks
+egress_credit_acquire              0.0009    0.00%        1
+mpsc_send_park                  1100.6164   54.80%     3089
+mpsc_recv_park                   331.3017   16.49%       71
+tonic_grpc_socket_write           18.9647    0.94%      318
+disk_io                            0.0000    0.00%        0   (explicit zero)
+tokio_scheduler                  557.4528   27.75%     2369
+other                              0.2186    0.01%       47
+TOTAL                           2008.5551  100.00%
+
+`other` broken out by NAMED cause (AC4 fixes 7 buckets; any residue is shown as
+`unclassified_residual`, bounded and quantified - NOT claimed to be absent):
+    unclassified_residual                0.2179 s    0.01%
+    unsymbolized_frames_only             0.0006 s    0.00%
+
+`tokio_scheduler` broken out (an IDLE runtime park is not a cost):
+    io_driver_epoll_park               362.1451 s   18.03%
+    blocking_pool_idle_thread          179.3970 s    8.93%
+    idle_worker_park                    15.9107 s    0.79%
+    unclassified_residual                0.0000 s    0.00%
+    timer_park                           0.0000 s    0.00%
+
+CHANNEL IDENTITY of send/recv/credit parks (1431.9190 s total):
+    channel                  blocked(s)    %total  %handoff
+    do_get_batch                 0.5880     0.03%     0.04%   cap 4, ONE reserve + ONE emit per Flight RecordBatch (8192 rows)
+    core_raw_chunk             477.7541    23.79%    33.36%   cap 8, ONE send per 16 KiB compression chunk (23.63 rows/chunk o
+    core_query_rows            468.3264    23.32%    32.71%   std sync_channel, cap 4, ONE send per 128 rows
+    core_windowed_batch        369.3069    18.39%    25.79%   cap 2, ONE send per 256 rows
+    unattributed_channel       115.9436     5.77%     8.10%   send/recv park whose channel item type did not resolve

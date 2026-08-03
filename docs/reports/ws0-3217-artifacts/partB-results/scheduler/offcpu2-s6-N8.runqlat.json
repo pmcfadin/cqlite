@@ -1,0 +1,89 @@
+{
+ "schema": "ws0-3217.runqlat/v1",
+ "label": "offcpu2-s6-N8",
+ "source_file": "/data/ws0/profiles/offcpu2-s6/runqlat-N8.txt",
+ "unit": "usecs",
+ "total_wakeup_events": 5896098,
+ "buckets": [
+  {
+   "lo": 0,
+   "hi": 1,
+   "count": 3071763
+  },
+  {
+   "lo": 2,
+   "hi": 3,
+   "count": 730623
+  },
+  {
+   "lo": 4,
+   "hi": 7,
+   "count": 589667
+  },
+  {
+   "lo": 8,
+   "hi": 15,
+   "count": 552877
+  },
+  {
+   "lo": 16,
+   "hi": 31,
+   "count": 318668
+  },
+  {
+   "lo": 32,
+   "hi": 63,
+   "count": 254253
+  },
+  {
+   "lo": 64,
+   "hi": 127,
+   "count": 173445
+  },
+  {
+   "lo": 128,
+   "hi": 255,
+   "count": 100587
+  },
+  {
+   "lo": 256,
+   "hi": 511,
+   "count": 61188
+  },
+  {
+   "lo": 512,
+   "hi": 1023,
+   "count": 32183
+  },
+  {
+   "lo": 1024,
+   "hi": 2047,
+   "count": 8553
+  },
+  {
+   "lo": 2048,
+   "hi": 4095,
+   "count": 2270
+  },
+  {
+   "lo": 4096,
+   "hi": 8191,
+   "count": 21
+  }
+ ],
+ "mean_approx": 23.194376518165065,
+ "mean_approx_note": "bucket-midpoint approximation over a log2 histogram",
+ "p50_bucket_usecs": [
+  0,
+  1
+ ],
+ "p90_bucket_usecs": [
+  32,
+  63
+ ],
+ "p99_bucket_usecs": [
+  256,
+  511
+ ],
+ "percentile_note": "log2 buckets bound each percentile to an interval; reported as [lo,hi] rather than a false-precision scalar"
+}

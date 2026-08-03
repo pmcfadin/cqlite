@@ -1,0 +1,78 @@
+=== AC3: on-CPU flame graphs, unsymbolized-frame gate (<10%) ===
+profile           unsym all   unsym server     gate    server%
+oncpu-s1-N1         0.0263%        0.0269%     PASS      97.6%
+oncpu-s1-N8         0.0124%        0.0124%     PASS     100.0%
+oncpu-s1-N16        0.0094%        0.0094%     PASS     100.0%
+oncpu-s6-N1         0.0275%        0.0269%     PASS      79.2%
+oncpu-s6-N8         0.0236%        0.0239%     PASS      95.0%
+oncpu-s6-N16        0.0189%        0.0189%     PASS      98.8%
+
+=== AC4: off-CPU blocked-time attribution (seconds; EXPLICIT 0 = measured absent) ===
+collector: patched offcputime-bpfcc (counts map 1e6; the stock 10240-key map
+SATURATED at N>=8 and silently dropped stacks). classifier: v2, leaf-first.
+capture             total egress_credit mpsc_send_par mpsc_recv_par tonic_grpc_so disk_io       tokio_schedul other        
+offcpu2-s1-N1      160.19 0.0001        49.1228       5.9662        1.4297        0.0000        103.5531      0.1225       
+offcpu2-s1-N8     1048.95 0.0000        528.2816      147.8621      10.3569       0.0000        361.9508      0.4971       
+offcpu2-s1-N16    2008.56 0.0009        1100.6164     331.3017      18.9647       0.0000        557.4528      0.2186       
+offcpu2-s6-N1      210.35 0.0000        50.5734       9.1210        1.0772        0.0000        149.5773      0.0000       
+offcpu2-s6-N8      947.01 0.0005        468.2154      36.0256       6.5957        0.0001        435.8509      0.3202       
+offcpu2-s6-N16    1963.72 0.0014        990.4241      190.9454      19.3503       0.0000        760.3198      2.6781       
+
+AC4 channel identity - WHICH bounded channel the send/recv parks belong to.
+The bypass read path stacks FOUR channels between SSTable and wire; only
+`do_get_batch` is the #3217 handoff.
+capture          do_get_batch   core_raw_chunk  core_query_rows core_windowed_batch   unattributed
+offcpu2-s1-N1          0.0001          27.0801          15.5255             9.4615         3.0218
+offcpu2-s1-N8          0.4666         238.0478         230.8348           146.4815        60.3130
+offcpu2-s1-N16         0.5880         477.7541         468.3264           369.3069       115.9436
+offcpu2-s6-N1          0.0000          27.4594          16.7043            12.6446         2.8861
+offcpu2-s6-N8          0.2940         229.0934         138.0932            93.5332        43.2277
+offcpu2-s6-N16         1.4563         473.2270         379.2668           217.7861       109.6348
+
+=== Park COUNTS by site (perf sched:sched_switch; EVENTS, not microseconds) ===
+offcputime charges duration, so a frequent-but-short park is invisible to it.
+This is the instrument for the 'parks per Flight batch' question.
+capture              vol/s      invol/s   parks/batch
+sched2-s1-N1         25486         8775          1009
+sched2-s6-N1         53666            3          2617
+sched2-s6-N16       134736        59383          1016
+
+parks per 8192-row Flight batch, by site (EXPLICIT 0 = measured absent):
+site                        sched2-s1-N1   sched2-s6-N1  sched2-s6-N16
+do_get_mpsc_handoff                    0              0              0
+egress_credit                          0              0              0
+core_raw_chunk_chan                  314            327            265
+core_query_rows_chan                 203            220            201
+core_windowed_batch_chan               8             27             43
+glibc_malloc_arena_lock              163           1677            243
+grpc_egress                            2              6              1
+tokio_runtime_idle                   320            360            263
+other                                  0              0              0
+
+=== AC5: run-queue latency per N (runqlat-bpfcc, log2 buckets, microseconds) ===
+arm           N            p50            p90              p99          wakeups
+s1            1          [0,1]         [8,15]        [128,255]          1089066
+s1            8         [8,15]     [512,1023]      [4096,8191]           996349
+s1           16       [64,127]    [1024,2047]     [8192,16383]           783361
+s6            1          [0,1]          [2,3]            [2,3]          1177996
+s6            8          [0,1]        [32,63]        [256,511]          5896098
+s6           16          [4,7]      [128,255]      [1024,2047]          5889067
+
+=== Residual inefficiency: MORE work, or SLOWER work? ===
+point                       instr/row      cyc/row      IPC   L1d-miss/row  dTLB-miss/row    br-miss/row
+S=1 N=2 (S=1 peak)              38343        25200     1.52          265.4            7.6           56.6
+S=6 N=16 (S=6 peak)             38382        33793     1.14          285.4           10.6           59.2
+S=6 N=1                         43241        32322     1.34          289.4           14.4           95.0
+
+S=6/N=16 vs S=1/N=2:  instructions/row +0.1%   cycles/row +34.1%   IPC -25.4%
+LLC-loads / LLC-load-misses / cache-references are <not supported> on this
+virtualized host, so the MICROARCHITECTURAL CAUSE of the IPC decay is only
+partially measured. Reported, not inferred.
+
+=== Closure: can the counters reproduce the C(N) marginal efficiency? ===
+measured  (S=6 N=16 per core) / (S=1 N=2 per core) = 0.7111  [vs cn-s1]   0.7180  [vs cn-s1-ac5]
+predicted = IPC 0.7465  x  instr/row 0.9990  x  util 0.9705  =  0.7237
+closure gap = +1.26 percentage points
+
+So the residual splits as:  IPC decay 25.4 pp | residual idle 2.2 pp | extra instructions 0.1 pp | unexplained 1.3 pp
+

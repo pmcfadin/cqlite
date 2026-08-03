@@ -1,0 +1,8 @@
+/data/ws0/ws0-corpus/fullscan.py:25: DeprecationWarning: Legacy execution parameters will be removed in 4.0. Consider using execution profiles.
+  cluster = Cluster(["127.0.0.1"], protocol_version=5,
+SCAN ranges           : 512
+SCAN rows counted     : 3999890
+SCAN wall seconds     : 14.238
+SCAN rows/s           : 280,931
+SCAN uncompressed MB/s: 194.6  (at measured 692.70 B/row)
+SCAN compressed  MB/s : 55.1  (at measured 195.96 B/row)

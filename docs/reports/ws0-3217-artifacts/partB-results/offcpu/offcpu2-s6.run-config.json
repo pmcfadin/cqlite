@@ -1,0 +1,4 @@
+{"label":"offcpu2-s6","kind":"offcpu","server_physical_cores_S":"6",
+ "server_cpus":"0,1,2,3,4,5,8,9,10,11,12,13","client_cpus":"6,7,14,15","n_list":"1,8,16",
+ "merge_path":"bypass","window_secs":30,"steady_pre_secs":20,
+ "offcpu_collector":"bpfcc","stack_storage_size":65536,"utc":"2026-08-03T00:39:38Z"}

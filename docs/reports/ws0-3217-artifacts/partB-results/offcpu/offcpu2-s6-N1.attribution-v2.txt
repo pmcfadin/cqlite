@@ -1,0 +1,30 @@
+==== WS0 #3217 OFF-CPU BLOCKED-STACK ATTRIBUTION (v2) ====
+label: offcpu2-s6-N1   total blocked: 210.349 s across 375 unique stacks
+
+bucket                        blocked (s)      pct   stacks
+egress_credit_acquire              0.0000    0.00%        0   (explicit zero)
+mpsc_send_park                    50.5734   24.04%       67
+mpsc_recv_park                     9.1210    4.34%        3
+tonic_grpc_socket_write            1.0772    0.51%      177
+disk_io                            0.0000    0.00%        0   (explicit zero)
+tokio_scheduler                  149.5773   71.11%      126
+other                              0.0000    0.00%        2
+TOTAL                            210.3490  100.00%
+
+`other` broken out by NAMED cause (AC4 fixes 7 buckets; any residue is shown as
+`unclassified_residual`, bounded and quantified - NOT claimed to be absent):
+    mmap_munmap                          0.0000 s    0.00%
+    glibc_malloc_arena_lock              0.0000 s    0.00%
+
+`tokio_scheduler` broken out (an IDLE runtime park is not a cost):
+    idle_worker_park                    70.3225 s   33.43%
+    io_driver_epoll_park                50.2100 s   23.87%
+    blocking_pool_idle_thread           29.0449 s   13.81%
+
+CHANNEL IDENTITY of send/recv/credit parks (59.6944 s total):
+    channel                  blocked(s)    %total  %handoff
+    do_get_batch                 0.0000     0.00%     0.00%   cap 4, ONE reserve + ONE emit per Flight RecordBatch (8192 rows)
+    core_raw_chunk              27.4594    13.05%    46.00%   cap 8, ONE send per 16 KiB compression chunk (23.63 rows/chunk o
+    core_query_rows             16.7043     7.94%    27.98%   std sync_channel, cap 4, ONE send per 128 rows
+    core_windowed_batch         12.6446     6.01%    21.18%   cap 2, ONE send per 256 rows
+    unattributed_channel         2.8861     1.37%     4.83%   send/recv park whose channel item type did not resolve

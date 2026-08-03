@@ -1,0 +1,17 @@
+==== WS0 #3217 microarch counters (derived from COMMITTED inputs only) ====
+
+capture           instr/row      cyc/row      IPC   L1d-miss/row  dTLB-miss/row       rows/s
+llc-s1-N2             38343        25200     1.52          265.4            7.6       250046
+llc-s6-N16            38382        33793     1.14          285.4           10.6      1086928
+llc-s6-N1             43241        32322     1.34          289.4           14.4       160735
+
+window: nominal (as invoked) vs derived (task-clock / hw threads) — the
+published per-row figures use the NOMINAL window; the derived one is a check.
+  llc-s1-N2      nominal 20.000 s   derived 20.0034 s   diff +0.017%
+  llc-s6-N16     nominal 20.000 s   derived 20.0108 s   diff +0.054%
+  llc-s6-N1      nominal 20.000 s   derived 20.0064 s   diff +0.032%
+  IPC is a pure counter ratio and is INVARIANT to the window choice.
+
+S=6/N=16 vs S=1/N=2:  instructions/row +0.1%   cycles/row +34.1%   IPC -25.4%
+unsupported on this host: LLC-load-misses, LLC-loads (null, not zero)
+

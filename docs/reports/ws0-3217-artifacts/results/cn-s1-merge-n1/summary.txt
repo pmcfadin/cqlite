@@ -1,0 +1,14 @@
+==== WS0 #3217 C(N) SWEEP SUMMARY ====
+label: cn-s1-merge-n1   S=1   server_cpus=2,10   client_cpus=6,7,14,15   merge_path=merge
+points: 3 total, 0 excluded (client-saturated)   admission_clean: YES
+
+N    rep  rows/s min    rows/s med    rows/s max    spr%    rows/s/strm   speedup  margeff  srvUtl  cliUtl  cs/s     
+1    3    72582.8       72631.9       72687.2       0.1     72631.9       1.000    1.000    0.820   0.017   26010    
+
+byte bases (median, AC6 - never a bare MB/s):
+N    logical-uncomp B/s     on-disk-comp B/s       arrow-wire-cap B/s    
+1    50354909.1             14242317.8             885481265.6           
+
+scheduler cost per N (AC5):
+N    cs/s (cpu-wide)  vol cs/s (proc)  nonvol cs/s (proc)
+1    26010            0.0              0.0             

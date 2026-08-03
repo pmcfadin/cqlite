@@ -1,0 +1,5 @@
+{"label":"oncpu-s1-N8","kind":"oncpu","server_physical_cores_S":"1",
+ "server_cpus":"2,10","client_cpus":"6,7,14,15","N":8,"merge_path":"bypass",
+ "window_secs":30,"steady_pre_secs":20,"perf_freq_hz":999,
+ "call_graph":"fp (frame pointers; dwarf HANGS on this binary - never use it)",
+ "unsym_gate_rc":0,"dry_run":"0","utc":"2026-08-03T00:28:58Z"}

@@ -1,0 +1,3 @@
+{"label":"park-s6-N1","kind":"park-count","server_cpus":"0,1,2,3,4,5,8,9,10,11,12,13","N":1,
+ "merge_path":"bypass","window_secs":30,"unit":"EVENTS (switch count), not microseconds",
+ "utc":"2026-08-03T00:10:25Z"}
