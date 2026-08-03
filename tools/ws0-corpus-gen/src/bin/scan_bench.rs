@@ -64,6 +64,18 @@ struct Cli {
     /// Projection. `*` reads every column — the shape the Flight arm streams.
     #[arg(long, default_value = "*")]
     project: String,
+
+    /// Do the SETUP (corpus open + schema ingest) and exit WITHOUT scanning.
+    ///
+    /// This is how setup is subtracted from the cycles/row denominator (spec R2):
+    /// the driver runs this binary twice under `perf stat` — once `--setup-only`
+    /// and once with `--passes P` — and reports
+    /// `(cycles_total - cycles_setup) / rows`. That is a MEASURED subtraction of a
+    /// separately-observed cost, not a model. The exit is deliberately success:
+    /// the "zero rows is a failure" rule applies to a SCAN, and this mode declares
+    /// up front that it does not scan.
+    #[arg(long)]
+    setup_only: bool,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -118,6 +130,25 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let setup_secs = setup_start.elapsed().as_secs_f64();
 
     let sql = format!("SELECT {} FROM {}.{}", cli.project, cli.keyspace, cli.table);
+
+    if cli.setup_only {
+        // Keep the opened database alive across the measurement boundary so the
+        // perf window covers the whole setup, then drop it explicitly.
+        std::hint::black_box(&db);
+        drop(db);
+        let out = serde_json::json!({
+            "arm": "bare_scan_setup_only",
+            "surface": "cqlite_core::ingestion::ingest",
+            "corpus": cli.corpus.display().to_string(),
+            "schema": schema_path.display().to_string(),
+            "setup_secs": setup_secs,
+            "passes": [],
+            "rows_denominator": 0,
+            "timed_scan_secs": 0.0,
+        });
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let mut passes = Vec::new();
     for pass in 0..cli.passes {

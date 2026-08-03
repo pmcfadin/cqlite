@@ -550,7 +550,7 @@ fn time_encoder_framing(inner: DoGetStream, rpc_span: tracing::Span) -> DoGetStr
         // truncate the framing total or move the merge samples' emission point,
         // breaking the #2819 roborev-B1 ordering invariant. Only the framing bucket
         // is ever non-zero here, so this emits exactly one extra sample per RPC.
-        emitter: Some(crate::obs::StreamSubPhaseEmitter::new(rpc_span, timings)),
+        _emitter: crate::obs::StreamSubPhaseEmitter::new(rpc_span, timings),
     })
 }
 
@@ -560,8 +560,9 @@ struct FramingTimedStream {
     timings: Arc<cqlite_core::observability::StreamSubPhaseTimings>,
     /// Flushes the framing sample when the response stream is dropped — i.e. after
     /// the LAST poll, so a mid-stream client disconnect still records what it cost.
-    /// `Option` only so the field is explicitly owned and dropped; never taken.
-    emitter: Option<crate::obs::StreamSubPhaseEmitter>,
+    /// Held purely for its `Drop`; underscore-prefixed so the lint knows that is
+    /// deliberate rather than an unread field.
+    _emitter: crate::obs::StreamSubPhaseEmitter,
 }
 
 impl Stream for FramingTimedStream {
