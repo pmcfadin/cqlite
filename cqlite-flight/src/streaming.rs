@@ -700,8 +700,18 @@ fn encode_do_get(
         // currencies involved, and why this is not simply raised until the split
         // disappears live on the constant.
         .with_max_flight_data_size(crate::flight_data_size::FLIGHT_DATA_SIZE_TARGET_BYTES)
-        .build(batch_stream)
-        .map(move |res| res.map_err(|e| flight_error_to_status(e, &probe)));
+        // …which is a TARGET the encoder meets by slicing uniformly BY ROW COUNT, so
+        // width-skewed rows can still frame one over-ceiling message (issue #3096
+        // review). `wire_partition` byte-partitions the input and checks every
+        // SERIALIZED body against the ceiling; its header quotes the encoder source.
+        .build(crate::wire_partition::partition_for_wire(
+            batch_stream,
+            probe.clone(),
+        ))
+        .map(move |res| match res {
+            Ok(data) => crate::wire_partition::guard_body_within_ceiling(data, &probe),
+            Err(e) => Err(flight_error_to_status(e, &probe)),
+        });
     Box::pin(encoded)
 }
 
@@ -739,7 +749,7 @@ fn flight_error_to_status(e: FlightError, probe: &StreamProbe) -> Status {
 /// same [`Status`] for propagation to the client, so the failure is both visible
 /// server-side (via [`crate::obs::record_status_error`]'s error log + error
 /// signal) AND delivered as a proper gRPC error status.
-fn record_encoder_error(status: Status, probe: &StreamProbe) -> Status {
+pub(crate) fn record_encoder_error(status: Status, probe: &StreamProbe) -> Status {
     // Issue #2681: an encoder-stage egress failure (Arrow IPC framing / encode /
     // send) is a genuine internal fault — stamp `internal` at the site.
     crate::obs::record_do_get_abort(

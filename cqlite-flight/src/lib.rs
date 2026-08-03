@@ -66,6 +66,11 @@ mod statics;
 pub mod streaming;
 pub mod warm;
 
+// The wire-side byte partitioner + the serialized-body guard that make the
+// framing target a BOUND rather than a target (issue #3096 review). Sibling of
+// `flight_data_size` (which holds the bounds) and driven from `streaming`.
+mod wire_partition;
+
 // Shared byte-pin infrastructure (issues #2283/#2285): the single source of
 // truth for the `cassandra_easy_stress.keyvalue` field shape AND the
 // wire-metadata-order guard, used by BOTH the golden emitter example and the

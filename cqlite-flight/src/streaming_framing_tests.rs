@@ -389,3 +389,158 @@ fn the_target_sits_between_the_arrow_default_and_the_producer_payload_cap() {
         "the reserved ceiling must sit strictly under the gRPC ceiling"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Width SKEW — the hole the uniform-row-count split leaves, and the bound that
+// closes it (issue #3096, second review of lever 4)
+// ---------------------------------------------------------------------------
+//
+// Every fixture above has UNIFORM row widths, and that is precisely why none of
+// them could catch this: `split_batch_for_grpc_response` slices a batch into
+// `ceil(capacity / target)` pieces of EQUAL ROW COUNT
+// (`arrow-flight-53.4.1/src/encode.rs:613-637`), so with uniform widths equal rows
+// means equal bytes and the target behaves like a cap. Skew the widths and it
+// stops being one: all of a batch's bytes can land in slice 0.
+//
+// `crate::wire_partition` byte-partitions before the encoder and checks the
+// SERIALIZED body after it. These two tests assert both halves over the real
+// `encode_do_get`, at the SHIPPED bounds.
+
+/// A one-column `Binary` batch with the EXACT per-row widths given, at
+/// capacity/payload ratio ~1.0 (`Buffer::from_vec` adopts the vector's allocation,
+/// so there is no allocator slack to hide behind).
+fn skewed_binary_batch(widths: &[usize]) -> (RecordBatch, Arc<ArrowSchema>) {
+    let total: usize = widths.iter().sum();
+    let values = Buffer::from_vec(vec![0x5au8; total]);
+    let mut offsets: Vec<i32> = Vec::with_capacity(widths.len() + 1);
+    let mut acc = 0i32;
+    offsets.push(0);
+    for w in widths {
+        acc += i32::try_from(*w).expect("cumulative width fits i32");
+        offsets.push(acc);
+    }
+    let array = BinaryArray::try_new(OffsetBuffer::new(ScalarBuffer::from(offsets)), values, None)
+        .expect("binary array");
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "b",
+        DataType::Binary,
+        false,
+    )]));
+    let batch =
+        RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(array)]).expect("record batch");
+    (batch, schema)
+}
+
+/// Drive `encode_do_get` over one batch, returning either every emitted body size
+/// or the `Status` the stream failed with.
+async fn body_sizes_or_status(
+    batch: RecordBatch,
+    schema: Arc<ArrowSchema>,
+) -> Result<Vec<usize>, Status> {
+    let stream = futures::stream::iter(vec![Ok::<_, FlightError>(batch)]);
+    let mut encoded = encode_do_get(stream, schema, StreamProbe::default());
+    let mut bodies = Vec::new();
+    while let Some(msg) = encoded.next().await {
+        match msg {
+            Ok(data) if data.data_body.is_empty() => {}
+            Ok(data) => bodies.push(data.data_body.len()),
+            Err(status) => return Err(status),
+        }
+    }
+    Ok(bodies)
+}
+
+/// **The wire-safety regression test of the SECOND #3096 review.**
+///
+/// A width-SKEWED batch at a raised `--max-batch-bytes` (16 MB): four ~3.5 MB rows
+/// followed by a thousand 2 KB ones. The encoder's own split cuts this into 4
+/// equal-ROW-COUNT slices of 251 rows, and slice 0 holds all four fat rows — so
+/// arrow-flight alone frames a **~14.5 MB** `data_body`, over three times the 4 MiB
+/// gRPC ceiling, at a target of 3.875 MiB.
+///
+/// Non-vacuity is asserted AND measured by perturbation: the encoder's first
+/// predicted slice is measured inline below and must exceed the reserved ceiling,
+/// and with `wire_partition::frame_for_wire_bounded` short-circuited to a
+/// pass-through this test fails with the serialized-body guard reporting a
+/// **14,495,104-byte** `data_body` — 3.5x the 4,128,768-byte ceiling. Both halves
+/// of the fix are therefore load-bearing on this fixture.
+#[tokio::test]
+async fn a_width_skewed_batch_frames_every_serialized_body_under_the_reserved_ceiling() {
+    const FAT: usize = 3_500_000;
+    const NARROW: usize = 2_000;
+    let mut widths = vec![FAT; 4];
+    widths.extend(std::iter::repeat_n(NARROW, 1_000));
+    let payload: usize = widths.iter().sum::<usize>() + (widths.len() + 1) * 4;
+    let (batch, schema) = skewed_binary_batch(&widths);
+
+    // The fixture is a batch a caller with `--max-batch-bytes 16MiB` really gets…
+    assert!(
+        payload > crate::batch_bytes::DEFAULT_MAX_BATCH_BYTES && payload < 16 * 1024 * 1024,
+        "the fixture must sit above the DEFAULT payload cap and inside a raised \
+         16 MiB one (got {payload} B)"
+    );
+    // …and the encoder's OWN uniform-by-row-count slice 0 blows the ceiling.
+    let rows = batch.num_rows();
+    let capacity: usize = batch
+        .columns()
+        .iter()
+        .map(|c| c.get_buffer_memory_size())
+        .sum();
+    let n_slices = capacity.div_ceil(FLIGHT_DATA_SIZE_TARGET_BYTES).max(1);
+    let uniform_rows = (rows / n_slices).max(1);
+    let encoder_slice_0 = crate::wire_partition::slice_payload_bytes(&batch, 0, uniform_rows);
+    assert!(
+        encoder_slice_0 > FLIGHT_DATA_RESERVED_CEILING_BYTES,
+        "NON-VACUITY: the encoder's first {uniform_rows}-row uniform slice measures \
+         {encoder_slice_0} B, which must exceed the {FLIGHT_DATA_RESERVED_CEILING_BYTES}-byte \
+         reserved ceiling — otherwise this fixture cannot distinguish the fix from the \
+         defect it closes"
+    );
+
+    let bodies = body_sizes_or_status(batch, schema)
+        .await
+        .expect("a skewed batch of legal rows must be framed, not refused");
+    assert!(
+        bodies.len() >= 5,
+        "the fat rows must be split apart from each other and from the narrow tail; \
+         got {} message(s): {bodies:?}",
+        bodies.len()
+    );
+    for (i, size) in bodies.iter().enumerate() {
+        assert!(
+            *size < FLIGHT_DATA_RESERVED_CEILING_BYTES,
+            "SERIALIZED message {i} is {size} B, at or over the \
+             {FLIGHT_DATA_RESERVED_CEILING_BYTES}-byte reserved ceiling \
+             ({GRPC_DEFAULT_MAX_MESSAGE_BYTES} B gRPC default less \
+             {FLIGHT_FRAMING_OVERHEAD_BYTES} B of framing). A default tonic client refuses \
+             it. Sizes: {bodies:?}"
+        );
+    }
+    // Nothing was dropped to achieve that: the bodies carry at least the payload.
+    let emitted: usize = bodies.iter().sum();
+    assert!(
+        emitted >= widths.iter().sum::<usize>(),
+        "the emitted bodies ({emitted} B) must carry the whole payload — splitting \
+         must not lose rows"
+    );
+}
+
+/// A row too wide to frame at all is REFUSED with a clear `Status`, not emitted as
+/// an illegal message.
+///
+/// A single row is indivisible (`rows_per_batch` is `.max(1)`), so a row wider than
+/// the reserved ceiling has no legal framing. The client's alternative is tonic's
+/// opaque `Failed to read message`, with nothing server-side saying why.
+#[tokio::test]
+async fn a_row_wider_than_the_ceiling_is_refused_rather_than_framed_illegally() {
+    let (batch, schema) = skewed_binary_batch(&[2_000, FLIGHT_DATA_RESERVED_CEILING_BYTES + 4_096]);
+    let status = body_sizes_or_status(batch, schema)
+        .await
+        .expect_err("a row wider than the ceiling must fail the stream closed");
+    assert_eq!(status.code(), tonic::Code::OutOfRange, "code: {status:?}");
+    let msg = status.message();
+    assert!(
+        msg.contains("row 1") && msg.contains("cannot be split"),
+        "the refusal must name the row and say why no framing helps, got: {msg}"
+    );
+}
