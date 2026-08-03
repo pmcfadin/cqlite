@@ -276,14 +276,27 @@ THE EFFECTIVE SET IS A UNION OF FOUR THINGS, and a swallow in ANY of them FAILs:
      v0.61.2 binary. A Cargo.lock in your diff IS dropped from the reviewer's copy.
 Every value line names the SOURCE of the pattern responsible, because with several
 files in play "excluded by 'docs/**'" does not say which file to edit.
-FAIL vs NOTICE turns on the AVAILABLE REMEDY, not on severity: a CONFIGURED pattern
-(sources 1-3) is a FAIL because the fix is a one-token config edit, while a BUILT-IN
-(source 4) is a NOTICE because there IS no fix — the deny-list is compiled into the
-binary and has no opt-out or negation form. A check that fires on a legitimate change
-(a routine Cargo.lock touch) with no remedy available is a check that gets disabled,
-and a disabled census-exclusion is #3229 all over again. If BOTH occur in one run the
-FAIL wins and both causes are named. Values:
-  PASS (<k>/<n> code census paths survive ...; corroboration: OK|NOTICE|UNAVAILABLE)
+THE UNIFYING RULE, which decides every value below:
+  **FAIL where the author can act; NOTICE where only the information is actionable;
+    never silence.**
+It is not three ad-hoc calls but one rule applied three times:
+  - a CONFIGURED pattern (sources 1-3) swallowing census code => FAIL. The remedy is a
+    one-token edit to a NAMED file; act before paying for a review round.
+  - a PINNED built-in (source 4) swallowing census code => NOTICE. There IS no fix: the
+    deny-list is compiled in, with no opt-out and no negation form. A check that fires
+    on a legitimate change (a routine Cargo.lock touch) with no remedy available is a
+    check that gets DISABLED, and a disabled census-exclusion is #3229 all over again.
+  - the LIVE built-in set DIVERGING from the pinned 24 => FAIL. This one HAS a remedy
+    (re-extract, update the pin, judge the new built-in) and it is a MECHANISM change,
+    which the v0.61.2 pin already obliges us to catch on upgrade. A NOTICE here would
+    silently absorb an upgrade that began excluding '*.rs' or 'scripts/**', with the
+    failure looking like normal operation.
+"never silence" is the third clause and it is load-bearing: an UNOBSERVABLE built-in
+set reads 'built-in-set: UNAVAILABLE' in the value line, never an unstated assumption
+of agreement. Every value therefore ends with built-in-set: OK|DIVERGED|UNAVAILABLE.
+Both FAIL causes outrank the NOTICE, and EVERY cause present is named. Values:
+  PASS (<k>/<n> code census paths survive ...; corroboration: OK|NOTICE|UNAVAILABLE;
+       built-in-set: OK|UNAVAILABLE)
   PASS (no exclusion patterns configured; <k>/<n> ... survive the <b> roborev
        v0.61.2 built-in exclude(s); ...)  absent key/file or an empty list, and only
        once 'roborev config get' has CORROBORATED that nothing is configured
@@ -292,6 +305,8 @@ FAIL wins and both causes are named. Values:
        outside the verdict scan's FAIL*|FINDINGS*|ERROR*|INCONSISTENT* set) but the
        paths ARE named: a clean verdict does not cover them, and prompt-content: is
        told not to expect them
+  FAIL (roborev built-in exclude set DIVERGED from the pinned v0.61.2 set: <delta>)
+       DIFF-INDEPENDENT — the mechanism moved under us; re-extract and re-pin
   FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>' [<source>], ...)
   FAIL (exclusion set unreadable: <cause>) present but unparseable, an unknown TOML
                                           escape, or an unresolvable ROOT checkout —
@@ -306,6 +321,10 @@ FAIL wins and both causes are named. Values:
 A FAIL naming a config source is a CONFIGURATION defect: fix the named file — do not
 investigate the reviewer or prompt-content:. A NOTICE naming [roborev-builtin] is not
 fixable: roborev will never show a reviewer that path, so verify it some other way.
+A FAIL naming a DIVERGED built-in set is fixable HERE: re-extract the deny-list with
+  LC_ALL=C grep -a -o ':(exclude,glob)[^ ]*' "$(command -v roborev)"
+then update ROBOREV_BUILTIN_EXCLUDES + ROBOREV_BUILTIN_PATHSPEC_LITERALS in
+scripts/flow/roborev-review-oracles.sh and JUDGE the new built-in.
 Re-verify BOTH the port and the built-in list on any roborev version bump.
 
 Sanctioned invocation (measured, issue #2964 round 5):
