@@ -425,7 +425,38 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   **`census-exclusion:`** key (immediately after `code-free:` in the block's fixed order) FAILs closed,
   naming the swallowed paths and the pattern responsible, whenever the configured set would swallow census
   code. Its asymmetry is deliberate — **noise, never blindness**: a new artifact extension under `docs/`
-  is re-admitted to review prompts (a token cost), while the swallow direction can only ever fail loudly. Push first: an unpushed implementation commit is
+  is re-admitted to review prompts (a token cost), while the swallow direction can only ever fail loudly.
+  **The effective exclusion set is FOUR things, not one** — the `--repo` checkout's `.roborev.toml`, the
+  **ROOT checkout's** (see the ordering property below), `~/.roborev/config.toml`, **and roborev's own
+  compiled-in lockfile/cache deny-list** (`**/Cargo.lock`, `**/go.sum`, `**/.cache/**`, … 24 patterns
+  pinned to v0.61.2). Every value line names WHICH source is responsible, and ends with
+  `built-in-set: OK|DIVERGED|UNAVAILABLE`.
+  **The verdict split follows ONE rule, and it generalizes beyond this key — apply it to any call of
+  this shape without asking: FAIL where the author can act; NOTICE where only the information is
+  actionable; never silence.** Concretely: a *configured* pattern swallowing census code is a **FAIL**
+  (the remedy is a one-token edit to a named file); a *pinned built-in* swallowing census code is a
+  **NOTICE** (there is **no** remedy — the deny-list is compiled in with no opt-out or negation form, and
+  a guard that fires on a legitimate change like a routine `Cargo.lock` touch with no available fix is
+  the guard that gets **disabled**, which is how #3229 happened); the *live built-in set diverging from
+  the pin* is a **FAIL** (that one HAS a remedy — re-extract, re-pin, judge the new built-in — and it is
+  a mechanism change the version pin exists to catch, not absorb). "Never silence" is load-bearing: an
+  unobservable built-in set reads `UNAVAILABLE` **in the value line**, never as an unstated assumption of
+  agreement. `NOTICE*` is deliberately outside the wrapper's failing-capable scan
+  (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`).
+  **A `.roborev.toml` change cannot certify itself (#3229) — three properties, one generalization:**
+  **(1)** roborev's daemon binds a repository by its **`repos.root_path`** and reads **that ROOT
+  checkout's** `.roborev.toml` — a *worktree* `.roborev.toml` edit is **invisible** to it, so under
+  1:1:1:1 the file you edited is not the file your review applies. **(2)** The daemon **snapshots config
+  at start**, so an edit needs a **daemon restart** to take effect. **(3) Generalized: any PR whose
+  subject is a config the daemon (or a gate) reads from root cannot certify itself** — the same shape as
+  `required` evaluating the aggregator and registry from the PR's **BASE** ref (below). Plan the
+  demonstration for **after** the merge. Both (1) and (2) have cost real rounds: (1) produced a
+  `census-exclusion: PASS (7/7 survive)` about a config roborev never read, caught only by the
+  pre-existing `prompt-content: FAIL (1/7 absent)`; (2) made #3234 measure `exclude_patterns` as having
+  "no observable effect" (its single daemon restart preceded every config edit and never followed one).
+  **Defence in depth paid out in the direction nobody plans for**: the *older* guard caught the *newer*
+  one certifying a config that was never used. Keep both layers.
+  Push first: an unpushed implementation commit is
   itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** FOUR
   confirmed paths make roborev report clean having reviewed NOTHING (or only part), and a vacuous pass is
   TEXTUALLY IDENTICAL to a genuine one — (T1) from a worktree, `--branch` without `--repo` resolves
@@ -703,7 +734,10 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   you push again it no longer short-circuits — the tier is polled and a failure it reports still reds
   the gate; **remove and re-apply the label** to waive the new head. Two further properties worth knowing: `required` evaluates the aggregator **and the registry
   from the PR's BASE ref**, so a registry/aggregator change lands only after it merges (rename a
-  tier's context in a separate PR, or waive it); and a tier's mandate covers everything that reaches
+  tier's context in a separate PR, or waive it) — the **same shape** as roborev reading
+  `exclude_patterns` from the repo **root path** and snapshotting it at daemon start (#3229, above);
+  generalized, **any PR whose subject is a config a daemon or gate reads from root cannot certify
+  itself**, so plan its demonstration for after the merge; and a tier's mandate covers everything that reaches
   it at runtime — for Flight that includes `cqlite-core/**`, `test-data/**` and the Cargo manifests,
   so core-touching PRs run the Flight e2e tier. Finalize runs in-session when the required
   check is already green at arm time, else on a later wake confirming `state=MERGED`. Do NOT

@@ -178,7 +178,7 @@ which is precisely why the fix cannot be a config edit alone.
 
 | Alternative | Why it was rejected |
 |---|---|
-| **(a) Drop `docs/**` entirely, keep only `*.md`** | Correct on AC1 and the *simplest* change — but it admits ~570 raw run-output files (`txt`/`json`/`err`/`log`/`jsonl`) plus binary/image blobs into review prompts. A genuine review already runs 398k–649k input tokens; a report PR's artifact tree would blow past the prompt budget (roborev's own `max_prompt_size` fallback switches to *file paths only*, i.e. a degraded review) for zero review value. |
+| **(a) Drop `docs/**` entirely, keep only `*.md`** | Correct on AC1 and the *simplest* change — but it admits ~570 raw run-output files (`txt`/`json`/`err`/`log`/`jsonl`) plus binary/image blobs into review prompts. A genuine review on a large diff already runs several hundred thousand input tokens; a report PR's artifact tree would blow past the prompt budget (roborev's own `max_prompt_size` fallback switches to *file paths only*, i.e. a degraded review) for zero review value. |
 | **(b) Relocate the harnesses out of `docs/`** | **Explicitly ruled out by the owner in #3229.** Shipping a harness beside the report it produced is the convention and it stays. |
 | **(c) Global (slash-less) exclusion of `*.txt`, `*.json`, …** | Per the recursive-normalisation finding, a slash-less pattern applies **repo-wide**. That would newly hide real config and data files elsewhere in the tree (`test-data/**/*.json`, workflow-adjacent JSON, fixtures) from review — a genuine regression traded for a shorter pattern list. |
 | **(d) Ask roborev for an allow-list / negation** | Not expressible today (see above) and it is an upstream feature request on a binary we do not control. A worthwhile upstream ask; not this change. |
@@ -275,6 +275,44 @@ Because three sources are now in play, **every value line names the source** (`w
 an operator which file to edit. The FAIL details additionally enumerate every source path read, and a
 worktree run states explicitly that a narrowed worktree config does **not** override the root one.
 
+#### D2a-bis — the arbitration Blocker A settled, and what it saved
+
+Blocker A did more than fix a false PASS: it closed the **live existential risk to this entire change**.
+
+Issue **#3234** had independently measured that `exclude_patterns` has **"no observable effect"** — a null
+result. If true, AC1's narrowing would have been cosmetic and AC3 would have been guarding a mechanism
+that does not apply, i.e. the change would have had no subject. The owner had ranked hypothesis **H2**:
+*config resolves from the primary checkout, not the worktree.*
+
+Both halves turned out to be operative, and they were found from opposite directions:
+
+| Half | Established by |
+|---|---|
+| The **mechanism** — `exclude_patterns` really is applied, as `FormatExcludeArgs` pathspecs | this change: the disassembly + the 21-review replay (every dropped path a `.md` at any depth, no non-`.md` ever dropped) |
+| The **ordering** — the daemon reads the ROOT path's config and snapshots it at start | #3234, whose single daemon restart happened to precede every config edit it made and never follow one; and this change's Blocker A, from the other side |
+
+**Conclusion, recorded plainly: `exclude_patterns` WORKS.** #3234's null result was a
+**worktree-config artifact**, not a broken mechanism. So AC1 is a genuine fix and AC3 guards a mechanism
+that really applies. Two workers reached the same property from opposite ends, which is stronger evidence
+than either alone.
+
+#### D2a-ter — the PRE-EXISTING guard caught the NEW guard. Keep both layers.
+
+The detail worth not smoothing over: `census-exclusion:` — the check added **by this change** — reported
+`PASS (7/7 code census paths survive)` about a config roborev never read. What caught it was
+`prompt-content: FAIL (1/7 code census paths absent)`: the **older** guard, already in the wrapper.
+
+This is the strongest argument in the change for keeping both layers, and it is strong precisely because
+it paid out in **the direction nobody plans for**. Defence in depth is usually justified as "the new,
+sharper check will catch what the old one misses". Here the new check was the wrong one, and the crude
+after-the-fact check — the one whose whole cost is that it only fires *after* a review round is paid for —
+was the thing standing between a broken guard and a fleet-wide green. A layer is worth keeping not because
+it is better than the other, but because its failure modes are **uncorrelated** with the other's.
+
+Corollary, also worth recording: `prompt-content:` remains valuable even though `census-exclusion:` now
+computes the same fact earlier and more cheaply. The cheap early check can be wrong about its INPUT; the
+expensive late check reads what actually happened.
+
 #### D2b — `exclude_patterns` is not the whole exclusion set: roborev's BUILT-INS
 
 The binary also **always** appends a hard-coded lockfile/cache deny-list, with no configuration switch.
@@ -298,6 +336,69 @@ not editable, so `.roborev.toml` cannot fix it — the honest statement is "robo
 reviewer these paths, verify them another way", not "narrow your config". The list carries the same
 re-verify-on-upgrade obligation as the ported algorithm, since an upstream addition would silently widen
 the real exclusion set while every summary block still read `PASS`.
+
+##### D2b-i — THE RULE: FAIL where the author can act; NOTICE where only the information is actionable; never silence
+
+The first cut of this made a built-in swallow a **FAIL**, on the reasoning that an invisible path is an
+invisible path. That was wrong, and the reason it was wrong generalizes — so the rule is recorded here
+verbatim, to be applied to future calls of this shape without re-litigating them:
+
+> **FAIL where the author can act; NOTICE where only the information is actionable; never silence.**
+
+One rule, three applications, which is why it replaces three ad-hoc judgements:
+
+| Cause | Verdict | Because |
+|---|---|---|
+| A **configured** pattern swallows census CODE | **FAIL** | The remedy is a one-token edit to a **named** file, available before a review round is paid for. (This is ④'s call.) |
+| A **pinned built-in** swallows census CODE | **NOTICE** | There is **no** remedy at all: compiled in, no opt-out, no negation form (R5). `Cargo.lock` churn is routine here, so FAILing would permanently red a legitimate change class against a check its author **cannot satisfy** — and *a guard that fires on correct input with no available fix is the guard that gets **disabled***, which is exactly how #3229 happened. (This is ⑥'s call.) |
+| The **live built-in set diverges from the pin** | **FAIL** | This one **does** have a remedy — re-extract, re-pin, and **judge** the new built-in — and it is a **mechanism** change, which the v0.61.2 pin exists to catch rather than absorb. A NOTICE here would swallow an upgrade that began excluding `*.rs` or `scripts/**` while the block read like normal operation: the exact blindness this issue closes. |
+
+Two design consequences follow from the third clause, "never silence":
+
+1. Every value line ends with `built-in-set: OK|DIVERGED|UNAVAILABLE`. An **unobservable** set is
+   `UNAVAILABLE` **in the value line**, never an unstated assumption of agreement — the same discipline as
+   refusing to alias "we could not tell" to "nothing is excluded".
+2. The NOTICE still names the paths and the built-in responsible **in the value line**, not merely in a
+   detail. "Non-failing" must not become "skimmable".
+
+`NOTICE*` sits outside the wrapper's failing-capable scan (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`) and both
+FAIL forms inside it. That correspondence is asserted **structurally against the scan itself**, because a
+NOTICE that reds the run — or a FAIL that does not — is the decorative-key defect mirrored.
+
+##### D2b-ii — how divergence is OBSERVED (and why not by re-extraction)
+
+A blind re-extraction of the deny-list cannot support a FAIL. Go string literals are concatenated into one
+blob with no terminators; measured on this very binary, a naive scan for `:(exclude,glob)<something>`
+yields truncations (`**/.be`, `**/f`, `**/mix.l`), junk-suffixed hits (`**/.cache/**add…`,
+`**/go.sumBinary file…`) and — worst — a phantom `**/git` that is really the bare RECURSIVE PREFIX constant
+followed by an unrelated string. A FAIL built on that would red every run.
+
+Two reliable signals are used instead:
+
+1. **Removals, named exactly.** Each pinned pattern is looked for as a FIXED string
+   `:(exclude,glob)<pattern>`. Hit or no hit; no delimiting required. This matters in its own right: a
+   *vanished* pattern makes the model **over**-exclude, so `census-exclusion:` would report a swallow that
+   no longer happens — a FALSE FAIL, the direction that gets a guard bypassed.
+2. **Additions, detected numerically.** The COUNT of `:(exclude,glob)` literals, pinned at **26** = the 24
+   built-in patterns + the **2 bare prefix constants** the algorithm concatenates. Any added built-in moves
+   it. The count cannot say *which* pattern appeared, and it also moves if roborev introduces an unrelated
+   `:(exclude,glob)` string — but that is still a mechanism change in precisely this area with precisely
+   this remedy, so reporting it is correct rather than a false alarm.
+
+**Declared residual:** a NEW pattern that has a PINNED one as a prefix (`**/Cargo.lock.bak`) is invisible
+to (1) and only moves the count in (2).
+
+##### D2b-iii — the follow-through: `prompt-content:` must not re-report a known absence
+
+Making the built-in swallow a NOTICE would have been pointless on its own, because `prompt-content:` would
+then FAIL on the very same `Cargo.lock` — moving one unfixable red a single key down the block. So
+`census-exclusion:` hands the built-in-excluded set to `prompt-content:`, which subtracts it and says so in
+its value (`+<n> not expected: excluded by a roborev built-in`). Their absence from the prompt is a
+deterministic property of roborev's compiled-in mechanism, already reported; asserting their presence
+asserts something known-impossible.
+
+Scoped to **built-in** swallows only, and that scoping is load-bearing: a *configured* swallow FAILs
+pre-enqueue and never reaches this code, so the subtraction can never mask a configuration defect.
 
 #### D2c — an EMPTY parse must be corroborated, not trusted (blocker, measured)
 
@@ -327,6 +428,14 @@ Two changes, and both are needed:
 The regression suite's `cx5b`/`cx5c` previously **locked in** the un-corroborated PASS (both left the stub's
 `config get` unsupported), so a green suite blessed a self-disabled guard; they now supply an
 answering-but-empty binary and assert `corroboration: OK`. `cx5d` pins the drift direction directly.
+
+**A test that blesses a vacuous verdict is WORSE than an unguarded path.** This is worth stating as a rule,
+not just as a fix. An unguarded path is merely unprotected — everyone can see there is no check. A test
+asserting `PASS (no exclusion patterns configured)` for the exact state a silently self-disabled guard
+produces is actively harmful twice over: it **consumes the review budget** that would otherwise have looked
+at that path, and it converts "nobody checked" into "we checked and it was fine" — which is the one
+statement that stops anyone looking again. When adding a case whose expected value is a PASS, ask *what
+state the system is in when that PASS is wrong*, and make the fixture distinguish the two.
 
 **Reading the effective set: files, not the binary.** The check parses `.roborev.toml` (repo) and
 `~/.roborev/config.toml` (global) directly, rather than shelling out to `roborev config get`. Two
@@ -400,31 +509,88 @@ constants it would otherwise have to import, and every additional sourced file a
 missing-or-truncated fail-closed validation surface. Revisit if the oracles file approaches the ~800-line
 target.
 
-### D4 — the demonstration is a recorded live probe, not an assertion (AC2)
+### D4 — the demonstration is a recorded POST-MERGE run, and the primary evidence is a real PR (AC2)
 
-AC2 is satisfied by **running** the sanctioned wrapper, not by reasoning about it:
+AC2 is satisfied by **running** the sanctioned wrapper, not by reasoning about it. But it cannot be run
+against *this* change's own review, and the reason is the ordering property of D2a taken one step further.
+
+#### Why it cannot be pre-merge — the deadlock
+
+roborev resolves `exclude_patterns` from the **ROOT checkout** and **snapshots it at daemon start**. So
+while this change is unmerged, the set applied to its own review is the root checkout's pre-change blanket
+`['docs/**', '*.md']`. The original plan committed an **executable under root `docs/`**
+(`probe-census-exclusion.sh`) precisely so the PR would be a #3222-shaped demonstration of its own fix.
+Under the old set that executable is swallowed, so the new check FAILs — **correctly**:
 
 ```
-bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol --repo <abs> --base origin/main
+census-exclusion: FAIL (1/7 code census paths excluded:
+  docs/reports/3229-artifacts/probe-census-exclusion.sh by 'docs/**' [root-config])
 ```
 
-against a PR #3222-shaped diff — executables under `docs/reports/*-artifacts/` — with the narrowed
-config in place. Recorded in the PR body: the `census:` counts, the `code-free:` and
-`census-exclusion:` lines, the `prompt-content:` line (expected `PASS (<n>/<n> code census paths
-present)`), and the **input / cached / output token counts** from the job record, which must sit in the
-**genuine-review band (398k–649k in / 5.0k–6.3k out, minutes of wall time)** rather than the **vacuous
-baseline (~18.7k in / 0 cached / 53–56 out, ~8s)** — the signature PR #3222 actually produced was
-15,443 in / 89 out.
+That is not a bug to route around; it is the guard working. But it makes a pre-merge self-demonstration a
+**deadlock, not a test**: *the specimen that proves the fix is the specimen the unfixed configuration eats.*
+So the executable is removed from the branch and the procedure kept as committed prose
+(`docs/reports/3229-artifacts/live-probe-procedure.md`). The requirement is **rescheduled, not dropped** —
+and the reason is recorded, because a quietly weakened acceptance criterion is indistinguishable from one
+that was never met.
 
-The probe diff **must also include a file under a nested `docs` directory** (e.g. under
-`website/src/content/docs/`) with one of the deny-listed extensions — no longer to *resolve* an ambiguity
-(the disassembly did that) but as the **end-to-end confirmation of R1**: because a pattern with an interior
-`/` is root-anchored, that nested path must still be DELIVERED to the reviewer. Presence confirms the port
-live; **absence would falsify it** and is a blocking finding, not an acceptable outcome to record — the
-pattern list and the check's construction both rest on R1 being right.
+`website/src/content/docs/_3229-root-anchoring-probe.json` **stays** on the branch: a `.json` under a
+*nested* `docs` directory survives under BOTH the old and the new configuration (root anchoring), so it
+does not deadlock and is live evidence either way.
 
-The probe needs the network and a live reviewer, so like the #2964 worktree probe it is **documented and
-recorded, never gate-run**.
+#### The primary evidence is a real PR, not the probe
+
+A probe is written to pass. The first post-merge PR that *happens* to carry an executable under `docs/`
+proves the fix on a diff **nobody shaped for it**, which is strictly better evidence and costs nothing
+extra — #3234 ships harnesses now, #3096's successor will, #3249's artifacts may.
+
+- **AC2's record** = that PR's `census:` + `census-exclusion:` + `prompt-content:` lines, posted to #3229.
+- **The committed procedure** = the documented **fallback**, if no such PR arrives promptly or its evidence
+  is ambiguous.
+
+The PASS condition is `census-exclusion: PASS` **together with**
+`prompt-content: PASS (<n>/<n> code census paths present)`: the first says the configuration would not
+swallow the executables, the second says the reviewer actually received them. Neither alone suffices —
+which is the same defence-in-depth point D2a-ter makes from the other side.
+
+#### The named trigger — an unowned post-merge obligation is not an obligation
+
+Post-merge intentions decay, and this project has the receipts: **#3232** existed only as prose in #3100's
+close; **#3103** shipped while its producer stayed uncommitted, after which three separate issues rebuilt a
+corpus. So the obligation carries mechanism:
+
+1. On merge, **#3229 goes to `In Review`, NOT `Done`** — `Done` auto-closes the issue and the obligation
+   would vanish with it.
+2. The PR is finalized and delivery telemetry stamped as usual; neither waits on the demonstration.
+3. #3229 flips to **`Done` only once the AC2 evidence is posted** on the issue.
+4. If the demonstration has not happened **within a few days**, it is **filed as a tracked issue** — never
+   left to live in a comment thread.
+
+#### Reading the tokens: the mechanism's thresholds, not a memorised band
+
+Earlier drafts of this design enshrined a **398k–649k input** "genuine-review band". That is wrong as a
+threshold and has been corrected. Judge against the wrapper's own thresholds, which are what the verdict is
+actually computed from:
+
+- **`input` ≥ `ROBOREV_VACUITY_MIN_INPUT_TOKENS` (25,000)** — anchored on the *highest observed vacuous
+  run* (18,801), with headroom. Below it, tier 2 FAILs.
+- **`cached` > 0** — a vacuous run measured exactly 0 cached.
+- **`output` is ADVISORY ONLY, never a failure condition** — and the reason is decisive: a genuine **clean**
+  review emits roughly **20–60** output tokens, *indistinguishable* from the vacuous baseline's 53–56.
+  Output therefore cannot be a realness test on its own, in either direction. Already documented at
+  `scripts/flow/roborev-review-checks.sh:328`.
+
+398k–649k is cited **only as observed on large diffs**. It is diff-size dependent, and an absolute floor
+drawn from large-diff observations would **falsely flag legitimate small diffs**: a real, substantive round
+measured during this change was `input=118514 cached=88320 output=5954` on a ~90k-character prompt, with two
+substantive findings citing real code — unambiguously genuine, and far below that band.
+
+The vacuous **signature** to recognise is a shape, not a magnitude: input below the 25k floor, `cached == 0`,
+a few dozen output tokens in seconds. PR #3222 measured 15,443 in / 89 out beside
+`prompt-content: FAIL (136/136 code census paths absent)`.
+
+The demonstration needs the network and a live reviewer, so like the #2964 worktree probe it is
+**documented and recorded, never gate-run**.
 
 ### D5 — hermetic regression tests (AC5)
 

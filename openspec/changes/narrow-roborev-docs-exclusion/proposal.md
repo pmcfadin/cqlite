@@ -20,14 +20,38 @@ carried **33 executable scripts** (`.py` / `.sh` / `.bt`) — the Part A/B drive
 classifier, the demangler, the counter parsers, the corpus-basis and summarisation tools. The
 sanctioned wrapper returned `RESULT: FAIL` with `prompt-content: FAIL (136/136 code census paths
 absent)`, both vacuity tiers red, and a token signature of **15,443 in / 89 out** against a documented
-vacuous baseline of ~18.7k in / 0 cached / 53–56 out (a genuine review on this repo runs 398k–649k in /
-5.0k–6.3k out). roborev had built an **empty prompt**.
+vacuous baseline of ~18.7k in / 0 cached / 53–56 out. roborev had built an **empty prompt**. (Token
+figures like 398k–649k in are *observed on large diffs*, never thresholds: the wrapper's actual floor is
+`ROBOREV_VACUITY_MIN_INPUT_TOKENS = 25000` with `cached > 0`, and **output is advisory only** because a
+genuine *clean* review emits 20–60 output tokens — indistinguishable from a vacuous one.)
 
 The wrapper catching it is a **detection, not a fix**. The standing outcome is "this class of PR can
 never be roborev-certified", and the compensating control — a hand-run adversarial review of every
 executable — is not a process to rely on. (On #3222 that hand review found no blockers but did find a
 fourth silent-failure instance and two provenance defects; the owner accepted it for that PR
 explicitly **not** as a standing process.)
+
+### Settled: `exclude_patterns` WORKS — the existential risk to this change is closed
+
+This change had one way to be worthless. Issue **#3234** had independently measured that
+`exclude_patterns` has **"no observable effect"** — a null result. If that were true, AC1's narrowing would
+be cosmetic and AC3 would guard a mechanism that does not apply. The owner had ranked hypothesis **H2**:
+*config resolves from the primary checkout, not the worktree.*
+
+Both halves turned out to be operative, established from opposite directions:
+
+- **The mechanism half** — this change: the disassembly of `git.FormatExcludeArgs` plus a 21-review replay
+  in which every dropped path was a `.md` at arbitrary depth and no non-`.md` was ever dropped. The
+  exclusion is real and its algorithm is exactly known.
+- **The ordering half** — #3234, independently: its single daemon restart happened to **precede every
+  config edit it made and never follow one**. Since roborev resolves `exclude_patterns` from the repo
+  **ROOT path** and **snapshots it at daemon start**, its edits could not have taken effect. This change
+  hit the same property from the other side, as Blocker A.
+
+**Conclusion: `exclude_patterns` works. #3234's null result was a worktree-config artifact, not a broken
+mechanism.** So AC1 is a genuine fix and AC3 guards a mechanism that really applies. Two workers reaching
+the same property from opposite ends is stronger evidence than either alone, and the arbitration is
+recorded here rather than left implicit.
 
 **The mechanism is a disagreement between two classifiers.** The wrapper's pre-enqueue `code-free:`
 check is **extension-based** (`roborev_census` in `scripts/flow/roborev-review-oracles.sh` classifies
@@ -78,12 +102,19 @@ review of every program the repo ships beside a report. It is fleet-wide and rec
    itself. The census's docs-scoped artifact classification and the config's docs-scoped deny-list are
    declared **once** in the wrapper, and the one residual disagreement direction that remains is
    declared and shown to be noise-only, never a swallow.
-4. **A recorded live demonstration (AC2).** The sanctioned wrapper is run against a PR
-   #3222-shaped diff (executables under `docs/reports/*-artifacts/`) and the census counts, the
-   `prompt-content:` line and the input/cached/output token counts are **recorded** in the PR — showing
-   the genuine-review band rather than the vacuous baseline. The probe also CONFIRMS end to end the
-   root-anchoring the disassembly established — a deny-listed extension under `website/src/content/docs/`
-   is still delivered to the reviewer, because a pattern containing an interior `/` is passed verbatim.
+4. **A recorded live demonstration (AC2) — POST-MERGE, with a named trigger.** The demonstration
+   cannot be pre-merge: roborev resolves `exclude_patterns` from the **repo ROOT path** and snapshots it
+   at daemon start, so the narrowed set does not apply to this change's own review, and a committed
+   executable under root `docs/` makes `census-exclusion:` FAIL *correctly* until merge — a deadlock, not
+   a test. The **primary evidence is the first post-merge PR that happens to carry an executable under
+   `docs/`** (strictly better than a probe written to pass: the diff was not shaped for it); the committed
+   procedure in `docs/reports/3229-artifacts/live-probe-procedure.md` is the fallback. The obligation is
+   held by mechanism, not goodwill: on merge the issue goes to **`In Review`, not `Done`**, and flips to
+   `Done` only once the evidence is posted; undelivered within a few days, it is filed as a tracked issue.
+   `website/src/content/docs/_3229-root-anchoring-probe.json` stays on the branch and CONFIRMS end to end
+   the root-anchoring the disassembly established — a deny-listed extension under a *nested* `docs`
+   directory is still delivered to the reviewer, because a pattern containing an interior `/` is passed
+   verbatim, and it survives under both the old and the new configuration.
 5. **Hermetic regression tests (AC5).** `scripts/tests/test_roborev_review_guard.sh` gains cases in its
    existing style: executables under `docs/` yield a PASS-eligible census and ARE enqueued; a prose-only
    diff under `docs/` still reports `code-free: FAIL` and is never enqueued; a config that WOULD swallow

@@ -198,6 +198,69 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    roborev trims it *before* deciding anchoring, so `docs/` resolves RECURSIVE (`**/docs`) — the opposite
    of root-anchored `docs/**` — and `census-exclusion:` FAILs on that form unconditionally.
 
+   #### The effective exclusion set is FOUR things, not one
+
+   `exclude_patterns` in the file you are looking at is only a quarter of it. The set is the UNION of the
+   `--repo` checkout's `.roborev.toml`, the **ROOT checkout's** `.roborev.toml` (see the ordering property
+   below), the global `~/.roborev/config.toml`, **and roborev's own compiled-in lockfile/cache deny-list**
+   — `**/Cargo.lock`, `**/go.sum`, `**/package-lock.json`, `**/.beads/**`, `**/.cache/**` and 19 more, 24
+   patterns pinned to **v0.61.2** and extracted from the executable itself. Every `census-exclusion:`
+   value names WHICH source is responsible for each swallowed path, and ends with
+   `built-in-set: OK|DIVERGED|UNAVAILABLE`.
+
+   #### The verdict rule — apply it to any call of this shape, without asking
+
+   > **FAIL where the author can act; NOTICE where only the information is actionable; never silence.**
+
+   This is **one** rule, not three ad-hoc calls, and it is what decides `census-exclusion:`'s three
+   outcomes:
+
+   | Cause | Verdict | Why |
+   |---|---|---|
+   | A **configured** pattern swallows census CODE | **FAIL** | The remedy is a one-token edit to a **named** file. Act before paying for a review round. |
+   | A **pinned built-in** swallows census CODE | **NOTICE** | There is **no** remedy: the deny-list is compiled in, with no opt-out and no negation form. A guard that fires on a legitimate change (a routine `Cargo.lock` touch) with **no available fix** is the guard that gets **disabled** — which is how #3229 happened. So: paths named loudly in the value line, run proceeds, and `prompt-content:` is told not to expect them. |
+   | The **live built-in set diverges from the pin** | **FAIL** | This one *does* have a remedy — re-extract, update the pin, and **judge** the new built-in. It is a **mechanism** change, which the version pin exists to catch rather than absorb: a NOTICE here would silently swallow an upgrade that began excluding `*.rs` or `scripts/**`, with the failure looking like normal operation. |
+
+   "Never silence" is the load-bearing third clause. An **unobservable** built-in set (no roborev on
+   PATH, an unreadable binary) reads `built-in-set: UNAVAILABLE` **in the value line** — never as an
+   unstated assumption of agreement. `NOTICE*` sits deliberately outside the wrapper's failing-capable
+   scan (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`), so a NOTICE cannot red `RESULT:`; both FAIL forms can.
+
+   #### A `.roborev.toml` change cannot certify itself — three properties, one generalization
+
+   1. **roborev's daemon reads `exclude_patterns` from the repo ROOT PATH.** It binds a repository by its
+      `repos.root_path` and resolves the config from **that** checkout — so a **worktree**
+      `.roborev.toml` edit is **invisible** to it. Under 1:1:1:1 the file you edited is not the file your
+      review applies.
+   2. **The daemon snapshots config at start.** An edit needs a **daemon restart** to take effect.
+   3. **Generalized — state it this way:** *any PR whose subject is a config the daemon (or a gate) reads
+      from root cannot certify itself.* Plan the demonstration for **after** the merge.
+
+   (3) is the **same shape** as the `required`-check property in CLAUDE.md — `required` evaluates the
+   aggregator **and the registry** from the PR's **BASE** ref, so a registry change lands only after it
+   merges. Recognising the shape is the transferable part.
+
+   Both (1) and (2) have already cost real rounds, so they are not theoretical:
+
+   - (1) produced `census-exclusion: PASS (7/7 code census paths survive)` about a config roborev never
+     read. It was caught **only** by the *pre-existing* `prompt-content: FAIL (1/7 code census paths
+     absent)`. **That is the strongest argument in the change for keeping both layers**, and it paid out
+     in the direction nobody plans for: the **older** guard caught the **newer** one certifying the wrong
+     input. Defence in depth is not about the new check protecting you from old bugs.
+   - (2) made a separate investigation (#3234) measure `exclude_patterns` as having *no observable
+     effect* — a null result produced entirely by its single daemon restart happening to precede every
+     config edit it made and never follow one.
+
+   #### A test that blesses a vacuous verdict is worse than an unguarded path
+
+   Two cases in this repo's own regression suite (`cx5b`/`cx5c`) asserted
+   `census-exclusion: PASS (no exclusion patterns configured)` while leaving the binary corroboration
+   unavailable — i.e. they **locked in** the exact green a guard emits when it has silently failed to
+   recognise a configured key. An unguarded path is merely unprotected; a test like that **consumes the
+   review budget that would otherwise have found the bug**, and converts "nobody checked" into "we
+   checked and it was fine". When you add a case whose expected value is a PASS, ask what state the
+   system is in when that PASS is *wrong*, and make the fixture distinguish the two.
+
 ### Why: a vacuous roborev pass is textually identical to a genuine clean pass
 
 **Four** confirmed trigger paths make roborev report clean **without having reviewed anything** (or having

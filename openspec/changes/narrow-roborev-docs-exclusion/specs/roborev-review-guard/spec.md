@@ -226,10 +226,62 @@ set: the binary ALWAYS appends a hard-coded lockfile/cache deny-list (extracted 
 executable as literal `:(exclude,glob)**/…` pathspecs — the `Cargo.lock`/`go.sum`/`package-lock.json`/…
 family plus `**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml`), with no
 configuration switch. A census path one of those eats is exactly as invisible to the reviewer as a
-configured swallow, so it SHALL be evaluated in the same reconciliation and SHALL FAIL — but it SHALL be
-messaged DISTINCTLY from a configured pattern ("excluded by a roborev built-in" ≠ "excluded by your
-config"), because editing `.roborev.toml` cannot remedy it. This list SHALL carry the same
-re-verify-on-upgrade obligation as the ported algorithm.
+configured swallow, so it SHALL be evaluated in the same reconciliation, and it SHALL be messaged
+DISTINCTLY from a configured pattern ("excluded by a roborev built-in" ≠ "excluded by your config"). This
+list SHALL carry the same re-verify-on-upgrade obligation as the ported algorithm.
+
+**THE VERDICT SHALL FOLLOW ONE RULE, STATED IN DOCTRINE VERBATIM:**
+
+> **FAIL where the author can act; NOTICE where only the information is actionable; never silence.**
+
+This is deliberately ONE rule rather than three ad-hoc calls, and doctrine SHALL present it as such
+(CLAUDE.md, `roborev-findings.md`, `design.md`), so a future call of this shape is decided by the rule
+instead of re-litigated. It resolves the three cases:
+
+1. A **CONFIGURED** pattern (worktree, root or global) swallowing census CODE ⇒ **FAIL**. The remedy is a
+   one-token edit to a NAMED file, available before any review round is paid for.
+2. A **PINNED BUILT-IN** swallowing census CODE ⇒ **NOTICE**, non-failing. There is NO remedy: the
+   deny-list is compiled into the binary with no opt-out and no negation form. FAILing would permanently
+   red a ROUTINE, legitimate change class (a `Cargo.lock` touch) against a check its author cannot
+   possibly satisfy — and **a guard that fires on correct input with no available fix is the guard that
+   gets disabled**, which is how #3229 happened. The NOTICE SHALL still name the paths and the responsible
+   built-in IN THE VALUE LINE (not merely in a detail), SHALL state that a clean verdict does not cover
+   them, and the run SHALL proceed.
+3. The **LIVE built-in set DIVERGING from the pinned set** ⇒ **FAIL**. This case DOES have a remedy —
+   re-extract, update the pin, and judge the new built-in — and it is a MECHANISM change, which the
+   v0.61.2 pin already obliges the project to catch on upgrade rather than assume away. A NOTICE here
+   would silently absorb an upgrade that began excluding `*.rs` or `scripts/**`, with the failure looking
+   like normal operation: precisely the blindness this change exists to close. This FAIL SHALL be
+   DIFF-INDEPENDENT, like the trailing-slash FAIL.
+
+**Divergence SHALL be OBSERVED, not assumed**, by reading the roborev executable: each pinned pattern
+looked for as a FIXED string `:(exclude,glob)<pattern>` (which names removals exactly), plus a PINNED
+COUNT of `:(exclude,glob)` literals (which detects additions numerically). A blind full-set
+re-extraction SHALL NOT be used as the basis of a FAIL: Go string literals are concatenated without
+terminators, and a naive scan of this very binary yields truncations, junk-suffixed hits and a phantom
+pattern that is really a bare prefix constant — a FAIL built on that would red every run. The residual
+(a new pattern having a pinned one as a prefix) SHALL be declared.
+
+**"Never silence" SHALL be mechanized.** Every `census-exclusion:` value SHALL end with
+`built-in-set: OK|DIVERGED|UNAVAILABLE`. When the set cannot be observed at all — `roborev` absent from
+PATH, an unreadable target, or a target carrying zero `:(exclude,glob)` literals (which is the hermetic
+suite's own state) — the value SHALL read `UNAVAILABLE` and SHALL be NEITHER a failure NOR a blessing.
+An unobservable set SHALL NEVER be reported as, or silently treated as, agreement.
+
+**PRECEDENCE.** Both FAIL causes outrank the NOTICE, and EVERY cause present SHALL be named in the value
+line — the actionable half must never be hidden behind the unactionable one, in either direction.
+
+**`NOTICE*` SHALL NOT be failing-capable** and both FAIL forms SHALL be. The wrapper's single verdict scan
+fails a run whose value begins `FAIL`, `FINDINGS`, `ERROR` or `INCONSISTENT`; that correspondence SHALL be
+asserted STRUCTURALLY against the scan itself, because a value reading NOTICE while `RESULT:` goes FAIL
+(or a FAIL that does not red the run) is the decorative-key defect mirrored.
+
+**A KNOWN built-in absence SHALL NOT be re-reported by `prompt-content:` as a discovery.** The set of
+census code paths a pinned built-in drops SHALL be handed to `prompt-content:`, which SHALL subtract them
+and SHALL say so in its value. Their absence from the prompt is a deterministic property of roborev's
+compiled-in mechanism, already reported non-fatally under `census-exclusion:`; asserting their presence
+would move the same unfixable red one key down. The subtraction SHALL be scoped to BUILT-IN swallows
+only — a configured swallow FAILs pre-enqueue and can therefore never be masked by it.
 
 When `roborev` IS invocable the parsed set SHALL be CORROBORATED against
 `roborev config get exclude_patterns`, run from **every** checkout whose config was read (that command
@@ -329,10 +381,44 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** it FAILs closed saying the exclusion set roborev will apply is UNKNOWN, rather than reading `$REPO/.roborev.toml` alone and reporting a PASS about a file roborev may never consult
 
-#### Scenario: A roborev built-in exclude is modelled and messaged as a built-in
+#### Scenario: A pinned built-in exclude is a non-failing NOTICE that still names the path
 - **GIVEN** a census containing `Cargo.lock` (which the census classifies as CODE) beside a `.rs` file, under a configuration that excludes neither
 - **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` FAILs naming `Cargo.lock` as excluded by `**/Cargo.lock` with a `roborev-builtin` source tag, states that this is NOT the operator's configuration and that editing `.roborev.toml` cannot fix it, names the pinned version the built-in list was extracted from, does NOT blame the operator's configuration, and reports the `.rs` file as surviving
+- **THEN** `census-exclusion:` reads `NOTICE`, names `Cargo.lock` as excluded by `**/Cargo.lock` with a `roborev-builtin` source tag IN THE VALUE LINE, states that there is NOTHING TO FIX in any config file, states that a clean verdict does not cover that path, does NOT blame the operator's configuration, reports the `.rs` file as surviving — and the review IS enqueued with `RESULT:` not FAIL on that account
+
+#### Scenario: A known built-in absence is not re-reported by prompt-content
+- **GIVEN** the same run, whose prompt therefore carries the `.rs` file but not `Cargo.lock`
+- **WHEN** `prompt-content:` evaluates
+- **THEN** it PASSes over the reduced set and records the subtraction explicitly (`+<n> not expected: excluded by a roborev built-in`), rather than FAILing on an absence that `census-exclusion:` already reported and that has no remedy under either key
+
+#### Scenario: A live built-in set matching the pin is reported OK and corroborated
+- **GIVEN** a roborev executable whose built-in deny-list matches the pinned set exactly
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** the value ends `built-in-set: OK`, the detail states the pin is corroborated rather than assumed, and a pinned-built-in swallow in the same run is still only a NOTICE
+
+#### Scenario: An ADDED built-in fails, because that divergence has a remedy
+- **GIVEN** a roborev executable carrying one MORE `:(exclude,glob)` literal than the pinned count — the shape of an upgrade that began excluding source — and a census that touches no lockfile at all
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` FAILs with `roborev built-in exclude set DIVERGED from the pinned v0.61.2 set`, quantifies the delta against the pinned literal count, explains that this direction HAS a remedy and is therefore a FAIL rather than a NOTICE, names the concrete silent-absorption risk (`*.rs` / `scripts/**`), states that the FAIL is about the mechanism rather than this diff, and enqueues no review
+
+#### Scenario: A REMOVED pinned built-in fails, naming the missing pattern
+- **GIVEN** a roborev executable from which one pinned built-in pattern is absent
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** it FAILs naming that pattern as no longer present in the binary, reports the count delta, and points at the re-extract-and-re-pin remedy — because a vanished pattern makes the model OVER-exclude, producing a false FAIL, which is the direction that gets a guard bypassed
+
+#### Scenario: An unobservable built-in set is UNAVAILABLE, neither failing nor blessing
+- **GIVEN** an environment where the roborev target carries no `:(exclude,glob)` literals (a wrapper, a shim, or the regression suite's stub)
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** the value ends `built-in-set: UNAVAILABLE`, a detail states that this is deliberately NEITHER a failure NOR a blessing, and the run's verdict is unaffected by it — so the hermetic suite stays fully exercisable and an unobserved set is never silently read as agreement
+
+#### Scenario: A configured swallow and a built-in divergence both name their cause
+- **GIVEN** a run in which a configured pattern swallows census code AND the live built-in set has diverged from the pin
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** the single value line names the configured swallow AND the divergence, the configured cause keeps its own remedy detail, and no review is enqueued — the actionable half is never hidden behind the other
+
+#### Scenario: NOTICE is not failing-capable and both FAIL forms are
+- **WHEN** the wrapper's verdict scan is inspected directly, rather than inferred from a case's exit code
+- **THEN** its failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`, `NOTICE*` is absent from it, and `census-exclusion:` still participates in the scan — so a NOTICE cannot red the run while a configured swallow still does
 
 #### Scenario: An empty parse is corroborated by the binary, never assumed
 - **GIVEN** a configuration file the parser recognises no `exclude_patterns` key in, and an invocable `roborev` whose `config get exclude_patterns` reports `docs/**`
@@ -359,42 +445,95 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **WHEN** the wrapper runs
 - **THEN** no key fails on account of it, the path is simply delivered to the reviewer, and the documented residual states that this direction can only add review noise while the opposite direction is always a pre-enqueue FAIL
 
-### Requirement: A recorded live probe demonstrates the narrowed exclusion on the real harness-PR shape
-The change SHALL include a **recorded live probe** — run, not asserted — of the sanctioned wrapper against
-a diff of the shape that failed: executable harness files under `docs/reports/*-artifacts/`. The probe
-SHALL be executed with the sanctioned invocation (`--agent codex --model gpt-5.6-sol` with an explicit
-absolute `--repo`), and its RECORD in the pull request SHALL carry: the `census:` counts, the
-`code-free:` and `census-exclusion:` lines, the `prompt-content:` line, and the input / cached / output
-token counts from the job record.
+### Requirement: A recorded live probe demonstrates the narrowed exclusion, POST-MERGE, on a real harness PR
+The change SHALL be demonstrated by a **recorded live run** — run, not asserted — of the sanctioned wrapper
+against a diff of the shape that failed: executable harness files under `docs/reports/*-artifacts/`.
 
-The probe's PASS condition SHALL be `prompt-content: PASS (<n>/<n> code census paths present)` together
-with a token signature in the **genuine-review band** (398k–649k input, 5.0k–6.3k output, minutes of wall
-time) rather than the **vacuous baseline** (~18.7k input, 0 cached, 53–56 output, ~8s). The measured
-failure being repaired is PR #3222's `prompt-content: FAIL (136/136 code census paths absent)` at 15,443
-input / 89 output, so a signature near that baseline SHALL be read as the defect persisting, whatever the
-verdict text says.
+**THE DEMONSTRATION IS NECESSARILY POST-MERGE, AND THE REQUIREMENT SHALL SAY WHY.** roborev's daemon binds
+a repository by its `repos.root_path` and resolves `exclude_patterns` from the **ROOT checkout**, and it
+**snapshots that config at daemon start**. Therefore the narrowed set CANNOT apply to this change's own
+review: while the change is unmerged the root checkout still carries the blanket `['docs/**', '*.md']`. A
+committed **executable under root `docs/`** — the original self-demonstrating specimen — is consequently
+swallowed, making `census-exclusion:` FAIL **correctly** and permanently until merge. A pre-merge
+self-demonstration is therefore a **deadlock, not a test**: the specimen that proves the fix is the
+specimen the unfixed configuration eats. The executable SHALL NOT be committed under root `docs/`; the
+requirement is **rescheduled, not dropped**, and the reason SHALL be recorded rather than the requirement
+quietly weakened.
 
-The probe diff SHALL additionally include a file under a NESTED `docs` directory (for example under
-`website/src/content/docs/`) carrying one of the deny-listed artifact extensions, as an END-TO-END
+**THE PRIMARY EVIDENCE SHALL BE A REAL PR, NOT A SYNTHETIC PROBE.** The first post-merge pull request that
+happens to carry an executable under `docs/` demonstrates this end to end at no extra cost, and is
+**strictly better** evidence than a probe written to pass, because it proves the fix on a diff **nobody
+shaped for it**. AC2's record SHALL therefore be that PR's `census:` + `census-exclusion:` +
+`prompt-content:` evidence posted to the issue; the committed probe **procedure** is the documented
+**FALLBACK**, for when no such PR arrives promptly or its evidence is ambiguous.
+
+**THE OBLIGATION SHALL CARRY A NAMED TRIGGER**, because an unowned post-merge obligation is not an
+obligation: (a) on merge the issue SHALL move to **`In Review`, NOT `Done`** — `Done` auto-closes it and
+the obligation would vanish with it; (b) the PR SHALL be finalized and delivery telemetry stamped
+regardless, neither waiting on the demonstration; (c) the issue SHALL flip to `Done` ONLY once the AC2
+evidence is posted; (d) if the demonstration has not happened within a few days it SHALL be **filed as a
+tracked issue**, never left to live in a comment thread.
+
+The recorded evidence SHALL carry: the `census:` counts, the `code-free:` and `census-exclusion:` lines,
+the `prompt-content:` line, and the input / cached / output token counts from the job record. Its PASS
+condition SHALL be `census-exclusion: PASS` TOGETHER WITH
+`prompt-content: PASS (<n>/<n> code census paths present)` — the first says the configuration would not
+swallow the executables, the second says the reviewer actually received them, and neither alone suffices.
+
+**TOKEN COUNTS SHALL BE JUDGED AGAINST THE MECHANISM'S THRESHOLDS, NOT A MEMORISED BAND.** The thresholds
+are the wrapper's own: `input` at or above `ROBOREV_VACUITY_MIN_INPUT_TOKENS` (**25,000**, anchored on the
+HIGHEST observed vacuous run, 18,801), `cached` greater than zero, and **`output` ADVISORY ONLY, never a
+failure condition**. The reason output can never be a realness test on its own SHALL be stated: a genuine
+**clean** review emits roughly **20–60** output tokens, which is INDISTINGUISHABLE from the vacuous
+baseline's 53–56 — already documented at `scripts/flow/roborev-review-checks.sh:328`. The figures
+398k–649k input / 314k–554k cached / 5.0k–6.3k output SHALL be cited ONLY as **observed on large diffs**
+and SHALL NOT be enshrined as a threshold: they are diff-size dependent, and a real substantive round
+measured during this change was `input=118514 cached=88320 output=5954` on a ~90k-character prompt with
+two substantive findings citing real code — unambiguously genuine and far below that band, so an absolute
+floor set from large-diff observations would falsely flag legitimate small diffs. The vacuous SIGNATURE to
+recognise is the SHAPE: input below the 25k floor, `cached == 0`, a few dozen output tokens in seconds
+(PR #3222 measured 15,443 in / 89 out beside `prompt-content: FAIL (136/136 code census paths absent)`).
+
+The demonstration diff SHALL additionally include a file under a NESTED `docs` directory (for example
+under `website/src/content/docs/`) carrying one of the deny-listed artifact extensions, as an END-TO-END
 CONFIRMATION of the disassembly-derived prediction: because a pattern with an interior `/` is
 root-anchored, that nested path SHALL still be DELIVERED to the reviewer. Its absence from the prompt
-would falsify the recovered algorithm and SHALL be treated as a blocking finding — the pattern list and
-the check's construction both depend on the port being correct. Because the probe needs the network and a
-live reviewer, it SHALL be documented and recorded rather than executed by the agent gate.
+would falsify the recovered algorithm and SHALL be treated as a blocking finding. That file SHALL be
+committed on this branch, because — unlike an executable under root `docs/` — it survives under BOTH the
+old and the new configuration and therefore does not deadlock.
 
-#### Scenario: The recorded probe shows the code census present and a genuine token signature
-- **GIVEN** the narrowed exclusion configuration and a branch whose diff is executables under `docs/reports/*-artifacts/`
-- **WHEN** the sanctioned wrapper is run against it and the result recorded in the pull request
-- **THEN** the record shows `census-exclusion: PASS`, `prompt-content: PASS (<n>/<n> code census paths present)`, and input/cached/output token counts inside the genuine-review band rather than the vacuous baseline
+Because the demonstration needs the network and a live reviewer, it SHALL be documented and recorded
+rather than executed by the agent gate.
 
-#### Scenario: The probe confirms the disassembly-derived root anchoring end to end
-- **GIVEN** a probe diff that includes a deny-listed artifact extension under a nested `docs` directory such as `website/src/content/docs/`
+#### Scenario: The recorded evidence shows the code census present and a genuine token signature
+- **GIVEN** the narrowed exclusion configuration in effect on the ROOT checkout, and a branch whose diff carries executables under `docs/reports/*-artifacts/`
+- **WHEN** the sanctioned wrapper is run against it and the result recorded on the issue
+- **THEN** the record shows `census-exclusion: PASS`, `prompt-content: PASS (<n>/<n> code census paths present)`, and a token triple judged against the wrapper's own floors (input at or above 25,000, cached greater than zero, output advisory) rather than against a memorised large-diff band
+
+#### Scenario: The reason the demonstration cannot be pre-merge is recorded, not the requirement weakened
+- **WHEN** the change is inspected for AC2
+- **THEN** it records that roborev reads `exclude_patterns` from the repo root path and snapshots it at daemon start, that a committed executable under root `docs/` therefore makes `census-exclusion:` FAIL correctly until merge, and that the demonstration is consequently rescheduled to post-merge — and it carries no executable under `docs/reports/3229-artifacts/`
+
+#### Scenario: A real post-merge PR is the primary evidence and the probe is the fallback
+- **WHEN** the AC2 record is inspected
+- **THEN** it names the first post-merge PR carrying an executable under `docs/` as the primary evidence — better than a probe written to pass, because the diff was not shaped for the test — and positions the committed procedure as the documented fallback
+
+#### Scenario: The post-merge obligation has a named trigger rather than a comment thread
+- **WHEN** the change's tasks and delta spec are inspected
+- **THEN** they state that the issue moves to `In Review` and not `Done` on merge, that the PR finalizes and telemetry stamps regardless, that `Done` waits on the posted AC2 evidence, and that an undelivered demonstration is filed as a tracked issue within a few days
+
+#### Scenario: Output tokens are never a realness test on their own
+- **WHEN** the token guidance is inspected
+- **THEN** it states that a genuine clean review's output count (roughly 20–60) is indistinguishable from the vacuous baseline's 53–56, that output is therefore advisory only, and it cites 398k–649k input solely as observed on large diffs rather than as a threshold
+
+#### Scenario: The demonstration confirms the disassembly-derived root anchoring end to end
+- **GIVEN** a diff that includes a deny-listed artifact extension under a nested `docs` directory such as `website/src/content/docs/`
 - **WHEN** the prompt actually sent is inspected
 - **THEN** that nested path IS present in the prompt — confirming live that a pattern containing an interior `/` is root-anchored as the recovered `git.FormatExcludeArgs` specifies — and its absence would instead falsify the port and block the change rather than being recorded as an acceptable outcome
 
 #### Scenario: The demonstration is recorded evidence, not an assertion
-- **WHEN** the pull request is reviewed for AC2
-- **THEN** it carries the actual summary-block lines and token counts from a real run, and a statement that the narrowed configuration "should" work is NOT accepted in their place
+- **WHEN** the pull request and issue are reviewed for AC2
+- **THEN** they carry the actual summary-block lines and token counts from a real run, and a statement that the narrowed configuration "should" work is NOT accepted in their place
 
 #### Scenario: The live probe is not a gate component
 - **WHEN** the agent gate's component set is inspected
@@ -736,6 +875,22 @@ key in its contracted position immediately after `code-free:`, and the corrected
 documents the live probe it SHALL state the expectation in the RANGE form — the `reviewed-sha:` range's
 HEAD endpoint equals the worktree HEAD and its base equals the base ref — never as `reviewed-sha`
 equalling the worktree HEAD.
+
+#### Scenario: Doctrine states the verdict rule verbatim, as one rule
+- **WHEN** CLAUDE.md, `website/src/content/docs/agents-developing/roborev-findings.md` and this change's `design.md` are inspected
+- **THEN** each carries the sentence "FAIL where the author can act; NOTICE where only the information is actionable; never silence." verbatim, and each presents it as ONE rule resolving the configured-pattern FAIL, the pinned-built-in NOTICE and the built-in-divergence FAIL — rather than as three independent judgements a future editor would have to re-derive
+
+#### Scenario: Doctrine records the three config-ordering properties and their generalization
+- **WHEN** CLAUDE.md and `roborev-findings.md` are inspected beside the existing note that `required` evaluates the aggregator and registry from the PR's BASE ref
+- **THEN** both state that roborev's daemon reads `exclude_patterns` from the repo ROOT PATH so a worktree edit is invisible to it, that the daemon snapshots config at start so an edit needs a restart, that BOTH have already cost real rounds, and that the generalization is "any PR whose subject is a config the daemon (or a gate) reads from root cannot certify itself" — explicitly noted as the same shape as the BASE-ref property
+
+#### Scenario: Doctrine records that the PRE-EXISTING guard caught the NEW guard
+- **WHEN** the defence-in-depth rationale in `roborev-findings.md` and `design.md` is inspected
+- **THEN** it records that `prompt-content:` — the older check — caught the newly added `census-exclusion:` certifying a config roborev never read, and states this as the strongest argument in the change for keeping both layers, explicitly because it paid out in the direction nobody plans for: the NEW layer was the wrong one
+
+#### Scenario: Doctrine records that a test blessing a vacuous verdict is worse than an unguarded path
+- **WHEN** the doctrine page is inspected
+- **THEN** it records that the two regression cases which locked in an un-corroborated "no exclusion patterns configured" PASS were worse than having no case at all, because such a test consumes the review budget that would otherwise have found the bug and converts "nobody checked" into "we checked and it was fine"
 
 #### Scenario: Both AC4 doctrine surfaces carry all four rules
 - **WHEN** CLAUDE.md and `website/src/content/docs/agents-developing/roborev-findings.md` are inspected after this change

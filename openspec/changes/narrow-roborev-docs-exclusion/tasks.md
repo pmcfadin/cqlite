@@ -117,15 +117,38 @@
 - [ ] After merge, verify publication by grepping the SERVED page for a distinctive new phrase (never an
       HTTP 200); re-check after ~3 minutes if absent (CDN staleness).
 
-## 7. AC2 demonstration and the AC7 ruling
-- [ ] Run the sanctioned wrapper (`--agent codex --model gpt-5.6-sol`, explicit absolute `--repo`) against
-      a PR #3222-shaped diff and RECORD in the PR: `census:` counts, `code-free:`, `census-exclusion:`,
-      `prompt-content:`, and input/cached/output tokens — expecting the genuine-review band
-      (398k–649k in / 5.0k–6.3k out) and NOT the vacuous baseline (~18.7k in / 0 cached / 53–56 out;
-      #3222 itself measured 15,443 in / 89 out).
-- [ ] Include in that same probe diff a deny-listed artifact extension under `website/src/content/docs/` and
-      confirm it IS present in the prompt — the end-to-end confirmation of root anchoring. Its ABSENCE
-      falsifies the port and blocks the change; it is not an acceptable outcome to merely record.
+## 7. AC2 demonstration (POST-MERGE) and the AC7 ruling
+- [x] RECORD why the demonstration cannot be pre-merge, rather than weakening the criterion: roborev
+      resolves `exclude_patterns` from the repo ROOT path and SNAPSHOTS it at daemon start, so the narrowed
+      set does not apply to this change's own review. A committed executable under root `docs/` therefore
+      makes `census-exclusion:` FAIL *correctly* until merge — a DEADLOCK, not a test. `git rm`'d
+      `probe-census-exclusion.sh`; procedure kept as prose in
+      `docs/reports/3229-artifacts/live-probe-procedure.md`.
+- [x] KEEP `website/src/content/docs/_3229-root-anchoring-probe.json` on the branch — a `.json` under a
+      NESTED `docs` directory survives under BOTH the old and the new configuration (root anchoring), so it
+      does not deadlock and is live evidence either way. Its ABSENCE from a prompt would falsify the port
+      and block; it is not an acceptable outcome to merely record.
+- [x] Correct the token guidance everywhere it appears: judge against the MECHANISM's thresholds
+      (`ROBOREV_VACUITY_MIN_INPUT_TOKENS = 25000`, anchored on the highest observed vacuous run of 18,801;
+      `cached > 0`; **output ADVISORY ONLY**, because a genuine CLEAN review emits 20–60 output tokens —
+      indistinguishable from the vacuous baseline's 53–56, per
+      `scripts/flow/roborev-review-checks.sh:328`). Cite 398k–649k ONLY as "observed on large diffs", never
+      as a threshold: a real substantive round measured `input=118514 cached=88320 output=5954` on a ~90k
+      prompt with two findings citing real code, far below that band, so an absolute floor drawn from
+      large-diff observations would falsely flag legitimate small diffs.
+- [ ] **POST-MERGE, PRIMARY EVIDENCE:** take the first post-merge PR that carries an executable under
+      `docs/` (#3234 ships harnesses now; #3096's successor will; #3249's artifacts may) and post its
+      `census:` + `census-exclusion: PASS` + `prompt-content: PASS (<n>/<n>)` lines to #3229. Better
+      evidence than a probe written to pass, because the diff was not shaped for it. FALLBACK: the
+      documented procedure.
+- [ ] **NAMED TRIGGER — an unowned post-merge obligation is not an obligation** (#3232 existed only as
+      prose in #3100's close; #3103 shipped uncommitted and three issues then rebuilt a corpus):
+      on merge #3229 goes to **`In Review`, NOT `Done`** (`Done` auto-closes it); the PR is finalized and
+      telemetry stamped regardless; #3229 flips to `Done` ONLY once the AC2 evidence is posted; if the
+      demonstration has not happened within a few days, FILE IT as a tracked issue — never leave it in a
+      comment thread.
+- [ ] Before running it post-merge: update the ROOT checkout AND **restart the roborev daemon** (it
+      snapshots config at start; the one observed had 4d15h uptime).
 - [x] Ask the owner for the AC7 backfill ruling on #3026 / #3100 / #3217 and RECORD it with its reason
       (retroactive review pass — naming mechanism, paths and outcome; or acceptance-as-is with the reason).
       Park rather than block if the session is unattended: one structured question comment,
@@ -182,6 +205,56 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       consequence for the owner, never a reason to weaken the check, special-case the probe, or hand-edit
       the root checkout's config.
 
+## 8c. Owner rulings applied after the first sanctioned roborev round
+- [x] **Built-in verdict SPLIT** — neither bare FAIL nor bare NOTICE. One rule, stated verbatim in
+      CLAUDE.md, `roborev-findings.md`, `design.md` and `--help`: **FAIL where the author can act; NOTICE
+      where only the information is actionable; never silence.** A pinned built-in swallowing census code is
+      a NOTICE (no remedy exists — compiled in, no opt-out, no negation form; and a guard that fires on a
+      routine `Cargo.lock` touch with no available fix is the guard that gets DISABLED, which is how #3229
+      happened). The live built-in set DIVERGING from the pinned 24 is a FAIL (that HAS a remedy —
+      re-extract, re-pin, judge the new built-in — and it is a MECHANISM change the version pin exists to
+      catch; a NOTICE would silently absorb an upgrade that began excluding `*.rs` or `scripts/**`).
+- [x] Observe the live set from the binary by two RELIABLE signals, not a blind re-extraction (Go literals
+      are concatenated with no terminators — a naive scan of this binary yields truncations, junk-suffixed
+      hits and a phantom `**/git` that is really the bare prefix constant): fixed-string presence per pinned
+      pattern names REMOVALS exactly, and a pinned COUNT of `:(exclude,glob)` literals (26 = 24 patterns + 2
+      prefix constants) detects ADDITIONS numerically. Residual declared.
+- [x] "Never silence" mechanized: every value ends `built-in-set: OK|DIVERGED|UNAVAILABLE`; an unobservable
+      set (no roborev, unreadable, or a stub with zero literals — the hermetic suite's state) is
+      UNAVAILABLE and is explicitly NEITHER a failure NOR a blessing.
+- [x] Precedence: both FAIL causes outrank the NOTICE and EVERY cause present is named.
+- [x] CONFIRMED by reading the wrapper's verdict scan directly (and asserted structurally against it):
+      failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`; `NOTICE*` is absent from it;
+      `$CENSUS_EXCLUSION` still participates, so a configured swallow still reds `RESULT:`.
+- [x] Follow-through so the unfixable red is not merely moved one key down: `prompt-content:` subtracts the
+      built-in-excluded set and says so in its value. Scoped to BUILT-IN swallows only — a configured
+      swallow FAILs pre-enqueue, so it can never be masked.
+- [x] Tests: `cx19` keeps the NOTICE (+ review enqueued, `RESULT:` not FAIL, and the UNAVAILABLE
+      "neither failure nor blessing" assertion); `cx19d` (pin MATCHED ⇒ `built-in-set: OK`, corroborated);
+      `cx19e` (an ADDED `**/*.rs` ⇒ FAIL, diff-independent, never enqueued); `cx19f` (a REMOVED pinned
+      pattern ⇒ FAIL naming it); `cx19g` (configured swallow AND divergence ⇒ both named); `cx19b`'s
+      structural assertions kept.
+- [x] **Doctrine — three properties, one generalization**, recorded in CLAUDE.md and
+      `roborev-findings.md` beside the existing BASE-ref note: (1) roborev's daemon reads
+      `exclude_patterns` from the repo ROOT PATH, so a worktree edit is INVISIBLE to it; (2) the daemon
+      SNAPSHOTS config at start, so an edit needs a RESTART; (3) generalized — **any PR whose subject is a
+      config the daemon (or a gate) reads from root cannot certify itself**. Both (1) and (2) have cost real
+      rounds, and the write-up says so.
+- [x] RECORD, not smooth over: **`prompt-content:` — the PRE-EXISTING guard — caught the NEW guard**
+      certifying a config roborev never used. Kept as the strongest argument in the change for keeping both
+      layers, explicitly because it paid out in the direction nobody plans for (the NEW layer was the wrong
+      one). In `design.md` (D2a-ter) and the doctrine rationale.
+- [x] RECORD the cross-worker arbitration in `proposal.md` + `design.md` (D2a-bis): #3234 measured
+      `exclude_patterns` as having "no observable effect"; the owner ranked H2 (config resolves from the
+      primary checkout). Our disassembly + 21-review replay proved the MECHANISM half, #3234 independently
+      supplied the ORDERING half (its single daemon restart preceded every config edit and never followed
+      one). Both operative. **Conclusion: `exclude_patterns` WORKS — #3234's null result was a
+      worktree-config artifact, so AC1 is a genuine fix and AC3 guards a mechanism that really applies.**
+      This was the live existential risk to the change and it is now closed.
+- [x] RECORD that a test which BLESSES a vacuous verdict (`cx5b`/`cx5c` locking in the un-corroborated
+      PASS) is WORSE than an unguarded path: it consumes the review budget that would otherwise have found
+      the bug, and converts "nobody checked" into "we checked and it was fine".
+
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` + `roborev` on the
       lite-green diff (the diff contains code — shell + config — so it IS roborev-certifiable and MUST be).
@@ -189,5 +262,9 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       (`AGENT-GATE SUMMARY`, `RESULT: PASS`, `tree-integrity:` verified) → `spec-auditor` C intent audit
       against these specs → final roborev pass → `gh pr merge --auto --squash --delete-branch` after
       `scripts/flow/premerge-assert.sh`.
-- [ ] After merge: verify the published doctrine page by served content, then `flow-finalize` (archive this
-      change, stamp delivery telemetry via a telemetry worktree PR).
+- [ ] After merge: verify the published doctrine page by served content (grep for a distinctive new
+      phrase, never an HTTP 200 — the CDN can serve the previous page for ~3 minutes), then `flow-finalize`
+      (archive this change, stamp delivery telemetry via a telemetry worktree PR).
+- [ ] After merge: set #3229 to **`In Review`, NOT `Done`** — the AC2 demonstration is still outstanding and
+      `Done` would auto-close the issue and lose the obligation. Flip to `Done` only once the evidence is
+      posted (see §7).
