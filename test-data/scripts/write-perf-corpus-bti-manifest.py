@@ -29,12 +29,15 @@ disagreement on EITHER the row count or the partition count, or a row plan that 
 describe THIS run's ``--seed`` / ``--rows-requested`` / ``--chunk-rows`` (a stale plan)
 is an error -- never a fabricated 0 and never a silently-partial manifest.
 
-PER-MODE METADATA: ``purpose``, the corpus-location fields (``corpus_root``,
-``corpus_committed``, ``committed_copy``, ``corpus_note``, ``datasets_root_usage``) and
-``read_path_measurement_scope`` are rendered per ``--mode``, and whether the corpus is
-COMMITTED is OBSERVED (the checkout is searched and every recorded sha256 re-hashed), not
-assumed. No field may be true of another corpus: the AC3 production figure and the
-500,000-row full-generation golden are recorded ONLY in the production manifest.
+A FIELD IS OBSERVED OR IT IS ABSENT — there is no third state, and no field is inferred
+from a partial match (issue #3234 review rounds 9-10, whose findings were all one defect:
+a claim asserted beyond what was checked). What that rule DELETED, rather than defended
+with another guard: the fixed AC3 throughput figure and everything describing it (a
+harness measurement, not derivable from any byte here — it lives in
+docs/development/dev-cookbook.md); the fixed ``full_generation_golden`` block (already
+recorded, observed, per SSTable); and ``corpus_committed`` / ``committed_copy`` /
+``corpus_note``, prose inferred from a ``Data.db``-only hash comparison — reduced to the
+one field ``data_db_sha256_also_match_at``, whose name states exactly what was compared.
 
 Usage:
     write-perf-corpus-bti-manifest.py --corpus-root DIR --keyspace KS --table T \
@@ -88,140 +91,34 @@ SSTABLEMETADATA = "/opt/cassandra/tools/bin/sstablemetadata"
 DESCRIPTOR_RE = re.compile(r"^da-\d+-bti-")
 
 
-# --------------------------------------------------------------------------
-# SCOPE OF THE AC3 FIGURE (issue #3234, owner-required, PART 3).
+# ----------------------------------------------------------------------------
+# WHY THERE IS NO THROUGHPUT FIGURE IN THIS MANIFEST (roborev #3234 M1).
 #
-# The AC3 throughput number was taken through the GENERATION-MERGE STITCH, which
-# EXCLUDES the BTI mmap/trie plane entirely: a full scan of this corpus is not
-# partition-key-constrained, so it resolves to the fallback full scan and is served by
-# `generation_merge::stream_generations_for_read` across all 27 generations -- and on
-# that route each generation is re-opened by its own compaction-style producer with
-# `use_mmap = false` / `DiskAccessMode::Buffered`
-# (storage/write_engine/merge/producer_iter.rs:364-388) and walked sequentially
-# through `Data.db` (`stream_all_partitions_for_compaction`). No MADV_RANDOM mapping
-# is created and no Partitions.db/Rows.db trie descent happens inside the measured
-# window. That is what `bti_perf_scan` prints at runtime, and this text must say the
-# same thing (roborev #3234 M3: it previously claimed the trie/mmap work happened
-# INSIDE the stitch and was merely un-isolated, which misattributes the figure).
-# Recorded HERE and in docs/development/dev-cookbook.md so the limitation is not
-# discoverable only by reading the issue thread.
+# The AC3 warm-scan figure (and the LIMITATION that the route it measures excludes the
+# BTI mmap/trie plane entirely) used to be recorded here, as a constant, for every
+# production corpus. It is a HISTORICAL measurement taken by a harness -- NOT a counter
+# this run observed and NOT derivable from any byte on disk -- so no corpus this script
+# reads can substantiate it. The previous guard compared row + generation counts and
+# called that "applies", which let a corpus with a different seed, payload size, width
+# mix or byte content INHERIT an unrelated number; an `applies_to_this_corpus: false`
+# printed beside a present figure is the same defect wearing a label, because the number
+# is still there to be quoted.
 #
-# `recorded_figure` is a HISTORICAL measurement with its provenance attached, not a
-# counter this run observed — hence `applies_to_this_corpus`, computed by comparing
-# the corpus it was measured on against the corpus being described.
-AC3_RECORDED_FIGURE = {
-    "access_path": "fallback_full_scan (partition_key_not_fully_constrained)",
-    "storage_route": "generation_merge::stream_generations_for_read",
-    "generations": 27,
-    "wall_seconds": 127.163,
-    "rows": 13200000,
-    "rows_per_second": 103804,
-    "measured_by": (
-        "cqlite-core/examples/bti_perf_scan (the AC3 warm-scan harness), against the "
-        "27-generation production corpus described by this manifest"
-    ),
-    "measured_on_utc": "2026-08-03",
-}
-
-
-# WHY a non-production corpus gets NO recorded figure and NO golden description
-# (roborev #3234 L3): the production-only blocks below were emitted VERBATIM for every
-# mode, so the COMMITTED small-golden manifest asserted that a 600-row committed
-# fixture was uncommitted and multi-GB and that a 500,000-row "full generation golden"
-# belonged to it. An OMITTED field cannot be false; a field labelled "does not apply"
-# is still there to be quoted out of context. So each mode gets only statements that
-# are true of the corpus it describes, and the AC3 figure stays with the one corpus it
-# was measured on.
-NOT_MEASURED_WHY = {
-    "small_golden": (
-        "this corpus is a CORRECTNESS ORACLE, not a profile target: its Data.db is far "
-        "below the 8 MiB MADV_RANDOM threshold, so the point-read and scan mappings are "
-        "the SAME mapping and a read-plane A/B on it is structurally zero. No throughput "
-        "figure was measured on it, and none may be attributed to it."
-    ),
-    "smoke": (
-        "this is the generator's small end-to-end validation run: it exercises every "
-        "fail-closed assert and is thrown away. No throughput figure was measured on it."
-    ),
-}
-AC3_FIGURE_LIVES = (
-    "the AC3 throughput figure was measured on the PRODUCTION corpus and is recorded in "
-    "the manifest that describes it (test-data/perf-corpus-bti-manifest.json, `mode: "
-    "production`), together with the route it measures and what that route excludes. It "
-    "describes THAT corpus's 27 generations, not this one — do not copy it here."
+# The rule this file now follows is: A FIELD IS OBSERVED OR IT IS ABSENT. So the figure,
+# the identity comparator it would need, and the fixed `full_generation_golden` block
+# (whose bytes/rows/partitions are already recorded, OBSERVED, in the per-SSTable
+# `sstabledump_golden` + `statistics` records) are all DELETED rather than defended. The
+# figure and its LIMITATION are published where a measurement belongs: in
+# docs/development/dev-cookbook.md, and printed at runtime beside the number by
+# cqlite-core/examples/bti_perf_scan (access_path + storage_route).
+NO_MEASUREMENT_HERE = (
+    "NONE. This manifest records only what was read back from the corpus bytes, and a "
+    "throughput measurement is not one of those things (roborev #3234 M1: a fixed AC3 "
+    "figure recorded here was inherited by any corpus with a matching row + generation "
+    "count). The AC3 warm-scan figure, the route it measures and the BTI mmap/trie plane "
+    "that route EXCLUDES are in docs/development/dev-cookbook.md, and "
+    "cqlite-core/examples/bti_perf_scan prints them beside the number at runtime."
 )
-
-
-def measurement_scope(mode: str, observed_rows: int, generations: int) -> dict:
-    """The route the AC3 figure measures, and what it therefore does NOT measure."""
-    if mode != "production":
-        return {
-            "measured": False,
-            "why_not_measured": NOT_MEASURED_WHY.get(
-                mode, "no throughput figure was measured on this corpus"
-            ),
-            "where_the_ac3_figure_lives": AC3_FIGURE_LIVES,
-            "generations_in_this_corpus": generations,
-            "rows_in_this_corpus": observed_rows,
-        }
-    applies = (
-        observed_rows == AC3_RECORDED_FIGURE["rows"]
-        and generations == AC3_RECORDED_FIGURE["generations"]
-    )
-    return {
-        "what_the_ac3_figure_measures": (
-            "the GENERATION-MERGE STITCH route, over BUFFERED I/O. A full scan of this "
-            "corpus is not partition-key-constrained, so it takes the fallback full-scan "
-            "access path and is served by generation_merge::stream_generations_for_read "
-            "across every generation: one sequential compaction-style producer per "
-            "generation, each of which RE-OPENS its SSTable with use_mmap=false / "
-            "DiskAccessMode::Buffered (storage/write_engine/merge/producer_iter.rs:"
-            "364-388) and walks Data.db via stream_all_partitions_for_compaction. So the "
-            "figure is Data.db decode + k-way merge throughput over buffered reads."
-        ),
-        "LIMITATION": (
-            "This route EXCLUDES the BTI mmap/trie plane, which is therefore ENTIRELY "
-            "UNMEASURED -- not merely un-isolated. Because every producer re-opens its "
-            "SSTable with buffered I/O and walks Data.db sequentially, no MADV_RANDOM "
-            "mapping is created and NO Partitions.db/Rows.db trie descent happens inside "
-            "the measured window (SSTable open, 0.033 s for 27 SSTables, is outside it). "
-            "Quoting this number as a BTI index-plane baseline would make every A/B "
-            "against it wrong by an unknown factor. The index plane needs its own "
-            "measurement, on the single-generation scan_stream route where a BTI reader "
-            "takes the trie branch (#3029 WS3 / #3030 WS4). cqlite-core/examples/"
-            "bti_perf_scan.rs prints the same statement at runtime beside the number "
-            "(access_path + storage_route)."
-        ),
-        "recorded_figure": AC3_RECORDED_FIGURE,
-        "applies_to_this_corpus": applies,
-        "applies_to_this_corpus_note": (
-            "true only when the corpus described here has the same row count and "
-            "generation count the figure was measured on; a regenerated corpus of a "
-            "different shape makes the recorded figure historical only — re-measure with "
-            "the harness rather than editing the number"
-        ),
-        "full_generation_golden": {
-            "committed": False,
-            "generated_on_demand": True,
-            "bytes": 160752721,
-            "mib": 153.3,
-            "what": (
-                "`sstabledump -l` of ONE generation (da-1-bti-Data.db) of this corpus, "
-                "i.e. 500,000 rows across 711 partitions"
-            ),
-            "verified": (
-                "correct: 711 partitions and EXACTLY 500,000 row objects, cross-checked "
-                "against that SSTable's own Statistics.db (totalRows) by the generator's "
-                "verify_dumped_row_counts step"
-            ),
-            "why_not_committed": (
-                "153.3 MiB of derived JSON. It stays generated-on-demand "
-                "(--dump-generations 1 during generation, or sstabledump -l against the "
-                "corpus); the COMMITTABLE Cassandra-written BTI oracle is the separate "
-                "small golden (gen-perf-corpus-bti.sh --small-golden)."
-            ),
-        },
-    }
 
 
 def sha256_of(path: str) -> str:
@@ -238,16 +135,23 @@ COMMITTED_DATASETS_REL = "test-data/datasets"
 REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
 
 
-def committed_copy(sstable_dir: str, corpus_root: str, sstables: list[dict]) -> dict | None:
-    """Locate a COMMITTED copy of these SSTables in the checkout, and VERIFY it.
+def data_db_sha256_match_path(sstable_dir: str, corpus_root: str,
+                              sstables: list[dict]) -> str | None:
+    """The checkout path where EVERY recorded ``Data.db`` sha256 was re-hashed and matched.
 
-    `corpus_committed` used to be the literal `False`, in every mode — which is how the
-    COMMITTED small-golden manifest came to state that the committed corpus is not
-    committed (roborev #3234 L3). It is now OBSERVED: the candidate directory is looked
-    up under the checkout's datasets root at the SAME corpus-relative path, and every
-    `Data.db` sha256 this manifest records is RE-HASHED from that copy and required to
-    match. So a `true` here means "these exact bytes are in the checkout", proven, and a
-    `false` means no such copy was found — never an assumption from `--mode`.
+    The claim is exactly the check, and no wider (roborev #3234 M2). This used to be a
+    `corpus_committed: true` + `committed_copy {files, bytes, verified: "describes the
+    committed bytes"}` block built from a `Data.db`-ONLY hash comparison: it counted and
+    summed files it never read, said nothing about git, and so reported "committed exact
+    bytes" for a copy whose `Rows.db`/`Statistics.db`/`schema.cql` differed, or which was
+    untracked in every commit. Partial verification reading as full verification is the
+    same defect class as a vacuous review reading as clean.
+
+    Growing the check to cover that claim would have meant a second validator inside a
+    provenance writer, so the CLAIM was cut down to the evidence instead: one field, whose
+    NAME states precisely what was compared (`Data.db` sha256s) and nothing else. Absent
+    when no such path was found — never `false`, which invites reading it as "not
+    committed", a thing this function cannot determine.
     """
     rel = os.path.relpath(os.path.abspath(sstable_dir), os.path.abspath(corpus_root))
     if rel.startswith(".."):
@@ -259,71 +163,7 @@ def committed_copy(sstable_dir: str, corpus_root: str, sstables: list[dict]) -> 
         data_db = os.path.join(cand, f"{s['sstable_basename']}-Data.db")
         if not os.path.exists(data_db) or sha256_of(data_db) != s["data_db_sha256"]:
             return None
-    files = sorted(e for e in os.listdir(cand)
-                   if os.path.isfile(os.path.join(cand, e)))
-    total = sum(os.path.getsize(os.path.join(cand, e)) for e in files)
-    return {
-        "path": f"{COMMITTED_DATASETS_REL}/{rel.replace(os.sep, '/')}",
-        "files": len(files),
-        "bytes": total,
-        "kib": round(total / 1024, 1),
-        "verified": (
-            "every Data.db sha256 recorded in this manifest was re-hashed from the "
-            "committed copy and matched, so this manifest describes the committed bytes"
-        ),
-    }
-
-
-def corpus_location(mode: str, corpus_root: str, committed: dict | None,
-                    corpus_bytes: int) -> dict:
-    """The four top-level fields that describe WHERE this corpus is and whether it ships.
-
-    Per MODE and per OBSERVATION — no field here may be true of another corpus (roborev
-    #3234 L3): the production note's "multi-GB and NOT committed" was emitted for the
-    600-row committed golden too.
-    """
-    if committed:
-        return {
-            "corpus_root": COMMITTED_DATASETS_REL,
-            "corpus_root_is_checkout_relative": True,
-            "datasets_root_usage": (
-                f"CQLITE_DATASETS_ROOT=<checkout>/{COMMITTED_DATASETS_REL}"
-            ),
-            "corpus_committed": True,
-            "committed_copy": committed,
-            "corpus_note": (
-                f"This corpus IS COMMITTED, at {committed['path']} — "
-                f"{committed['bytes']} B ({committed['kib']} KiB) over "
-                f"{committed['files']} file(s), force-added past .gitignore's `*.db` "
-                "(the `test_da` convention) so a Cassandra-WRITTEN `da` oracle travels "
-                "with the checkout. At this size it needs no regeneration: read it from "
-                "the checkout. Regenerating it would replace committed bytes (and "
-                "every sha256 here) for no gain — the write timestamps alone make the "
-                "bytes differ. Nothing in this manifest is inherited from a previous one; "
-                "every number is re-read from the bytes on each run."
-            ),
-        }
-    gib = round(corpus_bytes / 1024**3, 4)
-    return {
-        "corpus_root": corpus_root,
-        "corpus_root_is_checkout_relative": False,
-        "datasets_root_usage": f"CQLITE_DATASETS_ROOT={corpus_root}",
-        "corpus_committed": False,
-        "committed_copy": None,
-        "corpus_note": (
-            f"This corpus is {corpus_bytes} B ({gib} GiB) of Data.db under {corpus_root} "
-            "and is NOT committed (.gitignore: `*.db`); no copy of these bytes was found "
-            f"under the checkout's {COMMITTED_DATASETS_REL}. Regenerate it with the "
-            "generator + the recorded seed. Nothing in this manifest is inherited from a "
-            "previous one; every number is re-read from the bytes on each run. See "
-            "`reproducibility` for exactly what the seed does and does not reproduce."
-            + (
-                ""
-                if mode == "production"
-                else f" (mode `{mode}`: this is not the profileable production corpus.)"
-            )
-        ),
-    }
+    return f"{COMMITTED_DATASETS_REL}/{rel.replace(os.sep, '/')}"
 
 
 PURPOSE = {
@@ -866,13 +706,7 @@ def main() -> int:
     ddl = ddl_from_schema(schema_path, args.keyspace, args.table)
     largest = max(s["data_db_bytes"] for s in sstables)
     data_db_total = sum(s["data_db_bytes"] for s in sstables)
-    # WHERE this corpus is, and whether it ships — observed, then rendered per mode.
-    location = corpus_location(
-        args.mode,
-        args.corpus_root,
-        committed_copy(sstable_dir, args.corpus_root, sstables),
-        data_db_total,
-    )
+    match_path = data_db_sha256_match_path(sstable_dir, args.corpus_root, sstables)
 
     manifest = {
         "issue": 3234,
@@ -937,7 +771,17 @@ def main() -> int:
             "buckets": args.buckets,
         },
         "rows_per_partition": plan,
-        **location,
+        # WHERE this corpus was read from: the --corpus-root of THIS run, and the
+        # env-var line that points a consumer at it. The former "IS COMMITTED / needs no
+        # regeneration / multi-GB and NOT committed" narrative (`corpus_committed`,
+        # `committed_copy`, `corpus_note`, `corpus_root_is_checkout_relative`) is gone:
+        # it was prose inferred from a Data.db-only hash comparison, and inference is
+        # not observation (roborev #3234 M2).
+        "corpus_root": args.corpus_root,
+        "datasets_root_usage": f"CQLITE_DATASETS_ROOT={args.corpus_root}",
+        # Present only when a checkout path was found holding these exact Data.db bytes.
+        # The key name IS the claim: Data.db sha256s, nothing else compared.
+        **({"data_db_sha256_also_match_at": match_path} if match_path else {}),
         "reproducibility": {
             "reproduced_by_the_seed": (
                 "the ROW SET: every pk/bucket/seq/payload value, the partition count, the "
@@ -1004,19 +848,17 @@ def main() -> int:
                 "the SSTable COUNT was checked against the row plan's chunk count and the "
                 "generation identifiers against 1..N before this manifest was written; a "
                 "flush split or a compaction preserves the row and partition totals while "
-                "changing the generation count the scan route (and the AC3 attribution) "
-                "depends on, so a mismatch is a hard failure"
+                "changing the generation count the scan route depends on, so a mismatch "
+                "is a hard failure"
             ),
-            "corpus_committed": (
-                "OBSERVED: a copy of these SSTables was looked for under the checkout's "
-                f"{COMMITTED_DATASETS_REL} at the same corpus-relative path and every "
-                "recorded Data.db sha256 re-hashed from it; `true` means those exact bytes "
-                "are committed, never an assumption from --mode"
+            "data_db_sha256_also_match_at": (
+                "present only when a directory at the same corpus-relative path under the "
+                f"checkout's {COMMITTED_DATASETS_REL} holds a Data.db per SSTable whose "
+                "sha256 equals the one recorded here. That is ALL it asserts: no other "
+                "component was compared and git tracking was not checked"
             ),
+            "read_path_measurement": NO_MEASUREMENT_HERE,
         },
-        "read_path_measurement_scope": measurement_scope(
-            args.mode, observed_rows, len(sstables)
-        ),
         "tables": [
             {
                 "table": args.table,
