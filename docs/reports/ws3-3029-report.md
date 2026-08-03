@@ -6,10 +6,14 @@
 > cycles/row, no histogram, no flame graph. Not one number here was produced by running CQLite.
 >
 > **The profile is not runnable on this box, and the reason is not #3002.** #3029 was gated on "#3002
-> merges"; it merged (PR #3044). The real blocker is a **corpus nobody has commissioned**: the largest
-> BTI object reachable anywhere here is a **28,129-byte `Data.db` holding 900 rows in 3 partitions**
-> (§6). Profiling it would measure process startup. No BTI-capable throughput-scale generator exists,
-> and `docker` — which every committed BTI generator requires — is absent (§6.3).
+> merges"; it merged (PR #3044). The real blocker is a **corpus that had not been commissioned**: the
+> largest BTI object reachable anywhere here is a **28,129-byte `Data.db` holding 900 rows in 3
+> partitions** (§6). Profiling it would measure process startup. No BTI-capable throughput-scale
+> generator exists, and `docker` — which every committed BTI generator requires — is absent (§6.3).
+> That prerequisite is now **owned by its own issue, #3234** (*"Commission a profileable BTI (`da`)
+> perf corpus + author `gen-perf-corpus-bti.sh`"*), and **WS3's measurement arm — scope items 1, 4 and
+> 5 — holds behind it**. The fixture is **shared with WS4 (#3030)**, per this theme's "one fixture,
+> three consumers" rule, so it is commissioned once and consumed three times (§6.5).
 >
 > **What it IS: the structural analysis the profile's own scope items 2 and 3 asked for**, from code
 > alone. That needs no corpus, it turned up two P1 defects, and it changes what the eventual
@@ -26,17 +30,20 @@ is *correct*.**
 
 ---
 
-## 1. Executive summary
+## 1. Findings ledger
 
-| # | Finding | Status | Filed |
-|--:|---|---|---|
-| 1 | The clustering-seek plane still reads `Data.db` through the `MADV_RANDOM` point mmap — #2876's split missed it, in **both** formats | Defect, from code | **#3230** (clustering-seek plane on the advised mapping), P1 |
-| 2 | BTI index components are **resident-at-open**; trie traversal is **zero-syscall**. #3029 scope item 3's hypothesis is **false by construction** | Refutation, from code | — (no defect) |
-| 3 | BTI readers are **structurally excluded** from the Flight single-source bypass arm — worth ~3.06× on BIG | Defect, from code | **#3233** (BTI denied the Flight bypass arm), P1 |
-| B | No profileable BTI corpus exists on this box and none can be generated here | Blocker | this report, §6 |
+| # | Finding | Scope item it answers | Verdict | Filed as |
+|--:|---|---|---|---|
+| 1 | The clustering-seek plane still reads `Data.db` through the `MADV_RANDOM` point mmap — #2876's split missed it, in **both** formats (§3) | **item 2** ("does #2876's plane split cover BTI?") | **Defect, from code** — it does not cover it, and the gap is not BTI-specific | **#3230**, P1 |
+| 2 | BTI index components (`Partitions.db`, `Rows.db`) are **resident-at-open**; trie traversal is a slice index, **zero-syscall** (§4) | **item 3** ("does trie traversal add small random reads?") | **Hypothesis refuted** — false by construction. Real cost is two eager whole-file reads at OPEN (open-latency, not throughput) | — no defect; recorded here only |
+| 3 | BTI readers are **structurally excluded** from the Flight single-source bypass arm; on BIG that arm is worth 3.06× (§5) | unscoped/discovered | **Defect, from code**; verified CONFIRMED and **incidental**, not deliberate (§5.3) | **#3233**, P1 |
+| 4 | No profileable BTI corpus exists on this box, and none can be generated here (no `docker`, no JDK, no BTI scale generator) (§6) | blocks **items 1, 4, 5** (the measurement arm) | **Blocker** — this is why the report contains no measurement | **#3234**, prerequisite (shared with WS4 #3030) |
+| 5 | #3029's **AC 3** premise "BTI materially below BIG = defect" is unsound: 238k/253k is a **bypass-arm** number BTI cannot reach at all (§7.1) | corrects **item 4** | **Strike the premise.** The profile's job is to *attribute* the gap, not to assume a defect | recorded here only |
+| 6 | #3029's shared context still carries **T1 = 600k rows/s/phys-core**, withdrawn upstream by #3023 (§7.2) | corrects **items 1, 4** | **Strike the number.** WS3's ACs bake in a withdrawn target | recorded here only |
+| 7 | BTI **full** scan calls `stitch_all_chunks`, materializing the entire decompressed data section into one `Vec<u8>` — **O(file) resident** (§3.3) | unscoped/discovered (adjacent to #3061) | Structural note, from code — invisible on a 900-row fixture, load-bearing at profiling scale | **recorded here only, not filed** |
 
-Consequence: **#3029's AC 3 is unsound as written** — a below-BIG BTI number is the *predicted*
-outcome of finding 3, not evidence of a new defect. See §7c and §8.2.
+Consequences that change what the eventual measurement must do: findings 3, 5 and 6 (§7.1, §8.2);
+finding 4 is the gating prerequisite (§6, now **#3234**).
 
 ---
 
@@ -117,7 +124,7 @@ data_access/bti_point.rs:688 bti_pull_decompressed_chunk
 Both loops walk the partition's chunks **forward and sequentially** (`:575-603` buffers the header;
 `:615-622` extends to the authoritative partition end) — the single access shape `MADV_RANDOM`
 readahead suppression is exactly wrong for. The exclusion is even documented in prose:
-`data_access/compressed_offset.rs:22-23` — "(`bti_point.rs` / `big_promoted.rs` read `point_source`
+`data_access/compressed_offset.rs:21-22` — "(`bti_point.rs` / `big_promoted.rs` read `point_source`
 directly and do not route through here.)"
 
 **BIG leaks identically**, so this is *the clustering-seek plane, both formats*, not a BTI bug:
@@ -130,13 +137,16 @@ deliberate for a "POINT path").
 | Path | Site | Plane | Verdict |
 |---|---|---|---|
 | BTI point lookup | `bti_point.rs:57` (`bti_point_lookup`), reads at `:157` | `point_source` | correct — genuinely scattered |
-| BTI **full** scan | `bti.rs:536` (`bti_scan_with_metadata`) → `:551` `new_scan_cursor` → `data_access/mod.rs:1001-1006` → `scan_source.open` → `ScanCursor{BlockSource}` (`source.rs:196-203`) | unadvised scan mmap | correct |
+| BTI **full** scan | `bti.rs:536` (`bti_scan_with_metadata`) → `:550` `new_scan_cursor` → `data_access/mod.rs:1001-1006` → `scan_source.open` → `ScanCursor{BlockSource}` (`source.rs:196-203`) | unadvised scan mmap | correct |
 
-**Adjacent structural note, not part of #3230.** That same BTI full scan calls `stitch_all_chunks`
-(`bti.rs:561`, `data_access/mod.rs:418`), materializing the **entire decompressed data section into
-one `Vec<u8>`** before parsing — invisible on a 900-row fixture, O(file) resident at profiling
-scale. Any future BTI run must state which of the two BTI scan shapes it measured; their memory
-profiles differ.
+**Adjacent structural note — ledger finding 7, recorded here only, NOT filed.** That same BTI full
+scan calls `stitch_all_chunks` (`bti.rs:562`, `data_access/mod.rs:418`), materializing the **entire
+decompressed data section into one `Vec<u8>`** before parsing — invisible on a 900-row fixture,
+**O(file) resident** at profiling scale. It sits in the neighbourhood of **#3061** (peak-RSS vs the
+<128 MB target) rather than of #3230, and is deliberately left **unfiled** pending a measurement that
+would price it — filing an unpriced memory claim is the same error as publishing an unmeasured
+throughput one. Any future BTI run must state which of the two BTI scan shapes it measured; their
+memory profiles differ.
 
 ---
 
@@ -211,31 +221,55 @@ component **by format**, so this is not a fixture accident.
 reason, `:132` gates on `reason.is_selected()`, and a non-selected reason falls through
 unconditionally to `KWayMerger::new_from_readers` (`:162-167`).
 
-`CQLITE_FLIGHT_MERGE_PATH=bypass` **cannot rescue it**: the module contract (`bypass.rs:56-60`) is
+`CQLITE_FLIGHT_MERGE_PATH=bypass` **cannot rescue it**: the module contract (`bypass.rs:56-59`) is
 that `bypass` "requests the fast path but NEVER overrides a correctness precondition," and the
 predicate (`:204-273`) checks `supports_streaming_query_scan()` unconditionally, after the
 forced-path branch at `:210-211`.
 
-### 5.3 Incidental, not designed
+### 5.3 Verification outcome — **CONFIRMED, and INCIDENTAL** (not deliberate)
 
-Grepping both OpenSpec locations for `bti` / `Partitions.db`:
-`openspec/changes/archive/2026-07-29-flight-single-sstable-bypass/` → **0 hits**;
-`openspec/specs/flight-single-sstable-bypass/spec.md` (30,903 B) → **0 hits**. The bypass design never
-considered BTI; the exclusion is a side effect of reusing a BIG-shaped component predicate. Core says
-so in its own words: `parsing/block_entries.rs:119-130` labels itself a **"KNOWN FAIL-OPEN SEAM —
-issue #3108"** and notes the `da` route "is unreachable from the single-source query path today only
-because `supports_streaming_query_scan()` refuses BTI readers — an **implicit, undocumented
-dependency**." The same comment records a second BTI gap: `run_scan_stream_batched` "lacks the BTI
-dispatch its siblings have — issue #3109."
+The deliberate-vs-incidental question was verified before publishing, because the answers carry
+opposite consequences: a *deliberate* exclusion is a documented constraint to respect, an *incidental*
+one is a defect to remove. **Outcome: CONFIRMED, and incidental — filed as #3233.** Evidence:
 
-**Arm selection is only half-observable.** `BypassReason` has exactly one production consumer,
-`is_selected()` (`bypass.rs:192-197`) at `producer_warm.rs:132`; the value is never logged or
-exported, so the *reason* for the merge arm is discarded — an operator cannot distinguish "BTI
-reader" from "2 sources" from "multicell schema." The *arm* is indirectly observable via
-`read_path_probe`'s merger-built counter (`write_engine/merge/from_readers.rs:416`, fired at
-`producer_warm.rs:150,168`), which is what the differential tests assert.
+1. **The #3058 design never mentions BTI.** Grepping both OpenSpec locations for `bti` /
+   `Partitions.db` / `da`: `openspec/changes/archive/2026-07-29-flight-single-sstable-bypass/`
+   (`proposal.md`, `design.md`, `tasks.md`, `specs/`) → **0 hits**;
+   `openspec/specs/flight-single-sstable-bypass/spec.md` (30,903 B) → **0 hits**. A constraint nobody
+   wrote down in the design that created the predicate was not chosen there.
+2. **Core labels the dependency implicit and undocumented, in its own words.**
+   `parsing/block_entries.rs:119-130` marks itself a **"KNOWN FAIL-OPEN SEAM — issue #3108"** and
+   states the `da` route "is unreachable from the single-source query path today only because
+   `supports_streaming_query_scan()` refuses BTI readers — an **implicit, undocumented dependency**,"
+   which **#3108** owns making explicit. The same comment records a second BTI gap:
+   `run_scan_stream_batched` "lacks the BTI dispatch its siblings have — issue #3109."
 
-### 5.4 What the denied arm is worth — on BIG
+**The counterfactual, stated so the question is not re-opened.** Had the exclusion been *deliberate*,
+its home would be the pipeline-unification design — **#3231** (*"collapse the fragmented Flight
+`do_get` read pipeline into a single copy-minimizing path"*) — as a documented constraint on which
+readers the single-source path may serve. #3231 does discuss BTI, but only in the opposite direction:
+it lists divergent "BIG vs BTI dispatch" as *fragmentation to be collapsed* and names #3109 as "the
+first path-unification step." No document anywhere states that BTI must not take the arm. So the
+exclusion is a side effect of reusing a BIG-shaped component predicate (`Index.db` presence) as a
+proxy for "can stream", and #3233 is a defect report rather than a request to change a decision.
+
+### 5.4 Arm selection is **HALF**-observable — the reason is discarded, the arm is not
+
+The stronger claim ("arm selection is unobservable") is **false**; this report does not make it.
+
+- **The *reason* IS discarded.** `BypassReason` has exactly one production consumer, `is_selected()`
+  (`bypass.rs:192-197`), called at `producer_warm.rs:132`; the value is never logged, exported, or
+  attached to a span. An operator seeing the merge arm cannot distinguish "BTI reader" from "2 sources"
+  from "multicell schema" — the observability gap #3233 records.
+- **The *arm* IS observable.** `read_path_probe`'s merger-built counter
+  (`write_engine/merge/from_readers.rs:416`, fired at `producer_warm.rs:150,168` — both arms, same
+  phase boundary) exposes which arm ran, and existing differential tests assert on exactly that signal.
+  The module contract says so (`bypass.rs:60-61`).
+
+So: **half**-observable. WS3's measurement can already prove which arm its BTI run took, and must
+report it (§8.2); what it cannot get, without #3233, is *why*.
+
+### 5.5 What the denied arm is worth — on BIG
 
 From `docs/reports/ws0-3100-report.md` (§2, tables at `:63-81`, analysis `:86`):
 
@@ -251,6 +285,12 @@ The 3.06× is what the arm is worth on `nb`; whether BTI would realize the same,
 ---
 
 ## 6. The blocker — no profileable BTI corpus, and none generable here
+
+**Now owned by #3234** (*"Commission a profileable BTI (`da`) perf corpus + author
+`gen-perf-corpus-bti.sh` — prerequisite blocking WS3 (#3029) and WS4 (#3030)"*). This section is that
+issue's evidence base: §6.1–6.3 are why it exists, §6.4 is what it does **not** need to build, and
+§6.5 is its work breakdown. **WS3's measurement arm (scope items 1, 4, 5) holds behind #3234**; the
+structural arm (items 2, 3 → §3, §4) is delivered here and needed nothing from it.
 
 ### 6.1 Every BTI object reachable on this box
 
@@ -291,17 +331,17 @@ files. #3217's own 784 MB `nb-16-big` corpus was generated on *this* box and has
 ### 6.4 The harness is NOT a blocker
 
 #3217 committed a **retained, format-agnostic** harness at
-`docs/reports/ws0-3217-artifacts/harness/` (14 files incl. `sweep.sh`, `profile-oncpu.sh`,
+`docs/reports/ws0-3217-artifacts/harness/` (13 files incl. `sweep.sh`, `profile-oncpu.sh`,
 `profile-offcpu.sh`, `selftest.sh`, `corpus-basis.py`; provenance `ws0-3217-report.md:173-179`).
 Grepping it for `nb-` returns **no files** — nothing in it is BIG-specific. `perf`, `bpftrace`,
 `iostat`, `offcputime-bpfcc` and `runqlat-bpfcc` are all installed (§2).
 
-### 6.5 What commissioning a profileable BTI corpus requires
+### 6.5 What commissioning a profileable BTI corpus requires — the #3234 work breakdown
 
 1. Install `docker` (or a JDK + Cassandra 5.0.8 tarball for a #3217-style non-container run).
 2. Fork `gen-perf-corpus-3068.sh` and graft in the BTI flip from `gen-multiclustering-bti.sh:110-113`
    — `storage_compatibility_mode: NONE` + `sstable: selected_format: bti` + an explicit
-   `column_index_size` — keeping that script's fail-closed `grep` verification (`:117-121`), since a
+   `column_index_size` — keeping that script's fail-closed `grep` verification (`:117-120`), since a
    silently-unapplied edit yields a thin `Rows.db` and a fixture that profiles nothing.
 3. Replace the hardcoded `nb-*` globs (`:31-32`, `:399-400`) with `da-*`; add `Partitions.db` /
    `Rows.db` to the published component set.
@@ -312,9 +352,65 @@ Grepping it for `nb-` returns **no files** — nothing in it is BIG-specific. `p
    `Data.db`; `:176` enforces a free-space floor for "data + 2× compact headroom"). 266 GB free is
    ample.
 
+**One fixture, three consumers.** The geometry above is not WS3-specific: the same compound-clustering
+`da` corpus is what **WS4 (#3030, wide-row ≥4 KB profile)** needs, and what #3002's AC-9 asked for at
+correctness scale. That is why #3234 is a standalone prerequisite rather than a step inside WS3 —
+commission it once, consume it three times. Corollary for sequencing: **#3234 lands before either WS3's
+or WS4's measurement arm can start**, and neither should fork its own generator.
+
 ---
 
-## 7. Corrections to #3029's own text
+## 7. Corrections to #3029's own text — TWO UNSOUND AC PREMISES, STRIKE BOTH
+
+§7.1 and §7.2 are recorded prominently and on purpose: both premises are still live in the issue text,
+so the next worker would otherwise inherit them. Neither is a quibble — one would send a bug hunt
+after an already-filed defect, the other scores WS3 against a number its own umbrella has withdrawn.
+§7.3 collects two lesser pointer errors.
+
+### 7.1 STRIKE the premise "BTI materially below BIG = defect" (AC 3)
+
+#3029's AC 3 reads that a BTI rows/s figure "materially below BIG's 238k" is **"a defect, not a tuning
+gap."** That is **unsound**, for a reason that has nothing to do with how fast BTI is:
+
+- **238k/253k is a BYPASS-ARM number.** The 252,999 rows/s/phys-core headline (and the 234,842
+  1-hw-thread figure) is Flight `do_get` on the #3058 single-source bypass arm
+  (`ws0-3100-report.md:68`, `:78`); the 238k #3029 quotes is #2818's i4i bypass measurement.
+- **BTI cannot reach that arm at all** — not slowly, not at all. `supports_streaming_query_scan()`
+  fails on **both** conjuncts for every `da` reader, by format (§5.1), so a BTI run is confined to the
+  merge arm (**#3233**). Comparing a merge-arm number against a bypass-arm number measures #3233 and
+  nothing else, and #3233 is already filed.
+- **The sound same-arm comparison is BTI-merge-arm vs BIG-MERGE-ARM = 82,639 rows/s/phys-core**
+  (`ws0-3100-report.md:69`), **not** 252,999 (§8.2 tabulates the valid and invalid pairings).
+
+**Reframed job for the profile — attribution, never assumption.** A measured BTI-vs-BIG gap is not
+self-interpreting. WS3's task is to **attribute** it across three candidate causes, each of which has
+its own already-identified owner:
+
+| Candidate cause | Owner | How the profile separates it |
+|---|---|---|
+| **Merge-arm routing** — BTI denied the bypass arm | **#3233** | compare arm-to-arm (BTI-merge vs BIG-merge); the arm is observable (§5.4), so disclose it |
+| **The clustering-seek plane** on the `MADV_RANDOM` mapping | **#3230** | present in BIG too, so it does **not** explain a BTI-vs-BIG *delta*; isolate with a >8 MiB corpus (§8.1) and the block-read size histogram |
+| **Genuine BTI-specific cost** — trie/`Rows.db` resolution, `stitch_all_chunks` residency, eager open reads | unowned; §3.3, §4 bound the candidates | residual after the first two are accounted for, attributed per-phase (#2819 timers) |
+
+Only a residual that survives that decomposition is a new BTI defect. **No gap may be called a defect
+before it is attributed** — and a gap explained entirely by #3233 or #3230 is a re-report, not a
+finding.
+
+### 7.2 STRIKE the target "T1 = 600k rows/s per physical core" — WITHDRAWN upstream
+
+#3029's shared-context block still asserts "**T1 = 600k rows/s per PHYSICAL core, warm** (2.5× today's
+measured 238k)". Umbrella **#3023**'s current title reads:
+
+> *"[UMBRELLA] 0.17 scan-path exploration: TARGET = Flight `do_get` within ~1.3× of bare scan (~280k
+> rows/s/phys core); **T1=600k WITHDRAWN as underivable**."*
+
+Said plainly: **WS3's ACs bake in a withdrawn number.** 600k was retired as underivable, and the live
+target is *relative* — Flight `do_get` within ~1.3× of bare scan, ~280k rows/s/phys-core. Any WS3
+measurement that reports "x% of T1" is scoring itself against a target that no longer exists; it
+should report against the ~1.3×-of-bare-scan bound instead, which also requires measuring bare scan on
+the same box in the same run.
+
+### 7.3 Two lesser pointer errors
 
 **(a) The AC-9 fixture did not land in PR #3044.** A claim comment on #3029 states "#3002 …merged
 2026-07-28 via PR #3044." PR #3044 (`fix(bti): correct Rows.db row-index root base + OSS50 leading
@@ -324,19 +420,7 @@ multi-component-clustering `da` fixture WS3 and WS4 were told to share — lande
 `test-data/schemas/multiclustering-table-bti.cql` and the fixture directory. And it does **nothing
 for a profile**: 468 rows in 3 partitions, a correctness fixture (§6.1).
 
-**(b) T1 = 600k is withdrawn upstream.** #3029's shared-context block still asserts "**T1 = 600k
-rows/s per PHYSICAL core, warm** (2.5× today's measured 238k)". Umbrella **#3023**'s current title
-reads: *"TARGET = Flight `do_get` within ~1.3× of bare scan (~280k rows/s/phys core); **T1=600k
-WITHDRAWN as underivable**."* The child's copy is stale.
-
-**(c) AC 3 is unsound as written.** "A BTI number materially below BIG is a defect, not a tuning
-gap" presumes both formats can reach the same arm. Finding 3 shows BTI is structurally confined to
-the **merge** arm, so the arm-matched comparison is **BTI-merge vs BIG-merge = 82,639
-rows/s/phys-core** (`ws0-3100-report.md:69`), not BTI vs BIG's 252,999/234,842 bypass headline. A BTI
-figure below the *bypass* number is the predicted consequence of #3233; reading it as a fresh defect
-would send a bug hunt after an already-filed one.
-
-**(d) Two minor pointer errors.** #3029's Notes cite the Cassandra source as
+**(b) Two minor pointer errors.** #3029's Notes cite the Cassandra source as
 `/Users/pmcfadin/projects/cassandra`; no clone exists on this box and `CQLITE_CASSANDRA_REPO` is
 unset — per `CLAUDE.md`, read through the pinned ref (`git show cassandra-5.0.8:<path>`), never a
 working tree. Its scope-item-2 chain (`scan_single_partition_clustering` →
@@ -363,9 +447,10 @@ Because of #3233, the honest headline pairs are:
 
 | Comparison | Basis | Valid? |
 |---|---|:--|
-| BTI-merge vs **BIG-merge** (82,639 rows/s/phys-core) | same arm, same box | ✅ the sound one |
-| BTI-merge vs **BIG-bypass** (252,999) | different arms | ❌ measures #3233, already filed |
-| BTI-here vs **238k** (#2818, i4i) | different machines | ❌ (§2) |
+| BTI-merge vs **BIG-merge** (82,639 rows/s/phys-core, `ws0-3100-report.md:69`) | same arm, same box | ✅ the sound one |
+| BTI-merge vs **BIG-bypass** (252,999, `:68`) | different arms | ❌ measures #3233, already filed (§7.1) |
+| BTI-here vs **238k** (#2818, i4i) | different machines **and** different arms | ❌ (§2, §7.1) |
+| BTI-anything vs **T1 = 600k** | target withdrawn upstream | ❌ (§7.2) — score against ~1.3× of bare scan instead |
 
 Re-measure BIG **on this box, alongside BTI, on a geometry-matched corpus**, and state which arm each
 number came from — and which BTI scan shape was measured, the whole-section `bti_scan_with_metadata`
@@ -393,17 +478,20 @@ Two amendments to what #3029's scope item 1 prescribes:
    (`ws0-3026-artifacts/ws0-results/head-to-head-method.md:105`,
    `ws0-cassandra-baseline-2026-07-27.md:845`) — and it is not installed here anyway.
 
-Inherit #3217's nine traps wholesale (`ws0-3217-report.md:181-227`). The first three each produce an
+Inherit #3217's ten traps wholesale (`ws0-3217-report.md:181-226`). The first three each produce an
 empty off-CPU profile that "reads identically to 'the mpsc handoff is innocent'" (`:183-186`) — the
 same false-negative shape a BTI profile would take. Highest-risk here today: `perf_event_paranoid` is
 **4** (trap 8), BPF collectors need `sudo` regardless of the sysctl (trap 1), sched tracepoints need
 `sudo` independently (trap 7), and `rust_demangler` is **absent** (trap 9, degrades quietly). §2
 records all four.
 
-### 8.4 Report per the #3023 contract
+### 8.4 Report per the #3023 contract — against the LIVE target
 
 cycles/row **and** bytes-of-memory-traffic/row; rows/s **per physical core, warm** as the headline
-with cold separate; every multiplier measured, not modelled; findings posted to umbrella #3023.
+with cold separate; every multiplier measured, not modelled; findings posted to umbrella #3023. The
+target to score against is #3023's current one — **Flight `do_get` within ~1.3× of bare scan (~280k
+rows/s/phys-core)** — never the withdrawn T1 = 600k (§7.2), which means bare scan must be measured in
+the same run on the same box.
 
 ---
 
@@ -411,21 +499,29 @@ with cold separate; every multiplier measured, not modelled; findings posted to 
 
 | AC | Status | Where |
 |---|---|---|
-| BTI's first read-path profile exists, #2818-comparable instrument coverage | ❌ **BLOCKED** — no profileable corpus (§6) | §6 |
-| Evidence-backed answer on whether #2876's split covers BTI; any defect filed **separately** | ✅ **answered: it does not** — filed as **#3230**, both formats | §3 |
-| BTI rows/s/phys-core next to BIG's 238k | ❌ **BLOCKED**; and the comparison as specified is **unsound** — see §7c | §6, §7c |
-| BTI roofline note (cycles/row, traffic/row) | ❌ **BLOCKED** — requires measurement | §6 |
-| *(beyond scope, found en route)* BTI excluded from the Flight bypass arm | ✅ filed as **#3233** | §5 |
-| *(beyond scope, found en route)* trie-traversal read hypothesis refuted | ✅ resident-at-open, zero-syscall | §4 |
+| **1.** BTI's first read-path profile exists, #2818-comparable instrument coverage | ❌ **HELD behind #3234** — no profileable corpus (§6) | §6 |
+| **2.** Evidence-backed answer on whether #2876's split covers BTI; any defect filed **separately** | ✅ **answered: it does not** — filed as **#3230**, both formats | §3 |
+| **3.** Does trie traversal add small random reads? | ✅ **answered: no** — resident-at-open, zero-syscall; hypothesis refuted | §4 |
+| **4.** BTI rows/s/phys-core next to BIG's 238k | ❌ **HELD behind #3234**; and the comparison as specified is **unsound** — the premise is struck (§7.1) and the target it cites is withdrawn (§7.2) | §6, §7.1, §7.2 |
+| **5.** BTI roofline note (cycles/row, traffic/row) | ❌ **HELD behind #3234** — requires measurement | §6 |
+| *(unscoped, found en route)* BTI excluded from the Flight bypass arm | ✅ filed as **#3233**; verified CONFIRMED + incidental | §5 |
+| *(unscoped, found en route)* BTI full scan materializes the whole data section | ⚠️ recorded here only, **not filed** — unpriced | §3.3 |
+
+Scope items **2 and 3 are delivered**; items **1, 4 and 5 — the measurement arm — hold behind #3234**,
+whose fixture is shared with WS4 (#3030).
 
 ## 10. Notes and deviations
 
 - **No production code was changed and no fix is proposed here.** Both defects are filed as their own
-  P1 issues (#3230, #3233), per #3029's instruction to file separately rather than bury.
+  P1 issues (#3230, #3233), per #3029's instruction to file separately rather than bury; the corpus
+  prerequisite is filed as **#3234**.
 - **Nothing was measured.** Every number is quoted from a committed artefact (`ws0-3100-report.md`,
   `ws0-3217-report.md`, `ws0-cassandra-baseline-2026-07-27.md`) or read off the filesystem with
-  `ls`/`find`/`lscpu`/`uname`.
-- **Ordering.** #3230 and #3233 are code-only and need no corpus, so both can proceed while corpus
-  commissioning is funded. Their *validation* needs a >8 MiB corpus (§8.1), making §6.5 the gating
-  item for all of WS3 — and, per #3029's own note, for WS4 (#3030) too. Corpus first, then re-open
-  the profile.
+  `ls`/`find`/`lscpu`/`uname`. **This report claims no measurement of its own, anywhere.**
+- **Ordering.** #3230 and #3233 are code-only and need no corpus, so both can proceed while **#3234**
+  is funded. Their *validation* needs a >8 MiB corpus (§8.1), which makes #3234 the gating item for
+  all of WS3's measurement arm — and, per #3029's own note, for WS4 (#3030) too. **#3234 first, then
+  re-open the profile.**
+- **One finding is deliberately unfiled**: the `stitch_all_chunks` whole-section materialization
+  (§3.3). It is real and read off the code, but pricing it needs the same corpus #3234 will produce,
+  and an unmeasured memory claim is the same category of error this report exists to avoid.
