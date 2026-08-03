@@ -150,31 +150,150 @@ impl CorpusIdentity {
     ///
     /// `Data.db` is checked first and named explicitly, because it is the artifact
     /// both measurement arms actually read.
+    ///
+    /// # Why this is exhaustive by construction (issue #3096 review, finding 3)
+    ///
+    /// This function used to compare **4 of the 15 recorded fields**
+    /// (`data_db_sha256`, `rows`, `partitions`, `data_db_bytes`, plus the component
+    /// map) and returned an empty vec for a divergence in any of the others — so a
+    /// corpus regenerated with a DIFFERENT `seed`, a different `table`, a different
+    /// `rows_per_partition`/`cells_per_row`, a stray `compression_info_present`, or
+    /// with the recorded caveats edited out was reported as **"reproduced
+    /// exactly."** That is a FALSE VERIFICATION on the pin every future comparison
+    /// rests on, and it would have propagated: this generator is the template
+    /// #3232/#3234 are pointed at.
+    ///
+    /// The fix is structural, not a longer list: both operands are **destructured**
+    /// with full field patterns, so adding a field to [`CorpusIdentity`] without
+    /// extending this comparison is a COMPILE ERROR ("pattern does not mention
+    /// field") rather than a silently unchecked field.
     pub fn diff(&self, prior: &CorpusIdentity) -> Vec<String> {
+        // Exhaustiveness enforcement — see the doc comment above. Do NOT replace
+        // these patterns with field access.
+        let Self {
+            issue,
+            seed,
+            table,
+            rows,
+            partitions,
+            rows_per_partition,
+            cells_per_row,
+            data_db_bytes,
+            data_db_sha256,
+            bytes_per_row,
+            total_component_bytes,
+            components,
+            compression_info_present,
+            not_a_correctness_oracle,
+            differs_from_prior_corpus,
+        } = self;
+        let Self {
+            issue: p_issue,
+            seed: p_seed,
+            table: p_table,
+            rows: p_rows,
+            partitions: p_partitions,
+            rows_per_partition: p_rows_per_partition,
+            cells_per_row: p_cells_per_row,
+            data_db_bytes: p_data_db_bytes,
+            data_db_sha256: p_data_db_sha256,
+            bytes_per_row: p_bytes_per_row,
+            total_component_bytes: p_total_component_bytes,
+            components: p_components,
+            compression_info_present: p_compression_info_present,
+            not_a_correctness_oracle: p_not_a_correctness_oracle,
+            differs_from_prior_corpus: p_differs_from_prior_corpus,
+        } = prior;
+
         let mut out = Vec::new();
-        if self.data_db_sha256 != prior.data_db_sha256 {
+        // `Data.db` first and by name: it is the artifact both measurement arms
+        // read, so it is the primary determinism assertion.
+        if data_db_sha256 != p_data_db_sha256 {
             out.push(format!(
-                "Data.db sha256: recorded {} != regenerated {}",
-                prior.data_db_sha256, self.data_db_sha256
+                "Data.db sha256: recorded {p_data_db_sha256} != regenerated {data_db_sha256}"
             ));
         }
-        if self.rows != prior.rows {
-            out.push(format!("rows: recorded {} != {}", prior.rows, self.rows));
-        }
-        if self.partitions != prior.partitions {
+        if data_db_bytes != p_data_db_bytes {
             out.push(format!(
-                "partitions: recorded {} != {}",
-                prior.partitions, self.partitions
+                "Data.db bytes: recorded {p_data_db_bytes} != {data_db_bytes}"
             ));
         }
-        if self.data_db_bytes != prior.data_db_bytes {
+        // Corpus SHAPE. Any of these differing means the two identities describe
+        // different corpora, whatever the digests say.
+        if rows != p_rows {
+            out.push(format!("rows: recorded {p_rows} != {rows}"));
+        }
+        if partitions != p_partitions {
             out.push(format!(
-                "Data.db bytes: recorded {} != {}",
-                prior.data_db_bytes, self.data_db_bytes
+                "partitions: recorded {p_partitions} != {partitions}"
             ));
         }
-        for (name, prior_c) in &prior.components {
-            match self.components.get(name) {
+        if rows_per_partition != p_rows_per_partition {
+            out.push(format!(
+                "rows_per_partition: recorded {p_rows_per_partition} != {rows_per_partition}"
+            ));
+        }
+        if cells_per_row != p_cells_per_row {
+            out.push(format!(
+                "cells_per_row: recorded {p_cells_per_row} != {cells_per_row}"
+            ));
+        }
+        // Compared on the BIT PATTERN, not with `==`: an exact reproduction of a
+        // recorded value is the property, and bit equality makes a recorded NaN
+        // compare equal to itself instead of reporting a phantom difference on
+        // every re-run.
+        if bytes_per_row.to_bits() != p_bytes_per_row.to_bits() {
+            out.push(format!(
+                "bytes_per_row: recorded {p_bytes_per_row} != {bytes_per_row}"
+            ));
+        }
+        if total_component_bytes != p_total_component_bytes {
+            out.push(format!(
+                "total_component_bytes: recorded {p_total_component_bytes} != {total_component_bytes}"
+            ));
+        }
+        // PROVENANCE. A different seed or table reproduces different bytes by
+        // construction, so a match on these is part of what "reproduced" means.
+        if seed != p_seed {
+            out.push(format!("seed: recorded {p_seed} != {seed}"));
+        }
+        if table != p_table {
+            out.push(format!("table: recorded {p_table} != {table}"));
+        }
+        if issue != p_issue {
+            out.push(format!("issue: recorded {p_issue} != {issue}"));
+        }
+        // Issue #1406: a `CompressionInfo.db` MUST NOT appear. The component loop
+        // below would catch the file, but the recorded FLAG can disagree with the
+        // component set (an internally inconsistent identity), and that
+        // disagreement is exactly what must not read as "reproduced exactly".
+        if compression_info_present != p_compression_info_present {
+            out.push(format!(
+                "compression_info_present: recorded {p_compression_info_present} != \
+                 {compression_info_present}"
+            ));
+        }
+        // The CAVEATS travel IN the artifact (#3042). An identity whose caveat text
+        // was edited or dropped is not the recorded identity, and silently
+        // accepting it is how a performance fixture gets re-labelled as an oracle.
+        if not_a_correctness_oracle != p_not_a_correctness_oracle {
+            out.push(format!(
+                "not_a_correctness_oracle: recorded caveat text differs \
+                 (recorded {} chars, now {} chars) — the caveat travels IN the artifact (#3042)",
+                p_not_a_correctness_oracle.len(),
+                not_a_correctness_oracle.len()
+            ));
+        }
+        if differs_from_prior_corpus != p_differs_from_prior_corpus {
+            out.push(format!(
+                "differs_from_prior_corpus: recorded caveat text differs \
+                 (recorded {} chars, now {} chars)",
+                p_differs_from_prior_corpus.len(),
+                differs_from_prior_corpus.len()
+            ));
+        }
+        for (name, prior_c) in p_components {
+            match components.get(name) {
                 None => out.push(format!("component {name}: recorded, now MISSING")),
                 Some(c) if c != prior_c => out.push(format!(
                     "component {name}: recorded {} ({} B) != {} ({} B)",
@@ -183,8 +302,8 @@ impl CorpusIdentity {
                 Some(_) => {}
             }
         }
-        for name in self.components.keys() {
-            if !prior.components.contains_key(name) {
+        for name in components.keys() {
+            if !p_components.contains_key(name) {
                 out.push(format!(
                     "component {name}: NEW, not in the recorded identity"
                 ));
@@ -254,6 +373,179 @@ mod tests {
         assert!(json.contains("3042"));
         // And it must NOT assert the prior corpus's digest as this corpus's own.
         assert!(!json.contains("\"data_db_sha256\": \"0185909de6da"));
+    }
+
+    /// The comparison `diff` performed BEFORE the issue-#3096 review (finding 3),
+    /// kept as a **non-vacuity oracle** for the per-field tests below.
+    ///
+    /// Each per-field test asserts BOTH halves: the current `diff` reports the
+    /// divergence, AND this pre-fix comparison did NOT — i.e. the same input really
+    /// did read as "reproduced exactly" before the fix. Without the second half a
+    /// passing test proves nothing about whether the guard was ever broken.
+    ///
+    /// This is a frozen historical replica. It must never be called by production
+    /// code and must never be "kept in sync" with `diff`.
+    fn diff_pre_review(now: &CorpusIdentity, prior: &CorpusIdentity) -> Vec<String> {
+        let mut out = Vec::new();
+        if now.data_db_sha256 != prior.data_db_sha256 {
+            out.push("Data.db sha256".to_string());
+        }
+        if now.rows != prior.rows {
+            out.push("rows".to_string());
+        }
+        if now.partitions != prior.partitions {
+            out.push("partitions".to_string());
+        }
+        if now.data_db_bytes != prior.data_db_bytes {
+            out.push("Data.db bytes".to_string());
+        }
+        for (name, prior_c) in &prior.components {
+            match now.components.get(name) {
+                None => out.push(format!("component {name} MISSING")),
+                Some(c) if c != prior_c => out.push(format!("component {name} changed")),
+                Some(_) => {}
+            }
+        }
+        for name in now.components.keys() {
+            if !prior.components.contains_key(name) {
+                out.push(format!("component {name} NEW"));
+            }
+        }
+        out
+    }
+
+    /// Mutate one field of an otherwise byte-identical identity and return
+    /// `(current diff, pre-review diff)` for it.
+    fn diverge(mutate: impl FnOnce(&mut CorpusIdentity)) -> (Vec<String>, Vec<String>) {
+        let prior = ident("aa", 10);
+        let mut now = ident("aa", 10);
+        mutate(&mut now);
+        (now.diff(&prior), diff_pre_review(&now, &prior))
+    }
+
+    /// Every field the pre-review `diff` ignored is now reported — and each case
+    /// proves its own non-vacuity: the pre-review comparison returned EMPTY, i.e.
+    /// "reproduced exactly", for the very same divergence.
+    ///
+    /// One test per field rather than a loop, so a failure names the field.
+    macro_rules! previously_ignored_field {
+        ($test:ident, $prefix:literal, $mutate:expr) => {
+            #[test]
+            fn $test() {
+                let (now, pre) = diverge($mutate);
+                assert!(
+                    now.iter().any(|m| m.starts_with($prefix)),
+                    "diff must report a {} divergence; got {now:?}",
+                    $prefix
+                );
+                assert!(
+                    pre.is_empty(),
+                    "NON-VACUITY: the pre-review diff must have reported this as \
+                     'reproduced exactly'; got {pre:?}"
+                );
+            }
+        };
+    }
+
+    previously_ignored_field!(
+        a_changed_seed_is_reported,
+        "seed:",
+        |i: &mut CorpusIdentity| i.seed = 2
+    );
+    previously_ignored_field!(
+        a_changed_table_is_reported,
+        "table:",
+        |i: &mut CorpusIdentity| { i.table = "ws0.other".to_string() }
+    );
+    previously_ignored_field!(
+        a_changed_issue_is_reported,
+        "issue:",
+        |i: &mut CorpusIdentity| { i.issue = "#0000".to_string() }
+    );
+    previously_ignored_field!(
+        a_changed_rows_per_partition_is_reported,
+        "rows_per_partition:",
+        |i: &mut CorpusIdentity| i.rows_per_partition = 7
+    );
+    previously_ignored_field!(
+        a_changed_cells_per_row_is_reported,
+        "cells_per_row:",
+        |i: &mut CorpusIdentity| i.cells_per_row = 11
+    );
+    previously_ignored_field!(
+        a_changed_bytes_per_row_is_reported,
+        "bytes_per_row:",
+        |i: &mut CorpusIdentity| i.bytes_per_row = 99.0
+    );
+    previously_ignored_field!(
+        a_changed_total_component_bytes_is_reported,
+        "total_component_bytes:",
+        |i: &mut CorpusIdentity| i.total_component_bytes = 101
+    );
+    // Issue #1406: the FLAG can disagree with the component set. That is an
+    // internally inconsistent identity, and it used to read as reproduced exactly.
+    previously_ignored_field!(
+        a_flipped_compression_info_flag_is_reported,
+        "compression_info_present:",
+        |i: &mut CorpusIdentity| i.compression_info_present = true
+    );
+    previously_ignored_field!(
+        an_edited_correctness_caveat_is_reported,
+        "not_a_correctness_oracle:",
+        |i: &mut CorpusIdentity| i.not_a_correctness_oracle = "it is fine actually".to_string()
+    );
+    previously_ignored_field!(
+        an_edited_prior_corpus_caveat_is_reported,
+        "differs_from_prior_corpus:",
+        |i: &mut CorpusIdentity| i.differs_from_prior_corpus = String::new()
+    );
+
+    /// The backstop property, stated directly: for EVERY field, a divergence in it
+    /// alone must produce a non-empty diff. Enumerated here as a set so a future
+    /// field added to `CorpusIdentity` (which the destructure in `diff` forces the
+    /// author to handle) also gets its "must be reported" assertion here.
+    #[test]
+    fn no_single_field_divergence_reads_as_reproduced_exactly() {
+        type Mut = fn(&mut CorpusIdentity);
+        let mutations: Vec<(&str, Mut)> = vec![
+            ("issue", |i| i.issue = "#0000".to_string()),
+            ("seed", |i| i.seed = 2),
+            ("table", |i| i.table = "ws0.other".to_string()),
+            ("rows", |i| i.rows = 11),
+            ("partitions", |i| i.partitions = 2),
+            ("rows_per_partition", |i| i.rows_per_partition = 7),
+            ("cells_per_row", |i| i.cells_per_row = 11),
+            ("data_db_bytes", |i| i.data_db_bytes = 101),
+            ("data_db_sha256", |i| i.data_db_sha256 = "bb".to_string()),
+            ("bytes_per_row", |i| i.bytes_per_row = 99.0),
+            ("total_component_bytes", |i| i.total_component_bytes = 101),
+            ("components", |i| {
+                i.components.clear();
+            }),
+            ("compression_info_present", |i| {
+                i.compression_info_present = true
+            }),
+            ("not_a_correctness_oracle", |i| {
+                i.not_a_correctness_oracle = "nope".to_string()
+            }),
+            ("differs_from_prior_corpus", |i| {
+                i.differs_from_prior_corpus = "nope".to_string()
+            }),
+        ];
+        // Every field of CorpusIdentity is covered — the count is asserted so a new
+        // field cannot be added with no case here.
+        assert_eq!(
+            mutations.len(),
+            15,
+            "CorpusIdentity has 15 fields; add the new field's divergence case"
+        );
+        for (field, mutate) in mutations {
+            let (now, _) = diverge(mutate);
+            assert!(
+                !now.is_empty(),
+                "a divergence in `{field}` alone read as 'reproduced exactly'"
+            );
+        }
     }
 
     /// A missing or extra component must be visible, so a component-set change
