@@ -418,9 +418,9 @@ then prints the gate’s <code dir="auto">accelerators:</code> line as a health 
 <p>Every optional accelerator the gate depends on is auto-detected, and every SUMMARY
 block (full <strong>and</strong> <code dir="auto">--lite</code>) carries a machine-checkable line:</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on"><div></div></button></div></figure></div>
-<p>On <strong>Linux</strong> the line additionally carries a <code dir="auto">mold=</code> token (byte-identical / no token
-on macOS):</p>
-<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked"><div></div></button></div></figure></div>
+<p>On <strong>Linux</strong> the line additionally carries a <code dir="auto">mold=</code> token and a <code dir="auto">perf=</code> token
+(byte-identical / no tokens on macOS — both are Linux-only):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok"><div></div></button></div></figure></div>
 <ul>
 <li><strong><code dir="auto">sccache</code></strong> — cross-worktree compile cache (~25.6% faster fresh builds).</li>
 <li><strong><code dir="auto">nextest</code></strong> — parallel <code dir="auto">core-tests</code> (the gate’s long pole).</li>
@@ -429,6 +429,27 @@ on macOS):</p>
 <code dir="auto">~/.cargo/config.toml</code> managed block. States: <code dir="auto">mold=linked</code> (wired) · <code dir="auto">overridden</code>
 (a global <code dir="auto">RUSTFLAGS</code> is suppressing the wired flags — don’t export one on a worker)
 · <code dir="auto">present-unconfigured</code> (installed but not wired — re-run bootstrap) · <code dir="auto">absent</code>.</li>
+<li><strong><code dir="auto">perf</code></strong> (issue #3249, <strong>Linux only</strong>) — <em>can this box be profiled at all?</em> A free
+read of <code dir="auto">/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}</code> through shell builtins.
+<strong>Free is an enforced cost, not a slogan</strong>: the emit-time path runs <strong>zero external
+processes and zero command substitutions</strong> (a <code dir="auto">$( )</code> forks a subshell, so a value read
+back through one would not be free — hence the token comes back through a
+caller-named variable), and the helper is sourced <strong>once per gate run</strong>, not per
+summary. <code dir="auto">test_agent_gate_summary.sh</code> case <code dir="auto">perf-free</code> kills any regression: it counts
+the substitutions statically and re-runs the extracted path with an unresolvable
+<code dir="auto">PATH</code> under xtrace subshell counting. States: <code dir="auto">perf=ok</code> (unprivileged per-CPU
+profiling <strong>and</strong> kernel symbols available) · <code dir="auto">paranoid-&#x3C;N></code> (<code dir="auto">perf_event_paranoid</code>
+= N ≥ 1 forbids <strong>CPU-wide</strong> events, so the <code dir="auto">perf stat -C &#x3C;cpu></code> the measurement
+doctrine mandates is <strong>denied</strong> — a <em>permission</em> verdict, not a missing capability;
+agent images ship <code dir="auto">4</code>, which on Debian/Ubuntu kernels denies perf entirely) ·
+<code dir="auto">kptr-restricted</code> (paranoid is fine but <code dir="auto">kptr_restrict != 0</code>, so kernel frames
+resolve to bare addresses — a silent attribution loss) · <code dir="auto">absent</code> (the <code dir="auto">/proc</code>
+controls are not present, e.g. a container — tune the host) · <code dir="auto">unknown</code> (present but
+unparseable; never guessed). Anything but <code dir="auto">ok</code> on a box you intend to measure means
+<strong>re-run <code dir="auto">bash scripts/bootstrap-agent-machine.sh --yes</code></strong>, which installs
+<code dir="auto">/etc/sysctl.d/99-cqlite-perf.conf</code> and then <em>verifies</em> it by running
+<code dir="auto">perf stat -C 0 -e cycles</code>. Rationale + security posture:
+<code dir="auto">docs/development/fleet-runbook.md</code>.</li>
 </ul>
 <p>State values: <strong><code dir="auto">on</code></strong> (detected &#x26; used) · <strong><code dir="auto">absent</code></strong> (missing → the gate prints a
 loud <code dir="auto">WARN:</code> on STDERR with the one-line install command) · <strong><code dir="auto">off</code></strong> (intentionally

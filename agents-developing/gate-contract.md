@@ -369,11 +369,11 @@ block (full **and** `--lite`) carries a machine-checkable line:
 accelerators: sccache=on nextest=on lanes=on
 ```
 
-On **Linux** the line additionally carries a `mold=` token (byte-identical / no token
-on macOS):
+On **Linux** the line additionally carries a `mold=` token and a `perf=` token
+(byte-identical / no tokens on macOS — both are Linux-only):
 
 ```
-accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
 ```
 
 - **`sccache`** — cross-worktree compile cache (~25.6% faster fresh builds).
@@ -383,6 +383,27 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
   `~/.cargo/config.toml` managed block. States: `mold=linked` (wired) · `overridden`
   (a global `RUSTFLAGS` is suppressing the wired flags — don't export one on a worker)
   · `present-unconfigured` (installed but not wired — re-run bootstrap) · `absent`.
+- **`perf`** (issue #3249, **Linux only**) — *can this box be profiled at all?* A free
+  read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through shell builtins.
+  **Free is an enforced cost, not a slogan**: the emit-time path runs **zero external
+  processes and zero command substitutions** (a `$( )` forks a subshell, so a value read
+  back through one would not be free — hence the token comes back through a
+  caller-named variable), and the helper is sourced **once per gate run**, not per
+  summary. `test_agent_gate_summary.sh` case `perf-free` kills any regression: it counts
+  the substitutions statically and re-runs the extracted path with an unresolvable
+  `PATH` under xtrace subshell counting. States: `perf=ok` (unprivileged per-CPU
+  profiling **and** kernel symbols available) · `paranoid-<N>` (`perf_event_paranoid`
+  = N ≥ 1 forbids **CPU-wide** events, so the `perf stat -C <cpu>` the measurement
+  doctrine mandates is **denied** — a *permission* verdict, not a missing capability;
+  agent images ship `4`, which on Debian/Ubuntu kernels denies perf entirely) ·
+  `kptr-restricted` (paranoid is fine but `kptr_restrict != 0`, so kernel frames
+  resolve to bare addresses — a silent attribution loss) · `absent` (the `/proc`
+  controls are not present, e.g. a container — tune the host) · `unknown` (present but
+  unparseable; never guessed). Anything but `ok` on a box you intend to measure means
+  **re-run `bash scripts/bootstrap-agent-machine.sh --yes`**, which installs
+  `/etc/sysctl.d/99-cqlite-perf.conf` and then *verifies* it by running
+  `perf stat -C 0 -e cycles`. Rationale + security posture:
+  `docs/development/fleet-runbook.md`.
 
 State values: **`on`** (detected & used) · **`absent`** (missing → the gate prints a
 loud `WARN:` on STDERR with the one-line install command) · **`off`** (intentionally
