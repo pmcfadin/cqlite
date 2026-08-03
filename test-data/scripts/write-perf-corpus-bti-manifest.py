@@ -147,7 +147,10 @@ def data_db_sha256_match_path(sstable_dir: str, corpus_root: str,
     this function cannot determine.
     """
     rel = os.path.relpath(os.path.abspath(sstable_dir), os.path.abspath(corpus_root))
-    if rel.startswith(".."):
+    # An exact COMPONENT test, not `rel.startswith("..")`: the string form also rejects a
+    # directory legitimately named `..something` (roborev #3234 F1/F2 audit -- prefix
+    # semantics where a complete component is meant).
+    if os.pardir in rel.split(os.sep):
         return None
     cand = os.path.join(REPO_ROOT, COMMITTED_DATASETS_REL, rel)
     if not os.path.isdir(cand):
@@ -619,7 +622,14 @@ def main() -> int:
 
     # Fail closed on an empty SSTable list: an empty manifest describes nothing and
     # would overwrite a real provenance artifact with a lie.
-    datas = sorted(glob.glob(os.path.join(sstable_dir, "da-*-bti-Data.db")))
+    # The glob enumerates; DESCRIPTOR_RE decides (roborev #3234 F1/F2 audit). `da-*-bti-`
+    # also matches a non-numeric generation, which the foreign-component check below
+    # (same RE) would then call foreign -- two definitions of "a `da` descriptor" that
+    # could disagree about the same file.
+    datas = sorted(
+        p for p in glob.glob(os.path.join(sstable_dir, "da-*-bti-Data.db"))
+        if DESCRIPTOR_RE.match(os.path.basename(p))
+    )
     if not datas:
         raise SystemExit(f"no da-*-bti-Data.db in {sstable_dir} — refusing to write a manifest")
     foreign = [

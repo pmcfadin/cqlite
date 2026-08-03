@@ -876,18 +876,32 @@ publish() {
   # finished manifest into place, the corpus's provenance says "generation in progress".
   quarantine_local_manifest
   mkdir -p "$OUT/sstables/$KS"
-  # `|| CONTAINER_SSTABLE_DIR=""` is required, not defensive: under `set -e` an
-  # assignment from a FAILING command substitution exits the script immediately, so the
-  # guard below — the line whose whole purpose is to diagnose "the table directory is not
-  # there" — was unreachable, and the real failure mode (an `ls -d` glob matching
-  # nothing) killed the run with a bare `exit 1` and no message at all.
-  CONTAINER_SSTABLE_DIR="$($DOCKER exec "$CONTAINER" bash -lc \
-    "ls -d /var/lib/cassandra/data/$KS/$TBL-* | head -1" | tr -d '\r')" \
-    || CONTAINER_SSTABLE_DIR=""
-  [ -n "$CONTAINER_SSTABLE_DIR" ] || die "no SSTable dir for $KS.$TBL in the container
-       (the node wrote no table directory under /var/lib/cassandra/data/$KS, or the
-       keyspace/table names do not match what was created). The published corpus keeps
-       its IN-PROGRESS marker, so nothing can read provenance for it."
+  # `|| listing=""` is required, not defensive: under `set -e` an assignment from a
+  # FAILING command substitution exits the script immediately, so the guard below — the
+  # line whose whole purpose is to diagnose "the table directory is not there" — was
+  # unreachable, and the real failure mode (an `ls -d` glob matching nothing) killed the
+  # run with a bare `exit 1` and no message at all.
+  local listing candidates=() c
+  listing="$($DOCKER exec "$CONTAINER" bash -lc \
+    "ls -d /var/lib/cassandra/data/$KS/$TBL-*" | tr -d '\r')" || listing=""
+  # `| head -1` used to stand where this exact check is (roborev #3234 F1/F2 audit): the
+  # glob can match a second incarnation of the table (dropped and recreated leaves the
+  # old directory behind), and `head -1` then published a LEXICOGRAPHICALLY chosen one
+  # with no diagnosis at all. Exactly one `<table>-<32 hex>` directory, or refuse.
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    [[ "$(basename "$c")" =~ ^${TBL}-[0-9a-f]{32}$ ]] && candidates+=("$c")
+  done <<<"$listing"
+  [ ${#candidates[@]} -ge 1 ] || die "no SSTable dir for $KS.$TBL in the container
+       (no /var/lib/cassandra/data/$KS/$TBL-<32 hex> directory: the node wrote none, or
+       the keyspace/table names do not match what was created). The published corpus
+       keeps its IN-PROGRESS marker, so nothing can read provenance for it."
+  [ ${#candidates[@]} -eq 1 ] || die "AMBIGUOUS container table directory: ${#candidates[@]}
+       '$TBL-<32 hex>' directories under /var/lib/cassandra/data/$KS:
+       $(printf '%s ' "${candidates[@]##*/}")
+       Publishing one of them (this used to take whichever sorted first) would put an
+       unknown table incarnation in the corpus. Start from a fresh container."
+  CONTAINER_SSTABLE_DIR="${candidates[0]}"
   local name host_dir
   name="$(basename "$CONTAINER_SSTABLE_DIR")"
   host_dir="$DATA_DIR/data/$KS/$name"
@@ -1036,10 +1050,29 @@ if [ "$VERIFY_ONLY" = 1 ]; then
   if [ -z "$ks_dir" ] || [ ! -d "$ks_dir" ]; then
     die "no corpus at $OUT/sstables/$KS — generate it first"
   fi
+  # A GLOB enumerates the candidates; the exact `<table>-<32 hex>` shape decides
+  # (roborev #3234 F1/F2 audit). `"$TBL"-*` alone also matches a `<table>-backup` sibling
+  # or a half-copied directory, which would then be COUNTED as a generation: the
+  # ambiguity refusal below would name a backup as a corpus dir, or a corpus holding
+  # exactly one real generation beside one backup would be refused as ambiguous. The
+  # predicate is the same one prune_stale_table_dirs deletes on, so the verifier, the
+  # pruner and the harness all agree on what a table directory is.
+  candidates=()
   shopt -s nullglob
-  found=("$ks_dir/$TBL"-*)
+  candidates=("$ks_dir/$TBL"-*)
   shopt -u nullglob
-  [ ${#found[@]} -ge 1 ] || die "no $TBL-<uuid> dir under $ks_dir"
+  found=()
+  for d in "${candidates[@]}"; do
+    base="$(basename "$d")"
+    if [[ -d "$d" && "$base" =~ ^${TBL}-[0-9a-f]{32}$ ]]; then
+      found+=("$d")
+    else
+      log "ignoring '$base' (not a <table>-<32 hex> corpus dir)"
+    fi
+  done
+  [ ${#found[@]} -ge 1 ] || die "no $TBL-<32 hex> dir under $ks_dir
+       (${#candidates[@]} name(s) matched '$TBL-*', none of them a Cassandra table
+       directory — a backup copy or a half-copied directory is not a corpus)"
   # An AMBIGUOUS root is a hard failure, not a per-dir loop (roborev #3234 M1). This
   # used to verify each matching dir INDEPENDENTLY and then print one VERIFY-OK, so a
   # root left holding several generations by --no-prune passed while the SSTable

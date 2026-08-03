@@ -5380,8 +5380,10 @@ run_tooling_tests() {
   fi
 
   # BTI perf-corpus generator guard (#3234): hermetic (no docker/sudo/cassandra —
-  # only --help/--validate-only/--verify-only plus the row driver and the manifest
-  # writer's pre-container guards, none of which start a container). Pins issue
+  # --help/--validate-only/--verify-only, the row driver, the manifest writer's
+  # pre-container guards, and a full end-to-end run through a STUB `docker`
+  # (scripts/tests/fixtures/stub-docker-cassandra-bti.py); nothing here starts a
+  # container or needs root). Pins issue
   # #3234's ACCEPTANCE ASSERTS IN BOTH DIRECTIONS against fabricated corpora: a
   # stock Cassandra 5.0 node silently emits `nb` (BIG) when either mandatory yaml
   # setting misses, so an assert only ever observed on a good corpus is untested —

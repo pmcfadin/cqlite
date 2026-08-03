@@ -67,13 +67,21 @@
 //! without its guards is self-identifying.
 //!
 //! There is a third fail-closed guard, and it is not about the row count at all: the
-//! **ingest scope** (`scope.rs`, roborev #3234 M1). The row-count assert cannot see a
+//! **ingest scope** (`scope.rs`, roborev #3234 M1/F1). The row-count assert cannot see a
 //! workload change — a retained `<table>-<uuid>` generation beside the measured one
 //! holds the SAME rows, so reconciliation yields the same count while the GENERATION
 //! COUNT (which selects the scan route) silently doubles. So ingestion is confined to
 //! the manifest's exact `tables[].sstable_dir`, an ambiguous root is refused
 //! (`OPEN_FAILED`), and the resolved directory + how it was chosen are printed as
 //! `ingest_scope:`.
+//!
+//! "Confined" is EXACT, not a filter: the scope is passed as
+//! `TableDirSelection::Exact`, which compares complete path components, because a
+//! substring `table_directory_filter` of `/<ks>/<dir>` also matches a sibling whose full
+//! name extends it (`<table>-<uuid>-backup`). And `generations:` is the count OBSERVED in
+//! what ingestion selected, never in what this run intended to select — reporting the
+//! intended count is how extra SSTables could be scanned while the smaller number was
+//! printed (roborev #3234 F1).
 //!
 //! Module layout (split per the campsite rule, epic #1116): `main.rs` = flags, the
 //! timed scan and the result block; `manifest.rs` = the authoritative row count and the
