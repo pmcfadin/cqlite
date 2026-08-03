@@ -19,6 +19,10 @@ Reporting rules this file enforces, from issue #3096 spec R1/R2:
 * The **row denominator is printed with every figure**, so no derived number is
   divisible by an unstated count.
 * **Zero rows exits non-zero** rather than reporting a measurement.
+* The **request count is asserted per temperature**, not inferred: a cold Flight rep
+  must be exactly ONE successful request (requests 2..N would be warm), and every
+  rep's rows must be `requests_ok x corpus_rows` — an exact number of full corpus
+  scans. A rep that violates either is refused rather than reported.
 """
 
 from __future__ import annotations
@@ -210,7 +214,71 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
     }
 
 
-def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
+def expected_requests(temp: str) -> str:
+    """The request count a rep of this temperature MUST have, stated not implied.
+
+    Issue #3096 review, finding 2: this used to be reconstructible only by dividing
+    a rep's `rows` by the corpus row count in your head. Recorded explicitly here so
+    a reader sees the contract, and asserted per rep by `check_request_count`.
+    """
+    if temp == "cold":
+        return "exactly 1 (only the first request after the cache drop is cold)"
+    return ">=1, each one a full corpus scan"
+
+
+def check_request_count(
+    tag: str, temp: str, requests_ok: object, rows: int, corpus_rows: int | None
+) -> int:
+    """Assert the per-temperature request contract, or exit non-zero.
+
+    Two properties, both fail-closed (issue #3096 review, finding 2):
+
+    * A **cold** rep must have completed **exactly one** successful request. The
+      driver keeps `--cold-step-duration` short precisely so the loadgen issues one
+      request, but that is a duration heuristic against an unknown scan time — if
+      the corpus finishes inside the step, requests 2..N read the pages request 1
+      faulted in and their WARM rows land in a figure labelled "cold". A caller can
+      also trigger it directly by raising the option. So the OBSERVED count is
+      checked, not the duration.
+    * Every rep's rows must be an exact multiple of the corpus row count, i.e.
+      `rows == requests_ok * corpus_rows`. A remainder means some request did not
+      scan the whole corpus, so the per-request row denominator is not what the
+      report says it is.
+    """
+    if requests_ok is None:
+        sys.exit(
+            f"FATAL: flight rep {tag} step record carries no `requests_ok` — the"
+            " per-temperature request contract cannot be verified, and an unverified"
+            " cold rep is exactly how warm requests get reported as cold"
+        )
+    count = int(requests_ok)
+    if count < 1:
+        sys.exit(f"FATAL: flight rep {tag} completed {count} successful requests")
+    if temp == "cold" and count != 1:
+        sys.exit(
+            f"FATAL: flight COLD rep {tag} completed {count} successful requests;"
+            f" expected {expected_requests('cold')}."
+            " Only the FIRST request after the cache drop is cold: requests 2..N read the"
+            " pages request 1 faulted in, so their WARM rows would be blended into a figure"
+            " reported as 'cold', which spec R2/AC5 forbids."
+            " Lower --cold-step-duration so the loadgen issues a single request, or measure"
+            " this as a warm rep."
+        )
+    if corpus_rows:
+        if rows % corpus_rows != 0 or rows // corpus_rows != count:
+            sys.exit(
+                f"FATAL: flight rep {tag} observed {rows:,} rows over {count} successful"
+                f" request(s), which is not {count} x the corpus row count"
+                f" ({corpus_rows:,}). At least one request did not scan the whole corpus,"
+                " so the per-request row denominator is not the one this report would"
+                " print. Re-run rather than reporting a partial scan."
+            )
+    return count
+
+
+def collect_flight(
+    d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int | None
+) -> dict:
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
     ipc: list[float] = []
@@ -233,6 +301,9 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
             sys.exit(f"FATAL: flight rep {tag} observed ZERO rows — not a measurement")
         if int(rec.get("requests_error", 0)) > 0:
             sys.exit(f"FATAL: flight rep {tag} had {rec['requests_error']} failed request(s)")
+        requests_ok = check_request_count(
+            tag, temp, rec.get("requests_ok"), rows, corpus_rows
+        )
         # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
         prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
         counters = read_perf_csv(d / f"perf-{tag}.csv")
@@ -248,10 +319,13 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
             {
                 "rep": rep,
                 "rows": rows,
-                "requests_ok": rec.get("requests_ok"),
-                "rows_per_scan_observed": (
-                    rows / rec["requests_ok"] if rec.get("requests_ok") else None
-                ),
+                "requests_ok": requests_ok,
+                "requests_expected": expected_requests(temp),
+                "rows_per_scan_observed": rows / requests_ok,
+                # `None` only when no corpus-identity.json was found — then the
+                # full-corpus-per-request property could not be checked, and the
+                # artifact says so rather than implying it was.
+                "rows_per_scan_expected": corpus_rows,
                 "duration_s": rec.get("duration_s"),
                 "rows_per_sec": float(rec["rows_per_s"]),
                 "cycles": cyc,
@@ -272,6 +346,12 @@ def collect_flight(d: pathlib.Path, temp: str, arm: str, reps: int) -> dict:
         "cycles_per_row": spread(cycles_per_row),
         "ipc": spread(ipc),
         "row_denominator_total": rows_total,
+        # Issue #3096 review, finding 2: the request count each temperature MUST
+        # have, asserted per rep by `check_request_count` and stated here so no
+        # reader has to reconstruct it from row denominators.
+        "requests_expected_per_rep": expected_requests(temp),
+        "full_corpus_per_request_verified": corpus_rows is not None,
+        "corpus_rows_used_for_verification": corpus_rows,
         "setup_cycles_subtracted_total": 0,
         "setup_note": (
             "server start + (warm only) prewarm happen BEFORE the perf window opens, "
@@ -318,6 +398,11 @@ def main() -> int:
     idp = pathlib.Path(args.corpus) / "corpus-identity.json"
     if idp.exists():
         identity = json.loads(idp.read_text())
+    # The recorded corpus row count, used to assert that every Flight request
+    # scanned the WHOLE corpus (issue #3096 review, finding 2). Absent identity =>
+    # that property cannot be checked; results.json records that fact per arm
+    # (`full_corpus_per_request_verified`) rather than implying it was checked.
+    corpus_rows = int(identity["rows"]) if identity.get("rows") else None
 
     results = {
         "issue": "#3096",
@@ -370,7 +455,7 @@ def main() -> int:
         lines.append(fmt("bare scan (execute_streaming)", scan))
         lines += prewarm_warning(scan, "bare-scan")
         for arm in arms:
-            fl = collect_flight(d, temp, arm, args.reps)
+            fl = collect_flight(d, temp, arm, args.reps, corpus_rows)
             if not fl:
                 continue
             results["measurements"].append(fl)
@@ -395,6 +480,10 @@ def main() -> int:
     lines += [
         "NOTES",
         "  * warm and cold are SEPARATE claims above; nothing here is blended.",
+        "  * every COLD flight rep is verified to be EXACTLY ONE successful request "
+        "(requests_ok == 1) and every rep's rows an exact multiple of the corpus row "
+        "count, so no warm request can be reported inside a cold figure; a rep that "
+        "violates either is REFUSED, not blended.",
         "  * every figure is rows/s AND cycles/row; no CPU-share is reported "
         "(a share shift with unmoved rows/s is a FAIL, spec R1).",
         "  * the bare scan's cycles are SETUP-SUBTRACTED (a separately measured "

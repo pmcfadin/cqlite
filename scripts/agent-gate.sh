@@ -256,7 +256,16 @@
 #                      process — and scripts/tests/test_gen_perf_corpus_3068.sh,
 #                      which pins the perf-corpus generator's TABLES validation, its
 #                      manifest writer's refusal of an empty table list, and the
-#                      tight scoping of its multi-GB stale-corpus pruning.
+#                      tight scoping of its multi-GB stale-corpus pruning. Also runs
+#                      scripts/tests/test_ws0_report_guards.sh (#3096) — pins the two
+#                      MEASUREMENT-INTEGRITY guards of the #3096 rig: a cold Flight rep
+#                      must be EXACTLY ONE full-corpus request (accepting more blended
+#                      warm requests into a figure labelled "cold") and a warm rep of
+#                      EITHER arm must record an untimed prewarm (the bare-scan arm had
+#                      none, and it is the denominator of the 1.3x ratio). A broken
+#                      instrument publishes a wrong number rather than crashing, so
+#                      these need a standing test. Hermetic: synthetic result dirs,
+#                      no cargo/perf/sudo/corpus.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -5306,6 +5315,26 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 measurement-rig integrity guards (#3096): hermetic (synthetic result dirs +
+  # synthetic perf CSVs — no cargo, perf, sudo, corpus or network; the driver is only
+  # ever reached at argument validation). Pins (a) the reporter's refusal of a COLD
+  # Flight rep with more than one successful request — requests 2..N are WARM and were
+  # being blended into a figure labelled "cold" — and (b) the untimed prewarm of the
+  # WARM bare-scan arm, which had none at all while being the denominator of the 1.3x
+  # ratio. A broken measurement guard publishes a wrong number instead of failing, so
+  # it needs a standing test rather than a review round.
+  echo ">>> [$name] bash scripts/tests/test_ws0_report_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 measurement-rig integrity guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

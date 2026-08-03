@@ -89,7 +89,9 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
                        Step hold for COLD reps (default $COLD_STEP_DURATION). Deliberately
                        short: the loadgen finishes its in-flight request, so this yields
                        exactly ONE cold scan. A long cold step would blend one cold scan
-                       with warm ones inside a single "cold" claim.
+                       with warm ones inside a single "cold" claim, so a value above
+                       5000ms is REFUSED when --temp includes cold — and ws0_report.py
+                       independently rejects any cold rep whose observed requests_ok != 1.
   --scan-passes N      Timed passes per bare-scan rep (default $SCAN_PASSES). REFUSED with
                        N>1 when --temp includes cold: caches are dropped once per rep, so
                        pass 1 would be cold and passes 2..N warm, blended into one "cold"
@@ -169,6 +171,69 @@ esac
 case "$PORT" in
   ''|*[!0-9]*) echo "FATAL: --port must be a positive integer (got '$PORT')" >&2; exit 2 ;;
 esac
+
+# --- trap 3 enforcement, arm B: a COLD rep is ONE request, or it is not cold ---
+# `--cold-step-duration` is the one option a caller can raise to silently turn a
+# cold rep into a blended one (issue #3096 review, finding 2). The loadgen holds a
+# step for the given duration, starting a NEW request whenever the previous one
+# finishes before the deadline; only the FIRST request after the cache drop is
+# cold, so requests 2..N contribute WARM rows to a figure reported as "cold".
+#
+# Two independent guards, because neither alone is sufficient:
+#   (a) HERE, up front: reject a cold step long enough to admit a second request
+#       on this corpus, before any build, cache drop or measurement happens. The
+#       ceiling is 5s — 4x below the 20.2s cold full-corpus scan this rig's
+#       recorded session measured — so a single in-flight request is structural.
+#   (b) In ws0_report.py: require the OBSERVED `requests_ok` of every cold rep to
+#       be exactly 1, whatever the duration was. That is the ground truth, and it
+#       holds on a corpus whose scan is faster than any duration ceiling could
+#       anticipate. A ceiling alone would be a guess; the observed count is not.
+COLD_STEP_MAX_MS=5000
+
+# parse_duration_ms <value> — echo milliseconds, non-zero on a malformed value.
+# Accepts the loadgen's `<n>ms` / `<n>s` / `<n>m` forms only: a bare `45` is
+# REJECTED rather than guessed at, since guessing seconds-vs-millis would silently
+# measure a step 1000x from the one requested.
+parse_duration_ms() {
+  local v="$1" n
+  case "$v" in
+    *ms) n="${v%ms}"; [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((n))" ;;
+    *s)  n="${v%s}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((n * 1000))" ;;
+    *m)  n="${v%m}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((n * 60000))" ;;
+    *)   return 1 ;;
+  esac
+}
+
+for _spec in "step-duration:$STEP_DURATION" "cold-step-duration:$COLD_STEP_DURATION"; do
+  _name="${_spec%%:*}"; _val="${_spec#*:}"
+  if ! _ms="$(parse_duration_ms "$_val")"; then
+    echo "FATAL: --$_name must be <n>ms, <n>s or <n>m (got '$_val')" >&2
+    echo "       A bare number is refused rather than guessed at: seconds-vs-millis" >&2
+    echo "       would silently measure a step 1000x from the one requested." >&2
+    exit 2
+  fi
+  if [[ "$_ms" -le 0 ]]; then
+    echo "FATAL: --$_name must be greater than zero (got '$_val')" >&2
+    exit 2
+  fi
+done
+
+if [[ " $TEMPS " == *" cold "* ]]; then
+  COLD_STEP_MS="$(parse_duration_ms "$COLD_STEP_DURATION")"
+  if [[ "$COLD_STEP_MS" -gt "$COLD_STEP_MAX_MS" ]]; then
+    echo "FATAL: --cold-step-duration $COLD_STEP_DURATION (${COLD_STEP_MS}ms) exceeds the" >&2
+    echo "       ${COLD_STEP_MAX_MS}ms ceiling for a run that includes a COLD temperature." >&2
+    echo "       The loadgen starts a NEW request whenever the previous one finishes before" >&2
+    echo "       the step deadline, and only the FIRST request after the cache drop is cold." >&2
+    echo "       A longer cold step therefore folds WARM requests into a figure reported as" >&2
+    echo "       'cold' — the blending spec R2/AC5 forbids." >&2
+    echo "       Use --cold-step-duration 1s (the default), or --temp warm to hold a step" >&2
+    echo "       open for as long as you like. ws0_report.py independently REJECTS any cold" >&2
+    echo "       rep whose observed requests_ok != 1, so this is a fast failure, not the" >&2
+    echo "       only one." >&2
+    exit 2
+  fi
+fi
 if [[ " $TEMPS " == *" cold "* && "$SCAN_PASSES" -gt 1 ]]; then
   echo "FATAL: --temp ${TEMPS// /+} with --scan-passes $SCAN_PASSES would BLEND one cold pass" >&2
   echo "       with $((SCAN_PASSES - 1)) already-warm pass(es) into a single number reported as" >&2
