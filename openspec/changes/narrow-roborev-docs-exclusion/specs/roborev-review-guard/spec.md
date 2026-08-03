@@ -328,6 +328,19 @@ a non-failing NOTICE, and a binary that answers NOWHERE SHALL report the corrobo
 without failing. A binary that answers with an EMPTY list is an ANSWER, not an absence, and SHALL
 corroborate rather than degrade to `UNAVAILABLE`.
 
+**PARSING THE BINARY'S ANSWER SHALL NOT MUTATE THE PATTERNS IT REPORTS.** Only a **verified OUTER
+container** (a leading `[` together with a trailing `]`, after trimming) SHALL be stripped, and quoting only
+at an item's own edges. A blanket deletion of every bracket in the answer DESTROYS a glob CHARACTER CLASS
+inside a pattern — `src/[Tt]est.rs` becomes `src/Ttest.rs`, matches nothing in the parsed set, and reports
+`corroboration: DRIFT` ⇒ a **pre-enqueue FAIL on a CORRECT configuration**. The direction is fail-closed, so
+it can never certify unreviewed code; it is nonetheless a defect, because a guard that reds a legitimate
+configuration is the guard that gets disabled — which is how #3229 happened.
+
+#### Scenario: A pattern carrying a glob character class corroborates instead of reading as drift
+- **GIVEN** an invocable `roborev` reporting the bracketed list `['*.md', 'src/[Tt]est.rs']`, and a configuration whose parsed set holds exactly those two patterns
+- **WHEN** the check corroborates
+- **THEN** the outer container is stripped, `src/[Tt]est.rs` is compared with its brackets intact, the value records `corroboration: OK`, and no `FAIL (exclusion set drift: …)` is reported
+
 **Corroboration SHALL run on EVERY path, including when the parse found NO configured pattern.** An empty
 parse SHALL NOT be reported as "no exclusion patterns configured" until the binary has confirmed it:
 "our parser recognised no key" is not "nothing is configured", and where the parse is empty this
@@ -532,6 +545,50 @@ demonstrably a losing strategy: the invariant, not the symptom, is what SHALL be
 the MIXED shapes `diff --git "a/<q>" b/<raw>` and `diff --git a/<raw> "b/<q>"`, emitted when only one side
 needs quoting. Since our census runs `--no-renames` while the reviewer's diff has rename detection ON, a
 rename SHALL be counted as covered when a single header names either census side.
+
+**AMBIGUITY SHALL BE RESOLVED FROM EVIDENCE, NEVER POSITIONALLY.** A space-bearing `diff --git` header
+LINE is **irreducibly ambiguous**: `diff --git a/foo b/x b/foo b/x` reads both as the non-rename of a file
+named `foo b/x` and as a rename of `foo` to `x b/foo b/x`, and with renames ON both are legal. The matcher
+SHALL therefore decide membership in this order, and SHALL NOT substitute a positional or PREFIX test for
+any earlier step:
+
+1. **The header's own `rename from` / `rename to` (and `copy from` / `copy to`) lines**, when the prompt
+   carried them. git ALWAYS writes them for a rename or copy — one path per line, C-quoted when needed,
+   hence exactly decidable — so they are authoritative and the header line SHALL NOT be consulted at all.
+   Because these lines FOLLOW the header, header collection SHALL be part of the matcher's boundary
+   (the consumer SHALL still know nothing about header shapes), and the extended-header run SHALL be
+   BOUNDED so a `rename from` in the reviewer's prose or a diff body line is never attributed to a header.
+2. **Equality of the two header sides**, otherwise. Absent rename/copy lines the header is a NON-rename,
+   whose two paths are IDENTICAL, so ONLY a split whose `a/` and `b/` sides are EQUAL SHALL be accepted.
+3. **Positional enumeration**, last, and ONLY for a header that has no equal split and no rename/copy
+   lines — i.e. one that can only be a rename whose rename lines did not reach us.
+
+**A FALSE PASS HERE IS A FALSE PASS IN THE MERGE GATE**, which is why the ordering is a requirement.
+MEASURED: with a bare prefix test (`case $rest in "a/<want> b/"*`), a repository tracking a file named
+`foo b/x` made the UNRELATED census path `foo` read as PRESENT — `a/foo b/` is a PREFIX of that file's own
+header — so `prompt-content:`, the strongest anti-vacuity key the wrapper has, certified delivery of a file
+the reviewer never received. The matcher SHALL NOT fail closed on an ambiguous header either: ambiguity is
+irreducible, so refusing to decide would red EVERY space-bearing header and reintroduce the false-FAIL
+defects this capability already fixed. **Any residual permissiveness SHALL be DECLARED** — step 3 is
+permissive, is reachable only for a header that carries a space, names two DIFFERENT paths and arrived
+WITHOUT the rename lines git always writes (so unreachable for git's own output), and that boundedness
+SHALL be stated at the code, not left implicit. A comment asserting that a permissive step is safe SHALL be
+correct or absent: a false safety claim is worse than none, because the next reader relies on it.
+
+#### Scenario: A space-bearing header does not prove an unrelated census path
+- **GIVEN** a census containing a file named `foo b/x` beside one named `foo`, and a prompt whose only header is `diff --git a/foo b/x b/foo b/x`
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** `foo` is reported ABSENT — `prompt-content: FAIL (1/2 code census paths absent from the prompt)` — because a split whose two sides are EQUAL exists, so the header is a non-rename naming only `foo b/x`, and a prefix reading SHALL NOT stand in for a delivery
+
+#### Scenario: An ambiguous rename header is resolved by its rename from/to lines
+- **GIVEN** a rename whose header (`diff --git a/p b/x b/p b/x`) admits an EQUAL split that is NOT the true one, and a prompt carrying that header together with the `rename from p` / `rename to x b/p b/x` lines git writes
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** both census sides count as covered and `prompt-content:` reads `PASS (2/2 code census paths present)`, resolved from the rename lines rather than from the header
+
+#### Scenario: The same header without its rename lines cannot prove either side
+- **GIVEN** the same census and the same header with the `rename from` / `rename to` lines REMOVED
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** both sides are reported ABSENT — `prompt-content: FAIL (2/2 code census paths absent from the prompt)` — so the passing verdict above rests on the rename lines and not on a permissive positional reading
 
 **THE INVARIANT SHALL BE ASSERTED STRUCTURALLY**, not merely by behavioural cases: the hermetic regression
 check SHALL fail when a path-reading `git diff` lacks `-z`, when the census normalises inside its own
@@ -905,6 +962,35 @@ neither can be pasted as the other. The wrapper SHALL exit non-zero on any outco
 SHALL be usable such that a caller retains ONLY this block and never the raw review transcript (which
 SHALL be written to the log path named in the block's `log:` field). An unexpected mid-run abort SHALL
 still emit the block with `RESULT: FAIL` rather than terminate silently.
+
+**NO PATH SHALL REACH A SUMMARY VALUE UN-NEUTRALISED.** The block is LINE-ORIENTED and safety-critical:
+every reader retains only the block and greps it by `^<key>: ` / `^RESULT: ` to decide whether a merge
+proceeds. Diff-derived text reaches those values — `census-exclusion:` names each swallowed census path,
+and the accompanying detail lines name paths and the pattern responsible — and a census path is
+**ATTACKER-CONTROLLED**: it is whatever a pull request chose to track. Configured `exclude_patterns` are
+the same class of input (a TOML basic string `"a\nb"` decodes to a real newline, and a branch may carry
+its own `.roborev.toml`). Every value the block emits, **and every detail line printed alongside it**,
+SHALL therefore be neutralised so that a value can never span lines nor introduce a `key:` at line start:
+control characters SHALL be rendered as visible escapes (or the path C-quoted). Quotes, backslashes and
+spaces MAY be left intact, since the block names swallowed paths by their real bytes and no non-control
+byte can start a line.
+
+The neutralisation SHALL be enforced at the **single emit boundary**, not per interpolation site — a
+per-site escape is a list to keep complete, and the next value that grows a path interpolation would
+silently reopen the hole — and that boundary SHALL be asserted **structurally**, so a value emitted by any
+other route FAILs the fast loop. The rendering is NOT required to be reversible; the guarantee is exactly
+"no value spans a line and no `key:` can be introduced", and this residual SHALL be declared rather than
+implied.
+
+#### Scenario: A filename cannot forge a summary key or the verdict
+- **GIVEN** a census path whose FILENAME carries newlines followed by a `RESULT: PASS` line and a `prompt-content: PASS` line, excluded by a configured pattern so that it is named in the `census-exclusion:` value and in the detail lines
+- **WHEN** the block is emitted
+- **THEN** the output carries EXACTLY ONE `RESULT:` line (the wrapper's real `RESULT: FAIL`), no `RESULT: PASS` and no forged `prompt-content: PASS` anywhere, and the swallowed path is still NAMED — on one line, with its newlines shown as visible escapes — so neutralising never costs the operator the diagnosis
+
+#### Scenario: The neutralisation boundary is pinned structurally
+- **GIVEN** the hermetic regression check
+- **WHEN** a block value is emitted by any route that bypasses the neutralising boundary, or the detail lines are bulk-printed again
+- **THEN** the check FAILs naming the offending emit, so a future key that interpolates a path cannot silently reopen the injection
 
 A **USAGE ERROR is NOT a verdict.** When a required option is missing or invalid (notably `--agent`
 without `--model`, or the reverse), the wrapper SHALL emit **NO summary block at all**: it SHALL print a

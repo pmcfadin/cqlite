@@ -525,8 +525,48 @@ all when git wrote it. That yields four shapes, three of them exactly parseable:
    and both census sides were reported absent. (Confirmed: `--no-renames` is absent from the roborev
    binary's strings, so the reviewer's diff has rename detection ON while our census splits renames.)
 3. `diff --git a/<raw> b/<raw>` — genuinely ambiguous when a name carries a space (`a/x y b/z w` has several
-   readings). Not split at all: the wanted path is tested in each **position** it could occupy, with the
-   path quoted inside the bash pattern so `*`, `?` and `[` match literally.
+   readings), and **no reading of the header LINE can settle it**.
+
+**AMBIGUITY IS RESOLVED FROM EVIDENCE, NOT FROM POSITION (round 5, blocker 1).** The first attempt at shape 3
+tested each **position** the wanted path could occupy — `case $rest in "a/$want b/"*)` and friends. That is a
+**PREFIX test**, and it produced a genuine **FALSE PASS in the merge gate**: with a tracked file named
+`foo b/x`, the header `diff --git a/foo b/x b/foo b/x` has `a/foo b/` as a prefix, so the *unrelated* census
+path `foo` read as PRESENT. Reproduced:
+`roborev_diff_header_has_path 'diff --git a/foo b/x b/foo b/x' foo` → present. The code carried a comment
+asserting this was impossible ("can only ever match a header that LITERALLY carries `a/<want> b/` … widens
+nothing unsound"); the claim was false — `a/<want> b/` occurs as a **prefix of a different path's header** —
+and the comment is corrected in place rather than deleted, because the next reader relies on it.
+
+**Failing closed was NOT an option.** With renames ON the header ambiguity is irreducible
+(`a/foo b/(bar b/foo b/bar)` is a legal reading), so refusing to decide would red **every space-bearing
+header** and reintroduce the round-3/4 false FAILs pinned by `cx6c`, `cx6g`, `cx6h`. Instead: **git does not
+leave renames ambiguous elsewhere in the diff.** For a rename or copy it always emits
+`rename from <path>` / `rename to <path>` (with `similarity index`) immediately after the header — one path
+per line, C-quoted when needed, so each is exactly decidable. And for a non-rename the two header paths are
+**identical**, which disambiguates by itself. Hence the resolution order:
+
+| # | evidence | ruling |
+|---|----------|--------|
+| 0 | the header's own `rename from`/`rename to` (or `copy from`/`copy to`) lines | AUTHORITATIVE — the header line is not consulted at all |
+| 4a | otherwise, some valid `a/<A> b/<B>` split has **A == B** | the header is a NON-rename (git always writes rename lines for a rename), so ONLY the equal reading counts |
+| 4b | otherwise (no equal split, no rename lines) | it can only be a rename whose rename lines did not reach us: any valid split counts — the **declared residual** |
+
+Every candidate split is *enumerated*, and `$want` is **byte-compared**, never used as a pattern, so a path
+containing `*`, `?` or `[` matches literally. On the reproduction, 4a fires (`foo b/x` == `foo b/x`) and `foo`
+is correctly ABSENT; on `cx6g`'s space-bearing rename no split is equal, so 4b keeps it PRESENT.
+
+**The residual is declared, not implied.** 4b is permissive: a `$want` that is one side of *some* valid split
+reads PRESENT even if the producer meant another split. It is reachable only for a header that (i) carries a
+space, (ii) names two DIFFERENT paths — i.e. is a rename/copy — and (iii) arrived **without** the rename lines
+git always writes. For git's own output it is unreachable, and it is the price of not re-breaking `cx6g`/`cx6h`.
+
+**Consequence for the boundary: the matcher's INPUT widened, the boundary did not move.** Resolving from the
+rename lines means considering the lines *following* a header, so header collection moved into the oracles
+file beside the matcher (`roborev_collect_prompt_headers`, awk-based so a multi-megabyte prompt is not read in
+a bash loop, with the extended-header run BOUNDED so a `rename from` in the reviewer's prose or a diff body
+line is never attributed to a header). The canonical-normalisation invariant is preserved exactly:
+`roborev_unquote_path` still has one caller, and `roborev-review-checks.sh` still performs no unquoting and
+holds no header-shape knowledge — it now carries three parallel arrays through instead of one.
 
 Membership is decided **per header, in bash** — no regex, no path-set file, no `grep -Fxq` over
 newline-delimited paths. That is what closes the newline false PASS: with census `{a, a<LF>b.rs}` and a
@@ -627,6 +667,45 @@ to be moved before it. Tradeoffs accepted and mitigated:
   reports that our parse lacks is `FAIL (exclusion set drift: …)` — that direction could hide a swallow.
   The reverse is a NOTICE. When the binary is absent the corroboration reports `UNAVAILABLE` and the
   verdict stands on the file parse, so hermeticity is preserved.
+- **Parsing that answer must not MUTATE the patterns it reports** (round 5, blocker 3 / #3260 item 1). The
+  first version deleted every bracket in the string (`${out//[/}` + `${out//]/}`) to shed a bracketed list.
+  That also destroys a glob **character class** inside a pattern: `src/[Tt]est.rs` came back `src/Ttest.rs`,
+  matched nothing in the parsed set, and reported `corroboration: DRIFT` ⇒ a **pre-enqueue FAIL on a
+  correct configuration**. Only a **verified outer container** is stripped now (leading `[` *with* trailing
+  `]`, after trimming), and quoting only at each item's own edges. The direction was fail-closed, so it
+  could never certify unreviewed code — but by this design's own rule, *a guard that reds a legitimate
+  configuration is the guard that gets disabled*, which is how #3229 happened.
+
+#### D2d — no path may reach a summary value un-neutralised (round 5, blocker 2)
+
+The block is **line-oriented** and it is what every reader keeps: `flow-closer`, the flow-* skills and this
+repo's own guard suite retain only the block and grep it by `^<key>: ` / `^RESULT: ` to decide whether a
+merge proceeds. Diff-derived text reaches those values — `census-exclusion:` names each swallowed census
+path, the NOTICE/FAIL details name paths and the pattern responsible — and **a census path is
+attacker-controlled**: it is whatever a PR chose to track. A filename carrying a NEWLINE therefore let a
+value **span lines** and introduce arbitrary `key:` lines, up to a forged `RESULT: PASS`, into the block
+whose entire purpose is to be trusted. Measured on the mutant: **3 `RESULT:` lines, one of them
+`RESULT: PASS`**, plus a forged `prompt-content: PASS`. Configured `exclude_patterns` are the same input
+class (a TOML basic string `"a\nb"` decodes to a real newline, and a branch may carry its own
+`.roborev.toml`).
+
+**Fixed at the single emit boundary, not per interpolation site.** `emit_kv` (every block value) and
+`finish` (every detail line) run their text through `roborev_safe_line`, which renders control characters as
+visible escapes (`\n`, `\r`, `\t`, else `\ooo`). A per-site escape is a list to keep complete — the next
+value to grow a path interpolation reopens the hole silently — so the property is **total** and holds for
+keys that do not exist yet. Four structural asserts pin the boundary itself (every `emit_summary` value goes
+through `emit_kv`; all 23 keys do; `emit_kv` neutralises; `finish` neutralises and no longer bulk-prints
+`"${DETAILS[@]}"`), each verified to FAIL under mutation.
+
+Two deliberate choices:
+
+- **Quotes, backslashes and spaces are left intact.** The block names swallowed paths **by their real
+  bytes** — `docs/…/odd "q" name.sh` must still read as itself, pinned by `cx6b` — and no non-control byte
+  can begin a line or a `key:`. Escaping more would trade a real diagnostic for no extra safety.
+- **The rendering is not reversible, and that residual is declared.** A path holding the two literal bytes
+  `\` `n` renders the same as one holding a newline. The guarantee is exactly *no value spans a line and no
+  `key:` can be introduced*; a caller wanting exact bytes reads them from git, not from a summary block.
+  Neutralising also never costs the operator the diagnosis: the path is still **named**, on one line.
 
 **Rejected alternatives for the check:**
 
@@ -791,6 +870,24 @@ family's `(c2*)` lettering. The fixture helper gains the ability to write the wo
     test-quality rule these cases exist to enforce: **a hostile-path case asserts the terminal `RESULT:` and
     `prompt-content:`, never one intermediate key alone**, and the stub emits VALID JSON for a quote-bearing
     prompt so the record cannot degrade and mask the comparison.
+12. **the header-ambiguity resolution, both directions** (D2b-iv, round 5) — `cx6l`: a tracked `foo b/x`
+    beside a `foo`, with a prompt naming only the former ⇒ `prompt-content: FAIL (1/2 … absent)`, so a
+    PREFIX reading can never stand in for a delivery; `cx6m`: an ambiguous rename header
+    (`a/p b/x b/p b/x`, whose *equal* split is not the true one) **plus** its `rename from`/`rename to`
+    lines ⇒ `PASS (2/2 present)`; `cx6n`: **the same header with those lines removed** ⇒
+    `FAIL (2/2 … absent)`, which is what proves `cx6m` is carried by the rename lines and not by the
+    permissive positional fallback. Plus structural asserts that the retired prefix test is gone, that the
+    from/to resolution is still there, and that the consumer does no `diff --git` scanning of its own.
+13. **verdict forgery by filename** (D2d) — `cx6p`: a docs/ harness `.sh` whose NAME carries newlines plus
+    `RESULT: PASS` and `prompt-content: PASS` lines, swallowed by `docs/**` so it lands in the
+    `census-exclusion:` value *and* the detail lines ⇒ **exactly one** `RESULT:` line, no `RESULT: PASS`
+    and no forged `prompt-content: PASS` anywhere, and the path still NAMED with its newlines escaped on
+    one line. A dedicated `assert_one_result_line` helper is required: `assert_verdict` reads
+    `^RESULT: ` | `tail -1` and is therefore BLIND to an injected verdict line above the real one — only a
+    count can see it.
+14. **a glob character class in a corroborated pattern** (D2c) — `cx7c`: the stub answers the BRACKETED
+    `['*.md', 'src/[Tt]est.rs']` ⇒ `corroboration: OK`, no `FAIL (exclusion set drift`, so one case pins
+    both halves (the container IS stripped, the class inside a pattern is NOT).
 
 The suite runs under the `roborev-lints` gate component, which is in **both** `COMPONENTS` and
 `LITE_COMPONENTS` — so a regression FAILs the fast loop rather than costing a review round. Its tally

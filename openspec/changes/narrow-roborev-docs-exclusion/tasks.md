@@ -282,6 +282,44 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       once and called only from the canonical matcher; the three retired mechanisms are absent from
       executable lines. Each verified to FAIL under a deliberate mutation.
 
+## 8c. Round 5 blockers: evidence-based ambiguity, output neutralisation, non-mutating parse
+
+- [x] **The header matcher resolves ambiguity from EVIDENCE, never positionally** (blocker 1, High — a FALSE
+      PASS in `prompt-content:`, i.e. in the merge gate). REPRODUCED:
+      `roborev_diff_header_has_path 'diff --git a/foo b/x b/foo b/x' foo` returned PRESENT, because
+      `case $rest in "a/$want b/"*)` is a PREFIX test and `a/foo b/` prefixes the header of a file named
+      `foo b/x`. Resolution order: (0) the header's own `rename from`/`rename to` (and `copy from`/`copy to`)
+      lines — git ALWAYS writes them, one exact path per line; (4a) else accept ONLY a split whose two sides
+      are EQUAL, because absent rename lines the header is a non-rename; (4b) else — no equal split, no
+      rename lines — any valid split, DECLARED as the bounded residual (unreachable for git's own output).
+      NOT fixed by failing closed: the ambiguity is irreducible with renames ON, so that would red every
+      space-bearing header and re-break `cx6c`/`cx6g`/`cx6h`.
+- [x] **The stale comment claiming the prefix test was safe is CORRECTED, not deleted** — a false safety
+      claim is worse than none, because the next reader relies on it.
+- [x] Header collection moved to the oracles file (`roborev_collect_prompt_headers`, awk, extended-header run
+      BOUNDED) because the matcher now needs the lines FOLLOWING a header. The canonical boundary is kept,
+      not moved: the matcher's INPUT widened, `roborev_unquote_path` still has one caller, and the consumer
+      still holds no header-shape knowledge.
+- [x] **No path reaches a summary value un-neutralised** (blocker 2, Medium — injection). A newline-bearing
+      filename made a value SPAN LINES and inject keys, up to a forged `RESULT: PASS` (measured on the
+      mutant: 3 `RESULT:` lines). Fixed CENTRALLY at the emit boundary — `emit_kv` for every block value,
+      `finish` for every DETAILS line, both via `roborev_safe_line` (control characters ⇒ visible escapes).
+      Per-site escaping was rejected: it is a list to keep complete. Quotes/backslashes/spaces stay intact so
+      the block still names paths by their real bytes (`cx6b`); non-reversibility is the declared residual.
+- [x] **The corroboration parse does not MUTATE reported patterns** (blocker 3, Low; #3260 item 1). Only a
+      VERIFIED outer `[…]` container is stripped — `${out//[/}` destroyed a glob class (`src/[Tt]est.rs` ⇒
+      `src/Ttest.rs`) and reported `corroboration: DRIFT`, a pre-enqueue FAIL on a CORRECT config.
+- [x] Tests: `cx6l` (prefix reading cannot prove an unrelated path), `cx6m` (rename lines resolve an
+      ambiguous header), `cx6n` (the SAME header without them proves neither side — so `cx6m` rests on the
+      rename lines), `cx6p` (a filename cannot forge a key or the verdict; new `assert_one_result_line`
+      helper, because `assert_verdict` reads `tail -1` and is blind to an injected line above the real one),
+      `cx7c` (a bracketed answer carrying a glob class corroborates OK).
+- [x] STRUCTURAL asserts for all three: the retired prefix test is absent from the matcher, the from/to
+      resolution and the equal-split rule are present, the consumer does no `diff --git` scanning, every
+      `emit_summary` value goes through `emit_kv` (all 23 keys), `emit_kv`/`finish` neutralise, and
+      `"${DETAILS[@]}"` is no longer bulk-printed. Every new assert verified to FAIL under a deliberate
+      mutation of its own fix, and the whole `cx6*` hostile-path family re-run green.
+
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` + `roborev` on the
       lite-green diff (the diff contains code — shell + config — so it IS roborev-certifiable and MUST be).
