@@ -14,22 +14,80 @@
 //! `producer_stream.rs` are already at/over the campsite source threshold
 //! (epic #1116).
 
-use cqlite_core::export::build_arrow_schema;
+use std::sync::Arc;
+
+use arrow::datatypes::Schema as ArrowSchema;
+use cqlite_core::export::{build_arrow_schema, rows_to_record_batch_with_schema};
 use cqlite_core::query::QueryRow;
 
 use crate::batch_bytes::{worst_case_batch_capacity_bytes, BatchByteCap};
 use crate::egress_credit::{count_arrow_array_nodes, CreditedBatch};
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 
-impl MergeProducer {
-    /// Arrow array NODES over this producer's projected output schema, counted
-    /// ONCE per merge and threaded into every reservation.
+/// The per-merge, batch-invariant Arrow facts both drive loops need at every
+/// flush point: the output [`ArrowSchema`] and its array-node count.
+///
+/// Built ONCE per merge (issue #3096, lever 6) and threaded through
+/// [`MergeProducer::flush_credited`] in place of the bare `n_array_nodes` this
+/// replaced. Neither field can change between batches of one merge — the output
+/// column set is fixed when the merge starts — so rebuilding either per batch was
+/// pure repeat work: `build_arrow_schema` allocates a `Vec<Field>` with an owned
+/// `String` name per column (plus an extension-metadata `HashMap` per
+/// uuid/timeuuid column), and `count_arrow_array_nodes` walks it.
+pub(crate) struct EgressBatchPlan {
+    /// The batch schema every flush labels its arrays with.
+    ///
+    /// Derived from `self.columns` — the SAME slice [`MergeProducer::flush_buffer`]
+    /// builds the arrays from, which is what `rows_to_record_batch(&self.columns,
+    /// ..)` derived per batch before. It is deliberately NOT `output_columns()`:
+    /// `RecordBatch::try_new` validates the arrays against this schema, so the two
+    /// must come from one slice or a projection/aggregation shape would fail
+    /// closed here instead of building.
+    schema: Arc<ArrowSchema>,
+    /// Arrow array NODES over the OUTPUT schema (`output_columns()`), which is
+    /// the slice the reservation has always been sized from.
     ///
     /// Nodes, not columns: `crate::batch_bytes::BATCH_BYTES_PER_COLUMN_SLACK` is
     /// a per-array-node allowance, so a `map<text,text>` column contributes four.
-    pub(crate) fn egress_array_nodes(&self) -> Result<usize, ProducerError> {
-        let schema = build_arrow_schema(self.output_columns())?;
-        Ok(count_arrow_array_nodes(&schema))
+    array_nodes: usize,
+}
+
+impl MergeProducer {
+    /// Build the per-merge [`EgressBatchPlan`] — once, before the drive loop.
+    ///
+    /// The two derivations below keep the pre-change slices EXACTLY: the node
+    /// count from `output_columns()` (what `egress_array_nodes` used) and the
+    /// batch schema from `self.columns` (what `flush_buffer`'s
+    /// `rows_to_record_batch` used). On the row drive path the two coincide —
+    /// `output_columns()` returns `self.columns` unless `partial_columns` is set,
+    /// which only the aggregate route (a different, materializing path that never
+    /// reaches `flush_credited`) sets. Deriving both from one slice would still be
+    /// correct today and would silently change behaviour the day that stops
+    /// holding, so it is not done.
+    pub(crate) fn egress_batch_plan(&self) -> Result<EgressBatchPlan, ProducerError> {
+        let array_nodes = count_arrow_array_nodes(&build_arrow_schema(self.output_columns())?);
+        let schema = Arc::new(build_arrow_schema(&self.columns)?);
+        Ok(EgressBatchPlan {
+            schema,
+            array_nodes,
+        })
+    }
+
+    /// Convert `buffer`'s rows into an Arrow batch over the plan's SHARED schema
+    /// and clear it.
+    ///
+    /// Lives here rather than in `producer.rs` (already far over the campsite
+    /// source threshold, epic #1116) beside its only caller,
+    /// [`Self::flush_credited`].
+    fn flush_buffer(
+        &self,
+        plan: &EgressBatchPlan,
+        buffer: &mut Vec<QueryRow>,
+    ) -> Result<arrow::record_batch::RecordBatch, ProducerError> {
+        let batch =
+            rows_to_record_batch_with_schema(Arc::clone(&plan.schema), &self.columns, buffer)?;
+        buffer.clear();
+        Ok(batch)
     }
 
     /// Re-derive the payload estimate of exactly the rows in `buffer`, the way
@@ -85,7 +143,7 @@ impl MergeProducer {
         sink: &mut dyn BatchSink,
         buffer: &mut Vec<QueryRow>,
         byte_cap: &mut BatchByteCap,
-        n_array_nodes: usize,
+        plan: &EgressBatchPlan,
     ) -> Result<(), ProducerError> {
         #[cfg(debug_assertions)]
         {
@@ -105,7 +163,7 @@ impl MergeProducer {
         // only here on the producer side (design D0): `accumulated()` is PAYLOAD
         // bytes, everything downstream of this line is CAPACITY bytes.
         let reserve_capacity_bytes =
-            worst_case_batch_capacity_bytes(byte_cap.accumulated(), n_array_nodes, 0);
+            worst_case_batch_capacity_bytes(byte_cap.accumulated(), plan.array_nodes, 0);
         // Parks here on an exhausted pool, with ONLY the row buffer resident —
         // nothing is materialized while a reservation is pending.
         let reservation = sink.reserve(reserve_capacity_bytes)?;
@@ -115,7 +173,7 @@ impl MergeProducer {
         // per batch; a no-op with no flight sink installed (non-flight callers).
         let batch = cqlite_core::observability::stream_subphase::timed(
             cqlite_core::observability::StreamSubPhase::Encode,
-            || self.flush_buffer(buffer),
+            || self.flush_buffer(plan, buffer),
         )?;
         let actual_capacity_bytes = batch.get_array_memory_size();
         // Trues up DOWNWARD; an `actual > reserved` fails closed (never upward).
@@ -124,3 +182,7 @@ impl MergeProducer {
         sink.emit(CreditedBatch::new(batch, permit))
     }
 }
+
+#[cfg(test)]
+#[path = "egress_flush_tests.rs"]
+mod egress_flush_tests;

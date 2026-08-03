@@ -86,7 +86,9 @@ pub mod parquet;
 
 // Re-export the public arrow_convert API at the `export` module level.
 #[cfg(feature = "arrow")]
-pub use arrow_convert::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
+pub use arrow_convert::{
+    build_arrow_schema, rows_to_record_batch, rows_to_record_batch_with_schema, ArrowConvertError,
+};
 
 // Re-export the byte estimator beside the converter it models (issue #2825).
 // Deliberately narrow: the structural charging constants stay PRIVATE to

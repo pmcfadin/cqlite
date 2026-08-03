@@ -118,9 +118,34 @@ pub fn rows_to_record_batch(
     columns: &[ColumnInfo],
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
-    let schema = build_arrow_schema(columns)?;
+    let schema = Arc::new(build_arrow_schema(columns)?);
+    rows_to_record_batch_with_schema(schema, columns, rows)
+}
+
+/// [`rows_to_record_batch`] over a schema the caller already holds.
+///
+/// Identical output — `schema` MUST be the [`build_arrow_schema`] of the same
+/// `columns`, which is exactly what [`rows_to_record_batch`] passes. The point is
+/// the `Arc`: a caller that emits many batches over ONE column set (the Flight
+/// `do_get` egress does, once per batch for the whole scan) rebuilt the entire
+/// `Schema` — a `Vec<Field>`, each `Field` owning a fresh `String` name and, for
+/// uuid/timeuuid columns, its own extension-metadata `HashMap` — on every call,
+/// then dropped it again. Reusing the `Arc` makes the per-batch cost a refcount
+/// bump (issue #3096, lever 6).
+///
+/// # Errors
+///
+/// Returns [`ArrowConvertError`] if any value cannot be represented in the target
+/// Arrow type, or if the Arrow array construction fails or the arrays do not
+/// match `schema` (`RecordBatch::try_new` validates that, so a mismatched schema
+/// is rejected rather than silently mislabeling the batch).
+pub fn rows_to_record_batch_with_schema(
+    schema: Arc<Schema>,
+    columns: &[ColumnInfo],
+    rows: &[QueryRow],
+) -> Result<RecordBatch, ArrowConvertError> {
     let arrays = convert_to_arrays(columns, rows)?;
-    let batch = RecordBatch::try_new(Arc::new(schema), arrays)?;
+    let batch = RecordBatch::try_new(schema, arrays)?;
     Ok(batch)
 }
 

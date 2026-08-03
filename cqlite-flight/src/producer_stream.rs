@@ -243,7 +243,7 @@ impl MergeProducer {
         let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
         // Issue #2821: the SAME per-merge array-node count `drive_merge` uses —
         // a governor wired into only one loop would leave the other unbounded.
-        let n_array_nodes = self.egress_array_nodes()?;
+        let plan = self.egress_batch_plan()?;
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
@@ -350,13 +350,13 @@ impl MergeProducer {
             // an empty buffer.
             let width = estimate_arrow_row_bytes(&self.columns, &row);
             if byte_cap.cut_before(width).is_yes() {
-                self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
+                self.flush_credited(sink, &mut buffer, &mut byte_cap, &plan)?;
             }
             buffer.push(row);
             emitted += 1;
             byte_cap.accumulate(width);
             if buffer.len() >= self.batch_size {
-                self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
+                self.flush_credited(sink, &mut buffer, &mut byte_cap, &plan)?;
             }
             // LIMIT reached (counted post-filter): stop the merge early.
             if let Some(cap) = limit {
@@ -367,7 +367,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
+            self.flush_credited(sink, &mut buffer, &mut byte_cap, &plan)?;
         }
         Ok(())
     }

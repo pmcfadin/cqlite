@@ -1124,19 +1124,6 @@ impl MergeProducer {
     ) -> Result<Vec<RecordBatch>, ProducerError> {
         self.merge_paths(paths, &CancelFlag::new())
     }
-
-    /// Convert `buffer`'s rows into an Arrow batch and clear it. `pub(crate)` so
-    /// `egress_flush.rs`'s single reserve → build → true-up → emit helper can
-    /// drive BOTH loops' six flush points (issue #2821); `producer_stream.rs`'s
-    /// former private duplicate was folded into this one.
-    pub(crate) fn flush_buffer(
-        &self,
-        buffer: &mut Vec<QueryRow>,
-    ) -> Result<RecordBatch, ProducerError> {
-        let batch = rows_to_record_batch(&self.columns, buffer)?;
-        buffer.clear();
-        Ok(batch)
-    }
 }
 
 /// Build ordered, de-duplicated Arrow column metadata from a table schema.
