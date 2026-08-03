@@ -158,8 +158,12 @@ kernel.kptr_restrict = 0
 ```
 
 **Why `-1` and not `1`.** `perf_event_paranoid` is **cumulative** — higher is *more* restrictive and
-each level keeps the ones below it: `>= 2` no kernel profiling, `>= 1` **no CPU-wide event access**,
-`>= 0` no raw tracepoints, `-1` no restriction. CQLite's measurement doctrine mandates per-CPU
+each level keeps the ones below it: `>= 3` (an extra level Debian/Ubuntu kernels carry) **disallow
+all unprivileged perf event use**, `>= 2` no kernel profiling, `>= 1` **no CPU-wide event access**,
+`>= 0` no raw tracepoints, `-1` **(almost) all events permitted**. That `>= 3` level is what makes
+the images' shipped **`4`** deny *everything* — down to a plain `perf stat` — rather than only the
+CPU-wide collection, which is why the first probe on a fresh box fails outright.
+CQLite's measurement doctrine mandates per-CPU
 collection (`perf stat -C <cpu>`), which is exactly what `>= 1` forbids — so `1` is not "almost
 right", it is a hard denial. `0` is the bare minimum that works; `-1` additionally lifts the perf
 mlock limit, avoiding `perf record` ring-buffer surprises. `kernel.kptr_restrict = 0` is a
@@ -186,6 +190,12 @@ later-sorting drop-in can swallow it), and finishes by running the collection it
 **NOT verified**. No sudo, no `perf`, or an absent `/proc` control degrades to a `[warn]` plus the
 exact remedy line — bootstrap stays advisory and always exits 0.
 
+**`/etc/sysctl.conf` BEATS our drop-in — check it first when the value does not take.** Both
+`sysctl --system` and `systemd-sysctl` apply `/etc/sysctl.conf` **after** every `sysctl.d` drop-in,
+so a stale `kernel.perf_event_paranoid` there wins over `99-cqlite-perf.conf` no matter how the file
+sorts. That is the single likeliest cause of "applied, still restricted", and bootstrap's diagnostics
+name it explicitly.
+
 Verify by hand, in the same order bootstrap does:
 
 ```bash
@@ -195,7 +205,16 @@ bash scripts/perf-capability.sh --verify                                  # want
 # apply by hand (identical bytes to what bootstrap writes, so a later run is a no-op):
 bash scripts/perf-capability.sh --drop-in | sudo tee /etc/sysctl.d/99-cqlite-perf.conf >/dev/null
 sudo sysctl -q --system
+# still restricted? the override is almost always here (applied AFTER the drop-ins):
+grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.conf
 ```
+
+**Never set `CQLITE_PERF_PROC_DIR` / `CQLITE_PERF_SYSCTL_DIR` in a shell.** They are test-only path
+seams for `scripts/tests/test_perf_capability.sh` and are **inert** unless `CQLITE_PERF_TEST_MODE=1`
+is also set — which in turn refuses to run if a real `sudo`/`sysctl` is reachable. The privileged
+destination is a hardcoded `/etc/sysctl.d` literal precisely so no exported variable can ever steer
+a `sudo tee` at another file, and bootstrap fails closed (skips the section with a `[warn]`) if it
+finds a seam set without the marker.
 
 Every gate SUMMARY's `accelerators:` line stamps the same state as a Linux-only `perf=` token
 (`ok` / `paranoid-<N>` / `kptr-restricted` / `absent` / `unknown`), so "this box cannot be profiled"

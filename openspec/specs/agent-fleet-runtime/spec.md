@@ -189,3 +189,82 @@ active in the resolved cargo config), `overridden` (managed block active but a n
 - **THEN** the `accelerators:` line SHALL contain no `mold=` token and SHALL be
   byte-identical in format to pre-change output
 
+### Requirement: The gate summary SHALL stamp perf profiling capability on Linux hosts
+
+On Linux, every `scripts/agent-gate.sh` summary's `accelerators:` line SHALL carry a
+`perf=` token, after the `mold=` token, with one of five states read from
+`/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}`: `ok` (`perf_event_paranoid <= 0`
+AND `kptr_restrict == 0` — unprivileged per-CPU profiling and kernel symbol resolution
+both available), `paranoid-<N>` (`perf_event_paranoid = N >= 1`, which forbids CPU-wide
+event access and therefore DENIES the `perf stat -C <cpu>` collection the measurement
+doctrine mandates), `kptr-restricted` (paranoid permissive but `kptr_restrict != 0`, so
+kernel frames resolve to bare addresses — a silent attribution loss), `absent` (the
+`/proc` controls are not present, e.g. a container), or `unknown` (present but
+unparseable — never guessed). The read SHALL be free: no `perf` exec and no subprocess
+in the gate's path. On Darwin the `accelerators:` line SHALL be unchanged (no `perf=`
+token), since both controls are Linux kernel knobs.
+
+#### Scenario: a profileable Linux worker stamps ok
+- **GIVEN** a Linux host whose `perf_event_paranoid` is `<= 0` and `kptr_restrict` is `0`
+- **WHEN** any gate mode emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=ok`
+
+#### Scenario: the shipped-image denial is visible
+- **GIVEN** a Linux host with `perf_event_paranoid = 4` (the value agent images ship)
+- **WHEN** the gate emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=paranoid-4`, never `perf=ok` —
+  a PERMISSION verdict made visible in every pasted block rather than discovered at the
+  start of a measurement cycle
+
+#### Scenario: kernel symbols unavailable is visible
+- **GIVEN** a Linux host with a permissive `perf_event_paranoid` but `kptr_restrict != 0`
+- **WHEN** the gate emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=kptr-restricted`
+
+#### Scenario: an unreadable or unparseable control is never guessed
+- **GIVEN** a Linux host where a `/proc` control is missing or holds a non-integer
+- **WHEN** the gate emits its summary
+- **THEN** the `accelerators:` line SHALL contain `perf=absent` or `perf=unknown`
+  respectively, and SHALL NOT infer a capability from the surrounding state
+
+#### Scenario: Darwin summary unchanged by the perf token
+- **WHEN** the gate emits its summary on a macOS host
+- **THEN** the `accelerators:` line SHALL contain no `perf=` token
+
+### Requirement: Bootstrap SHALL install and VERIFY the perf sysctl drop-in on Linux
+
+On Linux, `scripts/bootstrap-agent-machine.sh` SHALL install the reboot-surviving
+drop-in `/etc/sysctl.d/99-cqlite-perf.conf` (`kernel.perf_event_paranoid = -1`,
+`kernel.kptr_restrict = 0`) idempotently, apply it, and then verify the outcome — never
+assume it. The verdict SHALL come from reading the values back out of `/proc/sys/kernel`
+(a `sysctl` write's return code proves nothing) and from a FUNCTIONAL
+`perf stat -C 0 -e cycles` collection requiring BOTH exit 0 AND a non-zero cycle count.
+The privileged destination path SHALL be a hardcoded literal, never derived from the
+environment. The section SHALL be advisory: a box without non-interactive root, without
+`perf`, or without the `/proc` controls SHALL warn with an actionable write-AND-apply
+remedy and the run SHALL still exit 0. On Darwin the section SHALL be an explicit no-op.
+
+#### Scenario: an applied value that did not take is reported, not claimed
+- **GIVEN** a Linux host where `sysctl --system` exits 0 but `/proc` still reports a
+  restrictive value (container, read-only procfs, a later-sorting drop-in or
+  `/etc/sysctl.conf` overriding ours)
+- **WHEN** bootstrap runs with `--yes`
+- **THEN** it SHALL warn that the value did NOT take, SHALL NOT report a successful
+  read-back, and SHALL exit 0
+
+#### Scenario: an rc-0 collection with an unusable counter is NOT verified
+- **GIVEN** a `perf stat` that exits 0 while reporting `<not supported>`, `<not counted>`
+  or a zero count (a virtualised or masked PMU)
+- **WHEN** bootstrap runs the functional verification
+- **THEN** it SHALL report the capability as NOT verified
+
+#### Scenario: check mode mutates nothing
+- **WHEN** bootstrap runs without `--yes` on a Linux host lacking the drop-in
+- **THEN** it SHALL write no file and invoke no privileged mutating command, and SHALL
+  print the complete write-AND-apply remedy using the detected privilege prefix
+
+#### Scenario: Darwin bootstrap no-op
+- **WHEN** bootstrap runs on a macOS host
+- **THEN** the perf section SHALL state that the controls are Linux-only, write nothing,
+  and exit 0
+

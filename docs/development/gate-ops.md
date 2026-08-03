@@ -181,6 +181,43 @@ print-only, the link probe, the managed-block write, idempotency, user-config
 preservation, and the Darwin no-op). See fleet-runbook for the one-time sccache
 cold-rebuild note at enablement.
 
+### The `perf=` profiling-capability token (Linux only, issue #3249)
+
+After `mold=`, a Linux `accelerators:` line carries a `perf=` token answering *can this
+box be profiled at all?*
+
+```
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked perf=ok
+```
+
+It is a **free** read of `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}` through
+shell builtins — no `perf` exec, no subprocess, no new binary dependency (the
+functional `perf stat -C 0 -e cycles` verification is **bootstrap's** job, not the
+gate's). State values (Linux only):
+- `perf=ok` — unprivileged per-CPU profiling **and** kernel symbol resolution available.
+- `perf=paranoid-<N>` — `perf_event_paranoid = N >= 1`. Cumulative: `>= 1` forbids
+  **CPU-wide** event access, which is exactly what the mandated `perf stat -C <cpu>`
+  needs, so it is **denied**. Agent images ship `4`; on Debian/Ubuntu kernels `>= 3`
+  denies unprivileged perf entirely. This is a **permission** verdict whose "access
+  limited" help text reads like a missing *capability* — the confusion that cost two
+  measurement cycles.
+- `perf=kptr-restricted` — paranoid is fine, `kptr_restrict != 0`: kernel frames render
+  as bare addresses (a **silent attribution loss**, not an error).
+- `perf=absent` — the `/proc` controls are not present (container without a writable
+  procfs → tune the HOST). `perf=unknown` — present but unparseable, never guessed.
+
+Anything but `ok` on a box you intend to measure means **re-run
+`bash scripts/bootstrap-agent-machine.sh --yes`** (installs + applies + verifies
+`/etc/sysctl.d/99-cqlite-perf.conf`), not "perf is unavailable here". Rationale
+(`-1`, not `1`), the BPF-still-needs-sudo caveat, the single-tenant security posture
+and the `/etc/sysctl.conf` precedence trap: `docs/development/fleet-runbook.md`.
+
+Self-test coverage: `scripts/tests/test_agent_gate_summary.sh` (cases 9f* assert every
+state via the test seam, the Darwin no-token contract, **and** the production branch
+against a real `/proc` fixture with the seam unset) and
+`scripts/tests/test_perf_capability.sh` (the helper contract + the bootstrap
+write/read-back/verify path, including the silent-revert and denied-`perf` cases).
+
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
 Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent

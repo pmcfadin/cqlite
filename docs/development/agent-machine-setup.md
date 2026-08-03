@@ -93,7 +93,7 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok
   **`paranoid-<N>`** (`perf_event_paranoid = N >= 1`
   forbids **CPU-wide** events, so the `perf stat -C <cpu>` the measurement doctrine
   mandates is DENIED — a *permission* verdict, not a missing capability; images ship
-  `4`) · **`kptr-restricted`** (paranoid is fine but `kptr_restrict != 0`, so kernel
+  `4`, and Debian/Ubuntu's extra `>= 3` level denies unprivileged perf *entirely*) · **`kptr-restricted`** (paranoid is fine but `kptr_restrict != 0`, so kernel
   frames resolve to bare addresses — a silent attribution loss) · **`absent`** (the
   `/proc` controls are not present, e.g. a container — tune the host) ·
   **`unknown`** (present but unparseable; never guessed). Anything but `ok` on a box
