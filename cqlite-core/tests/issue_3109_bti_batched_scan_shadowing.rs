@@ -18,54 +18,58 @@
 //! through to the state machine and failed outright. All four surfaces are asserted
 //! to agree here, so the next one added has to join the agreement or fail.
 //!
-//! # Oracle
+//! # Oracles, and how `now` is pinned
 //!
-//! `test_da.ttl_table` is a REAL Cassandra 5.0.2 BTI (`da`) SSTable. Its committed
-//! sstabledump golden (`da-2-bti-Data.db.jsonl`) records both rows as written with
-//! `"ttl": 86400` and `"expires_at": "2026-06-11T16:17:37Z"` — so Cassandra's own
-//! `SELECT` semantics are unambiguous, and the golden is re-read here (never
-//! hardcoded blind) so a corpus regeneration fails loudly instead of silently
-//! weakening the test:
+//! Both fixtures are REAL Cassandra 5.0.2 BTI (`da`) SSTables with committed
+//! sstabledump goldens; the goldens are re-read here (never hardcoded blind) so a
+//! corpus regeneration fails loudly instead of silently weakening the test.
 //!
-//!   * at a PINNED `now` BEFORE that instant, both rows are LIVE — the non-vacuous
-//!     arm (a strictly positive expected row count, byte-compared row-for-row
-//!     against the per-row surface);
-//!   * at a PINNED `now` AFTER it, both rows are EXPIRED and a `SELECT` returns
-//!     NOTHING. Pre-fix the batched surface returned both rows here while the
-//!     per-row surface returned none — the divergence this test pins.
+//! * **`ttl_shadowing_is_applied_at_a_caller_pinned_read_clock`** — the TTL arm.
+//!   `test_da.ttl_table`'s golden records both rows written with `"ttl": 86400`
+//!   and `"expires_at": "2026-06-11T16:17:37Z"`, so Cassandra's own `SELECT`
+//!   semantics are unambiguous: live before that instant, gone after it. `now` is
+//!   pinned through the EXPLICIT, non-debug-gated `now_secs` parameter of
+//!   [`SSTableReader::open_query_row_stream`], whose full-ring arm
+//!   (`token_bound = None`) drives exactly the batched surface this issue fixed
+//!   (`scan_stream_batched_admitted` → `run_scan_stream_batched` → the BTI
+//!   dispatch). An explicit parameter is deterministic in a `--release` test build
+//!   too; the ambient `CQLITE_TTL_NOW_OVERRIDE_SECS` seam is `debug_assertions`-only
+//!   and would be IGNORED there, silently falling back to the wall clock and turning
+//!   the "before expiry" phase into a time bomb that fires the moment the fixture's
+//!   TTL elapses (it already has).
 //!
-//! `now` is PINNED via the debug-only `CQLITE_TTL_NOW_OVERRIDE_SECS` reader seam
-//! (`now_clock.rs`), never sampled from the wall clock (#2642): the fixture's
-//! expiry is a fixed instant in the past, so a wall-clock read would only ever
-//! exercise the expired arm and could never prove the live arm.
+//! * **`all_bti_scan_surfaces_agree_row_for_row`** — the cross-surface arm, which
+//!   needs no clock pin at all: "every surface returns the same rows" is true under
+//!   ANY clock. Its non-vacuous fixture is `test_da.simple_table` (no TTL, so its
+//!   rows are live forever); `ttl_table` is then checked for agreement only, with no
+//!   count pinned, so it cannot rot as its TTL elapses.
 //!
-//! Both phases run sequentially inside ONE test so the process-global env seam is
-//! never mutated concurrently by a sibling test in this binary.
-//!
-//! Requires `CQLITE_DATASETS_ROOT` and the gitignored `Data.db` binaries; SKIPs
-//! (never passes with zero rows) when absent.
+//! Requires the gitignored `Data.db` binaries; SKIPs (never passes with zero rows)
+//! when absent. `CQLITE_DATASETS_ROOT` is honored first, else the in-repo
+//! `test-data/datasets` corpus is used, so a plain local `cargo test` still runs
+//! this — the only direct regression test for the #3109 dispatch.
 
 #![cfg(feature = "state_machine")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cqlite_core::platform::Platform;
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
-use cqlite_core::storage::sstable::SSTableManager;
+use cqlite_core::storage::scan_cancel::ScanCancel;
+use cqlite_core::storage::sstable::reader::QueryRowBatch;
+use cqlite_core::storage::sstable::{SSTableManager, SSTableReader};
 use cqlite_core::types::{ScanRow, TableId};
 use cqlite_core::{Config, RowKey};
 
 const KEYSPACE: &str = "test_da";
-const TABLE: &str = "ttl_table";
+const TTL_TABLE: &str = "ttl_table";
+const LIVE_TABLE: &str = "simple_table";
 const SSTABLE_PREFIX: &str = "da-2-bti";
 
-/// Debug-only reader seam (`now_clock.rs`): pins the read-time TTL "now" clock.
-const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
-
-/// The fixture's TTL expiry instant, as recorded by Cassandra's own sstabledump in
-/// the committed golden. Asserted against the golden below, so a regenerated
-/// corpus fails loudly rather than quietly invalidating the two pins.
+/// The TTL fixture's expiry instant, as recorded by Cassandra's own sstabledump in
+/// the committed golden. Asserted against the golden below, so a regenerated corpus
+/// fails loudly rather than quietly invalidating the two pins.
 const GOLDEN_EXPIRES_AT: &str = "2026-06-11T16:17:37Z";
 const GOLDEN_EXPIRES_AT_EPOCH: i64 = 1_781_194_657;
 
@@ -76,45 +80,83 @@ const NOW_BEFORE_EXPIRY: i64 = 1_781_136_000;
 /// the expiry: every row is expired.
 const NOW_AFTER_EXPIRY: i64 = 1_782_950_400;
 
-/// The `test_da/ttl_table-*` generation dir, requiring a real `Data.db` so a
-/// JSONL-only checkout SKIPs rather than passing with zero rows.
-fn fixture_dir() -> Option<PathBuf> {
-    let root = std::env::var("CQLITE_DATASETS_ROOT")
-        .ok()
-        .map(PathBuf::from)?;
-    let keyspace_dir = root.join("sstables").join(KEYSPACE);
-    let gen_dir = std::fs::read_dir(&keyspace_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with(&format!("{TABLE}-")))
-                .unwrap_or(false)
-        })?;
-    gen_dir
-        .join(format!("{SSTABLE_PREFIX}-Data.db"))
-        .exists()
-        .then_some(gen_dir)
+/// Repo root = the parent of this crate's manifest dir (`<repo>/cqlite-core`).
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("cqlite-core has a parent repo dir")
+        .to_path_buf()
 }
 
-/// Re-read the committed sstabledump golden and return the number of physical
-/// rows, asserting the TTL/expiry facts the two pins are derived from.
+/// The `<table>-<cfid>` generation dir, requiring a real `Data.db` so a JSONL-only
+/// checkout SKIPs rather than passing with zero rows.
+///
+/// `CQLITE_DATASETS_ROOT` is preferred (a worktree has no gitignored binaries and
+/// must point at the main checkout), with the in-repo corpus as a fallback so a
+/// plain local `cargo test` does not silently skip the only direct regression test
+/// for this fix.
+fn fixture_dir(table: &str) -> Option<PathBuf> {
+    let roots = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::iter::once(repo_root().join("test-data/datasets")));
+    for root in roots {
+        let keyspace_dir = root.join("sstables").join(KEYSPACE);
+        let Ok(entries) = std::fs::read_dir(&keyspace_dir) else {
+            continue;
+        };
+        let mut candidates: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(&format!("{table}-")))
+                    .unwrap_or(false)
+            })
+            .collect();
+        candidates.sort();
+        if let Some(dir) = candidates
+            .into_iter()
+            .find(|p| p.join(format!("{SSTABLE_PREFIX}-Data.db")).is_file())
+        {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// Number of physical ROWS the committed sstabledump golden records.
+///
+/// Counts `"type": "row"` entries, NOT JSONL lines: a line is a PARTITION, and the
+/// surfaces this is compared against count ROWS. They coincide only while every
+/// partition in the fixture holds exactly one row — a regenerated corpus with a
+/// multi-row partition would otherwise silently assert the wrong number. Same
+/// counting rule as `query_semantics_oracle_parity.rs`.
 ///
 /// The oracle is Cassandra's own dump of Cassandra-written bytes — never CQLite
 /// output (#3042).
-fn golden_rows_with_expiry(dir: &std::path::Path) -> usize {
+fn golden_row_count(dir: &Path) -> usize {
     let golden = dir.join(format!("{SSTABLE_PREFIX}-Data.db.jsonl"));
     let text = std::fs::read_to_string(&golden)
         .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let rows = text.matches("\"type\": \"row\"").count();
     assert!(
-        !lines.is_empty(),
-        "golden {} must record at least one partition (no vacuous pass)",
+        rows > 0,
+        "golden {} must record at least one physical row (no vacuous pass)",
         golden.display()
     );
-    for (i, line) in lines.iter().enumerate() {
+    rows
+}
+
+/// [`golden_row_count`] for the TTL fixture, additionally asserting the TTL/expiry
+/// facts the two `now` pins are derived from.
+fn golden_ttl_row_count(dir: &Path) -> usize {
+    let golden = dir.join(format!("{SSTABLE_PREFIX}-Data.db.jsonl"));
+    let text = std::fs::read_to_string(&golden)
+        .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
+    for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         assert!(
             line.contains("\"ttl\":") && line.contains(GOLDEN_EXPIRES_AT),
             "golden partition {i} must carry the TTL/expiry this test's pins are \
@@ -127,22 +169,27 @@ fn golden_rows_with_expiry(dir: &std::path::Path) -> usize {
         NOW_BEFORE_EXPIRY < GOLDEN_EXPIRES_AT_EPOCH && GOLDEN_EXPIRES_AT_EPOCH < NOW_AFTER_EXPIRY,
         "the two pins must straddle the golden's expiry instant"
     );
-    lines.len()
+    golden_row_count(dir)
 }
 
-/// Schema for `test_da.ttl_table` (matches `test-data/schemas/da-test.cql`).
-fn ttl_table_schema() -> TableSchema {
-    let cql = format!(
-        "CREATE TABLE {KEYSPACE}.{TABLE} (\
-             id UUID PRIMARY KEY, \
-             data TEXT, \
-             expiring_value INT\
-         );"
-    );
-    parse_cql_schema(&cql).expect("parse ttl_table schema")
+/// Schemas for the two `test_da` fixtures (match `test-data/schemas/da-test.cql`).
+fn table_schema(table: &str) -> TableSchema {
+    let cql = match table {
+        TTL_TABLE => format!(
+            "CREATE TABLE {KEYSPACE}.{TTL_TABLE} (\
+                 id UUID PRIMARY KEY, data TEXT, expiring_value INT);"
+        ),
+        LIVE_TABLE => format!(
+            "CREATE TABLE {KEYSPACE}.{LIVE_TABLE} (\
+                 id UUID PRIMARY KEY, name TEXT, age INT, salary BIGINT, \
+                 active BOOLEAN, created TIMESTAMP);"
+        ),
+        other => panic!("no schema for test_da.{other}"),
+    };
+    parse_cql_schema(&cql).expect("parse test_da schema")
 }
 
-async fn open_manager(keyspace_dir: &std::path::Path) -> SSTableManager {
+async fn open_manager(keyspace_dir: &Path) -> SSTableManager {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
     SSTableManager::new(
@@ -156,10 +203,95 @@ async fn open_manager(keyspace_dir: &std::path::Path) -> SSTableManager {
     .expect("open SSTableManager")
 }
 
+async fn open_reader(data_db: &Path) -> Arc<SSTableReader> {
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let reader = SSTableReader::open(data_db, &config, platform)
+        .await
+        .expect("open BTI SSTable reader");
+    assert!(
+        reader.is_bti(),
+        "fixture {} must open as a BTI (`da`) reader, else the #3109 dispatch is \
+         never exercised",
+        data_db.display()
+    );
+    Arc::new(reader)
+}
+
 type Entry = (Vec<u8>, ScanRow);
 
 fn snap(key: RowKey, row: ScanRow) -> Entry {
     (key.as_bytes().to_vec(), row)
+}
+
+/// Drive the batched BTI surface at an EXPLICITLY pinned read clock.
+///
+/// [`SSTableReader::open_query_row_stream`] with `token_bound = None` takes the
+/// full-ring arm, which is `scan_stream_batched_admitted(.., Some(now_secs))` —
+/// i.e. `run_scan_stream_batched`, whose BTI dispatch #3109 added. `now_secs` is a
+/// plain function parameter, honored identically in debug and release builds.
+fn batched_rows_at_pinned_now(reader: Arc<SSTableReader>, schema: &TableSchema, now: i64) -> usize {
+    let mut stream = reader
+        .open_query_row_stream(schema.clone(), None, now, ScanCancel::new())
+        .expect("open_query_row_stream");
+    let mut rows = 0usize;
+    while let Some(msg) = stream.next_batch() {
+        match msg.expect("query row batch Ok") {
+            QueryRowBatch::Rows(batch) => rows += batch.len(),
+            QueryRowBatch::Unsupported => panic!(
+                "the full-ring query row stream must serve this BTI reader through the \
+                 batched scan surface; `Unsupported` means the pinned-clock arm under \
+                 test was never driven (the assertions below would be vacuous)"
+            ),
+        }
+    }
+    rows
+}
+
+/// Issue #3109 / #1741: the batched streaming surface applies read shadowing to a
+/// BTI (`da`) reader at the clock its CALLER pinned — live rows before the
+/// fixture's TTL expiry, nothing after it.
+///
+/// Pre-#3109 this surface routed `da` readers into the block loop, whose
+/// `V5UncompressedOA` state machine drops BOTH `read_shadowing` and `now_secs`: the
+/// expired phase surfaced rows that `scan` hides (or failed outright on this
+/// schema-required fixture), and the live phase could not honor the pin at all.
+///
+/// Both phases are pinned through an explicit parameter, so this test is
+/// deterministic in a `--release` build too — it can never decay into reading the
+/// wall clock.
+#[tokio::test]
+async fn ttl_shadowing_is_applied_at_a_caller_pinned_read_clock() {
+    let Some(gen_dir) = fixture_dir(TTL_TABLE) else {
+        eprintln!(
+            "SKIP issue #3109: {KEYSPACE}/{TTL_TABLE} Data.db absent (set \
+             CQLITE_DATASETS_ROOT and fetch the datasets)"
+        );
+        return;
+    };
+    let physical_rows = golden_ttl_row_count(&gen_dir);
+    let schema = table_schema(TTL_TABLE);
+    let data_db = gen_dir.join(format!("{SSTABLE_PREFIX}-Data.db"));
+
+    // Non-vacuous arm: at a pinned `now` BEFORE the expiry every physical row is
+    // live, so no surface can pass by returning nothing.
+    let live = batched_rows_at_pinned_now(open_reader(&data_db).await, &schema, NOW_BEFORE_EXPIRY);
+    assert_eq!(
+        live, physical_rows,
+        "at a pinned now BEFORE expiry ({NOW_BEFORE_EXPIRY}) the batched BTI surface \
+         must return all {physical_rows} physical rows the golden records"
+    );
+
+    // Shadowing arm: at a pinned `now` AFTER the expiry every row is TTL-expired
+    // and a `SELECT` returns NOTHING. This is what the pre-#3109 batched surface got
+    // wrong.
+    let expired =
+        batched_rows_at_pinned_now(open_reader(&data_db).await, &schema, NOW_AFTER_EXPIRY);
+    assert_eq!(
+        expired, 0,
+        "at a pinned now AFTER expiry ({NOW_AFTER_EXPIRY}) the batched BTI surface must \
+         hide every TTL-expired row; got {expired} (issue #3109)"
+    );
 }
 
 async fn collect_per_row(
@@ -219,13 +351,9 @@ async fn collect_scan(
 /// `bti_partitions_db.is_none()`), so it is where a missing dispatch on the walk
 /// itself shows up. It resolves its own schema from the SSTable header/registry,
 /// so it takes no `schema` argument.
-async fn collect_sequential(data_db: &std::path::Path) -> Vec<Entry> {
-    let config = Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
-    let reader = cqlite_core::storage::sstable::SSTableReader::open(data_db, &config, platform)
+async fn collect_sequential(data_db: &Path) -> Vec<Entry> {
+    open_reader(data_db)
         .await
-        .expect("open BTI SSTable reader");
-    reader
         .iterate_all_partitions()
         .await
         .expect("iterate_all_partitions succeeds")
@@ -234,8 +362,8 @@ async fn collect_sequential(data_db: &std::path::Path) -> Vec<Entry> {
         .collect()
 }
 
-/// Every surface's rows at one pinned `now`, in one place so a new surface is
-/// added to the agreement assertion rather than left to drift (#1577 class).
+/// Every surface's rows for one table, in one place so a new surface is added to
+/// the agreement assertion rather than left to drift (#1577 class).
 struct Surfaces {
     scan: Vec<Entry>,
     per_row: Vec<Entry>,
@@ -246,7 +374,7 @@ struct Surfaces {
 impl Surfaces {
     /// Assert all surfaces returned the same rows in the same order, and return
     /// that agreed row count.
-    fn assert_agree(&self, phase: &str) -> usize {
+    fn assert_agree(&self, table: &str) -> usize {
         for (name, rows) in [
             ("per-row", &self.per_row),
             ("batched", &self.batched),
@@ -255,7 +383,7 @@ impl Surfaces {
             assert_eq!(
                 rows.len(),
                 self.scan.len(),
-                "{phase}: the {name} streaming surface returned {} rows but the \
+                "{table}: the {name} streaming surface returned {} rows but the \
                  materializing `scan` surface returned {} — the BTI decode posture \
                  diverges between surfaces (#3109 / #1577 class)",
                 rows.len(),
@@ -264,11 +392,11 @@ impl Surfaces {
             for (i, (got, want)) in rows.iter().zip(self.scan.iter()).enumerate() {
                 assert_eq!(
                     got.0, want.0,
-                    "{phase}: {name} row {i}: key mismatch vs scan"
+                    "{table}: {name} row {i}: key mismatch vs scan"
                 );
                 assert_eq!(
                     got.1, want.1,
-                    "{phase}: {name} row {i}: value mismatch vs scan"
+                    "{table}: {name} row {i}: value mismatch vs scan"
                 );
             }
         }
@@ -276,71 +404,59 @@ impl Surfaces {
     }
 }
 
-/// Drive every surface at one pinned `now`. The manager is opened INSIDE the pin so
-/// no reader caches a decode taken under a different clock.
-async fn surfaces_at(
-    gen_dir: &std::path::Path,
-    table_id: &TableId,
-    schema: &TableSchema,
-    pinned_now: i64,
-) -> Surfaces {
+async fn surfaces_for(gen_dir: &Path, table: &str) -> Surfaces {
     let keyspace_dir = gen_dir.parent().expect("generation dir has a parent");
     let data_db = gen_dir.join(format!("{SSTABLE_PREFIX}-Data.db"));
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, pinned_now.to_string());
+    let schema = table_schema(table);
+    let table_id = TableId::from(format!("{KEYSPACE}.{table}").as_str());
     let manager = open_manager(keyspace_dir).await;
-    let out = Surfaces {
-        scan: collect_scan(&manager, table_id, schema).await,
-        per_row: collect_per_row(&manager, table_id, schema).await,
-        batched: collect_batched(&manager, table_id, schema).await,
+    Surfaces {
+        scan: collect_scan(&manager, &table_id, &schema).await,
+        per_row: collect_per_row(&manager, &table_id, &schema).await,
+        batched: collect_batched(&manager, &table_id, &schema).await,
         sequential: collect_sequential(&data_db).await,
-    };
-    drop(manager);
-    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
-    out
+    }
 }
 
-/// Issue #3109: the batched surface applies read shadowing to a BTI (`da`) reader,
-/// row-for-row identically to the per-row surface, at BOTH a pinned `now` where the
-/// fixture's rows are live and one where they are all TTL-expired.
+/// Issue #3109: all four scan surfaces decode a BTI (`da`) reader through the same
+/// authoritative trie walk, so they return the same rows in the same order.
+///
+/// Clock-independent BY CONSTRUCTION — "every surface agrees" is true under any
+/// `now`, so nothing here can rot with the wall clock:
+///
+/// * `simple_table` carries NO TTL, so its rows are live forever and the agreement
+///   is permanently non-vacuous (a strictly positive count, byte-compared
+///   row-for-row). Pre-#3109 both the batched and the sequential surface took the
+///   `V5UncompressedOA` state machine here instead of the trie walk.
+/// * `ttl_table` is then checked for AGREEMENT ONLY, with no count pinned: whatever
+///   the ambient clock decides about its expiry, no surface may surface a row
+///   another one hides. The exact counts for that fixture are pinned separately, at
+///   an explicitly pinned clock, by
+///   `ttl_shadowing_is_applied_at_a_caller_pinned_read_clock`.
 #[tokio::test]
-async fn bti_batched_scan_applies_read_shadowing_like_the_per_row_surface() {
-    let Some(gen_dir) = fixture_dir() else {
+async fn all_bti_scan_surfaces_agree_row_for_row() {
+    let Some(live_dir) = fixture_dir(LIVE_TABLE) else {
         eprintln!(
-            "SKIP issue #3109: {KEYSPACE}/{TABLE} Data.db absent (set CQLITE_DATASETS_ROOT \
-             and fetch the datasets)"
+            "SKIP issue #3109: {KEYSPACE}/{LIVE_TABLE} Data.db absent (set \
+             CQLITE_DATASETS_ROOT and fetch the datasets)"
         );
         return;
     };
-    let physical_rows = golden_rows_with_expiry(&gen_dir);
-    let schema = ttl_table_schema();
-    let table_id = TableId::from(format!("{KEYSPACE}.{TABLE}").as_str());
-
-    // ---- Phase 1: pinned `now` BEFORE the TTL expiry -> every row is LIVE. -----
-    // The non-vacuous arm: a strictly positive expected row count, so no surface
-    // can pass by returning nothing.
-    let live = surfaces_at(&gen_dir, &table_id, &schema, NOW_BEFORE_EXPIRY).await;
-    let live_rows = live.assert_agree("pinned now BEFORE expiry");
+    let physical_rows = golden_row_count(&live_dir);
+    let agreed = surfaces_for(&live_dir, LIVE_TABLE)
+        .await
+        .assert_agree(LIVE_TABLE);
     assert_eq!(
-        live_rows, physical_rows,
-        "at a pinned now BEFORE expiry every surface must return all {physical_rows} \
-         physical rows the golden records (non-vacuous arm)"
+        agreed, physical_rows,
+        "the TTL-free {LIVE_TABLE} fixture must decode to all {physical_rows} physical \
+         rows the golden records on every surface (non-vacuous arm)"
     );
 
-    // ---- Phase 2: pinned `now` AFTER the TTL expiry -> every row is EXPIRED. ---
-    // Pre-#3109 the batched surface diverged here: the `V5UncompressedOA` state
-    // machine drops `read_shadowing`, so it surfaced rows the per-row and `scan`
-    // surfaces hid (on this schema-required fixture it failed outright instead).
-    let expired = surfaces_at(&gen_dir, &table_id, &schema, NOW_AFTER_EXPIRY).await;
-    let expired_rows = expired.assert_agree("pinned now AFTER expiry");
-    assert_eq!(
-        expired_rows,
-        0,
-        "issue #3109: at a pinned now AFTER expiry EVERY surface must hide every \
-         TTL-expired row; got {expired_rows} (batched={}, per-row={}, scan={}, \
-         sequential={})",
-        expired.batched.len(),
-        expired.per_row.len(),
-        expired.scan.len(),
-        expired.sequential.len()
-    );
+    // Same agreement on the TTL fixture — agreement only, no count: this arm must
+    // stay correct whether or not the fixture's TTL has elapsed.
+    if let Some(ttl_dir) = fixture_dir(TTL_TABLE) {
+        surfaces_for(&ttl_dir, TTL_TABLE)
+            .await
+            .assert_agree(TTL_TABLE);
+    }
 }
