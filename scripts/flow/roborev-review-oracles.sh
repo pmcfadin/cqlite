@@ -82,11 +82,43 @@ CODE_FREE_ARTIFACT_PREFIXES="docs/"
 #
 # RECOVERED FROM THE BINARY, not from documentation or memory: these are the literal
 # `:(exclude,glob)`-prefixed pathspec strings present in the v0.61.2 executable
-# (`strings -a <bin> | grep -o ':(exclude,glob)[^ ]*'`). They are therefore already
-# RESOLVED pathspec bodies, not user patterns — every one carries an explicit `**/`, so
-# feeding them through the `FormatExcludeArgs` port below is a no-op on their anchoring
-# (each contains a `/`, so the port keeps it VERBATIM) and simply adds the `/**`
-# sibling, which is what makes `**/.beads` exclude its subtree.
+# (`strings -a <bin> | grep -o ':(exclude,glob)[^ ]*'`).
+#
+# THE MECHANISM, ESTABLISHED FROM THE v0.61.2 BINARY (#3229 round-6 blocker 1) —
+# **built-ins are PRE-FORMATTED pathspec CONSTANTS appended to git's argv VERBATIM; they
+# do NOT pass through `git.FormatExcludeArgs`, so each contributes EXACTLY ONE pathspec
+# and never acquires the `/**` sibling a configured pattern does.** Three independent
+# measurements against `/usr/local/bin/roborev`, all reproducible:
+#   1. THE PREFIX IS INSIDE THE LITERAL. Each of the 24 is present as the CONTIGUOUS byte
+#      string `:(exclude,glob)<pattern>`. A pattern destined for the formatter would be
+#      stored BARE (the formatter is what prepends `:(exclude,glob)`), so a baked-in
+#      prefix means the string is already a finished git argument.
+#   2. LENGTH-BUCKET PACKING PROVES (1) IS NOT LINKER COINCIDENCE. Go's linker packs the
+#      rodata string blob in LENGTH order with no terminators, and these 24 pack
+#      back-to-back in runs of EQUAL total length INCLUDING the 15-byte prefix — e.g. at
+#      one offset `:(exclude,glob)**/bun.lock`, `…**/pdm.lock`, `…**/mix.lock` sit at
+#      deltas of exactly 26 = 15 + 11, and `…**/Pipfile.lock`/`Gemfile.lock`/
+#      `pubspec.lock`/`Podfile.lock` at deltas of exactly 30. Adjacency in a
+#      length-sorted blob is only possible if the prefix is part of the string being
+#      sorted.
+#   3. ONLY TWO BARE `:(exclude,glob)` CONSTANTS EXIST, and Go deduplicates identical
+#      literals — so there is no shared prefix constant for 24 patterns to be formatted
+#      against. `:(exclude,glob)` counts 26 occurrences total = the 24 finished pathspecs
+#      + the 2 runtime prefix constants the formatter concatenates for CONFIGURED
+#      patterns (`:(exclude,glob)` root-anchored, `:(exclude,glob)**/` recursive).
+# CORROBORATING SHAPE: the DIRECTORY built-ins carry `/**` HAND-WRITTEN into the literal
+# (`**/.beads/**`, `**/.cache/**`, `**/.gocache/**`) while the FILE built-ins do not
+# (`**/Cargo.lock`) — nobody writes `/**` onto a string about to be handed to a formatter
+# that appends it. And no `:(exclude,glob)**/Cargo.lock/**`-style sibling literal exists
+# for ANY file built-in (measured: 0 hits for all 8 probed).
+#
+# WHY IT MATTERS, i.e. why this is not trivia: `roborev_format_exclude_args` used to run
+# built-ins through the port, which manufactured a phantom `:(exclude,glob)**/Cargo.lock/**`
+# — an exclusion roborev never applies. OVER-modelling the exclusion set drops paths from
+# `prompt-content` coverage, which is the FALSE-PASS direction. UNDER-modelling it (the
+# mirror-image error of "fixing" a configured pattern down to one pathspec) would report
+# paths as SURVIVING that roborev really drops — also a false PASS. Both directions are
+# wrong; the pathspec count must match the mechanism per input class, and it now does.
 #
 # MAINTENANCE OBLIGATION, identical to the port's: a roborev UPGRADE requires
 # RE-EXTRACTING this list before the check is trusted. An upstream addition would
@@ -935,19 +967,49 @@ roborev_resolve_root_checkout() {
 
 # roborev_format_exclude_args: THE PORT (see the header block above). Fills
 # `_rx_pathspecs` (what git is asked) plus the parallel `_rx_owner_pattern` /
-# `_rx_owner_body` / `_rx_owner_src` (so a FAIL can name the pattern responsible for
-# each path AND the file it came from), and sets `_rx_trailing` when a CONFIGURED
-# pattern carries the R3 trailing slash.
+# `_rx_owner_body` / `_rx_owner_src` / `_rx_owner_single` (so a FAIL can name the pattern
+# responsible for each path AND the file it came from, and reproduce the SAME pathspec
+# count), and sets `_rx_trailing` when a CONFIGURED pattern carries the R3 trailing slash.
+#
+# TWO INPUT CLASSES, TWO MECHANISMS — and conflating them OVER-MODELS the real exclusion
+# set (#3229 round-6 blocker 1):
+#   * a CONFIGURED pattern is a USER pattern that roborev pushes through
+#     `git.FormatExcludeArgs`, which anchors it and emits TWO pathspecs, `<body>` and
+#     `<body>/**`. Both are reproduced here.
+#   * a BUILT-IN is NOT a user pattern. It is a PRE-FORMATTED pathspec CONSTANT that the
+#     binary appends to git's argv VERBATIM, so it contributes exactly ONE pathspec and
+#     is never re-anchored and never given a `/**` sibling. Emitting a sibling for it
+#     invented an exclusion roborev does not apply (`:(exclude,glob)**/Cargo.lock/**`),
+#     and over-exclusion drops paths from `prompt-content` coverage — the FALSE-PASS
+#     direction this whole check exists to close.
+#
+# ESTABLISHED FROM THE v0.61.2 BINARY, not inferred (see ROBOREV_BUILTIN_EXCLUDES above
+# for the full evidence): each built-in is a SINGLE Go string literal that already
+# CONTAINS the `:(exclude,glob)` prefix. RE-VERIFY ON EVERY roborev UPGRADE — the same
+# obligation the pin itself carries.
 roborev_format_exclude_args() {
   local pattern p spaced b0 prefix pidx=-1 psrc
   _rx_pathspecs=()
   _rx_owner_pattern=()
   _rx_owner_body=()
   _rx_owner_src=()
+  _rx_owner_single=()
   _rx_trailing=""
   for pattern in "${_rx_patterns[@]}"; do
     pidx=$((pidx + 1))
     psrc="${_rx_sources[$pidx]}"
+    # A BUILT-IN bypasses the port ENTIRELY: appended verbatim, ONE pathspec, no
+    # trimming, no anchoring test, no `/**` sibling. Deliberately BEFORE the
+    # normalisation below rather than a flag threaded through it — the mechanism is "the
+    # binary does not call the formatter on these", and the code should say exactly that.
+    if [ "$psrc" = "$ROBOREV_BUILTIN_SRC_LABEL" ]; then
+      _rx_pathspecs+=(":(exclude,glob)$pattern")
+      _rx_owner_pattern+=("$pattern")
+      _rx_owner_body+=("$pattern")
+      _rx_owner_src+=("$psrc")
+      _rx_owner_single+=(1)
+      continue
+    fi
     # strings.TrimSpace
     p="${pattern#"${pattern%%[![:space:]]*}"}"
     p="${p%"${p##*[![:space:]]}"}"
@@ -988,6 +1050,7 @@ roborev_format_exclude_args() {
     _rx_owner_pattern+=("$pattern")
     _rx_owner_body+=("$prefix$p")
     _rx_owner_src+=("$psrc")
+    _rx_owner_single+=(0)
   done
 }
 
@@ -1183,7 +1246,7 @@ roborev_check_census_exclusion() {
   local repo_cfg="$REPO/.roborev.toml"
   local global_cfg="${HOME:-}/.roborev/config.toml"
   local -a _rx_patterns=() _rx_sources=() _rx_pathspecs=() _rx_owner_pattern=() \
-    _rx_owner_body=() _rx_owner_src=()
+    _rx_owner_body=() _rx_owner_src=() _rx_owner_single=()
   local _rx_error="" _rx_found=0 _rx_trailing="" _rx_corroboration="UNAVAILABLE" \
     _rx_drift="" _rx_drift_cwd="" _rx_unquoted="" _rx_root="" _rx_root_error="" \
     _rx_src_label="" _rx_builtin_state="UNAVAILABLE" _rx_builtin_count="" \
@@ -1364,9 +1427,16 @@ roborev_check_census_exclusion() {
   # when something was swallowed, so the common case stays one git call.
   for ((i = 0; i < ${#_rx_owner_body[@]}; i++)); do
     body="${_rx_owner_body[$i]}"
+    # The POSITIVE form must be the SAME pathspec set the exclusion used, or blame
+    # attributes a path to a pattern that did not eat it. A BUILT-IN contributes ONE
+    # verbatim pathspec (no `/**` sibling — see roborev_format_exclude_args), so asking
+    # for a sibling here would blame `**/Cargo.lock` for a `Cargo.lock/` subtree the
+    # real exclusion never touched.
+    local -a _blame_spec=(":(glob)$body")
+    if [ "${_rx_owner_single[$i]}" -ne 1 ]; then _blame_spec+=(":(glob)$body/**"); fi
     set +e
     git -C "$REPO" diff --name-only -z --no-renames "${BASE}...HEAD" \
-      -- ":(glob)$body" ":(glob)$body/**" >"$surv_file.blame" 2>/dev/null
+      -- "${_blame_spec[@]}" >"$surv_file.blame" 2>/dev/null
     set -e
     while IFS= read -r -d '' matched; do
       [ -n "$matched" ] || continue
@@ -1527,7 +1597,11 @@ roborev_check_census_exclusion() {
   for ((i = 0; i < ${#_rx_owner_body[@]}; i++)); do
     [ "${_rx_owner_src[$i]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
     DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}")
-    DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}/**")
+    # The sibling is printed only when the pattern actually HAS one. Driven off the same
+    # `_rx_owner_single` flag the pathspecs and the blame are, so this listing cannot
+    # advertise an exclusion git was never asked for.
+    [ "${_rx_owner_single[$i]}" -eq 1 ] ||
+      DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}/**")
   done
   DETAILS+=("ERROR: census-exclusion: PLUS $n_builtin roborev v0.61.2 built-in exclude(s) — the hard-coded lockfile/cache deny-list (${ROBOREV_BUILTIN_EXCLUDES[*]}) — which are always applied and are not configurable.")
   DETAILS+=("ERROR: census-exclusion: no review was enqueued — a swallowing exclusion set is knowable BEFORE the enqueue, so it costs no review round.")
