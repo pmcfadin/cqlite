@@ -121,6 +121,15 @@
 #                     `roborev_diff_header_has_path`, which reads EVERY shape git emits:
 #                     unquoted, space-bearing, C-quoted, and the MIXED-quoting shape a
 #                     rename produces (`diff --git a/<ascii> "b/<quoted>"`).
+#                     A header LINE carrying a space is IRREDUCIBLY AMBIGUOUS, so ambiguity
+#                     is resolved from EVIDENCE and never positionally (#3229): first from
+#                     the header's own `rename from`/`rename to` lines (git always writes
+#                     them for a rename/copy, one exact path per line), else by requiring
+#                     the a/ and b/ sides to be EQUAL, which is what a non-rename header
+#                     always is. Positional enumeration is the LAST resort and only for a
+#                     header with no equal split and no rename lines. Because the matcher
+#                     needs the lines FOLLOWING a header, header collection lives with it
+#                     (`roborev_collect_prompt_headers`), not in the consumer.
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)

@@ -291,6 +291,10 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   rename-space    a rename where BOTH names carry a space (`docs/storage engine/old
 #                   probe.sh` → `new probe.sh`): the header `diff --git a/<sp> b/<sp>`
 #                   is unsplittable by any `[^ ]+` regex AND is not a same-path header
+#   rename-ambiguous  a rename `p` → `x b/p b/x`, whose header admits an EQUAL split that
+#                   is NOT the true one, so only `rename from`/`rename to` can resolve it
+#   ambiguous-space-pair  a file named `foo b/x` beside one named `foo` — the header
+#                   `a/foo b/x b/foo b/x` has `a/foo b/` as a PREFIX (#3229 blocker 1)
 #   rename-mixed    a rename where only ONE side needs quoting (probe.sh → `é probe.sh`),
 #                   producing the MIXED header `diff --git a/… "b/…"`. Mixed headers occur
 #                   ONLY on renames, so they were unreachable by a both-sides-quoted parse
@@ -345,6 +349,15 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/probe.sh"
       git_q "$work" add docs
       git_q "$work" commit -q -m 'base: an ASCII harness script'
+      ;;
+    rename-ambiguous)
+      # The OTHER direction of the header ambiguity (#3229 blocker 1): a rename whose
+      # header `diff --git a/p b/x b/p b/x` admits an EQUAL split (`p b/x` == `p b/x`)
+      # that is NOT the true one. Equality alone would therefore report BOTH real sides
+      # ABSENT; only the `rename from`/`rename to` lines can resolve it.
+      printf 'plain\n' >"$work/p"
+      git_q "$work" add p
+      git_q "$work" commit -q -m 'base: a one-character path'
       ;;
   esac
   git_q "$work" push -q "$remote" main
@@ -522,6 +535,22 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
     rename-mixed)
       git_q "$work" mv "docs/reports/x-artifacts/probe.sh" "docs/reports/x-artifacts/é probe.sh"
       git_q "$work" commit -q -m 'rename an ASCII script to a non-ASCII name'
+      ;;
+    rename-ambiguous)
+      mkdir -p "$work/x b/p b"
+      git_q "$work" mv p "x b/p b/x"
+      git_q "$work" commit -q -m 'rename p into a space-bearing path that makes the header ambiguous'
+      ;;
+    ambiguous-space-pair)
+      # THE REPORTED FALSE PASS (#3229 blocker 1). A tracked file named `foo b/x` emits the
+      # header `diff --git a/foo b/x b/foo b/x`, of which `a/foo b/` is a PREFIX — so the
+      # old prefix test `case $rest in "a/$want b/"*)` made the UNRELATED census path `foo`
+      # read as PRESENT. Both files are extensionless at the repo root, so both are CODE.
+      mkdir -p "$work/foo b"
+      printf 'plain\n' >"$work/foo"
+      printf 'plain\n' >"$work/foo b/x"
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'a file named "foo b/x" beside one named "foo"'
       ;;
     newline-name)
       # A path with a LITERAL NEWLINE, beside a path equal to its FIRST LINE. That pairing
@@ -1367,6 +1396,56 @@ STUB_PROMPT='Review this diff:\ndiff --git a/a b/a\ndiff --git "a/a\\nb.rs" "b/a
 run_wrapper "$work"
 assert_verdict 'case (cx6j)' PASS 0
 assert_says 'case (cx6j) the quoted newline header counts as present' '^prompt-content: PASS \(2/2 code census paths present\)$'
+
+printf '== case (cx6l): a space-bearing header does not prove an UNRELATED census path ==\n'
+reset_stub
+# #3229 round 5, BLOCKER 1 — a FALSE PASS in prompt-content:, the merge gate itself.
+# REPRODUCED: `roborev_diff_header_has_path 'diff --git a/foo b/x b/foo b/x' foo` returned
+# PRESENT, because the old membership test `case $rest in "a/$want b/"*)` is a PREFIX test
+# and `a/foo b/` prefixes that header. So a repo tracking a file named `foo b/x` made the
+# UNRELATED path `foo` read as delivered to the reviewer — a false PASS in the exact
+# mechanism that certifies "the reviewer received the code". The prompt below carries ONLY
+# the `foo b/x` header, so `foo` MUST be reported absent.
+work=$(make_fixture case_cx6l ambiguous-space-pair)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/foo b/x b/foo b/x'
+run_wrapper "$work"
+assert_verdict 'case (cx6l)' FAIL 1
+assert_says 'case (cx6l) both files are surviving CODE census paths' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_says 'case (cx6l) the unrelated path foo is reported ABSENT, not implied by a prefix' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_lacks 'case (cx6l) never reports a full-coverage PASS on one header' '^prompt-content: PASS'
+
+printf '== case (cx6m): an ambiguous RENAME header is resolved by its rename from/to lines ==\n'
+reset_stub
+# The mirror of (cx6l), and the reason the fix is not "prefer the equal split, full stop".
+# The header `diff --git a/p b/x b/p b/x` admits an EQUAL split (`p b/x` == `p b/x`) that is
+# NOT the true one, so equality alone reports BOTH real sides ABSENT (pinned as (cx6n)).
+# git never leaves a rename ambiguous: it writes `rename from` / `rename to`, one path per
+# line, and those lines are the authority the matcher resolves against.
+work=$(make_fixture case_cx6m rename-ambiguous)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/p b/x b/p b/x\nsimilarity index 100%\nrename from p\nrename to x b/p b/x\nindex e69de29..e69de29 100644'
+run_wrapper "$work"
+assert_verdict 'case (cx6m)' PASS 0
+assert_says 'case (cx6m) both rename sides survive the exclusion set' '^census-exclusion: PASS \(2/2 code census paths survive'
+assert_says 'case (cx6m) the rename from/to lines cover both census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6m) no false FAIL on an ambiguous rename header' '^prompt-content: FAIL'
+
+printf '== case (cx6n): the SAME header WITHOUT rename lines cannot prove either side ==\n'
+reset_stub
+# So (cx6m) cannot be satisfied by anything other than the rename lines: strip them from the
+# very same prompt and the header admits an equal split that matches NEITHER census path, so
+# both must be reported absent. This is also the fail-closed direction of the (cx6l) fix —
+# an ambiguous non-rename reading is never allowed to stand in for a real delivery.
+work=$(make_fixture case_cx6n rename-ambiguous)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/p b/x b/p b/x\nindex e69de29..e69de29 100644'
+run_wrapper "$work"
+assert_verdict 'case (cx6n)' FAIL 1
+assert_says 'case (cx6n) without the rename lines neither side counts as present' '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 
 printf '== case (cx6p): a filename cannot FORGE a summary key or the verdict ==\n'
 reset_stub
@@ -3095,6 +3174,44 @@ if grep -qE '^ *if roborev_diff_header_has_path ' "$CHECKS_FILE"; then
   ok 'structural: prompt-content decides membership through the canonical matcher, per header'
 else
   bad 'structural: prompt-content does not call roborev_diff_header_has_path — it has its own matcher again'
+fi
+# (5) HEADER COLLECTION lives with the matcher too (#3229 round 5, blocker 1). Resolving the
+#     header ambiguity needs the `rename from`/`rename to` lines that FOLLOW the header, so
+#     "which lines belong to a header" is header-shape knowledge — and this file must not
+#     grow a second, subtly different idea of the extended-header run. It therefore does no
+#     `diff --git` scanning of its own at all. Only a SCAN counts — the key's ERROR prose
+#     legitimately says the words "diff --git" when it explains what was looked for.
+if grep -nE '(grep|awk|sed|case)[^#]*diff --git' "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+  bad 'structural: roborev-review-checks.sh EXECUTES its own diff --git scan — header-shape knowledge must stay with the matcher in the oracles file'
+else
+  ok 'structural: roborev-review-checks.sh does no diff --git scanning of its own'
+fi
+_coll_defs=$(grep -cE '^roborev_collect_prompt_headers\(\) \{' "$ORACLES" || true)
+if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_prompt_headers "\$PROMPT_FILE"' "$CHECKS_FILE"; then
+  ok 'structural: the prompt headers (and their rename from/to lines) are collected by the oracles file'
+else
+  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not use it"
+fi
+# The matcher must resolve ambiguity from git's rename/copy lines, not positionally. Asserted
+# against the matcher body: a future edit that drops the rename-line branch and goes back to
+# a bare positional test is exactly blocker 1 reintroduced.
+if [ -n "$_matcher_start" ] && [ -n "${_matcher_end:-}" ]; then
+  _m_body=$(sed -n "${_matcher_start},${_matcher_end}p" "$ORACLES")
+  if printf '%s\n' "$_m_body" | grep -qE '\[ -n "\$from_tok" \] && \[ -n "\$to_tok" \]'; then
+    ok 'structural: the matcher resolves a rename/copy header from its from/to path tokens first'
+  else
+    bad 'structural: the matcher no longer resolves from the rename/copy from/to tokens — ambiguity would be guessed positionally again (#3229 blocker 1)'
+  fi
+  if printf '%s\n' "$_m_body" | grep -qE '"a/\$want b/"\*'; then
+    bad 'structural: the matcher is back to the PREFIX test `case $rest in "a/$want b/"*` — a tracked file named `foo b/x` would make the unrelated path `foo` read PRESENT (#3229 blocker 1)'
+  else
+    ok 'structural: the retired `"a/$want b/"*` prefix test is gone from the matcher'
+  fi
+  if printf '%s\n' "$_m_body" | grep -qE 'eq_seen'; then
+    ok 'structural: an ambiguous non-rename header is decided by the EQUAL split, not by position'
+  else
+    bad 'structural: the matcher has no equal-split resolution for an ambiguous header'
+  fi
 fi
 # The census must classify the RAW path. Asserted by the absence of any normalisation call
 # in the census loop AND by the `-z` read above: a quoted spelling reaching the extension

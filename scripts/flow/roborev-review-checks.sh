@@ -124,14 +124,13 @@ roborev_check_prompt_content() {
     # shapes; the guard suite asserts that structurally. Census paths arrive RAW from the
     # census's `--numstat -z`, so there is nothing to normalise on this side either.
     #
-    # Headers are read ONCE into an array: a `diff --git` header is always a single line
-    # (git quotes a newline-bearing path in it), so a line-oriented read is sound HERE
-    # even though it is not sound for git plumbing output.
-    prompt_headers=()
-    while IFS= read -r prompt_hdr; do
-      [ -n "$prompt_hdr" ] || continue
-      prompt_headers+=("$prompt_hdr")
-    done < <({ grep -a '^diff --git ' "$PROMPT_FILE" 2>/dev/null || true; })
+    # The headers are collected by the oracles file too (#3229 round 5, blocker 1), because
+    # a `diff --git` header LINE is irreducibly ambiguous once a path may contain a space
+    # and the matcher resolves that ambiguity from the header's OWN `rename from` /
+    # `rename to` lines. Which lines those are, and how far the extended-header run
+    # extends, is header-shape knowledge — so it lives with the matcher, not here, and this
+    # file just carries the three parallel arrays through.
+    roborev_collect_prompt_headers "$PROMPT_FILE"
     # SUBTRACT the paths `census-exclusion:` determined a ROBOREV BUILT-IN drops. Their
     # absence from the prompt is not a finding: it is the deterministic consequence of a
     # deny-list compiled into the binary, already reported LOUDLY (and non-fatally) under
@@ -156,8 +155,9 @@ roborev_check_prompt_content() {
     missing_paths=()
     for census_path in ${checked_paths[@]+"${checked_paths[@]}"}; do
       found=0
-      for prompt_hdr in ${prompt_headers[@]+"${prompt_headers[@]}"}; do
-        if roborev_diff_header_has_path "$prompt_hdr" "$census_path"; then
+      for ((hdr_i = 0; hdr_i < ${#_rx_hdrs[@]}; hdr_i++)); do
+        if roborev_diff_header_has_path "${_rx_hdrs[$hdr_i]}" "$census_path" \
+          "${_rx_hdr_from[$hdr_i]}" "${_rx_hdr_to[$hdr_i]}"; then
           found=1
           break
         fi

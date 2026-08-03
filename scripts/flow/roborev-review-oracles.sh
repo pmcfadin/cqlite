@@ -549,8 +549,59 @@ _rx_take_quoted_token() {
   return 1
 }
 
-# roborev_diff_header_has_path <diff-git-header-line> <RAW census path>: true when the
-# header names that path on EITHER side.
+# roborev_collect_prompt_headers <prompt-file>: read the prompt's `diff --git` headers
+# TOGETHER WITH the `rename from` / `rename to` (and `copy from` / `copy to`) lines that
+# DISAMBIGUATE them, into three parallel arrays `_rx_hdrs` / `_rx_hdr_from` / `_rx_hdr_to`.
+#
+# WHY THE FOLLOWING LINES ARE PART OF THE INPUT (#3229 round 5, blocker 1). A `diff --git`
+# header alone is IRREDUCIBLY AMBIGUOUS once a path may contain a space: `a/foo b/x b/foo b/x`
+# is both the non-rename of a file named `foo b/x` and a rename of `foo` to `x b/foo b/x`,
+# and no amount of care applied to the header LINE can tell them apart. Git, however, does
+# not leave renames ambiguous ELSEWHERE: for a rename or copy it always writes
+# `rename from <path>` / `rename to <path>` immediately after the header — ONE path per
+# line, C-quoted when needed, so each is exactly decidable. Those lines are the authority
+# the matcher resolves against; see `roborev_diff_header_has_path`.
+#
+# The extended-header run is BOUNDED: only the lines git emits between `diff --git` and the
+# `index`/`---`/`@@` body count, so a `rename from` sitting in the reviewer's PROSE (or in a
+# diff BODY line, which always begins with a space/`+`/`-`/`@`/`\`) is never attributed to a
+# header. `awk`, not a bash line loop: a prompt is megabytes.
+#
+# Reading the headers LINE-ORIENTED is sound HERE, and only here: git quotes a
+# newline-bearing path inside a `diff --git` header and inside a `rename from`/`rename to`
+# line, so each is genuinely one line. Git PLUMBING output gets `-z` instead (see the
+# census).
+roborev_collect_prompt_headers() {
+  local f="$1" _h _f _t
+  _rx_hdrs=()
+  _rx_hdr_from=()
+  _rx_hdr_to=()
+  [ -f "$f" ] || return 0
+  while IFS= read -r _h && IFS= read -r _f && IFS= read -r _t; do
+    _rx_hdrs+=("$_h")
+    _rx_hdr_from+=("$_f")
+    _rx_hdr_to+=("$_t")
+  done < <(LC_ALL=C awk '
+      function flush() { if (h != "") { print h; print f; print t } }
+      /^diff --git / { flush(); h = $0; f = ""; t = ""; ext = 1; next }
+      ext && /^rename from / { f = substr($0, 13); next }
+      ext && /^rename to /   { t = substr($0, 11); next }
+      ext && /^copy from /   { f = substr($0, 11); next }
+      ext && /^copy to /     { t = substr($0, 9);  next }
+      ext && /^(similarity index |dissimilarity index |old mode |new mode |new file mode |deleted file mode |index )/ { next }
+      { ext = 0 }
+      END { flush() }
+    ' "$f" 2>/dev/null)
+  return 0
+}
+
+# roborev_diff_header_has_path <diff-git-header-line> <RAW census path> [<from-path-token>]
+#   [<to-path-token>]: true when the header names that path on EITHER side.
+#
+# The two optional trailing arguments are the header's OWN `rename from`/`rename to`
+# (or `copy from`/`copy to`) path tokens, exactly as they appear in the prompt (still
+# C-quoted if git quoted them, and WITHOUT any `a/`/`b/` prefix — git does not write one on
+# those lines). `roborev_collect_prompt_headers` supplies them.
 #
 # THE ONLY WAY a consumer may ask "is this census path in the prompt?" (#3229 round 4,
 # blockers F2 + F3). It is defined HERE, beside the boundary it belongs to, because the
@@ -569,18 +620,64 @@ _rx_take_quoted_token() {
 #     ALTERNATIVES, so `a` present "proved" `a<LF>b.rs` present — a false PASS. Membership
 #     is decided here, in bash, per header, with no delimiter anywhere.
 #
-# THE SHAPES, and why each is decidable:
+# RESOLUTION ORDER — ambiguity is resolved from EVIDENCE, never positionally (#3229
+# round 5, blocker 1):
+#   0. the `rename from` / `rename to` lines, when the prompt carried them. AUTHORITATIVE
+#      and exact: one path per line, C-quoted when needed. The header is not consulted at
+#      all, because those lines ARE the header's two paths.
 #   1. `diff --git "a/<q>" "b/<q>"`  — both quoted: both sides parsed exactly.
 #   2. `diff --git "a/<q>" b/<raw>`  — a-side quoted, b-side literal to end of line.
 #   3. `diff --git a/<raw> "b/<q>"`  — an UNQUOTED side never contains a `"` (git would
 #      have quoted it), so the FIRST `"` begins the b-side token.
-#   4. `diff --git a/<raw> b/<raw>`  — the ambiguous case. Not split at all: the WANTED
-#      path is tested in each position it could occupy, with `$want` quoted inside the
-#      pattern so a path containing `*`/`?`/`[` is matched literally.
+#   4. `diff --git a/<raw> b/<raw>`  — no side is parseable as a quoted token, and NO
+#      rename/copy lines were supplied. EVERY valid split of the line into `a/<A> b/<B>`
+#      is enumerated (candidates only; `$want` is byte-compared, never used as a pattern,
+#      so a path containing `*`/`?`/`[` is matched literally), and then:
+#        4a. if SOME split has A == B, the header is a NON-RENAME — git ALWAYS accompanies
+#            a rename/copy with `rename from`/`rename to`, and none were supplied — so
+#            ONLY the equal reading is accepted. This is what closes the FALSE PASS below.
+#        4b. if NO split has A == B, the line can only be a rename/copy whose
+#            `rename from`/`rename to` lines did NOT reach us, so any valid split counts.
+#            See THE DECLARED RESIDUAL.
+#
+# THE FALSE PASS 4a CLOSES, measured: `roborev_diff_header_has_path 'diff --git a/foo b/x
+# b/foo b/x' foo` used to return PRESENT. The old test `case $rest in "a/$want b/"*)` is a
+# PREFIX test, and `a/foo b/` is a prefix of that header — so a repo tracking a file named
+# `foo b/x` made the UNRELATED census path `foo` read as delivered. That is a false PASS in
+# `prompt-content:`, the strongest anti-vacuity key the wrapper has and the exact mechanism
+# that certifies "the reviewer received the code". The comment that used to sit at shape 3's
+# fall-through asserted this was impossible ("can only ever match a header that LITERALLY
+# carries `a/<want> b/` … widens nothing unsound"). It was WRONG: `a/<want> b/` occurs as a
+# PREFIX of a DIFFERENT path's header. The reasoning is corrected here rather than deleted,
+# because a false safety claim in a comment is worse than no comment.
+#
+# WHY NOT FAIL CLOSED ON AN AMBIGUOUS HEADER. Because with renames ON the header ambiguity
+# is IRREDUCIBLE — `a/foo b/(bar b/foo b/bar)` is a legal reading — so refusing to decide
+# would red EVERY space-bearing header and reintroduce the false-FAIL blockers of rounds 3
+# and 4, pinned by cases (cx6c), (cx6g) and (cx6h). A guard that fires on correct input is
+# the guard that gets disabled.
+#
+# THE DECLARED RESIDUAL, bounded and stated rather than implied: branch 4b is PERMISSIVE.
+# When no split is equal and no rename/copy lines were supplied, a `$want` that happens to
+# be one side of SOME valid split reads as PRESENT even if the producer meant a different
+# split. It is reachable only for a header that (i) carries a space, (ii) has two DIFFERENT
+# paths, i.e. is a rename/copy, and (iii) arrived WITHOUT the rename/copy lines git always
+# writes — so for git's own output it is unreachable, and it is the price of keeping
+# (cx6g)/(cx6h) green. Anything git emits resolves at step 0 or by equality.
 roborev_diff_header_has_path() {
-  local hdr="$1" want="$2" rest a_raw b_raw
+  local hdr="$1" want="$2" from_tok="${3:-}" to_tok="${4:-}" rest a_raw b_raw
   case "$hdr" in 'diff --git '*) ;; *) return 1 ;; esac
   rest="${hdr#diff --git }"
+
+  # step 0: git's own disambiguation. Both lines must be present — one alone does not
+  # identify the pair, so a truncated run falls through to the header shapes instead.
+  if [ -n "$from_tok" ] && [ -n "$to_tok" ]; then
+    roborev_unquote_path "$from_tok"
+    [ "$_rx_unquoted" != "$want" ] || return 0
+    roborev_unquote_path "$to_tok"
+    [ "$_rx_unquoted" != "$want" ] || return 0
+    return 1
+  fi
 
   if [ "${rest:0:1}" = '"' ]; then
     _rx_take_quoted_token "$rest" || return 1
@@ -609,22 +706,40 @@ roborev_diff_header_has_path() {
       roborev_unquote_path "\"${rest#*\"}"
       b_raw="${_rx_unquoted#b/}"
       [ "$b_raw" = "$want" ] && return 0
-      # NO early `return 1`: fall through to the positional tests. A `"` in the line does
-      # not PROVE a quoted b-side — a producer that emits a quote-bearing path UNQUOTED
-      # (git quotes it; not every diff we are handed is git's own) yields a header whose
-      # only reading is positional. Falling through can only ever match a header that
-      # LITERALLY carries `a/<want> b/` or ` b/<want>`, so it widens nothing unsound.
+      # NO early `return 1`: fall through to shape 4. A `"` in the line does not PROVE a
+      # quoted b-side — a producer that emits a quote-bearing path UNQUOTED (git quotes it;
+      # not every diff we are handed is git's own) yields a header whose only reading is by
+      # split enumeration. Case (cx6) is exactly that shape, and it resolves at 4a by
+      # equality.
       ;;
   esac
 
-  # shape 4: neither side parseable as quoted. The reading is ambiguous, so instead of
-  # splitting, test each position `$want` could occupy — `$want` quoted inside the pattern,
-  # so a path containing `*`, `?` or `[` matches literally.
-  case "$rest" in
-    "a/$want b/$want") return 0 ;;
-    "a/$want b/"*) return 0 ;;
-    "a/"*" b/$want") return 0 ;;
-  esac
+  # shape 4: no side is parseable as a quoted token and no rename/copy lines were supplied.
+  # Enumerate EVERY valid split of the line into `a/<A> b/<B>` and prefer the EQUAL reading
+  # (4a) over any unequal one (4b) — see the RESOLUTION ORDER above for why that is the
+  # sound direction and where the residual is.
+  case "$rest" in 'a/'*) ;; *) return 1 ;; esac
+  local body="${rest#a/}" n i a_cand b_cand
+  local eq_seen=0 eq_match=0 any_match=0
+  n=${#body}
+  for ((i = 0; i + 3 <= n; i++)); do
+    [ "${body:$i:3}" = ' b/' ] || continue
+    a_cand="${body:0:$i}"
+    b_cand="${body:$((i + 3))}"
+    if [ "$a_cand" = "$b_cand" ]; then
+      eq_seen=1
+      [ "$a_cand" != "$want" ] || eq_match=1
+    elif [ "$a_cand" = "$want" ] || [ "$b_cand" = "$want" ]; then
+      any_match=1
+    fi
+  done
+  if [ "$eq_seen" -eq 1 ]; then
+    # 4a: a non-rename. Only the equal reading is admissible.
+    [ "$eq_match" -eq 1 ] && return 0
+    return 1
+  fi
+  # 4b: a rename/copy whose `rename from`/`rename to` lines did not reach us.
+  [ "$any_match" -eq 1 ] && return 0
   return 1
 }
 
