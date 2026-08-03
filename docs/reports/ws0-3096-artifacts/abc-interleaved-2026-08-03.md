@@ -30,7 +30,7 @@ not make AC1 satisfied, and nothing here is framed as if it did.
 | reps | **1 rep at a time**, **10 rounds per arm**, 30 measured runs |
 | rotation | arm order **rotated per round**, period 3: `BASE/L4/L46` → `L4/L46/BASE` → `L46/BASE/L4` → … so no arm holds a fixed position |
 | continuity | one continuous session, 06:53–07:49 UTC (`ab3` = rounds 1–5, `ab3b` = rounds 6–10); **nothing else on the box** |
-| drift control | the bare-scan arm (`execute_streaming`) in **every** run — byte-identical across all three arms, because levers 4 and 6 touch `cqlite-flight` only |
+| drift control | the bare-scan arm (`execute_streaming`) in **every** run — see the precision note below |
 | measured surface | Flight `do_get`, **bypass** arm, over a real loopback gRPC transport |
 | corpus | `/data/ws0-3096` — 4,000,000 rows / 40,000 partitions, `Data.db` sha256 `4a903f6f…ae269`, 693.69 B/row, uncompressed |
 | pinning | server `taskset -c 2,10` (**verified** siblings of one physical core), client `4,12,5,13,6,14,7,15` |
@@ -44,6 +44,16 @@ copies no longer exist, so they are **not restated here rather than
 reconstructed**. That is a rig gap, not a footnote: `results.json` should record
 the measured binary's digest. Filed as inherited work with the rest of the rig
 (#3248 §"Inherited rig").
+
+**The drift control, stated precisely — it is code-identical, not literally
+byte-identical.** Neither lever touches the scan path: lever 4 is
+`cqlite-flight` only, and lever 6's `cqlite-core` half adds a schema-reuse entry
+point in `export/arrow_convert.rs` that the bare scan never calls. So the code
+the control **executes** is the same in all three arms. Strictly, though, the
+`ws0-scan-bench` binary links `cqlite-core`, so the `L46` arm's copy is not
+*literally* byte-identical to `BASE`/`L4`'s. The empirical check that no arm
+effect leaks into the control is the per-arm control medians, which agree to
+within **0.25%**: `BASE` 332,741 / `L4` 333,557 / `L46` 332,847 rows/s.
 
 **The corpus is a PERFORMANCE FIXTURE ONLY** (CQLite-written + CQLite-read,
 therefore invariant to a uniform framing error — #3042). It is never a
@@ -152,7 +162,7 @@ Flight `do_get` (bypass), n = 10 per arm:
 | `+L4` | **218,288** | 10.0% | **23,847** | 7.1% | 1.501 |
 | `+L4+L6` | **217,791** | 5.6% | **23,810** | 4.3% | 1.504 |
 
-Bare-scan **drift control** — byte-identical in all three arms, n = **30**:
+Bare-scan **drift control** — code-identical in all three arms (§1), n = **30**:
 
 | | median | min | max | spread |
 |---|--:|--:|--:|--:|

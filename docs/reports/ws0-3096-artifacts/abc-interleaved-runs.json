@@ -26,7 +26,7 @@
    "ab3b": "rounds 6-10, 07:22-07:49 UTC",
    "continuity": "one continuous session, nothing else running on the box"
   },
-  "drift_control": "the bare-scan arm (execute_streaming) is byte-identical in all three arms - levers 4 and 6 touch cqlite-flight only - so its 30 readings are a within-session drift control, not a measurement of the change",
+  "drift_control": "the bare-scan arm (execute_streaming) is CODE-IDENTICAL in all three arms - neither lever touches the scan path (lever 4 is cqlite-flight only; lever 6's cqlite-core half adds a schema-reuse entry point in export/arrow_convert.rs that the bare scan never calls) - so its 30 readings are a within-session drift control, not a measurement of the change. NOT literally byte-identical: ws0-scan-bench links cqlite-core, so the L46 arm's copy differs in bytes. The empirical check is per_arm_bare_scan_control_median_rows_per_sec below, which agrees to within 0.25%.",
   "corpus": {
    "path": "/data/ws0-3096",
    "rows": 4000000,
@@ -1305,5 +1305,10 @@
   "#3231": "lever 1 (column-major build) routes there as an unpriced candidate",
   "#3232": "required corpus sha 22d9ae22...ce922c OR a geometry-matched regeneration; tools/ws0-corpus-gen IS that regeneration path, so this change retires that blocker",
   "#3234": "BTI (da) perf corpus - mirror this determinism contract (byte-identical across 3 runs, generated on the production writer); gen-perf-corpus-bti.sh should use tools/ws0-corpus-gen as its template rather than inventing a second contract"
+ },
+ "per_arm_bare_scan_control_median_rows_per_sec": {
+  "BASE": 332740.5995640332,
+  "L4": 333556.76263748726,
+  "L46": 332846.75054852787
  }
 }
