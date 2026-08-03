@@ -338,6 +338,181 @@ else
   fail "--verify-only with no corpus: expected a hard failure (rc=$rc, out: $out)"
 fi
 
+# ------------------------------------------- the cassandra.yaml BTI flip -------
+# The generator's most consequential upstream guard: a stock Cassandra 5.0 node
+# emits `nb` (BIG) with NO error when either setting misses, and the `sed`
+# addresses depend on the shipped file's exact comment markers and TWO-SPACE
+# indentation ("#  selected_format: big"). Driven through --yaml-flip-check, which
+# runs the PRODUCTION snippet -- the same text apply_bti_yaml runs in the container
+# -- against a copy of the committed cassandra:5.0.2 excerpt.
+YAML_FIXTURE="$REPO_ROOT/scripts/tests/fixtures/cassandra-5.0.2-cassandra.yaml.excerpt"
+if [ ! -f "$YAML_FIXTURE" ]; then
+  fail "missing the committed cassandra.yaml excerpt fixture: $YAML_FIXTURE"
+else
+  # Fixture-rot guard: the excerpt must still be in the SHIPPED (unflipped) form,
+  # or the positive case below would be proving nothing.
+  if grep -qx '#sstable:' "$YAML_FIXTURE" \
+     && grep -qx '#  selected_format: big' "$YAML_FIXTURE" \
+     && grep -qx 'storage_compatibility_mode: CASSANDRA_4' "$YAML_FIXTURE"; then
+    pass "the committed cassandra:5.0.2 excerpt is in the shipped (unflipped) form"
+  else
+    fail "the yaml excerpt fixture is no longer in the shipped form (the flip cases below would be vacuous)"
+  fi
+
+  y="$TMP/yaml-ok.yaml"; cp "$YAML_FIXTURE" "$y"
+  out=$(bash "$GEN" --yaml-flip-check "$y" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && grep -q "YAML-FLIP-OK" <<<"$out" \
+     && grep -qx 'storage_compatibility_mode: NONE' "$y" \
+     && grep -qx 'sstable:' "$y" && grep -qx '  selected_format: bti' "$y"; then
+    pass "the yaml flip sets BOTH mandatory settings on the shipped 5.0.2 file"
+  else
+    fail "yaml flip on the shipped file: expected both settings flipped (rc=$rc, out: $out)"
+  fi
+
+  # Negative: THREE-space indentation. The sed address no longer matches, so
+  # selected_format stays commented and the node would silently emit `nb`.
+  y="$TMP/yaml-indent.yaml"
+  sed 's|^#  selected_format: big|#   selected_format: big|' "$YAML_FIXTURE" >"$y"
+  out=$(bash "$GEN" --yaml-flip-check "$y" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "selected_format was NOT set to bti" <<<"$out"; then
+    pass "yaml flip HARD-FAILS when selected_format's indentation drifts"
+  else
+    fail "yaml indentation drift: expected a hard failure (rc=$rc, out: $out)"
+  fi
+
+  # Negative: the `#sstable:` block header is absent, so the child key would be
+  # orphaned even if it flipped.
+  y="$TMP/yaml-nosstable.yaml"
+  grep -vx '#sstable:' "$YAML_FIXTURE" >"$y"
+  out=$(bash "$GEN" --yaml-flip-check "$y" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "sstable: block was NOT uncommented" <<<"$out"; then
+    pass "yaml flip HARD-FAILS when the sstable: block header is missing"
+  else
+    fail "yaml missing sstable: block: expected a hard failure (rc=$rc, out: $out)"
+  fi
+
+  # Negative: the node is not on the shipped CASSANDRA_4 default, so the
+  # storage_compatibility_mode substitution finds nothing to replace.
+  y="$TMP/yaml-mode.yaml"
+  sed 's|^storage_compatibility_mode: CASSANDRA_4|storage_compatibility_mode: UPGRADING|' \
+    "$YAML_FIXTURE" >"$y"
+  out=$(bash "$GEN" --yaml-flip-check "$y" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "storage_compatibility_mode was NOT set to NONE" <<<"$out"; then
+    pass "yaml flip HARD-FAILS when storage_compatibility_mode is not the shipped default"
+  else
+    fail "yaml unexpected compatibility mode: expected a hard failure (rc=$rc, out: $out)"
+  fi
+
+  out=$(bash "$GEN" --yaml-flip-check "$TMP/no-such-yaml" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "no such cassandra.yaml" <<<"$out"; then
+    pass "yaml flip HARD-FAILS on a missing cassandra.yaml"
+  else
+    fail "yaml missing file: expected a hard failure (rc=$rc, out: $out)"
+  fi
+fi
+
+# ------------------------------------------------- prune scope (dry run only) --
+# prune_stale_table_dirs does `$SUDO rm -rf` on MULTI-GB paths, so each guard is
+# pinned: the symlink skip, the ^<table>-<32 hex>$ name filter, the
+# resolves-outside refusal, the `keep` exclusion, and "a dry run deletes nothing".
+# Mirrors the BIG sibling scripts/tests/test_gen_perf_corpus_3068.sh.
+PCORPUS="$TMP/prune/corpus"
+PKS="$PCORPUS/sstables/perf_bti"
+POUTSIDE="$TMP/prune/outside-the-corpus"
+mkdir -p "$PKS" "$POUTSIDE/precious"
+UA="8cc9d0708a2711f1a82281d620fbe729"
+UB="90c037f08a2711f1a82281d620fbe729"
+USYM="${UA//8/a}"
+mkdir -p "$PKS/wide_multiclustering-$UA" \
+         "$PKS/wide_multiclustering-$UB" \
+         "$PKS/wide_multiclustering-backup" \
+         "$PKS/wide_multiclustering-$UA/nested/wide_multiclustering-$UB" \
+         "$PKS/other_table-$UA"
+touch "$PKS/wide_multiclustering-$UA-notes.txt"
+ln -s "$POUTSIDE/precious" "$PKS/wide_multiclustering-$USYM"
+# WOULD-PRUNE prints the RESOLVED path, so compare against the resolved keyspace dir.
+PKS_REAL="$(cd "$PKS" && pwd -P)"
+
+prune_dry() { # prune_dry [env-prefixed args...] -> stdout+stderr of a dry run
+  bash "$GEN" --prune-dry-run --out "$PCORPUS" \
+    --keyspace perf_bti --table wide_multiclustering 2>&1
+}
+out=$(prune_dry); rc=$?
+would=$(grep '^WOULD-PRUNE ' <<<"$out" | sed 's/^WOULD-PRUNE //' | sort)
+expected=$(printf '%s\n' "$PKS_REAL/wide_multiclustering-$UA" \
+                         "$PKS_REAL/wide_multiclustering-$UB" | sort)
+if [ "$rc" -eq 0 ] && [ "$would" = "$expected" ]; then
+  pass "prune targets exactly the <table>-<32 hex> dirs"
+else
+  fail "prune candidate set wrong (rc=$rc)
+  got:
+$would
+  expected:
+$expected"
+fi
+if grep -q "skipping symlink (never followed)" <<<"$out"; then
+  pass "prune skips a symlinked corpus dir explicitly (never followed)"
+else
+  fail "prune did not report the symlink skip (out: $out)"
+fi
+if grep -q "skipping 'wide_multiclustering-backup' (not a <table>-<uuid> corpus dir)" <<<"$out"; then
+  pass "prune's name filter rejects a non-<uuid> suffix"
+else
+  fail "prune did not report the name-filter skip (out: $out)"
+fi
+for never in "$PKS_REAL/wide_multiclustering-backup" \
+             "$PKS_REAL/other_table-$UA" \
+             "$PKS_REAL/wide_multiclustering-$USYM" \
+             "$PKS_REAL/wide_multiclustering-$UA/nested/wide_multiclustering-$UB" \
+             "$PKS_REAL/wide_multiclustering-$UA-notes.txt" \
+             "$POUTSIDE/precious"; do
+  if grep -qF "WOULD-PRUNE $never" <<<"$out"; then
+    fail "prune would have removed '$never'"
+  else
+    pass "prune does not target '${never#"$TMP"/}'"
+  fi
+done
+missing=0
+for must_exist in "$PKS/wide_multiclustering-$UA" "$PKS/wide_multiclustering-$UB" \
+                  "$PKS/wide_multiclustering-backup" "$PKS/other_table-$UA" \
+                  "$PKS/wide_multiclustering-$UA-notes.txt" "$POUTSIDE/precious"; do
+  [ -e "$must_exist" ] || { fail "--prune-dry-run deleted $must_exist"; missing=1; }
+done
+[ "$missing" = 0 ] && pass "--prune-dry-run deletes nothing"
+
+# The `keep` exclusion: publish() passes the basename it is about to publish, and
+# that one dir must never be a candidate.
+out=$(PRUNE_KEEP="wide_multiclustering-$UA" prune_dry)
+if grep -qF "WOULD-PRUNE $PKS_REAL/wide_multiclustering-$UB" <<<"$out" \
+   && ! grep -qF "WOULD-PRUNE $PKS_REAL/wide_multiclustering-$UA" <<<"$out"; then
+  pass "prune excludes the dir being published (keep)"
+else
+  fail "prune ignored the keep exclusion (out: $out)"
+fi
+
+# A candidate that RESOLVES OUTSIDE the corpus keyspace dir (here: the keyspace dir
+# itself is a symlink) must abort the prune, not be deleted through.
+ECORPUS="$TMP/prune-escape/corpus"
+EOUTSIDE="$TMP/prune-escape/elsewhere"
+mkdir -p "$ECORPUS/sstables" "$EOUTSIDE/wide_multiclustering-$UA"
+ln -s "$EOUTSIDE" "$ECORPUS/sstables/perf_bti"
+out=$(bash "$GEN" --prune-dry-run --out "$ECORPUS" \
+        --keyspace perf_bti --table wide_multiclustering 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "resolves OUTSIDE the corpus keyspace dir" <<<"$out" \
+   && [ -d "$EOUTSIDE/wide_multiclustering-$UA" ]; then
+  pass "prune REFUSES a candidate that resolves outside the corpus keyspace dir"
+else
+  fail "prune escape case: expected a refusal (rc=$rc, out: $out)"
+fi
+
+out=$(bash "$GEN" --prune-dry-run --out "$TMP/prune-never-generated" \
+        --keyspace perf_bti --table wide_multiclustering 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q WOULD-PRUNE <<<"$out"; then
+  pass "no corpus yet: prune is a clean no-op"
+else
+  fail "prune on a non-existent corpus root: expected a no-op (rc=$rc, out: $out)"
+fi
+
 # ------------------------------------------------- row driver determinism -----
 if command -v python3 >/dev/null 2>&1; then
   gen_rows() { # gen_rows <out> <plan> <seed> <chunk>
