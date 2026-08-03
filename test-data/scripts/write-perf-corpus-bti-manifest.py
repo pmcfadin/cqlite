@@ -82,13 +82,20 @@ DESCRIPTOR_RE = re.compile(r"^da-\d+-bti-")
 # --------------------------------------------------------------------------
 # SCOPE OF THE AC3 FIGURE (issue #3234, owner-required, PART 3).
 #
-# The AC3 throughput number was taken through the GENERATION-MERGE STITCH, not the
-# BTI mmap/trie plane: a full scan of this corpus is not partition-key-constrained,
-# so it resolves to the fallback full scan and is served by
-# `generation_merge::stream_generations_for_read` across all 27 generations. The
-# per-generation BTI mmap/trie work is inside that, but what the wall clock measures
-# is the stitch. Recording it HERE (and in docs/development/dev-cookbook.md) so the
-# limitation is not discoverable only by reading the issue thread.
+# The AC3 throughput number was taken through the GENERATION-MERGE STITCH, which
+# EXCLUDES the BTI mmap/trie plane entirely: a full scan of this corpus is not
+# partition-key-constrained, so it resolves to the fallback full scan and is served by
+# `generation_merge::stream_generations_for_read` across all 27 generations -- and on
+# that route each generation is re-opened by its own compaction-style producer with
+# `use_mmap = false` / `DiskAccessMode::Buffered`
+# (storage/write_engine/merge/producer_iter.rs:364-388) and walked sequentially
+# through `Data.db` (`stream_all_partitions_for_compaction`). No MADV_RANDOM mapping
+# is created and no Partitions.db/Rows.db trie descent happens inside the measured
+# window. That is what `bti_perf_scan` prints at runtime, and this text must say the
+# same thing (roborev #3234 M3: it previously claimed the trie/mmap work happened
+# INSIDE the stitch and was merely un-isolated, which misattributes the figure).
+# Recorded HERE and in docs/development/dev-cookbook.md so the limitation is not
+# discoverable only by reading the issue thread.
 #
 # `recorded_figure` is a HISTORICAL measurement with its provenance attached, not a
 # counter this run observed — hence `applies_to_this_corpus`, computed by comparing
@@ -116,17 +123,27 @@ def measurement_scope(observed_rows: int, generations: int) -> dict:
     )
     return {
         "what_the_ac3_figure_measures": (
-            "the GENERATION-MERGE STITCH route. A full scan of this corpus is not "
-            "partition-key-constrained, so it takes the fallback full-scan access path and "
-            "is served by generation_merge::stream_generations_for_read across every "
-            "generation."
+            "the GENERATION-MERGE STITCH route, over BUFFERED I/O. A full scan of this "
+            "corpus is not partition-key-constrained, so it takes the fallback full-scan "
+            "access path and is served by generation_merge::stream_generations_for_read "
+            "across every generation: one sequential compaction-style producer per "
+            "generation, each of which RE-OPENS its SSTable with use_mmap=false / "
+            "DiskAccessMode::Buffered (storage/write_engine/merge/producer_iter.rs:"
+            "364-388) and walks Data.db via stream_all_partitions_for_compaction. So the "
+            "figure is Data.db decode + k-way merge throughput over buffered reads."
         ),
         "LIMITATION": (
-            "This corpus is PROFILEABLE and this figure measures the generation-merge "
-            "stitch; the BTI mmap/trie plane is UNMEASURED here. Per-generation BTI trie "
-            "descent and mmap behaviour happen inside the stitch but are not isolated by "
-            "this measurement, so it must not be quoted as a BTI index-plane number "
-            "(#3029 WS3 / #3030 WS4 are where that plane gets measured)."
+            "This route EXCLUDES the BTI mmap/trie plane, which is therefore ENTIRELY "
+            "UNMEASURED -- not merely un-isolated. Because every producer re-opens its "
+            "SSTable with buffered I/O and walks Data.db sequentially, no MADV_RANDOM "
+            "mapping is created and NO Partitions.db/Rows.db trie descent happens inside "
+            "the measured window (SSTable open, 0.033 s for 27 SSTables, is outside it). "
+            "Quoting this number as a BTI index-plane baseline would make every A/B "
+            "against it wrong by an unknown factor. The index plane needs its own "
+            "measurement, on the single-generation scan_stream route where a BTI reader "
+            "takes the trie branch (#3029 WS3 / #3030 WS4). cqlite-core/examples/"
+            "bti_perf_scan.rs prints the same statement at runtime beside the number "
+            "(access_path + storage_route)."
         ),
         "recorded_figure": AC3_RECORDED_FIGURE,
         "applies_to_this_corpus": applies,

@@ -134,6 +134,16 @@ a test with no Cassandra. `--smoke` overrides only the DEFAULTS: an explicit `--
   the chunk→SSTable split are a pure function of `(seed, chunk-index)` — not merely the row *count*.
   That is the deliberate divergence from the `#3068` BIG sibling, whose `cassandra-stress` profile
   cannot be reproduced from anything a manifest can record.
+  **Nothing in that guarantee depends on the standard library** (roborev #3234 M2): the PRNG
+  (MT19937 with CPython's `str` seeding), the weighted width draw and the bucket sampling are all
+  **vendored in the driver**, because `random.choices()`/`random.sample()` are *documented
+  implementation details* — `sample` even switches algorithm on a `setsize` heuristic — and `python3`
+  is unpinned, so a different interpreter could have changed every partition width while the manifests
+  kept advertising the old seed identity. What enforces it is `python3
+  test-data/scripts/gen-perf-corpus-bti-rows.py --self-check`: 4 configurations whose CSV sha256
+  digests are committed in the driver (one of them the committed small golden's exact row set, two on
+  the bit-assembly edges), run as a case of the generator self-test with mutation controls proving the
+  digests are live. If it ever fails, **find what changed — do not re-pin the digests.**
 - **The seed does NOT reproduce the `Data.db` bytes.** Cassandra stamps a wall-clock write timestamp
   on every row, serialized as an unsigned VInt *delta* from the `Statistics.db` `min_timestamp`
   baseline (Ch.5 §"temporal deltas"), so a later run shifts some deltas across a VInt width boundary
@@ -201,17 +211,25 @@ failed mid-stream, `8` no authoritative row count. Both asserts have a loud opt-
 Every one of those codes is observed firing by `scripts/tests/test_bti_perf_scan.sh` (38 hermetic
 cases against the committed 10 KiB `test_da` BTI fixture — no perf corpus, seconds to run), which the
 gate's `tooling-tests` component runs; its generator sibling
-`scripts/tests/test_gen_perf_corpus_bti.sh` runs 102. Both declare a case-count floor, so a suite that
+`scripts/tests/test_gen_perf_corpus_bti.sh` runs 118. Both declare a case-count floor, so a suite that
 stops running cases cannot report success — and both report the same count on either branch of their
 one conditional (`CQLITE_BTI_PERF_SCAN_BIN` reuses a prebuilt harness binary instead of building one,
-and records that as its case).
+and records that as its case). The generator suite additionally makes an **unrun** case impossible to
+report as a passing one (roborev #3234 M1, where two `check_reject` calls sat above the helper's
+definition and bash's "command not found" left `fails` at 0): every helper is defined above its first
+use, an unresolved name becomes a counted failure via a sentinel file (`command_not_found_handle`'s own
+`exit` cannot red the run — bash invokes it in a separate execution environment), and a static
+call-before-definition audit runs as its own case *with a negative control proving it detects the
+shape*. `set -euo pipefail` is deliberately NOT used: ~100 cases observe an EXPECTED non-zero exit via
+`out=$(...); rc=$?`, which `-e` would abort.
 
 **MEASURED on the 1.995 GiB / 13.2 M-row production corpus** (fleet worker box, warm page cache, one
 discarded warming pass, the multi-generation merge route above): **125.6 s** wall clock, 13,200,000
 rows, **105,073 rows/s** — 12.5× the ≥10 s window issue #3234 AC3 asks for, so the window survives
 even a 10× read-path speed-up. Open cost is negligible (27 SSTables discovered in 0.033 s). The two
 passes agreed to within 1.2 % (127.1 s vs 125.6 s), which is what confirms the measured pass was
-steady-state warm rather than fault-bound. The mmap/trie plane is **not** covered by this number.
+steady-state warm rather than fault-bound. The mmap/trie plane is **not** covered by this number — it
+is excluded from the route, not merely un-isolated within it (see the scope statement below).
 
 **Re-confirmed after the harness was hardened** (same box, same corpus, row-count assert ON and read
 from `/data/corpus-3234-bti-full/manifest-bti-3234.json`): **127.163 s**, 13,200,000 rows verified,
@@ -221,11 +239,17 @@ for an unrestricted `SELECT *` — and `storage_route: generation_merge::stream_
 The access path is the *query*-level signal; `storage_route` is the plane, and both are printed on
 every run.
 
-**SCOPE OF THAT FIGURE — a stated LIMITATION, recorded in the committed artifact.** *This corpus is
-profileable and this figure measures the generation-merge stitch; the BTI mmap/trie plane is
-unmeasured here.* Per-generation BTI trie descent and mmap behaviour happen **inside** the stitch but
-are not isolated by it, so the number must never be quoted as a BTI index-plane result (that plane is
-what #3029 WS3 / #3030 WS4 measure). The concrete values:
+**SCOPE OF THAT FIGURE — a stated LIMITATION, recorded in the committed artifact.** The measured
+`generation_merge` route **EXCLUDES the BTI mmap/trie plane, which is therefore ENTIRELY UNMEASURED**
+— not merely un-isolated. Every producer on that route **re-opens its SSTable with `use_mmap = false`
+/ `DiskAccessMode::Buffered`** (`storage/write_engine/merge/producer_iter.rs:364-388`) and walks
+`Data.db` sequentially (`stream_all_partitions_for_compaction`), so **no `MADV_RANDOM` mapping is
+created and no `Partitions.db`/`Rows.db` trie descent happens inside the measured window** (SSTable
+open — 0.033 s for 27 SSTables — is outside it). The figure is `Data.db` decode + k-way merge
+throughput over buffered reads. Quoting it as a BTI index-plane baseline **would make every A/B
+against it wrong by an unknown factor**; that plane needs its own measurement, on the
+single-generation `scan_stream` route where a BTI reader takes the trie branch (#3029 WS3 / #3030
+WS4). The concrete values:
 
 | field | value |
 |---|---|
@@ -235,8 +259,9 @@ what #3029 WS3 / #3030 WS4 measure). The concrete values:
 | wall clock / rows / throughput | 127.163 s / 13,200,000 rows / 103,804 rows/s |
 
 The same statement lives in the committed manifest under
-`read_path_measurement_scope` (`what_the_ac3_figure_measures`, `LIMITATION`, `recorded_figure`), so it
-travels with the artifact rather than being discoverable only from the issue thread. That block also
+`read_path_measurement_scope` (`what_the_ac3_figure_measures`, `LIMITATION`, `recorded_figure`) — and
+in what `bti_perf_scan` prints at runtime, so **all three say the same thing** — so it travels with
+the artifact rather than being discoverable only from the issue thread. That block also
 carries `applies_to_this_corpus`, computed by comparing the recorded rows/generations against the
 corpus the manifest describes — regenerate to a different shape and the recorded figure is marked
 historical instead of silently mis-describing the new corpus. `read_path_measurement_scope
