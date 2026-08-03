@@ -31,13 +31,17 @@
 #                              IN-PROGRESS generation marker (#3234 M2)
 #
 # ...and one guard that is NOT about the row count, because the row count cannot see
-# it: the INGEST SCOPE (roborev #3234 M1). A retained `<table>-<uuid>` generation
+# it: the INGEST SCOPE (roborev #3234 M1/F1). A retained `<table>-<uuid>` generation
 # beside the measured one holds the SAME rows, so reconciliation yields the same count
 # while the generation count -- which selects the scan route, and which every
 # throughput figure is attributed to -- doubles. The cases below therefore assert the
 # OBSERVED generation count and the reported scope, not just an exit code: a documented
 # `tables[].sstable_dir` confines ingestion to exactly that directory, and an
-# ambiguous root with nothing documenting it exits 3.
+# ambiguous root with nothing documenting it exits 3. "Exactly" is asserted against
+# siblings whose full names EXTEND the selected one (`<dir>-backup`, `<table>-backup`),
+# which is the case a SUBSTRING filter cannot express and which round 11 therefore still
+# ingested (#3234 F1) -- and against the `<table>-<32 hex>` shape the manifest validator
+# only CLAIMED to require (#3234 F2).
 #
 # HERMETIC, and CHEAP. No perf corpus (the AC3 corpus is ~2 GiB / 13.2 M rows and
 # takes ~2 minutes to scan), no docker, no network, no CQLITE_DATASETS_ROOT, no
@@ -70,7 +74,7 @@ TBL=multiclustering_table
 # `passes >= MIN_CASES`. The one BRANCH (build here vs reuse
 # CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the floor is
 # identical on both paths (roborev #3234 F4).
-MIN_CASES=67
+MIN_CASES=77
 
 fails=0
 passes=0
@@ -137,7 +141,7 @@ TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-# Build the three throwaway corpora the cases run against, in the layout the
+# Build the throwaway corpora the cases run against, in the layout the
 # harness expects (<corpus>/sstables/<ks>/<table>-<uuid>/ + <corpus>/schema.cql).
 mk_corpus() { # mk_corpus <name>  -> populated with the committed fixture
   local root="$TMP/$1"
@@ -161,6 +165,16 @@ cp -r "$FIXTURE_DIR" "$TWO/sstables/$KS/$TBL-$SECOND_UUID"
 # also picked up `multiclustering_table_small-<uuid>`.
 PREFIX="$(mk_corpus prefix)"
 cp -r "$FIXTURE_DIR" "$PREFIX/sstables/$KS/${TBL}_small-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+# ...and the case round 11's fix did NOT cover (roborev #3234 F1): siblings whose full
+# names EXTEND the SELECTED directory's name. `/test_da/<table>-<uuid>` is a SUBSTRING of
+# `/test_da/<table>-<uuid>-backup`, so scoping ingestion with a filter string ingested
+# both while `generations` was counted in the selected directory alone -- extra SSTables
+# scanned, the smaller count reported. Each of these holds the SAME 468 rows, which is
+# why only the OBSERVED generation count can see the difference.
+FIXTURE_BASE="$(basename "$FIXTURE_DIR")"
+EXTEND="$(mk_corpus extend)"
+cp -r "$FIXTURE_DIR" "$EXTEND/sstables/$KS/$FIXTURE_BASE-backup"
+cp -r "$FIXTURE_DIR" "$EXTEND/sstables/$KS/$TBL-backup"
 # An "empty" corpus: the table directory exists (so discovery is scoped to it) but
 # holds no SSTable -- the shape a mis-pathed or half-generated corpus has.
 EMPTY="$TMP/empty"
@@ -197,6 +211,26 @@ scoped_manifest "$TMP/m-scoped-escape.json" "sstables/$KS/../../../etc"
 scoped_manifest "$TMP/m-scoped-abs.json" "/etc"
 scoped_manifest "$TMP/m-scoped-othertable.json" "sstables/$KS/other_table-$SECOND_UUID"
 scoped_manifest "$TMP/m-scoped-otherks.json" "sstables/perf_bti/$TBL-$SECOND_UUID"
+# `sstable_dir` shapes that are NOT a Cassandra table directory (roborev #3234 F2). The
+# check used to accept any `<table>-*` while CLAIMING to require `<table>-<uuid>`, so
+# `<table>-backup` -- a backup copy, not a Cassandra directory -- redirected the
+# measurement and bypassed the ambiguity guard (which only ever sees table directories).
+ID32="$SECOND_UUID"                       # 32 hex: the accepted shape
+ID31="${ID32:0:31}"                       # one too short
+ID33="${ID32}a"                           # one too long
+ID32_NONHEX="${ID32:0:31}g"               # right length, one non-hex digit
+# The lengths are ASSERTED, not eyeballed: a mistyped literal would make one of the
+# negative cases below prove nothing (it would be rejected for the wrong reason).
+for v in "32:$ID32" "31:$ID31" "33:$ID33" "32:$ID32_NONHEX"; do
+  if [ "${#v}" -ne $(( ${v%%:*} + 3 )) ]; then
+    echo "FAIL - fixture bug: id '${v#*:}' is ${#v} chars in '$v', not ${v%%:*}"
+    exit 1
+  fi
+done
+scoped_manifest "$TMP/m-scoped-backup.json" "sstables/$KS/$TBL-backup"
+scoped_manifest "$TMP/m-scoped-hex31.json" "sstables/$KS/$TBL-$ID31"
+scoped_manifest "$TMP/m-scoped-hex33.json" "sstables/$KS/$TBL-$ID33"
+scoped_manifest "$TMP/m-scoped-nonhex.json" "sstables/$KS/$TBL-$ID32_NONHEX"
 # `tables` present but describing something else / not an array at all: the counts'
 # provenance is then unknown, which is a refusal, not a fall-through.
 printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[{"table":"other","sstable_dir":"%s"}]}\n' \
@@ -477,6 +511,67 @@ if run_case 0 "a sibling table whose name has this table's name as a PREFIX is i
     fail "expected generations: 1 beside a ${TBL}_small dir; got: $(grep '^generations' <<<"$out")"
   fi
 fi
+
+# --- EXACTNESS: siblings EXTENDING the selected directory's FULL name (#3234 F1) ------
+# The case a filter STRING cannot express. `/test_da/<table>-<uuid>` is a substring of
+# `/test_da/<table>-<uuid>-backup`, so round 11's "scoped" filter ingested both.
+#
+# Asserted on the OBSERVED COUNTS, not on a log line: `generations:` is now counted in the
+# directories ingestion ACTUALLY selected (main.rs::observed_generations), so a run that
+# swept in either sibling reports 2 or 3 here. Both siblings are byte copies of the
+# fixture, so `rows_scanned` stays 468 either way -- which is exactly why the row count
+# alone was never able to see this, and why both numbers are asserted together.
+extend_counts_ok() { # extend_counts_ok <label>
+  local label="$1"
+  if grep -q "^generations:      1" <<<"$out" \
+    && grep -q "^rows_scanned:     $FIXTURE_ROWS" <<<"$out"; then
+    pass "$label: exactly 1 generation and $FIXTURE_ROWS rows were OBSERVED"
+  else
+    fail "$label: expected generations: 1 + rows_scanned: $FIXTURE_ROWS; got: \
+$(grep -E '^(generations|rows_scanned|generations_observed_in):' <<<"$out" | tr '\n' ' ')"
+  fi
+}
+if run_case 0 "a documented scope beside '<dir>-backup' and '<table>-backup' measures only itself" \
+  --corpus "$EXTEND" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-scoped.json"; then
+  extend_counts_ok "documented scope"
+  # ...and the two siblings ARE discoverable (else the case above would prove nothing):
+  # discovery's unfiltered total is 3, so 2 SSTables were left outside the scope.
+  if grep -q "^generations_observed_in: 1 directory/ies" <<<"$out" \
+    && grep -q "^note: 2 sstable(s) under .* were NOT ingested" <<<"$out"; then
+    pass "the two name-extending siblings were DISCOVERED and left outside the scope"
+  else
+    fail "expected 1 selected dir + a 2-sstable outside-the-scope note (the siblings must be \
+discoverable, or this proves nothing); got: $(grep -E '^(note|generations_observed_in):' <<<"$out")"
+  fi
+fi
+# The same corpus with NOTHING documenting the scope: `<dir>-backup` and `<table>-backup`
+# must not even be CANDIDATES, so the root is unambiguous rather than a 3-way union.
+if run_case 0 "sole-dir resolution ignores '<dir>-backup' and '<table>-backup' entirely" \
+  --corpus "$EXTEND" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-good.json"; then
+  extend_counts_ok "sole-dir resolution"
+fi
+
+# --- `<table>-<32 hex>` EXACTLY, in the manifest path too (#3234 F2) -----------------
+# It claimed `<table>-<uuid>` and accepted any `<table>-*`. Each of these is a shape a
+# measurement must not be redirected into; the positive controls are m-scoped.json
+# (a real 32-hex id, exit 0, above) and m-scoped-absent.json (a 32-hex id that is simply
+# not there, exit 3 -- accepted by validation, refused for absence).
+if run_case 8 "an sstable_dir of '<table>-backup' is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-backup.json"; then
+  if grep -q "32 hex digits" <<<"$out"; then
+    pass "the refusal states the exact id shape it requires"
+  else
+    fail "expected the refusal to name the 32-hex requirement; got: $(tail -3 <<<"$out")"
+  fi
+fi
+run_case 8 "an sstable_dir whose id is 31 hex digits is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-hex31.json"
+run_case 8 "an sstable_dir whose id is 33 hex digits is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-hex33.json"
+run_case 8 "an sstable_dir whose 32-char id is not all hex is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-nonhex.json"
 # A documented directory that is not there means the manifest describes another corpus.
 if run_case 3 "a documented sstable_dir that does not exist refuses to measure" \
   "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-absent.json"; then
