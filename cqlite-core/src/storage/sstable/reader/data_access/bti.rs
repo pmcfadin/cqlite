@@ -6,6 +6,7 @@
 //! uncompressed Data.db offset via the trie and decodes only the chunk window
 //! that holds the target partition (issue #831 / #909 / #953 / #954).
 
+use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
 use super::model::{sort_by_token_order_with_meta, SCAN_FOR_KEY_CALLS};
 use crate::types::{CellWriteMetadata, ScanRow};
@@ -533,6 +534,12 @@ impl SSTableReader {
     /// (`scan`, `scan_with_cell_metadata`), `false` for the physical
     /// `get_all_entries` (integrity verification / data-manager) which must count
     /// every on-disk row.
+    ///
+    /// `now_secs` (issue #3058, threaded here by #3109): a caller-pinned read-time
+    /// TTL clock. `Some` pins the decoder's expiry instant to the ONE
+    /// reconciliation instant the caller already captured for the request instead
+    /// of the ambient sample the parser takes at construction; `None` keeps the
+    /// ambient sample. Only consulted when `read_shadowing`.
     pub(super) async fn bti_scan_with_metadata(
         &self,
         start_key: Option<&RowKey>,
@@ -540,6 +547,7 @@ impl SSTableReader {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
         read_shadowing: bool,
+        now_secs: Option<i64>,
     ) -> Result<
         Vec<(
             RowKey,
@@ -565,11 +573,30 @@ impl SSTableReader {
         // V5CompressedLegacy partition decode requires a schema (cells lack names).
         let effective_schema = self.get_table_schema(schema);
         let parser = self.build_v5_parser(read_shadowing);
+        // Issue #3058/#3109: honour the caller's pinned reconciliation clock, so a
+        // request that already sampled ONE `now` expires TTL cells at exactly that
+        // instant on this decoder too (mirrors `parse_block_entries_at_now` and the
+        // windowed driver).
+        let parser = match now_secs {
+            Some(now) => parser.with_now_secs(now),
+            None => parser,
+        };
         let parsed =
             parser.parse_block_with_cell_metadata(&whole, effective_schema.as_ref(), self)?;
 
         let mut results = Vec::new();
+        // Work-probe (issue #2398, threaded to BTI by #3109): "changed partition key
+        // = one more partition BODY decoded", counted BEFORE any range/tombstone
+        // filter exactly like the sibling walks (`sequential_scan`, the stitched
+        // walk, `run_scan_stream_batched`'s block loop). Without it the BTI decode
+        // would report ZERO scan work — including on the batched streaming surface,
+        // whose block loop counted before #3109 routed BTI readers here.
+        let mut prev_partition_key: Option<RowKey> = None;
         for (_entry_table_id, entry_key, entry_value, cell_meta) in parsed {
+            if prev_partition_key.as_ref() != Some(&entry_key) {
+                crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+                prev_partition_key = Some(entry_key.clone());
+            }
             if let Some(start) = start_key {
                 if &entry_key < start {
                     continue;
@@ -596,5 +623,78 @@ impl SSTableReader {
             results.len()
         );
         Ok(results)
+    }
+
+    /// The BTI (`da`) dispatch for BOTH public streaming surfaces — the per-row
+    /// `run_scan_stream` and the batched `run_scan_stream_batched` — in ONE place
+    /// (issue #3109).
+    ///
+    /// # Why a shared helper and not a third copy
+    ///
+    /// Issue #1577 established the rule: a BTI reader MUST decode through the SAME
+    /// authoritative trie-walk decoder [`Self::bti_scan_with_metadata`] that
+    /// [`SSTableReader::scan`] uses, NEVER the block-by-block `read_next_block` +
+    /// `parse_block_entries*` route. For `da` that route lands in the
+    /// `V5UncompressedOA` STATE MACHINE, which takes neither `read_shadowing` nor
+    /// `now_secs` and therefore silently DROPS both (see the "KNOWN FAIL-OPEN SEAM"
+    /// note in `parsing/block_entries.rs`, issue #3108) — so a `da` table read that
+    /// way is UNSHADOWED: partition/range tombstones and TTL expiry are not applied,
+    /// and on a schema-required fixture it fails outright ("Blob fallback not allowed
+    /// for V5_0Bti"). #1577 fixed the per-row surface; the batched surface was added
+    /// without the dispatch and reproduced the identical defect (#3109). Both now
+    /// call THIS function, gating on the SAME `bti_partitions_db.is_some()` condition
+    /// `scan` uses, so the three surfaces can never again disagree about which
+    /// readers are BTI or about the posture their rows are decoded under.
+    ///
+    /// The rows are exactly `scan`'s BTI rows: `bti_scan_with_metadata` has already
+    /// applied the key-range and tombstone filters and token-ordered them, so this
+    /// forwards them AS-IS and the stream stays prefix-authoritative with `scan`
+    /// (what D1's LIMIT pushdown relies on). BTI decode fully materializes the
+    /// (index-less) reconciled table before streaming — mirrored by
+    /// `scan_stream_materializes` returning `true` for BTI.
+    ///
+    /// `out` selects the emission shape only: one send per ROW for
+    /// [`WindowedOut::PerRow`], one send per `BATCH_EMIT_ROWS`-capped BATCH for
+    /// [`WindowedOut::Batched`] — the same cap and the same "flattening the batches
+    /// yields the per-row stream" contract the windowed driver honours, so the two
+    /// surfaces stay row-for-row identical for BTI by construction. A closed
+    /// consumer channel ends the scan cleanly (`Ok(())`), matching both callers.
+    pub(super) async fn stream_bti_scan(
+        &self,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        schema: Option<&crate::schema::TableSchema>,
+        now_secs: Option<i64>,
+        out: &WindowedOut,
+    ) -> Result<()> {
+        let entries = self
+            .bti_scan_with_metadata(start_key, end_key, None, schema, true, now_secs)
+            .await?;
+
+        match out {
+            WindowedOut::PerRow(tx) => {
+                for (entry_key, entry_value, _meta) in entries {
+                    if tx.send(Ok((entry_key, entry_value))).await.is_err() {
+                        return Ok(()); // consumer dropped
+                    }
+                }
+            }
+            WindowedOut::Batched(tx) => {
+                let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
+                for (entry_key, entry_value, _meta) in entries {
+                    batch.push((entry_key, entry_value));
+                    if batch.len() >= BATCH_EMIT_ROWS {
+                        if tx.send(Ok(std::mem::take(&mut batch))).await.is_err() {
+                            return Ok(()); // consumer dropped
+                        }
+                        batch.reserve(BATCH_EMIT_ROWS);
+                    }
+                }
+                if !batch.is_empty() && tx.send(Ok(batch)).await.is_err() {
+                    return Ok(()); // consumer dropped
+                }
+            }
+        }
+        Ok(())
     }
 }
