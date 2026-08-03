@@ -87,7 +87,17 @@ artifact extension inside one of the four, is re-admitted to review prompts — 
 remain a TOKEN-COST issue only, never a correctness one. With the directory scoping above, the stated
 asymmetry **"noise, never blindness" SHALL be true as written**: the leak direction costs tokens, and no
 pattern reaches outside a directory whose whole purpose is committed run output, so functional
-configuration under `docs/` cannot be hidden. Globally-scoped (slash-less) exclusion of artifact
+configuration under `docs/` cannot be hidden. That asymmetry SHALL be recorded as SCOPED, not timeless: it
+holds for **inert dumps** (`.txt`/`.log`/`.err`), where exclusion costs only noise, and it does NOT hold
+for **code-bearing formats** (`.json`/`.html`/`.svg`), for which exclusion is **blindness** because such a
+file can be functional configuration under any path. Exclusion of a code-bearing format SHALL therefore be
+scoped by DIRECTORY and SHALL NOT be scoped by extension alone. The record SHALL name the falsifying file:
+the claim was first written unqualified, and `docs/**/*.json` hid
+`docs/observability/grafana/dashboards/cqlite-overview.json`, which the agent gate's own
+`kit-dashboard-drift` component guards — so the extension-wide form hid from the reviewer a file the gate
+treats as correctness-bearing. The generalisable rule SHALL be stated with it: an extension describes a
+FORMAT, whereas a directory records an INTENT (someone decided that tree holds artifacts), which makes a
+directory the better proxy for "generated". Globally-scoped (slash-less) exclusion of artifact
 extensions SHALL NOT be used, because it would apply repo-wide and hide real configuration and data files
 outside `docs/` from review.
 

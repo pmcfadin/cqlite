@@ -85,7 +85,17 @@ review_min_severity = ''
 # directory exclude would reintroduce this issue's original defect.
 #
 # ASYMMETRY, BY DESIGN — "noise, never blindness", and with the directory scoping above
-# this is now TRUE AS STATED. A NEW artifact DIRECTORY (or a new artifact extension
+# this is now TRUE AS STATED. It is TRUE FOR INERT DUMPS (`.txt`/`.log`/`.err`), where
+# exclusion costs only NOISE. For a CODE-BEARING format (`.json`/`.html`/`.svg`)
+# exclusion is BLINDNESS, because such a file can be functional configuration under ANY
+# path — so code-bearing formats MUST be scoped by DIRECTORY, never by extension alone.
+# The claim was first written unqualified and #3229 falsified it: `docs/**/*.json` hid
+# `docs/observability/grafana/dashboards/cqlite-overview.json`, which the agent gate's own
+# `kit-dashboard-drift` component guards — the extension-wide form hid from the reviewer a
+# file the gate treats as correctness-bearing. Generalisable: an extension describes a
+# FORMAT; a directory records an INTENT (someone decided that tree holds artifacts), so a
+# directory is the better proxy for "generated".
+# A NEW artifact DIRECTORY (or a new artifact extension
 # inside one of the four) is silently re-admitted to review prompts, which costs tokens;
 # the deny-list can only ever leak in that harmless direction, because (a) the wrapper's
 # pre-enqueue `census-exclusion:` check FAILs closed on the swallow direction (a

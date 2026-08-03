@@ -425,13 +425,20 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   artifact-bearing DIRECTORIES**, and the pre-enqueue
   **`census-exclusion:`** key (immediately after `code-free:` in the block's fixed order) FAILs closed,
   naming the swallowed paths and the pattern responsible, whenever the configured set would swallow census
-  code. Its asymmetry is deliberate — **noise, never blindness**: a new artifact *directory* is
-  re-admitted to review prompts (a token cost), while the swallow direction can only ever fail loudly.
-  **An extension sweep across ALL of `docs/` did NOT satisfy that claim, and was retired (#3229):** for a
-  code-bearing format, exclusion is *blindness*, not noise. `docs/**/*.json` hid
-  `docs/observability/grafana/dashboards/cqlite-overview.json` — a dashboard the full gate guards with its
-  own `kit-dashboard-drift` component — from the reviewer's diff *and* classified it code-free, i.e.
-  unreviewable by construction; `docs/reports/delivery-telemetry.schema.json` went the same way. So the
+  code. Its asymmetry is deliberate — **noise, never blindness** — but that claim is SCOPED, and the
+  scope is the whole content of it: it holds for **inert dumps** (`.txt`/`.log`/`.err`), where exclusion
+  costs only **noise** (a new artifact *directory* is re-admitted to review prompts, a token cost, while
+  the swallow direction can only ever fail loudly). For a **code-bearing format**
+  (`.json`/`.html`/`.svg`) exclusion is **BLINDNESS**, because such a file can be **functional
+  configuration under any path**. So exclusion of code-bearing formats **MUST be scoped by directory,
+  never by extension alone**. **This asymmetry was first written unqualified and THIS CHANGE falsified
+  it (#3229):** an extension sweep across ALL of `docs/` was retired because `docs/**/*.json` hid
+  `docs/observability/grafana/dashboards/cqlite-overview.json` — the gate's own `kit-dashboard-drift`
+  component guards that dashboard, so the extension-wide form hid from the reviewer a file the gate
+  treats as correctness-bearing — from the reviewer's diff *and* classified it code-free, i.e.
+  unreviewable by construction; `docs/reports/delivery-telemetry.schema.json` went the same way. The
+  durable generalisation: **an extension describes a FORMAT; a directory records an INTENT** — someone
+  decided that tree holds artifacts — so a directory is the better proxy for "generated". So the
   patterns are `<artifact-dir-glob>/**/*.<ext>` over exactly four directories
   (`docs/reports/*-artifacts/`, `docs/round-artifacts/`, `docs/**/jfr-reports/`,
   `docs/sstables-definitive-guide/diagrams/`) and everything else under `docs/` is **reviewed**. Still

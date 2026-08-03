@@ -160,9 +160,12 @@ trailing-slash pattern.
 
 The first revision of this change wrote the artifact patterns as `docs/**/*.<ext>` — an extension sweep
 across **all** of `docs/`. That form does **not** satisfy this change's own stated asymmetry ("noise, never
-blindness"), and round 6 retired it. The asymmetry is sound for `.txt`/`.log`/`.err` run dumps, which
-contain nothing but output. It is **false** for `.json`/`.html`/`.svg`, which carry *functional
-configuration*, and for a code-bearing format exclusion is **blindness**, not noise. Two live cases in this
+blindness"), and round 6 retired it. **The asymmetry was originally written unqualified; this change
+falsified it, and the corrected form is scoped:** it is sound for **inert dumps** — `.txt`/`.log`/`.err`
+run output — where exclusion costs only **noise**. It is **false** for **code-bearing formats**
+`.json`/`.html`/`.svg`, which can be *functional configuration under any path*, and for those exclusion is
+**blindness**, not noise. Hence the rule the corrected form yields: exclusion of a code-bearing format must
+be **scoped by directory, never by extension alone**. Two live cases in this
 repository prove it:
 
 - **`docs/observability/grafana/dashboards/cqlite-overview.json`** — guarded by the **full agent gate's own
@@ -178,6 +181,13 @@ above, `docs/reports/delivery-telemetry.jsonl`, and two `sstables-definitive-gui
 beside the prose rather than in `diagrams/`). With the scoping in place the asymmetry is **true as
 written**: a *new artifact directory* is silently re-admitted to **review** (noise, a token cost), and
 functional configuration under `docs/` can no longer be hidden (no blindness).
+
+The doctrine surfaces state the corrected asymmetry **together with the counterexample that falsified it**
+— naming `cqlite-overview.json` and the `kit-dashboard-drift` component that guards it — rather than as a
+timeless claim, because a line that carries its own counterexample is much harder to re-break than one that
+reads as always having been true. The generalisable part, worth more than this configuration: **an extension
+describes a FORMAT; a directory records an INTENT** — someone decided that tree holds artifacts. That makes
+a directory the better proxy for "generated", which is why the scoping is directory-first everywhere here.
 
 **It stays extension-scoped WITHIN each directory — never a blanket `<dir>/**`.** That was the tempting
 simplification and it would reintroduce this issue's original defect: these directories deliberately hold

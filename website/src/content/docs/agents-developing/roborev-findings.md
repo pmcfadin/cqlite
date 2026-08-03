@@ -191,10 +191,18 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    porting roborev's own pathspec construction and letting **git** do the matching, FAILing closed and
    naming both the swallowed paths and the pattern responsible.
 
-   That deny-list leans deliberately one way — **noise, never blindness**. A *new* artifact **directory**
-   (or a new artifact extension inside one of the four below) is silently re-admitted to review prompts,
-   which costs tokens; the check can
-   only ever FAIL in the opposite direction, where a configured pattern would swallow census code.
+   That deny-list leans deliberately one way — **noise, never blindness** — and the claim is *scoped*, not
+   timeless. It holds for **inert dumps** (`.txt`/`.log`/`.err`), where exclusion costs only **noise**: a
+   *new* artifact **directory** (or a new artifact extension inside one of the four below) is silently
+   re-admitted to review prompts, which costs tokens; the check can
+   only ever FAIL in the opposite direction, where a configured pattern would swallow census code. For a
+   **code-bearing format** (`.json`/`.html`/`.svg`) exclusion is **blindness**, because such a file can be
+   **functional configuration under any path** — so exclusion of code-bearing formats **must be scoped by
+   directory, never by extension alone**. The claim was originally written unqualified, and #3229 falsified
+   it with a file this repo already guards; the section below records which one. The durable
+   generalisation is worth keeping past this issue: **an extension describes a format; a directory records
+   an intent** — someone decided that tree holds artifacts — which makes a directory the better proxy for
+   "generated".
 
    #### Why the exclusions are scoped to DIRECTORIES, not extensions across `docs/`
 
