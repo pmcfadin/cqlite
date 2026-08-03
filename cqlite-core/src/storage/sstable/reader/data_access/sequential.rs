@@ -455,6 +455,29 @@ impl SSTableReader {
             schema.is_some()
         );
 
+        // Issue #3109: BTI (`da`) readers decode through the authoritative trie
+        // walk, NEVER the block-by-block loop below. Every OTHER caller of this
+        // function (`scan`, `scan_with_cell_metadata`) already returns early for BTI
+        // and so never reaches here, but `iterate_all_partitions` does NOT — its
+        // index branches are both gated on `bti_partitions_db.is_none()`, so a `da`
+        // reader fell through to this sequential walk and decoded through the
+        // `V5UncompressedOA` state machine, which drops `read_shadowing` (and, on a
+        // schema-required fixture, fails outright). Gating HERE — on the SAME
+        // `bti_partitions_db.is_some()` condition the three other surfaces use —
+        // makes the dispatch hold for every present and future caller of the
+        // sequential walk rather than relying on each one to remember it.
+        //
+        // Posture is unchanged: this walk parses with `read_shadowing = true` and
+        // applies `filter_tombstone` + the key range + sort-then-`limit`, all of
+        // which `bti_scan_with_metadata` applies identically (it IS what `scan`'s
+        // BTI branch returns), so BTI and non-BTI callers get the same semantics.
+        if self.bti_partitions_db.is_some() {
+            let entries = self
+                .bti_scan_with_metadata(start_key, end_key, limit, schema, true, None)
+                .await?;
+            return Ok(entries.into_iter().map(|(k, v, _meta)| (k, v)).collect());
+        }
+
         // Issue #815: each scan uses its own cursor (private file position and
         // chunk index), so concurrent scans on this reader run in parallel
         // without the per-scan serialization #805 introduced for correctness.

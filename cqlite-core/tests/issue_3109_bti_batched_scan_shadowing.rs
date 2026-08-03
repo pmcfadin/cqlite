@@ -12,6 +12,12 @@
 //! partition/range tombstones) were surfaced where the per-row surface hides them.
 //! This is the #1577 class: per-surface decode-posture divergence.
 //!
+//! The same hole existed on the SEQUENTIAL walk (`sequential_scan`): every caller
+//! but one returns early for BTI, and the exception — `iterate_all_partitions`,
+//! whose two index branches are both gated on `bti_partitions_db.is_none()` — fell
+//! through to the state machine and failed outright. All four surfaces are asserted
+//! to agree here, so the next one added has to join the agreement or fail.
+//!
 //! # Oracle
 //!
 //! `test_da.ttl_table` is a REAL Cassandra 5.0.2 BTI (`da`) SSTable. Its committed
@@ -191,6 +197,108 @@ async fn collect_batched(
     out
 }
 
+/// The MATERIALIZING surface (`SSTableReader::scan`'s BTI branch, reached through
+/// the manager) — the reference the two streaming surfaces must reproduce.
+async fn collect_scan(
+    manager: &SSTableManager,
+    table_id: &TableId,
+    schema: &TableSchema,
+) -> Vec<Entry> {
+    manager
+        .scan(table_id, None, None, None, Some(schema))
+        .await
+        .expect("scan succeeds")
+        .into_iter()
+        .map(|(k, v)| snap(k, v))
+        .collect()
+}
+
+/// The SEQUENTIAL walk (`SSTableReader::sequential_scan`), reached through
+/// `iterate_all_partitions` — the one caller of that walk whose BTI readers are NOT
+/// intercepted by an earlier dispatch (both of its index branches are gated on
+/// `bti_partitions_db.is_none()`), so it is where a missing dispatch on the walk
+/// itself shows up. It resolves its own schema from the SSTable header/registry,
+/// so it takes no `schema` argument.
+async fn collect_sequential(data_db: &std::path::Path) -> Vec<Entry> {
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let reader = cqlite_core::storage::sstable::SSTableReader::open(data_db, &config, platform)
+        .await
+        .expect("open BTI SSTable reader");
+    reader
+        .iterate_all_partitions()
+        .await
+        .expect("iterate_all_partitions succeeds")
+        .into_iter()
+        .map(|(k, v)| snap(k, v))
+        .collect()
+}
+
+/// Every surface's rows at one pinned `now`, in one place so a new surface is
+/// added to the agreement assertion rather than left to drift (#1577 class).
+struct Surfaces {
+    scan: Vec<Entry>,
+    per_row: Vec<Entry>,
+    batched: Vec<Entry>,
+    sequential: Vec<Entry>,
+}
+
+impl Surfaces {
+    /// Assert all surfaces returned the same rows in the same order, and return
+    /// that agreed row count.
+    fn assert_agree(&self, phase: &str) -> usize {
+        for (name, rows) in [
+            ("per-row", &self.per_row),
+            ("batched", &self.batched),
+            ("sequential", &self.sequential),
+        ] {
+            assert_eq!(
+                rows.len(),
+                self.scan.len(),
+                "{phase}: the {name} streaming surface returned {} rows but the \
+                 materializing `scan` surface returned {} — the BTI decode posture \
+                 diverges between surfaces (#3109 / #1577 class)",
+                rows.len(),
+                self.scan.len()
+            );
+            for (i, (got, want)) in rows.iter().zip(self.scan.iter()).enumerate() {
+                assert_eq!(
+                    got.0, want.0,
+                    "{phase}: {name} row {i}: key mismatch vs scan"
+                );
+                assert_eq!(
+                    got.1, want.1,
+                    "{phase}: {name} row {i}: value mismatch vs scan"
+                );
+            }
+        }
+        self.scan.len()
+    }
+}
+
+/// Drive every surface at one pinned `now`. The manager is opened INSIDE the pin so
+/// no reader caches a decode taken under a different clock.
+async fn surfaces_at(
+    gen_dir: &std::path::Path,
+    table_id: &TableId,
+    schema: &TableSchema,
+    pinned_now: i64,
+) -> Surfaces {
+    let keyspace_dir = gen_dir.parent().expect("generation dir has a parent");
+    let data_db = gen_dir.join(format!("{SSTABLE_PREFIX}-Data.db"));
+    std::env::set_var(TTL_NOW_OVERRIDE_ENV, pinned_now.to_string());
+    let manager = open_manager(keyspace_dir).await;
+    let out = Surfaces {
+        scan: collect_scan(&manager, table_id, schema).await,
+        per_row: collect_per_row(&manager, table_id, schema).await,
+        batched: collect_batched(&manager, table_id, schema).await,
+        sequential: collect_sequential(&data_db).await,
+    };
+    drop(manager);
+    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
+    out
+}
+
 /// Issue #3109: the batched surface applies read shadowing to a BTI (`da`) reader,
 /// row-for-row identically to the per-row surface, at BOTH a pinned `now` where the
 /// fixture's rows are live and one where they are all TTL-expired.
@@ -204,61 +312,35 @@ async fn bti_batched_scan_applies_read_shadowing_like_the_per_row_surface() {
         return;
     };
     let physical_rows = golden_rows_with_expiry(&gen_dir);
-    let keyspace_dir = gen_dir.parent().expect("generation dir has a parent");
     let schema = ttl_table_schema();
     let table_id = TableId::from(format!("{KEYSPACE}.{TABLE}").as_str());
 
     // ---- Phase 1: pinned `now` BEFORE the TTL expiry -> every row is LIVE. -----
-    // The non-vacuous arm: a strictly positive expected row count, so neither
-    // surface can pass by returning nothing.
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, NOW_BEFORE_EXPIRY.to_string());
-    let manager = open_manager(keyspace_dir).await;
-    let live_per_row = collect_per_row(&manager, &table_id, &schema).await;
-    let live_batched = collect_batched(&manager, &table_id, &schema).await;
-    drop(manager);
-    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
-
+    // The non-vacuous arm: a strictly positive expected row count, so no surface
+    // can pass by returning nothing.
+    let live = surfaces_at(&gen_dir, &table_id, &schema, NOW_BEFORE_EXPIRY).await;
+    let live_rows = live.assert_agree("pinned now BEFORE expiry");
     assert_eq!(
-        live_per_row.len(),
-        physical_rows,
-        "at a pinned now BEFORE expiry the per-row surface must return every \
-         physical row the golden records ({physical_rows})"
+        live_rows, physical_rows,
+        "at a pinned now BEFORE expiry every surface must return all {physical_rows} \
+         physical rows the golden records (non-vacuous arm)"
     );
-    assert_eq!(
-        live_batched.len(),
-        live_per_row.len(),
-        "at a pinned now BEFORE expiry the batched surface must return the same \
-         row count as the per-row surface"
-    );
-    for (i, (got, want)) in live_batched.iter().zip(live_per_row.iter()).enumerate() {
-        assert_eq!(got.0, want.0, "live row {i}: key mismatch batched-vs-per-row");
-        assert_eq!(
-            got.1, want.1,
-            "live row {i}: value mismatch batched-vs-per-row"
-        );
-    }
 
     // ---- Phase 2: pinned `now` AFTER the TTL expiry -> every row is EXPIRED. ---
-    // Pre-#3109 the batched surface returned all `physical_rows` here (the state
-    // machine drops `read_shadowing`), while the per-row surface returned none.
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, NOW_AFTER_EXPIRY.to_string());
-    let manager = open_manager(keyspace_dir).await;
-    let expired_per_row = collect_per_row(&manager, &table_id, &schema).await;
-    let expired_batched = collect_batched(&manager, &table_id, &schema).await;
-    drop(manager);
-    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
-
-    assert!(
-        expired_per_row.is_empty(),
-        "control: at a pinned now AFTER expiry the per-row surface must hide every \
-         expired row, got {} (this arm is what the batched surface is compared to)",
-        expired_per_row.len()
-    );
-    assert!(
-        expired_batched.is_empty(),
-        "issue #3109: at a pinned now AFTER expiry the BATCHED surface must hide \
-         every TTL-expired row exactly as the per-row surface does, got {} rows — \
-         the BTI reader was decoded UNSHADOWED through the state machine",
-        expired_batched.len()
+    // Pre-#3109 the batched surface diverged here: the `V5UncompressedOA` state
+    // machine drops `read_shadowing`, so it surfaced rows the per-row and `scan`
+    // surfaces hid (on this schema-required fixture it failed outright instead).
+    let expired = surfaces_at(&gen_dir, &table_id, &schema, NOW_AFTER_EXPIRY).await;
+    let expired_rows = expired.assert_agree("pinned now AFTER expiry");
+    assert_eq!(
+        expired_rows,
+        0,
+        "issue #3109: at a pinned now AFTER expiry EVERY surface must hide every \
+         TTL-expired row; got {expired_rows} (batched={}, per-row={}, scan={}, \
+         sequential={})",
+        expired.batched.len(),
+        expired.per_row.len(),
+        expired.scan.len(),
+        expired.sequential.len()
     );
 }
