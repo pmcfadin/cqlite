@@ -694,6 +694,7 @@ fi
 # log line: on the pre-fix binary these two corpora reported `generations: 3` and named
 # generation_merge::stream_generations_for_read, with rows_scanned 468 and exit 0.
 nonreg_counts_ok() { # nonreg_counts_ok <label>
+  local label="$1"
   if grep -qE "^generations: +1\$" <<<"$out" \
     && grep -qE "^rows_scanned: +$FIXTURE_ROWS\$" <<<"$out" \
     && grep -q "^storage_route:    per-reader SSTableManager::scan_stream" <<<"$out"; then
