@@ -23,8 +23,10 @@
 //!    input is exactly what the authority describes, and a retained generation beside it
 //!    is not ingested;
 //! 2. otherwise (a hand-written minimal manifest, `--expect-rows`, `--no-expect-rows`)
-//!    the corpus root must be UNAMBIGUOUS: exactly one `<table>-<uuid>` directory, or the
-//!    run refuses rather than measuring an unknown union.
+//!    the corpus root must be UNAMBIGUOUS: exactly one `<table>-<uuid>` directory (the
+//!    shape is `is_table_dir`, below; the cardinality is `matching_dirs(..).len() == 1`
+//!    in `resolve`, whose other arms refuse), or the run refuses rather than measuring
+//!    an unknown union.
 //!
 //! In both cases the resolved directory, its generation count and the provenance of
 //! that decision are printed in the result block, so the workload a number describes

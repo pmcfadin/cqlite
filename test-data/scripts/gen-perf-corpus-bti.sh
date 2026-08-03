@@ -55,6 +55,8 @@
 # Output layout (mirrors CQLITE_DATASETS_ROOT, so `CQLITE_DATASETS_ROOT=$OUT`
 # works directly):
 #   $OUT/sstables/$KS/$TBL-<uuid>/da-*-bti-*.db         (gitignored: *.db)
+#     (`<uuid>` is enforced as [0-9a-f]{32} wherever this script SELECTS or DELETES
+#      such a directory: prune_stale_table_dirs, publish, --verify-only)
 #   $OUT/sstables/$KS/$TBL-<uuid>/da-<gen>-bti-Data.db.jsonl   (bounded goldens)
 #   $OUT/sstables/$KS/$TBL-<uuid>/schema.cql
 #   $OUT/schema.cql              (the same capture, where bti_perf_scan reads it;
@@ -126,7 +128,8 @@ COPY_TIMEOUT="${COPY_TIMEOUT:-120}"
 CHUNK_LENGTH_IN_KB="${CHUNK_LENGTH_IN_KB:-16}"   # matches #3100/#3217's BIG shape
 # Extra `docker run` options (resource caps, e.g. "--cpus 14 --memory 22g").
 DOCKER_RUN_OPTS="${DOCKER_RUN_OPTS:-}"
-# Remove a previous <table>-<uuid> corpus dir before publishing the new one.
+# Remove a previous <table>-<uuid> corpus dir before publishing the new one
+# (prune_stale_table_dirs deletes only names matching ^<table>-[0-9a-f]{32}$).
 PRUNE_STALE="${PRUNE_STALE:-1}"
 KEEP_CONTAINER="${KEEP_CONTAINER:-0}"
 
@@ -373,8 +376,9 @@ validate_inputs() {
        Point --out at a dedicated directory, e.g. /data/corpus-3234-bti."
   done
   # From here on the CANONICAL path is the corpus root: every destructive target
-  # (cassandra-data, work, the published <table>-<uuid> dir) is derived from it,
-  # never from the raw argument.
+  # (cassandra-data, work, the published <table>-<uuid> dir — the last of those
+  # matched against ^<table>-[0-9a-f]{32}$ before any rm) is derived from it, never
+  # from the raw argument.
   OUT="$OUT_CANON"
   [[ "$KS" =~ ^[a-z_][a-z0-9_]*$ ]] || die "invalid keyspace '$KS' (unquoted CQL identifier expected)"
   [[ "$TBL" =~ ^[a-z_][a-z0-9_]*$ ]] || die "invalid table '$TBL' (unquoted CQL identifier expected)"
@@ -515,7 +519,9 @@ assert_corpus() {  # $1 = published sstable dir
     base="$(basename "$f" -Data.db)"
     gens=$((gens + 1))
     # The generation identifier, for the one-SSTable-per-chunk mapping check below.
-    # The descriptor is `da-<gen>-bti`; anything else already failed the AC1 glob.
+    # The descriptor is `da-<gen>-bti`, enforced by the `da-*-bti-Data.db` glob that
+    # built "${datas[@]}" plus the ^[0-9]+$ test on <gen> two lines down; anything
+    # else already failed the AC1 foreign-descriptor check above.
     local gen_id="${base#da-}"; gen_id="${gen_id%-bti}"
     [[ "$gen_id" =~ ^[0-9]+$ ]] \
       || die "AC: cannot read the generation number out of descriptor '$base'
@@ -931,7 +937,9 @@ dump_goldens() {
     base="$(basename "$f")"
     stem="${base%-Data.db}"
     log "[golden] sstabledump -l $base (bounded subset: $((n + 1))/$DUMP_GENERATIONS)..."
-    # sstabledump is not on $PATH in the image; absolute path required.
+    # sstabledump is not on $PATH in the image, so the /opt/cassandra/... absolute
+    # path below is written out literally (there is nothing to validate: it is a
+    # constant in this file, not an input).
     $DOCKER exec "$CONTAINER" bash -lc \
       "/opt/cassandra/tools/bin/sstabledump '$CONTAINER_SSTABLE_DIR/$base' -l" >"$DEST/$base.jsonl" \
       || die "[golden] sstabledump failed for $base"

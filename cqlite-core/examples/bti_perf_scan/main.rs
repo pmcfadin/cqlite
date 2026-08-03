@@ -69,6 +69,7 @@
 //! There is a third fail-closed guard, and it is not about the row count at all: the
 //! **ingest scope** (`scope.rs`, roborev #3234 M1/F1). The row-count assert cannot see a
 //! workload change — a retained `<table>-<uuid>` generation beside the measured one
+//! (the shape is `scope::is_table_dir`: `<table>-` + exactly `TABLE_ID_HEX_LEN` hex)
 //! holds the SAME rows, so reconciliation yields the same count while the GENERATION
 //! COUNT (which selects the scan route) silently doubles. So ingestion is confined to
 //! the manifest's exact `tables[].sstable_dir`, an ambiguous root is refused
@@ -192,6 +193,7 @@ fn usage() -> String {
      \x20                    [--manifest PATH | --expect-rows N | --no-expect-rows]\n\
      \n\
      --corpus DIR        corpus root holding sstables/<ks>/<table>-<uuid>/ and schema.cql\n\
+     \x20                   (<uuid> = 32 hex digits, per scope::is_table_dir)\n\
      --keyspace KS       keyspace [perf_bti]\n\
      --table T           table [wide_multiclustering]\n\
      --warm-passes N     discarded warming scans before the measured one [1];\n\
@@ -319,7 +321,8 @@ fn rate(rows: u64, secs: f64) -> Option<f64> {
 ///
 /// This is deliberately NOT `scope.generations` (the count of the directory this run
 /// INTENDED to ingest). Reporting the intended count is exactly how round 11's substring
-/// filter could open a `<table>-<uuid>-backup` sibling's SSTables and still print the
+/// filter could open a `<table>-<uuid>-backup` sibling's SSTables (a name `is_table_dir`
+/// rejects, being `<table>-` + something that is not 32 hex) and still print the
 /// smaller number — and since the generation count selects the scan route, that
 /// misattributes every figure printed beside it. An unreadable selected directory is an
 /// error, never a count silently short by one.
@@ -417,7 +420,8 @@ fn real_main() -> i32 {
 
     // The ONE directory this run may ingest, resolved and NAMED before anything opens:
     // the manifest's exact `sstable_dir` when it documents one, else the sole
-    // `<table>-<uuid>` directory — an ambiguous root is refused, never silently unioned.
+    // `<table>-<uuid>` directory as `scope::is_table_dir` defines it — an ambiguous root
+    // is refused, never silently unioned.
     let scope = match scope::resolve(
         &args.corpus,
         &args.keyspace,

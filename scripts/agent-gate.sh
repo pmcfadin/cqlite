@@ -280,7 +280,14 @@
 #                      row-count mismatch = the silent-truncation guard, sub-floor
 #                      window, mid-scan failure, and an unavailable authoritative row
 #                      count) against the git-committed 10 KiB `test_da` BTI fixture —
-#                      never the multi-GB perf corpus.
+#                      never the multi-GB perf corpus. And
+#                      scripts/tests/check-constraint-comments.py --self-test (#3234):
+#                      a comment that STATES a constraint must name or sit beside its
+#                      enforcement, or the comment goes — the class that hit #3234 three
+#                      times (unobserved manifest claims, a stale committed contract, and
+#                      a shape check documenting `<table>-<uuid>` while accepting
+#                      `<table>-*`). Runs both directions: the surface must pass, an
+#                      injected unenforced claim must FAIL.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -5421,6 +5428,29 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (AC3 warm-scan harness guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Unenforced-constraint-comment guard (#3234): a comment that STATES a constraint
+  # must name or sit beside its enforcement, or the comment goes. Mechanizes the class
+  # that hit this one issue three times (L3's 11 unobserved manifest claims, L4's stale
+  # committed contract, F2's `validated_sstable_dir` documenting `<table>-<uuid>` while
+  # accepting `<table>-*`) — prose asserting what the adjacent code does not do, caught
+  # each time only by a human reviewer. Narrow by design (a named claim table over the
+  # #3234 production surface, not an English verifier) and it runs BOTH directions:
+  # `--self-test` asserts the real surface passes, that an INJECTED unenforced claim
+  # FAILS, and that the same claim passes once its enforcement follows it. Hermetic,
+  # python3-only, sub-second.
+  echo ">>> [$name] python3 scripts/tests/check-constraint-comments.py --self-test"
+  if ! python3 "$REPO_ROOT/scripts/tests/check-constraint-comments.py" --self-test \
+    >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (unenforced constraint comment); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
