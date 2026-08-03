@@ -386,6 +386,11 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
   command, SHALL leave the real drop-in byte- and metadata-unchanged, SHALL name no write
   target at all, and SHALL exit 0
 
+#### Scenario: re-run writes nothing
+- **WHEN** bootstrap runs twice on the same host
+- **THEN** the second run SHALL report the drop-in as already current and SHALL NOT
+  re-write it, invoking no privileged write command
+
 #### Scenario: a non-canonical drop-in is rewritten
 - **GIVEN** an existing drop-in whose bytes differ from the canonical content only in
   trailing newlines (a missing final newline, or an extra trailing blank line), or which
