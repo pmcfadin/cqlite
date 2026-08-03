@@ -90,6 +90,14 @@ would explain", and ~13.5% of the Flight arm's wall time (`server_cpu_utilizatio
 - Patched `offcputime` blocked **duration**: `do_get_batch` = **1.46 s of 1,963 s** at the worst
   point (0.074%). `egress_credit_acquire` ≈ 0 everywhere.
 
+**The bound on that acquittal, stated rather than buried.** At S=6/N=16 `unattributed_channel` —
+send/recv parks the classifier could bucket but could not tie to a named channel from the item type
+in the symbol — holds **109.63 s (5.6% of total blocked time)**, **75× larger** than `do_get_batch`'s
+1.46 s (0.07%). So the honest form is: the handoff's measured cost is ~0, and the uncertainty on that
+statement is bounded by 5.6%, not by 0.07%. Even if the entire residue were secretly the handoff (it
+is not — the independent park-count instrument records **zero** handoff parks with `other` = 0), it
+would be a ~6% site, not the 2.5–4× box-level lever the collapse hypothesis needed.
+
 **Where the switches actually come from.** Part A reproduced your signal as a specific number: at
 S=6/N=1, ~39,115 voluntary switches/s against ~20 batches/s ≈ **~1,960 voluntary parks per
 8,192-row batch** (the dedicated perf capture on the same arm measures 2,617 — the Part A figure
@@ -122,10 +130,11 @@ is a **hypothesis and was not measured**. What is settled regardless: every park
 attributed to a **named site**, `other` = 0, and the `do_get` handoff's site count is zero.
 
 **Is your ~13.5% now accounted for? Mechanism named and quantified — exact figure not reconciled.**
-At the comparable arm (S=1/N=1, where 22% of the pinned set is idle), the causal blocking is:
-`core_raw_chunk` **27.08 s (49.2%)**, `core_query_rows` 15.53 s (28.2%), `core_windowed_batch`
-9.46 s (17.2%), tonic/socket 1.43 s (0.9%), `do_get_batch` **0.0001 s** — plus glibc arena waits
-and pure runtime idle (`tokio_scheduler` is 100% idle-runtime park, not overhead). So your
+At the comparable arm (S=1/N=1, where 22% of the pinned set is idle), the causal blocking is
+(percentages are shares of the 55.09 s of channel park time): `core_raw_chunk` **27.08 s (49.2%)**,
+`core_query_rows` 15.53 s (28.2%), `core_windowed_batch` 9.46 s (17.2%), tonic/socket 1.43 s
+(0.9% of the 160.19 s grand total), `do_get_batch` **0.0001 s** — plus glibc arena waits
+and pure runtime idle (`tokio_scheduler` is ≥99.99% idle-runtime park, not overhead). So your
 off-metered-CPU time is the **four-stage read-path pipeline's serialization, dominated by the
 16 KiB raw-chunk channel** — **not** the `do_get` handoff, **not** gRPC egress, **not** disk
 (`disk_io` = 0, corpus fully page-cached).

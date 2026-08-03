@@ -80,6 +80,12 @@ independently-counted `sched:sched_switch` park events agree:
 - `do_get_batch` blocked time: **1.46 s out of 1,963 s** at the worst point = **0.074%** of
   total blocked time, 0.12% of all channel send/recv blocking.
 - `egress_credit_acquire`: ≈0 s everywhere (max 0.0014 s).
+- **The bound on that acquittal, stated rather than buried**: `unattributed_channel` — parks the
+  classifier could bucket but not tie to a named channel — holds **109.63 s (5.6% of total blocked
+  time)** at the same point, **75× larger** than `do_get_batch`'s 1.46 s (0.07%). Even if the whole
+  residue were secretly the handoff (it is not — the independent park-count instrument records zero
+  handoff parks with `other` = 0), the handoff would be a ~6% site, not a 2.5–4× box-level lever.
+  The ordering call below survives its own error bar.
 
 The parks that *do* exist (~1,000–2,600 per 8,192-row batch) are **inside `cqlite-core`, below the
 Flight layer** — the 16 KiB raw-chunk channel (~347 sends/batch by corpus geometry, 265–327 parks
