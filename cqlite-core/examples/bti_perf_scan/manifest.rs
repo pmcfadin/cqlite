@@ -231,6 +231,16 @@ fn check_cross_check(
         }
     };
     for (a, b, total_name) in CROSS_CHECK_PAIRS {
+        // Pair first, then the total: a pair that disagrees WITH ITSELF is reported as
+        // that, whatever else the manifest is or is not carrying.
+        let (va, vb) = (uint(a)?, uint(b)?);
+        if va != vb {
+            return Err(format!(
+                "{}: `row_count_cross_check.{a}` = {va} disagrees with `{b}` = {vb} — the \
+                 manifest itself reports a cross-check disagreement",
+                path.display()
+            ));
+        }
         let expected = match total_name {
             "rows" => rows,
             other => total(other).ok_or_else(|| {
@@ -242,14 +252,6 @@ fn check_cross_check(
                 )
             })?,
         };
-        let (va, vb) = (uint(a)?, uint(b)?);
-        if va != vb {
-            return Err(format!(
-                "{}: `row_count_cross_check.{a}` = {va} disagrees with `{b}` = {vb} — the \
-                 manifest itself reports a cross-check disagreement",
-                path.display()
-            ));
-        }
         if va != expected {
             return Err(format!(
                 "{}: `row_count_cross_check.{a}`/`{b}` = {va} disagrees with \

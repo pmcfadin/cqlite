@@ -24,7 +24,20 @@
 #     7 SCAN_FAILED         -- a scan that STARTED then failed mid-stream; before
 #                              this round it exited 3 and was indistinguishable
 #                              from "corpus missing" (rust-reviewer S6)
-#     8 MANIFEST_UNREADABLE -- no authoritative row count => refuse to measure
+#     8 MANIFEST_UNREADABLE -- no authoritative row count => refuse to measure,
+#                              incl. a PARTIAL row_count_cross_check (roborev #3234
+#                              L3: missing/non-integer fields used to fall through a
+#                              catch-all match arm and read as verified) and the
+#                              IN-PROGRESS generation marker (#3234 M2)
+#
+# ...and one guard that is NOT about the row count, because the row count cannot see
+# it: the INGEST SCOPE (roborev #3234 M1). A retained `<table>-<uuid>` generation
+# beside the measured one holds the SAME rows, so reconciliation yields the same count
+# while the generation count -- which selects the scan route, and which every
+# throughput figure is attributed to -- doubles. The cases below therefore assert the
+# OBSERVED generation count and the reported scope, not just an exit code: a documented
+# `tables[].sstable_dir` confines ingestion to exactly that directory, and an
+# ambiguous root with nothing documenting it exits 3.
 #
 # HERMETIC, and CHEAP. No perf corpus (the AC3 corpus is ~2 GiB / 13.2 M rows and
 # takes ~2 minutes to scan), no docker, no network, no CQLITE_DATASETS_ROOT, no
@@ -57,7 +70,7 @@ TBL=multiclustering_table
 # `passes >= MIN_CASES`. The one BRANCH (build here vs reuse
 # CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the floor is
 # identical on both paths (roborev #3234 F4).
-MIN_CASES=39
+MIN_CASES=67
 
 fails=0
 passes=0
@@ -135,6 +148,19 @@ mk_corpus() { # mk_corpus <name>  -> populated with the committed fixture
 }
 GOOD="$(mk_corpus good)"
 CORRUPT="$(mk_corpus corrupt)"
+# An AMBIGUOUS corpus root: TWO <table>-<uuid> directories, the shape
+# `gen-perf-corpus-bti.sh --no-prune` leaves behind (roborev #3234 M1). Both hold the
+# same rows, which is exactly why the row-count assert cannot see the difference:
+# reconciliation yields 468 either way while the GENERATION COUNT -- what selects the
+# scan route, and what any throughput figure is attributed to -- doubles.
+TWO="$(mk_corpus two)"
+SECOND_UUID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cp -r "$FIXTURE_DIR" "$TWO/sstables/$KS/$TBL-$SECOND_UUID"
+# ...and a corpus holding a DIFFERENT table whose name has this table's name as a
+# PREFIX. The old filter was a substring match, so `--table multiclustering_table`
+# also picked up `multiclustering_table_small-<uuid>`.
+PREFIX="$(mk_corpus prefix)"
+cp -r "$FIXTURE_DIR" "$PREFIX/sstables/$KS/${TBL}_small-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 # An "empty" corpus: the table directory exists (so discovery is scoped to it) but
 # holds no SSTable -- the shape a mis-pathed or half-generated corpus has.
 EMPTY="$TMP/empty"
@@ -158,10 +184,68 @@ manifest "$TMP/m-short.json" "$KS" "$TBL" 999
 manifest "$TMP/m-other.json" perf_bti wide_multiclustering "$FIXTURE_ROWS"
 printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":0}}\n' "$KS" "$TBL" \
   >"$TMP/m-zero.json"
+# A manifest that documents the directory its counts were read from, the way every
+# generator-written manifest does -- this is what SCOPES ingestion (roborev #3234 M1).
+scoped_manifest() { # scoped_manifest <file> <sstable_dir>
+  printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[{"table":"%s","sstable_dir":"%s"}]}\n' \
+    "$KS" "$TBL" "$FIXTURE_ROWS" "$TBL" "$2" >"$1"
+}
+FIXTURE_REL="sstables/$KS/$(basename "$FIXTURE_DIR")"
+scoped_manifest "$TMP/m-scoped.json" "$FIXTURE_REL"
+scoped_manifest "$TMP/m-scoped-absent.json" "sstables/$KS/$TBL-cccccccccccccccccccccccccccccccc"
+scoped_manifest "$TMP/m-scoped-escape.json" "sstables/$KS/../../../etc"
+scoped_manifest "$TMP/m-scoped-abs.json" "/etc"
+scoped_manifest "$TMP/m-scoped-othertable.json" "sstables/$KS/other_table-$SECOND_UUID"
+scoped_manifest "$TMP/m-scoped-otherks.json" "sstables/perf_bti/$TBL-$SECOND_UUID"
+# `tables` present but describing something else / not an array at all: the counts'
+# provenance is then unknown, which is a refusal, not a fall-through.
+printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":[{"table":"other","sstable_dir":"%s"}]}\n' \
+  "$KS" "$TBL" "$FIXTURE_ROWS" "$FIXTURE_REL" >"$TMP/m-tables-foreign.json"
+printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},"tables":"nope"}\n' \
+  "$KS" "$TBL" "$FIXTURE_ROWS" >"$TMP/m-tables-notarray.json"
+# The IN-PROGRESS marker gen-perf-corpus-bti.sh installs in the authoritative manifest
+# position before it mutates a published corpus (roborev #3234 M2). It is well-formed
+# JSON and deliberately carries no keyspace/table/row count, so a harness run over a
+# corpus whose generation did not finish must REFUSE rather than read stale numbers.
+printf '{"issue":3234,"generation_in_progress":true,"note":"generation did not finish"}\n' \
+  >"$TMP/m-inprogress.json"
+# A COMPLETE cross-check, and each of the ways it can be partial (roborev #3234 L3).
+cross_manifest() { # cross_manifest <file> <row_count_cross_check-json>
+  printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s,"partitions":3},"row_count_cross_check":%s}\n' \
+    "$KS" "$TBL" "$FIXTURE_ROWS" "$2" >"$1"
+}
+cross_manifest "$TMP/m-cross-ok.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"statistics_db_rows\":$FIXTURE_ROWS,\"row_driver_partitions\":3,\"statistics_db_partitions\":3}"
+# Each of the four counts MISSING in turn.
+cross_manifest "$TMP/m-cross-miss-rd-rows.json" \
+  "{\"statistics_db_rows\":$FIXTURE_ROWS,\"row_driver_partitions\":3,\"statistics_db_partitions\":3}"
+cross_manifest "$TMP/m-cross-miss-st-rows.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"row_driver_partitions\":3,\"statistics_db_partitions\":3}"
+cross_manifest "$TMP/m-cross-miss-rd-parts.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"statistics_db_rows\":$FIXTURE_ROWS,\"statistics_db_partitions\":3}"
+cross_manifest "$TMP/m-cross-miss-st-parts.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"statistics_db_rows\":$FIXTURE_ROWS,\"row_driver_partitions\":3}"
+# ...and each of the four NON-INTEGER in turn (string, null, float, negative -- every
+# one of them `Some(value)` with `as_u64() == None`, i.e. the fall-through the old
+# `match` arm swallowed).
+cross_manifest "$TMP/m-cross-str.json" \
+  "{\"row_driver_rows\":\"$FIXTURE_ROWS\",\"statistics_db_rows\":$FIXTURE_ROWS,\"row_driver_partitions\":3,\"statistics_db_partitions\":3}"
+cross_manifest "$TMP/m-cross-null.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"statistics_db_rows\":null,\"row_driver_partitions\":3,\"statistics_db_partitions\":3}"
+cross_manifest "$TMP/m-cross-float.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"statistics_db_rows\":$FIXTURE_ROWS,\"row_driver_partitions\":3.5,\"statistics_db_partitions\":3}"
+cross_manifest "$TMP/m-cross-neg.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"statistics_db_rows\":$FIXTURE_ROWS,\"row_driver_partitions\":3,\"statistics_db_partitions\":-3}"
+# A cross-check whose partition pair agrees with itself but has no total to be checked
+# against: the total the cross-check asserts must be present, not optional.
 printf '{"keyspace":"%s","table":"%s","rows_per_partition":{"rows":%s},' "$KS" "$TBL" \
-  "$FIXTURE_ROWS" >"$TMP/m-disagree.json"
-printf '"row_count_cross_check":{"statistics_db_rows":471}}\n' \
-  >>"$TMP/m-disagree.json"
+  "$FIXTURE_ROWS" >"$TMP/m-cross-nototal.json"
+printf '"row_count_cross_check":{"row_driver_rows":%s,"statistics_db_rows":%s,' \
+  "$FIXTURE_ROWS" "$FIXTURE_ROWS" >>"$TMP/m-cross-nototal.json"
+printf '"row_driver_partitions":3,"statistics_db_partitions":3}}\n' >>"$TMP/m-cross-nototal.json"
+# A COMPLETE cross-check whose Statistics.db side disagrees with the row driver.
+cross_manifest "$TMP/m-disagree.json" \
+  "{\"row_driver_rows\":$FIXTURE_ROWS,\"statistics_db_rows\":471,\"row_driver_partitions\":3,\"statistics_db_partitions\":3}"
 # The other half of the cross-check: the two sides disagreeing WITH EACH OTHER, while the
 # row count itself matches. The harness used to read an `agree: true` literal here; it now
 # compares the four numbers (the literal is gone from the manifest -- #3234 round 10: a
@@ -346,5 +430,107 @@ if run_case 0 "--no-expect-rows passes but marks the measurement unverified" \
     fail "expected a loud --no-expect-rows banner; got: $(tail -6 <<<"$out")"
   fi
 fi
+
+# ------------------------------- the INGEST SCOPE (roborev #3234 M1) -----------
+# The row-count assert CANNOT catch a changed workload, and that is the whole finding:
+# a retained `<table>-<uuid>` generation holds the same rows, so reconciliation still
+# yields 468 while the generation count -- which selects the scan route -- doubles.
+# So the scope is asserted directly, in both of its resolutions.
+if run_case 3 "an AMBIGUOUS corpus root (two <table>-<uuid> dirs) refuses to measure" \
+  --corpus "$TWO" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-good.json"; then
+  if grep -q "AMBIGUOUS corpus root: 2 " <<<"$out" \
+    && grep -q "GENERATION COUNT" <<<"$out" && grep -q -- "--no-prune" <<<"$out"; then
+    pass "the ambiguity refusal names the count, the consequence and the cause"
+  else
+    fail "expected an ambiguity diagnosis naming --no-prune; got: $(tail -3 <<<"$out")"
+  fi
+fi
+run_case 3 "an ambiguous root is refused under --no-expect-rows too (no manifest to scope it)" \
+  --corpus "$TWO" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --no-expect-rows
+# The PREFERRED resolution: the manifest documents its directory, so the SAME ambiguous
+# root is measured at exactly the documented generation count.
+if run_case 0 "a documented sstable_dir scopes ingestion inside an ambiguous root" \
+  --corpus "$TWO" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-scoped.json"; then
+  if grep -q "^generations:      1" <<<"$out"; then
+    pass "the OBSERVED generation count is 1 -- only the manifest's directory was ingested"
+  else
+    fail "expected generations: 1 from a scoped ingest; got: $(grep '^generations' <<<"$out")"
+  fi
+  if grep -q "sstable(s) under .* are OUTSIDE this scope and were NOT ingested" <<<"$out" \
+    && grep -q "^ingest_scope:     .*tables\[\].sstable_dir" <<<"$out"; then
+    pass "the run REPORTS the scope it used and the sstable it left outside it"
+  else
+    fail "expected an ingest_scope line + an outside-the-scope note; got: $(tail -8 <<<"$out")"
+  fi
+fi
+# The filter used to be a SUBSTRING of the table name, so a differently-named table
+# whose name starts with this one was swept in. It must be neither ambiguous nor ingested.
+if run_case 0 "a sibling table whose name has this table's name as a PREFIX is ignored" \
+  --corpus "$PREFIX" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-good.json"; then
+  if grep -q "^generations:      1" <<<"$out"; then
+    pass "the prefix-sharing sibling contributed no generation"
+  else
+    fail "expected generations: 1 beside a ${TBL}_small dir; got: $(grep '^generations' <<<"$out")"
+  fi
+fi
+# A documented directory that is not there means the manifest describes another corpus.
+if run_case 3 "a documented sstable_dir that does not exist refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-absent.json"; then
+  if grep -q "is not a directory" <<<"$out"; then
+    pass "the missing-scope refusal names the directory the manifest documents"
+  else
+    fail "expected a 'not a directory' diagnosis; got: $(tail -3 <<<"$out")"
+  fi
+fi
+# `sstable_dir` selects the bytes that get measured, so it is validated, not trusted.
+run_case 8 "an sstable_dir escaping the corpus root (..) is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-escape.json"
+run_case 8 "an ABSOLUTE sstable_dir is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-abs.json"
+run_case 8 "an sstable_dir naming ANOTHER table is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-othertable.json"
+run_case 8 "an sstable_dir naming another KEYSPACE is rejected" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-scoped-otherks.json"
+run_case 8 "a tables[] with no entry for this table refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-tables-foreign.json"
+run_case 8 "a tables that is not an array refuses to measure" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-tables-notarray.json"
+
+# --------------------- the IN-PROGRESS marker (roborev #3234 M2) ---------------
+# The generator vacates the authoritative manifest position BEFORE it mutates a
+# published corpus, so a generation that dies half way leaves this marker instead of
+# the PREVIOUS run's manifest. Reading it as a manifest is what must not happen.
+if run_case 8 "an IN-PROGRESS generation marker refuses to measure, never reads as a manifest" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-inprogress.json"; then
+  if grep -q "IN-PROGRESS GENERATION MARKER" <<<"$out" \
+    && grep -q "generation_in_progress" <<<"$out"; then
+    pass "the refusal names the marker key and says the generation did not finish"
+  else
+    fail "expected an in-progress-marker diagnosis; got: $(tail -3 <<<"$out")"
+  fi
+fi
+
+# ------------------- the cross-check, IN FULL (roborev #3234 L3) ---------------
+# It used to be read through a `match` with a catch-all arm, so a MISSING or
+# NON-INTEGER field fell through and a partially corrupted cross-check passed as a
+# verified one. Each field, each way.
+for m in miss-rd-rows miss-st-rows miss-rd-parts miss-st-parts; do
+  run_case 8 "a cross-check missing $m refuses to measure" \
+    "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-cross-$m.json"
+done
+for m in str null float neg; do
+  run_case 8 "a cross-check whose count is $m (not an unsigned integer) refuses to measure" \
+    "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-cross-$m.json"
+done
+run_case 8 "a cross-check with no rows_per_partition.partitions to check against refuses" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-cross-nototal.json"
+# The positive control for all nine: a COMPLETE, agreeing cross-check must still pass,
+# or the strictness above would be proving nothing.
+run_case 0 "a COMPLETE, agreeing cross-check PASSES (positive control for the nine above)" \
+  "${SCAN_GOOD[@]}" --no-min-seconds --manifest "$TMP/m-cross-ok.json"
 
 summary
