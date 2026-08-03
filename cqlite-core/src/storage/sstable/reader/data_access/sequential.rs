@@ -452,32 +452,32 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
         scan_cancel: &ScanCancel,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
-        tracing::debug!("SSTableReader::sequential_scan - Starting sequential scan");
-        tracing::debug!("SSTableReader::sequential_scan - Table ID: {}", table_id);
         tracing::debug!(
-            "SSTableReader::sequential_scan - Has schema: {}",
+            "SSTableReader::sequential_scan - starting: table_id={table_id}, has_schema={}",
             schema.is_some()
         );
 
         // Issue #3109: BTI (`da`) readers decode through the authoritative trie
-        // walk, NEVER the block-by-block loop below. Every OTHER caller of this
-        // function (`scan`, `scan_with_cell_metadata`) already returns early for BTI
-        // and so never reaches here, but `iterate_all_partitions` does NOT — its
-        // index branches are both gated on `bti_partitions_db.is_none()`, so a `da`
-        // reader fell through to this sequential walk and decoded through the
-        // `V5UncompressedOA` state machine, which drops `read_shadowing` (and, on a
-        // schema-required fixture, fails outright). Gating HERE — on the SAME
-        // `bti_partitions_db.is_some()` condition the three other surfaces use —
-        // makes the dispatch hold for every present and future caller of the
-        // sequential walk rather than relying on each one to remember it.
-        //
-        // Posture is unchanged: this walk parses with `read_shadowing = true` and
-        // applies `filter_tombstone` + the key range + sort-then-`limit`, all of
-        // which `bti_scan_with_metadata` applies identically (it IS what `scan`'s
-        // BTI branch returns), so BTI and non-BTI callers get the same semantics.
+        // walk, NEVER the block loop below. `iterate_all_partitions` is the one
+        // caller that reaches here with a `da` reader (both its index branches are
+        // gated on `bti_partitions_db.is_none()`), and that loop's state machine
+        // drops `read_shadowing` (and fails outright on a schema-required fixture).
+        // Posture is otherwise identical: both apply `filter_tombstone` + the key
+        // range + sort-then-`limit`. The PER-CALL `scan_cancel` is threaded through
+        // (#2264/#2346) — the non-cancellable wrapper polls the READER's own field
+        // instead, so a cancelled walk would stitch+parse the whole data section
+        // and return `Ok(every row)`.
         if self.bti_partitions_db.is_some() {
             let entries = self
-                .bti_scan_with_metadata(start_key, end_key, limit, schema, true, None)
+                .bti_scan_with_metadata_cancellable(
+                    start_key,
+                    end_key,
+                    limit,
+                    schema,
+                    true,
+                    None,
+                    scan_cancel,
+                )
                 .await?;
             return Ok(entries.into_iter().map(|(k, v, _meta)| (k, v)).collect());
         }

@@ -124,6 +124,16 @@ impl SSTableReader {
         // use, so the three surfaces cannot disagree about which readers are BTI.
         // See [`SSTableReader::stream_bti_scan`] for the full rationale.
         //
+        // BEHAVIOR DELTA, stated so it is not a surprise: this branch does NOT apply
+        // the `table_ids_match(&entry_table_id, &table_id)` filter the block loop
+        // below applies — the trie walk returns no per-entry `TableId` to match on.
+        // Safe and consistent with the sibling BTI surfaces (`scan`,
+        // `sequential_scan`, `run_scan_stream`), which all skip it for the same
+        // reason: every entry in this walk comes from the single SSTable being
+        // scanned, so the filter can only ever reject rows that DO belong to it
+        // (the parser tags entries from the SSTable header, which may carry a bare
+        // or default keyspace/table name rather than the query's qualified form).
+        //
         // Placed AFTER `open_batched_scan_cursor` deliberately: that call is this
         // task's single, format-branch-independent fault checkpoint (issue #3106),
         // and moving the BTI return above it would make the checkpoint silently

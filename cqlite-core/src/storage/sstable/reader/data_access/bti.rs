@@ -555,6 +555,53 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
+        self.bti_scan_with_metadata_cancellable(
+            start_key,
+            end_key,
+            limit,
+            schema,
+            read_shadowing,
+            now_secs,
+            &self.scan_cancel,
+        )
+        .await
+    }
+
+    /// [`Self::bti_scan_with_metadata`] with an explicit PER-CALL cancellation
+    /// token (issue #2346/#2264), mirroring the
+    /// [`stitch_all_chunks`](Self::stitch_all_chunks) /
+    /// [`stitch_all_chunks_cancellable`](Self::stitch_all_chunks_cancellable) pair.
+    ///
+    /// `sequential_scan` is the seam that needs it: it takes a caller-supplied
+    /// token (the compaction path's
+    /// [`iterate_all_partitions_cancellable`](SSTableReader::iterate_all_partitions_cancellable)
+    /// drives it with one that is NOT the reader's own field), and its BTI branch
+    /// must honour that token. Routing a `da` reader through the non-cancellable
+    /// wrapper would poll the WRONG flag — a cancelled walk would stitch and parse
+    /// the entire data section and return `Ok(every row)`, reporting success for a
+    /// scan the caller abandoned.
+    ///
+    /// The token is polled in BOTH phases of the walk: every 256 chunks inside the
+    /// stitch (the I/O phase) and every 256 entries of the post-parse filter loop —
+    /// the same two-phase cadence `sequential_scan`'s stitched branch uses.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn bti_scan_with_metadata_cancellable(
+        &self,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+        read_shadowing: bool,
+        now_secs: Option<i64>,
+        scan_cancel: &crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            ScanRow,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+    > {
+        scan_cancel.check()?;
         let cursor = self.new_scan_cursor().await?;
 
         // Decompress the entire data section. Precondition for stitch_all_chunks:
@@ -567,7 +614,9 @@ impl SSTableReader {
             crate::storage::sstable::read_work_counters::record_seek();
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
-        let whole = self.stitch_all_chunks(&cursor).await?;
+        let whole = self
+            .stitch_all_chunks_cancellable(&cursor, scan_cancel)
+            .await?;
 
         // Resolve schema via the four-tier strategy (provided > header > registry).
         // V5CompressedLegacy partition decode requires a schema (cells lack names).
@@ -592,7 +641,18 @@ impl SSTableReader {
         // would report ZERO scan work — including on the batched streaming surface,
         // whose block loop counted before #3109 routed BTI readers here.
         let mut prev_partition_key: Option<RowKey> = None;
-        for (_entry_table_id, entry_key, entry_value, cell_meta) in parsed {
+        for (idx, (_entry_table_id, entry_key, entry_value, cell_meta)) in
+            parsed.into_iter().enumerate()
+        {
+            // Cooperative cancellation (issue #2346/#2264): the stitch poll above
+            // covers the I/O phase, but `parse_block_with_cell_metadata`
+            // materialises every entry in one shot — poll here at the same
+            // 256-entry cadence as `sequential_scan`'s stitched branch so a
+            // cancelled caller does not walk a huge already-parsed result set to
+            // completion and then report success.
+            if idx & 0xFF == 0 {
+                scan_cancel.check()?;
+            }
             if prev_partition_key.as_ref() != Some(&entry_key) {
                 crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                 prev_partition_key = Some(entry_key.clone());
