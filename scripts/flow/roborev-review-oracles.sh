@@ -225,17 +225,43 @@ roborev_census() {
   # error as reading a mirror ref instead of the remote — and it would surface as
   # NOTHING-TO-REVIEW, i.e. "there is nothing to look at" instead of "we could not
   # tell". Capture the status and fail CLOSED on it.
+  #
+  # ============== THE CANONICAL PATH-NORMALISATION BOUNDARY (#3229) ==============
+  # `-z` IS LOAD-BEARING, and this is the ONE place path normalisation happens.
+  #
+  # Without it git C-QUOTES any path containing a double quote, a backslash or a
+  # non-ASCII byte (`"docs/\303\251 notes.md"`) — and EVERY consumer downstream then has
+  # to remember to unquote before it classifies or compares. Three rounds of blockers
+  # came from exactly that: the classification below read the extension of a QUOTED
+  # spelling (`md"`, `json"`) and called PROSE code (#3229 round 4 F1), while
+  # `census-exclusion:` and `prompt-content:` each unquoted at a different point in a
+  # different way. Patching one consumer per round is a losing game.
+  #
+  # So: `-z` makes the paths arrive RAW, `census_paths` / `census_code_paths` hold the RAW
+  # bytes, and the RAW form is the SINGLE internal representation for classification,
+  # comparison AND display. No consumer unquotes — `roborev_unquote_path` survives ONLY
+  # for text we do NOT get from git plumbing (the reviewer's prompt, whose `diff --git`
+  # headers are quoted by the producer), and it is called from exactly one place:
+  # `roborev_diff_header_has_path`. `scripts/tests/test_roborev_review_guard.sh` asserts
+  # that structurally, so a new consumer that re-implements unquoting FAILs `--lite`.
+  #
+  # `--numstat -z` emits one NUL-TERMINATED RECORD per file, `<add>\t<del>\t<path>`
+  # (the rename form, `<add>\t<del>\tNUL<old>NUL<new>`, cannot occur under
+  # `--no-renames`). Records are read with `read -d ''`, so a path containing a NEWLINE
+  # survives intact — which a line-oriented read cannot do at all.
+  local numstat_file="$LOG.numstat"
   set +e
-  NUMSTAT=$(git -C "$REPO" diff --numstat --no-renames "${BASE}...HEAD" 2>&1)
+  git -C "$REPO" diff --numstat -z --no-renames "${BASE}...HEAD" \
+    >"$numstat_file" 2>"$numstat_file.err"
   DIFF_RC=$?
   set -e
   if [ "$DIFF_RC" -ne 0 ]; then
     CENSUS_CHECK="FAIL (git diff failed)"
-    DETAILS+=("ERROR: census: 'git diff --numstat --no-renames ${BASE}...HEAD' exited $DIFF_RC in $REPO, so the census was never measured. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW — an unmeasurable diff is 'we cannot tell', never 'there is nothing to review'. git said:")
+    DETAILS+=("ERROR: census: 'git diff --numstat -z --no-renames ${BASE}...HEAD' exited $DIFF_RC in $REPO, so the census was never measured. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW — an unmeasurable diff is 'we cannot tell', never 'there is nothing to review'. git said:")
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       DETAILS+=("  $line")
-    done <<<"$NUMSTAT"
+    done <"$numstat_file.err"
     finish FAIL 1
   fi
 
@@ -244,8 +270,17 @@ roborev_census() {
   census_deleted=0
   census_non_code_files=0
   census_paths=()
-  while IFS=$'\t' read -r add del path; do
-    [ -n "${path:-}" ] || continue
+  local record add del path
+  while IFS= read -r -d '' record; do
+    [ -n "$record" ] || continue
+    # Split the record by hand: the PATH is everything after the second TAB and may itself
+    # contain a newline, so `read -r add del path` (which splits on IFS per LINE) cannot be
+    # used here — the whole point of `-z` is that the path is not line-delimited.
+    add="${record%%$'\t'*}"
+    path="${record#*$'\t'}"
+    del="${path%%$'\t'*}"
+    path="${path#*$'\t'}"
+    [ -n "$path" ] || continue
     if [ "$add" = "-" ]; then add=0; fi
     if [ "$del" = "-" ]; then del=0; fi
     census_files=$((census_files + 1))
@@ -258,6 +293,11 @@ roborev_census() {
     # `docs/foo.py`, `docs/reports/*-artifacts/**/*.sh`, `*.bt` and
     # `.github/workflows/*.yml` — is CODE. A `docs/` path PREFIX never makes a file
     # non-code on its own.
+    #
+    # CLASSIFIED ON THE RAW PATH (#3229): `$path` came out of `--numstat -z`, so it is
+    # never C-quoted and the extension/prefix tests below see the real bytes. Reading a
+    # QUOTED spelling here is what made `docs/é notes.md` (extension `md"`, prefix
+    # `"docs/`) classify as CODE and false-FAIL `census-exclusion:` under `*.md`.
     file_non_code=0
     ext=""
     case "$path" in *.*) ext="${path##*.}" ;; esac
@@ -296,7 +336,7 @@ roborev_census() {
     # review is enqueued (#3229).
     census_code_paths+=("$path")
   fi
-  done <<<"$NUMSTAT"
+  done <"$numstat_file"
 
   census_noun="files"
   if [ "$census_files" -eq 1 ]; then census_noun="file"; fi
@@ -417,15 +457,26 @@ roborev_census() {
 #      ⇒ NEVER a failure. The file is simply delivered to the reviewer: bounded
 #      NOISE, never blindness.
 
-# roborev_unquote_path <path>: render a `git diff --numstat` path back to the RAW
-# bytes that `-z` output carries.
+# roborev_unquote_path <token>: render a git C-QUOTED path token back to its RAW bytes.
 #
-# NUL-SAFETY, both halves. Survivors are read with `-z` (raw, never quoted, safe for
-# spaces and newlines); the census is built from `--numstat` WITHOUT `-z`, which
-# C-QUOTES any path containing a double quote, a backslash or a non-ASCII byte — this
-# repo tracks exactly such a path,
-# `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`. Comparing the
-# two renderings directly would mismatch on precisely those paths, so normalise here.
+# THE ONE UNQUOTING IMPLEMENTATION, and it has exactly ONE caller:
+# `roborev_diff_header_has_path`. Everything the wrapper gets from git PLUMBING is read
+# with `-z` and is therefore already raw (the census's `--numstat -z`, the exclusion
+# check's `--name-only -z`), so no census/survivor path is ever quoted and nothing on
+# those paths needs this function. What DOES arrive quoted is text produced by SOMEONE
+# ELSE: the reviewer's prompt, whose `diff --git` headers are written by roborev's own
+# `git diff` with quoting ON and no `-z` available to us.
+#
+# That division is the #3229 canonical boundary: normalise once where the bytes enter,
+# keep RAW as the single internal representation, and never let a second consumer grow
+# its own unquoting. The guard suite asserts the single-caller property structurally,
+# because "one more consumer normalises slightly differently" is what produced a blocker
+# in each of rounds 2, 3 and 4.
+#
+# The paths this exists for are real: this repo tracks
+# `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md` and 40
+# space-bearing paths under `docs/`.
+#
 # IT RETURNS THROUGH A NAMED GLOBAL (`_rx_unquoted`), NEVER THROUGH `$(...)`. Command
 # substitution STRIPS every trailing newline, so a tracked path ending in a `\012`
 # escape (`weird\n`) would come back a byte short — and a short path both mis-compares
@@ -468,6 +519,113 @@ roborev_unquote_path() {
     esac
   done
   _rx_unquoted="$out"
+}
+
+# _rx_take_quoted_token <string>: the string STARTS with a `"`; split off the complete
+# C-quoted token (quotes included) into `_rx_qtok` and the remainder into `_rx_rest`.
+# Returns 1 when the token is unterminated (a malformed header — never guessed at).
+#
+# The scan is what makes a quoted side UNAMBIGUOUS: a C-quoted body never contains an
+# unescaped `"`, so the first one not preceded by a backslash ends the token, whatever
+# spaces the path carries.
+_rx_take_quoted_token() {
+  local s="$1" i=1 n ch
+  n=${#s}
+  _rx_qtok=""
+  _rx_rest=""
+  while [ "$i" -lt "$n" ]; do
+    ch="${s:$i:1}"
+    if [ "$ch" = '\' ]; then
+      i=$((i + 2))
+      continue
+    fi
+    if [ "$ch" = '"' ]; then
+      _rx_qtok="${s:0:i+1}"
+      _rx_rest="${s:i+1}"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# roborev_diff_header_has_path <diff-git-header-line> <RAW census path>: true when the
+# header names that path on EITHER side.
+#
+# THE ONLY WAY a consumer may ask "is this census path in the prompt?" (#3229 round 4,
+# blockers F2 + F3). It is defined HERE, beside the boundary it belongs to, because the
+# previous arrangement — a regex path-set built in `roborev-review-checks.sh` and probed
+# with `grep -Fxq` over a NEWLINE-delimited file — was wrong in three independent ways,
+# each of which had to be found by a separate review round:
+#
+#   * `^diff --git a/[^ ]+ b/[^ ]+$` cannot split a SPACE-bearing header, and there is no
+#     regex that can: `a/x y b/z w` has several readings. So no regex is used at all.
+#   * requiring BOTH sides quoted missed the MIXED shape `diff --git a/ascii "b/quoted"`,
+#     which git emits when only one side needs quoting — a shape that occurs ONLY on
+#     renames, and renames are ON in the reviewer's diff while our census runs
+#     `--no-renames`. Both were therefore reported ABSENT: a false FAIL on the strongest
+#     anti-vacuity key the wrapper has.
+#   * a NEWLINE-delimited path set + `grep -Fxq` turns a path containing a newline into
+#     ALTERNATIVES, so `a` present "proved" `a<LF>b.rs` present — a false PASS. Membership
+#     is decided here, in bash, per header, with no delimiter anywhere.
+#
+# THE SHAPES, and why each is decidable:
+#   1. `diff --git "a/<q>" "b/<q>"`  — both quoted: both sides parsed exactly.
+#   2. `diff --git "a/<q>" b/<raw>`  — a-side quoted, b-side literal to end of line.
+#   3. `diff --git a/<raw> "b/<q>"`  — an UNQUOTED side never contains a `"` (git would
+#      have quoted it), so the FIRST `"` begins the b-side token.
+#   4. `diff --git a/<raw> b/<raw>`  — the ambiguous case. Not split at all: the WANTED
+#      path is tested in each position it could occupy, with `$want` quoted inside the
+#      pattern so a path containing `*`/`?`/`[` is matched literally.
+roborev_diff_header_has_path() {
+  local hdr="$1" want="$2" rest a_raw b_raw
+  case "$hdr" in 'diff --git '*) ;; *) return 1 ;; esac
+  rest="${hdr#diff --git }"
+
+  if [ "${rest:0:1}" = '"' ]; then
+    _rx_take_quoted_token "$rest" || return 1
+    roborev_unquote_path "$_rx_qtok"
+    a_raw="${_rx_unquoted#a/}"
+    [ "$a_raw" != "$want" ] || return 0
+    rest="${_rx_rest# }"
+    if [ "${rest:0:1}" = '"' ]; then
+      _rx_take_quoted_token "$rest" || return 1
+      roborev_unquote_path "$_rx_qtok"
+      b_raw="${_rx_unquoted#b/}"
+    else
+      b_raw="${rest#b/}"
+    fi
+    [ "$b_raw" = "$want" ] && return 0
+    return 1
+  fi
+
+  case "$rest" in
+    *'"'*)
+      # shape 3: unquoted a-side (git would have quoted one holding a `"`), quoted b-side.
+      a_raw="${rest%%\"*}"
+      a_raw="${a_raw% }"
+      a_raw="${a_raw#a/}"
+      [ "$a_raw" != "$want" ] || return 0
+      roborev_unquote_path "\"${rest#*\"}"
+      b_raw="${_rx_unquoted#b/}"
+      [ "$b_raw" = "$want" ] && return 0
+      # NO early `return 1`: fall through to the positional tests. A `"` in the line does
+      # not PROVE a quoted b-side — a producer that emits a quote-bearing path UNQUOTED
+      # (git quotes it; not every diff we are handed is git's own) yields a header whose
+      # only reading is positional. Falling through can only ever match a header that
+      # LITERALLY carries `a/<want> b/` or ` b/<want>`, so it widens nothing unsound.
+      ;;
+  esac
+
+  # shape 4: neither side parseable as quoted. The reading is ambiguous, so instead of
+  # splitting, test each position `$want` could occupy — `$want` quoted inside the pattern,
+  # so a path containing `*`, `?` or `[` matches literally.
+  case "$rest" in
+    "a/$want b/$want") return 0 ;;
+    "a/$want b/"*) return 0 ;;
+    "a/"*" b/$want") return 0 ;;
+  esac
+  return 1
 }
 
 # _rx_has_slash <string>: true when the string contains a '/'.
@@ -1061,10 +1219,14 @@ roborev_check_census_exclusion() {
     _rx_survivor["$sp"]=1
   done <"$surv_file"
 
+  # BOTH SIDES ARE ALREADY RAW (#3229 canonical boundary): the census comes from
+  # `--numstat -z` and the survivors from `--name-only -z`, so this is a direct byte
+  # comparison with no unquoting step to get wrong. This consumer used to unquote here —
+  # one of three consumers each doing it at a different point, which is the arrangement
+  # that produced a blocker per review round.
   for path in "${census_code_paths[@]}"; do
-    roborev_unquote_path "$path"
-    if [ -z "${_rx_survivor[$_rx_unquoted]:-}" ]; then
-      swallowed+=("$_rx_unquoted")
+    if [ -z "${_rx_survivor[$path]:-}" ]; then
+      swallowed+=("$path")
     fi
   done
 

@@ -1193,6 +1193,20 @@ assert_lacks 'case (cx6) no false FAIL from a quoting artefact' '^census-exclusi
 assert_says 'case (cx6) prompt-content compares the quoted census path against the prompt NORMALISED' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6) prompt-content does not false-FAIL on a quoting artefact' '^prompt-content: FAIL'
 
+printf '== case (cx6k): the same path in the header shape git REALLY emits for a quote ==\n'
+reset_stub
+# (cx6) hands the wrapper an UNQUOTED header carrying a literal `"` — a producer that is
+# not git. git itself C-QUOTES a quote-bearing path and ESCAPES the inner quotes:
+# `diff --git "a/…odd \"q\" name.sh" "b/…"`. Both readings must count as present, so the
+# escaped-quote round trip is pinned separately rather than assumed to follow from (cx6).
+work=$(make_fixture case_cx6k docs-odd-name)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git "a/docs/reports/x-artifacts/harness/odd \\"q\\" name.sh" "b/docs/reports/x-artifacts/harness/odd \\"q\\" name.sh"'
+run_wrapper "$work"
+assert_verdict 'case (cx6k)' PASS 0
+assert_says 'case (cx6k) the escaped-quote header shape counts as present' '^prompt-content: PASS \(2/2 code census paths present\)$'
+
 printf '== case (cx6c): a CODE path under a SPACE-bearing directory does not false-FAIL prompt-content ==\n'
 reset_stub
 # `docs/storage engine/` is a real tracked directory in this repo (40 space-bearing paths
