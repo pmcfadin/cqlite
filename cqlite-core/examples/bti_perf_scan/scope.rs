@@ -89,6 +89,39 @@ pub fn is_table_dir(name: &str, table: &str) -> bool {
     }
 }
 
+/// The type of one directory entry, OBSERVED with `lstat` and fail-closed (roborev
+/// #3234 round-12 F1).
+///
+/// Two deliberate choices, both about the same thing — a classification that CANNOT be
+/// silently wrong:
+///
+/// - it is an `lstat`, not `DirEntry::file_type()`. On Linux the latter is served from
+///   the `d_type` byte cached in the directory entry, so it answers even for an entry
+///   the process cannot stat at all: the type would come from the directory's claim
+///   rather than from an observation, and the one failure mode that matters here (an
+///   entry we cannot look at) would be invisible. `symlink_metadata` is the observation,
+///   and it can FAIL — which is the point.
+/// - it does NOT follow symlinks, so a symlink is reported as a symlink rather than as
+///   whatever it points at. Both callers below require the real thing.
+///
+/// An error here is returned, never swallowed: the counts these callers produce are the
+/// generation count the AC3 figure is attributed to, so an entry that cannot be
+/// classified must refuse rather than quietly change a number.
+fn entry_file_type(path: &Path, dir: &Path) -> std::result::Result<std::fs::FileType, String> {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type())
+        .map_err(|e| {
+            format!(
+                "cannot determine what {} is (lstat failed: {e}), while reading {}. An entry \
+                 that cannot be classified is not an entry that can be counted, and skipping \
+                 it would report a generation count or a corpus-directory set this run cannot \
+                 stand behind. Refusing.",
+                path.display(),
+                dir.display()
+            )
+        })
+}
+
 fn matching_dirs(ks_dir: &Path, table: &str) -> std::result::Result<Vec<PathBuf>, String> {
     let mut out: Vec<PathBuf> = Vec::new();
     let entries = std::fs::read_dir(ks_dir).map_err(|e| {
@@ -97,9 +130,25 @@ fn matching_dirs(ks_dir: &Path, table: &str) -> std::result::Result<Vec<PathBuf>
             ks_dir.display()
         )
     })?;
-    for entry in entries.flatten() {
+    // Every entry error is PROPAGATED (roborev #3234 round-12 F1). `entries.flatten()`
+    // dropped them, so an unreadable entry silently shrank the candidate set — and the
+    // cardinality of that set is exactly what makes an ambiguous root a refusal rather
+    // than a measurement over an unknown union.
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "cannot read an entry of the keyspace directory {}: {e}. Skipping it would \
+                 hide a `{table}-<uuid>` directory from the ambiguity check. Refusing.",
+                ks_dir.display()
+            )
+        })?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if entry.path().is_dir() && is_table_dir(&name, table) {
+        if !is_table_dir(&name, table) {
+            continue;
+        }
+        // A REAL directory: a symlink named `<table>-<32 hex>` is not a Cassandra table
+        // directory, and resolving one would measure bytes from outside the corpus.
+        if entry_file_type(&entry.path(), ks_dir)?.is_dir() {
             out.push(entry.path());
         }
     }
@@ -107,22 +156,46 @@ fn matching_dirs(ks_dir: &Path, table: &str) -> std::result::Result<Vec<PathBuf>
     Ok(out)
 }
 
-/// `*-Data.db` files in one directory — one per generation.
+/// `*-Data.db` REGULAR FILES in one directory — one per generation.
 ///
-/// The predicate is a SUFFIX match on the file NAME, and deliberately so: it is the
-/// exact rule `discovery::scanner` counts SSTables with (`ends_with("-Data.db") || ==
-/// "Data.db"`), and this count is compared against what discovery selected. A stricter
-/// rule here would disagree with the thing it is checking.
+/// The NAME predicate is a suffix match, and deliberately so: it is the exact rule
+/// `discovery::scanner` counts SSTables with (`ends_with("-Data.db") || == "Data.db"`),
+/// and this count is compared against what discovery selected. A stricter NAME rule here
+/// would disagree with the thing it is checking.
+///
+/// The TYPE, though, is required to be a regular file (roborev #3234 round-12 F1). The
+/// name alone counted a DIRECTORY or a SYMLINK named `*-Data.db` as a generation, and
+/// this count is not decoration: `main.rs` prints it as `generations:` and derives
+/// `storage_route:` from it (`generations > 1 && schema_resolved` selects
+/// `generation_merge::stream_generations_for_read`). Measured on the committed 468-row
+/// BTI fixture, one directory plus one symlink named `da-<n>-bti-Data.db` beside the one
+/// real generation made this harness report `generations: 3` and attribute its own figure
+/// to the multi-generation merge route — i.e. the instrument misreporting its own
+/// measurement, with `rows_scanned` unchanged at 468 and the exit code 0. So a
+/// non-regular entry is NOT a generation, and an entry whose type cannot be OBSERVED at
+/// all is an error rather than one silently left out of the count.
 pub fn count_generations(dir: &Path) -> std::result::Result<usize, String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot read the corpus directory {}: {e}", dir.display()))?;
-    Ok(entries
-        .flatten()
-        .filter(|e| {
-            let n = e.file_name().to_string_lossy().to_string();
-            n.ends_with("-Data.db") || n == "Data.db"
-        })
-        .count())
+    let mut count = 0usize;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "cannot read an entry of the corpus directory {}: {e}. Skipping it would \
+                 report a generation count this run cannot stand behind (the count selects \
+                 the scan route). Refusing.",
+                dir.display()
+            )
+        })?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.ends_with("-Data.db") || name == "Data.db") {
+            continue;
+        }
+        if entry_file_type(&entry.path(), dir)?.is_file() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// Resolve the one directory this run may ingest. `Err(message)` => exit `OPEN_FAILED`

@@ -501,14 +501,35 @@ assert_corpus() {  # $1 = published sstable dir
   local dest="$1" f base gens=0 max_data=0 sz rows_db gen_ids=()
   [ -d "$dest" ] || die "no published corpus dir at $dest"
 
-  # AC1: `da` descriptors only. A stray `nb-*` means a yaml setting did not take;
-  # that is the exact silent failure the two settings guard against.
-  local foreign
-  foreign="$(find "$dest" -maxdepth 1 -type f -name '*.db' ! -name 'da-*-bti-*' -printf '%f\n' | sort || true)"
-  [ -z "$foreign" ] || die "AC1: non-BTI descriptor(s) in $dest: $(tr '\n' ' ' <<<"$foreign")
+  # AC1: EVERY file in the published SSTable directory must be a `da` SSTable component
+  # with a NUMERIC generation, checked in two parts because there are two distinct
+  # diagnoses. The published directory holds exactly three kinds of file: SSTable
+  # components (`da-<gen>-bti-<Component>`), their `*-Data.db.jsonl` sstabledump goldens
+  # (which carry the same descriptor prefix) and the installed `schema.cql`.
+  local foreign malformed
+  # (a) not a `da` descriptor at all. A stray `nb-*` means a yaml setting did not take;
+  # that is the exact silent failure the two settings guard against. This is checked over
+  # every file rather than over `*.db` alone, so a non-component file cannot hide behind
+  # a different extension either.
+  foreign="$(find "$dest" -maxdepth 1 -type f ! -name 'schema.cql' -printf '%f\n' \
+    | grep -Ev '^da-' | sort || true)"
+  [ -z "$foreign" ] || die "AC1: non-BTI descriptor(s) or stray file(s) in $dest: $(tr '\n' ' ' <<<"$foreign")
        A stock Cassandra 5.0 node emits 'nb' (BIG). BOTH cassandra.yaml settings
        (storage_compatibility_mode: NONE and sstable.selected_format: bti) must be
        applied AND the node restarted BEFORE the table is created."
+  # (b) a `da` file whose descriptor is not `da-<numeric gen>-bti-<Component>`
+  # (roborev #3234 round-12 F2). The old check globbed `da-*-bti-*` and so ACCEPTED
+  # `da-x-bti-Statistics.db`; the numeric test was applied only to the discovered
+  # `*-Data.db` files, so --verify-only could print VERIFY-OK over a corpus carrying a
+  # malformed NON-Data component. Every component basename is validated against the
+  # regex here, once, whatever component it names.
+  malformed="$(find "$dest" -maxdepth 1 -type f -name 'da-*' -printf '%f\n' \
+    | grep -Ev '^da-[0-9]+-bti-.' | sort || true)"
+  [ -z "$malformed" ] || die "AC1: malformed \`da\` descriptor(s) in $dest: $(tr '\n' ' ' <<<"$malformed")
+       Every component must be da-<gen>-bti-<Component> with a NUMERIC generation:
+       the generation is what the one-SSTable-per-chunk mapping is checked on, and what
+       the AC3 figure is attributed to. A non-numeric or truncated descriptor is not
+       something Cassandra wrote, so nothing here can be verified against it."
 
   shopt -s nullglob
   local datas=("$dest"/da-*-bti-Data.db)

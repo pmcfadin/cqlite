@@ -296,16 +296,48 @@ fn documented_sstable_dir(
             path.display()
         )
     })?;
-    let entry = arr
+    // EXACTLY ONE matching record, not "the first one" (roborev #3234 round-12 F3).
+    // `.find()` accepted a `tables` array holding SEVERAL entries for this table and
+    // silently took the earliest, so two records carrying DIFFERENT `sstable_dir`
+    // values made the authoritative ingest scope a function of ARRAY ORDER: the
+    // measurement would be confined to whichever copy happened to be written first,
+    // with the other one — describing a different directory, and therefore possibly a
+    // different generation count and a different scan route — never mentioned. A
+    // manifest that describes this table twice does not have one authoritative answer
+    // to "which directory were these counts read from", so it is refused with the
+    // count it found rather than resolved by position.
+    let matches: Vec<&serde_json::Value> = arr
         .iter()
-        .find(|t| t.get("table").and_then(|n| n.as_str()) == Some(table))
-        .ok_or_else(|| {
-            format!(
+        .filter(|t| t.get("table").and_then(|n| n.as_str()) == Some(table))
+        .collect();
+    let entry = match matches.as_slice() {
+        [one] => *one,
+        [] => {
+            return Err(format!(
                 "{}: `tables[]` has no entry for `{table}`, the table this manifest's own \
                  `table` field names — so the directory its counts were read from is unknown",
                 path.display()
-            )
-        })?;
+            ))
+        }
+        many => {
+            return Err(format!(
+                "{}: `tables[]` has {} entries for `{table}`, the table this manifest's own \
+                 `table` field names — exactly one is required. The entry's `sstable_dir` is \
+                 what SCOPES ingestion, so with duplicates the measured directory would depend \
+                 on array ORDER; the dirs named are:\n    {}\n  Refusing.",
+                path.display(),
+                many.len(),
+                many.iter()
+                    .map(|t| t
+                        .get("sstable_dir")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("(no string sstable_dir)")
+                        .to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n    ")
+            ))
+        }
+    };
     let rel = entry
         .get("sstable_dir")
         .and_then(|s| s.as_str())
