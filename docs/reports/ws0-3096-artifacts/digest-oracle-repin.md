@@ -41,13 +41,33 @@ a stride-8 rule inside a partition land on two different bit alignments.
 | `metric_a` | `Int32` | `r % 8 == 0` | 65 | **`{0, 4}`** — byte-ALIGNED and NON-boundary, in one column |
 | `region` | `Utf8` (offsets buffer) | `r % 8 == 3` | 65 | `{3, 7}` |
 | `payload` | `Utf8`, 414 chars | `r % 40 == 17` | 15 | `{1, 5}` |
-| `device_id` | `FixedSizeBinary(16)` | partition tail (`r == 99`) | 5 | `{3, 7}` — for the final partition this is the last VALID bit of the final batch's last bitmap byte, against the padding |
+| `device_id` | `FixedSizeBinary(16)` | partition tail (`r == 99`) | 5 | `{3, 7}` — for the final partition this is, BY CONSTRUCTION of the rule, the last VALID bit of the final batch's last bitmap byte, against the padding |
 
 Totals: 150 null cells, 5,850 non-null cells, 11.70 cells/row (was 12.00). All
 four columns hold nulls in all four batches, so nothing is confined to a
-trailing position. Every number above is MEASURED by `ValidityCoverage` in the
-oracle and asserted per column — a total that still adds up while nulls moved
-between columns cannot pass.
+trailing position.
+
+Every number above is MEASURED by `ValidityCoverage` in the oracle, but the set
+that is ASSERTED is narrower than the set that is measured, and the difference
+matters:
+
+* **Asserted** — the per-column null census (a total that still adds up while
+  nulls moved between columns cannot pass), the 150-cell total, and, for
+  `metric_a`, that its observed bit offsets include both a byte-ALIGNED offset
+  (`0`) and a NON-boundary offset (`!= 0`), and that its nulls occupy at least
+  two distinct batches.
+* **Narrated from the null rules, NOT asserted** — the other three columns'
+  observed bit offsets, the "all four batches" spread for columns other than
+  `metric_a`, and the padding-adjacency of the `device_id` partition-tail null.
+
+One limitation is worth stating explicitly, because the assertion's own wording
+reads stronger than what it checks: the multi-batch assertion is expressed
+relative to the LAST NULL-BEARING batch, not the stream's actual final batch. It
+therefore does NOT verify that the real final batch carries null coverage — were
+a regression to strip nulls out of the trailing batch entirely, the "last" batch
+would simply be redefined downward and the assertion would still pass.
+Strengthening the oracle so the stream's true final batch is the reference is
+owned by issue #3272.
 
 ## 3. Non-vacuity proof (perturbation, run and reverted, not committed)
 
@@ -123,6 +143,19 @@ owner voided it. The oracle observes both from commit `3173e9c` forward: the
 producer-side tap that folds the builders' output before `encode_do_get` arrived
 in `fcd96ca`, and validity-bitmap content arrived in `3173e9c` as 150
 deterministic nulls placed at both byte-aligned and non-byte-aligned bit offsets
-within a single column, with the placement itself measured and asserted rather
-than narrated, and with a single shifted validity bit demonstrated to move both
-digests while every count-based assertion stayed green.
+within a single column, with that BIT-OFFSET placement measured and asserted
+rather than narrated, and with a single shifted validity bit demonstrated to move
+both digests while every count-based assertion stayed green.
+
+That narrower wording is deliberate, and it replaces an earlier claim in this
+file that "the placement itself" was measured and asserted rather than narrated.
+Null placement is not asserted uniformly: the bit offset WITHIN a bitmap byte is
+(byte-aligned and non-boundary, both, in `metric_a`), and so is a spread across
+at least two batches, but the batch-position claims are anchored to the last
+NULL-BEARING batch rather than the stream's actual final batch, so final-batch —
+and hence padding-adjacent — coverage is a property of how the fixture's null
+rules happen to be written, not a property the oracle verifies. See the
+limitation in section 2. Three claims are unaffected and remain fully asserted:
+nulls at both byte-aligned and non-byte-aligned offsets within one column, the
+fold moving when a single validity bit shifts (perturbation-proven, section 3),
+and arm-invariance of both digests. Closing the residual gap is issue #3272.
