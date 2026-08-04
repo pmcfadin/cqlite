@@ -136,8 +136,9 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    `reviewed-sha`, vacuous verdict) and re-run. A **docs-only diff cannot be roborev-certified
    at all** — record primary-source verification in the PR body instead of "roborev clean". "docs-only"
    means a **code-free CENSUS**, never a `docs/` path prefix: a PR carrying `docs/reports/*-artifacts/`
-   harness executables ships reviewed CODE, and `census-exclusion:` FAILs closed pre-enqueue when the
-   configured `exclude_patterns` would swallow it (#3229)
+   harness executables ships reviewed CODE. Nothing predicts roborev's exclusion set pre-enqueue
+   (deferred, #3283), so a path the reviewer did not receive FAILs AFTER the round under
+   `prompt-content:` — **if `prompt-content:` FAILs, suspect `.roborev.toml` first** (#3229)
    (https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/).
    Triage every finding per `docs/development/roborev-severity.md`:
    - **Blockers** (correctness, data-parity, no-heuristics, safety/unwrap-panic paths,

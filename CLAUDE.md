@@ -422,10 +422,20 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   measurement-harness files on PR #3222 — the `docs/reports/*-artifacts/` harnesses this repo ships **by
   convention are reviewed CODE**, so a PR carrying them is NOT a docs-only change and MUST be
   roborev-certified. The deny-list is now narrowed to `*.md` plus artifact extensions **scoped to
-  artifact-bearing DIRECTORIES**, and the pre-enqueue
-  **`census-exclusion:`** key (immediately after `code-free:` in the block's fixed order) FAILs closed,
-  naming the swallowed paths and the pattern responsible, whenever the configured set would swallow census
-  code. Its asymmetry is deliberate — **noise, never blindness** — but that claim is SCOPED, and the
+  artifact-bearing DIRECTORIES** (measured after the narrowing: 72 `docs/` executables reach the reviewer,
+  0 markdown does, and nothing outside `docs/` is newly excluded). **NOTHING PREDICTS THE EXCLUSION SET
+  PRE-ENQUEUE.** A `census-exclusion:` key that did — a bash port of roborev's `git.FormatExcludeArgs` over
+  a TOML parse of three config sources — was built on #3229 and **REMOVED by owner ruling, deferred to
+  #3283**: its false-PASS count was *increasing* across review rounds (1, 1, 2, 3), and two of the last
+  round's three defects lived in code the two preceding fix rounds had just introduced. **A guard with
+  known documented false-PASSes is worse than no guard, because it invites reliance it cannot support.**
+  So a path the reviewer did not receive surfaces AFTER the review, under `prompt-content:`, fail-closed,
+  with a cause that names the symptom rather than the mechanism — **if `prompt-content:` FAILs, suspect
+  `.roborev.toml` first.** The class-level lesson, recorded for #3283: **a port is a second
+  implementation, and a second implementation's correctness is only knowable by differential testing
+  against the original** — the oracle re-derived Go's trim rules in bash and was tested against a *model*
+  of Go, not against Go, so its NBSP divergence (Go's `unicode.IsSpace` trims U+00A0; bash trims do not)
+  was unfindable by care. The narrowing's asymmetry is deliberate — **noise, never blindness** — but that claim is SCOPED, and the
   scope is the whole content of it: it holds for **inert dumps** (`.txt`/`.log`/`.err`), where exclusion
   costs only **noise** (a new artifact *directory* is re-admitted to review prompts, a token cost, while
   the swallow direction can only ever fail loudly). For a **code-bearing format**
@@ -444,50 +454,46 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `docs/sstables-definitive-guide/diagrams/`) and everything else under `docs/` is **reviewed**. Still
   extension-scoped *within* each directory, never a blanket `<dir>/**` — those directories hold the
   executable harnesses that ARE the census `docs/**` swallowed. The census-side mirror
-  (`CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS`) is asserted **structurally** against
-  the committed `.roborev.toml` for set equality, so a one-sided edit FAILs `--lite` instead of surfacing
-  as a puzzling `census-exclusion:` failure on someone else's report PR.
-  **The effective exclusion set this check models is THREE config files** — the `--repo` checkout's
-  `.roborev.toml`, the **ROOT checkout's** (see the ordering property below) and `~/.roborev/config.toml`.
-  Every value line names WHICH source is responsible. A *configured* pattern is anchored by
-  `git.FormatExcludeArgs` into **two** pathspecs (`<body>` and `<body>/**`), and both are reproduced —
-  UNDER-modelling that reports paths as surviving that roborev really drops.
-  **The verdict split follows ONE rule, and it generalizes beyond this key — apply it to any call of
-  this shape without asking: FAIL where the author can act; NOTICE where only the information is
-  actionable; never silence.** On this key's subject it resolves to a single call: a *configured* pattern
-  swallowing census code is a **FAIL**, pre-enqueue, because the remedy is a one-token edit to a named file.
-  The key therefore has **no `NOTICE` value** — a NOTICE is for a swallow with no remedy, and with every
-  pattern in play configured and editable there is no such case left (see the declared residual below). A
-  **TOTAL** swallow is not a separate branch: it is a configured swallow, so it FAILs, and the value carries
-  `<m>/<n>` so `m == n` shows on its face. `NOTICE*` stays outside the wrapper's failing-capable scan
-  (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`) because `vacuity-tier1:` needs it as an advisory.
-  **DECLARED RESIDUAL — roborev's compiled-in deny-list is NOT modelled (#3278).** roborev also appends a
-  hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`, `**/pnpm-lock.yaml`, `**/.cache/**`, …)
-  that no configuration can switch off. Modelling it was built and then **DELETED on #3229**: four
-  consecutive review rounds found four false-PASSes *inside that subsystem alone*, no acceptance criterion
-  reached it, and **subtraction cannot introduce a false PASS** — modelling FEWER exclusions than roborev
-  applies can never excuse a path from coverage. So the residual, stated rather than left to be
-  rediscovered: **a diff whose code-census paths include a built-in-excluded path (`Cargo.lock`, `go.sum`,
-  `pnpm-lock.yaml`, …) has that path silently dropped from the reviewer's diff, `census-exclusion:` reports
-  it SURVIVING, and `prompt-content:` then FAILs on its absence.** That **fails CLOSED** — the cost is a
+  (`CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS`) and the committed `.roborev.toml` are
+  the same fact written twice and are **maintained BY HAND** — add an extension or a directory in both, in
+  one edit. There is deliberately **no automated drift assert**: the one that existed depended on the
+  removed TOML parser and went with it, so drift surfaces the slow way, as a `prompt-content:` FAIL on
+  someone's report PR, until #3283 lands a guard whose own correctness is establishable. That gap is a
+  **known reduction in coverage**, accepted, not argued away.
+  **The verdict split follows ONE rule — apply it to any call of this shape without asking: FAIL where
+  the author can act; NOTICE where only the information is actionable; never silence.** `NOTICE` stays
+  outside the wrapper's failing-capable scan (`FAIL|FINDINGS|ERROR|INCONSISTENT`) because `vacuity-tier1:`
+  needs it as an advisory.
+  **NEITHER HALF OF ROBOREV'S EXCLUSION SET IS MODELLED (#3283 configured, #3278 compiled-in).** Beyond
+  `exclude_patterns`, roborev appends a hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`,
+  `**/pnpm-lock.yaml`, `**/.cache/**`, …) that no configuration can switch off. Modelling either half was
+  built and then **DELETED on #3229**, and **subtraction cannot introduce a false PASS** — with nothing
+  predicted, nothing is excused. So the residual, stated rather than left to be rediscovered: **a path
+  roborev excludes by either half is silently dropped from the reviewer's diff, nothing names it
+  pre-enqueue, and `prompt-content:` FAILs on its absence.** That **fails CLOSED** — the cost is a
   diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
   **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
   Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
-  **That is ONE SHAPE, found three times on #3229, so it is now a RULE: a positive verdict requires an
+  **That is ONE SHAPE, found repeatedly on #3229, so it is now a RULE: a positive verdict requires an
   AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
-  every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state `built-in-set:` signal took
-  the permissive excusal path (that subsystem is since deleted, but the shape is the lesson);
-  `corroboration: UNAVAILABLE` reached a `PASS (no exclusion patterns configured)`
-  and **enqueued** (the code's own comment said the binary was the only oracle that could tell "no key
-  recognised" from "nothing configured", then never required it to have *answered*); a
-  `${end:-$start}` default degraded a failed `awk` bound to a 1-line scan. So: never derive a pass from the
-  ABSENCE of a bad signal; where an oracle is the SOLE evidence for a claim and could not be consulted the
-  verdict is NON-PASSING and its text names what was unverifiable; key a permissive branch on the
-  AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a signal genuinely SHOULD be permissive, record
-  the reason IN CODE at the branch (e.g. corroboration with patterns already parsed and git-matched). The
-  wrapper's own verdict scan was the same shape and is now a CLOSED grammar (unrecognised value ⇒ FAIL) plus
-  a backstop that no PASS may carry a verdict-carrying key that is not affirmatively `PASS` — a `SKIP` means
-  the check never ran, which is the vacuous pass itself.
+  every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state signal took the permissive
+  excusal path; an `UNAVAILABLE` corroboration state reached a `PASS` and **enqueued** (the code's own
+  comment said the binary was the only oracle that could tell "no key recognised" from "nothing
+  configured", then never required it to have *answered*); a `${end:-$start}` default degraded a failed
+  `awk` bound to a 1-line scan. Those instances lived in a subsystem since deleted; **the shape is the
+  lesson, and it was never theirs** — it was in the wrapper's own terminal verdict scan, which predates
+  them all. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
+  unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
+  signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict
+  scan is therefore a CLOSED grammar (unrecognised value ⇒ FAIL) plus a backstop that no PASS may carry a
+  verdict-carrying key that is not affirmatively `PASS` — a `SKIP` means the check never ran, which is the
+  vacuous pass itself. **Both are RETAINED after the oracle that surfaced them was deleted**, because they
+  are properties of every remaining key, and leaving the terminal verdict permissive again would leave the
+  wrapper worse than we found it. **And the closure must not itself be a prefix test**: `PASS*` accepts
+  `PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`, i.e. the guard against unplanned values would
+  check a *spelling* rather than a *state* — the same shape one level down. So each value is reduced to its
+  **verdict TOKEN** (up to the first space) and matched **EXACTLY**.
   **Paths are normalised ONCE, at the census, and that boundary is the fix for SIX blockers (#3229).**
   Rounds 2–4 of review produced six, and every one was a path-normalisation defect in a *different*
   consumer, because normalisation was scattered. Now the census reads `git diff --numstat -z` (and the
@@ -499,8 +505,9 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `docs/`), **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`), and the **MIXED** shape a rename produces
   (`diff --git a/<ascii> "b/<quoted>"`). Two measured costs of getting this wrong, in both directions: the
   census classifying a *quoted* spelling read `docs/é notes.md` as extension `md"` and called PROSE **code**,
-  so `*.md` then reported a swallow ⇒ `census-exclusion: FAIL` **pre-enqueue** on an ordinary docs+code
-  branch (reproduced against the tracked `docs/research/CQLite Writes (M5) — …md`); and a
+  so the configured `*.md` legitimately removed it from the reviewer's diff while `prompt-content:`
+  demanded it there ⇒ a **false FAIL** on an ordinary docs+code branch (reproduced against the tracked
+  `docs/research/CQLite Writes (M5) — …md`); and a
   newline-delimited path set with `grep -Fxq` membership made a path's first line "prove" its presence ⇒ a
   genuine **false PASS**. A key that reds on correct input is the key agents learn to waive; a key that
   greens on absent input is worse. The invariant is asserted **structurally** in
@@ -514,11 +521,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   subject is a config the daemon (or a gate) reads from root cannot certify itself** — the same shape as
   `required` evaluating the aggregator and registry from the PR's **BASE** ref (below). Plan the
   demonstration for **after** the merge. Both (1) and (2) have cost real rounds: (1) produced a
-  `census-exclusion: PASS (7/7 survive)` about a config roborev never read, caught only by the
-  pre-existing `prompt-content: FAIL (1/7 absent)`; (2) made #3234 measure `exclude_patterns` as having
+  since-removed key's `PASS (7/7 survive)` about a config roborev never read, caught only by the
+  pre-existing `prompt-content: FAIL (1/7 absent)` — **defence in depth paid out in the direction nobody
+  plans for, and it is why `prompt-content:` is the layer that stayed**; (2) made #3234 measure `exclude_patterns` as having
   "no observable effect" (its single daemon restart preceded every config edit and never followed one).
-  **Defence in depth paid out in the direction nobody plans for**: the *older* guard caught the *newer*
-  one certifying a config that was never used. Keep both layers.
+  The durable lesson from that pairing: when the newer, cleverer guard and the older, dumber one disagree,
+  **the one that measures what actually happened wins** — which is why the descope kept `prompt-content:`
+  and dropped the predictor.
   Push first: an unpushed implementation commit is
   itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** FOUR
   confirmed paths make roborev report clean having reviewed NOTHING (or only part), and a vacuous pass is

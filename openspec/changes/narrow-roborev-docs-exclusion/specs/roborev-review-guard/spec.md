@@ -1,15 +1,19 @@
 # roborev-review-guard — delta for narrow-roborev-docs-exclusion (issue #3229)
 
 **Architecture note (read this first).** #2964 established the guard as **DETERMINISTIC-PRIMARY**: the
-checks that carry the verdict are judged against data the wrapper obtains ITSELF. This delta extends
-that principle to the one input the wrapper previously took on FAITH — **roborev's own exclusion
-configuration**. The wrapper asserted in a prose comment that roborev "excludes non-code paths"; the
-configured set actually excluded `docs/**`, i.e. **code**, and on PR #3222 that discarded 33 executable
-harness files (a 136-path code census reduced to an EMPTY prompt: `prompt-content: FAIL (136/136 code
-census paths absent)`, 15,443 input / 89 output tokens against the vacuous baseline). So this delta
-(a) narrows the configured exclusion set to prose and non-code artifacts, and (b) makes the wrapper
-COMPUTE roborev's exclusion view with git and fail closed pre-enqueue when it would swallow census code,
-instead of asserting it.
+checks that carry the verdict are judged against data the wrapper obtains ITSELF. The wrapper asserted in
+a prose comment that roborev "excludes non-code paths"; the configured set actually excluded `docs/**`,
+i.e. **code**, and on PR #3222 that discarded 33 executable harness files (a 136-path code census reduced
+to an EMPTY prompt: `prompt-content: FAIL (136/136 code census paths absent)`, 15,443 input / 89 output
+tokens against the vacuous baseline).
+
+**What this delta does, after the owner's descope ruling:** it **narrows the configured exclusion set** to
+prose and non-code artifacts — measured at 72 `docs/` executables reaching the reviewer, 0 markdown, and
+nothing outside `docs/` newly excluded — and it strengthens the wrapper's TERMINAL VERDICT so no key's
+value can reach `RESULT: PASS` without an affirmative measurement. It does **NOT** predict roborev's
+effective exclusion set. A pre-enqueue oracle that did was built here and REMOVED; see
+*DEFERRED Requirements* below. A path the reviewer does not receive still fails CLOSED — under
+`prompt-content:`, after the review round rather than before it.
 
 **Acceptance-criterion → requirement map** (issue #3229's numbered ACs):
 
@@ -17,13 +21,15 @@ instead of asserting it.
 |----|----------------|
 | 1 — the exclusion is narrowed so executable files under `docs/` are reviewed | ADDED *The review-diff exclusion set excludes prose and non-code artifacts, never executable code* |
 | 2 — demonstrated on the real PR #3222 shape, recorded not asserted | ADDED *A recorded live probe demonstrates the narrowed exclusion on the real harness-PR shape* |
-| 3 — the wrapper FAILs loudly, pre-enqueue, when the config would swallow the census | ADDED *The wrapper fails closed before enqueuing when the effective exclusion set would swallow census code*; MODIFIED *The wrapper emits a machine-greppable summary block with a terminal verdict* (the new key in the fixed order) |
-| 4 — the two classifiers are reconciled, **or the residual disagreement is documented with the exact cases where it persists** | ADDED *The exclusion view is computed with git from the effective configuration, and the residual divergence is declared*; MODIFIED *A code-free census is a deterministic failure before any review is enqueued*. **This change satisfies AC4 through its SECOND BRANCH** — see *The residual disagreement, documented* below. That is not a reduction in AC coverage: AC4 is a disjunction, and the second branch is met by naming the exact residual case, pinning it by test, and showing it fails CLOSED. |
+| 3 — the wrapper FAILs loudly, pre-enqueue, when the config would swallow the census | **DEFERRED to issue #3283** — owner ruling. The requirement that carried it is REMOVED from this delta with its implementation; see *DEFERRED Requirements* below. NOT satisfied, NOT waived. |
+| 4 — the two classifiers are reconciled, **or the residual disagreement is documented with the exact cases where it persists** | **DEFERRED to issue #3283** — owner ruling, same removal. NOT satisfied through either branch, NOT waived; see *DEFERRED Requirements* below. |
 | 5 — a hermetic regression test pins the behaviour | MODIFIED *A hermetic regression check pins every vacuity trigger and is wired into the agent gate* |
 | 6 — doctrine updated in the same change, publication verified by served content | MODIFIED *Doctrine records the roborev rules, including the measured invocation matrix* |
 | 7 — the backfill decision is recorded | ADDED *The backfill ruling for already-merged, never-reviewed harness code is recorded* |
 
-**Mechanism note — how the exclusion semantics were established.** `roborev` is an external **stripped
+**Mechanism note — how the exclusion semantics were established. RECORDED FOR #3283; NO CODE IN THIS
+CHANGE RELIES ON IT.** The findings below are primary-source measurement and are kept because #3283 will
+need them. They no longer describe anything this change implements: the port they specified is deleted. `roborev` is an external **stripped
 Go binary** (`roborev v0.61.2`, `/usr/local/bin/roborev`) with no source available, so its behaviour is
 stated here only where it was **measured**: `exclude_patterns` is implemented as git pathspec
 (`:(exclude,glob)`, symbols `git.FormatExcludeArgs` / `config.ResolveExcludePatterns`), i.e. git
@@ -33,12 +39,58 @@ from a prompt were 25 paths, EVERY ONE a `.md` — including `.claude/agents/*.m
 `website/**/*.md` and top-level `CLAUDE.md` — which `docs/**` cannot explain, so a **slash-less pattern
 is applied recursively** (normalised to `**/<pattern>`). Every non-`.md` path in that replay reached its
 prompt. The pathspec CONSTRUCTION is no longer inferred at all: `git.FormatExcludeArgs` was recovered by
-DISASSEMBLING the stripped binary (symbols via `.gopclntab`, text base `0x401000`) and is fully specified
-in the requirement below — a pattern with an interior or leading `/` is ROOT-ANCHORED and passed verbatim,
+DISASSEMBLING the stripped binary (symbols via `.gopclntab`, text base `0x401000`) — a pattern with an
+interior or leading `/` is ROOT-ANCHORED and passed verbatim,
 a slash-less pattern is `**/`-prefixed (recursive), every pattern emits BOTH `<p>` and `<p>/**`, and a
 TRAILING slash is trimmed before the anchoring test so `docs/` and `docs/**` behave OPPOSITELY. The
-absence of any negation / re-include capability is likewise now a VERIFIED fact at the instruction level,
-not an assumption. The construction is pinned to `roborev v0.61.2`.
+absence of any negation / re-include capability is likewise a VERIFIED fact at the instruction level, not
+an assumption. The construction is pinned to `roborev v0.61.2`. **A caveat #3283 must honour:** reading
+those instructions is not the same as reproducing them. The removed port re-derived Go's
+`TrimSpace`/`TrimRight`/`TrimLeft` in bash and diverged on U+00A0, because it was tested against a MODEL
+of Go rather than against Go.
+
+## DEFERRED Requirements (AC3 and AC4 → issue #3283)
+
+**AC3 and AC4 of issue #3229 are DEFERRED, not satisfied and not waived.** The two requirements that
+carried them — *The wrapper fails closed before enqueuing when the effective exclusion set would swallow
+census code* and *The exclusion view is computed with git from the effective configuration, and the
+residual divergence is declared* — are **REMOVED from this delta together with their implementation**,
+by owner ruling. They were ADDED requirements, so removing them means they never enter
+`openspec/specs/`; nothing is left in a half-satisfied state, and a C audit of this change assesses
+**four** ACs (1, 5, 6, 7), not six with two failing.
+
+**Why.** The removed subsystem was a pre-enqueue oracle that PREDICTED roborev's effective exclusion set:
+a bash port of `git.FormatExcludeArgs` over a TOML parse of three configuration sources, reporting under
+a `census-exclusion:` summary key. Across review rounds 8–11 its false-PASS count was **increasing**
+(1, 1, 2, **3**), and **two of round 11's three defects lived in code the two preceding fix rounds had
+just introduced** — a surface on which fixes add defects of the class they close. **A guard with known
+documented false-PASSes is worse than no guard, because it invites reliance it cannot support.**
+Subtraction, by contrast, cannot add a false-PASS: with nothing predicted, nothing is excused.
+
+**This IS a reduction in coverage.** It is an acceptable one, and it is stated plainly rather than
+argued away. (An earlier residual under AC4's second branch was legitimately *not* a reduction — that
+was a disjunction met by its other branch. That reasoning does NOT apply here and must not be carried
+over: here the requirements are withdrawn outright.)
+
+**The absent coverage, named in one line:** there is no automated guard against a future `.roborev.toml`
+re-broadening; the regression it would catch is a hand edit to a version-controlled file on `main`, and
+AC6's doctrine names the hazard in prose.
+
+**What still stands in its place.** AC1's narrowed `.roborev.toml` is the fix for the defect #3229 was
+filed for, and it is measured: 72 `docs/` executables reach the reviewer, 0 markdown does, and nothing
+outside `docs/` is newly excluded. A path the reviewer does not receive still FAILs, fail-closed, under
+`prompt-content:` — after the review round rather than before it, with a cause that names the symptom
+("the reviewer did not receive this path") rather than the mechanism. That diagnostic gap is the whole
+residual.
+
+**The class-level root cause, recorded for #3283.** **A port is a second implementation, and a second
+implementation's correctness is only knowable by differential testing against the original.** The removed
+oracle re-derived Go's `TrimSpace`/`TrimRight`/`TrimLeft` rules in bash and was tested against a *model*
+of Go, not against Go — which is why the NBSP divergence (Go's `unicode.IsSpace` trims U+00A0; bash's
+`${v## }`-style trims do not) was unfindable by care. #3283 must either test differentially against the
+real binary or not predict at all.
+
+
 
 ## ADDED Requirements
 
@@ -101,15 +153,11 @@ directory the better proxy for "generated". Globally-scoped (slash-less) exclusi
 extensions SHALL NOT be used, because it would apply repo-wide and hide real configuration and data files
 outside `docs/` from review.
 
-#### Scenario: Functional configuration under `docs/` is reviewed, while a real artifact is excluded
+#### Scenario: Functional configuration under `docs/` is classified CODE, not artifact
 - **GIVEN** a diff containing `docs/observability/grafana/dashboards/cqlite-overview.json`, `docs/reports/delivery-telemetry.schema.json` and `docs/reports/x-artifacts/a.txt`
-- **WHEN** the pre-enqueue reconciliation runs against the configured set
-- **THEN** both configuration files are CODE census paths reported as SURVIVING, the change is NOT classified code-free, and the artifact under the artifact directory is still classified non-code — so the narrowing neither hides functional config nor degenerates into reviewing every artifact
-
-#### Scenario: The retired docs-wide form is what hid the gate-guarded dashboard
-- **GIVEN** the retired configuration `docs/**/*.json` and a census code path `docs/observability/grafana/dashboards/cqlite-overview.json`
-- **WHEN** the pre-enqueue reconciliation runs
-- **THEN** `census-exclusion:` FAILs, naming the swallowed path and `docs/**/*.json` as the pattern responsible, and no review is enqueued
+- **WHEN** the census classifies them
+- **THEN** both configuration files are CODE census paths, the change is NOT classified code-free, and only the artifact under the artifact directory is classified non-code — so the narrowing neither hides functional config nor degenerates into reviewing every artifact
+- **AND** the configured pattern set contains no pattern that would exclude either configuration file, verified by inspecting `.roborev.toml`
 
 #### Scenario: An executable committed under a report's artifact directory is reviewed
 - **GIVEN** the narrowed `exclude_patterns` and a diff containing `docs/reports/ws0-3217-artifacts/harness/run.sh`, `.../classify.py` and `.../offcpu.bt`
@@ -130,430 +178,6 @@ outside `docs/` from review.
 - **WHEN** roborev builds the review diff
 - **THEN** the artifact JSON under `docs/` is excluded while the non-`docs/` JSON is still delivered to the reviewer, so narrowing the exclusion did not create a new blind spot elsewhere in the tree
 
-### Requirement: The wrapper fails closed before enqueuing when the effective exclusion set would swallow census code
-The wrapper SHALL evaluate its own CODE census against the **effective** roborev exclusion set and SHALL
-FAIL, **before any review is enqueued**, when any code census path would be excluded. The verdict SHALL
-be published under its own distinct greppable key **`census-exclusion:`** — never as a generic
-`prompt-content:` failure discovered after a review has been paid for. The check SHALL run after the
-census and `code-free:` classification and before the enqueue, and it SHALL be registered in the
-summary block's verdict scan so its FAIL actually fails the run (a key absent from the failing-capable
-set would be decorative).
-
-The value grammar SHALL be:
-
-- `PASS (<k>/<n> code census paths survive the effective exclusion set; corroboration: <state>)`
-- `PASS (no exclusion patterns configured)` — an absent config file or a genuinely empty pattern list
-  cannot swallow anything, and ONLY once the binary has CORROBORATED that nothing is configured
-- `FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>'[, …])` — naming the swallowed paths
-  and the pattern that excluded each, capped at the first 10 with `(+<r> more)` so the block stays compact
-- `FAIL (exclusion set unreadable: <cause>)`
-- `FAIL (exclusion set UNCORROBORATED: <cause>; corroboration: <state>)` — the parse
-  found no configured pattern AND no oracle confirmed that, so the silence is unverified
-- `FAIL (trailing-slash pattern '<p>/' resolves RECURSIVE (**/<p>), opposite to '<p>/**' — drop the
-  trailing slash deliberately or write '<p>/**')`
-- `FAIL (exclusion set drift: '<pattern>' reported by roborev config get is absent from the parsed set)`
-- `SKIP (<cause>)` when the step was not reached
-
-An UNREADABLE configuration SHALL fail closed and SHALL be DISTINGUISHABLE from an absent one: a key
-present whose value is not a parseable pattern array is `FAIL (exclusion set unreadable: …)`, while an
-absent key or absent config file is the `PASS (no exclusion patterns configured)` form — obtainable only
-with the binary's corroboration, and otherwise `FAIL (exclusion set UNCORROBORATED: …)`, a THIRD textually
-distinct form so a reader can tell "unparseable" from "unverifiable" from "nothing configured". "We could
-not tell" SHALL NEVER be aliased to "nothing is excluded".
-
-**THE GENERAL RULE THIS REQUIREMENT IS AN INSTANCE OF, and the rule every key in the block SHALL obey:**
-
-> **A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT.** A pass SHALL NEVER be derived from the
-> ABSENCE of a bad signal. Where an oracle is the SOLE evidence for a claim and it could not be consulted,
-> the verdict SHALL be NON-PASSING, and its text SHALL distinguish *"we could not check"* from *"nothing
-> was wrong"* — naming what was unverifiable and what would have verified it. Where a signal has more than
-> two states, the PERMISSIVE branch SHALL be keyed on the AFFIRMATIVE value (`= OK`), never on the absence
-> of a bad one (`!= DIVERGED`), so an unknown or unmeasured state fails closed. Where a signal genuinely
-> SHOULD be permissive, the reason SHALL be recorded IN CODE at the branch.
-
-This is stated as a general rule, not as three fixes, because THREE separate defects on this change were
-ONE shape — *a multi-state signal where only the BAD states are tested, so every unknown or unmeasured
-state inherits the PERMISSIVE branch*: a three-state `built-in-set:` signal taking the permissive excusal
-path (that subsystem is since DELETED — #3278 — but the shape it exposed is why this is a general rule);
-`corroboration: UNAVAILABLE` reaching a `PASS`; and a `${end:-$start}` fallback silently degrading a failed
-`awk` bound into a one-line scan. A fourth point fix would have been the wrong response.
-
-The check SHALL be NUL-safe (`-z` / array handling, no word-splitting on filenames), because the
-repository tracks a path under `docs/` containing spaces and a literal double quote, which
-`git diff --name-only` without `-z` emits QUOTED and which would therefore silently never match its
-census entry — a false PASS in exactly the direction this check exists to close.
-
-#### Scenario: A restored blanket docs glob fails the round before any review is enqueued
-- **GIVEN** a pushed branch whose census contains `docs/reports/x-artifacts/harness/run.sh` and `.../classify.py`, and a repository configuration whose `exclude_patterns` is `['docs/**', '*.md']`
-- **WHEN** the wrapper runs
-- **THEN** `census-exclusion:` reads `FAIL (2/2 code census paths excluded: docs/reports/x-artifacts/harness/run.sh by 'docs/**', docs/reports/x-artifacts/harness/classify.py by 'docs/**')`, NO review is enqueued, the terminal `RESULT:` is `FAIL`, and the exit code is non-zero
-
-#### Scenario: The narrowed configuration passes and the review proceeds
-- **GIVEN** the same census under the narrowed `exclude_patterns`
-- **WHEN** the wrapper runs
-- **THEN** `census-exclusion:` reads `PASS (2/2 code census paths survive the effective exclusion set; corroboration: …)` and the review IS enqueued
-
-#### Scenario: An unparseable exclusion set fails closed and is distinct from an absent one
-- **GIVEN** a repository configuration whose `exclude_patterns` key is present but whose value is not a parseable pattern array, and separately a repository with no `exclude_patterns` key at all
-- **WHEN** the wrapper evaluates each
-- **THEN** the first reads `FAIL (exclusion set unreadable: <cause>)` with no review enqueued, and the second reads `PASS (no exclusion patterns configured)` and proceeds — so a parse failure can never present as "nothing is excluded"
-- **AND** the second form is reached only with the binary's corroboration; without it the value is the textually distinct `FAIL (exclusion set UNCORROBORATED: …)`, so "unparseable", "unverifiable" and "nothing configured" are three distinguishable states rather than two
-
-#### Scenario: A path containing spaces and a quote is compared correctly
-- **GIVEN** a census whose code paths include a filename containing spaces and a literal double quote
-- **WHEN** the wrapper compares the census against the survivors of the exclusion pathspecs
-- **THEN** the comparison is performed over NUL-delimited paths so the path matches its census entry exactly, and the verdict reflects the real exclusion state rather than a quoting artefact
-
-#### Scenario: The failure names its own cause, not the reviewer's
-- **GIVEN** a configuration that would swallow census code
-- **WHEN** the summary block is read by an agent deciding what to fix
-- **THEN** the failing key is `census-exclusion:` and its message names the configuration pattern responsible, so the reader is not sent to investigate `prompt-content:` or the reviewer's behaviour for a defect that is entirely in configuration
-
-### Requirement: The exclusion view is computed with git from the effective configuration, and the residual divergence is declared
-The wrapper SHALL NOT re-implement glob matching and SHALL NOT trust reviewer narration to learn what was
-excluded. It SHALL REPRODUCE roborev's mechanism with **git itself**: read the effective
-`exclude_patterns`, construct the git pathspecs roborev constructs, and obtain the surviving paths from
-`git diff --name-only -z --no-renames <base>...HEAD -- <pathspecs>`; the swallowed set is the census's
-CODE paths MINUS those survivors. `--no-renames` SHALL be passed because the census is computed with
-`--no-renames`, so without it the two path sets would not be comparable.
-
-**Pathspec construction SHALL be an EXACT PORT of roborev's `git.FormatExcludeArgs`**, which is fully
-specified — recovered by disassembling the stripped binary (symbols via `.gopclntab`, text base
-`0x401000`) and confirmed to be on the real diff path from its callers (`git.GetDiffCtx`,
-`GetDiffLimitedCtx`, `GetRangeDiffCtx`, `GetRangeDiffLimitedCtx`, `GetDirtyDiff`, and
-`prompt.(*Builder).buildSinglePrompt` / `buildRangePrompt` / `resolveExcludes`):
-
-```
-p  = TrimSpace(pattern); p = TrimRight(p, "/"); if p == "" -> skip
-b0 = p[0]                       # read BEFORE TrimLeft
-p  = TrimLeft(p, "/");          if p == "" -> skip
-prefix = (b0 == '/' || p contains "/") ? ":(exclude,glob)" : ":(exclude,glob)**/"
-emit   prefix+p   AND   prefix+p+"/**"
-```
-
-Four consequences SHALL be replicated, not approximated:
-
-1. **A pattern containing an interior `/` is passed VERBATIM and is ROOT-ANCHORED.** `docs/**/*.json`
-   therefore does NOT match `website/src/content/docs/c.json`. The check SHALL report such a nested path
-   as SURVIVING. Evaluating both a verbatim and a `**/`-prefixed reading and failing on either is
-   FORBIDDEN: it is not conservative but WRONG, and would emit false `census-exclusion: FAIL`s on
-   legitimate report PRs.
-2. **Every CONFIGURED pattern emits TWO pathspecs**, `<p>` and `<p>/**`, which is how a bare directory
-   name excludes recursively. A check that emits one pathspec per configured pattern UNDER-models the
-   exclusion set and reports paths as SURVIVING that roborev really drops.
-3. **A TRAILING SLASH INVERTS the anchoring.** `TrimRight(p, "/")` runs BEFORE the contains-`/` test, so
-   `docs/` becomes `docs`, is treated as slash-less, and resolves RECURSIVE (`**/docs` + `**/docs/**`) —
-   the OPPOSITE of `docs/**`, which stays root-anchored. Because that is a SILENT WIDENING of unbounded
-   depth that a future tidy-up would reintroduce, a trailing-slash pattern in the effective set SHALL be
-   a loud **FAIL** naming the inversion, independent of whether it currently swallows a census path.
-4. **A LEADING `/` root-anchors an otherwise-recursive slash-less name**: `/README.md` resolves to
-   `README.md` (root only) while `README.md` resolves to `**/README.md`. This is the ONLY way to
-   root-anchor a slash-less name and SHALL be replicated.
-
-Empty-after-trim patterns SHALL be skipped silently, as the algorithm does. The algorithm SHALL be
-recorded against the PINNED version it was derived from — **`roborev v0.61.2`** — and re-verification on
-any roborev upgrade SHALL be a stated maintenance obligation, since an upstream change to
-`FormatExcludeArgs` would silently invalidate the port. `git.EnsureLocalExcludePattern` /
-`.git/info/exclude` is a DISTINCT mechanism and SHALL NOT be conflated with `exclude_patterns`.
-
-The check SHALL REPLICATE the algorithm rather than QUERY the binary, because **no roborev flag prints
-the resolved pathspecs** — `review` has no `--dry-run` and `-v` is a global-only flag — so the resolved
-set is not obtainable from the tool at all.
-
-The effective set SHALL be read from the configuration FILES, not from the `roborev` binary, so the check
-stays hermetic and stub-testable and so no reordering of the wrapper's existing `command -v roborev`
-validation is required. The parse SHALL respect TOML table scoping (a same-named key inside a `[table]`
-is NOT the top-level key) and SHALL fail closed rather than guess.
-
-**THREE config sources SHALL be read, and a swallow in ANY of them SHALL FAIL.** roborev's daemon binds a
-repository by its `repos.root_path` — the **ROOT checkout** — and reads THAT checkout's `.roborev.toml`.
-Under 1:1:1:1 the wrapper's `$REPO` is a LINKED WORKTREE, so reading only `$REPO/.roborev.toml` certifies
-a file roborev may never consult: on this change's own branch that produced
-`census-exclusion: PASS (7/7 survive)` from the worktree's narrowed set while the real review applied the
-root checkout's blanket `['docs/**','*.md']` and returned
-`prompt-content: FAIL (1/7 code census paths absent)`. The sources SHALL therefore be
-(a) `$REPO/.roborev.toml`, (b) the ROOT checkout's `.roborev.toml` when `$REPO` is a linked worktree, and
-(c) the global `~/.roborev/config.toml`, combined as a UNION — which is also what
-`config.ResolveExcludePatterns` / `loadRepoExcludePatterns` do. Which of (a) and (b) a given roborev build
-PREFERS is an internal detail the check SHALL NOT bet on; the union is the only reading that cannot
-produce a false PASS in either direction. The root checkout SHALL be resolved from git
-(`rev-parse --path-format=absolute --git-common-dir`, with a relative-path fallback for git older than
-2.31 and `git worktree list --porcelain` as a last resort) and SHALL FAIL CLOSED when none of those
-answer — reading one file and reporting a PASS about it is the defect, not the remedy. When `$REPO` IS
-the root checkout there is only ONE repository file and it SHALL NOT be double-reported.
-
-**Every FAIL and PASS value SHALL name WHICH source each pattern came from.** With more than one config
-file in play, "excluded by `docs/**`" is not an actionable instruction; the swallowed-path list, the
-trailing-slash FAIL and the resolved-pathspec listing SHALL each carry a source tag, and a FAIL SHALL
-additionally enumerate every source path it read.
-
-### The residual disagreement, documented (AC4's SECOND BRANCH)
-
-**roborev's own BUILT-IN excludes SHALL NOT be modelled by this check, and the resulting residual SHALL be
-DOCUMENTED with the exact cases where it persists.** This is a scope decision, owner-ruled on #3229, and
-deferred in full to **issue #3278**.
-
-**THE FACT, unchanged.** `exclude_patterns` is not the whole exclusion set: the binary ALWAYS appends a
-hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`, `**/pnpm-lock.yaml`, `**/package-lock.json`,
-`**/Gemfile.lock`, … plus `**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml`) to the
-pathspecs it hands git, with no configuration switch and no negation form. A census path one of those eats is
-exactly as invisible to the reviewer as a configured swallow.
-
-**WHY IT IS NOT MODELLED HERE.** Modelling it was attempted and REMOVED. Four consecutive review rounds each
-found a false-PASS **inside that subsystem alone** — a phantom `/**` sibling on a pre-formatted pathspec
-constant; an unbounded substring presence test that blessed an equal-length rename; a three-state
-`built-in-set:` signal tested as two, so `UNAVAILABLE` took the permissive branch; and a coverage excusal
-granted on a model that could not be verified. The modelling was therefore the single largest false-PASS
-source in the change, and **no acceptance criterion reaches it**: all seven ACs are about the effective
-**`exclude_patterns`**, while the deny-list is the binary's internal default. **Subtraction cannot introduce
-a false PASS**: with no built-in in the pattern set this check only ever models FEWER exclusions than roborev
-applies, so it can never excuse a path from `prompt-content:` coverage on an unverified mechanism.
-
-**THE EXACT CASES WHERE THE DISAGREEMENT PERSISTS.** A diff whose code-census paths include a path roborev's
-compiled-in deny-list excludes — concretely `Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, `Gemfile.lock`,
-`package-lock.json`, or anything under `.cache/`, `.beads/`, `.gocache/`. Such a path is silently dropped from
-the reviewer's diff, and this check does not model that. The consequence, per key, SHALL be:
-
-* `census-exclusion:` reports the path as **SURVIVING**, because no CONFIGURED pattern excludes it;
-* `prompt-content:` therefore **EXPECTS** it in the prompt, does not find it, and **FAILs**.
-
-So the residual surfaces as a **FAIL under `prompt-content:`** whose stated cause names the SYMPTOM ("the
-reviewer never received their diffs") rather than the MECHANISM. It is a **DIAGNOSTIC** gap and it **fails
-CLOSED** — never a vacuous green, and never a merge on unreviewed code. The degenerate sub-case (a
-dependency-bump branch whose ONLY code-census path is a lockfile) likewise FAILs, under `prompt-content:`
-rather than pre-enqueue.
-
-**THE RESIDUAL SHALL BE STATED, NOT LEFT TO BE DISCOVERED**, in the wrapper's `--help`, in the oracles
-file's header, in `design.md`, and in this spec — an unstated residual is textually indistinguishable from a
-claim of coverage. **AND IT SHALL BE PINNED BY TEST**, with a both-directions control, so a declared
-residual cannot be confused with an unnoticed one.
-
-#### Scenario: A built-in-excluded lockfile in a #3096-shaped diff FAILs under prompt-content
-- **GIVEN** a census carrying three `docs/reports/ws0-3096-artifacts/*.json` measurement artifacts (excluded by a CONFIGURED pattern and classified code-FREE, so not census code paths), a `Cargo.lock` change and an ordinary `.rs` file, and a prompt that carries only the `.rs` file — which is what the real binary builds, because its compiled-in deny-list drops `Cargo.lock`
-- **WHEN** the guard runs
-- **THEN** `census-exclusion:` reads `PASS (2/2 code census paths survive the effective exclusion set; …)`, reporting the lockfile as SURVIVING because no configured pattern excludes it
-- **AND** `prompt-content:` reads `FAIL (1/2 code census paths absent from the prompt)` and NAMES `Cargo.lock`
-- **AND** the terminal `RESULT:` is `FAIL`, and no key excuses the path as built-in-excluded — the residual costs a DIAGNOSTIC, never a verdict
-
-#### Scenario: The same diff with the lockfile IN the prompt passes (the both-directions control)
-- **GIVEN** the identical census and configuration, but a prompt that DOES carry `Cargo.lock`
-- **WHEN** the guard runs
-- **THEN** `census-exclusion:` reads the SAME `PASS (2/2 …)`, `prompt-content:` reads `PASS (2/2 code census paths present)` with no excusal clause, the review IS enqueued, and `RESULT:` is `PASS` — so the FAIL in the scenario above is attributable to the prompt's contents and to nothing else
-
-**THE VERDICT SHALL FOLLOW ONE RULE, STATED IN DOCTRINE VERBATIM:**
-
-> **FAIL where the author can act; NOTICE where only the information is actionable; never silence.**
-
-This is deliberately ONE rule rather than a set of ad-hoc calls, and doctrine SHALL present it as such
-(CLAUDE.md, `roborev-findings.md`, `design.md`), so a future call of this shape is decided by the rule
-instead of re-litigated. On THIS check's subject it resolves to a single call:
-
-1. A **CONFIGURED** pattern (worktree, root or global) swallowing census CODE ⇒ **FAIL**, pre-enqueue. The
-   remedy is a one-token edit to a NAMED file, available before any review round is paid for.
-
-**AND THERE SHALL BE NO `NOTICE` VALUE FOR THIS KEY.** A NOTICE is the right value for a swallow with no
-remedy, and the only such swallow is by the deny-list this check does not model. With every pattern in play
-CONFIGURED and therefore EDITABLE, every swallow the check can see is actionable, so the verdict SHALL be
-`PASS` or `FAIL` and nothing between. "Never silence" is satisfied one level up, by the documented residual
-above. A **TOTAL** swallow SHALL NOT be a separate branch: it is a configured swallow, so it FAILs, and the
-value SHALL carry `<m>/<n>` so `m == n` is visible on its face.
-
-**`NOTICE*` SHALL NOT be failing-capable** — `vacuity-tier1:` emits it as a documented advisory — and both
-FAIL forms SHALL be. The wrapper's single verdict scan fails a run whose value begins `FAIL`, `FINDINGS`,
-`ERROR` or `INCONSISTENT`; that correspondence SHALL be asserted STRUCTURALLY against the scan itself,
-because a value reading NOTICE while `RESULT:` goes FAIL (or a FAIL that does not red the run) is the
-decorative-key defect mirrored. **"Against the scan itself" SHALL mean against the scan STATEMENT** — the
-extracted `for verdict in … ; do` key list and the `case` line bounded inside that loop — and SHALL NOT be a
-whole-file search for the key's name: the summary block's own `printf 'census-exclusion: %s\n'
-"$CENSUS_EXCLUSION"` satisfies a file-wide search, so such an assert would keep passing with the key DELETED
-from the scan, making the assert that forbids a decorative key itself decorative. Nor can a behavioural case
-substitute: every failing assignment to the key is immediately followed by the terminal FAIL, so the scan
-never observes a failing value and its registration there is purely defensive.
-
-**AND NO KEY SHALL BE EXEMPT FROM THE AFFIRMATION BACKSTOP.** `census-exclusion:` was formerly allowed a
-`NOTICE` there, the backstop's single per-key exemption, because a remedy-less built-in swallow was a
-measurement with a stated residual. With that subject deleted the key can no longer emit `NOTICE`, so the
-exemption is removed: the backstop now requires an affirmative `PASS` from all seven deterministic keys
-without exception, which is STRICTER. That absence of any per-key escape hatch SHALL be asserted
-structurally against the backstop's own `case` body.
-
-When `roborev` IS invocable the parsed set SHALL be CORROBORATED against
-`roborev config get exclude_patterns`, run from **every** checkout whose config was read (that command
-resolves the repo config relative to its CWD, so asking only from `$REPO` reproduces the same blind spot
-inside the corroboration). A pattern the binary reports that the parse LACKS SHALL be
-`FAIL (exclusion set drift: …)` because that direction can hide a swallow, the reverse direction SHALL be
-a non-failing NOTICE, and a binary that answers NOWHERE SHALL report the corroboration as `UNAVAILABLE` —
-which SHALL NOT fail the run WHEN THE PARSE IS NON-EMPTY, and SHALL be NON-PASSING when the parse is empty
-and this cross-check is therefore the only evidence (see the empty-parse requirement below). A binary that
-answers with an EMPTY list is an ANSWER, not an absence, and SHALL corroborate rather than degrade to
-`UNAVAILABLE`.
-
-**PARSING THE BINARY'S ANSWER SHALL NOT MUTATE THE PATTERNS IT REPORTS.** Only a **verified OUTER
-container** (a leading `[` together with a trailing `]`, after trimming) SHALL be stripped, and quoting only
-at an item's own edges. A blanket deletion of every bracket in the answer DESTROYS a glob CHARACTER CLASS
-inside a pattern — `src/[Tt]est.rs` becomes `src/Ttest.rs`, matches nothing in the parsed set, and reports
-`corroboration: DRIFT` ⇒ a **pre-enqueue FAIL on a CORRECT configuration**. The direction is fail-closed, so
-it can never certify unreviewed code; it is nonetheless a defect, because a guard that reds a legitimate
-configuration is the guard that gets disabled — which is how #3229 happened.
-
-#### Scenario: A pattern carrying a glob character class corroborates instead of reading as drift
-- **GIVEN** an invocable `roborev` reporting the bracketed list `['*.md', 'src/[Tt]est.rs']`, and a configuration whose parsed set holds exactly those two patterns
-- **WHEN** the check corroborates
-- **THEN** the outer container is stripped, `src/[Tt]est.rs` is compared with its brackets intact, the value records `corroboration: OK`, and no `FAIL (exclusion set drift: …)` is reported
-
-**Corroboration SHALL run on EVERY path, including when the parse found NO configured pattern.** An empty
-parse SHALL NOT be reported as "no exclusion patterns configured" until the binary has confirmed it:
-"our parser recognised no key" is not "nothing is configured", and where the parse is empty this
-cross-check is the ONLY oracle available.
-
-**AND THE EMPTY-PARSE PASS SHALL REQUIRE THAT ORACLE TO HAVE ANSWERED — `corroboration: OK`, not merely
-"not one of the bad states".** `corroboration:` has FOUR states (`UNAVAILABLE`, the initial value; `DRIFT`;
-`NOTICE`; `OK`), and running the cross-check is not the same as REQUIRING it: when `n_configured` is 0 and
-the binary answered from no checkout, the parser's silence is UNVERIFIED and the verdict SHALL be
-NON-PASSING (`FAIL (exclusion set UNCORROBORATED: …)`), naming the corroboration state, stating which of
-the two indistinguishable conditions could not be ruled out, disclaiming any assertion that something IS
-excluded, and enqueuing no review. Nothing at all is in the reconciliation on that path, so a configured
-pattern the parser missed is invisible to git as well, and the PASS would rest entirely on an unverified
-silence. A GENUINELY EMPTY configuration
-SHALL still PASS whenever the binary confirms it, so the requirement is a gate on the ORACLE, never a
-blanket refusal of the empty-parse PASS.
-
-**Where the parse is NON-EMPTY the same silence SHALL remain PERMISSIVE, and the asymmetry SHALL be
-STATED IN CODE with its reason.** With patterns parsed, those patterns ARE the affirmative measurement —
-each is resolved through the ported formatter and matched BY GIT against the census — so corroboration is
-a CROSS-CHECK that can only widen what was already measured, and its absence withholds nothing that was
-claimed. Failing there would red every run on a box whose roborev lacks the subcommand: the self-disabling
-guard this change refuses to build. The asymmetry is general — an unobservable oracle withholds the
-BLESSING it was the SOLE source of, and nothing else. The parse SHALL additionally accept the QUOTED TOML key
-spellings `"exclude_patterns"` and `'exclude_patterns'`, which are the same key and ARE honoured by
-roborev (measured on v0.61.2) — but accepting them is NOT sufficient on its own, because any other
-unenumerated-yet-honoured spelling would silently disable the guard; the corroboration is what covers
-that residual. A parse that found nothing while the binary reports at least one pattern SHALL be DRIFT →
-FAIL, and the failure text SHALL say that this state is issue #3229 reintroduced under the key meant to
-prevent it.
-
-An UNKNOWN or UNTRANSLATED backslash escape inside a TOML basic-string pattern SHALL be REFUSED fail-closed
-rather than have its backslash swallowed: `"a\tb"` is `a<TAB>b`, and silently yielding `atb` would compare a
-pattern DIFFERENT from the one roborev applies — the very failure mode this check exists to detect.
-
-Census paths SHALL be normalised for comparison WITHOUT command substitution, which strips trailing
-newlines: a tracked path ending in a `\012` escape would otherwise lose a byte and both mis-compare
-against the `-z` survivor set and risk COLLIDING with a shorter sibling path.
-
-The two classifications SHALL remain INDEPENDENT — the census's extension-based classification and the
-configured pathspec set — because deriving either from the other would make the comparison vacuous and
-unable to detect a configuration regression. They SHALL be kept in AGREEMENT on the docs-scoped artifact
-extensions by declaring that extension set ONCE in the wrapper's oracles file, used to classify census
-paths under the declared prose directories as non-code and mirrored by the configuration's docs-scoped
-patterns. The residual divergence SHALL be DECLARED in both directions:
-
-1. configuration excludes a path the census calls CODE ⇒ `census-exclusion: FAIL`, pre-enqueue — the
-   defect class this requirement exists to prevent;
-2. the census calls a path non-code that the configuration does NOT exclude ⇒ not a failure; the file is
-   delivered to the reviewer as bounded NOISE;
-3. roborev's compiled-in deny-list excludes a path the census calls CODE, and this check does not model it
-   ⇒ `census-exclusion: PASS` and `prompt-content: FAIL` — AC4's SECOND BRANCH, documented above with its
-   exact cases and pinned by test. Fail-CLOSED, diagnostically imprecise, deferred to #3278.
-
-#### Scenario: The exclusion view is obtained from git, not from a re-implemented matcher
-- **WHEN** the reconciliation check is inspected
-- **THEN** it determines survivors by invoking git with `:(exclude,glob)` pathspecs derived from the configured patterns, and contains no independent wildmatch/glob implementation whose semantics could drift from git's
-
-#### Scenario: A slash-containing pattern is root-anchored, so a nested docs path survives
-- **GIVEN** the configured pattern `docs/**/*.json` and a census code path `website/src/content/docs/c.json`
-- **WHEN** the check constructs the pathspecs and evaluates the census
-- **THEN** the pattern is emitted VERBATIM as `:(exclude,glob)docs/**/*.json` (plus its `/**` sibling), the nested path is reported as SURVIVING rather than swallowed, and `census-exclusion:` does NOT FAIL — a both-interpretations reading that failed here would be a false FAIL on a legitimate report PR
-
-#### Scenario: Each pattern contributes both its own pathspec and its `/**` sibling
-- **GIVEN** a configured pattern naming a bare directory, for example `build`
-- **WHEN** the check constructs the pathspecs
-- **THEN** it emits BOTH `:(exclude,glob)**/build` and `:(exclude,glob)**/build/**`, so a directory-name pattern is recognised as excluding the directory's whole subtree and the check's survivor set matches roborev's
-
-#### Scenario: A trailing-slash pattern is recognised as recursive and FAILs loudly
-- **GIVEN** an effective exclusion set containing `docs/` (a trailing slash) rather than `docs/**`
-- **WHEN** the check evaluates the set
-- **THEN** it recognises that the trailing slash is trimmed BEFORE the contains-`/` test so the pattern resolves RECURSIVE (`**/docs` + `**/docs/**`) — the OPPOSITE of `docs/**` — and it emits a FAIL naming the inversion and the remedy, independently of whether that pattern currently swallows any census path
-
-#### Scenario: A leading-slash pattern is root-anchored despite having no interior slash
-- **GIVEN** the configured patterns `/README.md` and `README.md`
-- **WHEN** the check constructs the pathspecs for each
-- **THEN** the first yields `:(exclude,glob)README.md` (root only) and the second yields `:(exclude,glob)**/README.md` (any depth), so a census path `docs/dev/README.md` is swallowed only under the second
-
-#### Scenario: The replication reproduces the observed behaviour of the pre-change configuration
-- **GIVEN** the pre-change effective set `['docs/**', '*.md']`
-- **WHEN** the check constructs its pathspecs and they are applied to the repository
-- **THEN** `docs/**` is root-anchored while `*.md` is recursive, which reproduces the measured behaviour of the 21 replayed reviews — every dropped path was a `.md` at arbitrary depth repo-wide, and no non-`.md` path was ever dropped — so the port is demonstrably faithful rather than merely plausible
-
-#### Scenario: The construction is pinned to a roborev version and re-verified on upgrade
-- **WHEN** the reconciliation check and this change's design record are inspected
-- **THEN** both name `roborev v0.61.2` as the version whose `git.FormatExcludeArgs` the construction ports, and state that a roborev upgrade requires re-verifying the algorithm before the check can be trusted — because an upstream change to it would silently invalidate the port while every summary block still read `PASS`
-
-#### Scenario: The check runs without a corroborating oracle and reports the corroboration state
-- **GIVEN** a configuration the parse read at least one pattern from, and a `roborev` that does not answer `config get exclude_patterns`
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the verdict is computed from the configuration files alone and the value records the corroboration as `UNAVAILABLE` without failing — the parsed patterns are themselves the measurement — so the check is fully exercisable in the hermetic regression suite
-- **AND GIVEN** instead a configuration the parse read NO pattern from, with the same non-answering binary
-- **THEN** the verdict is NON-PASSING (`FAIL (exclusion set UNCORROBORATED: …)`) and no review is enqueued, because on that path the oracle is the only evidence there is
-
-#### Scenario: A pattern the binary reports but the parse missed is drift, and fails
-- **GIVEN** an invocable `roborev` whose `config get exclude_patterns` reports a pattern absent from the wrapper's parsed set
-- **WHEN** the check corroborates
-- **THEN** it reads `FAIL (exclusion set drift: '<pattern>' reported by roborev config get is absent from the parsed set)` and no review is enqueued, because an unparsed pattern could be excluding census code invisibly
-
-#### Scenario: From a linked worktree, the ROOT checkout's configuration is evaluated
-- **GIVEN** `$REPO` is a linked worktree whose `.roborev.toml` carries the narrowed set, while the ROOT checkout backing it still carries `['docs/**', '*.md']`, and the census contains executables under `docs/`
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` FAILs naming those executables, attributes each to `docs/**` with a `root-config` source tag, enumerates both repository config paths it read, and states that roborev binds the repository by its `repos.root_path` so a narrowed worktree config does NOT override the root one — and no review is enqueued
-
-#### Scenario: The same worktree layout passes once both configurations are narrowed
-- **GIVEN** the same linked-worktree layout with the narrowed set in BOTH the worktree and the root checkout
-- **WHEN** the wrapper runs
-- **THEN** every `docs/` executable is reported SURVIVING, the review IS enqueued, and no pattern is double-reported — so the two-source read is a correctness fix, not a blanket refusal to review from a worktree
-
-#### Scenario: The root checkout cannot be resolved, so the check fails closed
-- **GIVEN** an environment in which neither `git rev-parse --git-common-dir` nor `git worktree list --porcelain` names a usable root checkout for `$REPO`
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** it FAILs closed saying the exclusion set roborev will apply is UNKNOWN, rather than reading `$REPO/.roborev.toml` alone and reporting a PASS about a file roborev may never consult
-
-#### Scenario: NOTICE is not failing-capable and both FAIL forms are
-- **WHEN** the wrapper's verdict scan is inspected directly, rather than inferred from a case's exit code
-- **THEN** its failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`, `NOTICE*` is absent from it, and `census-exclusion:` is named in the scan's own key list — so a NOTICE cannot red the run while a configured swallow still does
-- **AND** each of those three asserts reads the extracted scan STATEMENT (the `for verdict in … ; do` key list, and the `case` line bounded inside that loop), never a whole-file search: deleting `census-exclusion:` from the key list while leaving the rest of the wrapper untouched SHALL red this check, which a file-wide search cannot do because the summary block's own emit line satisfies it
-
-#### Scenario: An empty parse is corroborated by the binary, never assumed
-- **GIVEN** a configuration file the parser recognises no `exclude_patterns` key in, and an invocable `roborev` whose `config get exclude_patterns` reports `docs/**`
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** it FAILs as drift, says explicitly that the parse found no configured pattern while the binary reports at least one, names that state as issue #3229 reintroduced under the key meant to prevent it, never emits a `census-exclusion: PASS`, and enqueues no review
-
-#### Scenario: A genuinely absent key passes only with the binary's confirmation
-- **GIVEN** a configuration file with no `exclude_patterns` key and an invocable `roborev` that ANSWERS with an EMPTY list
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value reads `PASS (no exclusion patterns configured; <n>/<n> code census paths survive an EMPTY exclusion set; corroboration: OK)` — so "nothing is configured" is stated as the EMPTY set it is, and only on the binary's confirmation
-- **AND** the review IS enqueued, asserted positively — an "it was blocked" assert elsewhere is only evidence once its sibling is shown to reach the enqueue
-
-#### Scenario: An UNCORROBORATED empty parse is non-passing, and its text says which condition it could not rule out
-- **GIVEN** a configuration file with no `exclude_patterns` key and a `roborev` whose `config get exclude_patterns` exits non-zero from every checkout
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value reads `FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: UNAVAILABLE)`, never a `PASS`, and no review is enqueued
-- **AND** the detail names the oracle as the only thing that can distinguish "nothing is configured" from "this parser did not recognise the key", states which of the two the run could not rule out, explicitly disclaims asserting that anything IS excluded, names the issue the alias would reintroduce, and records that a genuinely empty configuration still passes once the binary says so
-- **AND GIVEN** instead a configuration carrying `exclude_patterns = []` with the same non-answering binary
-- **THEN** the verdict is the same and only the diagnostic differs, stating that the parser DID see the key with an empty array — an affirmative read of ONE file, which cannot rule out an unrecognised key spelling in another
-
-#### Scenario: A quoted TOML key spelling is parsed, not skipped
-- **GIVEN** a configuration whose key is written `"exclude_patterns"` (or `'exclude_patterns'`) with a value that would swallow census code
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the swallow is named directly by the primary reconciliation — not merely caught by the drift backstop — and the value is never `PASS (no exclusion patterns configured…)`
-
-#### Scenario: An unknown TOML escape is refused rather than swallowed
-- **GIVEN** a configured pattern written as a TOML basic string containing an escape TOML does not define
-- **WHEN** the check parses it
-- **THEN** it FAILs closed as an unreadable exclusion set naming the escape, explains that dropping the backslash would compare a different pattern than roborev applies, and enqueues no review
-
-#### Scenario: The declared residual direction is noise, never a swallow
-- **GIVEN** a census path the wrapper classifies as a non-code artifact which the configuration does NOT exclude
-- **WHEN** the wrapper runs
-- **THEN** no key fails on account of it, the path is simply delivered to the reviewer, and the documented residual states that this direction can only add review noise while the opposite direction is always a pre-enqueue FAIL
-
 ### Requirement: File paths are normalised ONCE, at the census, and every consumer uses the normalised form
 Every path the wrapper reasons about SHALL be normalised at **exactly one boundary — the census** — and the
 **RAW bytes SHALL be the single internal representation** used for classification, comparison and display.
@@ -570,11 +194,12 @@ membership of its own.
 
 **WHY THIS IS A REQUIREMENT AND NOT AN IMPLEMENTATION DETAIL.** Scattered normalisation produced a BLOCKER
 IN EVERY REVIEW ROUND of this change — six in total, all the same defect class in a different consumer:
-the oracle compared paths from the wrong config source; a total exclusion swallow certified an empty prompt;
+the (since-removed) exclusion oracle compared paths from the wrong config source; a total exclusion swallow
+certified an empty prompt;
 `prompt-content:` could not parse space-bearing or C-quoted headers; the **census classified a C-quoted path
 by its QUOTED spelling** (`docs/é notes.md` read as extension `md"` and prefix `"docs/`, so PROSE counted as
-CODE and the configured `*.md` then reported a swallow ⇒ `census-exclusion: FAIL`, pre-enqueue, on an
-ordinary docs+code branch — REPRODUCED against the repository's own tracked
+CODE — and a CODE census path that the configured `*.md` removes from the diff roborev builds is exactly a
+`prompt-content:` FAIL on an ordinary docs+code branch; REPRODUCED against the repository's own tracked
 `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`); rename and MIXED-quoted headers were
 unreachable; and a newline-delimited path set turned a newline-bearing path into grep ALTERNATIVES, so its
 first line "proved" its presence — a genuine FALSE PASS. Patching the reported consumer each round is
@@ -640,13 +265,13 @@ consumer nobody has written yet.
 
 #### Scenario: A non-ASCII prose path is classified by its raw bytes, not its quoted spelling
 - **GIVEN** a census containing a non-ASCII documentation path (which a non-`-z` `git diff --numstat` would render C-quoted) beside a real code file, and a configuration excluding `*.md`
-- **WHEN** the wrapper runs the pre-enqueue reconciliation
-- **THEN** the documentation path is classified NON-code, only the code file is a CODE census path, `census-exclusion:` reads `PASS (1/1 code census paths survive …)`, and the terminal `RESULT:` is `PASS` — the ordinary docs+code branch is never false-FAILed
+- **WHEN** the wrapper classifies the census and evaluates prompt content
+- **THEN** the documentation path is classified NON-code, only the code file is a CODE census path, `prompt-content:` reads `PASS (1/1 code census paths present)`, and the terminal `RESULT:` is `PASS` — the ordinary docs+code branch is never false-FAILed
 
 #### Scenario: A non-ASCII docs artifact is classified by its raw bytes too
 - **GIVEN** a census containing a non-ASCII docs-scoped artifact (`docs/reports/*-artifacts/é.json`) beside a code file, with the artifact's extension in the configured docs-scoped deny-list
-- **WHEN** the wrapper runs the pre-enqueue reconciliation
-- **THEN** the artifact is classified NON-code, `census-exclusion:` reads `PASS`, and no configured-swallow FAIL is reported
+- **WHEN** the wrapper classifies the census
+- **THEN** the artifact is classified NON-code by its RAW bytes rather than its quoted spelling, only the code file is a CODE census path, `code-free:` reads `PASS`, and the artifact is never demanded of the prompt roborev's configured exclusions remove it from
 
 #### Scenario: A rename whose BOTH names carry a space is matched
 - **GIVEN** a census that splits a rename into two paths, both of which contain a space, and a prompt carrying the single header `diff --git a/docs/storage engine/old probe.sh b/docs/storage engine/new probe.sh`
@@ -682,7 +307,8 @@ a repository by its `repos.root_path` and resolves `exclude_patterns` from the *
 **snapshots that config at daemon start**. Therefore the narrowed set CANNOT apply to this change's own
 review: while the change is unmerged the root checkout still carries the blanket `['docs/**', '*.md']`. A
 committed **executable under root `docs/`** — the original self-demonstrating specimen — is consequently
-swallowed, making `census-exclusion:` FAIL **correctly** and permanently until merge. A pre-merge
+dropped from the review of its own change, so `prompt-content:` would FAIL **correctly** and permanently
+until merge (the reviewer really did not receive the file). A pre-merge
 self-demonstration is therefore a **deadlock, not a test**: the specimen that proves the fix is the
 specimen the unfixed configuration eats. The executable SHALL NOT be committed under root `docs/`; the
 requirement is **rescheduled, not dropped**, and the reason SHALL be recorded rather than the requirement
@@ -691,7 +317,7 @@ quietly weakened.
 **THE PRIMARY EVIDENCE SHALL BE A REAL PR, NOT A SYNTHETIC PROBE.** The first post-merge pull request that
 happens to carry an executable under `docs/` demonstrates this end to end at no extra cost, and is
 **strictly better** evidence than a probe written to pass, because it proves the fix on a diff **nobody
-shaped for it**. AC2's record SHALL therefore be that PR's `census:` + `census-exclusion:` +
+shaped for it**. AC2's record SHALL therefore be that PR's `census:` + `code-free:` +
 `prompt-content:` evidence posted to the issue; the committed probe **procedure** is the documented
 **FALLBACK**, for when no such PR arrives promptly or its evidence is ambiguous.
 
@@ -702,11 +328,15 @@ regardless, neither waiting on the demonstration; (c) the issue SHALL flip to `D
 evidence is posted; (d) if the demonstration has not happened within a few days it SHALL be **filed as a
 tracked issue**, never left to live in a comment thread.
 
-The recorded evidence SHALL carry: the `census:` counts, the `code-free:` and `census-exclusion:` lines,
-the `prompt-content:` line, and the input / cached / output token counts from the job record. Its PASS
-condition SHALL be `census-exclusion: PASS` TOGETHER WITH
-`prompt-content: PASS (<n>/<n> code census paths present)` — the first says the configuration would not
-swallow the executables, the second says the reviewer actually received them, and neither alone suffices.
+The recorded evidence SHALL carry: the `census:` counts, the `code-free:` line, the `prompt-content:` line,
+and the input / cached / output token counts from the job record. Its PASS
+condition SHALL be `code-free: PASS` TOGETHER WITH
+`prompt-content: PASS (<n>/<n> code census paths present)` and a genuine token signature — the first says
+the wrapper's own census classified the executables as CODE, the second says the reviewer actually received
+them, the third says a real review happened, and no one of the three alone suffices. `prompt-content:`
+carries the whole weight of the exclusion question: it is measured AFTER the review round, from the prompt
+the reviewer was actually given, and nothing predicts the exclusion set before the enqueue (deferred to
+issue #3283).
 
 **TOKEN COUNTS SHALL BE JUDGED AGAINST THE MECHANISM'S THRESHOLDS, NOT A MEMORISED BAND.** The thresholds
 are the wrapper's own: `input` at or above `ROBOREV_VACUITY_MIN_INPUT_TOKENS` (**25,000**, anchored on the
@@ -724,9 +354,10 @@ recognise is the SHAPE: input below the 25k floor, `cached == 0`, a few dozen ou
 
 The demonstration diff SHALL additionally include a file under a NESTED `docs` directory (for example
 under `website/src/content/docs/`) carrying one of the deny-listed artifact extensions, as an END-TO-END
-CONFIRMATION of the disassembly-derived prediction: because a pattern with an interior `/` is
-root-anchored, that nested path SHALL still be DELIVERED to the reviewer. Its absence from the prompt
-would falsify the recovered algorithm and SHALL be treated as a blocking finding. That file SHALL be
+CONFIRMATION of the disassembly-derived reading of roborev's own pathspec construction: because a pattern
+with an interior `/` is root-anchored, that nested path SHALL still be DELIVERED to the reviewer. Its
+absence from the prompt would falsify that reading — on which the SHAPE of the committed deny-list rests —
+and SHALL be treated as a blocking finding. That file SHALL be
 committed on this branch, because — unlike an executable under root `docs/` — it survives under BOTH the
 old and the new configuration and therefore does not deadlock.
 
@@ -736,11 +367,11 @@ rather than executed by the agent gate.
 #### Scenario: The recorded evidence shows the code census present and a genuine token signature
 - **GIVEN** the narrowed exclusion configuration in effect on the ROOT checkout, and a branch whose diff carries executables under `docs/reports/*-artifacts/`
 - **WHEN** the sanctioned wrapper is run against it and the result recorded on the issue
-- **THEN** the record shows `census-exclusion: PASS`, `prompt-content: PASS (<n>/<n> code census paths present)`, and a token triple judged against the wrapper's own floors (input at or above 25,000, cached greater than zero, output advisory) rather than against a memorised large-diff band
+- **THEN** the record shows `code-free: PASS`, `prompt-content: PASS (<n>/<n> code census paths present)`, and a token triple judged against the wrapper's own floors (input at or above 25,000, cached greater than zero, output advisory) rather than against a memorised large-diff band
 
 #### Scenario: The reason the demonstration cannot be pre-merge is recorded, not the requirement weakened
 - **WHEN** the change is inspected for AC2
-- **THEN** it records that roborev reads `exclude_patterns` from the repo root path and snapshots it at daemon start, that a committed executable under root `docs/` therefore makes `census-exclusion:` FAIL correctly until merge, and that the demonstration is consequently rescheduled to post-merge — and it carries no executable under `docs/reports/3229-artifacts/`
+- **THEN** it records that roborev reads `exclude_patterns` from the repo root path and snapshots it at daemon start, that a committed executable under root `docs/` is therefore dropped from the review of its own change so `prompt-content:` FAILs correctly until merge, and that the demonstration is consequently rescheduled to post-merge — and it carries no executable under `docs/reports/3229-artifacts/`
 
 #### Scenario: A real post-merge PR is the primary evidence and the probe is the fallback
 - **WHEN** the AC2 record is inspected
@@ -757,7 +388,7 @@ rather than executed by the agent gate.
 #### Scenario: The demonstration confirms the disassembly-derived root anchoring end to end
 - **GIVEN** a diff that includes a deny-listed artifact extension under a nested `docs` directory such as `website/src/content/docs/`
 - **WHEN** the prompt actually sent is inspected
-- **THEN** that nested path IS present in the prompt — confirming live that a pattern containing an interior `/` is root-anchored as the recovered `git.FormatExcludeArgs` specifies — and its absence would instead falsify the port and block the change rather than being recorded as an acceptable outcome
+- **THEN** that nested path IS present in the prompt — confirming live that a pattern containing an interior `/` is root-anchored, as the disassembly of roborev's own `git.FormatExcludeArgs` established — and its absence would instead falsify the reading the committed deny-list's shape rests on and block the change rather than being recorded as an acceptable outcome
 
 #### Scenario: The demonstration is recorded evidence, not an assertion
 - **WHEN** the pull request and issue are reviewed for AC2
@@ -810,7 +441,10 @@ exactly what its configured `exclude_patterns` pathspecs match — it makes NO c
 the 5 code files, because `*.md` is CONFIGURED). Requiring all 27 would false-FAIL
 every branch that touches documentation, which is most of them. The code subset is the right subset only
 while the configured set is a prose/artifact deny-list MIRRORING the census classification, and that
-correspondence SHALL NOT be assumed — `census-exclusion:` computes it with git pre-enqueue (#3229).
+correspondence is NOT predicted anywhere pre-enqueue (an oracle that did was built here and REMOVED —
+deferred to issue #3283). A broken correspondence therefore surfaces HERE, after the review round, as a
+`prompt-content:` FAIL naming the paths the reviewer never received — which is why a FAIL of this key
+means "suspect `.roborev.toml` first".
 
 **EVERY code path SHALL be checked** — there SHALL be NO sampling cap. A sampled subset was a hole: a
 partial prompt naming just the sampled files passed. Matching SHALL be against the prompt's actual
@@ -831,8 +465,8 @@ space-bearing header, a both-sides-quoted parse cannot read a rename's mixed hea
 newline-delimited set makes a newline-bearing path's first line "prove" its presence. Accepting only
 `^diff --git a/[^ ]+ b/[^ ]+$`, and comparing a
 C-quoted census path against unquoted captures, FALSE-FAILED both shapes (MEASURED: a census whose two
-code paths both survived the exclusion set reported `census-exclusion: PASS (2/2 survive)` beside
-`prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`). That direction is the DANGEROUS one for this key
+code paths were both OUTSIDE the configured exclusion set, and both present in the prompt, nevertheless
+reported `prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`). That direction is the DANGEROUS one for this key
 specifically: it is the wrapper's strongest deterministic anti-vacuity signal, so a key that reds on
 correct input is the key agents learn to waive. Reachability is not theoretical — the repository already
 tracks 40 space-bearing paths under `docs/`, including the directory `docs/storage engine/`, and this
@@ -850,7 +484,7 @@ The value set SHALL be exactly:
 
 - `PASS (<n>/<n> code census paths present)` — every code path found. There SHALL be NO "not expected"
   suffix and NO subtraction: no key is licensed to tell this one which census code paths to skip, so a path
-  the reviewer did not receive FAILs (see the documented residual, AC4's second branch);
+  the reviewer did not receive FAILs (see the residual named under *DEFERRED Requirements*);
 - `FAIL (<k>/<n> code census paths absent from the prompt)` — `<k>` MISSING of `<n>` checked, naming the
   missing paths (first ten). Note the two values carry the SAME denominator `<n>` but OPPOSITE numerator
   senses (present on PASS, absent on FAIL), so a grep-based reader SHALL read the value word, never the
@@ -893,7 +527,7 @@ one is a real anomaly.
 #### Scenario: A census path carrying spaces and a literal quote is not a false failure
 - **GIVEN** a census whose code paths include a filename with spaces and a literal double quote, and a prompt carrying that path in an UNQUOTED header (a producer that is not git)
 - **WHEN** the wrapper evaluates prompt content
-- **THEN** the canonical matcher recognises the path positionally in that header, `prompt-content:` reads `PASS (2/2 code census paths present)`, and the terminal `RESULT:` is `PASS` — the verdict itself is asserted, not just the `census-exclusion:` key
+- **THEN** the canonical matcher recognises the path positionally in that header, `prompt-content:` reads `PASS (2/2 code census paths present)`, and the terminal `RESULT:` is `PASS` — the verdict itself is asserted, never one intermediate key alone
 
 #### Scenario: The same path in the header shape git REALLY emits for a quote is matched
 - **GIVEN** the same census path and the header git actually writes for it, with the whole side C-quoted and the inner quotes ESCAPED (`diff --git "a/…odd \"q\" name.sh" "b/…"`)
@@ -933,9 +567,10 @@ paths absent)`), i.e. it excluded CODE. So for a diff every path of which the co
 constructed diff is genuinely EMPTY and the reviewer's "contains no code changes to review" is a TRUTHFUL
 report of an empty input rather than a reviewer malfunction. That is precisely why the correct response is
 a DETERMINISTIC pre-enqueue FAIL computed from our own census — the reviewer is not misbehaving and no
-amount of re-running or re-prompting will change the outcome — and why the census is ALSO reconciled
-against the effective exclusion set under `census-exclusion:`, so a configured pattern that would swallow
-CODE fails before the enqueue instead of masquerading as a code-free diff.
+amount of re-running or re-prompting will change the outcome. This key measures the census ONLY; it does
+NOT predict which of those paths the configured exclusion set will remove (an oracle that did was built
+here and REMOVED — deferred to issue #3283). A configured pattern that would swallow CODE therefore fails
+AFTER the review round, under `prompt-content:`, rather than before the enqueue.
 
 Classification SHALL be by file EXTENSION against a declared prose-extension set, plus the INTERSECTION of
 a declared ARTIFACT-extension set and a declared set of ARTIFACT-BEARING DIRECTORY GLOBS, mirroring the
@@ -952,8 +587,8 @@ that happen to exist in the checkout).
 
 **THE MIRROR SHALL BE ASSERTED STRUCTURALLY AGAINST THE COMMITTED CONFIGURATION.** The classification
 constants and `.roborev.toml`'s `exclude_patterns` are the SAME FACT WRITTEN TWICE, and a one-sided edit is
-the standing hazard: it surfaces as a `census-exclusion:` FAIL on an unrelated report PR, far from its
-cause. The regression suite SHALL therefore DERIVE the expected pattern set from the constants and assert
+the standing hazard: it surfaces as a `prompt-content:` FAIL on an unrelated report PR, a whole review
+round away from its cause. The regression suite SHALL therefore DERIVE the expected pattern set from the constants and assert
 SET EQUALITY (order-insensitive, because the file is machine-managed) against the committed
 `.roborev.toml`, parsed with the wrapper's OWN TOML parser rather than a second ad-hoc one. The assert
 SHALL be non-vacuous (an empty derived set SHALL NOT compare equal to an empty parse and pass) and SHALL
@@ -1011,17 +646,18 @@ The wrapper SHALL emit a single compact `==== ROBOREV REVIEW SUMMARY ====` block
 exit path — a pass, any failed check, or an empty census — carrying one field per line, in a FIXED
 order that is part of the contract, under the greppable keys: `repo:`, `branch:`, `base:`, `head-sha:`,
 `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`,
-`census-exclusion:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`,
+`job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`,
 `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:`, `log:`, and a terminal
-`RESULT: PASS|FAIL|NOTHING-TO-REVIEW`. `census-exclusion:` SHALL sit immediately after `code-free:`,
-mirroring its pre-enqueue evaluation order, and SHALL appear EXACTLY ONCE.
+`RESULT: PASS|FAIL|NOTHING-TO-REVIEW` — **TWENTY-TWO keys in all**, counting the terminal `RESULT:`. Each
+SHALL appear EXACTLY ONCE, and `code-free:` SHALL sit immediately after `census-check:`, mirroring its
+pre-enqueue evaluation order.
 `reviewed-sha:` SHALL carry the reviewed RANGE `<base40>..<head40>` on a normal run (a single sha only
 when the record reports one, and `-` when it is unverifiable), so a reader SHALL NOT expect a bare sha
 there.
 
-Every per-check key SHALL participate in ONE verdict scan in which a value beginning `FAIL`, `FINDINGS`,
-`ERROR` or `INCONSISTENT` fails the run, and `PASS*`, `SKIP`, `UNAVAILABLE`, `NOTICE*` and `DEGRADED*`
-never do. `DEGRADED` is non-failing BY DESIGN and only ever appears on `job-record:`, whose consequences
+Every per-check key SHALL participate in ONE verdict scan in which a value whose VERDICT TOKEN is `FAIL`,
+`FINDINGS`, `ERROR` or `INCONSISTENT` fails the run, and `PASS`, `SKIP`, `UNAVAILABLE`, `NOTICE` and
+`DEGRADED` never do. `DEGRADED` is non-failing BY DESIGN and only ever appears on `job-record:`, whose consequences
 are published by the dependent asserts under their own keys. A per-check key whose
 step was never reached SHALL carry an explicit `SKIP` rather than a blank, so an unreached check can
 never read as a pass.
@@ -1033,13 +669,25 @@ because a check aborted before assigning, a state a future check introduces, a t
 non-failing branch and reach `RESULT: PASS`. A value matching NEITHER the failing set NOR the documented
 non-failing set (`PASS`, `SKIP`, `NOTICE`, `UNAVAILABLE`, `DEGRADED`, and `findings:`'s own `NONE`,
 `PRESENT`, `UNKNOWN`) SHALL therefore be an UNRECOGNISED VERDICT that FAILS the run and NAMES itself and
-the reason. The existing failing-prefix scan SHALL be preserved as its own statement so the structural
-assert pinning `NOTICE*` outside the failing set keeps reading the statement it was written against.
+the reason. The failing-token scan SHALL be preserved as its own statement so the structural
+assert pinning `NOTICE` outside the failing set keeps reading the statement it was written against.
 
-**AND A PASS SHALL REQUIRE EVERY VERDICT-CARRYING KEY TO HAVE AFFIRMATIVELY PASSED.** The seven
-deterministic keys — `push-assert:`, `census-check:`, `code-free:`, `census-exclusion:`, `sha-assert:`,
-`review-completed:`, `prompt-content:` — SHALL each read `PASS` on a passing run (`census-exclusion:` MAY
-additionally read `NOTICE`, which is a measurement with a stated remedy-less residual). `vacuity-tier1:`,
+**BOTH THE GRAMMAR SCAN AND THE AFFIRMATION BACKSTOP SHALL MATCH ON THE VERDICT TOKEN — the value up to
+its FIRST SPACE — COMPARED EXACTLY, NEVER AS A PREFIX GLOB.** Every documented value is either a bare
+token (`PASS`, `SKIP`, `UNAVAILABLE`) or `TOKEN (detail…)`, so the token is well defined for all of them,
+and anything ELSE glued to a token is UNRECOGNISED and fails closed. A `PASS*` prefix glob would accept
+`PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN` as affirmative passes: the closure would then be
+checking a SPELLING rather than a STATE, and the backstop against unmeasured keys would itself be
+satisfiable by a value that measured nothing. Exact-token matching is strictly STRONGER in BOTH arms — a
+`FAILED (…)` variant no longer matches the failing arm by prefix either; it lands in the unrecognised arm,
+which also fails — so nothing becomes permissive by tightening.
+
+**AND A PASS SHALL REQUIRE EVERY VERDICT-CARRYING KEY TO HAVE AFFIRMATIVELY PASSED.** The **six**
+deterministic keys — `push-assert:`, `census-check:`, `code-free:`, `sha-assert:`,
+`review-completed:`, `prompt-content:` — SHALL each read `PASS` on a passing run, with **NO exemption for
+any key** and no exemption mechanism. (One existed briefly, for a key allowed a `NOTICE` because a
+remedy-less swallow was a measurement with a stated residual; that key and its exemption are both gone —
+#3283/#3278 — leaving the backstop UNIFORM, which is stricter, never weaker.) `vacuity-tier1:`,
 `vacuity-tier2:` and `findings:` are deliberately EXCLUDED, being corroborators with documented non-`PASS`
 values. This closes the case NEIGHBOURING the grammar check: a value that is IN the grammar and
 non-failing but is not a MEASUREMENT — `SKIP` above all, which means the check NEVER RAN. Validating that

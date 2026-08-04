@@ -462,21 +462,21 @@ the record's completeness). Note too that **roborev drops exactly what its confi
 code/non-code judgement** — so a docs-only diff cannot be roborev-certified at all. "docs-only" means a
 **code-free CENSUS**, never a `docs/` path prefix: the `docs/reports/*-artifacts/` measurement harnesses
 this repo ships by convention are executable code that IS reviewed, so a PR carrying them must be
-certified like any other code change (#3229). The pre-enqueue **`census-exclusion:`** key FAILs closed,
-naming the swallowed paths and the pattern responsible, when the **configured** set would swallow census code
-— which is exactly what a blanket `docs/**` did to 33 harness executables on PR #3222. Its verdicts follow
-one rule: **FAIL where the author can act; NOTICE where only the information is actionable; never silence**
-— which on this key's subject resolves to a single call, a *configured* swallow ⇒ FAIL, so the key has
-**no `NOTICE` value** and no separate total-swallow branch (a total swallow is a configured swallow, and the
-value carries `<m>/<n>`). **DECLARED RESIDUAL (#3278):** roborev also applies a compiled-in lockfile/cache
-deny-list (`**/Cargo.lock`, `**/go.sum`, `**/pnpm-lock.yaml`, …) that no configuration can switch off, and
-the guard deliberately does **not** model it — that modelling was built on #3229 and deleted after four
-consecutive false-PASSes inside it. So a diff whose code-census paths include such a path has it silently
-dropped from the reviewer's diff, `census-exclusion:` reports it SURVIVING, and **`prompt-content:` then
-FAILs** on its absence. That fails CLOSED — the cost is a diagnostic that names the symptom, not the
-mechanism. Practically: a lockfile-only dependency bump is still **not** roborev-certifiable, it now
-surfaces under `prompt-content:` rather than pre-enqueue, and `prompt-content:` can never print a
-`PASS (0/0 …)`.
+certified like any other code change (#3229). The remedy that shipped is the **configuration**: a narrowed
+prose/artifact deny-list (`*.md` plus artifact extensions scoped to artifact-bearing *directories*, never a
+blanket `docs/**` — which is what swallowed 33 harness executables on PR #3222), measured at 72 `docs/`
+executables reaching the reviewer and 0 markdown.
+**NOTHING PREDICTS THE EXCLUSION SET PRE-ENQUEUE (#3283 configured, #3278 compiled-in).** A key that did
+was built on #3229 and REMOVED by owner ruling: its false-PASS count was *increasing* across review rounds,
+and **a guard with known documented false-PASSes is worse than no guard, because it invites reliance it
+cannot support**. So a swallowed path — by configuration or by roborev's compiled-in lockfile/cache
+deny-list (`**/Cargo.lock`, `**/go.sum`, `**/pnpm-lock.yaml`, …) — surfaces **after** the review under
+**`prompt-content:`**, fail-closed, with a cause that names the symptom rather than the mechanism.
+Practically: **if `prompt-content:` FAILs, suspect `.roborev.toml` first**; a lockfile-only dependency bump
+is still **not** roborev-certifiable; and `prompt-content:` can never print a `PASS (0/0 …)`. Verdicts still
+follow one rule — **FAIL where the author can act; NOTICE where only the information is actionable; never
+silence** — and no key is exempt from the affirmation backstop: all six deterministic keys must be
+affirmatively `PASS`, matched on the exact verdict token, never a prefix glob.
 Note also that **a `.roborev.toml` change cannot certify itself**: roborev reads `exclude_patterns` from the
 repo **root path** and snapshots it at daemon start, so a worktree edit is invisible and the demonstration
 belongs after the merge — generally, *any PR whose subject is a config a daemon or gate reads from root

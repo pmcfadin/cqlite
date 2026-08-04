@@ -142,9 +142,10 @@ never gate stdout or review churn.
    "roborev clean": fix the cause the block names (unpushed branch, mismatched `reviewed-sha`, vacuous
    verdict) and re-run. A **docs-only diff cannot be roborev-certified at all** — record primary-source
    verification in the PR instead. "docs-only" means a **code-free CENSUS**, never a `docs/` path prefix:
-   `docs/reports/*-artifacts/` measurement harnesses are executable code that IS reviewed, and the
-   pre-enqueue `census-exclusion:` key FAILs closed when the configured `exclude_patterns` would swallow
-   census code (#3229). Four rules + evidence:
+   `docs/reports/*-artifacts/` measurement harnesses are executable code that IS reviewed. Nothing
+   predicts roborev's exclusion set pre-enqueue (deferred, #3283), so a swallowed path FAILs AFTER the
+   round under `prompt-content:` — **if `prompt-content:` FAILs, suspect `.roborev.toml` first** (#3229).
+   Four rules + evidence:
    https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/.
    Run review-first before any full gate — so
    the ONE full gate certifies already-reviewed code. **Skip review-first ONLY for a genuinely mechanical
