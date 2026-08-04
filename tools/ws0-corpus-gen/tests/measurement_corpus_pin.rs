@@ -79,10 +79,77 @@ fn read_artifact() -> serde_json::Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?} is not valid JSON: {e}"))
 }
 
+/// Fields of the committed artifact that are DELIBERATELY not compared, each with the
+/// reason (#3272 review B2).
+///
+/// This exists so [`the_comparison_covers_every_artifact_field`] can be derived from the
+/// artifact's ACTUAL key set: any field present in the artifact and absent from both
+/// the comparison and this list FAILS. The previous exhaustiveness check counted the
+/// perturbation CASES (`cases.len() == 8`), which enumerated only the fields already
+/// compared — it certified its own scope, and could not have caught the missing `seed`
+/// and `table` anchors that prompted this.
+const DELIBERATELY_NOT_COMPARED: &[(&str, &str)] = &[
+    (
+        "issue",
+        "a provenance label, not a measured quantity; #3096 is stated in prose everywhere",
+    ),
+    (
+        "components",
+        "compared SEPARATELY and more strictly in \
+         the_in_source_pin_matches_the_committed_artifact, which asserts the Data.db \
+         COMPONENT's own sha256 and size equal the pinned ones",
+    ),
+    (
+        "not_a_correctness_oracle",
+        "the #3042 disclaimer string; its wording is not a pin",
+    ),
+    (
+        "differs_from_prior_corpus",
+        "prose recording which digest this corpus is NOT (#3058/#3100)",
+    ),
+];
+
+/// Every artifact key `pin_vs_artifact` compares, in comparison order.
+///
+/// Named separately from the comparison so the exhaustiveness test can subtract it
+/// from the artifact's real key set. Kept beside the comparison body: adding a
+/// comparison without adding its key here makes the coverage test's arithmetic
+/// disagree, which is visible rather than silent.
+const COMPARED_FIELDS: &[&str] = &[
+    "seed",
+    "table",
+    "rows",
+    "partitions",
+    "rows_per_partition",
+    "data_db_bytes",
+    "total_component_bytes",
+    "cells_per_row",
+    "data_db_sha256",
+    "bytes_per_row",
+    "compression_info_present",
+];
+
 /// Every way the in-source pin and the committed artifact disagree. EMPTY = agree.
 ///
 /// Split out from the assertion so [`the_artifact_comparison_can_fail`] can drive
 /// it against a perturbed artifact — the same code path, not a reimplementation.
+///
+/// # The INPUT anchors, and why their absence made the whole pin unmoored (#3272 B2)
+///
+/// This compared the artifact's OUTPUT quantities (`rows`, `data_db_bytes`,
+/// `data_db_sha256`, …) and never the INPUT that produced them. MEASURED: changing
+/// [`ws0_corpus_gen::generate::DEFAULT_SEED`] from `30_960_001` to `99_999_999` and
+/// running `cargo test -p ws0-corpus-gen` left ALL 47 tests GREEN — the determinism
+/// tests use the constant symmetrically (both generations get the new seed, so they
+/// still agree), and nothing compared it to the artifact. Yet [`mc::DATA_DB_SHA256`] is
+/// the digest of a corpus generated at `30_960_001`, so after such an edit the pinned
+/// digest is not reproducible by ANY code path in the repo: the operator procedure
+/// would regenerate at the new seed and "fail" against a digest nothing could produce.
+///
+/// A digest pin is only a pin together with the inputs that determine it. So the seed
+/// and the table identity are compared against the constants the generator actually
+/// uses — `generate::DEFAULT_SEED` and `schema::{KEYSPACE, TABLE}` — not against
+/// literals retyped here, which would be a third copy free to drift from both.
 fn pin_vs_artifact(json: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
     let mut u64_eq = |key: &str, pinned: u64| {
@@ -93,12 +160,32 @@ fn pin_vs_artifact(json: &serde_json::Value) -> Vec<String> {
             out.push(format!("{key}: artifact {got} != pinned {pinned}"));
         }
     };
+    // THE INPUT ANCHOR. `DEFAULT_SEED` is read from the generator, so this comparison
+    // moves the moment the generator's seed does.
+    u64_eq("seed", ws0_corpus_gen::generate::DEFAULT_SEED);
     u64_eq("rows", mc::ROWS);
     u64_eq("partitions", mc::PARTITIONS);
     u64_eq("rows_per_partition", mc::ROWS_PER_PARTITION);
     u64_eq("data_db_bytes", mc::DATA_DB_BYTES);
     u64_eq("total_component_bytes", mc::TOTAL_COMPONENT_BYTES);
     u64_eq("cells_per_row", mc::CELLS_PER_ROW as u64);
+
+    // The other INPUT anchor: which table these bytes are of. Built from the schema
+    // constants the generator writes with, exactly as `generate()` builds the field.
+    let expected_table = format!(
+        "{}.{}",
+        ws0_corpus_gen::schema::KEYSPACE,
+        ws0_corpus_gen::schema::TABLE
+    );
+    let table = field(json, "table");
+    let table = table
+        .as_str()
+        .unwrap_or_else(|| panic!("{ARTIFACT}.table is not a string"));
+    if table != expected_table {
+        out.push(format!(
+            "table: artifact {table} != pinned {expected_table}"
+        ));
+    }
 
     let sha = field(json, "data_db_sha256");
     let sha = sha
@@ -179,12 +266,31 @@ fn the_artifact_comparison_can_fail() {
 
     let cases: Vec<(&str, Perturb)> = vec![
         (
+            // THE INPUT ANCHOR (#3272 review B2). Without this case, `pin_vs_artifact`
+            // could stop comparing `seed` and every other assertion here would still
+            // pass — which is precisely the state the review found.
+            "seed",
+            Box::new(|j: &mut serde_json::Value| j["seed"] = serde_json::json!(1)),
+        ),
+        (
+            "table",
+            Box::new(|j: &mut serde_json::Value| j["table"] = serde_json::json!("somewhere.else")),
+        ),
+        (
             "rows",
             Box::new(|j: &mut serde_json::Value| j["rows"] = serde_json::json!(3_999_999)),
         ),
         (
             "partitions",
             Box::new(|j: &mut serde_json::Value| j["partitions"] = serde_json::json!(39_999)),
+        ),
+        (
+            // FOUND BY the exhaustiveness rewrite above: `rows_per_partition` was
+            // compared by `pin_vs_artifact` with NO perturbation case, so its comparison
+            // was unproven — the old `cases.len() == 8` could not see that, because 8
+            // was the number of cases, not the number of comparisons.
+            "rows_per_partition",
+            Box::new(|j: &mut serde_json::Value| j["rows_per_partition"] = serde_json::json!(99)),
         ),
         (
             "data_db_bytes",
@@ -220,10 +326,21 @@ fn the_artifact_comparison_can_fail() {
             }),
         ),
     ];
-    assert_eq!(
-        cases.len(),
-        8,
-        "every field pin_vs_artifact compares needs a perturbation case"
+    // Every COMPARED field needs a perturbation case, checked against the comparison's
+    // own field list rather than against a hardcoded count. `cases.len() == 8` used to
+    // stand here, and it could not fail for a field the comparison had never covered:
+    // it enumerated the cases, and the cases enumerated the comparisons — the assert
+    // certified its own scope (#3272 review B2).
+    let case_names: Vec<&str> = cases.iter().map(|(n, _)| *n).collect();
+    let uncovered: Vec<&&str> = COMPARED_FIELDS
+        .iter()
+        .filter(|f| !case_names.contains(f))
+        .collect();
+    assert!(
+        uncovered.is_empty(),
+        "pin_vs_artifact compares {uncovered:?} with no perturbation case, so the \
+         comparison of those fields is unproven — a `pin_vs_artifact` that silently \
+         stopped checking them would still pass this test"
     );
     for (field_name, perturb) in cases {
         let mut j = base.clone();
@@ -245,6 +362,86 @@ fn the_artifact_comparison_can_fail() {
     assert!(
         pin_vs_artifact(&base).is_empty(),
         "the UNPERTURBED artifact must agree with the pin"
+    );
+}
+
+/// EVERY field the committed artifact carries is either COMPARED or explicitly
+/// exempted — derived from the artifact's ACTUAL key set (#3272 review B2).
+///
+/// This is the assert `cases.len() == 8` was pretending to be. That one enumerated the
+/// perturbation cases, which enumerated the comparisons, so its "exhaustiveness" was
+/// over the fields already covered — it could never see a field the artifact carried and
+/// the comparison ignored. Which is exactly how `seed` (the INPUT that determines the
+/// pinned digest) and `table` went uncompared: MEASURED, changing
+/// `generate::DEFAULT_SEED` from `30_960_001` to `99_999_999` left all 47 tests GREEN
+/// while `DATA_DB_SHA256` became unreproducible by any code path.
+///
+/// So the direction is inverted: read the artifact, subtract what is compared, subtract
+/// what is deliberately exempted WITH A STATED REASON, and FAIL on whatever is left. A
+/// new artifact field is then a decision someone has to make, not a silent gap.
+#[test]
+fn the_comparison_covers_every_artifact_field() {
+    let json = read_artifact();
+    let obj = json
+        .as_object()
+        .expect("the committed artifact is a JSON object");
+    let exempt: Vec<&str> = DELIBERATELY_NOT_COMPARED.iter().map(|(k, _)| *k).collect();
+    let unaccounted: Vec<&String> = obj
+        .keys()
+        .filter(|k| !COMPARED_FIELDS.contains(&k.as_str()) && !exempt.contains(&k.as_str()))
+        .collect();
+    assert!(
+        unaccounted.is_empty(),
+        "{ARTIFACT} carries field(s) {unaccounted:?} that pin_vs_artifact neither \
+         compares nor lists in DELIBERATELY_NOT_COMPARED. Every field is a decision: \
+         either compare it against an in-source constant, or record WHY it is not a \
+         pin. An unaccounted field is a quantity the artifact asserts and nothing \
+         checks."
+    );
+    // The reverse direction: a COMPARED field that the artifact does not carry would
+    // make `field()` panic at some point — surfaced here as a named failure instead.
+    let absent: Vec<&&str> = COMPARED_FIELDS
+        .iter()
+        .filter(|f| !obj.contains_key(**f))
+        .collect();
+    assert!(
+        absent.is_empty(),
+        "pin_vs_artifact compares field(s) {absent:?} that {ARTIFACT} does not carry"
+    );
+    // And every exemption must carry a non-empty reason: "not compared, no reason
+    // given" is how a real gap gets parked as an exemption.
+    for (key, reason) in DELIBERATELY_NOT_COMPARED {
+        assert!(
+            reason.len() > 20,
+            "the exemption for `{key}` must state a real reason, got {reason:?}"
+        );
+    }
+}
+
+/// The seed anchor, stated as its own assertion so the failure NAMES the hazard.
+///
+/// `pin_vs_artifact` already compares `seed`, but a divergence there prints a generic
+/// "artifact X != pinned Y". This says what it means: the pinned digest was produced at
+/// one specific seed, and if the generator's seed moves, that digest is no longer
+/// reproducible by anything in the repo.
+#[test]
+fn the_pinned_digest_is_anchored_to_the_seed_that_produced_it() {
+    let json = read_artifact();
+    let recorded = field(&json, "seed")
+        .as_u64()
+        .expect("the artifact records an integer seed");
+    assert_eq!(
+        recorded,
+        ws0_corpus_gen::generate::DEFAULT_SEED,
+        "the committed corpus identity was generated at seed {recorded}, but \
+         generate::DEFAULT_SEED is now {}. The pinned DATA_DB_SHA256 ({}) is the digest \
+         of a corpus generated at {recorded} — with the generator on a different seed, \
+         NO code path in this repo can reproduce it, and the operator procedure would \
+         regenerate at the new seed and 'fail' against a digest nothing can produce. \
+         Either restore the seed, or regenerate the corpus and re-pin BOTH the seed and \
+         every digest together (see measurement_corpus::OPERATOR_VERIFY_CORPUS).",
+        ws0_corpus_gen::generate::DEFAULT_SEED,
+        mc::DATA_DB_SHA256,
     );
 }
 

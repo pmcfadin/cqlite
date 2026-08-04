@@ -52,6 +52,11 @@ REPORT="$REPO_ROOT/scripts/perf/ws0_report.py"
 # HERE as the shipped implementation, sourced rather than re-extracted, so a divergence
 # between what is tested and what runs cannot exist.
 HOST_STATE="$REPO_ROOT/scripts/perf/lib-host-state.sh"
+# The argument-validation helpers the driver sources (`require_positive_int`,
+# `parse_duration_ms`, `duration_reject`). The driver keeps the CALL SITES, so the
+# behavioural cases still run the driver end to end; the structural checks below read
+# the implementation from here.
+ARGS_LIB="$REPO_ROOT/scripts/perf/lib-args.sh"
 
 fails=0
 pass() { echo "ok   - $1"; }
@@ -60,6 +65,7 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$REPORT" ] || { echo "FAIL - missing $REPORT"; exit 1; }
 [ -f "$HOST_STATE" ] || { echo "FAIL - missing $HOST_STATE"; exit 1; }
+[ -f "$ARGS_LIB" ] || { echo "FAIL - missing $ARGS_LIB"; exit 1; }
 # python3 absence is a FAILURE, not a skip (#3272 review B8). The old branch printed
 # `SKIP - … (never a silent PASS)` and then `exit 0` — which IS a silent pass: the
 # gate's `tooling-tests` component records SUCCESS with none of the ~65 checks below
@@ -682,6 +688,44 @@ check_driver_reject "the DRIVER refuses --port 0" \
 check_driver_reject "the DRIVER refuses an out-of-range --port" \
   "65535" --corpus "$TMP/corpus" --port 70000
 
+# ---- the driver's cap and the reporter's cap AGREE (#3272 review) -----------
+# NON-VACUITY: the driver's `--reps` bound was a NINE-DIGIT length check, and the
+# reporter's is 100,000. MEASURED against that driver: `--reps 200000` passed argument
+# validation and ran on — 200,000 reps, each a full-corpus bare scan plus a Flight rep,
+# i.e. days of measurement — and would have been refused only by ws0_report.py at the
+# very end. Refusing a value after acting on it is not refusing it.
+check_driver_reject "the DRIVER refuses --reps 200000 UP FRONT (the reporter's own cap)" \
+  "must be at most 100000" --corpus "$TMP/corpus" --reps 200000
+out=$(bash "$DRIVER" --corpus "$TMP/corpus" --reps 200000 2>&1)
+if grep -q 'SAME bound ws0_report.py enforces' <<<"$out"; then
+  pass "the cap refusal says it is the reporter's bound, refused before the reps run"
+else
+  fail "the reps-cap refusal must name the reporter's bound (out: $out)"
+fi
+# The bound is written in two languages, so DRIFT is caught mechanically rather than
+# trusted to a comment: both values are read and compared.
+driver_cap=$(awk -F= '/^MAX_COUNT=/{print $2; exit}' "$ARGS_LIB")
+report_cap=$(python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ws0_validate
+print(ws0_validate.MAX_COUNT)
+PY
+)
+if [ -n "$driver_cap" ] && [ "$driver_cap" = "$report_cap" ]; then
+  pass "the driver's MAX_COUNT ($driver_cap) EQUALS ws0_validate.MAX_COUNT ($report_cap)"
+else
+  fail "the two caps disagree (driver='$driver_cap' reporter='$report_cap') — the driver would accept a value the report refuses"
+fi
+# And a value just INSIDE the shared cap must still be accepted: the fix is agreement,
+# not a blanket lowering that would refuse a legitimate long session.
+out=$(bash "$DRIVER" --corpus "$TMP/corpus" --reps 100000 2>&1)
+if ! grep -q 'must be at most' <<<"$out"; then
+  pass "--reps 100000 (exactly the cap) is ACCEPTED by the driver"
+else
+  fail "the cap must be inclusive; --reps 100000 was refused (out: $out)"
+fi
+
 # ==========================================================================
 # #3272 finding 6 — completeness is judged against the SELECTION, and the
 #                   selection is stated in the report
@@ -829,7 +873,7 @@ else
 fi
 # A structural check that no arithmetic path can regress: every multiplication of a
 # parsed duration component must carry `10#`.
-if awk '/^parse_duration_ms\(\)/,/^}/' "$DRIVER" | grep -q '\$((n \* 1000))'; then
+if awk '/^parse_duration_ms\(\)/,/^}/' "$ARGS_LIB" | grep -q '\$((n \* 1000))'; then
   fail "parse_duration_ms still multiplies a bare \$n — leading zeros would be octal again"
 else
   pass "parse_duration_ms feeds no bare component into arithmetic (structural)"
@@ -844,12 +888,49 @@ fi
 # corpus-missing check, meaning a caller could smuggle a BLENDED cold step past
 # #3096 finding 2's guard with an absurd duration. Both guards are needed; `10#`
 # alone is not sufficient.
+# The diagnostic must name the RANGE, not the FORMAT (#3272 review). These two cases
+# used to assert `must be <n>ms, <n>s or <n>m` — a complaint about the format of a value
+# whose format is perfectly fine, which is the SAME misleading diagnostic this file
+# criticizes for `08s` two blocks up, reintroduced through the digit cap. Both branches
+# of `parse_duration_ms` now report their own cause, so a too-long value says so and
+# says what the maximum is.
 check_driver_reject "a 64-bit-WRAPPING cold step is refused (would wrap to 4000ms, under the ceiling)" \
-  "must be <n>ms, <n>s or <n>m" --corpus "$TMP/corpus" --temp cold \
+  "is too LONG" --corpus "$TMP/corpus" --temp cold \
   --cold-step-duration 2305843009213693956s
+out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold \
+  --cold-step-duration 2305843009213693956s 2>&1)
+if grep -q '19 digits' <<<"$out" && grep -q 'maximum' <<<"$out" \
+  && ! grep -q 'must be <n>ms' <<<"$out"; then
+  pass "the too-long refusal states the DIGIT COUNT and the maximum, not a format complaint"
+else
+  fail "a too-long duration must be refused on RANGE, naming the length (out: $out)"
+fi
+if grep -q 'wraps to 4000ms' <<<"$out"; then
+  pass "the too-long refusal explains the wraparound it prevents (and the cold ceiling)"
+else
+  fail "the too-long refusal must explain why the cap exists (out: $out)"
+fi
 check_driver_reject "a 20-digit duration is refused before arithmetic touches it" \
-  "must be <n>ms, <n>s or <n>m" --corpus "$TMP/corpus" --temp cold \
+  "is too LONG" --corpus "$TMP/corpus" --temp cold \
   --cold-step-duration 99999999999999999999ms
+# ...and a genuinely MALFORMED value still gets the format message: the split must
+# distinguish the two causes, not replace one blanket message with another.
+check_driver_reject "a genuinely malformed value still gets the FORMAT message" \
+  "must be <n>ms, <n>s or <n>m" --corpus "$TMP/corpus" --temp cold \
+  --cold-step-duration 45
+out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 45 2>&1)
+if ! grep -q 'too LONG' <<<"$out"; then
+  pass "a malformed value is NOT reported as too long (the two causes stay distinct)"
+else
+  fail "a malformed value must not report a length problem (out: $out)"
+fi
+# The cause code must survive the call. `if ! cmd; then … $? …` reads 0 — `!` REPLACES
+# the status — which silently collapsed both causes back into the format branch.
+if awk '/^for _spec in "step-duration/,/^done$/' "$DRIVER" | grep -q '_rc=0 || _rc=\$?'; then
+  pass "the duration cause code is captured on its own statement (not through \`if !\`)"
+else
+  fail "the duration rc must be captured directly; \`if ! cmd\` discards it"
+fi
 # The largest value inside the cap must still PARSE — the fix is a cap, not a ban on
 # big-but-sane durations. 999999999ms is ~11.5 days: over the cold ceiling, so it must
 # be refused for its VALUE, which proves it reached the ceiling rather than the parser.
@@ -866,13 +947,13 @@ check_driver_reject "a 20-digit --port is refused before arithmetic" \
   "absurdly large" --corpus "$TMP/corpus" --port 99999999999999999999
 # The digit test must come BEFORE any arithmetic, or the bound is itself evaluated by
 # the arithmetic that wraps.
-if awk '/^require_positive_int\(\)/,/^}/' "$DRIVER" \
+if awk '/^require_positive_int\(\)/,/^}/' "$ARGS_LIB" \
   | awk '/#value/{d=NR} /10#\$value/{if(!d) bad=1} END{exit(bad?1:0)}'; then
   pass "the digit-count check precedes the arithmetic in require_positive_int"
 else
   fail "require_positive_int must test the digit count before any arithmetic"
 fi
-if awk '/^parse_duration_ms\(\)/,/^}/' "$DRIVER" | grep -q 'DURATION_MAX_DIGITS'; then
+if awk '/^parse_duration_ms\(\)/,/^}/' "$ARGS_LIB" | grep -q 'DURATION_MAX_DIGITS'; then
   pass "parse_duration_ms caps the digit count (structural)"
 else
   fail "parse_duration_ms must cap the digit count before multiplying"

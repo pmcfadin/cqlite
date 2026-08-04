@@ -62,6 +62,8 @@ source "$HERE/lib-cpu.sh"
 source "$HERE/lib-perf-lint.sh"
 # shellcheck source=scripts/perf/lib-host-state.sh
 source "$HERE/lib-host-state.sh"
+# shellcheck source=scripts/perf/lib-args.sh
+source "$HERE/lib-args.sh"
 
 CORPUS=""
 SERVER_CPUS="2,10"
@@ -181,44 +183,10 @@ unset _perf_lint_out
 #
 # The WARM arm is unaffected: N>1 there is a legitimate way to amortize process
 # start, and every pass is warm by construction.
-# Every numeric option is validated POSITIVE, up front, before any build, cache drop
-# or measurement (issue #3272, finding 5). `--reps` had no validation at all: at
-# `--reps 0` every `for rep in $(seq 1 0)` loop body was skipped, so the driver ran
-# to completion having measured NOTHING and handed the reporter an empty session —
-# which (pre-fix) also exited zero. A non-numeric `--reps abc` made `seq` emit
-# nothing and print its own diagnostic into the middle of a "successful" run. The
-# vacuous-green class: a run that measured nothing must not look like one that did.
-require_positive_int() { # require_positive_int <flag> <value> [max]
-  local flag="$1" value="$2" max="${3:-}"
-  case "$value" in
-    ''|*[!0-9]*)
-      echo "FATAL: --$flag must be a positive integer (got '$value')" >&2; exit 2 ;;
-  esac
-  # DIGIT COUNT first, before any arithmetic — bash arithmetic is signed 64-bit and
-  # WRAPS SILENTLY, so a 20-digit value becomes an arbitrary (possibly small,
-  # possibly negative) number and the range checks below would be comparing
-  # something other than what the caller wrote. Measured: `99999999999999999999`
-  # evaluates to 7766279631452241919. 9 digits is past any legitimate rep count or
-  # port and cannot wrap.
-  if [[ "${#value}" -gt 9 ]]; then
-    echo "FATAL: --$flag is absurdly large (got '$value', ${#value} digits)." >&2
-    echo "       Refused before arithmetic: bash arithmetic wraps at 64 bits, so a" >&2
-    echo "       value this size would be range-checked as some other number." >&2
-    exit 2
-  fi
-  # 10# for the same reason parse_duration_ms uses it: `08` is not octal here.
-  if (( 10#$value < 1 )); then
-    echo "FATAL: --$flag must be at least 1 (got '$value')." >&2
-    echo "       A run with --$flag below 1 measures nothing, and a report over" >&2
-    echo "       nothing is not a smaller version of the requested claim — it is a" >&2
-    echo "       vacuous success (issue #3272)." >&2
-    exit 2
-  fi
-  if [[ -n "$max" ]] && (( 10#$value > max )); then
-    echo "FATAL: --$flag must be at most $max (got '$value')" >&2
-    exit 2
-  fi
-}
+# Numeric-option and duration validation live in scripts/perf/lib-args.sh; the
+# CALL SITES stay here, so what this driver actually validates is visible at its
+# top level rather than buried in a library.
+
 require_positive_int scan-passes "$SCAN_PASSES"
 require_positive_int reps "$REPS"
 require_positive_int port "$PORT" 65535
@@ -241,73 +209,17 @@ require_positive_int port "$PORT" 65535
 #       anticipate. A ceiling alone would be a guess; the observed count is not.
 COLD_STEP_MAX_MS=5000
 
-# parse_duration_ms <value> — echo milliseconds, non-zero on a malformed value.
-# Accepts the loadgen's `<n>ms` / `<n>s` / `<n>m` forms only: a bare `45` is
-# REJECTED rather than guessed at, since guessing seconds-vs-millis would silently
-# measure a step 1000x from the one requested.
-#
-# EVERY component enters arithmetic as `10#$n` — DECIMAL, explicitly (issue #3272,
-# finding 7). Bash's `$((...))` reads a leading-zero literal as OCTAL, which made
-# this function silently wrong for a whole class of ordinary spellings:
-#
-#   `010s`     -> $((010 * 1000))   = 8000 ms.  A caller asking for 10s measured 8s.
-#   `030ms`    -> $((030))          = 24 ms.
-#   `08s`      -> a HARD bash error, "08: value too great for base (error token is
-#                 08)", which the `case` then reported as "must be <n>ms, <n>s or
-#                 <n>m" — a complaint about the FORMAT of a value whose format is
-#                 fine, sending the reader after the wrong thing.
-#   `010000ms` -> 4096 ms, i.e. UNDER the 5000ms cold ceiling while really being
-#                 10s — so the octal parse could smuggle a BLENDED cold step past
-#                 the guard added for #3096 finding 2.
-#
-# The regex already restricts `$n` to digits, so `10#` cannot fail on a value that
-# reaches it; it only fixes the base. Note the `*ms` case must stay FIRST — `*s`
-# would otherwise match `45ms` and leave a trailing `m`.
-#
-# The DIGIT-LENGTH CAP closes the OTHER half of the same defect class, and it is a
-# bypass of exactly the same shape as the octal one. Bash arithmetic is signed
-# 64-bit and WRAPS SILENTLY, so a large-but-well-formed value multiplied by 1000 or
-# 60000 lands on a small positive number:
-#
-#   `2305843009213693956s` -> $((… * 1000)) wraps to **4000** ms, UNDER the 5000ms
-#   cold ceiling. A caller could therefore smuggle a blended cold step past the
-#   guard of #3096 finding 2 with an absurd duration, exactly as `010000ms` could
-#   via the octal parse. Verified against this driver before the fix: the value ran
-#   straight through the ceiling to the corpus check.
-#
-# A duration is capped at 9 digits — ~11.5 days in ms, ~31 years in seconds, far
-# past any legitimate step — which keeps the largest product (999999999 * 60000)
-# near 6e13, four orders of magnitude inside 2^63. So the multiply cannot wrap and
-# the ceiling comparison is on the number the caller actually wrote. REJECTED rather
-# than clamped: a clamp would measure a step other than the one requested without
-# saying so, which is the failure mode this whole function is being hardened against.
-DURATION_MAX_DIGITS=9
-parse_duration_ms() {
-  local v="$1" n
-  case "$v" in
-    *ms) n="${v%ms}" ;;
-    *s)  n="${v%s}" ;;
-    *m)  n="${v%m}" ;;
-    *)   return 1 ;;
-  esac
-  [[ "$n" =~ ^[0-9]+$ ]] || return 1
-  # The DIGIT COUNT is compared before any arithmetic touches the value: a numeric
-  # bound would itself be evaluated by the arithmetic that wraps.
-  [[ "${#n}" -le "$DURATION_MAX_DIGITS" ]] || return 1
-  case "$v" in
-    *ms) echo "$((10#$n))" ;;
-    *s)  echo "$((10#$n * 1000))" ;;
-    *m)  echo "$((10#$n * 60000))" ;;
-  esac
-}
 
 for _spec in "step-duration:$STEP_DURATION" "cold-step-duration:$COLD_STEP_DURATION"; do
   _name="${_spec%%:*}"; _val="${_spec#*:}"
-  if ! _ms="$(parse_duration_ms "$_val")"; then
-    echo "FATAL: --$_name must be <n>ms, <n>s or <n>m (got '$_val')" >&2
-    echo "       A bare number is refused rather than guessed at: seconds-vs-millis" >&2
-    echo "       would silently measure a step 1000x from the one requested." >&2
-    exit 2
+  # `_rc` is captured on its OWN statement. `if ! cmd; then … $? …` reads 0 in the body
+  # — `!` REPLACES the status with the inverted one — so the cause code was lost and
+  # `duration_reject` always took its malformed branch. Measured: a 20-digit duration
+  # reported "must be <n>ms, <n>s or <n>m", which is the exact misleading
+  # format-complaint this split exists to remove.
+  _ms="$(parse_duration_ms "$_val")" && _rc=0 || _rc=$?
+  if [[ "$_rc" -ne 0 ]]; then
+    duration_reject "$_name" "$_val" "$_rc"
   fi
   if [[ "$_ms" -le 0 ]]; then
     echo "FATAL: --$_name must be greater than zero (got '$_val')" >&2

@@ -57,7 +57,17 @@ struct Cli {
 
     /// Timed passes. Every pass's wall time is printed individually; the caller
     /// takes the median and reports the spread (never a silent average).
-    #[arg(long, default_value_t = 3)]
+    ///
+    /// MUST be >= 1, enforced by clap's value parser rather than only by the shell
+    /// driver (issue #3272 review). At `--passes 0` the `for pass in 0..0` loop body
+    /// never ran, so this binary skipped the scan entirely, printed
+    /// `rows_denominator: 0` / `timed_scan_secs: 0.0`, and exited **SUCCESS** — the
+    /// exact contradiction of the "zero rows exits non-zero" guarantee stated in this
+    /// file's own doc comment. `ws0-baseline.sh` happens to validate `--scan-passes`
+    /// before invoking this, but a guarantee that holds only because one caller is
+    /// careful is a property of the caller, not of the binary; a direct invocation is
+    /// an ordinary thing to do with a bench tool.
+    #[arg(long, default_value_t = 3, value_parser = at_least_one_pass)]
     passes: u32,
 
     /// Fold every cell into a digest (anti-elision proof; inflates the number).
@@ -81,6 +91,29 @@ struct Cli {
     /// up front that it does not scan.
     #[arg(long)]
     setup_only: bool,
+}
+
+/// `--passes` value parser: a positive count, or a reason.
+///
+/// Rejects at PARSE time rather than after setup, so a vacuous invocation cannot open
+/// the corpus, ingest the schema and then exit zero having measured nothing (#3272
+/// review B7). The message states WHY rather than only the bound: the failure mode
+/// being closed is a vacuous SUCCESS, which is materially different from an ordinary
+/// out-of-range argument.
+fn at_least_one_pass(s: &str) -> Result<u32, String> {
+    let n: u32 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a non-negative integer"))?;
+    if n == 0 {
+        return Err(
+            "must be at least 1. A run with 0 timed passes performs no scan and \
+             observes no rows, so it would report `rows_denominator: 0` and exit \
+             SUCCESS — a vacuous measurement, which contradicts this binary's \
+             zero-rows-is-a-failure guarantee (issue #3272)."
+                .to_string(),
+        );
+    }
+    Ok(n)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -155,6 +188,16 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // The value parser above rejects 0 at parse time; this is the same rule stated
+    // where the loop is, so a future `Cli` constructed in code (a test, a library
+    // caller) cannot reach the loop with a vacuous count either.
+    if cli.passes == 0 {
+        return Err(
+            "--passes must be at least 1: a run with 0 timed passes observes no rows \
+             and would exit SUCCESS having measured nothing (issue #3272)"
+                .into(),
+        );
+    }
     let mut passes = Vec::new();
     for pass in 0..cli.passes {
         let mut rows = 0u64;
@@ -279,4 +322,81 @@ fn fnv1a64_update(mut h: u64, bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01B3);
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// NON-VACUITY for [`at_least_one_pass`] (issue #3272 review B7).
+    ///
+    /// MEASURED against the pre-fix binary — `#[arg(long, default_value_t = 3)] passes:
+    /// u32` with no parser — `--passes 0` parsed fine, `for pass in 0..0` ran zero
+    /// times, and the binary printed
+    /// `{"rows_denominator":0,"timed_scan_secs":0.0,"passes":[]}` and exited **0**. The
+    /// only thing preventing that was `ws0-baseline.sh` validating `--scan-passes`
+    /// first, i.e. a property of one caller rather than of the binary.
+    #[test]
+    fn passes_zero_is_refused_at_parse_time() {
+        let err = Cli::try_parse_from([
+            "ws0-scan-bench",
+            "--corpus",
+            "/nonexistent",
+            "--passes",
+            "0",
+        ])
+        .expect_err("--passes 0 must not parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least 1"),
+            "the refusal must state the bound; got: {msg}"
+        );
+        assert!(
+            msg.contains("vacuous"),
+            "the refusal must say WHY (a vacuous SUCCESS, not merely out of range); \
+             got: {msg}"
+        );
+    }
+
+    /// The ACCEPT direction: the guard is not one that refuses every value. Without
+    /// this, `at_least_one_pass` hardcoded to `Err` would satisfy the case above — the
+    /// #3249 shape.
+    #[test]
+    fn a_positive_passes_count_parses_and_the_default_is_positive() {
+        for n in ["1", "3", "17"] {
+            let cli = Cli::try_parse_from(["ws0-scan-bench", "--corpus", "/x", "--passes", n])
+                .unwrap_or_else(|e| panic!("--passes {n} must parse: {e}"));
+            assert_eq!(cli.passes.to_string(), n);
+        }
+        let cli = Cli::try_parse_from(["ws0-scan-bench", "--corpus", "/x"]).expect("defaults");
+        assert!(
+            cli.passes >= 1,
+            "the DEFAULT must itself be a non-vacuous count, got {}",
+            cli.passes
+        );
+    }
+
+    /// A negative or non-numeric value is refused too, with a reason rather than a
+    /// panic — the parser owns the whole domain, not just the zero case.
+    #[test]
+    fn a_negative_or_non_numeric_passes_count_is_refused() {
+        for bad in ["-1", "abc", "1.5", ""] {
+            let err = Cli::try_parse_from(["ws0-scan-bench", "--corpus", "/x", "--passes", bad])
+                .expect_err("must reject {bad}");
+            assert!(
+                !err.to_string().is_empty(),
+                "the refusal of `{bad}` must carry a message"
+            );
+        }
+    }
+
+    /// The value parser is what the CLI actually uses. A parser defined but not wired
+    /// is the #3249 shape ("present" vs "observed to fire"), and `try_parse_from` above
+    /// only proves the CLI refuses `0` — not that it refuses it THROUGH this function.
+    #[test]
+    fn the_value_parser_itself_refuses_zero_and_accepts_one() {
+        assert!(at_least_one_pass("0").is_err());
+        assert_eq!(at_least_one_pass("1").expect("1 is valid"), 1);
+    }
 }

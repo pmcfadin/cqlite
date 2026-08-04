@@ -121,7 +121,7 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<CorpusIdentity> {
         let mut mutations = Vec::with_capacity(spec.rows_per_partition as usize);
         for r in 0..spec.rows_per_partition {
             let global_row = p * spec.rows_per_partition + r;
-            mutations.push(row_mutation(spec.seed, *p, r, global_row));
+            mutations.push(row_mutation(spec.seed, *p, r, global_row)?);
         }
         rows_written += mutations.len() as u64;
         writer.write_partition(key.clone(), mutations)?;
@@ -205,7 +205,7 @@ fn token_ordered_keys(
 ) -> GenResult<Vec<(DecoratedKey, u64)>> {
     let mut keyed: Vec<(DecoratedKey, u64)> = Vec::with_capacity(partitions as usize);
     for p in 0..partitions {
-        let probe = row_mutation(spec.seed, p, 0, 0);
+        let probe = row_mutation(spec.seed, p, 0, 0)?;
         keyed.push((probe.decorated_key(schema)?, p));
     }
     keyed.sort_by(|a, b| {

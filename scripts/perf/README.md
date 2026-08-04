@@ -17,6 +17,7 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096
 | `lib-cpu.sh` | `thread_siblings_list` verification — the pinning is READ, never assumed |
 | `lib-perf-lint.sh` | the perf-invocation guard: perf is invoked in ONE wrapper, CPU-wide |
 | `lib-host-state.sh` | the sysctl capture/mutate/restore — the only state changed outside the process tree |
+| `lib-args.sh` | numeric + duration validation: positive, bounded to the reporter's cap, decimal |
 | `ws0_report.py` | aggregation → `results.json` + a human summary |
 | `ws0_validate.py` | the fail-closed layer: what the reporter is ALLOWED to aggregate |
 

@@ -59,6 +59,56 @@ const STATUSES: [&str; 4] = ["OK", "WARN", "ERROR", "UNKNOWN"];
 /// Printable alphabet for `payload`, so a corpus dump stays greppable.
 const PAYLOAD_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz012345";
 
+/// A row could not be synthesized as specified (issue #3272 review).
+///
+/// There is exactly one variant, and it is UNREACHABLE while [`PAYLOAD_ALPHABET`] stays
+/// ASCII — which is the point. The alternative was a silent substitution
+/// (`unwrap_or_else(|_| "a".repeat(PAYLOAD_LEN))`), and a fixture that quietly changes
+/// its own CONTENT is strictly worse than one that stops: the substituted corpus would
+/// still generate, still be deterministic, still record a digest, and that digest would
+/// become the pin every subsequent measurement compared against.
+#[derive(Debug)]
+pub enum RowSynthError {
+    /// The `payload` bytes did not decode as UTF-8, i.e. [`PAYLOAD_ALPHABET`] was
+    /// edited to include a non-ASCII byte.
+    PayloadNotUtf8 {
+        /// Partition index of the offending row.
+        partition: u64,
+        /// Clustering-row index within the partition.
+        row: u64,
+        /// The decode failure.
+        source: std::string::FromUtf8Error,
+    },
+}
+
+impl std::fmt::Display for RowSynthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PayloadNotUtf8 {
+                partition,
+                row,
+                source,
+            } => write!(
+                f,
+                "the synthesized `payload` for partition {partition} row {row} is not \
+                 valid UTF-8 ({source}). PAYLOAD_ALPHABET must stay ASCII: this used to \
+                 substitute {PAYLOAD_LEN} copies of 'a' instead, which changes the \
+                 corpus CONTENT on a path whose whole purpose is byte identity — the \
+                 corpus would still generate, still be deterministic, and its digest \
+                 would silently become the new pin (#3272)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RowSynthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PayloadNotUtf8 { source, .. } => Some(source),
+        }
+    }
+}
+
 /// The partition key text for partition `p`. Fixed width (`p` + 7 digits) so
 /// every partition key serializes to the same length, keeping the token
 /// distribution and the on-disk key bytes uniform.
@@ -76,12 +126,29 @@ fn row_rng(seed: u64, p: u64, r: u64) -> SplitMix64 {
     SplitMix64::new(base ^ r.wrapping_mul(0xD6E8_FEB8_6659_FD93))
 }
 
-/// Build the [`Mutation`] for row `r` of partition `p`.
+/// Build the [`Mutation`] for row `r` of partition `p`, or an error.
 ///
 /// One mutation per clustering row: `PRIMARY KEY (part_id, seq, event_time)` with
 /// nine non-key columns written as simple cells. `global_row` orders the write
 /// timestamps deterministically across the whole corpus.
-pub fn row_mutation(seed: u64, p: u64, r: u64, global_row: u64) -> Mutation {
+///
+/// # Why this returns a `Result` (issue #3272 review)
+///
+/// The `payload` synthesis ends in `String::from_utf8(bytes)`, which cannot fail while
+/// [`PAYLOAD_ALPHABET`] is ASCII — but it USED to be written
+/// `.unwrap_or_else(|_| "a".repeat(PAYLOAD_LEN))`, silently SUBSTITUTING corpus CONTENT
+/// on a path whose entire purpose is byte identity. The stated justification was that a
+/// future alphabet edit should "degrade to a visibly-wrong-but-valid fixture instead of
+/// aborting a 4M-row run", which inverts the priority: a corpus whose payload column is
+/// 414 copies of `a` is not visibly wrong, it is *plausible*, and its `Data.db` sha256
+/// would become the new pin. Every figure measured against that corpus would then be
+/// measured against silently different bytes — the whole failure class #3272 exists to
+/// close, in the fixture rather than the reporter.
+///
+/// So it errors. And erroring is why the signature is a `Result` rather than a panic:
+/// this crate's library code carries no `unwrap`/`expect`, and a 4M-row run is exactly
+/// the case where an actionable message beats an abort.
+pub fn row_mutation(seed: u64, p: u64, r: u64, global_row: u64) -> Result<Mutation, RowSynthError> {
     let mut rng = row_rng(seed, p, r);
 
     let mut blob_a = vec![0u8; BLOB_A_LEN];
@@ -102,19 +169,18 @@ pub fn row_mutation(seed: u64, p: u64, r: u64, global_row: u64) -> Mutation {
     for b in payload.iter_mut() {
         *b = PAYLOAD_ALPHABET[(*b as usize) % PAYLOAD_ALPHABET.len()];
     }
-    let payload = String::from_utf8(payload).unwrap_or_else(|_| {
-        // Unreachable: every byte was just mapped into a 32-char ASCII alphabet.
-        // Kept total rather than panicking so a future alphabet edit degrades to a
-        // visibly-wrong-but-valid fixture instead of aborting a 4M-row run.
-        "a".repeat(PAYLOAD_LEN)
-    });
+    let payload = String::from_utf8(payload).map_err(|e| RowSynthError::PayloadNotUtf8 {
+        partition: p,
+        row: r,
+        source: e,
+    })?;
 
     let region = REGIONS[rng.below(REGIONS.len() as u64) as usize];
     let status = STATUSES[rng.below(STATUSES.len() as u64) as usize];
 
     let event_time = EVENT_TIME_BASE_MS + (r as i64) * 1_000;
 
-    Mutation::new(
+    Ok(Mutation::new(
         TableId::new(KEYSPACE, TABLE),
         PartitionKey::single("part_id", Value::text(part_id(p))),
         Some(ClusteringKey::new(vec![
@@ -134,7 +200,7 @@ pub fn row_mutation(seed: u64, p: u64, r: u64, global_row: u64) -> Mutation {
         ],
         WRITE_TS_BASE_MICROS + global_row as i64,
         None,
-    )
+    ))
 }
 
 fn write(column: &str, value: Value) -> CellOperation {
@@ -153,22 +219,47 @@ mod tests {
     /// so EVERY field participates.
     #[test]
     fn row_content_is_deterministic_in_seed_p_r() {
-        let a = format!("{:?}", row_mutation(11, 3, 7, 307).operations);
-        let b = format!("{:?}", row_mutation(11, 3, 7, 307).operations);
+        let a = format!(
+            "{:?}",
+            row_mutation(11, 3, 7, 307)
+                .expect("ASCII payload")
+                .operations
+        );
+        let b = format!(
+            "{:?}",
+            row_mutation(11, 3, 7, 307)
+                .expect("ASCII payload")
+                .operations
+        );
         assert_eq!(a, b, "same (seed,p,r) must yield identical cells");
         assert_ne!(
             a,
-            format!("{:?}", row_mutation(12, 3, 7, 307).operations),
+            format!(
+                "{:?}",
+                row_mutation(12, 3, 7, 307)
+                    .expect("ASCII payload")
+                    .operations
+            ),
             "a different seed must yield different cells"
         );
         assert_ne!(
             a,
-            format!("{:?}", row_mutation(11, 4, 7, 407).operations),
+            format!(
+                "{:?}",
+                row_mutation(11, 4, 7, 407)
+                    .expect("ASCII payload")
+                    .operations
+            ),
             "a different partition must yield different cells"
         );
         assert_ne!(
             a,
-            format!("{:?}", row_mutation(11, 3, 8, 308).operations),
+            format!(
+                "{:?}",
+                row_mutation(11, 3, 8, 308)
+                    .expect("ASCII payload")
+                    .operations
+            ),
             "a different clustering row must yield different cells"
         );
     }
@@ -177,7 +268,7 @@ mod tests {
     /// twelve-cell `ws0.events` row shape the WS0 method records.
     #[test]
     fn each_row_writes_nine_non_key_cells() {
-        let m = row_mutation(1, 0, 0, 0);
+        let m = row_mutation(1, 0, 0, 0).expect("ASCII payload");
         assert_eq!(m.operations.len(), 9);
         assert_eq!(crate::schema::COLUMNS.len(), m.operations.len() + 3);
     }
@@ -186,7 +277,7 @@ mod tests {
     /// change would move bytes/row and invalidate the recorded identity).
     #[test]
     fn cell_widths_match_the_declared_constants() {
-        let m = row_mutation(5, 5, 5, 5);
+        let m = row_mutation(5, 5, 5, 5).expect("ASCII payload");
         for op in &m.operations {
             let CellOperation::Write { column, value } = op else {
                 panic!("only Write ops are synthesized, got {op:?}");
@@ -206,7 +297,7 @@ mod tests {
     #[test]
     fn metric_c_is_always_finite() {
         for r in 0..500u64 {
-            let m = row_mutation(9, r % 7, r, r);
+            let m = row_mutation(9, r % 7, r, r).expect("ASCII payload");
             for op in &m.operations {
                 if let CellOperation::Write {
                     column,
@@ -225,5 +316,77 @@ mod tests {
         assert_eq!(part_id(0), "p0000000");
         assert_eq!(part_id(39_999), "p0039999");
         assert_eq!(part_id(0).len(), part_id(39_999).len());
+    }
+    /// NON-VACUITY for [`RowSynthError`] (issue #3272 review).
+    ///
+    /// The variant is unreachable through `row_mutation` while [`PAYLOAD_ALPHABET`] is
+    /// ASCII, so the error PATH is driven directly: this proves the type carries the
+    /// offending coordinates and an actionable message, rather than existing as an
+    /// unexercised variant nobody has ever seen rendered.
+    ///
+    /// The pre-fix code did NOT have an error path at all: `String::from_utf8(payload)
+    /// .unwrap_or_else(|_| "a".repeat(PAYLOAD_LEN))` returned a Mutation whose `payload`
+    /// column was 414 copies of `a`. That corpus generates, is deterministic, records a
+    /// digest — and that digest silently becomes the pin every later measurement is
+    /// compared against.
+    #[test]
+    fn the_payload_error_names_the_row_and_says_why_substitution_is_worse() {
+        let bad = String::from_utf8(vec![0xff, 0xfe]).expect_err("0xff is not UTF-8");
+        let err = RowSynthError::PayloadNotUtf8 {
+            partition: 17,
+            row: 42,
+            source: bad,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("partition 17"), "{msg}");
+        assert!(msg.contains("row 42"), "{msg}");
+        assert!(
+            msg.contains("PAYLOAD_ALPHABET"),
+            "the message must name the constant to fix: {msg}"
+        );
+        assert!(
+            msg.contains("byte identity"),
+            "the message must say WHY a substitution is unacceptable here: {msg}"
+        );
+        // The underlying decode failure is preserved, not flattened into a string.
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "the UTF-8 error must be retained as the source"
+        );
+    }
+
+    /// The ACCEPT direction, and the reason the error is unreachable in practice: the
+    /// alphabet is ASCII, so every synthesized payload decodes. A future edit that
+    /// broke this would fail HERE with a clear cause, before it could reach a 4M-row
+    /// run and silently substitute content.
+    #[test]
+    fn the_payload_alphabet_is_ascii_so_synthesis_cannot_substitute() {
+        assert!(
+            PAYLOAD_ALPHABET.iter().all(|b| b.is_ascii()),
+            "PAYLOAD_ALPHABET must stay ASCII: a non-ASCII byte would make \
+             String::from_utf8 fail for real rows, which now ERRORS (it used to \
+             substitute {PAYLOAD_LEN} copies of 'a' and change the corpus content)"
+        );
+        let m = row_mutation(3, 1, 1, 101).expect("an ASCII alphabet cannot fail");
+        let payload = m.operations.iter().find_map(|op| match op {
+            CellOperation::Write {
+                column,
+                value: Value::Text(t),
+            } if column == "payload" => Some(t.clone()),
+            _ => None,
+        });
+        let payload = payload.expect("a payload cell is written");
+        assert_eq!(payload.len(), PAYLOAD_LEN);
+        assert!(
+            payload.iter().all(|b| PAYLOAD_ALPHABET.contains(b)),
+            "every payload byte must come from the pinned alphabet"
+        );
+        // The substituted value the pre-fix code would have produced must NOT be what a
+        // real row looks like — otherwise the substitution would have been undetectable.
+        assert_ne!(
+            payload,
+            "a".repeat(PAYLOAD_LEN),
+            "a real payload must differ from the old substitution value"
+        );
     }
 }
