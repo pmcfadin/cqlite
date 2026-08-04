@@ -6,10 +6,17 @@ number: `abc-interleaved-runs.json` (same directory). Method, traps and pinning:
 `measurement-method.md`. Phase-0 pre-change baseline: `baseline-2026-08-03.md`
 — **read its drift annotation before reusing any absolute from it.**
 
-**Headline: cumulative +2.0%. AC1 is UNMET, 15.0% short, and is re-anchored to
-issue #3248.** Spec R5 (owner-approved) makes a correctly-measured,
-correctly-reported negative result a satisfying outcome of this change; it does
-not make AC1 satisfied, and nothing here is framed as if it did.
+**Headline — MEASURED AT THE SUPERSEDED 4 MiB FLIGHT-DATA TARGET, not at what
+shipped: cumulative +2.0%; AC1 UNMET, 15.0% short, re-anchored to issue #3248.**
+Both of those numbers come from §§1–7, every figure of which was taken at the
+4 MiB target described in the SUPERSEDED banner below. **For the shipped figures
+read §10**, which re-measures on 8 interleaved rounds x 3 arms: lever 4 at
+**ZERO** (median −72 rows/s, −0.03%), cumulative **−573 rows/s (−0.25%)**, and
+AC1 UNMET by **−16.3%**. Lever 4 has since been **REVERTED entirely** (owner
+ruling A, deferred to **#3281**) — see §10.5. Spec R5 (owner-approved) makes a
+correctly-measured, correctly-reported negative result a satisfying outcome of
+this change; it does not make AC1 satisfied, and nothing here is framed as if it
+did.
 
 > ## SUPERSEDED IN PART — read §10 before quoting any lever-4 number here
 >
@@ -235,9 +242,11 @@ Read plainly:
 | **AC1** | **UNMET** — re-anchored to **#3248**; lever 1 routes to **#3231** |
 
 **We do not launder a negative result through an optimistic title.** The change
-delivers a committed rig, a closed attribution blind spot (IPC framing, §7), a
-+1.7% lever, a measured-at-zero lever, and an honest 15.0% gap. Spec R5 makes
-that a satisfying outcome of *this change*; it does not make the ratio met.
+delivers a closed attribution blind spot (IPC framing, §7), a +1.7% lever, a
+measured-at-zero lever, and an honest 15.0% gap. **The measurement rig is NOT
+delivered here — it is re-anchored to #3272** (owner-ordered split; see this
+directory's #3272 banners). Spec R5 makes that a satisfying outcome of *this
+change*; it does not make the ratio met.
 
 Also still owed, and never restated as reproduced: the WS0 absolutes (240,100 /
 312,155 rows/s — corpus- and machine-bound), the stock-Cassandra head-to-head
@@ -360,7 +369,7 @@ re-narrated.
 | rotation | arm order rotated per round, period 3: `BASE/NOTGT/L4P` → `NOTGT/L4P/BASE` → `L4P/BASE/NOTGT` → … |
 | drift control | the bare scan in **every** run — and here the `ws0-scan-bench` and `flight-loadgen` binaries are **literally identical** across arms (only `cqlite-flight` is swapped), which is stronger than §1's code-identical control |
 | binary md5 | `BASE` `bd5a7b4c180d6dc25f5c81a0449b3c04`, `NOTGT` `72d5b96a1ac45ceebe5168501aa93bdd`, `L4P` `21823b6e81e9d561da3495a5e177a0a4` — **recorded this time**, closing the §1 rig gap |
-| driver | the COMMITTED rig: `scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --reps 1 --temp warm --arm bypass --no-build`, once per (arm, round) |
+| driver | the rig **delivered under #3272**, not in this branch: `scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --reps 1 --temp warm --arm bypass --no-build`, once per (arm, round) |
 | corpus / pinning / counters | unchanged from §1: `/data/ws0-3096`, server `taskset -c 2,10` (verified siblings), `perf stat -C 2,10` (CPU-WIDE, never `-p`) |
 | prewarm | `ok` on all 24 runs (now recorded per rep in `results.json` — see the nit fix in this same change) |
 
@@ -435,11 +444,19 @@ the control.
   unmoved. **Spec R1 forbids reporting that as a win** — a profile improvement
   with unmoved throughput is explicitly not evidence of a gain (the #2877 shape),
   and it is not claimed as one here.
-* **What lever 4 is retained for is WIRE SAFETY, and secondarily framing** — both
-  positively verified in-repo, not by throughput:
+* ~~**What lever 4 is retained for is WIRE SAFETY, and secondarily framing** —
+  both positively verified in-repo, not by throughput:
   `cqlite-flight/src/streaming_framing_tests.rs` drives the real `encode_do_get`
   and asserts the message counts plus, at a capacity/payload ratio of ~1.0, that
-  **every** emitted `data_body` stays under the reserved ceiling.
+  **every** emitted `data_body` stays under the reserved ceiling.~~
+  **STRUCK 2026-08-03 by owner ruling A: lever 4 is NOT retained — it is REVERTED
+  in full, deferred to #3281**, and the framing tests named here are deleted with
+  it. The wire-safety mechanism that was this bullet's whole justification failed
+  three consecutive reviews because one number served as both a *target* and a
+  *ceiling*: a reserve that is safe to over-estimate against a target
+  false-REJECTS legal input against a ceiling. **No measurement above is changed
+  by the revert** — the arms, the medians and the −0.03% are the honest record of
+  what was measured, and they are what justifies removing it.
 * **AC1 remains UNMET, by a wider margin in this session:** control median
   357,790 ÷ `do_get` 230,321 = ratio **1.553x**; AC1's target on this session's
   control is **275,223 rows/s**; shortfall **−44,902 rows/s (−16.3%)**.

@@ -1,8 +1,28 @@
 # Issue #3096 — Arrow-encode measurement method
 
+> # ⚠ THE RIG THIS DOCUMENT DESCRIBES IS RE-ANCHORED TO #3272
+>
+> **Note added 2026-08-03 (owner-ordered split).** Every instrument named below —
+> the corpus generator `tools/ws0-corpus-gen` (and its `ws0-scan-bench` binary) and
+> the driver/reporter/CPU-pinning scripts under `scripts/perf/` — is **re-anchored
+> to issue #3272** and is **not part of the #3096 PR**. So the reproduction
+> contract here is **not satisfiable from a #3096 checkout alone**: every
+> `ws0-corpus-gen` / `scripts/perf/*` command below refers to code delivered under
+> **#3272**, and re-deriving these numbers requires a tree that also has it. Read
+> each "on a fresh clone" / `scripts/perf/...` instruction in this file with that
+> substitution.
+>
+> **No measurement, figure, ratio, superseded-figure label or AC1 statement in this
+> directory is changed by that split.** These files remain the posted evidence for
+> the negative result (spec R5's "posted"), recorded exactly as measured. The
+> re-anchor is a delivery-scope fact about the TOOLING, not a revision of the
+> RESULTS. R4's delivery status is recorded in
+> `openspec/changes/arrow-encode-doget/tasks.md`.
+
 The reproduction contract for the `do_get` Arrow-encode work. A future agent
 should be able to re-derive every number in the Phase-0 baseline
-(`baseline-2026-08-03.md`) from the commands here, on a fresh clone.
+(`baseline-2026-08-03.md`) from the commands here, on a fresh clone **that also
+carries #3272's rig** (see the banner above).
 
 **Everything here is measured.** Where a figure is derived, the derivation is
 stated inline.

@@ -1,5 +1,22 @@
 # Issue #3096 — rig-guard audit: did the two measurement-integrity defects contaminate the shipped figures?
 
+> # ⚠ THE RIG AND THE GUARDS AUDITED HERE ARE RE-ANCHORED TO #3272
+>
+> **Note added 2026-08-03 (owner-ordered split).** The instruments this audit is
+> *about* — `scripts/perf/ws0-baseline.sh`, `scripts/perf/ws0_report.py` — and the
+> guard that pins their fixes, `scripts/tests/test_ws0_report_guards.sh`, are
+> **re-anchored to issue #3272** and are **not part of the #3096 PR**. Where this
+> note says the defects "are now fixed and guarded", the fixes and the guard script
+> ship under **#3272**, not in this branch; they are not present in a #3096
+> checkout, so do not look for them here or treat their absence as a missing
+> deliverable.
+>
+> **No measurement, figure, ratio, superseded-figure label or AC1 statement in this
+> directory is changed by that split** — and none is changed by this audit either
+> (that is the audit's own finding, below). The re-anchor is a delivery-scope fact
+> about the TOOLING, not a revision of the RESULTS. R4's delivery status is
+> recorded in `openspec/changes/arrow-encode-doget/tasks.md`.
+
 **Audit result: no.** Two defects were found in the measurement *instruments*
 (`scripts/perf/ws0-baseline.sh`, `scripts/perf/ws0_report.py`) after the baseline
 session of 2026-08-03 was recorded. Both are now fixed and guarded
