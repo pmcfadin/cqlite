@@ -107,10 +107,10 @@ ws0_stop_server "$SRV_PID"; trap - EXIT INT TERM
 python3 - "$OUT" "$LABEL" "$REP" "$S" "$N" "$STEP_SECS" "$SERVER_CPUS" \
   "$CLIENT_CPUS" "$CORPUS_ROWS" "$RC_C" "$IO_BEFORE" "$IO_AFTER" \
   "$CLIENT_BUSY_BEFORE" "$CLIENT_BUSY_AFTER" "$WALL_BEFORE" "$WALL_AFTER" \
-  "$CORE_EVENTS_C" "$WS0_CLIENT_SAT_THRESHOLD" <<'PY'
+  "$CORE_EVENTS_C" "$WS0_CLIENT_SAT_THRESHOLD" "$WS0_BUSY_FRACTION_FLOOR" <<'PY'
 import json, sys, os
 (out, label, rep, S, N, step, scpus, ccpus, corpus, rc, io0, io1,
- cb0, cb1, w0, w1, events, satmax) = sys.argv[1:19]
+ cb0, cb1, w0, w1, events, satmax, busyfloor) = sys.argv[1:20]
 rows = int(corpus)
 
 def last(p):
@@ -138,7 +138,18 @@ occ = {
     'requests_ok': ok, 'requests_error': err, 'requests_unavailable': unav,
     'duration_s': d, 'rows_per_s_step': s['rows_per_s'],
     'busy_fraction_estimate': (ok * p50 / n / d) if (n and d) else None,
-    'ok': bool(rt > 0 and rt % rows == 0 and err == 0 and unav == 0 and ok > 0),
+    # THE BUSY FRACTION IS GATED HERE TOO (roborev round 5 finding #2). The primary
+    # capture applied WS0_BUSY_FRACTION_FLOOR to every occupancy arm while this one --
+    # the arm that supplies the HEADLINE attribution -- only recorded the estimate.
+    # A largely idle stalls arm could therefore pass validation and carry the
+    # measured attribution, which is the fix landing in one file and not its sibling:
+    # the shape that produced findings in three consecutive rounds. Not computable
+    # (n or d zero) is a FAILURE, not a pass.
+    'busy_fraction_floor': float(busyfloor),
+    'busy_fraction_ok': bool((ok * p50 / n / d) >= float(busyfloor)) if (n and d)
+                        else False,
+    'ok': bool(rt > 0 and rt % rows == 0 and err == 0 and unav == 0 and ok > 0
+               and (n and d) and (ok * p50 / n / d) >= float(busyfloor)),
 }
 
 doc = {

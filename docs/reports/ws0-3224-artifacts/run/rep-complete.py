@@ -66,17 +66,11 @@ def check(repdir):
 
     bad = []
 
-    occ = d.get('occupancy')
-    if not occ:
-        bad.append('occupancy block absent or empty')
-    else:
-        for arm, v in sorted(occ.items()):
-            if not v:
-                bad.append('occupancy[%s]: no step record' % arm)
-            elif not v.get('ok'):
-                bad.append('occupancy[%s]: ok=%s rows=%s err=%s'
-                           % (arm, v.get('ok'), v.get('rows_total'),
-                              v.get('requests_error')))
+    # Occupancy: roster + values, asked of the schema (round 5 finding #4). This used
+    # to iterate only the keys PRESENT, so a block omitting `uncore` was certified.
+    bad += ws0schema.validate_occupancy(d.get('occupancy'),
+                                        ws0schema.OCCUPANCY_ARMS_PRIMARY,
+                                        'meta.json')
 
     # The half the old predicate was missing, now asked of the schema.
     bad += ws0schema.validate_rc_block(d.get('rc'),

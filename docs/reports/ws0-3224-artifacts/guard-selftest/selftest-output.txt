@@ -1,14 +1,14 @@
 # #3224 guard selftest — recorded output
 # host: ip-172-31-3-252 / 6.17.0-1019-aws
-# date: 2026-08-04T07:36:56Z
-# commit: f7fa8ec1a49f783d0595d6920a8155819d60119c
+# date: 2026-08-04T07:50:01Z
+# commit: 62bb0db429e199064de0824ee43eb5f4d5d49815
 # command: bash docs/reports/ws0-3224-artifacts/selftest-guards.sh
 
 ==== #3224 GUARD SELFTEST ====
 artefact root: /home/ubuntu/workspace/wt-3224/docs/reports/ws0-3224-artifacts
 
 == FINDING 1 + 3 — positive-control verdict logic (harness/verdict-logic.sh)
-   healthy-host miss rate: friendly=0.139 hostile=0.612 rise=4.402x
+   healthy-host miss rate: friendly=0.139 hostile=0.612 rise=4.389x
    PASS  healthy host: raw LLC-load-misses movement is BELOW the 2x floor (so ordering decides) -> 1.240
    PASS  healthy host: LLC-load-misses verdict (P4 gates on the miss rate, not raw movement) -> OK
    PASS  flat miss rate: movement alone would PASS it (3.552x >= 2x) -> 3.552
@@ -107,8 +107,23 @@ dropped 2 S0 imc_11 rows
    PASS  cache-hostile stream with valid args: still runs (rc=0)
    PASS  cache-hostile chase with valid args: still runs (rc=0)
 
+== ROUND 5 — miss-rate rounding, the stalls busy floor, XOR captures, occupancy roster
+   PASS  sub-0.1% friendly rate with a LOWER hostile rate: rise is not inf -> 0.800
+   PASS  ...and the verdict is REJECTED, not the OK that rounding used to grant -> UNRELIABLE_MISSRATE_FLAT
+   PASS  friendly miss count genuinely ZERO with a real hostile rate: inf -> inf
+   PASS  ...and accepted (the ratio is undefined here, which is not the same as flat) -> OK
+   PASS  both miss counts zero: SILENT_ZERO, not an inf-driven OK -> SILENT_ZERO
+   PASS  healthy-host record still passes after the arithmetic change (rise 4.402x) -> OK
+   PASS  rep whose occupancy block omits 'uncore': REFUSED by rep-complete (rc=1)
+   PASS  ...and REFUSED by the derivation too (one validator, both consumers) (rc=1)
+   PASS  rep recording busy_fraction 0.42 with a stale ok=true: REFUSED at read time (rc=1)
+   PASS  group C with meta-stalls.json but NO CSV: diagnosed as a FAILED capture -> diagnosed-as-failed-capture
+   PASS  group C with the CSV but NO meta-stalls.json: diagnosed as a FAILED capture -> diagnosed-as-failed-capture
+   PASS  capture-stalls.sh occupancy gates on the busy fraction, floor from the schema (rc=0)
+   PASS  the busy-fraction floor has a single home (common.sh reads the schema) (rc=0)
+
 ==== SELFTEST RESULT: PASS ====
-cases passed: 84   failed: 0
+cases passed: 97   failed: 0
 Every guard rejected the bad input it exists to catch, and accepted the
 good input committed in this PR. The healthy-host record is pinned, so
 re-inverting the finding-1 ordering fails here rather than on a good box.

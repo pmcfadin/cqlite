@@ -166,14 +166,31 @@ def do_stalls(repdir):
     """
     meta_p = os.path.join(repdir, 'meta-stalls.json')
     csv_p = os.path.join(repdir, 'perf-coreC-aligned.csv')
-    if not (os.path.exists(meta_p) and os.path.exists(csv_p)):
+    # NONE means "never captured"; ONE-OF-TWO means a FAILED capture (round 5
+    # finding #3). Returning None whenever EITHER file was missing meant a tree in
+    # which every rep had lost one artefact to a failed capture looked exactly like a
+    # tree that had deliberately never run the stalls arm — so the AC4 accounting fell
+    # back to the modelled charge and said "group C absent" about a group C that had
+    # been attempted and had failed. The two cases have opposite remedies.
+    have_meta, have_csv = os.path.exists(meta_p), os.path.exists(csv_p)
+    if have_meta != have_csv:
+        raise SystemExit(
+            "FATAL: %s has %s but not %s. That is a FAILED group-C capture, not an "
+            "absent one: a tree where every rep lost one artefact would otherwise be "
+            "indistinguishable from one that never captured stalls at all, and the "
+            "accounting would silently fall back to the modelled charge. Re-run "
+            "run/capture-stalls.sh for this rep, or remove both files to make the "
+            "fallback an explicit choice."
+            % (repdir, os.path.basename(meta_p if have_meta else csv_p),
+               os.path.basename(csv_p if have_meta else meta_p)))
+    if not have_meta:
         return None
     meta = json.load(open(meta_p))
     assert_rc_all_zero(meta, repdir, 'stalls rep', ws0schema.RC_ARMS_STALLS)
     rows = meta['occupancy']['alignedC']['rows_total']
-    problems = []
-    if not meta['occupancy']['alignedC'].get('ok'):
-        problems.append('occupancy[alignedC] not ok')
+    problems = ws0schema.validate_occupancy(
+        meta.get('occupancy'), ws0schema.OCCUPANCY_ARMS_STALLS,
+        'stalls rep %s' % repdir)
     if not meta.get('warm_verified_zero_disk_reads'):
         problems.append('warmth: read_bytes delta=%s' % meta.get('warm_read_bytes_delta'))
     if not meta.get('client_saturation_gate_pass'):
@@ -241,9 +258,11 @@ def do_rep(repdir):
     # ---- validity gates, re-checked here rather than trusted from meta ----
     assert_rc_all_zero(meta, repdir, 'rep', ws0schema.RC_ARMS_PRIMARY)
     problems = []
-    for arm, o in occ.items():
-        if not o or not o.get('ok'):
-            problems.append('occupancy[%s] not ok' % arm)
+    assert_rc_all_zero(meta, repdir, 'rep', ws0schema.RC_ARMS_PRIMARY)
+    # Occupancy roster + values from the schema, so this cannot disagree with
+    # rep-complete.py (round 5 finding #4: both iterated only the keys present).
+    problems += ws0schema.validate_occupancy(
+        occ, ws0schema.OCCUPANCY_ARMS_PRIMARY, 'rep %s' % repdir)
     if not meta.get('warm_verified_zero_disk_reads'):
         problems.append('warmth: read_bytes delta=%s'
                         % meta.get('warm_read_bytes_delta'))

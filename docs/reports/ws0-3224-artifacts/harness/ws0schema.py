@@ -56,6 +56,31 @@ RC_ARMS_PRIMARY = frozenset({
 })
 RC_ARMS_STALLS = frozenset({'alignedC'})
 
+# ---------------------------------------------------------- occupancy rosters
+# The arms capture-endpoint.sh records occupancy for, and capture-stalls.sh's single
+# arm. Added in round 5 (finding #4) because both consumers iterated only the keys
+# PRESENT in meta.json — the same existence-instead-of-completeness shape as the rc
+# block two rounds earlier, in a third field. A block omitting `uncore` was certified
+# for resume AND passed derive.py's equivalent loop, so the arm whose absence matters
+# most to the bandwidth figures was the one nothing required.
+OCCUPANCY_ARMS_PRIMARY = frozenset({'interior', 'alignedA', 'alignedB', 'uncore'})
+OCCUPANCY_ARMS_STALLS = frozenset({'alignedC'})
+
+# Minimum busy fraction for an occupancy arm. Guards against IDLE PERIODS inside a
+# step, which break the interior convention's premise that whole-step throughput
+# represents the interior perf window.
+#
+# LOW BY DESIGN, and the reason is measured rather than cautious: the estimate is
+# requests_ok * p50 / concurrency / duration — a product of three measured quantities,
+# so it carries their combined error, and one committed arm reads 1.0031 (above 1.0,
+# which is only possible as estimator error). A tight floor here would be a false-FAIL
+# generator, i.e. round 1 finding #1 again. Committed reps span 0.9453..1.0031.
+#
+# Single-homed here rather than in common.sh so the shell captures and the Python
+# validators cannot disagree; common.sh reads its default from this value's twin and
+# the selftest asserts the committed data clears it.
+BUSY_FRACTION_FLOOR = 0.90
+
 # ------------------------------------------------------- counter-file rosters
 PERF_FILES_PRIMARY = frozenset({'alignedA', 'alignedB', 'interiorA', 'uncore'})
 
@@ -231,4 +256,53 @@ def validate_counter_file(path, arm):
             'not a complete one)'
             % (os.path.basename(path), len(set(seen) & expected), len(expected),
                label, _fmt(missing)))
+    return problems
+
+
+def validate_occupancy(occ, roster, which):
+    """The occupancy block: present, complete against `roster`, every arm ok.
+
+    Completeness BEFORE values, for the same reason as validate_rc_block: both
+    consumers used to iterate `occ.items()`, so a block that simply omitted an arm
+    reported on what was there and said nothing about what was not — and the arm most
+    likely to be missing, `uncore`, is the one the DRAM-bandwidth and NUMA-confinement
+    figures rest on.
+
+    The busy fraction is checked HERE as well as in the capture, deliberately. The
+    capture computes `ok` at write time; this re-derives the judgement at read time
+    from the recorded estimate, so an artefact written by an older capture — one whose
+    `ok` predates the floor — cannot be certified by its own stale verdict. That is the
+    same "re-check rather than trust" contract derive.py states for every other gate.
+    """
+    problems = []
+    if not isinstance(occ, dict) or not occ:
+        return ['%s: occupancy block absent or empty' % which]
+    missing = set(roster) - set(occ)
+    if missing:
+        problems.append(
+            '%s: occupancy roster incomplete, missing %s (a partial block reports on '
+            'the arms present and says nothing about the rest — and `uncore` is the '
+            'arm the DRAM bandwidth and NUMA figures rest on)'
+            % (which, _fmt(missing)))
+    for arm in sorted(occ):
+        v = occ[arm]
+        if not v:
+            problems.append('%s: occupancy[%s] has no step record' % (which, arm))
+            continue
+        if not v.get('ok'):
+            problems.append(
+                '%s: occupancy[%s] ok=%s rows=%s err=%s unavailable=%s'
+                % (which, arm, v.get('ok'), v.get('rows_total'),
+                   v.get('requests_error'), v.get('requests_unavailable')))
+        bf = v.get('busy_fraction_estimate')
+        if bf is None:
+            problems.append(
+                '%s: occupancy[%s] busy fraction not computable — an unverifiable '
+                'occupancy is not an established one' % (which, arm))
+        elif bf < BUSY_FRACTION_FLOOR:
+            problems.append(
+                '%s: occupancy[%s] busy fraction %.4f below the floor %.2f — the '
+                'workers were idle for part of the step, so whole-step throughput '
+                'does not represent the interior perf window'
+                % (which, arm, bf, BUSY_FRACTION_FLOOR))
     return problems

@@ -192,3 +192,48 @@ and each round exposes a thinner layer of it. Three things are true at once:
    careful; it fell when the schema got a single home, which removed the *opportunity*.
    The generalisation worth carrying: where the same fact is restated in N consumers,
    expect N chances to get it wrong, and fix the restatement rather than the instances.
+
+## Round 5 — four findings, and a THIRD test defect found the same way
+
+| # | mutation applied | cases that flipped | result |
+|---|---|--:|---|
+| 1 | divide the rounded milli-rates again in `compute_missrate` | 2 | **caught** — a 0.05% friendly rate against a LOWER hostile rate read `inf` → `OK` |
+| 2 | remove the occupancy roster completeness check | 2 | **caught** — a block omitting `uncore` certified in `rep-complete.py` AND `derive.py`, from one edit |
+| 3 | remove the read-time busy-fraction re-check | 1 | **caught** — a recorded 0.42 with a stale `ok=true` certified itself |
+| 4 | revert `do_stalls`'s XOR refusal | 2 | **caught — only after the cases were rewritten; see below** |
+| 5 | take the busy floor back out of `capture-stalls.sh`'s `ok` | 1 | **caught** — the arm feeding the headline attribution was ungated again |
+| 6 | hardcode the floor in `common.sh` (0.75) | 1 | **caught** — two homes for one threshold |
+
+**Finding #1 is the only one of all 22 that is a genuine arithmetic defect** rather than an
+unacted-upon failure signal, and it is worth its own note. `compute_missrate` divided two
+integer *milli*-rates, so a friendly miss rate below 0.1% truncated to zero and the rise
+became `inf` — which `evaluate` reads as an unconditional OK. A counter whose hostile rate
+was **equal or lower** therefore passed P4: the exact flat-counter case the gate exists to
+catch, waved through by a rounding step three lines earlier. Two rounding steps in the same
+function, one of which decided a verdict.
+
+**Mutations 2 and 6 are the single-homing paying off twice more.** One edit to the schema
+flips cases in two consumers; one edit to `common.sh` is caught by a case that compares it
+against the schema. Six of the 22 findings were "the same fact restated in another file",
+and that shape is now structurally hard to reintroduce rather than merely discouraged.
+
+### The XOR cases passed 97/97 against their own mutant — the third instance
+
+Reverting `do_stalls`'s XOR refusal changed nothing, because both fixtures still exited
+non-zero: one through a downstream `event absent from CSV` error, the other through the
+asymmetric-endpoint guard. **Defence in depth, which is good — and which made an
+exit-code assertion worthless as evidence for this particular guard.**
+
+It also mistook what the finding asked for. A half-present group C refused as "event
+absent from CSV" tells the operator nothing actionable; refused as a **failed capture**
+tells them to re-run `capture-stalls.sh`. Absent-versus-failed have *opposite* remedies,
+so **the diagnosis is the deliverable**, not the exit code. The cases now assert on the
+diagnosis text and fail 2/2 against the mutant.
+
+**Three test defects across five rounds, all the same shape** (round 2 #7, round 3 #1, round
+5 #4): an assertion that passes for a reason other than the guard under test. Each was found
+by mutation and by nothing else. The rule that came out of the first two — *extract the
+source and run it, never assert on it* — was necessary but not sufficient; this one adds:
+**assert on the thing the finding actually asks for.** A guard's exit code and a guard's
+diagnosis are different deliverables, and where the remedy depends on which failure
+occurred, the diagnosis is the one that matters.

@@ -961,6 +961,182 @@ else
 fi
 
 # =============================================================================
+section "ROUND 5 — miss-rate rounding, the stalls busy floor, XOR captures, occupancy roster"
+
+# Finding #1: compute_missrate divided two INTEGER MILLI-RATES, so any friendly miss
+# rate below 0.1% truncated to 0 and the rise became `inf` — an unconditional OK. The
+# numbers below are the shape that breaks it: a friendly rate of 0.05% (5e-4) and a
+# hostile rate that is LOWER. A flat-or-falling counter must never read OK.
+load_healthy_host
+MED[friendly/LLC-loads]=2000000;  MED[friendly/LLC-load-misses]=1000   # 0.050%
+MED[hostile/LLC-loads]=2000000;   MED[hostile/LLC-load-misses]=800     # 0.040% — LOWER
+compute_missrate
+evaluate LLC-load-misses
+check "sub-0.1% friendly rate with a LOWER hostile rate: rise is not inf" \
+      "0.800" "$(show_milli "$MISSRATE_RISE")"
+check "...and the verdict is REJECTED, not the OK that rounding used to grant" \
+      "UNRELIABLE_MISSRATE_FLAT" "${EV_VERDICT[LLC-load-misses]}"
+
+# A genuinely zero friendly miss count is the ONE case where the ratio is undefined,
+# and it must still read inf -> OK. Otherwise the fix would have broken a real case.
+load_healthy_host
+MED[friendly/LLC-loads]=2000000;  MED[friendly/LLC-load-misses]=0
+MED[hostile/LLC-loads]=2000000;   MED[hostile/LLC-load-misses]=800000
+compute_missrate
+evaluate LLC-load-misses
+check "friendly miss count genuinely ZERO with a real hostile rate: inf" \
+      "inf" "$MISSRATE_RISE"
+check "...and accepted (the ratio is undefined here, which is not the same as flat)" \
+      "OK" "${EV_VERDICT[LLC-load-misses]}"
+
+# Both counts zero: undefined AND no signal. Must not become an OK.
+load_healthy_host
+MED[friendly/LLC-loads]=2000000;  MED[friendly/LLC-load-misses]=0
+MED[hostile/LLC-loads]=2000000;   MED[hostile/LLC-load-misses]=0
+compute_missrate
+evaluate LLC-load-misses
+check "both miss counts zero: SILENT_ZERO, not an inf-driven OK" \
+      "SILENT_ZERO" "${EV_VERDICT[LLC-load-misses]}"
+
+# ...and the real healthy-host record must still pass, unchanged by the new arithmetic.
+load_healthy_host
+evaluate LLC-load-misses
+check "healthy-host record still passes after the arithmetic change (rise 4.402x)" \
+      "OK" "${EV_VERDICT[LLC-load-misses]}"
+
+# Finding #4: the occupancy roster, single-homed. A block omitting `uncore` — the arm
+# every bandwidth and NUMA figure rests on — was certified by BOTH consumers.
+cp -r "$GOOD_REP" "$TMP/rep-nouncore-occ"
+python3 - "$TMP/rep-nouncore-occ/meta.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['occupancy'].pop('uncore')
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "rep whose occupancy block omits 'uncore': REFUSED by rep-complete" 1 \
+  python3 "$HERE/run/rep-complete.py" "$TMP/rep-nouncore-occ"
+cp -r "$HERE/results" "$TMP/results-nouncore-occ"
+python3 - "$TMP/results-nouncore-occ/llc-s6-N16/rep1/meta.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['occupancy'].pop('uncore')
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "...and REFUSED by the derivation too (one validator, both consumers)" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-nouncore-occ" --out "$TMP/derived-bad11.json"
+
+# An idle arm recorded in the artefact must be refused at READ time, not just at write
+# time — an older capture's stale `ok` cannot certify itself.
+cp -r "$GOOD_REP" "$TMP/rep-idle-occ"
+python3 - "$TMP/rep-idle-occ/meta.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['occupancy']['uncore']['busy_fraction_estimate']=0.42   # ok flag left TRUE
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "rep recording busy_fraction 0.42 with a stale ok=true: REFUSED at read time" 1 \
+  python3 "$HERE/run/rep-complete.py" "$TMP/rep-idle-occ"
+
+# Finding #3: one group-C artefact present and one absent is a FAILED capture, not an
+# absent one, and the two have opposite remedies.
+#
+# THE ASSERTION IS ON THE DIAGNOSIS, NOT THE EXIT CODE, and the mutation run is why.
+# Reverting the XOR guard still produced a non-zero exit on both fixtures — via a
+# downstream "event absent from CSV" error in one case and the asymmetric-endpoint
+# guard in the other. Defence in depth, which is good, but it made an exit-code
+# assertion useless as evidence for THIS guard: the cases passed 97/97 against the
+# mutant. And the exit code is not what the finding asks for. A half-present group C
+# refused as "event absent" tells the operator nothing; refused as a FAILED CAPTURE
+# tells them to re-run capture-stalls.sh. The diagnosis IS the deliverable.
+xor_diagnosis() { # $1 which-file-to-remove -> the matching diagnosis, or a marker
+  local rmpat="$1" td; td="$(mktemp -d)"
+  cp -r "$HERE/results" "$td/r"
+  rm -f "$td/r"/llc-s6-N16/rep*/$rmpat
+  local out
+  out="$(python3 "$HERE/results/derive.py" "$td/r" --out "$td/d.json" 2>&1)"
+  local rc=$?
+  rm -rf "$td"
+  if [ "$rc" -eq 0 ]; then echo "ACCEPTED(rc=0)"; return; fi
+  case "$out" in
+    *"FAILED group-C capture"*) echo "diagnosed-as-failed-capture" ;;
+    *) echo "refused-but-misdiagnosed" ;;
+  esac
+}
+check "group C with meta-stalls.json but NO CSV: diagnosed as a FAILED capture" \
+      "diagnosed-as-failed-capture" "$(xor_diagnosis 'perf-coreC-aligned.csv')"
+check "group C with the CSV but NO meta-stalls.json: diagnosed as a FAILED capture" \
+      "diagnosed-as-failed-capture" "$(xor_diagnosis 'meta-stalls.json')"
+# BOTH absent is still the supported never-captured mode (covered above), so the XOR
+# guard has not swallowed it.
+
+# Finding #2: capture-stalls.sh gates the busy fraction too. Committed source text,
+# EXECUTED — the arm this one feeds is the headline attribution.
+expect_rc "capture-stalls.sh occupancy gates on the busy fraction, floor from the schema" 0 \
+  python3 - "$HERE/run/capture-stalls.sh" "$HERE/harness" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[2])
+import ws0schema
+src = open(sys.argv[1]).read()
+start = src.index("rt = s['rows_total']; ok = s['requests_ok']")
+end = src.index("doc = {")
+snippet = src[start:end]
+if 'busyfloor' not in snippet:
+    sys.exit('FAIL: the stalls occupancy block does not consult a busy-fraction floor; '
+             'the arm supplying the HEADLINE attribution would be ungated while the '
+             'primary capture gates every arm')
+
+def verdict(busy, rows=3999890 * 8):
+    n, d, ok = 16, 100.0, 1000
+    ns = {'s': {'rows_total': rows, 'requests_ok': ok, 'requests_error': 0,
+                'requests_unavailable': 0, 'duration_s': d,
+                'target_concurrency': n, 'rows_per_s': rows / d,
+                'latency_ms': {'p50': busy * n * d / ok * 1000.0}},
+          'rows': 3999890, 'busyfloor': str(ws0schema.BUSY_FRACTION_FLOOR)}
+    exec(compile(snippet, '<stalls-occupancy>', 'exec'), ns)
+    return bool(ns['occ']['ok'])
+
+bad = 0
+for busy, want, name in [(0.99, True, 'healthy'), (0.95, True, 'above the floor'),
+                         (0.50, False, 'HALF IDLE'), (0.10, False, 'mostly idle')]:
+    got = verdict(busy)
+    if got != want:
+        bad += 1
+    print('        busy=%.2f %-18s ok=%-5s want=%-5s %s'
+          % (busy, name, got, want, 'ok' if got == want else 'MISMATCH'))
+print('        floor read from the schema: %.2f' % ws0schema.BUSY_FRACTION_FLOOR)
+sys.exit(1 if bad else 0)
+PY
+
+# The floor has ONE home. common.sh must READ it, not restate it — two homes for one
+# threshold is the drift hazard every round of this PR has rediscovered.
+expect_rc "the busy-fraction floor has a single home (common.sh reads the schema)" 0 \
+  python3 - "$HERE/harness/common.sh" "$HERE/harness" <<'PY'
+import re, subprocess, sys
+sys.path.insert(0, sys.argv[2])
+import ws0schema
+src = open(sys.argv[1]).read()
+m = re.search(r'WS0_BUSY_FRACTION_FLOOR="\$\{WS0_BUSY_FRACTION_FLOOR:-([0-9.]+)\}"', src)
+if m:
+    sys.exit('FAIL: common.sh hardcodes the floor as %s while the schema says %s — '
+             'two homes for one threshold, so the shell captures could gate at one '
+             'value while the Python validators re-check at another'
+             % (m.group(1), ws0schema.BUSY_FRACTION_FLOOR))
+if 'ws0schema.BUSY_FRACTION_FLOOR' not in src:
+    sys.exit('FAIL: common.sh does not read the floor from the schema')
+# And it must actually resolve, not merely intend to.
+r = subprocess.run(['bash', '-c',
+                    'set -e; WS0_STAGE=x WS0_FLIGHT_BIN=x WS0_LOADGEN_BIN=x '
+                    'WS0_TICKET_TPL=x; source "%s" >/dev/null 2>&1; '
+                    'printf %%s "$WS0_BUSY_FRACTION_FLOOR"' % sys.argv[1]],
+                   capture_output=True, text=True)
+got = r.stdout.strip()
+if not got:
+    sys.exit('FAIL: sourcing common.sh yields an EMPTY floor — an ungated capture')
+if abs(float(got) - ws0schema.BUSY_FRACTION_FLOOR) > 1e-9:
+    sys.exit('FAIL: common.sh resolved %s, schema says %s'
+             % (got, ws0schema.BUSY_FRACTION_FLOOR))
+print('        common.sh resolves %s from the schema' % got)
+PY
+
+# =============================================================================
 printf '\n==== SELFTEST RESULT: %s ====\n' \
   "$( [ "$FAIL" -eq 0 ] && echo PASS || echo FAIL )"
 printf 'cases passed: %d   failed: %d\n' "$PASS" "$FAIL"

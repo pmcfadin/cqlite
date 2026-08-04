@@ -56,15 +56,37 @@ move_milli() {
 
 # LLC miss rate = misses/loads, x1000. The invariant that survives prefetcher
 # behaviour: hostility raises the FRACTION of LLC accesses that miss.
+#
+# THE RISE IS COMPUTED FROM THE COUNTS, NOT FROM THE ROUNDED RATES (roborev round 5
+# finding #1). The first version divided the two milli-rates:
+#
+#     MISSRATE_F=$(( mf * 1000 / lf ))          # integer milli-units
+#     [ "$MISSRATE_F" -gt 0 ] || MISSRATE_RISE=inf
+#
+# so ANY friendly miss rate below 0.1% truncated to 0 and the rise became `inf` —
+# which `evaluate` reads as an unconditional OK. A counter whose hostile rate was
+# equally low, or LOWER, therefore passed P4: the flat-counter case the gate exists to
+# catch, waved through by a rounding step. `inf` is now keyed on the friendly miss
+# COUNT being genuinely zero, which is the only condition under which the ratio is
+# actually undefined.
+#
+# awk does the division because the alternative is integer cross-multiplication
+# (mh*lf*1000), and the counts here reach ~2e7 against loads reaching ~4e8 — a product
+# that would sit within a few orders of magnitude of the 64-bit ceiling with nothing
+# guarding it. awk is already a dependency of this harness (ev_field uses it), so this
+# adds nothing to the dependency-light contract.
 compute_missrate() {
   MISSRATE_F=na; MISSRATE_H=na; MISSRATE_RISE=na
   local lf="${MED[friendly/LLC-loads]}" lh="${MED[hostile/LLC-loads]}"
   local mf="${MED[friendly/LLC-load-misses]}" mh="${MED[hostile/LLC-load-misses]}"
   isnum "$lf" && isnum "$lh" && isnum "$mf" && isnum "$mh" || return
   [ "$lf" -gt 0 ] && [ "$lh" -gt 0 ] || return
+  # Displayed rates keep the milli convention; they are REPORTED, never gated.
   MISSRATE_F=$(( mf * 1000 / lf )); MISSRATE_H=$(( mh * 1000 / lh ))
-  [ "$MISSRATE_F" -gt 0 ] || { MISSRATE_RISE=inf; return; }
-  MISSRATE_RISE=$(( MISSRATE_H * 1000 / MISSRATE_F ))
+  MISSRATE_RISE="$(awk -v mf="$mf" -v lf="$lf" -v mh="$mh" -v lh="$lh" 'BEGIN{
+    if (mf == 0) { if (mh > 0) print "inf"; else print "na"; exit }
+    printf "%d", ((mh / lh) / (mf / lf)) * 1000 + 0.5
+  }')"
 }
 
 # ----------------------------------------------------------------- the verdict

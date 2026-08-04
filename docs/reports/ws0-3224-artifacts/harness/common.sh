@@ -45,11 +45,27 @@ WS0_SEED="${WS0_SEED:-42}"
 WS0_CLIENT_SAT_THRESHOLD="${WS0_CLIENT_SAT_THRESHOLD:-0.70}"
 # Minimum busy fraction for an occupancy arm (roborev round 4 finding #1). Guards
 # against IDLE PERIODS inside a step, which would break the interior convention's
-# assumption that whole-step throughput represents the interior perf window. Low by
-# design: the estimate is a product of three measured quantities and carries their
-# combined error, so a tight floor would be a false-FAIL generator. Committed reps
-# land at ~0.99.
-WS0_BUSY_FRACTION_FLOOR="${WS0_BUSY_FRACTION_FLOOR:-0.90}"
+# assumption that whole-step throughput represents the interior perf window.
+#
+# READ FROM harness/ws0schema.py, NOT WRITTEN HERE. It was briefly a literal 0.90 in
+# both places, which is the drift hazard this whole PR keeps rediscovering: two homes
+# for one fact means the shell captures could gate at one threshold while the Python
+# validators re-checked at another, and nothing would report the disagreement.
+#
+# Fails CLOSED rather than defaulting: an unreadable schema leaves the variable empty,
+# and both consumers call float() on it, so a missing floor is a loud error rather than
+# a silently ungated capture.
+if [ -z "${WS0_BUSY_FRACTION_FLOOR:-}" ]; then
+  WS0_BUSY_FRACTION_FLOOR="$(python3 -c "
+import sys; sys.path.insert(0, '$HARNESS_DIR')
+import ws0schema; print(ws0schema.BUSY_FRACTION_FLOOR)" 2>/dev/null)"
+  [ -n "$WS0_BUSY_FRACTION_FLOOR" ] || {
+    echo "FATAL: cannot read BUSY_FRACTION_FLOOR from $HARNESS_DIR/ws0schema.py." >&2
+    echo "       The occupancy floor has ONE home and this is it; refusing to run" >&2
+    echo "       an ungated capture rather than defaulting to a guessed value." >&2
+    exit 2
+  }
+fi
 # AC3: unsymbolized frames must stay under this fraction of samples.
 WS0_UNSYM_THRESHOLD="${WS0_UNSYM_THRESHOLD:-0.10}"
 
