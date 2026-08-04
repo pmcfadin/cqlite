@@ -65,7 +65,29 @@ ws0_assert_full_physical_cores "client"       "$CLIENT_CPUS" 2
 ws0_assert_sets_disjoint       "$SERVER_CPUS" "$CLIENT_CPUS"
 ws0_verify_topology "$OUT/cpu-topology.json" >/dev/null
 
-CORE_EVENTS="cycles,instructions,LLC-loads,LLC-load-misses,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,dTLB-load-misses,branch-misses,task-clock"
+# ---------------------------------------------------------------- event groups
+# THE RUNBOOK'S 11-EVENT CORE SET MULTIPLEXES ON THIS BOX AND MUST BE SPLIT.
+# Measured in the first smoke capture, `perf stat -x,` field 5 (enabled %):
+#   cycles 79 | instructions 89 | LLC-loads 90 | LLC-load-misses 70
+#   cache-references 80 | cache-misses 90 | L1-dcache-loads 90
+#   L1-dcache-load-misses 90 | dTLB-load-misses 59 | branch-misses 69
+#   task-clock 100
+# Every count except task-clock was a SCALED ESTIMATE. RUNBOOK step 6: "If the
+# core set multiplexes, split it into two invocations rather than publishing
+# scaled values silently." So we split, and every group is verified at 100%
+# enabled before its numbers are used (the derivation fails closed otherwise).
+#
+# Probed on this host: each 7-event group below reads 100.00 enabled.
+# cycles/instructions use fixed-function counters and task-clock is software, so
+# the binding constraint is the 4 GP counters/thread with SMT on — hence 4
+# hardware events per group.
+#
+# cycles + instructions + task-clock are DELIBERATELY REPEATED in both groups.
+# That is not redundancy: it lets the derivation cross-check that the two groups
+# observed the same workload (IPC must agree between them), which is the same
+# kind of symmetry control the positive control's P2 applies to its two arms.
+CORE_EVENTS_A="cycles,instructions,task-clock,LLC-loads,LLC-load-misses,cache-references,cache-misses"
+CORE_EVENTS_B="cycles,instructions,task-clock,L1-dcache-loads,L1-dcache-load-misses,dTLB-load-misses,branch-misses"
 UNCORE_EVENTS="$(python3 - <<'PY'
 print(",".join("uncore_imc_%d/cas_count_%s/" % (i, k)
                for i in range(12) for k in ("read", "write")))
@@ -98,31 +120,42 @@ CPU_BEFORE="$(ws0_proc_cpu_secs "$SRV_PID")"
 CLIENT_BUSY_BEFORE="$(ws0_cpuset_busy_secs "$CLIENT_CPUS")"
 WALL_BEFORE="$(date +%s.%N)"
 
-# ============================ ARM (a): INTERIOR window ======================
-# Loadgen runs in the background; perf counts a WINDOW_SECS slice starting
-# SETTLE_SECS in, so the window sits strictly inside a step with constant
-# occupancy. This reproduces #3217's convention exactly.
-ws0_log "[$LABEL rep$REP] arm(a) INTERIOR: step=${STEP_SECS}s settle=${SETTLE_SECS}s window=${WINDOW_SECS}s"
+# ---------------------------------------------------------------- arm runners
+# ALIGNED: perf runs the loadgen as its OWN CHILD, so the counted interval and
+# the row-producing interval are the same interval — numerator and denominator
+# share one window BY CONSTRUCTION, no rate assumption needed.
+aligned_arm() { # $1 events  $2 perf-out  $3 round  $4 step-jsonl  $5 log
+  perf stat -x, -C "$SERVER_CPUS" -e "$1" -o "$2" -- \
+    taskset -c "$CLIENT_CPUS" "$WS0_LOADGEN_BIN" \
+      --endpoint "$WS0_ENDPOINT" --ticket-template "$WS0_TICKET_TPL" \
+      --shape full --ramp "$N" --step-duration "${STEP_SECS}s" \
+      --seed "$WS0_SEED" --round "$3" --out "$4" > "$5" 2>&1
+}
+
+# ================= ARM (a1): ALIGNED, group A — THE PRIMARY NUMBERS =========
+ws0_log "[$LABEL rep$REP] arm(a1) ALIGNED groupA (cycles/instr/LLC/cache)"
+aligned_arm "$CORE_EVENTS_A" "$OUT/perf-coreA-aligned.csv" \
+  "${LABEL}-alignedA" "$OUT/step-alignedA.jsonl" "$OUT/loadgen-alignedA.log"
+RC_ALIGNED_A=$?                               # captured IMMEDIATELY
+
+# ================= ARM (a2): ALIGNED, group B — attribution counters ========
+ws0_log "[$LABEL rep$REP] arm(a2) ALIGNED groupB (L1d/dTLB/branch)"
+aligned_arm "$CORE_EVENTS_B" "$OUT/perf-coreB-aligned.csv" \
+  "${LABEL}-alignedB" "$OUT/step-alignedB.jsonl" "$OUT/loadgen-alignedB.log"
+RC_ALIGNED_B=$?                               # captured IMMEDIATELY
+
+# ================= ARM (b): INTERIOR window, group A =======================
+# Reproduces #3217's convention exactly: counters over an interior WINDOW_SECS
+# slice starting SETTLE_SECS into the step, rate taken from the whole step.
+# Compared against arm (a1) to settle whether the two conventions agree.
+ws0_log "[$LABEL rep$REP] arm(b) INTERIOR groupA: settle=${SETTLE_SECS}s window=${WINDOW_SECS}s"
 loadgen "${LABEL}-interior" "$OUT/step-interior.jsonl" "$OUT/loadgen-interior.log" &
 LG_PID=$!
 sleep "$SETTLE_SECS"
-perf stat -x, -C "$SERVER_CPUS" -e "$CORE_EVENTS" \
-  -o "$OUT/perf-core.csv" -- sleep "$WINDOW_SECS" >/dev/null 2>&1
+perf stat -x, -C "$SERVER_CPUS" -e "$CORE_EVENTS_A" \
+  -o "$OUT/perf-coreA-interior.csv" -- sleep "$WINDOW_SECS" >/dev/null 2>&1
 RC_CORE=$?                                    # captured IMMEDIATELY
 wait "$LG_PID"; RC_LG_A=$?                    # captured IMMEDIATELY
-
-# ============================ ARM (b): ALIGNED window ======================
-# perf's window IS the loadgen step: perf runs the loadgen as its own child, so
-# the counted interval and the row-producing interval are the same interval.
-ws0_log "[$LABEL rep$REP] arm(b) ALIGNED: perf window == whole loadgen step"
-perf stat -x, -C "$SERVER_CPUS" -e "$CORE_EVENTS" \
-  -o "$OUT/perf-core-aligned.csv" -- \
-  taskset -c "$CLIENT_CPUS" "$WS0_LOADGEN_BIN" \
-    --endpoint "$WS0_ENDPOINT" --ticket-template "$WS0_TICKET_TPL" \
-    --shape full --ramp "$N" --step-duration "${STEP_SECS}s" \
-    --seed "$WS0_SEED" --round "${LABEL}-aligned" \
-    --out "$OUT/step-aligned.jsonl" > "$OUT/loadgen-aligned.log" 2>&1
-RC_ALIGNED=$?                                 # captured IMMEDIATELY
 
 # ============================ ARM (c): UNCORE ==============================
 # Uncore events CANNOT share the core PMU group (they would multiplex), so this
@@ -154,9 +187,10 @@ def step(p):
         return recs[-1] if recs else None
     except OSError:
         return None
-si = step("$OUT/step-interior.jsonl")
-sa = step("$OUT/step-aligned.jsonl")
-su = step("$OUT/step-uncore.jsonl")
+si  = step("$OUT/step-interior.jsonl")
+saA = step("$OUT/step-alignedA.jsonl")
+saB = step("$OUT/step-alignedB.jsonl")
+su  = step("$OUT/step-uncore.jsonl")
 rows = int("$CORPUS_ROWS")
 
 def occupancy(s):
@@ -170,7 +204,12 @@ def occupancy(s):
     exact=True because 0 % rows == 0 — a vacuously passing empty measurement,
     exactly what CLAUDE.md forbids ("never let a dataset-dependent test pass on
     an empty dataset; 0-rows-when-present is a failure"). So require positive
-    rows, whole scans, and zero errors, and surface `ok` for the caller to gate."""
+    rows, whole scans, and zero errors, and surface an ok flag for the caller.
+
+    NOTE: this heredoc is UNQUOTED (it interpolates $OUT, $CORPUS_ROWS, ...), so
+    bash still does command substitution inside it. Never write backticks or
+    $(...) in these docstrings — an earlier version said `ok` here and bash
+    dutifully tried to run a command named ok."""
     if not s: return None
     d = s["duration_s"]; n = s["target_concurrency"]
     ok = s["requests_ok"]; rt = s["rows_total"]
@@ -213,11 +252,15 @@ doc = {
    "admission_wait_timeout_ms": int("$WS0_ADMISSION_WAIT_TIMEOUT_MS"),
  },
  "rc": {"core_interior": int("$RC_CORE"), "loadgen_interior": int("$RC_LG_A"),
-        "aligned": int("$RC_ALIGNED"),
+        "alignedA": int("$RC_ALIGNED_A"), "alignedB": int("$RC_ALIGNED_B"),
         "uncore": int("$RC_UNCORE"), "loadgen_uncore": int("$RC_LG_C")},
- "steps": {"interior": si, "aligned": sa, "uncore": su},
- "occupancy": {"interior": occupancy(si), "aligned": occupancy(sa),
-               "uncore": occupancy(su)},
+ "event_groups": {"A": "$CORE_EVENTS_A", "B": "$CORE_EVENTS_B"},
+ "perf_files": {
+   "alignedA": "perf-coreA-aligned.csv", "alignedB": "perf-coreB-aligned.csv",
+   "interiorA": "perf-coreA-interior.csv", "uncore": "perf-uncore.csv"},
+ "steps": {"interior": si, "alignedA": saA, "alignedB": saB, "uncore": su},
+ "occupancy": {"interior": occupancy(si), "alignedA": occupancy(saA),
+               "alignedB": occupancy(saB), "uncore": occupancy(su)},
  "server_io_before": json.loads('''$IO_BEFORE'''),
  "server_io_after":  json.loads('''$IO_AFTER'''),
  "server_ctxt":      json.loads('''$CTXT'''),
@@ -267,5 +310,9 @@ if bad:
 print("  ALL VALIDITY GATES PASS")
 PY
 RC_META=$?
-ws0_log "[$LABEL rep$REP] done rc(core=$RC_CORE aligned=$RC_ALIGNED uncore=$RC_UNCORE meta=$RC_META)"
-[ "$RC_CORE" -eq 0 ] && [ "$RC_ALIGNED" -eq 0 ] && [ "$RC_UNCORE" -eq 0 ] && [ "$RC_META" -eq 0 ]
+ws0_log "[$LABEL rep$REP] done rc(alignedA=$RC_ALIGNED_A alignedB=$RC_ALIGNED_B interiorA=$RC_CORE uncore=$RC_UNCORE meta=$RC_META)"
+# Fail closed on ANY non-zero arm. RC_META is non-zero when a validity gate
+# (occupancy / warmth / client saturation) failed, so an empty or client-bound
+# capture can never be recorded as a good rep.
+[ "$RC_ALIGNED_A" -eq 0 ] && [ "$RC_ALIGNED_B" -eq 0 ] && [ "$RC_CORE" -eq 0 ] \
+  && [ "$RC_UNCORE" -eq 0 ] && [ "$RC_META" -eq 0 ]

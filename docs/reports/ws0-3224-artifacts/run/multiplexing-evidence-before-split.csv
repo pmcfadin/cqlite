@@ -1,0 +1,13 @@
+# started on Tue Aug  4 01:29:54 2026
+
+47234548424,,cycles,12800660031,79.00,2.952,GHz
+48515376894,,instructions,14402612012,89.00,1.03,insn per cycle
+40401498,,LLC-loads,14403261077,90.00,2.525,M/sec
+5679,,LLC-load-misses,11203255831,70.00,0.01,of all LL-cache accesses
+330002748,,cache-references,12803275552,80.00,20.621,M/sec
+59454,,cache-misses,14403238321,90.00,0.02,of all cache refs
+11284820781,,L1-dcache-loads,14403237002,90.00,705.162,M/sec
+697682425,,L1-dcache-load-misses,14403221888,90.00,6.18,of all L1-dcache accesses
+1435622,,dTLB-load-misses,9599924186,59.00,,
+149037869,,branch-misses,11199922461,69.00,,
+16003166764,,task-clock,16003166764,100.00,2.000,CPUs utilized

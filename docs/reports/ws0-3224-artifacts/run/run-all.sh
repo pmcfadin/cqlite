@@ -34,8 +34,16 @@ for rep in $(seq 1 "$REPS"); do
     set -- $spec
     label="$1"; S="$2"; N="$3"
     out="$OUTROOT/$label/rep$rep"
-    if [ -f "$out/meta.json" ] && grep -q '"ALL_GATES"' "$out/meta.json" 2>/dev/null; then
-      echo "[run-all] SKIP $label rep$rep (already complete)"; continue
+    # Resume-safe: a rep is "already complete" only if its meta.json exists AND
+    # every occupancy arm in it passed. A half-finished or invalid rep is redone.
+    if [ -f "$out/meta.json" ] && python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+occ=d.get("occupancy",{})
+sys.exit(0 if occ and all(v and v.get("ok") for v in occ.values())
+              and d.get("warm_verified_zero_disk_reads")
+              and d.get("client_saturation_gate_pass") else 1)' "$out/meta.json" 2>/dev/null; then
+      echo "[run-all] SKIP $label rep$rep (already complete and valid)"; continue
     fi
     echo "=============================================================="
     echo "[run-all] $(date -u +%H:%M:%S) $label rep$rep  S=$S N=$N step=${STEP}s window=${WINDOW}s"

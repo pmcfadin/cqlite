@@ -316,9 +316,16 @@ ws0_require_inputs() {
   [ -x "$WS0_LOADGEN_BIN" ] || ws0_die "WS0_LOADGEN_BIN=$WS0_LOADGEN_BIN is not executable"
   [ -n "$WS0_TICKET_TPL" ]  || ws0_die "WS0_TICKET_TPL unset (--ticket-template JSON)"
   [ -f "$WS0_TICKET_TPL" ]  || ws0_die "WS0_TICKET_TPL=$WS0_TICKET_TPL not found"
-  ls "$WS0_STAGE"/*Data.db >/dev/null 2>&1 || \
-    ls "$WS0_STAGE"/*/*Data.db >/dev/null 2>&1 || \
-    ws0_warn "no *-Data.db directly under $WS0_STAGE — check the stage layout"
+  # #3217's check tested only 1-2 levels, so the CORRECT layout warned. The
+  # layout cqlite-flight actually discovers is <keyspace>/<table>-<uuid>/, i.e.
+  # THREE levels down — and a flat stage (which this check ACCEPTED) makes the
+  # server log "discovered 0 tables across 0 keyspaces" and every request
+  # NotFound. So search at any depth, and require at least one Data.db.
+  local ndata
+  ndata="$(find "$WS0_STAGE" -name '*-Data.db' -type f 2>/dev/null | wc -l)"
+  [ "$ndata" -gt 0 ] || ws0_die "no *-Data.db anywhere under WS0_STAGE=$WS0_STAGE"
+  ls "$WS0_STAGE"/*/*/*-Data.db >/dev/null 2>&1 || \
+    ws0_warn "WS0_STAGE=$WS0_STAGE has $ndata Data.db but not at the <keyspace>/<table-uuid>/ depth cqlite-flight discovers — a flat stage yields 'discovered 0 tables' and all-NotFound"
 }
 
 # ------------------------------------------------------------ server lifecycle
