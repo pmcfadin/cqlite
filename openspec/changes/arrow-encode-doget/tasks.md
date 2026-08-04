@@ -1,5 +1,96 @@
 # Tasks: arrow-encode-doget (issue #3096)
 
+## DELIVERY STATUS — LEVER 6 IS REVERTED (owner ruling, 2026-08-04)
+
+**Lever 6 — caching the egress Arrow schema once per merge instead of building it
+per batch — is REVERTED IN FULL.** `EgressBatchPlan` / `egress_batch_plan()` are
+gone; `egress_array_nodes() -> usize` and the bare `n_array_nodes: usize` parameter
+`flush_credited` takes at all six flush sites are restored; `flush_buffer` calls
+`rows_to_record_batch(&self.columns, buffer)` per batch as `origin/main` does. The
+owner's rule: **a lever that measures zero with its mechanism genuinely in effect
+has no rationale and is reverted whole.**
+
+**MEASURED TWICE, ZERO BOTH TIMES.** The two readings are not a repeat — the first
+was not a result about lever 6 at all:
+
+| reading | value | what it actually measured |
+|---|---|---|
+| first (2026-08-03, `abc-interleaved-2026-08-03.md` §10) | **−496 rows/s (−0.2%)** | **NOT a result about the lever.** A redundant per-batch `check_schema_matches_columns` on the egress path reconstructed a `Field` per column per batch, re-adding under another name exactly the work the cache removed. So this measured **lever 6 PLUS a bug**, with the mechanism defeated. |
+| second (2026-08-04, post-`035585d`) | **+732 rows/s (+0.30%)**, 95% CI **[−1661, +3125]** covering zero, 8/12 rounds positive | lever 6 **with the mechanism live** — `035585d` routed `do_get`'s flush through a trusted tail, so the schema was genuinely built once per merge. |
+
+Supporting figures for the second reading: ON (HEAD `035585d`) 244,895 rows/s at
+1.9% spread vs OFF (lever 6 reverted whole) 243,588 rows/s at 4.3%; cycles/row mean
+−59 but **MEDIAN +44 — the wrong sign**; the between-binary code-layout noise floor
+on this box is **~1.4%**, so **+0.30% is 4.5x BELOW noise**. The per-batch work
+removed measures **1,475 ns over 709 batches = 0.261 ns/row = 1.53 cycles/row of
+23,940 (0.0064%)**, which is why no rig on this box can see it.
+
+**Both levers are now reverted** (lever 4 by ruling A below, lever 6 here). No AC
+verdict changes:
+
+* **AC1 stays `unmet`, re-anchored to #3248** — lever 6 measured at zero, so
+  removing it moves no throughput claim.
+* **R4 stays `unmet`, re-anchored to #3272** — the rig split is a separate ruling.
+* **No recorded measurement, figure, ratio or superseded-figure label is altered by
+  this revert.** Both readings above are the honest record, and they are precisely
+  what justifies removing the lever.
+
+### The roborev schema-reuse finding is MOOT, not closed
+
+The finding's subject was that **a redundant per-batch validation defeated the
+schema-reuse optimisation**. Reverting removes the optimisation, so **the subject
+ceases to exist** — the defect is not repaired, it is **MOOT**. That distinction is
+load-bearing: nothing here claims a validation bug was fixed by a revert.
+
+For the record, `035585d` DID close it on the shipping path first (a
+`PrevalidatedSchema` whose type made a schema/columns mismatch unconstructible, so
+`do_get`'s flush revalidated nothing) — and it is precisely that fix which made the
+second, honest measurement possible. With lever 6 gone that type has no caller, so
+it is **dropped rather than carried forward as dead API**: `arrow_prevalidated.rs`,
+`rows_to_record_batch_prevalidated`, the `arrow-validation-probe` feature and
+`prevalidated_batch_builds_on_this_thread` are all removed, along with
+`egress_flush_tests.rs` (all four of its tests had lever 6 as their subject).
+
+**What IS retained from that work, on its own merit:**
+
+* `rows_to_record_batch` does not revalidate a schema it just built (`9e01a42`).
+  This serves every public caller plus `producer.rs:963`'s aggregate route, is
+  independent of lever 6, and keeps its falsifying counter test
+  (`the_trusted_path_does_not_revalidate_and_the_external_one_still_does`), whose
+  thread-local returns to `#[cfg(test)]`-only.
+* `rows_to_record_batch_with_schema`'s **`Field`-identity rejection contract** —
+  name, data type, nullability, field metadata, arity, order, empty schema-level
+  metadata — with its eleven per-axis tests and the no-false-rejection complement.
+  Its docs no longer advertise schema hoisting as a performance route; they record
+  the measured negative.
+
+**The egress credit / byte-cap contract (spec R6) is UNTOUCHED.** It consumes only
+the array-node count, and the per-merge hoist of THAT predates this branch
+(`origin/main`'s `egress_array_nodes()`, issue #2821) and is not lever 6.
+`EgressBatchPlan` existed only as the vehicle for the cached schema, so with the
+schema gone a one-field struct wrapping a `usize` is dead API and the bare scalar is
+restored. `worst_case_batch_capacity_bytes`, the reserve → build → true-up-DOWNWARD
+→ emit ordering, the debug accumulator ⇄ buffer invariant, mid-stream cancellation
+and the `StreamSubPhase::Encode` span are unchanged; `issue_2821_egress_budget_e2e`
+and `issue_2825_max_batch_bytes_e2e` are green.
+
+**What the PR still delivers**, after both reverts: the `arrow_convert.rs`
+responsibility split; the `Field`-identity schema contract plus the
+non-revalidating trusted tail; the **IPC-framing attribution (313.0 ns/row**,
+previously attributable to nothing); the **Arrow-buffer digest oracle, now with a
+producer-side tap and real validity-bitmap coverage** (150 nulls over 500 rows, so a
+misplaced validity bit has something to misplace); and the **honest negative
+result**.
+
+### The measurement lesson
+
+**A same-binary drift control understates the noise floor for a between-binary
+A/B.** The ~1.4% code-layout floor was invisible to CTRL (same binary, so no layout
+difference to see) and was only exposed by a third arm that measured **faster while
+doing strictly more work** — an outcome no same-binary control can produce.
+
+---
+
 ## DELIVERY STATUS — LEVER 4 IS REVERTED (owner ruling A, 2026-08-03)
 
 **Lever 4 — the explicit `with_max_flight_data_size` flight-data target, plus the
@@ -137,17 +228,21 @@ framing reserve − 64 KiB inexactness margin). At the shipped target:
 | the SUPERSEDED figure | +2.0% / 213,471 → 217,791 rows/s was measured AT the 4 MiB target and is **not** the delivered figure |
 | cycles/row | lever 4' cuts a median 136.9 cycles/row (~0.6%) with rows/s unmoved — **spec R1 forbids reporting that as a win**, and it is not |
 
-**So BOTH levers measured at zero at the shipped target**, and the two were then
-treated differently — see the LEVER 4 REVERTED block at the top of this file:
+**So BOTH levers measured at zero at the shipped target**, and BOTH are now
+reverted — see the two REVERTED blocks at the top of this file:
 
 * **Lever 4: measured at zero AND NOT RETAINED.** It is REVERTED in full (owner
   ruling A, deferred to **#3281**). It was briefly retained for *wire safety*,
   which this file previously recorded; that justification is withdrawn, because the
   mechanism behind it conflated a `target` with a `ceiling` and failed three
   consecutive reviews.
-* **Lever 6: measured at zero and RETAINED**, on the narrow ground that it is
-  strictly less work per batch (one Arrow `Schema` build per merge instead of one
-  per batch), not on a throughput claim.
+* **Lever 6: measured at zero AND NOT RETAINED.** ~~measured at zero and RETAINED,
+  on the narrow ground that it is strictly less work per batch~~ — struck in place
+  rather than deleted, so the record stays legible. That "strictly less work per
+  batch" ground **was not true as written while the redundant validation stood**,
+  and once `035585d` made it true the re-measurement was still **+0.30% with a CI
+  covering zero, 4.5x below the ~1.4% between-binary noise floor**. Measured twice,
+  zero both times → **REVERTED in full** (owner ruling, 2026-08-04).
 
 **Spec R5 (owner-approved) makes a correctly-measured, correctly-reported
 negative result a satisfying outcome of THIS change. It does not make AC1
@@ -159,12 +254,14 @@ negative result through an optimistic title. The **C** intent audit should recor
 2026-08-03 split: the reproduction rig that produced the numbers below —
 `tools/ws0-corpus-gen` + `scripts/perf/` — is **re-anchored to #3272** and is no
 longer part of this PR; its ARTIFACTS remain committed here): the in-repo
-Arrow-buffer digest oracle, the closed IPC-framing attribution blind spot
-(**313.0 ns/row**, previously attributable to nothing), the `arrow_*` export split
-with its `Field`-identity schema contract, lever 6 (**measured at zero**, recorded
-as such), the cross-session drift finding — observed TWICE now — and the honest
-16.3% gap with its per-run evidence. **Lever 4 is NOT in that list: it was
-measured at zero and NOT retained** (reverted, #3281).
+Arrow-buffer digest oracle — now with a PRODUCER-SIDE tap and real validity-bitmap
+coverage — the closed IPC-framing attribution blind spot (**313.0 ns/row**,
+previously attributable to nothing), the `arrow_*` export split with its
+`Field`-identity schema contract and non-revalidating trusted tail, the
+cross-session drift finding — observed TWICE now — and the honest 16.3% gap with
+its per-run evidence. **NEITHER lever is in that list: both were measured at zero
+and NOT retained** (lever 4 reverted → #3281; lever 6 reverted → see the block at
+the top of this file, measured at zero TWICE).
 
 **The 82% is a COMPLEMENT, not an attribution** (`1,746 − 313 = 1,432.9 ns/row`,
 labeled "array build" from the call graph, **no per-function data inside it**).
@@ -257,9 +354,11 @@ honored: no further lever was stacked on an unexplained result.
       behavioral lever — builders / schema / conversion entry — so the `file-size` ratchet never
       forces `CQLITE_ALLOW_FILE_GROWTH=1`. Mechanical, no behavior change; digest unchanged.
 - [x] Check `cqlite-flight/src/producer.rs` (3,243 lines) for the same problem before touching it.
-      → checked; lever 6 **shrank** it (schema build hoisted out to `egress_flush.rs`), so the
-      `file-size` ratchet is satisfied without `CQLITE_ALLOW_FILE_GROWTH=1`. A responsibility split
-      of `producer.rs` itself remains owed to epic #1116 and is out of this change's scope.
+      → checked; it **shrank to 3,230** because `flush_buffer` moved to `egress_flush.rs` beside its
+      only caller, so the `file-size` ratchet is satisfied without `CQLITE_ALLOW_FILE_GROWTH=1`.
+      **That move SURVIVES the lever-6 revert** — its location was never part of the lever, and the
+      ratchet forbids regrowing an over-threshold file, so moving it back is not an option. A
+      responsibility split of `producer.rs` itself remains owed to epic #1116 and is out of scope.
 
 ## 2. Lever 4 + 6 — the cheap floor (surfaces: `cqlite-flight/src/batch_bytes.rs`, `streaming.rs`, `cqlite-core/src/export/arrow_convert.rs`)
 - [ ] **REVERTED — deferred to #3281 (owner ruling A, 2026-08-03).** Lever 4: align
@@ -272,8 +371,15 @@ honored: no further lever was stacked on an unexplained result.
       conflated a `target` with a `ceiling`, so the whole surface is removed. `batch_bytes.rs`
       is byte-identical to `origin/main` again. Unchecked is the honest state: **measured at
       zero AND not retained.**
-- [x] Lever 6: cache the Arrow `Schema` instead of rebuilding it per batch at
-      `arrow_convert.rs:201-203`.
+- [ ] **REVERTED (owner ruling, 2026-08-04).** Lever 6: cache the Arrow `Schema` instead of
+      rebuilding it per batch at `arrow_convert.rs:201-203`. It WAS implemented (`EgressBatchPlan`,
+      one `Schema` per merge) and it **measured at ZERO TWICE** — first at −0.2% while a redundant
+      per-batch validation defeated the mechanism (so that reading was lever 6 **plus a bug**, not a
+      result about the lever), then at **+0.30% with a 95% CI covering zero, 4.5x below the ~1.4%
+      between-binary layout noise floor**, with the mechanism genuinely live. The egress path builds
+      the schema per batch again; `producer_drive.rs`, `producer_stream.rs` and the `flush_credited`
+      signature are back to `origin/main`. Unchecked is the honest state: **measured at zero AND not
+      retained.** See the LEVER 6 REVERTED block at the top of this file.
 - [x] Measure each individually against the Phase-0 baseline; report rows/s AND cycles/row.
 - [x] `--lite` + the digest oracle + `issue_2825_max_batch_bytes_e2e.rs` after each.
 
