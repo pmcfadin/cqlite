@@ -73,6 +73,15 @@
 //! liveness marker OUTLIVES the deletion (a row Cassandra returns), and the marker
 //! timestamp alone leaves the marker-less phantom resurrected.
 //!
+//! ## All FOUR multi-generation drivers (issue #3129 AC2)
+//!
+//! The three pins above drive `merge_generations_for_read` only. Three further public
+//! entry points reach a multi-generation merge — the WRITETIME/TTL metadata
+//! projection, the streaming scan, and the partition-seeking point read — and the
+//! metadata one carries its OWN copy of the emission loop (`push_metadata_rows`). The
+//! `…AC2 — driver N of 4` pins at the bottom of this file assert the same property on
+//! each, so the four paths can never diverge silently. See the banner comment there.
+//!
 //! ## Anti-vacuity
 //!
 //! Every pin reads the UNPATCHED copy of the very same generations first and asserts
@@ -332,10 +341,24 @@ fn patch_newest_generation_partition_deletion(table_dir: &Path) {
     std::fs::write(data_path, &bytes).expect("write patched Data.db");
 }
 
-/// Scan `root` through the manager's MULTI-GENERATION merge path (`candidates > 1`
-/// ⇒ `merge_generations_for_read` ⇒ `partition_live_rows` ⇒ `ReadShadow::
-/// filter_live`) and return the number of live rows.
-async fn multigen_row_count(root: &Path, schema: &TableSchema) -> usize {
+/// The fixture's single partition key value (`pk = 1`).
+const PK_VALUE: i32 = 1;
+
+fn table_id() -> CqlTableId {
+    CqlTableId::from(format!("{KS}.{TBL}").as_str())
+}
+
+/// Open an `SSTableManager` over `root` and assert it registered EXACTLY the two
+/// generations the fixture flushed.
+///
+/// This is the shared ANTI-VACUITY precondition for every driver below: each
+/// multi-generation branch is guarded by a reader/candidate count (`reader_list.len()
+/// > 1`, `readers.len() > 1`, `candidates.len() > 1`), and every one of them falls
+/// back SILENTLY to a non-reconciling per-reader concatenation when the count is 1.
+/// A fixture that lost a generation — or a manager that failed to register one —
+/// would therefore take the fallback and could satisfy a naive expectation without
+/// the merge path ever running. Failing here instead makes that loud.
+async fn open_manager(root: &Path) -> SSTableManager {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
     let manager = SSTableManager::new(
@@ -348,9 +371,37 @@ async fn multigen_row_count(root: &Path, schema: &TableSchema) -> usize {
     .await
     .expect("SSTableManager open");
 
-    let table_id = CqlTableId::from(format!("{KS}.{TBL}").as_str());
+    let registered = manager.list_sstables().await.len();
+    assert_eq!(
+        registered, 2,
+        "anti-vacuity: the manager must register BOTH generations, else every \
+         multi-generation driver falls back to the non-reconciling per-reader \
+         concatenation and the pin below would prove nothing — registered {registered}"
+    );
+    manager
+}
+
+/// The `ck` clustering value carried by one emitted scan row.
+fn ck_of(row: &ScanRow) -> i32 {
+    match row {
+        ScanRow::Row(cells) => cells
+            .iter()
+            .find_map(|(name, value)| match (name.as_ref(), value) {
+                ("ck", Value::Integer(v)) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("emitted row carries no `ck` clustering value")),
+        other => panic!("unexpected scan row shape: {other:?}"),
+    }
+}
+
+/// Scan `root` through the manager's MULTI-GENERATION merge path (`candidates > 1`
+/// ⇒ `merge_generations_for_read` ⇒ `partition_live_rows` ⇒ `ReadShadow::
+/// filter_live`) and return the number of live rows.
+async fn multigen_row_count(root: &Path, schema: &TableSchema) -> usize {
+    let manager = open_manager(root).await;
     let rows = manager
-        .scan(&table_id, None, None, None, Some(schema))
+        .scan(&table_id(), None, None, None, Some(schema))
         .await
         .expect("multi-generation scan must not error");
     rows.len()
@@ -360,34 +411,13 @@ async fn multigen_row_count(root: &Path, schema: &TableSchema) -> usize {
 /// returns, in emission order — so an assertion can name the surviving row SET
 /// instead of only its cardinality.
 async fn multigen_ck_values(root: &Path, schema: &TableSchema) -> Vec<i32> {
-    let config = Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
-    let manager = SSTableManager::new(
-        root,
-        &config,
-        platform,
-        #[cfg(feature = "state_machine")]
-        None,
-    )
-    .await
-    .expect("SSTableManager open");
-
-    let table_id = CqlTableId::from(format!("{KS}.{TBL}").as_str());
+    let manager = open_manager(root).await;
     manager
-        .scan(&table_id, None, None, None, Some(schema))
+        .scan(&table_id(), None, None, None, Some(schema))
         .await
         .expect("multi-generation scan must not error")
         .iter()
-        .map(|(_, row)| match row {
-            ScanRow::Row(cells) => cells
-                .iter()
-                .find_map(|(name, value)| match (name.as_ref(), value) {
-                    ("ck", Value::Integer(v)) => Some(*v),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("emitted row carries no `ck` clustering value")),
-            other => panic!("unexpected scan row shape: {other:?}"),
-        })
+        .map(|(_, row)| ck_of(row))
         .collect()
 }
 
@@ -608,6 +638,299 @@ async fn multigen_partition_delete_hides_the_markerless_row_and_keeps_the_newer_
          deletion) must remain VISIBLE. Expected [4], got {deleted_cks:?} — `[2, 4]` means \
          tombstone PRESENCE is not reaching the row decision, `[]` means the surviving \
          marker TIMESTAMP is not."
+    );
+
+    drop(temp);
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Issue #3129 AC2 — the SAME property on the other THREE multi-generation drivers
+// ════════════════════════════════════════════════════════════════════════════════
+//
+// The three pins above all drive `merge_generations_for_read`. Three further public
+// entry points reach a multi-generation merge, and each has its OWN emission loop or
+// its own merger construction:
+//
+// | driver                                      | manager entry point            |
+// |---------------------------------------------|--------------------------------|
+// | `merge_generations_for_read_with_metadata`   | `scan_with_cell_metadata`      |
+// | `stream_generations_for_read`                | `scan_stream`                  |
+// | `seek_merge_generations_for_read`            | `scan_partition_clustering`    |
+//
+// `push_metadata_rows` is a SECOND COPY of the emission loop (not of the shadow
+// logic): it and `partition_live_rows` both call the identical
+// `ReadShadow::filter_live`, where the #3122 presence-bit fix lives, and those are its
+// only two callers in the crate. The streaming and seeking drivers reuse
+// `partition_live_rows` verbatim. So all four drivers are already CORRECT — these pins
+// close a COVERAGE gap, and their job is to make any future divergence between the
+// four emission paths (or a regression in the one shared `filter_live`) fail loudly on
+// every driver rather than only on the materializing one.
+//
+// Each pin uses the AC1 fixture verbatim (marker-less `ck = 2` in generation 1, live
+// `ck = 9` in generation 2, partition deletion patched into generation 2's header) and
+// asserts the same Cassandra answer, `[9]`, evaluated at the PINNED `now`.
+//
+// ## Why the core assertion is itself the fallback detector
+//
+// Every one of these drivers falls back SILENTLY to a per-reader CONCATENATION when
+// its multi-generation guard is not met. That fallback is not reconciling: generation
+// 1 (no partition deletion in its own header) still yields `ck = 2`, and generation 2
+// yields `ck = 9`, so a fallback returns `[2, 9]` — which is exactly the phantom
+// resurrection these pins forbid. A prune/registration-induced fallback therefore
+// FAILS the assertion loudly instead of passing it vacuously. `open_manager` asserts
+// the two generations were registered on top of that, and each pin additionally reads
+// the UNPATCHED copy of the very same generations first.
+
+/// The partition key BYTES for `pk = 1` — a single `int` partition column, so the
+/// key is its 4-byte big-endian value (Cassandra's `Int32Type` encoding; guide App.B).
+/// Cross-checked against the key the merge path actually emits before it is used.
+fn partition_key_bytes() -> Vec<u8> {
+    PK_VALUE.to_be_bytes().to_vec()
+}
+
+/// Build the AC1 fixture — generation 1: the MARKER-LESS `ck = 2` row whose only
+/// non-key cell is a `w` tombstone; generation 2: the live `ck = 9` sibling whose `v`
+/// is written strictly AFTER the partition deletion patched into that generation's
+/// header. Returns `(tempdir, unpatched root, patched root)`.
+async fn build_markerless_ac1_fixture(
+    schema: &TableSchema,
+) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (temp, data_dir) = build_two_generation_fixture(
+        schema,
+        vec![update_set_w_null_markerless(2)],
+        vec![update_v_live(9)],
+    )
+    .await;
+
+    let live_root = temp.path().join("live");
+    let deleted_root = temp.path().join("deleted");
+    copy_table_dir(&data_dir, &live_root);
+    let deleted_table_dir = copy_table_dir(&data_dir, &deleted_root);
+
+    assert_eq!(
+        data_db_paths_by_generation(&live_root.join(KS).join(TBL)).len(),
+        2,
+        "test must exercise a multi-generation directory (the KWayMerger path)"
+    );
+    patch_newest_generation_partition_deletion(&deleted_table_dir);
+
+    (temp, live_root, deleted_root)
+}
+
+/// Drive `SSTableManager::scan_with_cell_metadata` (the WRITETIME/TTL projection) over
+/// `root`, returning `(ck, WRITETIME(v))` per emitted row in emission order.
+///
+/// The `WRITETIME(v)` component is deliberately part of the pinned value: it is
+/// produced by `push_metadata_rows` from the merge WINNER's cell, so a pin that
+/// asserts it proves the metadata emission loop really ran and really carried
+/// authoritative per-cell metadata, not that a row merely appeared.
+async fn multigen_metadata_ck_and_v_writetime(
+    root: &Path,
+    schema: &TableSchema,
+) -> Vec<(i32, Option<i64>)> {
+    let manager = open_manager(root).await;
+    manager
+        .scan_with_cell_metadata(&table_id(), None, None, None, Some(schema))
+        .await
+        .expect("multi-generation metadata scan must not error")
+        .iter()
+        .map(|(_, row, meta)| (ck_of(row), meta.get("v").map(|m| m.write_timestamp_micros)))
+        .collect()
+}
+
+/// Drive `SSTableManager::scan_stream` (the STREAMING multi-generation merge) over
+/// `root` and drain it to completion, returning the `ck` of every emitted row in
+/// emission order. A producer that dies mid-stream surfaces as an `Err` item, which
+/// panics here rather than truncating the result set into a silent pass.
+#[cfg(not(feature = "tombstones"))]
+async fn multigen_stream_ck_values(root: &Path, schema: &TableSchema) -> Vec<i32> {
+    let manager = open_manager(root).await;
+    let mut stream = manager
+        .scan_stream(&table_id(), None, None, Some(schema), 64)
+        .await
+        .expect("multi-generation scan_stream must construct");
+    let mut out = Vec::new();
+    while let Some(item) = stream.recv().await {
+        let (_, row) =
+            item.expect("streamed row must be Ok — a dead producer is NOT an end of stream");
+        out.push(ck_of(&row));
+    }
+    out
+}
+
+/// Drive `SSTableManager::scan_partition_clustering` (the partition-SEEKING
+/// multi-generation merge) over `root` for `pk = 1`, returning
+/// `(ck values, clustering_seek_engaged)`.
+#[cfg(not(feature = "tombstones"))]
+async fn multigen_seek_ck_values(root: &Path, schema: &TableSchema) -> (Vec<i32>, bool) {
+    let manager = open_manager(root).await;
+    let (rows, engaged) = manager
+        .scan_partition_clustering(&table_id(), &partition_key_bytes(), None, Some(schema))
+        .await
+        .expect("multi-generation partition seek must not error");
+    (rows.iter().map(|(_, row)| ck_of(row)).collect(), engaged)
+}
+
+/// Issue #3129 AC2 — driver 2 of 4: the WRITETIME/TTL metadata projection
+/// (`SSTableManager::scan_with_cell_metadata` ⇒
+/// `generation_merge::merge_generations_for_read_with_metadata` ⇒
+/// `push_metadata_rows` ⇒ `ReadShadow::filter_live`).
+///
+/// `push_metadata_rows` is a second, independent copy of the emission loop, so the
+/// materializing pins above do not cover it. Same fixture, same Cassandra answer.
+#[tokio::test]
+async fn multigen_metadata_projection_partition_deleted_markerless_tombstone_row_is_hidden() {
+    std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
+
+    let schema = parse_cql_schema(&schema_cql()).expect("parse fixture schema");
+    let (temp, live_root, deleted_root) = build_markerless_ac1_fixture(&schema).await;
+
+    // (1) ANTI-VACUITY (a DECODE PROBE of current CQLite behaviour, not a parity
+    //     claim — #3121): with NO partition deletion both rows are physically present
+    //     and decodable through the METADATA merge, and the surviving `v` carries its
+    //     real write timestamp. A broken fixture, a lost generation or a metadata map
+    //     that silently came back empty fails here.
+    let live = multigen_metadata_ck_and_v_writetime(&live_root, &schema).await;
+    assert_eq!(
+        live,
+        vec![(2, None), (9, Some(T_SIBLING_LIVE_MICROS))],
+        "decode probe: BEFORE the partition tombstone is patched in, the metadata merge \
+         must emit both merged rows, and ck=9's `v` must carry its authoritative \
+         WRITETIME @{T_SIBLING_LIVE_MICROS}µs — got {live:?}"
+    );
+
+    // (2) THE PIN: the marker-less tombstone-only row is not resurrected, and the live
+    //     sibling keeps both its value AND its authoritative WRITETIME.
+    let deleted = multigen_metadata_ck_and_v_writetime(&deleted_root, &schema).await;
+    assert_eq!(
+        deleted,
+        vec![(9, Some(T_SIBLING_LIVE_MICROS))],
+        "issue #3129 AC2 (metadata driver): under a partition deletion \
+         @{T_PARTITION_DELETE_MICROS}µs the marker-less row ck=2 (only cell a `w` \
+         tombstone @{T_CELL_TOMB_MICROS}µs) has no live data and no liveness marker, so \
+         Cassandra never yields it, while ck=9's live `v` @{T_SIBLING_LIVE_MICROS}µs \
+         OUTLIVES the deletion. Expected [(9, Some({T_SIBLING_LIVE_MICROS}))], got \
+         {deleted:?} — a `(2, _)` entry is the phantom resurrection reaching the \
+         WRITETIME/TTL projection through `push_metadata_rows`, `[]` an over-hide of the \
+         whole partition."
+    );
+
+    drop(temp);
+}
+
+/// Issue #3129 AC2 — driver 3 of 4: the STREAMING merge
+/// (`SSTableManager::scan_stream` ⇒ `generation_merge::stream_generations_for_read` ⇒
+/// `partition_live_rows` ⇒ `ReadShadow::filter_live`).
+///
+/// `scan` and `scan_stream` must agree row-for-row (issue #957); this pins that they
+/// also agree on read-time row VISIBILITY under a partition deletion.
+#[cfg(not(feature = "tombstones"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multigen_streaming_scan_partition_deleted_markerless_tombstone_row_is_hidden() {
+    std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
+
+    let schema = parse_cql_schema(&schema_cql()).expect("parse fixture schema");
+    let (temp, live_root, deleted_root) = build_markerless_ac1_fixture(&schema).await;
+
+    // (1) ANTI-VACUITY (decode probe, #3121): the stream really carries both merged
+    //     rows before the deletion is patched in — so a stream that ended early, or
+    //     one that never engaged the merge, fails here rather than making the pin
+    //     below trivially true.
+    let live_cks = multigen_stream_ck_values(&live_root, &schema).await;
+    assert_eq!(
+        live_cks,
+        vec![2, 9],
+        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): the \
+         streaming merge must emit both merged rows BEFORE the partition tombstone is \
+         patched in — got {live_cks:?}"
+    );
+
+    // (2) THE PIN.
+    let deleted_cks = multigen_stream_ck_values(&deleted_root, &schema).await;
+    assert_eq!(
+        deleted_cks,
+        vec![9],
+        "issue #3129 AC2 (streaming driver): under a partition deletion \
+         @{T_PARTITION_DELETE_MICROS}µs, `scan_stream` must emit exactly the rows `scan` \
+         does — the marker-less ck=2 (only a `w` tombstone @{T_CELL_TOMB_MICROS}µs) \
+         HIDDEN, the live sibling ck=9 @{T_SIBLING_LIVE_MICROS}µs EMITTED. Expected [9], \
+         got {deleted_cks:?} — `[2, 9]` is the phantom resurrection reaching the \
+         streaming path (and a `scan`/`scan_stream` divergence), `[]` an over-hide."
+    );
+
+    drop(temp);
+}
+
+/// Issue #3129 AC2 — driver 4 of 4: the partition-SEEKING merge
+/// (`SSTableManager::scan_partition_clustering` ⇒
+/// `generation_merge::seek_merge_generations_for_read` ⇒ `partition_live_rows` ⇒
+/// `ReadShadow::filter_live`), i.e. the point-read path a `WHERE pk = ?` query takes.
+///
+/// Extra care here: this driver's multi-generation branch is entered only when MORE
+/// THAN ONE candidate survives bloom/BTI pruning, and otherwise it drops silently to a
+/// per-reader concat. Both generations physically contain `pk = 1`, and a bloom filter
+/// has no false negatives, so both MUST admit the key — but the pin does not rely on
+/// that argument alone: `open_manager` asserts both generations registered, the
+/// unpatched read asserts what the fixture really holds, and the concat fallback would
+/// return `[2, 9]`, failing the pin loudly.
+#[cfg(not(feature = "tombstones"))]
+#[tokio::test]
+async fn multigen_partition_seek_partition_deleted_markerless_tombstone_row_is_hidden() {
+    std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
+
+    let schema = parse_cql_schema(&schema_cql()).expect("parse fixture schema");
+    let (temp, live_root, deleted_root) = build_markerless_ac1_fixture(&schema).await;
+
+    // The partition key the seek is given must be the key the merge path actually
+    // emits — otherwise the seek would target a partition that does not exist and
+    // return an empty result, satisfying a "0 rows" expectation for the wrong reason.
+    let emitted_keys: Vec<Vec<u8>> = open_manager(&live_root)
+        .await
+        .scan(&table_id(), None, None, None, Some(&schema))
+        .await
+        .expect("multi-generation scan must not error")
+        .iter()
+        .map(|(key, _)| key.as_bytes().to_vec())
+        .collect();
+    assert!(
+        !emitted_keys.is_empty() && emitted_keys.iter().all(|k| *k == partition_key_bytes()),
+        "the seek target must be the SAME partition key the merge path emits (pk = \
+         {PK_VALUE} as 4-byte BE) — emitted {emitted_keys:?}"
+    );
+
+    // (1) ANTI-VACUITY (decode probe, #3121): the seek really reaches both merged rows
+    //     before the deletion is patched in.
+    let (live_cks, live_engaged) = multigen_seek_ck_values(&live_root, &schema).await;
+    assert_eq!(
+        live_cks,
+        vec![2, 9],
+        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): the \
+         seeking merge must reach both merged rows BEFORE the partition tombstone is \
+         patched in — got {live_cks:?}"
+    );
+    assert!(
+        !live_engaged,
+        "the cross-generation seeking merge decodes full partitions and must report \
+         clustering_seek_engaged = false (it is the honest non-engaged signal for the \
+         merge branch); a `true` here means a DIFFERENT branch served the read"
+    );
+
+    // (2) THE PIN.
+    let (deleted_cks, deleted_engaged) = multigen_seek_ck_values(&deleted_root, &schema).await;
+    assert_eq!(
+        deleted_cks,
+        vec![9],
+        "issue #3129 AC2 (seeking driver): under a partition deletion \
+         @{T_PARTITION_DELETE_MICROS}µs, the point-read path `WHERE pk = {PK_VALUE}` must \
+         hide the marker-less ck=2 (only a `w` tombstone @{T_CELL_TOMB_MICROS}µs) and \
+         keep the live sibling ck=9 @{T_SIBLING_LIVE_MICROS}µs. Expected [9], got \
+         {deleted_cks:?} — `[2, 9]` is either the phantom resurrection or a \
+         prune-induced fall back to the NON-reconciling per-reader concat, `[]` an \
+         over-hide."
+    );
+    assert!(
+        !deleted_engaged,
+        "clustering_seek_engaged must stay false for the cross-generation merge branch"
     );
 
     drop(temp);
