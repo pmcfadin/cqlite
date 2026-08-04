@@ -56,6 +56,7 @@ from ws0_validate import (  # noqa: E402  (path set above; stdlib-only, no deps)
     positive_int,
     read_perf_counters,
     require_complete,
+    verify_corpus_bytes,
 )
 
 TEMPS_ALLOWED = ("warm", "cold")
@@ -66,14 +67,33 @@ REQUIRED_EVENTS = ("cycles", "instructions")
 
 
 def spread(values: list[float]) -> dict[str, float]:
+    """Median + observed spread of a rep series, or `Invalid`.
+
+    The `spread_pct_of_median` divisor used to be written
+    `(hi - lo) / med * 100.0 if med else 0.0` — a PERMISSIVE NUMERIC FALLBACK in the
+    reporting path (#3272 review). A zero median means every rep of this series
+    measured zero rows/s (or zero cycles/row), which is not a series with an
+    undefined spread: it is not a measurement at all. Reporting `spread 0.0%` beside
+    it would have described the degenerate case as the TIGHTEST possible one — the
+    exact inversion of what the number means.
+    """
+    if not values:
+        raise Invalid("a rep series with no values reached spread() — nothing was observed")
     lo, hi = min(values), max(values)
     med = statistics.median(values)
+    if med <= 0:
+        raise Invalid(
+            f"a rep series has a non-positive median ({med}; observed {values}). A zero"
+            " median is not a series whose spread is undefined — it is a series that"
+            " measured nothing, and `spread 0.0%` would read as the tightest possible"
+            " result rather than as the absent one."
+        )
     return {
         "median": med,
         "min": lo,
         "max": hi,
         "spread_abs": hi - lo,
-        "spread_pct_of_median": (hi - lo) / med * 100.0 if med else 0.0,
+        "spread_pct_of_median": (hi - lo) / med * 100.0,
         "n": len(values),
     }
 
@@ -106,8 +126,22 @@ def prewarm_block(prewarm: list[dict], temp: str) -> dict:
 
 
 def prewarm_warning(block: dict, arm_label: str, temp: str) -> list[str]:
-    """The loud summary line for a degraded prewarm. Never swallowed."""
-    if block.get("prewarm_all_ok", True):
+    """The loud summary line for a degraded prewarm. Never swallowed.
+
+    Keyed on `is True`, never on a defaulting `.get(..., True)` (#3272 review): the
+    old form defaulted a VERDICT-CARRYING key to the PERMISSIVE value, so a block
+    that had lost `prewarm_all_ok` — a future refactor, a hand-edited artifact —
+    would have suppressed the warning by ABSENCE. A verdict that was not computed is
+    an error, never a pass.
+    """
+    verdict = block.get("prewarm_all_ok")
+    if verdict is not True and verdict is not False:
+        raise Invalid(
+            f"the {arm_label} block carries no boolean `prewarm_all_ok` (got"
+            f" {verdict!r}) — the prewarm verdict was never computed, and an absent"
+            " verdict may not be read as a passing one"
+        )
+    if verdict is True:
         return []
     degraded = [
         p for p in block["prewarm"] if classify_prewarm(temp, p["status"]) != "ok"
@@ -291,12 +325,48 @@ def collect_flight(
         records = [json.loads(x) for x in jsonl.read_text().splitlines() if x.strip()]
         if not records:
             raise Invalid(f"flight rep {tag} produced no step record")
-        rec = records[-1]
+        # EXACTLY ONE step record per rep, or refuse (#3272 review). This used to be
+        # `rec = records[-1]`, which SILENTLY DROPPED every earlier record: the driver
+        # runs one `--ramp 1` step per rep, so a second line means the artifact is not
+        # the one this reporter models (a loadgen that ramped, a rep whose file was
+        # appended to by a prior run, two reps sharing an --out path). Reporting the
+        # last line alone would publish ONE step's rows as the rep's whole measurement
+        # while the others existed on disk, unread and unmentioned.
+        if len(records) != 1:
+            raise Invalid(
+                f"flight rep {tag} carries {len(records)} step records; this rig runs"
+                " exactly ONE step per rep (--ramp 1), and reporting only the last"
+                " would silently drop the others. Rounds present:"
+                f" {[r.get('round') for r in records]}."
+                " Re-run the rep into a fresh --out directory rather than reporting a"
+                " subset of what was measured."
+            )
+        rec = records[0]
         rows = int(rec["rows_total"])
         if rows == 0:
             raise Invalid(f"flight rep {tag} observed ZERO rows — not a measurement")
-        if int(rec.get("requests_error", 0)) > 0:
-            raise Invalid(f"flight rep {tag} had {rec['requests_error']} failed request(s)")
+        # OBSERVED, never defaulted (#3272 review). `int(rec.get("requests_error", 0))`
+        # fabricated a zero for a counter the artifact did not carry, so a rep with no
+        # `requests_error` key at all was reported CLEAN with the failed-request count
+        # never measured — the "no failed requests" refusal resting on a default. Its
+        # sibling `requests_ok` was already None-checked and fatal; this now matches.
+        errors = rec.get("requests_error")
+        if errors is None:
+            raise Invalid(
+                f"flight rep {tag} step record carries no `requests_error` — the failed"
+                " request count was NOT OBSERVED, so 'no failed requests' cannot be"
+                " asserted. A counter that was not observed is an error, never a"
+                " fabricated 0 (#3272 AC3)."
+            )
+        try:
+            errors = int(errors)
+        except (TypeError, ValueError):
+            raise Invalid(
+                f"flight rep {tag} has an unparseable `requests_error` ({errors!r}) —"
+                " a corrupt counter is not a zero"
+            ) from None
+        if errors > 0:
+            raise Invalid(f"flight rep {tag} had {errors} failed request(s)")
         requests_ok = check_request_count(tag, temp, rec.get("requests_ok"), rows, corpus_rows)
         # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
         prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
@@ -390,6 +460,31 @@ def selection_lines(temps: list[str], arms: list[str], reps: int) -> list[str]:
     return lines
 
 
+def corpus_identity_lines(verification: dict) -> list[str]:
+    """State whether the printed corpus digest was OBSERVED or merely recorded.
+
+    The line above prints `corpus sha256:` from `corpus-identity.json`. Pre-#3272 it
+    was never compared against anything, so a reader could not tell a re-derived
+    digest from a recorded one. Now the distinction is printed, and the unverified
+    case is loud — the digest is what binds every #3096 figure to a specific corpus.
+    """
+    if verification["sha256_verified"]:
+        return [
+            "corpus verify: size AND sha256 re-derived from "
+            f"{pathlib.Path(verification['data_db']).name} at report time "
+            f"({verification['data_db_bytes_measured']:,} B) — the identity describes "
+            "the bytes that were measured",
+        ]
+    return [
+        "corpus verify: !! CORPUS DIGEST UNVERIFIED (--skip-corpus-digest) — the size "
+        f"matched ({verification['data_db_bytes_measured']:,} B) but the sha256 above "
+        "is the RECORDED value, NOT one observed from "
+        f"{pathlib.Path(verification['data_db']).name}.",
+        "               Anything citing this report's corpus identity is citing an "
+        "unverified digest; re-run without the flag before publishing a comparison.",
+    ]
+
+
 def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     """The whole report, or `Invalid`. No fabricated value anywhere in here."""
     reps = positive_int("reps", args.reps)
@@ -402,6 +497,13 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # REQUIRED, fail-closed: an absent identity used to silently disable the
     # full-corpus-per-request assert while the NOTES claimed it ran (#3272 f1).
     identity = load_corpus_identity(corpus)
+    # …and the recorded identity is checked against the BYTES ACTUALLY PRESENT
+    # (#3272 review B6). Reading the identity file only ever established that the
+    # file was self-consistent; stale metadata beside different bytes misidentified
+    # the corpus while the report printed the recorded digest as the measured one.
+    identity_verification = verify_corpus_bytes(
+        corpus, identity, skip_digest=args.skip_corpus_digest
+    )
     corpus_rows = identity["rows"]
     full_matrix = len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
 
@@ -420,6 +522,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
                 "bytes_per_row",
             )
         },
+        # What was OBSERVED about the corpus at report time, not what it claimed
+        # about itself (#3272 review B6).
+        "corpus_identity_verification": identity_verification,
         "pinning": {
             "server_cpus": args.server_cpus,
             "client_cpus": args.client_cpus,
@@ -452,6 +557,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "==== WS0 SAME-SESSION BASELINE (issue #3096 rig, hardened #3272) ====",
         f"corpus       : {corpus}",
         f"corpus sha256: {identity['data_db_sha256']}",
+        *corpus_identity_lines(identity_verification),
         f"corpus shape : {identity['rows']} rows / "
         f"{identity['partitions']} partitions / "
         f"{identity['bytes_per_row']:.2f} B/row",
@@ -476,7 +582,21 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             lines += prewarm_warning(fl, f"flight/{arm}", temp)
             scan_rps = scan["rows_per_sec"]["median"]
             fl_rps = fl["rows_per_sec"]["median"]
-            ratio = scan_rps / fl_rps if fl_rps else float("inf")
+            # No permissive numeric fallback in the reporting path (#3272 review).
+            # `scan_rps / fl_rps if fl_rps else float("inf")` published `inf x` as the
+            # bare/flight ratio for a Flight arm that measured NOTHING — a printable
+            # figure standing in for an absent one, and the most flattering possible
+            # reading of the arm under study. `spread()` already refuses a
+            # non-positive median, so this is a second, local, fail-closed statement
+            # of the same rule rather than a reachable branch.
+            if scan_rps <= 0 or fl_rps <= 0:
+                raise Invalid(
+                    f"the bare/flight ratio for {arm} ({temp}) has a non-positive"
+                    f" denominator or numerator (bare {scan_rps}, flight {fl_rps}) —"
+                    " there is no ratio to report, and `inf` is a printable number"
+                    " standing in for an absent measurement"
+                )
+            ratio = scan_rps / fl_rps
             target = scan_rps / 1.3
             verdict = "PASS" if fl_rps >= target else "BELOW TARGET"
             lines.append(
@@ -516,6 +636,10 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "    A warm rep is prewarmed by an UNTIMED full pass outside its perf window; "
         "the cold arm is deliberately never prewarmed, and its `skipped-cold-arm` "
         "sentinel satisfies the requirement for a COLD rep ONLY (#3272).",
+        "  * the corpus identity is verified against the BYTES MEASURED, not trusted "
+        "from corpus-identity.json: the recorded size is always re-stat'ed and the "
+        "recorded sha256 re-derived from the Data.db unless --skip-corpus-digest was "
+        "passed, in which case the line above says CORPUS DIGEST UNVERIFIED (#3272).",
         "  * the corpus is CQLite-written + CQLite-read: a PERFORMANCE FIXTURE ONLY "
         "(#3042), never a correctness oracle.",
         "  * the #3058/#3100 absolutes (240,100 / 312,155 rows/s) were corpus- and "
@@ -539,6 +663,21 @@ def main() -> int:
     ap.add_argument("--arms", required=True)
     ap.add_argument("--step-duration", required=True)
     ap.add_argument("--scan-passes", required=True)
+    # The ONLY relaxation anywhere in the reporting path, and it is not a relaxation
+    # of a VERDICT: it omits a multi-GB re-hash and RECORDS that it did, in both the
+    # summary (a loud `CORPUS DIGEST UNVERIFIED` banner) and results.json
+    # (`sha256_verified: false`). The size comparison is unaffected — it is a stat, so
+    # there is nothing to opt out of. There is deliberately no env var: a flag on the
+    # command line is in the transcript of the run (#3272 review B6).
+    ap.add_argument(
+        "--skip-corpus-digest",
+        action="store_true",
+        help=(
+            "skip re-hashing the corpus Data.db (seconds of IO on a 2.8 GB corpus)."
+            " The report then STAMPS 'CORPUS DIGEST UNVERIFIED' and records"
+            " sha256_verified=false; the size check still runs."
+        ),
+    )
     args = ap.parse_args()
 
     try:

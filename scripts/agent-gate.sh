@@ -5694,6 +5694,45 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 NO-FABRICATED-VALUE guards (#3272 AC3, review round 1). The third file of the
+  # rig's self-test set, for one subject: a counter or verdict that was not OBSERVED
+  # is an ERROR, never a default. Round 1's review found that rule stated in
+  # ws0_report.py's own docstring and then violated FIVE times in the same file, each
+  # time by an idiom that reads as harmless —
+  #   * `int(rec.get("requests_error", 0)) > 0`, so the "no failed requests" refusal
+  #     rested on a FABRICATED 0 and a record with no such key was reported CLEAN
+  #     (measured: exit 0 + a full five-line report, the error count never read);
+  #   * `block.get("prewarm_all_ok", True)`, a VERDICT key defaulting to the
+  #     PERMISSIVE value, so a block that lost the verdict suppressed the warning;
+  #   * `(hi-lo)/med*100 if med else 0.0`, printing the DEGENERATE series as the
+  #     TIGHTEST one (`0 rows/s [0..0, spread 0.0%]`);
+  #   * `scan_rps / fl_rps if fl_rps else float("inf")`, publishing `inf x` as the
+  #     bare/flight ratio for an arm that measured nothing;
+  #   * `rec = records[-1]`, silently DROPPING every earlier step record (measured: a
+  #     rep whose first record held 9 failed requests over a 37-row partial scan
+  #     published the second record's clean 250,000 rows/s).
+  # Plus the corpus-identity BYTE verification: the recorded size is re-stat'ed and
+  # the recorded sha256 re-derived from the Data.db actually present, so stale
+  # metadata beside different bytes can no longer misidentify the corpus while the
+  # summary prints the recorded digest as the measured one. The digest is skippable
+  # for a multi-GB corpus ONLY via --skip-corpus-digest, which STAMPS
+  # `CORPUS DIGEST UNVERIFIED` into the summary and `sha256_verified: false` into
+  # results.json — never a silent skip. Hermetic: synthetic session dirs, synthetic
+  # perf CSVs, and a few-KB synthetic Data.db whose real sha256 is computed with
+  # hashlib; no cargo, perf, sudo, corpus, network or root. python3 absence FAILS
+  # here (it is a hard requirement of the rig), never skips.
+  echo ">>> [$name] bash scripts/tests/test_ws0_fabrication_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_fabrication_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 no-fabricated-value guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
   # `tools/*` package tests are run by NO other gate component and by no CI lane
   # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so

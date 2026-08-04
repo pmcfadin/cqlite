@@ -37,6 +37,7 @@ which is the failure mode the whole rig is built against.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import re
@@ -264,6 +265,141 @@ def load_corpus_identity(corpus: pathlib.Path) -> dict:
         )
     identity["bytes_per_row"] = bpr
     return identity
+
+
+# Where a ws0 corpus's SSTable components live, relative to the corpus root — the
+# layout `ws0-corpus-gen` writes and both measurement arms resolve.
+CORPUS_TABLE_SUBPATH = ("ws0", "events")
+
+# Read the Data.db in 8 MiB slices. The measurement corpus is ~2.8 GB, so the digest
+# must stream: reading it whole would need 2.8 GB of RSS to verify a fixture.
+_DIGEST_CHUNK = 8 << 20
+
+
+def locate_corpus_data_db(corpus: pathlib.Path) -> pathlib.Path:
+    """The single `*-Data.db` the measurement read, or `Invalid`.
+
+    Ambiguity is fatal in both directions. NO `Data.db` means there is nothing for
+    the recorded identity to be the identity OF. TWO means the identity records one
+    digest for two candidate files, and picking either would be a guess about which
+    the measurement actually streamed — a heuristic, in the one place the whole rig
+    is trying to be authoritative about (#28, #3272 review B6).
+    """
+    table_dir = corpus.joinpath(*CORPUS_TABLE_SUBPATH)
+    if not table_dir.is_dir():
+        raise Invalid(
+            f"{table_dir} is not a directory — the corpus identity cannot be verified"
+            " against the bytes that were measured, because there are no bytes there."
+            " Regenerate with tools/ws0-corpus-gen."
+        )
+    found = sorted(p for p in table_dir.iterdir() if p.name.endswith("-Data.db"))
+    if not found:
+        raise Invalid(
+            f"{table_dir} holds no *-Data.db, so the recorded corpus identity"
+            " describes nothing that is present. A report may not identify bytes it"
+            " cannot read."
+        )
+    if len(found) > 1:
+        raise Invalid(
+            f"{table_dir} holds {len(found)} *-Data.db files"
+            f" ({', '.join(p.name for p in found)}), but corpus-identity.json records"
+            " ONE digest. Which one the measurement streamed cannot be determined, and"
+            " guessing is exactly the heuristic this rig refuses. Measure a corpus with"
+            " a single SSTable."
+        )
+    return found[0]
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    """Streaming lowercase-hex sha256 of `path` (constant memory, any file size)."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(_DIGEST_CHUNK)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_corpus_bytes(
+    corpus: pathlib.Path, identity: dict, skip_digest: bool = False
+) -> dict:
+    """Compare the RECORDED identity against the `Data.db` actually present.
+
+    #3272 review B6: corpus identity was trusted ENTIRELY from
+    `corpus-identity.json`. The file was validated for internal consistency and the
+    `Data.db` was never opened, so stale metadata sitting beside different bytes
+    misidentified the corpus while every other check — including the row-count
+    validation the identity feeds — passed. The report then printed that recorded
+    sha256 under "corpus sha256:" as the identity of the measured bytes.
+
+    Two comparisons, deliberately split by cost:
+
+    * **SIZE — always.** A `stat`. There is no argument for skipping it, so there is
+      no flag that can.
+    * **SHA-256 — streamed, opt-outable ONLY visibly.** Digesting 2.8 GB costs
+      seconds of IO per report run. `skip_digest` (the driver/reporter's
+      `--skip-corpus-digest`) omits it, and the returned record then carries
+      `sha256_verified: False` with `data_db_sha256_measured: None`, which the
+      reporter STAMPS into the summary as `CORPUS DIGEST UNVERIFIED`. A silent skip
+      is not available: an unverified identity that reads like a verified one is the
+      defect, not the cost.
+
+    Returns the verification RECORD (what was measured, and by what), so the report
+    carries the observation rather than a bare boolean.
+    """
+    data_db = locate_corpus_data_db(corpus)
+    measured_bytes = data_db.stat().st_size
+    recorded_bytes = identity["data_db_bytes"]
+    if measured_bytes != recorded_bytes:
+        raise Invalid(
+            f"{corpus / 'corpus-identity.json'} records data_db_bytes"
+            f" {recorded_bytes:,} but {data_db.name} is {measured_bytes:,} bytes on"
+            " disk. The recorded identity does not describe the corpus that would be"
+            " measured, so every figure derived from it (bytes/row, the row"
+            " denominator, the corpus digest printed in the summary) would name the"
+            " wrong bytes. Regenerate the corpus, or point --corpus at the one the"
+            " identity was recorded from."
+        )
+
+    record = {
+        "data_db": str(data_db),
+        "data_db_bytes_measured": measured_bytes,
+        "size_verified": True,
+        "data_db_sha256_recorded": identity["data_db_sha256"],
+        "data_db_sha256_measured": None,
+        "sha256_verified": False,
+        "note": "",
+    }
+    if skip_digest:
+        record["note"] = (
+            "CORPUS DIGEST UNVERIFIED: --skip-corpus-digest was passed, so the"
+            f" recorded sha256 was NOT compared against {data_db.name}. The size"
+            " matched. Anything citing this report's corpus identity is citing the"
+            " RECORDED digest, not an observed one."
+        )
+        return record
+
+    measured_sha = sha256_file(data_db)
+    record["data_db_sha256_measured"] = measured_sha
+    if measured_sha != identity["data_db_sha256"]:
+        raise Invalid(
+            f"{corpus / 'corpus-identity.json'} records data_db_sha256"
+            f" {identity['data_db_sha256']} but {data_db.name} hashes to"
+            f" {measured_sha}. The size matched, so this is the case a size check"
+            " alone cannot see: DIFFERENT BYTES of the same length, or an identity"
+            " file that outlived the corpus beside it. Every #3096 figure is bound to"
+            " a specific corpus digest; measuring one corpus and reporting another's"
+            " identity is how a comparison against a recorded number becomes"
+            " meaningless. Regenerate, or measure the corpus this identity describes."
+        )
+    record["sha256_verified"] = True
+    record["note"] = (
+        f"the recorded size and sha256 were both re-derived from {data_db.name} at"
+        " report time; the identity describes the bytes that were measured"
+    )
+    return record
 
 
 def classify_prewarm(temp: str, status: str) -> str:

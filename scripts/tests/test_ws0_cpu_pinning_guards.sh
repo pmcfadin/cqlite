@@ -49,6 +49,20 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$LIB" ] || { echo "FAIL - missing $LIB"; exit 1; }
+# Stated UP FRONT and fail-closed (#3272 review B8, applied to this file too).
+# `driver_copy_with` needs python3 for its exact-literal injection. Without this
+# check its absence would surface as a fixture-did-not-apply failure inside PART 2 —
+# correct, but diagnosed as the wrong thing; and the reflex fix for a confusing
+# failure is a skip, which is how a vacuous green gets introduced. python3 is a HARD
+# REQUIREMENT of the rig this file tests (ws0-baseline.sh refuses to run without it),
+# so its absence FAILS.
+command -v python3 >/dev/null 2>&1 || {
+  echo "FAIL - python3 is not installed. It is a HARD REQUIREMENT of the WS0 rig"
+  echo "       (ws0-baseline.sh refuses to run without it) and PART 2's exact-literal"
+  echo "       driver injection needs it. A skip here would record the gate component"
+  echo "       as SUCCESS with 0 of these checks having run (#3272 review B8)."
+  exit 1
+}
 
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }

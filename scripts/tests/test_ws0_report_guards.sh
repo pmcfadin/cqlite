@@ -54,9 +54,20 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$REPORT" ] || { echo "FAIL - missing $REPORT"; exit 1; }
+# python3 absence is a FAILURE, not a skip (#3272 review B8). The old branch printed
+# `SKIP - … (never a silent PASS)` and then `exit 0` — which IS a silent pass: the
+# gate's `tooling-tests` component records SUCCESS with none of the ~65 checks below
+# having run, and the reassuring word "SKIP" is on stdout the gate does not read.
+# python3 is a HARD REQUIREMENT of this rig (ws0-baseline.sh refuses to run without
+# it, and the reporter IS a python3 program), so there is no environment where its
+# absence means "this check is not applicable here".
 command -v python3 >/dev/null 2>&1 || {
-  echo "SKIP - python3 not installed; the reporter guards need it (never a silent PASS)"
-  exit 0
+  echo "FAIL - python3 is not installed. It is a HARD REQUIREMENT of the WS0 rig:"
+  echo "       scripts/perf/ws0_report.py IS a python3 program and ws0-baseline.sh"
+  echo "       refuses to run without it. So this is a failed check, not a skip —"
+  echo "       exiting 0 here would record the gate component as SUCCESS with 0 of"
+  echo "       its checks having run (#3272 review B8)."
+  exit 1
 }
 
 TMP="$(mktemp -d)"
@@ -78,13 +89,30 @@ perf_csv() { # perf_csv <path> <cycles> <instructions>
 
 # make_corpus <dir> [rows] [data_db_bytes] [bytes_per_row] — a COMPLETE, internally
 # consistent identity by default. Callers that need a broken one override the field.
+#
+# It also writes a real `ws0/events/nb-1-big-Data.db` of exactly `data_db_bytes`
+# bytes and records ITS OWN sha256, because the reporter now verifies the recorded
+# identity against the bytes actually present (#3272 review B6) — an identity beside
+# no Data.db is refused, so a fixture that omits one would fail every case here for
+# the wrong reason. The digest is MEASURED from the file, never asserted: `FAKE_SHA`
+# survives only for the cases that deliberately record a MALFORMED digest, which are
+# refused by `load_corpus_identity` before any byte comparison runs.
 make_corpus() {
   local dir="$1" rows="${2:-$CORPUS_ROWS}" bytes="${3:-700000}" bpr="${4:-700.0}"
-  mkdir -p "$dir"
-  cat > "$dir/corpus-identity.json" <<EOF
-{ "rows": $rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
-  "data_db_bytes": $bytes, "data_db_sha256": "$FAKE_SHA", "bytes_per_row": $bpr }
-EOF
+  mkdir -p "$dir/ws0/events"
+  python3 - "$dir" "$rows" "$bytes" "$bpr" <<'PY'
+import hashlib, json, os, sys
+out, rows, nbytes, bpr = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+data = os.path.join(out, "ws0", "events", "nb-1-big-Data.db")
+raw = (bytes(range(256)) * ((nbytes // 256) + 1))[:nbytes]
+open(data, "wb").write(raw)
+json.dump(
+    {"rows": rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
+     "data_db_bytes": nbytes, "data_db_sha256": hashlib.sha256(raw).hexdigest(),
+     "bytes_per_row": bpr},
+    open(os.path.join(out, "corpus-identity.json"), "w"),
+)
+PY
 }
 
 # make_scan_rep <dir> <temp> <rep> <prewarm-status|-none->
