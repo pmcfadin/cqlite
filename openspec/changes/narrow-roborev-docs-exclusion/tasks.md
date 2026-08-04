@@ -449,7 +449,7 @@ green about a swallow it existed to catch. Two independent root causes, both fal
       such a path is NOT excluded and DOES reach the reviewer. `prompt-content:` was therefore SILENT on
       exactly AC2's trigger class ("the first post-merge PR carrying an executable under `docs/`") whenever
       the executable has no extension, and a `PASS (n/n)` was a true statement about a subject set that had
-      dropped the file in question. **SHIPPED** in `roborev_path_is_executable` + the census's extensionless
+      dropped the file in question. **SHIPPED** in `roborev_path_exec_state` + the census's extensionless
       branch.
 - [x] **The mode is read from GIT'S TREE, never `test -x`**: `ls-tree`, with `:(literal)` pathspec magic
       because a tracked name may contain `*`/`?`/`[`, and on the same RAW path the census holds so the single
@@ -464,7 +464,7 @@ green about a swallow it existed to catch. Two independent root causes, both fal
       exactly ONE endpoint). **FIXED BY CONSTRUCTION**, not by moving the `return`: the endpoint list is
       produced complete before the fold; the fold body has no `return`/`break`/`continue` and only ORs into a
       monotone accumulator, so the sole `return` is post-loop; and the per-endpoint lookup
-      (`_roborev_mode_is_exec_at`) is range-BLIND, so no precedence is expressible. All four combinations —
+      (`_roborev_mode_exec_state_at`) is range-BLIND, so no precedence is expressible. All four combinations —
       both / HEAD-only / BASE-only / neither — fall out of the one rule.
 - [x] **The `-z` NUL warning is gone**: the single-path `ls-tree` lookup captured `-z` output through
       `$(...)`, so bash warned `ignored null byte in input` on EVERY call — harmless (only the terminating
@@ -501,6 +501,57 @@ green about a swallow it existed to catch. Two independent root causes, both fal
       absent-function probe that must read `NOT-FOUND` so a rename cannot pass vacuously. Whole-suite
       mutation: ordered scan restored ⇒ **19 RED**; consult-only-HEAD ⇒ **19 RED**; consult-only-BASE ⇒
       **17 RED**; unmutated ⇒ **551/551**. Assertion count 501 → 551.
+
+## 8l. Round-14 roborev blocker — the LEAF was still two-valued, so it collapsed uncertainty
+- [x] **THE CLASS-LEVEL RULE, which is the durable part: any predicate feeding a safety decision must be
+      TRI-VALUED — yes / no / could-not-measure — because a boolean CANNOT express uncertainty and will
+      therefore collapse it onto the PERMISSIVE side.** This was the **ninth** instance of "could not measure"
+      rendered as "nothing wrong" on this change (after `built-in-set: UNAVAILABLE`,
+      `corroboration: UNAVAILABLE`, the fail-open `${_census_end:-$_census_start}`, the permissive verdict
+      scan, and the measurement failures). The instructive part is the **LEVEL-SHIFT**: §8k's remedy fixed the
+      **fold** (order-independence, by construction) and left the **leaf** two-valued, so it proved the right
+      property **ONE LEVEL TOO HIGH** — an order-independent fold over a predicate that has already discarded
+      the distinction cannot recover it, which is why a fourth point patch on the fold would not have ended
+      the series. Recorded in `design.md`, the delta spec and the main spec.
+- [x] **The defect**: `record=$(git ls-tree …) || return 1` gave a FAILED lookup the SAME value as a measured
+      non-executable. Reproduced with controls — valid repo ⇒ CODE; `REPO` not a git repo (every `ls-tree`
+      fails) ⇒ **NON-CODE for a genuinely executable file**; bogus `BASE_SHA` + valid HEAD ⇒ CODE (so the
+      monotone OR did bound the blast radius to the both-endpoints-unmeasurable case).
+- [x] **The leaf is now tri-valued** (`_roborev_mode_exec_state_at`, exit status = state): 0 EXEC, 1 NOT-EXEC,
+      2 UNMEASURABLE. The critical distinction is INSIDE the failure handling — `ls-tree` **succeeded with no
+      record** is a REAL MEASUREMENT of absence (the added/deleted case, §8k's endpoint matrix) and stays
+      NOT-EXEC, while `ls-tree` **failed** (not a repo, unresolvable ref, corrupt object) is UNMEASURABLE.
+      git's own message is captured rather than discarded, so the condition is actionable.
+- [x] **The lattice**: `NOT-EXEC < UNMEASURABLE < EXEC`, joined by MAXIMUM. Total order ⇒ associative,
+      commutative, idempotent ⇒ order-independence is a property of the LATTICE, keeping §8k's guarantee
+      intact one level down. EXEC dominates UNMEASURABLE **soundly** (a disjunction settled by positive
+      evidence cannot be un-satisfied by another endpoint); UNMEASURABLE dominates NOT-EXEC ("exec at NEITHER"
+      is a claim about EVERY endpoint); the accumulator STARTS at UNMEASURABLE so an endpoint set that yielded
+      nothing cannot answer "prose". NOT-EXEC — the only permissive state — is now reachable only from a
+      positive measurement at EVERY endpoint. The fold keeps §8k's shape: complete endpoint list up front, no
+      `return`/`break`/`continue` in the body, monotone accumulators, single post-loop `return` (`cx3j` green).
+- [x] **Unmeasurable FAILS CLOSED on `census-check:`** pre-enqueue, naming the path, the endpoint ref(s) and
+      git's message, worded so "could not check" cannot read as "nothing was wrong" — the same discipline the
+      unresolvable base and the failed `git diff` already carry. Never spent as a non-code classification, and
+      never as `code-free:`/NOTHING-TO-REVIEW (an infra fault is not a docs-only diff).
+- [x] **Both functions RENAMED** (`_roborev_mode_is_exec_at` → `_roborev_mode_exec_state_at`,
+      `roborev_path_is_executable` → `roborev_path_exec_state`), because `if <boolean-call>` collapses states 1
+      and 2 back into "false": a surviving boolean call site now breaks as a "command not found" instead of
+      answering permissively. The `cx3h` probe was likewise widened to THREE outcome words — a boolean probe
+      over a tri-valued function would have printed the defect as the expected answer.
+- [x] Tests `cx3k`/`cx3k-mut`/`cx3l`: the leaf probed directly through the real oracles file (valid+exec ⇒
+      CODE; valid+prose ⇒ NON-CODE, the minimality control; `ls-tree`-succeeded-with-no-record ⇒
+      measured-absent, classification unchanged; both endpoints unmeasurable for a genuinely executable path
+      ⇒ UNMEASURABLE carrying git's message; ONE endpoint unmeasurable pinned in BOTH sub-directions — exec
+      ⇒ CODE, non-exec ⇒ UNMEASURABLE — so neither a fail-open nor a fail-closed-on-everything
+      implementation satisfies the pair); the two-valued leaf restored verbatim as a mutant, flipping every
+      unmeasurable row to NON-CODE, with a not-uniformly-broken control and a restored-green re-measure; and
+      the end-to-end consequence through the wrapper's summary block, fault-injecting a failing `git ls-tree`
+      with a PATH shim (its ONLY caller is the leaf, so nothing else in the run is perturbed) with the
+      no-shim control run FIRST and shown to reach PASS + enqueue. Whole-suite mutation: leaf reverted to
+      two-valued ⇒ **16 RED**; unmutated ⇒ **581/581**. Assertion count 551 → 581. The `49/49` docs/
+      executable measurement was re-run on the final tree and still discriminates (**46/49** with the
+      executable bit ignored).
 - [ ] **DEFERRED to #3260 (item: the OTHER direction of the same mirror)**: `txt rst adoc mdx markdown` sit
       in `CODE_FREE_EXTENSIONS` while `.roborev.toml` excludes only `*.md` globally (plus `docs/**/*.txt`
       inside artifact dirs), so a `.rst`/`.txt`-only diff is called code-free although roborev would deliver

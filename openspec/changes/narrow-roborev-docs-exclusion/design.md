@@ -287,8 +287,63 @@ implementation verbatim — a shape assert that cannot fire is not evidence.
 Mutation results on the whole guard suite, both directions: restoring the ordered scan turns **19**
 assertions RED; consulting only HEAD turns **19** RED (the deleted-executable and `chmod -x` paths read
 NON-CODE); consulting only BASE turns **17** RED (the added-executable and `chmod +x` paths read NON-CODE);
-unmutated, 551/551 pass. The `46/49 → 49/49` figure above was re-measured on the final tree and controlled
-the same way: with the executable bit ignored it reads **46/49**, so the number discriminates.
+reverting the leaf to two-valued (below) turns **16** RED; unmutated, 581/581 pass. The `46/49 → 49/49`
+figure above was re-measured on the final tree and controlled the same way: with the executable bit ignored
+it reads **46/49**, so the number discriminates.
+
+### The class-level rule: a predicate that feeds a safety decision must be TRI-VALUED
+
+**Any predicate feeding a safety decision must be tri-valued — yes / no / could-not-measure — because a
+boolean cannot express uncertainty and will therefore collapse it onto the permissive side.** That is the
+durable rule out of this change, and it is a rule about the *shape* of the predicate, not about any one call
+site: given only two values, "I could not tell" has nowhere to go but "nothing is wrong".
+
+This was the **ninth** instance of the class on this PR alone — after `built-in-set: UNAVAILABLE`,
+`corroboration: UNAVAILABLE`, the fail-open `${_census_end:-$_census_start}`, the permissive verdict scan,
+and the measurement failures. What made the ninth instructive is the **level-shift**: the round-13 remedy
+described immediately above made the **fold** order-independent *by construction*, and it worked — but it
+left the **leaf** two-valued (`record=$(git ls-tree …) || return 1`), so a **failed lookup returned the same
+value as a measured non-executable**. It proved the right property **one level too high**. An
+order-independent fold over a predicate that has already discarded the distinction cannot recover it, which
+is why a fourth point patch on the fold would not have ended the series. Reproduced with controls: a valid
+repo → CODE; `REPO` not a git repository (every `ls-tree` fails) → **NON-CODE for a genuinely executable
+file**; a bogus `BASE_SHA` with a valid HEAD → CODE, so the monotone OR did bound the blast radius to the
+both-endpoints-unmeasurable case.
+
+The leaf now returns three states, and the distinction that matters is *inside* the failure handling:
+
+| lookup outcome | state | why |
+|---|---|---|
+| `ls-tree` succeeded, record is `100755` | **EXEC** | measured |
+| `ls-tree` succeeded, record is another mode | **NOT-EXEC** | measured |
+| `ls-tree` succeeded, **no record** | **NOT-EXEC** | measured — the path is genuinely absent at that ref (the added/deleted case) |
+| `ls-tree` **failed** (not a repo, bad ref, corrupt object) | **UNMEASURABLE** | nothing was measured |
+
+The join is the **maximum on the total order `NOT-EXEC < UNMEASURABLE < EXEC`**. Being a total order, the
+join is associative, commutative and idempotent, so order-independence is now a property **of the lattice**
+rather than of the loop — which is what keeps the fold's by-construction guarantee intact one level down.
+EXEC dominates UNMEASURABLE *soundly*, not leniently: the rule is a disjunction, so positive evidence at one
+endpoint already settles it and whatever the failed endpoint would have said could only be another "yes".
+UNMEASURABLE dominates NOT-EXEC because "executable at neither endpoint" is a claim about *every* endpoint.
+So **NOT-EXEC — the only state that reaches the permissive classification — is now reachable only from a
+positive measurement at every endpoint**, and the accumulator starts at UNMEASURABLE so that an endpoint set
+which yielded nothing cannot answer "prose".
+
+An unmeasurable classification then **fails the run closed on `census-check:`** before anything is enqueued,
+naming the path, the endpoint refs and git's own message, in the same "we cannot tell, never nothing to
+review" wording the unresolvable base and the failed `git diff` already use. It is deliberately not spendable
+as prose (`code-free:`) either — that would report an infra fault as a docs-only diff. Both functions were
+**renamed** (`_roborev_mode_is_exec_at` → `_roborev_mode_exec_state_at`, `roborev_path_is_executable` →
+`roborev_path_exec_state`) so that a surviving boolean call site, where `if` would silently re-collapse the
+third state, breaks as a "command not found" instead of answering permissively.
+
+Evidence: the leaf is probed directly through the real oracles file by a probe that itself prints **three**
+outcome words (a boolean probe over a tri-valued function would print the defect as the expected answer), and
+the consequence is driven end-to-end through the wrapper's summary block by fault-injecting a failing
+`git ls-tree` via a PATH shim — legitimate because `ls-tree` has exactly one caller in the wrapper, so
+nothing else in the run is perturbed. Both have controls in the opposite direction (the same fixture without
+the shim reaches PASS and enqueues; the same repository read normally classifies correctly), and reverting
+the leaf to `|| return 1` reds **16** assertions.
 
 One piece of hygiene folded in: the single-path `ls-tree` lookup no longer passes `-z`. Captured through a
 command substitution it made the shell warn `ignored null byte in input` on **every** call — harmless for a

@@ -204,6 +204,29 @@ outside `docs/` from review.
 - **AND** consulting only HEAD SHALL make the deleted-executable and `chmod -x` paths read NON-CODE, and consulting only BASE SHALL make the added-executable and `chmod +x` paths read NON-CODE — measured as mutants, so the either-endpoint assertions are demonstrably load-bearing in both directions and the two endpoints are demonstrably not redundant
 - **AND** the batch of classifications SHALL write nothing to stderr
 
+#### Scenario: A FAILED mode lookup is UNMEASURABLE, never a measured "not executable"
+- **GIVEN** a path git records mode 100755 at BOTH endpoints of the range, and a repository in which `git ls-tree` itself FAILS (the repository is unreadable), so nothing about the path can be measured
+- **WHEN** it is classified
+- **THEN** the classification reads UNMEASURABLE — a THIRD outcome distinguishable from both CODE and NON-CODE — and git's own failure message is recorded against each endpoint ref
+- **AND** in the SAME repository read normally, the same path reads CODE and a non-executable sibling reads NON-CODE, so the fault is demonstrably the lookup and not the classifier
+- **AND** a path that a SUCCESSFUL `ls-tree` reports NO RECORD for reads NON-CODE, not UNMEASURABLE — a successful lookup returning nothing is a measurement of absence, and the added/deleted combinations depend on it
+- **AND** reverting the per-endpoint predicate to its two-valued form (`|| return 1`) SHALL make every UNMEASURABLE case read NON-CODE — measured as a mutant, with a control showing the mutant still classifies a readable repository correctly, so the tri-value assertions are demonstrably load-bearing
+
+#### Scenario: The lattice resolves a SINGLE unmeasurable endpoint in both directions
+- **GIVEN** a range whose HEAD endpoint is measurable and whose BASE endpoint is not
+- **WHEN** a path recorded EXECUTABLE at HEAD is classified
+- **THEN** it reads CODE — EXECUTABLE dominates UNMEASURABLE, because the rule is a disjunction and positive evidence at one endpoint cannot be un-satisfied by another endpoint's answer
+- **AND WHEN** a path recorded NON-EXECUTABLE at HEAD is classified, it reads UNMEASURABLE — NOT-EXECUTABLE does NOT dominate, because "executable at NEITHER endpoint" is a claim about EVERY endpoint
+- **SO THAT** neither a fail-open implementation (which would read NON-CODE for the second) nor a fail-closed-on-everything one (which would read UNMEASURABLE for the first) satisfies the pair
+
+#### Scenario: An unmeasurable mode FAILS the run closed and names the path
+- **GIVEN** a census of four files under `docs/` of which exactly two are extensionless (one recorded 100755, one 100644) and a `git ls-tree` that FAILS for every invocation while every other git operation succeeds
+- **WHEN** the wrapper runs
+- **THEN** `census-check:` reads `FAIL (recorded mode unmeasurable for 2 of 4 census paths)`, the terminal `RESULT:` is `FAIL`, and NO review is enqueued
+- **AND** a DETAILS line NAMES the genuinely executable path together with the endpoint ref(s) that could not be measured and git's own message
+- **AND** the summary NEVER reads `RESULT: PASS`, NEVER reads `census-check: PASS`, NEVER reads `code-free: FAIL` (an unmeasurable mode is not a docs-only diff) and NEVER reads `RESULT: NOTHING-TO-REVIEW`
+- **AND** the SAME fixture with the lookup working reaches `RESULT: PASS` with `census-check: PASS` and DOES enqueue — one variable, so the FAIL is demonstrably the unmeasurable mode and not a broken harness
+
 #### Scenario: The configuration contains no blanket directory glob
 - **WHEN** `.roborev.toml`'s `exclude_patterns` is inspected after this change
 - **THEN** it contains neither `docs/**` nor any other pattern that excludes a path solely by its directory, every docs-scoped pattern names a specific non-code file extension, and `*.md` is still present
@@ -649,8 +672,10 @@ strength of what another endpoint answered. All four endpoint combinations SHALL
 rule: present at BOTH (including a MODE CHANGE in either direction — a `chmod -x` SHALL NOT reclassify a
 script as prose, and a `chmod +x` SHALL make an existing file CODE), present at HEAD only (added), present
 at BASE only (deleted, which SHALL be classified by the mode it HAD, since removing an executable is a code
-change whose review must be asserted), and present at NEITHER (unmeasurable, which SHALL classify
-non-executable without erroring). "Whichever endpoint answers first" SHALL be treated as a defect, not an
+change whose review must be asserted), and present at NEITHER (which SHALL classify non-executable without
+erroring, because a SUCCESSFUL lookup returning no record is a real measurement of absence — see the
+tri-valued requirement below, which forbids confusing it with a FAILED lookup). "Whichever endpoint answers
+first" SHALL be treated as a defect, not an
 optimisation: an ordered scan that returned on the first endpoint holding a record classified `100755`@BASE
 → `100644`@HEAD as NON-CODE, dropping the path from the code census so `prompt-content:` reported
 `PASS (n/n)` while making **no claim** about it — a false PASS, and a contradiction of the rule's own
@@ -664,6 +689,37 @@ returning an accumulator — so that "skip an endpoint" is UNEXPRESSIBLE rather 
 STRUCTURAL test SHALL assert that shape independently of the loop's spelling, and SHALL itself be
 controlled against mutants that violate it (an injected early exit, and the prior ordered-scan
 implementation verbatim) so a shape assert that could not fire is not mistaken for one that holds.
+
+**ANY PREDICATE FEEDING A SAFETY DECISION SHALL BE TRI-VALUED — yes / no / COULD-NOT-MEASURE — AND THE
+UNMEASURABLE CASE SHALL FAIL CLOSED.** A BOOLEAN CANNOT EXPRESS UNCERTAINTY, so it is forced to fold "I could
+not tell" onto one of its two values, and the value it folds onto is invariably the PERMISSIVE one ("nothing
+wrong", "nothing to review"). This is a rule about the SHAPE of the predicate, not about any one call site,
+and it holds at EVERY level: this is the NINTH instance of the class on this change, and the previous round's
+remedy made the FOLD order-independent BY CONSTRUCTION while leaving the LEAF two-valued — it therefore
+proved the right property ONE LEVEL TOO HIGH, since an order-independent fold over a predicate that has
+already discarded the distinction cannot recover it. A fourth point patch would not have ended it.
+
+Concretely, for the mode lookup: a `git ls-tree` that SUCCEEDED and returned NO RECORD (the path is
+genuinely absent at that ref) and a `git ls-tree` that FAILED (`$REPO` is not a repository, the ref does not
+resolve to a tree, a corrupt object) SHALL be DISTINGUISHED — the first is a MEASUREMENT and SHALL classify
+NOT-EXECUTABLE, the second is UNMEASURABLE and SHALL NOT. The three states SHALL join on the TOTAL order
+`NOT-EXEC < UNMEASURABLE < EXEC` by MAXIMUM, which keeps the join associative, commutative and idempotent so
+order-independence is a property of the LATTICE rather than of the loop: EXECUTABLE SHALL dominate
+UNMEASURABLE (the rule is a disjunction, so positive evidence at one endpoint settles it — no "yes" from
+another endpoint can un-satisfy a disjunction), UNMEASURABLE SHALL dominate NOT-EXECUTABLE ("executable at
+NEITHER endpoint" is a claim about EVERY endpoint, which one unmeasured endpoint leaves unfounded), and an
+endpoint set that yielded nothing SHALL join to UNMEASURABLE rather than to the permissive bottom.
+NOT-EXECUTABLE SHALL therefore be reachable ONLY from a positive measurement at EVERY endpoint.
+
+When any endpoint a classification depends on is UNMEASURABLE the run SHALL FAIL CLOSED on `census-check:`
+before any review is enqueued, naming the PATH, the endpoint REF(s) that could not be measured and git's own
+message, worded so that *"could not check"* CANNOT read as *"nothing was wrong"* — the same wording
+discipline the unresolvable base and the failed `git diff` already carry. It SHALL NOT be spent as a non-code
+classification (which would drop the path from the code census, leave `prompt-content:` asserting nothing
+about it, and print a green summary) and SHALL NOT be spent as `code-free:`/NOTHING-TO-REVIEW (which would
+report the diff as prose). The per-endpoint predicate SHALL be renamed whenever its value set changes this
+way, so that a surviving boolean call site — where `if` would silently re-collapse the third state — fails
+as a "command not found" rather than as a permissive answer.
 
 The mode lookup SHALL NOT emit spurious output on its own stderr. `git ls-tree -z` captured through a
 command substitution makes the shell warn `ignored null byte in input` on EVERY call, which is per-call

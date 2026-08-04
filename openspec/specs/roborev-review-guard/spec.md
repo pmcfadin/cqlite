@@ -186,13 +186,32 @@ The endpoint test SHALL be a **logical OR over the HEAD tree and the BASE tree**
 that stops at the first endpoint holding a record. All four combinations SHALL follow from that one rule:
 present at both (including a MODE CHANGE in either direction — a `chmod -x` SHALL NOT reclassify a script
 as prose), HEAD only, BASE only (classified by the mode it HAD, since removing an executable is a code
-change whose review must be asserted), and neither (unmeasurable ⇒ non-executable, no error). An ordered
+change whose review must be asserted), and neither (which classifies non-executable, no error, because a
+SUCCESSFUL lookup returning no record is a real measurement of absence). An ordered
 scan is a FALSE-PASS mechanism, not an optimisation: it classified `100755`@BASE → `100644`@HEAD as
 NON-CODE, so the path left the code census and `prompt-content: PASS (n/n)` was silent about it. That
 property SHALL hold BY CONSTRUCTION — a range-blind per-endpoint lookup, an endpoint list complete before
 the fold, and a fold with no `break`/`continue`/`return` whose single post-loop `return` yields an
 accumulator — and the SHAPE SHALL be asserted structurally, with the assert itself controlled against
 mutants that violate it.
+
+**ANY PREDICATE FEEDING A SAFETY DECISION SHALL BE TRI-VALUED — yes / no / could-not-measure — AND THE
+UNMEASURABLE CASE SHALL FAIL CLOSED.** A boolean cannot express uncertainty, so it must fold "I could not
+tell" onto one of its two values, and that is always the PERMISSIVE one. This holds at EVERY level: making
+the FOLD above order-independent by construction while leaving the LEAF two-valued proved the right property
+ONE LEVEL TOO HIGH, and a `git ls-tree` that FAILED then returned the same value as a measured
+non-executable — so a genuinely executable file classified as prose on an infra fault. A SUCCESSFUL lookup
+with NO RECORD (a genuinely absent path) and a FAILED lookup SHALL therefore be DISTINGUISHED: the first is
+a measurement, the second is not. The three states SHALL join by MAXIMUM on the total order
+`NOT-EXEC < UNMEASURABLE < EXEC`, so order-independence is a property of the LATTICE: EXECUTABLE dominates
+UNMEASURABLE (a disjunction settled by positive evidence cannot be un-satisfied), UNMEASURABLE dominates
+NOT-EXECUTABLE ("executable at NEITHER endpoint" is a claim about EVERY endpoint), and an endpoint set that
+yielded nothing joins to UNMEASURABLE. NOT-EXECUTABLE — the only state reaching the permissive
+classification — SHALL be reachable only from a positive measurement at every endpoint. When any endpoint a
+decision depends on is UNMEASURABLE the run SHALL FAIL CLOSED on `census-check:` pre-enqueue, naming the
+path, the ref(s) and git's own message, and SHALL NOT be spent as a non-code classification or as
+`code-free:`/NOTHING-TO-REVIEW. A predicate whose value set changes this way SHALL be RENAMED, so a
+surviving boolean call site fails loudly instead of re-collapsing the third state.
 
 This requirement is deliberately STRONGER than a prose-matched detection: an earlier revision computed
 the same classification and used it only for attribution wording, which let a docs-only diff reach
