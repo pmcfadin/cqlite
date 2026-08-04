@@ -1,5 +1,4 @@
 {
-  "agent": "flow-lead",
   "env": {
     "ISSUE_GATE_TEST_CMD": "scripts/agent-gate.sh --lite",
     "ISSUE_GATE_COVERAGE_CMD": "",
@@ -58,16 +57,6 @@
   },
   "includeCoAuthoredBy": false,
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo 'flow-lead: before anything else, orient \u2014 run the flow-board skill to render the CQLite Delivery claim board (open issues by Status + claims) and surface the single furthest-along item waiting on the owner (a green PR to merge, a spec to approve), or a claim-aware pick-list. Do not wait for a prompt.'"
-          }
-        ]
-      }
-    ],
     "TaskCompleted": [
       {
         "hooks": [
