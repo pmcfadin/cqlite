@@ -204,24 +204,6 @@ case "$cmd" in
     printf '%s\n' "$STUB_CONFIG_PATTERNS"
     exit 0
     ;;
-  version)
-    # `built-in-set:` ASKS the executable which version it is (#3229 round 7). The
-    # deny-list, the built-in arity AND the ported git.FormatExcludeArgs were all derived
-    # from v0.61.2, so a version mismatch is a divergence in its own right and the pin's
-    # re-verify-on-upgrade obligation becomes machine-checked instead of remembered.
-    #   `none` => a target that will not answer at all, which is the UNAVAILABLE state.
-    #
-    # DELIBERATELY NOT RECORDED IN `$STUB_INVOKED`. That file is the enqueue witness
-    # `assert_never_enqueued` reads (`-s`), and the version probe runs on EVERY path
-    # including the pre-enqueue FAILs — recording it would make every "no review was
-    # enqueued" assert read as an enqueue.
-    if [ "${STUB_ROBOREV_VERSION:-}" = none ]; then
-      printf 'stub: unknown command "version"\n' >&2
-      exit 64
-    fi
-    printf '%s\n' "${STUB_ROBOREV_VERSION:-roborev v0.61.2}"
-    exit 0
-    ;;
   *) printf 'stub: unsupported roborev subcommand: %s\n' "$cmd" >&2; exit 64 ;;
 esac
 STUB
@@ -290,11 +272,10 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   `main` and the census lives in a LINKED WORKTREE. `make_fixture`
 #                   returns the WORKTREE path, so `$REPO` is the worktree and
 #                   `$REPO/.roborev.toml` is NOT the file roborev's daemon reads
-#   cargo-lock      Cargo.lock beside a .rs file — a path roborev ALWAYS excludes
-#                   through a hard-coded built-in, with no configuration involved
-#   cargo-lock-only Cargo.lock beside PROSE only: the census's whole CODE half is eaten
-#                   by the built-in, so the reviewer would get an EMPTY prompt — the
-#                   TOTAL swallow, which must FAIL rather than NOTICE
+#   issue-3096-shape  docs/reports/ws0-3096-artifacts/*.json + Cargo.lock + a .rs file —
+#                   the #3096 diff shape, which pins the residual this change declares
+#                   under AC4's second branch (a built-in-excluded lockfile is not
+#                   modelled, so prompt-content: FAILs on its absence)
 #   docs-space-dir  docs/storage engine/probe.sh + a .rs file — a CODE census path whose
 #                   directory carries a SPACE (the repo tracks 40 such paths), the header
 #                   shape `diff --git a/a b.txt b/a b.txt` no regex can split
@@ -322,8 +303,6 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   newline-name    a file literally named `a` beside one named `a<LF>b.rs` — a newline in
 #                   a path, which a newline-DELIMITED prompt path set splits into two
 #                   records so `grep -Fxq` treats them as ALTERNATIVES (a false PASS)
-#   cargo-lock-and-docs-exec  the same lockfile PLUS a docs/ harness .sh, so a
-#                   CONFIGURED swallow and a BUILT-IN one occur in one run
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
   # NOTE: separate statements on purpose — `local` is a builtin, so ALL of its
   # arguments are expanded before any assignment takes effect; `local a=$1 b=$a`
@@ -488,29 +467,23 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add docs
       git_q "$work" commit -q -m 'harness executables under docs/'
       ;;
-    cargo-lock)
+    issue-3096-shape)
+      # THE #3096-SHAPED DIFF, as a fixture (#3229 owner ruling / #3278). Three
+      # `docs/reports/ws0-3096-artifacts/*.json` measurement artifacts (excluded by a
+      # CONFIGURED pattern and classified code-FREE, so they are not census code paths at
+      # all) + a `Cargo.lock` change + ordinary code. It exists to PIN the residual AC4's
+      # second branch declares: the lockfile is dropped from the reviewer's diff by a
+      # roborev BUILT-IN this guard deliberately does not model, so `census-exclusion:`
+      # reports it SURVIVING and `prompt-content:` FAILs on its absence. Fail-CLOSED, with a
+      # cause that names the symptom rather than the mechanism.
+      mkdir -p "$work/docs/reports/ws0-3096-artifacts"
+      printf '{"a":1}\n' >"$work/docs/reports/ws0-3096-artifacts/one.json"
+      printf '{"b":2}\n' >"$work/docs/reports/ws0-3096-artifacts/two.json"
+      printf '{"c":3}\n' >"$work/docs/reports/ws0-3096-artifacts/three.json"
       printf '[[package]]\nname = "x"\nversion = "0.1.0"\n' >"$work/Cargo.lock"
       printf 'fn helper() {}\n' >>"$work/main.rs"
-      git_q "$work" add Cargo.lock main.rs
-      git_q "$work" commit -q -m 'a lockfile beside code'
-      ;;
-    cargo-lock-dir)
-      # THE PHANTOM SIBLING (#3229 round-6 blocker 1). A tracked DIRECTORY whose name is
-      # `Cargo.lock`, holding code. The real built-in is the single pre-formatted pathspec
-      # `:(exclude,glob)**/Cargo.lock`, which matches the FILE name only — so
-      # `Cargo.lock/inner.rs` must SURVIVE. Running built-ins through
-      # `FormatExcludeArgs` invented a `**/Cargo.lock/**` sibling that swallowed it,
-      # OVER-modelling the exclusion set and dropping the path from `prompt-content`
-      # coverage: the false-PASS direction.
-      #
-      # Contrived on purpose — that is the POINT. The defect is unreachable in this repo
-      # today, so only a fixture can reach it, and an unreachable defect left unpinned is
-      # one refactor away from becoming reachable.
-      mkdir -p "$work/Cargo.lock"
-      printf 'fn inner() {}\n' >"$work/Cargo.lock/inner.rs"
-      printf 'fn helper() {}\n' >>"$work/main.rs"
-      git_q "$work" add Cargo.lock main.rs
-      git_q "$work" commit -q -m 'a directory named Cargo.lock holding code'
+      git_q "$work" add docs Cargo.lock main.rs
+      git_q "$work" commit -q -m 'the #3096 shape: ws0 artifacts + a lockfile + code'
       ;;
     docs-functional-config)
       # THE BLINDNESS F2 NAMES. Functional configuration under `docs/` that is NOT in an
@@ -527,17 +500,6 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf 'raw\n' >"$work/docs/reports/x-artifacts/a.txt"
       git_q "$work" add docs
       git_q "$work" commit -q -m 'functional docs config beside a real artifact'
-      ;;
-    cargo-lock-only)
-      # THE TOTAL BUILT-IN SWALLOW (#3229 round 3, blocker F1). The census's ONLY
-      # non-prose file is a lockfile, so `code-free:` PASSes (a `.lock` extension
-      # classifies as CODE) — yet the built-in `**/Cargo.lock` drops it, leaving the
-      # reviewer an EMPTY prompt. Any dependency-bump branch (`Cargo.lock` / `go.sum` /
-      # `pnpm-lock.yaml`) is this shape.
-      printf '[[package]]\nname = "x"\nversion = "0.1.0"\n' >"$work/Cargo.lock"
-      printf 'doc line\n' >>"$work/README.md"
-      git_q "$work" add Cargo.lock README.md
-      git_q "$work" commit -q -m 'a lockfile bump beside prose'
       ;;
     docs-space-dir)
       # A CODE census path whose DIRECTORY carries a space — the real repo already tracks
@@ -628,16 +590,6 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add -A
       git_q "$work" commit -q -m 'a newline-bearing docs harness path that forges summary keys'
-      ;;
-    cargo-lock-and-docs-exec)
-      # BOTH causes at once: a built-in eats Cargo.lock, a configured `docs/**` eats the
-      # harness script. The FAIL must win and both must be named.
-      mkdir -p "$work/docs/reports/x-artifacts/harness"
-      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
-      printf '[[package]]\nname = "x"\nversion = "0.1.0"\n' >"$work/Cargo.lock"
-      printf 'fn helper() {}\n' >>"$work/main.rs"
-      git_q "$work" add docs Cargo.lock main.rs
-      git_q "$work" commit -q -m 'a lockfile and a docs harness script beside code'
       ;;
     pre-change-mix)
       mkdir -p "$work/docs/reports/x-artifacts/harness" "$work/website/src/content/docs" "$work/nested/deep"
@@ -768,139 +720,6 @@ INVOKED=""
 FIXTURE_HOME="$tmp/home"
 mkdir -p "$FIXTURE_HOME"
 
-# ---------------------------------------------------------------------------
-# A stub `roborev` carrying PLANTED `:(exclude,glob)` literals (#3229 ⑥).
-#
-# `census-exclusion:` observes the LIVE built-in deny-list by reading the roborev
-# EXECUTABLE (fixed-string presence per pinned pattern + a count of `:(exclude,glob)`
-# literals). Without a way to VARY those literals a divergence is not expressible at all —
-# the same gap that made the `docs/**` configuration regression untestable until
-# `write_roborev_config` existed. The default stub carries ZERO such literals, which is
-# the `UNAVAILABLE` state (a wrapper/shim, not the Go binary).
-#
-# The literals live in a shell COMMENT, so the stub's behaviour is untouched.
-# ---------------------------------------------------------------------------
-# The pinned v0.61.2 set, mirrored here on purpose rather than imported: a test that read
-# the constant it is checking could not catch the constant being wrong.
-#
-# AN ARRAY, for the reason the production constant is one — and this mirroring is exactly
-# how the bug hid. Both sides were space-separated strings, so BOTH glob-expanded
-# `**/package-lock.json` to the repo-relative `website/package-lock.json`; the planted
-# literals and the presence check made the SAME mistake, agreed with each other, and
-# `built-in-set: OK` passed while the real binary (which carries the pattern verbatim)
-# FAILed. Two defects that cancel are undetectable by a symmetric test BY CONSTRUCTION —
-# the #3042 lesson, reproduced here in shell.
-GUARD_PINNED_BUILTINS=(
-  '**/.beads/**' '**/.cache/**' '**/.gocache/**' '**/.kata.local.toml'
-  '**/Cargo.lock' '**/cargo.lock' '**/Gemfile.lock' '**/Package.resolved'
-  '**/Pipfile.lock' '**/Podfile.lock' '**/bun.lock' '**/bun.lockb'
-  '**/composer.lock' '**/flake.lock' '**/go.sum' '**/mix.lock'
-  '**/package-lock.json' '**/packages.lock.json' '**/pdm.lock' '**/pnpm-lock.yaml'
-  '**/poetry.lock' '**/pubspec.lock' '**/uv.lock' '**/yarn.lock'
-)
-
-# THE BLOB LAYOUT, MEASURED FROM /usr/local/bin/roborev v0.61.2 (#3229 round 7). Go packs
-# the rodata string blob in LENGTH order with no terminator, and each LENGTH BUCKET of
-# these literals is stored as ONE CONTIGUOUS RUN — `:(exclude,glob)**/Cargo.lock` is
-# immediately followed by the `:` of `:(exclude,glob)**/cargo.lock`. That adjacency is the
-# only RIGHT BOUNDARY available, and `built-in-set:` now checks it (per bucket of k
-# members, exactly k-1 are followed by another literal).
-#
-# So the planted literals must be laid out THE SAME WAY: one run per line, members
-# concatenated. Planting them one-per-line (as the first revision did) would leave every
-# bucket with ZERO bounded members and red the OK cases — the stub would be modelling a
-# blob shape the real binary does not have, which is precisely the symmetric-oracle error
-# this suite keeps re-learning.
-#
-# ORDER WITHIN A RUN IS PART OF THE MEASUREMENT, not alphabetical: bucket 26 is
-# bun.lock, pdm.lock, mix.lock. (The production check deliberately does NOT pin this
-# order — only the k-1 count — so a rebuild that permutes a bucket cannot false-FAIL.)
-GUARD_BUILTIN_BLOB_RUNS=(
-  '**/go.sum'
-  '**/uv.lock'
-  '**/bun.lock **/pdm.lock **/mix.lock'
-  '**/yarn.lock **/bun.lockb **/.beads/** **/.cache/**'
-  '**/Cargo.lock **/cargo.lock **/flake.lock'
-  '**/poetry.lock **/.gocache/**'
-  '**/Pipfile.lock **/Gemfile.lock **/pubspec.lock **/Podfile.lock'
-  '**/composer.lock'
-  '**/pnpm-lock.yaml'
-  '**/Package.resolved **/.kata.local.toml'
-  '**/package-lock.json'
-  '**/packages.lock.json'
-)
-
-# guard_run_members <run-string>: split a run into its members WITHOUT pathname expansion.
-# `read -ra` never globs; an unquoted `for p in $run` would expand `**/package-lock.json`
-# to the repo-relative `website/package-lock.json` — the exact defect that once made this
-# suite agree with a broken production check (see GUARD_PINNED_BUILTINS above).
-GUARD_RUN_MEMBERS=()
-guard_run_members() {
-  GUARD_RUN_MEMBERS=()
-  IFS=' ' read -r -a GUARD_RUN_MEMBERS <<<"$1"
-}
-
-# The two mirrors must describe the SAME 24 patterns. Two hand-maintained lists that drift
-# apart would make every built-in case assert against a set neither side believes, so the
-# agreement is CHECKED rather than trusted.
-guard_assert_run_mirror_agrees() {
-  local run p flat="" pinned=""
-  for run in "${GUARD_BUILTIN_BLOB_RUNS[@]}"; do
-    guard_run_members "$run"
-    for p in "${GUARD_RUN_MEMBERS[@]}"; do flat+="$p"$'\n'; done
-  done
-  for p in "${GUARD_PINNED_BUILTINS[@]}"; do pinned+="$p"$'\n'; done
-  if [ "$(printf '%s' "$flat" | LC_ALL=C sort)" = "$(printf '%s' "$pinned" | LC_ALL=C sort)" ]; then
-    ok 'harness: the measured blob RUNS and the pinned built-in list describe the same 24 patterns'
-  else
-    bad 'harness: GUARD_BUILTIN_BLOB_RUNS and GUARD_PINNED_BUILTINS disagree — the built-in cases would assert against a set neither mirror believes'
-  fi
-}
-
-make_builtin_stub() { # make_builtin_stub <pinned|added|removed|tampered> -> prints a bin dir
-  # SEPARATE statements, for the reason `make_fixture` documents: `local` is a builtin, so
-  # ALL of its arguments are expanded before any assignment takes effect — `local mode="$1"
-  # dir="$tmp/x-$mode"` would read an UNSET `mode` and abort under `set -u`.
-  local mode dir p run line
-  mode="$1"
-  dir="$tmp/stubbin-$mode"
-  mkdir -p "$dir"
-  cp "$stubbin/roborev" "$dir/roborev"
-  {
-    printf '# planted built-in deny-list literals (mode: %s)\n' "$mode"
-    for run in "${GUARD_BUILTIN_BLOB_RUNS[@]}"; do
-      guard_run_members "$run"
-      line=""
-      for p in "${GUARD_RUN_MEMBERS[@]}"; do
-        # `removed`: drop exactly one pinned pattern, so the presence check names it.
-        if [ "$mode" = removed ] && [ "$p" = '**/Cargo.lock' ]; then continue; fi
-        # `tampered`: THE EQUAL-LENGTH SUBSTITUTION (#3229 round-7 blocker). `**/Cargo.lock`
-        # becomes `**/Cargo.lock.bak`, ONE literal for one literal — so the `:(exclude,glob)`
-        # COUNT is untouched (26) and every pinned pattern is still PRESENT as a substring
-        # (`**/Cargo.lock` matches inside `**/Cargo.lock.bak`), which is why an unbounded
-        # presence test plus a count reported `built-in-set: OK` on a set that had moved.
-        # Only the RIGHT BOUNDARY sees it: `**/Cargo.lock` is now followed by `.bak`
-        # instead of the next literal's `:`.
-        if [ "$mode" = tampered ] && [ "$p" = '**/Cargo.lock' ]; then p='**/Cargo.lock.bak'; fi
-        line+=":(exclude,glob)$p"
-      done
-      [ -z "$line" ] || printf '# %s\n' "$line"
-    done
-    # The TWO bare PREFIX CONSTANTS the real binary carries, so the pinned count matches.
-    printf '# :(exclude,glob)\n# :(exclude,glob)**/\n'
-    # `added`: one EXTRA built-in — the scenario that matters most, an upgrade that starts
-    # excluding source. Detected by the count, since a blind re-extraction is unreliable.
-    # On its OWN line, so it neighbours no pinned literal and the divergence it produces is
-    # provably the COUNT rather than a broken adjacency run.
-    if [ "$mode" = added ]; then printf '# :(exclude,glob)**/*.rs\n'; fi
-  } >>"$dir/roborev"
-  chmod +x "$dir/roborev"
-  printf '%s' "$dir"
-}
-
-# Which stub dir `run_wrapper` puts on PATH. Reset by `reset_stub`.
-STUBBIN_OVERRIDE=""
-
 run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   local work="$1"; shift
   # Fail loudly on a broken fixture rather than letting the wrapper fall back to
@@ -924,7 +743,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # repo `.roborev.toml` with the GLOBAL `$HOME/.roborev/config.toml`, so a real global
   # config on the host would make these cases machine-dependent. `$FIXTURE_HOME` is
   # empty unless a case deliberately plants a global config in it.
-  STUB_INVOKED="$INVOKED" PATH="${STUBBIN_OVERRIDE:-$stubbin}:$PATH" HOME="$FIXTURE_HOME" \
+  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -1040,13 +859,8 @@ export STUB_ANNOUNCE_SHA=''
 # key" is not "nothing is configured". A case that wants the NON-ANSWERING build (the
 # UNAVAILABLE state) sets `STUB_CONFIG_PATTERNS=` explicitly and says why.
 export STUB_CONFIG_PATTERNS='none'
-# The version `built-in-set:` asks the executable for (#3229). Default = the PINNED one,
-# so every existing case keeps the state it pinned; `none` models a target that will not
-# answer, which must read UNAVAILABLE rather than OK.
-export STUB_ROBOREV_VERSION='roborev v0.61.2'
 
 reset_stub() {
-  STUBBIN_OVERRIDE=""
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
   STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
@@ -1064,7 +878,6 @@ reset_stub() {
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
   STUB_CONFIG_PATTERNS='none'
-  STUB_ROBOREV_VERSION='roborev v0.61.2'
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -1227,7 +1040,7 @@ STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/ru
 run_wrapper "$work"
 assert_verdict 'case (cx1)' PASS 0
 assert_says 'case (cx1) a docs/ path prefix does not make code documentation' '^code-free: PASS$'
-assert_says 'case (cx1) the narrowed config swallows nothing' '^census-exclusion: PASS \(3/3 code census paths survive the effective exclusion set; corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)$'
+assert_says 'case (cx1) the narrowed config swallows nothing' '^census-exclusion: PASS \(3/3 code census paths survive the effective exclusion set; corroboration: UNAVAILABLE\)$'
 assert_says 'case (cx1) the reviewer got all three executables' '^prompt-content: PASS \(3/3 code census paths present\)$'
 if [ -s "$INVOKED" ]; then
   ok 'case (cx1): the review WAS enqueued (the blind spot is closed)'
@@ -1276,7 +1089,7 @@ assert_says 'case (cx4) names the second swallowed path' "classify\.py by 'docs/
 assert_says 'case (cx4) names WHICH config file the pattern came from' "by 'docs/\*\*' \[repo-config\]"
 assert_says 'case (cx4) enumerates every config source it read' "config sources read, ALL of them"
 assert_says 'case (cx4) attributes the swallow to the configuration, not the reviewer' 'excluded by YOUR CONFIGURATION'
-assert_says 'case (cx4) attributes the defect to configuration, not the reviewer' 'this is a CONFIGURATION defect \(or a roborev built-in\), not a reviewer one'
+assert_says 'case (cx4) attributes the defect to configuration, not the reviewer' 'this is a CONFIGURATION defect, not a reviewer one'
 assert_says 'case (cx4) does not send the reader to prompt-content' 'do NOT go looking at prompt-content'
 assert_never_enqueued 'case (cx4)'
 assert_says 'case (cx4) prompt-content is never consulted' '^prompt-content: SKIP$'
@@ -1311,8 +1124,8 @@ STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/ru
 run_wrapper "$work"
 assert_verdict 'case (cx5b)' PASS 0
 assert_says 'case (cx5b) absent key is an explicit PASS' '^census-exclusion: PASS \(no exclusion patterns configured; '
-assert_says 'case (cx5b) the PASS is CORROBORATED by the binary, not merely parsed' 'corroboration: OK; built-in-set: UNAVAILABLE\)$'
-assert_says 'case (cx5b) the built-in excludes are still evaluated and counted' 'roborev v0\.61\.2 built-in exclude\(s\)'
+assert_says 'case (cx5b) the PASS is CORROBORATED by the binary, not merely parsed' 'corroboration: OK\)$'
+assert_says 'case (cx5b) an absent key reads as an EMPTY set, never as "nothing is excluded" by omission' 'survive an EMPTY exclusion set'
 assert_lacks 'case (cx5b) is not reported as unreadable' 'exclusion set unreadable'
 
 printf '== case (cx5c): a TABLE-SCOPED exclude_patterns is NOT the top-level key ==\n'
@@ -1330,7 +1143,7 @@ STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/ru
 run_wrapper "$work"
 assert_verdict 'case (cx5c)' PASS 0
 assert_says 'case (cx5c) table scoping is respected' '^census-exclusion: PASS \(no exclusion patterns configured; '
-assert_says 'case (cx5c) and the empty parse is corroborated, never assumed' 'corroboration: OK; built-in-set: UNAVAILABLE\)$'
+assert_says 'case (cx5c) and the empty parse is corroborated, never assumed' 'corroboration: OK\)$'
 
 printf '== case (cx5d): parse sees NOTHING while the binary reports a pattern => DRIFT FAIL ==\n'
 reset_stub
@@ -1668,7 +1481,7 @@ STUB_CONFIG_PATTERNS="*.md, docs/**/*.txt"
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
 run_wrapper "$work"
 assert_verdict 'case (cx7b)' PASS 0
-assert_says 'case (cx7b) corroboration is reported OK' 'corroboration: OK; built-in-set: UNAVAILABLE\)$'
+assert_says 'case (cx7b) corroboration is reported OK' 'corroboration: OK\)$'
 
 printf '== case (cx7c): a pattern carrying a GLOB CHARACTER CLASS corroborates, brackets intact ==\n'
 reset_stub
@@ -1685,7 +1498,7 @@ STUB_CONFIG_PATTERNS="['*.md', 'src/[Tt]est.rs']"
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
 run_wrapper "$work"
 assert_verdict 'case (cx7c)' PASS 0
-assert_says 'case (cx7c) the glob class survives the container strip, so corroboration is OK' 'corroboration: OK; built-in-set: UNAVAILABLE\)$'
+assert_says 'case (cx7c) the glob class survives the container strip, so corroboration is OK' 'corroboration: OK\)$'
 assert_lacks 'case (cx7c) no false DRIFT from a destroyed character class' '^census-exclusion: FAIL \(exclusion set drift'
 
 printf '== case (cx8): a slash-containing pattern is ROOT-ANCHORED, so a nested docs path SURVIVES ==\n'
@@ -1710,7 +1523,7 @@ write_roborev_config "$work" "['build']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx9)' FAIL 1
-assert_says 'case (cx9) the subtree file is swallowed by the bare directory name' "^census-exclusion: FAIL \(1/1 code census paths excluded: build/gen\.rs by 'build' \[repo-config\]; built-in-set: UNAVAILABLE\)$"
+assert_says 'case (cx9) the subtree file is swallowed by the bare directory name' "^census-exclusion: FAIL \(1/1 code census paths excluded: build/gen\.rs by 'build' \[repo-config\]\)$"
 assert_says 'case (cx9) the emitted pathspecs include the /** sibling' ':\(exclude,glob\)\*\*/build/\*\*'
 assert_never_enqueued 'case (cx9)'
 
@@ -1722,12 +1535,7 @@ write_roborev_config "$work" "['/tool.sh']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx10)' FAIL 1
-assert_says 'case (cx10) only the ROOT tool.sh is excluded' "^census-exclusion: FAIL \(1/2 code census paths excluded: tool\.sh by '/tool\.sh' \[repo-config\]; built-in-set: UNAVAILABLE\)$"
-# NEVER SILENCE applies to the FAIL values too (#3229 round-9 F1 audit): this is the one
-# reconciliation verdict that used to omit the built-in state, which made the documented
-# "every value ends with built-in-set:" contract false for exactly the branch where a
-# configured swallow coexists with an UNVERIFIED built-in model.
-assert_says 'case (cx10) a configured-swallow FAIL still reports the built-in state' 'built-in-set: UNAVAILABLE\)$'
+assert_says 'case (cx10) only the ROOT tool.sh is excluded' "^census-exclusion: FAIL \(1/2 code census paths excluded: tool\.sh by '/tool\.sh' \[repo-config\]\)$"
 assert_says 'case (cx10) the pathspec is emitted root-anchored, without the **/ prefix' ':\(exclude,glob\)tool\.sh$'
 assert_lacks 'case (cx10) sub/tool.sh is NOT reported swallowed' 'sub/tool\.sh by'
 
@@ -1872,352 +1680,14 @@ else
   bad 'case (cx18b): no review was enqueued — the two-source read must not be a blanket FAIL'
 fi
 
-printf "== case (cx19): a roborev BUILT-IN swallow is a NON-FAILING NOTICE that still names the path ==\n"
-reset_stub
-# `exclude_patterns` is not the whole exclusion set: the v0.61.2 binary ALWAYS appends a
-# hard-coded lockfile/cache deny-list. `Cargo.lock` has a `lock` extension, so the census
-# classifies it CODE — yet roborev silently drops it, and a check that modelled only the
-# configured half reported it SURVIVING. Same false-PASS class as blocker A.
-#
-# BUT IT IS A NOTICE, NOT A FAIL, and the asymmetry is about the available REMEDY: a
-# configured pattern is a one-token edit away, a built-in is compiled into the binary with
-# no opt-out. Cargo.lock churn is routine here, so FAILing would permanently red a
-# legitimate change class its author cannot fix — and a guard that fires with no available
-# fix is the guard that gets disabled, which is how #3229 happened. So: named loudly in
-# the value line, review still enqueued, RESULT not FAIL on this account.
-#
-# THE STUB IS THE `pinned` ONE, NOT THE DEFAULT (#3229 round-9 blocker F1). The EXCUSAL
-# this case pins — census-exclusion handing the path to prompt-content as "do not expect
-# this" — now requires `built-in-set: OK`, because the excusal asserts that the path's
-# absence is a DETERMINISTIC property of the PINNED deny-list, and an unverified deny-list
-# cannot support that claim. The default stub carries no `:(exclude,glob)` literals, so it
-# reads UNAVAILABLE and excuses NOTHING (cx19h). Planting the pinned literals is what keeps
-# this case testing the NOTICE-plus-excusal ruling end to end instead of the withheld path.
-work=$(make_fixture case_cx19 cargo-lock)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-# Corroboration deliberately silent (see cx1): this case pins the BUILT-IN half, and with
-# patterns parsed an absent `config get` withholds nothing that was claimed.
-STUB_CONFIG_PATTERNS=''
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-# The prompt carries main.rs only — Cargo.lock is exactly what roborev drops.
-STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
-run_wrapper "$work"
-assert_verdict 'case (cx19)' PASS 0
-assert_says 'case (cx19) the built-in swallow is a NOTICE naming the path and the built-in' "^census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; corroboration: UNAVAILABLE; built-in-set: OK\)\$"
-assert_lacks 'case (cx19) it is NOT a FAIL' '^census-exclusion: FAIL'
-assert_lacks 'case (cx19) and RESULT does not FAIL on its account' '^RESULT: FAIL'
-assert_says 'case (cx19) the NOTICE says there is nothing to fix in any config file' 'NOTHING TO FIX'
-assert_says 'case (cx19) it states the remedy-based rationale for not failing' 'a check that fires on a legitimate change .* with no remedy available is a check that gets disabled'
-assert_says 'case (cx19) the built-in set is version-pinned' 'pinned to v0\.61\.2'
-assert_says 'case (cx19) a clean verdict is explicitly declared not to cover the path' 'does NOT cover those path\(s\)'
-assert_lacks 'case (cx19) it is NOT blamed on the operator config' 'excluded by YOUR CONFIGURATION'
-assert_lacks 'case (cx19) main.rs is not reported swallowed' 'main\.rs by'
-# The point of the ruling: the round still happens.
-if [ -s "$INVOKED" ]; then
-  ok 'case (cx19): the review WAS enqueued (a routine Cargo.lock touch is still reviewable)'
-else
-  bad 'case (cx19): no review was enqueued — a built-in swallow must not block the round'
-fi
-# ...and prompt-content must not re-report the SAME known absence as a discovery, which
-# would move the unfixable red one key down instead of removing it.
-assert_says 'case (cx19) prompt-content does not expect the built-in-excluded path' '^prompt-content: PASS \(1/1 code census paths present\) \(\+1 not expected: excluded by a roborev built-in — see census-exclusion:\)$'
-assert_lacks 'case (cx19) prompt-content does not FAIL on the known absence' '^prompt-content: FAIL'
-# The excusal is GRANTED here — and it must SAY nothing about withholding, or the withheld
-# wording would be indistinguishable from the granted one (the cx19h complement).
-assert_says 'case (cx19) the built-in set is VERIFIED, which is what earns the excusal' 'built-in-set: OK\)$'
-assert_lacks 'case (cx19) a verified model never reports the excusal withheld' 'excusal WITHHELD'
-
-printf "== case (cx19d): a live built-in set MATCHING the pin reads OK, and is corroborated ==\n"
-reset_stub
-# The complement of cx19: with the pinned literals actually present in the binary, the
-# NOTICE carries `built-in-set: OK` — so the pin is corroborated rather than assumed, and
-# the OK state is reachable (a state no test could reach would be dead code).
-work=$(make_fixture case_cx19d cargo-lock)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
-run_wrapper "$work"
-assert_verdict 'case (cx19d)' PASS 0
-assert_says 'case (cx19d) the built-in set is observed to MATCH the pin' 'built-in-set: OK\)$'
-assert_says 'case (cx19d) and the match is stated as corroborated, not assumed' 'The pin is corroborated, not assumed'
-assert_says 'case (cx19d) the pinned-built-in swallow is still only a NOTICE' '^census-exclusion: NOTICE \('
-assert_lacks 'case (cx19d) an agreeing built-in set never FAILs' '^census-exclusion: FAIL'
-assert_says 'case (cx19d) a VERIFIED model grants the excusal, so the pin clause is stated' 'and the live built-in set still MATCHES that pin'
-assert_lacks 'case (cx19d) and the excusal is not withheld' 'excusal WITHHELD'
-
-printf "== case (cx19h): an UNVERIFIED built-in model EXCUSES NOTHING — the excusal needs OK ==\n"
-reset_stub
-# THE #3229 round-9 BLOCKER F1, REPRODUCED AND PINNED. `_rx_builtin_state` has THREE values
-# and the round-8 code tested only `= DIVERGED` / `!= DIVERGED` — a three-state signal
-# tested as two. `UNAVAILABLE` therefore took the PERMISSIVE path: it populated
-# `CENSUS_BUILTIN_EXCLUDED` and told `prompt-content:` NOT to expect the swallowed path, so
-# COVERAGE WAS EXCUSED ON AN UNVERIFIED MODEL while the block read `RESULT: PASS`. That is
-# "we could not check" rendered as "nothing was wrong", inside the guard whose whole purpose
-# is preventing exactly that.
-#
-# THE SHIM IS THE MEASURED REACHABILITY WITNESS: the `pinned` literals (all 24 present and
-# correctly right-bounded, count 26) with the `version` subcommand REFUSING to answer, which
-# is `state=UNAVAILABLE, missing=0` — an honest "we could not confirm the pin", and the state
-# a real box hits whenever roborev is absent from PATH or renames `version`.
-#
-# THE FIX FAILS CLOSED ON THE EXCUSAL, NOT ON THE RUN: census-exclusion stays a NOTICE (an
-# UNOBSERVABLE binary must never red every round — that is the self-disabling guard this
-# change keeps refusing to build), but it excuses NOTHING, so `prompt-content:` goes on to
-# expect Cargo.lock, does not find it, and FAILs. THAT is the correct fail-closed outcome:
-# if roborev really did drop a path, the absence is now reported instead of excused.
-work=$(make_fixture case_cx19h cargo-lock)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-# Corroboration deliberately silent (see cx1): the subject here is the BUILT-IN model's
-# UNAVAILABLE state, kept independent of the corroboration oracle's.
-STUB_CONFIG_PATTERNS=''
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ROBOREV_VERSION=none
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
-run_wrapper "$work"
-assert_verdict 'case (cx19h)' FAIL 1
-assert_says 'case (cx19h) the built-in state is honestly UNAVAILABLE, not OK' 'built-in-set: UNAVAILABLE\)$'
-assert_lacks 'case (cx19h) an unverifiable model never reads OK' 'built-in-set: OK'
-assert_says 'case (cx19h) the value line NAMES the withheld excusal and the non-verification' "^census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; excusal WITHHELD: the built-in model is NOT VERIFIED \(built-in-set: UNAVAILABLE\), so NO path is excused and 'prompt-content:' still expects all 2 code census path\(s\); corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)\$"
-# The wording must read as NEITHER a clean PASS nor a DIVERGED set, because it is neither.
-assert_lacks 'case (cx19h) the withheld state is not reported as a divergence' 'DIVERGED'
-assert_lacks 'case (cx19h) and census-exclusion itself does not FAIL on an unobservable binary' '^census-exclusion: FAIL'
-# THE EXCUSAL IS THE THING WITHHELD: prompt-content evaluates the path normally and FAILs.
-assert_says 'case (cx19h) prompt-content evaluates the unexcused path and FAILs on its absence' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
-assert_lacks 'case (cx19h) no path is excused from prompt coverage' 'not expected: excluded by a roborev built-in'
-assert_says 'case (cx19h) the detail states that prompt-content WILL still expect them' "'prompt-content:' WILL still expect them"
-assert_says 'case (cx19h) it names the rule the round-8 code broke' "'We could not check' is never 'nothing was wrong'"
-assert_says 'case (cx19h) the UNAVAILABLE notice records that it withholds the excusal too' 'It ALSO withholds the EXCUSAL'
-# The pin clause must NOT be asserted on an unverified model — that was the false claim.
-assert_lacks 'case (cx19h) it never claims the live set MATCHES the pin' 'still MATCHES that pin'
-assert_one_result_line 'case (cx19h)'
-
-printf "== case (cx19i): withholding the excusal does NOT red a run whose prompt HAS the path ==\n"
-reset_stub
-# The other direction of cx19h, so "no excusal" is not read as "always FAIL". Identical
-# UNAVAILABLE shim and identical swallow; the ONLY delta is that the prompt actually carries
-# Cargo.lock. prompt-content therefore evaluates 2/2 and PASSES — proving the withheld
-# excusal makes prompt-content EVALUATE the path rather than condemn it, and that the
-# hermetic no-binary condition cannot by itself red a legitimate round.
-work=$(make_fixture case_cx19i cargo-lock)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ROBOREV_VERSION=none
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/Cargo.lock b/Cargo.lock'
-run_wrapper "$work"
-assert_verdict 'case (cx19i)' PASS 0
-assert_says 'case (cx19i) the excusal is still withheld' 'excusal WITHHELD'
-assert_says 'case (cx19i) prompt-content checks BOTH paths, excusing neither' '^prompt-content: PASS \(2/2 code census paths present\)$'
-assert_lacks 'case (cx19i) and no path is marked not-expected' 'not expected: excluded by a roborev built-in'
-
-printf "== case (cx19j): a DIVERGED set with a real swallow FAILs and excuses nothing ==\n"
-reset_stub
-# The third state, pinned against the same fixture as cx19/cx19h so all three are
-# comparable. A positively OBSERVED divergence is an actionable mechanism change, so it
-# FAILs pre-enqueue — and it must never reach the excusal either.
-work=$(make_fixture case_cx19j cargo-lock)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub added)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
-run_wrapper "$work"
-assert_verdict 'case (cx19j)' FAIL 1
-assert_says 'case (cx19j) the divergence FAILs even beside a pinned-built-in swallow' 'roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set:'
-assert_says 'case (cx19j) the FAIL value still reports the built-in state' 'built-in-set: DIVERGED\)$'
-assert_lacks 'case (cx19j) a DIVERGED set is never softened to a NOTICE' '^census-exclusion: NOTICE'
-assert_lacks 'case (cx19j) and it never excuses a path from prompt coverage' 'not expected: excluded by a roborev built-in'
-assert_never_enqueued 'case (cx19j)'
-
-printf "== case (cx19e): an ADDED built-in (the upgrade that starts eating source) FAILs ==\n"
-reset_stub
-# THE case a bare NOTICE would have absorbed silently. The stub carries the pinned 26
-# literals PLUS `**/*.rs`: if an upgrade started excluding source, a NOTICE would report
-# it as normal operation and we would be blind again — the exact class #3229 exists to
-# close. Divergence HAS a remedy (re-extract, update the pin, judge the new built-in), so
-# by the rule it FAILs. The fixture touches NO lockfile, so this FAIL is provably about
-# the MECHANISM and not about the diff.
-work=$(make_fixture case_cx19e pushed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub added)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx19e)' FAIL 1
-assert_says 'case (cx19e) divergence is its own FAIL form, naming the pinned version' '^census-exclusion: FAIL \(roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set: '
-assert_says 'case (cx19e) the delta is quantified against the pinned literal count' "observed 27 ':\(exclude,glob\)' literal\(s\), pinned 26"
-assert_says 'case (cx19e) it explains the count is 24 patterns + 2 prefix constants' '= 24 built-in patterns \+ 2 prefix constants'
-assert_says 'case (cx19e) it names the remedy that makes this a FAIL, not a NOTICE' 'it HAS a remedy, which is why it FAILs rather than reporting a NOTICE'
-assert_says 'case (cx19e) it names the silent-absorption risk in concrete terms' "started excluding '\*\.rs' or 'scripts/\*\*'"
-assert_says 'case (cx19e) the FAIL is explicitly diff-independent' 'about the MECHANISM having moved under us, not about this diff'
-assert_never_enqueued 'case (cx19e)'
-
-printf "== case (cx19f): a REMOVED pinned built-in FAILs too, naming the missing pattern ==\n"
-reset_stub
-# Divergence in the OTHER direction. It matters just as much: a pattern that disappeared
-# means the model over-excludes, so `census-exclusion:` would report a swallow that no
-# longer happens — a FALSE FAIL, the direction that gets a guard bypassed.
-work=$(make_fixture case_cx19f pushed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub removed)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx19f)' FAIL 1
-assert_says 'case (cx19f) the missing pinned pattern is named exactly' 'pinned pattern\(s\) no longer present in the binary: \*\*/Cargo\.lock'
-assert_says 'case (cx19f) the count delta is reported alongside it' "observed 25 ':\(exclude,glob\)' literal\(s\), pinned 26"
-assert_says 'case (cx19f) it points at the re-extract-and-repin obligation' 'update ROBOREV_BUILTIN_EXCLUDES and ROBOREV_BUILTIN_PATHSPEC_LITERALS'
-assert_never_enqueued 'case (cx19f)'
-
-printf "== case (cx19g): a CONFIGURED swallow AND a built-in divergence name BOTH causes ==\n"
-reset_stub
-# Precedence: both FAIL causes coexist; the message must not report only the winner.
-work=$(make_fixture case_cx19g docs-executables)
-write_roborev_config "$work" "$BLANKET_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub added)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx19g)' FAIL 1
-assert_says 'case (cx19g) the configured swallow is named first' '^census-exclusion: FAIL \(3/3 code census paths excluded:'
-assert_says 'case (cx19g) and the divergence is named in the SAME value line' 'ALSO roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set:'
-assert_says 'case (cx19g) the configured cause keeps its own remedy line' 'excluded by YOUR CONFIGURATION'
-assert_never_enqueued 'case (cx19g)'
-
-printf "== case (cx19c): a CONFIGURED swallow beside a built-in one still FAILs, naming BOTH ==\n"
-reset_stub
-# The ruling's boundary: NOTICE must not become a way for an actionable config defect to
-# ride along unfixed. Here `docs/**` (configured) eats the harness .sh AND the built-in
-# eats Cargo.lock.
-work=$(make_fixture case_cx19c cargo-lock-and-docs-exec)
-write_roborev_config "$work" "$BLANKET_PATTERNS"
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx19c)' FAIL 1
-assert_says 'case (cx19c) the FAIL wins over the NOTICE' '^census-exclusion: FAIL \(2/3 code census paths excluded:'
-assert_says 'case (cx19c) the configured cause is named' "run\.sh by 'docs/\*\*' \[repo-config\]"
-assert_says 'case (cx19c) the built-in cause is named too' "Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]"
-assert_says 'case (cx19c) the actionable half is called out' 'excluded by YOUR CONFIGURATION'
-assert_says 'case (cx19c) and the unactionable half does not soften the FAIL' 'does NOT soften this FAIL'
-assert_never_enqueued 'case (cx19c)'
-
-printf "== case (cx19b): the built-in set is a CONSTANT, extracted from the pinned binary ==\n"
-# Structural, so an upgrade that drops a pattern from the constant cannot pass unnoticed:
-# the lock family the v0.61.2 binary carries must all be present, and the maintenance
-# obligation must be stated beside them.
-_oracles_src="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
-for _bi in '\*\*/Cargo\.lock' '\*\*/go\.sum' '\*\*/package-lock\.json' '\*\*/pnpm-lock\.yaml' \
-  '\*\*/poetry\.lock' '\*\*/uv\.lock' '\*\*/composer\.lock' '\*\*/Podfile\.lock' \
-  '\*\*/Package\.resolved' '\*\*/\.kata\.local\.toml' '\*\*/yarn\.lock' '\*\*/bun\.lockb' \
-  '\*\*/flake\.lock' '\*\*/\.beads/\*\*' '\*\*/\.cache/\*\*'; do
-  if grep -qE "$_bi" "$_oracles_src"; then
-    ok "structural: the roborev built-in '$_bi' is modelled"
-  else
-    bad "structural: the roborev built-in '$_bi' is absent from ROBOREV_BUILTIN_EXCLUDES"
-  fi
-done
-if grep -qE 'RE-EXTRACTING this list' "$_oracles_src"; then
-  ok 'structural: the built-in set states the re-extract-on-upgrade obligation'
-else
-  bad 'structural: the built-in set does not state a re-extract-on-upgrade obligation'
-fi
-# GLOB-SAFETY, asserted structurally. Declared as a space-separated STRING and iterated
-# unquoted, `**/package-lock.json` PATHNAME-EXPANDS to the repo-relative
-# `website/package-lock.json` — which then reads as "a pinned pattern is no longer present
-# in the binary" and FAILs every run. An array removes the hazard structurally; this assert
-# stops it being reverted to a string.
-if grep -qE '^ROBOREV_BUILTIN_EXCLUDES=\(' "$_oracles_src"; then
-  ok 'structural: the built-in set is a bash ARRAY (no word-splitting, no pathname expansion)'
-else
-  bad 'structural: ROBOREV_BUILTIN_EXCLUDES is not an array — an unquoted iteration glob-expands **/package-lock.json against the repo'
-fi
-if grep -qE 'for [A-Za-z_]+ in \$ROBOREV_BUILTIN_EXCLUDES' "$_oracles_src"; then
-  bad 'structural: ROBOREV_BUILTIN_EXCLUDES is iterated UNQUOTED somewhere — that pathname-expands the patterns'
-else
-  ok 'structural: ROBOREV_BUILTIN_EXCLUDES is never iterated unquoted'
-fi
-if grep -qE '^ROBOREV_BUILTIN_PATHSPEC_LITERALS=[0-9]+' "$_oracles_src"; then
-  ok 'structural: the :(exclude,glob) literal count is pinned, so an ADDED built-in is observable'
-else
-  bad 'structural: no pinned :(exclude,glob) literal count — an added built-in could not be detected'
-fi
-
-# THE EXCUSAL HAS EXACTLY ONE WRITE SITE, AND IT IS GATED ON A VERIFIED MODEL (#3229 round-9
-# blocker F1). cx19h/cx19i pin the BEHAVIOUR, but only for the ONE swallow path they exercise:
-# a SECOND, ungated assignment added elsewhere would restore the false-PASS on a path no
-# behavioural case reaches. So the write site is also counted, and its guard asserted.
-_excusal_writes=$(grep -cE '^[[:space:]]*CENSUS_BUILTIN_EXCLUDED=\(' "$_oracles_src" || true)
-if [ "$_excusal_writes" -eq 1 ]; then
-  ok 'structural: the built-in excusal has exactly ONE write site in the oracles'
-else
-  bad "structural: $_excusal_writes assignments to CENSUS_BUILTIN_EXCLUDED (want 1) — an ungated second site would excuse coverage on an unverified built-in model"
-fi
-if grep -B3 -E '^[[:space:]]*CENSUS_BUILTIN_EXCLUDED=\(' "$_oracles_src" |
-  grep -qE '\[ "\$builtin_excusal" = GRANTED \]'; then
-  ok 'structural: that write site is gated on the excusal being GRANTED (built-in-set: OK)'
-else
-  bad 'structural: the CENSUS_BUILTIN_EXCLUDED write is NOT gated on builtin_excusal = GRANTED — UNAVAILABLE would take the permissive path again (#3229 F1)'
-fi
-# ...and the GRANTED state is derived from the POSITIVE built-in state, never from "not the
-# negative one". A `!= DIVERGED` here is the three-state-tested-as-two bug reintroduced.
-if grep -qE '^[[:space:]]*\[ "\$_rx_builtin_state" != OK \] \|\| builtin_excusal=GRANTED$' "$_oracles_src"; then
-  ok 'structural: the excusal is keyed on built-in-set = OK, not on "not DIVERGED"'
-else
-  bad 'structural: builtin_excusal is not derived from _rx_builtin_state = OK — a three-state signal must not be tested as two (#3229 F1)'
-fi
-
-printf "== case (cx20): a TOTAL built-in swallow FAILs pre-enqueue — an empty prompt certifies nothing ==\n"
-reset_stub
-# THE WORST DEFECT CLASS THIS WRAPPER CAN HAVE (#3229 round 3, blocker F1): a vacuous
-# PASS textually identical to a genuine one. A lockfile-only bump PASSes `code-free:` (a
-# `.lock` extension classifies as CODE) and its single CODE path is then eaten by the
-# built-in `**/Cargo.lock`, so the reviewer receives an EMPTY prompt. Left as a NOTICE
-# (the partial-swallow ruling) the block read `census-exclusion: NOTICE (0/1 survive)`,
-# `prompt-content: PASS (0/0 ...)`, `RESULT: PASS`, exit 0 — and flow-closer would arm
-# `--auto` on an unreviewed diff. This is NOT an exception to the NOTICE ruling: it is the
-# same rule ("FAIL where the author can act; NOTICE where only the information is
-# actionable; never silence") reaching the case that ruling does not cover, and the remedy
-# is the one `code-free:` already prescribes.
-work=$(make_fixture case_cx20 cargo-lock-only)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-# Corroboration deliberately silent (see cx1): the subject is the TOTAL built-in swallow.
-STUB_CONFIG_PATTERNS=''
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx20)' FAIL 1
-assert_says 'case (cx20) the lockfile still classifies as CODE, so code-free does not catch it' '^code-free: PASS$'
-assert_says 'case (cx20) the total swallow is a FAIL naming the empty diff' "^census-exclusion: FAIL \(0/1 code census paths survive the effective exclusion set; ALL 1 code census path\(s\) excluded by a roborev built-in, so the reviewer would receive an EMPTY diff: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)\$"
-assert_lacks 'case (cx20) it is NOT downgraded to a NOTICE' '^census-exclusion: NOTICE'
-assert_says 'case (cx20) it states the diff cannot be roborev-certified at all' 'CANNOT be roborev-certified at all'
-assert_says 'case (cx20) it prescribes the code-free remedy' 'primary-source verification recorded in the PR'
-assert_says 'case (cx20) it explains that a PARTIAL swallow still stays a NOTICE' 'a PARTIAL built-in swallow stays a NOTICE'
-assert_says 'case (cx20) it names the unifying rule rather than claiming an exception' 'applied consistently, not an exception to it'
-assert_never_enqueued 'case (cx20)'
-assert_says 'case (cx20) prompt-content is never consulted' '^prompt-content: SKIP$'
-assert_lacks 'case (cx20) a 0/0 PASS is never printed' 'prompt-content: PASS \(0/0'
-assert_one_block 'case (cx20)'
-
-printf "== case (cx20b): the SAME lockfile beside real code stays the NOTICE (the ruling is intact) ==\n"
-reset_stub
-# The complement, so cx20 is not read as "a built-in swallow is a FAIL again". One code
-# path survives, so the review IS enqueued and census-exclusion is a NOTICE — the exact
-# cx19 outcome. The boundary is TOTAL vs PARTIAL, nothing else.
-work=$(make_fixture case_cx20b cargo-lock)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-# `pinned`, for cx19's reason: the excusal this case leans on requires `built-in-set: OK`.
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
-run_wrapper "$work"
-assert_verdict 'case (cx20b)' PASS 0
-assert_says 'case (cx20b) a PARTIAL swallow is still the NOTICE' '^census-exclusion: NOTICE \(1/2 code census paths survive'
-assert_lacks 'case (cx20b) the total-swallow FAIL does not fire on a partial swallow' 'EMPTY diff'
-
 printf "== case (cx21): prompt-content: can NEVER emit a 0/0 PASS (direct unit probe) ==\n"
-# Belt-and-braces behind cx20, exercised DIRECTLY because the wrapper now refuses the
-# condition upstream: with every code census path built-in-excluded there is no subject
-# left, and `PASS (0/0 code census paths present)` would be indistinguishable from a
-# genuine pass. Driven through the real function in the real files, so a future change
-# that removes the census-exclusion FAIL cannot silently restore the vacuous PASS.
+# A STRUCTURAL backstop, exercised DIRECTLY because the wrapper refuses the condition
+# upstream: `code-free:` FAILs pre-enqueue on a census with no CODE path, so this branch is
+# unreachable through the normal ordering — and that is exactly why it is probed directly.
+# With no subject left, `PASS (0/0 code census paths present)` would be indistinguishable
+# from a genuine pass, so the key must refuse to print one whatever happened upstream.
+# Driven through the real function in the real files, so a future change to the upstream
+# ordering cannot silently restore the vacuous PASS.
 CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
 ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 cx21_probe="$tmp/cx21-probe.sh"
@@ -2232,8 +1702,9 @@ printf 'Review this diff:\ndiff --git a/main.rs b/main.rs\n' >"$PROMPT_FILE"
 CENSUS='2 files, +2/-0'
 BASE='origin/main'
 JOB=4600
-census_code_paths=("Cargo.lock")
-CENSUS_BUILTIN_EXCLUDED=("Cargo.lock")
+# NO code census path at all — the zero-subject condition, reached without any reference to
+# an exclusion mechanism.
+census_code_paths=()
 DETAILS=()
 PROMPT_CONTENT=""
 roborev_check_prompt_content
@@ -2253,51 +1724,6 @@ if bash "$cx21_probe" "$ORACLES_SRC" "$CHECKS_SRC" "$tmp" >"$cx21_out" 2>&1; the
 else
   bad "case (cx21): the unit probe did not run: $(cat "$cx21_out")"
 fi
-
-printf "== case (cx22): a BUILT-IN contributes ONE verbatim pathspec — no phantom /** sibling ==\n"
-reset_stub
-# #3229 round-6 blocker 1. Built-ins are PRE-FORMATTED pathspec constants the binary
-# appends to git's argv VERBATIM (established from the v0.61.2 binary: the
-# `:(exclude,glob)` prefix is inside each string literal, proven non-coincidental by Go's
-# length-ordered rodata packing, and only 2 bare prefix constants exist for 26 total
-# occurrences). They do NOT pass through `git.FormatExcludeArgs`, so they never acquire
-# the `/**` sibling a CONFIGURED pattern does.
-#
-# The observable: a tracked DIRECTORY named `Cargo.lock`. The real pathspec
-# `:(exclude,glob)**/Cargo.lock` matches the file name only, so `Cargo.lock/inner.rs`
-# SURVIVES and must be expected in the prompt. With the phantom sibling it was swallowed —
-# an exclusion roborev does not apply, which drops the path from `prompt-content` coverage.
-# That is the FALSE-PASS direction, so this asserts BOTH keys.
-work=$(make_fixture case_cx22 cargo-lock-dir)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff:\ndiff --git a/Cargo.lock/inner.rs b/Cargo.lock/inner.rs\ndiff --git a/main.rs b/main.rs'
-run_wrapper "$work"
-assert_verdict 'case (cx22)' PASS 0
-assert_says 'case (cx22) BOTH code paths survive — the built-in eats neither' '^census-exclusion: PASS \(2/2 code census paths survive'
-assert_lacks 'case (cx22) Cargo.lock/inner.rs is NOT reported swallowed' 'Cargo\.lock/inner\.rs by'
-assert_lacks 'case (cx22) no NOTICE, because nothing was excluded at all' '^census-exclusion: NOTICE'
-# The false-PASS direction, asserted where it would actually land: an over-modelled
-# exclusion set silently EXCUSES the path from prompt coverage.
-assert_says 'case (cx22) prompt-content covers BOTH paths, excusing neither' '^prompt-content: PASS \(2/2 code census paths present\)$'
-assert_lacks 'case (cx22) no path is excused as built-in-excluded' 'not expected: excluded by a roborev built-in'
-
-printf "== case (cx22b): the built-in still eats the FILE — the fix did not under-model it ==\n"
-reset_stub
-# The MIRROR-IMAGE error the fix must not commit. "One pathspec for built-ins" is only
-# correct if that one pathspec still WORKS: a real `Cargo.lock` FILE must still be seen as
-# swallowed. Without this, cx22 could be satisfied by dropping built-in modelling
-# altogether, which reports paths as surviving that roborev really drops — a false PASS in
-# the other place. cx19's NOTICE and cx20's total-swallow FAIL both depend on this too.
-work=$(make_fixture case_cx22b cargo-lock)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-# `pinned`, for cx19's reason: the excusal this case leans on requires `built-in-set: OK`.
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
-run_wrapper "$work"
-assert_verdict 'case (cx22b)' PASS 0
-assert_says 'case (cx22b) the lockfile FILE is still attributed to the built-in' "census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]"
 
 printf "== case (cx23): FUNCTIONAL CONFIG under docs/ is CODE and REACHES the reviewer ==\n"
 reset_stub
@@ -2432,118 +1858,6 @@ else
   bad "case (cx24): the mirror probe did not run: $(cat "$cx24_out")"
 fi
 
-printf "== case (cx25): an EQUAL-LENGTH built-in RENAME FAILs — presence needs a RIGHT boundary ==\n"
-reset_stub
-# THE #3229 round-7 blocker, REPRODUCED AND PINNED. `built-in-set:` looked for each pinned
-# pattern as the fixed string `:(exclude,glob)<pattern>` — an exact LEFT boundary and NO
-# right one — and caught additions with a bare literal COUNT. Both signals are BLIND to a
-# one-for-one substitution: with `**/Cargo.lock` replaced by `**/Cargo.lock.bak` the count
-# stays 26 and the missing list stays EMPTY (the pinned pattern still matches, INSIDE the
-# longer one), so the verdict read `built-in-set: OK` while the modelled exclusion set no
-# longer matched reality. Measured on the real /usr/local/bin/roborev by patching its
-# bucket-28 run in place, then reproduced here.
-#
-# The boundary that catches it is the blob's own structure, not a pinned foreign byte: Go
-# packs rodata in LENGTH order with no terminator and each length bucket is ONE contiguous
-# run, so per bucket of k members exactly k-1 must be immediately followed by another
-# `:(exclude,glob)` literal. The tamper drops bucket 28 from 2 bounded to 1.
-guard_assert_run_mirror_agrees
-work=$(make_fixture case_cx25 pushed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub tampered)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx25)' FAIL 1
-assert_says 'case (cx25) the equal-length rename is a DIVERGENCE, not an OK' '^census-exclusion: FAIL \(roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set: '
-assert_lacks 'case (cx25) and never reads OK on the tampered set' 'built-in-set: OK'
-assert_says 'case (cx25) the unbounded pattern is NAMED, with its bucket' "literal length 28 \[\*\*/Cargo\.lock \*\*/cargo\.lock \*\*/flake\.lock\]: 1 of 3 bounded on the right"
-assert_says 'case (cx25) the value line says which member lost its boundary' 'UNBOUNDED: \*\*/Cargo\.lock, \*\*/flake\.lock'
-assert_says 'case (cx25) the detail names the substring hazard concretely' "'\*\*/Cargo\.lock' matches inside '\*\*/Cargo\.lock\.bak'"
-assert_says 'case (cx25) the detail states the length-bucket basis of the boundary' 'each LENGTH BUCKET is stored as ONE contiguous run'
-assert_says 'case (cx25) it points at the re-extract-and-repin remedy' 'update ROBOREV_BUILTIN_EXCLUDES and ROBOREV_BUILTIN_PATHSPEC_LITERALS'
-# THE POINT: the two PRE-EXISTING signals are provably blind to this tamper, so the FAIL is
-# attributable to the boundary check alone. If either of these ever starts firing, the
-# fixture stopped modelling the tamper and this case stopped testing what it claims to.
-assert_lacks 'case (cx25) no pinned pattern reads as MISSING (presence is satisfied by the substring)' 'no longer present in the binary'
-assert_lacks 'case (cx25) and the literal COUNT is unchanged at the pinned 26' "literal\(s\), pinned 26"
-assert_never_enqueued 'case (cx25)'
-
-printf "== case (cx25b): the CONTROL — same fixture, untampered stub, reads OK ==\n"
-reset_stub
-# Without this, cx25's FAIL could be the fixture rather than the tamper. Same repo, same
-# config, same paths; the ONLY delta is the planted deny-list.
-work=$(make_fixture case_cx25b pushed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx25b)' PASS 0
-assert_says 'case (cx25b) an untampered set reads OK' 'built-in-set: OK\)$'
-assert_says 'case (cx25b) the OK detail states the right boundary was verified' 'RIGHT-BOUNDED by the pinned length-bucket adjacency'
-assert_says 'case (cx25b) the OK detail records WHY presence alone is insufficient' "replaced by '\*\*/Cargo\.lock\.bak' at equal length \(count 26/26, missing 0\)"
-assert_says 'case (cx25b) the OK detail names the observed version' 'the executable reports v0\.61\.2'
-
-printf "== case (cx26): a binary that is NOT the pinned version FAILs ==\n"
-reset_stub
-# Option A of the round-7 fix. The 24 patterns, the built-in arity AND the ported
-# git.FormatExcludeArgs were ALL read out of v0.61.2, so on any other build every one of
-# them is unverified — that is the standing re-verify-on-upgrade obligation, now enforced
-# rather than remembered. The literals still match the pin exactly, so this FAIL is
-# provably the VERSION dimension on its own.
-work=$(make_fixture case_cx26 pushed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ROBOREV_VERSION='roborev v0.62.0'
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx26)' FAIL 1
-assert_says 'case (cx26) the version divergence is named FIRST in the value line' '^census-exclusion: FAIL \(roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set: the executable reports v0\.62\.0, but every fact modelled here was derived from v0\.61\.2'
-assert_says 'case (cx26) the detail names observed vs pinned' 'it reports v0\.62\.0, pinned v0\.61\.2'
-assert_says 'case (cx26) it names ALL THREE facts the version invalidates' 'the 24 built-in patterns, their one-pathspec arity AND the ported git\.FormatExcludeArgs'
-assert_says 'case (cx26) it names the re-pin obligation as enforced, not remembered' 'move ROBOREV_PINNED_VERSION in the same commit'
-assert_lacks 'case (cx26) a version mismatch is never an OK' 'built-in-set: OK'
-# Provably the version alone: the planted literals are the pinned 26 and all 24 are present
-# and correctly bounded, so no other divergence fragment may appear.
-assert_lacks 'case (cx26) no pattern reads as missing' 'no longer present in the binary'
-assert_lacks 'case (cx26) no adjacency run reads as broken' 'NOT right-bounded as pinned'
-assert_never_enqueued 'case (cx26)'
-
-printf "== case (cx26b): a binary that will not report its version is UNAVAILABLE, not OK ==\n"
-reset_stub
-# `built-in-set:` must never bless a pin it could not confirm. The literals here match the
-# pin exactly, so the ONLY thing missing is the version — and the honest report of that is
-# UNAVAILABLE ("we could not look"), which is neither a failure nor a blessing.
-work=$(make_fixture case_cx26b pushed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
-STUB_ROBOREV_VERSION=none
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx26b)' PASS 0
-assert_says 'case (cx26b) an unconfirmable pin withholds the blessing' 'built-in-set: UNAVAILABLE\)$'
-assert_lacks 'case (cx26b) matching literals alone do NOT earn an OK' 'built-in-set: OK'
-assert_says 'case (cx26b) UNAVAILABLE names the unreadable version among its causes' 'would not report its version'
-assert_says 'case (cx26b) and stays explicitly neither a failure nor a blessing' 'deliberately NEITHER a failure NOR a blessing'
-assert_says 'case (cx26b) it states that it withholds only the blessing' 'withholds only the OK blessing'
-assert_lacks 'case (cx26b) an unreadable version is not a FAIL' '^census-exclusion: FAIL'
-
-printf "== case (cx26c): an unreadable version does NOT disable the check — a removal still FAILs ==\n"
-reset_stub
-# The asymmetry that keeps cx26b from being a self-disabling escape hatch: withholding the
-# OK blessing must NOT withhold a FAIL. If a future roborev renamed its `version`
-# subcommand, `built-in-set:` would stop saying OK — but a pinned pattern vanishing from
-# the binary must still red the round.
-work=$(make_fixture case_cx26c pushed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-STUBBIN_OVERRIDE=$(make_builtin_stub removed)
-STUB_ROBOREV_VERSION=none
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-run_wrapper "$work"
-assert_verdict 'case (cx26c)' FAIL 1
-assert_says 'case (cx26c) the missing pattern is still named without a readable version' 'pinned pattern\(s\) no longer present in the binary: \*\*/Cargo\.lock'
-assert_lacks 'case (cx26c) an observed divergence is never downgraded to UNAVAILABLE' 'built-in-set: UNAVAILABLE'
-assert_never_enqueued 'case (cx26c)'
-
 # ===========================================================================
 # (cx27*): THE EMPTY-PARSE PASS REQUIRES AN AFFIRMATIVE MEASUREMENT (#3229 round-10 H2).
 #
@@ -2580,7 +1894,7 @@ STUB_CONFIG_PATTERNS=''
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx27a)' FAIL 1
-assert_says 'case (cx27a) the value is its own non-passing form, not a PASS' '^census-exclusion: FAIL \(exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)$'
+assert_says 'case (cx27a) the value is its own non-passing form, not a PASS' '^census-exclusion: FAIL \(exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: UNAVAILABLE\)$'
 assert_lacks 'case (cx27a) an unverified silence never reads as a PASS' '^census-exclusion: PASS'
 assert_says 'case (cx27a) the text names WHAT could not be verified, not a wrongdoing' "the ONLY oracle that can distinguish 'nothing is configured' from 'this parser did not recognise the key' — did not answer"
 assert_says 'case (cx27a) it says which of the two states it could not rule out' "the parser saw NO 'exclude_patterns' key in any of the three sources"
@@ -2604,7 +1918,7 @@ STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
 run_wrapper "$work"
 assert_verdict 'case (cx27b)' PASS 0
-assert_says 'case (cx27b) the corroborated empty set PASSes' '^census-exclusion: PASS \(no exclusion patterns configured; 3/3 code census paths survive the 24 roborev v0\.61\.2 built-in exclude\(s\); corroboration: OK; built-in-set: UNAVAILABLE\)$'
+assert_says 'case (cx27b) the corroborated empty set PASSes' '^census-exclusion: PASS \(no exclusion patterns configured; 3/3 code census paths survive an EMPTY exclusion set; corroboration: OK\)$'
 assert_lacks 'case (cx27b) a corroborated empty parse is never UNCORROBORATED' 'UNCORROBORATED'
 assert_enqueued 'case (cx27b)'
 
@@ -2647,9 +1961,10 @@ reset_stub
 # THE GENERAL SHAPE, closed at the wrapper's single most consequential decision point
 # (#3229 round-10 sweep). Three defects on this issue were ONE shape: a multi-state signal
 # where only the BAD states are tested, so every unknown/unmeasured state inherits the
-# PERMISSIVE branch (`built-in-set: UNAVAILABLE` took the permissive excusal path;
-# `corroboration: UNAVAILABLE` reached a PASS — cx19h and cx27a; a `${_census_end:-…}`
-# fallback degraded a failed measurement to a 1-line scan). The verdict scan itself was the
+# PERMISSIVE branch (a three-state `built-in-set:` signal took the permissive excusal path —
+# that subsystem is since deleted, #3278; `corroboration: UNAVAILABLE` reached a PASS —
+# cx27a; a `${_census_end:-…}` fallback degraded a failed measurement to a 1-line scan). The
+# verdict scan itself was the
 # same shape: four failing prefixes tested, EVERYTHING else fell through to `finish PASS 0`.
 #
 # This case runs a PATCHED COPY of the three flow scripts in which ONE check reports a value
@@ -2727,6 +2042,69 @@ else
   bad 'case (cx29): could not patch the copied checks file for an early return, so the never-ran-check path was never exercised'
 fi
 WRAPPER="$_gm_real_wrapper"
+
+# ===========================================================================
+# (cx30*): THE DECLARED RESIDUAL — AC4's SECOND BRANCH, PINNED (#3229 ruling / #3278).
+#
+# AC4 reads: "either the wrapper's extension-based classification and roborev's path-glob
+# exclusion AGREE on what 'code' means, OR the residual disagreement is documented with the
+# exact cases where it persists." The built-in modelling that closed the first branch is
+# DELETED (four consecutive false-PASSes lived inside it, and no AC reaches it), so this
+# change takes the SECOND branch — and a documented residual is only documented if the exact
+# case is PINNED. Otherwise the next reader cannot tell a declared residual from an unnoticed
+# one, which is the same epistemic gap the whole issue is about.
+#
+# THE EXACT CASE: a code-census path that roborev's COMPILED-IN deny-list excludes
+# (`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, `Gemfile.lock`, …). `census-exclusion:` reports it
+# SURVIVING (no CONFIGURED pattern eats it) and `prompt-content:` then FAILs on its absence
+# from the prompt. FAIL-CLOSED, never a vacuous green — but the stated cause names the SYMPTOM
+# ("the reviewer never received their diffs"), not the MECHANISM. That diagnostic gap is the
+# residual, and #3278 is where it gets modelled.
+#
+# TWO CASES, ONE VARIABLE — whether the prompt carries the lockfile:
+#   cx30   the prompt OMITS Cargo.lock (what the real binary does) => prompt-content: FAIL
+#   cx30b  the prompt CARRIES it (the control)                     => prompt-content: PASS
+# cx30b is the both-directions control: without it, cx30's FAIL would be satisfied by any
+# run that failed for an unrelated reason, and the residual would be "pinned" by an assert
+# that never observed the mechanism it claims to describe.
+# ===========================================================================
+
+printf '== case (cx30): the #3096 SHAPE — a built-in-excluded lockfile FAILs under prompt-content: ==\n'
+reset_stub
+work=$(make_fixture case_cx30 issue-3096-shape)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+# THE PROMPT THE REAL BINARY BUILDS: `main.rs` only. The three
+# `docs/reports/ws0-3096-artifacts/*.json` are excluded by a CONFIGURED pattern AND classified
+# code-FREE, so they are not census code paths and are not expected; `Cargo.lock` IS a census
+# code path (a `.lock` extension classifies as CODE) and is dropped by the built-in.
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx30)' FAIL 1
+# census-exclusion PASSES: the configured half swallows nothing, and the built-in is not modelled.
+assert_says 'case (cx30) census-exclusion reports the lockfile SURVIVING (the built-in is not modelled)' '^census-exclusion: PASS \(2/2 code census paths survive the effective exclusion set; corroboration: NOTICE\)$'
+assert_lacks 'case (cx30) the artifacts are code-free, so they are not census code paths' 'ws0-3096-artifacts/one\.json by'
+# ...and prompt-content FAILS on the absence. This is the residual, in the place it lands.
+assert_says 'case (cx30) prompt-content FAILs on the absent lockfile' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_says 'case (cx30) the missing path is named' '^  Cargo\.lock$'
+# The residual must be FAIL-CLOSED. These two asserts are the whole point of the case: the
+# deletion may cost a diagnostic, but it may NEVER cost a verdict.
+assert_lacks 'case (cx30) it is never a vacuous PASS' '^RESULT: PASS'
+assert_lacks 'case (cx30) and no key excuses the path as built-in-excluded' 'not expected: excluded by a roborev built-in'
+
+printf '== case (cx30b): the CONTROL — the same fixture with the lockfile IN the prompt PASSes ==\n'
+reset_stub
+# ONE variable changed: the prompt now carries `Cargo.lock`. Without this, cx30's FAIL could
+# come from the fixture, the config, or the census rather than from the absence it names.
+work=$(make_fixture case_cx30b issue-3096-shape)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/Cargo.lock b/Cargo.lock\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx30b)' PASS 0
+assert_says 'case (cx30b) the same census-exclusion PASS, so cx30 differs ONLY in the prompt' '^census-exclusion: PASS \(2/2 code census paths survive the effective exclusion set; corroboration: NOTICE\)$'
+assert_says 'case (cx30b) prompt-content covers both code paths, with no excusal clause' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_enqueued 'case (cx30b)'
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
@@ -3779,33 +3157,31 @@ assert_says '--help names the drift FAIL' 'FAIL \(exclusion set drift'
 assert_says '--help sends a FAIL to the config, not the reviewer' 'is a CONFIGURATION defect'
 assert_says '--help defines docs-only as a code-free CENSUS, not a path prefix' 'CENSUS as code-free: classifies it, NEVER a .docs/. path prefix'
 assert_says '--help names the harness convention as reviewed code' 'docs/reports/\*-artifacts/ are executable code'
-# The four-source union and the built-in half are the two facts an operator reading a
+# The three-file union and the DECLARED RESIDUAL are the two facts an operator reading a
 # census-exclusion FAIL most needs, so --help states them rather than leaving them in the
 # oracles file's comments.
-assert_says '--help enumerates the four exclusion sources' 'THE EFFECTIVE SET IS A UNION OF FOUR THINGS'
+assert_says '--help enumerates the three config sources it unions' 'THE EFFECTIVE SET IS A UNION OF THREE CONFIG FILES'
 assert_says '--help names the ROOT-checkout config source' '\[root-config\]'
 assert_says '--help explains why the root checkout is read' 'binds a repo by its repos\.root_path'
 assert_says '--help says a worktree config does not override the root one' 'does NOT override'
-assert_says '--help names the non-configurable built-in source' '\[roborev-builtin\]  <-- NOT configurable'
-assert_says '--help gives a concrete built-in consequence' 'A Cargo\.lock in your diff IS dropped'
 assert_says '--help says every value line names the pattern source' 'names the SOURCE of the pattern responsible'
 assert_says '--help says an empty parse must be corroborated' "CORROBORATED that nothing is configured"
-assert_says '--help distinguishes a builtin NOTICE from a config FAIL' 'A NOTICE naming \[roborev-builtin\] is not'
 # THE UNIFYING RULE must be stated verbatim in every rule-stating surface, so a future
 # call of this shape is decided by the rule rather than re-litigated ad hoc.
 assert_says '--help states the unifying rule verbatim' 'FAIL where the author can act; NOTICE where only the information is actionable;'
 assert_says '--help states the unifying rule verbatim (2nd line)' 'never silence\.'
-assert_says '--help says it is one rule, not three ad-hoc calls' 'not three ad-hoc calls but one rule applied three times'
-assert_says '--help says a built-in has no fix because it is compiled in' 'deny-list is compiled in,? with no opt-out'
-assert_says '--help warns that an unfixable guard gets DISABLED' 'check that gets DISABLED'
-assert_says '--help makes built-in DIVERGENCE a FAIL because it has a remedy' 'DIVERGING from the pinned 24 => FAIL'
-assert_says '--help names the silent-absorption risk concretely' "began excluding '\*\.rs' or 'scripts/\*\*'"
-assert_says '--help says every value ends with the built-in-set state' "built-in-set: OK\|DIVERGED\|UNAVAILABLE"
-assert_says '--help says never silence is load-bearing' 'never an unstated assumption'
-assert_says '--help says both FAIL causes outrank the NOTICE and all are named' 'outrank the NOTICE, and EVERY cause present is named'
-assert_says '--help records that NOTICE is outside the verdict scan' 'outside the verdict scan'
-assert_says '--help gives the re-extraction command for a diverged pin' "grep -a -o ':\(exclude,glob\)"
-assert_says '--help extends the re-verify obligation to the built-in list' 'Re-verify BOTH the port and the built-in list'
+# THE DECLARED RESIDUAL (AC4's second branch, #3278). The built-in deny-list is NOT modelled,
+# and --help must SAY SO with the exact case where the disagreement persists — an unstated
+# residual is indistinguishable from a claim of coverage.
+assert_says '--help states that the built-in deny-list is NOT modelled' 'NOT MODELLED, DELIBERATELY \(issue #3278\)'
+assert_says '--help names the exact residual case' 'only code-census path is a built-in-excluded path'
+assert_says '--help says the residual fails CLOSED, never green' 'It fails CLOSED, never a'
+assert_says '--help says there is deliberately no NOTICE value for this key' 'There is deliberately NO'
+assert_says '--help keeps the port re-verify obligation' 'Re-verify the ported git\.FormatExcludeArgs'
+# The subtracted grammar must be GONE from --help, or the block documents values the code
+# can no longer emit — the failure direction that reads as coverage.
+assert_lacks '--help no longer documents the built-in-set key' 'built-in-set:'
+assert_lacks '--help no longer documents a roborev-builtin source tag' '\[roborev-builtin\]'
 assert_never_enqueued '--help'
 
 
@@ -3828,11 +3204,9 @@ reset_stub
 ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 if [ -f "$ORACLES" ]; then
   # Anchored to the CONSTRUCTION STATEMENT on an EXECUTABLE line, not to a file-wide grep:
-  # the file carries ~20 further `:(exclude,glob)` occurrences in comments, in the pinned
-  # built-in extraction, and in DETAILS prose, so `grep -qF ':(exclude,glob)' "$ORACLES"`
-  # stays green with the construction replaced by a hand-rolled matcher (MEASURED: swapping
-  # it for `:!` left this assert `ok`). The pinned LITERAL COUNT is a separate obligation,
-  # asserted on ROBOREV_BUILTIN_PATHSPEC_LITERALS above.
+  # the file carries further `:(exclude,glob)` occurrences in comments and in DETAILS prose,
+  # so `grep -qF ':(exclude,glob)' "$ORACLES"` stays green with the construction replaced by
+  # a hand-rolled matcher (MEASURED: swapping it for `:!` left this assert `ok`).
   if grep -nE '_rx_pathspecs\+=\(":\(exclude,glob\)' "$ORACLES" | grep -qv '^[0-9]*: *#'; then
     ok 'structural: the check CONSTRUCTS :(exclude,glob) git pathspecs (executable statement, not a comment)'
   else
@@ -4067,10 +3441,11 @@ else
 fi
 
 printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
-# The mirror of the decorative-key bug: a value that reads NOTICE while RESULT: goes FAIL
-# would make the built-in ruling a lie. Asserted against the SCAN ITSELF, not just against
-# a case's observed exit code, so a future edit that adds NOTICE* to the failing set is
-# caught here rather than by whichever case happens to exercise it.
+# `vacuity-tier1:` emits NOTICE as its documented ADVISORY value, so a scan that treated
+# NOTICE* as failing would red every findings-bearing review on an advisory. Asserted against
+# the SCAN ITSELF, not just against a case's observed exit code, so a future edit that adds
+# NOTICE* to the failing set is caught here rather than by whichever case happens to exercise
+# it.
 #
 # EVERY assert below is anchored to the SCAN STATEMENT, never to a file-wide grep. That
 # distinction is the whole point and it is not pedantry: a file-wide `grep '"$CENSUS_EXCLUSION"'`
@@ -4115,7 +3490,7 @@ else
     bad 'structural: the failing-capable verdict set is not the expected FAIL*|FINDINGS*|ERROR*|INCONSISTENT*'
   fi
   if printf '%s\n' "$_scan_case" | grep -q 'NOTICE'; then
-    bad 'structural: NOTICE* appears in the failing-capable verdict scan — a census-exclusion NOTICE would red RESULT:'
+    bad 'structural: NOTICE* appears in the failing-capable verdict scan — an advisory vacuity-tier1 NOTICE would red RESULT:'
   else
     ok 'structural: NOTICE* is absent from the failing-capable verdict scan'
   fi
@@ -4149,7 +3524,9 @@ else
     bad 'structural: the verdict scan positive arm does not fail closed — an unrecognised value would be accepted silently, which is the shape this sweep closed'
   fi
   # THE AFFIRMATION BACKSTOP: a PASS requires every VERDICT-CARRYING key to be affirmatively
-  # PASS (census-exclusion may also be NOTICE). Case (cx29) proves one un-run check is caught;
+  # PASS — with NO exception. (`census-exclusion:` was the one exemption, allowed a `NOTICE`
+  # while the built-in modelling could emit one; that subsystem is deleted (#3278) and the
+  # exemption went with it, which is STRICTER.) Case (cx29) proves one un-run check is caught;
   # this pins that the backstop exists and names all seven deterministic keys, so a key added
   # to the block later is not silently exempt from it.
   if grep -qE '^[[:space:]]*not_affirmed="\$\{not_affirmed' "$WRAPPER" &&
@@ -4167,6 +3544,25 @@ else
     fi
   else
     bad 'structural: the affirmation backstop is gone — a verdict-carrying key left at its initial SKIP (a check that never ran) would reach finish PASS, which is the vacuous pass this wrapper exists to prevent (#3229 round-10)'
+  fi
+  # AND IT CARRIES NO PER-KEY EXEMPTION. The backstop's body must contain exactly ONE
+  # `continue` arm — the affirmative `PASS*)` one. The deleted built-in modelling needed a
+  # second arm exempting `census-exclusion:` on `NOTICE`; with that subject gone the arm is
+  # gone too, and this pins that no per-key escape hatch is reintroduced (an exempted key can
+  # reach `finish PASS` on a non-measurement, which is the whole defect class). Read from the
+  # backstop's own `case` body, so a `NOTICE*)` arm elsewhere in the wrapper cannot satisfy or
+  # break it.
+  _aff_body=$(awk '/for keyed in "push-assert=/ { inb = 1 } inb { print } inb && /^[[:space:]]*esac[[:space:]]*$/ { exit }' "$WRAPPER")
+  if [ -z "$_aff_body" ]; then
+    bad 'structural: could not locate the affirmation backstop case body to inspect for per-key exemptions'
+  else
+    _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
+    if [ "$_aff_continues" -eq 1 ] &&
+      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\*\) continue ;;'; then
+      ok 'structural: the affirmation backstop has exactly ONE exempting arm, the affirmative PASS*) one — no per-key escape hatch'
+    else
+      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s); a non-PASS value is exempted for some key, so that key can reach finish PASS on a non-measurement (#3229 owner ruling / #3278)"
+    fi
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this
   # block is written by someone reading the doc block, not the scan.

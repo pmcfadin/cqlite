@@ -318,8 +318,8 @@ that no configuration can switch off. This check reconciles the census against t
 CONFIGURED exclude_patterns only. THE RESIDUAL, stated rather than hidden (AC4's second
 branch): a diff whose only code-census path is a built-in-excluded path is silently
 dropped from the reviewer's diff, census-exclusion: reports it SURVIVING, and
-prompt-content: then FAILs because the prompt does not carry it. That fails CLOSED --
-never a vacuous green -- but its stated cause names the symptom, not the mechanism.
+prompt-content: then FAILs because the prompt does not carry it. It fails CLOSED, never a
+vacuous green -- but its stated cause names the symptom, not the mechanism.
 
 THE UNIFYING RULE, which decides every value below:
   **FAIL where the author can act; NOTICE where only the information is actionable;
