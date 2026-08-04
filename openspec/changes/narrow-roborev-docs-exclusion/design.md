@@ -629,6 +629,65 @@ reconciliation verdict that omitted the built-in state entirely — the configur
 the documented "every value ends with `built-in-set:`" contract false for exactly the branch where a
 configured swallow coexists with an unverified model; `cx9`/`cx10` now pin it.
 
+###### Round 10: it was never one bug — it is ONE SHAPE, and the third instance is why it is now a rule
+
+Round 9 fixed `built-in-set: UNAVAILABLE` taking the permissive excusal path. Round 10's review found the
+SAME defect one key over, and the round before had fixed a third instance in the test harness. Written out
+together they are indistinguishable:
+
+| # | signal | states | which were tested | what the UNMEASURED state did |
+|---|---|---|---|---|
+| 1 | `_rx_builtin_state` | OK / DIVERGED / UNAVAILABLE | `= DIVERGED`, `!= DIVERGED` | `UNAVAILABLE` took the permissive **excusal** path — coverage excused on an unverified model |
+| 2 | `_rx_corroboration` | OK / DRIFT / NOTICE / **UNAVAILABLE (initial)** | `= DRIFT`, `= NOTICE` | `UNAVAILABLE` reached `PASS (no exclusion patterns configured; …)` and **enqueued** a review |
+| 3 | `_census_end` (suite) | a line number / empty | `-` (a `${:-$start}` default) | a failed `awk` degraded to a **1-line scan**, in which the absence-assert reads `ok` |
+
+**The shape: a multi-state signal where only the BAD states are tested, so every unknown or unmeasured
+state inherits the PERMISSIVE branch.** Instance 2 is the sharpest, because the code's own comment states
+the correct principle three lines above the defect — *"our parser recognised no key" is NOT "nothing is
+configured", and here the binary is the only oracle that can tell them apart* — and then never requires that
+oracle to have **answered**; `--help` and `roborev_toml_exclude_patterns` had *already documented* the
+corroboration requirement, so the code was contradicting its own contract. That is #3229 reintroduced under
+the key written to prevent it, for the second time.
+
+A third point fix is the wrong response, so round 10 does four things instead:
+
+1. **The rule, stated in the spec and in the wrapper's own doc block** (not only in a commit message):
+   *a positive verdict requires an affirmative measurement*; an oracle that is the SOLE evidence for a claim
+   and could not be consulted yields a NON-PASSING verdict whose text distinguishes "we could not check"
+   from "nothing was wrong"; a permissive branch is keyed on the AFFIRMATIVE value, never on the absence of
+   a bad one; and where a signal genuinely SHOULD be permissive, the reason is recorded IN CODE at the branch.
+2. **The instance fixed** — `FAIL (exclusion set UNCORROBORATED: …)`, a third textually distinct form beside
+   `unreadable` and `no exclusion patterns configured`, scoped to the EMPTY parse. With patterns parsed the
+   silence stays permissive *on purpose*, because there the patterns themselves are the measurement (each
+   resolved through the port and matched by git) and corroboration only cross-checks them; failing there
+   would red every run on a box whose roborev lacks the subcommand. `cx1` now pins that permissive branch
+   deliberately, so the scoping is asserted in both directions (an over-broad fix reds 153 asserts).
+3. **The shape closed where it is structural** — the wrapper's final verdict scan WAS the same shape at its
+   most consequential point: four failing prefixes tested, everything else falling through to
+   `finish PASS 0`. The non-failing set is now an ALLOW-LIST with a failing fallback (`cx28`), and a PASS
+   additionally requires every one of the seven verdict-carrying keys to be affirmatively `PASS` — closing
+   the neighbouring case where a value is IN the grammar and non-failing but is not a MEASUREMENT, namely
+   the initial `SKIP` of a check that never ran (`cx29`; un-backstopped, an early-returning
+   `prompt-content:` PASSED the run with the strongest anti-vacuity key having measured nothing).
+4. **Every state variable and `${VAR:-default}` in the three flow scripts audited**, and each
+   deliberately-permissive one annotated with its reason: `vacuity-tier1: UNAVAILABLE` (no summary region =
+   no claim to judge; a genuine not-applicable, and the deterministic keys cover the condition), the
+   `${HOME:-}` global-config guard (roborev resolves it from HOME too, so the mechanism agrees), the
+   announce-count default (diagnostic-only). Two more were verified to fall the STRICT way and now say so:
+   `block_marker_count`'s `:-0` (0 markers ⇒ `findings: NONE` ⇒ tier 1 HARD FAILs, whereas `PRESENT` is the
+   permissive value) and the built-in literal count's `|| n=0` (0 ⇒ `UNAVAILABLE`, blessing withheld).
+   `_rx_found` — the parser's "did I see the key at all" flag — was MEASURED AND NEVER READ; it now feeds the
+   UNCORROBORATED diagnostic, which is the only thing that can distinguish an absent key from an empty array
+   for the operator, while deliberately NOT gating the verdict (an empty array in one file cannot rule out an
+   unrecognised key spelling in another).
+
+One latent instance is **reported and deliberately not changed**, because it sits in the built-in-set
+machinery whose fate is an open owner decision: `roborev_builtin_state_details` switches on
+`_rx_builtin_state` with arms for `OK` and `UNAVAILABLE` and **no `*)`**, so a future fourth state would be
+reported nowhere by that function. It is not reachable today (the variable is assigned in exactly one
+function, to exactly three values) and `DIVERGED` is never silent because its own FAIL branch emits detail
+lines — but it is the same shape, and it should get a `*)` arm whenever that subsystem is next touched.
+
 ###### The divergence check found a real bug in its first live run — in itself
 
 Worth recording, because the failure mode is one of this repo's named blind spots reproduced in shell.

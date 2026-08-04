@@ -143,10 +143,12 @@ The value grammar SHALL be:
 
 - `PASS (<k>/<n> code census paths survive the effective exclusion set; corroboration: <state>)`
 - `PASS (no exclusion patterns configured)` — an absent config file or a genuinely empty pattern list
-  cannot swallow anything
+  cannot swallow anything, and ONLY once the binary has CORROBORATED that nothing is configured
 - `FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>'[, …])` — naming the swallowed paths
   and the pattern that excluded each, capped at the first 10 with `(+<r> more)` so the block stays compact
 - `FAIL (exclusion set unreadable: <cause>)`
+- `FAIL (exclusion set UNCORROBORATED: <cause>; corroboration: <state>; built-in-set: <state>)` — the parse
+  found no configured pattern AND no oracle confirmed that, so the silence is unverified
 - `FAIL (trailing-slash pattern '<p>/' resolves RECURSIVE (**/<p>), opposite to '<p>/**' — drop the
   trailing slash deliberately or write '<p>/**')`
 - `FAIL (exclusion set drift: '<pattern>' reported by roborev config get is absent from the parsed set)`
@@ -154,8 +156,26 @@ The value grammar SHALL be:
 
 An UNREADABLE configuration SHALL fail closed and SHALL be DISTINGUISHABLE from an absent one: a key
 present whose value is not a parseable pattern array is `FAIL (exclusion set unreadable: …)`, while an
-absent key or absent config file is the `PASS (no exclusion patterns configured)` form. "We could not
-tell" SHALL NEVER be aliased to "nothing is excluded".
+absent key or absent config file is the `PASS (no exclusion patterns configured)` form — obtainable only
+with the binary's corroboration, and otherwise `FAIL (exclusion set UNCORROBORATED: …)`, a THIRD textually
+distinct form so a reader can tell "unparseable" from "unverifiable" from "nothing configured". "We could
+not tell" SHALL NEVER be aliased to "nothing is excluded".
+
+**THE GENERAL RULE THIS REQUIREMENT IS AN INSTANCE OF, and the rule every key in the block SHALL obey:**
+
+> **A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT.** A pass SHALL NEVER be derived from the
+> ABSENCE of a bad signal. Where an oracle is the SOLE evidence for a claim and it could not be consulted,
+> the verdict SHALL be NON-PASSING, and its text SHALL distinguish *"we could not check"* from *"nothing
+> was wrong"* — naming what was unverifiable and what would have verified it. Where a signal has more than
+> two states, the PERMISSIVE branch SHALL be keyed on the AFFIRMATIVE value (`= OK`), never on the absence
+> of a bad one (`!= DIVERGED`), so an unknown or unmeasured state fails closed. Where a signal genuinely
+> SHOULD be permissive, the reason SHALL be recorded IN CODE at the branch.
+
+This is stated as a general rule, not as three fixes, because THREE separate defects on this change were
+ONE shape — *a multi-state signal where only the BAD states are tested, so every unknown or unmeasured
+state inherits the PERMISSIVE branch*: `built-in-set: UNAVAILABLE` taking the permissive excusal path;
+`corroboration: UNAVAILABLE` reaching a `PASS`; and a `${end:-$start}` fallback silently degrading a failed
+`awk` bound into a one-line scan. A fourth point fix would have been the wrong response.
 
 The check SHALL be NUL-safe (`-z` / array handling, no word-splitting on filenames), because the
 repository tracks a path under `docs/` containing spaces and a literal double quote, which
@@ -176,6 +196,7 @@ census entry — a false PASS in exactly the direction this check exists to clos
 - **GIVEN** a repository configuration whose `exclude_patterns` key is present but whose value is not a parseable pattern array, and separately a repository with no `exclude_patterns` key at all
 - **WHEN** the wrapper evaluates each
 - **THEN** the first reads `FAIL (exclusion set unreadable: <cause>)` with no review enqueued, and the second reads `PASS (no exclusion patterns configured)` and proceeds — so a parse failure can never present as "nothing is excluded"
+- **AND** the second form is reached only with the binary's corroboration; without it the value is the textually distinct `FAIL (exclusion set UNCORROBORATED: …)`, so "unparseable", "unverifiable" and "nothing configured" are three distinguishable states rather than two
 
 #### Scenario: A path containing spaces and a quote is compared correctly
 - **GIVEN** a census whose code paths include a filename containing spaces and a literal double quote
@@ -454,9 +475,11 @@ When `roborev` IS invocable the parsed set SHALL be CORROBORATED against
 resolves the repo config relative to its CWD, so asking only from `$REPO` reproduces the same blind spot
 inside the corroboration). A pattern the binary reports that the parse LACKS SHALL be
 `FAIL (exclusion set drift: …)` because that direction can hide a swallow, the reverse direction SHALL be
-a non-failing NOTICE, and a binary that answers NOWHERE SHALL report the corroboration as `UNAVAILABLE`
-without failing. A binary that answers with an EMPTY list is an ANSWER, not an absence, and SHALL
-corroborate rather than degrade to `UNAVAILABLE`.
+a non-failing NOTICE, and a binary that answers NOWHERE SHALL report the corroboration as `UNAVAILABLE` —
+which SHALL NOT fail the run WHEN THE PARSE IS NON-EMPTY, and SHALL be NON-PASSING when the parse is empty
+and this cross-check is therefore the only evidence (see the empty-parse requirement below). A binary that
+answers with an EMPTY list is an ANSWER, not an absence, and SHALL corroborate rather than degrade to
+`UNAVAILABLE`.
 
 **PARSING THE BINARY'S ANSWER SHALL NOT MUTATE THE PATTERNS IT REPORTS.** Only a **verified OUTER
 container** (a leading `[` together with a trailing `]`, after trimming) SHALL be stripped, and quoting only
@@ -474,7 +497,27 @@ configuration is the guard that gets disabled — which is how #3229 happened.
 **Corroboration SHALL run on EVERY path, including when the parse found NO configured pattern.** An empty
 parse SHALL NOT be reported as "no exclusion patterns configured" until the binary has confirmed it:
 "our parser recognised no key" is not "nothing is configured", and where the parse is empty this
-cross-check is the ONLY oracle available. The parse SHALL additionally accept the QUOTED TOML key
+cross-check is the ONLY oracle available.
+
+**AND THE EMPTY-PARSE PASS SHALL REQUIRE THAT ORACLE TO HAVE ANSWERED — `corroboration: OK`, not merely
+"not one of the bad states".** `corroboration:` has FOUR states (`UNAVAILABLE`, the initial value; `DRIFT`;
+`NOTICE`; `OK`), and running the cross-check is not the same as REQUIRING it: when `n_configured` is 0 and
+the binary answered from no checkout, the parser's silence is UNVERIFIED and the verdict SHALL be
+NON-PASSING (`FAIL (exclusion set UNCORROBORATED: …)`), naming the corroboration state, stating which of
+the two indistinguishable conditions could not be ruled out, disclaiming any assertion that something IS
+excluded, and enqueuing no review. Nothing of the wrapper's own is in the reconciliation on that path —
+only the built-ins — so a configured pattern the parser missed is invisible to git as well, and the
+configured half of a PASS would rest entirely on an unverified silence. A GENUINELY EMPTY configuration
+SHALL still PASS whenever the binary confirms it, so the requirement is a gate on the ORACLE, never a
+blanket refusal of the empty-parse PASS.
+
+**Where the parse is NON-EMPTY the same silence SHALL remain PERMISSIVE, and the asymmetry SHALL be
+STATED IN CODE with its reason.** With patterns parsed, those patterns ARE the affirmative measurement —
+each is resolved through the ported formatter and matched BY GIT against the census — so corroboration is
+a CROSS-CHECK that can only widen what was already measured, and its absence withholds nothing that was
+claimed. Failing there would red every run on a box whose roborev lacks the subcommand: the self-disabling
+guard this change refuses to build. This is the same asymmetry `built-in-set:` draws — an unobservable
+oracle withholds the BLESSING it was the SOLE source of, and nothing else. The parse SHALL additionally accept the QUOTED TOML key
 spellings `"exclude_patterns"` and `'exclude_patterns'`, which are the same key and ARE honoured by
 roborev (measured on v0.61.2) — but accepting them is NOT sufficient on its own, because any other
 unenumerated-yet-honoured spelling would silently disable the guard; the corroboration is what covers
@@ -535,10 +578,12 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **WHEN** the reconciliation check and this change's design record are inspected
 - **THEN** both name `roborev v0.61.2` as the version whose `git.FormatExcludeArgs` the construction ports, and state that a roborev upgrade requires re-verifying the algorithm before the check can be trusted — because an upstream change to it would silently invalidate the port while every summary block still read `PASS`
 
-#### Scenario: The check runs without the roborev binary and reports the corroboration state
-- **GIVEN** an environment in which `roborev` is not invocable
+#### Scenario: The check runs without a corroborating oracle and reports the corroboration state
+- **GIVEN** a configuration the parse read at least one pattern from, and a `roborev` that does not answer `config get exclude_patterns`
 - **WHEN** the wrapper runs the reconciliation check
-- **THEN** the verdict is computed from the configuration files alone and the value records the corroboration as `UNAVAILABLE`, so the check is fully exercisable in the hermetic regression suite
+- **THEN** the verdict is computed from the configuration files alone and the value records the corroboration as `UNAVAILABLE` without failing — the parsed patterns are themselves the measurement — so the check is fully exercisable in the hermetic regression suite
+- **AND GIVEN** instead a configuration the parse read NO pattern from, with the same non-answering binary
+- **THEN** the verdict is NON-PASSING (`FAIL (exclusion set UNCORROBORATED: …)`) and no review is enqueued, because on that path the oracle is the only evidence there is
 
 #### Scenario: A pattern the binary reports but the parse missed is drift, and fails
 - **GIVEN** an invocable `roborev` whose `config get exclude_patterns` reports a pattern absent from the wrapper's parsed set
@@ -665,6 +710,15 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **GIVEN** a configuration file with no `exclude_patterns` key and an invocable `roborev` that ANSWERS with an EMPTY list
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** the value reads `PASS (no exclusion patterns configured; …)` with the corroboration recorded as `OK` and the roborev built-in excludes still named, counted and reconciled — so "nothing is configured" can never be read as "nothing is excluded"
+- **AND** the review IS enqueued, asserted positively — an "it was blocked" assert elsewhere is only evidence once its sibling is shown to reach the enqueue
+
+#### Scenario: An UNCORROBORATED empty parse is non-passing, and its text says which condition it could not rule out
+- **GIVEN** a configuration file with no `exclude_patterns` key and a `roborev` whose `config get exclude_patterns` exits non-zero from every checkout
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** the value reads `FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: UNAVAILABLE; built-in-set: <state>)`, never a `PASS`, and no review is enqueued
+- **AND** the detail names the oracle as the only thing that can distinguish "nothing is configured" from "this parser did not recognise the key", states which of the two the run could not rule out, explicitly disclaims asserting that anything IS excluded, names the issue the alias would reintroduce, and records that a genuinely empty configuration still passes once the binary says so
+- **AND GIVEN** instead a configuration carrying `exclude_patterns = []` with the same non-answering binary
+- **THEN** the verdict is the same and only the diagnostic differs, stating that the parser DID see the key with an empty array — an affirmative read of ONE file, which cannot rule out an unrecognised key spelling in another
 
 #### Scenario: A quoted TOML key spelling is parsed, not skipped
 - **GIVEN** a configuration whose key is written `"exclude_patterns"` (or `'exclude_patterns'`) with a value that would swallow census code
@@ -1150,7 +1204,42 @@ Every per-check key SHALL participate in ONE verdict scan in which a value begin
 never do. `DEGRADED` is non-failing BY DESIGN and only ever appears on `job-record:`, whose consequences
 are published by the dependent asserts under their own keys. A per-check key whose
 step was never reached SHALL carry an explicit `SKIP` rather than a blank, so an unreached check can
-never read as a pass. The block's name SHALL be distinct from the agent gate's summary block names so
+never read as a pass.
+
+**THE VERDICT GRAMMAR SHALL BE CLOSED, AND THE NON-FAILING SET SHALL BE AN ALLOW-LIST.** Testing only the
+FAILING prefixes and letting everything else fall through to the pass is the same defect shape as the three
+above, at the wrapper's single most consequential decision point: a value nobody planned — an EMPTY string
+because a check aborted before assigning, a state a future check introduces, a typo — would inherit the
+non-failing branch and reach `RESULT: PASS`. A value matching NEITHER the failing set NOR the documented
+non-failing set (`PASS`, `SKIP`, `NOTICE`, `UNAVAILABLE`, `DEGRADED`, and `findings:`'s own `NONE`,
+`PRESENT`, `UNKNOWN`) SHALL therefore be an UNRECOGNISED VERDICT that FAILS the run and NAMES itself and
+the reason. The existing failing-prefix scan SHALL be preserved as its own statement so the structural
+assert pinning `NOTICE*` outside the failing set keeps reading the statement it was written against.
+
+**AND A PASS SHALL REQUIRE EVERY VERDICT-CARRYING KEY TO HAVE AFFIRMATIVELY PASSED.** The seven
+deterministic keys — `push-assert:`, `census-check:`, `code-free:`, `census-exclusion:`, `sha-assert:`,
+`review-completed:`, `prompt-content:` — SHALL each read `PASS` on a passing run (`census-exclusion:` MAY
+additionally read `NOTICE`, which is a measurement with a stated remedy-less residual). `vacuity-tier1:`,
+`vacuity-tier2:` and `findings:` are deliberately EXCLUDED, being corroborators with documented non-`PASS`
+values. This closes the case NEIGHBOURING the grammar check: a value that is IN the grammar and
+non-failing but is not a MEASUREMENT — `SKIP` above all, which means the check NEVER RAN. Validating that
+the sourced checks file DEFINES its five functions proves they exist, NOT that each reached its
+assignment; a check that returns early leaves its key at the initial `SKIP`, and the run then passed with a
+key that measured nothing — textually identical to a genuine pass. The backstop SHALL be evaluated only on
+a run that would otherwise PASS, so an already-failing run's actionable cause is not buried under a
+structural one, and its message SHALL say that the cause is a defect in the wrapper rather than in the
+branch under review.
+
+#### Scenario: An unrecognised verdict value fails the run instead of inheriting the pass
+- **GIVEN** a run in which one per-check key holds a value outside the documented grammar (the observable signature of a check that aborted before assigning, or that introduced a new state)
+- **WHEN** the verdict scan runs
+- **THEN** the run FAILs, the offending value is named under its own diagnostic, and the value is still emitted in the block rather than being silently normalised
+- **AND** the hermetic suite proves this on a PATCHED COPY of the flow scripts, having FIRST shown the UNPATCHED copy reaching `PASS` on the same fixture and verified that the patch really changed the file — otherwise a copy that failed because it was copied wrong would satisfy the assert
+
+#### Scenario: A check that never ran cannot ride to PASS on its initial SKIP
+- **GIVEN** a run in which a verdict-carrying check returns before assigning its key, leaving the initial `SKIP`, and in which no other key fails
+- **WHEN** the verdict is computed
+- **THEN** the run FAILs, naming the key and its non-affirmative value, stating that a non-failing value which is not a measurement is the vacuous pass itself, and directing the reader at the wrapper rather than at the branch under review The block's name SHALL be distinct from the agent gate's summary block names so
 neither can be pasted as the other. The wrapper SHALL exit non-zero on any outcome other than PASS, and
 SHALL be usable such that a caller retains ONLY this block and never the raw review transcript (which
 SHALL be written to the log path named in the block's `log:` field). An unexpected mid-run abort SHALL
@@ -1282,9 +1371,13 @@ whose `exclude_patterns` WOULD swallow census code — notably a restored `['doc
 `exclude_patterns` key present with an unparseable value FAILs as `exclusion set unreadable` while an
 absent key/configuration file reads `PASS (no exclusion patterns configured)`; (t) a census path containing
 SPACES and a literal double quote is compared correctly (the NUL-safety regression, which a
-non-`-z` comparison would silently mis-handle as a false PASS); (u) the corroboration states — a stub
-that does not answer `config get` reports `UNAVAILABLE` without failing, and one reporting a pattern absent
-from the parsed set FAILs as `exclusion set drift`; and (v) the ported `FormatExcludeArgs` construction
+non-`-z` comparison would silently mis-handle as a false PASS); (u) the corroboration states, ALL FOUR of
+them and in both scopes — with patterns PARSED, a stub that does not answer `config get` reports
+`UNAVAILABLE` without failing; with an EMPTY parse the same silence is NON-PASSING with no review enqueued,
+while a stub ANSWERING an empty list PASSes and IS enqueued (asserted positively, since a
+"no review was enqueued" assert is only evidence once its sibling is shown to reach the enqueue), and one
+reporting a pattern absent from the parsed set FAILs as `exclusion set drift`; and (v) the ported
+`FormatExcludeArgs` construction
 itself — a slash-containing pattern leaves a NESTED `docs`-directory census path SURVIVING (no false FAIL),
 a bare directory name excludes its whole subtree via the `<p>/**` sibling pathspec, a leading-`/` pattern
 excludes only the root-level path while its slash-less twin excludes at any depth, a TRAILING-slash pattern
@@ -1301,6 +1394,19 @@ DIRECTLY against the function so the assertion survives the upstream pre-enqueue
 unreachable through the wrapper; and (z) a code census path containing SPACES, one under a space-bearing
 DIRECTORY, and one with a NON-ASCII (octal-escaped) name each yield `prompt-content: PASS` and
 `RESULT: PASS`.
+
+The check SHALL additionally pin the CLOSED VERDICT GRAMMAR and the affirmation backstop, which are
+properties of the wrapper's own decision point rather than of any fixture: (aa) a per-check key holding a
+value outside the documented grammar FAILs the run and is named; and (bb) a verdict-carrying check that
+returns before assigning its key FAILs the run rather than passing on its initial `SKIP`. Because neither
+state is reachable through a fixture, both SHALL be exercised against a PATCHED COPY of the three flow
+scripts, and the copy SHALL be shown to reach `PASS` UNPATCHED on the same fixture — with the patch
+verified to have really changed the file — before either assertion is believed: an assert that a copy FAILs
+is otherwise satisfied by a copy that failed because it was copied wrong, which is a probe failing in the
+direction that looks like success. Both SHALL ALSO be pinned STRUCTURALLY against the scan statement (that
+the positive arm exists, that its fallback sets the failure flag, and that the backstop names all seven
+deterministic keys), because a behavioural case cannot see a future edit that deletes the arm for a key it
+does not exercise.
 
 **Every hostile-path or hostile-verdict case SHALL assert the terminal `RESULT:` and, where the path
 reaches the reviewer, `prompt-content:` — not one intermediate key alone.** A case that asserted only
@@ -1353,7 +1459,8 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 
 #### Scenario: The exclusion cases stay hermetic
 - **WHEN** the new cases run on a machine with no network access and no real roborev binary installed
-- **THEN** they complete using the stub reviewer, the fixture's own git repository and the fixture's own configuration file, with the corroboration reported `UNAVAILABLE` rather than causing a failure or a skip
+- **THEN** they complete using the stub reviewer, the fixture's own git repository and the fixture's own configuration file, and a case whose parse is NON-EMPTY reports the corroboration as `UNAVAILABLE` rather than causing a failure or a skip
+- **AND** the stub's DEFAULT SHALL be a build that ANSWERS `config get` (which is what the pinned binary does), so a case reaches the non-answering `UNAVAILABLE` state only by asking for it explicitly and stating why — the empty-parse PASS requires an answer, so a silently non-answering default would make every configuration-less case assert against a state the real binary never produces
 
 #### Scenario: Every wrapper invocation in the suite redirects HOME
 - **GIVEN** the reconciliation check reads the GLOBAL `$HOME/.roborev/config.toml` into the effective set
@@ -1363,6 +1470,7 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 #### Scenario: No case blesses a guard that has silently self-disabled
 - **WHEN** the cases that expect `PASS (no exclusion patterns configured…)` are inspected
 - **THEN** each of them supplies a binary that ANSWERS with an empty list and asserts the corroboration is `OK`, so no case in the suite records a green verdict for the state a guard reaches when it fails to recognise a configured key
+- **AND** that expectation is no longer carried by the cases alone: the wrapper itself refuses the un-corroborated form, so a future case that forgot the answering stub would FAIL rather than record a green verdict for it
 
 #### Scenario: The tally line cannot be mistaken for a gate or wrapper verdict
 - **WHEN** the regression check finishes
