@@ -569,7 +569,7 @@ roborev_census() {
   census_paths=()
   census_unmeasurable_paths=()
   census_unmeasurable_detail=()
-  local record add del path unmeasurable_row
+  local record add del path exec_state unmeasurable_row
   while IFS= read -r -d '' record; do
     [ -n "$record" ] || continue
     # Split the record by hand: the PATH is everything after the second TAB and may itself
