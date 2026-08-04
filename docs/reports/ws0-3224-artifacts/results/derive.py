@@ -25,6 +25,13 @@ import argparse, glob, json, os, statistics, sys
 
 CORPUS_DEFAULT = 3999890
 MUX_MIN = 99.0            # enabled% floor; below this the count is an estimate
+# uncore_imc_0..11 on this host (Xeon 8375C; host/sysfs-pmus.txt is authoritative,
+# and host/imc-socket-map.txt records the per-socket split). Each instance is read
+# for cas_count_read and cas_count_write, so a COMPLETE per-socket set is
+# IMC_COUNT x 2 rows. Derived rather than written twice so the completeness
+# assertion and the summing loop cannot drift apart.
+IMC_COUNT = 12
+IMC_EXPECTED_INSTANCES = IMC_COUNT * 2
 
 
 # --------------------------------------------------------------- perf CSV I/O
@@ -256,7 +263,36 @@ def do_rep(repdir):
     ipc_I = interior['instructions'] / interior['cycles']
 
     # ================= uncore / DRAM bandwidth ============================
-    pU = parse_perf(os.path.join(repdir, 'perf-uncore.csv'), per_socket=True)
+    #
+    # FAIL CLOSED ON AN ABSENT OR INCOMPLETE IMC SET (roborev finding #5, PR
+    # #3286). parse_perf returns {} for a file that does not exist, so a missing
+    # or emptied perf-uncore.csv used to flow straight through the summing loop
+    # below: s_r and s_w stayed 0, n stayed 0, and the rep published
+    # total_GB_per_s = 0.0 and per-socket 0.0 — a NUMBER, indistinguishable in
+    # derived.json from a host that genuinely moved no DRAM traffic. Combined with
+    # the resume predicate that skipped such a rep as "complete", a failed uncore
+    # capture could be preserved and then published as 0 GB/s.
+    #
+    # The check is an AFFIRMATIVE one: the expected instance count is asserted
+    # PRESENT, rather than the absence of an error being read as success. On this
+    # host that is 12 IMCs x {read,write} x {S0,S1} = 48 rows, and all six
+    # committed reps carry exactly 48. IMC_EXPECTED_INSTANCES is derived from the
+    # same range(12) the loop scans, so the two cannot drift apart.
+    upath = os.path.join(repdir, 'perf-uncore.csv')
+    if not os.path.exists(upath):
+        raise SystemExit(
+            "FATAL: %s absent. The uncore capture did not produce a counter "
+            "file, so this rep has no DRAM traffic measurement. Deriving 0 GB/s "
+            "from an absent file would publish a number for a capture that "
+            "failed; re-run the rep (run/run-all.sh redoes it now that "
+            "run/rep-complete.py refuses to skip it)." % upath)
+    pU = parse_perf(upath, per_socket=True)
+    if not pU:
+        raise SystemExit(
+            "FATAL: %s carries no readable perf rows (size %d bytes). Same "
+            "refusal as an absent file: an empty counter file is not a "
+            "measurement of zero traffic."
+            % (upath, os.path.getsize(upath)))
     uwin = meta['window_secs']
     dram = {'per_socket': {}, 'note':
             "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline "
@@ -265,7 +301,7 @@ def do_rep(repdir):
     for sock in ('S0', 'S1'):
         s_r = s_w = 0.0
         n = 0
-        for i in range(12):
+        for i in range(IMC_COUNT):
             for kind, acc in (('read', 'r'), ('write', 'w')):
                 rows = ev(pU, 'uncore_imc_%d/cas_count_%s/' % (i, kind), socket=sock)
                 for r in rows:
@@ -280,6 +316,18 @@ def do_rep(repdir):
                     else:
                         s_w += r['value']
                     n += 1
+        # Per-socket completeness, asserted before the socket's total is believed.
+        # A partial IMC set understates that socket's traffic, which would show up
+        # as a plausible-but-low GB/s figure and — because the far-socket fraction
+        # is a RATIO of the two sockets — could shift the NUMA-confinement claim in
+        # either direction without ever looking wrong.
+        if n != IMC_EXPECTED_INSTANCES:
+            raise SystemExit(
+                "FATAL: %s reports %d of %d expected uncore_imc instances on %s "
+                "(12 IMCs x {read,write}). A partial IMC set cannot be summed "
+                "into a socket total: the missing channels' traffic is not zero, "
+                "it is unmeasured. Re-run the rep."
+                % (upath, n, IMC_EXPECTED_INSTANCES, sock))
         dram['per_socket'][sock] = {
             'cas_read_MiB': s_r, 'cas_write_MiB': s_w,
             'total_MiB': s_r + s_w,
@@ -290,9 +338,17 @@ def do_rep(repdir):
     dram['total_MiB'] = tot_mib
     dram['total_GB_per_s'] = tot_mib * 1048576 / 1e9 / uwin
     dram['window_secs'] = uwin
-    if tot_mib > 0:
-        dram['far_socket_fraction'] = (
-            dram['per_socket']['S1']['total_MiB'] / tot_mib)
+    # A complete IMC set that genuinely sums to zero is not a plausible reading for
+    # a running scan, and it is the last shape in which a 0 GB/s figure could still
+    # reach derived.json. Refused rather than published with a caveat.
+    if tot_mib <= 0:
+        raise SystemExit(
+            "FATAL: %s: all %d expected uncore_imc instances present on both "
+            "sockets, yet total DRAM traffic sums to %.1f MiB. A running scan "
+            "cannot move zero bytes; this is a counter/permission failure, not a "
+            "measurement of zero." % (upath, IMC_EXPECTED_INSTANCES * 2, tot_mib))
+    dram['far_socket_fraction'] = (
+        dram['per_socket']['S1']['total_MiB'] / tot_mib)
 
     return {
         'repdir': repdir,

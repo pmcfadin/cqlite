@@ -149,15 +149,19 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The verdict math, the counter diagnoses and their thresholds live here, sourced
+# rather than inlined so selftest-guards.sh can drive every branch with injected
+# values. Two of PR #3286's six roborev findings were fail-open defects in this
+# logic that no test could reach; see that file's header.
+# shellcheck source=harness/verdict-logic.sh
+source "$HERE/harness/verdict-logic.sh"
+
 # ------------------------------------------------------------------ thresholds
-MOVE_MIN_MILLI=2000          # P3/P5 minimum movement between arms, EITHER
-                             #   direction, x1000. Measured healthy-host margin:
-                             #   LLC-loads 3.54x, cache-references ~8x.
-MISSRATE_MIN_MILLI=1500      # P4 minimum rise in misses/loads, x1000. Measured
-                             #   healthy-host value 4.39x (13.95% -> 61.23%).
+# MOVE_MIN_MILLI, MISSRATE_MIN_MILLI and MUX_MIN_PCT are single-homed in
+# harness/verdict-logic.sh alongside the checks that consume them, and are in
+# scope from here on. The two below are used only by this script's P1/P2 controls.
 HOSTILITY_MIN=5              # P1 cycles/access minimum ratio
 SYMMETRY_TOL_PCT=10          # P2 instructions/access tolerance, percent
-MUX_MIN_PCT=99               # below this the counts are multiplexed estimates
 GATE_PROBE_ACCESSES=1000     # gate-integrity probe size
 GATE_PROBE_MAX_INSTR=1000000 # ...and its ceiling; ungated would be ~1e8-1e9
 
@@ -405,17 +409,8 @@ for arm in friendly hostile; do
 done
 
 # ------------------------------------------------------------------ verdict math
-isnum() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
-fmt_milli() { printf '%d.%03d' "$(( $1 / 1000 ))" "$(( $1 % 1000 ))"; }
-show_milli() { if [ "$1" = inf ]; then printf 'inf'; elif isnum "$1"; then fmt_milli "$1"; else printf 'na'; fi; }
-
-ratio_milli() { # $1 hostile $2 friendly -> milli-ratio, or "inf"/"na"
-  if ! isnum "$1" || ! isnum "$2"; then echo na; return; fi
-  if [ "$2" -eq 0 ]; then if [ "$1" -gt 0 ]; then echo inf; else echo na; fi; return; fi
-  echo $(( $1 * 1000 / $2 ))
-}
-rate_milli() { if isnum "$1"; then echo $(( $1 * 1000 / ACCESSES )); else echo na; fi; }
-
+# isnum / fmt_milli / show_milli / ratio_milli / rate_milli / move_milli /
+# compute_missrate / evaluate / ev_mux_min all come from harness/verdict-logic.sh.
 C_H="${MED[hostile/cycles]}";       C_F="${MED[friendly/cycles]}"
 I_H="${MED[hostile/instructions]}"; I_F="${MED[friendly/instructions]}"
 CYC_RATIO="$(ratio_milli "$C_H" "$C_F")"
@@ -436,56 +431,17 @@ if isnum "$INS_RATIO"; then
 fi
 say "   instructions friendly=$I_F  hostile=$I_H  ratio=$(show_milli "$INS_RATIO")x  -> $SYMMETRY"
 
-# Direction-agnostic movement: max/min. See the P3-P5 header block - raw LLC-loads
-# legitimately FALLS in the hostile arm on healthy hardware (prefetcher stops
-# issuing them), so asserting a direction here is a false-FAIL generator.
-move_milli() {
-  if ! isnum "$1" || ! isnum "$2"; then echo na; return; fi
-  local hi=$1 lo=$2
-  [ "$1" -lt "$2" ] && { hi=$2; lo=$1; }
-  if [ "$lo" -eq 0 ]; then if [ "$hi" -gt 0 ]; then echo inf; else echo na; fi; return; fi
-  echo $(( hi * 1000 / lo ))
-}
-# LLC miss rate = misses/loads, x1000. The invariant that survives prefetcher
-# behaviour: hostility raises the FRACTION of LLC accesses that miss.
-MISSRATE_F=na; MISSRATE_H=na; MISSRATE_RISE=na
-compute_missrate() {
-  local lf="${MED[friendly/LLC-loads]}" lh="${MED[hostile/LLC-loads]}"
-  local mf="${MED[friendly/LLC-load-misses]}" mh="${MED[hostile/LLC-load-misses]}"
-  isnum "$lf" && isnum "$lh" && isnum "$mf" && isnum "$mh" || return
-  [ "$lf" -gt 0 ] && [ "$lh" -gt 0 ] || return
-  MISSRATE_F=$(( mf * 1000 / lf )); MISSRATE_H=$(( mh * 1000 / lh ))
-  [ "$MISSRATE_F" -gt 0 ] || { MISSRATE_RISE=inf; return; }
-  MISSRATE_RISE=$(( MISSRATE_H * 1000 / MISSRATE_F ))
-}
-
-declare -A EV_VERDICT EV_MOVE EV_RATE
-evaluate() { # $1 event -> sets EV_VERDICT/EV_MOVE/EV_RATE
-  local ev="$1" h="${MED[hostile/$1]}" f="${MED[friendly/$1]}"
-  local m q; m="$(move_milli "$h" "$f")"; q="$(rate_milli "$h")"
-  EV_MOVE[$ev]="$m"; EV_RATE[$ev]="$q"
-  if ! isnum "$h" || ! isnum "$f"; then EV_VERDICT[$ev]="${h}"; return; fi
-  if [ "$h" -eq 0 ] && [ "$f" -eq 0 ]; then EV_VERDICT[$ev]=SILENT_ZERO; return; fi
-  if [ "$h" -eq 0 ]; then EV_VERDICT[$ev]=HOSTILE_ZERO; return; fi
-  local moved=0
-  { [ "$m" = inf ] || { isnum "$m" && [ "$m" -ge "$MOVE_MIN_MILLI" ]; }; } && moved=1
-  if [ "$moved" -eq 0 ]; then EV_VERDICT[$ev]=UNRELIABLE_NO_MOVEMENT; return; fi
-  if [ "$ev" = LLC-load-misses ]; then
-    if [ "$MISSRATE_RISE" = inf ]; then EV_VERDICT[$ev]=OK
-    elif isnum "$MISSRATE_RISE" && [ "$MISSRATE_RISE" -ge "$MISSRATE_MIN_MILLI" ]; then EV_VERDICT[$ev]=OK
-    elif [ "$MISSRATE_RISE" = na ]; then EV_VERDICT[$ev]=UNRELIABLE_MISSRATE_UNCOMPUTABLE
-    else EV_VERDICT[$ev]=UNRELIABLE_MISSRATE_FLAT; fi
-    return
-  fi
-  EV_VERDICT[$ev]=OK
-}
 report_ev() {
   local ev="$1" tag="$2"
   say "   $(printf '%-17s' "$ev") [$tag] friendly=${MED[friendly/$ev]}  hostile=${MED[hostile/$ev]}"
   say "                     movement=$(show_milli "${EV_MOVE[$ev]}")x either-direction (need >= $(fmt_milli $MOVE_MIN_MILLI)x)  hostile-per-access=$(show_milli "${EV_RATE[$ev]}") (REPORTED, not gated)  -> ${EV_VERDICT[$ev]}"
-  local m="${MUXMIN[hostile/$ev]:-100}"
+  # Multiplexing is GATING, not advisory (roborev finding #3, PR #3286): it is
+  # decided in evaluate() and surfaces as UNRELIABLE_MULTIPLEXED above. This line
+  # reports the number behind that verdict; it no longer carries the decision,
+  # which is what let a scaled estimate read OK.
+  local m; m="$(ev_mux_min "$ev")"
   if isnum "$m" && [ "$m" -lt "$MUX_MIN_PCT" ]; then
-    say "                     WARNING: multiplexed at ${m}% enabled - counts are scaled estimates"
+    say "                     MULTIPLEXED at ${m}% enabled (floor ${MUX_MIN_PCT}%) - counts are scaled estimates, not counts"
   fi
 }
 
@@ -579,7 +535,7 @@ say "artefacts:  $OUT_DIR"
     printf '    "%s": {"probe": "%s", "gating": %s, "friendly_median": "%s", "hostile_median": "%s", "movement_either_direction": "%s", "hostile_per_access_reported_not_gated": "%s", "verdict": "%s", "min_enabled_pct": "%s"}' \
       "$ev" "${EV_STATUS[$ev]}" "$gating" "${MED[friendly/$ev]}" "${MED[hostile/$ev]}" \
       "$(show_milli "${EV_MOVE[$ev]}")" "$(show_milli "${EV_RATE[$ev]}")" \
-      "${EV_VERDICT[$ev]}" "${MUXMIN[hostile/$ev]:-unknown}"
+      "${EV_VERDICT[$ev]}" "$(ev_mux_min "$ev")"
   done
   printf '\n  },\n'
   printf '  "advisory": {"sysfs_pmus": "%s", "uncore_imc_instances": %s, "perf_M_MemoryBandwidth": "%s", "stream_triad_threads": "%s", "stream_triad_gbps_basis24": "%s", "stream_triad_gbps_basis32": "%s", "stream_note": "STREAM-triad-class, not the vendor STREAM benchmark; re-run at the engine core/NUMA binding for AC5"}\n' \

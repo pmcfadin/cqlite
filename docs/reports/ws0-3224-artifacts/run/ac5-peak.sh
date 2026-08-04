@@ -22,6 +22,9 @@
 # cross-check that the byte accounting is right (RUNBOOK step 8.2: "Cross-check
 # the peak against a second source if cheap").
 set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../harness/guards.sh
+source "$HERE/../harness/guards.sh"
 OUT="${1:-/data/ws0/ac5}"
 BIN="${BIN:-/data/ws0/positive-control-run2/cache-hostile}"
 SERVER_CPUS="${SERVER_CPUS:-0-5,64-69}"    # the S=6/N=16 server set
@@ -47,9 +50,18 @@ numactl --cpunodebind="$NODE" --membind="$NODE" \
   perf stat -x, --per-socket -a -e "$UNCORE" -o "$OUT/perf-uncore-triad.csv" -- \
   "$BIN" stream --stream-mib "$STREAM_MIB" --threads "$THREADS" --iters "$ITERS" \
   > "$OUT/stream.txt" 2>&1
-RC=$?
+RC=$?   # captured IMMEDIATELY, before any command substitution
 echo "rc=$RC" | tee -a "$OUT/summary.txt"
 cat "$OUT/stream.txt" | tee -a "$OUT/summary.txt"
+# A nonzero rc used to be PRINTED and then walked past (roborev finding #6, PR
+# #3286): if a partial CSV happened to exist, the analysis below would run on it,
+# find enough rows to reach a verdict, and the script would exit 0 — publishing an
+# AC5 figure from a triad that had failed. AC5 is a DISCHARGED acceptance
+# criterion, so a fail-open here certifies a claim against a measurement that did
+# not complete.
+ws0_guard_rc "AC5 triad+uncore capture" "$RC" \
+  "See $OUT/stream.txt. A partial CSV must not be analysed: a bandwidth ceiling derived from an incomplete run is not a ceiling." \
+  || exit 1
 
 # Independent cross-check from the IMC counters over the SAME run.
 #
@@ -79,106 +91,14 @@ cat "$OUT/stream.txt" | tee -a "$OUT/summary.txt"
 # original form of this block had exactly that shape and had never been executed,
 # so the defect sat latent in a committed script. The heredoc must be attached to
 # python3 and the pipe applied after it.
-python3 - "$OUT/perf-uncore-triad.csv" "$OUT/stream.txt" <<'PY' | tee -a "$OUT/summary.txt"
-import sys
-csv, stxt = sys.argv[1], sys.argv[2]
-per = {'S0': {}, 'S1': {}}
-elapsed = None
-for line in open(csv):
-    line = line.strip()
-    if not line or line.startswith('#'):
-        continue
-    f = line.split(',')
-    if len(f) < 7:
-        continue
-    sock, val, unit, ev, enabled = f[0], f[2], f[3], f[4], f[6]
-    try:
-        v = float(val)
-    except ValueError:
-        continue
-    if float(enabled) < 99.0:
-        sys.exit("FATAL: %s %s only %s%% enabled" % (sock, ev, enabled))
-    if sock in per and 'cas_count' in ev:
-        per[sock][ev] = v         # already MiB; do NOT multiply by 64 again
-    if elapsed is None:
-        try:
-            elapsed = float(f[5]) / 1e9
-        except (ValueError, IndexError):
-            pass
-
-st = {}
-for line in open(stxt):
-    if '=' in line:
-        k, _, v = line.strip().partition('=')
-        st[k] = v
-
-tot_mib = sum(sum(d.values()) for d in per.values())
-print()
-print("-- IMC cross-check of the triad's own DRAM traffic --")
-print("   window (perf run_time)  : %.3f s" % (elapsed or float('nan')))
-for sock in ('S0', 'S1'):
-    vals = list(per[sock].values())
-    nz = [v for v in vals if v > 0]
-    print("   %s: %d instances, %d non-zero, sum %.1f MiB (per-instance min %.1f "
-          "max %.1f)" % (sock, len(vals), len(nz), sum(vals),
-                         min(nz) if nz else 0.0, max(nz) if nz else 0.0))
-if tot_mib:
-    print("   far-socket fraction     : %.4f  (membind=node0 should keep this near 0)"
-          % (sum(per['S1'].values()) / tot_mib))
-
-try:
-    n = float(st['elements']); iters = float(st['iters'])
-    best = float(st['best_iter_s']); init = float(st['init_s'])
-    # Steady-state traffic: `iters` passes at 32 B/element (2 reads + the written
-    # line's read-for-ownership + the writeback). The init pass writes all three
-    # arrays once, so charge it at 3 arrays x 8 B x n, x2 for RFO + writeback.
-    steady = 32.0 * n * iters
-    init_bytes = 2.0 * 3.0 * 8.0 * n
-    expected = steady + init_bytes
-    measured = tot_mib * 1048576.0
-    ratio = measured / expected if expected else float('nan')
-    print()
-    print("   -- byte accounting: is the per-instance sum right? --")
-    print("   elements %.0f, iters %.0f" % (n, iters))
-    print("   expected steady traffic  : %.1f GB (32 B/elem x elements x iters)"
-          % (steady / 1e9))
-    print("   expected init traffic    : %.1f GB (3 arrays written once, RFO+WB)"
-          % (init_bytes / 1e9))
-    print("   expected TOTAL           : %.1f GB" % (expected / 1e9))
-    print("   IMC measured TOTAL       : %.1f GB" % (measured / 1e9))
-    print("   ratio measured/expected  : %.3f" % ratio)
-    if 0.6 <= ratio <= 1.6:
-        print("   VERDICT: ~1x  -> the 8 non-zero instances per socket are DISTINCT")
-        print("            CHANNELS and summing them is CORRECT.")
-    elif 6.0 <= ratio <= 10.0:
-        print("   VERDICT: ~8x  -> the instances are DUPLICATE reports of one")
-        print("            socket aggregate. EVERY GB/s figure derived by summing")
-        print("            them is 8x too high and MUST be divided by the non-zero")
-        print("            instance count. Fix the derivation before publishing.")
-    else:
-        print("   VERDICT: INDETERMINATE (ratio %.3f matches neither ~1x nor ~8x)."
-              % ratio)
-        print("            Do NOT publish a bandwidth figure until this is resolved.")
-    print()
-    print("   rates, for information only (NOT the verdict): the triad's own GB/s")
-    print("   comes from its BEST iteration (%.6f s) while the IMC counters cover"
-          % best)
-    print("   the WHOLE %.3f s window including a %.3f s single-threaded init, so"
-          % (elapsed or float('nan'), init))
-    print("   the IMC window-average rate is necessarily the lower of the two.")
-    if elapsed:
-        print("   IMC window-average      : %.2f GB/s" % (measured / 1e9 / elapsed))
-    print("   triad best-iteration     : basis24 %s GB/s | basis32 %s GB/s"
-          % (st.get('gbps_basis24', '?'), st.get('gbps_basis32', '?')))
-    print("   steady-state IMC equivalent at the best iteration rate:")
-    print("                            : %.2f GB/s" % (32.0 * n / best / 1e9))
-except (KeyError, ValueError) as exc:
-    print("   byte accounting UNAVAILABLE (%s) — the channels-vs-duplicates"
-          % exc)
-    print("   question is then UNRESOLVED and no bandwidth figure may be published.")
-
-print()
-print("   NOTE: this is a STREAM-TRIAD-CLASS reference, not the vendor STREAM")
-print("   benchmark. Quote which byte basis (24 B/elem architectural, or 32 B/elem")
-print("   including read-for-ownership) any published figure uses.")
-PY
+# The analysis lives in run/ac5-analyse.py, not in a heredoc here. Two reasons,
+# both from roborev finding #6 (PR #3286): its failure paths had to become real
+# exits rather than printed prose, and a heredoc cannot be handed a crafted
+# indeterminate input by a test. Its EXIT CODE is the AC5 verdict.
+python3 "$HERE/ac5-analyse.py" "$OUT/perf-uncore-triad.csv" "$OUT/stream.txt" \
+  | tee -a "$OUT/summary.txt"
+ARC=${PIPESTATUS[0]}
+ws0_guard_rc "AC5 byte accounting (run/ac5-analyse.py)" "$ARC" \
+  "The channels-vs-duplicates question is unresolved or resolved against the derivation, so no bandwidth figure may be published from $OUT." \
+  || exit 1
+echo "AC5 peak: byte accounting resolved; artefacts in $OUT" | tee -a "$OUT/summary.txt"

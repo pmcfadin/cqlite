@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""#3224 AC5 — the triad's IMC cross-check and byte accounting, fail-closed.
+
+    python3 ac5-analyse.py <perf-uncore-triad.csv> <stream.txt>
+
+Exit 0 = the byte accounting RESOLVED the channels-vs-duplicates question and the
+         per-instance sum is the right basis for a bandwidth figure.
+Exit 1 = unresolved. No bandwidth figure may be published.
+
+THE DEFECT THIS EXISTS TO CATCH (roborev finding #6, PR #3286)
+--------------------------------------------------------------
+This analysis used to be a heredoc inside ac5-peak.sh, and BOTH of its failure
+paths printed a warning and then exited 0:
+
+  * the INDETERMINATE branch (`ratio` matching neither ~1x nor ~8x) printed "Do
+    NOT publish a bandwidth figure until this is resolved" and returned success;
+  * the `except (KeyError, ValueError)` branch printed "byte accounting
+    UNAVAILABLE ... no bandwidth figure may be published" and returned success.
+
+So a script whose sole job is to decide whether a GB/s figure is 1x or 8x too
+high could fail to decide it, say so in prose, and exit 0 — while its caller had
+already printed a nonzero perf return code without stopping either. A message that
+tells the operator not to publish, delivered by a process that reports success, is
+advice; the exit code is the only part a pipeline reads.
+
+WHY IT MATTERS HERE SPECIFICALLY. The whole AC5 claim rests on this ratio. perf
+exposes uncore_imc_0..11, and per socket EIGHT report a near-identical non-zero
+value while FOUR read exactly 0.0. `sum/max = 7.996` is consistent with BOTH
+"8 populated channels, sum them" and "8 duplicate reports of one aggregate, do
+not" — and every GB/s figure in the report differs by 8x between them. Byte
+accounting is the only thing that separates them, so an unresolved verdict is not
+a caveat to note, it is the absence of the measurement.
+
+Extracted to its own file so selftest-guards.sh can drive it with a crafted
+indeterminate input and assert the nonzero exit.
+"""
+import sys
+if len(sys.argv) != 3:
+    sys.exit('usage: ac5-analyse.py <perf-uncore-triad.csv> <stream.txt>')
+csv, stxt = sys.argv[1], sys.argv[2]
+per = {'S0': {}, 'S1': {}}
+elapsed = None
+for line in open(csv):
+    line = line.strip()
+    if not line or line.startswith('#'):
+        continue
+    f = line.split(',')
+    if len(f) < 7:
+        continue
+    sock, val, unit, ev, enabled = f[0], f[2], f[3], f[4], f[6]
+    try:
+        v = float(val)
+    except ValueError:
+        continue
+    if float(enabled) < 99.0:
+        sys.exit("FATAL: %s %s only %s%% enabled" % (sock, ev, enabled))
+    if sock in per and 'cas_count' in ev:
+        per[sock][ev] = v         # already MiB; do NOT multiply by 64 again
+    if elapsed is None:
+        try:
+            elapsed = float(f[5]) / 1e9
+        except (ValueError, IndexError):
+            pass
+
+st = {}
+for line in open(stxt):
+    if '=' in line:
+        k, _, v = line.strip().partition('=')
+        st[k] = v
+
+tot_mib = sum(sum(d.values()) for d in per.values())
+# The verdict this script exists to produce. It stays None until the byte
+# accounting AFFIRMATIVELY resolves the channels-vs-duplicates question, so every
+# path that fails to resolve it — an unparseable stream.txt, a missing key, a ratio
+# matching neither hypothesis, an empty CSV — leaves it None and exits non-zero.
+# Keyed on reaching a positive answer, never on the absence of a bad one.
+resolved = None
+print()
+print("-- IMC cross-check of the triad's own DRAM traffic --")
+print("   window (perf run_time)  : %.3f s" % (elapsed or float('nan')))
+for sock in ('S0', 'S1'):
+    vals = list(per[sock].values())
+    nz = [v for v in vals if v > 0]
+    print("   %s: %d instances, %d non-zero, sum %.1f MiB (per-instance min %.1f "
+          "max %.1f)" % (sock, len(vals), len(nz), sum(vals),
+                         min(nz) if nz else 0.0, max(nz) if nz else 0.0))
+if tot_mib:
+    print("   far-socket fraction     : %.4f  (membind=node0 should keep this near 0)"
+          % (sum(per['S1'].values()) / tot_mib))
+
+try:
+    n = float(st['elements']); iters = float(st['iters'])
+    best = float(st['best_iter_s']); init = float(st['init_s'])
+    # Steady-state traffic: `iters` passes at 32 B/element (2 reads + the written
+    # line's read-for-ownership + the writeback). The init pass writes all three
+    # arrays once, so charge it at 3 arrays x 8 B x n, x2 for RFO + writeback.
+    steady = 32.0 * n * iters
+    init_bytes = 2.0 * 3.0 * 8.0 * n
+    expected = steady + init_bytes
+    measured = tot_mib * 1048576.0
+    ratio = measured / expected if expected else float('nan')
+    print()
+    print("   -- byte accounting: is the per-instance sum right? --")
+    print("   elements %.0f, iters %.0f" % (n, iters))
+    print("   expected steady traffic  : %.1f GB (32 B/elem x elements x iters)"
+          % (steady / 1e9))
+    print("   expected init traffic    : %.1f GB (3 arrays written once, RFO+WB)"
+          % (init_bytes / 1e9))
+    print("   expected TOTAL           : %.1f GB" % (expected / 1e9))
+    print("   IMC measured TOTAL       : %.1f GB" % (measured / 1e9))
+    print("   ratio measured/expected  : %.3f" % ratio)
+    if 0.6 <= ratio <= 1.6:
+        print("   VERDICT: ~1x  -> the 8 non-zero instances per socket are DISTINCT")
+        print("            CHANNELS and summing them is CORRECT.")
+        resolved = 'channels'
+    elif 6.0 <= ratio <= 10.0:
+        # RESOLVED, and resolved AGAINST the derivation as written. The question is
+        # answered, so this is not an indeterminate outcome — but every summed GB/s
+        # figure is then 8x high, so it must still stop the run rather than let a
+        # caller proceed on a printed warning.
+        print("   VERDICT: ~8x  -> the instances are DUPLICATE reports of one")
+        print("            socket aggregate. EVERY GB/s figure derived by summing")
+        print("            them is 8x too high and MUST be divided by the non-zero")
+        print("            instance count. Fix the derivation before publishing.")
+        resolved = 'duplicates'
+    else:
+        print("   VERDICT: INDETERMINATE (ratio %.3f matches neither ~1x nor ~8x)."
+              % ratio)
+        print("            Do NOT publish a bandwidth figure until this is resolved.")
+    print()
+    print("   rates, for information only (NOT the verdict): the triad's own GB/s")
+    print("   comes from its BEST iteration (%.6f s) while the IMC counters cover"
+          % best)
+    print("   the WHOLE %.3f s window including a %.3f s single-threaded init, so"
+          % (elapsed or float('nan'), init))
+    print("   the IMC window-average rate is necessarily the lower of the two.")
+    if elapsed:
+        print("   IMC window-average      : %.2f GB/s" % (measured / 1e9 / elapsed))
+    print("   triad best-iteration     : basis24 %s GB/s | basis32 %s GB/s"
+          % (st.get('gbps_basis24', '?'), st.get('gbps_basis32', '?')))
+    print("   steady-state IMC equivalent at the best iteration rate:")
+    print("                            : %.2f GB/s" % (32.0 * n / best / 1e9))
+except (KeyError, ValueError) as exc:
+    print("   byte accounting UNAVAILABLE (%s) — the channels-vs-duplicates"
+          % exc)
+    print("   question is then UNRESOLVED and no bandwidth figure may be published.")
+
+print()
+print("   NOTE: this is a STREAM-TRIAD-CLASS reference, not the vendor STREAM")
+print("   benchmark. Quote which byte basis (24 B/elem architectural, or 32 B/elem")
+print("   including read-for-ownership) any published figure uses.")
+
+# ------------------------------------------------------------------ the verdict
+# The exit code IS the verdict. Everything above is the working; a caller reads
+# this. The two non-'channels' outcomes are distinguished in the message because
+# their remedies differ — 'duplicates' means fix the derivation, None means
+# re-measure — but both are failures, and neither may be walked past.
+print()
+if resolved == 'channels':
+    print("==== AC5 BYTE ACCOUNTING: RESOLVED (channels) ====")
+    print("The per-instance sum is the correct basis; a bandwidth figure derived")
+    print("by summing the non-zero instances may be published.")
+    sys.exit(0)
+if resolved == 'duplicates':
+    sys.exit("==== AC5 BYTE ACCOUNTING: RESOLVED AGAINST THE DERIVATION "
+             "(duplicates) ====\nThe instances are duplicate reports of one "
+             "socket aggregate, so every summed GB/s figure is 8x too high. Fix "
+             "the derivation to divide by the non-zero instance count, then "
+             "re-run. Publishing nothing from this run.")
+sys.exit("==== AC5 BYTE ACCOUNTING: UNRESOLVED ====\nThe channels-vs-duplicates "
+         "question was NOT answered, so the 8x ambiguity stands and NO bandwidth "
+         "figure may be published from this run. sum/max ~ 7.996 is consistent "
+         "with both hypotheses, so it cannot substitute. Re-run the triad with a "
+         "readable stream.txt and a complete uncore CSV.")

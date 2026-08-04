@@ -27,18 +27,55 @@
 # nearly every access (random 64 B stride over 2 GiB with 4 KiB pages), so its
 # latency BUNDLES the page-table walk. That is why the report charges dTLB
 # misses from a SEPARATE term and treats the bundled figure as an UPPER BOUND on
-# the pure DRAM penalty — an upper-bound penalty makes the attributed share
-# LARGER and therefore the residual SMALLER, so quoting it is the conservative
-# direction for a claim of "attributed", and the report says so explicitly.
+# the pure DRAM penalty.
+#
+# DIRECTION OF CONSERVATISM — this comment used to state it BACKWARDS, and the
+# correction is worth keeping visible. It claimed an upper-bound penalty was "the
+# conservative direction for a claim of attributed" because it makes the residual
+# smaller. That is exactly wrong: a LARGER attributed share FLATTERS the
+# hypothesis that the decay is explained, so an inflated penalty is the
+# ANTI-conservative direction. Report §5.4 measures the consequence — the
+# zero-MLP charge accounts for >100% of a delta it is meant to explain part of —
+# and derive.py's route-2 block states the rule correctly. Which is why the
+# MEASURED stall counter, not this table, is the headline attribution.
+#
+# ------------------------------------------------------------------------------
+# WINDOW GATING — the fix for roborev finding #2 (PR #3286), and the reason this
+# script's earlier output must not be used to derive a penalty.
+#
+# This probe used to invoke perf as a plain wrapper, with neither `-D` nor a
+# control FIFO, while cache-hostile defaults to `delay_s = 10.0` and calls
+# wait_for_window(). perf therefore counted FROM PROCESS START, so the
+# identity-fill + Sattolo permutation build was inside the measured interval. That
+# build walks the WORKING SET, so it added ~29 instructions PER NODE — measured at
+# 28.91/28.99/29.01/29.01/29.02 across LLC_8M..DRAM_2G, i.e. constant across five
+# orders of magnitude, which is what identifies it. cycles/access then varied with
+# working set for a reason that had nothing to do with access latency, which is
+# the one quantity this probe exists to isolate.
+#
+# The nanosleep in wait_for_window() is NOT the contaminant: `cycles:u` counts no
+# user cycles while the process is descheduled. The contaminant is init WORK.
+#
+# Fixed by gating the window exactly around the chase with perf's control FIFO
+# (`-D -1 --control fifo:<ctl>,<ack>`, cache-hostile writes enable/disable), which
+# is what positive-control.sh has always done and is strictly better than a `-D`
+# delay: it excludes exit-time address-space teardown as well as init, and both are
+# working-set-dependent. run/penalty-window-check.py then VERIFIES the gate held,
+# per row, from the artefacts — so a silently-failed handshake cannot publish a
+# latency either.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../harness/guards.sh
+source "$HERE/../harness/guards.sh"
 OUT="${1:-/data/ws0/penalty}"
 CPU="${CPU:-8}"          # an idle node-0 CPU, same node as the engine arms
 ACCESSES="${ACCESSES:-20000000}"
 BIN="${BIN:-/data/ws0/positive-control-run2/cache-hostile}"
+CTL="$OUT/perf-ctl.fifo"; ACK="$OUT/perf-ack.fifo"
 
 mkdir -p "$OUT"
 [ -x "$BIN" ] || { echo "FATAL: cache-hostile binary not found at $BIN"; exit 2; }
+trap 'rm -f "$CTL" "$ACK"' EXIT INT TERM
 
 sudo -n sysctl -q -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 >/dev/null 2>&1 || true
 p=$(cat /proc/sys/kernel/perf_event_paranoid)
@@ -72,11 +109,25 @@ probe() { # $1 label  $2 mode  $3 size-arg
   # (rc=0, measuring nothing) and the positive control's two false FAILs.
   local label="$1" work_kib="$2" csv="$OUT/perf-$1.csv"
   local buf_mib=$(( (work_kib / 1024) * 2 + 512 ))   # always > working set
+  # The window is gated to the chase by the control FIFO, NOT by perf's default
+  # "count the whole process". See the header block: without this, init is counted.
+  rm -f "$CTL" "$ACK"; mkfifo "$CTL" "$ACK" \
+    || { echo "FATAL: cannot create control FIFOs under $OUT" >&2; exit 2; }
   taskset -c "$CPU" perf stat -x, \
     -e cycles:u,instructions:u,LLC-loads:u,LLC-load-misses:u,dTLB-load-misses:u \
+    -D -1 --control "fifo:$CTL,$ACK" \
     -o "$csv" -- \
     "$BIN" chase --buffer-mib "$buf_mib" --working-kib "$work_kib" \
-           --accesses "$ACCESSES" --arm "chase-$label" >/dev/null 2>&1
+           --accesses "$ACCESSES" --arm "chase-$label" \
+           --ctl-fifo "$CTL" --ack-fifo "$ACK" > "$OUT/run-$label.log" 2>&1
+  local rc=$?   # captured IMMEDIATELY, before any command substitution
+  # A failed probe used to be silently ignored (stdout and stderr both went to
+  # /dev/null and rc was never read), so a partial count could still be published
+  # as a latency. cache-hostile exits 4 on init_overrun and dies on a failed FIFO
+  # handshake; both must stop the sweep, not decorate it.
+  ws0_guard_rc "penalty probe row '$label' (working set ${work_kib} KiB)" "$rc" \
+    "See $OUT/run-$label.log. A row whose measured section did not run cannot yield an access latency." \
+    || exit 1
   python3 - "$csv" "$label" "$work_kib" "$ACCESSES" "$CPU_GHZ" "$buf_mib" >> "$OUT/summary.txt" <<'PY'
 import sys
 csv,label,size,acc,ghz,buf = sys.argv[1:7]
@@ -112,6 +163,17 @@ probe DRAM_256M    262144
 probe DRAM_1G      1048576
 probe DRAM_2G      2097152
 
+# VERIFY the gate held, per row, from the artefacts just written. A FIFO handshake
+# that silently failed would leave the window ungated and produce plausible,
+# wrong latencies — the "plausible output from a broken instrument" class this
+# whole issue indicts #3217 for. Fail closed: no summary may be presented as a
+# penalty table unless this passes.
+python3 "$HERE/penalty-window-check.py" "$OUT" "$ACCESSES" | tee -a "$OUT/summary.txt"
+WRC=${PIPESTATUS[0]}
+ws0_guard_rc "penalty-probe window-gate check" "$WRC" \
+  "cycles/access in $OUT are NOT access latencies; do not derive a penalty from them." \
+  || exit 1
+
 echo
 cat "$OUT/summary.txt"
 echo
@@ -120,6 +182,8 @@ echo "dTLB-load-misses/access is MEASURED above, so the page-walk bundling is a"
      "bundles a page-table walk and is an UPPER BOUND on the pure DRAM penalty" \
      "(dTLB is charged separately in AC4, so that term risks double-counting --" \
      "the report states which row it charges and why). An upper-bound penalty" \
-     "makes the attributed share larger and the residual smaller, i.e. it is the" \
-     "conservative direction for a claim of 'attributed'." \
+     "makes the attributed share LARGER and the residual SMALLER, which FLATTERS" \
+     "the hypothesis: it is the ANTI-conservative direction, not the conservative" \
+     "one. This table is therefore a CROSS-CHECK; the headline attribution is the" \
+     "measured cycle_activity.stalls_l3_miss delta." \
   | tee -a "$OUT/summary.txt"

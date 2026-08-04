@@ -44,6 +44,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$HERE/../harness/common.sh"
+# shellcheck source=../harness/guards.sh
+source "$HERE/../harness/guards.sh"
 
 LABEL="${1:?label}"; S="${2:?S}"; N="${3:?N}"
 STEP_SECS="${4:?step_secs}"; WINDOW_SECS="${5:?window_secs}"
@@ -300,6 +302,27 @@ for k, v in doc["occupancy"].items():
     if not v["ok"]:
         bad.append("%s: rows=%d err=%d codes=%s"
                    % (k, v["rows_total"], v["requests_error"], v["error_codes"]))
+# The recorded return codes are a VALIDITY GATE, not decoration (roborev finding
+# #4, PR #3286). meta.json has always carried all six, including the two load
+# generators, but nothing here read them — so a rep with loadgen_uncore=1 wrote a
+# structurally perfect meta.json, passed every gate below, and was later SKIPPED
+# ON RESUME as "already complete and valid". Checked here as well as in the
+# caller's shell condition deliberately: this is the copy that travels with the
+# artefact, so anything re-reading meta.json (run-all.sh's resume predicate,
+# derive.py, a future operator) inherits the same refusal.
+#
+# Enumerated from the dict rather than by name: a hardcoded roster is how the
+# shell condition came to omit two arms, and a new arm added to "rc" must not
+# default to unchecked.
+_rc = doc.get("rc")
+if not isinstance(_rc, dict) or not _rc:
+    bad.append("rc: block absent or empty — a capture with no recorded return "
+               "codes cannot be certified")
+else:
+    _nz = {k: v for k, v in _rc.items() if v != 0}
+    if _nz:
+        bad.append("rc: nonzero arm(s) %s (all of %s must be 0)"
+                   % (_nz, sorted(_rc)))
 if not doc["warm_verified_zero_disk_reads"]:
     bad.append("warmth: read_bytes delta = %s (want 0)" % doc["warm_read_bytes_delta"])
 if not doc["client_saturation_gate_pass"]:
@@ -310,9 +333,24 @@ if bad:
 print("  ALL VALIDITY GATES PASS")
 PY
 RC_META=$?
-ws0_log "[$LABEL rep$REP] done rc(alignedA=$RC_ALIGNED_A alignedB=$RC_ALIGNED_B interiorA=$RC_CORE uncore=$RC_UNCORE meta=$RC_META)"
-# Fail closed on ANY non-zero arm. RC_META is non-zero when a validity gate
-# (occupancy / warmth / client saturation) failed, so an empty or client-bound
-# capture can never be recorded as a good rep.
-[ "$RC_ALIGNED_A" -eq 0 ] && [ "$RC_ALIGNED_B" -eq 0 ] && [ "$RC_CORE" -eq 0 ] \
-  && [ "$RC_UNCORE" -eq 0 ] && [ "$RC_META" -eq 0 ]
+ws0_log "[$LABEL rep$REP] done rc(alignedA=$RC_ALIGNED_A alignedB=$RC_ALIGNED_B interiorA=$RC_CORE loadgenInterior=$RC_LG_A uncore=$RC_UNCORE loadgenUncore=$RC_LG_C meta=$RC_META)"
+# Fail closed on ANY non-zero arm, and let the guard NAME the arms it tested.
+#
+# THIS EXPRESSION USED TO OMIT RC_LG_A AND RC_LG_C (roborev finding #4, PR #3286)
+# while the comment above it claimed to "fail closed on ANY non-zero arm". Those
+# two are the load generators for the interior and uncore arms — i.e. the
+# processes that produce the ROWS that are the denominator of every per-row
+# figure. A load generator that died mid-step leaves perf's own rc at 0 (perf was
+# wrapping `sleep`, which succeeded) and a structurally valid meta.json, so the
+# capture returned SUCCESS. A validity expression that omits an arm it advertises
+# is worse than one that never claimed to cover it, because the claim is what
+# stops anyone from checking.
+#
+# The guard prints its roster, so the coverage is visible in the log rather than
+# inferred from this source line. RC_META is non-zero when a meta.json validity
+# gate (occupancy / warmth / client saturation / recorded rc) failed.
+ws0_guard_all_rc_zero \
+  "alignedA=$RC_ALIGNED_A" "alignedB=$RC_ALIGNED_B" \
+  "interiorA=$RC_CORE" "loadgenInterior=$RC_LG_A" \
+  "uncore=$RC_UNCORE" "loadgenUncore=$RC_LG_C" \
+  "meta=$RC_META"

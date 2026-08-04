@@ -34,16 +34,20 @@ for rep in $(seq 1 "$REPS"); do
     set -- $spec
     label="$1"; S="$2"; N="$3"
     out="$OUTROOT/$label/rep$rep"
-    # Resume-safe: a rep is "already complete" only if its meta.json exists AND
-    # every occupancy arm in it passed. A half-finished or invalid rep is redone.
-    if [ -f "$out/meta.json" ] && python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-occ=d.get("occupancy",{})
-sys.exit(0 if occ and all(v and v.get("ok") for v in occ.values())
-              and d.get("warm_verified_zero_disk_reads")
-              and d.get("client_saturation_gate_pass") else 1)' "$out/meta.json" 2>/dev/null; then
-      echo "[run-all] SKIP $label rep$rep (already complete and valid)"; continue
+    # Resume-safe: a rep may be SKIPPED only if run/rep-complete.py certifies it —
+    # occupancy arms ok, EVERY recorded return code zero, EVERY counter file named
+    # in its own meta.json present and carrying supported non-multiplexed rows,
+    # warmth verified, client-saturation gate passed.
+    #
+    # This predicate used to be three inlined conditions that read neither the
+    # return codes nor the counter files (roborev finding #5, PR #3286), so a rep
+    # whose load generator had failed, or whose perf-uncore.csv was absent, was
+    # reported "already complete and valid" and skipped — and a skipped rep is
+    # never revisited, so the failure became permanent. The diagnosis is printed
+    # rather than swallowed: `2>/dev/null` on the old form also hid why a rep was
+    # being redone.
+    if python3 "$HERE/rep-complete.py" "$out"; then
+      echo "[run-all] SKIP $label rep$rep (certified complete and valid)"; continue
     fi
     echo "=============================================================="
     echo "[run-all] $(date -u +%H:%M:%S) $label rep$rep  S=$S N=$N step=${STEP}s window=${WINDOW}s"
