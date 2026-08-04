@@ -1,7 +1,7 @@
 # #3224 guard selftest — recorded output
 # host: ip-172-31-3-252 / 6.17.0-1019-aws
-# date: 2026-08-04T07:58:28Z
-# commit: 75066ce499bc6fda46de2179dbc89f08c695d5f9
+# date: 2026-08-04T08:13:42Z
+# commit: 409e47e6dd8ed7672aa04f188d51a0a0f41bbb6e
 # command: bash docs/reports/ws0-3224-artifacts/selftest-guards.sh
 
 ==== #3224 GUARD SELFTEST ====
@@ -144,8 +144,22 @@ dropped 2 S0 imc_11 rows
    PASS  ws0_start_server refuses to start when the port is already occupied (rc=0)
    PASS  ...and readiness re-verifies our own pid is alive (rc=0)
 
+== ROUND 7 — the timing race, sibling numeric hygiene, required endpoints
+   PASS  cache-hostile stream: clock starts BEFORE the workers (three-phase barrier) (rc=0)
+   PASS  core alignedA CSV with enabled%=nan: REFUSED by the derivation -> REFUSED
+   PASS  core interior CSV with enabled%=nan: REFUSED -> REFUSED
+   PASS  group-C CSV with enabled%=nan: REFUSED -> REFUSED
+   PASS  AC5 triad CSV with enabled%=nan: REFUSED (third copy of the parse, now shared) (rc=1)
+   PASS  uncore rows reporting raw counts instead of MiB: REFUSED (would be 64x wrong) (rc=1)
+   PASS  corpus_rows=3999890 (the real value): CLEAN -> CLEAN
+   PASS  corpus_rows=null: REFUSED (the invariant used to be silently skipped) -> PROBLEMS
+   PASS  corpus_rows=0: REFUSED -> PROBLEMS
+   PASS  corpus_rows=-1: REFUSED (rows % -1 == 0 makes everything look divisible) -> PROBLEMS
+   PASS  tree missing the S=1 endpoint: REFUSED (used to exit 0 with no AC4 at all) (rc=1)
+   PASS  settle+window vs step: real values pass, oversized windows refused (rc=0)
+
 ==== SELFTEST RESULT: PASS ====
-cases passed: 117   failed: 0
+cases passed: 129   failed: 0
 Every guard rejected the bad input it exists to catch, and accepted the
 good input committed in this PR. The healthy-host record is pinned, so
 re-inverting the finding-1 ordering fails here rather than on a good box.

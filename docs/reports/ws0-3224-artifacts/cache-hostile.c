@@ -214,7 +214,11 @@ static int run_chase(size_t buf_mib, size_t working_kib, uint64_t accesses,
 typedef struct {
     double *a, *b, *c;
     size_t lo, hi;
-    pthread_barrier_t *bar;
+    /* THREE barriers per iteration, not one (roborev round 7 finding #1). See
+     * run_stream's comment: with a single barrier the main thread recorded the
+     * iteration start AFTER releasing the workers, so any part of the triad they
+     * completed before that timestamp was not counted. */
+    pthread_barrier_t *b_arrive, *b_go, *b_done;
     int iters;
 } tri_arg_t;
 
@@ -222,9 +226,13 @@ static void *tri_worker(void *v) {
     tri_arg_t *t = (tri_arg_t *)v;
     const double scalar = 3.0;
     for (int it = 0; it < t->iters; it++) {
-        pthread_barrier_wait(t->bar);
+        /* Announce readiness, then BLOCK until the timer has been started. The
+         * timestamp is taken by the main thread between these two waits, so no
+         * element of the triad can execute before the clock starts. */
+        pthread_barrier_wait(t->b_arrive);
+        pthread_barrier_wait(t->b_go);
         for (size_t i = t->lo; i < t->hi; i++) t->a[i] = t->b[i] + scalar * t->c[i];
-        pthread_barrier_wait(t->bar);
+        pthread_barrier_wait(t->b_done);
     }
     return NULL;
 }
@@ -245,15 +253,44 @@ static int run_stream(size_t arr_mib, int threads, int iters, double delay_s) {
 
     wait_for_window(delay_s, init_s);
 
-    pthread_barrier_t bar;
-    if (pthread_barrier_init(&bar, NULL, (unsigned)(threads + 1)) != 0)
+    /*
+     * TIMING: THE CLOCK STARTS BEFORE THE WORKERS DO (roborev round 7 finding #1).
+     *
+     * The previous shape was a single barrier:
+     *
+     *     pthread_barrier_wait(&bar);   // release workers
+     *     double s = now_s();           // ...and only THEN start the clock
+     *
+     * so every element a worker processed between the barrier release and that
+     * timestamp went uncounted. This is not a theoretical window: AC5 runs 12 workers
+     * plus this main thread on a 12-CPU set, so the main thread is oversubscribed and
+     * can be descheduled precisely at the release. And because the reported figure is
+     * the BEST of `iters` iterations, the accounting selects for the iteration where
+     * the undercount was largest — the error is not averaged away, it is actively
+     * maximised, in the direction that INFLATES the published bandwidth ceiling.
+     *
+     * AC5's ceiling is what §6 divides measured bandwidth by to claim 4.6x headroom, so
+     * an inflated ceiling makes the box look further from saturation than it is: the
+     * anti-conservative direction, which AC7 forbids.
+     *
+     * Fixed with three barriers per iteration. Workers arrive at `b_arrive` and then
+     * block at `b_go`; the main thread starts the clock while they are all blocked, and
+     * only then joins `b_go` to release them. The residual is the barrier wake-up
+     * latency, which is now INSIDE the measured interval — an over-count of elapsed
+     * time, i.e. an under-statement of bandwidth, which is the conservative direction.
+     */
+    pthread_barrier_t b_arrive, b_go, b_done;
+    if (pthread_barrier_init(&b_arrive, NULL, (unsigned)(threads + 1)) != 0
+        || pthread_barrier_init(&b_go, NULL, (unsigned)(threads + 1)) != 0
+        || pthread_barrier_init(&b_done, NULL, (unsigned)(threads + 1)) != 0)
         die("pthread_barrier_init failed");
     tri_arg_t *args = (tri_arg_t *)calloc((size_t)threads, sizeof(tri_arg_t));
     pthread_t *tid = (pthread_t *)calloc((size_t)threads, sizeof(pthread_t));
     if (!args || !tid) die("calloc failed");
     size_t chunk = (n + (size_t)threads - 1) / (size_t)threads;
     for (int i = 0; i < threads; i++) {
-        args[i].a = a; args[i].b = b; args[i].c = c; args[i].bar = &bar;
+        args[i].a = a; args[i].b = b; args[i].c = c;
+        args[i].b_arrive = &b_arrive; args[i].b_go = &b_go; args[i].b_done = &b_done;
         args[i].iters = iters;
         args[i].lo = (size_t)i * chunk;
         args[i].hi = args[i].lo + chunk; if (args[i].hi > n) args[i].hi = n;
@@ -263,9 +300,10 @@ static int run_stream(size_t arr_mib, int threads, int iters, double delay_s) {
     }
     double best = 1e30;
     for (int it = 0; it < iters; it++) {
-        pthread_barrier_wait(&bar);      /* release workers */
-        double s = now_s();
-        pthread_barrier_wait(&bar);      /* workers finished this iteration */
+        pthread_barrier_wait(&b_arrive); /* every worker is now blocked at b_go */
+        double s = now_s();              /* clock starts with NO worker running */
+        pthread_barrier_wait(&b_go);     /* ...and only now are they released */
+        pthread_barrier_wait(&b_done);   /* workers finished this iteration */
         double e = now_s() - s;
         if (e < best) best = e;
     }

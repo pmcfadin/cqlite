@@ -54,6 +54,30 @@ REP="${6:?rep}"; OUT="${7:?outdir}"
 CORPUS_ROWS="${CORPUS_ROWS:-3999890}"
 SETTLE_SECS="${SETTLE_SECS:-12}"   # skip the leading part of the step for arm (a)
 
+# THE COUNTER WINDOW MUST FIT INSIDE THE LOAD-GENERATOR STEP (roborev round 7
+# finding #7). Nothing required SETTLE_SECS + WINDOW_SECS <= STEP_SECS, and with a
+# shortened step the load generator finishes while `perf stat -- sleep WINDOW_SECS`
+# keeps counting IDLE server CPUs. Every gate still passes, because occupancy
+# describes the COMPLETED STEP and not the perf window: rows are positive, scans are
+# whole, errors are zero, the rc of a `sleep` that slept is 0. The result is a
+# per-row figure whose counters cover a partly-idle interval and whose denominator
+# covers a fully-busy one — the numerator/denominator-from-different-intervals error
+# the ALIGNED convention exists to avoid, reachable purely by mis-sizing a flag.
+#
+# The margin is not cosmetic: the loadgen DRAINS in-flight requests, so the actual
+# duration EXCEEDS the requested step (run-all.sh records 120s requested -> 144.2s
+# actual). That drain is why a window ending exactly at the step boundary is normally
+# fine, and it is exactly why relying on it silently would be relying on an
+# undocumented cushion. Required explicitly instead.
+if ! awk -v s="$SETTLE_SECS" -v w="$WINDOW_SECS" -v t="$STEP_SECS" \
+        'BEGIN { exit !(s >= 0 && w > 0 && t > 0 && s + w <= t) }'; then
+  echo "FATAL: settle(${SETTLE_SECS}s) + window(${WINDOW_SECS}s) must fit inside the requested step(${STEP_SECS}s), and all three must be positive." >&2
+  echo "       Otherwise the load generator finishes while perf keeps counting IDLE" >&2
+  echo "       server CPUs, and every validity gate still passes because occupancy" >&2
+  echo "       describes the completed STEP, not the counter window." >&2
+  exit 2
+fi
+
 mkdir -p "$OUT"
 ws0_require_inputs
 ws0_assert_sysctl                      # re-asserted per capture, never once per session

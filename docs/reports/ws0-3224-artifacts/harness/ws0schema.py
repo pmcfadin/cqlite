@@ -234,6 +234,20 @@ def read_counter_rows(path, layout):
                                 'MULTIPLEXED ESTIMATE, not a count'
                                 % (name, e, MUX_MIN))
                 continue
+            # THE UNIT IS CHECKED, NOT MERELY CARRIED (round 7 finding #6). It was
+            # captured into the row tuple and never looked at, while derive.py
+            # unconditionally treats every uncore value as MiB — because perf applies
+            # the x64 B/cacheline conversion itself. A CSV reporting raw CAS counts
+            # (or any other scale) would therefore be summed as MiB and published as a
+            # bandwidth figure wrong by that factor. This is the same shape as the
+            # `unit` check ac5-analyse.py already had and the schema did not: the fix
+            # applied in one consumer and not the shared code.
+            if layout == 'uncore' and unit != 'MiB':
+                problems.append(
+                    '%s reports unit %r, expected MiB. perf applies the x64 '
+                    'B/cacheline conversion itself, so every byte figure derived from '
+                    'this row would be wrong by that factor.' % (name, unit))
+                continue
             # perf strips the `:u` modifier from some event names and keeps it on
             # others, so core events are compared on the base name. Uncore names
             # carry no modifier and their slashes must survive intact.
@@ -286,7 +300,7 @@ def validate_counter_file(path, arm):
     return problems
 
 
-def validate_occupancy(occ, roster, which, corpus_rows=None):
+def validate_occupancy(occ, roster, which, corpus_rows):
     """The occupancy block: present, complete against `roster`, every invariant
     RE-DERIVED from the recorded fields.
 
@@ -308,12 +322,26 @@ def validate_occupancy(occ, roster, which, corpus_rows=None):
     is itself reported, which turns a stale flag into a visible finding rather than a
     silent acceptance.
 
-    `corpus_rows` enables the exact-multiple check; when it is None that one invariant
-    is skipped and SAID to be skipped, rather than passing silently.
+    `corpus_rows` is REQUIRED and must be a positive integer (round 7 finding #4). It
+    was optional, and `if corpus_rows:` then silently skipped the whole-scan invariant
+    whenever it was absent or zero — the "unmeasured state takes the permissive branch"
+    shape again — while a NEGATIVE value made every row count appear exactly divisible,
+    since `rows % -1 == 0`. A capture whose corpus geometry cannot be established is
+    not certifiable: the whole-scan check is what separates a complete scan from a
+    partial one, and the row count is the denominator of every per-row figure.
     """
     problems = []
     if not isinstance(occ, dict) or not occ:
         return ['%s: occupancy block absent or empty' % which]
+    if (isinstance(corpus_rows, bool) or not isinstance(corpus_rows, int)
+            or corpus_rows <= 0):
+        problems.append(
+            '%s: corpus_rows=%r is not a positive integer, so the whole-scan '
+            'invariant cannot be established. It is REQUIRED rather than skipped: '
+            'skipping it would certify a capture whose corpus geometry is unknown, '
+            'and a negative value would make every row count appear exactly '
+            'divisible.' % (which, corpus_rows))
+        corpus_rows = None
     missing = set(roster) - set(occ)
     if missing:
         problems.append(

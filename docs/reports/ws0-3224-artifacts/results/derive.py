@@ -199,6 +199,11 @@ def do_stalls(repdir):
     if problems:
         raise SystemExit("FATAL: stalls rep %s is invalid: %s" % (repdir, problems))
 
+    # Group C through the same schema validator, for the same reason.
+    cproblems = ws0schema.validate_counter_file(csv_p, 'alignedC')
+    if cproblems:
+        raise SystemExit("FATAL: group-C counter file for %s is not usable:\n  - %s"
+                         % (repdir, '\n  - '.join(cproblems)))
     p = parse_perf(csv_p)
     c = {name: scalar(p, name, csv_p) for name in CORE_C}
     per_row = {k: v / rows for k, v in c.items()}
@@ -274,12 +279,32 @@ def do_rep(repdir):
     if problems:
         raise SystemExit("FATAL: rep %s is invalid: %s" % (repdir, problems))
 
-    pA = parse_perf(os.path.join(repdir, 'perf-coreA-aligned.csv'))
-    pB = parse_perf(os.path.join(repdir, 'perf-coreB-aligned.csv'))
-    pI = parse_perf(os.path.join(repdir, 'perf-coreA-interior.csv'))
     fA = os.path.join(repdir, 'perf-coreA-aligned.csv')
     fB = os.path.join(repdir, 'perf-coreB-aligned.csv')
     fI = os.path.join(repdir, 'perf-coreA-interior.csv')
+
+    # THE CORE FILES GO THROUGH THE SHARED SCHEMA TOO (round 7 finding #2). The uncore
+    # path was routed through validate_counter_file in round 4 and these three were
+    # not, so they kept `scalar()`'s weaker checks: float() accepts 'nan' and 'inf',
+    # `nan < MUX_MIN` is False so a NaN percentage passed the multiplexing floor, a
+    # negative count reached the per-row figures, and a DUPLICATE row was silently
+    # reduced to the first one by `rows[0]`. Every defect round 6 finding #4 closed for
+    # uncore, still open for the three files the headline is computed from.
+    #
+    # This is the recurring shape of this whole PR in one sentence: the fix applied
+    # where the finding pointed and not to its siblings. The schema is the sibling-proof
+    # answer, so the remaining job was to make every consumer actually call it.
+    cproblems = []
+    for path, arm in ((fA, 'alignedA'), (fB, 'alignedB'), (fI, 'interiorA')):
+        cproblems += ws0schema.validate_counter_file(path, arm)
+    if cproblems:
+        raise SystemExit(
+            "FATAL: core counter files for %s are not usable:\n  - %s"
+            % (repdir, '\n  - '.join(cproblems)))
+
+    pA = parse_perf(fA)
+    pB = parse_perf(fB)
+    pI = parse_perf(fI)
 
     # ================= ALIGNED convention =================================
     # The perf window IS the loadgen step, so rows_in_window is the step's own
@@ -621,6 +646,27 @@ def main():
 
     # ------------------------------------------------- the AC4 delta + residual
     lo, hi = 'llc-s1-N2', 'llc-s6-N16'
+    # BOTH HEADLINE ENDPOINTS ARE REQUIRED (round 7 finding #5). This comparison was
+    # conditional, so a tree missing or mislabelling either endpoint derived
+    # SUCCESSFULLY while silently omitting the delta, the denominator-convention check
+    # and the entire AC4 accounting — the study's whole deliverable — with nothing in
+    # the output saying they were absent. An exit code of 0 on a run that produced no
+    # accounting is the fail-open shape all 29 findings share.
+    if lo not in doc['endpoints'] or hi not in doc['endpoints']:
+        if os.environ.get('CQLITE_ALLOW_UNDISPERSED') == '1':
+            doc['PARTIAL_TREE'] = (
+                'endpoints %s present; the headline comparison needs %r and %r, so '
+                'no delta, denominator check or AC4 accounting was produced. '
+                'Exploratory only (CQLITE_ALLOW_UNDISPERSED=1).'
+                % (sorted(doc['endpoints']), lo, hi))
+        else:
+            raise SystemExit(
+                "FATAL: the headline comparison needs BOTH %r and %r; this tree has "
+                "%s. Deriving without them would exit 0 having produced no delta and "
+                "no AC4 accounting at all. Check the endpoint labels (a mislabelled "
+                "rep directory looks exactly like a missing endpoint), or set "
+                "CQLITE_ALLOW_UNDISPERSED=1 for an explicitly-stamped partial "
+                "derivation." % (lo, hi, sorted(doc['endpoints'])))
     if lo in doc['endpoints'] and hi in doc['endpoints']:
         doc['delta'] = {}
         for conv in ('aligned', 'interior'):

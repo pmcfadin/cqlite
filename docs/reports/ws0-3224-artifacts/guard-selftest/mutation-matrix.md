@@ -277,3 +277,37 @@ adds: **a re-derivation may only demand fields the capture actually records**, a
 recorded set belongs in a comment next to the check so the next tightening does not guess.
 Concurrency is not lost, incidentally — a computable `busy_fraction_estimate` already
 establishes that concurrency and duration were both non-zero at write time.
+
+## Round 7 — seven findings, all six mutations caught
+
+| # | mutation applied | flipped | result |
+|---|---|--:|---|
+| 1 | put the clock back AFTER the barrier release | 1 | **caught** |
+| 2 | core files bypass `validate_counter_file` again | 2 | **caught** |
+| 6 | remove the uncore `MiB` unit check | 1 | **caught** |
+| 4 | make `corpus_rows` optional again | 3 | **caught** |
+| 5 | make the endpoint pair optional again | 1 | **caught** |
+| 7 | remove the settle+window fit check | 1 | **caught** |
+
+**Finding #1 is the second genuine measurement defect of the 29** (after round 5's rounding),
+and the most consequential one found after round 1. The triad recorded its iteration start
+**after** releasing the workers, so any element processed in that window went uncounted —
+and because the reported figure is the **best** of N iterations, the accounting *selects for
+the iteration where the undercount was largest*. The error is not averaged away, it is
+actively maximised, and it inflates the AC5 ceiling that §6 divides measured bandwidth by
+to claim 4.6× headroom. Anti-conservative, which AC7 forbids. Fixed with a three-phase
+barrier so the residual (barrier wake-up latency) now lands *inside* the measured interval —
+an over-count of time, i.e. an under-statement of bandwidth.
+
+**Findings #2, #3 and #6 are the sibling pattern once more**, and by now the pattern is the
+finding: round 6 closed the numeric hygiene for the uncore path, and the *core* files, the
+AC5 analyser and the schema's own unit field were three more copies of the same parse. Every
+consumer now calls `ws0schema.read_counter_rows`, so there is one copy left.
+
+### A fifth test defect, same session
+
+The barrier-ordering case first indexed on the bare identifier `b_go` — which matched the
+**comment** naming it, one line above the timestamp, rather than the barrier call. It
+compared comment positions and failed a correct implementation. Fixed to match
+`pthread_barrier_wait(&b_go)`. Five test defects across seven rounds; every one was an
+assertion that measured something adjacent to the property it claimed to check.

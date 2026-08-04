@@ -62,48 +62,40 @@ SOCKETS = ws0schema.SOCKETS
 
 per = {s: {} for s in SOCKETS}
 elapsed = None
+
+# THE ROWS COME FROM THE SHARED SCHEMA READER (round 7 finding #3). This file used to
+# re-implement the parse, and re-implemented the permissive numeric handling with it:
+# `float()` accepts 'nan' and 'inf', `nan < MUX_MIN` is False so a NaN enabled
+# percentage cleared the multiplexing floor, and a negative count could still leave the
+# broad 0.6-1.6 byte-accounting ratio inside its passing band. Round 6 closed exactly
+# that in ws0schema.read_counter_rows; this was the third copy of the same parse, so the
+# fix is to stop having a third copy rather than to patch it.
+_rows, _problems = ws0schema.read_counter_rows(csv, 'uncore')
+if _problems:
+    sys.exit('FATAL: %s carries unusable counter rows:\n  - %s'
+             % (csv, '\n  - '.join(_problems)))
+for _sock, _ev, _v, _e, _unit in _rows:
+    if _sock not in per or 'cas_count' not in _ev:
+        continue
+    # A duplicate row would be SILENTLY OVERWRITTEN by dict assignment, hiding a
+    # double-counted or malformed capture. (read_counter_rows preserves duplicates so
+    # each consumer can decide; the roster check below also refuses them.)
+    if _ev in per[_sock]:
+        sys.exit('FATAL: %s carries a DUPLICATE row for %s on %s. A repeated instance '
+                 'means the capture is malformed; summing it would double-count that '
+                 'channel.' % (csv, _ev, _sock))
+    per[_sock][_ev] = _v      # already MiB; the unit is asserted in the schema reader
+
+# The perf run_time, for the window-average rate. Read separately because it is a
+# per-row field the schema reader does not carry.
 for line in open(csv):
-    line = line.strip()
-    if not line or line.startswith('#'):
-        continue
-    f = line.split(',')
-    if len(f) < 7:
-        continue
-    sock, val, unit, ev, enabled = f[0], f[2], f[3], f[4], f[6]
-    try:
-        v = float(val)
-    except ValueError:
-        # A `<not counted>`/`<not supported>` row is a MISSING instance, not an
-        # absent one: skipping it here leaves the roster check below to catch it,
-        # which is where the diagnosis belongs.
-        continue
-    try:
-        e = float(enabled)
-    except ValueError:
-        sys.exit("FATAL: %s %s has an unreadable enabled%% (%r). An unverifiable "
-                 "count is not a usable one — reading the percentage is the only "
-                 "evidence the count is not a multiplexed estimate."
-                 % (sock, ev, enabled))
-    if e < ws0schema.MUX_MIN:
-        sys.exit("FATAL: %s %s only %s%% enabled" % (sock, ev, enabled))
-    if sock in per and 'cas_count' in ev:
-        # A duplicate row would be SILENTLY OVERWRITTEN by dict assignment, hiding
-        # a double-counted or malformed capture.
-        if ev in per[sock]:
-            sys.exit("FATAL: %s carries a DUPLICATE row for %s on %s. A repeated "
-                     "instance means the capture is malformed; summing it would "
-                     "double-count that channel." % (csv, ev, sock))
-        if unit != 'MiB':
-            sys.exit("FATAL: %s %s reports unit %r, expected 'MiB'. perf applies "
-                     "the x64 B/cacheline conversion itself, so a different unit "
-                     "means every byte figure below is wrong by that factor."
-                     % (sock, ev, unit))
-        per[sock][ev] = v         # already MiB; do NOT multiply by 64 again
-    if elapsed is None:
+    f = line.strip().split(',')
+    if len(f) >= 7 and f[0].startswith('S'):
         try:
             elapsed = float(f[5]) / 1e9
         except (ValueError, IndexError):
             pass
+        break
 
 # The roster assertion itself. Both sockets, complete, before any arithmetic.
 for sock in SOCKETS:

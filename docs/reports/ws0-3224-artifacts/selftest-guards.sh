@@ -1298,6 +1298,165 @@ print('        readiness confirms kill -0 on our pid before returning')
 PY
 
 # =============================================================================
+section "ROUND 7 — the timing race, sibling numeric hygiene, required endpoints"
+
+# Finding #1: the triad's clock started AFTER the workers were released, so work done in
+# that window went uncounted -- and taking the BEST of N iterations selects for the
+# iteration where the undercount was largest, INFLATING the published ceiling. AC5's
+# ceiling is what the report divides measured bandwidth by to claim 4.6x headroom, so
+# this is the anti-conservative direction. Compiled and RUN.
+if [ -x "$TMP/cache-hostile" ]; then
+  expect_rc "cache-hostile stream: clock starts BEFORE the workers (three-phase barrier)" 0 \
+    python3 - "$HERE/cache-hostile.c" "$TMP/cache-hostile" <<'PYX'
+import subprocess, sys
+src = open(sys.argv[1]).read()
+fn = src[src.index('static int run_stream('):]
+loop = fn[fn.index('double best = 1e30;'):]
+loop = loop[:loop.index('for (int i = 0; i < threads; i++) pthread_join')]
+# Match the CALLS, not any mention: the line above the timestamp is a comment that
+# names b_go, and an earlier version of this check indexed on the bare identifier and
+# therefore compared comment positions instead of code positions.
+i_arrive = loop.index('pthread_barrier_wait(&b_arrive)')
+i_clock = loop.index('double s = now_s()')
+i_go = loop.index('pthread_barrier_wait(&b_go)')
+if not (i_arrive < i_clock < i_go):
+    sys.exit('FAIL: the clock is not taken between arrive and go (arrive=%d clock=%d '
+             'go=%d) -- a worker can run before the timestamp'
+             % (i_arrive, i_clock, i_go))
+if 'pthread_barrier_wait(&bar)' in loop:
+    sys.exit('FAIL: the single-barrier release is still present')
+r = subprocess.run([sys.argv[2], 'stream', '--stream-mib', '64', '--threads', '4',
+                    '--iters', '5', '--delay-ms', '0'], capture_output=True, text=True)
+if r.returncode != 0:
+    sys.stderr.write(r.stderr); sys.exit('FAIL: the fixed stream mode does not run')
+st = dict(l.split('=', 1) for l in r.stdout.strip().splitlines() if '=' in l)
+best = float(st['best_iter_s'])
+if not (0 < best < 60):
+    sys.exit('FAIL: best_iter_s=%r is not a plausible interval' % st['best_iter_s'])
+print('        clock between arrive and go; best_iter_s=%s over 5 iterations'
+      % st['best_iter_s'])
+PYX
+fi
+
+# Findings #2/#3: round 6's numeric hygiene had to reach the CORE files and the AC5
+# analyser -- two more copies of the same permissive parse. A NaN enabled% is the
+# canary, because nan < 99.0 is False.
+mk_bad_core_rep() { # $1 file-to-corrupt -> COMPLETE|REFUSED
+  local td; td="$(mktemp -d)"; cp -r "$HERE/results" "$td/r"
+  python3 - "$td/r/llc-s6-N16/rep1/$1" <<'PYX'
+import sys
+p = sys.argv[1]; out = []; done = False
+for line in open(p):
+    f = line.rstrip('\n').split(',')
+    if not done and len(f) >= 5 and f[2].startswith('cycles'):
+        f[4] = 'nan'; line = ','.join(f) + '\n'; done = True
+    out.append(line)
+assert done, 'fixture did not find a cycles row'
+open(p, 'w').writelines(out)
+PYX
+  if python3 "$HERE/results/derive.py" "$td/r" --out "$td/d.json" >/dev/null 2>&1; then
+    echo COMPLETE; else echo REFUSED; fi
+  rm -rf "$td"
+}
+check "core alignedA CSV with enabled%=nan: REFUSED by the derivation" \
+      "REFUSED" "$(mk_bad_core_rep perf-coreA-aligned.csv)"
+check "core interior CSV with enabled%=nan: REFUSED" \
+      "REFUSED" "$(mk_bad_core_rep perf-coreA-interior.csv)"
+check "group-C CSV with enabled%=nan: REFUSED" \
+      "REFUSED" "$(mk_bad_core_rep perf-coreC-aligned.csv)"
+
+python3 - "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/ac5-nanmux.csv" <<'PYX'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+out = []; done = False
+for line in open(src):
+    f = line.rstrip('\n').split(',')
+    if not done and len(f) >= 7 and f[0].startswith('S') and 'cas_count' in f[4]:
+        f[6] = 'nan'; line = ','.join(f) + '\n'; done = True
+    out.append(line)
+open(dst, 'w').writelines(out)
+PYX
+expect_rc "AC5 triad CSV with enabled%=nan: REFUSED (third copy of the parse, now shared)" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$TMP/ac5-nanmux.csv" "$HERE/ac5-run/stream.txt"
+
+# Finding #6: the uncore unit was carried in the row tuple and never checked, while
+# derive.py treats every value as MiB because perf applies the x64 conversion itself.
+python3 - "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/ac5-unit.csv" <<'PYX'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+out = []
+for line in open(src):
+    f = line.rstrip('\n').split(',')
+    if len(f) >= 7 and f[0].startswith('S') and 'cas_count' in f[4]:
+        f[3] = ''          # raw CAS counts, not MiB
+        line = ','.join(f) + '\n'
+    out.append(line)
+open(dst, 'w').writelines(out)
+PYX
+expect_rc "uncore rows reporting raw counts instead of MiB: REFUSED (would be 64x wrong)" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$TMP/ac5-unit.csv" "$HERE/ac5-run/stream.txt"
+
+# Finding #4: corpus_rows is REQUIRED, not silently skipped, and a negative value must
+# not make every row count appear exactly divisible.
+occ_corpus() { # $1 json-value -> CLEAN|PROBLEMS
+  python3 - "$HERE/harness" "$HERE/results/llc-s6-N16/rep1/meta.json" "$1" <<'PYX'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import ws0schema
+occ = json.load(open(sys.argv[2]))['occupancy']
+cr = json.loads(sys.argv[3])
+print('PROBLEMS' if ws0schema.validate_occupancy(
+    occ, ws0schema.OCCUPANCY_ARMS_PRIMARY, 'test', cr) else 'CLEAN')
+PYX
+}
+check "corpus_rows=3999890 (the real value): CLEAN" "CLEAN" "$(occ_corpus 3999890)"
+check "corpus_rows=null: REFUSED (the invariant used to be silently skipped)" \
+      "PROBLEMS" "$(occ_corpus null)"
+check "corpus_rows=0: REFUSED" "PROBLEMS" "$(occ_corpus 0)"
+check "corpus_rows=-1: REFUSED (rows % -1 == 0 makes everything look divisible)" \
+      "PROBLEMS" "$(occ_corpus -1)"
+
+# Finding #5: both headline endpoints are required. A mislabelled rep directory looks
+# exactly like a missing endpoint, and the run used to exit 0 producing no accounting.
+cp -r "$HERE/results" "$TMP/results-1ep"
+rm -rf "$TMP/results-1ep/llc-s1-N2"
+expect_rc "tree missing the S=1 endpoint: REFUSED (used to exit 0 with no AC4 at all)" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-1ep" --out "$TMP/derived-bad14.json"
+
+# Finding #7: settle + window must fit inside the requested step, else perf counts idle
+# CPUs after the load generator finishes while every gate still passes -- occupancy
+# describes the completed STEP, not the counter window.
+expect_rc "settle+window vs step: real values pass, oversized windows refused" 0 \
+  python3 - "$HERE/run/capture-endpoint.sh" <<'PYX'
+import re, subprocess, sys
+src = open(sys.argv[1]).read()
+if 'must fit inside the requested step' not in src:
+    sys.exit('FAIL: no timing-relationship check')
+m = re.search(r"BEGIN \{ exit !\((.+?)\) \}'", src)
+if not m:
+    sys.exit('FAIL: the awk predicate is not in the expected shape')
+pred = m.group(1)
+cases = [(20, 60, 120, True, 'run-all.sh real values'),
+         (12, 60, 120, True, 'capture-endpoint defaults'),
+         (12, 60, 60, False, 'window overruns the step'),
+         (12, 60, 70, False, 'overruns by 2s'),
+         (0, 60, 60, True, 'exactly fits'),
+         (12, 0, 120, False, 'zero window'),
+         (12, 60, 0, False, 'zero step'),
+         (-1, 60, 120, False, 'negative settle')]
+bad = 0
+for s_, w, t, want, name in cases:
+    r = subprocess.run(['awk', '-v', 's=%d' % s_, '-v', 'w=%d' % w, '-v', 't=%d' % t,
+                        'BEGIN { exit !(%s) }' % pred])
+    got = (r.returncode == 0)
+    if got != want:
+        bad += 1
+    print('        settle=%-3d window=%-3d step=%-4d %-26s %-5s want=%-5s %s'
+          % (s_, w, t, name, got, want, 'ok' if got == want else 'MISMATCH'))
+sys.exit(1 if bad else 0)
+PYX
+
+# =============================================================================
 printf '\n==== SELFTEST RESULT: %s ====\n' \
   "$( [ "$FAIL" -eq 0 ] && echo PASS || echo FAIL )"
 printf 'cases passed: %d   failed: %d\n' "$PASS" "$FAIL"
