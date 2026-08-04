@@ -40,5 +40,14 @@ serde_json = { workspace = true }
 # from the version cqlite-core resolves (issue #3096 review).
 sha2 = { workspace = true }
 
+[dev-dependencies]
+# `tests/determinism_byte_compare.rs` (issue #3272 item 8) REGENERATES the corpus
+# twice into throwaway roots and byte-compares every emitted component, and
+# `tests/measurement_corpus_pin.rs` needs a runtime for its #[ignore]d full-size
+# operator procedure. `tokio`'s `macros`/`rt-multi-thread` come from the normal
+# dependency above; `rt` is spelled out here for the block_on path.
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
 [lints]
 workspace = true

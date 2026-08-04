@@ -43,6 +43,7 @@
 
 pub mod generate;
 pub mod identity;
+pub mod measurement_corpus;
 pub mod rows;
 pub mod schema;
 
