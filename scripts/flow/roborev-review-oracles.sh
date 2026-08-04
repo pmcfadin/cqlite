@@ -46,8 +46,17 @@
 # (`docs/LICENSE`, `openspec/NOTES`). Anything with a code-ish extension anywhere —
 # including `.github/workflows/*.yml` — counts as CODE and does not trip this key.
 CODE_FREE_EXTENSIONS="md markdown mdx txt rst adoc"
-# THE PROSE PREFIXES, and the RULE that applies under them: an extensionless path under
-# one of these directories is CODE **iff it is EXECUTABLE**, non-code otherwise.
+# THE PROSE PREFIXES, and the RULE that applies under them: an extensionless path under one
+# of these directories is CODE **iff git records it EXECUTABLE AT EITHER ENDPOINT of the
+# census range** (`${BASE}...HEAD`) — non-code only when it is executable at NEITHER.
+#
+# EITHER endpoint, because the census SUBJECT is the range, not a snapshot. Asking only HEAD
+# would miss a deleted executable; asking only BASE would miss an added one; asking "whichever
+# endpoint answers first" misses a MODE CHANGE, and did (#3229 round-13 blocker: `100755`@BASE
+# → `100644`@HEAD read non-code, because the HEAD record ended the scan before BASE was ever
+# consulted — and a `chmod -x` does not turn a script into prose). The rule is a DISJUNCTION
+# over both endpoints; see `roborev_path_is_executable` for how the shape now makes skipping
+# one unexpressible.
 #
 # The prefix ALONE was the bug (#3229 round-11 blocker). Under a bare prefix test EVERY
 # extensionless path under `docs/` classified non-code, so it was dropped from
@@ -169,10 +178,24 @@ _rx_dirglob_match() {
   return 1
 }
 
-# roborev_path_is_executable <path>: 0 when git RECORDS `<path>` with the executable bit in
-# the range the census measured, 1 otherwise (recorded non-executable, absent from both
-# endpoints, or unmeasurable). Used only for the extensionless-under-a-prose-prefix decision
-# above.
+# ROBOREV_RANGE_ENDPOINT_REFS: the refs that ARE the census range's endpoints, named once so
+# neither caller nor reader can disagree about what "the range" means. HEAD is the right-hand
+# endpoint; `BASE_SHA` the left. The order is presentational ONLY — the fold below is a
+# DISJUNCTION, so permuting this array cannot change any answer.
+roborev_range_endpoint_refs() {
+  local ref
+  for ref in HEAD "${BASE_SHA:-}"; do
+    [ -n "$ref" ] && printf '%s\n' "$ref"
+  done
+}
+
+# _roborev_mode_is_exec_at <ref> <path>: 0 iff the tree at `<ref>` records `<path>` with the
+# executable bit; 1 for recorded-non-executable, absent-at-that-ref, or unreadable-ref.
+#
+# DELIBERATELY IGNORANT OF THE RANGE. It answers for ONE endpoint and cannot express an
+# ordering, a precedence or a short-circuit, because it has no second endpoint to skip. All
+# range semantics live in the fold below, in one place, so there is exactly one thing to get
+# right instead of one per ref.
 #
 # THE MODE COMES FROM GIT'S TREE, NEVER FROM `test -x` ON THE FILESYSTEM (#3229), for three
 # reasons in ascending order of how badly the filesystem answer fails:
@@ -184,29 +207,69 @@ _rx_dirglob_match() {
 #   3. A checkout's bits are not authoritative anyway: under `core.fileMode=false`, or on a
 #      filesystem that cannot hold the bit, the working file diverges from the tree while git
 #      keeps honouring the recorded mode.
-# HEAD (the range's right-hand endpoint) is consulted first, then the BASE commit, so a path
-# the diff DELETES is classified by the mode it HAD. That is the fail-closed direction: the
-# removal of an executable is a code change whose review must be asserted, and a pure
-# deletion still carries a `diff --git` header for `prompt-content:` to find.
 #
 # `:(literal)` pathspec magic is load-bearing: nothing stops a repo tracking a name
 # containing `*`, `?` or `[`, and a bare pathspec would read those as WILDCARDS — answering
-# for a different file, or for several. `-z` keeps the output RAW, consistent with the single
-# normalisation boundary; only the leading MODE field is read, and it is always first and
-# slash-free, so a path carrying a newline or a tab cannot displace it. An absent path is a
-# SILENT empty result (not an error), which is why the loop tests for content rather than for
-# git's exit status alone.
+# for a different file, or for several. It is fed the RAW `$path` the census carries, so the
+# single normalisation boundary is untouched.
+#
+# NO `-z` (#3229): `-z` made every call emit `warning: command substitution: ignored null
+# byte in input` on stderr — per-call noise that can MASK a real warning. Dropping it is safe
+# precisely because the PATH FIELD IS NEVER READ: only the leading MODE is, and that field is
+# first, space-terminated, and always one of git's four literal mode constants. Without `-z`
+# git C-QUOTES an odd name, which keeps a newline-bearing path on ONE line — if anything
+# harder to confuse than the raw form. An absent path is a SILENT empty result (not an
+# error), so content is tested, not just git's exit status.
+_roborev_mode_is_exec_at() {
+  local ref="$1" path="$2" record mode
+  [ -n "$ref" ] || return 1
+  record=$(git -C "$REPO" ls-tree "$ref" -- ":(literal)$path" 2>/dev/null) || return 1
+  [ -n "$record" ] || return 1
+  mode="${record%% *}"
+  [ "$mode" = 100755 ]
+}
+
+# roborev_path_is_executable <path>: 0 when git records `<path>` executable at EITHER ENDPOINT
+# of the census range, 1 only when it is executable at NEITHER (recorded non-executable at
+# both, absent from both, or unmeasurable). Used only for the extensionless-under-a-prose-
+# prefix decision above.
+#
+# EITHER ENDPOINT, AND THE DISJUNCTION IS THE WHOLE RULE (#3229 round-13 blocker). The census
+# subject is the RANGE, so a path is a code path if it is an executable ANYWHERE in that range:
+# both endpoints belong to the reviewed change and neither outranks the other. The four cases
+# this must get right, all of them by the same single rule:
+#   present at both, exec at either  -> CODE. Includes a MODE CHANGE in EITHER direction: a
+#       `chmod -x` does not turn a script into prose, and a `chmod +x` of an existing file is
+#       an executable entering the range.
+#   present at HEAD only (added)     -> CODE iff added executable.
+#   present at BASE only (deleted)   -> CODE iff it WAS executable. Fail-closed: removing an
+#       executable is a code change whose review must be asserted, and a pure deletion still
+#       carries a `diff --git` header for `prompt-content:` to find.
+#   present at neither               -> non-executable (unmeasurable; unreachable for a real
+#       census path, which by construction exists at an endpoint).
+#
+# BY CONSTRUCTION, NOT BY CARE. The previous revision was an ordered scan that `return`ed on
+# the FIRST ref yielding a record, so a path recorded 100644 at HEAD NEVER REACHED BASE and a
+# `chmod -x` silently dropped it from `census_code_paths` — `prompt-content:` then asserted
+# NOTHING about it while claiming `PASS (n/n)`. Moving that `return` would have fixed the one
+# case and left the shape that produced it. So the shape changed instead, and three properties
+# now make skipping an endpoint UNEXPRESSIBLE here rather than merely unintended:
+#   1. The endpoint list is produced by `roborev_range_endpoint_refs`, complete before the
+#      fold starts — the loop cannot be cut short by a ref it has not looked at yet.
+#   2. THE LOOP BODY HAS NO `return`, NO `break` AND NO `continue`. It can only ever OR into
+#      the accumulator, so control flow cannot leave the fold early; the function's sole
+#      `return` is after the loop, once every endpoint has been consulted. (Pinned
+#      STRUCTURALLY by the guard test, so a future edit cannot reintroduce an early exit.)
+#   3. The per-endpoint predicate is a separate, range-blind function, so there is no
+#      "first"/"then" for a reader or an editor to get wrong — only a set to fold.
 roborev_path_is_executable() {
-  local path="$1" ref record mode
-  for ref in HEAD "${BASE_SHA:-}"; do
-    [ -n "$ref" ] || continue
-    record=$(git -C "$REPO" ls-tree -z "$ref" -- ":(literal)$path" 2>/dev/null) || continue
-    [ -n "$record" ] || continue
-    mode="${record%% *}"
-    [ "$mode" = 100755 ] && return 0
-    return 1
-  done
-  return 1
+  local path="$1" ref exec_at_any=1
+  while IFS= read -r ref; do
+    # NO early exit of any kind — see property 2 above. Every endpoint is consulted on every
+    # call, and the accumulator is monotone, so the result cannot depend on the order.
+    if _roborev_mode_is_exec_at "$ref" "$path"; then exec_at_any=0; fi
+  done < <(roborev_range_endpoint_refs)
+  return "$exec_at_any"
 }
 
 # NO EXCLUSION SET IS MODELLED HERE AT ALL (issues #3283 / #3278).
@@ -439,11 +502,12 @@ roborev_census() {
         fi
       fi
     else
-      # EXTENSIONLESS under a prose prefix: non-code only when git records it
-      # NON-EXECUTABLE. The prefix alone used to decide it, which made every extensionless
-      # path under `docs/` a path `prompt-content:` asserted NOTHING about — see the rule
-      # documented at `CODE_FREE_EXTENSIONLESS_PREFIXES`. The mode is read from the tree, on
-      # this same RAW `$path`, so the classification boundary is unchanged.
+      # EXTENSIONLESS under a prose prefix: non-code only when git records it NON-EXECUTABLE
+      # AT BOTH ENDPOINTS of the range. The prefix alone used to decide it, which made every
+      # extensionless path under `docs/` a path `prompt-content:` asserted NOTHING about; the
+      # ordered single-endpoint scan that replaced it did the same to a MODE CHANGE — see the
+      # rule documented at `CODE_FREE_EXTENSIONLESS_PREFIXES`. The mode is read from the tree,
+      # on this same RAW `$path`, so the classification boundary is unchanged.
       # shellcheck disable=SC2086 # deliberate split of the space-separated constant
       for prefix in $CODE_FREE_EXTENSIONLESS_PREFIXES; do
         case "$path" in
