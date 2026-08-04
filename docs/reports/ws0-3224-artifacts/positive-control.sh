@@ -14,8 +14,10 @@
 # over 40-240 CPU-seconds of a memory-heavy workload. A non-zero check would
 # have caught that one, but a counter STUCK AT A CONSTANT NON-ZERO VALUE passes
 # a non-zero check and is just as wrong. So this script is a DIFFERENTIAL: it
-# asserts each counter MOVES between two arms, in the predicted direction, by at
-# least a predicted minimum ratio, and reaches a predicted minimum magnitude.
+# asserts each counter MOVES between two arms by at least a predicted minimum,
+# and that the LLC MISS RATE rises in the predicted direction. (Raw LLC-loads
+# deliberately has NO asserted direction — see P3-P5 below; it legitimately
+# FALLS on healthy hardware, and asserting otherwise reds a good box.)
 #
 # -----------------------------------------------------------------------------
 # THE PREDICTIONS — stated here, in the script, so a reviewer can verify they
@@ -31,11 +33,18 @@
 #
 # P1  cycles/access ratio (hostile:friendly) >= 5x        [HOSTILITY CONTROL]
 #     An L2 hit is ~14 cycles; a DRAM round trip with a TLB walk is ~250-400.
-#     Predicted ~15-25x. Threshold set at 5x. This check uses only `cycles`,
-#     which works on every host including #3217's, so it is the control ON THE
-#     CONTROL: if it fails, the microbenchmark did not achieve cache hostility
-#     and a flat LLC counter would be AMBIGUOUS (nothing to see) rather than
-#     evidence of a broken counter. That outcome is INDETERMINATE, not FAIL.
+#     Predicted ~15-30x (measured 27.8x in local development). Threshold 5x.
+#     This check uses only `cycles`, which works on every host including
+#     #3217's, so it is the control ON THE CONTROL: if it fails, the
+#     microbenchmark did not achieve cache hostility and a flat LLC counter
+#     would be AMBIGUOUS (nothing to see) rather than evidence of a broken
+#     counter. That outcome is INDETERMINATE, not FAIL.
+#
+#     P1 is only meaningful BECAUSE P2 verifies the two arms executed the same
+#     work. A cycles ratio compared across arms with DIFFERENT access counts
+#     says nothing — which is why running this script's thresholds against some
+#     other tool's two-arm walk yields INDETERMINATE (P2 fails first), not FAIL.
+#     INDETERMINATE is the honest verdict for "that was a different experiment".
 #
 # P2  instructions/access ratio within +/-10%             [SYMMETRY CONTROL]
 #     Same loop, same iteration count => the arms must execute the same work.
@@ -43,32 +52,48 @@
 #     are uninterpretable. (This mirrors #3217's own headline shape: the whole
 #     finding there is "instructions flat, cycles up".)
 #
-# P3  LLC-loads       hostile:friendly >= 10x  AND hostile >= 0.20 per access
-# P4  LLC-load-misses hostile:friendly >= 10x  AND hostile >= 0.20 per access
-# P5  cache-references hostile:friendly >= 10x AND hostile >= 0.20 per access
-#     Direction: UP in the hostile arm, in every case. An L2-resident chase
-#     never reaches the LLC, so the friendly arm should read ~0; a chase over a
-#     working set tens of times the LLC must miss on essentially every access,
-#     so the hostile arm should read ~1.0 per access.
+# P3  LLC-loads        MOVES between arms by >= 2x, IN EITHER DIRECTION
+# P4  LLC-load-misses  LLC MISS RATE (misses/loads) RISES by >= 1.5x in hostile
+# P5  cache-references MOVES between arms by >= 2x, IN EITHER DIRECTION
 #
-#     Why ratio >= 10x and not >= 100x (the predicted value): the friendly
-#     denominator is small and noisy (OS noise, timer ticks, the perf window's
-#     own edges) and may legitimately be 0. 10x is an order of magnitude below
-#     the prediction — a genuine instrument clears it by a wide margin, while a
-#     stuck, aliased or fixed-value counter cannot clear it at all.
+#     *** DO NOT ASSERT THAT RAW LLC-loads GOES UP. *** This is the single
+#     easiest way to build a control that reds a HEALTHY host, and it has been
+#     measured on the actual #3224 target box (i4i.metal, Xeon 8375C, owner's
+#     manual cache-hostile-vs-friendly walk over 512 MiB, 2026-08-04 — those are
+#     the owner's numbers from a manual walk, NOT output of this script):
 #
-#     Why a magnitude floor of 0.20/access as well: a ratio alone can be
-#     satisfied by two small noisy numbers. The theoretical hostile value is
-#     1.0/access; 0.20 tolerates a 5x under-count from counter-definition
-#     subtleties (demand-only counting, line vs access granularity, uncore
-#     filtering) and is still unreachable by a counter that is not measuring
-#     this workload. If the friendly arm reads exactly 0 the ratio is reported
-#     as `inf` and the floor is what carries the verdict.
+#         arm       LLC-loads  LLC-load-misses  miss rate   cycles   IPC
+#         friendly    389,812           54,391     13.95%   2.10e9  2.18
+#         hostile     110,149           67,449     61.23%   6.84e8  1.14
 #
-#     ZERO IS ONLY A DEFECT IN THE HOSTILE ARM. A 0 in the friendly arm is the
-#     PREDICTED reading and must not be diagnosed as a broken counter. #3217's
-#     failure was a hostile-side zero. Getting this backwards would make the
-#     control reject working hardware.
+#     LLC-loads FELL 3.5x in the hostile arm on a perfectly healthy PMU, because
+#     the prefetcher stops generating loads once the access pattern defeats it;
+#     the loads that ARE issued then actually miss, so the MISS RATE rose 4.4x.
+#     Raw LLC-load-misses moved only 1.24x, so a raw-magnitude gate on that
+#     counter would also have red-flagged a good box. The invariant that
+#     survives is the RATIO: hostility raises the fraction of LLC accesses that
+#     miss. Gate on that, and on the fact that each counter MOVES AT ALL.
+#
+#     Chosen thresholds and their margin against those measured healthy-host
+#     numbers: movement >= 2x (LLC-loads measured 3.54x, margin 1.8x;
+#     cache-references measured ~8x, margin 4x); miss-rate rise >= 1.5x
+#     (measured 4.39x, margin 2.9x). Every gate below clears the one healthy
+#     host we have real numbers from, with margin, in the direction it actually
+#     moved.
+#
+#     Per-access magnitude is REPORTED BUT NOT GATED, deliberately. The naive
+#     prediction is ~1.0 LLC miss per access, but on that same healthy host a
+#     512 MiB walk reported only ~67k LLC-load-misses — two orders of magnitude
+#     below the line-fill count — because these events count a narrower subset
+#     (demand loads, prefetch-excluded) than the intuition assumes. A magnitude
+#     floor is therefore not defensible against measured evidence and would be
+#     a false-FAIL generator on a metered clock.
+#
+#     A HARD ZERO IS STILL A DEFECT. If BOTH arms read 0 the counter is the
+#     #3217 silent instrument (SILENT_ZERO). If the hostile arm reads exactly 0
+#     while the friendly arm does not (HOSTILE_ZERO), that is not physically
+#     credible for a memory-bound arm either. But a low friendly reading on its
+#     own is expected and must never be diagnosed as a broken counter.
 #
 # P6  cache-misses is measured and reported with the same thresholds but is
 #     ADVISORY, not gating: the owner's condition names three counters, and
@@ -76,14 +101,42 @@
 #     A failure there is printed prominently and does not by itself exit 1.
 #
 # -----------------------------------------------------------------------------
-# THE FOUR DIAGNOSES ARE DISTINCT, because they have different remedies:
+# TWO MEASUREMENT-INTEGRITY DECISIONS, both forced by measurement, not taste:
+#
+# (i) THE WINDOW IS GATED EXACTLY AROUND THE CHASE, via perf's control FIFO
+#     (`perf stat -D -1 --control fifo:<ctl>,<ack>`; cache-hostile.c writes
+#     enable/disable). Both neighbouring phases are large AND asymmetric between
+#     the arms, so counting either one corrupts the differential:
+#       - init (page faults + permutation build): huge in hostile, ~free in
+#         friendly;
+#       - exit-time address-space teardown: measured on a 512 MiB buffer at 192M
+#         instructions (hostile) vs 80M (friendly) — larger than the chase
+#         itself, and it does NOT cancel.
+#     A `perf stat -D <ms>` delay excludes init but NOT teardown, which is why
+#     it is only the standalone fallback and not this gate.
+#
+# (ii) EVENTS ARE COUNTED USER-ONLY (`:u`). The hostile arm runs ~30x longer in
+#     wall-clock than the friendly arm at equal access count, so it absorbs
+#     proportionally more timer/IRQ kernel work: measured, that alone put the
+#     instruction ratio at 1.22 (P2 FAIL) with kernel counting on, and at
+#     1.00002 with `:u`. The microbenchmark's work is entirely user-space, so
+#     `:u` is both correct and what makes P2 a sharp instrument.
+#
+# GATE INTEGRITY IS ITSELF CHECKED. Before the arms run, a 1000-access hostile
+# run must report < 1M instructions. An ungated window over a multi-GiB buffer
+# reports hundreds of millions, so this catches a silently-failed FIFO
+# handshake — the same "plausible output from a broken instrument" class this
+# whole script exists to defeat.
+#
+# -----------------------------------------------------------------------------
+# THE DIAGNOSES ARE DISTINCT, because they have different remedies:
 #   ABSENT_EVENT_NAME  perf does not know the event at all       -> wrong host/PMU
 #   NOT_SUPPORTED      perf prints `<not supported>`             -> wrong host/PMU
 #   SILENT_ZERO        programs, hostile arm reads 0             -> #3217's failure
-#   UNRELIABLE         moves less than predicted, or below floor -> do not trust
+#   UNRELIABLE_*       moves less than predicted, or below floor -> do not trust
 # plus two non-counter outcomes:
 #   INDETERMINATE      the workload was not actually hostile (P1/P2 failed)
-#   ENV_ERROR          perf/cc/-D missing; nothing was measured
+#   ENV_ERROR          perf/cc/control-FIFO missing; nothing was measured
 #
 # Exit codes: 0 PASS · 1 FAIL (a required counter is unusable) · 2 ENV_ERROR or
 # usage · 3 INDETERMINATE. Anything other than 0 means STOP AND REPORT: do not
@@ -97,12 +150,18 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ------------------------------------------------------------------ thresholds
-RATIO_MIN=10                 # P3-P5 hostile:friendly minimum, integer multiple
-RATE_MIN_MILLI=200           # P3-P5 hostile floor, events per access x1000
+MOVE_MIN_MILLI=2000          # P3/P5 minimum movement between arms, EITHER
+                             #   direction, x1000. Measured healthy-host margin:
+                             #   LLC-loads 3.54x, cache-references ~8x.
+MISSRATE_MIN_MILLI=1500      # P4 minimum rise in misses/loads, x1000. Measured
+                             #   healthy-host value 4.39x (13.95% -> 61.23%).
 HOSTILITY_MIN=5              # P1 cycles/access minimum ratio
 SYMMETRY_TOL_PCT=10          # P2 instructions/access tolerance, percent
 MUX_MIN_PCT=99               # below this the counts are multiplexed estimates
+GATE_PROBE_ACCESSES=1000     # gate-integrity probe size
+GATE_PROBE_MAX_INSTR=1000000 # ...and its ceiling; ungated would be ~1e8-1e9
 
+MOD=":u"                     # user-only; see integrity decision (ii)
 REQUIRED_EVENTS=(LLC-loads LLC-load-misses cache-references)
 ADVISORY_EVENTS=(cache-misses)
 CONTROL_EVENTS=(cycles instructions)
@@ -123,7 +182,7 @@ usage() {
 usage: positive-control.sh [options]
   --out-dir DIR      artefact directory            (default ./positive-control-out)
   --reps N           reps per arm, median reported (default 3)
-  --buffer-mib N     hostile working set, MiB      (default 2048)
+  --buffer-mib N     hostile working set, MiB      (default 2048; must be >> LLC)
   --working-kib K    friendly working set, KiB     (default 256; must fit in L2)
   --accesses A       chase accesses per arm        (default 20000000)
   --cpu C            logical CPU to pin to         (default 2)
@@ -155,11 +214,18 @@ done
 QUICK="${QUICK:-0}"
 
 mkdir -p "$OUT_DIR" || { echo "cannot create $OUT_DIR" >&2; exit 2; }
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 SUMMARY="$OUT_DIR/summary.txt"
 VERDICT="$OUT_DIR/verdict.json"
 : > "$SUMMARY"
 say() { printf '%s\n' "$*" | tee -a "$SUMMARY"; }
-die_env() { say "ENV_ERROR: $*"; printf '{"schema":"ws0-3224.positive-control/v1","result":"ENV_ERROR","reason":"%s"}\n' "$1" > "$VERDICT"; exit 2; }
+die_env() {
+  say "==== RESULT: ENV_ERROR ===="
+  say "$1"
+  printf '{"schema":"ws0-3224.positive-control/v1","issue":3224,"result":"ENV_ERROR","exit_code":2,"reason":"%s"}\n' \
+    "$1" > "$VERDICT"
+  exit 2
+}
 
 say "==== WS0 #3224 PMU POSITIVE CONTROL ===="
 say "started:    $(date -u +%FT%TZ)"
@@ -168,9 +234,10 @@ say "host:       $(uname -n) / $(uname -r)"
 [ "$QUICK" = 1 ] && say "MODE:       QUICK (mechanics check only - NOT a valid gate result)"
 
 # ------------------------------------------------------------------ environment
-command -v perf >/dev/null 2>&1 || die_env "perf not installed (apt-get install linux-tools-\$(uname -r))"
-command -v cc   >/dev/null 2>&1 || die_env "no C compiler (apt-get install build-essential)"
+command -v perf    >/dev/null 2>&1 || die_env "perf not installed (apt-get install linux-tools-\$(uname -r))"
+command -v cc      >/dev/null 2>&1 || die_env "no C compiler (apt-get install build-essential)"
 command -v taskset >/dev/null 2>&1 || die_env "taskset not installed (apt-get install util-linux)"
+command -v timeout >/dev/null 2>&1 || die_env "timeout(1) not installed (coreutils)"
 
 {
   echo "== uname =="; uname -a
@@ -190,12 +257,9 @@ cc -O2 -std=c99 -pthread -o "$BIN" "$HERE/cache-hostile.c" 2>"$OUT_DIR/build.log
   || die_env "cache-hostile.c failed to build; see $OUT_DIR/build.log"
 say "built:      $BIN"
 
-# `perf stat -D` is how initialisation is kept OUT of the measured window. Without
-# it both arms would carry a large common init term and the ratio would collapse
-# toward 1.0 - i.e. a WORKING counter would look broken. Refuse to guess.
-perf stat -D 200 -x, -e cycles -o "$OUT_DIR/probe-delay.csv" -- sleep 1 >/dev/null 2>&1
-grep -q ',cycles,' "$OUT_DIR/probe-delay.csv" 2>/dev/null \
-  || die_env "this perf does not support 'stat -D <ms>' (need >= 4.x); cannot exclude init from the window"
+CTL="$OUT_DIR/perf-ctl.fifo"; ACK="$OUT_DIR/perf-ack.fifo"
+cleanup() { rm -f "$CTL" "$ACK"; }
+trap cleanup EXIT INT TERM
 
 # ------------------------------------------------------------ per-event probing
 declare -A EV_STATUS
@@ -204,13 +268,13 @@ PROBE="$OUT_DIR/event-probe.txt"
 ALL_EVENTS=("${CONTROL_EVENTS[@]}" "${REQUIRED_EVENTS[@]}" "${ADVISORY_EVENTS[@]}")
 USABLE=()
 for ev in "${ALL_EVENTS[@]}"; do
-  out="$(perf stat -x, -e "$ev" -- true 2>&1)"
-  if printf '%s' "$out" | grep -q ",$ev,"; then
-    val="$(printf '%s' "$out" | awk -F, -v e="$ev" '$3==e{print $1; exit}')"
+  out="$(perf stat -x, -e "${ev}${MOD}" -- true 2>&1)"
+  if printf '%s' "$out" | grep -q ",${ev}${MOD},"; then
+    val="$(printf '%s' "$out" | awk -F, -v e="${ev}${MOD}" '$3==e{print $1; exit}')"
     if [ "$val" = "<not supported>" ]; then
       EV_STATUS[$ev]=NOT_SUPPORTED
     else
-      EV_STATUS[$ev]=PROGRAMS; USABLE+=("$ev")
+      EV_STATUS[$ev]=PROGRAMS; USABLE+=("${ev}${MOD}")
     fi
   else
     EV_STATUS[$ev]=ABSENT_EVENT_NAME
@@ -218,67 +282,63 @@ for ev in "${ALL_EVENTS[@]}"; do
   printf '%-20s %s\n' "$ev" "${EV_STATUS[$ev]}" >> "$PROBE"
 done
 say ""
-say "-- event availability probe (perf stat -e <ev> -- true) --"
-sed 's/^/   /' "$PROBE" | tee -a "$SUMMARY" >/dev/null
-sed 's/^/   /' "$PROBE"
+say "-- event availability probe (perf stat -e <ev>${MOD} -- true) --"
+while read -r line; do say "   $line"; done < "$PROBE"
 
 for ev in "${CONTROL_EVENTS[@]}"; do
-  [ "${EV_STATUS[$ev]}" = PROGRAMS ] || die_env "control event '$ev' unusable (${EV_STATUS[$ev]}) - nothing can be measured on this host"
+  [ "${EV_STATUS[$ev]}" = PROGRAMS ] || \
+    die_env "control event '$ev' unusable (${EV_STATUS[$ev]}) - nothing at all can be measured on this host"
 done
 EVLIST="$(IFS=,; echo "${USABLE[*]}")"
 
-# ------------------------------------------------ calibrate the -D window delay
-# The hostile arm's permutation build is the expensive init; size the delay from a
-# measured probe rather than a guessed constant, then assert it took.
-CAL="$("$BIN" chase --buffer-mib "$BUFFER_MIB" --working-kib 0 --accesses 1000 \
-        --delay-ms 0 --arm calib 2>/dev/null)"
-CAL_INIT="$(printf '%s' "$CAL" | awk -F= '$1=="init_s"{print $2}')"
-[ -n "$CAL_INIT" ] || die_env "calibration run produced no init_s (binary broken?)"
-DELAY_MS="$(awk -v i="$CAL_INIT" 'BEGIN{d=int(i*1500)+3000; if(d<5000)d=5000; print d}')"
-say ""
-say "-- window calibration --"
-say "   hostile-arm init measured at ${CAL_INIT}s  ->  perf -D ${DELAY_MS} ms"
-say "   (init is EXCLUDED from the counted window; it is common to both arms and"
-say "    counting it would bias the ratio toward 1.0, i.e. hide a working counter)"
-
 # ------------------------------------------------------------------- measurement
-run_arm() { # $1 arm, $2 working-kib, $3 rep -> csv path on stdout
-  local arm="$1" wkib="$2" rep="$3"
-  local csv="$OUT_DIR/perf-${arm}-rep${rep}.csv"
-  local log="$OUT_DIR/run-${arm}-rep${rep}.txt"
-  taskset -c "$CPU" perf stat -x, -e "$EVLIST" -D "$DELAY_MS" -o "$csv" -- \
-    "$BIN" chase --buffer-mib "$BUFFER_MIB" --working-kib "$wkib" \
-                 --accesses "$ACCESSES" --delay-ms "$DELAY_MS" --arm "$arm" \
-    > "$log" 2>>"$log"
-  local rc=$?
-  if grep -q '^init_overrun=1' "$log" 2>/dev/null; then
-    say "FATAL: ${arm} rep${rep} init overran the perf delay; see $log"
-    exit 2
-  fi
-  [ $rc -eq 0 ] || { say "FATAL: ${arm} rep${rep} exited rc=$rc; see $log"; exit 2; }
-  printf '%s' "$csv"
+run_chase() { # $1 out-csv  $2 working-kib  $3 accesses  $4 arm-label  $5 log
+  rm -f "$CTL" "$ACK"; mkfifo "$CTL" "$ACK" || return 90
+  taskset -c "$CPU" timeout 900 \
+    perf stat -x, -e "$EVLIST" -D -1 --control "fifo:$CTL,$ACK" -o "$1" -- \
+      "$BIN" chase --buffer-mib "$BUFFER_MIB" --working-kib "$2" --accesses "$3" \
+                   --arm "$4" --ctl-fifo "$CTL" --ack-fifo "$ACK" \
+    > "$5" 2>>"$5"
+  return $?
 }
 cell() { awk -F, -v e="$2" '$3==e{print $1; exit}' "$1"; }   # raw value token
 mux()  { awk -F, -v e="$2" '$3==e{print $5; exit}' "$1"; }   # enabled percentage
 
+# --- gate integrity: an ungated window would report orders of magnitude more ---
+say ""
+say "-- gate integrity (control-FIFO window really is closed around the chase) --"
+run_chase "$OUT_DIR/gate-probe.csv" 0 "$GATE_PROBE_ACCESSES" gate-probe "$OUT_DIR/gate-probe.txt"
+grc=$?
+[ $grc -eq 0 ] || die_env "control-FIFO gate probe failed (rc=$grc). Either this perf lacks 'stat --control fifo:' (needs >= 5.13) or the handshake did not complete; see $OUT_DIR/gate-probe.txt"
+GP_INSTR="$(cell "$OUT_DIR/gate-probe.csv" "instructions${MOD}")"
+case "$GP_INSTR" in ''|*[!0-9]*) die_env "gate probe produced no instruction count ('${GP_INSTR:-empty}')" ;; esac
+if [ "$GP_INSTR" -ge "$GATE_PROBE_MAX_INSTR" ]; then
+  die_env "gate probe counted $GP_INSTR instructions for only $GATE_PROBE_ACCESSES accesses (ceiling $GATE_PROBE_MAX_INSTR). The perf window is NOT gated to the chase - it is also counting buffer init and/or address-space teardown, which are asymmetric between the arms and would corrupt every ratio below."
+fi
+say "   $GP_INSTR instructions for $GATE_PROBE_ACCESSES accesses (ceiling $GATE_PROBE_MAX_INSTR) -> PASS"
+
 declare -A MED MUXMIN
 say ""
-say "-- measurement: ${REPS} rep(s) per arm, pinned to CPU ${CPU} --"
+say "-- measurement: ${REPS} rep(s) per arm, pinned to CPU ${CPU}, events counted ${MOD} --"
 say "   friendly: working set ${WORKING_KIB} KiB (L2-resident)"
 say "   hostile:  working set ${BUFFER_MIB} MiB (>> LLC), random 64 B chase"
 say "   accesses: ${ACCESSES} per arm (identical in both arms)"
 for arm in friendly hostile; do
   wkib=$WORKING_KIB; [ "$arm" = hostile ] && wkib=0
   for rep in $(seq 1 "$REPS"); do
-    csv="$(run_arm "$arm" "$wkib" "$rep")"
-    say "   ran $arm rep$rep -> $(basename "$csv")"
+    run_chase "$OUT_DIR/perf-${arm}-rep${rep}.csv" "$wkib" "$ACCESSES" "$arm" \
+              "$OUT_DIR/run-${arm}-rep${rep}.txt"
+    rc=$?
+    [ $rc -eq 0 ] || die_env "${arm} rep${rep} exited rc=$rc; see $OUT_DIR/run-${arm}-rep${rep}.txt"
+    nspa="$(awk -F= '$1=="ns_per_access"{print $2}' "$OUT_DIR/run-${arm}-rep${rep}.txt")"
+    say "   ran $arm rep$rep  (${nspa:-?} ns/access wall-clock)"
   done
   for ev in "${ALL_EVENTS[@]}"; do
     if [ "${EV_STATUS[$ev]}" != PROGRAMS ]; then MED["$arm/$ev"]="${EV_STATUS[$ev]}"; continue; fi
     vals=(); bad=""; mmin=10000
     for rep in $(seq 1 "$REPS"); do
-      v="$(cell "$OUT_DIR/perf-${arm}-rep${rep}.csv" "$ev")"
-      p="$(mux  "$OUT_DIR/perf-${arm}-rep${rep}.csv" "$ev")"
+      v="$(cell "$OUT_DIR/perf-${arm}-rep${rep}.csv" "${ev}${MOD}")"
+      p="$(mux  "$OUT_DIR/perf-${arm}-rep${rep}.csv" "${ev}${MOD}")"
       case "$v" in
         ''|*[!0-9]*) bad="${v:-MISSING_ROW}" ;;
         *) vals+=("$v") ;;
@@ -301,6 +361,7 @@ done
 # ------------------------------------------------------------------ verdict math
 isnum() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 fmt_milli() { printf '%d.%03d' "$(( $1 / 1000 ))" "$(( $1 % 1000 ))"; }
+show_milli() { if [ "$1" = inf ]; then printf 'inf'; elif isnum "$1"; then fmt_milli "$1"; else printf 'na'; fi; }
 
 ratio_milli() { # $1 hostile $2 friendly -> milli-ratio, or "inf"/"na"
   if ! isnum "$1" || ! isnum "$2"; then echo na; return; fi
@@ -319,7 +380,7 @@ say "-- P1 HOSTILITY CONTROL (cycles/access, hostile:friendly, need >= ${HOSTILI
 HOSTILITY=FAIL
 if [ "$CYC_RATIO" = inf ]; then HOSTILITY=PASS
 elif isnum "$CYC_RATIO" && [ "$CYC_RATIO" -ge $(( HOSTILITY_MIN * 1000 )) ]; then HOSTILITY=PASS; fi
-say "   cycles friendly=$C_F  hostile=$C_H  ratio=$( [ "$CYC_RATIO" = inf ] && echo inf || fmt_milli "$CYC_RATIO" )x  -> $HOSTILITY"
+say "   cycles friendly=$C_F  hostile=$C_H  ratio=$(show_milli "$CYC_RATIO")x  -> $HOSTILITY"
 
 say "-- P2 SYMMETRY CONTROL (instructions/access, need within +/-${SYMMETRY_TOL_PCT}%) --"
 SYMMETRY=FAIL
@@ -327,35 +388,65 @@ if isnum "$INS_RATIO"; then
   lo=$(( (100 - SYMMETRY_TOL_PCT) * 10 )); hi=$(( (100 + SYMMETRY_TOL_PCT) * 10 ))
   if [ "$INS_RATIO" -ge "$lo" ] && [ "$INS_RATIO" -le "$hi" ]; then SYMMETRY=PASS; fi
 fi
-say "   instructions friendly=$I_F  hostile=$I_H  ratio=$( isnum "$INS_RATIO" && fmt_milli "$INS_RATIO" || echo na )x  -> $SYMMETRY"
+say "   instructions friendly=$I_F  hostile=$I_H  ratio=$(show_milli "$INS_RATIO")x  -> $SYMMETRY"
 
-declare -A EV_VERDICT EV_RATIO EV_RATE
-evaluate() { # $1 event -> sets EV_VERDICT/EV_RATIO/EV_RATE
+# Direction-agnostic movement: max/min. See the P3-P5 header block - raw LLC-loads
+# legitimately FALLS in the hostile arm on healthy hardware (prefetcher stops
+# issuing them), so asserting a direction here is a false-FAIL generator.
+move_milli() {
+  if ! isnum "$1" || ! isnum "$2"; then echo na; return; fi
+  local hi=$1 lo=$2
+  [ "$1" -lt "$2" ] && { hi=$2; lo=$1; }
+  if [ "$lo" -eq 0 ]; then if [ "$hi" -gt 0 ]; then echo inf; else echo na; fi; return; fi
+  echo $(( hi * 1000 / lo ))
+}
+# LLC miss rate = misses/loads, x1000. The invariant that survives prefetcher
+# behaviour: hostility raises the FRACTION of LLC accesses that miss.
+MISSRATE_F=na; MISSRATE_H=na; MISSRATE_RISE=na
+compute_missrate() {
+  local lf="${MED[friendly/LLC-loads]}" lh="${MED[hostile/LLC-loads]}"
+  local mf="${MED[friendly/LLC-load-misses]}" mh="${MED[hostile/LLC-load-misses]}"
+  isnum "$lf" && isnum "$lh" && isnum "$mf" && isnum "$mh" || return
+  [ "$lf" -gt 0 ] && [ "$lh" -gt 0 ] || return
+  MISSRATE_F=$(( mf * 1000 / lf )); MISSRATE_H=$(( mh * 1000 / lh ))
+  [ "$MISSRATE_F" -gt 0 ] || { MISSRATE_RISE=inf; return; }
+  MISSRATE_RISE=$(( MISSRATE_H * 1000 / MISSRATE_F ))
+}
+
+declare -A EV_VERDICT EV_MOVE EV_RATE
+evaluate() { # $1 event -> sets EV_VERDICT/EV_MOVE/EV_RATE
   local ev="$1" h="${MED[hostile/$1]}" f="${MED[friendly/$1]}"
-  local r; r="$(ratio_milli "$h" "$f")"; local q; q="$(rate_milli "$h")"
-  EV_RATIO[$ev]="$r"; EV_RATE[$ev]="$q"
-  if ! isnum "$h"; then EV_VERDICT[$ev]="$h"; return; fi        # NOT_SUPPORTED etc
-  if [ "$h" -eq 0 ]; then EV_VERDICT[$ev]=SILENT_ZERO; return; fi
-  local moved=0 big=0
-  { [ "$r" = inf ] || { isnum "$r" && [ "$r" -ge $(( RATIO_MIN * 1000 )) ]; }; } && moved=1
-  { isnum "$q" && [ "$q" -ge "$RATE_MIN_MILLI" ]; } && big=1
-  if [ $moved -eq 1 ] && [ $big -eq 1 ]; then EV_VERDICT[$ev]=OK
-  elif [ $moved -eq 0 ] && [ $big -eq 0 ]; then EV_VERDICT[$ev]=UNRELIABLE_NO_MOVEMENT_AND_LOW_RATE
-  elif [ $moved -eq 0 ]; then EV_VERDICT[$ev]=UNRELIABLE_NO_MOVEMENT
-  else EV_VERDICT[$ev]=UNRELIABLE_LOW_RATE; fi
+  local m q; m="$(move_milli "$h" "$f")"; q="$(rate_milli "$h")"
+  EV_MOVE[$ev]="$m"; EV_RATE[$ev]="$q"
+  if ! isnum "$h" || ! isnum "$f"; then EV_VERDICT[$ev]="${h}"; return; fi
+  if [ "$h" -eq 0 ] && [ "$f" -eq 0 ]; then EV_VERDICT[$ev]=SILENT_ZERO; return; fi
+  if [ "$h" -eq 0 ]; then EV_VERDICT[$ev]=HOSTILE_ZERO; return; fi
+  local moved=0
+  { [ "$m" = inf ] || { isnum "$m" && [ "$m" -ge "$MOVE_MIN_MILLI" ]; }; } && moved=1
+  if [ "$moved" -eq 0 ]; then EV_VERDICT[$ev]=UNRELIABLE_NO_MOVEMENT; return; fi
+  if [ "$ev" = LLC-load-misses ]; then
+    if [ "$MISSRATE_RISE" = inf ]; then EV_VERDICT[$ev]=OK
+    elif isnum "$MISSRATE_RISE" && [ "$MISSRATE_RISE" -ge "$MISSRATE_MIN_MILLI" ]; then EV_VERDICT[$ev]=OK
+    elif [ "$MISSRATE_RISE" = na ]; then EV_VERDICT[$ev]=UNRELIABLE_MISSRATE_UNCOMPUTABLE
+    else EV_VERDICT[$ev]=UNRELIABLE_MISSRATE_FLAT; fi
+    return
+  fi
+  EV_VERDICT[$ev]=OK
 }
 report_ev() {
-  local ev="$1" tag="$2" r="${EV_RATIO[$1]}" q="${EV_RATE[$1]}"
-  local rs qs
-  rs="$( [ "$r" = inf ] && echo "inf" || { isnum "$r" && fmt_milli "$r" || echo na; } )"
-  qs="$( isnum "$q" && fmt_milli "$q" || echo na )"
+  local ev="$1" tag="$2"
   say "   $(printf '%-17s' "$ev") [$tag] friendly=${MED[friendly/$ev]}  hostile=${MED[hostile/$ev]}"
-  say "                     ratio=${rs}x (need >= ${RATIO_MIN}x)  hostile-rate=${qs}/access (need >= $(fmt_milli $RATE_MIN_MILLI))  -> ${EV_VERDICT[$ev]}"
+  say "                     movement=$(show_milli "${EV_MOVE[$ev]}")x either-direction (need >= $(fmt_milli $MOVE_MIN_MILLI)x)  hostile-per-access=$(show_milli "${EV_RATE[$ev]}") (REPORTED, not gated)  -> ${EV_VERDICT[$ev]}"
   local m="${MUXMIN[hostile/$ev]:-100}"
   if isnum "$m" && [ "$m" -lt "$MUX_MIN_PCT" ]; then
     say "                     WARNING: multiplexed at ${m}% enabled - counts are scaled estimates"
   fi
 }
+
+compute_missrate
+say ""
+say "-- P4 LLC MISS RATE (misses/loads; the prefetcher-proof invariant) --"
+say "   friendly=$(show_milli "$MISSRATE_F")  hostile=$(show_milli "$MISSRATE_H")  rise=$(show_milli "$MISSRATE_RISE")x (need >= $(fmt_milli $MISSRATE_MIN_MILLI)x)"
 
 say ""
 say "-- P3-P5 REQUIRED COUNTERS (gating) --"
@@ -377,21 +468,21 @@ say "   sysfs PMUs (AUTHORITATIVE): $UNCORE_LIST"
 say "   uncore_imc* PMU instances:  $IMC_COUNT"
 say "   NOTE: 'perf list | grep uncore' is MISLEADING - it lists per-model JSON"
 say "         event-table entries, not PMUs present on this host. sysfs is truth."
-MBW_OUT="$(perf stat -M MemoryBandwidth -a -- sleep 1 2>&1 | tr '\n' '|' | cut -c1-400)"
-MBW_OK=no; printf '%s' "$MBW_OUT" | grep -qi 'cannot find metric' || MBW_OK=maybe
-say "   perf stat -M MemoryBandwidth: $MBW_OK"
-printf '%s\n' "$MBW_OUT" > "$OUT_DIR/memorybandwidth-probe.txt"
+perf stat -M MemoryBandwidth -a -- sleep 1 > "$OUT_DIR/memorybandwidth-probe.txt" 2>&1
+MBW_OK=no
+grep -qi 'cannot find metric' "$OUT_DIR/memorybandwidth-probe.txt" || MBW_OK=maybe
+say "   perf stat -M MemoryBandwidth: $MBW_OK (raw: memorybandwidth-probe.txt)"
 
 STREAM_G24=""; STREAM_G32=""; STREAM_T=""
 if [ "$RUN_STREAM" = 1 ]; then
-  SOUT="$("$BIN" stream --stream-mib "$STREAM_MIB" --threads "$STREAM_THREADS" \
-           --iters 5 --delay-ms 100 2>"$OUT_DIR/stream.err")"
+  SOUT="$(timeout 900 "$BIN" stream --stream-mib "$STREAM_MIB" --threads "$STREAM_THREADS" \
+           --iters 5 --delay-ms 0 2>"$OUT_DIR/stream.err")"
   printf '%s\n' "$SOUT" > "$OUT_DIR/stream-reference.txt"
   STREAM_G24="$(printf '%s' "$SOUT" | awk -F= '$1=="gbps_basis24"{print $2}')"
   STREAM_G32="$(printf '%s' "$SOUT" | awk -F= '$1=="gbps_basis32"{print $2}')"
   STREAM_T="$(printf '%s'  "$SOUT" | awk -F= '$1=="threads"{print $2}')"
   say "   STREAM-triad-class reference (NOT the vendor STREAM benchmark):"
-  say "     threads=${STREAM_T}  ${STREAM_G24} GB/s @24B/elem basis  ${STREAM_G32} GB/s @32B/elem (incl. RFO)"
+  say "     threads=${STREAM_T:-?}  ${STREAM_G24:-?} GB/s @24B/elem basis  ${STREAM_G32:-?} GB/s @32B/elem (incl. RFO)"
   say "     AC5 needs this re-run at the SAME core/NUMA binding as the engine arms."
 else
   say "   STREAM-triad reference: SKIPPED (--no-stream)"
@@ -401,7 +492,7 @@ fi
 say ""
 if [ "$HOSTILITY" != PASS ] || [ "$SYMMETRY" != PASS ]; then
   RESULT=INDETERMINATE; RC=3
-  REASON="the microbenchmark did not establish a valid differential (P1 hostility=$HOSTILITY, P2 symmetry=$SYMMETRY); counter verdicts are uninterpretable, NOT evidence of broken counters. Remedy: raise --buffer-mib well above this host's LLC, lower --working-kib below L2, and re-run."
+  REASON="the microbenchmark did not establish a valid differential (P1 hostility=$HOSTILITY, P2 symmetry=$SYMMETRY); the counter verdicts below are UNINTERPRETABLE, not evidence about the counters. Remedy: raise --buffer-mib well above this host's LLC, lower --working-kib below L2, and re-run."
 elif [ "$FAILED_REQUIRED" -eq 0 ]; then
   RESULT=PASS; RC=0
   REASON="all required counters programmed, moved in the predicted direction, and reached the predicted magnitude."
@@ -419,16 +510,19 @@ say "artefacts:  $OUT_DIR"
   printf '  "issue": 3224,\n  "result": "%s",\n  "exit_code": %d,\n' "$RESULT" "$RC"
   printf '  "reason": "%s",\n' "$REASON"
   printf '  "quick_mode": %s,\n' "$( [ "$QUICK" = 1 ] && echo true || echo false )"
-  printf '  "started_utc": "%s",\n' "$(date -u +%FT%TZ)"
+  printf '  "completed_utc": "%s",\n' "$(date -u +%FT%TZ)"
   printf '  "host": {"nodename": "%s", "kernel": "%s", "perf": "%s"},\n' \
     "$(uname -n)" "$(uname -r)" "$(perf --version 2>/dev/null | head -1)"
-  printf '  "config": {"reps": %s, "buffer_mib": %s, "working_kib": %s, "accesses": %s, "cpu": %s, "perf_delay_ms": %s},\n' \
-    "$REPS" "$BUFFER_MIB" "$WORKING_KIB" "$ACCESSES" "$CPU" "$DELAY_MS"
-  printf '  "thresholds": {"ratio_min": %s, "hostile_rate_min_per_access": %s, "hostility_min": %s, "symmetry_tol_pct": %s},\n' \
-    "$RATIO_MIN" "$(fmt_milli $RATE_MIN_MILLI)" "$HOSTILITY_MIN" "$SYMMETRY_TOL_PCT"
+  printf '  "config": {"reps": %s, "buffer_mib": %s, "working_kib": %s, "accesses": %s, "cpu": %s, "event_modifier": "%s", "window_gate": "perf-control-fifo"},\n' \
+    "$REPS" "$BUFFER_MIB" "$WORKING_KIB" "$ACCESSES" "$CPU" "$MOD"
+  printf '  "gate_integrity": {"probe_accesses": %s, "probe_instructions": %s, "ceiling": %s, "verdict": "PASS"},\n' \
+    "$GATE_PROBE_ACCESSES" "$GP_INSTR" "$GATE_PROBE_MAX_INSTR"
+  printf '  "thresholds": {"movement_min_either_direction": "%s", "missrate_rise_min": "%s", "hostility_min": %s, "symmetry_tol_pct": %s, "per_access_magnitude": "reported, not gated"},\n' \
+    "$(fmt_milli $MOVE_MIN_MILLI)" "$(fmt_milli $MISSRATE_MIN_MILLI)" "$HOSTILITY_MIN" "$SYMMETRY_TOL_PCT"
+  printf '  "llc_miss_rate": {"friendly": "%s", "hostile": "%s", "rise": "%s"},\n' \
+    "$(show_milli "$MISSRATE_F")" "$(show_milli "$MISSRATE_H")" "$(show_milli "$MISSRATE_RISE")"
   printf '  "controls": {"hostility": "%s", "cycles_ratio": "%s", "symmetry": "%s", "instructions_ratio": "%s"},\n' \
-    "$HOSTILITY" "$( [ "$CYC_RATIO" = inf ] && echo inf || { isnum "$CYC_RATIO" && fmt_milli "$CYC_RATIO" || echo na; } )" \
-    "$SYMMETRY" "$( isnum "$INS_RATIO" && fmt_milli "$INS_RATIO" || echo na )"
+    "$HOSTILITY" "$(show_milli "$CYC_RATIO")" "$SYMMETRY" "$(show_milli "$INS_RATIO")"
   printf '  "counters": {\n'
   first=1
   for ev in "${REQUIRED_EVENTS[@]}" "${ADVISORY_EVENTS[@]}" "${CONTROL_EVENTS[@]}"; do
@@ -436,10 +530,9 @@ say "artefacts:  $OUT_DIR"
     [ $first -eq 1 ] || printf ',\n'; first=0
     gating=false
     for r in "${REQUIRED_EVENTS[@]}"; do [ "$r" = "$ev" ] && gating=true; done
-    printf '    "%s": {"probe": "%s", "gating": %s, "friendly_median": "%s", "hostile_median": "%s", "ratio": "%s", "hostile_per_access": "%s", "verdict": "%s", "min_enabled_pct": "%s"}' \
+    printf '    "%s": {"probe": "%s", "gating": %s, "friendly_median": "%s", "hostile_median": "%s", "movement_either_direction": "%s", "hostile_per_access_reported_not_gated": "%s", "verdict": "%s", "min_enabled_pct": "%s"}' \
       "$ev" "${EV_STATUS[$ev]}" "$gating" "${MED[friendly/$ev]}" "${MED[hostile/$ev]}" \
-      "$( [ "${EV_RATIO[$ev]}" = inf ] && echo inf || { isnum "${EV_RATIO[$ev]}" && fmt_milli "${EV_RATIO[$ev]}" || echo na; } )" \
-      "$( isnum "${EV_RATE[$ev]}" && fmt_milli "${EV_RATE[$ev]}" || echo na )" \
+      "$(show_milli "${EV_MOVE[$ev]}")" "$(show_milli "${EV_RATE[$ev]}")" \
       "${EV_VERDICT[$ev]}" "${MUXMIN[hostile/$ev]:-unknown}"
   done
   printf '\n  },\n'

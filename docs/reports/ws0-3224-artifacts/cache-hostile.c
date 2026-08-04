@@ -26,13 +26,23 @@
  * with a large cycles ratio proves the difference is purely memory-hierarchy, and
  * any counter that claims to see the memory hierarchy MUST move with it.
  *
- * INIT MUST NOT BE COUNTED. Building the permutation over a multi-GiB buffer
- * generates its own LLC traffic, and it costs the SAME in both arms — counting it
- * would add a large common term to numerator and denominator and crush the ratio
- * toward 1.0, i.e. it would make a WORKING counter look broken. So the measured
- * window is opened by `perf stat -D <delay_ms>` and this program does not start its
- * chase until that deadline. If init overruns the deadline the program FAILS LOUDLY
- * (exit 4, `init_overrun=1`) rather than reporting a contaminated run.
+ * ONLY THE CHASE MAY BE COUNTED — this is measured, not assumed. Two phases outside
+ * the chase are large and, worse, ASYMMETRIC between the arms:
+ *   - init (mmap + page faults + permutation build): huge in the hostile arm, ~free
+ *     in the friendly arm, which only ever touches --working-kib;
+ *   - exit-time address-space teardown: measured on a 512 MiB buffer at 192M
+ *     instructions (hostile, all pages resident) vs 80M (friendly, few resident) —
+ *     i.e. teardown alone can exceed the chase and it does NOT cancel between arms.
+ * Counting either one corrupts the differential in an unpredictable direction, so
+ * the measured window is gated EXACTLY around the chase loop using perf's control
+ * FIFO (`perf stat -D -1 --control fifo:<ctl>,<ack>`): the program writes `enable`
+ * immediately before the loop and `disable` immediately after, and every handshake
+ * has a deadline so a missing peer fails loudly instead of hanging.
+ *
+ * `--delay-ms` remains as a standalone fallback for running this benchmark without
+ * the control FIFO; in that mode init is excluded by `perf stat -D <ms>` and the
+ * program exits 4 (`init_overrun=1`) if init overran the deadline — but teardown is
+ * then INSIDE the window, so that mode is for ad-hoc use, not for the gate.
  *
  * Also provides `stream` mode: a STREAM-triad-class bandwidth reference measured on
  * the same host, for AC5 (measured bandwidth vs achievable peak). It is NOT the
@@ -44,7 +54,10 @@
  * Build:  cc -O2 -std=c99 -pthread -o cache-hostile cache-hostile.c
  */
 #define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -109,10 +122,44 @@ static void wait_for_window(double delay_s, double init_s) {
     nanosleep(&ts, NULL);
 }
 
+/* ------------------------------------------------- perf control-FIFO handshake */
+
+static int g_ctl_fd = -1, g_ack_fd = -1;
+
+/*
+ * perf opens the ctl FIFO for reading and the ack FIFO for writing before it execs
+ * this workload, so O_WRONLY on ctl succeeds as soon as perf is ready. Every wait
+ * carries a deadline: a hung handshake on a metered bare-metal box is worse than a
+ * loud failure, and a silent one would leave the window ungated.
+ */
+static void ctl_open(const char *ctl, const char *ack) {
+    double deadline = now_s() + 30.0;
+    for (;;) {
+        g_ctl_fd = open(ctl, O_WRONLY | O_NONBLOCK);
+        if (g_ctl_fd >= 0) break;
+        if (errno != ENXIO && errno != ENOENT) die("cannot open --ctl-fifo");
+        if (now_s() > deadline) die("timed out waiting for perf to open --ctl-fifo");
+        usleep(20000);
+    }
+    if (fcntl(g_ctl_fd, F_SETFL, 0) < 0) die("fcntl on ctl fifo failed");
+    g_ack_fd = open(ack, O_RDONLY | O_NONBLOCK);
+    if (g_ack_fd < 0) die("cannot open --ack-fifo");
+}
+
+static void ctl_cmd(const char *cmd) {
+    char buf[32];
+    if (write(g_ctl_fd, cmd, strlen(cmd)) < 0) die("write to perf ctl fifo failed");
+    struct pollfd p = { .fd = g_ack_fd, .events = POLLIN };
+    int r = poll(&p, 1, 30000);
+    if (r <= 0) die("perf did not acknowledge a control command within 30s");
+    if (read(g_ack_fd, buf, sizeof buf) < 0) die("read from perf ack fifo failed");
+}
+
 /* ------------------------------------------------------------------ chase mode */
 
 static int run_chase(size_t buf_mib, size_t working_kib, uint64_t accesses,
-                     double delay_s, uint64_t seed, const char *arm) {
+                     double delay_s, uint64_t seed, const char *arm,
+                     const char *ctl, const char *ack) {
     size_t buf_bytes = buf_mib << 20;
     size_t work_bytes = (working_kib == 0) ? buf_bytes : (working_kib << 10);
     if (work_bytes > buf_bytes) die("--working-kib exceeds --buffer-mib");
@@ -135,7 +182,9 @@ static int run_chase(size_t buf_mib, size_t working_kib, uint64_t accesses,
     }
     double init_s = now_s() - t0;
 
-    wait_for_window(delay_s, init_s);
+    const char *gate = "delay";
+    if (ctl && ack) { gate = "fifo"; ctl_open(ctl, ack); ctl_cmd("enable\n"); }
+    else wait_for_window(delay_s, init_s);
 
     /* THE MEASURED SECTION. Serial dependency: each load's address comes from the
      * previous load's result, so there is no memory-level parallelism to hide a
@@ -147,9 +196,10 @@ static int run_chase(size_t buf_mib, size_t working_kib, uint64_t accesses,
         sum += idx;
     }
     double chase_s = now_s() - c0;
+    if (ctl && ack) ctl_cmd("disable\n");   /* teardown must land OUTSIDE the window */
 
-    printf("mode=chase\narm=%s\nbuffer_bytes=%zu\nworking_set_bytes=%zu\n",
-           arm, buf_bytes, work_bytes);
+    printf("mode=chase\narm=%s\ngate=%s\nbuffer_bytes=%zu\nworking_set_bytes=%zu\n",
+           arm, gate, buf_bytes, work_bytes);
     printf("nodes=%" PRIu64 "\naccesses=%" PRIu64 "\ninit_s=%.4f\nchase_s=%.4f\n",
            nodes, accesses, init_s, chase_s);
     printf("ns_per_access=%.3f\nchecksum=%" PRIu64 "\ninit_overrun=0\n",
@@ -239,13 +289,17 @@ static int run_stream(size_t arr_mib, int threads, int iters, double delay_s) {
 static void usage(void) {
     fprintf(stderr,
         "usage: cache-hostile chase  [--buffer-mib N] [--working-kib K]\n"
-        "                            [--accesses A] [--delay-ms D] [--seed S]\n"
-        "                            [--arm NAME]\n"
+        "                            [--accesses A] [--seed S] [--arm NAME]\n"
+        "                            [--ctl-fifo P --ack-fifo P | --delay-ms D]\n"
         "       cache-hostile stream [--stream-mib N] [--threads T] [--iters I]\n"
         "                            [--delay-ms D]\n"
         "\n"
         "--working-kib 0 means 'the whole buffer' (the cache-hostile arm).\n"
-        "--delay-ms must exceed initialisation time; the program exits 4 if not.\n");
+        "--ctl-fifo/--ack-fifo gate the perf window EXACTLY around the chase loop\n"
+        "  (use with `perf stat -D -1 --control fifo:<ctl>,<ack>`). This is the\n"
+        "  gate mode: it excludes both init AND exit-time teardown.\n"
+        "--delay-ms is the fallback when no control FIFO is available; it excludes\n"
+        "  init only, and the program exits 4 if init overran the delay.\n");
     exit(2);
 }
 
@@ -257,7 +311,7 @@ int main(int argc, char **argv) {
     uint64_t accesses = 20000000ULL, seed = 42;
     double delay_s = 10.0;
     int threads = 0, iters = 5;
-    const char *arm = "unnamed";
+    const char *arm = "unnamed", *ctl = NULL, *ack = NULL;
 
     for (int i = 2; i < argc; i++) {
         const char *k = argv[i];
@@ -269,13 +323,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(k, "--delay-ms")) delay_s = strtod(v, NULL) / 1000.0;
         else if (!strcmp(k, "--seed")) seed = strtoull(v, NULL, 10);
         else if (!strcmp(k, "--arm")) arm = v;
+        else if (!strcmp(k, "--ctl-fifo")) ctl = v;
+        else if (!strcmp(k, "--ack-fifo")) ack = v;
         else if (!strcmp(k, "--stream-mib")) stream_mib = strtoull(v, NULL, 10);
         else if (!strcmp(k, "--threads")) threads = atoi(v);
         else if (!strcmp(k, "--iters")) iters = atoi(v);
         else usage();
     }
+    if ((ctl == NULL) != (ack == NULL))
+        die("--ctl-fifo and --ack-fifo must be given together");
     if (!strcmp(mode, "chase"))
-        return run_chase(buf_mib, working_kib, accesses, delay_s, seed, arm);
+        return run_chase(buf_mib, working_kib, accesses, delay_s, seed, arm, ctl, ack);
     if (!strcmp(mode, "stream"))
         return run_stream(stream_mib, threads, iters, delay_s);
     usage();
