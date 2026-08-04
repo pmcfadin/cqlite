@@ -218,9 +218,27 @@ from root cannot certify itself.** All three are in CLAUDE.md and `roborev-findi
 **sh 32**, png 23, svg 22, **py 22**, gz 18, pdf 10, mmd 10, html 9, yml 4, yaml 3, jfr 3, csv 3, c 3,
 **bt 3**, extensionless 3, cql 2, toml 1, tex 1, rs 1, diff 1. Of those, 578 are under
 `docs/reports/*-artifacts/**`: txt 246, json 133, err 66, log 53, jsonl 45, sh 30, py 21, gz 18, svg 12,
-md 7, csv 3, c 3, bt 3, extensionless 3, yaml 2, cql 2, toml 1, rs 1, diff 1. The three extensionless
-files are **compiled binaries** (`ws0-readbw`, `ws0-stream`, `offcputime-bigmap`) — correctly not code
-to review.
+md 7, csv 3, c 3, bt 3, extensionless 3, yaml 2, cql 2, toml 1, rs 1, diff 1.
+
+**The three extensionless files, RE-MEASURED — the earlier claim here was WRONG.** This design previously
+recorded them as "compiled binaries … correctly not code to review". `file(1)` says otherwise: `ws0-readbw`
+(16,856 B) and `ws0-stream` (21,112 B) are ELF 64-bit executables, but
+`docs/reports/ws0-3217-artifacts/partB-run/offcputime-bigmap` (13,953 B) is a **Python script, ASCII text
+executable** — 379 lines of reviewable source. All three are mode **100755**. So the "correctly not code"
+justification was doing double duty for a real script, and it was the justification a prefix-only
+extensionless rule rested on. Corrected rule: an extensionless path under a prose prefix is CODE **iff git
+records it executable** (see the classification requirement in the delta spec). Consequences, both measured
+on the final tree: docs/ executables classified CODE went **46/49 → 49/49**, and the docs/ code-path total
+**75 → 78**, the delta being exactly those three paths and nothing else.
+
+The two ELF blobs are now CODE census paths as well. That costs no prompt budget — git renders a binary
+blob as `Binary files … differ` — and it remains *satisfiable*, because git still emits the
+`diff --git a/<p> b/<p>` header the check matches on. The residual, stated rather than hidden: if roborev's
+constructed diff should omit binary paths entirely, a PR touching one would surface as a
+`prompt-content:` FAIL naming it. That is the fail-closed direction and it is diagnosable from the named
+path; a by-name refinement, if it is ever wanted, belongs to **#3260** rather than here, because the
+alternative — inspecting file CONTENT to guess "binary, therefore not code" — is precisely the kind of
+byte-pattern inference the no-heuristics mandate forbids, while the executable bit is recorded metadata.
 
 Read that histogram as the budget: the ~570 raw-output files (`txt`/`json`/`err`/`log`/`jsonl`) are what
 makes a blanket un-exclusion unaffordable, and the ~60 `sh`/`py`/`bt`/`c`/`rs`/`toml`/`cql`/`yml` files
@@ -322,10 +340,11 @@ into "the reviewer silently sees nothing" is now the **directory scoping itself*
 outside a tree whose whole purpose is committed run output) plus `prompt-content:`'s fail-closed check that
 every code census path actually arrived — not a pre-enqueue prediction, which is deferred to #3283.
 
-Three extensionless compiled binaries under `docs/` are not matched by an extension deny-list. They
-remain classified non-code by the census (extensionless under a declared prose directory), and git
-renders them as `Binary files … differ`, so the token cost is bounded; they are not worth a
-by-name exclusion, and this is recorded rather than fixed.
+Three extensionless executables under `docs/` are not matched by an extension deny-list, so nothing removes
+them from a review prompt — and that is now consistent with how the census classifies them: **CODE, because
+git records them executable** (one of the three is a Python script; see the re-measurement above). git
+renders the two ELF blobs as `Binary files … differ`, so the token cost stays bounded, and no by-name
+exclusion is wanted: excluding them would restore exactly the silence this change closes.
 
 **Operational risk to record:** `.roborev.toml` is a machine-managed file (`roborev config set` rewrites
 it, comments and all). A rewrite that drops or reorders the list would silently restore the blind spot.

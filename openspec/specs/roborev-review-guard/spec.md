@@ -176,6 +176,12 @@ limited to EXTENSIONLESS files under declared prose directories. A file with a c
 anywhere in the tree — including `docs/foo.py` and `.github/workflows/*.yml` — SHALL count as CODE, so
 the check cannot false-FAIL a code change that merely lives in a documentation directory.
 
+Under a declared prose directory an EXTENSIONLESS path SHALL count as CODE **iff git RECORDS it
+EXECUTABLE**, the mode read from the tree (HEAD, else the BASE commit for a deleted path) and never from
+the filesystem. The prose PREFIX alone SHALL NOT decide it: that made every extensionless path under
+`docs/` non-code, so it never entered the code census and `prompt-content:` made no claim about it at all —
+while the configured exclusions do not remove it, so it does reach the reviewer.
+
 This requirement is deliberately STRONGER than a prose-matched detection: an earlier revision computed
 the same classification and used it only for attribution wording, which let a docs-only diff reach
 `RESULT: PASS` whenever the reviewer's verdict happened not to carry the vacuity phrase.

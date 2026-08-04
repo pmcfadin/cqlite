@@ -165,6 +165,27 @@ outside `docs/` from review.
 - **WHEN** roborev builds the review diff for that range
 - **THEN** all three paths are present in the prompt actually sent, and no pattern in the effective set excludes them
 
+#### Scenario: An EXTENSIONLESS executable under `docs/` is a code census path the prompt must carry
+- **GIVEN** a census containing `docs/reports/x-artifacts/ws0-results/ws0-readbw` recorded mode 100755, a non-executable `docs/reports/x-artifacts/harness/plain.sh`, `docs/reports/x-report.md` and a non-executable extensionless `docs/NOTICE`
+- **WHEN** the census classifies them and `prompt-content:` runs against a prompt carrying `diff --git` headers for the extensionless executable and the `.sh`
+- **THEN** `code-free:` reads `PASS`, `prompt-content:` reads `PASS (2/2 code census paths present)` — so the extensionless executable IS a subject and the `.md` and extensionless non-executable are NOT, established by the count rather than by inspection
+- **AND** a code EXTENSION still outranks the mode: the non-executable `.sh` is CODE
+
+#### Scenario: The same extensionless executable ABSENT from the prompt is a named FAIL
+- **GIVEN** the same census
+- **WHEN** the prompt carries a header for the `.sh` only
+- **THEN** `prompt-content:` reads `FAIL (1/2 code census paths absent from the prompt)`, a DETAILS line NAMES `docs/reports/x-artifacts/ws0-results/ws0-readbw`, and the terminal `RESULT:` is `FAIL` — the assertion that did not exist while the path was not a subject at all
+
+#### Scenario: The same extensionless path NON-EXECUTABLE is still non-code
+- **GIVEN** a census containing `docs/reports/x-artifacts/ws0-results/ws0-readbw` recorded mode 100644 and one `.rs` file
+- **WHEN** `prompt-content:` runs against a prompt carrying a header for the `.rs` file only
+- **THEN** it reads `PASS (1/1 code census paths present)` and the terminal `RESULT:` is `PASS` — same name, same directory, only the recorded mode differs, so the discriminator is demonstrably the mode
+
+#### Scenario: A DELETED extensionless executable is classified from the BASE tree
+- **GIVEN** a branch that DELETES `docs/reports/x-artifacts/ws0-results/ws0-readbw`, which was recorded 100755 at the base and is absent from both HEAD and the working tree
+- **WHEN** the census classifies it
+- **THEN** it is a CODE census path, `code-free:` reads `PASS`, and `prompt-content:` reads `PASS (1/1 code census paths present)` against the deletion's own `diff --git` header — a filesystem `test -x` could not have reached this verdict, since there is no file to stat
+
 #### Scenario: The configuration contains no blanket directory glob
 - **WHEN** `.roborev.toml`'s `exclude_patterns` is inspected after this change
 - **THEN** it contains neither `docs/**` nor any other pattern that excludes a path solely by its directory, every docs-scoped pattern names a specific non-code file extension, and `*.md` is still present
@@ -579,7 +600,30 @@ configuration's `<artifact-dir-glob>/**/*.<ext>` exclusions (raw run output and 
 committed inside a directory whose purpose is committed run output), with a path assist limited to
 EXTENSIONLESS files under the declared prose directories. An artifact EXTENSION alone SHALL NOT make a file
 non-code: a `.json` outside those directories — notably `docs/observability/**` — is functional
-configuration and SHALL count as CODE. The directory-glob match SHALL follow git `:(glob)` component
+configuration and SHALL count as CODE.
+
+**THE EXTENSIONLESS RULE SHALL BE THE EXECUTABLE BIT, NOT THE PREFIX.** Under a declared prose directory an
+EXTENSIONLESS path SHALL count as CODE **if and only if** git RECORDS it EXECUTABLE; a non-executable
+extensionless path there SHALL stay non-code, which is the only case the prefix assist exists for
+(`docs/LICENSE`, `openspec/NOTES`, a `.claude/CODEOWNERS`). The prefix ALONE SHALL NOT decide it: a bare
+prefix test made every extensionless path under `docs/` non-code, so it never entered the code census and
+`prompt-content:` made **no claim whatsoever** about it — while the narrowed configuration excludes only
+`*.md` globally plus the artifact intersection above, so such a path is NOT excluded and DOES reach the
+reviewer. That left the guard silent on exactly the class AC2's post-merge trigger names, and on a REAL
+tracked file: of this repo's three extensionless `docs/` executables (all mode 100755),
+`docs/reports/ws0-3217-artifacts/partB-run/offcputime-bigmap` is a **379-line Python script**, i.e. genuinely
+reviewable source that no key asserted was delivered (the other two, `ws0-readbw` and `ws0-stream`, are ELF
+binaries, for which git still emits a `diff --git` header so the check remains satisfiable).
+
+The mode SHALL be read from GIT'S TREE — the range's HEAD endpoint, falling back to the BASE commit for a
+path the diff DELETES — and SHALL NOT be read from the filesystem with `test -x`. A census path need not be
+checked out at all (a deletion has no file to stat, so a filesystem probe would answer a different question
+with a plausible value), the recorded mode is what the diff and therefore the prompt carry, and under
+`core.fileMode=false` the working bits are not authoritative. The lookup SHALL use `:(literal)` pathspec
+magic (a tracked name may contain `*`, `?` or `[`) and SHALL classify the same RAW path the census holds, so
+the single normalisation boundary is unchanged. An absent path SHALL classify non-code without erroring.
+
+The directory-glob match SHALL follow git `:(glob)` component
 semantics (`*` matches within one path component, `**` matches zero or more components), so a shell-style
 match whose `*` crosses `/` (which would classify `docs/reports/a/b-artifacts/x.json` as an artifact) is
 FORBIDDEN, and the declared globs SHALL be held in a form that cannot be PATHNAME-EXPANDED against the

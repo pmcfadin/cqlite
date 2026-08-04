@@ -68,6 +68,28 @@ probe written to pass: it proves the fix on a diff **nobody shaped for it**.
 - **This procedure** = the documented **fallback**, for when no such PR arrives promptly or the
   natural evidence is ambiguous.
 
+### The trigger class INCLUDES extensionless executables — check the mode, not the name
+
+"An executable under `docs/`" is a statement about the **file mode**, not about a suffix. An
+extensionless `100755` file counts, and it is the sub-class that was silently outside the guard's claim
+set until the classifier started reading the recorded mode: under the earlier prefix-only rule every
+extensionless path under `docs/` was non-code, so it never entered `census_code_paths` and
+`prompt-content:` asserted **nothing** about it — a `PASS (n/n)` was a true statement about a subject set
+that had quietly dropped exactly the file in question. Three such files are tracked today, all `100755`:
+`docs/reports/ws0-3026-artifacts/ws0-results/ws0-readbw`, `.../ws0-stream` (ELF), and
+`docs/reports/ws0-3217-artifacts/partB-run/offcputime-bigmap` (a Python script).
+
+So when you record AC2's evidence:
+
+1. List the candidate PR's `docs/` additions **with their modes**
+   (`git diff --diff-filter=d --name-only <base>...HEAD -- docs/ | while read -r p; do git ls-tree HEAD -- ":(literal)$p"; done`),
+   not just their extensions.
+2. If any is extensionless-and-`100755`, it is part of the trigger class and its path MUST appear among
+   `prompt-content:`'s subjects — a `PASS` whose count is lower than the number of `docs/` code paths you
+   listed is the failure signature to look for, not a pass.
+3. A PR whose only `docs/` executables carry extensions still satisfies AC2, but it does **not** exercise
+   this sub-class; say which one you got, so the record is not read as covering both.
+
 ### The named trigger — an unowned post-merge obligation is not an obligation
 
 Post-merge intentions decay. #3232 existed only as prose in #3100's close; #3103 shipped while its

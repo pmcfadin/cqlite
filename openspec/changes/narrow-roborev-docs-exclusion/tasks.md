@@ -441,6 +441,42 @@ green about a swallow it existed to catch. Two independent root causes, both fal
 - [x] Cite **#3283** for the deferred exclusion oracle and **#3278** for roborev's compiled-in built-in
       deny-list (a separate, still-open, still-unmodelled thing) everywhere either is referenced.
 
+## 8k. Round-11 roborev blocker — the EXTENSIONLESS class the guard made no claim about
+- [x] **An extensionless path under a prose prefix is CODE iff git records it EXECUTABLE.**
+      `CODE_FREE_EXTENSIONLESS_PREFIXES` was applied as a bare prefix test, so EVERY extensionless path under
+      `docs/`/`openspec/`/`website/`/`.claude/` classified non-code and never entered `census_code_paths` —
+      while the narrowed `exclude_patterns` exclude only `*.md` globally plus the artifact intersection, so
+      such a path is NOT excluded and DOES reach the reviewer. `prompt-content:` was therefore SILENT on
+      exactly AC2's trigger class ("the first post-merge PR carrying an executable under `docs/`") whenever
+      the executable has no extension, and a `PASS (n/n)` was a true statement about a subject set that had
+      dropped the file in question. **SHIPPED** in `roborev_path_is_executable` + the census's extensionless
+      branch.
+- [x] **The mode is read from GIT'S TREE, never `test -x`**: `ls-tree` on HEAD, falling back to the BASE
+      commit for a path the diff DELETES (which has no file to stat), with `:(literal)` pathspec magic
+      because a tracked name may contain `*`/`?`/`[`, and on the same RAW path the census holds so the single
+      normalisation boundary is unchanged. `core.fileMode=false` also makes working bits non-authoritative.
+- [x] **The design's measurement was WRONG and is corrected**: the three extensionless `docs/` files were
+      recorded as "compiled binaries … correctly not code to review". `file(1)`:
+      `docs/reports/ws0-3217-artifacts/partB-run/offcputime-bigmap` is a **379-line Python script**; only
+      `ws0-readbw`/`ws0-stream` are ELF. All three are 100755. Re-measured on the final tree through the real
+      census: docs/ executables classified CODE **46/49 → 49/49**, docs/ code paths **75 → 78**, delta =
+      exactly those three paths.
+- [x] Tests `cx3a`–`cx3d`: the extensionless executable is CODE and EXPECTED (2/2 of a 4-file census, which
+      also proves the `.md` and an extensionless 100644 `NOTICE` are still non-code and a non-executable
+      `.sh` is still CODE); the same path ABSENT from the prompt is a FAIL that NAMES it; the same path at
+      mode **100644** is still non-code (one-variable control); a DELETED extensionless executable is
+      classified from the BASE tree. Fixtures set BOTH the on-disk bit and the index mode, and
+      `assert_tracked_mode` reads the recorded mode back from the tree. Mutation-tested in both directions:
+      reverting to the prefix-only rule reds 9 asserts (cx3a/cx3b/cx3d), and swapping the tree read for
+      `test -x` reds 4 (cx3d only) — so each half of the fix is load-bearing.
+- [ ] **DEFERRED to #3260 (item: the OTHER direction of the same mirror)**: `txt rst adoc mdx markdown` sit
+      in `CODE_FREE_EXTENSIONS` while `.roborev.toml` excludes only `*.md` globally (plus `docs/**/*.txt`
+      inside artifact dirs), so a `.rst`/`.txt`-only diff is called code-free although roborev would deliver
+      it — an over-strict FALSE-FAIL. NOT fixed here, and deliberately not on the census side: removing those
+      extensions would let a prose-only change reach `RESULT: PASS` and record "roborev clean", violating
+      CLAUDE.md rule 4 — trading a conservative false-FAIL for a doctrine-breaking false-PASS. The sound fix
+      is on the CONFIG side (add the patterns so the two halves agree), which is out of this round's scope.
+
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` +
       `roborev` on the lite-green diff (the diff contains code — shell + config — so it IS
