@@ -93,10 +93,11 @@ roborev_check_prompt_content() {
     # not because the reviewer recognised prose. Checking all 27 would therefore
     # false-FAIL every branch that touches documentation, which is most of them.
     # The CODE subset is the right subset only because this repo's configured set is a
-    # prose/artifact deny-list that MIRRORS the census classification, and that
-    # correspondence is not assumed: `census-exclusion:` computes it with git before the
-    # enqueue and FAILs closed if a configured pattern would swallow a code path (which
-    # `docs/**` did, for 33 executables, on PR #3222).
+    # prose/artifact deny-list that MIRRORS the census classification. That correspondence is
+    # NOT verified pre-enqueue — the oracle that tried is removed (#3283) — so this check IS
+    # where a divergence surfaces: a configured pattern that swallows a code path (which
+    # `docs/**` did, for 33 executables, on PR #3222) lands here as a FAIL on the paths the
+    # reviewer never received. Fail-closed, but AFTER the review round has been paid for.
     # EVERY code path is checked against the prompt's actual `diff --git` HEADERS, never a
     # bare substring (codex, round 5): sampling let a partial prompt pass by naming the
     # sampled files, and a substring match is satisfied by any incidental mention —
@@ -132,13 +133,13 @@ roborev_check_prompt_content() {
     # file just carries the three parallel arrays through.
     roborev_collect_prompt_headers "$PROMPT_FILE"
     # EVERY code census path is expected in the prompt. There is NO subtraction and no
-    # excusal: `census-exclusion:` FAILs pre-enqueue on a CONFIGURED swallow, and roborev's
-    # own compiled-in deny-list is deliberately not modelled (issue #3278), so nothing here
-    # is licensed to say "do not expect this path". A path the reviewer really did not get
-    # therefore FAILs — the fail-closed direction. The residual that lands here is a
-    # built-in-excluded path (`Cargo.lock`, `go.sum`, …): it FAILs under this key with a
-    # cause that names the symptom rather than the mechanism. See the scope decision at the
-    # top of `roborev-review-oracles.sh`.
+    # excusal: NO exclusion set is modelled anywhere in this wrapper (#3283 for the
+    # configured half, #3278 for roborev's compiled-in deny-list), so nothing here is
+    # licensed to say "do not expect this path". A path the reviewer really did not get
+    # therefore FAILs — the fail-closed direction — whether it was eaten by configuration,
+    # by a built-in, or by anything else. The cost is diagnostic: the cause names the
+    # symptom ("the reviewer did not receive this path") rather than the mechanism. See the
+    # exclusion note near the top of `roborev-review-oracles.sh`.
     checked_paths=("${census_code_paths[@]}")
     census_total=${#checked_paths[@]}
     missing_paths=()
@@ -331,9 +332,8 @@ roborev_check_tier1() {
   # its terminal marker), so FAILing here would red correct input. It cannot manufacture a pass
   # either: tier 1 is a CORROBORATOR, `UNAVAILABLE` is carried into the block (never silent),
   # and the vacuity condition it looks for is independently covered by the deterministic keys —
-  # `prompt-content:` (the reviewer's own prompt vs our census) and `census-exclusion:`, both of
-  # which fail closed. Contrast `corroboration:` with an empty parse, where the oracle is the
-  # SOLE evidence for the claim and its silence is therefore NON-passing (#3229 H2).
+  # `prompt-content:` (the reviewer's own prompt vs our census) and `code-free:` (our own
+  # census classification), both of which fail closed on data the wrapper measured itself.
   if [ ! -s "$VERDICT_REGION_FILE" ]; then
     TIER1="UNAVAILABLE"
   elif grep -qi 'no code changes' "$VERDICT_REGION_FILE"; then

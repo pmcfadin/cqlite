@@ -38,8 +38,10 @@
 #      sanctioned substitute is primary-source verification recorded in the PR (e.g.
 #      `git show cassandra-5.0.8:<path>`). The same mechanism cuts the other way and
 #      did: under a configured `docs/**` it discarded 33 EXECUTABLE harness files on
-#      PR #3222 (#3229), which is why `census-exclusion:` now reconciles the census
-#      against the configured set BEFORE anything is enqueued.
+#      PR #3222 (#3229), which is why this repo's `.roborev.toml` now excludes ARTIFACT
+#      EXTENSIONS inside artifact-bearing directories and never a blanket `docs/**`,
+#      and why `prompt-content:` matches the CODE census against the prompt the
+#      reviewer was actually given.
 #
 # This wrapper judges the reviewer's claims against a LOCALLY COMPUTED `git` diff
 # census — never against the reviewer's own prose — and fails closed.
@@ -81,13 +83,13 @@
 #
 #   ==== ROBOREV REVIEW SUMMARY ====
 #   repo: / branch: / base: / head-sha: / reviewed-sha: / job: / model: / census:
-#   tokens: / push-assert: / census-check: / code-free: / census-exclusion: /
-#   job-record: / sha-assert: / review-completed: / prompt-content: /
+#   tokens: / push-assert: / census-check: / code-free: / job-record: /
+#   sha-assert: / review-completed: / prompt-content: /
 #   vacuity-tier1: / vacuity-tier2: / findings: / roborev-exit: / log:
 #   RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 #
 # EVERY value is ONE LINE, guaranteed (#3229 blocker 2). Diff-derived text reaches these
-# values — `census-exclusion:` names swallowed census paths — and a census path is
+# values — `prompt-content:` names the census paths absent from the prompt — and a census path is
 # attacker-controlled, so a NEWLINE-bearing filename could otherwise make a value span
 # lines and inject its own `key:` lines, up to a forged `RESULT: PASS`. Every value goes
 # through `emit_kv` and every DETAILS line through `finish`, both of which neutralise
@@ -96,16 +98,6 @@
 #
 # Per-check values, as built:
 #   push-assert / census-check / code-free / review-completed  PASS | FAIL (...) | SKIP
-#   census-exclusion  PASS (<k>/<n> code census paths survive the effective exclusion
-#                     set; corroboration: OK|NOTICE|UNAVAILABLE) |
-#                     PASS (no exclusion patterns configured; <k>/<n> ... survive an
-#                     EMPTY exclusion set; corroboration: ...) |
-#                     FAIL (<m>/<n> code census paths excluded: <path> by '<pat>'
-#                     [<source>], ...) |
-#                     FAIL (exclusion set unreadable: ...) |
-#                     FAIL (exclusion set UNCORROBORATED: ...) |
-#                     FAIL (trailing-slash pattern ...) |
-#                     FAIL (exclusion set drift: ...) | SKIP (<cause>)
 #   job-record        PASS | PASS (no token accounting in the record) |
 #                     DEGRADED (incomplete after <n> retries: <fields>) | SKIP
 #   sha-assert        PASS | FAIL (...) | SKIP
@@ -167,8 +159,7 @@
 #
 # WHICH CHECKS CARRY THE VERDICT. The DETERMINISTIC ones, each judged against data we
 # obtained ourselves: `push-assert` (the remote, via ls-remote), `census-check` (our
-# own git diff), `code-free` (our own census classification), `census-exclusion` (our
-# census vs the configured exclusion set, matched by git — #3229), `sha-assert` (the job
+# own git diff), `code-free` (our own census classification), `sha-assert` (the job
 # record's git_ref, asserting BOTH endpoints of the reviewed range against the census
 # range), `review-completed` (job status + an allow-list of terminal verdict markers),
 # `prompt-content` (the CODE subset of our census inside the prompt actually sent). Prose matching (`vacuity-tier1`) and token accounting (`vacuity-tier2`)
@@ -179,7 +170,7 @@
 #                           no vacuity signal. PASS requires POSITIVE evidence; it is
 #                           never inferred from the absence of a bad phrase.
 #   1  FAIL               — any failed check: push-assert, census-check, code-free,
-#                           census-exclusion, sha-assert, review-completed, prompt-content,
+#                           sha-assert, review-completed, prompt-content,
 #                           vacuity-tier1, vacuity-tier2, findings (INCONSISTENT), or
 #                           roborev-exit (FINDINGS or ERROR). Each names itself under
 #                           its own key. NOT reportable as "roborev clean".
@@ -294,70 +285,6 @@ Options:
 Outcome: one '==== ROBOREV REVIEW SUMMARY ====' block on stdout, terminal
 RESULT: PASS|FAIL|NOTHING-TO-REVIEW. Exit 0=PASS, 1=FAIL, 3=NOTHING-TO-REVIEW,
 2=usage error. Retain the block, never the transcript.
-
-census-exclusion: (PRE-ENQUEUE, immediately after code-free: in the fixed key
-order) reconciles the CODE census against the EFFECTIVE exclusion set by porting
-roborev v0.61.2's git.FormatExcludeArgs and letting GIT match.
-roborev drops exactly what its pathspecs match and makes NO code/non-code judgement,
-which is why this is computed, not assumed (#3229: a configured 'docs/**' discarded
-33 executable harness files on PR #3222).
-THE EFFECTIVE SET IS A UNION OF THREE CONFIG FILES, and a swallow in ANY of them FAILs:
-  1. the wrapper's --repo checkout .roborev.toml   [worktree-config|repo-config]
-  2. the ROOT checkout's .roborev.toml        [root-config]  <-- when --repo is a
-     LINKED WORKTREE. roborev's daemon binds a repo by its repos.root_path, i.e. the
-     ROOT checkout, and reads THAT file: a narrowed worktree config does NOT override
-     it, and reading only (1) reported '7/7 survive' on a branch whose real review
-     came back 'prompt-content: FAIL (1/7 absent)'.
-  3. ~/.roborev/config.toml                   [global-config]
-Every value line names the SOURCE of the pattern responsible, because with several
-files in play "excluded by 'docs/**'" does not say which file to edit.
-
-NOT MODELLED, DELIBERATELY (issue #3278): roborev ALSO applies its own compiled-in
-lockfile/cache deny-list (**/Cargo.lock, **/go.sum, **/pnpm-lock.yaml, **/.cache/**, ...)
-that no configuration can switch off. This check reconciles the census against the
-CONFIGURED exclude_patterns only. THE RESIDUAL, stated rather than hidden (AC4's second
-branch): a diff whose only code-census path is a built-in-excluded path is silently
-dropped from the reviewer's diff, census-exclusion: reports it SURVIVING, and
-prompt-content: then FAILs because the prompt does not carry it. It fails CLOSED, never a
-vacuous green -- but its stated cause names the symptom, not the mechanism.
-
-THE UNIFYING RULE, which decides every value below:
-  **FAIL where the author can act; NOTICE where only the information is actionable;
-    never silence.**
-On this check's subject it resolves to ONE call: a CONFIGURED pattern (sources 1-3)
-swallowing census code => FAIL, pre-enqueue. The remedy is a one-token edit to a NAMED
-file, so the author can act before paying for a review round. There is deliberately NO
-NOTICE value here: a NOTICE is for a swallow with no remedy, and the only such swallow is
-by the deny-list this check does not model. A TOTAL swallow is not a separate branch --
-it is a configured swallow, so it FAILs, and the value carries <m>/<n> so m == n shows on
-its face. Values:
-  PASS (<k>/<n> code census paths survive the effective exclusion set;
-       corroboration: OK|NOTICE|UNAVAILABLE)
-  PASS (no exclusion patterns configured; <k>/<n> ... survive an EMPTY exclusion set;
-       ...)  absent key/file or an empty list, and only once 'roborev config get' has
-       CORROBORATED that nothing is configured
-  FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>' [<source>], ...)
-  FAIL (exclusion set unreadable: <cause>) present but unparseable, an unknown TOML
-                                          escape, or an unresolvable ROOT checkout --
-                                          DISTINCT from 'no exclusion patterns
-                                          configured'
-  FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no
-       oracle confirmed that; corroboration: UNAVAILABLE)  the empty-parse PASS
-       requires an AFFIRMATIVE measurement: with nothing parsed, 'roborev config get'
-       is the ONLY oracle that can tell 'nothing is configured' from 'this parser did
-       not recognise the key', so a silence it could not confirm is non-passing and
-       says which of the two it could not rule out. NOT a claim that something IS
-       excluded. With patterns parsed (n>0) corroboration is only a CROSS-CHECK and
-       its absence is permissive on purpose -- the patterns themselves were measured
-  FAIL (trailing-slash pattern '<p>/' from <source> resolves RECURSIVE ...)
-                                          diff-independent
-  FAIL (exclusion set drift: '<pattern>' reported by roborev config get ...)  also
-       how a key spelling this parser does not recognise -- but roborev DOES honour --
-       is caught, instead of reading as a green 'nothing configured'
-  SKIP (<cause>)                          the step was not reached
-A FAIL naming a config source is a CONFIGURATION defect: fix the named file -- do not
-investigate the reviewer or prompt-content:.
-Re-verify the ported git.FormatExcludeArgs on any roborev version bump.
 
 Sanctioned invocation (measured, issue #2964 round 5):
   roborev review --branch --base <base> --repo <abs> --agent <a> --model <m> --wait
@@ -484,10 +411,6 @@ census_code_paths=()
 PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"
-# The census-vs-configured-exclusion reconciliation (#3229). An explicit SKIP CAUSE,
-# never a blank: this key's whole job is to say whether the configured exclusion set
-# would swallow the census's CODE paths, and a blank value would read as a pass.
-CENSUS_EXCLUSION="SKIP (not reached)"
 JOB_RECORD="SKIP"
 SHA_ASSERT="SKIP"
 # The POSITIVE "a review actually happened" assert. Absence of a vacuous phrase is
@@ -522,13 +445,11 @@ EMITTED=0
 # WHY. The block is LINE-ORIENTED and safety-critical: every reader (flow-closer, the
 # flow-* skills, this repo's own guard suite) retains only the block and greps it by
 # `^<key>: `, `^RESULT: ` deciding whether a merge proceeds. Diff-derived text reaches
-# those values — `census-exclusion:` names each swallowed census path, the NOTICE/FAIL
-# DETAILS prose names paths and the pattern that ate them — and a census path is
+# those values — `prompt-content:` names each census path absent from the prompt, and the
+# FAIL DETAILS prose names paths — and a census path is
 # ATTACKER-CONTROLLED: it is whatever a PR branch chose to track. A filename containing a
 # NEWLINE therefore let a value SPAN LINES and introduce arbitrary `key:` lines, up to a
-# FORGED `RESULT: PASS`, into the block whose whole purpose is to be trusted. Configured
-# `exclude_patterns` are the same class of input (a TOML basic string `"a\nb"` decodes to a
-# real newline, and a PR may carry its own `.roborev.toml`).
+# FORGED `RESULT: PASS`, into the block whose whole purpose is to be trusted.
 #
 # WHY CENTRALLY, AND NOT AT EACH SITE. A per-site escape is a list to keep complete, and
 # the next value that grows a path interpolation silently reopens the hole. Every value in
@@ -587,9 +508,6 @@ emit_summary() {
   emit_kv 'push-assert' "$PUSH_ASSERT"
   emit_kv 'census-check' "$CENSUS_CHECK"
   emit_kv 'code-free' "$CODE_FREE"
-  # Immediately after `code-free:` — mirroring the pre-enqueue evaluation order, and
-  # part of the block's FIXED key contract (#3229).
-  emit_kv 'census-exclusion' "$CENSUS_EXCLUSION"
   emit_kv 'job-record' "$JOB_RECORD"
   emit_kv 'sha-assert' "$SHA_ASSERT"
   emit_kv 'review-completed' "$REVIEW_COMPLETED"
@@ -654,35 +572,22 @@ if [ "$(type -t roborev_push_assert)" != function ] || [ "$(type -t roborev_cens
   DETAILS+=("ERROR: '$ORACLES_FILE' did not define roborev_push_assert and roborev_census, so the push assert and the diff census cannot run. Failing closed — the file is truncated or corrupt.")
   finish FAIL 1
 fi
-if [ "$(type -t roborev_check_census_exclusion)" != function ]; then
-  DETAILS+=("ERROR: '$ORACLES_FILE' did not define roborev_check_census_exclusion, so the census could not be reconciled against roborev's configured exclusion set. Failing closed — the file is truncated or corrupt.")
-  finish FAIL 1
-fi
-
 roborev_push_assert
 roborev_census
-# Reconcile the CODE census against the EFFECTIVE `exclude_patterns` (#3229). Placed
-# HERE — after the census/`code-free:` classification it consumes, and BEFORE the
-# checks-file validation and the enqueue — so a configuration that would swallow census
-# code costs no review round, and reports itself under its own key rather than
-# surfacing later as `prompt-content:` (which would send the reader to investigate the
-# reviewer for a defect entirely in configuration).
-# IS THE TOOL EVEN INSTALLED — asked BEFORE census-exclusion, not after (#3229 round-10).
-# It used to sit after the enqueue-side setup, which meant that on a box with no `roborev`
-# at all the FIRST failure reported was census-exclusion's "the corroboration oracle did not
-# answer" — a MISATTRIBUTED cause, sending the reader to investigate a configuration oracle
-# when the actionable fact is that the binary is missing (the same error push-assert
-# deliberately avoids when it refuses to call an auth failure "never pushed"). Asked here it
-# is also a real STRENGTHENING: the downstream `corroboration: UNAVAILABLE` state is now
-# reachable only from a binary that is PRESENT but uncommunicative, never from an absent one. Deliberately AFTER the census and `code-free:`, which are pure
-# git/classification facts whose causes are more actionable still.
+# IS THE TOOL EVEN INSTALLED — asked HERE, before any enqueue-side setup (#3229 round-10).
+# It used to sit after that setup, which meant that on a box with no `roborev` at all the
+# FIRST failure reported belonged to a downstream oracle that could not answer — a
+# MISATTRIBUTED cause, sending the reader to investigate configuration when the actionable
+# fact is that the binary is missing (the same error push-assert deliberately avoids when it
+# refuses to call an auth failure "never pushed"). Deliberately AFTER the census and
+# `code-free:`, which are pure git/classification facts whose causes are more actionable
+# still, and BEFORE the checks-file validation and the enqueue, so a box with no binary
+# costs no review round.
 if ! command -v roborev >/dev/null 2>&1; then
   SHA_ASSERT="FAIL (roborev not on PATH)"
   DETAILS+=("ERROR: 'roborev' is not on PATH, so the review cannot be performed and the census cannot be certified. Failing closed rather than reporting a pass.")
   finish FAIL 1
 fi
-
-roborev_check_census_exclusion
 
 # --- the per-review checks (sourced) ------------------------------------------
 # Same contract as the oracles file: resolved from BASH_SOURCE, and FAIL CLOSED if it is
@@ -706,7 +611,7 @@ for roborev_required_check in roborev_check_review_completed roborev_check_promp
 done
 
 # --- step 4: invoke over the CENSUS RANGE + an EXPLICIT absolute repo (AC2) ----
-# (`roborev` on PATH was asserted above, before census-exclusion, so its absence is
+# (`roborev` on PATH was asserted above, before any enqueue-side setup, so its absence is
 # reported as the absent binary rather than as an oracle that would not answer.)
 
 # THE SANCTIONED FORM — `--branch --base <base> --repo <abs>` — reviews the RANGE
@@ -1010,13 +915,14 @@ roborev_check_tier2
 # an incomplete job record, whose consequences are carried by the dependent asserts).
 #
 # ====== THE GRAMMAR IS CLOSED: NO PASS WITHOUT AN AFFIRMATIVE VALUE (#3229 round-10) ======
-# THE GENERAL DEFECT this closes, of which three separate instances were found on this issue
-# (a three-state `built-in-set:` signal taking the permissive excusal path — that subsystem
-# is since deleted, #3278; `corroboration: UNAVAILABLE` reaching a PASS; a
-# `${_census_end:-…}` fallback degrading a failed measurement into a 1-line scan): **a
-# multi-state signal where only the BAD states are tested, so every unknown or unmeasured
-# state inherits the PERMISSIVE branch.** A third point fix is the wrong response; the shape
-# has to be closed where it is structural.
+# THE GENERAL DEFECT this closes, of which several instances were found on this issue (each
+# in a subsystem since deleted — #3283/#3278 — but the defect was NOT theirs: it was HERE,
+# in this scan, and it predates every one of them): **a multi-state signal where only the BAD
+# states are tested, so every unknown or unmeasured state inherits the PERMISSIVE branch.**
+# A point fix per instance is the wrong response; the shape has to be closed where it is
+# structural. This closure is therefore RETAINED after the exclusion oracle that surfaced it
+# was removed: it is a property of the wrapper's terminal verdict for EVERY key, and leaving
+# the verdict permissive again would leave the wrapper worse than we found it.
 #
 # This scan WAS that shape, at the wrapper's single most consequential decision point: it
 # tested four failing prefixes and let EVERYTHING ELSE fall through to `finish PASS 0`. So a
@@ -1033,19 +939,39 @@ roborev_check_tier2
 # is unreachable unless `roborev-exit:` is already `ERROR (exit N)`, which fails on its own
 # terms, while `vacuity-tier1:` additionally treats it as claiming cleanliness.
 #
-# The failing-prefix `case` below is left EXACTLY as it was, as a separate statement: it is
-# the one the regression suite extracts and asserts against (NOTICE must stay outside it), and
-# the positive arm is an ADDITION rather than a rewrite of a scan whose set is pinned.
+# ====== MATCHED ON THE VERDICT TOKEN, EXACTLY — NEVER AS A PREFIX GLOB ======
+# The scan's earlier form matched `PASS*` / `FAIL*` etc. as PREFIX globs, and a prefix glob
+# reopens, in the closure itself, exactly the hole the closure exists to shut: `PASS` is a
+# prefix of `PASSthisNeverRan` and of `PASS-MEASUREMENT-DID-NOT-HAPPEN`, so a value that
+# merely BEGINS with a recognised token — a typo, a concatenation, a state a future check
+# names `PASS-PENDING` — was accepted as that token and rode to `RESULT: PASS`. The closure
+# would then be checking a spelling, not a state.
+#
+# So the value is reduced to its VERDICT TOKEN — everything before the first space — and that
+# token is compared EXACTLY. Every documented value in this block is either the bare token
+# (`PASS`, `SKIP`, `UNAVAILABLE`) or `TOKEN (detail…)` (`FAIL (empty census)`,
+# `PASS (2/2 code census paths present)`, `DEGRADED (incomplete after 3 retries: …)`), so the
+# token is well defined for every one of them, and a value with anything ELSE glued to the
+# token is UNRECOGNISED and fails closed. That is strictly stronger than the prefix form in
+# both arms: a `FAILED (…)` variant no longer matches the failing arm by prefix either — it
+# lands in `*)`, which also fails, so nothing becomes permissive by tightening.
+#
+# The failing-token `case` is kept as a SEPARATE statement: it is the one the regression suite
+# extracts and asserts against (NOTICE must stay outside it), and the positive arm is an
+# ADDITION rather than a rewrite of a scan whose set is pinned.
 failed=0
 unrecognised=""
-for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$CENSUS_EXCLUSION" "$SHA_ASSERT" \
+for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
   "$REVIEW_COMPLETED" "$PROMPT_CONTENT" "$TIER1" "$TIER2" "$FINDINGS" "$ROBOREV_EXIT"; do
-  case "$verdict" in FAIL*|FINDINGS*|ERROR*|INCONSISTENT*) failed=1 ;; esac
+  # The VERDICT TOKEN: the value up to its first space. An empty or all-detail value yields a
+  # token that matches nothing, which is the intended fail-closed outcome.
+  verdict_token="${verdict%% *}"
+  case "$verdict_token" in FAIL|FINDINGS|ERROR|INCONSISTENT) failed=1 ;; esac
   # The POSITIVE arm. An `*)` that FAILS is what makes the grammar closed — the whole point
   # is that an unplanned value must not inherit the non-failing branch.
-  case "$verdict" in
-    FAIL*|FINDINGS*|ERROR*|INCONSISTENT*) ;;
-    PASS*|SKIP*|NOTICE*|UNAVAILABLE*|DEGRADED*|NONE*|PRESENT*|UNKNOWN*) ;;
+  case "$verdict_token" in
+    FAIL|FINDINGS|ERROR|INCONSISTENT) ;;
+    PASS|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN) ;;
     *)
       failed=1
       unrecognised="${unrecognised:+$unrecognised; }'$verdict'"
@@ -1055,13 +981,18 @@ done
 # ====== AND A PASS NEEDS EVERY DETERMINISTIC KEY TO HAVE AFFIRMATIVELY PASSED ======
 # The grammar check above closes "an unplanned value inherits the non-failing branch". This
 # closes the neighbouring case: a value that is IN the grammar and non-failing, but is not a
-# measurement — `SKIP`, i.e. "this check never ran". The seven keys below are the ones that
+# measurement — `SKIP`, i.e. "this check never ran". The six keys below are the ones that
 # CARRY the verdict (each judged against data the wrapper obtained itself), and on a PASS
-# every one of them must be an affirmative `PASS` — no exceptions. (`census-exclusion:` used
-# to be allowed a `NOTICE` here, the one exception, because a remedy-less built-in swallow was
-# a measurement with a stated residual. That subsystem is deleted (#3278) and the key can no
-# longer emit `NOTICE`, so the exemption went with it: the backstop is now uniform, which is
-# STRICTER, never weaker.)
+# every one of them must be an affirmative `PASS` — no exceptions, and there is deliberately
+# no exemption mechanism. (One existed briefly, for a key allowed a `NOTICE` because a
+# remedy-less swallow was a measurement with a stated residual; both that key and its
+# exemption are gone — #3283/#3278 — so the backstop is uniform, which is STRICTER, never
+# weaker.)
+#
+# MATCHED ON THE VERDICT TOKEN, EXACTLY, for the same reason the grammar scan above is: a
+# `PASS*` prefix glob would accept `PASSthisNeverRan` as an affirmative pass, i.e. the
+# backstop against unmeasured keys would itself be satisfiable by a value that measured
+# nothing. The token is the value up to its first space, compared exactly.
 # `vacuity-tier1/2` and `findings:` are deliberately EXCLUDED: they CORROBORATE, and
 # `UNAVAILABLE` / `NONE` are documented, legitimate values for them on a clean run.
 #
@@ -1078,22 +1009,22 @@ done
 if [ "$failed" -eq 0 ]; then
   not_affirmed=""
   for keyed in "push-assert=$PUSH_ASSERT" "census-check=$CENSUS_CHECK" "code-free=$CODE_FREE" \
-    "census-exclusion=$CENSUS_EXCLUSION" "sha-assert=$SHA_ASSERT" \
+    "sha-assert=$SHA_ASSERT" \
     "review-completed=$REVIEW_COMPLETED" "prompt-content=$PROMPT_CONTENT"; do
     det_key="${keyed%%=*}"
     det_value="${keyed#*=}"
-    case "$det_value" in
-      PASS*) continue ;;
+    case "${det_value%% *}" in
+      PASS) continue ;;
     esac
     not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
   done
   if [ -n "$not_affirmed" ]; then
     failed=1
-    DETAILS+=("ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — $not_affirmed. A PASS must rest on POSITIVE evidence from every deterministic check (push-assert, census-check, code-free, census-exclusion, sha-assert, review-completed, prompt-content); a non-failing value that is not a measurement — 'SKIP' above all, which means the check NEVER RAN — is exactly the vacuous pass this wrapper exists to prevent, and it is textually indistinguishable from a genuine one. Failing closed. This is a structural backstop, so its cause is a defect in the wrapper or its sourced files (a check that returned before assigning its key), NOT something to fix in the branch under review.")
+    DETAILS+=("ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — $not_affirmed. A PASS must rest on POSITIVE evidence from every deterministic check (push-assert, census-check, code-free, sha-assert, review-completed, prompt-content); a non-failing value that is not a measurement — 'SKIP' above all, which means the check NEVER RAN — is exactly the vacuous pass this wrapper exists to prevent, and it is textually indistinguishable from a genuine one. Failing closed. This is a structural backstop, so its cause is a defect in the wrapper or its sourced files (a check that returned before assigning its key), NOT something to fix in the branch under review.")
   fi
 fi
 if [ -n "$unrecognised" ]; then
-  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper) or introduced a state this scan has never judged — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
+  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
 fi
 
 if [ "$failed" -eq 0 ]; then
