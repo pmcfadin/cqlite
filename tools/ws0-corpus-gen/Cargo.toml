@@ -1,0 +1,44 @@
+[package]
+name = "ws0-corpus-gen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Deterministic ws0.events PERFORMANCE-FIXTURE corpus generator + bare-scan bench for the #3096 Arrow-encode measurement rig"
+publish = false
+
+# The corpus generator: drives the PRODUCTION `cqlite_core` `SSTableWriter`.
+[[bin]]
+name = "ws0-corpus-gen"
+path = "src/main.rs"
+
+# Arm A of the measurement: the BARE SCAN (`Database::execute_streaming`), the
+# same-session comparator the Flight `do_get` arm is measured against. It lives
+# in this crate (not its own) so both arms are built from the ONE pinned
+# `ws0.events` DDL constant in `schema.rs` — a second crate could drift.
+[[bin]]
+name = "ws0-scan-bench"
+path = "src/bin/scan_bench.rs"
+
+[lib]
+name = "ws0_corpus_gen"
+path = "src/lib.rs"
+
+[dependencies]
+# The production write surface (`SSTableWriter`) and the production read surface
+# (`Database::execute_streaming`). `arrow` is NOT enabled: the bare-scan arm must
+# measure the scan WITHOUT Arrow encode — that is the whole point of the
+# comparison. The Arrow/Flight arm is `cqlite-flight` + `flight-loadgen`.
+cqlite-core = { path = "../../cqlite-core", features = ["cli-helpers"] }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Corpus identity digest, taken from the workspace table so it can never drift
+# from the version cqlite-core resolves (issue #3096 review).
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
