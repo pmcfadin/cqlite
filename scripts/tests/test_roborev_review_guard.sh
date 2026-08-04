@@ -1683,7 +1683,7 @@ write_roborev_config "$work" "['build']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx9)' FAIL 1
-assert_says 'case (cx9) the subtree file is swallowed by the bare directory name' "^census-exclusion: FAIL \(1/1 code census paths excluded: build/gen\.rs by 'build' \[repo-config\]\)$"
+assert_says 'case (cx9) the subtree file is swallowed by the bare directory name' "^census-exclusion: FAIL \(1/1 code census paths excluded: build/gen\.rs by 'build' \[repo-config\]; built-in-set: UNAVAILABLE\)$"
 assert_says 'case (cx9) the emitted pathspecs include the /** sibling' ':\(exclude,glob\)\*\*/build/\*\*'
 assert_never_enqueued 'case (cx9)'
 
@@ -1695,7 +1695,12 @@ write_roborev_config "$work" "['/tool.sh']"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx10)' FAIL 1
-assert_says 'case (cx10) only the ROOT tool.sh is excluded' "^census-exclusion: FAIL \(1/2 code census paths excluded: tool\.sh by '/tool\.sh' \[repo-config\]\)$"
+assert_says 'case (cx10) only the ROOT tool.sh is excluded' "^census-exclusion: FAIL \(1/2 code census paths excluded: tool\.sh by '/tool\.sh' \[repo-config\]; built-in-set: UNAVAILABLE\)$"
+# NEVER SILENCE applies to the FAIL values too (#3229 round-9 F1 audit): this is the one
+# reconciliation verdict that used to omit the built-in state, which made the documented
+# "every value ends with built-in-set:" contract false for exactly the branch where a
+# configured swallow coexists with an UNVERIFIED built-in model.
+assert_says 'case (cx10) a configured-swallow FAIL still reports the built-in state' 'built-in-set: UNAVAILABLE\)$'
 assert_says 'case (cx10) the pathspec is emitted root-anchored, without the **/ prefix' ':\(exclude,glob\)tool\.sh$'
 assert_lacks 'case (cx10) sub/tool.sh is NOT reported swallowed' 'sub/tool\.sh by'
 
@@ -1853,14 +1858,23 @@ reset_stub
 # legitimate change class its author cannot fix — and a guard that fires with no available
 # fix is the guard that gets disabled, which is how #3229 happened. So: named loudly in
 # the value line, review still enqueued, RESULT not FAIL on this account.
+#
+# THE STUB IS THE `pinned` ONE, NOT THE DEFAULT (#3229 round-9 blocker F1). The EXCUSAL
+# this case pins — census-exclusion handing the path to prompt-content as "do not expect
+# this" — now requires `built-in-set: OK`, because the excusal asserts that the path's
+# absence is a DETERMINISTIC property of the PINNED deny-list, and an unverified deny-list
+# cannot support that claim. The default stub carries no `:(exclude,glob)` literals, so it
+# reads UNAVAILABLE and excuses NOTHING (cx19h). Planting the pinned literals is what keeps
+# this case testing the NOTICE-plus-excusal ruling end to end instead of the withheld path.
 work=$(make_fixture case_cx19 cargo-lock)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 # The prompt carries main.rs only — Cargo.lock is exactly what roborev drops.
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
 run_wrapper "$work"
 assert_verdict 'case (cx19)' PASS 0
-assert_says 'case (cx19) the built-in swallow is a NOTICE naming the path and the built-in' "^census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)\$"
+assert_says 'case (cx19) the built-in swallow is a NOTICE naming the path and the built-in' "^census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; corroboration: UNAVAILABLE; built-in-set: OK\)\$"
 assert_lacks 'case (cx19) it is NOT a FAIL' '^census-exclusion: FAIL'
 assert_lacks 'case (cx19) and RESULT does not FAIL on its account' '^RESULT: FAIL'
 assert_says 'case (cx19) the NOTICE says there is nothing to fix in any config file' 'NOTHING TO FIX'
@@ -1879,11 +1893,10 @@ fi
 # would move the unfixable red one key down instead of removing it.
 assert_says 'case (cx19) prompt-content does not expect the built-in-excluded path' '^prompt-content: PASS \(1/1 code census paths present\) \(\+1 not expected: excluded by a roborev built-in — see census-exclusion:\)$'
 assert_lacks 'case (cx19) prompt-content does not FAIL on the known absence' '^prompt-content: FAIL'
-# The default stub carries NO `:(exclude,glob)` literals, so the live built-in set cannot
-# be observed. That must read UNAVAILABLE in the VALUE LINE — "never silence" — and be
-# neither a failure nor a blessing.
-assert_says 'case (cx19) an unobservable built-in set says so in the value line' 'built-in-set: UNAVAILABLE\)$'
-assert_says 'case (cx19) UNAVAILABLE is explicitly neither a failure nor a blessing' 'deliberately NEITHER a failure NOR a blessing'
+# The excusal is GRANTED here — and it must SAY nothing about withholding, or the withheld
+# wording would be indistinguishable from the granted one (the cx19h complement).
+assert_says 'case (cx19) the built-in set is VERIFIED, which is what earns the excusal' 'built-in-set: OK\)$'
+assert_lacks 'case (cx19) a verified model never reports the excusal withheld' 'excusal WITHHELD'
 
 printf "== case (cx19d): a live built-in set MATCHING the pin reads OK, and is corroborated ==\n"
 reset_stub
@@ -1901,6 +1914,89 @@ assert_says 'case (cx19d) the built-in set is observed to MATCH the pin' 'built-
 assert_says 'case (cx19d) and the match is stated as corroborated, not assumed' 'The pin is corroborated, not assumed'
 assert_says 'case (cx19d) the pinned-built-in swallow is still only a NOTICE' '^census-exclusion: NOTICE \('
 assert_lacks 'case (cx19d) an agreeing built-in set never FAILs' '^census-exclusion: FAIL'
+assert_says 'case (cx19d) a VERIFIED model grants the excusal, so the pin clause is stated' 'and the live built-in set still MATCHES that pin'
+assert_lacks 'case (cx19d) and the excusal is not withheld' 'excusal WITHHELD'
+
+printf "== case (cx19h): an UNVERIFIED built-in model EXCUSES NOTHING — the excusal needs OK ==\n"
+reset_stub
+# THE #3229 round-9 BLOCKER F1, REPRODUCED AND PINNED. `_rx_builtin_state` has THREE values
+# and the round-8 code tested only `= DIVERGED` / `!= DIVERGED` — a three-state signal
+# tested as two. `UNAVAILABLE` therefore took the PERMISSIVE path: it populated
+# `CENSUS_BUILTIN_EXCLUDED` and told `prompt-content:` NOT to expect the swallowed path, so
+# COVERAGE WAS EXCUSED ON AN UNVERIFIED MODEL while the block read `RESULT: PASS`. That is
+# "we could not check" rendered as "nothing was wrong", inside the guard whose whole purpose
+# is preventing exactly that.
+#
+# THE SHIM IS THE MEASURED REACHABILITY WITNESS: the `pinned` literals (all 24 present and
+# correctly right-bounded, count 26) with the `version` subcommand REFUSING to answer, which
+# is `state=UNAVAILABLE, missing=0` — an honest "we could not confirm the pin", and the state
+# a real box hits whenever roborev is absent from PATH or renames `version`.
+#
+# THE FIX FAILS CLOSED ON THE EXCUSAL, NOT ON THE RUN: census-exclusion stays a NOTICE (an
+# UNOBSERVABLE binary must never red every round — that is the self-disabling guard this
+# change keeps refusing to build), but it excuses NOTHING, so `prompt-content:` goes on to
+# expect Cargo.lock, does not find it, and FAILs. THAT is the correct fail-closed outcome:
+# if roborev really did drop a path, the absence is now reported instead of excused.
+work=$(make_fixture case_cx19h cargo-lock)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
+STUB_ROBOREV_VERSION=none
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx19h)' FAIL 1
+assert_says 'case (cx19h) the built-in state is honestly UNAVAILABLE, not OK' 'built-in-set: UNAVAILABLE\)$'
+assert_lacks 'case (cx19h) an unverifiable model never reads OK' 'built-in-set: OK'
+assert_says 'case (cx19h) the value line NAMES the withheld excusal and the non-verification' "^census-exclusion: NOTICE \(1/2 code census paths survive the effective exclusion set; 1 code census path\(s\) excluded by a roborev built-in: Cargo\.lock by '\*\*/Cargo\.lock' \[roborev-builtin\]; excusal WITHHELD: the built-in model is NOT VERIFIED \(built-in-set: UNAVAILABLE\), so NO path is excused and 'prompt-content:' still expects all 2 code census path\(s\); corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)\$"
+# The wording must read as NEITHER a clean PASS nor a DIVERGED set, because it is neither.
+assert_lacks 'case (cx19h) the withheld state is not reported as a divergence' 'DIVERGED'
+assert_lacks 'case (cx19h) and census-exclusion itself does not FAIL on an unobservable binary' '^census-exclusion: FAIL'
+# THE EXCUSAL IS THE THING WITHHELD: prompt-content evaluates the path normally and FAILs.
+assert_says 'case (cx19h) prompt-content evaluates the unexcused path and FAILs on its absence' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_lacks 'case (cx19h) no path is excused from prompt coverage' 'not expected: excluded by a roborev built-in'
+assert_says 'case (cx19h) the detail states that prompt-content WILL still expect them' "'prompt-content:' WILL still expect them"
+assert_says 'case (cx19h) it names the rule the round-8 code broke' "'We could not check' is never 'nothing was wrong'"
+assert_says 'case (cx19h) the UNAVAILABLE notice records that it withholds the excusal too' 'It ALSO withholds the EXCUSAL'
+# The pin clause must NOT be asserted on an unverified model — that was the false claim.
+assert_lacks 'case (cx19h) it never claims the live set MATCHES the pin' 'still MATCHES that pin'
+assert_one_result_line 'case (cx19h)'
+
+printf "== case (cx19i): withholding the excusal does NOT red a run whose prompt HAS the path ==\n"
+reset_stub
+# The other direction of cx19h, so "no excusal" is not read as "always FAIL". Identical
+# UNAVAILABLE shim and identical swallow; the ONLY delta is that the prompt actually carries
+# Cargo.lock. prompt-content therefore evaluates 2/2 and PASSES — proving the withheld
+# excusal makes prompt-content EVALUATE the path rather than condemn it, and that the
+# hermetic no-binary condition cannot by itself red a legitimate round.
+work=$(make_fixture case_cx19i cargo-lock)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
+STUB_ROBOREV_VERSION=none
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/Cargo.lock b/Cargo.lock'
+run_wrapper "$work"
+assert_verdict 'case (cx19i)' PASS 0
+assert_says 'case (cx19i) the excusal is still withheld' 'excusal WITHHELD'
+assert_says 'case (cx19i) prompt-content checks BOTH paths, excusing neither' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx19i) and no path is marked not-expected' 'not expected: excluded by a roborev built-in'
+
+printf "== case (cx19j): a DIVERGED set with a real swallow FAILs and excuses nothing ==\n"
+reset_stub
+# The third state, pinned against the same fixture as cx19/cx19h so all three are
+# comparable. A positively OBSERVED divergence is an actionable mechanism change, so it
+# FAILs pre-enqueue — and it must never reach the excusal either.
+work=$(make_fixture case_cx19j cargo-lock)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub added)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx19j)' FAIL 1
+assert_says 'case (cx19j) the divergence FAILs even beside a pinned-built-in swallow' 'roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set:'
+assert_says 'case (cx19j) the FAIL value still reports the built-in state' 'built-in-set: DIVERGED\)$'
+assert_lacks 'case (cx19j) a DIVERGED set is never softened to a NOTICE' '^census-exclusion: NOTICE'
+assert_lacks 'case (cx19j) and it never excuses a path from prompt coverage' 'not expected: excluded by a roborev built-in'
+assert_never_enqueued 'case (cx19j)'
 
 printf "== case (cx19e): an ADDED built-in (the upgrade that starts eating source) FAILs ==\n"
 reset_stub
@@ -2048,6 +2144,8 @@ reset_stub
 # cx19 outcome. The boundary is TOTAL vs PARTIAL, nothing else.
 work=$(make_fixture case_cx20b cargo-lock)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
+# `pinned`, for cx19's reason: the excusal this case leans on requires `built-in-set: OK`.
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
 run_wrapper "$work"
@@ -2134,6 +2232,8 @@ reset_stub
 # the other place. cx19's NOTICE and cx20's total-swallow FAIL both depend on this too.
 work=$(make_fixture case_cx22b cargo-lock)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
+# `pinned`, for cx19's reason: the excusal this case leans on requires `built-in-set: OK`.
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
 run_wrapper "$work"
