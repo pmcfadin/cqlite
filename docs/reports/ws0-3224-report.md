@@ -832,7 +832,10 @@ python3 results/derive.py results --penalty-summary penalty/summary.txt
 
 The output is **byte-for-byte identical** to the committed
 `results/derived-summary.txt` — transcript in
-`results/reproduce-from-clean-checkout.txt`, for commit `87bbdd6`.
+`results/reproduce-from-clean-checkout.txt`, verified at commit `7cb478a`. That
+transcript depends only on `results/` and `penalty/`; any later commit touches report
+prose alone, and the transcript names the `git diff --stat` a reviewer can run to confirm
+those inputs are unchanged.
 
 The window, the row counts, the CPU sets and the corpus size are all **read from the
 artefacts**, never hardcoded, and the script **refuses** (non-zero exit, named diagnosis)
