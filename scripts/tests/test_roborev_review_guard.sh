@@ -1235,6 +1235,62 @@ else
 fi
 WRAPPER="$_gm_real_wrapper"
 
+# ===========================================================================
+# (cx28b/cx28c): THE CLOSURE MUST NOT ITSELF BE A PREFIX TEST (#3229 round-11 M3).
+#
+# cx28 pins that a value OUTSIDE the allow-list FAILs. It cannot see the neighbouring
+# defect, because its mutant (`MEASUREMENT-DID-NOT-HAPPEN`) is deliberately NOT a
+# near-miss: the scan matched `PASS*` / `SKIP*` / … as PREFIX GLOBS, so any value merely
+# BEGINNING with a recognised token was accepted AS that token and rode to `RESULT: PASS`.
+# The closure was therefore checking a SPELLING, not a state — the same "absence of a bad
+# word is not evidence of a good outcome" error it was written to remove, reintroduced
+# inside itself one level down.
+#
+# TWO MUTANTS, both NEAR-PREFIXES of `PASS`, run through cx28's harness (whose UNPATCHED
+# control already showed this fixture reaches PASS):
+#   cx28b  PASSthisNeverRan             — a token glued to more characters, no separator
+#   cx28c  PASS-MEASUREMENT-DID-NOT-HAPPEN — a token followed by a hyphenated state name
+# Under the prefix form BOTH were accepted silently. Under exact token matching both are
+# UNRECOGNISED and fail closed. `vacuity-tier1:` is the mutation site deliberately: it is in
+# the grammar scan but NOT in the affirmation backstop, so a green here could ONLY come from
+# the grammar arm — no other check can rescue the assert.
+# ===========================================================================
+for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
+  _np_label="${_np_case%%:*}"
+  _np_value="${_np_case#*:}"
+  printf '== case (%s): the near-prefix value %s is UNRECOGNISED, not a PASS ==\n' "$_np_label" "$_np_value"
+  reset_stub
+  # Restore the copy to the control state, then apply ONLY this mutation.
+  sed -i 's/^roborev_check_prompt_content() {\n  return 0$/roborev_check_prompt_content() {/' \
+    "$_gm_dir/roborev-review-checks.sh"
+  cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
+  work=$(make_fixture "case_$_np_label" pushed)
+  STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+  WRAPPER="$_gm_dir/roborev-review.sh"
+  # THE CONTROL, per case: the restored copy must reach PASS on this fixture, or a FAIL below
+  # would prove nothing about the mutation.
+  run_wrapper "$work"
+  assert_verdict "case ($_np_label control) the restored copy reaches PASS" PASS 0
+  if sed -i "s/^    TIER1=\"PASS\"\$/    TIER1=\"$_np_value\"/" \
+    "$_gm_dir/roborev-review-checks.sh" &&
+    grep -qF "TIER1=\"$_np_value\"" "$_gm_dir/roborev-review-checks.sh"; then
+    ok "case ($_np_label): the near-prefix patch was really applied to the copy"
+    run_wrapper "$work"
+    assert_verdict "case ($_np_label)" FAIL 1
+    assert_says "case ($_np_label) the near-prefix value is named as OUTSIDE the grammar" \
+      "^ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: '$_np_value'\. "
+    assert_says "case ($_np_label) the diagnostic states that the token is matched exactly" \
+      'the token is matched EXACTLY, up to the value.s first space'
+    assert_says "case ($_np_label) the value still reaches the block, never silently" \
+      "^vacuity-tier1: $_np_value\$"
+    assert_lacks "case ($_np_label) and it never reads as a PASS" '^RESULT: PASS'
+  else
+    bad "case ($_np_label): could not patch the copied checks file, so the near-prefix path was never exercised (a green run here would be a probe failing in the direction that looks like success)"
+  fi
+  WRAPPER="$_gm_real_wrapper"
+done
+cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
+
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
 work=$(make_fixture case_d pushed)
