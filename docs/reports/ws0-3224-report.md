@@ -607,6 +607,29 @@ tracks the primary arm's 1.2376 → 1.0384), so both arms observed the same work
 The core goes from spending **4.1%** of its cycles stalled on an L3 miss to **13.7%** — a
 3.3× rise that tracks the ×3.19 rise in LLC misses per row.
 
+**What these counters mean is verified from the event definitions on this host, not
+assumed** (`host/counter-semantics-verification.txt`, `perf list --details`):
+
+| event | definition, verbatim | encoding |
+|---|---|---|
+| `cycle_activity.stalls_l3_miss` | "Execution stalls while L3 cache miss **demand load** is outstanding" | `event=0xa3, umask=0x6, cmask=0x6` |
+| `l1d_pend_miss.pending` | "Number of L1D misses that are outstanding" | `event=0x48, umask=0x1` |
+| `l1d_pend_miss.pending_cycles` | "**Cycles with** L1D load Misses outstanding" | `event=0x48, umask=0x1, cmask=0x1` |
+
+Two things follow. It confirms the term is exactly the quantity the penalty product
+estimates, and that `pending ÷ pending_cycles` is the mean outstanding misses *across
+cycles in which at least one is outstanding* — the correct MLP divisor.
+
+> **And it surfaces a scope limit worth stating plainly: the stall term is DEMAND-LOAD
+> scoped.** Stalls caused by **prefetch** traffic — prefetches saturating fill buffers or
+> memory queues — are not in it, and land in "other execution stalls" instead. That matters
+> *here specifically*, because §3.4 showed the hardware prefetcher does most of the fetching
+> on this streaming scan (demand `LLC-load-misses` × 64 B covers only ~2.4 KB of the ~22 KB
+> DRAM traffic per row). So **the 67.76% below is a demand-load attribution, and some part
+> of the ~32% residual is plausibly prefetch-related memory cost this counter cannot see.**
+> It should not be read as "32% of the decay is non-memory" — §5.3's `other execution
+> stalls` bucket is an upper bound on the non-memory share, not a measurement of it.
+
 ### 5.3 The additive decomposition — it closes exactly
 
 The three stall counters **nest** (`stalls_l3_miss` ⊂ `stalls_l2_miss` ⊂ `stalls_total`), so
@@ -766,10 +789,15 @@ Three things the data indicts, to be groomed separately:
    locality reduction in the Flight read path is the lever class that can move the slope.
    The measurement to demand of any candidate is Δ`LLC-load-misses`/row at S=6/N=16, not
    Δinstructions/row.
-2. **~32% of the delta remains unattributed** (20.6% at the wider boundary), sitting mostly
-   in `other execution stalls` (+1,792.6 cycles/row). Naming *that* would need front-end /
-   port-utilisation counters (a TMA level-2 breakdown), which is a different capture than
-   this one and out of this issue's two-endpoint scope.
+2. **~32% of the delta remains unattributed** (20.6% at the wider boundary), sitting in
+   `other execution stalls` (+1,792.6 cycles/row) net of the −631.9 in non-stalled cycles.
+   **That bucket is not established to be non-memory**: because `stalls_l3_miss` is
+   demand-load scoped (§5.2), prefetch-induced memory stalls land there too, and on this
+   streaming workload the prefetcher moves most of the bytes. Splitting it would need
+   front-end / port-utilisation counters (a TMA level-2 breakdown) **plus** an
+   offcore/prefetch-stall term — a different capture than this one, and out of this issue's
+   two-endpoint scope. The honest statement is that 32% is *unattributed*, not that it is
+   *non-memory*.
 3. **The harness defects found here are latent in #3217's committed scripts too** — the
    fabricated `rc=$?`-after-substitution pattern, and the hardcoded core table that silently
    mislabels S. Both are fixed in this issue's drivers; #3217's remain as committed.
