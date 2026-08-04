@@ -1098,11 +1098,29 @@ if ! cmp -s "$FETCH" "$MUTANT_GITENV"; then
   for rel in "${TRACKED_RELATIVE[@]}"; do
     [ -f "$R19B/test-data/datasets/$rel" ] || MUT19_MISSING=$((MUT19_MISSING + 1))
   done
-  if [ "$RC" -eq 0 ] && [ "$MUT19_MISSING" -gt 0 ] \
-    && [ -n "$(git -C "$R19B" status --porcelain 2>&1)" ]; then
-    ok "non-vacuity: mutant reports SUCCESS while deleting $MUT19_MISSING tracked fixture(s) (the exact silent-loss shape)"
+  # This case pins ONE property: the GIT_* env scrub is load-bearing, i.e. the
+  # mutant must NOT behave like the unmutated script, which is a CLEAN SUCCESS (exit
+  # 0, nothing lost, a real restore performed).
+  #
+  # Before #3245 the mutant demonstrated that as SILENT LOSS: a foreign empty
+  # GIT_INDEX_FILE zeroes the index-derived TRACKED_GUARD_COUNT, the count-gated
+  # guards short-circuited, and the run deleted the fixtures and still exited 0.
+  # #3245 removed that count gate, so the porcelain oracle now runs regardless and
+  # sees the HEAD-vs-empty-index staged deletions (`D ` records) — the mutant is
+  # REFUSED before the rm -rf instead. Defence in depth: a second, independent guard
+  # catches the same mutant, so the loud-failure shape has replaced the silent-loss
+  # one. Both are "not a clean success", which is exactly what this case must assert;
+  # narrowing it to the silent-loss shape alone would make it a test of #3245's
+  # postcondition rather than of the scrub. The porcelain oracle has its OWN
+  # non-vacuity coverage in cases 30/30b.
+  if [ "$RC" -ne 0 ] || [ "$MUT19_MISSING" -gt 0 ]; then
+    if [ "$RC" -eq 0 ]; then
+      ok "non-vacuity: mutant reports SUCCESS while deleting $MUT19_MISSING tracked fixture(s) (the pre-#3245 silent-loss shape)"
+    else
+      ok "non-vacuity: mutant fails closed (exit $RC) instead of succeeding — the scrub is load-bearing (#3245 porcelain oracle catches it)"
+    fi
   else
-    bad "non-vacuity: mutant did not reproduce the silent loss (exit $RC, missing $MUT19_MISSING)"
+    bad "non-vacuity: mutant was a CLEAN SUCCESS (exit 0, nothing lost) — the GIT_* scrub mutation no longer changes anything, so this case proves nothing"
   fi
   case "$OUT" in
     *"Restoring "*) bad "non-vacuity: mutant attempted a restore — the empty-list short-circuit is not what happened" ;;
@@ -1615,6 +1633,91 @@ if grep -q ': mutant-no-modification-check' "$MUTANT_NO_MODCHECK"; then
 else
   bad "porcelain-oracle: no modification-check-disabled mutant available; cases 29/29b cannot run"
 fi
+
+# === Case 30: ALL tracked files staged-deleted — the index-derived count is 0 ==
+# The #3245 review blocker. TRACKED_GUARD_COUNT comes from `git ls-files`, i.e. the
+# INDEX, so staging the deletion of EVERY tracked path under the root drives it to 0.
+# A guard gated on that count reads 0 as "nothing to protect" when it in fact means
+# "every tracked file is staged-deleted" — the state of maximum risk, because the
+# on-disk content is then the only copy the index-sourced restore cannot rebuild.
+# Cases 27/27b/27c stage only ONE path, leaving the count > 0, so none of them can
+# see this. `git status --porcelain` reports these as `D ` records and CAN.
+R30="$T/case30-repo"
+make_repo "$R30"
+git -C "$R30" rm -q --cached -r -- test-data/datasets >/dev/null
+if [ -z "$(git -C "$R30" ls-files -- test-data/datasets)" ]; then
+  ok "all-staged-delete: the index really carries NO tracked path under the root (count would be 0)"
+else
+  bad "all-staged-delete: could not stage-delete every tracked path; case is vacuous"
+fi
+if [ -f "$R30/$LOCAL_MOD_REL" ]; then
+  ok "all-staged-delete: the on-disk content is still present pre-fetch"
+else
+  bad "all-staged-delete: fixture missing on disk before the fetch; case is vacuous"
+fi
+run_fetch "$R30" "$R30/test-data/datasets"
+assert_refusal "all-staged-delete" "carry LOCAL MODIFICATIONS" "$R30/$LOCAL_MOD_REL"
+R30_SURVIVED=1
+for rel in "${TRACKED_RELATIVE[@]}"; do
+  [ -f "$R30/test-data/datasets/$rel" ] || R30_SURVIVED=0
+done
+if [ "$R30_SURVIVED" -eq 1 ]; then
+  ok "all-staged-delete: every staged-deleted file survives on disk (nothing was destroyed)"
+else
+  bad "all-staged-delete: on-disk content was destroyed despite the refusal"
+fi
+
+# === Case 30b: non-vacuity — restoring the count gate reproduces the loss ======
+# Proves the removed gate was load-bearing: with it back, the run must report
+# SUCCESS while destroying the staged-deleted on-disk content.
+MUTANT_COUNT_GATE="$T/fetch-datasets-mutant-count-gate.sh"
+sed -e 's/^  local entries rc=0 count sample$/  [ "${TRACKED_GUARD_COUNT}" -gt 0 ] || return 0\n  local entries rc=0 count sample/' \
+    -e 's/^  local entries rc=0$/  [ "${TRACKED_GUARD_COUNT}" -gt 0 ] || return 0\n  local entries rc=0/' \
+    "$FETCH" >"$MUTANT_COUNT_GATE"
+if [ "$(grep -c '\-gt 0 \] || return 0' "$MUTANT_COUNT_GATE")" -ge 2 ]; then
+  ok "non-vacuity: built a count-gated mutant (both #3245 guards re-gated)"
+  R30B="$T/case30b-repo"
+  make_repo "$R30B"
+  git -C "$R30B" rm -q --cached -r -- test-data/datasets >/dev/null
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_COUNT_GATE"
+  run_fetch "$R30B" "$R30B/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  if [ "$RC" -eq 0 ] && [ ! -f "$R30B/$LOCAL_MOD_REL" ]; then
+    ok "non-vacuity: mutant reports SUCCESS with the staged-deleted content DESTROYED (the #3245 review blocker)"
+  else
+    bad "non-vacuity: mutant did not reproduce the count-gated loss (exit $RC, file present: $([ -f "$R30B/$LOCAL_MOD_REL" ] && echo yes || echo no))"
+  fi
+else
+  bad "non-vacuity: could not build the count-gated mutant (guard preamble renamed?)"
+fi
+
+# === Case 31: an in-repo root with ZERO tracked files must still fetch =========
+# The other half of removing the count gate: the status scan now runs on every
+# in-repo root, so it must NOT red on a legitimately untracked corpus. Extraction
+# creates many untracked files by design; `--untracked-files=no` plus the `??`/`!!`
+# filter must keep them invisible. A guard that reds on correct input is the guard
+# people disable, so this false-positive case is as load-bearing as case 30.
+R31="$T/case31-repo"
+mkdir -p "$R31"
+git -C "$R31" init -q
+git -C "$R31" config user.email test@example.com
+git -C "$R31" config user.name "Test"
+printf 'placeholder\n' >"$R31/README.md"
+git -C "$R31" add README.md
+git -C "$R31" commit -qm "repo with no tracked dataset fixtures"
+if [ -z "$(git -C "$R31" ls-files -- test-data/datasets)" ]; then
+  ok "no-tracked-fixtures: the root genuinely holds no tracked paths"
+else
+  bad "no-tracked-fixtures: unexpected tracked paths under the root; case is vacuous"
+fi
+run_fetch "$R31" "$R31/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "no-tracked-fixtures: the fetch SUCCEEDS (the always-on status scan raises no false refusal)"
+else
+  bad "no-tracked-fixtures: false refusal on a clean in-repo root (exit $RC); output: $OUT"
+fi
+assert_archive_extracted "$R31/test-data/datasets" "no-tracked-fixtures"
 
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"

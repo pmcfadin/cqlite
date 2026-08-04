@@ -910,8 +910,18 @@ tracked_dataset_dirty_entries() {
 # never reach the `rm -rf`, and the pre-flight `restore missing-only` skips any
 # file that exists, so both stay modification-safe and ungated.
 refuse_modified_tracked_dataset_files() {
+  # `in-repo` is the AFFIRMATIVE precondition: an out-of-repo root holds no tracked
+  # files by construction, so there is nothing this oracle could witness.
+  #
+  # Deliberately NOT gated on TRACKED_GUARD_COUNT (issue #3245 review): that count is
+  # derived from `git ls-files`, i.e. the INDEX, so staging the deletion of every
+  # tracked file under the root (`git rm --cached -r <root>`) drives it to 0. A
+  # count-gated guard would then read `0` as "nothing to protect" when it actually
+  # means "every tracked file is staged-deleted" — the state of MAXIMUM risk, since
+  # the on-disk content is the only copy the restore cannot rebuild from the index.
+  # `git status --porcelain` reports those as `D ` records and IS able to see them,
+  # so the status scan is the sole authority here and always runs.
   [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
-  [ "${TRACKED_GUARD_COUNT}" -gt 0 ] || return 0
 
   local entries rc=0 count sample
   entries="$(tracked_dataset_dirty_entries)" || rc=$?
@@ -935,8 +945,11 @@ refuse_modified_tracked_dataset_files() {
 # tracked_dataset_dirty_entries for why `git diff` alone cannot see a staged
 # deletion of a tracked fixture.
 verify_tracked_status_clean_or_fail() {
+  # Not gated on TRACKED_GUARD_COUNT, for the same reason as
+  # refuse_modified_tracked_dataset_files above: the count is index-derived and goes
+  # to 0 precisely when every tracked path under the root is staged-deleted, which is
+  # the case this postcondition most needs to catch (issue #3245 review).
   [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
-  [ "${TRACKED_GUARD_COUNT}" -gt 0 ] || return 0
 
   local entries rc=0
   entries="$(tracked_dataset_dirty_entries)" || rc=$?
