@@ -460,6 +460,76 @@ def selection_lines(temps: list[str], arms: list[str], reps: int) -> list[str]:
     return lines
 
 
+def paired_rounds(scan: dict, fl: dict) -> tuple[list[dict], list[str]]:
+    """The WITHIN-ROUND bare/flight comparison, paired by rep index (#3272 B5).
+
+    The driver interleaves — one rep per arm per round, arm order rotated — so rep `k`
+    of the bare scan and rep `k` of each Flight arm were measured within a few minutes
+    of each other. Differencing THOSE, rather than the two medians, is what
+    `measurement-method.md` §3b step 4 requires:
+
+        "**Difference within a round**, and report the per-round deltas and how many
+        were positive — not the medians alone. At these spreads (5-10% per arm) a
+        median-vs-median difference of a couple of percent is not readable."
+
+    That is not a stylistic preference; it is the check that caught a real error. The
+    #3096 session's `+4,817 rows/s / +2.3%` lever-4 result re-measured at ZERO on 8
+    interleaved rounds — median −72 rows/s (−0.03%), 4 of 8 rounds positive. A
+    median-vs-median reading would have published the 2.3%.
+
+    Returns `(per_round_records, summary_lines)`. Refuses rather than skips if the two
+    arms' rep indices do not line up: an unpairable set is a set the report cannot
+    difference within a round, and saying nothing about that would leave the reader with
+    only the median comparison the method forbids on its own.
+    """
+    scan_by_rep = {r["rep"]: r for r in scan["reps"]}
+    fl_by_rep = {r["rep"]: r for r in fl["reps"]}
+    if set(scan_by_rep) != set(fl_by_rep):
+        raise Invalid(
+            f"the bare scan and {fl['arm']} do not cover the same rep indices"
+            f" (scan {sorted(scan_by_rep)}, flight {sorted(fl_by_rep)}), so no"
+            " within-round comparison is possible. The driver interleaves one rep per"
+            " arm per round precisely so rep k of each arm is contemporaneous;"
+            " differencing medians alone is what measurement-method.md §3b forbids."
+        )
+    rounds = []
+    for rep in sorted(scan_by_rep):
+        s, f = scan_by_rep[rep], fl_by_rep[rep]
+        if f["rows_per_sec"] <= 0 or s["rows_per_sec"] <= 0:
+            raise Invalid(
+                f"round {rep} has a non-positive rows/s (bare {s['rows_per_sec']},"
+                f" flight {f['rows_per_sec']}) — there is no ratio for that round"
+            )
+        rounds.append(
+            {
+                "round": rep,
+                "bare_rows_per_sec": s["rows_per_sec"],
+                "flight_rows_per_sec": f["rows_per_sec"],
+                "ratio_bare_over_flight": s["rows_per_sec"] / f["rows_per_sec"],
+                "cycles_per_row_delta": f["cycles_per_row"] - s["cycles_per_row"],
+                # The 1.3x verdict, decided WITHIN the round rather than across windows.
+                "flight_meets_target": f["rows_per_sec"] >= s["rows_per_sec"] / 1.3,
+            }
+        )
+    met = sum(1 for r in rounds if r["flight_meets_target"])
+    ratios = [r["ratio_bare_over_flight"] for r in rounds]
+    lines = [
+        "      per-round (PAIRED, the comparison method §3b step 4 requires):",
+        "        ratios "
+        + ", ".join(f"r{r['round']}={r['ratio_bare_over_flight']:.2f}x" for r in rounds),
+        f"        within-round 1.3x target met in {met}/{len(rounds)} round(s);"
+        f" paired ratio median {statistics.median(ratios):.2f}x"
+        f" [{min(ratios):.2f}..{max(ratios):.2f}]",
+    ]
+    if len(rounds) < 3:
+        lines.append(
+            f"        !! only {len(rounds)} round(s): the per-round direction count is"
+            " the readable signal at this rig's 5-10% per-arm spread, and it needs"
+            " several rounds. Raise --reps."
+        )
+    return rounds, lines
+
+
 def corpus_identity_lines(verification: dict) -> list[str]:
     """State whether the printed corpus digest was OBSERVED or merely recorded.
 
@@ -608,11 +678,27 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
                 f"{fl['cycles_per_row']['median'] - scan['cycles_per_row']['median']:+,.0f} "
                 f"({(fl['cycles_per_row']['median'] / scan['cycles_per_row']['median'] - 1) * 100:+.1f}%)"
             )
+            # The PAIRED within-round comparison, beside the medians (#3272 B5). The
+            # median-vs-median line above is retained because it is the figure the
+            # 1.3x spec target is stated against, but it is not left standing ALONE:
+            # this rig's own recorded evidence is that a couple of percent of median
+            # difference is not readable at its spreads.
+            fl["per_round_paired"] = None
+            rounds, paired_lines = paired_rounds(scan, fl)
+            fl["per_round_paired"] = rounds
+            lines += paired_lines
         lines.append("")
 
     lines += [
         "NOTES",
         "  * warm and cold are SEPARATE claims above; nothing here is blended.",
+        "  * the reps were INTERLEAVED — one rep per arm per round, arm order rotated "
+        "— so rep k of each arm is contemporaneous, and the per-round PAIRED ratios "
+        "above are differenced WITHIN a round. This rig produces no cross-session "
+        "absolute: the untouched bare scan drifted ~10% in one hour on the recorded "
+        "box, so an arm-after-arm ordering would put that drift straight onto the "
+        "bare/flight ratio. Read the per-round direction count, not the median "
+        "difference alone (measurement-method.md §3b).",
         "  * only the SELECTION printed above was measured; an absent temperature or "
         "arm was NOT run and nothing here speaks to it (results.json .selection).",
         "  * every COLD flight rep is verified to be EXACTLY ONE successful request "

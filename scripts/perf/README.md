@@ -97,6 +97,17 @@ changed on the measured path.** So this rig produces **no reusable absolute**.
 code-identical across arms, or NO COMPARISON.** One rep at a time, arm order
 rotated per round, the control carried in every run, differenced *within* a
 round. Mechanics: `docs/reports/ws0-3096-artifacts/measurement-method.md` §3b.
+
+**`ws0-baseline.sh` now IMPLEMENTS that rule rather than documenting it (#3272
+review).** Its loop is round-major — one bare-scan rep, then one rep of each Flight
+arm, arm order rotated by round — so rep *k* of every arm is contemporaneous. It had
+been arm-major (all bare-scan reps, then all of arm 1, then all of arm 2), which put
+the ~10% intra-session drift straight onto the `bare/flight` ratio and the 1.3x
+verdict, in whichever direction the box drifted. `ws0_report.py` prints the **paired
+per-round ratios and the within-round direction count** beside the medians, and
+refuses a rep set it cannot pair. Read the direction count: #3096's lever 4 measured
+`+2.3%` by medians and **zero** on 8 interleaved rounds (median −0.03%, 4 of 8
+positive).
 Worked example with all 30 per-run numbers, and a discarded run with the reason
 it was discarded: `docs/reports/ws0-3096-artifacts/abc-interleaved-2026-08-03.md`.
 

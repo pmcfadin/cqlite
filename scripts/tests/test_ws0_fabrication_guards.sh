@@ -481,6 +481,156 @@ for script in test_ws0_report_guards.sh test_ws0_cpu_pinning_guards.sh \
   fi
 done
 
+# ==========================================================================
+# 7 — the reps are INTERLEAVED, and the comparison is differenced WITHIN a round
+# ==========================================================================
+# The repo DOES carry a binding interleaving rule; the reviewer's claim was verified
+# before acting on it. `docs/reports/ws0-3096-artifacts/measurement-method.md` §3b:
+#
+#   "**THE RULE, binding on every future use of this rig: same-session interleaved
+#   A/B/C with a drift control that is code-identical across arms, or NO COMPARISON.**"
+#   (1) "run **one rep at a time**, never all reps of an arm back to back";
+#   (2) "**rotate the arm order every round** so no arm holds a fixed position";
+#   (4) "**Difference within a round** … not the medians alone."
+#
+# and `scripts/perf/README.md` §"No cross-session absolutes — interleave or do not
+# compare" restates it. It was paid for: the UNTOUCHED warm bare scan read 370,134
+# rows/s and 333,206 rows/s an hour later on the same box — ~10% drift with nothing
+# changed on the measured path. The pre-fix driver ran ALL bare-scan reps, then all
+# Flight reps of arm 1, then all of arm 2, so that drift landed directly on the
+# `bare/flight` ratio and the 1.3x verdict.
+#
+# NON-VACUITY, measured on the pre-fix loop
+#   for temp in $TEMPS; do
+#     for rep in $(seq 1 $REPS); do measure_scan …; done
+#     for arm in $ARMS; do for rep in …; do measure_flight …; done; done
+#   done
+# with `measure_scan`/`measure_flight` replaced by recorders and REPS=3, ARMS="bypass
+# merge": the observed order was
+#   scan-1 scan-2 scan-3  bypass-1 bypass-2 bypass-3  merge-1 merge-2 merge-3
+# i.e. every arm's three reps back to back, `merge` never in first position, and no two
+# arms of the same round contemporaneous. The post-fix order is asserted below.
+order_probe() { # order_probe <reps> <arms…> — echoes the observed measurement order
+  local reps="$1"; shift
+  ( set -uo pipefail
+    REPS="$reps"; TEMPS="warm"; ARMS="$*"; OUT_DIR="$TMP/order"
+    mkdir -p "$OUT_DIR"
+    measure_scan()   { printf 'scan-%s\n' "$2"; }
+    measure_flight() { printf 'flight-%s-%s\n' "$3" "$2"; }
+    eval "$(awk '/^rotate_arms\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
+    # The loop itself, taken from the driver so this cannot drift into testing a copy.
+    eval "$(awk '/^_ARM_LIST=/,/^done$/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
+  ) 2>/dev/null | grep -E '^(scan|flight)-' | tr '\n' ' '
+}
+
+got=$(order_probe 3 bypass merge)
+# Round-major: each round's scan is immediately followed by that round's two arms.
+if grep -q 'scan-1 flight-bypass-1 flight-merge-1 scan-2 flight-merge-2 flight-bypass-2 scan-3 flight-bypass-3 flight-merge-3' <<<"$got"; then
+  pass "OBSERVED: the loop is ROUND-MAJOR and the arm order ROTATES (pre-fix: arm-major)"
+else
+  fail "the loop must interleave one rep per arm per round with rotation (order: $got)"
+fi
+# The two properties, asserted separately so a partial regression is diagnosable.
+if ! grep -qE 'scan-1 scan-2' <<<"$got"; then
+  pass "OBSERVED: no two bare-scan reps run back to back (rule §3b step 1)"
+else
+  fail "bare-scan reps must not run back to back (order: $got)"
+fi
+if grep -q 'flight-bypass-1' <<<"$got" && grep -q 'flight-merge-2' <<<"$got" \
+   && grep -qE 'scan-2 flight-merge-2' <<<"$got"; then
+  pass "OBSERVED: 'merge' holds FIRST position in round 2 (rule §3b step 2, rotation)"
+else
+  fail "the arm order must rotate per round (order: $got)"
+fi
+# A single arm must still work — the common case (`--arm bypass`), where rotation is a
+# no-op and the interleave is just scan/flight alternation.
+got=$(order_probe 2 bypass)
+if grep -q 'scan-1 flight-bypass-1 scan-2 flight-bypass-2' <<<"$got"; then
+  pass "OBSERVED: a single arm interleaves scan/flight per round (rotation is a no-op)"
+else
+  fail "a single-arm run must still alternate scan/flight per round (order: $got)"
+fi
+# `rotate_arms` itself: over n rounds every arm must occupy every position, or the
+# rotation is decorative.
+if bash -c '
+  set -uo pipefail
+  eval "$(awk "/^rotate_arms\(\)/,/^}/" "'"$REPO_ROOT"'/scripts/perf/ws0-baseline.sh")"
+  [ "$(rotate_arms 1 a b c)" = "a b c " ] || { echo "round1: $(rotate_arms 1 a b c)"; exit 1; }
+  [ "$(rotate_arms 2 a b c)" = "b c a " ] || { echo "round2: $(rotate_arms 2 a b c)"; exit 1; }
+  [ "$(rotate_arms 3 a b c)" = "c a b " ] || { echo "round3: $(rotate_arms 3 a b c)"; exit 1; }
+  [ "$(rotate_arms 4 a b c)" = "a b c " ] || { echo "round4 (wraps): $(rotate_arms 4 a b c)"; exit 1; }
+  [ "$(rotate_arms 7 x)" = "x " ]         || { echo "single arm: $(rotate_arms 7 x)"; exit 1; }
+' >/dev/null 2>&1; then
+  pass "OBSERVED: rotate_arms puts every arm in every position over n rounds, and wraps"
+else
+  fail "rotate_arms must rotate by (round-1) mod n and wrap"
+fi
+
+# --- the reporter differences WITHIN a round --------------------------------
+# Interleaving the driver is half the fix; the other half is that the REPORT states the
+# paired per-round comparison rather than only the median-vs-median difference. The
+# recorded case for that: #3096's lever 4 measured `+4,817 rows/s / +2.3%` by medians
+# and ZERO on 8 interleaved rounds (median −0.03%, 4 of 8 rounds positive).
+d="$TMP/paired"; mkdir -p "$d"
+# Three rounds where the MEDIAN favours flight but the per-round direction is split —
+# the exact shape a median-only reading misreports.
+for rep in 1 2 3; do
+  make_scan_rep "$d" warm "$rep" ok
+done
+python3 - "$d" "$CORPUS_ROWS" <<'PY'
+import json, pathlib, sys
+d, rows = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+# flight rows/s per round: two rounds below the bare scan's 500/s (1000 rows / 2.0s),
+# one above — so 1 of 3 rounds meets a 1.3x target while the median does not.
+for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
+    tag = f"flight-bypass-warm-{rep}"
+    (d / f"{tag}.jsonl").write_text(json.dumps({
+        "round": tag, "requests_ok": 1, "requests_error": 0,
+        "rows_total": rows, "rows_per_s": rps, "duration_s": 4.0}) + "\n")
+    (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
+    (d / f"{tag}.prewarm.status").write_text("ok\n")
+PY
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'per-round (PAIRED' <<<"$out" \
+  && grep -q 'within-round 1.3x target met in 1/3 round' <<<"$out"; then
+  pass "OBSERVED: the report prints PAIRED per-round ratios and the direction count"
+else
+  fail "the report must print the paired within-round comparison (rc=$rc, out: $out)"
+fi
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+fl = [m for m in json.load(open(sys.argv[1]))["measurements"] if m["arm"].startswith("flight_")][0]
+rounds = fl["per_round_paired"]
+assert [r["round"] for r in rounds] == [1, 2, 3], rounds
+# Each round pairs rep k of the bare scan with rep k of the flight arm.
+assert all(r["bare_rows_per_sec"] == 500.0 for r in rounds), rounds
+assert [r["flight_rows_per_sec"] for r in rounds] == [300.0, 480.0, 200.0], rounds
+assert [r["flight_meets_target"] for r in rounds] == [False, True, False], rounds
+PY
+then
+  pass "results.json records the per-round PAIRED comparison, rep-for-rep"
+else
+  fail "results.json must record the paired per-round records"
+fi
+# And the reporter REFUSES an unpairable set rather than silently falling back to
+# medians alone — which is the comparison §3b forbids on its own.
+d="$TMP/unpairable"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+make_scan_rep "$d" warm 2 ok
+make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+make_flight_rep "$d" warm 2 ok "$GOOD_FLIGHT"
+rm -f "$d/scan-warm-2.json"          # scan has rep 1 only; flight has 1 and 2
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -ne 0 ]; then
+  pass "an unpairable rep set is REFUSED (never a silent fallback to median-only)"
+else
+  fail "an unpairable rep set must be refused (rc=$rc, out: $out)"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "ws0 fabrication guards: all checks passed"

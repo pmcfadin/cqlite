@@ -666,12 +666,71 @@ else
 fi
 echo
 
+# ---------------------------------------------------------------------------
+# The measurement loop is INTERLEAVED — one rep per arm per round, arm order
+# rotated (issue #3272 review B5)
+# ---------------------------------------------------------------------------
+# This loop used to run ALL `$REPS` bare-scan reps, then all Flight reps of arm 1, then
+# all of arm 2. That makes each arm's median a measurement of a DIFFERENT TIME WINDOW,
+# and this rig's own recorded evidence says those windows are not comparable:
+#
+#   `docs/reports/ws0-3096-artifacts/measurement-method.md` §3b — "**THE RULE, binding
+#   on every future use of this rig: same-session interleaved A/B/C with a drift control
+#   that is code-identical across arms, or NO COMPARISON.**" It then states the shape
+#   explicitly: (1) "run **one rep at a time**, never all reps of an arm back to back",
+#   (2) "**rotate the arm order every round** so no arm holds a fixed position",
+#   (4) "**difference within a round**".
+#
+# The rule exists because it was PAID FOR: on the delivery box, in one session, the
+# UNTOUCHED warm bare scan read 370,134 rows/s at 05:06 UTC and 333,206 rows/s at 06:05
+# — a ~10% drift with nothing changed on the measured path. And the failure is not
+# hypothetical for THIS driver: the whole claim it exists to produce is the
+# `bare/flight` RATIO, so a drift between the bare-scan block and the Flight block
+# lands DIRECTLY on the reported ratio and on the 1.3x PASS/BELOW-TARGET verdict, in
+# whichever direction the box happened to drift. The sequential order made a
+# same-session run a cross-window comparison wearing a same-session label.
+#
+# So: ROUNDS on the outside, arms on the inside, order rotated by round index. Every
+# round measures the bare scan and each Flight arm within a few minutes of each other,
+# and no arm holds a fixed position across rounds. The per-rep artifacts are named
+# exactly as before (`scan-<temp>-<rep>`, `flight-<arm>-<temp>-<rep>`), so the reporter
+# and every existing artifact reader are unaffected — this changes WHEN each rep runs,
+# not what is written.
+#
+# The ROUND is also recorded per rep (`<tag>.round`), which is what makes a paired
+# within-round comparison possible at all: ws0_report.py prints the per-round
+# bare/flight ratios and how many rounds favour which arm, beside the median-vs-median
+# figure. At the spreads this rig measures (5-10% per arm) a couple of percent of
+# median difference is not readable, and the recorded #3096 session is the case in
+# point — a +2.3% median difference measured at ZERO (median −0.03%, 4 of 8 rounds
+# positive) when re-measured on 8 interleaved rounds.
+#
+# `rotate_arms <round> <arms…>` — the arm list left-rotated by `(round-1) % n`, so over
+# n rounds every arm occupies every position. With a single arm it is a no-op, which is
+# the common case (`--arm bypass`); the rotation matters for `--arm both`.
+rotate_arms() {
+  local round="$1"; shift
+  local -a all=("$@")
+  local n="${#all[@]}" i shift_by
+  shift_by=$(( (round - 1) % n ))
+  for ((i = 0; i < n; i++)); do
+    printf '%s ' "${all[$(( (i + shift_by) % n ))]}"
+  done
+}
+
+# shellcheck disable=SC2206  # word-splitting $ARMS into an array is intended
+_ARM_LIST=($ARMS)
 for temp in $TEMPS; do
-  echo "-- bare scan ($temp) --"
-  for rep in $(seq 1 "$REPS"); do measure_scan "$temp" "$rep"; done
-  for arm in $ARMS; do
-    echo "-- flight do_get / $arm ($temp) --"
-    for rep in $(seq 1 "$REPS"); do measure_flight "$temp" "$rep" "$arm"; done
+  for rep in $(seq 1 "$REPS"); do
+    echo "-- round $rep/$REPS ($temp) — one rep per arm, interleaved --"
+    # The bare scan leads each round. It is the DENOMINATOR of the ratio and the drift
+    # control, so it is measured in every round rather than once per temperature.
+    measure_scan "$temp" "$rep"
+    printf '%s\n' "$rep" > "$OUT_DIR/scan-$temp-$rep.round"
+    for arm in $(rotate_arms "$rep" "${_ARM_LIST[@]}"); do
+      measure_flight "$temp" "$rep" "$arm"
+      printf '%s\n' "$rep" > "$OUT_DIR/flight-$arm-$temp-$rep.round"
+    done
   done
 done
 
