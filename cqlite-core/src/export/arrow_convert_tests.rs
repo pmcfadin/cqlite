@@ -1116,9 +1116,9 @@ fn a_differing_datatype_is_rejected_here_with_a_named_axis_before_arrow_sees_it(
 /// most plausibly break — is still accepted, and its batch keeps the extension
 /// metadata.
 ///
-/// The production path this stands in for is `cqlite-flight`'s `EgressBatchPlan`,
-/// which derives `plan.schema` and the arrays from the same `&self.columns`; its
-/// own end-to-end coverage lives in that crate.
+/// The case it stands in for is a caller that derives its schema with
+/// `build_arrow_schema` from the same columns it then passes here — the ONLY use of
+/// this entry point that is expected to be accepted.
 #[test]
 fn a_matching_schema_with_uuid_extension_metadata_is_accepted() {
     let (columns, rows) = uuid_and_text_columns();

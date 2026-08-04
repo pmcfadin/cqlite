@@ -168,21 +168,13 @@ pub fn rows_to_record_batch(
 ///   that is a documented public contract and is not weakened by this helper's
 ///   existence.
 ///
-/// * [`rows_to_record_batch_prevalidated`] takes a [`PrevalidatedSchema`], which
-///   OWNS the columns its schema was derived from and can only be constructed by
-///   deriving it — so the precondition is discharged by that argument's TYPE and a
-///   violating pair is unconstructible.
-///
-/// This is deliberately NOT public: `pub(super)` reaches the two in-module callers
-/// above and stops there, so it is not a "skip the checks" door for external
+/// This is deliberately NOT public — it is module-private, reaching the two callers
+/// above and stopping there, so it is not a "skip the checks" door for external
 /// callers, and the schema-mismatch guarantee of the public API is unchanged.
 /// `RecordBatch::try_new` still owns array lengths and field data types, so an
 /// internal caller that broke its precondition would surface as
 /// [`ArrowConvertError::Arrow`] rather than undefined behaviour.
-///
-/// [`rows_to_record_batch_prevalidated`]: super::arrow_prevalidated::rows_to_record_batch_prevalidated
-/// [`PrevalidatedSchema`]: super::arrow_prevalidated::PrevalidatedSchema
-pub(super) fn rows_to_record_batch_trusted_schema(
+fn rows_to_record_batch_trusted_schema(
     schema: Arc<Schema>,
     columns: &[ColumnInfo],
     rows: &[QueryRow],
@@ -195,13 +187,17 @@ pub(super) fn rows_to_record_batch_trusted_schema(
 /// [`rows_to_record_batch`] over a schema the caller already holds.
 ///
 /// Identical output — `schema` MUST be the [`build_arrow_schema`] of the same
-/// `columns`, which is exactly what [`rows_to_record_batch`] passes. The point is
-/// the `Arc`: a caller that emits many batches over ONE column set (the Flight
-/// `do_get` egress does, once per batch for the whole scan) rebuilt the entire
-/// `Schema` — a `Vec<Field>`, each `Field` owning a fresh `String` name and, for
-/// uuid/timeuuid columns, its own extension-metadata `HashMap` — on every call,
-/// then dropped it again. Reusing the `Arc` makes the per-batch cost a refcount
-/// bump (issue #3096, lever 6).
+/// `columns`, which is what [`rows_to_record_batch`] derives inline. This entry
+/// point exists for a caller whose schema arrives from somewhere it did not derive
+/// it, and its job is to REJECT one that does not describe `columns`; the
+/// `Arc<Schema>` it takes is incidental to that.
+///
+/// It is deliberately NOT a performance door. Reusing one `Arc<Schema>` across a
+/// scan's batches through this entry point is not cheaper than deriving it per
+/// batch — see `# Cost` below — and hoisting the derivation out of the Flight
+/// `do_get` egress loop was measured twice on the WS0 corpus and delivered nothing
+/// (issue #3096, lever 6, reverted: +0.30%, 95% CI covering zero, 4.5x below the
+/// measuring box's between-binary code-layout noise floor).
 ///
 /// # What is validated, exactly (issue #3096, second review)
 ///
@@ -263,17 +259,14 @@ pub(super) fn rows_to_record_batch_trusted_schema(
 /// construction is paid either way, once as `build_arrow_schema` or once as this
 /// validation.
 ///
-/// **A caller that wants reuse to be genuinely free should not use this function.**
-/// That is what [`PrevalidatedSchema`] + [`rows_to_record_batch_prevalidated`] are
-/// (issue #3096, fourth review): the schema is bound to the columns it was derived
-/// from, in a type whose only constructor derives it, so a mismatch is
-/// unconstructible and there is nothing to revalidate — ZERO per-batch schema work.
-/// The Flight `do_get` egress (`cqlite-flight`'s `EgressBatchPlan`) goes that way;
-/// this entry point remains for callers whose schema arrives from somewhere it did
-/// not derive, and its validation is exactly what such a caller needs.
-///
-/// [`PrevalidatedSchema`]: super::arrow_prevalidated::PrevalidatedSchema
-/// [`rows_to_record_batch_prevalidated`]: super::arrow_prevalidated::rows_to_record_batch_prevalidated
+/// So a caller emitting many batches over one column set should use
+/// [`rows_to_record_batch`], not this function with a hoisted schema. Issue #3096
+/// pursued the hoist on the Flight `do_get` egress with the validation removed
+/// as well (a schema newtype bound to its columns), measured it against the WS0
+/// corpus, and found nothing to keep: the per-batch work at stake is 1.53
+/// cycles/row of 23,940, so the whole lever was reverted. This entry point remains
+/// for the case it is actually for — a schema the caller did not derive, which must
+/// be REJECTED if it does not describe `columns`.
 ///
 /// # Errors
 ///
@@ -313,8 +306,11 @@ fn check_schema_matches_columns(
     // Probe instrumentation (issue #3096, third review): the ONLY way a test can
     // distinguish "the trusted path skipped validation" from "validation ran and
     // happened to pass", since a schema `build_arrow_schema` just produced can
-    // never FAIL this check. A no-op in any default/release build.
-    record_schema_validation();
+    // never FAIL this check. Thread-local, so a `cargo test` thread's count is
+    // unaffected by the other tests running concurrently in the same process, and
+    // compiled out entirely of any non-`cfg(test)` build.
+    #[cfg(test)]
+    SCHEMA_VALIDATIONS.with(|n| n.set(n.get() + 1));
     if !schema.metadata().is_empty() {
         return Err(ArrowConvertError::SchemaMismatch(format!(
             "schema carries top-level metadata {:?} but build_arrow_schema sets none \
@@ -389,42 +385,21 @@ fn field_mismatch_reason(i: usize, field: &Field, expected: &Field) -> String {
     )
 }
 
-/// Count one [`check_schema_matches_columns`] run on this thread.
-///
-/// A no-op — no static, no atomic, nothing referenced — unless the test-only
-/// `arrow-validation-probe` feature is on (or this crate is under `cargo test`).
-/// Same convention as `storage::sstable::read_work_counters`' `record_*()`: the
-/// call site is unconditional, the body is not, so a default or release build links
-/// no counter at all.
-#[inline]
-fn record_schema_validation() {
-    #[cfg(any(test, feature = "arrow-validation-probe"))]
-    SCHEMA_VALIDATIONS.with(|n| n.set(n.get() + 1));
-}
-
-#[cfg(any(test, feature = "arrow-validation-probe"))]
+#[cfg(test)]
 thread_local! {
     /// How many times [`check_schema_matches_columns`] has run on THIS thread.
     ///
-    /// Probe-only. Exists so a test can assert the negative —
-    /// `rows_to_record_batch` and `rows_to_record_batch_prevalidated` perform ZERO
-    /// schema validations while `rows_to_record_batch_with_schema` performs exactly
-    /// one — which is not observable from any of their return values (all succeed,
-    /// with an identical batch).
-    ///
-    /// [`rows_to_record_batch_prevalidated`]: super::arrow_prevalidated::rows_to_record_batch_prevalidated
+    /// Test-only. Exists so a test can assert the negative —
+    /// [`rows_to_record_batch`] performs ZERO schema validations while
+    /// [`rows_to_record_batch_with_schema`] performs exactly one — which is not
+    /// observable from either function's return value (both succeed, with an
+    /// identical batch).
     static SCHEMA_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The current thread's [`SCHEMA_VALIDATIONS`] count (issue #3096).
-///
-/// Test/probe-only surface, compiled under the `arrow-validation-probe` feature,
-/// which `cqlite-flight` enables as a DEV-dependency so its egress test can assert
-/// that the Flight `do_get` flush path revalidates NOTHING. Pair it with
-/// `prevalidated_batch_builds_on_this_thread` — a zero here is also true of a
-/// thread that built no batches, so the two together are the property.
-#[cfg(any(test, feature = "arrow-validation-probe"))]
-pub fn schema_validations_on_this_thread() -> usize {
+/// The current thread's [`SCHEMA_VALIDATIONS`] count. Test-only.
+#[cfg(test)]
+fn schema_validations_on_this_thread() -> usize {
     SCHEMA_VALIDATIONS.with(|n| n.get())
 }
 
