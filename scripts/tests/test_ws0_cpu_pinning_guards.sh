@@ -306,7 +306,7 @@ expect_selfgrep_fires() {
   fi
   out=$(bash "$copy" --corpus /nonexistent 2>&1); rc=$?
   if [ "$rc" -ne 0 ] \
-     && grep -q "contains a per-process perf invocation" <<<"$out" \
+     && grep -qE "contains a per-process/per-thread perf invocation" <<<"$out" \
      && grep -q "CPU-wide counting is mandatory" <<<"$out"; then
     pass "selfgrep-fires: $label"
   else
@@ -385,28 +385,137 @@ fi
 # hand-written pattern: a reimplemented check in the test would be a second thing to
 # keep in sync, and its divergence would be invisible in exactly the permissive
 # direction. Sourced by extraction so nothing in the driver's body runs.
-lint_shipped() {
+lint_shipped() { # lint_shipped <file> [owner|library]
   ( set -uo pipefail
     # shellcheck disable=SC1090
     source "$PERF_LINT_LIB"
-    perf_invocation_lint "$1" )
+    perf_invocation_lint "$1" "${2:-owner}" )
 }
 if [ -z "$(lint_shipped "$DRIVER")" ]; then
   pass "selfgrep-real: the shipped driver is clean under its OWN lint (no second pattern to drift)"
 else
   fail "selfgrep-real: the SHIPPED driver violates its own lint: $(lint_shipped "$DRIVER")"
 fi
-# The driver's own lint only ever reads ${BASH_SOURCE[0]} — ITSELF — so a per-process
-# invocation smuggled into one of the LIBRARIES it sources would be inside the rig and
-# outside the guard. The lint's per-TOKEN layer is applied to each of them here.
-# `lib-cpu.sh` has no `perf_stat_c`, so only the option findings are asserted; the
-# allowlist half is meaningless for a file that is not supposed to invoke perf at all.
-for lib in "$LIB" "$PERF_LINT_LIB"; do
-  bad=$(lint_shipped "$lib" | grep 'per-process option token')
-  if [ -z "$bad" ]; then
-    pass "selfgrep-libs: $(basename "$lib") carries no per-process option token"
+# --- R2: THE LINT'S SUBJECT IS THE WHOLE RIG, and it is DISCOVERED ----------
+# The driver's runtime lint used to read `${BASH_SOURCE[0]}` — ITSELF — so the FOUR
+# libraries it sources were inside the rig and outside all three layers. And the
+# compensating loop here covered only `lib-cpu.sh` + `lib-perf-lint.sh`: the two libraries
+# round 1 CREATED (`lib-host-state.sh`, `lib-args.sh`) were never linted at all, so a
+# `perf stat -p "$SERVER_PID"` planted in either fired NOTHING (#3272 review round 2, R2).
+#
+# So the subject is now a DIRECTORY GLOB, and this asserts the SET rather than trusting
+# it: `perf_lint_tree_subject` must name EVERY `scripts/perf/*.sh` on disk. A
+# hand-maintained list drifts the moment someone adds a library — which is exactly what
+# happened — so the drift is caught by comparing against `ls`, not by remembering.
+lint_tree() {
+  ( set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$PERF_LINT_LIB"
+    perf_invocation_lint_tree "$1" )
+}
+lint_subject() {
+  ( set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$PERF_LINT_LIB"
+    perf_lint_tree_subject "$1" )
+}
+PERF_DIR="$REPO_ROOT/scripts/perf"
+on_disk=$(cd "$PERF_DIR" && ls -1 ./*.sh | sed 's#^\./##' | sort)
+subject=$(lint_subject "$PERF_DIR" | xargs -n1 basename | sort)
+n_on_disk=$(printf '%s\n' "$on_disk" | grep -c .)
+if [ "$n_on_disk" -ge 4 ] && [ "$subject" = "$on_disk" ]; then
+  pass "lint-subject: the tree lint covers ALL $n_on_disk scripts/perf/*.sh (discovered, not enumerated)"
+else
+  fail "lint-subject: the tree lint's subject ($subject) is not every scripts/perf/*.sh ($on_disk)"
+fi
+# The shipped tree must be CLEAN under its own tree lint — the negative direction, which
+# is what keeps a guard that reds unconditionally from passing every positive case.
+if [ -z "$(lint_tree "$PERF_DIR")" ]; then
+  pass "lint-tree: the SHIPPED scripts/perf tree is clean under the tree lint"
+else
+  fail "lint-tree: the shipped tree violates its own tree lint: $(lint_tree "$PERF_DIR")"
+fi
+# NON-VACUITY, per library, per option spelling: a counting-domain option planted in ANY
+# of the rig's files must FIRE. The pre-round-2 loop covered two of five files and one
+# option family; MEASURED against it, a `-p` in `lib-host-state.sh` or `lib-args.sh`, and
+# a `-t` anywhere at all, produced NO finding.
+for libname in ws0-baseline.sh lib-cpu.sh lib-host-state.sh lib-args.sh lib-perf-lint.sh; do
+  for spelling in '-p 1234' '-p1234' '--pid=1234' '-t 1234' '--tid=1234'; do
+    treedir="$(mktemp -d "$TMP/treeXXXXXX")"
+    cp "$PERF_DIR/"*.sh "$treedir/"
+    # Appended as a REAL invocation line, outside any function, so the plant is
+    # structurally inside the rig exactly as an edit would be.
+    printf 'perf stat -x, -e cycles -C 0 %s -o /dev/null -- true\n' "$spelling" >> "$treedir/$libname"
+    got=$(lint_tree "$treedir")
+    if grep -q "$libname" <<<"$got" \
+       && grep -qE 'per-(process|thread) option token' <<<"$got"; then
+      pass "lint-tree-libs: a '${spelling%% *}' planted in $libname FIRES"
+    else
+      fail "lint-tree-libs: '$spelling' in $libname must fire (got: $got)"
+    fi
+  done
+done
+# An UNKNOWN option is refused too — the allowlist half, which is the property an
+# enumeration can never have. `--per-thread` and `-a` are real perf options this rig does
+# not use; neither appears in any deny list, and both change the counting domain.
+for spelling in '--per-thread' '-a' '--cgroup=x'; do
+  treedir="$(mktemp -d "$TMP/treeXXXXXX")"
+  cp "$PERF_DIR/"*.sh "$treedir/"
+  printf 'perf stat -x, -e cycles -C 0 %s -o /dev/null -- true\n' "$spelling" >> "$treedir/lib-args.sh"
+  got=$(lint_tree "$treedir")
+  if grep -q 'not in the perf option allowlist' <<<"$got"; then
+    pass "lint-tree-allowlist: an UNANTICIPATED option '$spelling' FAILS CLOSED (no deny-list entry needed)"
   else
-    fail "selfgrep-libs: $(basename "$lib") carries a per-process option: $bad"
+    fail "lint-tree-allowlist: '$spelling' must fail closed (got: $got)"
+  fi
+done
+# The tree lint's own VACUITY guards: an empty subject, no wrapper, or two wrappers all
+# print NOTHING under a naive implementation and read exactly like a clean tree.
+emptydir="$(mktemp -d "$TMP/emptyXXXXXX")"
+if grep -q 'subject is EMPTY' <<<"$(lint_tree "$emptydir")"; then
+  pass "lint-tree-vacuity: a directory with NO *.sh is a FINDING (not a silent clean tree)"
+else
+  fail "lint-tree-vacuity: an empty subject must be reported (got: $(lint_tree "$emptydir"))"
+fi
+nowrap="$(mktemp -d "$TMP/nowrapXXXXXX")"
+printf 'echo hello\n' > "$nowrap/a.sh"
+if grep -q 'no file defines perf_stat_c' <<<"$(lint_tree "$nowrap")"; then
+  pass "lint-tree-vacuity: a tree with NO wrapper is a FINDING (nothing owns the invocation)"
+else
+  fail "lint-tree-vacuity: an absent wrapper must be reported (got: $(lint_tree "$nowrap"))"
+fi
+twowrap="$(mktemp -d "$TMP/twowrapXXXXXX")"
+cp "$PERF_DIR/"*.sh "$twowrap/"
+printf 'perf_stat_c() {\n  perf stat -x, -C 0 -o "$1" -- "$2"\n}\n' >> "$twowrap/lib-args.sh"
+if grep -q 'define perf_stat_c' <<<"$(lint_tree "$twowrap")"; then
+  pass "lint-tree-vacuity: TWO wrapper definitions are a FINDING (layer 1 allows exactly one)"
+else
+  fail "lint-tree-vacuity: two wrappers must be reported (got: $(lint_tree "$twowrap"))"
+fi
+# A per-file lint of the SHIPPED libraries, asserting an AFFIRMATIVE subject count rather
+# than a `0/0` pass (#3272 review round 2 nit). The old loop filtered the lint's output
+# for 'per-process option token' and passed on an EMPTY result — but no line of those
+# files is classified as a perf invocation at all, so the option filter had nothing to
+# examine and the case could not fail. A check whose subject is empty is not a pass. Here
+# each library is linted in `library` mode (which also refuses a second wrapper), and the
+# COUNT of lines the lint actually classified is asserted non-zero via a planted control.
+for lib in "$PERF_DIR"/lib-*.sh; do
+  base="$(basename "$lib")"
+  if [ -z "$(lint_shipped "$lib" library)" ]; then
+    pass "selfgrep-libs: $base is clean in library mode (no wrapper, no perf invocation)"
+  else
+    fail "selfgrep-libs: $base is not clean in library mode: $(lint_shipped "$lib" library)"
+  fi
+  # THE AFFIRMATIVE SUBJECT: the same file with ONE invocation planted must produce a
+  # finding, which proves the clean verdict above was over a file the lint can actually
+  # read — not a `0/0`.
+  ctl="$TMP/ctl-$base"
+  cp "$lib" "$ctl"
+  printf 'perf stat -x, -e cycles -C 0 -p 1234 -o /dev/null -- true\n' >> "$ctl"
+  if [ -n "$(lint_shipped "$ctl" library)" ]; then
+    pass "selfgrep-libs: ...and the SAME file with one planted invocation FIRES (the subject is non-empty)"
+  else
+    fail "selfgrep-libs: a planted invocation in $base must fire, else the clean verdict is a 0/0"
   fi
 done
 # And the driver must SOURCE the lint before using it — a lint library present but
@@ -419,13 +528,35 @@ else
   fail "selfgrep-wired: the driver must source lib-perf-lint.sh"
 fi
 # And the guard must still be WIRED (a lint present but never called is the #3249
-# shape): the driver runs it unconditionally at parse time and exits on any output.
-if grep -q '_perf_lint_out="\$(perf_invocation_lint "\${BASH_SOURCE\[0\]}")"' "$DRIVER" \
+# shape), over the WHOLE DIRECTORY rather than `${BASH_SOURCE[0]}` (R2): the driver runs
+# it unconditionally at parse time and exits on any output.
+if grep -q '_perf_lint_out="\$(perf_invocation_lint_tree "\$HERE")"' "$DRIVER" \
    && awk '/^if \[\[ -n "\$_perf_lint_out" \]\]/,/^fi$/' "$DRIVER" | grep -q 'exit 2'; then
-  pass "selfgrep-wired: the lint runs over \${BASH_SOURCE[0]} at startup and exits on any finding"
+  pass "selfgrep-wired: the lint runs over the whole scripts/perf TREE at startup and exits on any finding"
 else
-  fail "selfgrep-wired: the lint must run over \${BASH_SOURCE[0]} unconditionally and exit"
+  fail "selfgrep-wired: the lint must run over the tree (perf_invocation_lint_tree \"\$HERE\") unconditionally and exit"
 fi
+# END-TO-END: a plant in a LIBRARY must stop the DRIVER, not merely the lint function.
+# This is the wiring half of R2 — the lint could be correct and the driver still run.
+for libname in lib-host-state.sh lib-args.sh; do
+  treedir="$(mktemp -d "$TMP/e2eXXXXXX")"
+  mkdir -p "$treedir/scripts/perf"
+  cp "$PERF_DIR/"*.sh "$treedir/scripts/perf/"
+  # Inside a FUNCTION BODY, and with a LITERAL pid. Both matter: the libraries are
+  # SOURCED, so a top-level plant would EXECUTE at source time (`perf: command not found`,
+  # rc=127) and an unbound `$SERVER_PID` would die under the driver's `set -u` — either
+  # way the fixture would report the wrong failure, before the lint ever ran. A function
+  # body is structurally inside the rig exactly as a real edit would be, and never runs.
+  printf '_ws0_planted() {\n  perf stat -x, -e cycles -C 0 -t 1234 -o /dev/null -- true\n}\n' \
+    >> "$treedir/scripts/perf/$libname"
+  out=$(bash "$treedir/scripts/perf/ws0-baseline.sh" --corpus /nonexistent 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "per-thread option token" <<<"$out" \
+     && grep -q "$libname" <<<"$out"; then
+    pass "selfgrep-e2e: a per-thread invocation in $libname STOPS THE DRIVER, naming the file"
+  else
+    fail "selfgrep-e2e: a plant in $libname must stop the driver (rc=$rc, out: $(head -4 <<<"$out"))"
+  fi
+done
 
 # --- The lint's own POSITIVE CONTROL and non-vacuity ------------------------
 # Per #3249 the greps above are only evidence if the lint can both FIRE and STAY
@@ -506,22 +637,49 @@ argv_probe() { # argv_probe <args…> — run the driver's perf_stat_c with a pe
     eval "$(awk '/^perf_stat_c\(\)/,/^}/' "$DRIVER")"
     perf_stat_c /dev/null "$@" ) 2>&1
 }
-for spelled in "-p1234" "-p" "--pid=1234" "--pid"; do
-  out=$(argv_probe true "$spelled"); rc=$?
-  if [ "$rc" -ne 0 ] && grep -q "was passed the per-process option" <<<"$out" \
+# LAYER 3 PREFIX = an ALLOWLIST OF NOTHING (#3272 review round 2, R4b). Round 1's version
+# enumerated `-p`/`--pid`, so `-t`/`--tid` — per-THREAD counting, equally per-process in
+# effect and with the same observer cost — went straight through. MEASURED against that
+# wrapper: `perf_stat_c out -t 1234 true` invoked perf with rc=0. Enumerating `-t` too
+# would be the same mistake a third time, so a caller-supplied option before the command
+# word is now refused WHATEVER IT IS.
+for spelled in "-p1234" "-p" "--pid=1234" "--pid" "-t" "-t1234" "--tid=99" "--per-thread" "-a" "--cgroup=x" "--future-option"; do
+  out=$(argv_probe "$spelled" true); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "was passed the perf option" <<<"$out" \
      && ! grep -q 'PERF-RAN' <<<"$out"; then
-    pass "argv-guard: perf_stat_c REFUSES a computed '$spelled' before invoking perf"
+    pass "argv-guard: perf_stat_c REFUSES a caller-supplied '$spelled' before invoking perf"
   else
     fail "argv-guard: '$spelled' must be refused and perf must not run (rc=$rc, out: $out)"
   fi
 done
 # A single-quoted attached value is the SAME TOKEN here — the spelling problem does
 # not exist at this layer, which is the point of having it.
-out=$(argv_probe true "-p'1234'")
-if grep -q "was passed the per-process option" <<<"$out"; then
+out=$(argv_probe "-p'1234'" true)
+if grep -q "was passed the perf option" <<<"$out"; then
   pass "argv-guard: a single-quoted attached value is the same token after quote removal"
 else
   fail "argv-guard: -p'1234' must be refused (out: $out)"
+fi
+# AFTER the command word an allowlist is impossible (`$@` carries `--shape full`,
+# `--corpus …`), so the check there is necessarily the counting-DOMAIN enumeration — and
+# it must still fire, because a domain option past perf's `--` would never be read by
+# perf at all and the measurement would silently not be the one asked for.
+for spelled in "-p" "--pid=1" "-t" "--tid=1" "--per-thread" "-a"; do
+  out=$(argv_probe true "$spelled"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "counting-domain option" <<<"$out" \
+     && ! grep -q 'PERF-RAN' <<<"$out"; then
+    pass "argv-guard: a domain option '$spelled' AFTER the command word is refused too"
+  else
+    fail "argv-guard: a trailing '$spelled' must be refused (rc=$rc, out: $out)"
+  fi
+done
+# ...and an ordinary COMMAND option must NOT be: a guard that refuses `--shape full`
+# refuses every real call, which is the guard an operator deletes.
+out=$(argv_probe taskset -c 1 flight-loadgen --shape full --step-duration 45s)
+if grep -q 'PERF-RAN: stat -x, -e cycles -C 0 -o /dev/null -- taskset -c 1 flight-loadgen --shape full --step-duration 45s' <<<"$out"; then
+  pass "argv-guard: ordinary COMMAND options (--shape/--step-duration) pass through untouched"
+else
+  fail "argv-guard: a command's own options must not be refused (out: $out)"
 fi
 # And the ACCEPT direction: an ordinary argv reaches perf, so the guard is not one
 # that refuses everything.

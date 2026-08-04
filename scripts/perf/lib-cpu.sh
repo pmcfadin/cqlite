@@ -152,7 +152,7 @@ verify_disjoint() {
     for y in $b; do
       if [[ "$x" == "$y" ]]; then
         echo "FATAL: server CPUs ($1) and client CPUs ($2) overlap on cpu$x — the client's" >&2
-        echo "       own cost would be counted inside the server's perf -C window." >&2
+        echo "       own cost would be counted inside the server's perf -C window." >&2  # perf-lint-allow: a diagnostic STRING
         return 1
       fi
     done

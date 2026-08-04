@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # lib-perf-lint.sh — THE perf-invocation guard for the WS0 measurement rig
-# (issue #3096 spec R2 trap 1, hardened by #3272 item 10 and review round 1).
+# (issue #3096 spec R2 trap 1, hardened by #3272 item 10 and review rounds 1 and 2).
 #
 # Sourced, not executed. It sets NO shell options: `set -euo pipefail` in a sourced
 # library mutates the SOURCING shell's options, which is a caller's decision to make.
 #
 # Split into its own file under the campsite rule. It is also the honest boundary: the
-# lint is a self-contained CHECKER over a shell source file, with one entry point and
+# lint is a self-contained CHECKER over shell source files, with two entry points and
 # no dependency on the driver's state — and moving it out means the awk no longer has
 # to skip its OWN function body by position, since the file it lints (the driver) no
 # longer contains it.
 
 # --- trap 1: the rig contains no per-process perf invocation -------------------
-# Spec R2: the driver "contains no per-process perf invocation". Per-process counting
+# Spec R2: the rig "contains no per-process perf invocation". Per-process counting
 # measured >2x observer cost on this workload, so CPU-wide counting is mandatory and
-# a future edit that reaches for the per-process option must not be able to RUN.
+# the driver checks ITSELF — and every library it sources — at startup.
 #
 # # Why this stopped being a deny-list grep (issue #3272, item 10, then review round 1)
 #
@@ -39,11 +39,24 @@
 # amount of pattern care that converts that into a guarantee, because the space of
 # spellings is open: a new perf option, a new shell idiom, an `eval`.
 #
-# So the mechanism is INVERTED into an ALLOWLIST, which is closed by construction:
+# # Why the OPTION check is now an ALLOWLIST too (review round 2, R4b)
 #
-#   LAYER 1 (STRUCTURAL, source): `perf_stat_c` is the ONLY place the linted file
-#     invokes `perf`. Every non-comment line whose tokens include a bare `perf`/`stat`
-#     command word must either be inside that function's body or carry an explicit
+# Round 1's fix enumerated the FORBIDDEN options (`-p`, `--pid`) per token. Round 2
+# found the same class one level in: `perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS"
+# -t "$SERVER_PID"` is PER-THREAD counting — equally per-process in effect, with the
+# same observer cost — and it satisfied layer 1 (it is inside the wrapper and carries
+# `-C`) while layers 2 and 3 found no matching token. All three layers green, spec R2
+# violated. Adding `-t`/`--tid` to the deny list would be the same mistake a third
+# time: `--per-thread`, `--cgroup`, `--pid=`-by-another-name, whatever perf adds next.
+#
+# So layer 2 is INVERTED: the wrapper may carry only the options this rig actually
+# needs, and ANY OTHER option token on a perf/stat line is a finding. Unknown future
+# spellings therefore fail CLOSED, which is the property an enumeration can never have.
+# The set is deliberately tiny — see `PERF_ALLOWED_OPTS`.
+#
+#   LAYER 1 (STRUCTURAL, source): `perf_stat_c` is the ONLY place the rig invokes
+#     `perf`. Every non-comment line whose tokens include a bare `perf`/`stat` command
+#     word must either be inside that function's body or carry an explicit
 #     `perf-lint-allow` marker (a diagnostic string, a presence probe). A NEW
 #     invocation anywhere else fails this regardless of how it is spelled — through a
 #     variable, with global options, with any quoting — because the check does not ask
@@ -51,7 +64,7 @@
 #     wrapper's own invocation must carry `-C`, so the allowlist cannot be satisfied by
 #     a wrapper that counts nothing CPU-wide.
 #   LAYER 2 (TOKEN, source): no such line — marked or not, inside the wrapper or not —
-#     may carry an option token that makes the invocation per-process. Applied per
+#     may carry an option token outside `PERF_ALLOWED_OPTS`. Applied per
 #     WHITESPACE-SEPARATED TOKEN rather than by substring, so attached and separated
 #     values are one case and quoting is irrelevant. This is what fires when the edit
 #     is made INSIDE the wrapper, where layer 1 has nothing to say.
@@ -61,23 +74,98 @@
 #     layer at all. It is the backstop for a caller that reaches the wrapper with
 #     arguments no source scan saw (a computed option, an `eval`).
 #
+# LAYER 1'S SUBJECT NOW COVERS AN UNKNOWN COMMAND WORD (review round 2 nit). Layer 2 sits
+# behind `if (!mentions) next`, and the nit was that this makes the two layers dependent:
+# a line layer 1 did not classify as an invocation was never option-checked either, so
+# `"${PS[@]}" -p 1234` — a VARIABLE holding both `perf` and `stat` — escaped both.
+#
+# The fix is at the classifier, not by dropping the gate. `invokes()` now also returns
+# true when the line's COMMAND WORD is a VARIABLE EXPANSION (`$X`, `"$X"`, `"${X[@]}"`),
+# because such a line invokes something this file cannot identify — and "cannot identify"
+# must resolve to "treat as perf", which is the allowlist posture. Dropping the gate
+# instead was tried and REVERTED: an unconditional option scan reds on ordinary code
+# (`cargo build --release -p ws0-corpus-gen`, `mkdir -p "$OUT_DIR"` — measured, 6 findings
+# across this rig), and a guard that reds on `mkdir -p` is the guard an operator deletes.
+# A command substitution (`"$(cpu_list_expand …)"`) is NOT a variable expansion: what it
+# runs is a literal, visible on the same line, and covered by the ordinary rules.
+#
+# THE SUBJECT IS THE WHOLE RIG, DISCOVERED (review round 2, R2). The driver's runtime
+# call used to lint `${BASH_SOURCE[0]}` — itself — so the FOUR libraries it sources were
+# inside the rig and outside all three layers. `perf_invocation_lint_tree` globs the
+# directory instead and discovers which file owns the wrapper, so adding a library
+# cannot silently add an unlinted file; a hand-maintained list would drift the moment
+# someone did.
+
 # The option spellings are held in VARIABLES so the diagnostics can name them without
 # layer 2 matching its own message — the self-match problem removed rather than filtered
 # around, which is what the discarded `grep -v` was trying and failing to do.
 _PP_SHORT='-p'
 _PP_LONG='--pid'
+# The PER-THREAD family (review round 2, R4b). Named for the diagnostics; the guard
+# itself no longer depends on the enumeration being complete, because layer 2 is an
+# allowlist and these are simply not in it.
+_PT_SHORT='-t'
+_PT_LONG='--tid'
 
-# perf_invocation_lint <file> — print one `<lineno>: <reason>` per violation, and
-# nothing when the file is clean. Exit status is not used; the CALLER counts output,
-# so an awk that dies mid-file cannot read as "clean" (it would print nothing AND the
-# caller's own affirmative check for the wrapper would fail).
+# The ONLY options a perf/stat line in this rig may carry (layer 2 ALLOWLIST).
+#
+# `-x` CSV output, `-e` the event list, `-C` the CPU list (the whole point), `-o` the
+# output file, `--` the command separator. That is the complete set the wrapper needs.
+# Anything else — `-p`, `--pid`, `-t`, `--tid`, `--per-thread`, `-a`, `--cgroup`, an
+# option perf has not shipped yet — is a finding, WITHOUT this file having to know what
+# it means. An option that changes the counting DOMAIN is exactly the class that must
+# not be reachable by an unanticipated spelling.
+PERF_ALLOWED_OPTS='-x -e -C -o --'
+
+# The counting-DOMAIN option families, for LAYER 3's post-command-word check.
+#
+# It lives HERE, beside the option names it is built from, because `perf_stat_c` is the
+# only consumer and a constant defined in the DRIVER while the function that reads it is
+# extracted for testing is exactly the cross-file coupling round 2 flagged in
+# `lib-args.sh` (`$COLD_STEP_MAX_MS`): under `set -u` the extracted function dies with an
+# unbound-variable error instead of producing its diagnostic. An enumeration is
+# unavoidable on that side — `$@` legitimately carries `--shape full`, so nothing there
+# can be allowlisted — and the reason is recorded at the branch in `perf_stat_c`.
+PERF_DOMAIN_OPTS="$_PP_SHORT $_PP_LONG $_PT_SHORT $_PT_LONG --per-thread -a --all-cpus --cgroup"
+
+# perf_invocation_lint <file> [mode] — print one `<lineno>: <reason>` per violation,
+# and nothing when the file is clean. Exit status is not used; the CALLER counts
+# output, so an awk that dies mid-file cannot read as "clean" (it would print nothing
+# AND the caller's own affirmative check for the wrapper would fail).
+#
+# `mode` is `owner` (default) or `library`:
+#
+#   owner    — this file DEFINES `perf_stat_c`. The three END assertions apply: the
+#              wrapper must exist, must invoke something, and must pass `-C`.
+#   library  — this file must define NO wrapper (there is exactly ONE in the rig) and
+#              must invoke perf NOWHERE. Layers 1 and 2 apply unchanged; the END
+#              assertions would be nonsense here, so a wrapper DEFINITION is the
+#              finding instead.
 perf_invocation_lint() {
-  awk -v pp_short="$_PP_SHORT" -v pp_long="$_PP_LONG" '
+  local mode="${2:-owner}"
+  awk -v pp_short="$_PP_SHORT" -v pp_long="$_PP_LONG" \
+      -v pt_short="$_PT_SHORT" -v pt_long="$_PT_LONG" \
+      -v allowed="$PERF_ALLOWED_OPTS" -v mode="$mode" '
+    BEGIN { n = split(allowed, a, /[[:space:]]+/); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
     # A token as the SHELL would see it after word-splitting and quote removal:
     # leading/trailing quotes, parens and `;` stripped. That is what makes the
     # spelling of an invocation irrelevant — `"perf"`, `perf`, `(perf` and `perf;`
     # reduce to the same token.
+    #
+    # A trailing COMMA is deliberately NOT stripped: `no perf, no sudo` in a prose line
+    # would then reduce to the command word `perf` and red every diagnostic string in the
+    # rig. (Measured while writing round 2s fix — 6 false findings.) `optname` handles
+    # `-x,` on its own, so nothing needs the comma stripped here.
     function bare(t) { gsub(/^[("'\''`]+/, "", t); gsub(/[)"'\''`;]+$/, "", t); return t }
+    # An option token reduced to its NAME: the attached value dropped, so `-p1234`,
+    # `-p"$x"`, `--pid=1234` and `-x,` reduce to `-p`, `-p`, `--pid`, `-x`. Long options
+    # keep their whole name; short options are one letter, which is how perf parses them.
+    function optname(t) {
+      if (t !~ /^-/) return ""
+      if (t == "--") return "--"
+      if (t ~ /^--/) { sub(/=.*$/, "", t); return t }
+      return substr(t, 1, 2)
+    }
     # Does this line INVOKE the tool? A line invokes it when some token IS the
     # command word (`perf`, or any path ending `/perf`, or the subcommand `stat`).
     # This is deliberately NOT a substring test: `perf_stat_c`, `perf_event_paranoid`
@@ -86,23 +174,54 @@ perf_invocation_lint() {
     # Matching the SUBCOMMAND too is what closes review round 1s
     # variable-and-global-option bypasses: `"$BIN" stat …` and `perf --no-pager stat …`
     # both carry a bare `stat` token however the tool itself is spelled.
-    function invokes(line,   n, i, t) {
+    #
+    # It ALSO returns true when the COMMAND WORD is an unresolvable VARIABLE EXPANSION
+    # (round 2 nit): `"${PS[@]}" -p 1234` invokes something this file cannot name, and
+    # "cannot name" must resolve to "treat as perf" — that is the allowlist posture. The
+    # command word is the first token after any `VAR=val` prefixes and control operators.
+    # A command SUBSTITUTION is excluded: `x="$(cpu_list_expand …)"` runs a literal that
+    # is visible on the same line and covered by the ordinary rules.
+    # DELIBERATELY NARROW. Reimplementing shell word-splitting in awk is a second
+    # implementation of bash, and a second implementation is only as good as the
+    # differential testing nobody is going to do — so this asks ONE cheap, well-defined
+    # question: is the FIRST token of the line a variable expansion, on a line that is
+    # not an assignment? That is the whole of the bypass the nit named
+    # (`"${PS[@]}" -p 1234`).
+    # An assignment is excluded because its right-hand side runs nothing in command
+    # position; a command SUBSTITUTION is excluded because what it runs is a literal on
+    # the same line, covered by the ordinary rules. An assignment PREFIX to a variable
+    # command (`FOO=1 "$BIN" stat …`) is out of scope here and caught by the bare `stat`
+    # token instead — which is how the `"$PERF_BIN" stat …` case from round 1 fires.
+    function is_var_command(line,   t, n, tk) {
+      if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) return 0
+      n = split(line, tk, /[[:space:]]+/)
+      for (i = 1; i <= n; i++) if (tk[i] != "") { t = tk[i]; break }
+      gsub(/^[("'\''!]+/, "", t)
+      if (t ~ /^\$\(/ || t ~ /^`/) return 0
+      return (t ~ /^"?\$[A-Za-z_{]/)
+    }
+    function invokes(line,   n, i, t, tk) {
       n = split(line, tk, /[[:space:]]+/)
       for (i = 1; i <= n; i++) {
+        if (tk[i] ~ /^#/) break     # a whitespace-preceded `#` starts a comment: not argv
         t = bare(tk[i])
         if (t == "perf" || t ~ /\/perf$/ || t == "stat") return 1
       }
-      return 0
+      return is_var_command(line)
     }
     /^[[:space:]]*#/ { next }                                   # full-line comment
-    # The lint FUNCTION ITSELF is skipped STRUCTURALLY, by position, for the case where
-    # this library is pointed at ITSELF (a caller may lint the whole scripts/perf tree).
+    # The lint FUNCTIONS THEMSELVES are skipped STRUCTURALLY, by position, for the case
+    # where this library is pointed at ITSELF (the tree lint below does exactly that).
     # A CONTENT-based exclusion is what the discarded `grep -v self-check` did, and its
     # bypass was a code comment; position cannot be spelled around.
-    /^perf_invocation_lint\(\)/ { inlint = 1; next }
+    /^perf_invocation_lint\(\)/ || /^perf_invocation_lint_tree\(\)/ { inlint = 1; next }
     inlint && /^\}/  { inlint = 0; next }
     inlint           { next }
-    /^perf_stat_c\(\)/ { inwrap = 1; next }
+    /^perf_stat_c\(\)/ {
+      inwrap = 1
+      if (mode == "library") print NR ": defines perf_stat_c, but the rig has exactly ONE wrapper (this file is not it)"
+      next
+    }
     inwrap && /^\}/    { inwrap = 0; wrapseen = 1; next }
     {
       mentions = invokes($0)
@@ -112,24 +231,96 @@ perf_invocation_lint() {
       } else if (mentions && !marked) {
         print NR ": perf/stat invocation outside the single perf_stat_c wrapper, unmarked"
       }
-      # LAYER 2 applies to a marked line TOO — the marker exempts a line from the
-      # allowlist (a diagnostic string may name the tool), never from the option check.
+      # LAYER 2, applied to a marked line TOO — the marker exempts a line from the
+      # ALLOWLIST (a diagnostic string may name the tool), never from the option check.
+      # It runs on every line `invokes()` classifies as an invocation, which now includes
+      # a line whose command word is an unresolvable variable expansion (round 2 nit).
+      # Ordinary code (`taskset -c 1`, `mkdir -p "$d"`) is not option-checked, because an
+      # allowlist of PERF options says nothing about it.
       if (!mentions) next
       n = split($0, tok, /[[:space:]]+/)
       for (i = 1; i <= n; i++) {
-        t = bare(tok[i])
-        # An ATTACHED value is part of the token; a SEPARATED one is the next token.
-        # Either way the token STARTS WITH the option, so one test covers `-p1234`,
-        # `-p 1234`, `-p"1234"`, `-p$x`, `--pid=1234` and `--pid 1234` alike.
-        if (index(t, pp_short) == 1 || index(t, pp_long) == 1) {
+        if (tok[i] ~ /^#/) break    # trailing comment: prose, not argv
+        o = optname(bare(tok[i]))
+        if (o == "") continue
+        if (o in ok) continue
+        if (o == pp_short || o == pp_long)
           print NR ": per-process option token `" tok[i] "` on a perf/stat line"
-        }
+        else if (o == pt_short || o == pt_long)
+          print NR ": per-thread option token `" tok[i] "` on a perf/stat line (per-thread counting is per-process counting)"
+        else
+          print NR ": option token `" tok[i] "` is not in the perf option allowlist (" allowed ") — an option this rig does not need may change the counting DOMAIN"
       }
     }
     END {
-      if (!wrapseen)     print "0: perf_stat_c() is absent — there is no single wrapper to allow"
-      if (!wrapinvoke)   print "0: perf_stat_c() invokes nothing — the allowlist would be vacuous"
-      if (!wrapcpuwide)  print "0: perf_stat_c() does not pass -C — the wrapper counts nothing CPU-wide"
+      if (mode != "library") {
+        if (!wrapseen)     print "0: perf_stat_c() is absent — there is no single wrapper to allow"
+        if (!wrapinvoke)   print "0: perf_stat_c() invokes nothing — the allowlist would be vacuous"
+        if (!wrapcpuwide)  print "0: perf_stat_c() does not pass -C — the wrapper counts nothing CPU-wide"
+      }
     }
   ' "$1"
+}
+
+# perf_invocation_lint_tree <dir> — lint EVERY shell file of the rig, printing
+# `<file>:<lineno>: <reason>` per violation and nothing when the tree is clean.
+#
+# THE SUBJECT IS DISCOVERED, NOT ENUMERATED (issue #3272 review round 2, R2). The
+# driver's startup call linted `${BASH_SOURCE[0]}` — ITSELF — so `lib-cpu.sh`,
+# `lib-host-state.sh`, `lib-args.sh` and this file were inside the rig and outside all
+# three layers: a `perf stat -p "$SERVER_PID"` added to any of them fired NOTHING.
+# A hand-written list would have the same defect one edit later, so the set is the
+# directory glob and the wrapper OWNER is discovered by who defines `perf_stat_c`.
+#
+# Three vacuity guards, because a checker whose subject is empty prints nothing and
+# reads exactly like a clean tree:
+#
+#   * ZERO files is a finding (a wrong `dir`, a moved rig).
+#   * ZERO wrapper definitions is a finding (nothing owns the invocation).
+#   * MORE THAN ONE wrapper definition is a finding ("perf is invoked in ONE place" is
+#     what layer 1 rests on, so two wrappers dissolve the allowlist).
+perf_invocation_lint_tree() {
+  local dir="$1" f owner="" count=0 owners=0 out
+  local -a files=()
+  for f in "$dir"/*.sh; do
+    [[ -r "$f" ]] || continue
+    files+=("$f")
+    count=$((count + 1))
+    if grep -q '^perf_stat_c()' "$f"; then
+      owner="$f"
+      owners=$((owners + 1))
+    fi
+  done
+  if [[ "$count" -eq 0 ]]; then
+    echo "$dir:0: no *.sh found — the lint's subject is EMPTY, which prints exactly like a clean tree"
+    return 0
+  fi
+  if [[ "$owners" -eq 0 ]]; then
+    echo "$dir:0: no file defines perf_stat_c — nothing owns the single perf invocation the allowlist rests on"
+    return 0
+  fi
+  if [[ "$owners" -gt 1 ]]; then
+    echo "$dir:0: $owners files define perf_stat_c — layer 1 allows ONE wrapper, so two dissolve the allowlist"
+    return 0
+  fi
+  for f in "${files[@]}"; do
+    if [[ "$f" == "$owner" ]]; then
+      out="$(perf_invocation_lint "$f" owner)"
+    else
+      out="$(perf_invocation_lint "$f" library)"
+    fi
+    [[ -z "$out" ]] || printf '%s:%s\n' "$f" "$out"
+  done
+}
+
+# perf_lint_tree_subject <dir> — the files the tree lint WOULD examine, one per line.
+#
+# Exists so a test can assert the subject is the WHOLE directory rather than trusting
+# that it is: "the lint covers every library" is a claim about a SET, and a set claim
+# needs the set printed. Used by scripts/tests/test_ws0_cpu_pinning_guards.sh.
+perf_lint_tree_subject() {
+  local dir="$1" f
+  for f in "$dir"/*.sh; do
+    [[ -r "$f" ]] && printf '%s\n' "$f"
+  done
 }

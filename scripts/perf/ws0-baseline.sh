@@ -18,12 +18,16 @@
 #
 #  1. CPU-WIDE COUNTERS ONLY. Every measurement goes through the single
 #     `perf_stat_c` wrapper, which counts CPU-wide. Per-process counting measured
-#     >2x observer cost on this workload and appears NOWHERE in this rig. Three
-#     layers enforce that (see scripts/perf/lib-perf-lint.sh): an ALLOWLIST over
-#     this file's source (perf is invoked in ONE place, everything else must be
-#     marked), a per-TOKEN option check, and a RUNTIME argv check in the wrapper.
-#     It stopped being a deny-list grep because five ordinary bash spellings
-#     bypassed two successive versions of one.
+#     >2x observer cost on this workload, and per-THREAD counting is the same thing
+#     under another option, so neither appears anywhere in this rig. Three layers
+#     enforce that (see scripts/perf/lib-perf-lint.sh): an ALLOWLIST over the source
+#     of EVERY `scripts/perf/*.sh` — this driver and all four libraries it sources,
+#     discovered by glob, not enumerated (perf is invoked in ONE place, everything
+#     else must be marked); a per-TOKEN OPTION ALLOWLIST (only `-x -e -C -o --`, so
+#     an option nobody anticipated fails closed); and a RUNTIME argv check in the
+#     wrapper that refuses ANY caller-supplied option. All three are allowlists
+#     because five ordinary bash spellings bypassed two successive deny-list greps,
+#     and then `-t`/`--tid` bypassed the deny-list of OPTIONS that replaced them.
 #  2. VERIFIED SIBLING PINNING. The pinned pair is read from
 #     `thread_siblings_list` and the run FAILS CLOSED if it is not one physical
 #     core's siblings (`lib-cpu.sh`). Never assumed from CPU numbers.
@@ -160,21 +164,31 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- trap 1: this file contains NO per-process perf invocation ----------------
-# Runs unconditionally at startup, over THIS FILE, so an edit that reaches for the
-# per-process option — or that invokes perf anywhere other than the single
-# `perf_stat_c` wrapper — cannot run at all. The mechanism, the three bypasses review
-# round 1 found in its predecessor, and why it is an ALLOWLIST rather than a deny-list
-# grep: scripts/perf/lib-perf-lint.sh. Its LAYER 3 (the runtime argv check) lives in
+# --- trap 1: the WHOLE RIG contains NO per-process perf invocation -------------
+# Runs unconditionally at startup, over EVERY `scripts/perf/*.sh` — this driver AND the
+# four libraries it sources — so an edit that reaches for a counting-domain option, or
+# that invokes perf anywhere other than the single `perf_stat_c` wrapper, cannot run at
+# all. The mechanism, the five bypasses review round 1 found in its predecessor, and why
+# BOTH the invocation check and the option check are ALLOWLISTS rather than deny-list
+# greps: scripts/perf/lib-perf-lint.sh. Its LAYER 3 (the runtime argv check) lives in
 # `perf_stat_c` below, because only the wrapper sees the argv.
-_perf_lint_out="$(perf_invocation_lint "${BASH_SOURCE[0]}")"
+#
+# THE SUBJECT IS THE DIRECTORY, not `${BASH_SOURCE[0]}` (issue #3272 review round 2, R2).
+# This used to lint ITSELF only, which put `lib-cpu.sh`, `lib-host-state.sh`,
+# `lib-args.sh` and `lib-perf-lint.sh` inside the rig and outside all three layers: a
+# `perf stat -p "$SERVER_PID"` added to any of them fired nothing. The set is DISCOVERED
+# by glob rather than enumerated, so adding a library cannot silently add an unlinted
+# file, and the tree lint reports its own vacuity (an empty subject, no wrapper, or two
+# wrappers) rather than printing nothing and reading as clean.
+_perf_lint_out="$(perf_invocation_lint_tree "$HERE")"
 if [[ -n "$_perf_lint_out" ]]; then
-  echo "FATAL: this script contains a per-process perf invocation, or invokes perf" >&2  # perf-lint-allow
-  echo "       outside its single wrapper:" >&2
+  echo "FATAL: this rig contains a per-process/per-thread perf invocation, invokes perf" >&2  # perf-lint-allow
+  echo "       outside its single wrapper, or carries an option outside the allowlist:" >&2
   printf '       %s\n' "$_perf_lint_out" >&2
-  echo "       Per-process counting (${_PP_SHORT} / ${_PP_LONG}) measured >2x observer cost on" >&2
-  echo "       this workload; CPU-wide counting is mandatory (issue #3096 spec R2), and" >&2
-  echo "       every invocation must go through perf_stat_c so ONE place enforces it." >&2  # perf-lint-allow
+  echo "       Per-process (${_PP_SHORT} / ${_PP_LONG}) and per-thread (${_PT_SHORT} / ${_PT_LONG}) counting" >&2
+  echo "       measured >2x observer cost on this workload; CPU-wide counting is mandatory" >&2
+  echo "       (issue #3096 spec R2), and every invocation must go through perf_stat_c so" >&2  # perf-lint-allow
+  echo "       ONE place enforces it. Permitted options: ${PERF_ALLOWED_OPTS}." >&2
   exit 2
 fi
 unset _perf_lint_out
@@ -452,18 +466,65 @@ drop_caches_if_cold() {
 # source-text deny-list can never close does not exist at this layer. It catches what
 # no scan of this file could see: a caller passing a COMPUTED option, or one built by
 # an `eval`.
+#
+# TWO checks, with DIFFERENT postures, and the reason each has the posture it has is
+# recorded HERE at the branch rather than left to be re-derived (#3272 review round 2,
+# R4b — it used to enumerate `-p`/`--pid` only, which let `-t`/`--tid` through: per-THREAD
+# counting, equally per-process in effect, same observer cost):
+#
+#  (a) the argv PREFIX — every token before the COMMAND WORD — is an ALLOWLIST OF
+#      NOTHING. This wrapper supplies every perf option itself, so a caller-supplied
+#      option here is refused WHATEVER IT IS. That closes the unknown-future-spelling
+#      hole: `--per-thread`, `-a`, `--cgroup` and whatever perf ships next fail without
+#      this file having to know they exist.
+#  (b) the COMMAND and its arguments cannot be allowlisted, and that is a fact about the
+#      domain, not an omission: `$@` legitimately carries `taskset -c 1`,
+#      `--shape full`, `--step-duration 45s`, `--corpus …`. So there the check is
+#      necessarily an enumeration — the counting-DOMAIN option families — and it is
+#      retained because a domain option appearing after the command word is a caller who
+#      built the argv wrong, which is worth catching even though the token would land
+#      past perf's `--` and never be read by perf as an option at all.
+# `PERF_DOMAIN_OPTS` comes from lib-perf-lint.sh, beside the option names it is built
+# from — never defined here, because this function is EXTRACTED and driven directly by
+# scripts/tests/test_ws0_cpu_pinning_guards.sh, and a constant it could only get from the
+# driver would make the extracted copy die on an unbound variable instead of diagnosing.
 perf_stat_c() {
   local outfile="$1"; shift
-  local a
+  local a name opt in_prefix=1
   for a in "$@"; do
+    # The option NAME with any attached value dropped: `-p1234`, `-p"$x"`, `--pid=1234`
+    # all reduce to the option itself. Bash has already done quote removal, so the
+    # spelling problem a source-text scan cannot close does not exist here.
     case "$a" in
-      "$_PP_SHORT"|"$_PP_SHORT"*|"$_PP_LONG"|"$_PP_LONG"*)
-        echo "FATAL: perf_stat_c was passed the per-process option '$a'." >&2
-        echo "       Per-process counting measured >2x observer cost on this workload;" >&2
-        echo "       this wrapper counts CPU-WIDE only (issue #3096 spec R2). The" >&2
-        echo "       argument list was: $*" >&2
-        exit 2 ;;
+      --*) name="${a%%=*}" ;;
+      -?*) name="${a:0:2}" ;;
+      *)   name="" ;;
     esac
+    if [[ -z "$name" ]]; then
+      in_prefix=0     # the COMMAND word: everything after it belongs to the command
+      continue
+    fi
+    if [[ "$in_prefix" == "1" ]]; then
+      echo "FATAL: perf_stat_c was passed the perf option '$a'." >&2
+      echo "       This wrapper supplies every perf option itself and counts CPU-WIDE only" >&2
+      echo "       (issue #3096 spec R2). Before the command word the check is an ALLOWLIST" >&2
+      echo "       OF NOTHING: a caller-supplied option is refused whatever it is, so an" >&2
+      echo "       option perf has not shipped yet fails CLOSED rather than passing because" >&2
+      echo "       no deny-list entry matched it (#3272 R4b)." >&2
+      echo "       The argument list was: $*" >&2
+      exit 2
+    fi
+    for opt in $PERF_DOMAIN_OPTS; do
+      [[ "$name" == "$opt" ]] || continue
+      echo "FATAL: perf_stat_c was passed the counting-domain option '$a'." >&2
+      echo "       Per-process (${_PP_SHORT}/${_PP_LONG}) and per-thread (${_PT_SHORT}/${_PT_LONG})" >&2
+      echo "       counting measured >2x observer cost on this workload; this wrapper counts" >&2
+      echo "       CPU-WIDE only (issue #3096 spec R2). A domain option after the command" >&2
+      echo "       word is an argv built wrong: it would land past perf's '--' and never be" >&2
+      echo "       read by perf at all, so the measurement would silently not be the one" >&2
+      echo "       asked for. The argument list was: $*" >&2
+      exit 2
+    done
   done
   perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"
 }
