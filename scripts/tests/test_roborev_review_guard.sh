@@ -204,6 +204,24 @@ case "$cmd" in
     printf '%s\n' "$STUB_CONFIG_PATTERNS"
     exit 0
     ;;
+  version)
+    # `built-in-set:` ASKS the executable which version it is (#3229 round 7). The
+    # deny-list, the built-in arity AND the ported git.FormatExcludeArgs were all derived
+    # from v0.61.2, so a version mismatch is a divergence in its own right and the pin's
+    # re-verify-on-upgrade obligation becomes machine-checked instead of remembered.
+    #   `none` => a target that will not answer at all, which is the UNAVAILABLE state.
+    #
+    # DELIBERATELY NOT RECORDED IN `$STUB_INVOKED`. That file is the enqueue witness
+    # `assert_never_enqueued` reads (`-s`), and the version probe runs on EVERY path
+    # including the pre-enqueue FAILs — recording it would make every "no review was
+    # enqueued" assert read as an enqueue.
+    if [ "${STUB_ROBOREV_VERSION:-}" = none ]; then
+      printf 'stub: unknown command "version"\n' >&2
+      exit 64
+    fi
+    printf '%s\n' "${STUB_ROBOREV_VERSION:-roborev v0.61.2}"
+    exit 0
+    ;;
   *) printf 'stub: unsupported roborev subcommand: %s\n' "$cmd" >&2; exit 64 ;;
 esac
 STUB
@@ -781,26 +799,99 @@ GUARD_PINNED_BUILTINS=(
   '**/poetry.lock' '**/pubspec.lock' '**/uv.lock' '**/yarn.lock'
 )
 
-make_builtin_stub() { # make_builtin_stub <pinned|added|removed> -> prints a bin dir
+# THE BLOB LAYOUT, MEASURED FROM /usr/local/bin/roborev v0.61.2 (#3229 round 7). Go packs
+# the rodata string blob in LENGTH order with no terminator, and each LENGTH BUCKET of
+# these literals is stored as ONE CONTIGUOUS RUN — `:(exclude,glob)**/Cargo.lock` is
+# immediately followed by the `:` of `:(exclude,glob)**/cargo.lock`. That adjacency is the
+# only RIGHT BOUNDARY available, and `built-in-set:` now checks it (per bucket of k
+# members, exactly k-1 are followed by another literal).
+#
+# So the planted literals must be laid out THE SAME WAY: one run per line, members
+# concatenated. Planting them one-per-line (as the first revision did) would leave every
+# bucket with ZERO bounded members and red the OK cases — the stub would be modelling a
+# blob shape the real binary does not have, which is precisely the symmetric-oracle error
+# this suite keeps re-learning.
+#
+# ORDER WITHIN A RUN IS PART OF THE MEASUREMENT, not alphabetical: bucket 26 is
+# bun.lock, pdm.lock, mix.lock. (The production check deliberately does NOT pin this
+# order — only the k-1 count — so a rebuild that permutes a bucket cannot false-FAIL.)
+GUARD_BUILTIN_BLOB_RUNS=(
+  '**/go.sum'
+  '**/uv.lock'
+  '**/bun.lock **/pdm.lock **/mix.lock'
+  '**/yarn.lock **/bun.lockb **/.beads/** **/.cache/**'
+  '**/Cargo.lock **/cargo.lock **/flake.lock'
+  '**/poetry.lock **/.gocache/**'
+  '**/Pipfile.lock **/Gemfile.lock **/pubspec.lock **/Podfile.lock'
+  '**/composer.lock'
+  '**/pnpm-lock.yaml'
+  '**/Package.resolved **/.kata.local.toml'
+  '**/package-lock.json'
+  '**/packages.lock.json'
+)
+
+# guard_run_members <run-string>: split a run into its members WITHOUT pathname expansion.
+# `read -ra` never globs; an unquoted `for p in $run` would expand `**/package-lock.json`
+# to the repo-relative `website/package-lock.json` — the exact defect that once made this
+# suite agree with a broken production check (see GUARD_PINNED_BUILTINS above).
+GUARD_RUN_MEMBERS=()
+guard_run_members() {
+  GUARD_RUN_MEMBERS=()
+  IFS=' ' read -r -a GUARD_RUN_MEMBERS <<<"$1"
+}
+
+# The two mirrors must describe the SAME 24 patterns. Two hand-maintained lists that drift
+# apart would make every built-in case assert against a set neither side believes, so the
+# agreement is CHECKED rather than trusted.
+guard_assert_run_mirror_agrees() {
+  local run p flat="" pinned=""
+  for run in "${GUARD_BUILTIN_BLOB_RUNS[@]}"; do
+    guard_run_members "$run"
+    for p in "${GUARD_RUN_MEMBERS[@]}"; do flat+="$p"$'\n'; done
+  done
+  for p in "${GUARD_PINNED_BUILTINS[@]}"; do pinned+="$p"$'\n'; done
+  if [ "$(printf '%s' "$flat" | LC_ALL=C sort)" = "$(printf '%s' "$pinned" | LC_ALL=C sort)" ]; then
+    ok 'harness: the measured blob RUNS and the pinned built-in list describe the same 24 patterns'
+  else
+    bad 'harness: GUARD_BUILTIN_BLOB_RUNS and GUARD_PINNED_BUILTINS disagree — the built-in cases would assert against a set neither mirror believes'
+  fi
+}
+
+make_builtin_stub() { # make_builtin_stub <pinned|added|removed|tampered> -> prints a bin dir
   # SEPARATE statements, for the reason `make_fixture` documents: `local` is a builtin, so
   # ALL of its arguments are expanded before any assignment takes effect — `local mode="$1"
   # dir="$tmp/x-$mode"` would read an UNSET `mode` and abort under `set -u`.
-  local mode dir p
+  local mode dir p run line
   mode="$1"
   dir="$tmp/stubbin-$mode"
   mkdir -p "$dir"
   cp "$stubbin/roborev" "$dir/roborev"
   {
     printf '# planted built-in deny-list literals (mode: %s)\n' "$mode"
-    for p in "${GUARD_PINNED_BUILTINS[@]}"; do
-      # `removed`: drop exactly one pinned pattern, so the presence check names it.
-      if [ "$mode" = removed ] && [ "$p" = '**/Cargo.lock' ]; then continue; fi
-      printf '# :(exclude,glob)%s\n' "$p"
+    for run in "${GUARD_BUILTIN_BLOB_RUNS[@]}"; do
+      guard_run_members "$run"
+      line=""
+      for p in "${GUARD_RUN_MEMBERS[@]}"; do
+        # `removed`: drop exactly one pinned pattern, so the presence check names it.
+        if [ "$mode" = removed ] && [ "$p" = '**/Cargo.lock' ]; then continue; fi
+        # `tampered`: THE EQUAL-LENGTH SUBSTITUTION (#3229 round-7 blocker). `**/Cargo.lock`
+        # becomes `**/Cargo.lock.bak`, ONE literal for one literal — so the `:(exclude,glob)`
+        # COUNT is untouched (26) and every pinned pattern is still PRESENT as a substring
+        # (`**/Cargo.lock` matches inside `**/Cargo.lock.bak`), which is why an unbounded
+        # presence test plus a count reported `built-in-set: OK` on a set that had moved.
+        # Only the RIGHT BOUNDARY sees it: `**/Cargo.lock` is now followed by `.bak`
+        # instead of the next literal's `:`.
+        if [ "$mode" = tampered ] && [ "$p" = '**/Cargo.lock' ]; then p='**/Cargo.lock.bak'; fi
+        line+=":(exclude,glob)$p"
+      done
+      [ -z "$line" ] || printf '# %s\n' "$line"
     done
     # The TWO bare PREFIX CONSTANTS the real binary carries, so the pinned count matches.
     printf '# :(exclude,glob)\n# :(exclude,glob)**/\n'
     # `added`: one EXTRA built-in — the scenario that matters most, an upgrade that starts
     # excluding source. Detected by the count, since a blind re-extraction is unreliable.
+    # On its OWN line, so it neighbours no pinned literal and the divergence it produces is
+    # provably the COUNT rather than a broken adjacency run.
     if [ "$mode" = added ]; then printf '# :(exclude,glob)**/*.rs\n'; fi
   } >>"$dir/roborev"
   chmod +x "$dir/roborev"
@@ -930,6 +1021,10 @@ export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
 export STUB_CONFIG_PATTERNS=''
+# The version `built-in-set:` asks the executable for (#3229). Default = the PINNED one,
+# so every existing case keeps the state it pinned; `none` models a target that will not
+# answer, which must read UNAVAILABLE rather than OK.
+export STUB_ROBOREV_VERSION='roborev v0.61.2'
 
 reset_stub() {
   STUBBIN_OVERRIDE=""
@@ -950,6 +1045,7 @@ reset_stub() {
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
   STUB_CONFIG_PATTERNS=''
+  STUB_ROBOREV_VERSION='roborev v0.61.2'
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -2176,6 +2272,118 @@ elif bash "$cx24_probe" "$ORACLES_SRC" "$REPO_TOML" "$tmp" >"$cx24_out" 2>&1; th
 else
   bad "case (cx24): the mirror probe did not run: $(cat "$cx24_out")"
 fi
+
+printf "== case (cx25): an EQUAL-LENGTH built-in RENAME FAILs — presence needs a RIGHT boundary ==\n"
+reset_stub
+# THE #3229 round-7 blocker, REPRODUCED AND PINNED. `built-in-set:` looked for each pinned
+# pattern as the fixed string `:(exclude,glob)<pattern>` — an exact LEFT boundary and NO
+# right one — and caught additions with a bare literal COUNT. Both signals are BLIND to a
+# one-for-one substitution: with `**/Cargo.lock` replaced by `**/Cargo.lock.bak` the count
+# stays 26 and the missing list stays EMPTY (the pinned pattern still matches, INSIDE the
+# longer one), so the verdict read `built-in-set: OK` while the modelled exclusion set no
+# longer matched reality. Measured on the real /usr/local/bin/roborev by patching its
+# bucket-28 run in place, then reproduced here.
+#
+# The boundary that catches it is the blob's own structure, not a pinned foreign byte: Go
+# packs rodata in LENGTH order with no terminator and each length bucket is ONE contiguous
+# run, so per bucket of k members exactly k-1 must be immediately followed by another
+# `:(exclude,glob)` literal. The tamper drops bucket 28 from 2 bounded to 1.
+guard_assert_run_mirror_agrees
+work=$(make_fixture case_cx25 pushed)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub tampered)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx25)' FAIL 1
+assert_says 'case (cx25) the equal-length rename is a DIVERGENCE, not an OK' '^census-exclusion: FAIL \(roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set: '
+assert_lacks 'case (cx25) and never reads OK on the tampered set' 'built-in-set: OK'
+assert_says 'case (cx25) the unbounded pattern is NAMED, with its bucket' "literal length 28 \[\*\*/Cargo\.lock \*\*/cargo\.lock \*\*/flake\.lock\]: 1 of 3 bounded on the right"
+assert_says 'case (cx25) the value line says which member lost its boundary' 'UNBOUNDED: \*\*/Cargo\.lock, \*\*/flake\.lock'
+assert_says 'case (cx25) the detail names the substring hazard concretely' "'\*\*/Cargo\.lock' matches inside '\*\*/Cargo\.lock\.bak'"
+assert_says 'case (cx25) the detail states the length-bucket basis of the boundary' 'each LENGTH BUCKET is stored as ONE contiguous run'
+assert_says 'case (cx25) it points at the re-extract-and-repin remedy' 'update ROBOREV_BUILTIN_EXCLUDES and ROBOREV_BUILTIN_PATHSPEC_LITERALS'
+# THE POINT: the two PRE-EXISTING signals are provably blind to this tamper, so the FAIL is
+# attributable to the boundary check alone. If either of these ever starts firing, the
+# fixture stopped modelling the tamper and this case stopped testing what it claims to.
+assert_lacks 'case (cx25) no pinned pattern reads as MISSING (presence is satisfied by the substring)' 'no longer present in the binary'
+assert_lacks 'case (cx25) and the literal COUNT is unchanged at the pinned 26' "literal\(s\), pinned 26"
+assert_never_enqueued 'case (cx25)'
+
+printf "== case (cx25b): the CONTROL — same fixture, untampered stub, reads OK ==\n"
+reset_stub
+# Without this, cx25's FAIL could be the fixture rather than the tamper. Same repo, same
+# config, same paths; the ONLY delta is the planted deny-list.
+work=$(make_fixture case_cx25b pushed)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx25b)' PASS 0
+assert_says 'case (cx25b) an untampered set reads OK' 'built-in-set: OK\)$'
+assert_says 'case (cx25b) the OK detail states the right boundary was verified' 'RIGHT-BOUNDED by the pinned length-bucket adjacency'
+assert_says 'case (cx25b) the OK detail records WHY presence alone is insufficient' "replaced by '\*\*/Cargo\.lock\.bak' at equal length \(count 26/26, missing 0\)"
+assert_says 'case (cx25b) the OK detail names the observed version' 'the executable reports v0\.61\.2'
+
+printf "== case (cx26): a binary that is NOT the pinned version FAILs ==\n"
+reset_stub
+# Option A of the round-7 fix. The 24 patterns, the built-in arity AND the ported
+# git.FormatExcludeArgs were ALL read out of v0.61.2, so on any other build every one of
+# them is unverified — that is the standing re-verify-on-upgrade obligation, now enforced
+# rather than remembered. The literals still match the pin exactly, so this FAIL is
+# provably the VERSION dimension on its own.
+work=$(make_fixture case_cx26 pushed)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
+STUB_ROBOREV_VERSION='roborev v0.62.0'
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx26)' FAIL 1
+assert_says 'case (cx26) the version divergence is named FIRST in the value line' '^census-exclusion: FAIL \(roborev built-in exclude set DIVERGED from the pinned v0\.61\.2 set: the executable reports v0\.62\.0, but every fact modelled here was derived from v0\.61\.2'
+assert_says 'case (cx26) the detail names observed vs pinned' 'it reports v0\.62\.0, pinned v0\.61\.2'
+assert_says 'case (cx26) it names ALL THREE facts the version invalidates' 'the 24 built-in patterns, their one-pathspec arity AND the ported git\.FormatExcludeArgs'
+assert_says 'case (cx26) it names the re-pin obligation as enforced, not remembered' 'move ROBOREV_PINNED_VERSION in the same commit'
+assert_lacks 'case (cx26) a version mismatch is never an OK' 'built-in-set: OK'
+# Provably the version alone: the planted literals are the pinned 26 and all 24 are present
+# and correctly bounded, so no other divergence fragment may appear.
+assert_lacks 'case (cx26) no pattern reads as missing' 'no longer present in the binary'
+assert_lacks 'case (cx26) no adjacency run reads as broken' 'NOT right-bounded as pinned'
+assert_never_enqueued 'case (cx26)'
+
+printf "== case (cx26b): a binary that will not report its version is UNAVAILABLE, not OK ==\n"
+reset_stub
+# `built-in-set:` must never bless a pin it could not confirm. The literals here match the
+# pin exactly, so the ONLY thing missing is the version — and the honest report of that is
+# UNAVAILABLE ("we could not look"), which is neither a failure nor a blessing.
+work=$(make_fixture case_cx26b pushed)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
+STUB_ROBOREV_VERSION=none
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx26b)' PASS 0
+assert_says 'case (cx26b) an unconfirmable pin withholds the blessing' 'built-in-set: UNAVAILABLE\)$'
+assert_lacks 'case (cx26b) matching literals alone do NOT earn an OK' 'built-in-set: OK'
+assert_says 'case (cx26b) UNAVAILABLE names the unreadable version among its causes' 'would not report its version'
+assert_says 'case (cx26b) and stays explicitly neither a failure nor a blessing' 'deliberately NEITHER a failure NOR a blessing'
+assert_says 'case (cx26b) it states that it withholds only the blessing' 'withholds only the OK blessing'
+assert_lacks 'case (cx26b) an unreadable version is not a FAIL' '^census-exclusion: FAIL'
+
+printf "== case (cx26c): an unreadable version does NOT disable the check — a removal still FAILs ==\n"
+reset_stub
+# The asymmetry that keeps cx26b from being a self-disabling escape hatch: withholding the
+# OK blessing must NOT withhold a FAIL. If a future roborev renamed its `version`
+# subcommand, `built-in-set:` would stop saying OK — but a pinned pattern vanishing from
+# the binary must still red the round.
+work=$(make_fixture case_cx26c pushed)
+write_roborev_config "$work" "$NARROWED_PATTERNS"
+STUBBIN_OVERRIDE=$(make_builtin_stub removed)
+STUB_ROBOREV_VERSION=none
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx26c)' FAIL 1
+assert_says 'case (cx26c) the missing pattern is still named without a readable version' 'pinned pattern\(s\) no longer present in the binary: \*\*/Cargo\.lock'
+assert_lacks 'case (cx26c) an observed divergence is never downgraded to UNAVAILABLE' 'built-in-set: UNAVAILABLE'
+assert_never_enqueued 'case (cx26c)'
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
