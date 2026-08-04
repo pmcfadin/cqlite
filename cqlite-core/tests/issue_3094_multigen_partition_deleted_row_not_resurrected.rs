@@ -353,9 +353,9 @@ fn table_id() -> CqlTableId {
 /// generations the fixture flushed.
 ///
 /// This is the shared ANTI-VACUITY precondition for every driver below: each
-/// multi-generation branch is guarded by a reader/candidate count (`reader_list.len()
-/// > 1`, `readers.len() > 1`, `candidates.len() > 1`), and every one of them falls
-/// back SILENTLY to a non-reconciling per-reader concatenation when the count is 1.
+/// multi-generation branch is guarded by a reader/candidate count exceeding one
+/// (`reader_list.len()`, `readers.len()`, `candidates.len()`), and every one of them
+/// falls back SILENTLY to a non-reconciling per-reader concatenation at a count of 1.
 /// A fixture that lost a generation — or a manager that failed to register one —
 /// would therefore take the fallback and could satisfy a naive expectation without
 /// the merge path ever running. Failing here instead makes that loud.
