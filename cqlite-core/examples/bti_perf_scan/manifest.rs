@@ -490,7 +490,7 @@ fn documented_table(
 /// scanned. An authority that cannot be read is a refusal, never a reason to pick a
 /// different authority.
 ///
-/// So exactly ONE outcome means "absent": `ErrorKind::NotFound`. Every other `lstat`
+/// So the ONLY outcome that means "absent" is `ErrorKind::NotFound`. Every other `lstat`
 /// error, and every entry that is not a REGULAR FILE (a symlink — including a dangling
 /// one — a directory, a fifo), is an authoritative manifest failure. A symlink is refused
 /// rather than followed for the same reason `scope.rs` requires real directories: the file

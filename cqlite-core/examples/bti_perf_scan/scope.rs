@@ -162,8 +162,9 @@ fn matching_dirs(ks_dir: &Path, table: &str) -> std::result::Result<Vec<PathBuf>
         if !is_table_dir(&name, table) {
             continue;
         }
-        // A REAL directory: a symlink named `<table>-<32 hex>` is not a Cassandra table
-        // directory, and resolving one would measure bytes from outside the corpus.
+        // A REAL directory: `is_table_dir` above enforced the `<table>-<32 hex>` NAME shape,
+        // but a symlink so named is not a Cassandra table directory, and resolving one would
+        // measure bytes from outside the corpus.
         if entry_file_type(&entry.path(), ks_dir)?.is_dir() {
             out.push(entry.path());
         }
@@ -332,11 +333,11 @@ fn verify_documented_generations(
 /// The documented-scope branch used to accept `dir.is_dir()`, which FOLLOWS symlinks, while
 /// the fallback branch lstat'ed its table directory and refused symlinks — inconsistent
 /// hardening, in favour of the branch a MANIFEST controls. So a correctly shaped
-/// `sstable_dir` (right keyspace, right `<table>-<32 hex>` name) that happened to be a
-/// symlink redirected ingestion — and therefore the measurement — anywhere on the
-/// filesystem, and exact ingestion canonicalizes through symlinks too, so nothing
-/// downstream noticed. Both branches now go through this one function, so they cannot drift
-/// apart again.
+/// `sstable_dir` (right keyspace, a name `is_table_dir` accepts: `<table>-<32 hex>`)
+/// that happened to be a symlink redirected ingestion — and therefore the measurement —
+/// anywhere on the filesystem, and exact ingestion canonicalizes through symlinks too, so
+/// nothing downstream noticed. Both branches now go through this one function, so they
+/// cannot drift apart again.
 ///
 /// Only components BELOW the corpus root are checked: the root itself is operator-supplied
 /// (`--corpus`), and requiring IT to be symlink-free would reject ordinary layouts like
