@@ -38,6 +38,21 @@
 #[cfg(feature = "arrow")]
 pub mod arrow_convert;
 
+// The CQL → Arrow converter, split by responsibility (epic #1116; issue #3096
+// Phase 0a). `arrow_convert` keeps the public entry points and the top-level
+// column dispatch and re-exports everything the rest of the crate used to reach
+// through it, so no `use` path outside this module changed.
+#[cfg(feature = "arrow")]
+mod arrow_builders_nested;
+#[cfg(feature = "arrow")]
+mod arrow_builders_scalar;
+#[cfg(feature = "arrow")]
+mod arrow_convert_util;
+#[cfg(feature = "arrow")]
+mod arrow_schema;
+#[cfg(feature = "arrow")]
+mod arrow_typed_value;
+
 // Per-column accessor resolution for Arrow conversion (issue #1495, AE1): resolves
 // each schema column once and transposes rows into per-column value slices,
 // killing the per-cell `values.get(name)` string-hash lookup (parser epic J1).
@@ -70,8 +85,15 @@ pub mod arrow_shape_corpus;
 pub mod parquet;
 
 // Re-export the public arrow_convert API at the `export` module level.
+//
+// `rows_to_record_batch_with_schema` (issue #3096) is the caller-supplied-schema
+// entry point, whose `Field`-identity rejection contract is documented and tested
+// on its own terms; `rows_to_record_batch` derives its schema inline and shares the
+// same non-revalidating tail.
 #[cfg(feature = "arrow")]
-pub use arrow_convert::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
+pub use arrow_convert::{
+    build_arrow_schema, rows_to_record_batch, rows_to_record_batch_with_schema, ArrowConvertError,
+};
 
 // Re-export the byte estimator beside the converter it models (issue #2825).
 // Deliberately narrow: the structural charging constants stay PRIVATE to

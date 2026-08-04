@@ -89,7 +89,7 @@ impl From<ArrowConvertError> for DeltaParquetError {
     fn from(e: ArrowConvertError) -> Self {
         match e {
             ArrowConvertError::Arrow(a) => DeltaParquetError::Arrow(a),
-            ArrowConvertError::InvalidValue(s) => DeltaParquetError::InvalidValue(s),
+            other => DeltaParquetError::InvalidValue(other.to_string()),
         }
     }
 }

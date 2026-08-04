@@ -419,6 +419,12 @@ pub(crate) fn spawn_streaming(
     // emitter so the sub-phase samples carry the same span/exemplar association as
     // the top-level phase samples.
     let rpc_span = tracing::Span::current();
+    // Issue #3096: the IPC-framing accumulator lives OUT here, not inside the
+    // blocking closure, because the arrow-flight encoder stage runs on the ASYNC
+    // gRPC task that polls the response stream — a different thread, reached by no
+    // thread-local the merge closure installs. Cloned for the framing wrapper
+    // below; the span is cloned for its own teardown emitter.
+    let framing_span = rpc_span.clone();
 
     // Run the CPU-bound merge off the async runtime; it sends batches as it goes.
     // `error_tx` is a clone kept OUTSIDE the (potentially unwound) merge closure so
@@ -507,7 +513,85 @@ pub(crate) fn spawn_streaming(
         Some(handle.abort_handle()),
         Some(stream_cancelled),
     );
-    (encode_do_get(metered, schema_ref, probe), handle)
+    let encoded = encode_do_get(metered, schema_ref, probe);
+    (time_encoder_framing(encoded, framing_span), handle)
+}
+
+/// Wrap the arrow-flight encoder's output stream so its poll time lands in the
+/// `stream_encode_framing` sub-phase (issue #3096).
+///
+/// # The blind spot this closes
+///
+/// `StreamSubPhase::Encode` (`egress_flush.rs`) times ONLY `flush_buffer` — the
+/// Arrow ARRAY BUILD, on the merge-consumer thread. The arrow-flight encoder stage
+/// built in [`encode_do_get`] runs LATER, on the async gRPC task, and does the IPC
+/// framing, the dictionary hydration, and the re-slicing of any batch larger than
+/// the encoder's own target. None of that was inside ANY sub-phase, so a change
+/// aimed at it could not be attributed from in-process timings at all.
+///
+/// # Cost
+///
+/// Two `Instant::now()` per `poll_next` — and ONLY when a meter is installed. With
+/// metrics off (the default, and the state every `perf`-based measurement runs in)
+/// this function returns the stream UNWRAPPED, so the framing path is byte- and
+/// instruction-identical to before: the cost is one `metrics_active()` branch per
+/// RPC, not per poll.
+fn time_encoder_framing(inner: DoGetStream, rpc_span: tracing::Span) -> DoGetStream {
+    if !cqlite_core::observability::metrics_active() {
+        return inner;
+    }
+    let timings = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
+    Box::pin(FramingTimedStream {
+        // Its OWN emitter, deliberately not the merge closure's: this accumulator
+        // is still being written after that closure has ended (the client may poll
+        // the last frames later), and reusing the merge emitter would either
+        // truncate the framing total or move the merge samples' emission point,
+        // breaking the #2819 roborev-B1 ordering invariant. Only the framing bucket
+        // is ever non-zero here, so this emits exactly one extra sample per RPC.
+        // Written first to MIRROR the load-bearing declaration order below.
+        _emitter: crate::obs::StreamSubPhaseEmitter::new(rpc_span, timings.clone()),
+        inner,
+        timings,
+    })
+}
+
+/// See [`time_encoder_framing`]. Constructed only when a meter is installed.
+///
+/// FIELD ORDER IS LOAD-BEARING: struct fields drop in DECLARATION order, so
+/// `_emitter` is declared FIRST — it flushes the framing sample while `inner` (the
+/// metered/encoded parent stream, whose own `Drop` finalizes the RPC's row/byte
+/// accounting) is still alive. Declared AFTER `inner` the sample would land
+/// OUTSIDE its parent stream's teardown, the ordering the #2819 roborev-B1
+/// invariant forbids. Guarded by `streaming_framing_tests.rs`.
+struct FramingTimedStream {
+    /// Flushes the framing sample when the response stream is dropped — i.e. after
+    /// the LAST poll, so a mid-stream client disconnect still records what it cost.
+    /// Held purely for its `Drop`; underscore-prefixed so the lint knows that is
+    /// deliberate rather than an unread field.
+    _emitter: crate::obs::StreamSubPhaseEmitter,
+    inner: DoGetStream,
+    timings: Arc<cqlite_core::observability::StreamSubPhaseTimings>,
+}
+
+impl Stream for FramingTimedStream {
+    type Item = Result<FlightData, Status>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Every field is `Unpin` (a `Pin<Box<dyn Stream>>`, an `Arc`, and an
+        // emitter holding an `Arc` + a `Span`), so projecting through `get_mut` is
+        // sound and needs no pin-projection macro.
+        let this = self.get_mut();
+        let start = std::time::Instant::now();
+        let polled = this.inner.as_mut().poll_next(cx);
+        this.timings.add_nanos(
+            cqlite_core::observability::StreamSubPhase::EncodeFraming,
+            cqlite_core::observability::stream_subphase::elapsed_nanos(start),
+        );
+        polled
+    }
 }
 
 /// Materialize the (bounded) aggregate output and serve it as a stream, unchanged
@@ -574,6 +658,25 @@ pub(crate) async fn build_aggregate_response(
     );
     let probe = StreamProbe::default();
     let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, probe.clone(), None, None);
+    // DELIBERATE ASYMMETRY, not an omission (issue #3096 review): the encoder
+    // stream is NOT wrapped in `time_encoder_framing` here, so the aggregate route
+    // emits no `stream_encode_framing` sub-phase sample.
+    //
+    // `stream_encode_framing` is a sub-phase OF the `stream` phase, and this route
+    // deliberately records no `stream` phase at all (issue #2162 — it materializes
+    // one row per GROUP BY group under `merge_setup` and never enters a client
+    // stream phase; the `_timer` above is what enforces that). Emitting a
+    // sub-phase whose parent phase is absent would publish a sample no consumer of
+    // `docs/reports/flight-metrics-reference.md` can attribute, and would break
+    // the #2819 ordering invariant that a sub-phase's emission sits inside its
+    // phase.
+    //
+    // The cost of the asymmetry is bounded and known: framing time on the
+    // aggregate route is unattributed. That is acceptable because the route's
+    // output is bounded by GROUP count — one row per group, so a handful of
+    // batches — which is exactly why it is not a framing-throughput surface. If a
+    // `stream` phase is ever introduced for aggregates, wire the framing timer at
+    // the same time.
     Ok(encode_do_get(metered, schema_ref, probe))
 }
 
@@ -596,6 +699,13 @@ fn encode_do_get(
     schema_ref: Arc<ArrowSchema>,
     probe: StreamProbe,
 ) -> DoGetStream {
+    // Issue #3096, lever 4 REVERTED (owner ruling A, deferred to #3281): the
+    // encoder's re-slicing target is arrow-flight's own default again — no
+    // `with_max_flight_data_size`, no wire-side partitioner, no serialized-message
+    // guard. Lever 4 measured ZERO throughput (-0.03%), and the wire-safety
+    // mechanism that was its only remaining justification conflated a TARGET with a
+    // CEILING: a reserve that is safe to over-estimate against a target
+    // false-REJECTS legal input against a ceiling.
     let encoded = FlightDataEncoderBuilder::new()
         .with_schema(schema_ref)
         .build(batch_stream)
@@ -679,3 +789,9 @@ mod tests;
 #[cfg(test)]
 #[path = "egress_budget_tests.rs"]
 mod egress_budget_tests;
+
+// Teardown-ORDER guard for `FramingTimedStream`'s load-bearing field order
+// (issue #3096); its own module so the two files above stay put (epic #1135).
+#[cfg(test)]
+#[path = "streaming_framing_tests.rs"]
+mod streaming_framing_tests;

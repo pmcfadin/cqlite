@@ -1,0 +1,52 @@
+################################################################################
+# ANNOTATION ADDED 2026-08-03 (later the same day). The tool output below is
+# UNCHANGED -- it is the honest record of the session that produced it.
+#
+# !! NO ABSOLUTE IN THIS FILE IS REUSABLE ACROSS SESSIONS. !!
+#
+# The warm bare scan below reads 370,134 rows/s. Hours later, in the same
+# delivery, the same scan on a functionally untouched scan path measured
+# 333,206 rows/s (3 reps, 1.1% spread), and a 30-run interleaved control later
+# that session measured 332,970 rows/s (2.3% spread) -- a ~10% session-to-session
+# drift on one box with nothing changed on the measured path.
+#
+# Reusing 370,134 as a reference point will report a FAKE ~10% regression.
+#
+# THE RULE: same-session interleaved A/B/C with a drift control that is
+# code-identical across arms, or NO COMPARISON. This change's only licensed
+# comparison is docs/reports/ws0-3096-artifacts/abc-interleaved-2026-08-03.md
+# (+ abc-interleaved-runs.json). Read baseline-2026-08-03.md's top annotation.
+#
+# Still good here: the method, the pinning, the corpus identity, the RATIOS and
+# the within-session deltas. Not the absolutes.
+################################################################################
+
+==== ISSUE #3096 SAME-SESSION BASELINE ====
+corpus       : /data/ws0-3096
+corpus sha256: 4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269
+corpus shape : 4000000 rows / 40000 partitions / 693.69 B/row
+pinning      : server 2,10 (verified physical-core siblings), client 4,12,5,13,6,14,7,15
+counters     : perf stat -C 2,10  [CPU-WIDE; no -p anywhere]
+reps         : 3 (median reported, spread shown)
+
+[WARM]
+  bare scan (execute_streaming)           370,134 rows/s  [364,370..372,078, spread 2.1%]       18,814 cycles/row [18,786..19,076, 1.5%]   IPC 1.45   rows=12,000,000 (n=3)
+  flight do_get (bypass)                  249,041 rows/s  [244,633..264,413, spread 7.9%]       23,511 cycles/row [22,769..23,906, 4.8%]   IPC 1.52   rows=36,000,000 (n=3)
+      ratio bare/flight = 1.49x   1.3x target => do_get must reach 284,719 rows/s   [BELOW TARGET]
+      cycles/row delta  = +4,697 (+25.0%)
+
+[COLD]
+  bare scan (execute_streaming)           194,638 rows/s  [194,514..198,392, spread 2.0%]       17,939 cycles/row [17,850..18,021, 1.0%]   IPC 1.46   rows=12,000,000 (n=3)
+  flight do_get (bypass)                  197,832 rows/s  [196,837..197,847, spread 0.5%]       24,412 cycles/row [24,124..24,948, 3.4%]   IPC 1.48   rows=12,000,000 (n=3)
+      ratio bare/flight = 0.98x   1.3x target => do_get must reach 149,721 rows/s   [PASS]
+      cycles/row delta  = +6,472 (+36.1%)
+
+NOTES
+  * warm and cold are SEPARATE claims above; nothing here is blended.
+  * every figure is rows/s AND cycles/row; no CPU-share is reported (a share shift with unmoved rows/s is a FAIL, spec R1).
+  * the bare scan's cycles are SETUP-SUBTRACTED (a separately measured --setup-only perf window); the Flight arm's setup is outside its window.
+  * `cycles` is summed over BOTH SMT siblings of the pinned physical core, so cycles/row is a per-physical-core figure counted on two hardware threads.
+    Both arms are counted identically, so the ratio and the arm-to-arm delta are unaffected.
+  * the corpus is CQLite-written + CQLite-read: a PERFORMANCE FIXTURE ONLY (#3042), never a correctness oracle.
+  * the #3058/#3100 absolutes (240,100 / 312,155 rows/s) were corpus- and machine-bound and are NOT reproduced here.
+

@@ -112,7 +112,7 @@ impl From<ArrowConvertError> for ParquetExportError {
     fn from(e: ArrowConvertError) -> Self {
         match e {
             ArrowConvertError::Arrow(a) => ParquetExportError::Arrow(a),
-            ArrowConvertError::InvalidValue(s) => ParquetExportError::InvalidValue(s),
+            other => ParquetExportError::InvalidValue(other.to_string()),
         }
     }
 }

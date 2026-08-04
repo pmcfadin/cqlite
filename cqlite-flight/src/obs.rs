@@ -41,7 +41,7 @@ pub use crate::obs_abort::{record_do_get_abort, AbortContext, AbortReason};
 // keep the stable `crate::obs::{...}` path.
 pub use crate::obs_subphase::{
     StreamSubPhaseEmitter, PHASE_STREAM_COLD_FAULT, PHASE_STREAM_DECOMPRESS, PHASE_STREAM_ENCODE,
-    PHASE_STREAM_GRPC_WRITE, PHASE_STREAM_MERGE,
+    PHASE_STREAM_ENCODE_FRAMING, PHASE_STREAM_GRPC_WRITE, PHASE_STREAM_MERGE,
 };
 
 /// Bounded `cqlite.rpc.status` value for a successful RPC.

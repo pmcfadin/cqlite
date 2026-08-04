@@ -14,7 +14,7 @@
 //! `producer_stream.rs` are already at/over the campsite source threshold
 //! (epic #1116).
 
-use cqlite_core::export::build_arrow_schema;
+use cqlite_core::export::{build_arrow_schema, rows_to_record_batch};
 use cqlite_core::query::QueryRow;
 
 use crate::batch_bytes::{worst_case_batch_capacity_bytes, BatchByteCap};
@@ -30,6 +30,31 @@ impl MergeProducer {
     pub(crate) fn egress_array_nodes(&self) -> Result<usize, ProducerError> {
         let schema = build_arrow_schema(self.output_columns())?;
         Ok(count_arrow_array_nodes(&schema))
+    }
+
+    /// Convert `buffer`'s rows into an Arrow batch and clear it.
+    ///
+    /// This is the `do_get` row route's ONLY batch-materialization point — all six
+    /// flush sites reach it through [`Self::flush_credited`].
+    ///
+    /// The schema is derived from `self.columns` per batch by
+    /// `rows_to_record_batch`, which builds it and hands it straight to its private
+    /// trusted tail, so it is built once and never revalidated. Hoisting that build
+    /// to once per merge was measured twice on the WS0 corpus and delivered nothing
+    /// (issue #3096: +0.30%, 95% CI covering zero, 4.5x below this box's ~1.4%
+    /// between-binary code-layout noise floor; the removed per-batch work is
+    /// 1.53 cycles/row of 23,940), so it is not done.
+    ///
+    /// Lives here rather than in `producer.rs` (~3.2k lines, far over the campsite
+    /// source threshold, epic #1116) beside its only caller,
+    /// [`Self::flush_credited`].
+    fn flush_buffer(
+        &self,
+        buffer: &mut Vec<QueryRow>,
+    ) -> Result<arrow::record_batch::RecordBatch, ProducerError> {
+        let batch = rows_to_record_batch(&self.columns, buffer)?;
+        buffer.clear();
+        Ok(batch)
     }
 
     /// Re-derive the payload estimate of exactly the rows in `buffer`, the way

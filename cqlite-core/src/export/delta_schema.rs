@@ -54,7 +54,7 @@
 use arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema};
 use thiserror::Error;
 
-use crate::export::arrow_convert::cql_type_to_arrow_data_type;
+use crate::export::arrow_schema::cql_type_to_arrow_data_type;
 use crate::schema::{CqlType, TableSchema};
 
 /// Name of the hardcoded boolean sub-field appended to the range-bound structs

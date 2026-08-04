@@ -3,13 +3,15 @@
 //!
 //! Split out of `arrow_convert` (epic #1116 file-size split) so the bounded,
 //! fail-closed rescale logic — the fix for the issue #1755 export hang — lives in
-//! one small, focused module. `arrow_convert` re-imports [`rescale_decimal`]; the
-//! two call sites (the batch and streaming `Decimal128` array builders) are
-//! unchanged.
+//! one small, focused module. Since the #3096 builder split, [`rescale_decimal`]
+//! is imported directly by its two call sites — `arrow_builders_scalar` (the
+//! batch/streaming `Decimal128` array builder) and `arrow_typed_value` (the
+//! typed-value path) — and `arrow_convert` no longer re-imports it. The rescale
+//! behaviour itself is unchanged.
 
-use super::arrow_convert::{
-    bigint_to_i128, ArrowConvertError, DECIMAL_FIXED_SCALE, DECIMAL_MAX_PRECISION,
-};
+use super::arrow_convert::ArrowConvertError;
+use super::arrow_convert_util::bigint_to_i128;
+use super::arrow_schema::{DECIMAL_FIXED_SCALE, DECIMAL_MAX_PRECISION};
 use num_bigint::BigInt;
 use std::sync::LazyLock;
 

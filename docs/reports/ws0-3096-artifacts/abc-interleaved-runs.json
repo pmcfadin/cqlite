@@ -1,0 +1,1914 @@
+{
+ "schema": "cqlite.perf.abc-interleaved/v1",
+ "issue": "#3096",
+ "recorded_utc": "2026-08-03",
+ "what": "Interleaved A/B/C measurement of Flight do_get (bypass arm) across three release binaries, with a byte-identical bare-scan drift control in every run. THE ONLY comparison this session licenses: no absolute here is reusable cross-session.",
+ "design": {
+  "arms": {
+   "BASE": {
+    "commit": "f4f8ce9",
+    "description": "pre-lever tip of this branch"
+   },
+   "L4": {
+    "commit": "aeadaa2",
+    "description": "BASE + lever 4 (state the Flight encoder's re-slicing target)"
+   },
+   "L46": {
+    "commit": "af2d888",
+    "description": "BASE + lever 4 + lever 6 (build the egress Arrow schema once per merge)"
+   }
+  },
+  "binaries": "three separately built --release cqlite-flight binaries, verified distinct by md5 at run time and swapped in per run; the md5 digests themselves were NOT captured into the run artifacts and the staged copies no longer exist, so they are NOT recoverable and are NOT restated here (rig gap \u2014 record the binary digest in results.json)",
+  "reps": "1 rep per arm per round, 10 rounds per arm, 30 runs total",
+  "rotation": "arm order rotated per round with period 3 (BASE/L4/L46 -> L4/L46/BASE -> L46/BASE/L4), so no arm holds a fixed position in the round",
+  "sessions": {
+   "ab3": "rounds 1-5, 06:53-07:20 UTC",
+   "ab3b": "rounds 6-10, 07:22-07:49 UTC",
+   "continuity": "one continuous session, nothing else running on the box"
+  },
+  "drift_control": "the bare-scan arm (execute_streaming) is CODE-IDENTICAL in all three arms - neither lever touches the scan path (lever 4 is cqlite-flight only; lever 6's cqlite-core half adds a schema-reuse entry point in export/arrow_convert.rs that the bare scan never calls) - so its 30 readings are a within-session drift control, not a measurement of the change. NOT literally byte-identical: ws0-scan-bench links cqlite-core, so the L46 arm's copy differs in bytes. The empirical check is per_arm_bare_scan_control_median_rows_per_sec below, which agrees to within 0.25%.",
+  "corpus": {
+   "path": "/data/ws0-3096",
+   "rows": 4000000,
+   "partitions": 40000,
+   "data_db_sha256": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+   "bytes_per_row": 693.6901055,
+   "note": "CQLite-written + CQLite-read: PERFORMANCE FIXTURE ONLY (#3042), never a correctness oracle"
+  },
+  "pinning": {
+   "server_cpus": "2,10",
+   "client_cpus": "4,12,5,13,6,14,7,15",
+   "counter_mode": "perf stat -C 2,10 (CPU-WIDE, sibling-aggregate; never -p)",
+   "verified": "thread_siblings_list, fail-closed"
+  }
+ },
+ "runs": [
+  {
+   "round": 1,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3/BASE-1",
+   "completed_utc": "2026-08-03T06:55:34Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 211967.47401412894,
+    "cycles_per_row": 24413.68982375,
+    "ipc": 1.4973902279246478,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.612459321,
+    "cycles": 292964277885
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 335346.39668168157,
+    "cycles_per_row": 18577.00477925,
+    "ipc": 1.4747992306112816,
+    "rows": 4000000,
+    "secs": 11.927964754,
+    "cycles_scan": 74308019117,
+    "cycles_setup_subtracted": 11921598
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 1,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3/L4-1",
+   "completed_utc": "2026-08-03T06:57:19Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 220380.12078545176,
+    "cycles_per_row": 23716.824262083333,
+    "ipc": 1.5126158195613348,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.45137228,
+    "cycles": 284601891145
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 334838.63350346644,
+    "cycles_per_row": 18590.21612825,
+    "ipc": 1.475741980902002,
+    "rows": 4000000,
+    "secs": 11.946052814,
+    "cycles_scan": 74360864513,
+    "cycles_setup_subtracted": 10147313
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 1,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3/L46-1",
+   "completed_utc": "2026-08-03T06:59:04Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 220947.7649210753,
+    "cycles_per_row": 23536.326387166668,
+    "ipc": 1.519382128749798,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.311479477,
+    "cycles": 282435916646
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 331162.3574624527,
+    "cycles_per_row": 18817.066582,
+    "ipc": 1.4724470221625323,
+    "rows": 4000000,
+    "secs": 12.078667487,
+    "cycles_scan": 75268266328,
+    "cycles_setup_subtracted": 11067915
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 2,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3/L4-2",
+   "completed_utc": "2026-08-03T07:00:51Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 217031.99430495937,
+    "cycles_per_row": 23879.8950175,
+    "ipc": 1.4983002449143827,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.291387053,
+    "cycles": 286558740210
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 334534.1116068162,
+    "cycles_per_row": 18637.66521125,
+    "ipc": 1.4686472701649196,
+    "rows": 4000000,
+    "secs": 11.956927145,
+    "cycles_scan": 74550660845,
+    "cycles_setup_subtracted": 10542991
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 2,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3/L46-2",
+   "completed_utc": "2026-08-03T07:02:37Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 215824.05963781523,
+    "cycles_per_row": 23862.702203083332,
+    "ipc": 1.5043362119816825,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.600844596,
+    "cycles": 286352426437
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 334759.51986072084,
+    "cycles_per_row": 18575.773188,
+    "ipc": 1.4725994512126792,
+    "rows": 4000000,
+    "secs": 11.948876022,
+    "cycles_scan": 74303092752,
+    "cycles_setup_subtracted": 11204891
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 2,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3/BASE-2",
+   "completed_utc": "2026-08-03T07:04:25Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 214659.40267707975,
+    "cycles_per_row": 24085.4612845,
+    "ipc": 1.484915090427028,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.902512773,
+    "cycles": 289025535414
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 333588.8350544997,
+    "cycles_per_row": 18563.10810825,
+    "ipc": 1.4799646763782133,
+    "rows": 4000000,
+    "secs": 11.990808983,
+    "cycles_scan": 74252432433,
+    "cycles_setup_subtracted": 10325336
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 3,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3/L46-3",
+   "completed_utc": "2026-08-03T07:06:12Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 218458.6491806587,
+    "cycles_per_row": 23758.15448825,
+    "ipc": 1.5147679327694352,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.93030395,
+    "cycles": 285097853859
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 328578.5782558792,
+    "cycles_per_row": 18892.6386645,
+    "ipc": 1.4699516298341788,
+    "rows": 4000000,
+    "secs": 12.173648146,
+    "cycles_scan": 75570554658,
+    "cycles_setup_subtracted": 11484257
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "L46",
+    "BASE",
+    "L4"
+   ]
+  },
+  {
+   "round": 3,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3/BASE-3",
+   "completed_utc": "2026-08-03T07:07:59Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 216579.17715786886,
+    "cycles_per_row": 24097.5771905,
+    "ipc": 1.5028189480750005,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.406988601,
+    "cycles": 289170926286
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 332752.43689481495,
+    "cycles_per_row": 18688.2450745,
+    "ipc": 1.4746870264642729,
+    "rows": 4000000,
+    "secs": 12.020948779,
+    "cycles_scan": 74752980298,
+    "cycles_setup_subtracted": 10621375
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "L46",
+    "BASE",
+    "L4"
+   ]
+  },
+  {
+   "round": 3,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3/L4-3",
+   "completed_utc": "2026-08-03T07:09:43Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 227627.096321479,
+    "cycles_per_row": 23121.60911116667,
+    "ipc": 1.5362674190538212,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 52.717801149,
+    "cycles": 277459309334
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 334026.2719479102,
+    "cycles_per_row": 18667.62988575,
+    "ipc": 1.4691256296111292,
+    "rows": 4000000,
+    "secs": 11.97510596,
+    "cycles_scan": 74670519543,
+    "cycles_setup_subtracted": 11474069
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "L46",
+    "BASE",
+    "L4"
+   ]
+  },
+  {
+   "round": 4,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3/BASE-4",
+   "completed_utc": "2026-08-03T07:11:30Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 213511.8268444259,
+    "cycles_per_row": 24239.008631416666,
+    "ipc": 1.5032771821687476,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.202975626,
+    "cycles": 290868103577
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 332728.7622332515,
+    "cycles_per_row": 18736.700726,
+    "ipc": 1.47301431379814,
+    "rows": 4000000,
+    "secs": 12.021804106,
+    "cycles_scan": 74946802904,
+    "cycles_setup_subtracted": 11004015
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 4,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3/L4-4",
+   "completed_utc": "2026-08-03T07:13:16Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 215317.6346348706,
+    "cycles_per_row": 24167.541016583335,
+    "ipc": 1.4817622727426334,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.731617247,
+    "cycles": 290010492199
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 332679.28726845054,
+    "cycles_per_row": 18716.44622475,
+    "ipc": 1.4717519772837078,
+    "rows": 4000000,
+    "secs": 12.023591949,
+    "cycles_scan": 74865784899,
+    "cycles_setup_subtracted": 12229732
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 4,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3/L46-4",
+   "completed_utc": "2026-08-03T07:15:02Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 222831.0436673777,
+    "cycles_per_row": 23408.03227525,
+    "ipc": 1.5232844809692936,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 53.852460602,
+    "cycles": 280896387303
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 332478.28402419854,
+    "cycles_per_row": 18711.765888,
+    "ipc": 1.4771016170085378,
+    "rows": 4000000,
+    "secs": 12.030860938,
+    "cycles_scan": 74847063552,
+    "cycles_setup_subtracted": 10497333
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 5,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3/L4-5",
+   "completed_utc": "2026-08-03T07:16:43Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 232693.8805179782,
+    "cycles_per_row": 22883.128296916668,
+    "ipc": 1.5293105741635877,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 51.56989936,
+    "cycles": 274597539563
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 333635.5836786405,
+    "cycles_per_row": 18672.84917025,
+    "ipc": 1.4739721947655784,
+    "rows": 4000000,
+    "secs": 11.989128845,
+    "cycles_scan": 74691396681,
+    "cycles_setup_subtracted": 10531214
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 5,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3/L46-5",
+   "completed_utc": "2026-08-03T07:18:31Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 213852.5173160414,
+    "cycles_per_row": 24116.726967583334,
+    "ipc": 1.5005842609492825,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.113438133,
+    "cycles": 289400723611
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 335557.2861132163,
+    "cycles_per_row": 18572.5583055,
+    "ipc": 1.4710292179515916,
+    "rows": 4000000,
+    "secs": 11.920468324,
+    "cycles_scan": 74290233222,
+    "cycles_setup_subtracted": 10364187
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 5,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3/BASE-5",
+   "completed_utc": "2026-08-03T07:20:20Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 211692.73870185023,
+    "cycles_per_row": 24504.47127125,
+    "ipc": 1.4780103659861237,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.685931098,
+    "cycles": 294053655255
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 333052.283777636,
+    "cycles_per_row": 18703.95699375,
+    "ipc": 1.4727527309571287,
+    "rows": 4000000,
+    "secs": 12.010126322,
+    "cycles_scan": 74815827975,
+    "cycles_setup_subtracted": 10663509
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 6,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3b/BASE-1",
+   "completed_utc": "2026-08-03T07:24:08Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 213217.9157539275,
+    "cycles_per_row": 24336.797226916668,
+    "ipc": 1.4932525297661854,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.280448843,
+    "cycles": 292041566723
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 332044.9215605301,
+    "cycles_per_row": 18784.84322575,
+    "ipc": 1.470810237978278,
+    "rows": 4000000,
+    "secs": 12.0465628,
+    "cycles_scan": 75139372903,
+    "cycles_setup_subtracted": 11335303
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 6,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L4-1",
+   "completed_utc": "2026-08-03T07:25:54Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 219543.99769651733,
+    "cycles_per_row": 23814.438759583332,
+    "ipc": 1.5012140807481078,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.658747795,
+    "cycles": 285773265115
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 335453.99623127026,
+    "cycles_per_row": 18566.0844,
+    "ipc": 1.4753902339391498,
+    "rows": 4000000,
+    "secs": 11.924138764,
+    "cycles_scan": 74264337600,
+    "cycles_setup_subtracted": 10405307
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 6,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L46-1",
+   "completed_utc": "2026-08-03T07:27:43Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 210646.8900545587,
+    "cycles_per_row": 24440.27749575,
+    "ipc": 1.4695055328986641,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.967373204,
+    "cycles": 293283329949
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 333203.0270424425,
+    "cycles_per_row": 18704.80724825,
+    "ipc": 1.4736071145870169,
+    "rows": 4000000,
+    "secs": 12.004692861,
+    "cycles_scan": 74819228993,
+    "cycles_setup_subtracted": 12823946
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 7,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L4-2",
+   "completed_utc": "2026-08-03T07:29:31Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 211001.00400041547,
+    "cycles_per_row": 24565.82132575,
+    "ipc": 1.4640805537970456,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.871767302,
+    "cycles": 294789855909
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 331531.5242306698,
+    "cycles_per_row": 18764.91689925,
+    "ipc": 1.4739696592051243,
+    "rows": 4000000,
+    "secs": 12.065217657,
+    "cycles_scan": 75059667597,
+    "cycles_setup_subtracted": 10129495
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 7,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L46-2",
+   "completed_utc": "2026-08-03T07:31:18Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 214822.28256420177,
+    "cycles_per_row": 24008.8319235,
+    "ipc": 1.4923414108294586,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.860127063,
+    "cycles": 288105983082
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 332490.4740546132,
+    "cycles_per_row": 18752.67521425,
+    "ipc": 1.4743924142481766,
+    "rows": 4000000,
+    "secs": 12.030419853,
+    "cycles_scan": 75010700857,
+    "cycles_setup_subtracted": 10111844
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 7,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3b/BASE-2",
+   "completed_utc": "2026-08-03T07:33:08Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 207888.6268793357,
+    "cycles_per_row": 24817.93093375,
+    "ipc": 1.4718960172961146,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 57.723215455,
+    "cycles": 297815171205
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 330400.2301254784,
+    "cycles_per_row": 18842.768098,
+    "ipc": 1.468939183897714,
+    "rows": 4000000,
+    "secs": 12.106529098,
+    "cycles_scan": 75371072392,
+    "cycles_setup_subtracted": 10999166
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 8,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L46-3",
+   "completed_utc": "2026-08-03T07:34:54Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 217386.9380248453,
+    "cycles_per_row": 23817.585710666666,
+    "ipc": 1.4972845141840845,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.201108719,
+    "cycles": 285811028528
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 334381.27153182577,
+    "cycles_per_row": 18588.1412885,
+    "ipc": 1.4730580080747593,
+    "rows": 4000000,
+    "secs": 11.962392456,
+    "cycles_scan": 74352565154,
+    "cycles_setup_subtracted": 10294173
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "L46",
+    "BASE",
+    "L4"
+   ]
+  },
+  {
+   "round": 8,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3b/BASE-3",
+   "completed_utc": "2026-08-03T07:36:41Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 218338.334266834,
+    "cycles_per_row": 23899.7313145,
+    "ipc": 1.5170897865457953,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.960573187,
+    "cycles": 286796775774
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 328770.60858038906,
+    "cycles_per_row": 18957.60134175,
+    "ipc": 1.4720467115368678,
+    "rows": 4000000,
+    "secs": 12.166537688,
+    "cycles_scan": 75830405367,
+    "cycles_setup_subtracted": 10455299
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "L46",
+    "BASE",
+    "L4"
+   ]
+  },
+  {
+   "round": 8,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L4-3",
+   "completed_utc": "2026-08-03T07:38:29Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 210940.48031047944,
+    "cycles_per_row": 24551.8998505,
+    "ipc": 1.4697416923086624,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.888085124,
+    "cycles": 294622798206
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 330415.9533183108,
+    "cycles_per_row": 18826.5226545,
+    "ipc": 1.4748246810790249,
+    "rows": 4000000,
+    "secs": 12.105952996,
+    "cycles_scan": 75306090618,
+    "cycles_setup_subtracted": 10536698
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "L46",
+    "BASE",
+    "L4"
+   ]
+  },
+  {
+   "round": 9,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3b/BASE-4",
+   "completed_utc": "2026-08-03T07:40:18Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 213430.13587480603,
+    "cycles_per_row": 24360.0139525,
+    "ipc": 1.4870093382116396,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 56.224487469,
+    "cycles": 292320167430
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 336387.3076403135,
+    "cycles_per_row": 18507.47809325,
+    "ipc": 1.4688785464463108,
+    "rows": 4000000,
+    "secs": 11.89105507,
+    "cycles_scan": 74029912373,
+    "cycles_setup_subtracted": 10825364
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 9,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L4-4",
+   "completed_utc": "2026-08-03T07:42:04Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 216472.28629178635,
+    "cycles_per_row": 24025.103319916667,
+    "ipc": 1.5004730839262994,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 55.434347766,
+    "cycles": 288301239839
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 333477.94159633404,
+    "cycles_per_row": 18668.26996025,
+    "ipc": 1.477976537501845,
+    "rows": 4000000,
+    "secs": 11.99479636,
+    "cycles_scan": 74673079841,
+    "cycles_setup_subtracted": 11436764
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 9,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L46-4",
+   "completed_utc": "2026-08-03T07:43:50Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 220805.66994744376,
+    "cycles_per_row": 23552.502938833335,
+    "ipc": 1.521960184862018,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.346430519,
+    "cycles": 282630035266
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 329846.2035029267,
+    "cycles_per_row": 18903.407799,
+    "ipc": 1.4693612827296336,
+    "rows": 4000000,
+    "secs": 12.126863846,
+    "cycles_scan": 75613631196,
+    "cycles_setup_subtracted": 11296414
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "BASE",
+    "L4",
+    "L46"
+   ]
+  },
+  {
+   "round": 10,
+   "arm": "L4",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L4-5",
+   "completed_utc": "2026-08-03T07:45:35Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 223955.4973181896,
+    "cycles_per_row": 23477.193810083332,
+    "ipc": 1.5194828370101832,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 53.582073866,
+    "cycles": 281726325721
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 332888.6867573248,
+    "cycles_per_row": 18729.0142895,
+    "ipc": 1.4766339220401288,
+    "rows": 4000000,
+    "secs": 12.016028658,
+    "cycles_scan": 74916057158,
+    "cycles_setup_subtracted": 11016218
+   },
+   "execution_order_in_round": 1,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 10,
+   "arm": "L46",
+   "raw_dir": "target/perf-ws0-3096/ab3b/L46-5",
+   "completed_utc": "2026-08-03T07:47:20Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 218195.93485975658,
+    "cycles_per_row": 23802.54405941667,
+    "ipc": 1.5044456379128013,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.996441651,
+    "cycles": 285630528713
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 336039.816666979,
+    "cycles_per_row": 18544.13110375,
+    "ipc": 1.4741491615086748,
+    "rows": 4000000,
+    "secs": 11.903351334,
+    "cycles_scan": 74176524415,
+    "cycles_setup_subtracted": 10409560
+   },
+   "execution_order_in_round": 2,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  },
+  {
+   "round": 10,
+   "arm": "BASE",
+   "raw_dir": "target/perf-ws0-3096/ab3b/BASE-5",
+   "completed_utc": "2026-08-03T07:49:05Z",
+   "flight_do_get_bypass": {
+    "rows_per_sec": 219864.6646032892,
+    "cycles_per_row": 23764.961099166667,
+    "ipc": 1.5290056977072366,
+    "rows": 12000000,
+    "requests_ok": 3,
+    "duration_s": 54.57902943,
+    "cycles": 285179533190
+   },
+   "bare_scan_drift_control": {
+    "rows_per_sec": 331744.3758587238,
+    "cycles_per_row": 18823.6185185,
+    "ipc": 1.4724005202432566,
+    "rows": 4000000,
+    "secs": 12.057476452,
+    "cycles_scan": 75294474074,
+    "cycles_setup_subtracted": 12956338
+   },
+   "execution_order_in_round": 3,
+   "round_arm_order": [
+    "L4",
+    "L46",
+    "BASE"
+   ]
+  }
+ ],
+ "per_arm_flight_do_get": {
+  "BASE": {
+   "flight_rows_per_sec": {
+    "median": 213470.98135961598,
+    "min": 207888.6268793357,
+    "max": 219864.6646032892,
+    "n": 10,
+    "spread_pct_of_median": 5.610147874749542
+   },
+   "flight_cycles_per_row": {
+    "median": 24287.902929166667,
+    "min": 23764.961099166667,
+    "max": 24817.93093375,
+    "n": 10,
+    "spread_pct_of_median": 4.33536743643212
+   },
+   "flight_ipc": {
+    "median": 1.4953213788454165,
+    "min": 1.4718960172961146,
+    "max": 1.5290056977072366,
+    "n": 10,
+    "spread_pct_of_median": 3.819224497092264
+   }
+  },
+  "L4": {
+   "flight_rows_per_sec": {
+    "median": 218287.99600073835,
+    "min": 210940.48031047944,
+    "max": 232693.8805179782,
+    "n": 10,
+    "spread_pct_of_median": 9.96545875450942
+   },
+   "flight_cycles_per_row": {
+    "median": 23847.166888541666,
+    "min": 22883.128296916668,
+    "max": 24565.82132575,
+    "n": 10,
+    "spread_pct_of_median": 7.056154874488882
+   },
+   "flight_ipc": {
+    "median": 1.5008435823372035,
+    "min": 1.4640805537970456,
+    "max": 1.5362674190538212,
+    "n": 10,
+    "spread_pct_of_median": 4.809752735482397
+   }
+  },
+  "L46": {
+   "flight_rows_per_sec": {
+    "median": 217791.43644230094,
+    "min": 210646.8900545587,
+    "max": 222831.0436673777,
+    "n": 10,
+    "spread_pct_of_median": 5.594413541621012
+   },
+   "flight_cycles_per_row": {
+    "median": 23810.06488504167,
+    "min": 23408.03227525,
+    "max": 24440.27749575,
+    "n": 10,
+    "spread_pct_of_median": 4.335331404949232
+   },
+   "flight_ipc": {
+    "median": 1.5043909249472418,
+    "min": 1.4695055328986641,
+    "max": 1.5232844809692936,
+    "n": 10,
+    "spread_pct_of_median": 3.5747987560158565
+   }
+  }
+ },
+ "bare_scan_drift_control_all_30_runs": {
+  "rows_per_sec": {
+   "median": 332970.48526748037,
+   "min": 328578.5782558792,
+   "max": 336387.3076403135,
+   "n": 30,
+   "spread_pct_of_median": 2.3451716383094494
+  },
+  "cycles_per_row": {
+   "median": 18704.382121,
+   "min": 18507.47809325,
+   "max": 18957.60134175,
+   "n": 30,
+   "spread_pct_of_median": 2.406512257866206
+  },
+  "ipc": {
+   "median": 1.4730361609364495,
+   "min": 1.4686472701649196,
+   "max": 1.4799646763782133,
+   "n": 30,
+   "spread_pct_of_median": 0.768304710598476
+  }
+ },
+ "paired_within_round": {
+  "lever_4_L4_minus_BASE": {
+   "pairs": [
+    {
+     "round": 1,
+     "delta_rows_per_sec": 8412.64677132282,
+     "delta_cycles_per_row": -696.8655616666656
+    },
+    {
+     "round": 2,
+     "delta_rows_per_sec": 2372.5916278796212,
+     "delta_cycles_per_row": -205.56626700000197
+    },
+    {
+     "round": 3,
+     "delta_rows_per_sec": 11047.919163610146,
+     "delta_cycles_per_row": -975.9680793333318
+    },
+    {
+     "round": 4,
+     "delta_rows_per_sec": 1805.8077904446982,
+     "delta_cycles_per_row": -71.46761483333103
+    },
+    {
+     "round": 5,
+     "delta_rows_per_sec": 21001.141816127958,
+     "delta_cycles_per_row": -1621.3429743333327
+    },
+    {
+     "round": 6,
+     "delta_rows_per_sec": 6326.081942589837,
+     "delta_cycles_per_row": -522.3584673333353
+    },
+    {
+     "round": 7,
+     "delta_rows_per_sec": 3112.3771210797713,
+     "delta_cycles_per_row": -252.10960800000248
+    },
+    {
+     "round": 8,
+     "delta_rows_per_sec": -7397.853956354549,
+     "delta_cycles_per_row": 652.168536000001
+    },
+    {
+     "round": 9,
+     "delta_rows_per_sec": 3042.150416980323,
+     "delta_cycles_per_row": -334.9106325833345
+    },
+    {
+     "round": 10,
+     "delta_rows_per_sec": 4090.8327149004035,
+     "delta_cycles_per_row": -287.7672890833346
+    }
+   ],
+   "n": 10,
+   "positive": 9,
+   "median_delta_rows_per_sec": 3601.6049179900874,
+   "median_delta_cycles_per_row": -311.33896083333457
+  },
+  "lever_6_L46_minus_L4": {
+   "pairs": [
+    {
+     "round": 1,
+     "delta_rows_per_sec": 567.64413562353,
+     "delta_cycles_per_row": -180.49787491666575
+    },
+    {
+     "round": 2,
+     "delta_rows_per_sec": -1207.9346671441454,
+     "delta_cycles_per_row": -17.192814416666806
+    },
+    {
+     "round": 3,
+     "delta_rows_per_sec": -9168.447140820324,
+     "delta_cycles_per_row": 636.5453770833301
+    },
+    {
+     "round": 4,
+     "delta_rows_per_sec": 7513.409032507101,
+     "delta_cycles_per_row": -759.5087413333349
+    },
+    {
+     "round": 5,
+     "delta_rows_per_sec": -18841.363201936794,
+     "delta_cycles_per_row": 1233.5986706666663
+    },
+    {
+     "round": 6,
+     "delta_rows_per_sec": -8897.107641958632,
+     "delta_cycles_per_row": 625.8387361666682
+    },
+    {
+     "round": 7,
+     "delta_rows_per_sec": 3821.278563786298,
+     "delta_cycles_per_row": -556.9894022499975
+    },
+    {
+     "round": 8,
+     "delta_rows_per_sec": 6446.4577143658535,
+     "delta_cycles_per_row": -734.3141398333355
+    },
+    {
+     "round": 9,
+     "delta_rows_per_sec": 4333.38365565741,
+     "delta_cycles_per_row": -472.60038108333174
+    },
+    {
+     "round": 10,
+     "delta_rows_per_sec": -5759.562458433007,
+     "delta_cycles_per_row": 325.35024933333625
+    }
+   ],
+   "n": 10,
+   "positive": 5,
+   "median_delta_rows_per_sec": -320.14526576030767,
+   "median_delta_cycles_per_row": -98.84534466666628
+  },
+  "cumulative_L46_minus_BASE": {
+   "pairs": [
+    {
+     "round": 1,
+     "delta_rows_per_sec": 8980.29090694635,
+     "delta_cycles_per_row": -877.3634365833313
+    },
+    {
+     "round": 2,
+     "delta_rows_per_sec": 1164.6569607354759,
+     "delta_cycles_per_row": -222.75908141666878
+    },
+    {
+     "round": 3,
+     "delta_rows_per_sec": 1879.4720227898215,
+     "delta_cycles_per_row": -339.42270225000175
+    },
+    {
+     "round": 4,
+     "delta_rows_per_sec": 9319.2168229518,
+     "delta_cycles_per_row": -830.9763561666659
+    },
+    {
+     "round": 5,
+     "delta_rows_per_sec": 2159.778614191164,
+     "delta_cycles_per_row": -387.7443036666664
+    },
+    {
+     "round": 6,
+     "delta_rows_per_sec": -2571.0256993687944,
+     "delta_cycles_per_row": 103.48026883333296
+    },
+    {
+     "round": 7,
+     "delta_rows_per_sec": 6933.655684866069,
+     "delta_cycles_per_row": -809.09901025
+    },
+    {
+     "round": 8,
+     "delta_rows_per_sec": -951.3962419886957,
+     "delta_cycles_per_row": -82.14560383333446
+    },
+    {
+     "round": 9,
+     "delta_rows_per_sec": 7375.534072637733,
+     "delta_cycles_per_row": -807.5110136666663
+    },
+    {
+     "round": 10,
+     "delta_rows_per_sec": -1668.7297435326036,
+     "delta_cycles_per_row": 37.58296025000163
+    }
+   ],
+   "n": 10,
+   "positive": 7,
+   "median_delta_rows_per_sec": 2019.6253184904926,
+   "median_delta_cycles_per_row": -363.58350295833407
+  }
+ },
+ "conclusion": {
+  "cumulative_median_rows_per_sec": {
+   "base": 213470.98135961598,
+   "l4_l6": 217791.43644230094,
+   "delta": 4320.455082684959,
+   "pct": 2.023907444078632
+  },
+  "ratio_bare_over_flight": {
+   "base": 1.5597927322334926,
+   "l4_l6": 1.528850218845467
+  },
+  "ac1_target_rows_per_sec": 256131.14251344642,
+  "shortfall_rows_per_sec": -38339.70607114548,
+  "shortfall_pct": -14.968779545865928,
+  "ac1": "UNMET - re-anchored to issue #3248 (attribute inside the unattributed encode region before any array-build lever is funded); lever 1 routes to #3231",
+  "spec_r5": "a correctly measured, correctly reported negative result IS a satisfying outcome of this change (openspec/changes/arrow-encode-doget/specs/arrow-encode-doget/spec.md)"
+ },
+ "discarded_attempt": {
+  "id": "ab-lever4b",
+  "verdict": "DISCARDED IN FULL - no number from it is used anywhere",
+  "when_utc": "2026-08-03 06:32-06:38",
+  "design": "first interleaved attempt at the lever-4 comparison: two arms (A=BASE, B=L4), 1 rep per arm per round, alternating",
+  "why": "a concurrent cargo release build landed on the pinned server cores mid-attempt. The signature is in the counters: flight IPC 1.516 (A-1) -> 1.442 (B-1) -> 1.458 (A-2) with cycles/row 24,088 -> 26,068 -> 25,914, i.e. cycles inflated ~8% while rows/s fell ~4% - foreign cycles being counted inside a CPU-wide (-C 2,10) window. The attempt was aborted mid-round-2 (B-2 has no results.json) and re-run from scratch as ab3/ab3b after the build finished.",
+  "supporting_evidence": "target/release/deps holds cqlite_core/cqlite_flight/flight_loadgen release artifacts stamped 06:38:23-06:40:30 UTC, i.e. a rustc/cargo release build resident on the box across the tail of this attempt (rustc writes its outputs at the END of compilation, so a 06:38 artifact was being produced during the 06:32-06:38 runs). The attribution to cargo is the operator's contemporaneous call plus these timestamps; it is not an independently instrumented per-CPU trace.",
+  "lesson": "the bare-scan drift control did NOT move during the contamination (335,679 / 332,270 / 335,540 rows/s - all normal): its ~12 s window escaped the interference that hit the ~57 s Flight window. So the byte-identical drift control is NECESSARY BUT NOT SUFFICIENT; what flagged this was the IPC + cycles/row signature on the measured arm. Watch both.",
+  "runs": [
+   {
+    "run": "A-1",
+    "arm": "BASE",
+    "raw_dir": "target/perf-ws0-3096/ab-lever4b/A-1",
+    "completed_utc": "2026-08-03T06:32:40Z",
+    "status": "completed, DISCARDED",
+    "flight_do_get_bypass": {
+     "rows_per_sec": 215914.81817334413,
+     "cycles_per_row": 24087.65630975,
+     "ipc": 1.515534011825255
+    },
+    "bare_scan_drift_control": {
+     "rows_per_sec": 335679.1085967422,
+     "cycles_per_row": 18534.21126925,
+     "ipc": 1.4737961942205349
+    }
+   },
+   {
+    "run": "B-1",
+    "arm": "L4",
+    "raw_dir": "target/perf-ws0-3096/ab-lever4b/B-1",
+    "completed_utc": "2026-08-03T06:34:30Z",
+    "status": "completed, DISCARDED",
+    "flight_do_get_bypass": {
+     "rows_per_sec": 206426.6406885244,
+     "cycles_per_row": 26068.35094675,
+     "ipc": 1.4424536195721518
+    },
+    "bare_scan_drift_control": {
+     "rows_per_sec": 332269.8505687901,
+     "cycles_per_row": 18713.517813,
+     "ipc": 1.4708631534995937
+    }
+   },
+   {
+    "run": "A-2",
+    "arm": "BASE",
+    "raw_dir": "target/perf-ws0-3096/ab-lever4b/A-2",
+    "completed_utc": "2026-08-03T06:36:16Z",
+    "status": "completed, DISCARDED",
+    "flight_do_get_bypass": {
+     "rows_per_sec": 213386.24658622887,
+     "cycles_per_row": 25913.569273833335,
+     "ipc": 1.4584833682321143
+    },
+    "bare_scan_drift_control": {
+     "rows_per_sec": 335540.2345552453,
+     "cycles_per_row": 18531.34046675,
+     "ipc": 1.4711132189500546
+    }
+   },
+   {
+    "run": "B-2",
+    "arm": "L4",
+    "raw_dir": "target/perf-ws0-3096/ab-lever4b/B-2",
+    "completed_utc": "2026-08-03T06:37:56Z",
+    "status": "ABORTED \u2014 no results.json / no summary.txt was ever written"
+   }
+  ]
+ },
+ "cross_links": {
+  "#3248": "successor; AC1 re-anchored there",
+  "#3231": "lever 1 (column-major build) routes there as an unpriced candidate",
+  "#3232": "required corpus sha 22d9ae22...ce922c OR a geometry-matched regeneration; tools/ws0-corpus-gen IS that regeneration path, so this change retires that blocker",
+  "#3234": "BTI (da) perf corpus - mirror this determinism contract (byte-identical across 3 runs, generated on the production writer); gen-perf-corpus-bti.sh should use tools/ws0-corpus-gen as its template rather than inventing a second contract"
+ },
+ "per_arm_bare_scan_control_median_rows_per_sec": {
+  "BASE": 332740.5995640332,
+  "L4": 333556.76263748726,
+  "L46": 332846.75054852787
+ },
+ "review_remeasurement_2026_08_03": {
+  "schema": "cqlite.perf.abc-interleaved/v1#remeasurement",
+  "why": "The #3096 review found FLIGHT_DATA_SIZE_TARGET_BYTES equalled GRPC_DEFAULT_MAX_MESSAGE_BYTES with a `<=` guard admitting it. The target moved to 4,063,232 B (ceiling - 64 KiB framing reserve - 64 KiB inexactness margin), which changes framing geometry, so lever 4's recorded +4,817 rows/s / +2.3% / -441 cycles/row (measured AT the superseded 4 MiB target) was no longer certified and is SUPERSEDED by this session.",
+  "design": {
+   "arms": {
+    "BASE": "f4f8ce9 release binary - the SAME BASE the main session used",
+    "NOTGT": "HEAD with the with_max_flight_data_size call REMOVED (inherits arrow-flight 53.4.1's 2 MiB default) - the true lever-4 isolation on SHIPPED code",
+    "L4P": "HEAD as shipped: encoder target 4,063,232 B (3.875 MiB)"
+   },
+   "binary_md5": {
+    "BASE": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "NOTGT": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "L4P": "21823b6e81e9d561da3495a5e177a0a4"
+   },
+   "rounds": 8,
+   "reps_per_arm_per_round": 1,
+   "measured_runs": 24,
+   "rotation": "arm order rotated per round, period 3: BASE/NOTGT/L4P -> NOTGT/L4P/BASE -> L4P/BASE/NOTGT -> ...",
+   "drift_control": "the bare scan (execute_streaming) in EVERY run; the ws0-scan-bench and flight-loadgen binaries are LITERALLY IDENTICAL across arms (only cqlite-flight is swapped), which is stronger than the main session's code-identical control",
+   "temperature": "warm only",
+   "merge_path": "bypass",
+   "corpus": "/data/ws0-3096 (Data.db sha256 4a903f6f...ae269, 4,000,000 rows / 40,000 partitions, uncompressed)",
+   "pinning": "server taskset -c 2,10 (verified physical-core siblings), client 4,12,5,13,6,14,7,15",
+   "counters": "perf stat -C 2,10 - CPU-WIDE, sibling-aggregate, never -p",
+   "session": "2026-08-03 16:19-16:59 UTC, one continuous session, nothing else on the box",
+   "driver": "scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096 --reps 1 --temp warm --arm bypass --no-build, once per (arm, round), with the arm's cqlite-flight binary swapped into target/release first",
+   "prewarm_all_ok": true
+  },
+  "runs": [
+   {
+    "round": 1,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 232686.86938316104,
+    "do_get_cycles_per_row": 24191.535215,
+    "do_get_ipc": 1.4817466180012062,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 290298422580,
+    "do_get_window_secs": 51.571453223,
+    "prewarm": "ok",
+    "control_rows_per_sec": 359004.1171616215,
+    "control_cycles_per_row": 18734.77837775,
+    "control_ipc": 1.463120772851225,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-1"
+   },
+   {
+    "round": 1,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 214268.34761804529,
+    "do_get_cycles_per_row": 25726.413259166668,
+    "do_get_ipc": 1.4067223734613832,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 308716959110,
+    "do_get_window_secs": 56.004538857,
+    "prewarm": "ok",
+    "control_rows_per_sec": 355659.80013848864,
+    "control_cycles_per_row": 18891.902988,
+    "control_ipc": 1.4647547515767498,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-1"
+   },
+   {
+    "round": 1,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 226363.79843646337,
+    "do_get_cycles_per_row": 24468.265847666666,
+    "do_get_ipc": 1.4708564593002682,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 293619190172,
+    "do_get_window_secs": 53.012010237,
+    "prewarm": "ok",
+    "control_rows_per_sec": 353919.73116512044,
+    "control_cycles_per_row": 18985.64833375,
+    "control_ipc": 1.4534397518280378,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-1"
+   },
+   {
+    "round": 2,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 226913.34120951785,
+    "do_get_cycles_per_row": 24686.43018141667,
+    "do_get_ipc": 1.4698981093190058,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 296237162177,
+    "do_get_window_secs": 52.883624806,
+    "prewarm": "ok",
+    "control_rows_per_sec": 359225.126532913,
+    "control_cycles_per_row": 18808.84244125,
+    "control_ipc": 1.4603764259043115,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-2"
+   },
+   {
+    "round": 2,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 234986.5253675123,
+    "do_get_cycles_per_row": 24050.11618825,
+    "do_get_ipc": 1.487567191108994,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 288601394259,
+    "do_get_window_secs": 51.066757897,
+    "prewarm": "ok",
+    "control_rows_per_sec": 357025.0113153164,
+    "control_cycles_per_row": 18896.69661475,
+    "control_ipc": 1.4597149762921633,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-2"
+   },
+   {
+    "round": 2,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 226016.26499362272,
+    "do_get_cycles_per_row": 24571.271556666667,
+    "do_get_ipc": 1.46865653712478,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 294855258680,
+    "do_get_window_secs": 53.093524045,
+    "prewarm": "ok",
+    "control_rows_per_sec": 359843.37309447065,
+    "control_cycles_per_row": 18808.20450925,
+    "control_ipc": 1.4556619592813937,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-2"
+   },
+   {
+    "round": 3,
+    "arm_order_in_round": "L4P BASE NOTGT",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 227208.3628399738,
+    "do_get_cycles_per_row": 24725.710960166667,
+    "do_get_ipc": 1.4683434846958434,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 296708531522,
+    "do_get_window_secs": 52.814957381,
+    "prewarm": "ok",
+    "control_rows_per_sec": 360383.25144995505,
+    "control_cycles_per_row": 18758.6548995,
+    "control_ipc": 1.458310553025268,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-3"
+   },
+   {
+    "round": 3,
+    "arm_order_in_round": "L4P BASE NOTGT",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 237173.17496886314,
+    "do_get_cycles_per_row": 23921.031534916667,
+    "do_get_ipc": 1.4953552871993492,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 287052378419,
+    "do_get_window_secs": 50.595941137,
+    "prewarm": "ok",
+    "control_rows_per_sec": 359304.0638365915,
+    "control_cycles_per_row": 18803.04606675,
+    "control_ipc": 1.4624402720778384,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-3"
+   },
+   {
+    "round": 3,
+    "arm_order_in_round": "L4P BASE NOTGT",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 236236.5646246095,
+    "do_get_cycles_per_row": 23834.977750416667,
+    "do_get_ipc": 1.5036137203809008,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 286019733005,
+    "do_get_window_secs": 50.796539558,
+    "prewarm": "ok",
+    "control_rows_per_sec": 358019.38801904,
+    "control_cycles_per_row": 18917.65057725,
+    "control_ipc": 1.4598320045070068,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-3"
+   },
+   {
+    "round": 4,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 236335.78397771812,
+    "do_get_cycles_per_row": 24066.297673666668,
+    "do_get_ipc": 1.4781916237269452,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 288795572084,
+    "do_get_window_secs": 50.775213969,
+    "prewarm": "ok",
+    "control_rows_per_sec": 357560.94514281646,
+    "control_cycles_per_row": 18926.261648,
+    "control_ipc": 1.4619596246664972,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-4"
+   },
+   {
+    "round": 4,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 235361.99800401824,
+    "do_get_cycles_per_row": 24044.34693625,
+    "do_get_ipc": 1.4937026721661524,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 288532163235,
+    "do_get_window_secs": 50.985291176,
+    "prewarm": "ok",
+    "control_rows_per_sec": 355104.3038417022,
+    "control_cycles_per_row": 18999.93569625,
+    "control_ipc": 1.4638775898325562,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-4"
+   },
+   {
+    "round": 4,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 228402.49696845477,
+    "do_get_cycles_per_row": 24323.361969083333,
+    "do_get_ipc": 1.4832037634753117,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 291880343629,
+    "do_get_window_secs": 52.538830176,
+    "prewarm": "ok",
+    "control_rows_per_sec": 360404.91653834487,
+    "control_cycles_per_row": 18766.22445075,
+    "control_ipc": 1.4591566669877292,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-4"
+   },
+   {
+    "round": 5,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 238691.58605366395,
+    "do_get_cycles_per_row": 23930.515293916666,
+    "do_get_ipc": 1.4873406826707427,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 287166183527,
+    "do_get_window_secs": 50.27408045,
+    "prewarm": "ok",
+    "control_rows_per_sec": 356295.19019773847,
+    "control_cycles_per_row": 18956.251882,
+    "control_ipc": 1.4655106015777934,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-5"
+   },
+   {
+    "round": 5,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 233934.8776261063,
+    "do_get_cycles_per_row": 24164.498239416665,
+    "do_get_ipc": 1.484333636472638,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 289973978873,
+    "do_get_window_secs": 51.296327088,
+    "prewarm": "ok",
+    "control_rows_per_sec": 360099.56943947775,
+    "control_cycles_per_row": 18792.64704625,
+    "control_ipc": 1.464950210991887,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-5"
+   },
+   {
+    "round": 5,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 238442.45725399317,
+    "do_get_cycles_per_row": 23765.05006116667,
+    "do_get_ipc": 1.4926342993611992,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 285180600734,
+    "do_get_window_secs": 50.326607678,
+    "prewarm": "ok",
+    "control_rows_per_sec": 357434.887094361,
+    "control_cycles_per_row": 18896.55962225,
+    "control_ipc": 1.4644429197929842,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-5"
+   },
+   {
+    "round": 6,
+    "arm_order_in_round": "L4P BASE NOTGT",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 229222.23655940878,
+    "do_get_cycles_per_row": 24566.702819583334,
+    "do_get_ipc": 1.4787359736179746,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 294800433835,
+    "do_get_window_secs": 52.350941951,
+    "prewarm": "ok",
+    "control_rows_per_sec": 358083.57668477605,
+    "control_cycles_per_row": 18891.32064075,
+    "control_ipc": 1.461616179346887,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-6"
+   },
+   {
+    "round": 6,
+    "arm_order_in_round": "L4P BASE NOTGT",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 231447.67073602573,
+    "do_get_cycles_per_row": 24308.297615,
+    "do_get_ipc": 1.4810331912048214,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 291699571380,
+    "do_get_window_secs": 51.847572982,
+    "prewarm": "ok",
+    "control_rows_per_sec": 357068.1877448199,
+    "control_cycles_per_row": 18959.402655,
+    "control_ipc": 1.4599192652939623,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-6"
+   },
+   {
+    "round": 6,
+    "arm_order_in_round": "L4P BASE NOTGT",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 232239.87384854688,
+    "do_get_cycles_per_row": 24120.609506333334,
+    "do_get_ipc": 1.4911847690238713,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 289447314076,
+    "do_get_window_secs": 51.670713565,
+    "prewarm": "ok",
+    "control_rows_per_sec": 357145.2136316198,
+    "control_cycles_per_row": 18912.70868975,
+    "control_ipc": 1.4647838405486588,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-6"
+   },
+   {
+    "round": 7,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 233726.3571675818,
+    "do_get_cycles_per_row": 24247.202801833333,
+    "do_get_ipc": 1.473126315452736,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 290966433622,
+    "do_get_window_secs": 51.342091433,
+    "prewarm": "ok",
+    "control_rows_per_sec": 358560.3097558055,
+    "control_cycles_per_row": 18864.91612675,
+    "control_ipc": 1.461281411737141,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-7"
+   },
+   {
+    "round": 7,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 228474.890714647,
+    "do_get_cycles_per_row": 23465.550196166667,
+    "do_get_ipc": 1.5088730888192576,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 281586602354,
+    "do_get_window_secs": 52.522182908,
+    "prewarm": "ok",
+    "control_rows_per_sec": 359738.20412292896,
+    "control_cycles_per_row": 18769.15568075,
+    "control_ipc": 1.4576032303258513,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-7"
+   },
+   {
+    "round": 7,
+    "arm_order_in_round": "BASE NOTGT L4P",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 226017.15704869243,
+    "do_get_cycles_per_row": 24108.4379175,
+    "do_get_ipc": 1.4864585178178207,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 289301255010,
+    "do_get_window_secs": 53.093314493,
+    "prewarm": "ok",
+    "control_rows_per_sec": 331886.11296172655,
+    "control_cycles_per_row": 18766.497475,
+    "control_ipc": 1.4686835467815498,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-7"
+   },
+   {
+    "round": 8,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "BASE",
+    "binary_md5": "bd5a7b4c180d6dc25f5c81a0449b3c04",
+    "do_get_rows_per_sec": 231802.21716353952,
+    "do_get_cycles_per_row": 24299.23656,
+    "do_get_ipc": 1.4725196262434894,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 291590838720,
+    "do_get_window_secs": 51.768271015,
+    "prewarm": "ok",
+    "control_rows_per_sec": 359481.97593266953,
+    "control_cycles_per_row": 18718.34435675,
+    "control_ipc": 1.4576166095539902,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/BASE-8"
+   },
+   {
+    "round": 8,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "NOTGT",
+    "binary_md5": "72d5b96a1ac45ceebe5168501aa93bdd",
+    "do_get_rows_per_sec": 226645.90430221613,
+    "do_get_cycles_per_row": 24311.661063833333,
+    "do_get_ipc": 1.475790884617551,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 291739932766,
+    "do_get_window_secs": 52.946026256,
+    "prewarm": "ok",
+    "control_rows_per_sec": 347354.7303931779,
+    "control_cycles_per_row": 18795.82612525,
+    "control_ipc": 1.4637227804417172,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/NOTGT-8"
+   },
+   {
+    "round": 8,
+    "arm_order_in_round": "NOTGT L4P BASE",
+    "arm": "L4P",
+    "binary_md5": "21823b6e81e9d561da3495a5e177a0a4",
+    "do_get_rows_per_sec": 238637.5380652452,
+    "do_get_cycles_per_row": 23530.575469666666,
+    "do_get_ipc": 1.493350900503828,
+    "do_get_rows_denominator": 12000000,
+    "do_get_cycles": 282366905636,
+    "do_get_window_secs": 50.28546681,
+    "prewarm": "ok",
+    "control_rows_per_sec": 356738.14256156725,
+    "control_cycles_per_row": 18761.1935345,
+    "control_ipc": 1.4583887999281915,
+    "control_rows_denominator": 4000000,
+    "raw_dir": "/data/ws0-arms/session/L4P-8"
+   }
+  ],
+  "per_arm_flight_do_get": {
+   "BASE": {
+    "rows_per_sec": {
+     "median": 232244.54327335028,
+     "min": 226913.34120951785,
+     "max": 238691.58605366395,
+     "spread_pct_of_median": 5.071483996195849,
+     "n": 8
+    },
+    "cycles_per_row": {
+     "median": 24273.219680916667,
+     "min": 23930.515293916666,
+     "max": 24725.710960166667,
+     "spread_pct_of_median": 3.2760205555885746,
+     "n": 8
+    },
+    "ipc_median": 1.4756589695898406
+   },
+   "NOTGT": {
+    "rows_per_sec": {
+     "median": 232691.27418106602,
+     "min": 214268.34761804529,
+     "max": 237173.17496886314,
+     "spread_pct_of_median": 9.843440598032364,
+     "n": 8
+    },
+    "cycles_per_row": {
+     "median": 24107.30721383333,
+     "min": 23465.550196166667,
+     "max": 25726.413259166668,
+     "spread_pct_of_median": 9.378330988799384,
+     "n": 8
+    },
+    "ipc_median": 1.4859504137908162
+   },
+   "L4P": {
+    "rows_per_sec": {
+     "median": 230321.18540850084,
+     "min": 226016.26499362272,
+     "max": 238637.5380652452,
+     "spread_pct_of_median": 5.4798576384700395,
+     "n": 8
+    },
+    "cycles_per_row": {
+     "median": 24114.523711916667,
+     "min": 23530.575469666666,
+     "max": 24571.271556666667,
+     "spread_pct_of_median": 4.315640231723589,
+     "n": 8
+    },
+    "ipc_median": 1.488821643420846
+   }
+  },
+  "bare_scan_drift_control_all_24_runs": {
+   "rows_per_sec": {
+    "median": 357790.16658092826,
+    "min": 331886.11296172655,
+    "max": 360404.91653834487,
+    "spread_pct_of_median": 7.970818161143529,
+    "n": 24
+   },
+   "cycles_per_row": {
+    "median": 18836.879284,
+    "min": 18718.34435675,
+    "max": 18999.93569625,
+    "spread_pct_of_median": 1.494893794531995,
+    "n": 24
+   },
+   "note": "the 8.0% rows/s spread is driven by ONE run (L4P-7, 331,886 rows/s); over the other 23 runs the control spread is 3.6% (347,355..360,405, median 358,019). Recorded, not trimmed: the outlier stays in every median above."
+  },
+  "per_arm_bare_scan_control_median_rows_per_sec": {
+   "BASE": 358782.2134587135,
+   "NOTGT": 357046.59953006817,
+   "L4P": 357290.0503629904
+  },
+  "paired_within_round": {
+   "lever4_prime_isolated_L4P_minus_NOTGT": {
+    "per_round_rows_per_sec_delta": [
+     12095.450818418089,
+     -8970.260373889585,
+     -936.610344253626,
+     -6959.501035563473,
+     4507.57962788688,
+     792.2031125211506,
+     -2457.7336659545545,
+     11991.633763029065
+    ],
+    "positive_rounds": 4,
+    "rounds": 8,
+    "median_rows_per_sec_delta": -72.20361586623767,
+    "median_rows_per_sec_delta_pct_of_lo_median": -0.03102979091947095,
+    "median_cycles_per_row_delta": -136.87094658333262
+   },
+   "cumulative_L4P_minus_BASE": {
+    "per_round_rows_per_sec_delta": [
+     -6323.07094669767,
+     -897.0762158951256,
+     9028.20178463572,
+     -7933.287009263353,
+     -249.12879967078334,
+     3017.6372891381034,
+     -7709.200118889363,
+     6835.32090170568
+    ],
+    "positive_rounds": 3,
+    "rounds": 8,
+    "median_rows_per_sec_delta": -573.1025077829545,
+    "median_rows_per_sec_delta_pct_of_lo_median": -0.24676683452080792,
+    "median_cycles_per_row_delta": -152.11505854166535
+   },
+   "no_target_NOTGT_minus_BASE": {
+    "per_round_rows_per_sec_delta": [
+     -18418.521765115758,
+     8073.184157994459,
+     9964.812128889345,
+     -973.7859736998798,
+     -4756.7084275576635,
+     2225.4341766169528,
+     -5251.466452934808,
+     -5156.312861323386
+    ],
+    "positive_rounds": 3,
+    "rounds": 8,
+    "median_rows_per_sec_delta": -2865.2472006287717,
+    "median_rows_per_sec_delta_pct_of_lo_median": -1.2337199230796974,
+    "median_cycles_per_row_delta": -140.17797100000098
+   }
+  },
+  "conclusion": {
+   "lever4_at_the_shipped_target": "MEASURED AT ZERO. Paired within-round median -72.2 rows/s (-0.03%), 4 of 8 rounds positive - far inside the 5.5-9.8% per-arm spread.",
+   "superseded_figure": "+4,817 rows/s (+2.3%) / -441 cycles/row, measured at the SUPERSEDED 4 MiB target in the 10-round session above. NOT the delivered figure and not restated as one.",
+   "cumulative_vs_base": "-573.1 rows/s (-0.25%), 3 of 8 rounds positive - also indistinguishable from zero.",
+   "cycles_per_row": "lever 4' does reduce cycles/row by a median 136.9 (~0.6%) with rows/s unmoved. Per spec R1 that is NOT reported as a throughput win: a profile improvement with unmoved rows/s is explicitly not evidence of a gain.",
+   "what_survives": "lever 4's positively verified effect is FRAMING (fewer FlightData messages, no degenerate 1-row tails) plus wire safety at the reserved ceiling, both asserted in-repo by cqlite-flight/src/streaming_framing_tests.rs. It is retained for wire safety, not for throughput.",
+   "ac1": "UNMET, and by a wider margin in this session: control median 357,790 rows/s / do_get 230,321 rows/s = ratio 1.553x; AC1 target 275,223 rows/s; shortfall -44,902 rows/s (-16.3%). Re-anchored to #3248.",
+   "cross_session_absolutes": "this session's control (357,790 rows/s) sits ~7% above the main session's (332,970). Same box, same corpus, same bytes, 9 hours apart - the one rule this record exists to enforce, observed a second time."
+  }
+ }
+}
