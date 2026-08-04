@@ -1,0 +1,21 @@
+== IMC -> socket mapping (cpumask) ==
+uncore_imc_0 cpumask=0,32
+uncore_imc_1 cpumask=0,32
+uncore_imc_10 cpumask=0,32
+uncore_imc_11 cpumask=0,32
+uncore_imc_2 cpumask=0,32
+uncore_imc_3 cpumask=0,32
+uncore_imc_4 cpumask=0,32
+uncore_imc_5 cpumask=0,32
+uncore_imc_6 cpumask=0,32
+uncore_imc_7 cpumask=0,32
+uncore_imc_8 cpumask=0,32
+uncore_imc_9 cpumask=0,32
+uncore_imc_free_running_0 cpumask=0,32
+uncore_imc_free_running_1 cpumask=0,32
+uncore_imc_free_running_2 cpumask=0,32
+uncore_imc_free_running_3 cpumask=0,32
+
+== node0/node1 cpulist ==
+node0: 0-31,64-95
+node1: 32-63,96-127
