@@ -227,7 +227,8 @@ recorded them as "compiled binaries … correctly not code to review". `file(1)`
 executable** — 379 lines of reviewable source. All three are mode **100755**. So the "correctly not code"
 justification was doing double duty for a real script, and it was the justification a prefix-only
 extensionless rule rested on. Corrected rule: an extensionless path under a prose prefix is CODE **iff git
-records it executable** (see the classification requirement in the delta spec). Consequences, both measured
+records it executable at EITHER ENDPOINT of the census range** (see the classification requirement in the
+delta spec, and the endpoint discussion below). Consequences, both measured
 on the final tree: docs/ executables classified CODE went **46/49 → 49/49**, and the docs/ code-path total
 **75 → 78**, the delta being exactly those three paths and nothing else.
 
@@ -244,6 +245,58 @@ Read that histogram as the budget: the ~570 raw-output files (`txt`/`json`/`err`
 makes a blanket un-exclusion unaffordable, and the ~60 `sh`/`py`/`bt`/`c`/`rs`/`toml`/`cql`/`yml` files
 are what the reviewer must see. Measured on the final tree: **71 `docs/` executables now reach the
 reviewer, 0 markdown does, and nothing outside `docs/` is newly excluded.**
+
+### WHICH ENDPOINT'S MODE — both, as a disjunction
+
+**The census subject is the RANGE `<base>...HEAD`, so a path is a code path if it is an executable
+ANYWHERE in that range.** Both endpoints belong to the reviewed change and neither outranks the other, so
+the rule is a **logical OR over the HEAD tree and the BASE tree** — not "the HEAD mode, falling back to
+BASE", which is what this design said for one round and what the code then did.
+
+That ordering was wrong, and measurably so. An implementation that consults HEAD, then BASE, and stops at
+the first endpoint that yields a record never reaches BASE for a path present in HEAD — so a **pure
+`chmod -x`** (`100755`@BASE → `100644`@HEAD) classified NON-CODE. Reproduced on a two-commit fixture with a
+still-executable control (the control read CODE, so the probe was sound). The consequence is a false PASS
+rather than a false FAIL: the path leaves `census_code_paths`, so `prompt-content: PASS (n/n)` is true of
+the paths it counted and **silent about the one it dropped** — while `chmod -x` plainly does not turn a
+Python script into prose. Deletion was already right (absent from HEAD ⇒ BASE consulted), which is exactly
+why the four then-existing tests passed: every one of their fixtures has the path at **one** endpoint, so
+the range semantics were untested.
+
+The four combinations and the single rule that covers them:
+
+| combination | example | classification |
+|---|---|---|
+| present at both, exec at either | `chmod -x` **or** `chmod +x`, or exec at both | **CODE** |
+| present at both, exec at neither | a prose `docs/NOTICE` edited | non-code |
+| HEAD only (added) | a new harness executable | **CODE** iff added executable |
+| BASE only (deleted) | an executable removed | **CODE** iff it WAS executable (fail-closed: the removal is a code change) |
+| neither | unreachable for a real census path | non-executable, no error |
+
+**Why the fix is a SHAPE change and not a moved `return`.** This was the third round on this PR where a fix
+reintroduced a narrower instance of the class it closed (prefix-only → HEAD-first ordered scan → …), and
+each time the code was correct for the cases someone had thought of. So the remedy is structural, and it
+rests on three properties that make skipping an endpoint *unexpressible*: the endpoint list is produced
+**complete** before the fold begins; the fold's body contains **no `return`, `break` or `continue`** and can
+only OR into a monotone accumulator, so the function's sole `return` is after the loop; and the
+per-endpoint lookup is a **range-blind** function that names no endpoint, so there is no "first"/"then" for
+a reader or an editor to get wrong. A structural test asserts that shape independently of the loop's
+spelling, and is itself controlled against an injected early exit and against the prior ordered-scan
+implementation verbatim — a shape assert that cannot fire is not evidence.
+
+Mutation results on the whole guard suite, both directions: restoring the ordered scan turns **19**
+assertions RED; consulting only HEAD turns **19** RED (the deleted-executable and `chmod -x` paths read
+NON-CODE); consulting only BASE turns **17** RED (the added-executable and `chmod +x` paths read NON-CODE);
+unmutated, 551/551 pass. The `46/49 → 49/49` figure above was re-measured on the final tree and controlled
+the same way: with the executable bit ignored it reads **46/49**, so the number discriminates.
+
+One piece of hygiene folded in: the single-path `ls-tree` lookup no longer passes `-z`. Captured through a
+command substitution it made the shell warn `ignored null byte in input` on **every** call — harmless for a
+single record, since only the terminating NUL is lost, but per-call stderr noise able to mask a real
+warning. Only the leading MODE field is read, and it is first, space-terminated and always one of git's
+literal mode constants, so the NUL delimiter buys nothing here; without it git C-quotes an odd name, which
+keeps a newline-bearing path on one line. A `-z`-only mutant reds exactly one assertion — the
+stderr-cleanliness one — which is the evidence that the removal is behaviour-neutral.
 
 ## Recommended design
 

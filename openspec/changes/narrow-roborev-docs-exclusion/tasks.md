@@ -451,10 +451,27 @@ green about a swallow it existed to catch. Two independent root causes, both fal
       the executable has no extension, and a `PASS (n/n)` was a true statement about a subject set that had
       dropped the file in question. **SHIPPED** in `roborev_path_is_executable` + the census's extensionless
       branch.
-- [x] **The mode is read from GIT'S TREE, never `test -x`**: `ls-tree` on HEAD, falling back to the BASE
-      commit for a path the diff DELETES (which has no file to stat), with `:(literal)` pathspec magic
+- [x] **The mode is read from GIT'S TREE, never `test -x`**: `ls-tree`, with `:(literal)` pathspec magic
       because a tracked name may contain `*`/`?`/`[`, and on the same RAW path the census holds so the single
       normalisation boundary is unchanged. `core.fileMode=false` also makes working bits non-authoritative.
+- [x] **The range test is a DISJUNCTION over BOTH endpoints, not an ordered scan.** The first revision read
+      "HEAD, falling back to BASE" and `return`ed on the first ref yielding a record, so a path present at
+      HEAD **never reached BASE**: a pure `chmod -x` (`100755`@BASE → `100644`@HEAD) classified NON-CODE and
+      left `census_code_paths`, making `prompt-content: PASS (n/n)` silent about it — a false PASS, and a
+      contradiction of the rule's own premise that the census subject is the RANGE. Reproduced on a
+      two-commit fixture with a still-executable control. Deletion was already right, so the defect was
+      precisely the MODE-CHANGE case, which no then-existing fixture could produce (all four had the path at
+      exactly ONE endpoint). **FIXED BY CONSTRUCTION**, not by moving the `return`: the endpoint list is
+      produced complete before the fold; the fold body has no `return`/`break`/`continue` and only ORs into a
+      monotone accumulator, so the sole `return` is post-loop; and the per-endpoint lookup
+      (`_roborev_mode_is_exec_at`) is range-BLIND, so no precedence is expressible. All four combinations —
+      both / HEAD-only / BASE-only / neither — fall out of the one rule.
+- [x] **The `-z` NUL warning is gone**: the single-path `ls-tree` lookup captured `-z` output through
+      `$(...)`, so bash warned `ignored null byte in input` on EVERY call — harmless (only the terminating
+      NUL is lost) but per-call stderr noise able to mask a real warning. Safe to drop because the PATH FIELD
+      IS NEVER READ; only the leading MODE is, and it is first, space-terminated and one of git's literal
+      mode constants. A `-z`-only mutant reds exactly one assert (the stderr-cleanliness one), which is the
+      evidence the removal is behaviour-neutral.
 - [x] **The design's measurement was WRONG and is corrected**: the three extensionless `docs/` files were
       recorded as "compiled binaries … correctly not code to review". `file(1)`:
       `docs/reports/ws0-3217-artifacts/partB-run/offcputime-bigmap` is a **379-line Python script**; only
@@ -469,6 +486,21 @@ green about a swallow it existed to catch. Two independent root causes, both fal
       `assert_tracked_mode` reads the recorded mode back from the tree. Mutation-tested in both directions:
       reverting to the prefix-only rule reds 9 asserts (cx3a/cx3b/cx3d), and swapping the tree read for
       `test -x` reds 4 (cx3d only) — so each half of the fix is load-bearing.
+- [x] Tests `cx3e`–`cx3j`: the ENDPOINT-COMBINATION axis, which `cx3a`–`cx3d` structurally could not reach
+      (each of their fixtures has the path at exactly one endpoint, so a single-endpoint implementation
+      passed all four). `cx3e` a PURE `chmod -x` present at BOTH endpoints is CODE and EXPECTED, with the
+      working-tree bit asserted clear so only the BASE tree can answer; `cx3f` the same path absent from the
+      prompt is a FAIL that NAMES it; `cx3g` the mirror `chmod +x`; `cx3h` the full matrix as a direct unit
+      probe over one repo carrying every combination (both / HEAD-only / BASE-only / neither, both
+      mode-change directions, a `glob[x]*?-exec` name proving `:(literal)` still holds, and
+      `absent-everywhere`, which is reachable ONLY by direct probe) plus an assert that nine classifications
+      write NOTHING to stderr; `cx3i` in-test mutation of the SEMANTICS in both directions, each with a KEPT
+      case proving the mutant lost one endpoint rather than the whole function, and a restored-green diff;
+      `cx3j` a shape-AGNOSTIC structural assert (no `break`/`continue`, exactly one `return`, last),
+      controlled against an injected `return 0`, an injected `break`, the ROUND-12 shape verbatim, and an
+      absent-function probe that must read `NOT-FOUND` so a rename cannot pass vacuously. Whole-suite
+      mutation: ordered scan restored ⇒ **19 RED**; consult-only-HEAD ⇒ **19 RED**; consult-only-BASE ⇒
+      **17 RED**; unmutated ⇒ **551/551**. Assertion count 501 → 551.
 - [ ] **DEFERRED to #3260 (item: the OTHER direction of the same mirror)**: `txt rst adoc mdx markdown` sit
       in `CODE_FREE_EXTENSIONS` while `.roborev.toml` excludes only `*.md` globally (plus `docs/**/*.txt`
       inside artifact dirs), so a `.rst`/`.txt`-only diff is called code-free although roborev would deliver

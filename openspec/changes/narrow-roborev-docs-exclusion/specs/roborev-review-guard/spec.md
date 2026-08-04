@@ -186,6 +186,24 @@ outside `docs/` from review.
 - **WHEN** the census classifies it
 - **THEN** it is a CODE census path, `code-free:` reads `PASS`, and `prompt-content:` reads `PASS (1/1 code census paths present)` against the deletion's own `diff --git` header — a filesystem `test -x` could not have reached this verdict, since there is no file to stat
 
+#### Scenario: An extensionless path that LOSES the executable bit is still CODE
+- **GIVEN** a branch whose only change to `docs/reports/x-artifacts/ws0-results/ws0-readbw` is a PURE mode change from 100755 at the base to 100644 at HEAD — so the path is present at BOTH endpoints, and neither HEAD nor the working tree records the bit
+- **WHEN** the census classifies it, beside a `docs/reports/x-report.md`
+- **THEN** it is a CODE census path, `code-free:` reads `PASS` (never `FAIL`), and `prompt-content:` reads `PASS (1/1 code census paths present)` — a `chmod -x` does not turn a script into prose, and the BASE tree is the only source that can say so
+- **AND** with the path ABSENT from the prompt, `prompt-content:` reads `FAIL (1/1 code census paths absent from the prompt)` and a DETAILS line NAMES it — so the path is a SUBJECT the guard can miss, which is what an ordered scan removed
+
+#### Scenario: An extensionless path that GAINS the executable bit is CODE
+- **GIVEN** a branch whose only change to `docs/reports/x-artifacts/ws0-results/ws0-readbw` is a PURE mode change from 100644 at the base to 100755 at HEAD
+- **WHEN** the census classifies it
+- **THEN** it is a CODE census path and `prompt-content:` reads `PASS (1/1 code census paths present)` — the mirror direction, so neither endpoint outranks the other
+
+#### Scenario: Every endpoint combination is classified by the one disjunction
+- **GIVEN** a single repository whose range carries one path per combination: executable at both endpoints; non-executable at both; added executable; added non-executable; deleted executable; executable at BASE only via `chmod -x`; executable at HEAD only via `chmod +x`; an executable whose NAME contains `[`, `*` and `?`; and a path present at NEITHER endpoint
+- **WHEN** each is classified
+- **THEN** exactly the paths executable at one or both endpoints read CODE, the both-non-executable, added-non-executable and absent-from-both paths read NON-CODE, and the glob-metacharacter name is answered for itself rather than for a wildcard match
+- **AND** consulting only HEAD SHALL make the deleted-executable and `chmod -x` paths read NON-CODE, and consulting only BASE SHALL make the added-executable and `chmod +x` paths read NON-CODE — measured as mutants, so the either-endpoint assertions are demonstrably load-bearing in both directions and the two endpoints are demonstrably not redundant
+- **AND** the batch of classifications SHALL write nothing to stderr
+
 #### Scenario: The configuration contains no blanket directory glob
 - **WHEN** `.roborev.toml`'s `exclude_patterns` is inspected after this change
 - **THEN** it contains neither `docs/**` nor any other pattern that excludes a path solely by its directory, every docs-scoped pattern names a specific non-code file extension, and `*.md` is still present
@@ -602,8 +620,9 @@ EXTENSIONLESS files under the declared prose directories. An artifact EXTENSION 
 non-code: a `.json` outside those directories — notably `docs/observability/**` — is functional
 configuration and SHALL count as CODE.
 
-**THE EXTENSIONLESS RULE SHALL BE THE EXECUTABLE BIT, NOT THE PREFIX.** Under a declared prose directory an
-EXTENSIONLESS path SHALL count as CODE **if and only if** git RECORDS it EXECUTABLE; a non-executable
+**THE EXTENSIONLESS RULE SHALL BE THE EXECUTABLE BIT AT EITHER ENDPOINT, NOT THE PREFIX.** Under a declared
+prose directory an EXTENSIONLESS path SHALL count as CODE **if and only if** git RECORDS it EXECUTABLE **at
+EITHER ENDPOINT of the census range** (`<base>...HEAD`); a non-executable
 extensionless path there SHALL stay non-code, which is the only case the prefix assist exists for
 (`docs/LICENSE`, `openspec/NOTES`, a `.claude/CODEOWNERS`). The prefix ALONE SHALL NOT decide it: a bare
 prefix test made every extensionless path under `docs/` non-code, so it never entered the code census and
@@ -615,13 +634,43 @@ tracked file: of this repo's three extensionless `docs/` executables (all mode 1
 reviewable source that no key asserted was delivered (the other two, `ws0-readbw` and `ws0-stream`, are ELF
 binaries, for which git still emits a `diff --git` header so the check remains satisfiable).
 
-The mode SHALL be read from GIT'S TREE — the range's HEAD endpoint, falling back to the BASE commit for a
-path the diff DELETES — and SHALL NOT be read from the filesystem with `test -x`. A census path need not be
+The mode SHALL be read from GIT'S TREE and SHALL NOT be read from the filesystem with `test -x`. A census
+path need not be
 checked out at all (a deletion has no file to stat, so a filesystem probe would answer a different question
 with a plausible value), the recorded mode is what the diff and therefore the prompt carry, and under
 `core.fileMode=false` the working bits are not authoritative. The lookup SHALL use `:(literal)` pathspec
 magic (a tracked name may contain `*`, `?` or `[`) and SHALL classify the same RAW path the census holds, so
 the single normalisation boundary is unchanged. An absent path SHALL classify non-code without erroring.
+
+**THE RANGE TEST SHALL BE A DISJUNCTION OVER BOTH ENDPOINTS, AND SHALL NOT BE AN ORDERED SCAN.** The mode
+SHALL be collected from the HEAD tree AND the BASE tree, and "executable" SHALL be their **logical OR**;
+the result SHALL NOT depend on which endpoint is consulted first, and no endpoint SHALL be skippable on the
+strength of what another endpoint answered. All four endpoint combinations SHALL be handled by that one
+rule: present at BOTH (including a MODE CHANGE in either direction — a `chmod -x` SHALL NOT reclassify a
+script as prose, and a `chmod +x` SHALL make an existing file CODE), present at HEAD only (added), present
+at BASE only (deleted, which SHALL be classified by the mode it HAD, since removing an executable is a code
+change whose review must be asserted), and present at NEITHER (unmeasurable, which SHALL classify
+non-executable without erroring). "Whichever endpoint answers first" SHALL be treated as a defect, not an
+optimisation: an ordered scan that returned on the first endpoint holding a record classified `100755`@BASE
+→ `100644`@HEAD as NON-CODE, dropping the path from the code census so `prompt-content:` reported
+`PASS (n/n)` while making **no claim** about it — a false PASS, and a contradiction of the rule's own
+premise that the census subject is the RANGE.
+
+**THAT PROPERTY SHALL HOLD BY CONSTRUCTION, AND THE SHAPE SHALL BE ASSERTED, NOT ONLY THE BEHAVIOUR.** The
+per-endpoint mode lookup SHALL be a SEPARATE function that names no endpoint (range-blind, so it cannot
+express a precedence), the endpoint list SHALL be produced complete before the fold begins, and the fold
+SHALL contain no `break`, no `continue` and no `return` — its single `return` SHALL be its last statement,
+returning an accumulator — so that "skip an endpoint" is UNEXPRESSIBLE rather than merely unintended. A
+STRUCTURAL test SHALL assert that shape independently of the loop's spelling, and SHALL itself be
+controlled against mutants that violate it (an injected early exit, and the prior ordered-scan
+implementation verbatim) so a shape assert that could not fire is not mistaken for one that holds.
+
+The mode lookup SHALL NOT emit spurious output on its own stderr. `git ls-tree -z` captured through a
+command substitution makes the shell warn `ignored null byte in input` on EVERY call, which is per-call
+noise able to MASK a real warning; since only the leading MODE field is read — first, space-terminated, and
+always one of git's literal mode constants — the NUL-delimited form is unnecessary for a single-path
+lookup and SHALL NOT be used there. Cleanliness SHALL be asserted by measuring that a batch of
+classifications writes NOTHING to stderr.
 
 The directory-glob match SHALL follow git `:(glob)` component
 semantics (`*` matches within one path component, `**` matches zero or more components), so a shell-style
