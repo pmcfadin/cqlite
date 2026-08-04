@@ -838,7 +838,7 @@ EOF
 # keeps this cheap on a fully extracted corpus), and the explicit `??`/`!!` skip
 # below is belt-and-braces for a git that reports them regardless.
 tracked_dataset_dirty_entries() {
-  local scratch record xy path
+  local scratch record xy path _origin_path
   if ! scratch="$(mktemp "${TRACKED_GUARD_STATE_DIR:-${TMPDIR:-/tmp}}/cqlite-tracked-status.XXXXXX")"; then
     printf 'could not create a scratch file for the status scan\n'
     return 1
