@@ -154,95 +154,37 @@ _rx_dirglob_match() {
   return 1
 }
 
-# ROBOREV'S BUILT-IN EXCLUDES — PINNED TO `roborev v0.61.2` (issue #3229).
+# ROBOREV'S OWN BUILT-IN EXCLUDES ARE DELIBERATELY **NOT MODELLED HERE** (issue #3278).
 #
-# `exclude_patterns` is NOT the whole exclusion set. The binary ALWAYS appends a
-# hard-coded lockfile/cache deny-list to the pathspecs it hands git, with no
-# configuration switch and no way to opt out. Modelling only the configured half is the
-# SAME false-PASS class as reading the wrong config file: today a PR touching
-# `Cargo.lock` has it silently dropped from the reviewer's diff while a
-# `census-exclusion:` that ignored the built-ins would report it SURVIVING.
+# THE FACT, unchanged and still true: `exclude_patterns` is not the whole exclusion set.
+# The binary also appends a hard-coded lockfile/cache deny-list (`**/Cargo.lock`,
+# `**/go.sum`, `**/pnpm-lock.yaml`, `**/.cache/**`, …) to the pathspecs it hands git, with
+# no configuration switch and no opt-out.
 #
-# RECOVERED FROM THE BINARY, not from documentation or memory: these are the literal
-# `:(exclude,glob)`-prefixed pathspec strings present in the v0.61.2 executable
-# (`strings -a <bin> | grep -o ':(exclude,glob)[^ ]*'`).
+# THE SCOPE DECISION (#3229, owner-ruled): this file reconciles the code census against
+# the EFFECTIVE **`exclude_patterns`** — the configured half, which is the half every
+# acceptance criterion of #3229 is about and the half a repo can actually edit. Modelling
+# the binary's internal defaults was attempted here and REMOVED: four consecutive review
+# rounds found four false-PASSes inside that subsystem alone (a phantom `/**` sibling, an
+# unbounded substring presence test, a three-state signal tested as two, and an excusal
+# granted on an unverified model), i.e. the modelling was itself the largest false-PASS
+# source in the change. Deleting it cannot introduce a false PASS: with no built-in in
+# `_rx_patterns`, this check only ever reports FEWER exclusions than roborev applies, so
+# it never excuses a path from `prompt-content:` coverage on a mechanism it did not verify.
 #
-# THE MECHANISM, ESTABLISHED FROM THE v0.61.2 BINARY (#3229 round-6 blocker 1) —
-# **built-ins are PRE-FORMATTED pathspec CONSTANTS appended to git's argv VERBATIM; they
-# do NOT pass through `git.FormatExcludeArgs`, so each contributes EXACTLY ONE pathspec
-# and never acquires the `/**` sibling a configured pattern does.** Three independent
-# measurements against `/usr/local/bin/roborev`, all reproducible:
-#   1. THE PREFIX IS INSIDE THE LITERAL. Each of the 24 is present as the CONTIGUOUS byte
-#      string `:(exclude,glob)<pattern>`. A pattern destined for the formatter would be
-#      stored BARE (the formatter is what prepends `:(exclude,glob)`), so a baked-in
-#      prefix means the string is already a finished git argument.
-#   2. LENGTH-BUCKET PACKING PROVES (1) IS NOT LINKER COINCIDENCE. Go's linker packs the
-#      rodata string blob in LENGTH order with no terminators, and these 24 pack
-#      back-to-back in runs of EQUAL total length INCLUDING the 15-byte prefix — e.g. at
-#      one offset `:(exclude,glob)**/bun.lock`, `…**/pdm.lock`, `…**/mix.lock` sit at
-#      deltas of exactly 26 = 15 + 11, and `…**/Pipfile.lock`/`Gemfile.lock`/
-#      `pubspec.lock`/`Podfile.lock` at deltas of exactly 30. Adjacency in a
-#      length-sorted blob is only possible if the prefix is part of the string being
-#      sorted.
-#   3. ONLY TWO BARE `:(exclude,glob)` CONSTANTS EXIST, and Go deduplicates identical
-#      literals — so there is no shared prefix constant for 24 patterns to be formatted
-#      against. `:(exclude,glob)` counts 26 occurrences total = the 24 finished pathspecs
-#      + the 2 runtime prefix constants the formatter concatenates for CONFIGURED
-#      patterns (`:(exclude,glob)` root-anchored, `:(exclude,glob)**/` recursive).
-# CORROBORATING SHAPE: the DIRECTORY built-ins carry `/**` HAND-WRITTEN into the literal
-# (`**/.beads/**`, `**/.cache/**`, `**/.gocache/**`) while the FILE built-ins do not
-# (`**/Cargo.lock`) — nobody writes `/**` onto a string about to be handed to a formatter
-# that appends it. And no `:(exclude,glob)**/Cargo.lock/**`-style sibling literal exists
-# for ANY file built-in (measured: 0 hits for all 8 probed).
-#
-# WHY IT MATTERS, i.e. why this is not trivia: `roborev_format_exclude_args` used to run
-# built-ins through the port, which manufactured a phantom `:(exclude,glob)**/Cargo.lock/**`
-# — an exclusion roborev never applies. OVER-modelling the exclusion set drops paths from
-# `prompt-content` coverage, which is the FALSE-PASS direction. UNDER-modelling it (the
-# mirror-image error of "fixing" a configured pattern down to one pathspec) would report
-# paths as SURVIVING that roborev really drops — also a false PASS. Both directions are
-# wrong; the pathspec count must match the mechanism per input class, and it now does.
-#
-# MAINTENANCE OBLIGATION, identical to the port's: a roborev UPGRADE requires
-# RE-EXTRACTING this list before the check is trusted. An upstream addition would
-# silently widen the real exclusion set while every summary block still read `PASS`.
-#
-# MESSAGED DISTINCTLY, deliberately: a built-in swallow is NOT a defect in this repo's
-# configuration and editing `.roborev.toml` cannot fix it, so the two causes must never
-# share a remedy line.
-#
-# DECLARED AS AN ARRAY, NOT A SPACE-SEPARATED STRING, and that is load-bearing: iterating
-# an unquoted string performs PATHNAME EXPANSION, so `**/package-lock.json` silently
-# became the repo-relative `website/package-lock.json` — which then read as "a pinned
-# pattern is no longer present in the binary" and FAILed every run. (Caught by this very
-# check running against the real binary. The identical hazard is called out for
-# `roborev config get` parsing below; an array removes it structurally rather than by
-# remembering to quote.)
-ROBOREV_BUILTIN_EXCLUDES=(
-  '**/.beads/**' '**/.cache/**' '**/.gocache/**' '**/.kata.local.toml'
-  '**/Cargo.lock' '**/cargo.lock' '**/Gemfile.lock' '**/Package.resolved'
-  '**/Pipfile.lock' '**/Podfile.lock' '**/bun.lock' '**/bun.lockb'
-  '**/composer.lock' '**/flake.lock' '**/go.sum' '**/mix.lock'
-  '**/package-lock.json' '**/packages.lock.json' '**/pdm.lock' '**/pnpm-lock.yaml'
-  '**/poetry.lock' '**/pubspec.lock' '**/uv.lock' '**/yarn.lock'
-)
-ROBOREV_BUILTIN_SRC_LABEL="roborev-builtin"
-# The TOTAL number of `:(exclude,glob)` literals the pinned v0.61.2 executable carries:
-# the 24 patterns above PLUS the 2 bare PREFIX CONSTANTS the algorithm concatenates
-# (`:(exclude,glob)` for root-anchored, `:(exclude,glob)**/` for recursive). 24 + 2 = 26.
-# This count is what makes an ADDED built-in observable: see
-# `roborev_observe_builtin_excludes` for why a count is used rather than a blind
-# full-set re-extraction.
-ROBOREV_BUILTIN_PATHSPEC_LITERALS=26
-# THE VERSION EVERYTHING ABOVE IS PINNED TO, as a MACHINE-CHECKED value rather than only
-# prose (#3229 round-7 blocker). Both this deny-list AND the `git.FormatExcludeArgs` port
-# were derived from THIS build; the standing obligation on an upgrade is to RE-VERIFY both
-# before the check is trusted. `roborev_observe_builtin_excludes` therefore ASKS the
-# executable which version it is (`roborev version` prints `roborev v0.61.2`; there is no
-# `--version` flag) and treats a mismatch as DIVERGENCE — not as a workaround for a
-# missing right boundary, but because "the pin holds" is exactly the claim the version
-# answers. A version that cannot be read is UNAVAILABLE, never a blessing.
-ROBOREV_PINNED_VERSION="v0.61.2"
+# THE RESIDUAL, STATED RATHER THAN HIDDEN — this is AC4's SECOND BRANCH ("…or the residual
+# disagreement is documented with the exact cases where it persists"). The exact case that
+# persists: a diff whose ONLY code-census path is a roborev built-in-excluded path
+# (`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, `Gemfile.lock`, …) is silently dropped from
+# the reviewer's diff, and NOTHING here models that. Consequence, by key:
+#   * `census-exclusion:` reports the path as SURVIVING (no configured pattern eats it);
+#   * `prompt-content:` then EXPECTS it in the prompt, does not find it, and FAILs.
+# So the residual surfaces as a FAIL under `prompt-content:` whose stated cause names the
+# wrong subject (it reads as "the reviewer did not receive this path", which is TRUE, but
+# attributes it to nothing). That is a DIAGNOSTIC gap, and it fails CLOSED — never a
+# vacuous green. Modelling it properly (and deciding NOTICE-vs-FAIL for a remedy-less
+# built-in swallow) is issue #3278.
+
 
 # roborev_push_assert: sets PUSH_ASSERT (and REMOTE/REMOTE_SHA); calls `finish` on
 # failure, so it never returns when the branch is not pushed.
@@ -1059,49 +1001,27 @@ roborev_resolve_root_checkout() {
 
 # roborev_format_exclude_args: THE PORT (see the header block above). Fills
 # `_rx_pathspecs` (what git is asked) plus the parallel `_rx_owner_pattern` /
-# `_rx_owner_body` / `_rx_owner_src` / `_rx_owner_single` (so a FAIL can name the pattern
-# responsible for each path AND the file it came from, and reproduce the SAME pathspec
-# count), and sets `_rx_trailing` when a CONFIGURED pattern carries the R3 trailing slash.
+# `_rx_owner_body` / `_rx_owner_src` (so a FAIL can name the pattern responsible for each
+# path AND the file it came from, and reproduce the SAME pathspec count), and sets
+# `_rx_trailing` when a pattern carries the R3 trailing slash.
 #
-# TWO INPUT CLASSES, TWO MECHANISMS — and conflating them OVER-MODELS the real exclusion
-# set (#3229 round-6 blocker 1):
-#   * a CONFIGURED pattern is a USER pattern that roborev pushes through
-#     `git.FormatExcludeArgs`, which anchors it and emits TWO pathspecs, `<body>` and
-#     `<body>/**`. Both are reproduced here.
-#   * a BUILT-IN is NOT a user pattern. It is a PRE-FORMATTED pathspec CONSTANT that the
-#     binary appends to git's argv VERBATIM, so it contributes exactly ONE pathspec and
-#     is never re-anchored and never given a `/**` sibling. Emitting a sibling for it
-#     invented an exclusion roborev does not apply (`:(exclude,glob)**/Cargo.lock/**`),
-#     and over-exclusion drops paths from `prompt-content` coverage — the FALSE-PASS
-#     direction this whole check exists to close.
+# ONE INPUT CLASS: a CONFIGURED pattern from `exclude_patterns`, which roborev pushes
+# through `git.FormatExcludeArgs` — it anchors the pattern and emits TWO pathspecs,
+# `<body>` and `<body>/**`. Both are reproduced here. Ported from the v0.61.2 binary;
+# RE-VERIFY ON EVERY roborev UPGRADE.
 #
-# ESTABLISHED FROM THE v0.61.2 BINARY, not inferred (see ROBOREV_BUILTIN_EXCLUDES above
-# for the full evidence): each built-in is a SINGLE Go string literal that already
-# CONTAINS the `:(exclude,glob)` prefix. RE-VERIFY ON EVERY roborev UPGRADE — the same
-# obligation the pin itself carries.
+# roborev's own built-in deny-list does NOT come through here and is not modelled at all —
+# see the scope decision at the top of this file (issue #3278).
 roborev_format_exclude_args() {
   local pattern p spaced b0 prefix pidx=-1 psrc
   _rx_pathspecs=()
   _rx_owner_pattern=()
   _rx_owner_body=()
   _rx_owner_src=()
-  _rx_owner_single=()
   _rx_trailing=""
   for pattern in "${_rx_patterns[@]}"; do
     pidx=$((pidx + 1))
     psrc="${_rx_sources[$pidx]}"
-    # A BUILT-IN bypasses the port ENTIRELY: appended verbatim, ONE pathspec, no
-    # trimming, no anchoring test, no `/**` sibling. Deliberately BEFORE the
-    # normalisation below rather than a flag threaded through it — the mechanism is "the
-    # binary does not call the formatter on these", and the code should say exactly that.
-    if [ "$psrc" = "$ROBOREV_BUILTIN_SRC_LABEL" ]; then
-      _rx_pathspecs+=(":(exclude,glob)$pattern")
-      _rx_owner_pattern+=("$pattern")
-      _rx_owner_body+=("$pattern")
-      _rx_owner_src+=("$psrc")
-      _rx_owner_single+=(1)
-      continue
-    fi
     # strings.TrimSpace
     p="${pattern#"${pattern%%[![:space:]]*}"}"
     p="${p%"${p##*[![:space:]]}"}"
@@ -1125,9 +1045,8 @@ roborev_format_exclude_args() {
     #
     # It names the SOURCE FILE too: with a worktree config, a root-checkout config and a
     # global config all in play, "a trailing slash somewhere" is not an editable
-    # instruction. (A built-in carries no trailing slash, and is not editable at all, so
-    # it can never be the subject of this FAIL.)
-    if [ -z "$_rx_trailing" ] && [ "$psrc" != "$ROBOREV_BUILTIN_SRC_LABEL" ] &&
+    # instruction.
+    if [ -z "$_rx_trailing" ] &&
       [ "$spaced" != "$p" ] && [ "${spaced%/}" != "$spaced" ]; then
       if [ "$prefix" = "**/" ]; then
         _rx_trailing="FAIL (trailing-slash pattern '$p/' from $psrc resolves RECURSIVE (**/$p), opposite to '$p/**' — drop the trailing slash deliberately or write '$p/**')"
@@ -1142,201 +1061,7 @@ roborev_format_exclude_args() {
     _rx_owner_pattern+=("$pattern")
     _rx_owner_body+=("$prefix$p")
     _rx_owner_src+=("$psrc")
-    _rx_owner_single+=(0)
   done
-}
-
-# roborev_observe_builtin_excludes: compare the LIVE built-in deny-list against the
-# PINNED 24. Sets `_rx_builtin_state` = OK | DIVERGED | UNAVAILABLE, plus
-# `_rx_builtin_missing` (pinned patterns the binary no longer carries) and
-# `_rx_builtin_count` / `_rx_builtin_count_note`.
-#
-# WHY THIS IS A SEPARATE, FAILING CHECK. A swallow by a built-in that IS in the pinned
-# set has no remedy, so it is information only (a NOTICE). A DIVERGENCE between the live
-# set and the pin is the opposite: it HAS a remedy — re-extract, update the pin, and
-# decide whether the new built-in is acceptable — and it is a MECHANISM change, which the
-# v0.61.2 pin already obliges us to catch on upgrade rather than assume away. If an
-# upgrade added a built-in matching `*.rs` or `scripts/**`, a bare NOTICE would absorb it
-# silently, the failure would look like normal operation, and we would be blind again:
-# exactly the class this issue exists to close. So divergence FAILs.
-#
-# WHAT `built-in-set:` VERIFIES, AND WHY AN UNBOUNDED SUBSTRING TEST IS NOT ENOUGH.
-# Go string literals are concatenated into one rodata blob with NO terminators, so a scan
-# for `:(exclude,glob)<something>` cannot reliably delimit each pattern — MEASURED on this
-# very binary, a naive extraction yields truncations (`**/.be`, `**/f`, `**/mix.l`),
-# junk-suffixed hits (`**/.cache/**add…`, `**/go.sumBinary file…`) and, worst, a phantom
-# `**/git` that is really the bare RECURSIVE PREFIX constant followed by an unrelated
-# string. Basing a FAIL on that would red every run. So the check is built from FOUR
-# signals, each individually reliable:
-#
-#   1. REMOVALS, named exactly: each pinned pattern is looked for as a FIXED string
-#      `:(exclude,glob)<pattern>`. Hit or no hit — no delimiting required.
-#   2. ADDITIONS, detected numerically: the COUNT of `:(exclude,glob)` literals. Any
-#      added built-in adds one. The count cannot say WHICH pattern appeared, and it also
-#      moves if roborev introduces an unrelated `:(exclude,glob)` string — but that is
-#      still a mechanism change in precisely this area, with precisely this remedy, so
-#      reporting it is correct rather than a false alarm.
-#   3. THE VERSION THE PIN IS FOR (`ROBOREV_PINNED_VERSION`), asked of the executable
-#      itself. Every fact modelled in this file — the 24 patterns, their arity, the ported
-#      `git.FormatExcludeArgs` — was derived from the v0.61.2 build, and an upgrade
-#      obliges a re-verification of ALL of it. So a version mismatch IS the divergence the
-#      pin encodes, reported with the observed and pinned versions named. This is the
-#      GENERAL signal: any upgrade or rebuild moves it, whatever it did to the patterns.
-#   4. A RIGHT BOUNDARY for (1), from the blob's LENGTH-BUCKET ADJACENCY.
-#
-# (4) EXISTS BECAUSE (1) ALONE IS A FALSE-PASS (#3229 round-7 blocker, REPRODUCED). A
-# fixed-string search for `:(exclude,glob)<pattern>` has an exact LEFT boundary (the
-# 15-byte prefix) and NO RIGHT ONE, so `**/Cargo.lock` matches INSIDE
-# `**/Cargo.lock.bak`. Combined with (2) being a bare count, an equal-length substitution
-# is INVISIBLE: patching the v0.61.2 binary so its bucket-28 run reads
-# `:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock`
-# (4 bytes taken from the preceding string, file size unchanged) leaves the count at
-# EXACTLY 26 and the missing list EMPTY — verdict `built-in-set: OK` while the modelled
-# exclusion set no longer matches reality. Measured, not hypothesised.
-#
-# THE BOUNDARY, AND WHY IT IS DERIVED RATHER THAN PINNED. Go's linker packs the rodata
-# string blob in LENGTH order, so the 24 finished pathspec literals fall into LENGTH
-# BUCKETS, and MEASURED against v0.61.2 each bucket is stored as ONE CONTIGUOUS RUN: the
-# 12 buckets are (total literal length → members) 24→go.sum; 25→uv.lock;
-# 26→bun/pdm/mix.lock; 27→yarn.lock/bun.lockb/.beads/.cache; 28→Cargo/cargo/flake.lock;
-# 29→poetry.lock/.gocache; 30→Pipfile/Gemfile/pubspec/Podfile.lock; 31→composer.lock;
-# 32→pnpm-lock.yaml; 34→Package.resolved/.kata.local.toml; 35→package-lock.json;
-# 36→packages.lock.json. Inside a run, the byte AFTER a literal is the `:` of the NEXT
-# literal — a genuine right boundary. So the invariant checked is, per bucket of k
-# members: EXACTLY k-1 of them are immediately followed by another `:(exclude,glob)`
-# literal, and exactly one (the run's last) is not. That is DERIVED FROM THE PINNED
-# PATTERN LIST ALONE (group by length; expect k-1) — it pins NO foreign bytes and NO
-# within-bucket ORDER, so it cannot false-FAIL on a rebuild that merely permutes a bucket.
-# Summed over the 12 buckets: 12 bounded, 12 run-enders. The tamper above moves bucket 28
-# from 2 bounded to 1, and FAILs naming the bucket and the unbounded member.
-#
-# DECLARED RESIDUALS, both narrowed by (3):
-#   * the LAST literal of each of the 12 runs has no derivable right boundary — its
-#     successor is an unrelated Go string, and pinning those bytes would pin foreign,
-#     build-specific data whose drift would FALSE-FAIL a correct binary (the failure mode
-#     that gets a guard disabled). An in-place equal-length extension of a run-ENDER
-#     inside v0.61.2 therefore stays invisible; any upstream change that really did it
-#     would move the version (3) or the count (2).
-#   * a NEW pattern that has a PINNED one as a prefix is still not NAMED by (1) — it is
-#     detected, as an addition, by (2) and/or as a broken run by (4).
-#
-# UNAVAILABLE, never FAIL, when the set cannot be observed — `roborev` absent from PATH,
-# an unreadable target, a target carrying ZERO `:(exclude,glob)` literals (a wrapper
-# script rather than the Go executable), or a target that will not report its version.
-# That is what keeps the hermetic suite, which puts a shell stub on PATH, fully
-# exercisable: "we could not look" is never a failure and never a blessing. Note the
-# asymmetry that keeps this from self-disabling: an unreadable version withholds only the
-# OK BLESSING — a positively OBSERVED divergence (1/2/4) still FAILs without it.
-roborev_observe_builtin_excludes() {
-  _rx_builtin_state="UNAVAILABLE"
-  _rx_builtin_missing=()
-  _rx_builtin_count=""
-  _rx_builtin_count_note=""
-  _rx_builtin_version=""
-  _rx_builtin_version_note=""
-  _rx_builtin_bucket_note=""
-  local bin="" p n lit len ver want got k
-  bin=$(command -v roborev 2>/dev/null) || bin=""
-  { [ -n "$bin" ] && [ -f "$bin" ] && [ -r "$bin" ]; } || return 0
-  set +e
-  n=$(LC_ALL=C grep -a -o ':(exclude,glob)' "$bin" 2>/dev/null | wc -l | tr -d '[:space:]')
-  set -e
-  # `|| n=0` is fail-closed here (#3229 round-10 sweep): a failed count yields 0, 0 is not the
-  # pinned literal count, and the state that follows is UNAVAILABLE — the blessing is withheld,
-  # never granted. A default that produced the PINNED value would be the fail-open form.
-  [ -n "${n:-}" ] || n=0
-  # ZERO literals ⇒ this is not the Go executable (a stub, a wrapper, a shim). Not
-  # observable, so not a verdict in either direction.
-  [ "$n" -gt 0 ] || return 0
-  _rx_builtin_count="$n"
-
-  # --- (1) presence AND (4) its right boundary, bucketed by literal length -----------
-  # `b_bounded` counts the members whose literal is IMMEDIATELY FOLLOWED by another
-  # `:(exclude,glob)` literal. A bounded hit PROVES presence, so the presence-only grep
-  # runs on the else branch — the two signals are one pass over the pinned list.
-  local -A b_k=() b_bounded=() b_members=() b_bounded_names=() b_unbounded_names=() b_missing=()
-  for p in "${ROBOREV_BUILTIN_EXCLUDES[@]}"; do
-    lit=":(exclude,glob)$p"
-    len=${#lit}
-    b_k[$len]=$((${b_k[$len]:-0} + 1))
-    b_members[$len]="${b_members[$len]:-}${b_members[$len]:+ }$p"
-    if LC_ALL=C grep -qFa "$lit:(exclude,glob)" "$bin"; then
-      b_bounded[$len]=$((${b_bounded[$len]:-0} + 1))
-      b_bounded_names[$len]="${b_bounded_names[$len]:-}${b_bounded_names[$len]:+, }$p"
-    elif LC_ALL=C grep -qFa "$lit" "$bin"; then
-      b_unbounded_names[$len]="${b_unbounded_names[$len]:-}${b_unbounded_names[$len]:+, }$p"
-    else
-      _rx_builtin_missing+=("$p")
-      b_missing[$len]=1
-    fi
-  done
-  local -a b_lens=()
-  mapfile -t b_lens < <(printf '%s\n' "${!b_k[@]}" | sort -n)
-  for len in ${b_lens[@]+"${b_lens[@]}"}; do
-    # A bucket with a MISSING member has had its run broken BY that removal, so its
-    # arithmetic is a CONSEQUENCE of a divergence already named exactly by (1). Reporting
-    # both would bury the actionable name under derived noise.
-    [ -z "${b_missing[$len]:-}" ] || continue
-    k="${b_k[$len]}"
-    want=$((k - 1))
-    got="${b_bounded[$len]:-0}"
-    [ "$got" -ne "$want" ] || continue
-    _rx_builtin_bucket_note="${_rx_builtin_bucket_note:-}${_rx_builtin_bucket_note:+; }literal length $len [${b_members[$len]}]: $got of $k bounded on the right by an adjacent ':(exclude,glob)' literal, pinned $want (a length bucket is stored as ONE run, so exactly one member ends it); bounded: ${b_bounded_names[$len]:-<none>}; UNBOUNDED: ${b_unbounded_names[$len]:-<none>}"
-  done
-  if [ -n "$_rx_builtin_bucket_note" ]; then
-    _rx_builtin_bucket_note="pinned pattern(s) present but NOT right-bounded as pinned (an unbounded substring hit also matches a LONGER pattern, e.g. '**/Cargo.lock' inside '**/Cargo.lock.bak'): $_rx_builtin_bucket_note"
-  fi
-
-  # --- (2) additions, numerically ----------------------------------------------------
-  if [ "$n" -ne "$ROBOREV_BUILTIN_PATHSPEC_LITERALS" ]; then
-    _rx_builtin_count_note="observed $n ':(exclude,glob)' literal(s), pinned $ROBOREV_BUILTIN_PATHSPEC_LITERALS (= 24 built-in patterns + 2 prefix constants)"
-  fi
-
-  # --- (3) the version the pin is FOR ------------------------------------------------
-  # Asked of `$bin` — the SAME file the literals were read from, never a bare `roborev`
-  # that PATH might resolve elsewhere. `timeout` when available: this check must not be
-  # the thing that hangs a review round. `version`, not `--version`: the latter does not
-  # exist.
-  set +e
-  if command -v timeout >/dev/null 2>&1; then
-    ver=$(timeout 20 "$bin" version 2>/dev/null | head -n 1)
-  else
-    ver=$("$bin" version 2>/dev/null | head -n 1)
-  fi
-  set -e
-  if [[ "${ver:-}" =~ (^|[[:space:]])(v[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)([[:space:]]|$) ]]; then
-    _rx_builtin_version="${BASH_REMATCH[2]}"
-  fi
-  if [ -n "$_rx_builtin_version" ] && [ "$_rx_builtin_version" != "$ROBOREV_PINNED_VERSION" ]; then
-    _rx_builtin_version_note="the executable reports $_rx_builtin_version, but every fact modelled here was derived from $ROBOREV_PINNED_VERSION"
-  fi
-
-  if [ "${#_rx_builtin_missing[@]}" -gt 0 ] || [ -n "$_rx_builtin_count_note" ] ||
-    [ -n "$_rx_builtin_bucket_note" ] || [ -n "$_rx_builtin_version_note" ]; then
-    _rx_builtin_state="DIVERGED"
-  elif [ -z "$_rx_builtin_version" ]; then
-    # Everything observable AGREED, but the version — the thing the pin is TO — could not
-    # be read, so the pin is unconfirmed. Withhold the blessing, never invent a failure.
-    _rx_builtin_state="UNAVAILABLE"
-  else
-    _rx_builtin_state="OK"
-  fi
-  return 0
-}
-
-# roborev_builtin_state_details: record the built-in observation on a NON-FAILING path.
-# "Never silence" is the third clause of the rule: an UNAVAILABLE observation must be
-# stated, because an unstated one reads as agreement — and agreement is exactly what we
-# have no evidence for.
-roborev_builtin_state_details() {
-  case "$_rx_builtin_state" in
-    OK)
-      DETAILS+=("NOTICE: census-exclusion: built-in-set: OK — the live roborev built-in exclude set MATCHES the pinned v0.61.2 set. The pin is corroborated, not assumed, on FOUR observations: the executable reports $_rx_builtin_version (the build every fact here was derived from, so the pin's re-verify-on-upgrade obligation is satisfied for this run); every pinned pattern is present as the literal ':(exclude,glob)<pattern>'; every pattern is RIGHT-BOUNDED by the pinned length-bucket adjacency, so a presence hit cannot be a substring of a LONGER pattern; and $_rx_builtin_count ':(exclude,glob)' literal(s) are present, exactly as pinned. The right-boundary half is load-bearing: an unbounded substring test alone reported OK for a binary whose '**/Cargo.lock' had been replaced by '**/Cargo.lock.bak' at equal length (count 26/26, missing 0).")
-      ;;
-    UNAVAILABLE)
-      DETAILS+=("NOTICE: census-exclusion: built-in-set: UNAVAILABLE — the live roborev built-in deny-list could not be confirmed against the pinned v0.61.2 set ('roborev' absent from PATH, unreadable, a wrapper/stub carrying no ':(exclude,glob)' literals, or a target that would not report its version), so whether it still matches is UNKNOWN. This is deliberately NEITHER a failure NOR a blessing: 'we could not look' is reported in the value line so it cannot be mistaken for agreement. It withholds only the OK blessing — an OBSERVED divergence (a missing pattern, a broken adjacency run, a changed literal count) still FAILs without a readable version. It ALSO withholds the EXCUSAL (#3229 round-9 F1): no census code path is excused from 'prompt-content:' on a model that could not be verified, because the excusal asserts that a path's absence is a DETERMINISTIC property of the pinned mechanism — a claim an unverified mechanism cannot support.")
-      ;;
-  esac
 }
 
 # roborev_corroborate_exclude_patterns: the cross-check against the BINARY.
@@ -1359,9 +1084,8 @@ roborev_builtin_state_details() {
 # `roborev config get` resolves the repo config relative to its CWD, so asking only from
 # `$REPO` reproduces Blocker A's blind spot inside the corroboration itself.
 #
-# The comparison is against the CONFIGURED subset of `_rx_patterns` only: `config get`
-# reports configuration, never roborev's built-in lockfile/cache excludes, so including
-# those would make every run report a permanent NOTICE.
+# `_rx_patterns` holds exactly the CONFIGURED patterns, which is exactly what `config get`
+# reports, so the two sides are directly comparable.
 roborev_corroborate_exclude_patterns() {
   _rx_corroboration="UNAVAILABLE"
   _rx_drift=""
@@ -1415,7 +1139,6 @@ roborev_corroborate_exclude_patterns() {
     item="${reported[$j]}"
     known=0
     for ((idx = 0; idx < ${#_rx_patterns[@]}; idx++)); do
-      [ "${_rx_sources[$idx]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
       [ "${_rx_patterns[$idx]}" != "$item" ] || known=1
     done
     if [ "$known" -eq 0 ]; then
@@ -1425,7 +1148,6 @@ roborev_corroborate_exclude_patterns() {
     fi
   done
   for ((idx = 0; idx < ${#_rx_patterns[@]}; idx++)); do
-    [ "${_rx_sources[$idx]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
     p="${_rx_patterns[$idx]}"
     known=0
     for item in ${reported[@]+"${reported[@]}"}; do
@@ -1449,13 +1171,10 @@ roborev_check_census_exclusion() {
   local repo_cfg="$REPO/.roborev.toml"
   local global_cfg="${HOME:-}/.roborev/config.toml"
   local -a _rx_patterns=() _rx_sources=() _rx_pathspecs=() _rx_owner_pattern=() \
-    _rx_owner_body=() _rx_owner_src=() _rx_owner_single=()
+    _rx_owner_body=() _rx_owner_src=()
   local _rx_error="" _rx_found=0 _rx_trailing="" _rx_corroboration="UNAVAILABLE" \
     _rx_drift="" _rx_drift_cwd="" _rx_unquoted="" _rx_root="" _rx_root_error="" \
-    _rx_src_label="" _rx_builtin_state="UNAVAILABLE" _rx_builtin_count="" \
-    _rx_builtin_count_note="" _rx_builtin_version="" _rx_builtin_version_note="" \
-    _rx_builtin_bucket_note=""
-  local -a _rx_builtin_missing=()
+    _rx_src_label=""
   local line
 
   # --- the CONFIG SOURCES, all of them ------------------------------------------
@@ -1503,50 +1222,6 @@ roborev_check_census_exclusion() {
   fi
   local n_configured=${#_rx_patterns[@]}
 
-  # --- roborev's OWN built-in excludes, folded into the SAME evaluation ----------
-  # They are not configurable and not reported by `config get`, but git applies them
-  # exactly like the configured ones, so a census path they eat is just as invisible to
-  # the reviewer. Tagged distinctly so the remedy text can differ.
-  local _builtin
-  for _builtin in "${ROBOREV_BUILTIN_EXCLUDES[@]}"; do
-    _rx_patterns+=("$_builtin")
-    _rx_sources+=("$ROBOREV_BUILTIN_SRC_LABEL")
-  done
-  local n_builtin=$((${#_rx_patterns[@]} - n_configured))
-
-  # --- is the LIVE built-in set still the one we pinned? -------------------------
-  # Observed here, BEFORE any verdict, so a mechanism change is reported even on a run
-  # whose census nothing swallows. `UNAVAILABLE` is recorded and carried into the value
-  # line rather than being silently treated as agreement.
-  roborev_observe_builtin_excludes
-
-  # --- THE EXCUSAL REQUIRES A VERIFIED MODEL (#3229 round-9 blocker F1) -----------
-  # `_rx_builtin_state` has THREE values (OK | UNAVAILABLE | DIVERGED), and the round-8
-  # revision tested only `= DIVERGED` / `!= DIVERGED` — a three-state signal tested as
-  # two. `UNAVAILABLE` therefore took the PERMISSIVE path: it populated
-  # `CENSUS_BUILTIN_EXCLUDED` and told `prompt-content:` NOT to expect those paths, so
-  # coverage was EXCUSED on an unverified model while the block read PASS. REPRODUCED: a
-  # shim carrying all 24 literals correctly right-bounded but refusing to report its
-  # `version` yields `state=UNAVAILABLE, missing=0` — and the excusal still happened.
-  # That is "we could not check" rendered as "nothing was wrong", inside the guard whose
-  # entire purpose is preventing exactly that.
-  #
-  # SO THE PERMISSIVE BEHAVIOUR IS KEYED ON THE POSITIVE STATE, never on "not the
-  # negative one". Two distinct decisions, deliberately separated:
-  #   * whether a built-in swallow can be a NOTICE rather than a FAIL — that turns on
-  #     `!= DIVERGED`, and correctly so: only a POSITIVELY OBSERVED divergence is an
-  #     actionable mechanism change. An unobservable binary (`roborev` absent from PATH —
-  #     the hermetic suite's normal condition) must NOT red every run; failing there would
-  #     be the self-disabling guard this change keeps refusing to build.
-  #   * whether that swallow EXCUSES the paths from `prompt-content:` — that requires
-  #     `= OK`. The excusal is a claim ABOUT THE MECHANISM ("their absence is
-  #     deterministic"), and an unverified mechanism cannot support it. Withholding it
-  #     fails CLOSED on the excusal WITHOUT failing the run: `prompt-content:` simply goes
-  #     on to expect every census code path, and FAILs if the reviewer really did not get
-  #     one.
-  local builtin_excusal=WITHHELD
-  [ "$_rx_builtin_state" != OK ] || builtin_excusal=GRANTED
-
   # --- CORROBORATION, unconditionally and BEFORE any early return ----------------
   # Especially when `n_configured` is 0: "our parser recognised no key" is NOT "nothing
   # is configured", and here the binary is the only oracle that can tell them apart.
@@ -1580,12 +1255,12 @@ roborev_check_census_exclusion() {
   # from case (cx5d).
   #
   # SO THE PASS IS KEYED ON THE POSITIVE STATE (`= OK`), never on "not one of the two bad
-  # ones". With `n_configured` == 0 there is nothing of OURS in `_rx_pathspecs` but the
-  # built-ins, so git cannot see a configured pattern the parser missed either: the
-  # configured half of the verdict would rest entirely on an unverified silence. Reachable
-  # for real — `roborev config get` is a subcommand a build may not carry (exit != 0 from
-  # every checkout) while `.roborev.toml` holds a key spelling this parser does not
-  # recognise, which is precisely the cx5d configuration with the corroboration switched off.
+  # ones". With `n_configured` == 0 there is NOTHING in `_rx_pathspecs`, so git cannot see a
+  # configured pattern the parser missed either: the verdict would rest entirely on an
+  # unverified silence. Reachable for real — `roborev config get` is a subcommand a build
+  # may not carry (exit != 0 from every checkout) while `.roborev.toml` holds a key spelling
+  # this parser does not recognise, which is precisely the cx5d configuration with the
+  # corroboration switched off.
   #
   # WHY `n_configured > 0` STAYS PERMISSIVE, deliberately and stated so the next reader does
   # not have to re-derive it: there the parsed patterns ARE the affirmative measurement —
@@ -1593,8 +1268,8 @@ roborev_check_census_exclusion() {
   # — so corroboration is a CROSS-CHECK that can only widen what we already measured, and its
   # absence withholds nothing that was claimed. Failing there would red every run on a box
   # without the subcommand (case (cx1)), i.e. the self-disabling guard this change keeps
-  # refusing to build. The asymmetry is the same one `built-in-set:` draws: an unobservable
-  # oracle withholds a BLESSING it was the sole source of, and nothing else.
+  # refusing to build. The asymmetry is general: an unobservable oracle withholds a BLESSING
+  # it was the sole source of, and nothing else.
   #
   # The test is `!= OK` rather than `= UNAVAILABLE` on purpose: with an empty parse DRIFT has
   # already finished above and NOTICE is unreachable (it needs a parsed pattern the binary
@@ -1605,11 +1280,10 @@ roborev_check_census_exclusion() {
     if [ "$_rx_found" -eq 1 ]; then
       unverified_detail="the parser DID see an 'exclude_patterns' key, whose array was empty"
     fi
-    CENSUS_EXCLUSION="FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: $_rx_corroboration; built-in-set: $_rx_builtin_state)"
+    CENSUS_EXCLUSION="FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: $_rx_corroboration)"
     DETAILS+=("ERROR: census-exclusion: this wrapper's parse of $sources_line found NO configured exclusion pattern ($unverified_detail), and 'roborev config get exclude_patterns' — the ONLY oracle that can distinguish 'nothing is configured' from 'this parser did not recognise the key' — did not answer from either checkout (corroboration: $_rx_corroboration). So the empty parse is UNVERIFIED, and reporting it as a PASS would be reporting 'we could not check' as 'nothing was wrong'. Failing closed: that alias IS issue #3229, and a configured pattern this parser cannot see would silently narrow the reviewer's diff exactly as 'docs/**' did on PR #3222.")
     DETAILS+=("ERROR: census-exclusion: this is NOT a claim that something IS excluded — it is a refusal to certify a set we could not measure. Remedy, in order: (1) make the corroboration oracle answer — 'roborev config get exclude_patterns' must exit 0 from both '$REPO' and the ROOT checkout (a build without the subcommand cannot corroborate anything; upgrade or run from a box that has it); or (2) if a pattern IS configured, write it as a single-line array of quoted strings under a TOP-LEVEL 'exclude_patterns' key so the parse is non-empty and the reconciliation runs on measured data. An EMPTY configuration is fine and PASSes — but only once the binary has said so.")
     DETAILS+=("ERROR: census-exclusion: no review was enqueued. An unverifiable exclusion set is knowable BEFORE the enqueue, so it costs no review round.")
-    roborev_builtin_state_details
     finish FAIL 1
   fi
 
@@ -1625,59 +1299,27 @@ roborev_check_census_exclusion() {
     finish FAIL 1
   fi
 
-  # How the PASS line describes the CONFIGURED half. The built-in half is always
-  # evaluated, so "nothing is configured" must never read as "nothing is excluded".
+  # How the PASS line describes the exclusion set. `n_conf_effective` counts the patterns
+  # that survived trimming (a whitespace-only pattern is SKIPPED by the port, exactly as the
+  # algorithm skips it), so "3 patterns configured" and "3 patterns that exclude nothing"
+  # cannot read the same.
   local n_conf_effective=0 idx
   for ((idx = 0; idx < ${#_rx_owner_src[@]}; idx++)); do
-    [ "${_rx_owner_src[$idx]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
     n_conf_effective=$((n_conf_effective + 1))
   done
-  # `pass_prefix` leads the PASS parenthetical when the CONFIGURED half contributes
-  # nothing, so "nothing is configured" can never be mistaken for "nothing is excluded" —
-  # the built-in half is still named, counted and reconciled.
   local pass_prefix="" survive_of="the effective exclusion set"
   if [ "$n_configured" -eq 0 ]; then
     pass_prefix="no exclusion patterns configured; "
-    survive_of="the $n_builtin roborev v0.61.2 built-in exclude(s)"
+    survive_of="an EMPTY exclusion set"
   elif [ "$n_conf_effective" -eq 0 ]; then
     pass_prefix="$n_configured configured pattern(s), all empty after trimming; "
-    survive_of="the $n_builtin roborev v0.61.2 built-in exclude(s)"
-  fi
-
-  # --- the built-in DIVERGENCE fragment, computed once ---------------------------
-  # Assembled here so that whichever verdict wins below can carry it: a divergence must
-  # be reported even on a run that swallows nothing, and must not be hidden by (or hide)
-  # a coexisting configured swallow.
-  local builtin_div="" builtin_div_missing=""
-  if [ "$_rx_builtin_state" = DIVERGED ]; then
-    # VERSION first: it is the GENERAL signal, and it reframes every other fragment — on a
-    # different build the patterns, the count and the port all need re-deriving, so a
-    # reader must not diagnose a moved pattern before knowing the binary moved.
-    if [ -n "$_rx_builtin_version_note" ]; then
-      builtin_div="$_rx_builtin_version_note"
-    fi
-    if [ "${#_rx_builtin_missing[@]}" -gt 0 ]; then
-      builtin_div_missing=$(
-        IFS=,
-        printf '%s' "${_rx_builtin_missing[*]}"
-      )
-      [ -z "$builtin_div" ] || builtin_div="$builtin_div; "
-      builtin_div="${builtin_div}pinned pattern(s) no longer present in the binary: ${builtin_div_missing//,/, }"
-    fi
-    if [ -n "$_rx_builtin_bucket_note" ]; then
-      [ -z "$builtin_div" ] || builtin_div="$builtin_div; "
-      builtin_div="$builtin_div$_rx_builtin_bucket_note"
-    fi
-    if [ -n "$_rx_builtin_count_note" ]; then
-      [ -z "$builtin_div" ] || builtin_div="$builtin_div; "
-      builtin_div="$builtin_div$_rx_builtin_count_note"
-    fi
+    survive_of="an EMPTY exclusion set"
   fi
 
   local n_code=${#census_code_paths[@]}
   local -a swallowed=()
   local -A _rx_blame=() _rx_blame_src=()
-  local n_builtin_hits=0 n_config_hits=0 m=0 joined="" path
+  local n_config_hits=0 m=0 joined="" path
   local surv_file="$LOG.exclusion"
   local i=0 body="" matched="" shown=0
 
@@ -1686,7 +1328,12 @@ roborev_check_census_exclusion() {
   # path sets would not be comparable. `-z` for NUL-safety.
   local rc=0
   set +e
-  git -C "$REPO" diff --name-only -z --no-renames "${BASE}...HEAD" -- "${_rx_pathspecs[@]}" \
+  # `${_rx_pathspecs[@]+...}` because an EMPTY pathspec set is now REACHABLE: with nothing
+  # configured (or every pattern empty after trimming) there is no exclusion at all, and git
+  # is then correctly asked for the whole diff. Under `set -u` the bare expansion of an empty
+  # array is a portability hazard, so the guarded form is used rather than relied upon.
+  git -C "$REPO" diff --name-only -z --no-renames "${BASE}...HEAD" -- \
+    ${_rx_pathspecs[@]+"${_rx_pathspecs[@]}"} \
     >"$surv_file" 2>"$surv_file.err"
   rc=$?
   set -e
@@ -1726,12 +1373,9 @@ roborev_check_census_exclusion() {
   for ((i = 0; i < ${#_rx_owner_body[@]}; i++)); do
     body="${_rx_owner_body[$i]}"
     # The POSITIVE form must be the SAME pathspec set the exclusion used, or blame
-    # attributes a path to a pattern that did not eat it. A BUILT-IN contributes ONE
-    # verbatim pathspec (no `/**` sibling — see roborev_format_exclude_args), so asking
-    # for a sibling here would blame `**/Cargo.lock` for a `Cargo.lock/` subtree the
-    # real exclusion never touched.
-    local -a _blame_spec=(":(glob)$body")
-    if [ "${_rx_owner_single[$i]}" -ne 1 ]; then _blame_spec+=(":(glob)$body/**"); fi
+    # attributes a path to a pattern that did not eat it — hence BOTH the body and its
+    # `/**` sibling, exactly as `roborev_format_exclude_args` emitted them.
+    local -a _blame_spec=(":(glob)$body" ":(glob)$body/**")
     set +e
     git -C "$REPO" diff --name-only -z --no-renames "${BASE}...HEAD" \
       -- "${_blame_spec[@]}" >"$surv_file.blame" 2>/dev/null
@@ -1745,13 +1389,8 @@ roborev_check_census_exclusion() {
     done <"$surv_file.blame"
   done
 
-  for path in "${swallowed[@]}"; do
-    if [ "${_rx_blame_src[$path]:-}" = "$ROBOREV_BUILTIN_SRC_LABEL" ]; then
-      n_builtin_hits=$((n_builtin_hits + 1))
-    else
-      n_config_hits=$((n_config_hits + 1))
-    fi
-  done
+  # Every pattern in play is CONFIGURED, so every swallow is a configured swallow.
+  n_config_hits=${#swallowed[@]}
   m=${#swallowed[@]}
   for path in "${swallowed[@]}"; do
     [ "$shown" -lt 10 ] || break
@@ -1768,168 +1407,50 @@ roborev_check_census_exclusion() {
   #   **FAIL where the author can act; NOTICE where only the information is actionable;
   #   never silence.**
   #
-  # It resolves three calls that would otherwise be three ad-hoc judgements:
-  #   - a CONFIGURED pattern swallowing census code ⇒ FAIL. The remedy is a one-token
-  #     edit to a named file; the author can act before paying for a review round.
-  #   - a PINNED built-in swallowing census code ⇒ NOTICE. There is NO remedy: the
-  #     deny-list is compiled into the binary, with no configuration switch and no
-  #     negation form (R5). Failing would red a ROUTINE `Cargo.lock` touch against a
-  #     check its author cannot possibly satisfy — and **a guard that fires on correct
-  #     input with no available fix is the guard that gets disabled**, which is how
-  #     #3229 happened. So: named loudly in the VALUE line, run proceeds.
-  #   - the LIVE built-in set DIVERGING from the pinned 24 ⇒ FAIL. This one DOES have a
-  #     remedy (re-extract, update the pin, judge the new built-in), and it is a
-  #     MECHANISM change, which the v0.61.2 pin already obliges us to catch on upgrade
-  #     rather than assume away. A bare NOTICE here would silently absorb an upgrade that
-  #     started excluding `*.rs` or `scripts/**`, with the failure looking like normal
-  #     operation: the exact blindness this issue exists to close.
-  # "Never silence" is the third clause and it is load-bearing: an unobservable built-in
-  # set is `UNAVAILABLE` IN THE VALUE LINE, never an unstated assumption of agreement.
+  # On THIS check's subject — the configured `exclude_patterns` — the rule resolves to a
+  # SINGLE call: a CONFIGURED pattern swallowing census code ⇒ FAIL. The remedy is a
+  # one-token edit to a NAMED file, so the author can act before paying for a review round,
+  # and the FAIL lands PRE-ENQUEUE.
   #
-  # PRECEDENCE: both FAIL causes outrank the NOTICE, and EVERY cause present is named —
-  # the actionable half must never be hidden behind the unactionable one, in either
-  # direction.
+  # THERE IS DELIBERATELY NO `NOTICE` VERDICT HERE (#3229 owner ruling; #3278). A NOTICE is
+  # the right value for a swallow with NO remedy, and the only such swallow is by roborev's
+  # compiled-in deny-list — which this check does not model at all (see the scope decision at
+  # the top of this file). With every pattern in play CONFIGURED and therefore EDITABLE, every
+  # swallow this check can see is actionable, so the verdict is PASS or FAIL and nothing in
+  # between. "Never silence" still holds, one level up: the residual — a built-in swallow this
+  # check cannot see — is stated in this file's header, in the delta spec and in `design.md`
+  # under AC4's second branch, rather than left to be rediscovered.
   #
-  # `NOTICE*` is deliberately OUTSIDE the wrapper's failing-capable verdict scan
-  # (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`), so a NOTICE cannot red `RESULT:`; both FAIL
-  # forms below start with `FAIL`, so they can. That correspondence is asserted
-  # structurally in the regression suite, against the scan itself.
-  local builtin_state_clause="built-in-set: $_rx_builtin_state"
-  if [ "$_rx_builtin_state" != DIVERGED ] && [ "$n_config_hits" -eq 0 ]; then
-    if [ "$m" -eq 0 ]; then
-      local corr_clause="corroboration: $_rx_corroboration"
-      [ "$n_code" -gt 0 ] || corr_clause="corroboration: SKIP (no code paths)"
-      CENSUS_EXCLUSION="PASS (${pass_prefix}$n_code/$n_code code census paths survive $survive_of; $corr_clause; $builtin_state_clause)"
-      roborev_builtin_state_details
-      return 0
-    fi
-    # --- the TOTAL swallow: nothing reaches the reviewer at all ⇒ FAIL --------------
-    # A PARTIAL built-in swallow is a NOTICE (above/below): some of the diff still reaches
-    # the reviewer, the remainder has no remedy, and failing would red a routine
-    # `Cargo.lock` touch — the ruling this change deliberately made.
-    #
-    # THIS IS NOT A CONTRADICTION OF THAT RULING; it is the SAME rule — "FAIL where the
-    # author can act; NOTICE where only the information is actionable; NEVER SILENCE" —
-    # applied consistently to a case the NOTICE ruling does not cover. When EVERY code
-    # census path is swallowed the reviewer receives an EMPTY prompt, so a returned "no
-    # issues found" certifies NOTHING: it is the very same condition `code-free:` already
-    # FAILs pre-enqueue for a prose-only census, arrived at by the exclusion set rather
-    # than by classification. Reporting a NOTICE here would let `prompt-content:` go on to
-    # print `PASS (0/0 code census paths present)` and the block to read `RESULT: PASS` —
-    # a VACUOUS pass TEXTUALLY IDENTICAL to a genuine one, on which `flow-closer` would
-    # arm `--auto`. MEASURED (#3229 round 3, hermetic fixture `Cargo.lock` + `README.md`):
-    # `census-exclusion: NOTICE (0/1 ... survive)` ⇒ `prompt-content: PASS (0/0 ...)` ⇒
-    # `RESULT: PASS`, exit 0. Any dependency-bump branch whose only non-prose file is a
-    # `Cargo.lock` / `go.sum` / `pnpm-lock.yaml` reaches it, and `code-free:` does NOT
-    # catch it because a `.lock` extension classifies as CODE.
-    # The remedy is the ACTIONABLE one code-free already prescribes — verify another way
-    # and record it — so this FAILs, and it FAILs BEFORE the enqueue: a review of an empty
-    # prompt costs a round and certifies nothing.
-    if [ "$m" -ge "$n_code" ]; then
-      CENSUS_EXCLUSION="FAIL (${pass_prefix}0/$n_code code census paths survive $survive_of; ALL $n_code code census path(s) excluded by a roborev built-in, so the reviewer would receive an EMPTY diff: $joined; corroboration: $_rx_corroboration; $builtin_state_clause)"
-      DETAILS+=("ERROR: census-exclusion: EVERY ONE of the $n_code CODE path(s) in this census is dropped from the diff roborev builds by a ROBOREV BUILT-IN exclude (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list), so NOTHING would reach the reviewer. A verdict on an EMPTY prompt certifies nothing, and this diff therefore CANNOT be roborev-certified at all — exactly as a code-free (prose-only) census cannot. The sanctioned substitute is primary-source verification recorded in the PR; this change must NEVER record \"roborev clean\".")
-      DETAILS+=("ERROR: census-exclusion: a PARTIAL built-in swallow stays a NOTICE — some of the diff still reaches the reviewer and the rest has no remedy. A TOTAL one FAILs because it is the same condition 'code-free:' already fails pre-enqueue: this is the rule 'FAIL where the author can act; NOTICE where only the information is actionable; never silence' applied consistently, not an exception to it. The actionable remedy is the one code-free prescribes — verify these path(s) another way and record it.")
-      DETAILS+=("ERROR: census-exclusion: path(s) the reviewer would NOT receive, each with the built-in responsible:")
-      for path in "${swallowed[@]}"; do
-        DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'  [${_rx_blame_src[$path]:-<unattributed>}]")
-      done
-      DETAILS+=("ERROR: census-exclusion: no review was enqueued — an exclusion set that swallows the WHOLE code census is knowable BEFORE the enqueue, so it costs no review round.")
-      roborev_builtin_state_details
-      finish FAIL 1
-    fi
-    # The EXCUSAL clause, and the two detail sentences that depend on it. GRANTED keeps
-    # the round-8 wording verbatim; WITHHELD says so in the VALUE LINE, in words that read
-    # as neither a clean PASS nor as a DIVERGED set — because the state is neither.
-    local excusal_clause="" pin_clause=", and the live built-in set still MATCHES that pin" \
-      expect_clause="'prompt-content:' will not expect them either, because their absence is a deterministic property of roborev's mechanism rather than evidence about the reviewer."
-    if [ "$builtin_excusal" != GRANTED ]; then
-      excusal_clause="excusal WITHHELD: the built-in model is NOT VERIFIED (built-in-set: $_rx_builtin_state), so NO path is excused and 'prompt-content:' still expects all $n_code code census path(s); "
-      pin_clause=""
-      expect_clause="'prompt-content:' WILL still expect them, because the excusal — the claim that their absence is a DETERMINISTIC property of roborev's mechanism — rests on the live built-in set actually being the pinned one, and that could NOT be verified on this run (built-in-set: $_rx_builtin_state). 'We could not check' is never 'nothing was wrong', so coverage is not excused on an unverified model: if the reviewer really did not receive one of these path(s), 'prompt-content:' FAILs, which is the correct fail-closed outcome here."
-    fi
-    CENSUS_EXCLUSION="NOTICE (${pass_prefix}$((n_code - m))/$n_code code census paths survive $survive_of; $m code census path(s) excluded by a roborev built-in: $joined; ${excusal_clause}corroboration: $_rx_corroboration; $builtin_state_clause)"
-    DETAILS+=("NOTICE: census-exclusion: $m of the $n_code CODE path(s) in this census are dropped from the diff roborev builds by a ROBOREV BUILT-IN exclude (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list)$pin_clause. NO configured pattern is responsible, so there is NOTHING TO FIX in '$repo_cfg' or any other config file — the deny-list is compiled into the binary and has no opt-out. Under the rule 'FAIL where the author can act; NOTICE where only the information is actionable; never silence', this is a NOTICE: a check that fires on a legitimate change (a routine Cargo.lock touch) with no remedy available is a check that gets disabled, which is how #3229 happened.")
-    DETAILS+=("NOTICE: census-exclusion: path(s) the reviewer will NOT receive, each with the built-in responsible:")
-    for path in "${swallowed[@]}"; do
-      DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'  [${_rx_blame_src[$path]:-<unattributed>}]")
-    done
-    DETAILS+=("NOTICE: census-exclusion: a clean verdict on this review does NOT cover those path(s) — verify them some other way (primary sources, a regenerate-and-diff, or by reviewing them outside roborev). $expect_clause")
-    roborev_builtin_state_details
-    # Hand the set to `prompt-content:` so it does not re-report a KNOWN absence as a
-    # discovery. TWO conditions, both required:
-    #   * the swallow is by a BUILT-IN, not a configured pattern (a configured swallow
-    #     FAILs below and never reaches here); and
-    #   * the built-in model is VERIFIED (`built-in-set: OK`) — see the excusal block
-    #     above. On `UNAVAILABLE` the set stays EMPTY, so `prompt-content:` evaluates
-    #     every census code path normally and fails closed if one is really absent.
-    if [ "$builtin_excusal" = GRANTED ]; then
-      CENSUS_BUILTIN_EXCLUDED=("${swallowed[@]}")
-    fi
+  # A TOTAL swallow needs no separate branch: it IS a configured swallow, so it FAILs, and the
+  # FAIL value carries `m/n` so `m == n` is visible on its face.
+  #
+  # `n_config_hits` == `m` by construction (every pattern is configured), so the PASS branch
+  # below is exactly "nothing was swallowed".
+  if [ "$n_config_hits" -eq 0 ]; then
+    local corr_clause="corroboration: $_rx_corroboration"
+    [ "$n_code" -gt 0 ] || corr_clause="corroboration: SKIP (no code paths)"
+    CENSUS_EXCLUSION="PASS (${pass_prefix}$n_code/$n_code code census paths survive $survive_of; $corr_clause)"
     return 0
   fi
 
-  # --- a FAIL: a configured swallow, a built-in divergence, or both --------------
-  local fail_value=""
-  if [ "$n_config_hits" -gt 0 ] || [ "$m" -gt 0 ]; then
-    fail_value="$m/$n_code code census paths excluded: $joined"
-  fi
-  if [ "$_rx_builtin_state" = DIVERGED ]; then
-    [ -z "$fail_value" ] || fail_value="$fail_value; ALSO "
-    fail_value="${fail_value}roborev built-in exclude set DIVERGED from the pinned v0.61.2 set: $builtin_div"
-  fi
-  # The built-in state rides on THIS value too (#3229 round-9 F1 audit). This is the ONE
-  # reconciliation verdict that used to omit it, which made the documented contract
-  # ("every value ends with built-in-set: OK|DIVERGED|UNAVAILABLE") false for exactly the
-  # branch where a configured swallow coexists with an UNVERIFIED built-in model — the
-  # state stayed silent, and "never silence" is the third clause of the rule, not a
-  # PASS-only courtesy.
-  CENSUS_EXCLUSION="FAIL ($fail_value; $builtin_state_clause)"
+  # --- a FAIL: a configured pattern swallowed census code ------------------------
+  CENSUS_EXCLUSION="FAIL ($m/$n_code code census paths excluded: $joined)"
 
-  if [ "$_rx_builtin_state" = DIVERGED ]; then
-    DETAILS+=("ERROR: census-exclusion: the LIVE roborev built-in exclude set no longer matches the set PINNED to v0.61.2 in ROBOREV_BUILTIN_EXCLUDES. Divergence: $builtin_div. This is a MECHANISM change, and unlike a pinned built-in it HAS a remedy, which is why it FAILs rather than reporting a NOTICE: re-extract the deny-list from the binary (LC_ALL=C grep -a -o ':(exclude,glob)[^ ]*' \"\$(command -v roborev)\"), update ROBOREV_BUILTIN_EXCLUDES and ROBOREV_BUILTIN_PATHSPEC_LITERALS, and JUDGE the new built-in — an upgrade that started excluding '*.rs' or 'scripts/**' would otherwise be absorbed silently while the block still read green. Re-verify the ported git.FormatExcludeArgs in the same pass.")
-    if [ -n "$_rx_builtin_version_note" ]; then
-      DETAILS+=("ERROR: census-exclusion: the executable is NOT the build this model was derived from — it reports $_rx_builtin_version, pinned $ROBOREV_PINNED_VERSION. That alone is the divergence: the 24 built-in patterns, their one-pathspec arity AND the ported git.FormatExcludeArgs were all read out of the $ROBOREV_PINNED_VERSION binary, so on any other build EVERY one of them is unverified and the check would be reconciling this diff against a mechanism that is no longer in play. Re-verify all three against the new binary and move ROBOREV_PINNED_VERSION in the same commit — this is the standing re-verify-on-upgrade obligation the pin has always carried, now enforced rather than remembered.")
-    fi
-    if [ -n "$_rx_builtin_bucket_note" ]; then
-      DETAILS+=("ERROR: census-exclusion: a pinned pattern is PRESENT but no longer RIGHT-BOUNDED, which is a divergence a bare presence test cannot see. Go packs the rodata string blob in LENGTH order with no terminator, so a fixed-string search for ':(exclude,glob)<pattern>' has an exact LEFT boundary and NO right one: '**/Cargo.lock' matches inside '**/Cargo.lock.bak'. The boundary used instead is the blob's own structure — each LENGTH BUCKET is stored as ONE contiguous run, so exactly k-1 of a k-member bucket must be immediately followed by another ':(exclude,glob)' literal. A bucket that no longer satisfies that either gained a longer pattern sharing a pinned prefix or had one renamed at equal length; the count (2) and the missing list (1) are both blind to it. Re-extract the deny-list, re-derive the buckets, and JUDGE what the new literal excludes before re-pinning.")
-    fi
-  fi
-  if [ "$m" -eq 0 ]; then
-    DETAILS+=("ERROR: census-exclusion: no census code path is currently swallowed — this FAIL is about the MECHANISM having moved under us, not about this diff. It is deliberately diff-independent for the same reason the trailing-slash FAIL is.")
-    DETAILS+=("ERROR: census-exclusion: no review was enqueued — the exclusion set roborev will apply is no longer the one this check models, so a reconciliation against it certifies nothing.")
-    finish FAIL 1
-  fi
-
-  DETAILS+=("ERROR: census-exclusion: the EFFECTIVE roborev exclusion set would remove $m of the $n_code CODE path(s) in this census from the diff roborev builds, so the reviewer would never see them and a clean verdict would be VACUOUS for those files. roborev drops exactly what its pathspecs match — it makes NO code/non-code judgement — so this is a CONFIGURATION defect (or a roborev built-in), not a reviewer one; do NOT go looking at prompt-content or the reviewer.")
+  DETAILS+=("ERROR: census-exclusion: the EFFECTIVE roborev exclusion set would remove $m of the $n_code CODE path(s) in this census from the diff roborev builds, so the reviewer would never see them and a clean verdict would be VACUOUS for those files. roborev drops exactly what its pathspecs match — it makes NO code/non-code judgement — so this is a CONFIGURATION defect, not a reviewer one; do NOT go looking at prompt-content or the reviewer.")
   DETAILS+=("ERROR: census-exclusion: config sources read, ALL of them, and a swallow in ANY is a FAIL (which file a given roborev build prefers is an internal detail this check must not bet on): $sources_line.")
   if [ -n "$root_cfg" ]; then
     DETAILS+=("ERROR: census-exclusion: '$REPO' is a LINKED WORKTREE. roborev's daemon binds the repository by its 'repos.root_path' — the ROOT checkout '$_rx_root' — so '$root_cfg' is the file its reviews actually apply. A narrowed worktree config does NOT override it; edit the file the value line names.")
   fi
-  if [ "$n_config_hits" -gt 0 ]; then
-    DETAILS+=("ERROR: census-exclusion: $n_config_hits of the $m swallowed path(s) were excluded by YOUR CONFIGURATION — editable, and the remedy is to narrow the responsible pattern in the file its source tag names.")
-  fi
-  if [ "$n_builtin_hits" -gt 0 ]; then
-    local soften_because="the $n_config_hits configured swallow(s) above are actionable"
-    if [ "$n_config_hits" -eq 0 ]; then
-      soften_because="the built-in set has DIVERGED from the pin, which IS actionable"
-    fi
-    DETAILS+=("ERROR: census-exclusion: $n_builtin_hits of the $m swallowed path(s) were excluded by a ROBOREV BUILT-IN (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list). That direction ALONE would be a NOTICE (it has no remedy — the deny-list is compiled in), but it does NOT soften this FAIL: $soften_because, and the FAIL wins. Every cause is named so the actionable half is not hidden behind the unactionable one. Those built-in path(s) will not reach the reviewer even after you fix what IS fixable; verify them some other way.")
-  fi
+  DETAILS+=("ERROR: census-exclusion: all $m of the swallowed path(s) were excluded by YOUR CONFIGURATION — editable, and the remedy is to narrow the responsible pattern in the file its source tag names.")
   DETAILS+=("ERROR: census-exclusion: swallowed path(s), each with the pattern responsible and its source:")
   for path in "${swallowed[@]}"; do
     DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'  [${_rx_blame_src[$path]:-<unattributed>}]")
   done
   DETAILS+=("ERROR: census-exclusion: the $n_configured configured pattern(s) resolved to these git pathspecs (an exact port of roborev v0.61.2's git.FormatExcludeArgs — a pattern with an interior or leading '/' is ROOT-ANCHORED and verbatim, a slash-less pattern is '**/'-prefixed and RECURSIVE, and every pattern emits BOTH itself and its '/**' sibling):")
   for ((i = 0; i < ${#_rx_owner_body[@]}; i++)); do
-    [ "${_rx_owner_src[$i]}" != "$ROBOREV_BUILTIN_SRC_LABEL" ] || continue
     DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}")
-    # The sibling is printed only when the pattern actually HAS one. Driven off the same
-    # `_rx_owner_single` flag the pathspecs and the blame are, so this listing cannot
-    # advertise an exclusion git was never asked for.
-    [ "${_rx_owner_single[$i]}" -eq 1 ] ||
-      DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}/**")
+    DETAILS+=("  [${_rx_owner_src[$i]}] :(exclude,glob)${_rx_owner_body[$i]}/**")
   done
-  DETAILS+=("ERROR: census-exclusion: PLUS $n_builtin roborev v0.61.2 built-in exclude(s) — the hard-coded lockfile/cache deny-list (${ROBOREV_BUILTIN_EXCLUDES[*]}) — which are always applied and are not configurable.")
   DETAILS+=("ERROR: census-exclusion: no review was enqueued — a swallowing exclusion set is knowable BEFORE the enqueue, so it costs no review round.")
   finish FAIL 1
 }

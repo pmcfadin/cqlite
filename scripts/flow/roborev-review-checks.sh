@@ -131,33 +131,16 @@ roborev_check_prompt_content() {
     # extends, is header-shape knowledge — so it lives with the matcher, not here, and this
     # file just carries the three parallel arrays through.
     roborev_collect_prompt_headers "$PROMPT_FILE"
-    # SUBTRACT the paths `census-exclusion:` determined a ROBOREV BUILT-IN drops. Their
-    # absence from the prompt is not a finding: it is the deterministic consequence of a
-    # deny-list compiled into the binary, already reported LOUDLY (and non-fatally) under
-    # `census-exclusion: NOTICE`, with no remedy available under either key. Asserting
-    # their presence would red a routine `Cargo.lock` touch here after we deliberately
-    # chose not to red it there — the same self-defeating guard, moved one key down.
-    # Scoped to BUILT-IN swallows ONLY: a CONFIGURED swallow FAILs pre-enqueue, so this
-    # code is never reached with one, and the subtraction can never mask a config defect.
-    # `CENSUS_BUILTIN_EXCLUDED` holds the same RAW paths the census does, so this is a
-    # direct byte comparison.
-    # IT IS ALSO SCOPED TO A **VERIFIED** BUILT-IN MODEL (#3229 round-9 F1). The subtraction
-    # asserts that a path's absence is a DETERMINISTIC property of the pinned deny-list, so
-    # `census-exclusion:` populates this array ONLY on `built-in-set: OK`. On `UNAVAILABLE`
-    # it stays EMPTY and every census code path is checked here — the fail-closed direction,
-    # because excusing coverage on a model we could not verify is exactly the false-PASS
-    # this key exists to prevent.
-    checked_paths=()
-    for census_path in "${census_code_paths[@]}"; do
-      builtin_excluded=0
-      for excluded_path in ${CENSUS_BUILTIN_EXCLUDED[@]+"${CENSUS_BUILTIN_EXCLUDED[@]}"}; do
-        [ "$census_path" != "$excluded_path" ] || builtin_excluded=1
-      done
-      [ "$builtin_excluded" -eq 0 ] || continue
-      checked_paths+=("$census_path")
-    done
+    # EVERY code census path is expected in the prompt. There is NO subtraction and no
+    # excusal: `census-exclusion:` FAILs pre-enqueue on a CONFIGURED swallow, and roborev's
+    # own compiled-in deny-list is deliberately not modelled (issue #3278), so nothing here
+    # is licensed to say "do not expect this path". A path the reviewer really did not get
+    # therefore FAILs — the fail-closed direction. The residual that lands here is a
+    # built-in-excluded path (`Cargo.lock`, `go.sum`, …): it FAILs under this key with a
+    # cause that names the symptom rather than the mechanism. See the scope decision at the
+    # top of `roborev-review-oracles.sh`.
+    checked_paths=("${census_code_paths[@]}")
     census_total=${#checked_paths[@]}
-    n_builtin_skipped=$((${#census_code_paths[@]} - census_total))
     missing_paths=()
     for census_path in ${checked_paths[@]+"${checked_paths[@]}"}; do
       found=0
@@ -172,13 +155,15 @@ roborev_check_prompt_content() {
     done
     if [ "$census_total" -eq 0 ]; then
       # A `0/0` IS NEVER A PASS (codex round 7 — BLOCKER, #3229). Belt-and-braces behind
-      # `census-exclusion:`, which now FAILs pre-enqueue when EVERY code census path is
-      # swallowed: with nothing left to check there is no evidence whatsoever that the
-      # reviewer received a diff, and `PASS (0/0 code census paths present)` is textually
-      # indistinguishable from a genuine pass. Refuse to print one — if this key has no
-      # subject, it has no verdict to give.
+      # `code-free:`, which FAILs pre-enqueue on a census with no CODE path at all: with
+      # nothing to check there is no evidence whatsoever that the reviewer received a diff,
+      # and `PASS (0/0 code census paths present)` is textually indistinguishable from a
+      # genuine pass. Refuse to print one — if this key has no subject, it has no verdict to
+      # give. Kept as a STRUCTURAL backstop even though it is unreachable through the normal
+      # ordering: the whole point is that it does not depend on an upstream check still being
+      # there.
       PROMPT_CONTENT="FAIL (no code census path was checkable — a 0/0 is never a pass)"
-      DETAILS+=("ERROR: prompt-content: there is not one CODE census path left to look for in the prompt (census code paths: ${#census_code_paths[@]}, all of them dropped from the diff roborev builds), so this key has NO subject and therefore no verdict to give. Failing closed: 'PASS (0/0 code census paths present)' would be textually identical to a genuine pass while the reviewer received an EMPTY prompt. See census-exclusion:, which fails pre-enqueue for the same reason.")
+      DETAILS+=("ERROR: prompt-content: there is not one CODE census path to look for in the prompt (census code paths: ${#census_code_paths[@]}), so this key has NO subject and therefore no verdict to give. Failing closed: 'PASS (0/0 code census paths present)' would be textually identical to a genuine pass while the reviewer received an EMPTY prompt. See code-free:, which fails pre-enqueue for the same reason.")
     elif [ "${#missing_paths[@]}" -gt 0 ]; then
       PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
       DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a prompt that does not mention its files cannot have reviewed them. Missing (first 10):")
@@ -190,9 +175,6 @@ roborev_check_prompt_content() {
       done
     else
       PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"
-      if [ "$n_builtin_skipped" -gt 0 ]; then
-        PROMPT_CONTENT="$PROMPT_CONTENT (+$n_builtin_skipped not expected: excluded by a roborev built-in — see census-exclusion:)"
-      fi
     fi
   fi
 }

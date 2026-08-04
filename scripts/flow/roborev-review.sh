@@ -98,10 +98,8 @@
 #   push-assert / census-check / code-free / review-completed  PASS | FAIL (...) | SKIP
 #   census-exclusion  PASS (<k>/<n> code census paths survive the effective exclusion
 #                     set; corroboration: OK|NOTICE|UNAVAILABLE) |
-#                     PASS (no exclusion patterns configured; <k>/<n> ... survive the
-#                     <b> roborev v0.61.2 built-in exclude(s); corroboration: ...) |
-#                     NOTICE (<k>/<n> ... survive ...; <m> code census path(s) excluded
-#                     by a roborev built-in: <path> by '<pat>' [roborev-builtin]; ...) |
+#                     PASS (no exclusion patterns configured; <k>/<n> ... survive an
+#                     EMPTY exclusion set; corroboration: ...) |
 #                     FAIL (<m>/<n> code census paths excluded: <path> by '<pat>'
 #                     [<source>], ...) |
 #                     FAIL (exclusion set unreadable: ...) |
@@ -111,8 +109,7 @@
 #   job-record        PASS | PASS (no token accounting in the record) |
 #                     DEGRADED (incomplete after <n> retries: <fields>) | SKIP
 #   sha-assert        PASS | FAIL (...) | SKIP
-#   prompt-content    PASS (<k>/<n> code census paths present)
-#                     [ (+<b> not expected: excluded by a roborev built-in — ...) ] |
+#   prompt-content    PASS (<k>/<n> code census paths present) |
 #                     FAIL (<k>/<n> code census paths absent from the prompt) |
 #                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
 #                     FAIL (prompt unretrievable — ...) | SKIP
@@ -165,9 +162,8 @@
 # branch on the AFFIRMATIVE value (`= OK`), never on "not the bad one" (`!= DIVERGED`),
 # so an unknown state fails closed. Where a signal genuinely SHOULD be permissive (an
 # oracle that only cross-checks something already measured — `corroboration:` with
-# patterns parsed; `built-in-set:` deciding NOTICE-vs-FAIL), say so IN CODE with the
-# reason, so the next reader does not have to re-derive it and the next edit does not
-# silently widen it.
+# patterns parsed), say so IN CODE with the reason, so the next reader does not have to
+# re-derive it and the next edit does not silently widen it.
 #
 # WHICH CHECKS CARRY THE VERDICT. The DETERMINISTIC ones, each judged against data we
 # obtained ourselves: `push-assert` (the remote, via ls-remote), `census-check` (our
@@ -305,7 +301,7 @@ roborev v0.61.2's git.FormatExcludeArgs and letting GIT match.
 roborev drops exactly what its pathspecs match and makes NO code/non-code judgement,
 which is why this is computed, not assumed (#3229: a configured 'docs/**' discarded
 33 executable harness files on PR #3222).
-THE EFFECTIVE SET IS A UNION OF FOUR THINGS, and a swallow in ANY of them FAILs:
+THE EFFECTIVE SET IS A UNION OF THREE CONFIG FILES, and a swallow in ANY of them FAILs:
   1. the wrapper's --repo checkout .roborev.toml   [worktree-config|repo-config]
   2. the ROOT checkout's .roborev.toml        [root-config]  <-- when --repo is a
      LINKED WORKTREE. roborev's daemon binds a repo by its repos.root_path, i.e. the
@@ -313,90 +309,55 @@ THE EFFECTIVE SET IS A UNION OF FOUR THINGS, and a swallow in ANY of them FAILs:
      it, and reading only (1) reported '7/7 survive' on a branch whose real review
      came back 'prompt-content: FAIL (1/7 absent)'.
   3. ~/.roborev/config.toml                   [global-config]
-  4. roborev's own BUILT-IN excludes          [roborev-builtin]  <-- NOT configurable:
-     the hard-coded lockfile/cache deny-list (**/Cargo.lock, **/go.sum,
-     **/package-lock.json, ... **/.beads/**, **/.cache/**), extracted from the pinned
-     v0.61.2 binary. A Cargo.lock in your diff IS dropped from the reviewer's copy.
 Every value line names the SOURCE of the pattern responsible, because with several
 files in play "excluded by 'docs/**'" does not say which file to edit.
+
+NOT MODELLED, DELIBERATELY (issue #3278): roborev ALSO applies its own compiled-in
+lockfile/cache deny-list (**/Cargo.lock, **/go.sum, **/pnpm-lock.yaml, **/.cache/**, ...)
+that no configuration can switch off. This check reconciles the census against the
+CONFIGURED exclude_patterns only. THE RESIDUAL, stated rather than hidden (AC4's second
+branch): a diff whose only code-census path is a built-in-excluded path is silently
+dropped from the reviewer's diff, census-exclusion: reports it SURVIVING, and
+prompt-content: then FAILs because the prompt does not carry it. That fails CLOSED --
+never a vacuous green -- but its stated cause names the symptom, not the mechanism.
+
 THE UNIFYING RULE, which decides every value below:
   **FAIL where the author can act; NOTICE where only the information is actionable;
     never silence.**
-It is not three ad-hoc calls but one rule applied three times:
-  - a CONFIGURED pattern (sources 1-3) swallowing census code => FAIL. The remedy is a
-    one-token edit to a NAMED file; act before paying for a review round.
-  - a PINNED built-in (source 4) swallowing SOME census code => NOTICE. There IS no fix:
-    the deny-list is compiled in, with no opt-out and no negation form. A check that
-    fires on a legitimate change (a routine Cargo.lock touch) with no remedy available
-    is a check that gets DISABLED, and a disabled census-exclusion is #3229 all over
-    again.
-  - a PINNED built-in swallowing the WHOLE code census => FAIL. Not an exception to the
-    NOTICE above but the SAME rule reaching a case it does not cover: with nothing left,
-    the reviewer receives an EMPTY prompt, so any verdict certifies NOTHING — the very
-    condition code-free: already FAILs pre-enqueue for a prose-only census. The remedy
-    is code-free's: verify another way and record it in the PR. Left as a NOTICE it let
-    prompt-content: print 'PASS (0/0 code census paths present)' and the block read
-    'RESULT: PASS' — a vacuous pass textually identical to a genuine one (MEASURED on a
-    Cargo.lock + README.md fixture). Any lockfile-only dependency bump reaches it, and
-    code-free: does not catch it because a '.lock' extension classifies as CODE.
-  - the LIVE built-in set DIVERGING from the pinned 24 => FAIL. This one HAS a remedy
-    (re-extract, update the pin, judge the new built-in) and it is a MECHANISM change,
-    which the v0.61.2 pin already obliges us to catch on upgrade. A NOTICE here would
-    silently absorb an upgrade that began excluding '*.rs' or 'scripts/**', with the
-    failure looking like normal operation.
-"never silence" is the third clause and it is load-bearing: an UNOBSERVABLE built-in
-set reads 'built-in-set: UNAVAILABLE' in the value line, never an unstated assumption
-of agreement. Every value therefore ends with built-in-set: OK|DIVERGED|UNAVAILABLE.
-Both FAIL causes outrank the NOTICE, and EVERY cause present is named. Values:
-  PASS (<k>/<n> code census paths survive ...; corroboration: OK|NOTICE|UNAVAILABLE;
-       built-in-set: OK|UNAVAILABLE)
-  PASS (no exclusion patterns configured; <k>/<n> ... survive the <b> roborev
-       v0.61.2 built-in exclude(s); ...)  absent key/file or an empty list, and only
-       once 'roborev config get' has CORROBORATED that nothing is configured
-  NOTICE (<k>/<n> ... survive ...; <m> code census path(s) excluded by a roborev
-       built-in: <path> by '<pattern>' [roborev-builtin]; ...)  PARTIAL swallow only
-       (a total one is the FAIL below); NON-FAILING (NOTICE is
-       outside the verdict scan's FAIL*|FINDINGS*|ERROR*|INCONSISTENT* set) but the
-       paths ARE named: a clean verdict does not cover them, and prompt-content: is
-       told not to expect them — but ONLY on 'built-in-set: OK'
-  NOTICE (... ; excusal WITHHELD: the built-in model is NOT VERIFIED (built-in-set:
-       UNAVAILABLE), so NO path is excused and 'prompt-content:' still expects all <n>
-       code census path(s); ...)  the EXCUSAL requires a VERIFIED model. Withholding it
-       fails CLOSED on the excusal without failing the run: prompt-content: goes on to
-       expect every census code path and FAILs if one is really absent. 'We could not
-       check' must never render as 'nothing was wrong'
-  FAIL (0/<n> code census paths survive ...; ALL <n> code census path(s) excluded by a
-       roborev built-in, so the reviewer would receive an EMPTY diff: ...)  the TOTAL
-       swallow — uncertifiable, exactly as a code-free census is
-  FAIL (roborev built-in exclude set DIVERGED from the pinned v0.61.2 set: <delta>)
-       DIFF-INDEPENDENT — the mechanism moved under us; re-extract and re-pin
+On this check's subject it resolves to ONE call: a CONFIGURED pattern (sources 1-3)
+swallowing census code => FAIL, pre-enqueue. The remedy is a one-token edit to a NAMED
+file, so the author can act before paying for a review round. There is deliberately NO
+NOTICE value here: a NOTICE is for a swallow with no remedy, and the only such swallow is
+by the deny-list this check does not model. A TOTAL swallow is not a separate branch --
+it is a configured swallow, so it FAILs, and the value carries <m>/<n> so m == n shows on
+its face. Values:
+  PASS (<k>/<n> code census paths survive the effective exclusion set;
+       corroboration: OK|NOTICE|UNAVAILABLE)
+  PASS (no exclusion patterns configured; <k>/<n> ... survive an EMPTY exclusion set;
+       ...)  absent key/file or an empty list, and only once 'roborev config get' has
+       CORROBORATED that nothing is configured
   FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>' [<source>], ...)
   FAIL (exclusion set unreadable: <cause>) present but unparseable, an unknown TOML
-                                          escape, or an unresolvable ROOT checkout —
+                                          escape, or an unresolvable ROOT checkout --
                                           DISTINCT from 'no exclusion patterns
                                           configured'
   FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no
-       oracle confirmed that; corroboration: UNAVAILABLE; ...)  the empty-parse PASS
+       oracle confirmed that; corroboration: UNAVAILABLE)  the empty-parse PASS
        requires an AFFIRMATIVE measurement: with nothing parsed, 'roborev config get'
        is the ONLY oracle that can tell 'nothing is configured' from 'this parser did
        not recognise the key', so a silence it could not confirm is non-passing and
        says which of the two it could not rule out. NOT a claim that something IS
        excluded. With patterns parsed (n>0) corroboration is only a CROSS-CHECK and
-       its absence is permissive on purpose — the patterns themselves were measured
+       its absence is permissive on purpose -- the patterns themselves were measured
   FAIL (trailing-slash pattern '<p>/' from <source> resolves RECURSIVE ...)
                                           diff-independent
   FAIL (exclusion set drift: '<pattern>' reported by roborev config get ...)  also
-       how a key spelling this parser does not recognise — but roborev DOES honour —
+       how a key spelling this parser does not recognise -- but roborev DOES honour --
        is caught, instead of reading as a green 'nothing configured'
   SKIP (<cause>)                          the step was not reached
-A FAIL naming a config source is a CONFIGURATION defect: fix the named file — do not
-investigate the reviewer or prompt-content:. A NOTICE naming [roborev-builtin] is not
-fixable: roborev will never show a reviewer that path, so verify it some other way.
-A FAIL naming a DIVERGED built-in set is fixable HERE: re-extract the deny-list with
-  LC_ALL=C grep -a -o ':(exclude,glob)[^ ]*' "$(command -v roborev)"
-then update ROBOREV_BUILTIN_EXCLUDES + ROBOREV_BUILTIN_PATHSPEC_LITERALS in
-scripts/flow/roborev-review-oracles.sh and JUDGE the new built-in.
-Re-verify BOTH the port and the built-in list on any roborev version bump.
+A FAIL naming a config source is a CONFIGURATION defect: fix the named file -- do not
+investigate the reviewer or prompt-content:.
+Re-verify the ported git.FormatExcludeArgs on any roborev version bump.
 
 Sanctioned invocation (measured, issue #2964 round 5):
   roborev review --branch --base <base> --repo <abs> --agent <a> --model <m> --wait
@@ -520,13 +481,6 @@ census_files=0
 census_non_code_files=0
 census_paths=()
 census_code_paths=()
-# CODE census paths that `census-exclusion:` determined a ROBOREV BUILT-IN exclude drops
-# (never a configured pattern — that direction FAILs pre-enqueue and never gets here).
-# `prompt-content:` subtracts these, because their absence from the prompt is a
-# deterministic property of roborev's compiled-in deny-list, not evidence about the
-# reviewer — and re-reporting a known absence as a discovery would red a routine
-# Cargo.lock touch under a second key with no remedy behind either.
-CENSUS_BUILTIN_EXCLUDED=()
 PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"
@@ -719,9 +673,8 @@ roborev_census
 # answer" — a MISATTRIBUTED cause, sending the reader to investigate a configuration oracle
 # when the actionable fact is that the binary is missing (the same error push-assert
 # deliberately avoids when it refuses to call an auth failure "never pushed"). Asked here it
-# is also a real STRENGTHENING: every downstream `UNAVAILABLE` state — `corroboration:`,
-# `built-in-set:` — is now reachable only from a binary that is PRESENT but uncommunicative,
-# never from an absent one. Deliberately AFTER the census and `code-free:`, which are pure
+# is also a real STRENGTHENING: the downstream `corroboration: UNAVAILABLE` state is now
+# reachable only from a binary that is PRESENT but uncommunicative, never from an absent one. Deliberately AFTER the census and `code-free:`, which are pure
 # git/classification facts whose causes are more actionable still.
 if ! command -v roborev >/dev/null 2>&1; then
   SHA_ASSERT="FAIL (roborev not on PATH)"
@@ -1058,11 +1011,12 @@ roborev_check_tier2
 #
 # ====== THE GRAMMAR IS CLOSED: NO PASS WITHOUT AN AFFIRMATIVE VALUE (#3229 round-10) ======
 # THE GENERAL DEFECT this closes, of which three separate instances were found on this issue
-# (`built-in-set: UNAVAILABLE` taking the permissive excusal path; `corroboration:
-# UNAVAILABLE` reaching a PASS; a `${_census_end:-…}` fallback degrading a failed
-# measurement into a 1-line scan): **a multi-state signal where only the BAD states are
-# tested, so every unknown or unmeasured state inherits the PERMISSIVE branch.** A third
-# point fix is the wrong response; the shape has to be closed where it is structural.
+# (a three-state `built-in-set:` signal taking the permissive excusal path — that subsystem
+# is since deleted, #3278; `corroboration: UNAVAILABLE` reaching a PASS; a
+# `${_census_end:-…}` fallback degrading a failed measurement into a 1-line scan): **a
+# multi-state signal where only the BAD states are tested, so every unknown or unmeasured
+# state inherits the PERMISSIVE branch.** A third point fix is the wrong response; the shape
+# has to be closed where it is structural.
 #
 # This scan WAS that shape, at the wrapper's single most consequential decision point: it
 # tested four failing prefixes and let EVERYTHING ELSE fall through to `finish PASS 0`. So a
@@ -1102,9 +1056,12 @@ done
 # The grammar check above closes "an unplanned value inherits the non-failing branch". This
 # closes the neighbouring case: a value that is IN the grammar and non-failing, but is not a
 # measurement — `SKIP`, i.e. "this check never ran". The seven keys below are the ones that
-# CARRY the verdict (each judged against data the wrapper obtained itself), and on a PASS every
-# one of them must be an affirmative `PASS`; `census-exclusion:` may additionally be `NOTICE`,
-# which is a measurement WITH a stated, remedy-less residual (a pinned built-in swallow).
+# CARRY the verdict (each judged against data the wrapper obtained itself), and on a PASS
+# every one of them must be an affirmative `PASS` — no exceptions. (`census-exclusion:` used
+# to be allowed a `NOTICE` here, the one exception, because a remedy-less built-in swallow was
+# a measurement with a stated residual. That subsystem is deleted (#3278) and the key can no
+# longer emit `NOTICE`, so the exemption went with it: the backstop is now uniform, which is
+# STRICTER, never weaker.)
 # `vacuity-tier1/2` and `findings:` are deliberately EXCLUDED: they CORROBORATE, and
 # `UNAVAILABLE` / `NONE` are documented, legitimate values for them on a clean run.
 #
@@ -1127,7 +1084,6 @@ if [ "$failed" -eq 0 ]; then
     det_value="${keyed#*=}"
     case "$det_value" in
       PASS*) continue ;;
-      NOTICE*) [ "$det_key" != census-exclusion ] || continue ;;
     esac
     not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
   done
