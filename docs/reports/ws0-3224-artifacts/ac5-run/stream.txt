@@ -1,0 +1,11 @@
+mode=stream
+threads=12
+array_bytes=4294967296
+elements=536870912
+iters=10
+init_s=4.3628
+best_iter_s=0.152656
+gbps_basis24=84.405
+gbps_basis32=112.540
+checksum=14.0
+init_overrun=0

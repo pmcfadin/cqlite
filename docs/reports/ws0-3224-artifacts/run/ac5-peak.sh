@@ -72,7 +72,14 @@ cat "$OUT/stream.txt" | tee -a "$OUT/summary.txt"
 # iteration, while perf's counters cover the WHOLE window including the
 # single-threaded init. Those two are not comparable as rates, so the rate
 # comparison is reported for information and the BYTE ratio carries the verdict.
-python3 - "$OUT/perf-uncore-triad.csv" "$OUT/stream.txt" | tee -a "$OUT/summary.txt" <<'PY'
+# NOTE ON THE REDIRECTION ORDER — this was a real bug, caught on first execution.
+# Written as `python3 - args | tee -a file <<'PY'`, bash attaches the heredoc to the
+# LAST command of the pipeline, i.e. to *tee*: tee then copies the Python SOURCE
+# into summary.txt while python3 reads an empty stdin and computes nothing. The
+# original form of this block had exactly that shape and had never been executed,
+# so the defect sat latent in a committed script. The heredoc must be attached to
+# python3 and the pipe applied after it.
+python3 - "$OUT/perf-uncore-triad.csv" "$OUT/stream.txt" <<'PY' | tee -a "$OUT/summary.txt"
 import sys
 csv, stxt = sys.argv[1], sys.argv[2]
 per = {'S0': {}, 'S1': {}}

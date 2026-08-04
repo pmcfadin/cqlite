@@ -1,0 +1,81 @@
+{
+ "schema": "ws0-3224.stalls/v1",
+ "label": "llc-s1-N2",
+ "rep": 1,
+ "S_physical_cores": 1,
+ "N_streams": 2,
+ "step_secs": 120.0,
+ "server_cpus": "2,66",
+ "client_cpus": "8,9,72,73",
+ "corpus_rows": 3999890,
+ "event_group_C": "cycles,instructions,task-clock,cycle_activity.stalls_l3_miss,cycle_activity.stalls_l2_miss,cycle_activity.stalls_total,l1d_pend_miss.pending,l1d_pend_miss.pending_cycles",
+ "rc": {
+  "alignedC": 0
+ },
+ "convention": "aligned (perf runs the loadgen as its own child)",
+ "step": {
+  "schema": "flight-loadgen.step/v1",
+  "round": "llc-s1-N2-alignedC",
+  "endpoint": "http://127.0.0.1:8815",
+  "ts_unix_ms": 1785815016776,
+  "seed": 42,
+  "step": 0,
+  "target_concurrency": 2,
+  "shape": "full",
+  "duration_s": 144.8958377,
+  "requests_ok": 8,
+  "requests_unavailable": 0,
+  "requests_error": 0,
+  "error_codes": {},
+  "qps": 0.05521207597808036,
+  "rows_per_s": 220842.23058396386,
+  "bytes_per_s": 2692366736.605023,
+  "rows_total": 31999120,
+  "bytes_total": 390112733696,
+  "latency_ms": {
+   "p50": 35913.727,
+   "p95": 37552.127,
+   "p99": 37552.127,
+   "max": 37552.127,
+   "samples": 8
+  }
+ },
+ "occupancy": {
+  "alignedC": {
+   "rows_total": 31999120,
+   "rows_positive": true,
+   "whole_scans": 8.0,
+   "rows_total_is_exact_multiple_of_corpus": true,
+   "requests_ok": 8,
+   "requests_error": 0,
+   "requests_unavailable": 0,
+   "duration_s": 144.8958377,
+   "rows_per_s_step": 220842.23058396386,
+   "busy_fraction_estimate": 0.9914357118900181,
+   "ok": true
+  }
+ },
+ "server_io_before": {
+  "rchar": 3153478,
+  "wchar": 8143027824,
+  "syscr": 371,
+  "syscw": 1009417,
+  "read_bytes": 0,
+  "write_bytes": 4096,
+  "cancelled_write_bytes": 0
+ },
+ "server_io_after": {
+  "rchar": 3267874,
+  "wchar": 29857105774,
+  "syscr": 956,
+  "syscw": 3618390,
+  "read_bytes": 0,
+  "write_bytes": 4096,
+  "cancelled_write_bytes": 0
+ },
+ "warm_read_bytes_delta": 0,
+ "warm_verified_zero_disk_reads": true,
+ "client_cpu_count": 4,
+ "client_utilisation": 0.020080578014127114,
+ "client_saturation_gate_pass": true
+}

@@ -437,4 +437,355 @@ charge is reported as the upper bound it is — never as the attribution.
 
 ---
 
-<!-- RESULTS SECTIONS 4-7 APPENDED AFTER THE CAPTURES COMPLETE -->
+## 4. Results — the two endpoints
+
+**3 reps per endpoint**, every counter **100.00% enabled** in every rep, every validity gate
+PASS in every rep. Raw: `results/<label>/rep<N>/`; derivation `results/derive.py` →
+`results/derived.json` + `results/derived-summary.txt`; drivers `results/run-all.log` and
+`results/run-stalls.log`.
+
+`#3217's method gap 1 is closed`: its `llc-*` captures were **reps=1**, so its headline
+delta carried no dispersion. Here every figure is a median of 3 with min/max published.
+
+### 4.1 Headline — the decay reproduces, and instructions/row is flat
+
+ALIGNED convention (primary), medians of 3 reps:
+
+| per row | S=1 / N=2 | S=6 / N=16 | Δ | ratio |
+|---|--:|--:|--:|--:|
+| **instructions** | 38,856.8 | 38,685.6 | **−171.3 (−0.44%)** | 0.996 |
+| **cycles** | 31,316.4 | 37,284.9 | **+5,968.6 (+19.06%)** | 1.191 |
+| **IPC** | **1.2376** | **1.0384** | **−16.09%** | 0.839 |
+| rows/s (aggregate) | 222,329 | 1,117,642 | — | 5.027 |
+
+Dispersion across the 3 reps — cycles/row spread **1.52%** at S=1 and **0.56%** at S=6:
+
+| | min | median | max | spread |
+|---|--:|--:|--:|--:|
+| cycles/row S=1/N=2 | 31,117.9 | 31,316.4 | 31,593.6 | 1.52% |
+| cycles/row S=6/N=16 | 37,147.5 | 37,284.9 | 37,356.5 | 0.56% |
+
+**The same work, executed more slowly.** Instructions/row is flat to −0.44%; cycles/row
+rises 19%. This is #3217's finding, reproduced on a host where the mechanism counters work.
+
+### 4.2 AC2 — the endpoints are the same points, and rows/s lands in band
+
+| | #3217 (context only) | this host | Δ |
+|---|--:|--:|--:|
+| best aggregate at S=6/N=16 | 1,076,917 rows/s | **1,117,642 rows/s** | **+3.8%** |
+
+**+3.8% is the band, and it is a band check rather than a comparison of absolutes** — a
+two-socket bare-metal Ice Lake-SP is not #3217's single-socket virtualized Sapphire Rapids
+guest. Corpus geometry is exact on both row oracles (§3.1) and `sha256(Data.db)` was
+**re-verified unchanged after the last capture**:
+`b1656ae8c0e45feb30f3da641b8a23c4969d1be43e5f341ef0af6bb3a9b41042`. `--batch-size 8192` as
+AC2 requires; both SMT siblings of every pinned core; both endpoints inside NUMA node 0.
+
+Where this host **differs** from #3217's, stated rather than absorbed: its decay is
+**smaller** (cycles/row +19.06% vs +34.1%, IPC −16.09% vs −25.4%). That is the expected
+direction for a bare-metal host with a larger shared LLC (54 MiB/socket) and no hypervisor,
+and it does not weaken the mechanism claim, which rests on *this* box's self-consistent pair.
+
+### 4.3 #3217's open method question, SETTLED: the two conventions agree
+
+| | ALIGNED (counters and rows share one interval **by construction**) | INTERIOR (#3217's) | difference |
+|---|--:|--:|--:|
+| cycles/row S=1/N=2 | 31,316.4 | 31,457.0 | **+0.45%** |
+| cycles/row S=6/N=16 | 37,284.9 | 37,585.8 | +0.81% |
+| **Δ cycles/row** | **5,968.6** | **6,128.8** | **+2.68%** |
+| IPC S=1 → S=6 | 1.2376 → 1.0384 | 1.2305 → 1.0374 | — |
+
+**#3217's most exposed number was sound.** Its `cycles/row = counter ÷ (rows_per_s ×
+window_secs)` took counters from a 20 s interior slice and the rate from the whole step, and
+at `llc-s1-N2` that step held only 4 completed requests in 63.99 s. Measured both ways on
+one host from the same reps, the conventions agree to **0.45%** at the exposed point. The
+reason is the property §3.5 established: the loadgen holds each step open until in-flight
+requests drain, so a step contains only whole scans and occupancy is ~99.5% — precisely the
+condition the interior convention needs in order to be valid.
+
+So **#3217's +8,593 cycles/row is not a convention artefact.** For the record, against
+#3217's own baseline of **25,200** cycles/row at S=1/N=2, this host measures **31,316**
+(ALIGNED) / **31,457** (INTERIOR) — a **+24%** absolute difference that is a *cross-host*
+difference, not a convention one, and is exactly why the cross-host rule in the preamble
+bars comparing the two absolutes. **Verdict: the conventions AGREE (0.45% at the exposed
+point, 2.68% on the delta); the absolutes DIVERGE across hosts by 24% and must not be
+compared.**
+
+### 4.4 AC3 — the counters, per point, per row
+
+ALIGNED convention, medians of 3 reps. The three counters that read `<not supported>` on
+#3217's host are in **bold**.
+
+| event / row | S=1 / N=2 | S=6 / N=16 | ratio | reading |
+|---|--:|--:|--:|---|
+| **LLC-load-misses** | **11.935** | **38.081** | **×3.191** | **the signal** |
+| **LLC-loads** | **74.073** | **88.167** | ×1.190 | more LLC traffic |
+| **cache-references** | **372.954** | **407.340** | ×1.092 | slightly more |
+| cache-misses | 56.920 | 130.128 | ×2.286 | corroborates |
+| L1-dcache-loads | 9,157.744 | 9,140.759 | ×0.998 | **flat** |
+| L1-dcache-load-misses | 586.662 | 578.921 | ×0.987 | **flat** |
+| branch-misses | 63.050 | 62.949 | ×0.998 | **flat** |
+| dTLB-load-misses | 7.044 | 8.558 | ×1.215 | small, +1.5/row |
+| instructions | 38,856.8 | 38,685.6 | ×0.996 | **flat** |
+
+**The mechanism is named by what does NOT move.** The private caches are untouched — L1
+loads *and* L1 misses flat to ~1%, branch behaviour flat, the same instruction stream. LLC
+misses per row **triple**. What fails between the 1-core and 6-core points is the **shared**
+LLC: six cores contend for one 54 MiB last-level cache, each core's effective share falls
+roughly six-fold, and the working set stops fitting. `LLC-load-misses` rising ×3.19 while
+`LLC-loads` rises only ×1.19 means the **miss rate** rose from 16.1% to 43.2% — the same
+accesses, far less often satisfied.
+
+The `LLC-loads` counter also demonstrates why the positive control gates on the miss *rate*
+rather than the raw load count (§2, RUNBOOK step 4): raw loads move only ×1.19 here, so a
+control asserting a large rise in raw `LLC-loads` would red a host that is behaving exactly
+as expected.
+
+### 4.5 AC3 — memory bandwidth, with the source named explicitly
+
+**Source: `uncore_imc_*/cas_count_{read,write}/`, `perf stat --per-socket`, summed over the
+8 populated channels per socket.** `perf stat -M MemoryBandwidth` **does not exist on this
+perf build** (§1) — recorded as a capability fact, not silently omitted; there is no `-M`
+cross-check available here. **Byte basis: actual DRAM bytes moved**, `cas_count × 64 B`,
+where perf applies the ×64 itself and reports MiB (§3.4-ii). Channel summing validated two
+independent ways (§3.4-iii, ratio **1.008**).
+
+| | S=1 / N=2 | S=6 / N=16 |
+|---|--:|--:|
+| socket 0 (the engine's node) | 1.58 GB/s | **24.43 GB/s** |
+| socket 1 (far) | 0.07 GB/s | 0.28 GB/s |
+| **total** | **1.65 GB/s** | **24.71 GB/s** |
+| far-socket fraction | 3.9% | **1.1%** |
+| DRAM bytes / row | 7,429 B | 22,161 B |
+
+**The NUMA confinement is proven by measurement, not asserted**: 98.9% of DRAM traffic lands
+on the engine's own socket at the 6-core point. A mixed-NUMA allocation is a plausible
+alternative explanation for an IPC delta, and it is excluded by data as well as by
+construction.
+
+DRAM bytes/row rises **×2.98**, against `LLC-load-misses`/row's **×3.19** — internally
+consistent. On the absolute magnitude (22 KB/row against a 692 B logical row) see §3.4: the
+hardware prefetcher does most of the fetching on a streaming scan, so demand miss counters
+systematically undercount DRAM traffic, and the two are reported as separate measured facts
+rather than one being derived from the other.
+
+---
+
+## 5. AC4 — the cycles-per-row accounting. The residual is a number.
+
+### 5.1 Basis, and the arms' agreement
+
+The stall counters come from arm (d) (group C), which ran its **own** loadgen steps, so they
+are charged against **group C's own** cycles/row delta — numerator and denominator from one
+interval, the same discipline the ALIGNED convention exists to enforce. The primary arm's
+delta is reported beside it.
+
+| | S=1 / N=2 | S=6 / N=16 | Δ |
+|---|--:|--:|--:|
+| cycles/row, primary arm (a1) | 31,316.4 | 37,284.9 | **+5,968.6** |
+| cycles/row, group C arm (d) | 31,622.5 | 37,261.9 | **+5,639.4** |
+| agreement at the point | +0.98% | −0.06% | — |
+
+**The two arms agree to within 1% at each endpoint, but their deltas differ by 5.5%** —
+differencing two large, nearly-equal numbers amplifies a small relative difference. Stated
+because it bounds the precision of everything below: **the attribution shares carry a ±~5%
+basis uncertainty from the choice of arm**, and would read 67.8% (group C basis) or 64.0%
+(primary-arm basis). That is a real limit of this measurement, not a rounding.
+
+`instructions/row` is flat on both arms (−0.44% primary, and group C's IPC 1.2309 → 1.0379
+tracks the primary arm's 1.2376 → 1.0384), so both arms observed the same workload.
+
+### 5.2 The measured stall counters
+
+| per row | S=1 / N=2 | S=6 / N=16 | Δ | % of cycles (S=1 → S=6) |
+|---|--:|--:|--:|---|
+| `cycle_activity.stalls_l3_miss` | 1,290.3 | 5,111.6 | **+3,821.3** | 4.08% → **13.72%** |
+| `cycle_activity.stalls_l2_miss` | 2,752.6 | 7,231.3 | +4,478.6 | 8.71% → 19.41% |
+| `cycle_activity.stalls_total` | 12,436.5 | 18,707.7 | +6,271.3 | 39.36% → 50.21% |
+| MLP (`pending ÷ pending_cycles`) | **2.150** | **2.201** | — | — |
+
+The core goes from spending **4.1%** of its cycles stalled on an L3 miss to **13.7%** — a
+3.3× rise that tracks the ×3.19 rise in LLC misses per row.
+
+### 5.3 The additive decomposition — it closes exactly
+
+The three stall counters **nest** (`stalls_l3_miss` ⊂ `stalls_l2_miss` ⊂ `stalls_total`), so
+differencing the nested pairs yields **disjoint** buckets, and the cycles that were not
+stalled at all close the identity:
+
+| bucket | cycles/row | % of Δ | what it is |
+|---|--:|--:|---|
+| L3-miss stalls | **+3,821.3** | **67.76%** | misses served from **DRAM** |
+| L2-miss-but-L3-hit stalls | +657.4 | 11.66% | misses served from the **LLC** |
+| other execution stalls | +1,792.6 | 31.79% | **non-memory** (front-end, ports, dependencies) |
+| non-stalled cycles | **−631.9** | **−11.20%** | fewer un-stalled cycles per row |
+| **SUM** | **+5,639.4** | **100.00%** | **closure error +0.000** |
+
+This is a **partition of the measured delta, not an estimate with a slack term** — it sums
+to the measurement by construction, and the closure error is printed as a float-rounding
+check (`+0.000`).
+
+Two defensible places to draw the memory boundary, both published rather than one quietly
+preferred:
+
+| boundary | attributed | residual | residual % |
+|---|--:|--:|--:|
+| **strict DRAM** (L3-miss stalls only) | **+3,821.3** | **+1,818.1** | **32.24%** |
+| whole cache hierarchy (L3 miss + L3 hit) | +4,478.6 | +1,160.8 | **20.58%** |
+
+> ### AC4 verdict
+> **Δ = +5,639.4 cycles/row.** Charged at the **measured** L3-miss stall cycles,
+> **attributed = +3,821.3 cycles/row (67.76%)** and the **residual = +1,818.1 cycles/row,
+> which is 32.24% of the delta, UNATTRIBUTED.** Widening the boundary to the whole cache
+> hierarchy attributes 79.42% and leaves a **20.58%** residual.
+>
+> As a fraction of **#3217's** +8,593 cycles/row — which AC4 names, and which is a
+> *different host's* delta — this box's attributed 3,821.3 is 44.5%. **That ratio is not
+> meaningful and is given only because AC4 names the figure**: the correct denominator is
+> this box's own Δ, per RUNBOOK step 7.1.
+>
+> For comparison, #3217 attributed **~10–13%** and left **~87%** unattributed. **The
+> unattributed fraction falls from ~87% to 32%,** and the named cause is contention for the
+> shared last-level cache.
+
+### 5.4 The modelled charge brackets the measurement — and shows why modelling was the weak link
+
+The classical route, charged from the **on-host** latencies of §3.9
+(penalty = DRAM 393.50 − LLC-hit 90.44 = **303.1 cycles per miss**, applied to
+Δ`LLC-load-misses`/row = 26.15):
+
+| charge | cycles/row | % of Δ | reading |
+|---|--:|--:|---|
+| zero-MLP (full unloaded latency per miss) | +7,923.9 | **140.51%** | **impossible** — exceeds the whole delta |
+| ÷ **measured** MLP 2.20 | +3,600.4 | 63.84% | plausible |
+| **measured `stalls_l3_miss`** | **+3,821.3** | **67.76%** | **the headline** |
+
+Two things follow, and both matter beyond this report:
+
+1. **A zero-MLP penalty charge is not conservative — it is wrong.** It accounts for 140% of
+   a delta it is supposed to explain a fraction of. Any accounting that had charged the
+   unloaded latency per miss would have "attributed" more than 100% and declared the
+   mechanism fully explained. The earlier draft of the penalty probe asserted precisely that
+   this direction was "the conservative direction for a claim of *attributed*" (§3.9); it is
+   the opposite.
+2. **Corrected by a *measured* MLP, the model lands within 5.8% of the direct measurement**
+   (63.84% vs 67.76%). Two independent routes — a modelled charge from on-host latency and
+   MLP, and a hardware stall counter — agree. That mutual corroboration is the strongest
+   statement this study makes about the mechanism, and neither route alone would license it.
+
+`dTLB-load-misses`/row rises only 7.04 → 8.56 (+1.5/row) and is **not** added to the
+headline: any stall a page-table walk caused is already inside the measured stall counters,
+so charging it separately would double-count. Listed in `derived.json` for completeness.
+
+### 5.5 Cross-check on this report's own arithmetic
+
+RUNBOOK step 7.5 asks where the accounting lands against measured marginal efficiency:
+
+| | value |
+|---|--:|
+| throughput 222,329 → 1,117,642 rows/s over 6× cores | **0.8378 measured efficiency** |
+| predicted from the cycles/row inflation alone | **0.8399** |
+| **gap** | **−0.21 pp** |
+
+Two routes to the same quantity — one from throughput, one from cycles/row — agree to
+0.21 pp. (#3217's equivalent check had a 1.26 pp gap.) This is a check on this report's
+arithmetic, not a target, and it passes.
+
+---
+
+## 6. AC5 — the saturation verdict
+
+**Achievable peak measured at the engine's own binding**, as RUNBOOK step 8.2 requires:
+`cache-hostile stream`, 12 threads, 4 GiB × 3 arrays, 10 iterations, under
+`numactl --cpunodebind=0 --membind=0 taskset -c 0-5,64-69` — the S=6/N=16 server set
+verbatim. This is a **STREAM-triad-class reference, not the vendor STREAM benchmark**.
+Artefacts: `ac5-run/`.
+
+| | GB/s | basis |
+|---|--:|---|
+| triad, best iteration | 84.405 | **24 B/element** (architectural: 2 reads + 1 write) |
+| triad, best iteration | **112.540** | **32 B/element** (adds read-for-ownership of the written line) |
+| IMC steady-state equivalent | 112.54 | `cas_count × 64 B`, same instant |
+
+The **32 B basis is the one quoted below**, because that is what the DRAM controller
+actually sees on a machine without non-temporal stores — and it is the basis that makes the
+peak directly comparable to the engine's IMC-measured traffic. The IMC byte-accounting
+cross-check over the same run agrees to **1.008×** (§3.4-iii), which simultaneously
+validates the peak and the channel summing.
+
+For context from topology (§3.4): the *theoretical* socket ceiling is 8 channels ×
+3200 MT/s × 8 B = **204.8 GB/s**. The 12-thread pinned peak of 112.5 GB/s is 55% of that,
+which is the expected shape — **six of thirty-two cores cannot saturate eight channels**,
+and 112.5 GB/s, not 204.8, is the ceiling this engine faces.
+
+> ### AC5 verdict
+> **At S=6/N=16 the memory system is NOT saturated: measured 24.43 GB/s on the engine's
+> socket (basis: actual DRAM bytes, `uncore_imc cas_count × 64 B`; 24.71 GB/s including the
+> 1.1% far-socket component) against an achievable 112.54 GB/s measured on this host at the
+> same 6-core/12-thread NUMA-bound binding (basis: 32 B/element, read-for-ownership
+> included) = 21.7% of peak.**
+>
+> **Therefore the decay is NOT a bandwidth wall, and reducing per-row work moves the scaling
+> SLOPE only insofar as it reduces the per-row LLC FOOTPRINT; a lever that cuts
+> instructions per row without cutting bytes touched per row moves the LEVEL only.**
+
+### 6.1 Why the verdict is conditional rather than a bare "slope" or "level"
+
+The bare form of the question presupposes that the binding constraint is DRAM throughput. It
+is not — there is **4.6× bandwidth headroom**. The measured constraint is **capacity
+contention in the shared 54 MiB LLC**: six cores each get roughly a sixth of it, the working
+set stops fitting, and misses per row triple. Bandwidth *rises* as a consequence of that,
+and stops well short of the ceiling.
+
+That distinction is exactly what #2817 and #3096 need, so the criterion is stated as a test
+a candidate lever must pass:
+
+| a lever that… | effect | why |
+|---|---|---|
+| reduces **bytes touched per row** / improves locality (smaller intermediates, fewer passes, better reuse) | moves the **SLOPE** | it relieves the LLC capacity contention that *is* the decay, and relieves it more at 6 cores than at 1 |
+| reduces **instructions per row** at the same memory footprint | moves the **LEVEL** | it does not change LLC pressure, so the ×3.19 miss inflation and the resulting IPC decay survive it |
+
+`instructions/row` being flat across the endpoints (−0.44%) is the direct evidence for the
+second row: the decay is not made of extra instructions, so removing instructions cannot
+remove the decay.
+
+**Whether #3096 (Arrow encode) is a slope lever or a level lever is therefore an open
+question this report deliberately does not answer** — it turns on whether that work reduces
+the bytes touched per row or only the instructions spent on them, which is a measurement on
+#3096's own change, not on this one. What this report supplies is the criterion and the
+headroom figure.
+
+---
+
+## 7. What this indicts — as follow-ups, not fixes here
+
+Per the issue's explicit scope, **no production code was changed and no fix is proposed.**
+Three things the data indicts, to be groomed separately:
+
+1. **LLC capacity contention is the named cause of the full-box IPC decay.** A working-set /
+   locality reduction in the Flight read path is the lever class that can move the slope.
+   The measurement to demand of any candidate is Δ`LLC-load-misses`/row at S=6/N=16, not
+   Δinstructions/row.
+2. **~32% of the delta remains unattributed** (20.6% at the wider boundary), sitting mostly
+   in `other execution stalls` (+1,792.6 cycles/row). Naming *that* would need front-end /
+   port-utilisation counters (a TMA level-2 breakdown), which is a different capture than
+   this one and out of this issue's two-endpoint scope.
+3. **The harness defects found here are latent in #3217's committed scripts too** — the
+   fabricated `rc=$?`-after-substitution pattern, and the hardcoded core table that silently
+   mislabels S. Both are fixed in this issue's drivers; #3217's remain as committed.
+
+## 8. Acceptance criteria — discharged or not, explicitly
+
+| AC | verdict | evidence |
+|---|---|---|
+| **1** host capability VERIFIED before the run, probe committed | **PASS** | §1; `host/ac1-capability-probe.txt`, committed at `4b2bc33` *before* any measurement. All three counters program. `perf stat -M MemoryBandwidth` absent — recorded, not hidden. |
+| **2** both #3217 endpoints reproduced, same geometry, rows/s in band or divergence explained | **PASS** | §3.1, §4.2. Geometry exact on both row oracles; sha256 re-verified after the last capture; `--batch-size 8192`; +3.8% on aggregate rows/s; the *smaller* decay on this host explained (§4.2) rather than absorbed. |
+| **3** per point per row: LLC-load-misses, LLC-loads, cache-references + bandwidth figure, source **named** | **PASS** | §4.4, §4.5. Source named as `uncore_imc cas_count` with `--per-socket`; `-M MemoryBandwidth` explicitly unavailable; channel summing validated two ways. |
+| **4** cycles-per-row accounting, penalties stated and sourced, **residual as a number** | **PASS** | §5. **Residual = +1,818.1 cycles/row = 32.24%** (strict DRAM boundary); 20.58% at the wider boundary. Penalties measured on this host (§3.9); the additive decomposition closes with 0.000 error. |
+| **5** explicit saturation verdict, measured vs achievable peak on the same host | **PASS** | §6. 24.43 vs 112.54 GB/s = **21.7% — not saturated**; peak measured at the engine's own pinning and NUMA binding; both byte bases reported and the quoted one named. |
+| **6** byte basis named on every throughput figure; geometry + sha256 recorded; `now`-pinning N/A recorded | **PASS** | §3.1 (geometry, sha256, `now` N/A with the reason: no TTL, no tombstones, min/max local deletion time `9223372036854775807`); §4.5 and §6 name the basis on every bandwidth figure. |
+| **7** a well-measured negative is a pass; do not round toward the hypothesis | **PASS** | §6 reports **21.7% of peak — the memory system is NOT saturated**, which is a negative on the bandwidth hypothesis, stated plainly. §5.4 rejects the penalty charge that would have "attributed" 140% of the delta, and §5.1 publishes the ±5% basis uncertainty rather than picking the flattering arm. |
+
+**Not discharged, and deliberately so:** the ~32% residual is *named as unattributed*, not
+explained (§7.2); and whether #3096 moves slope or level is left open with a stated criterion
+(§6.1) rather than guessed.
