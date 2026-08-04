@@ -1146,3 +1146,103 @@ fn a_matching_schema_with_uuid_extension_metadata_is_accepted() {
             .expect("the same schema must be accepted for every batch of a scan");
     }
 }
+
+// =========================================================================
+// The trusted path does NOT revalidate (issue #3096, third review)
+// =========================================================================
+
+/// **The finding, pinned.** `rows_to_record_batch` used to delegate to
+/// `rows_to_record_batch_with_schema`, so it built the schema with
+/// `build_arrow_schema` and then had every expected `Field` RECONSTRUCTED a second
+/// time by the validation — a full duplicate schema mapping for every caller,
+/// per batch.
+///
+/// Both halves are asserted, because neither alone is the property:
+///
+/// 1. `rows_to_record_batch` runs the validation ZERO times — it goes through the
+///    private trusted tail, whose precondition holds by construction; and
+/// 2. `rows_to_record_batch_with_schema` — the externally-supplied-schema entry
+///    point whose contract that validation IS — still runs it exactly once per
+///    call, so the fix removed duplicate work and not the contract.
+///
+/// The counter is the only way to see this: on the trusted path a schema
+/// `build_arrow_schema` just produced can never FAIL validation, so "validated and
+/// passed" and "not validated" are indistinguishable from the returned batch. If
+/// `rows_to_record_batch` is ever routed back through the public validating entry
+/// point, half (1) fails.
+#[test]
+fn the_trusted_path_does_not_revalidate_and_the_external_one_still_does() {
+    let (columns, rows) = uuid_and_text_columns();
+
+    // (1) The trusted path: no validation at all, for any number of batches.
+    let before = super::schema_validations_on_this_thread();
+    for _ in 0..3 {
+        rows_to_record_batch(&columns, &rows).expect("inline schema must build");
+    }
+    assert_eq!(
+        super::schema_validations_on_this_thread() - before,
+        0,
+        "rows_to_record_batch must not revalidate the schema it just built with \
+         build_arrow_schema — that reconstructs every expected Field a second time, \
+         per batch"
+    );
+
+    // (2) The external entry point: exactly one validation per call, unchanged.
+    let schema = Arc::new(build_arrow_schema(&columns).expect("schema"));
+    let before = super::schema_validations_on_this_thread();
+    for _ in 0..3 {
+        rows_to_record_batch_with_schema(Arc::clone(&schema), &columns, &rows)
+            .expect("the matching schema must be accepted");
+    }
+    assert_eq!(
+        super::schema_validations_on_this_thread() - before,
+        3,
+        "a caller-supplied schema must still be validated on every call — that is \
+         the documented public contract"
+    );
+}
+
+/// The trusted path is an OPTIMISATION, not a behaviour change: the batch
+/// `rows_to_record_batch` returns is indistinguishable from the one the validating
+/// entry point returns for the same columns and rows — same schema (fields,
+/// nullability, metadata, schema-level metadata), same rows, same column values.
+///
+/// Asserted over the uuid fixture specifically, because the uuid column's
+/// extension metadata is the part of the schema that the two construction routes
+/// could most plausibly diverge on.
+#[test]
+fn the_trusted_path_returns_the_same_batch_as_the_validating_path() {
+    let (columns, rows) = uuid_and_text_columns();
+    let trusted = rows_to_record_batch(&columns, &rows).expect("inline schema");
+    let validated = rows_to_record_batch_with_schema(
+        Arc::new(build_arrow_schema(&columns).expect("schema")),
+        &columns,
+        &rows,
+    )
+    .expect("supplied schema");
+
+    assert_eq!(
+        trusted.schema(),
+        validated.schema(),
+        "schemas must be equal"
+    );
+    assert_eq!(trusted.num_rows(), validated.num_rows());
+    assert_eq!(trusted.num_columns(), validated.num_columns());
+    assert_eq!(
+        trusted
+            .schema()
+            .field(0)
+            .metadata()
+            .get("ARROW:extension:name")
+            .map(String::as_str),
+        Some("arrow.uuid"),
+        "the trusted path must keep the uuid extension metadata"
+    );
+    for i in 0..trusted.num_columns() {
+        assert_eq!(
+            trusted.column(i).to_data(),
+            validated.column(i).to_data(),
+            "column {i} must be byte-identical on both paths"
+        );
+    }
+}

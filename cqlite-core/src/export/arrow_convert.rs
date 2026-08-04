@@ -129,6 +129,17 @@ pub fn build_arrow_schema(columns: &[ColumnInfo]) -> Result<Schema, ArrowConvert
 /// The schema is derived from `columns` via [`build_arrow_schema`].  Each
 /// column is converted to an Arrow array using the same type mapping.
 ///
+/// # Cost
+///
+/// The schema is built HERE from `columns` and handed straight to
+/// [`rows_to_record_batch_trusted_schema`], so it is NOT revalidated: this entry
+/// point pays ONE `column_to_field` per column, not two. Routing it through
+/// [`rows_to_record_batch_with_schema`] instead would reconstruct every expected
+/// `Field` a second time to compare it against the fields
+/// [`build_arrow_schema`] had just produced from the same `columns` — pure
+/// duplicate work, since a mismatch is unconstructible on this path (issue
+/// #3096, third review).
+///
 /// # Errors
 ///
 /// Returns [`ArrowConvertError`] if any value cannot be represented in the
@@ -138,7 +149,38 @@ pub fn rows_to_record_batch(
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
     let schema = Arc::new(build_arrow_schema(columns)?);
-    rows_to_record_batch_with_schema(schema, columns, rows)
+    // Trusted: `schema` IS `build_arrow_schema(columns)`, one line up.
+    rows_to_record_batch_trusted_schema(schema, columns, rows)
+}
+
+/// Build the arrays for `columns`/`rows` and assemble the batch under a schema
+/// the CALLER HAS ALREADY ESTABLISHED is [`build_arrow_schema`]'s output for
+/// `columns` (issue #3096, third review).
+///
+/// The shared tail of both public entry points, and the only place
+/// `RecordBatch::try_new` is called. What differs is the precondition:
+///
+/// * [`rows_to_record_batch`] built `schema` from these same `columns`
+///   immediately before calling, so it holds by CONSTRUCTION — checking it would
+///   re-derive, per batch, the very fields `build_arrow_schema` had just built.
+/// * [`rows_to_record_batch_with_schema`] accepts a schema it did not build, so
+///   it must PROVE the precondition first via [`check_schema_matches_columns`];
+///   that is a documented public contract and is not weakened by this helper's
+///   existence.
+///
+/// This is deliberately private: it is not a "skip the checks" door for external
+/// callers, and the schema-mismatch guarantee of the public API is unchanged.
+/// `RecordBatch::try_new` still owns array lengths and field data types, so an
+/// internal caller that broke its precondition would surface as
+/// [`ArrowConvertError::Arrow`] rather than undefined behaviour.
+fn rows_to_record_batch_trusted_schema(
+    schema: Arc<Schema>,
+    columns: &[ColumnInfo],
+    rows: &[QueryRow],
+) -> Result<RecordBatch, ArrowConvertError> {
+    let arrays = convert_to_arrays(columns, rows)?;
+    let batch = RecordBatch::try_new(schema, arrays)?;
+    Ok(batch)
 }
 
 /// [`rows_to_record_batch`] over a schema the caller already holds.
@@ -190,19 +232,30 @@ pub fn rows_to_record_batch(
 /// correctly rejected here. The egress path passes
 /// `build_arrow_schema(&self.columns)` unmodified and is unaffected.
 ///
-/// # Cost
+/// # Cost — borne by THIS entry point only
 ///
 /// One `column_to_field` construction and one `Field` comparison per COLUMN per
 /// BATCH — for a 12-column table, 12 short `String` allocations plus one small
 /// metadata `HashMap` per uuid/timeuuid column, against per-batch work
-/// proportional to rows x columns. What the shared `Arc` still saves per batch is
-/// the `Schema`/`Fields` allocation and a fresh `SchemaRef` for every emitted
-/// batch; what it can no longer save is per-field construction, because a
-/// contract that is only documented is not enforced. The zero-per-batch
-/// alternative — a prevalidated-schema newtype owning both the schema and the
-/// columns it was built from, making a mismatch unconstructible — would change
-/// this public signature and its callers, so it is left as a possible follow-up
-/// rather than done here.
+/// proportional to rows x columns.
+///
+/// [`rows_to_record_batch`] does NOT pay it: it goes through the private trusted
+/// tail both entry points share, because its schema is
+/// [`build_arrow_schema`]'s output for the same `columns` by construction (issue
+/// #3096, third review — before that fix it delegated here and every caller paid
+/// the mapping twice).
+///
+/// So state the schema-reuse tradeoff exactly, without overclaiming: reusing one
+/// `Arc<Schema>` across a scan's batches saves the `Schema`/`Fields` allocation
+/// and a fresh `SchemaRef` per batch, and costs a `column_to_field` construction
+/// plus a `Field` comparison per column per batch. It is therefore CHEAPER IN
+/// ALLOCATIONS but NOT strictly less work per batch than rebuilding the schema
+/// through [`rows_to_record_batch`] — the per-field construction is paid either
+/// way, once as `build_arrow_schema` or once as this validation. Making reuse
+/// genuinely free needs the zero-per-batch alternative: a prevalidated-schema
+/// newtype owning both the schema and the columns it was built from, making a
+/// mismatch unconstructible. That changes this public signature and its callers,
+/// so it stays a follow-up rather than being done here.
 ///
 /// # Errors
 ///
@@ -218,9 +271,8 @@ pub fn rows_to_record_batch_with_schema(
     rows: &[QueryRow],
 ) -> Result<RecordBatch, ArrowConvertError> {
     check_schema_matches_columns(&schema, columns)?;
-    let arrays = convert_to_arrays(columns, rows)?;
-    let batch = RecordBatch::try_new(schema, arrays)?;
-    Ok(batch)
+    // The precondition is now PROVEN, not assumed, so the shared tail may trust it.
+    rows_to_record_batch_trusted_schema(schema, columns, rows)
 }
 
 /// Reject a caller-supplied `schema` that is not [`build_arrow_schema`]'s output
@@ -240,6 +292,13 @@ fn check_schema_matches_columns(
     schema: &Schema,
     columns: &[ColumnInfo],
 ) -> Result<(), ArrowConvertError> {
+    // Test-only instrumentation (issue #3096, third review): the ONLY way a test
+    // can distinguish "the trusted path skipped validation" from "validation ran
+    // and happened to pass", since a schema `build_arrow_schema` just produced can
+    // never FAIL this check. Thread-local, so a `cargo test` thread's count is
+    // unaffected by the other tests running concurrently in the same process.
+    #[cfg(test)]
+    SCHEMA_VALIDATIONS.with(|n| n.set(n.get() + 1));
     if !schema.metadata().is_empty() {
         return Err(ArrowConvertError::SchemaMismatch(format!(
             "schema carries top-level metadata {:?} but build_arrow_schema sets none \
@@ -312,6 +371,24 @@ fn field_mismatch_reason(i: usize, field: &Field, expected: &Field) -> String {
         sorted_pairs(field.metadata()),
         sorted_pairs(expected.metadata())
     )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`check_schema_matches_columns`] has run on THIS thread.
+    ///
+    /// Test-only. Exists so `no_schema_revalidation_on_the_trusted_path` can
+    /// assert the negative — `rows_to_record_batch` performs ZERO schema
+    /// validations while `rows_to_record_batch_with_schema` performs exactly one —
+    /// which is not observable from either function's return value (both succeed,
+    /// with an identical batch).
+    static SCHEMA_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The current thread's [`SCHEMA_VALIDATIONS`] count. Test-only.
+#[cfg(test)]
+fn schema_validations_on_this_thread() -> usize {
+    SCHEMA_VALIDATIONS.with(|n| n.get())
 }
 
 /// Metadata as key-sorted pairs, so a rejection message is deterministic.
