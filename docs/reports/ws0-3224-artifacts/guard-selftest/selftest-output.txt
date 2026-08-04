@@ -1,0 +1,65 @@
+# #3224 guard selftest — recorded output
+# host: ip-172-31-3-252 / 6.17.0-1019-aws
+# date: 2026-08-04T06:47:13Z
+# commit: bfba09c72bf8b02937a8b29d0627a5aafaf4a840
+# command: bash docs/reports/ws0-3224-artifacts/selftest-guards.sh
+
+==== #3224 GUARD SELFTEST ====
+artefact root: /home/ubuntu/workspace/wt-3224/docs/reports/ws0-3224-artifacts
+
+== FINDING 1 + 3 — positive-control verdict logic (harness/verdict-logic.sh)
+   healthy-host miss rate: friendly=0.139 hostile=0.612 rise=4.402x
+   PASS  healthy host: raw LLC-load-misses movement is BELOW the 2x floor (so ordering decides) -> 1.240
+   PASS  healthy host: LLC-load-misses verdict (P4 gates on the miss rate, not raw movement) -> OK
+   PASS  flat miss rate: movement alone would PASS it (3.552x >= 2x) -> 3.552
+   PASS  flat miss rate: REJECTED anyway (the fix did not weaken P4) -> UNRELIABLE_MISSRATE_FLAT
+   PASS  both arms zero: still SILENT_ZERO (the #3217 failure mode) -> SILENT_ZERO
+   PASS  unmultiplexed counter with real movement: accepted -> OK
+   PASS  multiplexed HOSTILE arm (87% enabled): rejected, not warned -> UNRELIABLE_MULTIPLEXED
+   PASS  multiplexed FRIENDLY arm (87% enabled): also rejected (old code saw only hostile) -> UNRELIABLE_MULTIPLEXED
+   PASS  multiplexed LLC-load-misses: rejected before the miss-rate branch is reached -> UNRELIABLE_MULTIPLEXED
+
+== FINDING 2 — penalty-probe window gating (run/penalty-window-check.py)
+   PASS  committed (contaminated) penalty/ CSVs: REJECTED (rc=1)
+   PASS  FIFO-gated sweep (6.009 instr/access, uniform): ACCEPTED (rc=0)
+   PASS  UNIFORMLY inflated sweep (30 instr/access, no cross-row signal): REJECTED by the ceiling (rc=1)
+   PASS  ONE row +3.2% (real LLC_8M value, under the ceiling): REJECTED by cross-row uniformity (rc=1)
+   PASS  empty penalty dir: REFUSED rather than passed vacuously (rc=1)
+
+== FINDING 4 — capture-endpoint rc roster (harness/guards.sh)
+   PASS  all seven arms zero: accepted (rc=0)
+   PASS  loadgenInterior=1 (RC_LG_A, omitted from the old expression): REJECTED (rc=1)
+   PASS  loadgenUncore=1 (RC_LG_C, omitted from the old expression): REJECTED (rc=1)
+   PASS  an arm whose rc is unrecordable (empty): REJECTED, not read as zero (rc=1)
+   PASS  no arms at all: REFUSED (a validity check with no subject has no verdict) (rc=1)
+   PASS  guard prints its roster including both load-generator arms
+   PASS  ws0_guard_rc with rc=0: accepted (rc=0)
+   PASS  ws0_guard_rc with rc=4: REJECTED (rc=1)
+   PASS  meta.json rc gate (extracted from committed capture-endpoint.sh): rejects a nonzero arm (rc=0)
+
+== FINDING 5a — resume predicate (run/rep-complete.py)
+   PASS  committed rep llc-s6-N16/rep1: certified complete (safe to skip) (rc=0)
+   PASS  rep with rc.loadgen_uncore=1: REFUSED (old predicate skipped it as complete) (rc=1)
+   PASS  rep with an EMPTY perf-uncore.csv: REFUSED (rc=1)
+   PASS  rep with perf-uncore.csv ABSENT: REFUSED (rc=1)
+   PASS  rep with one counter row at 42% enabled: REFUSED (a scaled estimate is not a count) (rc=1)
+   PASS  rep dir with no meta.json: REFUSED (rc=1)
+
+== FINDING 5b — derivation must not publish 0 GB/s (results/derive.py)
+   PASS  committed results tree: derives cleanly (rc=0)
+   PASS  re-derived headline attribution is unchanged by the guards -> 3821.3/32.24
+   PASS  results tree with an EMPTY perf-uncore.csv: REFUSED (used to derive 0 GB/s) (rc=1)
+   PASS  results tree with perf-uncore.csv ABSENT: REFUSED (rc=1)
+dropped 2 S0 imc_11 rows
+   PASS  results tree with a PARTIAL IMC set (2 rows dropped): REFUSED (rc=1)
+
+== FINDING 6 — AC5 byte accounting (run/ac5-analyse.py)
+   PASS  committed ac5-run (ratio 1.008): RESOLVED, accepted (rc=0)
+   PASS  INDETERMINATE ratio (~3x, matches neither hypothesis): REJECTED (rc=1)
+   PASS  byte accounting UNAVAILABLE (no 'elements' key): REJECTED (rc=1)
+
+==== SELFTEST RESULT: PASS ====
+cases passed: 37   failed: 0
+Every guard rejected the bad input it exists to catch, and accepted the
+good input committed in this PR. The healthy-host record is pinned, so
+re-inverting the finding-1 ordering fails here rather than on a good box.
