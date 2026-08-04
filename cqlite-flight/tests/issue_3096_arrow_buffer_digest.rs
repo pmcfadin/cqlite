@@ -32,13 +32,16 @@
 //!
 //! # Fixtures
 //!
-//! * **CI fixture** — a small `ws0.events` corpus built in-test through the SAME
-//!   `ws0_corpus_gen::generate::generate` the 4M-row measurement corpus uses, so
-//!   the shape the oracle pins is the shape the rig measures. Always runs.
-//! * **Measurement corpus** — set `CQLITE_WS0_CORPUS_DIR` to the generated 4M-row
-//!   corpus root to run the same oracle over it (what the perf runs do). Skips
-//!   cleanly when unset; a corpus dir that is SET but unusable is a hard failure,
-//!   never a silent skip.
+//! * **CI fixture** — a small `ws0.events` corpus built in-test by the
+//!   self-contained fixture builder in `tests/support/ws0_fixture.rs`. Needs no
+//!   fetched dataset and no external corpus, so it ALWAYS runs, and the pinned
+//!   digest below is its digest.
+//! * **Measurement corpus** — set `CQLITE_WS0_CORPUS_DIR` to a generated 4M-row
+//!   corpus root to run the same oracle over it (what a perf run does). The
+//!   generator + driver scripts that PRODUCE such a corpus are re-anchored to
+//!   issue #3272 and are not in this change, so this arm skips cleanly with an
+//!   explicit reason when the env var is unset. A corpus dir that is SET but
+//!   unusable stays a hard failure, never a silent skip.
 //!
 //! SCOPE (issue #3042): the fixture is CQLite-written and CQLite-read, so it is
 //! invariant to a uniform framing error and is a PERFORMANCE FIXTURE ONLY. This
@@ -68,8 +71,11 @@ use tonic::Request;
 use cqlite_core::storage::read_path_probe::ReadPathProbe;
 use cqlite_flight::bypass::MERGE_PATH_ENV;
 use cqlite_flight::service::CqliteFlightService;
-use ws0_corpus_gen::generate::{generate, has_data_db, CorpusSpec};
-use ws0_corpus_gen::schema::{DDL, KEYSPACE, TABLE};
+#[path = "support/ws0_fixture.rs"]
+mod ws0_fixture;
+use ws0_fixture::{
+    assert_ddl_matches_the_committed_pin, generate, has_data_db, CorpusSpec, DDL, KEYSPACE, TABLE,
+};
 
 /// Debug-only reader seam pinning the read-time TTL clock (`now_clock.rs`). The
 /// corpus carries no TTLs, but the clock is pinned anyway so the oracle can never
@@ -365,6 +371,10 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
     let mut failures: Vec<String> = Vec::new();
 
     // ---- Case 1: the CI fixture (always runs, digest PINNED) ------------------
+    // The fixture's schema must still be the committed `ws0.events` DDL: a drifted
+    // DDL would move the pinned digest for a reason that has nothing to do with the
+    // encode path.
+    assert_ddl_matches_the_committed_pin();
     let temp = tempfile::tempdir().expect("tempdir");
     let spec = CorpusSpec::small(temp.path().to_path_buf(), CI_FIXTURE_ROWS);
     let identity = rt.block_on(generate(&spec)).expect("generate CI fixture");
@@ -402,8 +412,11 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
     // ---- Case 2: the measurement corpus (opt-in via env) ----------------------
     match std::env::var(CORPUS_DIR_ENV) {
         Err(_) => eprintln!(
-            "SKIP measurement-corpus case — set {CORPUS_DIR_ENV} to the ws0-corpus-gen output \
-             root to run the oracle over the 4M-row corpus"
+            "SKIP measurement-corpus case — {CORPUS_DIR_ENV} is unset. This arm runs the \
+             oracle over a generated 4M-row corpus; the corpus GENERATOR and the perf \
+             driver scripts are re-anchored to issue #3272 and are not part of this \
+             change, so point {CORPUS_DIR_ENV} at a corpus root produced there to enable \
+             it. The CI-fixture case above is unaffected and always runs."
         ),
         Ok(dir) => {
             let root = PathBuf::from(&dir);
@@ -412,7 +425,8 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
             // silent skip that looks like coverage.
             assert!(
                 has_data_db(&table_dir),
-                "{CORPUS_DIR_ENV}={dir} but {} holds no *-Data.db — run ws0-corpus-gen",
+                "{CORPUS_DIR_ENV}={dir} but {} holds no *-Data.db — generate the corpus \
+                 with the rig re-anchored to issue #3272, or unset {CORPUS_DIR_ENV}",
                 table_dir.display()
             );
             let identity_path = root.join("corpus-identity.json");

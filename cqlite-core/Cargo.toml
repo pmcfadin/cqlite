@@ -159,7 +159,7 @@ fastrand = "2.0"
 libc = { workspace = true }
 num-traits = "0.2"  # Required for BigInt conversion methods
 # Full-fixture-dir hashing for the corruption-verify parity test (issue #1294).
-sha2 = { workspace = true }
+sha2 = "0.10"
 # Real zstd dictionary-frame generation for the zstd-dictionary fail-closed
 # rejection characterization test (issue #1399). Dev-only: proves CQLite's
 # decompression path rejects (never garbles) genuinely dictionary-compressed

@@ -115,16 +115,15 @@ criterion = { workspace = true }
 # (`SSTableReader::decompress_call_count`) against one another — a concurrent
 # scan in the same binary would inflate the count (issue #2373).
 serial_test = "3"
-# The committed `ws0.events` PERFORMANCE-FIXTURE generator (issue #3096). The
-# in-repo Arrow-buffer digest oracle
-# (`tests/issue_3096_arrow_buffer_digest.rs`) builds its small CI fixture
-# through the SAME `generate()` the 4M-row measurement corpus is built with, so
-# the shape the oracle pins and the shape the rig measures can never diverge.
-# Dev-only, and no dependency cycle: ws0-corpus-gen depends on cqlite-core, not
-# on cqlite-flight. NOTE the fixture is CQLite-written + CQLite-read and is a
-# PERFORMANCE FIXTURE ONLY (#3042) — the oracle asserts ARM-INVARIANCE over it,
-# never an on-disk framing correctness claim.
-ws0-corpus-gen = { path = "../tools/ws0-corpus-gen" }
+# NOTE (issue #3096): the `ws0.events` CI PERFORMANCE FIXTURE that
+# `tests/issue_3096_arrow_buffer_digest.rs` and
+# `tests/issue_3096_framing_subphase.rs` build is written by the self-contained
+# `tests/support/ws0_fixture.rs` support module — no extra dependency, and the
+# tests need no fetched dataset. The MEASUREMENT RIG (corpus-generator CLI,
+# bare-scan bench, `perf` driver scripts) is re-anchored to issue #3272. The
+# fixture is CQLite-written + CQLite-read and is a PERFORMANCE FIXTURE ONLY
+# (#3042) — the oracle asserts ARM-INVARIANCE over it, never an on-disk framing
+# correctness claim.
 
 # dhat allocator for the Flight-producer peak-memory budget test (issue #1494),
 # installed only under the `dhat-heap` feature in that one test binary.

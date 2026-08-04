@@ -27,11 +27,11 @@
 //!    `cqlite.rpc.phase.duration` histogram on the existing `cqlite.rpc.phase`
 //!    attribute, exactly as the five #2819 values do.
 //!
-//! The fixture is the small `ws0.events` corpus built through the SAME
-//! `ws0_corpus_gen::generate::generate` the measurement corpus uses, so no
-//! fetched dataset is needed and the test never skips. SCOPE: that corpus is
-//! CQLite-written + CQLite-read, a PERFORMANCE FIXTURE ONLY (#3042) — nothing
-//! here is an on-disk framing correctness claim.
+//! The fixture is the small `ws0.events` corpus written by the self-contained
+//! builder in `tests/support/ws0_fixture.rs`, so no fetched dataset is needed and
+//! the test never skips. SCOPE: that corpus is CQLite-written + CQLite-read, a
+//! PERFORMANCE FIXTURE ONLY (#3042) — nothing here is an on-disk framing
+//! correctness claim.
 
 #![cfg(feature = "observability-testing")]
 
@@ -48,8 +48,9 @@ use cqlite_flight::obs::{
     PHASE_STREAM_ENCODE, PHASE_STREAM_ENCODE_FRAMING, PHASE_STREAM_GRPC_WRITE, PHASE_STREAM_MERGE,
 };
 use cqlite_flight::service::CqliteFlightService;
-use ws0_corpus_gen::generate::{generate, CorpusSpec};
-use ws0_corpus_gen::schema::{DDL, KEYSPACE, TABLE};
+#[path = "support/ws0_fixture.rs"]
+mod ws0_fixture;
+use ws0_fixture::{generate, CorpusSpec, DDL, KEYSPACE, TABLE};
 
 /// Rows in the fixture. Small, but spanning several batches at the `batch_size`
 /// below so the framing stage is polled repeatedly rather than exactly once.
@@ -59,9 +60,11 @@ const FIXTURE_ROWS: u64 = 500;
 /// fixture that spans MANY batches.
 const BATCH_SIZE: usize = 64;
 
-/// Optional: point the test at the generated measurement corpus instead of
-/// building a fixture, so the framing-vs-array-build split can be READ at corpus
-/// scale during a perf run. Unset = build the small fixture (the CI path).
+/// Optional: point the test at a generated measurement corpus instead of building
+/// a fixture, so the framing-vs-array-build split can be READ at corpus scale
+/// during a perf run. Unset = build the small fixture (the CI path, which is what
+/// runs everywhere — the generator that produces such a corpus is re-anchored to
+/// issue #3272 and is not part of this change).
 const CORPUS_DIR_ENV: &str = "CQLITE_WS0_CORPUS_DIR";
 /// Optional: override the service `batch_size`, so the same split can be read at
 /// the PRODUCTION default (8192) rather than only at the small committed value.
