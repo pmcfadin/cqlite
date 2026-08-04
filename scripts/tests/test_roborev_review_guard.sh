@@ -3769,15 +3769,27 @@ fi
 _census_start=$(grep -nE '^roborev_census\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
 if [ -n "$_census_start" ]; then
   _census_end=$(awk -v s="$_census_start" 'NR>s && /^  \}$/ {print NR; exit}' "$ORACLES")
-  if sed -n "${_census_start},${_census_end:-$_census_start}p" "$ORACLES" | grep -q 'roborev_unquote_path '; then
-    bad 'structural: the census normalises inside its own loop — it must read raw paths instead (-z)'
+  # AN UNRESOLVED BOUND IS ITS OWN FAILURE, NEVER A SILENT 1-LINE RANGE. The previous
+  # `${_census_end:-$_census_start}` fallback degraded a failed/empty `awk` into a range of
+  # ONE line, in which the absence-assert below reads `ok` (nothing to find) while the
+  # presence-assert reds — a FLAKY FAIL that names the wrong defect and, in the other
+  # direction, an assert satisfied by scanning nothing. OBSERVED once under gate load, on a
+  # tree whose `read -r -d ''` is provably present. So the bound is verified before use.
+  if [ -z "$_census_end" ] || [ "$_census_end" -le "$_census_start" ]; then
+    bad "structural: the census body bounds could not be resolved (start $_census_start, end '${_census_end:-<none>}') — the range asserts below would scan nothing, so this is a failure to measure, not a measurement"
   else
-    ok 'structural: the census classifies the RAW path (no unquoting inside the census loop)'
-  fi
-  if sed -n "${_census_start},${_census_end:-$_census_start}p" "$ORACLES" | grep -qF 'read -r -d '; then
-    ok 'structural: the census reads NUL-terminated records (a newline-bearing path survives)'
-  else
-    bad 'structural: the census does not read NUL-terminated records — a newline-bearing path would split'
+    ok "structural: the census body bounds resolved (lines $_census_start-$_census_end)"
+    _census_body=$(sed -n "${_census_start},${_census_end}p" "$ORACLES")
+    if printf '%s\n' "$_census_body" | grep -q 'roborev_unquote_path '; then
+      bad 'structural: the census normalises inside its own loop — it must read raw paths instead (-z)'
+    else
+      ok 'structural: the census classifies the RAW path (no unquoting inside the census loop)'
+    fi
+    if printf '%s\n' "$_census_body" | grep -qF 'read -r -d '; then
+      ok 'structural: the census reads NUL-terminated records (a newline-bearing path survives)'
+    else
+      bad 'structural: the census does not read NUL-terminated records — a newline-bearing path would split'
+    fi
   fi
 else
   bad 'structural: roborev_census is not defined'
