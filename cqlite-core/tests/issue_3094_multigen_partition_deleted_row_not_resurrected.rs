@@ -342,6 +342,7 @@ fn patch_newest_generation_partition_deletion(table_dir: &Path) {
 }
 
 /// The fixture's single partition key value (`pk = 1`).
+#[cfg(not(feature = "tombstones"))]
 const PK_VALUE: i32 = 1;
 
 fn table_id() -> CqlTableId {
@@ -684,6 +685,10 @@ async fn multigen_partition_delete_hides_the_markerless_row_and_keeps_the_newer_
 /// The partition key BYTES for `pk = 1` — a single `int` partition column, so the
 /// key is its 4-byte big-endian value (Cassandra's `Int32Type` encoding; guide App.B).
 /// Cross-checked against the key the merge path actually emits before it is used.
+///
+/// Only the SEEKING driver takes a partition key, and that driver (like
+/// `SSTableManager::scan_partition_clustering` itself) is `not(tombstones)`.
+#[cfg(not(feature = "tombstones"))]
 fn partition_key_bytes() -> Vec<u8> {
     PK_VALUE.to_be_bytes().to_vec()
 }
