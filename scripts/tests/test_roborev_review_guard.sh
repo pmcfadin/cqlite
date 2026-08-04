@@ -32,6 +32,10 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
+# The two sourced halves, named ONCE here because several cases probe a function DIRECTLY rather
+# than through the wrapper. `WRAPPER` is reassigned later by the gate-mock cases; these are not.
+CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 BLOCK_HEADER="==== ROBOREV REVIEW SUMMARY ===="
 
 if [ ! -f "$WRAPPER" ]; then
@@ -257,6 +261,13 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   docs-extensionless-exec-deleted  the extensionless 100755 file exists at the BASE and the
 #                   branch DELETES it: there is no file to stat and no HEAD tree entry, so the
 #                   mode can only come from the BASE tree
+#   docs-extensionless-exec-unset  THE ROUND-13 BLOCKER: the extensionless file is 100755 at
+#                   the BASE and 100644 at HEAD (a pure `chmod -x`). PRESENT AT BOTH endpoints,
+#                   which is exactly what the ordered scan could not survive — the HEAD record
+#                   ended the scan, so BASE was never consulted and a script "became" prose
+#   docs-extensionless-exec-set  the MIRROR: 100644 at the BASE, 100755 at HEAD (a `chmod +x`
+#                   of a file that already existed). Also present at both, and the direction a
+#                   BASE-only consult would lose
 #   rename-space    a rename where BOTH names carry a space (`docs/storage engine/old
 #                   probe.sh` → `new probe.sh`): the header `diff --git a/<sp> b/<sp>`
 #                   is unsplittable by any `[^ ]+` regex AND is not a same-path header
@@ -316,6 +327,22 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/probe.sh"
       git_q "$work" add docs
       git_q "$work" commit -q -m 'base: an ASCII harness script'
+      ;;
+    docs-extensionless-exec-unset | docs-extensionless-exec-set)
+      # A MODE CHANGE is only expressible in `origin/main...HEAD` when the path exists at the
+      # BASE, so it is created here with the STARTING mode; the branch flips it below. Both the
+      # on-disk bit and the INDEX mode are set for the same reason as the deleted variant.
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      git_q "$work" add docs
+      if [ "$mode" = docs-extensionless-exec-unset ]; then
+        chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      else
+        chmod 644 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      fi
+      git_q "$work" commit -q -m 'base: an extensionless harness file under docs/'
       ;;
     docs-extensionless-exec-deleted)
       # The path must exist at the BASE for the branch to DELETE it in `origin/main...HEAD`.
@@ -494,6 +521,21 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
     docs-extensionless-exec-deleted)
       git_q "$work" rm -q docs/reports/x-artifacts/ws0-results/ws0-readbw
       git_q "$work" commit -q -m 'delete the extensionless harness executable'
+      ;;
+    docs-extensionless-exec-unset | docs-extensionless-exec-set)
+      # A PURE mode change — no content edit — so `--numstat` reports `0 0 <path>` and the ONLY
+      # thing distinguishing the two endpoints is the recorded mode. A `.md` rides along so the
+      # census has a second, provably NON-code file and the `1/1` count below is discriminating.
+      if [ "$mode" = docs-extensionless-exec-unset ]; then
+        chmod 644 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      else
+        chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      fi
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      git_q "$work" add docs/reports/x-report.md
+      git_q "$work" commit -q -m 'flip the recorded mode of an extensionless harness file'
       ;;
     rename-space)
       git_q "$work" mv "docs/storage engine/old probe.sh" "docs/storage engine/new probe.sh"
@@ -1046,6 +1088,375 @@ assert_says 'case (cx3d) deleting an extensionless executable is a reviewable co
 assert_says 'case (cx3d) the deletion is a code census path the reviewer received' '^prompt-content: PASS \(1/1 code census paths present\)$'
 assert_enqueued 'case (cx3d)'
 
+# ---------------------------------------------------------------------------------------------
+# (cx3e)–(cx3j): THE RULE IS A DISJUNCTION OVER BOTH ENDPOINTS (#3229 round-13 blocker).
+#
+# (cx3a)–(cx3d) pin the mode SOURCE — the tree rather than `test -x` — and they were mutation-
+# tested in that direction (swapping the tree read for a filesystem stat turned 4 assertions
+# RED). What they could NOT see is the RANGE SEMANTICS: every one of those fixtures has the
+# path at EXACTLY ONE endpoint (added ⇒ HEAD only; deleted ⇒ BASE only), so an implementation
+# that consulted only ONE endpoint, or that stopped at the FIRST endpoint holding a record,
+# passed all four. The round-12 implementation was the latter, and a path present at BOTH
+# endpoints therefore never reached BASE: `100755`@BASE → `100644`@HEAD read NON-CODE, dropping
+# the path from `census_code_paths` so `prompt-content: PASS (n/n)` made no claim about it.
+#
+# So the cases below cover the ENDPOINT COMBINATIONS, which is the property the previous round
+# left unguarded:
+#   (cx3e) present at BOTH, exec at BASE only  — e2e, the blocker itself
+#   (cx3f) the same fixture with the path ABSENT from the prompt — the naming direction
+#   (cx3g) present at BOTH, exec at HEAD only  — the mirror
+#   (cx3h) the full matrix as a direct unit probe (both / HEAD-only / BASE-only / neither),
+#          plus a glob-metacharacter name, plus the stderr cleanliness assert
+#   (cx3i) MUTATION of the semantics: consult only HEAD, then only BASE
+#   (cx3j) STRUCTURAL: the fold cannot exit early
+# ---------------------------------------------------------------------------------------------
+printf '== case (cx3e): an extensionless file EXECUTABLE AT THE BASE ONLY (chmod -x) is still CODE ==\n'
+reset_stub
+# THE ROUND-13 BLOCKER, at the summary level. `chmod -x` does not turn a script into prose, and
+# the census subject is the RANGE — so a path executable at EITHER endpoint is a code path. The
+# fixture is a PURE mode change, so the path is present at BOTH endpoints: the shape the four
+# preceding cases cannot produce.
+work=$(make_fixture case_cx3e docs-extensionless-exec-unset)
+assert_tracked_mode 'case (cx3e) fixture' "$work" origin/main docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+assert_tracked_mode 'case (cx3e) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100644
+# The working-tree bit agrees with HEAD, so no filesystem stat could rescue this case either:
+# every source of "is it executable" EXCEPT the BASE tree says no.
+if [ -x "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw" ]; then
+  bad 'case (cx3e): the working-tree file is still executable, so the case does not isolate the BASE tree'
+else
+  ok 'case (cx3e): neither HEAD nor the working tree records the bit — only the BASE tree does'
+fi
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\nold mode 100755\nnew mode 100644'
+run_wrapper "$work"
+assert_verdict 'case (cx3e)' PASS 0
+assert_says 'case (cx3e) the census saw the mode change and the .md' '^census: 2 files, \+[0-9]+/-[0-9]+$'
+assert_says 'case (cx3e) losing the exec bit is a reviewable code change, not prose' '^code-free: PASS$'
+assert_says 'case (cx3e) the mode-changed path is the one code census path, and it arrived' '^prompt-content: PASS \(1/1 code census paths present\)$'
+# Before the fix this run reported `code-free: FAIL` — the path was classified non-code, leaving
+# the census with NO code path at all — so a `PASS` here can only come from counting it.
+assert_lacks 'case (cx3e) the diff is never called code-free' '^code-free: FAIL'
+assert_enqueued 'case (cx3e)'
+
+printf '== case (cx3f): the SAME mode-changed path, ABSENT from the prompt, is a FAIL that NAMES it ==\n'
+reset_stub
+# The direction that makes (cx3e) mean something: the path must be a SUBJECT the guard can miss.
+# Under the round-12 code it was not a subject at all, so its absence from the reviewer's prompt
+# was unassertable — the defect was invisible from inside the guard's own output.
+work=$(make_fixture case_cx3f docs-extensionless-exec-unset)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-report.md b/docs/reports/x-report.md'
+run_wrapper "$work"
+assert_verdict 'case (cx3f)' FAIL 1
+assert_says 'case (cx3f) the absent mode-changed executable is the one absent code path' '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
+assert_says 'case (cx3f) the absent path is NAMED' '^  docs/reports/x-artifacts/ws0-results/ws0-readbw$'
+assert_lacks 'case (cx3f) never reports a PASS on a prompt missing the mode-changed path' '^prompt-content: PASS'
+
+printf '== case (cx3g): the MIRROR — executable at HEAD only (chmod +x of an existing file) ==\n'
+reset_stub
+# A `chmod +x` of a file that already existed at the BASE: an executable ENTERING the range. Also
+# present at both endpoints, and the direction a BASE-only consult would lose. Same expectation,
+# because the rule is a disjunction and neither endpoint outranks the other.
+work=$(make_fixture case_cx3g docs-extensionless-exec-set)
+assert_tracked_mode 'case (cx3g) fixture' "$work" origin/main docs/reports/x-artifacts/ws0-results/ws0-readbw 100644
+assert_tracked_mode 'case (cx3g) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\nold mode 100644\nnew mode 100755'
+run_wrapper "$work"
+assert_verdict 'case (cx3g)' PASS 0
+assert_says 'case (cx3g) gaining the exec bit is a reviewable code change' '^code-free: PASS$'
+assert_says 'case (cx3g) the newly-executable path is the one code census path' '^prompt-content: PASS \(1/1 code census paths present\)$'
+assert_enqueued 'case (cx3g)'
+
+printf '== case (cx3h): the ENDPOINT-COMBINATION MATRIX (direct unit probe) ==\n'
+# Probed DIRECTLY, through the real function in the real file, because ONE repository can carry
+# every combination at once — which is what makes the table a table rather than six unrelated
+# fixtures whose expectations could drift apart. `absent-everywhere` is only reachable this way:
+# a real census path exists at an endpoint by construction, so the unmeasurable case has no
+# fixture that could produce it end-to-end.
+mode_matrix_repo() { # mode_matrix_repo <dir> -> prints the BASE sha
+  local w="$1"
+  mkdir -p "$w"
+  git init -q -b main "$w"
+  git_q "$w" config user.email guard@example.invalid
+  git_q "$w" config user.name 'guard test'
+  local p
+  # BASE tree. `chmod` AND `update-index --chmod` for the same reason as every other
+  # mode-bearing fixture here: neither alone is trustworthy.
+  for p in both-exec base-only-exec base-exec-head-plain 'glob[x]*?-exec'; do
+    printf '#!/bin/sh\nexit 0\n' >"$w/$p"; chmod 755 "$w/$p"
+  done
+  for p in both-plain head-exec-base-plain; do
+    printf 'plain\n' >"$w/$p"; chmod 644 "$w/$p"
+  done
+  printf 'base\n' >"$w/README.md"
+  git_q "$w" add -A
+  git_q "$w" update-index --chmod=+x both-exec --chmod=+x base-only-exec \
+    --chmod=+x base-exec-head-plain --chmod=+x 'glob[x]*?-exec'
+  git_q "$w" update-index --chmod=-x both-plain --chmod=-x head-exec-base-plain
+  git_q "$w" commit -q -m base
+  local base; base=$(git -C "$w" rev-parse HEAD)
+  # HEAD tree: one transition per path. `rm -f` because the index/worktree mode agreement above
+  # is what made a plain `git rm` refuse in the deleted fixture.
+  git_q "$w" rm -q -f base-only-exec
+  chmod 644 "$w/base-exec-head-plain"
+  chmod 755 "$w/head-exec-base-plain"
+  printf '#!/bin/sh\nexit 0\n' >"$w/head-only-exec"; chmod 755 "$w/head-only-exec"
+  printf 'plain\n' >"$w/head-only-plain"; chmod 644 "$w/head-only-plain"
+  git_q "$w" add -A
+  git_q "$w" update-index --chmod=-x base-exec-head-plain --chmod=+x head-exec-base-plain \
+    --chmod=+x head-only-exec --chmod=-x head-only-plain
+  git_q "$w" commit -q -m head
+  printf '%s' "$base"
+}
+# The probe prints one `<path><TAB>CODE|NON-CODE` line per subject. It sources the REAL oracles
+# file, so a future change to the function is measured, not a copy of it.
+cx3h_probe="$tmp/cx3h-probe.sh"
+cat >"$cx3h_probe" <<'CX3H'
+set -uo pipefail
+# shellcheck disable=SC1090
+. "$1"          # the real oracles file
+REPO="$2"
+BASE_SHA="$3"
+for p in both-exec both-plain head-only-exec head-only-plain base-only-exec \
+         base-exec-head-plain head-exec-base-plain 'glob[x]*?-exec' absent-everywhere; do
+  if roborev_path_is_executable "$p"; then printf '%s\tCODE\n' "$p"; else printf '%s\tNON-CODE\n' "$p"; fi
+done
+CX3H
+# `<path> <expected>`; the comment on each line is the endpoint combination it stands for.
+CX3H_MATRIX=(
+  'both-exec CODE'                 # present at both, exec at both
+  'both-plain NON-CODE'            # present at both, exec at neither  -> the only non-code both-case
+  'head-only-exec CODE'            # added executable          (HEAD only)
+  'head-only-plain NON-CODE'       # added non-executable      (HEAD only)
+  'base-only-exec CODE'            # deleted executable        (BASE only)
+  'base-exec-head-plain CODE'      # chmod -x  — THE ROUND-13 BLOCKER
+  'head-exec-base-plain CODE'      # chmod +x  — the mirror
+  'glob[x]*?-exec CODE'            # a name full of glob metacharacters, exec at both
+  'absent-everywhere NON-CODE'     # present at NEITHER endpoint (unmeasurable)
+)
+cx3h_work="$tmp/case_cx3h/work"
+cx3h_base=$(mode_matrix_repo "$cx3h_work")
+cx3h_out="$tmp/cx3h-out.txt"
+cx3h_err="$tmp/cx3h-err.txt"
+# The fixture must really hold the combinations the table claims, or the table measures nothing.
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" base-exec-head-plain 100755
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD base-exec-head-plain 100644
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" head-exec-base-plain 100644
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD head-exec-base-plain 100755
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" base-only-exec 100755
+if git -C "$cx3h_work" ls-tree HEAD -- ':(literal)base-only-exec' | grep -q .; then
+  bad 'case (cx3h): base-only-exec still exists at HEAD, so the BASE-only combination is not reproduced'
+else
+  ok 'case (cx3h): base-only-exec is absent from HEAD (the BASE-only combination is reproduced)'
+fi
+# `run_probe` is deliberately a plain `bash`: the point is the FUNCTION, and the wrapper's
+# summary block cannot express `absent-everywhere` at all.
+if bash "$cx3h_probe" "$ORACLES_SRC" "$cx3h_work" "$cx3h_base" >"$cx3h_out" 2>"$cx3h_err"; then
+  for _row in "${CX3H_MATRIX[@]}"; do
+    _mpath="${_row% *}"; _mwant="${_row##* }"
+    if grep -Fxq "$(printf '%s\t%s' "$_mpath" "$_mwant")" "$cx3h_out"; then
+      ok "case (cx3h): $_mpath => $_mwant"
+    else
+      bad "case (cx3h): $_mpath => want $_mwant, got '$(grep -F "$_mpath" "$cx3h_out" | head -1)'"
+    fi
+  done
+else
+  bad "case (cx3h): the matrix probe did not run: $(cat "$cx3h_err")"
+fi
+# THE NUL WARNING (#3229 round-13, folded in). `git ls-tree -z` piped through `$(...)` made bash
+# emit `warning: command substitution: ignored null byte in input` on EVERY call — harmless for a
+# single record (the path is last, so only the terminating NUL is lost) but per-call stderr noise
+# that can MASK a real warning. Nine calls above, so a per-call warning cannot hide here.
+if [ -s "$cx3h_err" ]; then
+  bad "case (cx3h): the classifier wrote to stderr: $(head -2 "$cx3h_err")"
+else
+  ok 'case (cx3h): nine classifications produced NO stderr (the ignored-null-byte warning is gone)'
+fi
+
+printf '== case (cx3i): MUTATION — consulting only ONE endpoint must go RED ==\n'
+# The previous round's mutation testing swapped the mode SOURCE (tree ⇒ `test -x`) and turned 4
+# assertions red, which is why it looked sufficient. It never mutated the RANGE SEMANTICS, and
+# that is the axis the blocker lived on. So both single-endpoint mutants are run here, and each
+# must break the combination only the OTHER endpoint can answer — which also proves the two
+# endpoints are not redundant.
+#
+#   HEAD-only consult ⇒ `base-only-exec` (a deleted executable) must go NON-CODE
+#   BASE-only consult ⇒ `head-only-exec` (an added executable)  must go NON-CODE
+#
+# Both mutants also flip a mode-change case, and that is asserted too: it is the same defect the
+# blocker reported, reachable from either single-endpoint direction.
+cx3i_mut="$tmp/cx3i-oracles.sh"
+for _mut in head base; do
+  cp "$ORACLES_SRC" "$cx3i_mut"
+  if [ "$_mut" = head ]; then
+    _mut_from='HEAD "${BASE_SHA:-}"'; _mut_to='HEAD'
+    _mut_lost=base-only-exec; _mut_lost2=base-exec-head-plain; _mut_kept=head-only-exec
+  else
+    _mut_from='HEAD "${BASE_SHA:-}"'; _mut_to='"${BASE_SHA:-}"'
+    _mut_lost=head-only-exec; _mut_lost2=head-exec-base-plain; _mut_kept=base-only-exec
+  fi
+  # Patch the ENDPOINT PRODUCER, which is the single place the range is named — a mutant that
+  # could not be expressed as a one-line edit there would itself be evidence the shape is wrong.
+  python3 - "$cx3i_mut" "$_mut_from" "$_mut_to" <<'CX3I' || bad "case (cx3i/$_mut): could not patch the endpoint producer"
+import sys
+p, frm, to = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(p).read()
+old = 'for ref in %s; do' % frm
+if s.count(old) != 1:
+    sys.exit('expected exactly one endpoint-producer loop, found %d' % s.count(old))
+open(p, 'w').write(s.replace(old, 'for ref in %s; do' % to, 1))
+CX3I
+  if grep -qF "for ref in $_mut_to; do" "$cx3i_mut" && ! grep -qF "for ref in $_mut_from; do" "$cx3i_mut"; then
+    ok "case (cx3i/$_mut): the single-endpoint mutant was really applied to the copy"
+  else
+    bad "case (cx3i/$_mut): the mutant was NOT applied, so nothing was mutation-tested (a green here is a probe failing toward success)"
+  fi
+  if bash "$cx3h_probe" "$cx3i_mut" "$cx3h_work" "$cx3h_base" >"$tmp/cx3i-$_mut.txt" 2>/dev/null; then
+    for _lost in "$_mut_lost" "$_mut_lost2"; do
+      if grep -Fxq "$(printf '%s\tNON-CODE' "$_lost")" "$tmp/cx3i-$_mut.txt"; then
+        ok "case (cx3i/$_mut): consulting only $_mut makes $_lost read NON-CODE — the assert is load-bearing"
+      else
+        bad "case (cx3i/$_mut): $_lost still read CODE under a $_mut-only consult, so the either-endpoint asserts do not detect a skipped endpoint"
+      fi
+    done
+    # The mutant must NOT be uniformly broken: the endpoint it DOES consult still answers, so the
+    # two REDs above are the semantics and not a probe that stopped working.
+    if grep -Fxq "$(printf '%s\tCODE' "$_mut_kept")" "$tmp/cx3i-$_mut.txt"; then
+      ok "case (cx3i/$_mut): the mutant still classifies $_mut_kept CODE (it lost one endpoint, not the whole function)"
+    else
+      bad "case (cx3i/$_mut): the mutant lost $_mut_kept too, so it is broken rather than single-endpoint"
+    fi
+  else
+    bad "case (cx3i/$_mut): the mutated probe did not run at all"
+  fi
+done
+# RESTORED GREEN: the unmutated file, re-measured after the mutants, so a mutation that leaked
+# into the real file (a stray in-place edit, a wrong path) cannot pass unnoticed.
+if bash "$cx3h_probe" "$ORACLES_SRC" "$cx3h_work" "$cx3h_base" >"$tmp/cx3i-restored.txt" 2>/dev/null &&
+  diff -q "$cx3h_out" "$tmp/cx3i-restored.txt" >/dev/null; then
+  ok 'case (cx3i): the UNMUTATED oracles file still produces the full green matrix (no mutant leaked into it)'
+else
+  bad 'case (cx3i): the unmutated matrix changed after the mutation run — a mutant leaked into the real file'
+fi
+
+printf '== case (cx3j): STRUCTURAL — the endpoint fold cannot exit early ==\n'
+# The behavioural cases above pin the RULE. This pins the SHAPE that makes the rule hold BY
+# CONSTRUCTION, because the shape is the actual remedy: this is the third round on this PR where
+# a fix restored a narrower instance of the class it closed, and each time the code was correct
+# for the cases someone had thought of. A `return`/`break`/`continue` inside the fold is what
+# "skip an endpoint" LOOKS like, so its absence is asserted directly — a future edit that
+# reintroduces one FAILs here even if it happens to be correct for every fixture above.
+#
+# SHAPE-AGNOSTIC ON PURPOSE. A check keyed to the CURRENT loop spelling (`while … read -r ref`)
+# would go quiet the moment someone rewrote the fold — including back into the `for`-loop shape
+# the blocker came from — so it asserts the INVARIANT instead: `roborev_path_is_executable`
+# contains NO `break`/`continue` at all, and EXACTLY ONE `return`, which is its LAST statement.
+# The round-12 code had three returns, two of them inside the loop; any reintroduced early exit
+# adds a return, a break or a continue, whatever the loop is written with.
+#
+# `cx3j_shape <file>` prints one word: `OK`, `NOT-FOUND`, or a named violation. Comment lines are
+# stripped first — the body deliberately DOCUMENTS that it has no early exit, and a check that
+# read its own prose fired on the word "exit" in that comment (measured).
+cx3j_shape() { # cx3j_shape <file> [funcname]
+  local file="$1" fn="${2:-roborev_path_is_executable}" body last nret
+  body=$(awk -v fn="^$fn\\\\(\\\\) \\\\{" '
+    $0 ~ fn { inf = 1; next }
+    inf && /^\}/ { exit }
+    inf { print }
+  ' "$file" | grep -vE '^[[:space:]]*#' | grep -vE '^[[:space:]]*$')
+  if [ -z "$body" ]; then printf 'NOT-FOUND\n'; return 0; fi
+  if printf '%s\n' "$body" | grep -qE '(^|[^[:alnum:]_])(break|continue)([^[:alnum:]_]|$)'; then
+    printf 'HAS-BREAK-OR-CONTINUE\n'; return 0
+  fi
+  nret=$(printf '%s\n' "$body" | grep -cE '(^|[^[:alnum:]_])return([^[:alnum:]_]|$)' || true)
+  if [ "$nret" -ne 1 ]; then printf 'RETURNS=%s\n' "$nret"; return 0; fi
+  last=$(printf '%s\n' "$body" | tail -1)
+  case "$last" in
+    *return*) printf 'OK\n' ;;
+    *) printf 'RETURN-NOT-LAST\n' ;;
+  esac
+}
+# BOTH DIRECTIONS. The check is only worth its line if it FIRES, so it is run against three
+# mutants first: a `return` injected into the fold, a `break` injected into the fold, and the
+# ACTUAL round-12 shape (an ordered `for` loop that returns on the first record). If any of them
+# read `OK`, the assert below proves nothing.
+cx3j_mut="$tmp/cx3j-mutant.sh"
+cx3j_inject() { # cx3j_inject <stmt> — copy the oracles with <stmt> added inside the fold
+  python3 - "$ORACLES_SRC" "$cx3j_mut" "$1" <<'CX3JI'
+import sys
+src, dst, stmt = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(src).read()
+anchor = 'if _roborev_mode_is_exec_at "$ref" "$path"; then exec_at_any=0; fi\n'
+if s.count(anchor) != 1:
+    sys.exit('expected exactly one fold body, found %d' % s.count(anchor))
+open(dst, 'w').write(s.replace(anchor, anchor.rstrip('\n') + '\n    ' + stmt + '\n', 1))
+CX3JI
+}
+for _inj in 'return 0' 'break'; do
+  if cx3j_inject "$_inj"; then
+    _got=$(cx3j_shape "$cx3j_mut")
+    if [ "$_got" != OK ]; then
+      ok "case (cx3j control): a '$_inj' injected into the fold is caught ($_got)"
+    else
+      bad "case (cx3j control): a '$_inj' injected into the fold read OK — the structural assert cannot see an early exit"
+    fi
+  else
+    bad "case (cx3j control): could not inject '$_inj' into the fold, so the assert was never controlled"
+  fi
+done
+# The round-12 shape itself, verbatim from the commit this round fixes.
+{
+  printf 'roborev_path_is_executable() {\n'
+  printf '  local path="$1" ref record mode\n'
+  printf '  for ref in HEAD "${BASE_SHA:-}"; do\n'
+  printf '    [ -n "$ref" ] || continue\n'
+  printf '    record=$(git -C "$REPO" ls-tree -z "$ref" -- ":(literal)$path" 2>/dev/null) || continue\n'
+  printf '    [ -n "$record" ] || continue\n'
+  printf '    mode="${record%%%% *}"\n'
+  printf '    [ "$mode" = 100755 ] && return 0\n'
+  printf '    return 1\n'
+  printf '  done\n'
+  printf '  return 1\n'
+  printf '}\n'
+} >"$tmp/cx3j-round12.sh"
+_got=$(cx3j_shape "$tmp/cx3j-round12.sh")
+if [ "$_got" != OK ]; then
+  ok "case (cx3j control): the ROUND-12 shape this round replaced is caught ($_got)"
+else
+  bad 'case (cx3j control): the round-12 shape read OK — the structural assert would not have caught the reported blocker'
+fi
+# A function that is absent must read NOT-FOUND rather than OK, or a rename would pass vacuously.
+_got=$(cx3j_shape "$ORACLES_SRC" roborev_no_such_function_exists)
+if [ "$_got" = NOT-FOUND ]; then
+  ok 'case (cx3j control): an ABSENT function reads NOT-FOUND, never OK (a rename cannot pass vacuously)'
+else
+  bad "case (cx3j control): an absent function read '$_got' — the shape check can pass on nothing"
+fi
+# THE ASSERT ITSELF.
+cx3j_got=$(cx3j_shape "$ORACLES_SRC")
+if [ "$cx3j_got" = OK ]; then
+  ok 'case (cx3j): roborev_path_is_executable has no break/continue and exactly ONE return, last — no endpoint can be skipped'
+else
+  bad "case (cx3j): roborev_path_is_executable's shape reads '$cx3j_got' — an endpoint can be skipped again"
+fi
+# The per-endpoint predicate must stay RANGE-BLIND: if it learns about BASE_SHA it can express
+# a precedence again, which is the ambiguity the split exists to remove.
+cx3j_pred=$(awk '
+  /^_roborev_mode_is_exec_at\(\) \{/ { inf = 1 }
+  inf { print }
+  inf && /^\}/ { exit }
+' "$ORACLES_SRC")
+if [ -z "$cx3j_pred" ]; then
+  bad 'case (cx3j): _roborev_mode_is_exec_at was not found, so its range-blindness was not checked'
+else
+  if ! printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' | grep -qE 'BASE_SHA|\bHEAD\b'; then
+    ok 'case (cx3j): the per-endpoint predicate names no endpoint (range-blind, so it cannot encode an ordering)'
+  else
+    bad 'case (cx3j): _roborev_mode_is_exec_at references a specific endpoint — it can encode a precedence again'
+  fi
+fi
+
 printf '== case (cx6): a census path with SPACES and a literal quote compares correctly ==\n'
 reset_stub
 # NUL-safety. `git diff --numstat` C-QUOTES this path while `-z` output does not, so an
@@ -1270,9 +1681,8 @@ printf "== case (cx21): prompt-content: can NEVER emit a 0/0 PASS (direct unit p
 # With no subject left, `PASS (0/0 code census paths present)` would be indistinguishable
 # from a genuine pass, so the key must refuse to print one whatever happened upstream.
 # Driven through the real function in the real files, so a future change to the upstream
-# ordering cannot silently restore the vacuous PASS.
-CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
-ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
+# ordering cannot silently restore the vacuous PASS. (`CHECKS_SRC`/`ORACLES_SRC` are set at the
+# top of this file — several direct probes need them.)
 cx21_probe="$tmp/cx21-probe.sh"
 cx21_out="$tmp/cx21-out.txt"
 cat >"$cx21_probe" <<'CX21'
