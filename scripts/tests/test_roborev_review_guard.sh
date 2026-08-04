@@ -244,6 +244,19 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #                   path by its QUOTED spelling (ext `md"`, prefix `"docs/…`)
 #   docs-nonascii-artifact  docs/reports/x-artifacts/é.json + a .rs file — the same
 #                   misclassification for a docs-scoped ARTIFACT (ext `json"`)
+#   docs-extensionless-exec  an EXTENSIONLESS 100755 file under docs/reports/x-artifacts/,
+#                   beside a `.md`, an extensionless 100644 file, and a NON-executable `.sh`.
+#                   The real repo tracks three such executables (`ws0-readbw`, `ws0-stream`,
+#                   `offcputime-bigmap`); the retired prefix-only rule classified every
+#                   extensionless docs/ path non-code, so `prompt-content:` asserted NOTHING
+#                   about exactly the class AC2 names
+#   docs-extensionless-plain  THE ONE-VARIABLE SIBLING: the SAME path as above at mode
+#                   100644, beside a .rs change. Same name, same directory, only the recorded
+#                   mode differs — so a green pair proves the discriminator is the MODE and
+#                   not something about the name
+#   docs-extensionless-exec-deleted  the extensionless 100755 file exists at the BASE and the
+#                   branch DELETES it: there is no file to stat and no HEAD tree entry, so the
+#                   mode can only come from the BASE tree
 #   rename-space    a rename where BOTH names carry a space (`docs/storage engine/old
 #                   probe.sh` → `new probe.sh`): the header `diff --git a/<sp> b/<sp>`
 #                   is unsplittable by any `[^ ]+` regex AND is not a same-path header
@@ -303,6 +316,20 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/probe.sh"
       git_q "$work" add docs
       git_q "$work" commit -q -m 'base: an ASCII harness script'
+      ;;
+    docs-extensionless-exec-deleted)
+      # The path must exist at the BASE for the branch to DELETE it in `origin/main...HEAD`.
+      # BOTH the on-disk bit and the INDEX mode are set: `chmod` alone is at the mercy of
+      # `core.fileMode`, while `update-index --chmod` alone leaves the working file DISAGREEING
+      # with the index — which git reports as a local modification and which made `git rm`
+      # refuse (measured: the refusal left the fixture unbuilt and polluted make_fixture's
+      # stdout, so every assert in the case reported against a non-existent work tree).
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      git_q "$work" add docs
+      git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" commit -q -m 'base: an extensionless harness executable under docs/'
       ;;
     rename-ambiguous)
       # The OTHER direction of the header ambiguity (#3229 blocker 1): a rename whose
@@ -428,6 +455,46 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add docs main.rs
       git_q "$work" commit -q -m 'a non-ASCII docs artifact beside code'
       ;;
+    docs-extensionless-exec)
+      # FOUR paths, chosen so ONE `prompt-content:` count discriminates all four rules:
+      #   ws0-readbw   extensionless, 100755   -> CODE   (the class this fixture exists for)
+      #   plain.sh     `.sh`,         100644   -> CODE   (a code EXTENSION wins over the mode;
+      #                                                   the mode is consulted ONLY when there
+      #                                                   is no extension)
+      #   x-report.md  `.md`                   -> non-code (unchanged)
+      #   NOTICE       extensionless, 100644   -> non-code (what the prefix list is FOR)
+      # So the code census is exactly 2, and a `2/2` can only be those two.
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results" "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/plain.sh"
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      printf 'no rights reserved\n' >"$work/docs/NOTICE"
+      # On-disk bits AND index modes (see the deleted-variant comment): a `chmod` alone bends
+      # to `core.fileMode`, an `update-index --chmod` alone leaves the file reported modified.
+      chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      chmod 644 "$work/docs/reports/x-artifacts/harness/plain.sh" "$work/docs/NOTICE"
+      git_q "$work" add docs
+      git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/harness/plain.sh
+      git_q "$work" update-index --chmod=-x docs/NOTICE
+      git_q "$work" commit -q -m 'an extensionless executable under docs/, beside prose'
+      ;;
+    docs-extensionless-plain)
+      # The SAME path at mode 100644. Nothing but the recorded mode differs from the fixture
+      # above, so the pair is a one-variable control: if the classifier were keying on the
+      # directory or the name, both would land in the same class.
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results"
+      printf 'plain notes with no extension\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      chmod 644 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" commit -q -m 'an extensionless NON-executable under docs/, beside code'
+      ;;
+    docs-extensionless-exec-deleted)
+      git_q "$work" rm -q docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" commit -q -m 'delete the extensionless harness executable'
+      ;;
     rename-space)
       git_q "$work" mv "docs/storage engine/old probe.sh" "docs/storage engine/new probe.sh"
       git_q "$work" commit -q -m 'rename a space-bearing harness script'
@@ -532,6 +599,21 @@ assert_no_mirror_ref() { # assert_no_mirror_ref <label> <work> <remote>
     bad "$1: fixture is not narrow — refs/remotes/$3/feature exists"
   else
     ok "$1: no refs/remotes/$3/feature mirror ref (narrow refspec reproduced)"
+  fi
+}
+
+# Fixture-integrity guard for the MODE-bearing fixtures (#3229). The whole point of the
+# extensionless family is the RECORDED mode, so a fixture whose exec bit silently failed to
+# stick — a `chmod` swallowed by the host umask, a `core.fileMode=false` checkout — would test
+# the OTHER class while still looking like the case it claims to be. Read from the tree, which
+# is the same source the classifier reads.
+assert_tracked_mode() { # assert_tracked_mode <label> <work> <ref> <path> <want-mode>
+  local got
+  got=$(git -C "$2" ls-tree -z "$3" -- ":(literal)$4" 2>/dev/null | cut -d' ' -f1)
+  if [ "$got" = "$5" ]; then
+    ok "$1: $4 is recorded $5 in $3"
+  else
+    bad "$1: $4 is recorded '${got:-<absent>}' in $3, want $5 — the fixture tests a different class than it claims"
   fi
 }
 
@@ -885,6 +967,84 @@ run_wrapper "$work"
 assert_verdict 'case (cx3)' FAIL 1
 assert_says 'case (cx3) artifacts under docs/ classify non-code' '^code-free: FAIL \(code-free census: 6/6 files are documentation/specification text\)$'
 assert_never_enqueued 'case (cx3)'
+
+printf '== case (cx3a): an EXTENSIONLESS EXECUTABLE under docs/ is CODE and IS expected in the prompt ==\n'
+reset_stub
+# THE ROUND-11 BLOCKER. `CODE_FREE_EXTENSIONLESS_PREFIXES` used to make every extensionless
+# path under `docs/` non-code, so it never entered `census_code_paths` and `prompt-content:`
+# made NO CLAIM about it — while the narrowed `exclude_patterns` (only `*.md` globally plus
+# docs-scoped ARTIFACT EXTENSIONS) do not exclude it, so it genuinely reaches the reviewer.
+# The guard was silent on precisely the class AC2's trigger names, and three files in this
+# repo have that exact shape today (`ws0-readbw`, `ws0-stream`, `offcputime-bigmap`, all
+# 100755). The count is the assertion: 2 of the 4 census files are CODE, and only the
+# extensionless EXECUTABLE and the non-executable `.sh` can be them.
+work=$(make_fixture case_cx3a docs-extensionless-exec)
+assert_tracked_mode 'case (cx3a) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+assert_tracked_mode 'case (cx3a) fixture' "$work" HEAD docs/reports/x-artifacts/harness/plain.sh 100644
+assert_tracked_mode 'case (cx3a) fixture' "$work" HEAD docs/NOTICE 100644
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx3a)' PASS 0
+assert_says 'case (cx3a) the census saw all four files' '^census: 4 files, \+[0-9]+/-[0-9]+$'
+assert_says 'case (cx3a) an extensionless executable makes the diff reviewable' '^code-free: PASS$'
+assert_says 'case (cx3a) exactly the two CODE paths are expected, and both arrived' '^prompt-content: PASS \(2/2 code census paths present\)$'
+# The two NON-code paths are still non-code: were `.md` or the extensionless 100644 `NOTICE`
+# counted, the value would read 3/4 or 4/4 — neither of which this case's prompt could satisfy.
+assert_lacks 'case (cx3a) the .md and the extensionless non-executable are NOT in the code census' '^prompt-content: (PASS|FAIL) \([0-9]+/(3|4) '
+assert_enqueued 'case (cx3a)'
+
+printf '== case (cx3b): the SAME extensionless path, ABSENT from the prompt, is a FAIL that NAMES it ==\n'
+reset_stub
+# The other direction, and the one that makes (cx3a) mean something: before the fix this diff
+# passed with `prompt-content: PASS (1/1 ...)` — the reviewer's coverage of `ws0-readbw` was
+# never in question because the guard had already dropped it from the subject set.
+work=$(make_fixture case_cx3b docs-extensionless-exec)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx3b)' FAIL 1
+assert_says 'case (cx3b) the missing extensionless executable is one absent code path of two' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_says 'case (cx3b) the absent path is NAMED' '^  docs/reports/x-artifacts/ws0-results/ws0-readbw$'
+assert_lacks 'case (cx3b) never reports a PASS on a prompt missing a code path' '^prompt-content: PASS'
+
+printf '== case (cx3c): the SAME path NON-EXECUTABLE is still non-code (one-variable control) ==\n'
+reset_stub
+# Identical name, identical directory, mode 100644 instead of 100755. This is what keeps the
+# fix from being "extensionless under docs/ is code now": `docs/LICENSE`, `openspec/NOTES` and
+# a `.claude/CODEOWNERS` must stay out of the code census, which is the only thing the prefix
+# list was ever for. `1/1` — not `2/2` — is the assertion.
+work=$(make_fixture case_cx3c docs-extensionless-plain)
+assert_tracked_mode 'case (cx3c) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100644
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx3c)' PASS 0
+assert_says 'case (cx3c) the census saw both files' '^census: 2 files, \+[0-9]+/-[0-9]+$'
+assert_says 'case (cx3c) only the .rs file is a code census path' '^prompt-content: PASS \(1/1 code census paths present\)$'
+assert_lacks 'case (cx3c) the extensionless non-executable is not demanded of the prompt' '^prompt-content: FAIL'
+
+printf '== case (cx3d): a DELETED extensionless executable is classified from the BASE tree ==\n'
+reset_stub
+# There is no working-tree file to stat and no HEAD tree entry, so `test -x` would answer
+# "not executable" — a different question with a plausible value — and the removal of a harness
+# executable would go unasserted. The mode comes from the BASE tree instead, which is the
+# fail-closed direction: a pure deletion still carries a `diff --git` header for the prompt
+# check to find.
+work=$(make_fixture case_cx3d docs-extensionless-exec-deleted)
+assert_tracked_mode 'case (cx3d) fixture' "$work" origin/main docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+if [ -e "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw" ]; then
+  bad 'case (cx3d): the fixture still has the file on disk, so a filesystem stat could answer'
+else
+  ok 'case (cx3d): the path is absent from the working tree and from HEAD (only the BASE tree has it)'
+fi
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndeleted file mode 100755'
+run_wrapper "$work"
+assert_verdict 'case (cx3d)' PASS 0
+assert_says 'case (cx3d) deleting an extensionless executable is a reviewable code change' '^code-free: PASS$'
+assert_says 'case (cx3d) the deletion is a code census path the reviewer received' '^prompt-content: PASS \(1/1 code census paths present\)$'
+assert_enqueued 'case (cx3d)'
 
 printf '== case (cx6): a census path with SPACES and a literal quote compares correctly ==\n'
 reset_stub
