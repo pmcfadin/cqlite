@@ -43,6 +43,13 @@ WS0_SEED="${WS0_SEED:-42}"
 # Validity gate (AC1/AC2): above this client-pinned-set utilisation the point
 # measured the CLIENT, not the engine.
 WS0_CLIENT_SAT_THRESHOLD="${WS0_CLIENT_SAT_THRESHOLD:-0.70}"
+# Minimum busy fraction for an occupancy arm (roborev round 4 finding #1). Guards
+# against IDLE PERIODS inside a step, which would break the interior convention's
+# assumption that whole-step throughput represents the interior perf window. Low by
+# design: the estimate is a product of three measured quantities and carries their
+# combined error, so a tight floor would be a false-FAIL generator. Committed reps
+# land at ~0.99.
+WS0_BUSY_FRACTION_FLOOR="${WS0_BUSY_FRACTION_FLOOR:-0.90}"
 # AC3: unsymbolized frames must stay under this fraction of samples.
 WS0_UNSYM_THRESHOLD="${WS0_UNSYM_THRESHOLD:-0.10}"
 

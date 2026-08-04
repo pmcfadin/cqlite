@@ -324,6 +324,26 @@ def do_rep(repdir):
             "refusal as an absent file: an empty counter file is not a "
             "measurement of zero traffic."
             % (upath, os.path.getsize(upath)))
+    # COMPLETENESS IS AN IDENTITY CHECK, NOT A COUNT (round 4 finding #2). The first
+    # version of this counted rows per socket and compared against the expected
+    # total — and one MISSING event plus one DUPLICATED event on the same socket
+    # yields exactly the expected count. The duplicate is then summed while the
+    # missing channel is silently omitted, so the socket total is wrong and the
+    # far-socket fraction, which is a RATIO of the two sockets, moves in an
+    # unpredictable direction while every visible number stays plausible.
+    #
+    # Asked of harness/ws0schema.py, which is the same validator rep-complete.py uses,
+    # so the two cannot disagree about what a complete uncore capture is. That
+    # single-homing is the round-3 fix; routing this call through it is what finishes
+    # the job — the count-based check here was the last independent restatement.
+    uproblems = ws0schema.validate_counter_file(upath, 'uncore')
+    if uproblems:
+        raise SystemExit(
+            "FATAL: the uncore capture for %s is not usable:\n  - %s\n"
+            "A partial or duplicated IMC set cannot be summed into a socket total: "
+            "a missing channel's traffic is not zero, it is unmeasured, and a "
+            "duplicated one is counted twice. Re-run the rep."
+            % (repdir, '\n  - '.join(uproblems)))
     uwin = meta['window_secs']
     dram = {'per_socket': {}, 'note':
             "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline "
@@ -347,18 +367,12 @@ def do_rep(repdir):
                     else:
                         s_w += r['value']
                     n += 1
-        # Per-socket completeness, asserted before the socket's total is believed.
-        # A partial IMC set understates that socket's traffic, which would show up
-        # as a plausible-but-low GB/s figure and — because the far-socket fraction
-        # is a RATIO of the two sockets — could shift the NUMA-confinement claim in
-        # either direction without ever looking wrong.
-        if n != IMC_EXPECTED_INSTANCES:
-            raise SystemExit(
-                "FATAL: %s reports %d of %d expected uncore_imc instances on %s "
-                "(12 IMCs x {read,write}). A partial IMC set cannot be summed "
-                "into a socket total: the missing channels' traffic is not zero, "
-                "it is unmeasured. Re-run the rep."
-                % (upath, n, IMC_EXPECTED_INSTANCES, sock))
+        # Per-socket row count, REPORTED. It is deliberately NOT the completeness
+        # check: see the schema validation above, and round 4 finding #2 for why a
+        # count cannot be one.
+        dram['per_socket_instances_counted'] = dram.get(
+            'per_socket_instances_counted', {})
+        dram['per_socket_instances_counted'][sock] = n
         dram['per_socket'][sock] = {
             'cas_read_MiB': s_r, 'cas_write_MiB': s_w,
             'total_MiB': s_r + s_w,
@@ -451,9 +465,38 @@ def main():
         e = {'n_reps': len(rs), 'S': rs[0]['S'], 'N': rs[0]['N'],
              'server_cpus': rs[0]['server_cpus'],
              'numa_node': rs[0]['numa_node']}
+        # A WARNING IS NOT A GATE (round 4 finding #3). This used to stamp
+        # e['WARNING'] and carry on, so a one-rep tree still produced headline deltas
+        # and a full AC4 accounting — recreating, in publishable output, the exact
+        # "undispersed point" methodology this file's DESIGN RULES reject #3217 for.
+        # A caveat in a field beside the number is not a constraint on the number.
+        #
+        # The asymmetry is what made it obvious: group C was already REFUSED below
+        # MIN_REPS (round 2 finding #2), while the primary arm that group C's own
+        # cross-arm check is compared against only warned. One dispersion rule, two
+        # enforcement levels, and the weaker one applied to the larger sample.
+        #
+        # CQLITE_ALLOW_UNDISPERSED=1 exists for exploratory derivation of a partial
+        # tree mid-capture, and it is deliberately LOUD rather than silent: the opt-out
+        # is recorded in derived.json, so a figure derived under it can never be
+        # mistaken for one that met the rule.
         if len(rs) < MIN_REPS:
-            e['WARNING'] = ("only %d rep(s) — #3217's undispersed reps=1 gap is "
-                            "not closed at this endpoint" % len(rs))
+            if os.environ.get('CQLITE_ALLOW_UNDISPERSED') == '1':
+                e['UNDISPERSED_OPT_OUT'] = (
+                    "only %d rep(s) (floor %d); derived under "
+                    "CQLITE_ALLOW_UNDISPERSED=1. NOT publishable: a delta between "
+                    "undispersed points cannot be defended (#3217 ran reps=1)."
+                    % (len(rs), MIN_REPS))
+            else:
+                raise SystemExit(
+                    "FATAL: endpoint %s has %d rep(s); the dispersion floor is %d. "
+                    "min/median/max needs >= %d points, and a delta between "
+                    "undispersed points cannot be defended — that is the #3217 "
+                    "method gap this study exists to close, so emitting a headline "
+                    "from it would reproduce the defect in publishable output. "
+                    "Re-run the missing reps (run/run-all.sh resumes), or set "
+                    "CQLITE_ALLOW_UNDISPERSED=1 for an explicitly-marked "
+                    "exploratory derivation." % (label, len(rs), MIN_REPS, MIN_REPS))
         for conv in ('aligned', 'interior'):
             e[conv] = {
                 'cycles_per_row': agg([x[conv]['per_row']['cycles'] for x in rs]),
@@ -508,12 +551,25 @@ def main():
                 "modelled charge explicitly. Reps with group C: %s"
                 % (label, len(st), len(rs),
                    sorted(os.path.basename(x['repdir']) for x in st)))
+        # ONE dispersion rule, ONE enforcement level, ONE opt-out. The primary arm's
+        # floor above and this one are the same rule applied to two arms, so they must
+        # honour the same escape hatch — otherwise the documented opt-out works for
+        # half a tree and the other half still hard-fails, which is how the round-4
+        # selftest caught this: CQLITE_ALLOW_UNDISPERSED=1 was refused here.
         if st and len(st) < MIN_REPS:
-            raise SystemExit(
-                "FATAL: %s has group-C data for only %d rep(s); this script's "
-                "dispersion rule needs >= %d. A delta between undispersed points "
-                "cannot be defended (#3217 ran reps=1), and the AC4 headline is "
-                "computed from this arm." % (label, len(st), MIN_REPS))
+            if os.environ.get('CQLITE_ALLOW_UNDISPERSED') == '1':
+                e['stalls_UNDISPERSED_OPT_OUT'] = (
+                    "group C has only %d rep(s) (floor %d); derived under "
+                    "CQLITE_ALLOW_UNDISPERSED=1. NOT publishable."
+                    % (len(st), MIN_REPS))
+            else:
+                raise SystemExit(
+                    "FATAL: %s has group-C data for only %d rep(s); this script's "
+                    "dispersion rule needs >= %d. A delta between undispersed points "
+                    "cannot be defended (#3217 ran reps=1), and the AC4 headline is "
+                    "computed from this arm. Set CQLITE_ALLOW_UNDISPERSED=1 for an "
+                    "explicitly-marked exploratory derivation."
+                    % (label, len(st), MIN_REPS))
         if st:
             e['stalls'] = {
                 'n_reps': len(st),

@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # =============================================================================
-# #3224 — the six guards, each shown REJECTING the bad input it now catches.
+# #3224 — every harness guard, shown REJECTING the bad input it now catches.
 #
 #     bash docs/reports/ws0-3224-artifacts/selftest-guards.sh
 #
-# Runs in seconds, needs no perf, no root, no C compiler and no bare-metal box:
-# every guard is driven with an injected or crafted input. That portability is
-# the point — the six defects roborev found on PR #3286 all lived in code whose
-# only entry point required ~20 minutes of exclusive bare metal, which is why
-# none of them had ever been exercised.
+# Runs in seconds and needs no perf, no root and no bare-metal box (a C compiler is
+# used if present and its cases SKIP if not): every guard is driven with an injected
+# or crafted input. That portability is the point — the 22 defects four roborev rounds
+# found on PR #3286 all lived in code whose only entry point required ~20 minutes of
+# exclusive bare metal, which is why not one of them had ever been exercised.
+#
+# WHERE A GUARD CANNOT BE INVOKED DIRECTLY (it lives inside a heredoc, or deep in a
+# script that needs perf and root), the committed source TEXT is extracted and
+# EXECUTED. It is never asserted ON. That rule is not stylistic: two cases here were
+# first written as text matches and both passed against mutants whose branches were
+# unreachable — see guard-selftest/mutation-matrix.md. Testing a transcription instead
+# would prove only that the transcription works.
 #
 # WHY THIS FILE EXISTS AT ALL, stated because it is the whole standard being met:
 # a guard added without an input that exercises it is the same defect wearing a
@@ -788,6 +795,170 @@ open(dst,'w').writelines(out)
 PY
 expect_rc "IMC row with an UNREADABLE enabled%: REJECTED (not read as healthy)" 1 \
   python3 "$HERE/run/ac5-analyse.py" "$TMP/ac5-badmux/triad.csv" "$HERE/ac5-run/stream.txt"
+
+# =============================================================================
+section "ROUND 4 — occupancy busy fraction, count-vs-identity, dispersion, argv"
+
+# Finding #1: busy_fraction_estimate was recorded and left out of `ok`, so an arm with
+# long idle stretches passed every gate — breaking the interior convention's premise
+# that whole-step throughput represents the interior window. Committed source text,
+# EXECUTED against crafted step records.
+expect_rc "occupancy() gates on the busy fraction, and the floor clears the committed reps" 0 \
+  python3 - "$HERE/run/capture-endpoint.sh" "$HERE/results" <<'PY'
+import glob, json, re, subprocess, sys
+src = open(sys.argv[1]).read()
+start = src.index('def occupancy(s):')
+end = src.index('doc = {')
+snippet = src[start:end]
+# The heredoc is UNQUOTED in the script, so bash interpolates these before python
+# ever sees them. Substitute the same way to test the text as it actually executes.
+snippet = snippet.replace('float("$WS0_BUSY_FRACTION_FLOOR")', '0.90')
+snippet = snippet.replace('int("$CORPUS_ROWS")', '3999890')
+# Only ACTUAL interpolations matter — a quoted "$VAR" inside a Python expression. The
+# function's docstring discusses $OUT and $CORPUS_ROWS in prose, and an earlier version
+# of this check flagged those, which would have been a false FAIL on correct input.
+leftover = re.findall(r'"\$[A-Za-z_][A-Za-z_0-9]*"', snippet)
+if leftover:
+    sys.exit('FAIL: unsubstituted shell interpolation in the extracted snippet: %s'
+             % sorted(set(leftover)))
+if 'busy_fraction_estimate' not in snippet:
+    sys.exit('FAIL: occupancy() no longer computes a busy fraction')
+
+ns = {'rows': 3999890}
+exec(compile('rows = 3999890\n' + snippet, '<occupancy>', 'exec'), ns)
+occupancy = ns['occupancy']
+
+def step(busy, rows=3999890*8, err=0):
+    # busy_fraction_estimate = ok*p50/n/d. Pick p50 to hit the target exactly.
+    n, d, ok = 16, 100.0, 1000
+    p50_s = busy * n * d / ok
+    return {'duration_s': d, 'target_concurrency': n, 'requests_ok': ok,
+            'rows_total': rows, 'requests_error': err, 'requests_unavailable': 0,
+            'latency_ms': {'p50': p50_s * 1000.0}, 'rows_per_s': rows / d}
+
+cases = [(0.99, True, 'healthy'), (0.95, True, 'just above the floor'),
+         (0.50, False, 'HALF IDLE — the defect'), (0.10, False, 'mostly idle')]
+bad = 0
+for busy, want, name in cases:
+    got = bool(occupancy(step(busy))['ok'])
+    if got != want:
+        bad += 1
+    print('        busy=%.2f %-24s ok=%-5s want=%-5s %s'
+          % (busy, name, got, want, 'ok' if got == want else 'MISMATCH'))
+# Not computable (n or d zero) must FAIL, not pass: an unverifiable occupancy is not
+# an established one.
+s0 = step(0.99); s0['target_concurrency'] = 0
+if occupancy(s0)['ok']:
+    print('        n=0 (busy fraction not computable)  ok=True  want=False  MISMATCH')
+    bad += 1
+else:
+    print('        n=0 (busy fraction not computable)  ok=False want=False ok')
+
+# THE FLOOR MUST NOT FALSE-FAIL THE COMMITTED DATA. A guard that reds this PR's own
+# artefacts is finding #1 of round 1 all over again, so the margin is measured here
+# rather than assumed.
+lo = 1e9
+for p in glob.glob(sys.argv[2] + '/*/rep*/meta*.json'):
+    for v in (json.load(open(p)).get('occupancy') or {}).values():
+        if v and v.get('busy_fraction_estimate') is not None:
+            lo = min(lo, v['busy_fraction_estimate'])
+print('        minimum busy fraction across every committed arm: %.4f (floor 0.90)' % lo)
+if lo < 0.90:
+    sys.exit('FAIL: the floor would REJECT this PR\'s own committed reps')
+sys.exit(1 if bad else 0)
+PY
+
+# Finding #2: completeness by ROW COUNT cannot see one missing event plus one
+# duplicate on the same socket — the count is identical. This is the case that
+# motivated routing derive.py's uncore check through the schema.
+cp -r "$HERE/results" "$TMP/results-swap"
+python3 - "$TMP/results-swap/llc-s6-N16/rep1/perf-uncore.csv" <<'PY'
+import sys
+p = sys.argv[1]
+out = []
+dropped = dup = None
+for line in open(p):
+    f = line.rstrip('\n').split(',')
+    if len(f) >= 7 and f[0] == 'S0' and 'uncore_imc_11/cas_count_read/' in f[4]:
+        dropped = line          # drop this one
+        continue
+    if len(f) >= 7 and f[0] == 'S0' and 'uncore_imc_0/cas_count_read/' in f[4]:
+        dup = line              # ...and duplicate this one, keeping the row COUNT
+    out.append(line)
+assert dropped and dup, 'fixture did not find both rows'
+out.append(dup)
+open(p, 'w').writelines(out)
+PY
+expect_rc "one MISSING + one DUPLICATE uncore event (row count unchanged): REFUSED" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-swap" --out "$TMP/derived-bad9.json"
+# Prove the count really is unchanged, else the case above proves nothing about counts.
+expect_rc "...and that fixture really does have the EXPECTED row count (so a count check passes it)" 0 \
+  python3 - "$TMP/results-swap/llc-s6-N16/rep1/perf-uncore.csv" "$HERE/harness" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[2])
+import ws0schema
+rows, _ = ws0schema.read_counter_rows(sys.argv[1], 'uncore')
+n_s0 = sum(1 for s, *_ in rows if s == 'S0')
+want = len(ws0schema.IMC_EVENTS)
+if n_s0 != want:
+    sys.exit('FAIL: S0 row count is %d, expected %d — the fixture does not '
+             'demonstrate the count-blindness it claims to' % (n_s0, want))
+print('        S0 carries %d rows (the expected count) but not %d distinct events'
+      % (n_s0, want))
+PY
+
+# Finding #3: a WARNING is not a gate. A one-rep tree used to emit headline deltas and
+# a full AC4 accounting with a caveat in a field beside them.
+cp -r "$HERE/results" "$TMP/results-1rep"
+rm -rf "$TMP/results-1rep"/llc-s6-N16/rep2 "$TMP/results-1rep"/llc-s6-N16/rep3
+expect_rc "endpoint with 1 of 3 reps: REFUSED (was a WARNING beside a published delta)" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-1rep" --out "$TMP/derived-bad10.json"
+# The documented opt-out works, and MARKS what it produced.
+expect_rc "CQLITE_ALLOW_UNDISPERSED=1: derives, and stamps the opt-out in the output" 0 \
+  env CQLITE_ALLOW_UNDISPERSED=1 python3 - "$HERE/results/derive.py" "$TMP/results-1rep" <<'PY'
+import json, os, subprocess, sys, tempfile
+out = os.path.join(tempfile.mkdtemp(), 'd.json')
+r = subprocess.run([sys.executable, sys.argv[1], sys.argv[2], '--out', out],
+                   capture_output=True, text=True, env=dict(os.environ))
+if r.returncode != 0:
+    sys.stderr.write(r.stderr)
+    sys.exit('FAIL: the documented opt-out does not work')
+eps = json.load(open(out))['endpoints']
+marked = [k for k, v in eps.items() if 'UNDISPERSED_OPT_OUT' in v]
+if not marked:
+    sys.exit('FAIL: derived under the opt-out with nothing recording it — a figure '
+             'produced this way would be indistinguishable from a compliant one')
+print('        opt-out honoured and STAMPED on: %s' % marked)
+PY
+
+# Finding #4: cache-hostile accepted --iters 0, exiting 0 having measured no bandwidth
+# iteration at all, which AC5 could then certify. Compiled and RUN.
+if command -v cc > /dev/null 2>&1; then
+  CH="$TMP/cache-hostile"
+  if cc -O2 -std=c99 -pthread -o "$CH" "$HERE/cache-hostile.c" 2> "$TMP/cc.log"; then
+    expect_rc "cache-hostile --iters 0: REFUSED (exited 0 having measured nothing)" 2 \
+      "$CH" stream --stream-mib 8 --threads 2 --iters 0
+    expect_rc "cache-hostile --iters -1: REFUSED" 2 \
+      "$CH" stream --stream-mib 8 --threads 2 --iters -1
+    expect_rc "cache-hostile --iters ten (unparseable -> 0): REFUSED" 2 \
+      "$CH" stream --stream-mib 8 --threads 2 --iters ten
+    expect_rc "cache-hostile --accesses 0: REFUSED" 2 \
+      "$CH" chase --buffer-mib 8 --accesses 0
+    expect_rc "cache-hostile --stream-mib 0: REFUSED" 2 \
+      "$CH" stream --stream-mib 0 --iters 2
+    expect_rc "cache-hostile --working-kib beyond --buffer-mib: REFUSED" 2 \
+      "$CH" chase --buffer-mib 1 --working-kib 999999
+    # ...and the real thing still runs, so the validation is not a blanket refusal.
+    expect_rc "cache-hostile stream with valid args: still runs" 0 \
+      "$CH" stream --stream-mib 8 --threads 2 --iters 2 --delay-ms 0
+    expect_rc "cache-hostile chase with valid args: still runs" 0 \
+      "$CH" chase --buffer-mib 8 --working-kib 256 --accesses 100000 --delay-ms 0
+  else
+    bad "cache-hostile.c failed to compile"; sed 's/^/         | /' "$TMP/cc.log" >&2
+  fi
+else
+  ok "cache-hostile argv cases SKIPPED (no cc on this host)"
+fi
 
 # =============================================================================
 printf '\n==== SELFTEST RESULT: %s ====\n' \

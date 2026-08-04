@@ -230,7 +230,32 @@ def occupancy(s):
       "p50_latency_s": p50,
       "busy_fraction_estimate": (ok*p50/n/d) if (n and d) else None,
       "rows_per_s_step": s["rows_per_s"],
-      "ok": bool(rt > 0 and rt % rows == 0 and err == 0 and unav == 0 and ok > 0),
+      # BUSY FRACTION IS GATED, NOT MERELY RECORDED (roborev round 4 finding #1).
+      #
+      # This field existed, was printed, and was left out of "ok" — so an arm with
+      # long idle stretches passed every validity gate. That matters specifically for
+      # the INTERIOR convention, whose whole legitimacy is the assumption that the
+      # whole-step throughput represents the interior perf window: if the workers were
+      # idle for part of the step, the interior window and the step have different
+      # rates and the per-row figures divide counters from one interval by rows from
+      # another. That is the numerator/denominator-from-different-intervals error the
+      # ALIGNED convention exists to avoid, arriving through the back door.
+      #
+      # The floor is deliberately LOW (0.90). It is a check against IDLE PERIODS, not
+      # a tuning target, and the estimate is ok*p50/n/d — a product of three measured
+      # quantities, so it carries their combined error. A tight floor here would be a
+      # false-FAIL generator, which is finding #1 of round 1 all over again. On the
+      # committed reps this lands at ~0.99, so 0.90 has real margin.
+      #
+      # None (not computable, when n or d is zero) is a FAILURE, not a pass: it means
+      # the step recorded no concurrency or no duration, and an unverifiable
+      # occupancy is not an established one.
+      "busy_fraction_floor": float("$WS0_BUSY_FRACTION_FLOOR"),
+      "busy_fraction_ok": bool(
+          (ok*p50/n/d) >= float("$WS0_BUSY_FRACTION_FLOOR")) if (n and d) else False,
+      "ok": bool(rt > 0 and rt % rows == 0 and err == 0 and unav == 0 and ok > 0
+                 and (n and d)
+                 and (ok*p50/n/d) >= float("$WS0_BUSY_FRACTION_FLOOR")),
     }
 
 doc = {

@@ -333,6 +333,50 @@ int main(int argc, char **argv) {
     }
     if ((ctl == NULL) != (ack == NULL))
         die("--ctl-fifo and --ack-fifo must be given together");
+
+    /*
+     * NUMERIC ARGUMENTS ARE VALIDATED BEFORE ANY WORK (roborev round 4 finding #4).
+     *
+     * `--iters 0` was accepted, and the consequence was not a crash: run_stream's
+     * `best` stays at its 1e30 sentinel, the loop body never executes, the process
+     * prints its key=value block and exits 0. AC5's analysis then reads a stream.txt
+     * whose `iters` is 0 — so `expected` collapses to the init pass alone, the IMC
+     * counters (which did capture the init traffic) divide by it, and the ratio can
+     * land inside the 0.6-1.6 band. Byte accounting is then declared RESOLVED and a
+     * bandwidth ceiling published, from a run that never measured a single bandwidth
+     * iteration.
+     *
+     * That is this harness's signature failure — plausible output from an instrument
+     * that measured nothing — reachable here by a typo in a flag. It is refused at the
+     * boundary rather than detected downstream, because a caller cannot distinguish
+     * "0 iterations" from "0 iterations because I asked for 0".
+     *
+     * The other arguments are validated on the same principle: a zero or absurd value
+     * either divides something later or allocates nothing, and in every case failing
+     * loudly here is cheaper than a number nobody can trace back to it. `strtoull`
+     * and `atoi` both return 0 for unparseable input, so "0" also catches `--iters ten`.
+     */
+    if (accesses == 0)
+        die("--accesses must be > 0 (a chase of zero accesses measures nothing, and "
+            "cycles/access would divide by zero)");
+    if (buf_mib == 0)
+        die("--buffer-mib must be > 0");
+    if (working_kib > 0 && (working_kib << 10) > (buf_mib << 20))
+        die("--working-kib exceeds --buffer-mib");
+    if (delay_s < 0.0)
+        die("--delay-ms must be >= 0");
+    if (!strcmp(mode, "stream")) {
+        if (iters <= 0)
+            die("--iters must be > 0. With zero iterations the timed loop never runs, "
+                "`best` keeps its sentinel, and the process would exit 0 having "
+                "measured no bandwidth at all — which AC5's byte accounting can then "
+                "certify as RESOLVED. Refused here rather than detected downstream.");
+        if (threads < 0)
+            die("--threads must be >= 0 (0 means every online CPU)");
+        if (stream_mib == 0)
+            die("--stream-mib must be > 0");
+    }
+
     if (!strcmp(mode, "chase"))
         return run_chase(buf_mib, working_kib, accesses, delay_s, seed, arm, ctl, ack);
     if (!strcmp(mode, "stream"))

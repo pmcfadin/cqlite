@@ -151,3 +151,44 @@ one, so `run-all.sh` correctly SKIPPED it and the capture never ran — three ca
 "passing" while exercising nothing. The scenario the finding describes is *recapturing an
 invalid rep*, so the fixture now seeds an invalid one. **Knowing about a failure shape does
 not confer immunity to it**; only running the thing does.
+
+## Round 4 — four findings; the trend and what it says
+
+| # | mutation applied | cases that flipped | result |
+|---|---|--:|---|
+| 1 | take the busy fraction back out of `occupancy()`'s `ok` | 1 | **caught** — a half-idle arm passed every validity gate again |
+| 2 | replace `derive.py`'s schema call with an empty problem list | 2 | **caught** — both the partial IMC set and the missing+duplicate pair derived cleanly |
+| 3 | change the `MIN_REPS` refusal back to a warning | 1 | **caught** (via the opt-out marker, see note) |
+| 4 | accept `--iters <= 0` in `cache-hostile.c` again | 3 | **caught** — 0, -1 and an unparseable `ten` all ran and exited 0 |
+
+**Note on mutation 3.** The case that flips is the *opt-out* one, not the refusal one:
+with the primary check disabled the group-C `MIN_REPS` refusal still fires on the same
+tree, so "1 of 3 reps → REFUSED" still passes for a different reason. The mutation is
+caught, but by the marker rather than the refusal. Recorded because the distinction is
+the whole point of running these.
+
+**Finding 2 is the single-homing paying off a second time.** The count-based check in
+`derive.py` was the last independent restatement of the uncore roster; routing it through
+`ws0schema.validate_counter_file()` is what made *identity* checking automatic. The
+finding it closes could not have been caught by any count: **one missing event plus one
+duplicated event on the same socket yields exactly the expected row count**, and the
+selftest asserts that property of its own fixture so the case cannot pass for the wrong
+reason.
+
+### The trend, and why it is worth stating rather than just stopping
+
+Findings per round: **6 → 7 → 5 → 4**. The count is falling, but slowly, and the honest
+reading is not "nearly clean" — it is that this harness had a *systemic* fail-open habit
+and each round exposes a thinner layer of it. Three things are true at once:
+
+1. **The class never changed.** All 22 findings are one defect: a measurement step whose
+   failure was recorded, printed, or structurally representable but not *acted on*. Not
+   one was a logic error in an actual computation.
+2. **Later rounds reach further from the headline.** Round 1 hit the penalty probe that
+   feeds a published figure; round 4 hit `--iters 0` and a busy fraction that no committed
+   artefact violates. That is what convergence looks like here — the defects are still
+   real, and they are no longer near the numbers.
+3. **Three of the 22 were introduced by earlier fixes.** That rate did not fall by being
+   careful; it fell when the schema got a single home, which removed the *opportunity*.
+   The generalisation worth carrying: where the same fact is restated in N consumers,
+   expect N chances to get it wrong, and fix the restatement rather than the instances.
