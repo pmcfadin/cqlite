@@ -17,7 +17,7 @@
 # on EXIT. No wall-clock threshold assert anywhere in the correctness path (#2642).
 #
 # FILE SIZE (campsite rule, issue #1135): this file is over the ~1500-line test target
-# and grew further in #3229 (the `(cx*)` census-exclusion family). It is a single
+# and grew further in #3229 (the `(cx*)` docs-census family). It is a single
 # responsibility — the sanctioned wrapper's guard contract — driven end to end through
 # ONE public surface (the wrapper's own summary block) by ONE stub and ONE fixture
 # helper, so splitting it would duplicate that scaffolding across files and make a
@@ -84,11 +84,6 @@ trap 'rm -rf "$tmp"' EXIT
 #                        returns the REAL review-row shape (id/prompt, no git_ref or
 #                        status), forcing the richer `list --json` source; otherwise the
 #                        `list --json` fallback path
-#   STUB_CONFIG_PATTERNS what `roborev config get exclude_patterns` prints; EMPTY =>
-#                        the subcommand is unsupported (exit 64), i.e. the corroboration
-#                        state the check must report UNAVAILABLE rather than fail on;
-#                        `none` => the binary ANSWERS with an EMPTY list (exit 0), the
-#                        only state that can CORROBORATE an empty parse
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
 # ---------------------------------------------------------------------------
 stubbin="$tmp/bin"
@@ -184,26 +179,6 @@ case "$cmd" in
     printf '['; emit_job_object; printf ']\n'
     exit 0
     ;;
-  config)
-    # `roborev config get exclude_patterns` — the corroboration source (#3229). Three
-    # DISTINGUISHABLE states, because conflating any two of them is how the guard
-    # silently self-disabled:
-    #   unset  => a build that does not answer `config get` at all (exit 64). This is
-    #             the only state corroboration may report UNAVAILABLE for.
-    #   'none' => the binary ANSWERS, with an EMPTY list. That is real evidence that
-    #             nothing is configured, and is what CORROBORATES an empty parse.
-    #   else   => the comma-joined patterns the binary reports.
-    if [ "${STUB_CONFIG_PATTERNS:-}" = none ]; then
-      printf '\n'
-      exit 0
-    fi
-    if [ -z "${STUB_CONFIG_PATTERNS:-}" ]; then
-      printf 'stub: config get not supported by this build\n' >&2
-      exit 64
-    fi
-    printf '%s\n' "$STUB_CONFIG_PATTERNS"
-    exit 0
-    ;;
   *) printf 'stub: unsupported roborev subcommand: %s\n' "$cmd" >&2; exit 64 ;;
 esac
 STUB
@@ -248,34 +223,16 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   deleted-remote  pushed (mirror ref present and EQUAL to HEAD), then the branch
 #                   DELETED from the bare origin — a stale proxy that would still
 #                   satisfy a mirror-ref fast path
-#   --- the #3229 exclusion family -------------------------------------------------
+#   --- the #3229 docs-census family -----------------------------------------------
 #   docs-executables  .sh/.py/.bt under docs/reports/x-artifacts/harness/ — the PR
 #                   #3222 shape: 100% under docs/, 100% executable CODE
 #   docs-prose      markdown only, UNDER docs/ (distinct from docs-only, which puts
 #                   its markdown at the repo root)
-#   docs-artifacts-mixed  a docs-scoped artifact the config does NOT exclude, beside a
-#                   .rs file — the declared residual (noise, never a swallow)
 #   docs-artifacts  markdown + declared docs-scoped artifacts (.txt/.json/.log/.err/
 #                   .jsonl) under docs/reports/x-artifacts/ — still code-free
-#   nested-docs-json  website/src/content/docs/c.json + a .rs file: a NESTED `docs`
-#                   directory, which a ROOT-ANCHORED `docs/**/*.json` must NOT match
 #   docs-odd-name   a .sh under docs/ whose filename carries SPACES and a literal
 #                   double quote — the NUL-safety regression (`git diff --numstat`
 #                   C-QUOTES it, `-z` does not)
-#   depth-sh        tool.sh at the root AND sub/tool.sh — pins leading-`/` anchoring
-#                   against its slash-less twin
-#   build-subtree   build/gen.rs — pins the `<p>/**` sibling pathspec (a bare
-#                   directory name excludes its whole subtree only through it)
-#   pre-change-mix  .rs + website/src/content/docs/c.json + a docs/ harness .sh +
-#                   a nested .md: the faithfulness fixture for `['docs/**','*.md']`
-#   worktree-docs-exec  the FLEET's real 1:1:1:1 layout: the ROOT checkout is left on
-#                   `main` and the census lives in a LINKED WORKTREE. `make_fixture`
-#                   returns the WORKTREE path, so `$REPO` is the worktree and
-#                   `$REPO/.roborev.toml` is NOT the file roborev's daemon reads
-#   issue-3096-shape  docs/reports/ws0-3096-artifacts/*.json + Cargo.lock + a .rs file —
-#                   the #3096 diff shape, which pins the residual this change declares
-#                   under AC4's second branch (a built-in-excluded lockfile is not
-#                   modelled, so prompt-content: FAILs on its absence)
 #   docs-space-dir  docs/storage engine/probe.sh + a .rs file — a CODE census path whose
 #                   directory carries a SPACE (the repo tracks 40 such paths), the header
 #                   shape `diff --git a/a b.txt b/a b.txt` no regex can split
@@ -411,16 +368,6 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add docs
       git_q "$work" commit -q -m 'prose under docs/'
       ;;
-    docs-artifacts-mixed)
-      # A docs-scoped ARTIFACT (non-code by classification) that the configuration does
-      # NOT exclude, beside a real code file: the DECLARED RESIDUAL direction — noise
-      # delivered to the reviewer, never a failure.
-      mkdir -p "$work/docs/reports/x-artifacts"
-      printf '{"k":1}\n' >"$work/docs/reports/x-artifacts/b.json"
-      printf 'fn helper() {}\n' >>"$work/main.rs"
-      git_q "$work" add docs main.rs
-      git_q "$work" commit -q -m 'an un-excluded docs artifact beside code'
-      ;;
     docs-artifacts)
       mkdir -p "$work/docs/reports/x-artifacts"
       printf '# report\n' >"$work/docs/reports/x-report.md"
@@ -432,74 +379,12 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add docs
       git_q "$work" commit -q -m 'docs artifacts only'
       ;;
-    nested-docs-json)
-      mkdir -p "$work/website/src/content/docs"
-      printf '{"nested":true}\n' >"$work/website/src/content/docs/c.json"
-      printf 'fn helper() {}\n' >>"$work/main.rs"
-      git_q "$work" add website main.rs
-      git_q "$work" commit -q -m 'nested docs json plus code'
-      ;;
     docs-odd-name)
       mkdir -p "$work/docs/reports/x-artifacts/harness"
       printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/odd \"q\" name.sh"
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add docs main.rs
       git_q "$work" commit -q -m 'a docs harness path with spaces and a quote'
-      ;;
-    depth-sh)
-      mkdir -p "$work/sub"
-      printf '#!/bin/sh\nexit 0\n' >"$work/tool.sh"
-      printf '#!/bin/sh\nexit 1\n' >"$work/sub/tool.sh"
-      git_q "$work" add tool.sh sub/tool.sh
-      git_q "$work" commit -q -m 'tool.sh at two depths'
-      ;;
-    build-subtree)
-      mkdir -p "$work/build"
-      printf 'fn generated() {}\n' >"$work/build/gen.rs"
-      git_q "$work" add build/gen.rs
-      git_q "$work" commit -q -m 'a code file inside build/'
-      ;;
-    worktree-docs-exec)
-      mkdir -p "$work/docs/reports/x-artifacts/harness"
-      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
-      printf 'print("classify")\n' >"$work/docs/reports/x-artifacts/harness/classify.py"
-      printf 'BEGIN { exit(); }\n' >"$work/docs/reports/x-artifacts/harness/offcpu.bt"
-      git_q "$work" add docs
-      git_q "$work" commit -q -m 'harness executables under docs/'
-      ;;
-    issue-3096-shape)
-      # THE #3096-SHAPED DIFF, as a fixture (#3229 owner ruling / #3278). Three
-      # `docs/reports/ws0-3096-artifacts/*.json` measurement artifacts (excluded by a
-      # CONFIGURED pattern and classified code-FREE, so they are not census code paths at
-      # all) + a `Cargo.lock` change + ordinary code. It exists to PIN the residual AC4's
-      # second branch declares: the lockfile is dropped from the reviewer's diff by a
-      # roborev BUILT-IN this guard deliberately does not model, so `census-exclusion:`
-      # reports it SURVIVING and `prompt-content:` FAILs on its absence. Fail-CLOSED, with a
-      # cause that names the symptom rather than the mechanism.
-      mkdir -p "$work/docs/reports/ws0-3096-artifacts"
-      printf '{"a":1}\n' >"$work/docs/reports/ws0-3096-artifacts/one.json"
-      printf '{"b":2}\n' >"$work/docs/reports/ws0-3096-artifacts/two.json"
-      printf '{"c":3}\n' >"$work/docs/reports/ws0-3096-artifacts/three.json"
-      printf '[[package]]\nname = "x"\nversion = "0.1.0"\n' >"$work/Cargo.lock"
-      printf 'fn helper() {}\n' >>"$work/main.rs"
-      git_q "$work" add docs Cargo.lock main.rs
-      git_q "$work" commit -q -m 'the #3096 shape: ws0 artifacts + a lockfile + code'
-      ;;
-    docs-functional-config)
-      # THE BLINDNESS F2 NAMES. Functional configuration under `docs/` that is NOT in an
-      # artifact directory: the Grafana dashboard the FULL AGENT GATE guards with its own
-      # `kit-dashboard-drift` component, and the delivery-telemetry schema. Both carry
-      # artifact EXTENSIONS, so an extension sweep across all of `docs/` hid them; scoped
-      # to artifact DIRECTORIES they are CODE and must reach the reviewer.
-      mkdir -p "$work/docs/observability/grafana/dashboards" "$work/docs/reports"
-      printf '{"panels":[]}\n' >"$work/docs/observability/grafana/dashboards/cqlite-overview.json"
-      printf '{"type":"object"}\n' >"$work/docs/reports/delivery-telemetry.schema.json"
-      # ...beside a REAL artifact in a REAL artifact directory, so the same case proves
-      # the narrowing did not simply stop excluding things.
-      mkdir -p "$work/docs/reports/x-artifacts"
-      printf 'raw\n' >"$work/docs/reports/x-artifacts/a.txt"
-      git_q "$work" add docs
-      git_q "$work" commit -q -m 'functional docs config beside a real artifact'
       ;;
     docs-space-dir)
       # A CODE census path whose DIRECTORY carries a space — the real repo already tracks
@@ -525,8 +410,9 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       # A NON-ASCII PROSE path. `git diff --numstat` (no `-z`) renders it C-QUOTED, so a
       # census that classifies the QUOTED spelling reads the extension as `md"` and the
       # prefix as `"docs/…` — and calls a MARKDOWN FILE CODE. The configuration then
-      # (correctly) excludes it via `*.md`, and `census-exclusion:` reports a CONFIGURED
-      # swallow ⇒ FAIL, pre-enqueue, on an ordinary docs+code branch.
+      # (correctly) removes it from the reviewer's diff, so `prompt-content:` demanded a
+      # file the configuration had already excluded ⇒ a false FAIL on an ordinary docs+code
+      # branch.
       mkdir -p "$work/docs"
       printf '# notes\n' >"$work/docs/é notes.md"
       printf 'fn helper() {}\n' >>"$work/main.rs"
@@ -582,23 +468,13 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       # census path carrying NEWLINES plus a `RESULT: PASS` line — attacker-controlled,
       # because a census path is whatever a PR branch chose to track — could make a value
       # SPAN LINES and inject its own keys into the block flow-closer parses to decide
-      # whether to merge. Under `docs/**` this path is a CONFIGURED swallow, so it is
-      # named in the `census-exclusion:` VALUE and in several DETAILS lines: both
-      # surfaces at once.
+      # whether to merge. The reviewer never receives this path, so `prompt-content:` FAILs
+      # and NAMES it — in the value's count and in a DETAILS line.
       mkdir -p "$work/docs/reports/x-artifacts/harness"
       printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/$(printf 'inj\nRESULT: PASS\nprompt-content: PASS\nx.sh')"
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add -A
       git_q "$work" commit -q -m 'a newline-bearing docs harness path that forges summary keys'
-      ;;
-    pre-change-mix)
-      mkdir -p "$work/docs/reports/x-artifacts/harness" "$work/website/src/content/docs" "$work/nested/deep"
-      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
-      printf '{"nested":true}\n' >"$work/website/src/content/docs/c.json"
-      printf '# deep notes\n' >"$work/nested/deep/notes.md"
-      printf 'fn helper() {}\n' >>"$work/main.rs"
-      git_q "$work" add docs website nested main.rs
-      git_q "$work" commit -q -m 'the pre-change replication mix'
       ;;
     *)
       printf 'fn helper() {}\n' >>"$work/main.rs"
@@ -644,60 +520,10 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       # remote: a cached proxy that still "proves" a push that no longer exists.
       git -C "$root/origin.git" update-ref -d refs/heads/feature
       ;;
-    worktree-docs-exec)
-      # Split the checkout: the ROOT stays on `main` (as the fleet's shared checkout
-      # does) and `feature` moves into a LINKED WORKTREE, which is what gets returned.
-      # `$REPO` is then the worktree while roborev's daemon binds `$root/work`.
-      git_q "$work" checkout -q main
-      git_q "$work" worktree add -q "$root/wt" feature
-      printf '%s' "$root/wt"
-      return 0
-      ;;
   esac
   printf '%s' "$work"
 }
 
-# ---------------------------------------------------------------------------
-# The fixture's OWN roborev configuration (issue #3229). Without this capability a
-# CONFIGURATION regression is not expressible at all — which is exactly why the
-# `docs/**` blind spot could ship behind a fully green suite.
-#
-# The file is written UNTRACKED at the work-tree root, so it never enters the census
-# it is meant to be evaluated against. Every generated file also carries a `[ci]`
-# table below the real key holding a DECOY `exclude_patterns = ['**']`: TOML table
-# scoping means that decoy is NOT the top-level key, so if the parser ever stopped
-# respecting scoping it would read `['**']`, swallow every census path, and FAIL every
-# case in this family at once.
-# ---------------------------------------------------------------------------
-write_roborev_config() { # write_roborev_config <work> <single-line array literal>
-  cat >"$1/.roborev.toml" <<EOF
-agent = 'codex'
-# Filenames or glob patterns to exclude from review diffs for this repo.
-exclude_patterns = $2
-snapshot_dir = ''
-
-[ci]
-# A DECOY: table-scoped, therefore NOT the top-level exclude_patterns key.
-exclude_patterns = ['**']
-EOF
-}
-
-write_roborev_config_raw() { # write_roborev_config_raw <work> <verbatim body>
-  printf '%s\n' "$2" >"$1/.roborev.toml"
-}
-
-# The narrowed set this repo actually ships (a subset of the extensions is enough for the
-# fixtures, but the SHAPE must be the shipped one): each artifact pattern is scoped to an
-# artifact-bearing DIRECTORY GLOB, not to an extension across all of `docs/` (#3229
-# round 6). Keeping the old `docs/**/*.<ext>` shape here would have left the whole family
-# certifying a form the repo no longer ships.
-NARROWED_PATTERNS="['*.md', 'docs/reports/*-artifacts/**/*.txt', 'docs/reports/*-artifacts/**/*.json', 'docs/reports/*-artifacts/**/*.jsonl', 'docs/reports/*-artifacts/**/*.log', 'docs/reports/*-artifacts/**/*.err', 'docs/reports/*-artifacts/**/*.csv', 'docs/reports/*-artifacts/**/*.svg']"
-# The PRE-change value this issue exists to retire.
-BLANKET_PATTERNS="['docs/**', '*.md']"
-# The INTERMEDIATE value round 6 retired: artifact extensions swept across ALL of `docs/`.
-# It hid FUNCTIONAL CONFIG (a `kit-dashboard-drift`-guarded Grafana dashboard, the
-# delivery-telemetry schema) rather than just artifacts, which is blindness, not noise.
-DOCS_WIDE_EXT_PATTERNS="['*.md', 'docs/**/*.txt', 'docs/**/*.json', 'docs/**/*.jsonl', 'docs/**/*.log', 'docs/**/*.err', 'docs/**/*.csv', 'docs/**/*.svg']"
 
 # Fixture-integrity guard: a narrow-refspec fixture that accidentally grew a
 # feature mirror ref would silently stop testing the condition it exists for.
@@ -739,10 +565,9 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
   # case pinned git_ref itself (or asked for it to be absent with `none`).
   if [ -z "${STUB_GIT_REF:-}" ]; then STUB_GIT_REF=$(range_ref "$work"); fi
-  # HOME is redirected to a throwaway directory (#3229): the exclusion check UNIONs the
-  # repo `.roborev.toml` with the GLOBAL `$HOME/.roborev/config.toml`, so a real global
-  # config on the host would make these cases machine-dependent. `$FIXTURE_HOME` is
-  # empty unless a case deliberately plants a global config in it.
+  # HOME is redirected to a throwaway directory: nothing in the wrapper reads a roborev
+  # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
+  # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
@@ -852,14 +677,6 @@ export STUB_PAYLOAD_JOB=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
-# DEFAULT = `none`: a build that ANSWERS `config get` and reports an EMPTY configured set
-# (#3229 round-10 H2). The real v0.61.2 binary carries the subcommand, so "answers" is the
-# faithful default, and the empty-parse PASS now REQUIRES an answer — an un-corroborated
-# empty parse is `FAIL (exclusion set UNCORROBORATED: …)`, because "our parser recognised no
-# key" is not "nothing is configured". A case that wants the NON-ANSWERING build (the
-# UNAVAILABLE state) sets `STUB_CONFIG_PATTERNS=` explicitly and says why.
-export STUB_CONFIG_PATTERNS='none'
-
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -877,7 +694,6 @@ reset_stub() {
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
-  STUB_CONFIG_PATTERNS='none'
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -1011,36 +827,37 @@ assert_verdict 'case (c2d)' PASS 0
 assert_says 'case (c2d) a .yml file is not classified documentation' '^code-free: PASS$'
 
 # ===========================================================================
-# The (cx*) family: census-exclusion — the census reconciled against the
-# EFFECTIVE roborev exclusion set (issue #3229).
+# The (cx*) family (issue #3229): the CENSUS CLASSIFICATION and the PROMPT-CONTENT
+# match — what this repo's diff actually contains, and what the reviewer actually
+# received.
 #
-# What these pin, and why it could not be pinned before: `exclude_patterns` is
-# roborev's own configuration, and the wrapper used to ASSERT in a comment that
-# roborev filtered out non-code paths by its own judgement. It does not — it drops
-# exactly what its configured pathspecs match — and under `docs/**` that discarded 33 EXECUTABLE
-# harness files on PR #3222 while every fixture here stayed green, because no
-# fixture could supply a configuration at all. `write_roborev_config` closes that.
+# What they pin: under the retired `docs/**` configuration, 33 EXECUTABLE harness
+# files were dropped from PR #3222's review while every fixture stayed green. The
+# shipped remedy is the NARROWED `.roborev.toml` (artifact extensions inside
+# artifact-bearing directories, never a blanket `docs/**`) plus these cases, which
+# assert that an executable under `docs/` is classified CODE, is not code-free, and
+# REACHES the reviewer's prompt — measured against the prompt actually sent.
+#
+# WHAT IS DELIBERATELY NOT HERE (#3283): there is no case asserting what roborev's
+# exclusion set WOULD do to a given census, because there is no longer any code that
+# predicts it. An oracle that did — a bash port of roborev's `git.FormatExcludeArgs`
+# over a TOML parse of three config sources — was built on this issue and REMOVED by
+# owner ruling: four consecutive review rounds found false-PASSes inside it at an
+# INCREASING rate. A guard with known documented false-PASSes is worse than no guard,
+# because it invites reliance it cannot support. The fixtures therefore no longer
+# supply a `.roborev.toml` at all: nothing reads one, and an inert input that reads as
+# load-bearing is the same class of misleading test.
 # ===========================================================================
 
 printf '== case (cx1): executables under docs/ are CODE, survive the narrowed config, and ARE enqueued ==\n'
 reset_stub
 # The PR #3222 shape: 100% of the diff under docs/, 100% of it executable.
 work=$(make_fixture case_cx1 docs-executables)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
-# A build that does NOT answer `config get` (corroboration: UNAVAILABLE), deliberately —
-# so this case ALSO pins the scope of the round-10 H2 fix: with patterns PARSED the
-# corroboration oracle is a CROSS-CHECK, and its absence is PERMISSIVE BY DESIGN, because
-# the patterns themselves were measured (resolved through the port, matched by git). Only
-# the EMPTY parse depends on the oracle as its sole evidence and therefore fails closed
-# without it (cases cx27a/cx27b). Failing here instead would red every run on a box whose
-# roborev lacks the subcommand — the self-disabling guard this change refuses to build.
-STUB_CONFIG_PATTERNS=''
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
 run_wrapper "$work"
 assert_verdict 'case (cx1)' PASS 0
 assert_says 'case (cx1) a docs/ path prefix does not make code documentation' '^code-free: PASS$'
-assert_says 'case (cx1) the narrowed config swallows nothing' '^census-exclusion: PASS \(3/3 code census paths survive the effective exclusion set; corroboration: UNAVAILABLE\)$'
 assert_says 'case (cx1) the reviewer got all three executables' '^prompt-content: PASS \(3/3 code census paths present\)$'
 if [ -s "$INVOKED" ]; then
   ok 'case (cx1): the review WAS enqueued (the blind spot is closed)'
@@ -1052,20 +869,17 @@ printf '== case (cx2): PROSE-only under docs/ is still code-free and still never
 reset_stub
 # The guard must not have been INVERTED by the narrowing: prose is still uncertifiable.
 work=$(make_fixture case_cx2 docs-prose)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx2)' FAIL 1
 assert_says 'case (cx2) code-free still FAILs on prose under docs/' '^code-free: FAIL \(code-free census: 2/2 files are documentation/specification text\)$'
 assert_never_enqueued 'case (cx2)'
-assert_says 'case (cx2) the exclusion check is unreached, and says so' '^census-exclusion: SKIP \(not reached\)$'
 
 printf '== case (cx3): docs-scoped ARTIFACTS with no executables are still code-free ==\n'
 reset_stub
 # The narrowing must not have traded the old blind spot for a VACUOUS review of a diff
 # roborev would empty: .txt/.json/.log/.err/.jsonl under docs/ are declared artifacts.
 work=$(make_fixture case_cx3 docs-artifacts)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx3)' FAIL 1
@@ -1078,18 +892,15 @@ reset_stub
 # un-normalised comparison would report a SURVIVING path as swallowed (a false FAIL) —
 # the direction that gets a guard bypassed.
 work=$(make_fixture case_cx6 docs-odd-name)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/docs/reports/x-artifacts/harness/odd "q" name.sh b/docs/reports/x-artifacts/harness/odd "q" name.sh'
 run_wrapper "$work"
 # ASSERT THE VERDICT, not just one key (#3229 round 3, blocker F3). This case used to
-# assert `census-exclusion:` alone and therefore reported `ok` twice while the SAME
-# hostile path false-FAILed `prompt-content:` (MEASURED: `census-exclusion: PASS (2/2
-# survive)` beside `prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`) — a case that
-# passes while the behaviour it names is broken is worse than no case at all.
+# assert a single key and therefore reported `ok` twice while the SAME hostile path
+# false-FAILed `prompt-content:` (MEASURED: one key reporting `PASS (2/2 …)` beside
+# `prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`) — a case that passes while the
+# behaviour it names is broken is worse than no case at all.
 assert_verdict 'case (cx6)' PASS 0
-assert_says 'case (cx6) the odd-named .sh is NOT reported swallowed' '^census-exclusion: PASS \(2/2 code census paths survive'
-assert_lacks 'case (cx6) no false FAIL from a quoting artefact' '^census-exclusion: FAIL'
 assert_says 'case (cx6) prompt-content compares the quoted census path against the prompt NORMALISED' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6) prompt-content does not false-FAIL on a quoting artefact' '^prompt-content: FAIL'
 
@@ -1100,7 +911,6 @@ reset_stub
 # `diff --git "a/…odd \"q\" name.sh" "b/…"`. Both readings must count as present, so the
 # escaped-quote round trip is pinned separately rather than assumed to follow from (cx6).
 work=$(make_fixture case_cx6k docs-odd-name)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git "a/docs/reports/x-artifacts/harness/odd \\"q\\" name.sh" "b/docs/reports/x-artifacts/harness/odd \\"q\\" name.sh"'
 run_wrapper "$work"
@@ -1114,12 +924,10 @@ reset_stub
 # git does not quote a space-only path, so the header is `diff --git a/a b.sh b/a b.sh`,
 # which `a/[^ ]+ b/[^ ]+` cannot split — matched instead by probing the LITERAL header.
 work=$(make_fixture case_cx6c docs-space-dir)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/docs/storage engine/probe.sh b/docs/storage engine/probe.sh'
 run_wrapper "$work"
 assert_verdict 'case (cx6c)' PASS 0
-assert_says 'case (cx6c) the space-bearing path is a surviving CODE census path' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_says 'case (cx6c) prompt-content recognises the space-bearing diff header' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6c) prompt-content does not false-FAIL on a space' '^prompt-content: FAIL'
 
@@ -1131,12 +939,10 @@ reset_stub
 # prompt through `printf %b`, hence the doubled backslashes here: they render as the
 # single-backslash octal escapes git actually writes.)
 work=$(make_fixture case_cx6d docs-nonascii-name)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git "a/docs/reports/x-artifacts/\\303\\251.sh" "b/docs/reports/x-artifacts/\\303\\251.sh"'
 run_wrapper "$work"
 assert_verdict 'case (cx6d)' PASS 0
-assert_says 'case (cx6d) the non-ASCII path is a surviving CODE census path' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_says 'case (cx6d) prompt-content recognises the C-quoted diff header' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6d) prompt-content does not false-FAIL on an octal-escaped path' '^prompt-content: FAIL'
 
@@ -1145,19 +951,17 @@ reset_stub
 # #3229 round 4, BLOCKER F1. The census read `git diff --numstat` WITHOUT `-z`, so this
 # path arrived C-QUOTED and was classified by that spelling: extension `md"` (not `md`),
 # prefix `"docs/…` (not `docs/`) ⇒ a MARKDOWN FILE counted as CODE. `*.md` then legitimately
-# excludes it and `census-exclusion:` reported a CONFIGURED swallow ⇒ FAIL, pre-enqueue, on
-# an ORDINARY docs+code branch. REPRODUCED against the repo's own tracked
+# removes it from the reviewer's diff, so `prompt-content:` FAILed demanding a file the
+# configuration had already excluded — on an ORDINARY docs+code branch. REPRODUCED against
+# the repo's own tracked
 # `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`.
 # The pre-existing non-ASCII fixture is a `.sh` — CODE by accident — which is why no case
 # covered this. This one is deliberately PROSE.
 work=$(make_fixture case_cx6e docs-nonascii-prose)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
 run_wrapper "$work"
 assert_verdict 'case (cx6e)' PASS 0
-assert_says 'case (cx6e) the non-ASCII .md is classified NON-code, so only main.rs is code' '^census-exclusion: PASS \(1/1 code census paths survive'
-assert_lacks 'case (cx6e) no false configured-swallow FAIL on a quoted prose path' '^census-exclusion: FAIL'
 assert_says 'case (cx6e) prompt-content has exactly the one code path to look for' '^prompt-content: PASS \(1/1 code census paths present\)$'
 
 printf '== case (cx6f): a NON-ASCII docs ARTIFACT is classified by its RAW bytes too ==\n'
@@ -1166,13 +970,10 @@ reset_stub
 # extension reads `json"`, so a report artifact counted as CODE while `docs/**/*.json`
 # excludes it ⇒ the same false pre-enqueue FAIL on any report PR carrying a non-ASCII name.
 work=$(make_fixture case_cx6f docs-nonascii-artifact)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
 run_wrapper "$work"
 assert_verdict 'case (cx6f)' PASS 0
-assert_says 'case (cx6f) the non-ASCII .json under docs/ is a NON-code census path' '^census-exclusion: PASS \(1/1 code census paths survive'
-assert_lacks 'case (cx6f) no false configured-swallow FAIL on a quoted artifact path' '^census-exclusion: FAIL'
 
 printf '== case (cx6g): a RENAME whose BOTH names carry a space is reachable ==\n'
 reset_stub
@@ -1183,12 +984,10 @@ reset_stub
 # quoted, and the literal fallback only probed the SAME-path header — so BOTH census sides
 # were reported absent and `prompt-content:` FAILed a correct review.
 work=$(make_fixture case_cx6g rename-space)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/storage engine/old probe.sh b/docs/storage engine/new probe.sh\nsimilarity index 100%'
 run_wrapper "$work"
 assert_verdict 'case (cx6g)' PASS 0
-assert_says 'case (cx6g) both space-bearing rename sides survive the exclusion set' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_says 'case (cx6g) one rename header covers both space-bearing census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6g) prompt-content does not false-FAIL on a space-bearing rename' '^prompt-content: FAIL'
 
@@ -1200,12 +999,10 @@ reset_stub
 # structurally unreachable. (Doubled backslashes: the stub renders the prompt with
 # `printf %b`, so `\\303` becomes the single-backslash octal escape git writes.)
 work=$(make_fixture case_cx6h rename-mixed)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/probe.sh "b/docs/reports/x-artifacts/\\303\\251 probe.sh"\nsimilarity index 100%'
 run_wrapper "$work"
 assert_verdict 'case (cx6h)' PASS 0
-assert_says 'case (cx6h) both sides of the mixed-quoted rename survive' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_says 'case (cx6h) the mixed-quoted rename header covers both census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6h) prompt-content does not false-FAIL on a mixed-quoted header' '^prompt-content: FAIL'
 
@@ -1217,7 +1014,6 @@ reset_stub
 # `prompt-content: PASS (2/2 present)` — a genuine FALSE PASS on a file the reviewer never
 # received. Membership is now judged PER HEADER in bash, with no delimiter at all.
 work=$(make_fixture case_cx6i newline-name)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/a b/a'
 run_wrapper "$work"
@@ -1229,7 +1025,6 @@ reset_stub
 # The other direction, so (cx6i) cannot be satisfied by a blanket "newline ⇒ absent" rule:
 # with the C-quoted header git really emits for such a path, it must count as PRESENT.
 work=$(make_fixture case_cx6j newline-name)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/a b/a\ndiff --git "a/a\\nb.rs" "b/a\\nb.rs"'
 run_wrapper "$work"
@@ -1246,12 +1041,10 @@ reset_stub
 # mechanism that certifies "the reviewer received the code". The prompt below carries ONLY
 # the `foo b/x` header, so `foo` MUST be reported absent.
 work=$(make_fixture case_cx6l ambiguous-space-pair)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/foo b/x b/foo b/x'
 run_wrapper "$work"
 assert_verdict 'case (cx6l)' FAIL 1
-assert_says 'case (cx6l) both files are surviving CODE census paths' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_says 'case (cx6l) the unrelated path foo is reported ABSENT, not implied by a prefix' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
 assert_lacks 'case (cx6l) never reports a full-coverage PASS on one header' '^prompt-content: PASS'
 
@@ -1263,12 +1056,10 @@ reset_stub
 # git never leaves a rename ambiguous: it writes `rename from` / `rename to`, one path per
 # line, and those lines are the authority the matcher resolves against.
 work=$(make_fixture case_cx6m rename-ambiguous)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/p b/x b/p b/x\nsimilarity index 100%\nrename from p\nrename to x b/p b/x\nindex e69de29..e69de29 100644'
 run_wrapper "$work"
 assert_verdict 'case (cx6m)' PASS 0
-assert_says 'case (cx6m) both rename sides survive the exclusion set' '^census-exclusion: PASS \(2/2 code census paths survive'
 assert_says 'case (cx6m) the rename from/to lines cover both census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
 assert_lacks 'case (cx6m) no false FAIL on an ambiguous rename header' '^prompt-content: FAIL'
 
@@ -1279,7 +1070,6 @@ reset_stub
 # both must be reported absent. This is also the fail-closed direction of the (cx6l) fix —
 # an ambiguous non-rename reading is never allowed to stand in for a real delivery.
 work=$(make_fixture case_cx6n rename-ambiguous)
-write_roborev_config "$work" "$NARROWED_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/p b/x b/p b/x\nindex e69de29..e69de29 100644'
 run_wrapper "$work"
@@ -1289,26 +1079,29 @@ assert_says 'case (cx6n) without the rename lines neither side counts as present
 printf '== case (cx6p): a filename cannot FORGE a summary key or the verdict ==\n'
 reset_stub
 # #3229 round 5, BLOCKER 2. Census paths are ATTACKER-CONTROLLED (whatever a PR branch
-# tracks) and they are interpolated into the LINE-ORIENTED `census-exclusion:` value and
-# into several DETAILS lines. A newline-bearing filename therefore let a value SPAN LINES
-# and inject `key:` lines — up to a forged `RESULT: PASS` — into the very block
-# flow-closer greps to decide whether to arm `--auto`. Neutralised centrally at the emit
-# boundary: control characters become visible escapes, so no value can span a line.
+# tracks) and they are interpolated into LINE-ORIENTED summary values and DETAILS lines. A
+# newline-bearing filename therefore let a value SPAN LINES and inject `key:` lines — up to a
+# forged `RESULT: PASS` — into the very block flow-closer greps to decide whether to arm
+# `--auto`. Neutralised centrally at the emit boundary: control characters become visible
+# escapes, so no value and no DETAILS line can span a line.
+#
+# The surface it is exercised through is `prompt-content:` — the reviewer never receives the
+# forged path, so the key FAILs and NAMES it. (Until #3283's subject was removed this case
+# also went through a `census-exclusion:` FAIL value; the neutralisation being asserted is the
+# SAME central boundary, exercised through the surface that remains.)
 work=$(make_fixture case_cx6p newline-injection)
-write_roborev_config "$work" "$BLANKET_PATTERNS"
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx6p)' FAIL 1
 assert_one_result_line 'case (cx6p)'
 assert_one_block 'case (cx6p)'
 assert_lacks 'case (cx6p) no forged RESULT: PASS anywhere in the output' '^RESULT: PASS'
-assert_lacks 'case (cx6p) no forged prompt-content key' '^prompt-content: PASS'
-assert_says 'case (cx6p) prompt-content still reports its real SKIP value' '^prompt-content: SKIP'
-# The path is still NAMED — neutralised, not dropped: the operator must be able to see
-# WHICH file was swallowed, on ONE line, with its newlines shown as visible escapes.
-assert_says 'case (cx6p) the swallowed path is named with its newlines escaped, on one line' \
-  '^census-exclusion: FAIL \(1/2 code census paths excluded: docs/reports/x-artifacts/harness/inj\\nRESULT: PASS\\nprompt-content: PASS\\nx\.sh by '"'"'docs/\*\*'"'"''
-assert_never_enqueued 'case (cx6p)'
+assert_lacks 'case (cx6p) no forged prompt-content PASS' '^prompt-content: PASS'
+assert_says 'case (cx6p) prompt-content reports the forged path as absent' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+# The path is still NAMED — neutralised, not dropped: the operator must be able to see WHICH
+# file the reviewer did not get, on ONE line, with its newlines shown as visible escapes.
+assert_says 'case (cx6p) the absent path is named with its newlines escaped, on one line' \
+  '^  docs/reports/x-artifacts/harness/inj\\nRESULT: PASS\\nprompt-content: PASS\\nx\.sh$'
 
 printf "== case (cx21): prompt-content: can NEVER emit a 0/0 PASS (direct unit probe) ==\n"
 # A STRUCTURAL backstop, exercised DIRECTLY because the wrapper refuses the condition
@@ -1333,7 +1126,7 @@ CENSUS='2 files, +2/-0'
 BASE='origin/main'
 JOB=4600
 # NO code census path at all — the zero-subject condition, reached without any reference to
-# an exclusion mechanism.
+# any exclusion mechanism.
 census_code_paths=()
 DETAILS=()
 PROMPT_CONTENT=""
@@ -1955,10 +1748,8 @@ CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
 INVOKED="$tmp/invoked-$CASE_N.txt"
 : >"$INVOKED"
-# HOME is redirected for the same reason `run_wrapper` does it: `census-exclusion`
-# UNIONs the GLOBAL `$HOME/.roborev/config.toml` into the exclusion set, so on a box
-# whose real global config carries a pattern this case would fail on THAT key and its
-# own assertion would never be reached. This hand-rolled invocation must not skip it.
+# HOME is redirected for the same reason `run_wrapper` does it: a hand-rolled invocation
+# must be as hermetic as the helper, so a host `$HOME/.roborev/` can never influence it.
 STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
   bash "$WRAPPER" --repo "$tmp/case_t7/work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
@@ -2003,9 +1794,8 @@ CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
 INVOKED="$tmp/invoked-$CASE_N.txt"
 : >"$INVOKED"
-# HOME redirected (see case t7): t9 now runs THROUGH `census-exclusion`, which reads the
-# global config, so a host global with a non-empty pattern would fail this case on the
-# wrong key and the EXIT-trap assertion below would never fire.
+# HOME redirected (see case t7): hermeticity, so nothing on the host can fail this case on
+# the wrong key and leave the EXIT-trap assertion below unreached.
 STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
   bash "$WRAPPER" --repo "$work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/trapcase.log" >"$OUT" 2>&1
@@ -2481,96 +2271,44 @@ assert_says '--help states the probe expectation in range terms' 'reviewed-sha i
 assert_says '--help says the range must end in the worktree HEAD' 'ENDS IN that same head-sha'
 assert_lacks '--help no longer asks for reviewed-sha == head-sha' 'reviewed-sha == head-sha'
 assert_says '--help requires both agent and model' 'Both are required'
-# #3229: the new key is documented — its meaning, its position, and its value grammar.
-assert_says '--help documents the census-exclusion key' '^census-exclusion: \(PRE-ENQUEUE, immediately after code-free:'
+# #3229: the RETAINED facts about how roborev drops paths. The mechanism statement stays —
+# it is what stops the falsified "roborev filters non-code" claim coming back — while the
+# key that once PREDICTED the effective exclusion set is gone (#3283).
 assert_says '--help states the CORRECTED mechanism, not the falsified one' 'roborev drops exactly what its'
 assert_lacks '--help never restates the falsified claim' '[Ee]xcludes non-code paths'
-assert_says '--help pins the ported version' 'git\.FormatExcludeArgs'
-assert_says '--help carries the swallowed-paths FAIL grammar' 'FAIL \(<m>/<n> code census paths excluded'
-assert_says '--help distinguishes unreadable from absent' 'DISTINCT from'
-assert_says '--help names the trailing-slash FAIL' 'FAIL \(trailing-slash pattern'
-assert_says '--help names the drift FAIL' 'FAIL \(exclusion set drift'
-assert_says '--help sends a FAIL to the config, not the reviewer' 'is a CONFIGURATION defect'
 assert_says '--help defines docs-only as a code-free CENSUS, not a path prefix' 'CENSUS as code-free: classifies it, NEVER a .docs/. path prefix'
 assert_says '--help names the harness convention as reviewed code' 'docs/reports/\*-artifacts/ are executable code'
-# The three-file union and the DECLARED RESIDUAL are the two facts an operator reading a
-# census-exclusion FAIL most needs, so --help states them rather than leaving them in the
-# oracles file's comments.
-assert_says '--help enumerates the three config sources it unions' 'THE EFFECTIVE SET IS A UNION OF THREE CONFIG FILES'
-assert_says '--help names the ROOT-checkout config source' '\[root-config\]'
-assert_says '--help explains why the root checkout is read' 'binds a repo by its repos\.root_path'
-assert_says '--help says a worktree config does not override the root one' 'does NOT override'
-assert_says '--help says every value line names the pattern source' 'names the SOURCE of the pattern responsible'
-assert_says '--help says an empty parse must be corroborated' "CORROBORATED that nothing is configured"
-# THE UNIFYING RULE must be stated verbatim in every rule-stating surface, so a future
-# call of this shape is decided by the rule rather than re-litigated ad hoc.
-assert_says '--help states the unifying rule verbatim' 'FAIL where the author can act; NOTICE where only the information is actionable;'
-assert_says '--help states the unifying rule verbatim (2nd line)' 'never silence\.'
-# THE DECLARED RESIDUAL (AC4's second branch, #3278). The built-in deny-list is NOT modelled,
-# and --help must SAY SO with the exact case where the disagreement persists — an unstated
-# residual is indistinguishable from a claim of coverage.
-assert_says '--help states that the built-in deny-list is NOT modelled' 'NOT MODELLED, DELIBERATELY \(issue #3278\)'
-assert_says '--help names the exact residual case' 'only code-census path is a built-in-excluded path'
-assert_says '--help says the residual fails CLOSED, never green' 'It fails CLOSED, never a'
-assert_says '--help says there is deliberately no NOTICE value for this key' 'There is deliberately NO'
-assert_says '--help keeps the port re-verify obligation' 'Re-verify the ported git\.FormatExcludeArgs'
-# The subtracted grammar must be GONE from --help, or the block documents values the code
-# can no longer emit — the failure direction that reads as coverage.
+# THE REMOVAL, ASSERTED IN THE DOCUMENTED OUTPUT CONTRACT (#3229 owner ruling / #3283). A
+# `--help` that still documents a key the wrapper cannot emit is a claim of coverage that does
+# not exist — the failure direction that reads as coverage — so every trace of the deleted
+# oracle's grammar must be absent, not merely unexercised.
+assert_lacks '--help no longer documents the census-exclusion key' 'census-exclusion'
+assert_lacks '--help no longer names the ported Go function' 'FormatExcludeArgs'
+assert_lacks '--help no longer documents the swallowed-paths FAIL grammar' 'code census paths excluded'
+assert_lacks '--help no longer documents the trailing-slash FAIL' 'trailing-slash pattern'
+assert_lacks '--help no longer documents the drift FAIL' 'exclusion set drift'
+assert_lacks '--help no longer documents the UNCORROBORATED FAIL' 'UNCORROBORATED'
+assert_lacks '--help no longer enumerates config sources it does not read' 'UNION OF THREE CONFIG FILES'
+assert_lacks '--help no longer documents a root-config source tag' '\[root-config\]'
 assert_lacks '--help no longer documents the built-in-set key' 'built-in-set:'
 assert_lacks '--help no longer documents a roborev-builtin source tag' '\[roborev-builtin\]'
+# The block's KEY CONTRACT is what readers grep, so --help must list exactly the keys the
+# wrapper emits.
+assert_says '--help still documents the prompt-content key' 'prompt-content'
 assert_never_enqueued '--help'
-
-printf '== structural: the exclusion view is GIT-matched, VERSION-PINNED, and not a hand-rolled matcher ==\n'
-reset_stub
-ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
-if [ -f "$ORACLES" ]; then
-  # Anchored to the CONSTRUCTION STATEMENT on an EXECUTABLE line, not to a file-wide grep:
-  # the file carries further `:(exclude,glob)` occurrences in comments and in DETAILS prose,
-  # so `grep -qF ':(exclude,glob)' "$ORACLES"` stays green with the construction replaced by
-  # a hand-rolled matcher (MEASURED: swapping it for `:!` left this assert `ok`).
-  if grep -nE '_rx_pathspecs\+=\(":\(exclude,glob\)' "$ORACLES" | grep -qv '^[0-9]*: *#'; then
-    ok 'structural: the check CONSTRUCTS :(exclude,glob) git pathspecs (executable statement, not a comment)'
-  else
-    bad 'structural: no executable :(exclude,glob) pathspec construction found — the matcher may have been re-implemented (note: a file-wide grep would still pass here, satisfied by the comments and the pinned-set extraction)'
-  fi
-  # Counted, not merely present: the oracles file runs the query TWICE (survivors, then
-  # per-pattern blame) and both must be NUL-safe, so a bare presence grep stays green with
-  # `-z` dropped from either one (MEASURED). The `-z` audit loop below covers the same
-  # property file-wide; this assert additionally pins the query's exact census-comparable shape.
-  _surv_reads=$(grep -cE 'git -C "\$REPO" diff --name-only' "$ORACLES" || true)
-  _surv_nulsafe=$(grep -cE 'git -C "\$REPO" diff --name-only -z --no-renames' "$ORACLES" || true)
-  if [ "${_surv_reads:-0}" -gt 0 ] && [ "${_surv_reads:-0}" -eq "${_surv_nulsafe:-0}" ]; then
-    ok "structural: all $_surv_reads survivor/blame queries are git diff --name-only -z --no-renames (NUL-safe, census-comparable)"
-  else
-    bad "structural: ${_surv_reads:-0} survivor/blame git-diff query/queries but only ${_surv_nulsafe:-0} in the NUL-safe --name-only -z --no-renames shape the census is comparable with"
-  fi
-  # A second, independent wildmatch implementation is the class of error this check exists
-  # to catch, so its absence is asserted rather than assumed.
-  if grep -qE 'roborev v0\.61\.2' "$ORACLES"; then
-    ok 'structural: the ported construction names the pinned roborev version'
-  else
-    bad 'structural: the port does not name the roborev version it was derived from'
-  fi
-  if grep -qiE 're-?verif' "$ORACLES"; then
-    ok 'structural: the port states the re-verify-on-upgrade maintenance obligation'
-  else
-    bad 'structural: the port does not state the re-verify-on-upgrade obligation'
-  fi
-else
-  bad "structural: oracles file not found at $ORACLES"
-fi
 
 printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
 # THE INVARIANT THAT STOPS THE NEXT ROUND (#3229 round 4). Rounds 2, 3 and 4 produced six
 # blockers and every one was a path-normalisation defect in a DIFFERENT consumer, because
-# normalisation was scattered: the census did not normalise at all, `census-exclusion:`
-# unquoted at one point, `prompt-content:` did something else again. Patching the reported
+# normalisation was scattered: the census did not normalise at all, a since-deleted
+# consumer unquoted at one point, `prompt-content:` did something else again. Patching the reported
 # consumer each round is a losing game, so the boundary itself is asserted here:
 #   (1) every git path read is `-z`, so paths arrive RAW and there is nothing to unquote;
 #   (2) RAW is the single internal representation — no consumer unquotes a census path;
 #   (3) there is ONE unquoting implementation and ONE header matcher, with the unquoter
 #       called only from the matcher;
 #   (4) no consumer re-implements header parsing or newline-delimited path membership.
+ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 CHECKS_FILE="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
 FLOW_FILES=("$ORACLES" "$CHECKS_FILE" "$WRAPPER")
 for _f in "${FLOW_FILES[@]}"; do
@@ -2731,11 +2469,12 @@ else
   else
     bad "structural: emit_summary emits a value WITHOUT emit_kv, so a newline-bearing path could forge a key: ${_em_raw%%$'\n'*}"
   fi
+  # 22 since #3229's owner ruling removed `census-exclusion:` with its oracle (#3283).
   _em_n=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" | grep -cE "^[[:space:]]*emit_kv '" || true)
-  if [ "${_em_n:-0}" -ge 23 ]; then
+  if [ "${_em_n:-0}" -ge 22 ]; then
     ok "structural: all $_em_n block keys are emitted through the neutralising boundary"
   else
-    bad "structural: only ${_em_n:-0} emit_kv call(s) in emit_summary — the block has 23 keys, so some are emitted another way"
+    bad "structural: only ${_em_n:-0} emit_kv call(s) in emit_summary — the block has 22 keys, so some are emitted another way"
   fi
 fi
 if grep -qE '^[[:space:]]*roborev_safe_line "\$2"' "$WRAPPER"; then
@@ -2769,13 +2508,13 @@ printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
 # it.
 #
 # EVERY assert below is anchored to the SCAN STATEMENT, never to a file-wide grep. That
-# distinction is the whole point and it is not pedantry: a file-wide `grep '"$CENSUS_EXCLUSION"'`
-# is satisfied by the `printf 'census-exclusion: %s\n' "$CENSUS_EXCLUSION"` inside
-# `emit_summary()`, so it would keep passing with the key DELETED from the scan — i.e. the assert
-# meant to forbid the decorative-key defect would itself be decorative. Nor can a behavioural
-# case cover it: every `CENSUS_EXCLUSION="FAIL (…)"` assignment is (correctly) followed
-# immediately by `finish FAIL 1`, so the scan never observes a failing value and the
-# registration is purely defensive — only a structural assert can pin it (#3229).
+# distinction is the whole point and it is not pedantry: a file-wide `grep '"$SOME_KEY"'` is
+# satisfied by the `emit_kv '<key>' "$SOME_KEY"` inside `emit_summary()`, so it would keep
+# passing with the key DELETED from the scan — i.e. the assert meant to forbid the
+# decorative-key defect would itself be decorative. Nor can a behavioural case always cover
+# it: a key whose every failing assignment is (correctly) followed immediately by
+# `finish FAIL 1` is never observed failing BY the scan, so its registration there is purely
+# defensive — only a structural assert can pin it (#3229).
 #
 # So the scan is extracted ONCE, as a statement, and the asserts read that extract:
 #   _scan_block = the whole `for verdict in … done` loop (bounds the `case` to INSIDE it)
@@ -2794,7 +2533,7 @@ if [ -n "$_scan_start" ] && [ -n "$_scan_end" ]; then
   _scan_block=$(sed -n "${_scan_start},${_scan_end}p" "$WRAPPER")
   # The key list ends at the first line that does not continue with a trailing backslash.
   _scan_keys=$(printf '%s\n' "$_scan_block" | awk '{print} !/\\$/{exit}')
-  _scan_case=$(printf '%s\n' "$_scan_block" | grep -E 'case "\$verdict" in' | head -1 || printf '')
+  _scan_case=$(printf '%s\n' "$_scan_block" | grep -E 'case "\$verdict_token" in' | head -1 || printf '')
 fi
 if [ -z "$_scan_block" ] || [ -z "$_scan_keys" ] || [ -z "$_scan_case" ]; then
   bad 'structural: could not locate the wrapper verdict scan STATEMENT (for verdict in … case … done) to inspect'
@@ -2805,20 +2544,30 @@ else
   else
     bad 'structural: the extracted verdict-scan key list does not terminate at "; do" — the extraction is truncated, so the per-key asserts below would be unreliable'
   fi
-  if printf '%s\n' "$_scan_case" | grep -qE 'case "\$verdict" in FAIL\*\|FINDINGS\*\|ERROR\*\|INCONSISTENT\*\)'; then
-    ok 'structural: the failing-capable set is exactly FAIL*|FINDINGS*|ERROR*|INCONSISTENT*'
+  if printf '%s\n' "$_scan_case" | grep -qE 'case "\$verdict_token" in FAIL\|FINDINGS\|ERROR\|INCONSISTENT\)'; then
+    ok 'structural: the failing-capable set is exactly FAIL|FINDINGS|ERROR|INCONSISTENT'
   else
-    bad 'structural: the failing-capable verdict set is not the expected FAIL*|FINDINGS*|ERROR*|INCONSISTENT*'
+    bad 'structural: the failing-capable verdict set is not the expected FAIL|FINDINGS|ERROR|INCONSISTENT'
   fi
   if printf '%s\n' "$_scan_case" | grep -q 'NOTICE'; then
-    bad 'structural: NOTICE* appears in the failing-capable verdict scan — an advisory vacuity-tier1 NOTICE would red RESULT:'
+    bad 'structural: NOTICE appears in the failing-capable verdict scan — an advisory vacuity-tier1 NOTICE would red RESULT:'
   else
-    ok 'structural: NOTICE* is absent from the failing-capable verdict scan'
+    ok 'structural: NOTICE is absent from the failing-capable verdict scan'
   fi
-  if grep -qE "^\\s*emit_kv 'census-exclusion'" "$WRAPPER"; then
-    ok 'structural: census-exclusion is still emitted as a block key (not decorative)'
+  # ===== MATCHED ON THE VERDICT TOKEN, EXACTLY — the closure must not itself be a prefix
+  # test (#3229 round-11 M3). A `PASS*` glob accepts `PASSthisNeverRan`, so the scan meant to
+  # reject unplanned values would accept any value merely BEGINNING with a planned token.
+  # Pinned structurally as well as behaviourally (cases cx28b/cx28c) because a future edit
+  # could restore the globs while every behavioural case but those two stayed green.
+  if printf '%s\n' "$_scan_block" | grep -qE '^[[:space:]]*verdict_token="\$\{verdict%% \*\}"'; then
+    ok 'structural: the scan reduces each value to its VERDICT TOKEN (up to the first space) before classifying'
   else
-    bad 'structural: census-exclusion is not emitted in the summary block'
+    bad 'structural: the verdict scan does not extract a verdict token — it is classifying the whole value, so a token followed by anything is matched by prefix (#3229 M3)'
+  fi
+  if printf '%s\n' "$_scan_block" | grep -qE '(PASS|FAIL|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN)\*'; then
+    bad 'structural: a PREFIX GLOB (TOKEN*) survives in the verdict scan — PASSthisNeverRan would match PASS* and inherit the non-failing branch (#3229 M3)'
+  else
+    ok 'structural: the verdict scan carries NO prefix globs — every token is matched exactly'
   fi
   # ===== THE CLOSED-GRAMMAR INVARIANT, asserted STRUCTURALLY (#3229 round-10 sweep) =====
   # Case (cx28) proves ONE unrecognised value FAILs. Only a structural assert can pin that the
@@ -2828,7 +2577,7 @@ else
   # edit could delete the positive arm while every behavioural case except cx28 stayed green.
   # Both halves are required: an allow-list whose fallthrough is permissive pins nothing.
   _scan_positive=$(printf '%s\n' "$_scan_block" \
-    | grep -E 'PASS\*\|SKIP\*\|NOTICE\*\|UNAVAILABLE\*\|DEGRADED\*' | head -1 || printf '')
+    | grep -E 'PASS\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' | head -1 || printf '')
   if [ -n "$_scan_positive" ]; then
     ok 'structural: the verdict scan has a POSITIVE arm — the non-failing set is an allow-list, not "not-failing"'
   else
@@ -2837,7 +2586,7 @@ else
   # The `*)` fallback must SET failed=1. Read from the positive `case`'s own body: from the
   # allow-list line to the `esac` that closes it.
   _scan_fallthrough=$(printf '%s\n' "$_scan_block" \
-    | awk '/PASS\*\|SKIP\*\|NOTICE\*/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
+    | awk '/PASS\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
     | grep -A 3 -E '^[[:space:]]*\*\)' || printf '')
   if printf '%s\n' "$_scan_fallthrough" | grep -qE '^[[:space:]]*failed=1[[:space:]]*$'; then
     ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
@@ -2845,21 +2594,23 @@ else
     bad 'structural: the verdict scan positive arm does not fail closed — an unrecognised value would be accepted silently, which is the shape this sweep closed'
   fi
   # THE AFFIRMATION BACKSTOP: a PASS requires every VERDICT-CARRYING key to be affirmatively
-  # PASS — with NO exception. (`census-exclusion:` was the one exemption, allowed a `NOTICE`
-  # while the built-in modelling could emit one; that subsystem is deleted (#3278) and the
-  # exemption went with it, which is STRICTER.) Case (cx29) proves one un-run check is caught;
-  # this pins that the backstop exists and names all seven deterministic keys, so a key added
-  # to the block later is not silently exempt from it.
+  # PASS — with NO exception, and no exemption mechanism. (One key was briefly exempt on a
+  # `NOTICE`; both it and its exemption are gone — #3283/#3278 — which is STRICTER.) Case
+  # (cx29) proves one un-run check is caught; this pins that the backstop exists and names all
+  # six deterministic keys, so a key added to the block later is not silently exempt from it.
+  # The `PASS)` arm is EXACT, matched on the token: a `PASS*` glob would let `PASSthisNeverRan`
+  # satisfy the very backstop that exists to reject non-measurements (#3229 M3).
   if grep -qE '^[[:space:]]*not_affirmed="\$\{not_affirmed' "$WRAPPER" &&
-    grep -qE '^[[:space:]]*PASS\*\) continue ;;' "$WRAPPER"; then
-    ok 'structural: a PASS requires each verdict-carrying key to be affirmatively PASS (the SKIP backstop)'
+    grep -qE '^[[:space:]]*PASS\) continue ;;' "$WRAPPER" &&
+    grep -qE '^[[:space:]]*case "\$\{det_value%% \*\}" in' "$WRAPPER"; then
+    ok 'structural: a PASS requires each verdict-carrying key to be affirmatively PASS, matched on the exact token (the SKIP backstop)'
     _aff_missing=""
-    for _aff_key in push-assert census-check code-free census-exclusion sha-assert \
+    for _aff_key in push-assert census-check code-free sha-assert \
       review-completed prompt-content; do
       grep -qE "\"$_aff_key=\\\$[A-Z_]+\"" "$WRAPPER" || _aff_missing="$_aff_missing $_aff_key"
     done
     if [ -z "$_aff_missing" ]; then
-      ok 'structural: all seven deterministic keys are named in the affirmation backstop'
+      ok 'structural: all six deterministic keys are named in the affirmation backstop'
     else
       bad "structural: the affirmation backstop does not cover:$_aff_missing — those keys could ride to PASS on a non-measurement (SKIP)"
     fi
@@ -2867,8 +2618,8 @@ else
     bad 'structural: the affirmation backstop is gone — a verdict-carrying key left at its initial SKIP (a check that never ran) would reach finish PASS, which is the vacuous pass this wrapper exists to prevent (#3229 round-10)'
   fi
   # AND IT CARRIES NO PER-KEY EXEMPTION. The backstop's body must contain exactly ONE
-  # `continue` arm — the affirmative `PASS*)` one. The deleted built-in modelling needed a
-  # second arm exempting `census-exclusion:` on `NOTICE`; with that subject gone the arm is
+  # `continue` arm — the affirmative `PASS)` one. A deleted subsystem needed a second arm
+  # exempting one key on `NOTICE`; with that subject gone the arm is
   # gone too, and this pins that no per-key escape hatch is reintroduced (an exempted key can
   # reach `finish PASS` on a non-measurement, which is the whole defect class). Read from the
   # backstop's own `case` body, so a `NOTICE*)` arm elsewhere in the wrapper cannot satisfy or
@@ -2879,10 +2630,10 @@ else
   else
     _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
     if [ "$_aff_continues" -eq 1 ] &&
-      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\*\) continue ;;'; then
-      ok 'structural: the affirmation backstop has exactly ONE exempting arm, the affirmative PASS*) one — no per-key escape hatch'
+      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;'; then
+      ok 'structural: the affirmation backstop has exactly ONE exempting arm, the affirmative PASS) one — no per-key escape hatch'
     else
-      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s); a non-PASS value is exempted for some key, so that key can reach finish PASS on a non-measurement (#3229 owner ruling / #3278)"
+      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s); a non-PASS value is exempted for some key, so that key can reach finish PASS on a non-measurement (#3229 owner ruling / #3283)"
     fi
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this
@@ -2892,12 +2643,30 @@ else
   else
     bad 'structural: the wrapper no longer states the affirmative-measurement rule — the invariant would have to be re-derived from the code by every reader'
   fi
-  # Anchored to $_scan_keys — the scan's own key list — NOT to the file. See the note above.
-  if printf '%s\n' "$_scan_keys" | grep -qE '"\$CENSUS_EXCLUSION"'; then
-    ok 'structural: census-exclusion is named in the verdict scan KEY LIST itself (a FAIL there still reds RESULT:)'
+  # THE REMOVAL, PINNED AT THE SCAN (#3229 owner ruling / #3283). The census-exclusion oracle
+  # is deleted, so its key must be absent from the scan's key list AND from the block. Asserted
+  # rather than assumed: a leftover `"$CENSUS_EXCLUSION"` in the key list would be a permanently
+  # EMPTY value, which the closed grammar (correctly) FAILs — i.e. the residue of an incomplete
+  # deletion would red every run, and it must be caught here rather than in the field.
+  if printf '%s\n' "$_scan_keys" | grep -qE 'CENSUS_EXCLUSION'; then
+    bad 'structural: the deleted CENSUS_EXCLUSION key is still named in the verdict-scan key list — it would hold a permanently empty value and red every run'
   else
-    bad 'structural: census-exclusion is absent from the verdict-scan KEY LIST — a configured swallow would not red RESULT: (note: a file-wide grep would still pass here, satisfied by the emit_summary printf; this assert reads the for-statement)'
+    ok 'structural: the deleted census-exclusion key is absent from the verdict-scan key list'
   fi
+  if grep -qE "emit_kv 'census-exclusion'" "$WRAPPER"; then
+    bad 'structural: the summary block still emits a census-exclusion key whose oracle is deleted'
+  else
+    ok 'structural: the summary block no longer emits census-exclusion (removal visible in the OUTPUT contract, not just the source)'
+  fi
+  for _gone_fn in roborev_check_census_exclusion roborev_format_exclude_args \
+    roborev_toml_exclude_patterns roborev_parse_toml_array roborev_corroborate_exclude_patterns; do
+    if grep -qE "(^|[^#[:alnum:]_])$_gone_fn\b" "$WRAPPER" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+      "$SCRIPT_DIR/../flow/roborev-review-checks.sh"; then
+      bad "structural: $_gone_fn is still referenced by the flow scripts — the deletion is incomplete"
+    else
+      ok "structural: $_gone_fn has no live reference in the flow scripts"
+    fi
+  done
 fi
 
 printf '== structural: the AC2 live probe is NOT a gate component ==\n'
@@ -2913,15 +2682,16 @@ else
   printf 'SKIP - agent-gate.sh not found; the live-probe/gate separation could not be checked\n'
 fi
 # The probe must NOT be a committed executable under root `docs/` (#3229 ⑤a): roborev
-# resolves exclude_patterns from the repo ROOT path and snapshots it at daemon start, so
-# such a file makes census-exclusion FAIL correctly and permanently until this change
-# merges — a deadlock, not a test. Asserted structurally so it cannot be reintroduced.
+# resolves exclude_patterns from the repo ROOT path and SNAPSHOTS them at daemon start, so
+# until this change merges such a file is excluded from every review of it — `prompt-content:`
+# would FAIL permanently, a deadlock rather than a test. Asserted structurally so it cannot
+# be reintroduced.
 _probe_exec_count=$(find "$SCRIPT_DIR/../../docs/reports/3229-artifacts" -maxdepth 1 \
   \( -name '*.sh' -o -name '*.py' -o -name '*.bt' \) 2>/dev/null | wc -l | tr -d '[:space:]')
 if [ "${_probe_exec_count:-0}" -eq 0 ]; then
   ok 'structural: the #3229 artifacts dir carries NO executable (a pre-merge self-demonstration is a deadlock)'
 else
-  bad "structural: $_probe_exec_count executable(s) under docs/reports/3229-artifacts/ — an executable under root docs/ makes census-exclusion FAIL until this change merges"
+  bad "structural: $_probe_exec_count executable(s) under docs/reports/3229-artifacts/ — an executable under root docs/ is dropped from its own review until this change merges, so prompt-content: FAILs permanently"
 fi
 if [ -f "$SCRIPT_DIR/../../docs/reports/3229-artifacts/live-probe-procedure.md" ]; then
   ok 'structural: the probe procedure is kept as committed prose'

@@ -299,6 +299,20 @@ CENSUS as code-free: classifies it, NEVER a 'docs/' path prefix: the measurement
 harnesses this repo ships under docs/reports/*-artifacts/ are executable code that
 IS reviewed, so a PR carrying them is not a docs-only change (issue #3229).
 
+HOW ROBOREV DROPS PATHS, stated correctly because the old claim was FALSIFIED:
+roborev drops exactly what its exclusion pathspecs match (the repo/global
+exclude_patterns plus a compiled-in lockfile/cache deny-list) and makes NO
+code/non-code judgement of its own. A markdown-only diff arrives EMPTY because
+'*.md' is CONFIGURED, not because a reviewer recognised prose — and the same
+mechanism cuts the other way: a configured 'docs/**' discarded 33 EXECUTABLE
+harness files on PR #3222 (#3229). NOTHING HERE PREDICTS THAT SET. There is no
+pre-enqueue key reconciling the census against it: the oracle that tried was
+removed (#3283 for the configured half, #3278 for the built-ins) because it
+produced false-PASSes faster than review rounds closed them. Consequence: a path
+the reviewer did not receive surfaces AFTER the review, under prompt-content:,
+whose cause names the symptom rather than the mechanism. Fail-closed, never green
+— but if prompt-content: FAILs, SUSPECT .roborev.toml first.
+
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
 a worktree; the gate's hermetic check uses a stub reviewer.
