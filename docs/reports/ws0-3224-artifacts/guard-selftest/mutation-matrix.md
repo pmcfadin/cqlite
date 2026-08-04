@@ -1,6 +1,6 @@
-# #3224 — mutation evidence that each of the six guards is load-bearing
+# #3224 — mutation evidence that every guard is load-bearing
 
-`selftest-guards.sh` passing 37/37 shows the guards behave correctly on the inputs
+`selftest-guards.sh` passing **71/71** shows the guards behave correctly on the inputs
 it supplies. It does **not** by itself show that the guards are what produce that
 result — a test can pass for reasons unrelated to the code it means to pin. So each
 fix was **reverted in place** and the selftest re-run. The requirement the owner set
@@ -8,9 +8,18 @@ was *"show the guard rejecting the bad input it now catches"*; a mutation run sh
 the complement, which is what makes it evidence rather than assertion: **with the
 guard removed, the bad input is accepted.**
 
-Run on `ip-172-31-3-252` (i4i.metal), 2026-08-04, against the artefacts committed in
-PR #3286. Every mutation was reverted immediately afterwards and the 37/37 PASS
-re-confirmed; `guard-selftest/selftest-output.txt` is the final unmutated run.
+Three review rounds produced **18 findings** (6, then 7, then 5) and this file records a
+mutation run for each fix. Run on `ip-172-31-3-252` (i4i.metal), 2026-08-04, against the
+artefacts committed in PR #3286. Every mutation was reverted immediately afterwards and
+the PASS re-confirmed; `guard-selftest/selftest-output.txt` is the final unmutated run.
+
+**Two of the mutations found defects in the TESTS rather than the code** (round 2's #7 and
+round 3's #1) — both source-text assertions passing against a mutant whose branch was
+unreachable. Those are written up below rather than quietly repaired, because they are the
+same defect class as the findings themselves and the second one arrived one round *after*
+the first was documented.
+
+## Round 1 — the original six
 
 | # | mutation applied | cases that flipped to FAIL | result |
 |---|---|--:|---|
@@ -99,3 +108,46 @@ silently lost its "no arms at all" subject test. Worth recording because it is t
 shape of the original defect one level down: a roster that quietly covers a subset
 is indistinguishable from one that covers everything, and the only defence is
 printing what was actually checked.
+
+## Round 3 — five further findings, and the structural fix that should end the pattern
+
+| # | mutation applied | cases that flipped | result |
+|---|---|--:|---|
+| 1 | capture straight into `$out` again, no swap | 2 | **caught** — the invalid rep was overwritten in place by a broken capture |
+| 2 | make the schema's rc-roster difference empty | 2 | **caught** — a partial `rc` block passed in `rep-complete.py` AND `derive.py`, from one edit |
+| 3 | track uncore completeness as a flat event set again | 3 | **caught** — all 24 events on S0 with no S1 rows certified complete |
+| 4 | change the group-C cross-endpoint check to a constant false | 1 | **caught** — group C at S=1 only derived silently via the modelled fallback |
+| 5 | remove the AC4 basis / `AC4_UNAVAILABLE` marker | 2 | **caught** — `ac4_accounting` emitted with neither an attribution nor a residual |
+
+### Why round 3 existed at all, which matters more than the five fixes
+
+Findings came in at **6, then 7, then 5** — not converging. Looking at *which* defects
+arrived rather than how many, the same fact kept being wrong in a different file:
+
+| the fact | round 1 | round 2 | round 3 |
+|---|---|---|---|
+| the rc arm roster | `capture-endpoint.sh` omitted two arms | `rep-complete.py` checked "nonempty", not the roster | `derive.py` enumerated the dict, not the roster |
+| the uncore roster | asserted in `derive.py` | missing in `ac5-analyse.py` | `rep-complete.py` tracked event names globally, not `(socket, event)` pairs |
+
+**Four consumers, two facts, fixed six times, wrong in a new way each time.** Fixing each
+report where it pointed could not converge, because the defect was not in any of those
+files — it was that **the schema had no single home**, so every consumer re-derived it and
+each re-derivation was an independent chance to get it wrong.
+
+`harness/ws0schema.py` is that home. Mutation 2 is the evidence it works: **one** edit to
+the schema flips cases in **two** different consumers, which is exactly the coupling that
+was missing. A roster correction now lands everywhere at once, and two consumers cannot
+disagree about a question they both ask the same code.
+
+### And the round-2 test lesson repeated itself immediately
+
+The `run-all.sh` atomicity case was first written as a source-text assertion again —
+grep for `staging`, check the swap comes after its gate — one round after the mutation
+matrix recorded that exact mistake. It was rewritten to **execute** the real loop against
+a stub `capture-endpoint.sh` and assert the resulting directory state.
+
+Doing so found a second defect in the case: the pre-existing rep it seeded was a **valid**
+one, so `run-all.sh` correctly SKIPPED it and the capture never ran — three cases
+"passing" while exercising nothing. The scenario the finding describes is *recapturing an
+invalid rep*, so the fixture now seeds an invalid one. **Knowing about a failure shape does
+not confer immunity to it**; only running the thing does.

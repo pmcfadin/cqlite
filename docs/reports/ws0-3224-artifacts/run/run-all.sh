@@ -52,10 +52,40 @@ for rep in $(seq 1 "$REPS"); do
     echo "=============================================================="
     echo "[run-all] $(date -u +%H:%M:%S) $label rep$rep  S=$S N=$N step=${STEP}s window=${WINDOW}s"
     echo "=============================================================="
-    bash "$HERE/capture-endpoint.sh" "$label" "$S" "$N" "$STEP" "$WINDOW" "$rep" "$out"
+    # A REP DIRECTORY IS REPLACED ATOMICALLY, NEVER WRITTEN INTO IN PLACE (roborev
+    # round 3 finding #1). Recapturing straight into $out leaves the OLD meta.json
+    # authoritative for the whole run: interrupt a rerun that has repaired one CSV and
+    # the directory holds old metadata beside a MIXTURE of old and new counter files,
+    # which can satisfy rep-complete.py and then be SKIPPED FOREVER — the resume
+    # defect of finding 5, re-entered through the crash path instead of the rc path.
+    #
+    # So capture into a fresh sibling and swap only once capture-endpoint.sh's own
+    # validity gates have passed. The previous directory is kept as .prev until the
+    # swap succeeds, and a crash at any point leaves either the OLD complete rep or an
+    # obviously-incomplete .staging that rep-complete.py refuses — never a mixture
+    # that looks complete.
+    staging="$out.staging.$$"
+    rm -rf "$staging"
+    mkdir -p "$staging"
+    bash "$HERE/capture-endpoint.sh" "$label" "$S" "$N" "$STEP" "$WINDOW" "$rep" "$staging"
     rc=$?                       # captured IMMEDIATELY, before any substitution
     echo "[run-all] $label rep$rep rc=$rc"
-    [ "$rc" -eq 0 ] || FAILED=$((FAILED+1))
+    if [ "$rc" -eq 0 ] && python3 "$HERE/rep-complete.py" "$staging" > /dev/null; then
+      # Swap. mv of a directory within one filesystem is atomic; the two-step
+      # (out -> .prev, staging -> out) is not, so the .prev is removed only after the
+      # new directory is in place and a stale .prev is cleaned on the next attempt.
+      rm -rf "$out.prev"
+      [ -d "$out" ] && mv "$out" "$out.prev"
+      mv "$staging" "$out"
+      rm -rf "$out.prev"
+      echo "[run-all] $label rep$rep committed atomically -> $out"
+    else
+      # Deliberately NOT swapped in, and deliberately NOT deleted: the failed capture
+      # is the evidence for why it failed. The previous $out, if any, is untouched.
+      FAILED=$((FAILED+1))
+      echo "[run-all] $label rep$rep NOT committed (rc=$rc or incomplete); staging kept at $staging"
+      python3 "$HERE/rep-complete.py" "$staging" || true
+    fi
   done
 done
 echo "[run-all] DONE failed_captures=$FAILED"

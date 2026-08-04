@@ -568,6 +568,160 @@ rm -f "$TMP/results-noC"/*/rep*/meta-stalls.json \
 expect_rc "results tree with NO group C anywhere: still derives (supported mode)" 0 \
   python3 "$HERE/results/derive.py" "$TMP/results-noC" --out "$TMP/derived-noC.json"
 
+# Round 3 finding #2: derive.py's rc check enumerated the dict it was handed, so a
+# PARTIAL block whose present arms were all zero passed. Same finding as round 2's #6
+# in rep-complete.py — which is why both now ask harness/ws0schema.py.
+cp -r "$HERE/results" "$TMP/results-partialrc"
+python3 - "$TMP/results-partialrc/llc-s6-N16/rep1/meta.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['rc']={'alignedA':0}
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "results tree with a PARTIAL rc block {alignedA:0}: REFUSED by the derivation" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-partialrc" --out "$TMP/derived-bad7.json"
+
+# Round 3 finding #4: group C all-or-nothing ACROSS the two headline endpoints, not
+# just within each. Complete at S=1, absent at S=6 used to fall silently back to the
+# modelled charge and discard the stall data that WAS captured.
+cp -r "$HERE/results" "$TMP/results-asymC"
+rm -f "$TMP/results-asymC"/llc-s6-N16/rep*/meta-stalls.json \
+      "$TMP/results-asymC"/llc-s6-N16/rep*/perf-coreC-aligned.csv
+expect_rc "group C complete at S=1 and ABSENT at S=6: REFUSED as an asymmetric capture" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-asymC" --out "$TMP/derived-bad8.json"
+
+# Round 3 finding #5: AC4's own contract applied to AC4. With group C absent the
+# fallback populated neither attributed nor residual, yet emitted an ac4_accounting
+# object in the same shape as one that had both.
+expect_rc "AC4 with no group C anywhere: emits an explicit basis, never silent incompleteness" 0 \
+  python3 - "$HERE/results/derive.py" "$TMP/results-noC" "$HERE/penalty/summary.txt" <<'PY'
+import json, subprocess, sys, tempfile, os
+derive, tree, pen = sys.argv[1], sys.argv[2], sys.argv[3]
+out = os.path.join(tempfile.mkdtemp(), 'd.json')
+r = subprocess.run([sys.executable, derive, tree, '--penalty-summary', pen,
+                    '--out', out], capture_output=True, text=True)
+if r.returncode != 0:
+    sys.stderr.write(r.stderr)
+    sys.exit('derivation failed; the no-group-C mode must remain supported')
+ac4 = json.load(open(out))['ac4_accounting']
+basis = ac4.get('attribution_basis')
+if not basis:
+    sys.exit('FAIL: ac4_accounting emitted with no attribution_basis — the caller '
+             'cannot tell measured from modelled from unevaluated')
+measured = 'attributed_cycles_per_row' in ac4
+modelled = 'modelled_residual_pct_of_delta' in ac4
+unavail = 'AC4_UNAVAILABLE' in ac4
+if measured:
+    sys.exit('FAIL: claims a MEASURED attribution with no group C in the tree')
+if not (modelled or unavail):
+    sys.exit('FAIL: no residual and no AC4_UNAVAILABLE marker — this is exactly the '
+             'incomplete accounting the finding names: an object shaped like a '
+             'verdict that contains none')
+print('        basis=%r  modelled_residual=%s  unavailable=%s'
+      % (basis, modelled, unavail))
+PY
+# ...and the measured path must still say so, so the marker cannot be a blanket.
+expect_rc "AC4 with group C present: basis says MEASURED and the residual is there" 0 \
+  python3 - "$TMP/derived-good.json" <<'PY'
+import json, sys
+ac4 = json.load(open(sys.argv[1]))['ac4_accounting']
+if ac4.get('attribution_basis') != 'MEASURED cycle_activity.stalls_l3_miss':
+    sys.exit('FAIL: basis is %r' % ac4.get('attribution_basis'))
+for k in ('attributed_cycles_per_row', 'residual_cycles_per_row',
+          'residual_pct_of_delta'):
+    if k not in ac4:
+        sys.exit('FAIL: %s missing from the measured path' % k)
+if 'AC4_UNAVAILABLE' in ac4:
+    sys.exit('FAIL: the measured path is marked unavailable')
+print('        measured basis, residual %.2f%% present'
+      % ac4['residual_pct_of_delta'])
+PY
+
+# Round 3 finding #3: uncore completeness is (socket, event) PAIRS, not a flat event
+# set. All 24 events for S0 with no S1 rows at all used to certify as complete.
+cp -r "$GOOD_REP" "$TMP/rep-nos1"
+grep -v '^S1,' "$GOOD_REP/perf-uncore.csv" > "$TMP/rep-nos1/perf-uncore.csv"
+expect_rc "rep with ALL 24 uncore events on S0 and NO S1 rows: REFUSED" 1 \
+  python3 "$HERE/run/rep-complete.py" "$TMP/rep-nos1"
+# The flat-set check would have passed that, so prove the file really does carry the
+# complete event set — otherwise the case above could be passing for the wrong reason.
+expect_rc "...and that file really does carry all 24 distinct uncore events (S0 only)" 0 \
+  python3 - "$TMP/rep-nos1/perf-uncore.csv" "$HERE/harness" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[2])
+import ws0schema
+rows, problems = ws0schema.read_counter_rows(sys.argv[1], 'uncore')
+events = {e for _, e, *_ in rows}
+socks = {s for s, *_ in rows}
+if events != set(ws0schema.IMC_EVENTS):
+    sys.exit('FAIL: the fixture does not carry the full flat event set, so the '
+             'case above may be passing for the wrong reason (%d of %d)'
+             % (len(events), len(ws0schema.IMC_EVENTS)))
+if socks != {'S0'}:
+    sys.exit('FAIL: expected S0 rows only, got %s' % sorted(socks))
+print('        %d distinct events, sockets=%s — flat set COMPLETE, pairs are not'
+      % (len(events), sorted(socks)))
+PY
+
+# Round 3 finding #1: a rep directory is replaced atomically, never written into in
+# place.
+#
+# RUN, NOT READ. The obvious way to test this is to grep run-all.sh for `staging` and
+# for the order of the swap against its gate — and that is exactly the source-text
+# assertion the round-2 mutation run caught being worthless (see
+# guard-selftest/mutation-matrix.md). So the real loop is EXECUTED, against a stub
+# capture-endpoint.sh, and the resulting directory state is asserted. The stub is the
+# only fake: run-all.sh, rep-complete.py and the schema are the committed files.
+runall_case() { # $1 mode(good|partial|fail)  -> prints the state of the rep dir
+  local mode="$1" td; td="$(mktemp -d)"
+  mkdir -p "$td/run" "$td/harness" "$td/out"
+  cp "$HERE/run/run-all.sh" "$td/run/"
+  cp "$HERE/run/rep-complete.py" "$td/run/"
+  cp "$HERE/harness/ws0schema.py" "$td/harness/"
+  # ws0env.sh derives WT from its own location and exports paths; a stub keeps this
+  # case independent of the worktree layout, and run-all.sh only needs it to source.
+  echo ': # stubbed for selftest' > "$td/harness/ws0env.sh"
+  cat > "$td/run/capture-endpoint.sh" <<STUB
+#!/usr/bin/env bash
+out="\$7"
+mkdir -p "\$out"
+case "$mode" in
+  good)    cp -r "$GOOD_REP"/. "\$out"/ ;;
+  partial) cp -r "$GOOD_REP"/. "\$out"/; : > "\$out/perf-uncore.csv" ;;
+  fail)    cp -r "$GOOD_REP"/. "\$out"/; exit 7 ;;
+esac
+exit 0
+STUB
+  # The pre-existing rep must be INVALID, because that is the scenario: an invalid rep
+  # being recaptured. A valid one is correctly SKIPPED and the capture never runs —
+  # which is how the first version of this case "passed" three times over while
+  # exercising nothing. Marked so we can tell whether it survived the attempt.
+  local pre="$td/out/llc-s1-N2/rep1"
+  mkdir -p "$pre"; cp -r "$GOOD_REP"/. "$pre"/
+  python3 - "$pre/meta.json" <<'MKBAD'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['rc']['loadgen_uncore']=1
+json.dump(d,open(p,'w'),indent=1)
+MKBAD
+  echo PREEXISTING > "$pre/marker.txt"
+  ( cd "$td" && REPS=1 OUTROOT="$td/out" STEP=1 WINDOW=1 SETTLE=0 \
+      bash run/run-all.sh > "$td/log" 2>&1 )
+  local swapped=no marker=absent staging=absent
+  [ -f "$pre/marker.txt" ] && marker=present
+  python3 "$td/run/rep-complete.py" "$pre" >/dev/null 2>&1 && swapped=complete || swapped=incomplete
+  ls -d "$td/out/llc-s1-N2"/rep1.staging.* >/dev/null 2>&1 && staging=kept
+  echo "rep=$swapped marker=$marker staging=$staging"
+  rm -rf "$td"
+}
+check "good recapture: swaps in atomically (old invalid rep replaced, now complete)" \
+      "rep=complete marker=absent staging=absent" "$(runall_case good)"
+# The two failure modes. The invalid rep must remain INVALID and in place — never
+# replaced by a mixture that could later certify — and the broken capture is kept as
+# evidence rather than swapped in or deleted.
+check "capture exits 7: rep stays INVALID in place, broken staging kept as evidence" \
+      "rep=incomplete marker=present staging=kept" "$(runall_case fail)"
+check "capture exits 0 but is INCOMPLETE: rep stays INVALID, staging kept" \
+      "rep=incomplete marker=present staging=kept" "$(runall_case partial)"
+
 # =============================================================================
 section "FINDING 6 — AC5 byte accounting (run/ac5-analyse.py)"
 expect_rc "committed ac5-run (ratio 1.008): RESOLVED, accepted" 0 \

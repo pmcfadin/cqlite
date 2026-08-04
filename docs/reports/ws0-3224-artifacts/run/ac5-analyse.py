@@ -50,11 +50,15 @@ csv, stxt = sys.argv[1], sys.argv[2]
 # Same constants and same reasoning as results/derive.py's IMC_COUNT /
 # IMC_EXPECTED_INSTANCES: uncore_imc_0..11 (host/sysfs-pmus.txt is authoritative),
 # each read for cas_count_read and cas_count_write, on both sockets.
-IMC_COUNT = 12
-KINDS = ('read', 'write')
-EXPECTED = set('uncore_imc_%d/cas_count_%s/' % (i, k)
-               for i in range(IMC_COUNT) for k in KINDS)
-SOCKETS = ('S0', 'S1')
+# The roster comes from harness/ws0schema.py, not from a local copy. It was a local
+# copy, and that is how the same finding kept arriving in a new file each round.
+import os
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'harness'))
+import ws0schema
+IMC_COUNT = ws0schema.IMC_COUNT
+EXPECTED = set(ws0schema.IMC_EVENTS)
+SOCKETS = ws0schema.SOCKETS
 
 per = {s: {} for s in SOCKETS}
 elapsed = None
@@ -80,7 +84,7 @@ for line in open(csv):
                  "count is not a usable one — reading the percentage is the only "
                  "evidence the count is not a multiplexed estimate."
                  % (sock, ev, enabled))
-    if e < 99.0:
+    if e < ws0schema.MUX_MIN:
         sys.exit("FATAL: %s %s only %s%% enabled" % (sock, ev, enabled))
     if sock in per and 'cas_count' in ev:
         # A duplicate row would be SILENTLY OVERWRITTEN by dict assignment, hiding

@@ -23,15 +23,23 @@ DESIGN RULES THIS SCRIPT ENFORCES (each one a #3217 lesson):
 """
 import argparse, glob, json, os, statistics, sys
 
+# THE SCHEMA IS SINGLE-HOMED in harness/ws0schema.py. This file's own restatement of
+# the rc roster is exactly what round 3 caught: assert_rc_all_zero enumerated the
+# dict it was handed, so a partial block such as {"alignedA": 0} passed while saying
+# nothing about the other five arms. See that module's header.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'harness'))
+import ws0schema
+
 CORPUS_DEFAULT = 3999890
 MUX_MIN = 99.0            # enabled% floor; below this the count is an estimate
-# uncore_imc_0..11 on this host (Xeon 8375C; host/sysfs-pmus.txt is authoritative,
-# and host/imc-socket-map.txt records the per-socket split). Each instance is read
-# for cas_count_read and cas_count_write, so a COMPLETE per-socket set is
-# IMC_COUNT x 2 rows. Derived rather than written twice so the completeness
-# assertion and the summing loop cannot drift apart.
-IMC_COUNT = 12
-IMC_EXPECTED_INSTANCES = IMC_COUNT * 2
+# The IMC roster comes from the schema, not from a local copy: it is the same fact
+# ac5-analyse.py and rep-complete.py need, and it was independently restated in each
+# of them before round 3. IMC_EXPECTED_INSTANCES is the PER-SOCKET count (every
+# instance read for cas_count_read and cas_count_write), which is what the summing
+# loop below counts.
+IMC_COUNT = ws0schema.IMC_COUNT
+IMC_EXPECTED_INSTANCES = len(ws0schema.IMC_EVENTS)
 # The dispersion floor named in this file's DESIGN RULES: min/median/max needs >= 3
 # points, because a delta between undispersed points cannot be defended (#3217 ran
 # reps=1). Single-homed so the primary-arm WARNING and the group-C refusal below
@@ -133,33 +141,20 @@ CORE_C = ['cycles', 'instructions', 'task-clock',
           'l1d_pend_miss.pending', 'l1d_pend_miss.pending_cycles']
 
 
-def assert_rc_all_zero(meta, repdir, which):
-    """Refuse a rep whose own meta file records a failed arm.
+def assert_rc_all_zero(meta, repdir, which, roster):
+    """Refuse a rep whose own meta file records a failed or incompletely-recorded arm.
 
-    THE GATES ARE RE-CHECKED HERE rather than trusted, which is this script's
-    stated contract — but the `rc` block was the one recorded fact it never read
-    (roborev round 2 finding #1). Structurally parseable output from a failed perf
-    or load-generator invocation could therefore enter derived.json: perf wrapping
-    `sleep` still exits 0 when the load generator behind it died, so the CSV is
-    well-formed and only `rc` records that the rows it is divided by are wrong.
-
-    Enumerated from the dict, so an arm added later cannot default to unchecked —
-    the mistake that produced findings 4 and 5 twice over.
+    THE GATES ARE RE-CHECKED HERE rather than trusted, which is this script's stated
+    contract — but the `rc` block was the one recorded fact it never read (round 2
+    finding #1), and the first version of this function then checked only the arms
+    that happened to be present (round 3 finding #2). Both are now the schema's
+    business, so this function cannot disagree with rep-complete.py's answer to the
+    same question.
     """
-    rc = meta.get('rc')
-    if not isinstance(rc, dict) or not rc:
-        raise SystemExit(
-            "FATAL: %s %s carries no 'rc' block. A capture with no recorded "
-            "return codes cannot be certified, and this script re-checks rather "
-            "than trusts." % (which, repdir))
-    nonzero = {k: v for k, v in rc.items() if v != 0}
-    if nonzero:
-        raise SystemExit(
-            "FATAL: %s %s records nonzero arm(s) %s (all of %s must be 0). The "
-            "counter files may parse cleanly and still be wrong: a dead load "
-            "generator leaves perf's own rc at 0 while the row counts every "
-            "per-row figure divides by are invalid."
-            % (which, repdir, nonzero, sorted(rc)))
+    problems = ws0schema.validate_rc_block(meta.get('rc'), roster,
+                                           '%s %s' % (which, repdir))
+    if problems:
+        raise SystemExit('FATAL: ' + '\n  - '.join([''] + problems).lstrip())
 
 
 def do_stalls(repdir):
@@ -174,7 +169,7 @@ def do_stalls(repdir):
     if not (os.path.exists(meta_p) and os.path.exists(csv_p)):
         return None
     meta = json.load(open(meta_p))
-    assert_rc_all_zero(meta, repdir, 'stalls rep')
+    assert_rc_all_zero(meta, repdir, 'stalls rep', ws0schema.RC_ARMS_STALLS)
     rows = meta['occupancy']['alignedC']['rows_total']
     problems = []
     if not meta['occupancy']['alignedC'].get('ok'):
@@ -244,7 +239,7 @@ def do_rep(repdir):
     occ = meta['occupancy']
 
     # ---- validity gates, re-checked here rather than trusted from meta ----
-    assert_rc_all_zero(meta, repdir, 'rep')
+    assert_rc_all_zero(meta, repdir, 'rep', ws0schema.RC_ARMS_PRIMARY)
     problems = []
     for arm, o in occ.items():
         if not o or not o.get('ok'):
@@ -621,6 +616,30 @@ def main():
 
         e_lo, e_hi = doc['endpoints'][lo], doc['endpoints'][hi]
 
+        # GROUP C IS ALL-OR-NOTHING ACROSS THE TWO HEADLINE ENDPOINTS, not just
+        # within each one (round 3 finding #4). The per-endpoint refusal above stops a
+        # PARTIAL set of reps at one endpoint; it says nothing about group C being
+        # complete at S=1 and absent at S=6. In that case the `and` below is simply
+        # False, the code takes the modelled fallback, and a study that captured the
+        # measured stall arm for half its experiment publishes as though it had never
+        # captured it at all — the expensive half of the data silently discarded with
+        # a note nobody reads.
+        #
+        # An asymmetric capture is a FAILED capture, and it is distinguishable from a
+        # deliberate choice not to measure stalls precisely because one endpoint has
+        # them. Never-captured stays supported; half-captured does not.
+        if ('stalls' in e_lo) != ('stalls' in e_hi):
+            have = lo if 'stalls' in e_lo else hi
+            lack = hi if 'stalls' in e_lo else lo
+            raise SystemExit(
+                "FATAL: group C (stalls) is present at %s and ABSENT at %s. The AC4 "
+                "headline is a DELTA between the two endpoints, so it needs the "
+                "measured stall arm at BOTH or neither: with one side missing the "
+                "accounting silently falls back to the modelled charge and discards "
+                "the stall data that was captured. Either run "
+                "run/capture-stalls.sh for %s, or remove it from %s so the fallback "
+                "is an explicit choice." % (have, lack, lack, have))
+
         # ---- route 1: MEASURED stall cycles --------------------------------
         # DENOMINATOR DISCIPLINE: the stall counters come from group C, which ran
         # its OWN loadgen steps, so their delta is charged against GROUP C's OWN
@@ -794,6 +813,64 @@ def main():
         eff = ac4['marginal_efficiency']
         eff['gap_pp'] = (eff['measured_efficiency']
                          - eff['predicted_from_cycles_per_row']) * 100
+
+        # AC4'S OWN CONTRACT, ENFORCED ON AC4 (round 3 finding #5). This file's
+        # DESIGN RULES say: "The residual is printed as a NUMBER and as a PERCENTAGE.
+        # AC4 fails if omitted." Route 1 populates those three keys; the modelled
+        # fallback populated NONE of them, and an `ac4_accounting` object was emitted
+        # successfully regardless — accounting with no attribution and no residual,
+        # presented in the same shape as accounting that has both.
+        #
+        # In the fallback the modelled charge IS available (it is computed just
+        # above), so a residual can be stated — but it is model-dependent and must
+        # not be mistaken for the measured one, so it goes in under DIFFERENT key
+        # names with the basis named. Where even that is impossible, AC4 is marked
+        # UNAVAILABLE rather than emitted incomplete: a criterion that could not be
+        # evaluated has no verdict, and an object that looks like a verdict is worse
+        # than an absent one.
+        if 'attributed_cycles_per_row' not in ac4:
+            mc = ac4['components'].get('modelled_llc_miss_charge')
+            charge = (mc or {}).get('charge_mlp_corrected')
+            if charge is not None and delta:
+                ac4['modelled_attributed_cycles_per_row'] = charge
+                ac4['modelled_residual_cycles_per_row'] = delta - charge
+                ac4['modelled_residual_pct_of_delta'] = (
+                    (delta - charge) / delta * 100)
+                ac4['attribution_basis'] = 'MODELLED (group C absent)'
+                ac4['notes'].append(
+                    'AC4 residual here is MODELLED, not measured: it is '
+                    'd(LLC-load-misses)/row x an on-host penalty / measured MLP, '
+                    'and it is reported under modelled_* keys so it can never be '
+                    'read as the measured stall attribution. The penalty is an '
+                    'UPPER bound, which inflates attribution and shrinks this '
+                    'residual — the anti-conservative direction.')
+            else:
+                # WHY THIS IS THE COMMON CASE, and why it is correct rather than a
+                # gap: the MLP-corrected charge needs a MEASURED MLP, and MLP comes
+                # from l1d_pend_miss.* — which is a GROUP C counter. So group C being
+                # absent removes the measured attribution AND the only defensible
+                # modelled one in the same stroke.
+                #
+                # The zero-MLP charge does survive, and it is deliberately NOT used
+                # here. It accounted for 140.51% of the delta on the real data (report
+                # 5.4): charging the full unloaded latency per miss inflates
+                # attribution and shrinks the residual, which is the direction AC7 and
+                # RUNBOOK step 7 forbid. Reaching for it to avoid an UNAVAILABLE
+                # verdict would be precisely the rounding-toward-the-hypothesis this
+                # file's own route-1 comment rules out — so AC4 stays unevaluated.
+                ac4['AC4_UNAVAILABLE'] = (
+                    'no defensible attribution is available: group C (measured '
+                    'stalls) is absent, and MLP is itself a group C counter '
+                    '(l1d_pend_miss.*), so the MLP-corrected modelled charge cannot '
+                    'be computed either. The zero-MLP charge is NOT substituted: it '
+                    'reached 140.51%% of the delta on this data, and an inflated '
+                    'penalty shrinks the residual, which is the direction AC7 '
+                    'forbids. AC4 requires the residual as a number and a '
+                    'percentage, so it is UNEVALUATED rather than partially or '
+                    'flatteringly reported. Remedy: run run/capture-stalls.sh.')
+                ac4['attribution_basis'] = 'NONE — AC4 unevaluated'
+        else:
+            ac4['attribution_basis'] = 'MEASURED cycle_activity.stalls_l3_miss'
         doc['ac4_accounting'] = ac4
 
     out = a.out or os.path.join(a.root, 'derived.json')

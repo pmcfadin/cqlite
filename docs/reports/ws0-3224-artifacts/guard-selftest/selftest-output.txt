@@ -1,7 +1,7 @@
 # #3224 guard selftest — recorded output
 # host: ip-172-31-3-252 / 6.17.0-1019-aws
-# date: 2026-08-04T07:12:44Z
-# commit: 350e9cfff4c9d1f43c91119294c288b9a0ab3934
+# date: 2026-08-04T07:25:41Z
+# commit: 52f5ee46056188a33bc49af95b08c7388d6eb327
 # command: bash docs/reports/ws0-3224-artifacts/selftest-guards.sh
 
 ==== #3224 GUARD SELFTEST ====
@@ -73,6 +73,15 @@ dropped 2 S0 imc_11 rows
    PASS  results tree with a failed group-C arm (rc.alignedC=1): REFUSED (rc=1)
    PASS  results tree with group C for 1 of 3 reps: REFUSED (was 1 undispersed rep) (rc=1)
    PASS  results tree with NO group C anywhere: still derives (supported mode) (rc=0)
+   PASS  results tree with a PARTIAL rc block {alignedA:0}: REFUSED by the derivation (rc=1)
+   PASS  group C complete at S=1 and ABSENT at S=6: REFUSED as an asymmetric capture (rc=1)
+   PASS  AC4 with no group C anywhere: emits an explicit basis, never silent incompleteness (rc=0)
+   PASS  AC4 with group C present: basis says MEASURED and the residual is there (rc=0)
+   PASS  rep with ALL 24 uncore events on S0 and NO S1 rows: REFUSED (rc=1)
+   PASS  ...and that file really does carry all 24 distinct uncore events (S0 only) (rc=0)
+   PASS  good recapture: swaps in atomically (old invalid rep replaced, now complete) -> rep=complete marker=absent staging=absent
+   PASS  capture exits 7: rep stays INVALID in place, broken staging kept as evidence -> rep=incomplete marker=present staging=kept
+   PASS  capture exits 0 but is INCOMPLETE: rep stays INVALID, staging kept -> rep=incomplete marker=present staging=kept
 
 == FINDING 6 — AC5 byte accounting (run/ac5-analyse.py)
    PASS  committed ac5-run (ratio 1.008): RESOLVED, accepted (rc=0)
@@ -84,7 +93,7 @@ dropped 2 S0 imc_11 rows
    PASS  IMC row with an UNREADABLE enabled%: REJECTED (not read as healthy) (rc=1)
 
 ==== SELFTEST RESULT: PASS ====
-cases passed: 62   failed: 0
+cases passed: 71   failed: 0
 Every guard rejected the bad input it exists to catch, and accepted the
 good input committed in this PR. The healthy-host record is pinned, so
 re-inverting the finding-1 ordering fails here rather than on a good box.
