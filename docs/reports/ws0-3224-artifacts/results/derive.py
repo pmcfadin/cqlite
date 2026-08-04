@@ -112,6 +112,88 @@ CORE_A = ['cycles', 'instructions', 'task-clock', 'LLC-loads',
           'LLC-load-misses', 'cache-references', 'cache-misses']
 CORE_B = ['cycles', 'instructions', 'task-clock', 'L1-dcache-loads',
           'L1-dcache-load-misses', 'dTLB-load-misses', 'branch-misses']
+# Group C — the MEASURED memory-stall arm (run/capture-stalls.sh). Optional: a
+# results tree without it still derives everything else, and the AC4 accounting
+# then falls back to the MODELLED charge alone and says so.
+CORE_C = ['cycles', 'instructions', 'task-clock',
+          'cycle_activity.stalls_l3_miss', 'cycle_activity.stalls_l2_miss',
+          'cycle_activity.stalls_total',
+          'l1d_pend_miss.pending', 'l1d_pend_miss.pending_cycles']
+
+
+def do_stalls(repdir):
+    """Group C for one rep, or None if this rep has no stalls arm.
+
+    Same fail-closed contract as do_rep: the gates are RE-CHECKED here rather
+    than trusted from the meta file, and a multiplexed or absent counter is
+    refused rather than published.
+    """
+    meta_p = os.path.join(repdir, 'meta-stalls.json')
+    csv_p = os.path.join(repdir, 'perf-coreC-aligned.csv')
+    if not (os.path.exists(meta_p) and os.path.exists(csv_p)):
+        return None
+    meta = json.load(open(meta_p))
+    rows = meta['occupancy']['alignedC']['rows_total']
+    problems = []
+    if not meta['occupancy']['alignedC'].get('ok'):
+        problems.append('occupancy[alignedC] not ok')
+    if not meta.get('warm_verified_zero_disk_reads'):
+        problems.append('warmth: read_bytes delta=%s' % meta.get('warm_read_bytes_delta'))
+    if not meta.get('client_saturation_gate_pass'):
+        problems.append('client saturation util=%s' % meta.get('client_utilisation'))
+    if problems:
+        raise SystemExit("FATAL: stalls rep %s is invalid: %s" % (repdir, problems))
+
+    p = parse_perf(csv_p)
+    c = {name: scalar(p, name, csv_p) for name in CORE_C}
+    per_row = {k: v / rows for k, v in c.items()}
+    pend, pend_cyc = c['l1d_pend_miss.pending'], c['l1d_pend_miss.pending_cycles']
+    return {
+        'repdir': repdir, 'label': meta['label'], 'rep': meta['rep'],
+        'rows_in_window': rows,
+        'counters': c, 'per_row': per_row,
+        'ipc': c['instructions'] / c['cycles'],
+        # Fractions of TOTAL cycles: what share of the core's time is spent
+        # stalled with an L3 miss outstanding. This is the attribution term.
+        'stalls_l3_miss_frac_cycles': c['cycle_activity.stalls_l3_miss'] / c['cycles'],
+        'stalls_l2_miss_frac_cycles': c['cycle_activity.stalls_l2_miss'] / c['cycles'],
+        'stalls_total_frac_cycles': c['cycle_activity.stalls_total'] / c['cycles'],
+        # MEASURED memory-level parallelism: mean outstanding L1D misses over the
+        # cycles in which at least one was outstanding. This is the divisor that
+        # turns an unloaded serial-chase latency into a per-miss cost, so the
+        # MODELLED cross-check no longer needs a guessed MLP.
+        'mlp': (pend / pend_cyc) if pend_cyc else None,
+        'client_utilisation': meta['client_utilisation'],
+        'warm_read_bytes_delta': meta['warm_read_bytes_delta'],
+    }
+
+
+def parse_penalty_summary(path):
+    """Parse the committed run/penalty-probe.sh summary table.
+
+    Columns: level ws_MiB buf_MiB cyc_per_acc ns_per_acc LLCld_acc LLCmiss_acc
+             dTLBmiss_acc
+    Returns {level: {...}}. Absent file -> {} (the MODELLED cross-check is then
+    reported as unavailable rather than invented).
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    out = {}
+    for line in open(path):
+        f = line.split()
+        if len(f) != 8 or f[0] in ('level', '=='):
+            continue
+        try:
+            out[f[0]] = {
+                'ws_MiB': float(f[1]), 'buf_MiB': float(f[2]),
+                'cycles_per_access': float(f[3]), 'ns_per_access': float(f[4]),
+                'llc_loads_per_access': float(f[5]),
+                'llc_misses_per_access': float(f[6]),
+                'dtlb_misses_per_access': float(f[7]),
+            }
+        except ValueError:
+            continue
+    return out
 
 
 def do_rep(repdir):
@@ -239,6 +321,7 @@ def do_rep(repdir):
             'ipc': ipc_I,
         },
         'dram': dram,
+        'stalls': do_stalls(repdir),
     }
 
 
@@ -258,6 +341,11 @@ def main():
     ap.add_argument('root')
     ap.add_argument('--out', default=None)
     ap.add_argument('--md', default=None)
+    ap.add_argument('--penalty-summary', default=None,
+                    help='run/penalty-probe.sh summary.txt — the on-host measured '
+                         'latency table used for the MODELLED cross-check. Absent '
+                         'means the cross-check is reported unavailable, never '
+                         'invented.')
     a = ap.parse_args()
 
     reps = {}
@@ -269,7 +357,9 @@ def main():
     if not reps:
         raise SystemExit("FATAL: no reps found under %s" % a.root)
 
-    doc = {'schema': 'ws0-3224.derived/v1', 'reps': reps, 'endpoints': {}}
+    doc = {'schema': 'ws0-3224.derived/v1', 'reps': reps, 'endpoints': {},
+           'penalty_table': parse_penalty_summary(a.penalty_summary),
+           'penalty_summary_path': a.penalty_summary}
     for label, rs in reps.items():
         e = {'n_reps': len(rs), 'S': rs[0]['S'], 'N': rs[0]['N'],
              'server_cpus': rs[0]['server_cpus'],
@@ -299,6 +389,35 @@ def main():
         e['ipc_group_agreement_max'] = max(
             x['aligned']['ipc_group_agreement'] for x in rs)
         e['client_utilisation_max'] = max(x['client_utilisation'] for x in rs)
+
+        # ---- group C: the MEASURED stall arm, if this tree has one ----------
+        st = [x['stalls'] for x in rs if x['stalls']]
+        if st:
+            e['stalls'] = {
+                'n_reps': len(st),
+                'cycles_per_row': agg([x['per_row']['cycles'] for x in st]),
+                'instructions_per_row': agg([x['per_row']['instructions'] for x in st]),
+                'ipc': agg([x['ipc'] for x in st]),
+                'stalls_l3_miss_per_row': agg(
+                    [x['per_row']['cycle_activity.stalls_l3_miss'] for x in st]),
+                'stalls_l2_miss_per_row': agg(
+                    [x['per_row']['cycle_activity.stalls_l2_miss'] for x in st]),
+                'stalls_total_per_row': agg(
+                    [x['per_row']['cycle_activity.stalls_total'] for x in st]),
+                'stalls_l3_miss_frac_cycles': agg(
+                    [x['stalls_l3_miss_frac_cycles'] for x in st]),
+                'stalls_l2_miss_frac_cycles': agg(
+                    [x['stalls_l2_miss_frac_cycles'] for x in st]),
+                'stalls_total_frac_cycles': agg(
+                    [x['stalls_total_frac_cycles'] for x in st]),
+                'mlp': agg([x['mlp'] for x in st]),
+            }
+            # Cross-arm consistency: group C ran its OWN loadgen step, so its
+            # cycles/row must agree with the primary arm's or the two arms did
+            # not observe the same workload (the P2 symmetry idea again).
+            pc = e['aligned']['cycles_per_row']['median']
+            sc = e['stalls']['cycles_per_row']['median']
+            e['stalls']['cycles_per_row_vs_primary_pct'] = (sc - pc) / pc * 100
         doc['endpoints'][label] = e
 
     # ------------------------------------------------- the AC4 delta + residual
@@ -343,6 +462,145 @@ def main():
                      "reps; if they agree, #3217's baseline convention is sound."),
         }
 
+        # ============================ AC4: the accounting ====================
+        # "residual = delta - attributed; publish residual and residual/delta as
+        #  a percentage. AC4 explicitly fails if this number is omitted."
+        #
+        # Two independent routes to `attributed`, reported side by side:
+        #
+        #   MEASURED  d(cycle_activity.stalls_l3_miss / row). Hardware-counted
+        #             execution-stall cycles with an L3 miss outstanding. No
+        #             penalty, no MLP assumption, no model.
+        #   MODELLED  d(LLC-load-misses / row) x penalty, the #3217-style charge,
+        #             with the penalty MEASURED on this host by the serial chase
+        #             (DRAM latency - LLC-hit latency) and reported BOTH at zero
+        #             MLP (an upper bound on the charge) and divided by the
+        #             MEASURED MLP (the physically motivated value).
+        #
+        # Direction-of-conservatism note, stated because it is easy to get
+        # backwards: a LARGER penalty inflates `attributed` and SHRINKS the
+        # residual, which flatters the hypothesis that the decay is explained.
+        # AC7 and RUNBOOK step 7 forbid rounding toward the hypothesis, so the
+        # HEADLINE attribution is the MEASURED stall term, and the modelled
+        # zero-MLP figure is reported as the upper bound it is -- never as the
+        # attribution.
+        conv = 'aligned'
+        d = doc['delta'][conv]
+        delta = d['delta_cycles_per_row']
+        ac4 = {'convention': conv, 'delta_cycles_per_row': delta,
+               'delta_pct': d['delta_pct'],
+               'instructions_per_row_delta_pct': d['instructions_per_row_delta_pct'],
+               'components': {}, 'notes': []}
+
+        e_lo, e_hi = doc['endpoints'][lo], doc['endpoints'][hi]
+
+        # ---- route 1: MEASURED stall cycles --------------------------------
+        if 'stalls' in e_lo and 'stalls' in e_hi:
+            s_lo = e_lo['stalls']['stalls_l3_miss_per_row']['median']
+            s_hi = e_hi['stalls']['stalls_l3_miss_per_row']['median']
+            t_lo = e_lo['stalls']['stalls_total_per_row']['median']
+            t_hi = e_hi['stalls']['stalls_total_per_row']['median']
+            l2_lo = e_lo['stalls']['stalls_l2_miss_per_row']['median']
+            l2_hi = e_hi['stalls']['stalls_l2_miss_per_row']['median']
+            ac4['components']['measured_l3_miss_stalls'] = {
+                'source': 'cycle_activity.stalls_l3_miss (hardware-counted)',
+                'per_row_low': s_lo, 'per_row_high': s_hi,
+                'delta_cycles_per_row': s_hi - s_lo,
+                'share_of_delta_pct': (s_hi - s_lo) / delta * 100,
+            }
+            ac4['components']['measured_all_execution_stalls'] = {
+                'source': 'cycle_activity.stalls_total (hardware-counted)',
+                'per_row_low': t_lo, 'per_row_high': t_hi,
+                'delta_cycles_per_row': t_hi - t_lo,
+                'share_of_delta_pct': (t_hi - t_lo) / delta * 100,
+                'note': ('a SUPERSET of memory stalls; the gap between this and '
+                         'the l3_miss term is stall cycles the memory system did '
+                         'NOT cause'),
+            }
+            ac4['components']['measured_l2_miss_stalls'] = {
+                'source': 'cycle_activity.stalls_l2_miss (hardware-counted)',
+                'per_row_low': l2_lo, 'per_row_high': l2_hi,
+                'delta_cycles_per_row': l2_hi - l2_lo,
+                'share_of_delta_pct': (l2_hi - l2_lo) / delta * 100,
+                'note': ('superset of the l3_miss term: includes L2 misses that '
+                         'HIT in the L3, so the difference is L3-hit stall cost'),
+            }
+            attributed = s_hi - s_lo
+            ac4['attributed_cycles_per_row'] = attributed
+            ac4['attributed_basis'] = 'measured cycle_activity.stalls_l3_miss delta'
+            ac4['residual_cycles_per_row'] = delta - attributed
+            ac4['residual_pct_of_delta'] = (delta - attributed) / delta * 100
+            ac4['mlp_low'] = e_lo['stalls']['mlp']['median']
+            ac4['mlp_high'] = e_hi['stalls']['mlp']['median']
+        else:
+            ac4['notes'].append(
+                'group C (stalls) absent: no MEASURED attribution available, so '
+                'the modelled charge is all there is and the residual below is '
+                'model-dependent')
+
+        # ---- route 2: MODELLED charge, penalty measured on this host -------
+        pen = doc.get('penalty_table') or {}
+        llc_lo = e_lo[conv]['events_per_row']['LLC-load-misses']['median']
+        llc_hi = e_hi[conv]['events_per_row']['LLC-load-misses']['median']
+        d_llc = llc_hi - llc_lo
+        tlb_lo = e_lo[conv]['events_per_row']['dTLB-load-misses']['median']
+        tlb_hi = e_hi[conv]['events_per_row']['dTLB-load-misses']['median']
+        if pen.get('LLC_8M') and pen.get('DRAM_256M'):
+            llc_hit = pen['LLC_8M']['cycles_per_access']
+            dram = pen['DRAM_256M']['cycles_per_access']
+            penalty = dram - llc_hit
+            mlp = ac4.get('mlp_high')
+            ac4['components']['modelled_llc_miss_charge'] = {
+                'source': ('serial dependent chase on THIS host: DRAM_256M '
+                           '%.2f cyc/access - LLC_8M %.2f cyc/access = %.2f '
+                           'cycles per miss' % (dram, llc_hit, penalty)),
+                'penalty_cycles_per_miss': penalty,
+                'delta_misses_per_row': d_llc,
+                'charge_zero_mlp': d_llc * penalty,
+                'charge_zero_mlp_share_of_delta_pct': d_llc * penalty / delta * 100,
+                'measured_mlp_at_high_point': mlp,
+                'charge_mlp_corrected': (d_llc * penalty / mlp) if mlp else None,
+                'charge_mlp_corrected_share_of_delta_pct':
+                    (d_llc * penalty / mlp / delta * 100) if mlp else None,
+                'caveat': ('the DRAM_256M row carries %.2f dTLB misses/access, so '
+                           'its latency BUNDLES a page-table walk and the penalty '
+                           'is an OVERestimate; dTLB is also charged separately '
+                           'below, so the two terms partly double-count'
+                           % pen['DRAM_256M']['dtlb_misses_per_access']),
+            }
+            ac4['components']['modelled_dtlb_charge'] = {
+                'delta_misses_per_row': tlb_hi - tlb_lo,
+                'note': ('small in absolute terms (%.2f -> %.2f per row); listed '
+                         'for completeness. Not added to the headline, because '
+                         'the measured stall term already contains any stall a '
+                         'walk caused.' % (tlb_lo, tlb_hi)),
+            }
+        else:
+            ac4['notes'].append(
+                'penalty table absent (run/penalty-probe.sh output not supplied '
+                'via --penalty-summary): modelled cross-check unavailable, and a '
+                'penalty with no source is not an attribution')
+
+        # ---- the efficiency cross-check RUNBOOK step 7.5 asks for ----------
+        r_lo = e_lo[conv]['rows_per_s']['median']
+        r_hi = e_hi[conv]['rows_per_s']['median']
+        s_ratio = e_hi['S'] / e_lo['S']
+        ac4['marginal_efficiency'] = {
+            'rows_per_s_low': r_lo, 'rows_per_s_high': r_hi,
+            'throughput_ratio': r_hi / r_lo,
+            'core_ratio': s_ratio,
+            'measured_efficiency': (r_hi / r_lo) / s_ratio,
+            'predicted_from_cycles_per_row': 1.0 / (1.0 + delta / d['cycles_per_row_low']),
+            'note': ('efficiency predicted purely from the cycles/row inflation '
+                     'vs the efficiency actually measured from throughput. These '
+                     'are the same quantity by two routes; the gap is a check on '
+                     'this arithmetic, not a target.'),
+        }
+        eff = ac4['marginal_efficiency']
+        eff['gap_pp'] = (eff['measured_efficiency']
+                         - eff['predicted_from_cycles_per_row']) * 100
+        doc['ac4_accounting'] = ac4
+
     out = a.out or os.path.join(a.root, 'derived.json')
     open(out, 'w').write(json.dumps(doc, indent=1, default=str) + '\n')
     print('wrote', out)
@@ -381,6 +639,64 @@ def main():
         print('   delta cycles/row:   aligned %.1f vs interior %.1f  -> %+.2f%%'
               % (k['aligned_delta_cycles_per_row'], k['interior_delta_cycles_per_row'],
                  k['relative_difference_pct']))
+
+    for label in sorted(doc['endpoints']):
+        st = doc['endpoints'][label].get('stalls')
+        if not st:
+            continue
+        print('\n== %s GROUP C (measured stalls, %d reps)' % (label, st['n_reps']))
+        print('   cycles/row %10.1f  (vs primary arm %+.2f%%)   IPC %.4f'
+              % (st['cycles_per_row']['median'],
+                 st['cycles_per_row_vs_primary_pct'], st['ipc']['median']))
+        for key, nm in (('stalls_l3_miss', 'stalls_l3_miss'),
+                        ('stalls_l2_miss', 'stalls_l2_miss'),
+                        ('stalls_total', 'stalls_total')):
+            print('   %-16s/row %9.1f   = %5.2f%% of cycles'
+                  % (nm, st[key + '_per_row']['median'],
+                     st[key + '_frac_cycles']['median'] * 100))
+        print('   MLP (measured)  %.3f' % st['mlp']['median'])
+
+    if 'ac4_accounting' in doc:
+        ac4 = doc['ac4_accounting']
+        print('\n' + '=' * 74)
+        print('== AC4 CYCLES-PER-ROW ACCOUNTING  (convention: %s)' % ac4['convention'])
+        print('=' * 74)
+        print('   delta cycles/row        %+10.1f  (%+.2f%%)'
+              % (ac4['delta_cycles_per_row'], ac4['delta_pct']))
+        print('   instructions/row        %+10.2f%%   <- flat means SAME WORK'
+              % ac4['instructions_per_row_delta_pct'])
+        print('   --- components ---')
+        for name, c in ac4['components'].items():
+            if 'delta_cycles_per_row' in c:
+                print('   %-34s %+10.1f  = %6.2f%% of delta'
+                      % (name, c['delta_cycles_per_row'], c['share_of_delta_pct']))
+            elif 'charge_zero_mlp' in c:
+                print('   %-34s penalty %.1f cyc/miss x %.2f misses/row'
+                      % (name, c['penalty_cycles_per_miss'],
+                         c['delta_misses_per_row']))
+                print('   %-34s   zero-MLP    %+10.1f  = %6.2f%% of delta (UPPER BOUND)'
+                      % ('', c['charge_zero_mlp'],
+                         c['charge_zero_mlp_share_of_delta_pct']))
+                if c.get('charge_mlp_corrected'):
+                    print('   %-34s   MLP %.2f    %+10.1f  = %6.2f%% of delta'
+                          % ('', c['measured_mlp_at_high_point'],
+                             c['charge_mlp_corrected'],
+                             c['charge_mlp_corrected_share_of_delta_pct']))
+        if 'attributed_cycles_per_row' in ac4:
+            print('   --- verdict ---')
+            print('   ATTRIBUTED   %+10.1f cycles/row   (%s)'
+                  % (ac4['attributed_cycles_per_row'], ac4['attributed_basis']))
+            print('   RESIDUAL     %+10.1f cycles/row   = %.2f%% of delta UNATTRIBUTED'
+                  % (ac4['residual_cycles_per_row'], ac4['residual_pct_of_delta']))
+        eff = ac4['marginal_efficiency']
+        print('   --- efficiency cross-check ---')
+        print('   throughput %.0f -> %.0f rows/s over %gx cores = %.4f measured efficiency'
+              % (eff['rows_per_s_low'], eff['rows_per_s_high'], eff['core_ratio'],
+                 eff['measured_efficiency']))
+        print('   predicted from cycles/row inflation alone       = %.4f  (gap %+.2f pp)'
+              % (eff['predicted_from_cycles_per_row'], eff['gap_pp']))
+        for n in ac4['notes']:
+            print('   NOTE: %s' % n)
 
 
 if __name__ == '__main__':
