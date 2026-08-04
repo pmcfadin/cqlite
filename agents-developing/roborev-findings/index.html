@@ -117,7 +117,12 @@ implementation done — every one pre-empted is a review round saved.</p>
 
 
 
-<table><thead><tr><th>Class</th><th>Mechanized by</th><th>Where it runs</th></tr></thead><tbody><tr><td>GitHub Actions command injection</td><td><code dir="auto">scripts/ci/check-workflow-injection.sh</code> — flags an <em>attacker-controlled</em> <code dir="auto">${{ }}</code> context (issue/PR title/body, <code dir="auto">github.head_ref</code>, commit message, …) inlined into a <code dir="auto">run:</code> shell</td><td><code dir="auto">roborev-lints</code> (<code dir="auto">--lite</code> + full)</td></tr><tr><td>clippy <code dir="auto">manual_range_contains</code></td><td><code dir="auto">cargo clippy -D warnings</code></td><td><code dir="auto">clippy</code> (<code dir="auto">--lite</code> + full)</td></tr><tr><td>Wall-clock races in tests</td><td><code dir="auto">scripts/tests/check-no-wallclock-asserts.sh</code> (#2642)</td><td><code dir="auto">roborev-lints</code> (<code dir="auto">--lite</code>) + <code dir="auto">tooling-tests</code> (full)</td></tr><tr><td>Vacuous roborev reviews (a “clean” verdict that reviewed nothing)</td><td><code dir="auto">scripts/tests/test_roborev_review_guard.sh</code> (#2964) — hermetic regression check over every vacuity trigger of <code dir="auto">scripts/flow/roborev-review.sh</code></td><td><code dir="auto">roborev-lints</code> (<code dir="auto">--lite</code>) + <code dir="auto">tooling-tests</code> (full)</td></tr></tbody></table>
+
+
+
+
+
+<table><thead><tr><th>Class</th><th>Mechanized by</th><th>Where it runs</th></tr></thead><tbody><tr><td>GitHub Actions command injection</td><td><code dir="auto">scripts/ci/check-workflow-injection.sh</code> — flags an <em>attacker-controlled</em> <code dir="auto">${{ }}</code> context (issue/PR title/body, <code dir="auto">github.head_ref</code>, commit message, …) inlined into a <code dir="auto">run:</code> shell</td><td><code dir="auto">roborev-lints</code> (<code dir="auto">--lite</code> + full)</td></tr><tr><td>clippy <code dir="auto">manual_range_contains</code></td><td><code dir="auto">cargo clippy -D warnings</code></td><td><code dir="auto">clippy</code> (<code dir="auto">--lite</code> + full)</td></tr><tr><td>Wall-clock races in tests</td><td><code dir="auto">scripts/tests/check-no-wallclock-asserts.sh</code> (#2642)</td><td><code dir="auto">roborev-lints</code> (<code dir="auto">--lite</code>) + <code dir="auto">tooling-tests</code> (full)</td></tr><tr><td>Vacuous roborev reviews (a “clean” verdict that reviewed nothing)</td><td><code dir="auto">scripts/tests/test_roborev_review_guard.sh</code> (#2964) — hermetic regression check over every vacuity trigger of <code dir="auto">scripts/flow/roborev-review.sh</code></td><td><code dir="auto">roborev-lints</code> (<code dir="auto">--lite</code>) + <code dir="auto">tooling-tests</code> (full)</td></tr><tr><td>Executable harness files under <code dir="auto">docs/</code> being classified as prose (the PR #3222 class)</td><td><code dir="auto">scripts/tests/test_roborev_review_guard.sh</code> (#3229) — the <code dir="auto">(cx*)</code> cases drive the census classification and the <code dir="auto">prompt-content:</code> match. <strong>NOT mechanized: whether the configuration would swallow them.</strong> No guard predicts roborev’s exclusion set; that is deferred to #3283</td><td><code dir="auto">roborev-lints</code> (<code dir="auto">--lite</code>) + <code dir="auto">tooling-tests</code> (full)</td></tr></tbody></table>
 <p>The other classes below (integer/decimal overflow, float ordering, no-heuristics,
 process-global counters, gitignored references) are <strong>not mechanized</strong>: they are semantic
 or structural, with no low-false-positive static signal (a gitignored-references lint would
@@ -196,14 +201,17 @@ terminal <code dir="auto">RESULT</code> — <code dir="auto">NOTHING-TO-REVIEW</
 “roborev clean”.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="the-four-rules">The four rules</h3><a class="sl-anchor-link" href="#the-four-rules"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “The four rules”</span></a></div>
 <ol>
-<li><strong>The wrapper is the only sanctioned roborev invocation.</strong> Three direct-CLI forms are
+<li>
+<p><strong>The wrapper is the only sanctioned roborev invocation.</strong> Three direct-CLI forms are
 <strong>NON-SANCTIONED</strong>: <code dir="auto">--branch</code> <strong>WITHOUT an explicit <code dir="auto">--repo</code></strong> (from a worktree it resolves against the
 ROOT checkout), the two-positional commit-range form (<code dir="auto">roborev review &#x3C;sha-a> &#x3C;sha-b></code>, whose range base
 is git’s EMPTY TREE), and a single-SHA review (<code dir="auto">roborev review &#x3C;sha></code>, which <strong>reviews ONE COMMIT, not
 the branch</strong>). Measured on a 17-commit branch with a 27-file census: <code dir="auto">--branch --base &#x3C;base> --repo &#x3C;abs></code> delivered <strong>5/5</strong> census code files to the reviewer, the other two <strong>3/5</strong>. So <code dir="auto">--repo</code> is what
 makes <code dir="auto">--branch</code> correct — the defect was always the missing <code dir="auto">--repo</code>, never <code dir="auto">--branch</code> itself — and the
-wrapper invokes that range form.</li>
-<li><strong>The reviewed RANGE must be VERIFIED against <code dir="auto">&#x3C;base>...HEAD</code>.</strong> The wrapper asserts <strong>both endpoints</strong>
+wrapper invokes that range form.</p>
+</li>
+<li>
+<p><strong>The reviewed RANGE must be VERIFIED against <code dir="auto">&#x3C;base>...HEAD</code>.</strong> The wrapper asserts <strong>both endpoints</strong>
 from the <strong>job record’s structured fields</strong> (read via <code dir="auto">roborev list --json</code> / <code dir="auto">roborev show --json</code>:
 <code dir="auto">git_ref</code> is <code dir="auto">&#x3C;base40>..&#x3C;head40></code>, reported in <code dir="auto">reviewed-sha:</code> beside a <code dir="auto">job-record:</code> completeness key),
 and demotes the stdout <code dir="auto">Enqueued job &#x3C;N> for &#x3C;sha></code> announcement to the <strong>carrier of the job id</strong> — for
@@ -215,20 +223,307 @@ off the local <code dir="auto">origin/&#x3C;branch></code> mirror ref onto <code
 round</strong>; base-equality is the signature of the
 worktree bug below. Also push first — an unpushed implementation commit is itself an empty-diff
 cause, and the wrapper asserts the push and FAILs otherwise. Which fields are asserted is the
-wrapper’s business — see its <code dir="auto">--help</code>.</li>
-<li><strong><code dir="auto">"contains no code changes to review"</code> on a NON-EMPTY diff is a HARD FAIL</strong>, never a pass. The
+wrapper’s business — see its <code dir="auto">--help</code>.</p>
+</li>
+<li>
+<p><strong><code dir="auto">"contains no code changes to review"</code> on a NON-EMPTY diff is a HARD FAIL</strong>, never a pass. The
 wrapper judges the reviewer’s claim against a <em>locally computed</em> <code dir="auto">git</code> diff census, so a reviewer
-asserting the opposite of a census we measured ourselves has demonstrably not reviewed the change.</li>
-<li><strong>A docs-only (code-free) diff cannot be roborev-certified at all.</strong> The mechanism is measured:
-roborev <strong>excludes non-code paths from the diff it builds</strong> (of a 27-file census — 22 markdown, 5 code —
-the prompt carried headers for exactly the 5 code files), so for a prose-only diff the constructed diff
+asserting the opposite of a census we measured ourselves has demonstrably not reviewed the change.</p>
+</li>
+<li>
+<p><strong>A docs-only (code-free) diff cannot be roborev-certified at all</strong> — where <strong>“docs-only” means a
+CODE-FREE CENSUS as the wrapper classifies it, never a <code dir="auto">docs/</code> path prefix</strong> (issue #3229).
+The mechanism is measured, and it is <em>not</em> a code/non-code judgement: <strong>roborev drops exactly what its
+configured <code dir="auto">exclude_patterns</code> pathspecs match.</strong> Of a 27-file census — 22 markdown, 5 code — the prompt
+carried headers for exactly the 5 code files <strong>because <code dir="auto">*.md</code> is configured</strong>, not because the reviewer
+recognised prose. So for a prose-only diff the constructed diff
 is genuinely EMPTY and the verdict is a <em>truthful report of an empty input</em>, not a reviewer malfunction.
 Re-running cannot help; the wrapper’s deterministic
 pre-enqueue <code dir="auto">code-free:</code> check fails it before any review is enqueued, rather than matching reviewer
 prose after the fact. The same mechanism is why <code dir="auto">prompt-content:</code> asserts the <strong>CODE subset</strong> of the
 census — and why an unretrievable prompt is a <code dir="auto">FAIL</code> there, never a passing <code dir="auto">UNAVAILABLE</code>. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
 change describing the on-disk format, <code dir="auto">git show cassandra-5.0.8:&#x3C;path></code>). <strong>No docs-only change may
-ever record “roborev clean.”</strong></li>
+ever record “roborev clean.”</strong></p>
+<p><strong>The same mechanism cuts the other way, and did.</strong> A configured <code dir="auto">docs/**</code> discarded <strong>33 executable</strong>
+measurement-harness files on PR #3222 — a 136-path code census reaching the reviewer as an empty prompt
+(<code dir="auto">prompt-content: FAIL (136/136 code census paths absent)</code>, 15,443 in / 89 out). The
+<code dir="auto">docs/reports/*-artifacts/</code> measurement harnesses this repo ships <strong>by convention are executable code
+that IS reviewed</strong>, so a PR carrying them is <strong>not</strong> a docs-only change and must be roborev-certified
+like any other code change. <strong>One</strong> thing holds that line: <code dir="auto">exclude_patterns</code> is a narrowed
+<strong>prose/artifact deny-list</strong> (<code dir="auto">*.md</code> plus artifact extensions scoped to artifact-bearing
+<strong>directories</strong> — never a blanket <code dir="auto">docs/**</code>). Measured after the narrowing: 71 <code dir="auto">docs/</code> executables reach
+the reviewer, 0 markdown does, and nothing outside <code dir="auto">docs/</code> is newly excluded.</p>
+<p><strong>NOTHING PREDICTS THE EXCLUSION SET PRE-ENQUEUE, and that is a deliberate, recorded reduction in
+coverage (#3283).</strong> A <code dir="auto">census-exclusion:</code> key that did — a bash port of roborev’s own pathspec
+construction (<code dir="auto">git.FormatExcludeArgs</code>) over a TOML parse of three configuration sources — was built on
+#3229 and <strong>REMOVED by owner ruling</strong>. Its false-PASS count across review rounds was <em>increasing</em>
+(1, 1, 2, 3), and two of the last round’s three defects lived in code the two preceding fix rounds had
+just introduced: a surface where fixes add defects of the class they close. <strong>A guard with known
+documented false-PASSes is worse than no guard, because it invites reliance it cannot support.</strong>
+Subtraction, by contrast, cannot add a false-PASS.</p>
+<p>So a path the reviewer did not receive surfaces <strong>after</strong> the review, under <code dir="auto">prompt-content:</code>,
+fail-closed, with a cause that names the symptom (“the reviewer did not receive this path”) rather than
+the mechanism. <strong>If <code dir="auto">prompt-content:</code> FAILs, suspect <code dir="auto">.roborev.toml</code> first.</strong></p>
+<p><strong>The class-level root cause, recorded for #3283: a port is a second implementation, and a second
+implementation’s correctness is only knowable by differential testing against the original.</strong> The
+removed oracle re-derived Go’s <code dir="auto">TrimSpace</code>/<code dir="auto">TrimRight</code>/<code dir="auto">TrimLeft</code> rules in bash and was tested against a
+<em>model</em> of Go, not against Go — which is why its NBSP divergence (Go’s <code dir="auto">unicode.IsSpace</code> trims U+00A0;
+the bash trims did not) was unfindable by care rather than by differential test. #3283 must either test
+differentially against the real binary or not predict at all.</p>
+<p>That deny-list leans deliberately one way — <strong>noise, never blindness</strong> — and the claim is <em>scoped</em>, not
+timeless. It holds for <strong>inert dumps</strong> (<code dir="auto">.txt</code>/<code dir="auto">.log</code>/<code dir="auto">.err</code>), where exclusion costs only <strong>noise</strong>: a
+<em>new</em> artifact <strong>directory</strong> (or a new artifact extension inside one of the four below) is silently
+re-admitted to review prompts, which costs tokens; the check can
+only ever FAIL in the opposite direction, where a configured pattern would swallow census code. For a
+<strong>code-bearing format</strong> (<code dir="auto">.json</code>/<code dir="auto">.html</code>/<code dir="auto">.svg</code>) exclusion is <strong>blindness</strong>, because such a file can be
+<strong>functional configuration under any path</strong> — so exclusion of code-bearing formats <strong>must be scoped by
+directory, never by extension alone</strong>. The claim was originally written unqualified, and #3229 falsified
+it with a file this repo already guards; the section below records which one. The durable
+generalisation is worth keeping past this issue: <strong>an extension describes a format; a directory records
+an intent</strong> — someone decided that tree holds artifacts — which makes a directory the better proxy for
+“generated”.</p>
+<div class="sl-heading-wrapper level-h4"><h4 id="why-the-exclusions-are-scoped-to-directories-not-extensions-across-docs">Why the exclusions are scoped to DIRECTORIES, not extensions across <code dir="auto">docs/</code></h4><a class="sl-anchor-link" href="#why-the-exclusions-are-scoped-to-directories-not-extensions-across-docs"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Why the exclusions are scoped to DIRECTORIES, not extensions across docs/”</span></a></div>
+<p>The intermediate form — <code dir="auto">docs/**/*.txt</code>, <code dir="auto">docs/**/*.json</code>, … — <strong>did not satisfy the claim above</strong>, and
+#3229 retired it. The asymmetry holds for <code dir="auto">.txt</code>/<code dir="auto">.log</code>/<code dir="auto">.err</code> run dumps, which carry nothing but
+output. It does <strong>not</strong> hold for <code dir="auto">.json</code>/<code dir="auto">.html</code>/<code dir="auto">.svg</code>, which carry <em>functional configuration</em>: for a
+code-bearing format, exclusion is <strong>blindness</strong>, not noise. Two live cases falsified it:</p>
+<ul>
+<li><code dir="auto">docs/observability/grafana/dashboards/cqlite-overview.json</code> — a dashboard the <strong>full agent gate
+guards with its own <code dir="auto">kit-dashboard-drift</code> component</strong>, so the repo already treats it as
+correctness-bearing. Under <code dir="auto">docs/**/*.json</code> a PR editing it was dropped from the reviewer’s diff <em>and</em>
+classified code-free: unreviewable by construction, in both directions at once.</li>
+<li><code dir="auto">docs/reports/delivery-telemetry.schema.json</code> — the schema governing the delivery ledger, hidden the
+same way.</li>
+</ul>
+<p>So every artifact pattern is now <code dir="auto">&#x3C;artifact-dir-glob>/**/*.&#x3C;ext></code> over exactly four directories:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>directory glob</th><th>what it holds</th></tr></thead><tbody><tr><td><code dir="auto">docs/reports/*-artifacts/</code></td><td>per-issue measurement artifacts (the #3229 convention)</td></tr><tr><td><code dir="auto">docs/round-artifacts/</code></td><td>soak/round measurement output</td></tr><tr><td><code dir="auto">docs/**/jfr-reports/</code></td><td>JFR profiling output</td></tr><tr><td><code dir="auto">docs/sstables-definitive-guide/diagrams/</code></td><td>generated diagram renders</td></tr></tbody></table>
+<p>Everything else under <code dir="auto">docs/</code> is <strong>reviewed</strong>. Measured when the change landed: 672 tracked <code dir="auto">docs/</code>
+files carry an artifact extension, 667 sit inside those four directories and stay excluded, and the 5
+that do not are now delivered to the reviewer.</p>
+<p>It stays <strong>extension-scoped within</strong> each directory — never a blanket <code dir="auto">&#x3C;dir>/**</code> — because these
+directories deliberately hold executable code beside their output: 63 tracked
+<code dir="auto">.sh</code>/<code dir="auto">.py</code>/<code dir="auto">.rs</code>/<code dir="auto">.c</code>/<code dir="auto">.bt</code>/<code dir="auto">.cql</code>/<code dir="auto">.yaml</code>/<code dir="auto">.toml</code> files under <code dir="auto">docs/reports/*-artifacts/</code> alone.
+Those harnesses <em>are</em> the 136-path census <code dir="auto">docs/**</code> swallowed on PR #3222, so a blanket directory
+exclude would reintroduce this issue’s original defect.</p>
+<p>When you add a pattern to <code dir="auto">.roborev.toml</code>, add the extension to <code dir="auto">CODE_FREE_ARTIFACT_EXTENSIONS</code> (or the
+directory to <code dir="auto">CODE_FREE_ARTIFACT_DIR_GLOBS</code>) in <code dir="auto">scripts/flow/roborev-review-oracles.sh</code> in the same
+edit. That mirror is <strong>maintained by hand, and there is no automated drift assert</strong> — the one that
+existed depended on the removed TOML parser and went with it (#3283). A one-sided edit therefore
+surfaces the slow way, as a <code dir="auto">prompt-content:</code> failure on someone else’s report PR. And <strong>never write a
+trailing slash</strong>: roborev trims it <em>before</em> deciding anchoring, so <code dir="auto">docs/</code> resolves RECURSIVE
+(<code dir="auto">**/docs</code>) — the opposite of root-anchored <code dir="auto">docs/**</code> — and nothing now catches that inversion before a
+review is paid for.</p>
+<div class="sl-heading-wrapper level-h4"><h4 id="neither-half-of-roborevs-exclusion-set-is-modelled-3283-3278">Neither half of roborev’s exclusion set is modelled (#3283, #3278)</h4><a class="sl-anchor-link" href="#neither-half-of-roborevs-exclusion-set-is-modelled-3283-3278"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Neither half of roborev’s exclusion set is modelled (#3283, #3278)”</span></a></div>
+<p><code dir="auto">exclude_patterns</code> in the file you are looking at is not the whole exclusion set. The effective set is
+the union of the <code dir="auto">--repo</code> checkout’s <code dir="auto">.roborev.toml</code>, the <strong>ROOT checkout’s</strong> (see the ordering property
+below) and the global <code dir="auto">~/.roborev/config.toml</code> — plus a compiled-in lockfile/cache deny-list roborev
+appends itself (<code dir="auto">**/Cargo.lock</code>, <code dir="auto">**/go.sum</code>, <code dir="auto">**/pnpm-lock.yaml</code>, <code dir="auto">**/package-lock.json</code>,
+<code dir="auto">**/.beads/**</code>, <code dir="auto">**/.cache/**</code> and ~18 more) that no configuration can switch off.</p>
+<p><strong>Nothing in the wrapper models any of it.</strong> The configured half is deferred to <strong>#3283</strong>, the
+compiled-in half to <strong>#3278</strong>. Both attempts were built on #3229 and deleted, for the same reason: they
+produced false-PASSes faster than review rounds could close them, and <strong>subtraction cannot introduce a
+false PASS</strong> — with nothing predicted, nothing is excused.</p>
+<p>The residual, stated rather than left to be rediscovered: <strong>a path roborev excludes — by configuration
+or by built-in — is silently dropped from the reviewer’s diff, nothing names it pre-enqueue, and
+<code dir="auto">prompt-content:</code> FAILs on its absence.</strong> It <strong>fails CLOSED</strong> — never a vacuous green, never a merge on
+unreviewed code. The cost is a <strong>diagnostic</strong>: the stated cause names the symptom (“the reviewer never
+received their diffs”, which is true) rather than the mechanism.</p>
+<div class="sl-heading-wrapper level-h4"><h4 id="the-verdict-rule--apply-it-to-any-call-of-this-shape-without-asking">The verdict rule — apply it to any call of this shape, without asking</h4><a class="sl-anchor-link" href="#the-verdict-rule--apply-it-to-any-call-of-this-shape-without-asking"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “The verdict rule — apply it to any call of this shape, without asking”</span></a></div>
+<blockquote>
+<p><strong>FAIL where the author can act; NOTICE where only the information is actionable; never silence.</strong></p>
+</blockquote>
+<p>This is <strong>one</strong> rule, not a set of ad-hoc calls: it decides any verdict-shaped call, including ones this
+wrapper has not met yet. <code dir="auto">NOTICE</code> sits outside the wrapper’s failing-capable scan
+(<code dir="auto">FAIL|FINDINGS|ERROR|INCONSISTENT</code>), because <code dir="auto">vacuity-tier1:</code> emits it as a documented advisory.</p>
+<p><strong>And no key is exempt from the affirmation backstop.</strong> One key was formerly allowed a <code dir="auto">NOTICE</code> there —
+the backstop’s single per-key escape hatch — while a remedy-less swallow was a measurement with a stated
+residual. With that subject deleted the exemption went with it: all <strong>six</strong> deterministic keys
+(<code dir="auto">push-assert:</code>, <code dir="auto">census-check:</code>, <code dir="auto">code-free:</code>, <code dir="auto">sha-assert:</code>, <code dir="auto">review-completed:</code>, <code dir="auto">prompt-content:</code>)
+must be affirmatively <code dir="auto">PASS</code>, no exceptions. A structural assert reads the backstop’s own <code dir="auto">case</code> body and
+requires exactly ONE exempting arm, so no hatch can be reintroduced.</p>
+<p><strong><code dir="auto">prompt-content:</code> expects EVERY census code path and subtracts nothing.</strong> No key is licensed to tell
+another which paths to skip; a path the reviewer really did not receive FAILs. (And it never prints a
+<code dir="auto">0/0</code> PASS: a key with no subject has no verdict to give.)</p>
+<p><strong>It was never one bug — it is ONE SHAPE, found repeatedly on #3229, so it is now a rule:
+<em>a positive verdict requires an AFFIRMATIVE MEASUREMENT.</em></strong> The shape is <em>a multi-state signal where
+only the BAD states are tested, so every unknown or unmeasured state inherits the PERMISSIVE branch</em>:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>#</th><th>signal</th><th>states</th><th>tested</th><th>what the unmeasured state did</th></tr></thead><tbody><tr><td>1</td><td>a built-in-set signal (a since-DELETED subsystem, #3278)</td><td>OK / DIVERGED / UNAVAILABLE</td><td><code dir="auto">= DIVERGED</code>, <code dir="auto">!= DIVERGED</code></td><td>took the permissive <strong>excusal</strong> path — coverage excused on a model that could not be verified</td></tr><tr><td>2</td><td>a corroboration signal (a since-DELETED subsystem, #3283)</td><td>OK / DRIFT / NOTICE / <strong>UNAVAILABLE (initial)</strong></td><td><code dir="auto">= DRIFT</code>, <code dir="auto">= NOTICE</code></td><td>reached a <code dir="auto">PASS</code> claiming nothing was configured, and <strong>enqueued</strong> a review</td></tr><tr><td>3</td><td>an <code dir="auto">awk</code> line bound</td><td>a number / empty</td><td>a <code dir="auto">${end:-$start}</code> default</td><td>degraded a failed measurement to a <strong>1-line scan</strong>, in which the absence-assert reads <code dir="auto">ok</code></td></tr><tr><td>4</td><td>the wrapper’s <strong>own verdict scan</strong> — the oldest instance, and the one that outlived the others</td><td>4 failing tokens / 8 non-failing / anything else</td><td>four failing <strong>prefixes</strong></td><td>let every unplanned value, <code dir="auto">''</code> included, fall through to <code dir="auto">RESULT: PASS</code></td></tr></tbody></table>
+<p>Instances 1–3 lived in subsystems since deleted; <strong>instance 4 is why the rule survived the deletion.</strong>
+The shape was never theirs — it was in the terminal verdict, which predates all of them, and leaving that
+permissive again would have left the wrapper worse than we found it. Instance 2 is the sharpest: the
+code’s own comment three lines above said the binary is the ONLY oracle
+that can tell “our parser recognised no key” from “nothing is configured” — and then never required that
+oracle to have <strong>answered</strong>. So the rule, applicable well beyond this wrapper:</p>
+<ul>
+<li>Never derive a pass from the <strong>absence</strong> of a bad signal.</li>
+<li>Where an oracle is the <strong>sole</strong> evidence for a claim and could not be consulted, the verdict is
+<strong>non-passing</strong>, and its text distinguishes <em>“we could not check”</em> from <em>“nothing was wrong”</em> — naming
+what was unverifiable and what would have verified it.</li>
+<li>Key a permissive branch on the <strong>affirmative</strong> value (<code dir="auto">= OK</code>), never on <code dir="auto">!= &#x3C;bad></code>, so an unknown state
+fails closed.</li>
+<li>Where a signal genuinely <strong>should</strong> be permissive, record the reason <strong>in code</strong> at the branch, so the
+next reader need not re-derive it and the next edit cannot silently widen it.</li>
+</ul>
+<p>The wrapper’s own <strong>verdict scan</strong> was the same shape at its most consequential point — four failing
+prefixes tested, everything else falling through to <code dir="auto">RESULT: PASS</code>. Its non-failing set is now an
+<strong>allow-list</strong> (an unrecognised value, an empty string included, FAILs and names itself), plus a backstop
+that a PASS may not carry a verdict-carrying key that is not affirmatively <code dir="auto">PASS</code>: a <code dir="auto">SKIP</code> there means
+the check <strong>never ran</strong>, which is the vacuous pass itself. Un-backstopped, an early-returning
+<code dir="auto">prompt-content:</code> passed a run with the strongest anti-vacuity key having measured nothing.</p>
+<p><strong>And a closure must not itself be a prefix test — the shape recurses one level down.</strong> Written as
+<code dir="auto">PASS*|SKIP*|…</code>, the allow-list accepts <code dir="auto">PASSthisNeverRan</code> and <code dir="auto">PASS-MEASUREMENT-DID-NOT-HAPPEN</code>: the
+guard against unplanned values checks a <strong>spelling</strong> rather than a <strong>state</strong>, which is the same error it
+was written to remove. So each value is reduced to its <strong>verdict TOKEN</strong> — everything up to the first
+space, well defined because every documented value is either the bare token or <code dir="auto">TOKEN (detail…)</code> — and
+that token is compared <strong>EXACTLY</strong>. Tightening is safe in both arms: a <code dir="auto">FAILED (…)</code> variant no longer
+matches the failing arm by prefix either, and lands in the <code dir="auto">*)</code> that also fails. Two mutation cases pin
+it, and a mutation restoring the globs makes <strong>both</strong> mutants reach <code dir="auto">RESULT: PASS</code> — which is how you
+know the asserts bite.</p>
+<p>The <strong>TOTAL vs PARTIAL</strong> boundary is the whole distinction, and it was measured rather than
+theorised. Left as a NOTICE, a hermetic <code dir="auto">Cargo.lock</code> + <code dir="auto">README.md</code> fixture produced a since-removed
+key’s <code dir="auto">NOTICE (0/1 survive)</code>, <code dir="auto">prompt-content: PASS (0/0 code census paths present)</code> and
+<code dir="auto">RESULT: PASS</code>, exit 0 — <strong>a vacuous pass textually identical to a genuine one</strong>, on which
+<code dir="auto">flow-closer</code> would arm <code dir="auto">--auto</code>. Its trigger is ordinary: any dependency-bump branch whose only
+non-prose file is a lockfile. <code dir="auto">code-free:</code> does not catch it (a <code dir="auto">.lock</code> extension classifies as
+CODE), tier 1 greps a phrase the reviewer need not emit, and tier 2 is <code dir="auto">UNAVAILABLE</code>.</p>
+<p>Two follow-throughs on <code dir="auto">prompt-content:</code>, the wrapper’s strongest deterministic anti-vacuity key:</p>
+<ul>
+<li>
+<p><strong>A <code dir="auto">0/0</code> is never a pass.</strong> With no census path left to look for, the key has no subject and so no
+verdict to give: it FAILs, and it can never print <code dir="auto">PASS (0/0 …)</code>.</p>
+</li>
+<li>
+<p><strong>Paths are normalised ONCE, at the census — one boundary, and it is the fix for SIX blockers.</strong>
+Rounds 2–4 of review on #3229 produced six blockers and <strong>every one was a path-normalisation defect
+in a different consumer</strong>, because normalisation was scattered: the census did not normalise at all,
+a since-deleted consumer unquoted at one point, <code dir="auto">prompt-content:</code> did something else again. Patch the
+reported consumer and the next round finds the next one. So:</p>
+<ul>
+<li>the census reads <code dir="auto">git diff --numstat -z</code>, so paths arrive <strong>RAW</strong>, and RAW is the single
+representation used for classification, comparison and display;</li>
+<li>the one quoted-path decoder survives only for text we did <strong>not</strong> get from git plumbing — the
+reviewer’s prompt — with exactly <strong>one caller</strong>, the canonical matcher
+<code dir="auto">roborev_diff_header_has_path</code>. Every consumer asks that matcher instead of parsing headers;</li>
+<li>it reads every shape git emits: unquoted, <strong>space-bearing</strong> (<code dir="auto">diff --git a/a b.txt b/a b.txt</code>),
+<strong>C-quoted</strong> (<code dir="auto">diff --git "a/\303\251.txt" "b/…"</code>), and the <strong>MIXED</strong> shape
+(<code dir="auto">diff --git a/&#x3C;ascii> "b/&#x3C;quoted>"</code>) that occurs <strong>only on renames</strong> — and our census runs
+<code dir="auto">--no-renames</code> while the reviewer’s diff has rename detection ON;</li>
+<li>the invariant is asserted <strong>structurally</strong> (no path-reading <code dir="auto">git diff</code> without <code dir="auto">-z</code>; the decoder
+called only from the matcher; no header regex or delimiter-based membership anywhere else), because
+a behavioural case can only cover the shapes someone already thought of.</li>
+</ul>
+<p>Both failure directions were measured. False FAIL: classifying a <em>quoted</em> spelling read
+<code dir="auto">docs/é notes.md</code> as extension <code dir="auto">md"</code>, so PROSE counted as <strong>code</strong> — and the configured <code dir="auto">*.md</code>
+legitimately removed it from the reviewer’s diff while <code dir="auto">prompt-content:</code> demanded it there, a <strong>false
+FAIL</strong> on an ordinary docs+code branch (reproduced against the tracked
+<code dir="auto">docs/research/CQLite Writes (M5) — Analysis &#x26; Recommended Paths.md</code>); a <code dir="auto">[^ ]+</code> header regex likewise
+made a since-removed key report <code dir="auto">PASS (2/2 survive)</code> beside <code dir="auto">prompt-content: FAIL (1/2 absent)</code>.
+False PASS: a newline-delimited path set probed with <code dir="auto">grep -Fxq</code> turned <code dir="auto">a&#x3C;LF>b.rs</code> into the
+alternatives {<code dir="auto">a</code>, <code dir="auto">b.rs</code>}, so a prompt naming only <code dir="auto">a</code> reported <code dir="auto">PASS (2/2 present)</code> for a file the
+reviewer never received. A key that reds on correct input is the key agents learn to waive; a key that
+greens on absent input is worse. This repo tracks 40 space-bearing paths under <code dir="auto">docs/</code>, including the
+directory <code dir="auto">docs/storage engine/</code>.</p>
+</li>
+</ul>
+<div class="sl-heading-wrapper level-h4"><h4 id="a-roborevtoml-change-cannot-certify-itself--three-properties-one-generalization">A <code dir="auto">.roborev.toml</code> change cannot certify itself — three properties, one generalization</h4><a class="sl-anchor-link" href="#a-roborevtoml-change-cannot-certify-itself--three-properties-one-generalization"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “A .roborev.toml change cannot certify itself — three properties, one generalization”</span></a></div>
+<ol>
+<li><strong>roborev’s daemon reads <code dir="auto">exclude_patterns</code> from the repo ROOT PATH.</strong> It binds a repository by its
+<code dir="auto">repos.root_path</code> and resolves the config from <strong>that</strong> checkout — so a <strong>worktree</strong>
+<code dir="auto">.roborev.toml</code> edit is <strong>invisible</strong> to it. Under 1:1:1:1 the file you edited is not the file your
+review applies.</li>
+<li><strong>The daemon snapshots config at start.</strong> An edit needs a <strong>daemon restart</strong> to take effect.</li>
+<li><strong>Generalized — state it this way:</strong> <em>any PR whose subject is a config the daemon (or a gate) reads
+from root cannot certify itself.</em> Plan the demonstration for <strong>after</strong> the merge.</li>
+</ol>
+<p>(3) is the <strong>same shape</strong> as the <code dir="auto">required</code>-check property in CLAUDE.md — <code dir="auto">required</code> evaluates the
+aggregator <strong>and the registry</strong> from the PR’s <strong>BASE</strong> ref, so a registry change lands only after it
+merges. Recognising the shape is the transferable part.</p>
+<p>Both (1) and (2) have already cost real rounds, so they are not theoretical:</p>
+<ul>
+<li>(1) produced a since-removed key’s <code dir="auto">PASS (7/7 code census paths survive)</code> about a config roborev never
+read. It was caught <strong>only</strong> by the <em>pre-existing</em> <code dir="auto">prompt-content: FAIL (1/7 code census paths absent)</code> — defence in depth paying out in the direction nobody plans for: the <strong>older</strong> guard caught
+the <strong>newer</strong> one certifying the wrong input. The durable lesson, and the one the descope acted on:
+<strong>when the newer, cleverer guard and the older, dumber one disagree, the one that measures what
+actually happened wins.</strong> <code dir="auto">prompt-content:</code> is the layer that stayed.</li>
+<li>(2) made a separate investigation (#3234) measure <code dir="auto">exclude_patterns</code> as having <em>no observable
+effect</em> — a null result produced entirely by its single daemon restart happening to precede every
+config edit it made and never follow one.</li>
+</ul>
+<div class="sl-heading-wrapper level-h4"><h4 id="a-test-that-blesses-a-vacuous-verdict-is-worse-than-an-unguarded-path">A test that blesses a vacuous verdict is worse than an unguarded path</h4><a class="sl-anchor-link" href="#a-test-that-blesses-a-vacuous-verdict-is-worse-than-an-unguarded-path"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “A test that blesses a vacuous verdict is worse than an unguarded path”</span></a></div>
+<p>Two cases in this repo’s own regression suite asserted a since-removed key’s
+<code dir="auto">PASS (no exclusion patterns configured)</code> while leaving the binary corroboration
+unavailable — i.e. they <strong>locked in</strong> the exact green a guard emits when it has silently failed to
+recognise a configured key. (Both cases are gone with the key, but the lesson is not.) An unguarded path
+is merely unprotected; a test like that <strong>consumes the
+review budget that would otherwise have found the bug</strong>, and converts “nobody checked” into “we
+checked and it was fine”. When you add a case whose expected value is a PASS, ask what state the
+system is in when that PASS is <em>wrong</em>, and make the fixture distinguish the two.</p>
+</li>
 </ol>
 <div class="sl-heading-wrapper level-h3"><h3 id="why-a-vacuous-roborev-pass-is-textually-identical-to-a-genuine-clean-pass">Why: a vacuous roborev pass is textually identical to a genuine clean pass</h3><a class="sl-anchor-link" href="#why-a-vacuous-roborev-pass-is-textually-identical-to-a-genuine-clean-pass"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Why: a vacuous roborev pass is textually identical to a genuine clean pass”</span></a></div>
 <p><strong>Four</strong> confirmed trigger paths make roborev report clean <strong>without having reviewed anything</strong> (or having
@@ -243,11 +538,15 @@ enqueued <code dir="auto">origin/main</code>. Adding an explicit <code dir="auto
 since origin/main” and delivers every census code file — which is why the sanctioned invocation uses it.</li>
 <li><strong>T2 — the two-positional commit-range form</strong> anchors the reviewed range at git’s <strong>EMPTY-TREE</strong> hash
 (<code dir="auto">4b825dc6…..&#x3C;head40></code>) rather than at the base you named, delivering 3 of 5 census code files.</li>
-<li><strong>T3 — a code-free diff is silently discarded</strong> even on a correctly targeted run: right SHA, right
+<li><strong>T3 — a diff whose every path the configured <code dir="auto">exclude_patterns</code> match is silently discarded</strong> even on
+a correctly targeted run: right SHA, right
 <code dir="auto">--repo</code>, and still <em>“No issues found. Summary: The provided diff contains no code changes to
 review.”</em> Reproducible (jobs 4658/4659). <strong>This one passes the SHA check, so SHA verification alone is
-insufficient</strong> — hence rules 3 and 4. The mechanism is rule 4’s: non-code paths never reach the
-constructed diff, so there is genuinely nothing to review.</li>
+insufficient</strong> — hence rules 3 and 4. The mechanism is rule 4’s: the configured pathspecs remove those
+paths before the diff is constructed, so there is genuinely nothing to review. By default that is
+prose; under a mis-scoped pattern it was <strong>executable code</strong> (PR #3222), which is why the configuration
+is now a narrowed prose/artifact deny-list — and why, with nothing predicting that set pre-enqueue
+(#3283), a <code dir="auto">prompt-content:</code> FAIL should send you to <code dir="auto">.roborev.toml</code> first.</li>
 <li><strong>T4 — a single-SHA review covers ONE COMMIT.</strong> <code dir="auto">roborev review &#x3C;sha></code> enqueues <code dir="auto">git_ref = &#x3C;head40></code> —
 <em>correct</em>, and still partial: 3 of 5 census code files reached the prompt on a 17-commit branch. Every
 sha-equality check passes while the reviewer saw only the last commit, so this is a PARTIAL review
