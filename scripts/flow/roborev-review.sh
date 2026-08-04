@@ -149,7 +149,25 @@
 # ERROR or INCONSISTENT. PASS, SKIP, UNAVAILABLE, NOTICE and DEGRADED never do —
 # NOTICE is tier 1's advisory value, and DEGRADED reports an incomplete job record
 # whose consequences are carried by the dependent asserts (which fail on their own
-# terms).
+# terms). THE GRAMMAR IS CLOSED: the non-failing set is an ALLOW-LIST (PASS, SKIP,
+# NOTICE, UNAVAILABLE, DEGRADED, and findings:'s NONE/PRESENT/UNKNOWN), so a value
+# outside it — an empty string, a state a future check invents — is an UNRECOGNISED
+# VERDICT and FAILS. Testing only the bad states would let every unplanned one inherit
+# the permissive branch, which is the general shape of three separate defects found on
+# #3229 (see step 7).
+#
+# THE RULE THAT GOVERNS EVERY KEY HERE, and the one to apply when adding another:
+# **A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT.** Never derive a pass from
+# the absence of a bad signal. Where an oracle is the SOLE evidence for a claim and it
+# could not be consulted, the verdict is NON-PASSING, and its text must distinguish
+# "we could not check" from "nothing was wrong" — naming what was unverifiable and what
+# would have verified it. Where a signal has more than two states, key the permissive
+# branch on the AFFIRMATIVE value (`= OK`), never on "not the bad one" (`!= DIVERGED`),
+# so an unknown state fails closed. Where a signal genuinely SHOULD be permissive (an
+# oracle that only cross-checks something already measured — `corroboration:` with
+# patterns parsed; `built-in-set:` deciding NOTICE-vs-FAIL), say so IN CODE with the
+# reason, so the next reader does not have to re-derive it and the next edit does not
+# silently widen it.
 #
 # WHICH CHECKS CARRY THE VERDICT. The DETERMINISTIC ones, each judged against data we
 # obtained ourselves: `push-assert` (the remote, via ls-remote), `census-check` (our
@@ -1033,11 +1051,52 @@ roborev_check_tier2
 # starts with FAIL, FINDINGS, ERROR or INCONSISTENT; PASS / SKIP / UNAVAILABLE /
 # NOTICE / DEGRADED never do (NOTICE is tier 1's non-failing value; DEGRADED reports
 # an incomplete job record, whose consequences are carried by the dependent asserts).
+#
+# ====== THE GRAMMAR IS CLOSED: NO PASS WITHOUT AN AFFIRMATIVE VALUE (#3229 round-10) ======
+# THE GENERAL DEFECT this closes, of which three separate instances were found on this issue
+# (`built-in-set: UNAVAILABLE` taking the permissive excusal path; `corroboration:
+# UNAVAILABLE` reaching a PASS; a `${_census_end:-…}` fallback degrading a failed
+# measurement into a 1-line scan): **a multi-state signal where only the BAD states are
+# tested, so every unknown or unmeasured state inherits the PERMISSIVE branch.** A third
+# point fix is the wrong response; the shape has to be closed where it is structural.
+#
+# This scan WAS that shape, at the wrapper's single most consequential decision point: it
+# tested four failing prefixes and let EVERYTHING ELSE fall through to `finish PASS 0`. So a
+# key holding a value nobody planned — an EMPTY string because a check aborted before
+# assigning it, a state name a future check introduces, a typo in an assignment, a value from
+# a checks file that returned early — reached PASS. The absence of a bad word is not evidence
+# of a good outcome, which is the same epistemic error every other fix on this issue removes.
+#
+# So the grammar is CLOSED and keyed POSITIVELY: a value must MATCH a recognised non-failing
+# form to be non-failing. The recognised set is exactly the states this block documents —
+# PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED, plus `findings:`'s own NONE / PRESENT /
+# UNKNOWN — and anything else is an UNRECOGNISED VERDICT, which fails closed and names
+# itself. UNKNOWN is recognised deliberately: `findings: UNKNOWN` is a documented value and
+# is unreachable unless `roborev-exit:` is already `ERROR (exit N)`, which fails on its own
+# terms, while `vacuity-tier1:` additionally treats it as claiming cleanliness.
+#
+# The failing-prefix `case` below is left EXACTLY as it was, as a separate statement: it is
+# the one the regression suite extracts and asserts against (NOTICE must stay outside it), and
+# the positive arm is an ADDITION rather than a rewrite of a scan whose set is pinned.
 failed=0
+unrecognised=""
 for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$CENSUS_EXCLUSION" "$SHA_ASSERT" \
   "$REVIEW_COMPLETED" "$PROMPT_CONTENT" "$TIER1" "$TIER2" "$FINDINGS" "$ROBOREV_EXIT"; do
   case "$verdict" in FAIL*|FINDINGS*|ERROR*|INCONSISTENT*) failed=1 ;; esac
+  # The POSITIVE arm. An `*)` that FAILS is what makes the grammar closed — the whole point
+  # is that an unplanned value must not inherit the non-failing branch.
+  case "$verdict" in
+    FAIL*|FINDINGS*|ERROR*|INCONSISTENT*) ;;
+    PASS*|SKIP*|NOTICE*|UNAVAILABLE*|DEGRADED*|NONE*|PRESENT*|UNKNOWN*) ;;
+    *)
+      failed=1
+      unrecognised="${unrecognised:+$unrecognised; }'$verdict'"
+      ;;
+  esac
 done
+if [ -n "$unrecognised" ]; then
+  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper) or introduced a state this scan has never judged — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
+fi
 
 if [ "$failed" -eq 0 ]; then
   finish PASS 0

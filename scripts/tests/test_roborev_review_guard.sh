@@ -2642,6 +2642,56 @@ assert_says 'case (cx27d) an empty array is still UNCORROBORATED' '^census-exclu
 assert_says 'case (cx27d) but the diagnostic distinguishes it from an absent key' "the parser DID see an 'exclude_patterns' key, whose array was empty"
 assert_never_enqueued 'case (cx27d)'
 
+printf '== case (cx28): the verdict grammar is CLOSED — an UNRECOGNISED value FAILs, it does not inherit PASS ==\n'
+reset_stub
+# THE GENERAL SHAPE, closed at the wrapper's single most consequential decision point
+# (#3229 round-10 sweep). Three defects on this issue were ONE shape: a multi-state signal
+# where only the BAD states are tested, so every unknown/unmeasured state inherits the
+# PERMISSIVE branch (`built-in-set: UNAVAILABLE` took the permissive excusal path;
+# `corroboration: UNAVAILABLE` reached a PASS — cx19h and cx27a; a `${_census_end:-…}`
+# fallback degraded a failed measurement to a 1-line scan). The verdict scan itself was the
+# same shape: four failing prefixes tested, EVERYTHING else fell through to `finish PASS 0`.
+#
+# This case runs a PATCHED COPY of the three flow scripts in which ONE check reports a value
+# outside the documented grammar — the observable signature of a check that aborted before
+# assigning, or that invented a state the scan has never judged. It must FAIL and name itself.
+#
+# THE CONTROL RUNS FIRST, AND IT IS NOT OPTIONAL: an assert that a copy FAILs is satisfied by
+# a copy that fails because it was copied wrong (a missing sibling file, a bad path), which is
+# a probe failing in the direction that looks like success. So the UNPATCHED copy is shown to
+# reach PASS on the same fixture before the patch is applied, and the patch is verified to have
+# CHANGED the file before its run is believed.
+_gm_dir="$tmp/grammar-mutant"
+mkdir -p "$_gm_dir"
+cp "$WRAPPER" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_gm_dir/"
+fi
+work=$(make_fixture case_cx28 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+_gm_real_wrapper="$WRAPPER"
+WRAPPER="$_gm_dir/roborev-review.sh"
+run_wrapper "$work"
+assert_verdict 'case (cx28 control) the UNPATCHED copy reaches PASS' PASS 0
+assert_lacks 'case (cx28 control) and reports no grammar violation' 'verdict-grammar'
+# ONE key, ONE value, outside the grammar. `MEASUREMENT-DID-NOT-HAPPEN` is deliberately not a
+# near-miss of a recognised prefix, so the case pins the ALLOW-LIST rather than a spelling.
+if sed -i 's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' \
+  "$_gm_dir/roborev-review-checks.sh" &&
+  grep -qF 'TIER1="MEASUREMENT-DID-NOT-HAPPEN"' "$_gm_dir/roborev-review-checks.sh"; then
+  ok 'case (cx28): the unrecognised-verdict patch was really applied to the copy'
+  run_wrapper "$work"
+  assert_verdict 'case (cx28)' FAIL 1
+  assert_says 'case (cx28) the unrecognised value is named under its own diagnostic' "^ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: 'MEASUREMENT-DID-NOT-HAPPEN'\. "
+  assert_says 'case (cx28) it explains that an unplanned value must not inherit the non-failing branch' 'rather than letting the unplanned value inherit the non-failing branch'
+  assert_says 'case (cx28) an empty value is called out as the same defect' "An EMPTY value \(''\) is this same defect"
+  assert_says 'case (cx28) the unrecognised value still reaches the block, never silently' '^vacuity-tier1: MEASUREMENT-DID-NOT-HAPPEN$'
+else
+  bad 'case (cx28): could not patch the copied checks file, so the unrecognised-verdict path was never exercised (a green run here would be a probe failing in the direction that looks like success)'
+fi
+WRAPPER="$_gm_real_wrapper"
+
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
 work=$(make_fixture case_d pushed)
@@ -4037,6 +4087,37 @@ else
     ok 'structural: census-exclusion is still emitted as a block key (not decorative)'
   else
     bad 'structural: census-exclusion is not emitted in the summary block'
+  fi
+  # ===== THE CLOSED-GRAMMAR INVARIANT, asserted STRUCTURALLY (#3229 round-10 sweep) =====
+  # Case (cx28) proves ONE unrecognised value FAILs. Only a structural assert can pin that the
+  # scan is keyed POSITIVELY AT ALL — i.e. that its non-failing branch is an ALLOW-LIST with a
+  # failing `*)` fallback, rather than "everything that is not one of the four bad prefixes".
+  # That distinction is the general form of three separate defects on this issue, and a future
+  # edit could delete the positive arm while every behavioural case except cx28 stayed green.
+  # Both halves are required: an allow-list whose fallthrough is permissive pins nothing.
+  _scan_positive=$(printf '%s\n' "$_scan_block" \
+    | grep -E 'PASS\*\|SKIP\*\|NOTICE\*\|UNAVAILABLE\*\|DEGRADED\*' | head -1 || printf '')
+  if [ -n "$_scan_positive" ]; then
+    ok 'structural: the verdict scan has a POSITIVE arm — the non-failing set is an allow-list, not "not-failing"'
+  else
+    bad 'structural: the verdict scan has NO positive arm, so any value outside FAIL*|FINDINGS*|ERROR*|INCONSISTENT* — an empty string, a state a future check invents — inherits the non-failing branch and reaches finish PASS (#3229 round-10)'
+  fi
+  # The `*)` fallback must SET failed=1. Read from the positive `case`'s own body: from the
+  # allow-list line to the `esac` that closes it.
+  _scan_fallthrough=$(printf '%s\n' "$_scan_block" \
+    | awk '/PASS\*\|SKIP\*\|NOTICE\*/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
+    | grep -A 3 -E '^[[:space:]]*\*\)' || printf '')
+  if printf '%s\n' "$_scan_fallthrough" | grep -qE '^[[:space:]]*failed=1[[:space:]]*$'; then
+    ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
+  else
+    bad 'structural: the verdict scan positive arm does not fail closed — an unrecognised value would be accepted silently, which is the shape this sweep closed'
+  fi
+  # And the wrapper must STATE the rule, not just implement it: the next key added to this
+  # block is written by someone reading the doc block, not the scan.
+  if grep -qF 'A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT' "$WRAPPER"; then
+    ok 'structural: the wrapper states the affirmative-measurement rule the whole block obeys'
+  else
+    bad 'structural: the wrapper no longer states the affirmative-measurement rule — the invariant would have to be re-derived from the code by every reader'
   fi
   # Anchored to $_scan_keys — the scan's own key list — NOT to the file. See the note above.
   if printf '%s\n' "$_scan_keys" | grep -qE '"\$CENSUS_EXCLUSION"'; then
