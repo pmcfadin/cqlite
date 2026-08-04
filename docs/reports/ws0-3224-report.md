@@ -442,6 +442,63 @@ explained. AC7 and RUNBOOK step 7 forbid rounding toward the hypothesis, so the
 **headline attribution below is the measured stall term**, and the modelled zero-MLP
 charge is reported as the upper bound it is — never as the attribution.
 
+#### 3.9.1 A SECOND defect in the same probe, found by review, and its measured size
+
+The table above carries a second contamination, found by the roborev round on
+PR #3286 (finding ②) rather than by reading the numbers — because this one *was*
+plausible. **perf ran unfenced.** The probe invoked `perf stat` as a plain wrapper with
+neither `-D` nor a control FIFO, while `cache-hostile` defaults to `delay_s = 10.0` and
+calls `wait_for_window()`. Counting therefore began at process start, so the
+identity-fill and Sattolo permutation build were **inside the measured interval** — and
+that build walks the **working set**, so its cost scales with exactly the variable the
+probe exists to hold constant.
+
+It is measurable from the committed CSVs, and the signature is unambiguous. Subtracting
+the chase-only instruction count (the `L1d_32K` row's 120,174,195 = **6.009
+instr/access**, where `nodes=512` makes init negligible):
+
+| row | nodes | extra instructions | **instr/node** | instr/access |
+|---|--:|--:|--:|--:|
+| L1d_32K | 512 | 0 | — | 6.009 |
+| L2_512K | 8,192 | 223,053 | 27.23 | 6.020 |
+| LLC_8M | 131,072 | 3,789,715 | **28.91** | 6.198 |
+| LLC_32M | 524,288 | 15,199,301 | **28.99** | 6.769 |
+| DRAM_256M | 4,194,304 | 121,688,792 | **29.01** | 12.093 |
+| DRAM_1G | 16,777,216 | 486,790,479 | **29.01** | 30.348 |
+| DRAM_2G | 33,554,432 | 973,592,180 | **29.02** | 54.688 |
+
+**29.0 instructions per node, constant across five orders of magnitude.** That is the
+init loop, in the window. (The 10-second delay itself costs nothing: `wait_for_window`
+`nanosleep`s, and `cycles:u` counts no user cycles while descheduled. The contaminant is
+init *work*.)
+
+**Size of the error, bounded from the artefacts.** Fitting
+`cycles = 20M·L + nodes·k` across the three DRAM points gives `k` = 97.7–168.9
+init-cycles/node, so:
+
+| row | init share of counted cycles | reported | corrected |
+|---|--:|--:|--:|
+| LLC_8M | 0.7%–1.3% | 90.44 | ≈ 89.3–89.8 |
+| DRAM_256M | 5.2%–9.0% | 393.50 | ≈ 358–373 |
+| **penalty (DRAM − LLC-hit)** | | **303.06** | **≈ 269–284** |
+
+So the penalty is **~7–12% high**, in the anti-conservative direction named above.
+**Every probe row nevertheless ran to completion**: `cache-hostile` `exit(4)`s on
+`init_overrun` *before* the chase, so the chase's 120,174,195 instructions would be
+absent — they are present in all seven rows, which is positive evidence that no probe
+exited early even though the script ignored its return codes.
+
+**What this does and does not touch.** It does **not** touch §5.3 or the AC4 verdict:
+those consume `cycle_activity.stalls_l3_miss` from the two-endpoint capture and consume
+nothing from this probe (`results/derive.py` reads `penalty_table` at exactly one site,
+the modelled cross-check). It **does** bound §5.4, which is corrected there.
+
+Both defects are now mechanically refused rather than described. The window is gated by
+perf's control FIFO — which also excludes exit-time teardown, itself
+working-set-dependent — and `run/penalty-window-check.py` **verifies the gate held, per
+row**, so a silently-failed handshake cannot publish a latency either. Run against the
+contaminated CSVs still committed here, it rejects them; see §7.1.
+
 ---
 
 ## 4. Results — the two endpoints
@@ -690,18 +747,46 @@ The classical route, charged from the **on-host** latencies of §3.9
 | ÷ **measured** MLP 2.20 | +3,600.4 | 63.84% | plausible |
 | **measured `stalls_l3_miss`** | **+3,821.3** | **67.76%** | **the headline** |
 
+Both modelled rows use the penalty **as reported by the probe**, and §3.9.1 measures that
+penalty to be **~7–12% high**. Corrected, the zero-MLP charge is ≈125%–130% and the
+MLP-corrected charge ≈56.6%–59.8%. The reported figures are kept in the table because
+they are what the committed artefacts contain; the corrected ranges are what the
+conclusions below are stated against.
+
 Two things follow, and both matter beyond this report:
 
 1. **A zero-MLP penalty charge is not conservative — it is wrong.** It accounts for 140% of
-   a delta it is supposed to explain a fraction of. Any accounting that had charged the
-   unloaded latency per miss would have "attributed" more than 100% and declared the
-   mechanism fully explained. The earlier draft of the penalty probe asserted precisely that
+   a delta it is supposed to explain a fraction of — and **still >100% after the §3.9.1
+   correction**, so this conclusion does not depend on the contaminated figure; if
+   anything the correction strengthens it, since the impossibility survives removing
+   the inflation that most flattered it. Any accounting that had charged the unloaded
+   latency per miss would have "attributed" more than 100% and declared the mechanism
+   fully explained. The earlier draft of the penalty probe asserted precisely that
    this direction was "the conservative direction for a claim of *attributed*" (§3.9); it is
    the opposite.
-2. **Corrected by a *measured* MLP, the model lands within 5.8% of the direct measurement**
-   (63.84% vs 67.76%). Two independent routes — a modelled charge from on-host latency and
-   MLP, and a hardware stall counter — agree. That mutual corroboration is the strongest
-   statement this study makes about the mechanism, and neither route alone would license it.
+2. **Corrected by a *measured* MLP, the model lands in the same range as the direct
+   measurement** (63.84% vs 67.76%). Two independent routes — a modelled charge from
+   on-host latency and MLP, and a hardware stall counter — agree on the mechanism and
+   on its rough magnitude. That mutual corroboration is the strongest statement this
+   study makes about the mechanism, and neither route alone would license it.
+
+   > **The tightness of that agreement is NOT claimable, and an earlier draft of this
+   > paragraph claimed it.** It read "the model lands within 5.8% of the direct
+   > measurement", quoting the 63.84%-vs-67.76% gap as if both figures were clean.
+   > §3.9.1 measures that the penalty feeding 63.84% is **~7–12% high** from init
+   > contamination, so the corrected modelled share is **≈56.6%–59.8%** and the honest
+   > gap against 67.76% is **~12–16%, not 5.8%**. The direction of the correction is
+   > *away* from the measurement, so the agreement is looser than the draft claimed —
+   > and quoting the tighter number would have been rounding toward the hypothesis,
+   > which is what §3.9 and AC7 forbid.
+   >
+   > **What survives is the part that was load-bearing anyway:** two methods that share
+   > no counter and no assumption both put the DRAM-served share of the delta in the
+   > mid-50s to high-60s percent, against #3217's ~10–13%. The corroboration is of the
+   > *mechanism*, and it is not weakened. What does not survive is a precision claim,
+   > and precision claims are exactly what a contaminated instrument cannot support.
+   > Recorded rather than quietly restated, because the draft's number is the kind that
+   > gets cited.
 
 `dTLB-load-misses`/row rises only 7.04 → 8.56 (+1.5/row) and is **not** added to the
 headline: any stall a page-table walk caused is already inside the measured stall counters,
@@ -824,6 +909,73 @@ Three things the data indicts, all now filed:
    limitation — a pinned table plus a host-pinned selftest, where a topology-derived guard would
    let the harness run correctly anywhere. → **#3289**, filed as a portability improvement that
    explicitly records that no #3217 figure is affected.
+
+### 7.1 The harness's own six fail-open defects — found by review, fixed here, not deferred
+
+The roborev round at `c27ca28..88f7ec9` was the **first** to actually receive this PR's ten
+harness executables (`prompt-content: PASS (10/10)`; the preceding rounds reviewed nothing —
+a code-free verdict on a diff carrying 8 `.sh`, 1 `.py` and 1 `.c`, which is the #3229
+exclusion-scope hazard, recorded in PR #3286 §2). It immediately found **six defects, and every one is a fail-open in a measurement
+instrument** — a condition under which a *failed* measurement would have been published as a
+number. That is the same class this report indicts #3217's harness for in §3.7 and §3.9, so
+they are fixed **in this PR** rather than filed: #3287, #3288 and #3289 all re-run this
+harness, and the next operator inherits whatever ships here.
+
+| | site | fail-open | direction |
+|---|---|---|---|
+| ① | `positive-control.sh` `evaluate()` | 2× movement gate ran before the `LLC-load-misses` miss-rate branch | false **FAIL** — rejects a healthy host |
+| ② | `run/penalty-probe.sh` | perf unfenced, so init was counted; probe rc ignored | false **PASS** — see §3.9.1 |
+| ③ | `positive-control.sh` `report_ev()` | sub-`MUX_MIN_PCT` counts warned but still read `OK` | false **PASS** — a multiplexed estimate certified sound |
+| ④ | `run/capture-endpoint.sh` | validity expression omitted `RC_LG_A`/`RC_LG_C` while claiming to cover every arm | false **PASS** |
+| ⑤ | `run/run-all.sh` + `results/derive.py` | resume ignored rc and counter files; absent uncore CSV derived as **0 GB/s** | false **PASS** |
+| ⑥ | `run/ac5-peak.sh` | nonzero rc printed not fatal; INDETERMINATE and UNAVAILABLE both exited 0 | false **PASS** — against a discharged AC |
+
+**Five of the six fail in the PASS direction, which is why all six are blockers here rather
+than the four Mediums an ordinary severity rubric would give them.** In a deliverable whose
+entire content is *numbers whose provenance is trustworthy*, a false-PASS is not a defect in
+the software, it is a defect in the result.
+
+**The published figures were verified BEFORE any guard was written**, because "latent hazard"
+and "published error" are different findings with different remedies, and patching the guards
+would have destroyed the evidence for telling them apart. From the committed artefacts:
+
+- **No `penalty-probe.sh` figure reaches the headline.** `derive.py:548-552` computes
+  `attributed` and `residual` from `cycle_activity.stalls_l3_miss` alone; `penalty_table` is
+  read at exactly one site (the §5.4 modelled cross-check). The one real consequence is
+  §5.4's precision claim, corrected there.
+- **Every IMC row behind "98.9% on the engine's own socket" is present and non-empty**: 6/6
+  reps, **288/288** `S<n>` rows (12 IMCs × {read,write} × {S0,S1} × 6), zero
+  `<not counted>`/`<not supported>`, so the `0 GB/s` default was never taken. Recomputed
+  independently from the raw CSVs, the S=6/N=16 own-socket share is 0.9881 / 0.9886 / 0.9886,
+  median **98.86%**.
+- **No counter was multiplexed and no recorded rc was nonzero**: **587** counter rows across
+  all 45 perf CSVs in the PR at `enabled% = 100.00`, and **42** recorded `rc` values across
+  all 12 `meta*.json` at 0 — *including* `loadgen_interior` and `loadgen_uncore`, the two arms
+  ④ omitted. So every fail-open path was **un-taken**, and the figures stand on their own
+  evidence rather than on a guard that would not have caught a failure.
+
+**Each fix is demonstrated load-bearing rather than asserted.** `selftest-guards.sh` runs 37
+cases in seconds with no perf, no root and no bare metal — each guard is handed the bad input
+it now catches *and* the good input it must still accept, since a guard that rejects
+everything is how ① got in. The bad input for ② is not simulated: it is the contaminated
+`penalty/` CSVs still committed here, i.e. the defect's own output being refused. Each fix was
+then **reverted in place and the selftest re-run**; every mutation is caught
+(`guard-selftest/mutation-matrix.md`). Two results from that matrix are worth carrying
+forward:
+
+- The two halves of ②'s window check flip **disjoint** cases, which *measures* their
+  complementarity instead of asserting it. The absolute ceiling alone misses a row
+  contaminated by +3.2% (the real `LLC_8M` value); the cross-row uniformity check alone
+  misses a **uniformly** inflated sweep, because its reference is derived from the very data
+  it is checking — CLAUDE.md's vacuous-pass shape, reproduced and then closed.
+- Reverting ④ broke a **fourth** case the finding never named: the guard's "no arms at all"
+  subject test. A roster that quietly covers a subset is indistinguishable from one that
+  covers everything, and the only defence is printing what was actually checked.
+
+**The captured data is immutable, so no fix changes a number** — verified, not assumed:
+re-deriving from the committed tree yields 1,109 leaf values of which **13 differ, all 13
+being the invocation's own path strings**. `attributed = +3,821.3` and `residual = 32.24%`
+reproduce exactly, and the selftest asserts that as a case.
 
 ## 8. Acceptance criteria — discharged or not, explicitly
 

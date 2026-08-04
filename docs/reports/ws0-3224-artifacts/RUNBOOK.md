@@ -35,6 +35,13 @@ absolute is a defect.
 - [ ] Cassandra (or anything JVM) **stopped** — nothing else competes for CPU (#3217 §2.1).
 - [ ] `perf`, `cc`, `taskset`, `numactl`, `timeout` present.
 - [ ] Scratch root on the instance-store NVMe (`/data`), not the EBS root.
+- [ ] **`bash selftest-guards.sh` PASSes.** Seconds, no perf and no root, so there is no
+      excuse for skipping it — and it is the cheapest step in this runbook by two orders of
+      magnitude. It drives the harness's fail-closed guards with the bad input each exists to
+      catch, so a guard that has been softened or reordered surfaces **here**, before you
+      spend metered bare-metal time producing numbers it would have to certify. Six of these
+      guards exist because a roborev round found six fail-open paths in this harness
+      (report §7.1); a seventh regression is likelier than not, and this is where it shows.
 
 ---
 
@@ -386,13 +393,20 @@ and post that list.
 docs/reports/ws0-3224-artifacts/
   RUNBOOK.md                      this file
   positive-control.sh             the condition-3 gate
+  selftest-guards.sh              pre-flight: every fail-closed guard vs the bad input it catches
   cache-hostile.c                 its microbenchmark + STREAM-triad reference
   negative-control-c7i.md         why virtualized substitution is barred
   negative-control-c7i-probe.txt  raw probe behind it
+  harness/verdict-logic.sh        the positive control's verdict math (sourced, testable)
+  harness/guards.sh               the shared "a nonzero rc stops the run" guards
   host/                           ac1-capability-probe.txt, thread-siblings.txt, lscpu, numactl
   positive-control-run/           summary.txt, verdict.json, event-probe.txt, env.txt, perf-*.csv
+  guard-selftest/                 recorded selftest output + the mutation matrix behind it
   corpus/                         geometry, sha, provenance, deviations from the recipe
-  run/                            the capture drivers as invoked
+  run/                            the capture drivers as invoked, plus the three checkers whose
+                                  EXIT CODE is a verdict: penalty-window-check.py (was the
+                                  window gated?), rep-complete.py (is this rep skippable?),
+                                  ac5-analyse.py (did byte accounting resolve?)
   results/                        per-endpoint perf CSVs, step.jsonl, capture-config.json,
                                   cpu-topology.json, the derivation script + its output
 docs/reports/ws0-3224-report.md   the report
