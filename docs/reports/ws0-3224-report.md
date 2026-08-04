@@ -790,12 +790,12 @@ headroom figure.
 ## 7. What this indicts — as follow-ups, not fixes here
 
 Per the issue's explicit scope, **no production code was changed and no fix is proposed.**
-Three things the data indicts, to be groomed separately:
+Three things the data indicts, all now filed:
 
 1. **LLC capacity contention is the named cause of the full-box IPC decay.** A working-set /
    locality reduction in the Flight read path is the lever class that can move the slope.
    The measurement to demand of any candidate is Δ`LLC-load-misses`/row at S=6/N=16, not
-   Δinstructions/row.
+   Δinstructions/row. → **#3288**, where that criterion is the gate any proposal must pass.
 2. **~32% of the delta remains unattributed** (20.6% at the wider boundary), sitting in
    `other execution stalls` (+1,792.6 cycles/row) net of the −631.9 in non-stalled cycles.
    **That bucket is not established to be non-memory**: because `stalls_l3_miss` is
@@ -804,7 +804,7 @@ Three things the data indicts, to be groomed separately:
    front-end / port-utilisation counters (a TMA level-2 breakdown) **plus** an
    offcore/prefetch-stall term — a different capture than this one, and out of this issue's
    two-endpoint scope. The honest statement is that 32% is *unattributed*, not that it is
-   *non-memory*.
+   *non-memory*. → **#3287**, filed with that method stated.
 3. **#3217's committed scripts do NOT carry these defects — verified against `origin/main`, not
    assumed.** An earlier draft of this report asserted they did; that was wrong, and the
    correction matters because the claim would have impugned published figures.
@@ -822,8 +822,8 @@ Three things the data indicts, to be groomed separately:
    **Therefore no #3217 figure is impugned by anything found in this issue**, and nothing here
    calls for re-deriving its results. What remains is a genuine but much narrower portability
    limitation — a pinned table plus a host-pinned selftest, where a topology-derived guard would
-   let the harness run correctly anywhere — worth hoisting into the shared harness as a low
-   priority follow-up.
+   let the harness run correctly anywhere. → **#3289**, filed as a portability improvement that
+   explicitly records that no #3217 figure is affected.
 
 ## 8. Acceptance criteria — discharged or not, explicitly
 
