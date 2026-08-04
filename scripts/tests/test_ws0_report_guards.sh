@@ -597,6 +597,23 @@ expect_report_reject "--reps 'abc' is REFUSED with a reason (not a traceback)" \
   "must be an integer" "$d" "$TMP/corpus" warm bypass abc 1
 expect_report_reject "--scan-passes 0 is REFUSED (same hole, same class)" \
   "must be at least 1" "$d" "$TMP/corpus" warm bypass 1 0
+# The same class from the OTHER end. Python ints do not overflow, so an absurd --reps
+# is not a wrong number — it is NO number: `range(1, 10**20)` statting a file per
+# iteration never reaches a verdict. MEASURED before the cap:
+# `--reps 99999999999999999999` ran past a 10s timeout with no output at all.
+expect_report_reject "an absurdly large --reps is REFUSED (would never reach a verdict)" \
+  "absurdly large" "$d" "$TMP/corpus" warm bypass 99999999999999999999 1
+expect_report_reject "an absurdly large --scan-passes is REFUSED" \
+  "absurdly large" "$d" "$TMP/corpus" warm bypass 1 99999999999999999999
+# And the reporter must TERMINATE on that input rather than merely printing something:
+# the whole point is that the pre-cap code did not.
+if timeout 15 python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+    --client-cpus 4,12 --reps 99999999999999999999 --temps warm --arms bypass \
+    --step-duration 45s/1s --scan-passes 1 >/dev/null 2>&1; rc=$?; [ "$rc" -eq 1 ]; then
+  pass "OBSERVED: the reporter TERMINATES (rc=1) on an absurd --reps (pre-cap: timed out)"
+else
+  fail "the reporter must terminate non-zero on an absurd --reps (rc=$rc; 124 = still hangs)"
+fi
 expect_report_reject "--scan-passes -1 is REFUSED" \
   "must be at least 1" "$d" "$TMP/corpus" warm bypass 1 -1
 # The non-numeric selections had the same vacuous-green hole: an empty --temps/--arms
@@ -782,6 +799,49 @@ if awk '/^parse_duration_ms\(\)/,/^}/' "$DRIVER" | grep -q '\$((n \* 1000))'; th
   fail "parse_duration_ms still multiplies a bare \$n — leading zeros would be octal again"
 else
   pass "parse_duration_ms feeds no bare component into arithmetic (structural)"
+fi
+
+# ---- the OTHER half of the same class: 64-bit WRAPAROUND -------------------
+# Found by self-checking this very change against the integer-overflow class, and it
+# is the SAME BYPASS SHAPE as the octal defect. Bash arithmetic is signed 64-bit and
+# wraps silently, so `2305843009213693956s` * 1000 lands on **4000 ms** — UNDER the
+# 5000ms cold ceiling. MEASURED against the `10#`-only driver (i.e. after finding 7's
+# first fix but before this one): the value sailed through the ceiling to the
+# corpus-missing check, meaning a caller could smuggle a BLENDED cold step past
+# #3096 finding 2's guard with an absurd duration. Both guards are needed; `10#`
+# alone is not sufficient.
+check_driver_reject "a 64-bit-WRAPPING cold step is refused (would wrap to 4000ms, under the ceiling)" \
+  "must be <n>ms, <n>s or <n>m" --corpus "$TMP/corpus" --temp cold \
+  --cold-step-duration 2305843009213693956s
+check_driver_reject "a 20-digit duration is refused before arithmetic touches it" \
+  "must be <n>ms, <n>s or <n>m" --corpus "$TMP/corpus" --temp cold \
+  --cold-step-duration 99999999999999999999ms
+# The largest value inside the cap must still PARSE — the fix is a cap, not a ban on
+# big-but-sane durations. 999999999ms is ~11.5 days: over the cold ceiling, so it must
+# be refused for its VALUE, which proves it reached the ceiling rather than the parser.
+out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 999999999ms 2>&1)
+if grep -q "999999999ms) exceeds the" <<<"$out"; then
+  pass "the largest in-cap duration still parses (judged on value, not rejected as malformed)"
+else
+  fail "999999999ms must parse and be refused by the ceiling (out: $out)"
+fi
+# Same wraparound class on the plain integer options.
+check_driver_reject "a 20-digit --reps is refused before arithmetic (would wrap to 7766279631452241919)" \
+  "absurdly large" --corpus "$TMP/corpus" --reps 99999999999999999999
+check_driver_reject "a 20-digit --port is refused before arithmetic" \
+  "absurdly large" --corpus "$TMP/corpus" --port 99999999999999999999
+# The digit test must come BEFORE any arithmetic, or the bound is itself evaluated by
+# the arithmetic that wraps.
+if awk '/^require_positive_int\(\)/,/^}/' "$DRIVER" \
+  | awk '/#value/{d=NR} /10#\$value/{if(!d) bad=1} END{exit(bad?1:0)}'; then
+  pass "the digit-count check precedes the arithmetic in require_positive_int"
+else
+  fail "require_positive_int must test the digit count before any arithmetic"
+fi
+if awk '/^parse_duration_ms\(\)/,/^}/' "$DRIVER" | grep -q 'DURATION_MAX_DIGITS'; then
+  pass "parse_duration_ms caps the digit count (structural)"
+else
+  fail "parse_duration_ms must cap the digit count before multiplying"
 fi
 
 # ==========================================================================

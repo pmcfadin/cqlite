@@ -62,12 +62,23 @@ class Invalid(Exception):
     """A property the report depends on was not observed. Always fatal."""
 
 
+# An upper bound on any count that drives a loop. Python ints are arbitrary-precision,
+# so an absurd `--reps` does not overflow — it HANGS: `range(1, 10**20)` iterates
+# essentially forever, statting a file per iteration, and a reporter that never
+# terminates produces no verdict at all. Measured before this bound:
+# `--reps 99999999999999999999` ran past a 10s timeout with no output. 100k is far
+# past any session anyone would run (the recorded #3096 sessions used 3).
+MAX_COUNT = 100_000
+
+
 def positive_int(name: str, value: object) -> int:
-    """`value` as an int >= 1, or `Invalid`.
+    """`value` as an int in `1..MAX_COUNT`, or `Invalid`.
 
     `--reps 0` used to run the whole reporter over an empty rep range and exit
     ZERO with `measurements: []` — a report that measured nothing, indistinguishable
-    at the exit code from one that measured everything (#3272 finding 5).
+    at the exit code from one that measured everything (#3272 finding 5). The upper
+    bound is the same class from the other end: not a wrong number but no number,
+    since an unbounded loop never reaches a verdict.
     """
     try:
         n = int(value)
@@ -78,6 +89,12 @@ def positive_int(name: str, value: object) -> int:
             f"--{name} must be at least 1 (got {n}). A run with {name}<1 measures"
             " nothing, and a report over nothing is not a smaller version of the"
             " requested claim — it is a vacuous success."
+        )
+    if n > MAX_COUNT:
+        raise Invalid(
+            f"--{name} is absurdly large ({n:,}; the cap is {MAX_COUNT:,}). Python"
+            " ints do not overflow, so this would not be a wrong number — it would"
+            " be a reporter that iterates for hours and never reaches a verdict."
         )
     return n
 

@@ -177,6 +177,18 @@ require_positive_int() { # require_positive_int <flag> <value> [max]
     ''|*[!0-9]*)
       echo "FATAL: --$flag must be a positive integer (got '$value')" >&2; exit 2 ;;
   esac
+  # DIGIT COUNT first, before any arithmetic — bash arithmetic is signed 64-bit and
+  # WRAPS SILENTLY, so a 20-digit value becomes an arbitrary (possibly small,
+  # possibly negative) number and the range checks below would be comparing
+  # something other than what the caller wrote. Measured: `99999999999999999999`
+  # evaluates to 7766279631452241919. 9 digits is past any legitimate rep count or
+  # port and cannot wrap.
+  if [[ "${#value}" -gt 9 ]]; then
+    echo "FATAL: --$flag is absurdly large (got '$value', ${#value} digits)." >&2
+    echo "       Refused before arithmetic: bash arithmetic wraps at 64 bits, so a" >&2
+    echo "       value this size would be range-checked as some other number." >&2
+    exit 2
+  fi
   # 10# for the same reason parse_duration_ms uses it: `08` is not octal here.
   if (( 10#$value < 1 )); then
     echo "FATAL: --$flag must be at least 1 (got '$value')." >&2
@@ -234,13 +246,41 @@ COLD_STEP_MAX_MS=5000
 # The regex already restricts `$n` to digits, so `10#` cannot fail on a value that
 # reaches it; it only fixes the base. Note the `*ms` case must stay FIRST — `*s`
 # would otherwise match `45ms` and leave a trailing `m`.
+#
+# The DIGIT-LENGTH CAP closes the OTHER half of the same defect class, and it is a
+# bypass of exactly the same shape as the octal one. Bash arithmetic is signed
+# 64-bit and WRAPS SILENTLY, so a large-but-well-formed value multiplied by 1000 or
+# 60000 lands on a small positive number:
+#
+#   `2305843009213693956s` -> $((… * 1000)) wraps to **4000** ms, UNDER the 5000ms
+#   cold ceiling. A caller could therefore smuggle a blended cold step past the
+#   guard of #3096 finding 2 with an absurd duration, exactly as `010000ms` could
+#   via the octal parse. Verified against this driver before the fix: the value ran
+#   straight through the ceiling to the corpus check.
+#
+# A duration is capped at 9 digits — ~11.5 days in ms, ~31 years in seconds, far
+# past any legitimate step — which keeps the largest product (999999999 * 60000)
+# near 6e13, four orders of magnitude inside 2^63. So the multiply cannot wrap and
+# the ceiling comparison is on the number the caller actually wrote. REJECTED rather
+# than clamped: a clamp would measure a step other than the one requested without
+# saying so, which is the failure mode this whole function is being hardened against.
+DURATION_MAX_DIGITS=9
 parse_duration_ms() {
   local v="$1" n
   case "$v" in
-    *ms) n="${v%ms}"; [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((10#$n))" ;;
-    *s)  n="${v%s}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((10#$n * 1000))" ;;
-    *m)  n="${v%m}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((10#$n * 60000))" ;;
+    *ms) n="${v%ms}" ;;
+    *s)  n="${v%s}" ;;
+    *m)  n="${v%m}" ;;
     *)   return 1 ;;
+  esac
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  # The DIGIT COUNT is compared before any arithmetic touches the value: a numeric
+  # bound would itself be evaluated by the arithmetic that wraps.
+  [[ "${#n}" -le "$DURATION_MAX_DIGITS" ]] || return 1
+  case "$v" in
+    *ms) echo "$((10#$n))" ;;
+    *s)  echo "$((10#$n * 1000))" ;;
+    *m)  echo "$((10#$n * 60000))" ;;
   esac
 }
 
