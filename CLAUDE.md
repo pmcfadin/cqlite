@@ -622,7 +622,7 @@ A feature is done only when its public surface exercises it — a named surface 
 end-to-end test. Green helper-only unit tests are not sufficient.
 
 ### Delivery pipeline (flow-lead)
-- **`flow-lead`** orchestrates (the repo's default agent; `claude --agent flow-lead`) — it spawns
+- **`flow-lead`** orchestrates (opt-in: `claude --agent flow-lead`; plain sessions are default Claude) — it spawns
   and sequences the specialists + roborev + the gate, and writes no production code. Verbs:
   `flow-groom` → `flow-activate` (**Seam 1**: owner approves spec + design) → `flow-implement` (the
   implement loop above) → `flow-address` → `flow-finalize`; `flow-board` = status + the single next
