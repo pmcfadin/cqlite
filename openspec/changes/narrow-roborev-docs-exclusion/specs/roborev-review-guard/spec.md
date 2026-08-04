@@ -337,14 +337,48 @@ looked for as a FIXED string `:(exclude,glob)<pattern>` (which names removals ex
 COUNT of `:(exclude,glob)` literals (which detects additions numerically). A blind full-set
 re-extraction SHALL NOT be used as the basis of a FAIL: Go string literals are concatenated without
 terminators, and a naive scan of this very binary yields truncations, junk-suffixed hits and a phantom
-pattern that is really a bare prefix constant — a FAIL built on that would red every run. The residual
-(a new pattern having a pinned one as a prefix) SHALL be declared.
+pattern that is really a bare prefix constant — a FAIL built on that would red every run.
+
+**AN UNBOUNDED SUBSTRING PRESENCE TEST SHALL NOT BE THE ONLY PRESENCE CHECK.** A fixed-string search for
+`:(exclude,glob)<pattern>` has an exact LEFT boundary (the 15-byte prefix) and NO RIGHT one, so
+`**/Cargo.lock` matches INSIDE `**/Cargo.lock.bak`; and a bare literal COUNT cannot see a one-for-one
+substitution. Together they are a FALSE PASS, MEASURED on the pinned binary: patching its bucket-28 run
+to read `:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock`
+(4 bytes borrowed from the preceding string, file size unchanged) leaves the literal count at EXACTLY 26
+and the missing list EMPTY — verdict `built-in-set: OK` on a modelled exclusion set that no longer
+matches reality. Two further observations are therefore REQUIRED, and `built-in-set: OK` SHALL mean all
+four hold:
+
+1. **THE PINNED VERSION, ASKED OF THE EXECUTABLE.** Every fact this file models — the 24 patterns, their
+   one-pathspec arity, the ported `git.FormatExcludeArgs` — was derived from ONE build, so the pin SHALL
+   be held as a machine-checked constant and the executable SHALL be asked which version it is
+   (`roborev version`; there is no `--version` flag). A MISMATCH SHALL be DIVERGENCE ⇒ FAIL, naming the
+   observed and pinned versions and the re-verify-on-upgrade obligation the pin has always carried. This
+   is the GENERAL signal: any upgrade or rebuild moves it, whatever it did to the patterns.
+2. **A RIGHT BOUNDARY, DERIVED FROM THE BLOB'S LENGTH-BUCKET ADJACENCY.** Go's linker packs the rodata
+   string blob in LENGTH order with no terminator, and MEASURED against the pinned binary each LENGTH
+   BUCKET of these literals is stored as ONE CONTIGUOUS RUN — inside a run the byte after a literal is
+   the `:` of the next literal, which IS a right boundary. The invariant checked SHALL therefore be: per
+   bucket of k members, EXACTLY k-1 are immediately followed by another `:(exclude,glob)` literal (one
+   ends the run). It SHALL be DERIVED FROM THE PINNED PATTERN LIST ALONE — group by length, expect k-1 —
+   and SHALL NOT pin foreign successor bytes or a within-bucket ORDER, because build-specific foreign
+   data would FALSE-FAIL a correct binary, and a guard that reds correct input is the guard that gets
+   disabled. A bucket holding a MISSING member SHALL skip this arithmetic: its run was broken BY the
+   removal, which requirement (1) above already names exactly.
+
+Declared residuals, both narrowed by the version check: the LAST literal of each run has no derivable
+right boundary (an in-place equal-length extension of a run-ENDER within the pinned version stays
+invisible), and a new pattern having a pinned one as a prefix is still not NAMED — it is detected as an
+addition by the count or as a broken run by the adjacency invariant.
 
 **"Never silence" SHALL be mechanized.** Every `census-exclusion:` value SHALL end with
-`built-in-set: OK|DIVERGED|UNAVAILABLE`. When the set cannot be observed at all — `roborev` absent from
-PATH, an unreadable target, or a target carrying zero `:(exclude,glob)` literals (which is the hermetic
-suite's own state) — the value SHALL read `UNAVAILABLE` and SHALL be NEITHER a failure NOR a blessing.
-An unobservable set SHALL NEVER be reported as, or silently treated as, agreement.
+`built-in-set: OK|DIVERGED|UNAVAILABLE`. When the set cannot be observed — `roborev` absent from
+PATH, an unreadable target, a target carrying zero `:(exclude,glob)` literals (which is the hermetic
+suite's own state), or a target that will not report its version — the value SHALL read `UNAVAILABLE`
+and SHALL be NEITHER a failure NOR a blessing. An unobservable set SHALL NEVER be reported as, or
+silently treated as, agreement. An unreadable version SHALL withhold ONLY the OK blessing: a
+POSITIVELY OBSERVED divergence (a missing pattern, a broken adjacency run, a changed literal count)
+SHALL still FAIL without it, so the check can never self-disable.
 
 **PRECEDENCE.** Both FAIL causes outrank the NOTICE, and EVERY cause present SHALL be named in the value
 line — the actionable half must never be hidden behind the unactionable one, in either direction.
@@ -528,7 +562,25 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 #### Scenario: A live built-in set matching the pin is reported OK and corroborated
 - **GIVEN** a roborev executable whose built-in deny-list matches the pinned set exactly
 - **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value ends `built-in-set: OK`, the detail states the pin is corroborated rather than assumed, and a pinned-built-in swallow in the same run is still only a NOTICE
+- **THEN** the value ends `built-in-set: OK`, the detail states the pin is corroborated rather than assumed, names the observed version and records that the right boundary was verified, and a pinned-built-in swallow in the same run is still only a NOTICE
+
+#### Scenario: An EQUAL-LENGTH built-in rename fails, because presence needs a right boundary
+- **GIVEN** a roborev executable in which one pinned built-in has been replaced ONE-FOR-ONE by a longer pattern carrying it as a prefix (`**/Cargo.lock` → `**/Cargo.lock.bak`), so the `:(exclude,glob)` literal COUNT is unchanged and the pinned pattern is still PRESENT as a substring
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` FAILs as a built-in-set DIVERGENCE naming the affected length bucket, its members, how many of them are right-bounded versus the pinned `k-1`, and WHICH member lost its boundary; the detail names the substring hazard concretely and states the length-bucket basis of the boundary; no review is enqueued
+- **AND** neither the missing-pattern list NOR the literal count reports anything — both pre-existing signals are blind to this substitution, so the FAIL is attributable to the boundary check alone
+- **AND GIVEN** the identical fixture with an UNTAMPERED deny-list, the value ends `built-in-set: OK` and the run PASSes — so the FAIL is the tamper and not the fixture
+
+#### Scenario: A binary that is not the pinned version fails
+- **GIVEN** a roborev executable whose built-in literals match the pinned set exactly but which reports a DIFFERENT version than the pinned one
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` FAILs as a built-in-set DIVERGENCE with the version named FIRST in the value line, the detail names the observed and pinned versions, names all three facts the version invalidates (the pattern list, the built-in arity, the ported `git.FormatExcludeArgs`) and the obligation to re-pin in the same commit; no other divergence fragment appears, and no review is enqueued
+
+#### Scenario: A binary that will not report its version is UNAVAILABLE, and the check still fails on real divergence
+- **GIVEN** a roborev executable whose built-in literals match the pinned set exactly but which will not answer `version`
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** the value ends `built-in-set: UNAVAILABLE` rather than `OK` — matching literals alone do not earn a blessing for a pin that could not be confirmed — the detail names the unreadable version among the UNAVAILABLE causes and states that only the blessing is withheld, and `census-exclusion:` does NOT FAIL on that account
+- **AND GIVEN** the same unreadable version on a binary that is ALSO missing a pinned pattern, `census-exclusion:` still FAILs naming the missing pattern — so withholding the blessing can never become a way to disable the check
 
 #### Scenario: An ADDED built-in fails, because that divergence has a remedy
 - **GIVEN** a roborev executable carrying one MORE `:(exclude,glob)` literal than the pinned count — the shape of an upgrade that began excluding source — and a census that touches no lockfile at all

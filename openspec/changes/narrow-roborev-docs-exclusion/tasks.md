@@ -367,6 +367,36 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       `cx3`/`cx6f`/`cx17`/`cx24` RED). Named regression set re-run green: `cx1`, `cx3`, `cx6`, `cx6c`–`cx6n`,
       `cx6p`, `cx7c`, `cx8`, `cx11`, `cx13`, `cx18`, `cx19*`, `cx20*`, `cx21`. Suite: 681 asserts, 0 failed.
 
+## 8g. Round 7 — the `built-in-set:` self-check needed a right boundary and a version gate
+- [x] REPRODUCED the false PASS on the real binary: patching `/usr/local/bin/roborev`'s length-28 run to
+      `:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock` (4 bytes
+      borrowed from the preceding string, size unchanged) left the literal count at 26/26 and the missing
+      list EMPTY ⇒ `built-in-set: OK` on a set that had moved. Unbounded substring presence + a bare count
+      is sound in the REMOVAL direction only.
+- [x] Fix, both halves: (A) `ROBOREV_PINNED_VERSION` is a machine-checked constant and the check asks the
+      SAME file it read the literals from (`roborev version`) — a mismatch is DIVERGENCE ⇒ FAIL naming
+      observed vs pinned and the re-verify obligation. (B) a RIGHT BOUNDARY derived from the blob's
+      length-bucket adjacency: Go packs rodata in length order with no terminator and each bucket is ONE
+      contiguous run, so per bucket of k members exactly k-1 must be immediately followed by another
+      `:(exclude,glob)` literal. Derived from the pinned list alone — no foreign successor bytes, no
+      within-bucket order — so a rebuild that merely permutes a bucket cannot false-FAIL.
+- [x] Grammar preserved: `OK` | `UNAVAILABLE` | a `FAIL` naming what diverged. An unreadable version is
+      `UNAVAILABLE` (withholds only the blessing); an OBSERVED divergence still FAILs without it. A bucket
+      holding a MISSING member skips the adjacency arithmetic, so a removal still FAILs naming the pattern.
+- [x] Tests: `cx25` (the equal-length tamper FAILs, bucket + unbounded member named, and the two
+      pre-existing signals asserted SILENT), `cx25b` (the untampered control reads OK), `cx26` (version
+      mismatch alone FAILs), `cx26b` (unreadable version ⇒ UNAVAILABLE, never OK), `cx26c` (a removal still
+      FAILs without a readable version). The stub plants the MEASURED contiguous length-bucket runs, with
+      `guard_assert_run_mirror_agrees` keeping the two harness mirrors on the same 24 patterns.
+- [x] MUTATION-TESTED both directions in a scratch copy — 3 mutations, each RED, restore green: M1 disable
+      the boundary check (9 asserts RED, `cx25` reproduces `RESULT: PASS` + `built-in-set: OK` on the
+      tampered set and even enqueues the review), M2 disable the version gate (12 asserts RED across
+      `cx26`/`cx26b`), M3 plant the literals one-per-line (19 asserts RED across `cx19d`/`cx25`, i.e. the
+      harness mirror is load-bearing). Verified on REAL binaries too: pristine ⇒ OK, `Cargo.lock.bak` tamper
+      ⇒ DIVERGED, a blanked `**/go.sum` prefix ⇒ DIVERGED naming it missing, a patched version string ⇒
+      DIVERGED naming v0.99.9 vs v0.61.2, no binary ⇒ UNAVAILABLE. Named regression set re-run green.
+      Suite: 718 asserts, 0 failed.
+
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` + `roborev` on the
       lite-green diff (the diff contains code — shell + config — so it IS roborev-certifiable and MUST be).

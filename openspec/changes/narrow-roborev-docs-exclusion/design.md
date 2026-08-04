@@ -452,7 +452,10 @@ Two design consequences follow from the third clause, "never silence":
 
 1. Every value line ends with `built-in-set: OK|DIVERGED|UNAVAILABLE`. An **unobservable** set is
    `UNAVAILABLE` **in the value line**, never an unstated assumption of agreement — the same discipline as
-   refusing to alias "we could not tell" to "nothing is excluded".
+   refusing to alias "we could not tell" to "nothing is excluded". A binary whose **version** cannot be read
+   is unobservable in this sense too: matching literals alone do not earn `OK` for a pin nothing confirmed.
+   But that withholding is narrow — an *observed* divergence still FAILs without a readable version, so the
+   version gate can never turn the check into a no-op (D2b-ii).
 2. The NOTICE still names the paths and the built-in responsible **in the value line**, not merely in a
    detail. "Non-failing" must not become "skimmable".
 
@@ -526,8 +529,71 @@ Two reliable signals are used instead:
    `:(exclude,glob)` string — but that is still a mechanism change in precisely this area with precisely
    this remedy, so reporting it is correct rather than a false alarm.
 
-**Declared residual:** a NEW pattern that has a PINNED one as a prefix (`**/Cargo.lock.bak`) is invisible
-to (1) and only moves the count in (2).
+Those two are necessary but **NOT sufficient**, and round 7 proved it by reproduction rather than by
+argument. (1) has an exact LEFT boundary — the 15-byte `:(exclude,glob)` prefix — and **no right one**, so
+`**/Cargo.lock` matches *inside* `**/Cargo.lock.bak`; and (2) is a bare count, so a **one-for-one**
+substitution moves nothing. Combined, they are a **false PASS**. Measured on `/usr/local/bin/roborev`: patch
+its length-28 run to read
+
+```
+:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock
+```
+
+(the four extra bytes taken from the preceding string, so the file size is unchanged) and the check reports
+count **26/26**, missing **0**, verdict **`built-in-set: OK`** — while the modelled exclusion set no longer
+matches reality. The control direction was intact (a genuine removal still FAILed with the pattern named),
+so the self-check was sound *one way only*. Two further signals close it:
+
+3. **The pinned VERSION, asked of the executable.** `ROBOREV_PINNED_VERSION` is now a machine-checked
+   constant and the check runs `roborev version` (there is no `--version`) **on the same file it read the
+   literals from**. A mismatch is DIVERGENCE ⇒ FAIL. This is not a workaround for a missing boundary: the
+   pin is *to a version*, and everything modelled here — the 24 patterns, the one-pathspec arity, the
+   `FormatExcludeArgs` port — was read out of that one build, so on any other build all of it is
+   unverified. Gating on the version *is* the semantic the pin encodes, and it turns the standing
+   re-verify-on-upgrade obligation from prose into a mechanism. It is also the **general** signal: any
+   upgrade or rebuild moves it whatever it did to the patterns.
+4. **A right boundary, DERIVED from the blob's length-bucket adjacency.** Go's linker packs the rodata
+   string blob in **length order** with no terminator, and — measured — each length bucket of these
+   literals is stored as **one contiguous run**: 24→`go.sum`; 25→`uv.lock`; 26→`bun`/`pdm`/`mix.lock`;
+   27→`yarn.lock`/`bun.lockb`/`.beads`/`.cache`; 28→`Cargo`/`cargo`/`flake.lock`;
+   29→`poetry.lock`/`.gocache`; 30→`Pipfile`/`Gemfile`/`pubspec`/`Podfile.lock`; 31→`composer.lock`;
+   32→`pnpm-lock.yaml`; 34→`Package.resolved`/`.kata.local.toml`; 35→`package-lock.json`;
+   36→`packages.lock.json`. Inside a run the byte after a literal is the `:` of the next literal — a
+   genuine right boundary. So the invariant checked is: **per bucket of k members, exactly k-1 are
+   immediately followed by another `:(exclude,glob)` literal** (one ends the run). Summed over the 12
+   buckets: 12 bounded, 12 run-enders — verified against the real binary. The tamper above drops bucket 28
+   from 2 bounded to 1 and FAILs naming the bucket and the unbounded member.
+
+**Why (4) is derived and not pinned.** The alternative — pinning the 12 run-enders' actual successor bytes,
+which were measured too — would make *all* 24 exactly bounded. It was rejected: those successors are
+unrelated Go strings whose ordering within a length bucket is **not** content-sorted (bucket 26 is
+`bun`,`pdm`,`mix`, not alphabetical), so it is build-order-dependent and a different build of even the same
+version could reshuffle it. That would **FALSE-FAIL a correct binary**, and *a guard that reds correct input
+is the guard that gets disabled* — the ruling this whole design already turns on. The `k-1` invariant needs
+**no foreign bytes and no within-bucket order**: it falls out of the pinned pattern list by grouping on
+length, so a permuted bucket still passes and only a broken run fails.
+
+**Both are needed, and they cover different threats.** (3) catches the realistic one — an upgrade or rebuild
+— completely, and it is what makes (4)'s layout assumption safe, since (4) is only ever applied to the
+version it was derived from. (4) catches an equal-length substitution *within* the pinned version, which
+(3) cannot see: the tampered binary still reports `v0.61.2`. So (4) is what the acceptance test turns on and
+(3) is the honest primary.
+
+**Declared residuals, both narrowed by (3):** the LAST literal of each of the 12 runs has no derivable right
+boundary, so an in-place equal-length extension of a *run-ender* inside the pinned version stays invisible
+(any upstream change that really did it would move the version or the count); and a NEW pattern that has a
+PINNED one as a prefix is still not NAMED by (1) — it is detected as an addition by (2) or as a broken run
+by (4).
+
+**A bucket holding a MISSING member skips (4).** Its run was broken *by* that removal, so reporting the
+arithmetic too would bury the exactly-named actionable cause under a derived consequence; `cx19f`/`cx26c`
+pin that a removal still FAILs with the pattern named and nothing else.
+
+**An unreadable version is `UNAVAILABLE`, and that withholds only the blessing.** If the executable will
+not answer `version`, the pin is unconfirmed and `built-in-set:` refuses to say `OK` — but a *positively
+observed* divergence (missing pattern, broken run, changed count) still FAILs without it. That asymmetry is
+deliberate: it is what stops the version gate from becoming a way for a future roborev that renamed its
+`version` subcommand to silently turn the whole check into a no-op. `cx26c` is its detector.
 
 ###### The divergence check found a real bug in its first live run — in itself
 
@@ -982,6 +1048,22 @@ family's `(c2*)` lettering. The fixture helper gains the ability to write the wo
 14. **a glob character class in a corroborated pattern** (D2c) — `cx7c`: the stub answers the BRACKETED
     `['*.md', 'src/[Tt]est.rs']` ⇒ `corroboration: OK`, no `FAIL (exclusion set drift`, so one case pins
     both halves (the container IS stripped, the class inside a pattern is NOT).
+
+15. **the `built-in-set:` self-check, in both of its new dimensions** (D2b-ii, round 7) — `cx25`: the
+    EQUAL-LENGTH substitution (`**/Cargo.lock` → `**/Cargo.lock.bak`, one literal for one) ⇒
+    `census-exclusion: FAIL` naming the length bucket, its `k-1` shortfall and WHICH member lost its
+    boundary, `assert_never_enqueued` — **plus asserts that the missing list and the literal count stay
+    SILENT**, so the FAIL is attributable to the boundary check alone and the case cannot quietly start
+    passing for the wrong reason; `cx25b`: the identical fixture with an untampered stub ⇒ `built-in-set:
+    OK`, which is what makes `cx25` about the tamper rather than the fixture. `cx26`: a version mismatch
+    ALONE (literals matching the pin exactly) ⇒ FAIL with the version named first and no other divergence
+    fragment; `cx26b`: a target that will not answer `version` ⇒ `built-in-set: UNAVAILABLE`, never `OK`,
+    and not a FAIL; `cx26c`: that same unreadable version on a binary MISSING a pinned pattern ⇒ still
+    FAILs naming the pattern, which is the detector for "withholding the blessing must not disable the
+    check". The stub's planted literals are laid out as the measured **contiguous length-bucket runs**,
+    because a one-per-line planting would model a blob shape the real binary does not have — the same
+    symmetric-mirror error the array/string bug taught, so a `guard_assert_run_mirror_agrees` check keeps
+    the run mirror and the flat pinned mirror describing the same 24 patterns.
 
 The suite runs under the `roborev-lints` gate component, which is in **both** `COMPONENTS` and
 `LITE_COMPONENTS` — so a regression FAILs the fast loop rather than costing a review round. Its tally
