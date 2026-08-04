@@ -1,0 +1,7 @@
+# started on Tue Aug  4 03:36:41 2026
+
+7870063083,,cycles:u,2343507599,100.00,,
+241862987,,instructions:u,2343507599,100.00,0.03,insn per cycle
+28427754,,LLC-loads,2343507599,100.00,,
+22257676,,LLC-load-misses,2343507599,100.00,78.30,of all LL-cache accesses
+22351329,,dTLB-load-misses,2343507599,100.00,,

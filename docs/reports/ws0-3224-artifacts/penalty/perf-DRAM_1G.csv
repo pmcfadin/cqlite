@@ -1,0 +1,7 @@
+# started on Tue Aug  4 03:36:53 2026
+
+9995555371,,cycles:u,3211333656,100.00,,
+606964674,,instructions:u,3211333656,100.00,0.06,insn per cycle
+63100286,,LLC-loads,3211333656,100.00,,
+38094541,,LLC-load-misses,3211333656,100.00,60.37,of all LL-cache accesses
+33212521,,dTLB-load-misses,3211333656,100.00,,

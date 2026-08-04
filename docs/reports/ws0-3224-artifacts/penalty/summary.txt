@@ -1,0 +1,10 @@
+== #3224 penalty probe: serial dependent chase, CPU 8, 20000000 accesses, 2.90 GHz nominal
+level         ws_MiB buf_MiB   cyc_per_acc  ns_per_acc   LLCld_acc LLCmiss_acc dTLBmiss_acc
+L1d_32K          0.0     512          6.11        2.11      0.0000      0.0000      0.0000
+L2_512K          0.5     512         18.57        6.40      0.0005      0.0001      0.0000
+LLC_8M           8.0     528         90.44       31.19      1.0093      0.0063      0.0154
+LLC_32M         32.0     576        114.78       39.58      1.0299      0.0515      0.7634
+DRAM_256M      256.0    1024        393.50      135.69      1.4214      1.1129      1.1176
+DRAM_1G       1024.0    2560        499.78      172.34      3.1550      1.9047      1.6606
+DRAM_2G       2048.0    4608        581.76      200.61      5.0429      2.9016      2.3757
+dTLB-load-misses/access is MEASURED above, so the page-walk bundling is a NUMBER, not a caveat: where it approaches 1.0 the latency for that row bundles a page-table walk and is an UPPER BOUND on the pure DRAM penalty (dTLB is charged separately in AC4, so that term risks double-counting -- the report states which row it charges and why). An upper-bound penalty makes the attributed share larger and the residual smaller, i.e. it is the conservative direction for a claim of 'attributed'.

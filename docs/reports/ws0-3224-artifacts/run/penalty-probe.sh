@@ -52,25 +52,34 @@ for l in open('/proc/cpuinfo'):
 else: print('2.90')")"
 
 echo "== #3224 penalty probe: serial dependent chase, CPU $CPU, ${ACCESSES} accesses, ${CPU_GHZ} GHz nominal" | tee "$OUT/summary.txt"
-printf '%-14s %-10s %14s %14s %12s %12s\n' level working_set cycles_per_access ns_per_access LLC_loads LLC_misses | tee -a "$OUT/summary.txt"
+printf '%-10s %9s %7s %13s %11s %11s %11s %11s\n' \
+  level ws_MiB buf_MiB cyc_per_acc ns_per_acc LLCld_acc LLCmiss_acc dTLBmiss_acc \
+  | tee -a "$OUT/summary.txt"
 
 probe() { # $1 label  $2 mode  $3 size-arg
-  local label="$1" csv="$OUT/perf-$1.csv"
-  if [ "$2" = friendly ]; then
-    # resident working set = --working-kib, buffer must exceed it
-    taskset -c "$CPU" perf stat -x, \
-      -e cycles:u,instructions:u,LLC-loads:u,LLC-load-misses:u -o "$csv" -- \
-      "$BIN" chase --buffer-mib 4096 --working-kib "$3" --accesses "$ACCESSES" \
-             --arm "friendly-$label" >/dev/null 2>&1
-  else
-    taskset -c "$CPU" perf stat -x, \
-      -e cycles:u,instructions:u,LLC-loads:u,LLC-load-misses:u -o "$csv" -- \
-      "$BIN" chase --buffer-mib "$3" --working-kib 256 --accesses "$ACCESSES" \
-             --arm "hostile-$label" >/dev/null 2>&1
-  fi
-  python3 - "$csv" "$label" "$3" "$ACCESSES" "$CPU_GHZ" >> "$OUT/summary.txt" <<'PY'
+  # ONE code path. $2 is the resident working set in KiB; the buffer is always
+  # sized to exceed it, and the chase is ALWAYS confined to that working set.
+  #
+  # HISTORY — a real defect, caught by reading the numbers and fixed here.
+  # This function used to have a second "hostile" branch that passed
+  # `--buffer-mib <N> --working-kib 256`. In cache-hostile.c, `--working-kib`
+  # CONFINES the chase (`--working-kib 0` means "the whole buffer"), so that
+  # branch chased 256 KiB — L2-resident — no matter how big the buffer was. The
+  # DRAM row it produced read **15.12 cycles/access, LOWER than the L2 row's
+  # 18.64**, which is how the bug announced itself: a DRAM latency cheaper than
+  # L2 is impossible, and had the number merely been plausible it would have
+  # been published. That is the same failure class as the flat-staging capture
+  # (rc=0, measuring nothing) and the positive control's two false FAILs.
+  local label="$1" work_kib="$2" csv="$OUT/perf-$1.csv"
+  local buf_mib=$(( (work_kib / 1024) * 2 + 512 ))   # always > working set
+  taskset -c "$CPU" perf stat -x, \
+    -e cycles:u,instructions:u,LLC-loads:u,LLC-load-misses:u,dTLB-load-misses:u \
+    -o "$csv" -- \
+    "$BIN" chase --buffer-mib "$buf_mib" --working-kib "$work_kib" \
+           --accesses "$ACCESSES" --arm "chase-$label" >/dev/null 2>&1
+  python3 - "$csv" "$label" "$work_kib" "$ACCESSES" "$CPU_GHZ" "$buf_mib" >> "$OUT/summary.txt" <<'PY'
 import sys
-csv,label,size,acc,ghz = sys.argv[1:6]
+csv,label,size,acc,ghz,buf = sys.argv[1:7]
 acc=float(acc); ghz=float(ghz)
 vals={}
 for line in open(csv):
@@ -80,24 +89,37 @@ for line in open(csv):
     if len(f)<5: continue
     try: v=float(f[0])
     except ValueError: continue
+    # perf STRIPS the :u modifier from exactly the LLC event names (the bug that
+    # false-FAILed the positive control), so key on the base name.
     vals[f[2].split(':')[0]]=v
 c=vals.get('cycles'); ll=vals.get('LLC-loads'); lm=vals.get('LLC-load-misses')
+dt=vals.get('dTLB-load-misses')
 cpa = c/acc if c else float('nan')
-print('%-14s %-10s %14.2f %14.2f %12.4f %12.4f'
-      % (label, size, cpa, cpa/ghz, (ll or 0)/acc, (lm or 0)/acc))
+ws_mib = float(size)/1024.0
+print('%-10s %9.1f %7s %13.2f %11.2f %11.4f %11.4f %11.4f'
+      % (label, ws_mib, buf, cpa, cpa/ghz, (ll or 0)/acc, (lm or 0)/acc,
+         (dt or 0)/acc))
 PY
 }
 
-probe L1d      friendly 32
-probe L2       friendly 512
-probe LLC_8M   friendly 8192
-probe LLC_32M  friendly 32768
-probe DRAM_2G  hostile  2048
+# Sweep the hierarchy. Sizes in KiB. The DRAM points bracket the LLC->DRAM
+# transition so the plateau is OBSERVED, not assumed from one point.
+probe L1d_32K      32
+probe L2_512K      512
+probe LLC_8M       8192
+probe LLC_32M      32768
+probe DRAM_256M    262144
+probe DRAM_1G      1048576
+probe DRAM_2G      2097152
 
+echo
 cat "$OUT/summary.txt"
 echo
-echo "NOTE: the DRAM row bundles a page-table walk (random 64 B stride over 2 GiB," \
-     "4 KiB pages). Treated as an UPPER BOUND on the pure DRAM penalty; dTLB is" \
-     "charged separately. An upper-bound penalty makes the attributed share larger" \
-     "and the residual smaller, i.e. conservative for an attribution claim." \
+echo "dTLB-load-misses/access is MEASURED above, so the page-walk bundling is a" \
+     "NUMBER, not a caveat: where it approaches 1.0 the latency for that row" \
+     "bundles a page-table walk and is an UPPER BOUND on the pure DRAM penalty" \
+     "(dTLB is charged separately in AC4, so that term risks double-counting --" \
+     "the report states which row it charges and why). An upper-bound penalty" \
+     "makes the attributed share larger and the residual smaller, i.e. it is the" \
+     "conservative direction for a claim of 'attributed'." \
   | tee -a "$OUT/summary.txt"

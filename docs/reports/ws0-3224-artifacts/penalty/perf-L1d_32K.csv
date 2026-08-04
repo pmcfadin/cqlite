@@ -1,0 +1,7 @@
+# started on Tue Aug  4 03:36:00 2026
+
+122210751,,cycles:u,35603258,100.00,,
+120174195,,instructions:u,35603258,100.00,0.98,insn per cycle
+884,,LLC-loads,35603258,100.00,,
+254,,LLC-load-misses,35603258,100.00,28.73,of all LL-cache accesses
+175,,dTLB-load-misses,35603258,100.00,,
