@@ -814,6 +814,147 @@ EOF
   return 0
 }
 
+# Enumerate the `git status --porcelain` entries that concern a TRACKED path under
+# the captured subtree. Prints one "XY <path>" per line. The exit status IS the
+# verdict, and a failed MEASUREMENT is deliberately not a clean reading:
+#   0  measured — no tracked path under the subtree is dirty
+#   2  measured — at least one is dirty; the entries are on stdout
+#   1  COULD NOT MEASURE (git failed, no scratch file, unparseable record); the
+#      reason is on stdout, and every caller treats it as a failure
+#
+# Why `git status` when restore_tracked_dataset_files already runs `git diff`
+# (issue #3245): `git diff` compares the WORKTREE to the INDEX, so a path removed
+# from the index but still present in HEAD — a STAGED DELETION, e.g. after
+# `git rm --cached` — produces NO diff entry: there is no index entry left to
+# differ from. Such a path is not captured either (`ls-files` reads the index), so
+# the `rm -rf` takes it for good and the `git diff` postcondition agrees nothing is
+# wrong. `git status --porcelain` compares HEAD -> index -> worktree and reports it
+# as `D `. Both oracles are kept: neither is a superset of the other.
+#
+# Why the TRACKED subset and not raw porcelain: a fetch legitimately creates
+# hundreds of untracked (and .gitignore'd) files under the dataset root, so
+# asserting raw porcelain emptiness would fail every normal run.
+# `--untracked-files=no` asks git not to enumerate them at all (which is also what
+# keeps this cheap on a fully extracted corpus), and the explicit `??`/`!!` skip
+# below is belt-and-braces for a git that reports them regardless.
+tracked_dataset_dirty_entries() {
+  local scratch record xy path
+  if ! scratch="$(mktemp "${TRACKED_GUARD_STATE_DIR:-${TMPDIR:-/tmp}}/cqlite-tracked-status.XXXXXX")"; then
+    printf 'could not create a scratch file for the status scan\n'
+    return 1
+  fi
+  # --no-optional-locks: `git status` otherwise rewrites the index to refresh its
+  # stat cache — a needless mutation, and a lock, for a read-only oracle. git's own
+  # diagnostic is left on stderr rather than swallowed.
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" --no-optional-locks status \
+    --porcelain -z --untracked-files=no -- ":(literal)${TRACKED_GUARD_REL}" >"${scratch}"; then
+    rm -f "${scratch}"
+    printf "'git status --porcelain' failed for '%s' in '%s'\n" "${TRACKED_GUARD_REL}" "${TRACKED_GUARD_REPO}"
+    return 1
+  fi
+
+  local -a entries=()
+  while IFS= read -r -d '' record; do
+    # Every porcelain v1 record is "XY <path>", so it is at least 4 characters. A
+    # shorter one means this is not the format being parsed; refusing to guess is
+    # mandatory on a data-loss oracle.
+    if [ "${#record}" -lt 4 ]; then
+      rm -f "${scratch}"
+      printf "unparseable 'git status --porcelain -z' record '%s' for '%s'\n" "${record}" "${TRACKED_GUARD_REL}"
+      return 1
+    fi
+    xy="${record:0:2}"
+    path="${record:3}"
+    case "${xy}" in
+      R? | C? | ?R | ?C)
+        # A rename/copy entry carries a SECOND NUL-terminated field (the original
+        # path). Consume it so it can never be misread as the next status record.
+        # shellcheck disable=SC2034  # read only to advance past the field
+        IFS= read -r -d '' _origin_path || _origin_path=""
+        ;;
+    esac
+    # Quoted so `case` matches them LITERALLY — unquoted, `??` is a two-character
+    # glob and would swallow every entry.
+    case "${xy}" in
+      '??' | '!!') continue ;;
+    esac
+    entries+=( "${xy} ${path}" )
+  done <"${scratch}"
+  rm -f "${scratch}"
+
+  [ "${#entries[@]}" -gt 0 ] || return 0
+  printf '%s\n' "${entries[@]}"
+  return 2
+}
+
+# STRUCTURAL pre-destruction refusal (issue #3245): a tracked file under the
+# dataset root that carries a LOCAL modification must stop the fetch.
+#
+# restore_tracked_dataset_files rewrites worktree content FROM THE INDEX, so the
+# `rm -rf` + `restore all` pair SILENTLY REVERTS such a file: the modification
+# exists only in the tree about to be deleted, so there is nothing to restore it
+# FROM; the postcondition then sees a clean subtree and the run reports SUCCESS.
+# These fixtures are hand-regenerated (that is how a golden is produced), so the
+# loss is real and message-free — which is exactly why this is STRUCTURAL and
+# CQLITE_DATASETS_ALLOW_UNPROTECTED does NOT unlock it: an escape hatch on a
+# silent-data-loss guard would be reached for precisely when it must not be.
+#
+# ANY dirty tracked path is refused, including the index states that would in fact
+# survive (a purely staged edit is restored from the index unchanged). That
+# over-refusal is deliberate: separating the safe index states from the lossy ones
+# (`MD`, `AM`, a staged rename, an unborn HEAD reporting every path as `A `) is a
+# per-state analysis whose failure mode is SILENT loss, while over-refusing costs
+# one `git commit`/`git stash` and says so.
+#
+# Only the DESTRUCTIVE path calls this. `--verify-only` and the warm-cache path
+# never reach the `rm -rf`, and the pre-flight `restore missing-only` skips any
+# file that exists, so both stay modification-safe and ungated.
+refuse_modified_tracked_dataset_files() {
+  [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
+  [ "${TRACKED_GUARD_COUNT}" -gt 0 ] || return 0
+
+  local entries rc=0 count sample
+  entries="$(tracked_dataset_dirty_entries)" || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    2)
+      count="$(printf '%s\n' "${entries}" | wc -l | tr -d ' ')"
+      sample="$(printf '%s\n' "${entries}" | head -3 | tr '\n' ';' | sed 's/;$//')"
+      refuse_structural_dataset_root "${count} tracked file(s) under '${TRACKED_GUARD_REL}' carry LOCAL MODIFICATIONS, staged or unstaged (${sample}) — this script deletes that directory and rebuilds those files from the git INDEX, so the modification would be SILENTLY REVERTED and the run would still report success (issue #3245). Commit them, stash them (git stash push -- '${TRACKED_GUARD_REL}'), or discard them (git restore --staged --worktree -- '${TRACKED_GUARD_REL}') first. Nothing has been deleted"
+      return 0
+      ;;
+    *)
+      refuse_structural_dataset_root "could not determine whether the tracked files under '${TRACKED_GUARD_REL}' carry local modifications (${entries}) — an unmeasured tree is not a clean one, and a local modification would be silently reverted by the delete-and-restore (issue #3245). Nothing has been deleted"
+      return 0
+      ;;
+  esac
+}
+
+# The porcelain half of the `all`-mode postcondition (issue #3245). Returns 1 (never
+# `exit`) so it is safe on the abort/trap path, like its caller. See
+# tracked_dataset_dirty_entries for why `git diff` alone cannot see a staged
+# deletion of a tracked fixture.
+verify_tracked_status_clean_or_fail() {
+  [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
+  [ "${TRACKED_GUARD_COUNT}" -gt 0 ] || return 0
+
+  local entries rc=0
+  entries="$(tracked_dataset_dirty_entries)" || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    2)
+      echo "ERROR: dataset fetch left git-tracked paths under ${TRACKED_GUARD_REL} modified or DELETED as reported by 'git status --porcelain' (issue #3245; 'git diff' alone cannot see a staged deletion):" >&2
+      printf '%s\n' "${entries}" | head -20 >&2
+      echo "ERROR: recover with: git -C '${TRACKED_GUARD_REPO:-.}' restore --staged --worktree -- '${TRACKED_GUARD_REL:-test-data/datasets}'" >&2
+      return 1
+      ;;
+    *)
+      echo "ERROR: could not verify tracked-path status under ${TRACKED_GUARD_REL} with 'git status --porcelain' (issue #3245): ${entries}" >&2
+      return 1
+      ;;
+  esac
+}
+
 # Restore the captured tracked files from the index.
 #   missing-only  only files that are absent on disk (pre-flight repair of an
 #                 earlier run's damage, and the abort path; never clobbers a
@@ -871,6 +1012,10 @@ restore_tracked_dataset_files() {
       printf '%s\n' "${dirty}" | head -20 >&2
       return 1
     fi
+    # ...and the porcelain oracle AC3 actually asks for (issue #3245): the `git
+    # diff` above is worktree-vs-index, so a STAGED DELETION of a tracked path is
+    # structurally invisible to it. An addition, not a replacement.
+    verify_tracked_status_clean_or_fail || return 1
   fi
   return 0
 }
@@ -1137,6 +1282,14 @@ capture_tracked_dataset_files
 # ...and prove every captured blob is READABLE in the restore's own environment
 # before the deletion, rather than discovering it afterwards.
 verify_captured_blobs_readable
+
+# ...and refuse outright if any tracked fixture carries a LOCAL modification: the
+# restore rebuilds from the INDEX, so the delete-and-restore would silently REVERT
+# it and still report success (issue #3245). Placed here — after the re-capture,
+# immediately before the destructive window opens — so the verdict is about the
+# tree state at deletion time; the warm-cache and --verify-only paths exit above
+# and are unaffected.
+refuse_modified_tracked_dataset_files
 
 # From here until the restore below verifies the tracked subtree clean, an abort
 # on ANY path must restore on the way out — see cleanup_fetch_temporaries.

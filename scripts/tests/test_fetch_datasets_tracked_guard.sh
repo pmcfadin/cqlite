@@ -1029,9 +1029,18 @@ else
 fi
 
 # --- Case 20b: NON-VACUITY for the readability precheck ------------------------
+# TWO guards are disabled, deliberately: #3245's modification check runs `git
+# status`, which CANNOT read HEAD when the object store is unreachable, and its
+# fail-closed reading of an unmeasurable tree refuses the fetch before the
+# destructive window this case is about. So the mutant has to disable it as well to
+# reach the window the readability precheck owns — which is itself evidence that
+# the #3245 check fails closed on an unreadable store.
 MUTANT_NO_PRECHECK="$T/fetch-datasets-mutant-no-precheck.sh"
-sed 's/^verify_captured_blobs_readable$/: mutant-no-readability-precheck/' "$FETCH" >"$MUTANT_NO_PRECHECK"
-if ! cmp -s "$FETCH" "$MUTANT_NO_PRECHECK"; then
+sed -e 's/^verify_captured_blobs_readable$/: mutant-no-readability-precheck/' \
+    -e 's/^refuse_modified_tracked_dataset_files$/: mutant-no-modification-check/' \
+    "$FETCH" >"$MUTANT_NO_PRECHECK"
+if grep -q ': mutant-no-readability-precheck' "$MUTANT_NO_PRECHECK" \
+  && grep -q ': mutant-no-modification-check' "$MUTANT_NO_PRECHECK"; then
   ok "non-vacuity: built a precheck-disabled mutant"
   R20B="$T/case20b-repo"
   external_objects_repo "$R20B"
