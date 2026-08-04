@@ -337,6 +337,41 @@
 #                      real SIGINT probe on the driver's own trap wiring. Hermetic:
 #                      synthetic result dirs + synthetic perf CSVs, no
 #                      cargo/perf/sudo/corpus/network, never root.
+#                      Also runs scripts/tests/test_ws0_cpu_pinning_guards.sh (#3272
+#                      item 10) — the MEASUREMENT-APPARATUS half of the same rig, split
+#                      out because it asks whether the observations are of the RIGHT
+#                      THING (the reporter test asks what the rig does with them) and
+#                      uses disjoint fixtures. Two guards, both directions each: the
+#                      VERIFIED-SIBLING taskset check (driven over a FAKE 4-core/8-thread
+#                      sysfs tree via lib-cpu.sh's injectable topology root — it must
+#                      ACCEPT genuine sibling pairs and REFUSE two-different-cores, a
+#                      pair valid on another box's layout, a pair-plus-stray, a lone CPU,
+#                      a cross-core range, an empty spec and an unreadable entry; the
+#                      override itself fails closed in a measurement run, refusal asserted
+#                      to PRECEDE the pinning check, so it can never be the bypass), and
+#                      the `perf stat -p` SELF-GREP, whose two REAL BYPASSES this test
+#                      found — an ATTACHED `-p<pid>` (the pattern needed a trailing space)
+#                      and ANY line mentioning "self-check" (the `grep -v` discarded by
+#                      CONTENT, so a comment suppressed the guard). Hermetic: fake sysfs +
+#                      driver copies under $TMPDIR; no perf/sudo/taskset/root/hardware.
+#                      Also runs `cargo test -p ws0-corpus-gen` (#3272 items 8-9) — a
+#                      tools/* package NO other component and no CI lane compiles, so
+#                      without this hook the corpus determinism oracle would be a test
+#                      nothing executes (#1597/#1618 gate-wiring class). It REGENERATES
+#                      the corpus (two, then three, 1,000-row generations, ~0.3s) and
+#                      BYTE-COMPARES every emitted component off disk; corroborates the
+#                      generator's self-reported sha256 against an independent hash
+#                      (anti-circularity); proves the comparison can FAIL (different seed
+#                      diverges, a one-byte flip is reported at its offset, a
+#                      missing/extra component is reported); and asserts the in-source
+#                      measurement-corpus pin (4,000,000 rows / 40,000 partitions /
+#                      693.69 B/row / sha256 4a903f6f… / digest 0x0390bfbb81a23fa1 over
+#                      31,250 batches) equals the committed corpus-identity.json field for
+#                      field, with a per-field perturbation case proving THAT comparison
+#                      can fail. Measured non-vacuity: a wall-clock write timestamp, a
+#                      per-generation buffer-reuse tail, and a fabricated self-reported
+#                      digest each left all 34 pre-existing unit tests GREEN while these
+#                      FAIL. Hermetic: tempdir corpora, no datasets/network.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -5613,6 +5648,83 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 measurement-rig integrity guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 MEASUREMENT-APPARATUS guards (#3272, item 10): the sibling of the reporter
+  # test above, split out because it covers a different question over disjoint
+  # fixtures — that one asks what the rig DOES with its observations, this one asks
+  # whether the observations are of the right thing at all. Two guards, both
+  # directions each:
+  #   * the VERIFIED-SIBLING taskset check — the load-bearing assumption of the
+  #     whole same-session both-arm methodology. If the two pinned CPUs are not one
+  #     physical core's hyperthreads, `perf stat -C` counts two different cores and
+  #     every per-core figure is a figure of something else, silently. The check had
+  #     never been OBSERVED refusing anything (it read a hardcoded /sys path, so it
+  #     needed a particular CPU layout to test); lib-cpu.sh now takes an injectable
+  #     topology root and this drives it over a FAKE 4-core/8-thread sysfs tree: it
+  #     must ACCEPT genuine sibling pairs and REFUSE two-different-cores, a
+  #     valid-on-another-box pair, a pair-plus-stray, a lone CPU, a cross-core range,
+  #     an empty spec and an unreadable topology entry. The override itself fails
+  #     closed in a measurement run (asserted, incl. that the refusal PRECEDES the
+  #     pinning check), so it can never become the bypass.
+  #   * the `perf stat -p` SELF-GREP — per-process counting measured >2x observer
+  #     cost, so spec R2 mandates CPU-wide `-C`. Driving the guard over injected
+  #     copies found TWO REAL BYPASSES in it: an ATTACHED `-p<pid>` (the pattern
+  #     required a trailing space) and ANY line mentioning "self-check" (the
+  #     `grep -v` discarded by CONTENT, so a comment suppressed the guard). Both now
+  #     fire; the shipped driver must still pass its own check, so the guard cannot
+  #     be one that reds unconditionally.
+  # Hermetic: a fake sysfs tree + driver copies under $TMPDIR. No perf, sudo,
+  # taskset, root, real multi-socket hardware, corpus, network or cargo.
+  echo ">>> [$name] bash scripts/tests/test_ws0_cpu_pinning_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 cpu-pinning / perf-invocation guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
+  # `tools/*` package tests are run by NO other gate component and by no CI lane
+  # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so
+  # without this hook the determinism oracle would be a test nothing executes —
+  # the #1597/#1618 gate-wiring class. What it pins:
+  #   * REGENERATE-AND-BYTE-COMPARE: two (and three) independent generations from
+  #     the recorded seed, byte-compared file by file over the RAW BYTES read off
+  #     disk. The committed corpus's "byte-identical across three generations"
+  #     claim was PROSE ONLY; `--verify-against` and the row-content unit tests are
+  #     invariant to a whole class of defects (measured: a wall-clock write
+  #     timestamp, and a per-generation buffer-reuse tail, each left all 34
+  #     pre-existing unit tests GREEN while this test FAILs).
+  #   * ANTI-CIRCULARITY: the generator's self-reported `data_db_sha256` is
+  #     corroborated against an independently computed hash of the file, so the pin
+  #     every future comparison rests on is not a number the generator asserted
+  #     about itself (measured: a fabricated constant digest also survived all 34).
+  #   * NON-VACUITY: a different SEED must diverge, a one-BYTE flip must be
+  #     reported at its offset, and a missing/extra component must be reported — so
+  #     the equality is not one that would pass on any two inputs.
+  #   * The MEASUREMENT-CORPUS PIN: the in-source constants (4,000,000 rows /
+  #     40,000 partitions / 693.69 B/row / sha256 4a903f6f… / digest
+  #     0x0390bfbb81a23fa1 over 31,250 batches) must equal the committed
+  #     corpus-identity.json field for field, with a perturbation case per field
+  #     proving that comparison can FAIL. The full-size verification is
+  #     #[ignore]d (it writes ~2.8 GB) and carries the operator command.
+  # Cheap and hermetic: 1,000-row corpora in tempdirs (~0.3s total), no datasets,
+  # no network. A build failure is a FAILURE, never a skip.
+  echo ">>> [$name] cargo test -p ws0-corpus-gen (determinism byte-compare + corpus pin)"
+  if ! (cd "$REPO_ROOT" && cargo test -q -p ws0-corpus-gen) >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 corpus determinism / pin); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
