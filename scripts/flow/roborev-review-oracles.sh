@@ -1450,7 +1450,8 @@ roborev_check_census_exclusion() {
   local _rx_error="" _rx_found=0 _rx_trailing="" _rx_corroboration="UNAVAILABLE" \
     _rx_drift="" _rx_drift_cwd="" _rx_unquoted="" _rx_root="" _rx_root_error="" \
     _rx_src_label="" _rx_builtin_state="UNAVAILABLE" _rx_builtin_count="" \
-    _rx_builtin_count_note=""
+    _rx_builtin_count_note="" _rx_builtin_version="" _rx_builtin_version_note="" \
+    _rx_builtin_bucket_note=""
   local -a _rx_builtin_missing=()
   local line
 
