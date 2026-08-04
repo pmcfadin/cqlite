@@ -369,10 +369,38 @@ else
     bad 'sed_inplace: a no-op patch changed the file'
   fi
   # And no temp spill: the helper must not leave its scratch file behind on the failure path.
-  if [ -z "$(find "$tmp" -maxdepth 1 -name '*.sed-inplace.*' 2>/dev/null)" ]; then
-    ok 'sed_inplace: no scratch file is left behind on the no-op path'
+  #
+  # AFFIRMATIVE MEASUREMENT (CLAUDE.md: "never derive a pass from the ABSENCE of a bad
+  # signal"). The obvious spelling — `[ -z "$(find … 2>/dev/null)" ]` — reads EMPTY OUTPUT as
+  # "no spill", so an enumeration that never ran (unreadable dir, a `find` that errored, a
+  # mistyped path) reports the same green as a genuinely clean dir. That is the exact vacuous
+  # portability pass this file exists to prevent, one level down. So the enumeration is
+  # (1) first shown to DETECT a planted spill, and (2) then required to EXIT ZERO before its
+  # empty output is allowed to mean anything; its stderr is captured, never discarded.
+  #
+  # `-maxdepth` is deliberately KEPT: it is NOT a GNU extension — FreeBSD/macOS find(1)
+  # documents `-maxdepth n` ("Always true; descend at most n directory levels below the
+  # command line arguments"), and scripts/agent-gate.sh already relies on it fleet-wide.
+  _spill_err="$tmp/spill-find.err"
+  scratch_scan() { find "$tmp" -maxdepth 1 -name '*.sed-inplace.*' 2>"$_spill_err"; }
+
+  _decoy="$tmp/planted.sed-inplace.control"
+  : >"$_decoy"
+  _ctl_spill=$(scratch_scan); _ctl_spill_rc=$?
+  rm -f "$_decoy"
+  if [ "$_ctl_spill_rc" -eq 0 ] && printf '%s\n' "$_ctl_spill" | grep -qF 'planted.sed-inplace.control'; then
+    ok 'sed_inplace control: the scratch-file enumeration detects a PLANTED spill (so its clean verdict below is a measurement, not an empty pipe)'
   else
-    bad 'sed_inplace: a .sed-inplace.* scratch file survived the no-op path'
+    bad "sed_inplace control: the scratch-file enumeration did not find a planted spill (rc $_ctl_spill_rc, stderr: $(tr '\n' ' ' <"$_spill_err")) — every no-spill verdict from it would be vacuous"
+  fi
+
+  _spill=$(scratch_scan); _spill_rc=$?
+  if [ "$_spill_rc" -ne 0 ]; then
+    bad "sed_inplace: the scratch-file enumeration itself FAILED (rc $_spill_rc, stderr: $(tr '\n' ' ' <"$_spill_err")) — a failure to measure is not a measurement, so this is NOT reported as 'no spill'"
+  elif [ -n "$_spill" ]; then
+    bad "sed_inplace: a .sed-inplace.* scratch file survived the no-op path: $(printf '%s' "$_spill" | tr '\n' ' ')"
+  else
+    ok 'sed_inplace: no scratch file is left behind on the no-op path (enumeration exited 0, having first been shown to detect a planted spill)'
   fi
 
   # --- AC2 IN THE CASES: the four cases must STILL verify the mutation landed. Asserted on
