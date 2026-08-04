@@ -68,9 +68,10 @@ documented false-PASSes is worse than no guard, because it invites reliance it c
 Subtraction, by contrast, cannot add a false-PASS: with nothing predicted, nothing is excused.
 
 **This IS a reduction in coverage.** It is an acceptable one, and it is stated plainly rather than
-argued away. (An earlier residual under AC4's second branch was legitimately *not* a reduction — that
-was a disjunction met by its other branch. That reasoning does NOT apply here and must not be carried
-over: here the requirements are withdrawn outright.)
+argued away. (An earlier draft argued the opposite about a residual under AC4's SECOND BRANCH, on the
+ground that a disjunction met by its other branch loses nothing. AC4 now has NO satisfied branch, so that
+reasoning is VOID and SHALL NOT be carried over — here the requirements are withdrawn outright, and no
+statement anywhere in this change may describe THIS removal as "not a reduction in coverage".)
 
 **The absent coverage, named in one line:** there is no automated guard against a future `.roborev.toml`
 re-broadening; the regression it would catch is a hand edit to a version-controlled file on `main`, and
@@ -585,15 +586,19 @@ FORBIDDEN, and the declared globs SHALL be held in a form that cannot be PATHNAM
 current directory (they contain `*`; an unquoted string iteration silently reduces them to the directories
 that happen to exist in the checkout).
 
-**THE MIRROR SHALL BE ASSERTED STRUCTURALLY AGAINST THE COMMITTED CONFIGURATION.** The classification
-constants and `.roborev.toml`'s `exclude_patterns` are the SAME FACT WRITTEN TWICE, and a one-sided edit is
-the standing hazard: it surfaces as a `prompt-content:` FAIL on an unrelated report PR, a whole review
-round away from its cause. The regression suite SHALL therefore DERIVE the expected pattern set from the constants and assert
-SET EQUALITY (order-insensitive, because the file is machine-managed) against the committed
-`.roborev.toml`, parsed with the wrapper's OWN TOML parser rather than a second ad-hoc one. The assert
-SHALL be non-vacuous (an empty derived set SHALL NOT compare equal to an empty parse and pass) and SHALL
-additionally reject the retired forms — a blanket `docs/**` and any `docs/**/*.<ext>` sweep — judged on the
-PARSED pattern set, never by grepping the file, since the file DOCUMENTS the forms it retired.
+**THE MIRROR IS ONE FACT IN TWO REPRESENTATIONS, MAINTAINED BY HAND, AND THAT SHALL BE DECLARED AT THE
+CODE.** The classification constants and `.roborev.toml`'s `exclude_patterns` are the SAME FACT WRITTEN
+TWICE, and a one-sided edit is the standing hazard: it surfaces as a `prompt-content:` FAIL on an unrelated
+report PR, a whole review round away from its cause. Both representations SHALL therefore be edited
+TOGETHER, and each SHALL carry a comment saying so and naming its twin.
+
+**There is NO automated drift assert, and that SHALL be recorded as a KNOWN GAP rather than left to be
+discovered.** One existed briefly — it re-derived the expected pattern set from the constants and asserted
+set equality against the committed `.roborev.toml` — and it was REMOVED with the exclusion-modelling
+subsystem it read the file through (a bash TOML parser over three config sources), because that subsystem
+produced false-PASSes faster than review rounds could close them. Closing the gap with a guard whose own
+correctness is establishable is deferred to issue **#3283**. Until then drift surfaces the slow way, under
+`prompt-content:`, and the declaration SHALL name that path so the FAIL is diagnosable.
 
 A file with an executable/config-as-code extension anywhere in the tree —
 including `docs/foo.py`, `docs/reports/*-artifacts/**/*.sh`, `*.bt` and `.github/workflows/*.yml` — SHALL
@@ -828,66 +833,62 @@ HEAD; and (o) pins the job-record read: `PASS` on a complete record, `PASS` when
 in the NESTED job row of a `show --json` payload whose outer review row lacks them, and `DEGRADED` plus
 `sha-assert: FAIL (job record unavailable …)` when no source answers.
 
-The check SHALL additionally pin the exclusion reconciliation, which requires the fixture helper to write
-the work repository's OWN roborev configuration (without that capability a configuration regression is not
-expressible at all, which is why the defect could ship): (p) a fixture diff of EXECUTABLES under
-`docs/reports/*-artifacts/` (`.py`, `.sh`, `.bt`) under the narrowed configuration yields `code-free: PASS`
-and `census-exclusion: PASS` and IS enqueued; (q) a PROSE-ONLY diff under `docs/` still yields
-`code-free: FAIL` with NO review enqueued, so the narrowing did not invert the guard; (r) a configuration
-whose `exclude_patterns` WOULD swallow census code — notably a restored `['docs/**', '*.md']` — yields
-`census-exclusion: FAIL` NAMING the swallowed paths, `RESULT: FAIL` and NO review enqueued; (s) an
-`exclude_patterns` key present with an unparseable value FAILs as `exclusion set unreadable` while an
-absent key/configuration file reads `PASS (no exclusion patterns configured)`; (t) a census path containing
-SPACES and a literal double quote is compared correctly (the NUL-safety regression, which a
-non-`-z` comparison would silently mis-handle as a false PASS); (u) the corroboration states, ALL FOUR of
-them and in both scopes — with patterns PARSED, a stub that does not answer `config get` reports
-`UNAVAILABLE` without failing; with an EMPTY parse the same silence is NON-PASSING with no review enqueued,
-while a stub ANSWERING an empty list PASSes and IS enqueued (asserted positively, since a
-"no review was enqueued" assert is only evidence once its sibling is shown to reach the enqueue), and one
-reporting a pattern absent from the parsed set FAILs as `exclusion set drift`; and (v) the ported
-`FormatExcludeArgs` construction
-itself — a slash-containing pattern leaves a NESTED `docs`-directory census path SURVIVING (no false FAIL),
-a bare directory name excludes its whole subtree via the `<p>/**` sibling pathspec, a leading-`/` pattern
-excludes only the root-level path while its slash-less twin excludes at any depth, a TRAILING-slash pattern
-FAILs naming the recursive inversion, and an empty-after-trim pattern is skipped rather than treated as a
-match-everything.
+The check SHALL additionally pin the DOCS-CENSUS CLASSIFICATION, which is the half of the narrowing that
+the wrapper itself decides: (p) a fixture diff of EXECUTABLES under `docs/reports/*-artifacts/`
+(`.py`, `.sh`, `.bt`) yields `code-free: PASS` and IS enqueued; (q) a PROSE-ONLY diff under `docs/` still
+yields `code-free: FAIL` with NO review enqueued, so the narrowing did not invert the guard; and (r) a
+census path containing SPACES and a literal double quote is compared correctly (the NUL-safety regression,
+which a non-`-z` comparison would silently mis-handle as a false PASS). It SHALL NOT pin any PREDICTION of
+roborev's effective exclusion set: the cases that did — a configured-swallow FAIL, the unparseable/absent
+exclusion-set forms, exclusion-set drift, the binary-corroboration states, the ported pathspec
+construction, the three-config-source union, the trailing-slash inversion and the built-in lockfile
+residual — are REMOVED with the oracle they exercised (deferred to issue #3283), and the fixture helper
+consequently no longer writes a `.roborev.toml` into a fixture nor stubs `roborev config get`, because
+nothing reads either one.
 
 The check SHALL additionally pin the DECLARED RESIDUAL and the header-shape normalisation:
-(w) a #3096-shaped census (`docs/reports/ws0-3096-artifacts/*.json` + a `Cargo.lock` change + a `.rs` file)
-against a prompt carrying only the `.rs` file yields `census-exclusion: PASS (2/2 …)` and
+(s) a #3096-shaped census (`docs/reports/ws0-3096-artifacts/*.json` + a `Cargo.lock` change + a `.rs` file)
+against a prompt carrying only the `.rs` file yields
 `prompt-content: FAIL (1/2 …)` naming `Cargo.lock`, with `RESULT: FAIL` and no "not expected" clause
-anywhere; (x) the SAME census against a prompt that DOES carry the lockfile yields
-`prompt-content: PASS (2/2 …)` and `RESULT: PASS`, so (w)'s FAIL is attributable to the prompt's contents
+anywhere; (t) the SAME census against a prompt that DOES carry the lockfile yields
+`prompt-content: PASS (2/2 …)` and `RESULT: PASS`, so (s)'s FAIL is attributable to the prompt's contents
 and to nothing else — the both-directions control without which a declared residual is indistinguishable
-from an unnoticed one; (y) `prompt-content:` refuses to report a pass when no census path is checkable, driven
+from an unnoticed one; (u) `prompt-content:` refuses to report a pass when no census path is checkable, driven
 DIRECTLY against the function so the assertion survives the upstream pre-enqueue FAIL that makes the state
-unreachable through the wrapper; and (z) a code census path containing SPACES, one under a space-bearing
+unreachable through the wrapper; and (v) a code census path containing SPACES, one under a space-bearing
 DIRECTORY, and one with a NON-ASCII (octal-escaped) name each yield `prompt-content: PASS` and
 `RESULT: PASS`.
 
 The check SHALL additionally pin the CLOSED VERDICT GRAMMAR and the affirmation backstop, which are
-properties of the wrapper's own decision point rather than of any fixture: (aa) a per-check key holding a
-value outside the documented grammar FAILs the run and is named; and (bb) a verdict-carrying check that
-returns before assigning its key FAILs the run rather than passing on its initial `SKIP`. Because neither
-state is reachable through a fixture, both SHALL be exercised against a PATCHED COPY of the three flow
+properties of the wrapper's own decision point rather than of any fixture: (w) a per-check key holding a
+value outside the documented grammar FAILs the run and is named; (x) a verdict-carrying check that
+returns before assigning its key FAILs the run rather than passing on its initial `SKIP`; and (y) the two
+NEAR-PREFIX mutants — `PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN` — are UNRECOGNISED and FAIL
+in both arms, so neither the grammar scan nor the backstop can be satisfied by a value that merely BEGINS
+with a recognised token. Because none of these states is reachable through a fixture, all
+SHALL be exercised against a PATCHED COPY of the three flow
 scripts, and the copy SHALL be shown to reach `PASS` UNPATCHED on the same fixture — with the patch
-verified to have really changed the file — before either assertion is believed: an assert that a copy FAILs
+verified to have really changed the file — before any assertion is believed: an assert that a copy FAILs
 is otherwise satisfied by a copy that failed because it was copied wrong, which is a probe failing in the
-direction that looks like success. Both SHALL ALSO be pinned STRUCTURALLY against the scan statement (that
-the positive arm exists, that its fallback sets the failure flag, and that the backstop names all seven
-deterministic keys), because a behavioural case cannot see a future edit that deletes the arm for a key it
+direction that looks like success. They SHALL ALSO be pinned STRUCTURALLY against the scan statement (that
+the positive arm exists, that its fallback sets the failure flag, that both arms match the verdict TOKEN
+exactly rather than by prefix, and that the backstop names all SIX
+deterministic keys with no exemption), because a behavioural case cannot see a future edit that deletes the arm for a key it
 does not exercise.
 
+The suite SHALL report its own pass/fail tally, which at this change's completion stands at **477**
+assertions passed and 0 failed.
+
 **Every hostile-path or hostile-verdict case SHALL assert the terminal `RESULT:` and, where the path
-reaches the reviewer, `prompt-content:` — not one intermediate key alone.** A case that asserted only
-`census-exclusion:` reported two passes while the SAME fixture false-FAILed `prompt-content:` and the run
+reaches the reviewer, `prompt-content:` — not one intermediate key alone.** A case that asserted only an
+intermediate pre-enqueue key reported two passes while the SAME fixture false-FAILed `prompt-content:` and the run
 terminated `RESULT: FAIL`: a case that passes while the behaviour it names is broken is worse than no case,
 because it is read as coverage. The suite's stub SHALL emit a VALID JSON job record for a prompt containing
 double quotes, so a quote-bearing prompt cannot degrade the record and mask the very comparison the case
 exists to pin.
 
-The check SHALL also pin the block's key ORDER — including `census-exclusion:` appearing EXACTLY ONCE
-immediately after `code-free:` — the distinctness of its header from all three
+The check SHALL also pin the block's key ORDER — all twenty-two keys, each appearing EXACTLY ONCE, with
+`code-free:` immediately after `census-check:` — the distinctness of its header from all three
 agent-gate summary headers, the usage-error path emitting no block, and hermeticity itself. It SHALL be
 registered in the agent gate's shell-tooling component set such that it runs in the fast `--lite` loop
 as well as the full gate, so a regression FAILs the fast loop rather than costing a review round. The
@@ -896,7 +897,7 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 
 #### Scenario: Every trigger class is asserted against the block's own keys
 - **WHEN** the regression check runs
-- **THEN** it asserts each of the classes (a) through (z) above against the wrapper's terminal `RESULT`, its per-check key values and its exit code, and it reports an explicit pass/fail tally so a partial run cannot read as a pass
+- **THEN** it asserts each of the classes (a) through (y) above against the wrapper's terminal `RESULT`, its per-check key values and its exit code, and it reports an explicit pass/fail tally (477 passed, 0 failed) so a partial run cannot read as a pass
 
 #### Scenario: The total-swallow and partial-swallow cases are both pinned
 - **GIVEN** two hermetic fixtures under the narrowed configuration — one whose census is a `Cargo.lock` bump beside a prose edit, one whose census is the same lockfile beside a `.rs` file
@@ -905,7 +906,7 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 
 #### Scenario: A hostile-path case asserts the verdict, not one intermediate key
 - **WHEN** the suite's hostile-path cases (spaces, a literal quote, a space-bearing directory, a non-ASCII name) are inspected
-- **THEN** each asserts the terminal `RESULT:` and the `prompt-content:` value in addition to `census-exclusion:`, and the stub emits a VALID JSON record for a quote-bearing prompt so the record cannot degrade and mask the comparison
+- **THEN** each asserts the terminal `RESULT:` alongside the `prompt-content:` value rather than an intermediate key alone, and the stub emits a VALID JSON record for a quote-bearing prompt so the record cannot degrade and mask the comparison
 
 #### Scenario: The zero-subject refusal is driven directly against the check
 - **GIVEN** that the pre-enqueue `code-free:` FAIL makes a zero-subject `prompt-content:` unreachable through the wrapper
@@ -913,34 +914,17 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 - **THEN** it asserts `FAIL (no code census path was checkable — a 0/0 is never a pass)` and asserts the ABSENCE of any `PASS (0/0` form, so removing the upstream FAIL cannot silently restore the vacuous pass
 
 #### Scenario: Executables under a docs artifact directory are enqueued, prose under docs is not
-- **GIVEN** two hermetic fixtures under the narrowed configuration — one whose diff is `.py`/`.sh`/`.bt` files under `docs/reports/x-artifacts/`, one whose diff is only markdown under `docs/`
+- **GIVEN** two hermetic fixtures — one whose diff is `.py`/`.sh`/`.bt` files under `docs/reports/x-artifacts/`, one whose diff is only markdown under `docs/`
 - **WHEN** the regression check runs the wrapper against each
-- **THEN** the first reports `code-free: PASS`, `census-exclusion: PASS` and IS enqueued, while the second reports `code-free: FAIL` and is asserted never enqueued
+- **THEN** the first reports `code-free: PASS` and IS enqueued, while the second reports `code-free: FAIL` and is asserted never enqueued
 
-#### Scenario: A configuration regression is caught by the fixture's own roborev configuration
-- **GIVEN** a hermetic fixture that writes its own `.roborev.toml` with `exclude_patterns = ['docs/**', '*.md']` and a census of executables under `docs/`
-- **WHEN** the regression check runs the wrapper
-- **THEN** `census-exclusion:` FAILs naming the swallowed paths, the terminal `RESULT:` is `FAIL`, nothing is enqueued, and the case is expressible precisely because the fixture can supply its own configuration
+#### Scenario: The suite neither configures nor stubs an exclusion prediction
+- **WHEN** the regression suite is inspected after the oracle's removal
+- **THEN** no fixture writes a `.roborev.toml`, no stub answers `roborev config get`, and no case asserts a predicted exclusion set — because nothing in the wrapper reads any of them, and a fixture pinning a behaviour no code has is read as coverage while covering nothing
 
-#### Scenario: The ported pathspec construction is pinned case by case
-- **GIVEN** hermetic fixtures configuring, separately, `docs/**/*.json` with a census path under a nested `docs` directory, a bare directory name, `/README.md` versus `README.md`, `docs/` with a trailing slash, and a whitespace-only pattern
-- **WHEN** the regression check runs the wrapper against each
-- **THEN** the nested path is reported SURVIVING, the bare directory name excludes its whole subtree, the leading-`/` form excludes only the root-level path while its slash-less twin excludes at any depth, the trailing-slash form FAILs naming the recursive inversion, and the whitespace-only pattern is skipped — so a future edit that "simplifies" the construction away from `FormatExcludeArgs` FAILs the fast loop
-
-#### Scenario: The exclusion cases stay hermetic
-- **WHEN** the new cases run on a machine with no network access and no real roborev binary installed
-- **THEN** they complete using the stub reviewer, the fixture's own git repository and the fixture's own configuration file, and a case whose parse is NON-EMPTY reports the corroboration as `UNAVAILABLE` rather than causing a failure or a skip
-- **AND** the stub's DEFAULT SHALL be a build that ANSWERS `config get` (which is what the pinned binary does), so a case reaches the non-answering `UNAVAILABLE` state only by asking for it explicitly and stating why — the empty-parse PASS requires an answer, so a silently non-answering default would make every configuration-less case assert against a state the real binary never produces
-
-#### Scenario: Every wrapper invocation in the suite redirects HOME
-- **GIVEN** the reconciliation check reads the GLOBAL `$HOME/.roborev/config.toml` into the effective set
-- **WHEN** the regression suite is inspected for invocations of the wrapper, including the hand-rolled ones that do not go through the shared runner
-- **THEN** every one of them redirects `HOME` to the throwaway fixture home, so a host whose real global config carries a pattern cannot make a case fail on `census-exclusion:` before its own assertion is ever reached
-
-#### Scenario: No case blesses a guard that has silently self-disabled
-- **WHEN** the cases that expect `PASS (no exclusion patterns configured…)` are inspected
-- **THEN** each of them supplies a binary that ANSWERS with an empty list and asserts the corroboration is `OK`, so no case in the suite records a green verdict for the state a guard reaches when it fails to recognise a configured key
-- **AND** that expectation is no longer carried by the cases alone: the wrapper itself refuses the un-corroborated form, so a future case that forgot the answering stub would FAIL rather than record a green verdict for it
+#### Scenario: The near-prefix mutants are pinned as cases, not left to the grammar's wording
+- **WHEN** the suite's verdict-grammar cases are inspected
+- **THEN** they include the two near-prefix mutants (`PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`), each asserted to FAIL the run, be NAMED, and still appear in the block, and a structural assert additionally pins that both arms reduce a value to its verdict token before comparing rather than matching a `PASS*` glob
 
 #### Scenario: The tally line cannot be mistaken for a gate or wrapper verdict
 - **WHEN** the regression check finishes
@@ -991,23 +975,30 @@ wording FORBIDS the form now known to be correct:
    (`prompt-content: FAIL (136/136 code census paths absent)`, 15,443 input / 89 output tokens). Doctrine
    SHALL state the configured-pathspec mechanism, that a markdown-only diff is empty because `*.md` is
    configured (not because the reviewer recognised prose), that the wrapper's `prompt-content:` check
-   covers the CODE subset of the census, and that the deterministic pre-enqueue `code-free:` FAIL plus the
-   `census-exclusion:` reconciliation are the correct responses.
+   covers the CODE subset of the census, and that the deterministic pre-enqueue `code-free:` FAIL is the
+   correct response to a code-free census. Doctrine SHALL FURTHER state that **NOTHING predicts roborev's
+   effective exclusion set pre-enqueue** — the oracle that did was built under #3229 and removed, deferred
+   to **#3283**, with the built-in (unconfigured) patterns deferred to **#3278** — and that a
+   `prompt-content:` FAIL therefore means **"suspect `.roborev.toml` first"**: the reviewer did not receive
+   a path the census called code, and a configured pattern is the likeliest reason.
 
 **Doctrine SHALL NOT imply that everything under `docs/` is code-free.** Every surface stating the
 docs-only rule SHALL be amended in this same change to (a) name the `docs/reports/*-artifacts/` harness
 convention EXPLICITLY as executable code that IS reviewed and that a PR carrying it is NOT a docs-only
 change, (b) state that "docs-only" means a code-free CENSUS as the wrapper classifies it, never a
-directory prefix, and (c) name `census-exclusion:` as the pre-enqueue key that FAILs when the configured
-exclusion set would swallow census code. The surfaces SHALL include, beyond the two AC4 surfaces:
+directory prefix, and (c) name `prompt-content:` as the key that FAILs — after the review round, since
+nothing predicts the exclusion set before it — when a configured pattern swallows census code, so its FAIL
+reads as "suspect `.roborev.toml` first". The surfaces SHALL include, beyond the two doctrine surfaces
+(`CLAUDE.md` and the website `agents-developing/roborev-findings/` page):
 `website/.../agents-developing/delivery-pipeline.md`, `.claude/agents/flow-lead.md`,
 `.claude/agents/flow-closer.md`, `.claude/skills/flow-implement/SKILL.md`, and the header comments of all
 three `scripts/flow/roborev-review*.sh` files — including the `roborev_check_prompt_content()` comment
 that states the falsified claim outright. A surface left un-amended is doctrine drift against itself, and
 this requirement is not satisfied while any copy still asserts the falsified mechanism.
 
-Where doctrine documents the summary block it SHALL carry the `job-record:` key, the `census-exclusion:`
-key in its contracted position immediately after `code-free:`, and the corrected `prompt-content:` values
+Where doctrine documents the summary block it SHALL carry the `job-record:` key, the block's TWENTY-TWO
+keys in their contracted order (no `census-exclusion:` among them), the exact-token verdict grammar with
+its six-key affirmation backstop, and the corrected `prompt-content:` values
 (an unretrievable prompt FAILS; there is no non-failing `UNAVAILABLE` for that key). Where doctrine
 documents the live probe it SHALL state the expectation in the RANGE form — the `reviewed-sha:` range's
 HEAD endpoint equals the worktree HEAD and its base equals the base ref — never as `reviewed-sha`
@@ -1015,7 +1006,7 @@ equalling the worktree HEAD.
 
 #### Scenario: Doctrine states the verdict rule verbatim, as one rule
 - **WHEN** CLAUDE.md, `website/src/content/docs/agents-developing/roborev-findings.md` and this change's `design.md` are inspected
-- **THEN** each carries the sentence "FAIL where the author can act; NOTICE where only the information is actionable; never silence." verbatim, and each presents it as ONE rule rather than as independent judgements a future editor would have to re-derive — and each records that on `census-exclusion:`'s subject the rule resolves to a single call (a configured swallow ⇒ FAIL), so the key has NO `NOTICE` value and the remedy-less case it would have covered is the documented residual deferred to #3278
+- **THEN** each carries the sentence "FAIL where the author can act; NOTICE where only the information is actionable; never silence." verbatim, and each presents it as ONE rule rather than as independent judgements a future editor would have to re-derive — and each records that the affirmation backstop grants NO `NOTICE` exemption to ANY of its six keys, the single exemption that briefly existed having been removed along with the key it was written for (deferred to #3283, its remedy-less residual to #3278)
 
 #### Scenario: Doctrine records the three config-ordering properties and their generalization
 - **WHEN** CLAUDE.md and `roborev-findings.md` are inspected beside the existing note that `required` evaluates the aggregator and registry from the PR's BASE ref
@@ -1023,13 +1014,13 @@ equalling the worktree HEAD.
 
 #### Scenario: Doctrine records that the PRE-EXISTING guard caught the NEW guard
 - **WHEN** the defence-in-depth rationale in `roborev-findings.md` and `design.md` is inspected
-- **THEN** it records that `prompt-content:` — the older check — caught the newly added `census-exclusion:` certifying a config roborev never read, and states this as the strongest argument in the change for keeping both layers, explicitly because it paid out in the direction nobody plans for: the NEW layer was the wrong one
+- **THEN** it records that `prompt-content:` — the older check — caught the then-new `census-exclusion:` oracle (since REMOVED, deferred to #3283) certifying a config roborev never read, and states this as the change's strongest argument for keeping the measured layer, explicitly because it paid out in the direction nobody plans for: the NEW layer was the wrong one, and it is the layer that went
 
 #### Scenario: Doctrine records that a test blessing a vacuous verdict is worse than an unguarded path
 - **WHEN** the doctrine page is inspected
-- **THEN** it records that the two regression cases which locked in an un-corroborated "no exclusion patterns configured" PASS were worse than having no case at all, because such a test consumes the review budget that would otherwise have found the bug and converts "nobody checked" into "we checked and it was fine"
+- **THEN** it records that the two regression cases which locked in an un-corroborated "no exclusion patterns configured" PASS (both since deleted with the oracle they exercised) were worse than having no case at all, because such a test consumes the review budget that would otherwise have found the bug and converts "nobody checked" into "we checked and it was fine"
 
-#### Scenario: Both AC4 doctrine surfaces carry all four rules
+#### Scenario: Both doctrine surfaces carry all four rules
 - **WHEN** CLAUDE.md and `website/src/content/docs/agents-developing/roborev-findings.md` are inspected after this change
 - **THEN** both state that the wrapper is the only sanctioned invocation, that the reviewed scope must be verified against the census range, that a "contains no code changes to review" verdict on a non-empty diff is a HARD FAIL, and that a docs-only diff cannot be roborev-certified
 
@@ -1043,7 +1034,7 @@ equalling the worktree HEAD.
 
 #### Scenario: Doctrine names the harness convention as reviewed code
 - **WHEN** the docs-only rule is read on CLAUDE.md and the `roborev-findings` page after this change
-- **THEN** both name `docs/reports/*-artifacts/` measurement harnesses explicitly as executable code that IS reviewed, state that "docs-only" means a code-free census rather than a `docs/` path prefix, and name `census-exclusion:` as the pre-enqueue key that FAILs when the configured exclusion set would swallow census code
+- **THEN** both name `docs/reports/*-artifacts/` measurement harnesses explicitly as executable code that IS reviewed, state that "docs-only" means a code-free census rather than a `docs/` path prefix, state that NOTHING predicts roborev's exclusion set pre-enqueue (deferred to #3283, its built-in patterns to #3278), and name `prompt-content:` as the key whose FAIL means "suspect `.roborev.toml` first"
 
 #### Scenario: The live-probe expectation is stated in the range form
 - **WHEN** the doctrine page's live worktree probe section is inspected
