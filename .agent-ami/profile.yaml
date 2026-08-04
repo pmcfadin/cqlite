@@ -17,18 +17,30 @@ toolchains:
   - kind: node
     version: "18"
 datasets:
+  # {data_mount}, NOT {repo_root}. Two reasons, the second of which is a
+  # data-loss bug rather than a preference:
+  #  1. The clone is ephemeral, so a golden snapshot cannot preserve datasets
+  #     under it — every worker would re-download ~20 min of data.
+  #  2. fetch-datasets.sh does `rm -rf "$DATASET_ROOT"`, and 875 git-TRACKED
+  #     fixtures live under test-data/datasets/. Its restore guard early-returns
+  #     unless $CI is set (it is not on a worker), so pointing DATASET_ROOT into
+  #     the repo SILENTLY DELETES TRACKED FIXTURES and the gate then fails on
+  #     pristine main. That is #2878; it cost the 2026-07-25 trial ~90 minutes.
+  #  On /data the script's "already present + pinned" check exits 0 before the rm.
   - run: "bash test-data/scripts/fetch-datasets.sh"
     env:
-      CQLITE_DATASETS_ROOT: "{repo_root}/test-data/datasets"
+      CQLITE_DATASETS_ROOT: "{data_mount}/datasets"
 env:
   RUSTFLAGS: "-D warnings"
   # NOTE: do NOT set RUSTC_WRAPPER=sccache here. Profile env is applied to every
   # onboard command, including `cargo install sccache` — wrapping rustc with a
   # not-yet-built sccache deadlocks the toolchain step. cqlite's agent-gate.sh
   # auto-detects sccache and wires it in itself; these two vars are all it needs.
-  SCCACHE_DIR: "/home/ubuntu/.cache/sccache"
+  # Both caches live on the DURABLE volume so the golden snapshot captures them;
+  # under $HOME they are lost with the instance and every worker rebuilds cold.
+  SCCACHE_DIR: "{data_mount}/sccache"
   SCCACHE_CACHE_SIZE: "30G"
-  CQLITE_DATASETS_ROOT: "{repo_root}/test-data/datasets"
+  CQLITE_DATASETS_ROOT: "{data_mount}/datasets"
 verify:
   run: "bash scripts/bootstrap-agent-machine.sh"
   expect: "All checks green."
