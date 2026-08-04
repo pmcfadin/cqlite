@@ -2108,6 +2108,30 @@ else
   bad 'structural: no pinned :(exclude,glob) literal count — an added built-in could not be detected'
 fi
 
+# THE EXCUSAL HAS EXACTLY ONE WRITE SITE, AND IT IS GATED ON A VERIFIED MODEL (#3229 round-9
+# blocker F1). cx19h/cx19i pin the BEHAVIOUR, but only for the ONE swallow path they exercise:
+# a SECOND, ungated assignment added elsewhere would restore the false-PASS on a path no
+# behavioural case reaches. So the write site is also counted, and its guard asserted.
+_excusal_writes=$(grep -cE '^[[:space:]]*CENSUS_BUILTIN_EXCLUDED=\(' "$_oracles_src" || true)
+if [ "$_excusal_writes" -eq 1 ]; then
+  ok 'structural: the built-in excusal has exactly ONE write site in the oracles'
+else
+  bad "structural: $_excusal_writes assignments to CENSUS_BUILTIN_EXCLUDED (want 1) — an ungated second site would excuse coverage on an unverified built-in model"
+fi
+if grep -B3 -E '^[[:space:]]*CENSUS_BUILTIN_EXCLUDED=\(' "$_oracles_src" |
+  grep -qE '\[ "\$builtin_excusal" = GRANTED \]'; then
+  ok 'structural: that write site is gated on the excusal being GRANTED (built-in-set: OK)'
+else
+  bad 'structural: the CENSUS_BUILTIN_EXCLUDED write is NOT gated on builtin_excusal = GRANTED — UNAVAILABLE would take the permissive path again (#3229 F1)'
+fi
+# ...and the GRANTED state is derived from the POSITIVE built-in state, never from "not the
+# negative one". A `!= DIVERGED` here is the three-state-tested-as-two bug reintroduced.
+if grep -qE '^[[:space:]]*\[ "\$_rx_builtin_state" != OK \] \|\| builtin_excusal=GRANTED$' "$_oracles_src"; then
+  ok 'structural: the excusal is keyed on built-in-set = OK, not on "not DIVERGED"'
+else
+  bad 'structural: builtin_excusal is not derived from _rx_builtin_state = OK — a three-state signal must not be tested as two (#3229 F1)'
+fi
+
 printf "== case (cx20): a TOTAL built-in swallow FAILs pre-enqueue — an empty prompt certifies nothing ==\n"
 reset_stub
 # THE WORST DEFECT CLASS THIS WRAPPER CAN HAVE (#3229 round 3, blocker F1): a vacuous

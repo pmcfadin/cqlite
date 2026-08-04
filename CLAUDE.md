@@ -472,6 +472,14 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   unobservable built-in set reads `UNAVAILABLE` **in the value line**, never as an unstated assumption of
   agreement. `NOTICE*` is deliberately outside the wrapper's failing-capable scan
   (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`).
+  **`UNAVAILABLE` withholds the EXCUSAL, not just the blessing — permissive behaviour is keyed on the
+  POSITIVE state.** `built-in-set:` has THREE values, and a three-state signal tested as two is a
+  false-PASS generator: telling `prompt-content:` not to expect a swallowed path is a claim *about the
+  mechanism* (its absence is DETERMINISTIC), so it requires `built-in-set: OK`. Whether the swallow may be
+  a NOTICE rather than a FAIL turns on `!= DIVERGED` (an unobservable binary must not red every run); whether
+  it EXCUSES coverage requires `= OK`. Under `UNAVAILABLE` NOTHING is excused, `prompt-content:` evaluates
+  every census code path and FAILs if one is genuinely absent — fail-closed on the excusal, not on the run.
+  *"We could not check" must never render as "nothing was wrong."*
   **A built-in swallowing the WHOLE code census is a FAIL, and that is the same rule, not an exception**:
   with nothing surviving, the reviewer gets an **EMPTY prompt**, so any verdict certifies nothing — the
   identical condition `code-free:` already FAILs pre-enqueue for a prose-only census, and it carries the

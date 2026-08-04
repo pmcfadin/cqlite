@@ -295,6 +295,22 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    unstated assumption of agreement. `NOTICE*` sits deliberately outside the wrapper's failing-capable
    scan (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`), so a NOTICE cannot red `RESULT:`; both FAIL forms can.
 
+   **And `UNAVAILABLE` withholds the EXCUSAL as well as the blessing.** `built-in-set:` has **three**
+   states, so permissive behaviour must be keyed on the **positive** one — a three-state signal tested as
+   two is a false-PASS generator. Two decisions, deliberately separate:
+
+   | decision | keyed on |
+   |---|---|
+   | may a built-in swallow be a NOTICE rather than a FAIL? | **not `DIVERGED`** — only a *positively observed* divergence is an actionable mechanism change, and an unobservable binary must not red every run |
+   | may that swallow **EXCUSE** the paths from `prompt-content:`? | **`= OK`** — the excusal is a claim *about the mechanism* (the absence is DETERMINISTIC), which an unverified mechanism cannot support |
+
+   Under `UNAVAILABLE` nothing is excused: `prompt-content:` evaluates **every** census code path and
+   FAILs if one is genuinely absent from the prompt. That fails **closed on the excusal without failing
+   the run**, and the value line names the withholding explicitly. The false-PASS this closes was
+   reproduced: a shim carrying all 24 literals correctly right-bounded but hiding its `version` reads
+   `UNAVAILABLE` with an empty missing list, and the previous revision still excused the paths while the
+   block read `RESULT: PASS`. ***"We could not check" must never render as "nothing was wrong."***
+
    The **TOTAL vs PARTIAL** boundary is the whole distinction, and it was measured rather than
    theorised. Left as a NOTICE, a hermetic `Cargo.lock` + `README.md` fixture produced
    `census-exclusion: NOTICE (0/1 survive)`, `prompt-content: PASS (0/0 code census paths present)` and
