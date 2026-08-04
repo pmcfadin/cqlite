@@ -1,0 +1,13 @@
+==== WS0 #3217 SCHEDULER COST PER N (AC5) ====
+label: offcpu2-s1   server_cpus=2,10   merge_path=bypass   collector=bpfcc   window=30s
+
+N      cs/s cpu-wide  vol cs/s (proc) nonvol cs/s (proc)     migrations runq p99 bucket       
+1              44027              0.0                0.0         7567.0 [128,255] usecs       
+8              33338              0.0                0.0         2490.0 [4096,8191] usecs     
+16             26243              0.0                0.0         3632.0 [8192,16383] usecs    
+
+blocked-time attribution per N (seconds, AC4 buckets; explicit 0 = measured absent):
+N            total mpsc_send_par mpsc_recv_par egress_credit tonic_grpc_so tokio_schedul disk_io       other        
+1         160.1944 0.0001        0.0000        0.0001        0.2493        28.8593       17.9461       113.1395     
+8        1048.9484 1.1296        0.0000        0.0000        4.4302        25.1502       154.9600      863.2784     
+16       2008.5551 1.2591        0.0000        0.0009        8.5590        21.1305       341.2410      1636.3645    

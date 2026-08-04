@@ -75,7 +75,11 @@
 //!   * **Fixture-drift detection** — a case whose source directory stops holding
 //!     exactly one generation FAILs (the axis would otherwise silently compare
 //!     N-vs-M and lose its meaning).
-//!   * **SKIP contract** — absent keyspace/`*-Data.db`/schema SKIPs cleanly unless
+//!   * **SKIP contract** — a case whose binaries are COMMITTED to git carries
+//!     `must_run: true` and may never SKIP: its absence is a hard failure
+//!     UNCONDITIONALLY, in whichever lane owns it (issue #3220), because a committed
+//!     fixture exists in every checkout and can only go missing by failing to
+//!     RESOLVE. A FETCHED (gitignored) case SKIPs cleanly unless
 //!     `CQLITE_REQUIRE_FIXTURES=1` (then it fails closed), matching the parent.
 //!   * **Divergence detection is itself tested** — `one_vs_n_comparator_reports_a_seeded_divergence`
 //!     feeds the comparator deliberately divergent row sets and asserts the
@@ -90,8 +94,8 @@ use cqlite_core::config::ReadPathMode;
 use cqlite_core::query::result::QueryRow;
 
 use super::{
-    discover_pk_ints, normalize, open_db, pin_read_clock, schema_path, skip_or_fail, sstables_root,
-    table_has_data, MAX_KEYS_PER_TABLE,
+    describe_search, discover_pk_ints, normalize, open_db, pin_read_clock, schema_path,
+    skip_or_fail, sstables_root_for_table, MAX_KEYS_PER_TABLE,
 };
 
 /// Sidecar files that live next to the real SSTable components in the committed
@@ -400,6 +404,28 @@ struct GenerationCase {
     empty_probe_keys: &'static [i64],
     /// Reconciliation classes covered (asserted exhaustive by the driver).
     divergence_classes: &'static [&'static str],
+    /// This case MUST execute — a SKIP is a hard FAILURE, UNCONDITIONALLY (issue
+    /// #3220), in whichever lane owns it: the enforcing lane for a case with
+    /// `known_divergent: None`, the expected-divergence pin otherwise.
+    ///
+    /// Set exactly for the cases whose SSTable binaries are **committed to git**, so
+    /// they are present in every checkout and an absence can only mean the lane failed
+    /// to RESOLVE them. AUTHORITY is `git ls-files`, never directory presence in the
+    /// working tree (`fetch-datasets.sh` unpacks the FETCHED corpus into
+    /// `test-data/datasets/` by default, so a gitignored fixture is routinely on disk
+    /// here and absent elsewhere):
+    ///
+    /// ```text
+    /// git ls-files 'test-data/datasets/sstables/**-Data.db'
+    /// ```
+    ///
+    /// Why the field exists: the terminal checks used to be suite-wide
+    /// `assert!(ran > 0)` / `assert!(pinned > 0)`, BOTH gated on
+    /// `CQLITE_REQUIRE_FIXTURES` — which the `bti-multiclustering` component
+    /// deliberately does not set and `core-tests` never sets. A committed case that
+    /// failed to resolve therefore returned `Ok(false)`, its siblings still tallied,
+    /// and it skipped silently: the exact #3220 defect, in this very file.
+    must_run: bool,
     /// `Some(reason)` = this shape ALREADY diverges on `main` for a defect tracked
     /// elsewhere, so it is NOT part of the enforcing lane (it would make the axis
     /// permanently red and hide a future regression in the shapes that do agree).
@@ -434,6 +460,8 @@ const CORPUS: &[GenerationCase] = &[
         // N-gen seek path's MISS branch (no generation holds the key).
         empty_probe_keys: &[999],
         divergence_classes: &["tombstone", "absent_partition"],
+        // COMMITTED (nb-3-big-* in `git ls-files`).
+        must_run: true,
         known_divergent: None,
     },
     // Partition TOMBSTONES covering whole partitions, in the SAME single generation
@@ -458,6 +486,8 @@ const CORPUS: &[GenerationCase] = &[
             "absent_partition",
             "compressed",
         ],
+        // FETCHED: only `test_deltas/static_with_rows` has committed binaries.
+        must_run: false,
         known_divergent: None,
     },
     // Range tombstone spanning generations, compacted to one SSTable: the range
@@ -472,6 +502,8 @@ const CORPUS: &[GenerationCase] = &[
         expected_partitions: 1,
         empty_probe_keys: &[999],
         divergence_classes: &["range_tombstone", "absent_partition"],
+        // COMMITTED (nb-3-big-* in `git ls-files`).
+        must_run: true,
         known_divergent: None,
     },
     // WIDE range tombstone (~3k live rows): the axis at scale, and the only case
@@ -487,6 +519,8 @@ const CORPUS: &[GenerationCase] = &[
         expected_partitions: 1,
         empty_probe_keys: &[999],
         divergence_classes: &["range_tombstone", "wide_partition", "absent_partition"],
+        // FETCHED (sidecars only in git).
+        must_run: false,
         known_divergent: None,
     },
     // BTI (`da`) WIDE partitions (3 × 300 rows, LZ4-compressed): the
@@ -503,6 +537,8 @@ const CORPUS: &[GenerationCase] = &[
         expected_partitions: 3,
         empty_probe_keys: &[999],
         divergence_classes: &["bti", "wide_partition", "compressed", "absent_partition"],
+        // COMMITTED (da-2-bti-* in `git ls-files`).
+        must_run: true,
         known_divergent: None,
     },
     // ---------------------------------------------------------------------
@@ -526,6 +562,8 @@ const CORPUS: &[GenerationCase] = &[
         expected_partitions: 1,
         empty_probe_keys: &[],
         divergence_classes: &["ttl"],
+        // FETCHED (sidecars only in git).
+        must_run: false,
         known_divergent: Some(
             "issue #2189: the 2-gen arm resurrects the TTL-EXPIRED rows ck=1,ck=2 as all-null \
              phantom rows. Root cause is that `MergeEntry` carries no primary-key row-liveness \
@@ -547,6 +585,9 @@ const CORPUS: &[GenerationCase] = &[
         expected_partitions: 1,
         empty_probe_keys: &[],
         divergence_classes: &["ttl"],
+        // COMMITTED (nb-3-big-* in `git ls-files`) — quarantined, so the
+        // expected-divergence pin is what must not let it skip.
+        must_run: true,
         known_divergent: Some(
             "issue #2189: the 3-gen arm returns 2 rows where the 1-gen arm returns 1 — the same \
              missing multi-generation row-liveness rule as gc_before_boundary (`MergeEntry` has no \
@@ -570,6 +611,9 @@ const CORPUS: &[GenerationCase] = &[
         expected_partitions: 1,
         empty_probe_keys: &[],
         divergence_classes: &["static", "tombstone"],
+        // COMMITTED (nb-1-big-* in `git ls-files`; the only committed
+        // test_tomb table) — quarantined, so the expected-divergence pin owns it.
+        must_run: true,
         known_divergent: Some(
             "issue #3168: the multi-generation read path never injects static cells, so the N-gen \
              arm emits an extra static-only row AND drops `stat_col` from every clustering row, \
@@ -595,15 +639,12 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
             case.keyspace, case.table
         ));
     }
-    let Some(root) = sstables_root(case.keyspace) else {
-        return skip_or_fail(&format!("keyspace {} absent", case.keyspace));
+    // TABLE-granular root resolution (issue #3220): search every candidate root for
+    // THIS table's `*-Data.db` rather than committing to the first root that merely
+    // holds the keyspace.
+    let Some(root) = sstables_root_for_table(case.keyspace, case.table) else {
+        return skip_or_fail(&describe_search(case.keyspace, case.table));
     };
-    if !table_has_data(&root, case.keyspace, case.table) {
-        return skip_or_fail(&format!(
-            "table {}.{} has no fetched *-Data.db",
-            case.keyspace, case.table
-        ));
-    }
     let Some(schema) = schema_path(case.schema) else {
         return skip_or_fail(&format!("schema {} absent", case.schema));
     };
@@ -839,6 +880,60 @@ const REQUIRED_ENFORCED_CLASSES: &[&str] = &[
 /// how those two shapes went unguarded.
 const REQUIRED_ASSERTED_CLASSES: &[&str] = &["ttl", "static"];
 
+/// Stable identity of a 1-vs-N case, used by the per-case must-run bookkeeping.
+fn case_id(case: &GenerationCase) -> String {
+    format!("{}.{}", case.keyspace, case.table)
+}
+
+/// PURE decision behind BOTH lanes' must-run assertions: every `must_run` case in
+/// `cases` whose id is absent from `exercised`, by table name.
+///
+/// Factored out (mirroring the parent lane's `super::must_run_violations`) so the
+/// guard has a proof it CAN fire —
+/// `must_run_violations_flags_a_committed_case_that_did_not_run` below. A fail-closed
+/// guard whose failing branch is never exercised is indistinguishable from one that
+/// cannot fire, which is the #3220 shape itself.
+fn must_run_violations<'a, I>(cases: I, exercised: &[String]) -> Vec<&'a str>
+where
+    I: IntoIterator<Item = &'a GenerationCase>,
+{
+    cases
+        .into_iter()
+        .filter(|c| c.must_run && !exercised.iter().any(|id| id == &case_id(c)))
+        .map(|c| c.table)
+        .collect()
+}
+
+/// The two lanes' shared must-run assertion: `lane` names which lane owns `cases`
+/// (enforcing vs the expected-divergence pin), so a failure says where to look.
+///
+/// UNCONDITIONAL by design — deliberately NOT gated on `CQLITE_REQUIRE_FIXTURES`.
+/// Every `must_run` fixture is committed to git, so it is present in every checkout
+/// and a SKIP can only mean the lane failed to RESOLVE it.
+fn assert_must_run_cases_were_exercised<'a, I>(
+    lane: &str,
+    cases: I,
+    exercised: &[String],
+    skipped: &[String],
+) where
+    I: IntoIterator<Item = &'a GenerationCase>,
+{
+    let missing = must_run_violations(cases, exercised);
+    assert!(
+        missing.is_empty(),
+        "{} committed-fixture 1-vs-N case(s) did NOT run in the {lane} lane: {:?} — these \
+         fixtures are COMMITTED to git (`git ls-files \
+         'test-data/datasets/sstables/**-Data.db'`), so absence means the lane failed to \
+         RESOLVE them, never that they are legitimately missing.\n  exercised: {:?}\n  \
+         skipped  : {:?}\n  remedy   : git restore --source=HEAD -- test-data/datasets/sstables \
+         (or fix root resolution — see tests/support/datasets_root.rs)",
+        missing.len(),
+        missing,
+        exercised,
+        skipped
+    );
+}
+
 /// True when `reason` cites a tracking issue (`#` followed by at least one digit).
 /// Doctrine: a waiver with no cited issue is not a waiver.
 fn cites_an_issue(reason: &str) -> bool {
@@ -890,6 +985,19 @@ fn assert_corpus_invariants() {
          deleted or absent partition reaches `seek_merge_generations_for_read` (issue #3129)"
     );
 
+    // Both lanes' unconditional must-run guards must be NON-VACUOUS: each lane has to
+    // own at least one committed-fixture case, else `must_run_violations` can never
+    // report anything for it and the guard is decoration (#3220).
+    for (lane, quarantined) in [("ENFORCING", false), ("expected-divergence", true)] {
+        assert!(
+            CORPUS
+                .iter()
+                .any(|c| c.known_divergent.is_some() == quarantined && c.must_run),
+            "the {lane} lane must own at least one `must_run` (committed-fixture) case, else its \
+             unconditional must-run guard can never fire"
+        );
+    }
+
     // Every quarantined case must carry a substantive reason that CITES its tracking
     // issue, so an exclusion can never be undocumented or untracked.
     for case in CORPUS.iter() {
@@ -923,13 +1031,19 @@ async fn one_vs_n_generation_differential_equality() {
 
     let _clock = pin_read_clock();
 
-    let mut ran = 0usize;
+    let enforcing: Vec<&GenerationCase> = CORPUS
+        .iter()
+        .filter(|c| c.known_divergent.is_none())
+        .collect();
+
+    let mut ran: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
-    for case in CORPUS.iter().filter(|c| c.known_divergent.is_none()) {
+    for case in &enforcing {
         match run_case(case).await {
-            Ok(true) => ran += 1,
-            Ok(false) => {}
-            Err(e) => failures.push(format!("{}.{}: {e}", case.keyspace, case.table)),
+            Ok(true) => ran.push(case_id(case)),
+            Ok(false) => skipped.push(case_id(case)),
+            Err(e) => failures.push(format!("{}: {e}", case_id(case))),
         }
     }
 
@@ -939,6 +1053,13 @@ async fn one_vs_n_generation_differential_equality() {
         failures.join("\n\n")
     );
 
+    // PER-CASE must-run, UNCONDITIONALLY (issue #3220) — the suite-wide
+    // `assert!(ran > 0)` this replaces was gated on `CQLITE_REQUIRE_FIXTURES` (which
+    // neither `core-tests` nor `bti-multiclustering` sets) and could not see a single
+    // committed case skipping behind its siblings.
+    assert_must_run_cases_were_exercised("ENFORCING", enforcing.iter().copied(), &ran, &skipped);
+
+    let ran = ran.len();
     if super::require_fixtures() {
         assert!(
             ran > 0,
@@ -995,12 +1116,23 @@ async fn one_vs_n_generation_quarantine_still_diverges() {
         .collect();
 
     let mut pinned = 0usize;
+    // Ids of the quarantined cases this run actually EXERCISED — pinned, cleared or
+    // failed in the harness. Only `Ok(false)` (an unresolved fixture) leaves a case
+    // out, which is precisely what the must-run guard below must catch.
+    let mut exercised: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     let mut cleared: Vec<String> = Vec::new();
     let mut harness_failures: Vec<String> = Vec::new();
     for case in &quarantined {
-        let label = format!("{}.{}", case.keyspace, case.table);
+        let label = case_id(case);
         let reason = case.known_divergent.unwrap_or_default();
-        match run_case(case).await {
+        let outcome = run_case(case).await;
+        if matches!(outcome, Ok(false)) {
+            skipped.push(label.clone());
+        } else {
+            exercised.push(label.clone());
+        }
+        match outcome {
             // The case now AGREES at 1 vs N generations: the cited defect is fixed
             // (or the quarantine was wrong). Either way it must move into the
             // enforcing lane — that is this test's whole purpose.
@@ -1034,6 +1166,18 @@ async fn one_vs_n_generation_quarantine_still_diverges() {
         cleared.join("\n\n")
     );
 
+    // PER-CASE must-run, UNCONDITIONALLY (issue #3220): a quarantined case backed by
+    // COMMITTED binaries must have been exercised. Otherwise a resolution failure
+    // would silently retire the pin — the quarantined shape would then be guarded by
+    // nothing at all, green whether broken or fixed, behind `pinned > 0` from its
+    // siblings.
+    assert_must_run_cases_were_exercised(
+        "expected-divergence",
+        quarantined.iter().copied(),
+        &exercised,
+        &skipped,
+    );
+
     if quarantined.is_empty() {
         eprintln!(
             "NOTE the 1-vs-N quarantine is EMPTY — every corpus case is enforced. \
@@ -1049,6 +1193,61 @@ async fn one_vs_n_generation_quarantine_still_diverges() {
         eprintln!(
             "SKIP one_vs_n_generation_quarantine_still_diverges: no fixtures present \
              (set CQLITE_REQUIRE_FIXTURES=1 to fail-close)"
+        );
+    }
+}
+
+/// The unconditional must-run guard (issue #3220) must have a demonstrable failing
+/// branch, in BOTH lanes: a committed-fixture case that did not run has to be
+/// reported even when every sibling ran — the suite-wide `assert!(ran > 0)` /
+/// `assert!(pinned > 0)` blind spot this replaces.
+#[test]
+fn must_run_violations_flags_a_committed_case_that_did_not_run() {
+    let enforcing: Vec<&GenerationCase> = CORPUS
+        .iter()
+        .filter(|c| c.known_divergent.is_none())
+        .collect();
+    let quarantined: Vec<&GenerationCase> = CORPUS
+        .iter()
+        .filter(|c| c.known_divergent.is_some())
+        .collect();
+
+    for (lane, cases) in [("enforcing", &enforcing), ("quarantined", &quarantined)] {
+        // Everything ran: no violation.
+        let all: Vec<String> = cases.iter().map(|c| case_id(c)).collect();
+        assert!(
+            must_run_violations(cases.iter().copied(), &all).is_empty(),
+            "{lane}: no violation when every case ran"
+        );
+
+        // Drop ONE committed case while every sibling still ran — the exact state a
+        // resolution failure produces, and the one a suite-wide counter cannot see.
+        let dropped = cases
+            .iter()
+            .find(|c| c.must_run)
+            .unwrap_or_else(|| panic!("{lane} lane must own a must_run case"));
+        let without: Vec<String> = cases
+            .iter()
+            .filter(|c| c.table != dropped.table)
+            .map(|c| case_id(c))
+            .collect();
+        assert_eq!(
+            must_run_violations(cases.iter().copied(), &without),
+            vec![dropped.table],
+            "{lane}: a committed-fixture case that did not run must be reported even though \
+             every other case ran"
+        );
+
+        // A FETCHED-only case that skipped is NOT a violation: its binaries are
+        // gitignored, so absence on a minimal checkout is legitimate.
+        let committed_only: Vec<String> = cases
+            .iter()
+            .filter(|c| c.must_run)
+            .map(|c| case_id(c))
+            .collect();
+        assert!(
+            must_run_violations(cases.iter().copied(), &committed_only).is_empty(),
+            "{lane}: a gitignored-fixture case that skipped must not trip the guard"
         );
     }
 }

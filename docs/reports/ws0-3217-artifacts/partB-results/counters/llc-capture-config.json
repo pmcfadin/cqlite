@@ -1,0 +1,8 @@
+{
+ "note": "Capture parameters AS INVOKED by partB-run/run-partB4.sh -> llc-run.sh <label> <s-spec> <N> <window>. window_secs is the 4th argument (perf stat ... -- sleep WINDOW); server_hw_threads is the size of the S-arm's pinned CPU set from harness/common.sh's core table (both SMT siblings per physical core). Recorded here so the analysis reads the window as DATA instead of hardcoding a literal.",
+ "captures": {
+  "s1-N2":  {"s_spec": "s1", "N": 2,  "window_secs": 20, "server_physical_cores": 1, "server_hw_threads": 2,  "server_cpus": "2,10"},
+  "s6-N16": {"s_spec": "s6", "N": 16, "window_secs": 20, "server_physical_cores": 6, "server_hw_threads": 12, "server_cpus": "0,1,2,3,4,5,8,9,10,11,12,13"},
+  "s6-N1":  {"s_spec": "s6", "N": 1,  "window_secs": 20, "server_physical_cores": 6, "server_hw_threads": 12, "server_cpus": "0,1,2,3,4,5,8,9,10,11,12,13"}
+ }
+}

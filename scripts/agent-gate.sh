@@ -118,13 +118,16 @@
 #                      the write-support-gated targets derived from Cargo.toml
 #                      required-features + two self-gated ground-truth targets. New
 #                      files are auto-covered; fails closed on zero targets.
-#   bti-multiclustering  the compound-clustering BTI ('da') lane (issue #3032):
+#   bti-multiclustering  the compound-clustering BTI ('da') lane (issue #3032/#3220):
 #                      issue_3032_multiclustering_rows_trie_shape +
 #                      issue_3032_multiclustering_clustering_slice_select against the
 #                      COMMITTED test_da/multiclustering_table fixture, pinned to
 #                      CQLITE_REQUIRE_FIXTURES=1 so an absent fixture FAILs rather
-#                      than silently skipping. Unconditionally fail-closed (the
-#                      fixture is in git, so it is present in every checkout).
+#                      than silently skipping, PLUS point_vs_full_differential (#3220)
+#                      whose AC6 case compares the point and full READ PATHS over that
+#                      same fixture and is fail-closed by its own must_run assertion.
+#                      Unconditionally fail-closed (the fixtures are in git, so they
+#                      are present in every checkout).
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
@@ -256,7 +259,53 @@
 #                      process — and scripts/tests/test_gen_perf_corpus_3068.sh,
 #                      which pins the perf-corpus generator's TABLES validation, its
 #                      manifest writer's refusal of an empty table list, and the
-#                      tight scoping of its multi-GB stale-corpus pruning.
+#                      tight scoping of its multi-GB stale-corpus pruning. Also runs
+#                      scripts/tests/test_gen_perf_corpus_bti.sh (#3234), which pins
+#                      the BTI (`da`) perf-corpus generator's acceptance asserts in
+#                      BOTH directions (a negative control per assert: nb-* descriptor,
+#                      empty Rows.db, sub-8-MiB Data.db incl. the exact 8388608 B
+#                      boundary, BIG-only TOC entry or file), its row driver's
+#                      (seed, chunk-index) determinism, the cassandra.yaml BTI flip
+#                      against a COMMITTED cassandra:5.0.2 excerpt (a missed flip
+#                      silently emits `nb`), every guard on its multi-GB stale-corpus
+#                      pruning, and — through a stub `docker`
+#                      (scripts/tests/fixtures/stub-docker-cassandra-bti.py) — a full
+#                      hermetic end-to-end run: the manifest writer's happy path plus
+#                      both row-count cross-checks FIRING on injected disagreement.
+#                      Also runs scripts/tests/test_bti_perf_scan.sh (#3234), the
+#                      automated executor for the AC3 warm-scan harness
+#                      (cqlite-core/examples/bti_perf_scan/): it builds the example
+#                      and asserts its EXIT CODE for every documented failure mode
+#                      (usage incl. `--min-seconds nan`, corpus-absent, zero-rows,
+#                      row-count mismatch = the silent-truncation guard, sub-floor
+#                      window, mid-scan failure, and an unavailable authoritative row
+#                      count) against the git-committed 10 KiB `test_da` BTI fixture —
+#                      never the multi-GB perf corpus. And
+#                      scripts/tests/check-constraint-comments.py --self-test (#3234):
+#                      a comment that STATES a constraint must name or sit beside its
+#                      enforcement, or the comment goes — the class that hit #3234 three
+#                      times (unobserved manifest claims, a stale committed contract, and
+#                      a shape check documenting `<table>-<uuid>` while accepting
+#                      `<table>-*`). Runs both directions: the surface must pass, an
+#                      injected unenforced claim must FAIL.
+#                      Also runs (no python3/sudo/perf needed) the PAIR
+#                      scripts/tests/test_perf_capability.sh (the helper's unit
+#                      contract) and scripts/tests/test_perf_capability_bootstrap.sh
+#                      (the bootstrap section end-to-end), sharing
+#                      scripts/tests/lib/perf-capability-test-lib.sh (#3249) — they pin
+#                      the perf profiling capability path: scripts/perf-capability.sh
+#                      (free /proc token, canonical /etc/sysctl.d/99-cqlite-perf.conf
+#                      bytes, byte-exact idempotency compare, side-effect-free
+#                      sourcing, privilege-drop identity resolution) and bootstrap's
+#                      install + VERIFY section. Load-bearing arms: the FUNCTIONAL
+#                      check is HONOURED (a shimmed perf that EXITS 0 while reporting
+#                      0 / `<not supported>` must WARN, never "verified"), and NO path
+#                      reaches a capable/verified verdict from an UNVALIDATED input —
+#                      an unusable `id -u`, an inconsistent SUDO_USER, a missing test
+#                      sandbox and a non-canonical drop-in all fail closed. Hermetic —
+#                      test-only seams stand in for /proc and /etc/sysctl.d (and test
+#                      mode REFUSES to fall back to either production directory), every
+#                      privileged tool is a recording shim, asserted mutation-free.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -726,16 +775,92 @@ _mold_accel_token() {
   esac
 }
 
+# ---- perf profiling capability token (Linux only, issue #3249) --------------
+# Agent boxes ship with kernel.perf_event_paranoid = 4, which denies ALL
+# unprivileged perf use — a PERMISSION verdict that reads like a missing
+# CAPABILITY, and one that reverts on reboot when no /etc/sysctl.d drop-in exists.
+# Stamping it here makes "this box cannot be profiled" visible in every pasted
+# SUMMARY instead of being discovered at the start of a measurement cycle.
+#
+# HARD CONSTRAINT — and it is ENFORCED, not asserted in prose (issue #3249 review):
+# the emit-time perf path is the FREE /proc read from scripts/perf-capability.sh and
+# NOTHING else: no `perf stat` exec, no new binary dependency, no external process,
+# and no command substitution — a `$( )` is a forked subshell, so "no subprocess" that
+# is read back through `$( )` would be self-contradictory. That is why the functions
+# below take an <outvar> and assign into it instead of printing (and why the helper is
+# sourced ONCE, at script scope, rather than re-read on every summary). Case 9f-free
+# of scripts/tests/test_agent_gate_summary.sh kills any regression: it runs this exact
+# code with an EMPTY PATH and with xtrace subshell-depth counting. The functional
+# verification (which DOES exec perf) is bootstrap's job, not the gate's.
+#
+# NO MEMOIZATION of the state, deliberately: every emit runs inside a `$( )`, so an
+# assignment to a script-level cache would land in a subshell and be discarded — a
+# cache that looks real and never hits. Two `read`-builtin /proc reads cost nothing,
+# so the honest implementation is to just do them.
+#
+# Sourced HERE, at script scope: the helper is 300+ lines, and re-reading it on every
+# emit bought nothing (its functions are all a subshell inherits anyway). Sourcing it
+# is documented side-effect free — functions plus PERF_CAPABILITY_* constants only.
+_PERF_CAP_LOADED=0
+if [ -r "$REPO_ROOT/scripts/perf-capability.sh" ]; then
+  # shellcheck source=scripts/perf-capability.sh
+  if . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then _PERF_CAP_LOADED=1; fi
+fi
+
+# _AGENT_GATE_OS: the host OS, resolved ONCE per gate run. `uname` is an external
+# process, so the OS question cannot be asked inside the per-emit token path above;
+# asking it at script scope costs one fork per RUN instead of one per summary. The
+# AGENT_GATE_TEST_OS seam is honoured exactly as before (tests export it before the
+# gate starts, so call-time vs init-time resolution is equivalent).
+_AGENT_GATE_OS="${AGENT_GATE_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+
+# _perf_state_into <outvar>: the state token, assigned into <outvar>. Never left
+# empty — an empty token would emit a bare `perf=`, which no consumer can parse.
+_perf_state_into() {
+  local __ps_out="$1" __ps_v=""
+  if [ -n "${AGENT_GATE_TEST_PERF_STATE:-}" ]; then
+    __ps_v="$AGENT_GATE_TEST_PERF_STATE"
+  elif [ "${_PERF_CAP_LOADED:-0}" = 1 ]; then
+    perf_capability_token_into __ps_v
+  fi
+  [ -n "$__ps_v" ] || __ps_v=unknown
+  eval "$__ps_out=\$__ps_v"
+}
+
+# _perf_accel_token_into <outvar>: the ` perf=<state>` suffix on Linux hosts, empty
+# elsewhere — the controls are Linux kernel knobs, so Darwin output stays
+# byte-identical (same contract as _mold_accel_token above).
+_perf_accel_token_into() {
+  local __pat_out="$1" __pat_state=""
+  case "${_AGENT_GATE_OS:-unknown}" in
+    Linux|linux)
+      _perf_state_into __pat_state
+      eval "$__pat_out=\" perf=\$__pat_state\"" ;;
+    *) eval "$__pat_out=" ;;
+  esac
+}
+
+# stdout forms, for debugging/ad-hoc use only — NOT the emit path (reading them costs
+# the caller the very `$( )` the `_into` forms exist to avoid).
+_perf_state()       { local v; _perf_state_into v; printf '%s' "$v"; }
+_perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
+
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
 # See the ACCEL_* detection above (#1848). The trailing sccache-health token
 # (na|ok|warn, issue #2641) surfaces sccache's own corruption counters. On Linux
 # a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
-# #2859); Darwin output is unchanged.
+# #2859), then ` perf=ok|paranoid-<N>|kptr-restricted|absent|unknown` (issue
+# #3249); Darwin output is unchanged.
+# The perf token is fetched through a VARIABLE, not a `$( )`: its path is
+# contractually free of forks (see above), and reading it back through a command
+# substitution here would reintroduce exactly the subshell that contract excludes.
 accelerators_line() {
-  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s' \
+  local perf_tok=""
+  _perf_accel_token_into perf_tok
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
-    "$(_sccache_health)" "$(_mold_accel_token)"
+    "$(_sccache_health)" "$(_mold_accel_token)" "$perf_tok"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------
@@ -4781,17 +4906,50 @@ run_compaction_byte_parity() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
-# bti-multiclustering: the compound-clustering BTI (`da`) lane (issue #3032). The
-# two targets read the real Cassandra 5.0 `test_da/multiclustering_table` fixture —
-# a 3-component PRIMARY KEY ((pk), bucket, seq) whose Rows.db trie is the only
-# in-corpus oracle for the OSS50 byte-comparable clustering encoding and for the
-# `ClusteringPrefix.Kind` bound markers.
+# bti-multiclustering: the compound-clustering BTI (`da`) lane (issue #3032, extended
+# by #3220). The targets read the real Cassandra 5.0 `test_da/multiclustering_table`
+# fixture — a 3-component PRIMARY KEY ((pk), bucket, seq) whose Rows.db trie is the
+# only in-corpus oracle for the OSS50 byte-comparable clustering encoding and for the
+# `ClusteringPrefix.Kind` bound markers. Coverage:
+#   * issue_3032_multiclustering_rows_trie_shape          (trie/byte shape)
+#   * issue_3032_multiclustering_clustering_slice_select  (SELECT vs JSONL golden)
+#   * point_vs_full_differential                          (#3220: the AC6 point-vs-full
+#     differential case over the SAME fixture — the only lane comparing the two READ
+#     PATHS on a multi-component clustering key)
 #
-# Why a DEDICATED component (issue #3032 roborev B1): both targets self-skip when
-# the fixture is missing, and core-tests runs them WITHOUT CQLITE_REQUIRE_FIXTURES —
-# so a deleted/renamed fixture would turn both into silent green no-ops. This lane
-# pins them to CQLITE_REQUIRE_FIXTURES=1, under which every absence path in both
-# files asserts instead of skipping.
+# Why a DEDICATED component (issue #3032 roborev B1): the targets self-skip when the
+# fixture is missing, and core-tests runs them WITHOUT CQLITE_REQUIRE_FIXTURES — so a
+# deleted/renamed fixture would turn them into silent green no-ops. This lane pins the
+# two #3032 targets to CQLITE_REQUIRE_FIXTURES=1, under which every absence path in
+# both files asserts instead of skipping.
+#
+# point_vs_full_differential is run in a SECOND invocation, deliberately WITHOUT
+# CQLITE_REQUIRE_FIXTURES — enforced with `env -u`, not merely by omitting it: plain
+# `env` INHERITS an exported value, and exporting CQLITE_REQUIRE_FIXTURES=1 is routine
+# after a manual fail-closed run. Inherited, the target's `skipped.is_empty()` branch
+# fires on any box lacking the fetched test_tomb corpus and this component FAILs for a
+# reason unrelated to the fixture it exists to guard (#3220 review B3/R1).
+# Why it must not be pinned: most of its corpus (test_tomb/**) is FETCHED and gitignored,
+# so pinning that variable here would make this component depend on the fetched corpus
+# and break its "no fetched corpus at all" contract below. Its fail-closure instead
+# comes from the target itself — `TableCase::must_run`, asserted UNCONDITIONALLY, so
+# every COMMITTED-fixture case (both test_da cases + the two committed
+# test_compaction_tombstone_ttl ones) must have run while the fetched-only cases still
+# SKIP cleanly on a minimal checkout (#3220).
+#
+# Ordering note (#3220): this is only meaningful because that target now resolves its
+# root TABLE-granularly (cqlite-core/tests/support/datasets_root.rs) and therefore
+# falls back to the in-repo committed fixture when CQLITE_DATASETS_ROOT names a corpus
+# that lacks it. Under the previous keyspace-granular resolution the case skipped.
+#
+# Third invocation — scripts/tests/test_point_vs_full_failclosed.sh (#3220 AC2), the
+# POSITIVE CONTROL for everything above: a green lane proves nothing unless the same
+# lane FAILs on a fixture that is absent from every candidate root AND on one that is
+# present-but-empty. Both are staged in temp dirs (the tracked fixture and
+# $CQLITE_DATASETS_ROOT are never mutated — asserted by the self-test) and the absent
+# staging is surgical, hiding exactly one fixture, so the assertion cannot be satisfied
+# by some other case failing. It runs HERE rather than in tooling-tests because it
+# drives the very test binary this component has just built.
 #
 # Fixture policy: FAIL-CLOSED, unconditionally. Unlike the fetched-corpus lanes,
 # these fixtures are COMMITTED to git (test-data/datasets/sstables/test_da/
@@ -4808,12 +4966,20 @@ run_bti_multiclustering() {
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
-  echo ">>> [$name] compound-clustering BTI trie shape + SELECT lanes, fail-closed (#3032)"
-  if env CQLITE_REQUIRE_FIXTURES=1 \
-      ${CQLITE_DATASETS_ROOT:+CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT"} \
+  # An ARRAY, not `${VAR:+NAME="$VAR"}`: the unquoted parameter-expansion form
+  # word-splits a root containing whitespace, and `env` would then run its second
+  # word as the command.
+  local -a ds_env=()
+  [ -n "${CQLITE_DATASETS_ROOT:-}" ] && ds_env=(CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT")
+  echo ">>> [$name] compound-clustering BTI trie shape + SELECT + point-vs-full lanes, fail-closed (#3032/#3220)"
+  if env CQLITE_REQUIRE_FIXTURES=1 "${ds_env[@]}" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test issue_3032_multiclustering_rows_trie_shape \
-        --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1; then
+        --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1 \
+    && env -u CQLITE_REQUIRE_FIXTURES "${ds_env[@]}" \
+      cargo test -p cqlite-core --features "state_machine cli-helpers" \
+        --test point_vs_full_differential >>"$log" 2>&1 \
+    && bash "$REPO_ROOT/scripts/tests/test_point_vs_full_failclosed.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -5314,6 +5480,79 @@ run_tooling_tests() {
     return 0
   fi
 
+  # BTI perf-corpus generator guard (#3234): hermetic (no docker/sudo/cassandra —
+  # --help/--validate-only/--verify-only, the row driver, the manifest writer's
+  # pre-container guards, and a full end-to-end run through a STUB `docker`
+  # (scripts/tests/fixtures/stub-docker-cassandra-bti.py); nothing here starts a
+  # container or needs root). Pins issue
+  # #3234's ACCEPTANCE ASSERTS IN BOTH DIRECTIONS against fabricated corpora: a
+  # stock Cassandra 5.0 node silently emits `nb` (BIG) when either mandatory yaml
+  # setting misses, so an assert only ever observed on a good corpus is untested —
+  # every case here carries a negative control (`nb-*` descriptor, empty Rows.db,
+  # sub-8-MiB Data.db, a TOC listing the BIG-only Index.db). Also pins the row
+  # driver's (seed, chunk) determinism, which is what makes the manifest's
+  # per-Data.db sha256 a reproducibility check. A failure FAILs the component,
+  # mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_gen_perf_corpus_bti.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (BTI perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # AC3 warm-scan harness guard (#3234): the automated executor for
+  # cqlite-core/examples/bti_perf_scan/, the instrument every #3234 throughput
+  # number comes from. Its guards had never been OBSERVED to fire, and its worst
+  # failure mode is silent — a TRUNCATED scan reporting `RESULT: PASS` with a short
+  # row count. This drives the real binary and asserts its exit code for each
+  # documented mode (2 usage incl. `--min-seconds nan`, 3 open-failed, 4 zero-rows,
+  # 5 row-count mismatch, 6 window-too-short, 7 scan-failed-mid-stream, 8 no
+  # authoritative row count) plus the guarded happy path as positive control.
+  # Hermetic and cheap: it runs against the GIT-COMMITTED 10 KiB `test_da`
+  # BTI (`da`) fixture (468 Cassandra-written rows), never the ~2 GiB perf corpus,
+  # and needs no docker/network/python3/datasets. It does `cargo build -p cqlite-core
+  # --example bti_perf_scan --features cli-helpers` (incremental; the full gate has
+  # already compiled that graph), and a build failure is a FAILURE, never a skip.
+  echo ">>> [$name] bash scripts/tests/test_bti_perf_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (AC3 warm-scan harness guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Unenforced-constraint-comment guard (#3234): a comment that STATES a constraint
+  # must name or sit beside its enforcement, or the comment goes. Mechanizes the class
+  # that hit this one issue three times (L3's 11 unobserved manifest claims, L4's stale
+  # committed contract, F2's `validated_sstable_dir` documenting `<table>-<uuid>` while
+  # accepting `<table>-*`) — prose asserting what the adjacent code does not do, caught
+  # each time only by a human reviewer. Narrow by design (a named claim table over the
+  # #3234 production surface, not an English verifier) and it runs BOTH directions:
+  # `--self-test` asserts the real surface passes, that an INJECTED unenforced claim
+  # FAILS, and that the same claim passes once its enforcement follows it. Hermetic,
+  # python3-only, sub-second.
+  echo ">>> [$name] python3 scripts/tests/check-constraint-comments.py --self-test"
+  if ! python3 "$REPO_ROOT/scripts/tests/check-constraint-comments.py" --self-test \
+    >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (unenforced constraint comment); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # fetch-datasets tracked-fixture guard (#2878): hermetic (throwaway git repo +
   # locally-built partial-overlap tarball + stub curl — no network, and the real
   # test-data/datasets is never touched), no python3 needed, always runs. Pins the
@@ -5670,13 +5909,15 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&

@@ -1,0 +1,31 @@
+#!/usr/bin/env bpftrace
+/*
+ * WS0 #3217 Part B supplement: COUNT (not duration) of off-CPU switches for one
+ * process, split voluntary vs involuntary, and attributed to the user stack the
+ * thread parked on. offcputime charges MICROSECONDS; this charges EVENTS, which
+ * is what the "~1,960 voluntary parks per 8192-row batch" question needs.
+ *
+ * sched:sched_switch fires in the context of the OUTGOING task, so `pid`/`tid`/
+ * `comm`/`ustack` all describe prev. args->prev_state == 0 (TASK_RUNNING) means
+ * the task was PREEMPTED => involuntary; anything else means it blocked =>
+ * voluntary.
+ *
+ * Usage: bpftrace park-count.bt <tgid> <duration-secs>
+ */
+BEGIN { @tgid = (uint32)$1; printf("park-count: tgid %d for %d s\n", $1, $2); }
+
+tracepoint:sched:sched_switch
+/pid == @tgid/
+{
+	if (args->prev_state == 0) {
+		@invol_total = count();
+		@invol_by_comm[comm] = count();
+	} else {
+		@vol_total = count();
+		@vol_by_comm[comm] = count();
+		@vol_by_stack[comm, ustack] = count();
+	}
+}
+
+interval:s:$2 { exit(); }
+END { clear(@tgid); }

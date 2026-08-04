@@ -24,13 +24,24 @@
 //! to guard.
 //!
 //! Anti-empty-pass / SKIP contract (matches the query-semantics oracle):
-//!   * When the committed corpus (or its `*.db` binaries) is absent, each case
-//!     SKIPs cleanly — UNLESS `CQLITE_REQUIRE_FIXTURES=1` (the agent-gate
-//!     integration-tests tier sets it), in which case an absent/empty fixture is
-//!     a hard FAIL so the lane can never green-pass without running.
+//!   * Every case whose SSTable binaries are COMMITTED to git carries
+//!     `must_run: true` and is fail-closed UNCONDITIONALLY — a SKIP is a hard
+//!     FAILURE with or without `CQLITE_REQUIRE_FIXTURES` (issue #3220). Those
+//!     fixtures exist in every checkout, so a SKIP can only mean the lane failed to
+//!     RESOLVE them.
+//!   * A case whose binaries are FETCHED (gitignored) SKIPs cleanly when the corpus
+//!     is absent — UNLESS `CQLITE_REQUIRE_FIXTURES=1` (the agent-gate
+//!     integration-tests tier sets it), under which EVERY case must run.
 //!   * A case that discovers ZERO partition keys in a present fixture is a hard
 //!     FAIL (a fixture with rows must yield at least one point query), never a
-//!     silent vacuous pass.
+//!     silent vacuous pass; every clustering slice is additionally anchored to an
+//!     exact expected row count, so a present-but-empty fixture FAILs rather than
+//!     comparing `0 == 0`.
+//!
+//! Fixture roots resolve TABLE-granularly via `support/datasets_root.rs` (#3220):
+//! a `CQLITE_DATASETS_ROOT` corpus holding the keyspace but not the table falls
+//! through to the checkout's committed copy instead of being committed to. The
+//! agent-gate `bti-multiclustering` component runs this target as defense in depth.
 //!
 //! The harness's divergence detection is itself regression-tested by
 //! `comparison_detects_a_seeded_divergence` below (feeding the compare helper two
@@ -58,8 +69,14 @@
 #[path = "point_vs_full_differential/one_vs_n_generation.rs"]
 mod one_vs_n_generation;
 
+// TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
+// (issue #3220). Declared BEFORE first use so both this file and the submodule
+// (`use super::…`) resolve fixtures the same way.
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serial_test::serial;
 
@@ -149,6 +166,37 @@ struct TableCase {
     /// Documented reconciliation classes this fixture covers (for the corpus
     /// coverage assertion; not used at query time).
     divergence_classes: &'static [&'static str],
+    /// This case MUST execute — a SKIP is a hard FAILURE, unconditionally (issue
+    /// #3220).
+    ///
+    /// Set for every case whose SSTable binaries are **committed to git** rather than
+    /// fetched: they are present in EVERY checkout, so there is no legitimate
+    /// absence and no reason to require `CQLITE_REQUIRE_FIXTURES=1` before saying so.
+    /// A declarative flag (rather than a table name hardcoded in the terminal
+    /// assertion) so a future committed fixture opts in where it is defined.
+    ///
+    /// AUTHORITY for the value is `git ls-files`, NEVER directory presence in the
+    /// working tree: `fetch-datasets.sh` unpacks the fetched corpus into
+    /// `test-data/datasets/` by default, so a GITIGNORED fixture is routinely present
+    /// on disk in a checkout where another machine has nothing. Re-derive with
+    ///
+    /// ```text
+    /// git ls-files 'test-data/datasets/sstables/**-Data.db'
+    /// ```
+    ///
+    /// which (as of #3220) covers exactly four of this corpus's tables —
+    /// `test_tomb/static_with_tombstones`, both `test_compaction_tombstone_ttl`
+    /// tables and both `test_da` tables, i.e. FIVE of the nine cases. Every other
+    /// `test_tomb` table here ships only its `*-Data.db.jsonl` / `*-Statistics.db.txt`
+    /// sidecars, so its binaries are fetched and its absence is legitimate.
+    ///
+    /// Why it is load-bearing: `CQLITE_REQUIRE_FIXTURES` is NOT set by the
+    /// `core-tests` component that runs this target, and the terminal check used to
+    /// be a suite-wide `ran > 0` — so a single case that resolved to no fixture
+    /// skipped silently behind seven siblings that ran. That is exactly how the
+    /// #3032 `test_da.multiclustering_table` case never executed on a machine whose
+    /// `CQLITE_DATASETS_ROOT` held `test_da` without that table.
+    must_run: bool,
     /// Extra WITHIN-partition clustering predicates to run against EVERY probed
     /// partition key, as `(predicate, expected_row_count)` pairs evaluated as
     /// `WHERE <pk> = <k> AND <predicate>` (issue #3002). These exercise the
@@ -178,6 +226,9 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     TableCase {
@@ -187,6 +238,9 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     // Cross-generation partition tombstone + a tombstone-only partition.
@@ -197,6 +251,9 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2],
         divergence_classes: &["multi_generation", "tombstone"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     // TTL localDeletionTime boundary (expired vs live cells).
@@ -207,6 +264,9 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["ttl"],
+        // FETCHED (gitignored binaries; only the JSONL/.db.txt sidecars are
+        // committed) — a clean SKIP on a minimal checkout is legitimate.
+        must_run: false,
         clustering_slice_predicates: &[],
     },
     // Live static cell surviving adjacent row/cell/range tombstones.
@@ -217,6 +277,12 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["tombstone"],
+        // COMMITTED: `git ls-files` lists nb-1-big-{Data,Index,Filter,Summary,
+        // Statistics,CompressionInfo}.db under
+        // test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780…/ —
+        // the ONLY test_tomb table in this corpus whose binaries are in git. Present in
+        // every checkout, so a SKIP can only mean the lane failed to RESOLVE it.
+        must_run: true,
         clustering_slice_predicates: &[],
     },
     // Post-major-compaction tombstone/TTL fixtures (single output SSTable).
@@ -227,6 +293,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "id",
         probe_keys: &[],
         divergence_classes: &["tombstone"],
+        must_run: true,
         clustering_slice_predicates: &[],
     },
     TableCase {
@@ -236,6 +303,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "id",
         probe_keys: &[],
         divergence_classes: &["ttl"],
+        must_run: true,
         clustering_slice_predicates: &[],
     },
     // BTI (`da`) WIDE partition with a per-partition `Rows.db` row index (issue
@@ -253,6 +321,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2, 3],
         divergence_classes: &["bti_clustering_slice"],
+        must_run: true,
         // Every partition holds ck=0..=299, so each slice's row count is exact and
         // identical for pk=1/2/3 — and every one of them is strictly between 0 and the
         // partition's 300 rows, so neither an empty nor an unnarrowed result can pass.
@@ -282,6 +351,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2, 3],
         divergence_classes: &["bti_clustering_slice", "compound_clustering"],
+        must_run: true,
         // The fixture's partitions are DELIBERATELY non-uniform (pk=1: 3 buckets x
         // 60 rows = 180; pk=2: 5 x 32 = 160; pk=3: 8 x 16 = 128), which is what makes
         // their row-index tries differ structurally. This lane applies one expected
@@ -313,77 +383,35 @@ const CORPUS: &[TableCase] = &[
     },
 ];
 
+/// Stable identity of a corpus case, used by the per-case must-run bookkeeping.
+fn case_id(case: &TableCase) -> String {
+    format!("{}.{}", case.keyspace, case.table)
+}
+
+/// PURE decision behind the must-run assertion: every `must_run` case absent from
+/// `ran`, by table name.
+///
+/// Factored out so the assertion has a proof it CAN fail
+/// (`must_run_violations_flags_a_committed_case_that_did_not_run`). A fail-closed
+/// guard whose failing branch is never exercised is indistinguishable from a guard
+/// that cannot fire — the exact shape of the #3220 defect it replaces.
+fn must_run_violations<'a>(cases: &'a [TableCase], ran: &[String]) -> Vec<&'a str> {
+    cases
+        .iter()
+        .filter(|c| c.must_run && !ran.iter().any(|id| id == &case_id(c)))
+        .map(|c| c.table)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
-// Path resolution (mirrors query_semantics_oracle_parity.rs)
+// Path resolution — the shared, TABLE-granular resolver (issue #3220)
 // ---------------------------------------------------------------------------
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
-}
-
-fn sstables_root(keyspace: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .map(|r| PathBuf::from(r).join("sstables")),
-        Some(
-            repo_root()
-                .join("test-data")
-                .join("datasets")
-                .join("sstables"),
-        ),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|root| root.join(keyspace).is_dir())
-}
-
-fn schema_path(file: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT").ok().and_then(|r| {
-            PathBuf::from(r)
-                .parent()
-                .map(|p| p.join("schemas").join(file))
-        }),
-        Some(repo_root().join("test-data").join("schemas").join(file)),
-    ];
-    candidates.into_iter().flatten().find(|p| p.exists())
-}
-
-/// True when the keyspace dir holds at least one `*-Data.db` for `table` — i.e.
-/// the (gitignored) binaries have actually been fetched, not just the JSONL.
-fn table_has_data(root: &Path, keyspace: &str, table: &str) -> bool {
-    let ks_dir = root.join(keyspace);
-    let Ok(entries) = std::fs::read_dir(&ks_dir) else {
-        return false;
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&format!("{table}-")))
-                    .unwrap_or(false)
-        })
-        .any(|dir| {
-            std::fs::read_dir(&dir)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok()).any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|n| n.ends_with("-Data.db"))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        })
-}
+// Re-exported for the `one_vs_n_generation` submodule (`use super::…`) and shared,
+// byte-for-byte, with `query_semantics_oracle_parity.rs` + `read_path_forcing_e2e.rs`.
+// A private per-file copy is what let the same absence read as a hard FAIL in one
+// lane and a silent SKIP in another.
+use datasets_root::{describe_search, schema_path, sstables_root_for_table};
 
 // ---------------------------------------------------------------------------
 // Result normalization (authoritative; never a byte-pattern guess)
@@ -509,15 +537,12 @@ async fn assert_point_full_equal(
 /// equality. `Ok(true)` = ran a comparison, `Ok(false)` = SKIPped (absent
 /// fixture, non-fail-closed).
 async fn run_case(case: &TableCase) -> Result<bool, String> {
-    let Some(root) = sstables_root(case.keyspace) else {
-        return skip_or_fail(&format!("keyspace {} absent", case.keyspace));
+    // TABLE-granular: every candidate root is searched for THIS table's `*-Data.db`,
+    // so a root holding the keyspace without the table falls through to the next one
+    // instead of being committed to (issue #3220).
+    let Some(root) = sstables_root_for_table(case.keyspace, case.table) else {
+        return skip_or_fail(&describe_search(case.keyspace, case.table));
     };
-    if !table_has_data(&root, case.keyspace, case.table) {
-        return skip_or_fail(&format!(
-            "table {}.{} has no fetched *-Data.db",
-            case.keyspace, case.table
-        ));
-    }
     let Some(schema) = schema_path(case.schema) else {
         return skip_or_fail(&format!("schema {} absent", case.schema));
     };
@@ -655,7 +680,17 @@ async fn point_vs_full_differential_equality() {
         .iter()
         .flat_map(|c| c.divergence_classes.iter().copied())
         .collect();
-    for required in ["multi_generation", "tombstone", "ttl"] {
+    for required in [
+        "multi_generation",
+        "tombstone",
+        "ttl",
+        // The BTI (`da`) clustering-slice classes (#3002 / #3032): the point path's
+        // `Rows.db` row-index window, and its multi-component (`text` then `int`)
+        // clustering form. Listed so dropping either fixture reds this lane instead
+        // of quietly narrowing the corpus.
+        "bti_clustering_slice",
+        "compound_clustering",
+    ] {
         assert!(
             covered.contains(required),
             "corpus must cover the {required:?} reconciliation class (issue #1741 divergence set)"
@@ -667,13 +702,14 @@ async fn point_vs_full_differential_equality() {
     // AND this test is `#[serial]` against every sibling that writes the same var.
     let _clock = pin_read_clock();
 
-    let mut ran = 0usize;
+    let mut ran: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for case in CORPUS {
         match run_case(case).await {
-            Ok(true) => ran += 1,
-            Ok(false) => {}
-            Err(e) => failures.push(format!("{}.{}: {e}", case.keyspace, case.table)),
+            Ok(true) => ran.push(case_id(case)),
+            Ok(false) => skipped.push(case_id(case)),
+            Err(e) => failures.push(format!("{}: {e}", case_id(case))),
         }
     }
 
@@ -683,10 +719,46 @@ async fn point_vs_full_differential_equality() {
         failures.join("\n\n")
     );
 
+    // PER-CASE must-run, UNCONDITIONALLY (issue #3220). Every `must_run` fixture is
+    // COMMITTED to git, so it is present in every checkout and a SKIP can only mean
+    // the case failed to RESOLVE its fixture — the silent-skip defect this assertion
+    // exists to make impossible. Deliberately NOT gated on
+    // `CQLITE_REQUIRE_FIXTURES`: this target runs under `core-tests`, which does not
+    // set it, and that is exactly where the #3032 multiclustering case skipped
+    // unnoticed. Suite-wide `ran > 0` cannot see it — seven siblings ran.
+    let must_run_missing = must_run_violations(CORPUS, &ran);
+    assert!(
+        must_run_missing.is_empty(),
+        "{} committed-fixture case(s) did NOT run: {:?} — these fixtures are COMMITTED to git, \
+         so absence means the lane failed to RESOLVE them, never that they are legitimately \
+         missing.\n  ran    : {:?}\n  skipped: {:?}\n  remedy : git restore --source=HEAD -- \
+         test-data/datasets/sstables (or fix root resolution — see \
+         tests/support/datasets_root.rs)",
+        must_run_missing.len(),
+        must_run_missing,
+        ran,
+        skipped
+    );
+
+    let ran = ran.len();
     if require_fixtures() {
+        // Fail closed per CASE, not merely suite-wide (matching the query-semantics
+        // oracle): this lane has no per-case opt-out, so under REQUIRE_FIXTURES every
+        // corpus case must have run. A suite-wide `ran > 0` would let a newly added
+        // case skip silently behind its siblings.
         assert!(
-            ran > 0,
-            "CQLITE_REQUIRE_FIXTURES=1 but no differential case ran (fixtures absent) — fail-closed"
+            skipped.is_empty(),
+            "CQLITE_REQUIRE_FIXTURES=1 but {} of {} differential cases SKIPped ({:?}) — \
+             fail-closed",
+            skipped.len(),
+            CORPUS.len(),
+            skipped
+        );
+        assert_eq!(
+            ran,
+            CORPUS.len(),
+            "CQLITE_REQUIRE_FIXTURES=1: {ran} of {} differential cases ran — fail-closed",
+            CORPUS.len()
         );
     } else if ran == 0 {
         eprintln!(
@@ -694,6 +766,50 @@ async fn point_vs_full_differential_equality() {
              (set CQLITE_REQUIRE_FIXTURES=1 to fail-close)"
         );
     }
+}
+
+/// Regression-test the FAIL-CLOSED guard itself (issue #3220): the must-run decision
+/// must FIRE for a committed-fixture case that did not run, and must stay silent for
+/// a fetched-only case that skipped. Without this, the guard's failing branch is
+/// never exercised and "green" would not distinguish a guard that works from a guard
+/// that cannot fire.
+#[test]
+fn must_run_violations_flags_a_committed_case_that_did_not_run() {
+    // The real corpus, minus the #3032 case's id: exactly the state observed on a
+    // machine whose CQLITE_DATASETS_ROOT lacked the committed fixture.
+    let ran_without_multiclustering: Vec<String> = CORPUS
+        .iter()
+        .filter(|c| c.table != "multiclustering_table")
+        .map(case_id)
+        .collect();
+    assert_eq!(
+        must_run_violations(CORPUS, &ran_without_multiclustering),
+        vec!["multiclustering_table"],
+        "a committed-fixture case that did not run must be reported, even though every \
+         other case ran (the suite-wide `ran > 0` blind spot)"
+    );
+
+    // All cases ran: no violation.
+    let all: Vec<String> = CORPUS.iter().map(case_id).collect();
+    assert!(
+        must_run_violations(CORPUS, &all).is_empty(),
+        "no violation when every case ran"
+    );
+
+    // A FETCHED-only (must_run == false) case that skipped is NOT a violation: those
+    // binaries are gitignored, so their absence is legitimate on a minimal checkout.
+    let without_fetched: Vec<String> = CORPUS.iter().filter(|c| c.must_run).map(case_id).collect();
+    assert!(
+        must_run_violations(CORPUS, &without_fetched).is_empty(),
+        "a gitignored-fixture case that skipped must not trip the committed-fixture guard"
+    );
+
+    // The corpus must actually DECLARE some committed cases, else the guard above is
+    // vacuous (an all-`false` corpus can never produce a violation).
+    assert!(
+        CORPUS.iter().any(|c| c.must_run),
+        "at least one corpus case must be declared must_run, else the guard is vacuous"
+    );
 }
 
 /// Regression-test the harness itself: the compare logic MUST flag a divergence

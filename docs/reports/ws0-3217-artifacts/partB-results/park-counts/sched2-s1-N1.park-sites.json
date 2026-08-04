@@ -1,0 +1,281 @@
+{
+ "schema": "ws0-3217.sched-switch-counts/v1",
+ "label": "sched2-s1-N1",
+ "window_secs": 10.0,
+ "unit": "EVENTS (context switches)",
+ "voluntary": 254863,
+ "voluntary_per_s": 25486.3,
+ "involuntary": 87753,
+ "involuntary_per_s": 8775.3,
+ "total_switches": 342616,
+ "rows_per_s": 206861.0,
+ "flight_batch_rows": 8192.0,
+ "flight_batches_per_s": 25.2515869140625,
+ "voluntary_parks_per_flight_batch": 1009.2949835880132,
+ "voluntary_parks_per_1k_rows": 123.20495405127114,
+ "sites": [
+  {
+   "site": "tokio_runtime_idle",
+   "parks": 80738,
+   "present": true,
+   "pct_of_voluntary": 31.678980471861355,
+   "parks_per_s": 8073.8,
+   "parks_per_flight_batch": 319.73436075432295,
+   "by_comm": {
+    "tokio-rt-worker": 2687,
+    "cqlite-query-ro": 78051
+   },
+   "description": "runtime worker / io-driver / blocking-pool park with nothing to do",
+   "examples": [
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "epoll_wait",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "schedule_hrtimeout_range_clock",
+      "schedule_hrtimeout_range",
+      "ep_poll",
+      "do_epoll_wait",
+      "__x64_sys_epoll_wait"
+     ]
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "matched": "epoll_wait",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "schedule_hrtimeout_range_clock",
+      "schedule_hrtimeout_range",
+      "ep_poll",
+      "do_epoll_wait",
+      "__x64_sys_epoll_wait"
+     ]
+    }
+   ]
+  },
+  {
+   "site": "core_raw_chunk_chan",
+   "parks": 79202,
+   "present": true,
+   "pct_of_voluntary": 31.076303739656208,
+   "parks_per_s": 7920.2,
+   "parks_per_flight_batch": 313.65157472892423,
+   "by_comm": {
+    "tokio-rt-worker": 79202
+   },
+   "description": "cqlite-core raw decompressed-chunk channel, cap 8: 1 send per 16 KiB chunk",
+   "examples": [
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "Sender<bytes::bytes::Bytes>",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    }
+   ]
+  },
+  {
+   "site": "core_query_rows_chan",
+   "parks": 51154,
+   "present": true,
+   "pct_of_voluntary": 20.071175494285164,
+   "parks_per_s": 5115.4,
+   "parks_per_flight_batch": 202.57736741096676,
+   "by_comm": {
+    "cqlite-query-ro": 5339,
+    "tokio-rt-worker": 45815
+   },
+   "description": "cqlite-core query_rows std sync_channel, cap 4: 1 send per 128 rows",
+   "examples": [
+    {
+     "comm": "cqlite-query-ro",
+     "matched": "QueryRowMsg",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "matched": "QueryRowMsg",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    }
+   ]
+  },
+  {
+   "site": "glibc_malloc_arena_lock",
+   "parks": 41159,
+   "present": true,
+   "pct_of_voluntary": 16.14946069064556,
+   "parks_per_s": 4115.9,
+   "parks_per_flight_batch": 162.99569662720376,
+   "by_comm": {
+    "tokio-rt-worker": 41159
+   },
+   "description": "glibc allocator arena futex (NOT one of AC4's seven buckets; reported explicitly)",
+   "examples": [
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "__lll_lock_wait",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    },
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "__lll_lock_wait",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    }
+   ]
+  },
+  {
+   "site": "core_windowed_batch_chan",
+   "parks": 2083,
+   "present": true,
+   "pct_of_voluntary": 0.8173018445203893,
+   "parks_per_s": 208.3,
+   "parks_per_flight_batch": 8.248986517516594,
+   "by_comm": {
+    "tokio-rt-worker": 2082,
+    "cqlite-query-ro": 1
+   },
+   "description": "cqlite-core windowed batch channel, cap 2: 1 send per 256 rows",
+   "examples": [
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "Vec<(cqlite_core::types::RowKey",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    },
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "scan_stream_windowed",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    }
+   ]
+  },
+  {
+   "site": "grpc_egress",
+   "parks": 527,
+   "present": true,
+   "pct_of_voluntary": 0.2067777590313227,
+   "parks_per_s": 52.7,
+   "parks_per_flight_batch": 2.08699754907885,
+   "by_comm": {
+    "tokio-rt-worker": 527
+   },
+   "description": "Arrow-Flight encode + tonic/h2 + socket write",
+   "examples": [
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "hyper::proto::h2",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    },
+    {
+     "comm": "tokio-rt-worker",
+     "matched": "hyper::proto::h2",
+     "leaf_frames": [
+      "perf_trace_sched_switch",
+      "__schedule",
+      "schedule",
+      "futex_do_wait",
+      "__futex_wait",
+      "futex_wait",
+      "do_futex",
+      "__x64_sys_futex"
+     ]
+    }
+   ]
+  },
+  {
+   "site": "do_get_mpsc_handoff",
+   "parks": 0,
+   "present": false,
+   "pct_of_voluntary": 0.0,
+   "parks_per_s": 0.0,
+   "parks_per_flight_batch": 0.0,
+   "by_comm": {},
+   "description": "cqlite-flight do_get bounded mpsc, cap 4: 1 reserve + 1 emit per Flight batch",
+   "examples": []
+  },
+  {
+   "site": "egress_credit",
+   "parks": 0,
+   "present": false,
+   "pct_of_voluntary": 0.0,
+   "parks_per_s": 0.0,
+   "parks_per_flight_batch": 0.0,
+   "by_comm": {},
+   "description": "per-stream in-flight capacity-byte credit pool",
+   "examples": []
+  }
+ ]
+}

@@ -41,6 +41,11 @@
 //! seam is never mutated concurrently by a sibling test in this binary.
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
+// TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
+// (issue #3220).
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -112,45 +117,39 @@ struct Case {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// Repo root = the parent of this crate's manifest dir (`<repo>/cqlite-core`).
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
-}
+// Repo root, candidate `sstables/` roots and committed-schema resolution come from
+// the shared, TABLE-granular resolver (issue #3220). This file used to carry a
+// private copy of a KEYSPACE-granular `sstables_root`, byte-identical to the copies
+// in `point_vs_full_differential.rs` and `read_path_forcing_e2e.rs` — so the same
+// absence (a root holding the keyspace but not the table) surfaced as a confusing
+// hard FAIL here and a silent SKIP there.
+use datasets_root::{repo_root, schema_path};
 
-/// The `sstables/` root. Prefer `CQLITE_DATASETS_ROOT` when it actually holds the
-/// committed keyspace; otherwise fall back to the in-repo committed corpus (these
-/// fixtures are committed, not gitignored, so the repo copy is always present).
-fn sstables_root(keyspace: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .map(|r| PathBuf::from(r).join("sstables")),
-        Some(
-            repo_root()
-                .join("test-data")
-                .join("datasets")
-                .join("sstables"),
-        ),
-    ];
+/// The candidate root that actually carries THIS case's fixture.
+///
+/// Table-granular (issue #3220): every candidate root is probed with the case's own
+/// `fixture_dir_prefix`/`sstable_prefix` and the first one holding the `Data.db`
+/// wins, so a `CQLITE_DATASETS_ROOT` corpus lacking a git-committed table falls
+/// through to the checkout instead of being committed to. When NO root resolves the
+/// fixture, a root merely holding the keyspace is returned so the caller's
+/// "dir absent" / "not fetched" messages still name a real path.
+fn sstables_root_for_case(case: &Case) -> Option<PathBuf> {
+    let candidates = datasets_root::sstables_root_candidates();
+    let data_db = format!("{}-Data.db", case.sstable_prefix);
     candidates
-        .into_iter()
-        .flatten()
-        .find(|root| root.join(keyspace).is_dir())
-}
-
-fn schema_path(file: &str) -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT").ok().and_then(|r| {
-            PathBuf::from(r)
-                .parent()
-                .map(|p| p.join("schemas").join(file))
-        }),
-        Some(repo_root().join("test-data").join("schemas").join(file)),
-    ];
-    candidates.into_iter().flatten().find(|p| p.exists())
+        .iter()
+        .find(|root| {
+            fixture_dir(
+                root,
+                &case.keyspace,
+                &case.fixture_dir_prefix,
+                &case.sstable_prefix,
+            )
+            .map(|dir| dir.join(&data_db).exists())
+            .unwrap_or(false)
+        })
+        .or_else(|| candidates.iter().find(|r| r.join(&case.keyspace).is_dir()))
+        .cloned()
 }
 
 /// Resolve `<sstables>/<keyspace>/<prefix><uuid>/` for a case.
@@ -358,8 +357,16 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         }
     }
 
-    let Some(root) = sstables_root(&case.keyspace) else {
-        let msg = format!("case {}: keyspace {} absent", case.id, case.keyspace);
+    let Some(root) = sstables_root_for_case(case) else {
+        // Names the table AND every root searched: "keyspace absent" was actively
+        // misleading when the keyspace existed and only the table did not (#3220).
+        let msg = format!(
+            "case {}: no candidate sstables root holds {}.{}* — {}",
+            case.id,
+            case.keyspace,
+            case.fixture_dir_prefix,
+            datasets_root::describe_roots()
+        );
         if require_fixtures() {
             return Err(format!("REQUIRE_FIXTURES: {msg}"));
         }
@@ -448,8 +455,19 @@ async fn run_case(case: &Case) -> Result<bool, String> {
     };
 
     let exec = db.execute(&case.query).await;
+    // Issue #3109: run the SAME query through the STREAMING executor as well, INSIDE
+    // the same pin. That executor is the one that consumes the BATCHED reader surface
+    // (`select_executor/streaming.rs` -> `StorageEngine::scan_stream_batched` ->
+    // `SSTableReader::scan_stream_batched`), which the materializing `execute` above
+    // does not reach — so without this second drive a per-surface decode-posture
+    // divergence (the #1577 class: the batched surface lacking the BTI dispatch its
+    // siblings have, and so decoding `da` readers UNSHADOWED) is INVISIBLE to this
+    // oracle. Both lanes must produce the recorded post-reconciliation result set.
+    let streamed = collect_streaming(&db, &case.query).await;
     std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
     let result = exec.map_err(|e| format!("case {}: SELECT failed: {e}", case.id))?;
+    let (streamed_cols, streamed_rows) =
+        streamed.map_err(|e| format!("case {}: streaming SELECT failed: {e}", case.id))?;
 
     // The compared column set is the query's DECLARED projection, taken from the
     // result metadata (the engine's rendering of the case's own `SELECT` list) —
@@ -478,47 +496,109 @@ async fn run_case(case: &Case) -> Result<bool, String> {
     // authored in every expected row (so no projected column is silently left out
     // of the comparison).
     validate_projection(&case.id, &cols, &case.expected_rows)?;
-    let mut actual: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
-    for row in &result.rows {
+    let actual = project_rows(&case.id, &cols, &result.rows)?;
+
+    // The streaming lane's projection must be the SAME declared projection, else the
+    // two lanes would be compared on different column sets and a divergence could
+    // hide in the difference.
+    if streamed_cols != cols {
+        return Err(format!(
+            "case {}: the streaming executor declared projection {streamed_cols:?} but \
+             the materializing executor declared {cols:?} — the two lanes must compare \
+             the same column set",
+            case.id
+        ));
+    }
+    let streamed_actual = project_rows(&case.id, &cols, &streamed_rows)?;
+
+    let expected = normalize(case.expected_rows.clone());
+    for (lane, rows) in [
+        ("materializing (`execute`)", actual),
+        (
+            "streaming (`execute_streaming`, batched reader surface)",
+            streamed_actual,
+        ),
+    ] {
+        let got = normalize(rows);
+        if expected != got {
+            return Err(format!(
+                "case {} ({}): query-semantics MISMATCH on the {lane} lane\n  query: {}\n  pinned_now_secs: {}\n  physical rows on disk: {golden}\n  expected ({} rows): {:#?}\n  got      ({} rows): {:#?}",
+                case.id,
+                case.keyspace,
+                case.query,
+                case.pinned_now_secs,
+                expected.len(),
+                expected,
+                got.len(),
+                got,
+            ));
+        }
+    }
+    eprintln!(
+        "PASS case {} — semantic {} rows on BOTH the materializing and streaming lanes \
+         (physical dump had {golden}); reconciliation applied",
+        case.id,
+        expected.len()
+    );
+    Ok(true)
+}
+
+/// Execute `query` through the STREAMING executor and drain it, returning the
+/// declared projection and the rows (issue #3109).
+///
+/// This is the lane that reaches the reader's BATCHED scan surface; `db.execute`
+/// does not, so a posture divergence between the two reader surfaces is only
+/// observable from here.
+async fn collect_streaming(
+    db: &Database,
+    query: &str,
+) -> Result<(Vec<String>, Vec<cqlite_core::query::result::QueryRow>), String> {
+    let mut iter = db
+        .execute_streaming(
+            query,
+            cqlite_core::query::result::StreamingConfig::default(),
+        )
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let cols: Vec<String> = iter
+        .metadata
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    let mut rows = Vec::new();
+    while let Some(row) = iter.next_async().await {
+        rows.push(row.map_err(|e| format!("streamed row: {e}"))?);
+    }
+    Ok((cols, rows))
+}
+
+/// Render `rows` down to the declared projection `cols` as comparable JSON.
+///
+/// A PROJECTED column with no cell in a row reads NULL — CQL semantics, and exactly
+/// what Cassandra returns for the clustering and regular columns of a static-only
+/// partition's row (issue #3095; `processPartition()`'s
+/// `default: result.add((ByteBuffer) null)`), and equally what a cell TOMBSTONE
+/// leaves behind: an absent entry IS the core result model's NULL (issue #3094).
+/// `validate_projection` is what keeps this from masking an oracle typo.
+fn project_rows(
+    case_id: &str,
+    cols: &[String],
+    rows: &[cqlite_core::query::result::QueryRow],
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    let mut actual = Vec::with_capacity(rows.len());
+    for row in rows {
         let mut m = serde_json::Map::new();
-        for col in &cols {
-            // A PROJECTED column with no cell in this row reads NULL — CQL
-            // semantics, and exactly what Cassandra returns for the clustering and
-            // regular columns of a static-only partition's row (issue #3095;
-            // `processPartition()`'s `default: result.add((ByteBuffer) null)`), and
-            // equally what a cell TOMBSTONE leaves behind: an absent entry IS the
-            // core result model's NULL (issue #3094). `validate_projection` above is
-            // what keeps this from masking an oracle typo.
+        for col in cols {
             let json = match row.values.get(col.as_str()) {
-                Some(v) => value_to_json(v).map_err(|e| format!("case {}: {e}", case.id))?,
+                Some(v) => value_to_json(v).map_err(|e| format!("case {case_id}: {e}"))?,
                 None => serde_json::Value::Null,
             };
             m.insert(col.clone(), json);
         }
         actual.push(m);
     }
-
-    let expected = normalize(case.expected_rows.clone());
-    let got = normalize(actual);
-    if expected != got {
-        return Err(format!(
-            "case {} ({}): query-semantics MISMATCH\n  query: {}\n  pinned_now_secs: {}\n  physical rows on disk: {golden}\n  expected ({} rows): {:#?}\n  got      ({} rows): {:#?}",
-            case.id,
-            case.keyspace,
-            case.query,
-            case.pinned_now_secs,
-            expected.len(),
-            expected,
-            got.len(),
-            got,
-        ));
-    }
-    eprintln!(
-        "PASS case {} — semantic {} rows (physical dump had {golden}); reconciliation applied",
-        case.id,
-        got.len()
-    );
-    Ok(true)
+    Ok(actual)
 }
 
 /// A synthetic `Case` for the guard-enforcement tests below. Uses placeholder

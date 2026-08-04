@@ -13,8 +13,15 @@
 //!
 //! Assertions read the PER-QUERY `metadata.access_path` (not the process-global
 //! `access_path::last()` probe), so the three `#[tokio::test]`s are safe to run in
-//! parallel. Against a committed INT-partition-key fixture; SKIP-loud when the
-//! fixture is absent, fail-closed under `CQLITE_REQUIRE_FIXTURES=1`.
+//! parallel.
+//!
+//! Fixture contract (issue #3220): the fixture is COMMITTED to git, so it is present
+//! in every checkout and there is no legitimate absence — resolution failure is a hard
+//! FAILURE, UNCONDITIONALLY, with or without `CQLITE_REQUIRE_FIXTURES`. This lane runs
+//! under `core-tests`, which does NOT set that variable, so the previous
+//! require-fixtures-gated `SKIP` meant a resolution break would return early from all
+//! three tests and report green — the exact silent-skip defect #3220 exists to remove.
+//! Roots resolve TABLE-granularly via `support/datasets_root.rs`.
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
 use std::collections::BTreeMap;
@@ -32,76 +39,17 @@ const TABLE: &str = "shadow_row_delete";
 const SCHEMA: &str = "compaction-tombstone-ttl-parity.cql";
 const PK_COLUMN: &str = "id";
 
-fn require_fixtures() -> bool {
-    std::env::var("CQLITE_REQUIRE_FIXTURES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
+// TABLE-granular fixture-root resolution, shared with the sibling dataset lanes
+// (issue #3220): this file used to carry a private, byte-identical copy of a
+// KEYSPACE-granular `sstables_root` + `table_has_data` pair, which selects a corpus
+// root that may not hold the table and then reports the table as absent.
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
-}
-
-fn sstables_root() -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .map(|r| PathBuf::from(r).join("sstables")),
-        Some(
-            repo_root()
-                .join("test-data")
-                .join("datasets")
-                .join("sstables"),
-        ),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|root| root.join(KEYSPACE).is_dir())
-}
+use datasets_root::{describe_search, sstables_root_for_table};
 
 fn schema_path() -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT").ok().and_then(|r| {
-            PathBuf::from(r)
-                .parent()
-                .map(|p| p.join("schemas").join(SCHEMA))
-        }),
-        Some(repo_root().join("test-data").join("schemas").join(SCHEMA)),
-    ];
-    candidates.into_iter().flatten().find(|p| p.exists())
-}
-
-fn table_has_data(root: &Path) -> bool {
-    let ks_dir = root.join(KEYSPACE);
-    let Ok(entries) = std::fs::read_dir(&ks_dir) else {
-        return false;
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&format!("{TABLE}-")))
-                    .unwrap_or(false)
-        })
-        .any(|dir| {
-            std::fs::read_dir(&dir)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok()).any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|n| n.ends_with("-Data.db"))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        })
+    datasets_root::schema_path(SCHEMA)
 }
 
 async fn open_db(root: &Path, schema: &Path, mode: Option<ReadPathMode>) -> Database {
@@ -135,28 +83,31 @@ fn normalize(rows: &[QueryRow]) -> Vec<String> {
         .collect()
 }
 
-/// Resolve the fixture paths, or `None` (SKIP / fail-closed) when absent.
-fn resolve() -> Option<(PathBuf, PathBuf)> {
-    let Some(root) = sstables_root() else {
-        handle_absent("keyspace absent");
-        return None;
-    };
-    if !table_has_data(&root) {
-        handle_absent("no fetched *-Data.db");
-        return None;
-    }
-    let Some(schema) = schema_path() else {
-        handle_absent("schema absent");
-        return None;
-    };
-    Some((root, schema))
-}
-
-fn handle_absent(msg: &str) {
-    if require_fixtures() {
-        panic!("REQUIRE_FIXTURES: {KEYSPACE}.{TABLE}: {msg}");
-    }
-    eprintln!("SKIP {KEYSPACE}.{TABLE}: {msg}");
+/// Resolve the fixture paths, or FAIL — never skip (issue #3220).
+///
+/// Both inputs are COMMITTED source: the SSTable binaries are force-added under
+/// `test-data/datasets/sstables/test_compaction_tombstone_ttl/shadow_row_delete-*`
+/// (`git ls-files`), and the schema is a committed `.cql` resolved checkout-relative
+/// (#3148). Neither can be legitimately absent in any checkout, so a failure here is
+/// a resolution defect and must be loud. Panicking (rather than returning `Option`)
+/// removes the early-return branch that let all three tests report green.
+fn resolve() -> (PathBuf, PathBuf) {
+    let root = sstables_root_for_table(KEYSPACE, TABLE).unwrap_or_else(|| {
+        panic!(
+            "{KEYSPACE}.{TABLE} is COMMITTED to git and must resolve in every checkout, \
+             unconditionally (issue #3220) — {}.\n  remedy: git restore --source=HEAD -- \
+             test-data/datasets/sstables (or fix root resolution — see \
+             tests/support/datasets_root.rs)",
+            describe_search(KEYSPACE, TABLE)
+        )
+    });
+    let schema = schema_path().unwrap_or_else(|| {
+        panic!(
+            "committed schema {SCHEMA} is unreadable — it is checkout-relative source \
+             (#3148), so this is a resolution defect, never a legitimate absence"
+        )
+    });
+    (root, schema)
 }
 
 /// Discover the first live INT partition key via an unforced (auto) scan.
@@ -176,9 +127,7 @@ async fn first_live_pk(db: &Database) -> Option<i64> {
 
 #[tokio::test]
 async fn forced_full_records_forced_fallback_and_matches_auto_rows() {
-    let Some((root, schema)) = resolve() else {
-        return;
-    };
+    let (root, schema) = resolve();
     let auto_db = open_db(&root, &schema, None).await;
     let Some(pk) = first_live_pk(&auto_db).await else {
         panic!("fixture {KEYSPACE}.{TABLE} has no live partition to point-query");
@@ -210,9 +159,7 @@ async fn forced_full_records_forced_fallback_and_matches_auto_rows() {
 
 #[tokio::test]
 async fn forced_point_on_non_targeted_query_fails_closed() {
-    let Some((root, schema)) = resolve() else {
-        return;
-    };
+    let (root, schema) = resolve();
     let point_db = open_db(&root, &schema, Some(ReadPathMode::Point)).await;
     // A full-table SELECT (no partition key constraint) is NOT partition-targeted,
     // so forced point must fail closed rather than silently full-scan.
@@ -231,9 +178,7 @@ async fn forced_point_on_non_targeted_query_fails_closed() {
 
 #[tokio::test]
 async fn forced_point_on_full_pk_takes_targeted_path() {
-    let Some((root, schema)) = resolve() else {
-        return;
-    };
+    let (root, schema) = resolve();
     let auto_db = open_db(&root, &schema, None).await;
     let Some(pk) = first_live_pk(&auto_db).await else {
         panic!("fixture {KEYSPACE}.{TABLE} has no live partition to point-query");

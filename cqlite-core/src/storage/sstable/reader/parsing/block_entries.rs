@@ -116,18 +116,18 @@ impl SSTableReader {
             self.header.cassandra_version
         );
 
-        // KNOWN FAIL-OPEN SEAM — issue #3108, deliberately NOT guarded here.
-        // The `V5UncompressedOA` (BTI `da`) route below calls
-        // `parse_block_entries_with_state_machine`, which takes neither
-        // `read_shadowing` nor `now_secs`, so both are silently DROPPED on that
-        // route. It is unreachable from the single-source query path today only
-        // because `supports_streaming_query_scan()` refuses BTI readers — an
-        // implicit, undocumented dependency, which #3108 owns making explicit. A
-        // guard here must NOT fire for `read_shadowing`-only callers:
-        // `run_scan_stream_batched` reaches this function with
-        // `read_shadowing = true` for BTI readers today (it lacks the BTI dispatch
-        // its siblings have — issue #3109), so refusing those would break
-        // pre-existing `da` batched scans.
+        // KNOWN FAIL-OPEN SEAM — issue #3108, deliberately NOT guarded here. The
+        // `V5UncompressedOA` (BTI `da`) route calls `parse_block_entries_with_state_machine`,
+        // which takes neither `read_shadowing` nor `now_secs` and silently DROPS both; the
+        // single-source query path misses it only because `supports_streaming_query_scan()`
+        // refuses BTI readers (implicit — #3108 owns making it explicit). #3109 NARROWED but
+        // did NOT close the `read_shadowing = true` callers reaching here with a `da`
+        // reader: the four SCAN surfaces (`scan`, `sequential_scan`, per-row/batched
+        // streaming) now dispatch BTI to the trie walk first, but a FIFTH site stays
+        // OPEN — `scan_for_key` (`data_access/sequential.rs`) parses with `true` and NO
+        // BTI gate, reached by a `da` reader via `verify_presence_oracle_negative`
+        // (`presence_verify.rs`) under opt-in presence verification. A #3108 guard CAN
+        // therefore still fire today; that site is out of #3109's scope.
 
         let mut entries = Vec::new();
 

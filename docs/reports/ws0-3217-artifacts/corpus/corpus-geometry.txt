@@ -1,0 +1,35 @@
+CompressionInfo.db      : /data/ws0/ws0-h2h/datasets/sstables/ws0/events-1aeab5508eaa11f18f9875578d68601b/nb-16-big-CompressionInfo.db
+Data.db                 : /data/ws0/ws0-h2h/datasets/sstables/ws0/events-1aeab5508eaa11f18f9875578d68601b/nb-16-big-Data.db
+compressor              : LZ4Compressor
+other options           : {}
+chunk_length (bytes)    : 16384   (16 KiB)
+max_compressed_length   : 2147483647
+dataLength UNCOMPRESSED : 2773081150 bytes (2.7731 GB)
+Data.db on disk (comp)  : 784334710 bytes (0.7843 GB)
+chunk count             : 169257
+trailing bytes unread   : 0  (0 == format parsed exactly)
+compression ratio       : 3.5356x
+expected chunk count    : 169256  (match=False)
+per-chunk compressed size (incl 4B checksum): min=9 p50=4656 p99=5220 max=5479 mean=4634.0
+rows                    : 3999890
+UNCOMPRESSED bytes/row  : 693.29
+COMPRESSED bytes/row    : 196.09
+
+--- additional measured geometry (WS0 regeneration for #3217) ---
+staged dataset dir      : /data/ws0/ws0-h2h/datasets/sstables   (serve with: cqlite-flight --data-dir <that>)
+staged table dir        : /data/ws0/ws0-h2h/datasets/sstables/ws0/events-1aeab5508eaa11f18f9875578d68601b
+SSTable generation/fmt  : nb-16-big  (BIG 'nb', Cassandra 5.0)
+Data.db count in dir    : 1  (single SSTable after nodetool flush + compact)
+sha256(Data.db)         : 3a4ee5cd5ef5937ae52a703cca0ee0359df8ecb959915dea66b3b89f9a9c7c1e
+rows (sstablemetadata totalRows)   : 3999890
+rows (fullscan.py 512 token ranges): 3999890   (independent oracle; agrees exactly)
+partitions requested               : 200000
+partitions (tablestats estimate)   : 198130
+rows per partition                 : 20  (seq 2 x event_time 10)
+totalColumnsSet                    : 35999010
+set cells per row                  : 9.00  (9 regular columns; 12 columns total incl. the 3 PK components)
+Estimated droppable tombstones     : 0.0
+SSTable min/max local deletion time: no tombstones (9223372036854775807)
+TTL min/max                        : 0 / 0
+Compression ratio (sstablemetadata): 0.28259457246680286  (= 3.5387x inverse; header-derived ratio above is 3.5356x)
+Space used (live, all components)  : 790771553 bytes

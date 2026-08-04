@@ -1,0 +1,34 @@
+==== WS0 #3217 AC3 ON-CPU SUMMARY ====
+
+profile            unsym all  unsym server      gate(<10%)     server%  DSO-only srv%
+oncpu-s1-N1          0.0263%       0.0269%            PASS       97.6%         17.41%
+oncpu-s1-N8          0.0124%       0.0124%            PASS      100.0%         17.63%
+oncpu-s1-N16         0.0094%       0.0094%            PASS      100.0%         17.94%
+oncpu-s6-N1          0.0275%       0.0269%            PASS       79.2%         17.25%
+oncpu-s6-N8          0.0236%       0.0239%            PASS       95.0%         16.86%
+oncpu-s6-N16         0.0189%       0.0189%            PASS       98.8%         17.15%
+
+DSO-only srv%: [libc.so.6] frames as a fraction of SERVER-thread frame instances.
+These are NOT counted by the <10% unsymbolized gate (they carry a DSO name), so a
+PASS above does NOT mean 'fully symbolized'. All-frames basis, and any-DSO vs libc,
+are both in the JSON; the server-only [libc.so.6] column is the quotable figure.
+BAND: server-threads-only [libc.so.6] = 16.86%-17.94%   (all-frames basis 14.25%-17.94%)
+
+--- oncpu-s1-N1 : on-CPU cost centres (% of SERVER-thread samples) ---
+    by crate: cqlite_core 57.1%, alloc 10.7%, tokio 8.9%, std 8.7%, cqlite_flight 7.6%, arrow 5.6%, tonic 1.1%, h2 0.2%, hyper 0.1%, prost 0.0%
+    top leaves: [libc.so.6] 21.9%, <cqlite_core::storage::sstable::reader::pars 5.4%, malloc 5.1%, <cqlite_core::storage::sstable::reader::pars 4.6%, cqlite_core::export::arrow_convert::rows_to_ 4.3%, <core::hash::sip::Hasher<core::hash::sip::Si 4.0%
+--- oncpu-s1-N8 : on-CPU cost centres (% of SERVER-thread samples) ---
+    by crate: cqlite_core 56.4%, alloc 11.2%, cqlite_flight 9.0%, tokio 7.7%, std 7.5%, arrow 7.1%, tonic 0.8%, h2 0.2%, hyper 0.1%
+    top leaves: [libc.so.6] 21.8%, cqlite_core::export::arrow_convert::rows_to_ 8.6%, <cqlite_core::storage::sstable::reader::pars 4.8%, malloc 4.7%, <cqlite_core::storage::sstable::reader::pars 4.0%, <core::hash::sip::Hasher<core::hash::sip::Si 3.2%
+--- oncpu-s1-N16 : on-CPU cost centres (% of SERVER-thread samples) ---
+    by crate: cqlite_core 56.3%, alloc 11.4%, cqlite_flight 9.8%, tokio 7.6%, std 7.3%, arrow 6.7%, tonic 0.7%, h2 0.1%, hyper 0.1%, prost 0.0%
+    top leaves: [libc.so.6] 23.0%, cqlite_core::export::arrow_convert::rows_to_ 9.1%, <cqlite_core::storage::sstable::reader::pars 4.8%, malloc 4.8%, <cqlite_core::storage::sstable::reader::pars 3.8%, <core::hash::sip::Hasher<core::hash::sip::Si 3.2%
+--- oncpu-s6-N1 : on-CPU cost centres (% of SERVER-thread samples) ---
+    by crate: cqlite_core 62.9%, alloc 10.3%, tokio 8.1%, cqlite_flight 7.1%, std 4.8%, arrow 4.7%, tonic 0.6%, h2 0.2%, hyper 0.1%, prost 0.0%
+    top leaves: [libc.so.6] 24.7%, malloc 6.6%, <cqlite_core::storage::sstable::reader::pars 4.5%, cqlite_core::export::arrow_convert::rows_to_ 3.8%, <cqlite_core::storage::sstable::reader::pars 3.7%, cfree 3.4%
+--- oncpu-s6-N8 : on-CPU cost centres (% of SERVER-thread samples) ---
+    by crate: cqlite_core 62.2%, alloc 11.0%, cqlite_flight 7.7%, tokio 7.1%, std 5.8%, arrow 5.2%, tonic 0.7%, h2 0.1%, hyper 0.1%, prost 0.0%
+    top leaves: [libc.so.6] 22.7%, cqlite_core::export::arrow_convert::rows_to_ 6.6%, malloc 6.5%, <cqlite_core::storage::sstable::reader::pars 4.3%, <cqlite_core::storage::sstable::reader::pars 3.4%, cfree 3.0%
+--- oncpu-s6-N16 : on-CPU cost centres (% of SERVER-thread samples) ---
+    by crate: cqlite_core 59.5%, alloc 11.1%, cqlite_flight 8.5%, tokio 7.4%, std 6.6%, arrow 5.7%, tonic 0.8%, h2 0.2%, hyper 0.1%, prost 0.0%
+    top leaves: [libc.so.6] 22.5%, cqlite_core::export::arrow_convert::rows_to_ 8.2%, malloc 5.3%, <cqlite_core::storage::sstable::reader::pars 4.7%, <cqlite_core::storage::sstable::reader::pars 3.6%, core::str::converts::from_utf8 2.7%

@@ -1,0 +1,22 @@
+{
+ "schema": "ws0-3217.unsym-check/v1",
+ "label": "oncpu-s1-N16",
+ "folded_file": "/data/ws0/profiles/oncpu-s1-N16/oncpu.folded",
+ "total_samples_or_weight": 184474164746,
+ "total_frames_weighted": 2418087641852,
+ "unsymbolized_frames_weighted": 227736480,
+ "frame_weighted_unsym_fraction": 9.418040771490726e-05,
+ "sample_fraction_with_any_unknown_frame": 0.0007680912402834032,
+ "leaf_unsym_fraction": 0.0,
+ "threshold": 0.1,
+ "gated_metric": "frame_weighted_unsym_fraction",
+ "top_unknown_frames": [
+  [
+   "[unknown]",
+   227736480
+  ]
+ ],
+ "gated_value": 9.418040771490726e-05,
+ "verdict": "PASS",
+ "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
+}

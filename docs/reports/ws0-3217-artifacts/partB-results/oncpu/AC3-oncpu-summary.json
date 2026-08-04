@@ -1,0 +1,915 @@
+{
+ "schema": "ws0-3217.oncpu-summary/v2",
+ "profiles": [
+  {
+   "total_weight": 147832034917,
+   "server_weight": 144277449984,
+   "server_share_of_capture": 0.9759552458640259,
+   "frame_weighted_unsym_all": 0.00026336489833393494,
+   "frame_weighted_unsym_server_threads_only": 0.00026856064998221247,
+   "frame_weighted_dso_only_any_all": 0.17075171561325495,
+   "frame_weighted_dso_only_any_server_threads_only": 0.17410063967405648,
+   "frame_weighted_dso_only_libc_all": 0.1707418527880836,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.1740974592096608,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
+   "by_comm": [
+    {
+     "comm": "tokio-rt-worker",
+     "pct": 94.83405399831793
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "pct": 2.76147058808466
+    },
+    {
+     "comm": "swapper",
+     "pct": 2.3905286279689912
+    },
+    {
+     "comm": "2.1.220",
+     "pct": 0.008978938839239087
+    },
+    {
+     "comm": "kworker/2:2-mm_",
+     "pct": 0.003387060188146135
+    },
+    {
+     "comm": "ksoftirqd/10",
+     "pct": 0.0015807866010314022
+    }
+   ],
+   "top_leaf_functions": [
+    {
+     "fn": "[libc.so.6]",
+     "pct_of_server": 21.94942123562061
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_cell_value_schema_order",
+     "pct_of_server": 5.4190300257365545
+    },
+    {
+     "fn": "malloc",
+     "pct_of_server": 5.094335499286336
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_data_with_offset_impl",
+     "pct_of_server": 4.587317005349049
+    },
+    {
+     "fn": "cqlite_core::export::arrow_convert::rows_to_record_batch",
+     "pct_of_server": 4.256232878860139
+    },
+    {
+     "fn": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+     "pct_of_server": 3.972286304363964
+    },
+    {
+     "fn": "cqlite_core::export::arrow_size::estimate_arrow_row_bytes",
+     "pct_of_server": 2.3717909883904147
+    },
+    {
+     "fn": "<cqlite_core::types::Value>::into_owned",
+     "pct_of_server": 2.233234636013679
+    },
+    {
+     "fn": "core::str::converts::from_utf8",
+     "pct_of_server": 2.161704865414431
+    },
+    {
+     "fn": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>",
+     "pct_of_server": 2.1475709477424307
+    },
+    {
+     "fn": "<hashbrown::map::HashMap<alloc::sync::Arc<str>, cqlite_core::types::Value, std::hash::random::RandomState>>::insert",
+     "pct_of_server": 2.012029487159584
+    },
+    {
+     "fn": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::sync::Arc<str>>",
+     "pct_of_server": 1.9478396120195183
+    }
+   ],
+   "cost_centre_by_crate": [
+    {
+     "crate": "cqlite_core",
+     "pct_of_server": 57.125807642247715
+    },
+    {
+     "crate": "alloc",
+     "pct_of_server": 10.691523411115627
+    },
+    {
+     "crate": "tokio",
+     "pct_of_server": 8.9009440799128
+    },
+    {
+     "crate": "std",
+     "pct_of_server": 8.716735720235336
+    },
+    {
+     "crate": "cqlite_flight",
+     "pct_of_server": 7.578754611488213
+    },
+    {
+     "crate": "arrow",
+     "pct_of_server": 5.598851277102427
+    },
+    {
+     "crate": "tonic",
+     "pct_of_server": 1.1132108026431806
+    },
+    {
+     "crate": "h2",
+     "pct_of_server": 0.16465148020452555
+    },
+    {
+     "crate": "hyper",
+     "pct_of_server": 0.0859546616701035
+    },
+    {
+     "crate": "prost",
+     "pct_of_server": 0.002133564185076303
+    }
+   ],
+   "label": "oncpu-s1-N1",
+   "harness_gate": {
+    "schema": "ws0-3217.unsym-check/v1",
+    "label": "oncpu-s1-N1",
+    "folded_file": "/data/ws0/profiles/oncpu-s1-N1/oncpu.folded",
+    "total_samples_or_weight": 147832034917,
+    "total_frames_weighted": 1968262203047,
+    "unsymbolized_frames_weighted": 518371175,
+    "frame_weighted_unsym_fraction": 0.00026336489833393494,
+    "sample_fraction_with_any_unknown_frame": 0.0022784243360318298,
+    "leaf_unsym_fraction": 0.0,
+    "threshold": 0.1,
+    "gated_metric": "frame_weighted_unsym_fraction",
+    "top_unknown_frames": [
+     [
+      "[unknown]",
+      518371175
+     ]
+    ],
+    "gated_value": 0.00026336489833393494,
+    "verdict": "PASS",
+    "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
+   }
+  },
+  {
+   "total_weight": 184527900238,
+   "server_weight": 184515550100,
+   "server_share_of_capture": 0.9999330717036065,
+   "frame_weighted_unsym_all": 0.00012432235494644746,
+   "frame_weighted_unsym_server_threads_only": 0.0001243304960919851,
+   "frame_weighted_dso_only_any_all": 0.1762499205885075,
+   "frame_weighted_dso_only_any_server_threads_only": 0.17626146216729374,
+   "frame_weighted_dso_only_libc_all": 0.17624866615383092,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.1762602076504716,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
+   "by_comm": [
+    {
+     "comm": "tokio-rt-worker",
+     "pct": 97.73972550133581
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "pct": 2.2535816690248334
+    },
+    {
+     "comm": "kworker/10:0-ev",
+     "pct": 0.003333979843733727
+    },
+    {
+     "comm": "ksoftirqd/2",
+     "pct": 0.001683511813657036
+    },
+    {
+     "comm": "kworker/2:2-eve",
+     "pct": 0.0016753379819597447
+    }
+   ],
+   "top_leaf_functions": [
+    {
+     "fn": "[libc.so.6]",
+     "pct_of_server": 21.79583188148867
+    },
+    {
+     "fn": "cqlite_core::export::arrow_convert::rows_to_record_batch",
+     "pct_of_server": 8.610873147216658
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_cell_value_schema_order",
+     "pct_of_server": 4.777484900444713
+    },
+    {
+     "fn": "malloc",
+     "pct_of_server": 4.682334961100929
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_data_with_offset_impl",
+     "pct_of_server": 3.958753706146309
+    },
+    {
+     "fn": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+     "pct_of_server": 3.2197517183675024
+    },
+    {
+     "fn": "core::str::converts::from_utf8",
+     "pct_of_server": 3.0283094275640674
+    },
+    {
+     "fn": "core::ptr::drop_glue::<cqlite_core::query::result::QueryRow>",
+     "pct_of_server": 2.7629098296794443
+    },
+    {
+     "fn": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<core::option::Option<&cqlite_core::types::Value>>, cqlite_core::export::arrow_convert::build_string_array::{closure#0}>, core::result::Result<core::convert::Infallible, cqlite_core::export::arrow_convert::ArrowConvertError>> as core::iter::traits::iterator::Iterator>::next",
+     "pct_of_server": 2.3207814206874264
+    },
+    {
+     "fn": "<cqlite_core::types::Value>::into_owned",
+     "pct_of_server": 1.9001012684838208
+    },
+    {
+     "fn": "cqlite_core::export::arrow_size::estimate_arrow_row_bytes",
+     "pct_of_server": 1.7844263679758012
+    },
+    {
+     "fn": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>",
+     "pct_of_server": 1.72659630544602
+    }
+   ],
+   "cost_centre_by_crate": [
+    {
+     "crate": "cqlite_core",
+     "pct_of_server": 56.413335591816875
+    },
+    {
+     "crate": "alloc",
+     "pct_of_server": 11.228232715221978
+    },
+    {
+     "crate": "cqlite_flight",
+     "pct_of_server": 9.022512868415419
+    },
+    {
+     "crate": "tokio",
+     "pct_of_server": 7.70113036722318
+    },
+    {
+     "crate": "std",
+     "pct_of_server": 7.521599364648887
+    },
+    {
+     "crate": "arrow",
+     "pct_of_server": 7.082271525580217
+    },
+    {
+     "crate": "tonic",
+     "pct_of_server": 0.7672706323302992
+    },
+    {
+     "crate": "h2",
+     "pct_of_server": 0.16021128888041616
+    },
+    {
+     "crate": "hyper",
+     "pct_of_server": 0.08675789759358607
+    }
+   ],
+   "label": "oncpu-s1-N8",
+   "harness_gate": {
+    "schema": "ws0-3217.unsym-check/v1",
+    "label": "oncpu-s1-N8",
+    "folded_file": "/data/ws0/profiles/oncpu-s1-N8/oncpu.folded",
+    "total_samples_or_weight": 184527900238,
+    "total_frames_weighted": 2456571918474,
+    "unsymbolized_frames_weighted": 305406806,
+    "frame_weighted_unsym_fraction": 0.00012432235494644746,
+    "sample_fraction_with_any_unknown_frame": 0.0008694797848621472,
+    "leaf_unsym_fraction": 0.0,
+    "threshold": 0.1,
+    "gated_metric": "frame_weighted_unsym_fraction",
+    "top_unknown_frames": [
+     [
+      "[unknown]",
+      305406806
+     ]
+    ],
+    "gated_value": 0.00012432235494644746,
+    "verdict": "PASS",
+    "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
+   }
+  },
+  {
+   "total_weight": 184474164746,
+   "server_weight": 184467949807,
+   "server_share_of_capture": 0.9999663099762042,
+   "frame_weighted_unsym_all": 9.418040771490726e-05,
+   "frame_weighted_unsym_server_threads_only": 9.418318895978189e-05,
+   "frame_weighted_dso_only_any_all": 0.17937258986808352,
+   "frame_weighted_dso_only_any_server_threads_only": 0.1793778869262331,
+   "frame_weighted_dso_only_libc_all": 0.1793712988263752,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.179376595846399,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
+   "by_comm": [
+    {
+     "comm": "tokio-rt-worker",
+     "pct": 97.79980433108967
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "pct": 2.196826666530752
+    },
+    {
+     "comm": "kworker/10:0-mm",
+     "pct": 0.001691578332552208
+    },
+    {
+     "comm": "ksoftirqd/10",
+     "pct": 0.001677424047026128
+    }
+   ],
+   "top_leaf_functions": [
+    {
+     "fn": "[libc.so.6]",
+     "pct_of_server": 23.02894023023829
+    },
+    {
+     "fn": "cqlite_core::export::arrow_convert::rows_to_record_batch",
+     "pct_of_server": 9.089448569544269
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_cell_value_schema_order",
+     "pct_of_server": 4.779096293542405
+    },
+    {
+     "fn": "malloc",
+     "pct_of_server": 4.760465859889319
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_data_with_offset_impl",
+     "pct_of_server": 3.7832612496109457
+    },
+    {
+     "fn": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+     "pct_of_server": 3.2192806496809943
+    },
+    {
+     "fn": "core::ptr::drop_glue::<cqlite_core::query::result::QueryRow>",
+     "pct_of_server": 3.17488238370271
+    },
+    {
+     "fn": "core::str::converts::from_utf8",
+     "pct_of_server": 3.106432604685754
+    },
+    {
+     "fn": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<core::option::Option<&cqlite_core::types::Value>>, cqlite_core::export::arrow_convert::build_string_array::{closure#0}>, core::result::Result<core::convert::Infallible, cqlite_core::export::arrow_convert::ArrowConvertError>> as core::iter::traits::iterator::Iterator>::next",
+     "pct_of_server": 2.8005154724194607
+    },
+    {
+     "fn": "<cqlite_core::types::Value>::into_owned",
+     "pct_of_server": 1.7734936195815276
+    },
+    {
+     "fn": "cqlite_core::export::arrow_size::estimate_arrow_row_bytes",
+     "pct_of_server": 1.771462864643383
+    },
+    {
+     "fn": "<hashbrown::map::HashMap<alloc::sync::Arc<str>, cqlite_core::types::Value, std::hash::random::RandomState>>::insert",
+     "pct_of_server": 1.680922924683763
+    }
+   ],
+   "cost_centre_by_crate": [
+    {
+     "crate": "cqlite_core",
+     "pct_of_server": 56.33698063470124
+    },
+    {
+     "crate": "alloc",
+     "pct_of_server": 11.358140837430682
+    },
+    {
+     "crate": "cqlite_flight",
+     "pct_of_server": 9.833665219881814
+    },
+    {
+     "crate": "tokio",
+     "pct_of_server": 7.554044635710055
+    },
+    {
+     "crate": "std",
+     "pct_of_server": 7.28560262097628
+    },
+    {
+     "crate": "arrow",
+     "pct_of_server": 6.664855260148536
+    },
+    {
+     "crate": "tonic",
+     "pct_of_server": 0.7379173587738035
+    },
+    {
+     "crate": "h2",
+     "pct_of_server": 0.12862186913674717
+    },
+    {
+     "crate": "hyper",
+     "pct_of_server": 0.09352570415646978
+    },
+    {
+     "crate": "prost",
+     "pct_of_server": 0.0016742209165501358
+    }
+   ],
+   "label": "oncpu-s1-N16",
+   "harness_gate": {
+    "schema": "ws0-3217.unsym-check/v1",
+    "label": "oncpu-s1-N16",
+    "folded_file": "/data/ws0/profiles/oncpu-s1-N16/oncpu.folded",
+    "total_samples_or_weight": 184474164746,
+    "total_frames_weighted": 2418087641852,
+    "unsymbolized_frames_weighted": 227736480,
+    "frame_weighted_unsym_fraction": 9.418040771490726e-05,
+    "sample_fraction_with_any_unknown_frame": 0.0007680912402834032,
+    "leaf_unsym_fraction": 0.0,
+    "threshold": 0.1,
+    "gated_metric": "frame_weighted_unsym_fraction",
+    "top_unknown_frames": [
+     [
+      "[unknown]",
+      227736480
+     ]
+    ],
+    "gated_value": 9.418040771490726e-05,
+    "verdict": "PASS",
+    "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
+   }
+  },
+  {
+   "total_weight": 159186049426,
+   "server_weight": 126018066562,
+   "server_share_of_capture": 0.791640140680678,
+   "frame_weighted_unsym_all": 0.00027530735169119654,
+   "frame_weighted_unsym_server_threads_only": 0.00026916524670489303,
+   "frame_weighted_dso_only_any_all": 0.1604510008352727,
+   "frame_weighted_dso_only_any_server_threads_only": 0.1782663795248408,
+   "frame_weighted_dso_only_libc_all": 0.1424756846314537,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.17249956311190667,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
+   "by_comm": [
+    {
+     "comm": "tokio-rt-worker",
+     "pct": 75.76715430460362
+    },
+    {
+     "comm": "swapper",
+     "pct": 18.99896964216028
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "pct": 2.5760909079575516
+    },
+    {
+     "comm": "claude",
+     "pct": 1.0628244718055462
+    },
+    {
+     "comm": "HeapHelper",
+     "pct": 0.8207688555066309
+    },
+    {
+     "comm": "bash",
+     "pct": 0.2549352304823998
+    }
+   ],
+   "top_leaf_functions": [
+    {
+     "fn": "[libc.so.6]",
+     "pct_of_server": 24.725950064207588
+    },
+    {
+     "fn": "malloc",
+     "pct_of_server": 6.559946290663675
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_cell_value_schema_order",
+     "pct_of_server": 4.4866911413993575
+    },
+    {
+     "fn": "cqlite_core::export::arrow_convert::rows_to_record_batch",
+     "pct_of_server": 3.8275331058399704
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_data_with_offset_impl",
+     "pct_of_server": 3.6855560632768123
+    },
+    {
+     "fn": "cfree",
+     "pct_of_server": 3.366658894034588
+    },
+    {
+     "fn": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+     "pct_of_server": 1.9822265093799225
+    },
+    {
+     "fn": "<cqlite_core::types::Value>::into_owned",
+     "pct_of_server": 1.5571153966519462
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::decode_scalar_cell_value",
+     "pct_of_server": 1.5008083702581636
+    },
+    {
+     "fn": "core::ptr::drop_glue::<cqlite_core::query::result::QueryRow>",
+     "pct_of_server": 1.4385801285945616
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::compression::Compression>::decompress",
+     "pct_of_server": 1.422244236796165
+    },
+    {
+     "fn": "core::str::converts::from_utf8",
+     "pct_of_server": 1.3940379637039555
+    }
+   ],
+   "cost_centre_by_crate": [
+    {
+     "crate": "cqlite_core",
+     "pct_of_server": 62.87340329334325
+    },
+    {
+     "crate": "alloc",
+     "pct_of_server": 10.292709512900295
+    },
+    {
+     "crate": "tokio",
+     "pct_of_server": 8.133506591261044
+    },
+    {
+     "crate": "cqlite_flight",
+     "pct_of_server": 7.122353281451228
+    },
+    {
+     "crate": "std",
+     "pct_of_server": 4.792417575323377
+    },
+    {
+     "crate": "arrow",
+     "pct_of_server": 4.745752550534199
+    },
+    {
+     "crate": "tonic",
+     "pct_of_server": 0.6430515576917759
+    },
+    {
+     "crate": "h2",
+     "pct_of_server": 0.23799696677019075
+    },
+    {
+     "crate": "hyper",
+     "pct_of_server": 0.10409774453685924
+    },
+    {
+     "crate": "prost",
+     "pct_of_server": 0.0018262857563107451
+    }
+   ],
+   "label": "oncpu-s6-N1",
+   "harness_gate": {
+    "schema": "ws0-3217.unsym-check/v1",
+    "label": "oncpu-s6-N1",
+    "folded_file": "/data/ws0/profiles/oncpu-s6-N1/oncpu.folded",
+    "total_samples_or_weight": 159186049426,
+    "total_frames_weighted": 2112175728065,
+    "unsymbolized_frames_weighted": 581497506,
+    "frame_weighted_unsym_fraction": 0.00027530735169119654,
+    "sample_fraction_with_any_unknown_frame": 0.002083798317730104,
+    "leaf_unsym_fraction": 3.0233585275556986e-05,
+    "threshold": 0.1,
+    "gated_metric": "frame_weighted_unsym_fraction",
+    "top_unknown_frames": [
+     [
+      "[unknown]",
+      581497506
+     ]
+    ],
+    "gated_value": 0.00027530735169119654,
+    "verdict": "PASS",
+    "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
+   }
+  },
+  {
+   "total_weight": 1016773965751,
+   "server_weight": 966078785957,
+   "server_share_of_capture": 0.9501411508342898,
+   "frame_weighted_unsym_all": 0.00023579208456959557,
+   "frame_weighted_unsym_server_threads_only": 0.00023921735434286138,
+   "frame_weighted_dso_only_any_all": 0.16261448708803058,
+   "frame_weighted_dso_only_any_server_threads_only": 0.16882155144050726,
+   "frame_weighted_dso_only_libc_all": 0.16195885225678525,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.16857762638456525,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
+   "by_comm": [
+    {
+     "comm": "tokio-rt-worker",
+     "pct": 92.6148879681889
+    },
+    {
+     "comm": "swapper",
+     "pct": 4.920923227715008
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "pct": 2.355653935957048
+    },
+    {
+     "comm": "HeapHelper",
+     "pct": 0.043573179283044036
+    },
+    {
+     "comm": "claude",
+     "pct": 0.03621012569180624
+    },
+    {
+     "comm": "bash",
+     "pct": 0.01536615573005945
+    }
+   ],
+   "top_leaf_functions": [
+    {
+     "fn": "[libc.so.6]",
+     "pct_of_server": 22.727535348630752
+    },
+    {
+     "fn": "cqlite_core::export::arrow_convert::rows_to_record_batch",
+     "pct_of_server": 6.639451866594964
+    },
+    {
+     "fn": "malloc",
+     "pct_of_server": 6.539416436974939
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_cell_value_schema_order",
+     "pct_of_server": 4.335756433105693
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_data_with_offset_impl",
+     "pct_of_server": 3.434620999065897
+    },
+    {
+     "fn": "cfree",
+     "pct_of_server": 3.0415634678171966
+    },
+    {
+     "fn": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+     "pct_of_server": 2.426816530162741
+    },
+    {
+     "fn": "core::str::converts::from_utf8",
+     "pct_of_server": 2.233370720135071
+    },
+    {
+     "fn": "core::ptr::drop_glue::<cqlite_core::query::result::QueryRow>",
+     "pct_of_server": 1.974629992221886
+    },
+    {
+     "fn": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<core::option::Option<&cqlite_core::types::Value>>, cqlite_core::export::arrow_convert::build_string_array::{closure#0}>, core::result::Result<core::convert::Infallible, cqlite_core::export::arrow_convert::ArrowConvertError>> as core::iter::traits::iterator::Iterator>::next",
+     "pct_of_server": 1.651818698326151
+    },
+    {
+     "fn": "native_queued_spin_lock_slowpath",
+     "pct_of_server": 1.557815439357951
+    },
+    {
+     "fn": "<cqlite_core::types::Value>::into_owned",
+     "pct_of_server": 1.4792457297200268
+    }
+   ],
+   "cost_centre_by_crate": [
+    {
+     "crate": "cqlite_core",
+     "pct_of_server": 62.23648759478729
+    },
+    {
+     "crate": "alloc",
+     "pct_of_server": 10.991065080454645
+    },
+    {
+     "crate": "cqlite_flight",
+     "pct_of_server": 7.685041647245587
+    },
+    {
+     "crate": "tokio",
+     "pct_of_server": 7.1098082482951055
+    },
+    {
+     "crate": "std",
+     "pct_of_server": 5.7838259332699025
+    },
+    {
+     "crate": "arrow",
+     "pct_of_server": 5.214748624574636
+    },
+    {
+     "crate": "tonic",
+     "pct_of_server": 0.6916971684023119
+    },
+    {
+     "crate": "h2",
+     "pct_of_server": 0.14444315104359517
+    },
+    {
+     "crate": "hyper",
+     "pct_of_server": 0.07844967801971105
+    },
+    {
+     "crate": "prost",
+     "pct_of_server": 0.0002754826043885884
+    }
+   ],
+   "label": "oncpu-s6-N8",
+   "harness_gate": {
+    "schema": "ws0-3217.unsym-check/v1",
+    "label": "oncpu-s6-N8",
+    "folded_file": "/data/ws0/profiles/oncpu-s6-N8/oncpu.folded",
+    "total_samples_or_weight": 1016773965751,
+    "total_frames_weighted": 13965177503777,
+    "unsymbolized_frames_weighted": 3292878315,
+    "frame_weighted_unsym_fraction": 0.00023579208456959557,
+    "sample_fraction_with_any_unknown_frame": 0.0020171133340192754,
+    "leaf_unsym_fraction": 2.9385105250931345e-06,
+    "threshold": 0.1,
+    "gated_metric": "frame_weighted_unsym_fraction",
+    "top_unknown_frames": [
+     [
+      "[unknown]",
+      3292878315
+     ]
+    ],
+    "gated_value": 0.00023579208456959557,
+    "verdict": "PASS",
+    "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
+   }
+  },
+  {
+   "total_weight": 1070968483822,
+   "server_weight": 1058458206653,
+   "server_share_of_capture": 0.9883187251931502,
+   "frame_weighted_unsym_all": 0.00018878105434318323,
+   "frame_weighted_unsym_server_threads_only": 0.0001887986222384044,
+   "frame_weighted_dso_only_any_all": 0.17003330967288727,
+   "frame_weighted_dso_only_any_server_threads_only": 0.17155981656508512,
+   "frame_weighted_dso_only_libc_all": 0.16987487335177076,
+   "frame_weighted_dso_only_libc_server_threads_only": 0.17149148640803435,
+   "dso_only_definition": "A frame printed as a bare '[<dso>]' \u2014 the address mapped to a shared object but to no function symbol. NOT counted by AC3's unsymbolized gate (it carries a DSO name), so a profile can PASS <10% unsymbolized while this fraction of its frame instances is opaque at function granularity. Excludes '[unknown]' (the gate's own metric) and pseudo-DSOs '[[vdso]]'/'[[anon:*]]'. Weighted by sample weight x frame instances, not by leaf.",
+   "by_comm": [
+    {
+     "comm": "tokio-rt-worker",
+     "pct": 96.32934712161578
+    },
+    {
+     "comm": "cqlite-query-ro",
+     "pct": 2.490954079974019
+    },
+    {
+     "comm": "swapper",
+     "pct": 1.1530557115864148
+    },
+    {
+     "comm": "HeapHelper",
+     "pct": 0.011571317725218602
+    },
+    {
+     "comm": "claude",
+     "pct": 0.007405780020430768
+    },
+    {
+     "comm": "bash",
+     "pct": 0.0030243192483508496
+    }
+   ],
+   "top_leaf_functions": [
+    {
+     "fn": "[libc.so.6]",
+     "pct_of_server": 22.478821706845295
+    },
+    {
+     "fn": "cqlite_core::export::arrow_convert::rows_to_record_batch",
+     "pct_of_server": 8.210209965284857
+    },
+    {
+     "fn": "malloc",
+     "pct_of_server": 5.307895872209756
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_cell_value_schema_order",
+     "pct_of_server": 4.744188945238377
+    },
+    {
+     "fn": "<cqlite_core::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser>::parse_row_data_with_offset_impl",
+     "pct_of_server": 3.5681363619849975
+    },
+    {
+     "fn": "core::str::converts::from_utf8",
+     "pct_of_server": 2.748433997123995
+    },
+    {
+     "fn": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+     "pct_of_server": 2.7206211942046528
+    },
+    {
+     "fn": "core::ptr::drop_glue::<cqlite_core::query::result::QueryRow>",
+     "pct_of_server": 2.6052521524867562
+    },
+    {
+     "fn": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<core::option::Option<&cqlite_core::types::Value>>, cqlite_core::export::arrow_convert::build_string_array::{closure#0}>, core::result::Result<core::convert::Infallible, cqlite_core::export::arrow_convert::ArrowConvertError>> as core::iter::traits::iterator::Iterator>::next",
+     "pct_of_server": 2.2810098416965747
+    },
+    {
+     "fn": "cfree",
+     "pct_of_server": 2.019711337644567
+    },
+    {
+     "fn": "<cqlite_core::types::Value>::into_owned",
+     "pct_of_server": 1.617698797588275
+    },
+    {
+     "fn": "cqlite_core::export::arrow_size::estimate_arrow_row_bytes",
+     "pct_of_server": 1.6010921073198112
+    }
+   ],
+   "cost_centre_by_crate": [
+    {
+     "crate": "cqlite_core",
+     "pct_of_server": 59.45803250362245
+    },
+    {
+     "crate": "alloc",
+     "pct_of_server": 11.139711408147718
+    },
+    {
+     "crate": "cqlite_flight",
+     "pct_of_server": 8.524108732861727
+    },
+    {
+     "crate": "tokio",
+     "pct_of_server": 7.407001334035884
+    },
+    {
+     "crate": "std",
+     "pct_of_server": 6.629870729511539
+    },
+    {
+     "crate": "arrow",
+     "pct_of_server": 5.7323707257995995
+    },
+    {
+     "crate": "tonic",
+     "pct_of_server": 0.8375369686094988
+    },
+    {
+     "crate": "h2",
+     "pct_of_server": 0.15906991720760238
+    },
+    {
+     "crate": "hyper",
+     "pct_of_server": 0.08368817393376761
+    },
+    {
+     "crate": "prost",
+     "pct_of_server": 0.00028400478933463425
+    }
+   ],
+   "label": "oncpu-s6-N16",
+   "harness_gate": {
+    "schema": "ws0-3217.unsym-check/v1",
+    "label": "oncpu-s6-N16",
+    "folded_file": "/data/ws0/profiles/oncpu-s6-N16/oncpu.folded",
+    "total_samples_or_weight": 1070968483822,
+    "total_frames_weighted": 14561086521971,
+    "unsymbolized_frames_weighted": 2748857266,
+    "frame_weighted_unsym_fraction": 0.00018878105434318323,
+    "sample_fraction_with_any_unknown_frame": 0.001545285367403081,
+    "leaf_unsym_fraction": 5.385375094715295e-06,
+    "threshold": 0.1,
+    "gated_metric": "frame_weighted_unsym_fraction",
+    "top_unknown_frames": [
+     [
+      "[unknown]",
+      2748857266
+     ]
+    ],
+    "gated_value": 0.00018878105434318323,
+    "verdict": "PASS",
+    "verdict_note": "AC3 satisfied: unsymbolized frames below threshold"
+   }
+  }
+ ],
+ "dso_only_libc_band_server_threads_only_pct": [
+  16.857762638456524,
+  17.9376595846399
+ ],
+ "dso_only_libc_band_all_frames_pct": [
+  14.247568463145369,
+  17.93712988263752
+ ]
+}

@@ -1,0 +1,41 @@
+{
+ "schema": "ws0-3217.sweep-summary/v1",
+ "label": "calib-s6-n16",
+ "server_physical_cores_S": 6,
+ "server_cpus": "0,1,2,3,4,5,8,9,10,11,12,13",
+ "client_cpus": "6,7,14,15",
+ "merge_path": "bypass",
+ "points_total": 1,
+ "points_excluded_client_saturated": 0,
+ "admission_clean_all_points": true,
+ "byte_basis_note": "three separately-labelled bases per AC6: logical/uncompressed, on-disk/compressed, and Arrow wire CAPACITY (client-side buffer capacity, not gRPC-on-the-wire bytes)",
+ "curve": [
+  {
+   "N": 16,
+   "reps": 1,
+   "rows_per_s_aggregate_min": 1079742.9136266958,
+   "rows_per_s_aggregate_median": 1079742.9136266958,
+   "rows_per_s_aggregate_max": 1079742.9136266958,
+   "rows_per_s_aggregate_spread_pct": 0.0,
+   "rows_per_s_per_stream_median": 67483.93210166848,
+   "speedup_vs_N1": null,
+   "marginal_efficiency_vs_linear": null,
+   "marginal_efficiency_definition": "rows_per_s(N) / (N * rows_per_s(N=1)); 1.0 = linear",
+   "bytes_per_s_logical_uncompressed_median": 748574265.9483806,
+   "bytes_per_s_ondisk_compressed_median": 211725783.7175396,
+   "bytes_per_s_arrow_wire_capacity_median": 13163532613.515442,
+   "server_cpu_utilization_of_pinned_set_median": 0.9762522205493056,
+   "client_cpu_utilization_of_pinned_set_median": 0.12292958063241473,
+   "rows_per_server_cpu_sec_median": 92167.34593948472,
+   "IPC_median": 1.1374695219935214,
+   "cycles_per_row_median": 34283.85298664463,
+   "instructions_per_row_median": 38996.83786881483,
+   "context_switches_per_second_cpu_wide_median": 232114.26334505406,
+   "server_voluntary_ctxt_switches_per_s_median": 0.08435723495104676,
+   "server_nonvoluntary_ctxt_switches_per_s_median": 0.0,
+   "latency_p50_ms_median": 58753.023,
+   "requests_unavailable_total": 0,
+   "excluded_client_saturated_reps": 0
+  }
+ ]
+}

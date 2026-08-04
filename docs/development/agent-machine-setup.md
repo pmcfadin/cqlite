@@ -86,6 +86,21 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok
   `overridden` means a global `RUSTFLAGS` is suppressing the wired flags (don't
   export one on a worker); `present-unconfigured` means mold is installed but not
   wired — re-run bootstrap.
+- **`perf`** (issue #3249, **Linux only** — no token on macOS) — can this box be
+  profiled *at all*? Read free from `/proc/sys/kernel/{perf_event_paranoid,kptr_restrict}`
+  (never a `perf` exec, so the gate pays nothing for it). Values:
+  **`ok`** (unprivileged per-CPU profiling **and** kernel symbols available) ·
+  **`paranoid-<N>`** (`perf_event_paranoid = N >= 1`
+  forbids **CPU-wide** events, so the `perf stat -C <cpu>` the measurement doctrine
+  mandates is DENIED — a *permission* verdict, not a missing capability; images ship
+  `4`, and Debian/Ubuntu's extra `>= 3` level denies unprivileged perf *entirely*) · **`kptr-restricted`** (paranoid is fine but `kptr_restrict != 0`, so kernel
+  frames resolve to bare addresses — a silent attribution loss) · **`absent`** (the
+  `/proc` controls are not present, e.g. a container — tune the host) ·
+  **`unknown`** (present but unparseable; never guessed). Anything but `ok` on a box
+  you intend to measure means **re-run `bash scripts/bootstrap-agent-machine.sh --yes`**,
+  which installs `/etc/sysctl.d/99-cqlite-perf.conf` and then *verifies* it by running
+  `perf stat -C 0 -e cycles`. Rationale (`-1`, not `1`), the BPF-still-needs-sudo
+  caveat, and the single-tenant security posture: `docs/development/fleet-runbook.md`.
 
 States: **`on`** (detected & used) · **`absent`** (missing → the gate prints a loud
 `WARN:` with the install command) · **`off`** (intentionally disabled via

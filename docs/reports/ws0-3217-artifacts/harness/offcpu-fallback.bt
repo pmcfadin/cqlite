@@ -1,0 +1,50 @@
+#!/usr/bin/env bpftrace
+/*
+ * Off-CPU time by stack, for one target process. FALLBACK ONLY — used by
+ * profile-offcpu.sh when offcputime-bpfcc is unusable. Issue #3217, AC4.
+ *
+ * Usage: bpftrace offcpu-fallback.bt <tgid> <duration-secs>
+ *
+ * Emits bpftrace map output `@[kstack, ustack]: <microseconds>` which
+ * FlameGraph's stackcollapse-bpftrace.pl folds. Value is MICROSECONDS, matching
+ * the unit offcputime-bpfcc -f emits, so the downstream classifier and
+ * `flamegraph.pl --countname=us` are identical for both collectors.
+ *
+ * Measures the same thing as offcputime: wall time between a thread being
+ * switched OUT and being switched back IN, attributed to the stack it blocked on.
+ */
+
+BEGIN
+{
+	@tgid = (uint32)$1;
+	printf("offcpu-fallback: tracing tgid %d for %d s\n", $1, $2);
+}
+
+kprobe:finish_task_switch, kprobe:finish_task_switch.isra.0
+{
+	// The thread being switched away from: stamp when it went off-CPU.
+	$prev = (struct task_struct *)arg0;
+	if ($prev->tgid == @tgid) {
+		@start[$prev->pid] = nsecs;
+	}
+	// The thread being switched in: charge its blocked interval to the stack
+	// it is resuming on.
+	if (tgid == @tgid) {
+		$last = @start[tid];
+		if ($last != 0) {
+			@[kstack, ustack] = sum((nsecs - $last) / 1000);
+			delete(@start[tid]);
+		}
+	}
+}
+
+interval:s:$2
+{
+	exit();
+}
+
+END
+{
+	clear(@start);
+	clear(@tgid);
+}
