@@ -2406,6 +2406,10 @@ assert_one_block 'case (f)'
 # broke both case (f) asserts at pristine origin/main). The expectation is canonicalised the
 # same way rather than loosened to a substring: the full flag string is still matched with
 # `grep -F`, so a relative --repo, a missing --repo, or a root-checkout --repo still FAILs.
+# >>> BEGIN case-f-invocation-asserts (#3296) — this block is EXTRACTED VERBATIM and
+# mutation-tested by scripts/tests/test_roborev_guard_portability.sh, which feeds it a
+# relative, a root-checkout and a missing `--repo` record and requires BOTH asserts to
+# report `bad` for each. Keep the markers; the extractor FAILs closed if they go missing.
 work_canon=$(cd "$(git -C "$work" rev-parse --show-toplevel)" && pwd -P)
 # The sanctioned invocation form: explicit HEAD sha, explicit ABSOLUTE --repo,
 # --wait, both --agent and --model — and never --branch, never two positionals.
@@ -2422,6 +2426,7 @@ if grep -qF -- '--branch' "$INVOKED" && grep -qF -- "--repo $work_canon" "$INVOK
 else
   bad "case (f): --branch/--repo pairing missing: $(cat "$INVOKED")"
 fi
+# <<< END case-f-invocation-asserts (#3296)
 if grep -qE -- 'review [0-9a-f]{7,40} [0-9a-f]{7,40}' "$INVOKED"; then
   bad 'case (f): the two-positional commit-range form was used'
 else
