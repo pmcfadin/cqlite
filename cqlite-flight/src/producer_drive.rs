@@ -68,7 +68,7 @@ impl MergeProducer {
         // Issue #2821: Arrow array NODES over the projected output schema,
         // counted ONCE per merge and fed to every pre-materialization egress
         // reservation (the per-node slack term the bare capacity factor misses).
-        let plan = self.egress_batch_plan()?;
+        let n_array_nodes = self.egress_array_nodes()?;
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
@@ -131,13 +131,13 @@ impl MergeProducer {
                     // buffer. `batch_bytes.rs` documents the rule and its one-row floor.
                     let width = estimate_arrow_row_bytes(&self.columns, &row);
                     if byte_cap.cut_before(width).is_yes() {
-                        self.flush_credited(sink, &mut buffer, &mut byte_cap, &plan)?;
+                        self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                     }
                     buffer.push(row);
                     emitted += 1;
                     byte_cap.accumulate(width);
                     if buffer.len() >= self.batch_size {
-                        self.flush_credited(sink, &mut buffer, &mut byte_cap, &plan)?;
+                        self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                     }
                     // LIMIT reached (counted post-filter): stop the merge early.
                     if let Some(cap) = limit {
@@ -154,7 +154,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            self.flush_credited(sink, &mut buffer, &mut byte_cap, &plan)?;
+            self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
         }
         Ok(())
     }

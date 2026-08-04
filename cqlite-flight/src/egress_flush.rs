@@ -14,96 +14,45 @@
 //! `producer_stream.rs` are already at/over the campsite source threshold
 //! (epic #1116).
 
-use cqlite_core::export::{
-    build_arrow_schema, rows_to_record_batch_prevalidated, PrevalidatedSchema,
-};
+use cqlite_core::export::{build_arrow_schema, rows_to_record_batch};
 use cqlite_core::query::QueryRow;
 
 use crate::batch_bytes::{worst_case_batch_capacity_bytes, BatchByteCap};
 use crate::egress_credit::{count_arrow_array_nodes, CreditedBatch};
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 
-/// The per-merge, batch-invariant Arrow facts both drive loops need at every
-/// flush point: the output schema and its array-node count.
-///
-/// Built ONCE per merge (issue #3096, lever 6) and threaded through
-/// [`MergeProducer::flush_credited`] in place of the bare `n_array_nodes` this
-/// replaced. Neither field can change between batches of one merge — the output
-/// column set is fixed when the merge starts — so rebuilding either per batch was
-/// pure repeat work: `build_arrow_schema` allocates a `Vec<Field>` with an owned
-/// `String` name per column (plus an extension-metadata `HashMap` per
-/// uuid/timeuuid column), and `count_arrow_array_nodes` walks it.
-pub(crate) struct EgressBatchPlan {
-    /// The batch schema every flush labels its arrays with, BOUND to the columns it
-    /// was derived from.
-    ///
-    /// A [`PrevalidatedSchema`] rather than a bare `Arc<Schema>` (issue #3096,
-    /// fourth review) for a reason that is the whole point of lever 6 on this path:
-    /// the only converter entry point taking a bare `Arc<Schema>`
-    /// (`rows_to_record_batch_with_schema`) must re-prove that the schema describes
-    /// the columns on EVERY call, which reconstructs a `Field` per column per batch
-    /// — cancelling the saving this plan exists to make. `PrevalidatedSchema` OWNS
-    /// the columns its schema was derived from and can only be built by deriving it,
-    /// so [`MergeProducer::flush_buffer`] needs no revalidation and no `columns`
-    /// argument, and a schema/columns disagreement is unconstructible rather than
-    /// merely checked.
-    ///
-    /// Derived from `self.columns`, which is what `rows_to_record_batch(&self.columns,
-    /// ..)` derived per batch before. It is deliberately NOT `output_columns()`:
-    /// `RecordBatch::try_new` validates the arrays against this schema, so the two
-    /// must come from one slice or a projection/aggregation shape would fail
-    /// closed here instead of building.
-    schema: PrevalidatedSchema,
-    /// Arrow array NODES over the OUTPUT schema (`output_columns()`), which is
-    /// the slice the reservation has always been sized from.
+impl MergeProducer {
+    /// Arrow array NODES over this producer's projected output schema, counted
+    /// ONCE per merge and threaded into every reservation.
     ///
     /// Nodes, not columns: `crate::batch_bytes::BATCH_BYTES_PER_COLUMN_SLACK` is
     /// a per-array-node allowance, so a `map<text,text>` column contributes four.
-    array_nodes: usize,
-}
-
-impl MergeProducer {
-    /// Build the per-merge [`EgressBatchPlan`] — once, before the drive loop.
-    ///
-    /// The two derivations below keep the pre-change slices EXACTLY: the node
-    /// count from `output_columns()` (what `egress_array_nodes` used) and the
-    /// batch schema from `self.columns` (what `flush_buffer`'s
-    /// `rows_to_record_batch` used). On the row drive path the two coincide —
-    /// `output_columns()` returns `self.columns` unless `partial_columns` is set,
-    /// which only the aggregate route (a different, materializing path that never
-    /// reaches `flush_credited`) sets. Deriving both from one slice would still be
-    /// correct today and would silently change behaviour the day that stops
-    /// holding, so it is not done.
-    pub(crate) fn egress_batch_plan(&self) -> Result<EgressBatchPlan, ProducerError> {
-        let array_nodes = count_arrow_array_nodes(&build_arrow_schema(self.output_columns())?);
-        let schema = PrevalidatedSchema::build(&self.columns)?;
-        Ok(EgressBatchPlan {
-            schema,
-            array_nodes,
-        })
+    pub(crate) fn egress_array_nodes(&self) -> Result<usize, ProducerError> {
+        let schema = build_arrow_schema(self.output_columns())?;
+        Ok(count_arrow_array_nodes(&schema))
     }
 
-    /// Convert `buffer`'s rows into an Arrow batch over the plan's SHARED schema
-    /// and clear it.
+    /// Convert `buffer`'s rows into an Arrow batch and clear it.
     ///
-    /// This is the `do_get` row route's ONLY batch-materialization point (all six
-    /// flush sites reach it through [`Self::flush_credited`]), so it is where lever
-    /// 6 either pays off or does not. Per batch it now costs an `Arc` refcount bump:
-    /// no `Schema` rebuild — the plan holds it — and no revalidation, because
-    /// [`PrevalidatedSchema`] carries the columns the schema was derived from and
-    /// `rows_to_record_batch_prevalidated` therefore takes no columns to disagree
-    /// with. The columns the arrays are built from come from that same value, which
-    /// `Self::egress_batch_plan` derived from `self.columns`.
+    /// This is the `do_get` row route's ONLY batch-materialization point — all six
+    /// flush sites reach it through [`Self::flush_credited`].
     ///
-    /// Lives here rather than in `producer.rs` (already far over the campsite
+    /// The schema is derived from `self.columns` per batch by
+    /// `rows_to_record_batch`, which builds it and hands it straight to its private
+    /// trusted tail, so it is built once and never revalidated. Hoisting that build
+    /// to once per merge was measured twice on the WS0 corpus and delivered nothing
+    /// (issue #3096: +0.30%, 95% CI covering zero, 4.5x below this box's ~1.4%
+    /// between-binary code-layout noise floor; the removed per-batch work is
+    /// 1.53 cycles/row of 23,940), so it is not done.
+    ///
+    /// Lives here rather than in `producer.rs` (~3.2k lines, far over the campsite
     /// source threshold, epic #1116) beside its only caller,
     /// [`Self::flush_credited`].
     fn flush_buffer(
         &self,
-        plan: &EgressBatchPlan,
         buffer: &mut Vec<QueryRow>,
     ) -> Result<arrow::record_batch::RecordBatch, ProducerError> {
-        let batch = rows_to_record_batch_prevalidated(&plan.schema, buffer)?;
+        let batch = rows_to_record_batch(&self.columns, buffer)?;
         buffer.clear();
         Ok(batch)
     }
@@ -161,7 +110,7 @@ impl MergeProducer {
         sink: &mut dyn BatchSink,
         buffer: &mut Vec<QueryRow>,
         byte_cap: &mut BatchByteCap,
-        plan: &EgressBatchPlan,
+        n_array_nodes: usize,
     ) -> Result<(), ProducerError> {
         #[cfg(debug_assertions)]
         {
@@ -181,7 +130,7 @@ impl MergeProducer {
         // only here on the producer side (design D0): `accumulated()` is PAYLOAD
         // bytes, everything downstream of this line is CAPACITY bytes.
         let reserve_capacity_bytes =
-            worst_case_batch_capacity_bytes(byte_cap.accumulated(), plan.array_nodes, 0);
+            worst_case_batch_capacity_bytes(byte_cap.accumulated(), n_array_nodes, 0);
         // Parks here on an exhausted pool, with ONLY the row buffer resident —
         // nothing is materialized while a reservation is pending.
         let reservation = sink.reserve(reserve_capacity_bytes)?;
@@ -191,7 +140,7 @@ impl MergeProducer {
         // per batch; a no-op with no flight sink installed (non-flight callers).
         let batch = cqlite_core::observability::stream_subphase::timed(
             cqlite_core::observability::StreamSubPhase::Encode,
-            || self.flush_buffer(plan, buffer),
+            || self.flush_buffer(buffer),
         )?;
         let actual_capacity_bytes = batch.get_array_memory_size();
         // Trues up DOWNWARD; an `actual > reserved` fails closed (never upward).
@@ -200,7 +149,3 @@ impl MergeProducer {
         sink.emit(CreditedBatch::new(batch, permit))
     }
 }
-
-#[cfg(test)]
-#[path = "egress_flush_tests.rs"]
-mod egress_flush_tests;
