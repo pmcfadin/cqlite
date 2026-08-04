@@ -311,6 +311,38 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    `UNAVAILABLE` with an empty missing list, and the previous revision still excused the paths while the
    block read `RESULT: PASS`. ***"We could not check" must never render as "nothing was wrong."***
 
+   **It was never one bug — it is ONE SHAPE, found three times on #3229, so it is now a rule:
+   *a positive verdict requires an AFFIRMATIVE MEASUREMENT.*** The shape is *a multi-state signal where
+   only the BAD states are tested, so every unknown or unmeasured state inherits the PERMISSIVE branch*:
+
+   | # | signal | states | tested | what the unmeasured state did |
+   |---|---|---|---|---|
+   | 1 | `built-in-set:` | OK / DIVERGED / UNAVAILABLE | `= DIVERGED`, `!= DIVERGED` | took the permissive **excusal** path (above) |
+   | 2 | `corroboration:` | OK / DRIFT / NOTICE / **UNAVAILABLE (initial)** | `= DRIFT`, `= NOTICE` | reached `PASS (no exclusion patterns configured)` and **enqueued** a review |
+   | 3 | an `awk` line bound | a number / empty | a `${end:-$start}` default | degraded a failed measurement to a **1-line scan**, in which the absence-assert reads `ok` |
+
+   Instance 2 is the sharpest: the code's own comment three lines above said the binary is the ONLY oracle
+   that can tell "our parser recognised no key" from "nothing is configured" — and then never required that
+   oracle to have **answered**. So the rule, applicable well beyond this wrapper:
+
+   - Never derive a pass from the **absence** of a bad signal.
+   - Where an oracle is the **sole** evidence for a claim and could not be consulted, the verdict is
+     **non-passing**, and its text distinguishes *"we could not check"* from *"nothing was wrong"* — naming
+     what was unverifiable and what would have verified it.
+   - Key a permissive branch on the **affirmative** value (`= OK`), never on `!= <bad>`, so an unknown state
+     fails closed.
+   - Where a signal genuinely **should** be permissive, record the reason **in code** at the branch. (Here:
+     with patterns already parsed and git-matched, corroboration only cross-checks a measurement that
+     happened, so its silence withholds nothing — and failing there would red every run on a box whose
+     roborev lacks the subcommand, which is the self-disabling guard again.)
+
+   The wrapper's own **verdict scan** was the same shape at its most consequential point — four failing
+   prefixes tested, everything else falling through to `RESULT: PASS`. Its non-failing set is now an
+   **allow-list** (an unrecognised value, an empty string included, FAILs and names itself), plus a backstop
+   that a PASS may not carry a verdict-carrying key that is not affirmatively `PASS`: a `SKIP` there means
+   the check **never ran**, which is the vacuous pass itself. Un-backstopped, an early-returning
+   `prompt-content:` passed a run with the strongest anti-vacuity key having measured nothing.
+
    The **TOTAL vs PARTIAL** boundary is the whole distinction, and it was measured rather than
    theorised. Left as a NOTICE, a hermetic `Cargo.lock` + `README.md` fixture produced
    `census-exclusion: NOTICE (0/1 survive)`, `prompt-content: PASS (0/0 code census paths present)` and

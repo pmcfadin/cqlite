@@ -480,6 +480,20 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   it EXCUSES coverage requires `= OK`. Under `UNAVAILABLE` NOTHING is excused, `prompt-content:` evaluates
   every census code path and FAILs if one is genuinely absent — fail-closed on the excusal, not on the run.
   *"We could not check" must never render as "nothing was wrong."*
+  **That is ONE SHAPE, found three times on #3229, so it is now a RULE: a positive verdict requires an
+  AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
+  every unknown/unmeasured state inherits the PERMISSIVE branch* — `built-in-set: UNAVAILABLE` took the
+  permissive excusal path; `corroboration: UNAVAILABLE` reached a `PASS (no exclusion patterns configured)`
+  and **enqueued** (the code's own comment said the binary was the only oracle that could tell "no key
+  recognised" from "nothing configured", then never required it to have *answered*); a
+  `${end:-$start}` default degraded a failed `awk` bound to a 1-line scan. So: never derive a pass from the
+  ABSENCE of a bad signal; where an oracle is the SOLE evidence for a claim and could not be consulted the
+  verdict is NON-PASSING and its text names what was unverifiable; key a permissive branch on the
+  AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a signal genuinely SHOULD be permissive, record
+  the reason IN CODE at the branch (e.g. corroboration with patterns already parsed and git-matched). The
+  wrapper's own verdict scan was the same shape and is now a CLOSED grammar (unrecognised value ⇒ FAIL) plus
+  a backstop that no PASS may carry a verdict-carrying key that is not affirmatively `PASS` — a `SKIP` means
+  the check never ran, which is the vacuous pass itself.
   **A built-in swallowing the WHOLE code census is a FAIL, and that is the same rule, not an exception**:
   with nothing surviving, the reviewer gets an **EMPTY prompt**, so any verdict certifies nothing — the
   identical condition `code-free:` already FAILs pre-enqueue for a prose-only census, and it carries the
