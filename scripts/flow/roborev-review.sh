@@ -422,6 +422,11 @@ census_files=0
 census_non_code_files=0
 census_paths=()
 census_code_paths=()
+# The paths whose recorded mode `git ls-tree` could not measure at all (#3229). Declared here
+# for the same reason as the arrays above: the fail-closed check reads `${#...[@]}`, and an
+# array that does not exist would abort under `set -u` — or, worse, be treated as empty.
+census_unmeasurable_paths=()
+census_unmeasurable_detail=()
 PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"

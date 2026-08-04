@@ -55,8 +55,15 @@ CODE_FREE_EXTENSIONS="md markdown mdx txt rst adoc"
 # endpoint answers first" misses a MODE CHANGE, and did (#3229 round-13 blocker: `100755`@BASE
 # → `100644`@HEAD read non-code, because the HEAD record ended the scan before BASE was ever
 # consulted — and a `chmod -x` does not turn a script into prose). The rule is a DISJUNCTION
-# over both endpoints; see `roborev_path_is_executable` for how the shape now makes skipping
+# over both endpoints; see `roborev_path_exec_state` for how the shape now makes skipping
 # one unexpressible.
+#
+# AND THERE IS A THIRD ANSWER (#3229 round-14 blocker): **could not measure**. `git ls-tree` can
+# FAIL — an unreadable repository, a ref that does not resolve to a tree, a corrupt object — and
+# the round-13 leaf wrote `|| return 1`, giving a FAILED lookup the SAME value as a measured
+# non-executable. So a file the repo genuinely runs classified as prose, silently, on an infra
+# fault. Non-code is now reachable ONLY from a positive measurement at every endpoint; an
+# unmeasurable one FAILs `census-check:` closed and names the path and the ref.
 #
 # The prefix ALONE was the bug (#3229 round-11 blocker). Under a bare prefix test EVERY
 # extensionless path under `docs/` classified non-code, so it was dropped from
@@ -189,8 +196,39 @@ roborev_range_endpoint_refs() {
   done
 }
 
-# _roborev_mode_is_exec_at <ref> <path>: 0 iff the tree at `<ref>` records `<path>` with the
-# executable bit; 1 for recorded-non-executable, absent-at-that-ref, or unreadable-ref.
+# ===================== THE CLASS-LEVEL RULE THIS LEAF EXISTS TO OBEY =====================
+# ANY PREDICATE FEEDING A SAFETY DECISION MUST BE TRI-VALUED — yes / no / could-not-measure.
+# A BOOLEAN CANNOT EXPRESS UNCERTAINTY, so it is forced to fold "I could not tell" onto one of
+# its two values, and the value it folds onto is always the PERMISSIVE one ("nothing wrong",
+# "nothing to review"). That is not a bug in any one call site; it is the shape.
+#
+# This is the NINTH instance of "could not measure" rendered as "nothing wrong" on this change
+# (after `built-in-set: UNAVAILABLE`, `corroboration: UNAVAILABLE`, the fail-open
+# `${_census_end:-$_census_start}`, the permissive verdict scan, and the measurement failures),
+# and the LEVEL-SHIFT is why another point patch would not have ended it: round 13 made the
+# FOLD below order-independent BY CONSTRUCTION while leaving this LEAF two-valued, so it proved
+# the right property ONE LEVEL TOO HIGH. An order-independent fold over a predicate that has
+# already discarded the distinction cannot recover it.
+#
+# _roborev_mode_exec_state_at <ref> <path>: the recorded mode STATE of `<path>` in the tree at
+# `<ref>`. The EXIT STATUS *is* the state, and there are THREE of them:
+#   0  EXEC          — `git ls-tree` SUCCEEDED and records mode 100755.
+#   1  NOT-EXEC      — `git ls-tree` SUCCEEDED and records some other mode, OR SUCCEEDED and
+#                      returned NO RECORD. BOTH ARE REAL MEASUREMENTS. A successful `ls-tree`
+#                      with empty output means the path is genuinely ABSENT at that ref — the
+#                      added/deleted case the endpoint matrix already covers — and it is
+#                      perfectly fine. It must NEVER be conflated with the state below.
+#   2  UNMEASURABLE  — `git ls-tree` FAILED (`$REPO` is not a repository, the ref does not
+#                      resolve to a tree, a corrupt/unreadable object). NOTHING was measured, so
+#                      there is no answer of any kind for this endpoint.
+# The distinction between 1-by-empty-output and 2 is the whole fix: the previous revision wrote
+# `... || return 1`, which gave a FAILED lookup the SAME value as a measured non-executable.
+#
+# THE RENAME IS LOAD-BEARING. The old name was `_roborev_mode_is_exec_at` and it was called as
+# `if _roborev_mode_is_exec_at ...`, where `if` collapses 1 and 2 back into "false". A surviving
+# boolean call site would silently reintroduce exactly this defect, so the name such a call site
+# would use no longer exists — the breakage is a syntax-visible "command not found", not a
+# permissive answer.
 #
 # DELIBERATELY IGNORANT OF THE RANGE. It answers for ONE endpoint and cannot express an
 # ordering, a precedence or a short-circuit, because it has no second endpoint to skip. All
@@ -219,20 +257,70 @@ roborev_range_endpoint_refs() {
 # first, space-terminated, and always one of git's four literal mode constants. Without `-z`
 # git C-QUOTES an odd name, which keeps a newline-bearing path on ONE line — if anything
 # harder to confuse than the raw form. An absent path is a SILENT empty result (not an
-# error), so content is tested, not just git's exit status.
-_roborev_mode_is_exec_at() {
-  local ref="$1" path="$2" record mode
-  [ -n "$ref" ] || return 1
-  record=$(git -C "$REPO" ls-tree "$ref" -- ":(literal)$path" 2>/dev/null) || return 1
+# error), so content is tested, not just git's exit status — and now the two are DISTINGUISHED
+# rather than both meaning "not executable".
+#
+# git's OWN message is captured (not discarded to `/dev/null`) into
+# `ROBOREV_EXEC_MEASURE_STDERR`, because "unmeasurable" is only actionable when the operator is
+# told WHY. It is set on EVERY call, so a stale message from an earlier call can never be
+# attributed to this one.
+ROBOREV_EXEC_MEASURE_STDERR=""
+_roborev_mode_exec_state_at() {
+  local ref="$1" path="$2" record mode errfile rc
+  ROBOREV_EXEC_MEASURE_STDERR=""
+  if [ -z "$ref" ]; then
+    # UNMEASURABLE, not NOT-EXEC: an empty ref names no tree, so nothing was read. Unreachable
+    # from the fold (the endpoint producer drops empties), and fail-closed anyway.
+    ROBOREV_EXEC_MEASURE_STDERR="empty ref: no tree to read"
+    return 2
+  fi
+  errfile=$(mktemp "${TMPDIR:-/tmp}/roborev-exec-state.XXXXXX") || return 2
+  rc=0
+  record=$(git -C "$REPO" ls-tree "$ref" -- ":(literal)$path" 2>"$errfile") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    ROBOREV_EXEC_MEASURE_STDERR=$(head -1 "$errfile" 2>/dev/null || printf '')
+    [ -n "$ROBOREV_EXEC_MEASURE_STDERR" ] || ROBOREV_EXEC_MEASURE_STDERR="git ls-tree exited $rc with no message"
+    rm -f "$errfile"
+    return 2
+  fi
+  rm -f "$errfile"
+  # SUCCEEDED with no record => the path is genuinely ABSENT at this ref. A MEASUREMENT.
   [ -n "$record" ] || return 1
   mode="${record%% *}"
-  [ "$mode" = 100755 ]
+  if [ "$mode" = 100755 ]; then return 0; fi
+  return 1
 }
 
-# roborev_path_is_executable <path>: 0 when git records `<path>` executable at EITHER ENDPOINT
-# of the census range, 1 only when it is executable at NEITHER (recorded non-executable at
-# both, absent from both, or unmeasurable). Used only for the extensionless-under-a-prose-
-# prefix decision above.
+# roborev_path_exec_state <path>: the mode state of `<path>` ACROSS THE CENSUS RANGE, joined from
+# the per-endpoint states. Exit status is the state, on the SAME three-valued scale as the leaf:
+#   0  EXEC          — git records it executable at at least one endpoint  -> CODE
+#   1  NOT-EXEC      — MEASURED non-executable (or measured absent) at EVERY endpoint -> prose
+#   2  UNMEASURABLE  — no endpoint said EXEC and at least one endpoint could not be measured
+#                      (or no endpoint was consulted at all) -> the caller MUST fail closed;
+#                      `ROBOREV_EXEC_UNMEASURABLE_REFS` names which refs, and why.
+# Used only for the extensionless-under-a-prose-prefix decision above.
+#
+# THE LATTICE, and why it is the safe one. Three states, TOTALLY ordered
+#       NOT-EXEC  <  UNMEASURABLE  <  EXEC
+# and the join is the MAXIMUM under that order. Because the order is total, the join is
+# associative, commutative and idempotent — so order-independence is a property OF THE LATTICE,
+# not of the loop, which is what keeps round 13's by-construction guarantee intact now that the
+# accumulator carries three states instead of a boolean.
+#   * EXEC dominates everything, UNMEASURABLE included, and that is SOUND rather than
+#     convenient: the rule is a DISJUNCTION over the endpoints, so positive evidence at ONE
+#     endpoint already settles it — whatever an unmeasurable endpoint would have said could only
+#     be another "yes", and no "yes" can un-satisfy a disjunction. This is a conclusion drawn
+#     from a real measurement, never a guess about the endpoint that failed.
+#   * UNMEASURABLE dominates NOT-EXEC because "executable at NEITHER endpoint" is a claim about
+#     EVERY endpoint, and one unmeasured endpoint leaves it unfounded.
+#   * NOT-EXEC is therefore the ONLY state that can reach the permissive classification (prose,
+#     dropped from `census_code_paths`, asserted about by nothing) — and reaching it now
+#     requires a POSITIVE measurement at every single endpoint.
+#   * The accumulator STARTS at UNMEASURABLE, not at the lattice bottom: an endpoint set that
+#     yielded nothing measured nothing, so it must not answer "prose". (Unreachable today —
+#     `roborev_range_endpoint_refs` always yields HEAD — closed by construction rather than by
+#     relying on that, because a fail-open reachable only by a future edit is the same class of
+#     defect this whole function is fixing.)
 #
 # EITHER ENDPOINT, AND THE DISJUNCTION IS THE WHOLE RULE (#3229 round-13 blocker). The census
 # subject is the RANGE, so a path is a code path if it is an executable ANYWHERE in that range:
@@ -245,8 +333,11 @@ _roborev_mode_is_exec_at() {
 #   present at BASE only (deleted)   -> CODE iff it WAS executable. Fail-closed: removing an
 #       executable is a code change whose review must be asserted, and a pure deletion still
 #       carries a `diff --git` header for `prompt-content:` to find.
-#   present at neither               -> non-executable (unmeasurable; unreachable for a real
-#       census path, which by construction exists at an endpoint).
+#   present at neither               -> NOT-EXEC, and that is a MEASUREMENT: `ls-tree` succeeded
+#       at both endpoints and reported no record, i.e. git positively says the path is not there.
+#       Do not confuse it with UNMEASURABLE, where `ls-tree` itself failed and git said nothing
+#       at all. (Unreachable for a real census path, which by construction exists at an
+#       endpoint — it is reachable only by the direct unit probe.)
 #
 # BY CONSTRUCTION, NOT BY CARE. The previous revision was an ordered scan that `return`ed on
 # the FIRST ref yielding a record, so a path recorded 100644 at HEAD NEVER REACHED BASE and a
@@ -257,19 +348,44 @@ _roborev_mode_is_exec_at() {
 #   1. The endpoint list is produced by `roborev_range_endpoint_refs`, complete before the
 #      fold starts — the loop cannot be cut short by a ref it has not looked at yet.
 #   2. THE LOOP BODY HAS NO `return`, NO `break` AND NO `continue`. It can only ever OR into
-#      the accumulator, so control flow cannot leave the fold early; the function's sole
+#      the accumulators, so control flow cannot leave the fold early; the function's sole
 #      `return` is after the loop, once every endpoint has been consulted. (Pinned
 #      STRUCTURALLY by the guard test, so a future edit cannot reintroduce an early exit.)
 #   3. The per-endpoint predicate is a separate, range-blind function, so there is no
 #      "first"/"then" for a reader or an editor to get wrong — only a set to fold.
-roborev_path_is_executable() {
-  local path="$1" ref exec_at_any=1
+# The three-state accumulator is carried as THREE MONOTONE FLAGS rather than one running
+# maximum, so each is a plain OR (idempotent, commutative) and the lattice join is applied ONCE,
+# after the loop, as a fixed precedence. Same guarantee, and nothing inside the loop can lower a
+# flag.
+#
+# ROBOREV_EXEC_UNMEASURABLE_REFS: reset on every call, then one entry per endpoint whose mode
+# could not be measured, spelled `<ref>: <git's own message>`. A SET — its order is
+# presentational, exactly like the endpoint list's.
+ROBOREV_EXEC_UNMEASURABLE_REFS=()
+roborev_path_exec_state() {
+  local path="$1" ref st consulted=0 saw_exec=0 saw_unmeasurable=0 state
+  ROBOREV_EXEC_UNMEASURABLE_REFS=()
   while IFS= read -r ref; do
     # NO early exit of any kind — see property 2 above. Every endpoint is consulted on every
-    # call, and the accumulator is monotone, so the result cannot depend on the order.
-    if _roborev_mode_is_exec_at "$ref" "$path"; then exec_at_any=0; fi
+    # call, and every accumulator is a monotone OR, so the result cannot depend on the order.
+    consulted=1
+    st=0
+    _roborev_mode_exec_state_at "$ref" "$path" || st=$?
+    if [ "$st" -eq 0 ]; then saw_exec=1; fi
+    # ANY status that is neither of the two MEASURED ones counts as UNMEASURABLE, so there is no
+    # unhandled bucket for a future fourth state to fall through permissively.
+    if [ "$st" -ne 0 ] && [ "$st" -ne 1 ]; then
+      saw_unmeasurable=1
+      ROBOREV_EXEC_UNMEASURABLE_REFS+=("$ref: ${ROBOREV_EXEC_MEASURE_STDERR:-git ls-tree failed with no message}")
+    fi
   done < <(roborev_range_endpoint_refs)
-  return "$exec_at_any"
+  # THE JOIN, once, as the lattice's fixed precedence: EXEC > UNMEASURABLE > NOT-EXEC, over an
+  # accumulator that starts at UNMEASURABLE (nothing consulted == nothing measured).
+  state=2
+  if [ "$consulted" -eq 1 ]; then state=1; fi
+  if [ "$saw_unmeasurable" -eq 1 ]; then state=2; fi
+  if [ "$saw_exec" -eq 1 ]; then state=0; fi
+  return "$state"
 }
 
 # NO EXCLUSION SET IS MODELLED HERE AT ALL (issues #3283 / #3278).
@@ -451,7 +567,9 @@ roborev_census() {
   census_deleted=0
   census_non_code_files=0
   census_paths=()
-  local record add del path
+  census_unmeasurable_paths=()
+  census_unmeasurable_detail=()
+  local record add del path unmeasurable_row
   while IFS= read -r -d '' record; do
     [ -n "$record" ] || continue
     # Split the record by hand: the PATH is everything after the second TAB and may itself
@@ -502,17 +620,33 @@ roborev_census() {
         fi
       fi
     else
-      # EXTENSIONLESS under a prose prefix: non-code only when git records it NON-EXECUTABLE
-      # AT BOTH ENDPOINTS of the range. The prefix alone used to decide it, which made every
+      # EXTENSIONLESS under a prose prefix: non-code only when git MEASURED it NON-EXECUTABLE
+      # AT EVERY ENDPOINT of the range. The prefix alone used to decide it, which made every
       # extensionless path under `docs/` a path `prompt-content:` asserted NOTHING about; the
-      # ordered single-endpoint scan that replaced it did the same to a MODE CHANGE — see the
-      # rule documented at `CODE_FREE_EXTENSIONLESS_PREFIXES`. The mode is read from the tree,
-      # on this same RAW `$path`, so the classification boundary is unchanged.
+      # ordered single-endpoint scan that replaced it did the same to a MODE CHANGE; and the
+      # two-valued leaf under that scan's replacement did the same whenever `git ls-tree` itself
+      # FAILED — see the rule documented at `CODE_FREE_EXTENSIONLESS_PREFIXES`. The mode is read
+      # from the tree, on this same RAW `$path`, so the classification boundary is unchanged.
+      #
+      # THREE STATES, THREE DESTINATIONS — and only ONE of them is the permissive one:
+      #   0 EXEC          -> CODE (fall through; `file_non_code` stays 0)
+      #   1 NOT-EXEC      -> prose. A POSITIVE measurement at every endpoint.
+      #   2 UNMEASURABLE  -> NEITHER. Recorded here and failed closed after the loop, because a
+      #                     path whose mode was never measured must not be spent as prose: that
+      #                     would drop it from `census_code_paths`, leave `prompt-content:`
+      #                     asserting nothing about it, and print a green summary meaning
+      #                     "nothing was wrong" when what happened is "nothing was checked".
       # shellcheck disable=SC2086 # deliberate split of the space-separated constant
       for prefix in $CODE_FREE_EXTENSIONLESS_PREFIXES; do
         case "$path" in
           "$prefix"*)
-            if ! roborev_path_is_executable "$path"; then file_non_code=1; fi
+            exec_state=0
+            roborev_path_exec_state "$path" || exec_state=$?
+            if [ "$exec_state" -eq 1 ]; then file_non_code=1; fi
+            if [ "$exec_state" -ne 0 ] && [ "$exec_state" -ne 1 ]; then
+              census_unmeasurable_paths+=("$path")
+              census_unmeasurable_detail+=("$path @ ${ROBOREV_EXEC_UNMEASURABLE_REFS[*]:-<no endpoint was consulted>}")
+            fi
             ;;
         esac
       done
@@ -538,6 +672,24 @@ roborev_census() {
     CENSUS_CHECK="FAIL (empty census)"
     DETAILS+=("NOTHING-TO-REVIEW: the local diff census for '${BASE}...HEAD' is genuinely empty (0 files changed), so no review was enqueued. This is explicitly NOT a pass and MUST NOT be recorded as \"roborev clean\".")
     finish NOTHING-TO-REVIEW 3
+  fi
+
+  # --- step 3a: UNMEASURABLE MODE = FAIL CLOSED (#3229) -------------------------
+  # Reached when `git ls-tree` itself FAILED at every endpoint a path's classification depends
+  # on, so this run has NO measurement of whether that path is harness CODE or prose. It is
+  # deliberately not allowed to fall through to either side. Same wording discipline as the
+  # unresolvable base and the failed `git diff` above, and for the same reason: "we could not
+  # check" must never be able to read as "nothing was wrong", and it is textually
+  # indistinguishable from it unless it is said out loud. Surfaced on `census-check:` because
+  # that key already fails closed on an unmeasurable census and is affirmation-checked.
+  if [ "${#census_unmeasurable_paths[@]}" -gt 0 ]; then
+    CENSUS_CHECK="FAIL (recorded mode unmeasurable for ${#census_unmeasurable_paths[@]} of $census_files census paths)"
+    DETAILS+=("ERROR: census: the executable-bit classification could NOT BE MEASURED for ${#census_unmeasurable_paths[@]} extensionless census path(s): 'git ls-tree' FAILED in $REPO at every endpoint of '${BASE}...HEAD' that the decision needs, so this run does not know whether they are harness CODE or prose. This is a FAIL, explicitly NOT a quiet non-code classification and explicitly NOT a NOTHING-TO-REVIEW — an unmeasurable mode is 'we cannot tell', never 'there is nothing wrong'. Each row below names the PATH, then the endpoint REF(s) that could not be measured and git's own message:")
+    for unmeasurable_row in "${census_unmeasurable_detail[@]}"; do
+      DETAILS+=("  $unmeasurable_row")
+    done
+    DETAILS+=("ERROR: census: failing closed on an unmeasurable mode. No review was enqueued. This is an INFRA condition in the checkout being reviewed (an unreadable repository, a ref that does not resolve to a tree, a corrupt object), NOT a defect in the branch under review — repair the checkout and re-run.")
+    finish FAIL 1
   fi
   CENSUS_CHECK="PASS"
 
