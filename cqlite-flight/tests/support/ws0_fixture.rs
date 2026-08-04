@@ -14,9 +14,20 @@
 //! minimum needed to write the fixture, and nothing that only the measurement rig
 //! needed (no CLI, no `sha256` corpus-identity record, no bench binary).
 //!
-//! The row synthesis, the schema and the write path below are UNCHANGED from the
-//! form the pinned digest `CI_FIXTURE_DIGEST` was recorded against — the fixture
-//! bytes are the same bytes, which is why that constant is untouched by the split.
+//! # The null plan ([`NullPlan`]) and what depends on it
+//!
+//! [`CorpusSpec::nulls`] selects whether any cell is ABSENT. It defaults to
+//! [`NullPlan::None`] — every non-key column written on every row, the exact row
+//! synthesis this module shipped with — so a consumer that does not opt in gets
+//! BYTE-IDENTICAL fixture bytes. `tests/issue_3096_framing_subphase.rs` is such a
+//! consumer and is deliberately left on the default.
+//!
+//! [`NullPlan::Pinned`] adds the deterministic absent-cell pattern the
+//! Arrow-buffer digest oracle needs to exercise VALIDITY BITMAPS at all (issue
+//! #3096, roborev finding 2: with no nulls anywhere, a validity-bit defect is
+//! invisible to a digest that folds the bitmap). Only
+//! `tests/issue_3096_arrow_buffer_digest.rs` opts in, and it re-pins its digests
+//! against it.
 //!
 //! # THIS FIXTURE IS A PERFORMANCE FIXTURE ONLY — NEVER A CORRECTNESS ORACLE
 //!
@@ -91,6 +102,10 @@ pub const COLUMNS: [(&str, &str); 12] = [
 /// The three PRIMARY KEY column names: partition key first, then the two
 /// clustering columns in order.
 const PK_COLUMNS: [&str; 3] = ["part_id", "seq", "event_time"];
+
+/// Non-key columns per row — the twelve [`COLUMNS`] less the three
+/// [`PK_COLUMNS`]. The census a [`NullPlan`] takes cells away from.
+pub const NON_KEY_COLUMNS: u64 = (COLUMNS.len() - PK_COLUMNS.len()) as u64;
 
 /// The pinned `ws0.events` [`TableSchema`], built from [`COLUMNS`] so the schema
 /// and the emitted DDL can never drift.
@@ -242,6 +257,73 @@ pub fn part_id(p: u64) -> String {
     format!("p{p:07}")
 }
 
+// ---------------------------------------------------------------------------
+// The deterministic null plan (issue #3096, roborev finding 2)
+// ---------------------------------------------------------------------------
+
+/// Which cells, if any, are ABSENT from a written row.
+///
+/// An absent cell reads back as a NULL, so this is what puts content into the
+/// Arrow validity bitmaps the digest oracle folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NullPlan {
+    /// Every non-key column written on every row: 12 non-null cells per row, no
+    /// validity-bitmap content anywhere. The original synthesis; the DEFAULT, so
+    /// a consumer that does not opt in keeps byte-identical fixture bytes.
+    #[default]
+    None,
+    /// The pinned absent-cell pattern, keyed on the row's index WITHIN its
+    /// partition (`r`) so it is a pure function of the fixture spec — no
+    /// wall-clock, no RNG draw, no dependence on which partition landed where in
+    /// token order.
+    ///
+    /// # Why these positions
+    ///
+    /// The rule that carries the coverage is `metric_a`'s stride of 8. A batch's
+    /// validity bitmap is bit-packed 8 rows to the byte, and a partition's rows
+    /// enter the stream at offset `k * rows_per_partition` for token-order rank
+    /// `k`. With `rows_per_partition = 100` (≡ 4 mod 8), a stride-8 rule inside
+    /// the partition therefore lands on **bit 0 of a byte** for even `k` and on
+    /// **bit 4 of a byte** for odd `k` — a byte-aligned null AND a null at a
+    /// non-boundary offset, in the SAME column. A misplaced validity bit moves
+    /// the digest instead of disappearing into bitmap padding.
+    ///
+    /// The other three rules widen the shape rather than the alignment:
+    ///
+    /// * `region` (`r % 8 == 3`) — a VAR-WIDTH column, so a null must also be
+    ///   consistent with its offsets buffer.
+    /// * `payload` (`r % 40 == 17`) — a wide var-width column at a stride
+    ///   coprime with 8, so its nulls sweep several distinct bit offsets.
+    /// * `device_id` (last row of each partition) — a FIXED-SIZE-BINARY column
+    ///   nulled at the partition tail, which for the final partition is the last
+    ///   valid bit of the final batch's last bitmap byte, immediately adjacent to
+    ///   the padding bits.
+    ///
+    /// Every rule leaves at least six of the nine non-key columns written, so no
+    /// row degenerates to a bare row marker.
+    Pinned,
+}
+
+/// Is `column` ABSENT for row `r` of a partition of `rows_per_partition` rows?
+///
+/// The partition-key and clustering columns (`part_id`, `seq`, `event_time`) can
+/// never be absent and are not named here — CQL forbids a null key component.
+pub fn column_is_absent(plan: NullPlan, column: &str, r: u64, rows_per_partition: u64) -> bool {
+    match plan {
+        NullPlan::None => false,
+        NullPlan::Pinned => match column {
+            "metric_a" => r % 8 == 0,
+            "region" => r % 8 == 3,
+            "payload" => r % 40 == 17,
+            // The LAST row of each partition. Expressed against
+            // `rows_per_partition` rather than a literal so the rule stays the
+            // "partition tail" it claims to be at any partition size.
+            "device_id" => r + 1 == rows_per_partition,
+            _ => false,
+        },
+    }
+}
+
 /// The per-row PRNG, seeded from `(seed, p, r)` by mixing the three through
 /// SplitMix64's own avalanche so adjacent rows do not share a stream prefix.
 fn row_rng(seed: u64, p: u64, r: u64) -> SplitMix64 {
@@ -255,9 +337,22 @@ fn row_rng(seed: u64, p: u64, r: u64) -> SplitMix64 {
 /// Build the [`Mutation`] for row `r` of partition `p`.
 ///
 /// One mutation per clustering row: `PRIMARY KEY (part_id, seq, event_time)` with
-/// nine non-key columns written as simple cells. `global_row` orders the write
+/// up to nine non-key columns written as simple cells — the ones `plan` marks
+/// absent are OMITTED, and read back as nulls. `global_row` orders the write
 /// timestamps deterministically across the whole fixture.
-pub fn row_mutation(seed: u64, p: u64, r: u64, global_row: u64) -> Mutation {
+///
+/// Every PRNG draw happens unconditionally, BEFORE the absent cells are dropped,
+/// so a cell that survives the plan carries exactly the value it carries under
+/// [`NullPlan::None`]: the two plans differ by absent cells alone, never by a
+/// shifted random stream.
+pub fn row_mutation(
+    seed: u64,
+    p: u64,
+    r: u64,
+    global_row: u64,
+    plan: NullPlan,
+    rows_per_partition: u64,
+) -> Mutation {
     let mut rng = row_rng(seed, p, r);
 
     let mut blob_a = vec![0u8; BLOB_A_LEN];
@@ -290,6 +385,28 @@ pub fn row_mutation(seed: u64, p: u64, r: u64, global_row: u64) -> Mutation {
 
     let event_time = EVENT_TIME_BASE_MS + (r as i64) * 1_000;
 
+    let mut cells = vec![
+        write("blob_a", Value::Blob(blob_a.into())),
+        write("blob_b", Value::Blob(blob_b.into())),
+        write("device_id", Value::Uuid(device_id)),
+        write("metric_a", Value::Integer(metric_a)),
+        write("metric_b", Value::BigInt(metric_b)),
+        write("metric_c", Value::Float(metric_c)),
+        write("payload", Value::text(payload)),
+        write("region", Value::text(region)),
+        write("status", Value::text(status)),
+    ];
+    // Drop the cells `plan` marks absent. `NullPlan::None` retains all nine, so
+    // this is a no-op there and the fixture bytes are unchanged.
+    cells.retain(|cell| match cell {
+        CellOperation::Write { column, .. } => {
+            !column_is_absent(plan, column, r, rows_per_partition)
+        }
+        // Every cell built above is a `Write`; a future non-`Write` operation is
+        // retained rather than silently dropped by a wildcard that guessed.
+        _ => true,
+    });
+
     Mutation::new(
         TableId::new(KEYSPACE, TABLE),
         PartitionKey::single("part_id", Value::text(part_id(p))),
@@ -297,17 +414,7 @@ pub fn row_mutation(seed: u64, p: u64, r: u64, global_row: u64) -> Mutation {
             ("seq".to_string(), Value::Integer(r as i32)),
             ("event_time".to_string(), Value::Timestamp(event_time)),
         ])),
-        vec![
-            write("blob_a", Value::Blob(blob_a.into())),
-            write("blob_b", Value::Blob(blob_b.into())),
-            write("device_id", Value::Uuid(device_id)),
-            write("metric_a", Value::Integer(metric_a)),
-            write("metric_b", Value::BigInt(metric_b)),
-            write("metric_c", Value::Float(metric_c)),
-            write("payload", Value::text(payload)),
-            write("region", Value::text(region)),
-            write("status", Value::text(status)),
-        ],
+        cells,
         WRITE_TS_BASE_MICROS + global_row as i64,
         None,
     )
@@ -342,17 +449,27 @@ pub struct CorpusSpec {
     pub rows_per_partition: u64,
     /// Generation seed.
     pub seed: u64,
+    /// Which cells, if any, are absent. See [`NullPlan`].
+    pub nulls: NullPlan,
 }
 
 impl CorpusSpec {
-    /// A cheap CI-sized fixture: `rows` rows in 100-row partitions.
+    /// A cheap CI-sized fixture: `rows` rows in 100-row partitions, every cell
+    /// present ([`NullPlan::None`]).
     pub fn small(out: PathBuf, rows: u64) -> Self {
         Self {
             out,
             rows,
             rows_per_partition: 100,
             seed: DEFAULT_SEED,
+            nulls: NullPlan::None,
         }
+    }
+
+    /// Select a [`NullPlan`]. Consumes and returns `self` for chaining.
+    pub fn with_null_plan(mut self, nulls: NullPlan) -> Self {
+        self.nulls = nulls;
+        self
     }
 
     /// Directory the SSTable components land in.
@@ -372,6 +489,13 @@ pub struct FixtureIdentity {
     pub rows: u64,
     /// Partitions the writer confirmed.
     pub partitions: u64,
+    /// Non-key cells actually handed to the writer, COUNTED from the emitted
+    /// mutations. With `NullPlan::None` this is `rows * 9`.
+    pub cells_written: u64,
+    /// Non-key cells the [`NullPlan`] dropped, COUNTED the same way. Zero under
+    /// `NullPlan::None`; a consumer that opted into a null-bearing plan asserts
+    /// this is non-zero rather than assuming the plan took effect.
+    pub cells_absent: u64,
     /// `Data.db` size in bytes (non-zero, asserted).
     pub data_db_bytes: u64,
     /// Whether a `CompressionInfo.db` was emitted. Always `false` — the write
@@ -413,15 +537,32 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<FixtureIdentity> {
     let mut writer =
         SSTableWriter::with_expected_partitions(spec.out.clone(), 1, &schema, partitions as usize)?;
     let mut rows_written: u64 = 0;
+    let mut cells_written: u64 = 0;
     for (key, p) in keyed.iter() {
         let mut mutations = Vec::with_capacity(spec.rows_per_partition as usize);
         for r in 0..spec.rows_per_partition {
             let global_row = p * spec.rows_per_partition + r;
-            mutations.push(row_mutation(spec.seed, *p, r, global_row));
+            let mutation = row_mutation(
+                spec.seed,
+                *p,
+                r,
+                global_row,
+                spec.nulls,
+                spec.rows_per_partition,
+            );
+            // COUNTED from the mutation actually built, so the reported cell
+            // census can never disagree with what the writer received.
+            cells_written += mutation.operations.len() as u64;
+            mutations.push(mutation);
         }
         rows_written += mutations.len() as u64;
         writer.write_partition(key.clone(), mutations)?;
     }
+    // Nine non-key columns per row is the full census; whatever was not written
+    // was dropped by the plan.
+    let cells_absent = rows_written
+        .saturating_mul(NON_KEY_COLUMNS)
+        .saturating_sub(cells_written);
     let info = writer.finish().await?;
 
     if rows_written != spec.rows {
@@ -466,9 +607,30 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<FixtureIdentity> {
         return Err("Data.db is empty — refusing to report a vacuous fixture identity".into());
     }
 
+    // A plan that claims nulls must have produced some: a rule that silently
+    // matched nothing (a renamed column, a stride that missed) would leave the
+    // fixture null-free while every consumer believed otherwise.
+    if spec.nulls != NullPlan::None && cells_absent == 0 {
+        return Err(format!(
+            "null plan {:?} dropped ZERO cells over {rows_written} rows — the plan \
+             matched nothing, so the fixture carries no validity-bitmap content at all",
+            spec.nulls
+        )
+        .into());
+    }
+    if spec.nulls == NullPlan::None && cells_absent != 0 {
+        return Err(format!(
+            "NullPlan::None dropped {cells_absent} cells — the default plan must \
+             write every non-key cell, or an existing pinned digest moved silently"
+        )
+        .into());
+    }
+
     Ok(FixtureIdentity {
         rows: rows_written,
         partitions: info.partition_count as u64,
+        cells_written,
+        cells_absent,
         data_db_bytes,
         compression_info_present: false,
     })
@@ -486,7 +648,10 @@ fn token_ordered_keys(
 ) -> GenResult<Vec<(DecoratedKey, u64)>> {
     let mut keyed: Vec<(DecoratedKey, u64)> = Vec::with_capacity(partitions as usize);
     for p in 0..partitions {
-        let probe = row_mutation(spec.seed, p, 0, 0);
+        // The decorated key is a function of the PARTITION KEY alone, and no plan
+        // can make a key component absent, so `spec.nulls` cannot change it — it
+        // is threaded through only because it is part of the row's identity.
+        let probe = row_mutation(spec.seed, p, 0, 0, spec.nulls, spec.rows_per_partition);
         keyed.push((probe.decorated_key(schema)?, p));
     }
     keyed.sort_by(|a, b| {

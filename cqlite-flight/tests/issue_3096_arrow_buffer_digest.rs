@@ -16,6 +16,30 @@
 //! estimate into the build pass) risks exactly that defect class, so the oracle
 //! has to see the bytes the builders produced.
 //!
+//! # The validity bitmaps are EXERCISED, not merely folded (roborev finding 2)
+//!
+//! Folding a validity bitmap proves nothing if no cell is ever null: every bitmap
+//! is then absent or all-set, and a misplaced validity bit has nothing to
+//! misplace. The fixture therefore carries `NullPlan::Pinned` — a deterministic
+//! absent-cell pattern (see `tests/support/ws0_fixture.rs`) placed so that a
+//! shifted bit MOVES the digest rather than landing in bitmap padding:
+//!
+//! * `metric_a` is null on a stride of 8 WITHIN each partition, and partitions
+//!   enter the stream 100 rows apart (100 ≡ 4 mod 8). Its nulls therefore occupy
+//!   **bit 0 of a byte** (byte-aligned) AND **bit 4 of a byte** (a non-boundary
+//!   offset) — both, in the SAME column.
+//! * `region` (var-width, so its nulls must also agree with an offsets buffer),
+//!   `payload` (wide var-width, stride coprime with 8) and `device_id`
+//!   (fixed-size-binary, nulled at each partition's TAIL — for the final
+//!   partition, the last VALID bit of the final batch's last bitmap byte, right up
+//!   against the padding) widen the shape.
+//!
+//! None of this is asserted by narration: [`ValidityCoverage`] MEASURES where the
+//! nulls landed in the emitted batches and the test fails if the byte-aligned
+//! case, the non-boundary case, the multi-batch spread or the exact per-column
+//! null census is missing. [`assert_fold_detects_a_shifted_validity_bit`]
+//! separately proves the fold itself is position-sensitive.
+//!
 //! # TWO TAPS, TWO PINNED DIGESTS — deliberately not one (roborev finding 1)
 //!
 //! The same fold runs at two DIFFERENT points of the data plane, and each has a
@@ -84,9 +108,10 @@
 //! `issue_3058_forced_path_differential.rs` established. Add a case to the list,
 //! never a second `#[test]`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, ArrayData};
+use arrow::array::{Array, ArrayData, Int32Array};
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
@@ -107,7 +132,8 @@ use cqlite_flight::warm::{ddl_hash, TableKey, WarmTableRegistry};
 #[path = "support/ws0_fixture.rs"]
 mod ws0_fixture;
 use ws0_fixture::{
-    assert_ddl_matches_the_committed_pin, generate, has_data_db, CorpusSpec, DDL, KEYSPACE, TABLE,
+    assert_ddl_matches_the_committed_pin, generate, has_data_db, CorpusSpec, NullPlan, DDL,
+    KEYSPACE, NON_KEY_COLUMNS, TABLE,
 };
 
 /// Debug-only reader seam pinning the read-time TTL clock (`now_clock.rs`). The
@@ -144,16 +170,17 @@ const CORPUS_DIR_ENV: &str = "CQLITE_WS0_CORPUS_DIR";
 ///
 /// | Digest | Old | New | Reason | Commit |
 /// |---|---|---|---|---|
-/// | wire | `0xd0014e42e893f87f` | (unchanged in this commit) | — | — |
-/// | producer | (did not exist) | `0xd0014e42e893f87f` | NEW TAP: roborev finding 1 — the pre-existing digest hashed batches only AFTER Flight IPC serialization and client-side decoding, so an Arrow-builder defect the round trip normalized was invisible. This tap folds the producer's `RecordBatch`es BEFORE `encode_do_get`. | (this commit) |
+/// | producer | (did not exist) | `0xd0014e42e893f87f` | NEW TAP (roborev finding 1): the pre-existing digest hashed batches only AFTER Flight IPC serialization and client-side decoding, so an Arrow-builder defect the round trip normalized was invisible. This tap folds the producer's `RecordBatch`es BEFORE `encode_do_get`. | `fcd96ca` |
+/// | wire | `0xd0014e42e893f87f` | `0xe6eccf8a9ffbca11` | THE FIXTURE GAINED DETERMINISTIC NULLS (roborev finding 2): all twelve cells were non-null, so no validity bitmap ever had content and a misplaced validity bit had nothing to misplace. The fixture now carries `NullPlan::Pinned` (150 absent cells over 500 rows), so the hashed data genuinely differs. | (stamped in the next commit) |
+/// | producer | `0xd0014e42e893f87f` | `0xe6eccf8a9ffbca11` | Same cause: the same fixture, now null-bearing, folded at the producer tap. | (stamped in the next commit) |
 ///
-/// **Measured on introduction:** over the null-free fixture the producer digest
-/// came out EQUAL to the wire digest (`0xd0014e42e893f87f`) — for this shape the
-/// IPC round trip is byte-preserving, so the pre-existing wire digest did happen
-/// to reflect the builders' output. That was a COINCIDENCE of the shape (no
-/// validity bitmaps to normalize, no sliced/offset buffers), not a property of the
-/// round trip, and it is exactly what the wire tap could not tell anyone. The
-/// producer tap removes the dependence on it.
+/// **The two taps currently fold byte-IDENTICAL input**, both before and after the
+/// nulls were added — for this shape the Flight IPC round trip preserves the
+/// buffer layout, so the wire digest did happen to reflect the builders' output.
+/// That is a COINCIDENCE of the shape, not a property of the round trip, and it is
+/// exactly what the wire tap alone could never tell anyone. The producer tap
+/// removes the dependence on it; the relationship is reported per run, never
+/// asserted (see the `taps …` log line).
 ///
 /// To re-derive after an INTENDED output change, run this test and read the
 /// `observed` value from the failure message.
@@ -163,30 +190,67 @@ const CORPUS_DIR_ENV: &str = "CQLITE_WS0_CORPUS_DIR";
 /// identical on BOTH arms. This value moving means the bytes `do_get` puts on the
 /// wire changed.
 ///
-/// PINNED 2026-08-03 on the Phase-0 (pre-lever) binary, over the 500-row
-/// `ws0.events` CI fixture at `BATCH_SIZE` = 128: 4 batches (128/128/128/116),
-/// 12 columns, 12.0 cells/row, identical under `bypass` and `merge`.
-const CI_FIXTURE_WIRE_DIGEST: u64 = 0xd001_4e42_e893_f87f;
+/// PINNED 2026-08-04 on the Phase-0 (pre-lever) binary, over the 500-row
+/// `ws0.events` CI fixture under `NullPlan::Pinned` at `BATCH_SIZE` = 128: 4
+/// batches (128/128/128/116), 12 columns, 5,850 non-null + 150 null cells
+/// (11.70 cells/row), identical under `bypass` and `merge`.
+const CI_FIXTURE_WIRE_DIGEST: u64 = 0xe6ec_cf8a_9ffb_ca11;
 
 /// The **PRODUCER** digest: the same fold over the `RecordBatch`es the Arrow
 /// builders produced, taken BEFORE `encode_do_get`. This value moving means the
 /// builders' output changed — which is the signal the wire digest alone could not
 /// give, because an IPC round trip can normalize a buffer representation.
 ///
-/// It is NOT expected to equal the wire digest: the two fold different (though
-/// census-equal) byte layouts of the same rows.
-const CI_FIXTURE_PRODUCER_DIGEST: u64 = 0xd001_4e42_e893_f87f;
+/// It is not REQUIRED to differ from the wire digest (and currently does not — see
+/// the re-pin log above); it is required to be observed independently of it.
+const CI_FIXTURE_PRODUCER_DIGEST: u64 = 0xe6ec_cf8a_9ffb_ca11;
 
 /// Row count of the CI fixture as observed through `do_get`. Pinned so a fixture
 /// that silently shrank cannot make the digest assertion vacuous.
 const CI_FIXTURE_ROWS_OBSERVED: u64 = CI_FIXTURE_ROWS;
 
+/// Rows per partition in the CI fixture. Load-bearing for the null plan: it is
+/// ≡ 4 (mod 8), which is what makes a stride-8 rule inside a partition land on
+/// both a byte-aligned and a non-byte-aligned validity bit across partitions.
+const CI_FIXTURE_ROWS_PER_PARTITION: u64 = 100;
+
+/// Partitions in the CI fixture.
+const CI_FIXTURE_PARTITIONS: u64 = CI_FIXTURE_ROWS / CI_FIXTURE_ROWS_PER_PARTITION;
+
+/// The EXACT per-column null census the `NullPlan::Pinned` fixture must produce,
+/// derived from the plan's rules over `CI_FIXTURE_ROWS_PER_PARTITION` = 100 rows
+/// in each of `CI_FIXTURE_PARTITIONS` = 5 partitions:
+///
+/// | Column | Rule | Rows per partition | Total |
+/// |---|---|---|---|
+/// | `metric_a` | `r % 8 == 0` | 13 (`0,8,…,96`) | 65 |
+/// | `region` | `r % 8 == 3` | 13 (`3,11,…,99`) | 65 |
+/// | `payload` | `r % 40 == 17` | 3 (`17,57,97`) | 15 |
+/// | `device_id` | partition tail (`r == 99`) | 1 | 5 |
+///
+/// Pinned as an exact integer census per column, not a total: a total could stay
+/// right while the plan moved nulls from one column to another.
+const CI_FIXTURE_NULLS_PER_COLUMN: [(&str, u64); 4] = [
+    ("device_id", 5),
+    ("metric_a", 65),
+    ("payload", 15),
+    ("region", 65),
+];
+
+/// Total null cells across the stream: the sum of [`CI_FIXTURE_NULLS_PER_COLUMN`].
+const CI_FIXTURE_NULL_CELLS: u64 = 65 + 65 + 15 + 5;
+
 /// NON-NULL cells the whole stream must carry, pinned as an EXACT integer rather
 /// than a float cells-per-row ratio: an integer census cannot be satisfied
 /// approximately, and it is the currency a validity-bitmap change moves.
 ///
-/// `CI_FIXTURE_ROWS` x 12 columns, every cell present.
-const CI_FIXTURE_NON_NULL_CELLS: u64 = CI_FIXTURE_ROWS * 12;
+/// `CI_FIXTURE_ROWS` x 12 columns, less the nulls the plan removed.
+const CI_FIXTURE_NON_NULL_CELLS: u64 = CI_FIXTURE_ROWS * 12 - CI_FIXTURE_NULL_CELLS;
+
+/// The column whose nulls must be proven to occupy BOTH a byte-aligned validity
+/// bit and a non-boundary one. Named as a constant so the assertion and the
+/// failure message can never name different columns.
+const BOUNDARY_COVERAGE_COLUMN: &str = "metric_a";
 
 /// The folded shape of one `do_get` stream.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -211,6 +275,78 @@ impl BufferDigest {
             self.non_null_cells as f64 / self.rows as f64
         }
     }
+}
+
+/// WHERE the nulls actually landed, measured from the emitted batches.
+///
+/// This is what stops the validity-bitmap claim from being narration (roborev
+/// finding 2). Every field is observed, never assumed, so a fixture that silently
+/// lost its nulls — or moved them all into bitmap padding — fails instead of
+/// quietly reducing the oracle to the value-buffer-only oracle it used to be.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ValidityCoverage {
+    /// Null cells per column name, across the whole stream.
+    nulls_per_column: BTreeMap<String, u64>,
+    /// Per column, the distinct `bit_index % 8` offsets its nulls occupied inside
+    /// their batch's validity bitmap. `0` means a byte-ALIGNED null; anything else
+    /// is a non-boundary offset.
+    bit_offsets_per_column: BTreeMap<String, BTreeSet<u32>>,
+    /// Per column, the batch indices in which at least one null appeared — so
+    /// "nulls only in the final batch's tail" is detectable.
+    batches_with_nulls_per_column: BTreeMap<String, BTreeSet<u64>>,
+}
+
+impl ValidityCoverage {
+    /// Record one batch's nulls. `batch_index` is the batch's position in the
+    /// stream, counted from 0.
+    fn record(&mut self, batch_index: u64, batch: &RecordBatch) {
+        let schema = batch.schema();
+        for (i, field) in schema.fields().iter().enumerate() {
+            let col = batch.column(i);
+            if col.null_count() == 0 {
+                continue;
+            }
+            let data = col.to_data();
+            // The validity BIT index is the array's own buffer offset plus the row
+            // — not the row alone: a sliced array's bitmap starts mid-byte, and
+            // reporting `row % 8` there would name the wrong bit.
+            let base = data.offset();
+            for row in 0..col.len() {
+                if !col.is_null(row) {
+                    continue;
+                }
+                let bit = base + row;
+                *self
+                    .nulls_per_column
+                    .entry(field.name().clone())
+                    .or_insert(0) += 1;
+                self.bit_offsets_per_column
+                    .entry(field.name().clone())
+                    .or_default()
+                    .insert((bit % 8) as u32);
+                self.batches_with_nulls_per_column
+                    .entry(field.name().clone())
+                    .or_default()
+                    .insert(batch_index);
+            }
+        }
+    }
+
+    /// Total nulls observed across every column.
+    fn total_nulls(&self) -> u64 {
+        self.nulls_per_column.values().sum()
+    }
+}
+
+/// One tap's complete observation: the folded digest plus the measured null
+/// placement. Compared as a whole between arms, so the nulls must land in the
+/// SAME positions on the bypass arm and the merge arm.
+#[derive(Debug, Clone, PartialEq)]
+struct StreamFold {
+    /// The folded Arrow-buffer digest and its census.
+    digest: BufferDigest,
+    /// Where the nulls landed.
+    coverage: ValidityCoverage,
 }
 
 /// FNV-1a 64. Chosen over `DefaultHasher` because `DefaultHasher` is explicitly
@@ -291,7 +427,7 @@ fn fold_batch(mut h: u64, batch: &RecordBatch) -> (u64, u64) {
 async fn digest_do_get(
     svc: &CqliteFlightService,
     ticket: &serde_json::Value,
-) -> Result<BufferDigest, String> {
+) -> Result<StreamFold, String> {
     let bytes = serde_json::to_vec(ticket).map_err(|e| format!("ticket json: {e}"))?;
     let resp = svc
         .do_get(Request::new(Ticket::new(bytes)))
@@ -306,6 +442,7 @@ async fn digest_do_get(
     let mut batches = 0u64;
     let mut non_null_cells = 0u64;
     let mut columns: Option<usize> = None;
+    let mut coverage = ValidityCoverage::default();
     while let Some(batch) = stream.next().await {
         let batch = batch.map_err(|e| format!("stream: {e}"))?;
         match columns {
@@ -318,18 +455,22 @@ async fn digest_do_get(
             }
             Some(_) => {}
         }
+        coverage.record(batches, &batch);
         let (next, non_null) = fold_batch(h, &batch);
         h = next;
         non_null_cells += non_null;
         rows += batch.num_rows() as u64;
         batches += 1;
     }
-    Ok(BufferDigest {
-        digest: h,
-        batches,
-        rows,
-        columns: columns.unwrap_or(0),
-        non_null_cells,
+    Ok(StreamFold {
+        digest: BufferDigest {
+            digest: h,
+            batches,
+            rows,
+            columns: columns.unwrap_or(0),
+            non_null_cells,
+        },
+        coverage,
     })
 }
 
@@ -355,7 +496,7 @@ async fn digest_do_get(
 ///   diverge);
 /// * byte cap — the service's own configured `max_batch_bytes`;
 /// * readers — `WarmTableRegistry::warm_readers`, the same registry call.
-fn producer_digest(svc: &CqliteFlightService, corpus_root: &Path) -> Result<BufferDigest, String> {
+fn producer_digest(svc: &CqliteFlightService, corpus_root: &Path) -> Result<StreamFold, String> {
     let ticket: FlightTicket =
         serde_json::from_value(ticket()).map_err(|e| format!("ticket decode: {e}"))?;
     let schema = parse_cql_schema(&ticket.ddl).map_err(|e| format!("parse ddl: {e}"))?;
@@ -395,7 +536,8 @@ fn producer_digest(svc: &CqliteFlightService, corpus_root: &Path) -> Result<Buff
     let mut rows = 0u64;
     let mut non_null_cells = 0u64;
     let mut columns: Option<usize> = None;
-    for batch in &batches {
+    let mut coverage = ValidityCoverage::default();
+    for (index, batch) in batches.iter().enumerate() {
         match columns {
             None => columns = Some(batch.num_columns()),
             Some(c) if c != batch.num_columns() => {
@@ -406,17 +548,21 @@ fn producer_digest(svc: &CqliteFlightService, corpus_root: &Path) -> Result<Buff
             }
             Some(_) => {}
         }
+        coverage.record(index as u64, batch);
         let (next, non_null) = fold_batch(h, batch);
         h = next;
         non_null_cells += non_null;
         rows += batch.num_rows() as u64;
     }
-    Ok(BufferDigest {
-        digest: h,
-        batches: batches.len() as u64,
-        rows,
-        columns: columns.unwrap_or(0),
-        non_null_cells,
+    Ok(StreamFold {
+        digest: BufferDigest {
+            digest: h,
+            batches: batches.len() as u64,
+            rows,
+            columns: columns.unwrap_or(0),
+            non_null_cells,
+        },
+        coverage,
     })
 }
 
@@ -424,9 +570,9 @@ fn producer_digest(svc: &CqliteFlightService, corpus_root: &Path) -> Result<Buff
 #[derive(Debug)]
 struct ArmObservation {
     /// The producer tap (pre-`encode_do_get`).
-    producer: BufferDigest,
+    producer: StreamFold,
     /// The wire tap (post-IPC, client-decoded).
-    wire: BufferDigest,
+    wire: StreamFold,
     /// Probe delta across the PRODUCER run, proving which arm it took.
     producer_probe: ReadPathProbe,
     /// Probe delta across the WIRE run, proving which arm it took.
@@ -506,12 +652,12 @@ fn assert_arm_taken(
 }
 
 /// Both taps of one corpus case, once the arms have been proven to agree.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CaseDigests {
-    /// The arm-invariant PRODUCER digest (pre-`encode_do_get`).
-    producer: BufferDigest,
-    /// The arm-invariant WIRE digest (post-IPC).
-    wire: BufferDigest,
+    /// The arm-invariant PRODUCER observation (pre-`encode_do_get`).
+    producer: StreamFold,
+    /// The arm-invariant WIRE observation (post-IPC).
+    wire: StreamFold,
 }
 
 /// One corpus case: at BOTH taps the arms must agree, the two taps must agree on
@@ -544,12 +690,24 @@ fn assert_arms_agree(
     // Anti-vacuity FIRST: a zero/short result would make every equality below
     // trivially true. Checked at BOTH taps on BOTH arms.
     for (arm, obs) in [("merge", &merge), ("bypass", &bypass)] {
-        for (tap, d) in [("producer", &obs.producer), ("wire", &obs.wire)] {
-            if d.rows != expect_rows {
+        for (tap, f) in [("producer", &obs.producer), ("wire", &obs.wire)] {
+            if f.digest.rows != expect_rows {
                 failures.push(format!(
                     "case {label}: expected {expect_rows} rows at the {tap} tap on the {arm} \
                      arm, got {} — a short or empty result is a failure, never a vacuous pass",
-                    d.rows
+                    f.digest.rows
+                ));
+                return None;
+            }
+            // A tap that observed NO nulls has reduced this oracle to the
+            // value-buffer-only oracle roborev finding 2 flagged: every validity
+            // bitmap would be absent or all-set, so a misplaced validity bit would
+            // have nothing to misplace.
+            if f.coverage.total_nulls() == 0 {
+                failures.push(format!(
+                    "case {label}: the {tap} tap on the {arm} arm observed ZERO null cells — \
+                     the fixture's null plan did not reach the Arrow layer, so the validity \
+                     bitmaps carry no content and this oracle proves nothing about them"
                 ));
                 return None;
             }
@@ -591,40 +749,163 @@ fn assert_arms_agree(
     // trip can re-lay-out a buffer — the very reason both taps exist), but the
     // rows, columns, batching and null census may not.
     if (
-        producer.rows,
-        producer.columns,
-        producer.batches,
-        producer.non_null_cells,
-    ) != (wire.rows, wire.columns, wire.batches, wire.non_null_cells)
-    {
+        producer.digest.rows,
+        producer.digest.columns,
+        producer.digest.batches,
+        producer.digest.non_null_cells,
+    ) != (
+        wire.digest.rows,
+        wire.digest.columns,
+        wire.digest.batches,
+        wire.digest.non_null_cells,
+    ) {
         failures.push(format!(
             "case {label}: the two taps disagree on the LOGICAL CENSUS — the IPC round trip \
              changed rows/columns/batches/non-null cells, which is a defect, not a \
-             representation difference\n  producer = {producer:?}\n  wire     = {wire:?}"
+             representation difference\n  producer = {:?}\n  wire     = {:?}",
+            producer.digest, wire.digest
         ));
         return None;
     }
 
-    if producer.non_null_cells != wire.non_null_cells {
+    // And on WHERE the nulls landed. A round trip that preserved the null COUNT
+    // but moved a validity bit is exactly the defect class this oracle exists for.
+    if producer.coverage != wire.coverage {
         failures.push(format!(
-            "case {label}: non-null cell counts differ between taps: producer={} wire={}",
-            producer.non_null_cells, wire.non_null_cells
+            "case {label}: the two taps disagree on NULL PLACEMENT — the IPC round trip moved \
+             at least one validity bit\n  producer = {:?}\n  wire     = {:?}",
+            producer.coverage, wire.coverage
         ));
         return None;
     }
     eprintln!(
         "PASS {label} — producer digest 0x{:016x}, wire digest 0x{:016x}; {} rows in {} \
-         batches, {} columns, {} non-null cells ({:.2} cells/row) — each digest identical on \
-         both arms",
-        producer.digest,
-        wire.digest,
-        wire.rows,
-        wire.batches,
-        wire.columns,
-        wire.non_null_cells,
-        wire.cells_per_row()
+         batches, {} columns, {} non-null cells + {} nulls ({:.2} cells/row) — each digest \
+         identical on both arms\n  null placement: {:?}\n  null bit offsets (mod 8): {:?}\n  \
+         batches holding nulls: {:?}",
+        producer.digest.digest,
+        wire.digest.digest,
+        wire.digest.rows,
+        wire.digest.batches,
+        wire.digest.columns,
+        wire.digest.non_null_cells,
+        wire.coverage.total_nulls(),
+        wire.digest.cells_per_row(),
+        wire.coverage.nulls_per_column,
+        wire.coverage.bit_offsets_per_column,
+        wire.coverage.batches_with_nulls_per_column,
     );
     Some(CaseDigests { producer, wire })
+}
+
+/// Prove [`fold_array_data`] actually MOVES when a single validity bit moves.
+///
+/// Without this, every null-coverage assertion in this file could pass over a fold
+/// that ignored the bitmap — the fixture would carry nulls, the coverage would
+/// report them, and the digest would still be blind to their placement. Two
+/// shifts are checked: one WITHIN a bitmap byte, and one ACROSS a byte boundary
+/// (the case a naive byte-wise fold could miss).
+fn assert_fold_detects_a_shifted_validity_bit() {
+    // 16 rows = exactly two bitmap bytes, so index 7 -> 8 crosses a byte boundary.
+    let rows = 16usize;
+    let with_null_at = |null_at: usize| -> u64 {
+        let values: Vec<Option<i32>> = (0..rows)
+            .map(|i| if i == null_at { None } else { Some(i as i32) })
+            .collect();
+        let array = Int32Array::from(values);
+        fold_array_data(FNV_OFFSET, &array.to_data())
+    };
+
+    // Same byte (bit 3 -> bit 4).
+    assert_ne!(
+        with_null_at(3),
+        with_null_at(4),
+        "the fold did NOT change when a null moved from row 3 to row 4 (same bitmap \
+         byte) — it is blind to validity-bit POSITION, so every null-coverage \
+         assertion in this file would be vacuous"
+    );
+    // Across a byte boundary (bit 7 -> bit 8, i.e. byte 0 -> byte 1).
+    assert_ne!(
+        with_null_at(7),
+        with_null_at(8),
+        "the fold did NOT change when a null moved from row 7 to row 8 (across a \
+         bitmap byte boundary) — it is blind to validity-bit position"
+    );
+    // And a null must be distinguishable from no null at all.
+    assert_ne!(
+        with_null_at(rows),
+        with_null_at(0),
+        "the fold did NOT change between an all-valid array and one with a null at \
+         row 0"
+    );
+}
+
+/// Assert the MEASURED null placement carries the coverage roborev finding 2 asked
+/// for: the exact per-column census, a byte-ALIGNED null and a NON-BOUNDARY null
+/// in the same column, and nulls spread beyond the final batch's tail.
+fn assert_validity_coverage(tap: &str, coverage: &ValidityCoverage) {
+    let expected: BTreeMap<String, u64> = CI_FIXTURE_NULLS_PER_COLUMN
+        .iter()
+        .map(|(name, n)| ((*name).to_string(), *n))
+        .collect();
+    assert_eq!(
+        coverage.nulls_per_column, expected,
+        "{tap} tap: per-column null census moved. A total that still adds up while \
+         nulls moved between columns is exactly what this per-column pin exists to \
+         catch."
+    );
+    assert_eq!(
+        coverage.total_nulls(),
+        CI_FIXTURE_NULL_CELLS,
+        "{tap} tap: total null count moved"
+    );
+
+    let offsets = coverage
+        .bit_offsets_per_column
+        .get(BOUNDARY_COVERAGE_COLUMN)
+        .unwrap_or_else(|| {
+            panic!(
+                "{tap} tap: column {BOUNDARY_COVERAGE_COLUMN} has no nulls at all, so it \
+                 cannot carry the byte-boundary coverage the null plan is built around"
+            )
+        });
+    assert!(
+        offsets.contains(&0),
+        "{tap} tap: no null in {BOUNDARY_COVERAGE_COLUMN} landed on bit 0 of a bitmap byte \
+         (observed offsets {offsets:?}) — the byte-ALIGNED case is unexercised"
+    );
+    assert!(
+        offsets.iter().any(|o| *o != 0),
+        "{tap} tap: every null in {BOUNDARY_COVERAGE_COLUMN} landed on a byte boundary \
+         (observed offsets {offsets:?}) — the NON-BOUNDARY case is unexercised, and a \
+         validity bit misplaced within a byte would be invisible"
+    );
+
+    // Not tail-only: at least one null strictly before the LAST batch, and at
+    // least one inside it. Nulls confined to an all-set-except-the-tail position
+    // prove little, and a null adjacent to the final byte's padding bits is the
+    // adversarial case.
+    let batches = coverage
+        .batches_with_nulls_per_column
+        .get(BOUNDARY_COVERAGE_COLUMN)
+        .unwrap_or_else(|| panic!("{tap} tap: {BOUNDARY_COVERAGE_COLUMN} nulls in no batch"));
+    let last = coverage
+        .batches_with_nulls_per_column
+        .values()
+        .flat_map(|s| s.iter().copied())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        batches.iter().any(|b| *b < last),
+        "{tap} tap: every {BOUNDARY_COVERAGE_COLUMN} null is in the final batch \
+         ({batches:?}, last={last}) — nulls only in a trailing position prove little"
+    );
+    assert!(
+        batches.contains(&last),
+        "{tap} tap: no {BOUNDARY_COVERAGE_COLUMN} null in the final batch ({batches:?}, \
+         last={last}) — the bits adjacent to the final bitmap byte's padding are \
+         unexercised"
+    );
 }
 
 #[test]
@@ -637,12 +918,44 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
     // DDL would move the pinned digest for a reason that has nothing to do with the
     // encode path.
     assert_ddl_matches_the_committed_pin();
+    // Prove the FOLD is position-sensitive before trusting it to police null
+    // placement: an insensitive fold would make every coverage assertion below
+    // pass while observing nothing (roborev finding 2).
+    assert_fold_detects_a_shifted_validity_bit();
+
     let temp = tempfile::tempdir().expect("tempdir");
-    let spec = CorpusSpec::small(temp.path().to_path_buf(), CI_FIXTURE_ROWS);
+    // `NullPlan::Pinned` — the fixture carries deterministic absent cells so the
+    // validity bitmaps have CONTENT (roborev finding 2). The default
+    // (`NullPlan::None`) is left to `issue_3096_framing_subphase.rs`, whose fixture
+    // bytes stay unchanged.
+    let spec = CorpusSpec::small(temp.path().to_path_buf(), CI_FIXTURE_ROWS)
+        .with_null_plan(NullPlan::Pinned);
+    assert_eq!(
+        spec.rows_per_partition, CI_FIXTURE_ROWS_PER_PARTITION,
+        "the null plan's byte-boundary coverage depends on rows-per-partition being \
+         {CI_FIXTURE_ROWS_PER_PARTITION} (≡ 4 mod 8)"
+    );
     let identity = rt.block_on(generate(&spec)).expect("generate CI fixture");
     assert_eq!(
         identity.rows, CI_FIXTURE_ROWS,
         "the CI fixture must hold exactly {CI_FIXTURE_ROWS} rows"
+    );
+    assert_eq!(
+        identity.partitions, CI_FIXTURE_PARTITIONS,
+        "the null census below is derived over {CI_FIXTURE_PARTITIONS} partitions"
+    );
+    // MEASURED on the WRITE side, so the two sides of the fixture agree in the same
+    // currency: the writer dropped exactly the cells the Arrow layer must report as
+    // null, and neither number is assumed.
+    assert_eq!(
+        identity.cells_absent, CI_FIXTURE_NULL_CELLS,
+        "the null plan dropped {} non-key cells, expected {CI_FIXTURE_NULL_CELLS}",
+        identity.cells_absent
+    );
+    assert_eq!(
+        identity.cells_written,
+        CI_FIXTURE_ROWS * NON_KEY_COLUMNS - CI_FIXTURE_NULL_CELLS,
+        "written non-key cell count disagrees with the plan"
     );
     assert!(
         !identity.compression_info_present,
@@ -665,35 +978,46 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
         // The absolute census pin. `assert_arms_agree` only proved the two taps
         // agree WITH EACH OTHER; this is what proves they agree with the fixture.
         assert_eq!(
-            d.wire.non_null_cells,
+            d.wire.digest.non_null_cells,
             CI_FIXTURE_NON_NULL_CELLS,
             "non-null cell census moved: observed {}, pinned {CI_FIXTURE_NON_NULL_CELLS} \
              ({:.2} cells/row over {} rows)",
-            d.wire.non_null_cells,
-            d.wire.cells_per_row(),
-            d.wire.rows
+            d.wire.digest.non_null_cells,
+            d.wire.digest.cells_per_row(),
+            d.wire.digest.rows
         );
+        // The validity bitmaps carry the CONTENT they claim to, in the POSITIONS
+        // that make a misplaced bit detectable. Asserted from the measured
+        // coverage, at both taps.
+        for (tap, fold) in [("producer", &d.producer), ("wire", &d.wire)] {
+            assert_validity_coverage(tap, &fold.coverage);
+        }
         assert_eq!(
-            d.wire.digest, CI_FIXTURE_WIRE_DIGEST,
+            d.wire.digest.digest,
+            CI_FIXTURE_WIRE_DIGEST,
             "the PINNED WIRE Arrow-buffer digest changed: observed 0x{:016x}, pinned 0x{:016x}. \
              The bytes do_get puts on the wire moved. A lever that does this is reverted, or \
              its divergence is separately specified and this constant is re-pinned WITH a \
              recorded reason — never silently. (rows={} batches={} columns={})",
-            d.wire.digest, CI_FIXTURE_WIRE_DIGEST, d.wire.rows, d.wire.batches, d.wire.columns
+            d.wire.digest.digest,
+            CI_FIXTURE_WIRE_DIGEST,
+            d.wire.digest.rows,
+            d.wire.digest.batches,
+            d.wire.digest.columns
         );
         assert_eq!(
-            d.producer.digest,
+            d.producer.digest.digest,
             CI_FIXTURE_PRODUCER_DIGEST,
             "the PINNED PRODUCER Arrow-buffer digest changed: observed 0x{:016x}, pinned \
              0x{:016x}. The Arrow BUILDERS' output moved — this is the tap the wire digest \
              cannot see, because an IPC round trip can normalize a buffer representation. Same \
              rule: revert the lever, or re-pin WITH a recorded reason. (rows={} batches={} \
              columns={})",
-            d.producer.digest,
+            d.producer.digest.digest,
             CI_FIXTURE_PRODUCER_DIGEST,
-            d.producer.rows,
-            d.producer.batches,
-            d.producer.columns
+            d.producer.digest.rows,
+            d.producer.digest.batches,
+            d.producer.digest.columns
         );
         // NOT asserted either way, deliberately. Equal digests would mean the IPC
         // round trip is byte-preserving for this shape (legitimate); unequal means
@@ -702,13 +1026,13 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
         // without pinning a property neither Arrow nor Flight guarantees.
         eprintln!(
             "taps {}: producer 0x{:016x} vs wire 0x{:016x}",
-            if d.producer.digest == d.wire.digest {
+            if d.producer.digest.digest == d.wire.digest.digest {
                 "fold IDENTICAL bytes (the IPC round trip preserved the layout)"
             } else {
                 "fold DIFFERENT bytes (the IPC round trip re-laid-out at least one buffer)"
             },
-            d.producer.digest,
-            d.wire.digest
+            d.producer.digest.digest,
+            d.wire.digest.digest
         );
     }
 
@@ -759,7 +1083,10 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
                 println!(
                     "measurement-corpus arrow-buffer digests = producer 0x{:016x} / wire \
                      0x{:016x} over {} rows in {} batches",
-                    d.producer.digest, d.wire.digest, d.wire.rows, d.wire.batches
+                    d.producer.digest.digest,
+                    d.wire.digest.digest,
+                    d.wire.digest.rows,
+                    d.wire.digest.batches
                 );
             }
         }
