@@ -259,7 +259,35 @@
 #                      process — and scripts/tests/test_gen_perf_corpus_3068.sh,
 #                      which pins the perf-corpus generator's TABLES validation, its
 #                      manifest writer's refusal of an empty table list, and the
-#                      tight scoping of its multi-GB stale-corpus pruning.
+#                      tight scoping of its multi-GB stale-corpus pruning. Also runs
+#                      scripts/tests/test_gen_perf_corpus_bti.sh (#3234), which pins
+#                      the BTI (`da`) perf-corpus generator's acceptance asserts in
+#                      BOTH directions (a negative control per assert: nb-* descriptor,
+#                      empty Rows.db, sub-8-MiB Data.db incl. the exact 8388608 B
+#                      boundary, BIG-only TOC entry or file), its row driver's
+#                      (seed, chunk-index) determinism, the cassandra.yaml BTI flip
+#                      against a COMMITTED cassandra:5.0.2 excerpt (a missed flip
+#                      silently emits `nb`), every guard on its multi-GB stale-corpus
+#                      pruning, and — through a stub `docker`
+#                      (scripts/tests/fixtures/stub-docker-cassandra-bti.py) — a full
+#                      hermetic end-to-end run: the manifest writer's happy path plus
+#                      both row-count cross-checks FIRING on injected disagreement.
+#                      Also runs scripts/tests/test_bti_perf_scan.sh (#3234), the
+#                      automated executor for the AC3 warm-scan harness
+#                      (cqlite-core/examples/bti_perf_scan/): it builds the example
+#                      and asserts its EXIT CODE for every documented failure mode
+#                      (usage incl. `--min-seconds nan`, corpus-absent, zero-rows,
+#                      row-count mismatch = the silent-truncation guard, sub-floor
+#                      window, mid-scan failure, and an unavailable authoritative row
+#                      count) against the git-committed 10 KiB `test_da` BTI fixture —
+#                      never the multi-GB perf corpus. And
+#                      scripts/tests/check-constraint-comments.py --self-test (#3234):
+#                      a comment that STATES a constraint must name or sit beside its
+#                      enforcement, or the comment goes — the class that hit #3234 three
+#                      times (unobserved manifest claims, a stale committed contract, and
+#                      a shape check documenting `<table>-<uuid>` while accepting
+#                      `<table>-*`). Runs both directions: the surface must pass, an
+#                      injected unenforced claim must FAIL.
 #                      Also runs (no python3/sudo/perf needed) the PAIR
 #                      scripts/tests/test_perf_capability.sh (the helper's unit
 #                      contract) and scripts/tests/test_perf_capability_bootstrap.sh
@@ -5444,6 +5472,79 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # BTI perf-corpus generator guard (#3234): hermetic (no docker/sudo/cassandra —
+  # --help/--validate-only/--verify-only, the row driver, the manifest writer's
+  # pre-container guards, and a full end-to-end run through a STUB `docker`
+  # (scripts/tests/fixtures/stub-docker-cassandra-bti.py); nothing here starts a
+  # container or needs root). Pins issue
+  # #3234's ACCEPTANCE ASSERTS IN BOTH DIRECTIONS against fabricated corpora: a
+  # stock Cassandra 5.0 node silently emits `nb` (BIG) when either mandatory yaml
+  # setting misses, so an assert only ever observed on a good corpus is untested —
+  # every case here carries a negative control (`nb-*` descriptor, empty Rows.db,
+  # sub-8-MiB Data.db, a TOC listing the BIG-only Index.db). Also pins the row
+  # driver's (seed, chunk) determinism, which is what makes the manifest's
+  # per-Data.db sha256 a reproducibility check. A failure FAILs the component,
+  # mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_gen_perf_corpus_bti.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_bti.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (BTI perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # AC3 warm-scan harness guard (#3234): the automated executor for
+  # cqlite-core/examples/bti_perf_scan/, the instrument every #3234 throughput
+  # number comes from. Its guards had never been OBSERVED to fire, and its worst
+  # failure mode is silent — a TRUNCATED scan reporting `RESULT: PASS` with a short
+  # row count. This drives the real binary and asserts its exit code for each
+  # documented mode (2 usage incl. `--min-seconds nan`, 3 open-failed, 4 zero-rows,
+  # 5 row-count mismatch, 6 window-too-short, 7 scan-failed-mid-stream, 8 no
+  # authoritative row count) plus the guarded happy path as positive control.
+  # Hermetic and cheap: it runs against the GIT-COMMITTED 10 KiB `test_da`
+  # BTI (`da`) fixture (468 Cassandra-written rows), never the ~2 GiB perf corpus,
+  # and needs no docker/network/python3/datasets. It does `cargo build -p cqlite-core
+  # --example bti_perf_scan --features cli-helpers` (incremental; the full gate has
+  # already compiled that graph), and a build failure is a FAILURE, never a skip.
+  echo ">>> [$name] bash scripts/tests/test_bti_perf_scan.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_bti_perf_scan.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (AC3 warm-scan harness guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Unenforced-constraint-comment guard (#3234): a comment that STATES a constraint
+  # must name or sit beside its enforcement, or the comment goes. Mechanizes the class
+  # that hit this one issue three times (L3's 11 unobserved manifest claims, L4's stale
+  # committed contract, F2's `validated_sstable_dir` documenting `<table>-<uuid>` while
+  # accepting `<table>-*`) — prose asserting what the adjacent code does not do, caught
+  # each time only by a human reviewer. Narrow by design (a named claim table over the
+  # #3234 production surface, not an English verifier) and it runs BOTH directions:
+  # `--self-test` asserts the real surface passes, that an INJECTED unenforced claim
+  # FAILS, and that the same claim passes once its enforcement follows it. Hermetic,
+  # python3-only, sub-second.
+  echo ">>> [$name] python3 scripts/tests/check-constraint-comments.py --self-test"
+  if ! python3 "$REPO_ROOT/scripts/tests/check-constraint-comments.py" --self-test \
+    >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (unenforced constraint comment); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

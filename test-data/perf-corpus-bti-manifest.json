@@ -1,0 +1,1779 @@
+{
+  "issue": 3234,
+  "purpose": "Profileable LZ4-compressed multi-SSTable Cassandra 5.0 BTI (`da`) corpus with wide partitions and a compound clustering key, for BTI read-path measurement (#3029 WS3, #3030 WS4) and as a Cassandra-written parity oracle.",
+  "generated_utc": "2026-08-03T20:16:46.530105+00:00",
+  "generator": "test-data/scripts/gen-perf-corpus-bti.sh",
+  "row_driver": "test-data/scripts/gen-perf-corpus-bti-rows.py",
+  "mode": "production",
+  "mode_note": "production = the full-scale corpus a read-path profile runs against",
+  "method": "recorded-seed deterministic CSV -> chunked cqlsh COPY -> explicit `nodetool flush` per chunk (one SSTable per chunk), with autocompaction DISABLED before the first load so STCS cannot merge the chunks. durable_writes=false is generation-time only and changes no SSTable byte. Deliberately NOT cassandra-stress (its row values are not reproducible from anything a manifest can record).",
+  "cassandra_image": "cassandra:5.0.2",
+  "cassandra_yaml_settings_required": {
+    "storage_compatibility_mode": "NONE",
+    "sstable.selected_format": "bti",
+    "why": "Cassandra 5.0 ships storage_compatibility_mode: CASSANDRA_4, which pins the BIG (`nb`) format. A miss on either setting emits `nb` with no error.",
+    "verified_in_container": [
+      "1142:sstable:",
+      "1143:  selected_format: bti",
+      "2249:storage_compatibility_mode: NONE"
+    ],
+    "verification": "grep-verified in the generating container before the table was created; the emitted descriptors are then asserted to be da-*-bti-*"
+  },
+  "keyspace": "perf_bti",
+  "table": "wide_multiclustering",
+  "keyspace_table": "perf_bti.wide_multiclustering",
+  "keyspace_ddl": "CREATE KEYSPACE perf_bti WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}  AND durable_writes = false;",
+  "seed": "20260803",
+  "seed_note": "the ROW SET (not the on-disk bytes) is reproducible from this seed alone: chunk N is generated with PRNG seed '<seed>:<N>' (see the row driver's determinism contract, and `reproducibility` for the write-timestamp caveat)",
+  "row_driver_config": {
+    "rows_requested": 13200000,
+    "chunk_rows": 500000,
+    "payload_bytes": 160,
+    "widths": "200:60,800:30,4000:10",
+    "buckets": "alpha,bo,charlie-extended-bucket,delta,ep,foxtrot-long-bucket-name,golf,hh,india-bucket,jj"
+  },
+  "rows_per_partition": {
+    "source": "row driver plan records (gen-perf-corpus-bti-rows.py), counted while writing each CSV chunk \u2014 observed, not requested",
+    "rows": 13200000,
+    "partitions": 17299,
+    "histogram": {
+      "200": 10387,
+      "400": 5,
+      "600": 5,
+      "800": 5147,
+      "1400": 2,
+      "1600": 1,
+      "1800": 1,
+      "2000": 2,
+      "2200": 1,
+      "2600": 1,
+      "2800": 2,
+      "3400": 1,
+      "4000": 1744
+    },
+    "buckets_per_partition_histogram": {
+      "2": 10387,
+      "4": 5,
+      "6": 5,
+      "8": 5147,
+      "10": 1755
+    },
+    "min": 200,
+    "max": 4000,
+    "mean": 763.05,
+    "chunks": [
+      {
+        "chunk": 0,
+        "seed_material": "20260803:0",
+        "rows": 500000,
+        "partitions": 711,
+        "pk_min": 0,
+        "pk_max": 710
+      },
+      {
+        "chunk": 1,
+        "seed_material": "20260803:1",
+        "rows": 500000,
+        "partitions": 677,
+        "pk_min": 1000000,
+        "pk_max": 1000676
+      },
+      {
+        "chunk": 2,
+        "seed_material": "20260803:2",
+        "rows": 500000,
+        "partitions": 615,
+        "pk_min": 2000000,
+        "pk_max": 2000614
+      },
+      {
+        "chunk": 3,
+        "seed_material": "20260803:3",
+        "rows": 500000,
+        "partitions": 641,
+        "pk_min": 3000000,
+        "pk_max": 3000640
+      },
+      {
+        "chunk": 4,
+        "seed_material": "20260803:4",
+        "rows": 500000,
+        "partitions": 649,
+        "pk_min": 4000000,
+        "pk_max": 4000648
+      },
+      {
+        "chunk": 5,
+        "seed_material": "20260803:5",
+        "rows": 500000,
+        "partitions": 702,
+        "pk_min": 5000000,
+        "pk_max": 5000701
+      },
+      {
+        "chunk": 6,
+        "seed_material": "20260803:6",
+        "rows": 500000,
+        "partitions": 649,
+        "pk_min": 6000000,
+        "pk_max": 6000648
+      },
+      {
+        "chunk": 7,
+        "seed_material": "20260803:7",
+        "rows": 500000,
+        "partitions": 707,
+        "pk_min": 7000000,
+        "pk_max": 7000706
+      },
+      {
+        "chunk": 8,
+        "seed_material": "20260803:8",
+        "rows": 500000,
+        "partitions": 715,
+        "pk_min": 8000000,
+        "pk_max": 8000714
+      },
+      {
+        "chunk": 9,
+        "seed_material": "20260803:9",
+        "rows": 500000,
+        "partitions": 634,
+        "pk_min": 9000000,
+        "pk_max": 9000633
+      },
+      {
+        "chunk": 10,
+        "seed_material": "20260803:10",
+        "rows": 500000,
+        "partitions": 609,
+        "pk_min": 10000000,
+        "pk_max": 10000608
+      },
+      {
+        "chunk": 11,
+        "seed_material": "20260803:11",
+        "rows": 500000,
+        "partitions": 603,
+        "pk_min": 11000000,
+        "pk_max": 11000602
+      },
+      {
+        "chunk": 12,
+        "seed_material": "20260803:12",
+        "rows": 500000,
+        "partitions": 649,
+        "pk_min": 12000000,
+        "pk_max": 12000648
+      },
+      {
+        "chunk": 13,
+        "seed_material": "20260803:13",
+        "rows": 500000,
+        "partitions": 667,
+        "pk_min": 13000000,
+        "pk_max": 13000666
+      },
+      {
+        "chunk": 14,
+        "seed_material": "20260803:14",
+        "rows": 500000,
+        "partitions": 673,
+        "pk_min": 14000000,
+        "pk_max": 14000672
+      },
+      {
+        "chunk": 15,
+        "seed_material": "20260803:15",
+        "rows": 500000,
+        "partitions": 653,
+        "pk_min": 15000000,
+        "pk_max": 15000652
+      },
+      {
+        "chunk": 16,
+        "seed_material": "20260803:16",
+        "rows": 500000,
+        "partitions": 626,
+        "pk_min": 16000000,
+        "pk_max": 16000625
+      },
+      {
+        "chunk": 17,
+        "seed_material": "20260803:17",
+        "rows": 500000,
+        "partitions": 662,
+        "pk_min": 17000000,
+        "pk_max": 17000661
+      },
+      {
+        "chunk": 18,
+        "seed_material": "20260803:18",
+        "rows": 500000,
+        "partitions": 665,
+        "pk_min": 18000000,
+        "pk_max": 18000664
+      },
+      {
+        "chunk": 19,
+        "seed_material": "20260803:19",
+        "rows": 500000,
+        "partitions": 662,
+        "pk_min": 19000000,
+        "pk_max": 19000661
+      },
+      {
+        "chunk": 20,
+        "seed_material": "20260803:20",
+        "rows": 500000,
+        "partitions": 659,
+        "pk_min": 20000000,
+        "pk_max": 20000658
+      },
+      {
+        "chunk": 21,
+        "seed_material": "20260803:21",
+        "rows": 500000,
+        "partitions": 589,
+        "pk_min": 21000000,
+        "pk_max": 21000588
+      },
+      {
+        "chunk": 22,
+        "seed_material": "20260803:22",
+        "rows": 500000,
+        "partitions": 722,
+        "pk_min": 22000000,
+        "pk_max": 22000721
+      },
+      {
+        "chunk": 23,
+        "seed_material": "20260803:23",
+        "rows": 500000,
+        "partitions": 622,
+        "pk_min": 23000000,
+        "pk_max": 23000621
+      },
+      {
+        "chunk": 24,
+        "seed_material": "20260803:24",
+        "rows": 500000,
+        "partitions": 611,
+        "pk_min": 24000000,
+        "pk_max": 24000610
+      },
+      {
+        "chunk": 25,
+        "seed_material": "20260803:25",
+        "rows": 500000,
+        "partitions": 658,
+        "pk_min": 25000000,
+        "pk_max": 25000657
+      },
+      {
+        "chunk": 26,
+        "seed_material": "20260803:26",
+        "rows": 200000,
+        "partitions": 269,
+        "pk_min": 26000000,
+        "pk_max": 26000268
+      }
+    ]
+  },
+  "corpus_root": "/data/corpus-3234-bti-full",
+  "datasets_root_usage": "CQLITE_DATASETS_ROOT=/data/corpus-3234-bti-full",
+  "reproducibility": {
+    "reproduced_by_the_seed": "the ROW SET: every pk/bucket/seq/payload value, the partition count, the rows-per-partition distribution and the chunk->SSTable split are a pure function of (seed, chunk-index) \u2014 see the row driver's determinism contract",
+    "row_set_determinism_guaranteed_by": "the row driver VENDORS its PRNG (MT19937 with CPython's str seeding) and both selection algorithms (weighted width draw, bucket sampling), so the seed identity recorded here does not depend on any standard-library implementation detail or on which `python3` runs it (roborev #3234 M2 \u2014 random.choices()/random.sample() are documented as changeable). Enforced by `gen-perf-corpus-bti-rows.py --self-check`: pinned CSV sha256 digests for fixed configurations, run as a case of scripts/tests/test_gen_perf_corpus_bti.sh. If that check ever fails, the seed identity recorded in this manifest is void \u2014 find what changed rather than re-pinning the digests.",
+    "NOT_reproduced_by_the_seed": "the Data.db BYTES. Cassandra stamps a wall-clock write timestamp on every row, serialized as an unsigned VInt DELTA from the Statistics.db min_timestamp baseline (docs/sstables-definitive-guide/chapters/05-data-db-format.md:77-78, :623), so a later run shifts some deltas across a VInt width boundary and the file length itself changes. MEASURED: two same-seed smoke runs of this generator produced Data.db of 19,474,015 B and 19,474,397 B (a 382 B difference). Do NOT treat a sha256 mismatch after a regeneration as a defect.",
+    "what_the_sha256_is_for": "identifying THIS corpus instance: a consumer can prove two measurements ran against the same bytes, and silent corruption or an accidental replacement is caught. It is an instance identity, not a regeneration check.",
+    "data_db_bytes_reproducible": false
+  },
+  "provenance": {
+    "sizes": "os.stat of each component file",
+    "data_db_sha256": "sha256 of the Data.db bytes, recomputed every run; identifies this corpus INSTANCE (see `reproducibility` \u2014 write timestamps make the bytes non-reproducible even at a fixed seed)",
+    "compression": "CompressionInfo.db header (authoritative, not the DDL)",
+    "rows": "Cassandra sstablemetadata totalRows (Statistics.db) per SSTable; fail-closed, never a fabricated 0",
+    "partitions": "sstablemetadata Partition Size histogram bucket counts, cross-checked against the row driver's planned partition count; fail-closed, never a fabricated 0",
+    "rows_per_partition": "row driver plan records, counted while writing the CSV",
+    "toc": "read from each SSTable's own TOC.txt",
+    "ddl": "cqlsh DESCRIBE KEYSPACE captured at generation time (schema.cql)",
+    "row_plan_matches_config": "the row plan's chunk count, contiguous chunk index set, per-chunk row counts and per-chunk seed material were checked against --seed / --rows-requested / --chunk-rows before this manifest was written; a stale plan is a hard failure, because matching aggregate totals alone cannot prove the plan describes these bytes",
+    "one_sstable_per_chunk": "the SSTable COUNT was checked against the row plan's chunk count and the generation identifiers against 1..N before this manifest was written; a flush split or a compaction preserves the row and partition totals while changing the generation count the scan route depends on, so a mismatch is a hard failure",
+    "data_db_sha256_also_match_at": "present only when a directory at the same corpus-relative path under the checkout's test-data/datasets holds a Data.db per SSTable whose sha256 equals the one recorded here. That is ALL it asserts: no other component was compared and git tracking was not checked",
+    "read_path_measurement": "NONE. This manifest records only what was read back from the corpus bytes, and a throughput measurement is not one of those things (roborev #3234 M1: a fixed AC3 figure recorded here was inherited by any corpus with a matching row + generation count). The AC3 warm-scan figure, the route it measures and the BTI mmap/trie plane that route EXCLUDES are in docs/development/dev-cookbook.md, and cqlite-core/examples/bti_perf_scan prints them beside the number at runtime."
+  },
+  "tables": [
+    {
+      "table": "wide_multiclustering",
+      "keyspace_table": "perf_bti.wide_multiclustering",
+      "sstable_dir": "sstables/perf_bti/wide_multiclustering-333ee5508f5811f181aa2b1d7de6db4d",
+      "format": "da",
+      "sstable_count": 27,
+      "sstable_generations": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27
+      ],
+      "one_sstable_per_planned_chunk": true,
+      "rows": 13200000,
+      "partitions": 17299,
+      "data_db_bytes_total": 2142059738,
+      "data_db_bytes_largest": 81151240,
+      "data_db_largest_gib": 0.0756,
+      "min_data_db_floor_bytes": 8388608,
+      "read_plane_threshold_bytes": 8388608,
+      "meets_8mib_read_plane_floor": true,
+      "rows_db_bytes_total": 3634853,
+      "every_rows_db_non_empty": true,
+      "ddl": {
+        "source": "schema.cql captured at generation time (cqlsh DESCRIBE KEYSPACE, alongside the SSTable components)",
+        "keyspace_ddl": "CREATE KEYSPACE perf_bti WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}  AND durable_writes = false;",
+        "table_ddl": "CREATE TABLE perf_bti.wide_multiclustering (\n    pk int,\n    bucket text,\n    seq int,\n    payload text,\n    PRIMARY KEY (pk, bucket, seq)\n) WITH CLUSTERING ORDER BY (bucket ASC, seq ASC)\n    AND additional_write_policy = '99p'\n    AND allow_auto_snapshot = true\n    AND bloom_filter_fp_chance = 0.01\n    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}\n    AND cdc = false\n    AND comment = ''\n    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}\n    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}\n    AND memtable = 'default'\n    AND crc_check_chance = 1.0\n    AND default_time_to_live = 0\n    AND extensions = {}\n    AND gc_grace_seconds = 864000\n    AND incremental_backups = true\n    AND max_index_interval = 2048\n    AND memtable_flush_period_in_ms = 0\n    AND min_index_interval = 128\n    AND read_repair = 'BLOCKING'\n    AND speculative_retry = '99p';",
+        "extracted_statements": true
+      },
+      "sstables": [
+        {
+          "sstable_basename": "da-1-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81150527,
+          "data_db_mib": 77.391,
+          "data_db_sha256": "bfc15b4931ab372d4592aa82259c3dfb0c8d496138417c78de93a8abb78f3b46",
+          "partitions_db_bytes": 5660,
+          "rows_db_bytes": 144946,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 711,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.873748256294102",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-1-bti-CompressionInfo.db": 45383,
+            "da-1-bti-Data.db": 81150527,
+            "da-1-bti-Digest.crc32": 9,
+            "da-1-bti-Filter.db": 904,
+            "da-1-bti-Partitions.db": 5660,
+            "da-1-bti-Rows.db": 144946,
+            "da-1-bti-Statistics.db": 7023,
+            "da-1-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5668,
+            "uncompressed_data_length_bytes": 92850377,
+            "compression_ratio_on_disk_over_logical": 0.873992
+          },
+          "sstabledump_golden": {
+            "file": "da-1-bti-Data.db.jsonl",
+            "bytes": 160752721,
+            "tool": "cassandra sstabledump -l (line-delimited JSON, one partition per line)",
+            "oracle": "Cassandra-WRITTEN bytes: usable as a parity oracle (issue #3042). A CQLite-written round-trip fixture is not."
+          }
+        },
+        {
+          "sstable_basename": "da-10-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81132671,
+          "data_db_mib": 77.374,
+          "data_db_sha256": "3772a5d926c4be76920f8d4bff829790cbc36669d02ff7c72b0993a9cf4f59c8",
+          "partitions_db_bytes": 5092,
+          "rows_db_bytes": 132571,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 634,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8747266305077183",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-10-bti-CompressionInfo.db": 45319,
+            "da-10-bti-Data.db": 81132671,
+            "da-10-bti-Digest.crc32": 10,
+            "da-10-bti-Filter.db": 808,
+            "da-10-bti-Partitions.db": 5092,
+            "da-10-bti-Rows.db": 132571,
+            "da-10-bti-Statistics.db": 6837,
+            "da-10-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5660,
+            "uncompressed_data_length_bytes": 92726148,
+            "compression_ratio_on_disk_over_logical": 0.874971
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-11-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81139123,
+          "data_db_mib": 77.38,
+          "data_db_sha256": "f67281c2f458897230bd53b1fd84aa88529fa980d68ff9c23644707363bb5e0a",
+          "partitions_db_bytes": 4900,
+          "rows_db_bytes": 134665,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 609,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8740583461325644",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-11-bti-CompressionInfo.db": 45359,
+            "da-11-bti-Data.db": 81139123,
+            "da-11-bti-Digest.crc32": 10,
+            "da-11-bti-Filter.db": 776,
+            "da-11-bti-Partitions.db": 4900,
+            "da-11-bti-Rows.db": 134665,
+            "da-11-bti-Statistics.db": 6754,
+            "da-11-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5665,
+            "uncompressed_data_length_bytes": 92804403,
+            "compression_ratio_on_disk_over_logical": 0.874303
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-12-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81136010,
+          "data_db_mib": 77.377,
+          "data_db_sha256": "cd251624896b3dd1a172e790f71d5348742af38072ef7e8c049ec00f1d32a6a7",
+          "partitions_db_bytes": 4864,
+          "rows_db_bytes": 136772,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 603,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.874502511872273",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-12-bti-CompressionInfo.db": 45335,
+            "da-12-bti-Data.db": 81136010,
+            "da-12-bti-Digest.crc32": 10,
+            "da-12-bti-Filter.db": 768,
+            "da-12-bti-Partitions.db": 4864,
+            "da-12-bti-Rows.db": 136772,
+            "da-12-bti-Statistics.db": 6710,
+            "da-12-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5662,
+            "uncompressed_data_length_bytes": 92753721,
+            "compression_ratio_on_disk_over_logical": 0.874747
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-13-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81138870,
+          "data_db_mib": 77.38,
+          "data_db_sha256": "218eb7fa1a4f6ce3f3edd623cdcf5258a1d1eaa07ffd4f8ac1deadafa14abf28",
+          "partitions_db_bytes": 5231,
+          "rows_db_bytes": 138071,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 649,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8742946184517122",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-13-bti-CompressionInfo.db": 45343,
+            "da-13-bti-Data.db": 81138870,
+            "da-13-bti-Digest.crc32": 10,
+            "da-13-bti-Filter.db": 824,
+            "da-13-bti-Partitions.db": 5231,
+            "da-13-bti-Rows.db": 138071,
+            "da-13-bti-Statistics.db": 6838,
+            "da-13-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5663,
+            "uncompressed_data_length_bytes": 92779043,
+            "compression_ratio_on_disk_over_logical": 0.874539
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-14-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81136224,
+          "data_db_mib": 77.378,
+          "data_db_sha256": "876cb0b91fc6452acd7339e1740f1d6ed0be2de1d1bc756c1ac57ef7c164163a",
+          "partitions_db_bytes": 5359,
+          "rows_db_bytes": 138623,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 667,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.874441673231338",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-14-bti-CompressionInfo.db": 45335,
+            "da-14-bti-Data.db": 81136224,
+            "da-14-bti-Digest.crc32": 10,
+            "da-14-bti-Filter.db": 848,
+            "da-14-bti-Partitions.db": 5359,
+            "da-14-bti-Rows.db": 138623,
+            "da-14-bti-Statistics.db": 6890,
+            "da-14-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5662,
+            "uncompressed_data_length_bytes": 92760419,
+            "compression_ratio_on_disk_over_logical": 0.874686
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-15-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81140087,
+          "data_db_mib": 77.381,
+          "data_db_sha256": "72f8886adf1d0a7f08e50b7e2eb8e2bdbc96ea70372b33c8c0d87b4bca70ff96",
+          "partitions_db_bytes": 5335,
+          "rows_db_bytes": 137657,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 673,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8745607988321484",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-15-bti-CompressionInfo.db": 45335,
+            "da-15-bti-Data.db": 81140087,
+            "da-15-bti-Digest.crc32": 10,
+            "da-15-bti-Filter.db": 856,
+            "da-15-bti-Partitions.db": 5335,
+            "da-15-bti-Rows.db": 137657,
+            "da-15-bti-Statistics.db": 6912,
+            "da-15-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5662,
+            "uncompressed_data_length_bytes": 92752201,
+            "compression_ratio_on_disk_over_logical": 0.874805
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-16-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81139716,
+          "data_db_mib": 77.381,
+          "data_db_sha256": "190d91bfd13e12299b5d33f890811dada8461e0b12ef2388ce2e8fe3f14cbf5c",
+          "partitions_db_bytes": 5256,
+          "rows_db_bytes": 137621,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 653,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8742417103615656",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-16-bti-CompressionInfo.db": 45351,
+            "da-16-bti-Data.db": 81139716,
+            "da-16-bti-Digest.crc32": 10,
+            "da-16-bti-Filter.db": 832,
+            "da-16-bti-Partitions.db": 5256,
+            "da-16-bti-Rows.db": 137621,
+            "da-16-bti-Statistics.db": 6838,
+            "da-16-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5664,
+            "uncompressed_data_length_bytes": 92785621,
+            "compression_ratio_on_disk_over_logical": 0.874486
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-17-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81135654,
+          "data_db_mib": 77.377,
+          "data_db_sha256": "ec3ac1dd2dc7dcf2c5afe57d7923e8eb0f3aab40b632a1f1831d1857df699836",
+          "partitions_db_bytes": 5063,
+          "rows_db_bytes": 134993,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 626,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.874452374416216",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-17-bti-CompressionInfo.db": 45335,
+            "da-17-bti-Data.db": 81135654,
+            "da-17-bti-Digest.crc32": 10,
+            "da-17-bti-Filter.db": 800,
+            "da-17-bti-Partitions.db": 5063,
+            "da-17-bti-Rows.db": 134993,
+            "da-17-bti-Statistics.db": 6766,
+            "da-17-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5662,
+            "uncompressed_data_length_bytes": 92758632,
+            "compression_ratio_on_disk_over_logical": 0.874697
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-18-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81136420,
+          "data_db_mib": 77.378,
+          "data_db_sha256": "231b4aed7e975df254ed85ca2ca134538ba5b88937ed5be8caa6498c7ed844f5",
+          "partitions_db_bytes": 5240,
+          "rows_db_bytes": 135094,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 662,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8745355667673567",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-18-bti-CompressionInfo.db": 45335,
+            "da-18-bti-Data.db": 81136420,
+            "da-18-bti-Digest.crc32": 9,
+            "da-18-bti-Filter.db": 840,
+            "da-18-bti-Partitions.db": 5240,
+            "da-18-bti-Rows.db": 135094,
+            "da-18-bti-Statistics.db": 6907,
+            "da-18-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5662,
+            "uncompressed_data_length_bytes": 92750684,
+            "compression_ratio_on_disk_over_logical": 0.87478
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-19-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81143843,
+          "data_db_mib": 77.385,
+          "data_db_sha256": "e30a50d7b4caca8d0cdc827ca76931acea91d9eb46f9e62f8be79b8933968799",
+          "partitions_db_bytes": 5359,
+          "rows_db_bytes": 139580,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 665,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8738478062908267",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-19-bti-CompressionInfo.db": 45375,
+            "da-19-bti-Data.db": 81143843,
+            "da-19-bti-Digest.crc32": 8,
+            "da-19-bti-Filter.db": 848,
+            "da-19-bti-Partitions.db": 5359,
+            "da-19-bti-Rows.db": 139580,
+            "da-19-bti-Statistics.db": 6903,
+            "da-19-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5667,
+            "uncompressed_data_length_bytes": 92832155,
+            "compression_ratio_on_disk_over_logical": 0.874092
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-2-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81130989,
+          "data_db_mib": 77.373,
+          "data_db_sha256": "a9642ce240c7b310b76874f96cc2096a0c1b3346b512fa8af91fbe843fe83af8",
+          "partitions_db_bytes": 5450,
+          "rows_db_bytes": 137123,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 677,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8748105100494752",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-2-bti-CompressionInfo.db": 45311,
+            "da-2-bti-Data.db": 81130989,
+            "da-2-bti-Digest.crc32": 10,
+            "da-2-bti-Filter.db": 864,
+            "da-2-bti-Partitions.db": 5450,
+            "da-2-bti-Rows.db": 137123,
+            "da-2-bti-Statistics.db": 6956,
+            "da-2-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5659,
+            "uncompressed_data_length_bytes": 92715339,
+            "compression_ratio_on_disk_over_logical": 0.875055
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-20-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81139183,
+          "data_db_mib": 77.38,
+          "data_db_sha256": "273bb4864b561ba0c281dba48c41ea809c19c9a67c8aabe8d4885d9aa1506520",
+          "partitions_db_bytes": 5298,
+          "rows_db_bytes": 138426,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 662,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.874254405387569",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-20-bti-CompressionInfo.db": 45351,
+            "da-20-bti-Data.db": 81139183,
+            "da-20-bti-Digest.crc32": 9,
+            "da-20-bti-Filter.db": 840,
+            "da-20-bti-Partitions.db": 5298,
+            "da-20-bti-Rows.db": 138426,
+            "da-20-bti-Statistics.db": 6885,
+            "da-20-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5664,
+            "uncompressed_data_length_bytes": 92783664,
+            "compression_ratio_on_disk_over_logical": 0.874499
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-21-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81136636,
+          "data_db_mib": 77.378,
+          "data_db_sha256": "c3396146041dbf0f812317ec717c05938f6eaeb0f546a43ddc3d8fd01f22130c",
+          "partitions_db_bytes": 5296,
+          "rows_db_bytes": 135850,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 659,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8743919698392614",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-21-bti-CompressionInfo.db": 45335,
+            "da-21-bti-Data.db": 81136636,
+            "da-21-bti-Digest.crc32": 10,
+            "da-21-bti-Filter.db": 840,
+            "da-21-bti-Partitions.db": 5296,
+            "da-21-bti-Rows.db": 135850,
+            "da-21-bti-Statistics.db": 6884,
+            "da-21-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5662,
+            "uncompressed_data_length_bytes": 92766163,
+            "compression_ratio_on_disk_over_logical": 0.874636
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-22-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81128660,
+          "data_db_mib": 77.37,
+          "data_db_sha256": "052767d4fd0d5c22fb8b75fd7f176bb09cbe02fb3cc8dbf4c2c9169557f94c5b",
+          "partitions_db_bytes": 4725,
+          "rows_db_bytes": 128043,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 589,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8745296476608881",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-22-bti-CompressionInfo.db": 45327,
+            "da-22-bti-Data.db": 81128660,
+            "da-22-bti-Digest.crc32": 10,
+            "da-22-bti-Filter.db": 752,
+            "da-22-bti-Partitions.db": 4725,
+            "da-22-bti-Rows.db": 128043,
+            "da-22-bti-Statistics.db": 6692,
+            "da-22-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5661,
+            "uncompressed_data_length_bytes": 92742443,
+            "compression_ratio_on_disk_over_logical": 0.874774
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-23-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81148356,
+          "data_db_mib": 77.389,
+          "data_db_sha256": "795afcf8e4bfe413d2be04cacd48a9403dffa8dcf824ffd6fdf7d621a345c9d7",
+          "partitions_db_bytes": 5781,
+          "rows_db_bytes": 145714,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 722,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8740376079579419",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-23-bti-CompressionInfo.db": 45367,
+            "da-23-bti-Data.db": 81148356,
+            "da-23-bti-Digest.crc32": 9,
+            "da-23-bti-Filter.db": 920,
+            "da-23-bti-Partitions.db": 5781,
+            "da-23-bti-Rows.db": 145714,
+            "da-23-bti-Statistics.db": 7047,
+            "da-23-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5666,
+            "uncompressed_data_length_bytes": 92817164,
+            "compression_ratio_on_disk_over_logical": 0.874282
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-24-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81136833,
+          "data_db_mib": 77.378,
+          "data_db_sha256": "e77626d8ac09c3bc66610767ecd99c753c886a8d1cb13b125661eabf7a12a7b9",
+          "partitions_db_bytes": 5022,
+          "rows_db_bytes": 136031,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 622,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8742496617105198",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-24-bti-CompressionInfo.db": 45343,
+            "da-24-bti-Data.db": 81136833,
+            "da-24-bti-Digest.crc32": 10,
+            "da-24-bti-Filter.db": 792,
+            "da-24-bti-Partitions.db": 5022,
+            "da-24-bti-Rows.db": 136031,
+            "da-24-bti-Statistics.db": 6761,
+            "da-24-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5663,
+            "uncompressed_data_length_bytes": 92781484,
+            "compression_ratio_on_disk_over_logical": 0.874494
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-25-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81131514,
+          "data_db_mib": 77.373,
+          "data_db_sha256": "6f17ed4aac2c85b98d665e8e0a7f1ed925e0975a48bcba156a1f29dc014b8800",
+          "partitions_db_bytes": 4950,
+          "rows_db_bytes": 134278,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 611,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8741179283917382",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-25-bti-CompressionInfo.db": 45351,
+            "da-25-bti-Data.db": 81131514,
+            "da-25-bti-Digest.crc32": 9,
+            "da-25-bti-Filter.db": 776,
+            "da-25-bti-Partitions.db": 4950,
+            "da-25-bti-Rows.db": 134278,
+            "da-25-bti-Statistics.db": 6754,
+            "da-25-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5664,
+            "uncompressed_data_length_bytes": 92789377,
+            "compression_ratio_on_disk_over_logical": 0.874362
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-26-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81142676,
+          "data_db_mib": 77.384,
+          "data_db_sha256": "dc9f12cea04065b81a6e0b895ff38439610749b5788961d405e96dde59b72125",
+          "partitions_db_bytes": 5275,
+          "rows_db_bytes": 138365,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 658,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8738837488736845",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-26-bti-CompressionInfo.db": 45367,
+            "da-26-bti-Data.db": 81142676,
+            "da-26-bti-Digest.crc32": 10,
+            "da-26-bti-Filter.db": 840,
+            "da-26-bti-Partitions.db": 5275,
+            "da-26-bti-Rows.db": 138365,
+            "da-26-bti-Statistics.db": 6892,
+            "da-26-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5666,
+            "uncompressed_data_length_bytes": 92827006,
+            "compression_ratio_on_disk_over_logical": 0.874128
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-27-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 32449483,
+          "data_db_mib": 30.946,
+          "data_db_sha256": "7e94251a0d1bc52b0c1779911c242574d88c0e3b96cc2527fa406775d7548592",
+          "partitions_db_bytes": 2090,
+          "rows_db_bytes": 53746,
+          "rows": 200000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 200000,
+            "total_columns_set": 200000,
+            "partition_count": 269,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8768890323439699",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-27-bti-CompressionInfo.db": 18103,
+            "da-27-bti-Data.db": 32449483,
+            "da-27-bti-Digest.crc32": 9,
+            "da-27-bti-Filter.db": 352,
+            "da-27-bti-Partitions.db": 2090,
+            "da-27-bti-Rows.db": 53746,
+            "da-27-bti-Statistics.db": 5759,
+            "da-27-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 2258,
+            "uncompressed_data_length_bytes": 36994933,
+            "compression_ratio_on_disk_over_logical": 0.877133
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-3-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81132000,
+          "data_db_mib": 77.374,
+          "data_db_sha256": "eee9961b2283c05492d2f92c0c019f955dc7e4b91e9fc6d419931e29f538e2e1",
+          "partitions_db_bytes": 4951,
+          "rows_db_bytes": 134278,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 615,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8743099824074827",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-3-bti-CompressionInfo.db": 45343,
+            "da-3-bti-Data.db": 81132000,
+            "da-3-bti-Digest.crc32": 10,
+            "da-3-bti-Filter.db": 784,
+            "da-3-bti-Partitions.db": 4951,
+            "da-3-bti-Rows.db": 134278,
+            "da-3-bti-Statistics.db": 6723,
+            "da-3-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5663,
+            "uncompressed_data_length_bytes": 92769555,
+            "compression_ratio_on_disk_over_logical": 0.874554
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-4-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81140705,
+          "data_db_mib": 77.382,
+          "data_db_sha256": "c2ce52f8afc1ec0827d7962798964618020e846a02b3a9e1570fa248e82fc921",
+          "partitions_db_bytes": 5153,
+          "rows_db_bytes": 136158,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 641,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8739111788964056",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-4-bti-CompressionInfo.db": 45367,
+            "da-4-bti-Data.db": 81140705,
+            "da-4-bti-Digest.crc32": 10,
+            "da-4-bti-Filter.db": 816,
+            "da-4-bti-Partitions.db": 5153,
+            "da-4-bti-Rows.db": 136158,
+            "da-4-bti-Statistics.db": 6830,
+            "da-4-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5666,
+            "uncompressed_data_length_bytes": 92821837,
+            "compression_ratio_on_disk_over_logical": 0.874155
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-5-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81135550,
+          "data_db_mib": 77.377,
+          "data_db_sha256": "fa823f69012aa4591fb091aa98cfe2f864779b76a84087bb0051a151f1a9df18",
+          "partitions_db_bytes": 5257,
+          "rows_db_bytes": 137133,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 649,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8742443232976883",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-5-bti-CompressionInfo.db": 45343,
+            "da-5-bti-Data.db": 81135550,
+            "da-5-bti-Digest.crc32": 10,
+            "da-5-bti-Filter.db": 824,
+            "da-5-bti-Partitions.db": 5257,
+            "da-5-bti-Rows.db": 137133,
+            "da-5-bti-Statistics.db": 6859,
+            "da-5-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5663,
+            "uncompressed_data_length_bytes": 92780583,
+            "compression_ratio_on_disk_over_logical": 0.874488
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-6-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81151240,
+          "data_db_mib": 77.392,
+          "data_db_sha256": "73a161c50ac2c8637f2f8411ccffde2d2c3720339037491cff072fa75fc81650",
+          "partitions_db_bytes": 5648,
+          "rows_db_bytes": 144157,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 702,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8740250807908324",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-6-bti-CompressionInfo.db": 45367,
+            "da-6-bti-Data.db": 81151240,
+            "da-6-bti-Digest.crc32": 10,
+            "da-6-bti-Filter.db": 888,
+            "da-6-bti-Partitions.db": 5648,
+            "da-6-bti-Rows.db": 144157,
+            "da-6-bti-Statistics.db": 6960,
+            "da-6-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5666,
+            "uncompressed_data_length_bytes": 92821794,
+            "compression_ratio_on_disk_over_logical": 0.874269
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-7-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81141028,
+          "data_db_mib": 77.382,
+          "data_db_sha256": "6f51d3b6a44c8e619a29624fdc507fde3766d7d2916b894033d18457fea54afb",
+          "partitions_db_bytes": 5222,
+          "rows_db_bytes": 140831,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 649,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8740930953521029",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-7-bti-CompressionInfo.db": 45359,
+            "da-7-bti-Data.db": 81141028,
+            "da-7-bti-Digest.crc32": 9,
+            "da-7-bti-Filter.db": 824,
+            "da-7-bti-Partitions.db": 5222,
+            "da-7-bti-Rows.db": 140831,
+            "da-7-bti-Statistics.db": 6834,
+            "da-7-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5665,
+            "uncompressed_data_length_bytes": 92802893,
+            "compression_ratio_on_disk_over_logical": 0.874337
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-8-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81145445,
+          "data_db_mib": 77.386,
+          "data_db_sha256": "338a640efe5f28dbb3dc83a93d3ef7f511e53f0d2ca789a99ec896187b5b3dae",
+          "partitions_db_bytes": 5667,
+          "rows_db_bytes": 141851,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 707,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.8746907702359952",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-8-bti-CompressionInfo.db": 45327,
+            "da-8-bti-Data.db": 81145445,
+            "da-8-bti-Digest.crc32": 10,
+            "da-8-bti-Filter.db": 896,
+            "da-8-bti-Partitions.db": 5667,
+            "da-8-bti-Rows.db": 141851,
+            "da-8-bti-Statistics.db": 7032,
+            "da-8-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5661,
+            "uncompressed_data_length_bytes": 92744549,
+            "compression_ratio_on_disk_over_logical": 0.874935
+          },
+          "sstabledump_golden": null
+        },
+        {
+          "sstable_basename": "da-9-bti",
+          "format": "da",
+          "format_detail": "da = BTI (trie-indexed), requires storage_compatibility_mode: NONE + sstable.selected_format: bti",
+          "data_db_bytes": 81140295,
+          "data_db_mib": 77.381,
+          "data_db_sha256": "fd6ae0341391620b8bb0c2052a84e67a2e07c8d93adacde125940db5c8a8fa05",
+          "partitions_db_bytes": 5691,
+          "rows_db_bytes": 142276,
+          "rows": 500000,
+          "statistics": {
+            "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+            "total_rows": 500000,
+            "total_columns_set": 500000,
+            "partition_count": 715,
+            "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+            "cassandra_compression_ratio": "0.874397983695216",
+            "sstable_level": 0,
+            "estimated_droppable_tombstones": "0.0"
+          },
+          "components": {
+            "da-9-bti-CompressionInfo.db": 45343,
+            "da-9-bti-Data.db": 81140295,
+            "da-9-bti-Digest.crc32": 10,
+            "da-9-bti-Filter.db": 912,
+            "da-9-bti-Partitions.db": 5691,
+            "da-9-bti-Rows.db": 142276,
+            "da-9-bti-Statistics.db": 7022,
+            "da-9-bti-TOC.txt": 94
+          },
+          "toc": [
+            "Data.db",
+            "Statistics.db",
+            "Digest.crc32",
+            "TOC.txt",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Partitions.db",
+            "Rows.db"
+          ],
+          "compression": {
+            "source": "read from CompressionInfo.db header (authoritative)",
+            "compressor": "LZ4Compressor",
+            "options": {},
+            "chunk_length_bytes": 16384,
+            "chunk_length_kb": 16.0,
+            "chunk_count": 5663,
+            "uncompressed_data_length_bytes": 92769705,
+            "compression_ratio_on_disk_over_logical": 0.874642
+          },
+          "sstabledump_golden": null
+        }
+      ]
+    }
+  ],
+  "row_count_cross_check": {
+    "row_driver_rows": 13200000,
+    "statistics_db_rows": 13200000,
+    "row_driver_partitions": 17299,
+    "statistics_db_partitions": 17299,
+    "note": "fail-closed: a rows OR partitions disagreement aborts before the manifest is written, and an UNOBSERVED partition count is an error rather than a 0"
+  }
+}
