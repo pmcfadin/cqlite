@@ -1,0 +1,58 @@
+== #3224 memory topology: does the uncore_imc instance count match REAL channels? ==
+
+Motivation: perf exposes uncore_imc_0..11 per socket, of which EIGHT report a
+near-identical non-zero value and FOUR read exactly 0.0. Summing them is only
+correct if they are DISTINCT CHANNELS; if they were duplicate reports of one
+socket aggregate, every GB/s figure would be 8x too high. sum/max = 7.996 is
+consistent with BOTH readings, so it cannot decide. DIMM topology can.
+
+== populated DIMM locators (dmidecode -t memory) ==
+	Size: 64 GB		Locator: CPU0 Channel0 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel0 DIMM1
+	Size: 64 GB		Locator: CPU0 Channel1 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel1 DIMM1
+	Size: 64 GB		Locator: CPU0 Channel2 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel2 DIMM1
+	Size: 64 GB		Locator: CPU0 Channel3 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel3 DIMM1
+	Size: 64 GB		Locator: CPU0 Channel4 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel4 DIMM1
+	Size: 64 GB		Locator: CPU0 Channel5 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel5 DIMM1
+	Size: 64 GB		Locator: CPU0 Channel6 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel6 DIMM1
+	Size: 64 GB		Locator: CPU0 Channel7 DIMM0
+	Volatile Size: 64 GB		Locator: CPU0 Channel7 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel0 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel0 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel1 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel1 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel2 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel2 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel3 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel3 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel4 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel4 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel5 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel5 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel6 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel6 DIMM1
+	Size: 64 GB		Locator: CPU1 Channel7 DIMM0
+	Volatile Size: 64 GB		Locator: CPU1 Channel7 DIMM1
+
+== channel count per socket ==
+      8 CPU0
+      8 CPU1
+
+== theoretical peak from topology ==
+	Configured Memory Speed: 3200 MT/s
+8 channels/socket x 3200 MT/s x 8 B = 204.8 GB/s per socket (409.6 GB/s both)
+
+== non-zero uncore_imc instances observed per socket, from a committed capture ==
+  S0: 24 instances, 16 non-zero  (read+write events, so 8 channels)
+  S1: 24 instances, 16 non-zero  (read+write events, so 8 channels)
+
+CONCLUSION: 8 populated channels per socket in DIMM topology == 8 non-zero
+uncore_imc read/write pairs per socket. The instances are DISTINCT CHANNELS
+and summing them is CORRECT. Corroborated a second, independent way by the
+AC5 triad byte accounting (run/ac5-peak.sh).

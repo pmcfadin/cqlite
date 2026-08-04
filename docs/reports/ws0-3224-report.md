@@ -211,16 +211,57 @@ inside the positive control. `derive.py` **refuses** any event under 99% enabled
 publishing an estimate. Before/after CSVs are committed as
 `run/multiplexing-evidence-{before,after}-split.csv`.
 
-### 3.4 Uncore: `--per-socket`, and the ×64 must NOT be re-applied
+### 3.4 Uncore: three ways to be wrong by a large integer factor
 
-All 12 `uncore_imc_N` devices carry `cpumask=0,32` — CPU 0 is socket 0's proxy, CPU 32 is socket 1's.
-They are therefore **not** 12 per-socket instances: each counts on both sockets and `perf stat -a`
-sums them, hiding the split. The per-socket split needs `--per-socket`, which inserts **two** leading
-fields and moves the enabled-% column from field 5 to **field 7**; reading field 5 there would
-silently parse `run_time` as a percentage.
+**(i) `--per-socket`, and the moving enabled-% column.** Each `uncore_imc_N` device carries
+`cpumask=0,32` — CPU 0 is socket 0's proxy for it, CPU 32 is socket 1's — so a plain
+`perf stat -a` aggregates the device across **both** sockets and hides the split this
+report needs. `--per-socket` splits it, but it also inserts **two** leading CSV fields,
+moving the enabled-% column from field 5 to **field 7**. Reading field 5 there would
+silently parse `run_time` as a percentage; `derive.py` takes a `per_socket` flag for
+exactly this reason.
 
-perf reports `cas_count_*` **already scaled to MiB** — the ×64 B/cacheline conversion the RUNBOOK
-specifies is applied by perf. Multiplying the MiB figure by 64 again would overcount by 64×.
+**(ii) The ×64 is already applied.** perf reports `cas_count_*` **already scaled to MiB**
+(its unit field says so). The ×64 B/cacheline conversion the RUNBOOK specifies is perf's,
+not ours — multiplying the MiB figure by 64 again would overcount by 64×.
+
+**(iii) The 8× that summing could have been — settled two independent ways.** perf exposes
+`uncore_imc_0..11`; per socket **eight report a near-identical non-zero value and four read
+exactly `0.0`**. Two readings fit that equally well:
+
+- **distinct channels**, near-identical because DRAM interleaving is uniform → the
+  per-instance values **must be summed**;
+- **duplicate reports** of one socket-level aggregate → summing overcounts by **8×**.
+
+`sum ÷ max = 7.996` is consistent with **both**, so it cannot decide — and every GB/s
+figure in this report differs by 8× on the answer. What prompted checking rather than
+assuming: the summed figure implies **22.2 KB of DRAM traffic per 692 B logical row**, a
+32× amplification, which is large enough to demand proof.
+
+Both checks say *distinct channels*:
+
+1. **DIMM topology**, independent of perf entirely
+   (`host/memory-channel-topology.txt`): `dmidecode -t memory` reports `CPU0 Channel0..7`
+   and `CPU1 Channel0..7` populated at 3200 MT/s — **8 channels per socket**, exactly
+   matching the 8 non-zero read/write instance pairs per socket.
+2. **Byte accounting under the triad** (§6): the triad moves a *known* number of bytes, so
+   `IMC_measured ÷ expected` is ~1× under the channel reading and ~8× under the duplicate
+   reading. `run/ac5-peak.sh` states the verdict and **refuses to bless a bandwidth figure
+   when the ratio matches neither**.
+
+Topology also fixes the theoretical ceiling: 8 × 3200 MT/s × 8 B = **204.8 GB/s per
+socket** (409.6 GB/s for the box). §6 measures the *achievable* peak at the engine's own
+binding, which is the ceiling the engine actually faces and is far below the socket
+figure — six cores cannot saturate eight channels.
+
+**The amplification is real, not an artefact.** Demand `LLC-load-misses` × 64 B accounts
+for only ~2.4 KB of the ~22 KB per row, because on a streaming scan the hardware
+prefetcher does most of the fetching, and a prefetched line that a later demand load hits
+is **not** counted as an `LLC-load-miss`. Demand miss counters therefore systematically
+**undercount** DRAM traffic on this workload — which is why AC3 reports the IMC figure and
+the miss counters as separate measured facts rather than deriving either from the other.
+Internal consistency: DRAM bytes/row rises **×2.98** between the endpoints while
+`LLC-load-misses`/row rises **×3.19**.
 
 ### 3.5 The denominator convention — #3217's open method question, settled with data
 
