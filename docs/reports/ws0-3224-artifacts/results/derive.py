@@ -495,7 +495,27 @@ def main():
         e_lo, e_hi = doc['endpoints'][lo], doc['endpoints'][hi]
 
         # ---- route 1: MEASURED stall cycles --------------------------------
+        # DENOMINATOR DISCIPLINE: the stall counters come from group C, which ran
+        # its OWN loadgen steps, so their delta is charged against GROUP C's OWN
+        # cycles/row delta -- numerator and denominator from ONE arm. Mixing group
+        # C's stall numerator with the primary arm's cycles denominator would
+        # shift every share by the (small) inter-arm difference, which is exactly
+        # the numerator/denominator-from-different-intervals error the ALIGNED
+        # convention exists to avoid. The primary arm's delta is reported beside
+        # it, and their agreement is itself a cross-arm consistency check.
         if 'stalls' in e_lo and 'stalls' in e_hi:
+            delta_primary = delta
+            delta = (e_hi['stalls']['cycles_per_row']['median']
+                     - e_lo['stalls']['cycles_per_row']['median'])
+            ac4['delta_cycles_per_row_primary_arm'] = delta_primary
+            ac4['delta_cycles_per_row_groupC_arm'] = delta
+            ac4['delta_cycles_per_row'] = delta
+            ac4['delta_basis'] = ('group C own arm (stall numerators and the '
+                                  'cycles denominator share one interval)')
+            ac4['delta_arm_agreement_pct'] = (
+                (delta - delta_primary) / delta_primary * 100)
+            ac4['delta_pct'] = (
+                delta / e_lo['stalls']['cycles_per_row']['median'] * 100)
             s_lo = e_lo['stalls']['stalls_l3_miss_per_row']['median']
             s_hi = e_hi['stalls']['stalls_l3_miss_per_row']['median']
             t_lo = e_lo['stalls']['stalls_total_per_row']['median']
@@ -532,6 +552,50 @@ def main():
             ac4['residual_pct_of_delta'] = (delta - attributed) / delta * 100
             ac4['mlp_low'] = e_lo['stalls']['mlp']['median']
             ac4['mlp_high'] = e_hi['stalls']['mlp']['median']
+
+            # ---- the ADDITIVE decomposition ---------------------------------
+            # The three stall counters NEST: stalls_l3_miss is a subset of
+            # stalls_l2_miss (an L2 miss either hits L3 or misses it), which is a
+            # subset of stalls_total. Differencing the nested pairs turns them
+            # into DISJOINT buckets, and the leftover -- cycles that were not
+            # stalled at all -- closes the identity:
+            #
+            #   d(cycles/row) = d(L3-miss stalls)          DRAM-served misses
+            #                 + d(L2-miss-but-L3-hit stalls)  LLC-served misses
+            #                 + d(other stalls)            non-memory stalls
+            #                 + d(non-stalled cycles)      may be NEGATIVE
+            #
+            # This sums to the measured delta BY CONSTRUCTION, so it is not an
+            # estimate with a residual -- it is a partition. The AC4 "residual"
+            # is then a CHOICE of where to draw the memory boundary, and both
+            # choices are published rather than one being quietly preferred.
+            d_l3 = s_hi - s_lo
+            d_l3hit = (l2_hi - l2_lo) - (s_hi - s_lo)
+            d_other = (t_hi - t_lo) - (l2_hi - l2_lo)
+            d_unstalled = delta - (t_hi - t_lo)
+            parts = {
+                'l3_miss_stalls_DRAM': d_l3,
+                'l2_miss_l3_hit_stalls_LLC': d_l3hit,
+                'other_stalls_non_memory': d_other,
+                'non_stalled_cycles': d_unstalled,
+            }
+            ac4['additive_decomposition'] = {
+                'parts_cycles_per_row': parts,
+                'parts_pct_of_delta': {k: v / delta * 100 for k, v in parts.items()},
+                'sum_cycles_per_row': sum(parts.values()),
+                'closure_error_cycles_per_row': sum(parts.values()) - delta,
+                'memory_attributed_cycles_per_row': d_l3 + d_l3hit,
+                'memory_attributed_pct': (d_l3 + d_l3hit) / delta * 100,
+                'non_memory_cycles_per_row': d_other + d_unstalled,
+                'non_memory_pct': (d_other + d_unstalled) / delta * 100,
+                'note': ('the three cycle_activity stall counters NEST, so the '
+                         'differenced buckets are disjoint and sum to the measured '
+                         'delta by construction (closure_error is a float-rounding '
+                         'check, and must be ~0). Two defensible residuals follow: '
+                         'strict DRAM boundary -> residual is everything but '
+                         'l3_miss_stalls; whole-cache boundary -> residual is '
+                         'other_stalls + non_stalled.'),
+            }
         else:
             ac4['notes'].append(
                 'group C (stalls) absent: no MEASURED attribution available, so '
@@ -582,15 +646,19 @@ def main():
                 'penalty with no source is not an attribution')
 
         # ---- the efficiency cross-check RUNBOOK step 7.5 asks for ----------
+        # Throughput comes from the PRIMARY arm, so the cycles/row inflation it is
+        # compared against must come from the primary arm too -- not from group C.
         r_lo = e_lo[conv]['rows_per_s']['median']
         r_hi = e_hi[conv]['rows_per_s']['median']
         s_ratio = e_hi['S'] / e_lo['S']
         ac4['marginal_efficiency'] = {
+            'basis': 'primary arm throughput vs primary arm cycles/row inflation',
             'rows_per_s_low': r_lo, 'rows_per_s_high': r_hi,
             'throughput_ratio': r_hi / r_lo,
             'core_ratio': s_ratio,
             'measured_efficiency': (r_hi / r_lo) / s_ratio,
-            'predicted_from_cycles_per_row': 1.0 / (1.0 + delta / d['cycles_per_row_low']),
+            'predicted_from_cycles_per_row':
+                1.0 / (1.0 + d['delta_cycles_per_row'] / d['cycles_per_row_low']),
             'note': ('efficiency predicted purely from the cycles/row inflation '
                      'vs the efficiency actually measured from throughput. These '
                      'are the same quantity by two routes; the gap is a check on '
@@ -661,8 +729,13 @@ def main():
         print('\n' + '=' * 74)
         print('== AC4 CYCLES-PER-ROW ACCOUNTING  (convention: %s)' % ac4['convention'])
         print('=' * 74)
-        print('   delta cycles/row        %+10.1f  (%+.2f%%)'
+        print('   delta cycles/row        %+10.1f  (%+.2f%% of the low point)'
               % (ac4['delta_cycles_per_row'], ac4['delta_pct']))
+        if 'delta_cycles_per_row_primary_arm' in ac4:
+            print('     basis: %s' % ac4['delta_basis'])
+            print('     primary arm delta %+.1f -> the two arms agree to %+.2f%%'
+                  % (ac4['delta_cycles_per_row_primary_arm'],
+                     ac4['delta_arm_agreement_pct']))
         print('   instructions/row        %+10.2f%%   <- flat means SAME WORK'
               % ac4['instructions_per_row_delta_pct'])
         print('   --- components ---')
@@ -682,6 +755,19 @@ def main():
                           % ('', c['measured_mlp_at_high_point'],
                              c['charge_mlp_corrected'],
                              c['charge_mlp_corrected_share_of_delta_pct']))
+        if 'additive_decomposition' in ac4:
+            ad = ac4['additive_decomposition']
+            print('   --- ADDITIVE decomposition (disjoint buckets, sums by construction) ---')
+            for k, v in ad['parts_cycles_per_row'].items():
+                print('   %-34s %+10.1f  = %6.2f%% of delta'
+                      % (k, v, ad['parts_pct_of_delta'][k]))
+            print('   %-34s %+10.1f  (closure error %+.3f — must be ~0)'
+                  % ('SUM', ad['sum_cycles_per_row'],
+                     ad['closure_error_cycles_per_row']))
+            print('   memory-attributed (L3 miss + L3 hit) %+8.1f = %6.2f%%'
+                  % (ad['memory_attributed_cycles_per_row'], ad['memory_attributed_pct']))
+            print('   non-memory                           %+8.1f = %6.2f%%'
+                  % (ad['non_memory_cycles_per_row'], ad['non_memory_pct']))
         if 'attributed_cycles_per_row' in ac4:
             print('   --- verdict ---')
             print('   ATTRIBUTED   %+10.1f cycles/row   (%s)'

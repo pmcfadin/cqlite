@@ -118,6 +118,13 @@ by 64 again would overcount by 64×.
 | a2 | ALIGNED, group B | the attribution counters (L1d, dTLB, branch) |
 | b | INTERIOR, group A | reproduces #3217's convention exactly (interior window, rate from the step) so the two can be compared |
 | c | UNCORE | `cas_count_{read,write}` for DRAM bandwidth, separate invocation, `--per-socket` |
+| d | ALIGNED, group C | `run/capture-stalls.sh` — **MEASURED memory-stall cycles**, so AC4 does not have to model a penalty at all: `cycle_activity.stalls_l3_miss` counts execution-stall cycles with an L3 miss outstanding, which is exactly the quantity `Δmisses × penalty` is trying to estimate, and it is inherently MLP-correct (two overlapping misses stalling one cycle are ONE stalled cycle). Also `stalls_l2_miss` / `stalls_total` (nested supersets → an additive decomposition) and `l1d_pend_miss.pending{,_cycles}` → a **measured MLP** divisor for the modelled cross-check |
+
+Arm (d) is why this report attributes ~2/3 of the decay where #3217 attributed
+~13%. It was added after the primary arms were already green, so it is a
+**separate script writing separate files** into the same rep directories rather
+than an edit to a validated capture path; `derive.py` treats it as optional and
+falls back to the modelled charge alone (saying so) if a results tree lacks it.
 
 ## Validity gates — all fail closed
 

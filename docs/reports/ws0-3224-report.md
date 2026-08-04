@@ -296,6 +296,104 @@ other command substitution. #3217's drivers did `echo "$(date) END rc=$?"`, wher
 overwrites `$?`, so a failed step logged `rc=0`. This report's captures fail closed on any non-zero
 arm.
 
+### 3.8 Arm (d): the memory-stall cycles are MEASURED, not modelled
+
+AC4 asks what fraction of the cycles/row delta is attributed, and #3217 answered it
+the classical way — charge each miss counter at a penalty, `attributed = Σ Δ(misses/row)
+× penalty_cycles` — and landed **~87% unattributed**. That product is only ever as good
+as the penalty, and the penalty is the weakest link in the chain:
+
+- an **unloaded** serial-chase latency assumes **zero memory-level parallelism**, so it
+  overcharges every miss that actually overlapped another;
+- dividing by an **assumed** MLP undercharges if the guess is high;
+- a **vendor** figure is not this silicon under this load at all.
+
+This host removes the need to model it. `cycle_activity.stalls_l3_miss` counts
+**execution-stall cycles while an L3 miss is outstanding**, in hardware, per pinned CPU
+— the very quantity the penalty product estimates, and it is inherently **MLP-correct**,
+because two overlapping misses that stall the same cycle are *one* stalled cycle, which
+is what a cycles/row accounting must add up. So arm (d) charges the measured stall
+cycles and keeps the modelled product as a **cross-check** (§5.4).
+
+Group C, verified at **100.00% enabled under load before use**:
+
+```
+cycles, instructions, task-clock,
+cycle_activity.stalls_l3_miss     <- the attribution term
+cycle_activity.stalls_l2_miss     <- superset: includes L2 misses that HIT in L3
+cycle_activity.stalls_total       <- superset: all execution stalls
+l1d_pend_miss.pending             <- Σ outstanding L1D misses per cycle
+l1d_pend_miss.pending_cycles      <- cycles with >=1 outstanding  => MEASURED MLP
+```
+
+The three stall counters **nest**, which is what makes §5.3's decomposition additive
+rather than an estimate with a residual.
+
+Two properties of arm (d) worth stating because they are deliberate:
+
+1. **It is a separate script** (`run/capture-stalls.sh`), added after the primary arms
+   were already green and writing separate files into the same rep directories, rather
+   than an edit to an already-validated capture path. `derive.py` treats it as optional.
+2. **Its heredoc is quoted.** `capture-endpoint.sh` interpolates shell variables into an
+   *unquoted* heredoc, so bash performs command substitution inside the Python source —
+   and its own docstring warning against writing backticks there *contains backticks*,
+   so every run emitted `line 182: ok: command not found`. Harmless (the mangling is
+   confined to that docstring; the whole heredoc was audited for other `` ` `` and `$(`
+   and has none) but self-defeating. Arm (d) passes values as `argv` instead, so the
+   hazard does not exist.
+
+It reuses `harness/common.sh` unchanged, so every §3.6 guard governs it identically.
+
+### 3.9 On-host latency calibration — and the probe defect it exposed
+
+`run/penalty-probe.sh` measures the cache hierarchy's access latency on this exact
+silicon with a **serial dependent pointer chase** over a random permutation of 64 B
+lines: each access depends on the previous one, so there is no MLP to hide the latency
+and cycles/access *is* the access latency in cycles.
+
+**The first version of this probe was wrong, and it is worth recording how it announced
+itself.** In `cache-hostile.c`, `--working-kib` *confines* the chase (`--working-kib 0`
+means "the whole buffer"). The probe's "hostile" branch passed `--buffer-mib 2048
+--working-kib 256`, which chases an **L2-resident 256 KiB** no matter how large the
+buffer is. Its DRAM row therefore reported **15.12 cycles/access — below the L2 row's
+18.64**. A DRAM latency cheaper than L2 is impossible, which is the *only* reason the
+bug was caught: had the number merely been plausible it would have been published, and
+every penalty charged from it would have been wrong. That is the same failure class as
+the flat-staging capture that returned `rc=0` on zero rows (§3.6) and the positive
+control's two false FAILs (§2.1) — **an instrument that does not error but emits
+plausible output**, three times in one study.
+
+The fixed probe uses one code path, brackets the LLC→DRAM transition across
+256 MiB/1 GiB/2 GiB so the plateau is *observed* rather than assumed from a single
+point, and adds `dTLB-load-misses:u` so the page-walk bundling is a **measured number
+rather than a prose caveat**:
+
+| level | working set | cycles/access | ns/access | LLC-loads/acc | LLC-miss/acc | dTLB-miss/acc |
+|---|--:|--:|--:|--:|--:|--:|
+| L1d | 32 KiB | **6.11** | 2.11 | 0.0000 | 0.0000 | 0.0000 |
+| L2 | 512 KiB | **18.57** | 6.40 | 0.0005 | 0.0001 | 0.0000 |
+| LLC | 8 MiB | **90.44** | 31.19 | 1.0093 | 0.0063 | 0.0154 |
+| LLC | 32 MiB | **114.78** | 39.58 | 1.0299 | 0.0515 | 0.7634 |
+| DRAM | 256 MiB | **393.50** | 135.69 | 1.4214 | 1.1129 | 1.1176 |
+| DRAM | 1 GiB | **499.78** | 172.34 | 3.1550 | 1.9047 | 1.6606 |
+| DRAM | 2 GiB | **581.76** | 200.61 | 5.0429 | 2.9016 | 2.3757 |
+
+The DRAM rows do **not** plateau — they climb 393 → 500 → 582 — and the measured
+`dTLB-miss/access` (1.12 → 2.38) and `LLC-loads/access` (1.42 → 5.04) say why: with
+4 KiB pages a random stride over gigabytes misses the TLB on essentially every access,
+and each page-table walk is itself extra memory traffic. So the larger the working set,
+the more page-walk cost the figure bundles. **The smallest DRAM-resident point
+(256 MiB, 393.50 cycles) is therefore the least-contaminated DRAM latency available
+here**, and it is still an over-estimate. §5.4 charges from it and says so.
+
+**Direction of conservatism, stated because it is easy to get backwards.** An earlier
+draft of this probe asserted that an upper-bound penalty is "the conservative direction
+for a claim of *attributed*". It is the **opposite**: a larger penalty inflates
+`attributed` and *shrinks* the residual, which flatters the hypothesis that the decay is
+explained. AC7 and RUNBOOK step 7 forbid rounding toward the hypothesis, so the
+**headline attribution below is the measured stall term**, and the modelled zero-MLP
+charge is reported as the upper bound it is — never as the attribution.
+
 ---
 
 <!-- RESULTS SECTIONS 4-7 APPENDED AFTER THE CAPTURES COMPLETE -->
