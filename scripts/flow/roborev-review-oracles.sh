@@ -1331,7 +1331,7 @@ roborev_builtin_state_details() {
       DETAILS+=("NOTICE: census-exclusion: built-in-set: OK — the live roborev built-in exclude set MATCHES the pinned v0.61.2 set. The pin is corroborated, not assumed, on FOUR observations: the executable reports $_rx_builtin_version (the build every fact here was derived from, so the pin's re-verify-on-upgrade obligation is satisfied for this run); every pinned pattern is present as the literal ':(exclude,glob)<pattern>'; every pattern is RIGHT-BOUNDED by the pinned length-bucket adjacency, so a presence hit cannot be a substring of a LONGER pattern; and $_rx_builtin_count ':(exclude,glob)' literal(s) are present, exactly as pinned. The right-boundary half is load-bearing: an unbounded substring test alone reported OK for a binary whose '**/Cargo.lock' had been replaced by '**/Cargo.lock.bak' at equal length (count 26/26, missing 0).")
       ;;
     UNAVAILABLE)
-      DETAILS+=("NOTICE: census-exclusion: built-in-set: UNAVAILABLE — the live roborev built-in deny-list could not be confirmed against the pinned v0.61.2 set ('roborev' absent from PATH, unreadable, a wrapper/stub carrying no ':(exclude,glob)' literals, or a target that would not report its version), so whether it still matches is UNKNOWN. This is deliberately NEITHER a failure NOR a blessing: 'we could not look' is reported in the value line so it cannot be mistaken for agreement. It withholds only the OK blessing — an OBSERVED divergence (a missing pattern, a broken adjacency run, a changed literal count) still FAILs without a readable version.")
+      DETAILS+=("NOTICE: census-exclusion: built-in-set: UNAVAILABLE — the live roborev built-in deny-list could not be confirmed against the pinned v0.61.2 set ('roborev' absent from PATH, unreadable, a wrapper/stub carrying no ':(exclude,glob)' literals, or a target that would not report its version), so whether it still matches is UNKNOWN. This is deliberately NEITHER a failure NOR a blessing: 'we could not look' is reported in the value line so it cannot be mistaken for agreement. It withholds only the OK blessing — an OBSERVED divergence (a missing pattern, a broken adjacency run, a changed literal count) still FAILs without a readable version. It ALSO withholds the EXCUSAL (#3229 round-9 F1): no census code path is excused from 'prompt-content:' on a model that could not be verified, because the excusal asserts that a path's absence is a DETERMINISTIC property of the pinned mechanism — a claim an unverified mechanism cannot support.")
       ;;
   esac
 }
@@ -1510,6 +1510,33 @@ roborev_check_census_exclusion() {
   # whose census nothing swallows. `UNAVAILABLE` is recorded and carried into the value
   # line rather than being silently treated as agreement.
   roborev_observe_builtin_excludes
+
+  # --- THE EXCUSAL REQUIRES A VERIFIED MODEL (#3229 round-9 blocker F1) -----------
+  # `_rx_builtin_state` has THREE values (OK | UNAVAILABLE | DIVERGED), and the round-8
+  # revision tested only `= DIVERGED` / `!= DIVERGED` — a three-state signal tested as
+  # two. `UNAVAILABLE` therefore took the PERMISSIVE path: it populated
+  # `CENSUS_BUILTIN_EXCLUDED` and told `prompt-content:` NOT to expect those paths, so
+  # coverage was EXCUSED on an unverified model while the block read PASS. REPRODUCED: a
+  # shim carrying all 24 literals correctly right-bounded but refusing to report its
+  # `version` yields `state=UNAVAILABLE, missing=0` — and the excusal still happened.
+  # That is "we could not check" rendered as "nothing was wrong", inside the guard whose
+  # entire purpose is preventing exactly that.
+  #
+  # SO THE PERMISSIVE BEHAVIOUR IS KEYED ON THE POSITIVE STATE, never on "not the
+  # negative one". Two distinct decisions, deliberately separated:
+  #   * whether a built-in swallow can be a NOTICE rather than a FAIL — that turns on
+  #     `!= DIVERGED`, and correctly so: only a POSITIVELY OBSERVED divergence is an
+  #     actionable mechanism change. An unobservable binary (`roborev` absent from PATH —
+  #     the hermetic suite's normal condition) must NOT red every run; failing there would
+  #     be the self-disabling guard this change keeps refusing to build.
+  #   * whether that swallow EXCUSES the paths from `prompt-content:` — that requires
+  #     `= OK`. The excusal is a claim ABOUT THE MECHANISM ("their absence is
+  #     deterministic"), and an unverified mechanism cannot support it. Withholding it
+  #     fails CLOSED on the excusal WITHOUT failing the run: `prompt-content:` simply goes
+  #     on to expect every census code path, and FAILs if the reviewer really did not get
+  #     one.
+  local builtin_excusal=WITHHELD
+  [ "$_rx_builtin_state" != OK ] || builtin_excusal=GRANTED
 
   # --- CORROBORATION, unconditionally and BEFORE any early return ----------------
   # Especially when `n_configured` is 0: "our parser recognised no key" is NOT "nothing
@@ -1751,18 +1778,34 @@ roborev_check_census_exclusion() {
       roborev_builtin_state_details
       finish FAIL 1
     fi
-    CENSUS_EXCLUSION="NOTICE (${pass_prefix}$((n_code - m))/$n_code code census paths survive $survive_of; $m code census path(s) excluded by a roborev built-in: $joined; corroboration: $_rx_corroboration; $builtin_state_clause)"
-    DETAILS+=("NOTICE: census-exclusion: $m of the $n_code CODE path(s) in this census are dropped from the diff roborev builds by a ROBOREV BUILT-IN exclude (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list), and the live built-in set still MATCHES that pin. NO configured pattern is responsible, so there is NOTHING TO FIX in '$repo_cfg' or any other config file — the deny-list is compiled into the binary and has no opt-out. Under the rule 'FAIL where the author can act; NOTICE where only the information is actionable; never silence', this is a NOTICE: a check that fires on a legitimate change (a routine Cargo.lock touch) with no remedy available is a check that gets disabled, which is how #3229 happened.")
+    # The EXCUSAL clause, and the two detail sentences that depend on it. GRANTED keeps
+    # the round-8 wording verbatim; WITHHELD says so in the VALUE LINE, in words that read
+    # as neither a clean PASS nor as a DIVERGED set — because the state is neither.
+    local excusal_clause="" pin_clause=", and the live built-in set still MATCHES that pin" \
+      expect_clause="'prompt-content:' will not expect them either, because their absence is a deterministic property of roborev's mechanism rather than evidence about the reviewer."
+    if [ "$builtin_excusal" != GRANTED ]; then
+      excusal_clause="excusal WITHHELD: the built-in model is NOT VERIFIED (built-in-set: $_rx_builtin_state), so NO path is excused and 'prompt-content:' still expects all $n_code code census path(s); "
+      pin_clause=""
+      expect_clause="'prompt-content:' WILL still expect them, because the excusal — the claim that their absence is a DETERMINISTIC property of roborev's mechanism — rests on the live built-in set actually being the pinned one, and that could NOT be verified on this run (built-in-set: $_rx_builtin_state). 'We could not check' is never 'nothing was wrong', so coverage is not excused on an unverified model: if the reviewer really did not receive one of these path(s), 'prompt-content:' FAILs, which is the correct fail-closed outcome here."
+    fi
+    CENSUS_EXCLUSION="NOTICE (${pass_prefix}$((n_code - m))/$n_code code census paths survive $survive_of; $m code census path(s) excluded by a roborev built-in: $joined; ${excusal_clause}corroboration: $_rx_corroboration; $builtin_state_clause)"
+    DETAILS+=("NOTICE: census-exclusion: $m of the $n_code CODE path(s) in this census are dropped from the diff roborev builds by a ROBOREV BUILT-IN exclude (source tag '$ROBOREV_BUILTIN_SRC_LABEL', pinned to v0.61.2: the hard-coded lockfile/cache deny-list)$pin_clause. NO configured pattern is responsible, so there is NOTHING TO FIX in '$repo_cfg' or any other config file — the deny-list is compiled into the binary and has no opt-out. Under the rule 'FAIL where the author can act; NOTICE where only the information is actionable; never silence', this is a NOTICE: a check that fires on a legitimate change (a routine Cargo.lock touch) with no remedy available is a check that gets disabled, which is how #3229 happened.")
     DETAILS+=("NOTICE: census-exclusion: path(s) the reviewer will NOT receive, each with the built-in responsible:")
     for path in "${swallowed[@]}"; do
       DETAILS+=("  $path  <=  '${_rx_blame[$path]:-<unattributed>}'  [${_rx_blame_src[$path]:-<unattributed>}]")
     done
-    DETAILS+=("NOTICE: census-exclusion: a clean verdict on this review does NOT cover those path(s) — verify them some other way (primary sources, a regenerate-and-diff, or by reviewing them outside roborev). 'prompt-content:' will not expect them either, because their absence is a deterministic property of roborev's mechanism rather than evidence about the reviewer.")
+    DETAILS+=("NOTICE: census-exclusion: a clean verdict on this review does NOT cover those path(s) — verify them some other way (primary sources, a regenerate-and-diff, or by reviewing them outside roborev). $expect_clause")
     roborev_builtin_state_details
     # Hand the set to `prompt-content:` so it does not re-report a KNOWN absence as a
-    # discovery. Scoped to BUILT-IN swallows ONLY: a configured swallow FAILs below and
-    # never reaches here.
-    CENSUS_BUILTIN_EXCLUDED=("${swallowed[@]}")
+    # discovery. TWO conditions, both required:
+    #   * the swallow is by a BUILT-IN, not a configured pattern (a configured swallow
+    #     FAILs below and never reaches here); and
+    #   * the built-in model is VERIFIED (`built-in-set: OK`) — see the excusal block
+    #     above. On `UNAVAILABLE` the set stays EMPTY, so `prompt-content:` evaluates
+    #     every census code path normally and fails closed if one is really absent.
+    if [ "$builtin_excusal" = GRANTED ]; then
+      CENSUS_BUILTIN_EXCLUDED=("${swallowed[@]}")
+    fi
     return 0
   fi
 
@@ -1775,7 +1818,13 @@ roborev_check_census_exclusion() {
     [ -z "$fail_value" ] || fail_value="$fail_value; ALSO "
     fail_value="${fail_value}roborev built-in exclude set DIVERGED from the pinned v0.61.2 set: $builtin_div"
   fi
-  CENSUS_EXCLUSION="FAIL ($fail_value)"
+  # The built-in state rides on THIS value too (#3229 round-9 F1 audit). This is the ONE
+  # reconciliation verdict that used to omit it, which made the documented contract
+  # ("every value ends with built-in-set: OK|DIVERGED|UNAVAILABLE") false for exactly the
+  # branch where a configured swallow coexists with an UNVERIFIED built-in model — the
+  # state stayed silent, and "never silence" is the third clause of the rule, not a
+  # PASS-only courtesy.
+  CENSUS_EXCLUSION="FAIL ($fail_value; $builtin_state_clause)"
 
   if [ "$_rx_builtin_state" = DIVERGED ]; then
     DETAILS+=("ERROR: census-exclusion: the LIVE roborev built-in exclude set no longer matches the set PINNED to v0.61.2 in ROBOREV_BUILTIN_EXCLUDES. Divergence: $builtin_div. This is a MECHANISM change, and unlike a pinned built-in it HAS a remedy, which is why it FAILs rather than reporting a NOTICE: re-extract the deny-list from the binary (LC_ALL=C grep -a -o ':(exclude,glob)[^ ]*' \"\$(command -v roborev)\"), update ROBOREV_BUILTIN_EXCLUDES and ROBOREV_BUILTIN_PATHSPEC_LITERALS, and JUDGE the new built-in — an upgrade that started excluding '*.rs' or 'scripts/**' would otherwise be absorbed silently while the block still read green. Re-verify the ported git.FormatExcludeArgs in the same pass.")

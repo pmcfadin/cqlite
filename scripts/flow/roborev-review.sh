@@ -339,7 +339,13 @@ Both FAIL causes outrank the NOTICE, and EVERY cause present is named. Values:
        (a total one is the FAIL below); NON-FAILING (NOTICE is
        outside the verdict scan's FAIL*|FINDINGS*|ERROR*|INCONSISTENT* set) but the
        paths ARE named: a clean verdict does not cover them, and prompt-content: is
-       told not to expect them
+       told not to expect them — but ONLY on 'built-in-set: OK'
+  NOTICE (... ; excusal WITHHELD: the built-in model is NOT VERIFIED (built-in-set:
+       UNAVAILABLE), so NO path is excused and 'prompt-content:' still expects all <n>
+       code census path(s); ...)  the EXCUSAL requires a VERIFIED model. Withholding it
+       fails CLOSED on the excusal without failing the run: prompt-content: goes on to
+       expect every census code path and FAILs if one is really absent. 'We could not
+       check' must never render as 'nothing was wrong'
   FAIL (0/<n> code census paths survive ...; ALL <n> code census path(s) excluded by a
        roborev built-in, so the reviewer would receive an EMPTY diff: ...)  the TOTAL
        swallow — uncertifiable, exactly as a code-free census is

@@ -141,6 +141,12 @@ roborev_check_prompt_content() {
     # code is never reached with one, and the subtraction can never mask a config defect.
     # `CENSUS_BUILTIN_EXCLUDED` holds the same RAW paths the census does, so this is a
     # direct byte comparison.
+    # IT IS ALSO SCOPED TO A **VERIFIED** BUILT-IN MODEL (#3229 round-9 F1). The subtraction
+    # asserts that a path's absence is a DETERMINISTIC property of the pinned deny-list, so
+    # `census-exclusion:` populates this array ONLY on `built-in-set: OK`. On `UNAVAILABLE`
+    # it stays EMPTY and every census code path is checked here — the fail-closed direction,
+    # because excusing coverage on a model we could not verify is exactly the false-PASS
+    # this key exists to prevent.
     checked_paths=()
     for census_path in "${census_code_paths[@]}"; do
       builtin_excluded=0
