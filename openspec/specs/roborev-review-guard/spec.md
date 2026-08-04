@@ -177,10 +177,22 @@ anywhere in the tree — including `docs/foo.py` and `.github/workflows/*.yml` �
 the check cannot false-FAIL a code change that merely lives in a documentation directory.
 
 Under a declared prose directory an EXTENSIONLESS path SHALL count as CODE **iff git RECORDS it
-EXECUTABLE**, the mode read from the tree (HEAD, else the BASE commit for a deleted path) and never from
+EXECUTABLE AT EITHER ENDPOINT of the census range**, the mode read from the tree and never from
 the filesystem. The prose PREFIX alone SHALL NOT decide it: that made every extensionless path under
 `docs/` non-code, so it never entered the code census and `prompt-content:` made no claim about it at all —
 while the configured exclusions do not remove it, so it does reach the reviewer.
+
+The endpoint test SHALL be a **logical OR over the HEAD tree and the BASE tree**, never an ordered scan
+that stops at the first endpoint holding a record. All four combinations SHALL follow from that one rule:
+present at both (including a MODE CHANGE in either direction — a `chmod -x` SHALL NOT reclassify a script
+as prose), HEAD only, BASE only (classified by the mode it HAD, since removing an executable is a code
+change whose review must be asserted), and neither (unmeasurable ⇒ non-executable, no error). An ordered
+scan is a FALSE-PASS mechanism, not an optimisation: it classified `100755`@BASE → `100644`@HEAD as
+NON-CODE, so the path left the code census and `prompt-content: PASS (n/n)` was silent about it. That
+property SHALL hold BY CONSTRUCTION — a range-blind per-endpoint lookup, an endpoint list complete before
+the fold, and a fold with no `break`/`continue`/`return` whose single post-loop `return` yields an
+accumulator — and the SHAPE SHALL be asserted structurally, with the assert itself controlled against
+mutants that violate it.
 
 This requirement is deliberately STRONGER than a prose-matched detection: an earlier revision computed
 the same classification and used it only for attribution wording, which let a docs-only diff reach
