@@ -92,16 +92,32 @@ SCAN_FILES=(
 CONSTRUCT_RE=(); CONSTRUCT_WHY=(); CONSTRUCT_SAMPLE=()
 add_construct() { CONSTRUCT_RE+=("$1"); CONSTRUCT_WHY+=("$2"); CONSTRUCT_SAMPLE+=("$3"); }
 
-add_construct '(^|[^[:alnum:]_-])sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-i([[:space:]]|$)' \
+# The two patterns whose controls below name them directly are held in NAMED variables rather
+# than referenced by table INDEX: an index reference silently retargets when a row is inserted
+# above it, which would leave a control asserting about a different rule than it names.
+RE_SED_INPLACE='(^|[^[:alnum:]_-])sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-i([[:space:]]|$)'
+# BUNDLED CLUSTERS ending in `i` — the hole the bare `-i` rule above leaves open. BSD getopt
+# processes `-Ei` as `-E` then `-i`, and `i` is declared WITH A REQUIRED ARGUMENT (Apple
+# text_cmds sed/main.c: `getopt(argc, argv, "EI:ae:f:i:lnru")`), so with nothing left in the
+# cluster it consumes the NEXT ARGV entry as the backup suffix — byte for byte the #3296
+# defect, reached by a spelling the bare-`-i` regex never sees. `-i.bak` (an ATTACHED suffix)
+# is portable and deliberately NOT matched: both seds read it the same way.
+RE_SED_INPLACE_CLUSTER='(^|[^[:alnum:]_-])sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]+i([[:space:]]|$)'
+RE_PASTE_NO_OPERAND='(^|[^[:alnum:]_-])paste([[:space:]]+-[^[:space:]|;)&]+)*[[:space:]]*($|\||\)|;|&)'
+
+add_construct "$RE_SED_INPLACE" \
   "BSD sed's -i takes a REQUIRED suffix argument, so it eats the EXPRESSION and the edit never lands (#3296 cx28/cx29/cx28b/cx28c) — use the guard test's sed_inplace helper" \
   "  sed -i 's/a/b/' \"\$f\""
+add_construct "$RE_SED_INPLACE_CLUSTER" \
+  "a BUNDLED cluster ending in -i (-Ei, -ni, -nEi, …) reaches the SAME BSD argument-consuming -i as a bare -i, so the edit never lands — use sed_inplace" \
+  "  sed -Ei 's/a/b/' \"\$f\""
 add_construct '(^|[^[:alnum:]_-])sed[[:space:]]+-i("")' \
   'the empty-suffix spelling -i"" is GNU-only (BSD needs -i "" or no -i at all) — use sed_inplace' \
   '  sed -i"" -e s/a/b/ f'
 add_construct "(^|[^[:alnum:]_-])sed[[:space:]]+-i('')" \
   "the empty-suffix spelling -i'' is GNU-only — use sed_inplace" \
   "  sed -i'' -e s/a/b/ f"
-add_construct '(^|[^[:alnum:]_-])paste([[:space:]]+-[^[:space:]|;)&]+)*[[:space:]]*($|\||\)|;|&)' \
+add_construct "$RE_PASTE_NO_OPERAND" \
   'a paste with NO FILE OPERAND is empty output + exit 1 on BSD (it usage()-errors instead of reading stdin) — pass an explicit `-`, or extract with awk (#3296 case (j2))' \
   '  order=$(grep -n x f | cut -d: -f2 | paste -sd,)'
 add_construct '(^|[^[:alnum:]_-])readlink[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-f' \
@@ -177,11 +193,57 @@ for _ci in "${!CONSTRUCT_RE[@]}"; do
   fi
 done
 
+# POSITIVE CONTROLS for the CLUSTER rule beyond its table sample: every bundled spelling that
+# reaches BSD's argument-consuming -i must be detected, not just the one in the table. `-Ei` is
+# the form that evaded the bare-`-i` rule and is therefore asserted against BOTH rules: the old
+# one must MISS it (that is the hole) and the new one must CATCH it.
+printf '%s\n' \
+  "  sed -Ei 's/a/b/' \"\$f\"" \
+  "  sed -ni '\$p' \"\$f\"" \
+  "  sed -nEi 's/a/b/' \"\$f\"" \
+  "  sed -E -i 's/a/b/' \"\$f\"" >"$tmp/cluster-bad.sh"
+# Asserted against the UNION of the two in-place rules, because that union is what the scan
+# actually applies: `-E -i` (separated) is the BARE rule's job and `-Ei` (bundled) is the
+# cluster rule's, and what matters to a reader of this file is that NO in-place spelling
+# escapes the table. Which rule catches which is pinned separately, immediately below.
+_cluster_missed=""
+while IFS= read -r _cl; do
+  [ -n "$_cl" ] || continue
+  printf '%s\n' "$_cl" >"$tmp/cluster-one.sh"
+  if [ -z "$(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-one.sh")" ] &&
+    [ -z "$(scan_hits "$RE_SED_INPLACE" "$tmp/cluster-one.sh")" ]; then
+    _cluster_missed="$_cluster_missed [$_cl]"
+  fi
+done <"$tmp/cluster-bad.sh"
+if [ -z "$_cluster_missed" ]; then
+  ok 'structural control: every in-place spelling (-Ei, -ni, -nEi, -E -i) is detected by the in-place rules — no bundled form escapes the table'
+else
+  bad "structural control: the in-place rules MISS:$_cluster_missed — a scanner with a known hole invites reliance it cannot support"
+fi
+printf '%s\n' "  sed -Ei 's/a/b/' \"\$f\"" >"$tmp/cluster-one.sh"
+if [ -z "$(scan_hits "$RE_SED_INPLACE" "$tmp/cluster-one.sh")" ]; then
+  ok 'structural control: `sed -Ei` is (still) invisible to the bare -i rule — which is WHY the cluster rule exists, stated as a measurement rather than an assumption'
+else
+  bad 'structural control: the bare -i rule now also matches `sed -Ei`; fold the two rules together rather than keeping a redundant one'
+fi
+
+# NEGATIVE CONTROLS for the cluster rule: a cluster that does NOT end in `i`, and an ATTACHED
+# suffix (portable — both seds read `-i.bak` as -i with suffix ".bak"), must not be reported.
+printf '%s\n' \
+  "  sed -n '2p' \"\$f\"" \
+  "  sed -E 's/a/b/' \"\$f\"" \
+  "  sed -Ei.bak -e 's/a/b/' \"\$f\"" >"$tmp/cluster-ok.sh"
+if [ -z "$(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh")" ]; then
+  ok 'structural control: a non-`i` cluster (-n, -E) and an ATTACHED suffix (-Ei.bak) are not flagged — the rule reds only on the unportable spelling'
+else
+  bad "structural control: the cluster rule false-positives on a portable sed — a lint that reds on correct input is the lint agents learn to waive: $(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh" | tr '\n' ' ')"
+fi
+
 # NEGATIVE CONTROL for the paste pattern, whose ERE is the subtlest of the table: a paste WITH
 # an explicit operand is portable and must NOT be reported.
 printf '%s\n' '  order=$(grep -n x f | cut -d: -f2 | paste -sd, -)' >"$tmp/paste-ok.sh"
 printf '%s\n' '  order=$(paste -sd, "$f")' >>"$tmp/paste-ok.sh"
-if [ -z "$(scan_hits "${CONSTRUCT_RE[3]}" "$tmp/paste-ok.sh")" ]; then
+if [ -z "$(scan_hits "$RE_PASTE_NO_OPERAND" "$tmp/paste-ok.sh")" ]; then
   ok 'structural control: a paste WITH a file operand (`-` or a path) is not flagged'
 else
   bad 'structural control: the paste pattern false-positives on a portable paste with an operand — a lint that reds on correct input is the lint agents learn to waive'
@@ -191,7 +253,7 @@ fi
 # must not be a blanket switch (the same sample WITHOUT the marker is still detected above).
 printf '%s\n' "  sed -i 's/a/b/' \"\$f\"   # portability-lint-allow: deliberate BSD-emulation control" \
   >"$tmp/allow.sh"
-if [ -z "$(scan_hits "${CONSTRUCT_RE[0]}" "$tmp/allow.sh")" ]; then
+if [ -z "$(scan_hits "$RE_SED_INPLACE" "$tmp/allow.sh")" ]; then
   ok 'structural control: a line marked portability-lint-allow is exempt (a visible, per-line escape)'
 else
   bad 'structural control: the portability-lint-allow marker does not exempt its line'
