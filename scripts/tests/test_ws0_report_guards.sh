@@ -905,35 +905,28 @@ fi
 # The prior values must be CAPTURED BEFORE the mutation, or there is nothing to
 # restore to: assert the capture precedes the `sysctl -w` in file order.
 cap_line=$(grep -n 'PARANOID_PRIOR=' "$DRIVER" | head -1 | cut -d: -f1)
-mut_line=$(grep -n 'sysctl -w kernel.perf_event_paranoid' "$DRIVER" | head -1 | cut -d: -f1)
+mut_line=$(grep -n 'sysctl -w "\${_sysctl_writes\[@\]}"' "$DRIVER" | head -1 | cut -d: -f1)
 if [ -n "$cap_line" ] && [ -n "$mut_line" ] && [ "$cap_line" -lt "$mut_line" ]; then
   pass "the prior sysctl values are captured BEFORE the mutation (line $cap_line < $mut_line)"
 else
   fail "prior values must be captured before mutating (capture=$cap_line mutate=$mut_line)"
 fi
-# Both sysctls the driver weakens must be restored — not just the one in the message.
+# Both sysctls the driver weakens must be ENROLLED for restore — not just the one in
+# the message. The enrollment list is what `restore_sysctls` iterates.
 for knob in perf_event_paranoid kptr_restrict; do
-  if awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -q "$knob"; then
-    pass "restore_sysctls restores kernel.$knob"
+  if grep -q "enroll_sysctl kernel.$knob" "$DRIVER"; then
+    pass "kernel.$knob is enrolled for restore where it is weakened"
   else
-    fail "restore_sysctls must restore kernel.$knob (the driver weakens it)"
+    fail "kernel.$knob must be enrolled for restore (the driver weakens it)"
   fi
 done
 # The restore must be IDEMPOTENT and must never fail the run: it is cleanup, and a
 # cleanup that can exit non-zero turns a successful measurement into a failed one.
 if awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -q 'SYSCTLS_MUTATED' \
-  && awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -q '|| true'; then
-  pass "restore_sysctls is guarded by a mutated-flag and cannot fail the run"
+  && awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -q '^  return 0$'; then
+  pass "restore_sysctls is guarded by a mutated-flag and returns 0 unconditionally"
 else
-  fail "restore_sysctls must be flag-guarded (idempotent) and non-fatal"
-fi
-# It must run under `set -e` too: an exit handler that inherits errexit and dies
-# midway would restore one knob and skip the other.
-if awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -q 'kptr_restrict' \
-  && awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -cq '|| true'; then
-  pass "each restore step is individually non-fatal (one knob cannot orphan the other)"
-else
-  fail "each restore step must be individually non-fatal"
+  fail "restore_sysctls must be flag-guarded (idempotent) and end in an explicit return 0"
 fi
 
 # ---- BEHAVIOURAL, not merely structural -----------------------------------
@@ -942,33 +935,53 @@ fi
 # root, so the functions are extracted verbatim from the driver and run against a
 # RECORDING `sudo` shim: no privileged call ever happens, and the exact
 # `sysctl -w` argv the handler would issue is asserted. Hermetic, sub-second.
-sysctl_probe() { # sysctl_probe <case> — echoes the recorded sudo argv
-  local case_name="$1" calls="$TMP/sysctl-calls-$1.txt"
+#
+# `sudo_ok` selects which knobs the shim lets through, so the PARTIAL-restore case
+# (#3272 review B3) can be driven: `paranoid` = only perf_event_paranoid succeeds.
+sysctl_probe() { # sysctl_probe <case> <enrollment-lines> [sudo_ok: all|none|paranoid]
+  local case_name="$1" written="$2" sudo_ok="${3:-all}"
+  local calls="$TMP/sysctl-calls-$1.txt" out="$TMP/sysctl-out-$1.txt"
   : > "$calls"
   (
     set -uo pipefail
-    sudo() { printf '%s\n' "$*" >> "$calls"; [ "$case_name" != "failing-sudo" ]; }
-    # The three definitions under test, taken from the driver itself so this can
-    # never drift into testing a local copy.
+    sudo() {
+      printf '%s\n' "$*" >> "$calls"
+      case "$sudo_ok" in
+        all)      return 0 ;;
+        none)     return 1 ;;
+        paranoid) [[ "$*" == *perf_event_paranoid* ]] ;;
+      esac
+    }
+    # Taken from the driver itself so this can never drift into testing a local copy.
     eval "$(awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER")"
     SERVER_PID=""
-    PARANOID_PRIOR=2
-    KPTR_PRIOR=1
+    SYSCTLS_WRITTEN="$written"
     SYSCTLS_MUTATED=1
     case "$case_name" in
       never-mutated) SYSCTLS_MUTATED=0 ;;
-      failing-sudo)  set -e ;;   # cleanup must survive errexit
+      errexit)       set -e ;;   # cleanup must survive errexit
     esac
-    restore_sysctls 2>/dev/null
+    # THE RETURN CODE OF `restore_sysctls`, captured on the NEXT statement (#3272
+    # review). It used to be read after an intervening `case`, so `$?` was the
+    # CASE's status — 0 for every non-`idempotent` case — and the "cleanup cannot
+    # fail the run" half of the failing-sudo case measured nothing at all. The
+    # second (idempotency) call is issued only after the code is banked.
+    # stderr is NOT discarded: the affirmative/warning DIAGNOSTIC is half of what
+    # B3 is about, so the probe must be able to read it.
+    restore_sysctls
+    printf 'RC=%s\n' "$?" > "$TMP/sysctl-rc-$case_name.txt"
     case "$case_name" in
-      idempotent) : > "$calls"; restore_sysctls 2>/dev/null ;;
+      idempotent) : > "$calls"; restore_sysctls ;;
     esac
-    echo "RC=$?"
-  ) >"$TMP/sysctl-rc-$1.txt" 2>&1
+  ) >"$out" 2>&1
   cat "$calls"
 }
+probe_rc()  { cat "$TMP/sysctl-rc-$1.txt"; }
+probe_out() { cat "$TMP/sysctl-out-$1.txt"; }
 
-got=$(sysctl_probe restores)
+BOTH_KNOBS=$'kernel.perf_event_paranoid=2\nkernel.kptr_restrict=1'
+
+got=$(sysctl_probe restores "$BOTH_KNOBS")
 if grep -q 'sysctl -w kernel.perf_event_paranoid=2' <<<"$got" \
   && grep -q 'sysctl -w kernel.kptr_restrict=1' <<<"$got"; then
   pass "OBSERVED: restore_sysctls writes BOTH captured priors back (paranoid=2, kptr=1)"
@@ -982,15 +995,29 @@ if [ "$(grep -c 'sysctl -w' <<<"$got")" -eq 2 ]; then
 else
   fail "expected exactly 2 restore writes (recorded: $got)"
 fi
+# The affirmative line is printed, and it NAMES both knobs — the case the partial
+# check below is distinguished from.
+if grep -q 'restored host sysctls:.*perf_event_paranoid=2' <<<"$(probe_out restores)" \
+  && grep -q 'kptr_restrict=1' <<<"$(probe_out restores)" \
+  && ! grep -q 'WARNING' <<<"$(probe_out restores)"; then
+  pass "OBSERVED: a FULL restore prints the affirmative line for both knobs and NO warning"
+else
+  fail "a full restore must print both knobs and no warning (out: $(probe_out restores))"
+fi
+if [ "$(probe_rc restores)" = "RC=0" ]; then
+  pass "OBSERVED: restore_sysctls returns 0 on the success path (measured, not inferred)"
+else
+  fail "restore_sysctls must return 0 (got $(probe_rc restores))"
+fi
 
-got=$(sysctl_probe idempotent)
+got=$(sysctl_probe idempotent "$BOTH_KNOBS")
 if [ -z "$got" ]; then
   pass "OBSERVED: a SECOND restore_sysctls call is a no-op (idempotent)"
 else
   fail "restore_sysctls must be idempotent (second call recorded: $got)"
 fi
 
-got=$(sysctl_probe never-mutated)
+got=$(sysctl_probe never-mutated "$BOTH_KNOBS")
 if [ -z "$got" ]; then
   pass "OBSERVED: a run that never mutated the knobs issues NO sysctl on exit"
 else
@@ -998,13 +1025,115 @@ else
 fi
 
 # A FAILING sudo must neither abort the handler under `set -e` nor stop it trying the
-# SECOND knob — the failure mode that would leave kptr_restrict=0 behind forever.
-got=$(sysctl_probe failing-sudo)
-rc_line=$(cat "$TMP/sysctl-rc-failing-sudo.txt")
-if grep -q 'kernel.kptr_restrict=1' <<<"$got" && grep -q 'RC=0' <<<"$rc_line"; then
+# SECOND knob — the failure mode that would leave kptr_restrict=0 behind forever. The
+# rc is now read off `restore_sysctls` itself (see the probe), so the "cannot fail the
+# run" half is genuinely measured.
+got=$(sysctl_probe errexit "$BOTH_KNOBS" none)
+if grep -q 'kernel.kptr_restrict=1' <<<"$got" && [ "$(probe_rc errexit)" = "RC=0" ]; then
   pass "OBSERVED: a FAILING sudo still attempts both knobs and cannot fail the run (rc=0)"
 else
-  fail "a failing sudo must not orphan the second knob or fail the run (recorded: $got / $rc_line)"
+  fail "a failing sudo must not orphan the second knob or fail the run (recorded: $got / $(probe_rc errexit))"
+fi
+# ...and it must say so: a total failure is a WARNING with a complete runnable command,
+# never the affirmative line.
+out=$(probe_out errexit)
+if grep -q 'WARNING' <<<"$out" \
+  && grep -q 'sudo sysctl -w kernel.perf_event_paranoid=2 kernel.kptr_restrict=1' <<<"$out" \
+  && ! grep -q '^restored host sysctls' <<<"$out"; then
+  pass "OBSERVED: a TOTAL restore failure warns with a COMPLETE runnable sysctl command"
+else
+  fail "a total restore failure must warn with the full command (out: $out)"
+fi
+
+# ---- #3272 review B3: a PARTIAL restore must WARN, not report success -------
+# NON-VACUITY. The first fix of finding 3 keyed the success/warning split on "was
+# ANYTHING restored":
+#
+#     if [[ "${#restored[@]}" -gt 0 ]]; then echo "restored host sysctls: …"
+#     else echo "WARNING: …"; fi
+#
+# so a PARTIAL restore took the AFFIRMATIVE branch. MEASURED against that code with
+# perf_event_paranoid restorable and kptr_restrict not: ONE `sysctl -w`, the line
+# `restored host sysctls: perf_event_paranoid=2`, and NO warning — the operator told
+# the host was restored while `kptr_restrict=0` was left behind permanently. That is
+# finding 3's own defect in narrower form; both directions are asserted here.
+got=$(sysctl_probe partial "$BOTH_KNOBS" paranoid)
+out=$(probe_out partial)
+if [ "$(grep -c 'sysctl -w' <<<"$got")" -eq 2 ]; then
+  pass "OBSERVED: a partial restore still ATTEMPTS both knobs (the failure does not stop the loop)"
+else
+  fail "a partial restore must attempt both knobs (recorded: $got)"
+fi
+if grep -q 'WARNING' <<<"$out" && grep -q 'kernel.kptr_restrict=1' <<<"$out"; then
+  pass "OBSERVED: a PARTIAL restore WARNS, naming the knob left weakened (pre-fix: silent)"
+else
+  fail "a partial restore must warn and name the unrestored knob (out: $out)"
+fi
+if grep -q 'sudo sysctl -w kernel.kptr_restrict=1' <<<"$out"; then
+  pass "OBSERVED: the partial warning carries a COMPLETE runnable restoration command"
+else
+  fail "the partial warning must carry a runnable command (out: $out)"
+fi
+if grep -q 'PARTIAL restore, not a successful one' <<<"$out"; then
+  pass "OBSERVED: the partial case says it is PARTIAL (pre-fix it read as a success)"
+else
+  fail "a partial restore must not read as a success (out: $out)"
+fi
+# The counted knob must be the one that actually went back — the affirmative half may
+# not name a knob the sudo refused.
+if grep -q 'restored host sysctls: kernel.perf_event_paranoid=2$' <<<"$out"; then
+  pass "OBSERVED: the affirmative half names ONLY the knob that was genuinely restored"
+else
+  fail "the affirmative line must name only the restored knob (out: $out)"
+fi
+
+# ---- B3 ROOT CAUSE: a knob whose prior was not captured is never MUTATED ----
+# The reporting fix above is the second half. The first is that the unrestorable case
+# must not arise: `kptr_restrict` used to be WRITTEN even when its prior read as `""`
+# (an unreadable /proc entry), which is what created a knob with nothing to restore
+# to. Driven over the driver's own capture/enrollment functions with an injected
+# unreadable path.
+if bash -c '
+  set -uo pipefail
+  DRIVER="'"$DRIVER"'"
+  eval "$(awk "/^read_sysctl_prior\(\)/,/^}/" "$DRIVER")"
+  eval "$(awk "/^enroll_sysctl\(\)/,/^}/" "$DRIVER")"
+  SYSCTLS_WRITTEN=""; SYSCTLS_MUTATED=0
+  # An unreadable path yields rc=1, NOT an empty success — so the caller can branch.
+  read_sysctl_prior /nonexistent/kptr_restrict >/dev/null 2>&1 \
+    && { echo "an unreadable path returned SUCCESS"; exit 1; }
+  # An EMPTY file is also a failed capture: "" is not a value to restore to.
+  tmp=$(mktemp); : > "$tmp"
+  read_sysctl_prior "$tmp" >/dev/null 2>&1 && { echo "an empty file read as a value"; exit 1; }
+  rm -f "$tmp"
+  # A readable one yields the value and enrolls exactly one line.
+  tmp=$(mktemp); printf "2\n" > "$tmp"
+  v=$(read_sysctl_prior "$tmp") || { echo "a readable path failed"; exit 1; }
+  [ "$v" = "2" ] || { echo "wrong value: $v"; exit 1; }
+  enroll_sysctl kernel.perf_event_paranoid "$v"
+  [ "$SYSCTLS_WRITTEN" = "kernel.perf_event_paranoid=2" ] || { echo "bad enrollment: $SYSCTLS_WRITTEN"; exit 1; }
+  [ "$SYSCTLS_MUTATED" = "1" ] || { echo "enrollment did not set the mutated flag"; exit 1; }
+  rm -f "$tmp"
+' >/dev/null 2>&1; then
+  pass "OBSERVED: read_sysctl_prior FAILS on an unreadable/empty prior, and enrollment pairs knob+prior"
+else
+  fail "read_sysctl_prior must fail-closed on an unreadable or empty prior"
+fi
+# And the driver must WIRE that: the kptr write is inside the successful-capture
+# branch, so an unreadable prior leaves the knob alone rather than weakening it.
+if awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$DRIVER" | grep -q 'kernel.kptr_restrict=0' \
+  && awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$DRIVER" | grep -q 'left ALONE'; then
+  pass "the driver weakens kptr_restrict ONLY inside the successful-capture branch"
+else
+  fail "the kptr_restrict write must be gated on its prior having been captured"
+fi
+# An unreadable perf_event_paranoid prior is FATAL rather than a silent weakening: it
+# is the knob the measurement REQUIRES, so there is no correct run without it.
+if grep -q 'if ! PARANOID_PRIOR=' "$DRIVER" \
+  && awk '/^  if ! PARANOID_PRIOR=/,/^  fi$/' "$DRIVER" | grep -q 'exit 2'; then
+  pass "an unreadable perf_event_paranoid prior is FATAL (never weakened unrestorably)"
+else
+  fail "an unreadable perf_event_paranoid prior must be fatal"
 fi
 
 # The signal path end-to-end: a driver-shaped script carrying the driver's OWN
