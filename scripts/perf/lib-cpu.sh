@@ -13,6 +13,57 @@
 
 set -euo pipefail
 
+# --- the sysfs topology root, INJECTABLE for testing only (issue #3272, item 10) --
+#
+# The sibling check below is the load-bearing guarantee of the whole
+# same-session both-arm methodology: if the two pinned CPUs are NOT one physical
+# core's hyperthreads, every per-core figure the rig prints is a figure of
+# something else. A guarantee that has never been OBSERVED to reject a
+# non-sibling set is not evidence it would (#3249), and it could not be observed
+# because the path was a hardcoded `/sys/...` literal — untestable without a
+# particular CPU layout and root.
+#
+# So the root is a variable. Two properties keep that from becoming the bypass:
+#
+#  * It is READ ONCE here from `CQLITE_WS0_CPU_TOPOLOGY_ROOT`, and any non-default
+#    value is ANNOUNCED ON STDERR every single time — a shimmed run cannot be
+#    quiet about it.
+#  * `assert_real_cpu_topology` (called by the driver BEFORE any measurement)
+#    FAILS CLOSED when the override is set, so it can only ever be used by a test
+#    that sources this library directly. A measurement run that tried to point
+#    the sibling check at a fake tree stops before it measures anything.
+CPU_TOPOLOGY_ROOT="${CQLITE_WS0_CPU_TOPOLOGY_ROOT:-/sys/devices/system/cpu}"
+if [[ "$CPU_TOPOLOGY_ROOT" != "/sys/devices/system/cpu" ]]; then
+  echo "NOTE: CPU topology root OVERRIDDEN to '$CPU_TOPOLOGY_ROOT' (test-only; a" >&2
+  echo "      measurement run refuses this — see assert_real_cpu_topology)." >&2
+fi
+
+# FAIL CLOSED unless the sibling check is reading the REAL host topology.
+#
+# The driver calls this before it verifies any pinning. Without it, the override
+# above would be a way to satisfy the pinning guarantee with a fabricated
+# `thread_siblings_list` — i.e. the guard added for #3096 trap 2 could be
+# bypassed by an env var, which is precisely the "a fix moved the problem" shape
+# #3272 exists to close.
+assert_real_cpu_topology() {
+  if [[ -n "${CQLITE_WS0_CPU_TOPOLOGY_ROOT:-}" ]]; then
+    echo "FATAL: CQLITE_WS0_CPU_TOPOLOGY_ROOT is set ('$CQLITE_WS0_CPU_TOPOLOGY_ROOT')." >&2
+    echo "       That override exists ONLY so scripts/tests/ can prove the sibling check" >&2
+    echo "       rejects a non-sibling set. A measurement run must read the REAL host" >&2
+    echo "       topology: verifying the pinning against a fabricated sysfs tree would" >&2
+    echo "       make every per-core figure this rig prints unverified (issue #3272)." >&2
+    echo "       Unset it and re-run." >&2
+    return 1
+  fi
+  if [[ ! -d "$CPU_TOPOLOGY_ROOT" ]]; then
+    echo "FATAL: $CPU_TOPOLOGY_ROOT does not exist — the sibling check cannot read the" >&2
+    echo "       host's CPU topology, so the pinning cannot be VERIFIED (issue #3096" >&2
+    echo "       spec R2). This rig runs on Linux; there is no fallback, because an" >&2
+    echo "       assumed sibling pair is the defect the check exists to prevent." >&2
+    return 1
+  fi
+}
+
 # Expand a Linux CPU list ("0-3,8", "2,10") into one sorted, space-separated list.
 #
 # Two properties that are easy to lose in an edit (issue #3096 review):
@@ -42,8 +93,13 @@ cpu_list_expand() {
 }
 
 # The sorted sibling list of one logical CPU, read from sysfs.
+#
+# An unreadable file is a FAILURE, never an empty answer: `verify_sibling_pair`
+# compares `got` against `want`, and an empty `got` from a silent read failure
+# would compare unequal and produce a confusing "not the sibling set" diagnostic
+# for what is really "the topology could not be read".
 cpu_siblings_of() {
-  local cpu="$1" f="/sys/devices/system/cpu/cpu$1/topology/thread_siblings_list"
+  local cpu="$1" f="$CPU_TOPOLOGY_ROOT/cpu$1/topology/thread_siblings_list"
   [[ -r "$f" ]] || { echo "FATAL: $f is unreadable — cannot VERIFY that cpu$cpu's pinning is a physical core" >&2; return 1; }
   cpu_list_expand "$(cat "$f")"
 }
@@ -73,7 +129,7 @@ verify_sibling_pair() {
 # Print every physical core's sibling pair — the menu a caller picks from.
 list_sibling_pairs() {
   local f seen=() s
-  for f in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
+  for f in "$CPU_TOPOLOGY_ROOT"/cpu[0-9]*/topology/thread_siblings_list; do
     [[ -r "$f" ]] || continue
     s="$(cpu_list_expand "$(cat "$f")")"
     if [[ ! " ${seen[*]-} " == *" $s "* ]]; then

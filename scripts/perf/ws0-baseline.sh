@@ -143,8 +143,41 @@ done
 # --- trap 1 self-check: this rig contains no per-process perf invocation ------
 # Greps THIS FILE (spec R2's "contains no `perf stat -p` invocation"), so a
 # future edit that reaches for `-p` cannot run at all.
-if grep -nE 'perf stat[^|]*(-p |--pid)' "${BASH_SOURCE[0]}" | grep -v 'self-check' >/dev/null 2>&1; then
-  echo "FATAL: this script contains a per-process 'perf stat -p' invocation." >&2
+#
+# # Two bypasses this used to have (issue #3272, item 10)
+#
+# The original pattern was `perf stat[^|]*(-p |--pid)` filtered through
+# `grep -v 'self-check'`, and MEASURED against injected invocations it let two
+# ordinary spellings through:
+#
+#  1. **An ATTACHED value, `-p<pid>` with no space.** The old `-p ` alternative
+#     required a trailing SPACE, but perf/getopt accept an attached value, so a
+#     per-process counting invocation written that way was a genuine one the guard
+#     did not see. Verified before this fix: the old pattern returned rc=1 (no
+#     match) on exactly that line. (Not spelled out literally here — see the
+#     self-match note below.)
+#  2. **Any line containing the words "self-check".** The `grep -v` was meant to
+#     stop the PATTERN LITERAL in this very comment block from matching itself,
+#     but it discards by CONTENT, so appending a comment mentioning that phrase to
+#     a real per-process invocation suppressed the guard. A guard whose bypass is a
+#     code comment is not a guard.
+#
+# The fix for (1) is a word-boundary/attached-value alternation; the fix for (2) is
+# to stop excluding by content at all. Instead the pattern is ASSEMBLED from pieces
+# so no line in this file contains the literal it searches for — the self-match
+# problem is removed rather than filtered around. `PERF_TOOL` is spelled
+# separately from `stat` for the same reason.
+#
+# Both directions are covered by scripts/tests/test_ws0_cpu_pinning_guards.sh: the
+# guard must FIRE on each `-p` spelling AND must NOT fire on this file as shipped
+# (a guard that reds unconditionally is the one operators learn to delete).
+PERF_TOOL='perf'
+# Matches `-p <n>`, `-p<n>`, `--pid <n>`, `--pid=<n>` after a `perf stat`, and
+# nothing in a pipeline's right-hand side (`[^|]*`).
+PERF_PER_PROCESS_RE="${PERF_TOOL} "'stat[^|]*(-p([[:space:]]|[0-9"$])|--pid([[:space:]]|=))'
+if grep -nE "$PERF_PER_PROCESS_RE" "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+  echo "FATAL: this script contains a per-process 'perf stat -p' invocation:" >&2
+  grep -nE "$PERF_PER_PROCESS_RE" "${BASH_SOURCE[0]}" >&2
   echo "       Per-process counting measured >2x observer cost on this workload;" >&2
   echo "       CPU-wide 'perf stat -C <cpu-list>' is mandatory (issue #3096 spec R2)." >&2
   exit 2
@@ -339,6 +372,13 @@ for tool in perf taskset python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is not installed" >&2; exit 2; }
 done
 
+# The sibling check must read the REAL host topology before it can vouch for
+# anything (issue #3272, item 10). `lib-cpu.sh` exposes an injectable topology root
+# so `scripts/tests/test_ws0_cpu_pinning_guards.sh` can prove the check REJECTS a
+# non-sibling set without needing a particular CPU layout; that override would
+# otherwise be a way to satisfy the pinning guarantee with a fabricated
+# `thread_siblings_list`, so a measurement run refuses it here, before it measures.
+assert_real_cpu_topology || exit 2
 verify_sibling_pair "$SERVER_CPUS" "server"
 verify_sibling_pair "$CLIENT_CPUS" "client" 2>/dev/null \
   || echo "client CPUs: $CLIENT_CPUS (a multi-core set — only the SERVER set must be one physical core)"
