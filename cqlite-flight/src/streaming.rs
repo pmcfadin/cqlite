@@ -542,27 +542,35 @@ fn time_encoder_framing(inner: DoGetStream, rpc_span: tracing::Span) -> DoGetStr
     }
     let timings = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
     Box::pin(FramingTimedStream {
-        inner,
-        timings: timings.clone(),
         // Its OWN emitter, deliberately not the merge closure's: this accumulator
         // is still being written after that closure has ended (the client may poll
         // the last frames later), and reusing the merge emitter would either
         // truncate the framing total or move the merge samples' emission point,
         // breaking the #2819 roborev-B1 ordering invariant. Only the framing bucket
         // is ever non-zero here, so this emits exactly one extra sample per RPC.
-        _emitter: crate::obs::StreamSubPhaseEmitter::new(rpc_span, timings),
+        // Written first to MIRROR the load-bearing declaration order below.
+        _emitter: crate::obs::StreamSubPhaseEmitter::new(rpc_span, timings.clone()),
+        inner,
+        timings,
     })
 }
 
 /// See [`time_encoder_framing`]. Constructed only when a meter is installed.
+///
+/// FIELD ORDER IS LOAD-BEARING: struct fields drop in DECLARATION order, so
+/// `_emitter` is declared FIRST — it flushes the framing sample while `inner` (the
+/// metered/encoded parent stream, whose own `Drop` finalizes the RPC's row/byte
+/// accounting) is still alive. Declared AFTER `inner` the sample would land
+/// OUTSIDE its parent stream's teardown, the ordering the #2819 roborev-B1
+/// invariant forbids. Guarded by `streaming_framing_tests.rs`.
 struct FramingTimedStream {
-    inner: DoGetStream,
-    timings: Arc<cqlite_core::observability::StreamSubPhaseTimings>,
     /// Flushes the framing sample when the response stream is dropped — i.e. after
     /// the LAST poll, so a mid-stream client disconnect still records what it cost.
     /// Held purely for its `Drop`; underscore-prefixed so the lint knows that is
     /// deliberate rather than an unread field.
     _emitter: crate::obs::StreamSubPhaseEmitter,
+    inner: DoGetStream,
+    timings: Arc<cqlite_core::observability::StreamSubPhaseTimings>,
 }
 
 impl Stream for FramingTimedStream {
@@ -781,3 +789,9 @@ mod tests;
 #[cfg(test)]
 #[path = "egress_budget_tests.rs"]
 mod egress_budget_tests;
+
+// Teardown-ORDER guard for `FramingTimedStream`'s load-bearing field order
+// (issue #3096); its own module so the two files above stay put (epic #1135).
+#[cfg(test)]
+#[path = "streaming_framing_tests.rs"]
+mod streaming_framing_tests;
