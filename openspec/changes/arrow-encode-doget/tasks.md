@@ -1,5 +1,51 @@
 # Tasks: arrow-encode-doget (issue #3096)
 
+## DELIVERY STATUS — R4 is UNMET (owner-ordered split, 2026-08-03)
+
+**R4 ("The corpus generator and measurement scripts are COMMITTED and runnable from
+a clean checkout"): UNMET. Re-anchored to issue #3272.** Stated in the same plain
+form as AC1/R1 below, with no optimistic framing:
+
+| | |
+|---|---|
+| what R4 requires in this PR | a committed corpus generator + committed measurement scripts, runnable from a clean checkout |
+| what this PR now ships | **neither** — `tools/ws0-corpus-gen/` and `scripts/perf/` were REMOVED from this branch |
+| **R4 verdict** | **UNMET** — re-anchored to **#3272** |
+
+**Why.** A sliced roborev pass (6 rounds, every one `prompt-content: PASS`) left 7
+blockers open at HEAD, **5 of them in `scripts/perf/`** — three being guards that
+earlier fix rounds had made fail-open or bypassable. The measurement rig needs its
+own review footing and must not hold the reviewed core (the `arrow_*` export split,
+the `Field`-identity validation, the wire-partition/framing work, the IPC-framing
+attribution). The owner therefore ordered the rig out of this PR and into **#3272**.
+
+**R4's spec text is deliberately NOT edited or softened** — the requirement stands
+in `specs/arrow-encode-doget/spec.md` exactly as written, and this block records its
+delivery status. Removed here, delivered there:
+
+* `tools/ws0-corpus-gen/` (generator binary, bare-scan bench, corpus-identity
+  recorder, and the generator self-check tests);
+* `scripts/perf/` (driver, CPU-sibling-pinning library, reporter, README) and
+  `scripts/tests/test_ws0_report_guards.sh` with its `agent-gate.sh` hook.
+
+**What survives here, and is unaffected:** every artifact under
+`docs/reports/ws0-3096-artifacts/` (the posted evidence R5 requires — no recorded
+measurement, figure, superseded-figure label or AC1 statement is changed by the
+split), the method doc, and the in-repo Arrow-buffer digest oracle.
+
+**R3 status after the split: satisfied, with one arm now rig-dependent.** The
+oracle's **CI-fixture** arm is fully self-contained — its fixture is written in-test
+by the new `cqlite-flight/tests/support/ws0_fixture.rs` support module (same schema,
+same row synthesis, same write path), and its pinned digest is UNCHANGED at
+`0xd001_4e42_e893_f87f` over 500 rows in 4 batches, identical on the `bypass` and
+`merge` arms. The oracle's opt-in **measurement-corpus** arm (`CQLITE_WS0_CORPUS_DIR`)
+still runs against any such corpus, but the generator that PRODUCES one is in #3272,
+so with the env var unset it SKIPs with an explicit reason naming #3272 rather than
+failing or passing vacuously. A corpus dir that is SET but unusable remains a hard
+failure.
+
+---
+
 ## DELIVERY STATUS — AC1 is UNMET (owner-ruled ship, 2026-08-03)
 
 **AC1 (`do_get rows/s >= same-session bare scan / 1.3`): UNMET. Re-anchored to
@@ -38,8 +84,10 @@ satisfied, and nothing in this tree may say otherwise.** We do not launder a
 negative result through an optimistic title. The **C** intent audit should record
 **AC1: unmet**; the spec has deliberately NOT been edited to soften it.
 
-**What the change delivers instead, all of it verifiable:** the committed
-reproduction rig (`tools/ws0-corpus-gen` + `scripts/perf/`), the in-repo
+**What the change delivers instead, all of it verifiable** (as re-scoped by the
+2026-08-03 split: the reproduction rig that produced the numbers below —
+`tools/ws0-corpus-gen` + `scripts/perf/` — is **re-anchored to #3272** and is no
+longer part of this PR; its ARTIFACTS remain committed here): the in-repo
 Arrow-buffer digest oracle, the closed IPC-framing attribution blind spot
 (**313.0 ns/row**, previously attributable to nothing), lever 4 (a **wire-safety**
 lever: bodies provably under the reserved gRPC ceiling; **throughput measured at
@@ -91,28 +139,37 @@ honored: no further lever was stacked on an unexplained result.
       ws0-cqlite/scan-harness/Cargo.toml` points at the dead path `/home/ubuntu/workspace/wt-3026/
       cqlite-core`, and that the #3100 corpus is Cassandra-written + LZ4 — so no #3096 number is
       currently reproducible on this box.
-- [x] **Corpus generator** (surface: new `tools/ws0-corpus-gen` binary): drives the production
+- [ ] **RE-ANCHORED TO #3272 (R4 unmet here).** **Corpus generator** (surface: new `tools/ws0-corpus-gen` binary): drives the production
       `cqlite_core` `SSTableWriter` from the pinned `ws0.events` DDL
       (`docs/reports/ws0-3100-artifacts/ws0-h2h/schemas/ws0-events.cql`); 4,000,000 rows as
       40,000 partitions x 100 rows; partitions emitted in Murmur3 token order; **uncompressed**
       (assert no `CompressionInfo.db` is written — #1406); deterministic from a recorded seed.
-- [x] Generator self-checks: re-running with the same seed produces a byte-identical `Data.db`;
+- [ ] **RE-ANCHORED TO #3272 (R4 unmet here).** Generator self-checks: re-running with the same seed produces a byte-identical `Data.db`;
       writing/observing 0 rows exits non-zero; the emitted row/partition counts are asserted, not
-      assumed.
+      assumed. (The equivalent anti-vacuity checks for the CI FIXTURE — non-zero rows, confirmed
+      partition count, non-empty `Data.db`, no `CompressionInfo.db` — remain in
+      `cqlite-flight/tests/support/ws0_fixture.rs` and are asserted by the digest oracle.)
 - [x] Record the corpus identity in-tree: `sha256`, row count, cells/row, on-disk bytes, bytes/row.
       State explicitly that it differs from #3058's `0185909de6da…` by construction and that the
       old digest is NOT asserted.
 - [x] Document the corpus as a **PERFORMANCE FIXTURE ONLY** in the generator's own docs — a
       CQLite-written + CQLite-read corpus is invariant to a uniform framing error (#3042) and is
-      never a correctness oracle for on-disk framing.
-- [x] **Measurement scripts** (surface: `scripts/perf/…` + method doc under `docs/reports/`):
+      never a correctness oracle for on-disk framing. (Carried into
+      `cqlite-flight/tests/support/ws0_fixture.rs`, which states the same scope for the CI
+      fixture; `docs/reports/ws0-3096-artifacts/measurement-method.md` states it for the corpus.)
+- [ ] **RE-ANCHORED TO #3272 (R4 unmet here).** **Measurement scripts** (surface: `scripts/perf/…` + method doc under `docs/reports/`):
       CPU-wide `perf stat -C <cpu-list>`, **no** `perf stat -p` anywhere; `taskset` pinning to a
       pair read from `/sys/devices/system/cpu/cpu*/topology/thread_siblings_list` that **fails
       closed** if the pair is not siblings of one physical core; median of 3 with spread; setup
       subtracted from the cycles/row denominator; row denominator printed with every figure.
 - [x] Both arms in ONE session on ONE pinned pair: bare scan via `execute_streaming`, Flight
       `do_get` over a real loopback transport. Warm and cold as separate runs, reported separately.
-- [x] **In-repo Arrow-buffer digest oracle** (surface: `cqlite-flight/tests/`): folds each emitted
+      (EXECUTED, and its artifacts stay committed; the DRIVER that runs it is re-anchored to
+      #3272, so re-running it from this branch alone is not possible — that is R4's gap, recorded
+      above.)
+- [x] **In-repo Arrow-buffer digest oracle** (surface: `cqlite-flight/tests/`) — KEPT, and now
+      self-contained: its CI fixture is written in-test by
+      `cqlite-flight/tests/support/ws0_fixture.rs`, and the pinned digest is unchanged. Folds each emitted
       `RecordBatch`'s value + validity buffers in column order plus row count; asserts equality
       across `CQLITE_FLIGHT_MERGE_PATH=bypass|merge` at a PINNED `now`, plus row count and
       cells/row. Shares `PROBE_LOCK` with `issue_3058_forced_path_differential.rs` (process-global
@@ -120,7 +177,8 @@ honored: no further lever was stacked on an unexplained result.
 - [x] Close the attribution blind spot: `StreamSubPhase::Encode` (`egress_flush.rs:116-119`) times
       only `flush_buffer`, NOT `encode_do_get`'s IPC framing. Add a sub-phase around the encoder
       stream, or record explicitly that levers 4/5 are attributed by `perf` alone.
-- [x] **Re-baseline pre-change** on the regenerated corpus: bare scan and `do_get` (bypass arm)
+- [x] **Re-baseline pre-change** on the regenerated corpus (measured; artifacts committed here,
+      the rig that produced them re-anchored to #3272): bare scan and `do_get` (bypass arm)
       rows/s + cycles/row, warm and cold. This pair, not 210,192 / 312,155, is the baseline.
 
 ## 1. File-size precursor (surface: `cqlite-core/src/export/arrow_convert.rs`)
