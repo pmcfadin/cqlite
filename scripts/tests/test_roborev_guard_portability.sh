@@ -98,18 +98,38 @@ SCAN_FILES=(
 CONSTRUCT_RE=(); CONSTRUCT_WHY=(); CONSTRUCT_SAMPLE=()
 add_construct() { CONSTRUCT_RE+=("$1"); CONSTRUCT_WHY+=("$2"); CONSTRUCT_SAMPLE+=("$3"); }
 
-# The two patterns whose controls below name them directly are held in NAMED variables rather
+# The patterns whose controls below name them directly are held in NAMED variables rather
 # than referenced by table INDEX: an index reference silently retargets when a row is inserted
 # above it, which would leave a control asserting about a different rule than it names.
-RE_SED_INPLACE='(^|[^[:alnum:]_-])sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-i([[:space:]]|$)'
+#
+# THE OPTION RUN. `-i` does not have to sit next to `sed`: `sed -e 's/a/b/' -i file` reaches the
+# same BSD argument-consuming `-i` (it eats `file` as the backup suffix) while an "adjacent
+# flags only" regex sees nothing. So the rules skip over an arbitrary run of intervening
+# tokens — BUT that run stops dead at a shell metacharacter (| ; & < > ( )), which is what
+# keeps `sed 's/x/y/' f | grep -i foo` from being read as a sed `-i`: the `-i` there belongs to
+# a DIFFERENT command. This is deliberately a LINE-ORIENTED approximation of shell parsing and
+# not a tokeniser; the residual it leaves is stated in full below the table.
+_OPT_RUN='([[:space:]]+[^[:space:]|;&<>()]+)*'
+RE_SED_INPLACE='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+(-i|--in-place)([[:space:]]|$)'
 # BUNDLED CLUSTERS ending in `i` — the hole the bare `-i` rule above leaves open. BSD getopt
 # processes `-Ei` as `-E` then `-i`, and `i` is declared WITH A REQUIRED ARGUMENT (Apple
 # text_cmds sed/main.c: `getopt(argc, argv, "EI:ae:f:i:lnru")`), so with nothing left in the
 # cluster it consumes the NEXT ARGV entry as the backup suffix — byte for byte the #3296
 # defect, reached by a spelling the bare-`-i` regex never sees. `-i.bak` (an ATTACHED suffix)
 # is portable and deliberately NOT matched: both seds read it the same way.
-RE_SED_INPLACE_CLUSTER='(^|[^[:alnum:]_-])sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]+i([[:space:]]|$)'
-RE_PASTE_NO_OPERAND='(^|[^[:alnum:]_-])paste([[:space:]]+-[^[:space:]|;)&]+)*[[:space:]]*($|\||\)|;|&)'
+RE_SED_INPLACE_CLUSTER='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-[a-zA-Z]+i([[:space:]]|$)'
+# PASTE WITH NO FILE OPERAND, in every spelling that reaches BSD's `if (*argv == NULL) usage();`:
+#   paste -sd,            bundled flags, nothing after them
+#   paste -d ,            the delimiter argument SEPARATED from -d (consumed as the option's
+#                         argument by getopt, so it is not an operand either)
+#   paste -sd, < input    a REDIRECTION is not an operand — BSD still usage()-errors, and the
+#                         `<` is why the option run above excludes redirection characters
+# The `-d`-with-separated-argument pair is matched as ONE unit, because a regex cannot express
+# "this bare token is the argument of the preceding option" any other way.
+_PASTE_DARG='[[:space:]]+-[a-zA-Z]*d[[:space:]]+[^[:space:]|;)&<]+'
+_PASTE_OPT='[[:space:]]+-[^[:space:]|;)&<]+'
+_PASTE_REDIR='([[:space:]]*<[[:space:]]*[^[:space:]|;)&]+)?'
+RE_PASTE_NO_OPERAND='(^|[^[:alnum:]_-])paste('"$_PASTE_DARG"'|'"$_PASTE_OPT"')*'"$_PASTE_REDIR"'[[:space:]]*($|\||\)|;|&)'
 
 add_construct "$RE_SED_INPLACE" \
   "BSD sed's -i takes a REQUIRED suffix argument, so it eats the EXPRESSION and the edit never lands (#3296 cx28/cx29/cx28b/cx28c) — use the guard test's sed_inplace helper" \
@@ -162,13 +182,68 @@ if [ "${#CONSTRUCT_RE[@]}" -ne "${#CONSTRUCT_WHY[@]}" ] ||
   bad 'structural: the construct table arrays are not the same length — some pattern has no reason or no positive control'
 fi
 
+# ---------------------------------------------------------------------------
+# STATED RESIDUAL (an undocumented hole is worse than no guard, because it invites reliance it
+# cannot support). This scanner is line-oriented ERE matching over backslash-JOINED logical
+# lines. It is deliberately NOT a shell tokeniser: a bash re-implementation of shell word
+# splitting would be a second implementation whose own correctness is only knowable by
+# differential testing against the first, which is the failure mode CLAUDE.md records for the
+# deleted `census-exclusion:` predictor (a false-PASS count that GREW across review rounds).
+# So these spellings are KNOWN NOT COVERED, by choice:
+#
+#   1. A shell metacharacter INSIDE QUOTES within the option run, e.g.
+#        sed -e 's/a|b/c/' -i f
+#      The run stops at the `|` because nothing here knows it is quoted. Un-quoted, the same
+#      `|` really would end the command, and reading it as one is what prevents the
+#      `sed … | grep -i …` false positive — the two cases are indistinguishable line-wise.
+#   2. The command name reached through a VARIABLE or an alias: `$SED -i f`, `"${SED}" -i f`.
+#      (`command sed -i f` and `env sed -i f` ARE caught — the literal name is present.)
+#   3. An operand supplied at RUNTIME: `paste -sd, $files` is flagged when $files is empty and
+#      not otherwise; the scanner cannot know, so it treats a bare word as an operand (the
+#      quiet direction — noise here would be worse than a miss, per the negative controls).
+#   4. A construct built by string concatenation or eval (`cmd="sed -"; cmd="$cmd i"`).
+#
+# Each of these is a MISS, never a false green elsewhere; the behavioural shim differential in
+# section (2) is the backstop that catches what the text scan cannot see.
+# ---------------------------------------------------------------------------
+
 # The scan body: code only. A construct named in a comment (this repo documents the ones it
 # banned) is prose, not an invocation. A line carrying `portability-lint-allow` is exempt —
 # the repo's existing escape-marker convention (`injection-lint-allow`, `perf-gate-allow`) —
 # so a provably-safe or deliberately-BSD-emulating line has a route that is VISIBLE in the
 # diff instead of forcing a rewrite of the lint.
+#
+# CONTINUATION JOINING: `sed \` + newline + `-i file` is ONE command that no line-oriented ERE
+# can see, so logical lines are assembled before matching. The awk below is written to keep the
+# output the SAME LENGTH as the input — a joined logical line is emitted at the position of its
+# FIRST physical line and each consumed continuation becomes a blank — so `grep -n` line numbers
+# still name the real line in the real file. Comment-only and marker-exempt lines are BLANKED
+# rather than deleted for the same reason (deleting them, as the previous form did, shifted
+# every number after them). A comment line is never joined to the next: `#` in shell comments to
+# end of line, so a trailing backslash there continues nothing.
 scan_hits() { # scan_hits <ere> <file>
-  grep -vE '^[[:space:]]*#' "$2" | grep -v 'portability-lint-allow' | grep -nE -- "$1" || true
+  awk '
+    function emit_logical(  i) {
+      if (buf ~ /portability-lint-allow/) print ""; else print buf
+      for (i = 0; i < pending; i++) print ""
+      buf = ""; have = 0; pending = 0
+    }
+    BEGIN { buf = ""; have = 0; pending = 0 }
+    {
+      if (have == 0) {
+        if ($0 ~ /^[[:space:]]*#/) { print ""; next }
+        buf = $0; have = 1; pending = 0
+      } else {
+        line = $0
+        sub(/^[[:space:]]+/, "", line)
+        buf = buf " " line
+        pending = pending + 1
+      }
+      if (buf ~ /\\$/) { sub(/\\$/, "", buf); next }
+      emit_logical()
+    }
+    END { if (have == 1) emit_logical() }
+  ' "$2" | grep -nE -- "$1" || true
 }
 
 for _ci in "${!CONSTRUCT_RE[@]}"; do
@@ -243,6 +318,86 @@ if [ -z "$(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh")" ]; then
   ok 'structural control: a non-`i` cluster (-n, -E) and an ATTACHED suffix (-Ei.bak) are not flagged — the rule reds only on the unportable spelling'
 else
   bad "structural control: the cluster rule false-positives on a portable sed — a lint that reds on correct input is the lint agents learn to waive: $(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh" | tr '\n' ' ')"
+fi
+
+# ---------------------------------------------------------------------------
+# CONTROLS FOR THE SPELLINGS THE ADJACENT-FLAGS-ONLY FORM MISSED (roborev round 2). Each named
+# form gets its OWN control and each is asserted to FIRE — a rule without a control is a rule
+# nobody has tested. Multi-line fixtures are written as separate printf arguments so the
+# continuation-joining path is exercised on real newlines, not on an escaped approximation.
+# The assertion is against the UNION of the table's rules, because "is this flagged by the
+# scan" is the property the guard actually provides.
+# ---------------------------------------------------------------------------
+scan_any() { # scan_any <file> -> hits from ANY rule in the table
+  local _i _h _all=""
+  for _i in "${!CONSTRUCT_RE[@]}"; do
+    _h=$(scan_hits "${CONSTRUCT_RE[$_i]}" "$1")
+    [ -n "$_h" ] && _all="$_all ${_h%%$'\n'*}"
+  done
+  printf '%s' "$_all"
+}
+assert_flagged() { # assert_flagged <label> <file>
+  if [ -n "$(scan_any "$2")" ]; then
+    ok "structural control: $1 is FLAGGED"
+  else
+    bad "structural control: $1 is NOT flagged — the scan has a hole at this spelling, and a guard with a known-but-hidden miss invites reliance it cannot support"
+  fi
+}
+assert_not_flagged() { # assert_not_flagged <label> <file>
+  if [ -z "$(scan_any "$2")" ]; then
+    ok "structural control: $1 is correctly NOT flagged"
+  else
+    bad "structural control: $1 was flagged — a lint that reds on correct input is the lint agents learn to waive:$(scan_any "$2")"
+  fi
+}
+
+# (a) -i AFTER an intervening option argument. BSD eats `file` as the backup suffix.
+printf '%s\n' "  sed -e 's/a/b/' -i file" >"$tmp/sp-optrun.sh"
+assert_flagged '`sed -e EXPR -i file` (-i beyond the adjacent option run)' "$tmp/sp-optrun.sh"
+# (b) a LINE-BROKEN invocation — invisible to any single-line ERE, hence the joiner.
+printf '%s\n' '  sed \' '    -i '"'"'s/a/b/'"'"' file' >"$tmp/sp-break.sh"
+assert_flagged '`sed \` + newline + `-i …` (backslash-continued across lines)' "$tmp/sp-break.sh"
+printf '%s\n' '  sed -e '"'"'s/a/b/'"'"' \' '    -Ei file' >"$tmp/sp-break2.sh"
+assert_flagged 'a line-broken invocation whose continuation carries a BUNDLED -Ei' "$tmp/sp-break2.sh"
+# (c) the delimiter argument SEPARATED from -d, with no operand.
+printf '%s\n' '  order=$(paste -d ,)' >"$tmp/sp-darg.sh"
+assert_flagged '`paste -d ,` (separated delimiter argument, still no file operand)' "$tmp/sp-darg.sh"
+# (d) a REDIRECTION is not an operand — BSD usage()-errors just the same.
+printf '%s\n' '  order=$(paste -sd, < input)' >"$tmp/sp-redir.sh"
+assert_flagged '`paste -sd, < input` (a redirection is not a file operand)' "$tmp/sp-redir.sh"
+printf '%s\n' '  order=$(paste -sd, <"$f")' >"$tmp/sp-redir2.sh"
+assert_flagged '`paste -sd, <"$f"` (redirection with no space)' "$tmp/sp-redir2.sh"
+# (e) the GNU long spelling, absent from BSD sed entirely.
+printf '%s\n' "  sed --in-place -e 's/a/b/' file" >"$tmp/sp-long.sh"
+assert_flagged '`sed --in-place` (GNU long option; BSD sed has no such flag)' "$tmp/sp-long.sh"
+
+# NEGATIVE CONTROLS for the widened option run — this is where widening can go wrong.
+# The first is the important one: an `-i` belonging to a DIFFERENT command after a pipe must
+# not be attributed to the sed, which is why the option run stops at a shell metacharacter.
+printf '%s\n' '  sed '"'"'s/x/y/'"'"' f | grep -i foo' >"$tmp/sp-pipe.sh"
+assert_not_flagged 'a `grep -i` AFTER a pipe (the -i belongs to another command)' "$tmp/sp-pipe.sh"
+printf '%s\n' "  sed -e 's/a/b/' file" >"$tmp/sp-noi.sh"
+assert_not_flagged 'a multi-option sed with NO in-place flag' "$tmp/sp-noi.sh"
+printf '%s\n' '  order=$(paste -d , "$f")' >"$tmp/sp-dargok.sh"
+assert_not_flagged '`paste -d , FILE` (separated delimiter argument WITH an operand)' "$tmp/sp-dargok.sh"
+printf '%s\n' '  grep -q foo \' '    "$f" | sed -n '"'"'1p'"'"'' >"$tmp/sp-breakok.sh"
+assert_not_flagged 'a benign backslash-continued command (joining must not manufacture a hit)' "$tmp/sp-breakok.sh"
+# A comment line ending in a backslash continues NOTHING in shell, so it must not swallow the
+# next line into a joined logical line — otherwise a comment could mask real code below it.
+printf '%s\n' '# sed \' "  echo ok" >"$tmp/sp-cmtbreak.sh"
+assert_not_flagged 'a COMMENT ending in a backslash (it must not join the code line beneath it)' "$tmp/sp-cmtbreak.sh"
+printf '%s\n' '# prose about sed, ending in a backslash \' "  sed -i 's/a/b/' file" \
+  >"$tmp/sp-cmtbreak2.sh"
+assert_flagged 'a REAL `sed -i` on the line beneath a backslash-ended COMMENT (joining it into the comment would MASK it)' "$tmp/sp-cmtbreak2.sh"
+
+# The joiner rewrites the stream, so LINE NUMBERS are asserted rather than assumed: a report
+# naming the wrong line sends the next reader to the wrong place.
+printf '%s\n' '# a comment' '' "  sed -i 's/a/b/' f" '  echo tail' >"$tmp/sp-lineno.sh"
+_ln=$(scan_hits "$RE_SED_INPLACE" "$tmp/sp-lineno.sh")
+if [ "${_ln%%:*}" = 3 ]; then
+  ok 'structural control: a hit is reported at its REAL file line (blanking, not deleting, keeps numbering exact)'
+else
+  bad "structural control: the hit was reported at line '${_ln%%:*}' but lives at line 3 — the scan's line numbers do not name the real file"
 fi
 
 # NEGATIVE CONTROL for the paste pattern, whose ERE is the subtlest of the table: a paste WITH
