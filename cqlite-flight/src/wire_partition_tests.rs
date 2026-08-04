@@ -109,8 +109,11 @@ fn width_skew_defeats_the_uniform_row_split_and_the_partitioner_fixes_it() {
          ({predicted} B over 33 rows) exceeds the {target}-byte target — otherwise \
          this test proves nothing"
     );
+    // Predicted at the encoder's target, measured against the same number here (this
+    // one-column fixture's per-message overhead is a few hundred bytes and does not
+    // change the outcome).
     assert!(
-        encoder_split_would_exceed(&batch, target),
+        encoder_split_would_exceed(&batch, target, target),
         "the intervention predicate must fire on this fixture"
     );
 
@@ -176,7 +179,13 @@ fn a_single_row_over_the_ceiling_is_rejected_with_a_clear_error() {
         "the recorded size ({}) must be the reason it was rejected",
         err.bytes
     );
-    assert_eq!(err.ceiling, ceiling);
+    assert!(
+        err.ceiling < ceiling && err.ceiling > ceiling / 2,
+        "the reported bound ({}) is the PAYLOAD budget — the {ceiling}-byte MESSAGE \
+         ceiling less this batch's measured per-message framing cost — so it must sit \
+         strictly under the message ceiling without collapsing",
+        err.ceiling
+    );
     let msg = err.to_string();
     for expected in ["row 2", "cannot be split", "narrow the projection"] {
         assert!(
@@ -245,6 +254,251 @@ fn a_sliced_list_column_is_not_over_measured_by_its_whole_child() {
         (512..640).contains(&one_row),
         "expected ~512-640 B for a 64-element i64 list row, got {one_row}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The partition budget includes the PER-BATCH HEADER (issue #3096, third review)
+// ---------------------------------------------------------------------------
+//
+// The partitioner budgeted the Arrow PAYLOAD against a bound the guard applies to
+// the whole serialized MESSAGE. On a wide schema those differ by more than the
+// margin between the target and the ceiling — the IPC `data_header` is ~16 B per
+// buffer plus ~16 B per field node — so a batch the partitioner passed through as
+// legal was then REFUSED by the guard, failing the stream closed where smaller
+// slices would have been legal.
+//
+// No wall-clock assertion appears here (#2642): every assertion is a byte size or a
+// slice count.
+
+/// A wide batch: `columns` non-nullable `Int32` columns x `rows` rows. Payload is
+/// `columns * rows * 4` B; the IPC header is ~16 B per field node + ~16 B per
+/// buffer, so the column count is what makes the header large, independent of the
+/// payload.
+fn wide_int32_batch(columns: usize, rows: usize) -> RecordBatch {
+    let fields: Vec<Field> = (0..columns)
+        .map(|c| Field::new(format!("c{c}"), arrow::datatypes::DataType::Int32, false))
+        .collect();
+    let arrays: Vec<ArrayRef> = (0..columns)
+        .map(|c| {
+            Arc::new(arrow::array::Int32Array::from(
+                (0..rows).map(|r| (c + r) as i32).collect::<Vec<i32>>(),
+            )) as ArrayRef
+        })
+        .collect();
+    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), arrays).expect("wide record batch")
+}
+
+/// Encode one batch the way the flight encoder does — arrow's own IPC generator —
+/// so a slice can be measured in the currency
+/// [`super::guard_message_within_ceiling`] enforces.
+fn encode_to_flight_data(batch: &RecordBatch) -> FlightData {
+    let generator = IpcDataGenerator::default();
+    let mut dictionaries = DictionaryTracker::new(false);
+    let options = IpcWriteOptions::default();
+    let (_dicts, encoded) = generator
+        .encoded_batch(batch, &mut dictionaries, &options)
+        .expect("encode batch");
+    FlightData {
+        data_header: prost::bytes::Bytes::from(encoded.ipc_message),
+        data_body: prost::bytes::Bytes::from(encoded.arrow_data),
+        ..Default::default()
+    }
+}
+
+/// The header measurement is shape-based, so a ONE-ROW probe measures the same
+/// `data_header` the whole batch (and every slice of it) carries.
+///
+/// This is the property `per_message_overhead_bytes` rests on — the flatbuffer
+/// holds fixed-width `FieldNode`/`Buffer` structs, so its size follows the schema
+/// shape, not the row count.
+#[test]
+fn a_one_row_probe_measures_the_same_header_as_the_whole_batch() {
+    let batch = wide_int32_batch(512, 64);
+    let whole = ipc_header_bytes(&batch).expect("header for the whole batch");
+    let probe = ipc_header_bytes(&batch.slice(0, 1)).expect("header for a one-row probe");
+    assert_eq!(
+        probe,
+        whole,
+        "a one-row probe must measure the same header as the {}-row batch, or the \
+         per-batch reserve is measuring the wrong thing",
+        batch.num_rows()
+    );
+    // Non-vacuity: this schema's header must be LARGE, or the equality above says
+    // nothing about the case the reserve exists for.
+    assert!(
+        whole > 16 * 1024,
+        "a 512-column schema must carry a header of tens of KB, got {whole} B"
+    );
+    // …and a narrow schema's header must be small, so the reserve is a no-op on the
+    // shapes this tree actually serves.
+    let narrow = ipc_header_bytes(&int64_batch(1_000)).expect("header for a 1-column batch");
+    assert!(
+        narrow < 1_024,
+        "a one-column schema's header must be well under 1 KB (got {narrow} B), or the \
+         reserve would change the shipped framing"
+    );
+}
+
+/// The body bound is REAL and the alignment it rests on is arrow's, not ours.
+///
+/// Two directions, because either alone is weak: the bound must HOLD against arrow's
+/// real encoder output, and a smaller alignment assumption must be shown to
+/// UNDER-budget it (otherwise the 64-byte constant could be quietly wrong and this
+/// test would not notice).
+#[test]
+fn the_body_bound_holds_and_a_smaller_alignment_would_under_budget() {
+    let batch = wide_int32_batch(2_048, 55);
+    let payload = slice_payload_bytes(&batch, 0, batch.num_rows());
+    let buffers: usize = batch
+        .columns()
+        .iter()
+        .map(|c| ipc_buffer_count(&c.to_data()))
+        .sum();
+    let body = encode_to_flight_data(&batch).data_body.len();
+
+    assert_eq!(
+        buffers,
+        2 * 2_048,
+        "a non-nullable primitive column emits a validity entry plus a values buffer"
+    );
+    assert!(
+        body <= payload + buffers * (IPC_BUFFER_ALIGNMENT_BYTES - 1),
+        "the body bound must HOLD: arrow encoded {body} B where the bound allows \
+         {} B (payload {payload} + {buffers} buffers x {} B of padding)",
+        payload + buffers * (IPC_BUFFER_ALIGNMENT_BYTES - 1),
+        IPC_BUFFER_ALIGNMENT_BYTES - 1
+    );
+    assert!(
+        body > payload + buffers * 7,
+        "NON-VACUITY: an 8-byte alignment assumption would allow only {} B and \
+         UNDER-budget arrow's real {body}-byte body — the padding term is load-bearing \
+         and 64 is the operative alignment",
+        payload + buffers * 7
+    );
+}
+
+/// **The finding of the third review.** A WIDE-schema batch whose payload sits just
+/// under the target: the payload-only budget passes it through, and the guard then
+/// REFUSES the message it becomes — a hard stream failure where smaller slices are
+/// legal.
+///
+/// Non-vacuity is measured in the guard's own currency, twice over:
+///
+/// 1. the pre-fix budget really does emit ONE slice, and that slice serializes to
+///    MORE than the message ceiling (so the guard rejects it), and
+/// 2. arrow-flight's own split cannot rescue it either — at this capacity the
+///    encoder cuts the batch into exactly one slice.
+#[test]
+fn a_wide_schema_batch_is_budgeted_with_its_header_instead_of_being_refused() {
+    // Bounds scaled down so the fixture is kilobytes, not megabytes. They stand in
+    // for FLIGHT_DATA_SIZE_TARGET_BYTES / FLIGHT_DATA_RESERVED_CEILING_BYTES.
+    const MESSAGE_TARGET: usize = 550_000;
+    const MESSAGE_CEILING: usize = 600_000;
+
+    // 2,048 Int32 columns x 64 rows: 524,288 B of payload (under the target), a ~98 KB
+    // IPC header and 4,096 buffers of alignment padding — together far over the
+    // 50,000 B gap between target and ceiling.
+    let batch = wide_int32_batch(2_048, 64);
+    let payload = slice_payload_bytes(&batch, 0, batch.num_rows());
+    let overhead = per_message_overhead_bytes(&batch);
+    assert!(
+        payload <= MESSAGE_TARGET,
+        "the fixture's payload ({payload} B) must be INSIDE the target, or the \
+         payload-only budget would have split it anyway and the test proves nothing"
+    );
+    assert!(
+        overhead > MESSAGE_CEILING - MESSAGE_TARGET,
+        "the fixture's per-message overhead ({overhead} B) must exceed the \
+         {}-byte target-to-ceiling gap, or the payload-only budget is already safe here",
+        MESSAGE_CEILING - MESSAGE_TARGET
+    );
+
+    // (1) NON-VACUITY: the PRE-FIX budget — payload measured against the message
+    // bounds, with no per-batch reserve — emits one slice, and that slice is a
+    // message the guard refuses.
+    let pre_fix = frame_for_wire_payload_budget(
+        batch.clone(),
+        MESSAGE_TARGET,
+        MESSAGE_TARGET,
+        MESSAGE_CEILING,
+    )
+    .expect("no single row is oversized");
+    assert_eq!(
+        pre_fix.len(),
+        1,
+        "the pre-fix budget must pass this batch through unsplit (that is the defect)"
+    );
+    let pre_fix_message = serialized_message_bytes(&encode_to_flight_data(&pre_fix[0]));
+    assert!(
+        pre_fix_message > MESSAGE_CEILING,
+        "NON-VACUITY: the pre-fix slice must serialize OVER the {MESSAGE_CEILING}-byte \
+         ceiling ({pre_fix_message} B) — that is the message the guard rejects, turning a \
+         framable batch into a failed stream"
+    );
+
+    // (2) …and arrow-flight's own row-uniform split would not have saved it: at this
+    // capacity it cuts the batch into exactly ONE slice.
+    let capacity: usize = batch
+        .columns()
+        .iter()
+        .map(|c| c.get_buffer_memory_size())
+        .sum();
+    assert_eq!(
+        capacity.div_ceil(MESSAGE_TARGET).max(1),
+        1,
+        "the encoder must frame this batch as ONE message (capacity {capacity} B), so the \
+         partitioner is the only thing that can keep it legal"
+    );
+
+    // (3) THE FIX: budgeting the header in splits the batch, and EVERY slice is a
+    // legal message.
+    let slices = frame_for_wire_bounded(batch.clone(), MESSAGE_TARGET, MESSAGE_CEILING)
+        .expect("no single row is oversized");
+    assert!(
+        slices.len() > 1,
+        "the header-aware budget must split this batch, got {} slice(s)",
+        slices.len()
+    );
+    for (i, s) in slices.iter().enumerate() {
+        let message = serialized_message_bytes(&encode_to_flight_data(s));
+        assert!(
+            message <= MESSAGE_CEILING,
+            "slice {i} ({} rows) serializes to {message} B, over the \
+             {MESSAGE_CEILING}-byte ceiling — the partition budget still disagrees with \
+             the guard",
+            s.num_rows()
+        );
+    }
+    assert_eq!(
+        slices.iter().map(|s| s.num_rows()).sum::<usize>(),
+        batch.num_rows(),
+        "the partition must cover every row exactly once"
+    );
+}
+
+/// The reserve is a NO-OP on the shapes this tree serves: a narrow batch at the
+/// SHIPPED bounds is still passed through untouched, which is what keeps the exact
+/// message counts in `streaming_framing_tests.rs` unchanged.
+#[test]
+fn the_header_reserve_does_not_change_framing_for_a_narrow_schema() {
+    let batch = int64_batch(64 * 1024); // 512 KB, one column, uniform rows
+    let overhead = per_message_overhead_bytes(&batch);
+    assert!(
+        overhead < 1_024,
+        "a one-column batch's per-message overhead must be under 1 KB, got {overhead} B"
+    );
+    let slices = frame_for_wire_bounded(
+        batch.clone(),
+        FLIGHT_DATA_SIZE_TARGET_BYTES,
+        FLIGHT_DATA_RESERVED_CEILING_BYTES,
+    )
+    .expect("safe");
+    assert_eq!(
+        slices.len(),
+        1,
+        "a narrow batch must still pass through untouched at the shipped bounds"
+    );
+    assert_eq!(slices[0].num_rows(), batch.num_rows());
 }
 
 // ---------------------------------------------------------------------------

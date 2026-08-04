@@ -44,8 +44,9 @@
 //!
 //! Two mechanisms, in series, because neither alone is sufficient:
 //!
-//! * [`partition_for_wire`] cuts each batch on **measured payload bytes** before
-//!   the encoder sees it, so no slice reaching the encoder exceeds the target.
+//! * [`partition_for_wire`] cuts each batch on **measured payload bytes plus this
+//!   batch's measured per-message framing cost** before the encoder sees it, so no
+//!   slice reaching the encoder can be serialized into a message over the ceiling.
 //!   Any further row-uniform split the encoder applies to those slices can only
 //!   make bodies SMALLER, so the bound survives it.
 //! * [`guard_message_within_ceiling`] checks every emitted `FlightData`'s
@@ -78,9 +79,47 @@
 //! dependency ever changes it the only consequence is that we under-intervene —
 //! [`guard_message_within_ceiling`] still refuses to put an illegal message on the
 //! wire.
+//!
+//! # The partitioner budgets the SAME quantity the guard measures (third review)
+//!
+//! The first version of this module budgeted the **Arrow payload alone** against
+//! the target while the guard measured the **whole serialized message**. Those are
+//! two different quantities, so on a wide-enough schema the two disagreed in the
+//! dangerous direction: `data_header` is a `RecordBatch` flatbuffer of ~16 B per
+//! Arrow buffer plus ~16 B per field node, so a few thousand columns carry a
+//! header of a hundred kilobytes or more — past the
+//! [`crate::flight_data_size::FLIGHT_DATA_SIZE_INEXACTNESS_MARGIN_BYTES`] gap
+//! between the target and the ceiling. A batch whose payload sat just under the
+//! target was therefore passed through as legal by the partitioner and then
+//! **REJECTED by the guard**, failing the whole stream closed even though smaller
+//! slices would have been perfectly legal. A weak guard had been turned into a hard
+//! stream failure.
+//!
+//! [`per_message_overhead_bytes`] closes that. It MEASURES this batch's per-message
+//! non-payload cost — the real IPC header (arrow's own generator, over a one-row
+//! probe), the per-buffer body ALIGNMENT PADDING, and protobuf field framing — and
+//! the bounds become:
+//!
+//! * `payload_ceiling = ceiling - overhead`: what a slice's payload may be and still
+//!   serialize inside the ceiling, which is also the bound an indivisible row is
+//!   rejected against; and
+//! * `payload_target = min(target, payload_ceiling)`: the partition budget. The
+//!   `min` is what makes this a TIGHTENING ONLY — for every shape in this tree's
+//!   corpora the overhead is a few kilobytes against a ~3.9 MB target, the target is
+//!   the smaller of the two, and the shipped framing (including the exact message
+//!   counts `streaming_framing_tests.rs` pins) is unchanged.
+//!
+//! The padding term is not a rounding detail: a 2,048-column batch has 4,096 IPC
+//! buffers, each padded up to [`IPC_BUFFER_ALIGNMENT_BYTES`], so its body can exceed
+//! the measured payload by ~256 KB — measured at 655,385 B of body over 450,560 B of
+//! payload on the wide fixture in `wire_partition_tests.rs`. Budgeting the header
+//! alone would have left that hole open.
 
 use arrow::array::{Array, LargeListArray, ListArray, MapArray, StructArray};
 use arrow::datatypes::DataType;
+// Arrow's OWN IPC message generator, so this module measures the `data_header` the
+// encoder will really emit for a batch instead of modelling it.
+use arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow::record_batch::RecordBatch;
 use arrow_flight::error::FlightError;
 use arrow_flight::FlightData;
@@ -90,8 +129,39 @@ use futures::{Stream, StreamExt};
 use prost::Message as _;
 use tonic::Status;
 
-use crate::flight_data_size::{FLIGHT_DATA_RESERVED_CEILING_BYTES, FLIGHT_DATA_SIZE_TARGET_BYTES};
+use crate::flight_data_size::{
+    FLIGHT_DATA_RESERVED_CEILING_BYTES, FLIGHT_DATA_SIZE_TARGET_BYTES,
+    FLIGHT_FRAMING_OVERHEAD_BYTES,
+};
 use crate::streaming::{record_encoder_error, StreamProbe};
+
+/// Upper bound on the protobuf FIELD FRAMING of one `FlightData` message — the
+/// bytes outside `data_header`/`app_metadata`/`data_body` themselves.
+///
+/// Derived, not guessed: `FlightData` has four fields, each a `bytes`/message field
+/// costing a tag (at most 2 B for these field numbers) plus a length varint (at
+/// most 5 B, since a length under 4 GiB encodes in five groups of seven bits) —
+/// `4 * (2 + 5) = 28` B. 64 B is that bound rounded up, and it is only ever ADDED
+/// to a reserve, so over-stating it can cost a little extra splitting and can never
+/// admit an illegal message. Cross-checked by
+/// `wire_partition_tests::the_measured_size_is_the_whole_message_not_the_body`,
+/// which asserts a real message exceeds the sum of its payload fields by less than
+/// this.
+const FLIGHT_DATA_PROTOBUF_FRAMING_BYTES: usize = 64;
+
+/// Alignment arrow-rs pads every IPC body buffer to (`IpcWriteOptions::default()`).
+///
+/// The IPC body is not the concatenation of the buffer LENGTHS this module measures:
+/// each buffer is written padded up to this alignment, so a body can exceed the
+/// measured payload by up to `alignment - 1` bytes PER BUFFER. On a narrow schema
+/// that is tens of bytes; on a few thousand buffers it is hundreds of kilobytes,
+/// which is why it is budgeted rather than left to the inexactness margin.
+///
+/// The value is arrow's, not ours, so it is cross-checked against arrow's real
+/// encoder output by
+/// `wire_partition_tests::the_body_bound_holds_and_a_smaller_alignment_would_under_budget`
+/// — which also shows an 8-byte assumption UNDER-budgets a real body.
+const IPC_BUFFER_ALIGNMENT_BYTES: usize = 64;
 
 /// A single row whose own Arrow payload exceeds the largest legal `data_body`.
 ///
@@ -104,7 +174,10 @@ pub(crate) struct RowTooWide {
     pub(crate) row: usize,
     /// Measured Arrow payload bytes for that one row.
     pub(crate) bytes: usize,
-    /// The bound it exceeded.
+    /// The bound it exceeded: the largest legal serialized message LESS this
+    /// batch's measured per-message framing cost
+    /// ([`per_message_overhead_bytes`]) — i.e. the payload a single-row message
+    /// can actually carry, which is strictly less than the message ceiling.
     pub(crate) ceiling: usize,
 }
 
@@ -113,8 +186,9 @@ impl std::fmt::Display for RowTooWide {
         write!(
             f,
             "row {} of this batch is {} bytes of Arrow payload on its own, over the \
-             {}-byte maximum FlightData body (the 4 MiB default gRPC message limit less \
-             the reserved IPC/protobuf framing overhead). A single row cannot be split \
+             {}-byte maximum FlightData payload (the 4 MiB default gRPC message limit less \
+             the reserved IPC/protobuf framing overhead, less this batch's own measured \
+             IPC data_header). A single row cannot be split \
              across FlightData messages, so there is no framing that makes it legal: \
              narrow the projection to drop the oversized column, or raise the client's \
              max_decoding_message_size and the server's framing reserve together",
@@ -243,47 +317,175 @@ fn frame_for_wire(batch: RecordBatch) -> Result<Vec<RecordBatch>, RowTooWide> {
     )
 }
 
-/// [`frame_for_wire`] with explicit bounds, so tests can drive the intervention
-/// path on small fixtures instead of allocating multi-megabyte batches.
+/// [`frame_for_wire`] with explicit MESSAGE bounds, so tests can drive the
+/// intervention path on small fixtures instead of allocating multi-megabyte
+/// batches.
+///
+/// `target` and `ceiling` are stated in the currency
+/// [`guard_message_within_ceiling`] enforces — the FULL serialized message — and
+/// this function converts them into payload budgets by subtracting the batch's own
+/// [`per_message_overhead_bytes`]. That subtraction is the fix of the third #3096
+/// review (see the module header): budgeting the payload against a message bound
+/// let a wide-schema batch be passed through here and then refused by the guard.
 pub(crate) fn frame_for_wire_bounded(
     batch: RecordBatch,
     target: usize,
     ceiling: usize,
 ) -> Result<Vec<RecordBatch>, RowTooWide> {
-    if batch.num_rows() == 0 || !encoder_split_would_exceed(&batch, target) {
+    if batch.num_rows() == 0 {
         return Ok(vec![batch]);
     }
-    byte_partition(batch, target, ceiling)
+    let overhead = per_message_overhead_bytes(&batch);
+    // What a slice's payload may be and still serialize inside the ceiling.
+    let payload_ceiling = ceiling.saturating_sub(overhead);
+    // The partition budget stays the encoder's target — the shipped contract, and
+    // what keeps the framing tests' exact message counts intact — EXCEPT where that
+    // target would not leave room for this batch's own per-message cost, which is the
+    // case the third review found. `min` is what makes the fix a tightening only: for
+    // every shape in this tree's corpora the target is the smaller of the two and
+    // nothing changes.
+    let payload_target = target.min(payload_ceiling);
+    frame_for_wire_payload_budget(batch, target, payload_target, payload_ceiling)
 }
 
-/// Would the encoder's OWN row-uniform split put more than `target` payload bytes
-/// into some slice? (arrow-flight 53.4.1 `split_batch_for_grpc_response`,
+/// The partition decision in PAYLOAD currency.
+///
+/// `encoder_target` is what arrow-flight's own builder is configured with (it is
+/// what decides how many row-uniform slices the encoder will cut), while
+/// `payload_target`/`payload_ceiling` are what each resulting slice must fit. The
+/// two are DIFFERENT numbers by design: the encoder is configured once with the
+/// shipped constant and knows nothing about a given batch's header, so its split
+/// must be predicted at its own target and then measured against ours.
+///
+/// Exposed to the tests with the two currencies separated so the pre-fix behavior
+/// (payload budgeted against the message bound, i.e. `payload_target == ceiling`'s
+/// sibling with no overhead subtracted) can be reproduced and shown to be unsafe.
+pub(crate) fn frame_for_wire_payload_budget(
+    batch: RecordBatch,
+    encoder_target: usize,
+    payload_target: usize,
+    payload_ceiling: usize,
+) -> Result<Vec<RecordBatch>, RowTooWide> {
+    if batch.num_rows() == 0 || !encoder_split_would_exceed(&batch, encoder_target, payload_target)
+    {
+        return Ok(vec![batch]);
+    }
+    byte_partition(batch, payload_target, payload_ceiling)
+}
+
+/// This batch's per-message NON-PAYLOAD cost — everything a serialized
+/// `FlightData` carries beyond the Arrow buffer bytes [`slice_payload_bytes`]
+/// measures. Three components, none of them a guess:
+///
+/// 1. **The IPC `data_header`**, MEASURED with arrow's own [`IpcDataGenerator`] —
+///    the same code path the flight encoder uses — over a ONE-ROW slice. The
+///    `RecordBatch` header flatbuffer holds a fixed-size `FieldNode` (16 B) per
+///    array node and a fixed-size `Buffer` (16 B) per buffer, in fixed-width
+///    vectors, so its SIZE follows the schema shape and not the row count: a
+///    one-row probe measures the same header the full batch (and every slice of
+///    it) will carry. Asserted, not assumed —
+///    `wire_partition_tests::a_one_row_probe_measures_the_same_header_as_the_whole_batch`.
+/// 2. **Body alignment padding**, bounded at
+///    `(IPC_BUFFER_ALIGNMENT_BYTES - 1)` per IPC buffer ([`ipc_buffer_count`]).
+///    This is the term a header-only reserve missed: a 2,048-column batch has
+///    4,096 buffers, so its body can exceed the measured payload by ~256 KB.
+/// 3. **Protobuf field framing**, [`FLIGHT_DATA_PROTOBUF_FRAMING_BYTES`].
+///
+/// Cost: one IPC encode of a single row plus a walk of the schema, per batch —
+/// O(schema width), independent of the row count, and negligible against the
+/// megabytes of payload a batch carries.
+///
+/// If arrow declines to encode the probe (a layout its IPC writer rejects), the
+/// header term falls back to [`FLIGHT_FRAMING_OVERHEAD_BYTES`], the module's
+/// documented upper bound on non-body bytes. A larger reserve can only cause extra
+/// splitting, which is the safe direction.
+fn per_message_overhead_bytes(batch: &RecordBatch) -> usize {
+    let header = match ipc_header_bytes(&batch.slice(0, 1.min(batch.num_rows()))) {
+        Some(bytes) => bytes,
+        None => FLIGHT_FRAMING_OVERHEAD_BYTES,
+    };
+    let buffers: usize = batch
+        .columns()
+        .iter()
+        .map(|c| ipc_buffer_count(&c.to_data()))
+        .sum();
+    let padding = buffers.saturating_mul(IPC_BUFFER_ALIGNMENT_BYTES.saturating_sub(1));
+    header
+        .saturating_add(padding)
+        .saturating_add(FLIGHT_DATA_PROTOBUF_FRAMING_BYTES)
+}
+
+/// The number of buffers arrow's IPC writer emits for one array node and its
+/// children: the validity bitmap entry it writes for EVERY node, plus the node's own
+/// buffers, recursively.
+///
+/// Over-counting is the safe direction and is deliberate for a `Dictionary` array,
+/// whose values travel in a separate dictionary message rather than in this batch's
+/// body: counting them here only enlarges the reserve.
+fn ipc_buffer_count(data: &arrow::array::ArrayData) -> usize {
+    1 + data.buffers().len()
+        + data
+            .child_data()
+            .iter()
+            .map(ipc_buffer_count)
+            .sum::<usize>()
+}
+
+/// The exact `data_header` length arrow's IPC generator produces for `batch`, or
+/// `None` if it declines to encode it.
+///
+/// A fresh [`DictionaryTracker`] per call (`error_on_replacement = false`) keeps
+/// this a pure measurement with no state shared with the real encoder; any
+/// dictionary batches it would emit are separate `FlightData` messages, guarded on
+/// their own by [`guard_message_within_ceiling`], and are deliberately not folded
+/// into this batch's reserve.
+fn ipc_header_bytes(batch: &RecordBatch) -> Option<usize> {
+    let generator = IpcDataGenerator::default();
+    let mut dictionaries = DictionaryTracker::new(false);
+    let options = IpcWriteOptions::default();
+    match generator.encoded_batch(batch, &mut dictionaries, &options) {
+        Ok((_dictionaries, encoded)) => Some(encoded.ipc_message.len()),
+        Err(_) => None,
+    }
+}
+
+/// Would the encoder's OWN row-uniform split put more than `payload_target` payload
+/// bytes into some slice? (arrow-flight 53.4.1 `split_batch_for_grpc_response`,
 /// replicated — see this module's header for the quoted source.)
 ///
+/// The number of slices is predicted at the encoder's OWN `encoder_target`, because
+/// that is the value it is configured with; each predicted slice is then measured
+/// against `payload_target`, the budget that leaves room for this batch's header.
+///
 /// Short-circuits on the first violation, and on the whole-batch check first: if
-/// the entire batch fits, no slice of it can fail.
-fn encoder_split_would_exceed(batch: &RecordBatch, target: usize) -> bool {
+/// the entire batch fits the budget, no slice of it can fail.
+fn encoder_split_would_exceed(
+    batch: &RecordBatch,
+    encoder_target: usize,
+    payload_target: usize,
+) -> bool {
     let rows = batch.num_rows();
     if rows == 0 {
         return false;
     }
-    if slice_payload_bytes(batch, 0, rows) <= target {
+    if slice_payload_bytes(batch, 0, rows) <= payload_target {
         return false;
     }
     // `max(1)` mirrors the encoder AND makes the division safe for a nonsense
     // target supplied by a test.
-    let target = target.max(1);
+    let encoder_target = encoder_target.max(1);
     let capacity: usize = batch
         .columns()
         .iter()
         .map(|c| c.get_buffer_memory_size())
         .sum();
-    let n_batches = (capacity / target + usize::from(capacity % target != 0)).max(1);
+    let n_batches =
+        (capacity / encoder_target + usize::from(capacity % encoder_target != 0)).max(1);
     let rows_per_batch = (rows / n_batches).max(1);
     let mut offset = 0;
     while offset < rows {
         let length = rows_per_batch.min(rows - offset);
-        if slice_payload_bytes(batch, offset, length) > target {
+        if slice_payload_bytes(batch, offset, length) > payload_target {
             return true;
         }
         offset += length;
