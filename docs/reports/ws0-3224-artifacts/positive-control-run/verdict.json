@@ -1,0 +1,24 @@
+{
+  "schema": "ws0-3224.positive-control/v1",
+  "issue": 3224,
+  "result": "PASS",
+  "exit_code": 0,
+  "reason": "all required counters programmed, moved in the predicted direction, and reached the predicted magnitude.",
+  "quick_mode": false,
+  "completed_utc": "2026-08-04T01:09:35Z",
+  "host": {"nodename": "ip-172-31-3-252", "kernel": "6.17.0-1019-aws", "perf": "perf version 6.17.13"},
+  "config": {"reps": 3, "buffer_mib": 2048, "working_kib": 256, "accesses": 20000000, "cpu": 8, "event_modifier": ":u", "window_gate": "perf-control-fifo"},
+  "gate_integrity": {"probe_accesses": 1000, "probe_instructions": 6298, "ceiling": 1000000, "verdict": "PASS"},
+  "thresholds": {"movement_min_either_direction": "2.000", "missrate_rise_min": "1.500", "hostility_min": 5, "symmetry_tol_pct": 10, "per_access_magnitude": "reported, not gated"},
+  "llc_miss_rate": {"friendly": "0.055", "hostile": "0.540", "rise": "9.818"},
+  "controls": {"hostility": "PASS", "cycles_ratio": "29.209", "symmetry": "PASS", "instructions_ratio": "1.000"},
+  "counters": {
+    "LLC-loads": {"probe": "PROGRAMS", "gating": true, "friendly_median": "18", "hostile_median": "36986968", "movement_either_direction": "2054831.555", "hostile_per_access_reported_not_gated": "1.849", "verdict": "OK", "min_enabled_pct": "100"},
+    "LLC-load-misses": {"probe": "PROGRAMS", "gating": true, "friendly_median": "1", "hostile_median": "20000591", "movement_either_direction": "20000591.000", "hostile_per_access_reported_not_gated": "1.000", "verdict": "OK", "min_enabled_pct": "100"},
+    "cache-references": {"probe": "PROGRAMS", "gating": true, "friendly_median": "46", "hostile_median": "36987457", "movement_either_direction": "804075.152", "hostile_per_access_reported_not_gated": "1.849", "verdict": "OK", "min_enabled_pct": "100"},
+    "cache-misses": {"probe": "PROGRAMS", "gating": false, "friendly_median": "8", "hostile_median": "20000851", "movement_either_direction": "2500106.375", "hostile_per_access_reported_not_gated": "1.000", "verdict": "OK", "min_enabled_pct": "100"},
+    "cycles": {"probe": "PROGRAMS", "gating": false, "friendly_median": "301217202", "hostile_median": "8798399848", "movement_either_direction": "29.209", "hostile_per_access_reported_not_gated": "439.919", "verdict": "OK", "min_enabled_pct": "100"},
+    "instructions": {"probe": "PROGRAMS", "gating": false, "friendly_median": "120000366", "hostile_median": "120002820", "movement_either_direction": "1.000", "hostile_per_access_reported_not_gated": "6.000", "verdict": "UNRELIABLE_NO_MOVEMENT", "min_enabled_pct": "100"}
+  },
+  "advisory": {"sysfs_pmus": "breakpoint cpu intel_bts intel_pt kprobe msr software tracepoint uncore_cha_0 uncore_cha_1 uncore_cha_10 uncore_cha_11 uncore_cha_12 uncore_cha_13 uncore_cha_14 uncore_cha_15 uncore_cha_16 uncore_cha_17 uncore_cha_18 uncore_cha_19 uncore_cha_2 uncore_cha_20 uncore_cha_21 uncore_cha_22 uncore_cha_23 uncore_cha_24 uncore_cha_25 uncore_cha_26 uncore_cha_27 uncore_cha_28 uncore_cha_29 uncore_cha_3 uncore_cha_30 uncore_cha_31 uncore_cha_32 uncore_cha_33 uncore_cha_34 uncore_cha_35 uncore_cha_4 uncore_cha_5 uncore_cha_6 uncore_cha_7 uncore_cha_8 uncore_cha_9 uncore_iio_0 uncore_iio_1 uncore_iio_2 uncore_iio_3 uncore_iio_4 uncore_iio_5 uncore_iio_free_running_0 uncore_iio_free_running_1 uncore_iio_free_running_2 uncore_iio_free_running_3 uncore_iio_free_running_4 uncore_iio_free_running_5 uncore_imc_0 uncore_imc_1 uncore_imc_10 uncore_imc_11 uncore_imc_2 uncore_imc_3 uncore_imc_4 uncore_imc_5 uncore_imc_6 uncore_imc_7 uncore_imc_8 uncore_imc_9 uncore_imc_free_running_0 uncore_imc_free_running_1 uncore_imc_free_running_2 uncore_imc_free_running_3 uncore_irp_0 uncore_irp_1 uncore_irp_2 uncore_irp_3 uncore_irp_4 uncore_irp_5 uncore_m2m_0 uncore_m2m_1 uncore_m2m_2 uncore_m2m_3 uncore_m2pcie_0 uncore_m2pcie_1 uncore_m2pcie_2 uncore_m2pcie_3 uncore_m2pcie_4 uncore_m2pcie_5 uncore_m3upi_0 uncore_m3upi_1 uncore_m3upi_2 uncore_pcu uncore_ubox uncore_upi_0 uncore_upi_1 uncore_upi_2 uprobe ", "uncore_imc_instances": 16, "perf_M_MemoryBandwidth": "no", "stream_triad_threads": "128", "stream_triad_gbps_basis24": "131.865", "stream_triad_gbps_basis32": "175.820", "stream_note": "STREAM-triad-class, not the vendor STREAM benchmark; re-run at the engine core/NUMA binding for AC5"}
+}

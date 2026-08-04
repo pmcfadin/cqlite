@@ -262,15 +262,56 @@ cleanup() { rm -f "$CTL" "$ACK"; }
 trap cleanup EXIT INT TERM
 
 # ------------------------------------------------------------ per-event probing
+#
+# EVENT-NAME MATCHING: perf echoes the event-name field WITH or WITHOUT the
+# modifier depending on the event, so match BOTH forms (#3224, measured on
+# perf 6.17.13 / i4i.metal 2026-08-04):
+#
+#     requested            field-3 name printed back     modifier
+#     cycles:u             cycles:u                      RETAINED
+#     instructions:u       instructions:u                RETAINED
+#     cache-references:u   cache-references:u            RETAINED
+#     cache-misses:u       cache-misses:u                RETAINED
+#     LLC-loads:u          LLC-loads                     *** STRIPPED ***
+#     LLC-load-misses:u    LLC-load-misses               *** STRIPPED ***
+#
+# Matching only the requested form made this script report ABSENT_EVENT_NAME
+# for exactly the two LLC counters this whole issue exists to read — on a host
+# where both program correctly and return real counts (AC1 probe, committed as
+# host/ac1-capability-probe.txt: LLC-load-misses 104, LLC-loads 1352). That is
+# the SAME failure class the pre-run review already caught once: a control that
+# reds a healthy box. It cost one wasted gate run to diagnose.
+#
+# This changes NO threshold and weakens NO gate. The teeth are intact because
+# the diagnoses key off things this matching does not touch, each verified on
+# this host after the fix:
+#   - a genuinely bogus event name emits NO CSV ROW AT ALL ("event syntax
+#     error: Bad event name"), so neither form matches -> ABSENT_EVENT_NAME
+#     still fires;
+#   - an unsupported event still puts the literal "<not supported>" in field 1
+#     (measured: LLC-prefetches:u -> "<not supported>,,LLC-prefetches,...")
+#     -> NOT_SUPPORTED still fires, and is now reachable for the LLC events
+#     that previously short-circuited to ABSENT_EVENT_NAME;
+#   - SILENT_ZERO / UNRELIABLE_* are computed from the values, which this fix
+#     is what makes readable in the first place.
+# Base names in this script are distinct, so accepting the stripped form
+# cannot alias one event onto another.
+ev_field() { # $1 csv-file  $2 event-name-as-requested  $3 field number
+  awk -F, -v e="$2" -v f="$3" '
+    BEGIN { b = e; sub(/:[ukhHGSDpP]+$/, "", b) }
+    ($3 == e || $3 == b) { print $f; exit }' "$1"
+}
+
 declare -A EV_STATUS
 PROBE="$OUT_DIR/event-probe.txt"
 : > "$PROBE"
 ALL_EVENTS=("${CONTROL_EVENTS[@]}" "${REQUIRED_EVENTS[@]}" "${ADVISORY_EVENTS[@]}")
 USABLE=()
 for ev in "${ALL_EVENTS[@]}"; do
-  out="$(perf stat -x, -e "${ev}${MOD}" -- true 2>&1)"
-  if printf '%s' "$out" | grep -q ",${ev}${MOD},"; then
-    val="$(printf '%s' "$out" | awk -F, -v e="${ev}${MOD}" '$3==e{print $1; exit}')"
+  probe_csv="$OUT_DIR/.probe-${ev}.csv"
+  perf stat -x, -e "${ev}${MOD}" -o "$probe_csv" -- true >/dev/null 2>&1 || true
+  val="$(ev_field "$probe_csv" "${ev}${MOD}" 1 2>/dev/null)"
+  if [ -n "$val" ]; then
     if [ "$val" = "<not supported>" ]; then
       EV_STATUS[$ev]=NOT_SUPPORTED
     else
@@ -301,8 +342,13 @@ run_chase() { # $1 out-csv  $2 working-kib  $3 accesses  $4 arm-label  $5 log
     > "$5" 2>>"$5"
   return $?
 }
-cell() { awk -F, -v e="$2" '$3==e{print $1; exit}' "$1"; }   # raw value token
-mux()  { awk -F, -v e="$2" '$3==e{print $5; exit}' "$1"; }   # enabled percentage
+# Both go through ev_field so the measurement path tolerates the same
+# modifier-stripping the probe does. Before this, cell()/mux() returned EMPTY
+# for LLC-loads/LLC-load-misses even when those counters had been measured
+# perfectly well, which would have surfaced as a second, differently-shaped
+# false failure downstream in the verdict math.
+cell() { ev_field "$1" "$2" 1; }   # raw value token
+mux()  { ev_field "$1" "$2" 5; }   # enabled percentage
 
 # --- gate integrity: an ungated window would report orders of magnitude more ---
 say ""

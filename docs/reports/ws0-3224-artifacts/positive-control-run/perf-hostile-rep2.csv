@@ -1,0 +1,8 @@
+# started on Tue Aug  4 01:09:27 2026
+
+8771704464,,cycles:u,2542743283,100.00,,
+120002811,,instructions:u,2542743283,100.00,0.01,insn per cycle
+36985292,,LLC-loads,2542743283,100.00,,
+19995666,,LLC-load-misses,2542743283,100.00,54.06,of all LL-cache accesses
+36985768,,cache-references:u,2542743283,100.00,,
+19995916,,cache-misses:u,2542743283,100.00,54.06,of all cache refs

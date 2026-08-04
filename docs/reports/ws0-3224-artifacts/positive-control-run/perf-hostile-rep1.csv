@@ -1,0 +1,8 @@
+# started on Tue Aug  4 01:09:23 2026
+
+8807957127,,cycles:u,2552881823,100.00,,
+120002824,,instructions:u,2552881823,100.00,0.01,insn per cycle
+36987146,,LLC-loads,2552881823,100.00,,
+20102281,,LLC-load-misses,2552881823,100.00,54.35,of all LL-cache accesses
+36987500,,cache-references:u,2552881823,100.00,,
+20102462,,cache-misses:u,2552881823,100.00,54.35,of all cache refs

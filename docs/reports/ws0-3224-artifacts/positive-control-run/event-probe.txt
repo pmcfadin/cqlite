@@ -1,0 +1,6 @@
+cycles               PROGRAMS
+instructions         PROGRAMS
+LLC-loads            PROGRAMS
+LLC-load-misses      PROGRAMS
+cache-references     PROGRAMS
+cache-misses         PROGRAMS
