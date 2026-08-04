@@ -63,7 +63,9 @@ Skills in `.claude/skills/` activate automatically when relevant:
 | `test-data-management` | Test SSTable generation, validation |
 
 **Delivery pipeline skills**: `flow-groom` → `flow-activate` → `flow-implement` → `flow-address` →
-`flow-finalize`, plus `flow-board` (claim board + next thing). See
+`flow-finalize`, plus `flow-board` (claim board + next thing) and **`/drive-issue <N>`** (drive ONE
+named issue to merged: worker persona + `github-coord-worker` comms + a self-rearming cron that
+re-checks the issue for lead answers while blocked). See
 `docs/development/pm-operating-loop.md`. (`start-epic`/`pm-status` are deprecated pointers → flow-*.)
 
 ## Available Subagents
