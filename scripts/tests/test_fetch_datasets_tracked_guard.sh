@@ -1423,6 +1423,190 @@ else
   bad "non-vacuity: could not build the failed-scan mutant (return codes changed?)"
 fi
 
+# =============================================================================
+# Issue #3245: the restore rewrites worktree content FROM THE INDEX, so the
+# `rm -rf` + `restore all` pair SILENTLY REVERTS a local modification to a
+# tracked fixture — the edit exists only in the worktree being deleted, the
+# postcondition then sees a clean subtree, and the run reports SUCCESS. These
+# fixtures are hand-regenerated, so that is real data loss with no message.
+# Cases 27* pin the pre-deletion refusal; case 29* pins the porcelain half of the
+# postcondition, which sees a STAGED DELETION that `git diff` structurally cannot.
+#
+# NOT SKIP-PRONE: every case below needs an IN-REPO dataset root, which is what
+# make_repo builds inside the sandbox, so none of them depends on $SANDBOX_IN_REPO
+# (unlike the out-of-repo cases at 4/5/6/9-15).
+# =============================================================================
+LOCAL_MOD_REL="test-data/datasets/goldens/simple_table-Data.db.jsonl"
+LOCAL_MOD_CONTENT='HAND-REGENERATED locally, never committed'
+
+# === Case 27: an UNSTAGED local modification must be refused, not reverted ====
+R27="$T/case27-repo"
+make_repo "$R27"
+printf '%s\n' "$LOCAL_MOD_CONTENT" >"$R27/$LOCAL_MOD_REL"
+if [ -n "$(git -C "$R27" diff --name-only -- "$LOCAL_MOD_REL")" ]; then
+  ok "local-mod: fixture really carries an UNSTAGED modification"
+else
+  bad "local-mod: could not build the unstaged-modification fixture"
+fi
+run_fetch "$R27" "$R27/test-data/datasets"
+assert_refusal "local-mod" "carry LOCAL MODIFICATIONS" "$R27/$LOCAL_MOD_REL"
+if [ "$(cat "$R27/$LOCAL_MOD_REL")" = "$LOCAL_MOD_CONTENT" ]; then
+  ok "local-mod: the locally modified content survives byte-identical"
+else
+  bad "local-mod: the local modification was REVERTED (issue #3245 data loss)"
+fi
+case "$OUT" in
+  *"goldens/simple_table-Data.db.jsonl"*) ok "local-mod: refusal NAMES the offending path" ;;
+  *) bad "local-mod: refusal does not name the path; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"git stash push"*"git restore"*) ok "local-mod: refusal gives the remedy (commit/stash/restore)" ;;
+  *) bad "local-mod: refusal has no remedy; output: $OUT" ;;
+esac
+# Data-loss guards get no escape hatch: an override would be reached for exactly
+# when it must not be.
+assert_structural_not_overridable "local-mod" "$R27" "$R27/test-data/datasets" "$R27/$LOCAL_MOD_REL"
+if [ ! -f "$R27/test-data/datasets/metadata.yml" ]; then
+  ok "local-mod: no extraction happened (refused before the destructive step)"
+else
+  bad "local-mod: the archive was extracted despite the refusal"
+fi
+
+# === Case 27b: a STAGED modification is refused the same way ==================
+# `restore --worktree` reads the INDEX, so a purely staged edit would survive —
+# but distinguishing the safe index states from the lossy ones (`MD`, `AM`, a
+# staged rename, an unborn HEAD) is a per-state analysis whose failure mode is
+# SILENT loss, while over-refusing costs one `git commit`/`git stash`. So any
+# dirty tracked path is refused, and this case pins that deliberate choice.
+R27B="$T/case27b-repo"
+make_repo "$R27B"
+printf '%s\n' "$LOCAL_MOD_CONTENT" >"$R27B/$LOCAL_MOD_REL"
+git -C "$R27B" add -f "$LOCAL_MOD_REL"
+if [ -n "$(git -C "$R27B" diff --cached --name-only -- "$LOCAL_MOD_REL")" ]; then
+  ok "staged-mod: fixture really carries a STAGED modification"
+else
+  bad "staged-mod: could not build the staged-modification fixture"
+fi
+run_fetch "$R27B" "$R27B/test-data/datasets"
+assert_refusal "staged-mod" "carry LOCAL MODIFICATIONS" "$R27B/$LOCAL_MOD_REL"
+if [ "$(cat "$R27B/$LOCAL_MOD_REL")" = "$LOCAL_MOD_CONTENT" ]; then
+  ok "staged-mod: the staged content is untouched"
+else
+  bad "staged-mod: the staged content changed"
+fi
+
+# === Case 27c: a STAGED DELETION is refused before the rm -rf ================
+# `git rm --cached` leaves the file on disk but OUT of the index, so it is not
+# captured (`ls-files` reads the index), the `rm -rf` takes it for good, and there
+# is nothing to restore it from. This is the state case 29 exercises past the
+# refusal.
+R27C="$T/case27c-repo"
+make_repo "$R27C"
+git -C "$R27C" rm -q --cached "$LOCAL_MOD_REL" >/dev/null
+if [ -f "$R27C/$LOCAL_MOD_REL" ] && [ -z "$(git -C "$R27C" ls-files -- "$LOCAL_MOD_REL")" ]; then
+  ok "staged-delete: fixture is on disk but no longer in the index"
+else
+  bad "staged-delete: could not build the staged-deletion fixture"
+fi
+run_fetch "$R27C" "$R27C/test-data/datasets"
+assert_refusal "staged-delete" "carry LOCAL MODIFICATIONS" "$R27C/$LOCAL_MOD_REL"
+
+# --- Case 28: NON-VACUITY for the modification refusal -----------------------
+# Mutant: the pre-deletion check becomes a no-op — the pre-#3245 code. It must
+# report SUCCESS while the local modification is silently reverted, which is the
+# defect; if the mutant also preserved it, case 27 would prove nothing.
+MUTANT_NO_MODCHECK="$T/fetch-datasets-mutant-no-modcheck.sh"
+sed 's/^refuse_modified_tracked_dataset_files$/: mutant-no-modification-check/' "$FETCH" >"$MUTANT_NO_MODCHECK"
+if grep -q ': mutant-no-modification-check' "$MUTANT_NO_MODCHECK"; then
+  ok "non-vacuity: built a modification-check-disabled mutant"
+  R28="$T/case28-repo"
+  make_repo "$R28"
+  printf '%s\n' "$LOCAL_MOD_CONTENT" >"$R28/$LOCAL_MOD_REL"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_NO_MODCHECK"
+  run_fetch "$R28" "$R28/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  if [ "$RC" -eq 0 ] && [ "$(cat "$R28/$LOCAL_MOD_REL" 2>/dev/null)" = "$(committed_content "goldens/simple_table-Data.db.jsonl")" ]; then
+    ok "non-vacuity: mutant reports SUCCESS while REVERTING the local modification (the #3245 defect)"
+  else
+    bad "non-vacuity: mutant did not reproduce the silent revert (exit $RC, content: $(cat "$R28/$LOCAL_MOD_REL" 2>/dev/null))"
+  fi
+  if [ -z "$(git -C "$R28" status --porcelain -- "$LOCAL_MOD_REL" 2>&1)" ]; then
+    ok "non-vacuity: mutant leaves a CLEAN checkout — the loss is invisible to git, which is why it must be refused up front"
+  else
+    bad "non-vacuity: mutant left the modification visible; the silent-loss shape is not what happened"
+  fi
+else
+  bad "non-vacuity: could not build the modification-check-disabled mutant (call site renamed?)"
+fi
+
+# === Case 29: the postcondition must ALSO consult `git status --porcelain` ====
+# `git diff` compares the worktree to the INDEX, so a path removed from the index
+# but still in HEAD produces NO diff entry — its deletion is structurally
+# invisible to that oracle. Driven past the case-27c refusal with the mutant, so
+# the postcondition is what has to catch it (AC3: the literal porcelain oracle).
+if grep -q ': mutant-no-modification-check' "$MUTANT_NO_MODCHECK"; then
+  R29="$T/case29-repo"
+  make_repo "$R29"
+  git -C "$R29" rm -q --cached "$LOCAL_MOD_REL" >/dev/null
+  # Prove the blindness rather than assuming it: with the file gone from disk,
+  # `git diff` reports NOTHING while porcelain reports the staged deletion.
+  PROBE29="$T/case29-probe"
+  make_repo "$PROBE29"
+  git -C "$PROBE29" rm -q --cached "$LOCAL_MOD_REL" >/dev/null
+  rm -f "$PROBE29/$LOCAL_MOD_REL"
+  if [ -z "$(git -C "$PROBE29" diff --name-status -- ":(literal)test-data/datasets")" ] \
+    && [ -n "$(git -C "$PROBE29" status --porcelain -uno -- ":(literal)test-data/datasets")" ]; then
+    ok "porcelain-oracle: git diff is BLIND to the staged deletion; git status --porcelain sees it"
+  else
+    bad "porcelain-oracle: the blindness did not reproduce on this git"
+  fi
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_NO_MODCHECK"
+  run_fetch "$R29" "$R29/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  if [ "$RC" -ne 0 ]; then
+    ok "porcelain-oracle: the run FAILS instead of reporting success (exit $RC)"
+  else
+    bad "porcelain-oracle: reported SUCCESS after losing a staged-deleted tracked path; output: $OUT"
+  fi
+  case "$OUT" in
+    *"git status --porcelain"*"#3245"*|*"#3245"*"git status --porcelain"*)
+      ok "porcelain-oracle: the failure names the porcelain oracle and the issue" ;;
+    *) bad "porcelain-oracle: failure does not name the oracle; output: $OUT" ;;
+  esac
+  case "$OUT" in
+    *"goldens/simple_table-Data.db.jsonl"*) ok "porcelain-oracle: the failure names the offending path" ;;
+    *) bad "porcelain-oracle: failure does not name the path; output: $OUT" ;;
+  esac
+
+  # --- Case 29b: NON-VACUITY — drop the porcelain assert as well -------------
+  # That is the pre-#3245 postcondition (git diff only): it must report SUCCESS
+  # with the tracked path gone, i.e. exactly the blindness case 29 closes.
+  MUTANT_NO_PORCELAIN="$T/fetch-datasets-mutant-no-porcelain.sh"
+  sed 's/^    verify_tracked_status_clean_or_fail || return 1$/    : mutant-no-porcelain-postcondition/' \
+    "$MUTANT_NO_MODCHECK" >"$MUTANT_NO_PORCELAIN"
+  if grep -q ': mutant-no-porcelain-postcondition' "$MUTANT_NO_PORCELAIN"; then
+    ok "non-vacuity: built a porcelain-postcondition-disabled mutant"
+    R29B="$T/case29b-repo"
+    make_repo "$R29B"
+    git -C "$R29B" rm -q --cached "$LOCAL_MOD_REL" >/dev/null
+    FETCH_SAVED="$FETCH"
+    FETCH="$MUTANT_NO_PORCELAIN"
+    run_fetch "$R29B" "$R29B/test-data/datasets"
+    FETCH="$FETCH_SAVED"
+    if [ "$RC" -eq 0 ] && [ ! -f "$R29B/$LOCAL_MOD_REL" ]; then
+      ok "non-vacuity: mutant reports SUCCESS with the tracked path DELETED (git diff cannot see it)"
+    else
+      bad "non-vacuity: mutant did not reproduce the blind postcondition (exit $RC, file present: $([ -f "$R29B/$LOCAL_MOD_REL" ] && echo yes || echo no))"
+    fi
+  else
+    bad "non-vacuity: could not build the porcelain-postcondition-disabled mutant (call site renamed?)"
+  fi
+else
+  bad "porcelain-oracle: no modification-check-disabled mutant available; cases 29/29b cannot run"
+fi
+
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
