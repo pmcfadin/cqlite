@@ -161,20 +161,35 @@ rows = int("$CORPUS_ROWS")
 
 def occupancy(s):
     """What makes the INTERIOR convention legitimate: whole scans only, and
-    workers busy for the whole step (no idle ramp/drain)."""
+    workers busy for the whole step (no idle ramp/drain).
+
+    FAIL-CLOSED ON AN EMPTY RUN. The first smoke run of this script returned
+    rc=0 with rows_total=0 and 2,258,606 NotFound errors, because the corpus was
+    staged FLAT and cqlite-flight logged "discovered 0 tables across 0
+    keyspaces" (it needs <keyspace>/<table>-<uuid>/). The old check said
+    exact=True because 0 % rows == 0 — a vacuously passing empty measurement,
+    exactly what CLAUDE.md forbids ("never let a dataset-dependent test pass on
+    an empty dataset; 0-rows-when-present is a failure"). So require positive
+    rows, whole scans, and zero errors, and surface `ok` for the caller to gate."""
     if not s: return None
     d = s["duration_s"]; n = s["target_concurrency"]
     ok = s["requests_ok"]; rt = s["rows_total"]
+    err = s.get("requests_error", 0); unav = s.get("requests_unavailable", 0)
     p50 = s["latency_ms"]["p50"]/1000.0
     return {
       "rows_total": rt,
-      "rows_total_is_exact_multiple_of_corpus": (rt % rows == 0),
+      "rows_positive": rt > 0,
+      "requests_error": err,
+      "requests_unavailable": unav,
+      "error_codes": s.get("error_codes", {}),
+      "rows_total_is_exact_multiple_of_corpus": (rt > 0 and rt % rows == 0),
       "whole_scans": rt/rows,
       "requests_ok": ok,
       "duration_s": d,
       "p50_latency_s": p50,
       "busy_fraction_estimate": (ok*p50/n/d) if (n and d) else None,
       "rows_per_s_step": s["rows_per_s"],
+      "ok": bool(rt > 0 and rt % rows == 0 and err == 0 and unav == 0 and ok > 0),
     }
 
 doc = {
@@ -231,10 +246,25 @@ print("meta -> $OUT/meta.json")
 print("  warm read_bytes delta:", doc["warm_read_bytes_delta"],
       "| client util: %.4f" % (doc["client_utilisation"] or -1),
       "| gate:", "PASS" if doc["client_saturation_gate_pass"] else "FAIL")
+bad = []
 for k, v in doc["occupancy"].items():
-    if v: print("  occupancy[%s]: whole_scans=%.3f exact=%s busy_frac=%.4f rows/s=%.0f"
-                % (k, v["whole_scans"], v["rows_total_is_exact_multiple_of_corpus"],
-                   v["busy_fraction_estimate"] or -1, v["rows_per_s_step"]))
+    if not v:
+        bad.append("%s: NO STEP RECORD" % k); continue
+    print("  occupancy[%s]: rows=%d whole_scans=%.3f exact=%s err=%d busy_frac=%.4f rows/s=%.0f ok=%s"
+          % (k, v["rows_total"], v["whole_scans"],
+             v["rows_total_is_exact_multiple_of_corpus"], v["requests_error"],
+             v["busy_fraction_estimate"] or -1, v["rows_per_s_step"], v["ok"]))
+    if not v["ok"]:
+        bad.append("%s: rows=%d err=%d codes=%s"
+                   % (k, v["rows_total"], v["requests_error"], v["error_codes"]))
+if not doc["warm_verified_zero_disk_reads"]:
+    bad.append("warmth: read_bytes delta = %s (want 0)" % doc["warm_read_bytes_delta"])
+if not doc["client_saturation_gate_pass"]:
+    bad.append("client saturation: util=%s > %s — this point measured the CLIENT"
+               % (doc["client_utilisation"], "$WS0_CLIENT_SAT_THRESHOLD"))
+if bad:
+    raise SystemExit("CAPTURE INVALID (fail-closed):\n  - " + "\n  - ".join(bad))
+print("  ALL VALIDITY GATES PASS")
 PY
 RC_META=$?
 ws0_log "[$LABEL rep$REP] done rc(core=$RC_CORE aligned=$RC_ALIGNED uncore=$RC_UNCORE meta=$RC_META)"
