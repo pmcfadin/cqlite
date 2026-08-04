@@ -117,9 +117,11 @@ actually received them. Either alone is insufficient.
 A `RESULT` of `FINDINGS`/`FAIL` because the reviewer found real issues is **not** a probe failure: the
 probe is about **scope** (did the reviewer receive the code?), not about the verdict.
 
-If `census-exclusion:` reads `NOTICE (… excluded by a roborev built-in …)`, that is expected and
-non-failing whenever the diff touches a lockfile or cache path — see the FAIL-vs-NOTICE rationale in
-`scripts/flow/roborev-review.sh --help`.
+If the probe diff touches a lockfile or cache path (`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, …), expect
+`census-exclusion: PASS` (the guard does not model roborev's compiled-in deny-list) followed by
+`prompt-content: FAIL` naming that path. That is the **declared residual**, not a probe failure — see the
+residual section in `scripts/flow/roborev-review.sh --help` and issue #3278. Keep such paths out of the
+probe diff if you want an unambiguous demonstration.
 
 ## Reading the token line — the mechanism's thresholds, not a memorised band
 
@@ -185,7 +187,6 @@ evidence reads exactly like real evidence.
 
 ## Version pinning
 
-Everything here is pinned to **`roborev v0.61.2`** — the ported `FormatExcludeArgs`, the extracted
-built-in deny-list, and the measured `config get` behaviour. Re-run this procedure and re-verify both
-lists after any roborev version bump: an upstream change would silently invalidate them while every
-summary block still read `PASS`.
+Everything here is pinned to **`roborev v0.61.2`** — the ported `FormatExcludeArgs` and the measured
+`config get` behaviour. Re-run this procedure and re-verify the port after any roborev version bump: an
+upstream change would silently invalidate it while every summary block still read `PASS`.

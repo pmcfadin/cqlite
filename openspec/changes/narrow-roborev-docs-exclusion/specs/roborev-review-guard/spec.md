@@ -18,7 +18,7 @@ instead of asserting it.
 | 1 — the exclusion is narrowed so executable files under `docs/` are reviewed | ADDED *The review-diff exclusion set excludes prose and non-code artifacts, never executable code* |
 | 2 — demonstrated on the real PR #3222 shape, recorded not asserted | ADDED *A recorded live probe demonstrates the narrowed exclusion on the real harness-PR shape* |
 | 3 — the wrapper FAILs loudly, pre-enqueue, when the config would swallow the census | ADDED *The wrapper fails closed before enqueuing when the effective exclusion set would swallow census code*; MODIFIED *The wrapper emits a machine-greppable summary block with a terminal verdict* (the new key in the fixed order) |
-| 4 — the two classifiers are reconciled, or the residual is made explicit | ADDED *The exclusion view is computed with git from the effective configuration, and the residual divergence is declared*; MODIFIED *A code-free census is a deterministic failure before any review is enqueued* |
+| 4 — the two classifiers are reconciled, **or the residual disagreement is documented with the exact cases where it persists** | ADDED *The exclusion view is computed with git from the effective configuration, and the residual divergence is declared*; MODIFIED *A code-free census is a deterministic failure before any review is enqueued*. **This change satisfies AC4 through its SECOND BRANCH** — see *The residual disagreement, documented* below. That is not a reduction in AC coverage: AC4 is a disjunction, and the second branch is met by naming the exact residual case, pinning it by test, and showing it fails CLOSED. |
 | 5 — a hermetic regression test pins the behaviour | MODIFIED *A hermetic regression check pins every vacuity trigger and is wired into the agent gate* |
 | 6 — doctrine updated in the same change, publication verified by served content | MODIFIED *Doctrine records the roborev rules, including the measured invocation matrix* |
 | 7 — the backfill decision is recorded | ADDED *The backfill ruling for already-merged, never-reviewed harness code is recorded* |
@@ -147,7 +147,7 @@ The value grammar SHALL be:
 - `FAIL (<m>/<n> code census paths excluded: <path> by '<pattern>'[, …])` — naming the swallowed paths
   and the pattern that excluded each, capped at the first 10 with `(+<r> more)` so the block stays compact
 - `FAIL (exclusion set unreadable: <cause>)`
-- `FAIL (exclusion set UNCORROBORATED: <cause>; corroboration: <state>; built-in-set: <state>)` — the parse
+- `FAIL (exclusion set UNCORROBORATED: <cause>; corroboration: <state>)` — the parse
   found no configured pattern AND no oracle confirmed that, so the silence is unverified
 - `FAIL (trailing-slash pattern '<p>/' resolves RECURSIVE (**/<p>), opposite to '<p>/**' — drop the
   trailing slash deliberately or write '<p>/**')`
@@ -173,7 +173,8 @@ not tell" SHALL NEVER be aliased to "nothing is excluded".
 
 This is stated as a general rule, not as three fixes, because THREE separate defects on this change were
 ONE shape — *a multi-state signal where only the BAD states are tested, so every unknown or unmeasured
-state inherits the PERMISSIVE branch*: `built-in-set: UNAVAILABLE` taking the permissive excusal path;
+state inherits the PERMISSIVE branch*: a three-state `built-in-set:` signal taking the permissive excusal
+path (that subsystem is since DELETED — #3278 — but the shape it exposed is why this is a general rule);
 `corroboration: UNAVAILABLE` reaching a `PASS`; and a `${end:-$start}` fallback silently degrading a failed
 `awk` bound into a one-line scan. A fourth point fix would have been the wrong response.
 
@@ -238,9 +239,8 @@ Four consequences SHALL be replicated, not approximated:
    FORBIDDEN: it is not conservative but WRONG, and would emit false `census-exclusion: FAIL`s on
    legitimate report PRs.
 2. **Every CONFIGURED pattern emits TWO pathspecs**, `<p>` and `<p>/**`, which is how a bare directory
-   name excludes recursively. This SHALL apply to configured patterns ONLY — see the built-in arity
-   requirement below; a check that emits one pathspec per configured pattern UNDER-models the exclusion
-   set and reports paths as SURVIVING that roborev really drops.
+   name excludes recursively. A check that emits one pathspec per configured pattern UNDER-models the
+   exclusion set and reports paths as SURVIVING that roborev really drops.
 3. **A TRAILING SLASH INVERTS the anchoring.** `TrimRight(p, "/")` runs BEFORE the contains-`/` test, so
    `docs/` becomes `docs`, is treated as slash-less, and resolves RECURSIVE (`**/docs` + `**/docs/**`) —
    the OPPOSITE of `docs/**`, which stays root-anchored. Because that is a SILENT WIDENING of unbounded
@@ -287,188 +287,95 @@ file in play, "excluded by `docs/**`" is not an actionable instruction; the swal
 trailing-slash FAIL and the resolved-pathspec listing SHALL each carry a source tag, and a FAIL SHALL
 additionally enumerate every source path it read.
 
-**roborev's own BUILT-IN excludes SHALL be modelled too.** `exclude_patterns` is not the whole exclusion
-set: the binary ALWAYS appends a hard-coded lockfile/cache deny-list (extracted from the pinned v0.61.2
-executable as literal `:(exclude,glob)**/…` pathspecs — the `Cargo.lock`/`go.sum`/`package-lock.json`/…
-family plus `**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml`), with no
-configuration switch. A census path one of those eats is exactly as invisible to the reviewer as a
-configured swallow, so it SHALL be evaluated in the same reconciliation, and it SHALL be messaged
-DISTINCTLY from a configured pattern ("excluded by a roborev built-in" ≠ "excluded by your config"). This
-list SHALL carry the same re-verify-on-upgrade obligation as the ported algorithm.
+### The residual disagreement, documented (AC4's SECOND BRANCH)
 
-**A BUILT-IN SHALL CONTRIBUTE EXACTLY ONE PATHSPEC, APPENDED VERBATIM, AND SHALL NOT BE RE-FORMATTED.**
-The built-ins are NOT user patterns: each is a PRE-FORMATTED pathspec CONSTANT that the binary appends to
-git's argv as-is, so a built-in SHALL NOT be trimmed, SHALL NOT be re-anchored, and SHALL NOT be given the
-`/**` sibling a CONFIGURED pattern receives. This mechanism SHALL be established from the pinned binary
-rather than assumed, and the evidence SHALL be recorded beside the pin: the `:(exclude,glob)` prefix is
-part of each of the 24 string literals (a pattern destined for the formatter would be stored bare); Go's
-length-ordered rodata packing places them back-to-back in equal-length runs at deltas of exactly
-`15 + len(pattern)`, which is only possible if the prefix is inside the string being sorted; and only TWO
-bare `:(exclude,glob)` constants exist among the 26 total occurrences, so there is no shared prefix
-constant for 24 patterns to be formatted against. Corroborating shape: the DIRECTORY built-ins carry `/**`
-written into the literal (`**/.beads/**`) while the FILE built-ins do not (`**/Cargo.lock`).
+**roborev's own BUILT-IN excludes SHALL NOT be modelled by this check, and the resulting residual SHALL be
+DOCUMENTED with the exact cases where it persists.** This is a scope decision, owner-ruled on #3229, and
+deferred in full to **issue #3278**.
 
-Both arities SHALL be pinned by test, because each error is a FALSE PASS in a different place:
-OVER-modelling (a phantom `**/Cargo.lock/**`) invents an exclusion roborev never applies and makes
-`prompt-content:` EXCUSE a covered path, while UNDER-modelling (dropping the sibling from configured
-patterns) reports paths as SURVIVING that roborev really drops. Anything derived from a built-in's arity —
-the blame attribution that names the responsible pattern, and any listing of the emitted pathspecs — SHALL
-use the same arity, so no output can advertise an exclusion git was not asked for.
+**THE FACT, unchanged.** `exclude_patterns` is not the whole exclusion set: the binary ALWAYS appends a
+hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`, `**/pnpm-lock.yaml`, `**/package-lock.json`,
+`**/Gemfile.lock`, … plus `**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml`) to the
+pathspecs it hands git, with no configuration switch and no negation form. A census path one of those eats is
+exactly as invisible to the reviewer as a configured swallow.
 
-#### Scenario: A built-in matches the FILE it names, not a same-named directory's subtree
-- **GIVEN** a census containing `Cargo.lock/inner.rs` (a tracked DIRECTORY named `Cargo.lock`) beside `main.rs`, and the built-in `**/Cargo.lock`
-- **WHEN** the pre-enqueue reconciliation runs
-- **THEN** BOTH paths are reported as SURVIVING, `census-exclusion:` emits neither a FAIL nor a NOTICE, and `prompt-content:` covers both without excusing either as built-in-excluded
-- **AND GIVEN** the same built-in and a census containing a real `Cargo.lock` FILE beside `main.rs`
-- **THEN** the lockfile IS reported swallowed and attributed to `**/Cargo.lock` — so the single pathspec still works and the model is not merely narrower
+**WHY IT IS NOT MODELLED HERE.** Modelling it was attempted and REMOVED. Four consecutive review rounds each
+found a false-PASS **inside that subsystem alone** — a phantom `/**` sibling on a pre-formatted pathspec
+constant; an unbounded substring presence test that blessed an equal-length rename; a three-state
+`built-in-set:` signal tested as two, so `UNAVAILABLE` took the permissive branch; and a coverage excusal
+granted on a model that could not be verified. The modelling was therefore the single largest false-PASS
+source in the change, and **no acceptance criterion reaches it**: all seven ACs are about the effective
+**`exclude_patterns`**, while the deny-list is the binary's internal default. **Subtraction cannot introduce
+a false PASS**: with no built-in in the pattern set this check only ever models FEWER exclusions than roborev
+applies, so it can never excuse a path from `prompt-content:` coverage on an unverified mechanism.
+
+**THE EXACT CASES WHERE THE DISAGREEMENT PERSISTS.** A diff whose code-census paths include a path roborev's
+compiled-in deny-list excludes — concretely `Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, `Gemfile.lock`,
+`package-lock.json`, or anything under `.cache/`, `.beads/`, `.gocache/`. Such a path is silently dropped from
+the reviewer's diff, and this check does not model that. The consequence, per key, SHALL be:
+
+* `census-exclusion:` reports the path as **SURVIVING**, because no CONFIGURED pattern excludes it;
+* `prompt-content:` therefore **EXPECTS** it in the prompt, does not find it, and **FAILs**.
+
+So the residual surfaces as a **FAIL under `prompt-content:`** whose stated cause names the SYMPTOM ("the
+reviewer never received their diffs") rather than the MECHANISM. It is a **DIAGNOSTIC** gap and it **fails
+CLOSED** — never a vacuous green, and never a merge on unreviewed code. The degenerate sub-case (a
+dependency-bump branch whose ONLY code-census path is a lockfile) likewise FAILs, under `prompt-content:`
+rather than pre-enqueue.
+
+**THE RESIDUAL SHALL BE STATED, NOT LEFT TO BE DISCOVERED**, in the wrapper's `--help`, in the oracles
+file's header, in `design.md`, and in this spec — an unstated residual is textually indistinguishable from a
+claim of coverage. **AND IT SHALL BE PINNED BY TEST**, with a both-directions control, so a declared
+residual cannot be confused with an unnoticed one.
+
+#### Scenario: A built-in-excluded lockfile in a #3096-shaped diff FAILs under prompt-content
+- **GIVEN** a census carrying three `docs/reports/ws0-3096-artifacts/*.json` measurement artifacts (excluded by a CONFIGURED pattern and classified code-FREE, so not census code paths), a `Cargo.lock` change and an ordinary `.rs` file, and a prompt that carries only the `.rs` file — which is what the real binary builds, because its compiled-in deny-list drops `Cargo.lock`
+- **WHEN** the guard runs
+- **THEN** `census-exclusion:` reads `PASS (2/2 code census paths survive the effective exclusion set; …)`, reporting the lockfile as SURVIVING because no configured pattern excludes it
+- **AND** `prompt-content:` reads `FAIL (1/2 code census paths absent from the prompt)` and NAMES `Cargo.lock`
+- **AND** the terminal `RESULT:` is `FAIL`, and no key excuses the path as built-in-excluded — the residual costs a DIAGNOSTIC, never a verdict
+
+#### Scenario: The same diff with the lockfile IN the prompt passes (the both-directions control)
+- **GIVEN** the identical census and configuration, but a prompt that DOES carry `Cargo.lock`
+- **WHEN** the guard runs
+- **THEN** `census-exclusion:` reads the SAME `PASS (2/2 …)`, `prompt-content:` reads `PASS (2/2 code census paths present)` with no excusal clause, the review IS enqueued, and `RESULT:` is `PASS` — so the FAIL in the scenario above is attributable to the prompt's contents and to nothing else
 
 **THE VERDICT SHALL FOLLOW ONE RULE, STATED IN DOCTRINE VERBATIM:**
 
 > **FAIL where the author can act; NOTICE where only the information is actionable; never silence.**
 
-This is deliberately ONE rule rather than three ad-hoc calls, and doctrine SHALL present it as such
+This is deliberately ONE rule rather than a set of ad-hoc calls, and doctrine SHALL present it as such
 (CLAUDE.md, `roborev-findings.md`, `design.md`), so a future call of this shape is decided by the rule
-instead of re-litigated. It resolves the three cases:
+instead of re-litigated. On THIS check's subject it resolves to a single call:
 
-1. A **CONFIGURED** pattern (worktree, root or global) swallowing census CODE ⇒ **FAIL**. The remedy is a
-   one-token edit to a NAMED file, available before any review round is paid for.
-2. A **PINNED BUILT-IN** swallowing census CODE ⇒ **NOTICE**, non-failing. There is NO remedy: the
-   deny-list is compiled into the binary with no opt-out and no negation form. FAILing would permanently
-   red a ROUTINE, legitimate change class (a `Cargo.lock` touch) against a check its author cannot
-   possibly satisfy — and **a guard that fires on correct input with no available fix is the guard that
-   gets disabled**, which is how #3229 happened. The NOTICE SHALL still name the paths and the responsible
-   built-in IN THE VALUE LINE (not merely in a detail), SHALL state that a clean verdict does not cover
-   them, and the run SHALL proceed.
-3. The **LIVE built-in set DIVERGING from the pinned set** ⇒ **FAIL**. This case DOES have a remedy —
-   re-extract, update the pin, and judge the new built-in — and it is a MECHANISM change, which the
-   v0.61.2 pin already obliges the project to catch on upgrade rather than assume away. A NOTICE here
-   would silently absorb an upgrade that began excluding `*.rs` or `scripts/**`, with the failure looking
-   like normal operation: precisely the blindness this change exists to close. This FAIL SHALL be
-   DIFF-INDEPENDENT, like the trailing-slash FAIL.
+1. A **CONFIGURED** pattern (worktree, root or global) swallowing census CODE ⇒ **FAIL**, pre-enqueue. The
+   remedy is a one-token edit to a NAMED file, available before any review round is paid for.
 
-**The pinned pattern list SHALL be held in a form that cannot be PATHNAME-EXPANDED** (a bash array, not a
-space-separated string iterated unquoted). This is not style: `**/package-lock.json` expands to the
-repo-relative `website/package-lock.json`, which then reads as a pinned pattern having vanished from the
-binary and FAILs every run. The regression suite's mirrored copy SHALL be held the same way — when both
-sides were strings they made the IDENTICAL mistake, agreed with each other, and a green suite blessed a
-check that FAILed against the real binary, which is the symmetric-oracle blindness of #3042 in shell.
+**AND THERE SHALL BE NO `NOTICE` VALUE FOR THIS KEY.** A NOTICE is the right value for a swallow with no
+remedy, and the only such swallow is by the deny-list this check does not model. With every pattern in play
+CONFIGURED and therefore EDITABLE, every swallow the check can see is actionable, so the verdict SHALL be
+`PASS` or `FAIL` and nothing between. "Never silence" is satisfied one level up, by the documented residual
+above. A **TOTAL** swallow SHALL NOT be a separate branch: it is a configured swallow, so it FAILs, and the
+value SHALL carry `<m>/<n>` so `m == n` is visible on its face.
 
-**Divergence SHALL be OBSERVED, not assumed**, by reading the roborev executable: each pinned pattern
-looked for as a FIXED string `:(exclude,glob)<pattern>` (which names removals exactly), plus a PINNED
-COUNT of `:(exclude,glob)` literals (which detects additions numerically). A blind full-set
-re-extraction SHALL NOT be used as the basis of a FAIL: Go string literals are concatenated without
-terminators, and a naive scan of this very binary yields truncations, junk-suffixed hits and a phantom
-pattern that is really a bare prefix constant — a FAIL built on that would red every run.
+**`NOTICE*` SHALL NOT be failing-capable** — `vacuity-tier1:` emits it as a documented advisory — and both
+FAIL forms SHALL be. The wrapper's single verdict scan fails a run whose value begins `FAIL`, `FINDINGS`,
+`ERROR` or `INCONSISTENT`; that correspondence SHALL be asserted STRUCTURALLY against the scan itself,
+because a value reading NOTICE while `RESULT:` goes FAIL (or a FAIL that does not red the run) is the
+decorative-key defect mirrored. **"Against the scan itself" SHALL mean against the scan STATEMENT** — the
+extracted `for verdict in … ; do` key list and the `case` line bounded inside that loop — and SHALL NOT be a
+whole-file search for the key's name: the summary block's own `printf 'census-exclusion: %s\n'
+"$CENSUS_EXCLUSION"` satisfies a file-wide search, so such an assert would keep passing with the key DELETED
+from the scan, making the assert that forbids a decorative key itself decorative. Nor can a behavioural case
+substitute: every failing assignment to the key is immediately followed by the terminal FAIL, so the scan
+never observes a failing value and its registration there is purely defensive.
 
-**AN UNBOUNDED SUBSTRING PRESENCE TEST SHALL NOT BE THE ONLY PRESENCE CHECK.** A fixed-string search for
-`:(exclude,glob)<pattern>` has an exact LEFT boundary (the 15-byte prefix) and NO RIGHT one, so
-`**/Cargo.lock` matches INSIDE `**/Cargo.lock.bak`; and a bare literal COUNT cannot see a one-for-one
-substitution. Together they are a FALSE PASS, MEASURED on the pinned binary: patching its bucket-28 run
-to read `:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock`
-(4 bytes borrowed from the preceding string, file size unchanged) leaves the literal count at EXACTLY 26
-and the missing list EMPTY — verdict `built-in-set: OK` on a modelled exclusion set that no longer
-matches reality. Two further observations are therefore REQUIRED, and `built-in-set: OK` SHALL mean all
-four hold:
-
-1. **THE PINNED VERSION, ASKED OF THE EXECUTABLE.** Every fact this file models — the 24 patterns, their
-   one-pathspec arity, the ported `git.FormatExcludeArgs` — was derived from ONE build, so the pin SHALL
-   be held as a machine-checked constant and the executable SHALL be asked which version it is
-   (`roborev version`; there is no `--version` flag). A MISMATCH SHALL be DIVERGENCE ⇒ FAIL, naming the
-   observed and pinned versions and the re-verify-on-upgrade obligation the pin has always carried. This
-   is the GENERAL signal: any upgrade or rebuild moves it, whatever it did to the patterns.
-2. **A RIGHT BOUNDARY, DERIVED FROM THE BLOB'S LENGTH-BUCKET ADJACENCY.** Go's linker packs the rodata
-   string blob in LENGTH order with no terminator, and MEASURED against the pinned binary each LENGTH
-   BUCKET of these literals is stored as ONE CONTIGUOUS RUN — inside a run the byte after a literal is
-   the `:` of the next literal, which IS a right boundary. The invariant checked SHALL therefore be: per
-   bucket of k members, EXACTLY k-1 are immediately followed by another `:(exclude,glob)` literal (one
-   ends the run). It SHALL be DERIVED FROM THE PINNED PATTERN LIST ALONE — group by length, expect k-1 —
-   and SHALL NOT pin foreign successor bytes or a within-bucket ORDER, because build-specific foreign
-   data would FALSE-FAIL a correct binary, and a guard that reds correct input is the guard that gets
-   disabled. A bucket holding a MISSING member SHALL skip this arithmetic: its run was broken BY the
-   removal, which requirement (1) above already names exactly.
-
-Declared residuals, both narrowed by the version check: the LAST literal of each run has no derivable
-right boundary (an in-place equal-length extension of a run-ENDER within the pinned version stays
-invisible), and a new pattern having a pinned one as a prefix is still not NAMED — it is detected as an
-addition by the count or as a broken run by the adjacency invariant.
-
-**"Never silence" SHALL be mechanized.** Every `census-exclusion:` value SHALL end with
-`built-in-set: OK|DIVERGED|UNAVAILABLE`. When the set cannot be observed — `roborev` absent from
-PATH, an unreadable target, a target carrying zero `:(exclude,glob)` literals (which is the hermetic
-suite's own state), or a target that will not report its version — the value SHALL read `UNAVAILABLE`
-and SHALL be NEITHER a failure NOR a blessing. An unobservable set SHALL NEVER be reported as, or
-silently treated as, agreement. An unreadable version SHALL withhold ONLY the OK blessing: a
-POSITIVELY OBSERVED divergence (a missing pattern, a broken adjacency run, a changed literal count)
-SHALL still FAIL without it, so the check can never self-disable.
-
-**THE BUILT-IN EXCUSAL SHALL REQUIRE A VERIFIED MODEL — `built-in-set: OK`, not merely "not
-`DIVERGED`".** `built-in-set:` has THREE states, and PERMISSIVE behaviour SHALL be keyed on the POSITIVE
-one. Two decisions are deliberately SEPARATE:
-
-1. Whether a built-in swallow may be a NOTICE rather than a FAIL SHALL turn on the set NOT being
-   `DIVERGED`. Only a POSITIVELY OBSERVED divergence is an actionable mechanism change; an unobservable
-   binary (`roborev` absent from PATH — the hermetic suite's normal state) SHALL NOT red every run,
-   because a guard that reds correct input with no available remedy is the guard that gets disabled.
-2. Whether that swallow **EXCUSES** the swallowed paths from `prompt-content:` SHALL require
-   `built-in-set: OK`. The excusal is a claim ABOUT THE MECHANISM — that a path's absence from the
-   prompt is a DETERMINISTIC consequence of the PINNED deny-list — and an UNVERIFIED mechanism cannot
-   support it.
-
-Under `UNAVAILABLE` the guard SHALL therefore excuse NOTHING: the set handed to `prompt-content:` SHALL
-be EMPTY, `prompt-content:` SHALL evaluate EVERY census code path, and it SHALL FAIL if one is genuinely
-absent from the prompt. That fails CLOSED on the EXCUSAL without failing the RUN. The value line SHALL
-say so EXPLICITLY and DISTINCTLY — naming that the built-in model is NOT VERIFIED and that NO path is
-excused — in wording that reads as NEITHER a clean PASS NOR a `DIVERGED` set, because the state is
-neither. *"We could not check" SHALL NEVER render as "nothing was wrong."* This closes a REPRODUCED
-false-PASS: a shim carrying all 24 literals correctly right-bounded but hiding its `version` yields
-`state=UNAVAILABLE, missing=0`, and the previous revision — which tested only `= DIVERGED` at three
-sites and `!= DIVERGED` at a fourth — still populated the excusal set and still instructed
-`prompt-content:` not to expect those paths, so coverage was excused on an unverified model while the
-block read `RESULT: PASS`.
-
-**PRECEDENCE.** Both FAIL causes outrank the NOTICE, and EVERY cause present SHALL be named in the value
-line — the actionable half must never be hidden behind the unactionable one, in either direction.
-
-**`NOTICE*` SHALL NOT be failing-capable** and both FAIL forms SHALL be. The wrapper's single verdict scan
-fails a run whose value begins `FAIL`, `FINDINGS`, `ERROR` or `INCONSISTENT`; that correspondence SHALL be
-asserted STRUCTURALLY against the scan itself, because a value reading NOTICE while `RESULT:` goes FAIL
-(or a FAIL that does not red the run) is the decorative-key defect mirrored. **"Against the scan itself"
-SHALL mean against the scan STATEMENT** — the extracted `for verdict in … ; do` key list and the `case`
-line bounded inside that loop — and SHALL NOT be a whole-file search for the key's name: the summary
-block's own `printf 'census-exclusion: %s\n' "$CENSUS_EXCLUSION"` satisfies a file-wide search, so such an
-assert would keep passing with the key DELETED from the scan, making the assert that forbids a decorative
-key itself decorative. Nor can a behavioural case substitute: every failing assignment to the key is
-immediately followed by the terminal FAIL, so the scan never observes a failing value and its registration
-there is purely defensive.
-
-**A TOTAL built-in swallow SHALL FAIL; only a PARTIAL one is a NOTICE.** When EVERY code census path is
-dropped by a pinned built-in — so the reviewer would receive an EMPTY prompt — `census-exclusion:` SHALL
-FAIL **before the enqueue**, with the value naming the empty diff and the detail carrying the same remedy
-`code-free:` prescribes (this diff cannot be roborev-certified at all; verify the paths another way and
-record primary-source verification in the pull request). This SHALL NOT be read as an exception to the
-pinned-built-in NOTICE ruling above: it is the SAME rule — *FAIL where the author can act; NOTICE where
-only the information is actionable; **never silence*** — reaching a case that ruling does not cover. A
-partial swallow leaves a diff the reviewer can genuinely review and an unactionable remainder, so it stays
-information; a total swallow leaves NOTHING, and a verdict on an empty prompt certifies nothing — the very
-condition `code-free:` already FAILs pre-enqueue for a prose-only census, arrived at through the exclusion
-set instead of through classification. The boundary is TOTAL vs PARTIAL and nothing else, and BOTH sides
-of it SHALL be pinned by the regression suite so neither can drift into the other.
-
-The consequence of NOT drawing this boundary is MEASURED, not hypothetical (hermetic fixture: a
-`Cargo.lock` bump beside a `README.md` edit): `census-exclusion: NOTICE (0/1 … survive)` let
-`prompt-content:` report `PASS (0/0 code census paths present)` and the block terminate `RESULT: PASS`
-with exit 0 — a VACUOUS pass TEXTUALLY IDENTICAL to a genuine one, on which `flow-closer` would arm
-`--auto` for an unreviewed diff. Any dependency-bump branch whose only non-prose file is a lockfile
-(`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`) reaches it, and `code-free:` does NOT catch it because a
-`.lock` extension classifies as CODE. Neither vacuity tier catches it either: tier 1 greps a literal
-phrase the reviewer need not emit, and tier 2 is `UNAVAILABLE` with no token payload.
-
-**A KNOWN built-in absence SHALL NOT be re-reported by `prompt-content:` as a discovery.** The set of
-census code paths a pinned built-in drops SHALL be handed to `prompt-content:`, which SHALL subtract them
-and SHALL say so in its value. Their absence from the prompt is a deterministic property of roborev's
-compiled-in mechanism, already reported non-fatally under `census-exclusion:`; asserting their presence
-would move the same unfixable red one key down. The subtraction SHALL be scoped to BUILT-IN swallows
-only — a configured swallow FAILs pre-enqueue and can therefore never be masked by it.
+**AND NO KEY SHALL BE EXEMPT FROM THE AFFIRMATION BACKSTOP.** `census-exclusion:` was formerly allowed a
+`NOTICE` there, the backstop's single per-key exemption, because a remedy-less built-in swallow was a
+measurement with a stated residual. With that subject deleted the key can no longer emit `NOTICE`, so the
+exemption is removed: the backstop now requires an affirmative `PASS` from all seven deterministic keys
+without exception, which is STRICTER. That absence of any per-key escape hatch SHALL be asserted
+structurally against the backstop's own `case` body.
 
 When `roborev` IS invocable the parsed set SHALL be CORROBORATED against
 `roborev config get exclude_patterns`, run from **every** checkout whose config was read (that command
@@ -505,9 +412,9 @@ cross-check is the ONLY oracle available.
 the binary answered from no checkout, the parser's silence is UNVERIFIED and the verdict SHALL be
 NON-PASSING (`FAIL (exclusion set UNCORROBORATED: …)`), naming the corroboration state, stating which of
 the two indistinguishable conditions could not be ruled out, disclaiming any assertion that something IS
-excluded, and enqueuing no review. Nothing of the wrapper's own is in the reconciliation on that path —
-only the built-ins — so a configured pattern the parser missed is invisible to git as well, and the
-configured half of a PASS would rest entirely on an unverified silence. A GENUINELY EMPTY configuration
+excluded, and enqueuing no review. Nothing at all is in the reconciliation on that path, so a configured
+pattern the parser missed is invisible to git as well, and the PASS would rest entirely on an unverified
+silence. A GENUINELY EMPTY configuration
 SHALL still PASS whenever the binary confirms it, so the requirement is a gate on the ORACLE, never a
 blanket refusal of the empty-parse PASS.
 
@@ -516,8 +423,8 @@ STATED IN CODE with its reason.** With patterns parsed, those patterns ARE the a
 each is resolved through the ported formatter and matched BY GIT against the census — so corroboration is
 a CROSS-CHECK that can only widen what was already measured, and its absence withholds nothing that was
 claimed. Failing there would red every run on a box whose roborev lacks the subcommand: the self-disabling
-guard this change refuses to build. This is the same asymmetry `built-in-set:` draws — an unobservable
-oracle withholds the BLESSING it was the SOLE source of, and nothing else. The parse SHALL additionally accept the QUOTED TOML key
+guard this change refuses to build. The asymmetry is general — an unobservable oracle withholds the
+BLESSING it was the SOLE source of, and nothing else. The parse SHALL additionally accept the QUOTED TOML key
 spellings `"exclude_patterns"` and `'exclude_patterns'`, which are the same key and ARE honoured by
 roborev (measured on v0.61.2) — but accepting them is NOT sufficient on its own, because any other
 unenumerated-yet-honoured spelling would silently disable the guard; the corroboration is what covers
@@ -543,7 +450,10 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 1. configuration excludes a path the census calls CODE ⇒ `census-exclusion: FAIL`, pre-enqueue — the
    defect class this requirement exists to prevent;
 2. the census calls a path non-code that the configuration does NOT exclude ⇒ not a failure; the file is
-   delivered to the reviewer as bounded NOISE.
+   delivered to the reviewer as bounded NOISE;
+3. roborev's compiled-in deny-list excludes a path the census calls CODE, and this check does not model it
+   ⇒ `census-exclusion: PASS` and `prompt-content: FAIL` — AC4's SECOND BRANCH, documented above with its
+   exact cases and pinned by test. Fail-CLOSED, diagnostically imprecise, deferred to #3278.
 
 #### Scenario: The exclusion view is obtained from git, not from a re-implemented matcher
 - **WHEN** the reconciliation check is inspected
@@ -605,97 +515,6 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** it FAILs closed saying the exclusion set roborev will apply is UNKNOWN, rather than reading `$REPO/.roborev.toml` alone and reporting a PASS about a file roborev may never consult
 
-#### Scenario: A pinned built-in exclude is a non-failing NOTICE that still names the path
-- **GIVEN** a census containing `Cargo.lock` (which the census classifies as CODE) beside a `.rs` file, under a configuration that excludes neither
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` reads `NOTICE`, names `Cargo.lock` as excluded by `**/Cargo.lock` with a `roborev-builtin` source tag IN THE VALUE LINE, states that there is NOTHING TO FIX in any config file, states that a clean verdict does not cover that path, does NOT blame the operator's configuration, reports the `.rs` file as surviving — and the review IS enqueued with `RESULT:` not FAIL on that account
-
-#### Scenario: A TOTAL built-in swallow FAILs pre-enqueue, because nothing would reach the reviewer
-- **GIVEN** a census whose only non-prose file is a lockfile (a `Cargo.lock` bump beside a `README.md` edit), so `code-free:` PASSes because a `.lock` extension classifies as CODE, and whose single CODE path is dropped by the built-in `**/Cargo.lock`
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` reads `FAIL (0/1 code census paths survive …; ALL 1 code census path(s) excluded by a roborev built-in, so the reviewer would receive an EMPTY diff: …)`, NOT a NOTICE; the detail states the diff cannot be roborev-certified at all and prescribes primary-source verification recorded in the pull request; no review is enqueued; `prompt-content:` reads `SKIP`; and the terminal `RESULT:` is `FAIL`
-
-#### Scenario: The total-swallow FAIL is the NOTICE rule applied consistently, not an exception to it
-- **WHEN** the total-swallow failure detail is read
-- **THEN** it states that a PARTIAL built-in swallow stays a NOTICE and that this FAIL is the rule "FAIL where the author can act; NOTICE where only the information is actionable; never silence" applied consistently rather than an exception to it — so a reader cannot conclude the pinned-built-in NOTICE ruling was reversed
-
-#### Scenario: The same lockfile beside surviving code is still only a NOTICE
-- **GIVEN** the same built-in-excluded `Cargo.lock` in a census that ALSO carries a surviving `.rs` file
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` reads `NOTICE (1/2 code census paths survive …)`, the review IS enqueued, the terminal `RESULT:` is not FAIL on that account, and the total-swallow wording (`EMPTY diff`) is absent — so the boundary is TOTAL vs PARTIAL and nothing else
-
-#### Scenario: A known built-in absence is not re-reported by prompt-content, GIVEN a VERIFIED built-in set
-- **GIVEN** the same run against a roborev target whose built-in deny-list is observed to MATCH the pin (`built-in-set: OK`), whose prompt therefore carries the `.rs` file but not `Cargo.lock`
-- **WHEN** `prompt-content:` evaluates
-- **THEN** it PASSes over the reduced set and records the subtraction explicitly (`+<n> not expected: excluded by a roborev built-in`), rather than FAILing on an absence that `census-exclusion:` already reported and that has no remedy under either key
-- **AND** the value line reports no withheld excusal, so the granted and withheld wordings are distinguishable
-
-#### Scenario: An UNVERIFIED built-in model excuses NOTHING, and prompt-content fails closed
-- **GIVEN** a roborev target carrying the pinned literals, correctly right-bounded, that will NOT report its `version` — so the state is `UNAVAILABLE` with an EMPTY missing list — and a census in which a pinned built-in swallows one code path whose diff is absent from the prompt
-- **WHEN** the wrapper runs the reconciliation check and `prompt-content:` evaluates
-- **THEN** `census-exclusion:` is still a NOTICE (an unobservable binary never reds a run on its own), the value line NAMES the withheld excusal, states that the built-in model is NOT VERIFIED and that NO path is excused, and reads as neither a clean PASS nor a DIVERGED set
-- **AND** NO path is handed to `prompt-content:` as excluded: it evaluates EVERY census code path, FAILs on the genuinely-absent one, and the block's `RESULT:` is FAIL — the correct fail-closed outcome when the model is unverified
-- **AND** the detail never claims the live built-in set MATCHES the pin, and the `UNAVAILABLE` notice records that it withholds the EXCUSAL as well as the blessing
-
-#### Scenario: Withholding the excusal does not red a run whose prompt carries the path
-- **GIVEN** the identical `UNAVAILABLE` target and the identical built-in swallow, but a prompt that DOES carry the swallowed path's diff
-- **WHEN** `prompt-content:` evaluates
-- **THEN** the excusal is still reported withheld, `prompt-content:` PASSes over ALL census code paths with no path marked not-expected, and the run PASSes — so withholding the excusal makes the path EVALUATED, never condemned
-
-#### Scenario: A live built-in set matching the pin is reported OK and corroborated
-- **GIVEN** a roborev executable whose built-in deny-list matches the pinned set exactly
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value ends `built-in-set: OK`, the detail states the pin is corroborated rather than assumed, names the observed version and records that the right boundary was verified, and a pinned-built-in swallow in the same run is still only a NOTICE
-
-#### Scenario: An EQUAL-LENGTH built-in rename fails, because presence needs a right boundary
-- **GIVEN** a roborev executable in which one pinned built-in has been replaced ONE-FOR-ONE by a longer pattern carrying it as a prefix (`**/Cargo.lock` → `**/Cargo.lock.bak`), so the `:(exclude,glob)` literal COUNT is unchanged and the pinned pattern is still PRESENT as a substring
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` FAILs as a built-in-set DIVERGENCE naming the affected length bucket, its members, how many of them are right-bounded versus the pinned `k-1`, and WHICH member lost its boundary; the detail names the substring hazard concretely and states the length-bucket basis of the boundary; no review is enqueued
-- **AND** neither the missing-pattern list NOR the literal count reports anything — both pre-existing signals are blind to this substitution, so the FAIL is attributable to the boundary check alone
-- **AND GIVEN** the identical fixture with an UNTAMPERED deny-list, the value ends `built-in-set: OK` and the run PASSes — so the FAIL is the tamper and not the fixture
-
-#### Scenario: A binary that is not the pinned version fails
-- **GIVEN** a roborev executable whose built-in literals match the pinned set exactly but which reports a DIFFERENT version than the pinned one
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` FAILs as a built-in-set DIVERGENCE with the version named FIRST in the value line, the detail names the observed and pinned versions, names all three facts the version invalidates (the pattern list, the built-in arity, the ported `git.FormatExcludeArgs`) and the obligation to re-pin in the same commit; no other divergence fragment appears, and no review is enqueued
-
-#### Scenario: A binary that will not report its version is UNAVAILABLE, and the check still fails on real divergence
-- **GIVEN** a roborev executable whose built-in literals match the pinned set exactly but which will not answer `version`
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value ends `built-in-set: UNAVAILABLE` rather than `OK` — matching literals alone do not earn a blessing for a pin that could not be confirmed — the detail names the unreadable version among the UNAVAILABLE causes and states that only the blessing is withheld, and `census-exclusion:` does NOT FAIL on that account
-- **AND GIVEN** the same unreadable version on a binary that is ALSO missing a pinned pattern, `census-exclusion:` still FAILs naming the missing pattern — so withholding the blessing can never become a way to disable the check
-
-#### Scenario: An ADDED built-in fails, because that divergence has a remedy
-- **GIVEN** a roborev executable carrying one MORE `:(exclude,glob)` literal than the pinned count — the shape of an upgrade that began excluding source — and a census that touches no lockfile at all
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` FAILs with `roborev built-in exclude set DIVERGED from the pinned v0.61.2 set`, quantifies the delta against the pinned literal count, explains that this direction HAS a remedy and is therefore a FAIL rather than a NOTICE, names the concrete silent-absorption risk (`*.rs` / `scripts/**`), states that the FAIL is about the mechanism rather than this diff, and enqueues no review
-
-#### Scenario: A REMOVED pinned built-in fails, naming the missing pattern
-- **GIVEN** a roborev executable from which one pinned built-in pattern is absent
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** it FAILs naming that pattern as no longer present in the binary, reports the count delta, and points at the re-extract-and-re-pin remedy — because a vanished pattern makes the model OVER-exclude, producing a false FAIL, which is the direction that gets a guard bypassed
-
-#### Scenario: An unobservable built-in set is UNAVAILABLE, neither failing nor blessing
-- **GIVEN** an environment where the roborev target carries no `:(exclude,glob)` literals (a wrapper, a shim, or the regression suite's stub)
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value ends `built-in-set: UNAVAILABLE`, a detail states that this is deliberately NEITHER a failure NOR a blessing, and the run's verdict is unaffected by it — so the hermetic suite stays fully exercisable and an unobserved set is never silently read as agreement
-- **AND** it withholds the EXCUSAL as well as the blessing: no census code path is excused from `prompt-content:` on a model that could not be verified
-
-#### Scenario: A configured swallow and a built-in divergence both name their cause
-- **GIVEN** a run in which a configured pattern swallows census code AND the live built-in set has diverged from the pin
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** the single value line names the configured swallow AND the divergence, the configured cause keeps its own remedy detail, and no review is enqueued — the actionable half is never hidden behind the other
-- **AND** the FAIL value ALSO ends with the built-in state, so "never silence" holds for the FAIL values and not only the PASS/NOTICE ones
-
-#### Scenario: A DIVERGED set beside a real built-in swallow fails and excuses nothing
-- **GIVEN** a roborev executable carrying one MORE `:(exclude,glob)` literal than the pinned count AND a census in which a pinned built-in swallows one code path
-- **WHEN** the wrapper runs the reconciliation check
-- **THEN** `census-exclusion:` FAILs as a built-in-set DIVERGENCE, the value ends `built-in-set: DIVERGED`, the verdict is never softened to a NOTICE, no path is excused from prompt coverage, and no review is enqueued
-
-#### Scenario: The pinned pattern list cannot be pathname-expanded
-- **WHEN** the oracles file is inspected
-- **THEN** `ROBOREV_BUILTIN_EXCLUDES` is declared as a bash array, is never iterated unquoted, and the pinned `:(exclude,glob)` literal count is present — so a pattern like `**/package-lock.json` can never glob into a repo-relative path and be reported as a vanished built-in
-
 #### Scenario: NOTICE is not failing-capable and both FAIL forms are
 - **WHEN** the wrapper's verdict scan is inspected directly, rather than inferred from a case's exit code
 - **THEN** its failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`, `NOTICE*` is absent from it, and `census-exclusion:` is named in the scan's own key list — so a NOTICE cannot red the run while a configured swallow still does
@@ -709,13 +528,13 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 #### Scenario: A genuinely absent key passes only with the binary's confirmation
 - **GIVEN** a configuration file with no `exclude_patterns` key and an invocable `roborev` that ANSWERS with an EMPTY list
 - **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value reads `PASS (no exclusion patterns configured; …)` with the corroboration recorded as `OK` and the roborev built-in excludes still named, counted and reconciled — so "nothing is configured" can never be read as "nothing is excluded"
+- **THEN** the value reads `PASS (no exclusion patterns configured; <n>/<n> code census paths survive an EMPTY exclusion set; corroboration: OK)` — so "nothing is configured" is stated as the EMPTY set it is, and only on the binary's confirmation
 - **AND** the review IS enqueued, asserted positively — an "it was blocked" assert elsewhere is only evidence once its sibling is shown to reach the enqueue
 
 #### Scenario: An UNCORROBORATED empty parse is non-passing, and its text says which condition it could not rule out
 - **GIVEN** a configuration file with no `exclude_patterns` key and a `roborev` whose `config get exclude_patterns` exits non-zero from every checkout
 - **WHEN** the wrapper runs the reconciliation check
-- **THEN** the value reads `FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: UNAVAILABLE; built-in-set: <state>)`, never a `PASS`, and no review is enqueued
+- **THEN** the value reads `FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: UNAVAILABLE)`, never a `PASS`, and no review is enqueued
 - **AND** the detail names the oracle as the only thing that can distinguish "nothing is configured" from "this parser did not recognise the key", states which of the two the run could not rule out, explicitly disclaims asserting that anything IS excluded, names the issue the alias would reintroduce, and records that a genuinely empty configuration still passes once the binary says so
 - **AND GIVEN** instead a configuration carrying `exclude_patterns = []` with the same non-answering binary
 - **THEN** the verdict is the same and only the diagnostic differs, stating that the parser DID see the key with an empty array — an affirmative read of ONE file, which cannot rule out an unrecognised key spelling in another
@@ -751,7 +570,7 @@ membership of its own.
 
 **WHY THIS IS A REQUIREMENT AND NOT AN IMPLEMENTATION DETAIL.** Scattered normalisation produced a BLOCKER
 IN EVERY REVIEW ROUND of this change — six in total, all the same defect class in a different consumer:
-the oracle compared paths from the wrong config source; a total built-in swallow certified an empty prompt;
+the oracle compared paths from the wrong config source; a total exclusion swallow certified an empty prompt;
 `prompt-content:` could not parse space-bearing or C-quoted headers; the **census classified a C-quoted path
 by its QUOTED spelling** (`docs/é notes.md` read as extension `md"` and prefix `"docs/`, so PROSE counted as
 CODE and the configured `*.md` then reported a swallow ⇒ `census-exclusion: FAIL`, pre-enqueue, on an
@@ -1023,14 +842,15 @@ change promotes `docs/reports/*-artifacts/**` executables to CODE census paths.
 dropped from the diff roborev builds — this key has no subject and SHALL NOT report PASS; it SHALL FAIL,
 naming the reason. `PASS (0/0 code census paths present)` is textually indistinguishable from a genuine
 pass while the reviewer received an EMPTY prompt, which is precisely the vacuity this capability exists to
-prevent. This is belt-and-braces behind the pre-enqueue total-swallow FAIL in `census-exclusion:`: the
-condition is unreachable through the normal flow, and SHALL remain refused here anyway so that removing
-the upstream FAIL cannot silently restore a vacuous PASS.
+prevent. This is belt-and-braces behind the pre-enqueue `code-free:` FAIL: the condition is unreachable through the normal
+flow, and SHALL remain refused here anyway so that a change to the upstream ordering cannot silently
+restore a vacuous PASS.
 
 The value set SHALL be exactly:
 
-- `PASS (<n>/<n> code census paths present)` — every code path found, optionally suffixed
-  `(+<b> not expected: excluded by a roborev built-in — see census-exclusion:)`;
+- `PASS (<n>/<n> code census paths present)` — every code path found. There SHALL be NO "not expected"
+  suffix and NO subtraction: no key is licensed to tell this one which census code paths to skip, so a path
+  the reviewer did not receive FAILs (see the documented residual, AC4's second branch);
 - `FAIL (<k>/<n> code census paths absent from the prompt)` — `<k>` MISSING of `<n>` checked, naming the
   missing paths (first ten). Note the two values carry the SAME denominator `<n>` but OPPOSITE numerator
   senses (present on PASS, absent on FAIL), so a grep-based reader SHALL read the value word, never the
@@ -1384,12 +1204,14 @@ excludes only the root-level path while its slash-less twin excludes at any dept
 FAILs naming the recursive inversion, and an empty-after-trim pattern is skipped rather than treated as a
 match-everything.
 
-The check SHALL additionally pin the TOTAL/PARTIAL built-in boundary and the header-shape normalisation:
-(w) a LOCKFILE-ONLY census (a `Cargo.lock` bump beside prose) yields `code-free: PASS` and
-`census-exclusion: FAIL` naming the EMPTY diff, with NO review enqueued, no `NOTICE` value, and no
-`prompt-content: PASS (0/0 …)` anywhere; (x) the SAME lockfile beside a surviving `.rs` file still yields
-the `NOTICE` and IS enqueued, so the boundary is TOTAL vs PARTIAL and the pinned-built-in ruling is
-demonstrably intact; (y) `prompt-content:` refuses to report a pass when no census path is checkable, driven
+The check SHALL additionally pin the DECLARED RESIDUAL and the header-shape normalisation:
+(w) a #3096-shaped census (`docs/reports/ws0-3096-artifacts/*.json` + a `Cargo.lock` change + a `.rs` file)
+against a prompt carrying only the `.rs` file yields `census-exclusion: PASS (2/2 …)` and
+`prompt-content: FAIL (1/2 …)` naming `Cargo.lock`, with `RESULT: FAIL` and no "not expected" clause
+anywhere; (x) the SAME census against a prompt that DOES carry the lockfile yields
+`prompt-content: PASS (2/2 …)` and `RESULT: PASS`, so (w)'s FAIL is attributable to the prompt's contents
+and to nothing else — the both-directions control without which a declared residual is indistinguishable
+from an unnoticed one; (y) `prompt-content:` refuses to report a pass when no census path is checkable, driven
 DIRECTLY against the function so the assertion survives the upstream pre-enqueue FAIL that makes the state
 unreachable through the wrapper; and (z) a code census path containing SPACES, one under a space-bearing
 DIRECTORY, and one with a NON-ASCII (octal-escaped) name each yield `prompt-content: PASS` and
@@ -1431,15 +1253,15 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 #### Scenario: The total-swallow and partial-swallow cases are both pinned
 - **GIVEN** two hermetic fixtures under the narrowed configuration — one whose census is a `Cargo.lock` bump beside a prose edit, one whose census is the same lockfile beside a `.rs` file
 - **WHEN** the regression check runs the wrapper against each
-- **THEN** the first reports `census-exclusion: FAIL` naming the EMPTY diff with `RESULT: FAIL` and nothing enqueued, the second reports `census-exclusion: NOTICE` with `RESULT: PASS` and IS enqueued, and neither can drift into the other without failing the fast loop
+- **THEN** the first reports `prompt-content: FAIL` naming `Cargo.lock` with `RESULT: FAIL`, the second reports `prompt-content: PASS (2/2 …)` with `RESULT: PASS` and IS enqueued, and neither can drift into the other without failing the fast loop
 
 #### Scenario: A hostile-path case asserts the verdict, not one intermediate key
 - **WHEN** the suite's hostile-path cases (spaces, a literal quote, a space-bearing directory, a non-ASCII name) are inspected
 - **THEN** each asserts the terminal `RESULT:` and the `prompt-content:` value in addition to `census-exclusion:`, and the stub emits a VALID JSON record for a quote-bearing prompt so the record cannot degrade and mask the comparison
 
 #### Scenario: The zero-subject refusal is driven directly against the check
-- **GIVEN** that the pre-enqueue total-swallow FAIL makes a zero-subject `prompt-content:` unreachable through the wrapper
-- **WHEN** the regression check exercises the check function directly, in the real files, with every census code path built-in-excluded
+- **GIVEN** that the pre-enqueue `code-free:` FAIL makes a zero-subject `prompt-content:` unreachable through the wrapper
+- **WHEN** the regression check exercises the check function directly, in the real files, with an EMPTY code census
 - **THEN** it asserts `FAIL (no code census path was checkable — a 0/0 is never a pass)` and asserts the ABSENCE of any `PASS (0/0` form, so removing the upstream FAIL cannot silently restore the vacuous pass
 
 #### Scenario: Executables under a docs artifact directory are enqueued, prose under docs is not
@@ -1545,7 +1367,7 @@ equalling the worktree HEAD.
 
 #### Scenario: Doctrine states the verdict rule verbatim, as one rule
 - **WHEN** CLAUDE.md, `website/src/content/docs/agents-developing/roborev-findings.md` and this change's `design.md` are inspected
-- **THEN** each carries the sentence "FAIL where the author can act; NOTICE where only the information is actionable; never silence." verbatim, and each presents it as ONE rule resolving the configured-pattern FAIL, the pinned-built-in NOTICE and the built-in-divergence FAIL — rather than as three independent judgements a future editor would have to re-derive
+- **THEN** each carries the sentence "FAIL where the author can act; NOTICE where only the information is actionable; never silence." verbatim, and each presents it as ONE rule rather than as independent judgements a future editor would have to re-derive — and each records that on `census-exclusion:`'s subject the rule resolves to a single call (a configured swallow ⇒ FAIL), so the key has NO `NOTICE` value and the remedy-less case it would have covered is the documented residual deferred to #3278
 
 #### Scenario: Doctrine records the three config-ordering properties and their generalization
 - **WHEN** CLAUDE.md and `roborev-findings.md` are inspected beside the existing note that `required` evaluates the aggregator and registry from the PR's BASE ref

@@ -191,8 +191,6 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       honoured while the bare-key match skipped it. Fix: corroborate unconditionally and before every early
       return (parsed-none-while-binary-reports-some ⇒ DRIFT → FAIL), accept the quoted key spellings, and a
       binary answering with an EMPTY list corroborates rather than degrading to `UNAVAILABLE`.
-- [x] Model roborev's BUILT-IN excludes (the hard-coded lockfile/cache deny-list extracted from the pinned
-      v0.61.2 binary) in the same reconciliation, messaged DISTINCTLY from a configured pattern.
 - [x] Refuse an unknown/untranslated TOML basic-string escape fail-closed instead of swallowing the
       backslash; return un-quoted paths through a named global so `$(…)` cannot strip a trailing newline
       byte; declare `line` local in `roborev_check_census_exclusion`.
@@ -202,10 +200,9 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
 - [x] New hermetic cases: `cx5d` (empty parse + binary reports ⇒ DRIFT FAIL, never enqueued), `cx5e`/`cx5f`
       (quoted / single-quoted key spellings parsed), `cx5g` (unknown TOML escape refused), `cx18` (linked
       worktree: blanket ROOT config caught, attributed `[root-config]`), `cx18b` (its PASS complement),
-      `cx19` (`Cargo.lock` swallowed by a built-in, messaged apart), `cx19b` (structural: the built-in
-      constant + its re-extract obligation). `cx5b`/`cx5c` no longer bless an un-corroborated PASS.
-- [x] Specify all of it — the multi-source rule, the built-in excludes, the corroborate-on-empty-parse
-      rule — in the delta spec and `design.md` (§D2a/D2b/D2c), not only in code.
+      `cx5b`/`cx5c` no longer bless an un-corroborated PASS.
+- [x] Specify all of it — the multi-source rule and the corroborate-on-empty-parse rule — in the delta spec
+      and `design.md` (§D2a/D2c), not only in code.
 - [x] EXPECTED CONSEQUENCE, recorded not suppressed: with A fixed, `census-exclusion:` now correctly FAILs
       on this very branch, because the ROOT checkout's `.roborev.toml` still carries the blanket `docs/**`
       and the diff contains `docs/reports/3229-artifacts/probe-census-exclusion.sh`. Observed verbatim:
@@ -217,34 +214,15 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       the root checkout's config.
 
 ## 8c. Owner rulings applied after the first sanctioned roborev round
-- [x] **Built-in verdict SPLIT** — neither bare FAIL nor bare NOTICE. One rule, stated verbatim in
-      CLAUDE.md, `roborev-findings.md`, `design.md` and `--help`: **FAIL where the author can act; NOTICE
-      where only the information is actionable; never silence.** A pinned built-in swallowing census code is
-      a NOTICE (no remedy exists — compiled in, no opt-out, no negation form; and a guard that fires on a
-      routine `Cargo.lock` touch with no available fix is the guard that gets DISABLED, which is how #3229
-      happened). The live built-in set DIVERGING from the pinned 24 is a FAIL (that HAS a remedy —
-      re-extract, re-pin, judge the new built-in — and it is a MECHANISM change the version pin exists to
-      catch; a NOTICE would silently absorb an upgrade that began excluding `*.rs` or `scripts/**`).
-- [x] Observe the live set from the binary by two RELIABLE signals, not a blind re-extraction (Go literals
-      are concatenated with no terminators — a naive scan of this binary yields truncations, junk-suffixed
-      hits and a phantom `**/git` that is really the bare prefix constant): fixed-string presence per pinned
-      pattern names REMOVALS exactly, and a pinned COUNT of `:(exclude,glob)` literals (26 = 24 patterns + 2
-      prefix constants) detects ADDITIONS numerically. Residual declared.
-- [x] "Never silence" mechanized: every value ends `built-in-set: OK|DIVERGED|UNAVAILABLE`; an unobservable
-      set (no roborev, unreadable, or a stub with zero literals — the hermetic suite's state) is
-      UNAVAILABLE and is explicitly NEITHER a failure NOR a blessing.
-- [x] Precedence: both FAIL causes outrank the NOTICE and EVERY cause present is named.
+- [x] **The unifying verdict rule**, stated verbatim in CLAUDE.md, `roborev-findings.md`, `design.md` and
+      `--help`: **FAIL where the author can act; NOTICE where only the information is actionable; never
+      silence.** On `census-exclusion:`'s subject it resolves to ONE call — a CONFIGURED swallow ⇒ FAIL,
+      pre-enqueue — so the key has no `NOTICE` value; see §8i for why the remedy-less case it would have
+      covered is a documented residual instead.
 - [x] CONFIRMED by reading the wrapper's verdict scan directly (and asserted structurally against it):
-      failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`; `NOTICE*` is absent from it;
-      `$CENSUS_EXCLUSION` still participates, so a configured swallow still reds `RESULT:`.
-- [x] Follow-through so the unfixable red is not merely moved one key down: `prompt-content:` subtracts the
-      built-in-excluded set and says so in its value. Scoped to BUILT-IN swallows only — a configured
-      swallow FAILs pre-enqueue, so it can never be masked.
-- [x] Tests: `cx19` keeps the NOTICE (+ review enqueued, `RESULT:` not FAIL, and the UNAVAILABLE
-      "neither failure nor blessing" assertion); `cx19d` (pin MATCHED ⇒ `built-in-set: OK`, corroborated);
-      `cx19e` (an ADDED `**/*.rs` ⇒ FAIL, diff-independent, never enqueued); `cx19f` (a REMOVED pinned
-      pattern ⇒ FAIL naming it); `cx19g` (configured swallow AND divergence ⇒ both named); `cx19b`'s
-      structural assertions kept.
+      failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`; `NOTICE*` is absent from it
+      (`vacuity-tier1:` needs it as an advisory); `$CENSUS_EXCLUSION` still participates, so a configured
+      swallow still reds `RESULT:`.
 - [x] **Doctrine — three properties, one generalization**, recorded in CLAUDE.md and
       `roborev-findings.md` beside the existing BASE-ref note: (1) roborev's daemon reads
       `exclude_patterns` from the repo ROOT PATH, so a worktree edit is INVISIBLE to it; (2) the daemon
@@ -274,8 +252,8 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
 - [x] **Every consumer audited, not just the two reported**: the census classification loop (was reading
       the QUOTED extension — `md"`/`json"` — so PROSE counted as CODE ⇒ false pre-enqueue
       `census-exclusion: FAIL` under `*.md`); `census-exclusion:`'s survivor comparison (dropped its own
-      unquote — both sides are `-z` now); `CENSUS_BUILTIN_EXCLUDED` + the `prompt-content:` subtraction;
-      `prompt-content:` membership; the wrapper's `--help`/key documentation.
+      unquote — both sides are `-z` now); `prompt-content:` membership; the wrapper's `--help`/key
+      documentation.
 - [x] **ONE matcher for prompt headers**: `roborev_diff_header_has_path` (in the oracles file, beside the
       boundary) is the only way to ask whether a header names a path, and `roborev_unquote_path` has exactly
       one caller — it. It reads every shape git emits, including the MIXED-quoted rename header
@@ -332,16 +310,6 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       mutation of its own fix, and the whole `cx6*` hostile-path family re-run green.
 
 ## 8f. Round-6 roborev blockers (job 30 — certified genuine: `prompt-content: PASS (6/6)`, 261k in / 183k cached / 10.4k out)
-- [x] **A built-in exclude contributes ONE verbatim pathspec, not two** (blocker 1). The port emitted
-      `<p>` **and** `<p>/**` for built-ins too, manufacturing `:(exclude,glob)**/Cargo.lock/**` — an
-      exclusion roborev never applies. OVER-modelling is a false PASS: a path wrongly believed excluded is
-      SUBTRACTED from `prompt-content:` coverage. **Established from the v0.61.2 binary, not inferred**
-      (see D2b-0): the `:(exclude,glob)` prefix is inside each of the 24 string literals, proven
-      non-coincidental by Go's length-ordered rodata packing (equal-length runs at deltas of exactly
-      `15 + len(pattern)`), and only 2 bare prefix constants exist among 26 occurrences — so built-ins are
-      pre-formatted constants appended verbatim and never reach `FormatExcludeArgs`. Built-ins now bypass
-      the port entirely; CONFIGURED patterns keep both pathspecs. Blame lookup and the pathspec listing are
-      driven off the same `_rx_owner_single` flag so no output advertises an exclusion git was not asked for.
 - [x] **Artifact exclusions are scoped to artifact-bearing DIRECTORIES** (blocker 2, owner-approved posture).
       The `docs/**/*.<ext>` sweep hid FUNCTIONAL CONFIG, falsifying "noise, never blindness" for code-bearing
       formats: `docs/observability/grafana/dashboards/cqlite-overview.json` is guarded by the gate's own
@@ -362,49 +330,69 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
       OWN TOML parser, refuses a vacuous empty-set comparison, and rejects both retired forms off the PARSED
       set — never a file-wide grep, since `.roborev.toml` documents the forms it retired (that exact
       over-broad grep was caught red-handed on first run).
-- [x] Tests: `cx22` (a tracked DIRECTORY named `Cargo.lock` — both keys asserted, incl. the false-PASS
-      `prompt-content` excusal), `cx22b` (the built-in still eats the real FILE, so the fix did not
-      UNDER-model), `cx23` (functional config is CODE and survives while a real artifact stays non-code),
+- [x] Tests: `cx23` (functional config is CODE and survives while a real artifact stays non-code),
       `cx23b` (the retired form reproduced, swallowing the dashboard — without it `cx23` would pass under
       either config), `cx24` (the mirror). `NARROWED_PATTERNS` moved to the shipped directory-scoped shape;
       the old value kept as `DOCS_WIDE_EXT_PATTERNS` to drive `cx23b`.
 - [x] Every new assert MUTATION-TESTED both directions in a scratch copy — 6 mutations, each RED, restore
-      green: M1 restore the phantom sibling (5 `cx22` asserts RED), M2 under-model configured patterns
+      green: M2 under-model configured patterns
       (`cx9` RED), M3 revert the config to docs-wide (3 `cx24` asserts RED, exact both-sides diff), M4
       one-sided constant drift (2 `cx24` RED), M5 revert the classification to the bare `docs/` prefix (6
       asserts across `cx23`/`cx23b` RED), M6 dir-globs back to an unquoted string (9 asserts across
       `cx3`/`cx6f`/`cx17`/`cx24` RED). Named regression set re-run green: `cx1`, `cx3`, `cx6`, `cx6c`–`cx6n`,
-      `cx6p`, `cx7c`, `cx8`, `cx11`, `cx13`, `cx18`, `cx19*`, `cx20*`, `cx21`. Suite: 681 asserts, 0 failed.
+      `cx6p`, `cx7c`, `cx8`, `cx11`, `cx13`, `cx18`, `cx21`. Suite: 681 asserts, 0 failed.
 
-## 8g. Round 7 — the `built-in-set:` self-check needed a right boundary and a version gate
-- [x] REPRODUCED the false PASS on the real binary: patching `/usr/local/bin/roborev`'s length-28 run to
-      `:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock` (4 bytes
-      borrowed from the preceding string, size unchanged) left the literal count at 26/26 and the missing
-      list EMPTY ⇒ `built-in-set: OK` on a set that had moved. Unbounded substring presence + a bare count
-      is sound in the REMOVAL direction only.
-- [x] Fix, both halves: (A) `ROBOREV_PINNED_VERSION` is a machine-checked constant and the check asks the
-      SAME file it read the literals from (`roborev version`) — a mismatch is DIVERGENCE ⇒ FAIL naming
-      observed vs pinned and the re-verify obligation. (B) a RIGHT BOUNDARY derived from the blob's
-      length-bucket adjacency: Go packs rodata in length order with no terminator and each bucket is ONE
-      contiguous run, so per bucket of k members exactly k-1 must be immediately followed by another
-      `:(exclude,glob)` literal. Derived from the pinned list alone — no foreign successor bytes, no
-      within-bucket order — so a rebuild that merely permutes a bucket cannot false-FAIL.
-- [x] Grammar preserved: `OK` | `UNAVAILABLE` | a `FAIL` naming what diverged. An unreadable version is
-      `UNAVAILABLE` (withholds only the blessing); an OBSERVED divergence still FAILs without it. A bucket
-      holding a MISSING member skips the adjacency arithmetic, so a removal still FAILs naming the pattern.
-- [x] Tests: `cx25` (the equal-length tamper FAILs, bucket + unbounded member named, and the two
-      pre-existing signals asserted SILENT), `cx25b` (the untampered control reads OK), `cx26` (version
-      mismatch alone FAILs), `cx26b` (unreadable version ⇒ UNAVAILABLE, never OK), `cx26c` (a removal still
-      FAILs without a readable version). The stub plants the MEASURED contiguous length-bucket runs, with
-      `guard_assert_run_mirror_agrees` keeping the two harness mirrors on the same 24 patterns.
-- [x] MUTATION-TESTED both directions in a scratch copy — 3 mutations, each RED, restore green: M1 disable
-      the boundary check (9 asserts RED, `cx25` reproduces `RESULT: PASS` + `built-in-set: OK` on the
-      tampered set and even enqueues the review), M2 disable the version gate (12 asserts RED across
-      `cx26`/`cx26b`), M3 plant the literals one-per-line (19 asserts RED across `cx19d`/`cx25`, i.e. the
-      harness mirror is load-bearing). Verified on REAL binaries too: pristine ⇒ OK, `Cargo.lock.bak` tamper
-      ⇒ DIVERGED, a blanked `**/go.sum` prefix ⇒ DIVERGED naming it missing, a patched version string ⇒
-      DIVERGED naming v0.99.9 vs v0.61.2, no binary ⇒ UNAVAILABLE. Named regression set re-run green.
-      Suite: 718 asserts, 0 failed.
+## 8i. Round 11 — the built-in-exclude modelling is DELETED (owner ruling; deferred to #3278)
+- [x] **Ruled option A: remove the roborev built-in-exclude modelling from this change entirely.** Rationale,
+      recorded because a deletion needs one: four consecutive review rounds (jobs 30, 31, 32, 33-H1) found
+      four false-PASSes **all inside that subsystem**; **no acceptance criterion reaches it** (all seven ACs
+      are about the effective `exclude_patterns`; the 24 built-ins are the binary's internal defaults); and
+      **subtraction cannot introduce a false PASS** — with no built-in in the pattern set the check only ever
+      models FEWER exclusions than roborev applies, so it can never excuse a path from coverage.
+- [x] DELETED from `scripts/flow/roborev-review-oracles.sh`: `ROBOREV_BUILTIN_EXCLUDES`,
+      `ROBOREV_BUILTIN_SRC_LABEL`, `ROBOREV_BUILTIN_PATHSPEC_LITERALS`, `ROBOREV_PINNED_VERSION`,
+      `roborev_observe_builtin_excludes` (with the version gate and the rodata length-bucket right boundary),
+      `roborev_builtin_state_details`, the `built-in-set: OK|UNAVAILABLE|DIVERGED` grammar, the
+      `builtin_excusal` machinery, the built-in branch of the port and the `_rx_owner_single` arity flag.
+      `census-exclusion:` now emits **PASS or FAIL only** — the `NOTICE` verdict and the total-swallow FAIL
+      branch had no remaining subject once every pattern in play is CONFIGURED and therefore editable.
+- [x] DELETED from `scripts/flow/roborev-review.sh`: `CENSUS_BUILTIN_EXCLUDED`, and the affirmation
+      backstop's `census-exclusion` ⇒ `NOTICE` exemption — its **only** per-key escape hatch. All seven
+      deterministic keys must now be affirmatively `PASS`, which is STRICTER. A new structural assert reads
+      the backstop's own `case` body and requires exactly ONE exempting arm, so no hatch can be reintroduced.
+- [x] DELETED from `scripts/flow/roborev-review-checks.sh`: the built-in subtraction and
+      `prompt-content:`'s `(+<n> not expected: excluded by a roborev built-in …)` clause. `prompt-content:`
+      now expects EVERY census code path; no key can tell it which to skip.
+- [x] DELETED from the suite: `cx19*`, `cx20`/`cx20b`, `cx22*`, `cx25*`, `cx26*`, the `GUARD_PINNED_BUILTINS`
+      / `GUARD_BUILTIN_BLOB_RUNS` mirrors and their agreement check, `make_builtin_stub`,
+      `STUBBIN_OVERRIDE`, the stub's `version` subcommand, and the `cargo-lock*` fixture modes. The task
+      items for that work are removed above; this section is the record of what they covered.
+- [x] **AC4 is satisfied through its SECOND BRANCH, and that is not a reduction in AC coverage.** AC4 is a
+      disjunction: *"either the two classifiers agree … or the residual disagreement is documented with the
+      exact cases where it persists."* The residual — a diff whose code-census paths include a path roborev's
+      compiled-in deny-list excludes (`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, …) is silently dropped from
+      the reviewer's diff and the guard does not model it — is documented in the wrapper's `--help`, the
+      oracles file header, the delta spec and `design.md` §D2b, with its exact per-key consequence:
+      `census-exclusion: PASS` (the path SURVIVES) then `prompt-content: FAIL` (the prompt lacks it). It
+      **fails CLOSED**; the cost is a diagnostic that names the symptom, not the mechanism.
+- [x] **Job-33 H1 is DELETED, not waived.** The excusal mechanism it was a finding about no longer exists, so
+      **no subject remains**. Nothing was excused or judged acceptable-with-the-defect-present; deferred to
+      **#3278**. Written down because a High finding that vanishes with its subject reads identically to a
+      waiver unless it is said explicitly.
+- [x] PINNED with a both-directions control: `cx30` (#3096-shaped fixture, prompt lacking `Cargo.lock` ⇒
+      `census-exclusion: PASS (2/2)`, `prompt-content: FAIL (1/2)`, `RESULT: FAIL`) and `cx30b` (same fixture,
+      prompt carrying it ⇒ `prompt-content: PASS (2/2)`, `RESULT: PASS`, enqueued). Without `cx30b` the FAIL
+      could come from the fixture rather than the absence it names.
+- [x] **NEGATIVE CONTROL on the RETAINED oracle**, because a suite that shrinks by ~19% and stays green
+      proves nothing unless something in it has been SEEN to fail: with `docs/**` restored in `cx1`'s fixture
+      config the retained census-vs-`exclude_patterns` oracle goes RED, and it is green again on restore.
+      Recorded in the PR with the exact failure line.
+- [x] MEASURED for #3096, and reported without adjustment: a #3096-shaped diff now yields
+      **`prompt-content: FAIL`** — option **(iii)**, not the numeric `PASS (n/n)` that worker was told to
+      expect, because **F1 lived inside the deleted subsystem**. Re-anchoring #3096 is the owner's call.
+- [x] Suite: **792 → 644 asserts, 0 failed**; every retained family re-run green (`cx1`, `cx3`, `cx5*`,
+      `cx6`–`cx6p`, `cx7c`, `cx8`, `cx9`, `cx10*`, `cx11`, `cx13`, `cx17`, `cx18*`, `cx21`, `cx23*`, `cx24`,
+      `cx27*`, `cx28`, `cx29`, and the harness run-mirror case's surviving subject).
 
 ## 9. Certification
 - [ ] `--lite` green each fix round (summary-file redirect) — DONE, see the PR — then `rust-reviewer` + `roborev` on the

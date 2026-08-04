@@ -325,7 +325,7 @@ the single file is never double-reported. Corroboration now runs `roborev config
 checkout whose config was read.
 
 Because three sources are now in play, **every value line names the source** (`worktree-config` /
-`root-config` / `repo-config` / `global-config` / `roborev-builtin`): "excluded by `docs/**`" does not tell
+`root-config` / `repo-config` / `global-config`): "excluded by `docs/**`" does not tell
 an operator which file to edit. The FAIL details additionally enumerate every source path read, and a
 worktree run states explicitly that a narrowed worktree config does **not** override the root one.
 
@@ -367,267 +367,102 @@ Corollary, also worth recording: `prompt-content:` remains valuable even though 
 computes the same fact earlier and more cheaply. The cheap early check can be wrong about its INPUT; the
 expensive late check reads what actually happened.
 
-#### D2b — `exclude_patterns` is not the whole exclusion set: roborev's BUILT-INS
+#### D2b — roborev's BUILT-INS are DELIBERATELY NOT MODELLED, and the residual is documented (AC4's SECOND BRANCH)
 
-The binary also **always** appends a hard-coded lockfile/cache deny-list, with no configuration switch.
-Extracted from the pinned v0.61.2 executable as literal pathspec strings
-(`strings -a <bin> | grep -o ':(exclude,glob)[^ ]*'`), 24 of them: the lock family
-(`**/Cargo.lock`, `**/cargo.lock`, `**/go.sum`, `**/package-lock.json`, `**/pnpm-lock.yaml`,
-`**/yarn.lock`, `**/bun.lock`, `**/bun.lockb`, `**/poetry.lock`, `**/pdm.lock`, `**/uv.lock`,
-`**/Pipfile.lock`, `**/composer.lock`, `**/Gemfile.lock`, `**/mix.lock`, `**/pubspec.lock`,
-`**/Podfile.lock`, `**/Package.resolved`, `**/packages.lock.json`, `**/flake.lock`) plus
-`**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml`.
+**The fact, and it is still true.** `exclude_patterns` is not the whole exclusion set. The binary ALWAYS
+appends a hard-coded lockfile/cache deny-list — `**/Cargo.lock`, `**/cargo.lock`, `**/go.sum`,
+`**/pnpm-lock.yaml`, `**/package-lock.json`, `**/packages.lock.json`, `**/yarn.lock`, `**/bun.lock`,
+`**/bun.lockb`, `**/pdm.lock`, `**/uv.lock`, `**/poetry.lock`, `**/Pipfile.lock`, `**/Gemfile.lock`,
+`**/composer.lock`, `**/flake.lock`, `**/mix.lock`, `**/pubspec.lock`, `**/Podfile.lock`,
+`**/Package.resolved`, `**/.beads/**`, `**/.cache/**`, `**/.gocache/**`, `**/.kata.local.toml` — to the
+pathspecs it hands git, with no configuration switch, no opt-out and no negation form. A census path one of
+those eats is exactly as invisible to the reviewer as a configured swallow.
 
-Modelling only the configured half was the **same false-PASS class as D2a**: `Cargo.lock` has a `lock`
-extension, so the census classifies it CODE, and a PR touching it had it silently dropped from the
-reviewer's diff while `census-exclusion:` reported it surviving. The built-ins are therefore folded into
-the same reconciliation.
+**The decision (owner-ruled, #3229; deferred in full to #3278): do not model it here.** This check
+reconciles the census against the effective **`exclude_patterns`** — the configured half, the half every
+one of #3229's seven ACs is about, and the half a repository can actually edit. The deny-list is the
+binary's internal default.
 
-##### D2b-0 — a built-in is appended VERBATIM, one pathspec, and is NOT re-formatted
+**Why the modelling was removed rather than fixed once more.** It was built, and then four consecutive
+review rounds each found a **false-PASS inside that subsystem alone**:
 
-The first cut ran the built-ins through the `FormatExcludeArgs` port on the reasoning that they are
-"already-resolved pathspec bodies", so the port would be a no-op on anchoring and would merely add the
-`/**` sibling. **That was wrong, and round 6 fixed it.** The port's second pathspec manufactured
-`:(exclude,glob)**/Cargo.lock/**` — an exclusion roborev *never applies*. **Over**-modelling the exclusion
-set is not the safe direction: a path wrongly believed excluded is *subtracted from `prompt-content:`
-coverage*, so the check stops asserting it reached the reviewer. That is a false PASS, in the same family
-as the defect this change exists to close. (Its mirror image is equally bad: dropping the sibling from
-*configured* patterns would report paths as SURVIVING that roborev really drops. Both arities are pinned by
-test — `cx22`/`cx22b` for built-ins, `cx9` for configured patterns.)
+| round | the false-PASS | mechanism |
+|---|---|---|
+| jobs 30 | a phantom `/**` sibling on a pre-formatted pathspec constant | over-modelled the exclusion set, so a covered path was EXCUSED from `prompt-content:` |
+| jobs 31 | an unbounded substring presence test | `**/Cargo.lock` matched inside `**/Cargo.lock.bak`, so an equal-length rename read `OK` |
+| jobs 32 | a three-state `built-in-set:` tested as two | `UNAVAILABLE` took the permissive branch and the excusal happened on an unverified model |
+| jobs 33-H1 | the excusal machinery itself | coverage excused on a model that could not be verified |
 
-**The mechanism, established from the binary rather than reasoned about.** The question was whether roborev
-hands its built-ins to `FormatExcludeArgs` or appends them as finished constants. Three measurements on
-`/usr/local/bin/roborev` (v0.61.2) settle it on the second answer:
+Four for four, in a subsystem no acceptance criterion reaches — while the *retained* oracle (census vs
+`exclude_patterns`) is what every AC is written against. **And subtraction cannot introduce a false PASS**:
+with no built-in in `_rx_patterns` this check only ever models FEWER exclusions than roborev applies, so it
+can never tell `prompt-content:` to skip a path. Every failure direction the deletion opens is a FAIL.
 
-1. **The prefix is inside the literal.** Each of the 24 appears as the contiguous byte string
-   `:(exclude,glob)<pattern>`. A pattern *destined* for the formatter would be stored **bare** — prepending
-   `:(exclude,glob)` is the formatter's whole job — so a baked-in prefix means the string is already a
-   finished git argument.
-2. **Length-bucket packing proves (1) is not linker coincidence.** Go's linker packs the rodata string blob
-   in **length order** with no terminators, and these 24 pack back-to-back in runs of equal total length
-   *including* the 15-byte prefix: `…**/bun.lock` / `…**/pdm.lock` / `…**/mix.lock` at deltas of exactly
-   26 = 15 + 11, and `…**/Pipfile.lock` / `Gemfile.lock` / `pubspec.lock` / `Podfile.lock` at deltas of
-   exactly 30. Adjacency in a length-sorted blob is only possible if the prefix is part of the sorted string.
-3. **Only two bare `:(exclude,glob)` constants exist**, and Go deduplicates identical literals — so there is
-   no shared prefix constant for 24 patterns to be formatted against. The 26 total occurrences decompose
-   exactly as the pin already claimed: 24 finished pathspecs + the 2 runtime prefix constants
-   (`:(exclude,glob)` root-anchored, `:(exclude,glob)**/` recursive) the formatter concatenates for
-   **configured** patterns.
+**Job-33 H1 is therefore DELETED, not waived.** The excusal mechanism it was a finding about no longer
+exists, so there is **no subject remaining** for the finding to apply to. That distinction matters because a
+High finding that vanishes because its subject was removed reads *identically* to a waived one unless it is
+written down: nothing was excused, judged acceptable, or deferred-with-the-defect-still-present — the code
+the finding described is gone, and what it would have guarded is now recorded as a residual under #3278.
 
-Corroborating shape: the *directory* built-ins carry `/**` **hand-written** into the literal
-(`**/.beads/**`, `**/.cache/**`, `**/.gocache/**`) while the *file* built-ins do not (`**/Cargo.lock`) —
-nobody writes `/**` onto a string about to be handed to a formatter that appends it. And no
-`:(exclude,glob)**/<file>/**` sibling literal exists for any file built-in (0 hits across all 8 probed).
+**THE RESIDUAL, STATED — AC4's SECOND BRANCH.** AC4 reads: *"Either the wrapper's extension-based
+classification and roborev's path-glob exclusion agree on what 'code' means, **or the residual disagreement
+is documented with the exact cases where it persists**."* This change takes the second branch. **This is not
+a reduction in AC coverage** — AC4 is a disjunction, and the second branch is met by naming the exact case,
+pinning it by test, and showing it fails closed.
 
-So a built-in bypasses the port entirely: one pathspec, no trimming, no anchoring test, no sibling. Anything
-derived from that arity — the blame attribution, and the listing of emitted pathspecs in a FAIL detail — is
-driven off the same flag, so no output can advertise an exclusion git was not asked for. The
-re-verify-on-upgrade obligation covers this too: if a future roborev *did* start formatting its built-ins,
-the arity would flip and the pin comment says so.
+**The exact cases where it persists.** A diff whose code-census paths include a path the compiled-in
+deny-list excludes: `Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, `Gemfile.lock`, `package-lock.json`, or
+anything under `.cache/`, `.beads/`, `.gocache/`. Such a path is **silently dropped from the reviewer's
+diff, and the guard does not model it**. Per key:
 
-They are **messaged apart** from configured patterns, because the remedy differs completely: a built-in is
-not editable, so `.roborev.toml` cannot fix it — the honest statement is "roborev will never show a
-reviewer these paths, verify them another way", not "narrow your config". The list carries the same
-re-verify-on-upgrade obligation as the ported algorithm, since an upstream addition would silently widen
-the real exclusion set while every summary block still read `PASS`.
+| key | what it reports | why |
+|---|---|---|
+| `census-exclusion:` | **PASS**, the path SURVIVING | no CONFIGURED pattern excludes it, and the built-in is not in the set |
+| `prompt-content:` | **FAIL**, naming the path | it expects the path in the prompt and it is not there |
 
-##### D2b-i — THE RULE: FAIL where the author can act; NOTICE where only the information is actionable; never silence
+So the residual surfaces as a `prompt-content:` **FAIL whose stated cause names the symptom** ("the reviewer
+never received their diffs" — which is TRUE) **rather than the mechanism**. It is a **diagnostic** gap, and
+it **fails CLOSED**: never a vacuous green, never a merge on unreviewed code. The degenerate sub-case (a
+dependency bump whose only code-census path is a lockfile) also FAILs, under `prompt-content:` instead of
+pre-enqueue.
 
-The first cut of this made a built-in swallow a **FAIL**, on the reasoning that an invisible path is an
-invisible path. That was wrong, and the reason it was wrong generalizes — so the rule is recorded here
-verbatim, to be applied to future calls of this shape without re-litigating them:
+**Pinned, with a both-directions control** (`cx30` / `cx30b`), because a declared residual that is not
+pinned is indistinguishable from an unnoticed one: `cx30` runs a #3096-shaped fixture
+(`docs/reports/ws0-3096-artifacts/*.json` + `Cargo.lock` + `.rs`) against a prompt carrying only the `.rs`
+file and asserts `census-exclusion: PASS (2/2 …)` + `prompt-content: FAIL (1/2 …)` + `RESULT: FAIL`;
+`cx30b` changes ONE variable — the prompt carries the lockfile — and PASSes. Without `cx30b`, `cx30`'s FAIL
+could come from the fixture, the config or the census rather than from the absence it names.
+
+**Measured consequence for #3096.** #3096 is held `HOLD: merge after #3229` partly on **F1**, the built-in
+mis-modelling behind its `Cargo.lock` residual, and its worker was told to expect a numeric
+`prompt-content: PASS (n/n)`. F1 lived inside the deleted subsystem, so that expectation no longer holds:
+measured on the hermetic #3096-shaped fixture, a #3096-shaped diff now yields **`prompt-content: FAIL`**
+(option **(iii)**), not a numeric PASS and not a PASS-with-residual. Re-anchoring #3096 is the owner's call,
+not this change's.
+
+##### D2b-i — THE RULE, and why this key has no `NOTICE` value
 
 > **FAIL where the author can act; NOTICE where only the information is actionable; never silence.**
 
-One rule, three applications, which is why it replaces three ad-hoc judgements:
+On `census-exclusion:`'s subject the rule resolves to a **single** call: a CONFIGURED pattern (worktree,
+root or global) swallowing census CODE ⇒ **FAIL**, pre-enqueue, because the remedy is a one-token edit to a
+NAMED file and the author can act before paying for a review round.
 
-| Cause | Verdict | Because |
-|---|---|---|
-| A **configured** pattern swallows census CODE | **FAIL** | The remedy is a one-token edit to a **named** file, available before a review round is paid for. (This is ④'s call.) |
-| A **pinned built-in** swallows **SOME** census CODE | **NOTICE** | There is **no** remedy at all: compiled in, no opt-out, no negation form (R5). `Cargo.lock` churn is routine here, so FAILing would permanently red a legitimate change class against a check its author **cannot satisfy** — and *a guard that fires on correct input with no available fix is the guard that gets **disabled***, which is exactly how #3229 happened. (This is ⑥'s call.) |
-| A **pinned built-in** swallows the **WHOLE** code census | **FAIL** | Nothing reaches the reviewer, so a returned verdict certifies *nothing* — and there **is** an actionable remedy: the one `code-free:` already prescribes (verify another way, record primary-source verification in the PR). See D2b-i-a. |
-| The **live built-in set diverges from the pin** | **FAIL** | This one **does** have a remedy — re-extract, re-pin, and **judge** the new built-in — and it is a **mechanism** change, which the v0.61.2 pin exists to catch rather than absorb. A NOTICE here would swallow an upgrade that began excluding `*.rs` or `scripts/**` while the block read like normal operation: the exact blindness this issue closes. |
+**There is deliberately NO `NOTICE` value for this key.** A NOTICE is the right value for a swallow with
+**no** remedy, and the only such swallow is by the deny-list this check does not model. With every pattern
+in play CONFIGURED and therefore EDITABLE, every swallow the check can see is actionable — so the verdict is
+`PASS` or `FAIL` and nothing between. A **TOTAL** swallow needs no branch of its own either: it is a
+configured swallow, so it FAILs, and the value carries `<m>/<n>` so `m == n` shows on its face.
 
-Two design consequences follow from the third clause, "never silence":
+"Never silence" is satisfied one level up, by the documented residual: it is stated in `--help`, in the
+oracles file's header, in the delta spec and here — not left to be rediscovered.
 
-1. Every value line ends with `built-in-set: OK|DIVERGED|UNAVAILABLE`. An **unobservable** set is
-   `UNAVAILABLE` **in the value line**, never an unstated assumption of agreement — the same discipline as
-   refusing to alias "we could not tell" to "nothing is excluded". A binary whose **version** cannot be read
-   is unobservable in this sense too: matching literals alone do not earn `OK` for a pin nothing confirmed.
-   But that withholding is narrow — an *observed* divergence still FAILs without a readable version, so the
-   version gate can never turn the check into a no-op (D2b-ii).
-2. The NOTICE still names the paths and the built-in responsible **in the value line**, not merely in a
-   detail. "Non-failing" must not become "skimmable".
-
-`NOTICE*` sits outside the wrapper's failing-capable scan (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`) and both
-FAIL forms inside it. That correspondence is asserted **structurally against the scan itself**, because a
-NOTICE that reds the run — or a FAIL that does not — is the decorative-key defect mirrored.
-
-##### D2b-i-a — the boundary the NOTICE ruling does not cover: a TOTAL swallow
-
-⑥'s NOTICE ruling is about a swallow that leaves a diff behind. It says nothing about the case where the
-built-in eats **every** code census path, and that case is not a milder version of the same thing — it is a
-different condition:
-
-| | PARTIAL built-in swallow | TOTAL built-in swallow |
-|---|---|---|
-| What reaches the reviewer | a real diff, minus some paths | **nothing** |
-| What a clean verdict means | it covers what was sent; the rest is uncovered and named | **nothing at all** |
-| Remedy available to the author | none (compiled in) | **yes** — the `code-free:` remedy: verify another way and record it in the PR |
-| Verdict | **NOTICE** | **FAIL, pre-enqueue** |
-
-So the FAIL is **not an exception to the rule; it is the rule reaching a case ⑥ did not decide**. The third
-clause is the one that decides it: *never silence*. `code-free:` already FAILs pre-enqueue on exactly this
-condition when the cause is classification (a prose-only census); when the cause is the exclusion set the
-condition is identical and the answer must be identical, or the guard is inconsistent in the one direction
-that produces a false green.
-
-**This was measured, not theorised.** With the total case left as a NOTICE, a hermetic fixture of
-`Cargo.lock` + `README.md` produced:
-
-```
-code-free: PASS
-census-exclusion: NOTICE (0/1 code census paths survive …)
-prompt-content: PASS (0/0 code census paths present)
-RESULT: PASS            # exit 0 — the reviewer received an EMPTY prompt
-```
-
-That is the worst defect class this wrapper can have: **a vacuous PASS textually identical to a genuine
-one**, on which `flow-closer` arms `gh pr merge --auto`. Its trigger is ordinary — any dependency-bump
-branch whose only non-prose file is a lockfile (`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`). Nothing else in
-the block catches it: `code-free:` PASSes because a `.lock` extension classifies as CODE; vacuity tier 1
-greps a literal phrase the reviewer need not emit; tier 2 is `UNAVAILABLE` with no token payload (and is
-further weakened by `review_context_count = 1`, which inflates input/cached counts with prior-review
-context).
-
-Two mechanisms, deliberately both, because either alone can be removed by a later edit:
-
-1. **`census-exclusion:` FAILs pre-enqueue** when the surviving code path count is zero, carrying the
-   `code-free:` remedy wording and stating in the same detail that a *partial* swallow remains a NOTICE — so
-   a reader cannot conclude ⑥'s ruling was reversed.
-2. **`prompt-content:` refuses to print a `0/0` PASS** (D2b-iii below). Unreachable through the wrapper now
-   that (1) exists, and kept anyway: a `0/0` is the *signature* of the vacuity, and a key with no subject
-   has no verdict to give.
-
-##### D2b-ii — how divergence is OBSERVED (and why not by re-extraction)
-
-A blind re-extraction of the deny-list cannot support a FAIL. Go string literals are concatenated into one
-blob with no terminators; measured on this very binary, a naive scan for `:(exclude,glob)<something>`
-yields truncations (`**/.be`, `**/f`, `**/mix.l`), junk-suffixed hits (`**/.cache/**add…`,
-`**/go.sumBinary file…`) and — worst — a phantom `**/git` that is really the bare RECURSIVE PREFIX constant
-followed by an unrelated string. A FAIL built on that would red every run.
-
-Two reliable signals are used instead:
-
-1. **Removals, named exactly.** Each pinned pattern is looked for as a FIXED string
-   `:(exclude,glob)<pattern>`. Hit or no hit; no delimiting required. This matters in its own right: a
-   *vanished* pattern makes the model **over**-exclude, so `census-exclusion:` would report a swallow that
-   no longer happens — a FALSE FAIL, the direction that gets a guard bypassed.
-2. **Additions, detected numerically.** The COUNT of `:(exclude,glob)` literals, pinned at **26** = the 24
-   built-in patterns + the **2 bare prefix constants** the algorithm concatenates. Any added built-in moves
-   it. The count cannot say *which* pattern appeared, and it also moves if roborev introduces an unrelated
-   `:(exclude,glob)` string — but that is still a mechanism change in precisely this area with precisely
-   this remedy, so reporting it is correct rather than a false alarm.
-
-Those two are necessary but **NOT sufficient**, and round 7 proved it by reproduction rather than by
-argument. (1) has an exact LEFT boundary — the 15-byte `:(exclude,glob)` prefix — and **no right one**, so
-`**/Cargo.lock` matches *inside* `**/Cargo.lock.bak`; and (2) is a bare count, so a **one-for-one**
-substitution moves nothing. Combined, they are a **false PASS**. Measured on `/usr/local/bin/roborev`: patch
-its length-28 run to read
-
-```
-:(exclude,glob)**/Cargo.lock.bak:(exclude,glob)**/cargo.lock:(exclude,glob)**/flake.lock
-```
-
-(the four extra bytes taken from the preceding string, so the file size is unchanged) and the check reports
-count **26/26**, missing **0**, verdict **`built-in-set: OK`** — while the modelled exclusion set no longer
-matches reality. The control direction was intact (a genuine removal still FAILed with the pattern named),
-so the self-check was sound *one way only*. Two further signals close it:
-
-3. **The pinned VERSION, asked of the executable.** `ROBOREV_PINNED_VERSION` is now a machine-checked
-   constant and the check runs `roborev version` (there is no `--version`) **on the same file it read the
-   literals from**. A mismatch is DIVERGENCE ⇒ FAIL. This is not a workaround for a missing boundary: the
-   pin is *to a version*, and everything modelled here — the 24 patterns, the one-pathspec arity, the
-   `FormatExcludeArgs` port — was read out of that one build, so on any other build all of it is
-   unverified. Gating on the version *is* the semantic the pin encodes, and it turns the standing
-   re-verify-on-upgrade obligation from prose into a mechanism. It is also the **general** signal: any
-   upgrade or rebuild moves it whatever it did to the patterns.
-4. **A right boundary, DERIVED from the blob's length-bucket adjacency.** Go's linker packs the rodata
-   string blob in **length order** with no terminator, and — measured — each length bucket of these
-   literals is stored as **one contiguous run**: 24→`go.sum`; 25→`uv.lock`; 26→`bun`/`pdm`/`mix.lock`;
-   27→`yarn.lock`/`bun.lockb`/`.beads`/`.cache`; 28→`Cargo`/`cargo`/`flake.lock`;
-   29→`poetry.lock`/`.gocache`; 30→`Pipfile`/`Gemfile`/`pubspec`/`Podfile.lock`; 31→`composer.lock`;
-   32→`pnpm-lock.yaml`; 34→`Package.resolved`/`.kata.local.toml`; 35→`package-lock.json`;
-   36→`packages.lock.json`. Inside a run the byte after a literal is the `:` of the next literal — a
-   genuine right boundary. So the invariant checked is: **per bucket of k members, exactly k-1 are
-   immediately followed by another `:(exclude,glob)` literal** (one ends the run). Summed over the 12
-   buckets: 12 bounded, 12 run-enders — verified against the real binary. The tamper above drops bucket 28
-   from 2 bounded to 1 and FAILs naming the bucket and the unbounded member.
-
-**Why (4) is derived and not pinned.** The alternative — pinning the 12 run-enders' actual successor bytes,
-which were measured too — would make *all* 24 exactly bounded. It was rejected: those successors are
-unrelated Go strings whose ordering within a length bucket is **not** content-sorted (bucket 26 is
-`bun`,`pdm`,`mix`, not alphabetical), so it is build-order-dependent and a different build of even the same
-version could reshuffle it. That would **FALSE-FAIL a correct binary**, and *a guard that reds correct input
-is the guard that gets disabled* — the ruling this whole design already turns on. The `k-1` invariant needs
-**no foreign bytes and no within-bucket order**: it falls out of the pinned pattern list by grouping on
-length, so a permuted bucket still passes and only a broken run fails.
-
-**Both are needed, and they cover different threats.** (3) catches the realistic one — an upgrade or rebuild
-— completely, and it is what makes (4)'s layout assumption safe, since (4) is only ever applied to the
-version it was derived from. (4) catches an equal-length substitution *within* the pinned version, which
-(3) cannot see: the tampered binary still reports `v0.61.2`. So (4) is what the acceptance test turns on and
-(3) is the honest primary.
-
-**Declared residuals, both narrowed by (3):** the LAST literal of each of the 12 runs has no derivable right
-boundary, so an in-place equal-length extension of a *run-ender* inside the pinned version stays invisible
-(any upstream change that really did it would move the version or the count); and a NEW pattern that has a
-PINNED one as a prefix is still not NAMED by (1) — it is detected as an addition by (2) or as a broken run
-by (4).
-
-**A bucket holding a MISSING member skips (4).** Its run was broken *by* that removal, so reporting the
-arithmetic too would bury the exactly-named actionable cause under a derived consequence; `cx19f`/`cx26c`
-pin that a removal still FAILs with the pattern named and nothing else.
-
-**An unreadable version is `UNAVAILABLE`, and that withholds only the blessing.** If the executable will
-not answer `version`, the pin is unconfirmed and `built-in-set:` refuses to say `OK` — but a *positively
-observed* divergence (missing pattern, broken run, changed count) still FAILs without it. That asymmetry is
-deliberate: it is what stops the version gate from becoming a way for a future roborev that renamed its
-`version` subcommand to silently turn the whole check into a no-op. `cx26c` is its detector.
-
-###### …but "withholds only the blessing" was too generous by one behaviour (round 9, blocker F1)
-
-`built-in-set:` has **three** states, and the round-8 code tested only `= DIVERGED` (three sites) and
-`!= DIVERGED` (one). A three-state signal tested as two: `UNAVAILABLE` fell through to the **permissive**
-branch, where it populated `CENSUS_BUILTIN_EXCLUDED` and explicitly told `prompt-content:` *not* to expect
-those paths. So **coverage was excused on an unverified model while the block read `RESULT: PASS`** — "we
-could not check" rendered as "nothing was wrong", inside the guard whose entire purpose is preventing
-exactly that. Reachability was measured, not argued: a shim carrying all 24 literals correctly
-right-bounded but hiding its `version` yields `state=UNAVAILABLE, missing=0`, and the excusal still
-happened.
-
-The fix separates two decisions that had been conflated behind one comparison:
-
-| decision | keyed on | why |
-|---|---|---|
-| may a built-in swallow be a NOTICE rather than a FAIL? | **not `DIVERGED`** | only a *positively observed* divergence is an actionable mechanism change. An unobservable binary (`roborev` absent from PATH — the hermetic suite's normal state) must not red every run; a guard that reds correct input with no remedy is the guard that gets disabled. |
-| may that swallow **EXCUSE** the paths from `prompt-content:`? | **`= OK`** | the excusal is a claim *about the mechanism* — that the absence is a DETERMINISTIC consequence of the PINNED deny-list. An unverified mechanism cannot support it. |
-
-So the fix **fails closed on the EXCUSAL, not on the RUN**. Under `UNAVAILABLE` the excusal set stays
-EMPTY, `prompt-content:` evaluates every census code path, and if roborev really did drop one it FAILs —
-which is the correct outcome, and is reached without ever reding a run merely because no binary was
-observable. The value line names the withholding explicitly, in wording that reads as neither a clean PASS
-nor a `DIVERGED` set, following the precedent this change already set: *"could not check" must never read
-as "nothing was wrong."*
-
-Three detectors, one per state, all mutation-tested: `cx19h` (`UNAVAILABLE` ⇒ no excusal, `prompt-content:`
-FAILs on the genuinely-absent path, value names the non-verification), `cx19i` (the same `UNAVAILABLE`
-target with the path PRESENT in the prompt ⇒ PASS, so withholding the excusal makes the path *evaluated*,
-never condemned), `cx19` / `cx19d` (`OK` ⇒ the excusal works as before, on a `pinned` stub rather than the
-default one) and `cx19j` (`DIVERGED` ⇒ still FAILs, excusing nothing). The same audit found the one
-reconciliation verdict that omitted the built-in state entirely — the configured-swallow FAIL — which made
-the documented "every value ends with `built-in-set:`" contract false for exactly the branch where a
-configured swallow coexists with an unverified model; `cx9`/`cx10` now pin it.
+**And the affirmation backstop lost its one exemption, which makes it stricter.** `census-exclusion:` was
+allowed a `NOTICE` in the wrapper's verdict-affirmation backstop — its single per-key escape hatch — because
+a remedy-less built-in swallow was a measurement with a stated residual. With that subject deleted the key
+cannot emit `NOTICE`, so the exemption is gone: all seven deterministic keys must now be affirmatively
+`PASS`, with no exception. A structural assert reads the backstop's own `case` body and requires **exactly
+one** exempting arm (the affirmative `PASS*)` one), so no per-key hatch can be reintroduced.
 
 ###### Round 10: it was never one bug — it is ONE SHAPE, and the third instance is why it is now a rule
 
@@ -681,16 +516,16 @@ A third point fix is the wrong response, so round 10 does four things instead:
    for the operator, while deliberately NOT gating the verdict (an empty array in one file cannot rule out an
    unrecognised key spelling in another).
 
-One latent instance is **reported and deliberately not changed**, because it sits in the built-in-set
-machinery whose fate is an open owner decision: `roborev_builtin_state_details` switches on
-`_rx_builtin_state` with arms for `OK` and `UNAVAILABLE` and **no `*)`**, so a future fourth state would be
-reported nowhere by that function. It is not reachable today (the variable is assigned in exactly one
-function, to exactly three values) and `DIVERGED` is never silent because its own FAIL branch emits detail
-lines — but it is the same shape, and it should get a `*)` arm whenever that subsystem is next touched.
+One latent instance was reported and deliberately not changed at the time, because it sat in the
+built-in-set machinery whose fate was an open owner decision: `roborev_builtin_state_details` switched on
+`_rx_builtin_state` with arms for `OK` and `UNAVAILABLE` and **no `*)`**. That decision has since been made
+— the whole subsystem is deleted (D2b) — so the instance is **gone with its subject**, not carried forward.
+It is recorded here only because it is the fourth sighting of the same shape, and the shape is the finding.
 
-###### The divergence check found a real bug in its first live run — in itself
+###### The symmetric-mirror lesson the deleted subsystem taught, kept because it generalises
 
-Worth recording, because the failure mode is one of this repo's named blind spots reproduced in shell.
+Worth keeping even though the code is gone, because the failure mode is one of this repo's named blind
+spots reproduced in shell, and it applies to ANY constant this suite mirrors.
 `ROBOREV_BUILTIN_EXCLUDES` was first written as a space-separated STRING and iterated unquoted, so bash
 **pathname-expanded** it: `**/package-lock.json` became the repo-relative `website/package-lock.json`
 (without `globstar`, `**` behaves as `*`). The presence check then looked for
@@ -713,36 +548,39 @@ check agreed with each other and `built-in-set: OK` passed. That is #3042's rule
 producer/consumer test is invariant to a uniform error, and two defects that cancel are undetectable *by
 construction*) reproduced in shell rather than in SSTable framing. What exposed it was the only asymmetric
 oracle available: running the check against the **real roborev binary**, which carries the pattern
-verbatim. Both constants are now arrays, and the structural assertions pin that — so a revert to a string
-makes the test's (correct) planted literal un-findable and `cx19d` fails, which is the detector the mirror
-should have been all along.
+verbatim. **The generalisable rule, which survives the deletion:** a hermetic suite that MIRRORS a
+production constant is a symmetric oracle, so it cannot catch an error both sides make — the mirror needs an
+ASYMMETRIC check (here, the real binary) or a structural assert against the production file itself. `cx24`,
+which asserts the census/config mirror **structurally against the committed `.roborev.toml`** rather than
+against a second hand-maintained copy, is that rule applied to the mirror this change RETAINS.
 
-##### D2b-iii — the follow-through: `prompt-content:` must not re-report a known absence
+##### D2b-iii — `prompt-content:` expects EVERY code census path, and subtracts nothing
 
-Making the built-in swallow a NOTICE would have been pointless on its own, because `prompt-content:` would
-then FAIL on the very same `Cargo.lock` — moving one unfixable red a single key down the block. So
-`census-exclusion:` hands the built-in-excluded set to `prompt-content:`, which subtracts it and says so in
-its value (`+<n> not expected: excluded by a roborev built-in`). Their absence from the prompt is a
-deterministic property of roborev's compiled-in mechanism, already reported; asserting their presence
-asserts something known-impossible.
+There is **no subtraction and no excusal**. No key is licensed to tell `prompt-content:` which census code
+paths to skip: a CONFIGURED swallow FAILs pre-enqueue and never reaches it, and roborev's compiled-in
+deny-list is not modelled, so nothing computes a "known absence" set at all. A path the reviewer really did
+not receive therefore FAILs — the fail-closed direction, and the residual documented in D2b is exactly what
+lands here.
 
-Scoped to **built-in** swallows only, and that scoping is load-bearing: a *configured* swallow FAILs
-pre-enqueue and never reaches this code, so the subtraction can never mask a configuration defect.
+That is a deliberate reversal of the earlier design, which handed the built-in-excluded set down and had
+`prompt-content:` report `(+<n> not expected: …)`. The excusal was the mechanism behind two of the four
+false-PASSes in D2b's table (it excused coverage on a model that could not be verified), and it is the ONE
+place in the wrapper where one key could weaken another. Removing it means the guard may now report a FAIL
+whose stated cause is imprecise; it can no longer report a PASS that covered less than it claimed.
 
-**The subtraction has a floor: a `0/0` is never a pass.** Subtracting known-absent paths is right up to
-the point where there is nothing left to subtract *from*. At that point the key has no subject, and
-`PASS (0/0 code census paths present)` is indistinguishable from a genuine pass — so the check FAILs with
-`no code census path was checkable — a 0/0 is never a pass`. D2b-i-a's pre-enqueue FAIL makes the state
-unreachable through the wrapper; this floor exists so that removing that FAIL cannot silently restore the
-vacuous green. Its regression case therefore drives the function **directly** (the state has no
-wrapper-level fixture, by construction) — a test that could only be written against the current control
-flow would evaporate with the next refactor.
+**And the floor stays: a `0/0` is never a pass.** With no subtraction, `census_total == 0` means the census
+had no CODE path at all — which `code-free:` already FAILs pre-enqueue — so the branch is unreachable
+through the normal ordering. It is kept anyway, as a **structural** backstop that does not depend on an
+upstream check still being there, because `PASS (0/0 code census paths present)` is textually
+indistinguishable from a genuine pass. Its regression case (`cx21`) therefore drives the function
+**directly** — a test that could only be written against the current control flow would evaporate with the
+next refactor.
 
 ##### D2b-iv — ONE canonical path-normalisation boundary (the fix for six blockers, not two)
 
 **The pattern is the finding.** Rounds 2, 3 and 4 of review produced **six blockers and every one was a
 path-normalisation defect** — in a different consumer each time: the oracle compared paths from the wrong
-config source; a total built-in swallow certified an empty prompt; `prompt-content:` could not parse
+config source; a total exclusion swallow certified an empty prompt; `prompt-content:` could not parse
 space-bearing or C-quoted headers; the **census classified a C-quoted path by its quoted spelling**; rename
 and mixed-quoted headers were unreachable; a newline-delimited path set turned one path into two grep
 alternatives. The root cause was structural: **normalisation was scattered.** `roborev_census` did not
@@ -759,7 +597,7 @@ the problem instead of the symptom.
 | the prompt's diff header (produced by roborev, not by us) | `diff --git "a/docs/\303\251.sh" "b/…"` | `diff --git a/docs/a b.sh b/docs/a b.sh` |
 
 With `-z` there is **no quoted spelling to reconcile** on any git-sourced path: `census_paths` /
-`census_code_paths` / `CENSUS_BUILTIN_EXCLUDED` / the survivor map all hold the same RAW bytes, and RAW is
+`census_code_paths` / the survivor map all hold the same RAW bytes, and RAW is
 the single representation used for classification, comparison **and** display. `census-exclusion:` became a
 direct byte comparison; the census's extension/prefix tests now see `md`, not `md"`. Records are read with
 `read -r -d ''`, so a path containing a NEWLINE survives — something a line-oriented read cannot do at all.
@@ -1141,14 +979,17 @@ family's `(c2*)` lettering. The fixture helper gains the ability to write the wo
    have shipped); a bare directory name excludes its subtree through the `<p>/**` sibling; `/README.md`
    excludes only the root file while `README.md` excludes at any depth; a **trailing-slash** pattern FAILs
    naming the inversion; a whitespace-only pattern is skipped, not treated as match-everything.
-9. **the TOTAL/PARTIAL built-in boundary** (D2b-i-a) — a lockfile-only census (`Cargo.lock` + prose) ⇒
-   `code-free: PASS`, `census-exclusion: FAIL` naming the EMPTY diff, `assert_never_enqueued`,
-   `prompt-content: SKIP`, and no `PASS (0/0` anywhere; the **same** lockfile beside a surviving `.rs` file ⇒
-   `census-exclusion: NOTICE`, `RESULT: PASS`, review enqueued. Both sides, so neither can drift into the
-   other;
+9. **the DECLARED RESIDUAL, with a both-directions control** (D2b) — `cx30`: a #3096-shaped census
+   (`docs/reports/ws0-3096-artifacts/*.json` + `Cargo.lock` + `.rs`) against a prompt carrying only the
+   `.rs` file ⇒ `census-exclusion: PASS (2/2 …)` (the lockfile SURVIVES, because the built-in is not
+   modelled), `prompt-content: FAIL (1/2 …)` naming `Cargo.lock`, `RESULT: FAIL`, and no "not expected"
+   clause anywhere; `cx30b`: the same census with the lockfile IN the prompt ⇒ `prompt-content: PASS (2/2)`,
+   `RESULT: PASS`, review enqueued. `cx30b` is not optional: without it `cx30`'s FAIL could come from the
+   fixture, the config or the census rather than from the absence it names, and a declared residual would be
+   indistinguishable from an unnoticed one;
 10. **the `0/0` floor**, driven **directly** against `roborev_check_prompt_content` in the real files (the
-    state has no wrapper-level fixture once (9) exists) — asserts the refusal value AND the *absence* of any
-    `PASS (0/0` form;
+    state is unreachable through the wrapper because `code-free:` FAILs first) — asserts the refusal value
+    AND the *absence* of any `PASS (0/0` form;
 11. **every diff-header shape git emits** (D2b-iv) — a space-bearing directory (`docs/storage engine/`) and a
     non-ASCII, octal-escaped name (`é.sh`) each ⇒ `prompt-content: PASS` and `RESULT: PASS`. Plus the
     test-quality rule these cases exist to enforce: **a hostile-path case asserts the terminal `RESULT:` and
@@ -1173,32 +1014,18 @@ family's `(c2*)` lettering. The fixture helper gains the ability to write the wo
     `['*.md', 'src/[Tt]est.rs']` ⇒ `corroboration: OK`, no `FAIL (exclusion set drift`, so one case pins
     both halves (the container IS stripped, the class inside a pattern is NOT).
 
-15. **the `built-in-set:` self-check, in both of its new dimensions** (D2b-ii, round 7) — `cx25`: the
-    EQUAL-LENGTH substitution (`**/Cargo.lock` → `**/Cargo.lock.bak`, one literal for one) ⇒
-    `census-exclusion: FAIL` naming the length bucket, its `k-1` shortfall and WHICH member lost its
-    boundary, `assert_never_enqueued` — **plus asserts that the missing list and the literal count stay
-    SILENT**, so the FAIL is attributable to the boundary check alone and the case cannot quietly start
-    passing for the wrong reason; `cx25b`: the identical fixture with an untampered stub ⇒ `built-in-set:
-    OK`, which is what makes `cx25` about the tamper rather than the fixture. `cx26`: a version mismatch
-    ALONE (literals matching the pin exactly) ⇒ FAIL with the version named first and no other divergence
-    fragment; `cx26b`: a target that will not answer `version` ⇒ `built-in-set: UNAVAILABLE`, never `OK`,
-    and not a FAIL; `cx26c`: that same unreadable version on a binary MISSING a pinned pattern ⇒ still
-    FAILs naming the pattern, which is the detector for "withholding the blessing must not disable the
-    check". The stub's planted literals are laid out as the measured **contiguous length-bucket runs**,
-    because a one-per-line planting would model a blob shape the real binary does not have — the same
-    symmetric-mirror error the array/string bug taught, so a `guard_assert_run_mirror_agrees` check keeps
-    the run mirror and the flat pinned mirror describing the same 24 patterns.
-16. **the EXCUSAL gate, one detector per built-in state** (round 9, blocker F1) — `cx19h`: the pinned
-    literals with `version` REFUSED ⇒ `built-in-set: UNAVAILABLE`, `census-exclusion:` still a NOTICE whose
-    value line NAMES the withheld excusal and the non-verification, NO path handed to `prompt-content:`,
-    `prompt-content: FAIL (1/2 … absent)`, `RESULT: FAIL` — the fail-closed outcome; `cx19i`: the same
-    target with the swallowed path PRESENT in the prompt ⇒ `prompt-content: PASS (2/2)`, `RESULT: PASS`, so
-    withholding the excusal makes the path *evaluated*, never condemned; `cx19`/`cx19d`: the `OK` state on a
-    `pinned` stub ⇒ the excusal works as before (`+1 not expected: …`) and reports no withholding, so the
-    granted and withheld wordings are distinguishable; `cx19j`: `DIVERGED` beside a real swallow ⇒ FAIL,
-    `built-in-set: DIVERGED`, nothing excused, never enqueued. `cx19`/`cx20b`/`cx22b` were MOVED onto the
-    `pinned` stub for this reason: their subject is the excusal, which the default (literal-free) stub can
-    no longer earn.
+15. **the CLOSED verdict grammar and the affirmation backstop** (round 10, and the owner ruling) —
+    `cx28`: a per-check key holding a value outside the documented grammar ⇒ FAIL naming itself, so an
+    unplanned value cannot inherit the non-failing branch; `cx29`: a check that returns before assigning its
+    key ⇒ FAIL, so an un-run check cannot ride to PASS on its initial `SKIP`. Both run patched COPIES of the
+    three flow scripts, each with the UNPATCHED copy shown to PASS first — an assert that a copy FAILs is
+    otherwise satisfied by a copy that failed because it was copied wrong, which is a probe failing in the
+    direction that looks like success. Plus four **structural** asserts read from the scan and backstop
+    STATEMENTS (never a file-wide grep, which the summary block's own emit line would satisfy): the
+    failing-capable set is exactly `FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`; the positive arm exists and its
+    `*)` sets `failed=1`; all seven deterministic keys are named in the backstop; and the backstop carries
+    **exactly one** exempting arm — the affirmative `PASS*)` one — so no per-key escape hatch can be
+    reintroduced now that `census-exclusion:`'s `NOTICE` exemption is gone.
 
 The suite runs under the `roborev-lints` gate component, which is in **both** `COMPONENTS` and
 `LITE_COMPONENTS` — so a regression FAILs the fast loop rather than costing a review round. Its tally

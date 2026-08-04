@@ -447,43 +447,37 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   (`CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS`) is asserted **structurally** against
   the committed `.roborev.toml` for set equality, so a one-sided edit FAILs `--lite` instead of surfacing
   as a puzzling `census-exclusion:` failure on someone else's report PR.
-  **The effective exclusion set is FOUR things, not one** — the `--repo` checkout's `.roborev.toml`, the
-  **ROOT checkout's** (see the ordering property below), `~/.roborev/config.toml`, **and roborev's own
-  compiled-in lockfile/cache deny-list** (`**/Cargo.lock`, `**/go.sum`, `**/.cache/**`, … 24 patterns
-  pinned to v0.61.2). Every value line names WHICH source is responsible, and ends with
-  `built-in-set: OK|DIVERGED|UNAVAILABLE`. **The two halves reach git by DIFFERENT mechanisms, and the
-  count matters:** a *configured* pattern is anchored by `git.FormatExcludeArgs` into **two** pathspecs
-  (`<body>` and `<body>/**`), whereas a *built-in* is a **pre-formatted pathspec constant appended
-  verbatim — exactly one pathspec**, never re-anchored and never given a `/**` sibling (established from
-  the v0.61.2 binary: the `:(exclude,glob)` prefix sits inside each string literal, which Go's
-  length-ordered rodata packing proves is not linker coincidence). Modelling built-ins through the
-  formatter invented a `**/Cargo.lock/**` exclusion roborev never applies, and **over**-modelling the
-  exclusion set drops paths from `prompt-content` coverage — a false PASS, exactly like **under**-modelling
-  it reports paths as surviving that roborev really drops.
+  **The effective exclusion set this check models is THREE config files** — the `--repo` checkout's
+  `.roborev.toml`, the **ROOT checkout's** (see the ordering property below) and `~/.roborev/config.toml`.
+  Every value line names WHICH source is responsible. A *configured* pattern is anchored by
+  `git.FormatExcludeArgs` into **two** pathspecs (`<body>` and `<body>/**`), and both are reproduced —
+  UNDER-modelling that reports paths as surviving that roborev really drops.
   **The verdict split follows ONE rule, and it generalizes beyond this key — apply it to any call of
   this shape without asking: FAIL where the author can act; NOTICE where only the information is
-  actionable; never silence.** Concretely: a *configured* pattern swallowing census code is a **FAIL**
-  (the remedy is a one-token edit to a named file); a *pinned built-in* swallowing **SOME** census code is
-  a **NOTICE** (there is **no** remedy — the deny-list is compiled in with no opt-out or negation form, and
-  a guard that fires on a legitimate change like a routine `Cargo.lock` touch with no available fix is
-  the guard that gets **disabled**, which is how #3229 happened); the *live built-in set diverging from
-  the pin* is a **FAIL** (that one HAS a remedy — re-extract, re-pin, judge the new built-in — and it is
-  a mechanism change the version pin exists to catch, not absorb). "Never silence" is load-bearing: an
-  unobservable built-in set reads `UNAVAILABLE` **in the value line**, never as an unstated assumption of
-  agreement. `NOTICE*` is deliberately outside the wrapper's failing-capable scan
-  (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`).
-  **`UNAVAILABLE` withholds the EXCUSAL, not just the blessing — permissive behaviour is keyed on the
-  POSITIVE state.** `built-in-set:` has THREE values, and a three-state signal tested as two is a
-  false-PASS generator: telling `prompt-content:` not to expect a swallowed path is a claim *about the
-  mechanism* (its absence is DETERMINISTIC), so it requires `built-in-set: OK`. Whether the swallow may be
-  a NOTICE rather than a FAIL turns on `!= DIVERGED` (an unobservable binary must not red every run); whether
-  it EXCUSES coverage requires `= OK`. Under `UNAVAILABLE` NOTHING is excused, `prompt-content:` evaluates
-  every census code path and FAILs if one is genuinely absent — fail-closed on the excusal, not on the run.
-  *"We could not check" must never render as "nothing was wrong."*
+  actionable; never silence.** On this key's subject it resolves to a single call: a *configured* pattern
+  swallowing census code is a **FAIL**, pre-enqueue, because the remedy is a one-token edit to a named file.
+  The key therefore has **no `NOTICE` value** — a NOTICE is for a swallow with no remedy, and with every
+  pattern in play configured and editable there is no such case left (see the declared residual below). A
+  **TOTAL** swallow is not a separate branch: it is a configured swallow, so it FAILs, and the value carries
+  `<m>/<n>` so `m == n` shows on its face. `NOTICE*` stays outside the wrapper's failing-capable scan
+  (`FAIL*|FINDINGS*|ERROR*|INCONSISTENT*`) because `vacuity-tier1:` needs it as an advisory.
+  **DECLARED RESIDUAL — roborev's compiled-in deny-list is NOT modelled (#3278).** roborev also appends a
+  hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`, `**/pnpm-lock.yaml`, `**/.cache/**`, …)
+  that no configuration can switch off. Modelling it was built and then **DELETED on #3229**: four
+  consecutive review rounds found four false-PASSes *inside that subsystem alone*, no acceptance criterion
+  reached it, and **subtraction cannot introduce a false PASS** — modelling FEWER exclusions than roborev
+  applies can never excuse a path from coverage. So the residual, stated rather than left to be
+  rediscovered: **a diff whose code-census paths include a built-in-excluded path (`Cargo.lock`, `go.sum`,
+  `pnpm-lock.yaml`, …) has that path silently dropped from the reviewer's diff, `census-exclusion:` reports
+  it SURVIVING, and `prompt-content:` then FAILs on its absence.** That **fails CLOSED** — the cost is a
+  diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
+  **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
+  Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
   **That is ONE SHAPE, found three times on #3229, so it is now a RULE: a positive verdict requires an
   AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
-  every unknown/unmeasured state inherits the PERMISSIVE branch* — `built-in-set: UNAVAILABLE` took the
-  permissive excusal path; `corroboration: UNAVAILABLE` reached a `PASS (no exclusion patterns configured)`
+  every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state `built-in-set:` signal took
+  the permissive excusal path (that subsystem is since deleted, but the shape is the lesson);
+  `corroboration: UNAVAILABLE` reached a `PASS (no exclusion patterns configured)`
   and **enqueued** (the code's own comment said the binary was the only oracle that could tell "no key
   recognised" from "nothing configured", then never required it to have *answered*); a
   `${end:-$start}` default degraded a failed `awk` bound to a 1-line scan. So: never derive a pass from the
@@ -494,15 +488,6 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   wrapper's own verdict scan was the same shape and is now a CLOSED grammar (unrecognised value ⇒ FAIL) plus
   a backstop that no PASS may carry a verdict-carrying key that is not affirmatively `PASS` — a `SKIP` means
   the check never ran, which is the vacuous pass itself.
-  **A built-in swallowing the WHOLE code census is a FAIL, and that is the same rule, not an exception**:
-  with nothing surviving, the reviewer gets an **EMPTY prompt**, so any verdict certifies nothing — the
-  identical condition `code-free:` already FAILs pre-enqueue for a prose-only census, and it carries the
-  identical remedy (verify another way; record primary-source verification in the PR). The boundary is
-  **TOTAL vs PARTIAL** and nothing else. Left as a NOTICE it was MEASURED to produce
-  `prompt-content: PASS (0/0 code census paths present)` and `RESULT: PASS`, exit 0 — a vacuous pass
-  **textually identical to a genuine one** — on any dependency-bump branch whose only non-prose file is a
-  lockfile (`code-free:` does not catch it: a `.lock` extension classifies as CODE). Hence also:
-  **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
   **Paths are normalised ONCE, at the census, and that boundary is the fix for SIX blockers (#3229).**
   Rounds 2–4 of review produced six, and every one was a path-normalisation defect in a *different*
   consumer, because normalisation was scattered. Now the census reads `git diff --numstat -z` (and the
