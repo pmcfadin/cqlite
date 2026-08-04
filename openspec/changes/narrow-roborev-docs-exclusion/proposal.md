@@ -102,7 +102,7 @@ prose, and it cost the review of every program the repo ships beside a report.
    html mmd tex diff`) — so `.py` / `.sh` / `.bt` / `.c` / `.rs` / `.toml` / `.cql` / `.yml` / `.yaml`
    under `docs/` become reviewable. A deny-list is **forced**, not chosen: `exclude_patterns` has no
    negation/allow-list support (git pathspec has none inside `:(exclude)`), so "review these extensions"
-   is not expressible. **Measured on the shipped value: 72 `docs/` executables now reach the reviewer, 0
+   is not expressible. **Measured on the final tree: 71 `docs/` executables now reach the reviewer, 0
    markdown does, and nothing outside `docs/` is newly excluded.**
 2. **AC3 and AC4 are DEFERRED to #3283.** The pre-enqueue prediction of roborev's effective exclusion set,
    and with it the reconciliation of the wrapper's extension-based census against roborev's path-glob
