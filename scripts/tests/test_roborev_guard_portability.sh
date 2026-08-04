@@ -27,6 +27,14 @@
 # guard-test cases under shims (that would double a --lite component's runtime for no extra
 # information — the full-suite run under both shims was recorded once, by hand, on #3296).
 #
+# SAME DOCTRINE, DIFFERENT SCOPE as scripts/tests/test_agent_gate_tree_portability.sh (#2926,
+# after #2914): behavioural BSD shims for the covered paths plus a static lint for the
+# uncovered ones, every lint rule proved discriminating. That file lints the gate's
+# tree-integrity functions; this one lints the roborev review-guard path. macOS is a
+# FIRST-CLASS host here — the gate carries `Darwin) … taskpolicy` branches and declares a
+# /bin/bash 3.2 floor — so this file also avoids bash-4-only constructs and never expands a
+# possibly-empty array under `set -u` (a 3.2 unbound-variable abort).
+#
 # AUTHORITATIVE SOURCES for the three BSD behaviours emulated here (a CQLite file is never
 # authority for another program's behaviour):
 #   sed -i takes a REQUIRED argument   Apple text_cmds sed/main.c:
@@ -133,9 +141,12 @@ if [ "${#CONSTRUCT_RE[@]}" -ne "${#CONSTRUCT_WHY[@]}" ] ||
 fi
 
 # The scan body: code only. A construct named in a comment (this repo documents the ones it
-# banned) is prose, not an invocation.
+# banned) is prose, not an invocation. A line carrying `portability-lint-allow` is exempt —
+# the repo's existing escape-marker convention (`injection-lint-allow`, `perf-gate-allow`) —
+# so a provably-safe or deliberately-BSD-emulating line has a route that is VISIBLE in the
+# diff instead of forcing a rewrite of the lint.
 scan_hits() { # scan_hits <ere> <file>
-  grep -vE '^[[:space:]]*#' "$2" | grep -nE -- "$1" || true
+  grep -vE '^[[:space:]]*#' "$2" | grep -v 'portability-lint-allow' | grep -nE -- "$1" || true
 }
 
 for _ci in "${!CONSTRUCT_RE[@]}"; do
@@ -176,6 +187,16 @@ else
   bad 'structural control: the paste pattern false-positives on a portable paste with an operand — a lint that reds on correct input is the lint agents learn to waive'
 fi
 
+# CONTROL for the escape marker, in BOTH directions: it must exempt the line it is on, and it
+# must not be a blanket switch (the same sample WITHOUT the marker is still detected above).
+printf '%s\n' "  sed -i 's/a/b/' \"\$f\"   # portability-lint-allow: deliberate BSD-emulation control" \
+  >"$tmp/allow.sh"
+if [ -z "$(scan_hits "${CONSTRUCT_RE[0]}" "$tmp/allow.sh")" ]; then
+  ok 'structural control: a line marked portability-lint-allow is exempt (a visible, per-line escape)'
+else
+  bad 'structural control: the portability-lint-allow marker does not exempt its line'
+fi
+
 # ===========================================================================
 # (2) THE BSD SHIMS, and the controls that prove they reproduce the reported defects.
 # ===========================================================================
@@ -192,6 +213,9 @@ fi
   printf 'REAL_SED=%q\n' "$REAL_SED"
   cat <<'SHIM_SED'
 set -uo pipefail
+# A zero-argument call is handled before any array is built: expanding an EMPTY "${arr[@]}"
+# under `set -u` aborts on macOS's /bin/bash 3.2, the floor the gate declares.
+[ $# -eq 0 ] && exec "$REAL_SED"
 # BSD sed declares -i with a REQUIRED argument, so a SEPARATE `-i` consumes the NEXT argv
 # entry as the backup suffix. Rewriting it to GNU's attached form reproduces exactly that
 # consumption: `sed -i EXPR FILE` becomes suffix=EXPR, script=FILE, no input file — the edit
@@ -220,8 +244,14 @@ set -uo pipefail
 # getopt(argc, argv, "d:s") then `if (*argv == NULL) usage();` — flags are consumed (with
 # bundling, so `-sd,` is -s plus -d,), and a missing FILE OPERAND is a usage error on stderr
 # with exit 1 and NOTHING on stdout.
+if [ $# -eq 0 ]; then   # see the sed shim: no empty-array expansion under bash 3.2 + set -u
+  printf 'usage: paste [-s] [-d delimiters] file ...\n' >&2
+  exit 1
+fi
 orig=("$@")
-operands=()
+# A COUNTER, not an array: `${#arr[@]}` on an array that never received an element is not
+# reliably safe under bash 3.2 + set -u either.
+n_operands=0
 end=0
 while [ $# -gt 0 ]; do
   a="$1"
@@ -239,10 +269,10 @@ while [ $# -gt 0 ]; do
     shift
     continue
   fi
-  operands+=("$a")
+  n_operands=$((n_operands + 1))
   shift
 done
-if [ "${#operands[@]}" -eq 0 ]; then
+if [ "$n_operands" -eq 0 ]; then
   printf 'usage: paste [-s] [-d delimiters] file ...\n' >&2
   exit 1
 fi
