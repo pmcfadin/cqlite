@@ -30,6 +30,10 @@ PASS=0
 FAIL=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# A case whose PROPERTY IS UNOBSERVABLE on this box (a Linux-only kernel control on
+# Darwin, an unreadable /proc entry) is reported as a SKIP — counted in neither total,
+# so it can never be mistaken for a passing assertion (issue #3249 AC3).
+skipped() { printf 'skip - %s\n' "$1"; }
 
 # assert_complete <label> <file>: file must contain start marker, end marker,
 # RESULT line, and a representative stage line.
@@ -77,7 +81,11 @@ trap 'rm -rf "$tmp"' EXIT
 #     which names the offending line and points here. That is loud and uniform by
 #     design — one grammar to extend, not N per-token asserts to chase. Do NOT relax
 #     it to a `.*` tail; that is the failure mode this design prevents.
-ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?$'
+# The ` perf=` group (issue #3249) is appended AFTER the optional ` mold=` group,
+# because that is the order accelerators_line emits them; both are Linux-only and
+# therefore both are optional here, so a Darwin line (which ends at
+# sccache-health) and a Linux line (which carries both) satisfy one grammar.
+ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?( perf=(ok|kptr-restricted|absent|unknown|paranoid-[0-9]+))?$'
 
 # accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
 # print nothing (rc 1). `grep -m1` + capture-to-a-variable, deliberately with NO
@@ -144,6 +152,10 @@ accel_token_is() {
 # by the 9c-iv regression guard, which must assert both the TRUE and the FALSE outcome.
 mold_token_is()          { accel_token_is "$1" mold "$2"; }
 accel_health_token_is()  { accel_token_is "$1" sccache-health "$2"; }
+# perf_token_is: the same tier-1 whole-field idiom for the ` perf=` token (#3249).
+# Today it is the LAST token, i.e. the most exposed to the next appended one — so it
+# is built from accel_token_is rather than an end-anchored match, by construction.
+perf_token_is()          { accel_token_is "$1" perf "$2"; }
 
 # assert_mold_token <label> <file> <expected>: assert the accelerators line's mold
 # token (issue #2859). <expected> is a state (linked|present-unconfigured|absent)
@@ -160,6 +172,25 @@ assert_mold_token() {
     ok "$label: mold=$expected present"
   else
     bad "$label: expected mold=$expected, got: '$line'"
+  fi
+}
+
+# assert_perf_token <label> <file> <expected>: assert the accelerators line's perf
+# capability token (issue #3249). <expected> is a state
+# (ok|paranoid-<N>|kptr-restricted|absent|unknown) or the literal "none" to require
+# NO perf token (the Darwin contract — perf_event_paranoid is a Linux control).
+assert_perf_token() {
+  local label="$1" file="$2" expected="$3" line
+  line=$(accel_line_of "$file")
+  if [ "$expected" = none ]; then
+    case " $line " in
+      *" perf="*) bad "$label: perf token present but expected none ($line)" ;;
+      *)          ok  "$label: no perf token (Darwin contract)" ;;
+    esac
+  elif perf_token_is "$file" "$expected"; then
+    ok "$label: perf=$expected present"
+  else
+    bad "$label: expected perf=$expected, got: '$line'"
   fi
 }
 
@@ -913,23 +944,24 @@ fi
 #        could ever legitimately ship as an accelerator token: a plausible name (say
 #        `lto=thin`) would turn this guard into a false accusation on the day someone
 #        correctly adds that token AND extends $ACCEL_LINE_RE.
-#        The base fixture forces OS=Linux + mold=linked + sccache-health=ok so the
-#        line deterministically carries BOTH tier-1 tokens on any host, and the
-#        sentinel lands immediately after ` mold=` — the position tomorrow's token
-#        will actually occupy.
+#        The base fixture forces OS=Linux + mold=linked + perf=ok +
+#        sccache-health=ok so the line deterministically carries EVERY tier-1 token
+#        on any host, and the sentinel lands immediately after the CURRENT last
+#        token (` perf=` since #3249) — the position tomorrow's token will actually
+#        occupy. When a token is appended, move this expectation to the new last one.
 FUTURE_TOKEN='__unknown-future-token__=x'
 future_base="$tmp/health-future-base.txt"
 future_accel="$tmp/health-future-token.txt"
 AGENT_GATE_SUMMARY_FILE="$future_base" \
-  AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE=linked \
+  AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE=linked AGENT_GATE_TEST_PERF_STATE=ok \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 # The UNMUTATED base must satisfy the grammar — otherwise the canary below would be
 # "armed" by a pre-existing defect rather than by the synthesized token.
 assert_accelerators "accel-future-token-base" "$future_base"
 sed "s/^accelerators: .*/& $FUTURE_TOKEN/" "$future_base" >"$future_accel"
-if grep -qF " mold=linked $FUTURE_TOKEN" "$future_accel"; then
-  ok "accel-future-token: guard fixture really carries an unknown token after ' mold='"
+if grep -qF " perf=ok $FUTURE_TOKEN" "$future_accel"; then
+  ok "accel-future-token: guard fixture really carries an unknown token after the last known token"
 else
   bad "accel-future-token: guard fixture did not gain a trailing token (guard is vacuous)"
   grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
@@ -943,6 +975,8 @@ else
   grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
 fi
 assert_mold_token "accel-future-token" "$future_accel" linked
+# ...and the CURRENT last token, the one most exposed to an appended sibling (#3249).
+assert_perf_token "accel-future-token" "$future_accel" ok
 # ...and neither may have been weakened into accepting a WRONG value, nor a value of
 # which the truth is a prefix/superstring. Tolerating a new token != tolerating a
 # bad token value. (The negative direction is asserted through the same predicates
@@ -960,8 +994,14 @@ for wrong in absent overridden present-unconfigured linke linkedx; do
     wrong_val_ok=0
   fi
 done
+for wrong in absent unknown kptr-restricted paranoid-4 o okx; do
+  if perf_token_is "$future_accel" "$wrong"; then
+    bad "accel-future-token: perf assert wrongly matched perf=$wrong (value check weakened)"
+    wrong_val_ok=0
+  fi
+done
 if [ "$wrong_val_ok" -eq 1 ]; then
-  ok "accel-future-token: wrong/partial health+mold values still FAIL (values matched exactly)"
+  ok "accel-future-token: wrong/partial health+mold+perf values still FAIL (values matched exactly)"
 fi
 # Tier 2: the whole-line grammar is the canary and must REJECT the unknown token, so
 # a future token addition reddens the assert_accelerators call sites with an
@@ -997,6 +1037,247 @@ AGENT_GATE_SUMMARY_FILE="$mold_darwin" \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 assert_mold_token "mold-darwin" "$mold_darwin" none
 assert_accelerators "mold-darwin" "$mold_darwin"
+
+# 9f. perf profiling capability token (issue #3249). Boxes ship with
+#     kernel.perf_event_paranoid = 4, which denies ALL unprivileged perf use — a
+#     PERMISSION verdict that reads like a missing CAPABILITY, and one that reverts
+#     on reboot when no /etc/sysctl.d drop-in exists. The token makes "this box
+#     cannot be profiled" visible in every pasted SUMMARY. Linux-only, same
+#     contract as mold: NO token on Darwin. State forced via
+#     AGENT_GATE_TEST_PERF_STATE so every value asserts deterministically
+#     regardless of the host's real sysctls.
+for state in ok paranoid-4 paranoid-2 kptr-restricted absent unknown; do
+  perf_file="$tmp/perf-$state.txt"
+  AGENT_GATE_SUMMARY_FILE="$perf_file" \
+    AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE=linked AGENT_GATE_TEST_PERF_STATE="$state" \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_perf_token "perf-linux-$state" "$perf_file" "$state"
+  assert_accelerators "perf-linux-$state" "$perf_file"
+done
+
+# 9f-darwin. perf_event_paranoid/kptr_restrict are Linux kernel controls, so Darwin
+#            emits NO perf token even with a forced state — its line still ends at
+#            sccache-health, byte-identical to pre-#3249 output.
+perf_darwin="$tmp/perf-darwin.txt"
+AGENT_GATE_SUMMARY_FILE="$perf_darwin" \
+  AGENT_GATE_TEST_OS=Darwin AGENT_GATE_TEST_MOLD_STATE=linked AGENT_GATE_TEST_PERF_STATE=ok \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_perf_token "perf-darwin" "$perf_darwin" none
+assert_accelerators "perf-darwin" "$perf_darwin"
+
+# 9f-real. REAL detection, NO AGENT_GATE_TEST_PERF_STATE: the production branch of
+#          _perf_state, reading an actual /proc directory. Without this every case
+#          above set the test seam, so hardcoding `_PERF_STATE="ok"` — a gate stamping
+#          `perf=ok` on a paranoid-4 box, exactly what AC3 exists to prevent — passed
+#          the whole suite, and so did forcing the real branch to always yield
+#          `unknown`. The fixture is scripts/perf-capability.sh's own test seam, which
+#          is inert without its hermetic marker.
+perf_fixture_ok="$tmp/perf-proc-ok"; mkdir -p "$perf_fixture_ok"
+printf -- '-1\n' >"$perf_fixture_ok/perf_event_paranoid"
+printf '0\n'     >"$perf_fixture_ok/kptr_restrict"
+perf_fixture_p4="$tmp/perf-proc-p4"; mkdir -p "$perf_fixture_p4"
+printf '4\n' >"$perf_fixture_p4/perf_event_paranoid"
+printf '1\n' >"$perf_fixture_p4/kptr_restrict"
+for pair in "ok:$perf_fixture_ok" "paranoid-4:$perf_fixture_p4"; do
+  want="${pair%%:*}"; fixture="${pair#*:}"
+  real_file="$tmp/perf-real-$want.txt"
+  env -u AGENT_GATE_TEST_PERF_STATE \
+    AGENT_GATE_SUMMARY_FILE="$real_file" AGENT_GATE_TEST_OS=Linux \
+    CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$fixture" \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_perf_token "perf-real-$want" "$real_file" "$want"
+  assert_accelerators "perf-real-$want" "$real_file"
+done
+
+# 9f-host. THE HOST'S OWN /proc, WITH NO SEAM SET AT ALL (issue #3249 AC3(a)). Every
+#          case above — 9f-real included — sets the LIBRARY's fixture seams
+#          (CQLITE_PERF_TEST_MODE + CQLITE_PERF_PROC_DIR), so they prove the production
+#          BRANCH runs but not that it reads this box's real kernel state. Here every
+#          seam the code reads is unset (the five CQLITE_PERF_* seams plus both
+#          AGENT_GATE_TEST_* forcings), so the token can only come from
+#          /proc/sys/kernel. The expectation is DERIVED from the box's own two controls
+#          by the documented rule and asserted as an EXACT whole-field token — never
+#          hardcoded to `ok` (a paranoid-4 box MUST fail this case if the gate claims
+#          otherwise) and never as a member of the alternation (which every state
+#          satisfies). Skipped, not passed, off Linux or when a control is unreadable:
+#          a case that cannot observe the property must say so, not bank a green.
+perf_host_par_f=/proc/sys/kernel/perf_event_paranoid
+perf_host_kptr_f=/proc/sys/kernel/kptr_restrict
+perf_host_os=$(uname -s 2>/dev/null || echo unknown)
+if [ "$perf_host_os" != Linux ]; then
+  skipped "perf-host: host is $perf_host_os, not Linux — perf_event_paranoid/kptr_restrict are Linux controls (9f-darwin covers the no-token contract)"
+elif [ ! -r "$perf_host_par_f" ] || [ ! -r "$perf_host_kptr_f" ]; then
+  skipped "perf-host: $perf_host_par_f / $perf_host_kptr_f unreadable on this box — no real state to derive an expectation from"
+else
+  perf_host_par=$(tr -d '[:space:]' <"$perf_host_par_f")
+  perf_host_kptr=$(tr -d '[:space:]' <"$perf_host_kptr_f")
+  # The rule, from openspec/specs/agent-fleet-runtime/spec.md: paranoid <= 0 AND kptr == 0
+  # => ok; paranoid >= 1 => paranoid-<N>; else kptr != 0 => kptr-restricted.
+  if ! printf '%s' "$perf_host_par" | grep -Eq '^-?[0-9]+$' \
+     || ! printf '%s' "$perf_host_kptr" | grep -Eq '^-?[0-9]+$'; then
+    perf_host_want=unknown
+  elif [ "$perf_host_par" -ge 1 ]; then
+    perf_host_want="paranoid-$perf_host_par"
+  elif [ "$perf_host_kptr" -ne 0 ]; then
+    perf_host_want=kptr-restricted
+  else
+    perf_host_want=ok
+  fi
+  perf_host_file="$tmp/perf-host.txt"
+  env -u AGENT_GATE_TEST_PERF_STATE -u AGENT_GATE_TEST_OS \
+      -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
+      -u CQLITE_PERF_SYSCTL_EXTRA_DIRS -u CQLITE_PERF_TEST_PRIV_DIR \
+      AGENT_GATE_SUMMARY_FILE="$perf_host_file" \
+      bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_perf_token "perf-host (real /proc: paranoid=$perf_host_par kptr=$perf_host_kptr, no seam set)" \
+    "$perf_host_file" "$perf_host_want"
+  assert_accelerators "perf-host" "$perf_host_file"
+fi
+
+# 9f-free. The gate's emit-time perf path is documented as FREE — in the code, in
+#          openspec/specs/agent-fleet-runtime/spec.md, in gate-contract.md and in
+#          gate-ops.md: no `perf` exec, NO EXTERNAL PROCESS AT ALL, and no command
+#          substitution. That last clause is not pedantry: a `$( )` forks a subshell,
+#          so a "no subprocess" claim whose value is read back through one is
+#          self-contradictory — and the original assert here only rejected a literal
+#          `perf stat`, so the claim shipped UNENFORCED while the path in fact forked
+#          several `$( )` per emit and re-sourced the 300-line helper each time.
+#          THE STATED COST IS ZERO: zero external processes, zero command
+#          substitutions, one source of the helper per gate RUN (not per emit).
+#          Asserted three ways below, because each catches a different regression.
+PERF_LIB="$(dirname "$GATE")/perf-capability.sh"
+
+# fn_text <file> <name>: a function's verbatim definition text, whether written as a
+# single line (`f() { …; }`) or a block ending in a column-0 `}`. Empty output means
+# NOT FOUND, which the asserts treat as a FAILURE — a renamed function must never drop
+# out of this audit silently.
+fn_text() {
+  awk -v n="$2" '
+    index($0, n "()") == 1 {
+      print
+      if ($0 ~ /\}[[:space:]]*$/) exit
+      inb = 1; next
+    }
+    inb { print; if ($0 ~ /^\}/) exit }
+  ' "$1"
+}
+
+# The FULL emit-time path: the gate's two token functions plus every helper function
+# they reach. Enumerated explicitly so the audit is a closed set, not a guess.
+perf_path_text=""
+perf_path_missing=""
+for _fn in _perf_state_into _perf_accel_token_into; do
+  _t=$(fn_text "$GATE" "$_fn")
+  [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
+  perf_path_text="$perf_path_text$_t
+"
+done
+for _fn in perf_capability_token_into perf_capability_proc_read \
+           perf_capability_proc_dir_into perf_capability_test_mode \
+           perf_capability_seam_set perf_capability_is_int \
+           perf_capability_test_dir_valid; do
+  _t=$(fn_text "$PERF_LIB" "$_fn")
+  [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
+  perf_path_text="$perf_path_text$_t
+"
+done
+if [ -z "$perf_path_missing" ]; then
+  ok "perf-free: every function on the emit-time perf path was located (closed audit set)"
+else
+  bad "perf-free: perf-path function(s) not found — renamed without updating this audit?$perf_path_missing"
+fi
+# (a) STATIC: the whole path contains ZERO command substitutions and ZERO backticks.
+#     Counted (not merely grepped) so the failure message states the real number
+#     against the documented one.
+perf_subs=$(printf '%s\n' "$perf_path_text" | grep -o '\$(' | wc -l | tr -d ' ')
+perf_ticks=$(printf '%s\n' "$perf_path_text" | grep -o '`' | wc -l | tr -d ' ')
+if [ "$perf_subs" -eq 0 ] && [ "$perf_ticks" -eq 0 ]; then
+  ok "perf-free: the emit-time perf path contains 0 command substitutions (documented cost: 0)"
+else
+  bad "perf-free: the emit-time perf path forks $perf_subs command substitution(s) + $perf_ticks backtick(s) — documented cost is 0; either remove them or correct the claim in the code comment, the spec, gate-contract.md and gate-ops.md"
+fi
+if ! body_mentions "$perf_path_text" 'perf stat'; then
+  ok "perf-free: the emit-time perf path never execs 'perf stat' (free /proc read only)"
+else
+  bad "perf-free: the emit-time perf path execs perf stat"
+fi
+# ...and the 300-line helper is sourced ONCE at script scope, not from inside the
+# per-emit path (a per-emit source re-reads the file on every summary).
+if grep -q '^_PERF_CAP_LOADED=' "$GATE" \
+   && ! body_mentions "$perf_path_text" 'perf-capability.sh'; then
+  ok "perf-free: the helper is sourced once at script scope, never from the per-emit path"
+else
+  bad "perf-free: the perf helper is (re-)sourced inside the per-emit path, or the script-scope load flag is gone"
+fi
+# ...and the call site must consume the token through a VARIABLE: reading
+# `$(_perf_accel_token)` there would reintroduce the very fork the path excludes.
+accel_fn_text=$(fn_text "$GATE" accelerators_line)
+if printf '%s' "$accel_fn_text" | grep -q '_perf_accel_token_into' \
+   && ! printf '%s' "$accel_fn_text" | grep -q '\$(_perf_accel_token\|`_perf_accel_token'; then
+  ok "perf-free: accelerators_line consumes the perf token through a variable, not a subshell"
+else
+  bad "perf-free: accelerators_line reads the perf token through a command substitution"
+fi
+# (b) RUNTIME: run the gate's OWN extracted path with PATH pointing at a NONEXISTENT
+#     directory (so no external command can resolve) and with xtrace stamping
+#     ${BASH_SUBSHELL} (so ANY subshell — command substitution, pipeline, `( )` — is
+#     visible). A static scan can be fooled by an indirection; this cannot. Correct
+#     token + no subshell + no attempted exec is the whole claim, executed.
+#     Every attempted exec is recorded by `command_not_found_handle`, which appends to
+#     a FILE — deliberately NOT to stderr, because a `2>/dev/null` on the offending
+#     line inside the code under test hides a stderr-only signal completely (measured:
+#     a `id -u >/dev/null 2>&1` mutation was invisible until this handler existed).
+#     PATH must name a MISSING DIRECTORY, not be empty: an empty PATH is one empty
+#     element = the current directory, so bash tries `./id`, reports ENOENT and never
+#     consults the handler. bash 4+; on bash 3.2 the xtrace/stderr grep still fires.
+perf_probe="$tmp/perf-free-probe.sh"
+perf_extlog="$tmp/perf-free-external.txt"; : >"$perf_extlog"
+{
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' '. "$1"'
+  fn_text "$GATE" _perf_state_into
+  fn_text "$GATE" _perf_accel_token_into
+  printf '%s\n' '_PERF_CAP_LOADED=1'
+  printf '%s\n' '_AGENT_GATE_OS=Linux'
+  printf '%s\n' 'tok=""'
+  printf 'command_not_found_handle() { printf "EXTERNAL:%%s\\n" "$1" >>"%s"; return 127; }\n' "$perf_extlog"
+  printf 'PATH=%s\n' "$tmp/perf-free-no-such-bin"
+  printf '%s\n' "PS4='+SUB\${BASH_SUBSHELL} '"
+  printf '%s\n' 'set -x'
+  printf '%s\n' '_perf_accel_token_into tok'
+  printf '%s\n' 'set +x'
+  printf '%s\n' 'printf "TOKEN[%s]\n" "$tok"'
+} >"$perf_probe"
+perf_trace="$tmp/perf-free-trace.txt"
+perf_probe_out=$(env -u AGENT_GATE_TEST_PERF_STATE -u AGENT_GATE_TEST_OS \
+  CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$perf_fixture_p4" \
+  bash "$perf_probe" "$PERF_LIB" 2>"$perf_trace")
+perf_probe_subshells=$(grep -c 'SUB[1-9]' "$perf_trace" 2>/dev/null || true)
+perf_probe_execfail=$(grep -c 'No such file or directory\|command not found' "$perf_trace" 2>/dev/null || true)
+perf_probe_ext=$(grep -c '^EXTERNAL:' "$perf_extlog" 2>/dev/null || true)
+if [ "$perf_probe_out" = 'TOKEN[ perf=paranoid-4]' ] \
+   && [ "${perf_probe_subshells:-0}" -eq 0 ] && [ "${perf_probe_execfail:-0}" -eq 0 ] \
+   && [ "${perf_probe_ext:-0}" -eq 0 ]; then
+  ok "perf-free: the extracted path yields perf=paranoid-4 with an unresolvable PATH, 0 subshells and 0 external commands (xtrace + not-found-handler verified)"
+else
+  bad "perf-free: runtime probe failed (out='$perf_probe_out' subshells=$perf_probe_subshells exec-failures=$perf_probe_execfail external=$perf_probe_ext: $(head -3 "$perf_extlog" | tr '\n' ' '))"
+  head -20 "$perf_trace"
+fi
+perf_nopath="$tmp/perf-nopath.txt"
+nopath_dir="$tmp/nopath-bin"; mkdir -p "$nopath_dir"
+for t in bash sed awk grep cat env date mktemp uname tr cut sort head tail wc git printf sleep python3 rm mv cp mkdir touch dirname basename find id hostname stat diff; do
+  src=$(command -v "$t" 2>/dev/null) && ln -sf "$src" "$nopath_dir/$t"
+done
+(
+  env -u AGENT_GATE_TEST_PERF_STATE PATH="$nopath_dir" \
+    AGENT_GATE_SUMMARY_FILE="$perf_nopath" AGENT_GATE_TEST_OS=Linux \
+    CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_PROC_DIR="$perf_fixture_p4" \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+)
+# Asserted as an EXACT whole-field value (not a `.*` presence grep that any state
+# would satisfy — including the `unknown`/`absent` states a broken read produces).
+assert_perf_token "perf-nopath" "$perf_nopath" paranoid-4
+assert_accelerators "perf-nopath" "$perf_nopath"
 
 # 9e. REAL detection (NO AGENT_GATE_TEST_MOLD_STATE override): exercise the actual
 #     `command -v mold` + `_mold_block_active` + RUSTFLAGS branches. A stub `mold` is

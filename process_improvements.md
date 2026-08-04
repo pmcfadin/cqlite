@@ -920,4 +920,69 @@ issues have landed). Keep entries short so a future reader can re-run the measur
 - **A subagent that pushes back on a lead's instruction can be right — leave room for it.**
   The lead diagnosed a superseded gate block and ordered the closer to discard its triage;
   the closer refused, and its evidence (the `../schemas` sibling) was the actual root cause.
+
+## 2026-08-03 — #3249 (persist a profileable perf configuration on agent boxes): lessons
+
+Four named entries from #3249 / PR #3251 (squash `a93c3f0`). Entries 3 and 4 are **owner
+standing rules for the whole fleet** (owner, 2026-08-03), not observations; they are
+cross-referenced from `docs/development/pm-operating-loop.md`.
+
+### 1. A test-only seam on the value under test can replace the assertion
+
+The owner's framing, which this issue proved on itself **twice**. When a test sets a seam that
+overrides the very value under test, the suite goes green whether or not the production path
+works — the seam, not the code, is supplying the answer. Concretely: hardcoding
+`_PERF_STATE="ok"` in `scripts/agent-gate.sh` **survived all 118 tests**, because every case set
+`AGENT_GATE_TEST_PERF_STATE`; and the `CQLITE_PERF_PROC_DIR` / `CQLITE_PERF_SYSCTL_DIR` seams
+meant no test ever exercised the production default paths, so repointing them at
+`/tmp/bogus-*` also survived.
+
+**Rule: any test-only seam on the value under test requires at least one non-seam case that
+derives the expectation from the real source and asserts the specific value — never a member of
+a regex alternation. Otherwise the seam has replaced the assertion.**
+
+Sharper corollary found on #3249: a case can unset the *obvious* seam and still be seam-driven
+through a *second* one — `9f-real` unset the gate's token seam but still set the library's
+fixture-directory seam. So "no seam set" must be verified against the full list of seams the
+code actually reads, **enumerated from source rather than remembered**.
+
+### 2. A targeted audit finds what adversarial review rounds do not
+
+Seven roborev/reviewer rounds on #3249 produced **29 findings**. A single *closed-set audit* —
+enumerate every path that can reach a "capable/verified" verdict, then prove each is reachable
+only from validated input — found **three more in one pass**, including one in the gate token's
+own parse (`proc_read` truncated at the first whitespace, so `0 1` read as a capable `0`).
+
+**Rule: for a property of the form "X must never be reported unless Y," enumerate the closed set
+of paths that can report X and justify each, rather than waiting for reviewers to find them one
+at a time. Reviewers chase findings; an audit forces every member of a set to justify itself.**
+
+Record the audit as a durable artifact (a file header or doc), not merely as the fixed lines —
+otherwise the next change re-opens the set with nothing to check it against.
+
+### 3. Coverage is not equivalence: a per-slice review ledger is an audit trail, never a certification
+
+**Fleet rule (owner, 2026-08-03).** On #3249 every line of a `+4216` diff sat inside some
+verified review slice, and the per-slice ledger was complete — yet a single full-range round
+then surfaced **4 findings (one High, two Medium) that no sliced round produced**. A reviewer
+holding the whole change reasons across boundaries a slice cannot see; slice coverage is not
+equivalent to reviewing the change.
+
+**Rule: the only certifying review artifact is one genuine full-range `<base>...HEAD` round with
+`prompt-content: PASS`. Never slice the base to get a green; if a round is non-PASS, raise
+`default_max_prompt_size` (see #3257 / #3263) and re-run the full range.**
+
+Mechanism, so the rule is understandable rather than ritual: past an assembled-prompt byte
+ceiling (default 204,800) roborev **spills the diff to a file** instead of discarding it, and on
+a sandboxed box every read of that file fails — so the model answers "No issues found" having
+read zero lines. That vacuous PASS is textually identical to a real one.
+
+### 4. Re-read the issue immediately before spawning `flow-closer`
+
+**Fleet doctrine (owner, 2026-08-03).** A fleet order landed between a status poll and a closer
+spawn, and the closer was briefed with an instruction that order had countermanded. Nothing was
+armed, but `flow-closer` is the one irreversible step in the pipeline (full gate → final review
+→ merge), so it is the one step that must never run on stale instructions.
+
+**Rule: re-read the issue live at closer-spawn time, not on the last status tick.**
   An instruction to destroy evidence deserves resistance.

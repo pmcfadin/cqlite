@@ -288,6 +288,24 @@
 #                      a shape check documenting `<table>-<uuid>` while accepting
 #                      `<table>-*`). Runs both directions: the surface must pass, an
 #                      injected unenforced claim must FAIL.
+#                      Also runs (no python3/sudo/perf needed) the PAIR
+#                      scripts/tests/test_perf_capability.sh (the helper's unit
+#                      contract) and scripts/tests/test_perf_capability_bootstrap.sh
+#                      (the bootstrap section end-to-end), sharing
+#                      scripts/tests/lib/perf-capability-test-lib.sh (#3249) — they pin
+#                      the perf profiling capability path: scripts/perf-capability.sh
+#                      (free /proc token, canonical /etc/sysctl.d/99-cqlite-perf.conf
+#                      bytes, byte-exact idempotency compare, side-effect-free
+#                      sourcing, privilege-drop identity resolution) and bootstrap's
+#                      install + VERIFY section. Load-bearing arms: the FUNCTIONAL
+#                      check is HONOURED (a shimmed perf that EXITS 0 while reporting
+#                      0 / `<not supported>` must WARN, never "verified"), and NO path
+#                      reaches a capable/verified verdict from an UNVALIDATED input —
+#                      an unusable `id -u`, an inconsistent SUDO_USER, a missing test
+#                      sandbox and a non-canonical drop-in all fail closed. Hermetic —
+#                      test-only seams stand in for /proc and /etc/sysctl.d (and test
+#                      mode REFUSES to fall back to either production directory), every
+#                      privileged tool is a recording shim, asserted mutation-free.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -757,16 +775,92 @@ _mold_accel_token() {
   esac
 }
 
+# ---- perf profiling capability token (Linux only, issue #3249) --------------
+# Agent boxes ship with kernel.perf_event_paranoid = 4, which denies ALL
+# unprivileged perf use — a PERMISSION verdict that reads like a missing
+# CAPABILITY, and one that reverts on reboot when no /etc/sysctl.d drop-in exists.
+# Stamping it here makes "this box cannot be profiled" visible in every pasted
+# SUMMARY instead of being discovered at the start of a measurement cycle.
+#
+# HARD CONSTRAINT — and it is ENFORCED, not asserted in prose (issue #3249 review):
+# the emit-time perf path is the FREE /proc read from scripts/perf-capability.sh and
+# NOTHING else: no `perf stat` exec, no new binary dependency, no external process,
+# and no command substitution — a `$( )` is a forked subshell, so "no subprocess" that
+# is read back through `$( )` would be self-contradictory. That is why the functions
+# below take an <outvar> and assign into it instead of printing (and why the helper is
+# sourced ONCE, at script scope, rather than re-read on every summary). Case 9f-free
+# of scripts/tests/test_agent_gate_summary.sh kills any regression: it runs this exact
+# code with an EMPTY PATH and with xtrace subshell-depth counting. The functional
+# verification (which DOES exec perf) is bootstrap's job, not the gate's.
+#
+# NO MEMOIZATION of the state, deliberately: every emit runs inside a `$( )`, so an
+# assignment to a script-level cache would land in a subshell and be discarded — a
+# cache that looks real and never hits. Two `read`-builtin /proc reads cost nothing,
+# so the honest implementation is to just do them.
+#
+# Sourced HERE, at script scope: the helper is 300+ lines, and re-reading it on every
+# emit bought nothing (its functions are all a subshell inherits anyway). Sourcing it
+# is documented side-effect free — functions plus PERF_CAPABILITY_* constants only.
+_PERF_CAP_LOADED=0
+if [ -r "$REPO_ROOT/scripts/perf-capability.sh" ]; then
+  # shellcheck source=scripts/perf-capability.sh
+  if . "$REPO_ROOT/scripts/perf-capability.sh" 2>/dev/null; then _PERF_CAP_LOADED=1; fi
+fi
+
+# _AGENT_GATE_OS: the host OS, resolved ONCE per gate run. `uname` is an external
+# process, so the OS question cannot be asked inside the per-emit token path above;
+# asking it at script scope costs one fork per RUN instead of one per summary. The
+# AGENT_GATE_TEST_OS seam is honoured exactly as before (tests export it before the
+# gate starts, so call-time vs init-time resolution is equivalent).
+_AGENT_GATE_OS="${AGENT_GATE_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+
+# _perf_state_into <outvar>: the state token, assigned into <outvar>. Never left
+# empty — an empty token would emit a bare `perf=`, which no consumer can parse.
+_perf_state_into() {
+  local __ps_out="$1" __ps_v=""
+  if [ -n "${AGENT_GATE_TEST_PERF_STATE:-}" ]; then
+    __ps_v="$AGENT_GATE_TEST_PERF_STATE"
+  elif [ "${_PERF_CAP_LOADED:-0}" = 1 ]; then
+    perf_capability_token_into __ps_v
+  fi
+  [ -n "$__ps_v" ] || __ps_v=unknown
+  eval "$__ps_out=\$__ps_v"
+}
+
+# _perf_accel_token_into <outvar>: the ` perf=<state>` suffix on Linux hosts, empty
+# elsewhere — the controls are Linux kernel knobs, so Darwin output stays
+# byte-identical (same contract as _mold_accel_token above).
+_perf_accel_token_into() {
+  local __pat_out="$1" __pat_state=""
+  case "${_AGENT_GATE_OS:-unknown}" in
+    Linux|linux)
+      _perf_state_into __pat_state
+      eval "$__pat_out=\" perf=\$__pat_state\"" ;;
+    *) eval "$__pat_out=" ;;
+  esac
+}
+
+# stdout forms, for debugging/ad-hoc use only — NOT the emit path (reading them costs
+# the caller the very `$( )` the `_into` forms exist to avoid).
+_perf_state()       { local v; _perf_state_into v; printf '%s' "$v"; }
+_perf_accel_token() { local v; _perf_accel_token_into v; printf '%s' "$v"; }
+
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
 # See the ACCEL_* detection above (#1848). The trailing sccache-health token
 # (na|ok|warn, issue #2641) surfaces sccache's own corruption counters. On Linux
 # a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
-# #2859); Darwin output is unchanged.
+# #2859), then ` perf=ok|paranoid-<N>|kptr-restricted|absent|unknown` (issue
+# #3249); Darwin output is unchanged.
+# The perf token is fetched through a VARIABLE, not a `$( )`: its path is
+# contractually free of forks (see above), and reading it back through a command
+# substitution here would reintroduce exactly the subshell that contract excludes.
 accelerators_line() {
-  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s' \
+  local perf_tok=""
+  _perf_accel_token_into perf_tok
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
-    "$(_sccache_health)" "$(_mold_accel_token)"
+    "$(_sccache_health)" "$(_mold_accel_token)" "$perf_tok"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------
@@ -5815,13 +5909,15 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_perf_capability.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_perf_capability_bootstrap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/flow/tests/claim-resume.test.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&

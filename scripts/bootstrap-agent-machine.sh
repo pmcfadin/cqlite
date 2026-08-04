@@ -16,6 +16,20 @@
 #      / "ACCEL_LANES" / "mold link-accelerator") so the two can never disagree
 #      about whether an accelerator is present. The final health check below
 #      re-reads the state straight from the gate to reconcile.
+#      2c's functional check additionally reports WHOSE capability it measured: root
+#      BYPASSES perf_event_paranoid, so under `sudo bootstrap` the probe drops privilege
+#      (setpriv/runuser/sudo -u) and, where it cannot, says the result is not evidence
+#      about an unprivileged agent process. "VERIFIED" needs BOTH /proc=ok and that pass.
+#   2c. Perf profiling capability (issue #3249, LINUX only): the reboot-surviving
+#      /etc/sysctl.d/99-cqlite-perf.conf drop-in (kernel.perf_event_paranoid = -1,
+#      kernel.kptr_restrict = 0), applied now, READ BACK out of /proc — a `sysctl`
+#      write's return code proves nothing — and then FUNCTIONALLY verified by running
+#      the collection the measurement doctrine mandates (`perf stat -C 0 -e cycles`),
+#      requiring exit 0 AND a non-zero cycle count. Images ship paranoid=4, which
+#      denies ALL unprivileged perf use: a PERMISSION verdict whose "access limited"
+#      help text reads like a missing CAPABILITY. Advisory like mold — no sudo, no
+#      perf, or an absent /proc control degrades to a `[warn]` plus the exact
+#      write-AND-apply remedy line, and the run still exits 0.
 #   3. gh auth + BOARD ACCESS (Path A board dispatch, #1886). The verdict comes
 #      from a READ-ONLY functional probe of the board, never from the `project`
 #      scope string (issue #2942): a token can carry `project` and still fail
@@ -55,7 +69,10 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     -h|--help)
-      sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      # Print the whole leading comment block, bounded by the FIRST `set -` line
+      # rather than a hardcoded line number: a fixed `2,45p` silently truncates the
+      # help the moment the header grows (it already omitted the perf section).
+      awk 'NR == 1 { next } /^set -/ { exit } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
       exit 0 ;;
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -361,6 +378,391 @@ if [ "$PLATFORM" = linux ]; then
       info "linker config is written only after mold is installed AND a link probe passes — re-run bootstrap once mold is on PATH"
     fi
   fi
+fi
+
+# ---- 2c. Perf profiling capability (issue #3249) ----------------------------
+# Agent/worker images ship with kernel.perf_event_paranoid = 4 and set it NOWHERE
+# in /etc/sysctl.conf or /etc/sysctl.d, so every profiling run starts from a hard
+# EACCES whose help text ("access limited") reads like a CAPABILITY verdict when it
+# is a PERMISSION verdict — two measurement cycles were lost to that. A box left
+# permissive by a hand-probe is no better: with no drop-in, it reverts on
+# reboot/reprovision, i.e. the fleet is profileable only by accident.
+#
+# Posture mirrors mold above: PROBE FIRST, write only what is needed, and never
+# fail the run — a box without sudo or without perf degrades to a warn plus the
+# exact remedy line. What is NOT advisory is the VERDICT: a bootstrap that
+# silently leaves a box unprofileable is the failure mode being fixed, so the
+# section ends with a FUNCTIONAL `perf stat -C 0` verification (AC2), never with an
+# assumption that writing the file worked.
+hdr "Perf profiling capability (issue #3249)"
+PERF_CAP_LIB="$REPO_ROOT/scripts/perf-capability.sh"
+# INITIALISE BEFORE THE GUARDS, never after (issue #3249 review). The gate below is
+# read as `${PERF_SECTION_OK:-0}`, so an INHERITED `PERF_SECTION_OK=1` from the
+# ambient environment would carry a macOS host — or a checkout with no
+# scripts/perf-capability.sh — straight into the Linux-only implementation, calling
+# helper functions that were never sourced. Every variable this section reads is
+# initialised here, so no ambient export can steer any of it.
+PERF_SECTION_OK=0
+PERF_DROPIN=''
+PERF_DROPIN_OK=0
+PERF_TOKEN=''
+PERF_TOKEN_BEFORE=''
+if [ ! -r "$PERF_CAP_LIB" ]; then
+  warn "scripts/perf-capability.sh missing from this checkout — perf capability UNVERIFIED"
+elif [ "$PLATFORM" != linux ]; then
+  info "perf_event_paranoid/kptr_restrict are Linux kernel controls — nothing to configure on $PLATFORM"
+else
+  # shellcheck source=scripts/perf-capability.sh
+  . "$PERF_CAP_LIB"
+  # FAIL CLOSED on a misused test seam BEFORE anything privileged happens: this
+  # section pipes the drop-in through `sudo tee <path>`, so a stray
+  # CQLITE_PERF_SYSCTL_DIR / CQLITE_PERF_PROC_DIR export must never steer that write
+  # or fabricate a /proc verdict. The seams are inert without
+  # CQLITE_PERF_TEST_MODE=1, and the marker itself forbids a reachable real
+  # sudo/sysctl (see scripts/perf-capability.sh).
+  if ! perf_capability_env_guard; then
+    warn "perf capability SKIPPED — the test-only env seams are misconfigured (a seam set without CQLITE_PERF_TEST_MODE=1; or test mode WITHOUT both non-production path seams, which has no production fallback; or test mode with a reachable real sudo/sysctl — details on stderr) — refusing to run a privileged write against an env-chosen path"
+    PERF_SECTION_OK=0
+  else
+    PERF_SECTION_OK=1
+  fi
+fi
+if [ "$PERF_SECTION_OK" = 1 ]; then
+  PERF_DROPIN=$(perf_capability_dropin_path)
+
+  # perf_apply_now: run (under --yes) or PRINT (check mode) `sysctl -q --system`,
+  # recording THREE INDEPENDENT FACTS instead of collapsing them into one rc:
+  #   PERF_APPLY_RAN  1 iff the command actually executed (0 = check mode printed it)
+  #   PERF_APPLY_RC   that command's exit status when it ran ('' otherwise)
+  # and, separately, the /proc read-back the caller performs afterwards.
+  #
+  # WHY THE SPLIT (issue #3249 review). `sysctl --system` applies EVERY drop-in on the
+  # box, so it can apply OURS perfectly and still exit non-zero because an unrelated
+  # pre-existing entry failed (a stale /etc/sysctl.conf line, a foreign drop-in naming
+  # a knob this kernel lacks). Gating the read-back on its rc therefore left the token
+  # STALE and printed "nothing was applied" on a box that had just become profileable —
+  # a FALSE verdict, and the verdict is the whole point of AC2. "The apply command
+  # failed" and "the controls are not in effect" are independent facts and are reported
+  # as such: the read-back happens after EVERY attempt, whatever the rc.
+  PERF_APPLY_RAN=0
+  PERF_APPLY_RC=''
+  perf_apply_now() {
+    PERF_APPLY_RAN=0
+    PERF_APPLY_RC=''
+    local -a cmd=(${PERF_ROOT[@]+"${PERF_ROOT[@]}"} sysctl -q --system)
+    if [ "$AUTO_YES" != 1 ]; then
+      info "apply the drop-in now:  ${cmd[*]}"
+      return 0
+    fi
+    info "apply the drop-in now: ${cmd[*]}"
+    PERF_APPLY_RAN=1
+    "${cmd[@]}"
+    PERF_APPLY_RC=$?
+    return 0
+  }
+
+  # Privilege is OPTIONAL: probe it non-interactively (`sudo -n`) so bootstrap can
+  # never block on a password prompt on an unattended worker.
+  # Every privileged call below goes through PERF_ROOT (an ARRAY: empty when we are
+  # already root) and always carries `-n`, so no code path can ever sit on a
+  # password prompt.
+  #
+  # `sudo -n` failing is TWO different boxes and they need DIFFERENT remedies: no
+  # sudo binary at all (a printed `sudo tee` line is useless there — the fix is a
+  # root shell or the image owner) versus a sudo that needs a password (the same line
+  # works, just interactively). PERF_PRIV_STATE distinguishes them.
+  #
+  # The root test goes through perf_capability_self_uid_into, which reports rc 1 for an
+  # UNKNOWN identity instead of substituting a plausible uid (issue #3249 review R4-1):
+  # `$(id -u || echo 1000)` invented an unprivileged answer whenever `id` was missing or
+  # broken. Here an unknown identity simply is not root, so the `sudo -n` probe below
+  # decides — the fail-closed direction (no privilege claimed, nothing written unless
+  # sudo actually works).
+  PERF_ROOT=()
+  PERF_PRIV=0
+  PERF_PRIV_STATE=unknown
+  PERF_SELF_UID=''
+  if perf_capability_self_uid_into PERF_SELF_UID && [ "$PERF_SELF_UID" = 0 ]; then
+    PERF_PRIV=1; PERF_PRIV_STATE=root
+  elif ! have sudo; then
+    PERF_PRIV_STATE=no-sudo-binary
+  elif bounded 10 sudo -n true >/dev/null 2>&1; then
+    PERF_PRIV=1; PERF_ROOT=(sudo -n); PERF_PRIV_STATE=sudo-nopasswd
+  else
+    PERF_PRIV_STATE=sudo-needs-password
+  fi
+  # Prefix for PRINTED remedy lines: empty when we are already root (a printed
+  # `sudo` would be wrong there, and on many root images sudo is not even
+  # installed), plain `sudo` (never `-n`) otherwise, since a human running the line
+  # by hand may legitimately be prompted.
+  PERF_RUN_AS=""
+  [ "$PERF_PRIV_STATE" = root ] || PERF_RUN_AS="sudo "
+
+  # perf_remedy_line: the COMPLETE write-AND-APPLY remedy. Write-only was the bug —
+  # an operator who pasted it had a reboot-persistent file and an unprofileable box
+  # until the next reboot, which is precisely what the functional verification exists
+  # to prevent, on the path most people take (no --yes).
+  perf_remedy_line() {
+    if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
+      info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/perf-capability.sh --drop-in > $PERF_DROPIN && sysctl -q --system"
+      info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
+    else
+      info "write + apply the drop-in:  bash scripts/perf-capability.sh --drop-in | ${PERF_RUN_AS}tee $PERF_DROPIN >/dev/null && ${PERF_RUN_AS}sysctl -q --system"
+    fi
+  }
+
+  # perf_apply_remedy_line: the APPLY-ONLY remedy, for the box whose drop-in is ALREADY
+  # current — re-writing the file is not the fix there, applying it is. Same no-sudo /
+  # needs-a-password / already-root split as perf_remedy_line above, because a printed
+  # `sudo` is un-runnable on a box with no sudo binary and wrong on a root box.
+  perf_apply_remedy_line() {
+    if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
+      info "no 'sudo' on this box — apply it from a ROOT shell:  sysctl -q --system"
+      info "(or ask the image/host owner; the drop-in is already on disk, so this is the only step left)"
+    else
+      info "apply the drop-in now:  ${PERF_RUN_AS}sysctl -q --system"
+    fi
+  }
+
+  # perf_diagnose_token <token>: translate a non-ok token into the ACTIONABLE
+  # sentence. Shared by both non-ok paths below, so the diagnosis can never be
+  # reachable from one and silently missing from the other.
+  perf_diagnose_token() {
+    case "$1" in
+      paranoid-*) info "perf_event_paranoid >= 1 forbids CPU-WIDE events, so 'perf stat -C <cpu>' is DENIED — this is a PERMISSION verdict, not a missing capability" ;;
+      kptr-restricted) info "kptr_restrict != 0 — kernel frames resolve to bare addresses (a SILENT attribution loss, not an error)" ;;
+      absent) info "/proc/sys/kernel/{perf_event_paranoid,kptr_restrict} not present — a container without a writable procfs cannot be tuned from here; tune the HOST" ;;
+      unknown) info "the /proc controls are present but unparseable — never guessed; inspect them by hand" ;;
+    esac
+    case "$1" in paranoid-*|kptr-restricted) perf_name_competitors ;; esac
+  }
+
+  # perf_name_competitors: NAME THE FILE THAT IS FIGHTING US, rather than reporting only
+  # that the value did not take. Stock Ubuntu ships
+  # /etc/sysctl.d/10-kernel-hardening.conf with `kernel.kptr_restrict = 1`, and that is
+  # the concrete mechanism behind the "it silently reverts" note in three separate
+  # measurement reports (ws0-3217, ws3-3029, the 2026-07-27 Cassandra baseline) — none of
+  # which identified a cause. A named file is actionable; "it reverts" is not.
+  #
+  # A competitor that sorts AFTER our 99- drop-in is an ACTUAL override (sysctl.d is
+  # applied in basename order, last assignment wins) and is reported as such; one that
+  # sorts before is reported as harmless, which also documents WHY the 99- prefix is
+  # load-bearing and must never be "tidied" to a lower number.
+  #
+  # THE SCAN COVERS THE WHOLE `sysctl --system` SEARCH PATH (issue #3249 review R5-4) —
+  # /etc/sysctl.d, /run/sysctl.d, /usr/local/lib/sysctl.d, /usr/lib/sysctl.d,
+  # /lib/sysctl.d and /etc/sysctl.conf — with same-basename masking honoured, because a
+  # later-sorting file in /run or /usr/lib overriding us while this reported "no
+  # competitor" is the same silent-revert mystery wearing a different directory.
+  perf_name_competitors() {
+    local scan verdict path found=0
+    # A FAILED scan is reported as a failed scan, never as "no competitors" — the whole
+    # point of this diagnostic is to replace an unknown with a named file, so silently
+    # printing the reassuring line on an unreadable directory would recreate the mystery.
+    if ! scan=$(perf_capability_competing_files); then
+      info "could not scan the 'sysctl --system' search path for competing perf_event_paranoid/kptr_restrict settings — inspect it by hand"
+      return 0
+    fi
+    while IFS=' ' read -r verdict path; do
+      [ -n "$path" ] || continue
+      found=1
+      case "$verdict" in
+        override) warn "OVERRIDE: $path also sets perf_event_paranoid/kptr_restrict and its name sorts AFTER $PERF_CAPABILITY_DROPIN_BASENAME, so it is applied LAST and WINS — fix or rename that file" ;;
+        last)     warn "OVERRIDE: $path also sets perf_event_paranoid/kptr_restrict and is applied AFTER every sysctl.d drop-in (both by 'sysctl --system' and systemd-sysctl), so it WINS regardless of our filename — fix that file" ;;
+        *)        info "competing file: $path also sets perf_event_paranoid/kptr_restrict but sorts BEFORE $PERF_CAPABILITY_DROPIN_BASENAME, so ours wins (this is exactly why the '99-' prefix is load-bearing — never rename the drop-in)" ;;
+      esac
+    done <<EOF
+$scan
+EOF
+    [ "$found" = 1 ] || info "no other file on the 'sysctl --system' search path (/etc/sysctl.d, /run/sysctl.d, /usr/local/lib/sysctl.d, /usr/lib/sysctl.d, /lib/sysctl.d, /etc/sysctl.conf) sets perf_event_paranoid/kptr_restrict"
+  }
+
+  # perf_inspect_lines: where a value that did not take actually comes from.
+  # /etc/sysctl.conf is applied AFTER every sysctl.d drop-in by both
+  # `sysctl --system` and systemd-sysctl, so a stale entry there BEATS our 99- file —
+  # listing only /etc/sysctl.d would hide the most likely culprit.
+  perf_inspect_lines() {
+    info "inspect:  sysctl -a --pattern 'perf_event_paranoid|kptr_restrict'; grep -Hn 'perf_event_paranoid\|kptr_restrict' /etc/sysctl.conf /etc/sysctl.d/*.conf /run/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf /lib/sysctl.d/*.conf"
+    info "precedence: /etc/sysctl.conf is applied AFTER the sysctl.d drop-ins (both by 'sysctl --system' and systemd-sysctl), so a stale entry THERE overrides our 99- file"
+  }
+
+  PERF_TOKEN_BEFORE=$(perf_capability_token)
+  info "runtime now: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid || echo '<unreadable>') kptr_restrict=$(perf_capability_proc_value kptr_restrict || echo '<unreadable>')  (gate stamps perf=$PERF_TOKEN_BEFORE)"
+
+  # ---- 1. the reboot-surviving drop-in (AC1), applied idempotently ----
+  if perf_capability_dropin_current; then
+    ok "drop-in already current: $PERF_DROPIN (survives reboot) — wrote nothing"
+    PERF_DROPIN_OK=1
+  elif [ "$PERF_PRIV" = 0 ]; then
+    PERF_DROPIN_OK=0
+    if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
+      warn "no 'sudo' binary on this box — cannot install $PERF_DROPIN; it reverts to perf_event_paranoid=4 on reboot"
+    else
+      warn "sudo needs a password (sudo -n failed) and bootstrap never prompts — cannot install $PERF_DROPIN unattended; it reverts to perf_event_paranoid=4 on reboot"
+    fi
+    perf_remedy_line
+  else
+    PERF_DROPIN_OK=0
+    if [ "$AUTO_YES" = 1 ]; then
+      info "writing perf sysctl drop-in: $PERF_DROPIN"
+      if perf_capability_dropin_content | ${PERF_ROOT[@]+"${PERF_ROOT[@]}"} tee "$PERF_DROPIN" >/dev/null 2>&1 \
+         && perf_capability_dropin_current; then
+        ok "wrote $PERF_DROPIN (kernel.perf_event_paranoid = -1, kernel.kptr_restrict = 0)"
+        PERF_DROPIN_OK=1
+      else
+        warn "could NOT write $PERF_DROPIN"
+        perf_remedy_line
+      fi
+    else
+      perf_remedy_line
+      info "(re-run with --yes to write AND apply it automatically)"
+    fi
+  fi
+
+  # ---- 2. apply now + READ BACK from /proc (never trust the write's rc) ----
+  # A `sysctl -w`/`--system` can report success while the value does not take
+  # (container, read-only /proc, a later-sorting drop-in overriding ours), so the
+  # verdict is always the value read back out of /proc/sys/kernel.
+  PERF_TOKEN=$(perf_capability_token)
+  if [ "$PERF_TOKEN" = ok ]; then
+    ok "kernel controls verified from /proc: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid) kptr_restrict=$(perf_capability_proc_value kptr_restrict)"
+  elif [ "$PERF_DROPIN_OK" = 1 ] && [ "$PERF_PRIV" = 1 ]; then
+    perf_apply_now
+    # READ BACK after EVERY attempt, regardless of the command's exit status: the rc
+    # says something about `sysctl --system`, the /proc read says something about THIS
+    # BOX, and only the latter is the capability verdict.
+    if [ "$PERF_APPLY_RAN" = 1 ]; then
+      PERF_TOKEN=$(perf_capability_token)
+      # FACT 1, reported on its own line and never mixed with the verdict: the command
+      # itself failed. It applies every drop-in on the box, so this may be an unrelated
+      # entry — it does NOT mean our controls are unset (the read-back below answers
+      # that, and the two lines are allowed to disagree).
+      if [ "${PERF_APPLY_RC:-0}" != 0 ]; then
+        warn "'sysctl -q --system' exited $PERF_APPLY_RC — it applies EVERY sysctl drop-in on this box, so an UNRELATED pre-existing entry may be the failure; the perf verdict below comes from /proc, not from this exit code"
+        perf_inspect_lines
+      fi
+    fi
+    # FACT 2, independent of FACT 1: what /proc reports now.
+    if [ "$PERF_TOKEN" = ok ]; then
+      ok "kernel controls READ BACK from /proc as profileable: perf_event_paranoid=$(perf_capability_proc_value perf_event_paranoid) kptr_restrict=$(perf_capability_proc_value kptr_restrict)"
+    elif [ "$PERF_APPLY_RAN" = 1 ] && [ "${PERF_APPLY_RC:-0}" = 0 ]; then
+      # The apply RAN and reported success, and /proc still disagrees — the silent
+      # revert this whole section exists to catch.
+      warn "sysctl --system reported success but /proc still reports perf=$PERF_TOKEN — the value did NOT take (container, read-only /proc, or a later-sorting drop-in / /etc/sysctl.conf overrides ours)"
+      perf_diagnose_token "$PERF_TOKEN"
+      perf_inspect_lines
+    elif [ "$PERF_APPLY_RAN" = 1 ]; then
+      # The command failed AND the controls are not in effect. Both facts are already
+      # on the record; state only the second one here, with no claim about which
+      # drop-in failed.
+      warn "/proc still reports perf=$PERF_TOKEN after the apply — the controls are NOT in effect (and the apply command itself exited $PERF_APPLY_RC; see above)"
+      perf_diagnose_token "$PERF_TOKEN"
+    else
+      # The apply did NOT run: check mode printed the line. Never claim it was applied.
+      # Without this branch a check-mode run with a current drop-in and a non-ok
+      # runtime printed NO warn at all and never counted a WARNING.
+      warn "kernel controls NOT in the profileable state (gate stamps perf=$PERF_TOKEN) — the drop-in is on disk but has NOT been applied to the running kernel"
+      info "apply it now (or re-run with --yes):  ${PERF_RUN_AS}sysctl -q --system"
+      perf_diagnose_token "$PERF_TOKEN"
+    fi
+  else
+    warn "kernel controls NOT in the profileable state (gate stamps perf=$PERF_TOKEN)"
+    perf_diagnose_token "$PERF_TOKEN"
+    # The drop-in is already on disk (so there is nothing to WRITE) but we have no
+    # non-interactive privilege to apply it. Without this the branch diagnosed the
+    # state and offered NO remedy at all, contradicting every other unprivileged path
+    # in this section — the no-sudo / needs-a-password boxes are exactly the ones that
+    # need a runnable command printed.
+    if [ "$PERF_DROPIN_OK" = 1 ]; then
+      info "the drop-in is on disk but has NOT been applied to the running kernel, and bootstrap has no non-interactive privilege to apply it"
+      perf_apply_remedy_line
+    fi
+  fi
+
+  # ---- 3. FUNCTIONAL verification (AC2), attributed to the RIGHT IDENTITY -------
+  # Two rules, and together they make a FALSE "VERIFIED" unreachable (issue #3249
+  # review):
+  #
+  # (a) OVERALL verification requires BOTH facts: the /proc token = ok AND a
+  #     functional pass. Reporting the functional result alone as the verdict let a
+  #     box whose /proc says `paranoid-2`/`kptr-restricted` print its diagnosis AND
+  #     "VERIFIED" in the same run — contradictory output in which the reassuring line
+  #     wins the reader's attention. Anything short of both facts is reported as
+  #     PARTIAL DIAGNOSTIC INFORMATION, explicitly subordinate to the /proc verdict.
+  #
+  # (b) THE PRIVILEGE DIMENSION. perf_event_paranoid restricts UNPRIVILEGED users and
+  #     ROOT BYPASSES IT. `sudo bash scripts/bootstrap-agent-machine.sh` is a normal
+  #     invocation — arguably the most likely one, since this section needs root to
+  #     write /etc/sysctl.d — and as root `perf stat -C 0 -e cycles` SUCCEEDS on a
+  #     paranoid=4 box where every unprivileged agent process still gets EACCES. So a
+  #     root-run probe cannot demonstrate the property we care about ("an UNPRIVILEGED
+  #     process can collect CPU-wide cycles"). CHOSEN FIX: DROP PRIVILEGE for the
+  #     probe when a mechanism exists (setpriv/runuser/`sudo -u`, targeting SUDO_UID
+  #     — the account that invoked sudo — else `nobody`), because that measures the
+  #     real property; and when no mechanism exists, label the root result as NOT
+  #     evidence of unprivileged capability and let the identity-independent /proc
+  #     token be the authority. Never imply the stronger claim.
+  PERF_FUNC=untested            # untested | pass | fail
+  PERF_VERIFY_OUT=''
+  PERF_DROP_PREFIX=''
+  PERF_DROP_STATE=''
+  PERF_UNPRIV_EVIDENCE=0        # 1 iff the probe measured an UNPRIVILEGED process
+  if ! have perf; then
+    warn "perf MISSING — profiling capability UNVERIFIED on this machine"
+    if have apt-get; then
+      info "install perf:  ${PERF_RUN_AS}apt-get install -y linux-tools-common linux-tools-\$(uname -r)"
+    else
+      info "install perf via your distro's linux-tools/perf package"
+    fi
+  else
+    if perf_capability_drop_prefix_into PERF_DROP_PREFIX PERF_DROP_STATE; then
+      PERF_UNPRIV_EVIDENCE=1
+    fi
+    if [ -n "$PERF_DROP_PREFIX" ]; then
+      info "this run is ROOT and root BYPASSES perf_event_paranoid, so the probe DROPS PRIVILEGE ($PERF_DROP_STATE) — otherwise it would measure root's capability, not an agent's"
+    fi
+    # shellcheck disable=SC2086  # deliberate split of our own literal prefix tokens
+    if PERF_VERIFY_OUT=$(perf_capability_verify $PERF_DROP_PREFIX); then
+      PERF_FUNC=pass
+    else
+      PERF_FUNC=fail
+    fi
+  fi
+  if [ "$PERF_FUNC" = pass ] && [ "$PERF_TOKEN" = ok ] && [ "$PERF_UNPRIV_EVIDENCE" = 1 ]; then
+    ok "perf capability VERIFIED — /proc reports perf=ok and an UNPRIVILEGED perf stat -C 0 -e cycles reports $PERF_VERIFY_OUT"
+  elif [ "$PERF_FUNC" = pass ]; then
+    # A functional PASS that is NOT a verification: either /proc disagrees, or the
+    # probe could not be attributed to an unprivileged identity. Reported as partial
+    # information and never as a verdict — no run may print a non-ok token diagnosis
+    # and an unqualified "VERIFIED" together.
+    warn "perf capability NOT verified — the 'perf stat -C 0 -e cycles' probe succeeded ($PERF_VERIFY_OUT), but that is PARTIAL DIAGNOSTIC INFORMATION only, subordinate to the /proc verdict (gate stamps perf=$PERF_TOKEN)"
+    if [ "$PERF_TOKEN" != ok ]; then
+      info "/proc is the AUTHORITY here: perf=$PERF_TOKEN, so an unprivileged agent process is still restricted whatever this probe reported"
+      perf_diagnose_token "$PERF_TOKEN"
+    fi
+    if [ "$PERF_UNPRIV_EVIDENCE" = 0 ]; then
+      # `identity-unknown` is its own sentence: with `id -u` unusable we do NOT know the
+      # probe ran as root, and asserting it would be as unfounded as asserting it did
+      # not (issue #3249 review R4-1). Report the unknown as an unknown.
+      if [ "$PERF_DROP_STATE" = identity-unknown ]; then
+        info "the identity of this process could NOT be determined ('id -u' unusable), so the probe's success is NOT attributable to an unprivileged process — no capability claim is made from it"
+        info "install/repair coreutils so 'id -u' works, then re-run; or prove it as the agent account:  sudo -u <agent-user> perf stat -C 0 -e cycles -- sleep 0.1"
+      else
+        info "the probe ran AS ROOT ($PERF_DROP_STATE) and root BYPASSES perf_event_paranoid — its success is NOT evidence that an UNPRIVILEGED process can profile this box"
+        info "prove it as the agent account:  sudo -u <agent-user> perf stat -C 0 -e cycles -- sleep 0.1   (or install util-linux so bootstrap can drop privilege itself via setpriv)"
+      fi
+    fi
+  elif [ "$PERF_FUNC" = fail ]; then
+    warn "perf capability NOT verified — perf stat -C 0 -e cycles: $PERF_VERIFY_OUT"
+    info "an rc-0 perf stat with a zero/<not supported> counter is NOT a working setup — a virtualised or masked PMU counts nothing"
+    if [ -n "$PERF_DROP_PREFIX" ]; then
+      info "the probe ran with privilege DROPPED ($PERF_DROP_STATE), so this failure may be the drop mechanism rather than perf itself — reproduce exactly:  $PERF_DROP_PREFIX perf stat -C 0 -e cycles -- sleep 0.1"
+    else
+      info "reproduce by hand:  perf stat -C 0 -e cycles -- sleep 0.1"
+    fi
+  fi
+  info "note: BPF collectors (bpftrace/bcc) still require sudo — a permissive perf_event_paranoid does NOT grant BPF map creation (#3217)"
+  info "posture: this loosening is for DEDICATED SINGLE-TENANT measurement/agent boxes; never apply it to a shared or multi-tenant host"
 fi
 
 # ---- 3. GitHub board access + project scope (Path A, #1886; #2942) ----
