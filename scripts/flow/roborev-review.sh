@@ -1094,6 +1094,44 @@ for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$CENSUS_EXCLUSION" "
       ;;
   esac
 done
+# ====== AND A PASS NEEDS EVERY DETERMINISTIC KEY TO HAVE AFFIRMATIVELY PASSED ======
+# The grammar check above closes "an unplanned value inherits the non-failing branch". This
+# closes the neighbouring case: a value that is IN the grammar and non-failing, but is not a
+# measurement — `SKIP`, i.e. "this check never ran". The seven keys below are the ones that
+# CARRY the verdict (each judged against data the wrapper obtained itself), and on a PASS every
+# one of them must be an affirmative `PASS`; `census-exclusion:` may additionally be `NOTICE`,
+# which is a measurement WITH a stated, remedy-less residual (a pinned built-in swallow).
+# `vacuity-tier1/2` and `findings:` are deliberately EXCLUDED: they CORROBORATE, and
+# `UNAVAILABLE` / `NONE` are documented, legitimate values for them on a clean run.
+#
+# WHY IT IS NOT REDUNDANT with the checks-file validation: that validation proves the five
+# functions EXIST, not that each reached its assignment. A check that returned early — an
+# aborted helper, a `return` added inside a new branch, a sourced file that defines a function
+# whose body changed — leaves its key at the initial `SKIP` and, before this, the run PASSED
+# with a key that had measured nothing. "PASS requires POSITIVE evidence" is the wrapper's
+# stated contract (see EXIT CODES above); this is the contract enforced rather than intended.
+#
+# Evaluated ONLY when the run would otherwise PASS, deliberately: on an already-failing run
+# every non-affirmative key has its own diagnostic under its own name, and repeating them here
+# would bury the actionable cause under a structural one.
+if [ "$failed" -eq 0 ]; then
+  not_affirmed=""
+  for keyed in "push-assert=$PUSH_ASSERT" "census-check=$CENSUS_CHECK" "code-free=$CODE_FREE" \
+    "census-exclusion=$CENSUS_EXCLUSION" "sha-assert=$SHA_ASSERT" \
+    "review-completed=$REVIEW_COMPLETED" "prompt-content=$PROMPT_CONTENT"; do
+    det_key="${keyed%%=*}"
+    det_value="${keyed#*=}"
+    case "$det_value" in
+      PASS*) continue ;;
+      NOTICE*) [ "$det_key" != census-exclusion ] || continue ;;
+    esac
+    not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
+  done
+  if [ -n "$not_affirmed" ]; then
+    failed=1
+    DETAILS+=("ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — $not_affirmed. A PASS must rest on POSITIVE evidence from every deterministic check (push-assert, census-check, code-free, census-exclusion, sha-assert, review-completed, prompt-content); a non-failing value that is not a measurement — 'SKIP' above all, which means the check NEVER RAN — is exactly the vacuous pass this wrapper exists to prevent, and it is textually indistinguishable from a genuine one. Failing closed. This is a structural backstop, so its cause is a defect in the wrapper or its sourced files (a check that returned before assigning its key), NOT something to fix in the branch under review.")
+  fi
+fi
 if [ -n "$unrecognised" ]; then
   DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper) or introduced a state this scan has never judged — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
 fi

@@ -2690,6 +2690,42 @@ if sed -i 's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' \
 else
   bad 'case (cx28): could not patch the copied checks file, so the unrecognised-verdict path was never exercised (a green run here would be a probe failing in the direction that looks like success)'
 fi
+
+printf '== case (cx29): a check that never ran cannot ride to PASS on its initial SKIP ==\n'
+# The neighbouring hazard to cx28: a value that IS in the grammar and IS non-failing, but is
+# not a MEASUREMENT. The wrapper validates that the checks file DEFINES its five functions —
+# which proves they exist, not that each reached its assignment. A check that returns early
+# leaves its key at the initial `SKIP`, and before the round-10 backstop the run PASSED with a
+# verdict-carrying key that had measured nothing: the vacuous pass this wrapper exists to
+# prevent, textually identical to a genuine one.
+#
+# The patch makes `roborev_check_prompt_content` — the STRONGEST anti-vacuity key — return
+# before assigning anything, which is exactly what an aborted helper or a stray `return` in a
+# new branch looks like. cx28's control (the unpatched copy PASSes on this fixture) is the
+# both-directions control for this case too; the patch is verified applied before it is run.
+sed -i 's/^roborev_check_prompt_content() {$/roborev_check_prompt_content() {\n  return 0/' \
+  "$_gm_dir/roborev-review-checks.sh"
+# VERIFIED, not assumed: the `return 0` must be the line IMMEDIATELY AFTER the function
+# header. A sed that matched nothing leaves a copy identical to the control, and this case
+# would then be asserting against an unpatched wrapper — a probe failing in the
+# direction that looks like success.
+_gm_patched=$(grep -A1 '^roborev_check_prompt_content() {$' "$_gm_dir/roborev-review-checks.sh" \
+  | sed -n '2p')
+if [ "$_gm_patched" = '  return 0' ]; then
+  # Undo cx28's patch so the ONLY grammar-relevant difference is the un-run check.
+  sed -i 's/^    TIER1="MEASUREMENT-DID-NOT-HAPPEN"$/    TIER1="PASS"/' \
+    "$_gm_dir/roborev-review-checks.sh"
+  ok 'case (cx29): the early-return patch was really applied to the copy'
+  run_wrapper "$work"
+  assert_verdict 'case (cx29)' FAIL 1
+  assert_says 'case (cx29) the un-run key is named as never having affirmatively passed' "^ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — prompt-content: 'SKIP'\. "
+  assert_says 'case (cx29) it states that a non-measurement is the vacuous pass itself' 'a non-failing value that is not a measurement'
+  assert_says 'case (cx29) it points the reader at the wrapper, not the branch under review' 'NOT something to fix in the branch under review'
+  assert_says 'case (cx29) the un-run key is visible in the block' '^prompt-content: SKIP$'
+  assert_lacks 'case (cx29) and the grammar check does not misreport it as unrecognised' 'verdict-grammar'
+else
+  bad 'case (cx29): could not patch the copied checks file for an early return, so the never-ran-check path was never exercised'
+fi
 WRAPPER="$_gm_real_wrapper"
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
@@ -4111,6 +4147,26 @@ else
     ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
   else
     bad 'structural: the verdict scan positive arm does not fail closed — an unrecognised value would be accepted silently, which is the shape this sweep closed'
+  fi
+  # THE AFFIRMATION BACKSTOP: a PASS requires every VERDICT-CARRYING key to be affirmatively
+  # PASS (census-exclusion may also be NOTICE). Case (cx29) proves one un-run check is caught;
+  # this pins that the backstop exists and names all seven deterministic keys, so a key added
+  # to the block later is not silently exempt from it.
+  if grep -qE '^[[:space:]]*not_affirmed="\$\{not_affirmed' "$WRAPPER" &&
+    grep -qE '^[[:space:]]*PASS\*\) continue ;;' "$WRAPPER"; then
+    ok 'structural: a PASS requires each verdict-carrying key to be affirmatively PASS (the SKIP backstop)'
+    _aff_missing=""
+    for _aff_key in push-assert census-check code-free census-exclusion sha-assert \
+      review-completed prompt-content; do
+      grep -qE "\"$_aff_key=\\\$[A-Z_]+\"" "$WRAPPER" || _aff_missing="$_aff_missing $_aff_key"
+    done
+    if [ -z "$_aff_missing" ]; then
+      ok 'structural: all seven deterministic keys are named in the affirmation backstop'
+    else
+      bad "structural: the affirmation backstop does not cover:$_aff_missing — those keys could ride to PASS on a non-measurement (SKIP)"
+    fi
+  else
+    bad 'structural: the affirmation backstop is gone — a verdict-carrying key left at its initial SKIP (a check that never ran) would reach finish PASS, which is the vacuous pass this wrapper exists to prevent (#3229 round-10)'
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this
   # block is written by someone reading the doc block, not the scan.
