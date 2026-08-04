@@ -1,0 +1,70 @@
+== #3224 primary-source verification of the load-bearing counter semantics ==
+
+WHY THIS FILE EXISTS. This diff lives entirely under docs/, so the repo's
+.roborev.toml (exclude_patterns = ['docs/**', '*.md']) makes it CODE-FREE to
+roborev, which therefore CANNOT certify it (#3229 / PR #3262 narrows that
+exclusion so executables under docs/ become reviewable; still open at the time
+of writing). CLAUDE.md's sanctioned substitute for a code-free diff is
+PRIMARY-SOURCE VERIFICATION recorded in the PR. For a measurement study the
+primary source for the central claim is the PMU event definition itself.
+
+Captured 2026-08-04T04:13:32Z with 'perf list --details' on the very host
+that produced the measurements.
+
+-- cycle_activity.stalls_l3_miss : THE AC4 attribution term --
+  cycle_activity.stalls_l3_miss
+       [Execution stalls while L3 cache miss demand load is outstanding. Unit:
+        cpu]
+        cpu/event=0xa3,cmask=0x6,period=0xf4243,umask=0x6/
+
+-- cycle_activity.stalls_l2_miss --
+  cycle_activity.stalls_l2_miss
+       [Execution stalls while L2 cache miss demand load is outstanding. Unit:
+        cpu]
+        cpu/event=0xa3,cmask=0x5,period=0xf4243,umask=0x5/
+
+-- cycle_activity.stalls_total --
+  cycle_activity.stalls_total
+       [Total execution stalls. Unit: cpu]
+        cpu/event=0xa3,cmask=0x4,period=0xf4243,umask=0x4/
+  exe_activity.1_ports_util
+
+-- l1d_pend_miss.pending / .pending_cycles : the MLP ratio --
+  l1d_pend_miss.pending
+       [Number of L1D misses that are outstanding. Unit: cpu]
+        cpu/event=0x48,period=0xf4243,umask=0x1/
+  l1d_pend_miss.pending_cycles
+  l1d_pend_miss.pending_cycles
+       [Cycles with L1D load Misses outstanding. Unit: cpu]
+        cpu/event=0x48,cmask=0x1,period=0xf4243,umask=0x1/
+  l2_lines_in.all
+
+WHAT THIS CONFIRMS -- and one SCOPE LIMIT it surfaces that the report now states:
+
+  1. CONFIRMED. stalls_l3_miss counts EXECUTION STALLS WHILE AN L3-MISS DEMAND
+     LOAD IS OUTSTANDING. That is precisely the quantity the classical
+     'delta(misses/row) x penalty' product is trying to estimate, so charging it
+     directly is sound; and it is inherently MLP-correct, because two
+     overlapping misses that stall the same cycle are ONE stalled cycle -- which
+     is what a cycles/row accounting must add up.
+
+  2. CONFIRMED. The three cycle_activity terms NEST (l3_miss subset of l2_miss
+     subset of total), which is what licenses the additive decomposition in
+     report section 5.3 as a PARTITION of the measured delta rather than an
+     estimate carrying a slack term.
+
+  3. SCOPE LIMIT (umask=0x6, the definition says 'demand load'). The term is
+     DEMAND-LOAD scoped. Stalls arising from PREFETCH traffic -- prefetches
+     saturating fill buffers or memory queues -- are NOT counted in it and fall
+     into 'other execution stalls'. This matters here specifically: on a
+     streaming scan the hardware prefetcher does most of the fetching (report
+     section 3.4 -- demand LLC-load-misses x 64 B accounts for only ~2.4 KB of
+     the ~22 KB of DRAM traffic per row), so the 67.76% figure is a DEMAND-LOAD
+     attribution and some part of the ~32% residual is plausibly prefetch-
+     related memory cost that this counter cannot see. The report says so
+     rather than letting 67.76% be read as 'all memory cost'.
+
+  4. CONFIRMED. MLP = pending / pending_cycles is the mean number of outstanding
+     L1D misses ACROSS CYCLES IN WHICH AT LEAST ONE IS OUTSTANDING (cmask=0x1 on
+     pending_cycles, per the definitions above), which is the correct divisor
+     for converting an unloaded serial-chase latency into a per-miss cost.

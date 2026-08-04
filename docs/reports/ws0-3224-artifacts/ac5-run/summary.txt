@@ -1,0 +1,42 @@
+== AC5 peak, pinned to 0-5,64-69 on node 0, threads=12, 4096 MiB, iters=10
+rc=0
+mode=stream
+threads=12
+array_bytes=4294967296
+elements=536870912
+iters=10
+init_s=4.3628
+best_iter_s=0.152656
+gbps_basis24=84.405
+gbps_basis32=112.540
+checksum=14.0
+init_overrun=0
+
+-- IMC cross-check of the triad's own DRAM traffic --
+   window (perf run_time)  : 12.256 s
+   S0: 24 instances, 16 non-zero, sum 189549.9 MiB (per-instance min 6799.9 max 16894.3)
+   S1: 24 instances, 16 non-zero, sum 365.9 MiB (per-instance min 20.3 max 26.7)
+   far-socket fraction     : 0.0019  (membind=node0 should keep this near 0)
+
+   -- byte accounting: is the per-instance sum right? --
+   elements 536870912, iters 10
+   expected steady traffic  : 171.8 GB (32 B/elem x elements x iters)
+   expected init traffic    : 25.8 GB (3 arrays written once, RFO+WB)
+   expected TOTAL           : 197.6 GB
+   IMC measured TOTAL       : 199.1 GB
+   ratio measured/expected  : 1.008
+   VERDICT: ~1x  -> the 8 non-zero instances per socket are DISTINCT
+            CHANNELS and summing them is CORRECT.
+
+   rates, for information only (NOT the verdict): the triad's own GB/s
+   comes from its BEST iteration (0.152656 s) while the IMC counters cover
+   the WHOLE 12.256 s window including a 4.363 s single-threaded init, so
+   the IMC window-average rate is necessarily the lower of the two.
+   IMC window-average      : 16.25 GB/s
+   triad best-iteration     : basis24 84.405 GB/s | basis32 112.540 GB/s
+   steady-state IMC equivalent at the best iteration rate:
+                            : 112.54 GB/s
+
+   NOTE: this is a STREAM-TRIAD-CLASS reference, not the vendor STREAM
+   benchmark. Quote which byte basis (24 B/elem architectural, or 32 B/elem
+   including read-for-ownership) any published figure uses.

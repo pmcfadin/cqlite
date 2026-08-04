@@ -1,0 +1,81 @@
+{
+ "schema": "ws0-3224.stalls/v1",
+ "label": "llc-s6-N16",
+ "rep": 2,
+ "S_physical_cores": 6,
+ "N_streams": 16,
+ "step_secs": 120.0,
+ "server_cpus": "0-5,64-69",
+ "client_cpus": "8,9,72,73",
+ "corpus_rows": 3999890,
+ "event_group_C": "cycles,instructions,task-clock,cycle_activity.stalls_l3_miss,cycle_activity.stalls_l2_miss,cycle_activity.stalls_total,l1d_pend_miss.pending,l1d_pend_miss.pending_cycles",
+ "rc": {
+  "alignedC": 0
+ },
+ "convention": "aligned (perf runs the loadgen as its own child)",
+ "step": {
+  "schema": "flight-loadgen.step/v1",
+  "round": "llc-s6-N16-alignedC",
+  "endpoint": "http://127.0.0.1:8815",
+  "ts_unix_ms": 1785815709837,
+  "seed": 42,
+  "step": 0,
+  "target_concurrency": 16,
+  "shape": "full",
+  "duration_s": 170.835435492,
+  "requests_ok": 48,
+  "requests_unavailable": 0,
+  "requests_error": 0,
+  "error_codes": {},
+  "qps": 0.28097215230412653,
+  "rows_per_s": 1123857.7022797526,
+  "bytes_per_s": 13701351803.476458,
+  "rows_total": 191994720,
+  "bytes_total": 2340676402176,
+  "latency_ms": {
+   "p50": 55574.527,
+   "p95": 59146.239,
+   "p99": 60981.247,
+   "max": 60981.247,
+   "samples": 48
+  }
+ },
+ "occupancy": {
+  "alignedC": {
+   "rows_total": 191994720,
+   "rows_positive": true,
+   "whole_scans": 48.0,
+   "rows_total_is_exact_multiple_of_corpus": true,
+   "requests_ok": 48,
+   "requests_error": 0,
+   "requests_unavailable": 0,
+   "duration_s": 170.835435492,
+   "rows_per_s_step": 1123857.7022797526,
+   "busy_fraction_estimate": 0.975930904029612,
+   "ok": true
+  }
+ },
+ "server_io_before": {
+  "rchar": 3148960,
+  "wchar": 8143072719,
+  "syscr": 349,
+  "syscw": 1015059,
+  "read_bytes": 0,
+  "write_bytes": 4096,
+  "cancelled_write_bytes": 0
+ },
+ "server_io_after": {
+  "rchar": 3284238,
+  "wchar": 138422738678,
+  "syscr": 1037,
+  "syscw": 16069915,
+  "read_bytes": 0,
+  "write_bytes": 4096,
+  "cancelled_write_bytes": 0
+ },
+ "warm_read_bytes_delta": 0,
+ "warm_verified_zero_disk_reads": true,
+ "client_cpu_count": 4,
+ "client_utilisation": 0.11755374231642539,
+ "client_saturation_gate_pass": true
+}

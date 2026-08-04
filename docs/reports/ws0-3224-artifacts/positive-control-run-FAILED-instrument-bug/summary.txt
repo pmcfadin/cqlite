@@ -1,0 +1,62 @@
+==== WS0 #3224 PMU POSITIVE CONTROL ====
+started:    2026-08-04T01:06:38Z
+out-dir:    /data/ws0/positive-control
+host:       ip-172-31-3-252 / 6.17.0-1019-aws
+env captured: /data/ws0/positive-control/env.txt
+built:      /data/ws0/positive-control/cache-hostile
+
+-- event availability probe (perf stat -e <ev>:u -- true) --
+   cycles               PROGRAMS
+   instructions         PROGRAMS
+   LLC-loads            ABSENT_EVENT_NAME
+   LLC-load-misses      ABSENT_EVENT_NAME
+   cache-references     PROGRAMS
+   cache-misses         PROGRAMS
+
+-- gate integrity (control-FIFO window really is closed around the chase) --
+   6297 instructions for 1000 accesses (ceiling 1000000) -> PASS
+
+-- measurement: 3 rep(s) per arm, pinned to CPU 8, events counted :u --
+   friendly: working set 256 KiB (L2-resident)
+   hostile:  working set 2048 MiB (>> LLC), random 64 B chase
+   accesses: 20000000 per arm (identical in both arms)
+   ran friendly rep1  (4.317 ns/access wall-clock)
+   ran friendly rep2  (4.316 ns/access wall-clock)
+   ran friendly rep3  (4.316 ns/access wall-clock)
+   ran hostile rep1  (128.238 ns/access wall-clock)
+   ran hostile rep2  (127.303 ns/access wall-clock)
+   ran hostile rep3  (127.517 ns/access wall-clock)
+
+-- P1 HOSTILITY CONTROL (cycles/access, hostile:friendly, need >= 5x) --
+   cycles friendly=301219989  hostile=8793172684  ratio=29.191x  -> PASS
+-- P2 SYMMETRY CONTROL (instructions/access, need within +/-10%) --
+   instructions friendly=120000384  hostile=120002818  ratio=1.000x  -> PASS
+
+-- P4 LLC MISS RATE (misses/loads; the prefetcher-proof invariant) --
+   friendly=na  hostile=na  rise=nax (need >= 1.500x)
+
+-- P3-P5 REQUIRED COUNTERS (gating) --
+   LLC-loads         [required] friendly=ABSENT_EVENT_NAME  hostile=ABSENT_EVENT_NAME
+                     movement=nax either-direction (need >= 2.000x)  hostile-per-access=na (REPORTED, not gated)  -> ABSENT_EVENT_NAME
+   LLC-load-misses   [required] friendly=ABSENT_EVENT_NAME  hostile=ABSENT_EVENT_NAME
+                     movement=nax either-direction (need >= 2.000x)  hostile-per-access=na (REPORTED, not gated)  -> ABSENT_EVENT_NAME
+   cache-references  [required] friendly=28  hostile=36989398
+                     movement=1321049.928x either-direction (need >= 2.000x)  hostile-per-access=1.849 (REPORTED, not gated)  -> OK
+
+-- P6 ADVISORY COUNTERS (reported, not gating) --
+   cache-misses      [advisory] friendly=7  hostile=19992685
+                     movement=2856097.857x either-direction (need >= 2.000x)  hostile-per-access=0.999 (REPORTED, not gated)  -> OK
+
+-- AC3/AC5 capability probes (reported, never gating) --
+   sysfs PMUs (AUTHORITATIVE): breakpoint cpu intel_bts intel_pt kprobe msr software tracepoint uncore_cha_0 uncore_cha_1 uncore_cha_10 uncore_cha_11 uncore_cha_12 uncore_cha_13 uncore_cha_14 uncore_cha_15 uncore_cha_16 uncore_cha_17 uncore_cha_18 uncore_cha_19 uncore_cha_2 uncore_cha_20 uncore_cha_21 uncore_cha_22 uncore_cha_23 uncore_cha_24 uncore_cha_25 uncore_cha_26 uncore_cha_27 uncore_cha_28 uncore_cha_29 uncore_cha_3 uncore_cha_30 uncore_cha_31 uncore_cha_32 uncore_cha_33 uncore_cha_34 uncore_cha_35 uncore_cha_4 uncore_cha_5 uncore_cha_6 uncore_cha_7 uncore_cha_8 uncore_cha_9 uncore_iio_0 uncore_iio_1 uncore_iio_2 uncore_iio_3 uncore_iio_4 uncore_iio_5 uncore_iio_free_running_0 uncore_iio_free_running_1 uncore_iio_free_running_2 uncore_iio_free_running_3 uncore_iio_free_running_4 uncore_iio_free_running_5 uncore_imc_0 uncore_imc_1 uncore_imc_10 uncore_imc_11 uncore_imc_2 uncore_imc_3 uncore_imc_4 uncore_imc_5 uncore_imc_6 uncore_imc_7 uncore_imc_8 uncore_imc_9 uncore_imc_free_running_0 uncore_imc_free_running_1 uncore_imc_free_running_2 uncore_imc_free_running_3 uncore_irp_0 uncore_irp_1 uncore_irp_2 uncore_irp_3 uncore_irp_4 uncore_irp_5 uncore_m2m_0 uncore_m2m_1 uncore_m2m_2 uncore_m2m_3 uncore_m2pcie_0 uncore_m2pcie_1 uncore_m2pcie_2 uncore_m2pcie_3 uncore_m2pcie_4 uncore_m2pcie_5 uncore_m3upi_0 uncore_m3upi_1 uncore_m3upi_2 uncore_pcu uncore_ubox uncore_upi_0 uncore_upi_1 uncore_upi_2 uprobe 
+   uncore_imc* PMU instances:  16
+   NOTE: 'perf list | grep uncore' is MISLEADING - it lists per-model JSON
+         event-table entries, not PMUs present on this host. sysfs is truth.
+   perf stat -M MemoryBandwidth: no (raw: memorybandwidth-probe.txt)
+   STREAM-triad-class reference (NOT the vendor STREAM benchmark):
+     threads=128  285.382 GB/s @24B/elem basis  380.510 GB/s @32B/elem (incl. RFO)
+     AC5 needs this re-run at the SAME core/NUMA binding as the engine arms.
+
+==== RESULT: FAIL ====
+2 of 3 required counters unusable on this host. STOP AND REPORT (#3224 owner condition 3): do not proceed to the measurement and do not characterize the gap in prose.
+artefacts:  /data/ws0/positive-control

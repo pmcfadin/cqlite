@@ -1,0 +1,8 @@
+# started on Tue Aug  4 01:09:22 2026
+
+301216804,,cycles:u,86299024,100.00,,
+120000383,,instructions:u,86299024,100.00,0.40,insn per cycle
+4,,LLC-loads,86299024,100.00,,
+1,,LLC-load-misses,86299024,100.00,25.00,of all LL-cache accesses
+15,,cache-references:u,86299024,100.00,,
+6,,cache-misses:u,86299024,100.00,40.00,of all cache refs

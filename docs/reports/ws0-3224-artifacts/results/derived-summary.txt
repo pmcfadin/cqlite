@@ -1,0 +1,66 @@
+wrote /data/ws0/results/derived.json
+
+== llc-s1-N2  (S=1 N=2, 3 reps, cpus 2,66, node 0)
+   aligned  cycles/row      31316.4 (min 31117.9 max 31593.6, spread 1.52%)
+            instr/row       38856.8   IPC 1.2376   rows/s 222329
+   interior cycles/row      31457.0 (min 31406.7 max 31959.6, spread 1.76%)
+            instr/row       38907.3   IPC 1.2305   rows/s 222119
+   DRAM 1.65 GB/s (far-socket 0.0392)  |  IPC group agreement 0.00606  |  client util 0.0182
+
+== llc-s6-N16  (S=6 N=16, 3 reps, cpus 0-5,64-69, node 0)
+   aligned  cycles/row      37284.9 (min 37147.5 max 37356.5, spread 0.56%)
+            instr/row       38685.6   IPC 1.0384   rows/s 1117642
+   interior cycles/row      37585.8 (min 37462.2 max 37649.5, spread 0.50%)
+            instr/row       38987.6   IPC 1.0374   rows/s 1115061
+   DRAM 24.71 GB/s (far-socket 0.0114)  |  IPC group agreement 0.00395  |  client util 0.1168
+
+== DELTA (aligned): cycles/row 31316.4 -> 37284.9 = +5968.6 (+19.06%) | instr/row -0.441% | IPC 1.2376 -> 1.0384 (-16.09%)
+
+== DELTA (interior): cycles/row 31457.0 -> 37585.8 = +6128.8 (+19.48%) | instr/row +0.206% | IPC 1.2305 -> 1.0374 (-15.69%)
+
+== DENOMINATOR CONVENTION CHECK
+   S=1/N=2 cycles/row: aligned 31316.4 vs interior 31457.0  -> +0.45%
+   delta cycles/row:   aligned 5968.6 vs interior 6128.8  -> +2.68%
+
+== llc-s1-N2 GROUP C (measured stalls, 3 reps)
+   cycles/row    31622.5  (vs primary arm +0.98%)   IPC 1.2309
+   stalls_l3_miss  /row    1290.3   =  4.08% of cycles
+   stalls_l2_miss  /row    2752.6   =  8.71% of cycles
+   stalls_total    /row   12436.5   = 39.36% of cycles
+   MLP (measured)  2.150
+
+== llc-s6-N16 GROUP C (measured stalls, 3 reps)
+   cycles/row    37261.9  (vs primary arm -0.06%)   IPC 1.0379
+   stalls_l3_miss  /row    5111.6   = 13.72% of cycles
+   stalls_l2_miss  /row    7231.3   = 19.41% of cycles
+   stalls_total    /row   18707.7   = 50.21% of cycles
+   MLP (measured)  2.201
+
+==========================================================================
+== AC4 CYCLES-PER-ROW ACCOUNTING  (convention: aligned)
+==========================================================================
+   delta cycles/row           +5639.4  (+17.83% of the low point)
+     basis: group C own arm (stall numerators and the cycles denominator share one interval)
+     primary arm delta +5968.6 -> the two arms agree to -5.52%
+   instructions/row             -0.44%   <- flat means SAME WORK
+   --- components ---
+   measured_l3_miss_stalls               +3821.3  =  67.76% of delta
+   measured_all_execution_stalls         +6271.3  = 111.20% of delta
+   measured_l2_miss_stalls               +4478.6  =  79.42% of delta
+   modelled_llc_miss_charge           penalty 303.1 cyc/miss x 26.15 misses/row
+                                        zero-MLP       +7923.9  = 140.51% of delta (UPPER BOUND)
+                                        MLP 2.20       +3600.4  =  63.84% of delta
+   --- ADDITIVE decomposition (disjoint buckets, sums by construction) ---
+   l3_miss_stalls_DRAM                   +3821.3  =  67.76% of delta
+   l2_miss_l3_hit_stalls_LLC              +657.4  =  11.66% of delta
+   other_stalls_non_memory               +1792.6  =  31.79% of delta
+   non_stalled_cycles                     -631.9  = -11.20% of delta
+   SUM                                   +5639.4  (closure error +0.000 — must be ~0)
+   memory-attributed (L3 miss + L3 hit)  +4478.6 =  79.42%
+   non-memory                            +1160.8 =  20.58%
+   --- verdict ---
+   ATTRIBUTED      +3821.3 cycles/row   (measured cycle_activity.stalls_l3_miss delta)
+   RESIDUAL        +1818.1 cycles/row   = 32.24% of delta UNATTRIBUTED
+   --- efficiency cross-check ---
+   throughput 222329 -> 1117642 rows/s over 6x cores = 0.8378 measured efficiency
+   predicted from cycles/row inflation alone       = 0.8399  (gap -0.21 pp)

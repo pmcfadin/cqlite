@@ -1,0 +1,14 @@
+sha256(Data.db) b1656ae8c0e45feb30f3da641b8a23c4969d1be43e5f341ef0af6bb3a9b41042
+gen-corpus invocation: gen-corpus.sh 200000 375 6 96 3 96 16 2 10 8 50000
+cassandra tarball sha256: 1579d7d3f2d812741a28cd2c2cbe29e83541bb4d25fb21ec2c00c1e4fb3b9a8f
+total 771700
+drwxrwxr-x 2 ubuntu ubuntu      4096 Aug  4 01:23 .
+drwxrwxr-x 3 ubuntu ubuntu      4096 Aug  4 01:23 ..
+-rw-rw-r-- 1 ubuntu ubuntu   1352711 Aug  4 01:23 nb-16-big-CompressionInfo.db
+-rw-rw-r-- 1 ubuntu ubuntu 783752072 Aug  4 01:23 nb-16-big-Data.db
+-rw-rw-r-- 1 ubuntu ubuntu        10 Aug  4 01:23 nb-16-big-Digest.crc32
+-rw-rw-r-- 1 ubuntu ubuntu    247680 Aug  4 01:23 nb-16-big-Filter.db
+-rw-rw-r-- 1 ubuntu ubuntu   4780345 Aug  4 01:23 nb-16-big-Index.db
+-rw-rw-r-- 1 ubuntu ubuntu     10774 Aug  4 01:23 nb-16-big-Statistics.db
+-rw-rw-r-- 1 ubuntu ubuntu     43828 Aug  4 01:23 nb-16-big-Summary.db
+-rw-rw-r-- 1 ubuntu ubuntu        92 Aug  4 01:23 nb-16-big-TOC.txt

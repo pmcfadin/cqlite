@@ -1,0 +1,6 @@
+# started on Tue Aug  4 01:06:45 2026
+
+8777450490,,cycles:u,2545554412,100.00,,
+120002814,,instructions:u,2545554412,100.00,0.01,insn per cycle
+36989398,,cache-references:u,2545554412,100.00,,
+19988960,,cache-misses:u,2545554412,100.00,54.04,of all cache refs

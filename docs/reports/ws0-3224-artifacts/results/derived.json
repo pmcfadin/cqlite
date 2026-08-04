@@ -1,0 +1,1498 @@
+{
+ "schema": "ws0-3224.derived/v1",
+ "reps": {
+  "llc-s1-N2": [
+   {
+    "repdir": "/data/ws0/results/llc-s1-N2/rep1",
+    "label": "llc-s1-N2",
+    "rep": 1,
+    "S": 1,
+    "N": 2,
+    "server_cpus": "2,66",
+    "client_cpus": "8,9,72,73",
+    "numa_node": 0,
+    "window_secs": 60.0,
+    "client_utilisation": 0.018083608383856704,
+    "warm_read_bytes_delta": 0,
+    "aligned": {
+     "rows_in_window": 31999120,
+     "duration_s": 143.61071901,
+     "rows_per_s": 222818.46522731925,
+     "busy_fraction": 0.9920934940105626,
+     "whole_scans": 8.0,
+     "counters": {
+      "cycles": 1002096281900.0,
+      "instructions": 1243383759878.0,
+      "task-clock": 287224335137.0,
+      "LLC-loads": 2370280727.0,
+      "LLC-load-misses": 381896889.0,
+      "cache-references": 11750449571.0,
+      "cache-misses": 1708045366.0,
+      "L1-dcache-loads": 293039736225.0,
+      "L1-dcache-load-misses": 18455166955.0,
+      "dTLB-load-misses": 220747062.0,
+      "branch-misses": 2016751283.0
+     },
+     "per_row": {
+      "cycles": 31316.37000955026,
+      "instructions": 38856.81105849161,
+      "task-clock": 8976.007313232363,
+      "LLC-loads": 74.0733097347677,
+      "LLC-load-misses": 11.93460598291453,
+      "cache-references": 367.2116474140539,
+      "cache-misses": 53.37788557935343,
+      "L1-dcache-loads": 9157.743594980111,
+      "L1-dcache-load-misses": 576.7398276890115,
+      "dTLB-load-misses": 6.898535397223424,
+      "branch-misses": 63.025210787046646
+     },
+     "ipc": 1.240782729500316,
+     "ipc_groupB": 1.237476480526167,
+     "ipc_group_agreement": 0.0026646478029883334
+    },
+    "interior": {
+     "rows_in_window": 13116483.233929642,
+     "rows_per_s_step": 218608.05389882735,
+     "duration_s": 146.376674735,
+     "counters": {
+      "cycles": 419197062536.0,
+      "instructions": 515815822629.0,
+      "task-clock": 120002364143.0,
+      "LLC-loads": 981571711.0,
+      "LLC-load-misses": 156532036.0,
+      "cache-references": 4947065088.0,
+      "cache-misses": 779924455.0
+     },
+     "per_row": {
+      "cycles": 31959.562259159797,
+      "instructions": 39325.77150670163,
+      "task-clock": 9148.974004905414,
+      "LLC-loads": 74.83497622753606,
+      "LLC-load-misses": 11.93399428858216,
+      "cache-references": 377.16398517576425,
+      "cache-misses": 59.46139991110544
+     },
+     "ipc": 1.2304852985097017
+    },
+    "dram": {
+     "per_socket": {
+      "S0": {
+       "cas_read_MiB": 53944.049999999996,
+       "cas_write_MiB": 32911.310000000005,
+       "total_MiB": 86855.36,
+       "GB_per_s": 1.5179074327893334,
+       "instances_counted": 24
+      },
+      "S1": {
+       "cas_read_MiB": 3775.6000000000004,
+       "cas_write_MiB": 803.52,
+       "total_MiB": 4579.120000000001,
+       "GB_per_s": 0.08002592221866668,
+       "instances_counted": 24
+      }
+     },
+     "note": "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline conversion is APPLIED BY PERF); multiplying by 64 again overcounts 64x.",
+     "total_MiB": 91434.48,
+     "total_GB_per_s": 1.597933355008,
+     "window_secs": 60.0,
+     "far_socket_fraction": 0.05008088852257924
+    },
+    "stalls": {
+     "repdir": "/data/ws0/results/llc-s1-N2/rep1",
+     "label": "llc-s1-N2",
+     "rep": 1,
+     "rows_in_window": 31999120,
+     "counters": {
+      "cycles": 1011104938580.0,
+      "instructions": 1244545578447.0,
+      "task-clock": 289796396267.0,
+      "cycle_activity.stalls_l3_miss": 41289117391.0,
+      "cycle_activity.stalls_l2_miss": 88082015183.0,
+      "cycle_activity.stalls_total": 397956679674.0,
+      "l1d_pend_miss.pending": 364577289909.0,
+      "l1d_pend_miss.pending_cycles": 169583736756.0
+     },
+     "per_row": {
+      "cycles": 31597.898272827504,
+      "instructions": 38893.118887238146,
+      "task-clock": 9056.386433970683,
+      "cycle_activity.stalls_l3_miss": 1290.3204022798127,
+      "cycle_activity.stalls_l2_miss": 2752.6386720322307,
+      "cycle_activity.stalls_total": 12436.48824323919,
+      "l1d_pend_miss.pending": 11393.35362688099,
+      "l1d_pend_miss.pending_cycles": 5299.637513656626
+     },
+     "ipc": 1.2308767675438763,
+     "stalls_l3_miss_frac_cycles": 0.04083564011564082,
+     "stalls_l2_miss_frac_cycles": 0.08711461275889203,
+     "stalls_total_frac_cycles": 0.3935859320723841,
+     "mlp": 2.149836398720003,
+     "client_utilisation": 0.020080578014127114,
+     "warm_read_bytes_delta": 0
+    }
+   },
+   {
+    "repdir": "/data/ws0/results/llc-s1-N2/rep2",
+    "label": "llc-s1-N2",
+    "rep": 2,
+    "S": 1,
+    "N": 2,
+    "server_cpus": "2,66",
+    "client_cpus": "8,9,72,73",
+    "numa_node": 0,
+    "window_secs": 60.0,
+    "client_utilisation": 0.018221999865247755,
+    "warm_read_bytes_delta": 0,
+    "aligned": {
+     "rows_in_window": 31999120,
+     "duration_s": 143.92683478,
+     "rows_per_s": 222329.07469209892,
+     "busy_fraction": 0.9452909334660489,
+     "whole_scans": 8.0,
+     "counters": {
+      "cycles": 995745150093.0,
+      "instructions": 1232319973010.0,
+      "task-clock": 287858065845.0,
+      "LLC-loads": 2351167620.0,
+      "LLC-load-misses": 366797423.0,
+      "cache-references": 11934213146.0,
+      "cache-misses": 1854686904.0,
+      "L1-dcache-loads": 288575379895.0,
+      "L1-dcache-load-misses": 18772673252.0,
+      "dTLB-load-misses": 230440056.0,
+      "branch-misses": 2038163772.0
+     },
+     "per_row": {
+      "cycles": 31117.89168242752,
+      "instructions": 38511.058210663294,
+      "task-clock": 8995.811942484668,
+      "LLC-loads": 73.47600871523967,
+      "LLC-load-misses": 11.462734693954085,
+      "cache-references": 372.9544170589691,
+      "cache-misses": 57.9605596653908,
+      "L1-dcache-loads": 9018.228623005883,
+      "L1-dcache-load-misses": 586.6621723347392,
+      "dTLB-load-misses": 7.201449789869222,
+      "branch-misses": 63.69436947016043
+     },
+     "ipc": 1.2375857144721263,
+     "ipc_groupB": 1.2300845233608857,
+     "ipc_group_agreement": 0.006061148753999727
+    },
+    "interior": {
+     "rows_in_window": 13350014.964241996,
+     "rows_per_s_step": 222500.24940403327,
+     "duration_s": 143.816108457,
+     "counters": {
+      "cycles": 419279747591.0,
+      "instructions": 513311937923.0,
+      "task-clock": 120006348395.0,
+      "LLC-loads": 983755308.0,
+      "LLC-load-misses": 155865970.0,
+      "cache-references": 5031165448.0,
+      "cache-misses": 826198068.0
+     },
+     "per_row": {
+      "cycles": 31406.68746170251,
+      "instructions": 38450.28932910604,
+      "task-clock": 8989.229503969613,
+      "LLC-loads": 73.68945358001379,
+      "LLC-load-misses": 11.675340470964779,
+      "cache-references": 376.8659032574849,
+      "cache-misses": 61.887426359668574
+     },
+     "ipc": 1.2242707664089865
+    },
+    "dram": {
+     "per_socket": {
+      "S0": {
+       "cas_read_MiB": 56250.259999999995,
+       "cas_write_MiB": 34302.64,
+       "total_MiB": 90552.9,
+       "GB_per_s": 1.5825266278399999,
+       "instances_counted": 24
+      },
+      "S1": {
+       "cas_read_MiB": 3257.24,
+       "cas_write_MiB": 437.27000000000004,
+       "total_MiB": 3694.5099999999998,
+       "GB_per_s": 0.06456624196266667,
+       "instances_counted": 24
+      }
+     },
+     "note": "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline conversion is APPLIED BY PERF); multiplying by 64 again overcounts 64x.",
+     "total_MiB": 94247.40999999999,
+     "total_GB_per_s": 1.6470928698026666,
+     "window_secs": 60.0,
+     "far_socket_fraction": 0.03920012231635862
+    },
+    "stalls": {
+     "repdir": "/data/ws0/results/llc-s1-N2/rep2",
+     "label": "llc-s1-N2",
+     "rep": 2,
+     "rows_in_window": 31999120,
+     "counters": {
+      "cycles": 1021037084870.0,
+      "instructions": 1251439794995.0,
+      "task-clock": 293176482248.0,
+      "cycle_activity.stalls_l3_miss": 43028477714.0,
+      "cycle_activity.stalls_l2_miss": 89984375832.0,
+      "cycle_activity.stalls_total": 405446880741.0,
+      "l1d_pend_miss.pending": 363268186412.0,
+      "l1d_pend_miss.pending_cycles": 172072740913.0
+     },
+     "per_row": {
+      "cycles": 31908.286380062953,
+      "instructions": 39108.56907924343,
+      "task-clock": 9162.017025718207,
+      "cycle_activity.stalls_l3_miss": 1344.6769071774474,
+      "cycle_activity.stalls_l2_miss": 2812.089077199623,
+      "cycle_activity.stalls_total": 12670.5634636515,
+      "l1d_pend_miss.pending": 11352.443017557984,
+      "l1d_pend_miss.pending_cycles": 5377.421032609646
+     },
+     "ipc": 1.2256555746497055,
+     "stalls_l3_miss_frac_cycles": 0.04214193426625484,
+     "stalls_l2_miss_frac_cycles": 0.08813036976365746,
+     "stalls_total_frac_cycles": 0.39709319744504884,
+     "mlp": 2.1111315161514654,
+     "client_utilisation": 0.018143877252222447,
+     "warm_read_bytes_delta": 0
+    }
+   },
+   {
+    "repdir": "/data/ws0/results/llc-s1-N2/rep3",
+    "label": "llc-s1-N2",
+    "rep": 3,
+    "S": 1,
+    "N": 2,
+    "server_cpus": "2,66",
+    "client_cpus": "8,9,72,73",
+    "numa_node": 0,
+    "window_secs": 60.0,
+    "client_utilisation": 0.018039605143312185,
+    "warm_read_bytes_delta": 0,
+    "aligned": {
+     "rows_in_window": 31999120,
+     "duration_s": 145.165422937,
+     "rows_per_s": 220432.10671378145,
+     "busy_fraction": 0.991400356147195,
+     "whole_scans": 8.0,
+     "counters": {
+      "cycles": 1010966250558.0,
+      "instructions": 1245708710956.0,
+      "task-clock": 290334885544.0,
+      "LLC-loads": 2416354250.0,
+      "LLC-load-misses": 390505760.0,
+      "cache-references": 12121512439.0,
+      "cache-misses": 1821403169.0,
+      "L1-dcache-loads": 293406830809.0,
+      "L1-dcache-load-misses": 18828126853.0,
+      "dTLB-load-misses": 225404876.0,
+      "branch-misses": 2017557318.0
+     },
+     "per_row": {
+      "cycles": 31593.564152951705,
+      "instructions": 38929.467777738886,
+      "task-clock": 9073.214686653882,
+      "LLC-loads": 75.51314692404041,
+      "LLC-load-misses": 12.203640600116504,
+      "cache-references": 378.80768092997556,
+      "cache-misses": 56.92041434264442,
+      "L1-dcache-loads": 9169.215616210697,
+      "L1-dcache-load-misses": 588.3951450227381,
+      "dTLB-load-misses": 7.04409608764241,
+      "branch-misses": 63.05040007350202
+     },
+     "ipc": 1.2321961393552303,
+     "ipc_groupB": 1.2305275835907805,
+     "ipc_group_agreement": 0.0013541316282023902
+    },
+    "interior": {
+     "rows_in_window": 13327149.456997544,
+     "rows_per_s_step": 222119.15761662571,
+     "duration_s": 144.062855016,
+     "counters": {
+      "cycles": 419232418757.0,
+      "instructions": 518523751020.0,
+      "task-clock": 120003748420.0,
+      "LLC-loads": 1003306079.0,
+      "LLC-load-misses": 164986023.0,
+      "cache-references": 5042215451.0,
+      "cache-misses": 744659592.0
+     },
+     "per_row": {
+      "cycles": 31457.020881301676,
+      "instructions": 38907.326183525634,
+      "task-clock": 9004.457315288148,
+      "LLC-loads": 75.282871422531,
+      "LLC-load-misses": 12.379693311938702,
+      "cache-references": 378.3416301640212,
+      "cache-misses": 55.87538388481188
+     },
+     "ipc": 1.2368407780996353
+    },
+    "dram": {
+     "per_socket": {
+      "S0": {
+       "cas_read_MiB": 59412.13,
+       "cas_write_MiB": 39597.509999999995,
+       "total_MiB": 99009.63999999998,
+       "GB_per_s": 1.7303188712106665,
+       "instances_counted": 24
+      },
+      "S1": {
+       "cas_read_MiB": 3323.359999999999,
+       "cas_write_MiB": 479.23,
+       "total_MiB": 3802.5899999999992,
+       "GB_per_s": 0.06645507686399998,
+       "instances_counted": 24
+      }
+     },
+     "note": "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline conversion is APPLIED BY PERF); multiplying by 64 again overcounts 64x.",
+     "total_MiB": 102812.22999999998,
+     "total_GB_per_s": 1.7967739480746663,
+     "window_secs": 60.0,
+     "far_socket_fraction": 0.03698577494136641
+    },
+    "stalls": {
+     "repdir": "/data/ws0/results/llc-s1-N2/rep3",
+     "label": "llc-s1-N2",
+     "rep": 3,
+     "rows_in_window": 31999120,
+     "counters": {
+      "cycles": 1011893467322.0,
+      "instructions": 1245794558516.0,
+      "task-clock": 289827704327.0,
+      "cycle_activity.stalls_l3_miss": 40297033793.0,
+      "cycle_activity.stalls_l2_miss": 86716048750.0,
+      "cycle_activity.stalls_total": 396775833802.0,
+      "l1d_pend_miss.pending": 360170298241.0,
+      "l1d_pend_miss.pending_cycles": 167300726397.0
+     },
+     "per_row": {
+      "cycles": 31622.540473675526,
+      "instructions": 38932.15058776616,
+      "task-clock": 9057.364837751787,
+      "cycle_activity.stalls_l3_miss": 1259.3169372470243,
+      "cycle_activity.stalls_l2_miss": 2709.951047091295,
+      "cycle_activity.stalls_total": 12399.58579492186,
+      "l1d_pend_miss.pending": 11255.631349893372,
+      "l1d_pend_miss.pending_cycles": 5228.291477921893
+     },
+     "ipc": 1.2311518936998622,
+     "stalls_l3_miss_frac_cycles": 0.03982339553949988,
+     "stalls_l2_miss_frac_cycles": 0.0856968164637885,
+     "stalls_total_frac_cycles": 0.3921122594575856,
+     "mlp": 2.15283164632726,
+     "client_utilisation": 0.01825000741256721,
+     "warm_read_bytes_delta": 0
+    }
+   }
+  ],
+  "llc-s6-N16": [
+   {
+    "repdir": "/data/ws0/results/llc-s6-N16/rep1",
+    "label": "llc-s6-N16",
+    "rep": 1,
+    "S": 6,
+    "N": 16,
+    "server_cpus": "0-5,64-69",
+    "client_cpus": "8,9,72,73",
+    "numa_node": 0,
+    "window_secs": 60.0,
+    "client_utilisation": 0.11577554880082158,
+    "warm_read_bytes_delta": 0,
+    "aligned": {
+     "rows_in_window": 187994830,
+     "duration_s": 168.580130382,
+     "rows_per_s": 1115166.0019126015,
+     "busy_fraction": 0.9746640288519078,
+     "whole_scans": 47.0,
+     "counters": {
+      "cycles": 7022828277250.0,
+      "instructions": 7272684684277.0,
+      "task-clock": 2022994736562.0,
+      "LLC-loads": 16736243225.0,
+      "LLC-load-misses": 7197759136.0,
+      "cache-references": 77551513968.0,
+      "cache-misses": 24565947139.0,
+      "L1-dcache-loads": 1681870041051.0,
+      "L1-dcache-load-misses": 108387503037.0,
+      "dTLB-load-misses": 1574690240.0,
+      "branch-misses": 11733040223.0
+     },
+     "per_row": {
+      "cycles": 37356.49686350417,
+      "instructions": 38685.5568542869,
+      "task-clock": 10760.906225782912,
+      "LLC-loads": 89.02501853375436,
+      "LLC-load-misses": 38.287005743721785,
+      "cache-references": 412.51939730470247,
+      "cache-misses": 130.67352511236612,
+      "L1-dcache-loads": 9140.849422549338,
+      "L1-dcache-load-misses": 589.0787161701295,
+      "dTLB-load-misses": 8.55833448463311,
+      "branch-misses": 63.76827657869287
+     },
+     "ipc": 1.0355777469080931,
+     "ipc_groupB": 1.0331959434225224,
+     "ipc_group_agreement": 0.0022999755379854584
+    },
+    "interior": {
+     "rows_in_window": 66789405.28571085,
+     "rows_per_s_step": 1113156.7547618474,
+     "duration_s": 172.477702874,
+     "counters": {
+      "cycles": 2514587991475.0,
+      "instructions": 2603956250388.0,
+      "task-clock": 720030512520.0,
+      "LLC-loads": 5988734644.0,
+      "LLC-load-misses": 2612518510.0,
+      "cache-references": 27680198313.0,
+      "cache-misses": 8857207301.0
+     },
+     "per_row": {
+      "cycles": 37649.504149919114,
+      "instructions": 38987.56455831325,
+      "task-clock": 10780.609730538292,
+      "LLC-loads": 89.66593755972926,
+      "LLC-load-misses": 39.115762430047134,
+      "cache-references": 414.43995787340833,
+      "cache-misses": 132.61395670631822
+     },
+     "ipc": 1.0355399211385634
+    },
+    "dram": {
+     "per_socket": {
+      "S0": {
+       "cas_read_MiB": 985755.32,
+       "cas_write_MiB": 417507.25999999995,
+       "total_MiB": 1403262.5799999998,
+       "GB_per_s": 24.523791051434664,
+       "instances_counted": 24
+      },
+      "S1": {
+       "cas_read_MiB": 15753.26,
+       "cas_write_MiB": 1140.71,
+       "total_MiB": 16893.97,
+       "GB_per_s": 0.2952435247786667,
+       "instances_counted": 24
+      }
+     },
+     "note": "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline conversion is APPLIED BY PERF); multiplying by 64 again overcounts 64x.",
+     "total_MiB": 1420156.5499999998,
+     "total_GB_per_s": 24.81903457621333,
+     "window_secs": 60.0,
+     "far_socket_fraction": 0.01189585049620058
+    },
+    "stalls": {
+     "repdir": "/data/ws0/results/llc-s6-N16/rep1",
+     "label": "llc-s6-N16",
+     "rep": 1,
+     "rows_in_window": 191994720,
+     "counters": {
+      "cycles": 7168819051687.0,
+      "instructions": 7424336381906.0,
+      "task-clock": 2075636584941.0,
+      "cycle_activity.stalls_l3_miss": 986225279898.0,
+      "cycle_activity.stalls_l2_miss": 1397824830853.0,
+      "cycle_activity.stalls_total": 3608113142534.0,
+      "l1d_pend_miss.pending": 4437283454553.0,
+      "l1d_pend_miss.pending_cycles": 2013499959932.0
+     },
+     "per_row": {
+      "cycles": 37338.626039752555,
+      "instructions": 38669.482066517245,
+      "task-clock": 10810.904513108486,
+      "cycle_activity.stalls_l3_miss": 5136.731259578389,
+      "cycle_activity.stalls_l2_miss": 7280.537875484284,
+      "cycle_activity.stalls_total": 18792.772751948596,
+      "l1d_pend_miss.pending": 23111.486891686396,
+      "l1d_pend_miss.pending_cycles": 10487.267357831506
+     },
+     "ipc": 1.035642876236201,
+     "stalls_l3_miss_frac_cycles": 0.1375715125165444,
+     "stalls_l2_miss_frac_cycles": 0.19498676431567308,
+     "stalls_total_frac_cycles": 0.5033064883517909,
+     "mlp": 2.203766348573881,
+     "client_utilisation": 0.11590327902939429,
+     "warm_read_bytes_delta": 0
+    }
+   },
+   {
+    "repdir": "/data/ws0/results/llc-s6-N16/rep2",
+    "label": "llc-s6-N16",
+    "rep": 2,
+    "S": 6,
+    "N": 16,
+    "server_cpus": "0-5,64-69",
+    "client_cpus": "8,9,72,73",
+    "numa_node": 0,
+    "window_secs": 60.0,
+    "client_utilisation": 0.11677402974920352,
+    "warm_read_bytes_delta": 0,
+    "aligned": {
+     "rows_in_window": 191994720,
+     "duration_s": 171.785585577,
+     "rows_per_s": 1117641.6190864954,
+     "busy_fraction": 0.9768277381153394,
+     "whole_scans": 48.0,
+     "counters": {
+      "cycles": 7158511479129.0,
+      "instructions": 7433474466818.0,
+      "task-clock": 2061462523248.0,
+      "LLC-loads": 16927652864.0,
+      "LLC-load-misses": 7311314352.0,
+      "cache-references": 78207087603.0,
+      "cache-misses": 24983893758.0,
+      "L1-dcache-loads": 1746455754285.0,
+      "L1-dcache-load-misses": 111055332612.0,
+      "dTLB-load-misses": 1642790460.0,
+      "branch-misses": 12015467047.0
+     },
+     "per_row": {
+      "cycles": 37284.93928962734,
+      "instructions": 38717.07756764353,
+      "task-clock": 10737.079244929235,
+      "LLC-loads": 88.1672832669565,
+      "LLC-load-misses": 38.08080947226049,
+      "cache-references": 407.3397831096605,
+      "cache-misses": 130.12802517694237,
+      "L1-dcache-loads": 9096.373870515814,
+      "L1-dcache-load-misses": 578.4290974876809,
+      "dTLB-load-misses": 8.556435614479398,
+      "branch-misses": 62.582278549118435
+     },
+     "ipc": 1.0384106372519857,
+     "ipc_groupB": 1.0380721370973665,
+     "ipc_group_agreement": 0.00032597909003996805
+    },
+    "interior": {
+     "rows_in_window": 66903640.80566305,
+     "rows_per_s_step": 1115060.6800943841,
+     "duration_s": 172.183203504,
+     "counters": {
+      "cycles": 2514626796518.0,
+      "instructions": 2608729351227.0,
+      "task-clock": 720080473861.0,
+      "LLC-loads": 5993763975.0,
+      "LLC-load-misses": 2624681687.0,
+      "cache-references": 27596605466.0,
+      "cache-misses": 8836542752.0
+     },
+     "per_row": {
+      "cycles": 37585.79901237826,
+      "instructions": 38992.3376338315,
+      "task-clock": 10762.948999332319,
+      "LLC-loads": 89.58800900552274,
+      "LLC-load-misses": 39.23077511766496,
+      "cache-references": 412.48286541177424,
+      "cache-misses": 132.0786529042233
+     },
+     "ipc": 1.0374220758481154
+    },
+    "dram": {
+     "per_socket": {
+      "S0": {
+       "cas_read_MiB": 980356.9800000001,
+       "cas_write_MiB": 411066.69999999995,
+       "total_MiB": 1391423.6800000002,
+       "GB_per_s": 24.31689127799467,
+       "instances_counted": 24
+      },
+      "S1": {
+       "cas_read_MiB": 15230.65,
+       "cas_write_MiB": 864.3500000000001,
+       "total_MiB": 16095.0,
+       "GB_per_s": 0.28128051200000004,
+       "instances_counted": 24
+      }
+     },
+     "note": "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline conversion is APPLIED BY PERF); multiplying by 64 again overcounts 64x.",
+     "total_MiB": 1407518.6800000002,
+     "total_GB_per_s": 24.59817178999467,
+     "window_secs": 60.0,
+     "far_socket_fraction": 0.011435016976115726
+    },
+    "stalls": {
+     "repdir": "/data/ws0/results/llc-s6-N16/rep2",
+     "label": "llc-s6-N16",
+     "rep": 2,
+     "rows_in_window": 191994720,
+     "counters": {
+      "cycles": 7119010841819.0,
+      "instructions": 7412155467217.0,
+      "task-clock": 2050060993440.0,
+      "cycle_activity.stalls_l3_miss": 974776186558.0,
+      "cycle_activity.stalls_l2_miss": 1375304598728.0,
+      "cycle_activity.stalls_total": 3567604593372.0,
+      "l1d_pend_miss.pending": 4358599065513.0,
+      "l1d_pend_miss.pending_cycles": 1984877016741.0
+     },
+     "per_row": {
+      "cycles": 37079.2011458388,
+      "instructions": 38606.0380578018,
+      "task-clock": 10677.694644102712,
+      "cycle_activity.stalls_l3_miss": 5077.098925210026,
+      "cycle_activity.stalls_l2_miss": 7163.241774190456,
+      "cycle_activity.stalls_total": 18581.78492289788,
+      "l1d_pend_miss.pending": 22701.661095226995,
+      "l1d_pend_miss.pending_cycles": 10338.185428958672
+     },
+     "ipc": 1.041177718634166,
+     "stalls_l3_miss_frac_cycles": 0.1369257904246894,
+     "stalls_l2_miss_frac_cycles": 0.19318759716575903,
+     "stalls_total_frac_cycles": 0.5011376822767178,
+     "mlp": 2.195903841271461,
+     "client_utilisation": 0.11755374231642539,
+     "warm_read_bytes_delta": 0
+    }
+   },
+   {
+    "repdir": "/data/ws0/results/llc-s6-N16/rep3",
+    "label": "llc-s6-N16",
+    "rep": 3,
+    "S": 6,
+    "N": 16,
+    "server_cpus": "0-5,64-69",
+    "client_cpus": "8,9,72,73",
+    "numa_node": 0,
+    "window_secs": 60.0,
+    "client_utilisation": 0.11669795670504342,
+    "warm_read_bytes_delta": 0,
+    "aligned": {
+     "rows_in_window": 191994720,
+     "duration_s": 170.938362357,
+     "rows_per_s": 1123180.9954925412,
+     "busy_fraction": 0.99087054927003,
+     "whole_scans": 48.0,
+     "counters": {
+      "cycles": 7132116815658.0,
+      "instructions": 7417846776565.0,
+      "task-clock": 2051297477039.0,
+      "LLC-loads": 16827747277.0,
+      "LLC-load-misses": 7277703856.0,
+      "cache-references": 77985468468.0,
+      "cache-misses": 24894038553.0,
+      "L1-dcache-loads": 1754977434672.0,
+      "L1-dcache-load-misses": 111149836253.0,
+      "dTLB-load-misses": 1665973936.0,
+      "branch-misses": 12085923221.0
+     },
+     "per_row": {
+      "cycles": 37147.4633034596,
+      "instructions": 38635.68110917321,
+      "task-clock": 10684.13483995289,
+      "LLC-loads": 87.64692735821069,
+      "LLC-load-misses": 37.9057499914581,
+      "cache-references": 406.1854850383385,
+      "cache-misses": 129.6600164473273,
+      "L1-dcache-loads": 9140.758843118187,
+      "L1-dcache-load-misses": 578.9213174872725,
+      "dTLB-load-misses": 8.677186205953998,
+      "branch-misses": 62.94924788035838
+     },
+     "ipc": 1.0400624342382758,
+     "ipc_groupB": 1.0359515592122701,
+     "ipc_group_agreement": 0.0039525271663296314
+    },
+    "interior": {
+     "rows_in_window": 67139959.60511437,
+     "rows_per_s_step": 1118999.3267519062,
+     "duration_s": 171.577154168,
+     "counters": {
+      "cycles": 2515208753179.0,
+      "instructions": 2615451984993.0,
+      "task-clock": 720061816647.0,
+      "LLC-loads": 5954462782.0,
+      "LLC-load-misses": 2614829094.0,
+      "cache-references": 27307814477.0,
+      "cache-misses": 8778821002.0
+     },
+     "per_row": {
+      "cycles": 37462.17257162908,
+      "instructions": 38955.22130748748,
+      "task-clock": 10724.787755042817,
+      "LLC-loads": 88.68731552746452,
+      "LLC-load-misses": 38.9459438072229,
+      "cache-references": 406.7296828537239,
+      "cache-misses": 130.75404056887868
+     },
+     "ipc": 1.039854835781444
+    },
+    "dram": {
+     "per_socket": {
+      "S0": {
+       "cas_read_MiB": 986467.46,
+       "cas_write_MiB": 411380.34,
+       "total_MiB": 1397847.8,
+       "GB_per_s": 24.429160912213334,
+       "instances_counted": 24
+      },
+      "S1": {
+       "cas_read_MiB": 15157.160000000002,
+       "cas_write_MiB": 890.8200000000002,
+       "total_MiB": 16047.980000000001,
+       "GB_per_s": 0.28045877794133334,
+       "instances_counted": 24
+      }
+     },
+     "note": "perf reports cas_count_* already scaled to MiB (the x64 B/cacheline conversion is APPLIED BY PERF); multiplying by 64 again overcounts 64x.",
+     "total_MiB": 1413895.78,
+     "total_GB_per_s": 24.709619690154668,
+     "window_secs": 60.0,
+     "far_socket_fraction": 0.011350185938032858
+    },
+    "stalls": {
+     "repdir": "/data/ws0/results/llc-s6-N16/rep3",
+     "label": "llc-s6-N16",
+     "rep": 3,
+     "rows_in_window": 191994720,
+     "counters": {
+      "cycles": 7154096223613.0,
+      "instructions": 7425154285481.0,
+      "task-clock": 2058105622817.0,
+      "cycle_activity.stalls_l3_miss": 981396974844.0,
+      "cycle_activity.stalls_l2_miss": 1388363766108.0,
+      "cycle_activity.stalls_total": 3591788830390.0,
+      "l1d_pend_miss.pending": 4406989666023.0,
+      "l1d_pend_miss.pending_cycles": 2002399897915.0
+     },
+     "per_row": {
+      "cycles": 37261.94253473741,
+      "instructions": 38673.74209812124,
+      "task-clock": 10719.594907698503,
+      "cycle_activity.stalls_l3_miss": 5111.583145849011,
+      "cycle_activity.stalls_l2_miss": 7231.26014146639,
+      "cycle_activity.stalls_total": 18707.74795468334,
+      "l1d_pend_miss.pending": 22953.702404019237,
+      "l1d_pend_miss.pending_cycles": 10429.452944929944
+     },
+     "ipc": 1.0378885121747927,
+     "stalls_l3_miss_frac_cycles": 0.13717972811223522,
+     "stalls_l2_miss_frac_cycles": 0.19406557064825739,
+     "stalls_total_frac_cycles": 0.5020604585293172,
+     "mlp": 2.2008539206438136,
+     "client_utilisation": 0.11718220389823016,
+     "warm_read_bytes_delta": 0
+    }
+   }
+  ]
+ },
+ "endpoints": {
+  "llc-s1-N2": {
+   "n_reps": 3,
+   "S": 1,
+   "N": 2,
+   "server_cpus": "2,66",
+   "numa_node": 0,
+   "aligned": {
+    "cycles_per_row": {
+     "min": 31117.89168242752,
+     "median": 31316.37000955026,
+     "max": 31593.564152951705,
+     "n": 3,
+     "spread_pct": 1.518925949524563
+    },
+    "instructions_per_row": {
+     "min": 38511.058210663294,
+     "median": 38856.81105849161,
+     "max": 38929.467777738886,
+     "n": 3,
+     "spread_pct": 1.0767985217463047
+    },
+    "ipc": {
+     "min": 1.2321961393552303,
+     "median": 1.2375857144721263,
+     "max": 1.240782729500316,
+     "n": 3,
+     "spread_pct": 0.6938178135603442
+    },
+    "rows_per_s": {
+     "min": 220432.10671378145,
+     "median": 222329.07469209892,
+     "max": 222818.46522731925,
+     "n": 3,
+     "spread_pct": 1.073345227943145
+    },
+    "events_per_row": {
+     "LLC-loads": {
+      "min": 73.47600871523967,
+      "median": 74.0733097347677,
+      "max": 75.51314692404041,
+      "n": 3,
+      "spread_pct": 2.750164959679899
+     },
+     "LLC-load-misses": {
+      "min": 11.462734693954085,
+      "median": 11.93460598291453,
+      "max": 12.203640600116504,
+      "n": 3,
+      "spread_pct": 6.208046643710681
+     },
+     "cache-references": {
+      "min": 367.2116474140539,
+      "median": 372.9544170589691,
+      "max": 378.80768092997556,
+      "n": 3,
+      "spread_pct": 3.1092361386587783
+     },
+     "cache-misses": {
+      "min": 53.37788557935343,
+      "median": 56.92041434264442,
+      "max": 57.9605596653908,
+      "n": 3,
+      "spread_pct": 8.051020251628866
+     },
+     "L1-dcache-loads": {
+      "min": 9018.228623005883,
+      "median": 9157.743594980111,
+      "max": 9169.215616210697,
+      "n": 3,
+      "spread_pct": 1.6487357572183818
+     },
+     "L1-dcache-load-misses": {
+      "min": 576.7398276890115,
+      "median": 586.6621723347392,
+      "max": 588.3951450227381,
+      "n": 3,
+      "spread_pct": 1.9867170380769559
+     },
+     "dTLB-load-misses": {
+      "min": 6.898535397223424,
+      "median": 7.04409608764241,
+      "max": 7.201449789869222,
+      "n": 3,
+      "spread_pct": 4.300259236628052
+     },
+     "branch-misses": {
+      "min": 63.025210787046646,
+      "median": 63.05040007350202,
+      "max": 63.69436947016043,
+      "n": 3,
+      "spread_pct": 1.0613075925508846
+     }
+    }
+   },
+   "interior": {
+    "cycles_per_row": {
+     "min": 31406.68746170251,
+     "median": 31457.020881301676,
+     "max": 31959.562259159797,
+     "n": 3,
+     "spread_pct": 1.7575561256848722
+    },
+    "instructions_per_row": {
+     "min": 38450.28932910604,
+     "median": 38907.326183525634,
+     "max": 39325.77150670163,
+     "n": 3,
+     "spread_pct": 2.250173074001408
+    },
+    "ipc": {
+     "min": 1.2242707664089865,
+     "median": 1.2304852985097017,
+     "max": 1.2368407780996353,
+     "n": 3,
+     "spread_pct": 1.0215491160985826
+    },
+    "rows_per_s": {
+     "min": 218608.05389882735,
+     "median": 222119.15761662571,
+     "max": 222500.24940403327,
+     "n": 3,
+     "spread_pct": 1.752300678144922
+    },
+    "events_per_row": {
+     "LLC-loads": {
+      "min": 73.68945358001379,
+      "median": 74.83497622753606,
+      "max": 75.282871422531,
+      "n": 3,
+      "spread_pct": 2.1292421309421123
+     },
+     "LLC-load-misses": {
+      "min": 11.675340470964779,
+      "median": 11.93399428858216,
+      "max": 12.379693311938702,
+      "n": 3,
+      "spread_pct": 5.90207120886435
+     },
+     "cache-references": {
+      "min": 376.8659032574849,
+      "median": 377.16398517576425,
+      "max": 378.3416301640212,
+      "n": 3,
+      "spread_pct": 0.39126930580304037
+     },
+     "cache-misses": {
+      "min": 55.87538388481188,
+      "median": 59.46139991110544,
+      "max": 61.887426359668574,
+      "n": 3,
+      "spread_pct": 10.110832378391144
+     }
+    }
+   },
+   "dram_GB_per_s": {
+    "min": 1.597933355008,
+    "median": 1.6470928698026666,
+    "max": 1.7967739480746663,
+    "n": 3,
+    "spread_pct": 12.072215034874679
+   },
+   "dram_far_socket_fraction": {
+    "min": 0.03698577494136641,
+    "median": 0.03920012231635862,
+    "max": 0.05008088852257924,
+    "n": 3,
+    "spread_pct": 33.40579775626901
+   },
+   "dram_per_socket_GB_per_s": {
+    "S0": {
+     "min": 1.5179074327893334,
+     "median": 1.5825266278399999,
+     "max": 1.7303188712106665,
+     "n": 3,
+     "spread_pct": 13.422297905423228
+    },
+    "S1": {
+     "min": 0.06456624196266667,
+     "median": 0.06645507686399998,
+     "max": 0.08002592221866668,
+     "n": 3,
+     "spread_pct": 23.263354713497936
+    }
+   },
+   "ipc_group_agreement_max": 0.006061148753999727,
+   "client_utilisation_max": 0.018221999865247755,
+   "stalls": {
+    "n_reps": 3,
+    "cycles_per_row": {
+     "min": 31597.898272827504,
+     "median": 31622.540473675526,
+     "max": 31908.286380062953,
+     "n": 3,
+     "spread_pct": 0.9815407066798895
+    },
+    "instructions_per_row": {
+     "min": 38893.118887238146,
+     "median": 38932.15058776616,
+     "max": 39108.56907924343,
+     "n": 3,
+     "spread_pct": 0.5533991540477299
+    },
+    "ipc": {
+     "min": 1.2256555746497055,
+     "median": 1.2308767675438763,
+     "max": 1.2311518936998622,
+     "n": 3,
+     "spread_pct": 0.4465369072749811
+    },
+    "stalls_l3_miss_per_row": {
+     "min": 1259.3169372470243,
+     "median": 1290.3204022798127,
+     "max": 1344.6769071774474,
+     "n": 3,
+     "spread_pct": 6.615408837960265
+    },
+    "stalls_l2_miss_per_row": {
+     "min": 2709.951047091295,
+     "median": 2752.6386720322307,
+     "max": 2812.089077199623,
+     "n": 3,
+     "spread_pct": 3.7105498497164096
+    },
+    "stalls_total_per_row": {
+     "min": 12399.58579492186,
+     "median": 12436.48824323919,
+     "max": 12670.5634636515,
+     "n": 3,
+     "spread_pct": 2.1788921714049834
+    },
+    "stalls_l3_miss_frac_cycles": {
+     "min": 0.03982339553949988,
+     "median": 0.04083564011564082,
+     "max": 0.04214193426625484,
+     "n": 3,
+     "spread_pct": 5.677733274632598
+    },
+    "stalls_l2_miss_frac_cycles": {
+     "min": 0.0856968164637885,
+     "median": 0.08711461275889203,
+     "max": 0.08813036976365746,
+     "n": 3,
+     "spread_pct": 2.7935075675585264
+    },
+    "stalls_total_frac_cycles": {
+     "min": 0.3921122594575856,
+     "median": 0.3935859320723841,
+     "max": 0.39709319744504884,
+     "n": 3,
+     "spread_pct": 1.2655274443465627
+    },
+    "mlp": {
+     "min": 2.1111315161514654,
+     "median": 2.149836398720003,
+     "max": 2.15283164632726,
+     "n": 3,
+     "spread_pct": 1.9396885363287466
+    },
+    "cycles_per_row_vs_primary_pct": 0.9776690722197223
+   }
+  },
+  "llc-s6-N16": {
+   "n_reps": 3,
+   "S": 6,
+   "N": 16,
+   "server_cpus": "0-5,64-69",
+   "numa_node": 0,
+   "aligned": {
+    "cycles_per_row": {
+     "min": 37147.4633034596,
+     "median": 37284.93928962734,
+     "max": 37356.49686350417,
+     "n": 3,
+     "spread_pct": 0.5606380593000699
+    },
+    "instructions_per_row": {
+     "min": 38635.68110917321,
+     "median": 38685.5568542869,
+     "max": 38717.07756764353,
+     "n": 3,
+     "spread_pct": 0.2104052909898877
+    },
+    "ipc": {
+     "min": 1.0355777469080931,
+     "median": 1.0384106372519857,
+     "max": 1.0400624342382758,
+     "n": 3,
+     "spread_pct": 0.43187994896227416
+    },
+    "rows_per_s": {
+     "min": 1115166.0019126015,
+     "median": 1117641.6190864954,
+     "max": 1123180.9954925412,
+     "n": 3,
+     "spread_pct": 0.717134494909984
+    },
+    "events_per_row": {
+     "LLC-loads": {
+      "min": 87.64692735821069,
+      "median": 88.1672832669565,
+      "max": 89.02501853375436,
+      "n": 3,
+      "spread_pct": 1.563041441768181
+     },
+     "LLC-load-misses": {
+      "min": 37.9057499914581,
+      "median": 38.08080947226049,
+      "max": 38.287005743721785,
+      "n": 3,
+      "spread_pct": 1.001175546285078
+     },
+     "cache-references": {
+      "min": 406.1854850383385,
+      "median": 407.3397831096605,
+      "max": 412.51939730470247,
+      "n": 3,
+      "spread_pct": 1.5549456569182631
+     },
+     "cache-misses": {
+      "min": 129.6600164473273,
+      "median": 130.12802517694237,
+      "max": 130.67352511236612,
+      "n": 3,
+      "spread_pct": 0.7788550265484231
+     },
+     "L1-dcache-loads": {
+      "min": 9096.373870515814,
+      "median": 9140.758843118187,
+      "max": 9140.849422549338,
+      "n": 3,
+      "spread_pct": 0.4865630173255059
+     },
+     "L1-dcache-load-misses": {
+      "min": 578.4290974876809,
+      "median": 578.9213174872725,
+      "max": 589.0787161701295,
+      "n": 3,
+      "spread_pct": 1.8395623655165747
+     },
+     "dTLB-load-misses": {
+      "min": 8.556435614479398,
+      "median": 8.55833448463311,
+      "max": 8.677186205953998,
+      "n": 3,
+      "spread_pct": 1.4109122714403535
+     },
+     "branch-misses": {
+      "min": 62.582278549118435,
+      "median": 62.94924788035838,
+      "max": 63.76827657869287,
+      "n": 3,
+      "spread_pct": 1.8840543287007148
+     }
+    }
+   },
+   "interior": {
+    "cycles_per_row": {
+     "min": 37462.17257162908,
+     "median": 37585.79901237826,
+     "max": 37649.504149919114,
+     "n": 3,
+     "spread_pct": 0.49841052528466195
+    },
+    "instructions_per_row": {
+     "min": 38955.22130748748,
+     "median": 38987.56455831325,
+     "max": 38992.3376338315,
+     "n": 3,
+     "spread_pct": 0.09520042291562768
+    },
+    "ipc": {
+     "min": 1.0355399211385634,
+     "median": 1.0374220758481154,
+     "max": 1.039854835781444,
+     "n": 3,
+     "spread_pct": 0.41592662652307244
+    },
+    "rows_per_s": {
+     "min": 1113156.7547618474,
+     "median": 1115060.6800943841,
+     "max": 1118999.3267519062,
+     "n": 3,
+     "spread_pct": 0.5239689726629239
+    },
+    "events_per_row": {
+     "LLC-loads": {
+      "min": 88.68731552746452,
+      "median": 89.58800900552274,
+      "max": 89.66593755972926,
+      "n": 3,
+      "spread_pct": 1.0923582777739933
+     },
+     "LLC-load-misses": {
+      "min": 38.9459438072229,
+      "median": 39.115762430047134,
+      "max": 39.23077511766496,
+      "n": 3,
+      "spread_pct": 0.7281752744854144
+     },
+     "cache-references": {
+      "min": 406.7296828537239,
+      "median": 412.48286541177424,
+      "max": 414.43995787340833,
+      "n": 3,
+      "spread_pct": 1.869235225562016
+     },
+     "cache-misses": {
+      "min": 130.75404056887868,
+      "median": 132.0786529042233,
+      "max": 132.61395670631822,
+      "n": 3,
+      "spread_pct": 1.4081883003366615
+     }
+    }
+   },
+   "dram_GB_per_s": {
+    "min": 24.59817178999467,
+    "median": 24.709619690154668,
+    "max": 24.81903457621333,
+    "n": 3,
+    "spread_pct": 0.8938332074235086
+   },
+   "dram_far_socket_fraction": {
+    "min": 0.011350185938032858,
+    "median": 0.011435016976115726,
+    "max": 0.01189585049620058,
+    "n": 3,
+    "spread_pct": 4.771873616868685
+   },
+   "dram_per_socket_GB_per_s": {
+    "S0": {
+     "min": 24.31689127799467,
+     "median": 24.429160912213334,
+     "max": 24.523791051434664,
+     "n": 3,
+     "spread_pct": 0.846937699512035
+    },
+    "S1": {
+     "min": 0.28045877794133334,
+     "median": 0.28128051200000004,
+     "max": 0.2952435247786667,
+     "n": 3,
+     "spread_pct": 5.256228642435556
+    }
+   },
+   "ipc_group_agreement_max": 0.0039525271663296314,
+   "client_utilisation_max": 0.11677402974920352,
+   "stalls": {
+    "n_reps": 3,
+    "cycles_per_row": {
+     "min": 37079.2011458388,
+     "median": 37261.94253473741,
+     "max": 37338.626039752555,
+     "n": 3,
+     "spread_pct": 0.6962194568141625
+    },
+    "instructions_per_row": {
+     "min": 38606.0380578018,
+     "median": 38669.482066517245,
+     "max": 38673.74209812124,
+     "n": 3,
+     "spread_pct": 0.17508390777766183
+    },
+    "ipc": {
+     "min": 1.035642876236201,
+     "median": 1.0378885121747927,
+     "max": 1.041177718634166,
+     "n": 3,
+     "spread_pct": 0.5332790885571277
+    },
+    "stalls_l3_miss_per_row": {
+     "min": 5077.098925210026,
+     "median": 5111.583145849011,
+     "max": 5136.731259578389,
+     "n": 3,
+     "spread_pct": 1.1666118434714001
+    },
+    "stalls_l2_miss_per_row": {
+     "min": 7163.241774190456,
+     "median": 7231.26014146639,
+     "max": 7280.537875484284,
+     "n": 3,
+     "spread_pct": 1.6220699988541933
+    },
+    "stalls_total_per_row": {
+     "min": 18581.78492289788,
+     "median": 18707.74795468334,
+     "max": 18792.772751948596,
+     "n": 3,
+     "spread_pct": 1.1278098762170663
+    },
+    "stalls_l3_miss_frac_cycles": {
+     "min": 0.1369257904246894,
+     "median": 0.13717972811223522,
+     "max": 0.1375715125165444,
+     "n": 3,
+     "spread_pct": 0.4707124738771212
+    },
+    "stalls_l2_miss_frac_cycles": {
+     "min": 0.19318759716575903,
+     "median": 0.19406557064825739,
+     "max": 0.19498676431567308,
+     "n": 3,
+     "spread_pct": 0.9270923966080634
+    },
+    "stalls_total_frac_cycles": {
+     "min": 0.5011376822767178,
+     "median": 0.5020604585293172,
+     "max": 0.5033064883517909,
+     "n": 3,
+     "spread_pct": 0.43198105690819644
+    },
+    "mlp": {
+     "min": 2.195903841271461,
+     "median": 2.2008539206438136,
+     "max": 2.203766348573881,
+     "n": 3,
+     "spread_pct": 0.3572480312605354
+    },
+    "cycles_per_row_vs_primary_pct": -0.061678402400743945
+   }
+  }
+ },
+ "penalty_table": {
+  "L1d_32K": {
+   "ws_MiB": 0.0,
+   "buf_MiB": 512.0,
+   "cycles_per_access": 6.11,
+   "ns_per_access": 2.11,
+   "llc_loads_per_access": 0.0,
+   "llc_misses_per_access": 0.0,
+   "dtlb_misses_per_access": 0.0
+  },
+  "L2_512K": {
+   "ws_MiB": 0.5,
+   "buf_MiB": 512.0,
+   "cycles_per_access": 18.57,
+   "ns_per_access": 6.4,
+   "llc_loads_per_access": 0.0005,
+   "llc_misses_per_access": 0.0001,
+   "dtlb_misses_per_access": 0.0
+  },
+  "LLC_8M": {
+   "ws_MiB": 8.0,
+   "buf_MiB": 528.0,
+   "cycles_per_access": 90.44,
+   "ns_per_access": 31.19,
+   "llc_loads_per_access": 1.0093,
+   "llc_misses_per_access": 0.0063,
+   "dtlb_misses_per_access": 0.0154
+  },
+  "LLC_32M": {
+   "ws_MiB": 32.0,
+   "buf_MiB": 576.0,
+   "cycles_per_access": 114.78,
+   "ns_per_access": 39.58,
+   "llc_loads_per_access": 1.0299,
+   "llc_misses_per_access": 0.0515,
+   "dtlb_misses_per_access": 0.7634
+  },
+  "DRAM_256M": {
+   "ws_MiB": 256.0,
+   "buf_MiB": 1024.0,
+   "cycles_per_access": 393.5,
+   "ns_per_access": 135.69,
+   "llc_loads_per_access": 1.4214,
+   "llc_misses_per_access": 1.1129,
+   "dtlb_misses_per_access": 1.1176
+  },
+  "DRAM_1G": {
+   "ws_MiB": 1024.0,
+   "buf_MiB": 2560.0,
+   "cycles_per_access": 499.78,
+   "ns_per_access": 172.34,
+   "llc_loads_per_access": 3.155,
+   "llc_misses_per_access": 1.9047,
+   "dtlb_misses_per_access": 1.6606
+  },
+  "DRAM_2G": {
+   "ws_MiB": 2048.0,
+   "buf_MiB": 4608.0,
+   "cycles_per_access": 581.76,
+   "ns_per_access": 200.61,
+   "llc_loads_per_access": 5.0429,
+   "llc_misses_per_access": 2.9016,
+   "dtlb_misses_per_access": 2.3757
+  }
+ },
+ "penalty_summary_path": "docs/reports/ws0-3224-artifacts/penalty/summary.txt",
+ "delta": {
+  "aligned": {
+   "cycles_per_row_low": 31316.37000955026,
+   "cycles_per_row_high": 37284.93928962734,
+   "delta_cycles_per_row": 5968.569280077081,
+   "delta_pct": 19.058943543766098,
+   "instructions_per_row_low": 38856.81105849161,
+   "instructions_per_row_high": 38685.5568542869,
+   "instructions_per_row_delta_pct": -0.4407314947871437,
+   "ipc_low": 1.2375857144721263,
+   "ipc_high": 1.0384106372519857,
+   "ipc_delta_pct": -16.09384100761827
+  },
+  "interior": {
+   "cycles_per_row_low": 31457.020881301676,
+   "cycles_per_row_high": 37585.79901237826,
+   "delta_cycles_per_row": 6128.778131076582,
+   "delta_pct": 19.483021466662727,
+   "instructions_per_row_low": 38907.326183525634,
+   "instructions_per_row_high": 38987.56455831325,
+   "instructions_per_row_delta_pct": 0.2062294756754336,
+   "ipc_low": 1.2304852985097017,
+   "ipc_high": 1.0374220758481154,
+   "ipc_delta_pct": -15.69000644667711
+  }
+ },
+ "denominator_convention_check": {
+  "aligned_delta_cycles_per_row": 5968.569280077081,
+  "interior_delta_cycles_per_row": 6128.778131076582,
+  "abs_difference": 160.208850999501,
+  "relative_difference_pct": 2.6842086182072764,
+  "aligned_cycles_per_row_s1N2": 31316.37000955026,
+  "interior_cycles_per_row_s1N2": 31457.020881301676,
+  "s1N2_relative_difference_pct": 0.449128911519829,
+  "note": "#3217 computed cycles/row with counters from a 20 s interior window and rows/s from the whole loadgen step. Both conventions are computed here on the same host from the same reps; if they agree, #3217's baseline convention is sound."
+ },
+ "ac4_accounting": {
+  "convention": "aligned",
+  "delta_cycles_per_row": 5639.402061061886,
+  "delta_pct": 17.8334883174755,
+  "instructions_per_row_delta_pct": -0.4407314947871437,
+  "components": {
+   "measured_l3_miss_stalls": {
+    "source": "cycle_activity.stalls_l3_miss (hardware-counted)",
+    "per_row_low": 1290.3204022798127,
+    "per_row_high": 5111.583145849011,
+    "delta_cycles_per_row": 3821.2627435691984,
+    "share_of_delta_pct": 67.76006928028224
+   },
+   "measured_all_execution_stalls": {
+    "source": "cycle_activity.stalls_total (hardware-counted)",
+    "per_row_low": 12436.48824323919,
+    "per_row_high": 18707.74795468334,
+    "delta_cycles_per_row": 6271.259711444149,
+    "share_of_delta_pct": 111.20433768581637,
+    "note": "a SUPERSET of memory stalls; the gap between this and the l3_miss term is stall cycles the memory system did NOT cause"
+   },
+   "measured_l2_miss_stalls": {
+    "source": "cycle_activity.stalls_l2_miss (hardware-counted)",
+    "per_row_low": 2752.6386720322307,
+    "per_row_high": 7231.26014146639,
+    "delta_cycles_per_row": 4478.62146943416,
+    "share_of_delta_pct": 79.41660163508267,
+    "note": "superset of the l3_miss term: includes L2 misses that HIT in the L3, so the difference is L3-hit stall cost"
+   },
+   "modelled_llc_miss_charge": {
+    "source": "serial dependent chase on THIS host: DRAM_256M 393.50 cyc/access - LLC_8M 90.44 cyc/access = 303.06 cycles per miss",
+    "penalty_cycles_per_miss": 303.06,
+    "delta_misses_per_row": 26.14620348934596,
+    "charge_zero_mlp": 7923.868429481187,
+    "charge_zero_mlp_share_of_delta_pct": 140.50901751078803,
+    "measured_mlp_at_high_point": 2.2008539206438136,
+    "charge_mlp_corrected": 3600.3609122604676,
+    "charge_mlp_corrected_share_of_delta_pct": 63.842954860759264,
+    "caveat": "the DRAM_256M row carries 1.12 dTLB misses/access, so its latency BUNDLES a page-table walk and the penalty is an OVERestimate; dTLB is also charged separately below, so the two terms partly double-count"
+   },
+   "modelled_dtlb_charge": {
+    "delta_misses_per_row": 1.5142383969907005,
+    "note": "small in absolute terms (7.04 -> 8.56 per row); listed for completeness. Not added to the headline, because the measured stall term already contains any stall a walk caused."
+   }
+  },
+  "notes": [],
+  "delta_cycles_per_row_primary_arm": 5968.569280077081,
+  "delta_cycles_per_row_groupC_arm": 5639.402061061886,
+  "delta_basis": "group C own arm (stall numerators and the cycles denominator share one interval)",
+  "delta_arm_agreement_pct": -5.515010441680654,
+  "attributed_cycles_per_row": 3821.2627435691984,
+  "attributed_basis": "measured cycle_activity.stalls_l3_miss delta",
+  "residual_cycles_per_row": 1818.139317492688,
+  "residual_pct_of_delta": 32.23993071971777,
+  "mlp_low": 2.149836398720003,
+  "mlp_high": 2.2008539206438136,
+  "additive_decomposition": {
+   "parts_cycles_per_row": {
+    "l3_miss_stalls_DRAM": 3821.2627435691984,
+    "l2_miss_l3_hit_stalls_LLC": 657.3587258649613,
+    "other_stalls_non_memory": 1792.638242009989,
+    "non_stalled_cycles": -631.8576503822624
+   },
+   "parts_pct_of_delta": {
+    "l3_miss_stalls_DRAM": 67.76006928028224,
+    "l2_miss_l3_hit_stalls_LLC": 11.656532354800435,
+    "other_stalls_non_memory": 31.787736050733706,
+    "non_stalled_cycles": -11.204337685816377
+   },
+   "sum_cycles_per_row": 5639.402061061886,
+   "closure_error_cycles_per_row": 0.0,
+   "memory_attributed_cycles_per_row": 4478.62146943416,
+   "memory_attributed_pct": 79.41660163508267,
+   "non_memory_cycles_per_row": 1160.7805916277266,
+   "non_memory_pct": 20.583398364917333,
+   "note": "the three cycle_activity stall counters NEST, so the differenced buckets are disjoint and sum to the measured delta by construction (closure_error is a float-rounding check, and must be ~0). Two defensible residuals follow: strict DRAM boundary -> residual is everything but l3_miss_stalls; whole-cache boundary -> residual is other_stalls + non_stalled."
+  },
+  "marginal_efficiency": {
+   "basis": "primary arm throughput vs primary arm cycles/row inflation",
+   "rows_per_s_low": 222329.07469209892,
+   "rows_per_s_high": 1117641.6190864954,
+   "throughput_ratio": 5.026970137101074,
+   "core_ratio": 6.0,
+   "measured_efficiency": 0.8378283561835124,
+   "predicted_from_cycles_per_row": 0.8399201019555492,
+   "note": "efficiency predicted purely from the cycles/row inflation vs the efficiency actually measured from throughput. These are the same quantity by two routes; the gap is a check on this arithmetic, not a target.",
+   "gap_pp": -0.2091745772036857
+  }
+ }
+}

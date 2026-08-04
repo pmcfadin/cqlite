@@ -1,0 +1,27 @@
+== #3226 acceptance: every headline re-derives from COMMITTED artefacts alone ==
+
+Procedure, run 2026-08-04T04:14:34Z:
+
+    git worktree add --detach /tmp/clean-3224 7cb478a67e6f35e955e0a91f7ddad675855f74ef
+    cd /tmp/clean-3224/docs/reports/ws0-3224-artifacts
+    python3 results/derive.py results --penalty-summary penalty/summary.txt
+
+The clean detached checkout reads ONLY committed inputs. It has NO access to
+/data/ws0, where the captures were produced. Nothing in the report is a number
+typed by hand: the window, the row counts, the CPU sets and the corpus size are
+all READ from the artefacts.
+
+commit verified: 7cb478a67e6f35e955e0a91f7ddad675855f74ef
+
+-- diff against the committed results/derived-summary.txt --
+(empty diff -- BYTE-FOR-BYTE IDENTICAL)
+
+NOTE FOR A REVIEWER. Commits after 7cb478a touch only
+docs/reports/ws0-3224-report.md (report prose). They cannot affect this
+re-derivation, which depends solely on results/ and penalty/. Verify that with:
+
+    git diff --stat 7cb478a..HEAD -- \
+      docs/reports/ws0-3224-artifacts/results \
+      docs/reports/ws0-3224-artifacts/penalty
+
+An empty result means the inputs to this transcript are unchanged.

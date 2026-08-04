@@ -1,0 +1,12 @@
+mode=chase
+arm=gate-probe
+gate=fifo
+buffer_bytes=2147483648
+working_set_bytes=2147483648
+nodes=33554432
+accesses=1000
+init_s=1.3143
+chase_s=0.0002
+ns_per_access=213.571
+checksum=16827540310
+init_overrun=0

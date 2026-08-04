@@ -1,0 +1,6 @@
+cycles               PROGRAMS
+instructions         PROGRAMS
+LLC-loads            ABSENT_EVENT_NAME
+LLC-load-misses      ABSENT_EVENT_NAME
+cache-references     PROGRAMS
+cache-misses         PROGRAMS
