@@ -104,6 +104,7 @@ static void *alloc_buf(size_t bytes) {
  * deliberately outside the measured window.
  */
 static void wait_for_window(double delay_s, double init_s) {
+    if (delay_s <= 0.0) return;   /* no perf -D window to wait for */
     double elapsed = now_s() - g_start;
     if (elapsed >= delay_s) {
         printf("init_overrun=1\ninit_s=%.3f\ndelay_s=%.3f\n", init_s, delay_s);

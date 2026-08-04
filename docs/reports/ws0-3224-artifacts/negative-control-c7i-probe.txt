@@ -1,0 +1,54 @@
+==== WS0 #3224 NEGATIVE CONTROL — virtualized c7i.4xlarge capability probe ====
+Host:      c7i.4xlarge, us-west-2 (worker box ip-172-31-5-109)
+CPU:       Intel(R) Xeon(R) Platinum 8488C (Sapphire Rapids), 8 physical / 16 threads
+Virt:      Hypervisor vendor: KVM, Virtualization type: full
+Sysctls:   kernel.perf_event_paranoid=-1   kernel.kptr_restrict=0   (already permissive)
+Date:      2026-08-04
+Status:    NOT AC1's artefact. AC1 belongs to the target host (i4i.metal). This is a
+           negative control: evidence that virtualized substitution is barred.
+
+---- perf stat -e LLC-load-misses,LLC-loads,cache-references,cycles,instructions true ----
+
+   <not supported>      LLC-load-misses
+   <not supported>      LLC-loads
+                 0      cache-references
+            881469      cycles
+            714067      instructions   # 0.81 insn per cycle
+
+---- ls /sys/bus/event_source/devices/  (AUTHORITATIVE PMU list) ----
+
+breakpoint  cpu  kprobe  msr  software  tracepoint  uprobe
+
+   => ZERO uncore devices. Compare the #3224 target host i4i.metal: 88 uncore devices
+      (uncore_imc_0..11, uncore_cha_0..35, uncore_m2m_*, uncore_upi_*).
+
+   => CAUTION: `perf list | grep -ci uncore` returns 15 on THIS box and is MISLEADING.
+      Those are per-CPU-model JSON event-table entries shipped with perf, not PMUs
+      present on the host. sysfs is the authoritative test.
+
+---- perf list ----
+
+   Knows only L1-dcache-* and L1-icache-* hardware cache events. No LLC events at all.
+
+---- perf stat -M MemoryBandwidth ----
+
+   Cannot find metric or group
+
+---- Findings ----
+
+1. No uncore PMU exists in the guest. AC3's uncore_imc/* bandwidth source and AC5's
+   saturation verdict are UNREACHABLE on any virtualized instance, not merely degraded.
+
+2. cache-references programs cleanly and returns a hard 0 over a process that executed
+   714,067 instructions. That is the silent-instrument class appearing in the first probe
+   of the very issue commissioned because of it. A positive control catches this; prose
+   characterization does not.
+
+3. perf_event_paranoid was ALREADY -1, so this is NOT a permission wall. #3249's fix is
+   confirmed working AND confirmed insufficient — two facts from one measurement.
+
+---- Related, recorded for the RUNBOOK ----
+
+   On the FRESH i4i.metal, kernel.perf_event_paranoid was found at 4. #3249's fix is NOT
+   baked into the golden AMI and is NOT persistent across reboot. Re-apply and re-verify
+   before trusting any capture.
