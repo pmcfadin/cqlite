@@ -32,6 +32,11 @@ MUX_MIN = 99.0            # enabled% floor; below this the count is an estimate
 # assertion and the summing loop cannot drift apart.
 IMC_COUNT = 12
 IMC_EXPECTED_INSTANCES = IMC_COUNT * 2
+# The dispersion floor named in this file's DESIGN RULES: min/median/max needs >= 3
+# points, because a delta between undispersed points cannot be defended (#3217 ran
+# reps=1). Single-homed so the primary-arm WARNING and the group-C refusal below
+# cannot drift apart.
+MIN_REPS = 3
 
 
 # --------------------------------------------------------------- perf CSV I/O
@@ -128,6 +133,35 @@ CORE_C = ['cycles', 'instructions', 'task-clock',
           'l1d_pend_miss.pending', 'l1d_pend_miss.pending_cycles']
 
 
+def assert_rc_all_zero(meta, repdir, which):
+    """Refuse a rep whose own meta file records a failed arm.
+
+    THE GATES ARE RE-CHECKED HERE rather than trusted, which is this script's
+    stated contract — but the `rc` block was the one recorded fact it never read
+    (roborev round 2 finding #1). Structurally parseable output from a failed perf
+    or load-generator invocation could therefore enter derived.json: perf wrapping
+    `sleep` still exits 0 when the load generator behind it died, so the CSV is
+    well-formed and only `rc` records that the rows it is divided by are wrong.
+
+    Enumerated from the dict, so an arm added later cannot default to unchecked —
+    the mistake that produced findings 4 and 5 twice over.
+    """
+    rc = meta.get('rc')
+    if not isinstance(rc, dict) or not rc:
+        raise SystemExit(
+            "FATAL: %s %s carries no 'rc' block. A capture with no recorded "
+            "return codes cannot be certified, and this script re-checks rather "
+            "than trusts." % (which, repdir))
+    nonzero = {k: v for k, v in rc.items() if v != 0}
+    if nonzero:
+        raise SystemExit(
+            "FATAL: %s %s records nonzero arm(s) %s (all of %s must be 0). The "
+            "counter files may parse cleanly and still be wrong: a dead load "
+            "generator leaves perf's own rc at 0 while the row counts every "
+            "per-row figure divides by are invalid."
+            % (which, repdir, nonzero, sorted(rc)))
+
+
 def do_stalls(repdir):
     """Group C for one rep, or None if this rep has no stalls arm.
 
@@ -140,6 +174,7 @@ def do_stalls(repdir):
     if not (os.path.exists(meta_p) and os.path.exists(csv_p)):
         return None
     meta = json.load(open(meta_p))
+    assert_rc_all_zero(meta, repdir, 'stalls rep')
     rows = meta['occupancy']['alignedC']['rows_total']
     problems = []
     if not meta['occupancy']['alignedC'].get('ok'):
@@ -209,6 +244,7 @@ def do_rep(repdir):
     occ = meta['occupancy']
 
     # ---- validity gates, re-checked here rather than trusted from meta ----
+    assert_rc_all_zero(meta, repdir, 'rep')
     problems = []
     for arm, o in occ.items():
         if not o or not o.get('ok'):
@@ -420,7 +456,7 @@ def main():
         e = {'n_reps': len(rs), 'S': rs[0]['S'], 'N': rs[0]['N'],
              'server_cpus': rs[0]['server_cpus'],
              'numa_node': rs[0]['numa_node']}
-        if len(rs) < 3:
+        if len(rs) < MIN_REPS:
             e['WARNING'] = ("only %d rep(s) — #3217's undispersed reps=1 gap is "
                             "not closed at this endpoint" % len(rs))
         for conv in ('aligned', 'interior'):
@@ -447,7 +483,42 @@ def main():
         e['client_utilisation_max'] = max(x['client_utilisation'] for x in rs)
 
         # ---- group C: the MEASURED stall arm, if this tree has one ----------
+        #
+        # GROUP C IS ALL-OR-NOTHING, AND NEVER FEWER THAN MIN_REPS (roborev round 2
+        # finding #2). `do_stalls` returns None for a rep with no stalls arm, and this
+        # block used to aggregate whatever survived — so a tree in which group C had
+        # failed for two of three reps produced the HEADLINE measured attribution and
+        # residual from ONE rep, silently, with no warning and no visible dispersion.
+        #
+        # That defeats this script's own stated design rule: ">=3 reps -> min/median/
+        # max, because a delta between two undispersed points cannot be defended
+        # (#3217 ran reps=1)". #3217's central method gap was undispersed points, and
+        # a partial group C reintroduces it in exactly the term the report leads with,
+        # while `n_reps` recorded the shrinkage in a field no conclusion reads.
+        #
+        # Optional-in-full stays supported (the AC4 accounting falls back to the
+        # modelled charge and says so), because a tree that never captured group C is
+        # a different situation from one whose capture failed. What is refused is the
+        # SUBSET: present for some reps and not others is a failed capture, not a
+        # design choice.
         st = [x['stalls'] for x in rs if x['stalls']]
+        if st and len(st) != len(rs):
+            raise SystemExit(
+                "FATAL: %s has group-C (stalls) data for %d of %d reps. Group C is "
+                "all-or-nothing: a PARTIAL set would derive the headline measured "
+                "attribution from a reduced, silently-undispersed sample, which is "
+                "#3217's method gap in the one term this report leads with. Either "
+                "re-run the missing stalls captures (run/capture-stalls.sh) or "
+                "remove the partial ones so the accounting falls back to the "
+                "modelled charge explicitly. Reps with group C: %s"
+                % (label, len(st), len(rs),
+                   sorted(os.path.basename(x['repdir']) for x in st)))
+        if st and len(st) < MIN_REPS:
+            raise SystemExit(
+                "FATAL: %s has group-C data for only %d rep(s); this script's "
+                "dispersion rule needs >= %d. A delta between undispersed points "
+                "cannot be defended (#3217 ran reps=1), and the AC4 headline is "
+                "computed from this arm." % (label, len(st), MIN_REPS))
         if st:
             e['stalls'] = {
                 'n_reps': len(st),

@@ -23,6 +23,57 @@ re-confirmed; `guard-selftest/selftest-output.txt` is the final unmutated run.
 | ⑤ | delete `rep-complete.py`'s rc and counter-file checks (i.e. restore the old three-condition predicate) | 4 | **caught** — the failed-loadgen rep, the empty CSV, the absent CSV and the multiplexed row were all certified "complete and safe to skip" again |
 | ⑥ | `sys.exit(0)` before the terminal verdict block | 2 | **caught** — INDETERMINATE and UNAVAILABLE byte accounting both reported success again |
 
+## Round 2 — seven further findings, same method
+
+The round-1 fixes were themselves reviewed, and the round found seven more fail-opens of
+the same class — **three of them in code the round-1 fixes had just introduced**, which is
+the pattern CLAUDE.md records for #3229. Same mutation treatment:
+
+| # | mutation applied | cases that flipped | result |
+|---|---|--:|---|
+| 1 | remove `derive.py`'s `assert_rc_all_zero` calls | 2 | **caught** — a rep with `rc.loadgen_interior=1` and a rep with a failed group-C arm both derived cleanly |
+| 2 | remove `derive.py`'s group-C all-or-nothing refusal | 1 | **caught** — group C for 1 of 3 reps derived the headline from a single undispersed rep |
+| 3 | neuter `ac5-analyse.py`'s IMC roster assertion | 2 | **caught** — both the truncated capture and the near-zero-rows capture resolved successfully |
+| 4 | neuter `ac5-analyse.py`'s duplicate-row check | 1 | **caught** — the duplicate row was silently overwritten again |
+| 5 | revert the `MUX_UNREADABLE` marker in `verdict-logic.sh` | 2 | **caught** — an unreadable enabled% on either arm read `OK` |
+| 6 | make `rep-complete.py`'s roster/event-set differences empty | 3 | **caught** — partial `rc` block, partial `perf_files`, and a CSV truncated to 2 of 7 events all certified complete |
+| 7 | change the `--quick` branch condition to `elif false` | 2 | **caught — but only after the test was rewritten; see below** |
+| 8 | disable `penalty-probe.sh`'s row-parser `problems` exit | 1 | **caught** — a `cycles` counter at 43% enabled was published as a latency |
+
+### The mutation run found a defect in the TEST, and this is the part worth keeping
+
+**Mutation 7 initially passed 59/59 with the fix reverted.** The `--quick` case had been
+written as a source-text match: it asserted that the string `QUICK_MECHANICS` appears in
+the final-verdict block and appears before `RESULT=PASS`. Against a mutant whose branch
+condition was changed to `elif false`, every one of those assertions still held — the text
+was all present, and the branch was simply unreachable.
+
+**That is precisely the defect class these fourteen findings are made of**: a presence test
+standing in for a behaviour test, passing because nothing bad was found rather than because
+something good was measured. It was written *while fixing seven instances of that exact
+shape*, which is worth recording plainly rather than quietly repairing — the shape is not
+something one stops being susceptible to by understanding it.
+
+It is now a behaviour test: the committed decision block is **extracted and executed** with
+injected state, asserting the `RESULT`/`RC` pair it actually produces, across four
+combinations. Re-run against the same mutant, it fails 2 cases.
+
+**The generalisable rule, since it applied to two cases here:** where a guard cannot be
+invoked directly (it lives inside a heredoc, or deep in a script needing perf and root),
+extract the committed source **text** and **run it**. Do not assert on the text. The
+`capture-endpoint.sh` metadata gate and this `--quick` verdict are both tested that way, and
+in both cases testing a transcription instead would have proved only that the transcription
+works — the porting lesson CLAUDE.md records from #3229.
+
+### One honest limitation of mutation 8
+
+Only 1 of the 5 row-parser cases flips under mutation 8. The other four (`<not counted>`
+cycles, zero cycles, absent `LLC-load-misses`) still fail with the `problems` exit disabled,
+because the mutant then hits a `TypeError` or a later explicit refusal downstream. They do
+pin the property that matters — the parser refuses the input rather than publishing a
+number — but they do not specifically pin the `problems` list. Recorded rather than
+presented as five independent demonstrations.
+
 ## The two results worth reading twice
 
 **②a and ②b are the interesting pair, and they are why there are two checks rather

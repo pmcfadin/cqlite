@@ -129,28 +129,91 @@ probe() { # $1 label  $2 mode  $3 size-arg
     "See $OUT/run-$label.log. A row whose measured section did not run cannot yield an access latency." \
     || exit 1
   python3 - "$csv" "$label" "$work_kib" "$ACCESSES" "$CPU_GHZ" "$buf_mib" >> "$OUT/summary.txt" <<'PY'
-import sys
+import math, sys
 csv,label,size,acc,ghz,buf = sys.argv[1:7]
 acc=float(acc); ghz=float(ghz)
-vals={}
+
+# EVERY REQUIRED EVENT MUST BE PRESENT, NUMERIC, FINITE AND UNMULTIPLEXED BEFORE A
+# ROW IS EMITTED (roborev round 2 finding #4).
+#
+# This parser used to reach for each counter with `vals.get(...)` and paper over the
+# result: a missing or `<not supported>` `cycles` became `None` and then
+# `cpa = nan`, printed into the summary table as a latency; a missing LLC or dTLB
+# counter became `(ll or 0)/acc`, i.e. a confident 0.0000 per access. And the
+# enabled percentage was never read at all, so a multiplexed estimate was
+# indistinguishable from a count. run/penalty-window-check.py validates only
+# `instructions`, so nothing else in the pipeline would have caught it either — the
+# script could exit 0 with an unusable cycles or miss measurement in the published
+# table.
+#
+# `(x or 0)` is worth naming as its own hazard: it maps BOTH "absent" and "genuinely
+# zero" onto 0, so it destroys the very distinction the #3217 silent-instrument
+# lesson turns on. A real 0 is a finding; an absent counter is a failure. They must
+# not print the same.
+REQUIRED = ('cycles', 'instructions', 'LLC-loads', 'LLC-load-misses',
+            'dTLB-load-misses')
+MUX_MIN = 99.0
+
+vals={}; enabled={}
 for line in open(csv):
     line=line.strip()
     if not line or line.startswith('#'): continue
     f=line.split(',')
     if len(f)<5: continue
-    try: v=float(f[0])
-    except ValueError: continue
     # perf STRIPS the :u modifier from exactly the LLC event names (the bug that
     # false-FAILed the positive control), so key on the base name.
-    vals[f[2].split(':')[0]]=v
-c=vals.get('cycles'); ll=vals.get('LLC-loads'); lm=vals.get('LLC-load-misses')
-dt=vals.get('dTLB-load-misses')
-cpa = c/acc if c else float('nan')
+    name=f[2].split(':')[0]
+    try: v=float(f[0])
+    except ValueError:
+        # Keep the unreadable token so the diagnosis can name it rather than
+        # reporting the event as merely absent.
+        vals.setdefault(name, f[0]); continue
+    vals[name]=v
+    try: enabled[name]=float(f[4])
+    except ValueError: enabled[name]=None
+
+problems=[]
+for name in REQUIRED:
+    if name not in vals:
+        problems.append('%s ABSENT from the CSV' % name); continue
+    v=vals[name]
+    if not isinstance(v, float):
+        problems.append('%s reads %r (not a number)' % (name, v)); continue
+    if not math.isfinite(v):
+        problems.append('%s is non-finite (%r)' % (name, v)); continue
+    e=enabled.get(name)
+    if e is None:
+        problems.append('%s has an unreadable enabled%% — an unverifiable count is '
+                        'not a usable one' % name); continue
+    if e < MUX_MIN:
+        problems.append('%s only %.2f%% enabled (floor %.0f%%): a MULTIPLEXED '
+                        'ESTIMATE, not a count' % (name, e, MUX_MIN))
+if problems:
+    sys.exit("FATAL: penalty probe row '%s' (%s KiB working set) cannot be "
+             "published:\n  - %s\nRemedy: split the event group so nothing "
+             "multiplexes, and confirm this host programs all five events "
+             "(positive-control.sh's event probe reports which)."
+             % (label, size, '\n  - '.join(problems)))
+
+c=vals['cycles']; ll=vals['LLC-loads']; lm=vals['LLC-load-misses']
+dt=vals['dTLB-load-misses']
+if c <= 0:
+    sys.exit("FATAL: penalty probe row '%s' counted %r cycles. A chase of %d "
+             "accesses cannot take zero cycles; this is a failed capture, not a "
+             "measurement of zero." % (label, c, int(acc)))
+cpa = c/acc
 ws_mib = float(size)/1024.0
 print('%-10s %9.1f %7s %13.2f %11.2f %11.4f %11.4f %11.4f'
-      % (label, ws_mib, buf, cpa, cpa/ghz, (ll or 0)/acc, (lm or 0)/acc,
-         (dt or 0)/acc))
+      % (label, ws_mib, buf, cpa, cpa/ghz, ll/acc, lm/acc, dt/acc))
 PY
+  # The parser above now REFUSES a row it cannot certify, so its exit code has to be
+  # read. Left unchecked it would be the same fail-open one layer down: the row simply
+  # would not appear in the table while the sweep carried on to the next level, and a
+  # penalty would be computed from whichever rows happened to survive.
+  local prc=$?
+  ws0_guard_rc "penalty probe row '$label' counter validation" "$prc" \
+    "See $csv. Every required counter must be present, finite and >= 99% enabled before a latency is published." \
+    || exit 1
 }
 
 # Sweep the hierarchy. Sizes in KiB. The DRAM points bracket the LLC->DRAM

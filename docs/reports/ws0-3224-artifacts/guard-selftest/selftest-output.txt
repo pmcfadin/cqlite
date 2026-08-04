@@ -1,7 +1,7 @@
 # #3224 guard selftest — recorded output
 # host: ip-172-31-3-252 / 6.17.0-1019-aws
-# date: 2026-08-04T06:47:13Z
-# commit: bfba09c72bf8b02937a8b29d0627a5aafaf4a840
+# date: 2026-08-04T07:12:44Z
+# commit: 350e9cfff4c9d1f43c91119294c288b9a0ab3934
 # command: bash docs/reports/ws0-3224-artifacts/selftest-guards.sh
 
 ==== #3224 GUARD SELFTEST ====
@@ -18,6 +18,14 @@ artefact root: /home/ubuntu/workspace/wt-3224/docs/reports/ws0-3224-artifacts
    PASS  multiplexed HOSTILE arm (87% enabled): rejected, not warned -> UNRELIABLE_MULTIPLEXED
    PASS  multiplexed FRIENDLY arm (87% enabled): also rejected (old code saw only hostile) -> UNRELIABLE_MULTIPLEXED
    PASS  multiplexed LLC-load-misses: rejected before the miss-rate branch is reached -> UNRELIABLE_MULTIPLEXED
+   PASS  UNREADABLE enabled% on the hostile arm: rejected (not treated as healthy) -> UNRELIABLE_MUX_UNREADABLE
+   PASS  ...and the reported mux figure says UNREADABLE rather than the other arm's 100 -> UNREADABLE
+   PASS  UNREADABLE enabled% on the friendly arm: also rejected -> UNRELIABLE_MUX_UNREADABLE
+   PASS  MUXMIN accumulator no longer defaults an unreadable percentage to 10000 (rc=0)
+   PASS  a REAL run with every counter usable: PASS / exit 0 -> PASS/0
+   PASS  --quick with every counter usable: NOT the PASS contract -> QUICK_MECHANICS/3
+   PASS  --quick with a failing counter: also non-zero, not FAIL's contract -> QUICK_MECHANICS/3
+   PASS  a REAL run with a failing counter: FAIL / exit 1 -> FAIL/1
 
 == FINDING 2 — penalty-probe window gating (run/penalty-window-check.py)
    PASS  committed (contaminated) penalty/ CSVs: REJECTED (rc=1)
@@ -25,6 +33,11 @@ artefact root: /home/ubuntu/workspace/wt-3224/docs/reports/ws0-3224-artifacts
    PASS  UNIFORMLY inflated sweep (30 instr/access, no cross-row signal): REJECTED by the ceiling (rc=1)
    PASS  ONE row +3.2% (real LLC_8M value, under the ceiling): REJECTED by cross-row uniformity (rc=1)
    PASS  empty penalty dir: REFUSED rather than passed vacuously (rc=1)
+   PASS  row parser: all five counters present, unmultiplexed: ACCEPTED (rc=0)
+   PASS  row parser: cycles reads <not counted>: REJECTED (was published as nan) (rc=1)
+   PASS  row parser: cycles at 43% enabled: REJECTED (was never checked at all) (rc=1)
+   PASS  row parser: cycles reads 0 for 20M accesses: REJECTED as a failed capture (rc=1)
+   PASS  row parser: LLC-load-misses ABSENT: REJECTED (was printed as 0.0000/access) (rc=1)
 
 == FINDING 4 — capture-endpoint rc roster (harness/guards.sh)
    PASS  all seven arms zero: accepted (rc=0)
@@ -44,6 +57,10 @@ artefact root: /home/ubuntu/workspace/wt-3224/docs/reports/ws0-3224-artifacts
    PASS  rep with perf-uncore.csv ABSENT: REFUSED (rc=1)
    PASS  rep with one counter row at 42% enabled: REFUSED (a scaled estimate is not a count) (rc=1)
    PASS  rep dir with no meta.json: REFUSED (rc=1)
+   PASS  rep with a PARTIAL rc block (2 of 6 arms, all zero): REFUSED (rc=1)
+   PASS  rep with a PARTIAL perf_files roster (1 of 4): REFUSED (rc=1)
+   PASS  rep with a TRUNCATED CSV (2 of 7 events, all readable): REFUSED (rc=1)
+   PASS  rep with an UNREADABLE enabled% in a CSV: REFUSED (not read as healthy) (rc=1)
 
 == FINDING 5b — derivation must not publish 0 GB/s (results/derive.py)
    PASS  committed results tree: derives cleanly (rc=0)
@@ -52,14 +69,22 @@ artefact root: /home/ubuntu/workspace/wt-3224/docs/reports/ws0-3224-artifacts
    PASS  results tree with perf-uncore.csv ABSENT: REFUSED (rc=1)
 dropped 2 S0 imc_11 rows
    PASS  results tree with a PARTIAL IMC set (2 rows dropped): REFUSED (rc=1)
+   PASS  results tree with rc.loadgen_interior=1: REFUSED by the derivation (rc=1)
+   PASS  results tree with a failed group-C arm (rc.alignedC=1): REFUSED (rc=1)
+   PASS  results tree with group C for 1 of 3 reps: REFUSED (was 1 undispersed rep) (rc=1)
+   PASS  results tree with NO group C anywhere: still derives (supported mode) (rc=0)
 
 == FINDING 6 — AC5 byte accounting (run/ac5-analyse.py)
    PASS  committed ac5-run (ratio 1.008): RESOLVED, accepted (rc=0)
    PASS  INDETERMINATE ratio (~3x, matches neither hypothesis): REJECTED (rc=1)
    PASS  byte accounting UNAVAILABLE (no 'elements' key): REJECTED (rc=1)
+   PASS  TRUNCATED IMC capture (18 of 24 instances on S0): REJECTED on the roster (rc=1)
+   PASS  IMC capture missing only the NEAR-ZERO S1 rows (ratio unmoved): REJECTED (rc=1)
+   PASS  DUPLICATE IMC row: REJECTED (was silently overwritten) (rc=1)
+   PASS  IMC row with an UNREADABLE enabled%: REJECTED (not read as healthy) (rc=1)
 
 ==== SELFTEST RESULT: PASS ====
-cases passed: 37   failed: 0
+cases passed: 62   failed: 0
 Every guard rejected the bad input it exists to catch, and accepted the
 good input committed in this PR. The healthy-host record is pinned, so
 re-inverting the finding-1 ordering fails here rather than on a good box.

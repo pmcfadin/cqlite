@@ -139,8 +139,10 @@
 #   ENV_ERROR          perf/cc/control-FIFO missing; nothing was measured
 #
 # Exit codes: 0 PASS · 1 FAIL (a required counter is unusable) · 2 ENV_ERROR or
-# usage · 3 INDETERMINATE. Anything other than 0 means STOP AND REPORT: do not
-# proceed to the #3224 measurement and do not characterize the gap in prose.
+# usage · 3 INDETERMINATE or QUICK_MECHANICS. Anything other than 0 means STOP AND
+# REPORT: do not proceed to the #3224 measurement and do not characterize the gap in
+# prose. NOTE that --quick can NEVER exit 0: it establishes nothing, so it must not
+# return the same contract as a real PASS (see the final verdict block).
 #
 # Dependency-light by design (bash + perf + cc + coreutils): it must run on a
 # fresh bare-metal box before any CQLite build exists.
@@ -194,7 +196,8 @@ usage: positive-control.sh [options]
   --stream-threads T STREAM-triad threads, 0=all   (default 0)
   --no-stream        skip the advisory bandwidth reference
   --quick            1 rep, 2M accesses, 512 MiB buffer (mechanics check only;
-                     NOT a valid gate result - the verdict is stamped quick=true)
+                     NOT a valid gate result - the verdict is stamped quick=true
+                     and the exit code is ALWAYS 3, never 0)
   -h|--help
 EOF
   exit 2
@@ -385,7 +388,22 @@ for arm in friendly hostile; do
   done
   for ev in "${ALL_EVENTS[@]}"; do
     if [ "${EV_STATUS[$ev]}" != PROGRAMS ]; then MED["$arm/$ev"]="${EV_STATUS[$ev]}"; continue; fi
-    vals=(); bad=""; mmin=10000
+    # AN UNREADABLE ENABLED% IS NOT A HEALTHY ONE (roborev round 2 finding #5).
+    # This accumulator used to seed mmin=10000 and `: ` past any rep whose enabled
+    # field was missing or unparseable, so an event whose percentage could NEVER be
+    # read ended with MUXMIN=10000 — i.e. an unverifiable count was recorded as
+    # "10,000% enabled" and cleared the 99% floor more comfortably than a healthy
+    # counter.
+    #
+    # This is finding 3 ONE LEVEL DOWN, and worth naming as such: the fix for 3 made
+    # multiplexing gating, then keyed the gate on a variable whose default for
+    # UNMEASURABLE was maximally permissive. Same shape, one layer lower — a
+    # multi-state signal where only the bad states are tested, so every unmeasured
+    # state inherits the permissive branch. The floor is now a POSITIVE requirement:
+    # every rep must yield a parseable percentage, and any rep that does not makes
+    # the event UNRECORDABLE (a non-numeric token, which evaluate() surfaces as the
+    # verdict rather than comparing numerically).
+    vals=(); bad=""; mmin=10000; mux_unreadable=0
     for rep in $(seq 1 "$REPS"); do
       v="$(cell "$OUT_DIR/perf-${arm}-rep${rep}.csv" "${ev}${MOD}")"
       p="$(mux  "$OUT_DIR/perf-${arm}-rep${rep}.csv" "${ev}${MOD}")"
@@ -393,9 +411,16 @@ for arm in friendly hostile; do
         ''|*[!0-9]*) bad="${v:-MISSING_ROW}" ;;
         *) vals+=("$v") ;;
       esac
-      case "$p" in ''|*[!0-9.]*) : ;; *) pi=${p%%.*}; [ "$pi" -lt "$mmin" ] && mmin=$pi ;; esac
+      case "$p" in
+        ''|*[!0-9.]*) mux_unreadable=1 ;;
+        *) pi=${p%%.*}; [ "$pi" -lt "$mmin" ] && mmin=$pi ;;
+      esac
     done
-    MUXMIN["$arm/$ev"]=$mmin
+    if [ "$mux_unreadable" -eq 1 ]; then
+      MUXMIN["$arm/$ev"]=MUX_UNREADABLE
+    else
+      MUXMIN["$arm/$ev"]=$mmin
+    fi
     if [ -n "$bad" ]; then
       case "$bad" in
         "<not supported>") MED["$arm/$ev"]=NOT_SUPPORTED ;;
@@ -495,6 +520,23 @@ say ""
 if [ "$HOSTILITY" != PASS ] || [ "$SYMMETRY" != PASS ]; then
   RESULT=INDETERMINATE; RC=3
   REASON="the microbenchmark did not establish a valid differential (P1 hostility=$HOSTILITY, P2 symmetry=$SYMMETRY); the counter verdicts below are UNINTERPRETABLE, not evidence about the counters. Remedy: raise --buffer-mib well above this host's LLC, lower --working-kib below L2, and re-run."
+elif [ "$QUICK" = 1 ]; then
+  # --quick IS DOCUMENTED AS NOT A VALID GATE RESULT, SO IT MUST NOT RETURN THE
+  # GATE'S PASS CONTRACT (roborev round 2 finding #7). It used to print "NOTE:
+  # --quick was used; this is a mechanics check, not a valid gate result" and then
+  # exit 0 with RESULT: PASS — the exact exit contract the RUNBOOK's
+  # stop-and-report decision point reads as authorisation to proceed to the
+  # measurement. A caveat in prose beside a success exit code is advice; the exit
+  # code is the part a pipeline obeys. Same shape as findings 2, 5 and 6, and as
+  # AC5's indeterminate branch.
+  #
+  # QUICK_MECHANICS is deliberately its own verdict rather than reusing
+  # INDETERMINATE: they have different causes and different remedies. INDETERMINATE
+  # means the workload failed to be hostile and the remedy is to retune it; this
+  # means nothing was wrong but nothing was established either, and the remedy is
+  # to re-run without --quick.
+  RESULT=QUICK_MECHANICS; RC=3
+  REASON="--quick ran the mechanics only (reps=$REPS, accesses=$ACCESSES, buffer=${BUFFER_MIB} MiB) and establishes NOTHING about this host's counters. $FAILED_REQUIRED of ${#REQUIRED_EVENTS[@]} required counters would have failed a real run. This is NOT the condition-3 gate: re-run without --quick before proceeding to the measurement."
 elif [ "$FAILED_REQUIRED" -eq 0 ]; then
   RESULT=PASS; RC=0
   REASON="all required counters programmed, moved in the predicted direction, and reached the predicted magnitude."
@@ -504,7 +546,7 @@ else
 fi
 say "==== RESULT: $RESULT ===="
 say "$REASON"
-[ "$QUICK" = 1 ] && say "NOTE: --quick was used; this is a mechanics check, not a valid gate result."
+[ "$QUICK" = 1 ] && say "NOTE: --quick was used; this is a mechanics check, not a valid gate result, and this run exits 3 by construction."
 say "artefacts:  $OUT_DIR"
 
 {

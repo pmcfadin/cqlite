@@ -105,9 +105,26 @@ evaluate() { # $1 event -> sets EV_VERDICT/EV_MOVE/EV_RATE
   if ! isnum "$h" || ! isnum "$f"; then EV_VERDICT[$ev]="${h}"; return; fi
 
   # (1) multiplexing — EITHER arm. A scaled estimate is not a count.
+  #
+  # THE PERMISSIVE BRANCH IS KEYED ON THE AFFIRMATIVE VALUE, never on "not the bad
+  # one" (roborev round 2 finding #5). An enabled percentage is a THREE-state
+  # signal — healthy, below the floor, or UNREADABLE — and the first version of
+  # this check tested only "below the floor", so the unreadable state inherited the
+  # pass. Reading a percentage is the ONLY evidence that a count is not a
+  # multiplexed estimate, so a percentage that could not be read is a NON-PASSING
+  # state, not a missing nice-to-have: `MUX_UNREADABLE` from the accumulator lands
+  # here as a non-numeric value and must FAIL rather than fall through `isnum`.
+  #
+  # The `:-100` default is deliberate and NOT the same hazard: it applies only to an
+  # arm with no MUXMIN entry at all, which happens exactly when EV_STATUS != PROGRAMS
+  # — and such an event has already returned above on the non-numeric MED check, so
+  # the default is unreachable for any event that got this far. Recorded here because
+  # a future reader will otherwise read it as the defect this comment is about.
   local mh="${MUXMIN[hostile/$ev]:-100}" mf="${MUXMIN[friendly/$ev]:-100}"
-  if { isnum "$mh" && [ "$mh" -lt "$MUX_MIN_PCT" ]; } \
-  || { isnum "$mf" && [ "$mf" -lt "$MUX_MIN_PCT" ]; }; then
+  if ! isnum "$mh" || ! isnum "$mf"; then
+    EV_VERDICT[$ev]=UNRELIABLE_MUX_UNREADABLE; return
+  fi
+  if [ "$mh" -lt "$MUX_MIN_PCT" ] || [ "$mf" -lt "$MUX_MIN_PCT" ]; then
     EV_VERDICT[$ev]=UNRELIABLE_MULTIPLEXED; return
   fi
 
@@ -134,8 +151,11 @@ evaluate() { # $1 event -> sets EV_VERDICT/EV_MOVE/EV_RATE
 # The mux figure report_ev prints. Kept next to the check that consumes it so the
 # printed number and the gated number can never diverge.
 ev_mux_min() { # $1 event -> the lower of the two arms' enabled percentages
+  # An unreadable arm is REPORTED as unreadable, not silently replaced by the other
+  # arm's healthy number: substituting the readable arm here would print a reassuring
+  # percentage beside an UNRELIABLE_MUX_UNREADABLE verdict, which is the printed-number
+  # /gated-number divergence report_ev's own comment warns about.
   local mh="${MUXMIN[hostile/$1]:-100}" mf="${MUXMIN[friendly/$1]:-100}"
-  if ! isnum "$mh"; then echo "$mf"; return; fi
-  if ! isnum "$mf"; then echo "$mh"; return; fi
+  if ! isnum "$mh" || ! isnum "$mf"; then echo UNREADABLE; return; fi
   if [ "$mf" -lt "$mh" ]; then echo "$mf"; else echo "$mh"; fi
 }

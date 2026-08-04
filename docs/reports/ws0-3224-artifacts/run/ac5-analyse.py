@@ -38,7 +38,25 @@ import sys
 if len(sys.argv) != 3:
     sys.exit('usage: ac5-analyse.py <perf-uncore-triad.csv> <stream.txt>')
 csv, stxt = sys.argv[1], sys.argv[2]
-per = {'S0': {}, 'S1': {}}
+
+# THE EXPECTED IMC ROSTER, asserted PRESENT rather than inferred from whatever
+# parsed (roborev round 2 finding #3). The byte-accounting ratio has a broad
+# acceptance band (0.6-1.6), so a TRUNCATED capture can land inside it and exit
+# successfully — and the four near-zero S1 rows can go missing without moving the
+# ratio at all, since they contribute almost nothing to the sum. So the ratio cannot
+# police its own inputs, and "it parsed and the number looked right" is exactly the
+# plausible-output-from-a-broken-instrument failure this harness exists to refuse.
+#
+# Same constants and same reasoning as results/derive.py's IMC_COUNT /
+# IMC_EXPECTED_INSTANCES: uncore_imc_0..11 (host/sysfs-pmus.txt is authoritative),
+# each read for cas_count_read and cas_count_write, on both sockets.
+IMC_COUNT = 12
+KINDS = ('read', 'write')
+EXPECTED = set('uncore_imc_%d/cas_count_%s/' % (i, k)
+               for i in range(IMC_COUNT) for k in KINDS)
+SOCKETS = ('S0', 'S1')
+
+per = {s: {} for s in SOCKETS}
 elapsed = None
 for line in open(csv):
     line = line.strip()
@@ -51,16 +69,56 @@ for line in open(csv):
     try:
         v = float(val)
     except ValueError:
+        # A `<not counted>`/`<not supported>` row is a MISSING instance, not an
+        # absent one: skipping it here leaves the roster check below to catch it,
+        # which is where the diagnosis belongs.
         continue
-    if float(enabled) < 99.0:
+    try:
+        e = float(enabled)
+    except ValueError:
+        sys.exit("FATAL: %s %s has an unreadable enabled%% (%r). An unverifiable "
+                 "count is not a usable one — reading the percentage is the only "
+                 "evidence the count is not a multiplexed estimate."
+                 % (sock, ev, enabled))
+    if e < 99.0:
         sys.exit("FATAL: %s %s only %s%% enabled" % (sock, ev, enabled))
     if sock in per and 'cas_count' in ev:
+        # A duplicate row would be SILENTLY OVERWRITTEN by dict assignment, hiding
+        # a double-counted or malformed capture.
+        if ev in per[sock]:
+            sys.exit("FATAL: %s carries a DUPLICATE row for %s on %s. A repeated "
+                     "instance means the capture is malformed; summing it would "
+                     "double-count that channel." % (csv, ev, sock))
+        if unit != 'MiB':
+            sys.exit("FATAL: %s %s reports unit %r, expected 'MiB'. perf applies "
+                     "the x64 B/cacheline conversion itself, so a different unit "
+                     "means every byte figure below is wrong by that factor."
+                     % (sock, ev, unit))
         per[sock][ev] = v         # already MiB; do NOT multiply by 64 again
     if elapsed is None:
         try:
             elapsed = float(f[5]) / 1e9
         except (ValueError, IndexError):
             pass
+
+# The roster assertion itself. Both sockets, complete, before any arithmetic.
+for sock in SOCKETS:
+    missing = EXPECTED - set(per[sock])
+    unexpected = set(per[sock]) - EXPECTED
+    if missing:
+        sys.exit("FATAL: %s reports %d of %d expected uncore_imc instances on %s; "
+                 "missing %s. A truncated capture can still land inside the "
+                 "0.6-1.6 ratio band — the four near-zero S1 rows barely move the "
+                 "sum — so the ratio cannot detect its own missing inputs. Re-run "
+                 "the triad."
+                 % (csv, len(per[sock]), len(EXPECTED), sock,
+                    sorted(missing)[:6] + (['...'] if len(missing) > 6 else [])))
+    if unexpected:
+        sys.exit("FATAL: %s carries unexpected cas_count instances on %s: %s. The "
+                 "roster is pinned to uncore_imc_0..%d; an instance outside it "
+                 "means this host's IMC topology differs from the one the byte "
+                 "accounting was derived for."
+                 % (csv, sock, sorted(unexpected), IMC_COUNT - 1))
 
 st = {}
 for line in open(stxt):

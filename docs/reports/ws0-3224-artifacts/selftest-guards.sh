@@ -137,6 +137,84 @@ evaluate LLC-load-misses
 check "multiplexed LLC-load-misses: rejected before the miss-rate branch is reached" \
       "UNRELIABLE_MULTIPLEXED" "${EV_VERDICT[LLC-load-misses]}"
 
+# Round 2 finding #5: an UNREADABLE enabled% is not a healthy one. This is finding 3
+# one level down — the fix for 3 made multiplexing gating, then keyed the gate on an
+# accumulator whose default for "could not be measured" was mmin=10000, i.e. an
+# unverifiable count read as 10,000% enabled and cleared the 99% floor more
+# comfortably than a healthy counter.
+load_healthy_host
+MUXMIN[hostile/cache-references]=MUX_UNREADABLE
+MUXMIN[friendly/cache-references]=100
+evaluate cache-references
+check "UNREADABLE enabled% on the hostile arm: rejected (not treated as healthy)" \
+      "UNRELIABLE_MUX_UNREADABLE" "${EV_VERDICT[cache-references]}"
+check "...and the reported mux figure says UNREADABLE rather than the other arm's 100" \
+      "UNREADABLE" "$(ev_mux_min cache-references)"
+
+load_healthy_host
+MUXMIN[friendly/cache-references]=MUX_UNREADABLE
+evaluate cache-references
+check "UNREADABLE enabled% on the friendly arm: also rejected" \
+      "UNRELIABLE_MUX_UNREADABLE" "${EV_VERDICT[cache-references]}"
+
+# The accumulator that produces that token, tested on the committed source text
+# rather than a transcription (same reasoning as the finding-4 metadata case below).
+expect_rc "MUXMIN accumulator no longer defaults an unreadable percentage to 10000" 0 \
+  python3 - "$HERE/positive-control.sh" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+if 'mmin=10000' not in src:
+    sys.exit('FAIL: the accumulator no longer exists in a recognisable form; '
+             'update this case rather than deleting it')
+blk = src[src.index('vals=(); bad=""; mmin=10000'):src.index('MUXMIN["$arm/$ev"]=$mmin')]
+if 'mux_unreadable=1' not in blk:
+    sys.exit('FAIL: an unparseable enabled%% no longer sets mux_unreadable, so it '
+             'falls through with mmin=10000 and reads as 10,000%% enabled')
+if 'MUX_UNREADABLE' not in src:
+    sys.exit('FAIL: no MUX_UNREADABLE token is ever recorded')
+print('        accumulator marks an unreadable percentage rather than defaulting it')
+PY
+
+# Round 2 finding #7: --quick is documented as not a valid gate result, so it must
+# not return the gate's PASS exit contract.
+#
+# THIS CASE WAS FIRST WRITTEN AS A SOURCE-TEXT MATCH AND THE MUTATION RUN CAUGHT IT.
+# Checking that the string `QUICK_MECHANICS` appears, and appears before `RESULT=PASS`,
+# passed happily against a mutant whose branch condition had been changed to
+# `elif false` — the text was all still there, and the branch was unreachable. A
+# presence test standing in for a behaviour test is the very shape these seven
+# findings are made of, so it is replaced by EXECUTING the committed decision block
+# with injected state and asserting the RESULT and RC it produces.
+quick_verdict() { # $1 QUICK  $2 FAILED_REQUIRED -> "<RESULT>/<RC>"
+  python3 - "$HERE/positive-control.sh" "$1" "$2" <<'PY'
+import subprocess, sys
+src = open(sys.argv[1]).read()
+start = src.index('if [ "$HOSTILITY" != PASS ] || [ "$SYMMETRY" != PASS ]; then')
+end = src.index('say "==== RESULT: $RESULT ===="')
+block = src[start:end]
+prelude = (
+    'HOSTILITY=PASS\nSYMMETRY=PASS\n'
+    'QUICK=%s\nFAILED_REQUIRED=%s\n'
+    'REPS=1\nACCESSES=2000000\nBUFFER_MIB=512\n'
+    'REQUIRED_EVENTS=(LLC-loads LLC-load-misses cache-references)\n'
+) % (sys.argv[2], sys.argv[3])
+script = prelude + block + '\nprintf "%s/%s\\n" "$RESULT" "$RC"\n'
+r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+if r.returncode != 0:
+    sys.stderr.write(r.stderr)
+    sys.exit('the extracted decision block did not run')
+print(r.stdout.strip().splitlines()[-1])
+PY
+}
+check "a REAL run with every counter usable: PASS / exit 0" \
+      "PASS/0" "$(quick_verdict 0 0)"
+check "--quick with every counter usable: NOT the PASS contract" \
+      "QUICK_MECHANICS/3" "$(quick_verdict 1 0)"
+check "--quick with a failing counter: also non-zero, not FAIL's contract" \
+      "QUICK_MECHANICS/3" "$(quick_verdict 1 2)"
+check "a REAL run with a failing counter: FAIL / exit 1" \
+      "FAIL/1" "$(quick_verdict 0 2)"
+
 # =============================================================================
 section "FINDING 2 — penalty-probe window gating (run/penalty-window-check.py)"
 # THE BAD INPUT IS THE REAL ONE. These are the CSVs committed in this PR, written
@@ -185,6 +263,52 @@ expect_rc "ONE row +3.2% (real LLC_8M value, under the ceiling): REJECTED by cro
 mkdir -p "$TMP/empty-penalty"
 expect_rc "empty penalty dir: REFUSED rather than passed vacuously" 1 \
   python3 "$HERE/run/penalty-window-check.py" "$TMP/empty-penalty" 20000000
+
+# Round 2 finding #4: the probe's own row parser. The window check validates only
+# `instructions`, so a missing or multiplexed cycles/LLC/dTLB counter had nothing
+# looking at it — `vals.get()` turned it into nan or a confident 0.0000/access.
+# Tested against the committed source text, not a copy.
+run_row_parser() { # $1 csv -> exit code of the extracted parser
+  python3 - "$HERE/run/penalty-probe.sh" "$1" <<'PY'
+import subprocess, sys
+src = open(sys.argv[1]).read()
+start = src.index("import math, sys\ncsv,label,size,acc,ghz,buf")
+end = src.index("\nPY\n", start)
+snippet = src[start:end]
+r = subprocess.run([sys.executable, '-c', snippet,
+                    sys.argv[2], 'TESTROW', '8192', '20000000', '2.90', '528'],
+                   capture_output=True, text=True)
+sys.stderr.write(r.stderr)
+sys.stdout.write(r.stdout)
+sys.exit(r.returncode)
+PY
+}
+mk_full_row() { # $1 out-csv  $2 enabled-pct-for-cycles  $3 cycles-token
+  { printf '# started\n\n'
+    printf '%s,,cycles:u,3211333656,%s,,\n' "$3" "$2"
+    printf '120174195,,instructions:u,3211333656,100.00,0.06,insn per cycle\n'
+    printf '20185457,,LLC-loads,3211333656,100.00,,\n'
+    printf '125898,,LLC-load-misses,3211333656,100.00,0.62,of all LL-cache accesses\n'
+    printf '308542,,dTLB-load-misses,3211333656,100.00,,\n'; } > "$1"
+}
+mk_full_row "$TMP/row-good.csv" 100.00 1808801914
+expect_rc "row parser: all five counters present, unmultiplexed: ACCEPTED" 0 \
+  run_row_parser "$TMP/row-good.csv"
+mk_full_row "$TMP/row-notcounted.csv" 100.00 '<not counted>'
+expect_rc "row parser: cycles reads <not counted>: REJECTED (was published as nan)" 1 \
+  run_row_parser "$TMP/row-notcounted.csv"
+mk_full_row "$TMP/row-mux.csv" 43.00 1808801914
+expect_rc "row parser: cycles at 43% enabled: REJECTED (was never checked at all)" 1 \
+  run_row_parser "$TMP/row-mux.csv"
+mk_full_row "$TMP/row-zero.csv" 100.00 0
+expect_rc "row parser: cycles reads 0 for 20M accesses: REJECTED as a failed capture" 1 \
+  run_row_parser "$TMP/row-zero.csv"
+# A missing LLC counter used to print a confident 0.0000 per access, which erases the
+# very distinction the #3217 silent-instrument lesson turns on: a real 0 is a
+# finding, an absent counter is a failure, and `(x or 0)` maps both to the same cell.
+grep -v 'LLC-load-misses' "$TMP/row-good.csv" > "$TMP/row-nollc.csv"
+expect_rc "row parser: LLC-load-misses ABSENT: REJECTED (was printed as 0.0000/access)" 1 \
+  run_row_parser "$TMP/row-nollc.csv"
 
 # =============================================================================
 section "FINDING 4 — capture-endpoint rc roster (harness/guards.sh)"
@@ -315,6 +439,48 @@ expect_rc "rep with one counter row at 42% enabled: REFUSED (a scaled estimate i
 expect_rc "rep dir with no meta.json: REFUSED" 1 \
   python3 "$HERE/run/rep-complete.py" "$TMP/does-not-exist"
 
+# Round 2 finding #6: "nonempty dict" and "at least one row" are existence tests
+# standing in for completeness tests. Both shapes now fail.
+cp -r "$GOOD_REP" "$TMP/rep-partialrc"
+python3 - "$TMP/rep-partialrc/meta.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['rc']={'alignedA':0,'alignedB':0}          # nonempty, but 2 of 6 arms
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "rep with a PARTIAL rc block (2 of 6 arms, all zero): REFUSED" 1 \
+  python3 "$HERE/run/rep-complete.py" "$TMP/rep-partialrc"
+
+cp -r "$GOOD_REP" "$TMP/rep-partialfiles"
+python3 - "$TMP/rep-partialfiles/meta.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d['perf_files']={'alignedA':'perf-coreA-aligned.csv'}   # nonempty, 1 of 4
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "rep with a PARTIAL perf_files roster (1 of 4): REFUSED" 1 \
+  python3 "$HERE/run/rep-complete.py" "$TMP/rep-partialfiles"
+
+cp -r "$GOOD_REP" "$TMP/rep-trunccsv"
+head -4 "$TMP/rep-trunccsv/perf-coreA-aligned.csv" > "$TMP/t.csv"
+mv "$TMP/t.csv" "$TMP/rep-trunccsv/perf-coreA-aligned.csv"
+expect_rc "rep with a TRUNCATED CSV (2 of 7 events, all readable): REFUSED" 1 \
+  python3 "$HERE/run/rep-complete.py" "$TMP/rep-trunccsv"
+
+cp -r "$GOOD_REP" "$TMP/rep-badmux"
+python3 - "$TMP/rep-badmux/perf-coreA-aligned.csv" <<'PY'
+import sys
+p=sys.argv[1]; out=[]
+for line in open(p):
+    f=line.rstrip('\n').split(',')
+    if len(f)>=5 and f[2].startswith('cycles'):
+        f[4]='not-a-number'; line=','.join(f)+'\n'
+    out.append(line)
+open(p,'w').writelines(out)
+PY
+expect_rc "rep with an UNREADABLE enabled% in a CSV: REFUSED (not read as healthy)" 1 \
+  python3 "$HERE/run/rep-complete.py" "$TMP/rep-badmux"
+
 # =============================================================================
 section "FINDING 5b — derivation must not publish 0 GB/s (results/derive.py)"
 # The good input: the whole committed results tree. This also re-proves that the
@@ -360,6 +526,48 @@ PY
 expect_rc "results tree with a PARTIAL IMC set (2 rows dropped): REFUSED" 1 \
   python3 "$HERE/results/derive.py" "$TMP/results-partialimc" --out "$TMP/derived-bad3.json"
 
+# Round 2 finding #1: the derivation re-checks occupancy, warmth and saturation but
+# never read the rc blocks it was handed. A dead load generator leaves perf's own rc
+# at 0, so the CSV parses cleanly and only rc records that the row counts every
+# per-row figure divides by are wrong.
+cp -r "$HERE/results" "$TMP/results-rcfail"
+python3 - "$TMP/results-rcfail/llc-s6-N16/rep1/meta.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['rc']['loadgen_interior']=1
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "results tree with rc.loadgen_interior=1: REFUSED by the derivation" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-rcfail" --out "$TMP/derived-bad4.json"
+
+cp -r "$HERE/results" "$TMP/results-rcstalls"
+python3 - "$TMP/results-rcstalls/llc-s6-N16/rep2/meta-stalls.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d['rc']['alignedC']=1
+json.dump(d,open(p,'w'),indent=1)
+PY
+expect_rc "results tree with a failed group-C arm (rc.alignedC=1): REFUSED" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-rcstalls" --out "$TMP/derived-bad5.json"
+
+# Round 2 finding #2: group C is all-or-nothing. A partial set used to derive the
+# HEADLINE measured attribution from a silently reduced sample — #3217's undispersed
+# -reps method gap, reintroduced in the one term this report leads with.
+cp -r "$HERE/results" "$TMP/results-partialC"
+rm -f "$TMP/results-partialC/llc-s6-N16/rep2/meta-stalls.json" \
+      "$TMP/results-partialC/llc-s6-N16/rep2/perf-coreC-aligned.csv" \
+      "$TMP/results-partialC/llc-s6-N16/rep3/meta-stalls.json" \
+      "$TMP/results-partialC/llc-s6-N16/rep3/perf-coreC-aligned.csv"
+expect_rc "results tree with group C for 1 of 3 reps: REFUSED (was 1 undispersed rep)" 1 \
+  python3 "$HERE/results/derive.py" "$TMP/results-partialC" --out "$TMP/derived-bad6.json"
+
+# ...but a tree that never captured group C at all is a DIFFERENT situation and must
+# still derive, falling back to the modelled charge and saying so. A guard that
+# rejects this too would have broken a supported mode.
+cp -r "$HERE/results" "$TMP/results-noC"
+rm -f "$TMP/results-noC"/*/rep*/meta-stalls.json \
+      "$TMP/results-noC"/*/rep*/perf-coreC-aligned.csv
+expect_rc "results tree with NO group C anywhere: still derives (supported mode)" 0 \
+  python3 "$HERE/results/derive.py" "$TMP/results-noC" --out "$TMP/derived-noC.json"
+
 # =============================================================================
 section "FINDING 6 — AC5 byte accounting (run/ac5-analyse.py)"
 expect_rc "committed ac5-run (ratio 1.008): RESOLVED, accepted" 0 \
@@ -379,6 +587,53 @@ mkdir -p "$TMP/ac5-unavail"
 grep -v '^elements=' "$HERE/ac5-run/stream.txt" > "$TMP/ac5-unavail/stream.txt"
 expect_rc "byte accounting UNAVAILABLE (no 'elements' key): REJECTED" 1 \
   python3 "$HERE/run/ac5-analyse.py" "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/ac5-unavail/stream.txt"
+
+# Round 2 finding #3: the ratio has a broad 0.6-1.6 acceptance band, so it cannot
+# police its own inputs — and the four near-zero S1 rows can vanish without moving it
+# at all. The roster must therefore be asserted independently of the ratio.
+mkdir -p "$TMP/ac5-trunc"
+head -20 "$HERE/ac5-run/perf-uncore-triad.csv" > "$TMP/ac5-trunc/triad.csv"
+expect_rc "TRUNCATED IMC capture (18 of 24 instances on S0): REJECTED on the roster" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$TMP/ac5-trunc/triad.csv" "$HERE/ac5-run/stream.txt"
+
+# The case the finding singles out, and the reason the roster check cannot be replaced
+# by a tighter ratio band: drop only the near-zero S1 rows. MEASURED on the committed
+# capture, dropping 4 of 48 instances moves the ratio from 1.0080 to 1.0077 — three
+# ten-thousandths, versus an acceptance band 1.0 wide. No band that admits a healthy
+# capture could ever exclude this one, so the ratio is structurally incapable of
+# detecting it and the old code exited 0 on a capture missing a twelfth of its
+# instances.
+mkdir -p "$TMP/ac5-drops1"
+grep -v '^S1,.*uncore_imc_1[01]/' "$HERE/ac5-run/perf-uncore-triad.csv" \
+  > "$TMP/ac5-drops1/triad.csv"
+expect_rc "IMC capture missing only the NEAR-ZERO S1 rows (ratio unmoved): REJECTED" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$TMP/ac5-drops1/triad.csv" "$HERE/ac5-run/stream.txt"
+
+# A duplicated row would have been silently overwritten by dict assignment.
+mkdir -p "$TMP/ac5-dup"
+{ cat "$HERE/ac5-run/perf-uncore-triad.csv"
+  grep -m1 '^S0,.*uncore_imc_0/cas_count_read/' "$HERE/ac5-run/perf-uncore-triad.csv"
+} > "$TMP/ac5-dup/triad.csv"
+expect_rc "DUPLICATE IMC row: REJECTED (was silently overwritten)" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$TMP/ac5-dup/triad.csv" "$HERE/ac5-run/stream.txt"
+
+# An unreadable enabled% — the same three-state trap as round 2 finding #5, in a
+# third file. Checked here because "not below the floor" was the test, and an
+# unreadable percentage is not below anything.
+mkdir -p "$TMP/ac5-badmux"
+python3 - "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/ac5-badmux/triad.csv" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+out=[]; done=False
+for line in open(src):
+    f=line.rstrip('\n').split(',')
+    if not done and len(f)>=7 and f[0].startswith('S') and 'cas_count' in f[4]:
+        f[6]='n/a'; line=','.join(f)+'\n'; done=True
+    out.append(line)
+open(dst,'w').writelines(out)
+PY
+expect_rc "IMC row with an UNREADABLE enabled%: REJECTED (not read as healthy)" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$TMP/ac5-badmux/triad.csv" "$HERE/ac5-run/stream.txt"
 
 # =============================================================================
 printf '\n==== SELFTEST RESULT: %s ====\n' \
