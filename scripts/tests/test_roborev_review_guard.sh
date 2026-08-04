@@ -986,6 +986,19 @@ assert_never_enqueued() { # assert_never_enqueued <label>
   fi
 }
 
+# THE POSITIVE CONTROL for the assert above (#3229 round-10). `assert_never_enqueued` is
+# satisfied by an EMPTY witness file, so it also "passes" when the harness never ran the
+# wrapper at all — the failure direction that looks like success. A case pinning a
+# pre-enqueue FAIL is only evidence when its sibling case, differing in ONE variable, is
+# shown to reach the enqueue.
+assert_enqueued() { # assert_enqueued <label>
+  if [ -s "$INVOKED" ]; then
+    ok "$1: a review WAS enqueued (the pre-enqueue path was really passed)"
+  else
+    bad "$1: NO review was enqueued, so the run stopped pre-enqueue — an 'it was blocked' assert elsewhere would be satisfied by a harness that never ran"
+  fi
+}
+
 # Recorded token_usage payloads, PRE-ESCAPED for embedding as a JSON *string* value
 # (the real payload double-encodes it). The small-genuine and vacuous numbers are the
 # measured ones from issue #2964; the boundary pair pins the input floor exactly.
@@ -2530,6 +2543,104 @@ assert_verdict 'case (cx26c)' FAIL 1
 assert_says 'case (cx26c) the missing pattern is still named without a readable version' 'pinned pattern\(s\) no longer present in the binary: \*\*/Cargo\.lock'
 assert_lacks 'case (cx26c) an observed divergence is never downgraded to UNAVAILABLE' 'built-in-set: UNAVAILABLE'
 assert_never_enqueued 'case (cx26c)'
+
+# ===========================================================================
+# (cx27*): THE EMPTY-PARSE PASS REQUIRES AN AFFIRMATIVE MEASUREMENT (#3229 round-10 H2).
+#
+# `_rx_corroboration` has FOUR states — UNAVAILABLE (the INITIAL value), DRIFT, NOTICE, OK
+# — and the round-9 code tested exactly two. So `UNAVAILABLE` inherited the PERMISSIVE
+# branch and reached `PASS (no exclusion patterns configured; …)`: "our parser recognised no
+# key" aliased to "nothing is configured", which is issue #3229 itself, reintroduced under
+# the key written to prevent it. The file's own comment stated the principle ("here the
+# binary is the only oracle that can tell them apart") and never required the oracle to have
+# ANSWERED; `--help` and `roborev_toml_exclude_patterns` both already documented the
+# requirement, so the code contradicted its own contract.
+#
+# THE THREE CASES ARE ONE EXPERIMENT WITH ONE VARIABLE — the corroboration oracle's answer.
+# Identical fixture, identical config (no `exclude_patterns` key at all), so nothing but the
+# oracle's state can explain the difference in outcome:
+#   cx27a  the binary does NOT answer  => FAIL, non-passing, never enqueued
+#   cx27b  the binary answers "none"   => PASS, and the review IS enqueued
+#   cx27c  the binary answers a pattern the parse never saw => DRIFT FAIL (the pre-existing
+#          backstop, re-pinned here on the empty-KEY config rather than cx5d's alien spelling)
+# cx27b is the both-directions control: without it, cx27a's "no review was enqueued" would
+# be satisfied by any run that failed for an unrelated reason.
+# ===========================================================================
+
+printf '== case (cx27a): an UNCORROBORATED empty parse is NON-PASSING — "could not check" is not "nothing was wrong" ==\n'
+reset_stub
+work=$(make_fixture case_cx27a docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+model = 'gpt-5.6-sol'"
+# The build does NOT carry `config get` (exit != 0 from every checkout) => UNAVAILABLE. This
+# is the state the guard is in whenever its ONLY oracle is silent, and it is REACHABLE: a
+# roborev without the subcommand plus a `.roborev.toml` carrying a key spelling this parser
+# does not recognise is exactly the cx5d configuration with the corroboration switched off.
+STUB_CONFIG_PATTERNS=''
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx27a)' FAIL 1
+assert_says 'case (cx27a) the value is its own non-passing form, not a PASS' '^census-exclusion: FAIL \(exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: UNAVAILABLE; built-in-set: UNAVAILABLE\)$'
+assert_lacks 'case (cx27a) an unverified silence never reads as a PASS' '^census-exclusion: PASS'
+assert_says 'case (cx27a) the text names WHAT could not be verified, not a wrongdoing' "the ONLY oracle that can distinguish 'nothing is configured' from 'this parser did not recognise the key' — did not answer"
+assert_says 'case (cx27a) it says which of the two states it could not rule out' "the parser saw NO 'exclude_patterns' key in any of the three sources"
+assert_says 'case (cx27a) it disclaims asserting that anything IS excluded' 'NOT a claim that something IS excluded'
+assert_says 'case (cx27a) it names the issue the alias would reintroduce' 'that alias IS issue #3229'
+assert_says 'case (cx27a) the remedy is to make the oracle answer' "'roborev config get exclude_patterns' must exit 0 from both"
+assert_says 'case (cx27a) a genuinely empty configuration is still fine' 'An EMPTY configuration is fine and PASSes'
+assert_never_enqueued 'case (cx27a)'
+assert_one_block 'case (cx27a)'
+
+printf '== case (cx27b): a CORROBORATED empty parse still PASSes, and the review IS enqueued ==\n'
+reset_stub
+# THE OTHER DIRECTION, and the reason the fix is a gate on the ORACLE rather than a blanket
+# refusal of the empty-parse PASS: an empty configuration is legitimate and common, so it
+# must keep passing whenever the binary says so. One variable changes from cx27a.
+work=$(make_fixture case_cx27b docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+model = 'gpt-5.6-sol'"
+STUB_CONFIG_PATTERNS=none
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx27b)' PASS 0
+assert_says 'case (cx27b) the corroborated empty set PASSes' '^census-exclusion: PASS \(no exclusion patterns configured; 3/3 code census paths survive the 24 roborev v0\.61\.2 built-in exclude\(s\); corroboration: OK; built-in-set: UNAVAILABLE\)$'
+assert_lacks 'case (cx27b) a corroborated empty parse is never UNCORROBORATED' 'UNCORROBORATED'
+assert_enqueued 'case (cx27b)'
+
+printf '== case (cx27c): the binary reporting a pattern the parse never saw is still DRIFT ==\n'
+reset_stub
+# The third state, re-pinned on the SAME fixture/config as cx27a and cx27b so the trio is one
+# experiment: an ANSWER that disagrees with the parse must stay a FAIL, and must keep its own
+# more specific value form rather than being absorbed by the new UNCORROBORATED one.
+work=$(make_fixture case_cx27c docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+model = 'gpt-5.6-sol'"
+STUB_CONFIG_PATTERNS="docs/**"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx27c)' FAIL 1
+assert_says 'case (cx27c) drift keeps its own, more specific value form' "^census-exclusion: FAIL \(exclusion set drift: 'docs/\*\*' reported by roborev config get is absent from the parsed set\)$"
+assert_lacks 'case (cx27c) drift is not absorbed by the uncorroborated form' 'UNCORROBORATED'
+assert_says 'case (cx27c) the empty-parse danger is still called out' 'the parse found NO configured pattern at all while the binary reports at least one'
+assert_never_enqueued 'case (cx27c)'
+
+printf '== case (cx27d): a PRESENT key with an EMPTY array is still an unverified silence ==\n'
+reset_stub
+# `exclude_patterns = []` is an affirmative read of ONE file, and the guard says so in the
+# diagnostic — but it is NOT the affirmative measurement the PASS needs: the risk the oracle
+# covers is a key spelling this parser cannot see in ANY of the three sources, which an empty
+# array in one of them cannot rule out. So the verdict is the same and only the text differs.
+work=$(make_fixture case_cx27d docs-executables)
+write_roborev_config_raw "$work" "agent = 'codex'
+exclude_patterns = []"
+STUB_CONFIG_PATTERNS=''
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx27d)' FAIL 1
+assert_says 'case (cx27d) an empty array is still UNCORROBORATED' '^census-exclusion: FAIL \(exclusion set UNCORROBORATED: '
+assert_says 'case (cx27d) but the diagnostic distinguishes it from an absent key' "the parser DID see an 'exclude_patterns' key, whose array was empty"
+assert_never_enqueued 'case (cx27d)'
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
