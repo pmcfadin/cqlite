@@ -59,8 +59,14 @@ FLOW_DIR="$SCRIPT_DIR/../flow"
 
 PASS=0
 FAIL=0
-ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
-bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# SKIPPED is COUNTED and printed in the tally, never absorbed into PASS. A check that could not
+# run has no verdict to give: reporting it as a pass is the vacuous pass itself, and reporting it
+# as a failure turns a legitimately stripped runner into a red gate (which is #3296's own defect
+# one level down). So it is its own third state, loud in the output and named in the tally.
+SKIPPED=0
+ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+skip() { printf 'SKIP - %s\n' "$1"; SKIPPED=$((SKIPPED + 1)); }
 
 if [ ! -f "$GUARD" ]; then
   printf 'FAIL - the guard test is not at %s — nothing to keep portable\n' "$GUARD"
@@ -601,17 +607,60 @@ else
       awk -v n="$_epi_start" 'NR >= n' "$GUARD"
     } >"$1"
   }
+  # A COMPOSITION IS A LINE-SLICE OF A FOREIGN FILE, so it can be short-circuited by something
+  # that is not the contract under test: a dependency SKIP (the guard test SKIPs its
+  # structured-payload cases when python3 is missing — today at a line BELOW this slice, but a
+  # preflight is exactly the kind of thing that migrates upward), a missing fixture, any early
+  # `exit`. If that happens the probe never reaches the tally epilogue, and classifying it by
+  # rc/text alone would report BOTH probes as contract FAILURES — turning a legitimate skip on a
+  # stripped runner into a red gate, which is #3296's own failure mode reproduced one level down.
+  #
+  # So reaching the tally is measured FIRST and is a precondition for any verdict: no tally means
+  # NOT MEASURED (a loud, counted SKIP naming the dependency state and the probe's last line),
+  # never a pass and never a failure. The classifier is itself controlled below.
+  _ac5_dep='python3: present'
+  command -v python3 >/dev/null 2>&1 ||
+    _ac5_dep='python3: ABSENT (the guard test SKIPs its structured-payload cases without it)'
+  _ac5_out=''; _ac5_rc=0; _ac5_reached=0
+  run_ac5_probe() { # run_ac5_probe <script> -> _ac5_out / _ac5_rc / _ac5_reached
+    _ac5_out=$(bash "$1" 2>&1); _ac5_rc=$?
+    if printf '%s\n' "$_ac5_out" | grep -qF '==== ROBOREV REVIEW GUARD TEST TALLY'; then
+      _ac5_reached=1
+    else
+      _ac5_reached=0
+    fi
+  }
+  ac5_not_measured() { # ac5_not_measured <label>
+    skip "AC5 ($1): the composed probe EXITED BEFORE the guard test's tally epilogue (rc $_ac5_rc; $_ac5_dep; last line: $(printf '%s' "$_ac5_out" | tail -1)) — the prologue short-circuited, so the exit-code contract was NOT MEASURED on this host. Not a pass: rerun where the guard test's prologue dependencies are present."
+  }
+
   compose_probe "$tmp/mirror/tests/ac5-fail.sh" "bad 'AC5 injected failure'"
   compose_probe "$tmp/mirror/tests/ac5-pass.sh" ":"
-  _ac5_out=$(bash "$tmp/mirror/tests/ac5-fail.sh" 2>&1); _ac5_rc=$?
-  if [ "$_ac5_rc" -ne 0 ] && printf '%s\n' "$_ac5_out" | grep -qF 'GUARD-TEST RESULT: FAIL' &&
+  # CONTROL FIRST: a prologue that short-circuits must be classified NOT-MEASURED, not FAIL.
+  # Without this the skip branch could be dead code and the red-gate hazard would be unfixed.
+  compose_probe "$tmp/mirror/tests/ac5-skip.sh" \
+    "printf 'SKIP - simulated prologue dependency skip\\n'; exit 0"
+  run_ac5_probe "$tmp/mirror/tests/ac5-skip.sh"
+  if [ "$_ac5_reached" -eq 0 ]; then
+    ok 'AC5 control: a composition whose prologue short-circuits is detected as NOT MEASURED (it never reaches the tally), so a stripped runner degrades to a loud SKIP instead of a red gate'
+  else
+    bad 'AC5 control: a short-circuited composition was reported as having reached the tally — the not-measured detector cannot fire, so a legitimate dependency skip would be misclassified as a contract failure'
+  fi
+
+  run_ac5_probe "$tmp/mirror/tests/ac5-fail.sh"
+  if [ "$_ac5_reached" -eq 0 ]; then
+    ac5_not_measured 'injected failing case'
+  elif [ "$_ac5_rc" -ne 0 ] && printf '%s\n' "$_ac5_out" | grep -qF 'GUARD-TEST RESULT: FAIL' &&
     printf '%s\n' "$_ac5_out" | grep -qF 'failed: 1'; then
     ok "AC5: a failing case still exits NON-ZERO (rc $_ac5_rc) with GUARD-TEST RESULT: FAIL"
   else
     bad "AC5: the guard test's tally epilogue did not fail closed (rc $_ac5_rc): $(printf '%s' "$_ac5_out" | tail -3 | tr '\n' ' ')"
   fi
-  _ac5_out=$(bash "$tmp/mirror/tests/ac5-pass.sh" 2>&1); _ac5_rc=$?
-  if [ "$_ac5_rc" -eq 0 ] && printf '%s\n' "$_ac5_out" | grep -qF 'GUARD-TEST RESULT: PASS'; then
+
+  run_ac5_probe "$tmp/mirror/tests/ac5-pass.sh"
+  if [ "$_ac5_reached" -eq 0 ]; then
+    ac5_not_measured 'clean control'
+  elif [ "$_ac5_rc" -eq 0 ] && printf '%s\n' "$_ac5_out" | grep -qF 'GUARD-TEST RESULT: PASS'; then
     ok 'AC5 control: with no failing case the same epilogue exits 0 with GUARD-TEST RESULT: PASS'
   else
     bad "AC5 control: the clean composition did not pass (rc $_ac5_rc) — the injected-failure result above would then mean nothing"
@@ -621,7 +670,7 @@ fi
 # The gate must not swallow either script's exit status: `roborev-lints` is where both run in
 # --lite and in the full gate of record.
 if [ ! -f "$GATE" ]; then
-  printf 'SKIP - agent-gate.sh not found; the roborev-lints wiring could not be checked\n'
+  skip 'wiring: agent-gate.sh not found; the roborev-lints wiring could not be checked'
 else
   _lints=$(awk '/^run_roborev_lints_cmd\(\) \{/,/^\}$/' "$GATE")
   if [ -z "$_lints" ]; then
@@ -645,7 +694,12 @@ fi
 # The tally line deliberately does NOT start with `RESULT:` — that token belongs to the agent
 # gate's summary contract and to the roborev wrapper's own block.
 printf '\n==== ROBOREV GUARD PORTABILITY TALLY ====\n'
-printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
+printf 'passed: %d  failed: %d  skipped: %d\n' "$PASS" "$FAIL" "$SKIPPED"
+# A skip does not red the gate — a stripped runner is a supported host — but it is never
+# silent: it is counted above and restated here, naming that coverage was reduced on this run.
+if [ "$SKIPPED" -ne 0 ]; then
+  printf 'NOT MEASURED: %d check(s) SKIPped on this host — see the SKIP lines above for what was not covered\n' "$SKIPPED"
+fi
 if [ "$FAIL" -ne 0 ]; then
   printf 'PORTABILITY RESULT: FAIL\n'
   exit 1
