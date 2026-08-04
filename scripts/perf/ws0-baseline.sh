@@ -83,6 +83,11 @@ PORT=18815
 OUT_DIR=""
 DO_BUILD=1
 EVENTS="cycles,instructions"
+# `--validate-args-only`: run every ARGUMENT check, print a stamp, and exit 0 having
+# touched NOTHING outside this process (issue #3272 review R1). See the exit point below
+# for why the alternative — asserting acceptance by running the real driver until it
+# happens to fail on something later — was a hermeticity defect rather than a shortcut.
+VALIDATE_ONLY=0
 
 usage() {
   cat <<EOF
@@ -109,6 +114,10 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
   --port N             Loopback port for the Flight server (default $PORT).
   --out DIR            Results dir (default \$REPO/target/perf-ws0-3096/<timestamp>).
   --no-build           Skip the release build; use the binaries already in target/release.
+  --validate-args-only Run every ARGUMENT check and exit 0 with 'ARGUMENTS OK' — no
+                       sysctl write, no build, no cache drop, no perf, no measurement.
+                       Exists so the self-tests can assert the ACCEPT direction of
+                       argument validation without executing anything (#3272 R1).
   -h, --help           This text.
 
 Physical-core sibling pairs on this box:
@@ -142,6 +151,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --no-build) DO_BUILD=0; shift ;;
+    --validate-args-only) VALIDATE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     # Every unrecognized argument is an ERROR, never ignored: a typo'd flag that
     # is silently dropped produces a measurement of something other than what
@@ -255,6 +265,39 @@ if [[ " $TEMPS " == *" cold "* && "$SCAN_PASSES" -gt 1 ]]; then
 fi
 
 [[ -n "$CORPUS" ]] || { echo "FATAL: --corpus is required" >&2; usage >&2; exit 2; }
+
+# --- the ARGUMENT-VALIDATION boundary (#3272 review R1) -----------------------
+# Everything above this line is a decision about the ARGUMENTS: pure string/integer
+# checks plus this file's own source lint. Everything BELOW it touches the world —
+# it stats the corpus, reads the host's CPU topology, probes the port, WRITES HOST
+# SYSCTLS via `sudo -n`, and runs `cargo build --release`.
+#
+# `--validate-args-only` stops exactly here, which is what makes the ACCEPT direction
+# of argument validation ASSERTABLE without executing anything. The previous approach
+# was to run the real driver and accept "it failed somewhere later" as proof the
+# arguments were fine — and that inverted the hermeticity of the self-tests: on a LINUX
+# host (where the gate's `tooling-tests` runs) the accept cases sailed past validation
+# into `relax_perf_sysctls` (a host sysctl mutation) and a full `cargo build --release`,
+# six times over. It was invisible only because macOS exits earlier at
+# `perf is not installed`. A test suite whose hermeticity depends on the host LACKING a
+# tool is not hermetic; it is untested on the platform that matters.
+#
+# The stamp is a fixed string so the assertion is affirmative — the caller checks for
+# `ARGUMENTS OK`, not for the absence of a complaint.
+#
+# SCOPE, stated so the mode is not read as more than it is: the checks BELOW the boundary
+# (`--corpus` resolvability, the sibling/disjointness verification of `--server-cpus` and
+# `--client-cpus`, port availability) are HOST-DEPENDENT and are deliberately NOT covered
+# by this mode. They cannot be — verifying a CPU set needs a real `thread_siblings_list`,
+# which is exactly what `scripts/tests/test_ws0_cpu_pinning_guards.sh` drives directly
+# against an injected topology root instead.
+if [[ "$VALIDATE_ONLY" == "1" ]]; then
+  echo "ARGUMENTS OK (--validate-args-only): reps=$REPS temps=[$TEMPS] arms=[$ARMS]" \
+       "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION"
+  echo "  nothing was executed: no sysctl write, no build, no cache drop, no perf, no measurement."
+  exit 0
+fi
+
 CORPUS="$(cd "$CORPUS" && pwd)"
 TABLE_DIR="$CORPUS/ws0/events"
 if ! ls "$TABLE_DIR"/*-Data.db >/dev/null 2>&1; then

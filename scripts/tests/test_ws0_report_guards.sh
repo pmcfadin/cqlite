@@ -64,8 +64,25 @@
 #      intervening `case` measured the CASE's status (0 for most branches), so the
 #      "cleanup cannot fail the run" half of the failing-sudo case was unmeasured.
 #
-# Hermetic: synthetic result dirs + synthetic perf CSVs. No cargo, no perf, no
-# sudo, no corpus, no network, and the real perf artifacts are never touched.
+# And REVIEW ROUND 2, whose finding is a REGRESSION INTRODUCED BY 12 ABOVE:
+#
+#  14. THE ACCEPT DIRECTION MUST EXECUTE NOTHING. Round 1's `expect_driver_accepts`
+#      ran the REAL driver with no early exit and accepted "it failed at some later
+#      checkpoint" as proof the arguments were fine — so on LINUX the accept cases ran
+#      past validation into `relax_perf_sysctls` (a host `sudo -n sysctl -w`) and
+#      `cargo build --release`, six times over. MEASURED against that code on a
+#      Linux-shaped host (readable sysctl priors, stubbed topology/port checks, recording
+#      PATH shims): `sudo -n sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0`,
+#      then `cargo build --release -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen`.
+#      It was invisible on macOS only because the run stops earlier at `perf is not
+#      installed`. The driver now offers `--validate-args-only`, which STOPS at the
+#      argument boundary, and the hermeticity is PROVED by recording PATH shims rather
+#      than assumed from the host lacking a tool.
+#
+# Hermetic ON EVERY PLATFORM, Linux included: synthetic result dirs + synthetic perf
+# CSVs, and recording `sudo`/`cargo`/`perf`/`taskset` shims that FAIL the suite if any
+# accept case invokes them. No corpus, no network, and the real perf artifacts are never
+# touched.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -282,40 +299,71 @@ check_driver_reject() { # check_driver_reject <label> <expect-substring> <args..
     fail "$label: expected non-zero + '$expect' (rc=$rc2, out: $out)"
   fi
 }
-# expect_driver_accepts <label> <args…> — the ACCEPT direction, asserted
-# AFFIRMATIVELY (#3272 review).
+# --------------------------------------------------------------------------
+# HERMETICITY SHIMS — the accept direction may execute NOTHING (#3272 R1)
+# --------------------------------------------------------------------------
+# `sudo`, `cargo`, `perf` and `taskset` are shimmed to RECORD any invocation and exit
+# non-zero. They are prepended to PATH for every accept case, and the recording file
+# must stay EMPTY: that is the hermeticity contract, asserted rather than assumed.
 #
-# These cases used to assert only the ABSENCE of two bad substrings, e.g.
-#   `! grep -q "exceeds the" && ! grep -q "must be <n>ms"`
-# which passes on ANY unrelated failure. Measured: with a corpus dir present but `perf`
-# absent from PATH, the driver exits at `FATAL: perf is not installed` — every
-# absence-only case "passed" while argument validation had never been exercised. A
-# positive verdict requires an AFFIRMATIVE measurement, so this asserts the run REACHED
-# A LATER STAGE: the diagnostic must be one of the known post-validation checkpoints, in
-# driver order. An UNRECOGNIZED diagnostic FAILS (a closed grammar) — a new failure mode
-# must be added here deliberately, never inherited as a pass.
+# It needed asserting because it was BROKEN. Round 1's `expect_driver_accepts` ran the
+# REAL driver with no early exit and accepted "it failed at some later checkpoint" as
+# proof the arguments were fine — and its grammar admitted `release build failed` and
+# `not readable, so its prior value`, i.e. it EXPECTED to get past validation into
+# `relax_perf_sysctls` (a host `sudo -n sysctl -w`) and `cargo build --release`. Six call
+# sites, each a full release build, in a suite whose header says "No cargo, no perf, no
+# sudo". It never showed up because macOS stops earlier at `perf is not installed`; on
+# LINUX — where the gate's `tooling-tests` component runs this file — it mutated the host
+# and built the workspace. A suite whose hermeticity depends on the host LACKING a tool is
+# not hermetic; it is untested on the platform that matters.
+SHIM_BIN="$TMP/hermetic-bin"
+HERMETIC_CALLS="$TMP/hermetic-calls.txt"
+mkdir -p "$SHIM_BIN"
+: > "$HERMETIC_CALLS"
+for _tool in sudo cargo perf taskset; do
+  cat > "$SHIM_BIN/$_tool" <<SHIM
+#!/usr/bin/env bash
+printf '%s %s\n' "$_tool" "\$*" >> "$HERMETIC_CALLS"
+exit 97
+SHIM
+  chmod +x "$SHIM_BIN/$_tool"
+done
+unset _tool
+
+# expect_driver_accepts <label> <args…> — the ACCEPT direction, asserted
+# AFFIRMATIVELY and HERMETICALLY (#3272 review R1).
+#
+# Two positive measurements, neither of them an absence:
+#
+#  (a) the driver reached its ARGUMENT-VALIDATION BOUNDARY and SAID SO — `ARGUMENTS OK`
+#      on stdout with rc=0, via `--validate-args-only`. Round 1's version instead
+#      asserted the run reached one of ten LATER checkpoints, which made "the release
+#      build failed" a passing acceptance signal.
+#  (b) it executed NOTHING: no `sudo`, no `cargo`, no `perf`, no `taskset` — proved by
+#      the recording shims above, whose file must be empty for this case.
 expect_driver_accepts() {
   local label="$1"; shift
-  local out
-  out=$(bash "$DRIVER" "$@" 2>&1)
-  # Every checkpoint AFTER argument validation, in the order the driver reaches them.
-  # Reaching any one of them proves the arguments were accepted.
-  if grep -qE "holds no \*-Data.db|is not installed|CQLITE_WS0_CPU_TOPOLOGY_ROOT|does not exist — the sibling check|is NOT the sibling set|CPU list is empty|already accepting connections|not readable, so its prior value|missing — regenerate the corpus|release build failed" <<<"$out"; then
-    pass "$label"
+  local out rc calls
+  : > "$HERMETIC_CALLS"
+  out=$(PATH="$SHIM_BIN:$PATH" bash "$DRIVER" --validate-args-only "$@" 2>&1); rc=$?
+  calls="$(cat "$HERMETIC_CALLS")"
+  if [ "$rc" -ne 0 ] || ! grep -q "ARGUMENTS OK" <<<"$out"; then
+    fail "$label: the driver did not reach its argument-validation boundary, so acceptance is UNMEASURED (rc=$rc, out: $out)"
     return
   fi
-  # No diagnostic at all would mean the run proceeded to measure, which cannot happen
-  # in a hermetic test — so it is a failure to diagnose, not an acceptance.
-  fail "$label: the run did not reach a recognized post-validation checkpoint, so acceptance is UNMEASURED. Either the arguments were refused, or a new failure mode needs adding to expect_driver_accepts' grammar. out: $out"
+  if [ -n "$calls" ]; then
+    fail "$label: the accept path INVOKED something outside this process — the suite is not hermetic: $calls"
+    return
+  fi
+  pass "$label"
 }
 
-# NON-VACUITY for the helper ITSELF, before it is trusted: it must FAIL on a genuinely
-# REFUSED argument and PASS on an accepted one. Run against a REAL refusal (`--reps 0`,
-# which every other case here proves is rejected) with `pass`/`fail` shimmed, so the
-# helper's own verdict is observed rather than assumed.
+# NON-VACUITY for the helper ITSELF, before it is trusted, in THREE directions: it must
+# FAIL on a genuinely refused argument, PASS on an accepted one, and FAIL when the run
+# invokes a shimmed tool. `pass`/`fail` are shimmed so the helper's own verdict is
+# observed rather than assumed.
 _probe_helper() { # _probe_helper <args…> — echoes PASS or FAIL
   ( pass() { echo PASS; }; fail() { echo FAIL; }
-    expect_driver_accepts probe "$@" >/dev/null 2>&1
     expect_driver_accepts probe "$@" 2>/dev/null | head -1 )
 }
 if [ "$(_probe_helper --corpus "$TMP/corpus" --reps 0)" = "FAIL" ]; then
@@ -327,6 +375,53 @@ if [ "$(_probe_helper --corpus "$TMP/corpus" --reps 3)" = "PASS" ]; then
   pass "expect_driver_accepts PASSES on an accepted argument (the positive control)"
 else
   fail "expect_driver_accepts must pass on an accepted argument"
+fi
+# The HERMETICITY half of the helper, driven against a stand-in that stamps the accept
+# marker AND runs `sudo`: the helper must still FAIL, on the invocation alone. Without
+# this the empty-file check could be satisfied by shims that are never reached — the
+# `0/0` shape, one level down.
+if [ "$(
+  ( pass() { echo PASS; }; fail() { echo FAIL; }
+    DRIVER="$TMP/leaky-driver.sh"
+    { echo 'sudo -n sysctl -w kernel.perf_event_paranoid=-1 >/dev/null 2>&1'
+      echo 'echo "ARGUMENTS OK (stand-in)"'; } > "$DRIVER"
+    expect_driver_accepts probe --corpus "$TMP/corpus" 2>/dev/null | head -1 )
+)" = "FAIL" ]; then
+  pass "expect_driver_accepts FAILS when the run invokes sudo (the hermeticity half FIRES)"
+else
+  fail "expect_driver_accepts must fail on any sudo/cargo/perf invocation, else the shims are decorative"
+fi
+# And the shims must be REACHABLE and RECORDING at all — otherwise every hermeticity
+# assertion above rests on an oracle that cannot answer (#3272: a positive verdict
+# requires an affirmative measurement).
+: > "$HERMETIC_CALLS"
+PATH="$SHIM_BIN:$PATH" sudo -n true >/dev/null 2>&1
+PATH="$SHIM_BIN:$PATH" cargo build >/dev/null 2>&1
+if grep -q '^sudo ' "$HERMETIC_CALLS" && grep -q '^cargo ' "$HERMETIC_CALLS"; then
+  pass "the hermeticity shims are on PATH and RECORD (the oracle can answer)"
+else
+  fail "the hermeticity shims must record invocations, else the empty-file check is vacuous"
+fi
+: > "$HERMETIC_CALLS"
+# The driver must actually OFFER the boundary. A `--validate-args-only` that fell through
+# to the unrecognized-argument branch would make every accept case fail loudly; one that
+# was PARSED AND IGNORED would make them all pass while executing the world. So the
+# flag's own effect is asserted: even a corpus that does not exist is never stat'ed.
+out=$(PATH="$SHIM_BIN:$PATH" bash "$DRIVER" --validate-args-only --corpus /nonexistent-corpus 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "ARGUMENTS OK" <<<"$out" \
+   && grep -q "nothing was executed" <<<"$out" \
+   && ! grep -q "holds no" <<<"$out" && [ ! -s "$HERMETIC_CALLS" ]; then
+  pass "--validate-args-only stops AT the argument boundary (no corpus stat, nothing executed)"
+else
+  fail "--validate-args-only must exit 0 at the boundary without touching the world (rc=$rc, out: $out, calls: $(cat "$HERMETIC_CALLS"))"
+fi
+# ...and it must still REFUSE a bad argument: a validate-only mode that accepted
+# everything would turn every accept case into a tautology.
+out=$(PATH="$SHIM_BIN:$PATH" bash "$DRIVER" --validate-args-only --corpus "$TMP/corpus" --reps 0 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "must be at least 1" <<<"$out"; then
+  pass "--validate-args-only still REFUSES an invalid argument (it validates, it does not wave through)"
+else
+  fail "--validate-args-only must refuse --reps 0 (rc=$rc, out: $out)"
 fi
 
 check_driver_reject "a 45s cold step is refused up front (would admit warm requests)" \
