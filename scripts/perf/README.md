@@ -15,6 +15,8 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096
 |---|---|
 | `ws0-baseline.sh` | the driver: both arms, warm+cold, median of N, fail-closed pinning |
 | `lib-cpu.sh` | `thread_siblings_list` verification — the pinning is READ, never assumed |
+| `lib-perf-lint.sh` | the perf-invocation guard: perf is invoked in ONE wrapper, CPU-wide |
+| `lib-host-state.sh` | the sysctl capture/mutate/restore — the only state changed outside the process tree |
 | `ws0_report.py` | aggregation → `results.json` + a human summary |
 | `ws0_validate.py` | the fail-closed layer: what the reporter is ALLOWED to aggregate |
 
@@ -24,8 +26,14 @@ believing any number this rig prints.
 
 Non-negotiables baked into the scripts (issue #3096 spec R1/R2):
 
-* CPU-wide `perf stat -C <cpu-list>`; **never** `perf stat -p` (>2x observer
-  cost). `ws0-baseline.sh` greps itself for a `-p` form and refuses to run.
+* CPU-wide `perf stat -C <cpu-list>`; **never** per-process counting (>2x observer
+  cost). Enforced in three layers (`lib-perf-lint.sh`), an ALLOWLIST rather than a
+  deny-list grep: perf is invoked in exactly ONE wrapper and any other invocation line
+  must be explicitly marked; no such line may carry a per-process option TOKEN; and the
+  wrapper checks its own argv at runtime. The predecessor was a pattern over source
+  text, and five ordinary bash spellings bypassed two successive versions of it — a
+  deny-list must anticipate every spelling and is silently permissive the moment it
+  misses one.
 * `taskset` to a **verified** physical-core sibling pair; a non-sibling request
   fails closed rather than silently measuring two different cores.
 * **rows/s AND cycles/row**, never a CPU-share.

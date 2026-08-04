@@ -42,6 +42,11 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DRIVER="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
 LIB="$REPO_ROOT/scripts/perf/lib-cpu.sh"
+# The perf-invocation lint the driver sources. Held separately so this file drives THE
+# SHIPPED implementation rather than a copy: a reimplemented check in a test is a
+# second thing to keep in sync, and its divergence would be invisible in exactly the
+# permissive direction.
+PERF_LINT_LIB="$REPO_ROOT/scripts/perf/lib-perf-lint.sh"
 
 fails=0
 pass() { echo "ok   - $1"; }
@@ -49,6 +54,7 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$LIB" ] || { echo "FAIL - missing $LIB"; exit 1; }
+[ -f "$PERF_LINT_LIB" ] || { echo "FAIL - missing $PERF_LINT_LIB"; exit 1; }
 # Stated UP FRONT and fail-closed (#3272 review B8, applied to this file too).
 # `driver_copy_with` needs python3 for its exact-literal injection. Without this
 # check its absence would surface as a fixture-did-not-apply failure inside PART 2 —
@@ -261,7 +267,12 @@ driver_copy_with() {
   local repl="$1" d
   d="$(mktemp -d "$TMP/drvXXXXXX")"
   mkdir -p "$d/scripts/perf"
-  cp "$DRIVER" "$LIB" "$d/scripts/perf/"
+  # The WHOLE directory, not an enumerated file list: the driver sources several
+  # libraries and adding one more (as review round 1's splits did) silently broke a
+  # list-based copy — each case then failed with "no such file" instead of with the
+  # guard's own diagnostic, i.e. the fixture reported the WRONG failure. Copying the
+  # directory cannot go stale.
+  cp "$REPO_ROOT/scripts/perf/"* "$d/scripts/perf/"
   # python3 for an exact literal replacement — sed would need every metacharacter
   # in `$EVENTS`/`"$@"` escaped, and a replacement that silently did nothing would
   # make the case pass vacuously (the injection must actually land, asserted below).
@@ -288,8 +299,8 @@ expect_selfgrep_fires() {
   fi
   out=$(bash "$copy" --corpus /nonexistent 2>&1); rc=$?
   if [ "$rc" -ne 0 ] \
-     && grep -q "contains a per-process 'perf stat -p' invocation" <<<"$out" \
-     && grep -q "CPU-wide" <<<"$out"; then
+     && grep -q "contains a per-process perf invocation" <<<"$out" \
+     && grep -q "CPU-wide counting is mandatory" <<<"$out"; then
     pass "selfgrep-fires: $label"
   else
     fail "selfgrep-fires: $label — expected non-zero + the per-process diagnostic (rc=$rc, out: $(head -3 <<<"$out"))"
@@ -315,6 +326,39 @@ expect_selfgrep_fires "an --pid=<pid>" \
 expect_selfgrep_fires "a -p line carrying a 'self-check' comment (pre-fix: NOT caught)" \
   '  perf stat -x, -e "$EVENTS" -p "$SERVER_PID" -o "$outfile" -- "$@"  # not part of the self-check'
 
+# --- BYPASSES 3-5, found by review round 1 in the fix for bypasses 1-2 -------
+# All three are ordinary bash, and each was MEASURED against the item-10 pattern
+# `perf stat[^|]*(-p([[:space:]]|[0-9"$])|--pid([[:space:]]|=))` as NOT MATCHING:
+#
+#   * a SINGLE-QUOTED attached value — the attached-value class `[0-9"$]` omits `'`;
+#   * an invocation through a VARIABLE — the pattern anchored the literal word `perf`
+#     immediately before `stat`;
+#   * a GLOBAL OPTION between the two words — the same adjacency anchor.
+#
+# Three bypasses in a fix for two bypasses is why the mechanism is now an ALLOWLIST
+# (perf is invoked in ONE wrapper; every other perf/stat invocation line must be
+# explicitly marked) plus a per-TOKEN option check plus a RUNTIME argv check. The
+# allowlist is closed by construction: it does not ask what a line looks like, it asks
+# where it is — so a spelling nobody anticipated still fires.
+expect_selfgrep_fires "a SINGLE-QUOTED attached -p'<pid>' (pre-fix: NOT caught)" \
+  '  perf stat -x, -e "$EVENTS" -p'"'"'1234'"'"' -o "$outfile" -- "$@"'
+expect_selfgrep_fires "an invocation through a VARIABLE, \$PERF_BIN stat -p (pre-fix: NOT caught)" \
+  '  "$PERF_BIN" stat -x, -p 1 -o "$outfile" -- "$@"'
+expect_selfgrep_fires "a GLOBAL OPTION between the words, perf --no-pager stat -p (pre-fix: NOT caught)" \
+  '  perf --no-pager stat -x, -p 1 -o "$outfile" -- "$@"'
+# The allowlist half, independent of any option spelling: a SECOND perf invocation
+# somewhere other than the wrapper is refused even when it is CPU-wide and perfectly
+# correct, because "one place invokes perf" is what makes the guard closed. No
+# deny-list pattern could catch this at all — there is nothing forbidden on the line.
+# The replacement closes `perf_stat_c` early, adds an outside invocation, and opens a
+# throwaway function so the driver's original `}` still balances — so the injected
+# line is genuinely OUTSIDE the wrapper, which is the property under test.
+expect_selfgrep_fires "a SECOND, CPU-wide perf invocation outside the wrapper (no deny-list could see it)" \
+  '  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"
+}
+perf stat -x, -C 0 -o /dev/null -- true
+_ws0_injected_noop() {'
+
 # --- NEGATIVE direction: the driver AS SHIPPED passes its own check --------
 # The half that keeps this from being a guard that reds unconditionally — which is
 # the guard an operator deletes. The shipped driver must get PAST the self-check,
@@ -325,20 +369,155 @@ if [ "$rc" -ne 0 ] && ! grep -q "per-process" <<<"$out"; then
 else
   fail "selfgrep-silent: the shipped driver must NOT trip its own -p check (rc=$rc, out: $(head -3 <<<"$out"))"
 fi
-# Stated directly too, so a future edit that adds a per-process form to the real
-# file is caught here even if the driver's own check were disabled.
-if grep -nE 'perf stat[^|]*(-p([[:space:]]|[0-9"$])|--pid([[:space:]]|=))' "$DRIVER" >/dev/null 2>&1; then
-  fail "selfgrep-real: the SHIPPED driver contains a per-process perf invocation"
+# Stated directly too, using the driver's OWN lint function rather than a second
+# hand-written pattern: a reimplemented check in the test would be a second thing to
+# keep in sync, and its divergence would be invisible in exactly the permissive
+# direction. Sourced by extraction so nothing in the driver's body runs.
+lint_shipped() {
+  ( set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$PERF_LINT_LIB"
+    perf_invocation_lint "$1" )
+}
+if [ -z "$(lint_shipped "$DRIVER")" ]; then
+  pass "selfgrep-real: the shipped driver is clean under its OWN lint (no second pattern to drift)"
 else
-  pass "selfgrep-real: the shipped driver contains no per-process perf invocation"
+  fail "selfgrep-real: the SHIPPED driver violates its own lint: $(lint_shipped "$DRIVER")"
 fi
-# And the guard must still be WIRED (a self-check present but never called is the
-# #3249 shape): the driver's grep runs unconditionally at parse time.
-if grep -q 'PERF_PER_PROCESS_RE' "$DRIVER" \
-   && grep -q 'if grep -nE "\$PERF_PER_PROCESS_RE" "\${BASH_SOURCE\[0\]}"' "$DRIVER"; then
-  pass "selfgrep-wired: the self-check greps THIS FILE via \${BASH_SOURCE[0]} at startup"
+# The driver's own lint only ever reads ${BASH_SOURCE[0]} — ITSELF — so a per-process
+# invocation smuggled into one of the LIBRARIES it sources would be inside the rig and
+# outside the guard. The lint's per-TOKEN layer is applied to each of them here.
+# `lib-cpu.sh` has no `perf_stat_c`, so only the option findings are asserted; the
+# allowlist half is meaningless for a file that is not supposed to invoke perf at all.
+for lib in "$LIB" "$PERF_LINT_LIB"; do
+  bad=$(lint_shipped "$lib" | grep 'per-process option token')
+  if [ -z "$bad" ]; then
+    pass "selfgrep-libs: $(basename "$lib") carries no per-process option token"
+  else
+    fail "selfgrep-libs: $(basename "$lib") carries a per-process option: $bad"
+  fi
+done
+# And the driver must SOURCE the lint before using it — a lint library present but
+# unsourced would make `perf_invocation_lint` an unbound command, which under
+# `set -euo pipefail` in a command substitution is a confusing failure rather than a
+# refusal (the #3249 "wired?" question).
+if grep -q 'source "\$HERE/lib-perf-lint.sh"' "$DRIVER"; then
+  pass "selfgrep-wired: the driver SOURCES lib-perf-lint.sh"
 else
-  fail "selfgrep-wired: the self-check must grep \${BASH_SOURCE[0]} unconditionally"
+  fail "selfgrep-wired: the driver must source lib-perf-lint.sh"
+fi
+# And the guard must still be WIRED (a lint present but never called is the #3249
+# shape): the driver runs it unconditionally at parse time and exits on any output.
+if grep -q '_perf_lint_out="\$(perf_invocation_lint "\${BASH_SOURCE\[0\]}")"' "$DRIVER" \
+   && awk '/^if \[\[ -n "\$_perf_lint_out" \]\]/,/^fi$/' "$DRIVER" | grep -q 'exit 2'; then
+  pass "selfgrep-wired: the lint runs over \${BASH_SOURCE[0]} at startup and exits on any finding"
+else
+  fail "selfgrep-wired: the lint must run over \${BASH_SOURCE[0]} unconditionally and exit"
+fi
+
+# --- The lint's own POSITIVE CONTROL and non-vacuity ------------------------
+# Per #3249 the greps above are only evidence if the lint can both FIRE and STAY
+# SILENT. A `perf_invocation_lint` hardcoded to print nothing would satisfy every
+# `selfgrep-silent` case; one hardcoded to print something would satisfy every
+# `selfgrep-fires` case. So it is driven directly over minimal synthetic files.
+lint_probe() { # lint_probe <file-content> — echoes the lint's findings
+  printf '%s\n' "$1" > "$TMP/lint-probe.sh"
+  lint_shipped "$TMP/lint-probe.sh"
+}
+WRAP=$'perf_stat_c() {\n  perf stat -x, -C "$SERVER_CPUS" -o "$1" -- "$2"\n}'
+if [ -z "$(lint_probe "$WRAP")" ]; then
+  pass "lint-control: a file whose ONLY invocation is the CPU-wide wrapper is CLEAN"
+else
+  fail "lint-control: the minimal clean file must lint clean: $(lint_probe "$WRAP")"
+fi
+# The three END assertions: the allowlist may not be vacuous.
+if grep -q 'perf_stat_c() is absent' <<<"$(lint_probe 'echo hello')"; then
+  pass "lint-nonvacuous: a file with NO wrapper is flagged (the allowlist has nothing to allow)"
+else
+  fail "lint-nonvacuous: an absent wrapper must be flagged (got: $(lint_probe 'echo hello'))"
+fi
+NO_C=$'perf_stat_c() {\n  perf stat -x, -o "$1" -- "$2"\n}'
+if grep -q 'does not pass -C' <<<"$(lint_probe "$NO_C")"; then
+  pass "lint-nonvacuous: a wrapper that passes NO -C is flagged (it counts nothing CPU-wide)"
+else
+  fail "lint-nonvacuous: a wrapper without -C must be flagged (got: $(lint_probe "$NO_C"))"
+fi
+EMPTY_WRAP=$'perf_stat_c() {\n  :\n}'
+if grep -q 'invokes nothing' <<<"$(lint_probe "$EMPTY_WRAP")"; then
+  pass "lint-nonvacuous: an EMPTY wrapper is flagged (the allowlist would allow nothing)"
+else
+  fail "lint-nonvacuous: an empty wrapper must be flagged (got: $(lint_probe "$EMPTY_WRAP"))"
+fi
+# The option check applies INSIDE the wrapper too — where the allowlist has nothing to
+# say, since the line is exactly where it is supposed to be.
+IN_WRAP=$'perf_stat_c() {\n  perf stat -x, -C "$SERVER_CPUS" -p1234 -o "$1" -- "$2"\n}'
+if grep -q 'per-process option token' <<<"$(lint_probe "$IN_WRAP")"; then
+  pass "lint-inside-wrapper: a per-process option INSIDE the wrapper is still flagged"
+else
+  fail "lint-inside-wrapper: the option check must apply inside the wrapper (got: $(lint_probe "$IN_WRAP"))"
+fi
+# ...and the MARKER exempts a line from the ALLOWLIST only, never from the option
+# check — otherwise the marker would be a one-comment bypass, which is bypass 2 again.
+MARKED_P=$'perf_stat_c() {\n  perf stat -x, -C 1 -o "$1" -- "$2"\n}\nperf stat -p 1  # perf-lint-allow'
+if grep -q 'per-process option token' <<<"$(lint_probe "$MARKED_P")"; then
+  pass "lint-marker-scope: the allow-marker does NOT exempt a per-process option (bypass 2 cannot return)"
+else
+  fail "lint-marker-scope: a marked line must still be option-checked (got: $(lint_probe "$MARKED_P"))"
+fi
+# The IDENTIFIER false-positive direction: a guard that reds on `perf_stat_c`,
+# `perf_event_paranoid` or a `target/perf-…` path is the guard an operator deletes.
+IDENTS=$(printf '%s\n' \
+  'perf_stat_c() {' \
+  '  perf stat -x, -C 1 -o "$1" -- "$2"' \
+  '}' \
+  'PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid)"' \
+  'OUT_DIR="$REPO_ROOT/target/perf-ws0-3096/$TS"' \
+  'printf "%s\n" "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"' \
+  'perf_stat_c "$OUT_DIR/perf-$tag.csv" taskset -c 1 true')
+if [ -z "$(lint_probe "$IDENTS")" ]; then
+  pass "lint-no-false-positive: identifiers/paths containing 'perf' or 'stat' are NOT flagged"
+else
+  fail "lint-no-false-positive: identifiers must not red the lint (got: $(lint_probe "$IDENTS"))"
+fi
+
+# --- LAYER 3: the RUNTIME argv guard inside perf_stat_c ---------------------
+# The layer no source scan can substitute for: a caller passing a COMPUTED option, or
+# one built by `eval`, is invisible to any text check but arrives here as a plain
+# token — bash has already done word-splitting and quote removal, so `-p'1234'`,
+# `-p1234` and `-p "$x"` are indistinguishable by the time this runs.
+argv_probe() { # argv_probe <args…> — run the driver's perf_stat_c with a perf shim
+  ( set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$PERF_LINT_LIB"          # supplies $_PP_SHORT / $_PP_LONG
+    EVENTS="cycles"; SERVER_CPUS="0"
+    perf() { printf 'PERF-RAN: %s\n' "$*"; }
+    eval "$(awk '/^perf_stat_c\(\)/,/^}/' "$DRIVER")"
+    perf_stat_c /dev/null "$@" ) 2>&1
+}
+for spelled in "-p1234" "-p" "--pid=1234" "--pid"; do
+  out=$(argv_probe true "$spelled"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "was passed the per-process option" <<<"$out" \
+     && ! grep -q 'PERF-RAN' <<<"$out"; then
+    pass "argv-guard: perf_stat_c REFUSES a computed '$spelled' before invoking perf"
+  else
+    fail "argv-guard: '$spelled' must be refused and perf must not run (rc=$rc, out: $out)"
+  fi
+done
+# A single-quoted attached value is the SAME TOKEN here — the spelling problem does
+# not exist at this layer, which is the point of having it.
+out=$(argv_probe true "-p'1234'")
+if grep -q "was passed the per-process option" <<<"$out"; then
+  pass "argv-guard: a single-quoted attached value is the same token after quote removal"
+else
+  fail "argv-guard: -p'1234' must be refused (out: $out)"
+fi
+# And the ACCEPT direction: an ordinary argv reaches perf, so the guard is not one
+# that refuses everything.
+out=$(argv_probe taskset -c 1 /bin/true)
+if grep -q 'PERF-RAN: stat -x, -e cycles -C 0 -o /dev/null -- taskset -c 1 /bin/true' <<<"$out"; then
+  pass "argv-guard: an ordinary argv is passed through, CPU-wide, with -C (the accept half)"
+else
+  fail "argv-guard: a clean argv must reach perf with -C (out: $out)"
 fi
 
 # ===========================================================================

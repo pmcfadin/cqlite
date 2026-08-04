@@ -16,10 +16,14 @@
 # The traps this rig is built around (spec R2) — do not "simplify" these away
 # ---------------------------------------------------------------------------
 #
-#  1. CPU-WIDE COUNTERS ONLY. Every measurement uses `perf stat -C <cpu-list>`.
-#     `perf stat -p` (per-process) measured >2x observer cost on this workload
-#     and appears NOWHERE in this rig. There is a self-check below that greps
-#     this script for a `-p` form and refuses to run if one appears.
+#  1. CPU-WIDE COUNTERS ONLY. Every measurement goes through the single
+#     `perf_stat_c` wrapper, which counts CPU-wide. Per-process counting measured
+#     >2x observer cost on this workload and appears NOWHERE in this rig. Three
+#     layers enforce that (see scripts/perf/lib-perf-lint.sh): an ALLOWLIST over
+#     this file's source (perf is invoked in ONE place, everything else must be
+#     marked), a per-TOKEN option check, and a RUNTIME argv check in the wrapper.
+#     It stopped being a deny-list grep because five ordinary bash spellings
+#     bypassed two successive versions of one.
 #  2. VERIFIED SIBLING PINNING. The pinned pair is read from
 #     `thread_siblings_list` and the run FAILS CLOSED if it is not one physical
 #     core's siblings (`lib-cpu.sh`). Never assumed from CPU numbers.
@@ -54,6 +58,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=scripts/perf/lib-cpu.sh
 source "$HERE/lib-cpu.sh"
+# shellcheck source=scripts/perf/lib-perf-lint.sh
+source "$HERE/lib-perf-lint.sh"
+# shellcheck source=scripts/perf/lib-host-state.sh
+source "$HERE/lib-host-state.sh"
 
 CORPUS=""
 SERVER_CPUS="2,10"
@@ -140,48 +148,24 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- trap 1 self-check: this rig contains no per-process perf invocation ------
-# Greps THIS FILE (spec R2's "contains no `perf stat -p` invocation"), so a
-# future edit that reaches for `-p` cannot run at all.
-#
-# # Two bypasses this used to have (issue #3272, item 10)
-#
-# The original pattern was `perf stat[^|]*(-p |--pid)` filtered through
-# `grep -v 'self-check'`, and MEASURED against injected invocations it let two
-# ordinary spellings through:
-#
-#  1. **An ATTACHED value, `-p<pid>` with no space.** The old `-p ` alternative
-#     required a trailing SPACE, but perf/getopt accept an attached value, so a
-#     per-process counting invocation written that way was a genuine one the guard
-#     did not see. Verified before this fix: the old pattern returned rc=1 (no
-#     match) on exactly that line. (Not spelled out literally here — see the
-#     self-match note below.)
-#  2. **Any line containing the words "self-check".** The `grep -v` was meant to
-#     stop the PATTERN LITERAL in this very comment block from matching itself,
-#     but it discards by CONTENT, so appending a comment mentioning that phrase to
-#     a real per-process invocation suppressed the guard. A guard whose bypass is a
-#     code comment is not a guard.
-#
-# The fix for (1) is a word-boundary/attached-value alternation; the fix for (2) is
-# to stop excluding by content at all. Instead the pattern is ASSEMBLED from pieces
-# so no line in this file contains the literal it searches for — the self-match
-# problem is removed rather than filtered around. `PERF_TOOL` is spelled
-# separately from `stat` for the same reason.
-#
-# Both directions are covered by scripts/tests/test_ws0_cpu_pinning_guards.sh: the
-# guard must FIRE on each `-p` spelling AND must NOT fire on this file as shipped
-# (a guard that reds unconditionally is the one operators learn to delete).
-PERF_TOOL='perf'
-# Matches `-p <n>`, `-p<n>`, `--pid <n>`, `--pid=<n>` after a `perf stat`, and
-# nothing in a pipeline's right-hand side (`[^|]*`).
-PERF_PER_PROCESS_RE="${PERF_TOOL} "'stat[^|]*(-p([[:space:]]|[0-9"$])|--pid([[:space:]]|=))'
-if grep -nE "$PERF_PER_PROCESS_RE" "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
-  echo "FATAL: this script contains a per-process 'perf stat -p' invocation:" >&2
-  grep -nE "$PERF_PER_PROCESS_RE" "${BASH_SOURCE[0]}" >&2
-  echo "       Per-process counting measured >2x observer cost on this workload;" >&2
-  echo "       CPU-wide 'perf stat -C <cpu-list>' is mandatory (issue #3096 spec R2)." >&2
+# --- trap 1: this file contains NO per-process perf invocation ----------------
+# Runs unconditionally at startup, over THIS FILE, so an edit that reaches for the
+# per-process option — or that invokes perf anywhere other than the single
+# `perf_stat_c` wrapper — cannot run at all. The mechanism, the three bypasses review
+# round 1 found in its predecessor, and why it is an ALLOWLIST rather than a deny-list
+# grep: scripts/perf/lib-perf-lint.sh. Its LAYER 3 (the runtime argv check) lives in
+# `perf_stat_c` below, because only the wrapper sees the argv.
+_perf_lint_out="$(perf_invocation_lint "${BASH_SOURCE[0]}")"
+if [[ -n "$_perf_lint_out" ]]; then
+  echo "FATAL: this script contains a per-process perf invocation, or invokes perf" >&2  # perf-lint-allow
+  echo "       outside its single wrapper:" >&2
+  printf '       %s\n' "$_perf_lint_out" >&2
+  echo "       Per-process counting (${_PP_SHORT} / ${_PP_LONG}) measured >2x observer cost on" >&2
+  echo "       this workload; CPU-wide counting is mandatory (issue #3096 spec R2), and" >&2
+  echo "       every invocation must go through perf_stat_c so ONE place enforces it." >&2  # perf-lint-allow
   exit 2
 fi
+unset _perf_lint_out
 
 # --- trap 3 enforcement: COLD is ONE pass, or it is not a cold claim ----------
 # `--scan-passes N` runs N timed passes INSIDE ONE ws0-scan-bench process, and
@@ -368,7 +352,7 @@ if ! ls "$TABLE_DIR"/*-Data.db >/dev/null 2>&1; then
 fi
 TICKET_TEMPLATE="$CORPUS/ticket-template.json"
 
-for tool in perf taskset python3; do
+for tool in perf taskset python3; do  # perf-lint-allow: a presence PROBE (command -v), not an invocation
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is not installed" >&2; exit 2; }
 done
 
@@ -398,103 +382,11 @@ verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 # port as a FAILURE to be reported rather than an obstacle to be removed.
 SERVER_PID=""
 
-# ---------------------------------------------------------------------------
-# Host sysctl state — CAPTURED before mutation, RESTORED on every exit path
-# ---------------------------------------------------------------------------
-# Issue #3272, finding 3 (security-adjacent). This rig weakens two host hardening
-# knobs so `perf stat -C` can count CPU-wide:
-#
-#   kernel.perf_event_paranoid = -1   (unprivileged CPU-wide + kernel counting)
-#   kernel.kptr_restrict       = 0    (kernel pointers exposed via /proc)
-#
-# It used to set both and NEVER put them back: the only trap was
-# `trap stop_server EXIT`, so a success, a FATAL and a Ctrl-C all left the box less
-# hardened than the rig found it — permanently, for every subsequent process on a
-# shared fleet machine, with nothing in the output saying so.
-#
-# The prior values are captured BEFORE the mutation (there is nothing to restore to
-# otherwise) and restored from ONE exit handler that also stops the server. Three
-# properties the restore must have, because it runs on the failure paths too:
-#
-#  * IDEMPOTENT — `SYSCTLS_MUTATED` gates it, so a handler that runs twice, or a run
-#    that never touched the knobs, is a no-op rather than a spurious `sysctl -w`.
-#  * NON-FATAL, per step — every write runs as an `if` CONDITION, which `set -e` does
-#    not act on, and the function ends in an explicit `return 0`. This is cleanup: a
-#    restore that can exit non-zero would turn a successful measurement into a failed
-#    one, and a restore that inherits `set -e` and dies on the first knob would leave
-#    the SECOND one weakened, which is the exact bug being fixed.
-#  * REGISTERED ON SIGNALS TOO — `EXIT` alone does not fire for SIGINT/SIGTERM/SIGHUP
-#    while a foreground child (a long `perf stat` leg) is running, and Ctrl-C during
-#    a 45s step is the single most likely way this rig ends.
-#
-# # PER-KNOB, because the first fix of this finding was itself partial (#3272 round 1)
-#
-# The restore's success/warning split used to be keyed on "was ANYTHING restored":
-#
-#     if [[ "${#restored[@]}" -gt 0 ]]; then echo "restored host sysctls: …"
-#     else echo "WARNING: …"; fi
-#
-# and each knob's restore was gated on `[[ -n "$<KNOB>_PRIOR" ]]`. So a PARTIAL
-# restore took the AFFIRMATIVE branch. MEASURED against that code: with
-# `PARANOID_PRIOR=2` and `KPTR_PRIOR=""` (the value the capture below falls back to
-# when `/proc/sys/kernel/kptr_restrict` is unreadable — while the mutation wrote
-# `kernel.kptr_restrict=0` regardless), `restore_sysctls` issued ONE `sysctl -w`,
-# printed `restored host sysctls: perf_event_paranoid=2`, and emitted no warning. The
-# operator was told the host was restored while `kptr_restrict=0` was left behind
-# permanently. That is finding 3's own defect in narrower form — a fix that moved the
-# problem — so it is closed from BOTH ends:
-#
-#  1. ROOT CAUSE: a knob whose prior could not be CAPTURED is never MUTATED. Nothing
-#     is weakened that cannot be put back, so the unrestorable case does not arise.
-#  2. REPORTING: each knob is tracked independently. Every knob that was written and
-#     NOT restored is named in a warning carrying a COMPLETE runnable command, and the
-#     affirmative line is printed only for the knobs that genuinely went back.
-#
-# `SYSCTLS_WRITTEN` holds one `<sysctl-name>=<prior-value>` per line — exactly the
-# knobs that were written, each paired with the value to put back. It is the single
-# source of truth for the restore, so a knob cannot be mutated without being
-# enrolled, and a knob cannot be "restored" that was never touched.
-PARANOID_PRIOR=""
-KPTR_PRIOR=""
-SYSCTLS_MUTATED=0
-SYSCTLS_WRITTEN=""
+# Host sysctl capture/mutate/restore lives in scripts/perf/lib-host-state.sh — the
+# only part of this rig that changes state outside its own process tree. The
+# driver composes `restore_sysctls` into its single `on_exit` handler below and
+# calls `relax_perf_sysctls` once, before the results dir exists.
 
-restore_sysctls() {
-  [[ "$SYSCTLS_MUTATED" == "1" ]] || return 0
-  SYSCTLS_MUTATED=0
-  local entry knob prior
-  local -a restored=() failed=()
-  while IFS= read -r entry; do
-    [[ -n "$entry" ]] || continue
-    knob="${entry%%=*}"
-    prior="${entry#*=}"
-    # An `if` CONDITION: `set -e` never acts on one, so a failing knob neither aborts
-    # the handler nor orphans the knobs after it in the list.
-    if sudo -n sysctl -w "$knob=$prior" >/dev/null 2>&1; then
-      restored+=("$knob=$prior")
-    else
-      failed+=("$knob=$prior")
-    fi
-  done <<<"$SYSCTLS_WRITTEN"
-  if [[ "${#restored[@]}" -gt 0 ]]; then
-    echo "restored host sysctls: ${restored[*]}" >&2
-  fi
-  if [[ "${#failed[@]}" -gt 0 ]]; then
-    # Loud and per-knob, because the host is left weakened and only the operator can
-    # fix it — and because a PARTIAL restore used to print the affirmative line.
-    echo "WARNING: ${#failed[@]} host sysctl(s) this rig WEAKENED could not be restored:" >&2
-    echo "         ${failed[*]}" >&2
-    echo "         This host is still relaxed. Restore it by hand — complete command:" >&2
-    echo "           sudo sysctl -w ${failed[*]}" >&2
-    if [[ "${#restored[@]}" -gt 0 ]]; then
-      echo "         (${#restored[@]} other knob(s) WERE restored: ${restored[*]} — this" >&2
-      echo "          run was a PARTIAL restore, not a successful one.)" >&2
-    fi
-  fi
-  # Cleanup may never fail the run: an empty `failed` array would otherwise make the
-  # last `[[ ]]` test the function's exit status.
-  return 0
-}
 
 stop_server() {
   [[ -n "$SERVER_PID" ]] || return 0
@@ -551,72 +443,12 @@ require_port_free() {
 # Fail BEFORE the release build, not after it.
 require_port_free "preflight"
 
-# CAPTURE BEFORE MUTATE, and NEVER MUTATE WHAT WAS NOT CAPTURED (issue #3272,
-# finding 3 + review round 1's B3 root cause).
-#
-# The prior values are read first — both knobs, including `kptr_restrict`, which the
-# mutation also relaxes and which the pre-#3272 code never mentioned again. Round 1
-# then found the remaining half: `KPTR_PRIOR` fell back to `""` when
-# `/proc/sys/kernel/kptr_restrict` was unreadable, and the mutation wrote
-# `kernel.kptr_restrict=0` ANYWAY, after which the restore's `[[ -n "$KPTR_PRIOR" ]]`
-# guard silently skipped it. So the failure mode was: weaken a knob, be unable to put
-# it back, and report success.
-#
-# A knob whose prior cannot be READ is therefore never WRITTEN. That is the honest
-# ordering — the ability to restore is a PRECONDITION of weakening, not a best-effort
-# afterthought — and it is what makes `restore_sysctls`'s enrollment list total: every
-# entry in `SYSCTLS_WRITTEN` has a value to go back to, by construction.
-#
-# `perf_event_paranoid` is REQUIRED (CPU-wide counting is impossible without it), so an
-# unreadable prior there is FATAL. `kptr_restrict` is a nice-to-have (it only affects
-# kernel-symbol resolution in a `perf` report), so an unreadable prior there SKIPS the
-# knob with a note rather than failing the run — a measurement that can still be taken
-# correctly should be, and leaving a knob alone is always safe.
-read_sysctl_prior() { # read_sysctl_prior <proc-path> — echo the value, rc=1 if unreadable
-  local path="$1" value
-  [[ -r "$path" ]] || return 1
-  value="$(cat "$path" 2>/dev/null)" || return 1
-  [[ -n "$value" ]] || return 1
-  printf '%s' "$value"
-}
-
-# Enroll a knob as WRITTEN with the prior to restore it to. Called BEFORE the write,
-# because a `sysctl -w` that sets the first knob and fails on the second has still
-# mutated the host — an enrollment after the write would skip the half that landed.
-enroll_sysctl() { # enroll_sysctl <sysctl-name> <prior-value>
-  SYSCTLS_WRITTEN+="${SYSCTLS_WRITTEN:+$'\n'}$1=$2"
-  SYSCTLS_MUTATED=1
-}
-
-PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "")"
-if [[ "$PARANOID" != "-1" ]]; then
-  if ! PARANOID_PRIOR="$(read_sysctl_prior /proc/sys/kernel/perf_event_paranoid)"; then
-    echo "FATAL: /proc/sys/kernel/perf_event_paranoid is not readable, so its prior value" >&2
-    echo "       cannot be captured — and this rig will not weaken a host knob it would be" >&2
-    echo "       unable to put back. Weakening something unrestorable and then reporting a" >&2
-    echo "       successful restore is the defect this ordering exists to prevent (#3272)." >&2
-    exit 2
-  fi
-  echo "perf_event_paranoid is $PARANOID; CPU-wide counting needs -1. Trying sudo -n…"
-  # A list, so a knob whose prior could not be read is simply not in it.
-  _sysctl_writes=("kernel.perf_event_paranoid=-1")
-  enroll_sysctl kernel.perf_event_paranoid "$PARANOID_PRIOR"
-  if KPTR_PRIOR="$(read_sysctl_prior /proc/sys/kernel/kptr_restrict)"; then
-    _sysctl_writes+=("kernel.kptr_restrict=0")
-    enroll_sysctl kernel.kptr_restrict "$KPTR_PRIOR"
-  else
-    KPTR_PRIOR=""
-    echo "  NOTE: /proc/sys/kernel/kptr_restrict is unreadable, so it is left ALONE." >&2
-    echo "        This rig never weakens a knob whose prior it could not capture — it" >&2
-    echo "        would have no value to restore, and a knob left weakened forever is" >&2
-    echo "        worse than a perf report without kernel symbol names (#3272)." >&2
-  fi
-  echo "  (prior values captured for restore on exit: ${SYSCTLS_WRITTEN//$'\n'/ })"
-  sudo -n sysctl -w "${_sysctl_writes[@]}" >/dev/null || {
-    echo "FATAL: cannot set kernel.perf_event_paranoid=-1 (needed for perf stat -C)." >&2
-    exit 2
-  }
-fi
+# Weaken the host knobs CPU-wide counting needs — AFTER `trap on_exit` above, never
+# before: the interval between the write and the trap being armed is the one window in
+# which a signal could leave the host relaxed. Every knob is enrolled for restore
+# BEFORE it is written, and a knob whose prior could not be read is not written at all
+# (scripts/perf/lib-host-state.sh).
+relax_perf_sysctls
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/target/perf-ws0-3096/$TS}"
@@ -654,9 +486,30 @@ drop_caches_if_cold() {
     || { echo "FATAL: cannot drop caches (sudo -n) — a 'cold' claim would be a lie" >&2; exit 2; }
 }
 
-# perf stat -C <cpu-list>: CPU-WIDE, never per-process (trap 1).
+# THE ONLY PLACE THIS FILE INVOKES perf. CPU-WIDE (`-C <cpu-list>`), never
+# per-process (trap 1). The source-level allowlist above is anchored on exactly that
+# fact: every other line mentioning a perf/stat WORD must be marked, so a new
+# invocation elsewhere cannot run however it is spelled.
+#
+# LAYER 3 of the same guard, at RUNTIME on the argv (#3272 review B4). By the time a
+# value reaches here bash has done word-splitting and QUOTE REMOVAL, so `-p'1234'`,
+# `-p1234`, `-p "$pid"` and `--pid=1234` are all just tokens — the spelling problem a
+# source-text deny-list can never close does not exist at this layer. It catches what
+# no scan of this file could see: a caller passing a COMPUTED option, or one built by
+# an `eval`.
 perf_stat_c() {
   local outfile="$1"; shift
+  local a
+  for a in "$@"; do
+    case "$a" in
+      "$_PP_SHORT"|"$_PP_SHORT"*|"$_PP_LONG"|"$_PP_LONG"*)
+        echo "FATAL: perf_stat_c was passed the per-process option '$a'." >&2
+        echo "       Per-process counting measured >2x observer cost on this workload;" >&2
+        echo "       this wrapper counts CPU-WIDE only (issue #3096 spec R2). The" >&2
+        echo "       argument list was: $*" >&2
+        exit 2 ;;
+    esac
+  done
   perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"
 }
 

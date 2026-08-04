@@ -47,6 +47,11 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DRIVER="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
 REPORT="$REPO_ROOT/scripts/perf/ws0_report.py"
+# The host-state subsystem the driver sources: the sysctl capture/mutate/restore that
+# is the only part of the rig changing anything outside its own process tree. Driven
+# HERE as the shipped implementation, sourced rather than re-extracted, so a divergence
+# between what is tested and what runs cannot exist.
+HOST_STATE="$REPO_ROOT/scripts/perf/lib-host-state.sh"
 
 fails=0
 pass() { echo "ok   - $1"; }
@@ -54,6 +59,7 @@ fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$REPORT" ] || { echo "FAIL - missing $REPORT"; exit 1; }
+[ -f "$HOST_STATE" ] || { echo "FAIL - missing $HOST_STATE"; exit 1; }
 # python3 absence is a FAILURE, not a skip (#3272 review B8). The old branch printed
 # `SKIP - … (never a silent PASS)` and then `exit 0` — which IS a silent pass: the
 # gate's `tooling-tests` component records SUCCESS with none of the ~65 checks below
@@ -904,8 +910,8 @@ else
 fi
 # The prior values must be CAPTURED BEFORE the mutation, or there is nothing to
 # restore to: assert the capture precedes the `sysctl -w` in file order.
-cap_line=$(grep -n 'PARANOID_PRIOR=' "$DRIVER" | head -1 | cut -d: -f1)
-mut_line=$(grep -n 'sysctl -w "\${_sysctl_writes\[@\]}"' "$DRIVER" | head -1 | cut -d: -f1)
+cap_line=$(grep -n 'PARANOID_PRIOR=' "$HOST_STATE" | head -1 | cut -d: -f1)
+mut_line=$(grep -n 'sysctl -w "\${writes\[@\]}"' "$HOST_STATE" | head -1 | cut -d: -f1)
 if [ -n "$cap_line" ] && [ -n "$mut_line" ] && [ "$cap_line" -lt "$mut_line" ]; then
   pass "the prior sysctl values are captured BEFORE the mutation (line $cap_line < $mut_line)"
 else
@@ -914,7 +920,7 @@ fi
 # Both sysctls the driver weakens must be ENROLLED for restore — not just the one in
 # the message. The enrollment list is what `restore_sysctls` iterates.
 for knob in perf_event_paranoid kptr_restrict; do
-  if grep -q "enroll_sysctl kernel.$knob" "$DRIVER"; then
+  if grep -q "enroll_sysctl kernel.$knob" "$HOST_STATE"; then
     pass "kernel.$knob is enrolled for restore where it is weakened"
   else
     fail "kernel.$knob must be enrolled for restore (the driver weakens it)"
@@ -922,8 +928,8 @@ for knob in perf_event_paranoid kptr_restrict; do
 done
 # The restore must be IDEMPOTENT and must never fail the run: it is cleanup, and a
 # cleanup that can exit non-zero turns a successful measurement into a failed one.
-if awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -q 'SYSCTLS_MUTATED' \
-  && awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER" | grep -q '^  return 0$'; then
+if awk '/^restore_sysctls\(\)/,/^}/' "$HOST_STATE" | grep -q 'SYSCTLS_MUTATED' \
+  && awk '/^restore_sysctls\(\)/,/^}/' "$HOST_STATE" | grep -q '^  return 0$'; then
   pass "restore_sysctls is guarded by a mutated-flag and returns 0 unconditionally"
 else
   fail "restore_sysctls must be flag-guarded (idempotent) and end in an explicit return 0"
@@ -952,8 +958,10 @@ sysctl_probe() { # sysctl_probe <case> <enrollment-lines> [sudo_ok: all|none|par
         paranoid) [[ "$*" == *perf_event_paranoid* ]] ;;
       esac
     }
-    # Taken from the driver itself so this can never drift into testing a local copy.
-    eval "$(awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER")"
+    # SOURCED, not re-implemented: this drives the shipped restore_sysctls, so the
+    # test and the run can never be different code.
+    # shellcheck disable=SC1090
+    source "$HOST_STATE"
     SERVER_PID=""
     SYSCTLS_WRITTEN="$written"
     SYSCTLS_MUTATED=1
@@ -1095,9 +1103,8 @@ fi
 # unreadable path.
 if bash -c '
   set -uo pipefail
-  DRIVER="'"$DRIVER"'"
-  eval "$(awk "/^read_sysctl_prior\(\)/,/^}/" "$DRIVER")"
-  eval "$(awk "/^enroll_sysctl\(\)/,/^}/" "$DRIVER")"
+  # shellcheck disable=SC1090
+  source "'"$HOST_STATE"'"
   SYSCTLS_WRITTEN=""; SYSCTLS_MUTATED=0
   # An unreadable path yields rc=1, NOT an empty success — so the caller can branch.
   read_sysctl_prior /nonexistent/kptr_restrict >/dev/null 2>&1 \
@@ -1121,16 +1128,16 @@ else
 fi
 # And the driver must WIRE that: the kptr write is inside the successful-capture
 # branch, so an unreadable prior leaves the knob alone rather than weakening it.
-if awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$DRIVER" | grep -q 'kernel.kptr_restrict=0' \
-  && awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$DRIVER" | grep -q 'left ALONE'; then
+if awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$HOST_STATE" | grep -q 'kernel.kptr_restrict=0' \
+  && awk '/^  if KPTR_PRIOR=/,/^  fi$/' "$HOST_STATE" | grep -q 'left ALONE'; then
   pass "the driver weakens kptr_restrict ONLY inside the successful-capture branch"
 else
   fail "the kptr_restrict write must be gated on its prior having been captured"
 fi
 # An unreadable perf_event_paranoid prior is FATAL rather than a silent weakening: it
 # is the knob the measurement REQUIRES, so there is no correct run without it.
-if grep -q 'if ! PARANOID_PRIOR=' "$DRIVER" \
-  && awk '/^  if ! PARANOID_PRIOR=/,/^  fi$/' "$DRIVER" | grep -q 'exit 2'; then
+if grep -q 'if ! PARANOID_PRIOR=' "$HOST_STATE" \
+  && awk '/^  if ! PARANOID_PRIOR=/,/^  fi$/' "$HOST_STATE" | grep -q 'exit 2'; then
   pass "an unreadable perf_event_paranoid prior is FATAL (never weakened unrestorably)"
 else
   fail "an unreadable perf_event_paranoid prior must be fatal"

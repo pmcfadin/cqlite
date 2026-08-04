@@ -10,8 +10,12 @@
 # CLOSED when the requested set is not exactly one physical core's siblings.
 #
 # Sourced, not executed.
-
-set -euo pipefail
+#
+# It sets NO shell options (#3272 review). `set -euo pipefail` here mutated the
+# SOURCING shell's options — a library silently changing its caller's error handling,
+# which is the caller's decision and not a detail a `source` line advertises. The
+# driver sets all three itself; a future non-driver caller (a test sourcing this to
+# drive one function) gets to keep whatever options it chose.
 
 # --- the sysfs topology root, INJECTABLE for testing only (issue #3272, item 10) --
 #
