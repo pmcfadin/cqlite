@@ -46,6 +46,25 @@
 # (`docs/LICENSE`, `openspec/NOTES`). Anything with a code-ish extension anywhere —
 # including `.github/workflows/*.yml` — counts as CODE and does not trip this key.
 CODE_FREE_EXTENSIONS="md markdown mdx txt rst adoc"
+# THE PROSE PREFIXES, and the RULE that applies under them: an extensionless path under
+# one of these directories is CODE **iff it is EXECUTABLE**, non-code otherwise.
+#
+# The prefix ALONE was the bug (#3229 round-11 blocker). Under a bare prefix test EVERY
+# extensionless path under `docs/` classified non-code, so it was dropped from
+# `census_code_paths` and `prompt-content:` made NO CLAIM about it — while the narrowed
+# `exclude_patterns` exclude only `*.md` globally plus docs-scoped ARTIFACT EXTENSIONS, so an
+# extensionless file is NOT excluded and genuinely DOES reach the reviewer. The guard was
+# therefore silent on precisely the class this issue's AC2 names — "the first post-merge PR
+# carrying an executable under `docs/`" — whenever that executable has no extension. Three
+# such files are tracked TODAY, all mode 100755:
+#   docs/reports/ws0-3026-artifacts/ws0-results/ws0-readbw
+#   docs/reports/ws0-3026-artifacts/ws0-results/ws0-stream
+#   docs/reports/ws0-3217-artifacts/partB-run/offcputime-bigmap
+# The EXECUTABLE BIT is the discriminator because it is EVIDENCE rather than a name guess
+# (the no-heuristics posture): a file git records as executable is something the repo intends
+# to RUN, which is what an extensionless harness script is. A non-executable extensionless
+# file under a prose directory stays non-code — which is the only thing this prefix list was
+# ever for (`docs/LICENSE`, `openspec/NOTES`, a `CODEOWNERS` under `.claude/`).
 CODE_FREE_EXTENSIONLESS_PREFIXES="openspec/ docs/ website/ .claude/"
 
 # The DOCS-SCOPED ARTIFACT extension set (issue #3229) — raw run output and
@@ -147,6 +166,46 @@ _rx_dirglob_match() {
   case "${_pc[$pi]}" in
     ${_gc[$gi]}) _rx_dirglob_match "$((gi + 1))" "$((pi + 1))" && return 0 ;;
   esac
+  return 1
+}
+
+# roborev_path_is_executable <path>: 0 when git RECORDS `<path>` with the executable bit in
+# the range the census measured, 1 otherwise (recorded non-executable, absent from both
+# endpoints, or unmeasurable). Used only for the extensionless-under-a-prose-prefix decision
+# above.
+#
+# THE MODE COMES FROM GIT'S TREE, NEVER FROM `test -x` ON THE FILESYSTEM (#3229), for three
+# reasons in ascending order of how badly the filesystem answer fails:
+#   1. The census subject is the RANGE `${BASE}...HEAD`, and a path in that range need not
+#      exist in the working tree at all — a path the diff DELETES has no file to stat, so
+#      `test -x` would answer a DIFFERENT question with a plausible-looking value.
+#   2. The recorded mode is the one the diff — and therefore the reviewer's prompt — carries
+#      (`new file mode 100755`); it comes out of the tree, not out of the checkout.
+#   3. A checkout's bits are not authoritative anyway: under `core.fileMode=false`, or on a
+#      filesystem that cannot hold the bit, the working file diverges from the tree while git
+#      keeps honouring the recorded mode.
+# HEAD (the range's right-hand endpoint) is consulted first, then the BASE commit, so a path
+# the diff DELETES is classified by the mode it HAD. That is the fail-closed direction: the
+# removal of an executable is a code change whose review must be asserted, and a pure
+# deletion still carries a `diff --git` header for `prompt-content:` to find.
+#
+# `:(literal)` pathspec magic is load-bearing: nothing stops a repo tracking a name
+# containing `*`, `?` or `[`, and a bare pathspec would read those as WILDCARDS — answering
+# for a different file, or for several. `-z` keeps the output RAW, consistent with the single
+# normalisation boundary; only the leading MODE field is read, and it is always first and
+# slash-free, so a path carrying a newline or a tab cannot displace it. An absent path is a
+# SILENT empty result (not an error), which is why the loop tests for content rather than for
+# git's exit status alone.
+roborev_path_is_executable() {
+  local path="$1" ref record mode
+  for ref in HEAD "${BASE_SHA:-}"; do
+    [ -n "$ref" ] || continue
+    record=$(git -C "$REPO" ls-tree -z "$ref" -- ":(literal)$path" 2>/dev/null) || continue
+    [ -n "$record" ] || continue
+    mode="${record%% *}"
+    [ "$mode" = 100755 ] && return 0
+    return 1
+  done
   return 1
 }
 
@@ -380,9 +439,18 @@ roborev_census() {
         fi
       fi
     else
+      # EXTENSIONLESS under a prose prefix: non-code only when git records it
+      # NON-EXECUTABLE. The prefix alone used to decide it, which made every extensionless
+      # path under `docs/` a path `prompt-content:` asserted NOTHING about — see the rule
+      # documented at `CODE_FREE_EXTENSIONLESS_PREFIXES`. The mode is read from the tree, on
+      # this same RAW `$path`, so the classification boundary is unchanged.
       # shellcheck disable=SC2086 # deliberate split of the space-separated constant
       for prefix in $CODE_FREE_EXTENSIONLESS_PREFIXES; do
-        case "$path" in "$prefix"*) file_non_code=1 ;; esac
+        case "$path" in
+          "$prefix"*)
+            if ! roborev_path_is_executable "$path"; then file_non_code=1; fi
+            ;;
+        esac
       done
     fi
     if [ "$file_non_code" -eq 1 ]; then
