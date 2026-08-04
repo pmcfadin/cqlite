@@ -390,6 +390,14 @@ about a swallow it exists to catch. Two independent root causes, both false PASS
 - [x] MEASURED for #3096, and reported without adjustment: a #3096-shaped diff now yields
       **`prompt-content: FAIL`** — option **(iii)**, not the numeric `PASS (n/n)` that worker was told to
       expect, because **F1 lived inside the deleted subsystem**. Re-anchoring #3096 is the owner's call.
+- [x] MUTATION-TESTED both directions in a `/tmp` scratch copy — 6 mutations, each RED, restore green at
+      644/0: M1 disable the swallow detection in the retained oracle (**43** RED, first line
+      `case (cx4) census-exclusion FAILs with the count`), M2 restore a blanket `docs/**` in the fixture
+      config (**32** RED, first line `case (cx1): expected 'RESULT: PASS' + exit 0, got 'RESULT: FAIL' + exit 1`),
+      M3 reintroduce a per-key exemption in the affirmation backstop (**1** RED, the new structural assert),
+      M4 reintroduce a `prompt-content:` subtraction (**5** RED across `cx30`/`cx30b`), M5 delete the
+      declared-residual paragraph from `--help` (**3** RED), M6 reintroduce the `built-in-set:` grammar into
+      `--help` (**2** RED). M1/M2 are the negative control: the retained oracle has been SEEN to fail.
 - [x] Suite: **792 → 644 asserts, 0 failed**; every retained family re-run green (`cx1`, `cx3`, `cx5*`,
       `cx6`–`cx6p`, `cx7c`, `cx8`, `cx9`, `cx10*`, `cx11`, `cx13`, `cx17`, `cx18*`, `cx21`, `cx23*`, `cx24`,
       `cx27*`, `cx28`, `cx29`, and the harness run-mirror case's surviving subject).
