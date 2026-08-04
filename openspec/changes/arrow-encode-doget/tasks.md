@@ -1,5 +1,69 @@
 # Tasks: arrow-encode-doget (issue #3096)
 
+## DELIVERY STATUS — LEVER 4 IS REVERTED (owner ruling A, 2026-08-03)
+
+**Lever 4 — the explicit `with_max_flight_data_size` flight-data target, plus the
+`wire_partition` byte-partitioner and serialized-message ceiling guard built to
+make it a bound — is REVERTED IN FULL. Deferred to issue #3281.** The whole
+surface is gone: `cqlite-flight/src/flight_data_size.rs`, `wire_partition.rs`,
+`wire_partition_tests.rs`, `streaming_framing_tests.rs`, the 4 MiB-rejection
+constants with their `const _: () = assert!` guards, and `prost` as a
+`[dependencies]` entry. `encode_do_get` inherits arrow-flight 53's own 2 MiB
+target again — the configuration that was shipping before this change and was
+never reported broken.
+
+| | |
+|---|---|
+| lever 4 throughput | **ZERO, measured** — median −72 rows/s (−0.03%), 4 of 8 interleaved rounds positive (`abc-interleaved-2026-08-03.md` §10) |
+| its only retained justification | **wire safety** — and that mechanism failed **three consecutive reviews**, each fix inverting the error |
+| **lever 4 verdict** | **REVERTED** — deferred to **#3281** |
+
+**Why, in one sentence: ONE NUMBER SERVED AS BOTH A `target` AND A `ceiling`.**
+That is the owner's diagnosis and it is a single DESIGN error, not three bugs. "A
+larger reserve can only cause extra splitting, which is the safe direction" is
+true of a *target* and **false of a *ceiling***: measured against a target, an
+over-estimated reserve merely splits more; measured against a ceiling,
+**under-budget gives a false-ACCEPT (an illegal message reaches the client) and
+over-budget gives a false-REJECT on LEGAL input** (`RowTooWide` on a row a client
+could legally receive). Three review rounds each moved the error from one side of
+that inversion to the other, because no reserve value can be correct for both
+roles at once. **Reverting is subtractive** and needs no new mechanism to be
+believed.
+
+**The AC framing, in the owner's words: "we measured it at zero AND did not retain
+it."** That is a cleaner honest negative than shipping a lever for a safety
+property whose mechanism failed three attempts. It changes no AC verdict:
+
+* **AC1 stays `unmet`, re-anchored to #3248** (unchanged — lever 4 measured at
+  zero, so removing it moves no throughput claim).
+* **R4 stays `unmet`, re-anchored to #3272** (unchanged — the rig split is a
+  separate ruling).
+* **No recorded measurement, figure, ratio or superseded-figure label is altered
+  by the revert.** The §10 arms, medians and −0.03% are the honest record of what
+  was measured, and they are precisely what justifies removing it. The one
+  artifact statement the revert falsifies — §10.5's "what lever 4 is retained for
+  is WIRE SAFETY" — is struck in place rather than deleted, so the record stays
+  legible.
+
+### The two open review findings are DELETED WITH THEIR SUBJECT — explicitly NOT waived
+
+Both lived ONLY in files this revert deletes, so there is no remaining code for
+either to be true of. Neither is dismissed, downgraded, or accepted as risk; each
+is recorded here with the successor issue so that a re-introduction under **#3281**
+must answer it before it lands:
+
+1. **The over-estimated reserve subtracted from a HARD ceiling caused `RowTooWide`
+   on legal input.** Lived in `wire_partition.rs` (`guard_message_within_ceiling` /
+   the partitioner's ceiling arithmetic) — deleted. This *is* the target-vs-ceiling
+   design error, observed as a defect. **Carried to #3281 as a design constraint any
+   future wire-ceiling mechanism must satisfy: a ceiling needs an EXACT bound, not a
+   reserve, and a false-reject on legal input is worse than the splitting it avoids.**
+2. **`ipc_header_bytes` built a fresh `DictionaryTracker` per call.** Lived in
+   `wire_partition.rs` — deleted. **Carried to #3281**: any successor that measures a
+   serialized message size must not re-derive per-call IPC state per message.
+
+---
+
 ## DELIVERY STATUS — R4 is UNMET (owner-ordered split, 2026-08-03)
 
 **R4 ("The corpus generator and measurement scripts are COMMITTED and runnable from
@@ -16,8 +80,9 @@ form as AC1/R1 below, with no optimistic framing:
 blockers open at HEAD, **5 of them in `scripts/perf/`** — three being guards that
 earlier fix rounds had made fail-open or bypassable. The measurement rig needs its
 own review footing and must not hold the reviewed core (the `arrow_*` export split,
-the `Field`-identity validation, the wire-partition/framing work, the IPC-framing
-attribution). The owner therefore ordered the rig out of this PR and into **#3272**.
+the `Field`-identity validation, the IPC-framing attribution — and, at the time,
+the wire-partition/framing work, since reverted per ruling A above). The owner
+therefore ordered the rig out of this PR and into **#3272**.
 
 **R4's spec text is deliberately NOT edited or softened** — the requirement stands
 in `specs/arrow-encode-doget/spec.md` exactly as written, and this block records its
@@ -72,11 +137,17 @@ framing reserve − 64 KiB inexactness margin). At the shipped target:
 | the SUPERSEDED figure | +2.0% / 213,471 → 217,791 rows/s was measured AT the 4 MiB target and is **not** the delivered figure |
 | cycles/row | lever 4' cuts a median 136.9 cycles/row (~0.6%) with rows/s unmoved — **spec R1 forbids reporting that as a win**, and it is not |
 
-**So BOTH landed levers now measure at zero at the shipped target.** Lever 4 is
-retained for **wire safety** (every `data_body` under the reserved ceiling, at a
-capacity/payload ratio of ~1.0 — asserted by
-`cqlite-flight/src/streaming_framing_tests.rs`), lever 6 for being strictly less
-work per batch. Neither is retained on a throughput claim.
+**So BOTH levers measured at zero at the shipped target**, and the two were then
+treated differently — see the LEVER 4 REVERTED block at the top of this file:
+
+* **Lever 4: measured at zero AND NOT RETAINED.** It is REVERTED in full (owner
+  ruling A, deferred to **#3281**). It was briefly retained for *wire safety*,
+  which this file previously recorded; that justification is withdrawn, because the
+  mechanism behind it conflated a `target` with a `ceiling` and failed three
+  consecutive reviews.
+* **Lever 6: measured at zero and RETAINED**, on the narrow ground that it is
+  strictly less work per batch (one Arrow `Schema` build per merge instead of one
+  per batch), not on a throughput claim.
 
 **Spec R5 (owner-approved) makes a correctly-measured, correctly-reported
 negative result a satisfying outcome of THIS change. It does not make AC1
@@ -89,11 +160,11 @@ negative result through an optimistic title. The **C** intent audit should recor
 `tools/ws0-corpus-gen` + `scripts/perf/` — is **re-anchored to #3272** and is no
 longer part of this PR; its ARTIFACTS remain committed here): the in-repo
 Arrow-buffer digest oracle, the closed IPC-framing attribution blind spot
-(**313.0 ns/row**, previously attributable to nothing), lever 4 (a **wire-safety**
-lever: bodies provably under the reserved gRPC ceiling; **throughput measured at
-zero** at the shipped target), lever 6 (**measured at zero**, recorded as such),
-the cross-session drift finding — observed TWICE now — and the honest 16.3% gap
-with its per-run evidence.
+(**313.0 ns/row**, previously attributable to nothing), the `arrow_*` export split
+with its `Field`-identity schema contract, lever 6 (**measured at zero**, recorded
+as such), the cross-session drift finding — observed TWICE now — and the honest
+16.3% gap with its per-run evidence. **Lever 4 is NOT in that list: it was
+measured at zero and NOT retained** (reverted, #3281).
 
 **The 82% is a COMPLEMENT, not an attribution** (`1,746 − 313 = 1,432.9 ns/row`,
 labeled "array build" from the call graph, **no per-function data inside it**).
@@ -191,10 +262,16 @@ honored: no further lever was stacked on an unexplained result.
       of `producer.rs` itself remains owed to epic #1116 and is out of this change's scope.
 
 ## 2. Lever 4 + 6 — the cheap floor (surfaces: `cqlite-flight/src/batch_bytes.rs`, `streaming.rs`, `cqlite-core/src/export/arrow_convert.rs`)
-- [x] Lever 4: align `DEFAULT_MAX_BATCH_BYTES` (`batch_bytes.rs:154`, 4 MiB) with arrow-flight's
+- [ ] **REVERTED — deferred to #3281 (owner ruling A, 2026-08-03).** Lever 4: align
+      `DEFAULT_MAX_BATCH_BYTES` (`batch_bytes.rs:154`, 4 MiB) with arrow-flight's
       `GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES` (2 MiB, `encode.rs:166`) — or raise the encoder's limit —
       so a batch is not re-sliced and framed twice. Re-derive the narrow-shape table at
       `batch_bytes.rs:137-153`; halving the cap moves where the byte-cap starts binding.
+      It WAS implemented (the encoder's limit raised, not the batch cap lowered) and it
+      **measured at ZERO** (−0.03%); the wire-safety mechanism that then justified keeping it
+      conflated a `target` with a `ceiling`, so the whole surface is removed. `batch_bytes.rs`
+      is byte-identical to `origin/main` again. Unchecked is the honest state: **measured at
+      zero AND not retained.**
 - [x] Lever 6: cache the Arrow `Schema` instead of rebuilding it per batch at
       `arrow_convert.rs:201-203`.
 - [x] Measure each individually against the Phase-0 baseline; report rows/s AND cycles/row.
