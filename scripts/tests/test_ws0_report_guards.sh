@@ -40,6 +40,30 @@
 #   8. DURATIONS PARSE AS DECIMAL (#3272 f7). `010s` was octal 8s and `08s` was a
 #      hard bash error — a silently wrong measurement window.
 #
+# And REVIEW ROUND 1 of #3272, whose findings on this file's own subject matter are:
+#
+#   9. A PARTIAL SYSCTL RESTORE MUST WARN (B3). The success/warning split keyed on
+#      "was ANYTHING restored", so a partial restore printed the affirmative line and
+#      NO warning — finding 3's own defect in narrower form. Both halves are now
+#      per-knob, and the ROOT CAUSE is closed too: a knob whose prior could not be
+#      captured is never mutated.
+#  10. THE DRIVER'S BOUNDS AGREE WITH THE REPORTER'S. `--reps 200000` passed the
+#      driver's 9-digit check and was refused only by the report, after 200,000
+#      full-corpus reps. Refusing a value after acting on it is not refusing it.
+#  11. A TOO-LONG DURATION IS REPORTED AS A RANGE PROBLEM, not a format one — the
+#      digit cap reintroduced the same misleading complaint this file criticizes for
+#      `08s`.
+#  12. THE ACCEPT-DIRECTION CASES ASSERT AFFIRMATIVELY. Several asserted only the
+#      ABSENCE of a bad substring, which passes on ANY unrelated failure — measured:
+#      with a corpus present but `perf` absent, the driver exits at "perf is not
+#      installed" and every such case "passed" with argument validation never
+#      exercised. They now assert the expected DOWNSTREAM diagnostic, through
+#      `expect_driver_accepts`, whose closed grammar FAILS on an unrecognized outcome
+#      and which carries its own non-vacuity probe.
+#  13. A PROBE'S rc MUST BE READ OFF THE THING UNDER TEST. `echo "RC=$?"` after an
+#      intervening `case` measured the CASE's status (0 for most branches), so the
+#      "cleanup cannot fail the run" half of the failing-sudo case was unmeasured.
+#
 # Hermetic: synthetic result dirs + synthetic perf CSVs. No cargo, no perf, no
 # sudo, no corpus, no network, and the real perf artifacts are never touched.
 set -uo pipefail
@@ -258,6 +282,53 @@ check_driver_reject() { # check_driver_reject <label> <expect-substring> <args..
     fail "$label: expected non-zero + '$expect' (rc=$rc2, out: $out)"
   fi
 }
+# expect_driver_accepts <label> <args…> — the ACCEPT direction, asserted
+# AFFIRMATIVELY (#3272 review).
+#
+# These cases used to assert only the ABSENCE of two bad substrings, e.g.
+#   `! grep -q "exceeds the" && ! grep -q "must be <n>ms"`
+# which passes on ANY unrelated failure. Measured: with a corpus dir present but `perf`
+# absent from PATH, the driver exits at `FATAL: perf is not installed` — every
+# absence-only case "passed" while argument validation had never been exercised. A
+# positive verdict requires an AFFIRMATIVE measurement, so this asserts the run REACHED
+# A LATER STAGE: the diagnostic must be one of the known post-validation checkpoints, in
+# driver order. An UNRECOGNIZED diagnostic FAILS (a closed grammar) — a new failure mode
+# must be added here deliberately, never inherited as a pass.
+expect_driver_accepts() {
+  local label="$1"; shift
+  local out
+  out=$(bash "$DRIVER" "$@" 2>&1)
+  # Every checkpoint AFTER argument validation, in the order the driver reaches them.
+  # Reaching any one of them proves the arguments were accepted.
+  if grep -qE "holds no \*-Data.db|is not installed|CQLITE_WS0_CPU_TOPOLOGY_ROOT|does not exist — the sibling check|is NOT the sibling set|CPU list is empty|already accepting connections|not readable, so its prior value|missing — regenerate the corpus|release build failed" <<<"$out"; then
+    pass "$label"
+    return
+  fi
+  # No diagnostic at all would mean the run proceeded to measure, which cannot happen
+  # in a hermetic test — so it is a failure to diagnose, not an acceptance.
+  fail "$label: the run did not reach a recognized post-validation checkpoint, so acceptance is UNMEASURED. Either the arguments were refused, or a new failure mode needs adding to expect_driver_accepts' grammar. out: $out"
+}
+
+# NON-VACUITY for the helper ITSELF, before it is trusted: it must FAIL on a genuinely
+# REFUSED argument and PASS on an accepted one. Run against a REAL refusal (`--reps 0`,
+# which every other case here proves is rejected) with `pass`/`fail` shimmed, so the
+# helper's own verdict is observed rather than assumed.
+_probe_helper() { # _probe_helper <args…> — echoes PASS or FAIL
+  ( pass() { echo PASS; }; fail() { echo FAIL; }
+    expect_driver_accepts probe "$@" >/dev/null 2>&1
+    expect_driver_accepts probe "$@" 2>/dev/null | head -1 )
+}
+if [ "$(_probe_helper --corpus "$TMP/corpus" --reps 0)" = "FAIL" ]; then
+  pass "expect_driver_accepts FAILS on a genuinely refused argument (it is not vacuous)"
+else
+  fail "expect_driver_accepts must fail on a refused argument, else every accept case is vacuous"
+fi
+if [ "$(_probe_helper --corpus "$TMP/corpus" --reps 3)" = "PASS" ]; then
+  pass "expect_driver_accepts PASSES on an accepted argument (the positive control)"
+else
+  fail "expect_driver_accepts must pass on an accepted argument"
+fi
+
 check_driver_reject "a 45s cold step is refused up front (would admit warm requests)" \
   "exceeds the" --corpus "$TMP/corpus" --temp cold --cold-step-duration 45s
 check_driver_reject "a 10s cold step is refused (above the 5000ms ceiling)" \
@@ -269,12 +340,17 @@ check_driver_reject "a zero-length step is refused" \
 
 # A long step is fine when NO cold temperature is selected — the guard is scoped to
 # the claim it protects, not a blanket restriction.
+# The refusal must NOT fire (the ceiling is cold-scoped)…
 out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp warm --cold-step-duration 45s 2>&1)
 if grep -q "exceeds the" <<<"$out"; then
   fail "--temp warm must not be blocked by the cold-step ceiling (out: $out)"
 else
-  pass "--temp warm accepts a long cold-step value (the ceiling is cold-scoped)"
+  pass "--temp warm is not blocked by the cold-step ceiling (the ceiling is cold-scoped)"
 fi
+# …AND the run must be observed getting PAST argument validation, so this cannot pass
+# on an unrelated early failure.
+expect_driver_accepts "--temp warm with a 45s cold step REACHES a later stage (affirmative)" \
+  --corpus "$TMP/corpus" --temp warm --cold-step-duration 45s
 
 # --------------------------------------------------------------------------
 # Finding 1 — the bare-scan arm's prewarm is recorded, and a gap is flagged
@@ -342,8 +418,20 @@ d="$TMP/prewarm-cold"; mkdir -p "$d"
 make_scan_rep "$d" cold 1 skipped-cold-arm
 make_flight_rep "$d" cold 1 1 "$CORPUS_ROWS" skipped-cold-arm
 out=$(run_report "$d" "$TMP/corpus" cold); rc=$?
-if [ "$rc" -eq 0 ] && ! grep -q "PREWARM DEGRADED" <<<"$out"; then
-  pass "skipped-cold-arm is not reported as a degradation"
+# AFFIRMATIVE (#3272 review): the absence of "PREWARM DEGRADED" alone would pass on any
+# unrelated failure that printed neither the warning nor a report, so the POSITIVE
+# verdict is asserted too — `prewarm_all_ok: true` in results.json, with the recorded
+# status that produced it.
+if [ "$rc" -eq 0 ] && ! grep -q "PREWARM DEGRADED" <<<"$out" \
+  && python3 - "$d/results.json" <<'PWOK'
+import json, sys
+for m in json.load(open(sys.argv[1]))["measurements"]:
+    assert m["prewarm_all_ok"] is True, m
+    assert m["prewarm_required_status"] == "cold", m
+    assert all(p["status"] == "skipped-cold-arm" for p in m["prewarm"]), m
+PWOK
+then
+  pass "skipped-cold-arm reads as HEALTHY on a cold rep (prewarm_all_ok=true, recorded)"
 else
   fail "cold arm must not be flagged as prewarm-degraded (rc=$rc, out: $out)"
 fi
@@ -719,12 +807,8 @@ else
 fi
 # And a value just INSIDE the shared cap must still be accepted: the fix is agreement,
 # not a blanket lowering that would refuse a legitimate long session.
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --reps 100000 2>&1)
-if ! grep -q 'must be at most' <<<"$out"; then
-  pass "--reps 100000 (exactly the cap) is ACCEPTED by the driver"
-else
-  fail "the cap must be inclusive; --reps 100000 was refused (out: $out)"
-fi
+expect_driver_accepts "--reps 100000 (exactly the cap) is ACCEPTED by the driver" \
+  --corpus "$TMP/corpus" --reps 100000
 
 # ==========================================================================
 # #3272 finding 6 — completeness is judged against the SELECTION, and the
@@ -858,19 +942,11 @@ else
 fi
 # And a leading-zero value that is genuinely IN range must be ACCEPTED, so the fix
 # is not "reject leading zeros".
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 0500ms 2>&1)
-if ! grep -q "exceeds the" <<<"$out" && ! grep -q "must be <n>ms" <<<"$out"; then
-  pass "'0500ms' (=500ms, in range) is ACCEPTED — leading zeros are parsed, not banned"
-else
-  fail "'0500ms' must be accepted as 500ms (out: $out)"
-fi
+expect_driver_accepts "'0500ms' (=500ms, in range) is ACCEPTED — leading zeros are parsed, not banned" \
+  --corpus "$TMP/corpus" --temp cold --cold-step-duration 0500ms
 # The warm step goes through the same parser.
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp warm --step-duration 045s 2>&1)
-if ! grep -q "must be <n>ms" <<<"$out" && ! grep -q "greater than zero" <<<"$out"; then
-  pass "'045s' is accepted for --step-duration (pre-fix: a bash base error)"
-else
-  fail "'045s' must parse for --step-duration (out: $out)"
-fi
+expect_driver_accepts "'045s' is accepted for --step-duration (pre-fix: a bash base error)" \
+  --corpus "$TMP/corpus" --temp warm --step-duration 045s
 # A structural check that no arithmetic path can regress: every multiplication of a
 # parsed duration component must carry `10#`.
 if awk '/^parse_duration_ms\(\)/,/^}/' "$ARGS_LIB" | grep -q '\$((n \* 1000))'; then

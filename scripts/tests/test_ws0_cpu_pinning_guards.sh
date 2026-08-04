@@ -24,15 +24,22 @@
 #      check that refuses everything is as useless as one that refuses nothing, and
 #      it is the one an operator works around.
 #
-#   2. THE `perf stat -p` SELF-GREP. Per-process counting measured >2x observer
-#      cost on this workload, so spec R2 requires CPU-wide `perf stat -C` and the
-#      driver greps ITSELF to refuse a `-p` form. Driving that guard over injected
-#      copies found TWO REAL BYPASSES in it, both recorded in the driver's comment
-#      at the check: an ATTACHED value (`-p` immediately followed by digits — the
-#      old pattern required a trailing space) and ANY LINE MENTIONING "self-check"
-#      (the old `grep -v 'self-check'` discarded by CONTENT, so a comment on a real
-#      per-process line suppressed the guard). Both now fire. The negative
-#      direction is asserted too: the driver AS SHIPPED must pass its own check.
+#   2. THE PERF-INVOCATION GUARD (`lib-perf-lint.sh`). Per-process counting measured
+#      >2x observer cost on this workload, so spec R2 requires CPU-wide counting and
+#      the driver checks ITSELF at startup. Driving that guard over injected copies
+#      found FIVE REAL BYPASSES across two successive deny-list patterns: an ATTACHED
+#      value, ANY LINE MENTIONING "self-check" (the `grep -v` discarded by CONTENT, so
+#      a comment on a real invocation suppressed the guard), a SINGLE-QUOTED attached
+#      value, an invocation through a VARIABLE, and a GLOBAL OPTION between `perf` and
+#      `stat`. All five fire now — and the mechanism is no longer a deny-list: it is an
+#      ALLOWLIST (perf is invoked in ONE wrapper; any other invocation line must be
+#      explicitly marked) plus a per-TOKEN option check plus a RUNTIME argv check. A
+#      deny-list must anticipate every spelling and is silently permissive the moment it
+#      misses one; an allowlist asks WHERE a line is, which is closed by construction.
+#      Both directions are asserted, plus the lint's own positive control: it must be
+#      SILENT on a minimal clean file and must FLAG an absent/empty/`-C`-less wrapper,
+#      and it must NOT flag `perf_stat_c`/`perf_event_paranoid`/`target/perf-…`
+#      identifiers — a guard that reds on ordinary code is the one an operator deletes.
 #
 # Hermetic: a fake sysfs tree under $TMPDIR and copies of the driver. No perf, no
 # sudo, no taskset, no root, no real multi-socket hardware, no network, no corpus,
@@ -364,10 +371,15 @@ _ws0_injected_noop() {'
 # the guard an operator deletes. The shipped driver must get PAST the self-check,
 # so its failure must be about the (absent) corpus, never about `-p`.
 out=$(bash "$DRIVER" --corpus /nonexistent 2>&1); rc=$?
-if [ "$rc" -ne 0 ] && ! grep -q "per-process" <<<"$out"; then
-  pass "selfgrep-silent: the driver AS SHIPPED passes its own self-check (fails later, on the corpus)"
+# AFFIRMATIVE (#3272 review): the absence of "per-process" alone would pass on ANY early
+# failure, including one that never reached the lint at all. So the diagnostic must ALSO
+# be the LATER one this invocation is designed to hit — the unresolvable `--corpus` path
+# — which is only reachable past the lint.
+if [ "$rc" -ne 0 ] && ! grep -q "per-process" <<<"$out" \
+   && grep -qE "/nonexistent" <<<"$out"; then
+  pass "selfgrep-silent: the shipped driver passes its own lint and fails LATER, on the corpus (affirmative)"
 else
-  fail "selfgrep-silent: the shipped driver must NOT trip its own -p check (rc=$rc, out: $(head -3 <<<"$out"))"
+  fail "selfgrep-silent: the shipped driver must pass its lint and reach the corpus check (rc=$rc, out: $(head -3 <<<"$out"))"
 fi
 # Stated directly too, using the driver's OWN lint function rather than a second
 # hand-written pattern: a reimplemented check in the test would be a second thing to
