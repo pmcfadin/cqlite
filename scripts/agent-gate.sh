@@ -306,6 +306,37 @@
 #                      test-only seams stand in for /proc and /etc/sysctl.d (and test
 #                      mode REFUSES to fall back to either production directory), every
 #                      privileged tool is a recording shim, asserted mutation-free.
+#                      Also runs scripts/tests/test_ws0_report_guards.sh (#3096/#3272) —
+#                      pins the MEASUREMENT-INTEGRITY guards of the WS0 rig
+#                      (scripts/perf/), every one of which was a real "instrument that
+#                      reports success without having measured" defect: a cold Flight rep
+#                      must be EXACTLY ONE full-corpus request (else requests 2..N are
+#                      WARM and blend into a figure labelled "cold"); a warm rep of
+#                      EITHER arm must record an untimed prewarm, and the cold arm's
+#                      `skipped-cold-arm` sentinel may satisfy a COLD rep ONLY (a warm rep
+#                      carrying it is an UNPREWARMED warm measurement passing the very
+#                      guard added to refuse one — and the bare scan is the DENOMINATOR of
+#                      the 1.3x ratio); the corpus identity is REQUIRED, so the
+#                      full-corpus-per-request check can never be silently skipped while
+#                      the report's notes claim it ran; an absent, uncounted
+#                      (`<not counted>`/`<not supported>`) or unparseable perf counter is
+#                      an ERROR, never a fabricated 0 that would make "setup-subtracted" a
+#                      lie; --reps/--scan-passes/--port are validated positive (--reps 0
+#                      was a vacuous SUCCESS); completeness is judged against the STATED
+#                      selection, so an unselected arm is legitimately absent while a
+#                      selected-but-absent one stays fatal; durations parse as DECIMAL
+#                      (`010s` was octal 8s, `010000ms` snuck under the cold-step ceiling);
+#                      and the host sysctls the rig weakens (perf_event_paranoid,
+#                      kptr_restrict) are captured BEFORE mutation and RESTORED on
+#                      EXIT/INT/TERM/HUP. A broken instrument publishes a wrong number
+#                      rather than crashing, so these need a standing test — and per #3249
+#                      (a hardcoded `_PERF_STATE="ok"` survived 118/118 tests) the bar is
+#                      "OBSERVED TO FIRE", not "present": every case feeds rejectable input
+#                      and asserts the exit code AND the diagnostic, with the sysctl
+#                      restore checked BEHAVIOURALLY through a recording `sudo` shim plus a
+#                      real SIGINT probe on the driver's own trap wiring. Hermetic:
+#                      synthetic result dirs + synthetic perf CSVs, no
+#                      cargo/perf/sudo/corpus/network, never root.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -5545,6 +5576,43 @@ run_tooling_tests() {
     >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (unenforced constraint comment); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 measurement-rig integrity guards (#3096/#3272): hermetic (synthetic result
+  # dirs + synthetic perf CSVs — no cargo, perf, sudo, corpus or network, and never
+  # root; the driver is only ever reached at argument validation, and the sysctl
+  # restore is exercised through a recording `sudo` shim). Pins the rig's
+  # measurement-integrity guards, every one of which was a real defect of the same
+  # shape — an instrument that reports success without having measured:
+  #   * a COLD Flight rep must be EXACTLY ONE full-corpus request (requests 2..N are
+  #     WARM and were being blended into a figure labelled "cold");
+  #   * a WARM rep of EITHER arm must record an untimed prewarm, and the cold arm's
+  #     `skipped-cold-arm` sentinel may satisfy a COLD rep ONLY — a warm rep carrying
+  #     it is an UNPREWARMED warm measurement passing the guard added to refuse one,
+  #     and the bare scan is the DENOMINATOR of the 1.3x ratio;
+  #   * the corpus identity is REQUIRED, so the full-corpus-per-request check can
+  #     never be skipped while the report's notes claim it ran;
+  #   * an absent, uncounted or unparseable perf counter is an ERROR, never a
+  #     fabricated 0 that would make "setup-subtracted" a lie;
+  #   * --reps/--scan-passes/--port are validated positive (--reps 0 was a vacuous
+  #     but SUCCESSFUL report);
+  #   * completeness is judged against the STATED selection;
+  #   * durations parse as DECIMAL (`010s` was octal 8s);
+  #   * and the host sysctls the rig weakens (perf_event_paranoid, kptr_restrict) are
+  #     captured before mutation and RESTORED on EXIT/INT/TERM/HUP.
+  # A broken measurement guard publishes a wrong number instead of failing, so it
+  # needs a standing test rather than a review round — and per #3249 the bar is
+  # "observed to fire", not "present".
+  echo ">>> [$name] bash scripts/tests/test_ws0_report_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 measurement-rig integrity guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

@@ -671,6 +671,16 @@ make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
 expect_report_reject "a PARTIAL collection of a selected arm is FATAL (the original guard holds)" \
   "collected 1 of 2" "$d" "$TMP/corpus" warm bypass 2 1
 
+# The DRIVER states the selection too, at the top of the transcript — before any
+# measurement exists to be misread. Structural, because reaching the banner needs a
+# real corpus: the branch must exist and must distinguish the two cases.
+if awk '/^echo "=== issue #3096/,0' "$DRIVER" | grep -q 'PARTIAL MATRIX' \
+  && awk '/^echo "=== issue #3096/,0' "$DRIVER" | grep -q 'FULL MATRIX'; then
+  pass "the driver's banner distinguishes a PARTIAL from a FULL matrix"
+else
+  fail "the driver must print its selection as PARTIAL/FULL up front"
+fi
+
 # The selection must be VISIBLE — in results.json and in the human summary — or a
 # narrow run reads exactly like a full matrix that printed fewer rows.
 d="$TMP/selection-recorded"; make_warm_session "$d"

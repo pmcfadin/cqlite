@@ -620,12 +620,27 @@ measure_flight() {
 }
 
 echo
-echo "=== issue #3096 same-session baseline ==="
+echo "=== issue #3096 same-session baseline (rig hardened by #3272) ==="
 echo "corpus:      $CORPUS"
 echo "server CPUs: $SERVER_CPUS (verified physical-core siblings)"
 echo "client CPUs: $CLIENT_CPUS"
 echo "reps:        $REPS   temps: $TEMPS   arms: $ARMS"
 echo "out:         $OUT_DIR"
+# The SELECTION, stated up front as well as in the report (issue #3272, finding 6).
+# Completeness is judged against WHAT WAS SELECTED — an unselected temperature or arm
+# is legitimately absent, a selected one that is absent is fatal — so the selection
+# has to be visible, or a narrow session reads exactly like a full matrix that
+# happened to print fewer rows. ws0_report.py records it in `results.json .selection`
+# and prints a PARTIAL MATRIX banner; this line is the same fact at the top of the
+# transcript, before any measurement exists to be misread.
+if [[ "$TEMPS" != "warm cold" || "$ARMS" != "bypass merge" ]]; then
+  echo "selection:   PARTIAL MATRIX — temps [$TEMPS] x arms [$ARMS] only."
+  echo "             The full matrix is temps [warm cold] x arms [bypass merge];"
+  echo "             absent combinations will NOT be measured by this session and"
+  echo "             the report will say nothing about them."
+else
+  echo "selection:   FULL MATRIX — temps [$TEMPS] x arms [$ARMS]"
+fi
 echo
 
 for temp in $TEMPS; do

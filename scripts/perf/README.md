@@ -16,6 +16,7 @@ scripts/perf/ws0-baseline.sh --corpus /data/ws0-3096
 | `ws0-baseline.sh` | the driver: both arms, warm+cold, median of N, fail-closed pinning |
 | `lib-cpu.sh` | `thread_siblings_list` verification — the pinning is READ, never assumed |
 | `ws0_report.py` | aggregation → `results.json` + a human summary |
+| `ws0_validate.py` | the fail-closed layer: what the reporter is ALLOWED to aggregate |
 
 Full method, the traps, the recorded pinning and the residual caveats:
 **`docs/reports/ws0-3096-artifacts/measurement-method.md`** — read it before
@@ -33,6 +34,50 @@ Non-negotiables baked into the scripts (issue #3096 spec R1/R2):
   beside every figure.
 * A rep that observes **zero rows exits non-zero** rather than reporting a
   measurement.
+
+## The instrument-integrity contract (issue #3272)
+
+Every guard below was added because its absence was a real defect, and all of them
+are the same shape: **an instrument that reports success without having measured.**
+A rig whose guards are fail-open is worse than no rig, because it produces confident
+numbers nobody re-checks. So the bar here is not "the guard exists" — it is **"the
+guard has been observed to fire"** (per #3249, where hardcoding `_PERF_STATE="ok"`
+survived 118/118 tests). `scripts/tests/test_ws0_report_guards.sh` feeds each guard
+the input it must reject and asserts the exit code *and* the diagnostic; it is wired
+into the agent gate's `tooling-tests` component, and it is hermetic (synthetic result
+dirs and perf CSVs — no cargo, `perf`, `sudo`, corpus or network).
+
+* **A counter that was not observed is an ERROR, never a fabricated `0`.** An absent
+  perf CSV, an absent required event, a perf `<not counted>`/`<not supported>` marker
+  and an unparseable value are each fatal. `.get("cycles", 0)` let a run be reported
+  "setup-subtracted" having subtracted nothing.
+* **The corpus identity is REQUIRED and complete-checked.** Its absence used to
+  silently disable the `rows == requests_ok x corpus_rows` assert while the report's
+  NOTES claimed the property had been verified.
+* **The cold arm's `skipped-cold-arm` prewarm sentinel satisfies a COLD rep only.**
+  A temperature-blind acceptance set let an UNPREWARMED WARM rep reach
+  `prewarm_all_ok=true` — the prewarm guard satisfied by its own sentinel. Scoped in
+  both directions: a *prewarmed* "cold" rep is refused too. An honestly recorded
+  failure (`FAILED-exit-N`, `unrecorded`) stays a flagged degradation, not a refusal.
+* **Every numeric argument is validated positive up front.** `--reps 0` produced a
+  vacuous but *successful* report.
+* **Completeness is judged against the SELECTION, and the selection is stated.**
+  An unselected temperature/arm is legitimately absent; a selected one that is absent
+  is fatal. A narrow run prints `PARTIAL MATRIX` and records
+  `results.json .selection`, so it can never later be read as a full matrix.
+* **Durations parse as DECIMAL.** `010s` was octal 8s and `08s` was a hard bash
+  error; `010000ms` parsed as 4096ms, sneaking a blended cold step under the 5000ms
+  ceiling.
+* **Host state the rig mutates is RESTORED on every exit path.** It weakens
+  `kernel.perf_event_paranoid` and `kernel.kptr_restrict` for CPU-wide counting;
+  the priors are captured *before* the mutation and restored from a single
+  `EXIT INT TERM HUP` handler that also stops the server. Idempotent and per-step
+  non-fatal — cleanup may not fail a run, and may not leave the second knob
+  weakened when the first write fails. If the restore itself cannot run, the driver
+  says so loudly and prints the `sysctl` command to fix it by hand.
+
+There is deliberately **no environment variable that relaxes any of this.** An
+escape hatch on a measurement guard can only ever buy a confident wrong number.
 
 ## No cross-session absolutes — interleave or do not compare
 
