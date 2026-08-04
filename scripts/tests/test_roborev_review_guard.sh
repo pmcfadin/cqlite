@@ -1020,7 +1020,13 @@ export STUB_PAYLOAD_JOB=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
-export STUB_CONFIG_PATTERNS=''
+# DEFAULT = `none`: a build that ANSWERS `config get` and reports an EMPTY configured set
+# (#3229 round-10 H2). The real v0.61.2 binary carries the subcommand, so "answers" is the
+# faithful default, and the empty-parse PASS now REQUIRES an answer — an un-corroborated
+# empty parse is `FAIL (exclusion set UNCORROBORATED: …)`, because "our parser recognised no
+# key" is not "nothing is configured". A case that wants the NON-ANSWERING build (the
+# UNAVAILABLE state) sets `STUB_CONFIG_PATTERNS=` explicitly and says why.
+export STUB_CONFIG_PATTERNS='none'
 # The version `built-in-set:` asks the executable for (#3229). Default = the PINNED one,
 # so every existing case keeps the state it pinned; `none` models a target that will not
 # answer, which must read UNAVAILABLE rather than OK.
@@ -1044,7 +1050,7 @@ reset_stub() {
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
-  STUB_CONFIG_PATTERNS=''
+  STUB_CONFIG_PATTERNS='none'
   STUB_ROBOREV_VERSION='roborev v0.61.2'
 }
 
@@ -1195,6 +1201,14 @@ reset_stub
 # The PR #3222 shape: 100% of the diff under docs/, 100% of it executable.
 work=$(make_fixture case_cx1 docs-executables)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
+# A build that does NOT answer `config get` (corroboration: UNAVAILABLE), deliberately —
+# so this case ALSO pins the scope of the round-10 H2 fix: with patterns PARSED the
+# corroboration oracle is a CROSS-CHECK, and its absence is PERMISSIVE BY DESIGN, because
+# the patterns themselves were measured (resolved through the port, matched by git). Only
+# the EMPTY parse depends on the oracle as its sole evidence and therefore fails closed
+# without it (cases cx27a/cx27b). Failing here instead would red every run on a box whose
+# roborev lacks the subcommand — the self-disabling guard this change refuses to build.
+STUB_CONFIG_PATTERNS=''
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
 run_wrapper "$work"
@@ -1868,6 +1882,9 @@ reset_stub
 # this case testing the NOTICE-plus-excusal ruling end to end instead of the withheld path.
 work=$(make_fixture case_cx19 cargo-lock)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
+# Corroboration deliberately silent (see cx1): this case pins the BUILT-IN half, and with
+# patterns parsed an absent `config get` withholds nothing that was claimed.
+STUB_CONFIG_PATTERNS=''
 STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 # The prompt carries main.rs only — Cargo.lock is exactly what roborev drops.
@@ -1939,6 +1956,9 @@ reset_stub
 # if roborev really did drop a path, the absence is now reported instead of excused.
 work=$(make_fixture case_cx19h cargo-lock)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
+# Corroboration deliberately silent (see cx1): the subject here is the BUILT-IN model's
+# UNAVAILABLE state, kept independent of the corroboration oracle's.
+STUB_CONFIG_PATTERNS=''
 STUBBIN_OVERRIDE=$(make_builtin_stub pinned)
 STUB_ROBOREV_VERSION=none
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
@@ -2146,6 +2166,8 @@ reset_stub
 # is the one `code-free:` already prescribes.
 work=$(make_fixture case_cx20 cargo-lock-only)
 write_roborev_config "$work" "$NARROWED_PATTERNS"
+# Corroboration deliberately silent (see cx1): the subject is the TOTAL built-in swallow.
+STUB_CONFIG_PATTERNS=''
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_verdict 'case (cx20)' FAIL 1

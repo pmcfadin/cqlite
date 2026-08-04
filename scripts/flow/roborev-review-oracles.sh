@@ -1554,6 +1554,56 @@ roborev_check_census_exclusion() {
     DETAILS+=("NOTICE: census-exclusion: this wrapper parsed pattern(s) that 'roborev config get exclude_patterns' did not report. That direction can only make the reconciliation STRICTER than reality, so it is a NOTICE, not a failure.")
   fi
 
+  # --- AN EMPTY PARSE IS A CLAIM, AND A CLAIM NEEDS AN AFFIRMATIVE MEASUREMENT ----
+  # (#3229 round-10 blocker H2, and the third instance of ONE recurring shape.)
+  #
+  # `_rx_corroboration` has FOUR states — UNAVAILABLE (the INITIAL value), DRIFT, NOTICE,
+  # OK — and the round-9 revision tested exactly two of them (DRIFT above, NOTICE above).
+  # A four-state signal tested as two, so `UNAVAILABLE` inherited the PERMISSIVE branch and
+  # reached `PASS (no exclusion patterns configured; …)`. The comment 15 lines up already
+  # states the correct principle — "our parser recognised no key" is NOT "nothing is
+  # configured", and where the parse is empty the BINARY IS THE ONLY ORACLE that can tell
+  # them apart — and then never required that oracle to have ANSWERED. `--help` and
+  # `roborev_toml_exclude_patterns` BOTH already document the rule this now enforces
+  # ("only once 'roborev config get' has CORROBORATED that nothing is configured"), so the
+  # code was contradicting its own contract: "we could not check" rendered as "nothing was
+  # wrong", under the key whose entire job is preventing that. #3229 itself, one level up
+  # from case (cx5d).
+  #
+  # SO THE PASS IS KEYED ON THE POSITIVE STATE (`= OK`), never on "not one of the two bad
+  # ones". With `n_configured` == 0 there is nothing of OURS in `_rx_pathspecs` but the
+  # built-ins, so git cannot see a configured pattern the parser missed either: the
+  # configured half of the verdict would rest entirely on an unverified silence. Reachable
+  # for real — `roborev config get` is a subcommand a build may not carry (exit != 0 from
+  # every checkout) while `.roborev.toml` holds a key spelling this parser does not
+  # recognise, which is precisely the cx5d configuration with the corroboration switched off.
+  #
+  # WHY `n_configured > 0` STAYS PERMISSIVE, deliberately and stated so the next reader does
+  # not have to re-derive it: there the parsed patterns ARE the affirmative measurement —
+  # every one is resolved through the ported formatter and matched BY GIT against the census
+  # — so corroboration is a CROSS-CHECK that can only widen what we already measured, and its
+  # absence withholds nothing that was claimed. Failing there would red every run on a box
+  # without the subcommand (case (cx1)), i.e. the self-disabling guard this change keeps
+  # refusing to build. The asymmetry is the same one `built-in-set:` draws: an unobservable
+  # oracle withholds a BLESSING it was the sole source of, and nothing else.
+  #
+  # The test is `!= OK` rather than `= UNAVAILABLE` on purpose: with an empty parse DRIFT has
+  # already finished above and NOTICE is unreachable (it needs a parsed pattern the binary
+  # did not report), so any state that is not OK here is either UNAVAILABLE or one this code
+  # has never seen — and an unrecognised state must fail closed, not inherit the PASS.
+  if [ "$n_configured" -eq 0 ] && [ "$_rx_corroboration" != OK ]; then
+    local unverified_detail="the parser saw NO 'exclude_patterns' key in any of the three sources"
+    if [ "$_rx_found" -eq 1 ]; then
+      unverified_detail="the parser DID see an 'exclude_patterns' key, whose array was empty"
+    fi
+    CENSUS_EXCLUSION="FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no oracle confirmed that; corroboration: $_rx_corroboration; built-in-set: $_rx_builtin_state)"
+    DETAILS+=("ERROR: census-exclusion: this wrapper's parse of $sources_line found NO configured exclusion pattern ($unverified_detail), and 'roborev config get exclude_patterns' — the ONLY oracle that can distinguish 'nothing is configured' from 'this parser did not recognise the key' — did not answer from either checkout (corroboration: $_rx_corroboration). So the empty parse is UNVERIFIED, and reporting it as a PASS would be reporting 'we could not check' as 'nothing was wrong'. Failing closed: that alias IS issue #3229, and a configured pattern this parser cannot see would silently narrow the reviewer's diff exactly as 'docs/**' did on PR #3222.")
+    DETAILS+=("ERROR: census-exclusion: this is NOT a claim that something IS excluded — it is a refusal to certify a set we could not measure. Remedy, in order: (1) make the corroboration oracle answer — 'roborev config get exclude_patterns' must exit 0 from both '$REPO' and the ROOT checkout (a build without the subcommand cannot corroborate anything; upgrade or run from a box that has it); or (2) if a pattern IS configured, write it as a single-line array of quoted strings under a TOP-LEVEL 'exclude_patterns' key so the parse is non-empty and the reconciliation runs on measured data. An EMPTY configuration is fine and PASSes — but only once the binary has said so.")
+    DETAILS+=("ERROR: census-exclusion: no review was enqueued. An unverifiable exclusion set is knowable BEFORE the enqueue, so it costs no review round.")
+    roborev_builtin_state_details
+    finish FAIL 1
+  fi
+
   roborev_format_exclude_args
   if [ -n "$_rx_trailing" ]; then
     # DIFF-INDEPENDENT, by decision (#3229 R3): a trailing slash is a configuration

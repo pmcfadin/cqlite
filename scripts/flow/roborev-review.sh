@@ -105,6 +105,7 @@
 #                     FAIL (<m>/<n> code census paths excluded: <path> by '<pat>'
 #                     [<source>], ...) |
 #                     FAIL (exclusion set unreadable: ...) |
+#                     FAIL (exclusion set UNCORROBORATED: ...) |
 #                     FAIL (trailing-slash pattern ...) |
 #                     FAIL (exclusion set drift: ...) | SKIP (<cause>)
 #   job-record        PASS | PASS (no token accounting in the record) |
@@ -356,6 +357,14 @@ Both FAIL causes outrank the NOTICE, and EVERY cause present is named. Values:
                                           escape, or an unresolvable ROOT checkout —
                                           DISTINCT from 'no exclusion patterns
                                           configured'
+  FAIL (exclusion set UNCORROBORATED: the parse found NO configured pattern and no
+       oracle confirmed that; corroboration: UNAVAILABLE; ...)  the empty-parse PASS
+       requires an AFFIRMATIVE measurement: with nothing parsed, 'roborev config get'
+       is the ONLY oracle that can tell 'nothing is configured' from 'this parser did
+       not recognise the key', so a silence it could not confirm is non-passing and
+       says which of the two it could not rule out. NOT a claim that something IS
+       excluded. With patterns parsed (n>0) corroboration is only a CROSS-CHECK and
+       its absence is permissive on purpose — the patterns themselves were measured
   FAIL (trailing-slash pattern '<p>/' from <source> resolves RECURSIVE ...)
                                           diff-independent
   FAIL (exclusion set drift: '<pattern>' reported by roborev config get ...)  also
@@ -686,6 +695,22 @@ roborev_census
 # code costs no review round, and reports itself under its own key rather than
 # surfacing later as `prompt-content:` (which would send the reader to investigate the
 # reviewer for a defect entirely in configuration).
+# IS THE TOOL EVEN INSTALLED — asked BEFORE census-exclusion, not after (#3229 round-10).
+# It used to sit after the enqueue-side setup, which meant that on a box with no `roborev`
+# at all the FIRST failure reported was census-exclusion's "the corroboration oracle did not
+# answer" — a MISATTRIBUTED cause, sending the reader to investigate a configuration oracle
+# when the actionable fact is that the binary is missing (the same error push-assert
+# deliberately avoids when it refuses to call an auth failure "never pushed"). Asked here it
+# is also a real STRENGTHENING: every downstream `UNAVAILABLE` state — `corroboration:`,
+# `built-in-set:` — is now reachable only from a binary that is PRESENT but uncommunicative,
+# never from an absent one. Deliberately AFTER the census and `code-free:`, which are pure
+# git/classification facts whose causes are more actionable still.
+if ! command -v roborev >/dev/null 2>&1; then
+  SHA_ASSERT="FAIL (roborev not on PATH)"
+  DETAILS+=("ERROR: 'roborev' is not on PATH, so the review cannot be performed and the census cannot be certified. Failing closed rather than reporting a pass.")
+  finish FAIL 1
+fi
+
 roborev_check_census_exclusion
 
 # --- the per-review checks (sourced) ------------------------------------------
@@ -710,11 +735,8 @@ for roborev_required_check in roborev_check_review_completed roborev_check_promp
 done
 
 # --- step 4: invoke over the CENSUS RANGE + an EXPLICIT absolute repo (AC2) ----
-if ! command -v roborev >/dev/null 2>&1; then
-  SHA_ASSERT="FAIL (roborev not on PATH)"
-  DETAILS+=("ERROR: 'roborev' is not on PATH, so the review cannot be performed and the census cannot be certified. Failing closed rather than reporting a pass.")
-  finish FAIL 1
-fi
+# (`roborev` on PATH was asserted above, before census-exclusion, so its absence is
+# reported as the absent binary rather than as an oracle that would not answer.)
 
 # THE SANCTIONED FORM — `--branch --base <base> --repo <abs>` — reviews the RANGE
 # `<base>..HEAD`, i.e. exactly the census. Determined EMPIRICALLY against the real
