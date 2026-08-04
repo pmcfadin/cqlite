@@ -3,7 +3,7 @@
 | File | What it is |
 |---|---|
 | `live-probe-procedure.md` | The AC2 demonstration, as **prose** and as a **post-merge** step — with the reason it cannot be pre-merge, the expected summary values, and how to read the token line. |
-| `../../../website/src/content/docs/_3229-root-anchoring-probe.json` | A deny-listed extension (`.json`) under a **nested** `docs` directory — the end-to-end confirmation that a slash-containing pattern is ROOT-ANCHORED. Kept on the branch because it survives **both** the old and the new configuration. |
+| `../../../website/src/content/docs/reports/_3229-artifacts/_3229-root-anchoring-probe.json` | A deny-listed extension (`.json`) under a **nested** `docs/reports/*-artifacts/` directory — the end-to-end confirmation that a slash-containing pattern is ROOT-ANCHORED. It **discriminates**: `docs/reports/*-artifacts/**/*.json` matches this path under the incorrect `**/`-prefixed reading and NOT under the correct root-anchored one, so its survival is real evidence. It survives the current configuration but **not** a `**/`-prefixed misreading of it — which is the property that makes it a probe rather than a decoration. |
 
 ## Why there is no `probe-census-exclusion.sh` here any more
 

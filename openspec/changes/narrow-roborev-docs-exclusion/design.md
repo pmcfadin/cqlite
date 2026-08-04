@@ -595,6 +595,40 @@ observed* divergence (missing pattern, broken run, changed count) still FAILs wi
 deliberate: it is what stops the version gate from becoming a way for a future roborev that renamed its
 `version` subcommand to silently turn the whole check into a no-op. `cx26c` is its detector.
 
+###### …but "withholds only the blessing" was too generous by one behaviour (round 9, blocker F1)
+
+`built-in-set:` has **three** states, and the round-8 code tested only `= DIVERGED` (three sites) and
+`!= DIVERGED` (one). A three-state signal tested as two: `UNAVAILABLE` fell through to the **permissive**
+branch, where it populated `CENSUS_BUILTIN_EXCLUDED` and explicitly told `prompt-content:` *not* to expect
+those paths. So **coverage was excused on an unverified model while the block read `RESULT: PASS`** — "we
+could not check" rendered as "nothing was wrong", inside the guard whose entire purpose is preventing
+exactly that. Reachability was measured, not argued: a shim carrying all 24 literals correctly
+right-bounded but hiding its `version` yields `state=UNAVAILABLE, missing=0`, and the excusal still
+happened.
+
+The fix separates two decisions that had been conflated behind one comparison:
+
+| decision | keyed on | why |
+|---|---|---|
+| may a built-in swallow be a NOTICE rather than a FAIL? | **not `DIVERGED`** | only a *positively observed* divergence is an actionable mechanism change. An unobservable binary (`roborev` absent from PATH — the hermetic suite's normal state) must not red every run; a guard that reds correct input with no remedy is the guard that gets disabled. |
+| may that swallow **EXCUSE** the paths from `prompt-content:`? | **`= OK`** | the excusal is a claim *about the mechanism* — that the absence is a DETERMINISTIC consequence of the PINNED deny-list. An unverified mechanism cannot support it. |
+
+So the fix **fails closed on the EXCUSAL, not on the RUN**. Under `UNAVAILABLE` the excusal set stays
+EMPTY, `prompt-content:` evaluates every census code path, and if roborev really did drop one it FAILs —
+which is the correct outcome, and is reached without ever reding a run merely because no binary was
+observable. The value line names the withholding explicitly, in wording that reads as neither a clean PASS
+nor a `DIVERGED` set, following the precedent this change already set: *"could not check" must never read
+as "nothing was wrong."*
+
+Three detectors, one per state, all mutation-tested: `cx19h` (`UNAVAILABLE` ⇒ no excusal, `prompt-content:`
+FAILs on the genuinely-absent path, value names the non-verification), `cx19i` (the same `UNAVAILABLE`
+target with the path PRESENT in the prompt ⇒ PASS, so withholding the excusal makes the path *evaluated*,
+never condemned), `cx19` / `cx19d` (`OK` ⇒ the excusal works as before, on a `pinned` stub rather than the
+default one) and `cx19j` (`DIVERGED` ⇒ still FAILs, excusing nothing). The same audit found the one
+reconciliation verdict that omitted the built-in state entirely — the configured-swallow FAIL — which made
+the documented "every value ends with `built-in-set:`" contract false for exactly the branch where a
+configured swallow coexists with an unverified model; `cx9`/`cx10` now pin it.
+
 ###### The divergence check found a real bug in its first live run — in itself
 
 Worth recording, because the failure mode is one of this repo's named blind spots reproduced in shell.
@@ -932,9 +966,40 @@ So the executable is removed from the branch and the procedure kept as committed
 and the reason is recorded, because a quietly weakened acceptance criterion is indistinguishable from one
 that was never met.
 
-`website/src/content/docs/_3229-root-anchoring-probe.json` **stays** on the branch: a `.json` under a
-*nested* `docs` directory survives under BOTH the old and the new configuration (root anchoring), so it
-does not deadlock and is live evidence either way.
+`website/src/content/docs/reports/_3229-artifacts/_3229-root-anchoring-probe.json` **stays** on the branch:
+a `.json` under a *nested* `docs/reports/*-artifacts/` directory is not swallowed by the configured set
+(root anchoring), so it does not deadlock and is live evidence either way.
+
+##### A probe is only evidence while it DISCRIMINATES (round 9)
+
+The probe's evidence is its **survival**, and survival only means something if the two candidate readings
+of a configured pattern **disagree** about the path. At its original location
+(`website/src/content/docs/_3229-root-anchoring-probe.json`) the discriminating pattern was the
+pre-round-6 `docs/**/*.json`: `**/docs/**/*.json` (the incorrect `**/`-prefixed reading) matched it,
+`docs/**/*.json` (root-anchored) did not. **Round 6's ⑦a directory-scoping deleted that pattern**, and
+measurement with the guard's own port then showed the old path SURVIVING under *both* readings — i.e. the
+probe had become **vacuous evidence**: it could no longer fail, so its passing said nothing. Vacuous
+evidence is worse than absent evidence, because it reads exactly like the real thing.
+
+The probe was therefore relocated to a path a *currently configured* pattern discriminates:
+`docs/reports/*-artifacts/**/*.json` matches
+`website/src/content/docs/reports/_3229-artifacts/_3229-root-anchoring-probe.json` under the
+`**/`-prefixed reading (`**/docs/reports/*-artifacts/**/*.json`) and NOT under the root-anchored one. Both
+path segments that Astro would otherwise pick up are underscore-prefixed, and `_3229-artifacts` still
+matches `*-artifacts`, so the file is inert to the website build AND discriminating.
+
+**How that was established, and how it must be re-established.** With the guard's OWN port —
+`roborev_format_exclude_args` over the real `.roborev.toml`, then the same
+`git diff --name-only -z --no-renames <base>...HEAD -- <exclude pathspecs>` survivor query the check runs —
+executed twice: once with the correct pathspecs and once with every configured pattern forced to the
+`**/`-prefixed form. A **both-directions control** ran alongside: `docs/reports/3229-artifacts/*.json`
+must be EXCLUDED (proving the harness can see an exclusion) and `scripts/flow/*.sh` must SURVIVE (proving
+it can see a survival). Do **not** substitute hand-rolled `git ls-files` + `:(exclude,glob)` pathspecs:
+measured on this issue, `git ls-files -- 'website/' ':(exclude,glob)*.md'` returned **0 of 95** files, and
+an exclude pathspec combined with a *literal file* pathspec returns 0 unconditionally — either answer
+would have manufactured a configuration defect that does not exist. **Any future change to
+`exclude_patterns` must re-run this discrimination check**, because deleting a pattern can silently
+retire the probe.
 
 #### The primary evidence is a real PR, not the probe
 
@@ -1064,6 +1129,17 @@ family's `(c2*)` lettering. The fixture helper gains the ability to write the wo
     because a one-per-line planting would model a blob shape the real binary does not have — the same
     symmetric-mirror error the array/string bug taught, so a `guard_assert_run_mirror_agrees` check keeps
     the run mirror and the flat pinned mirror describing the same 24 patterns.
+16. **the EXCUSAL gate, one detector per built-in state** (round 9, blocker F1) — `cx19h`: the pinned
+    literals with `version` REFUSED ⇒ `built-in-set: UNAVAILABLE`, `census-exclusion:` still a NOTICE whose
+    value line NAMES the withheld excusal and the non-verification, NO path handed to `prompt-content:`,
+    `prompt-content: FAIL (1/2 … absent)`, `RESULT: FAIL` — the fail-closed outcome; `cx19i`: the same
+    target with the swallowed path PRESENT in the prompt ⇒ `prompt-content: PASS (2/2)`, `RESULT: PASS`, so
+    withholding the excusal makes the path *evaluated*, never condemned; `cx19`/`cx19d`: the `OK` state on a
+    `pinned` stub ⇒ the excusal works as before (`+1 not expected: …`) and reports no withholding, so the
+    granted and withheld wordings are distinguishable; `cx19j`: `DIVERGED` beside a real swallow ⇒ FAIL,
+    `built-in-set: DIVERGED`, nothing excused, never enqueued. `cx19`/`cx20b`/`cx22b` were MOVED onto the
+    `pinned` stub for this reason: their subject is the excusal, which the default (literal-free) stub can
+    no longer earn.
 
 The suite runs under the `roborev-lints` gate component, which is in **both** `COMPONENTS` and
 `LITE_COMPONENTS` — so a regression FAILs the fast loop rather than costing a review round. Its tally

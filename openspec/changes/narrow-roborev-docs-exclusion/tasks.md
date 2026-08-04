@@ -126,10 +126,19 @@
       makes `census-exclusion:` FAIL *correctly* until merge — a DEADLOCK, not a test. `git rm`'d
       `probe-census-exclusion.sh`; procedure kept as prose in
       `docs/reports/3229-artifacts/live-probe-procedure.md`.
-- [x] KEEP `website/src/content/docs/_3229-root-anchoring-probe.json` on the branch — a `.json` under a
-      NESTED `docs` directory survives under BOTH the old and the new configuration (root anchoring), so it
-      does not deadlock and is live evidence either way. Its ABSENCE from a prompt would falsify the port
-      and block; it is not an acceptable outcome to merely record.
+- [x] KEEP `website/src/content/docs/reports/_3229-artifacts/_3229-root-anchoring-probe.json` on the branch
+      — a `.json` under a NESTED `docs/reports/*-artifacts/` directory is not swallowed by the configured
+      set (root anchoring), so it does not deadlock and is live evidence either way. Its ABSENCE from a
+      prompt would falsify the port and block; it is not an acceptable outcome to merely record.
+- [x] Round 9: RELOCATE the probe so it DISCRIMINATES again. At its old path
+      (`website/src/content/docs/_3229-root-anchoring-probe.json`) it discriminated against the pre-round-6
+      `docs/**/*.json`; ⑦a's directory-scoping removed that pattern, after which NO configured pattern
+      matched the old path under EITHER reading — it survived unconditionally, which is vacuous evidence,
+      not weak evidence. The new path is matched by `**/docs/reports/*-artifacts/**/*.json` (incorrect
+      reading) and not by `docs/reports/*-artifacts/**/*.json` (correct reading). Established with the
+      guard's OWN port (`roborev_format_exclude_args` + the same survivor query), both directions, against
+      a must-be-EXCLUDED and a must-SURVIVE control — never hand-rolled `git ls-files` pathspecs, which
+      measurably answer 0-of-95 on this repo.
 - [x] Correct the token guidance everywhere it appears: judge against the MECHANISM's thresholds
       (`ROBOREV_VACUITY_MIN_INPUT_TOKENS = 25000`, anchored on the highest observed vacuous run of 18,801;
       `cached > 0`; **output ADVISORY ONLY**, because a genuine CLEAN review emits 20–60 output tokens —

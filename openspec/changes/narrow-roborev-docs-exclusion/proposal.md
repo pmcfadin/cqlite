@@ -111,10 +111,14 @@ review of every program the repo ships beside a report. It is fleet-wide and rec
    procedure in `docs/reports/3229-artifacts/live-probe-procedure.md` is the fallback. The obligation is
    held by mechanism, not goodwill: on merge the issue goes to **`In Review`, not `Done`**, and flips to
    `Done` only once the evidence is posted; undelivered within a few days, it is filed as a tracked issue.
-   `website/src/content/docs/_3229-root-anchoring-probe.json` stays on the branch and CONFIRMS end to end
-   the root-anchoring the disassembly established — a deny-listed extension under a *nested* `docs`
-   directory is still delivered to the reviewer, because a pattern containing an interior `/` is passed
-   verbatim, and it survives under both the old and the new configuration.
+   `website/src/content/docs/reports/_3229-artifacts/_3229-root-anchoring-probe.json` stays on the branch
+   and CONFIRMS end to end the root-anchoring the disassembly established — a deny-listed extension under a
+   *nested* `docs/reports/*-artifacts/` directory is still delivered to the reviewer, because a pattern
+   containing an interior `/` is passed verbatim. Its path is chosen to **discriminate**: the configured
+   `docs/reports/*-artifacts/**/*.json` matches it under the incorrect `**/`-prefixed reading and NOT under
+   the correct root-anchored one, so its survival is evidence rather than decoration. (Round 9 relocated it
+   for exactly that reason: at its previous path it discriminated against the pre-round-6 `docs/**/*.json`,
+   which ⑦a removed, leaving it surviving under both readings and proving nothing.)
 5. **Hermetic regression tests (AC5).** `scripts/tests/test_roborev_review_guard.sh` gains cases in its
    existing style: executables under `docs/` yield a PASS-eligible census and ARE enqueued; a prose-only
    diff under `docs/` still reports `code-free: FAIL` and is never enqueued; a config that WOULD swallow

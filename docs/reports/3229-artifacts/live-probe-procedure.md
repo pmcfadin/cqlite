@@ -146,15 +146,18 @@ The **vacuous signature** to recognise is the shape, not a magnitude: `input` be
 
 ## The second, independent assertion — root anchoring
 
-`website/src/content/docs/_3229-root-anchoring-probe.json` MUST be **PRESENT** in the prompt actually
-sent:
+`website/src/content/docs/reports/_3229-artifacts/_3229-root-anchoring-probe.json` MUST be **PRESENT**
+in the prompt actually sent:
 
 ```bash
-roborev show <job> --prompt | grep -F 'website/src/content/docs/_3229-root-anchoring-probe.json'
+roborev show <job> --prompt | grep -F 'website/src/content/docs/reports/_3229-artifacts/_3229-root-anchoring-probe.json'
 ```
 
-Why: `docs/**/*.json` contains an interior `/`, so roborev's `FormatExcludeArgs` passes it **VERBATIM**
-— it is ROOT-ANCHORED at this repo's top-level `docs/` and cannot match a **nested** `docs` directory.
+Why: the configured `docs/reports/*-artifacts/**/*.json` contains an interior `/`, so roborev's
+`FormatExcludeArgs` passes it **VERBATIM** — it is ROOT-ANCHORED at this repo's top-level `docs/` and
+cannot match a **nested** `docs` directory. The probe's path is chosen so the two candidate readings
+DISAGREE about it: `**/docs/reports/*-artifacts/**/*.json` (the incorrect `**/`-prefixed form) matches
+it, the root-anchored form does not. Its survival is therefore evidence, not decoration.
 
 - **Present** ⇒ the disassembly-recovered algorithm is confirmed live.
 - **ABSENT** ⇒ the port is **FALSIFIED**. That blocks, and is not an acceptable outcome to merely
@@ -162,8 +165,23 @@ Why: `docs/**/*.json` contains an interior `/`, so roborev's `FormatExcludeArgs`
   `scripts/flow/roborev-review-oracles.sh` rest on this root-anchoring result.
 
 This file is retained on the branch deliberately: unlike an executable under root `docs/`, a `.json`
-under a **nested** `docs` directory survives **both** the old and the new configuration, so it does not
-deadlock pre-merge and is live evidence either way.
+under a **nested** `docs` directory is not swallowed by the configured set, so it does not deadlock
+pre-merge and is live evidence either way.
+
+**Round 9 relocated it, because it had gone vacuous.** It previously sat at
+`website/src/content/docs/_3229-root-anchoring-probe.json` and discriminated against the pre-round-6
+pattern `docs/**/*.json`. Round 6's directory-scoping (⑦a) removed that pattern, after which **no**
+configured pattern matched the old path under **either** reading — so it survived unconditionally and
+proved nothing. Discrimination was re-established with the guard's OWN port
+(`roborev_format_exclude_args` + the same `git diff --name-only -- <exclude pathspecs>` survivor
+query), run in both directions against a must-be-EXCLUDED control (`docs/reports/3229-artifacts/*.json`)
+and a must-SURVIVE control (`scripts/flow/*.sh`). Do NOT use hand-rolled `git ls-files` +
+`:(exclude,glob)` pathspecs as the oracle here: measured on this issue, an exclude pathspec combined
+with a **literal file** pathspec returns 0 unconditionally, and `git ls-files -- 'website/'
+':(exclude,glob)*.md'` returned 0 of 95 files — an answer that would have manufactured a config defect
+that does not exist. **If a future round changes `exclude_patterns` again, re-run the discrimination
+check**: a probe whose discriminating pattern has been deleted is vacuous evidence, and vacuous
+evidence reads exactly like real evidence.
 
 ## Version pinning
 

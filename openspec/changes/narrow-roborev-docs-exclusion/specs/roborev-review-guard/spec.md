@@ -380,6 +380,31 @@ silently treated as, agreement. An unreadable version SHALL withhold ONLY the OK
 POSITIVELY OBSERVED divergence (a missing pattern, a broken adjacency run, a changed literal count)
 SHALL still FAIL without it, so the check can never self-disable.
 
+**THE BUILT-IN EXCUSAL SHALL REQUIRE A VERIFIED MODEL — `built-in-set: OK`, not merely "not
+`DIVERGED`".** `built-in-set:` has THREE states, and PERMISSIVE behaviour SHALL be keyed on the POSITIVE
+one. Two decisions are deliberately SEPARATE:
+
+1. Whether a built-in swallow may be a NOTICE rather than a FAIL SHALL turn on the set NOT being
+   `DIVERGED`. Only a POSITIVELY OBSERVED divergence is an actionable mechanism change; an unobservable
+   binary (`roborev` absent from PATH — the hermetic suite's normal state) SHALL NOT red every run,
+   because a guard that reds correct input with no available remedy is the guard that gets disabled.
+2. Whether that swallow **EXCUSES** the swallowed paths from `prompt-content:` SHALL require
+   `built-in-set: OK`. The excusal is a claim ABOUT THE MECHANISM — that a path's absence from the
+   prompt is a DETERMINISTIC consequence of the PINNED deny-list — and an UNVERIFIED mechanism cannot
+   support it.
+
+Under `UNAVAILABLE` the guard SHALL therefore excuse NOTHING: the set handed to `prompt-content:` SHALL
+be EMPTY, `prompt-content:` SHALL evaluate EVERY census code path, and it SHALL FAIL if one is genuinely
+absent from the prompt. That fails CLOSED on the EXCUSAL without failing the RUN. The value line SHALL
+say so EXPLICITLY and DISTINCTLY — naming that the built-in model is NOT VERIFIED and that NO path is
+excused — in wording that reads as NEITHER a clean PASS NOR a `DIVERGED` set, because the state is
+neither. *"We could not check" SHALL NEVER render as "nothing was wrong."* This closes a REPRODUCED
+false-PASS: a shim carrying all 24 literals correctly right-bounded but hiding its `version` yields
+`state=UNAVAILABLE, missing=0`, and the previous revision — which tested only `= DIVERGED` at three
+sites and `!= DIVERGED` at a fourth — still populated the excusal set and still instructed
+`prompt-content:` not to expect those paths, so coverage was excused on an unverified model while the
+block read `RESULT: PASS`.
+
 **PRECEDENCE.** Both FAIL causes outrank the NOTICE, and EVERY cause present SHALL be named in the value
 line — the actionable half must never be hidden behind the unactionable one, in either direction.
 
@@ -554,10 +579,23 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** `census-exclusion:` reads `NOTICE (1/2 code census paths survive …)`, the review IS enqueued, the terminal `RESULT:` is not FAIL on that account, and the total-swallow wording (`EMPTY diff`) is absent — so the boundary is TOTAL vs PARTIAL and nothing else
 
-#### Scenario: A known built-in absence is not re-reported by prompt-content
-- **GIVEN** the same run, whose prompt therefore carries the `.rs` file but not `Cargo.lock`
+#### Scenario: A known built-in absence is not re-reported by prompt-content, GIVEN a VERIFIED built-in set
+- **GIVEN** the same run against a roborev target whose built-in deny-list is observed to MATCH the pin (`built-in-set: OK`), whose prompt therefore carries the `.rs` file but not `Cargo.lock`
 - **WHEN** `prompt-content:` evaluates
 - **THEN** it PASSes over the reduced set and records the subtraction explicitly (`+<n> not expected: excluded by a roborev built-in`), rather than FAILing on an absence that `census-exclusion:` already reported and that has no remedy under either key
+- **AND** the value line reports no withheld excusal, so the granted and withheld wordings are distinguishable
+
+#### Scenario: An UNVERIFIED built-in model excuses NOTHING, and prompt-content fails closed
+- **GIVEN** a roborev target carrying the pinned literals, correctly right-bounded, that will NOT report its `version` — so the state is `UNAVAILABLE` with an EMPTY missing list — and a census in which a pinned built-in swallows one code path whose diff is absent from the prompt
+- **WHEN** the wrapper runs the reconciliation check and `prompt-content:` evaluates
+- **THEN** `census-exclusion:` is still a NOTICE (an unobservable binary never reds a run on its own), the value line NAMES the withheld excusal, states that the built-in model is NOT VERIFIED and that NO path is excused, and reads as neither a clean PASS nor a DIVERGED set
+- **AND** NO path is handed to `prompt-content:` as excluded: it evaluates EVERY census code path, FAILs on the genuinely-absent one, and the block's `RESULT:` is FAIL — the correct fail-closed outcome when the model is unverified
+- **AND** the detail never claims the live built-in set MATCHES the pin, and the `UNAVAILABLE` notice records that it withholds the EXCUSAL as well as the blessing
+
+#### Scenario: Withholding the excusal does not red a run whose prompt carries the path
+- **GIVEN** the identical `UNAVAILABLE` target and the identical built-in swallow, but a prompt that DOES carry the swallowed path's diff
+- **WHEN** `prompt-content:` evaluates
+- **THEN** the excusal is still reported withheld, `prompt-content:` PASSes over ALL census code paths with no path marked not-expected, and the run PASSes — so withholding the excusal makes the path EVALUATED, never condemned
 
 #### Scenario: A live built-in set matching the pin is reported OK and corroborated
 - **GIVEN** a roborev executable whose built-in deny-list matches the pinned set exactly
@@ -596,11 +634,18 @@ patterns. The residual divergence SHALL be DECLARED in both directions:
 - **GIVEN** an environment where the roborev target carries no `:(exclude,glob)` literals (a wrapper, a shim, or the regression suite's stub)
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** the value ends `built-in-set: UNAVAILABLE`, a detail states that this is deliberately NEITHER a failure NOR a blessing, and the run's verdict is unaffected by it — so the hermetic suite stays fully exercisable and an unobserved set is never silently read as agreement
+- **AND** it withholds the EXCUSAL as well as the blessing: no census code path is excused from `prompt-content:` on a model that could not be verified
 
 #### Scenario: A configured swallow and a built-in divergence both name their cause
 - **GIVEN** a run in which a configured pattern swallows census code AND the live built-in set has diverged from the pin
 - **WHEN** the wrapper runs the reconciliation check
 - **THEN** the single value line names the configured swallow AND the divergence, the configured cause keeps its own remedy detail, and no review is enqueued — the actionable half is never hidden behind the other
+- **AND** the FAIL value ALSO ends with the built-in state, so "never silence" holds for the FAIL values and not only the PASS/NOTICE ones
+
+#### Scenario: A DIVERGED set beside a real built-in swallow fails and excuses nothing
+- **GIVEN** a roborev executable carrying one MORE `:(exclude,glob)` literal than the pinned count AND a census in which a pinned built-in swallows one code path
+- **WHEN** the wrapper runs the reconciliation check
+- **THEN** `census-exclusion:` FAILs as a built-in-set DIVERGENCE, the value ends `built-in-set: DIVERGED`, the verdict is never softened to a NOTICE, no path is excused from prompt coverage, and no review is enqueued
 
 #### Scenario: The pinned pattern list cannot be pathname-expanded
 - **WHEN** the oracles file is inspected
