@@ -831,6 +831,10 @@ else
         ;;
     esac
   fi
+  # `${ANNOUNCE_COUNT:-0}` is DIAGNOSTIC-ONLY and gates nothing but a NOTICE about
+  # multiplicity, so its permissive default cannot weaken a verdict (#3229 round-10 sweep):
+  # the announcement's own PRESENCE is asserted above and FAILs closed, and the reviewed range
+  # is verified from the structured job record, not from this count.
   if [ "${ANNOUNCE_COUNT:-0}" -gt 1 ]; then
     DETAILS+=("NOTICE: sha-assert: the transcript carries $ANNOUNCE_COUNT enqueue announcements; the LAST one (job $JOB) is the effective enqueue and is the one asserted.")
   fi

@@ -1241,6 +1241,9 @@ roborev_observe_builtin_excludes() {
   set +e
   n=$(LC_ALL=C grep -a -o ':(exclude,glob)' "$bin" 2>/dev/null | wc -l | tr -d '[:space:]')
   set -e
+  # `|| n=0` is fail-closed here (#3229 round-10 sweep): a failed count yields 0, 0 is not the
+  # pinned literal count, and the state that follows is UNAVAILABLE — the blessing is withheld,
+  # never granted. A default that produced the PINNED value would be the fail-open form.
   [ -n "${n:-}" ] || n=0
   # ZERO literals ⇒ this is not the Go executable (a stub, a wrapper, a shim). Not
   # observable, so not a verdict in either direction.
@@ -1480,6 +1483,12 @@ roborev_check_census_exclusion() {
   if [ -z "$_rx_error" ] && [ -n "$root_cfg" ]; then
     roborev_toml_exclude_patterns "$root_cfg" "$root_tag"
   fi
+  # `${HOME:-}` GUARD: skipping the global config when HOME is unset is NOT a fail-open
+  # default (#3229 round-10 sweep). roborev resolves its own global config from HOME too, so
+  # with HOME unset there IS no global config for it to apply — our reading and the mechanism
+  # agree, which is the standard this whole check is held to. It is also not the last line of
+  # defence: a pattern from ANY source the parse missed is caught by `roborev config get`
+  # corroboration (DRIFT), which asks the binary rather than guessing where it looks.
   if [ -z "$_rx_error" ] && [ -n "${HOME:-}" ]; then
     roborev_toml_exclude_patterns "$global_cfg" "$global_tag"
   fi

@@ -226,6 +226,14 @@ roborev_check_findings() {
          tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
          inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
   block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+  # THE `:-0` DEFAULT IS THE FAIL-CLOSED DIRECTION, verified rather than assumed (#3229
+  # round-10 sweep audit of every `${VAR:-default}` in these three files). A fail-open default
+  # masking a failed measurement is exactly how the `${_census_end:-$_census_start}` bound
+  # degraded a broken `awk` into a 1-line scan, so each such default has to be shown to fall the
+  # STRICT way. Here it does: a failed `awk`/`grep` yields 0 markers, 0 markers makes
+  # `findings:` read NONE rather than PRESENT, and NONE is what makes `vacuity-tier1` treat the
+  # "no code changes" phrase as a VACUITY CLAIM and HARD FAIL. PRESENT is the permissive value
+  # (it downgrades tier 1 to an advisory NOTICE), and an unmeasurable block can never produce it.
   block_marker_count=${block_marker_count:-0}
 
   verdict_findings="unknown"
@@ -331,6 +339,19 @@ roborev_check_tier1() {
        tolower($0) ~ /(^|[^[:alnum:]])summary[[:space:]]*:/ { inblock = 1; print; next }
          /^[[:space:]]*#{1,4}[[:space:]]*[^[:space:]]/ { inblock = 0 }
          inblock { print }' "$LOG" 2>/dev/null || true; } >"$VERDICT_REGION_FILE"
+  # NO SUMMARY REGION => `UNAVAILABLE`, and that is PERMISSIVE BY DESIGN — stated here rather
+  # than left for the next reader to re-derive (#3229 round-10 sweep). It is the one branch of
+  # this file where an unmeasured signal takes the non-failing path, so the reason has to be on
+  # the page: tier 1 asks ONE question, "does the reviewer's own summary claim there are no code
+  # changes", and with no summary region there is no claim to judge — a genuine NOT-APPLICABLE,
+  # not a failure to measure something that exists. A review with no `## Summary` heading is a
+  # legitimate shape (`review-completed:` accepts a Findings heading or a `**Severity**:` line as
+  # its terminal marker), so FAILing here would red correct input. It cannot manufacture a pass
+  # either: tier 1 is a CORROBORATOR, `UNAVAILABLE` is carried into the block (never silent),
+  # and the vacuity condition it looks for is independently covered by the deterministic keys —
+  # `prompt-content:` (the reviewer's own prompt vs our census) and `census-exclusion:`, both of
+  # which fail closed. Contrast `corroboration:` with an empty parse, where the oracle is the
+  # SOLE evidence for the claim and its silence is therefore NON-passing (#3229 H2).
   if [ ! -s "$VERDICT_REGION_FILE" ]; then
     TIER1="UNAVAILABLE"
   elif grep -qi 'no code changes' "$VERDICT_REGION_FILE"; then
