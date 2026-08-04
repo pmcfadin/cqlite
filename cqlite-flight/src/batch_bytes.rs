@@ -120,16 +120,6 @@
 //! (The naive `4 + 8 = 12 MiB` reading of the task framing mixes payload and
 //! capacity: a 4 MiB *payload* cap is an 8 MiB *capacity* batch.)
 //!
-//! # Next door: the WIRE-side governor lives in `flight_data_size`
-//!
-//! This module is the **producer-side PAYLOAD cap** only. The arrow-flight
-//! encoder's re-slicing target — a **wire-side CAPACITY** target bounded by the
-//! gRPC maximum inbound message size — lives in
-//! [`crate::flight_data_size`], split out under the campsite rule (epic #1116) so
-//! the two governors' different currencies are structural rather than a paragraph.
-//! Conflating them is how the wire target came to sit ON the interop ceiling
-//! (issue #3096 review).
-//!
 //! # Liveness
 //!
 //! Test-then-push: the crossing row's width is tested against the accumulator
@@ -161,25 +151,6 @@ use cqlite_core::query::{ColumnInfo, QueryRow};
 /// pessimistic 300 B/row the *capacity* reading of a full narrow batch is
 /// already 4,227,256 B, above 4 MiB: precisely why the cap must be
 /// payload-denominated.
-///
-/// # Do NOT lower this to "align" it with the encoder's wire target
-///
-/// Recorded here because this constant is where a batch-bytes tuner looks first
-/// (issue #3096, lever 4). Two reasons, both binding:
-///
-/// * It is the **caller-facing byte-bounded batching contract** (`--max-batch-bytes`,
-///   spec R6): no emitted batch may exceed a caller-supplied cap. Lowering the
-///   default changes observable default batching for every caller that never set
-///   one.
-/// * **The narrow-shape headroom table above is derived from the 4 MiB value.**
-///   Halving it moves where the byte-cap starts binding on the ~300 B/row shape,
-///   so the table would have to be re-derived to buy a framing effect that
-///   belongs on the other side of the mismatch.
-///
-/// The encoder's side is [`crate::flight_data_size::FLIGHT_DATA_SIZE_TARGET_BYTES`]
-/// — a *wire-side capacity* target, a different governor in a different currency,
-/// bounded by the gRPC message ceiling **less a reserved per-message framing
-/// overhead** (see the `flight_data_size` module). Fix the mismatch there.
 pub const DEFAULT_MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 /// Environment variable backing `--max-batch-bytes`.

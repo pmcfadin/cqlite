@@ -18,13 +18,6 @@ cqlite-core = { path = "../cqlite-core", features = ["arrow"] }
 arrow = { workspace = true, features = ["ipc"] }
 arrow-flight = "53"
 tonic = "0.12"
-# `prost::Message::encoded_len` — the SERIALIZER's own length calculation, so
-# `wire_partition::guard_message_within_ceiling` measures the exact bytes a
-# `FlightData` occupies as a gRPC message instead of measuring its body and
-# reserving for the rest (issue #3096, second review of lever 4). Pinned to the
-# same prost line arrow-flight 53 uses so the `Message` impl unifies; the dev
-# targets' length-delimited golden encode/decode uses this same entry.
-prost = "0.13"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # `CancellationToken` — an async-wakeable cooperative-cancellation signal so the
 # `do_get` merge producer's backpressure park (`ChannelSink::emit`) can race a
@@ -135,13 +128,12 @@ dhat = "0.3"
 # consumer of the published library. `cargo test`/`cargo build --examples`
 # unify this feature onto the lib build; `cargo build`/the binary do not.
 cqlite-flight = { path = ".", features = ["test-util"] }
-# NOTE: `prost` moved to [dependencies] (issue #3096, second review of lever 4) —
-# the LIB now uses `Message::encoded_len` in the wire-ceiling guard, and a
-# [dependencies] entry is available to the dev targets too. Its other users are
-# unchanged: the golden emitter (`examples/emit_arrow_golden.rs`)
-# length-delimit-ENCODES the encoder's `FlightData` messages to a golden file, and
-# `tests/do_get_transport_test.rs` length-delimit-DECODES that same committed
-# golden to cross-check it against the live wire bytes.
+# The golden emitter (`examples/emit_arrow_golden.rs`) length-delimit-encodes
+# the encoder's `FlightData` protobuf messages to a golden file, and the
+# transport test (`tests/do_get_transport_test.rs`) length-delimit-DECODES that
+# same committed golden to cross-check it against the live wire bytes; pinned
+# to the same prost line arrow-flight 53 uses so the `Message` impl unifies.
+prost = "0.13"
 
 # End-to-end Flight `do_get` throughput bench (issue #1494, AD5). Drives the
 # PUBLIC tonic `FlightService::do_get` RPC over a real loopback transport

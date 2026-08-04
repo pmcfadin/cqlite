@@ -691,28 +691,17 @@ fn encode_do_get(
     schema_ref: Arc<ArrowSchema>,
     probe: StreamProbe,
 ) -> DoGetStream {
+    // Issue #3096, lever 4 REVERTED (owner ruling A, deferred to #3281): the
+    // encoder's re-slicing target is arrow-flight's own default again — no
+    // `with_max_flight_data_size`, no wire-side partitioner, no serialized-message
+    // guard. Lever 4 measured ZERO throughput (-0.03%), and the wire-safety
+    // mechanism that was its only remaining justification conflated a TARGET with a
+    // CEILING: a reserve that is safe to over-estimate against a target
+    // false-REJECTS legal input against a ceiling.
     let encoded = FlightDataEncoderBuilder::new()
         .with_schema(schema_ref)
-        // Issue #3096, lever 4: state the encoder's re-slicing target explicitly
-        // instead of inheriting arrow-flight's 2 MiB default, which is HALF this
-        // tree's `DEFAULT_MAX_BATCH_BYTES` and therefore re-sliced every batch the
-        // producer had already cut to its own cap. The derivation, the two
-        // currencies involved, and why this is not simply raised until the split
-        // disappears live on the constant.
-        .with_max_flight_data_size(crate::flight_data_size::FLIGHT_DATA_SIZE_TARGET_BYTES)
-        // …which is a TARGET the encoder meets by slicing uniformly BY ROW COUNT and
-        // which governs the BODY only, so width-skewed rows can still frame one
-        // over-ceiling message (issue #3096 review). `wire_partition`
-        // byte-partitions the input and checks every emitted message's FULL
-        // SERIALIZED SIZE against the ceiling; its header quotes the encoder source.
-        .build(crate::wire_partition::partition_for_wire(
-            batch_stream,
-            probe.clone(),
-        ))
-        .map(move |res| match res {
-            Ok(data) => crate::wire_partition::guard_message_within_ceiling(data, &probe),
-            Err(e) => Err(flight_error_to_status(e, &probe)),
-        });
+        .build(batch_stream)
+        .map(move |res| res.map_err(|e| flight_error_to_status(e, &probe)));
     Box::pin(encoded)
 }
 
@@ -750,7 +739,7 @@ fn flight_error_to_status(e: FlightError, probe: &StreamProbe) -> Status {
 /// same [`Status`] for propagation to the client, so the failure is both visible
 /// server-side (via [`crate::obs::record_status_error`]'s error log + error
 /// signal) AND delivered as a proper gRPC error status.
-pub(crate) fn record_encoder_error(status: Status, probe: &StreamProbe) -> Status {
+fn record_encoder_error(status: Status, probe: &StreamProbe) -> Status {
     // Issue #2681: an encoder-stage egress failure (Arrow IPC framing / encode /
     // send) is a genuine internal fault — stamp `internal` at the site.
     crate::obs::record_do_get_abort(
@@ -792,9 +781,3 @@ mod tests;
 #[cfg(test)]
 #[path = "egress_budget_tests.rs"]
 mod egress_budget_tests;
-
-// The encoder's wire-side re-slicing target (issue #3096, lever 4), in its own
-// test module for the same campsite reason (epic #1135).
-#[cfg(test)]
-#[path = "streaming_framing_tests.rs"]
-mod streaming_framing_tests;
