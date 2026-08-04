@@ -96,7 +96,7 @@ TBL=multiclustering_table
 # against the floor rather than reported as a pass it did not earn. The one BRANCH (build
 # here vs reuse CQLITE_BTI_PERF_SCAN_BIN) records exactly one case on EITHER side, so the
 # floor is identical on both paths (roborev #3234 F4).
-MIN_CASES=127
+MIN_CASES=129
 # The case count of that one conditional block, so the floor is identical as root.
 SKIP_UID0_CASES=2
 
@@ -268,6 +268,13 @@ done
 # the manifest documents WHICH generations, so an unidentifiable one is a refusal.
 BADDESC="$(mk_corpus bad-descriptor)"
 : >"$BADDESC/sstables/$KS/$FIXTURE_BASE/da-x-bti-Data.db"
+# A BIG (`nb`) descriptor in the MEASURED directory (roborev job 28): the name predicate is
+# a suffix match and `generation_of` reads only the generation, so nothing observed the
+# FORMAT -- a BIG SSTable was scanned and reported as a BTI measurement. Not only an
+# adversarial case: a BTI-configured Cassandra 5.0 node writes its own system tables in
+# BIG, so a corpus root pointed one level too high reaches `nb-*-big-Data.db`.
+BIGFMT="$(mk_corpus big-format)"
+: >"$BIGFMT/sstables/$KS/$FIXTURE_BASE/nb-1-big-Data.db"
 
 # --- roborev job 27 B3: REAL directory components, inside the corpus root --------------
 # The documented branch accepted `dir.is_dir()`, which FOLLOWS symlinks, while the fallback
@@ -1000,6 +1007,19 @@ if run_case 3 "a *-Data.db whose descriptor carries no readable generation id is
     pass "the refusal names the descriptor whose generation could not be read"
   else
     fail "expected an unreadable-generation-identifier diagnosis; got: $(tail -4 <<<"$out")"
+  fi
+fi
+# The FORMAT assert (roborev job 28). A BIG descriptor beside the BTI generation carries a
+# readable generation id and leaves the row count untouched, so neither the generation
+# checks above nor the row-count assert can see it -- only a version/format check can.
+if run_case 3 "a BIG (\`nb-*-big-\`) descriptor in the measured directory is refused" \
+  --corpus "$BIGFMT" --keyspace "$KS" --table "$TBL" --warm-passes 0 --no-min-seconds \
+  --manifest "$TMP/m-scoped.json"; then
+  if grep -q "are not BTI descriptors" <<<"$out" \
+    && grep -q "nb-1-big-Data.db" <<<"$out"; then
+    pass "the refusal names the non-BTI descriptor it will not measure"
+  else
+    fail "expected a non-BTI-descriptor diagnosis; got: $(tail -4 <<<"$out")"
   fi
 fi
 # A record that scopes the measurement but does not STATE its generation set cannot gate

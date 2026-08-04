@@ -220,7 +220,61 @@ fn data_db_entries(dir: &Path) -> std::result::Result<Vec<String>, String> {
         }
     }
     out.sort();
+    // The suffix predicate above matches `discovery::scanner` and therefore says nothing
+    // about the FORMAT; `assert_bti_descriptors` is what refuses a non-BTI one.
+    assert_bti_descriptors(dir, &out)?;
     Ok(out)
+}
+
+/// Every `*-Data.db` descriptor is a BTI one — `da-<generation>-bti-Data.db`.
+///
+/// `bti_perf_scan` is a BTI-ONLY instrument: every figure it prints is published as a `da`
+/// BTI measurement, and `main.rs` attributes it to a BTI `storage_route:`. Nothing above
+/// this point observes the format, though — the name predicate in `data_db_entries` is a
+/// deliberate suffix match (it has to agree with the `discovery::scanner` rule it is
+/// cross-checked against), and `generation_of` reads only the generation component. So a
+/// directory of `nb-<n>-big-Data.db` (BIG) SSTables carrying the same generation
+/// identifiers and the same row count scanned clean and was reported as a BTI measurement
+/// (roborev job 28) — the instrument misreporting WHICH FORMAT its own published number
+/// describes, with `rows_scanned` matching the manifest and the exit code 0.
+///
+/// Not hypothetical, and not only an adversarial case: a BTI-configured Cassandra 5.0 node
+/// still writes its OWN system tables in BIG, so the generated corpus tree holds 11
+/// `nb-*-big-Data.db` files beside the 27 `da-*-bti-*` generations under test — a corpus
+/// root pointed one level too high reaches them.
+///
+/// A REFUSAL rather than a filter, deliberately: silently dropping a non-`da` descriptor
+/// would make this count disagree with the discovery count it is compared against, and
+/// would measure a subset while reporting the whole. The version/format test below is the
+/// enforcement, and it does not judge the generation component — `da-x-bti-Data.db` stays
+/// the unreadable-generation refusal that `observed_generation_ids` already raises.
+fn assert_bti_descriptors(dir: &Path, names: &[String]) -> std::result::Result<(), String> {
+    let foreign: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            let parts: Vec<&str> = name.split('-').collect();
+            !(parts.len() == 4 && parts[0] == "da" && parts[2] == "bti")
+        })
+        .collect();
+    if !foreign.is_empty() {
+        return Err(format!(
+            "{}: {} `*-Data.db` file(s) are not BTI descriptors \
+             (`da-<generation>-bti-Data.db`): {}. This harness measures the BTI (`da`) read \
+             path and every figure it prints is published as a BTI measurement, so scanning \
+             a non-`da`/non-`bti` SSTable would attribute a number to a format it does not \
+             describe — and neither the row count nor the generation set can see the \
+             difference. Refusing.\n  note: a BTI-configured Cassandra 5.0 node still writes \
+             its own system tables in BIG, so a corpus root pointed one level too high \
+             reaches `nb-*-big-Data.db` files.\n  remedy: point --corpus at the BTI corpus \
+             this manifest describes (its table directories hold only \
+             `da-<generation>-bti-*` components).",
+            dir.display(),
+            foreign.len(),
+            foreign.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// The generation identifier in a Cassandra 5.0 descriptor
