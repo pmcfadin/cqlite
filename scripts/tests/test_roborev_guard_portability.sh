@@ -117,7 +117,13 @@ RE_SED_INPLACE='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+(-i|--in-place)([[
 # cluster it consumes the NEXT ARGV entry as the backup suffix — byte for byte the #3296
 # defect, reached by a spelling the bare-`-i` regex never sees. `-i.bak` (an ATTACHED suffix)
 # is portable and deliberately NOT matched: both seds read it the same way.
-RE_SED_INPLACE_CLUSTER='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-[a-zA-Z]+i([[:space:]]|$)'
+#
+# The letters BEFORE the trailing `i` are restricted to the ARGUMENT-FREE sed options
+# (BSD `n E r a l u`, plus GNU's `s` and `z`). A cluster containing an ARGUMENT-TAKING option
+# never reaches an in-place flag at all: in `sed -fi input`, getopt gives `-f` the argument
+# "i" (the script file), so there is no `-i` and flagging it was a false positive. Same for
+# `-ei`, and for BSD's `-I`/`-i`, which take arguments themselves.
+RE_SED_INPLACE_CLUSTER='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-[nEralusz]+i([[:space:]]|$)'
 # PASTE WITH NO FILE OPERAND, in every spelling that reaches BSD's `if (*argv == NULL) usage();`:
 #   paste -sd,            bundled flags, nothing after them
 #   paste -d ,            the delimiter argument SEPARATED from -d (consumed as the option's
@@ -310,12 +316,16 @@ fi
 
 # NEGATIVE CONTROLS for the cluster rule: a cluster that does NOT end in `i`, and an ATTACHED
 # suffix (portable — both seds read `-i.bak` as -i with suffix ".bak"), must not be reported.
+# `-fi`/`-ei` are included because the trailing `i` there is the ARGUMENT of an argument-taking
+# option, not an in-place flag: `sed -fi input` reads its script from a file named "i".
 printf '%s\n' \
   "  sed -n '2p' \"\$f\"" \
   "  sed -E 's/a/b/' \"\$f\"" \
-  "  sed -Ei.bak -e 's/a/b/' \"\$f\"" >"$tmp/cluster-ok.sh"
+  "  sed -Ei.bak -e 's/a/b/' \"\$f\"" \
+  "  sed -fi input" \
+  "  sed -ei 's/a/b/' \"\$f\"" >"$tmp/cluster-ok.sh"
 if [ -z "$(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh")" ]; then
-  ok 'structural control: a non-`i` cluster (-n, -E) and an ATTACHED suffix (-Ei.bak) are not flagged — the rule reds only on the unportable spelling'
+  ok 'structural control: a non-`i` cluster (-n, -E), an ATTACHED suffix (-Ei.bak) and an argument-taking cluster (-fi, -ei, where the i is the OPTION ARGUMENT) are not flagged — the rule reds only on the unportable spelling'
 else
   bad "structural control: the cluster rule false-positives on a portable sed — a lint that reds on correct input is the lint agents learn to waive: $(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh" | tr '\n' ' ')"
 fi
@@ -685,16 +695,47 @@ _cf_block=$(awk '/^# >>> BEGIN case-f-invocation-asserts/,/^# <<< END case-f-inv
 if [ -z "$_cf_block" ] || ! printf '%s\n' "$_cf_block" | grep -q 'work_canon='; then
   bad 'AC3: the case-f-invocation-asserts block could not be extracted from the guard test (markers removed?) — the contract is then untested here'
 else
-  mkdir -p "$tmp/real/work"
-  ln -s "$tmp/real" "$tmp/link"
+  # FIXTURE SETUP IS ITSELF MEASURED. Every command below was previously allowed to fail
+  # silently: a failed `git init`/commit leaves `_canon` EMPTY, and an empty `_canon` still
+  # satisfies `"$work" != "$_canon"`, so the probes would then compare the wrapper's contract
+  # against an empty expected repo path and report success. That is a positive verdict with no
+  # affirmative measurement behind it — the defect this whole file exists to prevent. So the
+  # setup is a fail-closed chain, `_canon` must be non-empty, ABSOLUTE, and actually resolve to
+  # the fixture, and an unestablished fixture is a loud counted SKIP, never a pass.
+  _cf_setup_err=''
   work="$tmp/link/work"
-  git init -q -b main "$work" >/dev/null 2>&1
-  git -C "$work" config user.email t@e && git -C "$work" config user.name t
-  printf 'x\n' >"$work/f.txt"
-  git -C "$work" add f.txt >/dev/null 2>&1
-  git -C "$work" commit -q -m base >/dev/null 2>&1
-  _canon=$(cd "$(git -C "$work" rev-parse --show-toplevel)" && pwd -P)
-  if [ "$work" = "$_canon" ]; then
+  mkdir -p "$tmp/real/work" || _cf_setup_err='mkdir of the fixture dir failed'
+  [ -n "$_cf_setup_err" ] || ln -s "$tmp/real" "$tmp/link" || _cf_setup_err='the symlink that reproduces /var -> /private/var could not be created'
+  [ -n "$_cf_setup_err" ] || git init -q -b main "$work" >/dev/null 2>&1 || _cf_setup_err='git init failed'
+  [ -n "$_cf_setup_err" ] || git -C "$work" config user.email t@e || _cf_setup_err='git config user.email failed'
+  [ -n "$_cf_setup_err" ] || git -C "$work" config user.name t || _cf_setup_err='git config user.name failed'
+  [ -n "$_cf_setup_err" ] || printf 'x\n' >"$work/f.txt" || _cf_setup_err='writing the fixture file failed'
+  [ -n "$_cf_setup_err" ] || git -C "$work" add f.txt >/dev/null 2>&1 || _cf_setup_err='git add failed'
+  [ -n "$_cf_setup_err" ] || git -C "$work" commit -q -m base >/dev/null 2>&1 || _cf_setup_err='git commit failed'
+  _canon=''
+  if [ -z "$_cf_setup_err" ]; then
+    _top=$(git -C "$work" rev-parse --show-toplevel 2>/dev/null) ||
+      _cf_setup_err='git rev-parse --show-toplevel failed'
+    [ -n "$_top" ] || _cf_setup_err='git rev-parse --show-toplevel returned nothing'
+    if [ -z "$_cf_setup_err" ]; then
+      _canon=$(cd "$_top" 2>/dev/null && pwd -P) || _cf_setup_err='canonicalising the fixture path failed'
+    fi
+  fi
+  # The canonical path must be non-empty, absolute, AND the same directory as $work — an
+  # arbitrary non-empty string would satisfy the "differs from $work" control by accident.
+  if [ -z "$_cf_setup_err" ]; then
+    case "$_canon" in
+      /*) ;;
+      *) _cf_setup_err="the canonical path is not absolute: '$_canon'" ;;
+    esac
+  fi
+  if [ -z "$_cf_setup_err" ] && ! [ "$_canon" -ef "$work" ]; then
+    _cf_setup_err="the canonical path '$_canon' is not the same directory as the fixture '$work'"
+  fi
+
+  if [ -n "$_cf_setup_err" ]; then
+    skip "AC3: the case (f) fixture could not be established ($_cf_setup_err) — the canonicalisation contract was NOT MEASURED on this host. Not a pass: the probes below are skipped rather than run against an unestablished fixture."
+  elif [ "$work" = "$_canon" ]; then
     bad 'AC3: the symlinked fixture did not produce a path that differs from its canonical form — the canonicalisation is not actually exercised, so a PASS below would be vacuous'
   else
     ok "AC3 control: the fixture path differs from its canonical form ($work vs $_canon), reproducing the macOS /var -> /private/var split"
@@ -723,15 +764,19 @@ else
     esac
   }
 
-  _tail='--agent codex --model gpt-5.6-sol --wait'
-  probe_case_f sanctioned 'the sanctioned canonical --repo record' accept \
-    "review --branch --base origin/main --repo $_canon $_tail"
-  probe_case_f relative 'a RELATIVE --repo' reject \
-    "review --branch --base origin/main --repo . $_tail"
-  probe_case_f rootco 'a ROOT-CHECKOUT --repo' reject \
-    "review --branch --base origin/main --repo $REPO_ROOT $_tail"
-  probe_case_f norepo 'a --branch review with NO --repo at all' reject \
-    "review --branch --base origin/main $_tail"
+  if [ -n "$_cf_setup_err" ]; then
+    skip 'AC3: the four case (f) contract probes (sanctioned / relative / root-checkout / no --repo) were NOT RUN, because the fixture above could not be established'
+  else
+    _tail='--agent codex --model gpt-5.6-sol --wait'
+    probe_case_f sanctioned 'the sanctioned canonical --repo record' accept \
+      "review --branch --base origin/main --repo $_canon $_tail"
+    probe_case_f relative 'a RELATIVE --repo' reject \
+      "review --branch --base origin/main --repo . $_tail"
+    probe_case_f rootco 'a ROOT-CHECKOUT --repo' reject \
+      "review --branch --base origin/main --repo $REPO_ROOT $_tail"
+    probe_case_f norepo 'a --branch review with NO --repo at all' reject \
+      "review --branch --base origin/main $_tail"
+  fi
 fi
 
 # ===========================================================================
