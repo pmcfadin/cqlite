@@ -171,8 +171,8 @@ const CORPUS_DIR_ENV: &str = "CQLITE_WS0_CORPUS_DIR";
 /// | Digest | Old | New | Reason | Commit |
 /// |---|---|---|---|---|
 /// | producer | (did not exist) | `0xd0014e42e893f87f` | NEW TAP (roborev finding 1): the pre-existing digest hashed batches only AFTER Flight IPC serialization and client-side decoding, so an Arrow-builder defect the round trip normalized was invisible. This tap folds the producer's `RecordBatch`es BEFORE `encode_do_get`. | `fcd96ca` |
-/// | wire | `0xd0014e42e893f87f` | `0xe6eccf8a9ffbca11` | THE FIXTURE GAINED DETERMINISTIC NULLS (roborev finding 2): all twelve cells were non-null, so no validity bitmap ever had content and a misplaced validity bit had nothing to misplace. The fixture now carries `NullPlan::Pinned` (150 absent cells over 500 rows), so the hashed data genuinely differs. | (stamped in the next commit) |
-/// | producer | `0xd0014e42e893f87f` | `0xe6eccf8a9ffbca11` | Same cause: the same fixture, now null-bearing, folded at the producer tap. | (stamped in the next commit) |
+/// | wire | `0xd0014e42e893f87f` | `0xe6eccf8a9ffbca11` | THE FIXTURE GAINED DETERMINISTIC NULLS (roborev finding 2): all twelve cells were non-null, so no validity bitmap ever had content and a misplaced validity bit had nothing to misplace. The fixture now carries `NullPlan::Pinned` (150 absent cells over 500 rows), so the hashed data genuinely differs. | `3173e9c` |
+/// | producer | `0xd0014e42e893f87f` | `0xe6eccf8a9ffbca11` | Same cause: the same fixture, now null-bearing, folded at the producer tap. | `3173e9c` |
 ///
 /// **The two taps currently fold byte-IDENTICAL input**, both before and after the
 /// nulls were added — for this shape the Flight IPC round trip preserves the
