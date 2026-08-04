@@ -707,7 +707,14 @@ branch under review.
 #### Scenario: A check that never ran cannot ride to PASS on its initial SKIP
 - **GIVEN** a run in which a verdict-carrying check returns before assigning its key, leaving the initial `SKIP`, and in which no other key fails
 - **WHEN** the verdict is computed
-- **THEN** the run FAILs, naming the key and its non-affirmative value, stating that a non-failing value which is not a measurement is the vacuous pass itself, and directing the reader at the wrapper rather than at the branch under review The block's name SHALL be distinct from the agent gate's summary block names so
+- **THEN** the run FAILs, naming the key and its non-affirmative value, stating that a non-failing value which is not a measurement is the vacuous pass itself, and directing the reader at the wrapper rather than at the branch under review
+
+#### Scenario: A value that merely BEGINS with a recognised token is unrecognised, not a pass
+- **GIVEN** a run in which one verdict-carrying key holds a NEAR-PREFIX value — `PASSthisNeverRan` (a token glued to more characters with no separator) or `PASS-MEASUREMENT-DID-NOT-HAPPEN` (a token followed by a hyphenated state name) — and in which no other key fails
+- **WHEN** the verdict scan and the affirmation backstop run
+- **THEN** the run FAILs in BOTH arms because the verdict TOKEN (the value up to its first space) is compared EXACTLY rather than as a `PASS*` glob, the offending value is NAMED, and it is still EMITTED in the block rather than normalised away — so the closure cannot be satisfied by a spelling that measured nothing
+
+The block's name SHALL be distinct from the agent gate's summary block names so
 neither can be pasted as the other. The wrapper SHALL exit non-zero on any outcome other than PASS, and
 SHALL be usable such that a caller retains ONLY this block and never the raw review transcript (which
 SHALL be written to the log path named in the block's `log:` field). An unexpected mid-run abort SHALL
@@ -715,14 +722,12 @@ still emit the block with `RESULT: FAIL` rather than terminate silently.
 
 **NO PATH SHALL REACH A SUMMARY VALUE UN-NEUTRALISED.** The block is LINE-ORIENTED and safety-critical:
 every reader retains only the block and greps it by `^<key>: ` / `^RESULT: ` to decide whether a merge
-proceeds. Diff-derived text reaches those values — `census-exclusion:` names each swallowed census path,
-and the accompanying detail lines name paths and the pattern responsible — and a census path is
-**ATTACKER-CONTROLLED**: it is whatever a pull request chose to track. Configured `exclude_patterns` are
-the same class of input (a TOML basic string `"a\nb"` decodes to a real newline, and a branch may carry
-its own `.roborev.toml`). Every value the block emits, **and every detail line printed alongside it**,
+proceeds. Diff-derived text reaches those values — `prompt-content:` names each code census path ABSENT
+from the prompt, and the accompanying detail lines name those paths — and a census path is
+**ATTACKER-CONTROLLED**: it is whatever a pull request chose to track. Every value the block emits, **and every detail line printed alongside it**,
 SHALL therefore be neutralised so that a value can never span lines nor introduce a `key:` at line start:
 control characters SHALL be rendered as visible escapes (or the path C-quoted). Quotes, backslashes and
-spaces MAY be left intact, since the block names swallowed paths by their real bytes and no non-control
+spaces MAY be left intact, since the block names paths by their real bytes and no non-control
 byte can start a line.
 
 The neutralisation SHALL be enforced at the **single emit boundary**, not per interpolation site — a
@@ -733,9 +738,9 @@ other route FAILs the fast loop. The rendering is NOT required to be reversible;
 implied.
 
 #### Scenario: A filename cannot forge a summary key or the verdict
-- **GIVEN** a census path whose FILENAME carries newlines followed by a `RESULT: PASS` line and a `prompt-content: PASS` line, excluded by a configured pattern so that it is named in the `census-exclusion:` value and in the detail lines
+- **GIVEN** a census path whose FILENAME carries newlines followed by a `RESULT: PASS` line and a `prompt-content: PASS` line, ABSENT from the prompt the reviewer received so that it is named in the `prompt-content:` value and in the detail lines
 - **WHEN** the block is emitted
-- **THEN** the output carries EXACTLY ONE `RESULT:` line (the wrapper's real `RESULT: FAIL`), no `RESULT: PASS` and no forged `prompt-content: PASS` anywhere, and the swallowed path is still NAMED — on one line, with its newlines shown as visible escapes — so neutralising never costs the operator the diagnosis
+- **THEN** the output carries EXACTLY ONE `RESULT:` line (the wrapper's real `RESULT: FAIL`), no `RESULT: PASS` and no forged `prompt-content: PASS` anywhere, and the missing path is still NAMED — on one line, with its newlines shown as visible escapes — so neutralising never costs the operator the diagnosis
 
 #### Scenario: The neutralisation boundary is pinned structurally
 - **GIVEN** the hermetic regression check
@@ -757,20 +762,15 @@ path (exit `0`) is likewise not a verdict and SHALL emit no block.
 
 #### Scenario: The block carries every per-check key in the contracted order
 - **WHEN** a review was enqueued and completed
-- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `census-exclusion:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:`
+- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:` — twenty-two keys in all, each exactly once
 
-#### Scenario: The new exclusion key is registered in the verdict scan, not decorative
-- **GIVEN** a run whose only failing key is `census-exclusion:`
-- **WHEN** the terminal verdict is computed by the single scan over the per-check keys
-- **THEN** the run is `RESULT: FAIL` with a non-zero exit — so a key added to the block but omitted from the failing-capable key set (a FAIL that changes nothing) is a defect this scenario forbids
-
-#### Scenario: An unreached exclusion check reads SKIP, never blank
+#### Scenario: An unreached check reads SKIP, never blank
 - **GIVEN** a run that fails at `push-assert:` before the census is classified
 - **WHEN** the block is emitted
-- **THEN** `census-exclusion:` carries an explicit `SKIP (<cause>)` rather than a blank value, so an unreached check can never read as a pass
+- **THEN** `code-free:` carries an explicit `SKIP (<cause>)` rather than a blank value, so an unreached check can never read as a pass — and, because the affirmation backstop admits only an exact `PASS`, that `SKIP` could not have ridden to a verdict either
 
 #### Scenario: One scan over the per-check keys computes the verdict
-- **GIVEN** a block in which exactly one per-check key carries a value beginning `FAIL`, `FINDINGS`, `ERROR` or `INCONSISTENT` while every other reads `PASS*`, `SKIP`, `UNAVAILABLE`, `NOTICE*` or `DEGRADED*`
+- **GIVEN** a block in which exactly one per-check key carries a value whose verdict token is `FAIL`, `FINDINGS`, `ERROR` or `INCONSISTENT` while every other reads `PASS`, `SKIP`, `UNAVAILABLE`, `NOTICE` or `DEGRADED`
 - **WHEN** the terminal verdict is computed
 - **THEN** the run is `RESULT: FAIL` and the failing key names the cause, and a `NOTICE`, `DEGRADED`, `UNAVAILABLE` or `SKIP` value never contributes a failure
 

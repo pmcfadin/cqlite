@@ -52,8 +52,8 @@ review_min_severity = ''
 #     be listed slash-less (it would hide real config/data outside `docs/`);
 #   * DO NOT ADD A TRAILING SLASH. The trailing `/` is trimmed BEFORE the anchoring
 #     test, so `docs/` resolves RECURSIVE (`**/docs` + `**/docs/**`) — the OPPOSITE of
-#     `docs/**`. The wrapper's `census-exclusion:` check FAILs on any trailing-slash
-#     pattern for exactly this reason.
+#     `docs/**`. Nothing catches that inversion before a review is paid for — see the
+#     note at the bottom of this block — so it is on YOU not to write one.
 #   * there is NO negation / re-include form, so an allow-list is not expressible.
 #
 # SCOPED TO ARTIFACT-BEARING DIRECTORIES, NOT TO EXTENSIONS ACROSS ALL OF `docs/`
@@ -97,20 +97,30 @@ review_min_severity = ''
 # directory is the better proxy for "generated".
 # A NEW artifact DIRECTORY (or a new artifact extension
 # inside one of the four) is silently re-admitted to review prompts, which costs tokens;
-# the deny-list can only ever leak in that harmless direction, because (a) the wrapper's
-# pre-enqueue `census-exclusion:` check FAILs closed on the swallow direction (a
-# configured pattern that would eat a code census path), and (b) no pattern reaches
+# the deny-list can only ever leak in that harmless direction because no pattern reaches
 # outside a directory whose whole purpose is committed run output, so functional config
 # under `docs/` can no longer be hidden. Extend the list when a new artifact class shows
 # up — and extend `CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS` in
-# scripts/flow/roborev-review-oracles.sh in the SAME edit. That mirror is asserted
-# structurally against THIS FILE by scripts/tests/test_roborev_review_guard.sh, so a
-# one-sided edit FAILs `--lite` rather than surfacing as a puzzling `census-exclusion:`
-# failure on someone else's report PR.
+# scripts/flow/roborev-review-oracles.sh in the SAME edit.
+#
+# THIS FILE HAS NO AUTOMATED GUARD. Read that literally before editing it.
+# A pre-enqueue `census-exclusion:` check that reconciled the code census against this
+# file was built on #3229 and REMOVED by owner ruling: its false-PASS count was
+# INCREASING across review rounds, and a guard with known documented false-PASSes is
+# worse than no guard, because it invites reliance it cannot support. Re-attempting it is
+# issue #3283. Consequences you own until it lands:
+#   * a re-broadening here (a blanket `docs/**`, a trailing slash, a slash-less artifact
+#     extension) is caught by NOTHING at edit time. It surfaces later, on someone else's
+#     PR, as `prompt-content: FAIL` naming files the reviewer never received. IF
+#     `prompt-content:` FAILS, SUSPECT THIS FILE FIRST.
+#   * the mirror with the census constants named above is hand-maintained; the structural
+#     set-equality assert that used to enforce it depended on the removed TOML parser.
+#   * roborev ALSO applies a compiled-in lockfile/cache deny-list nothing here can switch
+#     off or model (#3278).
 #
 # This file is MACHINE-MANAGED (`roborev config set` rewrites it, comments and all):
-# re-check this list after any `roborev config` write. `census-exclusion:` is the
-# standing detector — see scripts/flow/roborev-review-oracles.sh.
+# re-check this list after any `roborev config` write — by reading it, since no check
+# will tell you.
 exclude_patterns = ['*.md', 'docs/reports/*-artifacts/**/*.txt', 'docs/reports/*-artifacts/**/*.json', 'docs/reports/*-artifacts/**/*.jsonl', 'docs/reports/*-artifacts/**/*.log', 'docs/reports/*-artifacts/**/*.err', 'docs/reports/*-artifacts/**/*.csv', 'docs/reports/*-artifacts/**/*.png', 'docs/reports/*-artifacts/**/*.svg', 'docs/reports/*-artifacts/**/*.gz', 'docs/reports/*-artifacts/**/*.pdf', 'docs/reports/*-artifacts/**/*.jfr', 'docs/reports/*-artifacts/**/*.html', 'docs/reports/*-artifacts/**/*.mmd', 'docs/reports/*-artifacts/**/*.tex', 'docs/reports/*-artifacts/**/*.diff', 'docs/round-artifacts/**/*.txt', 'docs/round-artifacts/**/*.json', 'docs/round-artifacts/**/*.jsonl', 'docs/round-artifacts/**/*.log', 'docs/round-artifacts/**/*.err', 'docs/round-artifacts/**/*.csv', 'docs/round-artifacts/**/*.png', 'docs/round-artifacts/**/*.svg', 'docs/round-artifacts/**/*.gz', 'docs/round-artifacts/**/*.pdf', 'docs/round-artifacts/**/*.jfr', 'docs/round-artifacts/**/*.html', 'docs/round-artifacts/**/*.mmd', 'docs/round-artifacts/**/*.tex', 'docs/round-artifacts/**/*.diff', 'docs/**/jfr-reports/**/*.txt', 'docs/**/jfr-reports/**/*.json', 'docs/**/jfr-reports/**/*.jsonl', 'docs/**/jfr-reports/**/*.log', 'docs/**/jfr-reports/**/*.err', 'docs/**/jfr-reports/**/*.csv', 'docs/**/jfr-reports/**/*.png', 'docs/**/jfr-reports/**/*.svg', 'docs/**/jfr-reports/**/*.gz', 'docs/**/jfr-reports/**/*.pdf', 'docs/**/jfr-reports/**/*.jfr', 'docs/**/jfr-reports/**/*.html', 'docs/**/jfr-reports/**/*.mmd', 'docs/**/jfr-reports/**/*.tex', 'docs/**/jfr-reports/**/*.diff', 'docs/sstables-definitive-guide/diagrams/**/*.txt', 'docs/sstables-definitive-guide/diagrams/**/*.json', 'docs/sstables-definitive-guide/diagrams/**/*.jsonl', 'docs/sstables-definitive-guide/diagrams/**/*.log', 'docs/sstables-definitive-guide/diagrams/**/*.err', 'docs/sstables-definitive-guide/diagrams/**/*.csv', 'docs/sstables-definitive-guide/diagrams/**/*.png', 'docs/sstables-definitive-guide/diagrams/**/*.svg', 'docs/sstables-definitive-guide/diagrams/**/*.gz', 'docs/sstables-definitive-guide/diagrams/**/*.pdf', 'docs/sstables-definitive-guide/diagrams/**/*.jfr', 'docs/sstables-definitive-guide/diagrams/**/*.html', 'docs/sstables-definitive-guide/diagrams/**/*.mmd', 'docs/sstables-definitive-guide/diagrams/**/*.tex', 'docs/sstables-definitive-guide/diagrams/**/*.diff']
 # Repo-local directory for temporary oversized diff snapshots.
 snapshot_dir = ''

@@ -16,13 +16,20 @@ is updated.
 
 That has a sharp consequence for the original plan. An **executable committed under root `docs/`** —
 which the earlier `probe-census-exclusion.sh` was, deliberately, as a self-demonstrating specimen —
-is swallowed by the root checkout's `docs/**` for as long as the change is unmerged. The wrapper's
-`census-exclusion:` check therefore FAILs, **correctly**, and no amount of re-running changes it:
+is swallowed by the root checkout's `docs/**` for as long as the change is unmerged, so the wrapper FAILs
+**correctly** and no amount of re-running changes it. Measured at the time, under a since-removed
+pre-enqueue key that named the mechanism directly:
 
 ```
 census-exclusion: FAIL (1/7 code census paths excluded:
   docs/reports/3229-artifacts/probe-census-exclusion.sh by 'docs/**' [root-config])
 ```
+
+That key is **gone** (removed by owner ruling on #3229, deferred to **#3283** — its false-PASS count was
+rising, and a guard with known documented false-PASSes is worse than no guard). The identical condition now
+surfaces as `prompt-content: FAIL (1/7 code census paths absent from the prompt)`: the same fail-closed
+refusal, with a cause that names the symptom rather than the mechanism. **If `prompt-content:` FAILs,
+suspect `.roborev.toml` first.**
 
 A pre-merge demonstration of the narrowing was thus a **deadlock**, not a test: the specimen that
 proves the fix is the specimen the unfixed configuration eats. So the executable was removed from the
@@ -36,8 +43,9 @@ happened to precede every config edit it made and never followed one, which is w
 measured `exclude_patterns` as having "no observable effect". So after the merge: update the root
 checkout, **restart the daemon**, and only then run the probe.
 
-Both of these properties have now cost real rounds — (1) a `census-exclusion: PASS` that certified a
-config roborev never read, (2) a whole investigation's null result. They are not theoretical.
+Both of these properties have now cost real rounds — (1) a since-removed key's `PASS` that certified a
+config roborev never read, caught only by the older `prompt-content:` check, (2) a whole investigation's
+null result. They are not theoretical.
 
 This is the same shape as the `required`-check property already recorded in CLAUDE.md — *`required`
 evaluates the aggregator **and** the registry from the PR's **BASE** ref, so a registry/aggregator
@@ -56,7 +64,7 @@ carry an executable under `docs/` demonstrates the fix end to end for free — #
 now, #3096's successor will, #3249's artifacts may — and that is *strictly better* evidence than a
 probe written to pass: it proves the fix on a diff **nobody shaped for it**.
 
-- **AC2's record** = that PR's `census-exclusion:` + `prompt-content:` lines, pasted into #3229.
+- **AC2's record** = that PR's `census:` + `code-free:` + `prompt-content:` lines, pasted into #3229.
 - **This procedure** = the documented **fallback**, for when no such PR arrives promptly or the
   natural evidence is ambiguous.
 
@@ -92,7 +100,7 @@ bash scripts/flow/roborev-review.sh \
   --log "${TMPDIR:-/tmp}/probe-3229.log" | tee "${TMPDIR:-/tmp}/probe-3229-summary.txt"
 
 # 2. Extract exactly the lines AC2 asks to be recorded.
-grep -E '^(census|code-free|census-exclusion|prompt-content|reviewed-sha|job|tokens|RESULT): ' \
+grep -E '^(census|code-free|prompt-content|reviewed-sha|job|tokens|RESULT): ' \
   "${TMPDIR:-/tmp}/probe-3229-summary.txt"
 ```
 
@@ -105,23 +113,24 @@ sanctioned invocation is the thing under test.
 |---|---|
 | `census:` | the branch's `git diff --numstat --no-renames origin/main...HEAD` counts |
 | `code-free:` | `PASS` — a `docs/` path prefix never makes a program documentation |
-| `census-exclusion:` | `PASS (<n>/<n> code census paths survive the effective exclusion set; corroboration: OK)` |
-| `prompt-content:` | `PASS (<n>/<n> code census paths present)` |
+| `prompt-content:` | `PASS (<n>/<n> code census paths present)` — the whole demonstration |
 | `reviewed-sha:` | the RANGE `<base40>..<head40>`, head endpoint = branch HEAD |
 | `tokens:` | above the mechanism's floor — see below |
 
-`census-exclusion: PASS` **and** `prompt-content: PASS (<n>/<n>)` together are the demonstration: the
-first says the configuration would not swallow the `docs/` executables, the second says the reviewer
-actually received them. Either alone is insufficient.
+`code-free: PASS` **and** `prompt-content: PASS (<n>/<n>)` together are the demonstration: the first says
+the census classified the `docs/` executables as CODE, the second says the reviewer **actually received
+them**. The second is the load-bearing one, and it is now the ONLY evidence about the exclusion set: no key
+predicts what the configuration would do, so the demonstration is entirely a measurement of what the
+reviewer got (#3283).
 
 A `RESULT` of `FINDINGS`/`FAIL` because the reviewer found real issues is **not** a probe failure: the
 probe is about **scope** (did the reviewer receive the code?), not about the verdict.
 
 If the probe diff touches a lockfile or cache path (`Cargo.lock`, `go.sum`, `pnpm-lock.yaml`, …), expect
-`census-exclusion: PASS` (the guard does not model roborev's compiled-in deny-list) followed by
-`prompt-content: FAIL` naming that path. That is the **declared residual**, not a probe failure — see the
-residual section in `scripts/flow/roborev-review.sh --help` and issue #3278. Keep such paths out of the
-probe diff if you want an unambiguous demonstration.
+`prompt-content: FAIL` naming that path: roborev's compiled-in deny-list drops it and nothing here models
+that (#3278). That is the **declared residual**, not a probe failure — see the exclusion note near the top
+of `scripts/flow/roborev-review-oracles.sh`. Keep such paths out of the probe diff if you want an
+unambiguous demonstration.
 
 ## Reading the token line — the mechanism's thresholds, not a memorised band
 
