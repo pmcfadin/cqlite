@@ -1137,6 +1137,167 @@ print('        common.sh resolves %s from the schema' % got)
 PY
 
 # =============================================================================
+section "ROUND 6 — stale ok flags, NaN, the stale server, consumer-side stream validation"
+
+# Finding #1: validate_occupancy trusted the recorded `ok` and re-derived only the busy
+# fraction. Each case below carries ok=true beside a broken invariant — the shape an
+# artefact from an older capture has.
+occ_stale() { # $1 field  $2 value -> COMPLETE|INCOMPLETE
+  local td; td="$(mktemp -d)"
+  cp -r "$GOOD_REP"/. "$td"/
+  python3 - "$td/meta.json" "$1" "$2" <<'PY'
+import json, sys
+p, field, val = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(p))
+try:
+    v = json.loads(val)
+except ValueError:
+    v = val
+d['occupancy']['alignedA'][field] = v
+d['occupancy']['alignedA']['ok'] = True      # the STALE verdict
+json.dump(d, open(p, 'w'), indent=1)
+PY
+  if python3 "$HERE/run/rep-complete.py" "$td" > /dev/null 2>&1; then
+    echo COMPLETE; else echo INCOMPLETE; fi
+  rm -rf "$td"
+}
+check "ok=true beside rows_total=0: REFUSED (0-rows-when-present is a failure)" \
+      "INCOMPLETE" "$(occ_stale rows_total 0)"
+check "ok=true beside requests_error=7: REFUSED" \
+      "INCOMPLETE" "$(occ_stale requests_error 7)"
+check "ok=true beside requests_unavailable=3: REFUSED" \
+      "INCOMPLETE" "$(occ_stale requests_unavailable 3)"
+check "ok=true beside requests_ok=0: REFUSED" \
+      "INCOMPLETE" "$(occ_stale requests_ok 0)"
+check "ok=true beside duration_s=0: REFUSED" \
+      "INCOMPLETE" "$(occ_stale duration_s 0)"
+check "ok=true beside a NON-WHOLE rows_total: REFUSED (partial scan)" \
+      "INCOMPLETE" "$(occ_stale rows_total 12345)"
+# ...and the unmodified rep still passes, so none of the above is a blanket refusal.
+expect_rc "every committed rep still certifies after the re-derivation" 0 \
+  python3 - "$HERE/run/rep-complete.py" "$HERE/results" <<'PY'
+import glob, subprocess, sys
+bad = []
+for d in sorted(glob.glob(sys.argv[2] + '/*/rep*')):
+    r = subprocess.run([sys.executable, sys.argv[1], d], capture_output=True, text=True)
+    if r.returncode != 0:
+        bad.append((d, r.stdout.strip()))
+for d, out in bad:
+    print('        %s\n%s' % (d, out))
+if bad:
+    sys.exit('FAIL: the re-derived invariants REJECT %d of this PR\'s own committed '
+             'reps — a false FAIL, which is round 1 finding #1\'s failure mode' % len(bad))
+print('        all 6 committed reps certify')
+PY
+
+# Finding #4: `nan < 99.0` is False, so a NaN enabled% used to pass the multiplexing
+# floor. The purest form of the permissive-branch trap.
+mk_core_csv() { # $1 out  $2 value-for-cycles  $3 enabled-for-cycles
+  { printf '# started\n\n'
+    printf '%s,,cycles,3211333656,%s,,\n' "$2" "$3"
+    for e in instructions task-clock LLC-loads LLC-load-misses cache-references cache-misses; do
+      printf '12345,,%s,3211333656,100.00,,\n' "$e"
+    done; } > "$1"
+}
+csv_verdict() { # $1 csv -> CLEAN|PROBLEMS
+  python3 - "$1" "$HERE/harness" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[2])
+import ws0schema
+print('PROBLEMS' if ws0schema.validate_counter_file(sys.argv[1], 'alignedA') else 'CLEAN')
+PY
+}
+mk_core_csv "$TMP/c-good.csv" 1808801914 100.00
+check "well-formed core CSV: CLEAN" "CLEAN" "$(csv_verdict "$TMP/c-good.csv")"
+mk_core_csv "$TMP/c-nanmux.csv" 1808801914 nan
+check "enabled%=nan: REFUSED (nan < 99.0 is False, so it used to pass the floor)" \
+      "PROBLEMS" "$(csv_verdict "$TMP/c-nanmux.csv")"
+mk_core_csv "$TMP/c-bigmux.csv" 1808801914 10000.00
+check "enabled%=10000: REFUSED (impossible, and >= the floor)" \
+      "PROBLEMS" "$(csv_verdict "$TMP/c-bigmux.csv")"
+mk_core_csv "$TMP/c-nanval.csv" nan 100.00
+check "counter value=nan: REFUSED (would divide into per-row figures)" \
+      "PROBLEMS" "$(csv_verdict "$TMP/c-nanval.csv")"
+mk_core_csv "$TMP/c-inf.csv" inf 100.00
+check "counter value=inf: REFUSED" "PROBLEMS" "$(csv_verdict "$TMP/c-inf.csv")"
+mk_core_csv "$TMP/c-neg.csv" -5 100.00
+check "counter value=-5: REFUSED (a monotonic event counter cannot be negative)" \
+      "PROBLEMS" "$(csv_verdict "$TMP/c-neg.csv")"
+
+# Finding #3: the ANALYSER must validate the stream record, not trust its producer.
+# cache-hostile now refuses --iters 0 at the boundary, but an older binary's artefact
+# or an edited one still reaches this consumer.
+mk_stream() { # $1 out  $2 sed-expr
+  sed "$2" "$HERE/ac5-run/stream.txt" > "$1"
+}
+mk_stream "$TMP/s-iters0.txt" 's/^iters=10$/iters=0/'
+expect_rc "stream record with iters=0: REFUSED by the ANALYSER (producer-side is not enough)" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/s-iters0.txt"
+mk_stream "$TMP/s-elem0.txt" 's/^elements=536870912$/elements=0/'
+expect_rc "stream record with elements=0: REFUSED" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/s-elem0.txt"
+mk_stream "$TMP/s-nan.txt" 's/^best_iter_s=.*$/best_iter_s=nan/'
+expect_rc "stream record with best_iter_s=nan: REFUSED (nan > 0 is False)" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/s-nan.txt"
+mk_stream "$TMP/s-overrun.txt" 's/^init_overrun=0$/init_overrun=1/'
+expect_rc "stream record with init_overrun=1: REFUSED" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/s-overrun.txt"
+mk_stream "$TMP/s-mode.txt" 's/^mode=stream$/mode=chase/'
+expect_rc "a CHASE record handed to the triad analyser: REFUSED" 1 \
+  python3 "$HERE/run/ac5-analyse.py" "$HERE/ac5-run/perf-uncore-triad.csv" "$TMP/s-mode.txt"
+
+# Finding #2: a stale server on the port would answer the readiness probe while our
+# own child dies on EADDRINUSE — counters over one cpuset, work on another. Committed
+# source text, EXECUTED: the guard is driven with a real listener on a real port.
+expect_rc "ws0_start_server refuses to start when the port is already occupied" 0 \
+  python3 - "$HERE/harness/common.sh" <<'PY'
+import re, socket, subprocess, sys
+src = open(sys.argv[1]).read()
+fn = src[src.index('ws0_start_server() {'):]
+fn = fn[:fn.index('\n}\n') + 3]
+if 'ALREADY listening' not in fn:
+    sys.exit('FAIL: no pre-start port check; a stale server would answer the '
+             'readiness probe while our child dies on EADDRINUSE')
+
+# Bind a real listener, then run ONLY the pre-start guard against it.
+srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(1)
+port = srv.getsockname()[1]
+guard = fn[fn.index('if (echo >"/dev/tcp'):]
+guard = guard[:guard.index('fi\n') + 3]
+script = ('WS0_LISTEN_HOST=127.0.0.1\nWS0_LISTEN_PORT=%d\n'
+          'ws0_die() { echo "DIED: $1" >&2; exit 9; }\n' % port) + guard + 'echo REACHED\n'
+r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+srv.close()
+if r.returncode != 9 or 'DIED' not in r.stderr:
+    sys.exit('FAIL: the guard did not refuse an occupied port (rc=%d, out=%r)'
+             % (r.returncode, r.stdout))
+print('        occupied port -> refused (rc=9)')
+
+# ...and a FREE port must pass the guard, else it would block every real run.
+s2 = socket.socket(); s2.bind(('127.0.0.1', 0)); free = s2.getsockname()[1]; s2.close()
+script = script.replace('WS0_LISTEN_PORT=%d' % port, 'WS0_LISTEN_PORT=%d' % free)
+r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+if r.returncode != 0 or 'REACHED' not in r.stdout:
+    sys.exit('FAIL: the guard blocks a FREE port (rc=%d) — it would refuse every run'
+             % r.returncode)
+print('        free port -> proceeds')
+PY
+# The second half of that fix: readiness must also confirm OUR pid is alive.
+expect_rc "...and readiness re-verifies our own pid is alive" 0 \
+  python3 - "$HERE/harness/common.sh" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+fn = src[src.index('ws0_start_server() {'):]
+fn = fn[:fn.index('\n}\n') + 3]
+probe = fn[fn.index('if (echo >"/dev/tcp', fn.index('for i in')):]
+if 'kill -0 "$WS0_SERVER_PID"' not in probe.split('ws0_log "server ready')[0]:
+    sys.exit('FAIL: readiness returns success without confirming our pid is alive, '
+             'so a race in which our child died and another process holds the port '
+             'reads as success')
+print('        readiness confirms kill -0 on our pid before returning')
+PY
+
+# =============================================================================
 printf '\n==== SELFTEST RESULT: %s ====\n' \
   "$( [ "$FAIL" -eq 0 ] && echo PASS || echo FAIL )"
 printf 'cases passed: %d   failed: %d\n' "$PASS" "$FAIL"

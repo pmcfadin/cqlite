@@ -1,7 +1,7 @@
 # #3224 guard selftest — recorded output
 # host: ip-172-31-3-252 / 6.17.0-1019-aws
-# date: 2026-08-04T07:50:01Z
-# commit: 62bb0db429e199064de0824ee43eb5f4d5d49815
+# date: 2026-08-04T07:58:28Z
+# commit: 75066ce499bc6fda46de2179dbc89f08c695d5f9
 # command: bash docs/reports/ws0-3224-artifacts/selftest-guards.sh
 
 ==== #3224 GUARD SELFTEST ====
@@ -122,8 +122,30 @@ dropped 2 S0 imc_11 rows
    PASS  capture-stalls.sh occupancy gates on the busy fraction, floor from the schema (rc=0)
    PASS  the busy-fraction floor has a single home (common.sh reads the schema) (rc=0)
 
+== ROUND 6 — stale ok flags, NaN, the stale server, consumer-side stream validation
+   PASS  ok=true beside rows_total=0: REFUSED (0-rows-when-present is a failure) -> INCOMPLETE
+   PASS  ok=true beside requests_error=7: REFUSED -> INCOMPLETE
+   PASS  ok=true beside requests_unavailable=3: REFUSED -> INCOMPLETE
+   PASS  ok=true beside requests_ok=0: REFUSED -> INCOMPLETE
+   PASS  ok=true beside duration_s=0: REFUSED -> INCOMPLETE
+   PASS  ok=true beside a NON-WHOLE rows_total: REFUSED (partial scan) -> INCOMPLETE
+   PASS  every committed rep still certifies after the re-derivation (rc=0)
+   PASS  well-formed core CSV: CLEAN -> CLEAN
+   PASS  enabled%=nan: REFUSED (nan < 99.0 is False, so it used to pass the floor) -> PROBLEMS
+   PASS  enabled%=10000: REFUSED (impossible, and >= the floor) -> PROBLEMS
+   PASS  counter value=nan: REFUSED (would divide into per-row figures) -> PROBLEMS
+   PASS  counter value=inf: REFUSED -> PROBLEMS
+   PASS  counter value=-5: REFUSED (a monotonic event counter cannot be negative) -> PROBLEMS
+   PASS  stream record with iters=0: REFUSED by the ANALYSER (producer-side is not enough) (rc=1)
+   PASS  stream record with elements=0: REFUSED (rc=1)
+   PASS  stream record with best_iter_s=nan: REFUSED (nan > 0 is False) (rc=1)
+   PASS  stream record with init_overrun=1: REFUSED (rc=1)
+   PASS  a CHASE record handed to the triad analyser: REFUSED (rc=1)
+   PASS  ws0_start_server refuses to start when the port is already occupied (rc=0)
+   PASS  ...and readiness re-verifies our own pid is alive (rc=0)
+
 ==== SELFTEST RESULT: PASS ====
-cases passed: 97   failed: 0
+cases passed: 117   failed: 0
 Every guard rejected the bad input it exists to catch, and accepted the
 good input committed in this PR. The healthy-host record is pinned, so
 re-inverting the finding-1 ordering fails here rather than on a good box.

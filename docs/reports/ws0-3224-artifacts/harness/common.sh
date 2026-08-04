@@ -357,6 +357,24 @@ ws0_require_inputs() {
 ws0_start_server() {
   local cpus="$1" merge_path="$2" logfile="$3"
   mkdir -p "$(dirname "$logfile")"
+
+  # THE PORT MUST BE FREE BEFORE WE START (roborev round 6 finding #2). The readiness
+  # probe below only asks "is anything listening on this port", which a server left
+  # behind by a previous interrupted run answers instantly — while the child we just
+  # spawned dies on EADDRINUSE. The loop would then see a live listener, return
+  # success, and the whole capture would run against the STALE server: bound to some
+  # other core set, holding some other page cache, with perf counting the CPUs we
+  # asked for and the work happening elsewhere. Counters over one cpuset and a
+  # workload on another is a silent, plausible, entirely wrong measurement, which is
+  # this harness's signature failure mode.
+  #
+  # Two guards, because the probe cannot distinguish the two servers by itself:
+  # refuse to start when the port is already occupied, and re-verify OUR pid is still
+  # alive after readiness is observed.
+  if (echo >"/dev/tcp/${WS0_LISTEN_HOST}/${WS0_LISTEN_PORT}") 2>/dev/null; then
+    ws0_die "something is ALREADY listening on ${WS0_LISTEN_HOST}:${WS0_LISTEN_PORT} before we started. That is almost certainly a cqlite-flight left by an interrupted run; the readiness probe cannot tell it from ours, so the capture would measure a server bound to a different core set. Find and stop it (ss -ltnp 'sport = :${WS0_LISTEN_PORT}') and re-run. Refusing to start."
+  fi
+
   ws0_log "starting cqlite-flight on cpus=$cpus merge_path=$merge_path numa-node=$WS0_NUMA_NODE"
   # NUMA binding (RUNBOOK step 3 rule 2) — NEW vs #3217, whose host had one node.
   # --cpunodebind confines scheduling to node N and --membind confines page-cache
@@ -382,6 +400,11 @@ ws0_start_server() {
       ws0_die "cqlite-flight (pid $WS0_SERVER_PID) died during startup; see $logfile"
     fi
     if (echo >"/dev/tcp/${WS0_LISTEN_HOST}/${WS0_LISTEN_PORT}") 2>/dev/null; then
+      # Readiness observed. Confirm the listener is OURS: a race in which our child
+      # died and something else holds the port would otherwise read as success.
+      if ! kill -0 "$WS0_SERVER_PID" 2>/dev/null; then
+        ws0_die "a listener appeared on ${WS0_LISTEN_HOST}:${WS0_LISTEN_PORT} but our server (pid $WS0_SERVER_PID) is NOT alive — the port is held by another process and the capture would measure it instead of ours; see $logfile"
+      fi
       ws0_log "server ready pid=$WS0_SERVER_PID after ${i}s"
       return 0
     fi

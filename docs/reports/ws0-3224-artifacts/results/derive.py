@@ -190,7 +190,8 @@ def do_stalls(repdir):
     rows = meta['occupancy']['alignedC']['rows_total']
     problems = ws0schema.validate_occupancy(
         meta.get('occupancy'), ws0schema.OCCUPANCY_ARMS_STALLS,
-        'stalls rep %s' % repdir)
+        'stalls rep %s' % repdir,
+        corpus_rows=meta.get('corpus_rows'))
     if not meta.get('warm_verified_zero_disk_reads'):
         problems.append('warmth: read_bytes delta=%s' % meta.get('warm_read_bytes_delta'))
     if not meta.get('client_saturation_gate_pass'):
@@ -262,7 +263,8 @@ def do_rep(repdir):
     # Occupancy roster + values from the schema, so this cannot disagree with
     # rep-complete.py (round 5 finding #4: both iterated only the keys present).
     problems += ws0schema.validate_occupancy(
-        occ, ws0schema.OCCUPANCY_ARMS_PRIMARY, 'rep %s' % repdir)
+        occ, ws0schema.OCCUPANCY_ARMS_PRIMARY, 'rep %s' % repdir,
+        corpus_rows=rows_corpus)
     if not meta.get('warm_verified_zero_disk_reads'):
         problems.append('warmth: read_bytes delta=%s'
                         % meta.get('warm_read_bytes_delta'))

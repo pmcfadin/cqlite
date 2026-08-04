@@ -237,3 +237,43 @@ source and run it, never assert on it* — was necessary but not sufficient; thi
 **assert on the thing the finding actually asks for.** A guard's exit code and a guard's
 diagnosis are different deliverables, and where the remedy depends on which failure
 occurred, the diagnosis is the one that matters.
+
+## Round 6 — four findings
+
+| # | mutation applied | cases that flipped | result |
+|---|---|--:|---|
+| 1 | `validate_occupancy` trusts the recorded `ok` again | 7 | **caught** — `ok=true` beside zero rows, errors, unavailable requests, zero successes, zero duration and a partial scan all certified |
+| 2 | drop the finite/non-negative/0–100 checks on counter rows | 5 | **caught** — `nan`/`inf`/negative values and `nan`/`10000` percentages all passed |
+| 3 | drop the analyser-side stream-record validation | 3 of 5 | **caught** (the other 2 fail downstream — defence in depth again) |
+| 4 | remove the pre-start occupied-port refusal | 1 | **caught** |
+| 5 | remove the readiness pid re-check | 1 | **caught** |
+
+**Finding #2 is the permissive-branch trap in its purest form,** and worth quoting because
+CLAUDE.md names the shape and this is the cleanest instance of it in the repo:
+`float('nan') < 99.0` is **False**. The multiplexing floor was written as *"is it below
+the threshold"*, and NaN is not below anything, so a NaN enabled percentage passed the
+check designed to catch exactly untrustworthy percentages. The fix keys the branch on the
+affirmative property — finite **and** within 0–100 — rather than on the absence of the bad
+one.
+
+**Finding #1 is "re-check rather than trust" applied to the function that was added to
+re-check.** `validate_occupancy` (round 5) consulted `v.get('ok')` and independently
+re-derived only the busy fraction — so an artefact carrying `ok=true` beside zero rows was
+accepted by the very validator whose purpose was not to take the capture's word for it. The
+recorded flag is now compared *against* the re-derived answer, and a disagreement is
+reported as a stale verdict in its own right.
+
+### And a fourth test defect, caught before commit rather than by mutation
+
+The first version of the re-derivation demanded `target_concurrency > 0`. That field is
+**not** in the occupancy block — it lives in `steps` — so every one of this PR's six
+committed reps immediately read `target_concurrency=None (must be > 0)`. **A false FAIL on
+correct input: round 1 finding #1's failure mode wearing a completeness fix's clothes.**
+
+Caught by running the selftest against the committed artefacts before committing, which is
+why the "every committed rep still certifies" case exists at all — it is the counterweight
+to every tightening, and the fifth round in a row where it earned its place. The rule this
+adds: **a re-derivation may only demand fields the capture actually records**, and the
+recorded set belongs in a comment next to the check so the next tightening does not guess.
+Concurrency is not lost, incidentally — a computable `busy_fraction_estimate` already
+establishes that concurrency and duration were both non-zero at write time.

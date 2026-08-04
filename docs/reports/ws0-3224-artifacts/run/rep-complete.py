@@ -70,7 +70,8 @@ def check(repdir):
     # to iterate only the keys PRESENT, so a block omitting `uncore` was certified.
     bad += ws0schema.validate_occupancy(d.get('occupancy'),
                                         ws0schema.OCCUPANCY_ARMS_PRIMARY,
-                                        'meta.json')
+                                        'meta.json',
+                                        corpus_rows=d.get('corpus_rows'))
 
     # The half the old predicate was missing, now asked of the schema.
     bad += ws0schema.validate_rc_block(d.get('rc'),

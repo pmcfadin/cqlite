@@ -38,6 +38,7 @@ rather than testing for the absence of a bad thing, and no check returns valid f
 an empty subject: a validation with no subject has no verdict to give.
 """
 
+import math
 import os
 
 # enabled% floor. Below this a count is a scaled estimate, not a count. Mirrors
@@ -187,10 +188,29 @@ def read_counter_rows(path, layout):
             if val in ('<not supported>', '<not counted>'):
                 problems.append('%s reads %s' % (name, val))
                 continue
+            # NUMERIC HYGIENE BEFORE ANY COMPARISON (round 6 finding #4). float()
+            # parsing was the whole test, and float() happily accepts 'nan', 'inf'
+            # and '-1'. The consequence is the permissive-branch trap CLAUDE.md
+            # names, in its purest form: `float('nan') < 99.0` is **False**, so a
+            # NaN enabled percentage sailed through the multiplexing floor — the
+            # check was written as "not below the floor" and NaN is not below
+            # anything. Same for a NaN or negative COUNT, which would then divide
+            # into per-row figures.
+            #
+            # So each value must be AFFIRMATIVELY in range: finite, non-negative,
+            # and for a percentage within 0..100.
             try:
                 v = float(val)
             except ValueError:
                 problems.append('%s has an unreadable value (%r)' % (name, val))
+                continue
+            if not math.isfinite(v):
+                problems.append('%s is non-finite (%r) — a counter cannot count '
+                                'nan or inf' % (name, val))
+                continue
+            if v < 0:
+                problems.append('%s is negative (%r) — a monotonic event counter '
+                                'cannot be' % (name, val))
                 continue
             try:
                 e = float(enabled)
@@ -201,6 +221,13 @@ def read_counter_rows(path, layout):
                 problems.append('%s has an unreadable enabled%% (%r) — an '
                                 'unverifiable count is not a usable one'
                                 % (name, enabled))
+                continue
+            if not math.isfinite(e) or not (0.0 <= e <= 100.0):
+                problems.append(
+                    '%s has an impossible enabled%% (%r). Note this is checked '
+                    'AFFIRMATIVELY rather than as `e < MUX_MIN`: nan < 99.0 is '
+                    'False, so a NaN percentage would otherwise pass the '
+                    'multiplexing floor.' % (name, enabled))
                 continue
             if e < MUX_MIN:
                 problems.append('%s only %.2f%% enabled (floor %.0f%%): a '
@@ -259,8 +286,9 @@ def validate_counter_file(path, arm):
     return problems
 
 
-def validate_occupancy(occ, roster, which):
-    """The occupancy block: present, complete against `roster`, every arm ok.
+def validate_occupancy(occ, roster, which, corpus_rows=None):
+    """The occupancy block: present, complete against `roster`, every invariant
+    RE-DERIVED from the recorded fields.
 
     Completeness BEFORE values, for the same reason as validate_rc_block: both
     consumers used to iterate `occ.items()`, so a block that simply omitted an arm
@@ -268,11 +296,20 @@ def validate_occupancy(occ, roster, which):
     likely to be missing, `uncore`, is the one the DRAM-bandwidth and NUMA-confinement
     figures rest on.
 
-    The busy fraction is checked HERE as well as in the capture, deliberately. The
-    capture computes `ok` at write time; this re-derives the judgement at read time
-    from the recorded estimate, so an artefact written by an older capture — one whose
-    `ok` predates the floor — cannot be certified by its own stale verdict. That is the
-    same "re-check rather than trust" contract derive.py states for every other gate.
+    NOTHING HERE TRUSTS THE RECORDED `ok` FLAG (round 6 finding #1). The first version
+    checked `v.get('ok')` and independently re-derived only the busy fraction — so an
+    artefact carrying `ok=true` beside zero rows, a non-whole scan count, errors,
+    unavailable requests or no successful requests was accepted, and its invalid
+    denominators reached the per-row figures. That is precisely the defect this
+    function was added to close, one field over: `ok` is a VERDICT WRITTEN BY THE
+    CAPTURE, and derive.py's stated contract is to re-check rather than trust,
+    because an artefact written by an older capture carries an older capture's
+    standards. `ok` is now compared against the re-derived answer and a DISAGREEMENT
+    is itself reported, which turns a stale flag into a visible finding rather than a
+    silent acceptance.
+
+    `corpus_rows` enables the exact-multiple check; when it is None that one invariant
+    is skipped and SAID to be skipped, rather than passing silently.
     """
     problems = []
     if not isinstance(occ, dict) or not occ:
@@ -286,23 +323,81 @@ def validate_occupancy(occ, roster, which):
             % (which, _fmt(missing)))
     for arm in sorted(occ):
         v = occ[arm]
+        where = '%s: occupancy[%s]' % (which, arm)
         if not v:
-            problems.append('%s: occupancy[%s] has no step record' % (which, arm))
+            problems.append('%s has no step record' % where)
             continue
-        if not v.get('ok'):
-            problems.append(
-                '%s: occupancy[%s] ok=%s rows=%s err=%s unavailable=%s'
-                % (which, arm, v.get('ok'), v.get('rows_total'),
-                   v.get('requests_error'), v.get('requests_unavailable')))
-        bf = v.get('busy_fraction_estimate')
+        derived = []
+
+        def num(field):
+            x = v.get(field)
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                return None
+            return x if math.isfinite(x) else None
+
+        rows = num('rows_total')
+        ok_reqs = num('requests_ok')
+        err = num('requests_error')
+        unav = num('requests_unavailable')
+        dur = num('duration_s')
+        bf = num('busy_fraction_estimate')
+
+        if rows is None or rows <= 0:
+            derived.append('rows_total=%r (must be > 0; 0-rows-when-present is a '
+                           'failure, not an empty pass)' % v.get('rows_total'))
+        elif corpus_rows:
+            if rows % corpus_rows != 0:
+                derived.append('rows_total=%d is not a whole multiple of the corpus '
+                               '%d — a partial scan, so the row denominator does not '
+                               'correspond to complete work'
+                               % (rows, corpus_rows))
+        if ok_reqs is None or ok_reqs <= 0:
+            derived.append('requests_ok=%r (must be > 0)' % v.get('requests_ok'))
+        if err is None or err != 0:
+            derived.append('requests_error=%r (must be 0)' % v.get('requests_error'))
+        if unav is None or unav != 0:
+            derived.append('requests_unavailable=%r (must be 0)'
+                           % v.get('requests_unavailable'))
+        if dur is None or dur <= 0:
+            derived.append('duration_s=%r (must be > 0)' % v.get('duration_s'))
+        # NOTE ON WHAT IS *NOT* RE-DERIVED HERE, because the first version of this
+        # function got it wrong and the selftest caught it against this PR's own
+        # artefacts: `target_concurrency` is NOT an occupancy field. It lives in the
+        # `steps` block, and requiring it here made every committed rep read
+        # "target_concurrency=None (must be > 0)" — a false FAIL on correct input,
+        # which is round 1 finding #1's failure mode wearing a completeness fix's
+        # clothes. A re-derivation may only demand fields the capture actually
+        # records, and the recorded set is: rows_total, rows_positive, requests_ok,
+        # requests_error, requests_unavailable, duration_s, rows_per_s_step,
+        # whole_scans, rows_total_is_exact_multiple_of_corpus,
+        # busy_fraction_estimate (+ error_codes and p50_latency_s on the primary arm).
+        #
+        # Concurrency is not lost: busy_fraction_estimate is ok*p50/n/d, so a
+        # computable busy fraction already establishes that n and d were both
+        # non-zero at write time, and that value IS re-checked above.
         if bf is None:
-            problems.append(
-                '%s: occupancy[%s] busy fraction not computable — an unverifiable '
-                'occupancy is not an established one' % (which, arm))
+            derived.append('busy_fraction_estimate=%r not computable — an '
+                           'unverifiable occupancy is not an established one'
+                           % v.get('busy_fraction_estimate'))
         elif bf < BUSY_FRACTION_FLOOR:
-            problems.append(
-                '%s: occupancy[%s] busy fraction %.4f below the floor %.2f — the '
-                'workers were idle for part of the step, so whole-step throughput '
-                'does not represent the interior perf window'
-                % (which, arm, bf, BUSY_FRACTION_FLOOR))
+            derived.append(
+                'busy fraction %.4f below the floor %.2f — the workers were idle for '
+                'part of the step, so whole-step throughput does not represent the '
+                'interior perf window' % (bf, BUSY_FRACTION_FLOOR))
+
+        if derived:
+            problems.append('%s FAILS re-derived invariants: %s'
+                            % (where, '; '.join(derived)))
+        # A recorded ok=true beside a re-derived failure is a STALE VERDICT, and the
+        # disagreement is worth naming separately: it means the artefact was written
+        # by a capture whose standards differ from these, which is information about
+        # the artefact rather than only about this arm.
+        if v.get('ok') and derived:
+            problems.append('%s records ok=true while failing the checks above — a '
+                            'STALE VERDICT from an older capture; the recorded flag '
+                            'is not evidence and is not trusted here' % where)
+        if not v.get('ok') and not derived:
+            problems.append('%s records ok=false yet passes every re-derived '
+                            'invariant; refusing rather than overriding the '
+                            'capture\'s own verdict' % where)
     return problems

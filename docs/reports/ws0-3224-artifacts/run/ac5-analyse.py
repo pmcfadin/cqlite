@@ -130,6 +130,58 @@ for line in open(stxt):
         k, _, v = line.strip().partition('=')
         st[k] = v
 
+# THE STREAM RECORD IS VALIDATED HERE, INDEPENDENTLY OF ITS PRODUCER (round 6
+# finding #3). cache-hostile now refuses --iters <= 0 at the boundary, and this
+# analyser was left trusting that — so a stream.txt from an OLDER binary, or a
+# hand-edited or truncated one, carrying iters=0 would still be certified: with
+# iters=0 the `expected` total collapses to the init pass alone, the IMC counters
+# (which did capture the init traffic) divide by it, and the ratio can land inside
+# the 0.6-1.6 band. RESOLVED, from a run that measured no bandwidth iteration.
+#
+# Producer-side validation is not consumer-side validation. The artefact is the
+# interface, and this is the only place that sees BOTH the counters and the record
+# they are divided by — so it must establish for itself that the record describes a
+# real measurement. Same reasoning as derive.py re-checking every gate rather than
+# trusting meta.json's `ok`.
+_sproblems = []
+if st.get('mode') != 'stream':
+    _sproblems.append('mode=%r (expected "stream") — this is not a triad record'
+                      % st.get('mode'))
+if st.get('init_overrun') not in ('0', None):
+    _sproblems.append('init_overrun=%r: initialisation overran the measurement '
+                      'window, so the counted interval includes it'
+                      % st.get('init_overrun'))
+for _k, _positive in (('elements', True), ('iters', True), ('best_iter_s', True),
+                      ('init_s', False)):
+    _raw = st.get(_k)
+    if _raw is None:
+        _sproblems.append('%s absent from the stream record' % _k)
+        continue
+    try:
+        _v = float(_raw)
+    except ValueError:
+        _sproblems.append('%s=%r is not a number' % (_k, _raw))
+        continue
+    # Affirmatively in range, not merely "not obviously bad": float() accepts
+    # 'nan' and 'inf', and `nan > 0` is False, so a NaN would fail a positivity
+    # test by accident and pass a "not negative" one. Checked explicitly.
+    import math as _math
+    if not _math.isfinite(_v):
+        _sproblems.append('%s=%r is non-finite' % (_k, _raw))
+    elif _positive and _v <= 0:
+        _sproblems.append('%s=%r must be > 0 (with zero iterations the timed loop '
+                          'never ran, and `expected` would collapse to the init '
+                          'pass the counters did capture)' % (_k, _raw))
+    elif not _positive and _v < 0:
+        _sproblems.append('%s=%r must be >= 0' % (_k, _raw))
+if _sproblems:
+    sys.exit('==== AC5 BYTE ACCOUNTING: UNRESOLVED (invalid stream record) ====\n'
+             'The triad record at %s does not describe a completed measurement, so '
+             'no byte accounting can be derived from it:\n  - %s\n'
+             'Re-run run/ac5-peak.sh. Note cache-hostile refuses these at the '
+             'boundary now, so such a record comes from an older binary or has been '
+             'edited.' % (stxt, '\n  - '.join(_sproblems)))
+
 tot_mib = sum(sum(d.values()) for d in per.values())
 # The verdict this script exists to produce. It stays None until the byte
 # accounting AFFIRMATIVELY resolves the channels-vs-duplicates question, so every
