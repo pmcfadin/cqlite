@@ -669,6 +669,10 @@ INVOKED=""
 # A throwaway HOME for every wrapper run (see run_wrapper).
 FIXTURE_HOME="$tmp/home"
 mkdir -p "$FIXTURE_HOME"
+# An OPTIONAL extra PATH element prepended AHEAD of the stub dir for a single case, so a case can
+# FAULT-INJECT one git subcommand (#3229 round-14: `git ls-tree` failing is the only way to reach
+# the UNMEASURABLE state end-to-end). Empty for every other case, and every user restores it.
+WRAPPER_PATH_PREFIX=""
 
 run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   local work="$1"; shift
@@ -692,7 +696,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # HOME is redirected to a throwaway directory: nothing in the wrapper reads a roborev
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
-  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+  STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -1209,8 +1213,14 @@ mode_matrix_repo() { # mode_matrix_repo <dir> -> prints the BASE sha
   git_q "$w" commit -q -m head
   printf '%s' "$base"
 }
-# The probe prints one `<path><TAB>CODE|NON-CODE` line per subject. It sources the REAL oracles
-# file, so a future change to the function is measured, not a copy of it.
+# The probe prints one `<path><TAB>CODE|NON-CODE|UNMEASURABLE` line per subject. It sources the
+# REAL oracles file, so a future change to the function is measured, not a copy of it.
+#
+# THREE OUTCOME WORDS, NOT TWO (#3229 round-14 blocker). An `if roborev_path_exec_state` probe
+# would be a BOOLEAN probe over a tri-valued function: `if` collapses 1 and 2 into "false", so
+# UNMEASURABLE would print `NON-CODE` and the probe would report the very defect under test as
+# the expected answer. It therefore reads the exit STATUS and prints a distinct word per state —
+# the probe itself must be able to express "could not measure", or it cannot measure it.
 cx3h_probe="$tmp/cx3h-probe.sh"
 cat >"$cx3h_probe" <<'CX3H'
 set -uo pipefail
@@ -1220,7 +1230,13 @@ REPO="$2"
 BASE_SHA="$3"
 for p in both-exec both-plain head-only-exec head-only-plain base-only-exec \
          base-exec-head-plain head-exec-base-plain 'glob[x]*?-exec' absent-everywhere; do
-  if roborev_path_is_executable "$p"; then printf '%s\tCODE\n' "$p"; else printf '%s\tNON-CODE\n' "$p"; fi
+  st=0
+  roborev_path_exec_state "$p" || st=$?
+  case "$st" in
+    0) printf '%s\tCODE\n' "$p" ;;
+    1) printf '%s\tNON-CODE\n' "$p" ;;
+    *) printf '%s\tUNMEASURABLE\t%s\n' "$p" "${ROBOREV_EXEC_UNMEASURABLE_REFS[*]:-<none>}" ;;
+  esac
 done
 CX3H
 # `<path> <expected>`; the comment on each line is the endpoint combination it stands for.
@@ -1233,7 +1249,11 @@ CX3H_MATRIX=(
   'base-exec-head-plain CODE'      # chmod -x  — THE ROUND-13 BLOCKER
   'head-exec-base-plain CODE'      # chmod +x  — the mirror
   'glob[x]*?-exec CODE'            # a name full of glob metacharacters, exec at both
-  'absent-everywhere NON-CODE'     # present at NEITHER endpoint (unmeasurable)
+  # Present at NEITHER endpoint. `ls-tree` SUCCEEDED at both and reported no record, so this is a
+  # real MEASUREMENT of absence and NOT-EXEC is the right answer — the distinction the tri-valued
+  # leaf exists to keep (#3229 round-14). Pinned here so the fix cannot be "fail closed on
+  # everything", which would break the added/deleted cases above.
+  'absent-everywhere NON-CODE'
 )
 cx3h_work="$tmp/case_cx3h/work"
 cx3h_base=$(mode_matrix_repo "$cx3h_work")
@@ -1350,7 +1370,7 @@ printf '== case (cx3j): STRUCTURAL — the endpoint fold cannot exit early ==\n'
 #
 # SHAPE-AGNOSTIC ON PURPOSE. A check keyed to the CURRENT loop spelling (`while … read -r ref`)
 # would go quiet the moment someone rewrote the fold — including back into the `for`-loop shape
-# the blocker came from — so it asserts the INVARIANT instead: `roborev_path_is_executable`
+# the blocker came from — so it asserts the INVARIANT instead: `roborev_path_exec_state`
 # contains NO `break`/`continue` at all, and EXACTLY ONE `return`, which is its LAST statement.
 # The round-12 code had three returns, two of them inside the loop; any reintroduced early exit
 # adds a return, a break or a continue, whatever the loop is written with.
@@ -1359,7 +1379,7 @@ printf '== case (cx3j): STRUCTURAL — the endpoint fold cannot exit early ==\n'
 # stripped first — the body deliberately DOCUMENTS that it has no early exit, and a check that
 # read its own prose fired on the word "exit" in that comment (measured).
 cx3j_shape() { # cx3j_shape <file> [funcname]
-  local file="$1" fn="${2:-roborev_path_is_executable}" body last nret
+  local file="$1" fn="${2:-roborev_path_exec_state}" body last nret
   body=$(awk -v fn="^$fn\\\\(\\\\) \\\\{" '
     $0 ~ fn { inf = 1; next }
     inf && /^\}/ { exit }
@@ -1387,7 +1407,7 @@ cx3j_inject() { # cx3j_inject <stmt> — copy the oracles with <stmt> added insi
 import sys
 src, dst, stmt = sys.argv[1], sys.argv[2], sys.argv[3]
 s = open(src).read()
-anchor = 'if _roborev_mode_is_exec_at "$ref" "$path"; then exec_at_any=0; fi\n'
+anchor = '    _roborev_mode_exec_state_at "$ref" "$path" || st=$?\n'
 if s.count(anchor) != 1:
     sys.exit('expected exactly one fold body, found %d' % s.count(anchor))
 open(dst, 'w').write(s.replace(anchor, anchor.rstrip('\n') + '\n    ' + stmt + '\n', 1))
@@ -1407,7 +1427,7 @@ for _inj in 'return 0' 'break'; do
 done
 # The round-12 shape itself, verbatim from the commit this round fixes.
 {
-  printf 'roborev_path_is_executable() {\n'
+  printf 'roborev_path_exec_state() {\n'
   printf '  local path="$1" ref record mode\n'
   printf '  for ref in HEAD "${BASE_SHA:-}"; do\n'
   printf '    [ -n "$ref" ] || continue\n'
@@ -1436,26 +1456,221 @@ fi
 # THE ASSERT ITSELF.
 cx3j_got=$(cx3j_shape "$ORACLES_SRC")
 if [ "$cx3j_got" = OK ]; then
-  ok 'case (cx3j): roborev_path_is_executable has no break/continue and exactly ONE return, last — no endpoint can be skipped'
+  ok 'case (cx3j): roborev_path_exec_state has no break/continue and exactly ONE return, last — no endpoint can be skipped'
 else
-  bad "case (cx3j): roborev_path_is_executable's shape reads '$cx3j_got' — an endpoint can be skipped again"
+  bad "case (cx3j): roborev_path_exec_state's shape reads '$cx3j_got' — an endpoint can be skipped again"
 fi
 # The per-endpoint predicate must stay RANGE-BLIND: if it learns about BASE_SHA it can express
 # a precedence again, which is the ambiguity the split exists to remove.
 cx3j_pred=$(awk '
-  /^_roborev_mode_is_exec_at\(\) \{/ { inf = 1 }
+  /^_roborev_mode_exec_state_at\(\) \{/ { inf = 1 }
   inf { print }
   inf && /^\}/ { exit }
 ' "$ORACLES_SRC")
 if [ -z "$cx3j_pred" ]; then
-  bad 'case (cx3j): _roborev_mode_is_exec_at was not found, so its range-blindness was not checked'
+  bad 'case (cx3j): _roborev_mode_exec_state_at was not found, so its range-blindness was not checked'
 else
   if ! printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' | grep -qE 'BASE_SHA|\bHEAD\b'; then
     ok 'case (cx3j): the per-endpoint predicate names no endpoint (range-blind, so it cannot encode an ordering)'
   else
-    bad 'case (cx3j): _roborev_mode_is_exec_at references a specific endpoint — it can encode a precedence again'
+    bad 'case (cx3j): _roborev_mode_exec_state_at references a specific endpoint — it can encode a precedence again'
   fi
 fi
+
+printf '== case (cx3k): the TRI-VALUED LEAF — a FAILED measurement is not a measured NO ==\n'
+# THE ROUND-14 BLOCKER, and the NINTH instance on this PR of "could not measure" rendered as
+# "nothing wrong". The round-13 leaf was `record=$(git ls-tree …) || return 1`, so a FAILED lookup
+# returned the SAME value as a measured non-executable and a genuinely executable file classified
+# as PROSE on an infra fault — dropped from `census_code_paths`, asserted about by nothing, green
+# summary. The level-shift is the lesson: round 13 made the FOLD order-independent by construction
+# while leaving the LEAF two-valued, so it proved the right property ONE LEVEL TOO HIGH. A boolean
+# cannot express "I could not tell", so it must collapse uncertainty onto the permissive side.
+#
+# The probe is `cx3h_probe`, reused unchanged: it already prints THREE distinct outcome words, so
+# it can express the state under test. Fault injection is `REPO` pointed at a directory that is
+# NOT a git repository — the reviewer's own reproduction, and the honest shape of the condition
+# (every `ls-tree` fails; no other git call is involved in this function).
+cx3k_run() { # cx3k_run <oracles> <repo> <base> -> writes stdout to $tmp/cx3k-<tag>.txt
+  bash "$cx3h_probe" "$1" "$2" "$3" >"$tmp/cx3k-$4.txt" 2>"$tmp/cx3k-$4.err"
+}
+cx3k_want() { # cx3k_want <tag> <label> <path> <expected-word>
+  if grep -q "^$(printf '%s\t%s' "$3" "$4")" "$tmp/cx3k-$1.txt"; then
+    ok "case (cx3k/$1): $3 => $4 — $2"
+  else
+    bad "case (cx3k/$1): $3 => want $4, got '$(grep -F "$3" "$tmp/cx3k-$1.txt" | head -1)' — $2"
+  fi
+}
+cx3k_notrepo="$tmp/cx3k-not-a-git-repo"
+mkdir -p "$cx3k_notrepo"
+
+# --- (1) and (2): the two REGRESSION/MINIMALITY controls, on the valid repo. These are the same
+# subjects the cx3h matrix covers, re-asserted here so the four cx3k rows are read as one table:
+# a "fix" that returned CODE unconditionally — or UNMEASURABLE unconditionally — fails here.
+cx3k_run "$ORACLES_SRC" "$cx3h_work" "$cx3h_base" valid
+cx3k_want valid 'a valid repo still measures an executable'            both-exec   CODE
+cx3k_want valid 'a valid repo still measures NON-executable prose'     both-plain  NON-CODE
+# --- (3): `ls-tree` SUCCEEDED and returned NO RECORD. A REAL measurement of absence, and it must
+# stay on the measured side or the added/deleted endpoint combinations (cx3d, cx3h) break.
+cx3k_want valid 'ls-tree SUCCEEDED with no record is MEASURED-absent, not unmeasurable' \
+  absent-everywhere NON-CODE
+
+# --- (4): `ls-tree` FAILS AT BOTH ENDPOINTS for a genuinely EXECUTABLE path. `both-exec` is
+# recorded 100755 at both endpoints of the real fixture (asserted above by cx3h), so the ONLY
+# variable is that the lookup cannot run.
+cx3k_run "$ORACLES_SRC" "$cx3k_notrepo" "$cx3h_base" both-unmeasurable
+cx3k_want both-unmeasurable 'a genuinely executable path with BOTH lookups failing is UNMEASURABLE, never a quiet NON-CODE' \
+  both-exec UNMEASURABLE
+if grep -q '^both-exec	UNMEASURABLE.*not a git repository\|^both-exec	UNMEASURABLE.*cannot change to\|^both-exec	UNMEASURABLE.*fatal' "$tmp/cx3k-both-unmeasurable.txt"; then
+  ok "case (cx3k/both-unmeasurable): the unmeasurable refs carry git's OWN message, so the operator is told why"
+else
+  bad "case (cx3k/both-unmeasurable): no git message was recorded: '$(grep -F both-exec "$tmp/cx3k-both-unmeasurable.txt" | head -1)'"
+fi
+# BOTH DIRECTIONS on the injector itself: it must NOT make everything unmeasurable by accident of
+# how the probe is invoked — `both-plain` is unmeasurable here too (correctly, the whole repo is
+# unreadable), so the discriminating control is the VALID run above reading NON-CODE for it.
+cx3k_want both-unmeasurable 'and a non-executable path is unmeasurable too — the fault is the REPO, not the path' \
+  both-plain UNMEASURABLE
+
+# --- (5): `ls-tree` fails at ONE endpoint only. THE LATTICE IS THE ANSWER, and it is pinned in
+# BOTH sub-directions, because a single row could be satisfied by either a fail-open or a
+# fail-closed-on-everything implementation:
+#     exec@HEAD    + unmeasurable@BASE  => CODE          (EXEC dominates UNMEASURABLE)
+#     NOT-exec@HEAD + unmeasurable@BASE => UNMEASURABLE  (UNMEASURABLE dominates NOT-EXEC)
+# EXEC dominating is SOUND, not lenient: the rule is a DISJUNCTION over the endpoints, so positive
+# evidence at one endpoint settles it — whatever the failed endpoint would have said could only be
+# another "yes", and no "yes" un-satisfies a disjunction. NOT-EXEC does NOT dominate, because
+# "executable at NEITHER endpoint" is a claim about EVERY endpoint and one unmeasured endpoint
+# leaves it unfounded. So non-code stays reachable ONLY from a positive measurement everywhere.
+cx3k_run "$ORACLES_SRC" "$cx3h_work" 0000000000000000000000000000000000000000 one-unmeasurable
+cx3k_want one-unmeasurable 'exec at the measurable endpoint DOMINATES an unmeasurable one (a disjunction cannot be un-satisfied)' \
+  both-exec CODE
+cx3k_want one-unmeasurable 'NON-exec at the measurable endpoint yields UNMEASURABLE — "exec at NEITHER" is a claim about EVERY endpoint' \
+  both-plain UNMEASURABLE
+for _tag in valid both-unmeasurable one-unmeasurable; do
+  if [ -s "$tmp/cx3k-$_tag.err" ]; then
+    bad "case (cx3k/$_tag): the classifier wrote to stderr: $(head -2 "$tmp/cx3k-$_tag.err")"
+  else
+    ok "case (cx3k/$_tag): the classifier produced NO stderr (git's message is captured, not leaked)"
+  fi
+done
+
+printf '== case (cx3k-mut): MUTATION — the leaf reverted to TWO-VALUED must go RED ==\n'
+# The mutation that matters is not "break the function", it is "restore the exact prior shape".
+# `|| return 1` in place of the tri-valued failure branch is the round-13 code verbatim, and under
+# it every UNMEASURABLE row above reads NON-CODE — a genuinely executable file called prose because
+# the lookup failed. If this mutant did NOT flip those rows, the cx3k asserts would be measuring
+# nothing.
+cx3k_mut="$tmp/cx3k-two-valued-oracles.sh"
+python3 - "$ORACLES_SRC" "$cx3k_mut" <<'CX3KM' || bad 'case (cx3k-mut): could not build the two-valued mutant'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src, encoding='utf-8').read()
+# The tri-valued failure branch, replaced by the round-13 two-valued spelling: a FAILED lookup
+# returns the SAME value as a measured non-executable.
+old = '''  errfile=$(mktemp "${TMPDIR:-/tmp}/roborev-exec-state.XXXXXX") || return 2
+  rc=0
+  record=$(git -C "$REPO" ls-tree "$ref" -- ":(literal)$path" 2>"$errfile") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+'''
+if s.count(old) != 1:
+    sys.exit('expected exactly one tri-valued failure branch, found %d' % s.count(old))
+new = '''  errfile=$(mktemp "${TMPDIR:-/tmp}/roborev-exec-state.XXXXXX") || return 1
+  rc=0
+  record=$(git -C "$REPO" ls-tree "$ref" -- ":(literal)$path" 2>"$errfile") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$errfile"
+    return 1
+  fi
+  if false; then
+'''
+open(dst, 'w', encoding='utf-8').write(s.replace(old, new, 1))
+CX3KM
+if grep -qF 'if false; then' "$cx3k_mut" && ! grep -qF 'if false; then' "$ORACLES_SRC"; then
+  ok 'case (cx3k-mut): the two-valued mutant was really applied to the COPY only'
+else
+  bad 'case (cx3k-mut): the mutant was NOT applied (or leaked into the real file), so nothing was mutation-tested — a green here would be a probe failing toward success'
+fi
+cx3k_run "$cx3k_mut" "$cx3h_work" "$cx3h_base" mut-valid
+cx3k_run "$cx3k_mut" "$cx3k_notrepo" "$cx3h_base" mut-unmeasurable
+# THE RED: the mutant calls a genuinely executable, genuinely unmeasurable path PROSE.
+cx3k_want mut-unmeasurable 'the two-valued leaf collapses UNMEASURABLE onto the permissive side' \
+  both-exec NON-CODE
+# NOT UNIFORMLY BROKEN: on the valid repo the mutant still classifies correctly, so the row above
+# is the tri-value distinction and not a mutant that stopped working.
+cx3k_want mut-valid 'the mutant still measures a valid repo correctly (it lost the third state, not the function)' \
+  both-exec CODE
+# RESTORED GREEN, re-measured after the mutant, so a stray in-place edit cannot pass unnoticed.
+cx3k_run "$ORACLES_SRC" "$cx3k_notrepo" "$cx3h_base" restored
+if diff -q "$tmp/cx3k-both-unmeasurable.txt" "$tmp/cx3k-restored.txt" >/dev/null; then
+  ok 'case (cx3k-mut): the UNMUTATED oracles file still reports UNMEASURABLE (no mutant leaked into it)'
+else
+  bad 'case (cx3k-mut): the unmutated result changed after the mutation run — a mutant leaked into the real file'
+fi
+
+printf '== case (cx3l): END-TO-END — an unmeasurable mode FAILS the run CLOSED and NAMES the path ==\n'
+# The unit rows above pin the lattice; this pins the CONSEQUENCE, through the wrapper's own summary
+# block, which is the only surface a consumer reads. An unmeasurable classification must not be
+# spendable as prose (`code-free: FAIL`, which would read "docs-only, nothing to review") and must
+# not be spendable as a pass — it is a THIRD outcome and it fails closed on `census-check:`.
+#
+# FAULT INJECTION: a `git` shim, first on PATH, that forwards every subcommand to the real binary
+# EXCEPT `ls-tree`, which fails. Scoped and honest — `ls-tree` has exactly ONE caller in the whole
+# wrapper (the leaf), so nothing else in the run is perturbed, and the wrapper's own rev-parse /
+# ls-remote / diff still work. Pointing `--repo` at a non-repo (the unit injector) cannot be used
+# here: the wrapper would fail at push-assert long before the census.
+cx3l_bin="$tmp/cx3l-bin"
+mkdir -p "$cx3l_bin"
+cx3l_real_git=$(command -v git)
+cat >"$cx3l_bin/git" <<CX3L
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = ls-tree ]; then
+    printf 'fatal: injected ls-tree failure (cx3l fault injection)\n' >&2
+    exit 128
+  fi
+done
+exec "$cx3l_real_git" "\$@"
+CX3L
+chmod +x "$cx3l_bin/git"
+# THE CONTROL FIRST, AND IT IS NOT OPTIONAL. An assert that the shimmed run FAILs is satisfied by a
+# shim that broke the run for some other reason, which is a probe failing in the direction that
+# looks like success. So the SAME fixture is shown to reach PASS with the shim absent — one
+# variable, `ls-tree`.
+reset_stub
+work=$(make_fixture case_cx3l docs-extensionless-exec)
+assert_tracked_mode 'case (cx3l) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx3l control) the SAME fixture without the shim reaches PASS' PASS 0
+assert_says 'case (cx3l control) census-check PASSes when ls-tree works' '^census-check: PASS$'
+assert_enqueued 'case (cx3l control)'
+# NOW the one variable.
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+WRAPPER_PATH_PREFIX="$cx3l_bin"
+run_wrapper "$work"
+WRAPPER_PATH_PREFIX=""
+assert_verdict 'case (cx3l)' FAIL 1
+# The two EXTENSIONLESS paths (`ws0-readbw` 100755, `NOTICE` 100644) are the only ones whose
+# classification consults the mode, so exactly 2 of the 4 census files are unmeasurable. The
+# count is the assertion: a fix that failed closed on EVERY path would read 4 of 4.
+assert_says 'case (cx3l) census-check FAILs closed and counts the unmeasurable paths' \
+  '^census-check: FAIL \(recorded mode unmeasurable for 2 of 4 census paths\)$'
+assert_says 'case (cx3l) the genuinely EXECUTABLE path is NAMED, with the endpoint ref and git.s own message' \
+  '^  docs/reports/x-artifacts/ws0-results/ws0-readbw @ .*injected ls-tree failure'
+assert_says 'case (cx3l) the range endpoints are named as the refs that could not be measured' \
+  '^  docs/reports/x-artifacts/ws0-results/ws0-readbw @ HEAD: .*[0-9a-f]{40}: '
+assert_says 'case (cx3l) the wording says WE COULD NOT TELL, never NOTHING WAS WRONG' \
+  "an unmeasurable mode is 'we cannot tell', never 'there is nothing wrong'"
+# THE MISATTRIBUTION DIRECTIONS, both barred. Not a pass, and not "docs-only" either.
+assert_lacks 'case (cx3l) never a PASS' '^RESULT: PASS'
+assert_lacks 'case (cx3l) never census-check PASS' '^census-check: PASS'
+assert_lacks 'case (cx3l) NEVER spent as a code-free/docs-only diff' '^code-free: FAIL'
+assert_lacks 'case (cx3l) and never NOTHING-TO-REVIEW' '^RESULT: NOTHING-TO-REVIEW'
+assert_never_enqueued 'case (cx3l)'
+assert_one_result_line 'case (cx3l)'
 
 printf '== case (cx6): a census path with SPACES and a literal quote compares correctly ==\n'
 reset_stub
