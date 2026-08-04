@@ -8,7 +8,7 @@ to an EMPTY prompt: `prompt-content: FAIL (136/136 code census paths absent)`, 1
 tokens against the vacuous baseline).
 
 **What this delta does, after the owner's descope ruling:** it **narrows the configured exclusion set** to
-prose and non-code artifacts — measured at 72 `docs/` executables reaching the reviewer, 0 markdown, and
+prose and non-code artifacts — measured at 71 `docs/` executables reaching the reviewer, 0 markdown, and
 nothing outside `docs/` newly excluded — and it strengthens the wrapper's TERMINAL VERDICT so no key's
 value can reach `RESULT: PASS` without an affirmative measurement. It does **NOT** predict roborev's
 effective exclusion set. A pre-enqueue oracle that did was built here and REMOVED; see
@@ -71,14 +71,14 @@ Subtraction, by contrast, cannot add a false-PASS: with nothing predicted, nothi
 argued away. (An earlier draft argued the opposite about a residual under AC4's SECOND BRANCH, on the
 ground that a disjunction met by its other branch loses nothing. AC4 now has NO satisfied branch, so that
 reasoning is VOID and SHALL NOT be carried over — here the requirements are withdrawn outright, and no
-statement anywhere in this change may describe THIS removal as "not a reduction in coverage".)
+statement anywhere in this change may argue THIS removal out of being a coverage reduction.)
 
 **The absent coverage, named in one line:** there is no automated guard against a future `.roborev.toml`
 re-broadening; the regression it would catch is a hand edit to a version-controlled file on `main`, and
 AC6's doctrine names the hazard in prose.
 
 **What still stands in its place.** AC1's narrowed `.roborev.toml` is the fix for the defect #3229 was
-filed for, and it is measured: 72 `docs/` executables reach the reviewer, 0 markdown does, and nothing
+filed for, and it is measured: 71 `docs/` executables reach the reviewer, 0 markdown does, and nothing
 outside `docs/` is newly excluded. A path the reviewer does not receive still FAILs, fail-closed, under
 `prompt-content:` — after the review round rather than before it, with a cause that names the symptom
 ("the reviewer did not receive this path") rather than the mechanism. That diagnostic gap is the whole
@@ -610,10 +610,10 @@ This requirement is deliberately STRONGER than a prose-matched detection: an ear
 the same classification and used it only for attribution wording, which let a docs-only diff reach
 `RESULT: PASS` whenever the reviewer's verdict happened not to carry the vacuity phrase.
 
-#### Scenario: The census/configuration mirror is asserted against the committed configuration
+#### Scenario: The census/configuration mirror is declared, with its missing assert named as a gap
 - **GIVEN** the declared artifact-extension set, the declared artifact-directory globs and the committed `.roborev.toml`
-- **WHEN** the regression suite derives the expected pattern set and compares it to the parsed `exclude_patterns`
-- **THEN** the two are exactly equal over a NON-EMPTY set, the parsed set carries neither a blanket `docs/**` nor any `docs/**/*.<ext>` sweep, and a one-sided edit to EITHER side fails the suite while naming which side carries the surplus
+- **WHEN** the two representations are inspected
+- **THEN** they agree exactly over a NON-EMPTY set, the configured set carries neither a blanket `docs/**` nor any `docs/**/*.<ext>` sweep, each side carries a comment naming its twin and requiring a single joint edit, and the ABSENCE of an automated drift assert is recorded at the code as a known gap deferred to #3283 — together with the path a one-sided edit takes instead (a `prompt-content:` FAIL on an unrelated report PR)
 
 #### Scenario: A markdown-only census fails deterministically before a review is enqueued
 - **GIVEN** a pushed branch whose census against the base is entirely markdown
@@ -844,7 +844,11 @@ exclusion-set forms, exclusion-set drift, the binary-corroboration states, the p
 construction, the three-config-source union, the trailing-slash inversion and the built-in lockfile
 residual — are REMOVED with the oracle they exercised (deferred to issue #3283), and the fixture helper
 consequently no longer writes a `.roborev.toml` into a fixture nor stubs `roborev config get`, because
-nothing reads either one.
+nothing reads either one. The REMOVAL ITSELF SHALL be pinned structurally, since a half-deletion is its own
+failure mode: the suite SHALL assert that the deleted key is absent from the verdict-scan key list (it
+would otherwise hold a permanently EMPTY value that the closed grammar reds on every run), that the summary
+block no longer emits it — so the removal is visible in the OUTPUT contract and not merely in the source —
+and that each deleted function has NO live reference left in any of the three flow scripts.
 
 The check SHALL additionally pin the DECLARED RESIDUAL and the header-shape normalisation:
 (s) a #3096-shaped census (`docs/reports/ws0-3096-artifacts/*.json` + a `Cargo.lock` change + a `.rs` file)
@@ -922,6 +926,10 @@ SKIP rather than a silent pass when an optional prerequisite for a subset of cas
 - **WHEN** the regression suite is inspected after the oracle's removal
 - **THEN** no fixture writes a `.roborev.toml`, no stub answers `roborev config get`, and no case asserts a predicted exclusion set — because nothing in the wrapper reads any of them, and a fixture pinning a behaviour no code has is read as coverage while covering nothing
 
+#### Scenario: The deletion is pinned so a half-removal cannot ship
+- **WHEN** the regression suite's structural asserts run against the three flow scripts
+- **THEN** the deleted key is absent from the verdict-scan key list, the summary block emits no such key, and every deleted function has no live reference — so a partial deletion (a key left in the scan holding a permanently empty value, which the closed grammar would red on every run) FAILs the fast loop instead of the field
+
 #### Scenario: The near-prefix mutants are pinned as cases, not left to the grammar's wording
 - **WHEN** the suite's verdict-grammar cases are inspected
 - **THEN** they include the two near-prefix mutants (`PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`), each asserted to FAIL the run, be NAMED, and still appear in the block, and a structural assert additionally pins that both arms reduce a value to its verdict token before comparing rather than matching a `PASS*` glob
@@ -996,9 +1004,9 @@ three `scripts/flow/roborev-review*.sh` files — including the `roborev_check_p
 that states the falsified claim outright. A surface left un-amended is doctrine drift against itself, and
 this requirement is not satisfied while any copy still asserts the falsified mechanism.
 
-Where doctrine documents the summary block it SHALL carry the `job-record:` key, the block's TWENTY-TWO
-keys in their contracted order (no `census-exclusion:` among them), the exact-token verdict grammar with
-its six-key affirmation backstop, and the corrected `prompt-content:` values
+Where doctrine documents the summary block it SHALL carry the `job-record:` key, NO `census-exclusion:`
+key, the exact-token verdict grammar (the value up to its first space, matched exactly) with its
+SIX-key affirmation backstop and no per-key exemption, and the corrected `prompt-content:` values
 (an unretrievable prompt FAILS; there is no non-failing `UNAVAILABLE` for that key). Where doctrine
 documents the live probe it SHALL state the expectation in the RANGE form — the `reviewed-sha:` range's
 HEAD endpoint equals the worktree HEAD and its base equals the base ref — never as `reviewed-sha`

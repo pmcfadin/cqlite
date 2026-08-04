@@ -422,7 +422,7 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   measurement-harness files on PR #3222 — the `docs/reports/*-artifacts/` harnesses this repo ships **by
   convention are reviewed CODE**, so a PR carrying them is NOT a docs-only change and MUST be
   roborev-certified. The deny-list is now narrowed to `*.md` plus artifact extensions **scoped to
-  artifact-bearing DIRECTORIES** (measured after the narrowing: 72 `docs/` executables reach the reviewer,
+  artifact-bearing DIRECTORIES** (measured after the narrowing: 71 `docs/` executables reach the reviewer,
   0 markdown does, and nothing outside `docs/` is newly excluded). **NOTHING PREDICTS THE EXCLUSION SET
   PRE-ENQUEUE.** A `census-exclusion:` key that did — a bash port of roborev's `git.FormatExcludeArgs` over
   a TOML parse of three config sources — was built on #3229 and **REMOVED by owner ruling, deferred to

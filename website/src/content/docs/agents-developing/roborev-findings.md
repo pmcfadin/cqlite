@@ -185,7 +185,7 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    that IS reviewed**, so a PR carrying them is **not** a docs-only change and must be roborev-certified
    like any other code change. **One** thing holds that line: `exclude_patterns` is a narrowed
    **prose/artifact deny-list** (`*.md` plus artifact extensions scoped to artifact-bearing
-   **directories** — never a blanket `docs/**`). Measured after the narrowing: 72 `docs/` executables reach
+   **directories** — never a blanket `docs/**`). Measured after the narrowing: 71 `docs/` executables reach
    the reviewer, 0 markdown does, and nothing outside `docs/` is newly excluded.
 
    **NOTHING PREDICTS THE EXCLUSION SET PRE-ENQUEUE, and that is a deliberate, recorded reduction in
