@@ -164,13 +164,35 @@ fi
 #
 # The WARM arm is unaffected: N>1 there is a legitimate way to amortize process
 # start, and every pass is warm by construction.
-case "$SCAN_PASSES" in
-  ''|*[!0-9]*) echo "FATAL: --scan-passes must be a positive integer (got '$SCAN_PASSES')" >&2; exit 2 ;;
-  0) echo "FATAL: --scan-passes must be at least 1" >&2; exit 2 ;;
-esac
-case "$PORT" in
-  ''|*[!0-9]*) echo "FATAL: --port must be a positive integer (got '$PORT')" >&2; exit 2 ;;
-esac
+# Every numeric option is validated POSITIVE, up front, before any build, cache drop
+# or measurement (issue #3272, finding 5). `--reps` had no validation at all: at
+# `--reps 0` every `for rep in $(seq 1 0)` loop body was skipped, so the driver ran
+# to completion having measured NOTHING and handed the reporter an empty session —
+# which (pre-fix) also exited zero. A non-numeric `--reps abc` made `seq` emit
+# nothing and print its own diagnostic into the middle of a "successful" run. The
+# vacuous-green class: a run that measured nothing must not look like one that did.
+require_positive_int() { # require_positive_int <flag> <value> [max]
+  local flag="$1" value="$2" max="${3:-}"
+  case "$value" in
+    ''|*[!0-9]*)
+      echo "FATAL: --$flag must be a positive integer (got '$value')" >&2; exit 2 ;;
+  esac
+  # 10# for the same reason parse_duration_ms uses it: `08` is not octal here.
+  if (( 10#$value < 1 )); then
+    echo "FATAL: --$flag must be at least 1 (got '$value')." >&2
+    echo "       A run with --$flag below 1 measures nothing, and a report over" >&2
+    echo "       nothing is not a smaller version of the requested claim — it is a" >&2
+    echo "       vacuous success (issue #3272)." >&2
+    exit 2
+  fi
+  if [[ -n "$max" ]] && (( 10#$value > max )); then
+    echo "FATAL: --$flag must be at most $max (got '$value')" >&2
+    exit 2
+  fi
+}
+require_positive_int scan-passes "$SCAN_PASSES"
+require_positive_int reps "$REPS"
+require_positive_int port "$PORT" 65535
 
 # --- trap 3 enforcement, arm B: a COLD rep is ONE request, or it is not cold ---
 # `--cold-step-duration` is the one option a caller can raise to silently turn a
@@ -194,12 +216,30 @@ COLD_STEP_MAX_MS=5000
 # Accepts the loadgen's `<n>ms` / `<n>s` / `<n>m` forms only: a bare `45` is
 # REJECTED rather than guessed at, since guessing seconds-vs-millis would silently
 # measure a step 1000x from the one requested.
+#
+# EVERY component enters arithmetic as `10#$n` — DECIMAL, explicitly (issue #3272,
+# finding 7). Bash's `$((...))` reads a leading-zero literal as OCTAL, which made
+# this function silently wrong for a whole class of ordinary spellings:
+#
+#   `010s`     -> $((010 * 1000))   = 8000 ms.  A caller asking for 10s measured 8s.
+#   `030ms`    -> $((030))          = 24 ms.
+#   `08s`      -> a HARD bash error, "08: value too great for base (error token is
+#                 08)", which the `case` then reported as "must be <n>ms, <n>s or
+#                 <n>m" — a complaint about the FORMAT of a value whose format is
+#                 fine, sending the reader after the wrong thing.
+#   `010000ms` -> 4096 ms, i.e. UNDER the 5000ms cold ceiling while really being
+#                 10s — so the octal parse could smuggle a BLENDED cold step past
+#                 the guard added for #3096 finding 2.
+#
+# The regex already restricts `$n` to digits, so `10#` cannot fail on a value that
+# reaches it; it only fixes the base. Note the `*ms` case must stay FIRST — `*s`
+# would otherwise match `45ms` and leave a trailing `m`.
 parse_duration_ms() {
   local v="$1" n
   case "$v" in
-    *ms) n="${v%ms}"; [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((n))" ;;
-    *s)  n="${v%s}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((n * 1000))" ;;
-    *m)  n="${v%m}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((n * 60000))" ;;
+    *ms) n="${v%ms}"; [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((10#$n))" ;;
+    *s)  n="${v%s}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((10#$n * 1000))" ;;
+    *m)  n="${v%m}";  [[ "$n" =~ ^[0-9]+$ ]] || return 1; echo "$((10#$n * 60000))" ;;
     *)   return 1 ;;
   esac
 }
@@ -278,6 +318,60 @@ verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 # port as a FAILURE to be reported rather than an obstacle to be removed.
 SERVER_PID=""
 
+# ---------------------------------------------------------------------------
+# Host sysctl state — CAPTURED before mutation, RESTORED on every exit path
+# ---------------------------------------------------------------------------
+# Issue #3272, finding 3 (security-adjacent). This rig weakens two host hardening
+# knobs so `perf stat -C` can count CPU-wide:
+#
+#   kernel.perf_event_paranoid = -1   (unprivileged CPU-wide + kernel counting)
+#   kernel.kptr_restrict       = 0    (kernel pointers exposed via /proc)
+#
+# It used to set both and NEVER put them back: the only trap was
+# `trap stop_server EXIT`, so a success, a FATAL and a Ctrl-C all left the box less
+# hardened than the rig found it — permanently, for every subsequent process on a
+# shared fleet machine, with nothing in the output saying so.
+#
+# The prior values are captured BEFORE the mutation (there is nothing to restore to
+# otherwise) and restored from ONE exit handler that also stops the server. Three
+# properties the restore must have, because it runs on the failure paths too:
+#
+#  * IDEMPOTENT — `SYSCTLS_MUTATED` gates it, so a handler that runs twice, or a run
+#    that never touched the knobs, is a no-op rather than a spurious `sysctl -w`.
+#  * NON-FATAL, per step — each write ends in `|| true`. This is cleanup: a restore
+#    that can exit non-zero would turn a successful measurement into a failed one,
+#    and a restore that inherits `set -e` and dies on the first knob would leave the
+#    SECOND one weakened, which is the exact bug being fixed.
+#  * REGISTERED ON SIGNALS TOO — `EXIT` alone does not fire for SIGINT/SIGTERM/SIGHUP
+#    while a foreground child (a long `perf stat` leg) is running, and Ctrl-C during
+#    a 45s step is the single most likely way this rig ends.
+PARANOID_PRIOR=""
+KPTR_PRIOR=""
+SYSCTLS_MUTATED=0
+
+restore_sysctls() {
+  [[ "$SYSCTLS_MUTATED" == "1" ]] || return 0
+  SYSCTLS_MUTATED=0
+  local restored=()
+  if [[ -n "$PARANOID_PRIOR" ]]; then
+    sudo -n sysctl -w "kernel.perf_event_paranoid=$PARANOID_PRIOR" >/dev/null 2>&1 \
+      && restored+=("perf_event_paranoid=$PARANOID_PRIOR") || true
+  fi
+  if [[ -n "$KPTR_PRIOR" ]]; then
+    sudo -n sysctl -w "kernel.kptr_restrict=$KPTR_PRIOR" >/dev/null 2>&1 \
+      && restored+=("kptr_restrict=$KPTR_PRIOR") || true
+  fi
+  if [[ "${#restored[@]}" -gt 0 ]]; then
+    echo "restored host sysctls: ${restored[*]}" >&2
+  else
+    # Loud, because the host is left weakened and only the operator can fix it.
+    echo "WARNING: could not restore kernel.perf_event_paranoid=$PARANOID_PRIOR /" >&2
+    echo "         kernel.kptr_restrict=$KPTR_PRIOR — this host is still relaxed." >&2
+    echo "         Restore it by hand: sudo sysctl -w kernel.perf_event_paranoid=$PARANOID_PRIOR" >&2
+    echo "         kernel.kptr_restrict=$KPTR_PRIOR" >&2
+  fi
+}
+
 stop_server() {
   [[ -n "$SERVER_PID" ]] || return 0
   local pid="$SERVER_PID"
@@ -292,10 +386,25 @@ stop_server() {
   wait "$pid" 2>/dev/null || true
 }
 
-# Runs on EVERY exit path — success, a FATAL, or a Ctrl-C — so no rep can leave
-# an orphaned server holding the port (which used to be what the next run's
-# `pkill` was cleaning up).
-trap stop_server EXIT
+# Runs on EVERY exit path — success, a FATAL, or a Ctrl-C — so no rep can leave an
+# orphaned server holding the port (which used to be what the next run's `pkill` was
+# cleaning up) OR the host's perf hardening weakened (issue #3272, finding 3).
+#
+# ONE handler, ONE registration, deliberately. A second top-level `trap ... EXIT`
+# would SILENTLY DISCARD this one — bash keeps a single handler per signal — so the
+# server-stop and the sysctl restore are composed inside `on_exit` rather than
+# registered separately. The signal list is explicit because `EXIT` does not fire on
+# SIGINT/SIGTERM/SIGHUP while a foreground child (a `perf stat` leg) is running, and
+# `exit` at the end of the handler is what makes the signal path terminate rather
+# than resume.
+on_exit() {
+  local rc=$?
+  trap - EXIT INT TERM HUP
+  stop_server
+  restore_sysctls
+  exit "$rc"
+}
+trap on_exit EXIT INT TERM HUP
 
 # Is $PORT free? Fail closed if not: an occupied port means either an orphan of
 # ours (report it, do not silently reap something that might not be ours) or
@@ -318,9 +427,21 @@ require_port_free() {
 # Fail BEFORE the release build, not after it.
 require_port_free "preflight"
 
-PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid)"
+# CAPTURE BEFORE MUTATE (issue #3272, finding 3). The prior values are read first —
+# both knobs, including `kptr_restrict`, which the mutation also relaxes and which the
+# old code never mentioned again — and only then is either written. `restore_sysctls`,
+# invoked from `on_exit`, puts them back on every exit path.
+PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "")"
 if [[ "$PARANOID" != "-1" ]]; then
+  PARANOID_PRIOR="$PARANOID"
+  KPTR_PRIOR="$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null || echo "")"
   echo "perf_event_paranoid is $PARANOID; CPU-wide counting needs -1. Trying sudo -n…"
+  echo "  (prior values captured for restore on exit: perf_event_paranoid=$PARANOID_PRIOR" \
+       "kptr_restrict=${KPTR_PRIOR:-<unreadable>})"
+  # Mark BEFORE the write, not after: a `sysctl -w` that sets the first knob and then
+  # fails on the second has still mutated the host, and an unset flag would skip the
+  # restore of the half that landed.
+  SYSCTLS_MUTATED=1
   sudo -n sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 >/dev/null || {
     echo "FATAL: cannot set kernel.perf_event_paranoid=-1 (needed for perf stat -C)." >&2
     exit 2

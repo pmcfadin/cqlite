@@ -838,6 +838,126 @@ else
   fail "each restore step must be individually non-fatal"
 fi
 
+# ---- BEHAVIOURAL, not merely structural -----------------------------------
+# The greps above pin the SHAPE; per #3249 (hardcoding `_PERF_STATE="ok"` survived
+# 118/118 tests) shape is not evidence that the thing FIRES. The real restore needs
+# root, so the functions are extracted verbatim from the driver and run against a
+# RECORDING `sudo` shim: no privileged call ever happens, and the exact
+# `sysctl -w` argv the handler would issue is asserted. Hermetic, sub-second.
+sysctl_probe() { # sysctl_probe <case> — echoes the recorded sudo argv
+  local case_name="$1" calls="$TMP/sysctl-calls-$1.txt"
+  : > "$calls"
+  (
+    set -uo pipefail
+    sudo() { printf '%s\n' "$*" >> "$calls"; [ "$case_name" != "failing-sudo" ]; }
+    # The three definitions under test, taken from the driver itself so this can
+    # never drift into testing a local copy.
+    eval "$(awk '/^restore_sysctls\(\)/,/^}/' "$DRIVER")"
+    SERVER_PID=""
+    PARANOID_PRIOR=2
+    KPTR_PRIOR=1
+    SYSCTLS_MUTATED=1
+    case "$case_name" in
+      never-mutated) SYSCTLS_MUTATED=0 ;;
+      failing-sudo)  set -e ;;   # cleanup must survive errexit
+    esac
+    restore_sysctls 2>/dev/null
+    case "$case_name" in
+      idempotent) : > "$calls"; restore_sysctls 2>/dev/null ;;
+    esac
+    echo "RC=$?"
+  ) >"$TMP/sysctl-rc-$1.txt" 2>&1
+  cat "$calls"
+}
+
+got=$(sysctl_probe restores)
+if grep -q 'sysctl -w kernel.perf_event_paranoid=2' <<<"$got" \
+  && grep -q 'sysctl -w kernel.kptr_restrict=1' <<<"$got"; then
+  pass "OBSERVED: restore_sysctls writes BOTH captured priors back (paranoid=2, kptr=1)"
+else
+  fail "restore_sysctls must write both captured priors back (recorded: $got)"
+fi
+# Pre-fix there was no restore at all, so this is the case that could not pass:
+# the driver's only sysctl write was the WEAKENING one.
+if [ "$(grep -c 'sysctl -w' <<<"$got")" -eq 2 ]; then
+  pass "OBSERVED: exactly two restore writes, no stray sysctl mutation"
+else
+  fail "expected exactly 2 restore writes (recorded: $got)"
+fi
+
+got=$(sysctl_probe idempotent)
+if [ -z "$got" ]; then
+  pass "OBSERVED: a SECOND restore_sysctls call is a no-op (idempotent)"
+else
+  fail "restore_sysctls must be idempotent (second call recorded: $got)"
+fi
+
+got=$(sysctl_probe never-mutated)
+if [ -z "$got" ]; then
+  pass "OBSERVED: a run that never mutated the knobs issues NO sysctl on exit"
+else
+  fail "an unmutated run must not sysctl on exit (recorded: $got)"
+fi
+
+# A FAILING sudo must neither abort the handler under `set -e` nor stop it trying the
+# SECOND knob — the failure mode that would leave kptr_restrict=0 behind forever.
+got=$(sysctl_probe failing-sudo)
+rc_line=$(cat "$TMP/sysctl-rc-failing-sudo.txt")
+if grep -q 'kernel.kptr_restrict=1' <<<"$got" && grep -q 'RC=0' <<<"$rc_line"; then
+  pass "OBSERVED: a FAILING sudo still attempts both knobs and cannot fail the run (rc=0)"
+else
+  fail "a failing sudo must not orphan the second knob or fail the run (recorded: $got / $rc_line)"
+fi
+
+# The signal path end-to-end: a driver-shaped script carrying the driver's OWN
+# on_exit/trap wiring must run the restore when it is SIGINTed mid-work. `EXIT`
+# alone does not fire for SIGINT while a foreground child is running, which is how
+# a Ctrl-C during a 45s perf leg used to skip cleanup entirely.
+cat > "$TMP/trap-probe.sh" <<PROBE
+set -euo pipefail
+MARK="$TMP/trap-fired.txt"
+SERVER_PID=""
+SYSCTLS_MUTATED=1
+PARANOID_PRIOR=2
+KPTR_PRIOR=1
+stop_server() { :; }
+restore_sysctls() { printf 'restored\n' >> "\$MARK"; SYSCTLS_MUTATED=0; }
+$(awk '/^on_exit\(\)/,/^}/' "$DRIVER")
+$(grep '^trap on_exit' "$DRIVER")
+printf 'ready\n' > "$TMP/probe-ready.txt"
+sleep 30
+PROBE
+rm -f "$TMP/trap-fired.txt" "$TMP/probe-ready.txt"
+bash "$TMP/trap-probe.sh" >/dev/null 2>&1 &
+probe_pid=$!
+for _ in $(seq 1 50); do [ -f "$TMP/probe-ready.txt" ] && break; sleep 0.1; done
+kill -INT "$probe_pid" 2>/dev/null || true
+wait "$probe_pid" 2>/dev/null; probe_rc=$?
+if [ -f "$TMP/trap-fired.txt" ]; then
+  pass "OBSERVED: the driver's trap wiring runs the restore on SIGINT (rc=$probe_rc)"
+else
+  fail "a SIGINT must reach restore_sysctls through the driver's trap (rc=$probe_rc)"
+fi
+# Same wiring, ordinary exit — the handler must not be signal-only.
+cat > "$TMP/trap-probe-exit.sh" <<PROBE
+set -euo pipefail
+MARK="$TMP/trap-fired-exit.txt"
+SERVER_PID=""
+SYSCTLS_MUTATED=1
+stop_server() { :; }
+restore_sysctls() { printf 'restored\n' >> "\$MARK"; }
+$(awk '/^on_exit\(\)/,/^}/' "$DRIVER")
+$(grep '^trap on_exit' "$DRIVER")
+exit 7
+PROBE
+rm -f "$TMP/trap-fired-exit.txt"
+bash "$TMP/trap-probe-exit.sh" >/dev/null 2>&1; exit_rc=$?
+if [ -f "$TMP/trap-fired-exit.txt" ] && [ "$exit_rc" -eq 7 ]; then
+  pass "OBSERVED: the handler also runs on a normal FATAL exit and PRESERVES its code (7)"
+else
+  fail "the handler must run on a normal exit and preserve the exit code (rc=$exit_rc)"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "ws0-report guards: all checks passed"
