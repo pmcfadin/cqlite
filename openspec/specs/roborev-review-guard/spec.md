@@ -74,7 +74,7 @@ review". The wrapper SHALL NOT fetch on the caller's behalf to repair an unresol
 - **THEN** `census-check:` reads `FAIL (base 'origin/main' unresolvable)`, the terminal `RESULT:` is `FAIL` (not `NOTHING-TO-REVIEW`), no review is enqueued, and the message states that an unresolvable base is "we cannot tell", never "there is nothing to review"
 
 #### Scenario: A failed git diff is not "genuinely empty"
-- **GIVEN** a repository in which `git diff --numstat --no-renames <base>...HEAD` exits non-zero
+- **GIVEN** a repository in which `git diff --numstat -z --no-renames <base>...HEAD` exits non-zero
 - **WHEN** the wrapper computes the census
 - **THEN** `census-check:` reads `FAIL (git diff failed)`, the message reproduces what git said, and the outcome is `RESULT: FAIL` rather than `NOTHING-TO-REVIEW`
 
@@ -89,10 +89,13 @@ record (the structured `prompt` field, else the reviewer's own prompt-retrieval 
 SHALL be DETERMINISTIC and THRESHOLD-FREE: it catches "the reviewer never received the diff", the half of
 the defect space that a verdict-text comparison cannot see.
 
-**The code subset — not every census path — is what SHALL be required present**, because roborev
-EXCLUDES non-code paths from the diff it builds (measured: on a census of 22 markdown + 5 code files the
-prompt carried `diff --git` headers for exactly the 5 code files). Requiring all 27 would false-FAIL
-every branch that touches documentation, which is most of them.
+**The code subset — not every census path — is what SHALL be required present**, because **roborev drops
+exactly what its configured `exclude_patterns` pathspecs match — it makes NO code/non-code judgement**
+(measured: on a census of 22 markdown + 5 code files the prompt carried `diff --git` headers for exactly
+the 5 code files, because `*.md` is CONFIGURED). Requiring all 27 would false-FAIL
+every branch that touches documentation, which is most of them. The code subset is the right subset only
+while the configured set is a prose/artifact deny-list MIRRORING the census classification, and that
+correspondence SHALL NOT be assumed — `census-exclusion:` computes it with git pre-enqueue (#3229).
 
 **EVERY code path SHALL be checked** — there SHALL be NO sampling cap. A sampled subset was a hole: a
 partial prompt naming just the sampled files passed. Matching SHALL be against the prompt's actual
@@ -151,17 +154,64 @@ documentation/specification prose SHALL be a DETERMINISTIC FAIL under its own gr
 with no reviewer prose involved. No docs-only change SHALL record "roborev clean", and the sanctioned
 substitute SHALL be verification against primary sources recorded in the pull request.
 
-The MECHANISM is measured, not inferred: **roborev EXCLUDES non-code paths from the diff it constructs**
-(on a 27-file census — 22 markdown + 5 code — the prompt carried headers for exactly the 5 code files).
-So for a markdown-only diff the constructed diff is genuinely EMPTY, and the reviewer's "contains no code
+The MECHANISM is measured, not inferred, and it SHALL be stated CORRECTLY: **roborev drops from the diff
+it constructs exactly the paths matched by its CONFIGURED `exclude_patterns`, applied as git pathspec
+exclusions** — it makes no code/non-code judgement of its own. On a 27-file census (22 markdown + 5 code)
+the prompt carried headers for exactly the 5 code files because the configured set excluded `*.md`, not
+because the reviewer recognised prose. The earlier wording — "roborev excludes non-code paths" — is
+FALSIFIED and SHALL NOT be restored: under a configured `docs/**` the same mechanism discarded 33
+executable harness files on PR #3222, i.e. it excluded CODE.
+So for a diff every path of which the configured set excludes, the constructed diff is genuinely EMPTY, and
+the reviewer's "contains no code
 changes to review" is a TRUTHFUL report of an empty input rather than a reviewer malfunction. That is
 precisely why the correct response is a DETERMINISTIC pre-enqueue FAIL computed from our own census — the
-reviewer is not misbehaving and no amount of re-running or re-prompting will change the outcome.
+reviewer is not misbehaving and no amount of re-running or re-prompting will change the outcome — and why
+the census is ALSO reconciled against the effective exclusion set under `census-exclusion:` (#3229), so a
+configured pattern that would swallow CODE fails before the enqueue instead of masquerading as a code-free
+diff. A `docs/` path PREFIX SHALL NEVER on its own satisfy `code-free:`: the `docs/reports/*-artifacts/`
+measurement harnesses are executable CODE.
 
 Classification SHALL be by file EXTENSION against a declared prose-extension set, with a path assist
 limited to EXTENSIONLESS files under declared prose directories. A file with a code-ish extension
 anywhere in the tree — including `docs/foo.py` and `.github/workflows/*.yml` — SHALL count as CODE, so
 the check cannot false-FAIL a code change that merely lives in a documentation directory.
+
+Under a declared prose directory an EXTENSIONLESS path SHALL count as CODE **iff git RECORDS it
+EXECUTABLE AT EITHER ENDPOINT of the census range**, the mode read from the tree and never from
+the filesystem. The prose PREFIX alone SHALL NOT decide it: that made every extensionless path under
+`docs/` non-code, so it never entered the code census and `prompt-content:` made no claim about it at all —
+while the configured exclusions do not remove it, so it does reach the reviewer.
+
+The endpoint test SHALL be a **logical OR over the HEAD tree and the BASE tree**, never an ordered scan
+that stops at the first endpoint holding a record. All four combinations SHALL follow from that one rule:
+present at both (including a MODE CHANGE in either direction — a `chmod -x` SHALL NOT reclassify a script
+as prose), HEAD only, BASE only (classified by the mode it HAD, since removing an executable is a code
+change whose review must be asserted), and neither (which classifies non-executable, no error, because a
+SUCCESSFUL lookup returning no record is a real measurement of absence). An ordered
+scan is a FALSE-PASS mechanism, not an optimisation: it classified `100755`@BASE → `100644`@HEAD as
+NON-CODE, so the path left the code census and `prompt-content: PASS (n/n)` was silent about it. That
+property SHALL hold BY CONSTRUCTION — a range-blind per-endpoint lookup, an endpoint list complete before
+the fold, and a fold with no `break`/`continue`/`return` whose single post-loop `return` yields an
+accumulator — and the SHAPE SHALL be asserted structurally, with the assert itself controlled against
+mutants that violate it.
+
+**ANY PREDICATE FEEDING A SAFETY DECISION SHALL BE TRI-VALUED — yes / no / could-not-measure — AND THE
+UNMEASURABLE CASE SHALL FAIL CLOSED.** A boolean cannot express uncertainty, so it must fold "I could not
+tell" onto one of its two values, and that is always the PERMISSIVE one. This holds at EVERY level: making
+the FOLD above order-independent by construction while leaving the LEAF two-valued proved the right property
+ONE LEVEL TOO HIGH, and a `git ls-tree` that FAILED then returned the same value as a measured
+non-executable — so a genuinely executable file classified as prose on an infra fault. A SUCCESSFUL lookup
+with NO RECORD (a genuinely absent path) and a FAILED lookup SHALL therefore be DISTINGUISHED: the first is
+a measurement, the second is not. The three states SHALL join by MAXIMUM on the total order
+`NOT-EXEC < UNMEASURABLE < EXEC`, so order-independence is a property of the LATTICE: EXECUTABLE dominates
+UNMEASURABLE (a disjunction settled by positive evidence cannot be un-satisfied), UNMEASURABLE dominates
+NOT-EXECUTABLE ("executable at NEITHER endpoint" is a claim about EVERY endpoint), and an endpoint set that
+yielded nothing joins to UNMEASURABLE. NOT-EXECUTABLE — the only state reaching the permissive
+classification — SHALL be reachable only from a positive measurement at every endpoint. When any endpoint a
+decision depends on is UNMEASURABLE the run SHALL FAIL CLOSED on `census-check:` pre-enqueue, naming the
+path, the ref(s) and git's own message, and SHALL NOT be spent as a non-code classification or as
+`code-free:`/NOTHING-TO-REVIEW. A predicate whose value set changes this way SHALL be RENAMED, so a
+surviving boolean call site fails loudly instead of re-collapsing the third state.
 
 This requirement is deliberately STRONGER than a prose-matched detection: an earlier revision computed
 the same classification and used it only for attribution wording, which let a docs-only diff reach
@@ -630,8 +680,11 @@ The wrapper SHALL emit a single compact `==== ROBOREV REVIEW SUMMARY ====` block
 exit path — a pass, any failed check, or an empty census — carrying one field per line, in a FIXED
 order that is part of the contract, under the greppable keys: `repo:`, `branch:`, `base:`, `head-sha:`,
 `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`,
-`job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`,
+`census-exclusion:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`,
+`vacuity-tier1:`, `vacuity-tier2:`,
 `findings:`, `roborev-exit:`, `log:`, and a terminal `RESULT: PASS|FAIL|NOTHING-TO-REVIEW`.
+`census-exclusion:` SHALL sit immediately after `code-free:`, mirroring its pre-enqueue evaluation order,
+and SHALL appear EXACTLY ONCE.
 `reviewed-sha:` SHALL carry the reviewed RANGE `<base40>..<head40>` on a normal run (a single sha only
 when the record reports one, and `-` when it is unverifiable), so a reader SHALL NOT expect a bare sha
 there.
@@ -662,7 +715,7 @@ path (exit `0`) is likewise not a verdict and SHALL emit no block.
 
 #### Scenario: The block carries every per-check key in the contracted order
 - **WHEN** a review was enqueued and completed
-- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:`
+- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `census-exclusion:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:`
 
 #### Scenario: One scan over the per-check keys computes the verdict
 - **GIVEN** a block in which exactly one per-check key carries a value beginning `FAIL`, `FINDINGS`, `ERROR` or `INCONSISTENT` while every other reads `PASS*`, `SKIP`, `UNAVAILABLE`, `NOTICE*` or `DEGRADED*`
@@ -841,13 +894,29 @@ wording FORBIDS the form now known to be correct:
 2. **The single-SHA form reviews ONE COMMIT, not the branch** — a FOURTH vacuity class (a PARTIAL review
    reported as a complete one) on every multi-commit branch. It SHALL be named non-sanctioned alongside
    the two-positional form (whose range base is git's EMPTY-TREE hash).
-3. **roborev EXCLUDES non-code paths from the diff it builds**, so for a markdown-only diff the
-   constructed diff is genuinely EMPTY and "contains no code changes to review" is a TRUTHFUL report of an
+3. **roborev drops exactly the paths its CONFIGURED `exclude_patterns` match, applied as git pathspec
+   exclusions — it makes NO code/non-code judgement.** The earlier claim that roborev "excludes non-code
+   paths from the diff it builds" is **FALSIFIED and SHALL NOT be restated anywhere**: under a configured
+   `docs/**` the same mechanism discarded 33 EXECUTABLE harness files on PR #3222
+   (`prompt-content: FAIL (136/136 code census paths absent)`, 15,443 input / 89 output tokens). So for a
+   markdown-only diff the constructed diff is genuinely EMPTY — because `*.md` is CONFIGURED — and
+   "contains no code changes to review" is a TRUTHFUL report of an
    empty input rather than a reviewer malfunction. Doctrine SHALL state that mechanism, that the
    wrapper's `prompt-content:` check therefore covers the CODE subset of the census, and that the
-   deterministic pre-enqueue `code-free:` FAIL is the correct response.
+   deterministic pre-enqueue `code-free:` FAIL plus the `census-exclusion:` reconciliation are the correct
+   responses.
 
-Where doctrine documents the summary block it SHALL carry the `job-record:` key and the corrected
+**Doctrine SHALL NOT imply that everything under `docs/` is code-free** (#3229). Every surface stating the
+docs-only rule SHALL name the `docs/reports/*-artifacts/` harness convention EXPLICITLY as executable code
+that IS reviewed, SHALL state that "docs-only" means a code-free CENSUS rather than a directory prefix, and
+SHALL name `census-exclusion:` as the pre-enqueue key that FAILs when the configured exclusion set would
+swallow census code. Beyond CLAUDE.md and the `roborev-findings` page the surfaces SHALL include
+`website/.../agents-developing/delivery-pipeline.md`, `.claude/agents/flow-lead.md`,
+`.claude/agents/flow-closer.md`, `.claude/skills/flow-implement/SKILL.md`, and the header comments of all
+three `scripts/flow/roborev-review*.sh` files.
+
+Where doctrine documents the summary block it SHALL carry the `job-record:` key, the `census-exclusion:`
+key in its contracted position immediately after `code-free:`, and the corrected
 `prompt-content:` values (an unretrievable prompt FAILS; there is no non-failing `UNAVAILABLE` for that
 key). Where doctrine documents the live probe it SHALL state the expectation in the RANGE form — the
 `reviewed-sha:` range's HEAD endpoint equals the worktree HEAD and its base equals the base ref — never as
@@ -859,7 +928,7 @@ key). Where doctrine documents the live probe it SHALL state the expectation in 
 
 #### Scenario: Every rule-stating surface carries the three measured corrections
 - **WHEN** CLAUDE.md, `roborev-findings.md`, `delivery-pipeline.md`, `docs/development/pm-operating-loop.md` and `docs/development/agent-machine-setup.md` are inspected
-- **THEN** none of them still forbids `--branch` unconditionally (each names the non-sanctioned form as `--branch` WITHOUT an explicit `--repo`), each names the single-SHA form as a partial review, and the roborev-findings page records that roborev excludes non-code paths from the diff it builds
+- **THEN** none of them still forbids `--branch` unconditionally (each names the non-sanctioned form as `--branch` WITHOUT an explicit `--repo`), each names the single-SHA form as a partial review, and the roborev-findings page records that roborev drops exactly the paths its configured `exclude_patterns` match rather than making a code/non-code judgement
 
 #### Scenario: The live-probe expectation is stated in the range form
 - **WHEN** the doctrine page's live worktree probe section is inspected

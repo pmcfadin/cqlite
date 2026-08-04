@@ -16,6 +16,15 @@
 # can be exercised in both directions. Everything lives under one temp dir removed
 # on EXIT. No wall-clock threshold assert anywhere in the correctness path (#2642).
 #
+# FILE SIZE (campsite rule, issue #1135): this file is over the ~1500-line test target
+# and grew further in #3229 (the `(cx*)` docs-census family). It is a single
+# responsibility — the sanctioned wrapper's guard contract — driven end to end through
+# ONE public surface (the wrapper's own summary block) by ONE stub and ONE fixture
+# helper, so splitting it would duplicate that scaffolding across files and make a
+# missing case harder to see, not easier. The gate's file-size ratchet covers `.rs`
+# only, so this is recorded rather than suppressed; revisit under #1135 if the fixture
+# helper and the stub ever want separate homes.
+#
 # Run standalone:   bash scripts/tests/test_roborev_review_guard.sh
 # Or via the gate:  scripts/agent-gate.sh --lite   (roborev-lints component)
 #                   scripts/agent-gate.sh          (roborev-lints + tooling-tests)
@@ -23,6 +32,10 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
+# The two sourced halves, named ONCE here because several cases probe a function DIRECTLY rather
+# than through the wrapper. `WRAPPER` is reassigned later by the gate-mock cases; these are not.
+CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 BLOCK_HEADER="==== ROBOREV REVIEW SUMMARY ===="
 
 if [ ! -f "$WRAPPER" ]; then
@@ -85,6 +98,16 @@ set -uo pipefail
 cmd="${1:-}"
 shift || true
 
+# json_prompt: STUB_PROMPT with its double quotes ESCAPED, so the record stays VALID
+# JSON. The real binary emits a JSON string; embedding a prompt verbatim broke the
+# record for exactly the cases whose PROMPT carries a quote (a C-quoted `diff --git
+# "a/..." "b/..."` header, or a path with a literal quote) — which then degraded the
+# whole record and false-FAILed `sha-assert:`, hiding what those cases exist to pin.
+json_prompt() {
+  local p="${STUB_PROMPT:-}"
+  printf '%s' "${p//\"/\\\"}"
+}
+
 emit_job_object() {
   local usage="" extra=""
   if [ -n "${STUB_HAS_TOKEN_DATA:-}" ]; then
@@ -104,7 +127,7 @@ emit_job_object() {
     "${STUB_STATUS:-done}" \
     "${STUB_MODEL:-gpt-5.6-sol}" \
     "${STUB_REQUESTED_MODEL:-gpt-5.6-sol}" \
-    "${STUB_PROMPT:-}" \
+    "$(json_prompt)" \
     "$usage$extra"
 }
 
@@ -139,7 +162,7 @@ case "$cmd" in
       # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
       # `id` (equal to the job id) that NESTS the job row under a "job" key.
       printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_PROMPT:-}"
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -148,7 +171,7 @@ case "$cmd" in
       # The REAL `show --json` shape: the REVIEW row — id/agent/prompt, and no
       # git_ref / status / verdict / token_usage.
       printf '{"id":%s,"job_id":%s,"agent":"codex","prompt":"%s"}\n' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_PROMPT:-}"
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
       exit 0
     fi
     emit_job_object; printf '\n'
@@ -204,6 +227,63 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   deleted-remote  pushed (mirror ref present and EQUAL to HEAD), then the branch
 #                   DELETED from the bare origin — a stale proxy that would still
 #                   satisfy a mirror-ref fast path
+#   --- the #3229 docs-census family -----------------------------------------------
+#   docs-executables  .sh/.py/.bt under docs/reports/x-artifacts/harness/ — the PR
+#                   #3222 shape: 100% under docs/, 100% executable CODE
+#   docs-prose      markdown only, UNDER docs/ (distinct from docs-only, which puts
+#                   its markdown at the repo root)
+#   docs-artifacts  markdown + declared docs-scoped artifacts (.txt/.json/.log/.err/
+#                   .jsonl) under docs/reports/x-artifacts/ — still code-free
+#   docs-odd-name   a .sh under docs/ whose filename carries SPACES and a literal
+#                   double quote — the NUL-safety regression (`git diff --numstat`
+#                   C-QUOTES it, `-z` does not)
+#   docs-space-dir  docs/storage engine/probe.sh + a .rs file — a CODE census path whose
+#                   directory carries a SPACE (the repo tracks 40 such paths), the header
+#                   shape `diff --git a/a b.txt b/a b.txt` no regex can split
+#   docs-nonascii-name  docs/reports/x-artifacts/é.sh + a .rs file — the C-QUOTED header
+#                   shape `diff --git "a/\303\251.sh" "b/..."` git emits for non-ASCII
+#   docs-nonascii-prose  docs/é notes.md + a .rs file — a NON-ASCII PROSE path. The only
+#                   pre-existing non-ASCII fixture is a `.sh`, i.e. CODE **by accident**,
+#                   which is precisely why nothing covered the census CLASSIFYING a quoted
+#                   path by its QUOTED spelling (ext `md"`, prefix `"docs/…`)
+#   docs-nonascii-artifact  docs/reports/x-artifacts/é.json + a .rs file — the same
+#                   misclassification for a docs-scoped ARTIFACT (ext `json"`)
+#   docs-extensionless-exec  an EXTENSIONLESS 100755 file under docs/reports/x-artifacts/,
+#                   beside a `.md`, an extensionless 100644 file, and a NON-executable `.sh`.
+#                   The real repo tracks three such executables (`ws0-readbw`, `ws0-stream`,
+#                   `offcputime-bigmap`); the retired prefix-only rule classified every
+#                   extensionless docs/ path non-code, so `prompt-content:` asserted NOTHING
+#                   about exactly the class AC2 names
+#   docs-extensionless-plain  THE ONE-VARIABLE SIBLING: the SAME path as above at mode
+#                   100644, beside a .rs change. Same name, same directory, only the recorded
+#                   mode differs — so a green pair proves the discriminator is the MODE and
+#                   not something about the name
+#   docs-extensionless-exec-deleted  the extensionless 100755 file exists at the BASE and the
+#                   branch DELETES it: there is no file to stat and no HEAD tree entry, so the
+#                   mode can only come from the BASE tree
+#   docs-extensionless-exec-unset  THE ROUND-13 BLOCKER: the extensionless file is 100755 at
+#                   the BASE and 100644 at HEAD (a pure `chmod -x`). PRESENT AT BOTH endpoints,
+#                   which is exactly what the ordered scan could not survive — the HEAD record
+#                   ended the scan, so BASE was never consulted and a script "became" prose
+#   docs-extensionless-exec-set  the MIRROR: 100644 at the BASE, 100755 at HEAD (a `chmod +x`
+#                   of a file that already existed). Also present at both, and the direction a
+#                   BASE-only consult would lose
+#   rename-space    a rename where BOTH names carry a space (`docs/storage engine/old
+#                   probe.sh` → `new probe.sh`): the header `diff --git a/<sp> b/<sp>`
+#                   is unsplittable by any `[^ ]+` regex AND is not a same-path header
+#   rename-ambiguous  a rename `p` → `x b/p b/x`, whose header admits an EQUAL split that
+#                   is NOT the true one, so only `rename from`/`rename to` can resolve it
+#   ambiguous-space-pair  a file named `foo b/x` beside one named `foo` — the header
+#                   `a/foo b/x b/foo b/x` has `a/foo b/` as a PREFIX (#3229 blocker 1)
+#   rename-mixed    a rename where only ONE side needs quoting (probe.sh → `é probe.sh`),
+#                   producing the MIXED header `diff --git a/… "b/…"`. Mixed headers occur
+#                   ONLY on renames, so they were unreachable by a both-sides-quoted parse
+#   newline-injection  a docs/ harness `.sh` whose NAME carries newlines plus a
+#                   `RESULT: PASS` line, so a summary value that interpolated it raw
+#                   would FORGE the verdict (#3229 blocker 2)
+#   newline-name    a file literally named `a` beside one named `a<LF>b.rs` — a newline in
+#                   a path, which a newline-DELIMITED prompt path set splits into two
+#                   records so `grep -Fxq` treats them as ALTERNATIVES (a false PASS)
 make_fixture() { # make_fixture <name> <mode> -> prints work dir
   # NOTE: separate statements on purpose — `local` is a builtin, so ALL of its
   # arguments are expanded before any assignment takes effect; `local a=$1 b=$a`
@@ -231,6 +311,63 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
   if [ "$narrow" -eq 1 ]; then
     git_q "$work" config "remote.$remote.fetch" "+refs/heads/main:refs/remotes/$remote/main"
   fi
+  # PRE-BRANCH setup: a RENAME is only expressible in `origin/main...HEAD` when the OLD
+  # path exists at the BASE. Adding it on the feature branch instead would make the range
+  # a plain addition and the rename header unreachable — the fixture would then pin
+  # nothing, which is the failure mode this whole family exists to prevent.
+  case "$mode" in
+    rename-space)
+      mkdir -p "$work/docs/storage engine"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/storage engine/old probe.sh"
+      git_q "$work" add "docs/storage engine/old probe.sh"
+      git_q "$work" commit -q -m 'base: a space-bearing harness script'
+      ;;
+    rename-mixed)
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/probe.sh"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'base: an ASCII harness script'
+      ;;
+    docs-extensionless-exec-unset | docs-extensionless-exec-set)
+      # A MODE CHANGE is only expressible in `origin/main...HEAD` when the path exists at the
+      # BASE, so it is created here with the STARTING mode; the branch flips it below. Both the
+      # on-disk bit and the INDEX mode are set for the same reason as the deleted variant.
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      git_q "$work" add docs
+      if [ "$mode" = docs-extensionless-exec-unset ]; then
+        chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      else
+        chmod 644 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      fi
+      git_q "$work" commit -q -m 'base: an extensionless harness file under docs/'
+      ;;
+    docs-extensionless-exec-deleted)
+      # The path must exist at the BASE for the branch to DELETE it in `origin/main...HEAD`.
+      # BOTH the on-disk bit and the INDEX mode are set: `chmod` alone is at the mercy of
+      # `core.fileMode`, while `update-index --chmod` alone leaves the working file DISAGREEING
+      # with the index — which git reports as a local modification and which made `git rm`
+      # refuse (measured: the refusal left the fixture unbuilt and polluted make_fixture's
+      # stdout, so every assert in the case reported against a non-existent work tree).
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      git_q "$work" add docs
+      git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" commit -q -m 'base: an extensionless harness executable under docs/'
+      ;;
+    rename-ambiguous)
+      # The OTHER direction of the header ambiguity (#3229 blocker 1): a rename whose
+      # header `diff --git a/p b/x b/p b/x` admits an EQUAL split (`p b/x` == `p b/x`)
+      # that is NOT the true one. Equality alone would therefore report BOTH real sides
+      # ABSENT; only the `rename from`/`rename to` lines can resolve it.
+      printf 'plain\n' >"$work/p"
+      git_q "$work" add p
+      git_q "$work" commit -q -m 'base: a one-character path'
+      ;;
+  esac
   git_q "$work" push -q "$remote" main
 
   git_q "$work" checkout -q -b feature main
@@ -269,6 +406,184 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf 'name: ci\non: push\n' >"$work/.github/workflows/ci.yml"
       git_q "$work" add .github/workflows/ci.yml
       git_q "$work" commit -q -m 'workflow only'
+      ;;
+    docs-executables)
+      mkdir -p "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/run.sh"
+      printf 'print("classify")\n' >"$work/docs/reports/x-artifacts/harness/classify.py"
+      printf 'BEGIN { exit(); }\n' >"$work/docs/reports/x-artifacts/harness/offcpu.bt"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'harness executables under docs/'
+      ;;
+    docs-prose)
+      mkdir -p "$work/docs/reports"
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      printf '# notes\n' >"$work/docs/notes.md"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'prose under docs/'
+      ;;
+    docs-artifacts)
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      printf 'raw\n' >"$work/docs/reports/x-artifacts/a.txt"
+      printf '{"k":1}\n' >"$work/docs/reports/x-artifacts/b.json"
+      printf 'log line\n' >"$work/docs/reports/x-artifacts/c.log"
+      printf 'stderr line\n' >"$work/docs/reports/x-artifacts/d.err"
+      printf '{"k":2}\n' >"$work/docs/reports/x-artifacts/e.jsonl"
+      git_q "$work" add docs
+      git_q "$work" commit -q -m 'docs artifacts only'
+      ;;
+    docs-odd-name)
+      mkdir -p "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/odd \"q\" name.sh"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a docs harness path with spaces and a quote'
+      ;;
+    docs-space-dir)
+      # A CODE census path whose DIRECTORY carries a space — the real repo already tracks
+      # `docs/storage engine/`. git does NOT quote a space-only path, so the header it
+      # emits is `diff --git a/a b.txt b/a b.txt`, which no `a/<x> b/<y>` regex can split.
+      mkdir -p "$work/docs/storage engine"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/storage engine/probe.sh"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a code path under a space-bearing docs directory'
+      ;;
+    docs-nonascii-name)
+      # A NON-ASCII CODE census path: `git diff --numstat` C-QUOTES it
+      # (`"docs/reports/x-artifacts/\303\251.sh"`) and so does the `diff --git` header
+      # roborev's diff carries (`diff --git "a/..." "b/..."`). Both sides must normalise.
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/é.sh"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a code path with a non-ASCII name'
+      ;;
+    docs-nonascii-prose)
+      # A NON-ASCII PROSE path. `git diff --numstat` (no `-z`) renders it C-QUOTED, so a
+      # census that classifies the QUOTED spelling reads the extension as `md"` and the
+      # prefix as `"docs/…` — and calls a MARKDOWN FILE CODE. The configuration then
+      # (correctly) removes it from the reviewer's diff, so `prompt-content:` demanded a
+      # file the configuration had already excluded ⇒ a false FAIL on an ordinary docs+code
+      # branch.
+      mkdir -p "$work/docs"
+      printf '# notes\n' >"$work/docs/é notes.md"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a non-ASCII prose path beside code'
+      ;;
+    docs-nonascii-artifact)
+      # The same misclassification for a docs-scoped ARTIFACT: quoted, the extension reads
+      # `json"`, so the artifact classifies CODE while `docs/**/*.json` excludes it.
+      mkdir -p "$work/docs/reports/x-artifacts"
+      printf '{"k":1}\n' >"$work/docs/reports/x-artifacts/é.json"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" commit -q -m 'a non-ASCII docs artifact beside code'
+      ;;
+    docs-extensionless-exec)
+      # FOUR paths, chosen so ONE `prompt-content:` count discriminates all four rules:
+      #   ws0-readbw   extensionless, 100755   -> CODE   (the class this fixture exists for)
+      #   plain.sh     `.sh`,         100644   -> CODE   (a code EXTENSION wins over the mode;
+      #                                                   the mode is consulted ONLY when there
+      #                                                   is no extension)
+      #   x-report.md  `.md`                   -> non-code (unchanged)
+      #   NOTICE       extensionless, 100644   -> non-code (what the prefix list is FOR)
+      # So the code census is exactly 2, and a `2/2` can only be those two.
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results" "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/plain.sh"
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      printf 'no rights reserved\n' >"$work/docs/NOTICE"
+      # On-disk bits AND index modes (see the deleted-variant comment): a `chmod` alone bends
+      # to `core.fileMode`, an `update-index --chmod` alone leaves the file reported modified.
+      chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      chmod 644 "$work/docs/reports/x-artifacts/harness/plain.sh" "$work/docs/NOTICE"
+      git_q "$work" add docs
+      git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/harness/plain.sh
+      git_q "$work" update-index --chmod=-x docs/NOTICE
+      git_q "$work" commit -q -m 'an extensionless executable under docs/, beside prose'
+      ;;
+    docs-extensionless-plain)
+      # The SAME path at mode 100644. Nothing but the recorded mode differs from the fixture
+      # above, so the pair is a one-variable control: if the classifier were keying on the
+      # directory or the name, both would land in the same class.
+      mkdir -p "$work/docs/reports/x-artifacts/ws0-results"
+      printf 'plain notes with no extension\n' >"$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      chmod 644 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add docs main.rs
+      git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" commit -q -m 'an extensionless NON-executable under docs/, beside code'
+      ;;
+    docs-extensionless-exec-deleted)
+      git_q "$work" rm -q docs/reports/x-artifacts/ws0-results/ws0-readbw
+      git_q "$work" commit -q -m 'delete the extensionless harness executable'
+      ;;
+    docs-extensionless-exec-unset | docs-extensionless-exec-set)
+      # A PURE mode change — no content edit — so `--numstat` reports `0 0 <path>` and the ONLY
+      # thing distinguishing the two endpoints is the recorded mode. A `.md` rides along so the
+      # census has a second, provably NON-code file and the `1/1` count below is discriminating.
+      if [ "$mode" = docs-extensionless-exec-unset ]; then
+        chmod 644 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=-x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      else
+        chmod 755 "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw"
+        git_q "$work" update-index --chmod=+x docs/reports/x-artifacts/ws0-results/ws0-readbw
+      fi
+      printf '# report\n' >"$work/docs/reports/x-report.md"
+      git_q "$work" add docs/reports/x-report.md
+      git_q "$work" commit -q -m 'flip the recorded mode of an extensionless harness file'
+      ;;
+    rename-space)
+      git_q "$work" mv "docs/storage engine/old probe.sh" "docs/storage engine/new probe.sh"
+      git_q "$work" commit -q -m 'rename a space-bearing harness script'
+      ;;
+    rename-mixed)
+      git_q "$work" mv "docs/reports/x-artifacts/probe.sh" "docs/reports/x-artifacts/é probe.sh"
+      git_q "$work" commit -q -m 'rename an ASCII script to a non-ASCII name'
+      ;;
+    rename-ambiguous)
+      mkdir -p "$work/x b/p b"
+      git_q "$work" mv p "x b/p b/x"
+      git_q "$work" commit -q -m 'rename p into a space-bearing path that makes the header ambiguous'
+      ;;
+    ambiguous-space-pair)
+      # THE REPORTED FALSE PASS (#3229 blocker 1). A tracked file named `foo b/x` emits the
+      # header `diff --git a/foo b/x b/foo b/x`, of which `a/foo b/` is a PREFIX — so the
+      # old prefix test `case $rest in "a/$want b/"*)` made the UNRELATED census path `foo`
+      # read as PRESENT. Both files are extensionless at the repo root, so both are CODE.
+      mkdir -p "$work/foo b"
+      printf 'plain\n' >"$work/foo"
+      printf 'plain\n' >"$work/foo b/x"
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'a file named "foo b/x" beside one named "foo"'
+      ;;
+    newline-name)
+      # A path with a LITERAL NEWLINE, beside a path equal to its FIRST LINE. That pairing
+      # is the whole point: a newline-delimited prompt path set + `grep -Fxq` turns the
+      # two-line pattern into two ALTERNATIVES, so the presence of `a` "proves" the
+      # presence of `a<LF>b.rs` — a false PASS on a file the reviewer never received.
+      printf 'plain\n' >"$work/a"
+      printf 'fn odd() {}\n' >"$work/$(printf 'a\nb.rs')"
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'a newline-bearing path beside its first line'
+      ;;
+    newline-injection)
+      # A FILENAME THAT TRIES TO FORGE THE VERDICT (#3229 round 5, blocker 2). The block
+      # is line-oriented and every reader greps it by `^<key>: ` / `^RESULT: `, so a
+      # census path carrying NEWLINES plus a `RESULT: PASS` line — attacker-controlled,
+      # because a census path is whatever a PR branch chose to track — could make a value
+      # SPAN LINES and inject its own keys into the block flow-closer parses to decide
+      # whether to merge. The reviewer never receives this path, so `prompt-content:` FAILs
+      # and NAMES it — in the value's count and in a DETAILS line.
+      mkdir -p "$work/docs/reports/x-artifacts/harness"
+      printf '#!/bin/sh\nexit 0\n' >"$work/docs/reports/x-artifacts/harness/$(printf 'inj\nRESULT: PASS\nprompt-content: PASS\nx.sh')"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add -A
+      git_q "$work" commit -q -m 'a newline-bearing docs harness path that forges summary keys'
       ;;
     *)
       printf 'fn helper() {}\n' >>"$work/main.rs"
@@ -318,6 +633,7 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
   printf '%s' "$work"
 }
 
+
 # Fixture-integrity guard: a narrow-refspec fixture that accidentally grew a
 # feature mirror ref would silently stop testing the condition it exists for.
 assert_no_mirror_ref() { # assert_no_mirror_ref <label> <work> <remote>
@@ -328,6 +644,21 @@ assert_no_mirror_ref() { # assert_no_mirror_ref <label> <work> <remote>
   fi
 }
 
+# Fixture-integrity guard for the MODE-bearing fixtures (#3229). The whole point of the
+# extensionless family is the RECORDED mode, so a fixture whose exec bit silently failed to
+# stick — a `chmod` swallowed by the host umask, a `core.fileMode=false` checkout — would test
+# the OTHER class while still looking like the case it claims to be. Read from the tree, which
+# is the same source the classifier reads.
+assert_tracked_mode() { # assert_tracked_mode <label> <work> <ref> <path> <want-mode>
+  local got
+  got=$(git -C "$2" ls-tree -z "$3" -- ":(literal)$4" 2>/dev/null | cut -d' ' -f1)
+  if [ "$got" = "$5" ]; then
+    ok "$1: $4 is recorded $5 in $3"
+  else
+    bad "$1: $4 is recorded '${got:-<absent>}' in $3, want $5 — the fixture tests a different class than it claims"
+  fi
+}
+
 # range_ref <work>: the git_ref shape a RANGE review records, "<base40>..<head40>".
 range_ref() { printf '%s..%s' "$(git -C "$1" rev-parse "${2:-origin/main}")" "$(git -C "$1" rev-parse HEAD)"; }
 
@@ -335,12 +666,21 @@ CASE_N=0
 OUT=""
 RC=0
 INVOKED=""
+# A throwaway HOME for every wrapper run (see run_wrapper).
+FIXTURE_HOME="$tmp/home"
+mkdir -p "$FIXTURE_HOME"
+# An OPTIONAL extra PATH element prepended AHEAD of the stub dir for a single case, so a case can
+# FAULT-INJECT one git subcommand (#3229 round-14: `git ls-tree` failing is the only way to reach
+# the UNMEASURABLE state end-to-end). Empty for every other case, and every user restores it.
+WRAPPER_PATH_PREFIX=""
 
 run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   local work="$1"; shift
   # Fail loudly on a broken fixture rather than letting the wrapper fall back to
-  # $PWD (which would silently run every assert against the REAL repo).
-  if [ -z "$work" ] || [ ! -d "$work/.git" ]; then
+  # $PWD (which would silently run every assert against the REAL repo). `-e`, not `-d`:
+  # a LINKED WORKTREE's `.git` is a FILE holding `gitdir: ...`, and the worktree
+  # fixtures are the ones that pin the root-checkout config source.
+  if [ -z "$work" ] || [ ! -e "$work/.git" ]; then
     bad "fixture setup failed: '$work' is not a git work tree"
     OUT="$tmp/empty-out.txt"; : >"$OUT"; INVOKED="$tmp/empty-invoked.txt"; : >"$INVOKED"; RC=99
     return 0
@@ -353,7 +693,10 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
   # case pinned git_ref itself (or asked for it to be absent with `none`).
   if [ -z "${STUB_GIT_REF:-}" ]; then STUB_GIT_REF=$(range_ref "$work"); fi
-  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" \
+  # HOME is redirected to a throwaway directory: nothing in the wrapper reads a roborev
+  # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
+  # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
+  STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -387,6 +730,20 @@ assert_lacks() { # assert_lacks <label> <extended-regex>
   fi
 }
 
+# THE BLOCK CARRIES EXACTLY ONE VERDICT LINE (#3229 blocker 2). `assert_verdict` reads
+# `^RESULT: ` | tail -1, so it cannot see an INJECTED verdict line above the real one —
+# only a count can.
+assert_one_result_line() { # assert_one_result_line <label>
+  local n
+  n=$(grep -cE '^RESULT: ' "$OUT" || true)
+  if [ "$n" -eq 1 ]; then
+    ok "$1: exactly one RESULT: line"
+  else
+    bad "$1: $n 'RESULT:' lines (want 1) — a value or DETAILS line spans lines"
+    printf -- '------- captured -------\n'; cat "$OUT"; printf -- '------------------------\n'
+  fi
+}
+
 assert_one_block() { # assert_one_block <label>
   local n
   n=$(grep -cF "$BLOCK_HEADER" "$OUT" || true)
@@ -398,6 +755,19 @@ assert_never_enqueued() { # assert_never_enqueued <label>
     bad "$1: a review WAS enqueued (stub invoked: $(cat "$INVOKED"))"
   else
     ok "$1: no review was enqueued"
+  fi
+}
+
+# THE POSITIVE CONTROL for the assert above (#3229 round-10). `assert_never_enqueued` is
+# satisfied by an EMPTY witness file, so it also "passes" when the harness never ran the
+# wrapper at all — the failure direction that looks like success. A case pinning a
+# pre-enqueue FAIL is only evidence when its sibling case, differing in ONE variable, is
+# shown to reach the enqueue.
+assert_enqueued() { # assert_enqueued <label>
+  if [ -s "$INVOKED" ]; then
+    ok "$1: a review WAS enqueued (the pre-enqueue path was really passed)"
+  else
+    bad "$1: NO review was enqueued, so the run stopped pre-enqueue — an 'it was blocked' assert elsewhere would be satisfied by a harness that never ran"
   fi
 }
 
@@ -435,7 +805,6 @@ export STUB_PAYLOAD_JOB=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
-
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -584,6 +953,1128 @@ STUB_PROMPT='Review this diff:\ndiff --git a/.github/workflows/ci.yml b/.github/
 run_wrapper "$work"
 assert_verdict 'case (c2d)' PASS 0
 assert_says 'case (c2d) a .yml file is not classified documentation' '^code-free: PASS$'
+
+# ===========================================================================
+# The (cx*) family (issue #3229): the CENSUS CLASSIFICATION and the PROMPT-CONTENT
+# match — what this repo's diff actually contains, and what the reviewer actually
+# received.
+#
+# What they pin: under the retired `docs/**` configuration, 33 EXECUTABLE harness
+# files were dropped from PR #3222's review while every fixture stayed green. The
+# shipped remedy is the NARROWED `.roborev.toml` (artifact extensions inside
+# artifact-bearing directories, never a blanket `docs/**`) plus these cases, which
+# assert that an executable under `docs/` is classified CODE, is not code-free, and
+# REACHES the reviewer's prompt — measured against the prompt actually sent.
+#
+# WHAT IS DELIBERATELY NOT HERE (#3283): there is no case asserting what roborev's
+# exclusion set WOULD do to a given census, because there is no longer any code that
+# predicts it. An oracle that did — a bash port of roborev's `git.FormatExcludeArgs`
+# over a TOML parse of three config sources — was built on this issue and REMOVED by
+# owner ruling: four consecutive review rounds found false-PASSes inside it at an
+# INCREASING rate. A guard with known documented false-PASSes is worse than no guard,
+# because it invites reliance it cannot support. The fixtures therefore no longer
+# supply a `.roborev.toml` at all: nothing reads one, and an inert input that reads as
+# load-bearing is the same class of misleading test.
+# ===========================================================================
+
+printf '== case (cx1): executables under docs/ are CODE, survive the narrowed config, and ARE enqueued ==\n'
+reset_stub
+# The PR #3222 shape: 100% of the diff under docs/, 100% of it executable.
+work=$(make_fixture case_cx1 docs-executables)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/run.sh b/docs/reports/x-artifacts/harness/run.sh\ndiff --git a/docs/reports/x-artifacts/harness/classify.py b/docs/reports/x-artifacts/harness/classify.py\ndiff --git a/docs/reports/x-artifacts/harness/offcpu.bt b/docs/reports/x-artifacts/harness/offcpu.bt'
+run_wrapper "$work"
+assert_verdict 'case (cx1)' PASS 0
+assert_says 'case (cx1) a docs/ path prefix does not make code documentation' '^code-free: PASS$'
+assert_says 'case (cx1) the reviewer got all three executables' '^prompt-content: PASS \(3/3 code census paths present\)$'
+if [ -s "$INVOKED" ]; then
+  ok 'case (cx1): the review WAS enqueued (the blind spot is closed)'
+else
+  bad 'case (cx1): no review was enqueued — executables under docs/ are still unreviewable'
+fi
+
+printf '== case (cx2): PROSE-only under docs/ is still code-free and still never enqueued ==\n'
+reset_stub
+# The guard must not have been INVERTED by the narrowing: prose is still uncertifiable.
+work=$(make_fixture case_cx2 docs-prose)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx2)' FAIL 1
+assert_says 'case (cx2) code-free still FAILs on prose under docs/' '^code-free: FAIL \(code-free census: 2/2 files are documentation/specification text\)$'
+assert_never_enqueued 'case (cx2)'
+
+printf '== case (cx3): docs-scoped ARTIFACTS with no executables are still code-free ==\n'
+reset_stub
+# The narrowing must not have traded the old blind spot for a VACUOUS review of a diff
+# roborev would empty: .txt/.json/.log/.err/.jsonl under docs/ are declared artifacts.
+work=$(make_fixture case_cx3 docs-artifacts)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx3)' FAIL 1
+assert_says 'case (cx3) artifacts under docs/ classify non-code' '^code-free: FAIL \(code-free census: 6/6 files are documentation/specification text\)$'
+assert_never_enqueued 'case (cx3)'
+
+printf '== case (cx3a): an EXTENSIONLESS EXECUTABLE under docs/ is CODE and IS expected in the prompt ==\n'
+reset_stub
+# THE ROUND-11 BLOCKER. `CODE_FREE_EXTENSIONLESS_PREFIXES` used to make every extensionless
+# path under `docs/` non-code, so it never entered `census_code_paths` and `prompt-content:`
+# made NO CLAIM about it — while the narrowed `exclude_patterns` (only `*.md` globally plus
+# docs-scoped ARTIFACT EXTENSIONS) do not exclude it, so it genuinely reaches the reviewer.
+# The guard was silent on precisely the class AC2's trigger names, and three files in this
+# repo have that exact shape today (`ws0-readbw`, `ws0-stream`, `offcputime-bigmap`, all
+# 100755). The count is the assertion: 2 of the 4 census files are CODE, and only the
+# extensionless EXECUTABLE and the non-executable `.sh` can be them.
+work=$(make_fixture case_cx3a docs-extensionless-exec)
+assert_tracked_mode 'case (cx3a) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+assert_tracked_mode 'case (cx3a) fixture' "$work" HEAD docs/reports/x-artifacts/harness/plain.sh 100644
+assert_tracked_mode 'case (cx3a) fixture' "$work" HEAD docs/NOTICE 100644
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx3a)' PASS 0
+assert_says 'case (cx3a) the census saw all four files' '^census: 4 files, \+[0-9]+/-[0-9]+$'
+assert_says 'case (cx3a) an extensionless executable makes the diff reviewable' '^code-free: PASS$'
+assert_says 'case (cx3a) exactly the two CODE paths are expected, and both arrived' '^prompt-content: PASS \(2/2 code census paths present\)$'
+# The two NON-code paths are still non-code: were `.md` or the extensionless 100644 `NOTICE`
+# counted, the value would read 3/4 or 4/4 — neither of which this case's prompt could satisfy.
+assert_lacks 'case (cx3a) the .md and the extensionless non-executable are NOT in the code census' '^prompt-content: (PASS|FAIL) \([0-9]+/(3|4) '
+assert_enqueued 'case (cx3a)'
+
+printf '== case (cx3b): the SAME extensionless path, ABSENT from the prompt, is a FAIL that NAMES it ==\n'
+reset_stub
+# The other direction, and the one that makes (cx3a) mean something: before the fix this diff
+# passed with `prompt-content: PASS (1/1 ...)` — the reviewer's coverage of `ws0-readbw` was
+# never in question because the guard had already dropped it from the subject set.
+work=$(make_fixture case_cx3b docs-extensionless-exec)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx3b)' FAIL 1
+assert_says 'case (cx3b) the missing extensionless executable is one absent code path of two' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_says 'case (cx3b) the absent path is NAMED' '^  docs/reports/x-artifacts/ws0-results/ws0-readbw$'
+assert_lacks 'case (cx3b) never reports a PASS on a prompt missing a code path' '^prompt-content: PASS'
+
+printf '== case (cx3c): the SAME path NON-EXECUTABLE is still non-code (one-variable control) ==\n'
+reset_stub
+# Identical name, identical directory, mode 100644 instead of 100755. This is what keeps the
+# fix from being "extensionless under docs/ is code now": `docs/LICENSE`, `openspec/NOTES` and
+# a `.claude/CODEOWNERS` must stay out of the code census, which is the only thing the prefix
+# list was ever for. `1/1` — not `2/2` — is the assertion.
+work=$(make_fixture case_cx3c docs-extensionless-plain)
+assert_tracked_mode 'case (cx3c) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100644
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx3c)' PASS 0
+assert_says 'case (cx3c) the census saw both files' '^census: 2 files, \+[0-9]+/-[0-9]+$'
+assert_says 'case (cx3c) only the .rs file is a code census path' '^prompt-content: PASS \(1/1 code census paths present\)$'
+assert_lacks 'case (cx3c) the extensionless non-executable is not demanded of the prompt' '^prompt-content: FAIL'
+
+printf '== case (cx3d): a DELETED extensionless executable is classified from the BASE tree ==\n'
+reset_stub
+# There is no working-tree file to stat and no HEAD tree entry, so `test -x` would answer
+# "not executable" — a different question with a plausible value — and the removal of a harness
+# executable would go unasserted. The mode comes from the BASE tree instead, which is the
+# fail-closed direction: a pure deletion still carries a `diff --git` header for the prompt
+# check to find.
+work=$(make_fixture case_cx3d docs-extensionless-exec-deleted)
+assert_tracked_mode 'case (cx3d) fixture' "$work" origin/main docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+if [ -e "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw" ]; then
+  bad 'case (cx3d): the fixture still has the file on disk, so a filesystem stat could answer'
+else
+  ok 'case (cx3d): the path is absent from the working tree and from HEAD (only the BASE tree has it)'
+fi
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndeleted file mode 100755'
+run_wrapper "$work"
+assert_verdict 'case (cx3d)' PASS 0
+assert_says 'case (cx3d) deleting an extensionless executable is a reviewable code change' '^code-free: PASS$'
+assert_says 'case (cx3d) the deletion is a code census path the reviewer received' '^prompt-content: PASS \(1/1 code census paths present\)$'
+assert_enqueued 'case (cx3d)'
+
+# ---------------------------------------------------------------------------------------------
+# (cx3e)–(cx3j): THE RULE IS A DISJUNCTION OVER BOTH ENDPOINTS (#3229 round-13 blocker).
+#
+# (cx3a)–(cx3d) pin the mode SOURCE — the tree rather than `test -x` — and they were mutation-
+# tested in that direction (swapping the tree read for a filesystem stat turned 4 assertions
+# RED). What they could NOT see is the RANGE SEMANTICS: every one of those fixtures has the
+# path at EXACTLY ONE endpoint (added ⇒ HEAD only; deleted ⇒ BASE only), so an implementation
+# that consulted only ONE endpoint, or that stopped at the FIRST endpoint holding a record,
+# passed all four. The round-12 implementation was the latter, and a path present at BOTH
+# endpoints therefore never reached BASE: `100755`@BASE → `100644`@HEAD read NON-CODE, dropping
+# the path from `census_code_paths` so `prompt-content: PASS (n/n)` made no claim about it.
+#
+# So the cases below cover the ENDPOINT COMBINATIONS, which is the property the previous round
+# left unguarded:
+#   (cx3e) present at BOTH, exec at BASE only  — e2e, the blocker itself
+#   (cx3f) the same fixture with the path ABSENT from the prompt — the naming direction
+#   (cx3g) present at BOTH, exec at HEAD only  — the mirror
+#   (cx3h) the full matrix as a direct unit probe (both / HEAD-only / BASE-only / neither),
+#          plus a glob-metacharacter name, plus the stderr cleanliness assert
+#   (cx3i) MUTATION of the semantics: consult only HEAD, then only BASE
+#   (cx3j) STRUCTURAL: the fold cannot exit early
+# ---------------------------------------------------------------------------------------------
+printf '== case (cx3e): an extensionless file EXECUTABLE AT THE BASE ONLY (chmod -x) is still CODE ==\n'
+reset_stub
+# THE ROUND-13 BLOCKER, at the summary level. `chmod -x` does not turn a script into prose, and
+# the census subject is the RANGE — so a path executable at EITHER endpoint is a code path. The
+# fixture is a PURE mode change, so the path is present at BOTH endpoints: the shape the four
+# preceding cases cannot produce.
+work=$(make_fixture case_cx3e docs-extensionless-exec-unset)
+assert_tracked_mode 'case (cx3e) fixture' "$work" origin/main docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+assert_tracked_mode 'case (cx3e) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100644
+# The working-tree bit agrees with HEAD, so no filesystem stat could rescue this case either:
+# every source of "is it executable" EXCEPT the BASE tree says no.
+if [ -x "$work/docs/reports/x-artifacts/ws0-results/ws0-readbw" ]; then
+  bad 'case (cx3e): the working-tree file is still executable, so the case does not isolate the BASE tree'
+else
+  ok 'case (cx3e): neither HEAD nor the working tree records the bit — only the BASE tree does'
+fi
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\nold mode 100755\nnew mode 100644'
+run_wrapper "$work"
+assert_verdict 'case (cx3e)' PASS 0
+assert_says 'case (cx3e) the census saw the mode change and the .md' '^census: 2 files, \+[0-9]+/-[0-9]+$'
+assert_says 'case (cx3e) losing the exec bit is a reviewable code change, not prose' '^code-free: PASS$'
+assert_says 'case (cx3e) the mode-changed path is the one code census path, and it arrived' '^prompt-content: PASS \(1/1 code census paths present\)$'
+# Before the fix this run reported `code-free: FAIL` — the path was classified non-code, leaving
+# the census with NO code path at all — so a `PASS` here can only come from counting it.
+assert_lacks 'case (cx3e) the diff is never called code-free' '^code-free: FAIL'
+assert_enqueued 'case (cx3e)'
+
+printf '== case (cx3f): the SAME mode-changed path, ABSENT from the prompt, is a FAIL that NAMES it ==\n'
+reset_stub
+# The direction that makes (cx3e) mean something: the path must be a SUBJECT the guard can miss.
+# Under the round-12 code it was not a subject at all, so its absence from the reviewer's prompt
+# was unassertable — the defect was invisible from inside the guard's own output.
+work=$(make_fixture case_cx3f docs-extensionless-exec-unset)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-report.md b/docs/reports/x-report.md'
+run_wrapper "$work"
+assert_verdict 'case (cx3f)' FAIL 1
+assert_says 'case (cx3f) the absent mode-changed executable is the one absent code path' '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
+assert_says 'case (cx3f) the absent path is NAMED' '^  docs/reports/x-artifacts/ws0-results/ws0-readbw$'
+assert_lacks 'case (cx3f) never reports a PASS on a prompt missing the mode-changed path' '^prompt-content: PASS'
+
+printf '== case (cx3g): the MIRROR — executable at HEAD only (chmod +x of an existing file) ==\n'
+reset_stub
+# A `chmod +x` of a file that already existed at the BASE: an executable ENTERING the range. Also
+# present at both endpoints, and the direction a BASE-only consult would lose. Same expectation,
+# because the rule is a disjunction and neither endpoint outranks the other.
+work=$(make_fixture case_cx3g docs-extensionless-exec-set)
+assert_tracked_mode 'case (cx3g) fixture' "$work" origin/main docs/reports/x-artifacts/ws0-results/ws0-readbw 100644
+assert_tracked_mode 'case (cx3g) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\nold mode 100644\nnew mode 100755'
+run_wrapper "$work"
+assert_verdict 'case (cx3g)' PASS 0
+assert_says 'case (cx3g) gaining the exec bit is a reviewable code change' '^code-free: PASS$'
+assert_says 'case (cx3g) the newly-executable path is the one code census path' '^prompt-content: PASS \(1/1 code census paths present\)$'
+assert_enqueued 'case (cx3g)'
+
+printf '== case (cx3h): the ENDPOINT-COMBINATION MATRIX (direct unit probe) ==\n'
+# Probed DIRECTLY, through the real function in the real file, because ONE repository can carry
+# every combination at once — which is what makes the table a table rather than six unrelated
+# fixtures whose expectations could drift apart. `absent-everywhere` is only reachable this way:
+# a real census path exists at an endpoint by construction, so the unmeasurable case has no
+# fixture that could produce it end-to-end.
+mode_matrix_repo() { # mode_matrix_repo <dir> -> prints the BASE sha
+  local w="$1"
+  mkdir -p "$w"
+  git init -q -b main "$w"
+  git_q "$w" config user.email guard@example.invalid
+  git_q "$w" config user.name 'guard test'
+  local p
+  # BASE tree. `chmod` AND `update-index --chmod` for the same reason as every other
+  # mode-bearing fixture here: neither alone is trustworthy.
+  for p in both-exec base-only-exec base-exec-head-plain 'glob[x]*?-exec'; do
+    printf '#!/bin/sh\nexit 0\n' >"$w/$p"; chmod 755 "$w/$p"
+  done
+  for p in both-plain head-exec-base-plain; do
+    printf 'plain\n' >"$w/$p"; chmod 644 "$w/$p"
+  done
+  printf 'base\n' >"$w/README.md"
+  git_q "$w" add -A
+  git_q "$w" update-index --chmod=+x both-exec --chmod=+x base-only-exec \
+    --chmod=+x base-exec-head-plain --chmod=+x 'glob[x]*?-exec'
+  git_q "$w" update-index --chmod=-x both-plain --chmod=-x head-exec-base-plain
+  git_q "$w" commit -q -m base
+  local base; base=$(git -C "$w" rev-parse HEAD)
+  # HEAD tree: one transition per path. `rm -f` because the index/worktree mode agreement above
+  # is what made a plain `git rm` refuse in the deleted fixture.
+  git_q "$w" rm -q -f base-only-exec
+  chmod 644 "$w/base-exec-head-plain"
+  chmod 755 "$w/head-exec-base-plain"
+  printf '#!/bin/sh\nexit 0\n' >"$w/head-only-exec"; chmod 755 "$w/head-only-exec"
+  printf 'plain\n' >"$w/head-only-plain"; chmod 644 "$w/head-only-plain"
+  git_q "$w" add -A
+  git_q "$w" update-index --chmod=-x base-exec-head-plain --chmod=+x head-exec-base-plain \
+    --chmod=+x head-only-exec --chmod=-x head-only-plain
+  git_q "$w" commit -q -m head
+  printf '%s' "$base"
+}
+# The probe prints one `<path><TAB>CODE|NON-CODE|UNMEASURABLE` line per subject. It sources the
+# REAL oracles file, so a future change to the function is measured, not a copy of it.
+#
+# THREE OUTCOME WORDS, NOT TWO (#3229 round-14 blocker). An `if roborev_path_exec_state` probe
+# would be a BOOLEAN probe over a tri-valued function: `if` collapses 1 and 2 into "false", so
+# UNMEASURABLE would print `NON-CODE` and the probe would report the very defect under test as
+# the expected answer. It therefore reads the exit STATUS and prints a distinct word per state —
+# the probe itself must be able to express "could not measure", or it cannot measure it.
+cx3h_probe="$tmp/cx3h-probe.sh"
+cat >"$cx3h_probe" <<'CX3H'
+set -uo pipefail
+# shellcheck disable=SC1090
+. "$1"          # the real oracles file
+REPO="$2"
+BASE_SHA="$3"
+for p in both-exec both-plain head-only-exec head-only-plain base-only-exec \
+         base-exec-head-plain head-exec-base-plain 'glob[x]*?-exec' absent-everywhere; do
+  st=0
+  roborev_path_exec_state "$p" || st=$?
+  case "$st" in
+    0) printf '%s\tCODE\n' "$p" ;;
+    1) printf '%s\tNON-CODE\n' "$p" ;;
+    *) printf '%s\tUNMEASURABLE\t%s\n' "$p" "${ROBOREV_EXEC_UNMEASURABLE_REFS[*]:-<none>}" ;;
+  esac
+done
+CX3H
+# `<path> <expected>`; the comment on each line is the endpoint combination it stands for.
+CX3H_MATRIX=(
+  'both-exec CODE'                 # present at both, exec at both
+  'both-plain NON-CODE'            # present at both, exec at neither  -> the only non-code both-case
+  'head-only-exec CODE'            # added executable          (HEAD only)
+  'head-only-plain NON-CODE'       # added non-executable      (HEAD only)
+  'base-only-exec CODE'            # deleted executable        (BASE only)
+  'base-exec-head-plain CODE'      # chmod -x  — THE ROUND-13 BLOCKER
+  'head-exec-base-plain CODE'      # chmod +x  — the mirror
+  'glob[x]*?-exec CODE'            # a name full of glob metacharacters, exec at both
+  # Present at NEITHER endpoint. `ls-tree` SUCCEEDED at both and reported no record, so this is a
+  # real MEASUREMENT of absence and NOT-EXEC is the right answer — the distinction the tri-valued
+  # leaf exists to keep (#3229 round-14). Pinned here so the fix cannot be "fail closed on
+  # everything", which would break the added/deleted cases above.
+  'absent-everywhere NON-CODE'
+)
+cx3h_work="$tmp/case_cx3h/work"
+cx3h_base=$(mode_matrix_repo "$cx3h_work")
+cx3h_out="$tmp/cx3h-out.txt"
+cx3h_err="$tmp/cx3h-err.txt"
+# The fixture must really hold the combinations the table claims, or the table measures nothing.
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" base-exec-head-plain 100755
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD base-exec-head-plain 100644
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" head-exec-base-plain 100644
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" HEAD head-exec-base-plain 100755
+assert_tracked_mode 'case (cx3h) fixture' "$cx3h_work" "$cx3h_base" base-only-exec 100755
+if git -C "$cx3h_work" ls-tree HEAD -- ':(literal)base-only-exec' | grep -q .; then
+  bad 'case (cx3h): base-only-exec still exists at HEAD, so the BASE-only combination is not reproduced'
+else
+  ok 'case (cx3h): base-only-exec is absent from HEAD (the BASE-only combination is reproduced)'
+fi
+# `run_probe` is deliberately a plain `bash`: the point is the FUNCTION, and the wrapper's
+# summary block cannot express `absent-everywhere` at all.
+if bash "$cx3h_probe" "$ORACLES_SRC" "$cx3h_work" "$cx3h_base" >"$cx3h_out" 2>"$cx3h_err"; then
+  for _row in "${CX3H_MATRIX[@]}"; do
+    _mpath="${_row% *}"; _mwant="${_row##* }"
+    if grep -Fxq "$(printf '%s\t%s' "$_mpath" "$_mwant")" "$cx3h_out"; then
+      ok "case (cx3h): $_mpath => $_mwant"
+    else
+      bad "case (cx3h): $_mpath => want $_mwant, got '$(grep -F "$_mpath" "$cx3h_out" | head -1)'"
+    fi
+  done
+else
+  bad "case (cx3h): the matrix probe did not run: $(cat "$cx3h_err")"
+fi
+# THE NUL WARNING (#3229 round-13, folded in). `git ls-tree -z` piped through `$(...)` made bash
+# emit `warning: command substitution: ignored null byte in input` on EVERY call — harmless for a
+# single record (the path is last, so only the terminating NUL is lost) but per-call stderr noise
+# that can MASK a real warning. Nine calls above, so a per-call warning cannot hide here.
+if [ -s "$cx3h_err" ]; then
+  bad "case (cx3h): the classifier wrote to stderr: $(head -2 "$cx3h_err")"
+else
+  ok 'case (cx3h): nine classifications produced NO stderr (the ignored-null-byte warning is gone)'
+fi
+
+printf '== case (cx3i): MUTATION — consulting only ONE endpoint must go RED ==\n'
+# The previous round's mutation testing swapped the mode SOURCE (tree ⇒ `test -x`) and turned 4
+# assertions red, which is why it looked sufficient. It never mutated the RANGE SEMANTICS, and
+# that is the axis the blocker lived on. So both single-endpoint mutants are run here, and each
+# must break the combination only the OTHER endpoint can answer — which also proves the two
+# endpoints are not redundant.
+#
+#   HEAD-only consult ⇒ `base-only-exec` (a deleted executable) must go NON-CODE
+#   BASE-only consult ⇒ `head-only-exec` (an added executable)  must go NON-CODE
+#
+# Both mutants also flip a mode-change case, and that is asserted too: it is the same defect the
+# blocker reported, reachable from either single-endpoint direction.
+cx3i_mut="$tmp/cx3i-oracles.sh"
+for _mut in head base; do
+  cp "$ORACLES_SRC" "$cx3i_mut"
+  if [ "$_mut" = head ]; then
+    _mut_from='HEAD "${BASE_SHA:-}"'; _mut_to='HEAD'
+    _mut_lost=base-only-exec; _mut_lost2=base-exec-head-plain; _mut_kept=head-only-exec
+  else
+    _mut_from='HEAD "${BASE_SHA:-}"'; _mut_to='"${BASE_SHA:-}"'
+    _mut_lost=head-only-exec; _mut_lost2=head-exec-base-plain; _mut_kept=base-only-exec
+  fi
+  # Patch the ENDPOINT PRODUCER, which is the single place the range is named — a mutant that
+  # could not be expressed as a one-line edit there would itself be evidence the shape is wrong.
+  python3 - "$cx3i_mut" "$_mut_from" "$_mut_to" <<'CX3I' || bad "case (cx3i/$_mut): could not patch the endpoint producer"
+import sys
+p, frm, to = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(p).read()
+old = 'for ref in %s; do' % frm
+if s.count(old) != 1:
+    sys.exit('expected exactly one endpoint-producer loop, found %d' % s.count(old))
+open(p, 'w').write(s.replace(old, 'for ref in %s; do' % to, 1))
+CX3I
+  if grep -qF "for ref in $_mut_to; do" "$cx3i_mut" && ! grep -qF "for ref in $_mut_from; do" "$cx3i_mut"; then
+    ok "case (cx3i/$_mut): the single-endpoint mutant was really applied to the copy"
+  else
+    bad "case (cx3i/$_mut): the mutant was NOT applied, so nothing was mutation-tested (a green here is a probe failing toward success)"
+  fi
+  if bash "$cx3h_probe" "$cx3i_mut" "$cx3h_work" "$cx3h_base" >"$tmp/cx3i-$_mut.txt" 2>/dev/null; then
+    for _lost in "$_mut_lost" "$_mut_lost2"; do
+      if grep -Fxq "$(printf '%s\tNON-CODE' "$_lost")" "$tmp/cx3i-$_mut.txt"; then
+        ok "case (cx3i/$_mut): consulting only $_mut makes $_lost read NON-CODE — the assert is load-bearing"
+      else
+        bad "case (cx3i/$_mut): $_lost still read CODE under a $_mut-only consult, so the either-endpoint asserts do not detect a skipped endpoint"
+      fi
+    done
+    # The mutant must NOT be uniformly broken: the endpoint it DOES consult still answers, so the
+    # two REDs above are the semantics and not a probe that stopped working.
+    if grep -Fxq "$(printf '%s\tCODE' "$_mut_kept")" "$tmp/cx3i-$_mut.txt"; then
+      ok "case (cx3i/$_mut): the mutant still classifies $_mut_kept CODE (it lost one endpoint, not the whole function)"
+    else
+      bad "case (cx3i/$_mut): the mutant lost $_mut_kept too, so it is broken rather than single-endpoint"
+    fi
+  else
+    bad "case (cx3i/$_mut): the mutated probe did not run at all"
+  fi
+done
+# RESTORED GREEN: the unmutated file, re-measured after the mutants, so a mutation that leaked
+# into the real file (a stray in-place edit, a wrong path) cannot pass unnoticed.
+if bash "$cx3h_probe" "$ORACLES_SRC" "$cx3h_work" "$cx3h_base" >"$tmp/cx3i-restored.txt" 2>/dev/null &&
+  diff -q "$cx3h_out" "$tmp/cx3i-restored.txt" >/dev/null; then
+  ok 'case (cx3i): the UNMUTATED oracles file still produces the full green matrix (no mutant leaked into it)'
+else
+  bad 'case (cx3i): the unmutated matrix changed after the mutation run — a mutant leaked into the real file'
+fi
+
+printf '== case (cx3j): STRUCTURAL — the endpoint fold cannot exit early ==\n'
+# The behavioural cases above pin the RULE. This pins the SHAPE that makes the rule hold BY
+# CONSTRUCTION, because the shape is the actual remedy: this is the third round on this PR where
+# a fix restored a narrower instance of the class it closed, and each time the code was correct
+# for the cases someone had thought of. A `return`/`break`/`continue` inside the fold is what
+# "skip an endpoint" LOOKS like, so its absence is asserted directly — a future edit that
+# reintroduces one FAILs here even if it happens to be correct for every fixture above.
+#
+# SHAPE-AGNOSTIC ON PURPOSE. A check keyed to the CURRENT loop spelling (`while … read -r ref`)
+# would go quiet the moment someone rewrote the fold — including back into the `for`-loop shape
+# the blocker came from — so it asserts the INVARIANT instead: `roborev_path_exec_state`
+# contains NO `break`/`continue` at all, and EXACTLY ONE `return`, which is its LAST statement.
+# The round-12 code had three returns, two of them inside the loop; any reintroduced early exit
+# adds a return, a break or a continue, whatever the loop is written with.
+#
+# `cx3j_shape <file>` prints one word: `OK`, `NOT-FOUND`, or a named violation. Comment lines are
+# stripped first — the body deliberately DOCUMENTS that it has no early exit, and a check that
+# read its own prose fired on the word "exit" in that comment (measured).
+cx3j_shape() { # cx3j_shape <file> [funcname]
+  local file="$1" fn="${2:-roborev_path_exec_state}" body last nret
+  body=$(awk -v fn="^$fn\\\\(\\\\) \\\\{" '
+    $0 ~ fn { inf = 1; next }
+    inf && /^\}/ { exit }
+    inf { print }
+  ' "$file" | grep -vE '^[[:space:]]*#' | grep -vE '^[[:space:]]*$')
+  if [ -z "$body" ]; then printf 'NOT-FOUND\n'; return 0; fi
+  if printf '%s\n' "$body" | grep -qE '(^|[^[:alnum:]_])(break|continue)([^[:alnum:]_]|$)'; then
+    printf 'HAS-BREAK-OR-CONTINUE\n'; return 0
+  fi
+  nret=$(printf '%s\n' "$body" | grep -cE '(^|[^[:alnum:]_])return([^[:alnum:]_]|$)' || true)
+  if [ "$nret" -ne 1 ]; then printf 'RETURNS=%s\n' "$nret"; return 0; fi
+  last=$(printf '%s\n' "$body" | tail -1)
+  case "$last" in
+    *return*) printf 'OK\n' ;;
+    *) printf 'RETURN-NOT-LAST\n' ;;
+  esac
+}
+# BOTH DIRECTIONS. The check is only worth its line if it FIRES, so it is run against three
+# mutants first: a `return` injected into the fold, a `break` injected into the fold, and the
+# ACTUAL round-12 shape (an ordered `for` loop that returns on the first record). If any of them
+# read `OK`, the assert below proves nothing.
+cx3j_mut="$tmp/cx3j-mutant.sh"
+cx3j_inject() { # cx3j_inject <stmt> — copy the oracles with <stmt> added inside the fold
+  python3 - "$ORACLES_SRC" "$cx3j_mut" "$1" <<'CX3JI'
+import sys
+src, dst, stmt = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(src).read()
+anchor = '    _roborev_mode_exec_state_at "$ref" "$path" || st=$?\n'
+if s.count(anchor) != 1:
+    sys.exit('expected exactly one fold body, found %d' % s.count(anchor))
+open(dst, 'w').write(s.replace(anchor, anchor.rstrip('\n') + '\n    ' + stmt + '\n', 1))
+CX3JI
+}
+for _inj in 'return 0' 'break'; do
+  if cx3j_inject "$_inj"; then
+    _got=$(cx3j_shape "$cx3j_mut")
+    if [ "$_got" != OK ]; then
+      ok "case (cx3j control): a '$_inj' injected into the fold is caught ($_got)"
+    else
+      bad "case (cx3j control): a '$_inj' injected into the fold read OK — the structural assert cannot see an early exit"
+    fi
+  else
+    bad "case (cx3j control): could not inject '$_inj' into the fold, so the assert was never controlled"
+  fi
+done
+# The round-12 shape itself, verbatim from the commit this round fixes.
+{
+  printf 'roborev_path_exec_state() {\n'
+  printf '  local path="$1" ref record mode\n'
+  printf '  for ref in HEAD "${BASE_SHA:-}"; do\n'
+  printf '    [ -n "$ref" ] || continue\n'
+  printf '    record=$(git -C "$REPO" ls-tree -z "$ref" -- ":(literal)$path" 2>/dev/null) || continue\n'
+  printf '    [ -n "$record" ] || continue\n'
+  printf '    mode="${record%%%% *}"\n'
+  printf '    [ "$mode" = 100755 ] && return 0\n'
+  printf '    return 1\n'
+  printf '  done\n'
+  printf '  return 1\n'
+  printf '}\n'
+} >"$tmp/cx3j-round12.sh"
+_got=$(cx3j_shape "$tmp/cx3j-round12.sh")
+if [ "$_got" != OK ]; then
+  ok "case (cx3j control): the ROUND-12 shape this round replaced is caught ($_got)"
+else
+  bad 'case (cx3j control): the round-12 shape read OK — the structural assert would not have caught the reported blocker'
+fi
+# A function that is absent must read NOT-FOUND rather than OK, or a rename would pass vacuously.
+_got=$(cx3j_shape "$ORACLES_SRC" roborev_no_such_function_exists)
+if [ "$_got" = NOT-FOUND ]; then
+  ok 'case (cx3j control): an ABSENT function reads NOT-FOUND, never OK (a rename cannot pass vacuously)'
+else
+  bad "case (cx3j control): an absent function read '$_got' — the shape check can pass on nothing"
+fi
+# THE ASSERT ITSELF.
+cx3j_got=$(cx3j_shape "$ORACLES_SRC")
+if [ "$cx3j_got" = OK ]; then
+  ok 'case (cx3j): roborev_path_exec_state has no break/continue and exactly ONE return, last — no endpoint can be skipped'
+else
+  bad "case (cx3j): roborev_path_exec_state's shape reads '$cx3j_got' — an endpoint can be skipped again"
+fi
+# The per-endpoint predicate must stay RANGE-BLIND: if it learns about BASE_SHA it can express
+# a precedence again, which is the ambiguity the split exists to remove.
+cx3j_pred=$(awk '
+  /^_roborev_mode_exec_state_at\(\) \{/ { inf = 1 }
+  inf { print }
+  inf && /^\}/ { exit }
+' "$ORACLES_SRC")
+if [ -z "$cx3j_pred" ]; then
+  bad 'case (cx3j): _roborev_mode_exec_state_at was not found, so its range-blindness was not checked'
+else
+  if ! printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' | grep -qE 'BASE_SHA|\bHEAD\b'; then
+    ok 'case (cx3j): the per-endpoint predicate names no endpoint (range-blind, so it cannot encode an ordering)'
+  else
+    bad 'case (cx3j): _roborev_mode_exec_state_at references a specific endpoint — it can encode a precedence again'
+  fi
+fi
+
+printf '== case (cx3k): the TRI-VALUED LEAF — a FAILED measurement is not a measured NO ==\n'
+# THE ROUND-14 BLOCKER, and the NINTH instance on this PR of "could not measure" rendered as
+# "nothing wrong". The round-13 leaf was `record=$(git ls-tree …) || return 1`, so a FAILED lookup
+# returned the SAME value as a measured non-executable and a genuinely executable file classified
+# as PROSE on an infra fault — dropped from `census_code_paths`, asserted about by nothing, green
+# summary. The level-shift is the lesson: round 13 made the FOLD order-independent by construction
+# while leaving the LEAF two-valued, so it proved the right property ONE LEVEL TOO HIGH. A boolean
+# cannot express "I could not tell", so it must collapse uncertainty onto the permissive side.
+#
+# The probe is `cx3h_probe`, reused unchanged: it already prints THREE distinct outcome words, so
+# it can express the state under test. Fault injection is `REPO` pointed at a directory that is
+# NOT a git repository — the reviewer's own reproduction, and the honest shape of the condition
+# (every `ls-tree` fails; no other git call is involved in this function).
+cx3k_run() { # cx3k_run <oracles> <repo> <base> -> writes stdout to $tmp/cx3k-<tag>.txt
+  bash "$cx3h_probe" "$1" "$2" "$3" >"$tmp/cx3k-$4.txt" 2>"$tmp/cx3k-$4.err"
+}
+cx3k_want() { # cx3k_want <tag> <label> <path> <expected-word>
+  if grep -q "^$(printf '%s\t%s' "$3" "$4")" "$tmp/cx3k-$1.txt"; then
+    ok "case (cx3k/$1): $3 => $4 — $2"
+  else
+    bad "case (cx3k/$1): $3 => want $4, got '$(grep -F "$3" "$tmp/cx3k-$1.txt" | head -1)' — $2"
+  fi
+}
+cx3k_notrepo="$tmp/cx3k-not-a-git-repo"
+mkdir -p "$cx3k_notrepo"
+
+# --- (1) and (2): the two REGRESSION/MINIMALITY controls, on the valid repo. These are the same
+# subjects the cx3h matrix covers, re-asserted here so the four cx3k rows are read as one table:
+# a "fix" that returned CODE unconditionally — or UNMEASURABLE unconditionally — fails here.
+cx3k_run "$ORACLES_SRC" "$cx3h_work" "$cx3h_base" valid
+cx3k_want valid 'a valid repo still measures an executable'            both-exec   CODE
+cx3k_want valid 'a valid repo still measures NON-executable prose'     both-plain  NON-CODE
+# --- (3): `ls-tree` SUCCEEDED and returned NO RECORD. A REAL measurement of absence, and it must
+# stay on the measured side or the added/deleted endpoint combinations (cx3d, cx3h) break.
+cx3k_want valid 'ls-tree SUCCEEDED with no record is MEASURED-absent, not unmeasurable' \
+  absent-everywhere NON-CODE
+
+# --- (4): `ls-tree` FAILS AT BOTH ENDPOINTS for a genuinely EXECUTABLE path. `both-exec` is
+# recorded 100755 at both endpoints of the real fixture (asserted above by cx3h), so the ONLY
+# variable is that the lookup cannot run.
+cx3k_run "$ORACLES_SRC" "$cx3k_notrepo" "$cx3h_base" both-unmeasurable
+cx3k_want both-unmeasurable 'a genuinely executable path with BOTH lookups failing is UNMEASURABLE, never a quiet NON-CODE' \
+  both-exec UNMEASURABLE
+if grep -q '^both-exec	UNMEASURABLE.*not a git repository\|^both-exec	UNMEASURABLE.*cannot change to\|^both-exec	UNMEASURABLE.*fatal' "$tmp/cx3k-both-unmeasurable.txt"; then
+  ok "case (cx3k/both-unmeasurable): the unmeasurable refs carry git's OWN message, so the operator is told why"
+else
+  bad "case (cx3k/both-unmeasurable): no git message was recorded: '$(grep -F both-exec "$tmp/cx3k-both-unmeasurable.txt" | head -1)'"
+fi
+# BOTH DIRECTIONS on the injector itself: it must NOT make everything unmeasurable by accident of
+# how the probe is invoked — `both-plain` is unmeasurable here too (correctly, the whole repo is
+# unreadable), so the discriminating control is the VALID run above reading NON-CODE for it.
+cx3k_want both-unmeasurable 'and a non-executable path is unmeasurable too — the fault is the REPO, not the path' \
+  both-plain UNMEASURABLE
+
+# --- (5): `ls-tree` fails at ONE endpoint only. THE LATTICE IS THE ANSWER, and it is pinned in
+# BOTH sub-directions, because a single row could be satisfied by either a fail-open or a
+# fail-closed-on-everything implementation:
+#     exec@HEAD    + unmeasurable@BASE  => CODE          (EXEC dominates UNMEASURABLE)
+#     NOT-exec@HEAD + unmeasurable@BASE => UNMEASURABLE  (UNMEASURABLE dominates NOT-EXEC)
+# EXEC dominating is SOUND, not lenient: the rule is a DISJUNCTION over the endpoints, so positive
+# evidence at one endpoint settles it — whatever the failed endpoint would have said could only be
+# another "yes", and no "yes" un-satisfies a disjunction. NOT-EXEC does NOT dominate, because
+# "executable at NEITHER endpoint" is a claim about EVERY endpoint and one unmeasured endpoint
+# leaves it unfounded. So non-code stays reachable ONLY from a positive measurement everywhere.
+cx3k_run "$ORACLES_SRC" "$cx3h_work" 0000000000000000000000000000000000000000 one-unmeasurable
+cx3k_want one-unmeasurable 'exec at the measurable endpoint DOMINATES an unmeasurable one (a disjunction cannot be un-satisfied)' \
+  both-exec CODE
+cx3k_want one-unmeasurable 'NON-exec at the measurable endpoint yields UNMEASURABLE — "exec at NEITHER" is a claim about EVERY endpoint' \
+  both-plain UNMEASURABLE
+for _tag in valid both-unmeasurable one-unmeasurable; do
+  if [ -s "$tmp/cx3k-$_tag.err" ]; then
+    bad "case (cx3k/$_tag): the classifier wrote to stderr: $(head -2 "$tmp/cx3k-$_tag.err")"
+  else
+    ok "case (cx3k/$_tag): the classifier produced NO stderr (git's message is captured, not leaked)"
+  fi
+done
+
+printf '== case (cx3k-mut): MUTATION — the leaf reverted to TWO-VALUED must go RED ==\n'
+# The mutation that matters is not "break the function", it is "restore the exact prior shape".
+# `|| return 1` in place of the tri-valued failure branch is the round-13 code verbatim, and under
+# it every UNMEASURABLE row above reads NON-CODE — a genuinely executable file called prose because
+# the lookup failed. If this mutant did NOT flip those rows, the cx3k asserts would be measuring
+# nothing.
+cx3k_mut="$tmp/cx3k-two-valued-oracles.sh"
+python3 - "$ORACLES_SRC" "$cx3k_mut" <<'CX3KM' || bad 'case (cx3k-mut): could not build the two-valued mutant'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src, encoding='utf-8').read()
+# The tri-valued failure branch, replaced by the round-13 two-valued spelling: a FAILED lookup
+# returns the SAME value as a measured non-executable.
+old = '''  errfile=$(mktemp "${TMPDIR:-/tmp}/roborev-exec-state.XXXXXX") || return 2
+  rc=0
+  record=$(git -C "$REPO" ls-tree "$ref" -- ":(literal)$path" 2>"$errfile") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+'''
+if s.count(old) != 1:
+    sys.exit('expected exactly one tri-valued failure branch, found %d' % s.count(old))
+new = '''  errfile=$(mktemp "${TMPDIR:-/tmp}/roborev-exec-state.XXXXXX") || return 1
+  rc=0
+  record=$(git -C "$REPO" ls-tree "$ref" -- ":(literal)$path" 2>"$errfile") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$errfile"
+    return 1
+  fi
+  if false; then
+'''
+open(dst, 'w', encoding='utf-8').write(s.replace(old, new, 1))
+CX3KM
+if grep -qF 'if false; then' "$cx3k_mut" && ! grep -qF 'if false; then' "$ORACLES_SRC"; then
+  ok 'case (cx3k-mut): the two-valued mutant was really applied to the COPY only'
+else
+  bad 'case (cx3k-mut): the mutant was NOT applied (or leaked into the real file), so nothing was mutation-tested — a green here would be a probe failing toward success'
+fi
+cx3k_run "$cx3k_mut" "$cx3h_work" "$cx3h_base" mut-valid
+cx3k_run "$cx3k_mut" "$cx3k_notrepo" "$cx3h_base" mut-unmeasurable
+# THE RED: the mutant calls a genuinely executable, genuinely unmeasurable path PROSE.
+cx3k_want mut-unmeasurable 'the two-valued leaf collapses UNMEASURABLE onto the permissive side' \
+  both-exec NON-CODE
+# NOT UNIFORMLY BROKEN: on the valid repo the mutant still classifies correctly, so the row above
+# is the tri-value distinction and not a mutant that stopped working.
+cx3k_want mut-valid 'the mutant still measures a valid repo correctly (it lost the third state, not the function)' \
+  both-exec CODE
+# RESTORED GREEN, re-measured after the mutant, so a stray in-place edit cannot pass unnoticed.
+cx3k_run "$ORACLES_SRC" "$cx3k_notrepo" "$cx3h_base" restored
+if diff -q "$tmp/cx3k-both-unmeasurable.txt" "$tmp/cx3k-restored.txt" >/dev/null; then
+  ok 'case (cx3k-mut): the UNMUTATED oracles file still reports UNMEASURABLE (no mutant leaked into it)'
+else
+  bad 'case (cx3k-mut): the unmutated result changed after the mutation run — a mutant leaked into the real file'
+fi
+
+printf '== case (cx3l): END-TO-END — an unmeasurable mode FAILS the run CLOSED and NAMES the path ==\n'
+# The unit rows above pin the lattice; this pins the CONSEQUENCE, through the wrapper's own summary
+# block, which is the only surface a consumer reads. An unmeasurable classification must not be
+# spendable as prose (`code-free: FAIL`, which would read "docs-only, nothing to review") and must
+# not be spendable as a pass — it is a THIRD outcome and it fails closed on `census-check:`.
+#
+# FAULT INJECTION: a `git` shim, first on PATH, that forwards every subcommand to the real binary
+# EXCEPT `ls-tree`, which fails. Scoped and honest — `ls-tree` has exactly ONE caller in the whole
+# wrapper (the leaf), so nothing else in the run is perturbed, and the wrapper's own rev-parse /
+# ls-remote / diff still work. Pointing `--repo` at a non-repo (the unit injector) cannot be used
+# here: the wrapper would fail at push-assert long before the census.
+cx3l_bin="$tmp/cx3l-bin"
+mkdir -p "$cx3l_bin"
+cx3l_real_git=$(command -v git)
+cat >"$cx3l_bin/git" <<CX3L
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = ls-tree ]; then
+    printf 'fatal: injected ls-tree failure (cx3l fault injection)\n' >&2
+    exit 128
+  fi
+done
+exec "$cx3l_real_git" "\$@"
+CX3L
+chmod +x "$cx3l_bin/git"
+# THE CONTROL FIRST, AND IT IS NOT OPTIONAL. An assert that the shimmed run FAILs is satisfied by a
+# shim that broke the run for some other reason, which is a probe failing in the direction that
+# looks like success. So the SAME fixture is shown to reach PASS with the shim absent — one
+# variable, `ls-tree`.
+reset_stub
+work=$(make_fixture case_cx3l docs-extensionless-exec)
+assert_tracked_mode 'case (cx3l) fixture' "$work" HEAD docs/reports/x-artifacts/ws0-results/ws0-readbw 100755
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx3l control) the SAME fixture without the shim reaches PASS' PASS 0
+assert_says 'case (cx3l control) census-check PASSes when ls-tree works' '^census-check: PASS$'
+assert_enqueued 'case (cx3l control)'
+# NOW the one variable.
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/ws0-results/ws0-readbw b/docs/reports/x-artifacts/ws0-results/ws0-readbw\ndiff --git a/docs/reports/x-artifacts/harness/plain.sh b/docs/reports/x-artifacts/harness/plain.sh'
+WRAPPER_PATH_PREFIX="$cx3l_bin"
+run_wrapper "$work"
+WRAPPER_PATH_PREFIX=""
+assert_verdict 'case (cx3l)' FAIL 1
+# The two EXTENSIONLESS paths (`ws0-readbw` 100755, `NOTICE` 100644) are the only ones whose
+# classification consults the mode, so exactly 2 of the 4 census files are unmeasurable. The
+# count is the assertion: a fix that failed closed on EVERY path would read 4 of 4.
+assert_says 'case (cx3l) census-check FAILs closed and counts the unmeasurable paths' \
+  '^census-check: FAIL \(recorded mode unmeasurable for 2 of 4 census paths\)$'
+assert_says 'case (cx3l) the genuinely EXECUTABLE path is NAMED, with the endpoint ref and git.s own message' \
+  '^  docs/reports/x-artifacts/ws0-results/ws0-readbw @ .*injected ls-tree failure'
+assert_says 'case (cx3l) the range endpoints are named as the refs that could not be measured' \
+  '^  docs/reports/x-artifacts/ws0-results/ws0-readbw @ HEAD: .*[0-9a-f]{40}: '
+assert_says 'case (cx3l) the wording says WE COULD NOT TELL, never NOTHING WAS WRONG' \
+  "an unmeasurable mode is 'we cannot tell', never 'there is nothing wrong'"
+# THE MISATTRIBUTION DIRECTIONS, both barred. Not a pass, and not "docs-only" either.
+assert_lacks 'case (cx3l) never a PASS' '^RESULT: PASS'
+assert_lacks 'case (cx3l) never census-check PASS' '^census-check: PASS'
+assert_lacks 'case (cx3l) NEVER spent as a code-free/docs-only diff' '^code-free: FAIL'
+assert_lacks 'case (cx3l) and never NOTHING-TO-REVIEW' '^RESULT: NOTHING-TO-REVIEW'
+assert_never_enqueued 'case (cx3l)'
+assert_one_result_line 'case (cx3l)'
+
+printf '== case (cx6): a census path with SPACES and a literal quote compares correctly ==\n'
+reset_stub
+# NUL-safety. `git diff --numstat` C-QUOTES this path while `-z` output does not, so an
+# un-normalised comparison would report a SURVIVING path as swallowed (a false FAIL) —
+# the direction that gets a guard bypassed.
+work=$(make_fixture case_cx6 docs-odd-name)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/docs/reports/x-artifacts/harness/odd "q" name.sh b/docs/reports/x-artifacts/harness/odd "q" name.sh'
+run_wrapper "$work"
+# ASSERT THE VERDICT, not just one key (#3229 round 3, blocker F3). This case used to
+# assert a single key and therefore reported `ok` twice while the SAME hostile path
+# false-FAILed `prompt-content:` (MEASURED: one key reporting `PASS (2/2 …)` beside
+# `prompt-content: FAIL (1/2 absent)`, `RESULT: FAIL`) — a case that passes while the
+# behaviour it names is broken is worse than no case at all.
+assert_verdict 'case (cx6)' PASS 0
+assert_says 'case (cx6) prompt-content compares the quoted census path against the prompt NORMALISED' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6) prompt-content does not false-FAIL on a quoting artefact' '^prompt-content: FAIL'
+
+printf '== case (cx6k): the same path in the header shape git REALLY emits for a quote ==\n'
+reset_stub
+# (cx6) hands the wrapper an UNQUOTED header carrying a literal `"` — a producer that is
+# not git. git itself C-QUOTES a quote-bearing path and ESCAPES the inner quotes:
+# `diff --git "a/…odd \"q\" name.sh" "b/…"`. Both readings must count as present, so the
+# escaped-quote round trip is pinned separately rather than assumed to follow from (cx6).
+work=$(make_fixture case_cx6k docs-odd-name)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git "a/docs/reports/x-artifacts/harness/odd \\"q\\" name.sh" "b/docs/reports/x-artifacts/harness/odd \\"q\\" name.sh"'
+run_wrapper "$work"
+assert_verdict 'case (cx6k)' PASS 0
+assert_says 'case (cx6k) the escaped-quote header shape counts as present' '^prompt-content: PASS \(2/2 code census paths present\)$'
+
+printf '== case (cx6c): a CODE path under a SPACE-bearing directory does not false-FAIL prompt-content ==\n'
+reset_stub
+# `docs/storage engine/` is a real tracked directory in this repo (40 space-bearing paths
+# under docs/), and this change promotes docs/-scoped executables to CODE census paths.
+# git does not quote a space-only path, so the header is `diff --git a/a b.sh b/a b.sh`,
+# which `a/[^ ]+ b/[^ ]+` cannot split — matched instead by probing the LITERAL header.
+work=$(make_fixture case_cx6c docs-space-dir)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git a/docs/storage engine/probe.sh b/docs/storage engine/probe.sh'
+run_wrapper "$work"
+assert_verdict 'case (cx6c)' PASS 0
+assert_says 'case (cx6c) prompt-content recognises the space-bearing diff header' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6c) prompt-content does not false-FAIL on a space' '^prompt-content: FAIL'
+
+printf '== case (cx6d): a NON-ASCII CODE path is compared through the C-QUOTED header shape ==\n'
+reset_stub
+# `git diff --numstat` renders the census path as `"docs/.../\303\251.sh"` and the diff
+# header roborev carries is `diff --git "a/docs/.../\303\251.sh" "b/..."`. BOTH sides go
+# through `roborev_unquote_path`, so the two spellings compare EQUAL. (The stub emits the
+# prompt through `printf %b`, hence the doubled backslashes here: they render as the
+# single-backslash octal escapes git actually writes.)
+work=$(make_fixture case_cx6d docs-nonascii-name)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs\ndiff --git "a/docs/reports/x-artifacts/\\303\\251.sh" "b/docs/reports/x-artifacts/\\303\\251.sh"'
+run_wrapper "$work"
+assert_verdict 'case (cx6d)' PASS 0
+assert_says 'case (cx6d) prompt-content recognises the C-quoted diff header' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6d) prompt-content does not false-FAIL on an octal-escaped path' '^prompt-content: FAIL'
+
+printf '== case (cx6e): a NON-ASCII PROSE path is classified by its RAW bytes, not its quoted spelling ==\n'
+reset_stub
+# #3229 round 4, BLOCKER F1. The census read `git diff --numstat` WITHOUT `-z`, so this
+# path arrived C-QUOTED and was classified by that spelling: extension `md"` (not `md`),
+# prefix `"docs/…` (not `docs/`) ⇒ a MARKDOWN FILE counted as CODE. `*.md` then legitimately
+# removes it from the reviewer's diff, so `prompt-content:` FAILed demanding a file the
+# configuration had already excluded — on an ORDINARY docs+code branch. REPRODUCED against
+# the repo's own tracked
+# `docs/research/CQLite Writes (M5) — Analysis & Recommended Paths.md`.
+# The pre-existing non-ASCII fixture is a `.sh` — CODE by accident — which is why no case
+# covered this. This one is deliberately PROSE.
+work=$(make_fixture case_cx6e docs-nonascii-prose)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx6e)' PASS 0
+assert_says 'case (cx6e) prompt-content has exactly the one code path to look for' '^prompt-content: PASS \(1/1 code census paths present\)$'
+
+printf '== case (cx6f): a NON-ASCII docs ARTIFACT is classified by its RAW bytes too ==\n'
+reset_stub
+# The same defect for the docs-scoped ARTIFACT half of the classification: quoted, the
+# extension reads `json"`, so a report artifact counted as CODE while `docs/**/*.json`
+# excludes it ⇒ the same false pre-enqueue FAIL on any report PR carrying a non-ASCII name.
+work=$(make_fixture case_cx6f docs-nonascii-artifact)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (cx6f)' PASS 0
+
+printf '== case (cx6g): a RENAME whose BOTH names carry a space is reachable ==\n'
+reset_stub
+# #3229 round 4, BLOCKER F2. The census runs `--no-renames` (two paths) while the
+# reviewer's diff has rename detection ON (confirmed: `--no-renames` is absent from the
+# roborev binary's strings), emitting ONE header `diff --git a/<old> b/<new>`. With a space
+# in each name, step (a)'s `[^ ]+` regex cannot split it, step (b) requires BOTH sides
+# quoted, and the literal fallback only probed the SAME-path header — so BOTH census sides
+# were reported absent and `prompt-content:` FAILed a correct review.
+work=$(make_fixture case_cx6g rename-space)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/storage engine/old probe.sh b/docs/storage engine/new probe.sh\nsimilarity index 100%'
+run_wrapper "$work"
+assert_verdict 'case (cx6g)' PASS 0
+assert_says 'case (cx6g) one rename header covers both space-bearing census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6g) prompt-content does not false-FAIL on a space-bearing rename' '^prompt-content: FAIL'
+
+printf '== case (cx6h): a MIXED-QUOTED rename header (only one side quoted) is reachable ==\n'
+reset_stub
+# BROADER than reported (round 4): when only ONE side needs quoting git emits
+# `diff --git a/<ascii> "b/<quoted>"`, which neither the unquoted regex nor the
+# both-sides-quoted parse can read. Mixed headers occur ONLY on renames, so this shape was
+# structurally unreachable. (Doubled backslashes: the stub renders the prompt with
+# `printf %b`, so `\\303` becomes the single-backslash octal escape git writes.)
+work=$(make_fixture case_cx6h rename-mixed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/docs/reports/x-artifacts/probe.sh "b/docs/reports/x-artifacts/\\303\\251 probe.sh"\nsimilarity index 100%'
+run_wrapper "$work"
+assert_verdict 'case (cx6h)' PASS 0
+assert_says 'case (cx6h) the mixed-quoted rename header covers both census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6h) prompt-content does not false-FAIL on a mixed-quoted header' '^prompt-content: FAIL'
+
+printf '== case (cx6i): a NEWLINE-bearing census path cannot be "proved present" by its first line ==\n'
+reset_stub
+# #3229 round 4, F3 (nit, fixed inside F2's edit). The prompt path set was
+# NEWLINE-DELIMITED and membership was `grep -Fxq`, so the census path `a<LF>b.rs` became
+# the two-alternative pattern {`a`, `b.rs`} and the presence of `a` alone reported
+# `prompt-content: PASS (2/2 present)` — a genuine FALSE PASS on a file the reviewer never
+# received. Membership is now judged PER HEADER in bash, with no delimiter at all.
+work=$(make_fixture case_cx6i newline-name)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/a b/a'
+run_wrapper "$work"
+assert_verdict 'case (cx6i)' FAIL 1
+assert_says 'case (cx6i) the newline path is reported ABSENT, not implied by its first line' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+
+printf '== case (cx6j): the same newline-bearing path IS matched when its header is present ==\n'
+reset_stub
+# The other direction, so (cx6i) cannot be satisfied by a blanket "newline ⇒ absent" rule:
+# with the C-quoted header git really emits for such a path, it must count as PRESENT.
+work=$(make_fixture case_cx6j newline-name)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/a b/a\ndiff --git "a/a\\nb.rs" "b/a\\nb.rs"'
+run_wrapper "$work"
+assert_verdict 'case (cx6j)' PASS 0
+assert_says 'case (cx6j) the quoted newline header counts as present' '^prompt-content: PASS \(2/2 code census paths present\)$'
+
+printf '== case (cx6l): a space-bearing header does not prove an UNRELATED census path ==\n'
+reset_stub
+# #3229 round 5, BLOCKER 1 — a FALSE PASS in prompt-content:, the merge gate itself.
+# REPRODUCED: `roborev_diff_header_has_path 'diff --git a/foo b/x b/foo b/x' foo` returned
+# PRESENT, because the old membership test `case $rest in "a/$want b/"*)` is a PREFIX test
+# and `a/foo b/` prefixes that header. So a repo tracking a file named `foo b/x` made the
+# UNRELATED path `foo` read as delivered to the reviewer — a false PASS in the exact
+# mechanism that certifies "the reviewer received the code". The prompt below carries ONLY
+# the `foo b/x` header, so `foo` MUST be reported absent.
+work=$(make_fixture case_cx6l ambiguous-space-pair)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/foo b/x b/foo b/x'
+run_wrapper "$work"
+assert_verdict 'case (cx6l)' FAIL 1
+assert_says 'case (cx6l) the unrelated path foo is reported ABSENT, not implied by a prefix' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_lacks 'case (cx6l) never reports a full-coverage PASS on one header' '^prompt-content: PASS'
+
+printf '== case (cx6m): an ambiguous RENAME header is resolved by its rename from/to lines ==\n'
+reset_stub
+# The mirror of (cx6l), and the reason the fix is not "prefer the equal split, full stop".
+# The header `diff --git a/p b/x b/p b/x` admits an EQUAL split (`p b/x` == `p b/x`) that is
+# NOT the true one, so equality alone reports BOTH real sides ABSENT (pinned as (cx6n)).
+# git never leaves a rename ambiguous: it writes `rename from` / `rename to`, one path per
+# line, and those lines are the authority the matcher resolves against.
+work=$(make_fixture case_cx6m rename-ambiguous)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/p b/x b/p b/x\nsimilarity index 100%\nrename from p\nrename to x b/p b/x\nindex e69de29..e69de29 100644'
+run_wrapper "$work"
+assert_verdict 'case (cx6m)' PASS 0
+assert_says 'case (cx6m) the rename from/to lines cover both census sides' '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx6m) no false FAIL on an ambiguous rename header' '^prompt-content: FAIL'
+
+printf '== case (cx6n): the SAME header WITHOUT rename lines cannot prove either side ==\n'
+reset_stub
+# So (cx6m) cannot be satisfied by anything other than the rename lines: strip them from the
+# very same prompt and the header admits an equal split that matches NEITHER census path, so
+# both must be reported absent. This is also the fail-closed direction of the (cx6l) fix —
+# an ambiguous non-rename reading is never allowed to stand in for a real delivery.
+work=$(make_fixture case_cx6n rename-ambiguous)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff:\ndiff --git a/p b/x b/p b/x\nindex e69de29..e69de29 100644'
+run_wrapper "$work"
+assert_verdict 'case (cx6n)' FAIL 1
+assert_says 'case (cx6n) without the rename lines neither side counts as present' '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+
+printf '== case (cx6p): a filename cannot FORGE a summary key or the verdict ==\n'
+reset_stub
+# #3229 round 5, BLOCKER 2. Census paths are ATTACKER-CONTROLLED (whatever a PR branch
+# tracks) and they are interpolated into LINE-ORIENTED summary values and DETAILS lines. A
+# newline-bearing filename therefore let a value SPAN LINES and inject `key:` lines — up to a
+# forged `RESULT: PASS` — into the very block flow-closer greps to decide whether to arm
+# `--auto`. Neutralised centrally at the emit boundary: control characters become visible
+# escapes, so no value and no DETAILS line can span a line.
+#
+# The surface it is exercised through is `prompt-content:` — the reviewer never receives the
+# forged path, so the key FAILs and NAMES it. (Until #3283's subject was removed this case
+# also went through a `census-exclusion:` FAIL value; the neutralisation being asserted is the
+# SAME central boundary, exercised through the surface that remains.)
+work=$(make_fixture case_cx6p newline-injection)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (cx6p)' FAIL 1
+assert_one_result_line 'case (cx6p)'
+assert_one_block 'case (cx6p)'
+assert_lacks 'case (cx6p) no forged RESULT: PASS anywhere in the output' '^RESULT: PASS'
+assert_lacks 'case (cx6p) no forged prompt-content PASS' '^prompt-content: PASS'
+assert_says 'case (cx6p) prompt-content reports the forged path as absent' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+# The path is still NAMED — neutralised, not dropped: the operator must be able to see WHICH
+# file the reviewer did not get, on ONE line, with its newlines shown as visible escapes.
+assert_says 'case (cx6p) the absent path is named with its newlines escaped, on one line' \
+  '^  docs/reports/x-artifacts/harness/inj\\nRESULT: PASS\\nprompt-content: PASS\\nx\.sh$'
+
+printf "== case (cx21): prompt-content: can NEVER emit a 0/0 PASS (direct unit probe) ==\n"
+# A STRUCTURAL backstop, exercised DIRECTLY because the wrapper refuses the condition
+# upstream: `code-free:` FAILs pre-enqueue on a census with no CODE path, so this branch is
+# unreachable through the normal ordering — and that is exactly why it is probed directly.
+# With no subject left, `PASS (0/0 code census paths present)` would be indistinguishable
+# from a genuine pass, so the key must refuse to print one whatever happened upstream.
+# Driven through the real function in the real files, so a future change to the upstream
+# ordering cannot silently restore the vacuous PASS. (`CHECKS_SRC`/`ORACLES_SRC` are set at the
+# top of this file — several direct probes need them.)
+cx21_probe="$tmp/cx21-probe.sh"
+cx21_out="$tmp/cx21-out.txt"
+cat >"$cx21_probe" <<'CX21'
+set -uo pipefail
+. "$1"   # oracles (roborev_unquote_path)
+. "$2"   # checks  (roborev_check_prompt_content)
+LOG="$3/cx21.log"
+PROMPT_FILE="$LOG.prompt"
+printf 'Review this diff:\ndiff --git a/main.rs b/main.rs\n' >"$PROMPT_FILE"
+CENSUS='2 files, +2/-0'
+BASE='origin/main'
+JOB=4600
+# NO code census path at all — the zero-subject condition, reached without any reference to
+# any exclusion mechanism.
+census_code_paths=()
+DETAILS=()
+PROMPT_CONTENT=""
+roborev_check_prompt_content
+printf 'prompt-content: %s\n' "$PROMPT_CONTENT"
+CX21
+if bash "$cx21_probe" "$ORACLES_SRC" "$CHECKS_SRC" "$tmp" >"$cx21_out" 2>&1; then
+  if grep -qE '^prompt-content: FAIL \(no code census path was checkable — a 0/0 is never a pass\)$' "$cx21_out"; then
+    ok 'case (cx21): a zero-subject prompt-content is a FAIL, with the reason in the value line'
+  else
+    bad "case (cx21): expected the 0/0 refusal, got '$(cat "$cx21_out")'"
+  fi
+  if grep -qE '^prompt-content: PASS \(0/0' "$cx21_out"; then
+    bad 'case (cx21): prompt-content emitted the vacuous PASS (0/0 ...) form'
+  else
+    ok 'case (cx21): prompt-content never emits PASS (0/0 ...)'
+  fi
+else
+  bad "case (cx21): the unit probe did not run: $(cat "$cx21_out")"
+fi
+
+printf '== case (cx28): the verdict grammar is CLOSED — an UNRECOGNISED value FAILs, it does not inherit PASS ==\n'
+reset_stub
+# THE GENERAL SHAPE, closed at the wrapper's single most consequential decision point
+# (#3229 round-10 sweep). Three defects on this issue were ONE shape: a multi-state signal
+# where only the BAD states are tested, so every unknown/unmeasured state inherits the
+# PERMISSIVE branch (a three-state `built-in-set:` signal took the permissive excusal path —
+# that subsystem is since deleted, #3278; `corroboration: UNAVAILABLE` reached a PASS —
+# cx27a; a `${_census_end:-…}` fallback degraded a failed measurement to a 1-line scan). The
+# verdict scan itself was the
+# same shape: four failing prefixes tested, EVERYTHING else fell through to `finish PASS 0`.
+#
+# This case runs a PATCHED COPY of the three flow scripts in which ONE check reports a value
+# outside the documented grammar — the observable signature of a check that aborted before
+# assigning, or that invented a state the scan has never judged. It must FAIL and name itself.
+#
+# THE CONTROL RUNS FIRST, AND IT IS NOT OPTIONAL: an assert that a copy FAILs is satisfied by
+# a copy that fails because it was copied wrong (a missing sibling file, a bad path), which is
+# a probe failing in the direction that looks like success. So the UNPATCHED copy is shown to
+# reach PASS on the same fixture before the patch is applied, and the patch is verified to have
+# CHANGED the file before its run is believed.
+_gm_dir="$tmp/grammar-mutant"
+mkdir -p "$_gm_dir"
+cp "$WRAPPER" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_gm_dir/"
+fi
+work=$(make_fixture case_cx28 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+_gm_real_wrapper="$WRAPPER"
+WRAPPER="$_gm_dir/roborev-review.sh"
+run_wrapper "$work"
+assert_verdict 'case (cx28 control) the UNPATCHED copy reaches PASS' PASS 0
+assert_lacks 'case (cx28 control) and reports no grammar violation' 'verdict-grammar'
+# ONE key, ONE value, outside the grammar. `MEASUREMENT-DID-NOT-HAPPEN` is deliberately not a
+# near-miss of a recognised prefix, so the case pins the ALLOW-LIST rather than a spelling.
+if sed -i 's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' \
+  "$_gm_dir/roborev-review-checks.sh" &&
+  grep -qF 'TIER1="MEASUREMENT-DID-NOT-HAPPEN"' "$_gm_dir/roborev-review-checks.sh"; then
+  ok 'case (cx28): the unrecognised-verdict patch was really applied to the copy'
+  run_wrapper "$work"
+  assert_verdict 'case (cx28)' FAIL 1
+  assert_says 'case (cx28) the unrecognised value is named under its own diagnostic' "^ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: 'MEASUREMENT-DID-NOT-HAPPEN'\. "
+  assert_says 'case (cx28) it explains that an unplanned value must not inherit the non-failing branch' 'rather than letting the unplanned value inherit the non-failing branch'
+  assert_says 'case (cx28) an empty value is called out as the same defect' "An EMPTY value \(''\) is this same defect"
+  assert_says 'case (cx28) the unrecognised value still reaches the block, never silently' '^vacuity-tier1: MEASUREMENT-DID-NOT-HAPPEN$'
+else
+  bad 'case (cx28): could not patch the copied checks file, so the unrecognised-verdict path was never exercised (a green run here would be a probe failing in the direction that looks like success)'
+fi
+
+printf '== case (cx29): a check that never ran cannot ride to PASS on its initial SKIP ==\n'
+# The neighbouring hazard to cx28: a value that IS in the grammar and IS non-failing, but is
+# not a MEASUREMENT. The wrapper validates that the checks file DEFINES its five functions —
+# which proves they exist, not that each reached its assignment. A check that returns early
+# leaves its key at the initial `SKIP`, and before the round-10 backstop the run PASSED with a
+# verdict-carrying key that had measured nothing: the vacuous pass this wrapper exists to
+# prevent, textually identical to a genuine one.
+#
+# The patch makes `roborev_check_prompt_content` — the STRONGEST anti-vacuity key — return
+# before assigning anything, which is exactly what an aborted helper or a stray `return` in a
+# new branch looks like. cx28's control (the unpatched copy PASSes on this fixture) is the
+# both-directions control for this case too; the patch is verified applied before it is run.
+sed -i 's/^roborev_check_prompt_content() {$/roborev_check_prompt_content() {\n  return 0/' \
+  "$_gm_dir/roborev-review-checks.sh"
+# VERIFIED, not assumed: the `return 0` must be the line IMMEDIATELY AFTER the function
+# header. A sed that matched nothing leaves a copy identical to the control, and this case
+# would then be asserting against an unpatched wrapper — a probe failing in the
+# direction that looks like success.
+_gm_patched=$(grep -A1 '^roborev_check_prompt_content() {$' "$_gm_dir/roborev-review-checks.sh" \
+  | sed -n '2p')
+if [ "$_gm_patched" = '  return 0' ]; then
+  # Undo cx28's patch so the ONLY grammar-relevant difference is the un-run check.
+  sed -i 's/^    TIER1="MEASUREMENT-DID-NOT-HAPPEN"$/    TIER1="PASS"/' \
+    "$_gm_dir/roborev-review-checks.sh"
+  ok 'case (cx29): the early-return patch was really applied to the copy'
+  run_wrapper "$work"
+  assert_verdict 'case (cx29)' FAIL 1
+  assert_says 'case (cx29) the un-run key is named as never having affirmatively passed' "^ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — prompt-content: 'SKIP'\. "
+  assert_says 'case (cx29) it states that a non-measurement is the vacuous pass itself' 'a non-failing value that is not a measurement'
+  assert_says 'case (cx29) it points the reader at the wrapper, not the branch under review' 'NOT something to fix in the branch under review'
+  assert_says 'case (cx29) the un-run key is visible in the block' '^prompt-content: SKIP$'
+  assert_lacks 'case (cx29) and the grammar check does not misreport it as unrecognised' 'verdict-grammar'
+else
+  bad 'case (cx29): could not patch the copied checks file for an early return, so the never-ran-check path was never exercised'
+fi
+WRAPPER="$_gm_real_wrapper"
+
+# ===========================================================================
+# (cx28b/cx28c): THE CLOSURE MUST NOT ITSELF BE A PREFIX TEST (#3229 round-11 M3).
+#
+# cx28 pins that a value OUTSIDE the allow-list FAILs. It cannot see the neighbouring
+# defect, because its mutant (`MEASUREMENT-DID-NOT-HAPPEN`) is deliberately NOT a
+# near-miss: the scan matched `PASS*` / `SKIP*` / … as PREFIX GLOBS, so any value merely
+# BEGINNING with a recognised token was accepted AS that token and rode to `RESULT: PASS`.
+# The closure was therefore checking a SPELLING, not a state — the same "absence of a bad
+# word is not evidence of a good outcome" error it was written to remove, reintroduced
+# inside itself one level down.
+#
+# TWO MUTANTS, both NEAR-PREFIXES of `PASS`, run through cx28's harness (whose UNPATCHED
+# control already showed this fixture reaches PASS):
+#   cx28b  PASSthisNeverRan             — a token glued to more characters, no separator
+#   cx28c  PASS-MEASUREMENT-DID-NOT-HAPPEN — a token followed by a hyphenated state name
+# Under the prefix form BOTH were accepted silently. Under exact token matching both are
+# UNRECOGNISED and fail closed. `vacuity-tier1:` is the mutation site deliberately: it is in
+# the grammar scan but NOT in the affirmation backstop, so a green here could ONLY come from
+# the grammar arm — no other check can rescue the assert.
+# ===========================================================================
+for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
+  _np_label="${_np_case%%:*}"
+  _np_value="${_np_case#*:}"
+  printf '== case (%s): the near-prefix value %s is UNRECOGNISED, not a PASS ==\n' "$_np_label" "$_np_value"
+  reset_stub
+  # Restore the copy to the control state, then apply ONLY this mutation.
+  sed -i 's/^roborev_check_prompt_content() {\n  return 0$/roborev_check_prompt_content() {/' \
+    "$_gm_dir/roborev-review-checks.sh"
+  cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
+  work=$(make_fixture "case_$_np_label" pushed)
+  STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+  WRAPPER="$_gm_dir/roborev-review.sh"
+  # THE CONTROL, per case: the restored copy must reach PASS on this fixture, or a FAIL below
+  # would prove nothing about the mutation.
+  run_wrapper "$work"
+  assert_verdict "case ($_np_label control) the restored copy reaches PASS" PASS 0
+  if sed -i "s/^    TIER1=\"PASS\"\$/    TIER1=\"$_np_value\"/" \
+    "$_gm_dir/roborev-review-checks.sh" &&
+    grep -qF "TIER1=\"$_np_value\"" "$_gm_dir/roborev-review-checks.sh"; then
+    ok "case ($_np_label): the near-prefix patch was really applied to the copy"
+    run_wrapper "$work"
+    assert_verdict "case ($_np_label)" FAIL 1
+    assert_says "case ($_np_label) the near-prefix value is named as OUTSIDE the grammar" \
+      "^ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: '$_np_value'\. "
+    assert_says "case ($_np_label) the diagnostic states that the token is matched exactly" \
+      'the token is matched EXACTLY, up to the value.s first space'
+    assert_says "case ($_np_label) the value still reaches the block, never silently" \
+      "^vacuity-tier1: $_np_value\$"
+    assert_lacks "case ($_np_label) and it never reads as a PASS" '^RESULT: PASS'
+  else
+    bad "case ($_np_label): could not patch the copied checks file, so the near-prefix path was never exercised (a green run here would be a probe failing in the direction that looks like success)"
+  fi
+  WRAPPER="$_gm_real_wrapper"
+done
+cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
@@ -1098,7 +2589,10 @@ CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
 INVOKED="$tmp/invoked-$CASE_N.txt"
 : >"$INVOKED"
-STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --repo "$tmp/case_t7/work" \
+# HOME is redirected for the same reason `run_wrapper` does it: a hand-rolled invocation
+# must be as hermetic as the helper, so a host `$HOME/.roborev/` can never influence it.
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+  bash "$WRAPPER" --repo "$tmp/case_t7/work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (t7)' FAIL 1
@@ -1141,7 +2635,10 @@ CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
 INVOKED="$tmp/invoked-$CASE_N.txt"
 : >"$INVOKED"
-STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --repo "$work" \
+# HOME redirected (see case t7): hermeticity, so nothing on the host can fail this case on
+# the wrong key and leave the EXIT-trap assertion below unreached.
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+  bash "$WRAPPER" --repo "$work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/trapcase.log" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (t9)' FAIL 1
@@ -1615,7 +3112,443 @@ assert_says '--help states the probe expectation in range terms' 'reviewed-sha i
 assert_says '--help says the range must end in the worktree HEAD' 'ENDS IN that same head-sha'
 assert_lacks '--help no longer asks for reviewed-sha == head-sha' 'reviewed-sha == head-sha'
 assert_says '--help requires both agent and model' 'Both are required'
+# #3229: the RETAINED facts about how roborev drops paths. The mechanism statement stays —
+# it is what stops the falsified "roborev filters non-code" claim coming back — while the
+# key that once PREDICTED the effective exclusion set is gone (#3283).
+assert_says '--help states the CORRECTED mechanism, not the falsified one' 'roborev drops exactly what its'
+assert_lacks '--help never restates the falsified claim' '[Ee]xcludes non-code paths'
+assert_says '--help defines docs-only as a code-free CENSUS, not a path prefix' 'CENSUS as code-free: classifies it, NEVER a .docs/. path prefix'
+assert_says '--help names the harness convention as reviewed code' 'docs/reports/\*-artifacts/ are executable code'
+# THE REMOVAL, ASSERTED IN THE DOCUMENTED OUTPUT CONTRACT (#3229 owner ruling / #3283). A
+# `--help` that still documents a key the wrapper cannot emit is a claim of coverage that does
+# not exist — the failure direction that reads as coverage — so every trace of the deleted
+# oracle's grammar must be absent, not merely unexercised.
+assert_lacks '--help no longer documents the census-exclusion key' 'census-exclusion'
+assert_lacks '--help no longer names the ported Go function' 'FormatExcludeArgs'
+assert_lacks '--help no longer documents the swallowed-paths FAIL grammar' 'code census paths excluded'
+assert_lacks '--help no longer documents the trailing-slash FAIL' 'trailing-slash pattern'
+assert_lacks '--help no longer documents the drift FAIL' 'exclusion set drift'
+assert_lacks '--help no longer documents the UNCORROBORATED FAIL' 'UNCORROBORATED'
+assert_lacks '--help no longer enumerates config sources it does not read' 'UNION OF THREE CONFIG FILES'
+assert_lacks '--help no longer documents a root-config source tag' '\[root-config\]'
+assert_lacks '--help no longer documents the built-in-set key' 'built-in-set:'
+assert_lacks '--help no longer documents a roborev-builtin source tag' '\[roborev-builtin\]'
+# The block's KEY CONTRACT is what readers grep, so --help must list exactly the keys the
+# wrapper emits.
+assert_says '--help still documents the prompt-content key' 'prompt-content'
 assert_never_enqueued '--help'
+
+printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
+# THE INVARIANT THAT STOPS THE NEXT ROUND (#3229 round 4). Rounds 2, 3 and 4 produced six
+# blockers and every one was a path-normalisation defect in a DIFFERENT consumer, because
+# normalisation was scattered: the census did not normalise at all, a since-deleted
+# consumer unquoted at one point, `prompt-content:` did something else again. Patching the reported
+# consumer each round is a losing game, so the boundary itself is asserted here:
+#   (1) every git path read is `-z`, so paths arrive RAW and there is nothing to unquote;
+#   (2) RAW is the single internal representation — no consumer unquotes a census path;
+#   (3) there is ONE unquoting implementation and ONE header matcher, with the unquoter
+#       called only from the matcher;
+#   (4) no consumer re-implements header parsing or newline-delimited path membership.
+ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
+CHECKS_FILE="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+FLOW_FILES=("$ORACLES" "$CHECKS_FILE" "$WRAPPER")
+for _f in "${FLOW_FILES[@]}"; do
+  if [ ! -f "$_f" ]; then bad "structural: missing $_f"; continue; fi
+  # (1) EVERY `git diff` that reads PATHS must be NUL-delimited. A `--numstat`/`--name-only`
+  #     read without `-z` C-quotes odd paths and re-creates the whole defect class.
+  _bad_reads=$(grep -nE 'git .*diff .*(--numstat|--name-only)' "$_f" \
+    | grep -v '^[0-9]*: *#' | grep -vF -- ' -z ' || true)
+  if [ -z "$_bad_reads" ]; then
+    ok "structural: every path-reading git diff in $(basename "$_f") is NUL-delimited (-z)"
+  else
+    bad "structural: a path-reading git diff without -z in $(basename "$_f"): ${_bad_reads%%$'\n'*}"
+  fi
+done
+# (2) + (3): the unquoter is DEFINED once and CALLED only from the canonical matcher.
+_unq_defs=$(grep -cE '^roborev_unquote_path\(\) \{' "$ORACLES" || true)
+if [ "${_unq_defs:-0}" -eq 1 ]; then
+  ok 'structural: roborev_unquote_path is defined exactly once, in the oracles file'
+else
+  bad "structural: expected exactly 1 definition of roborev_unquote_path, found ${_unq_defs:-0}"
+fi
+_unq_callers=$(grep -nE '(^|[^#])roborev_unquote_path ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" \
+  | grep -v '^[^:]*:[0-9]*: *#' || true)
+_unq_caller_files=$(printf '%s\n' "$_unq_callers" | sed -n 's|^\([^:]*\):.*|\1|p' | sort -u | wc -l | tr -d '[:space:]')
+if [ "${_unq_caller_files:-0}" -eq 1 ] && printf '%s' "$_unq_callers" | grep -qF 'roborev-review-oracles.sh'; then
+  ok 'structural: roborev_unquote_path is called ONLY from the oracles file (one boundary)'
+else
+  bad "structural: roborev_unquote_path is called from $_unq_caller_files file(s) — a second consumer normalises on its own"
+fi
+# Every call site must sit inside `roborev_diff_header_has_path`, the one place text we did
+# NOT get from git plumbing is normalised. Bounded by the next top-level function.
+_matcher_start=$(grep -nE '^roborev_diff_header_has_path\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+if [ -z "$_matcher_start" ]; then
+  bad 'structural: roborev_diff_header_has_path is not defined — the canonical matcher is gone'
+else
+  _matcher_end=$(awk -v s="$_matcher_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  _outside=0
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _n="${_line#*:}"; _n="${_n%%:*}"
+    case "$_line" in "$ORACLES":*) ;; *) _outside=$((_outside + 1)); continue ;; esac
+    if [ "$_n" -lt "$_matcher_start" ] || [ "$_n" -gt "${_matcher_end:-$_matcher_start}" ]; then
+      _outside=$((_outside + 1))
+    fi
+  done <<<"$_unq_callers"
+  if [ "$_outside" -eq 0 ]; then
+    ok "structural: every roborev_unquote_path call is inside roborev_diff_header_has_path (lines $_matcher_start-${_matcher_end:-?})"
+  else
+    bad "structural: $_outside roborev_unquote_path call(s) outside the canonical matcher"
+  fi
+fi
+# (4) no consumer re-implements header parsing or newline-delimited membership. These are
+#     the exact three mechanisms that were wrong: a `[^ ]+` header regex, a `.promptpaths`
+#     path-set file, and `grep -Fxq` membership over newline-delimited paths.
+# COMMENT LINES ARE EXEMPT: the file DOCUMENTS what was retired and why, which is the
+# record that keeps a future edit from reintroducing it. Only executable lines are checked.
+for _pat in 'diff --git a/\[\^ \]' 'promptpaths' 'grep -Fxq'; do
+  if grep -nE -- "$_pat" "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+    bad "structural: roborev-review-checks.sh still EXECUTES the retired mechanism '$_pat'"
+  else
+    ok "structural: the retired mechanism '$_pat' is not executed by roborev-review-checks.sh"
+  fi
+done
+if grep -qE '^ *if roborev_diff_header_has_path ' "$CHECKS_FILE"; then
+  ok 'structural: prompt-content decides membership through the canonical matcher, per header'
+else
+  bad 'structural: prompt-content does not call roborev_diff_header_has_path — it has its own matcher again'
+fi
+# (5) HEADER COLLECTION lives with the matcher too (#3229 round 5, blocker 1). Resolving the
+#     header ambiguity needs the `rename from`/`rename to` lines that FOLLOW the header, so
+#     "which lines belong to a header" is header-shape knowledge — and this file must not
+#     grow a second, subtly different idea of the extended-header run. It therefore does no
+#     `diff --git` scanning of its own at all. Only a SCAN counts — the key's ERROR prose
+#     legitimately says the words "diff --git" when it explains what was looked for.
+if grep -nE '(grep|awk|sed|case)[^#]*diff --git' "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+  bad 'structural: roborev-review-checks.sh EXECUTES its own diff --git scan — header-shape knowledge must stay with the matcher in the oracles file'
+else
+  ok 'structural: roborev-review-checks.sh does no diff --git scanning of its own'
+fi
+_coll_defs=$(grep -cE '^roborev_collect_prompt_headers\(\) \{' "$ORACLES" || true)
+if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_prompt_headers "\$PROMPT_FILE"' "$CHECKS_FILE"; then
+  ok 'structural: the prompt headers (and their rename from/to lines) are collected by the oracles file'
+else
+  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not use it"
+fi
+# The matcher must resolve ambiguity from git's rename/copy lines, not positionally. Asserted
+# against the matcher body: a future edit that drops the rename-line branch and goes back to
+# a bare positional test is exactly blocker 1 reintroduced.
+if [ -n "$_matcher_start" ] && [ -n "${_matcher_end:-}" ]; then
+  _m_body=$(sed -n "${_matcher_start},${_matcher_end}p" "$ORACLES")
+  if printf '%s\n' "$_m_body" | grep -qE '\[ -n "\$from_tok" \] && \[ -n "\$to_tok" \]'; then
+    ok 'structural: the matcher resolves a rename/copy header from its from/to path tokens first'
+  else
+    bad 'structural: the matcher no longer resolves from the rename/copy from/to tokens — ambiguity would be guessed positionally again (#3229 blocker 1)'
+  fi
+  if printf '%s\n' "$_m_body" | grep -qE '"a/\$want b/"\*'; then
+    bad 'structural: the matcher is back to the PREFIX test `case $rest in "a/$want b/"*` — a tracked file named `foo b/x` would make the unrelated path `foo` read PRESENT (#3229 blocker 1)'
+  else
+    ok 'structural: the retired `"a/$want b/"*` prefix test is gone from the matcher'
+  fi
+  if printf '%s\n' "$_m_body" | grep -qE 'eq_seen'; then
+    ok 'structural: an ambiguous non-rename header is decided by the EQUAL split, not by position'
+  else
+    bad 'structural: the matcher has no equal-split resolution for an ambiguous header'
+  fi
+fi
+# The census must classify the RAW path. Asserted by the absence of any normalisation call
+# in the census loop AND by the `-z` read above: a quoted spelling reaching the extension
+# test is exactly blocker F1 (`docs/é notes.md` ⇒ ext `md"` ⇒ CODE).
+_census_start=$(grep -nE '^roborev_census\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+if [ -n "$_census_start" ]; then
+  _census_end=$(awk -v s="$_census_start" 'NR>s && /^  \}$/ {print NR; exit}' "$ORACLES")
+  # AN UNRESOLVED BOUND IS ITS OWN FAILURE, NEVER A SILENT 1-LINE RANGE. The previous
+  # `${_census_end:-$_census_start}` fallback degraded a failed/empty `awk` into a range of
+  # ONE line, in which the absence-assert below reads `ok` (nothing to find) while the
+  # presence-assert reds — a FLAKY FAIL that names the wrong defect and, in the other
+  # direction, an assert satisfied by scanning nothing. OBSERVED once under gate load, on a
+  # tree whose `read -r -d ''` is provably present. So the bound is verified before use.
+  if [ -z "$_census_end" ] || [ "$_census_end" -le "$_census_start" ]; then
+    bad "structural: the census body bounds could not be resolved (start $_census_start, end '${_census_end:-<none>}') — the range asserts below would scan nothing, so this is a failure to measure, not a measurement"
+  else
+    ok "structural: the census body bounds resolved (lines $_census_start-$_census_end)"
+    _census_body=$(sed -n "${_census_start},${_census_end}p" "$ORACLES")
+    if printf '%s\n' "$_census_body" | grep -q 'roborev_unquote_path '; then
+      bad 'structural: the census normalises inside its own loop — it must read raw paths instead (-z)'
+    else
+      ok 'structural: the census classifies the RAW path (no unquoting inside the census loop)'
+    fi
+    if printf '%s\n' "$_census_body" | grep -qF 'read -r -d '; then
+      ok 'structural: the census reads NUL-terminated records (a newline-bearing path survives)'
+    else
+      bad 'structural: the census does not read NUL-terminated records — a newline-bearing path would split'
+    fi
+  fi
+else
+  bad 'structural: roborev_census is not defined'
+fi
+
+printf '== structural: NO summary value or DETAILS line is emitted un-neutralised ==\n'
+# #3229 round 5, blocker 2. Behavioural case (cx6p) proves ONE path is neutralised; only a
+# structural assert can pin that EVERY value is, including keys that do not exist yet. A
+# per-site escape is a list to keep complete — the next value to grow a path interpolation
+# would silently reopen the hole — so the boundary is `emit_kv` + `finish`, and it is
+# asserted against the emitting statements themselves.
+_em_start=$(grep -nE '^emit_summary\(\) \{' "$WRAPPER" | head -1 | cut -d: -f1)
+_em_end=""
+[ -z "$_em_start" ] || _em_end=$(awk -v s="$_em_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER")
+if [ -z "$_em_start" ] || [ -z "$_em_end" ]; then
+  bad 'structural: could not locate the emit_summary() body to inspect'
+else
+  # Every executable line in the body is either the block BANNER or an `emit_kv` call.
+  _em_raw=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" \
+    | grep -vE '^[[:space:]]*(#|$)' \
+    | grep -vE "^[[:space:]]*emit_kv '" \
+    | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
+  if [ -z "$_em_raw" ]; then
+    ok "structural: every emit_summary value goes through emit_kv (lines $_em_start-$_em_end)"
+  else
+    bad "structural: emit_summary emits a value WITHOUT emit_kv, so a newline-bearing path could forge a key: ${_em_raw%%$'\n'*}"
+  fi
+  # 22 emit_kv lines = 21 keys + the terminal `RESULT:`, which goes through the SAME
+  # neutralising boundary. Was 23 before #3229's owner ruling removed `census-exclusion:`
+  # with its oracle (#3283).
+  _em_n=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" | grep -cE "^[[:space:]]*emit_kv '" || true)
+  if [ "${_em_n:-0}" -ge 22 ]; then
+    ok "structural: all $_em_n block lines (21 keys + RESULT:) are emitted through the neutralising boundary"
+  else
+    bad "structural: only ${_em_n:-0} emit_kv call(s) in emit_summary — the block has 21 keys plus RESULT:, so some are emitted another way"
+  fi
+fi
+if grep -qE '^[[:space:]]*roborev_safe_line "\$2"' "$WRAPPER"; then
+  ok 'structural: emit_kv neutralises its value before printing it'
+else
+  bad 'structural: emit_kv does not call roborev_safe_line — the boundary is decorative'
+fi
+# DETAILS reach the SAME stdout a reader greps for `^RESULT: `, so the bulk
+# `printf '%s\n' "${DETAILS[@]}"` (which prints a newline-bearing entry as several lines)
+# must be gone, replaced by a per-entry neutralised print.
+if grep -qE 'printf .%s..n. "\$\{DETAILS\[@\]\}"' "$WRAPPER"; then
+  bad 'structural: finish still bulk-prints "${DETAILS[@]}" — a newline-bearing DETAILS entry would span lines and could forge a RESULT: line'
+else
+  ok 'structural: DETAILS are not bulk-printed (each entry is neutralised individually)'
+fi
+_fin_start=$(grep -nE '^finish\(\) \{' "$WRAPPER" | head -1 | cut -d: -f1)
+_fin_end=""
+[ -z "$_fin_start" ] || _fin_end=$(awk -v s="$_fin_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER")
+if [ -n "$_fin_start" ] && [ -n "$_fin_end" ] \
+  && sed -n "${_fin_start},${_fin_end}p" "$WRAPPER" | grep -q 'roborev_safe_line'; then
+  ok "structural: finish neutralises every DETAILS line (lines $_fin_start-$_fin_end)"
+else
+  bad 'structural: finish does not neutralise DETAILS lines'
+fi
+
+printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
+# `vacuity-tier1:` emits NOTICE as its documented ADVISORY value, so a scan that treated
+# NOTICE* as failing would red every findings-bearing review on an advisory. Asserted against
+# the SCAN ITSELF, not just against a case's observed exit code, so a future edit that adds
+# NOTICE* to the failing set is caught here rather than by whichever case happens to exercise
+# it.
+#
+# EVERY assert below is anchored to the SCAN STATEMENT, never to a file-wide grep. That
+# distinction is the whole point and it is not pedantry: a file-wide `grep '"$SOME_KEY"'` is
+# satisfied by the `emit_kv '<key>' "$SOME_KEY"` inside `emit_summary()`, so it would keep
+# passing with the key DELETED from the scan — i.e. the assert meant to forbid the
+# decorative-key defect would itself be decorative. Nor can a behavioural case always cover
+# it: a key whose every failing assignment is (correctly) followed immediately by
+# `finish FAIL 1` is never observed failing BY the scan, so its registration there is purely
+# defensive — only a structural assert can pin it (#3229).
+#
+# So the scan is extracted ONCE, as a statement, and the asserts read that extract:
+#   _scan_block = the whole `for verdict in … done` loop (bounds the `case` to INSIDE it)
+#   _scan_keys  = the `for … ; do` KEY LIST alone (continuation-aware; this is what must
+#                 name every per-check key)
+#   _scan_case  = the classifying `case` line from within the loop
+_scan_start=$(grep -nE '^[[:space:]]*for verdict in ' "$WRAPPER" | head -1 | cut -d: -f1 || printf '')
+_scan_end=''
+if [ -n "$_scan_start" ]; then
+  _scan_end=$(awk -v s="$_scan_start" 'NR>s && /^[[:space:]]*done[[:space:]]*$/ {print NR; exit}' "$WRAPPER")
+fi
+_scan_block=''
+_scan_keys=''
+_scan_case=''
+if [ -n "$_scan_start" ] && [ -n "$_scan_end" ]; then
+  _scan_block=$(sed -n "${_scan_start},${_scan_end}p" "$WRAPPER")
+  # The key list ends at the first line that does not continue with a trailing backslash.
+  _scan_keys=$(printf '%s\n' "$_scan_block" | awk '{print} !/\\$/{exit}')
+  _scan_case=$(printf '%s\n' "$_scan_block" | grep -E 'case "\$verdict_token" in' | head -1 || printf '')
+fi
+if [ -z "$_scan_block" ] || [ -z "$_scan_keys" ] || [ -z "$_scan_case" ]; then
+  bad 'structural: could not locate the wrapper verdict scan STATEMENT (for verdict in … case … done) to inspect'
+else
+  ok "structural: the verdict scan is a single case over the per-check keys (lines $_scan_start-$_scan_end)"
+  if printf '%s\n' "$_scan_keys" | grep -qE '; do[[:space:]]*$'; then
+    ok 'structural: the extracted key list is the complete for-statement (terminates at "; do")'
+  else
+    bad 'structural: the extracted verdict-scan key list does not terminate at "; do" — the extraction is truncated, so the per-key asserts below would be unreliable'
+  fi
+  if printf '%s\n' "$_scan_case" | grep -qE 'case "\$verdict_token" in FAIL\|FINDINGS\|ERROR\|INCONSISTENT\)'; then
+    ok 'structural: the failing-capable set is exactly FAIL|FINDINGS|ERROR|INCONSISTENT'
+  else
+    bad 'structural: the failing-capable verdict set is not the expected FAIL|FINDINGS|ERROR|INCONSISTENT'
+  fi
+  if printf '%s\n' "$_scan_case" | grep -q 'NOTICE'; then
+    bad 'structural: NOTICE appears in the failing-capable verdict scan — an advisory vacuity-tier1 NOTICE would red RESULT:'
+  else
+    ok 'structural: NOTICE is absent from the failing-capable verdict scan'
+  fi
+  # ===== MATCHED ON THE VERDICT TOKEN, EXACTLY — the closure must not itself be a prefix
+  # test (#3229 round-11 M3). A `PASS*` glob accepts `PASSthisNeverRan`, so the scan meant to
+  # reject unplanned values would accept any value merely BEGINNING with a planned token.
+  # Pinned structurally as well as behaviourally (cases cx28b/cx28c) because a future edit
+  # could restore the globs while every behavioural case but those two stayed green.
+  if printf '%s\n' "$_scan_block" | grep -qE '^[[:space:]]*verdict_token="\$\{verdict%% \*\}"'; then
+    ok 'structural: the scan reduces each value to its VERDICT TOKEN (up to the first space) before classifying'
+  else
+    bad 'structural: the verdict scan does not extract a verdict token — it is classifying the whole value, so a token followed by anything is matched by prefix (#3229 M3)'
+  fi
+  if printf '%s\n' "$_scan_block" | grep -qE '(PASS|FAIL|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN)\*'; then
+    bad 'structural: a PREFIX GLOB (TOKEN*) survives in the verdict scan — PASSthisNeverRan would match PASS* and inherit the non-failing branch (#3229 M3)'
+  else
+    ok 'structural: the verdict scan carries NO prefix globs — every token is matched exactly'
+  fi
+  # ===== THE CLOSED-GRAMMAR INVARIANT, asserted STRUCTURALLY (#3229 round-10 sweep) =====
+  # Case (cx28) proves ONE unrecognised value FAILs. Only a structural assert can pin that the
+  # scan is keyed POSITIVELY AT ALL — i.e. that its non-failing branch is an ALLOW-LIST with a
+  # failing `*)` fallback, rather than "everything that is not one of the four bad prefixes".
+  # That distinction is the general form of three separate defects on this issue, and a future
+  # edit could delete the positive arm while every behavioural case except cx28 stayed green.
+  # Both halves are required: an allow-list whose fallthrough is permissive pins nothing.
+  _scan_positive=$(printf '%s\n' "$_scan_block" \
+    | grep -E 'PASS\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' | head -1 || printf '')
+  if [ -n "$_scan_positive" ]; then
+    ok 'structural: the verdict scan has a POSITIVE arm — the non-failing set is an allow-list, not "not-failing"'
+  else
+    bad 'structural: the verdict scan has NO positive arm, so any value outside FAIL*|FINDINGS*|ERROR*|INCONSISTENT* — an empty string, a state a future check invents — inherits the non-failing branch and reaches finish PASS (#3229 round-10)'
+  fi
+  # The `*)` fallback must SET failed=1. Read from the positive `case`'s own body: from the
+  # allow-list line to the `esac` that closes it.
+  _scan_fallthrough=$(printf '%s\n' "$_scan_block" \
+    | awk '/PASS\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
+    | grep -A 3 -E '^[[:space:]]*\*\)' || printf '')
+  if printf '%s\n' "$_scan_fallthrough" | grep -qE '^[[:space:]]*failed=1[[:space:]]*$'; then
+    ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
+  else
+    bad 'structural: the verdict scan positive arm does not fail closed — an unrecognised value would be accepted silently, which is the shape this sweep closed'
+  fi
+  # THE AFFIRMATION BACKSTOP: a PASS requires every VERDICT-CARRYING key to be affirmatively
+  # PASS — with NO exception, and no exemption mechanism. (One key was briefly exempt on a
+  # `NOTICE`; both it and its exemption are gone — #3283/#3278 — which is STRICTER.) Case
+  # (cx29) proves one un-run check is caught; this pins that the backstop exists and names all
+  # six deterministic keys, so a key added to the block later is not silently exempt from it.
+  # The `PASS)` arm is EXACT, matched on the token: a `PASS*` glob would let `PASSthisNeverRan`
+  # satisfy the very backstop that exists to reject non-measurements (#3229 M3).
+  if grep -qE '^[[:space:]]*not_affirmed="\$\{not_affirmed' "$WRAPPER" &&
+    grep -qE '^[[:space:]]*PASS\) continue ;;' "$WRAPPER" &&
+    grep -qE '^[[:space:]]*case "\$\{det_value%% \*\}" in' "$WRAPPER"; then
+    ok 'structural: a PASS requires each verdict-carrying key to be affirmatively PASS, matched on the exact token (the SKIP backstop)'
+    _aff_missing=""
+    for _aff_key in push-assert census-check code-free sha-assert \
+      review-completed prompt-content; do
+      grep -qE "\"$_aff_key=\\\$[A-Z_]+\"" "$WRAPPER" || _aff_missing="$_aff_missing $_aff_key"
+    done
+    if [ -z "$_aff_missing" ]; then
+      ok 'structural: all six deterministic keys are named in the affirmation backstop'
+    else
+      bad "structural: the affirmation backstop does not cover:$_aff_missing — those keys could ride to PASS on a non-measurement (SKIP)"
+    fi
+  else
+    bad 'structural: the affirmation backstop is gone — a verdict-carrying key left at its initial SKIP (a check that never ran) would reach finish PASS, which is the vacuous pass this wrapper exists to prevent (#3229 round-10)'
+  fi
+  # AND IT CARRIES NO PER-KEY EXEMPTION. The backstop's body must contain exactly ONE
+  # `continue` arm — the affirmative `PASS)` one. A deleted subsystem needed a second arm
+  # exempting one key on `NOTICE`; with that subject gone the arm is
+  # gone too, and this pins that no per-key escape hatch is reintroduced (an exempted key can
+  # reach `finish PASS` on a non-measurement, which is the whole defect class). Read from the
+  # backstop's own `case` body, so a `NOTICE*)` arm elsewhere in the wrapper cannot satisfy or
+  # break it.
+  _aff_body=$(awk '/for keyed in "push-assert=/ { inb = 1 } inb { print } inb && /^[[:space:]]*esac[[:space:]]*$/ { exit }' "$WRAPPER")
+  if [ -z "$_aff_body" ]; then
+    bad 'structural: could not locate the affirmation backstop case body to inspect for per-key exemptions'
+  else
+    _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
+    if [ "$_aff_continues" -eq 1 ] &&
+      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;'; then
+      ok 'structural: the affirmation backstop has exactly ONE exempting arm, the affirmative PASS) one — no per-key escape hatch'
+    else
+      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s); a non-PASS value is exempted for some key, so that key can reach finish PASS on a non-measurement (#3229 owner ruling / #3283)"
+    fi
+  fi
+  # And the wrapper must STATE the rule, not just implement it: the next key added to this
+  # block is written by someone reading the doc block, not the scan.
+  if grep -qF 'A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT' "$WRAPPER"; then
+    ok 'structural: the wrapper states the affirmative-measurement rule the whole block obeys'
+  else
+    bad 'structural: the wrapper no longer states the affirmative-measurement rule — the invariant would have to be re-derived from the code by every reader'
+  fi
+  # THE REMOVAL, PINNED AT THE SCAN (#3229 owner ruling / #3283). The census-exclusion oracle
+  # is deleted, so its key must be absent from the scan's key list AND from the block. Asserted
+  # rather than assumed: a leftover `"$CENSUS_EXCLUSION"` in the key list would be a permanently
+  # EMPTY value, which the closed grammar (correctly) FAILs — i.e. the residue of an incomplete
+  # deletion would red every run, and it must be caught here rather than in the field.
+  if printf '%s\n' "$_scan_keys" | grep -qE 'CENSUS_EXCLUSION'; then
+    bad 'structural: the deleted CENSUS_EXCLUSION key is still named in the verdict-scan key list — it would hold a permanently empty value and red every run'
+  else
+    ok 'structural: the deleted census-exclusion key is absent from the verdict-scan key list'
+  fi
+  if grep -qE "emit_kv 'census-exclusion'" "$WRAPPER"; then
+    bad 'structural: the summary block still emits a census-exclusion key whose oracle is deleted'
+  else
+    ok 'structural: the summary block no longer emits census-exclusion (removal visible in the OUTPUT contract, not just the source)'
+  fi
+  for _gone_fn in roborev_check_census_exclusion roborev_format_exclude_args \
+    roborev_toml_exclude_patterns roborev_parse_toml_array roborev_corroborate_exclude_patterns; do
+    if grep -qE "(^|[^#[:alnum:]_])$_gone_fn\b" "$WRAPPER" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+      "$SCRIPT_DIR/../flow/roborev-review-checks.sh"; then
+      bad "structural: $_gone_fn is still referenced by the flow scripts — the deletion is incomplete"
+    else
+      ok "structural: $_gone_fn has no live reference in the flow scripts"
+    fi
+  done
+fi
+
+printf '== structural: the AC2 live probe is NOT a gate component ==\n'
+GATE="$SCRIPT_DIR/../agent-gate.sh"
+PROBE_REL='docs/reports/3229-artifacts/live-probe-procedure.md'
+if [ -f "$GATE" ]; then
+  if grep -qF "$PROBE_REL" "$GATE"; then
+    bad "structural: $PROBE_REL is referenced by the agent gate — the live probe needs network + a live reviewer and must never be gate-run"
+  else
+    ok 'structural: the live probe is absent from the agent gate (documented + recorded, never gate-run)'
+  fi
+else
+  printf 'SKIP - agent-gate.sh not found; the live-probe/gate separation could not be checked\n'
+fi
+# The probe must NOT be a committed executable under root `docs/` (#3229 ⑤a): roborev
+# resolves exclude_patterns from the repo ROOT path and SNAPSHOTS them at daemon start, so
+# until this change merges such a file is excluded from every review of it — `prompt-content:`
+# would FAIL permanently, a deadlock rather than a test. Asserted structurally so it cannot
+# be reintroduced.
+_probe_exec_count=$(find "$SCRIPT_DIR/../../docs/reports/3229-artifacts" -maxdepth 1 \
+  \( -name '*.sh' -o -name '*.py' -o -name '*.bt' \) 2>/dev/null | wc -l | tr -d '[:space:]')
+if [ "${_probe_exec_count:-0}" -eq 0 ]; then
+  ok 'structural: the #3229 artifacts dir carries NO executable (a pre-merge self-demonstration is a deadlock)'
+else
+  bad "structural: $_probe_exec_count executable(s) under docs/reports/3229-artifacts/ — an executable under root docs/ is dropped from its own review until this change merges, so prompt-content: FAILs permanently"
+fi
+if [ -f "$SCRIPT_DIR/../../docs/reports/3229-artifacts/live-probe-procedure.md" ]; then
+  ok 'structural: the probe procedure is kept as committed prose'
+  for _phrase in 'cannot certify itself' 'snapshots config at start' 'In Review' \
+    'filed as a tracked issue' 'strictly better'; do
+    if grep -qF -- "$_phrase" "$SCRIPT_DIR/../../docs/reports/3229-artifacts/live-probe-procedure.md"; then
+      ok "structural: the probe procedure records '$_phrase'"
+    else
+      bad "structural: the probe procedure does not record '$_phrase'"
+    fi
+  done
+else
+  bad 'structural: docs/reports/3229-artifacts/live-probe-procedure.md is missing — the AC2 requirement was dropped rather than rescheduled'
+fi
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub

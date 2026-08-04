@@ -458,8 +458,29 @@ review (it reviews **one commit, not the branch**). Each can report clean having
 the single-SHA form, only the last commit — and a vacuous pass is textually identical to a genuine one.
 Measured: **`--repo` is what makes `--branch` correct**, so the wrapper reviews the RANGE `<base>..HEAD` and
 verifies BOTH endpoints against the job record (`reviewed-sha:` is a range, not a sha; `job-record:` reports
-the record's completeness). Note too that roborev excludes non-code paths from the diff it builds, so a
-docs-only diff cannot be roborev-certified at all. **Any** non-PASS terminal `RESULT` —
+the record's completeness). Note too that **roborev drops exactly what its configured `exclude_patterns` pathspecs match — it makes no
+code/non-code judgement** — so a docs-only diff cannot be roborev-certified at all. "docs-only" means a
+**code-free CENSUS**, never a `docs/` path prefix: the `docs/reports/*-artifacts/` measurement harnesses
+this repo ships by convention are executable code that IS reviewed, so a PR carrying them must be
+certified like any other code change (#3229). The remedy that shipped is the **configuration**: a narrowed
+prose/artifact deny-list (`*.md` plus artifact extensions scoped to artifact-bearing *directories*, never a
+blanket `docs/**` — which is what swallowed 33 harness executables on PR #3222), measured at 72 `docs/`
+executables reaching the reviewer and 0 markdown.
+**NOTHING PREDICTS THE EXCLUSION SET PRE-ENQUEUE (#3283 configured, #3278 compiled-in).** A key that did
+was built on #3229 and REMOVED by owner ruling: its false-PASS count was *increasing* across review rounds,
+and **a guard with known documented false-PASSes is worse than no guard, because it invites reliance it
+cannot support**. So a swallowed path — by configuration or by roborev's compiled-in lockfile/cache
+deny-list (`**/Cargo.lock`, `**/go.sum`, `**/pnpm-lock.yaml`, …) — surfaces **after** the review under
+**`prompt-content:`**, fail-closed, with a cause that names the symptom rather than the mechanism.
+Practically: **if `prompt-content:` FAILs, suspect `.roborev.toml` first**; a lockfile-only dependency bump
+is still **not** roborev-certifiable; and `prompt-content:` can never print a `PASS (0/0 …)`. Verdicts still
+follow one rule — **FAIL where the author can act; NOTICE where only the information is actionable; never
+silence** — and no key is exempt from the affirmation backstop: all six deterministic keys must be
+affirmatively `PASS`, matched on the exact verdict token, never a prefix glob.
+Note also that **a `.roborev.toml` change cannot certify itself**: roborev reads `exclude_patterns` from the
+repo **root path** and snapshots it at daemon start, so a worktree edit is invisible and the demonstration
+belongs after the merge — generally, *any PR whose subject is a config a daemon or gate reads from root
+cannot certify itself*. **Any** non-PASS terminal `RESULT` —
 `NOTHING-TO-REVIEW` included — is a failed review round and a blocked merge, never a clean pass. Verify
 which reviewer a box can actually serve with `roborev check-agents`; why:
 [roborev findings](/cqlite/agents-developing/roborev-findings/) + CLAUDE.md.
