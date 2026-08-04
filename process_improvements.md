@@ -986,3 +986,153 @@ armed, but `flow-closer` is the one irreversible step in the pipeline (full gate
 
 **Rule: re-read the issue live at closer-spawn time, not on the last status tick.**
   An instruction to destroy evidence deserves resistance.
+
+---
+
+## Lesson: roborev in a WORKTREE silently reviews the WRONG commit (found 2026-07-26, issue #2950)
+
+**Symptom.** `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`
+run from inside a worktree returned, twice in a row:
+
+```
+Enqueued job NNNN for 39900e4db454724c2 (agent: codex)
+Review (by codex) — No issues found.
+Summary: The provided combined diff contains no code changes to review.
+```
+
+`39900e4db` was **`origin/main` — the BASE**, not the branch HEAD (`4e7ab591e`). It reviewed an EMPTY
+diff. `roborev log <job>` confirmed the reviewer genuinely received no content (17k input tokens, a
+21-token reply).
+
+**Root cause.** `roborev repo list` tracks only `/Users/pmcfadin/projects/cqlite` (the root checkout).
+Worktrees under `~/projects/cqlite-wt/<issue>` are NOT registered, and there is no `repo add`
+subcommand (repos self-register on first use). So `--branch` resolved against the *root* checkout,
+which sits on `main` — producing a base-vs-base no-op regardless of the cwd it was launched from.
+
+**Why this is dangerous.** "No issues found." is **textually identical to a genuine clean pass.**
+Every worktree-based roborev run in the flow-* pipeline is exposed, and a vacuous pass would be
+recorded as review-complete, sending unreviewed code into the one gate of record and on to merge.
+The tell is cheap and must be checked every time.
+
+**Standing rule — verify the reviewed SHA, never trust the verdict alone.**
+1. Push the implementation commit BEFORE reviewing (an unpushed branch guarantees an empty diff).
+2. Invoke with an explicit SHA + explicit repo path, not bare `--branch`:
+   `roborev review <sha> --repo <worktree-abs-path> --agent codex --model gpt-5.6-sol --wait`
+3. Assert the `Enqueued job NNNN for <sha>` line matches `git rev-parse HEAD` of the branch. If it
+   equals `origin/main`, the review is VACUOUS — re-run, do not record it.
+4. Treat `"contains no code changes to review"` on a non-empty diff as a HARD FAIL, never as clean.
+
+Round 3, correctly targeted, returned two real BLOCKERS on the same diff the two vacuous runs had
+"passed" — direct proof that accepting the empty-diff verdict would have shipped false format claims.
+
+**Also (same issue):** `--agent codex` alone still inherits `review_model = 'opus'` from `.roborev.toml`
+and codex-on-a-ChatGPT-account rejects `opus` with a hard 400 — always pass BOTH `--agent` and
+`--model` (already in CLAUDE.md; reconfirmed here).
+
+### UPDATE (same day, #2950): the verified-SHA fix is NOT sufficient — a code-free diff is also discarded
+
+The rule above ("check the enqueued SHA matches HEAD") passes on runs that are STILL vacuous. Third and
+worst variant found while finishing #2950:
+
+```
+roborev review 989d7d2c3 --repo /Users/pmcfadin/projects/cqlite-wt/issue-2950 \
+  --agent codex --model gpt-5.6-sol --wait
+Enqueued job 4658 for 989d7d2   <-- CORRECT sha, CORRECT repo, passes the SHA check
+No issues found.
+Summary: The provided diff contains no code changes to review.
+```
+
+The diff was 5 files / 167+ / 63- — **all markdown**. The reviewer dropped it because it contained no
+code files, then reported a verdict byte-identical to a clean pass.
+
+**Token accounting is the only reliable tell** (`roborev log <job>`):
+
+| job | diff | input | cached | output | wall |
+|-----|------|-------|--------|--------|------|
+| 4652/4654/4656 | same change, earlier commits | 398k-648k | 314k-554k | ~5-6k | 2.5m |
+| 4658 + 4659 (retry) | markdown only | **18.7k** | **0** | **53** | **8s** |
+| 4651 | known-EMPTY diff | 17.3k | 0 | 21 | 7s |
+
+**Detection rule: a codex review is VACUOUS if input < ~50k OR cached_input == 0 OR output < ~200 tokens,
+regardless of the verdict text.** A genuine review of a repo this size reads 400k+ with heavy cache reuse.
+
+**Control that isolates the cause:** the identical invocation (same `--repo`, agent, model) on a commit
+containing `.rs` files returned a full substantive review with a real finding. So `--repo` + single-SHA
+works; the reviewer specifically discards diffs with no code files.
+
+**Fourth variant:** the commit-RANGE form mis-enqueues too — `roborev review 89fdbb895 989d7d2c3`
+enqueued `90a17d376`, neither endpoint. Same class as `--branch` → `origin/main`.
+
+**Standing rules.**
+1. Never accept a roborev verdict without checking `roborev log <job>` token counts against the table above.
+   "No issues found" is NOT evidence of review.
+2. For a docs/spec/workflow-only diff, do NOT rely on roborev at all — it cannot review it. Substitute an
+   adversarial subagent briefed to REFUTE each claim against primary sources (for #2950:
+   `git show cassandra-5.0.8:<path>`, since that checkout's working tree is 6.0-alpha).
+3. This affects `flow-closer`'s final roborev pass, which is a MERGE GATE — a docs-only PR would record a
+   false "roborev clean". Pass the closer the detection rule explicitly.
+4. Prefer single-SHA over `--branch` and over the range form; assert the `Enqueued job N for <sha>` line
+   matches HEAD **and** the token counts look like a real review.
+
+Tracked as #2964 (scope raised from "worktrees review the base commit" to "roborev can report clean
+without having reviewed anything", across >=3 trigger paths).
+
+## 2026-07-30 — #3097 merge-arm caller schema (delivered, PR #3128)
+
+- **roborev over-reach ↔ under-coverage seesaw on shared plumbing.** #3097 (thread caller
+  schema through the Flight merge arm) took 3 roborev rounds because the query arm and compaction
+  SHARE `stream_all_partitions_cancellable`. Round 1 threaded `Some(schema)` through the shared fn →
+  changed compaction decode (streaming vs materializing `iterate_all_partitions_for_compaction`
+  divergence — roborev Medium, correct). Path (a) reverted → re-exposed the query arm's OWN
+  full-index/sequential fallback still dropping caller schema (roborev Medium round 2, also correct).
+  Converged by keeping the shared param but pinning ALL compaction call sites to `None` while only the
+  query-arm fallback passes `Some(schema)`. LESSON: when a fix threads state through a fn shared by
+  two callers with different invariants, the right shape is usually "param defaults to None; only the
+  intended caller opts in" — not "thread it everywhere." Verify the OTHER caller's behavior is
+  byte-identical (compaction-byte-parity 12/12) AND cover EVERY route of the intended caller
+  (summary-guided + full-index + sequential — three separate tests, forced by removing Summary.db then
+  Summary.db+Index.db).
+
+- **macOS agent-gate FAIL on a diff-unrelated pre-existing tooling test — override protocol.**
+  flow-closer correctly refused to merge on RESULT: FAIL (charter). Sole failing component was
+  `tooling-tests → scripts/tests/test_gen_perf_corpus_3068.sh`: macOS `$TMPDIR` (`/var/folders/...`)
+  symlinks to `/private/var/folders/...`; the #3068 prune generator emits realpath'd `/private/var/...`
+  paths vs the test's `/var/...` expected set. Linux CI (`$TMPDIR=/tmp`) unaffected. LEAD OVERRIDE
+  PROTOCOL that worked: (1) verify diff touches ZERO scripts/tooling (`git diff --name-only`);
+  (2) verify the failing script is byte-identical to origin/main (`git diff origin/main...HEAD -- <script>`
+  empty); (3) confirm the GitHub `required` (Linux) check = SUCCESS + mergeState CLEAN; (4) confirm all
+  diff-relevant gate components PASS. Only then override, record the decision transparently on the PR,
+  file a follow-up (#3135), and re-invoke the closer with the override authorized as certified context.
+  Filed #3135 to canonicalize the expected paths through the same realpath. This is a concrete instance
+  of the L2 "agent-gate PASS ≠ CI, and vice-versa" lesson — here CI-green while local-macOS-red.
+
+## 2026-08-03 — #3217 full-box C(N) + off-CPU attribution: two measurement-doctrine lessons (PR #3222)
+
+- **The silent-instrument failure class: a broken instrument that does not error, it emits plausible
+  output.** #3217 (measurement-only, off-CPU attribution of the Flight `do_get` handoff) hit FOUR
+  distinct instances of one signature in a single run, plus TWO more in our own harness code — every
+  one of which would have produced output textually indistinguishable from the exact conclusion under
+  test ("the mpsc handoff is innocent"): (1) a permissive `perf_event_paranoid` does NOT cover BPF map
+  creation (bcc fails, bpftrace refuses — must run BPF collectors under `sudo`); (2) `offcputime`
+  charges only on switch-IN, so a probe that never blocks records **zero** off-CPU time; (3) bcc's
+  counts map silently truncates at 10,240 keys (`--stack-storage-size` does not size it) — captured
+  10,240 of 108,475 real stacks with no error; (4) a missing Rust-v0 demangler mis-buckets silently
+  (running the attribution without it collapsed `mpsc_send_park` 50.57 s → 2.89 s — the v1 failure
+  reproduced deliberately); (5) fabricated `rc=0` in every driver log (`echo "END rc=$?"` after a
+  command substitution resets `$?`); (6) a published headline that depended on an uncommitted producer.
+  **LESSON: for any profiling/measurement run, every collector needs an explicit lost-record / vacuity
+  guard AND a positive control that proves the instrument would have seen the thing if it were there.**
+  #3217 added a `ChannelSink`-appears-in-on-CPU-but-0×-in-sched positive control that turned "we did
+  not see the handoff park" into "we looked, with proof we could have seen it." Tracked as #3226
+  (harness lost-record guards) + #3229 (roborev blind to executables under `docs/`).
+
+- **Re-derive from committed artefacts, never trust running summaries — the operational argument for
+  AC8.** The #3217 report pass re-computed every published number from the committed artefacts instead
+  of the running-summary comments, and caught FOUR of the author's own published errors: "90 points"
+  was actually 83; a "geometry predicts these parks" claim that held for only 1 of 3 channels; a
+  wrong root-cause story (demangler, not leaf-first, was load-bearing); an unsourced 17.2–17.8%
+  opacity band that recomputed to 16.86–17.94%. **LESSON: retaining raw artefacts (AC8) is not just
+  for reviewers — it is what makes your OWN conclusions auditable against yourself. A run that
+  re-derives from committed data catches errors a run that trusts its own summaries ships. Make
+  "re-derive the headline from committed artefacts before publishing" a standing step for any
+  measurement deliverable.**
