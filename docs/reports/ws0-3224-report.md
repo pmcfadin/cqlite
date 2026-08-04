@@ -183,10 +183,17 @@ component would still be visible if one appeared.
 `S=1 → "2,10"` is entirely inside node 0 and passes a NUMA check, but sysfs says `cpu2 → {2,66}` and
 `cpu10 → {10,74}`: `"2,10"` is **one thread of each of two different physical cores**, i.e. S=2 on
 half-populated pairs labelled S=1. Its `S=6 → "0-5,8-13"` is one thread of each of **twelve** cores.
-`selftest.sh` cannot catch this — it verifies the topology *derivation*, not the table. The guard
-that does catch it, `ws0_assert_full_physical_cores`, requires the pinned set to be an exact union of
-**complete** SMT sibling groups with group count equal to the requested S, and is negative-tested
-against both of #3217's sets.
+`selftest.sh` does **not** silently accept this on a foreign host, and an earlier draft of this
+section wrongly said it could not catch it. It hard-asserts `logical_cpus == 16`,
+`physical_cores == 8`, `sibling_pair_rule_observed == "(c, c+8)"` and
+`[2,10] ∈ smt_sibling_pairs`, every one read live from `/sys` — so on this box all four fail and
+#3217's harness refuses to run rather than mislabelling. What it does not do is *derive* the sets:
+the table is correct for its own host and only for that host. The guard used here,
+`ws0_assert_full_physical_cores`, is topology-derived instead — it requires the pinned set to be an
+exact union of **complete** SMT sibling groups with group count equal to the requested S, so it is
+correct on any topology, and is negative-tested against both of #3217's sets *as they would be
+interpreted on this host*. That is a portability improvement over a pinned-host selftest, not a
+defect found in #3217.
 
 ### 3.3 The core event set had to be SPLIT — the RUNBOOK's single group multiplexes here
 
@@ -798,9 +805,25 @@ Three things the data indicts, to be groomed separately:
    offcore/prefetch-stall term — a different capture than this one, and out of this issue's
    two-endpoint scope. The honest statement is that 32% is *unattributed*, not that it is
    *non-memory*.
-3. **The harness defects found here are latent in #3217's committed scripts too** — the
-   fabricated `rc=$?`-after-substitution pattern, and the hardcoded core table that silently
-   mislabels S. Both are fixed in this issue's drivers; #3217's remain as committed.
+3. **#3217's committed scripts do NOT carry these defects — verified against `origin/main`, not
+   assumed.** An earlier draft of this report asserted they did; that was wrong, and the
+   correction matters because the claim would have impugned published figures.
+   - The **fabricated `rc`** pattern was fixed there before commit, in all six drivers with a
+     `run()` wrapper (`run-partA.sh`, `run-partA-followon.sh`, `run-partB{,2,3,4}.sh`): `rc` is
+     captured into a variable immediately after the measured command, and the only intervening
+     lines are comments, which are not commands and cannot reset `$?`. This matches #3217's own
+     report C7, which records the fix and a verification that it logs a real `rc=1`. The
+     remaining scripts in those directories log no `rc` at all, so there is nothing to fabricate.
+   - The **hardcoded core table** is *correct* for #3217's own 16-logical / 8-physical host under
+     its `(c, c+8)` sibling rule: `2,10` is both siblings of one physical core, and `0-5,8-13` is
+     six complete pairs. It is pinned to that host rather than derived, and `selftest.sh` asserts
+     that exact topology from `/sys` (§3.2), so on a different box it fails closed.
+
+   **Therefore no #3217 figure is impugned by anything found in this issue**, and nothing here
+   calls for re-deriving its results. What remains is a genuine but much narrower portability
+   limitation — a pinned table plus a host-pinned selftest, where a topology-derived guard would
+   let the harness run correctly anywhere — worth hoisting into the shared harness as a low
+   priority follow-up.
 
 ## 8. Acceptance criteria — discharged or not, explicitly
 
