@@ -922,7 +922,7 @@ key). Where doctrine documents the live probe it SHALL state the expectation in 
 `reviewed-sha:` range's HEAD endpoint equals the worktree HEAD and its base equals the base ref — never as
 `reviewed-sha` equalling the worktree HEAD.
 
-#### Scenario: Both AC4 doctrine surfaces carry all four rules
+#### Scenario: Both AC6 doctrine surfaces carry all four rules
 - **WHEN** CLAUDE.md and `website/src/content/docs/agents-developing/roborev-findings.md` are inspected after this change
 - **THEN** both state that the wrapper is the only sanctioned invocation, that the reviewed scope must be verified against the census range, that a "contains no code changes to review" verdict on a non-empty diff is a HARD FAIL, and that a docs-only diff cannot be roborev-certified
 

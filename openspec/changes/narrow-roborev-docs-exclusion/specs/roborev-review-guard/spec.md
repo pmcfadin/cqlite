@@ -1161,6 +1161,15 @@ documents the live probe it SHALL state the expectation in the RANGE form — th
 HEAD endpoint equals the worktree HEAD and its base equals the base ref — never as `reviewed-sha`
 equalling the worktree HEAD.
 
+**Scenario attribution note (#3229).** The *Both AC6 doctrine surfaces carry all four rules* scenario
+below was authored as *Both **AC4** doctrine surfaces …* under #2964, where the doctrine criterion was
+that change's AC4. Under #3229 the doctrine criterion is **AC6**, and #3229's own AC3/AC4 are **DEFERRED
+to issue #3283**. The scenario is therefore RE-ATTRIBUTED to AC6 rather than left carrying a number that
+now names a deferred criterion: the assertion is true and satisfied on `main` today, so filing it under a
+deferred AC would invite a future reader — most likely whoever picks up #3283 — to read "AC4 is deferred"
+as "AC4's scenarios are not yet satisfied" and then either re-derive an assertion that already holds or
+delete it as AC4 residue. The assertion is unchanged; only its criterion number is corrected.
+
 #### Scenario: Doctrine states the verdict rule verbatim, as one rule
 - **WHEN** CLAUDE.md, `website/src/content/docs/agents-developing/roborev-findings.md` and this change's `design.md` are inspected
 - **THEN** each carries the sentence "FAIL where the author can act; NOTICE where only the information is actionable; never silence." verbatim, and each presents it as ONE rule rather than as independent judgements a future editor would have to re-derive — and each records that the affirmation backstop grants NO `NOTICE` exemption to ANY of its six keys, the single exemption that briefly existed having been removed along with the key it was written for (deferred to #3283, its remedy-less residual to #3278)
@@ -1177,7 +1186,7 @@ equalling the worktree HEAD.
 - **WHEN** the doctrine page is inspected
 - **THEN** it records that the two regression cases which locked in an un-corroborated "no exclusion patterns configured" PASS (both since deleted with the oracle they exercised) were worse than having no case at all, because such a test consumes the review budget that would otherwise have found the bug and converts "nobody checked" into "we checked and it was fine"
 
-#### Scenario: Both doctrine surfaces carry all four rules
+#### Scenario: Both AC6 doctrine surfaces carry all four rules
 - **WHEN** CLAUDE.md and `website/src/content/docs/agents-developing/roborev-findings.md` are inspected after this change
 - **THEN** both state that the wrapper is the only sanctioned invocation, that the reviewed scope must be verified against the census range, that a "contains no code changes to review" verdict on a non-empty diff is a HARD FAIL, and that a docs-only diff cannot be roborev-certified
 
