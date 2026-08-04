@@ -1,0 +1,14 @@
+== #3226 acceptance: every headline re-derives from COMMITTED artefacts alone ==
+
+Procedure (run 2026-08-04T04:07:36Z):
+  git worktree add --detach /tmp/clean-3224 HEAD
+  cd /tmp/clean-3224/docs/reports/ws0-3224-artifacts
+  python3 results/derive.py results --penalty-summary penalty/summary.txt
+
+The clean checkout reads ONLY committed inputs -- it has no access to
+/data/ws0, where the captures were produced. Result: byte-for-byte identical
+to the committed results/derived-summary.txt.
+
+commit under test: 87bbdd648098365ccfd876afec61a00aea2e097c
+
+DIFF: (empty -- identical)

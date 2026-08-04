@@ -789,3 +789,25 @@ Three things the data indicts, to be groomed separately:
 **Not discharged, and deliberately so:** the ~32% residual is *named as unattributed*, not
 explained (§7.2); and whether #3096 moves slope or level is left open with a stated criterion
 (§6.1) rather than guessed.
+
+### 8.1 Reproducibility — every headline re-derives from committed artefacts alone (#3226)
+
+`results/derive.py` reads **only** committed inputs; nothing in this report is a number
+typed by hand. Verified by re-running it in a **clean detached checkout with no access to
+`/data/ws0`**, where the captures were produced:
+
+```bash
+git worktree add --detach /tmp/clean-3224 HEAD
+cd /tmp/clean-3224/docs/reports/ws0-3224-artifacts
+python3 results/derive.py results --penalty-summary penalty/summary.txt
+```
+
+The output is **byte-for-byte identical** to the committed
+`results/derived-summary.txt` — transcript in
+`results/reproduce-from-clean-checkout.txt`, for commit `87bbdd6`.
+
+The window, the row counts, the CPU sets and the corpus size are all **read from the
+artefacts**, never hardcoded, and the script **refuses** (non-zero exit, named diagnosis)
+on a multiplexed counter, a `<not supported>` counter, a failed occupancy gate, a warmth
+violation or a saturated client. Those refusals were **negative-tested**, not assumed: each
+of the five was induced against a real rep and confirmed to exit non-zero.
