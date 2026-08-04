@@ -2525,12 +2525,14 @@ else
   else
     bad "structural: emit_summary emits a value WITHOUT emit_kv, so a newline-bearing path could forge a key: ${_em_raw%%$'\n'*}"
   fi
-  # 22 since #3229's owner ruling removed `census-exclusion:` with its oracle (#3283).
+  # 22 emit_kv lines = 21 keys + the terminal `RESULT:`, which goes through the SAME
+  # neutralising boundary. Was 23 before #3229's owner ruling removed `census-exclusion:`
+  # with its oracle (#3283).
   _em_n=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" | grep -cE "^[[:space:]]*emit_kv '" || true)
   if [ "${_em_n:-0}" -ge 22 ]; then
-    ok "structural: all $_em_n block keys are emitted through the neutralising boundary"
+    ok "structural: all $_em_n block lines (21 keys + RESULT:) are emitted through the neutralising boundary"
   else
-    bad "structural: only ${_em_n:-0} emit_kv call(s) in emit_summary — the block has 22 keys, so some are emitted another way"
+    bad "structural: only ${_em_n:-0} emit_kv call(s) in emit_summary — the block has 21 keys plus RESULT:, so some are emitted another way"
   fi
 fi
 if grep -qE '^[[:space:]]*roborev_safe_line "\$2"' "$WRAPPER"; then
