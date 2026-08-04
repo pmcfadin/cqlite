@@ -461,6 +461,21 @@ bench-internals = []
 # links it.
 arrow-shape-corpus = ["arrow"]
 
+# TEST-ONLY Arrow schema-work probe (issue #3096, lever 6) — gates the two
+# thread-local counters in `export::arrow_convert` / `export::arrow_prevalidated`
+# and their public readers (`schema_validations_on_this_thread`,
+# `prevalidated_batch_builds_on_this_thread`). They exist so a test can assert the
+# NEGATIVE that lever 6 is about: the Flight `do_get` flush path builds every batch
+# through the prevalidated (zero-per-batch-schema-work) entry point and revalidates
+# nothing. That is invisible in the emitted batches — they are identical whether the
+# schema was revalidated or not — so without a counter such a test passes equally
+# before and after the fix. The `record_*()` call sites are unconditional but
+# compile to no-ops without this feature (and without `cfg(test)`), the
+# `work-counters` convention, so a default/release build links no counter at all.
+# NOT in defaults; `cqlite-flight` enables it from its `[dev-dependencies]` (the
+# `arrow-shape-corpus` convention), so no shipped binary links it.
+arrow-validation-probe = ["arrow"]
+
 # TEST-ONLY producer-fault injection (issue #3106) — gates the arming API of
 # `storage::producer_fault`, the deterministic seam a test uses to kill the query
 # row stream's producer thread mid-walk so the consumer's fail-closed handling of

@@ -14,10 +14,9 @@
 //! `producer_stream.rs` are already at/over the campsite source threshold
 //! (epic #1116).
 
-use std::sync::Arc;
-
-use arrow::datatypes::Schema as ArrowSchema;
-use cqlite_core::export::{build_arrow_schema, rows_to_record_batch_with_schema};
+use cqlite_core::export::{
+    build_arrow_schema, rows_to_record_batch_prevalidated, PrevalidatedSchema,
+};
 use cqlite_core::query::QueryRow;
 
 use crate::batch_bytes::{worst_case_batch_capacity_bytes, BatchByteCap};
@@ -25,7 +24,7 @@ use crate::egress_credit::{count_arrow_array_nodes, CreditedBatch};
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 
 /// The per-merge, batch-invariant Arrow facts both drive loops need at every
-/// flush point: the output [`ArrowSchema`] and its array-node count.
+/// flush point: the output schema and its array-node count.
 ///
 /// Built ONCE per merge (issue #3096, lever 6) and threaded through
 /// [`MergeProducer::flush_credited`] in place of the bare `n_array_nodes` this
@@ -35,15 +34,26 @@ use crate::producer::{BatchSink, MergeProducer, ProducerError};
 /// `String` name per column (plus an extension-metadata `HashMap` per
 /// uuid/timeuuid column), and `count_arrow_array_nodes` walks it.
 pub(crate) struct EgressBatchPlan {
-    /// The batch schema every flush labels its arrays with.
+    /// The batch schema every flush labels its arrays with, BOUND to the columns it
+    /// was derived from.
     ///
-    /// Derived from `self.columns` — the SAME slice [`MergeProducer::flush_buffer`]
-    /// builds the arrays from, which is what `rows_to_record_batch(&self.columns,
+    /// A [`PrevalidatedSchema`] rather than a bare `Arc<Schema>` (issue #3096,
+    /// fourth review) for a reason that is the whole point of lever 6 on this path:
+    /// the only converter entry point taking a bare `Arc<Schema>`
+    /// (`rows_to_record_batch_with_schema`) must re-prove that the schema describes
+    /// the columns on EVERY call, which reconstructs a `Field` per column per batch
+    /// — cancelling the saving this plan exists to make. `PrevalidatedSchema` OWNS
+    /// the columns its schema was derived from and can only be built by deriving it,
+    /// so [`MergeProducer::flush_buffer`] needs no revalidation and no `columns`
+    /// argument, and a schema/columns disagreement is unconstructible rather than
+    /// merely checked.
+    ///
+    /// Derived from `self.columns`, which is what `rows_to_record_batch(&self.columns,
     /// ..)` derived per batch before. It is deliberately NOT `output_columns()`:
     /// `RecordBatch::try_new` validates the arrays against this schema, so the two
     /// must come from one slice or a projection/aggregation shape would fail
     /// closed here instead of building.
-    schema: Arc<ArrowSchema>,
+    schema: PrevalidatedSchema,
     /// Arrow array NODES over the OUTPUT schema (`output_columns()`), which is
     /// the slice the reservation has always been sized from.
     ///
@@ -66,7 +76,7 @@ impl MergeProducer {
     /// holding, so it is not done.
     pub(crate) fn egress_batch_plan(&self) -> Result<EgressBatchPlan, ProducerError> {
         let array_nodes = count_arrow_array_nodes(&build_arrow_schema(self.output_columns())?);
-        let schema = Arc::new(build_arrow_schema(&self.columns)?);
+        let schema = PrevalidatedSchema::build(&self.columns)?;
         Ok(EgressBatchPlan {
             schema,
             array_nodes,
@@ -76,6 +86,15 @@ impl MergeProducer {
     /// Convert `buffer`'s rows into an Arrow batch over the plan's SHARED schema
     /// and clear it.
     ///
+    /// This is the `do_get` row route's ONLY batch-materialization point (all six
+    /// flush sites reach it through [`Self::flush_credited`]), so it is where lever
+    /// 6 either pays off or does not. Per batch it now costs an `Arc` refcount bump:
+    /// no `Schema` rebuild — the plan holds it — and no revalidation, because
+    /// [`PrevalidatedSchema`] carries the columns the schema was derived from and
+    /// `rows_to_record_batch_prevalidated` therefore takes no columns to disagree
+    /// with. The columns the arrays are built from come from that same value, which
+    /// `Self::egress_batch_plan` derived from `self.columns`.
+    ///
     /// Lives here rather than in `producer.rs` (already far over the campsite
     /// source threshold, epic #1116) beside its only caller,
     /// [`Self::flush_credited`].
@@ -84,8 +103,7 @@ impl MergeProducer {
         plan: &EgressBatchPlan,
         buffer: &mut Vec<QueryRow>,
     ) -> Result<arrow::record_batch::RecordBatch, ProducerError> {
-        let batch =
-            rows_to_record_batch_with_schema(Arc::clone(&plan.schema), &self.columns, buffer)?;
+        let batch = rows_to_record_batch_prevalidated(&plan.schema, buffer)?;
         buffer.clear();
         Ok(batch)
     }

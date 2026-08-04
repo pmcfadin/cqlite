@@ -17,7 +17,11 @@ use super::*;
 use crate::producer::CollectSink;
 use crate::testutil::{build_sstables, simple_schema, write_row};
 use arrow::record_batch::RecordBatch;
-use cqlite_core::export::rows_to_record_batch;
+use cqlite_core::export::{
+    prevalidated_batch_builds_on_this_thread, rows_to_record_batch,
+    schema_validations_on_this_thread,
+};
+use std::sync::Arc;
 
 /// A fixture whose merge emits SEVERAL batches at `batch_size = 1`, so the
 /// per-batch sharing has something to be observed across.
@@ -76,9 +80,68 @@ fn the_shared_schema_equals_the_per_batch_schema_it_replaced() {
     let plan = producer.egress_batch_plan().expect("plan");
     let reference = rows_to_record_batch(&producer.columns, &[]).expect("reference batch");
     assert_eq!(
-        plan.schema.as_ref(),
+        plan.schema.schema().as_ref(),
         reference.schema().as_ref(),
         "the cached schema diverged from the one the per-batch build produced"
+    );
+    assert_eq!(
+        plan.schema.columns().len(),
+        producer.columns.len(),
+        "the plan's schema must be bound to the producer's own columns — that \
+         binding is what lets the flush skip revalidation"
+    );
+}
+
+/// **The finding, pinned on the surface that ships.** The roborev finding said the
+/// redundant validation "leaves the Flight path rebuilding fields per batch", and
+/// the first fix reached only `rows_to_record_batch` — the AGGREGATE route
+/// (`producer.rs`), not `do_get`'s row route. `do_get` flushes through
+/// `flush_credited` → `flush_buffer`, which passed a bare `Arc<Schema>` to
+/// `rows_to_record_batch_with_schema` and so paid `column_to_field` per column per
+/// batch for the whole scan, defeating lever 6 on the only path a client sees.
+///
+/// Both halves are asserted, because the negative one alone would be vacuous:
+///
+/// 1. **Positive control** — the flush path built its batches through the
+///    PREVALIDATED entry point, on THIS thread, at least twice. Without this, "zero
+///    validations on this thread" would also hold for a thread that built nothing
+///    (e.g. if the flush ever moved to a worker thread), and the test would go
+///    quietly green while measuring nothing.
+/// 2. **The property** — across all of those batches the schema was validated ZERO
+///    times.
+///
+/// A counter is the only way to see this: a schema `build_arrow_schema` just
+/// produced can never FAIL validation, so "validated and passed" and "not
+/// validated" produce the identical batch. An output-equality test therefore passes
+/// before and after the fix and guards nothing.
+#[test]
+fn the_do_get_flush_path_builds_every_batch_prevalidated_and_never_revalidates() {
+    let validations_before = schema_validations_on_this_thread();
+    let builds_before = prevalidated_batch_builds_on_this_thread();
+
+    let batches = produced_batches(1);
+
+    assert!(
+        batches.len() >= 2,
+        "the fixture must emit several batches or the per-batch claim is vacuous; \
+         got {}",
+        batches.len()
+    );
+    let prevalidated_builds = prevalidated_batch_builds_on_this_thread() - builds_before;
+    assert_eq!(
+        prevalidated_builds,
+        batches.len(),
+        "every emitted batch must have been built through \
+         `rows_to_record_batch_prevalidated` ON THIS THREAD — a count of 0 means the \
+         flush is routed through the validating entry point (or ran elsewhere), and \
+         the zero-validation assertion below would be vacuous"
+    );
+    assert_eq!(
+        schema_validations_on_this_thread() - validations_before,
+        0,
+        "the `do_get` flush path revalidated the shared schema — that reconstructs a \
+         `Field` per column per batch for the whole scan and cancels lever 6 on the \
+         shipping surface (issue #3096, fourth review)"
     );
 }
 

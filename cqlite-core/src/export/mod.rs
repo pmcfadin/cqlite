@@ -53,6 +53,13 @@ mod arrow_schema;
 #[cfg(feature = "arrow")]
 mod arrow_typed_value;
 
+// The schema-bound-to-its-columns entry point (issue #3096, lever 6): a
+// `PrevalidatedSchema` carries the columns it was derived from, so a caller that
+// emits many batches over one column set (the Flight `do_get` egress) pays ZERO
+// per-batch schema work — neither a rebuild nor a revalidation.
+#[cfg(feature = "arrow")]
+mod arrow_prevalidated;
+
 // Per-column accessor resolution for Arrow conversion (issue #1495, AE1): resolves
 // each schema column once and transposes rows into per-column value slices,
 // killing the per-cell `values.get(name)` string-hash lookup (parser epic J1).
@@ -89,6 +96,21 @@ pub mod parquet;
 pub use arrow_convert::{
     build_arrow_schema, rows_to_record_batch, rows_to_record_batch_with_schema, ArrowConvertError,
 };
+
+// The third converter entry point, beside the two above (issue #3096).
+#[cfg(feature = "arrow")]
+pub use arrow_prevalidated::{rows_to_record_batch_prevalidated, PrevalidatedSchema};
+
+// TEST/PROBE-ONLY schema-work counters (issue #3096). Behind the non-default
+// `arrow-validation-probe` feature, which `cqlite-flight` enables as a
+// DEV-dependency so `egress_flush_tests` can assert that the `do_get` flush path
+// builds its batches HERE and revalidates NOTHING — a property invisible in the
+// emitted batches, which are identical either way. Absent from every default and
+// release build (the `arrow-shape-corpus` / `work-counters` convention).
+#[cfg(all(feature = "arrow", feature = "arrow-validation-probe"))]
+pub use arrow_convert::schema_validations_on_this_thread;
+#[cfg(all(feature = "arrow", feature = "arrow-validation-probe"))]
+pub use arrow_prevalidated::prevalidated_batch_builds_on_this_thread;
 
 // Re-export the byte estimator beside the converter it models (issue #2825).
 // Deliberately narrow: the structural charging constants stay PRIVATE to
