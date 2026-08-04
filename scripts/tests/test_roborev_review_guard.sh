@@ -58,6 +58,54 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/roborev-guard-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # ---------------------------------------------------------------------------
+# PORTABILITY (#3296): the ONE in-place edit used by every case that mutates a copied
+# flow script. `sed -i EXPR FILE` is GNU-ONLY, and its BSD failure is SILENT-ish:
+# BSD/macOS sed declares -i with a REQUIRED argument (Apple text_cmds sed/main.c:
+# `getopt(argc, argv, "EI:ae:f:i:lnru")` — note the `i:`), so it consumes EXPR as the
+# backup SUFFIX and then reads FILE as the SCRIPT. The edit never lands. That is how
+# four cases (cx28, cx29, cx28b, cx28c) FAILed on macOS at pristine origin/main while
+# passing on Linux — each verifies the mutation landed before asserting against it, so
+# each correctly reported `bad`: the fail-closed design worked, only the portability
+# was wrong.
+#
+# This helper keeps that fail-closed property and adds a SECOND, independent guard at
+# the edit site: it returns NON-ZERO when the file content did not change, so an
+# expression that matches nothing is an error here as well as at each case's own
+# verification. Portability is therefore not a licence to become unconditional — a
+# no-op patch is still detected in both places.
+#
+# Replacement newlines are written as a backslash + a REAL newline (POSIX §sed, valid
+# on every sed) rather than `\n`: current BSD sed does translate `\n` in the RHS
+# (text_cmds sed/compile.c compile_subst: `case 'n': *p = '\n';`), but the POSIX form
+# is vintage-insensitive and costs nothing.
+#
+# Do NOT reintroduce `sed -i` (or any other GNU-only construct) here: the structural
+# assert in scripts/tests/test_roborev_guard_portability.sh forbids it, and that test
+# also exercises this helper under a BSD-semantics `sed` shim.
+sed_inplace() { # sed_inplace <file> <sed-expr>  -> non-zero if nothing changed
+  local _f="$1" _expr="$2" _t
+  _t="$_f.sed-inplace.$$"
+  sed "$_expr" "$_f" >"$_t" || { rm -f "$_t"; return 1; }
+  if cmp -s "$_f" "$_t"; then rm -f "$_t"; return 1; fi
+  mv "$_t" "$_f"
+}
+
+# PORTABILITY (#3296): the summary block's key ORDER, extracted with one awk.
+# The previous form was `grep -nE '^(k1|k2|k3):' "$OUT" | cut -d: -f2 | paste -sd,`,
+# whose `paste -sd,` carries NO FILE OPERAND. GNU paste reads stdin in that case; BSD
+# paste does NOT — Apple text_cmds paste/paste.c and FreeBSD usr.bin/paste/paste.c both
+# do `argc -= optind; argv += optind; if (*argv == NULL) usage();`, and `usage()` prints
+# "usage: paste [-s] [-d delimiters] file ..." to stderr and exit(1). So on macOS the
+# whole command substitution yielded the EMPTY STRING — exactly the reported case (j2)
+# symptom: an empty extraction while the two neighbouring asserts on the same $OUT were
+# green. `cut` is NOT implicated: FreeBSD usr.bin/cut/cut.c reads stdin when given no
+# file operand (`if (*argv) ... else rval = fcn(stdin, "stdin")`).
+# awk needs no join step, so the operand-less pipe stage disappears entirely.
+summary_key_order() { # summary_key_order <file> <extended-regex-of-keys> -> "k1,k2,k3"
+  awk -v keys="$2" '$0 ~ "^(" keys "):" { printf "%s%s", sep, substr($0, 1, index($0, ":") - 1); sep = "," }' "$1"
+}
+
+# ---------------------------------------------------------------------------
 # The stub reviewer: first on PATH, driven entirely by STUB_* env vars, replaying
 # the RECORDED SHAPE of the real binary's payload — notably `token_usage`, which is
 # a JSON-ENCODED STRING (decoded twice) carrying `total_output_tokens`, not a nested
@@ -1969,8 +2017,8 @@ assert_verdict 'case (cx28 control) the UNPATCHED copy reaches PASS' PASS 0
 assert_lacks 'case (cx28 control) and reports no grammar violation' 'verdict-grammar'
 # ONE key, ONE value, outside the grammar. `MEASUREMENT-DID-NOT-HAPPEN` is deliberately not a
 # near-miss of a recognised prefix, so the case pins the ALLOW-LIST rather than a spelling.
-if sed -i 's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' \
-  "$_gm_dir/roborev-review-checks.sh" &&
+if sed_inplace "$_gm_dir/roborev-review-checks.sh" \
+  's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' &&
   grep -qF 'TIER1="MEASUREMENT-DID-NOT-HAPPEN"' "$_gm_dir/roborev-review-checks.sh"; then
   ok 'case (cx28): the unrecognised-verdict patch was really applied to the copy'
   run_wrapper "$work"
@@ -1995,8 +2043,9 @@ printf '== case (cx29): a check that never ran cannot ride to PASS on its initia
 # before assigning anything, which is exactly what an aborted helper or a stray `return` in a
 # new branch looks like. cx28's control (the unpatched copy PASSes on this fixture) is the
 # both-directions control for this case too; the patch is verified applied before it is run.
-sed -i 's/^roborev_check_prompt_content() {$/roborev_check_prompt_content() {\n  return 0/' \
-  "$_gm_dir/roborev-review-checks.sh"
+sed_inplace "$_gm_dir/roborev-review-checks.sh" \
+  's/^roborev_check_prompt_content() {$/roborev_check_prompt_content() {\
+  return 0/'
 # VERIFIED, not assumed: the `return 0` must be the line IMMEDIATELY AFTER the function
 # header. A sed that matched nothing leaves a copy identical to the control, and this case
 # would then be asserting against an unpatched wrapper — a probe failing in the
@@ -2005,8 +2054,8 @@ _gm_patched=$(grep -A1 '^roborev_check_prompt_content() {$' "$_gm_dir/roborev-re
   | sed -n '2p')
 if [ "$_gm_patched" = '  return 0' ]; then
   # Undo cx28's patch so the ONLY grammar-relevant difference is the un-run check.
-  sed -i 's/^    TIER1="MEASUREMENT-DID-NOT-HAPPEN"$/    TIER1="PASS"/' \
-    "$_gm_dir/roborev-review-checks.sh"
+  sed_inplace "$_gm_dir/roborev-review-checks.sh" \
+    's/^    TIER1="MEASUREMENT-DID-NOT-HAPPEN"$/    TIER1="PASS"/'
   ok 'case (cx29): the early-return patch was really applied to the copy'
   run_wrapper "$work"
   assert_verdict 'case (cx29)' FAIL 1
@@ -2046,8 +2095,12 @@ for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
   printf '== case (%s): the near-prefix value %s is UNRECOGNISED, not a PASS ==\n' "$_np_label" "$_np_value"
   reset_stub
   # Restore the copy to the control state, then apply ONLY this mutation.
-  sed -i 's/^roborev_check_prompt_content() {\n  return 0$/roborev_check_prompt_content() {/' \
-    "$_gm_dir/roborev-review-checks.sh"
+  # The restore is the `cp` ALONE, and deliberately so (#3296): the line that used to sit
+  # here tried to undo cx29's insertion with `sed -i 's/^header() {\n  return 0$/header() {/'`
+  # — a TWO-LINE left-hand side, which no sed can match, since sed's pattern space holds one
+  # line at a time. It was therefore a no-op on GNU too, and the wholesale `cp` from the real
+  # checks file was already doing all the restoring. Removed rather than made portable: making
+  # a no-op portable would have been inventing behaviour the suite never had.
   cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
   work=$(make_fixture "case_$_np_label" pushed)
   STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
@@ -2056,8 +2109,8 @@ for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
   # would prove nothing about the mutation.
   run_wrapper "$work"
   assert_verdict "case ($_np_label control) the restored copy reaches PASS" PASS 0
-  if sed -i "s/^    TIER1=\"PASS\"\$/    TIER1=\"$_np_value\"/" \
-    "$_gm_dir/roborev-review-checks.sh" &&
+  if sed_inplace "$_gm_dir/roborev-review-checks.sh" \
+    "s/^    TIER1=\"PASS\"\$/    TIER1=\"$_np_value\"/" &&
     grep -qF "TIER1=\"$_np_value\"" "$_gm_dir/roborev-review-checks.sh"; then
     ok "case ($_np_label): the near-prefix patch was really applied to the copy"
     run_wrapper "$work"
@@ -2344,16 +2397,27 @@ assert_says 'case (f) reviewed-sha reports the RANGE' "^reviewed-sha: $(git -C "
 assert_says 'case (f) job printed' '^job: 4656$'
 assert_says 'case (f) log path named' '^log: .+transcript-'
 assert_one_block 'case (f)'
+# PORTABILITY (#3296): compare CANONICAL to CANONICAL, computed by the SAME mechanism the
+# wrapper uses. roborev-review.sh resolves --repo with
+#   REPO=$(git -C "$REPO_ARG" rev-parse --show-toplevel); REPO=$(cd "$REPO" && pwd -P)
+# and records THAT string. On macOS $TMPDIR lives under /var, which is a symlink to
+# /private/var, so the fixture path `$work` and the recorded path differ by that prefix and
+# the literal `--repo $work` match FAILed — with the wrapper behaving perfectly (this is what
+# broke both case (f) asserts at pristine origin/main). The expectation is canonicalised the
+# same way rather than loosened to a substring: the full flag string is still matched with
+# `grep -F`, so a relative --repo, a missing --repo, or a root-checkout --repo still FAILs.
+work_canon=$(cd "$(git -C "$work" rev-parse --show-toplevel)" && pwd -P)
 # The sanctioned invocation form: explicit HEAD sha, explicit ABSOLUTE --repo,
 # --wait, both --agent and --model — and never --branch, never two positionals.
-if grep -qF -- "review --branch --base origin/main --repo $work --agent codex --model gpt-5.6-sol --wait" "$INVOKED"; then
+if grep -qF -- "review --branch --base origin/main --repo $work_canon --agent codex --model gpt-5.6-sol --wait" "$INVOKED"; then
   ok 'case (f): invoked over the census RANGE with an explicit absolute --repo + --wait'
 else
   bad "case (f): unexpected invocation form: $(cat "$INVOKED")"
 fi
 # `--branch` is correct ONLY with an explicit --repo (without it, it resolves against
-# the ROOT checkout); the two-positional range form must never appear.
-if grep -qF -- '--branch' "$INVOKED" && grep -qF -- "--repo $work" "$INVOKED"; then
+# the ROOT checkout); the two-positional range form must never appear. `--repo` is matched
+# with its ABSOLUTE canonical value, so a relative path would not satisfy it.
+if grep -qF -- '--branch' "$INVOKED" && grep -qF -- "--repo $work_canon" "$INVOKED"; then
   ok 'case (f): --branch is paired with an explicit absolute --repo'
 else
   bad "case (f): --branch/--repo pairing missing: $(cat "$INVOKED")"
@@ -2463,10 +2527,16 @@ assert_verdict 'case (j2)' PASS 0
 assert_says 'case (j2) roborev-exit PASS' '^roborev-exit: PASS$'
 assert_says 'case (j2) findings NONE' '^findings: NONE$'
 # Key ORDER is part of the contract: roborev-exit sits between vacuity-tier2 and log.
-if [ "$(grep -nE '^(vacuity-tier2|roborev-exit|log):' "$OUT" | cut -d: -f2 | paste -sd,)" = "vacuity-tier2,roborev-exit,log" ]; then
+# Extracted with `summary_key_order` (one awk) — see its definition for WHY the previous
+# `grep -n | cut | paste -sd,` form returned the EMPTY STRING on macOS (#3296): the
+# operand-less `paste` usage()-errors on BSD instead of reading stdin. An empty extraction
+# still FAILs this compare, so the fix changes a FALSE FAIL into a real measurement; it does
+# not make the assert conditional.
+_j2_key_order=$(summary_key_order "$OUT" 'vacuity-tier2|roborev-exit|log')
+if [ "$_j2_key_order" = "vacuity-tier2,roborev-exit,log" ]; then
   ok 'case (j2): roborev-exit is positioned between vacuity-tier2 and log'
 else
-  bad "case (j2): unexpected key order: $(grep -nE '^(vacuity-tier2|roborev-exit|log):' "$OUT" | cut -d: -f2 | paste -sd,)"
+  bad "case (j2): unexpected key order: $_j2_key_order"
 fi
 
 printf '== case (j3): a pre-invocation failure leaves roborev-exit: SKIP ==\n'
