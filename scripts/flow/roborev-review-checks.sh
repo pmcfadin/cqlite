@@ -85,12 +85,19 @@ roborev_check_prompt_content() {
     PROMPT_CONTENT="FAIL (prompt unretrievable — no evidence any diff was delivered)"
     DETAILS+=("ERROR: prompt-content: the prompt sent to the reviewer could not be retrieved for job '$JOB' (tried the job record's 'prompt' field, then 'roborev show <job> --prompt'), so there is NO authoritative evidence the reviewer received the ${#census_code_paths[@]} code file(s) in this census. Failing closed: a pass here would rest on nothing.")
   else
-    # Check the CODE subset of the census, not every path. MEASURED (issue #2964,
-    # round 5): roborev EXCLUDES non-code paths from the diff it builds — on a census of
-    # 22 markdown + 5 code files, the prompt carried diff headers for exactly the 5 code
-    # files. That is also the empirical mechanism behind the "code-free diff silently
-    # discarded" trigger: there is literally nothing left to review. Checking all 27
-    # would false-FAIL every branch that touches documentation, which is most of them.
+    # Check the CODE subset of the census, not every path. THE MECHANISM, stated
+    # correctly (#3229): **roborev drops exactly what its configured `exclude_patterns`
+    # pathspecs match — it makes NO code/non-code judgement of its own.** MEASURED
+    # (issue #2964, round 5): on a census of 22 markdown + 5 code files the prompt
+    # carried diff headers for exactly the 5 code files, because `*.md` is CONFIGURED —
+    # not because the reviewer recognised prose. Checking all 27 would therefore
+    # false-FAIL every branch that touches documentation, which is most of them.
+    # The CODE subset is the right subset only because this repo's configured set is a
+    # prose/artifact deny-list that MIRRORS the census classification. That correspondence is
+    # NOT verified pre-enqueue — the oracle that tried is removed (#3283) — so this check IS
+    # where a divergence surfaces: a configured pattern that swallows a code path (which
+    # `docs/**` did, for 33 executables, on PR #3222) lands here as a FAIL on the paths the
+    # reviewer never received. Fail-closed, but AFTER the review round has been paid for.
     # EVERY code path is checked against the prompt's actual `diff --git` HEADERS, never a
     # bare substring (codex, round 5): sampling let a partial prompt pass by naming the
     # sampled files, and a substring match is satisfied by any incidental mention —
@@ -102,16 +109,63 @@ roborev_check_prompt_content() {
     # only same-path headers therefore FALSELY REJECTED any review containing a detected
     # rename. Extracting the path set from both sides and comparing whole-line makes the
     # two rename behaviours agree without weakening the check to a substring test.
-    PROMPT_PATHS_FILE="$LOG.promptpaths"
-    { grep -oE '^diff --git a/[^ ]+ b/[^ ]+$' "$PROMPT_FILE" 2>/dev/null || true; } \
-      | sed -E 's|^diff --git a/([^ ]+) b/([^ ]+)$|\1\n\2|' | sort -u >"$PROMPT_PATHS_FILE"
+    #
+    # MEMBERSHIP IS DECIDED PER HEADER, BY THE CANONICAL HELPER — no regex, no path-set
+    # file, no `grep` (#3229 round 4, blockers F2 + F3). This consumer used to build its
+    # own path set with `grep -oE '^diff --git a/[^ ]+ b/[^ ]+$'` plus a both-sides-quoted
+    # parse, and then probe it with `grep -Fxq` over a NEWLINE-delimited file. Every one of
+    # those three mechanisms was wrong on real input: the regex cannot split a
+    # SPACE-bearing header, the quoted parse could not read a MIXED header
+    # (`diff --git a/ascii "b/quoted"`, which git emits on a rename), and a
+    # newline-delimited set turns a newline-bearing path into ALTERNATIVES (a false PASS).
+    #
+    # It now asks `roborev_diff_header_has_path` — the SINGLE implementation, in
+    # `roborev-review-oracles.sh` beside the normalisation boundary it belongs to — one
+    # header at a time. This file performs NO unquoting and knows NOTHING about header
+    # shapes; the guard suite asserts that structurally. Census paths arrive RAW from the
+    # census's `--numstat -z`, so there is nothing to normalise on this side either.
+    #
+    # The headers are collected by the oracles file too (#3229 round 5, blocker 1), because
+    # a `diff --git` header LINE is irreducibly ambiguous once a path may contain a space
+    # and the matcher resolves that ambiguity from the header's OWN `rename from` /
+    # `rename to` lines. Which lines those are, and how far the extended-header run
+    # extends, is header-shape knowledge — so it lives with the matcher, not here, and this
+    # file just carries the three parallel arrays through.
+    roborev_collect_prompt_headers "$PROMPT_FILE"
+    # EVERY code census path is expected in the prompt. There is NO subtraction and no
+    # excusal: NO exclusion set is modelled anywhere in this wrapper (#3283 for the
+    # configured half, #3278 for roborev's compiled-in deny-list), so nothing here is
+    # licensed to say "do not expect this path". A path the reviewer really did not get
+    # therefore FAILs — the fail-closed direction — whether it was eaten by configuration,
+    # by a built-in, or by anything else. The cost is diagnostic: the cause names the
+    # symptom ("the reviewer did not receive this path") rather than the mechanism. See the
+    # exclusion note near the top of `roborev-review-oracles.sh`.
     checked_paths=("${census_code_paths[@]}")
-    census_total=${#census_code_paths[@]}
+    census_total=${#checked_paths[@]}
     missing_paths=()
-    for census_path in "${checked_paths[@]}"; do
-      grep -Fxq -- "$census_path" "$PROMPT_PATHS_FILE" || missing_paths+=("$census_path")
+    for census_path in ${checked_paths[@]+"${checked_paths[@]}"}; do
+      found=0
+      for ((hdr_i = 0; hdr_i < ${#_rx_hdrs[@]}; hdr_i++)); do
+        if roborev_diff_header_has_path "${_rx_hdrs[$hdr_i]}" "$census_path" \
+          "${_rx_hdr_from[$hdr_i]}" "${_rx_hdr_to[$hdr_i]}"; then
+          found=1
+          break
+        fi
+      done
+      [ "$found" -eq 1 ] || missing_paths+=("$census_path")
     done
-    if [ "${#missing_paths[@]}" -gt 0 ]; then
+    if [ "$census_total" -eq 0 ]; then
+      # A `0/0` IS NEVER A PASS (codex round 7 — BLOCKER, #3229). Belt-and-braces behind
+      # `code-free:`, which FAILs pre-enqueue on a census with no CODE path at all: with
+      # nothing to check there is no evidence whatsoever that the reviewer received a diff,
+      # and `PASS (0/0 code census paths present)` is textually indistinguishable from a
+      # genuine pass. Refuse to print one — if this key has no subject, it has no verdict to
+      # give. Kept as a STRUCTURAL backstop even though it is unreachable through the normal
+      # ordering: the whole point is that it does not depend on an upstream check still being
+      # there.
+      PROMPT_CONTENT="FAIL (no code census path was checkable — a 0/0 is never a pass)"
+      DETAILS+=("ERROR: prompt-content: there is not one CODE census path to look for in the prompt (census code paths: ${#census_code_paths[@]}), so this key has NO subject and therefore no verdict to give. Failing closed: 'PASS (0/0 code census paths present)' would be textually identical to a genuine pass while the reviewer received an EMPTY prompt. See code-free:, which fails pre-enqueue for the same reason.")
+    elif [ "${#missing_paths[@]}" -gt 0 ]; then
       PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
       DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a prompt that does not mention its files cannot have reviewed them. Missing (first 10):")
       printed=0
@@ -155,6 +209,14 @@ roborev_check_findings() {
          tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
          inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
   block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+  # THE `:-0` DEFAULT IS THE FAIL-CLOSED DIRECTION, verified rather than assumed (#3229
+  # round-10 sweep audit of every `${VAR:-default}` in these three files). A fail-open default
+  # masking a failed measurement is exactly how the `${_census_end:-$_census_start}` bound
+  # degraded a broken `awk` into a 1-line scan, so each such default has to be shown to fall the
+  # STRICT way. Here it does: a failed `awk`/`grep` yields 0 markers, 0 markers makes
+  # `findings:` read NONE rather than PRESENT, and NONE is what makes `vacuity-tier1` treat the
+  # "no code changes" phrase as a VACUITY CLAIM and HARD FAIL. PRESENT is the permissive value
+  # (it downgrades tier 1 to an advisory NOTICE), and an unmeasurable block can never produce it.
   block_marker_count=${block_marker_count:-0}
 
   verdict_findings="unknown"
@@ -260,6 +322,18 @@ roborev_check_tier1() {
        tolower($0) ~ /(^|[^[:alnum:]])summary[[:space:]]*:/ { inblock = 1; print; next }
          /^[[:space:]]*#{1,4}[[:space:]]*[^[:space:]]/ { inblock = 0 }
          inblock { print }' "$LOG" 2>/dev/null || true; } >"$VERDICT_REGION_FILE"
+  # NO SUMMARY REGION => `UNAVAILABLE`, and that is PERMISSIVE BY DESIGN — stated here rather
+  # than left for the next reader to re-derive (#3229 round-10 sweep). It is the one branch of
+  # this file where an unmeasured signal takes the non-failing path, so the reason has to be on
+  # the page: tier 1 asks ONE question, "does the reviewer's own summary claim there are no code
+  # changes", and with no summary region there is no claim to judge — a genuine NOT-APPLICABLE,
+  # not a failure to measure something that exists. A review with no `## Summary` heading is a
+  # legitimate shape (`review-completed:` accepts a Findings heading or a `**Severity**:` line as
+  # its terminal marker), so FAILing here would red correct input. It cannot manufacture a pass
+  # either: tier 1 is a CORROBORATOR, `UNAVAILABLE` is carried into the block (never silent),
+  # and the vacuity condition it looks for is independently covered by the deterministic keys —
+  # `prompt-content:` (the reviewer's own prompt vs our census) and `code-free:` (our own
+  # census classification), both of which fail closed on data the wrapper measured itself.
   if [ ! -s "$VERDICT_REGION_FILE" ]; then
     TIER1="UNAVAILABLE"
   elif grep -qi 'no code changes' "$VERDICT_REGION_FILE"; then

@@ -123,7 +123,11 @@ silently fails:
   it reports clean having reviewed NOTHING (the two-positional commit-range form mis-enqueues too). The
   wrapper verifies the reviewed SHA against branch HEAD, asserts the branch is pushed, and HARD-FAILs a
   `"contains no code changes to review"` verdict on a non-empty diff; a **docs-only diff cannot be
-  roborev-certified at all** (record primary-source verification in the PR instead). Retain only its
+  roborev-certified at all** (record primary-source verification in the PR instead) — where "docs-only"
+  means a **code-free CENSUS**, never a `docs/` path prefix: the `docs/reports/*-artifacts/` measurement
+  harnesses are executable code that IS reviewed. Nothing predicts roborev's exclusion set pre-enqueue
+  (deferred, #3283), so a swallowed path FAILs AFTER the round under `prompt-content:` — **if
+  `prompt-content:` FAILs, suspect `.roborev.toml` first** (#3229). Retain only its
   `==== ROBOREV REVIEW SUMMARY ====` block; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW`
   included — is a failed round and a blocked merge, never "roborev clean". Pass **BOTH** `--agent` and
   `--model`; the wrapper requires them (#2433 — one alone inherits the `.roborev.toml`-pinned model, e.g.

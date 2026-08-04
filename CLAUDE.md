@@ -113,7 +113,10 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 - **A markdown/docs-only diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
   (#3042).** If your diff touches no compiled input (no `src`, no `Cargo.*`, no build script, no
-  workflow, no test-data), it cannot have caused a test to fail. **NEVER patch source to turn such a
+  workflow, no test-data), it cannot have caused a test to fail. (Read "docs-only" here the same way
+  roborev doctrine does — a **code-free census**, not a `docs/` path prefix: a PR carrying
+  `docs/reports/*-artifacts/` harness executables ships real programs, so this waiver does not apply to
+  it.) **NEVER patch source to turn such a
   gate green** — that is a real change smuggled in under a docs diff, certified by nothing, and it
   masks the actual main-red. Instead: (1) confirm the diff really is non-compiling-input
   (`git diff --stat origin/main...HEAD`); (2) identify the failure as a known main-red issue or a
@@ -408,21 +411,137 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   (even one equal to HEAD), or a base-equal scope **aborts the round** — base-equality is the signature of
   the worktree bug. **(3)** `"contains no code changes to review"` on a
   NON-EMPTY diff is a **HARD FAIL**, never a pass. **(4)** A docs-only (code-free) diff **cannot be
-  roborev-certified at all**: roborev **EXCLUDES non-code paths from the diff it builds** (measured — 22
-  markdown absent from the prompt, 5 code present), so for prose-only the constructed diff is genuinely
-  EMPTY and that verdict is a truthful report of an empty input, not a malfunction. The wrapper's
+  roborev-certified at all** — and "docs-only" means a **CODE-FREE CENSUS as the wrapper classifies it,
+  NEVER a `docs/` path prefix** (#3229). The mechanism, stated correctly: **roborev drops exactly what
+  its configured `exclude_patterns` pathspecs match — it makes NO code/non-code judgement.** The measured
+  22-markdown-absent / 5-code-present split happened because `*.md` is CONFIGURED, not because the
+  reviewer recognised prose, so for prose-only the constructed diff is genuinely EMPTY and that verdict is
+  a truthful report of an empty input, not a malfunction. The wrapper's
   deterministic pre-enqueue `code-free:` check fails it before any review is enqueued, and
   `prompt-content:` therefore asserts the CODE subset of the census (an unretrievable prompt FAILs — there
   is no passing `UNAVAILABLE` there). The sanctioned substitute is
   primary-source verification recorded in the PR (e.g. `git show cassandra-5.0.8:<path>`), and no
-  docs-only change may ever record "roborev clean". Push first: an unpushed implementation commit is
+  docs-only change may ever record "roborev clean".
+  **The same mechanism cuts the other way, and did**: a configured `docs/**` discarded 33 EXECUTABLE
+  measurement-harness files on PR #3222 — the `docs/reports/*-artifacts/` harnesses this repo ships **by
+  convention are reviewed CODE**, so a PR carrying them is NOT a docs-only change and MUST be
+  roborev-certified. The deny-list is now narrowed to `*.md` plus artifact extensions **scoped to
+  artifact-bearing DIRECTORIES** (measured after the narrowing: 71 `docs/` executables reach the reviewer,
+  0 markdown does, and nothing outside `docs/` is newly excluded). **NOTHING PREDICTS THE EXCLUSION SET
+  PRE-ENQUEUE.** A `census-exclusion:` key that did — a bash port of roborev's `git.FormatExcludeArgs` over
+  a TOML parse of three config sources — was built on #3229 and **REMOVED by owner ruling, deferred to
+  #3283**: its false-PASS count was *increasing* across review rounds (1, 1, 2, 3), and two of the last
+  round's three defects lived in code the two preceding fix rounds had just introduced. **A guard with
+  known documented false-PASSes is worse than no guard, because it invites reliance it cannot support.**
+  So a path the reviewer did not receive surfaces AFTER the review, under `prompt-content:`, fail-closed,
+  with a cause that names the symptom rather than the mechanism — **if `prompt-content:` FAILs, suspect
+  `.roborev.toml` first.** The class-level lesson, recorded for #3283: **a port is a second
+  implementation, and a second implementation's correctness is only knowable by differential testing
+  against the original** — the oracle re-derived Go's trim rules in bash and was tested against a *model*
+  of Go, not against Go, so its NBSP divergence (Go's `unicode.IsSpace` trims U+00A0; bash trims do not)
+  was unfindable by care. The narrowing's asymmetry is deliberate — **noise, never blindness** — but that claim is SCOPED, and the
+  scope is the whole content of it: it holds for **inert dumps** (`.txt`/`.log`/`.err`), where exclusion
+  costs only **noise** (a new artifact *directory* is re-admitted to review prompts, a token cost, while
+  the swallow direction can only ever fail loudly). For a **code-bearing format**
+  (`.json`/`.html`/`.svg`) exclusion is **BLINDNESS**, because such a file can be **functional
+  configuration under any path**. So exclusion of code-bearing formats **MUST be scoped by directory,
+  never by extension alone**. **This asymmetry was first written unqualified and THIS CHANGE falsified
+  it (#3229):** an extension sweep across ALL of `docs/` was retired because `docs/**/*.json` hid
+  `docs/observability/grafana/dashboards/cqlite-overview.json` — the gate's own `kit-dashboard-drift`
+  component guards that dashboard, so the extension-wide form hid from the reviewer a file the gate
+  treats as correctness-bearing — from the reviewer's diff *and* classified it code-free, i.e.
+  unreviewable by construction; `docs/reports/delivery-telemetry.schema.json` went the same way. The
+  durable generalisation: **an extension describes a FORMAT; a directory records an INTENT** — someone
+  decided that tree holds artifacts — so a directory is the better proxy for "generated". So the
+  patterns are `<artifact-dir-glob>/**/*.<ext>` over exactly four directories
+  (`docs/reports/*-artifacts/`, `docs/round-artifacts/`, `docs/**/jfr-reports/`,
+  `docs/sstables-definitive-guide/diagrams/`) and everything else under `docs/` is **reviewed**. Still
+  extension-scoped *within* each directory, never a blanket `<dir>/**` — those directories hold the
+  executable harnesses that ARE the census `docs/**` swallowed. The census-side mirror
+  (`CODE_FREE_ARTIFACT_EXTENSIONS` / `CODE_FREE_ARTIFACT_DIR_GLOBS`) and the committed `.roborev.toml` are
+  the same fact written twice and are **maintained BY HAND** — add an extension or a directory in both, in
+  one edit. There is deliberately **no automated drift assert**: the one that existed depended on the
+  removed TOML parser and went with it, so drift surfaces the slow way, as a `prompt-content:` FAIL on
+  someone's report PR, until #3283 lands a guard whose own correctness is establishable. That gap is a
+  **known reduction in coverage**, accepted, not argued away.
+  **The verdict split follows ONE rule — apply it to any call of this shape without asking: FAIL where
+  the author can act; NOTICE where only the information is actionable; never silence.** `NOTICE` stays
+  outside the wrapper's failing-capable scan (`FAIL|FINDINGS|ERROR|INCONSISTENT`) because `vacuity-tier1:`
+  needs it as an advisory.
+  **NEITHER HALF OF ROBOREV'S EXCLUSION SET IS MODELLED (#3283 configured, #3278 compiled-in).** Beyond
+  `exclude_patterns`, roborev appends a hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`,
+  `**/pnpm-lock.yaml`, `**/.cache/**`, …) that no configuration can switch off. Modelling either half was
+  built and then **DELETED on #3229**, and **subtraction cannot introduce a false PASS** — with nothing
+  predicted, nothing is excused. So the residual, stated rather than left to be rediscovered: **a path
+  roborev excludes by either half is silently dropped from the reviewer's diff, nothing names it
+  pre-enqueue, and `prompt-content:` FAILs on its absence.** That **fails CLOSED** — the cost is a
+  diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
+  **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
+  Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
+  **That is ONE SHAPE, found repeatedly on #3229, so it is now a RULE: a positive verdict requires an
+  AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
+  every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state signal took the permissive
+  excusal path; an `UNAVAILABLE` corroboration state reached a `PASS` and **enqueued** (the code's own
+  comment said the binary was the only oracle that could tell "no key recognised" from "nothing
+  configured", then never required it to have *answered*); a `${end:-$start}` default degraded a failed
+  `awk` bound to a 1-line scan. Those instances lived in a subsystem since deleted; **the shape is the
+  lesson, and it was never theirs** — it was in the wrapper's own terminal verdict scan, which predates
+  them all. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
+  unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
+  signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict
+  scan is therefore a CLOSED grammar (unrecognised value ⇒ FAIL) plus a backstop that no PASS may carry a
+  verdict-carrying key that is not affirmatively `PASS` — a `SKIP` means the check never ran, which is the
+  vacuous pass itself. **Both are RETAINED after the oracle that surfaced them was deleted**, because they
+  are properties of every remaining key, and leaving the terminal verdict permissive again would leave the
+  wrapper worse than we found it. **And the closure must not itself be a prefix test**: `PASS*` accepts
+  `PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`, i.e. the guard against unplanned values would
+  check a *spelling* rather than a *state* — the same shape one level down. So each value is reduced to its
+  **verdict TOKEN** (up to the first space) and matched **EXACTLY**.
+  **Paths are normalised ONCE, at the census, and that boundary is the fix for SIX blockers (#3229).**
+  Rounds 2–4 of review produced six, and every one was a path-normalisation defect in a *different*
+  consumer, because normalisation was scattered. Now the census reads `git diff --numstat -z` (and the
+  survivor set `--name-only -z`), so paths arrive **RAW**, and RAW is the single representation used for
+  classification, comparison and display; the one quoted-path decoder survives for the reviewer's prompt
+  alone, with exactly one caller — the canonical matcher `roborev_diff_header_has_path`, which every
+  consumer must ask rather than parsing headers itself. It reads every shape git emits: unquoted,
+  **space-bearing** (`diff --git a/a b.txt b/a b.txt` — this repo tracks 40 space-bearing paths under
+  `docs/`), **C-quoted** (`diff --git "a/\303\251.txt" "b/…"`), and the **MIXED** shape a rename produces
+  (`diff --git a/<ascii> "b/<quoted>"`). Two measured costs of getting this wrong, in both directions: the
+  census classifying a *quoted* spelling read `docs/é notes.md` as extension `md"` and called PROSE **code**,
+  so the configured `*.md` legitimately removed it from the reviewer's diff while `prompt-content:`
+  demanded it there ⇒ a **false FAIL** on an ordinary docs+code branch (reproduced against the tracked
+  `docs/research/CQLite Writes (M5) — …md`); and a
+  newline-delimited path set with `grep -Fxq` membership made a path's first line "prove" its presence ⇒ a
+  genuine **false PASS**. A key that reds on correct input is the key agents learn to waive; a key that
+  greens on absent input is worse. The invariant is asserted **structurally** in
+  `scripts/tests/test_roborev_review_guard.sh` (no path-reading `git diff` without `-z`; the decoder called
+  only from the matcher), because behavioural cases only cover the shapes someone already thought of.
+  **A `.roborev.toml` change cannot certify itself (#3229) — three properties, one generalization:**
+  **(1)** roborev's daemon binds a repository by its **`repos.root_path`** and reads **that ROOT
+  checkout's** `.roborev.toml` — a *worktree* `.roborev.toml` edit is **invisible** to it, so under
+  1:1:1:1 the file you edited is not the file your review applies. **(2)** The daemon **snapshots config
+  at start**, so an edit needs a **daemon restart** to take effect. **(3) Generalized: any PR whose
+  subject is a config the daemon (or a gate) reads from root cannot certify itself** — the same shape as
+  `required` evaluating the aggregator and registry from the PR's **BASE** ref (below). Plan the
+  demonstration for **after** the merge. Both (1) and (2) have cost real rounds: (1) produced a
+  since-removed key's `PASS (7/7 survive)` about a config roborev never read, caught only by the
+  pre-existing `prompt-content: FAIL (1/7 absent)` — **defence in depth paid out in the direction nobody
+  plans for, and it is why `prompt-content:` is the layer that stayed**; (2) made #3234 measure `exclude_patterns` as having
+  "no observable effect" (its single daemon restart preceded every config edit and never followed one).
+  The durable lesson from that pairing: when the newer, cleverer guard and the older, dumber one disagree,
+  **the one that measures what actually happened wins** — which is why the descope kept `prompt-content:`
+  and dropped the predictor.
+  Push first: an unpushed implementation commit is
   itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** FOUR
   confirmed paths make roborev report clean having reviewed NOTHING (or only part), and a vacuous pass is
   TEXTUALLY IDENTICAL to a genuine one — (T1) from a worktree, `--branch` without `--repo` resolves
   against the ROOT checkout (normally on `main`) and enqueues the BASE commit: enqueued `39900e4db`
   (= origin/main) while branch HEAD was `4e7ab591e`; (T2) the two-positional range form anchors the range
-  at git's EMPTY TREE (`4b825dc6…`); (T3) a code-free diff is SILENTLY DISCARDED even with the right SHA
-  and the right `--repo`, so **SHA verification alone is insufficient**; (T4) a single-SHA review covers
+  at git's EMPTY TREE (`4b825dc6…`); (T3) a diff every path of which the configured
+  `exclude_patterns` match is SILENTLY DISCARDED even with the right SHA and the right `--repo` — a
+  code-free diff by default, and under a mis-scoped pattern like `docs/**` an EXECUTABLE one too — so
+  **SHA verification alone is insufficient**; (T4) a single-SHA review covers
   ONE COMMIT — a PARTIAL review whose enqueued sha EQUALS HEAD, so no sha check can see it (this is the
   form #2964's own AC2 asked for; the wrapper implements the AC's intent instead).
   Token accounting is the tell: genuine reviews
@@ -695,7 +814,10 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   you push again it no longer short-circuits — the tier is polled and a failure it reports still reds
   the gate; **remove and re-apply the label** to waive the new head. Two further properties worth knowing: `required` evaluates the aggregator **and the registry
   from the PR's BASE ref**, so a registry/aggregator change lands only after it merges (rename a
-  tier's context in a separate PR, or waive it); and a tier's mandate covers everything that reaches
+  tier's context in a separate PR, or waive it) — the **same shape** as roborev reading
+  `exclude_patterns` from the repo **root path** and snapshotting it at daemon start (#3229, above);
+  generalized, **any PR whose subject is a config a daemon or gate reads from root cannot certify
+  itself**, so plan its demonstration for after the merge; and a tier's mandate covers everything that reaches
   it at runtime — for Flight that includes `cqlite-core/**`, `test-data/**` and the Cargo manifests,
   so core-touching PRs run the Flight e2e tier. Finalize runs in-session when the required
   check is already green at arm time, else on a later wake confirming `state=MERGED`. Do NOT
