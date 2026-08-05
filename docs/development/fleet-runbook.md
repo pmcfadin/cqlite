@@ -365,10 +365,38 @@ provably inside is refused — every spelling above, and every future one, for t
   the containment check, so a new entry point cannot silently skip it.
 - Paths that **write** or that **read host configuration** canonicalize both sides (`cd -P` + `pwd -P`:
   no `realpath`/`readlink -f` dependency, correct on bash 3.2); an unenterable path resolves to nothing
-  and is refused. The gate's **emit-time read path** is contractually fork-free and writes nothing, so
-  it applies the same containment check *syntactically* — its guarantee is that the seams are honoured
-  only under the marker, which is never set in production, and the worst a mis-accepted spelling can do
-  there is read a caller-chosen file, reported as `absent`/`unknown` rather than as a capability.
+  and is refused.
+
+**Containment of a SPELLING is not containment of a DESTINATION, and that cost four more rounds (#3261).**
+Positive containment closed the path spellings; four escapes remained, each about something the guard
+authorizes *other than* a directory name. All four are now closed by the same discipline — validate the
+destination, positively, fail closed:
+
+- **The write TARGET, not just its directory.** A contained directory says nothing about where its
+  *entries* point, and `tee <path>` opens `O_CREAT|O_TRUNC` and **follows a symlink**. So a symlink at
+  `99-cqlite-perf.conf` inside a perfectly-contained directory aimed the privileged write anywhere on the
+  box. Now: naming that target **refuses** when it is a symlink, the idempotency read never follows it
+  (a link whose target holds the canonical bytes must not report "already current"), and the write is an
+  **atomic directory-entry replacement** — staged entry in the validated directory, then `rename` over
+  the name — so a symlink planted between the check and the write is *replaced*, not written through.
+- **The fork-free read path is NOT exempt** — the earlier claim here that a syntactic check was "sound
+  because nothing there writes" was **wrong**, and this is what falsified it. A symlink *inside* the
+  sandbox pointing at the real `/proc/sys/kernel` satisfies containment, so the run reported a token
+  derived from the **host's real controls** while claiming to read a stand-in (measured: `paranoid-4`
+  straight out of the live `/proc`). A **fabricated verdict is worse than a refusal**. The path stays
+  fork-free and now rejects a **symlinked component** with builtins only (`[ -L ]` forks nothing).
+- **A strictly-contained file must be ACCEPTED.** `<root>/sysctl.conf` was refused, because the check
+  asked whether the *parent* was strictly contained and a root is not strictly inside itself. The judged
+  path is now `<canonical parent>/<basename>`. A guard that refuses legitimate input is the guard people
+  learn to route around.
+- **EXECUTABLES too, not only paths.** `CQLITE_PERF_TEST_PRIV_DIR` was trusted textually: `/usr` is
+  absolute and genuinely *contains* `/usr/bin/sudo`, and a symlink to the real `sudo`/`sysctl` inside a
+  genuine shim dir is spelled locally while resolving to the host's binary — either one let a privileged
+  test-mode bootstrap run a real `sysctl --system` against the host kernel. Every privileged executable's
+  **resolved destination** must now be contained beneath the proven sandbox root, and `sudo`/`sysctl`
+  **parked** in the shim dir are swept whether or not `PATH` reaches them (one `PATH`-order change is all
+  that separates "not resolved" from "executed"). The structural audit covers privilege-shim resolution
+  as a **second pass**, with its own floor and its own named allowlist.
 
 Every gate SUMMARY's `accelerators:` line stamps the same state as a Linux-only `perf=` token
 (`ok` / `paranoid-<N>` / `kptr-restricted` / `absent` / `unknown`), so "this box cannot be profiled"
