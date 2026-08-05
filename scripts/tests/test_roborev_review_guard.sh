@@ -3718,10 +3718,19 @@ else
     bad "structural: the prompt-content body bounds could not be resolved (start $_pc_start, end '${_pc_end:-<none>}')"
   else
     _pc_body=$(sed -n "${_pc_start},${_pc_end}p" "$CHECKS_FILE")
-    if printf '%s\n' "$_pc_body" | grep -qE '^ *inline\|snapshot\|both\|none\)' ; then
-      ok 'structural: prompt-content selects the diff source on its AFFIRMATIVE state names'
+    _pc_arm_missing=""
+    printf '%s\n' "$_pc_body" | grep -qF 'case "${ROBOREV_DIFF_SOURCE_STATE:-}" in' \
+      || _pc_arm_missing="$_pc_arm_missing the-state-switch"
+    for _st in inline snapshot both none; do
+      printf '%s\n' "$_pc_body" | grep -qE "^[[:space:]]*$_st\)" || _pc_arm_missing="$_pc_arm_missing $_st"
+    done
+    # The catch-all arm is what makes the allow-list CLOSED: without it every unmeasured state
+    # falls through to the census comparison as though a source had been read.
+    printf '%s\n' "$_pc_body" | grep -qE '^[[:space:]]*\*\)' || _pc_arm_missing="$_pc_arm_missing *)-fail-closed"
+    if [ -z "$_pc_arm_missing" ]; then
+      ok 'structural: prompt-content selects the diff source on its AFFIRMATIVE state names, with a closed catch-all'
     else
-      bad 'structural: prompt-content does not select the diff source on an affirmative allow-list of states — an unmeasured state would inherit the permissive branch (#3312)'
+      bad "structural: prompt-content does not select the diff source on an affirmative allow-list of states — missing:$_pc_arm_missing. An unmeasured state would inherit the permissive branch (#3312)"
     fi
     if printf '%s\n' "$_pc_body" | grep -qF 'snapshot diff unusable'; then
       ok 'structural: an unrecognised or failed diff-source state reaches a FAIL value under prompt-content:'

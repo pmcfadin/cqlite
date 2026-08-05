@@ -856,6 +856,304 @@ roborev_collect_prompt_headers() {
   return 0
 }
 
+# ===================== THE SECOND DIFF-DELIVERY MODE (issue #3312) =====================
+# roborev delivers the diff to the reviewer in ONE OF TWO ways, and modelling only the first
+# made `prompt-content:` FALSE-FAIL every large review. When the diff is big it is NOT inlined:
+# roborev writes it to a TRANSIENT snapshot file under `<repo>/.roborev/roborev-snapshot-<id>/`
+# and the prompt ends with an instruction to read it. MEASURED (job 6836 — 23 files, +6561/-1;
+# 1.47M input / 1.35M cached / 6.1k output; 4 findings with real `file:line`):
+#
+#     ### Combined Diff
+#
+#     (Diff too large to include inline)
+#
+#     The full diff has been written to a file for review.
+#     Read the diff from: `/Users/.../issue-3272/.roborev/roborev-snapshot-157393586/roborev-snapshot-content.diff`
+#
+#     Review the actual diff before writing findings.
+#
+# That prompt carries ZERO `diff --git` headers, so the check reported
+# `FAIL (21/21 code census paths absent from the prompt)` on a review the reviewer demonstrably
+# performed — a red no fix can clear, on exactly the diffs that most need reviewing, which is
+# the documented way a guard gets waived. And `prompt-content:` is the layer #3229 deliberately
+# KEPT when the pre-enqueue predictor was deleted.
+#
+# THE FIX IS NOT "AN EMPTY PROMPT IS A PASS" — that would reopen T3 (a silently discarded diff)
+# and the `0/0` false pass. It is: FOLLOW THE DIFF TO WHERE IT ACTUALLY IS. Same census, same
+# canonical matcher, same "no subtraction and no excusal"; only the SOURCE of the headers moves.
+# Every new edge therefore fails CLOSED, with its own cause text, because an oracle that could
+# not be consulted is a NON-PASSING verdict whose text says what was unverifiable.
+#
+# WHY THE EXTRACTION LIVES HERE, beside the header collector: "where the diff actually is" is
+# prompt-shape knowledge, the same class as "how far the extended-header run extends". The
+# checks file must not grow a second idea of it (asserted structurally).
+
+# roborev_prompt_snapshot_paths <prompt-file>: the DISTINCT snapshot diff paths the prompt
+# instructs the reviewer to read, into `_rx_snap_paths`, plus `_rx_snap_marker_lines` (how many
+# instruction lines were seen) and `_rx_snap_unparseable` (how many carried no readable path).
+#
+# ANCHORED AT COLUMN ZERO, and that is load-bearing rather than tidy. Every line of a unified
+# diff BODY carries a leading `+`, `-`, ` `, `@` or `\`, so an instruction quoted INSIDE the
+# reviewed change — this repo's own docs and tests quote it — can never pose as roborev's own
+# instruction. Without the anchor a branch could name the file its own review is judged against.
+#
+# LINE-ORIENTED, soundly: the instruction is one line and a path on it cannot contain a newline,
+# so there is nothing `-z` could add. (Git PLUMBING output still gets `-z` — see the census.)
+# The path is taken RAW, exactly as the prompt spells it: it is not a git-quoted token and the
+# single normalisation boundary is untouched.
+roborev_prompt_snapshot_paths() {
+  local f="$1" row seen p q
+  _rx_snap_paths=()
+  _rx_snap_marker_lines=0
+  _rx_snap_unparseable=0
+  [ -f "$f" ] || return 0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    _rx_snap_marker_lines=$((_rx_snap_marker_lines + 1))
+    case "$row" in
+      UNPARSEABLE) _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue ;;
+    esac
+    p="${row#PATH	}"
+    [ -n "$p" ] || { _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue; }
+    seen=0
+    for q in ${_rx_snap_paths[@]+"${_rx_snap_paths[@]}"}; do
+      [ "$q" = "$p" ] && seen=1
+    done
+    [ "$seen" -eq 1 ] || _rx_snap_paths+=("$p")
+  done < <(LC_ALL=C awk '
+      index($0, "Read the diff from:") == 1 {
+        line = $0
+        sub(/\r$/, "", line)
+        s = index(line, "`")
+        if (s == 0) { print "UNPARSEABLE"; next }
+        rest = substr(line, s + 1)
+        e = 0
+        for (i = length(rest); i >= 1; i--) if (substr(rest, i, 1) == "`") { e = i; break }
+        if (e <= 1) { print "UNPARSEABLE"; next }
+        printf "PATH\t%s\n", substr(rest, 1, e - 1)
+      }
+    ' "$f" 2>/dev/null)
+  return 0
+}
+
+# _roborev_resolve_existing_ancestor <path>: `<path>` with its deepest EXISTING ancestor
+# directory replaced by that directory's PHYSICAL path (`cd`+`pwd -P`), into `_rx_resolved`.
+#
+# Why not `realpath`/`readlink -f`: neither is portable (BSD `readlink` has no `-f`), and both
+# need the path to exist — while the whole point here is that a snapshot file may ALREADY BE
+# GONE. Resolving the deepest ancestor that does exist makes the containment test below immune
+# to a symlinked parent (a `/tmp` -> `/private/tmp` box, a symlinked worktree root) without
+# requiring the file itself, and it removes any `..` an existing prefix contained. `..` in the
+# still-unresolved remainder is rejected separately, by component, in the binding below.
+_roborev_resolve_existing_ancestor() {
+  local p="$1" dir="$1" rest="" base phys
+  _rx_resolved="$p"
+  while : ; do
+    if [ -d "$dir" ]; then
+      phys=$(cd "$dir" 2>/dev/null && pwd -P) || phys=""
+      if [ -n "$phys" ]; then
+        _rx_resolved="${phys%/}$rest"
+        return 0
+      fi
+    fi
+    [ "$dir" != "/" ] || return 0
+    base="${dir##*/}"
+    rest="/$base$rest"
+    dir="${dir%/*}"
+    [ -n "$dir" ] || dir="/"
+  done
+}
+
+# roborev_snapshot_path_binding <path>: is `<path>` a roborev snapshot belonging to THE REVIEW
+# WE RAN? Exit status is the state; `_rx_snap_bound_path` carries the resolved path and
+# `_rx_snap_bind_state` the state token:
+#   0  ok             — absolute, inside `$REPO`, and under `$REPO/.roborev/roborev-snapshot-<id>/`
+#   1  not-absolute   — a relative path would resolve against THIS PROCESS's cwd, not the repo
+#   2  foreign-repo   — outside the reviewed repository entirely
+#   3  unbound-job    — inside the repo but not a roborev snapshot directory for this review
+#
+# THE BINDING IS THE POINT, and it has two halves. PROVENANCE: the path is read ONLY from the
+# prompt of the job whose record `job-record:`/`sha-assert:` already verified — nothing here
+# ever SEARCHES the filesystem for a snapshot, so a leftover directory cannot volunteer itself.
+# SHAPE: even so, the named path must be inside the reviewed repo and must sit under that repo's
+# own `.roborev/roborev-snapshot-<id>/`, so a path from another checkout (the reviewed change's
+# prose naming an absolute path, a stale worktree) cannot become the oracle for this review.
+#
+# COMPONENT-WISE, never a `case` glob: bash's `*` crosses `/`, so `.roborev/roborev-snapshot-*/*`
+# would also accept `.roborev/roborev-snapshot-x/../../elsewhere/f.diff`. Splitting the relative
+# path into components makes `..`, `.` and an empty component unexpressible as "inside".
+#
+# THE DECLARED RESIDUAL: this pins roborev's CURRENT snapshot layout. If a future build writes
+# its snapshots elsewhere, this FAILs closed with `unbound-job` naming the path — a DRIFT FAIL
+# costing one re-run plus a one-line update here, chosen over the alternative (accept any path
+# the prompt names), which would hand the strongest anti-vacuity key an oracle nobody bound.
+roborev_snapshot_path_binding() {
+  local p="$1" rel comp i
+  local -a parts=()
+  _rx_snap_bind_state=""
+  _rx_snap_bound_path="$p"
+  _rx_snap_dir=""
+  case "$p" in
+    /*) ;;
+    *) _rx_snap_bind_state="not-absolute"; return 1 ;;
+  esac
+  _roborev_resolve_existing_ancestor "$p"
+  _rx_snap_bound_path="$_rx_resolved"
+  case "$_rx_snap_bound_path" in
+    "$REPO"/*) ;;
+    *) _rx_snap_bind_state="foreign-repo"; return 2 ;;
+  esac
+  rel="${_rx_snap_bound_path#"$REPO"/}"
+  IFS='/' read -r -a parts <<<"$rel"
+  # At least `.roborev` / `roborev-snapshot-<id>` / a file name.
+  if [ "${#parts[@]}" -lt 3 ]; then _rx_snap_bind_state="unbound-job"; return 3; fi
+  for ((i = 0; i < ${#parts[@]}; i++)); do
+    comp="${parts[$i]}"
+    case "$comp" in
+      ''|'.'|'..') _rx_snap_bind_state="unbound-job"; return 3 ;;
+    esac
+  done
+  [ "${parts[0]}" = ".roborev" ] || { _rx_snap_bind_state="unbound-job"; return 3; }
+  case "${parts[1]}" in
+    roborev-snapshot-?*) ;;
+    *) _rx_snap_bind_state="unbound-job"; return 3 ;;
+  esac
+  # The snapshot DIRECTORY, so a cleaned-up directory can be distinguished from a missing file.
+  _rx_snap_dir="$REPO/${parts[0]}/${parts[1]}"
+  _rx_snap_bind_state="ok"
+  return 0
+}
+
+# roborev_collect_review_diff_headers <prompt-file>: collect the `diff --git` headers of the diff
+# the reviewer was ACTUALLY GIVEN — inline in the prompt, in the snapshot file the prompt names,
+# or (the union of) both — into the same three parallel arrays `roborev_collect_prompt_headers`
+# fills, and report WHERE they came from.
+#
+# THE SINGLE SOURCE OF TRUTH IS THE STATE VARIABLE, never this function's exit status: it always
+# returns 0, so a caller cannot accidentally treat "no failure signalled" as "a source was
+# measured". `ROBOREV_DIFF_SOURCE_STATE` is one of the AFFIRMATIVE states
+#   inline    the prompt carried the diff inline; no snapshot was named
+#   snapshot  the diff came from the snapshot file the prompt names
+#   both      both sources carried headers; the sets are UNIONED (no header is dropped)
+#   none      NEITHER source exists. A MEASUREMENT, not an excusal — see the caller.
+# or a FAILURE state naming what was wrong with the named snapshot
+#   not-absolute / foreign-repo / unbound-job / cleaned-up / missing / unreadable / empty /
+#   no-headers / ambiguous / unparseable-path
+# `ROBOREV_DIFF_SOURCE_DETAIL` carries the ERROR line for a failure state (each distinct, each
+# naming the path), and `ROBOREV_DIFF_SOURCE_PATH` the snapshot path when one was named.
+# The caller keys on the AFFIRMATIVE names and fails closed on everything else, so a state added
+# here without a decision there cannot inherit a permissive branch.
+#
+# COLLECT DURING THE RUN, because the snapshot directory is TRANSIENT: `.roborev/roborev-snapshot-<id>/`
+# is removed minutes after the review, and "already cleaned up" is its own explicit cause.
+ROBOREV_DIFF_SOURCE_STATE=""
+ROBOREV_DIFF_SOURCE_DETAIL=""
+ROBOREV_DIFF_SOURCE_PATH=""
+roborev_collect_review_diff_headers() {
+  local prompt="$1" snap_path bind=0 snap_bytes
+  local -a in_hdrs=() in_from=() in_to=()
+  ROBOREV_DIFF_SOURCE_STATE=""
+  ROBOREV_DIFF_SOURCE_DETAIL=""
+  ROBOREV_DIFF_SOURCE_PATH=""
+
+  roborev_collect_prompt_headers "$prompt"
+  in_hdrs=(${_rx_hdrs[@]+"${_rx_hdrs[@]}"})
+  in_from=(${_rx_hdr_from[@]+"${_rx_hdr_from[@]}"})
+  in_to=(${_rx_hdr_to[@]+"${_rx_hdr_to[@]}"})
+
+  roborev_prompt_snapshot_paths "$prompt"
+  if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
+    # WHICH of several named paths roborev wrote for this job is UNDECIDABLE, so it is not
+    # decided. Picking one would be a guess dressed as a measurement.
+    ROBOREV_DIFF_SOURCE_STATE="ambiguous"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' names ${#_rx_snap_paths[@]} DIFFERENT snapshot diff paths, so which one roborev wrote for THIS review is undecidable and no header source can be trusted. Failing closed rather than picking one: ${_rx_snap_paths[*]}"
+    return 0
+  fi
+  if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
+    if [ "${_rx_snap_unparseable:-0}" -gt 0 ]; then
+      ROBOREV_DIFF_SOURCE_STATE="unparseable-path"
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' carries roborev's snapshot instruction ('Read the diff from:') but no backtick-delimited path could be read from it (${_rx_snap_unparseable:-0} such line(s)), so the diff the reviewer was told to read cannot be located. Failing closed: the instruction shape may have changed — inspect the prompt ('roborev show ${JOB:-<job>} --prompt') and update roborev_prompt_snapshot_paths."
+      return 0
+    fi
+    if [ "${#in_hdrs[@]}" -gt 0 ]; then
+      ROBOREV_DIFF_SOURCE_STATE="inline"
+    else
+      ROBOREV_DIFF_SOURCE_STATE="none"
+    fi
+    return 0
+  fi
+
+  snap_path="${_rx_snap_paths[0]}"
+  ROBOREV_DIFF_SOURCE_PATH="$snap_path"
+  roborev_snapshot_path_binding "$snap_path" || bind=$?
+  ROBOREV_DIFF_SOURCE_PATH="$_rx_snap_bound_path"
+  # KEYED ON THE AFFIRMATIVE VALUE (`= ok`), never on "not one of the bad ones": a binding state
+  # this function has never judged must not reach the read below.
+  if [ "${_rx_snap_bind_state:-}" != ok ]; then
+    case "${_rx_snap_bind_state:-}" in
+      not-absolute)
+        ROBOREV_DIFF_SOURCE_STATE="not-absolute"
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt names a RELATIVE snapshot diff path ('$snap_path'), which would resolve against THIS PROCESS's working directory rather than the reviewed repository ($REPO) — so reading it could answer about a different file entirely. Failing closed; roborev writes an absolute path."
+        ;;
+      foreign-repo)
+        ROBOREV_DIFF_SOURCE_STATE="foreign-repo"
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names lies OUTSIDE the reviewed repository: $_rx_snap_bound_path is not under $REPO. A snapshot belonging to another checkout or another job cannot certify THIS review, however complete it looks, so it is not read at all. Failing closed."
+        ;;
+      *)
+        # `unbound-job`, and any binding state a future edit adds without a decision here.
+        ROBOREV_DIFF_SOURCE_STATE="unbound-job"
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the path the prompt names is inside the reviewed repository but is NOT a roborev snapshot for this review: $_rx_snap_bound_path does not sit under $REPO/.roborev/roborev-snapshot-<id>/ (binding state '${_rx_snap_bind_state:-<unset>}'). Failing closed rather than reading an unbound file as this review's diff — if roborev's snapshot layout has changed, update roborev_snapshot_path_binding."
+        ;;
+    esac
+    return 0
+  fi
+
+  if [ ! -e "$_rx_snap_bound_path" ]; then
+    if [ ! -d "${_rx_snap_dir:-}" ]; then
+      ROBOREV_DIFF_SOURCE_STATE="cleaned-up"
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists — roborev's snapshot dir is TRANSIENT and is removed shortly after a review, so the headers must be collected DURING the check run: ${_rx_snap_dir:-<unresolved>} (file: $_rx_snap_bound_path). There is therefore NO evidence of what the reviewer received. Failing closed: re-run the review and let the wrapper read the snapshot while it exists."
+    else
+      ROBOREV_DIFF_SOURCE_STATE="missing"
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot directory EXISTS but the named diff file is not in it: $_rx_snap_bound_path. The reviewer was told to read a file that is not there, so nothing establishes what it received. Failing closed."
+    fi
+    return 0
+  fi
+  if [ ! -f "$_rx_snap_bound_path" ] || [ ! -r "$_rx_snap_bound_path" ]; then
+    ROBOREV_DIFF_SOURCE_STATE="unreadable"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names is not a READABLE REGULAR FILE: $_rx_snap_bound_path. An oracle that cannot be consulted is a NON-PASSING verdict, never a pass — failing closed and naming the path."
+    return 0
+  fi
+  snap_bytes=$(tr -d '[:space:]' <"$_rx_snap_bound_path" | wc -c | tr -d '[:space:]')
+  if [ "${snap_bytes:-0}" -eq 0 ]; then
+    ROBOREV_DIFF_SOURCE_STATE="empty"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff is EMPTY (0 non-whitespace bytes): $_rx_snap_bound_path. The reviewer was pointed at a file carrying no diff, so nothing was delivered — failing closed. (The zero default on that byte count falls the STRICT way: an unmeasurable size reads as empty, which FAILs.)"
+    return 0
+  fi
+
+  roborev_collect_prompt_headers "$_rx_snap_bound_path"
+  if [ "${#_rx_hdrs[@]}" -eq 0 ]; then
+    # A `0/0` IS NEVER A PASS, on this branch as much as on the census one: a snapshot with no
+    # header cannot show that any path was delivered, and proceeding would compare the census
+    # against an EMPTY header set — which is a FAIL either way, but under a cause that blamed the
+    # branch instead of the oracle.
+    ROBOREV_DIFF_SOURCE_STATE="no-headers"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff carries NO 'diff --git' header at all: $_rx_snap_bound_path (${snap_bytes} non-whitespace bytes). A file with no header cannot establish that ANY census path was delivered, so this is a broken oracle, not a clean review — failing closed."
+    return 0
+  fi
+  # THE UNION, so no header from either source is dropped (a prompt may carry a small inline
+  # diff AND name a snapshot). Appending is enough: membership is decided per header by the
+  # canonical matcher, and asking twice about the same header can only ever agree.
+  if [ "${#in_hdrs[@]}" -gt 0 ]; then
+    _rx_hdrs=(${in_hdrs[@]+"${in_hdrs[@]}"} ${_rx_hdrs[@]+"${_rx_hdrs[@]}"})
+    _rx_hdr_from=(${in_from[@]+"${in_from[@]}"} ${_rx_hdr_from[@]+"${_rx_hdr_from[@]}"})
+    _rx_hdr_to=(${in_to[@]+"${in_to[@]}"} ${_rx_hdr_to[@]+"${_rx_hdr_to[@]}"})
+    ROBOREV_DIFF_SOURCE_STATE="both"
+  else
+    ROBOREV_DIFF_SOURCE_STATE="snapshot"
+  fi
+  return 0
+}
+
 # roborev_diff_header_has_path <diff-git-header-line> <RAW census path> [<from-path-token>]
 #   [<to-path-token>]: true when the header names that path on EITHER side.
 #
