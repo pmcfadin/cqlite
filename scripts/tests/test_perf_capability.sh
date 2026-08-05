@@ -1017,6 +1017,53 @@ if [ "$wt_ins_rc" -eq 0 ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ] && [ -f "$wt_d
 else
   bad "perf-capability: the atomic drop-in install did not replace a symlinked entry (rc=$wt_ins_rc, out='$wt_ins', link=$([ -L "$wt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$wt_leftover', outside-changed=$([ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && echo no || echo YES))"
 fi
+# ...and the STAGING entry is UNPREDICTABLE, created by `mktemp` (roborev finding 1 on #3261 — the
+# NINTH escape, same shape as the other eight: a NAME trusted instead of a DESTINATION). A fixed
+# staging path that is checked, cleared and only THEN opened by a privileged `tee` is a TOCTOU
+# window: anyone who can create entries in the directory re-plants that KNOWN name as a symlink
+# between the verify and the open, and root follows it. Two asserts, because neither alone is
+# enough — a behavioural one (the previously-predictable name is planted as a symlink at a victim
+# file and must be left strictly alone) and a structural one (unpredictability is a property of the
+# NAME, which is gone by the time the write succeeds, so the source is the only place to see it).
+wt_bait="$tmp/wt-staging-bait"; printf 'BAIT-MUST-NOT-BE-WRITTEN\n' >"$wt_bait"
+wt_bait_before=$(cat "$wt_bait")
+rm -f "$wt_d/.99-cqlite-perf.conf.new"; ln -s "$wt_bait" "$wt_d/.99-cqlite-perf.conf.new"
+rm -f "$wt_d/99-cqlite-perf.conf"
+wt_st=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_st_rc=$?
+if [ "$wt_st_rc" -eq 0 ] && [ "$(cat "$wt_bait")" = "$wt_bait_before" ] \
+   && [ -L "$wt_d/.99-cqlite-perf.conf.new" ] \
+   && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
+  ok "perf-capability: the drop-in staging entry does NOT reuse the previously-predictable name — a symlink planted there is left untouched and its target is byte-unchanged, while the managed file is still written (#3261 roborev-1 TOCTOU)"
+else
+  bad "perf-capability: the install wrote through a PREDICTABLE staging name (rc=$wt_st_rc, bait-changed=$([ "$(cat "$wt_bait")" = "$wt_bait_before" ] && echo no || echo YES), out='$wt_st')"
+fi
+rm -f "$wt_d/.99-cqlite-perf.conf.new"
+# ...structurally: the staging entry is created by `mktemp` with a random-suffix template, and no
+# hardcoded staging literal survives. A future edit back to a fixed name FAILS here.
+wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
+if printf '%s\n' "$wt_body" | grep -q 'mktemp -- "\$__pin_d/\.\$PERF_CAPABILITY_DROPIN_BASENAME\.XXXXXX"' \
+   && ! printf '%s\n' "$wt_body" | grep -qF '.new"' \
+   && [ "$(printf '%s\n' "$wt_body" | grep -c 'mktemp')" -ge 1 ]; then
+  ok "perf-capability: STRUCTURAL — the staging entry is created by 'mktemp' (O_CREAT|O_EXCL, 6 random chars) inside the validated directory, with no hardcoded staging name left, so the check-then-open race is gone by construction (#3261 roborev-1)"
+else
+  bad "perf-capability: the installer no longer creates its staging entry with an unpredictable mktemp name"
+  printf '%s\n' "$wt_body" | grep -n 'pin_t' | head -5
+fi
+# ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted.
+wt_mt="$tmp/wt-bad-mktemp"; mkdir -p "$wt_mt"
+for t in bash cat printf tee mv rm chmod env grep; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_mt/$t"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "/tmp/perf-cap-elsewhere.$$"' >"$wt_mt/mktemp"
+chmod +x "$wt_mt/mktemp"
+wt_mt_out=$(env PATH="$wt_mt:$PATH" CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_mt_rc=$?
+if [ "$wt_mt_rc" -ne 0 ] && printf '%s' "$wt_mt_out" | grep -q 'mktemp did not create a staging entry inside the validated directory'; then
+  ok "perf-capability: a 'mktemp' answering a path OUTSIDE the validated directory is REFUSED by name, never written to (the tool's answer is checked, not trusted)"
+else
+  bad "perf-capability: a mktemp answering outside the validated directory was trusted (rc=$wt_mt_rc, out='$wt_mt_out')"
+fi
 # ...and the install is still gated: an out-of-sandbox seam may not be written at all.
 if env CQLITE_PERF_SYSCTL_DIR="$symanc/sysctl.d" \
      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" >/dev/null 2>&1; then

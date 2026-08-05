@@ -415,38 +415,56 @@ perf_capability_dropin_path() {
 # FOLLOWED (issue #3261 AC1). argv is the privilege prefix (empty when already root); rc 0 iff the
 # managed bytes are in place at the managed path afterwards, verified by re-reading the file.
 #
-# Content goes to a fresh temp entry in the ALREADY-VALIDATED directory, then `mv -f` — rename(2),
-# which replaces the NAME and never dereferences the destination. The check in
-# perf_capability_dropin_path above has a TOCTOU window; a rename has none, which is why both
-# exist rather than either alone. Same directory, so the rename is same-filesystem and atomic. The
-# temp name is derived from the managed basename, never from a caller-supplied string, and an
-# entry already occupying it is removed and its removal VERIFIED before anything is written —
-# otherwise `tee` would follow a symlink planted at the temp name instead.
-#   The staging name is FIXED rather than pid-suffixed, deliberately: two bootstraps racing on one
-#   box would then collide and ONE would fail loudly, which is the honest outcome (they are writing
-#   the same managed bytes to the same managed path), whereas a pid suffix would leave
-#   per-pid litter behind whenever a run is killed between the `tee` and the `mv`. Bootstrap is
-#   once-per-box and the fleet rule is one worker per machine, so the race is not a live concern;
-#   the litter would be.
-#   It does not end in `.conf`, so the competing-file scan (which globs `*.conf`) can never mistake
-#   a staging entry for a rival sysctl drop-in.
+# Content goes to a fresh staging entry in the ALREADY-VALIDATED directory, then `mv -f` —
+# rename(2), which replaces the NAME and never dereferences the destination. Same directory, so the
+# rename is same-filesystem and atomic. The check in perf_capability_dropin_path above has a TOCTOU
+# window; a rename has none, which is why both exist rather than either alone.
+#
+# THE STAGING NAME IS UNPREDICTABLE, AND `mktemp` — NOT THE SHELL — CREATES IT (issue #3261, roborev
+# finding 1, the NINTH escape in this family and the SAME SHAPE as the other eight: a NAME trusted
+# in place of a DESTINATION). A PREDICTABLE staging path that is checked-then-opened is exactly that
+# assumption: this function used a fixed `.99-cqlite-perf.conf.new`, removed it, verified the
+# removal, and only then let a privileged `tee` open it — so anyone able to create entries in the
+# directory could re-plant that known name as a symlink in the window between the verify and the
+# open, and the root `tee` would follow it to an arbitrary file. Checking harder cannot close that
+# window; only removing the assumption can. So `mktemp` creates the entry with O_CREAT|O_EXCL under
+# the SAME privilege that will write it, and the name carries 6 random characters — an attacker can
+# neither guess the name nor win the create, because there is no create left to win.
+#   An earlier revision of this comment argued the fixed name was preferable ("litter beats a race
+#   that cannot happen"). That was WRONG on both halves and is recorded here rather than quietly
+#   deleted: the race is a real privileged arbitrary-overwrite, and a pid suffix would not have
+#   helped either — a pid is predictable. Unpredictability is the property; `mktemp` is how it is
+#   obtained. The litter it does risk (an unpredictably-named dotfile if a run is killed between the
+#   `tee` and the `mv`) is a cosmetic cost against a root-overwrite, and every exit path here
+#   removes it.
+#   The name does not end in `.conf` (and begins with `.`), so the competing-file scan — which globs
+#   `*.conf` — can never mistake a staging entry for a rival sysctl drop-in.
+#   `chmod 0644` after the write is load-bearing, not cosmetic: `mktemp` creates 0600, and the
+#   idempotency compare (perf_capability_dropin_current) is run by an UNPRIVILEGED bootstrap
+#   process, which could not read a root-owned 0600 file — every subsequent run would then see
+#   "not current" and rewrite. The old `tee` produced 0644 via root's umask; this preserves that.
 perf_capability_dropin_install() {
   local __pin_d __pin_p __pin_t
   __pin_d=$(perf_capability_sysctl_dir) || return 1
   __pin_p="$__pin_d/$PERF_CAPABILITY_DROPIN_BASENAME"
-  __pin_t="$__pin_d/.$PERF_CAPABILITY_DROPIN_BASENAME.new"
-  if [ -e "$__pin_t" ] || [ -L "$__pin_t" ]; then
-    "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
-    if [ -e "$__pin_t" ] || [ -L "$__pin_t" ]; then
-      printf 'perf-capability: REFUSING: could not clear the staging entry %s, so a write there could follow it.\n' "'$__pin_t'" >&2
-      return 1
-    fi
-  fi
-  if ! perf_capability_dropin_content | "$@" tee -- "$__pin_t" >/dev/null 2>&1; then
+  __pin_t=$("$@" mktemp -- "$__pin_d/.$PERF_CAPABILITY_DROPIN_BASENAME.XXXXXX" 2>/dev/null) || return 1
+  # `mktemp` is the one creating the entry, so its answer is what must be checked: it has to name a
+  # fresh REGULAR file (never a symlink) directly inside the directory we validated. A tool that
+  # answered anything else has not given us a safe staging entry, and there is nothing to clean up.
+  case "$__pin_t" in
+    "$__pin_d"/.?*) ;;
+    *) printf 'perf-capability: REFUSING: mktemp did not create a staging entry inside the validated directory %s (got %s).\n' \
+         "'$__pin_d'" "'${__pin_t:-<empty>}'" >&2
+       return 1 ;;
+  esac
+  if [ -L "$__pin_t" ] || [ ! -f "$__pin_t" ]; then
+    printf 'perf-capability: REFUSING: the staging entry %s is not a fresh regular file.\n' "'$__pin_t'" >&2
     "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
     return 1
   fi
-  if ! "$@" mv -f -- "$__pin_t" "$__pin_p" >/dev/null 2>&1; then
+  if ! perf_capability_dropin_content | "$@" tee -- "$__pin_t" >/dev/null 2>&1 \
+     || ! "$@" chmod 0644 -- "$__pin_t" >/dev/null 2>&1 \
+     || ! "$@" mv -f -- "$__pin_t" "$__pin_p" >/dev/null 2>&1; then
     "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
     return 1
   fi
