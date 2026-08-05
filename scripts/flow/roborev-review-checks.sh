@@ -153,10 +153,22 @@ roborev_check_prompt_content() {
       snapshot)
         pc_source_noun="the snapshot diff the prompt names"
         pc_present_suffix=" in the snapshot diff"
+        if [ "${ROBOREV_DIFF_SOURCE_ORIGIN:-live}" = captured ]; then
+          # Measured live: roborev DELETES the snapshot when the review finishes, before
+          # `--wait` returns, so on a real snapshot-mode review the evidence is the copy the
+          # wrapper took while the review ran. The block says so rather than implying it read
+          # the original.
+          pc_source_noun="the snapshot diff captured while the review ran"
+          pc_present_suffix=" in the captured snapshot diff"
+        fi
         ;;
       both)
         pc_source_noun="the prompt and the snapshot diff it names"
         pc_present_suffix=" in the prompt and its snapshot diff"
+        if [ "${ROBOREV_DIFF_SOURCE_ORIGIN:-live}" = captured ]; then
+          pc_source_noun="the prompt and the snapshot diff captured while the review ran"
+          pc_present_suffix=" in the prompt and its captured snapshot diff"
+        fi
         ;;
       none)
         # PERMISSIVE-LOOKING, AND IT IS NOT — the reason is recorded here rather than left to

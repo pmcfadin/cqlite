@@ -586,6 +586,12 @@ finish() { # finish <PASS|FAIL|NOTHING-TO-REVIEW> <exit-code>
 # shellcheck disable=SC2317 # invoked indirectly, by `trap on_exit EXIT` below
 on_exit() {
   local rc=$?
+  # The snapshot-capture watcher (#3312) must never outlive the wrapper, including on a `set -e`
+  # abort before the review returns. Defined in the oracles file, which may not be sourced yet on
+  # the earliest failure paths — hence the existence test rather than a bare call.
+  if command -v roborev_snapshot_capture_stop >/dev/null 2>&1; then
+    roborev_snapshot_capture_stop
+  fi
   if [ "$EMITTED" -eq 0 ]; then
     printf 'ERROR: the wrapper terminated unexpectedly (exit %s) before reaching a verdict.\n' "$rc"
     RESULT="FAIL"
@@ -682,6 +688,14 @@ done
 # WITHOUT `--repo`, which resolves against the ROOT checkout. NEVER the
 # two-positional range form (it anchors the range at git's EMPTY TREE).
 # The transcript goes to the log; stdout stays reserved for the summary block.
+#
+# THE SNAPSHOT CAPTURE MUST BE ARMED BEFORE THE REVIEW STARTS (#3312), because roborev DELETES the
+# snapshot diff when the review finishes — measured: it is gone before this very `--wait` returns —
+# and `roborev show` cannot hand it back (no `--diff`). So a watcher copies it out of the reviewed
+# repo WHILE the review runs, and `prompt-content:` reads OUR copy of the directory id the job's own
+# prompt names. Nothing is reconstructed from our own `git diff`; that would make the key agree with
+# itself. If the capture cannot start or misses, the check fails CLOSED on the absent snapshot.
+roborev_snapshot_capture_start "$LOG.snapshots"
 set +e
 roborev review --branch \
   --base "$BASE" \
@@ -691,6 +705,10 @@ roborev review --branch \
   --wait >"$LOG" 2>&1
 REVIEW_RC=$?
 set -e
+# Stopped as soon as the review returns: the snapshot cannot appear after that, and a watcher left
+# running would outlive the wrapper. Also stopped from the EXIT trap, for the paths that never reach
+# here.
+roborev_snapshot_capture_stop
 
 # --- step 5: reviewed-RANGE assert (AC2) — STRUCTURED data is the oracle -------
 #

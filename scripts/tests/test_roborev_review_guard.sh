@@ -266,6 +266,27 @@ record_read_blank() {
 case "$cmd" in
   review)
     printf 'review %s\n' "$*" >>"$STUB_INVOKED"
+    # THE REAL SNAPSHOT LIFECYCLE (#3312), reproduced: roborev writes the snapshot diff, reviews it,
+    # then DELETES the directory BEFORE `--wait` returns — measured live on job 3, which is why the
+    # wrapper has to capture it while the review runs. Synchronisation is DETERMINISTIC, never a
+    # sleep: the stub waits for the wrapper's capture to appear (bounded), then removes the snapshot.
+    # A capture that never appears therefore FAILs the case, which is the point of it.
+    if [ -n "${STUB_SNAPSHOT_LIFECYCLE_DIR:-}" ]; then
+      mkdir -p "$STUB_SNAPSHOT_LIFECYCLE_DIR"
+      : >"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+      for p in ${STUB_SNAPSHOT_PATHS:-}; do
+        printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -0,0 +1 @@\n+x\n' \
+          "$p" "$p" "$p" "$p" >>"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+      done
+      snap_id="${STUB_SNAPSHOT_LIFECYCLE_DIR##*/}"
+      waited=0
+      while [ "$waited" -lt 300 ]; do
+        [ -f "${STUB_SNAPSHOT_CAPTURE_WAIT_DIR:-/nonexistent}/$snap_id.diff" ] && break
+        waited=$((waited + 1))
+        sleep 0.1
+      done
+      rm -rf "$STUB_SNAPSHOT_LIFECYCLE_DIR"
+    fi
     if [ -n "${STUB_ANNOUNCE_SHA:-}" ]; then
       printf 'Enqueued job %s for %s\n' "${STUB_JOB:-4600}" "$STUB_ANNOUNCE_SHA"
     fi
@@ -925,6 +946,12 @@ export STUB_PAYLOAD_JOB=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
+# #3312: the snapshot LIFECYCLE knobs. STUB_SNAPSHOT_LIFECYCLE_DIR is the snapshot directory the
+# stub creates and then deletes mid-review; STUB_SNAPSHOT_PATHS the paths it writes headers for;
+# STUB_SNAPSHOT_CAPTURE_WAIT_DIR the wrapper's capture dir the stub waits on before deleting.
+export STUB_SNAPSHOT_LIFECYCLE_DIR=''
+export STUB_SNAPSHOT_PATHS=''
+export STUB_SNAPSHOT_CAPTURE_WAIT_DIR=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -942,6 +969,9 @@ reset_stub() {
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
+  STUB_SNAPSHOT_LIFECYCLE_DIR=''
+  STUB_SNAPSHOT_PATHS=''
+  STUB_SNAPSHOT_CAPTURE_WAIT_DIR=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -3371,8 +3401,8 @@ run_wrapper "$snap_work"
 assert_verdict 'case (cx31f)' FAIL 1
 assert_says 'case (cx31f) a missing file is distinct from a cleaned-up directory' \
   '^prompt-content: FAIL \(snapshot diff unusable: missing\)$'
-assert_says 'case (cx31f) the cause names the path' \
-  "^ERROR: prompt-content: .*snapshot directory EXISTS but the named diff file is not in it: $snap_file"
+assert_says 'case (cx31f) the cause names the path and that no capture stood in for it' \
+  "^ERROR: prompt-content: .*snapshot directory EXISTS but the named diff file is not in it, and no capture of it was taken: $snap_file"
 
 printf '== (cx31g) the named snapshot path is not a readable regular file ==\n'
 reset_stub
@@ -3482,6 +3512,55 @@ assert_says 'case (cx31n) an unparseable instruction line is its own cause' \
   '^prompt-content: FAIL \(snapshot diff unusable: unparseable-path\)$'
 assert_says 'case (cx31n) the cause says what could not be read' \
   '^ERROR: prompt-content: .*no backtick-delimited path could be read'
+
+printf '== (cx31r) THE REAL LIFECYCLE: roborev deletes the snapshot before --wait returns ==\n'
+# MEASURED LIVE, and it falsified the first design of this fix (job 3 on this fleet: 12 files,
+# +3311, a 232,820-byte snapshot with 9 headers, 541,812 input / 472,576 cached tokens, a genuine
+# completed review) — roborev removes `.roborev/roborev-snapshot-<id>/` when the review finishes,
+# which is BEFORE `roborev review --wait` returns to the wrapper. Reading the path afterwards
+# therefore reported `cleaned-up` on EVERY genuine snapshot-mode review: a differently-named FAIL is
+# not a fix. `roborev show` cannot hand the diff back either (it has --prompt and --json, no --diff),
+# so the wrapper captures the snapshot WHILE the review runs and reads its own copy of the directory
+# id the prompt names. This case drives that whole path: the stub writes the snapshot, waits for the
+# capture, DELETES the snapshot, and only then announces the job.
+reset_stub
+snap_live_dir="$snap_repo/.roborev/roborev-snapshot-424242"
+snap_live_log="$tmp/cx31r-transcript.log"
+STUB_SNAPSHOT_LIFECYCLE_DIR="$snap_live_dir"
+STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+STUB_SNAPSHOT_CAPTURE_WAIT_DIR="$snap_live_log.snapshots"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_live_dir/roborev-snapshot-content.diff")
+run_wrapper "$snap_work" --log "$snap_live_log"
+assert_verdict 'case (cx31r)' PASS 0
+assert_says 'case (cx31r) the captured snapshot is what certifies the census, and the value says so' \
+  '^prompt-content: PASS \(2/2 code census paths present in the captured snapshot diff\)$'
+assert_lacks 'case (cx31r) the deleted snapshot is not reported as cleaned-up' 'snapshot diff unusable'
+if [ -d "$snap_live_dir" ]; then
+  bad 'case (cx31r): the stub did not delete the snapshot directory — the case did not reproduce the real lifecycle'
+else
+  ok 'case (cx31r): the snapshot directory was really gone by the time prompt-content ran'
+fi
+if [ -f "$snap_live_log.snapshots/roborev-snapshot-424242.diff" ]; then
+  ok 'case (cx31r): the capture exists beside the transcript (the evidence the block rests on is retained)'
+else
+  bad 'case (cx31r): no capture was written, so the PASS above could not have come from one'
+fi
+reset_stub
+
+printf '== (cx31r2) with the capture MISSING, the same lifecycle is still a cleaned-up FAIL ==\n'
+# The one-variable control for (cx31r): same deleted snapshot, no capture. Without it, a green
+# (cx31r) could not be attributed to the capture — and this direction is the fail-closed one that
+# must survive, so it is observed rather than reasoned about.
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_repo/.roborev/roborev-snapshot-555555/roborev-snapshot-content.diff")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31r2)' FAIL 1
+assert_says 'case (cx31r2) an uncaptured, deleted snapshot FAILs' \
+  '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
+assert_says 'case (cx31r2) the cause names the capture that would have been the evidence' \
+  'is the only possible evidence and it is not there'
 
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub

@@ -888,6 +888,84 @@ roborev_collect_prompt_headers() {
 # prompt-shape knowledge, the same class as "how far the extended-header run extends". The
 # checks file must not grow a second idea of it (asserted structurally).
 
+# ============ THE SNAPSHOT IS GONE BEFORE THE WRAPPER CAN READ IT (#3312) ============
+# MEASURED LIVE, on this fleet, with the real binary — and it falsifies the obvious design. Job 3,
+# 12 files / +3311, 232,820-byte snapshot, 541,812 input / 472,576 cached tokens, review-completed
+# PASS, both vacuity tiers PASS: roborev wrote
+# `<repo>/.roborev/roborev-snapshot-898764941/roborev-snapshot-content.diff` (9 `diff --git`
+# headers, exactly the 9 code census paths) — and DELETED the whole directory when the review
+# finished, i.e. BEFORE `roborev review --wait` returned to us. Reading the path after the review
+# therefore reports `cleaned-up` on EVERY genuine snapshot-mode review: a differently-named FAIL
+# is not a fix, because the merge is still blocked on exactly the large diffs the issue is about.
+#
+# THE DIFF IS NOT RETRIEVABLE AFTER THE FACT. `roborev show <job>` has `--prompt` and `--json` and
+# NO `--diff` (checked against the installed CLI's own help), and the prompt only NAMES the path.
+#
+# SO IT IS CAPTURED WHILE THE REVIEW RUNS: a watcher started before `roborev review` copies each
+# `<repo>/.roborev/roborev-snapshot-*/roborev-snapshot-content.diff` it sees into the wrapper's own
+# diagnostics directory, keyed by the SNAPSHOT DIRECTORY ID. After the review, the check resolves
+# the id from the path the prompt names and reads OUR COPY of exactly that snapshot.
+#
+# WHY THIS IS NOT A WEAKENING. The copy is (a) taken from INSIDE the reviewed repository, (b) taken
+# DURING this run, by us, (c) selected by the directory id the reviewed job's OWN prompt names.
+# Nothing is reconstructed: we never compute the diff ourselves. That distinction is the whole
+# point — `git diff` output of our own would make `prompt-content:` compare our census against our
+# own diff, which always agrees, i.e. exactly the vacuous pass this key exists to prevent. A
+# capture that does not happen is not excused either: with no live file and no capture the verdict
+# is still `cleaned-up`, fail-closed.
+#
+# RE-COPIED ONLY WHEN THE SOURCE SIZE CHANGES, so a partially-written snapshot converges to the
+# complete file without copying a multi-megabyte diff five times a second for the whole review.
+ROBOREV_SNAPSHOT_CAPTURE_DIR=""
+ROBOREV_SNAPSHOT_CAPTURE_PID=""
+_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS=${ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS:-0.2}
+
+# roborev_snapshot_capture_start <capture-dir>: begin capturing; sets
+# ROBOREV_SNAPSHOT_CAPTURE_DIR/_PID. Never fatal — a capture that cannot start leaves the check to
+# fail closed later on the absent snapshot, which is the correct direction.
+roborev_snapshot_capture_start() {
+  ROBOREV_SNAPSHOT_CAPTURE_DIR=""
+  ROBOREV_SNAPSHOT_CAPTURE_PID=""
+  mkdir -p "$1" 2>/dev/null || return 0
+  ROBOREV_SNAPSHOT_CAPTURE_DIR="$1"
+  _roborev_snapshot_capture_loop "$REPO" "$1" &
+  ROBOREV_SNAPSHOT_CAPTURE_PID=$!
+  return 0
+}
+
+# roborev_snapshot_capture_stop: stop the watcher. Idempotent, and safe to call from an EXIT trap.
+roborev_snapshot_capture_stop() {
+  [ -n "${ROBOREV_SNAPSHOT_CAPTURE_PID:-}" ] || return 0
+  kill "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
+  wait "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
+  ROBOREV_SNAPSHOT_CAPTURE_PID=""
+  return 0
+}
+
+_roborev_snapshot_capture_loop() {
+  local repo="$1" out="$2" f id size sizefile
+  while : ; do
+    # An unmatched glob leaves the PATTERN in `$f`, which the `-f` test rejects — no `nullglob`
+    # dependency, and inline-mode reviews simply never match.
+    for f in "$repo"/.roborev/roborev-snapshot-*/roborev-snapshot-content.diff; do
+      [ -f "$f" ] || continue
+      id="${f%/*}"
+      id="${id##*/}"
+      size=$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]') || size=""
+      [ -n "$size" ] || continue
+      sizefile="$out/$id.size"
+      if [ -f "$out/$id.diff" ] && [ "$(cat "$sizefile" 2>/dev/null || printf '')" = "$size" ]; then
+        continue
+      fi
+      # tmp + mv, so a reader never sees a half-written capture.
+      if cp "$f" "$out/.$id.diff.part" 2>/dev/null; then
+        mv "$out/.$id.diff.part" "$out/$id.diff" 2>/dev/null && printf '%s' "$size" >"$sizefile" 2>/dev/null
+      fi
+    done
+    sleep "$_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS" 2>/dev/null || sleep 1
+  done
+}
+
 # roborev_prompt_snapshot_paths <prompt-file>: the DISTINCT snapshot diff paths the prompt
 # instructs the reviewer to read, into `_rx_snap_paths`, plus `_rx_snap_unparseable` — how many
 # instruction lines carried NO readable path. That second count is not diagnostics: an
@@ -1017,6 +1095,7 @@ roborev_snapshot_path_binding() {
   _rx_snap_bind_state=""
   _rx_snap_bound_path="$p"
   _rx_snap_dir=""
+  _rx_snap_dir_id=""
   case "$p" in
     /*) ;;
     *) _rx_snap_bind_state="not-absolute"; return 1 ;;
@@ -1048,6 +1127,9 @@ roborev_snapshot_path_binding() {
   esac
   # The snapshot DIRECTORY, so a cleaned-up directory can be distinguished from a missing file.
   _rx_snap_dir="$repo_prefix/${parts[0]}/${parts[1]}"
+  # The DIRECTORY ID is what a capture is keyed by, so it is derived HERE, from the same components
+  # the binding already validated — never re-parsed from the path by a second consumer.
+  _rx_snap_dir_id="${parts[1]}"
   _rx_snap_bind_state="ok"
   return 0
 }
@@ -1081,12 +1163,16 @@ roborev_snapshot_path_binding() {
 ROBOREV_DIFF_SOURCE_STATE=""
 ROBOREV_DIFF_SOURCE_DETAIL=""
 ROBOREV_DIFF_SOURCE_PATH=""
+# live | captured — WHICH copy of the snapshot the headers came from. Presentational, and reset on
+# every call so a previous run's value can never be reported for this one.
+ROBOREV_DIFF_SOURCE_ORIGIN="live"
 roborev_collect_review_diff_headers() {
   local prompt="$1" snap_path snap_bytes
   local -a in_hdrs=() in_from=() in_to=()
   ROBOREV_DIFF_SOURCE_STATE=""
   ROBOREV_DIFF_SOURCE_DETAIL=""
   ROBOREV_DIFF_SOURCE_PATH=""
+  ROBOREV_DIFF_SOURCE_ORIGIN="live"
 
   roborev_collect_prompt_headers "$prompt"
   in_hdrs=(${_rx_hdrs[@]+"${_rx_hdrs[@]}"})
@@ -1153,15 +1239,32 @@ roborev_collect_review_diff_headers() {
     return 0
   fi
 
-  if [ ! -e "$_rx_snap_bound_path" ]; then
+  # THE CAPTURE, consulted ONLY when the original is no longer there — which, measured live, is the
+  # NORMAL case (roborev deletes the snapshot before `--wait` returns). It is OUR copy of the very
+  # directory id this job's prompt names, taken from inside the reviewed repo during this run.
+  _rx_snap_capture=""
+  if [ ! -f "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
+    && [ -n "${_rx_snap_dir_id:-}" ] \
+    && [ -f "$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.diff" ]; then
+    _rx_snap_capture="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.diff"
+  fi
+  if [ ! -e "$_rx_snap_bound_path" ] && [ -z "$_rx_snap_capture" ]; then
     if [ ! -d "${_rx_snap_dir:-}" ]; then
       ROBOREV_DIFF_SOURCE_STATE="cleaned-up"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists — roborev's snapshot dir is TRANSIENT and is removed shortly after a review, so the headers must be collected DURING the check run: ${_rx_snap_dir:-<unresolved>} (file: $_rx_snap_bound_path). There is therefore NO evidence of what the reviewer received. Failing closed: re-run the review and let the wrapper read the snapshot while it exists."
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists AND this run captured no copy of it — roborev deletes ${_rx_snap_dir:-<unresolved>} when the review finishes, which is BEFORE 'roborev review --wait' returns, so the copy taken while the review ran (${ROBOREV_SNAPSHOT_CAPTURE_DIR:-<capture never started>}/${_rx_snap_dir_id:-<unknown id>}.diff) is the only possible evidence and it is not there. There is therefore NO evidence of what the reviewer received. Failing closed: check that the wrapper's capture watcher started (it needs a writable log directory) and re-run the review."
     else
       ROBOREV_DIFF_SOURCE_STATE="missing"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot directory EXISTS but the named diff file is not in it: $_rx_snap_bound_path. The reviewer was told to read a file that is not there, so nothing establishes what it received. Failing closed."
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot directory EXISTS but the named diff file is not in it, and no capture of it was taken: $_rx_snap_bound_path. The reviewer was told to read a file that is not there, so nothing establishes what it received. Failing closed."
     fi
     return 0
+  fi
+  if [ -n "$_rx_snap_capture" ]; then
+    # The ORIGIN is carried separately from the STATE so the affirmative state set stays exactly
+    # {inline, snapshot, both, none} — a capture is not a different KIND of evidence, it is the same
+    # snapshot read from our copy, and the block says which one it read.
+    ROBOREV_DIFF_SOURCE_ORIGIN="captured"
+    _rx_snap_bound_path="$_rx_snap_capture"
+    ROBOREV_DIFF_SOURCE_PATH="$_rx_snap_capture"
   fi
   if [ ! -f "$_rx_snap_bound_path" ] || [ ! -r "$_rx_snap_bound_path" ]; then
     ROBOREV_DIFF_SOURCE_STATE="unreadable"
