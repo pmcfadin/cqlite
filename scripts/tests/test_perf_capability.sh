@@ -1148,7 +1148,26 @@ if [ "$wt_ns_rc" -eq 0 ] || ! printf '%s' "$wt_ns_out" | grep -q 'cannot determi
   bad "perf-capability: an undeterminable directory owner/mode did not fail closed (rc=$wt_ns_rc, out='$wt_ns_out')"
   wt_perm_fail=1
 fi
-[ "$wt_perm_fail" -ne 0 ] || ok "perf-capability: a privileged staged install REFUSES a group-/world-writable drop-in directory by name and writes nothing, refuses when owner/mode cannot be determined, and still installs into a correctly-owned 0755 directory — the staging race is closed at its PRECONDITION rather than by trying to win it (#3261 roborev-3)"
+# ...a SYMLINKED destination directory is refused OUTRIGHT (owner ruling A', condition 2: lstat
+# semantics ASSERTED, not inherited from `stat`'s default). The link itself may look perfectly
+# owned and 0755 while entries would be created somewhere else entirely, so measuring the link
+# and proceeding is exactly the by-name reasoning this family has punished eleven times. The
+# link target here is a legitimate, correctly-owned, non-group-writable directory precisely so
+# the case cannot pass for the wrong reason: only the SYMLINK-NESS may cause the refusal.
+wt_ln_target="$tmp/wt-ln-target"; wt_ln_dir="$tmp/wt-ln-dir"
+rm -rf "$wt_ln_target" "$wt_ln_dir"; mkdir -p "$wt_ln_target"; chmod 0755 "$wt_ln_target"
+ln -s "$wt_ln_target" "$wt_ln_dir"
+wt_ln_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_ln_dir" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ln_rc=$?
+if [ "$wt_ln_rc" -eq 0 ] || ! printf '%s' "$wt_ln_out" | grep -q 'is a SYMLINK'; then
+  bad "perf-capability: a SYMLINKED drop-in directory was not refused by name (rc=$wt_ln_rc, out='$wt_ln_out')"
+  wt_perm_fail=1
+fi
+if [ -e "$wt_ln_target/99-cqlite-perf.conf" ]; then
+  bad "perf-capability: the symlinked drop-in directory was refused but its TARGET was written anyway"
+  wt_perm_fail=1
+fi
+[ "$wt_perm_fail" -ne 0 ] || ok "perf-capability: a privileged staged install REFUSES a group-/world-writable drop-in directory by name and writes nothing, refuses a SYMLINKED destination outright (lstat semantics asserted, target left unwritten), refuses when owner/mode cannot be determined, and still installs into a correctly-owned 0755 directory — the staging race is closed at its PRECONDITION rather than by trying to win it (#3261 roborev-3, owner A' condition 2)"
 
 # ...and CR/LF IN A PATH SEAM IS REFUSED (issue #3261, roborev round 3). Not a containment defect —
 # the path IS contained — a SERIALIZATION one, which is why nine rounds of containment work never

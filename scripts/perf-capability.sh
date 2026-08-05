@@ -536,6 +536,30 @@ perf_capability_dropin_install() {
     d=$1; p=$2; b=$3
     # THE PRECONDITION (roborev round 3): nobody less privileged than this shell may be able to
     # create or replace entries in $d. Without that there is an actor to race; with it there is not.
+    #   WHY THIS IS NOT A TWELFTH ATTEMPT TO OUT-TIME THE RACE (owner ruling A-prime): escapes 9-11
+    #   narrowed a WINDOW (unpredictable name, O_EXCL create, one privileged process). This touches
+    #   no window. It removes the ATTACKER PRECONDITION, turning "production is safe because
+    #   /etc/sysctl.d is root-owned" from a recorded ASSUMPTION into an ENFORCED INVARIANT: assume
+    #   nothing about the destination, measure it, fail closed.
+    #   THE REMAINING BOUNDARY, STATED: this check races only against an actor who can `chmod` a
+    #   directory owned by the privileged writer — and that actor is already the privileged writer
+    #   (or root), so it has no privilege left to escalate to. That is the whole of the residual;
+    #   it is a boundary, not a proof, and it is deliberately not phrased as "cannot happen" —
+    #   this function has already had TWO such phrasings retracted (a fixed staging name, and a
+    #   single `sh -c` mistaken for mutual exclusion).
+    # NO SYMLINK FOLLOWING IN THE CHECK, ASSERTED RATHER THAN INHERITED: `stat -c` is lstat-like on
+    # GNU (it does not dereference without -L), so a symlinked $d would be measured as the LINK.
+    # Relying on that implicitly is the same by-name reasoning this family has punished eleven
+    # times, so the symlink case is refused OUTRIGHT and first — the destination directory must be
+    # a real directory, not a link to one, whatever a future stat implementation would report.
+    if [ -L "$d" ]; then
+      printf "perf-capability: REFUSING: the drop-in directory %s is a SYMLINK — its owner and mode say nothing about where entries would actually be created, so it cannot be proven un-writable by less-privileged users.\n" "$d" >&2
+      exit 1
+    fi
+    if [ ! -d "$d" ]; then
+      printf "perf-capability: REFUSING: the drop-in directory %s is not a directory.\n" "$d" >&2
+      exit 1
+    fi
     me=$(id -u 2>/dev/null) || {
       printf "perf-capability: REFUSING: cannot determine the privileged writer identity (id -u failed), so the drop-in directory cannot be proven un-writable by less-privileged users.\n" >&2
       exit 1; }
