@@ -308,10 +308,17 @@ done
 sbx="$tmp/sandbox"; mkdir -p "$sbx/inside" "$sbx/inside-proc"; : >"$sbx/.cqlite-perf-sandbox"
 mkdir -p "${sbx}evil"                       # the sibling whose NAME starts with the root's
 nostamp="$tmp/unstamped-root"; mkdir -p "$nostamp/inside"
+# The shim dir lives INSIDE the root each call declares. It has to: since #3261 AC4 a privileged
+# tool must RESOLVE beneath the proven sandbox root, so a shim dir outside it is refused on its own
+# merits — which would decide these cases for the wrong reason (they are about path containment).
+sbxpriv="$sbx/priv"; mkdir -p "$sbxpriv"
+for t in sudo sysctl; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$sbxpriv/$t"; chmod +x "$sbxpriv/$t"
+done
 guard_with_root() { # guard_with_root <sandbox-root> <proc-seam> <sysctl-seam> -> rc + stderr
-  # $realpriv FIRST on PATH with the same dir declared: the guard's OTHER refusal (a real
-  # sudo/sysctl reachable) must not be what decides these cases.
-  env PATH="$realpriv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$realpriv" \
+  # The shim dir FIRST on PATH and declared as such: the guard's OTHER refusals (a real
+  # sudo/sysctl reachable, an unresolvable privileged tool) must not be what decides these cases.
+  env PATH="$1/priv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$1/priv" \
     CQLITE_PERF_TEST_SANDBOX="$1" CQLITE_PERF_PROC_DIR="$2" CQLITE_PERF_SYSCTL_DIR="$3" \
     bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1
 }

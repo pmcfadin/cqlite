@@ -69,6 +69,15 @@ if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   exit 1
 fi
 trap 'rm -rf "$tmp"' EXIT
+# ...and CANONICALIZE it, because this IS the declared sandbox root (issue #3261 AC2). The
+# fork-free read gate now rejects a SYMLINKED path component — the fix for a symlink inside the
+# sandbox pointing at the real /proc/sys/kernel — and `mktemp -d` legitimately hands back a path
+# THROUGH a symlink on some supported hosts (macOS: TMPDIR lives under /var, and /var is a symlink
+# to private/var). An uncanonicalized root would make every POSITIVE case refuse there, i.e. the
+# suite would be green only on Linux. A root must be spelled as its own destination anyway.
+if tmp_canon=$(cd -P -- "$tmp" 2>/dev/null && pwd -P) && [ -n "$tmp_canon" ] && [ -d "$tmp_canon" ]; then
+  tmp="$tmp_canon"
+fi
 
 # Global-state isolation, same posture as test_bootstrap_agent_machine.sh: the
 # bootstrap runs below read/write git config and read board env, and these suites run
