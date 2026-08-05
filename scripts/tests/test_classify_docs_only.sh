@@ -194,11 +194,31 @@ echo "== (f) #3250: ONE canonical decision point for a docs/ path (structural) =
 # stops a blanket arm hiding by putting `return 0` on its own line.
 docs_case_arms() {
   awk '
-    function emit() { printf "%d:%s\n", start, body; in_arm = 0; body = "" }
+    function emit() { printf "%d:%s\n", start, substr(body, 1, 200); in_arm = 0; body = "" }
+    # A `case` ARM PATTERN is a `|`-separated list of glob WORDS terminated by
+    # `)`. Requiring every token to be space-free is what keeps a body line such
+    # as `echo "... docs/ ... (fail-closed, #3250)"` — which also carries a `)`
+    # after a `docs/` — from being misread as an arm.
+    function is_arm_pattern(line,   pat, n, i, toks) {
+      if (index(line, ")") == 0) return 0
+      pat = line
+      sub(/\).*/, "", pat)
+      sub(/^[[:space:]]*\(?[[:space:]]*/, "", pat)
+      sub(/[[:space:]]+$/, "", pat)
+      if (pat == "") return 0
+      n = split(pat, toks, /[[:space:]]*\|[[:space:]]*/)
+      for (i = 1; i <= n; i++) {
+        if (toks[i] == "" || toks[i] ~ /[[:space:]]/) return 0
+      }
+      return 1
+    }
     /^[[:space:]]*#/ { next }
+    { if ($0 ~ /(^|[[:space:]])case[[:space:]].*[[:space:]]in[[:space:]]*$/) case_depth++ }
+    { if ($0 ~ /^[[:space:]]*esac([[:space:]]|;|$)/) case_depth-- }
     in_arm { body = body " " $0; if ($0 ~ /;;/) emit(); next }
     {
-      if (index($0, ")") == 0) next
+      if (case_depth <= 0) next
+      if (!is_arm_pattern($0)) next
       pat = $0; sub(/\).*/, "", pat)
       if (pat !~ /docs\//) next
       start = NR; body = $0; in_arm = 1
