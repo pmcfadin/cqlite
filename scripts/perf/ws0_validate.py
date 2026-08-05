@@ -644,6 +644,151 @@ def verify_corpus_bytes(
     return record
 
 
+# The name of the identity the DRIVER stamps into the session dir BEFORE it measures
+# anything. Distinct from the corpus's own `corpus-identity.json`, which lives beside the data
+# and can be replaced under a session at any time.
+SESSION_CORPUS_PIN = "session-corpus-pin.json"
+
+
+def session_pin_path(session_dir: pathlib.Path) -> pathlib.Path:
+    return session_dir / SESSION_CORPUS_PIN
+
+
+def write_session_corpus_pin(
+    session_dir: pathlib.Path, corpus: pathlib.Path, identity: dict
+) -> dict:
+    """Record WHICH CORPUS this session is about to measure, into the session dir.
+
+    Called by `ws0-baseline.sh` BEFORE the first rep, and read back by the reporter (see
+    `verify_session_corpus_pin`).
+
+    # The finding (#3272 review round 4)
+
+    The corpus digest was verified only against the corpus present AT REPORT TIME. No corpus
+    identity was captured in the session dir before measurement, so two real sequences
+    attributed measurements to bytes that were never measured:
+
+    * RE-REPORTING an old result dir against a DIFFERENT corpus. `ws0_report.py --dir <old>
+      --corpus <other>` re-derives `<other>`'s digest, finds it self-consistent, and prints it
+      as the identity of figures measured over something else. Nothing in the old dir said
+      which corpus it came from.
+    * CHANGING THE CORPUS MID-RUN. A regeneration (or a second lane writing the same path)
+      between rep 1 and rep N leaves report time verifying the LAST state of the corpus while
+      the earlier reps measured the earlier bytes.
+
+    Verifying at report time cannot see either, because both are consistent at report time.
+    The pin is the missing half: an identity captured BEFORE, compared AFTER.
+
+    What is recorded is the SIZE and the recorded DIGEST plus the corpus path — never a
+    re-hash: this runs on the measurement's critical path, and a 2.8 GB hash per session would
+    be paid by every run. The digest RE-DERIVATION stays at report time
+    (`verify_corpus_bytes`); what the pin adds is that the identity being re-derived is the one
+    the session STARTED with.
+    """
+    pin = {
+        "corpus": str(corpus),
+        "rows": identity["rows"],
+        "data_db_bytes": identity["data_db_bytes"],
+        "data_db_sha256": identity["data_db_sha256"],
+        "note": (
+            "the corpus identity this session was STARTED against, stamped before the first"
+            " rep. ws0_report.py REQUIRES it and refuses a report whose corpus no longer"
+            " matches — re-reporting an old session dir against a different corpus, or a"
+            " corpus that changed mid-run, is otherwise invisible because both are"
+            " self-consistent at report time (#3272 round 4)."
+        ),
+    }
+    session_pin_path(session_dir).write_text(json.dumps(pin, indent=1) + "\n")
+    return pin
+
+
+def verify_session_corpus_pin(
+    session_dir: pathlib.Path, corpus: pathlib.Path, identity: dict
+) -> dict:
+    """Require the session's PRE-MEASUREMENT corpus pin, and require it to still match.
+
+    REQUIRED, not optional: an absent pin means this session dir does not record which corpus
+    it measured, and a report over it would attribute its figures to whatever `--corpus` the
+    reader happened to pass. That is the fail-open shape — a check that silently does not run
+    while the summary prints a digest as the measured one.
+
+    Compared on all three of PATH, SIZE and DIGEST, each for a different reason:
+
+    * the recorded DIGEST is the identity itself. A different digest is a different corpus.
+    * the recorded SIZE is compared too, so a pin whose digest field was hand-edited to match
+      still has to agree on a second, independent number.
+    * the PATH is compared last and is the WEAKEST of the three — a corpus can legitimately be
+      moved — so a path difference alone is REPORTED in the record rather than fatal. The two
+      byte-level fields are what decide.
+    """
+    p = session_pin_path(session_dir)
+    if not p.exists():
+        raise Invalid(
+            f"this session dir carries no {SESSION_CORPUS_PIN} ({p}), so it does not record"
+            " WHICH CORPUS it measured. A report over it would attribute its figures to"
+            " whatever --corpus the reader passed: re-reporting an old result dir against a"
+            " different corpus is self-consistent AT REPORT TIME and therefore invisible to"
+            " the report-time digest check (#3272 round 4). Re-run the session with"
+            " scripts/perf/ws0-baseline.sh, which stamps the pin before the first rep."
+        )
+    try:
+        pin = json.loads(p.read_text())
+    except (OSError, ValueError) as exc:
+        raise Invalid(f"{p} is not readable JSON: {exc}") from None
+    if not isinstance(pin, dict):
+        raise Invalid(f"{p} must hold a JSON object, got {type(pin).__name__}")
+    for key in ("rows", "data_db_bytes", "data_db_sha256"):
+        if key not in pin:
+            raise Invalid(
+                f"{p} carries no {key!r} — the session's corpus pin is incomplete, so it"
+                " cannot establish which bytes this session measured"
+            )
+    pinned_rows = positive_int(f"{p}: 'rows'", pin["rows"])
+    pinned_bytes = positive_int(f"{p}: 'data_db_bytes'", pin["data_db_bytes"])
+    pinned_sha = pin["data_db_sha256"]
+    if not isinstance(pinned_sha, str) or not _SHA256_RE.match(pinned_sha):
+        raise Invalid(
+            f"{p}: 'data_db_sha256' must be 64 lowercase hex characters (got"
+            f" {pinned_sha!r}); a truncated pin cannot identify the measured bytes"
+        )
+    if pinned_sha != identity["data_db_sha256"]:
+        raise Invalid(
+            f"THE CORPUS CHANGED. This session was started against a corpus whose Data.db"
+            f" sha256 is {pinned_sha} (stamped in {SESSION_CORPUS_PIN} before the first rep),"
+            f" but --corpus {corpus} now records {identity['data_db_sha256']}. Every figure in"
+            " this session was measured over the PINNED bytes; reporting it under this"
+            " corpus's identity would attribute the measurements to bytes that were never"
+            " measured. Two real ways to get here, both invisible to the report-time digest"
+            " check because both are self-consistent at report time: re-reporting an old"
+            " result dir against a different corpus, and a corpus regenerated (or written by"
+            " another lane) DURING the run (#3272 round 4). Point --corpus at the corpus this"
+            " session measured, or re-run the session."
+        )
+    if pinned_bytes != identity["data_db_bytes"] or pinned_rows != identity["rows"]:
+        raise Invalid(
+            f"THE CORPUS SHAPE CHANGED under this session. {SESSION_CORPUS_PIN} records"
+            f" {pinned_rows:,} rows / {pinned_bytes:,} Data.db bytes; --corpus {corpus} now"
+            f" records {identity['rows']:,} rows / {identity['data_db_bytes']:,} bytes."
+            " The digest matched, so this is an identity file that was edited rather than"
+            " regenerated — two independent numbers must agree, not one."
+        )
+    return {
+        "pinned_before_measurement": True,
+        "pinned_corpus_path": pin.get("corpus"),
+        "pinned_data_db_sha256": pinned_sha,
+        "pinned_data_db_bytes": pinned_bytes,
+        "pinned_rows": pinned_rows,
+        # The WEAKEST of the three comparisons, reported rather than enforced: a corpus can
+        # legitimately be moved, and the two byte-level fields already decided the question.
+        "corpus_path_unchanged": pin.get("corpus") == str(corpus),
+        "note": (
+            "the corpus identity was captured in the session dir BEFORE the first rep and"
+            " re-compared here on rows + data_db_bytes + sha256; the path is reported, not"
+            " enforced (a corpus may be moved)"
+        ),
+    }
+
+
 def classify_prewarm(temp: str, status: str) -> str:
     """`ok` | `degraded`, or `Invalid` for a status impossible at this temperature.
 

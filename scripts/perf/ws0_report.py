@@ -64,6 +64,7 @@ from ws0_validate import (  # noqa: E402
     nonempty_selection,
     positive_derived,
     verify_corpus_bytes,
+    verify_session_corpus_pin,
 )
 
 TEMPS_ALLOWED = ("warm", "cold")
@@ -147,6 +148,13 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     identity_verification = verify_corpus_bytes(
         corpus, identity, skip_digest=args.skip_corpus_digest
     )
+    # ...and the identity re-derived above must be the one this SESSION WAS STARTED AGAINST
+    # (#3272 review round 4). `verify_corpus_bytes` compares the recorded identity to the bytes
+    # present AT REPORT TIME, which is self-consistent for both of the sequences that attribute
+    # figures to bytes nobody measured: re-reporting an old result dir under a different
+    # `--corpus`, and a corpus regenerated mid-run. The driver stamps `session-corpus-pin.json`
+    # before the first rep; this REQUIRES it and refuses a mismatch.
+    session_pin = verify_session_corpus_pin(d, corpus, identity)
     corpus_rows = identity["rows"]
     full_matrix = len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
 
@@ -168,6 +176,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # What was OBSERVED about the corpus at report time, not what it claimed
         # about itself (#3272 review B6).
         "corpus_identity_verification": identity_verification,
+        # ...and that the corpus is the one the SESSION STARTED against, established from a pin
+        # written before the first rep (#3272 round 4).
+        "session_corpus_pin": session_pin,
         "pinning": {
             "server_cpus": args.server_cpus,
             "client_cpus": args.client_cpus,
@@ -201,6 +212,19 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f"corpus       : {corpus}",
         f"corpus sha256: {identity['data_db_sha256']}",
         *corpus_identity_lines(identity_verification),
+        # The PRE-MEASUREMENT pin, stated so a reader can see the report is about the corpus
+        # the session started against and not merely one that is self-consistent now (#3272
+        # round 4).
+        "corpus pin   : this session was STARTED against this corpus"
+        f" (session-corpus-pin.json: {session_pin['pinned_rows']} rows /"
+        f" {session_pin['pinned_data_db_bytes']:,} B), re-compared here"
+        + (
+            ""
+            if session_pin["corpus_path_unchanged"]
+            else f"; NOTE the corpus was MOVED (pinned path"
+            f" {session_pin['pinned_corpus_path']}) — the bytes match, so this is reported"
+            " rather than fatal"
+        ),
         f"corpus shape : {identity['rows']} rows / "
         f"{identity['partitions']} partitions / "
         f"{identity['bytes_per_row']:.2f} B/row",

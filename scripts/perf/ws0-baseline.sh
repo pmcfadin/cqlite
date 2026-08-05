@@ -412,6 +412,42 @@ done
 # generator emits it beside the data), so both arms provably read one schema.
 DDL_FILE="$CORPUS/ws0-events.cql"
 [[ -r "$DDL_FILE" ]] || { echo "FATAL: $DDL_FILE missing — regenerate the corpus" >&2; exit 2; }
+
+# --- PIN WHICH CORPUS THIS SESSION IS ABOUT TO MEASURE (#3272 review round 4) --------
+# Stamped into the RESULTS DIR, BEFORE the first rep, and REQUIRED by ws0_report.py.
+#
+# The corpus digest used to be verified only against the corpus present AT REPORT TIME, with
+# no identity captured in the session dir beforehand. Two real sequences attribute figures to
+# bytes nobody measured, and BOTH are self-consistent at report time — so the report-time
+# check cannot see either:
+#
+#   * re-reporting an OLD result dir against a DIFFERENT corpus (`--dir <old> --corpus
+#     <other>`): the reporter re-derives `<other>`'s digest, finds it consistent, and prints
+#     it as the identity of figures measured over something else;
+#   * a corpus REGENERATED (or written by another lane) BETWEEN reps: report time verifies the
+#     corpus's LAST state while the earlier reps measured the earlier bytes.
+#
+# The pin records the corpus path, row count, Data.db size and recorded sha256 — it does NOT
+# re-hash, because this is on the measurement's critical path and a 2.8 GB hash per session
+# would be paid by every run. The digest RE-DERIVATION stays at report time; what the pin adds
+# is that the identity being re-derived is the one the session STARTED with.
+python3 -c '
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid, load_corpus_identity, write_session_corpus_pin
+corpus, out = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+try:
+    pin = write_session_corpus_pin(out, corpus, load_corpus_identity(corpus))
+except Invalid as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"corpus pin:   {pin[\"data_db_sha256\"]} ({pin[\"rows\"]} rows / {pin[\"data_db_bytes\"]} B)"
+      " recorded in session-corpus-pin.json BEFORE the first rep")
+' "$HERE" "$CORPUS" "$OUT_DIR" \
+  || { echo "FATAL: could not pin this session's corpus identity — the report REQUIRES it," >&2
+       echo "       because a session dir that does not record WHICH corpus it measured can" >&2
+       echo "       be re-reported against any other corpus (#3272 round 4)." >&2
+       exit 2; }
 python3 - "$DDL_FILE" "$TICKET_TEMPLATE" <<'PY'
 import json, sys
 ddl = open(sys.argv[1]).read().strip().rstrip(';')

@@ -194,6 +194,9 @@ EOF
 # `out=$(run_report ...); rc=$?`: a command substitution runs in a SUBSHELL, so a
 # status the function assigned to a variable would not survive the call.
 run_report() {
+  # The PRE-MEASUREMENT corpus pin, stamped IF ABSENT — see lib-ws0-report-fixtures.sh's
+  # `run_report` for why "if absent" and not unconditionally (#3272 review round 4).
+  [ -e "$1/session-corpus-pin.json" ] || ws0_pin_session_corpus "$1" "$2"
   python3 "$REPORT" --dir "$1" --corpus "$2" --server-cpus 2,10 \
     --client-cpus 4,12 --reps 1 --temps "$3" --arms bypass \
     --step-duration 45s/1s --scan-passes 1 2>&1
@@ -202,6 +205,7 @@ run_report() {
 # run_report_full <dir> <corpus> <temps> <arms> <reps> <scan-passes> — same, with
 # every quantity a caller can get wrong exposed.
 run_report_full() {
+  [ -e "$1/session-corpus-pin.json" ] || ws0_pin_session_corpus "$1" "$2"
   python3 "$REPORT" --dir "$1" --corpus "$2" --server-cpus 2,10 \
     --client-cpus 4,12 --reps "$5" --temps "$3" --arms "$4" \
     --step-duration 45s/1s --scan-passes "$6" 2>&1

@@ -234,9 +234,9 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         f"round={rep}\nposition={pos}\narms_in_round=2\n"
         f"monotonic_ns={rep * 10**9 + pos * 10**6}\n")
 PY
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q 'per-round (PAIRED' <<<"$out" \
   && grep -q 'within-round 1.3x target met in 1/3 round' <<<"$out"; then
   pass "OBSERVED: the report prints PAIRED per-round ratios and the direction count"
@@ -339,9 +339,9 @@ for rep in 1 2; do
   make_round "$d" "scan-warm-$rep" "$rep" 1 2 "$(( rep * 1000000000 + 1000000 ))"
   make_round "$d" "flight-bypass-warm-$rep" "$rep" 2 2 "$(( rep * 1000000000 + 2000000 ))"
 done
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "held ONE FIXED POSITION" <<<"$out" \
   && grep -q "bare_scan" <<<"$out"; then
   pass "OBSERVED: an arm at a FIXED position across rounds is REFUSED, naming the arm (R4a)"
@@ -381,9 +381,9 @@ for rep in 1 2; do
   make_scan_rep "$d" warm "$rep" ok
   make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
 done
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "makes NO INTERLEAVING CLAIM and NO ROUND-ORDERING CLAIM" <<<"$out" \
   && grep -q "INERT RECORDED DATA" <<<"$out"; then
   pass "OBSERVED: an accepted session states that NO interleaving/ordering claim is made"
@@ -596,9 +596,9 @@ make_scan_rep "$d" warm 2 ok
 make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
 make_flight_rep "$d" warm 2 ok "$GOOD_FLIGHT"
 rm -f "$d/scan-warm-2.json"          # scan has rep 1 only; flight has 1 and 2
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -ne 0 ]; then
   pass "an unpairable rep set is REFUSED (never a silent fallback to median-only)"
 else
@@ -635,9 +635,9 @@ for rep in 1 2 3; do
   make_round "$d" "scan-warm-$rep"          "$rep" "$scan_pos" 2 "$(( 1000000000 + rep * 1000000 ))"
   make_round "$d" "flight-bypass-warm-$rep" "$rep" "$fl_pos"   2 "$(( 5000000000 + rep * 1000000 ))"
 done
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "round LABELS CONTRADICT the recorded INSTANTS" <<<"$out"; then
   pass "OBSERVED: labels that contradict the recorded instants are REFUSED"
 else
@@ -697,9 +697,9 @@ for rep in 1 2 3; do
   make_scan_rep "$d" warm "$rep" ok
   make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
 done
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -eq 0 ] \
   && python3 "$REPO_ROOT/scripts/tests/ws0_assert_no_verdict_fields.py" "$d/results.json" >/dev/null \
   && python3 - "$d/results.json" <<'PY'

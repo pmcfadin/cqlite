@@ -83,6 +83,25 @@ make_round() {
     "$rnd" "$pos" "$arms" "$ns" > "$1/$2.round"
 }
 
+# ws0_pin_session_corpus <session-dir> <corpus-dir> — stamp the PRE-MEASUREMENT corpus pin
+# the reporter REQUIRES (#3272 review round 4), by calling the SHIPPED writer.
+#
+# Called through `ws0_validate.write_session_corpus_pin` rather than by writing the JSON here,
+# and that is the point: a fixture that hand-rolled the pin's shape would keep passing after the
+# real writer's shape changed — the drift `make_round` already demonstrated in round 3. The
+# driver calls the same function.
+ws0_pin_session_corpus() {
+  local session="$1" corpus="$2" perf_dir
+  perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
+  python3 -c '
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import load_corpus_identity, write_session_corpus_pin
+write_session_corpus_pin(pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2]),
+                         load_corpus_identity(pathlib.Path(sys.argv[2])))
+' "$perf_dir" "$corpus" "$session"
+}
+
 # ws0_alternating_position <rep> <which> — the position an arm holds in `<rep>`, matching
 # the driver's alternation: the bare scan leads odd rounds, the Flight arm leads even ones.
 #

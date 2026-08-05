@@ -72,11 +72,36 @@ make_session() {
   make_flight_rep "$1" warm 1 ok "$2"
 }
 
+# run_report <dir> <corpus> [extra args…]
+#
+# The PRE-MEASUREMENT corpus pin (#3272 review round 4) is stamped here IF THE SESSION DIR DOES
+# NOT ALREADY CARRY ONE, standing in for the driver, which writes it before the first rep. Two
+# reasons for the "if absent" rather than an unconditional stamp:
+#
+#   * ~34 case sites build a session dir ad hoc; requiring each to stamp would put the same line
+#     in 34 places, and the one someone forgets fails for a reason unrelated to its subject.
+#   * the cases whose SUBJECT is the pin — an absent one, a stale one, a corpus swapped between
+#     the pin and the report — set it up (or remove it) EXPLICITLY, and the "if absent" test is
+#     what lets them: nothing here overwrites a pin a case deliberately wrote.
 run_report() { # run_report <dir> <corpus> [extra args…]
   local d="$1" c="$2"; shift 2
+  [[ -e "$d/session-corpus-pin.json" ]] || ws0_pin_session_corpus "$d" "$c"
   python3 "$REPORT" --dir "$d" --corpus "$c" --server-cpus 2,10 \
     --client-cpus 4,12 --reps 1 --temps warm --arms bypass \
     --step-duration 45s/1s --scan-passes 1 "$@" 2>&1
+}
+
+# run_report_args <dir> <corpus> <args…> — the reporter with the caller's OWN argument list,
+# with the PRE-MEASUREMENT corpus pin stamped if absent.
+#
+# Exists because ~9 cases need a `--reps`/`--temps`/`--arms` combination `run_report` does not
+# offer and were calling `python3 "$REPORT" …` directly. Every such site is a place the pin
+# would have to be remembered — and when the pin landed, nine of them failed for a reason
+# unrelated to their subject (#3272 review round 4). One helper, one place that knows.
+run_report_args() {
+  local d="$1" c="$2"; shift 2
+  [[ -e "$d/session-corpus-pin.json" ]] || ws0_pin_session_corpus "$d" "$c"
+  python3 "$REPORT" --dir "$d" --corpus "$c" "$@" 2>&1
 }
 
 # expect_reject <label> <expect-substring> <dir> <corpus> [extra…]

@@ -719,6 +719,142 @@ expect_reject "--skip-corpus-digest does NOT skip the size check" \
   "records data_db_bytes" "$d" "$TMP/corpus-stale-size" --skip-corpus-digest
 
 # ==========================================================================
+# 5b — the corpus is PINNED BEFORE MEASUREMENT, and re-compared after (round 4)
+# ==========================================================================
+# THE FINDING. Section 5 above verifies the corpus digest against the corpus present AT REPORT
+# TIME. That cannot see either of the two sequences that attribute figures to bytes nobody
+# measured, because BOTH are self-consistent at report time:
+#
+#   * RE-REPORTING an old result dir against a DIFFERENT corpus. MEASURED pre-fix:
+#     `--dir <session-over-corpus-A> --corpus <corpus-B>` exited **0** and printed corpus B's
+#     sha256 as the identity of figures measured over corpus A.
+#   * A CORPUS CHANGED MID-RUN (regenerated, or written by a second lane between reps): report
+#     time verifies the corpus's LAST state while the earlier reps measured the earlier bytes.
+#
+# The fix is a pin the DRIVER writes BEFORE the first rep and the reporter REQUIRES.
+#
+# The swap fixture is a REAL second corpus with a genuinely different DIGEST, not an edited
+# identity file — an edited file would be caught by section 5's own checks and would prove
+# nothing about this one.
+#
+# The BYTE COUNT is what must differ, not just the row count: `ws0_make_corpus` writes a
+# repeating 0..255 pattern, so two corpora of the same size hash IDENTICALLY however many rows
+# they claim. Written this way after the first attempt (2000 rows, same 4096 bytes) tripped the
+# SHAPE check instead of the DIGEST one — a case passing on the wrong assertion.
+ws0_make_corpus "$TMP/corpus-other" 2000 8192
+d="$TMP/pin-swapped"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"          # the session was measured over `corpus`
+out=$(run_report "$d" "$TMP/corpus-other"); rc=$?  # ...and is reported against another
+if [ "$rc" -ne 0 ] && grep -q "THE CORPUS CHANGED" <<<"$out"; then
+  pass "OBSERVED: a session PINNED to one corpus is REFUSED when reported against another (pre-fix: exit 0, printed the wrong digest)"
+else
+  fail "a corpus swap between measurement and report must be refused (rc=$rc, out: $out)"
+fi
+# ...and the refusal must explain WHY the report-time digest check could not see it, or the next
+# reader will conclude the two checks are redundant and delete one.
+if grep -q "self-consistent at report time" <<<"$out"; then
+  pass "the refusal explains why the REPORT-TIME digest check cannot see this (both states are consistent)"
+else
+  fail "the swap refusal must name the blind spot it covers (out: $out)"
+fi
+if [ ! -e "$d/results.json" ]; then
+  pass "no results.json is written for a session whose corpus was swapped"
+else
+  fail "a refused run must not leave a results.json behind"
+fi
+# An ABSENT pin is FATAL, not a skip: a session dir that does not record which corpus it
+# measured can be re-reported against anything, which is the fail-open half of the same finding.
+d="$TMP/pin-absent"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+rm -f "$d/session-corpus-pin.json"
+# NOT through `run_report`, which stamps a pin when one is absent (standing in for the driver):
+# this case's subject IS the absence, so the reporter is called directly.
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 1 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "carries no session-corpus-pin.json" <<<"$out"; then
+  pass "OBSERVED: an ABSENT session corpus pin is FATAL (a dir that does not say which corpus it measured)"
+else
+  fail "an absent corpus pin must be refused (rc=$rc, out: $out)"
+fi
+# A pin whose DIGEST was hand-edited to match while its SHAPE was not: two independent numbers
+# must agree, so editing one is not enough.
+d="$TMP/pin-edited"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/session-corpus-pin.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+pin = json.loads(p.read_text())
+pin["rows"] = pin["rows"] + 1          # digest still matches; shape does not
+p.write_text(json.dumps(pin))
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "THE CORPUS SHAPE CHANGED" <<<"$out"; then
+  pass "OBSERVED: a pin whose SHAPE disagrees is refused even when the digest matches (two numbers, not one)"
+else
+  fail "a pin with an inconsistent shape must be refused (rc=$rc, out: $out)"
+fi
+# A CORRUPT or INCOMPLETE pin is an error, never a defaulted pass.
+for pin_body in '{}' '{"rows":1000}' 'not json' '{"rows":1000,"data_db_bytes":4096,"data_db_sha256":"short"}'; do
+  d="$TMP/pin-corrupt-$(printf '%s' "$pin_body" | md5 2>/dev/null || printf '%s' "$pin_body" | md5sum | cut -c1-8)"
+  make_session "$d" "$GOOD_FLIGHT"
+  printf '%s\n' "$pin_body" > "$d/session-corpus-pin.json"
+  out=$(run_report "$d" "$TMP/corpus"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    pass "a corrupt/incomplete session pin ($(printf '%.28s' "$pin_body")) is REFUSED"
+  else
+    fail "a corrupt session pin must be refused (rc=$rc, out: $out)"
+  fi
+done
+# THE ACCEPT DIRECTION: the pin matching is recorded in results.json and stated in the summary,
+# so the check cannot be present-but-silent — and without this half the pin could be a function
+# that refuses everything.
+d="$TMP/pin-ok"; make_session "$d" "$GOOD_FLIGHT"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "this session was STARTED against this corpus" <<<"$out" \
+  && python3 - "$d/results.json" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))["session_corpus_pin"]
+assert p["pinned_before_measurement"] is True, p
+assert p["corpus_path_unchanged"] is True, p
+assert len(p["pinned_data_db_sha256"]) == 64, p
+assert p["pinned_rows"] == 1000, p
+PY
+then
+  pass "OBSERVED: a matching pin is ACCEPTED, stated in the summary and recorded in results.json"
+else
+  fail "the pin accept direction must be recorded (rc=$rc, out: $out)"
+fi
+# A MOVED corpus is REPORTED, not fatal — the bytes decide, and a corpus may legitimately move.
+d="$TMP/pin-moved"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-moved"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus-moved"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "the corpus was MOVED" <<<"$out"; then
+  pass "a corpus MOVED to an identical copy is ACCEPTED with the move REPORTED (the bytes decide, not the path)"
+else
+  fail "a moved corpus with identical bytes must be accepted and reported (rc=$rc, out: $out)"
+fi
+# And the DRIVER must WRITE the pin, or the reporter's requirement is satisfiable only by
+# fixtures — the wiring half (#3272 AC "wiring evidence").
+if grep -q 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+  && awk '/^DDL_FILE=/,/^drop_caches_if_cold/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+     | grep -q 'session-corpus-pin.json'; then
+  pass "the DRIVER writes the session corpus pin (the reporter's requirement is WIRED, not fixture-only)"
+else
+  fail "ws0-baseline.sh must stamp session-corpus-pin.json before the measurement loop"
+fi
+# ...and it must do so BEFORE the first rep, or the pin describes the corpus as it was after
+# the run rather than before it.
+pin_line=$(grep -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+loop_line=$(grep -n '^for temp in \$TEMPS; do' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+if [ -n "$pin_line" ] && [ -n "$loop_line" ] && [ "$pin_line" -lt "$loop_line" ]; then
+  pass "the pin is stamped at line $pin_line, BEFORE the measurement loop at line $loop_line"
+else
+  fail "the pin must be written before the measurement loop (pin=$pin_line loop=$loop_line)"
+fi
+
+# ==========================================================================
 # 6 — a MISSING python3 FAILS these test scripts; it does not skip them (B8)
 # ==========================================================================
 # NON-VACUITY, measured against the pre-fix `test_ws0_report_guards.sh:57-60`: with
@@ -844,9 +980,9 @@ three_reps() { # three_reps <dir>
 d="$TMP/one-bad-scan-ins-of-three"; three_reps "$d"
 perf_csv "$d/perf-scan-warm-2.csv" 2000000 4000000
 perf_csv "$d/perf-scan-warm-2-setup.csv" 100000 9000000     # rep 2 only; CYCLES healthy
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "setup-subtracted instructions" <<<"$out"; then
   pass "OBSERVED: ONE corrupt scan rep of three is REFUSED (pre-fix: exit 0, ipc.min -2.63)"
 else
@@ -859,9 +995,9 @@ else
 fi
 d="$TMP/one-bad-flight-ins-of-three"; three_reps "$d"
 perf_csv "$d/perf-flight-bypass-warm-2.csv" 8000000 0       # rep 2 only; CYCLES healthy
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "flight rep flight-bypass-warm-2 instructions" <<<"$out"; then
   pass "OBSERVED: ONE corrupt flight rep of three is REFUSED (pre-fix: exit 0, ipc.min 0.0)"
 else
@@ -924,9 +1060,9 @@ FRAC_OK='{"round":"r","requests_ok":1.9,"requests_error":0,"rows_total":1000,"ro
 d="$TMP/frac-ok"; mkdir -p "$d"
 make_scan_rep "$d" cold 1 skipped-cold-arm
 make_flight_rep "$d" cold 1 skipped-cold-arm "$FRAC_OK"
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 1 --temps cold --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+  --step-duration 45s/1s --scan-passes 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "fractional value 1.9" <<<"$out"; then
   pass "OBSERVED: a FRACTIONAL requests_ok is refused (pre-fix: int(1.9)==1 SATISFIED the cold guard)"
 else
