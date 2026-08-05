@@ -1011,19 +1011,191 @@ else
   fail "server-owner: require_socket_prober must precede the measurement loop (prober=$prober_line loop=$loop_line)"
 fi
 
+
+# ===========================================================================
+# PART 4 — the LINT's OWN vacuity states (#3272 review round 3 nits)
+# ===========================================================================
+# Two ways `perf_invocation_lint`/`_tree` used to read CLEAN while checking nothing, both
+# instances of the rule this issue is about: never derive a positive verdict from the
+# absence of a bad signal.
+
+# --- 4a. A LINE WHOSE COMMAND WORD **AND** SUBCOMMAND ARE VARIABLES ----------
+# `is_var_command` used to `return 0` on ANY line starting `VAR=`, and the comment claimed
+# the prefixed form was "caught by the bare `stat` token instead" — TRUE ONLY WHEN `stat` IS
+# LITERAL. MEASURED against that version, this line produced NO FINDING at all: no bare
+# `perf`/`stat` token for layer 1, `invokes()` returned 0, and layer 2 sits behind
+# `if (!mentions) next`. A genuinely per-process invocation through all three layers.
+VARCMD=$'perf_stat_c() {\n  perf stat -x, -C 1 -o "$1" -- "$2"\n}\nFOO=1 "$BIN" "$SUB" -p 1234'
+got="$(lint_probe "$VARCMD")"
+if grep -q 'per-process option token' <<<"$got" \
+   && grep -q 'outside the single perf_stat_c wrapper' <<<"$got"; then
+  pass "lint-varcmd: OBSERVED — \`FOO=1 \"\$BIN\" \"\$SUB\" -p 1234\` FIRES (pre-fix: no finding at all)"
+else
+  fail "lint-varcmd: an assignment-prefixed variable command with a variable subcommand must fire (got: $got)"
+fi
+# ...and the SHIPPED tree must stay clean under the same change, which is the half a
+# too-broad fix breaks. MEASURED while writing it: stepping over an assignment prefix
+# WITHOUT a quote-balance test made `want="$(cpu_list_expand "$spec")"` split so that
+# `"$spec")"` read as a variable command word — 6 false findings on ordinary code, and a
+# guard that reds on ordinary code is the one an operator deletes.
+for benign in \
+  'want="$(cpu_list_expand "$spec")"' \
+  'value="$(cat "$path" 2>/dev/null)" || return 1' \
+  '_ARM_LIST=(scan $ARMS)' \
+  'PERF_DOMAIN_OPTS="$_PP_SHORT $_PP_LONG --per-thread -a --all-cpus --cgroup"' \
+  'REPO_ROOT="$(cd "$HERE/../.." && pwd)"' \
+  'FOO=bar' \
+  ; do
+  probe=$'perf_stat_c() {\n  perf stat -x, -C 1 -o "$1" -- "$2"\n}\n'"$benign"
+  if [ -z "$(lint_probe "$probe")" ]; then
+    pass "lint-varcmd: ordinary code \`${benign:0:38}…\` is NOT flagged"
+  else
+    fail "lint-varcmd: '$benign' must not be flagged (got: $(lint_probe "$probe"))"
+  fi
+done
+
+# --- 4b. AN UNREADABLE rig file is a FINDING, not a silent skip ---------------
+# `perf_invocation_lint_tree` used to `[[ -r "$f" ]] || continue`, so a file with the wrong
+# mode was DROPPED FROM THE SUBJECT and the tree read as clean with that file never scanned
+# — the subject-too-small shape the DISCOVERED glob exists to prevent, arriving through the
+# readability test instead of through a hand-written list.
+unreadable_dir="$(mktemp -d "$TMP/unreadXXXXXX")"
+cp "$PERF_DIR/"*.sh "$unreadable_dir/"
+# Plant a real violation in the file we then make unreadable, so a lint that skipped it
+# would report CLEAN over a tree containing a per-process invocation.
+printf 'perf stat -x, -C 0 -p 1234 -o /dev/null -- true\n' >> "$unreadable_dir/lib-args.sh"
+chmod 000 "$unreadable_dir/lib-args.sh"
+got="$(lint_tree "$unreadable_dir")"
+if grep -q 'UNREADABLE' <<<"$got" && grep -q 'lib-args.sh' <<<"$got" \
+   && grep -q 'NOT SCANNED' <<<"$got"; then
+  pass "lint-unreadable: OBSERVED — an UNREADABLE rig file is a FINDING naming it (pre-fix: silently skipped)"
+else
+  fail "lint-unreadable: an unreadable file must be reported, not dropped from the subject (got: $got)"
+fi
+# NON-VACUITY: the planted violation is real, so the pre-fix silent skip really did hide
+# something. Restore the mode and require the SAME tree to fire on the plant.
+chmod 644 "$unreadable_dir/lib-args.sh"
+got="$(lint_tree "$unreadable_dir")"
+if grep -q 'per-process option token' <<<"$got" && grep -q 'lib-args.sh' <<<"$got"; then
+  pass "lint-unreadable: NON-VACUITY — the planted violation DOES fire once the file is readable"
+else
+  fail "lint-unreadable: the plant must be a real violation, or the skip hid nothing (got: $got)"
+fi
+# The printed SUBJECT must list the unreadable file too: filtering it out there would make
+# the set claim agree with a tree lint that had dropped it — a check confirming its own gap.
+chmod 000 "$unreadable_dir/lib-args.sh"
+if grep -q 'lib-args.sh' <<<"$(lint_subject "$unreadable_dir")"; then
+  pass "lint-unreadable: the printed SUBJECT still lists an unreadable file (the set claim cannot hide the gap)"
+else
+  fail "lint-unreadable: perf_lint_tree_subject must list every existing .sh, readable or not"
+fi
+chmod 644 "$unreadable_dir/lib-args.sh"
+
+# --- 4c. `library` mode HAS END assertions now (an awk that dies is a finding) -
+# `library` mode had NO END assertions, so an awk that died mid-file printed nothing and
+# read as clean — and the driver counts OUTPUT, so the run was waved through. Every mode now
+# emits a completion marker the caller verifies. Driven by feeding a file the scan cannot
+# complete over: an EMPTY one (nothing checked) in both modes.
+: > "$TMP/empty-probe.sh"
+for mode in owner library; do
+  got="$(lint_shipped "$TMP/empty-probe.sh" "$mode")"
+  if grep -q 'NO LINES' <<<"$got" || grep -q 'did not COMPLETE' <<<"$got"; then
+    pass "lint-complete: an EMPTY file is a FINDING in '$mode' mode (nothing checked reads like nothing wrong)"
+  else
+    fail "lint-complete: an empty file must be reported in '$mode' mode (got: ${got:-<nothing>})"
+  fi
+done
+# ...and a REAL library file must still be clean in library mode, so the completion marker is
+# filtered rather than printed as a finding.
+if [ -z "$(lint_shipped "$PERF_DIR/lib-cpu.sh" library)" ]; then
+  pass "lint-complete: the completion marker is FILTERED, not reported (lib-cpu.sh is clean in library mode)"
+else
+  fail "lint-complete: a clean library file must lint clean (got: $(lint_shipped "$PERF_DIR/lib-cpu.sh" library))"
+fi
+# And the marker must genuinely be emitted, not merely absent-and-forgiven: a mode whose
+# END block never ran would take the `did not COMPLETE` branch, which is what 4c relies on.
+if lint_shipped "$PERF_DIR/lib-cpu.sh" library >/dev/null 2>&1 \
+   && ! grep -q 'did not COMPLETE' <<<"$(lint_shipped "$PERF_DIR/lib-cpu.sh" library)"; then
+  pass "lint-complete: a real file DOES reach the END block (the marker is emitted, not assumed)"
+else
+  fail "lint-complete: the completion marker must be emitted for a real file"
+fi
+
+# --- 4d. STRUCTURAL: no APOSTROPHE inside the single-quoted awk program -------
+# Not a style rule — a correctness one, and it bit THREE TIMES writing this round. The awk
+# program is a single-quoted shell string, so an apostrophe in one of its COMMENTS closes the
+# string and bash reports a syntax error at some unrelated line ("syntax error near
+# unexpected token `{`" at the function header). `bash -n` catches it, but only if someone
+# runs it; this makes the property a standing check.
+if python3 - "$PERF_LINT_LIB" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"-v SQ=\"'\" '\n(.*?)\n  ' \"\$1\"", src, re.S)
+if not m:
+    raise SystemExit("could not locate the awk program — this check is stale, which is worse"
+                     " than absent: it would pass on any file")
+bad = []
+for i, line in enumerate(m.group(1).splitlines(), start=1):
+    stripped = line.lstrip()
+    if not stripped.startswith("#"):
+        continue          # code lines legitimately use quotes; only COMMENTS are the trap
+    if "'" in line:
+        bad.append((i, stripped[:70]))
+if bad:
+    raise SystemExit(
+        "apostrophe(s) inside the single-quoted awk program's comments — each CLOSES the"
+        f" shell string and breaks the file: {bad}"
+    )
+PYEOF
+then
+  pass "lint-quoting: STRUCTURAL — no apostrophe in the awk program's comments (it would close the shell string)"
+else
+  fail "an apostrophe in the awk program's comments closes the single-quoted string; bash then errors at an unrelated line"
+fi
+# NON-VACUITY for that check, and for the CLAIM behind it. A copy of the library with ONE
+# apostrophe planted in an awk comment must (a) be caught by the check and (b) genuinely FAIL
+# `bash -n` — otherwise the rule is a style preference dressed as a correctness one.
+apos_copy="$TMP/apostrophe-probe.sh"
+python3 - "$PERF_LINT_LIB" "$apos_copy" <<'PYEOF'
+import pathlib, sys
+src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+s = src.read_text()
+needle = "    # A token as the SHELL would see it after word-splitting"
+if needle not in s:
+    sys.exit("the plant target moved — this fixture is stale")
+dst.write_text(s.replace(needle, "    # A token as the SHELL's word-splitting yields it"))
+PYEOF
+apos_caught=0
+python3 - "$apos_copy" <<'PYEOF' || apos_caught=1
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r"-v SQ=\"'\" '\n(.*?)\n  ' \"\$1\"", src, re.S)
+if not m:
+    raise SystemExit("stale")
+bad = [i for i, l in enumerate(m.group(1).splitlines(), 1)
+       if l.lstrip().startswith("#") and "'" in l]
+if bad:
+    raise SystemExit(f"caught at {bad}")
+PYEOF
+if [ "$apos_caught" -eq 1 ] && ! bash -n "$apos_copy" 2>/dev/null; then
+  pass "lint-quoting: NON-VACUITY — a planted apostrophe is CAUGHT and really does break \`bash -n\`"
+else
+  fail "lint-quoting: the planted apostrophe must be caught AND must break the file (caught=$apos_caught)"
+fi
+
 # ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a
 # `$(...)` whose command vanished, a `for` over an empty list — LOWERS the check count and
 # registers NO failure. The gate reads only the exit code, so a suite that ran 3 of its
-# ~123 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
+# ~139 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
 # `0/0` shape this whole issue is about, one level up from the checks themselves.
 #
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=112
+MIN_CHECKS=130
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

@@ -40,6 +40,9 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPORT="$REPO_ROOT/scripts/perf/ws0_report.py"
+# Where the shared `strip_prose` lives (#3272 round 3 nit): ONE implementation, imported
+# by the assertion AND by both of its non-vacuity probes.
+TESTS_DIR="$REPO_ROOT/scripts/tests"
 
 fails=0
 # `checks` counts what actually RAN (incremented here, not derived from the file), so
@@ -440,33 +443,17 @@ fi
 # which is what a first pass at this did. That was caught by planting a real idiom in a
 # probe module and observing the scan stay green — the check below is the permanent version
 # of that probe, because a vacuous scan is textually identical to a passing one.
-if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
-import ast, pathlib, sys
+if python3 - "$REPO_ROOT/scripts/perf" "$TESTS_DIR" <<'PY'
+import pathlib, sys
 
-def strip_prose(source):
-    """The module's source with DOCSTRINGS and DIAGNOSTIC strings blanked.
-
-    A diagnostic string is one reachable from a `raise` — the prose that necessarily quotes
-    the idiom it refuses. Argument literals (`rec.get('cycles', 0)`) are left ALONE:
-    blanking every string constant rewrites that to `rec.get('', 0)` and makes the scan
-    vacuous, which is a defect a first version of this had.
-    """
-    tree = ast.parse(source)
-    prose = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Raise):
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                    prose.add(id(sub))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            body = node.body
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
-                    and isinstance(body[0].value.value, str):
-                node.body = body[1:] or [ast.Pass()]
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) in prose:
-            node.value = ""
-    return ast.unparse(ast.fix_missing_locations(tree))
+# `strip_prose` is IMPORTED from scripts/tests/ws0_prose_strip.py, never re-implemented
+# (#3272 review round 3 nit). It used to be THREE inline copies — the assertion, its
+# non-vacuity probe, and the strip's own test — which is three things to keep in sync, and
+# a non-vacuity probe testing a DIFFERENT strip than the assertion uses proves nothing
+# about the assertion. The tests dir is passed as the LAST argv rather than derived from
+# `__file__`, which a `python3 - <<EOF` heredoc does not have.
+sys.path.insert(0, sys.argv[-1])
+from ws0_prose_strip import strip_prose                 # noqa: E402
 
 
 subject = sorted(
@@ -516,8 +503,8 @@ fi
 #
 # Both are checked by planting the idiom in `ws0_validate.py` — the file (a) never read —
 # and requiring the scan to FIND it, using the SAME `strip_prose` the assertion uses.
-if ! python3 - "$TMP/scan-subject" "$REPO_ROOT/scripts/perf" <<'PY'
-import ast, pathlib, shutil, sys
+if ! python3 - "$TMP/scan-subject" "$REPO_ROOT/scripts/perf" "$TESTS_DIR" <<'PY'
+import pathlib, shutil, sys
 
 tmp = pathlib.Path(sys.argv[1]); tmp.mkdir(parents=True, exist_ok=True)
 for p in pathlib.Path(sys.argv[2]).glob("ws0_*.py"):
@@ -526,23 +513,14 @@ for p in pathlib.Path(sys.argv[2]).glob("ws0_*.py"):
 target = tmp / "ws0_validate.py"
 target.write_text(target.read_text() + "\n\ndef _planted(rec):\n    return rec.get('cycles', 0)\n")
 
-def strip_prose(source):
-    tree = ast.parse(source)
-    prose = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Raise):
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                    prose.add(id(sub))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            body = node.body
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
-                    and isinstance(body[0].value.value, str):
-                node.body = body[1:] or [ast.Pass()]
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) in prose:
-            node.value = ""
-    return ast.unparse(ast.fix_missing_locations(tree))
+# `strip_prose` is IMPORTED from scripts/tests/ws0_prose_strip.py, never re-implemented
+# (#3272 review round 3 nit). It used to be THREE inline copies — the assertion, its
+# non-vacuity probe, and the strip's own test — which is three things to keep in sync, and
+# a non-vacuity probe testing a DIFFERENT strip than the assertion uses proves nothing
+# about the assertion. The tests dir is passed as the LAST argv rather than derived from
+# `__file__`, which a `python3 - <<EOF` heredoc does not have.
+sys.path.insert(0, sys.argv[-1])
+from ws0_prose_strip import strip_prose                 # noqa: E402
 
 hits = [p.name for p in sorted(tmp.glob("ws0_*.py"))
         if "get('cycles', 0)" in strip_prose(p.read_text())]
@@ -559,30 +537,21 @@ fi
 # `if errors > 0`" inside an `Invalid(...)` message, so this is a live case, not a
 # hypothetical — without the strip the scan reds on its own documentation and the reflex fix
 # is to stop documenting.
-if python3 - "$REPO_ROOT/scripts/perf/ws0_collect.py" <<'PY'
-import ast, pathlib, sys
+if python3 - "$REPO_ROOT/scripts/perf/ws0_collect.py" "$TESTS_DIR" <<'PY'
+import pathlib, sys
 
 path = pathlib.Path(sys.argv[1])
 raw = path.read_text()
 assert "if errors > 0" in raw, "this case needs a module whose PROSE quotes a banned idiom"
 
-def strip_prose(source):
-    tree = ast.parse(source)
-    prose = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Raise):
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                    prose.add(id(sub))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            body = node.body
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
-                    and isinstance(body[0].value.value, str):
-                node.body = body[1:] or [ast.Pass()]
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) in prose:
-            node.value = ""
-    return ast.unparse(ast.fix_missing_locations(tree))
+# `strip_prose` is IMPORTED from scripts/tests/ws0_prose_strip.py, never re-implemented
+# (#3272 review round 3 nit). It used to be THREE inline copies — the assertion, its
+# non-vacuity probe, and the strip's own test — which is three things to keep in sync, and
+# a non-vacuity probe testing a DIFFERENT strip than the assertion uses proves nothing
+# about the assertion. The tests dir is passed as the LAST argv rather than derived from
+# `__file__`, which a `python3 - <<EOF` heredoc does not have.
+sys.path.insert(0, sys.argv[-1])
+from ws0_prose_strip import strip_prose                 # noqa: E402
 
 stripped = strip_prose(raw)
 if "if errors > 0" in stripped:
@@ -595,6 +564,64 @@ then
   pass "the prose-strip removes DIAGNOSTICS quoting an idiom but keeps argument literals"
 else
   fail "the prose-strip must exempt diagnostics WITHOUT blanking argument literals (else the scan is vacuous)"
+fi
+# --- THE STRIP MUST NOT BLANK AN F-STRING'S INTERPOLATION (#3272 round 3 nit) --
+# The round-2 defect, repeated ONE LEVEL IN. Round 2 fixed "blanking every string constant
+# makes the scan vacuous" by restricting the blanking to constants REACHABLE FROM A `raise`
+# — and `ast.walk` reaches INTO an f-string's `{...}` expressions, so
+#
+#     raise Invalid(f"bad: {rec.get('cycles', 0)} is wrong")
+#
+# became `raise Invalid(f"{rec.get('', 0)}")`: an idiom written inside a diagnostic's
+# interpolation was HIDDEN FROM THE SCAN. MEASURED against the pre-fix strip, that exact
+# input produced exactly that output.
+#
+# Both halves are asserted over ONE input, so the fix cannot be "stop blanking f-strings"
+# (which would red on the shipped diagnostics) or "blank nothing" (which is vacuity again):
+# the LITERAL text of the f-string must go, the INTERPOLATED expression must stay.
+if python3 - "$TESTS_DIR" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_prose_strip import strip_prose                 # noqa: E402
+
+src = (
+    "def f(rec):\n"
+    "    if rec.get('cycles', 0) < 1:\n"
+    "        raise Invalid(f\"the check used to be `if errors > 0`:"
+    " {rec.get('cycles', 0)} is wrong\")\n"
+    "    return 1\n"
+)
+out = strip_prose(src)
+# (1) the INTERPOLATED expression SURVIVES — this is the defect. Pre-fix it read
+#     `rec.get('', 0)` and the scan saw no idiom.
+if "rec.get('cycles', 0)" not in out:
+    raise SystemExit(
+        "the strip blanked an f-string's INTERPOLATED EXPRESSION, so an idiom written"
+        f" inside a diagnostic is invisible to the scan. Got: {out!r}"
+    )
+# (2) the LITERAL text of the same f-string is still REMOVED, or the strip would red on
+#     every shipped diagnostic that quotes the idiom it refuses.
+if "if errors > 0" in out:
+    raise SystemExit(
+        f"the strip left an f-string's LITERAL prose, so the scan reds on its own"
+        f" documentation. Got: {out!r}"
+    )
+# (3) the guard-condition idiom outside the raise is untouched (the ordinary case).
+if "rec.get('cycles', 0) < 1" not in out:
+    raise SystemExit(f"the strip damaged executable source outside the raise: {out!r}")
+PY
+then
+  pass "the prose-strip keeps an f-string's INTERPOLATED expression while removing its literal text (round-3 nit)"
+else
+  fail "the strip must not blank an f-string's interpolation — an idiom inside a diagnostic would be hidden"
+fi
+# ...and there is exactly ONE implementation, so the assertion and both non-vacuity probes
+# cannot test different strips. Structural, because a second copy is the failure mode.
+if [ "$(grep -c '^def strip_prose' "$TESTS_DIR/ws0_prose_strip.py")" -eq 1 ] \
+   && ! grep -q '^def strip_prose' "$0"; then
+  pass "strip_prose has ONE implementation (imported, not re-declared in this file)"
+else
+  fail "strip_prose must be defined once, in ws0_prose_strip.py — three inline copies were the nit"
 fi
 
 # ==========================================================================

@@ -143,9 +143,11 @@ PERF_DOMAIN_OPTS="$_PP_SHORT $_PP_LONG $_PT_SHORT $_PT_LONG --per-thread -a --al
 #              finding instead.
 perf_invocation_lint() {
   local mode="${2:-owner}"
+  # `SQ` carries a literal single quote INTO the awk program, so the program text (itself
+  # inside a single-quoted shell string) never has to contain one — see `is_var_command`.
   awk -v pp_short="$_PP_SHORT" -v pp_long="$_PP_LONG" \
       -v pt_short="$_PT_SHORT" -v pt_long="$_PT_LONG" \
-      -v allowed="$PERF_ALLOWED_OPTS" -v mode="$mode" '
+      -v allowed="$PERF_ALLOWED_OPTS" -v mode="$mode" -v SQ="'" '
     BEGIN { n = split(allowed, a, /[[:space:]]+/); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
     # A token as the SHELL would see it after word-splitting and quote removal:
     # leading/trailing quotes, parens and `;` stripped. That is what makes the
@@ -189,13 +191,74 @@ perf_invocation_lint() {
     # (`"${PS[@]}" -p 1234`).
     # An assignment is excluded because its right-hand side runs nothing in command
     # position; a command SUBSTITUTION is excluded because what it runs is a literal on
-    # the same line, covered by the ordinary rules. An assignment PREFIX to a variable
-    # command (`FOO=1 "$BIN" stat …`) is out of scope here and caught by the bare `stat`
-    # token instead — which is how the `"$PERF_BIN" stat …` case from round 1 fires.
-    function is_var_command(line,   t, n, tk) {
-      if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) return 0
+    # the same line, covered by the ordinary rules.
+    #
+    # ASSIGNMENT PREFIXES ARE SKIPPED, NOT USED TO DISMISS THE LINE (#3272 review round 3
+    # nit). This used to `return 0` on ANY line beginning with `VAR=`, and the comment
+    # claimed the prefixed form `FOO=1 "$BIN" stat …` was "caught by the bare `stat` token
+    # instead" — TRUE ONLY WHEN `stat` IS LITERAL. MEASURED against that version:
+    #
+    #     FOO=1 "$BIN" "$SUB" -p 1234
+    #
+    # produced NO FINDING. Both the command word and the subcommand are in variables, so
+    # there is no bare `perf`/`stat` token for layer 1, `invokes()` returned 0, and layer 2
+    # sits behind `if (!mentions) next` — a genuinely per-process invocation escaping all
+    # three layers, which is the deny-list-by-another-name failure this file exists to
+    # remove. So the prefixes are STEPPED OVER and the first non-prefix token is the
+    # command word, which is what bash does.
+    #
+    # A PURE assignment (`FOO=bar`) still returns 0: after the prefix is skipped there is
+    # no command word left, so nothing is invoked in command position.
+    #
+    # A prefix is only stepped over when it is an UNAMBIGUOUSLY COMPLETE token — balanced
+    # quotes. Whitespace-splitting a line is not shell word-splitting, so an assignment
+    # whose VALUE contains spaces spans several awk tokens, and treating its first token as
+    # a complete prefix would make the SECOND token look like a command word. MEASURED
+    # while writing this fix: without the balance test, `want="$(cpu_list_expand "$spec")"`
+    # in `lib-cpu.sh` split into `want="$(cpu_list_expand` + `"$spec")"`, the first was
+    # skipped as a prefix, and `"$spec")"` was read as a variable command word — SIX false
+    # findings across the shipped tree, on ordinary code. A guard that reds on
+    # `want="$(f "$x")"` is the guard an operator deletes.
+    #
+    # Unbalanced => NOT a prefix => the token becomes the candidate command word, which
+    # begins with a NAME and so returns 0: the old, safe answer for exactly the lines the
+    # old version was right about.
+    #
+    # Still DELIBERATELY NARROW, and the residual is stated rather than left to be
+    # discovered: an assignment prefix whose value contains BOTH a space and balanced
+    # quotes (`FOO="a b" "$BIN" "$SUB" …`) is not stepped over, so that shape is not
+    # covered. Reimplementing shell word-splitting in awk is a second implementation of
+    # bash, only as good as differential testing nobody will do — and the layer-2 allowlist
+    # plus the layer-3 runtime argv check remain behind this.
+    function is_var_command(line,   t, n, i, tk, q1, q2, po, pc) {
       n = split(line, tk, /[[:space:]]+/)
-      for (i = 1; i <= n; i++) if (tk[i] != "") { t = tk[i]; break }
+      t = ""
+      for (i = 1; i <= n; i++) {
+        if (tk[i] == "") continue
+        # An assignment PREFIX: `NAME=` or `NAME[idx]=`, with balanced quotes so the token
+        # is known to be complete. Step over it, as bash does.
+        if (tk[i] ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?=/) {
+          # `gsub` returns the substitution COUNT, so replacing each quote with itself
+          # counts them. The single quote is written as `SQ` (a BEGIN-assigned variable):
+          # this awk program is inside a single-quoted shell string, so a literal one
+          # would terminate it — the escaping dance is avoided rather than got right.
+          # (Two comment lines in this very block once carried an apostrophe and did
+          # exactly that: `bash -n` reported a syntax error at the function header.)
+          q1 = gsub(/"/, "\"", tk[i])
+          q2 = gsub(SQ, SQ, tk[i])
+          # PARENS too, for the ARRAY assignment `FOO=(a b c)`: it is not a command prefix
+          # at all, and `FOO=(scan` splits at the space exactly as a quoted value does.
+          # MEASURED: without this, `_ARM_LIST=(scan $ARMS)` in ws0-baseline.sh had
+          # `_ARM_LIST=(scan` skipped as a prefix and `$ARMS)` read as a variable command
+          # word — one false finding on the shipped driver.
+          po = gsub(/\(/, "(", tk[i])
+          pc = gsub(/\)/, ")", tk[i])
+          if (q1 % 2 == 0 && q2 % 2 == 0 && po == pc) continue
+        }
+        t = tk[i]
+        break
+      }
+      if (t == "") return 0        # a pure assignment: no command word at all
       gsub(/^[("'\''!]+/, "", t)
       if (t ~ /^\$\(/ || t ~ /^`/) return 0
       return (t ~ /^"?\$[A-Za-z_{]/)
@@ -252,14 +315,63 @@ perf_invocation_lint() {
           print NR ": option token `" tok[i] "` is not in the perf option allowlist (" allowed ") — an option this rig does not need may change the counting DOMAIN"
       }
     }
+    # An AFFIRMATIVE per-file subject check, in BOTH modes (#3272 review round 3 nit).
+    # `library` mode used to have NO END assertions at all, so an awk that DIED on a library
+    # file — a malformed regex reached on a particular line, a runtime error — printed
+    # nothing and read as CLEAN, and the drivers startup lint (which counts OUTPUT) waved
+    # the run through. The three `owner` assertions happened to cover that for one file
+    # only. Every mode now emits a subject line the CALLER verifies, so "printed nothing"
+    # and "never finished" stop being the same observation.
+    #
+    # The marker goes to the same stream as the findings and is FILTERED by the caller, not
+    # by the reader: a diagnostic a human has to remember to ignore is one they will read as
+    # a finding.
     END {
       if (mode != "library") {
         if (!wrapseen)     print "0: perf_stat_c() is absent — there is no single wrapper to allow"
         if (!wrapinvoke)   print "0: perf_stat_c() invokes nothing — the allowlist would be vacuous"
         if (!wrapcpuwide)  print "0: perf_stat_c() does not pass -C — the wrapper counts nothing CPU-wide"
       }
+      printf "#LINT-COMPLETE lines=%d mode=%s\n", NR, mode
     }
-  ' "$1"
+  ' "$1" | _perf_lint_verify_complete "$1" "$mode"
+}
+
+# _perf_lint_verify_complete <file> <mode> — pass the findings through, but turn a MISSING
+# or ZERO-LINE completion marker into a finding of its own (#3272 review round 3 nit).
+#
+# Two states that previously read as "clean":
+#
+#  * THE AWK DIED MID-FILE. It printed whatever it had and exited; the caller counts output,
+#    so a file with no findings before the death read as clean. In `library` mode there were
+#    no END assertions at all, so nothing could catch it.
+#  * THE FILE WAS EMPTY (or held only comments). Nothing to find, nothing printed — but also
+#    nothing checked, and a rig file that became empty by accident is a finding.
+#
+# This is the same rule the tree lint applies to its FILE SET, applied one level down to each
+# file's CONTENT: never derive a positive verdict from the absence of a bad signal.
+_perf_lint_verify_complete() {
+  local file="$1" mode="$2" line complete=0 lines=0
+  while IFS= read -r line; do
+    case "$line" in
+      '#LINT-COMPLETE '*)
+        complete=1
+        lines="${line##*lines=}"; lines="${lines%% *}"
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+  if [[ "$complete" != "1" ]]; then
+    echo "0: the lint did not COMPLETE over this file (the awk exited before its END block)."
+    echo "   A partial scan prints exactly like a clean one, and in 'library' mode there were"
+    echo "   no END assertions at all to catch it (#3272 review round 3)."
+    return 0
+  fi
+  if [[ "${lines:-0}" -eq 0 ]]; then
+    echo "0: this file has NO LINES, so the lint's subject was EMPTY — nothing was checked,"
+    echo "   which prints exactly like a clean file. Mode was '$mode'."
+    return 0
+  fi
 }
 
 # perf_invocation_lint_tree <dir> — lint EVERY shell file of the rig, printing
@@ -281,9 +393,21 @@ perf_invocation_lint() {
 #     what layer 1 rests on, so two wrappers dissolve the allowlist).
 perf_invocation_lint_tree() {
   local dir="$1" f owner="" count=0 owners=0 out
-  local -a files=()
+  local -a files=() unreadable=()
   for f in "$dir"/*.sh; do
-    [[ -r "$f" ]] || continue
+    # A glob that matched NOTHING yields the pattern itself; that is the empty-subject case
+    # below, not an unreadable file.
+    [[ -e "$f" ]] || continue
+    # AN UNREADABLE `.sh` IS A FINDING, NOT A `continue` (#3272 review round 3 nit). It used
+    # to be silently skipped, so a rig file with the wrong mode — or one whose directory a
+    # container mounted without read permission — was DROPPED FROM THE SUBJECT and the tree
+    # read as clean with the file never scanned. That is the subject-too-small shape the
+    # DISCOVERED glob exists to prevent, arriving through the readability test instead of
+    # through a hand-written list.
+    if [[ ! -r "$f" ]]; then
+      unreadable+=("$f")
+      continue
+    fi
     files+=("$f")
     count=$((count + 1))
     if grep -q '^perf_stat_c()' "$f"; then
@@ -291,6 +415,13 @@ perf_invocation_lint_tree() {
       owners=$((owners + 1))
     fi
   done
+  if [[ "${#unreadable[@]}" -gt 0 ]]; then
+    echo "$dir:0: ${#unreadable[@]} rig file(s) are UNREADABLE and were therefore NOT SCANNED:"
+    printf '%s:0:   %s\n' "$dir" "${unreadable[@]}"
+    echo "$dir:0: a file dropped from the subject prints exactly like a clean one, so this is"
+    echo "$dir:0: a finding rather than a skip (#3272 review round 3). Fix the permissions."
+    return 0
+  fi
   if [[ "$count" -eq 0 ]]; then
     echo "$dir:0: no *.sh found — the lint's subject is EMPTY, which prints exactly like a clean tree"
     return 0
@@ -318,9 +449,14 @@ perf_invocation_lint_tree() {
 # Exists so a test can assert the subject is the WHOLE directory rather than trusting
 # that it is: "the lint covers every library" is a claim about a SET, and a set claim
 # needs the set printed. Used by scripts/tests/test_ws0_cpu_pinning_guards.sh.
+#
+# It lists EVERY EXISTING `.sh`, readable or not, so the printed subject is what the tree
+# lint's own file set is judged against (#3272 review round 3 nit). Filtering unreadable
+# files out HERE would make the subject claim agree with a tree lint that had silently
+# dropped them — the set claim confirming its own omission.
 perf_lint_tree_subject() {
   local dir="$1" f
   for f in "$dir"/*.sh; do
-    [[ -r "$f" ]] && printf '%s\n' "$f"
+    [[ -e "$f" ]] && printf '%s\n' "$f"
   done
 }
