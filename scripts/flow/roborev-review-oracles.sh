@@ -1065,15 +1065,36 @@ _roborev_regular_readable_state() {
 # Any of the three tools distinguishes a same-length rewrite, which is the whole requirement; the
 # fallback chain exists because `sha256sum` is GNU, `shasum` is what macOS ships, and `cksum` is
 # POSIX. A failure returns non-zero and the caller RE-CAPTURES rather than keeping a stale copy.
+# ===== FIX 2 (roborev job 15): RE-VERIFY IMMEDIATELY BEFORE THE OPEN, AND BOUND THE READ =====
+# The safety checks are pathname-based and so is this open, so a component can be swapped between them. Under
+# C‴ a misread is MISINFORMATION in an explicitly non-certifying NOTICE — bounded and visible — but a FIFO
+# swapped in would HANG the wrapper, and a liveness defect is not advisory. Two proportionate measures, and
+# deliberately not a descriptor-passing apparatus for an advisory value:
+#   1. the object is re-verified as a NON-SYMLINK REGULAR FILE immediately before the open, so the race window
+#      is the syscall gap rather than the whole safety-check-to-use span;
+#   2. the read is bounded by `timeout` when available, so even a lost race cannot block forever.
+_ROBOREV_READ_TIMEOUT_SECS=${ROBOREV_READ_TIMEOUT_SECS:-20}
+_roborev_bounded() { # _roborev_bounded <cmd...> — run with a timeout when one is available
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_ROBOREV_READ_TIMEOUT_SECS" "$@"
+    return $?
+  fi
+  "$@"
+}
 _roborev_file_digest() {
   local f="$1" out=""
   _rx_digest=""
+  # observability-justified: this is the IMMEDIATELY-BEFORE-THE-OPEN re-verification described above. Its
+  # falsity means "not a plain file we may read right now", which is refused — never read as absence.
+  if [ -L "$f" ] || [ ! -f "$f" ]; then
+    return 1
+  fi
   if command -v sha256sum >/dev/null 2>&1; then
-    out=$(sha256sum -- "$f" 2>/dev/null | awk '{print $1; exit}')
+    out=$(_roborev_bounded sha256sum -- "$f" 2>/dev/null | awk '{print $1; exit}')
   elif command -v shasum >/dev/null 2>&1; then
-    out=$(shasum -a 256 -- "$f" 2>/dev/null | awk '{print $1; exit}')
+    out=$(_roborev_bounded shasum -a 256 -- "$f" 2>/dev/null | awk '{print $1; exit}')
   elif command -v cksum >/dev/null 2>&1; then
-    out=$(cksum -- "$f" 2>/dev/null | awk '{print $1 "-" $2; exit}')
+    out=$(_roborev_bounded cksum -- "$f" 2>/dev/null | awk '{print $1 "-" $2; exit}')
   fi
   [ -n "$out" ] || return 1
   _rx_digest="$out"
@@ -1170,7 +1191,7 @@ _roborev_snapshot_safe_to_read() {
 # there is no publication, no selection and no staleness rule to get wrong — a superseded line is simply
 # an earlier observation of the same path, and the reader takes the last.
 _roborev_snapshot_observe_loop() {
-  local repo="$1" out="$2" f id last=""
+  local repo="$1" out="$2" f id last size
   _rx_observe_stop=0
   trap '_rx_observe_stop=1' TERM
   while : ; do
@@ -1179,15 +1200,34 @@ _roborev_snapshot_observe_loop() {
       id="${id##*/}"
       _roborev_snapshot_safe_to_read "$repo" "$id" "$f" || continue
       _roborev_file_digest "$f" || continue
+      # FIX 3 (roborev job 15): THE LAST-SEEN DIGEST IS PER PATH. A single shared `last` meant that with two
+      # snapshots present, identical ones suppressed the second path entirely and differing ones re-appended
+      # every cycle. The record the observer itself writes IS the per-path memory, so it is read back rather
+      # than mirrored in a variable — which also avoids an associative array (bash 3.2 on macOS has none).
+      last=$(awk -F'\t' -v want="$f" '$1 == want { d = $2 } END { print d }' "$out" 2>/dev/null || printf '')
       [ "$_rx_digest" != "$last" ] || continue
-      last="$_rx_digest"
-      printf '%s\t%s\t%s\n' "$f" "$_rx_digest" "$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]')" \
-        >>"$out" 2>/dev/null || :
+      size=""
+      _roborev_file_size "$f" && size="$_rx_size"
+      printf '%s\t%s\t%s\n' "$f" "$_rx_digest" "${size:-unknown}" >>"$out" 2>/dev/null || :
     done
     [ "$_rx_observe_stop" -eq 0 ] || return 0
     sleep "$_ROBOREV_SNAPSHOT_OBSERVE_POLL_SECS" 2>/dev/null || sleep 1
     [ "$_rx_observe_stop" -eq 0 ] || return 0
   done
+}
+
+# _roborev_file_size <file>: the byte count, with the same immediately-before-the-open re-verification and
+# the same bounded read as the digest. Empty on refusal or failure — callers report "unknown", never a guess.
+_roborev_file_size() {
+  local f="$1"
+  _rx_size=""
+  # observability-justified: the immediately-before-the-open re-verification (see _roborev_file_digest).
+  if [ -L "$f" ] || [ ! -f "$f" ]; then
+    return 1
+  fi
+  _rx_size=$(_roborev_bounded wc -c <"$f" 2>/dev/null | tr -d '[:space:]') || _rx_size=""
+  [ -n "$_rx_size" ] || return 1
+  return 0
 }
 
 # roborev_snapshot_observation_for <path>: the digest and size the observer recorded for `<path>`, into
@@ -1409,6 +1449,36 @@ roborev_snapshot_path_binding() {
       return 1
     fi
   done
+  # ===== FIX 1 (roborev job 15): THE LAYOUT CHECK BELONGS TO THE SAFETY HALF =====
+  # It was swept out with the certification machinery, which let ANY regular file inside the repo named by a
+  # snapshot instruction be read and hashed. Whether a path is one of roborev's own snapshot files is a
+  # question about what we may READ, not about certification, so it survives C‴ like the rest of the safety
+  # half. Validated on the components established above — `.roborev` / `roborev-snapshot-<id>` / a file name.
+  if [ "${#parts[@]}" -lt 3 ]; then
+    _rx_snap_bind_state="unbound-job"
+    _rx_snap_bind_detail="the path has too few components inside the repository to be one of roborev's snapshot files"
+    return 1
+  fi
+  for ((i = 0; i < ${#parts[@]}; i++)); do
+    case "${parts[$i]}" in
+      '') _rx_snap_bind_state="unbound-job"
+          _rx_snap_bind_detail="the path contains an empty component"
+          return 1 ;;
+    esac
+  done
+  if [ "${parts[0]}" != ".roborev" ]; then
+    _rx_snap_bind_state="unbound-job"
+    _rx_snap_bind_detail="the path does not sit under the repository's own '.roborev' directory, so it is not one of roborev's snapshot files"
+    return 1
+  fi
+  case "${parts[1]}" in
+    roborev-snapshot-?*) ;;
+    *)
+      _rx_snap_bind_state="unbound-job"
+      _rx_snap_bind_detail="the second component '${parts[1]}' is not a 'roborev-snapshot-<id>' directory, so the path is not one of roborev's snapshot files"
+      return 1
+      ;;
+  esac
   _rx_snap_bind_state="ok"
   return 0
 }
@@ -1510,7 +1580,8 @@ roborev_collect_review_diff_headers() {
     present)
       if _roborev_file_digest "$_rx_snap_bound_path"; then
         ROBOREV_SNAPSHOT_DIGEST="$_rx_digest"
-        ROBOREV_SNAPSHOT_BYTES=$(wc -c <"$_rx_snap_bound_path" 2>/dev/null | tr -d '[:space:]')
+        ROBOREV_SNAPSHOT_BYTES=""
+        _roborev_file_size "$_rx_snap_bound_path" && ROBOREV_SNAPSHOT_BYTES="$_rx_size"
         return 0
       fi
       ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the snapshot is still present but no digest could be taken of it (no sha256sum/shasum/cksum?)"
