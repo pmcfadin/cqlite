@@ -506,7 +506,8 @@ mod tests {
         hasher.update(text.as_bytes());
         let digest = format!("{:x}", hasher.finalize());
         assert_eq!(
-            digest, PRE_REFACTOR_SHA256,
+            digest,
+            PRE_REFACTOR_SHA256,
             "the payload's first {} characters match the pre-refactor value but its FULL \
              {} bytes do not, so the rng stream diverged somewhere after the prefix — a \
              change the prefix check alone cannot see, and one that still invalidates \
