@@ -202,6 +202,18 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    `git` — that would make the key compare our census against our own diff and agree with itself, which is
    the vacuous pass this key exists to prevent. A capture that never happens is still a `cleaned-up` FAIL.
 
+   The capture apparatus is deliberately small, and its scope is recorded in code: it defends against
+   **silent tooling failure and staleness**, not against an adversary with write access to the reviewed
+   repository (who can write the diff, the wrapper or the tests, so hardening a file copy against them is
+   unwinnable). Four properties do the work, three of them by construction: the capture directory is
+   **private and per-run** (`mktemp -d` 0700, outside the repo, removed at exit — nothing can predate or
+   share it); a capture is **published by one rename** (content and identity together, so a kill mid-capture
+   cannot produce a half-published one — two separate writes previously let a SIGTERM between them report a
+   perfectly good snapshot as unvalidated, a false FAIL of exactly the kind this issue removes); reuse is
+   keyed on a **content digest**, so a same-length rewrite cannot leave a stale capture in place; and the
+   capture is matched to the prompt by **whole-path equality**, so the canonical sibling of a
+   differently-named file cannot stand in for it.
+
    Two further facts, read out of the installed binary (roborev v0.61.2) rather than inferred from a single
    transcript: roborev has **two** snapshot instruction spellings — the full one and a compact
    ``(Diff too large; read `<path>`.)`` — and both are read; and it has a **third** oversize tier (its

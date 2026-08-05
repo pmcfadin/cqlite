@@ -510,13 +510,17 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   genuine snapshot-mode review (a differently-named FAIL is not a fix). The wrapper therefore arms a watcher
   before the review that copies each snapshot out of the reviewed repo keyed by directory id, and reads its
   own copy of the id the job's prompt names — **never** a diff it recomputes itself, which would make the key
-  agree with itself. A capture that never happens is still a `cleaned-up` FAIL. **Provenance is established
-  AT CAPTURE TIME, because `-f`/`cp` follow symlinks and the original is deleted before any later check can
-  look**: the watcher refuses a symlink at the file or at any component it descends, requires a
-  physically-resolved in-repo directory, and records the validated relative path beside the capture — and the
-  consumer REQUIRES that record and requires it to EQUAL the path the prompt names (an absent record is an
-  absent measurement, and an id-only match would let the canonical sibling certify a file the reviewer was
-  never pointed at). Both holes were real: reverted, each reached `prompt-content: PASS`.
+  agree with itself. A capture that never happens is still a `cleaned-up` FAIL. The capture is
+  **private and per-run** (`mktemp -d` 0700, outside the repo, removed at exit), **published by ONE rename**
+  (content + identity together, so no observer sees a half-published capture — two separate writes made a
+  SIGTERM between them report `capture-unvalidated` on a good snapshot, i.e. the very false FAIL this issue
+  fixes), **re-taken whenever the source's content DIGEST changes** (a byte count cannot see a same-length
+  rewrite, which would certify a stale diff), and matched by **whole-path equality** with the path the prompt
+  names (an id-only match let the canonical sibling certify a file the reviewer was never pointed at). Every
+  one of those holes was real: reverted, each reached `prompt-content: PASS`. **Scope, recorded in code:** this
+  defends against silent tooling failure and staleness — *not* against an adversary with write access to the
+  reviewed repo, who can simply write the diff, the wrapper or the tests, so hardening the copy against them
+  is unwinnable and out of scope.
   Read out of the installed binary (v0.61.2) rather than from one transcript: there are **two** snapshot
   instruction spellings (the full one and a compact ``(Diff too large; read `<path>`.)``), both read, and a
   **THIRD oversize tier** (`codex_*`/`generic_*` templates) that ships **neither** a diff nor a snapshot and
