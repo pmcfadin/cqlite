@@ -1099,6 +1099,84 @@ else
   bad "perf-capability: the staged write was redirected through a symlink-to-directory at the managed name (rc=$wt_td_rc, outside-dir='$wt_outdir_contents', leftover='$wt_td_leftover', out='$wt_td')"
 fi
 rm -f "$wt_d/99-cqlite-perf.conf"
+# ...and THE PRECONDITION THAT ACTUALLY CLOSES THE STAGING RACE (issue #3261, roborev round 3): a
+# drop-in directory writable by anyone less privileged than the writer is REFUSED before anything is
+# staged. Three rounds of this defect were each answered by trying to make the race unwinnable
+# (unpredictable name, then one privileged invocation); neither works, because a single `sh -c`
+# sequences OUR commands and says nothing about other processes on other CPUs. Removing the
+# attacker's precondition does work — with no one able to create or replace entries in the
+# directory, there is no actor to race, whatever the timing.
+# The negative control is the whole point of the group: a check that refuses everything would pass
+# the two refusal cases and be useless, so a correctly-owned 0755 directory must still install.
+wt_perm_d="$tmp/wt-perm.d"
+wt_perm_fail=0
+for wt_mode in 0775 0777 0757; do
+  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod "$wt_mode" "$wt_perm_d"
+  wt_perm_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_perm_rc=$?
+  wt_perm_left=$(ls -A "$wt_perm_d")
+  if [ "$wt_perm_rc" -eq 0 ] \
+     || ! printf '%s' "$wt_perm_out" | grep -q 'group- or world-writable' \
+     || [ -n "$wt_perm_left" ]; then
+    bad "perf-capability: a mode-$wt_mode drop-in directory was accepted for a privileged staged write (rc=$wt_perm_rc, left='$wt_perm_left', out='$wt_perm_out')"
+    wt_perm_fail=1
+  fi
+done
+# ...the NEGATIVE CONTROL: a directory owned by the writer and not group/world-writable installs.
+rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+wt_ok_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ok_rc=$?
+if [ "$wt_ok_rc" -ne 0 ] || [ ! -f "$wt_perm_d/99-cqlite-perf.conf" ]; then
+  bad "perf-capability: a correctly-owned 0755 drop-in directory was REFUSED — the writability precondition is vacuous (rc=$wt_ok_rc, out='$wt_ok_out')"
+  wt_perm_fail=1
+fi
+# ...and an UNDETERMINABLE owner/mode is a refusal, not an assumption: with `stat` unusable the
+# install must fail closed rather than proceed on the hope that the directory is fine.
+wt_nostat="$tmp/wt-nostat"; mkdir -p "$wt_nostat"
+for t in bash sh cat printf tee mv rm chmod env grep mktemp id; do
+  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_nostat/$t"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$wt_nostat/stat"; chmod +x "$wt_nostat/stat"
+rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+wt_ns_out=$(env PATH="$wt_nostat" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ns_rc=$?
+if [ "$wt_ns_rc" -eq 0 ] || ! printf '%s' "$wt_ns_out" | grep -q 'cannot determine owner/mode'; then
+  bad "perf-capability: an undeterminable directory owner/mode did not fail closed (rc=$wt_ns_rc, out='$wt_ns_out')"
+  wt_perm_fail=1
+fi
+[ "$wt_perm_fail" -ne 0 ] || ok "perf-capability: a privileged staged install REFUSES a group-/world-writable drop-in directory by name and writes nothing, refuses when owner/mode cannot be determined, and still installs into a correctly-owned 0755 directory — the staging race is closed at its PRECONDITION rather than by trying to win it (#3261 roborev-3)"
+
+# ...and CR/LF IN A PATH SEAM IS REFUSED (issue #3261, roborev round 3). Not a containment defect —
+# the path IS contained — a SERIALIZATION one, which is why nine rounds of containment work never
+# saw it: the search path is emitted ONE ENTRY PER LINE and read back line-wise, so a contained
+# directory NAMED with an embedded newline splits into TWO entries, the second being the host's real
+# /etc/sysctl.d. One contained path becomes two paths, one of them production.
+wt_nl_root="$tmp/wt-nl-root"; mkdir -p "$wt_nl_root"; : >"$wt_nl_root/.cqlite-perf-sandbox"
+wt_nl_seam="$wt_nl_root/evil
+/etc/sysctl.d"
+mkdir -p "$wt_nl_seam" 2>/dev/null
+wt_nl_out=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$wt_nl_seam" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); wt_nl_rc=$?
+wt_nl_extra=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$seamed_d" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$wt_nl_seam" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); wt_nl_extra_rc=$?
+if [ "$wt_nl_rc" -ne 0 ] && [ "$wt_nl_extra_rc" -ne 0 ] \
+   && ! printf '%s\n' "$wt_nl_out" | grep -qx -- /etc/sysctl.d \
+   && ! printf '%s\n' "$wt_nl_extra" | grep -qx -- /etc/sysctl.d; then
+  ok "perf-capability: a CONTAINED path carrying an embedded newline is REFUSED as a seam and as an extra-dirs entry, so it can never SERIALIZE into two search-path entries whose second line is the host's real /etc/sysctl.d (#3261 roborev-3)"
+else
+  bad "perf-capability: an embedded-newline path was serialized into the search path (seam rc=$wt_nl_rc '$wt_nl_out'; extra rc=$wt_nl_extra_rc '$wt_nl_extra')"
+fi
+# ...and a CR is refused for the same reason (a CRLF-authored value would leave a stray \r inside a
+# resolved entry), while the predicate stays non-vacuous on an ordinary path.
+if env bash -c '. "$1"; perf_capability_path_lines_ok "$2"' _ "$PERFLIB" "$(printf '/tmp/a\rb')"; then
+  bad "perf-capability: a path containing CR was accepted by the line-safety predicate"
+elif ! env bash -c '. "$1"; perf_capability_path_lines_ok "$2"' _ "$PERFLIB" /tmp/ordinary/path; then
+  bad "perf-capability: the line-safety predicate rejects an ordinary path (vacuous)"
+else
+  ok "perf-capability: the line-safety predicate rejects CR as well as LF and still accepts an ordinary path"
+fi
+
 # ...and the install is still gated: an out-of-sandbox seam may not be written at all.
 if env CQLITE_PERF_SYSCTL_DIR="$symanc/sysctl.d" \
      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" >/dev/null 2>&1; then
