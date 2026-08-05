@@ -288,7 +288,7 @@ case "$cmd" in
       # events is flaky by construction (roborev job 7, finding 2).
       snap_capture_of() { # snap_capture_of <snapshot-id> -> prints the published meta path, if any
         local d
-        for d in "${TMPDIR:-/tmp}"/roborev-snapshot-capture.*/"$1"/meta; do
+        for d in "${CAPTURES_PARENT:?}"/roborev-snapshot-capture.*/"$1"/meta; do
           [ -f "$d" ] && { printf '%s' "$d"; return 0; }
         done
         return 1
@@ -922,6 +922,17 @@ assert_tracked_mode() { # assert_tracked_mode <label> <work> <ref> <path> <want-
 # range_ref <work>: the git_ref shape a RANGE review records, "<base40>..<head40>".
 range_ref() { printf '%s..%s' "$(git -C "$1" rev-parse "${2:-origin/main}")" "$(git -C "$1" rev-parse HEAD)"; }
 
+# ===== THE CAPTURE PARENT IS PER TEST PROCESS (roborev job 9, F3) =====
+# The capture directories are discovered by GLOB, and a glob over the shared temp dir can be satisfied
+# by a CONCURRENT run's artifact — or by a leftover from a killed run that used the same hard-coded
+# snapshot ids. A test that greens on evidence from a different run is the very false-PASS class this
+# change exists to prevent, one layer down. So every wrapper run in this file gets `TMPDIR` pinned to a
+# parent inside THIS process's `$tmp` (itself `mktemp -d`), and every discovery searches only there.
+# Unique by construction, rather than coordinated around.
+CAPTURES_PARENT="$tmp/captures"
+mkdir -p "$CAPTURES_PARENT"
+export CAPTURES_PARENT
+
 CASE_N=0
 OUT=""
 RC=0
@@ -933,6 +944,9 @@ mkdir -p "$FIXTURE_HOME"
 # FAULT-INJECT one git subcommand (#3229 round-14: `git ls-tree` failing is the only way to reach
 # the UNMEASURABLE state end-to-end). Empty for every other case, and every user restores it.
 WRAPPER_PATH_PREFIX=""
+# An OPTIONAL TMPDIR override for the single case that must exercise a hostile TMPDIR (one resolving
+# INSIDE the reviewed repo). Every other run gets the per-process capture parent.
+WRAPPER_TMPDIR=""
 
 run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   local work="$1"; shift
@@ -957,6 +971,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+    TMPDIR="${WRAPPER_TMPDIR:-$CAPTURES_PARENT}" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -3707,7 +3722,7 @@ else
 fi
 # ...and it does not survive the run: a stable, reusable capture path is the staleness class the
 # private directory removes by construction.
-if snap_capture_dirs=$(ls -d "${TMPDIR:-/tmp}"/roborev-snapshot-capture.*/roborev-snapshot-424242 2>/dev/null); then
+if snap_capture_dirs=$(ls -d "$CAPTURES_PARENT"/roborev-snapshot-capture.*/roborev-snapshot-424242 2>/dev/null); then
   bad "case (cx31r): the capture outlived the wrapper ($snap_capture_dirs) — a reusable capture directory is exactly the reuse hazard the private one removes"
 else
   ok 'case (cx31r): the private capture directory was removed at exit (nothing to go stale, nothing to reuse)'
@@ -4007,6 +4022,47 @@ fi
 WRAPPER="$_dg_real_wrapper"
 reset_stub
 
+printf '== (cx31z) a TMPDIR that resolves INSIDE the repo is refused, and named (job 9, F2) ==\n'
+# A LEXICAL containment test passes a `TMPDIR` whose path TRAVERSES A SYMLINK into the checkout: the
+# string does not start with $REPO, but the directory is inside it. Our own copies would then live in the
+# tree the census and the watcher are both reading. The fixture is exactly that shape — a symlink outside
+# the repo pointing at a directory inside it — and the refusal must be NAMED, because a silently absent
+# capture would leave an operator staring at `cleaned-up` with no idea why.
+reset_stub
+tmp_inside="$snap_repo/inside-the-checkout-tmp"
+mkdir -p "$tmp_inside"
+tmp_symlink="$tmp/tmpdir-that-resolves-into-the-repo"
+rm -rf "$tmp_symlink"
+ln -s "$tmp_inside" "$tmp_symlink"
+hostile_dir="$snap_repo/.roborev/roborev-snapshot-969696"
+hostile_log="$tmp/cx31z-transcript.log"
+STUB_SNAPSHOT_LIFECYCLE_DIR="$hostile_dir"
+STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+STUB_SNAPSHOT_EXPECT_NO_CAPTURE=1
+CP_SHIM_WITNESS="$tmp/cx31z-witness"
+printf 'no interposed copy here; the wait falls back to one poll\n' >"$CP_SHIM_WITNESS"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$hostile_dir/roborev-snapshot-content.diff")
+WRAPPER_TMPDIR="$tmp_symlink"
+run_wrapper "$snap_work" --log "$hostile_log"
+WRAPPER_TMPDIR=""
+assert_verdict 'case (cx31z)' FAIL 1
+assert_says 'case (cx31z) the refusal is NAMED, with the resolved path and the repo' \
+  "^NOTICE: snapshot-capture: the private capture directory resolves INSIDE the reviewed repository \('$snap_repo/inside-the-checkout-tmp/roborev-snapshot-capture\.[A-Za-z0-9]+' is under '$snap_repo'"
+assert_says 'case (cx31z) the notice says what to do about it' 'Point TMPDIR outside the checkout and re-run'
+assert_says 'case (cx31z) and that the consequence is fail-closed, not a silent pass' \
+  'fail-closed, never a silent pass'
+assert_says 'case (cx31z) the run itself fails closed on the absent capture' \
+  '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
+# AND NOTHING OF OURS WAS LEFT INSIDE THE REVIEWED TREE — the point of the refusal.
+if ls -d "$tmp_inside"/roborev-snapshot-capture.* >/dev/null 2>&1; then
+  bad "case (cx31z): a capture directory was left INSIDE the reviewed repository ($(ls -d "$tmp_inside"/roborev-snapshot-capture.* 2>/dev/null | head -1))"
+else
+  ok 'case (cx31z): no capture directory survives inside the reviewed repository'
+fi
+rm -rf "$tmp_inside" "$tmp_symlink"
+reset_stub
+
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs
@@ -4293,6 +4349,44 @@ if grep -qE 'mktemp -d "\$\{TMPDIR:-/tmp\}/roborev-snapshot-capture' "$ORACLES";
   ok 'structural: the capture directory is created by mktemp -d (private, per-run, unpredictable)'
 else
   bad 'structural: the capture directory is not a per-run mktemp -d — a shared, guessable path can be reused across runs and predate one (#3312 job 7, finding 1)'
+fi
+# THE CONTAINMENT TEST IS DECIDED ON A PHYSICALLY RESOLVED PATH (job 9, F2): a lexical test admits a
+# relative TMPDIR and one whose path traverses a symlink into the checkout.
+_start_s=$(grep -nE '^roborev_snapshot_capture_start\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_start_e=""
+[ -z "$_start_s" ] || _start_e=$(awk -v s="$_start_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+if [ -z "$_start_s" ] || [ -z "$_start_e" ]; then
+  bad 'structural: could not locate roborev_snapshot_capture_start to inspect its containment test'
+else
+  _start_body=$(sed -n "${_start_s},${_start_e}p" "$ORACLES")
+  _sb_missing=""
+  printf '%s\n' "$_start_body" | grep -qF 'pwd -P' || _sb_missing="$_sb_missing physical-resolution"
+  printf '%s\n' "$_start_body" | grep -qF '"$phys/" in' || _sb_missing="$_sb_missing containment-on-resolved-path"
+  printf '%s\n' "$_start_body" | grep -qF 'ROBOREV_SNAPSHOT_CAPTURE_DIR="$phys"' || _sb_missing="$_sb_missing stores-resolved-path"
+  printf '%s\n' "$_start_body" | grep -qE 'case "\$phys" in' || _sb_missing="$_sb_missing absolute-check"
+  if [ -z "$_sb_missing" ]; then
+    ok 'structural: containment is decided on the pwd -P-resolved path, which is also what gets stored'
+  else
+    bad "structural: the capture-directory containment test is incomplete —$_sb_missing. A lexical test admits a relative TMPDIR or one symlinked into the checkout (#3312 job 9, F2)"
+  fi
+fi
+# THE TEST HARNESS'S OWN DISCOVERY MUST BE PER-PROCESS (job 9, F3): a glob over the shared temp dir can
+# be satisfied by a concurrent run's capture, which is this change's own false-PASS class one layer down.
+# THE PROPERTY IS "no discovery searches a location SHARED with other runs", not "every glob names one
+# variable": a glob rooted at a path inside this process's own `$tmp` (the fixture repo, for instance) is
+# already unique. What must never appear is a glob rooted at the SHARED temp dir — `${TMPDIR...}` or a
+# literal `/tmp/` — since that is what another run's capture can satisfy.
+_selfglobs=$(grep -n 'roborev-snapshot-capture\.' "$0" \
+  | grep -E '(\$\{TMPDIR|"/tmp/|[^a-zA-Z_]/tmp/)' | grep -v '^[0-9]*: *#' || true)
+if [ -z "$_selfglobs" ]; then
+  ok 'structural: no capture discovery in this suite searches the SHARED temp dir (per-process scoping only)'
+else
+  bad "structural: a capture glob in this suite searches the shared temp dir: ${_selfglobs%%$'\n'*} — a concurrent run's artifact could satisfy a wait (#3312 job 9, F3)"
+fi
+if grep -qE '^CAPTURES_PARENT="\$tmp/captures"$' "$0" && grep -qF 'TMPDIR="${WRAPPER_TMPDIR:-$CAPTURES_PARENT}"' "$0"; then
+  ok 'structural: wrapper runs are pinned to the per-process capture parent'
+else
+  bad 'structural: wrapper runs do not pin TMPDIR to a per-process capture parent (#3312 job 9, F3)'
 fi
 if grep -qE '^roborev_snapshot_capture_cleanup\(\) \{' "$ORACLES" \
   && grep -qF 'roborev_snapshot_capture_cleanup' "$WRAPPER"; then
