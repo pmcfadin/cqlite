@@ -359,16 +359,32 @@ def write_session_corpus_pin(
     be paid by every run. The digest RE-DERIVATION stays at report time
     (`verify_corpus_bytes`); what the pin adds is that the identity being re-derived is the one
     the session STARTED with.
+
+    # SCOPE, corrected (#3272 round 6, B2)
+
+    F3's version of this docstring claimed the pin "covers everything a scan reads". That was
+    FALSE in the only sense that matters: the component map was written and read by nothing, so
+    the coverage was of the FILE, not of the CHECK. It is true now — `verify_session_corpus_pin`
+    compares every pinned component's name, size and digest against both the report-time
+    identity and the bytes on disk — and stated as what the pin covers rather than as what it
+    records, because "recorded" was the word doing the misleading work.
     """
     pin = {
         "corpus": str(corpus),
         "rows": identity["rows"],
         "data_db_bytes": identity["data_db_bytes"],
         "data_db_sha256": identity["data_db_sha256"],
-        # THE COMPLETE RECORDED COMPONENT SET (#3272 F3): the pin carries every component's
-        # size and digest, not just Data.db's, so the identity established BEFORE measurement
-        # covers everything a scan reads. Copied from the identity rather than re-hashed —
-        # this is on the measurement's critical path (see the note below).
+        # THE COMPLETE RECORDED COMPONENT SET (#3272 F3): every component's size and digest,
+        # not just Data.db's. Copied from the identity rather than re-hashed — this is on the
+        # measurement's critical path (see the note below).
+        #
+        # READ BACK by `verify_session_corpus_pin`, which compares this map against the
+        # report-time identity AND the bytes on disk. That reader did NOT exist when F3 added
+        # this field (#3272 round 6, B2, found independently by both reviewers): the map was
+        # WRITTEN and compared against NOTHING ANYWHERE IN THE TREE, so the field read as a
+        # guard while being inert. What F3 actually closed was `verify_corpus_components`,
+        # against the corpus's OWN report-time `corpus-identity.json` — self-consistent at
+        # report time, which is precisely the blind spot the PIN exists to cover.
         "components": {
             name: {"bytes": spec.get("bytes"), "sha256": spec.get("sha256")}
             for name, spec in sorted((identity.get("components") or {}).items())
@@ -506,8 +522,185 @@ def session_manifest_config(
     return out
 
 
+def _verify_pinned_components(
+    pin_path: pathlib.Path,
+    pin: dict,
+    corpus: pathlib.Path,
+    identity: dict,
+    measured: dict | None = None,
+) -> dict:
+    """Compare the PINNED component map against the report-time identity AND the bytes on disk.
+
+    # The finding (#3272 round 6, B2 — found independently by BOTH reviewers)
+
+    Round 5's F3 fix added the complete component set to the pin. `write_session_corpus_pin`
+    wrote it; the driver even printed its count. **Nothing ever read it.** A grep of the whole
+    tree found no consumer, so `verify_session_corpus_pin` still compared only `rows`,
+    `data_db_bytes` and `data_db_sha256` — and the sibling `verify_corpus_components` closes F3
+    only against the corpus's OWN report-time `corpus-identity.json`, i.e. against a file that
+    can be refreshed beside the component it describes.
+
+    The triggering state, which is what makes this a report-integrity defect rather than an
+    unused field: regenerate or replace `Index.db` between rep 1 and the report and refresh
+    `corpus-identity.json` beside it, leaving `Data.db` untouched. The pin's three fields still
+    match. The identity is self-consistent with disk. So the report EXITS 0 and prints
+
+        corpus comps : all 5 recorded component(s) were re-stat'ed and 5 of 5 re-hashed
+
+    — an affirmative FULL-verification claim, while an auxiliary component that shapes the read
+    pattern being measured is not the one that was measured. Written-but-unread data reading as
+    a guard is this issue's defining defect class.
+
+    # What is compared, and why all four
+
+    * the pinned NAME SET, both directions. A component that DISAPPEARED changes the read path
+      (an absent `Index.db` is a different scan); a component that APPEARED means the directory
+      is no longer the pinned corpus.
+    * every component's SIZE, against the identity's record AND against `stat` on disk. Two
+      independent comparisons because the identity is a file an editor can rewrite, and disk is
+      the thing actually read.
+    * every component's DIGEST, likewise against both — the same-length-different-bytes case a
+      size check cannot see.
+
+    The digest comparison against the IDENTITY is free (both are recorded strings). Against DISK
+    it needs a hash of multi-GB files, which `verify_corpus_components` has ALREADY performed in
+    the same report over the same files — so `measured` is that result (its per-component
+    `sha256_measured`), passed in rather than re-derived. Two reasons it is a PARAMETER and not
+    an internal re-hash: hashing 2.8 GB twice per report is a real cost, and a second derivation
+    is a second implementation whose disagreement with the first would be undiagnosable.
+
+    Under `--skip-corpus-digest` no digest was observed at all. This then reports the SCOPE of
+    what was compared (name + size, both sources) instead of treating an unobserved digest as a
+    match — a value not observed is never a pass. `measured` absent is likewise reported as
+    unobserved rather than silently skipped.
+    """
+    pinned = pin.get("components")
+    if not isinstance(pinned, dict) or not pinned:
+        raise Invalid(
+            f"{pin_path} records no `components` map, so the identity captured BEFORE"
+            " measurement covers only Data.db. A scan also reads Index.db and the"
+            " Statistics/Summary/Filter components that shape how it reads, and those can be"
+            " replaced mid-session with corpus-identity.json refreshed beside them — which is"
+            " self-consistent at report time and therefore invisible to the report-time"
+            " component check (#3272 round 6, B2). Re-run the session with the current driver,"
+            " which pins the complete component set before the first rep."
+        )
+    current = identity.get("components")
+    if not isinstance(current, dict) or not current:
+        raise Invalid(
+            f"{corpus / 'corpus-identity.json'} records no `components` map, so the pinned"
+            f" component set in {pin_path} cannot be compared against anything. The pin names"
+            f" {len(pinned)} component(s); refusing rather than reporting a comparison that did"
+            " not happen."
+        )
+    table_dir = corpus.joinpath(*CORPUS_TABLE_SUBPATH)
+    vanished = sorted(set(pinned) - set(current))
+    appeared = sorted(set(current) - set(pinned))
+    if vanished or appeared:
+        raise Invalid(
+            "THE CORPUS COMPONENT SET CHANGED under this session."
+            + (f" Pinned but now absent: {', '.join(vanished)}." if vanished else "")
+            + (f" Present but never pinned: {', '.join(appeared)}." if appeared else "")
+            + " The session was started against the pinned set and every figure was measured"
+            " over it; a component that came or went changes what a scan reads. Point --corpus"
+            " at the corpus this session measured, or re-run the session."
+        )
+    checked_sha = 0
+    for name in sorted(pinned):
+        spec = pinned[name]
+        if not isinstance(spec, dict):
+            raise Invalid(
+                f"{pin_path}: pinned component {name!r} is a {type(spec).__name__}, not a"
+                " record with its size and digest, so it cannot establish what was measured"
+            )
+        pin_bytes = positive_int(f"{pin_path}: component {name!r} 'bytes'", spec.get("bytes"))
+        pin_sha = spec.get("sha256")
+        if not isinstance(pin_sha, str) or not _SHA256_RE.match(pin_sha):
+            raise Invalid(
+                f"{pin_path}: pinned component {name!r} records 'sha256' {pin_sha!r}, which is"
+                " not 64 lowercase hex characters — a truncated pin cannot identify the bytes"
+                " this session measured"
+            )
+        cur = current.get(name)
+        if not isinstance(cur, dict):
+            raise Invalid(
+                f"{corpus / 'corpus-identity.json'}: component {name!r} is a"
+                f" {type(cur).__name__}, not a record, so the pinned component cannot be"
+                " compared against it"
+            )
+        if cur.get("bytes") != pin_bytes:
+            raise Invalid(
+                f"CORPUS COMPONENT {name} CHANGED SIZE under this session:"
+                f" {SESSION_CORPUS_PIN} pinned {pin_bytes:,} bytes before the first rep, the"
+                f" corpus now records {cur.get('bytes')!r}. This component is read by the scan"
+                " (or shapes how it reads), so the figures were measured over a different"
+                " corpus than the one being reported (#3272 round 6, B2)."
+            )
+        if cur.get("sha256") != pin_sha:
+            raise Invalid(
+                f"CORPUS COMPONENT {name} CHANGED under this session: {SESSION_CORPUS_PIN}"
+                f" pinned sha256 {pin_sha} before the first rep, the corpus now records"
+                f" {cur.get('sha256')!r}. This is the mid-session replacement the report-time"
+                " component check CANNOT see — refreshing corpus-identity.json beside the"
+                " replaced component leaves the corpus self-consistent at report time while"
+                " Data.db, and therefore the pin's other three fields, are unchanged"
+                " (#3272 round 6, B2). Re-run the session."
+            )
+        # ...and against DISK, which is the thing actually read. The identity is a file; an
+        # editor can make it agree with the pin without the bytes agreeing with either.
+        path = table_dir / name
+        try:
+            disk_bytes = path.stat().st_size
+        except OSError as exc:
+            raise Invalid(
+                f"pinned corpus component {name} cannot be stat'ed at {path}: {exc}. The pin"
+                " names it as part of the measured corpus, so an unreadable component means the"
+                " corpus being reported is not the one measured."
+            ) from None
+        if disk_bytes != pin_bytes:
+            raise Invalid(
+                f"pinned corpus component {name} is {disk_bytes:,} bytes ON DISK but"
+                f" {SESSION_CORPUS_PIN} pinned {pin_bytes:,}. The recorded identity agreed with"
+                " the pin, so this is an identity file that was edited rather than regenerated"
+                " — the pin is compared against BOTH the identity and the bytes for exactly"
+                " this case."
+            )
+        # The DISK digest: the one `verify_corpus_components` already derived in this same report
+        # over this same file. ABSENT means no digest was OBSERVED (`--skip-corpus-digest`, or an
+        # entry that recorded none), which is reported as scope below, never as a match.
+        entry = (measured or {}).get(name)
+        disk_sha = entry.get("sha256_measured") if isinstance(entry, dict) else None
+        if disk_sha is not None:
+            if disk_sha != pin_sha:
+                raise Invalid(
+                    f"pinned corpus component {name} hashes to {disk_sha} ON DISK but"
+                    f" {SESSION_CORPUS_PIN} pinned {pin_sha}. Both sizes matched, so this is the"
+                    " same-length-different-bytes case neither a size check nor the recorded"
+                    " identity can see."
+                )
+            checked_sha += 1
+    return {
+        "pinned_components": len(pinned),
+        "pinned_components_verified_size": len(pinned),
+        "pinned_components_verified_sha256": checked_sha,
+        "note": (
+            f"all {len(pinned)} component(s) pinned BEFORE the first rep were re-compared"
+            f" against the report-time identity AND the bytes on disk;"
+            f" {checked_sha} of {len(pinned)} digests were re-derived from disk"
+            if checked_sha
+            else f"all {len(pinned)} component(s) pinned BEFORE the first rep were re-compared"
+            " on NAME and SIZE against both the report-time identity and the bytes on disk; NO"
+            " digest was re-derived (--skip-corpus-digest), so no component's CONTENT was"
+            " confirmed to be the pinned content"
+        ),
+    }
+
+
 def verify_session_corpus_pin(
-    session_dir: pathlib.Path, corpus: pathlib.Path, identity: dict
+    session_dir: pathlib.Path,
+    corpus: pathlib.Path,
+    identity: dict,
+    measured_components: dict | None = None,
 ) -> dict:
     """Require the session's PRE-MEASUREMENT corpus pin, and require it to still match.
 
@@ -524,6 +717,12 @@ def verify_session_corpus_pin(
     * the PATH is compared last and is the WEAKEST of the three — a corpus can legitimately be
       moved — so a path difference alone is REPORTED in the record rather than fatal. The two
       byte-level fields are what decide.
+
+    ...and, since #3272 round 6 B2, THE COMPLETE PINNED COMPONENT SET, delegated to
+    `_verify_pinned_components`. The three `Data.db` fields above cannot see an auxiliary
+    component replaced mid-session, which is a real and silent way to change the read pattern
+    being measured. That comparison is UNCONDITIONAL: it is not gated on a flag, because a pin
+    component check that can be switched off is the fail-open shape one level out.
     """
     p = session_pin_path(session_dir)
     if not p.exists():
@@ -576,6 +775,8 @@ def verify_session_corpus_pin(
             " The digest matched, so this is an identity file that was edited rather than"
             " regenerated — two independent numbers must agree, not one."
         )
+    # THE PINNED COMPONENT SET — unconditional (#3272 round 6, B2). Raises on any divergence.
+    comps = _verify_pinned_components(p, pin, corpus, identity, measured_components)
     return {
         "pinned_before_measurement": True,
         "pinned_corpus_path": pin.get("corpus"),
@@ -585,9 +786,15 @@ def verify_session_corpus_pin(
         # The WEAKEST of the three comparisons, reported rather than enforced: a corpus can
         # legitimately be moved, and the two byte-level fields already decided the question.
         "corpus_path_unchanged": pin.get("corpus") == str(corpus),
+        "pinned_components": comps["pinned_components"],
+        "pinned_components_verified_size": comps["pinned_components_verified_size"],
+        "pinned_components_verified_sha256": comps["pinned_components_verified_sha256"],
+        "pinned_components_note": comps["note"],
         "note": (
             "the corpus identity was captured in the session dir BEFORE the first rep and"
-            " re-compared here on rows + data_db_bytes + sha256; the path is reported, not"
+            " re-compared here on rows + data_db_bytes + sha256, PLUS the complete pinned"
+            f" component set ({comps['pinned_components']} component(s)) against both the"
+            " report-time identity and the bytes on disk; the path is reported, not"
             " enforced (a corpus may be moved)"
         ),
     }

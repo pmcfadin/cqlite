@@ -542,6 +542,142 @@ else
 fi
 
 # ==========================================================================
+# ROUND 6, B2 — the PINNED COMPONENT SET is COMPARED, not merely recorded
+# ==========================================================================
+# Round 5's F3 added the complete component set to the pin. The writer wrote it; the driver
+# printed its count. NOTHING READ IT — a tree-wide grep found no consumer, so
+# `verify_session_corpus_pin` compared only rows/data_db_bytes/data_db_sha256, and the sibling
+# `verify_corpus_components` closes F3 only against the corpus's OWN report-time
+# `corpus-identity.json`: a file that can be refreshed beside the component it describes.
+#
+# THE TRIGGERING STATE, which is what makes this a report-integrity defect and not an unused
+# field: replace `Index.db` between rep 1 and the report and refresh `corpus-identity.json`
+# beside it, leaving `Data.db` untouched. The pin's three fields still match; the identity is
+# self-consistent with disk. PRE-FIX this exited **0** and printed
+#
+#     corpus comps : all 5 recorded component(s) were re-stat'ed and 5 of 5 re-hashed
+#
+# — an affirmative FULL-verification claim over a corpus whose auxiliary component is not the one
+# that was measured. Written-but-unread data reading as a guard is this issue's defining class.
+d="$TMP/pin-comp-swap"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-comp-swap"
+# Pin against the ORIGINAL corpus (this is the pre-measurement stamp)...
+ws0_pin_session_corpus "$d" "$TMP/corpus-comp-swap"
+# ...then replace Index.db and REFRESH the identity beside it, exactly as a regeneration would.
+# Data.db is deliberately untouched, so the pin's three fields cannot see this.
+python3 - "$TMP/corpus-comp-swap" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); table = root / "ws0" / "events"
+idx = next(p for p in table.iterdir() if p.name.endswith("-Index.db"))
+idx.write_bytes(idx.read_bytes() + b"\x00extra-index-bytes")
+ident = root / "corpus-identity.json"
+j = json.loads(ident.read_text())
+j["components"][idx.name] = {
+    "bytes": idx.stat().st_size,
+    "sha256": hashlib.sha256(idx.read_bytes()).hexdigest(),
+}
+ident.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus-comp-swap"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'CORPUS COMPONENT .*CHANGED' <<<"$out"; then
+  pass "OBSERVED (round6 B2): an Index.db REPLACED mid-session — with corpus-identity.json refreshed beside it — is REFUSED (pre-fix: exit 0 claiming 5 of 5 re-hashed)"
+else
+  fail "round6 B2: a mid-session component swap must be refused by the PIN, not blessed by the report-time identity (rc=$rc, out: $out)"
+fi
+# NON-VACUITY of that case, in the direction that matters: the swap is invisible to everything
+# the pin checked BEFORE this fix. Assert the three Data.db fields still AGREE, so the refusal
+# above is attributable to the component comparison and to nothing else.
+if python3 - "$d/session-corpus-pin.json" "$TMP/corpus-comp-swap/corpus-identity.json" <<'PY'
+import json, sys
+pin = json.load(open(sys.argv[1])); ident = json.load(open(sys.argv[2]))
+for k in ("rows", "data_db_bytes", "data_db_sha256"):
+    assert pin[k] == ident[k], (k, pin[k], ident[k])
+# ...and the identity IS self-consistent with disk for the swapped component, which is why
+# `verify_corpus_components` passes it.
+assert pin["components"] != {n: {"bytes": s["bytes"], "sha256": s["sha256"]}
+                             for n, s in sorted(ident["components"].items())}
+PY
+then
+  pass "NON-VACUITY (round6 B2): the swap leaves rows + data_db_bytes + data_db_sha256 IDENTICAL, so the refusal came from the component comparison alone"
+else
+  fail "round6 B2: the swap fixture must be invisible to the pin's three Data.db fields, or the case proves nothing"
+fi
+# A component that DISAPPEARED, which changes the read path just as much (an absent Index.db is
+# a different scan) — the other direction of the name-set comparison.
+d="$TMP/pin-comp-gone"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-comp-gone"
+ws0_pin_session_corpus "$d" "$TMP/corpus-comp-gone"
+python3 - "$TMP/corpus-comp-gone" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); table = root / "ws0" / "events"
+idx = next(p for p in table.iterdir() if p.name.endswith("-Index.db"))
+idx.unlink()
+ident = root / "corpus-identity.json"
+j = json.loads(ident.read_text()); j["components"].pop(idx.name)
+ident.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus-comp-gone"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'COMPONENT SET CHANGED' <<<"$out"; then
+  pass "OBSERVED (round6 B2): a component that VANISHED between the pin and the report is REFUSED"
+else
+  fail "round6 B2: a vanished pinned component must be refused (rc=$rc, out: $out)"
+fi
+# THE ACCEPT DIRECTION for the component comparison, so it cannot be a function that refuses
+# everything, and the SCOPE of what it verified is RECORDED rather than implied.
+d="$TMP/pin-comp-ok"; make_session "$d" "$GOOD_FLIGHT"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && python3 - "$d/results.json" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))["session_corpus_pin"]
+n = p["pinned_components"]
+assert n >= 5, p                                    # the fixture corpus emits 5 components
+assert p["pinned_components_verified_size"] == n, p
+assert p["pinned_components_verified_sha256"] == n, p   # a full-digest run
+assert "against the report-time identity AND the bytes on disk" in p["pinned_components_note"], p
+PY
+then
+  pass "OBSERVED (round6 B2): a matching pin records HOW MANY components were re-compared, against BOTH the identity and disk"
+else
+  fail "round6 B2: the accept direction must record the component comparison's scope (rc=$rc, out: $out)"
+fi
+# ...and under --skip-corpus-digest the pin reports that NO component CONTENT was confirmed,
+# rather than counting an unobserved digest as a match (a value not observed is never a pass).
+d="$TMP/pin-comp-skip"; make_session "$d" "$GOOD_FLIGHT"
+out=$(run_report "$d" "$TMP/corpus" --skip-corpus-digest); rc=$?
+if [ "$rc" -eq 0 ] && python3 - "$d/results.json" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))["session_corpus_pin"]
+# The COUNT FLOOR comes FIRST, and it is not decorative: a `pinned_components == 0` would
+# satisfy both assertions below by arithmetic (`0 == 0`), so without this floor the case is
+# ALSO satisfied by a component check that never ran. MEASURED — with the reader stubbed out
+# to all-zeros, this case was the one case of six that still PASSED.
+assert p["pinned_components"] >= 5, p
+assert p["pinned_components_verified_sha256"] == 0, p
+assert p["pinned_components_verified_size"] == p["pinned_components"], p
+assert "NO digest was re-derived" in p["pinned_components_note"], p
+PY
+then
+  pass "OBSERVED (round6 B2): --skip-corpus-digest reports 0 component digests re-derived and says no CONTENT was confirmed"
+else
+  fail "round6 B2: the skip path must not count an unobserved component digest as verified (rc=$rc, out: $out)"
+fi
+# A pin with NO `components` map at all — a session dir predating F3 — is REFUSED rather than
+# skipped. A comparison that silently does not run prints exactly like one that passed.
+d="$TMP/pin-comp-absent"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/session-corpus-pin.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p)); j.pop("components")
+json.dump(j, open(p, "w"), indent=1)
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'records no `components` map' <<<"$out"; then
+  pass "OBSERVED (round6 B2): a pin carrying NO component map is REFUSED (an absent comparison must not read as a passing one)"
+else
+  fail "round6 B2: a pin with no components map must be refused (rc=$rc, out: $out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a
@@ -554,7 +690,7 @@ fi
 # `pass`/`fail` to report their call site), set just below it so adding a case does not red the
 # suite, and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=41
+MIN_CHECKS=47
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

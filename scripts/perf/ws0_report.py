@@ -179,7 +179,18 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # figures to bytes nobody measured: re-reporting an old result dir under a different
     # `--corpus`, and a corpus regenerated mid-run. The driver stamps `session-corpus-pin.json`
     # before the first rep; this REQUIRES it and refuses a mismatch.
-    session_pin = verify_session_corpus_pin(d, corpus, identity)
+    # ...and, since round 6 B2, THE COMPLETE PINNED COMPONENT SET. The three Data.db fields
+    # cannot see an auxiliary component replaced mid-session with `corpus-identity.json`
+    # refreshed beside it — self-consistent at report time, so `verify_corpus_components` above
+    # passes and the report printed an affirmative full-verification note while an
+    # Index.db that shapes the measured read pattern was not the one measured.
+    #
+    # The per-component digests `verify_corpus_components` JUST derived are handed over rather
+    # than re-derived: hashing a 2.8 GB corpus twice per report is a real cost, and a second
+    # derivation would be a second implementation whose disagreement would be undiagnosable.
+    session_pin = verify_session_corpus_pin(
+        d, corpus, identity, component_verification.get("components")
+    )
 
     # ORDER MATTERS, and it is a diagnostic decision: the CORPUS is validated first (below),
     # then the manifest. A session pointed at a corpus with no identity must be refused AS a
