@@ -153,10 +153,40 @@ perf_capability_seam_set() {
 # `cd -P` + `pwd -P` is the canonicalizer: one subshell, no external binary, correct on bash
 # 3.2 (no `realpath`, no `readlink -f` — absent or non-GNU on some supported hosts).
 PERF_CAPABILITY_SANDBOX_STAMP='.cqlite-perf-sandbox'
+# A literal LF and CR, for the line-safety predicate below. Spelled as a literal newline inside
+# single quotes rather than `$'\n'` so this stays correct on bash 3.2 (a supported gate host).
+PERF_CAPABILITY_LF='
+'
+PERF_CAPABILITY_CR=$'\r'
+
+# perf_capability_path_lines_ok: rc 0 iff <path> contains NO CR and NO LF.
+#
+# WHY A SEPARATE PROPERTY FROM CONTAINMENT (issue #3261, roborev round 3). This one is not a
+# containment defect at all — the path IS contained — it is a SERIALIZATION defect, which is why
+# nine rounds of containment work never touched it. `perf_capability_sysctl_search_path` emits its
+# answer ONE ENTRY PER LINE and `perf_capability_competing_files` reads it line-wise, so a directory
+# legitimately inside the sandbox but NAMED with an embedded newline —
+# `<root>/name<LF>/etc/sysctl.d` — passes every containment check and is then SPLIT into two
+# entries, the second of which is the host's real `/etc/sysctl.d`. One contained path became two
+# paths, one of them production.
+#   The repo already knows this class: CLAUDE.md records the roborev guard's own `-z` invariant for
+# exactly this reason — a newline-delimited path set is not a safe representation of paths, and the
+# fix there was to stop using one. Here the answer is the cheaper half of the same lesson: REJECT
+# the characters at the boundary rather than escape them downstream or re-plumb every consumer to
+# NUL. A path with a newline in it has no legitimate use as a perf seam, so refusing it costs
+# nothing and removes the ambiguity at its source. CR is rejected with LF because a CRLF host file
+# would otherwise leave a stray `\r` inside a resolved entry.
+perf_capability_path_lines_ok() {
+  case "${1:-}" in
+    *"$PERF_CAPABILITY_LF"*|*"$PERF_CAPABILITY_CR"*) return 1 ;;
+  esac
+  return 0
+}
 
 perf_capability_sandbox_root_into() {
   local __psr_v="${CQLITE_PERF_TEST_SANDBOX:-}"
   eval "$1="
+  perf_capability_path_lines_ok "$__psr_v" || return 1
   __psr_v="${__psr_v%/}"
   case "$__psr_v" in *//*) return 1 ;; /?*) ;; *) return 1 ;; esac
   case "/$__psr_v/" in */../*|*/./*) return 1 ;; esac
@@ -165,11 +195,16 @@ perf_capability_sandbox_root_into() {
 }
 
 # THE containment predicate, and the only place a path is ever judged: rc 0 iff <path> is
-# absolute, canonically spelled (no `.`, `..` or `//` component — `//etc` IS `/etc`, R6-1)
+# absolute, canonically spelled (no `.`, `..` or `//` component — `//etc` IS `/etc`, R6-1),
+# free of CR/LF (so a contained path can never SERIALIZE into two entries, roborev round 3)
 # and STRICTLY inside <root>, with the `/` boundary explicit so `/tmp/sandboxevil` is NOT
 # inside `/tmp/sandbox`. An empty root refuses; it is never a wildcard.
+# The line check lives HERE, in the one predicate every entry point ends in, for the same reason
+# containment does: one choke point cannot be skipped by a future consumer.
 perf_capability_path_within() {
   [ -n "${2:-}" ] || return 1
+  perf_capability_path_lines_ok "${1:-}" || return 1
+  perf_capability_path_lines_ok "$2" || return 1
   case "${1:-}" in *//*) return 1 ;; /?*) ;; *) return 1 ;; esac
   case "/$1/" in */../*|*/./*) return 1 ;; esac
   case "$1" in "$2"/?*) return 0 ;; esac
@@ -444,27 +479,39 @@ perf_capability_dropin_path() {
 #   process, which could not read a root-owned 0600 file — every subsequent run would then see
 #   "not current" and rewrite. The old `tee` produced 0644 via root's umask; this preserves that.
 #
-# ONE PRIVILEGED INVOCATION, AND THE RESIDUAL THAT REMAINS (issue #3261, roborev round 2 — the
-# TENTH escape, the same shape one level deeper). `mktemp` closed the CREATE race but moved the
-# window rather than closing it: mktemp returns a NAME, and `tee`/`chmod`/`mv` each REOPEN that name
-# afterwards, so between the create and the reopen an attacker who can write the directory could
-# observe the random entry and replace it with a symlink. Every step therefore now runs inside a
-# SINGLE privileged `sh -c` — content on stdin — so no unprivileged process is scheduled between
-# them and there is no point at which a less-privileged observer gets to act.
-#   STATED PLAINLY, BECAUSE THIS FAMILY HAS PUNISHED OPTIMISM NINE TIMES AND ONE COMMENT HERE
-#   ALREADY HAD TO BE RETRACTED: consolidation SHRINKS the reopen window to the inside of one root
-#   process; it does NOT mathematically eliminate it. POSIX shell has no `O_NOFOLLOW|O_EXCL` open
-#   primitive — `mktemp` hands back a name and every subsequent open is by name — so the last
-#   name-based assumption cannot be removed in shell alone. Eliminating it needs a non-shell helper
-#   that holds the descriptor from creation to rename (deferred: it would add an interpreter
-#   dependency to the privileged bootstrap path, which is an owner call, not this issue's).
-#   RECORDED REACHABILITY BOUNDARY — a boundary, NOT a "cannot happen". Exploitation needs BOTH a
-#   real privileged `tee` AND a drop-in directory an attacker can write. In production that
-#   directory is `/etc/sysctl.d`, root-owned; in test mode AC4 requires every privileged tool to be
-#   a sandbox-contained shim, so a real `tee` is refused before this function runs. Neither is a
-#   proof of unreachability, and neither is offered as one.
-#   `mv -fT` requires GNU coreutils. That is satisfied by construction rather than by luck: these
+# THE STAGING RACE IS CLOSED AT ITS PRECONDITION, NOT BY WINNING IT (issue #3261, roborev rounds
+# 1-3 — the tenth and eleventh looks at ONE defect). The history matters because two successive
+# fixes here were each defended with a claim that turned out to be false:
+#   round 1  a FIXED staging name was checked, cleared and then opened by a privileged `tee`.
+#            Claimed safe because the race "cannot happen". It could.
+#   round 2  `mktemp` made the name unpredictable, closing the CREATE race. But mktemp returns a
+#            NAME, and `tee`/`chmod`/`mv` each REOPEN it, so the window moved rather than closing.
+#   round 2  every step was then put inside ONE privileged `sh -c`, and THAT WAS DEFENDED WITH A
+#     (b)    CLAIM THIS COMMENT PREVIOUSLY MADE AND WHICH IS FALSE: that no unprivileged process is
+#            scheduled between the steps, so no less-privileged observer gets to act. Round 3 of
+#            review corrected it, and the correction is the point: a single `sh -c` gives SEQUENCING
+#            WITHIN ONE PROCESS, not MUTUAL EXCLUSION against other processes — which run
+#            concurrently, on other CPUs, entirely unaffected by how we grouped our own commands.
+#            Consolidation is retained (it is still the right shape and removes needless windows)
+#            but it is NOT what makes this safe, and it is no longer described as if it were.
+#   round 3  what actually closes the class: REMOVE THE ATTACKER'S PRECONDITION. Every step of the
+#            race needs the ability to create or replace entries in the target directory. So the
+#            privileged install now REFUSES a target directory that anyone less privileged than the
+#            writer can write: it must be owned by the identity performing the privileged write and
+#            must be neither group- nor world-writable. There is then no actor to race against,
+#            whatever the timing — which is why this is a precondition and not another check.
+# The ownership/mode test runs INSIDE the privileged shell, against `id -u` of that shell, so it
+# tests the identity that will actually do the writing (root for the production path, the shim's
+# identity under test mode) rather than whoever invoked us. Undeterminable ownership or mode is a
+# REFUSAL, not an assumption.
+#   Deliberately conservative: a group-writable directory is refused even when the sticky bit would
+#   stop others from replacing our entry. Sticky-plus-group-writable is arguably safe here, and that
+#   is exactly the kind of "arguably safe" that has already cost this function three review rounds.
+#   `mv -fT` and `stat -c` want GNU coreutils. Satisfied by construction rather than by luck: these
 #   are Linux kernel controls and bootstrap skips this whole section on any non-Linux platform.
+#   The non-shell descriptor-holding helper stays DEFERRED (an owner call — it would add an
+#   interpreter dependency to the privileged bootstrap path), and with the precondition in place it
+#   is probably unnecessary rather than merely postponed.
 perf_capability_dropin_install() {
   local __pin_d __pin_p
   __pin_d=$(perf_capability_sysctl_dir) || return 1
@@ -474,6 +521,24 @@ perf_capability_dropin_install() {
   perf_capability_dropin_content | "$@" sh -c '
     set -u
     d=$1; p=$2; b=$3
+    # THE PRECONDITION (roborev round 3): nobody less privileged than this shell may be able to
+    # create or replace entries in $d. Without that there is an actor to race; with it there is not.
+    me=$(id -u 2>/dev/null) || {
+      printf "perf-capability: REFUSING: cannot determine the privileged writer identity (id -u failed), so the drop-in directory cannot be proven un-writable by less-privileged users.\n" >&2
+      exit 1; }
+    dinfo=$(stat -c "%u %a" -- "$d" 2>/dev/null) || {
+      printf "perf-capability: REFUSING: cannot determine owner/mode of the drop-in directory %s, so it cannot be proven un-writable by less-privileged users.\n" "$d" >&2
+      exit 1; }
+    downer=${dinfo%% *}; dmode=${dinfo##* }; dperm=${dmode#${dmode%???}}
+    if [ "$downer" != "$me" ]; then
+      printf "perf-capability: REFUSING: the drop-in directory %s is owned by uid %s, not by the privileged writer uid %s — a directory someone else owns can have its entries replaced under a privileged write.\n" "$d" "$downer" "$me" >&2
+      exit 1
+    fi
+    case "$dperm" in
+      ?[2367]?|??[2367])
+        printf "perf-capability: REFUSING: the drop-in directory %s is mode %s — group- or world-writable, so a less-privileged user can replace entries inside it while a privileged write is in progress. Tighten it (chmod go-w) before installing.\n" "$d" "$dmode" >&2
+        exit 1 ;;
+    esac
     t=$(mktemp -- "$d/.$b.XXXXXX") || exit 1
     # mktemp CREATED the entry, so mktemp is what must be checked, INSIDE this privileged shell and
     # fail-closed: it has to name a fresh regular file (never a symlink) directly in the directory

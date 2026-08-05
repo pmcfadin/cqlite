@@ -88,6 +88,15 @@ if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   exit 1
 fi
 trap 'rm -rf "$tmp"' EXIT
+# A GROUP-WRITABLE-FREE umask FOR THE WHOLE SUITE (issue #3261, roborev round 3). The staged
+# install now REFUSES to write into a directory writable by anyone less privileged than the
+# writer, which is how the staging race is closed at its precondition. Whether a `mkdir -p` here
+# produces 0755 or 0775 is decided by the AMBIENT umask of whoever launched the suite — measured
+# 0002 on this fleet's worker boxes, i.e. group-writable — so without this line the harness would
+# build directories a correct implementation must refuse, and every install case would fail for a
+# reason that has nothing to do with the code under test. Set once, explicitly, so the suite does
+# not depend on how it was invoked (same class as the GIT_CONFIG_GLOBAL / SUDO_UID isolation below).
+umask 022
 # ...and CANONICALIZE it, because this IS the declared sandbox root (issue #3261 AC2). The
 # fork-free read gate now rejects a SYMLINKED path component — the fix for a symlink inside the
 # sandbox pointing at the real /proc/sys/kernel — and `mktemp -d` legitimately hands back a path
