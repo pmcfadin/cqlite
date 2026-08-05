@@ -1313,11 +1313,27 @@ else
   #     a filesystem that can create symlinks. That is the ONLY route to `skip`.
   #   * EVERYTHING ELSE is a FAILURE of this file's own fixture, and goes to `bad`.
   # A cause nobody enumerated is therefore a red, not a silent skip — noise, never blindness.
-  cf_env_limitation() { # cf_env_limitation <scratch-dir> -> a NAMED limitation on stdout, else nothing
-    if ! command -v git >/dev/null 2>&1; then
-      printf 'git is not installed on this host, and the case (f) fixture is a git repository'
-      return 0
-    fi
+  # THE TWO CAUSES ARE SEPARATELY ANSWERABLE PROBES (#3296 round-11). They used to be ONE function
+  # that returned the FIRST limitation it found, git BEFORE symlinks. So on a host without git the
+  # symlink control below asked that composite probe, received the GIT cause, saw a non-empty string
+  # and reported the symlink-skip branch "reachable and named" — having never executed the symlink
+  # probe at all. A control that claims a measurement it did not perform is this branch's entire
+  # subject, so the fix is applied twice over: the probes are SPLIT, so the symlink control can ask
+  # the symlink question directly and a git answer is structurally impossible; AND the control
+  # asserts that the cause it received IDENTIFIES SYMLINK CREATION, so any future refactor that
+  # re-composes them cannot silently satisfy it again. Splitting alone would be undone by such a
+  # refactor; the cause assertion alone would still be reading a composite answer.
+  #
+  # The message text lives in its own function so a control can feed the REAL git cause to the
+  # acceptance test without hand-copying a duplicate that could drift out of step with it.
+  cf_git_limitation_message() {
+    printf 'git is not installed on this host, and the case (f) fixture is a git repository'
+  }
+  cf_git_limitation() { # -> the NAMED git limitation on stdout, else nothing
+    command -v git >/dev/null 2>&1 && return 0
+    cf_git_limitation_message
+  }
+  cf_symlink_limitation() { # cf_symlink_limitation <scratch-dir> -> the NAMED symlink limitation, else nothing
     # `ln -s` needs no existing target, so a dangling link is a sufficient capability probe.
     if ln -s "$1/cf-symlink-probe-target" "$1/cf-symlink-probe" 2>/dev/null &&
       [ -L "$1/cf-symlink-probe" ]; then
@@ -1325,6 +1341,26 @@ else
       return 0
     fi
     printf 'symlinks cannot be created under %s, and the fixture needs one to reproduce the macOS /var -> /private/var split' "$1"
+  }
+  # The composite remains, for the setup chain, which legitimately wants EITHER cause. It is only
+  # the CONTROLS that must not use it.
+  cf_env_limitation() { # cf_env_limitation <scratch-dir> -> the first NAMED limitation, else nothing
+    local _l
+    _l=$(cf_git_limitation)
+    if [ -n "$_l" ]; then
+      printf '%s' "$_l"
+      return 0
+    fi
+    cf_symlink_limitation "$1"
+  }
+  # The acceptance test for "this cause really is about symlinks", used by the control below and
+  # itself controlled in both directions — a test that accepted everything would re-admit the very
+  # defect being fixed, and one that accepted nothing would make the symlink control dead code.
+  cf_cause_is_symlink() { # cf_cause_is_symlink <cause> -> 0 only if it identifies symlink creation
+    case "$1" in
+      'symlinks cannot be created under '*) return 0 ;;
+      *) return 1 ;;
+    esac
   }
   # THE CLASSIFIER IS CONTROLLED IN BOTH DIRECTIONS, because a skip route that can never fire is
   # dead code, and one that fires on a healthy host would silently disable the probes below.
@@ -1334,15 +1370,39 @@ else
   else
     skip "AC3 control: an environment limitation is present on this host ($_cf_probe_ok), so the case (f) probes cannot run here"
   fi
+  # THE FINDING ITSELF, PINNED: the GIT cause must not be able to satisfy the symlink control. Fed
+  # the real git message — read from its function, never a hand-copied duplicate — the acceptance
+  # test must REJECT it. This control is privilege- and platform-independent, so it runs everywhere
+  # the composite probe's ordering could have hidden an unexercised symlink branch.
+  if cf_cause_is_symlink "$(cf_git_limitation_message)"; then
+    bad 'AC3 control: the GIT limitation message SATISFIES the symlink acceptance test — on a host without git the symlink-skip branch would be reported measured while never being exercised (#3296 round-11)'
+  else
+    ok 'AC3 control: the GIT limitation message does NOT satisfy the symlink acceptance test — a git answer can no longer stand in for a symlink measurement'
+  fi
+  # The ACCEPT direction of the same test, provoked from the REAL probe rather than a literal, by
+  # pointing it at a directory that does not exist: `ln -s` cannot succeed there on ANY host, root
+  # included, so the symlink skip route is proved reachable-and-named even where the read-only
+  # directory control below has to skip.
+  _cf_sym_absent=$(cf_symlink_limitation "$tmp/definitely-absent-dir-for-symlink-probe")
+  if cf_cause_is_symlink "$_cf_sym_absent"; then
+    ok 'AC3 control: the SYMLINK probe, asked directly, returns a cause that identifies SYMLINK CREATION when `ln -s` cannot succeed — the acceptance test is discriminating, not blanket-rejecting, and the skip route is reachable on any host'
+  else
+    bad "AC3 control: the symlink probe answered '$_cf_sym_absent' where `ln -s` cannot succeed — it must name symlink creation, or the symlink control can never pass and is dead code"
+  fi
   mkdir -p "$tmp/cf-ro" 2>/dev/null
   chmod 555 "$tmp/cf-ro" 2>/dev/null
   if ln -s x "$tmp/cf-ro/writable-check" 2>/dev/null; then
     rm -f "$tmp/cf-ro/writable-check"
-    skip 'AC3 control: the symlink-capability branch could NOT be provoked — a read-only directory still accepted a symlink (running as root, or a filesystem that ignores mode bits), so that skip route was not measured on this host'
-  elif [ -n "$(cf_env_limitation "$tmp/cf-ro")" ]; then
-    ok 'AC3 control: the symlink-capability probe DETECTS a filesystem that cannot create the link — the one legitimate skip route is reachable and named, not dead code'
+    skip 'AC3 control: the symlink-capability branch could NOT be provoked on a read-only directory — it still accepted a symlink (running as root, or a filesystem that ignores mode bits), so the realistic filesystem case was not measured on this host'
   else
-    bad 'AC3 control: the symlink-capability probe reported NO limitation on a directory where `ln -s` demonstrably fails — the skip route cannot be reached, so a genuine environment limitation would be reported as a fixture FAILURE'
+    _cf_sym_cause=$(cf_symlink_limitation "$tmp/cf-ro")
+    if cf_cause_is_symlink "$_cf_sym_cause"; then
+      ok 'AC3 control: the SYMLINK capability probe — asked DIRECTLY, never through the composite — DETECTS a filesystem that cannot create the link, and its cause identifies SYMLINK CREATION, so an unrelated git answer can no longer satisfy this control'
+    elif [ -z "$_cf_sym_cause" ]; then
+      bad 'AC3 control: the symlink-capability probe reported NO limitation on a directory where `ln -s` demonstrably fails — the skip route cannot be reached, so a genuine environment limitation would be reported as a fixture FAILURE'
+    else
+      bad "AC3 control: the symlink probe answered '$_cf_sym_cause', which does not identify SYMLINK CREATION — a control satisfied by some OTHER cause reports a measurement it never performed (#3296 round-11)"
+    fi
   fi
   chmod 755 "$tmp/cf-ro" 2>/dev/null
 
