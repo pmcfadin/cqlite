@@ -74,7 +74,7 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # shellcheck source=scripts/tests/lib-ws0-report-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
 
-GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 
@@ -221,7 +221,10 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
     tag = f"flight-bypass-warm-{rep}"
     secs = rows / rps
     (d / f"{tag}.jsonl").write_text(json.dumps({
-        "round": tag, "requests_ok": 1, "requests_error": 0,
+        # `requests_unavailable` at its HEALTHY value: the reporter REQUIRES the
+        # admission-shed counter (#3272 F4), so omitting it is refused — correctly, but for a
+        # reason unrelated to this case's subject (the per-round pairing).
+        "round": tag, "requests_ok": 1, "requests_error": 0, "requests_unavailable": 0,
         "rows_total": rows, "rows_per_s": rows / secs, "duration_s": secs}) + "\n")
     (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
     (d / f"{tag}.prewarm.status").write_text("ok\n")

@@ -63,7 +63,11 @@ make_flight_rep() {
   make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" flight)"
 }
 
-GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+# `requests_unavailable` is carried at its HEALTHY value because the reporter now REQUIRES
+# it (#3272 F4): the admission-shed counter was completely unread, so a rep whose requests
+# the server SHED was reported as failure-free. A fixture omitting it is refused — which is
+# the guard working, and is why the cases whose subject IS the omission set it explicitly.
+GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 # make_session <dir> <flight-jsonl> — a complete one-warm-rep session dir.
 make_session() {
