@@ -976,6 +976,27 @@ roborev_collect_prompt_headers() {
 #      source mutated mid-copy is discarded instead of published under the final digest and then
 #      reused forever. Each digest is held in its OWN variable: the helper returns through one global,
 #      and re-reading it is precisely how the post-copy check once compared a value with itself.
+# ===== WHAT POLLING ESTABLISHES, AND WHAT IT DOES NOT — A STATED LIMITATION (roborev job 9) =====
+# A poller sees the versions of the snapshot that exist AT ITS POLLS. It cannot prove that the version
+# it captured is the file's FINAL byte content, because roborev deletes the file without telling us.
+# This is RECORDED AS A LIMITATION rather than chased, for three reasons:
+#   1. THE REMEDY REQUIRES AN API THAT DOES NOT EXIST. Holding an open descriptor until the review
+#      completes, or asking roborev for a finalized artifact/digest, both need cooperation the tool does
+#      not offer: `roborev show` has `--prompt`/`--json` and NO `--diff` (checked against the installed
+#      CLI), and the snapshot is deleted before `roborev review --wait` returns. There is no bounded
+#      implementation to write.
+#   2. THE SUBJECT IS THE DIFF THE REVIEWER RECEIVED, not the file's last byte state. If a snapshot were
+#      rewritten AFTER the reviewer read it, the reviewer did not see that version either — so a "final
+#      version" materialising post-read is not what `prompt-content:` should be asserting about.
+#      Capturing the version present DURING the review is the correct semantic, not an approximation of
+#      a better one.
+#   3. THE RESIDUAL IS BOUNDED AND UNOBSERVED. Digest-keyed re-capture already follows any rewrite that
+#      happens a poll or more before deletion, so the exposure is a rewrite inside the final
+#      <= poll-interval (1s) window. In measured roborev behaviour (jobs 3 and 5 on this fleet) the
+#      snapshot is written once and then the reviewer is invoked; no mid-review rewrite was observed. To
+#      become a FALSE PASS rather than a false FAIL such a rewrite would additionally have to SHRINK the
+#      path set inside that window.
+# If evidence of a mid-review rewrite ever appears, this reasoning is what changes — not the code first.
 ROBOREV_SNAPSHOT_CAPTURE_DIR=""
 ROBOREV_SNAPSHOT_CAPTURE_PID=""
 # One second, because each poll DIGESTS the source: the point is that no same-size rewrite can hide,
@@ -987,19 +1008,42 @@ _ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS=${ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS:-1}
 # ROBOREV_SNAPSHOT_CAPTURE_DIR/_PID. Never fatal — a capture that cannot start leaves the check to
 # fail closed later on the absent snapshot, which is the correct direction.
 roborev_snapshot_capture_start() {
-  local dir
+  local dir phys
   ROBOREV_SNAPSHOT_CAPTURE_DIR=""
   ROBOREV_SNAPSHOT_CAPTURE_PID=""
   dir=$(mktemp -d "${TMPDIR:-/tmp}/roborev-snapshot-capture.XXXXXX" 2>/dev/null) || return 0
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   chmod 700 "$dir" 2>/dev/null || :
-  # OUTSIDE THE REVIEWED REPOSITORY, asserted rather than assumed: a `TMPDIR` pointing inside the
-  # checkout would put our own copies where the census and the watcher both look.
-  case "$dir/" in
-    "${REPO%/}"/*) rm -rf "$dir" 2>/dev/null || :; return 0 ;;
+  # OUTSIDE THE REVIEWED REPOSITORY, DECIDED ON THE PHYSICALLY RESOLVED PATH (roborev job 9). A
+  # LEXICAL test on `mktemp`'s output is not enough: `TMPDIR` may be RELATIVE (so the path does not
+  # even start at the root the comparison assumes) or may itself traverse a SYMLINK INTO the checkout,
+  # either of which puts our own copies inside the tree the census and the watcher are both reading.
+  # `pwd -P` answers where the directory actually is — the same resolution the snapshot directory
+  # already gets — and the RESOLVED path is what is stored, so containment and cleanup can never
+  # disagree about which directory this is.
+  phys=$(cd "$dir" 2>/dev/null && pwd -P) || phys=""
+  if [ -z "$phys" ]; then
+    rm -rf "$dir" 2>/dev/null || :
+    DETAILS+=("NOTICE: snapshot-capture: the private capture directory '$dir' could not be resolved to a physical path, so no snapshot capture is running. A snapshot-mode review will therefore report 'snapshot diff unusable: cleaned-up' rather than being certified — that is fail-closed, not a silent pass.")
+    return 0
+  fi
+  case "$phys" in
+    /*) ;;
+    *)
+      rm -rf "$dir" 2>/dev/null || :
+      DETAILS+=("NOTICE: snapshot-capture: the private capture directory resolved to the NON-ABSOLUTE path '$phys' (check TMPDIR), so no snapshot capture is running. A snapshot-mode review will report 'snapshot diff unusable: cleaned-up' rather than being certified.")
+      return 0
+      ;;
   esac
-  ROBOREV_SNAPSHOT_CAPTURE_DIR="$dir"
-  _roborev_snapshot_capture_loop "$REPO" "$dir" &
+  case "$phys/" in
+    "${REPO%/}"/*)
+      rm -rf "$dir" 2>/dev/null || :
+      DETAILS+=("NOTICE: snapshot-capture: the private capture directory resolves INSIDE the reviewed repository ('$phys' is under '$REPO' — TMPDIR is set there, or a component of it is a symlink into the checkout), so no snapshot capture is running: our own copies must never live in the tree being reviewed. Point TMPDIR outside the checkout and re-run. Until then a snapshot-mode review reports 'snapshot diff unusable: cleaned-up' rather than being certified — fail-closed, never a silent pass.")
+      return 0
+      ;;
+  esac
+  ROBOREV_SNAPSHOT_CAPTURE_DIR="$phys"
+  _roborev_snapshot_capture_loop "$REPO" "$phys" &
   ROBOREV_SNAPSHOT_CAPTURE_PID=$!
   return 0
 }
@@ -1030,11 +1074,19 @@ roborev_snapshot_capture_stop() {
 # it. The copy is deliberately not retained past the run: the block's actionable content is the cause
 # text, and keeping copies at a stable path is exactly the shared-directory reuse this design removed.
 roborev_snapshot_capture_cleanup() {
-  [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] || return 0
-  case "$ROBOREV_SNAPSHOT_CAPTURE_DIR" in
-    "${TMPDIR:-/tmp}"/roborev-snapshot-capture.*) rm -rf "$ROBOREV_SNAPSHOT_CAPTURE_DIR" 2>/dev/null || : ;;
-  esac
+  local dir="${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" base
+  [ -n "$dir" ] || return 0
   ROBOREV_SNAPSHOT_CAPTURE_DIR=""
+  # Only ever a directory WE created: an absolute path whose BASENAME carries our own prefix. Keyed on
+  # the basename rather than on a `$TMPDIR` prefix because the stored path is the PHYSICALLY RESOLVED
+  # one, and a symlinked TMPDIR (`/tmp` -> `/private/tmp`) would make a TMPDIR-prefix test silently
+  # never match — leaking the directory instead of removing it, on exactly the platform where the
+  # resolution matters most.
+  case "$dir" in /*) ;; *) return 0 ;; esac
+  base="${dir##*/}"
+  case "$base" in
+    roborev-snapshot-capture.?*) rm -rf "$dir" 2>/dev/null || : ;;
+  esac
   return 0
 }
 
