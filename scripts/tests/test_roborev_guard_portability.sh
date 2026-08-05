@@ -145,11 +145,22 @@ RE_SED_INPLACE_EMPTY_SQ='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-i'"('')"
 #                         argument by getopt, so it is not an operand either)
 #   paste -sd, < input    a REDIRECTION is not an operand — BSD still usage()-errors, and the
 #                         `<` is why the option run above excludes redirection characters
+#   paste -sd, >out       an OUTPUT redirection is not an operand either
+#   paste -sd, 2>/dev/null   nor is a FILE-DESCRIPTOR redirection
 # The `-d`-with-separated-argument pair is matched as ONE unit, because a regex cannot express
 # "this bare token is the argument of the preceding option" any other way.
 _PASTE_DARG='[[:space:]]+-[a-zA-Z]*d[[:space:]]+[^[:space:]|;)&<]+'
 _PASTE_OPT='[[:space:]]+-[^[:space:]|;)&<]+'
-_PASTE_REDIR='([[:space:]]*<[[:space:]]*[^[:space:]|;)&]+)?'
+# THE REDIRECTION GRAMMAR COVERS ALL THREE DIRECTIONS, AND REPEATS (#3296 round-8 finding 3). The
+# first form recognised ONE OPTIONAL INPUT redirection, so `paste -sd, >output`,
+# `paste -sd, 2>/dev/null`, `paste -sd, >>out 2>&1` and `paste -sd, <in >out` each had NO file
+# operand, diverged on BSD exactly as case (j2) did, and were reported CLEAN (measured: `.` under
+# the old grammar, `X` under this one, for all four). A redirection is: an optional fd number, one
+# of `<` `>` `>>`, an optional `&` (so `2>&1` is one redirection, not a redirection plus a stray
+# operand), and a target; zero or more of them may follow the options. `[0-9]*`/`&?` are what keep
+# the fd forms from being read as operands, which is the whole point of the rule.
+_PASTE_REDIR_ONE='[[:space:]]*[0-9]*(>>|<|>)&?[[:space:]]*[^[:space:]|;)&]+'
+_PASTE_REDIR='('"$_PASTE_REDIR_ONE"')*'
 RE_PASTE_NO_OPERAND='(^|[^[:alnum:]_-])paste('"$_PASTE_DARG"'|'"$_PASTE_OPT"')*'"$_PASTE_REDIR"'[[:space:]]*($|\||\)|;|&)'
 
 add_construct "$RE_SED_INPLACE" \
@@ -392,6 +403,28 @@ printf '%s\n' '  order=$(paste -sd, < input)' >"$tmp/sp-redir.sh"
 assert_flagged '`paste -sd, < input` (a redirection is not a file operand)' "$tmp/sp-redir.sh"
 printf '%s\n' '  order=$(paste -sd, <"$f")' >"$tmp/sp-redir2.sh"
 assert_flagged '`paste -sd, <"$f"` (redirection with no space)' "$tmp/sp-redir2.sh"
+# (d2) OUTPUT and FILE-DESCRIPTOR redirections are not operands either — one control per spelling,
+# because an input-only grammar reported every one of these CLEAN (#3296 round-8 finding 3).
+printf '%s\n' '  paste -sd, >output' >"$tmp/sp-redir-out.sh"
+assert_flagged '`paste -sd, >output` (an OUTPUT redirection is not a file operand)' "$tmp/sp-redir-out.sh"
+printf '%s\n' '  paste -sd, >>output' >"$tmp/sp-redir-app.sh"
+assert_flagged '`paste -sd, >>output` (an APPEND redirection is not a file operand)' "$tmp/sp-redir-app.sh"
+printf '%s\n' '  paste -sd, 2>/dev/null' >"$tmp/sp-redir-fd.sh"
+assert_flagged '`paste -sd, 2>/dev/null` (a FILE-DESCRIPTOR redirection is not a file operand)' "$tmp/sp-redir-fd.sh"
+printf '%s\n' '  paste -sd, >out 2>&1' >"$tmp/sp-redir-both.sh"
+assert_flagged '`paste -sd, >out 2>&1` (a RUN of redirections, one of them an fd duplication)' "$tmp/sp-redir-both.sh"
+printf '%s\n' '  paste -sd, <in >out' >"$tmp/sp-redir-inout.sh"
+assert_flagged '`paste -sd, <in >out` (input AND output redirection, still no operand)' "$tmp/sp-redir-inout.sh"
+printf '%s\n' '  order=$(paste -sd, >"$out")' >"$tmp/sp-redir-subst.sh"
+assert_flagged '`order=$(paste -sd, >"$out")` (output redirection inside a command substitution)' "$tmp/sp-redir-subst.sh"
+# And the NEGATIVE direction for the widened grammar, which is where widening can go wrong: a
+# paste that HAS an operand must stay unflagged even when it also redirects.
+printf '%s\n' '  paste -sd, "$f" >out' >"$tmp/sp-redir-okfile.sh"
+assert_not_flagged '`paste -sd, "$f" >out` (an operand AND a redirection — portable)' "$tmp/sp-redir-okfile.sh"
+printf '%s\n' '  paste -sd, - 2>/dev/null' >"$tmp/sp-redir-okdash.sh"
+assert_not_flagged '`paste -sd, - 2>/dev/null` (the explicit `-` stdin operand plus an fd redirection)' "$tmp/sp-redir-okdash.sh"
+printf '%s\n' '#  paste -sd, >output and paste -sd, 2>/dev/null are both banned' >"$tmp/sp-redir-cmt.sh"
+assert_not_flagged 'the redirection spellings named in a COMMENT (prose, not an invocation)' "$tmp/sp-redir-cmt.sh"
 # (e) the GNU long spelling, absent from BSD sed entirely.
 printf '%s\n' "  sed --in-place -e 's/a/b/' file" >"$tmp/sp-long.sh"
 assert_flagged '`sed --in-place` (GNU long option; BSD sed has no such flag)' "$tmp/sp-long.sh"
