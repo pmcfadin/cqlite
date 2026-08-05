@@ -3646,8 +3646,15 @@ assert_says '--help still documents the prompt-content key' 'prompt-content'
 # a `snapshot diff unusable:` FAIL must be able to learn from --help what the check now reads and
 # that the snapshot directory is transient.
 assert_says '--help documents BOTH diff-delivery modes' 'TWO DIFF-DELIVERY MODES'
-assert_says '--help names the transient snapshot directory' 'roborev-snapshot-<id>'
-assert_says '--help says a large review must no longer false-FAIL' 'no longer FALSE-FAILs'
+# C‴ (#3312): the documented CONTRACT changed with the verdict semantics, so --help must say that snapshot
+# mode is reported rather than certified, and must name the keys that carry the record instead.
+assert_says '--help says snapshot mode is observed and reported, not certified' \
+  'SNAPSHOT mode is OBSERVED AND REPORTED, not certified'
+assert_says '--help states plainly what a snapshot-mode PASS does NOT assert' \
+  'does NOT assert the reviewer received the census paths'
+assert_says '--help says inline mode is unchanged' 'INLINE mode$|INLINE mode is certified exactly as before'
+assert_says '--help documents the snapshot record keys' 'snapshot-path/-digest/-expected'
+assert_says '--help says safety survives the loss of certification' 'safety survives the loss of'
 assert_never_enqueued '--help'
 
 printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
