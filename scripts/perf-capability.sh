@@ -551,7 +551,7 @@ perf_capability_dropin_install() {
     #   rather than a thirteenth. #3323 records that fix and re-raises on EVIDENCE the boundary is
     #   reachable (multi-tenant boxes, an attacker-writable ancestor, or a real privileged helper
     #   reachable from test mode). Production ancestors are `/etc` and `/`, both root-owned; test
-    #   mode reaches only AC4 shims. Do NOT widen this function's trust without reading #3323 first.
+    #   mode reaches only AC4 shims. Do NOT widen the trust of this function without reading #3323 first.
     #   THE REMAINING BOUNDARY, STATED: this check races only against an actor who can `chmod` a
     #   directory owned by the privileged writer — and that actor is already the privileged writer
     #   (or root), so it has no privilege left to escalate to. That is the whole of the residual;
