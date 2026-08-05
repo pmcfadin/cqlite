@@ -292,6 +292,87 @@ if grep -q 'VARIABLE this lint cannot resolve' <<<"$(lint_probe 'out=$("$copy" -
 else
   fail "lint-fires (B1): an unresolvable command word must fail closed (got: $(lint_probe 'out=$("$copy" --corpus /c)'))"
 fi
+# --- F6: WHICH NAMES COUNT IS DISCOVERED, NOT ENUMERATED (#3272 review round 5) ----------
+# The case above passes for `$copy` — and used to pass ONLY for `$copy`, `$DRIVER` and the
+# literal basename, because `lint_text`'s line gate was five hardcoded spellings:
+#
+#     if DRIVER_BASENAME not in code and "$DRIVER" not in code and "${DRIVER}" not in code \
+#             and "$copy" not in code and "${copy}" not in code: continue
+#
+# So `names_driver`'s fail-closed posture — the property this file's own header advertises as
+# having "no enumeration left to be wrong" — was DEAD CODE for every other variable name: the
+# line never reached `command_words`, so what `names_driver` would have said never mattered.
+# A one-line RENAME defeated the whole guard. MEASURED against the pre-fix lint, both at ZERO
+# findings, and asserted here so the mechanism cannot silently regress to a name list.
+#
+# `driver_bearing_names` now derives the set from the FILE'S OWN ASSIGNMENTS (a value that
+# mentions the basename, expands a driver-ish identifier, or references an already-bearing
+# name), iterated to a fixpoint. `$copy` above is therefore DERIVED now rather than named.
+f6_probe() { # f6_probe <assignment-line> <invocation-line>
+  printf 'DRIVER=/x/ws0-baseline.sh\n%s\n%s\n' "$1" "$2" > "$TMP/probe-f6.sh"
+  ws0_hermeticity_lint "$TMP/probe-f6.sh"
+}
+# 1. a RENAMED alias of $DRIVER — the one-line rename that defeated the guard.
+if grep -q 'invokes (or could invoke)' <<<"$(f6_probe 'drv="$DRIVER"' "$SH \"\$drv\" --corpus /c")"; then
+  pass "lint-fires (F6): a RENAMED alias \`drv=\"\$DRIVER\"\` + \`bash \"\$drv\"\` is FLAGGED (was 0 findings)"
+else
+  fail "lint-fires (F6): a renamed \$DRIVER alias must be flagged (got: $(f6_probe 'drv="$DRIVER"' "$SH \"\$drv\" --corpus /c"))"
+fi
+# 2. a name whose VALUE names the driver literally, never touching $DRIVER at all.
+if grep -q 'invokes (or could invoke)' <<<"$(f6_probe 'injected="$TMP/injected-ws0-baseline.sh"' "$SH \"\$injected\" --corpus /c")"; then
+  pass "lint-fires (F6): a name whose VALUE names the driver (\`injected=…ws0-baseline.sh\`) is FLAGGED (was 0 findings)"
+else
+  fail "lint-fires (F6): a driver-valued name must be flagged (got: $(f6_probe 'injected="$TMP/injected-ws0-baseline.sh"' "$SH \"\$injected\" --corpus /c"))"
+fi
+# 3. TRANSITIVELY, and in the order that needs the FIXPOINT: `b="$a"` is written BEFORE
+#    `a="$DRIVER"`, so a single forward pass would not have marked `b`.
+if grep -q 'invokes (or could invoke)' <<<"$(f6_probe 'b="$a"; a="$DRIVER"' "$SH \"\$b\" --corpus /c")"; then
+  pass "lint-fires (F6): a TRANSITIVE alias assigned BEFORE its source is FLAGGED (the fixpoint is load-bearing)"
+else
+  fail "lint-fires (F6): transitive bearing must reach a fixpoint (got: $(f6_probe 'b="$a"; a="$DRIVER"' "$SH \"\$b\" --corpus /c"))"
+fi
+# 4. and a LOOP over driver paths, which is a real way to invoke it.
+if grep -q 'invokes (or could invoke)' <<<"$(f6_probe 'for d in "$DRIVER"; do :; done' "$SH \"\$d\" --corpus /c")"; then
+  pass "lint-fires (F6): a LOOP variable bound to \$DRIVER is FLAGGED"
+else
+  fail "lint-fires (F6): a for-loop over driver paths must be flagged (got: $(f6_probe 'for d in "$DRIVER"; do :; done' "$SH \"\$d\" --corpus /c"))"
+fi
+# THE SILENT DIRECTION FOR THE SAME MECHANISM, which is what keeps it from becoming "every
+# variable counts" (measured at 8 false findings over the shipped subject, all ordinary code).
+# A name with NO driver connection is not a candidate, however it is invoked.
+if [ -z "$(f6_probe 'probe="$TMP/timeout-probe.sh"' "$SH \"\$probe\" --flag x")" ]; then
+  pass "lint-silent (F6): a name with NO driver connection (\`probe=\"\$TMP/timeout-probe.sh\"\`) is NOT flagged"
+else
+  fail "lint-silent (F6): an unrelated probe path must not be flagged (got: $(f6_probe 'probe="$TMP/timeout-probe.sh"' "$SH \"\$probe\" --flag x"))"
+fi
+# ...and the ENV-PREFIX case, which is the FALSE FINDING this mechanism produced on its first
+# draft and the reason assignment values are parsed to the first UNQUOTED whitespace rather
+# than with a greedy `(.*)$`. With a greedy tail, `PATH="$X:$PATH" bash "$LINUX_DRIVER" …`
+# made `PATH` itself driver-bearing — after which every ordinary
+# `PATH="$SHIM:$PATH" "$tool" --probe` line in THIS file was a finding. One measured false
+# finding on the repo's own shipped test code, from reading a value past where the shell ends it.
+#
+# The probe BINDS `tool` in a `for`, exactly as the shipped line does. That is load-bearing,
+# not incidental: an UNASSIGNED name fails closed BY DESIGN (see `driver_bearing_names`), so a
+# probe that left `tool` unbound would be asserting the opposite property and would correctly
+# produce a finding. The real line's `tool` is bound by `for tool in $WS0_SHIM_TOOLS`.
+f6_env_probe='shims="$TMP/bin"; for tool in sudo cargo; do :; done'
+if [ -z "$(f6_probe "$f6_env_probe" "PATH=\"\$shims:\$PATH\" \"\$tool\" --probe")" ]; then
+  pass "lint-silent (F6): an ENV-PREFIX assignment does not make the PREFIXED NAME driver-bearing (1 false finding measured)"
+else
+  fail "lint-silent (F6): an env prefix must not widen the bearing set (got: $(f6_probe "$f6_env_probe" "PATH=\"\$shims:\$PATH\" \"\$tool\" --probe"))"
+fi
+# ...and the FAIL-CLOSED half of the same rule, asserted so the asymmetry is deliberate rather
+# than accidental: the SAME invocation with `tool` NEVER ASSIGNED anywhere in the file IS a
+# finding, because an unassigned name carries no evidence and could hold the driver. This is
+# `names_driver`'s original posture, preserved through the F6 rework — dropping it re-broke
+# B1's `bash "$copy"` case, which is how the regression was caught.
+if grep -q 'never assigned' <<<"$(f6_probe 'shims="$TMP/bin"' "PATH=\"\$shims:\$PATH\" \"\$unbound_name\" --probe")"; then
+  pass "lint-fires (F6): an UNASSIGNED command word still fails CLOSED (the B1 posture survives the F6 rework)"
+else
+  fail "lint-fires (F6): an unassigned name must fail closed (got: $(f6_probe 'shims="$TMP/bin"' "PATH=\"\$shims:\$PATH\" \"\$unbound_name\" --probe"))"
+fi
+
 # THE SCOPE OF THAT POSTURE IS FILE-LEVEL, and it is asserted rather than left implicit, because
 # the alternative was MEASURED and is worse. `has_driver_handle` requires the FILE to name the
 # driver before any unresolvable command word in it counts. Removing that gate — i.e. treating

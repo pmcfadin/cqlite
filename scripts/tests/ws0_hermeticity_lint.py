@@ -439,6 +439,212 @@ def lint_python(text: str) -> list[str]:
     return findings
 
 
+# An identifier that is ABOUT the driver — the same posture `_PY_SPAWN_HANDLE_RE` already
+# takes one language over. It catches `$DRIVER`, `${DRIVER}`, and a helper such as
+# `driver_copy_with` whose RETURN VALUE is a driver path.
+_DRIVERISH_IDENT_RE = re.compile(r"[A-Za-z_]*driver[A-Za-z_0-9]*", re.IGNORECASE)
+
+# `NAME=<value>` and `for NAME in <list>` — the two ways a shell name acquires a value.
+# The assignment's value is extracted by `_assigned_value` rather than by `(.*)$`, because a
+# greedy tail is WRONG for an ENV-PREFIX assignment and was measured to be: in
+#
+#     PATH="$WS0_SHIM_BIN:$PATH" bash "$LINUX_DRIVER" --corpus …
+#
+# a `(.*)$` value swallows the COMMAND too, so `PATH` referenced `$LINUX_DRIVER` and became
+# driver-bearing — after which every ordinary `PATH="$WS0_SHIM_BIN:$PATH" "$tool" --probe`
+# line was a finding. One FALSE FINDING, on this repo's own shipped test code, from reading
+# a value that extends past where the shell ends it.
+_ASSIGN_CAPTURE_RE = re.compile(r"(?:^|[;&|]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=")
+_FOR_CAPTURE_RE = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.*?)(?:;|$)")
+
+
+def _assigned_value(code: str, start: int) -> str:
+    """The VALUE of an assignment beginning at `code[start]` (just past the `=`).
+
+    A shell assignment's value ends at the first UNQUOTED whitespace — that is what makes
+    `VAR=x cmd` an env prefix rather than a value containing a command. Quotes and `$( )`
+    nesting are tracked so `out=$(bash "$DRIVER" …)` keeps its whole substitution (which
+    genuinely IS the value, and genuinely does hold a driver path).
+    """
+    out: list[str] = []
+    depth = 0
+    sq = dq = False
+    i = start
+    while i < len(code):
+        ch = code[i]
+        if ch == "\\" and i + 1 < len(code):
+            out.append(code[i:i + 2])
+            i += 2
+            continue
+        if not dq and ch == "'":
+            sq = not sq
+        elif not sq and ch == '"':
+            dq = not dq
+        elif not sq and not dq:
+            if ch == "$" and code.startswith("$(", i):
+                depth += 1
+            elif ch == "`":
+                depth += 1 if depth == 0 else -1
+            elif ch == ")" and depth > 0:
+                depth -= 1
+            elif ch.isspace() and depth == 0:
+                break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+# The names that hold the driver WITHOUT having been assigned in the file — `$DRIVER` is set
+# by every suite, and may arrive from a sourced library rather than a local assignment.
+_SEED_BEARING_NAMES = frozenset({"DRIVER"})
+
+
+def driver_bearing_names(text: str) -> tuple[frozenset[str], frozenset[str]]:
+    """`(bearing, assigned)`: which shell names in this file could HOLD a driver path.
+
+    # Why this is DISCOVERED and not a list (#3272 review round 5, F6)
+
+    `lint_text`'s line gate used to be five hardcoded spellings:
+
+        if DRIVER_BASENAME not in code and "$DRIVER" not in code \\
+                and "${DRIVER}" not in code and "$copy" not in code \\
+                and "${copy}" not in code:
+            continue
+
+    which made `names_driver`'s whole fail-closed posture — "an UNRESOLVABLE command word
+    counts as an invocation on purpose … there is no enumeration left to be wrong" — DEAD
+    CODE for any variable not named `DRIVER` or `copy`. The line never reached
+    `command_words`, so it did not matter what `names_driver` would have said about it.
+    MEASURED against the pre-fix lint, both at ZERO findings:
+
+        drv="$DRIVER";                  bash "$drv" --corpus /c
+        injected="$TMP/injected-ws0-baseline.sh";  bash "$injected" --corpus /c
+
+    A one-line rename defeated the guard, and the file's own header advertised the opposite
+    property. This is the same class as B1 (asking by SPELLING while claiming LOCATION), one
+    level in — which is why the answer is a MECHANISM rather than adding `$drv` and
+    `$injected` to the list.
+
+    # The mechanism
+
+    A name is driver-bearing when the value it is given could name the driver:
+
+    * the value mentions `ws0-baseline.sh` literally (`injected="$TMP/x-ws0-baseline.sh"`);
+    * the value contains a driver-ish IDENTIFIER — `$DRIVER`, `${DRIVER}`, or a call to a
+      helper like `driver_copy_with` whose result IS a driver path (that is how
+      `test_ws0_cpu_pinning_guards.sh` obtains its `copy`, so the previously-hardcoded
+      `copy` is now DERIVED rather than named);
+    * the value references an already-discovered bearing name (`a="$DRIVER"; b="$a"`).
+
+    Both `NAME=value` and `for NAME in <list>` are read, because a loop over driver paths
+    (`for d in "$DRIVER" "$copy"; do bash "$d"; done`) is a real way to invoke it, and
+    iterated to a FIXPOINT so an assignment order like `b="$a"` before `a="$DRIVER"` cannot
+    hide a name.
+
+    # What this deliberately does NOT widen to
+
+    A name whose value has no driver connection at all stays out, and that is what keeps the
+    lint usable: `SHIM="$TMP/nopython/bin"`, `timeout_probe="$TMP/timeout-probe.sh"` and
+    `trap_probe="$TMP/trap-probe.sh"` are probes of OTHER things, and the loop variables
+    `$fn`/`$tool`/`$_f` iterate over library function names, shim tool names and file lists.
+    Treating every unresolvable command word in a handle-bearing file as a candidate was
+    measured at 8 findings over the shipped subject, all of them ordinary code — and the
+    same experiment with `has_driver_handle` removed entirely was measured at 74. The gate
+    is narrowed by EVIDENCE from the file's own assignments, not by a name list.
+
+    # The UNASSIGNED case fails CLOSED — the second returned set is what makes that possible
+
+    A name this file never assigns carries NO evidence either way: it may arrive from a
+    sourced library, a caller's environment, or an `eval`. So it COULD hold the driver and
+    counts, exactly as `names_driver` treats an unresolvable command word. Only a name the
+    file DOES assign is judged by its value.
+
+    That asymmetry is the entire design, and dropping it was measured: with unassigned names
+    treated as non-bearing, `out=$(bash "$copy" --corpus /nonexistent)` in a probe that never
+    assigns `copy` produced ZERO findings — re-breaking the B1 posture in the fix for F6. Hence
+    two sets: `bearing` (assigned, and the value shows a driver connection) and `assigned`
+    (every name the file binds at all), so a caller can ask "bearing OR never assigned".
+    """
+    bearing = set(_SEED_BEARING_NAMES)
+    candidates: list[tuple[str, str]] = []
+    for _lineno, logical in logical_lines(text):
+        code = strip_trailing_comment(logical)
+        if not code.strip():
+            continue
+        for m in _FOR_CAPTURE_RE.finditer(code):
+            candidates.append((m.group(1), m.group(2)))
+        for m in _ASSIGN_CAPTURE_RE.finditer(code):
+            candidates.append((m.group(1), _assigned_value(code, m.end())))
+    # FIXPOINT: a value may reference a name assigned LATER in the file, so one pass is not
+    # enough. Bounded by the candidate count, since each round can only add names.
+    for _ in range(len(candidates) + 1):
+        grew = False
+        for name, value in candidates:
+            if name in bearing:
+                continue
+            if DRIVER_BASENAME in value or _DRIVERISH_IDENT_RE.search(value) \
+                    or any(_references(value, b) for b in bearing):
+                bearing.add(name)
+                grew = True
+        if not grew:
+            break
+    return frozenset(bearing), frozenset(name for name, _ in candidates)
+
+
+def _references(text: str, name: str) -> bool:
+    """Does `text` expand `$name` / `${name}`?"""
+    return bool(re.search(r"\$\{?" + re.escape(name) + r"\}?", text))
+
+
+def _word_var_name(word: str) -> str | None:
+    """The shell NAME a command word expands, or None if it is not a bare expansion."""
+    m = re.match(r'^"?\$\{?([A-Za-z_][A-Za-z0-9_]*)', word)
+    return m.group(1) if m else None
+
+
+def _word_could_be_driver(
+    word: str, bearing: frozenset[str], assigned: frozenset[str]
+) -> str | None:
+    """Why this COMMAND WORD could be the driver, or None.
+
+    `names_driver` filtered by the file's own evidence about the name (#3272 F6). Three
+    outcomes, and the middle one is what the hardcoded five-spelling gate could not express:
+
+    * a literal `…ws0-baseline.sh` path => yes, whatever the surrounding code.
+    * a variable the file ASSIGNS: yes only when the assigned value shows a driver
+      connection (`bearing`). This is what keeps the lint usable — `$tool` bound by
+      `for tool in $WS0_SHIM_TOOLS`, `$fn` bound to a library function name and
+      `$timeout_probe` assigned an unrelated path are all ASSIGNED and NOT bearing, so
+      they are not candidates.
+    * a variable the file NEVER assigns: yes, fail closed. There is no evidence either way
+      — it may come from a sourced library, the environment, or an `eval` — so it COULD
+      hold the driver, which is `names_driver`'s original posture preserved exactly.
+
+    THE QUESTION IS ASKED OF THE COMMAND WORD, not of the line. Asking it of every name
+    ANYWHERE on the line was measured to produce a FALSE FINDING on this repo's own shipped
+    code: `PATH="$WS0_SHIM_BIN:$PATH" "$tool" --probe` references `$WS0_SHIM_BIN`, which
+    THIS file never assigns (it comes from the sourced `lib-ws0-hermetic.sh`), so the line
+    passed the gate and its loop-bound command word `$tool` was then flagged. The command
+    word is the only token that can actually run something, so it is the only one whose
+    provenance matters.
+    """
+    if word.endswith(DRIVER_BASENAME):
+        return f"names {DRIVER_BASENAME} literally"
+    name = _word_var_name(word)
+    if name is None or word.startswith("$("):
+        return None
+    if name in bearing:
+        return (
+            f"the command word `{word}` expands ${name}, which this file assigns a value that"
+            " could name the driver"
+        )
+    if name not in assigned:
+        return (
+            f"the command word `{word}` is a VARIABLE this lint cannot resolve (never assigned"
+            " in this file), so it COULD be the driver"
+        )
+    return None
+
+
 def lint_text(text: str, is_python: bool = False) -> list[str]:
     """`<lineno>: <reason>` per finding for one file's contents."""
     if not has_driver_handle(text):
@@ -446,24 +652,26 @@ def lint_text(text: str, is_python: bool = False) -> list[str]:
     if is_python:
         return lint_python(text)
     findings = []
+    bearing, assigned = driver_bearing_names(text)
     for lineno, logical in logical_lines(text):
         if LINE_MARKER in logical:
             continue
         code = strip_trailing_comment(logical)
         if not code.strip():
             continue
-        # Nothing on the line refers to a driver-ish token at all: not a candidate, and asking
-        # further would red on ordinary code (`mkdir -p "$d"`), which is the lint an operator
-        # deletes. Inside a file WITH a handle, `$copy`/`${copy}` counts — that is the driver
-        # COPY the cpu-pinning suite builds and runs.
-        if DRIVER_BASENAME not in code and "$DRIVER" not in code and "${DRIVER}" not in code \
-                and "$copy" not in code and "${copy}" not in code:
-            continue
         # `ws0_driver_run`/`ws0_driver_run_copy` IS the sanctioned path.
         if re.search(r"\bws0_driver_run(_copy)?\b", code):
             continue
+        # THE QUESTION IS ASKED OF EACH COMMAND WORD, against evidence DISCOVERED FROM THE
+        # FILE (#3272 F6). There used to be a textual line gate of five hardcoded spellings
+        # (`$DRIVER`/`${DRIVER}`/`$copy`/`${copy}`/the basename) in front of this loop, which
+        # made the fail-closed posture in `names_driver` DEAD CODE for every other variable
+        # name — a one-line rename walked past the guard, MEASURED at zero findings for both
+        # `drv="$DRIVER"; bash "$drv"` and `injected="…ws0-baseline.sh"; bash "$injected"`.
+        # `_word_could_be_driver` replaces both the gate and `names_driver` here, so the
+        # decision is made once, on the token that can actually run something.
         for word in command_words(code):
-            why = names_driver(word)
+            why = _word_could_be_driver(word, bearing, assigned)
             if why is None:
                 continue
             findings.append(f"{lineno}: {REASON} [{why}]")
