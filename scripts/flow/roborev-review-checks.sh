@@ -153,6 +153,9 @@ roborev_check_prompt_content() {
         # this wrapper where a previously-FAILing condition no longer fails. It NEVER turns a previous
         # FAIL into a PASS by itself: `prompt-content` becomes NOTICE, and the wrapper's
         # verdict-affirmation backstop admits that NOTICE only for this key and only in this mode.
+        # SET ONLY HERE, AND ONLY ON AN AFFIRMATIVE FACT: the resolver reaches `snapshot` only after the path
+        # was VALIDLY BOUND, so `SNAPSHOT_NOTICE=1` asserts "a snapshot was bound, and either observed or its
+        # non-observation recorded with a cause" — never merely "the mode was selected" (roborev job 16).
         SNAPSHOT_NOTICE=1
         # THE CENSUS SUBSET THIS RUN EXPECTED, for the block. Reported, never asserted (that is the whole
         # of C‴): a closer reads it to know what a certification WOULD have covered.
@@ -173,6 +176,20 @@ roborev_check_prompt_content() {
         if [ "${#census_code_paths[@]}" -gt 10 ]; then
           DETAILS+=("  … and $(( ${#census_code_paths[@]} - 10 )) more (see census: for the total)")
         fi
+        return 0
+        ;;
+      snapshot-unbound|unparseable-instruction)
+        # ===== A SELECTED MODE IS NOT AN OBSERVED SNAPSHOT (roborev job 16, blocker 1) =====
+        # These two states mean the wrapper received NEITHER an inline diff NOR a snapshot it could read: the
+        # named path could not be bound, or an instruction line could not be read at all. The owner ruled that
+        # such an input stays a NAMED FAIL — "a review whose reviewer was told to run git itself cannot be
+        # verified to have received anything; an unverifiable input is a non-passing verdict by rule 13" — so
+        # they must never reach the C‴ NOTICE, and `SNAPSHOT_NOTICE` is deliberately NOT set here. Before this,
+        # snapshot mode was selected on the mere PRESENCE of an instruction line, so a compact instruction
+        # carrying a git command produced an exempted NOTICE and the run PASSED having received nothing.
+        PROMPT_CONTENT="FAIL (snapshot named but unusable: ${ROBOREV_DIFF_SOURCE_STATE})"
+        DETAILS+=("ERROR: prompt-content: roborev signalled that the diff was delivered BY PATH, but this run received neither an inline diff nor a snapshot it could read: ${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-cause not established}. Named path: ${ROBOREV_SNAPSHOT_PATH:-<none readable from the prompt>}. An input that cannot be established is a NON-PASSING verdict — it is not a C‴ NOTICE, because there is no snapshot to report a digest for. Failing closed.")
+        DETAILS+=("ERROR: prompt-content: the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are therefore UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
         return 0
         ;;
       inline) ;;

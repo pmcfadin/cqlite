@@ -1074,12 +1074,48 @@ _roborev_regular_readable_state() {
 #      is the syscall gap rather than the whole safety-check-to-use span;
 #   2. the read is bounded by `timeout` when available, so even a lost race cannot block forever.
 _ROBOREV_READ_TIMEOUT_SECS=${ROBOREV_READ_TIMEOUT_SECS:-20}
-_roborev_bounded() { # _roborev_bounded <cmd...> — run with a timeout when one is available
+# _roborev_bounded <cmd...>: run `<cmd>` so it CANNOT block forever, and print its stdout.
+#
+# TWO THINGS THIS GETS RIGHT THAT THE PREVIOUS FORM DID NOT (roborev job 16, blocker 3):
+#   1. THE OPEN MUST HAPPEN INSIDE THE BOUNDED CHILD. The caller used `_roborev_bounded wc -c <"$f"`, and a
+#      shell REDIRECTION is performed by the parent BEFORE the wrapper ever runs — so a FIFO swapped into that
+#      window blocked the wrapper with the timeout not yet started. Callers now pass the FILENAME to the
+#      command, which opens it itself, inside the bound.
+#   2. THE FALLBACK MUST ACTUALLY BOUND. `timeout` is coreutils and absent on a stock macOS worker — exactly
+#      the fleet host the portability sibling exists for — so the old fallback ran the command UNBOUNDED,
+#      which is the hang the guard was supposed to remove. There is now a portable watchdog: run in the
+#      background, poll for completion, KILL past the deadline. `_rx_bounded_kind` records which mechanism was
+#      used, so a caller can decline an advisory measurement rather than assume one happened.
+_ROBOREV_READ_TIMEOUT_SECS=${ROBOREV_READ_TIMEOUT_SECS:-20}
+_rx_bounded_kind=""
+_roborev_bounded() {
+  local out rc pid waited=0 deadline
   if command -v timeout >/dev/null 2>&1; then
+    _rx_bounded_kind="timeout"
     timeout "$_ROBOREV_READ_TIMEOUT_SECS" "$@"
     return $?
   fi
-  "$@"
+  # THE PORTABLE WATCHDOG. Deliberately simple: no coreutils, no `perl`, nothing but bash + kill + sleep.
+  _rx_bounded_kind="watchdog"
+  out=$(mktemp "${TMPDIR:-/tmp}/roborev-bounded.XXXXXX") || { _rx_bounded_kind=""; return 1; }
+  deadline=$((_ROBOREV_READ_TIMEOUT_SECS * 10))
+  "$@" >"$out" 2>/dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$deadline" ]; then
+      kill -KILL "$pid" 2>/dev/null || :
+      wait "$pid" 2>/dev/null || :
+      rm -f "$out"
+      return 124
+    fi
+    waited=$((waited + 1))
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  wait "$pid" 2>/dev/null
+  rc=$?
+  cat "$out" 2>/dev/null || :
+  rm -f "$out"
+  return "$rc"
 }
 _roborev_file_digest() {
   local f="$1" out=""
@@ -1225,7 +1261,16 @@ _roborev_file_size() {
   if [ -L "$f" ] || [ ! -f "$f" ]; then
     return 1
   fi
-  _rx_size=$(_roborev_bounded wc -c <"$f" 2>/dev/null | tr -d '[:space:]') || _rx_size=""
+  # THE FILENAME IS PASSED TO `wc`, never redirected into `_roborev_bounded`: a redirection is opened by the
+  # PARENT before the bound starts (roborev job 16). `wc -c -- <file>` prints "<n> <file>", so the count is
+  # the first field.
+  _rx_size=$(_roborev_bounded wc -c -- "$f" 2>/dev/null | awk '{print $1; exit}') || _rx_size=""
+  # DECLINED, AFFIRMATIVELY, WHEN NOTHING BOUNDED THE READ. Size is advisory; a hang is not — so if no
+  # bounded mechanism was used, no size is reported and the caller says so.
+  if [ -z "${_rx_bounded_kind:-}" ]; then
+    _rx_size=""
+    return 1
+  fi
   [ -n "$_rx_size" ] || return 1
   return 0
 }
@@ -1297,8 +1342,19 @@ roborev_prompt_snapshot_paths() {
     case "$row" in
       OVERSIZE) _rx_snap_oversize_markers=$((_rx_snap_oversize_markers + 1)); continue ;;
       UNPARSEABLE) _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue ;;
+      PATHC*)
+        # A COMPACT-FORM CANDIDATE. Accepted as a snapshot path ONLY if it is absolute and carries roborev's
+        # own snapshot directory shape; a git command or a relative token in that position means this is the
+        # DELEGATED oversize tier, which the owner ruled must stay a named FAIL — so it is counted as an
+        # oversize marker and never becomes a snapshot path.
+        p="${row#PATHC	}"
+        case "$p" in
+          /*/.roborev/roborev-snapshot-*/?*) ;;
+          *) _rx_snap_oversize_markers=$((_rx_snap_oversize_markers + 1)); continue ;;
+        esac
+        ;;
+      *) p="${row#PATH	}" ;;
     esac
-    p="${row#PATH	}"
     [ -n "$p" ] || { _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue; }
     seen=0
     for q in ${_rx_snap_paths[@]+"${_rx_snap_paths[@]}"}; do
@@ -1307,16 +1363,25 @@ roborev_prompt_snapshot_paths() {
     [ "$seen" -eq 1 ] || _rx_snap_paths+=("$p")
   done < <(LC_ALL=C awk '
       # THE INSTRUCTION LINES, both spellings, each anchored at COLUMN ZERO (index(...) == 1).
-      index($0, "Read the diff from:") == 1 || index($0, "(Diff too large; read ") == 1 {
+      # THE TWO SPELLINGS ARE TAGGED DIFFERENTLY (roborev job 16, blocker 1). In the full form the %s is
+      # documented to be the snapshot path. In the COMPACT form the %s was only ever read out of the binary
+      # format strings, and the sibling oversize templates put a git COMMAND in exactly that position — so a
+      # compact token is emitted as a CANDIDATE and accepted as a path only when it is demonstrably
+      # snapshot-shaped. Otherwise it is an oversize marker (the delegated tier), never a snapshot.
+      # (No apostrophes in this awk program: it is single-quoted, and one would close the quote.)
+      index($0, "Read the diff from:") == 1 { tag = "PATH" }
+      index($0, "(Diff too large; read ") == 1 { tag = "PATHC" }
+      tag != "" {
         line = $0
         sub(/\r$/, "", line)
         s = index(line, "`")
-        if (s == 0) { print "UNPARSEABLE"; next }
+        if (s == 0) { print "UNPARSEABLE"; tag = ""; next }
         rest = substr(line, s + 1)
         e = 0
         for (i = length(rest); i >= 1; i--) if (substr(rest, i, 1) == "`") { e = i; break }
-        if (e <= 1) { print "UNPARSEABLE"; next }
-        printf "PATH\t%s\n", substr(rest, 1, e - 1)
+        if (e <= 1) { print "UNPARSEABLE"; tag = ""; next }
+        printf "%s\t%s\n", tag, substr(rest, 1, e - 1)
+        tag = ""
         next
       }
       # THE OTHER OVERSIZE TIERS, reported so the caller can say WHICH mode it is looking at
@@ -1538,7 +1603,19 @@ roborev_collect_review_diff_headers() {
   roborev_collect_prompt_headers "$prompt"
   roborev_prompt_snapshot_paths "$prompt"
 
-  if [ "${#_rx_snap_paths[@]}" -eq 0 ] && [ "${_rx_snap_unparseable:-0}" -eq 0 ]; then
+  # FIX 2 (roborev job 16): AN UNPARSEABLE SIBLING IS NEVER EXCUSED BY A PARSED ONE. This is the contract
+  # `cx31p` was written for — "a readable instruction line does not excuse an unreadable one" — and it
+  # regressed when the resolver was rewritten for C‴: with one line parsed and another malformed, the block
+  # reported the parsed path and its digest and said nothing about the undecidable line. An input we cannot
+  # read is unverifiable, and rule 13 makes an unverifiable input non-passing, so this is a FAILING state that
+  # discloses BOTH the parsed path (if any) and how many lines could not be read.
+  if [ "${_rx_snap_unparseable:-0}" -gt 0 ]; then
+    ROBOREV_DIFF_SOURCE_STATE="unparseable-instruction"
+    ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]:-}"
+    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="${_rx_snap_unparseable} snapshot instruction line(s) carried no readable backtick-delimited path$([ "${#_rx_snap_paths[@]}" -gt 0 ] && printf ', while %s other line(s) did (first: %s)' "${#_rx_snap_paths[@]}" "${_rx_snap_paths[0]}")"
+    return 0
+  fi
+  if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
     if [ "${#_rx_hdrs[@]}" -gt 0 ]; then
       ROBOREV_DIFF_SOURCE_STATE="inline"
     else
@@ -1549,10 +1626,6 @@ roborev_collect_review_diff_headers() {
 
   # SNAPSHOT MODE. Everything below only ever REPORTS.
   ROBOREV_DIFF_SOURCE_STATE="snapshot"
-  if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
-    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt carries roborev's snapshot instruction but no backtick-delimited path could be read from it (${_rx_snap_unparseable:-0} such line(s))"
-    return 0
-  fi
   if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
     ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt names ${#_rx_snap_paths[@]} different snapshot diff paths, so which one this review was given is undecidable: ${_rx_snap_paths[*]}"
     return 0
@@ -1564,6 +1637,11 @@ roborev_collect_review_diff_headers() {
   # reason, never a silent omission.
   roborev_snapshot_path_binding "$snap_path" || :
   if [ "${_rx_snap_bind_state:-}" != ok ]; then
+    # FIX 1b (roborev job 16, blocker 1): A SELECTED MODE IS NOT AN OBSERVED SNAPSHOT. When the binding fails
+    # there IS no snapshot — the wrapper received neither an inline diff nor a readable one — so this is a
+    # FAILING state and must never reach the C‴ NOTICE exemption. Keyed on the AFFIRMATIVE `ok`, so any
+    # binding state this function has never judged also lands here.
+    ROBOREV_DIFF_SOURCE_STATE="snapshot-unbound"
     ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the path is not safe to read as this repository's snapshot (${_rx_snap_bind_state:-unknown}): ${_rx_snap_bind_detail:-no detail}"
     return 0
   fi
