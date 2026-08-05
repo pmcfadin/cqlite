@@ -212,7 +212,12 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    perfectly good snapshot as unvalidated, a false FAIL of exactly the kind this issue removes); reuse is
    keyed on a **content digest**, so a same-length rewrite cannot leave a stale capture in place; and the
    capture is matched to the prompt by **whole-path equality**, so the canonical sibling of a
-   differently-named file cannot stand in for it. Publication also requires **three digests that agree** —
+   differently-named file cannot stand in for it. Each capture is published to a **fresh, uniquely sequenced directory**, because `mv <dir> <existing-dir>`
+   does not fail — it nests, leaving the previous capture exactly where the resolver reads it; the rename-aside
+   and backup logic that invited that was deleted rather than hardened, and the resolver takes the newest
+   publication. A capture is consulted **only when the live path does not exist**: something that exists but is
+   not a readable regular file is reported `unreadable` rather than papered over with a copy. Publication also
+   requires **three digests that agree** —
    the source before the copy, the source after it, and the staged copy, each of them *measured*, because an
    empty digest compares equal to another empty one — so a source mutated mid-copy is discarded and retried
    rather than published under the final digest and reused. The capture directory's containment is decided on

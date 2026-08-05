@@ -516,7 +516,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   SIGTERM between them report `capture-unvalidated` on a good snapshot, i.e. the very false FAIL this issue
   fixes), **re-taken whenever the source's content DIGEST changes** (a byte count cannot see a same-length
   rewrite, which would certify a stale diff), and matched by **whole-path equality** with the path the prompt
-  names (an id-only match let the canonical sibling certify a file the reviewer was never pointed at). Publication additionally requires **three digests that
+  names (an id-only match let the canonical sibling certify a file the reviewer was never pointed at). Each capture publishes to a **fresh `pub.<id>.<seq>`
+  directory that cannot already exist** (a `mv` onto an existing directory does not fail — it NESTS, leaving
+  the previous content where the resolver reads it — so the rename-aside and backup paths were DELETED rather
+  than checked), and the resolver reads the newest publication. A capture is consulted **only when the live
+  path does not exist** (`! -e`, not `! -f`): a directory or FIFO at the named path is `unreadable`, a fact to
+  report, not "the snapshot is gone". Publication additionally requires **three digests that
   agree** (source before the copy, source after it, and the staged copy — each measured, since an empty digest
   compares equal to another empty one), and the capture directory's containment is decided on its
   **`pwd -P`-resolved** path, so a relative `TMPDIR` or one symlinked into the checkout is refused with a named
