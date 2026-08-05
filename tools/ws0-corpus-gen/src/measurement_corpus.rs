@@ -62,6 +62,46 @@ pub const DATA_DB_SHA256: &str = "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecae
 /// Recorded `DATA_DB_BYTES / ROWS`, to the precision the artifact records.
 pub const BYTES_PER_ROW: f64 = 693.6901055;
 
+/// `sha256` of the emitted `ws0-events.cql` — a MEASUREMENT INPUT (#3272 R2).
+///
+/// # Why this one is machine-checked WITHOUT a corpus re-run, unlike the digests above
+///
+/// Every other pinned value here describes 2.8 GB of generated data, so verifying it needs a
+/// minutes-long write no gate component may perform. The schema does not: it is
+/// `schema::DDL` — a **source constant** — plus the trailing newline `generate` writes. So its
+/// digest is derivable from source ALONE, and `measurement_corpus_pin.rs` asserts this constant
+/// equals `sha256(DDL + "\n")` in the gate, every run. That makes it the only corpus-identity
+/// digest here with a full machine oracle.
+///
+/// # This did NOT invalidate any pinned constant, and the reason is worth recording
+///
+/// R2 adds a field to `CorpusIdentity`, which changes the shape of every identity artifact the
+/// generator writes — so the obvious worry is that the committed
+/// `docs/reports/ws0-3096-artifacts/corpus-identity.json` (recorded 2026-08-03, before this
+/// field existed) no longer matches, and that the honest-looking fix is to regenerate it.
+/// **That would be the confirmation trap this issue exists to refuse**: re-pinning an artifact
+/// to agree with changed output is how a rig stops being able to detect anything.
+///
+/// It is not necessary, and here is the argument, which rests on evidence rather than on
+/// convenience:
+///
+/// * `DATA_DB_SHA256` and friends are **untouched**. The schema field is metadata ABOUT an
+///   auxiliary file; it does not enter `Data.db`, so no recorded corpus digest can move.
+/// * The exhaustiveness check reads the **ARTIFACT's** key set and requires every key in it to
+///   be compared or explicitly excused. A key the artifact does not yet carry is not a gap in
+///   that direction, so the committed artifact stays valid AS THE 2026-08-03 RECORD IT IS.
+/// * The DDL constant has **never changed**: measured across all three commits that have ever
+///   touched `schema.rs` (`683e717f1`, `f1cd438a9`, `a8dbcfa2e`), `sha256(DDL + "\n")` is
+///   `6bdd1d06…` in every one. So this value is not a NEW observation being blessed — it is the
+///   digest the corpus was written with all along, now recorded.
+///
+/// The residual, stated rather than left to be discovered: the committed artifact carries no
+/// `schema_sha256`, so it cannot corroborate this constant. The gate oracle is `DDL` itself,
+/// which is stronger (it is the input, not a record of it). The next real corpus regeneration
+/// will emit the field, and the exhaustiveness check will then require it to be compared —
+/// which is the correct time for the artifact to acquire it.
+pub const SCHEMA_SHA256: &str = "6bdd1d06ad7eb597b3103ace250930b28b19a76aa128bbf2e4170c90406baed0";
+
 /// Recorded total bytes across every emitted component.
 pub const TOTAL_COMPONENT_BYTES: u64 = 2_779_185_469;
 

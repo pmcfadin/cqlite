@@ -492,6 +492,39 @@ done
 # generator emits it beside the data), so both arms provably read one schema.
 DDL_FILE="$CORPUS/ws0-events.cql"
 [[ -r "$DDL_FILE" ]] || { echo "FATAL: $DDL_FILE missing — regenerate the corpus" >&2; exit 2; }
+# ...and READABLE IS NOT ENOUGH (#3272 round 6, R2). The DDL is a MEASUREMENT INPUT, and it was
+# outside every verification this rig performs: absent from the Data.db digest check, absent from
+# the component check (it is not in the table directory), absent from the session pin. `-r` was
+# the whole of it.
+#
+# THE TWO ARMS READ IT ASYMMETRICALLY, which is what makes a modification both silent and
+# harmful: the TICKET TEMPLATE below is generated from it ONCE, here, at setup — while the BARE
+# SCAN ingests the file on EVERY invocation. So editing it between setup and a later rep makes
+# the two arms measure DIFFERENT SCHEMAS (a different column set, clustering order or type) while
+# every recorded identity still agrees and the report exits 0. A head-to-head number between two
+# arms reading two schemas compares nothing.
+#
+# Verified HERE, before the pin and before the first rep, so a mismatch costs seconds rather than
+# a full measurement run. There is no skip flag: the file is a few hundred bytes.
+if ! python3 - "$HERE" "$CORPUS" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid, load_corpus_identity
+from ws0_schema_input import verify_schema_input
+corpus = pathlib.Path(sys.argv[2])
+try:
+    rec = verify_schema_input(corpus, load_corpus_identity(corpus))
+except Invalid as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"schema pin:   {rec['schema_sha256_measured']} ({rec['schema_bytes']} B) — ws0-events.cql"
+      " re-hashed from disk and matched the recorded identity BEFORE any measurement")
+PY
+then
+  echo "FATAL: the corpus's schema could not be verified against its recorded identity." >&2
+  echo "       ws0-events.cql is a MEASUREMENT INPUT both arms read (#3272 R2)." >&2
+  exit 2
+fi
 
 # --- PIN WHICH CORPUS THIS SESSION IS ABOUT TO MEASURE (#3272 review round 4) --------
 # Stamped into the RESULTS DIR, BEFORE the first rep, and REQUIRED by ws0_report.py.

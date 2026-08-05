@@ -783,3 +783,92 @@ fn the_full_size_verification_is_an_operator_procedure() {
         mc::operator_verify_digest(&root)
     );
 }
+
+/// THE SCHEMA DIGEST IS FULLY MACHINE-CHECKED, against the DDL that produces it (#3272 R2).
+///
+/// `ws0-events.cql` is a MEASUREMENT INPUT: both arms read it, asymmetrically — the bare scan
+/// ingests it on EVERY invocation while the Flight ticket is generated from it ONCE — so a
+/// modification between the two makes the two arms use DIFFERENT SCHEMAS. It was outside corpus
+/// verification and outside the pre-measurement pin, so nothing could see that and the report
+/// stayed valid by its own account.
+///
+/// # Why this is the ONE corpus digest with a complete gate oracle
+///
+/// Every other pinned digest describes 2.8 GB of generated data, so verifying it needs a
+/// minutes-long write no gate component may perform (see `operator_verify_corpus`). The schema
+/// does not: it is `schema::DDL`, a **source constant**, plus the trailing newline `generate`
+/// writes. So the oracle is the INPUT itself rather than a record of it, which is strictly
+/// stronger than comparing two recorded values — a co-edit of pin and artifact cannot satisfy
+/// it, only an actual DDL change can move it.
+///
+/// This is deliberately asserted against `sha256(DDL + "\n")` and NOT against the committed
+/// 2026-08-03 artifact, which predates the field. Regenerating that artifact to acquire the key
+/// would be re-pinning a record to agree with changed output — the confirmation trap this issue
+/// exists to refuse.
+#[test]
+fn the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written() {
+    use sha2::{Digest, Sha256};
+    // Exactly what `generate` writes: `format!("{DDL}\n")`.
+    let content = format!("{}\n", ws0_corpus_gen::schema::DDL);
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let derived = format!("{:x}", hasher.finalize());
+    assert_eq!(
+        derived,
+        mc::SCHEMA_SHA256,
+        "measurement_corpus::SCHEMA_SHA256 is not the digest of the DDL this generator writes. \
+         Either the DDL changed (in which case the corpus must be REGENERATED — the schema is a \
+         measurement input, and a corpus written from a different DDL is a different corpus, so \
+         every figure measured against the old one is incomparable), or the constant was edited \
+         alone. Do NOT re-pin the constant to match a changed DDL without regenerating: that \
+         records agreement instead of verifying it (#3272 R2)."
+    );
+    // NON-VACUITY: a 64-hex string, and not the all-zero placeholder a truncated derivation
+    // would produce. Without this the assertion above is satisfied by two equal empty strings.
+    assert_eq!(
+        mc::SCHEMA_SHA256.len(),
+        64,
+        "a schema digest that is not 64 hex characters cannot identify the schema"
+    );
+    assert!(
+        mc::SCHEMA_SHA256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned schema digest must be lowercase hex"
+    );
+    assert_ne!(
+        mc::SCHEMA_SHA256,
+        "0".repeat(64),
+        "an all-zero digest is a placeholder, not an observation"
+    );
+    // ...and the DDL itself is non-empty, so the digest is not the digest of nothing.
+    assert!(
+        ws0_corpus_gen::schema::DDL.len() > 100,
+        "the DDL must be the real schema (got {} bytes)",
+        ws0_corpus_gen::schema::DDL.len()
+    );
+}
+
+/// The comparison above must be able to FAIL — driven, per #3249.
+///
+/// Hashing a PERTURBED DDL must produce something other than the pinned digest. Without this,
+/// `the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written` would also pass against a
+/// hasher that returned the pinned constant unconditionally.
+#[test]
+fn the_schema_digest_comparison_can_fail() {
+    use sha2::{Digest, Sha256};
+    // A ONE-CHARACTER change to the schema — a different clustering order, a renamed column, a
+    // changed type would all be at least this large.
+    let perturbed = ws0_corpus_gen::schema::DDL.replacen("metric_a int", "metric_a bigint", 1);
+    assert_ne!(
+        perturbed,
+        ws0_corpus_gen::schema::DDL,
+        "the perturbation must actually change the DDL, or this test proves nothing"
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{perturbed}\n").as_bytes());
+    let derived = format!("{:x}", hasher.finalize());
+    assert_ne!(
+        derived, mc::SCHEMA_SHA256,
+        "a MODIFIED schema must not hash to the pinned digest — otherwise the schema pin cannot \
+         detect the change that makes the two measurement arms read different schemas"
+    );
+}

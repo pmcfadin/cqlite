@@ -73,6 +73,9 @@ from ws0_session import (  # noqa: E402
     verify_corpus_components,
     verify_session_corpus_pin,
 )
+# The SCHEMA as a verified measurement input — its own module since #3272 R2 (ws0_session.py was
+# at the ~800-line source target exactly, so this is a split by responsibility, not a waiver).
+from ws0_schema_input import verify_schema_input  # noqa: E402
 
 TEMPS_ALLOWED = ("warm", "cold")
 ARMS_ALLOWED = ("bypass", "merge")
@@ -173,6 +176,15 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     component_verification = verify_corpus_components(
         corpus, identity, skip_digest=args.skip_corpus_digest
     )
+    # ...and THE SCHEMA (#3272 round 6, R2). `ws0-events.cql` is a MEASUREMENT INPUT that was
+    # outside every verification the rig performed: absent from the Data.db check, absent from
+    # the component check (it is not in the table directory), absent from the pin. The driver
+    # only tested it was READABLE. And the two arms read it ASYMMETRICALLY — the bare scan
+    # ingests it on every invocation, the Flight ticket is generated from it once at setup — so
+    # a modification between them makes the arms measure DIFFERENT SCHEMAS while the report
+    # stays valid by its own account. No skip flag: the file is a few hundred bytes, so an
+    # opt-out could only buy a vacuous green.
+    schema_verification = verify_schema_input(corpus, identity)
     # ...and the identity re-derived above must be the one this SESSION WAS STARTED AGAINST
     # (#3272 review round 4). `verify_corpus_bytes` compares the recorded identity to the bytes
     # present AT REPORT TIME, which is self-consistent for both of the sequences that attribute
@@ -228,6 +240,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # The COMPLETE component set, re-stat'ed and (unless --skip-corpus-digest) re-hashed
         # (#3272 F3).
         "corpus_component_verification": component_verification,
+        # THE SCHEMA, re-hashed from disk on every report — a MEASUREMENT INPUT both arms read
+        # (asymmetrically), which was outside every verification the rig performed (#3272 R2).
+        "schema_input_verification": schema_verification,
         # WHERE THIS REPORT'S CONFIGURATION CAME FROM (#3272 F1) — the pre-measurement manifest,
         # not this invocation's arguments.
         "configuration_source": {

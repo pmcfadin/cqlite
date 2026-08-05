@@ -74,10 +74,18 @@ for name, body in (("nb-1-big-Data.db", raw),
         open(path, "wb").write(body)
     components[name] = {"name": name, "bytes": len(body),
                         "sha256": hashlib.sha256(body).hexdigest()}
+# THE SCHEMA, written and its digest RECORDED (#3272 R2). `ws0-events.cql` is a MEASUREMENT
+# INPUT both arms read, asymmetrically — the bare scan ingests it on every invocation while the
+# Flight ticket is generated from it once — so it is verified like any other recorded input.
+# A fixture without it is refused, which is the point: an absent schema digest means the schema
+# was never pinned.
+ddl = b"CREATE TABLE ws0.events (part_id text, seq int, PRIMARY KEY (part_id, seq));\n"
+open(os.path.join(out, "ws0-events.cql"), "wb").write(ddl)
 json.dump(
     {"rows": rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
      "data_db_bytes": nbytes, "data_db_sha256": hashlib.sha256(raw).hexdigest(),
-     "bytes_per_row": bpr, "components": components},
+     "bytes_per_row": bpr, "components": components,
+     "schema_sha256": hashlib.sha256(ddl).hexdigest()},
     open(os.path.join(out, "corpus-identity.json"), "w"),
 )
 PY

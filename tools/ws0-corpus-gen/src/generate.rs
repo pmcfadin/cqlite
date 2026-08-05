@@ -159,7 +159,22 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<CorpusIdentity> {
 
     // The DDL travels WITH the corpus so every consumer reads the exact schema it
     // was written from (no ambient schema lookup, no inference — issue #28).
-    std::fs::write(spec.out.join("ws0-events.cql"), format!("{DDL}\n"))?;
+    let schema_path = spec.out.join("ws0-events.cql");
+    std::fs::write(&schema_path, format!("{DDL}\n"))?;
+    // ...and its digest is RECORDED, because the DDL is a MEASUREMENT INPUT (#3272 R2). Both
+    // arms read it, asymmetrically — the bare scan ingests it on EVERY invocation while the
+    // Flight ticket is generated from it ONCE — so a modification between the two makes the two
+    // arms use DIFFERENT SCHEMAS. It was outside corpus verification and outside the
+    // pre-measurement pin, so nothing could see that.
+    //
+    // Hashed from the FILE JUST WRITTEN rather than from the `DDL` constant, so the recorded
+    // value is the digest of bytes that exist on disk. Hashing the constant would record what
+    // the code MEANT to write, which is the fabricated-value shape: if the write were truncated
+    // the identity would still claim the full schema.
+    let (schema_sha256, schema_bytes) = sha256_file(&schema_path)?;
+    if schema_bytes == 0 {
+        return Err("ws0-events.cql is empty — refusing to record a vacuous schema digest".into());
+    }
 
     let components = scan_components(&table_dir)?;
     if components.keys().any(|n| n.ends_with("CompressionInfo.db")) {
@@ -190,6 +205,7 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<CorpusIdentity> {
         compression_info_present: false,
         not_a_correctness_oracle: NOT_A_CORRECTNESS_ORACLE.to_string(),
         differs_from_prior_corpus: DIFFERS_FROM_PRIOR_CORPUS.to_string(),
+        schema_sha256,
     })
 }
 

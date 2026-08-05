@@ -68,6 +68,17 @@ pub struct CorpusIdentity {
     pub not_a_correctness_oracle: String,
     /// Why the #3058/#3100 digest is not asserted.
     pub differs_from_prior_corpus: String,
+    /// `sha256` of the emitted `ws0-events.cql` — a MEASUREMENT INPUT (#3272 R2).
+    ///
+    /// The DDL travels beside the corpus and is read by BOTH arms, asymmetrically: the bare
+    /// scan ingests it on EVERY invocation, while the Flight ticket is generated from it ONCE.
+    /// So a modification between the two makes the two arms use DIFFERENT SCHEMAS, and nothing
+    /// in the recorded identity could see it — the file was outside both corpus verification and
+    /// the pre-measurement pin, so the report stayed valid by its own account.
+    ///
+    /// Recorded as the digest of the FILE CONTENT (`DDL` + a trailing newline, which is what
+    /// `generate` writes), so the recorded value is comparable against `sha256sum` on disk.
+    pub schema_sha256: String,
 }
 
 /// The standing caveat, recorded in every identity artifact.
@@ -186,6 +197,7 @@ impl CorpusIdentity {
             compression_info_present,
             not_a_correctness_oracle,
             differs_from_prior_corpus,
+            schema_sha256,
         } = self;
         let Self {
             issue: p_issue,
@@ -203,6 +215,7 @@ impl CorpusIdentity {
             compression_info_present: p_compression_info_present,
             not_a_correctness_oracle: p_not_a_correctness_oracle,
             differs_from_prior_corpus: p_differs_from_prior_corpus,
+            schema_sha256: p_schema_sha256,
         } = prior;
 
         let mut out = Vec::new();
@@ -216,6 +229,14 @@ impl CorpusIdentity {
         if data_db_bytes != p_data_db_bytes {
             out.push(format!(
                 "Data.db bytes: recorded {p_data_db_bytes} != {data_db_bytes}"
+            ));
+        }
+        // THE SCHEMA (#3272 R2). A measurement input read by BOTH arms — asymmetrically, so a
+        // change between the two makes them use DIFFERENT SCHEMAS — and it was outside every
+        // recorded identity, so nothing could see it.
+        if schema_sha256 != p_schema_sha256 {
+            out.push(format!(
+                "ws0-events.cql sha256: recorded {p_schema_sha256} != {schema_sha256}"
             ));
         }
         // Corpus SHAPE. Any of these differing means the two identities describe
@@ -343,6 +364,7 @@ mod tests {
             compression_info_present: false,
             not_a_correctness_oracle: NOT_A_CORRECTNESS_ORACLE.to_string(),
             differs_from_prior_corpus: DIFFERS_FROM_PRIOR_CORPUS.to_string(),
+            schema_sha256: "cc".to_string(),
         }
     }
 
