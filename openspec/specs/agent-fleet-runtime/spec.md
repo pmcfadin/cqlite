@@ -316,13 +316,16 @@ to everything the guard authorizes — not only to the directories it names:
   `O_CREAT|O_EXCL` (a PREDICTABLE staging path that is checked, cleared and only then opened by
   a privileged writer is the same check-then-open race one level down: the name can be
   re-planted as a symlink in that window, and a predictable *suffix* such as a pid does not
-  help). The staging create, the write, the mode fix and the rename SHALL occur within a SINGLE
-  privileged invocation, since the staging tool yields a NAME and every later step reopens it by
-  name — so splitting them leaves a create-then-reopen window that an unpredictable name does not
-  close. The rename SHALL refuse to treat its destination as a directory
+  help). The rename SHALL refuse to treat its destination as a directory
   (`--no-target-directory`), or a symlink-to-DIRECTORY planted at the managed name redirects the
-  staged file outside the sandbox. Any window that REMAINS SHALL be recorded as a residual with
-  its reachability boundary stated, and SHALL NOT be described as unreachable,
+  staged file outside the sandbox. The staging create, the write, the mode fix and the rename
+  SHOULD occur within a single privileged invocation to avoid needless windows, but that grouping
+  SHALL NOT be relied on as mutual exclusion: it sequences one process's commands and says nothing
+  about other processes on other CPUs. What SHALL make the staged write safe is the PRECONDITION:
+  the target directory SHALL be owned by the identity performing the privileged write and SHALL be
+  neither group- nor world-writable, and an owner or mode that cannot be determined SHALL be a
+  refusal. Any window that REMAINS SHALL be recorded as a residual with its reachability boundary
+  stated, and SHALL NOT be described as unreachable,
   then renamed over the name — so a symlink appearing in the window between the check and the
   write is replaced rather than written through. A read that decides idempotency SHALL NOT
   follow the entry either, or a link whose target holds the canonical bytes would report
@@ -480,8 +483,25 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
 - **WHEN** the drop-in is installed
 - **THEN** the link SHALL be replaced by a regular file holding the managed bytes, the outside
   directory SHALL remain EMPTY, and no staging entry SHALL be left behind
-- **AND** the staged install SHALL be observable as a SINGLE privileged invocation, so no
-  unprivileged process can be scheduled between the staging create and its reopen
+- **AND** the staged install SHALL be observable as a SINGLE privileged invocation (a hygiene
+  property that removes needless windows — NOT a mutual-exclusion guarantee)
+
+#### Scenario: a drop-in directory writable by less-privileged users refuses the install
+- **GIVEN** a drop-in directory that is group- or world-writable, or not owned by the identity
+  that would perform the privileged write, or whose owner/mode cannot be determined
+- **WHEN** the staged install runs
+- **THEN** it SHALL refuse by name and write NOTHING, because every step of a staging race needs
+  the ability to create or replace entries in that directory
+- **AND** a directory owned by the writer and not group- or world-writable SHALL still install, so
+  the precondition is not a blanket refusal
+
+#### Scenario: a contained path carrying a newline cannot serialize into two entries
+- **GIVEN** the test-mode marker and a path seam (or extra-dirs entry) that is strictly contained
+  in the proven sandbox but whose NAME embeds a CR or LF, crafted so a line-wise reader would see
+  a second entry naming the host's real `/etc/sysctl.d`
+- **WHEN** the search path is resolved
+- **THEN** the seam SHALL be refused and the emitted search path SHALL NOT contain the host's real
+  `/etc/sysctl.d`, since a newline-delimited representation cannot safely carry such a path
 
 #### Scenario: a symlinked read seam cannot fabricate a capability verdict
 - **GIVEN** the test-mode marker and a proc seam whose spelling is strictly inside the proven

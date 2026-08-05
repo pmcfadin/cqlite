@@ -383,21 +383,38 @@ destination, positively, fail closed:
   too, so `mktemp`'s `O_EXCL` create is the point, not the suffix), then `rename` over
   the name — so a symlink planted between the check and the write is *replaced*, not written through.
   Two further properties, both learned the hard way one level deeper:
-  **(a)** the whole staged install — `mktemp`, write, `chmod`, `rename` — runs inside **one privileged
-  invocation**, because `mktemp` returns a *name* and every later step **reopens it by name**, so
-  splitting them leaves a create→reopen window an attacker can use even though the name is random;
-  **(b)** the rename carries **`-T`/`--no-target-directory`**. Without it a **symlink-to-directory** at
+  **(a)** the rename carries **`-T`/`--no-target-directory`**. Without it a **symlink-to-directory** at
   the managed name makes `mv` move the staging file *into* that directory — the rename that exists to
   avoid *following* a symlink follows one instead. Reproduced: the staging entry landed inside the
   outside directory, i.e. the managed bytes left the sandbox under a name nothing tracks.
-  **The residual is recorded, not waved away:** consolidation *shrinks* that window to the inside of one
-  root process; it does **not** mathematically eliminate it, because POSIX shell has no
-  `O_NOFOLLOW|O_EXCL` open primitive. Closing it fully needs a non-shell helper holding the descriptor
-  from creation to rename, which would add an interpreter dependency to the privileged bootstrap path —
-  an owner call, deferred. Exploitation needs a real privileged `tee` **and** an attacker-writable
-  drop-in directory (production's `/etc/sysctl.d` is root-owned; test mode requires sandbox-contained
-  shims) — a **boundary, not a proof of unreachability**. "Cannot happen" has been wrong nine times in
-  this family and one comment here already had to be retracted.
+  **(b)** the install **refuses a drop-in directory writable by anyone less privileged than the
+  writer** — it must be owned by the identity doing the privileged write and be neither group- nor
+  world-writable, with undeterminable owner/mode a refusal. *This* is what closes the staging race,
+  and it took three review rounds to get there because the first two answers tried to make the race
+  unwinnable instead of removing the racer.
+
+  **Two false rationales were published here before that landed, and both are recorded rather than
+  quietly deleted, because the failure mode is the interesting part.** First: a fixed staging name was
+  called safe because the race "cannot happen" — it could. Then `mktemp` made the name unpredictable
+  (closing the *create* race) and the remaining window was declared closed by putting every step in
+  **one privileged `sh -c`**, on the stated grounds that no unprivileged process is scheduled between
+  them. **That is false.** A single `sh -c` gives *sequencing within one process*; it is not mutual
+  exclusion against other processes, which run concurrently on other CPUs entirely unaffected by how
+  we grouped our own commands. Consolidation is retained — it is the right shape and removes needless
+  windows — but it is **not** what makes this safe. The lesson generalises past this function: *"the
+  attacker has no time to act"* is a claim about a scheduler you do not control, whereas *"the attacker
+  cannot write this directory"* is a checkable property of the filesystem. Prefer the second shape.
+  A non-shell helper holding the descriptor from creation to rename remains available but is now
+  probably unnecessary rather than merely deferred.
+- **A contained path can still SERIALIZE into two paths.** Not a containment defect — the path *is*
+  contained — which is why nine rounds of containment work never saw it. The search path is emitted
+  **one entry per line** and read back line-wise, so a directory legitimately inside the sandbox but
+  *named* with an embedded newline (`<root>/evil\n/etc/sysctl.d`) splits into **two** entries, the
+  second being the host's real `/etc/sysctl.d`. CR and LF are therefore rejected in every path seam at
+  the boundary, inside the single containment predicate. This is the same class CLAUDE.md records for
+  the roborev guard's own `-z` invariant: **a newline-delimited path set is not a safe representation
+  of paths.** If you add a path-carrying seam anywhere, ask what happens when the path contains a
+  newline before you ask whether it is contained.
 - **The fork-free read path is NOT exempt** — the earlier claim here that a syntactic check was "sound
   because nothing there writes" was **wrong**, and this is what falsified it. A symlink *inside* the
   sandbox pointing at the real `/proc/sys/kernel` satisfies containment, so the run reported a token
