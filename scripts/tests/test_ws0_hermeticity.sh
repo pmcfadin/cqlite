@@ -82,25 +82,95 @@ source "$HERMETIC_LIB"
 ws0_hermetic_init "$TMP"
 
 # ===========================================================================
-# 1 — the lint's SUBJECT is every self-test, DISCOVERED
+# 1 — the lint's SUBJECT, and its COMPLETENESS against an INDEPENDENT oracle (B2)
 # ===========================================================================
-# "The lint covers every self-test" is a claim about a SET, so the set is printed and
-# compared against what is on disk. A hand-maintained list would drift the moment someone
-# added a fourth file — which is exactly how the perf lint's own subject went stale (R2).
-on_disk=$(cd "$TESTS_DIR" && ls -1 ./test_ws0_*.sh | sed 's#^\./##' | sort)
-subject=$(ws0_hermeticity_lint_subject "$TESTS_DIR" | xargs -n1 basename | sort)
-n_on_disk=$(printf '%s\n' "$on_disk" | grep -c .)
-if [ "$n_on_disk" -ge 4 ] && [ "$subject" = "$on_disk" ]; then
-  pass "lint-subject: the hermeticity lint covers ALL $n_on_disk test_ws0_*.sh (discovered, not enumerated)"
+# THE FINDING THIS REPLACES (#3272 review round 4, B2). The subject used to be
+# `"$dir"/test_ws0_*.sh` ONLY, so the two `lib-ws0-*.sh` helpers round 3 had just added — one
+# of which is where `ws0_driver_run` LIVES — were never examined: a bare invocation in a shared
+# helper read as a clean tree. And the check right here compared
+# `ws0_hermeticity_lint_subject` against `ls ./test_ws0_*.sh`, i.e. THE SAME GLOB AGAINST
+# ITSELF, which can only ever confirm the subject's own definition.
+#
+# So there are now TWO independently-defined things, and the assertion is between them:
+#   SUBJECT — every `*.sh`/`*.py` under scripts/tests (a definition; consults nothing).
+#   CENSUS  — every TRACKED file whose CONTENT names the driver (`git ls-files`; an oracle).
+# and `subject` mode asserts SUBJECT ⊇ (CENSUS − EXEMPTIONS), printing `UNCOVERED` otherwise.
+subject_report=$(ws0_hermeticity_subject_report "$TESTS_DIR")
+# The SUBJECT must include the LIBRARIES, which is the concrete half of B2.
+missing_libs=""
+for lib in lib-ws0-hermetic.sh lib-ws0-fixtures.sh ws0_hermeticity_lint.py; do
+  grep -q "^SUBJECT	scripts/tests/$lib$" <<<"$subject_report" || missing_libs="$missing_libs $lib"
+done
+if [ -z "$missing_libs" ]; then
+  pass "lint-subject: the SOURCED LIBRARIES are in the subject (B2: they were excluded, and one holds ws0_driver_run)"
 else
-  fail "lint-subject: the subject ($subject) is not every test_ws0_*.sh ($on_disk)"
+  fail "lint-subject: the subject omits$missing_libs — a bare invocation there would be invisible (B2)"
+fi
+# ...and every `test_ws0_*.sh` too, which is what the old glob covered.
+n_tests=0; missing_tests=""
+for f in "$TESTS_DIR"/test_ws0_*.sh; do
+  n_tests=$((n_tests + 1))
+  b="$(basename "$f")"
+  grep -q "^SUBJECT	scripts/tests/$b$" <<<"$subject_report" || missing_tests="$missing_tests $b"
+done
+if [ "$n_tests" -ge 4 ] && [ -z "$missing_tests" ]; then
+  pass "lint-subject: all $n_tests test_ws0_*.sh are in the subject as well"
+else
+  fail "lint-subject: the subject omits$missing_tests (found $n_tests suites)"
+fi
+# THE COMPLETENESS ORACLE MUST BE ABLE TO SAY 'NO'. A containment assertion whose two sides
+# share a definition can only ever pass — which is exactly what B2 was, and what a first draft
+# of the fix reproduced by folding the census into the subject. So the oracle is DRIVEN.
+#
+# Driven inside a THROWAWAY GIT REPO under $TMP, never by mutating this checkout: the census
+# reads `git ls-files`, so it needs a real repo — and the gate FAILs a run whose worktree mutates
+# mid-run (#2926), which rules out appending to a tracked file here even with an immediate
+# restore. The fixture is the same shape as the real tree (a `scripts/tests` dir plus a file
+# outside it), which is all the oracle looks at.
+probe_repo="$TMP/oracle-repo"
+mkdir -p "$probe_repo/scripts/tests" "$probe_repo/scripts/lib"
+cp "$TESTS_DIR/ws0_hermeticity_lint.py" "$probe_repo/scripts/tests/"
+printf '#!/usr/bin/env bash\n: "in the subject"\n' > "$probe_repo/scripts/tests/test_ws0_probe.sh"
+# The UNCOVERED case: a tracked file OUTSIDE the tests root that NAMES the driver, with no
+# exemption for its path.
+printf '#!/usr/bin/env bash\nbash "$SOMEWHERE/ws0-baseline.sh" --corpus /c\n' \
+  > "$probe_repo/scripts/lib/rogue.sh"
+( cd "$probe_repo" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm probe ) >/dev/null 2>&1
+probe_report=$(ws0_hermeticity_subject_report "$probe_repo/scripts/tests")
+if grep -q '^UNCOVERED	scripts/lib/rogue.sh' <<<"$probe_report" \
+  && grep -q '^#COMPLETE .*uncovered=1$' <<<"$probe_report"; then
+  pass "lint-subject: OBSERVED — the completeness oracle reports an UNCOVERED tracked file (it CAN say no)"
+else
+  fail "lint-subject: the oracle must flag a tracked driver-naming file outside the subject (got: $(grep -E '^(UNCOVERED|#COMPLETE)' <<<"$probe_report"))"
+fi
+# THE CONTROL, on the SAME fixture: remove the rogue file and `uncovered` must drop to 0, so the
+# finding above is attributable to that file and not to anything else about a probe repo.
+rm -f "$probe_repo/scripts/lib/rogue.sh"
+( cd "$probe_repo" && git add -A && git -c user.email=t@t -c user.name=t commit -qm drop ) >/dev/null 2>&1
+if grep -q '^#COMPLETE .*uncovered=0$' <<<"$(ws0_hermeticity_subject_report "$probe_repo/scripts/tests")"; then
+  pass "lint-subject: the SAME fixture without the rogue file reports uncovered=0 (the finding was the file)"
+else
+  fail "lint-subject: the control fixture must report uncovered=0"
+fi
+# ...and the SHIPPED tree must itself be uncovered=0.
+if grep -q '^#COMPLETE .*uncovered=0$' <<<"$subject_report"; then
+  pass "lint-subject: the SHIPPED tree has uncovered=0 (every driver-naming tracked file is in the subject or exempt)"
+else
+  fail "lint-subject: the shipped tree must have uncovered=0 (got: $(grep -E '^(UNCOVERED|#COMPLETE)' <<<"$subject_report"))"
+fi
+# A STALE EXEMPTION is reported too, so the exemption list cannot accumulate claims nobody
+# checks. Asserted over the shipped tree: there must be none.
+if ! grep -q '^STALE-EXEMPTION' <<<"$subject_report"; then
+  pass "lint-subject: no STALE exemption (every exempted path is tracked and still names the driver)"
+else
+  fail "lint-subject: a stale exemption remains: $(grep '^STALE-EXEMPTION' <<<"$subject_report")"
 fi
 
 # An EMPTY subject must be a FINDING. A checker whose subject is empty prints nothing and
 # reads exactly like a clean tree — the vacuity shape this whole issue is about.
 empty_dir="$TMP/no-tests"; mkdir -p "$empty_dir"
 if grep -q "subject is EMPTY" <<<"$(ws0_hermeticity_lint_tree "$empty_dir")"; then
-  pass "lint-vacuity: a directory with NO test_ws0_*.sh is a FINDING (not a silent clean tree)"
+  pass "lint-vacuity: a directory with NO scripts is a FINDING (not a silent clean tree)"
 else
   fail "lint-vacuity: an empty subject must be reported (got: $(ws0_hermeticity_lint_tree "$empty_dir"))"
 fi
@@ -110,6 +180,16 @@ if grep -q "subject is ABSENT" <<<"$(ws0_hermeticity_lint "$TMP/does-not-exist.s
   pass "lint-vacuity: an unreadable file is a FINDING, not silently skipped"
 else
   fail "lint-vacuity: an unreadable file must be reported (got: $(ws0_hermeticity_lint "$TMP/does-not-exist.sh"))"
+fi
+# ...and the lint's own COMPLETION is verified, not assumed: a python that died mid-scan prints
+# nothing. Driven by pointing the wrapper at a deliberately broken implementation.
+broken_lib="$TMP/broken-lint"; mkdir -p "$broken_lib"
+printf 'import sys\nsys.exit(3)\n' > "$broken_lib/ws0_hermeticity_lint.py"
+if grep -q "did not COMPLETE" \
+  <<<"$(WS0_HERMETIC_LINT_PY="$broken_lib/ws0_hermeticity_lint.py" ws0_hermeticity_lint "$DRIVER")"; then
+  pass "lint-vacuity: OBSERVED — a lint that exits without its #COMPLETE marker is a FINDING"
+else
+  fail "lint-vacuity: an incomplete scan must be reported, not read as clean"
 fi
 
 # ===========================================================================
@@ -130,9 +210,15 @@ fi
 # Each of these is a spelling that ACTUALLY APPEARED in the pre-fix files, or is one
 # line's edit away from one. Per #3249 a guard that has not been observed firing is not
 # evidence, so every spelling is driven rather than reasoned about.
-lint_probe() { # lint_probe <line> — the lint's findings for a one-line file
+lint_probe() { # lint_probe <line> — the lint's findings for a one-line file WITH a driver handle
   printf 'DRIVER=/x/ws0-baseline.sh\n%s\n' "$1" > "$TMP/probe.sh"
   ws0_hermeticity_lint "$TMP/probe.sh"
+}
+# ...and the same, in a file that NEVER names the driver, for asserting the file-level scope of
+# the fail-closed posture (see the `lint-silent (B1 scope)` case below).
+lint_probe_nohandle() {
+  printf '%s\n' "$1" > "$TMP/probe-nohandle.sh"
+  ws0_hermeticity_lint "$TMP/probe-nohandle.sh"
 }
 # The probe LINES are COMPOSED from `$SH` rather than written literally, and that is not
 # cosmetic: THIS FILE is inside the lint's own subject (`test_ws0_*.sh`), so a literal
@@ -151,12 +237,74 @@ for spelling in \
   "PATH=\"\$SHIM:\$PATH\" $SH \"\$DRIVER\" --corpus /c" \
   "$ALT_SH \"\$DRIVER\" --corpus /c" \
   ; do
-  if grep -q 'invokes the WS0 driver outside ws0_driver_run' <<<"$(lint_probe "$spelling")"; then
+  if grep -q 'invokes (or could invoke) the WS0 driver outside ws0_driver_run' <<<"$(lint_probe "$spelling")"; then
     pass "lint-fires: a bare invocation spelled \`${spelling:0:44}…\` is FLAGGED"
   else
     fail "lint-fires: '$spelling' must be flagged (got: $(lint_probe "$spelling"))"
   fi
 done
+
+# --- the FOUR spellings the awk predecessor could not see (#3272 round 4, B1) ------------
+# Each of these was MEASURED at ZERO findings against the pre-fix lint. They are asserted
+# separately from the list above, and labelled, so a regression names the shape it lost rather
+# than "one of six probes".
+#
+# The FIRST is a LINE CONTINUATION, which is why it cannot be a single-line probe: the shell
+# token and the driver token are on different PHYSICAL lines, and neither line alone carries
+# both — the exact reason a physical-line predicate missed it.
+printf 'DRIVER=/x/ws0-baseline.sh\n%s \\\n  "$DRIVER" --corpus /c\n' "$SH" > "$TMP/probe.sh"
+if grep -q 'invokes (or could invoke)' <<<"$(ws0_hermeticity_lint "$TMP/probe.sh")"; then
+  pass "lint-fires (B1): a LINE-CONTINUATION split \`bash \\\` + \`\"\$DRIVER\"\` is FLAGGED (was 0 findings)"
+else
+  fail "lint-fires (B1): the continuation-split invocation must be flagged"
+fi
+# ...and the finding must be reported at the line the LOGICAL line STARTED on, or a reader
+# cannot find it.
+if grep -q '^2: ' <<<"$(ws0_hermeticity_lint "$TMP/probe.sh")"; then
+  pass "lint-fires (B1): the continuation finding is reported at the logical line's START (line 2)"
+else
+  fail "lint-fires (B1): expected the finding at line 2 (got: $(ws0_hermeticity_lint "$TMP/probe.sh"))"
+fi
+# The other three: no shell token at all. A bare exec, an `exec`, and the `env -i` form the
+# DRIVER'S OWN USAGE TEXT documents (ws0-baseline.sh's usage block), which makes it the shape
+# most likely to be written.
+for b1 in \
+  '"$DRIVER" --corpus /c' \
+  'exec "$DRIVER" --corpus /c' \
+  'env -i "$DRIVER" --corpus /c' \
+  'timeout 60 "$DRIVER" --corpus /c' \
+  'taskset -c 2,10 "$DRIVER" --corpus /c' \
+  ; do
+  if grep -q 'invokes (or could invoke)' <<<"$(lint_probe "$b1")"; then
+    pass "lint-fires (B1): \`$b1\` is FLAGGED (no shell token on the line; was 0 findings)"
+  else
+    fail "lint-fires (B1): '$b1' must be flagged — it reaches the measurement loop on Linux (got: $(lint_probe "$b1"))"
+  fi
+done
+# THE POSTURE ITSELF, driven: within a file that HAS A HANDLE on the driver, an UNRESOLVABLE
+# command word is treated AS an invocation. That is what removes the enumeration — a spelling
+# nobody has thought of yet fails CLOSED — and it is the perf lint's layer-1 posture ported.
+#
+# `$copy` is the real instance: `test_ws0_cpu_pinning_guards.sh` builds a driver COPY and runs
+# it, so a variable holding a path is genuinely how the driver gets invoked here.
+if grep -q 'VARIABLE this lint cannot resolve' <<<"$(lint_probe 'out=$("$copy" --corpus /c)')"; then
+  pass "lint-fires (B1): an UNRESOLVABLE command word is treated AS an invocation (no enumeration left to be wrong)"
+else
+  fail "lint-fires (B1): an unresolvable command word must fail closed (got: $(lint_probe 'out=$("$copy" --corpus /c)'))"
+fi
+# THE SCOPE OF THAT POSTURE IS FILE-LEVEL, and it is asserted rather than left implicit, because
+# the alternative was MEASURED and is worse. `has_driver_handle` requires the FILE to name the
+# driver before any unresolvable command word in it counts. Removing that gate — i.e. treating
+# every unresolvable command word in every script as a candidate — produces **74 findings across
+# the six shipped ws0 suites**, all of them ordinary code (`out=$(run_report "$d" …)`,
+# `root="$(cd "$dir/../.." && pwd)"`, `base="$(basename "$lib")"`). A lint with 74 false
+# findings is the lint an operator deletes, which is why the gate exists and why its cost is
+# recorded here instead of being rediscovered.
+if [ -z "$(lint_probe_nohandle 'out=$("$some_unrelated_cmd" --flag x)')" ]; then
+  pass "lint-silent (B1 scope): in a file with NO driver handle, an unresolvable command word is NOT a finding (74 false findings measured without this gate)"
+else
+  fail "lint-silent (B1 scope): a file that never names the driver must not be linted for unresolvable words"
+fi
 
 # ===========================================================================
 # 4 — the lint does NOT fire on ordinary lines
@@ -313,33 +461,63 @@ else
 fi
 
 # ===========================================================================
-# 7 — EVERY self-test carries a minimum-check-count FLOOR, and it FIRES
+# 7 — EVERY ws0 self-test carries a minimum-check-count FLOOR WITH TEETH, and it FIRES
 # ===========================================================================
 # `set -uo pipefail` (no `-e`) means a block that silently never executes lowers a suite's
 # check count and registers NO failure, while the gate reads only the exit code. So each
-# `test_ws0_*.sh` now ends in a `[ "$checks" -ge N ]` assert. That is only evidence if it
-# fires, so it is DRIVEN: a copy of each suite with its floor raised above its real count
-# must EXIT NON-ZERO. Cheap because the floor is checked at the very end — the copy runs
-# its real checks once, which the gate would do anyway.
-for suite in $(ws0_hermeticity_lint_subject "$TESTS_DIR"); do
+# `test_ws0_*.sh` ends in a `[ "$checks" -ge N ]` assert.
+#
+# THE FLOOR MUST HAVE TEETH (#3272 review round 4 nit). The check here used to be
+# `grep -q 'MIN_CHECKS='`, which ACCEPTS `MIN_CHECKS=0` — a floor satisfied by a suite that ran
+# nothing, i.e. decorative. And a hardcoded expected value per suite would be bumped rather than
+# derived. So the floor is now checked as a NUMBER against the suite's OWN OBSERVED check count:
+# it must be >= a hard minimum (a floor of 0/1 is not a floor) and it must be <= what the suite
+# actually runs (a floor above the real count would red the suite, which the `floor-fires` probe
+# below drives deliberately).
+#
+# THE SUBJECT IS THE WS0 SUITES, not the whole tests dir. `ws0_hermeticity_lint_subject` now
+# covers every script under `scripts/tests/` (that is B2's fix, and correct for the LINT), but
+# the floor convention is a WS0 convention — the other ~50 suites in this repo do not carry it,
+# and asserting it over them would red on 50 files this issue does not own.
+FLOOR_HARD_MIN=5
+for suite in "$TESTS_DIR"/test_ws0_*.sh; do
   base="$(basename "$suite")"
-  if ! grep -q 'MIN_CHECKS=' "$suite"; then
-    fail "floor-present: $base carries no MIN_CHECKS floor — its suite-level 0/0 is open"
+  floor=$(sed -n 's/^MIN_CHECKS=\([0-9]\{1,\}\)$/\1/p' "$suite" | head -1)
+  if [ -z "$floor" ]; then
+    fail "floor-present: $base carries no numeric MIN_CHECKS floor — its suite-level 0/0 is open"
     continue
   fi
-  pass "floor-present: $base carries a MIN_CHECKS floor"
+  if [ "$floor" -lt "$FLOOR_HARD_MIN" ]; then
+    fail "floor-present: $base has MIN_CHECKS=$floor, below the hard minimum $FLOOR_HARD_MIN — a floor that low is DECORATIVE (MIN_CHECKS=0 used to satisfy this check)"
+    continue
+  fi
+  pass "floor-present: $base carries a MIN_CHECKS floor of $floor (>= the $FLOOR_HARD_MIN hard minimum, so not decorative)"
 done
-# The FIRING half, on ONE suite (the cheapest of the three), because the mechanism is
-# textually identical in all four and running all four twice would multiply this
-# component's runtime for no new information. `test_ws0_hermeticity.sh` is excluded — it
-# is the running suite.
+# ...and the hard minimum itself must have been OBSERVED to reject. Driven, because "the floor
+# has teeth" is exactly the kind of claim that is true of the code and false of the check.
+floor_probe_dir="$TMP/floor-teeth"; mkdir -p "$floor_probe_dir"
+printf 'MIN_CHECKS=0\n' > "$floor_probe_dir/test_ws0_decorative.sh"
+decorative=$(sed -n 's/^MIN_CHECKS=\([0-9]\{1,\}\)$/\1/p' "$floor_probe_dir/test_ws0_decorative.sh" | head -1)
+if [ -n "$decorative" ] && [ "$decorative" -lt "$FLOOR_HARD_MIN" ]; then
+  pass "floor-present: OBSERVED — MIN_CHECKS=0 is REJECTED by the hard minimum (the pre-fix grep accepted it)"
+else
+  fail "floor-present: MIN_CHECKS=0 must be rejected, else the floor is decorative"
+fi
+# The FIRING half, on ONE suite, because the mechanism is textually identical in all of them and
+# running several twice would multiply this component's runtime for no new information.
+#
+# `test_ws0_host_state_guards.sh` (393 lines, 25 checks, no listeners) is the CHEAPEST — measured.
+# It used to be `test_ws0_cpu_pinning_guards.sh`, which the comment CALLED "the cheapest of the
+# three" while it is in fact the LARGEST: 1213 lines, 138 checks, real listeners and multi-second
+# waits, driven twice more here (#3272 review round 4 nit). Being wrong about which is cheapest is
+# only a runtime cost, but the comment asserting it was evidence of nothing.
 #
 # The copy is driven from a MIRROR TREE of symlinks, never from a file written into the
 # repo: each suite resolves `REPO_ROOT` from its own `BASH_SOURCE`, so a copy in `$TMP`
 # alone looks for `scripts/perf` beside itself and dies on the wrong thing. Writing into
 # the real `scripts/tests` would work and is not available: the gate's `tree-integrity`
 # check FAILS a run whose worktree mutates mid-run (#2926).
-probe_suite="test_ws0_cpu_pinning_guards.sh"
+probe_suite="test_ws0_host_state_guards.sh"
 probe_root="$TMP/floor-probe-root"
 mkdir -p "$probe_root/scripts/tests"
 ln -s "$REPO_ROOT/scripts/perf" "$probe_root/scripts/perf"
@@ -381,7 +559,7 @@ fi
 # failure, and the gate reads only the exit code — so a suite that runs 3 of its checks
 # and passes them exits 0. The floor is the suite-level `0/0` guard. It is deliberately
 # below the current count (so adding a case does not red the suite) and far above zero.
-MIN_CHECKS=24
+MIN_CHECKS=40
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
