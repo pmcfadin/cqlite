@@ -54,7 +54,16 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/roborev-guard-test.XXXXXX")
+# mktemp is verified BEFORE the trap and before any fixture (#3296). Unchecked, a failed or
+# empty-output `mktemp -d` leaves $tmp empty, every `"$tmp/x"` resolves to `/x`, and this file
+# creates those paths unconditionally — root-level file creation on a privileged runner. Arming
+# `rm -rf "$tmp"` on an unverified path is the same hazard, hence the ordering. Non-empty AND a
+# directory: a diagnostic printed on stdout would pass the emptiness test alone.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/roborev-guard-test.XXXXXX") || tmp=''
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - mktemp -d did not yield a usable temp directory (got: %s) — refusing to run rather than resolving every "$tmp/..." fixture path under /\n' "${tmp:-<empty>}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
 
 # ---------------------------------------------------------------------------

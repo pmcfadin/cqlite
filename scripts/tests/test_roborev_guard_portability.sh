@@ -73,7 +73,23 @@ if [ ! -f "$GUARD" ]; then
   exit 1
 fi
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/roborev-portability.XXXXXX")
+# THE TEMP DIRECTORY IS VERIFIED BEFORE ANYTHING USES IT, AND BEFORE THE TRAP (#3296 round-12).
+# An unchecked `mktemp -d` that fails, or that prints nothing, leaves $tmp EMPTY — and then every
+# `"$tmp/x"` below resolves to `/x`. This script does not merely read those paths, it CREATES them
+# unconditionally: `mkdir -p "$tmp/real/work"`, `ln -s "$tmp/real" "$tmp/link"`,
+# `chmod 000 "$tmp/cnr-noread.sh"`, dozens of `>"$tmp/…"` fixtures. On a privileged runner that is
+# root-level file creation, and the files are left behind. It is gate-wired into `roborev-lints`, so
+# it runs on every --lite and every full gate.
+#
+# THE ORDER IS THE POINT, not just the check: installing `trap 'rm -rf "$tmp"' EXIT` while $tmp may
+# be empty arms a recursive delete for a path that is not ours, so the verification must come first.
+# BOTH facts are required — a NON-EMPTY string AND an actual DIRECTORY — because a `mktemp` that
+# emitted a diagnostic on stdout, or a path that vanished, would satisfy the emptiness test alone.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/roborev-portability.XXXXXX") || tmp=''
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - mktemp -d did not yield a usable temp directory (got: %s) — refusing to run rather than resolving every "$tmp/..." fixture path under /\n' "${tmp:-<empty>}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
 
 # ===========================================================================
