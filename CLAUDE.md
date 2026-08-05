@@ -492,6 +492,36 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
   **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
   Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
+  **Snapshot-delivered diffs are OBSERVED AND REPORTED, not certified (#3312, owner ruling C‴).** A large
+  diff is not inlined: roborev writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file,
+  names it in the prompt, and deletes it before `roborev review --wait` returns — so the prompt carries
+  **zero** `diff --git` headers and the original key FALSE-FAILED every large review. Certifying that mode
+  meant trusting a copy of a vanishing file, and **seven review rounds found eleven false-PASS vectors in the
+  machinery built to make that copy trustworthy** (capture validation, private publication dirs, sequencing,
+  digest agreement, identity binding, path equality). The pre-registered exit therefore fired: in snapshot
+  mode `prompt-content:` reports **`NOTICE`**, and the block records **`snapshot-path:`**,
+  **`snapshot-digest:`** (observed *while the review ran*, else `UNOBSERVED (<why>)`) and
+  **`snapshot-expected:`** (the census code subset the run expected, *not* asserted). **A snapshot-mode PASS
+  does not assert the reviewer received the census paths** — a closer wanting certainty inspects the diff or
+  re-reviews a smaller range. **INLINE mode is unchanged and still FAILs on an absent census path.** The
+  wrapper still refuses to READ a path that is not absolute, not inside the reviewed repo, or reached through
+  a symlink — safety survives the loss of certification — and an unobserved snapshot always names why.
+  **One PREDICATE FAMILY, fixed categorically along the way (#3272's three-recurrence rule):** `! -f`, then
+  `! -e`, then `! -e` again each read "cannot tell" as "not there". **Every shell file test is two-valued and
+  collapses "unobservable" onto the answer that reads as "nothing is wrong"**, so absence is now established
+  affirmatively by one helper (`verified-absent` / `present` / `unreadable`, fail-closed, naming what was
+  unobservable) and a `--lite` lint FAILs any unannotated bare file predicate in that code.
+
+  **NEITHER HALF OF ROBOREV'S EXCLUSION SET IS MODELLED (#3283 configured, #3278 compiled-in).** Beyond
+  `exclude_patterns`, roborev appends a hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`,
+  `**/pnpm-lock.yaml`, `**/.cache/**`, …) that no configuration can switch off. Modelling either half was
+  built and then **DELETED on #3229**, and **subtraction cannot introduce a false PASS** — with nothing
+  predicted, nothing is excused. So the residual, stated rather than left to be rediscovered: **a path
+  roborev excludes by either half is silently dropped from the reviewer's diff, nothing names it
+  pre-enqueue, and `prompt-content:` FAILs on its absence.** That **fails CLOSED** — the cost is a
+  diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
+  **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
+  Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
   **And it reads BOTH of roborev's diff-delivery modes (#3312).** A large diff is **not inlined**: roborev
   writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file and the prompt ends with
   ``Read the diff from: `<abs path>` ``, carrying **zero** `diff --git` headers — which made the key

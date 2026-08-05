@@ -176,83 +176,25 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    prose after the fact. The same mechanism is why `prompt-content:` asserts the **CODE subset** of the
    census — and why an unretrievable prompt is a `FAIL` there, never a passing `UNAVAILABLE`.
 
-   **`prompt-content:` reads both of roborev's diff-delivery modes (issue #3312).** A large diff is *not*
-   inlined: roborev writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file and the
-   prompt ends with ``Read the diff from: `<abs path>` ``, carrying **zero** `diff --git` headers. Reading
-   only the prompt text therefore FALSE-FAILED every large review — measured `FAIL (21/21 code census paths
-   absent from the prompt)` on job 6836, a review with 1.47M input / 1.35M cached / 6.1k output, four
-   findings at real `file:line`, and both vacuity tiers PASS. That reds exactly the diffs that most need
-   review, which is how a guard gets waived. The fix is **not** "treat an empty prompt as a pass" (that
-   reopens the discarded-diff trigger and the `0/0` false pass) — it is *follow the diff to where it
-   actually is*: headers are collected from the snapshot file, unioned with any inline ones, judged by the
-   same canonical matcher against the same census. The snapshot path is taken **only** from the verified
-   job's own prompt, matched at column zero (so prose inside the reviewed diff cannot name its own oracle),
-   and must be absolute, inside the reviewed repo and under that repo's own `roborev-snapshot-<id>`
-   directory. Every other outcome — cleaned-up, missing, unreadable, empty, header-less, foreign-repo,
-   unbound-job, ambiguous, relative, unparseable — is a distinct `FAIL (snapshot diff unusable: …)` cause.
-   **The snapshot is captured while the review runs, because it does not survive it.** Measured live on this
-   fleet (job 3: 12 files, +3311, a 232,820-byte snapshot carrying exactly the 9 code census paths, 541,812
-   input / 472,576 cached tokens, a genuine completed review): roborev **deletes**
-   `.roborev/roborev-snapshot-<id>/` when the review finishes — *before* `roborev review --wait` returns — and
-   `roborev show` cannot hand the diff back (`--prompt`/`--json` only, no `--diff`). So reading the named path
-   after the fact reports `cleaned-up` on **every** real snapshot-mode review, which is a differently-named
-   FAIL rather than a fix. The wrapper arms a watcher before the review that copies each snapshot out of the
-   reviewed repo keyed by its directory id, and `prompt-content:` then reads **its own copy of the id the
-   job's prompt names** (the block says `in the captured snapshot diff`). It never recomputes the diff from
-   `git` — that would make the key compare our census against our own diff and agree with itself, which is
-   the vacuous pass this key exists to prevent. A capture that never happens is still a `cleaned-up` FAIL.
+   **Snapshot-delivered diffs are observed and reported, not certified (issue #3312, owner ruling).** A
+   large diff is not inlined: roborev writes it to a **transient** `.roborev/roborev-snapshot-<id>/` file,
+   names it in the prompt, and deletes it before `roborev review --wait` returns, so the prompt carries
+   **zero** `diff --git` headers — which made the original check false-FAIL every large review. Certifying
+   that mode required trusting a copy of a vanishing file, and **seven review rounds found eleven false-PASS
+   vectors in the machinery built to make the copy trustworthy**. So the pre-registered exit fired and that
+   machinery was retired: in snapshot mode `prompt-content:` reports a **`NOTICE`**, and the block records
+   `snapshot-path:`, `snapshot-digest:` (observed while the review ran, else `UNOBSERVED (<why>)`) and
+   `snapshot-expected:` (the census code subset the run expected, not asserted). **A snapshot-mode PASS does
+   not assert that the reviewer received the census paths** — inspect the diff, or re-review a smaller range,
+   if you need that. **Inline mode is unchanged and still FAILs on an absent census path.** Safety survives
+   the loss of certification: the wrapper still refuses to read a path that is not absolute, not inside the
+   reviewed repository, or reached through a symlink, and an unobserved snapshot always says why.
 
-   The capture apparatus is deliberately small, and its scope is recorded in code: it defends against
-   **silent tooling failure and staleness**, not against an adversary with write access to the reviewed
-   repository (who can write the diff, the wrapper or the tests, so hardening a file copy against them is
-   unwinnable). Four properties do the work, three of them by construction: the capture directory is
-   **private and per-run** (`mktemp -d` 0700, outside the repo, removed at exit — nothing can predate or
-   share it); a capture is **published by one rename** (content and identity together, so a kill mid-capture
-   cannot produce a half-published one — two separate writes previously let a SIGTERM between them report a
-   perfectly good snapshot as unvalidated, a false FAIL of exactly the kind this issue removes); reuse is
-   keyed on a **content digest**, so a same-length rewrite cannot leave a stale capture in place; and the
-   capture is matched to the prompt by **whole-path equality**, so the canonical sibling of a
-   differently-named file cannot stand in for it. Each capture is published to a **fresh, uniquely sequenced directory**, because `mv <dir> <existing-dir>`
-   does not fail — it nests, leaving the previous capture exactly where the resolver reads it; the rename-aside
-   and backup logic that invited that was deleted rather than hardened, and the resolver takes the newest
-   publication. A capture is consulted **only when the live path does not exist**: something that exists but is
-   not a readable regular file is reported `unreadable` rather than papered over with a copy. Publication also
-   requires **three digests that agree** —
-   the source before the copy, the source after it, and the staged copy, each of them *measured*, because an
-   empty digest compares equal to another empty one — so a source mutated mid-copy is discarded and retried
-   rather than published under the final digest and reused. The capture directory's containment is decided on
-   its **`pwd -P`-resolved** path, since a lexical test admits a relative `TMPDIR` or one whose path traverses
-   a symlink into the checkout; a refusal is reported as a named notice, and the review then fails closed on
-   the absent capture rather than certifying from a directory inside the tree under review.
-
-   **One predicate family, fixed categorically.** Three separate vectors turned out to be a single
-   mistake: `[ ! -f ]` read "not a regular file" as *gone*, `[ ! -e ]` read "not stat-able" as *gone*, and
-   `[ ! -e ]` again read "an unsearchable parent" as *gone*. The general fact — worth carrying to any shell
-   guard — is that **every `test`/`[` file predicate is two-valued, so it must collapse "cannot tell" onto
-   one of its answers, and the one it picks is always the permissive one.** Absence is therefore established
-   affirmatively by a single shared helper (ENOENT **and** an observable parent ⇒ `verified-absent`;
-   anything else ⇒ `unreadable`, fail-closed, naming what could not be observed), a capture may substitute
-   for the live snapshot ONLY on `verified-absent`, and a `--lite` lint fails any unannotated bare file
-   predicate in the apparatus — so instance four is prevented rather than awaited.
-
-   **One limitation is stated rather than chased.** Polling establishes *which versions of the snapshot
-   existed at the polls*, not that the captured one was the file's final bytes — roborev deletes it without
-   telling us. This is left as a documented residual for three reasons: the proposed remedies (hold an open
-   descriptor until completion, or ask roborev for a finalized artifact) need cooperation the tool does not
-   offer (`roborev show` has `--prompt`/`--json`, no `--diff`, and the file is gone before `--wait` returns);
-   the check's subject is **the diff the reviewer received**, so a version materialising after the read is not
-   what it should assert about; and the exposure is bounded to a rewrite inside the final ≤1s poll window,
-   which measured roborev behaviour does not exhibit (it writes the snapshot, then invokes the reviewer). If
-   evidence of a mid-review rewrite appears, that reasoning is what changes first.
-
-   Two further facts, read out of the installed binary (roborev v0.61.2) rather than inferred from a single
-   transcript: roborev has **two** snapshot instruction spellings — the full one and a compact
-   ``(Diff too large; read `<path>`.)`` — and both are read; and it has a **third** oversize tier (its
-   `codex_*`/`generic_*` fallback templates) that ships **neither** the diff nor a snapshot, telling the
-   reviewer to run git commands itself. Nothing obtainable locally can establish what a review in that mode
-   received, so it remains a `FAIL` — with a cause that now names the mode instead of reporting an empty
-   prompt. Whether a delegated-inspection review is certifiable at all is an owner decision, not something
-   the wrapper may assume.
+   **The general lesson worth carrying elsewhere** is the predicate family that surfaced three times on the
+   way (`! -f`, then `! -e`, then `! -e` again): **every `test`/`[` file predicate is two-valued, so it must
+   collapse "cannot tell" onto one of its answers — and it always picks the permissive one.** Absence is
+   therefore established affirmatively by a single helper (`verified-absent` / `present` / `unreadable`,
+   fail-closed, naming what could not be observed), with a `--lite` lint over any bare file predicate.
 
    The sanctioned substitute is primary-source verification recorded in the PR (for a docs
    change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may
