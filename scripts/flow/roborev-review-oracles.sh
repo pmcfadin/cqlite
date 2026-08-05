@@ -1140,7 +1140,7 @@ _roborev_capture_validate() {
 # The published unit is a DIRECTORY per snapshot id: `<capture-dir>/<id>/{content.diff,meta}`, where
 # `meta` records the validated relative path and the digest captured. One rename publishes both.
 _roborev_snapshot_capture_loop() {
-  local repo="$1" out="$2" f id rel stage published dg_pre dg_post dg_staged
+  local repo="$1" out="$2" f id rel stage published dest _pub dg_pre dg_post dg_staged
   # GRACEFUL SHUTDOWN: TERM only asks the loop to stop; the current iteration completes, so a capture
   # in flight when the review ends is finished rather than abandoned.
   _rx_capture_stop=0
@@ -1168,8 +1168,13 @@ _roborev_snapshot_capture_loop() {
       # agreement below and publish an unverified capture — a textbook vacuous pass. Belt and braces
       # on top of the `|| continue` above, because the guarantee must not depend on one call site.
       [ -n "$dg_pre" ] || continue
-      published="$out/$id/meta"
-      if [ -f "$published" ] \
+      # THE NEWEST PUBLICATION FOR THIS ID, found the same way the resolver finds it: the LAST match of
+      # the padded-sequence glob. Reuse is skipped only when that publication records the SAME digest.
+      published=""
+      for _pub in "$out"/pub."$id".*; do
+        [ -f "$_pub/meta" ] && published="$_pub/meta"
+      done
+      if [ -n "$published" ] \
         && [ "$(sed -n 's/^digest=//p' "$published" 2>/dev/null | head -1)" = "$dg_pre" ]; then
         continue
       fi
@@ -1209,13 +1214,26 @@ _roborev_snapshot_capture_loop() {
         rm -rf "$stage" 2>/dev/null || :
         continue
       }
-      # ONE RENAME PUBLISHES CONTENT AND METADATA TOGETHER. A previous publication is replaced by
-      # renaming it aside first, so the window in which `<id>` does not exist is a rename, not a copy.
-      if [ -d "$out/$id" ]; then
-        mv "$out/$id" "$out/.old.$$.$id" 2>/dev/null || :
-        rm -rf "$out/.old.$$.$id" 2>/dev/null &
-      fi
-      mv "$stage" "$out/$id" 2>/dev/null || rm -rf "$stage" 2>/dev/null || :
+      # ONE RENAME PUBLISHES CONTENT AND METADATA TOGETHER, INTO A DESTINATION THAT CANNOT ALREADY
+      # EXIST (roborev job 10, blocker 1). The previous revision published to the FIXED path
+      # `<out>/<id>`, renamed any existing publication aside first, and ignored whether that rename
+      # worked — and `mv <dir> <existing-dir>` does not fail, it NESTS: the staged directory landed
+      # INSIDE the old one, leaving the previous `content.diff` and `meta` at exactly the paths the
+      # resolver reads, so a rewritten snapshot certified the older version.
+      #
+      # THE FIX IS SUBTRACTION, NOT A RETURN-CODE CHECK. Each capture publishes to
+      # `<out>/pub.<id>.<seq>` with a per-run monotonic sequence, so the destination is fresh by
+      # construction: there is no pre-existing destination, hence no rename-aside, no backup path, no
+      # background delete, and no nesting case to reason about. Superseded publications are simply left
+      # behind — the whole capture directory is removed at exit, so garbage collection would be another
+      # deletion path to get wrong for no benefit.
+      #
+      # THE SEQUENCE IS ZERO-PADDED so a lexicographic glob is also numeric order, which is what lets
+      # the resolver take the LAST match as the newest without parsing anything. Six digits bounds a run
+      # at 999,999 publications (one per poll-with-change; a poll is 1s), which no review approaches.
+      _rx_capture_seq=$((${_rx_capture_seq:-0} + 1))
+      printf -v dest 'pub.%s.%06d' "$id" "$_rx_capture_seq"
+      mv "$stage" "$out/$dest" 2>/dev/null || rm -rf "$stage" 2>/dev/null || :
     done
     [ "$_rx_capture_stop" -eq 0 ] || return 0
     sleep "$_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS" 2>/dev/null || sleep 1
@@ -1517,30 +1535,38 @@ roborev_collect_review_diff_headers() {
     return 0
   fi
 
-  # THE CAPTURE, consulted ONLY when the original is no longer there — which, measured live, is the
+  # THE CAPTURE IS CONSULTED ONLY WHEN THE LIVE PATH DOES NOT EXIST — which, measured live, is the
   # NORMAL case (roborev deletes the snapshot before `--wait` returns). It is OUR copy, taken from
   # inside the reviewed repo during this run, into a PRIVATE per-run directory nothing else writes.
   #
-  # ONE THING IS REQUIRED OF IT, and it is an accident guard rather than a trust anchor: the capture's
+  # `! -e`, NOT `! -f` (roborev job 10, blocker 2). The predicate used to be "not a regular file",
+  # which is the affirmative-measurement defect in its purest form: a permissive branch keyed on the
+  # ABSENCE of one bad signal, so every unmeasured state inherited it. A DIRECTORY or a FIFO at the
+  # named path is not "the snapshot is gone" — it is "the named path is something we cannot read", a
+  # state the block must REPORT rather than silently paper over with a capture. The documented contract
+  # was always "the original no longer exists"; now the code says that too.
+  #
+  # ONE THING IS REQUIRED OF A CAPTURE, and it is an accident guard rather than a trust anchor: its
   # `meta` must record the SAME relative path the prompt names. The watcher only ever copies the
   # canonical `roborev-snapshot-content.diff`, while the binding accepts any file under a snapshot
   # directory — so keying by directory id alone let a prompt naming a DIFFERENT file be answered with
   # the canonical sibling, certifying a diff the reviewer was never pointed at. Whole-path equality is
   # what closes that, and `meta` exists to make the comparison possible.
   #
-  # `meta` survived the move to a private directory for exactly that reason and no other: as an
-  # anti-PLANTING record it would now be pointless (the directory is created by `mktemp -d` 0700 per
-  # run, so nothing can predate or share it), and as an anti-TEARING record it is unnecessary too
-  # (publication is a single rename). Its remaining job is IDENTITY. A capture whose `meta` is absent
-  # or unreadable is therefore an internal inconsistency, not an attack, and it is still non-passing:
-  # a capture we cannot identify is a capture we cannot say the reviewer received.
+  # THE NEWEST PUBLICATION WINS: publications are `pub.<id>.<zero-padded-seq>`, so the LAST match of
+  # the glob is the most recent one the watcher recorded. There is no fixed destination to overwrite,
+  # which is why no rename-aside or backup path exists to be checked.
   _rx_snap_capture=""
   _rx_snap_capture_reject=""
-  if [ ! -f "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
+  if [ ! -e "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
     && [ -n "${_rx_snap_dir_id:-}" ]; then
-    _rx_cap_file="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id/content.diff"
-    _rx_cap_marker="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id/meta"
-    if [ -f "$_rx_cap_file" ]; then
+    _rx_cap_pub=""
+    for _rx_cap_cand in "$ROBOREV_SNAPSHOT_CAPTURE_DIR"/pub."$_rx_snap_dir_id".*; do
+      [ -f "$_rx_cap_cand/content.diff" ] && _rx_cap_pub="$_rx_cap_cand"
+    done
+    if [ -n "$_rx_cap_pub" ]; then
+      _rx_cap_file="$_rx_cap_pub/content.diff"
+      _rx_cap_marker="$_rx_cap_pub/meta"
       if [ ! -f "$_rx_cap_marker" ]; then
         _rx_snap_capture_reject="capture-unidentified"
       else
@@ -1557,7 +1583,7 @@ roborev_collect_review_diff_headers() {
   fi
   if [ "$_rx_snap_capture_reject" = "capture-unidentified" ]; then
     ROBOREV_DIFF_SOURCE_STATE="capture-unidentified"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a capture of snapshot directory '${_rx_snap_dir_id}' exists ($_rx_cap_file) but its identity record is missing or unreadable ($_rx_cap_marker), so this run cannot say WHICH file it copied — and the original is gone, so it cannot be re-derived. Publication is a single rename, so this is an internal inconsistency in the wrapper rather than anything about the branch under review; it is still non-passing, because a capture we cannot identify is not evidence of what the reviewer received. Failing closed."
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a capture of snapshot directory '${_rx_snap_dir_id}' exists ($_rx_cap_file) but its identity record is missing or unreadable ($_rx_cap_marker), so this run cannot say WHICH file it copied — and the original is gone, so it cannot be re-derived. Publication is a single rename into a fresh directory, so this is an internal inconsistency in the wrapper rather than anything about the branch under review; it is still non-passing, because a capture we cannot identify is not evidence of what the reviewer received. Failing closed."
     return 0
   fi
   if [ "$_rx_snap_capture_reject" = "capture-path-mismatch" ]; then
@@ -1568,7 +1594,7 @@ roborev_collect_review_diff_headers() {
   if [ ! -e "$_rx_snap_bound_path" ] && [ -z "$_rx_snap_capture" ]; then
     if [ ! -d "${_rx_snap_dir:-}" ]; then
       ROBOREV_DIFF_SOURCE_STATE="cleaned-up"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists AND this run captured no copy of it — roborev deletes ${_rx_snap_dir:-<unresolved>} when the review finishes, which is BEFORE 'roborev review --wait' returns, so the copy taken while the review ran (${ROBOREV_SNAPSHOT_CAPTURE_DIR:-<capture never started>}/${_rx_snap_dir_id:-<unknown id>}/content.diff) is the only possible evidence and it is not there. There is therefore NO evidence of what the reviewer received. Failing closed: check that the wrapper's capture watcher started (it needs a writable log directory) and re-run the review."
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists AND this run captured no copy of it — roborev deletes ${_rx_snap_dir:-<unresolved>} when the review finishes, which is BEFORE 'roborev review --wait' returns, so the copy taken while the review ran (${ROBOREV_SNAPSHOT_CAPTURE_DIR:-<capture never started>}/pub.${_rx_snap_dir_id:-<unknown id>}.<seq>/content.diff) is the only possible evidence and it is not there. There is therefore NO evidence of what the reviewer received. Failing closed: check that the wrapper's capture watcher started (it needs a writable temp directory OUTSIDE the reviewed repo) and re-run the review."
     else
       ROBOREV_DIFF_SOURCE_STATE="missing"
       ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot directory EXISTS but the named diff file is not in it, and no capture of it was taken: $_rx_snap_bound_path. The reviewer was told to read a file that is not there, so nothing establishes what it received. Failing closed."
@@ -1583,9 +1609,12 @@ roborev_collect_review_diff_headers() {
     _rx_snap_bound_path="$_rx_snap_capture"
     ROBOREV_DIFF_SOURCE_PATH="$_rx_snap_capture"
   fi
+  # THE LIVE PATH EXISTS BUT IS NOT SOMETHING WE CAN READ AS A DIFF — a directory, a FIFO, a socket, a
+  # file we lack permission on. Reported, never substituted: the capture branch above is not reachable
+  # in this state, precisely so that "the named path is unusable" cannot be answered with a copy.
   if [ ! -f "$_rx_snap_bound_path" ] || [ ! -r "$_rx_snap_bound_path" ]; then
     ROBOREV_DIFF_SOURCE_STATE="unreadable"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names is not a READABLE REGULAR FILE: $_rx_snap_bound_path. An oracle that cannot be consulted is a NON-PASSING verdict, never a pass — failing closed and naming the path."
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names is not a READABLE REGULAR FILE: $_rx_snap_bound_path. An oracle that cannot be consulted is a NON-PASSING verdict, never a pass — and it is NOT answered from a capture, because a path that exists as something unreadable is a different fact from a snapshot that was deleted. Failing closed and naming the path."
     return 0
   fi
   snap_bytes=$(tr -d '[:space:]' <"$_rx_snap_bound_path" | wc -c | tr -d '[:space:]')
