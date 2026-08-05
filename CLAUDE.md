@@ -504,6 +504,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   (cleaned-up, missing, unreadable, empty, header-less, foreign-repo, unbound-job, ambiguous, relative,
   unparseable) FAILs closed under its own cause. The snapshot dir is deleted minutes after the review, so
   **the wrapper must run while the review is fresh** — "already cleaned up" is a FAIL, never a pass.
+  Read out of the installed binary (v0.61.2) rather than from one transcript: there are **two** snapshot
+  instruction spellings (the full one and a compact ``(Diff too large; read `<path>`.)``), both read, and a
+  **THIRD oversize tier** (`codex_*`/`generic_*` templates) that ships **neither** a diff nor a snapshot and
+  tells the reviewer to run git itself — nothing local can verify that mode, so it stays a **FAIL** whose
+  cause now NAMES it; whether such a review is certifiable at all is an owner call, not the wrapper's.
   **That is ONE SHAPE, found repeatedly on #3229, so it is now a RULE: a positive verdict requires an
   AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
   every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state signal took the permissive

@@ -193,6 +193,15 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    Because that directory is deleted minutes after a review, **run the wrapper while the review is fresh**;
    a cleaned-up snapshot is a FAIL, never a pass.
 
+   Two further facts, read out of the installed binary (roborev v0.61.2) rather than inferred from a single
+   transcript: roborev has **two** snapshot instruction spellings — the full one and a compact
+   ``(Diff too large; read `<path>`.)`` — and both are read; and it has a **third** oversize tier (its
+   `codex_*`/`generic_*` fallback templates) that ships **neither** the diff nor a snapshot, telling the
+   reviewer to run git commands itself. Nothing obtainable locally can establish what a review in that mode
+   received, so it remains a `FAIL` — with a cause that now names the mode instead of reporting an empty
+   prompt. Whether a delegated-inspection review is certifiable at all is an owner decision, not something
+   the wrapper may assume.
+
    The sanctioned substitute is primary-source verification recorded in the PR (for a docs
    change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may
    ever record "roborev clean."**
