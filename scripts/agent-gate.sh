@@ -4614,10 +4614,21 @@ run_clippy() {
 # dataset corpus. Both scripts are SKIP-aware (no python3 -> loud SKIP, exit 0),
 # so this component is safe on a stripped runner; any real violation exits non-zero
 # and FAILs the component.
+#   * test_roborev_guard_portability.sh — the #3296 PLATFORM class: the guard test above
+#     is a shell script that runs on macOS worker boxes and Linux CI, and three GNU-only
+#     constructs in its own scaffolding (`sed -i EXPR FILE`, an operand-less `paste -s`,
+#     and a literal-vs-canonical `--repo` compare over macOS's /var -> /private/var
+#     symlink) made it report `failed: 7` on macOS while every hosted Linux lane was
+#     green — i.e. the LOCAL gate of record was red on the whole fleet and no CI signal
+#     could see it. This test keeps that class out structurally (a construct table whose
+#     every pattern carries a positive control) and behaviourally (the guard test's own
+#     helpers, extracted verbatim, exercised under BSD `sed`/`paste` shims), so the
+#     platform difference is caught on ANY platform. Hermetic, ~1s.
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
-    bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh"
+    bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" &&
+    bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh"
 }
 
 run_component() { # run_component <name> <cmd...>
