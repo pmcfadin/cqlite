@@ -413,14 +413,46 @@ fi
 # entirely. The file list is DISCOVERED from the directory, not enumerated: a fifth module
 # would otherwise be unscanned the moment someone adds it, which is how this hole opened.
 #
-# EVERY STRING CONSTANT is stripped via `ast` before the scan, not only docstrings: the
-# comments explaining each fix — and the DIAGNOSTICS that name the idiom they refuse
-# ("the check used to be `if errors > 0`") — necessarily quote what they removed. A literal
-# grep over the raw file reds on its own documentation, and the obvious "fix" for that
-# would be to stop documenting it. Stripping constants keeps the scan over CODE, which is
-# the only place an idiom can execute.
+# DOCSTRINGS and DIAGNOSTIC STRINGS are stripped via `ast` before the scan, because the
+# comments explaining each fix — and the diagnostics that name the idiom they refuse ("the
+# check used to be `if errors > 0`") — necessarily quote what they removed. A literal grep
+# over the raw file reds on its own documentation, and the obvious "fix" for that would be
+# to stop documenting it.
+#
+# A "diagnostic string" is one that appears as an ARGUMENT to `raise`/`Invalid(...)` or is
+# concatenated into one — i.e. prose. It is NOT every string constant: blanking those
+# rewrites `rec.get('cycles', 0)` to `rec.get('', 0)` and makes THE WHOLE SCAN VACUOUS,
+# which is what a first pass at this did. That was caught by planting a real idiom in a
+# probe module and observing the scan stay green — the check below is the permanent version
+# of that probe, because a vacuous scan is textually identical to a passing one.
 if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
 import ast, pathlib, sys
+
+def strip_prose(source):
+    """The module's source with DOCSTRINGS and DIAGNOSTIC strings blanked.
+
+    A diagnostic string is one reachable from a `raise` — the prose that necessarily quotes
+    the idiom it refuses. Argument literals (`rec.get('cycles', 0)`) are left ALONE:
+    blanking every string constant rewrites that to `rec.get('', 0)` and makes the scan
+    vacuous, which is a defect a first version of this had.
+    """
+    tree = ast.parse(source)
+    prose = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    prose.add(id(sub))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                node.body = body[1:] or [ast.Pass()]
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) in prose:
+            node.value = ""
+    return ast.unparse(ast.fix_missing_locations(tree))
+
 
 subject = sorted(
     p for p in pathlib.Path(sys.argv[1]).glob("ws0_*.py")
@@ -446,18 +478,7 @@ banned = {
 }
 hits = []
 for path in subject:
-    tree = ast.parse(path.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            body = node.body
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
-                    and isinstance(body[0].value.value, str):
-                node.body = body[1:] or [ast.Pass()]
-        # Every OTHER string constant too — a diagnostic quoting the idiom it refuses is
-        # documentation, not an execution of it.
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            node.value = ""
-    code = ast.unparse(ast.fix_missing_locations(tree))
+    code = strip_prose(path.read_text())
     hits += [f"{path.name}: {why}" for idiom, why in banned.items() if idiom in code]
 if hits:
     raise SystemExit("; ".join(hits))
@@ -468,36 +489,97 @@ then
 else
   fail "a permissive-default idiom is still present in the reporting path"
 fi
-# NON-VACUITY for that scan: a planted idiom in a module OTHER than ws0_report.py must be
-# caught. The pre-fix scan parsed ws0_report.py alone, so this planted line was invisible.
+# NON-VACUITY for that scan, in BOTH of the ways it can go vacuous. Either alone leaves a
+# hole, and BOTH have actually happened while writing this:
+#
+#  (a) SUBJECT TOO SMALL — the scan parsed `ws0_report.py` alone while every fail-closed
+#      decision moved to `ws0_validate.py`, so an idiom planted there was invisible.
+#  (b) STRIP TOO BROAD — blanking every string constant (a first attempt at keeping the
+#      scan off its own documentation) rewrites `rec.get('cycles', 0)` to `rec.get('', 0)`,
+#      so NOTHING is ever detected. Observed by planting a real idiom in a probe module and
+#      watching the suite stay green.
+#
+# Both are checked by planting the idiom in `ws0_validate.py` — the file (a) never read —
+# and requiring the scan to FIND it, using the SAME `strip_prose` the assertion uses.
 if ! python3 - "$TMP/scan-subject" "$REPO_ROOT/scripts/perf" <<'PY'
 import ast, pathlib, shutil, sys
+
 tmp = pathlib.Path(sys.argv[1]); tmp.mkdir(parents=True, exist_ok=True)
 for p in pathlib.Path(sys.argv[2]).glob("ws0_*.py"):
     shutil.copy(p, tmp / p.name)
 # Plant the idiom in ws0_validate.py, NOT the reporter — the file the old scan never read.
 target = tmp / "ws0_validate.py"
 target.write_text(target.read_text() + "\n\ndef _planted(rec):\n    return rec.get('cycles', 0)\n")
-subject = sorted(tmp.glob("ws0_*.py"))
-banned = {"get('cycles', 0)": "planted"}
-hits = []
-for path in subject:
-    tree = ast.parse(path.read_text())
+
+def strip_prose(source):
+    tree = ast.parse(source)
+    prose = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    prose.add(id(sub))
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            b = node.body
-            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
-                    and isinstance(b[0].value.value, str):
-                node.body = b[1:] or [ast.Pass()]
-    code = ast.unparse(ast.fix_missing_locations(tree))
-    hits += [path.name for idiom in banned if idiom in code]
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                node.body = body[1:] or [ast.Pass()]
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) in prose:
+            node.value = ""
+    return ast.unparse(ast.fix_missing_locations(tree))
+
+hits = [p.name for p in sorted(tmp.glob("ws0_*.py"))
+        if "get('cycles', 0)" in strip_prose(p.read_text())]
 if hits:
     raise SystemExit(f"planted idiom found in {hits} (expected — the scan is not vacuous)")
 PY
 then
-  pass "NON-VACUITY: the scan CATCHES an idiom planted in ws0_validate.py (pre-fix: invisible)"
+  pass "NON-VACUITY: the scan CATCHES an idiom planted in ws0_validate.py (subject + strip both sound)"
 else
-  fail "the banned-idiom scan must catch an idiom outside ws0_report.py, else its subject is too small"
+  fail "the banned-idiom scan must catch an idiom outside ws0_report.py — its subject is too small, or its prose-strip is too broad and blanked the idiom"
+fi
+# And the STRIP must still do its job: a shipped module whose DIAGNOSTIC quotes a banned
+# idiom must NOT red. `ws0_collect.py` genuinely contains the sentence "the check used to be
+# `if errors > 0`" inside an `Invalid(...)` message, so this is a live case, not a
+# hypothetical — without the strip the scan reds on its own documentation and the reflex fix
+# is to stop documenting.
+if python3 - "$REPO_ROOT/scripts/perf/ws0_collect.py" <<'PY'
+import ast, pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+raw = path.read_text()
+assert "if errors > 0" in raw, "this case needs a module whose PROSE quotes a banned idiom"
+
+def strip_prose(source):
+    tree = ast.parse(source)
+    prose = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    prose.add(id(sub))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                node.body = body[1:] or [ast.Pass()]
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) in prose:
+            node.value = ""
+    return ast.unparse(ast.fix_missing_locations(tree))
+
+stripped = strip_prose(raw)
+if "if errors > 0" in stripped:
+    raise SystemExit("the prose-strip did not remove a DIAGNOSTIC quoting the idiom")
+# ...and it must NOT have blanked an argument literal, which is (b).
+if "'skipped-cold-arm'" in raw and "'skipped-cold-arm'" not in stripped:
+    raise SystemExit("the prose-strip blanked a non-prose literal — the scan would be vacuous")
+PY
+then
+  pass "the prose-strip removes DIAGNOSTICS quoting an idiom but keeps argument literals"
+else
+  fail "the prose-strip must exempt diagnostics WITHOUT blanking argument literals (else the scan is vacuous)"
 fi
 
 # ==========================================================================
