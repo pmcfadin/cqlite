@@ -311,7 +311,12 @@ to everything the guard authorizes — not only to the directories it names:
   about where its ENTRIES point, and a privileged `tee <path>` opens with `O_CREAT|O_TRUNC`
   and FOLLOWS a symlink. So the managed file's own final component SHALL be validated (a
   symlink there SHALL be a loud refusal), AND the privileged write SHALL be an atomic
-  directory-entry REPLACEMENT — content staged to a fresh entry in the validated directory,
+  directory-entry REPLACEMENT — content staged to a fresh entry in the validated directory
+  whose name SHALL be UNPREDICTABLE and SHALL be created by the staging tool itself with
+  `O_CREAT|O_EXCL` (a PREDICTABLE staging path that is checked, cleared and only then opened by
+  a privileged writer is the same check-then-open race one level down: the name can be
+  re-planted as a symlink in that window, and a predictable *suffix* such as a pid does not
+  help),
   then renamed over the name — so a symlink appearing in the window between the check and the
   write is replaced rather than written through. A read that decides idempotency SHALL NOT
   follow the entry either, or a link whose target holds the canonical bytes would report

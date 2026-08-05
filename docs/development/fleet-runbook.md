@@ -377,7 +377,10 @@ destination, positively, fail closed:
   `99-cqlite-perf.conf` inside a perfectly-contained directory aimed the privileged write anywhere on the
   box. Now: naming that target **refuses** when it is a symlink, the idempotency read never follows it
   (a link whose target holds the canonical bytes must not report "already current"), and the write is an
-  **atomic directory-entry replacement** — staged entry in the validated directory, then `rename` over
+  **atomic directory-entry replacement** — an **`mktemp`-created, unpredictably-named** staging entry
+  in the validated directory (a *predictable* staging name that is checked, cleared and only then
+  opened by a privileged writer is the same race one level down — and a pid suffix is predictable
+  too, so `mktemp`'s `O_EXCL` create is the point, not the suffix), then `rename` over
   the name — so a symlink planted between the check and the write is *replaced*, not written through.
 - **The fork-free read path is NOT exempt** — the earlier claim here that a syntactic check was "sound
   because nothing there writes" was **wrong**, and this is what falsified it. A symlink *inside* the
