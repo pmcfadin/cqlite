@@ -502,8 +502,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   union when a prompt carries both), the path is taken only from the verified job's own prompt and must be
   absolute, inside the reviewed repo and under that repo's own snapshot dir, and every other outcome
   (cleaned-up, missing, unreadable, empty, header-less, foreign-repo, unbound-job, ambiguous, relative,
-  unparseable) FAILs closed under its own cause. The snapshot dir is deleted minutes after the review, so
-  **the wrapper must run while the review is fresh** — "already cleaned up" is a FAIL, never a pass.
+  unparseable) FAILs closed under its own cause. **And the snapshot must be CAPTURED WHILE THE REVIEW RUNS
+  — measured live, roborev deletes it BEFORE `roborev review --wait` returns, and `roborev show` has no
+  `--diff` to hand it back**, so reading the named path after the fact reported `cleaned-up` on *every*
+  genuine snapshot-mode review (a differently-named FAIL is not a fix). The wrapper therefore arms a watcher
+  before the review that copies each snapshot out of the reviewed repo keyed by directory id, and reads its
+  own copy of the id the job's prompt names — **never** a diff it recomputes itself, which would make the key
+  agree with itself. A capture that never happens is still a `cleaned-up` FAIL.
   Read out of the installed binary (v0.61.2) rather than from one transcript: there are **two** snapshot
   instruction spellings (the full one and a compact ``(Diff too large; read `<path>`.)``), both read, and a
   **THIRD oversize tier** (`codex_*`/`generic_*` templates) that ships **neither** a diff nor a snapshot and

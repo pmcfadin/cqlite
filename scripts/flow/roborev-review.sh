@@ -119,7 +119,12 @@
 #                     snapshot path is taken ONLY from the verified job's own prompt and must
 #                     be absolute, inside the reviewed repo and under that repo's
 #                     `.roborev/roborev-snapshot-<id>/`; every other outcome FAILs closed
-#                     under its own cause above, never a pass.
+#                     under its own cause above, never a pass. The snapshot does NOT survive
+#                     the review (roborev deletes it before `--wait` returns, measured), so a
+#                     watcher armed before the review COPIES it out and the check reads that
+#                     copy — the value then says `in the captured snapshot diff`. The diff is
+#                     never recomputed from our own git: that would compare the census against
+#                     our own output and always agree.
 #                     Paths are normalised ONCE, at the census (`git diff --numstat -z`,
 #                     so they arrive RAW) and compared RAW everywhere; membership is
 #                     decided per `diff --git` header by the single canonical matcher
@@ -337,8 +342,12 @@ review no longer FALSE-FAILs; the snapshot path is taken only from the verified
 job's own prompt and must be absolute, inside the reviewed repo and under that
 repo's own snapshot directory. A named snapshot that is cleaned up, missing,
 unreadable, empty, header-less, foreign or unbound FAILs under its own cause —
-"we could not check" is never "nothing was wrong". The snapshot directory is
-removed minutes after a review, so run the wrapper as the review completes.
+"we could not check" is never "nothing was wrong". roborev DELETES the snapshot
+when the review finishes (before this wrapper's own --wait returns) and offers no
+'show --diff', so a watcher armed before the review copies it out of the repo and
+the check reads that copy, beside the transcript in <log>.snapshots/. The diff is
+never recomputed from our own git: a key compared against our own output would
+always agree, which is the vacuous pass this wrapper exists to prevent.
 
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside

@@ -190,8 +190,17 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    and must be absolute, inside the reviewed repo and under that repo's own `roborev-snapshot-<id>`
    directory. Every other outcome — cleaned-up, missing, unreadable, empty, header-less, foreign-repo,
    unbound-job, ambiguous, relative, unparseable — is a distinct `FAIL (snapshot diff unusable: …)` cause.
-   Because that directory is deleted minutes after a review, **run the wrapper while the review is fresh**;
-   a cleaned-up snapshot is a FAIL, never a pass.
+   **The snapshot is captured while the review runs, because it does not survive it.** Measured live on this
+   fleet (job 3: 12 files, +3311, a 232,820-byte snapshot carrying exactly the 9 code census paths, 541,812
+   input / 472,576 cached tokens, a genuine completed review): roborev **deletes**
+   `.roborev/roborev-snapshot-<id>/` when the review finishes — *before* `roborev review --wait` returns — and
+   `roborev show` cannot hand the diff back (`--prompt`/`--json` only, no `--diff`). So reading the named path
+   after the fact reports `cleaned-up` on **every** real snapshot-mode review, which is a differently-named
+   FAIL rather than a fix. The wrapper arms a watcher before the review that copies each snapshot out of the
+   reviewed repo keyed by its directory id, and `prompt-content:` then reads **its own copy of the id the
+   job's prompt names** (the block says `in the captured snapshot diff`). It never recomputes the diff from
+   `git` — that would make the key compare our census against our own diff and agree with itself, which is
+   the vacuous pass this key exists to prevent. A capture that never happens is still a `cleaned-up` FAIL.
 
    Two further facts, read out of the installed binary (roborev v0.61.2) rather than inferred from a single
    transcript: roborev has **two** snapshot instruction spellings — the full one and a compact
