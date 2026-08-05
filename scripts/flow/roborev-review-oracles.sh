@@ -1082,7 +1082,7 @@ ROBOREV_DIFF_SOURCE_STATE=""
 ROBOREV_DIFF_SOURCE_DETAIL=""
 ROBOREV_DIFF_SOURCE_PATH=""
 roborev_collect_review_diff_headers() {
-  local prompt="$1" snap_path bind=0 snap_bytes
+  local prompt="$1" snap_path snap_bytes
   local -a in_hdrs=() in_from=() in_to=()
   ROBOREV_DIFF_SOURCE_STATE=""
   ROBOREV_DIFF_SOURCE_DETAIL=""
@@ -1099,7 +1099,7 @@ roborev_collect_review_diff_headers() {
   # when NOTHING parsed would let the readable half excuse the unread half.
   if [ "${_rx_snap_unparseable:-0}" -gt 0 ]; then
     ROBOREV_DIFF_SOURCE_STATE="unparseable-path"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' carries roborev's snapshot instruction ('Read the diff from:') but no backtick-delimited path could be read from ${_rx_snap_unparseable:-0} such line(s), so a diff the reviewer was told to read cannot be located. Failing closed: the instruction shape may have changed — inspect the prompt ('roborev show ${JOB:-<job>} --prompt') and update roborev_prompt_snapshot_paths."
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' carries roborev's snapshot instruction ('Read the diff from:', or the compact '(Diff too large; read ...') but no backtick-delimited path could be read from ${_rx_snap_unparseable:-0} such line(s), so a diff the reviewer was told to read cannot be located. Failing closed: the instruction shape may have changed — inspect the prompt ('roborev show ${JOB:-<job>} --prompt') and update roborev_prompt_snapshot_paths."
     return 0
   fi
   if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
@@ -1127,7 +1127,10 @@ roborev_collect_review_diff_headers() {
 
   snap_path="${_rx_snap_paths[0]}"
   ROBOREV_DIFF_SOURCE_PATH="$snap_path"
-  roborev_snapshot_path_binding "$snap_path" || bind=$?
+  # THE STATE IS CONSULTED, NOT THE STATUS (this function's contract, and the binding's): `|| :`
+  # only keeps `set -e` from aborting on the non-zero states, and deliberately discards a value
+  # that must not become a second source of truth about what happened.
+  roborev_snapshot_path_binding "$snap_path" || :
   ROBOREV_DIFF_SOURCE_PATH="$_rx_snap_bound_path"
   # KEYED ON THE AFFIRMATIVE VALUE (`= ok`), never on "not one of the bad ones": a binding state
   # this function has never judged must not reach the read below.
