@@ -605,8 +605,12 @@ EOF
     PERF_DROPIN_OK=0
     if [ "$AUTO_YES" = 1 ]; then
       info "writing perf sysctl drop-in: $PERF_DROPIN"
-      if perf_capability_dropin_content | ${PERF_ROOT[@]+"${PERF_ROOT[@]}"} tee "$PERF_DROPIN" >/dev/null 2>&1 \
-         && perf_capability_dropin_current; then
+      # ATOMIC DIRECTORY-ENTRY REPLACEMENT, not `tee <path>` (issue #3261 AC1). `tee` opens
+      # O_WRONLY|O_CREAT|O_TRUNC and FOLLOWS a symlink, so a symlink at the managed name aimed
+      # this privileged write at the link's target — anywhere on the box. The helper writes a
+      # staging entry in the validated directory and renames it over the name, so a pre-existing
+      # symlink is REPLACED rather than written through, and it re-reads the file to confirm.
+      if perf_capability_dropin_install ${PERF_ROOT[@]+"${PERF_ROOT[@]}"}; then
         ok "wrote $PERF_DROPIN (kernel.perf_event_paranoid = -1, kernel.kptr_restrict = 0)"
         PERF_DROPIN_OK=1
       else

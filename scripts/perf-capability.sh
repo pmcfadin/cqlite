@@ -176,10 +176,39 @@ perf_capability_path_within() {
   return 1
 }
 
+# perf_capability_nosymlink: rc 0 iff <path> is absolute and NO path component — the final one
+# INCLUDED — is a symlink. FORK-FREE: `[ -L ]` is a shell builtin test, so this is usable on the
+# gate's contractually fork-free token path, where `cd -P`/`pwd -P` (a subshell, i.e. a process)
+# is not.
+#
+# WHY (issue #3261 AC2). Containment of a SPELLING is not containment of a DESTINATION. The
+# inversion to positive containment made the fork-free read check purely textual and thereby
+# REGRESSED a protection the denylist rounds had: a symlink INSIDE the proven sandbox pointing at
+# the real /proc/sys/kernel satisfies path_within, so the run reported a capability token derived
+# from the HOST's real controls while claiming to have read a stand-in. A FABRICATED verdict is
+# strictly worse than a refusal — measured before the fix, the suite's stand-in seam produced
+# `paranoid-4` straight out of the live /proc. Rejecting per component (rather than resolving)
+# is what keeps the token path fork-free while judging the destination.
+perf_capability_nosymlink() {
+  local __pns_rest="${1:-}" __pns_acc='' __pns_seg
+  case "$__pns_rest" in /*) ;; *) return 1 ;; esac
+  __pns_rest="${__pns_rest#/}"
+  while [ -n "$__pns_rest" ]; do
+    __pns_seg="${__pns_rest%%/*}"
+    if [ "$__pns_seg" = "$__pns_rest" ]; then __pns_rest=''; else __pns_rest="${__pns_rest#*/}"; fi
+    [ -n "$__pns_seg" ] || continue
+    __pns_acc="$__pns_acc/$__pns_seg"
+    if [ -L "$__pns_acc" ]; then return 1; fi
+  done
+  [ -n "$__pns_acc" ]
+}
+
 perf_capability_sandbox_ok() {
   local __pso_root=''
   perf_capability_sandbox_root_into __pso_root || return 1
-  perf_capability_path_within "${1:-}" "$__pso_root"
+  perf_capability_path_within "${1:-}" "$__pso_root" || return 1
+  # ...and no component may be a symlink out of it (#3261 AC2), by builtins alone.
+  perf_capability_nosymlink "$1"
 }
 
 perf_capability_sandbox_ok_resolved() {
@@ -191,12 +220,23 @@ perf_capability_sandbox_ok_resolved() {
   perf_capability_path_within "$__pdr_real" "${__pdr_root%/}"
 }
 
+# The FILE variant. Judged as <CANONICAL PARENT>/<basename> (issue #3261 AC3): canonicalizing the
+# parent and asking whether THE PARENT is contained refused `<sandbox-root>/sysctl.conf`, because
+# the parent there IS the root and a root is not STRICTLY inside itself — a legitimate,
+# strictly-contained file rejected, which is how a guard teaches people to route around it. The
+# assembled path is the thing being authorized, so it is the thing judged.
+# The final component may not be a SYMLINK (the AC1 lesson, here on a read whose CONTENTS are
+# consumed): a symlinked `sysctl.conf` inside the sandbox would feed the competing-file scan the
+# host's real configuration.
 perf_capability_sandbox_file_ok_resolved() {
   case "${1:-}" in */?*) ;; *) return 1 ;; esac
-  case "${1##*/}" in ''|.|..) return 1 ;; esac
-  # the FILE path is judged by canonicalizing its PARENT: a canonical parent strictly inside
-  # the sandbox puts <parent>/<basename> strictly inside it too, for any plain basename.
-  perf_capability_sandbox_ok_resolved "${1%/*}"
+  local __pfr_base="${1##*/}" __pfr_root='' __pfr_parent=''
+  case "$__pfr_base" in ''|.|..) return 1 ;; esac
+  if [ -L "$1" ]; then return 1; fi
+  perf_capability_sandbox_root_into __pfr_root || return 1
+  __pfr_root=$(cd -P -- "$__pfr_root" 2>/dev/null && pwd -P) || return 1
+  __pfr_parent=$(cd -P -- "${1%/*}" 2>/dev/null && pwd -P) || return 1
+  perf_capability_path_within "${__pfr_parent%/}/$__pfr_base" "${__pfr_root%/}"
 }
 
 # ONE message shape for both mandatory seams: the refusal must NAME the offending seam (that
@@ -259,8 +299,39 @@ perf_capability_env_guard() {
         "$tool" "$resolved" "$dir" >&2
       return 1
     }
+    perf_capability_priv_tool_ok "$resolved" "$tool" || return 1
   done
+  # ...and every privileged tool PARKED in the declared shim dir, whether or not PATH happens to
+  # reach it: one PATH-order change is all that separates "not resolved" from "executed", and the
+  # loop above is driven by PATH. Only `sudo`/`sysctl` are swept — a shim dir legitimately holds
+  # `ln -s`ed real coreutils (cat, mv, uname), which grant no privilege.
+  if [ -n "$dir" ] && [ -d "$dir" ]; then
+    for tool in sudo sysctl; do
+      [ -e "$dir/$tool" ] || [ -L "$dir/$tool" ] || continue
+      perf_capability_priv_tool_ok "$dir/$tool" "$tool" || return 1
+    done
+  fi
   return 0
+}
+
+# perf_capability_priv_tool_ok <resolved-path> <tool-name>: rc 0 iff this privileged executable's
+# RESOLVED destination is positively contained beneath the PROVEN sandbox root. Refuses loudly.
+#
+# WHY (issue #3261 AC4 — the EIGHTH escape from this guard family, and the first about an
+# executable rather than a path). The shim dir was trusted TEXTUALLY: `/usr` is absolute and
+# genuinely CONTAINS `/usr/bin/sudo`, so "inside the declared shim dir" passed; and a SYMLINK to
+# the real `sudo`/`sysctl` placed inside a genuine shim dir is spelled locally while resolving to
+# the host's binary. Either one let a privileged test-mode bootstrap run a real
+# `sysctl --system` and reconfigure the host kernel — the exact mutation the marker promises
+# cannot happen. Same discipline as the paths: the declared NAME is not the DESTINATION, so the
+# destination is what is judged, positively, against a root that had to prove itself. The FILE
+# form does the work (canonical parent + basename, and a symlinked final component is refused),
+# which is also why a `/usr` shim dir fails: /usr/bin is not inside the sandbox.
+perf_capability_priv_tool_ok() {
+  perf_capability_sandbox_file_ok_resolved "${1:-}" && return 0
+  printf 'perf-capability: REFUSING: CQLITE_PERF_TEST_MODE=1 but the privileged tool %s at %s does not RESOLVE to an executable strictly inside the declared sandbox %s (a symlink to the real tool, or a shim dir that is not itself in the sandbox, resolves OUT of it) — test mode may never invoke a real privileged tool.\n' \
+    "${2:-<tool>}" "'${1:-}'" "'${CQLITE_PERF_TEST_SANDBOX:-<unset>}'" >&2
+  return 1
 }
 
 # ---- resolved locations (the seams apply ONLY in test mode) -------------------
@@ -313,14 +384,65 @@ perf_capability_sysctl_dir() {
   fi
   printf '%s' "$PERF_CAPABILITY_SYSCTL_DIR_DEFAULT"
 }
-# perf_capability_dropin_path: the path a root `tee` is pointed at. Its gate lives in
-# perf_capability_sysctl_dir (the single source of that directory) and RESOLVES the
-# destination, so there is deliberately no second copy here — one gate, not a prohibition a
-# future entry point could skip (R6-2).
+# perf_capability_dropin_path: the path a root `tee` is pointed at. The DIRECTORY's gate lives in
+# perf_capability_sysctl_dir (the single source of that directory) and RESOLVES the destination,
+# so there is deliberately no second copy of it here — one gate, not a prohibition a future entry
+# point could skip (R6-2).
+#
+# BUT DIRECTORY CONTAINMENT IS NOT WRITE-TARGET CONTAINMENT (issue #3261 AC1). A contained
+# directory says nothing about where its ENTRIES point, and `tee <path>` opens
+# O_WRONLY|O_CREAT|O_TRUNC and FOLLOWS a symlink — so a symlink at the managed basename inside a
+# perfectly-contained directory aimed the privileged write at the LINK'S TARGET, anywhere on the
+# box. The write TARGET is therefore validated too, as an O_NOFOLLOW-equivalent refusal: a
+# symlink at the managed name is rc 1 + empty + a named reason, for every consumer at once
+# (this function is the single source of the path). The complementary half is
+# perf_capability_dropin_install, which REPLACES the directory entry instead of writing through
+# it, closing the window between this check and the write.
 perf_capability_dropin_path() {
-  local __pdi_d
+  local __pdi_d __pdi_p
   __pdi_d=$(perf_capability_sysctl_dir) || return 1
-  printf '%s/%s' "$__pdi_d" "$PERF_CAPABILITY_DROPIN_BASENAME"
+  __pdi_p="$__pdi_d/$PERF_CAPABILITY_DROPIN_BASENAME"
+  if [ -L "$__pdi_p" ]; then
+    printf 'perf-capability: REFUSING: the managed drop-in name %s is a SYMLINK. A privileged `tee` FOLLOWS it and would overwrite the link target instead of the managed file — a contained directory does not license writing through its entries. Remove the symlink (or let the atomic installer replace the entry).\n' \
+      "'$__pdi_p'" >&2
+    return 1
+  fi
+  printf '%s' "$__pdi_p"
+}
+
+# perf_capability_dropin_install [<priv-cmd>...]: write the managed drop-in as an ATOMIC
+# DIRECTORY-ENTRY REPLACEMENT, so a pre-existing symlink at the managed name is REPLACED, never
+# FOLLOWED (issue #3261 AC1). argv is the privilege prefix (empty when already root); rc 0 iff the
+# managed bytes are in place at the managed path afterwards, verified by re-reading the file.
+#
+# Content goes to a fresh temp entry in the ALREADY-VALIDATED directory, then `mv -f` — rename(2),
+# which replaces the NAME and never dereferences the destination. The check in
+# perf_capability_dropin_path above has a TOCTOU window; a rename has none, which is why both
+# exist rather than either alone. Same directory, so the rename is same-filesystem and atomic. The
+# temp name is derived from the managed basename, never from a caller-supplied string, and an
+# entry already occupying it is removed and its removal VERIFIED before anything is written —
+# otherwise `tee` would follow a symlink planted at the temp name instead.
+perf_capability_dropin_install() {
+  local __pin_d __pin_p __pin_t
+  __pin_d=$(perf_capability_sysctl_dir) || return 1
+  __pin_p="$__pin_d/$PERF_CAPABILITY_DROPIN_BASENAME"
+  __pin_t="$__pin_d/.$PERF_CAPABILITY_DROPIN_BASENAME.new"
+  if [ -e "$__pin_t" ] || [ -L "$__pin_t" ]; then
+    "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
+    if [ -e "$__pin_t" ] || [ -L "$__pin_t" ]; then
+      printf 'perf-capability: REFUSING: could not clear the staging entry %s, so a write there could follow it.\n' "'$__pin_t'" >&2
+      return 1
+    fi
+  fi
+  if ! perf_capability_dropin_content | "$@" tee -- "$__pin_t" >/dev/null 2>&1; then
+    "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
+    return 1
+  fi
+  if ! "$@" mv -f -- "$__pin_t" "$__pin_p" >/dev/null 2>&1; then
+    "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
+    return 1
+  fi
+  perf_capability_dropin_current
 }
 
 # perf_capability_dropin_content: the EXACT bytes of the managed drop-in. It is a WHOLE
