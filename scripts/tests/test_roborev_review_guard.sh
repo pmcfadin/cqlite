@@ -282,103 +282,46 @@ case "$cmd" in
             "$q" "$q" "$q" "$q" >>"$out"
         done
       }
-      # THE PUBLISHED UNIT IS `<capture-dir>/<id>/meta` — the COMPLETED artifact. The capture directory
-      # is private and per-run (mktemp -d), so it is DISCOVERED rather than known, and the wait is on
-      # the finished publication, never on the content file appearing: waiting on the earlier of two
-      # events is flaky by construction (roborev job 7, finding 2).
-      snap_capture_of() { # snap_capture_of <snapshot-id> -> prints the NEWEST published meta path
-        # Publications are `pub.<id>.<zero-padded-seq>`, so the LAST match of the glob is the newest —
-        # the same rule the resolver uses. Scoped to this process's capture parent (job 9, F3).
-        local d found=""
-        for d in "${CAPTURES_PARENT:?}"/roborev-snapshot-capture.*/pub."$1".*/meta; do
-          [ -f "$d" ] && found="$d"
-        done
-        [ -n "$found" ] || return 1
-        printf '%s' "$found"
-        return 0
+      if [ -n "${STUB_SNAPSHOT_SYMLINK_TARGET:-}" ]; then
+        ln -s "$STUB_SNAPSHOT_SYMLINK_TARGET" "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+      else
+        snap_write "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ${STUB_SNAPSHOT_PATHS:-}
+      fi
+      # ===== SYNCHRONISE ON THE THING WE OBSERVE (roborev job 15, FIX 4) =====
+      # This used to wait up to 60s for capture-publication `meta` files that C‴'s observer never creates, so
+      # the positive snapshot case was not synchronised with observation at all — it just ate the timeout. A
+      # positive test that is not synchronised with the thing it observes can pass WITHOUT observing, which is
+      # the class this whole issue exists to remove. The wait is now on the OBSERVER'S OWN RECORD naming this
+      # path; a case that expects no observation says so explicitly and waits a bounded number of polls.
+      snap_observed() { # snap_observed <path> -> 0 when the observer has recorded it
+        [ -n "${STUB_OBSERVE_FILE:-}" ] || return 1
+        [ -f "$STUB_OBSERVE_FILE" ] || return 1
+        awk -F'\t' -v want="$1" '$1 == want { found = 1 } END { exit(found ? 0 : 1) }' "$STUB_OBSERVE_FILE"
       }
-      snap_await() { # snap_await <snapshot-id> [<digest-to-differ-from>] -> 0 when published
-                     # (and, when a digest is given, when it has CHANGED)
-        local waited=0 meta dg
-        while [ "$waited" -lt 600 ]; do
-          if meta=$(snap_capture_of "$1"); then
-            if [ -z "${2:-}" ]; then return 0; fi
-            dg=$(sed -n 's/^digest=//p' "$meta" | head -1)
-            [ -n "$dg" ] && [ "$dg" != "$2" ] && return 0
-          fi
+      snap_await_observed() { # snap_await_observed <path>
+        local waited=0
+        while [ "$waited" -lt 300 ]; do
+          snap_observed "$1" && return 0
           waited=$((waited + 1))
           sleep 0.1
         done
         return 1
       }
-      if [ -n "${STUB_SNAPSHOT_SYMLINK_TARGET:-}" ]; then
-        # THE TOCTOU ORDERING: the snapshot file is a SYMLINK to a file OUTSIDE the repo, and the whole
-        # directory is deleted before the wrapper validates. `-f` and `cp` both follow symlinks, so a
-        # watcher that copied first would hold outside content with no path left to inspect.
-        ln -s "$STUB_SNAPSHOT_SYMLINK_TARGET" "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+      if [ -z "${STUB_SNAPSHOT_EXPECT_NO_OBSERVATION:-}" ]; then
+        if snap_await_observed "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"; then
+          printf '%s' "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" >"$STUB_INVOKED.observed"
+        fi
       else
-        snap_write "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ${STUB_SNAPSHOT_PATHS:-}
-      fi
-      snap_id="${STUB_SNAPSHOT_LIFECYCLE_DIR##*/}"
-      # THE POSITIVE CONTROL, in the SAME run: a second, ordinary snapshot directory whose capture MUST
-      # be published. Waiting on IT rather than on a fixed sleep is what makes "the symlinked one was
-      # not captured" a measurement instead of a race — the watcher is PROVEN alive before the case
-      # concludes anything from an absence.
-      wait_id="$snap_id"
-      if [ -n "${STUB_SNAPSHOT_CONTROL_DIR:-}" ]; then
-        mkdir -p "$STUB_SNAPSHOT_CONTROL_DIR"
-        snap_write "$STUB_SNAPSHOT_CONTROL_DIR/roborev-snapshot-content.diff" control.rs
-        wait_id="${STUB_SNAPSHOT_CONTROL_DIR##*/}"
-      fi
-      if [ -n "${STUB_SNAPSHOT_EXPECT_NO_CAPTURE:-}" ]; then
-        # NO CAPTURE IS EXPECTED, so the wait is on evidence the watcher TRIED — the interposed copy's
-        # own witness — plus one further poll interval. That makes the absence below a measurement
-        # instead of a timeout, the same discipline as the (cx31s) control.
+        # No observation is expected: wait a bounded few polls, then record whether one happened anyway.
         waited=0
-        while [ "$waited" -lt 600 ]; do
-          [ -s "${CP_SHIM_WITNESS:-/nonexistent}" ] && break
+        while [ "$waited" -lt 25 ]; do
           waited=$((waited + 1))
           sleep 0.1
         done
-        sleep 1.5
-        if snap_capture_of "$wait_id" >/dev/null; then
-          printf '%s' "$(snap_capture_of "$wait_id")" >"$STUB_INVOKED.capture-seen"
-        fi
-      elif snap_await "$wait_id"; then
-        printf '%s' "$(snap_capture_of "$wait_id")" >"$STUB_INVOKED.capture-seen"
+        snap_observed "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" \
+          && printf 'unexpected' >"$STUB_INVOKED.observed"
       fi
-      # SAME-LENGTH REWRITE (roborev job 7, finding 3): republish the snapshot with the SAME byte count
-      # and DIFFERENT content, then wait for the digest recorded in `meta` to CHANGE. Reuse keyed on the
-      # byte count would keep the stale copy and certify a diff other than the delivered one.
-      if [ -n "${STUB_SNAPSHOT_REWRITE_PATHS:-}" ]; then
-        before_dg=$(sed -n 's/^digest=//p' "$(snap_capture_of "$snap_id")" 2>/dev/null | head -1)
-        before_len=$(wc -c <"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" | tr -d '[:space:]')
-        snap_write "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ${STUB_SNAPSHOT_REWRITE_PATHS}
-        after_len=$(wc -c <"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" | tr -d '[:space:]')
-        printf '%s %s' "$before_len" "$after_len" >"$STUB_INVOKED.rewrite-lengths"
-        snap_await "$snap_id" "$before_dg" && printf 'recaptured' >"$STUB_INVOKED.recaptured"
-      fi
-      if [ -n "${STUB_SNAPSHOT_SYMLINK_TARGET:-}" ] && snap_capture_of "$snap_id" >/dev/null; then
-        printf 'captured' >"$STUB_INVOKED.symlink-captured"
-      fi
-      # REPLACE the snapshot file with a NON-REGULAR object instead of deleting the directory (job 10,
-      # blocker 2): the live path then EXISTS but cannot be read as a diff, while a valid capture sits
-      # ready. The block must say `unreadable`, not answer from the capture.
-      # An INACCESSIBLE snapshot directory (job 13): the file STAYS, only the parent's search bit goes,
-      # so `[ ! -e ]` is false while the snapshot is very much there.
-      if [ -n "${STUB_SNAPSHOT_CHMOD_AFTER:-}" ]; then
-        chmod "$STUB_SNAPSHOT_CHMOD_AFTER" "$STUB_SNAPSHOT_LIFECYCLE_DIR" 2>/dev/null || :
-      elif [ -n "${STUB_SNAPSHOT_REPLACE_WITH:-}" ]; then
-        rm -f "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
-        case "$STUB_SNAPSHOT_REPLACE_WITH" in
-          dir)  mkdir -p "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ;;
-          fifo) mkfifo "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" 2>/dev/null \
-                  || mkdir -p "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ;;
-        esac
-      else
-        rm -rf "$STUB_SNAPSHOT_LIFECYCLE_DIR"
-      fi
-      rm -rf "${STUB_SNAPSHOT_CONTROL_DIR:-/nonexistent/x}"
+      rm -rf "$STUB_SNAPSHOT_LIFECYCLE_DIR"
     fi
     if [ -n "${STUB_ANNOUNCE_SHA:-}" ]; then
       printf 'Enqueued job %s for %s\n' "${STUB_JOB:-4600}" "$STUB_ANNOUNCE_SHA"
@@ -421,53 +364,6 @@ case "$cmd" in
 esac
 STUB
 chmod +x "$stubbin/roborev"
-
-# ---------------------------------------------------------------------------
-# THE `cp` INTERPOSER (#3312, roborev job 8). The capture's copy step is OUR OWN code, so unlike the
-# SIGTERM case there is no "unexpressible state" argument available: a source that changes while it is
-# being copied is directly constructible. This shim stands in for `cp` ONLY for the snapshot content
-# file (everything else is delegated to the real binary, since the wrapper copies other files too) and
-# reproduces the two ways a staged copy can fail to be what was digested:
-#   mutate-source   the copy succeeds and the SOURCE is then changed, which is what the loop's
-#                   pre-copy/post-copy comparison exists to see. Deterministic by construction: no
-#                   racing against a real concurrent writer.
-#   truncate-copy   the copy "succeeds" but the DESTINATION holds fewer bytes than the source — the leg
-#                   only the STAGED digest can catch, since the source is untouched and pre == post.
-# Driven by CP_SHIM_MODE; each invocation appends to CP_SHIM_WITNESS, which is what the roborev stub
-# waits on so "no capture was published" is a measurement rather than a timeout.
-cpshim="$tmp/cpshim"
-mkdir -p "$cpshim"
-cat >"$cpshim/cp" <<'CPSHIM'
-#!/usr/bin/env bash
-set -uo pipefail
-real=/bin/cp
-src=""
-for a in "$@"; do
-  case "$a" in *roborev-snapshot-content.diff) src="$a" ;; esac
-done
-if [ -z "$src" ] || [ -z "${CP_SHIM_MODE:-}" ]; then exec "$real" "$@"; fi
-dest="${@: -1}"
-case "$CP_SHIM_MODE" in
-  mutate-source)
-    "$real" "$@" || exit $?
-    printf 'diff --git a/mutated-during-copy.rs b/mutated-during-copy.rs\n' >>"$src"
-    ;;
-  truncate-copy)
-    head -1 "$src" >"$dest" || exit $?
-    ;;
-  *) exec "$real" "$@" ;;
-esac
-printf '%s\n' "$CP_SHIM_MODE" >>"${CP_SHIM_WITNESS:-/dev/null}"
-exit 0
-CPSHIM
-chmod +x "$cpshim/cp"
-export CP_SHIM_MODE=''
-export CP_SHIM_WITNESS=''
-HAVE_REAL_CP=1
-if [ ! -x /bin/cp ]; then
-  HAVE_REAL_CP=0
-  printf 'SKIP - /bin/cp is absent: the mid-copy-mutation cases cannot delegate to a real cp\n'
-fi
 
 # The structured-payload cases need python3 (the wrapper decodes the doubly-encoded
 # token_usage with it). Loud SKIP, never a silent pass, matching the gate's other
@@ -943,17 +839,6 @@ assert_tracked_mode() { # assert_tracked_mode <label> <work> <ref> <path> <want-
 # range_ref <work>: the git_ref shape a RANGE review records, "<base40>..<head40>".
 range_ref() { printf '%s..%s' "$(git -C "$1" rev-parse "${2:-origin/main}")" "$(git -C "$1" rev-parse HEAD)"; }
 
-# ===== THE CAPTURE PARENT IS PER TEST PROCESS (roborev job 9, F3) =====
-# The capture directories are discovered by GLOB, and a glob over the shared temp dir can be satisfied
-# by a CONCURRENT run's artifact — or by a leftover from a killed run that used the same hard-coded
-# snapshot ids. A test that greens on evidence from a different run is the very false-PASS class this
-# change exists to prevent, one layer down. So every wrapper run in this file gets `TMPDIR` pinned to a
-# parent inside THIS process's `$tmp` (itself `mktemp -d`), and every discovery searches only there.
-# Unique by construction, rather than coordinated around.
-CAPTURES_PARENT="$tmp/captures"
-mkdir -p "$CAPTURES_PARENT"
-export CAPTURES_PARENT
-
 CASE_N=0
 OUT=""
 RC=0
@@ -983,6 +868,14 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   CASE_N=$((CASE_N + 1))
   OUT="$tmp/out-$CASE_N.txt"
   INVOKED="$tmp/invoked-$CASE_N.txt"
+  # The observer writes beside the transcript, so the stub is told which record to wait on (FIX 4).
+  WRAPPER_LOG_PATH="$tmp/transcript-$CASE_N.txt"
+  for _rw_i in $(seq 1 $#); do
+    if [ "${!_rw_i}" = "--log" ]; then
+      _rw_next=$((_rw_i + 1))
+      WRAPPER_LOG_PATH="${!_rw_next}"
+    fi
+  done
   : >"$INVOKED"
   # The sanctioned invocation reviews the RANGE <base>..HEAD, so the job record's
   # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
@@ -991,8 +884,9 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # HOME is redirected to a throwaway directory: nothing in the wrapper reads a roborev
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
+  STUB_OBSERVE_FILE="${WRAPPER_LOG_PATH:-$tmp/transcript-$CASE_N.txt}.snapshot-observed" \
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
-    TMPDIR="${WRAPPER_TMPDIR:-$CAPTURES_PARENT}" \
+    TMPDIR="${WRAPPER_TMPDIR:-$tmp/wrapper-tmp}" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -1105,25 +999,21 @@ export STUB_ANNOUNCE_SHA=''
 # stub creates and then deletes mid-review; STUB_SNAPSHOT_PATHS the paths it writes headers for;
 # STUB_SNAPSHOT_CAPTURE_WAIT_DIR the wrapper's capture dir the stub waits on before deleting.
 export STUB_SNAPSHOT_LIFECYCLE_DIR=''
+export STUB_SNAPSHOT_EXPECT_NO_OBSERVATION=''
 export STUB_SNAPSHOT_PATHS=''
 export STUB_SNAPSHOT_CAPTURE_WAIT_DIR=''
 # STUB_SNAPSHOT_SYMLINK_TARGET makes the snapshot file a SYMLINK to that path (the TOCTOU fixture);
 # STUB_SNAPSHOT_CONTROL_DIR is a second, ordinary snapshot dir used as the in-run positive control
 # the stub waits on, so an ABSENT capture is a measurement rather than a race.
 export STUB_SNAPSHOT_SYMLINK_TARGET=''
-export STUB_SNAPSHOT_CONTROL_DIR=''
 # STUB_SNAPSHOT_REWRITE_PATHS republishes the snapshot with these paths at the SAME byte length, to
 # exercise digest-keyed reuse (a byte count cannot see a same-length rewrite).
-export STUB_SNAPSHOT_REWRITE_PATHS=''
-# STUB_SNAPSHOT_EXPECT_NO_CAPTURE flips the lifecycle wait from "wait for the publication" to "wait for
-# the interposed copy's witness, then one more poll" — for the cases where a capture must be DISCARDED.
-export STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
+# STUB_SNAPSHOT_EXPECT_NO_OBSERVATION: the case expects the observer to record NOTHING for this snapshot
+# (a safety refusal), so the stub waits a bounded few polls and then records whether one happened anyway.
 # STUB_SNAPSHOT_REPLACE_WITH leaves the snapshot DIRECTORY in place and replaces the content file with a
 # non-regular object (`dir` or `fifo`), so the live path EXISTS but is unreadable while a capture exists.
-export STUB_SNAPSHOT_REPLACE_WITH=''
 # STUB_SNAPSHOT_CHMOD_AFTER leaves the snapshot file in place and makes its DIRECTORY unsearchable, so the
 # path exists but cannot be observed — the job-13 vector.
-export STUB_SNAPSHOT_CHMOD_AFTER=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -1142,16 +1032,10 @@ reset_stub() {
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
   STUB_SNAPSHOT_LIFECYCLE_DIR=''
+  STUB_SNAPSHOT_EXPECT_NO_OBSERVATION=''
   STUB_SNAPSHOT_PATHS=''
   STUB_SNAPSHOT_CAPTURE_WAIT_DIR=''
   STUB_SNAPSHOT_SYMLINK_TARGET=''
-  STUB_SNAPSHOT_CONTROL_DIR=''
-  STUB_SNAPSHOT_REWRITE_PATHS=''
-  STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
-  STUB_SNAPSHOT_REPLACE_WITH=''
-  STUB_SNAPSHOT_CHMOD_AFTER=''
-  CP_SHIM_MODE=''
-  CP_SHIM_WITNESS=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -3509,6 +3393,13 @@ assert_says 'case (cx31) the block records the census subset the run EXPECTED' \
 assert_says 'case (cx31) the NOTICE says the expectation is not asserted' 'that expectation is NOT asserted'
 assert_says 'case (cx31) and names the paths it would have covered' '^  beta\.rs$'
 assert_lacks 'case (cx31) no PASS is claimed about the census in snapshot mode' '^prompt-content: PASS'
+# FIX 4: the positive case is SYNCHRONISED with observation — the stub waited for the observer's own record to
+# name this path before deleting the snapshot, so a green here cannot come from an unsynchronised timeout.
+if [ -s "$INVOKED.observed" ]; then
+  ok 'case (cx31): the wrapper OBSERVED the snapshot while the review ran (synchronised, not timed out)'
+else
+  bad 'case (cx31): the observer never recorded the snapshot, so this case is not synchronised with the thing it observes'
+fi
 assert_one_result_line 'case (cx31)'
 reset_stub
 
@@ -3526,6 +3417,23 @@ assert_says 'case (cx31b) the NOTICE names the cause' 'could NOT be observed by 
 assert_lacks 'case (cx31b) an unobserved snapshot never yields a census claim' 'code census paths present'
 reset_stub
 
+printf '== (cx31b2) FIX 1: an ordinary in-repo path is NOT one of roborev'"'"'s snapshots, so it is not read ==\n'
+# The layout check belongs to the SAFETY half and was swept out with the certification machinery (roborev job
+# 15): without it, ANY regular file inside the repo named by a snapshot instruction was read and hashed. The
+# fixture names a perfectly ordinary tracked file, which must be refused by name rather than digested.
+reset_stub
+ordinary="$snap_repo/main.rs"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$ordinary")
+run_wrapper "$snap_work"
+assert_says 'case (cx31b2) an ordinary in-repo file is refused as not-a-snapshot' \
+  'not safe to read as this repository.s snapshot \(unbound-job\)'
+assert_says 'case (cx31b2) the cause says WHY it is not one of roborev'"'"'s snapshot files' \
+  "does not sit under the repository's own '\.roborev' directory"
+assert_says 'case (cx31b2) so nothing was observed for it' '^snapshot-digest: UNOBSERVED \('
+assert_lacks 'case (cx31b2) an ordinary file is never hashed into the block' '^snapshot-digest: [0-9a-f]{16,}$'
+reset_stub
+
 printf '== (cx31c) the safety refusals survive C‴: a symlinked component is not read ==\n'
 # Certification is gone; SAFETY is not. The wrapper must still refuse to READ a path outside the repo or
 # through a symlink, and must say that is why it observed nothing.
@@ -3535,6 +3443,7 @@ write_snap_diff "$sym_target" alpha.rs beta.rs
 sym_dir="$snap_repo/.roborev/roborev-snapshot-C1C1C1"
 mkdir -p "$sym_dir"
 ln -s "$sym_target" "$sym_dir/roborev-snapshot-content.diff"
+STUB_SNAPSHOT_LIFECYCLE_DIR=""
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
 STUB_PROMPT=$(snap_prompt "$sym_dir/roborev-snapshot-content.diff")
 run_wrapper "$snap_work"
@@ -3570,7 +3479,11 @@ assert_says 'case (cx31e) inline mode still FAILs with the original value spelli
   '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
 assert_says 'case (cx31e) and still names the absent path' '^  beta\.rs$'
 assert_lacks 'case (cx31e) inline mode never becomes a NOTICE' '^prompt-content: NOTICE'
-assert_says 'case (cx31e) no snapshot keys are populated for an inline review' '^snapshot-path: -$'
+# FIX 5 (roborev job 15): in inline mode the three keys have NO SUBJECT, so they are ABSENT — not `-`, and
+# above all not an empty value, which is the shape the block's own doctrine calls out.
+assert_lacks 'case (cx31e) snapshot-path is ABSENT in inline mode' '^snapshot-path:'
+assert_lacks 'case (cx31e) snapshot-digest is ABSENT in inline mode (never an empty value)' '^snapshot-digest:'
+assert_lacks 'case (cx31e) snapshot-expected is ABSENT in inline mode' '^snapshot-expected:'
 reset_stub
 
 printf '== (cx31f) a prompt with NEITHER an inline diff NOR a snapshot path still FAILs ==\n'
