@@ -941,31 +941,115 @@ roborev_collect_prompt_headers() {
 #     actually copied cannot drift with roborev's naming, while a pinned filename would both duplicate
 #     that authority and false-FAIL if roborev ever renames its snapshot file.)
 #
-# RE-COPIED ONLY WHEN THE SOURCE SIZE CHANGES, so a partially-written snapshot converges to the
-# complete file without copying a multi-megabyte diff five times a second for the whole review.
+# ============ WHAT THIS CAPTURE DEFENDS, AND WHAT IT DELIBERATELY DOES NOT ============
+# STATED HERE so the next reviewer does not have to re-derive it, and so the hardening stops at a
+# principled boundary instead of growing an unbounded series of adversarial patches.
+#
+# IT DEFENDS AGAINST SILENT TOOLING FAILURE AND ACCIDENTAL STALENESS — the failure family this whole
+# wrapper exists for: the reviewer never received the diff (T1 wrong sha, T2 empty-tree base, T3
+# silently-excluded paths, T4 single-commit review), or we certify against something that is not the
+# diff it received (a stale copy, a copy of a DIFFERENT file, a snapshot path that is not the one the
+# prompt named). Every one of those is an ACCIDENT mode, and each is caught by construction below.
+#
+# IT IS NOT A SECURITY BOUNDARY against an adversary with write access to the reviewed repository.
+# Such an adversary does not need to fool the capture: they can write the diff, edit this wrapper, or
+# edit the tests that check it. Hardening a file copy against them is unwinnable and would trade real
+# simplicity for imagined safety. So the checks here are the ones that also catch accidents (a symlink
+# where roborev writes a regular file; a source mutated mid-copy) and no more.
+#
+# THREE PROPERTIES MAKE THE APPARATUS SMALL RATHER THAN CLEVER:
+#   1. THE CAPTURE DIRECTORY IS PRIVATE AND PER-RUN — `mktemp -d`, mode 0700, OUTSIDE the reviewed
+#      repository, created at start and removed at exit. Nothing can predate the run, nothing is
+#      shared between runs, and the path is not predictable. That removes a whole class (stale or
+#      planted artifacts in a reused, guessable directory) BY CONSTRUCTION, which is strictly better
+#      than authenticating a shared directory with a nonce.
+#   2. A CAPTURE IS PUBLISHED BY ONE RENAME — content and metadata are staged in a hidden directory
+#      and the DIRECTORY is `mv`d into place, so no observer can ever see a half-published capture.
+#      That is what makes a kill mid-capture harmless: the previous version of this code published
+#      the diff and its validation record as two writes, and a SIGTERM between them turned a perfectly
+#      good snapshot into `capture-unvalidated` — a FALSE FAIL on a genuine review, i.e. the very
+#      defect #3312 exists to remove. Ordering cannot be got wrong when there is no ordering.
+#   3. REUSE IS KEYED ON A CONTENT DIGEST, never on the byte count. A snapshot rewritten to the SAME
+#      LENGTH would otherwise keep the stale capture and certify a diff other than the delivered one.
+#      An unmeasurable digest re-captures (the safe direction), never keeps.
 ROBOREV_SNAPSHOT_CAPTURE_DIR=""
 ROBOREV_SNAPSHOT_CAPTURE_PID=""
-_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS=${ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS:-0.2}
+# One second, because each poll DIGESTS the source: the point is that no same-size rewrite can hide,
+# and a digest is a sequential read of a page-cached file the size of a diff. A faster poll would buy
+# nothing (roborev writes the snapshot once, minutes before it deletes it).
+_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS=${ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS:-1}
 
-# roborev_snapshot_capture_start <capture-dir>: begin capturing; sets
+# roborev_snapshot_capture_start: create the private capture directory and begin capturing; sets
 # ROBOREV_SNAPSHOT_CAPTURE_DIR/_PID. Never fatal — a capture that cannot start leaves the check to
 # fail closed later on the absent snapshot, which is the correct direction.
 roborev_snapshot_capture_start() {
+  local dir
   ROBOREV_SNAPSHOT_CAPTURE_DIR=""
   ROBOREV_SNAPSHOT_CAPTURE_PID=""
-  mkdir -p "$1" 2>/dev/null || return 0
-  ROBOREV_SNAPSHOT_CAPTURE_DIR="$1"
-  _roborev_snapshot_capture_loop "$REPO" "$1" &
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/roborev-snapshot-capture.XXXXXX" 2>/dev/null) || return 0
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  chmod 700 "$dir" 2>/dev/null || :
+  # OUTSIDE THE REVIEWED REPOSITORY, asserted rather than assumed: a `TMPDIR` pointing inside the
+  # checkout would put our own copies where the census and the watcher both look.
+  case "$dir/" in
+    "${REPO%/}"/*) rm -rf "$dir" 2>/dev/null || :; return 0 ;;
+  esac
+  ROBOREV_SNAPSHOT_CAPTURE_DIR="$dir"
+  _roborev_snapshot_capture_loop "$REPO" "$dir" &
   ROBOREV_SNAPSHOT_CAPTURE_PID=$!
   return 0
 }
 
-# roborev_snapshot_capture_stop: stop the watcher. Idempotent, and safe to call from an EXIT trap.
+# roborev_snapshot_capture_stop: stop the watcher GRACEFULLY — TERM sets a flag the loop checks
+# between iterations, so an in-flight capture finishes instead of being torn in half. Idempotent, and
+# safe from an EXIT trap. The bounded escalation to KILL is there so a wedged watcher can never hang
+# the wrapper; publishing is atomic either way, so an escalation loses at most one capture and can
+# never publish a partial one.
 roborev_snapshot_capture_stop() {
+  local waited=0
   [ -n "${ROBOREV_SNAPSHOT_CAPTURE_PID:-}" ] || return 0
-  kill "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
+  kill -TERM "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
+  while [ "$waited" -lt 50 ]; do
+    kill -0 "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || break
+    waited=$((waited + 1))
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  kill -0 "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null && kill -KILL "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null
   wait "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
   ROBOREV_SNAPSHOT_CAPTURE_PID=""
+  return 0
+}
+
+# roborev_snapshot_capture_cleanup: remove the private directory. Called from the wrapper's EXIT trap
+# AFTER the summary block is emitted — NOT from `stop`, because `prompt-content:` reads the capture
+# after the review returns, so deleting at stop would delete the evidence before the check that needs
+# it. The copy is deliberately not retained past the run: the block's actionable content is the cause
+# text, and keeping copies at a stable path is exactly the shared-directory reuse this design removed.
+roborev_snapshot_capture_cleanup() {
+  [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] || return 0
+  case "$ROBOREV_SNAPSHOT_CAPTURE_DIR" in
+    "${TMPDIR:-/tmp}"/roborev-snapshot-capture.*) rm -rf "$ROBOREV_SNAPSHOT_CAPTURE_DIR" 2>/dev/null || : ;;
+  esac
+  ROBOREV_SNAPSHOT_CAPTURE_DIR=""
+  return 0
+}
+
+# _roborev_file_digest <file>: a content digest into `_rx_digest`; non-zero when none can be taken.
+# Any of the three tools distinguishes a same-length rewrite, which is the whole requirement; the
+# fallback chain exists because `sha256sum` is GNU, `shasum` is what macOS ships, and `cksum` is
+# POSIX. A failure returns non-zero and the caller RE-CAPTURES rather than keeping a stale copy.
+_roborev_file_digest() {
+  local f="$1" out=""
+  _rx_digest=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    out=$(sha256sum -- "$f" 2>/dev/null | awk '{print $1; exit}')
+  elif command -v shasum >/dev/null 2>&1; then
+    out=$(shasum -a 256 -- "$f" 2>/dev/null | awk '{print $1; exit}')
+  elif command -v cksum >/dev/null 2>&1; then
+    out=$(cksum -- "$f" 2>/dev/null | awk '{print $1 "-" $2; exit}')
+  fi
+  [ -n "$out" ] || return 1
+  _rx_digest="$out"
   return 0
 }
 
@@ -974,12 +1058,13 @@ roborev_snapshot_capture_stop() {
 #
 # EVERY TEST HERE PRECEDES THE READ, which is the entire point of the function: once `cp` has run,
 # a symlink has already been followed and the evidence of it can be (and normally IS) deleted before
-# anything else looks. The four conditions:
+# anything else looks. These are integrity checks against an ACCIDENTAL substitution (roborev writes a
+# regular file; anything else is not the snapshot), not a defence against a repo-writable adversary —
+# see the scope note above. The four conditions:
 #   1. no SYMLINK at any component this walk descends — `.roborev`, the snapshot dir, and the file
 #      itself. Checked with `-L`, which does NOT follow, and before `-f`, which does.
 #   2. a REGULAR FILE. Safe to ask only after 1, since `-f` would otherwise answer about a target.
-#   3. the containing directory, PHYSICALLY resolved, is exactly `<repo>/.roborev/<id>` — so a
-#      component swapped for a mount point or otherwise re-pointed cannot masquerade as in-repo.
+#   3. the containing directory, PHYSICALLY resolved, is exactly `<repo>/.roborev/<id>`.
 #      `$repo` is `$REPO`, already `pwd -P`-resolved by the wrapper.
 #   4. the relative path is derived from the components we just validated, never re-parsed.
 _roborev_capture_validate() {
@@ -996,8 +1081,14 @@ _roborev_capture_validate() {
   return 0
 }
 
+# The published unit is a DIRECTORY per snapshot id: `<capture-dir>/<id>/{content.diff,meta}`, where
+# `meta` records the validated relative path and the digest captured. One rename publishes both.
 _roborev_snapshot_capture_loop() {
-  local repo="$1" out="$2" f id size sizefile rel ino_before ino_after
+  local repo="$1" out="$2" f id rel stage published
+  # GRACEFUL SHUTDOWN: TERM only asks the loop to stop; the current iteration completes, so a capture
+  # in flight when the review ends is finished rather than abandoned.
+  _rx_capture_stop=0
+  trap '_rx_capture_stop=1' TERM
   while : ; do
     # An unmatched glob leaves the PATTERN in `$f`, which the validation rejects — no `nullglob`
     # dependency, and inline-mode reviews simply never match.
@@ -1007,36 +1098,43 @@ _roborev_snapshot_capture_loop() {
       # VALIDATE BEFORE ANY READ. Nothing below may run for a path that failed this.
       _roborev_capture_validate "$repo" "$id" "$f" || continue
       rel="$_rx_cap_rel"
-      size=$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]') || size=""
-      [ -n "$size" ] || continue
-      sizefile="$out/$id.size"
-      if [ -f "$out/$id.diff" ] && [ "$(cat "$sizefile" 2>/dev/null || printf '')" = "$size" ]; then
+      # DIGEST-KEYED REUSE: skip only when the published capture records the SAME digest. A digest we
+      # could not take is not a match, so it re-captures.
+      _roborev_file_digest "$f" || continue
+      published="$out/$id/meta"
+      if [ -f "$published" ] \
+        && [ "$(sed -n 's/^digest=//p' "$published" 2>/dev/null | head -1)" = "$_rx_digest" ]; then
         continue
       fi
-      # The inode is recorded across the copy so a source SWAPPED mid-read is detected rather than
-      # silently captured: a validated regular file replaced by a symlink between the checks above
-      # and the `cp` would otherwise be the residual TOCTOU window. Re-checked, together with `-L`,
-      # before the capture is published.
-      ino_before=$(ls -i -- "$f" 2>/dev/null | awk '{print $1; exit}') || ino_before=""
-      # tmp + mv, so a reader never sees a half-written capture.
-      cp "$f" "$out/.$id.diff.part" 2>/dev/null || { rm -f "$out/.$id.diff.part" 2>/dev/null; continue; }
-      ino_after=$(ls -i -- "$f" 2>/dev/null | awk '{print $1; exit}') || ino_after=""
-      if [ -n "$ino_before" ] && [ "$ino_before" = "$ino_after" ] && [ ! -L "$f" ]; then
-        if mv "$out/.$id.diff.part" "$out/$id.diff" 2>/dev/null; then
-          printf '%s' "$size" >"$sizefile" 2>/dev/null || :
-          # THE AFFIRMATIVE VALIDATION RECORD, written LAST and only on the validated path: the
-          # consumer requires it and rejects any capture without it, so a capture published without
-          # this file can never be read as evidence. It carries the exact relative path captured,
-          # which is what binds the capture to the file the prompt names.
-          printf '%s' "$rel" >"$out/$id.validated" 2>/dev/null || :
-        else
-          rm -f "$out/.$id.diff.part" 2>/dev/null || :
-        fi
-      else
-        rm -f "$out/.$id.diff.part" 2>/dev/null || :
+      stage="$out/.stage.$$.$id"
+      rm -rf "$stage" 2>/dev/null || :
+      mkdir -p "$stage" 2>/dev/null || continue
+      if ! cp "$f" "$stage/content.diff" 2>/dev/null; then
+        rm -rf "$stage" 2>/dev/null || :
+        continue
       fi
+      # RE-DIGEST AFTER THE READ: a source mutated (or swapped) mid-copy yields a different digest, so
+      # the staged copy is discarded rather than published as though it were what we validated. This
+      # replaces the earlier inode dance and covers the same-length case the byte count missed.
+      if ! _roborev_file_digest "$f" || [ -L "$f" ]; then
+        rm -rf "$stage" 2>/dev/null || :
+        continue
+      fi
+      printf 'rel=%s\ndigest=%s\n' "$rel" "$_rx_digest" >"$stage/meta" 2>/dev/null || {
+        rm -rf "$stage" 2>/dev/null || :
+        continue
+      }
+      # ONE RENAME PUBLISHES CONTENT AND METADATA TOGETHER. A previous publication is replaced by
+      # renaming it aside first, so the window in which `<id>` does not exist is a rename, not a copy.
+      if [ -d "$out/$id" ]; then
+        mv "$out/$id" "$out/.old.$$.$id" 2>/dev/null || :
+        rm -rf "$out/.old.$$.$id" 2>/dev/null &
+      fi
+      mv "$stage" "$out/$id" 2>/dev/null || rm -rf "$stage" 2>/dev/null || :
     done
+    [ "$_rx_capture_stop" -eq 0 ] || return 0
     sleep "$_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS" 2>/dev/null || sleep 1
+    [ "$_rx_capture_stop" -eq 0 ] || return 0
   done
 }
 
@@ -1336,23 +1434,32 @@ roborev_collect_review_diff_headers() {
 
   # THE CAPTURE, consulted ONLY when the original is no longer there — which, measured live, is the
   # NORMAL case (roborev deletes the snapshot before `--wait` returns). It is OUR copy, taken from
-  # inside the reviewed repo during this run, and it is trusted ONLY on two affirmative facts:
-  #   * a VALIDATION RECORD exists beside it, written by the watcher only after the capture-time
-  #     symlink/containment checks passed. A capture without one is REJECTED — the record's ABSENCE
-  #     is not evidence of safety, it is the absence of a measurement (roborev job 6, blocker 1).
-  #   * that record's path EQUALS the relative path this job's prompt names, so the canonical
-  #     sibling of a differently-named file can never stand in for it (blocker 2).
+  # inside the reviewed repo during this run, into a PRIVATE per-run directory nothing else writes.
+  #
+  # ONE THING IS REQUIRED OF IT, and it is an accident guard rather than a trust anchor: the capture's
+  # `meta` must record the SAME relative path the prompt names. The watcher only ever copies the
+  # canonical `roborev-snapshot-content.diff`, while the binding accepts any file under a snapshot
+  # directory — so keying by directory id alone let a prompt naming a DIFFERENT file be answered with
+  # the canonical sibling, certifying a diff the reviewer was never pointed at. Whole-path equality is
+  # what closes that, and `meta` exists to make the comparison possible.
+  #
+  # `meta` survived the move to a private directory for exactly that reason and no other: as an
+  # anti-PLANTING record it would now be pointless (the directory is created by `mktemp -d` 0700 per
+  # run, so nothing can predate or share it), and as an anti-TEARING record it is unnecessary too
+  # (publication is a single rename). Its remaining job is IDENTITY. A capture whose `meta` is absent
+  # or unreadable is therefore an internal inconsistency, not an attack, and it is still non-passing:
+  # a capture we cannot identify is a capture we cannot say the reviewer received.
   _rx_snap_capture=""
   _rx_snap_capture_reject=""
   if [ ! -f "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
     && [ -n "${_rx_snap_dir_id:-}" ]; then
-    _rx_cap_file="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.diff"
-    _rx_cap_marker="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.validated"
-    if [ -f "$_rx_cap_file" ] && [ ! -L "$_rx_cap_file" ]; then
-      if [ ! -f "$_rx_cap_marker" ] || [ -L "$_rx_cap_marker" ]; then
-        _rx_snap_capture_reject="capture-unvalidated"
+    _rx_cap_file="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id/content.diff"
+    _rx_cap_marker="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id/meta"
+    if [ -f "$_rx_cap_file" ]; then
+      if [ ! -f "$_rx_cap_marker" ]; then
+        _rx_snap_capture_reject="capture-unidentified"
       else
-        _rx_cap_recorded=$(cat "$_rx_cap_marker" 2>/dev/null || printf '')
+        _rx_cap_recorded=$(sed -n 's/^rel=//p' "$_rx_cap_marker" 2>/dev/null | head -1)
         # KEYED ON THE AFFIRMATIVE VALUE: the recorded path must be non-empty AND equal. An
         # unreadable or empty record takes the rejecting branch, never the trusting one.
         if [ -n "$_rx_cap_recorded" ] && [ "$_rx_cap_recorded" = "${_rx_snap_rel:-}" ]; then
@@ -1363,20 +1470,20 @@ roborev_collect_review_diff_headers() {
       fi
     fi
   fi
-  if [ "$_rx_snap_capture_reject" = "capture-unvalidated" ]; then
-    ROBOREV_DIFF_SOURCE_STATE="capture-unvalidated"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a capture of snapshot directory '${_rx_snap_dir_id}' exists ($_rx_cap_file) but carries NO capture-time validation record ($_rx_cap_marker), so nothing establishes that what was copied was a regular file inside the reviewed repository rather than a symlink to somewhere else — and the original is gone, so it cannot be checked now. A capture is evidence only on an AFFIRMATIVE validation record; its absence is the absence of a measurement, never a clean bill of health. Failing closed."
+  if [ "$_rx_snap_capture_reject" = "capture-unidentified" ]; then
+    ROBOREV_DIFF_SOURCE_STATE="capture-unidentified"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a capture of snapshot directory '${_rx_snap_dir_id}' exists ($_rx_cap_file) but its identity record is missing or unreadable ($_rx_cap_marker), so this run cannot say WHICH file it copied — and the original is gone, so it cannot be re-derived. Publication is a single rename, so this is an internal inconsistency in the wrapper rather than anything about the branch under review; it is still non-passing, because a capture we cannot identify is not evidence of what the reviewer received. Failing closed."
     return 0
   fi
   if [ "$_rx_snap_capture_reject" = "capture-path-mismatch" ]; then
     ROBOREV_DIFF_SOURCE_STATE="capture-path-mismatch"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the capture for snapshot directory '${_rx_snap_dir_id}' records the validated path '${_rx_cap_recorded:-<unreadable>}', but the prompt instructed the reviewer to read '${_rx_snap_rel:-<unresolved>}'. Reading the file the capture happens to hold would certify a diff the reviewer was never pointed at — a capture is matched by its WHOLE validated relative path, never by the snapshot directory id alone. Failing closed."
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the capture for snapshot directory '${_rx_snap_dir_id}' records the captured path '${_rx_cap_recorded:-<unreadable>}', but the prompt instructed the reviewer to read '${_rx_snap_rel:-<unresolved>}'. Reading the file the capture happens to hold would certify a diff the reviewer was never pointed at — a capture is matched by its WHOLE relative path, never by the snapshot directory id alone. Failing closed."
     return 0
   fi
   if [ ! -e "$_rx_snap_bound_path" ] && [ -z "$_rx_snap_capture" ]; then
     if [ ! -d "${_rx_snap_dir:-}" ]; then
       ROBOREV_DIFF_SOURCE_STATE="cleaned-up"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists AND this run captured no copy of it — roborev deletes ${_rx_snap_dir:-<unresolved>} when the review finishes, which is BEFORE 'roborev review --wait' returns, so the copy taken while the review ran (${ROBOREV_SNAPSHOT_CAPTURE_DIR:-<capture never started>}/${_rx_snap_dir_id:-<unknown id>}.diff) is the only possible evidence and it is not there. There is therefore NO evidence of what the reviewer received. Failing closed: check that the wrapper's capture watcher started (it needs a writable log directory) and re-run the review."
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists AND this run captured no copy of it — roborev deletes ${_rx_snap_dir:-<unresolved>} when the review finishes, which is BEFORE 'roborev review --wait' returns, so the copy taken while the review ran (${ROBOREV_SNAPSHOT_CAPTURE_DIR:-<capture never started>}/${_rx_snap_dir_id:-<unknown id>}/content.diff) is the only possible evidence and it is not there. There is therefore NO evidence of what the reviewer received. Failing closed: check that the wrapper's capture watcher started (it needs a writable log directory) and re-run the review."
     else
       ROBOREV_DIFF_SOURCE_STATE="missing"
       ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot directory EXISTS but the named diff file is not in it, and no capture of it was taken: $_rx_snap_bound_path. The reviewer was told to read a file that is not there, so nothing establishes what it received. Failing closed."

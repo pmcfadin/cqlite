@@ -109,7 +109,7 @@
 #                     FAIL (prompt unretrievable — ...) |
 #                     FAIL (snapshot diff unusable: <cleaned-up | missing | unreadable |
 #                     empty | no-headers | foreign-repo | unbound-job | symlinked |
-#                     capture-unvalidated | capture-path-mismatch | ambiguous |
+#                     capture-unidentified | capture-path-mismatch | ambiguous |
 #                     not-absolute | unparseable-path>) | SKIP
 #                     TWO DIFF-DELIVERY MODES (#3312): roborev either inlines the diff or,
 #                     when it is large, writes it to a TRANSIENT snapshot file
@@ -349,12 +349,17 @@ symlinked or unbound FAILs under its own cause —
 "we could not check" is never "nothing was wrong". roborev DELETES the snapshot
 when the review finishes (before this wrapper's own --wait returns) and offers no
 'show --diff', so a watcher armed before the review copies it out of the repo and
-the check reads that copy, beside the transcript in <log>.snapshots/. Each capture is
-VALIDATED AT CAPTURE TIME (no symlink at the file or at any component descended, a
-regular file, a physically-resolved in-repo directory) and its validated relative
-path is recorded next to it; the check REQUIRES that record and requires it to equal
-the path the prompt names, so an unvalidated capture or the canonical sibling of a
-differently-named file is refused rather than trusted. The diff is never recomputed
+the check reads that copy from a PRIVATE per-run directory (mktemp -d 0700, outside
+the repo, removed at exit) that nothing else writes and nothing can predate. Each
+capture is validated before it is read (no symlink at the file or at any component
+descended, a regular file, a physically-resolved in-repo directory), published by ONE
+rename so no observer sees a half-published capture, and re-taken whenever the
+source's content DIGEST changes (a byte count cannot see a same-length rewrite). The
+check requires the capture's recorded relative path to EQUAL the path the prompt
+names, so the canonical sibling of a differently-named file is refused rather than
+trusted. This defends against silent tooling failure and staleness; it is explicitly
+not a defence against an adversary who can write to the reviewed repo, who has
+strictly better attacks available. The diff is never recomputed
 from our own git: a key compared against our own output would always agree, which is
 the vacuous pass this wrapper exists to prevent.
 
@@ -615,8 +620,16 @@ on_exit() {
     RESULT="FAIL"
     EMITTED=1
     emit_summary
+    # The private capture directory goes AFTER the block is emitted, never before: prompt-content:
+    # reads the capture, so cleaning up at stop would delete the evidence the check needs.
+    if command -v roborev_snapshot_capture_cleanup >/dev/null 2>&1; then
+      roborev_snapshot_capture_cleanup
+    fi
     [ "$rc" -ne 0 ] || rc=1
     exit "$rc"
+  fi
+  if command -v roborev_snapshot_capture_cleanup >/dev/null 2>&1; then
+    roborev_snapshot_capture_cleanup
   fi
 }
 trap on_exit EXIT
@@ -713,7 +726,11 @@ done
 # repo WHILE the review runs, and `prompt-content:` reads OUR copy of the directory id the job's own
 # prompt names. Nothing is reconstructed from our own `git diff`; that would make the key agree with
 # itself. If the capture cannot start or misses, the check fails CLOSED on the absent snapshot.
-roborev_snapshot_capture_start "$LOG.snapshots"
+# The capture directory is PRIVATE and PER-RUN (`mktemp -d`, 0700, outside the reviewed repo) and is
+# removed at exit — see the scope note in roborev-review-oracles.sh. It is deliberately NOT a stable
+# path beside the transcript: a shared, guessable directory is reusable across runs, which is a
+# staleness class this design removes by construction rather than by checking for it.
+roborev_snapshot_capture_start
 set +e
 roborev review --branch \
   --base "$BASE" \
