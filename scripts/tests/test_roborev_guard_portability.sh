@@ -293,7 +293,72 @@ fi
 # rather than deleted for the same reason (deleting them, as the previous form did, shifted
 # every number after them). A comment line is never joined to the next: `#` in shell comments to
 # end of line, so a trailing backslash there continues nothing.
-scan_hits() { # scan_hits <ere> <file>
+#
+# A SCAN THAT COULD NOT RUN IS NOT A CLEAN SCAN (#3296 round-9 finding 1). The first form ended
+# `awk … | grep -nE -- "$1" || true`, and that `|| true` swallowed EVERY non-zero status, not just
+# grep's "no matches": an unreadable scan target, an `awk` that died, a MALFORMED ERE in the table
+# (grep exits 2) — each produced empty output and was reported as "the roborev code path is free
+# of this construct". That is the purest form of the defect this whole branch is about, one level
+# down: the mechanism that cannot run reports the same green as the mechanism that found nothing.
+#
+# So the two stages are now measured SEPARATELY and only ONE status means "no findings":
+#   * the target must be READABLE before anything is attempted;
+#   * the preprocessing awk's own exit status is captured, with its stderr, and any non-zero is an
+#     ERROR — never an empty result;
+#   * of grep's statuses ONLY 1 means "no matches". 0 means hits; anything else (2 = bad regex or
+#     an I/O error) is an ERROR. `grep -c`-style thinking ("no output means clean") is exactly
+#     what is being removed here.
+# The three states are returned as 0 = hits / 1 = none / 2 = COULD NOT RUN, and state 2 carries a
+# named cause in SCAN_ERR. There is deliberately no fourth, permissive state.
+SCAN_ERR=''
+SCAN_HITS_FILE=''
+scan_hits_to() { # scan_hits_to <ere> <file> -> 0 hits (in $SCAN_HITS_FILE) / 1 none / 2 could-not-run
+  local _re="$1" _f="$2" _pre="$tmp/scan-pre.txt" _serr="$tmp/scan-stderr.txt" _arc _grc
+  SCAN_ERR=''
+  SCAN_HITS_FILE="$tmp/scan-hits.txt"
+  : >"$SCAN_HITS_FILE"
+  if [ ! -f "$_f" ]; then
+    SCAN_ERR="the scan target does not exist: $_f"
+    return 2
+  fi
+  if [ ! -r "$_f" ]; then
+    SCAN_ERR="the scan target exists but is NOT READABLE: $_f"
+    return 2
+  fi
+  scan_preprocess "$_f" >"$_pre" 2>"$_serr"
+  _arc=$?
+  if [ "$_arc" -ne 0 ]; then
+    SCAN_ERR="the preprocessing awk exited $_arc on $_f (stderr: $(tr '\n' ' ' <"$_serr"))"
+    return 2
+  fi
+  grep -nE -- "$_re" "$_pre" >"$SCAN_HITS_FILE" 2>"$_serr"
+  _grc=$?
+  case "$_grc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *)
+      SCAN_ERR="grep exited $_grc — neither 0 (matched) nor 1 (no match), so this is an ERROR, not a clean scan — on $_f with ERE '$_re' (stderr: $(tr '\n' ' ' <"$_serr"))"
+      return 2 ;;
+  esac
+}
+
+# scan_found is what every call site uses. It COUNTS the could-not-run state as a failure itself,
+# right where the cause is known, and still returns 2 so the caller reports NO verdict: an errored
+# scan has no verdict to give, and printing either `ok` or `bad` for it would be a verdict derived
+# from an unmeasured state.
+scan_found() { # scan_found <ere> <file> -> 0 hits / 1 none / 2 could-not-run (already counted)
+  local _rc
+  scan_hits_to "$1" "$2"
+  _rc=$?
+  if [ "$_rc" -eq 2 ]; then
+    bad "structural: the scan itself COULD NOT RUN — $SCAN_ERR. A scan that cannot run has no verdict to give, so this is a counted FAILURE and never a clean scan (#3296 round-9)."
+  fi
+  return "$_rc"
+}
+scan_first_hit() { head -1 "$SCAN_HITS_FILE"; }
+scan_all_hits() { tr '\n' ' ' <"$SCAN_HITS_FILE"; }
+
+scan_preprocess() { # scan_preprocess <file> -> the joined, comment-blanked logical-line stream
   awk '
     function emit_logical(  i) {
       if (buf ~ /portability-lint-allow/) print ""; else print buf
@@ -315,8 +380,105 @@ scan_hits() { # scan_hits <ere> <file>
       emit_logical()
     }
     END { if (have == 1) emit_logical() }
-  ' "$2" | grep -nE -- "$1" || true
+  ' "$1"
 }
+
+# ---------------------------------------------------------------------------
+# CONTROLS FOR THE COULD-NOT-RUN STATE ITSELF. A three-state contract is only protection if state 2
+# is REACHABLE and COUNTED, so each of its four causes is provoked here and required to be
+# classified 2 with a cause that NAMES it — and a clean scan is still required to be state 1, so
+# the fix has not turned every scan into an error. Without these the new branches would be dead
+# code asserted only in prose, which is the same shape as the defect they close.
+# ---------------------------------------------------------------------------
+_cnr="$tmp/cnr-clean.sh"
+printf '%s\n' '  echo portable' >"$_cnr"
+scan_hits_to '(^|[^[:alnum:]_-])stat[[:space:]]+-c' "$_cnr"
+if [ $? -eq 1 ]; then
+  ok 'scan-status control: a readable target with no match is state 1 (NO FINDINGS) — grep exit 1 is still the one status that means clean'
+else
+  bad "scan-status control: a clean scan was NOT classified as state 1 (SCAN_ERR: $SCAN_ERR) — the error handling has made every scan an error"
+fi
+scan_hits_to 'echo' "$_cnr"
+if [ $? -eq 0 ] && [ -s "$SCAN_HITS_FILE" ]; then
+  ok 'scan-status control: a matching target is state 0 with its hits in $SCAN_HITS_FILE'
+else
+  bad "scan-status control: a matching target was not classified as state 0 with hits (SCAN_ERR: $SCAN_ERR)"
+fi
+scan_hits_to 'x' "$tmp/definitely-absent-scan-target.sh"
+_cnr_rc=$?
+case "$_cnr_rc:$SCAN_ERR" in
+  '2:the scan target does not exist'*)
+    ok 'scan-status control: a MISSING scan target is state 2 (could-not-run) with a cause naming it — never an empty, clean-looking result' ;;
+  *)
+    bad "scan-status control: a MISSING scan target was classified rc $_cnr_rc / '$SCAN_ERR' — an absent target must not be reported as a clean scan" ;;
+esac
+printf '%s\n' '  echo x' >"$tmp/cnr-noread.sh"
+chmod 000 "$tmp/cnr-noread.sh" 2>/dev/null
+if [ -r "$tmp/cnr-noread.sh" ]; then
+  # An affirmatively identified environment limitation (running as root, or a filesystem that
+  # ignores mode bits): the file could not be MADE unreadable, so this cause cannot be provoked
+  # here. Named, counted, and never reported as a pass.
+  skip 'scan-status control: the unreadable-target cause was NOT MEASURED — chmod 000 left the file readable (running as root, or a filesystem that ignores mode bits)'
+else
+  scan_hits_to 'x' "$tmp/cnr-noread.sh"
+  _cnr_rc=$?
+  case "$_cnr_rc:$SCAN_ERR" in
+    '2:the scan target exists but is NOT READABLE'*)
+      ok 'scan-status control: an UNREADABLE scan target is state 2 with a cause naming it (the finding-1 case: `awk … | grep … || true` reported this as a CLEAN SCAN)' ;;
+    *)
+      bad "scan-status control: an UNREADABLE scan target was classified rc $_cnr_rc / '$SCAN_ERR' — this is the exact case the swallowed exit status reported clean" ;;
+  esac
+fi
+chmod 644 "$tmp/cnr-noread.sh" 2>/dev/null
+# A MALFORMED ERE makes grep exit 2. Under the old form that was indistinguishable from "no
+# matches", so a typo'd table entry silently certified every file clean, forever.
+scan_hits_to '(' "$_cnr"
+_cnr_rc=$?
+case "$_cnr_rc:$SCAN_ERR" in
+  '2:grep exited '*)
+    ok 'scan-status control: a MALFORMED ERE (grep exit 2) is state 2 with a cause naming grep’s status — only exit 1 is accepted as "no findings"' ;;
+  *)
+    bad "scan-status control: a MALFORMED ERE was classified rc $_cnr_rc / '$SCAN_ERR' — a broken pattern would then certify every scanned file clean" ;;
+esac
+# The PREPROCESSING stage's failure path, provoked by swapping the preprocessor for one that fails
+# and restoring the real text afterwards (`declare -f`, bash 3.2 compatible). Corrupting the real
+# awk program to test this would be untestable-in-place; this exercises the actual branch.
+_real_pre=$(declare -f scan_preprocess)
+if [ -z "$_real_pre" ]; then
+  bad 'scan-status control: scan_preprocess could not be captured, so the awk-failure branch was NOT MEASURED'
+else
+  scan_preprocess() { return 3; }
+  scan_hits_to 'x' "$_cnr"
+  _cnr_rc=$?
+  eval "$_real_pre"
+  case "$_cnr_rc:$SCAN_ERR" in
+    '2:the preprocessing awk exited 3'*)
+      ok 'scan-status control: a FAILING preprocessing stage is state 2 with a cause naming its exit status — an awk that dies no longer yields an empty, clean-looking scan' ;;
+    *)
+      bad "scan-status control: a failing preprocessing stage was classified rc $_cnr_rc / '$SCAN_ERR' — a dead awk would then be reported as a clean scan" ;;
+  esac
+  # And the restore must have worked, or every scan below runs against a stub.
+  scan_hits_to 'echo' "$_cnr"
+  if [ $? -eq 0 ]; then
+    ok 'scan-status control: the real preprocessor was restored after the injection (the scans below run against the real awk)'
+  else
+    bad "scan-status control: the preprocessor was NOT restored (SCAN_ERR: $SCAN_ERR) — every scan below would be running against the failing stub"
+  fi
+fi
+# Finally: state 2 must be COUNTED, not merely returned. Measured on the tally itself, with the
+# counters restored afterwards so this probe does not red the run it is measuring.
+_cnr_p0=$PASS
+_cnr_f0=$FAIL
+scan_found 'x' "$tmp/definitely-absent-scan-target.sh" >/dev/null 2>&1
+_cnr_df=$((FAIL - _cnr_f0))
+_cnr_dp=$((PASS - _cnr_p0))
+PASS=$_cnr_p0
+FAIL=$_cnr_f0
+if [ "$_cnr_df" -eq 1 ] && [ "$_cnr_dp" -eq 0 ]; then
+  ok 'scan-status control: scan_found COUNTS the could-not-run state as a tally FAILURE (1 failure, 0 passes) — it propagates to the gate rather than being swallowed'
+else
+  bad "scan-status control: a could-not-run scan produced $_cnr_df failure(s) / $_cnr_dp pass(es) on the tally — it must be exactly one counted FAILURE"
+fi
 
 for _ci in "${!CONSTRUCT_RE[@]}"; do
   _re="${CONSTRUCT_RE[$_ci]}"
@@ -324,22 +486,30 @@ for _ci in "${!CONSTRUCT_RE[@]}"; do
   # POSITIVE CONTROL FIRST: the pattern must detect its own sample violation. Without this a
   # typo'd regex would report every file clean, forever.
   printf '%s\n' "${CONSTRUCT_SAMPLE[$_ci]}" >"$tmp/sample-$_ci.sh"
-  if [ -n "$(scan_hits "$_re" "$tmp/sample-$_ci.sh")" ]; then
-    ok "structural control: the pattern detects its sample violation (${CONSTRUCT_SAMPLE[$_ci]})"
-  else
-    bad "structural control: the pattern MATCHES NOTHING — it cannot detect '${CONSTRUCT_SAMPLE[$_ci]}', so its clean verdict below is vacuous ($_re)"
-    continue
-  fi
+  scan_found "$_re" "$tmp/sample-$_ci.sh"
+  case $? in
+    0) ok "structural control: the pattern detects its sample violation (${CONSTRUCT_SAMPLE[$_ci]})" ;;
+    1)
+      bad "structural control: the pattern MATCHES NOTHING — it cannot detect '${CONSTRUCT_SAMPLE[$_ci]}', so its clean verdict below is vacuous ($_re)"
+      continue ;;
+    # The could-not-run state is already counted by scan_found; the rule's clean verdict below
+    # would be unmeasured, so the rule is skipped over entirely rather than reported either way.
+    *) continue ;;
+  esac
   _hits=""
+  _scan_broke=0
   for _f in "${SCAN_FILES[@]}"; do
-    if [ ! -f "$_f" ]; then
-      bad "structural: scan target missing: $_f"
-      continue
-    fi
-    _fh=$(scan_hits "$_re" "$_f")
-    [ -n "$_fh" ] && _hits="$_hits $(basename "$_f"):${_fh%%$'\n'*}"
+    scan_found "$_re" "$_f"
+    case $? in
+      0) _hits="$_hits $(basename "$_f"):$(scan_first_hit)" ;;
+      1) ;;
+      *) _scan_broke=1 ;;
+    esac
   done
-  if [ -z "$_hits" ]; then
+  if [ "$_scan_broke" -eq 1 ]; then
+    : # a target could not be scanned: the cause is already a counted FAILURE, and a
+      # "free of this construct" verdict over a partially-scanned set would be vacuous.
+  elif [ -z "$_hits" ]; then
     ok "structural: the roborev code path is free of this construct — $_why"
   else
     bad "structural: GNU-only construct in the roborev code path ($_why):$_hits"
@@ -360,25 +530,37 @@ printf '%s\n' \
 # cluster rule's, and what matters to a reader of this file is that NO in-place spelling
 # escapes the table. Which rule catches which is pinned separately, immediately below.
 _cluster_missed=""
+_cluster_broke=0
 while IFS= read -r _cl; do
   [ -n "$_cl" ] || continue
   printf '%s\n' "$_cl" >"$tmp/cluster-one.sh"
-  if [ -z "$(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-one.sh")" ] &&
-    [ -z "$(scan_hits "$RE_SED_INPLACE" "$tmp/cluster-one.sh")" ]; then
+  # The two rules are consulted with EXPLICIT statuses rather than `! scan_found … && ! scan_found …`:
+  # `!` would fold the could-not-run state (2) in with "no match" (1) and report the spelling as
+  # MISSED — a verdict about a scan that never ran.
+  scan_found "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-one.sh"
+  _c1=$?
+  scan_found "$RE_SED_INPLACE" "$tmp/cluster-one.sh"
+  _c2=$?
+  if [ "$_c1" -eq 2 ] || [ "$_c2" -eq 2 ]; then
+    _cluster_broke=1
+  elif [ "$_c1" -eq 1 ] && [ "$_c2" -eq 1 ]; then
     _cluster_missed="$_cluster_missed [$_cl]"
   fi
 done <"$tmp/cluster-bad.sh"
-if [ -z "$_cluster_missed" ]; then
+if [ "$_cluster_broke" -eq 1 ]; then
+  : # already counted by scan_found; a MISS/no-MISS verdict here would be unmeasured
+elif [ -z "$_cluster_missed" ]; then
   ok 'structural control: every in-place spelling (-Ei, -ni, -nEi, -E -i) is detected by the in-place rules — no bundled form escapes the table'
 else
   bad "structural control: the in-place rules MISS:$_cluster_missed — a scanner with a known hole invites reliance it cannot support"
 fi
 printf '%s\n' "  sed -Ei 's/a/b/' \"\$f\"" >"$tmp/cluster-one.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
-if [ -z "$(scan_hits "$RE_SED_INPLACE" "$tmp/cluster-one.sh")" ]; then
-  ok 'structural control: `sed -Ei` is (still) invisible to the bare -i rule — which is WHY the cluster rule exists, stated as a measurement rather than an assumption'
-else
-  bad 'structural control: the bare -i rule now also matches `sed -Ei`; fold the two rules together rather than keeping a redundant one'
-fi
+scan_found "$RE_SED_INPLACE" "$tmp/cluster-one.sh"
+case $? in
+  1) ok 'structural control: `sed -Ei` is (still) invisible to the bare -i rule — which is WHY the cluster rule exists, stated as a measurement rather than an assumption' ;;
+  0) bad 'structural control: the bare -i rule now also matches `sed -Ei`; fold the two rules together rather than keeping a redundant one' ;;
+  *) : ;; # already counted by scan_found
+esac
 
 # NEGATIVE CONTROLS for the cluster rule: a cluster that does NOT end in `i`, and an ATTACHED
 # suffix (portable — both seds read `-i.bak` as -i with suffix ".bak"), must not be reported.
@@ -390,11 +572,12 @@ printf '%s\n' \
   "  sed -Ei.bak -e 's/a/b/' \"\$f\"" \
   "  sed -fi input" \
   "  sed -ei 's/a/b/' \"\$f\"" >"$tmp/cluster-ok.sh"
-if [ -z "$(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh")" ]; then
-  ok 'structural control: a non-`i` cluster (-n, -E), an ATTACHED suffix (-Ei.bak) and an argument-taking cluster (-fi, -ei, where the i is the OPTION ARGUMENT) are not flagged — the rule reds only on the unportable spelling'
-else
-  bad "structural control: the cluster rule false-positives on a portable sed — a lint that reds on correct input is the lint agents learn to waive: $(scan_hits "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh" | tr '\n' ' ')"
-fi
+scan_found "$RE_SED_INPLACE_CLUSTER" "$tmp/cluster-ok.sh"
+case $? in
+  1) ok 'structural control: a non-`i` cluster (-n, -E), an ATTACHED suffix (-Ei.bak) and an argument-taking cluster (-fi, -ei, where the i is the OPTION ARGUMENT) are not flagged — the rule reds only on the unportable spelling' ;;
+  0) bad "structural control: the cluster rule false-positives on a portable sed — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
+  *) : ;; # already counted by scan_found
+esac
 
 # ---------------------------------------------------------------------------
 # CONTROLS FOR THE SPELLINGS THE ADJACENT-FLAGS-ONLY FORM MISSED (roborev round 2). Each named
@@ -404,27 +587,39 @@ fi
 # The assertion is against the UNION of the table's rules, because "is this flagged by the
 # scan" is the property the guard actually provides.
 # ---------------------------------------------------------------------------
-scan_any() { # scan_any <file> -> hits from ANY rule in the table
-  local _i _h _all=""
+# scan_any carries the same three states outward: 0 = some rule hit, 1 = no rule hit, 2 = a scan
+# could not run (already counted by scan_found). It ABORTS on state 2 rather than continuing over
+# the remaining rules, because a "no rule matched" answer assembled from a partially-executed table
+# is exactly the unmeasured-state verdict being removed here.
+_scan_any_hits=''
+scan_any() { # scan_any <file> -> 0 flagged / 1 clean / 2 could-not-run; hits in $_scan_any_hits
+  local _i _any=1
+  _scan_any_hits=''
   for _i in "${!CONSTRUCT_RE[@]}"; do
-    _h=$(scan_hits "${CONSTRUCT_RE[$_i]}" "$1")
-    [ -n "$_h" ] && _all="$_all ${_h%%$'\n'*}"
+    scan_found "${CONSTRUCT_RE[$_i]}" "$1"
+    case $? in
+      0) _any=0; _scan_any_hits="$_scan_any_hits $(scan_first_hit)" ;;
+      1) ;;
+      *) return 2 ;;
+    esac
   done
-  printf '%s' "$_all"
+  return "$_any"
 }
 assert_flagged() { # assert_flagged <label> <file>
-  if [ -n "$(scan_any "$2")" ]; then
-    ok "structural control: $1 is FLAGGED"
-  else
-    bad "structural control: $1 is NOT flagged — the scan has a hole at this spelling, and a guard with a known-but-hidden miss invites reliance it cannot support"
-  fi
+  scan_any "$2"
+  case $? in
+    0) ok "structural control: $1 is FLAGGED" ;;
+    1) bad "structural control: $1 is NOT flagged — the scan has a hole at this spelling, and a guard with a known-but-hidden miss invites reliance it cannot support" ;;
+    *) : ;; # the cause is already a counted FAILURE; there is no verdict to give here
+  esac
 }
 assert_not_flagged() { # assert_not_flagged <label> <file>
-  if [ -z "$(scan_any "$2")" ]; then
-    ok "structural control: $1 is correctly NOT flagged"
-  else
-    bad "structural control: $1 was flagged — a lint that reds on correct input is the lint agents learn to waive:$(scan_any "$2")"
-  fi
+  scan_any "$2"
+  case $? in
+    1) ok "structural control: $1 is correctly NOT flagged" ;;
+    0) bad "structural control: $1 was flagged — a lint that reds on correct input is the lint agents learn to waive:$_scan_any_hits" ;;
+    *) : ;; # the cause is already a counted FAILURE; there is no verdict to give here
+  esac
 }
 
 # (a) -i AFTER an intervening option argument. BSD eats `file` as the backup suffix.
@@ -515,32 +710,40 @@ assert_flagged 'a REAL `sed -i` on the line beneath a backslash-ended COMMENT (j
 # The joiner rewrites the stream, so LINE NUMBERS are asserted rather than assumed: a report
 # naming the wrong line sends the next reader to the wrong place.
 printf '%s\n' '# a comment' '' "  sed -i 's/a/b/' f" '  echo tail' >"$tmp/sp-lineno.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
-_ln=$(scan_hits "$RE_SED_INPLACE" "$tmp/sp-lineno.sh")
-if [ "${_ln%%:*}" = 3 ]; then
-  ok 'structural control: a hit is reported at its REAL file line (blanking, not deleting, keeps numbering exact)'
-else
-  bad "structural control: the hit was reported at line '${_ln%%:*}' but lives at line 3 — the scan's line numbers do not name the real file"
-fi
+scan_found "$RE_SED_INPLACE" "$tmp/sp-lineno.sh"
+case $? in
+  0)
+    _ln=$(scan_first_hit)
+    if [ "${_ln%%:*}" = 3 ]; then
+      ok 'structural control: a hit is reported at its REAL file line (blanking, not deleting, keeps numbering exact)'
+    else
+      bad "structural control: the hit was reported at line '${_ln%%:*}' but lives at line 3 — the scan's line numbers do not name the real file"
+    fi ;;
+  1) bad "structural control: the line-numbering fixture produced NO hit at all, so the scan's line numbering was NOT MEASURED — which is a failure, not a pass" ;;
+  *) : ;; # already counted by scan_found
+esac
 
 # NEGATIVE CONTROL for the paste pattern, whose ERE is the subtlest of the table: a paste WITH
 # an explicit operand is portable and must NOT be reported.
 printf '%s\n' '  order=$(grep -n x f | cut -d: -f2 | paste -sd, -)' >"$tmp/paste-ok.sh"
 printf '%s\n' '  order=$(paste -sd, "$f")' >>"$tmp/paste-ok.sh"
-if [ -z "$(scan_hits "$RE_PASTE_NO_OPERAND" "$tmp/paste-ok.sh")" ]; then
-  ok 'structural control: a paste WITH a file operand (`-` or a path) is not flagged'
-else
-  bad 'structural control: the paste pattern false-positives on a portable paste with an operand — a lint that reds on correct input is the lint agents learn to waive'
-fi
+scan_found "$RE_PASTE_NO_OPERAND" "$tmp/paste-ok.sh"
+case $? in
+  1) ok 'structural control: a paste WITH a file operand (`-` or a path) is not flagged' ;;
+  0) bad "structural control: the paste pattern false-positives on a portable paste with an operand — a lint that reds on correct input is the lint agents learn to waive: $(scan_all_hits)" ;;
+  *) : ;; # already counted by scan_found
+esac
 
 # CONTROL for the escape marker, in BOTH directions: it must exempt the line it is on, and it
 # must not be a blanket switch (the same sample WITHOUT the marker is still detected above).
 printf '%s\n' "  sed -i 's/a/b/' \"\$f\"   # portability-lint-allow: deliberate BSD-emulation control" \
   >"$tmp/allow.sh"
-if [ -z "$(scan_hits "$RE_SED_INPLACE" "$tmp/allow.sh")" ]; then
-  ok 'structural control: a line marked portability-lint-allow is exempt (a visible, per-line escape)'
-else
-  bad 'structural control: the portability-lint-allow marker does not exempt its line'
-fi
+scan_found "$RE_SED_INPLACE" "$tmp/allow.sh"
+case $? in
+  1) ok 'structural control: a line marked portability-lint-allow is exempt (a visible, per-line escape)' ;;
+  0) bad 'structural control: the portability-lint-allow marker does not exempt its line' ;;
+  *) : ;; # already counted by scan_found
+esac
 
 # ---------------------------------------------------------------------------
 # THE SELF-SCAN, AND THE TWO WAYS IT COULD BE VACUOUS (#3296 round-8 finding 1).
