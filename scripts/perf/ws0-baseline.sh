@@ -70,6 +70,8 @@ source "$HERE/lib-host-state.sh"
 source "$HERE/lib-args.sh"
 # shellcheck source=scripts/perf/lib-server.sh
 source "$HERE/lib-server.sh"
+# shellcheck source=scripts/perf/lib-outdir.sh
+source "$HERE/lib-outdir.sh"
 
 CORPUS=""
 SERVER_CPUS="2,10"
@@ -314,33 +316,12 @@ fi
 # which is exactly what `scripts/tests/test_ws0_cpu_pinning_guards.sh` drives directly
 # against an injected topology root instead.
 # --- AN EXPLICIT `--out` MUST NOT BE A USED DIRECTORY (#3272 round 6, R1) -------------
-# ABOVE the argument boundary, and CREATION stays below it. That split is deliberate: this is
-# a pure ARGUMENT check (it needs no perf, no topology, no corpus), so putting it here makes it
+# ABOVE the argument boundary, and CREATION stays below it. That split is deliberate: this is a
+# pure ARGUMENT check (it needs no perf, no topology, no corpus), so calling it here makes it
 # reachable — and therefore OBSERVABLE by the hermetic self-tests — through
-# `--validate-args-only`, while `--validate-args-only` still creates nothing.
-#
-# Measuring into a used dir mixes artifacts from DIFFERENT SESSIONS into one report: any rep
-# file this session does not overwrite (a different temperature or arm, a higher rep index from
-# a longer previous run) is read as part of THIS run, and the reporter cannot tell — it reads
-# whatever rep files are present. REFUSED rather than auto-suffixed, because an operator who
-# named a directory means that directory, and silently measuring into `<name>-2` would be its
-# own attribution defect.
-if [[ -n "${OUT_DIR:-}" && -e "$OUT_DIR" ]]; then
-  if [[ ! -d "$OUT_DIR" ]]; then
-    echo "FATAL: --out $OUT_DIR exists and is not a directory" >&2
-    exit 2
-  fi
-  # `find -mindepth 1 … -print -quit` answers "non-empty" without listing the whole tree.
-  if [[ -n "$(find "$OUT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-    echo "FATAL: --out $OUT_DIR already exists and is NOT EMPTY." >&2
-    echo "       Measuring into a used dir mixes artifacts from different sessions into one" >&2
-    echo "       report: any rep file this session does not overwrite (a different temperature" >&2
-    echo "       or arm, a higher rep index from a longer previous run) is read as part of THIS" >&2
-    echo "       run, and the reporter cannot tell the difference (#3272 R1)." >&2
-    echo "       Name an unused directory, or remove that one." >&2
-    exit 2
-  fi
-fi
+# `--validate-args-only`, while `--validate-args-only` still creates nothing. The reason a used
+# dir is refused at all, and why it is refused rather than auto-suffixed: scripts/perf/lib-outdir.sh.
+require_unused_out_dir "${OUT_DIR:-}"
 
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
   echo "ARGUMENTS OK (--validate-args-only): reps=$REPS temps=[$TEMPS] arms=[$ARMS]" \
@@ -428,55 +409,25 @@ require_socket_prober
 # (scripts/perf/lib-host-state.sh).
 relax_perf_sysctls
 
-# --- THE OUTPUT DIR IS CREATED EXCLUSIVELY, NEVER REUSED (#3272 round 6, R1) ---------
-# It used to be `mkdir -p "$OUT_DIR"` over a default name with only SECOND-level uniqueness.
-# Two ways that mixes artifacts from DIFFERENT SESSIONS into one report, and the reporter
-# cannot see either — it reads whatever rep files are present:
-#
-#   * TWO CONCURRENT RUNS started in the same second share the default dir. Each writes the
-#     rep files for its own arms, `mkdir -p` succeeds for both, and the second run's pin
-#     overwrites the first's. The report then assembles a median across two sessions.
-#   * AN EXPLICIT `--out <dir>` pointed at a previous run's dir keeps that run's rep files.
-#     Any rep the new session does not overwrite (a different temperature, a different arm, a
-#     higher rep index from a longer previous run) is silently read as part of this one.
-#
-# `mkdir` WITHOUT `-p` is the atomic primitive: it FAILS if the directory exists, and that
-# failure is the exclusion. So the default name gets a uniqueness suffix and retries, while an
-# explicit `--out` is REFUSED if it exists and is non-empty — refused rather than
-# suffixed, because an operator who named a directory means that directory, and silently
-# measuring into `<name>-2` would be its own attribution defect.
+# --- THE OUTPUT DIR IS CREATED EXCLUSIVELY AND CLAIMED (#3272 R1 + round 7 F3) --------
+# The whole lifecycle — refuse a used dir, create it, CLAIM it against a concurrent peer —
+# lives in scripts/perf/lib-outdir.sh, which carries the full argument for each half. The CALL
+# SITES stay here so what this driver actually does to the filesystem remains visible at its top
+# level, and so the ARGUMENT/CREATION boundary is legible in one file: the refusal is called far
+# above, `--validate-args-only` exits between them, and creation happens only here.
 BIN="$REPO_ROOT/target/release"
-if [[ -n "${OUT_DIR:-}" ]]; then
-  # An EXPLICIT dir, already checked ABOVE the argument boundary for the used-directory case.
-  # Absent => create it; present-and-EMPTY => use it (a dir made by an operator or a wrapper).
-  mkdir -p "$OUT_DIR" || { echo "FATAL: cannot create --out $OUT_DIR" >&2; exit 2; }
-else
-  # THE DEFAULT NAME. A UTC second plus `$$` plus a retry counter: the pid makes two runs
-  # started in the same second distinct even on the same host, and `mkdir` without `-p`
-  # arbitrates whatever the name does not — so uniqueness rests on an ATOMIC CREATE, never on
-  # the name being clever enough.
-  _ws0_base="$REPO_ROOT/target/perf-ws0-3096"
-  mkdir -p "$_ws0_base" || { echo "FATAL: cannot create $_ws0_base" >&2; exit 2; }
-  _ws0_try=0
-  while :; do
-    TS="$(date -u +%Y%m%dT%H%M%SZ)"
-    if [[ "$_ws0_try" -eq 0 ]]; then
-      OUT_DIR="$_ws0_base/$TS-$$"
-    else
-      OUT_DIR="$_ws0_base/$TS-$$-$_ws0_try"
-    fi
-    # `mkdir` WITHOUT `-p`: an existing dir is an ERROR here, which is the exclusion.
-    if mkdir "$OUT_DIR" 2>/dev/null; then
-      break
-    fi
-    _ws0_try=$((_ws0_try + 1))
-    if [[ "$_ws0_try" -gt 64 ]]; then
-      echo "FATAL: could not create a unique output dir under $_ws0_base after 64 attempts" >&2
-      exit 2
-    fi
-  done
-  unset _ws0_base _ws0_try
-fi
+# The status is checked EXPLICITLY rather than left to `set -e`. `create_out_dir` runs in a
+# COMMAND SUBSTITUTION (it must echo the default name it chose), so its `exit 2` terminates only
+# that subshell; the driver survives on `set -e` alone. That works — and a fail-closed refusal
+# whose enforcement depends on an implicit shell option is one `set +e` from being decorative,
+# which is the class of defect this issue exists to remove. `|| exit` states it.
+OUT_DIR="$(create_out_dir "${OUT_DIR:-}" "$REPO_ROOT/target/perf-ws0-3096")" || exit 2
+# ...and the result must be a directory that now exists. An empty `$OUT_DIR` here would send
+# every artifact to `/…` paths rooted at nothing, so it is refused rather than measured into.
+[[ -n "$OUT_DIR" && -d "$OUT_DIR" ]] || {
+  echo "FATAL: the session output directory was not created (got '${OUT_DIR:-}')." >&2
+  exit 2
+}
 
 if [[ "$DO_BUILD" == "1" ]]; then
   echo "building release binaries…"

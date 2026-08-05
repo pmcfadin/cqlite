@@ -744,11 +744,17 @@ fi
 # STRUCTURALLY, because the racing behaviour itself cannot be driven deterministically from a
 # self-test: the default branch must use `mkdir` WITHOUT `-p` (an existing dir is then an ERROR,
 # which IS the exclusion) and the name must carry more than a second-resolution timestamp.
-r1_block=$(awk '/^  _ws0_base=/,/^  unset _ws0_base/' "$DRIVER")
+#
+# THE SUBJECT IS `lib-outdir.sh`, not the driver (#3272 round 7): the output-directory lifecycle
+# moved there under the campsite rule. The `-n "$r1_block"` guard is what caught the staleness —
+# after the split this awk range matched NOTHING in the driver and the check FAILED rather than
+# passing vacuously, which is why that guard was there. A range test without it would have gone
+# green over an empty subject, and this file would have stopped checking R1 silently.
+r1_block=$(awk '/^ *while :; do/,/^ *done/' "$REPO_ROOT/scripts/perf/lib-outdir.sh")
 if [ -n "$r1_block" ] \
-   && grep -q 'if mkdir "\$OUT_DIR" 2>/dev/null; then' <<<"$r1_block" \
-   && ! grep -q 'mkdir -p "\$OUT_DIR"' <<<"$r1_block" \
-   && grep -q 'OUT_DIR="\$_ws0_base/\$TS-\$\$"' <<<"$r1_block"; then
+   && grep -qF 'if mkdir "$out_dir" 2>/dev/null; then' <<<"$r1_block" \
+   && ! grep -qF 'mkdir -p "$out_dir"' <<<"$r1_block" \
+   && grep -qF 'out_dir="$base/$ts-$$"' <<<"$r1_block"; then
   pass "round6 R1: the DEFAULT out dir is created with \`mkdir\` (no -p) — an atomic exclusive create — and its name carries the pid, not just a UTC second"
 else
   fail "round6 R1: the default out dir must be created atomically without -p and be more than second-unique (block: $(head -5 <<<"$r1_block"))"
@@ -766,6 +772,130 @@ if mkdir -p "$r1_race" 2>/dev/null; then
   pass "OBSERVED (round6 R1): the CONTROL — \`mkdir -p\` on that same existing dir SUCCEEDS, which is exactly why the pre-fix code reused a session dir"
 else
   fail "round6 R1: mkdir -p must succeed on an existing dir; if it does not, the control proves nothing"
+fi
+
+# ==========================================================================
+# ROUND 7, F3 — AN EXPLICIT --out IS CLAIMED ATOMICALLY, NOT JUST CREATED
+# ==========================================================================
+# R1 fixed the DEFAULT path (atomic `mkdir` on a unique name) and left the EXPLICIT path on
+# `mkdir -p`, so the defect R1 was about survived one branch over: two concurrent runs given the
+# same ABSENT-OR-EMPTY `--out` BOTH pass the used-directory refusal (empty for both, and both
+# check before either writes) and BOTH `mkdir -p` succeed. Each then writes its session pin and
+# rep artifacts over the other's, and the reporter assembles a median across MIXED SESSIONS —
+# it reads whatever rep files are present and cannot tell.
+#
+# `mkdir` on `$OUT_DIR` itself is not available as the arbiter, because R1 deliberately ACCEPTS
+# an existing-but-empty dir. So the exclusion is one level down: an atomic marker SUBDIRECTORY.
+#
+# The SHIPPED library is SOURCED, never re-implemented and never re-extracted from text — a
+# reimplemented check in a test is a second thing to keep in sync, and its divergence would be
+# invisible in exactly the permissive direction. `scripts/perf/lib-outdir.sh` owns the whole
+# output-directory lifecycle (round 7's campsite-rule split; the driver was at 1035 lines).
+f3_dir="$TMP/f3"; mkdir -p "$f3_dir"
+OUTDIR_LIB="$REPO_ROOT/scripts/perf/lib-outdir.sh"
+if [ -f "$OUTDIR_LIB" ] && grep -qF 'mkdir "$claim"' "$OUTDIR_LIB" \
+   && ! grep -qF 'mkdir -p "$claim"' "$OUTDIR_LIB"; then
+  pass "OBSERVED (round7 F3): lib-outdir.sh's exclusion is \`mkdir\` on the MARKER, with NO -p (an existing marker is an ERROR, which IS the exclusion)"
+else
+  fail "round7 F3: lib-outdir.sh must claim with mkdir (no -p) on the marker"
+fi
+f3_run() { # f3_run <dir> — run the SHIPPED claim_out_dir against <dir>; prints output, returns rc
+  ( # shellcheck disable=SC1090
+    source "$OUTDIR_LIB"
+    claim_out_dir "$1" "self-test" ) 2>&1
+}
+mkdir -p "$f3_dir/shared"
+out=$(f3_run "$f3_dir/shared"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "OBSERVED (round7 F3): the FIRST session claims an existing-but-EMPTY --out successfully (R1's accepted case still works)"
+else
+  fail "round7 F3: the first claim on an empty dir must succeed (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+# THE RACE, which is the finding: a SECOND session handed the same dir must be REFUSED. Both
+# runs saw it empty, so nothing above this line could separate them.
+out=$(f3_run "$f3_dir/shared"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'ALREADY CLAIMED' <<<"$out"; then
+  pass "OBSERVED (round7 F3): a SECOND session on the SAME --out is REFUSED as ALREADY CLAIMED (pre-fix: both mkdir -p succeeded and the report mixed two sessions)"
+else
+  fail "round7 F3: a second claim must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+# ...and the refusal must NAME THE OWNER, or an operator cannot tell a live peer from a stale
+# marker — the difference between waiting and picking a new directory.
+if grep -q 'Claimed by: pid=' <<<"$out"; then
+  pass "OBSERVED (round7 F3): the refusal NAMES the owning pid/host/start time (a live peer is distinguishable from a stale marker)"
+else
+  fail "round7 F3: the refusal must name the claim owner (out: $(head -4 <<<"$out"))"
+fi
+# NON-VACUITY / THE CONTROL: the pre-fix explicit path really did admit both. `mkdir -p` twice on
+# the same dir succeeds twice, which is the whole finding — asserted rather than reasoned about.
+mkdir -p "$f3_dir/prefix-control"
+if mkdir -p "$f3_dir/prefix-control" 2>/dev/null && mkdir -p "$f3_dir/prefix-control" 2>/dev/null; then
+  pass "OBSERVED (round7 F3): NON-VACUITY — the pre-fix \`mkdir -p\` on an explicit --out SUCCEEDS REPEATEDLY, so two concurrent sessions both proceeded (this is F3)"
+else
+  fail "round7 F3: mkdir -p must succeed repeatedly, else the finding's premise is wrong"
+fi
+# A DIFFERENT dir is unaffected — a claim that refused everything would satisfy the case above
+# and make `--out` unusable.
+mkdir -p "$f3_dir/other"
+out=$(f3_run "$f3_dir/other"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "OBSERVED (round7 F3): a DIFFERENT --out still claims fine (the guard discriminates on the DIRECTORY, not unconditionally)"
+else
+  fail "round7 F3: an unclaimed dir must be claimable (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+# BOTH branches go through the SAME mechanism, so a future edit cannot re-split them (which is
+# exactly what F3 was: R1 hardened one branch and left the other). Driven for the EXPLICIT branch
+# above; structural for the DEFAULT branch, whose race is not deterministically drivable from a
+# self-test — asserted as "both code paths in `create_out_dir` claim".
+f3_calls=$(grep -cF 'claim_out_dir "$out_dir"' "$OUTDIR_LIB")
+if [ "$f3_calls" -eq 2 ]; then
+  pass "round7 F3: BOTH branches of create_out_dir claim (one mechanism, $f3_calls call sites — R1 hardened only one branch, which IS F3)"
+else
+  fail "round7 F3: both --out branches must claim (found $f3_calls call sites in lib-outdir.sh, expected 2)"
+fi
+# ...and the DEFAULT branch is DRIVEN too, for the property that IS drivable: it creates a fresh
+# unique dir and claims it, twice in a row, without collision — so the claim added to that branch
+# has not broken the retry loop R1 built.
+f3_base="$f3_dir/defaults"
+f3_default() {
+  ( # shellcheck disable=SC1090
+    source "$OUTDIR_LIB"
+    create_out_dir "" "$1" ) 2>&1
+}
+d1=$(f3_default "$f3_base"); rc1=$?
+d2=$(f3_default "$f3_base"); rc2=$?
+if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && [ -d "$d1" ] && [ -d "$d2" ] && [ "$d1" != "$d2" ]; then
+  pass "OBSERVED (round7 F3): the DEFAULT branch creates and claims two DISTINCT dirs back-to-back (the claim did not break R1's retry loop)"
+else
+  fail "round7 F3: two default-branch runs must yield two distinct claimed dirs (rc=$rc1/$rc2 d1=$d1 d2=$d2)"
+fi
+# ...and CREATION/CLAIMING stays BELOW the argument boundary, so `--validate-args-only` still
+# creates nothing. Asserted by LINE ORDER against the boundary's own exit, because the
+# behavioural half (an absent --out is not created) is already driven above and this is the
+# property that keeps it true.
+f3_boundary=$(grep -nF 'ARGUMENTS OK (--validate-args-only)' "$DRIVER" | head -1 | cut -d: -f1)
+f3_create=$(grep -nF 'OUT_DIR="$(create_out_dir' "$DRIVER" | head -1 | cut -d: -f1)
+if [ -n "$f3_boundary" ] && [ -n "$f3_create" ] && [ "$f3_boundary" -lt "$f3_create" ]; then
+  pass "round7 F3: create_out_dir (line $f3_create) is BELOW the --validate-args-only boundary (line $f3_boundary) — the hermetic mode still creates nothing"
+else
+  fail "round7 F3: creation must stay below the argument boundary (boundary=$f3_boundary create=$f3_create)"
+fi
+# ...and the REFUSAL stays ABOVE it, which is what makes the used-dir case observable hermetically
+# at all. The two halves on opposite sides of the boundary is the design, so both are pinned.
+f3_refusal=$(grep -nF 'require_unused_out_dir "${OUT_DIR:-}"' "$DRIVER" | head -1 | cut -d: -f1)
+if [ -n "$f3_refusal" ] && [ -n "$f3_boundary" ] && [ "$f3_refusal" -lt "$f3_boundary" ]; then
+  pass "round7 F3: require_unused_out_dir (line $f3_refusal) is ABOVE the boundary (line $f3_boundary) — which is why the used-dir refusal is hermetically observable"
+else
+  fail "round7 F3: the used-dir refusal must stay above the argument boundary (refusal=$f3_refusal boundary=$f3_boundary)"
+fi
+# The driver checks create_out_dir's STATUS EXPLICITLY. It runs in a COMMAND SUBSTITUTION (it must
+# echo the default name it chose), so its `exit 2` kills only that subshell and the driver survives
+# on `set -e` alone. That works — and a fail-closed refusal enforced only by an implicit shell
+# option is one `set +e` from being decorative, which is this issue's whole subject.
+if grep -qF 'OUT_DIR="$(create_out_dir "${OUT_DIR:-}" "$REPO_ROOT/target/perf-ws0-3096")" || exit 2' "$DRIVER"; then
+  pass "round7 F3: the driver checks create_out_dir's status EXPLICITLY (\`|| exit 2\`), not via set -e alone"
+else
+  fail "round7 F3: the create_out_dir call must check its status explicitly — its exit 2 only kills the command substitution"
 fi
 
 # ==========================================================================
