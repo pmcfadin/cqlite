@@ -188,6 +188,16 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    **directories** — never a blanket `docs/**`). Measured after the narrowing: 71 `docs/` executables reach
    the reviewer, 0 markdown does, and nothing outside `docs/` is newly excluded.
 
+   **The GATE had the same bug, and it is the same definition (#3250).** `scripts/ci/classify-docs-only.sh`
+   — which decides whether `pr-gate-core`, the compute half of `required`, runs at all — classified every
+   path under `docs/` as documentation on the prefix alone, so the same three PRs reported `required` green
+   in 13–16 s having compiled nothing. It now answers only on an affirmative allowlist match and imports
+   this subsystem's artifact declaration (`CODE_FREE_ARTIFACT_EXTENSIONS`, `CODE_FREE_ARTIFACT_DIR_GLOBS`,
+   `roborev_path_in_artifact_dir`) rather than restating it, so the review-side and gate-side definitions of
+   "docs-only" are one fact. The gate-side rule — including how to WAIVE a red on a genuinely prose diff, by
+   RUNNING that classifier instead of judging a path shape — is in
+   [gate contract → CITE-AND-WAIVE](/cqlite/agents-developing/gate-contract/).
+
    **NOTHING PREDICTS THE EXCLUSION SET PRE-ENQUEUE, and that is a deliberate, recorded reduction in
    coverage (#3283).** A `census-exclusion:` key that did — a bash port of roborev's own pathspec
    construction (`git.FormatExcludeArgs`) over a TOML parse of three configuration sources — was built on
