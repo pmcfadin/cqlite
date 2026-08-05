@@ -127,6 +127,18 @@ RE_SED_INPLACE='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+(-i|--in-place(=[^
 # "i" (the script file), so there is no `-i` and flagging it was a false positive. Same for
 # `-ei`, and for BSD's `-I`/`-i`, which take arguments themselves.
 RE_SED_INPLACE_CLUSTER='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-[nEralusz]+i([[:space:]]|$)'
+# THE EMPTY-SUFFIX SPELLINGS, `-i""` and `-i''`. GNU sed reads an ATTACHED empty suffix as "edit
+# in place, keep no backup"; BSD sed has no such reading (it needs `-i ''` as a separate word, or
+# no `-i` at all), so the GNU-only spelling is a portability defect in its own right.
+#
+# THESE TWO RULES ALSO TAKE THE OPTION RUN (#3296 round-8 finding 2). The first form required
+# `-i""` to sit IMMEDIATELY after `sed`, so `sed -e 's/a/b/' -i'' f` — the same defect one option
+# further along — was invisible to EVERY rule in this table: measured `. . . .` against the bare
+# rule, the cluster rule and both empty-suffix rules before this fix. `--in-place=SUFFIX` needed
+# no such repair; it is already reached through the option run above, and both of its positions
+# are now pinned by controls below rather than assumed.
+RE_SED_INPLACE_EMPTY_DQ='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-i("")'
+RE_SED_INPLACE_EMPTY_SQ='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-i'"('')"
 # PASTE WITH NO FILE OPERAND, in every spelling that reaches BSD's `if (*argv == NULL) usage();`:
 #   paste -sd,            bundled flags, nothing after them
 #   paste -d ,            the delimiter argument SEPARATED from -d (consumed as the option's
@@ -146,10 +158,10 @@ add_construct "$RE_SED_INPLACE" \
 add_construct "$RE_SED_INPLACE_CLUSTER" \
   "a BUNDLED cluster ending in -i (-Ei, -ni, -nEi, …) reaches the SAME BSD argument-consuming -i as a bare -i, so the edit never lands — use sed_inplace" \
   "  sed -Ei 's/a/b/' \"\$f\""
-add_construct '(^|[^[:alnum:]_-])sed[[:space:]]+-i("")' \
+add_construct "$RE_SED_INPLACE_EMPTY_DQ" \
   'the empty-suffix spelling -i"" is GNU-only (BSD needs -i "" or no -i at all) — use sed_inplace' \
   '  sed -i"" -e s/a/b/ f'
-add_construct "(^|[^[:alnum:]_-])sed[[:space:]]+-i('')" \
+add_construct "$RE_SED_INPLACE_EMPTY_SQ" \
   "the empty-suffix spelling -i'' is GNU-only — use sed_inplace" \
   "  sed -i'' -e s/a/b/ f"
 add_construct "$RE_PASTE_NO_OPERAND" \
@@ -383,6 +395,30 @@ assert_flagged '`paste -sd, <"$f"` (redirection with no space)' "$tmp/sp-redir2.
 # (e) the GNU long spelling, absent from BSD sed entirely.
 printf '%s\n' "  sed --in-place -e 's/a/b/' file" >"$tmp/sp-long.sh"
 assert_flagged '`sed --in-place` (GNU long option; BSD sed has no such flag)' "$tmp/sp-long.sh"
+# (f) the long spelling with an ATTACHED `=SUFFIX`, in BOTH positions — adjacent to `sed` and
+# beyond an intervening option. A long-option rule that requires WHITESPACE after the option name
+# sees neither; this table's does not, and both positions are now pinned by measurement instead of
+# left to inspection of the regex (#3296 round-8 finding 2).
+printf '%s\n' "  sed --in-place=.bak -e 's/a/b/' file" >"$tmp/sp-long-eq.sh"
+assert_flagged '`sed --in-place=.bak …` (long option with an ATTACHED suffix, adjacent to sed)' "$tmp/sp-long-eq.sh"
+printf '%s\n' "  sed -e 's/a/b/' --in-place=.bak file" >"$tmp/sp-long-eq2.sh"
+assert_flagged '`sed -e EXPR --in-place=.bak file` (attached-suffix long option BEYOND an intervening option)' "$tmp/sp-long-eq2.sh"
+# (g) the EMPTY-SUFFIX spellings beyond the adjacent position. Before the empty-suffix rules were
+# given the same option-run handling as the bare `-i` rule, these were invisible to EVERY rule in
+# the table — the hole this control now closes and keeps closed.
+printf '%s\n' "  sed -e 's/a/b/' -i'' file" >"$tmp/sp-empty-sq.sh"
+assert_flagged "\`sed -e EXPR -i'' file\` (empty SINGLE-quoted suffix beyond the adjacent position)" "$tmp/sp-empty-sq.sh"
+printf '%s\n' "  sed -e 's/a/b/' -i\"\" file" >"$tmp/sp-empty-dq.sh"
+assert_flagged '`sed -e EXPR -i"" file` (empty DOUBLE-quoted suffix beyond the adjacent position)' "$tmp/sp-empty-dq.sh"
+# The widening must not reach past a shell metacharacter here either: an empty-suffix `-i` on the
+# far side of a pipe belongs to a DIFFERENT command.
+printf '%s\n' '  sed '"'"'s/x/y/'"'"' f | grep -i'"''"' foo' >"$tmp/sp-empty-pipe.sh"
+assert_not_flagged "a \`grep -i''\` AFTER a pipe (the empty-suffix rules stop at the metacharacter too)" "$tmp/sp-empty-pipe.sh"
+# And the same spellings in PROSE stay invisible: this repo documents the constructs it bans, so a
+# comment naming one is not an invocation.
+printf '%s\n' "# prose: sed -e 's/a/b/' -i'' file, and sed --in-place=.bak, are both banned here" \
+  >"$tmp/sp-new-cmt.sh"
+assert_not_flagged 'the new in-place spellings named in a COMMENT (prose about a banned construct is not an invocation)' "$tmp/sp-new-cmt.sh"
 
 # NEGATIVE CONTROLS for the widened option run — this is where widening can go wrong.
 # The first is the important one: an `-i` belonging to a DIFFERENT command after a pipe must
