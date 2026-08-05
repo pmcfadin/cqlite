@@ -316,7 +316,13 @@ to everything the guard authorizes — not only to the directories it names:
   `O_CREAT|O_EXCL` (a PREDICTABLE staging path that is checked, cleared and only then opened by
   a privileged writer is the same check-then-open race one level down: the name can be
   re-planted as a symlink in that window, and a predictable *suffix* such as a pid does not
-  help),
+  help). The staging create, the write, the mode fix and the rename SHALL occur within a SINGLE
+  privileged invocation, since the staging tool yields a NAME and every later step reopens it by
+  name — so splitting them leaves a create-then-reopen window that an unpredictable name does not
+  close. The rename SHALL refuse to treat its destination as a directory
+  (`--no-target-directory`), or a symlink-to-DIRECTORY planted at the managed name redirects the
+  staged file outside the sandbox. Any window that REMAINS SHALL be recorded as a residual with
+  its reachability boundary stated, and SHALL NOT be described as unreachable,
   then renamed over the name — so a symlink appearing in the window between the check and the
   write is replaced rather than written through. A read that decides idempotency SHALL NOT
   follow the entry either, or a link whose target holds the canonical bytes would report
@@ -467,6 +473,15 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
   byte-identical canonical content, and the write SHALL replace the directory ENTRY
 - **AND** the link's target SHALL be byte-unchanged throughout, and no staging entry SHALL be
   left behind
+
+#### Scenario: a symlink to a DIRECTORY at the destination cannot redirect the staged write
+- **GIVEN** the test-mode marker, a contained sysctl seam, and the managed drop-in basename
+  present inside it as a SYMLINK to a DIRECTORY outside the sandbox
+- **WHEN** the drop-in is installed
+- **THEN** the link SHALL be replaced by a regular file holding the managed bytes, the outside
+  directory SHALL remain EMPTY, and no staging entry SHALL be left behind
+- **AND** the staged install SHALL be observable as a SINGLE privileged invocation, so no
+  unprivileged process can be scheduled between the staging create and its reopen
 
 #### Scenario: a symlinked read seam cannot fabricate a capability verdict
 - **GIVEN** the test-mode marker and a proc seam whose spelling is strictly inside the proven
