@@ -501,8 +501,10 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   pass" — it is *follow the diff to where it actually is*: the headers now come from the snapshot file (the
   union when a prompt carries both), the path is taken only from the verified job's own prompt and must be
   absolute, inside the reviewed repo and under that repo's own snapshot dir, and every other outcome
-  (cleaned-up, missing, unreadable, empty, header-less, foreign-repo, unbound-job, ambiguous, relative,
-  unparseable) FAILs closed under its own cause. **And the snapshot must be CAPTURED WHILE THE REVIEW RUNS
+  (cleaned-up, missing, unreadable, empty, header-less, foreign-repo, unbound-job, **symlinked**, ambiguous,
+  relative, unparseable) FAILs closed under its own cause — the symlink refusal because containment is decided
+  on the PATH, so a symlink at the last component could point anywhere on the host and still read as in-repo
+  (roborev found that on this very change, and without the refusal an out-of-repo target reached a green). **And the snapshot must be CAPTURED WHILE THE REVIEW RUNS
   — measured live, roborev deletes it BEFORE `roborev review --wait` returns, and `roborev show` has no
   `--diff` to hand it back**, so reading the named path after the fact reported `cleaned-up` on *every*
   genuine snapshot-mode review (a differently-named FAIL is not a fix). The wrapper therefore arms a watcher

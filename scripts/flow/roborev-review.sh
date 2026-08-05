@@ -108,8 +108,8 @@
 #                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
 #                     FAIL (prompt unretrievable — ...) |
 #                     FAIL (snapshot diff unusable: <cleaned-up | missing | unreadable |
-#                     empty | no-headers | foreign-repo | unbound-job | ambiguous |
-#                     not-absolute | unparseable-path>) | SKIP
+#                     empty | no-headers | foreign-repo | unbound-job | symlinked |
+#                     ambiguous | not-absolute | unparseable-path>) | SKIP
 #                     TWO DIFF-DELIVERY MODES (#3312): roborev either inlines the diff or,
 #                     when it is large, writes it to a TRANSIENT snapshot file
 #                     (`<repo>/.roborev/roborev-snapshot-<id>/`) and names that path in the
@@ -340,8 +340,11 @@ roborev writes it to a TRANSIENT snapshot file under
 collects the headers from wherever the diff is (the union when both), so a large
 review no longer FALSE-FAILs; the snapshot path is taken only from the verified
 job's own prompt and must be absolute, inside the reviewed repo and under that
-repo's own snapshot directory. A named snapshot that is cleaned up, missing,
-unreadable, empty, header-less, foreign or unbound FAILs under its own cause —
+repo's own snapshot directory, and must not BE a symlink (containment is decided
+on the path, so a symlink at the last component could point anywhere on the host
+while still reading as in-repo — found by roborev on this very change). A named
+snapshot that is cleaned up, missing, unreadable, empty, header-less, foreign,
+symlinked or unbound FAILs under its own cause —
 "we could not check" is never "nothing was wrong". roborev DELETES the snapshot
 when the review finishes (before this wrapper's own --wait returns) and offers no
 'show --diff', so a watcher armed before the review copies it out of the repo and

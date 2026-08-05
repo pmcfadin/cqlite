@@ -3475,6 +3475,28 @@ assert_says 'case (cx31k) an unbound in-repo path FAILs' \
 assert_says 'case (cx31k) the cause names the path and the required snapshot shape' \
   "^ERROR: prompt-content: .*NOT a roborev snapshot for this review: $stale_snap"
 
+printf '== (cx31k2) a SYMLINK at the named path is refused, not followed ==\n'
+# FOUND BY ROBOREV ON THIS CHANGE (job 5, Medium): the containment test is decided on the PATH, and
+# the ancestor resolution canonicalises only the DIRECTORIES — so a symlink at the FINAL component
+# can sit inside the repo and point anywhere on the host, which would let an arbitrary file stand in
+# as this review's diff. The fixture is the strongest form: the symlink target is a VALID snapshot
+# carrying every census path, so only the refusal stands between it and a green.
+reset_stub
+mkdir -p "$snap_dir"
+rm -f "$snap_file"
+write_snap_diff "$tmp/outside-target.diff" alpha.rs beta.rs
+ln -s "$tmp/outside-target.diff" "$snap_file"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31k2)' FAIL 1
+assert_says 'case (cx31k2) a symlinked snapshot path is its own cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: symlinked\)$'
+assert_says 'case (cx31k2) the cause names the path and why it is refused rather than followed' \
+  "^ERROR: prompt-content: the path the prompt names is a SYMLINK: $snap_file"
+assert_lacks 'case (cx31k2) a valid out-of-repo target never reaches a PASS through a symlink' '^prompt-content: PASS'
+rm -f "$snap_file"
+
 printf '== (cx31l) the prompt names TWO DIFFERENT snapshot paths ==\n'
 reset_stub
 snap_second="$snap_repo/.roborev/roborev-snapshot-2222/roborev-snapshot-content.diff"

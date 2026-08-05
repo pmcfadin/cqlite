@@ -1120,6 +1120,18 @@ roborev_snapshot_path_binding() {
       ''|'.'|'..') _rx_snap_bind_state="unbound-job"; return 3 ;;
     esac
   done
+  # A SYMLINK AT THE FINAL COMPONENT DEFEATS A LEXICAL CONTAINMENT TEST (roborev job 5, Medium).
+  # The ancestor resolution above canonicalises every DIRECTORY in the path, so a symlinked parent
+  # is resolved and cannot smuggle the path out of the repo — but the LAST component was never
+  # resolved, so `<repo>/.roborev/roborev-snapshot-<id>/roborev-snapshot-content.diff` could be a
+  # symlink to any file on the host and still read as "inside the reviewed repository". roborev
+  # writes a REGULAR FILE there, so a symlink is refused outright rather than followed: refusing is
+  # exact, while following it would need the containment test repeated on the target and would still
+  # leave a TOCTOU window between the resolution and the read.
+  if [ -L "$_rx_snap_bound_path" ]; then
+    _rx_snap_bind_state="symlinked"
+    return 4
+  fi
   [ "${parts[0]}" = ".roborev" ] || { _rx_snap_bind_state="unbound-job"; return 3; }
   case "${parts[1]}" in
     roborev-snapshot-?*) ;;
@@ -1225,6 +1237,10 @@ roborev_collect_review_diff_headers() {
       not-absolute)
         ROBOREV_DIFF_SOURCE_STATE="not-absolute"
         ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt names a RELATIVE snapshot diff path ('$snap_path'), which would resolve against THIS PROCESS's working directory rather than the reviewed repository ($REPO) — so reading it could answer about a different file entirely. Failing closed; roborev writes an absolute path."
+        ;;
+      symlinked)
+        ROBOREV_DIFF_SOURCE_STATE="symlinked"
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the path the prompt names is a SYMLINK: $_rx_snap_bound_path. Containment in the reviewed repository ($REPO) is decided on the path, and a symlink at the final component can point anywhere on the host — so a symlink would let an arbitrary file stand in as this review's diff while still looking in-repo. roborev writes a regular file there, so this is refused rather than followed. Failing closed."
         ;;
       foreign-repo)
         ROBOREV_DIFF_SOURCE_STATE="foreign-repo"
