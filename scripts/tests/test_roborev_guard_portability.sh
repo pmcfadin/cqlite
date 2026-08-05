@@ -1170,20 +1170,69 @@ else
   # satisfies `"$work" != "$_canon"`, so the probes would then compare the wrapper's contract
   # against an empty expected repo path and report success. That is a positive verdict with no
   # affirmative measurement behind it — the defect this whole file exists to prevent. So the
-  # setup is a fail-closed chain, `_canon` must be non-empty, ABSOLUTE, and actually resolve to
-  # the fixture, and an unestablished fixture is a loud counted SKIP, never a pass.
+  # setup is a fail-closed chain and `_canon` must be non-empty, ABSOLUTE, and actually resolve
+  # to the fixture.
+  #
+  # MEASURING IT WAS NOT ENOUGH, BECAUSE THE MEASUREMENT'S FAILURE BRANCH WAS A SKIP (#3296
+  # round-9 finding 3, a RE-OCCURRENCE in the same place as the round-3 commit titled "AC3 fixture
+  # setup must be measured"). Every cause — a broken command, a failed write, a canonicalisation
+  # error — became a counted SKIP while the script still exited 0, so a regression in fixture setup
+  # SILENTLY DISABLED all four canonical-path contract probes without failing the gate. CLAUDE.md
+  # is explicit: a SKIP means the check never ran, which IS the vacuous pass itself. Turning a
+  # per-cause measurement into one permissive bucket reproduces the very defect being measured.
+  #
+  # So the two are now DIFFERENT KINDS OF THING and are classified before the chain runs:
+  #   * an ENVIRONMENT LIMITATION — affirmatively identified, by name, by a dedicated CAPABILITY
+  #     PROBE, and only for the two conditions a supported host may legitimately lack: `git`, and
+  #     a filesystem that can create symlinks. That is the ONLY route to `skip`.
+  #   * EVERYTHING ELSE is a FAILURE of this file's own fixture, and goes to `bad`.
+  # A cause nobody enumerated is therefore a red, not a silent skip — noise, never blindness.
+  cf_env_limitation() { # cf_env_limitation <scratch-dir> -> a NAMED limitation on stdout, else nothing
+    if ! command -v git >/dev/null 2>&1; then
+      printf 'git is not installed on this host, and the case (f) fixture is a git repository'
+      return 0
+    fi
+    # `ln -s` needs no existing target, so a dangling link is a sufficient capability probe.
+    if ln -s "$1/cf-symlink-probe-target" "$1/cf-symlink-probe" 2>/dev/null &&
+      [ -L "$1/cf-symlink-probe" ]; then
+      rm -f "$1/cf-symlink-probe"
+      return 0
+    fi
+    printf 'symlinks cannot be created under %s, and the fixture needs one to reproduce the macOS /var -> /private/var split' "$1"
+  }
+  # THE CLASSIFIER IS CONTROLLED IN BOTH DIRECTIONS, because a skip route that can never fire is
+  # dead code, and one that fires on a healthy host would silently disable the probes below.
+  _cf_probe_ok=$(cf_env_limitation "$tmp")
+  if [ -z "$_cf_probe_ok" ]; then
+    ok 'AC3 control: no environment limitation is detected on this host, so the four case (f) contract probes below really RUN (a skip here would be the vacuous pass)'
+  else
+    skip "AC3 control: an environment limitation is present on this host ($_cf_probe_ok), so the case (f) probes cannot run here"
+  fi
+  mkdir -p "$tmp/cf-ro" 2>/dev/null
+  chmod 555 "$tmp/cf-ro" 2>/dev/null
+  if ln -s x "$tmp/cf-ro/writable-check" 2>/dev/null; then
+    rm -f "$tmp/cf-ro/writable-check"
+    skip 'AC3 control: the symlink-capability branch could NOT be provoked — a read-only directory still accepted a symlink (running as root, or a filesystem that ignores mode bits), so that skip route was not measured on this host'
+  elif [ -n "$(cf_env_limitation "$tmp/cf-ro")" ]; then
+    ok 'AC3 control: the symlink-capability probe DETECTS a filesystem that cannot create the link — the one legitimate skip route is reachable and named, not dead code'
+  else
+    bad 'AC3 control: the symlink-capability probe reported NO limitation on a directory where `ln -s` demonstrably fails — the skip route cannot be reached, so a genuine environment limitation would be reported as a fixture FAILURE'
+  fi
+  chmod 755 "$tmp/cf-ro" 2>/dev/null
+
+  _cf_env_limit=$(cf_env_limitation "$tmp")
   _cf_setup_err=''
   work="$tmp/link/work"
-  mkdir -p "$tmp/real/work" || _cf_setup_err='mkdir of the fixture dir failed'
-  [ -n "$_cf_setup_err" ] || ln -s "$tmp/real" "$tmp/link" || _cf_setup_err='the symlink that reproduces /var -> /private/var could not be created'
-  [ -n "$_cf_setup_err" ] || git init -q -b main "$work" >/dev/null 2>&1 || _cf_setup_err='git init failed'
-  [ -n "$_cf_setup_err" ] || git -C "$work" config user.email t@e || _cf_setup_err='git config user.email failed'
-  [ -n "$_cf_setup_err" ] || git -C "$work" config user.name t || _cf_setup_err='git config user.name failed'
-  [ -n "$_cf_setup_err" ] || printf 'x\n' >"$work/f.txt" || _cf_setup_err='writing the fixture file failed'
-  [ -n "$_cf_setup_err" ] || git -C "$work" add f.txt >/dev/null 2>&1 || _cf_setup_err='git add failed'
-  [ -n "$_cf_setup_err" ] || git -C "$work" commit -q -m base >/dev/null 2>&1 || _cf_setup_err='git commit failed'
+  [ -n "$_cf_env_limit" ] || mkdir -p "$tmp/real/work" || _cf_setup_err='mkdir of the fixture dir failed'
+  [ -n "$_cf_env_limit$_cf_setup_err" ] || ln -s "$tmp/real" "$tmp/link" || _cf_setup_err='the symlink that reproduces /var -> /private/var could not be created (the capability probe above says this filesystem CAN make symlinks, so this is a fixture failure, not an environment limitation)'
+  [ -n "$_cf_env_limit$_cf_setup_err" ] || git init -q -b main "$work" >/dev/null 2>&1 || _cf_setup_err='git init failed'
+  [ -n "$_cf_env_limit$_cf_setup_err" ] || git -C "$work" config user.email t@e || _cf_setup_err='git config user.email failed'
+  [ -n "$_cf_env_limit$_cf_setup_err" ] || git -C "$work" config user.name t || _cf_setup_err='git config user.name failed'
+  [ -n "$_cf_env_limit$_cf_setup_err" ] || printf 'x\n' >"$work/f.txt" || _cf_setup_err='writing the fixture file failed'
+  [ -n "$_cf_env_limit$_cf_setup_err" ] || git -C "$work" add f.txt >/dev/null 2>&1 || _cf_setup_err='git add failed'
+  [ -n "$_cf_env_limit$_cf_setup_err" ] || git -C "$work" commit -q -m base >/dev/null 2>&1 || _cf_setup_err='git commit failed'
   _canon=''
-  if [ -z "$_cf_setup_err" ]; then
+  if [ -z "$_cf_env_limit$_cf_setup_err" ]; then
     _top=$(git -C "$work" rev-parse --show-toplevel 2>/dev/null) ||
       _cf_setup_err='git rev-parse --show-toplevel failed'
     [ -n "$_top" ] || _cf_setup_err='git rev-parse --show-toplevel returned nothing'
@@ -1193,18 +1242,20 @@ else
   fi
   # The canonical path must be non-empty, absolute, AND the same directory as $work — an
   # arbitrary non-empty string would satisfy the "differs from $work" control by accident.
-  if [ -z "$_cf_setup_err" ]; then
+  if [ -z "$_cf_env_limit$_cf_setup_err" ]; then
     case "$_canon" in
       /*) ;;
       *) _cf_setup_err="the canonical path is not absolute: '$_canon'" ;;
     esac
   fi
-  if [ -z "$_cf_setup_err" ] && ! [ "$_canon" -ef "$work" ]; then
+  if [ -z "$_cf_env_limit$_cf_setup_err" ] && ! [ "$_canon" -ef "$work" ]; then
     _cf_setup_err="the canonical path '$_canon' is not the same directory as the fixture '$work'"
   fi
 
-  if [ -n "$_cf_setup_err" ]; then
-    skip "AC3: the case (f) fixture could not be established ($_cf_setup_err) — the canonicalisation contract was NOT MEASURED on this host. Not a pass: the probes below are skipped rather than run against an unestablished fixture."
+  if [ -n "$_cf_env_limit" ]; then
+    skip "AC3: the case (f) fixture could not be established because of an affirmatively identified environment limitation ($_cf_env_limit) — the canonicalisation contract was NOT MEASURED on this host. Not a pass: the probes below are skipped rather than run against an unestablished fixture."
+  elif [ -n "$_cf_setup_err" ]; then
+    bad "AC3: the case (f) fixture setup FAILED ($_cf_setup_err). This is a defect in THIS FILE's fixture, not a limitation of the host — the capability probe above found none — so it is a counted FAILURE, never a skip: as a skip it silently disabled all four canonical-path contract probes while the script still exited 0 (#3296 round-9)."
   elif [ "$work" = "$_canon" ]; then
     bad 'AC3: the symlinked fixture did not produce a path that differs from its canonical form — the canonicalisation is not actually exercised, so a PASS below would be vacuous'
   else
@@ -1234,8 +1285,10 @@ else
     esac
   }
 
-  if [ -n "$_cf_setup_err" ]; then
-    skip 'AC3: the four case (f) contract probes (sanctioned / relative / root-checkout / no --repo) were NOT RUN, because the fixture above could not be established'
+  if [ -n "$_cf_env_limit" ]; then
+    skip 'AC3: the four case (f) contract probes (sanctioned / relative / root-checkout / no --repo) were NOT RUN, because of the environment limitation named above'
+  elif [ -n "$_cf_setup_err" ]; then
+    bad 'AC3: the four case (f) contract probes (sanctioned / relative / root-checkout / no --repo) were NOT RUN, because this file’s own fixture setup FAILED — losing all four contract probes is a counted FAILURE, not a skip'
   else
     _tail='--agent codex --model gpt-5.6-sol --wait'
     probe_case_f sanctioned 'the sanctioned canonical --repo record' accept \
