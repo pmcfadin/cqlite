@@ -756,6 +756,34 @@ The delta block is **not the gate of record** and carries an explicit `gate-of-r
 
 **Standing backstop (owner condition, 2026-07-04).** Long-term quality is backstopped by the nightly full run on `main`: `.github/workflows/gate.yml` (deep-check) re-runs the FULL gate with `CQLITE_CLIPPY_FULL=1`, deeper than the local gate. Delta re-certification leans on that nightly as the net for anything a test/docs round scoped past. `--delta` (like `--lite` and `--only`) is EXEMPT from the machine-wide concurrency cap.
 
+## CITE-AND-WAIVE: waiving a red on a genuinely prose diff (#3042, narrowed by #3250)
+
+[Section titled “CITE-AND-WAIVE: waiving a red on a genuinely prose diff (#3042, narrowed by #3250)”](#cite-and-waive-waiving-a-red-on-a-genuinely-prose-diff-3042-narrowed-by-3250)
+
+A **genuinely prose** diff cannot change the compiled binary, so a test failure in its full gate is by definition **pre-existing on `main` or a flake**, and the correct response is CITE-AND-WAIVE — never a source patch to turn the gate green (that is a real change smuggled in under a docs diff, certified by nothing, and it masks the actual main-red).
+
+The waiver’s precondition is that the diff touches **no compiled input**: no `src`, no `Cargo.*`, no build script, no workflow, no test-data. **That qualifier is a path-shape test, and a path shape is not evidence. Don’t judge it — run it:**
+
+```bash
+git diff --name-only origin/main...HEAD | bash scripts/ci/classify-docs-only.sh
+# exit 0 => docs-only  (the waiver is available)
+# exit 1 => full       (the waiver does NOT apply — the failure is presumed yours)
+```
+
+`scripts/ci/classify-docs-only.sh` is the same classifier that decides whether `pr-gate-core` runs at all, so running it here asks the gate’s own question rather than a paraphrase of it. It answers documentation only on an **affirmative** allowlist match — prose/images/legal text, inert report artifacts under `docs/`, and code-bearing report formats (`.json`, `.html`) **only inside** an artifact-bearing directory — and fails closed on every unrecognized extension and on **every** extensionless path. `scripts/tests/test_classify_docs_only.sh` pins that behaviour, and it runs inside the full gate’s `tooling-tests` component.
+
+**Why the old wording was unsafe, in one concrete case.** This repository ships measurement harnesses under `docs/reports/*-artifacts/` **by convention**, so a PR-#3222-shaped diff contains `src/main.rs` **and** `Cargo.toml` under `docs/reports/ws0-3026-artifacts/ws0-cqlite/scan-harness/`. It satisfies “no `src`, no `Cargo.*`” **textually** while being false **materially** — measured, the three merged `docs/`-only PRs #3222 / #3081 / #3216 carried 35 / 30 / 1 executable or config-as-code paths and reported `required` green in 13–16 s against a \~14-minute baseline. An agent correctly following the old text would waive a red that was genuinely its own.
+
+Everything else about the rule is unchanged:
+
+1. Confirm the diff really is non-compiling input — with the classifier, not by eye.
+2. Identify the failure as a **known** main-red issue or a known flake; reproduce it on a clean `origin/main` checkout if it is not already filed, and FILE it if not.
+3. Record the waiver in the PR body, naming the failing component **and** the issue number it belongs to. **A waiver with no cited issue is not a waiver — it is an unexplained red.**
+
+Conversely, **if ANY compiled input is in the diff the waiver is void**: the failure is presumed yours until proven otherwise.
+
+**Same definition, two sides.** This is the gate-side spelling of the review-side rule in [roborev findings](/cqlite/agents-developing/roborev-findings/): “docs-only” means a **code-free census**, never a `docs/` path prefix. The two definitions are cross-referenced deliberately so they cannot drift apart again — #3229 fixed the reviewer’s copy of this bug and #3250 fixed the gate’s.
+
 ## New-machine setup
 
 [Section titled “New-machine setup”](#new-machine-setup)
@@ -1191,6 +1219,8 @@ bash scripts/flow/roborev-review.sh --agent <agent> --model <model> \
 4. **A docs-only (code-free) diff cannot be roborev-certified at all** — where **“docs-only” means a CODE-FREE CENSUS as the wrapper classifies it, never a `docs/` path prefix** (issue #3229). The mechanism is measured, and it is *not* a code/non-code judgement: **roborev drops exactly what its configured `exclude_patterns` pathspecs match.** Of a 27-file census — 22 markdown, 5 code — the prompt carried headers for exactly the 5 code files **because `*.md` is configured**, not because the reviewer recognised prose. So for a prose-only diff the constructed diff is genuinely EMPTY and the verdict is a *truthful report of an empty input*, not a reviewer malfunction. Re-running cannot help; the wrapper’s deterministic pre-enqueue `code-free:` check fails it before any review is enqueued, rather than matching reviewer prose after the fact. The same mechanism is why `prompt-content:` asserts the **CODE subset** of the census — and why an unretrievable prompt is a `FAIL` there, never a passing `UNAVAILABLE`. The sanctioned substitute is primary-source verification recorded in the PR (for a docs change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may ever record “roborev clean.”**
 
    **The same mechanism cuts the other way, and did.** A configured `docs/**` discarded **33 executable** measurement-harness files on PR #3222 — a 136-path code census reaching the reviewer as an empty prompt (`prompt-content: FAIL (136/136 code census paths absent)`, 15,443 in / 89 out). The `docs/reports/*-artifacts/` measurement harnesses this repo ships **by convention are executable code that IS reviewed**, so a PR carrying them is **not** a docs-only change and must be roborev-certified like any other code change. **One** thing holds that line: `exclude_patterns` is a narrowed **prose/artifact deny-list** (`*.md` plus artifact extensions scoped to artifact-bearing **directories** — never a blanket `docs/**`). Measured after the narrowing: 71 `docs/` executables reach the reviewer, 0 markdown does, and nothing outside `docs/` is newly excluded.
+
+   **The GATE had the same bug, and it is the same definition (#3250).** `scripts/ci/classify-docs-only.sh` — which decides whether `pr-gate-core`, the compute half of `required`, runs at all — classified every path under `docs/` as documentation on the prefix alone, so the same three PRs reported `required` green in 13–16 s having compiled nothing. It now answers only on an affirmative allowlist match and imports this subsystem’s artifact declaration (`CODE_FREE_ARTIFACT_EXTENSIONS`, `CODE_FREE_ARTIFACT_DIR_GLOBS`, `roborev_path_in_artifact_dir`) rather than restating it, so the review-side and gate-side definitions of “docs-only” are one fact. The gate-side rule — including how to WAIVE a red on a genuinely prose diff, by RUNNING that classifier instead of judging a path shape — is in [gate contract → CITE-AND-WAIVE](/cqlite/agents-developing/gate-contract/).
 
    **NOTHING PREDICTS THE EXCLUSION SET PRE-ENQUEUE, and that is a deliberate, recorded reduction in coverage (#3283).** A `census-exclusion:` key that did — a bash port of roborev’s own pathspec construction (`git.FormatExcludeArgs`) over a TOML parse of three configuration sources — was built on #3229 and **REMOVED by owner ruling**. Its false-PASS count across review rounds was *increasing* (1, 1, 2, 3), and two of the last round’s three defects lived in code the two preceding fix rounds had just introduced: a surface where fixes add defects of the class they close. **A guard with known documented false-PASSes is worse than no guard, because it invites reliance it cannot support.** Subtraction, by contrast, cannot add a false-PASS.
 

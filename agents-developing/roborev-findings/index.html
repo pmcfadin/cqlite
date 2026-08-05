@@ -253,6 +253,15 @@ like any other code change. <strong>One</strong> thing holds that line: <code di
 <strong>prose/artifact deny-list</strong> (<code dir="auto">*.md</code> plus artifact extensions scoped to artifact-bearing
 <strong>directories</strong> — never a blanket <code dir="auto">docs/**</code>). Measured after the narrowing: 71 <code dir="auto">docs/</code> executables reach
 the reviewer, 0 markdown does, and nothing outside <code dir="auto">docs/</code> is newly excluded.</p>
+<p><strong>The GATE had the same bug, and it is the same definition (#3250).</strong> <code dir="auto">scripts/ci/classify-docs-only.sh</code>
+— which decides whether <code dir="auto">pr-gate-core</code>, the compute half of <code dir="auto">required</code>, runs at all — classified every
+path under <code dir="auto">docs/</code> as documentation on the prefix alone, so the same three PRs reported <code dir="auto">required</code> green
+in 13–16 s having compiled nothing. It now answers only on an affirmative allowlist match and imports
+this subsystem’s artifact declaration (<code dir="auto">CODE_FREE_ARTIFACT_EXTENSIONS</code>, <code dir="auto">CODE_FREE_ARTIFACT_DIR_GLOBS</code>,
+<code dir="auto">roborev_path_in_artifact_dir</code>) rather than restating it, so the review-side and gate-side definitions of
+“docs-only” are one fact. The gate-side rule — including how to WAIVE a red on a genuinely prose diff, by
+RUNNING that classifier instead of judging a path shape — is in
+<a href="/cqlite/agents-developing/gate-contract/">gate contract → CITE-AND-WAIVE</a>.</p>
 <p><strong>NOTHING PREDICTS THE EXCLUSION SET PRE-ENQUEUE, and that is a deliberate, recorded reduction in
 coverage (#3283).</strong> A <code dir="auto">census-exclusion:</code> key that did — a bash port of roborev’s own pathspec
 construction (<code dir="auto">git.FormatExcludeArgs</code>) over a TOML parse of three configuration sources — was built on
