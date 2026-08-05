@@ -541,6 +541,17 @@ perf_capability_dropin_install() {
     #   no window. It removes the ATTACKER PRECONDITION, turning "production is safe because
     #   /etc/sysctl.d is root-owned" from a recorded ASSUMPTION into an ENFORCED INVARIANT: assume
     #   nothing about the destination, measure it, fail closed.
+    #   KNOWN, TRACKED, DELIBERATELY-UNFIXED RESIDUAL — **issue #3323** (ancestor-chain rename race,
+    #   the TWELFTH escape in this family). This precondition validates the target DIRECTORY; it does
+    #   NOT prove the PATH BY WHICH that directory is reached is stable. An actor able to write an
+    #   ANCESTOR can rename the validated directory and substitute a symlink after these checks, and
+    #   the later `mktemp`/write/rename re-resolve `$d`. The correct fix is a held directory
+    #   descriptor with no-follow fd-relative operations (`openat2` containment) — NOT expressible in
+    #   shell, which is why twelve in-shell attempts at this class stopped here by owner ruling
+    #   rather than a thirteenth. #3323 records that fix and re-raises on EVIDENCE the boundary is
+    #   reachable (multi-tenant boxes, an attacker-writable ancestor, or a real privileged helper
+    #   reachable from test mode). Production ancestors are `/etc` and `/`, both root-owned; test
+    #   mode reaches only AC4 shims. Do NOT widen this function's trust without reading #3323 first.
     #   THE REMAINING BOUNDARY, STATED: this check races only against an actor who can `chmod` a
     #   directory owned by the privileged writer — and that actor is already the privileged writer
     #   (or root), so it has no privilege left to escalate to. That is the whole of the residual;

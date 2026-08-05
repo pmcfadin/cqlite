@@ -521,7 +521,13 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
       info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/perf-capability.sh --install && sysctl -q --system"
       info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
     else
-      info "write + apply the drop-in:  bash scripts/perf-capability.sh --install ${PERF_RUN_AS% } && ${PERF_RUN_AS}sysctl -q --system"
+      # The priv token is only appended when there IS one: an empty ${PERF_RUN_AS} would leave a
+      # double space, and the root-box assertion pins the exact line.
+      if [ -n "$PERF_RUN_AS" ]; then
+        info "write + apply the drop-in:  bash scripts/perf-capability.sh --install ${PERF_RUN_AS% } && ${PERF_RUN_AS}sysctl -q --system"
+      else
+        info "write + apply the drop-in:  bash scripts/perf-capability.sh --install && sysctl -q --system"
+      fi
     fi
   }
 
