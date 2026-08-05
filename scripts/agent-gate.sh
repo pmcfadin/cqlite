@@ -5659,20 +5659,31 @@ run_tooling_tests() {
   # committed at the repo root of one branch THREE times — removed, re-added by a
   # `git add -A`, removed again. No committed code produces it: it is the residue of an
   # ad-hoc shell redirect typed during a fix round (`… 2>0`, a mistyped `2>&1`), which a
-  # later blanket `git add` swept up. Deleting the file is not the fix; this is. Both
-  # states are enumerated — UNTRACKED (the moment before the `git add`) and TRACKED (the
-  # state it reached twice) — and the predicate is narrow on purpose: only a name that is
-  # ENTIRELY a file-descriptor number, an `&`-prefixed one, or bare redirect punctuation,
-  # at depth 1. Anything with a letter, dot, dash or underscore is a legitimate file and
-  # is not flagged (driven: `2026-report.md`, `v2`, `0.14.0.md`, `0x`, `a0`, `_0`).
-  # `--self-test` OBSERVES both directions in a throwaway git repo under $TMPDIR and then
-  # scans THIS checkout, so the hook cannot certify the probe while leaving the real root
-  # unexamined. git-only: no python3, no network, hence NO SKIP PATH to record a vacuous
-  # success.
+  # later blanket `git add` swept up. Deleting the file is not the fix; this is.
+  #
+  # The VERDICT-BEARING subject is the TRACKED root only (#3272 round 8). It was both states
+  # until the LINUX gate of record failed this component on a file named `720` that was
+  # UNTRACKED, never committed, and already gone when the run was inspected — transient debris
+  # from a CONCURRENT STEP OF THE SAME GATE. A guard whose subject is the live working tree can
+  # be tripped by a peer step of the run it is certifying, i.e. it reds the gate at random over
+  # content no author can act on, and a guard people learn to waive is worse than no guard. So
+  # the subject was NARROWED (not given a settle/retry window, which would trade a wrong subject
+  # for a timing-dependent verdict): committed content is attributable to a diff and can ship;
+  # untracked debris is reported as a NON-FAILING notice.
+  #
+  # The predicate stays narrow on purpose: only a name that is ENTIRELY a file-descriptor
+  # number, an `&`-prefixed one, or bare redirect punctuation, at depth 1. Anything with a
+  # letter, dot, dash or underscore is a legitimate file and is not flagged (driven COMMITTED,
+  # which is now the only observable path: `2026-report.md`, `v2`, `0.14.0.md`, `0x`, `a0`, `_0`).
+  # `--self-test` OBSERVES the tracked half FAILING, the untracked half NOT failing while still
+  # being reported, and a tracked finding surviving concurrent untracked debris, in a throwaway
+  # git repo under $TMPDIR — then scans THIS checkout, so the hook cannot certify the probe while
+  # leaving the real root unexamined. git-only: no python3, no network, hence NO SKIP PATH to
+  # record a vacuous success.
   echo ">>> [$name] bash scripts/ci/check-root-junk-files.sh --self-test"
   if ! bash "$REPO_ROOT/scripts/ci/check-root-junk-files.sh" --self-test >>"$log" 2>&1; then
     status=FAIL
-    echo "--- [$name] FAILED (accidental-redirect artifact at the repo root); last 40 lines of $log ---"
+    echo "--- [$name] FAILED (TRACKED accidental-redirect artifact at the repo root, or its self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

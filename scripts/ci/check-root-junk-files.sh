@@ -12,13 +12,36 @@
 # (`… 2>0`, `… >0`, a mistyped `2>&1`), which leaves an empty file in `$PWD`, and a
 # later `git add -A`/`git add .` then captured it.
 #
-# So deleting the file is not the fix: the fix is that the NEXT one cannot land. Both
-# halves of the sequence are covered, because both are how it actually happened:
+# So deleting the file is not the fix: the fix is that the NEXT one cannot land.
 #
-#   * UNTRACKED at the root — the state the file is in the moment before a `git add -A`
-#     sweeps it up. Caught here it never becomes a commit.
-#   * TRACKED at the root — the state it reached twice. Caught here it cannot survive a
-#     gate run, whichever `git add` spelling put it there.
+# # THE VERDICT-BEARING SUBJECT IS THE TRACKED ROOT ONLY (#3272 review round 8)
+#
+# This guard originally FAILED on both states. The untracked half is now DEMOTED to a
+# NON-FAILING NOTICE, because it was OBSERVED reddening the gate of record on debris that was
+# never anyone's diff:
+#
+#   On the LINUX gate of record at the certified SHA, 30 of 31 components PASSED and this one
+#   FAILED. The artifact was a file named `720` at the repo root: UNTRACKED, never committed,
+#   and ALREADY GONE by the time the run was inspected — transient debris created and removed
+#   by a CONCURRENT STEP OF THE SAME GATE. Re-running the scan on that same box printed
+#   `root-junk: PASS`.
+#
+# A guard whose subject is the LIVE working tree can be tripped by a peer step of the very run
+# it is certifying, so it reds the gate of record at random over content no author can act on —
+# and a guard people learn to waive is worse than no guard (this issue's own doctrine). The fix
+# is to NARROW THE SUBJECT, deliberately NOT to re-check after a settle delay: a retry window
+# would make the verdict timing-dependent, which is a worse property than a narrower subject.
+#
+# So the two states are now handled differently, and this file no longer claims to guard the
+# untracked root:
+#
+#   * TRACKED at the root — FAILS, loudly, naming the file. This is the state the defect
+#     actually reached (twice) and the only one that can SHIP. It is committed content, so it
+#     is attributable to the diff and no concurrent step of a gate can manufacture it.
+#   * UNTRACKED at the root — a NOTICE on stdout, carrying no verdict and unable to change the
+#     exit status. Still reported rather than dropped, because the information is actionable by
+#     whoever is looking (`rm ./<name>` before a blanket `git add` captures it) and silence is
+#     not the third option — but it is not a gate verdict, because the gate cannot attribute it.
 #
 # # What counts as junk, and why the shape list is NARROW
 #
@@ -40,11 +63,13 @@
 # # Hermetic, and OBSERVED in both directions
 #
 # `--self-test` builds a throwaway git repo under `$TMPDIR`, plants each junk shape and
-# requires a FAIL, plants the legitimate look-alikes and requires a PASS, and asserts the
-# untracked and tracked halves SEPARATELY — per #3249 a guard that has not been observed
-# firing is not evidence. It also drives a `git` SHIM that FAILS the enumeration, which must
-# FAIL the guard rather than green it (#3272 F4), paired with a frozen replica of the pre-fix
-# loop observed to have been fail-open.
+# requires the TRACKED half to FAIL, requires the UNTRACKED half NOT to fail while still being
+# NOTICED, plants the legitimate look-alikes and requires a PASS, and asserts the two halves
+# SEPARATELY — per #3249 a guard that has not been observed firing is not evidence, and per
+# round 8 a half that has been DEMOTED must be observed NOT firing, or the demotion is a claim
+# rather than a fact. It also drives a `git` SHIM that FAILS the enumeration, which must FAIL
+# the guard rather than green it (#3272 F4), paired with a frozen replica of the pre-fix loop
+# observed to have been fail-open.
 #
 # It needs `git` and `mktemp` (coreutils, present wherever git is) and nothing else: no python3,
 # no network, no cargo. `mktemp` was added by the F4 fix — the enumeration is written to a FILE so
@@ -84,11 +109,15 @@ is_junk_name() {
 
 # root_junk <repo-root> — one `<state>\t<name>` line per junk file at the root.
 #
-# Two INDEPENDENT sources, because they are two different states of the same defect and a
-# check that saw only one would have missed the way it actually landed:
+# Two INDEPENDENT sources, because they are two different states of the same defect:
 #   * `git ls-files --others --exclude-standard` — UNTRACKED (pre-`git add`).
 #   * `git ls-files` — TRACKED (already committed).
 # Both are restricted to depth 1 (`*/*` excluded), which is the subject.
+#
+# Both are still ENUMERATED here; the distinction between them is drawn by the CALLER, once:
+# `scan` fails on `tracked` and only NOTICES `untracked` (round 8, above). Keeping the
+# enumeration whole and the verdict in one place means there is exactly one line to read to
+# know which state is verdict-bearing, rather than a silently half-blind enumerator.
 #
 # # THE ENUMERATION'S STATUS IS CHECKED, NOT DISCARDED (#3272 review round 7, F4)
 #
@@ -163,9 +192,13 @@ root_junk() {
   rm -f "$tmpf" "$errf"
 }
 
-# scan <repo-root> — exit 0 when the root is clean, 1 naming every junk file otherwise.
+# scan <repo-root> — exit 1 naming every TRACKED junk file, else 0.
+#
+# The untracked findings are reported as a NOTICE and cannot change the exit status (round 8,
+# see the header): the verdict-bearing subject is committed content, which is attributable to a
+# diff, and not the live working tree, which a concurrent step of the same gate can dirty.
 scan() {
-  local root="$1" found rc
+  local root="$1" found rc tracked untracked
   if ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
     echo "FAIL: $root is not a git checkout, so the root-junk subject cannot be" >&2
     echo "      enumerated — an unenumerated subject prints exactly like a clean one." >&2
@@ -183,15 +216,39 @@ scan() {
     echo "      pass (#3272 F4)." >&2
     return 1
   fi
-  if [ -z "$found" ]; then
+  tracked=""
+  untracked=""
+  if [ -n "$found" ]; then
+    # `^tracked` cannot match `untracked` — the anchor keeps the two states apart.
+    tracked="$(printf '%s\n' "$found" | grep '^tracked' || true)"
+    untracked="$(printf '%s\n' "$found" | grep '^untracked' || true)"
+  fi
+
+  # The UNTRACKED half: reported, never a verdict (round 8). Worded so no reader can mistake it
+  # for one — no PASS/FAIL token, and it says outright that it does not affect the result.
+  if [ -n "$untracked" ]; then
+    echo "root-junk notice (not a verdict, does not affect the exit status): untracked" \
+         "redirect-shaped file(s) at the root of $root:"
+    printf '%s\n' "$untracked" | while IFS=$'\t' read -r state name; do
+      echo "         ./$name"
+    done
+    echo "         These are NOT gate-failing: the working tree is shared with whatever else is"
+    echo "         running, and a concurrent step of a gate has been observed creating and"
+    echo "         removing exactly this kind of debris mid-run (a transient './720' on the Linux"
+    echo "         gate of record, #3272 round 8). Only TRACKED files carry a verdict here."
+    echo "         Worth clearing anyway (\`rm ./<name>\`) so a blanket \`git add\` cannot commit one."
+  fi
+
+  if [ -z "$tracked" ]; then
     # AFFIRMATIVE, not the absence of a complaint: the line states that the subject was
-    # enumerated, so a pasted log shows the check RAN.
-    echo "root-junk: PASS — no accidental-redirect artifact at the root of $root" \
-         "(both the untracked and the tracked halves enumerated)"
+    # enumerated, so a pasted log shows the check RAN. It names the verdict-bearing half
+    # explicitly, so it cannot be read as a claim about the untracked root.
+    echo "root-junk: PASS — no TRACKED accidental-redirect artifact at the root of $root" \
+         "(the tracked root enumerated; the untracked root is reported as a notice only)"
     return 0
   fi
-  echo "FAIL: accidental-redirect artifact(s) at the repo root:" >&2
-  printf '%s\n' "$found" | while IFS=$'\t' read -r state name; do
+  echo "FAIL: TRACKED accidental-redirect artifact(s) at the repo root:" >&2
+  printf '%s\n' "$tracked" | while IFS=$'\t' read -r state name; do
     echo "      [$state] $name" >&2
   done
   cat >&2 <<'EOF'
@@ -199,9 +256,10 @@ scan() {
       one (`&1`), or bare redirect punctuation is the residue of an ad-hoc shell
       redirect — `cmd 2>0`, a mistyped `2>&1` — not something anyone meant to write.
       On this repo an empty `0` reached the tree TWICE, re-added each time by a
-      `git add -A` that swept it up (#3272 F5).
-      Fix: `rm ./<name>` (untracked) or `git rm --cached ./<name>` then `rm ./<name>`
-      (tracked), and STAGE EXPLICIT PATHS rather than `git add -A`/`git add .`.
+      `git add -A` that swept it up (#3272 F5). That is COMMITTED content: it is in the
+      diff, it ships, and it is what this guard refuses.
+      Fix: `git rm --cached ./<name>` then `rm ./<name>`, and STAGE EXPLICIT PATHS
+      rather than `git add -A`/`git add .`.
 EOF
   return 1
 }
@@ -240,48 +298,63 @@ self_test() {
     _no "self-test: a clean root must PASS (got: $(scan "$repo" 2>&1))"
   fi
 
-  # 1. the UNTRACKED half — the state the file is in before a `git add -A`.
+  # 1. the UNTRACKED half — DEMOTED to a notice (round 8), so it is observed NOT FAILING.
   #
-  # The diagnostic assertion CAPTURES the output instead of piping it, and that is a
-  # correctness requirement, not a style choice. Two ways the obvious spelling
-  # `scan … | grep -qF …` is broken here, and BOTH were measured on this file:
+  # A demotion asserted in a comment is a claim; a demotion driven here is a fact. Both
+  # directions are required of every shape, because either alone would be satisfiable by a
+  # broken guard: the exit status must stay 0 (a transient artifact of a concurrent gate step
+  # cannot red the gate of record — the `./720` observation in the header), AND the finding must
+  # still be REPORTED (silence is not the alternative to a verdict; the information stays
+  # actionable for whoever is looking).
+  #
+  # The assertions CAPTURE the output instead of piping it, and that is a correctness
+  # requirement, not a style choice. Two ways the obvious spelling `scan … | grep -qF …` is
+  # broken here, and BOTH were measured on this file:
   #
   #   * `set -o pipefail` (this file's own option) makes a pipeline return the RIGHTMOST
-  #     NON-ZERO status, and `scan` exits 1 on a finding BY DESIGN — so the pipeline
-  #     returned 1 even when grep MATCHED, and all six state-naming assertions took their
-  #     failing branch unconditionally. They could never pass, i.e. they asserted nothing
-  #     about the guard: the FAIL they printed was about the pipeline.
+  #     NON-ZERO status, and `scan` exits 1 on a TRACKED finding BY DESIGN — so the pipeline
+  #     returned 1 even when grep MATCHED, and the state-naming assertions took their failing
+  #     branch unconditionally. They could never pass, i.e. they asserted nothing about the
+  #     guard: the FAIL they printed was about the pipeline.
   #   * `[untracked]` in a BASIC REGEX is a CHARACTER CLASS matching ONE character, so a
   #     `grep -q` would not have matched the literal bracketed state anyway. Hence `-F`.
   #
-  # This is the same shape as the finding this whole round is about — an assertion whose
-  # verdict comes from something other than the thing under test.
+  # This is the same shape as an earlier finding on this rig — an assertion whose verdict comes
+  # from something other than the thing under test.
   local shape out
   for shape in 0 2 12 '&1' '>'; do
     : > "$repo/$shape"
     if scan "$repo" >/dev/null 2>&1; then
-      _no "self-test: an UNTRACKED root file named '$shape' must FAIL the scan"
+      _ok "self-test: OBSERVED (round 8) — an UNTRACKED root file named '$shape' does NOT fail the scan (a concurrent gate step can create one; only TRACKED files carry a verdict)"
     else
-      _ok "self-test: OBSERVED — an UNTRACKED root file named '$shape' FAILS"
+      _no "self-test: round 8 — an UNTRACKED root file named '$shape' must NOT fail the scan (got: $(scan "$repo" 2>&1))"
     fi
-    # ...and the diagnostic must name the state, or a reader cannot act on it.
+    # ...and it must still be REPORTED, or the demotion became silence.
     out="$(scan "$repo" 2>&1)"
-    if grep -qF "[untracked] $shape" <<<"$out"; then
-      _ok "self-test: the finding for '$shape' names it as UNTRACKED"
+    if grep -qF "./$shape" <<<"$out"; then
+      _ok "self-test: the untracked '$shape' is still REPORTED (demoted, not dropped)"
     else
-      _no "self-test: the finding for '$shape' must name the untracked state (got: $out)"
+      _no "self-test: the untracked '$shape' must still be reported as a notice (got: $out)"
+    fi
+    # ...as a NOTICE that no reader can mistake for a verdict: it must say so, and it must not
+    # print the word FAIL.
+    if grep -qF 'not a verdict' <<<"$out" && ! grep -qF 'FAIL' <<<"$out"; then
+      _ok "self-test: the untracked notice for '$shape' declares itself non-verdict-bearing and prints no FAIL token"
+    else
+      _no "self-test: the untracked notice for '$shape' must be unmistakably non-verdict-bearing (got: $out)"
     fi
     rm -f "$repo/$shape"
   done
 
-  # 2. the TRACKED half — the state `0` actually reached, TWICE.
+  # 2. the TRACKED half — the state `0` actually reached, TWICE. This is the verdict-bearing
+  #    subject after round 8's narrowing, so it is the one case that MUST still red the gate.
   : > "$repo/0"
   git -C "$repo" add ./0
   git -C "$repo" commit -qm 'the defect'
   if scan "$repo" >/dev/null 2>&1; then
     _no "self-test: a TRACKED root file named '0' must FAIL the scan"
   else
-    _ok "self-test: OBSERVED — a TRACKED root '0' FAILS (the state it reached twice)"
+    _ok "self-test: OBSERVED — a TRACKED root '0' FAILS (the state it reached twice; still the verdict after round 8's narrowing)"
   fi
   out="$(scan "$repo" 2>&1)"
   if grep -qF '[tracked] 0' <<<"$out"; then
@@ -289,31 +362,57 @@ self_test() {
   else
     _no "self-test: the finding must name the tracked state (got: $out)"
   fi
+  # ...and the demotion of the untracked half must not SWALLOW a tracked finding when both are
+  # present. Without this, round 8's narrowing could have been an over-broad filter that greened
+  # the very case the guard exists for whenever any untracked debris happened to be lying around.
+  : > "$repo/2"
+  out="$(scan "$repo" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -qF '[tracked] 0' <<<"$out"; then
+    _ok "self-test: OBSERVED (round 8) — a TRACKED '0' still FAILS while UNTRACKED debris is also present (the notice does not swallow the verdict)"
+  else
+    _no "self-test: round 8 — a tracked finding must survive concurrent untracked debris (rc=$rc, out: $out)"
+  fi
+  rm -f "$repo/2"
   git -C "$repo" rm -q --cached ./0 >/dev/null 2>&1
   rm -f "$repo/0"
   git -C "$repo" commit -qm 'removed'
 
   # 3. the SILENT direction, over names a repo legitimately holds. A guard that reds on
   #    these is the guard someone deletes, so each is driven rather than reasoned about.
+  #
+  # These are planted COMMITTED, not untracked, and that is REQUIRED after round 8: an untracked
+  # plant can no longer fail the scan for ANY name, so an untracked spelling of this case would
+  # pass identically whether `is_junk_name` flagged the name or not — a check that asserts
+  # nothing. Committing them puts each name on the one path that still carries a verdict, which
+  # is the only place non-flagging is observable.
   for shape in 2026-report.md v2 0.14.0.md '0x' 'a0' '_0' 'CHANGELOG-2.md'; do
     : > "$repo/$shape"
+    git -C "$repo" add -- "./$shape"
+    git -C "$repo" commit -qm "legit $shape"
     if scan "$repo" >/dev/null 2>&1; then
-      _ok "self-test: a legitimate root file named '$shape' is NOT flagged"
+      _ok "self-test: a legitimate TRACKED root file named '$shape' is NOT flagged"
     else
       _no "self-test: '$shape' must not be flagged (got: $(scan "$repo" 2>&1))"
     fi
+    git -C "$repo" rm -q --cached -- "./$shape" >/dev/null 2>&1
     rm -f "$repo/$shape"
+    git -C "$repo" commit -qm "drop $shape"
   done
 
   # 4. the SUBJECT IS THE ROOT, stated by driving it: a `0` one directory down is a
-  #    deliberate act and outside this guard's subject.
+  #    deliberate act and outside this guard's subject. COMMITTED for the same reason as case 3 —
+  #    untracked, the depth restriction would be untestable because nothing untracked can fail.
   : > "$repo/docs/0"
+  git -C "$repo" add -- ./docs/0
+  git -C "$repo" commit -qm 'nested 0'
   if scan "$repo" >/dev/null 2>&1; then
-    _ok "self-test: a '0' BELOW the root is not flagged (the subject is the root)"
+    _ok "self-test: a TRACKED '0' BELOW the root is not flagged (the subject is the root)"
   else
     _no "self-test: docs/0 must not be flagged (got: $(scan "$repo" 2>&1))"
   fi
+  git -C "$repo" rm -q --cached -- ./docs/0 >/dev/null 2>&1
   rm -f "$repo/docs/0"
+  git -C "$repo" commit -qm 'drop nested 0'
 
   # 5. VACUITY: a non-repo path must FAIL rather than report a clean root, because an
   #    unenumerable subject prints exactly like an empty one.
@@ -407,9 +506,13 @@ SHIM
 
   # 6. the CHECK-COUNT FLOOR: a block that silently never ran would leave `checks` short,
   #    and a suite that asserts nothing exits 0 exactly like one that asserted everything.
-  # Raised from 22 with round 7's six F4 cases (#3272). Deliberately below the current count so
-  # adding a case does not red the guard, and far above zero.
-  local min=27
+  # 22 → 27 with round 7's six F4 cases → 33 with round 8's narrowing (#3272). DERIVED from the
+  # observed count, not lowered to fit: round 8 added a third assertion to each of the five
+  # untracked shapes (+5, they must now be observed NOT failing AND still reporting AND
+  # self-declaring as non-verdict) and one no-swallow case (+1), so 28 checks became 34. The
+  # floor is one below that, so adding a case does not red the guard while a block that stops
+  # running does.
+  local min=33
   if [ "$checks" -lt "$min" ]; then
     echo "FAIL - only $checks checks RAN (expected at least $min) — a block never executed"
     fails=$((fails + 1))
