@@ -831,7 +831,9 @@ fn the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written() {
         "a schema digest that is not 64 hex characters cannot identify the schema"
     );
     assert!(
-        mc::SCHEMA_SHA256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        mc::SCHEMA_SHA256
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "the pinned schema digest must be lowercase hex"
     );
     assert_ne!(
@@ -867,7 +869,8 @@ fn the_schema_digest_comparison_can_fail() {
     hasher.update(format!("{perturbed}\n").as_bytes());
     let derived = format!("{:x}", hasher.finalize());
     assert_ne!(
-        derived, mc::SCHEMA_SHA256,
+        derived,
+        mc::SCHEMA_SHA256,
         "a MODIFIED schema must not hash to the pinned digest — otherwise the schema pin cannot \
          detect the change that makes the two measurement arms read different schemas"
     );
