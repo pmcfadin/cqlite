@@ -3483,6 +3483,20 @@ assert_says 'case (cx31n) an unparseable instruction line is its own cause' \
 assert_says 'case (cx31n) the cause says what could not be read' \
   '^ERROR: prompt-content: .*no backtick-delimited path could be read'
 
+printf '== (cx31p) a READABLE instruction line does not excuse an UNREADABLE one ==\n'
+reset_stub
+write_snap_diff "$snap_file" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+# One instruction line resolves to a perfectly good snapshot; a second carries no readable path.
+# Taking the good one would be the "only the bad states are tested" shape with the roles swapped:
+# an unread instruction line leaves an UNKNOWN source, and a readable sibling cannot know it.
+STUB_PROMPT="$(snap_prompt "$snap_file")\\nRead the diff from: somewhere else entirely"
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31p)' FAIL 1
+assert_says 'case (cx31p) the unreadable instruction line still FAILs the run' \
+  '^prompt-content: FAIL \(snapshot diff unusable: unparseable-path\)$'
+assert_lacks 'case (cx31p) the readable sibling never excuses it' '^prompt-content: PASS'
+
 printf '== (cx31o) a snapshot instruction inside a DIFF BODY is not a snapshot path ==\n'
 reset_stub
 # The anchor is COLUMN ZERO. Every diff body line carries a leading `+`/`-`/space, so prose in
@@ -3699,10 +3713,11 @@ else
     bad "structural: the snapshot-binding body bounds could not be resolved (start $_bind_start, end '${_bind_end:-<none>}') — the asserts below would scan nothing"
   else
     _bind_body=$(sed -n "${_bind_start},${_bind_end}p" "$ORACLES")
-    if printf '%s\n' "$_bind_body" | grep -qF '"$REPO"/'; then
-      ok "structural: the snapshot path is bound to the reviewed repo \$REPO (lines $_bind_start-$_bind_end)"
+    if printf '%s\n' "$_bind_body" | grep -qE '\$\{?REPO' \
+      && printf '%s\n' "$_bind_body" | grep -qF 'foreign-repo'; then
+      ok "structural: the snapshot path is bound to the reviewed repo \$REPO, with a foreign-repo verdict (lines $_bind_start-$_bind_end)"
     else
-      bad 'structural: the snapshot binding no longer compares the path against $REPO — a snapshot from another checkout could satisfy prompt-content: (#3312)'
+      bad 'structural: the snapshot binding no longer derives its containment test from $REPO (or has no foreign-repo verdict) — a snapshot from another checkout could satisfy prompt-content: (#3312)'
     fi
     if printf '%s\n' "$_bind_body" | grep -qF 'roborev-snapshot-'; then
       ok 'structural: the snapshot path must sit under a roborev-snapshot-<id> directory'

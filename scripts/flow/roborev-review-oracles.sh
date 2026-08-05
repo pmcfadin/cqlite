@@ -889,8 +889,12 @@ roborev_collect_prompt_headers() {
 # checks file must not grow a second idea of it (asserted structurally).
 
 # roborev_prompt_snapshot_paths <prompt-file>: the DISTINCT snapshot diff paths the prompt
-# instructs the reviewer to read, into `_rx_snap_paths`, plus `_rx_snap_marker_lines` (how many
-# instruction lines were seen) and `_rx_snap_unparseable` (how many carried no readable path).
+# instructs the reviewer to read, into `_rx_snap_paths`, plus `_rx_snap_unparseable` — how many
+# instruction lines carried NO readable path. That second count is not diagnostics: an
+# instruction line we could not read is an UNKNOWN source, so the caller fails closed on it even
+# when another line did parse. Counting only the good ones would be the "only the bad states are
+# tested" shape with the roles swapped — a partially-read instruction block excused by its
+# readable half.
 #
 # ANCHORED AT COLUMN ZERO, and that is load-bearing rather than tidy. Every line of a unified
 # diff BODY carries a leading `+`, `-`, ` `, `@` or `\`, so an instruction quoted INSIDE the
@@ -904,12 +908,10 @@ roborev_collect_prompt_headers() {
 roborev_prompt_snapshot_paths() {
   local f="$1" row seen p q
   _rx_snap_paths=()
-  _rx_snap_marker_lines=0
   _rx_snap_unparseable=0
   [ -f "$f" ] || return 0
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    _rx_snap_marker_lines=$((_rx_snap_marker_lines + 1))
     case "$row" in
       UNPARSEABLE) _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue ;;
     esac
@@ -988,7 +990,7 @@ _roborev_resolve_existing_ancestor() {
 # costing one re-run plus a one-line update here, chosen over the alternative (accept any path
 # the prompt names), which would hand the strongest anti-vacuity key an oracle nobody bound.
 roborev_snapshot_path_binding() {
-  local p="$1" rel comp i
+  local p="$1" rel comp i repo_prefix
   local -a parts=()
   _rx_snap_bind_state=""
   _rx_snap_bound_path="$p"
@@ -999,11 +1001,15 @@ roborev_snapshot_path_binding() {
   esac
   _roborev_resolve_existing_ancestor "$p"
   _rx_snap_bound_path="$_rx_resolved"
+  # The trailing slash is stripped so a repo AT the filesystem root (`$REPO` = `/`) yields the
+  # prefix `` and the pattern `/*`, rather than `//*` — which matches nothing and would report
+  # every path in such a repo foreign. Unreachable in practice, closed by construction anyway.
+  repo_prefix="${REPO%/}"
   case "$_rx_snap_bound_path" in
-    "$REPO"/*) ;;
+    "$repo_prefix"/*) ;;
     *) _rx_snap_bind_state="foreign-repo"; return 2 ;;
   esac
-  rel="${_rx_snap_bound_path#"$REPO"/}"
+  rel="${_rx_snap_bound_path#"$repo_prefix"/}"
   IFS='/' read -r -a parts <<<"$rel"
   # At least `.roborev` / `roborev-snapshot-<id>` / a file name.
   if [ "${#parts[@]}" -lt 3 ]; then _rx_snap_bind_state="unbound-job"; return 3; fi
@@ -1019,7 +1025,7 @@ roborev_snapshot_path_binding() {
     *) _rx_snap_bind_state="unbound-job"; return 3 ;;
   esac
   # The snapshot DIRECTORY, so a cleaned-up directory can be distinguished from a missing file.
-  _rx_snap_dir="$REPO/${parts[0]}/${parts[1]}"
+  _rx_snap_dir="$repo_prefix/${parts[0]}/${parts[1]}"
   _rx_snap_bind_state="ok"
   return 0
 }
@@ -1046,6 +1052,10 @@ roborev_snapshot_path_binding() {
 #
 # COLLECT DURING THE RUN, because the snapshot directory is TRANSIENT: `.roborev/roborev-snapshot-<id>/`
 # is removed minutes after the review, and "already cleaned up" is its own explicit cause.
+#
+# A NAMED-BUT-UNUSABLE SNAPSHOT FAILS EVEN WHEN THE PROMPT ALSO CARRIED INLINE HEADERS, and that
+# is deliberate: roborev told the reviewer to read the snapshot, so whatever is inline is by
+# construction PARTIAL. Falling back to it would let a fraction of the diff certify the whole.
 ROBOREV_DIFF_SOURCE_STATE=""
 ROBOREV_DIFF_SOURCE_DETAIL=""
 ROBOREV_DIFF_SOURCE_PATH=""
@@ -1062,6 +1072,14 @@ roborev_collect_review_diff_headers() {
   in_to=(${_rx_hdr_to[@]+"${_rx_hdr_to[@]}"})
 
   roborev_prompt_snapshot_paths "$prompt"
+  # UNPARSEABLE FIRST, and unconditionally: an instruction line whose path could not be read
+  # leaves an UNKNOWN source, and a readable sibling line does not make it known. Checking it only
+  # when NOTHING parsed would let the readable half excuse the unread half.
+  if [ "${_rx_snap_unparseable:-0}" -gt 0 ]; then
+    ROBOREV_DIFF_SOURCE_STATE="unparseable-path"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' carries roborev's snapshot instruction ('Read the diff from:') but no backtick-delimited path could be read from ${_rx_snap_unparseable:-0} such line(s), so a diff the reviewer was told to read cannot be located. Failing closed: the instruction shape may have changed — inspect the prompt ('roborev show ${JOB:-<job>} --prompt') and update roborev_prompt_snapshot_paths."
+    return 0
+  fi
   if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
     # WHICH of several named paths roborev wrote for this job is UNDECIDABLE, so it is not
     # decided. Picking one would be a guess dressed as a measurement.
@@ -1070,11 +1088,6 @@ roborev_collect_review_diff_headers() {
     return 0
   fi
   if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
-    if [ "${_rx_snap_unparseable:-0}" -gt 0 ]; then
-      ROBOREV_DIFF_SOURCE_STATE="unparseable-path"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' carries roborev's snapshot instruction ('Read the diff from:') but no backtick-delimited path could be read from it (${_rx_snap_unparseable:-0} such line(s)), so the diff the reviewer was told to read cannot be located. Failing closed: the instruction shape may have changed — inspect the prompt ('roborev show ${JOB:-<job>} --prompt') and update roborev_prompt_snapshot_paths."
-      return 0
-    fi
     if [ "${#in_hdrs[@]}" -gt 0 ]; then
       ROBOREV_DIFF_SOURCE_STATE="inline"
     else
