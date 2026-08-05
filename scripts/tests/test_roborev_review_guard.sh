@@ -3237,6 +3237,267 @@ for pair in "--agent codex" "--model gpt-5.6-sol"; do
   assert_never_enqueued "usage: '$pair'"
 done
 
+# =============================================================================================
+# (cx31*) THE SNAPSHOT DIFF-DELIVERY MODE (issue #3312)
+# =============================================================================================
+# roborev has TWO diff-delivery modes, and the wrapper modelled only one. When the diff is
+# large it is NOT inlined: the prompt ends with roborev's instruction to read it from a file,
+# and carries ZERO `diff --git` headers. MEASURED on job 6836 (#3272, 23 files / +6561):
+#
+#     ### Combined Diff
+#
+#     (Diff too large to include inline)
+#
+#     The full diff has been written to a file for review.
+#     Read the diff from: `<repo>/.roborev/roborev-snapshot-157393586/roborev-snapshot-content.diff`
+#
+#     Review the actual diff before writing findings.
+#
+# `prompt-content:` therefore reported `FAIL (21/21 code census paths absent from the prompt)`
+# on a review that was genuine on every independent signal (1.47M input / 1.35M cached / 6.1k
+# output, four findings with real file:line, both vacuity tiers PASS) — a FALSE FAIL on exactly
+# the large diffs that most need review, and the documented way a guard gets waived.
+#
+# THE FIX IS NOT "AN EMPTY PROMPT IS A PASS" — it is "follow the diff to where it actually is".
+# So the census, the canonical matcher and the fail-closed semantics are unchanged; only the
+# SOURCE of the headers moves. Every new edge fails CLOSED with its OWN cause text, and each
+# one below is OBSERVED firing (a guard written but never observed failing is not evidence).
+#
+# The path is taken ONLY from the prompt of the job whose record was already verified, and it
+# is then bound to the reviewed repo + the snapshot shape, so a stale snapshot from another
+# job or another checkout can never satisfy the check.
+printf '== (cx31) snapshot diff-delivery mode: prompt names the diff by PATH ==\n'
+# THE MEASURED PROMPT SHAPE, reproduced verbatim in structure. Written with `\\n` so the
+# two-character escape survives into the JSON payload and is rendered by the stub's
+# `printf %b`, exactly like PROMPT_WITH_PATHS.
+snap_prompt() { # snap_prompt <abs-snapshot-path>...  -> the prompt roborev sends in snapshot mode
+  local p
+  printf 'Review the change on this branch.\\n\\n### Combined Diff\\n\\n(Diff too large to include inline)\\n\\nThe full diff has been written to a file for review.'
+  for p in "$@"; do
+    printf '\\nRead the diff from: `%s`' "$p"
+  done
+  printf '\\n\\nReview the actual diff before writing findings.'
+}
+# A snapshot file with the shape roborev writes: real `diff --git` headers plus body lines.
+write_snap_diff() { # write_snap_diff <file> <path>...
+  local f="$1" p
+  shift
+  mkdir -p "$(dirname "$f")"
+  : >"$f"
+  for p in "$@"; do
+    printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -0,0 +1 @@\n+x\n' \
+      "$p" "$p" "$p" "$p" >>"$f"
+  done
+}
+# ONE fixture for the whole family: only the PROMPT and the snapshot files differ per case, so
+# reusing it keeps each case a one-variable change. `two-code-commits` gives exactly TWO code
+# census paths (alpha.rs, beta.rs), so a `2/2` count is discriminating and a `1/2` names which
+# one was missing.
+snap_work=$(make_fixture case_cx31 two-code-commits)
+snap_repo=$(cd "$snap_work" && pwd -P)
+snap_dir="$snap_repo/.roborev/roborev-snapshot-157393586"
+snap_file="$snap_dir/roborev-snapshot-content.diff"
+
+reset_stub
+write_snap_diff "$snap_file" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31)' PASS 0
+assert_says 'case (cx31) the snapshot-delivered census is PASS, and the value says WHERE it was found' \
+  '^prompt-content: PASS \(2/2 code census paths present in the snapshot diff\)$'
+assert_lacks 'case (cx31) never the false FAIL this issue reports' '^prompt-content: FAIL'
+assert_enqueued 'case (cx31)'
+assert_one_result_line 'case (cx31)'
+
+printf '== (cx31b) T3 PRESERVED: a snapshot MISSING a census code path still FAILs, and names it ==\n'
+reset_stub
+write_snap_diff "$snap_file" alpha.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31b)' FAIL 1
+assert_says 'case (cx31b) the absent path is counted against the snapshot, not excused' \
+  '^prompt-content: FAIL \(1/2 code census paths absent from the snapshot diff the prompt names\)$'
+assert_says 'case (cx31b) the absent path is NAMED' '^  beta\.rs$'
+assert_lacks 'case (cx31b) never a PASS on a snapshot missing a code path' '^prompt-content: PASS'
+
+printf '== (cx31c) BOTH sources present: the header sets are UNIONED ==\n'
+reset_stub
+write_snap_diff "$snap_file" beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+# An inline header for alpha.rs AND a snapshot carrying beta.rs: neither source alone covers
+# the census, so a green here can only come from the union.
+STUB_PROMPT="diff --git a/alpha.rs b/alpha.rs\\n$(snap_prompt "$snap_file")"
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31c)' PASS 0
+assert_says 'case (cx31c) the union of prompt + snapshot covers the census' \
+  '^prompt-content: PASS \(2/2 code census paths present in the prompt and its snapshot diff\)$'
+
+printf '== (cx31d) NO source at all: neither an inline diff nor a snapshot path ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31d)' FAIL 1
+# TODAY'S BEHAVIOUR IS PRESERVED in the value (the paths really were not delivered), with the
+# no-source condition named as its OWN cause so it is distinguishable from a snapshot fault.
+assert_says 'case (cx31d) the value still counts the undelivered paths' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (cx31d) the no-source condition is its own named cause' \
+  "^ERROR: prompt-content: the prompt carries NEITHER an inline diff .* NOR a snapshot diff path"
+
+printf '== (cx31e) the snapshot directory was already CLEANED UP (its own cause) ==\n'
+reset_stub
+write_snap_diff "$snap_file" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+rm -rf "$snap_dir"
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31e)' FAIL 1
+assert_says 'case (cx31e) the key names the cleaned-up snapshot' \
+  '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
+assert_says 'case (cx31e) the cause names the TRANSIENT directory and the path' \
+  "^ERROR: prompt-content: .*snapshot DIRECTORY no longer exists.*$snap_dir"
+assert_lacks 'case (cx31e) never a PASS on an unreadable oracle' '^prompt-content: PASS'
+
+printf '== (cx31f) the snapshot directory exists but the named FILE does not ==\n'
+reset_stub
+mkdir -p "$snap_dir"
+rm -f "$snap_file"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31f)' FAIL 1
+assert_says 'case (cx31f) a missing file is distinct from a cleaned-up directory' \
+  '^prompt-content: FAIL \(snapshot diff unusable: missing\)$'
+assert_says 'case (cx31f) the cause names the path' \
+  "^ERROR: prompt-content: .*snapshot directory EXISTS but the named diff file is not in it: $snap_file"
+
+printf '== (cx31g) the named snapshot path is not a readable regular file ==\n'
+reset_stub
+rm -rf "$snap_file"
+# A DIRECTORY at the named path: root-immune (a `chmod 000` file is still readable as root, so
+# a permission-based fixture would silently stop testing this on a privileged runner).
+mkdir -p "$snap_file"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31g)' FAIL 1
+assert_says 'case (cx31g) a non-regular/unreadable snapshot is its own cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: unreadable\)$'
+assert_says 'case (cx31g) the cause names the path' \
+  "^ERROR: prompt-content: .*not a READABLE REGULAR FILE: $snap_file"
+rmdir "$snap_file"
+
+printf '== (cx31h) the named snapshot file is EMPTY ==\n'
+reset_stub
+mkdir -p "$snap_dir"
+printf '   \n\n' >"$snap_file"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31h)' FAIL 1
+assert_says 'case (cx31h) an empty snapshot is its own cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: empty\)$'
+assert_says 'case (cx31h) the cause names the path' \
+  "^ERROR: prompt-content: .*snapshot diff is EMPTY.*: $snap_file"
+
+printf '== (cx31i) the snapshot file carries ZERO diff --git headers (a 0/0 is never a pass) ==\n'
+reset_stub
+printf 'this file exists and has content but carries no header at all\n' >"$snap_file"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31i)' FAIL 1
+assert_says 'case (cx31i) a header-less snapshot is its own cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: no-headers\)$'
+assert_says 'case (cx31i) the cause names the path' \
+  "^ERROR: prompt-content: .*carries NO .diff --git. header at all: $snap_file"
+
+printf '== (cx31j) a snapshot OUTSIDE the reviewed repo cannot satisfy the check ==\n'
+reset_stub
+# The strongest form of this case: the foreign snapshot is PERFECTLY VALID and carries EVERY
+# census code path. Only the repo binding stands between it and a green — so a PASS here would
+# mean another checkout's (or another job's) diff certifying this review.
+foreign_snap="$tmp/foreign-repo/.roborev/roborev-snapshot-999/roborev-snapshot-content.diff"
+write_snap_diff "$foreign_snap" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$foreign_snap")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31j)' FAIL 1
+assert_says 'case (cx31j) a foreign-repo snapshot FAILs' \
+  '^prompt-content: FAIL \(snapshot diff unusable: foreign-repo\)$'
+assert_says 'case (cx31j) the cause names both the path and the reviewed repo' \
+  "^ERROR: prompt-content: .*OUTSIDE the reviewed repository: $foreign_snap is not under $snap_repo"
+assert_lacks 'case (cx31j) a valid foreign snapshot never reaches a PASS' '^prompt-content: PASS'
+
+printf '== (cx31k) a path inside the repo that is NOT a roborev snapshot for this review ==\n'
+reset_stub
+stale_snap="$snap_repo/.roborev/stale/roborev-snapshot-content.diff"
+write_snap_diff "$stale_snap" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$stale_snap")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31k)' FAIL 1
+assert_says 'case (cx31k) an unbound in-repo path FAILs' \
+  '^prompt-content: FAIL \(snapshot diff unusable: unbound-job\)$'
+assert_says 'case (cx31k) the cause names the path and the required snapshot shape' \
+  "^ERROR: prompt-content: .*NOT a roborev snapshot for this review: $stale_snap"
+
+printf '== (cx31l) the prompt names TWO DIFFERENT snapshot paths ==\n'
+reset_stub
+snap_second="$snap_repo/.roborev/roborev-snapshot-2222/roborev-snapshot-content.diff"
+write_snap_diff "$snap_file" alpha.rs beta.rs
+write_snap_diff "$snap_second" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_file" "$snap_second")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31l)' FAIL 1
+assert_says 'case (cx31l) an ambiguous snapshot set FAILs rather than picking one' \
+  '^prompt-content: FAIL \(snapshot diff unusable: ambiguous\)$'
+assert_says 'case (cx31l) the cause names how many were found' \
+  '^ERROR: prompt-content: .*names 2 DIFFERENT snapshot diff paths'
+rm -rf "$snap_repo/.roborev/roborev-snapshot-2222"
+
+printf '== (cx31m) a RELATIVE snapshot path is refused, never resolved against $PWD ==\n'
+reset_stub
+write_snap_diff "$snap_file" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt '.roborev/roborev-snapshot-157393586/roborev-snapshot-content.diff')
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31m)' FAIL 1
+assert_says 'case (cx31m) a relative snapshot path is its own cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: not-absolute\)$'
+assert_says 'case (cx31m) the cause explains what it would resolve against' \
+  "^ERROR: prompt-content: .*RELATIVE snapshot diff path"
+
+printf '== (cx31n) the instruction line carries no readable path ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT='Review the change.\n\nThe full diff has been written to a file for review.\nRead the diff from: somewhere, probably\n\nReview the actual diff before writing findings.'
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31n)' FAIL 1
+assert_says 'case (cx31n) an unparseable instruction line is its own cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: unparseable-path\)$'
+assert_says 'case (cx31n) the cause says what could not be read' \
+  '^ERROR: prompt-content: .*no backtick-delimited path could be read'
+
+printf '== (cx31o) a snapshot instruction inside a DIFF BODY is not a snapshot path ==\n'
+reset_stub
+# The anchor is COLUMN ZERO. Every diff body line carries a leading `+`/`-`/space, so prose in
+# the reviewed change that quotes roborev's own instruction (this repo's docs and tests do)
+# can never be mistaken for the instruction itself — otherwise a branch could name any file it
+# liked as the oracle for its own review.
+rm -rf "$snap_dir"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT='Review the change.\ndiff --git a/alpha.rs b/alpha.rs\n+Read the diff from: `/etc/passwd`\ndiff --git a/beta.rs b/beta.rs\n @@ x @@'
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31o)' PASS 0
+assert_says 'case (cx31o) the inline diff is what is read, with no snapshot involved' \
+  '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (cx31o) the quoted instruction is not resolved as a snapshot' 'snapshot diff unusable'
+
 printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
@@ -3387,10 +3648,87 @@ else
   ok 'structural: roborev-review-checks.sh does no diff --git scanning of its own'
 fi
 _coll_defs=$(grep -cE '^roborev_collect_prompt_headers\(\) \{' "$ORACLES" || true)
-if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_prompt_headers "\$PROMPT_FILE"' "$CHECKS_FILE"; then
+if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_review_diff_headers "\$PROMPT_FILE"' "$CHECKS_FILE"; then
   ok 'structural: the prompt headers (and their rename from/to lines) are collected by the oracles file'
 else
-  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not use it"
+  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not go through the oracles' diff-source resolver"
+fi
+# (6) THE SNAPSHOT DELIVERY MODE LIVES WITH THE HEADER COLLECTOR TOO (#3312). roborev delivers a
+#     large diff by writing it to a transient snapshot file and naming that path in the prompt,
+#     so "where the diff actually is" is prompt-shape knowledge of exactly the kind (5) keeps out
+#     of the checks file. The resolver is therefore defined ONCE in the oracles file, the checks
+#     file calls it and does no prompt scanning of its own, and the repo/job binding is asserted
+#     to exist in the resolver — a resolver that stopped comparing against $REPO would let a
+#     stale snapshot from another checkout certify this review.
+_src_defs=$(grep -cE '^roborev_collect_review_diff_headers\(\) \{' "$ORACLES" || true)
+if [ "${_src_defs:-0}" -eq 1 ]; then
+  ok 'structural: roborev_collect_review_diff_headers is defined exactly once, in the oracles file'
+else
+  bad "structural: expected exactly 1 definition of roborev_collect_review_diff_headers in the oracles file, found ${_src_defs:-0}"
+fi
+_snap_defs=$(grep -cE '^roborev_prompt_snapshot_paths\(\) \{' "$ORACLES" || true)
+if [ "${_snap_defs:-0}" -eq 1 ]; then
+  ok 'structural: the snapshot-path extraction is defined exactly once, in the oracles file'
+else
+  bad "structural: expected exactly 1 definition of roborev_prompt_snapshot_paths in the oracles file, found ${_snap_defs:-0}"
+fi
+if grep -nE '(grep|awk|sed)[^#]*Read the diff from' "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
+  bad 'structural: roborev-review-checks.sh scans the prompt for the snapshot instruction itself — prompt-shape knowledge must stay with the collector in the oracles file (#3312)'
+else
+  ok 'structural: roborev-review-checks.sh does no snapshot-instruction scanning of its own'
+fi
+# The extraction must be anchored at COLUMN ZERO: a diff body line always carries a leading
+# `+`/`-`/space, so an unanchored match would let the reviewed change name its own oracle.
+if grep -qF 'index($0, "Read the diff from:") == 1' "$ORACLES"; then
+  ok 'structural: the snapshot instruction is matched at column zero (a quoted line in a diff body cannot pose as it)'
+else
+  bad 'structural: the snapshot-instruction match is not anchored at column zero — prose inside the reviewed diff could name the file its own review is judged against (#3312)'
+fi
+_bind_start=$(grep -nE '^roborev_snapshot_path_binding\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+if [ -z "$_bind_start" ]; then
+  bad 'structural: roborev_snapshot_path_binding is not defined — the snapshot path would be read without being bound to the reviewed repo (#3312)'
+else
+  _bind_end=$(awk -v s="$_bind_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  if [ -z "$_bind_end" ] || [ "$_bind_end" -le "$_bind_start" ]; then
+    bad "structural: the snapshot-binding body bounds could not be resolved (start $_bind_start, end '${_bind_end:-<none>}') — the asserts below would scan nothing"
+  else
+    _bind_body=$(sed -n "${_bind_start},${_bind_end}p" "$ORACLES")
+    if printf '%s\n' "$_bind_body" | grep -qF '"$REPO"/'; then
+      ok "structural: the snapshot path is bound to the reviewed repo \$REPO (lines $_bind_start-$_bind_end)"
+    else
+      bad 'structural: the snapshot binding no longer compares the path against $REPO — a snapshot from another checkout could satisfy prompt-content: (#3312)'
+    fi
+    if printf '%s\n' "$_bind_body" | grep -qF 'roborev-snapshot-'; then
+      ok 'structural: the snapshot path must sit under a roborev-snapshot-<id> directory'
+    else
+      bad 'structural: the snapshot binding no longer requires the roborev-snapshot-<id> directory shape — any in-repo file could pose as the review oracle (#3312)'
+    fi
+  fi
+fi
+# THE AFFIRMATIVE-MEASUREMENT SHAPE, at the new branch point (CLAUDE.md; #3229 round-10). The
+# diff-source state is MULTI-VALUED, which is precisely the shape whose unmeasured states inherit
+# the permissive branch when only the bad ones are tested. So prompt-content: must select on the
+# AFFIRMATIVE state names and fail closed in its `*)` arm.
+_pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | head -1 | cut -d: -f1)
+if [ -z "$_pc_start" ]; then
+  bad 'structural: roborev_check_prompt_content is not defined'
+else
+  _pc_end=$(awk -v s="$_pc_start" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
+  if [ -z "$_pc_end" ] || [ "$_pc_end" -le "$_pc_start" ]; then
+    bad "structural: the prompt-content body bounds could not be resolved (start $_pc_start, end '${_pc_end:-<none>}')"
+  else
+    _pc_body=$(sed -n "${_pc_start},${_pc_end}p" "$CHECKS_FILE")
+    if printf '%s\n' "$_pc_body" | grep -qE '^ *inline\|snapshot\|both\|none\)' ; then
+      ok 'structural: prompt-content selects the diff source on its AFFIRMATIVE state names'
+    else
+      bad 'structural: prompt-content does not select the diff source on an affirmative allow-list of states — an unmeasured state would inherit the permissive branch (#3312)'
+    fi
+    if printf '%s\n' "$_pc_body" | grep -qF 'snapshot diff unusable'; then
+      ok 'structural: an unrecognised or failed diff-source state reaches a FAIL value under prompt-content:'
+    else
+      bad 'structural: prompt-content has no fail-closed arm for a failed/unrecognised diff-source state (#3312)'
+    fi
+  fi
 fi
 # The matcher must resolve ambiguity from git's rename/copy lines, not positionally. Asserted
 # against the matcher body: a future edit that drops the rename-line branch and goes back to
