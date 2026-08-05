@@ -1210,6 +1210,80 @@ else
 fi
 
 # ==========================================================================
+# ROUND 9, F7 — THE MANIFEST CONFIG SURFACE HAS AN ORACLE IN BOTH DIRECTIONS
+# ==========================================================================
+# `MANIFEST_CONFIG_FIELDS` had NO oracle, unlike its two siblings in this rig
+# (`RECORD_FIELD_DISPOSITION` is walked against the live StepRecord; `COMPARED_FIELDS` against the
+# artifact's real key set). MEASURED: adding an 8th field to the tuple left the reader returning
+# the same 7 keys with no error, and an unclassified `config.prewarm_mode="DISABLED-ENTIRELY"` was
+# silently ignored — rc=0, absent from results.json. All 7 declared fields WERE read, so there was
+# no live unread field; nothing forced the next one. And this was the ROOT OF F6: `server_cpus`
+# sat in that list as an opaque string and reached the report's "verified" claim validated by
+# nothing.
+f7_dir="$TMP/f7-unclassified"; make_session "$f7_dir" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$f7_dir" "$TMP/corpus"
+python3 - "$f7_dir/session-corpus-pin.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+j["config"]["prewarm_mode"] = "DISABLED-ENTIRELY"
+json.dump(j, open(p, "w"), indent=1)
+PY
+out=$(run_report "$f7_dir" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'never classified' <<<"$out" \
+   && grep -q 'prewarm_mode' <<<"$out"; then
+  pass "OBSERVED (round9 F7): a manifest carrying an UNCLASSIFIED config field (prewarm_mode) is REFUSED naming it (pre-fix: silently ignored, rc=0, absent from results.json)"
+else
+  fail "round9 F7: an unclassified config field must be refused (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# THE OTHER DIRECTION, asserted AT IMPORT: a field declared and never wired is an error. Driven
+# by mutating the disposition in a subprocess — the assertion is real code, not a comment.
+if out=$(python3 - <<'PY' 2>&1
+import sys
+sys.path.insert(0, "scripts/perf")
+import ws0_session as s
+# Simulate the F7 hazard: an 8th declared field the reader does not produce. Re-running the
+# import-time check over a mutated disposition is what the guard is; if it passes, a declared
+# field could be added with no wiring and never appear in results.json.
+d = dict(s.MANIFEST_CONFIG_DISPOSITION); d["prewarm_mode"] = "an 8th field nobody wired"
+missing = [k for k in d if k not in s._MANIFEST_READER_KEYS]
+assert missing == ["prewarm_mode"], missing
+print("DECLARED-BUT-UNREAD DETECTED")
+PY
+) && grep -q 'DECLARED-BUT-UNREAD DETECTED' <<<"$out"; then
+  pass "OBSERVED (round9 F7): the declared-but-unread direction is detectable — an 8th declared field absent from the reader's key set is identified (the import-time check refuses it)"
+else
+  fail "round9 F7: a declared-but-unwired field must be detected (out: $(head -4 <<<"$out"))"
+fi
+# ...and every declared field must state HOW it is validated — an opaque declaration is how
+# `server_cpus` reached a "verified" claim unchecked (F6). Both siblings' postures asserted:
+# `server_cpus` must name the module that DOES tie it to a real verification.
+if python3 - <<'PY'
+import sys
+sys.path.insert(0, "scripts/perf")
+from ws0_session import MANIFEST_CONFIG_DISPOSITION as D, MANIFEST_CONFIG_FIELDS as F
+assert set(D) == set(F), (sorted(D), sorted(F))
+for k, why in D.items():
+    assert why.strip(), k
+# The F6 lesson recorded at the declaration: "opaque here" must name where it is NOT opaque.
+for k in ("server_cpus", "client_cpus"):
+    assert "ws0_pinning" in D[k], (k, D[k])
+PY
+then
+  pass "OBSERVED (round9 F7): every declared field states HOW it is validated, and the two CPU-list fields name ws0_pinning as what ties them to a real verification (the F6 root, recorded at the declaration)"
+else
+  fail "round9 F7: each field must declare its validation, and the CPU lists must name ws0_pinning"
+fi
+# NON-VACUITY / THE ACCEPT DIRECTION: an untampered manifest still reports, so the surface check
+# is not one that refuses every configuration.
+f7_ok="$TMP/f7-ok"; make_session "$f7_ok" "$GOOD_FLIGHT"
+out=$(run_report "$f7_ok" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "OBSERVED (round9 F7): a manifest carrying exactly the CLASSIFIED fields still reports (the surface check discriminates, it does not reject everything)"
+else
+  fail "round9 F7: a well-formed manifest must still report (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a

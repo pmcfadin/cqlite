@@ -418,18 +418,115 @@ def write_session_corpus_pin(
 # measured, so every one must come from the session rather than from the reporting command line.
 #
 # `reps`/`scan_passes` are COUNTS (validated as CLI counts); `temps`/`arms` are SELECTIONS;
-# the rest are opaque strings recorded verbatim (`server_cpus` is a CPU list the driver already
-# verified against the real topology — re-parsing it here would be a second implementation of
-# a check that has already fail-closed).
-MANIFEST_CONFIG_FIELDS = (
+# the rest are opaque strings recorded verbatim.
+#
+# # THE DISPOSITION IS DECLARED, AND CHECKED IN BOTH DIRECTIONS (#3272 round 9, F7)
+#
+# This tuple had NO ORACLE, unlike its two siblings in this rig — `RECORD_FIELD_DISPOSITION` is
+# walked against the live `StepRecord`, and `COMPARED_FIELDS` against the artifact's real key set.
+# MEASURED: adding an 8th field to the tuple left `session_manifest_config` returning the same 7
+# keys with no error, and adding an unclassified `config.prewarm_mode="DISABLED-ENTIRELY"` to a
+# manifest was silently ignored, rc=0, absent from results.json. All 7 declared fields ARE
+# currently read, so there was no live unread field — but nothing forced the next one, and this
+# was the ROOT OF F6: `server_cpus` sat in this list as an opaque string and reached the report's
+# "verified physical-core siblings" claim having been validated by nothing.
+#
+# So each field now DECLARES how it is validated, and `check_manifest_config_surface` closes both
+# directions:
+#
+#   * DECLARED-BUT-UNREAD — every declared field must be produced by the reader (asserted at
+#     import against `_MANIFEST_READER_KEYS`), so adding a field to the tuple without wiring it
+#     is an ERROR rather than a key that silently never appears in results.json;
+#   * PRESENT-BUT-UNCLASSIFIED — a manifest carrying a `config` key nobody declared is REFUSED,
+#     so the next configuration field cannot be silently ignored the way `prewarm_mode` was.
+#
+# The `server_cpus` entry records what F6 established: it is opaque HERE (re-parsing it would be
+# a second implementation of `cpu_list_expand`, which is the right call) and it is tied to a real
+# verification ELSEWHERE, by `ws0_pinning.verify_pinning_record`. "Opaque" is only acceptable
+# because something else is not.
+MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
+    "reps": "validated as a CLI COUNT (cli_count), so a hand-edited `reps: 0` cannot produce a"
+            " vacuous-but-successful report (#3272 finding 5)",
+    "scan_passes": "validated as a CLI COUNT, and cross-checked against the per-pass records by"
+                   " the bare-scan collector (#3272 F2)",
+    "temps": "validated as a NON-EMPTY SELECTION over TEMPS_ALLOWED",
+    "arms": "validated as a NON-EMPTY SELECTION over ARMS_ALLOWED",
+    "server_cpus": "a non-empty recorded STRING here — deliberately not re-parsed, because that"
+                   " would be a second implementation of cpu_list_expand — and tied to a REAL"
+                   " sibling verification by ws0_pinning.verify_pinning_record, which requires"
+                   " the driver's record and requires this value to equal the list actually"
+                   " verified (#3272 F6). Opaque here is only acceptable because it is checked"
+                   " there.",
+    "client_cpus": "as server_cpus: a non-empty recorded STRING, tied to the driver's recorded"
+                   " verification by ws0_pinning.verify_pinning_record (#3272 F6)",
+    "step_duration": "a non-empty recorded STRING (`<warm>/<cold>`), reported verbatim; the"
+                     " DURATIONS that bound a rep were validated by the driver's own argument"
+                     " checks (lib-args.sh) before the session ran",
+}
+
+# Declaration order preserved, and DERIVED from the disposition rather than written twice: two
+# copies of the field list is the drift this issue keeps finding.
+MANIFEST_CONFIG_FIELDS = tuple(MANIFEST_CONFIG_DISPOSITION)
+
+# The keys `session_manifest_config` actually PRODUCES, besides its own `source`. Named here so
+# the declared-but-unread direction can be asserted at import — a field added to the disposition
+# and never wired would otherwise be a key that silently never reaches results.json.
+_MANIFEST_READER_KEYS = (
     "reps",
+    "scan_passes",
     "temps",
     "arms",
-    "scan_passes",
     "server_cpus",
     "client_cpus",
     "step_duration",
 )
+
+# AT IMPORT, both directions, so a half-wired field cannot ship (the pattern
+# `ws0_loadgen_record.py` established for `ZERO_REQUIRED_COUNTERS`).
+for _k in MANIFEST_CONFIG_FIELDS:
+    if _k not in _MANIFEST_READER_KEYS:
+        raise Invalid(
+            f"`{_k}` is declared in MANIFEST_CONFIG_DISPOSITION but is not produced by"
+            " session_manifest_config — a declared field the reader never emits is a"
+            " configuration property the report claims to take from the session and does not"
+            " (#3272 F7). Wire it, or remove the declaration."
+        )
+    if not MANIFEST_CONFIG_DISPOSITION[_k].strip():
+        raise Invalid(f"`{_k}` must declare HOW it is validated, not an empty string")
+for _k in _MANIFEST_READER_KEYS:
+    if _k not in MANIFEST_CONFIG_DISPOSITION:
+        raise Invalid(
+            f"session_manifest_config produces `{_k}` but it is not declared in"
+            " MANIFEST_CONFIG_DISPOSITION — every configuration field must record how it is"
+            " validated, because an opaque field reaches the report as an unchecked claim"
+            " (#3272 F6/F7)."
+        )
+del _k
+
+
+def check_manifest_config_surface(path: pathlib.Path, config: dict) -> None:
+    """Refuse a manifest `config` carrying a field nobody CLASSIFIED (#3272 round 9, F7).
+
+    The mirror of `ws0_loadgen_record.check_record_surface`, for the configuration surface.
+    MEASURED before this existed: adding `config.prewarm_mode = "DISABLED-ENTIRELY"` to a
+    manifest was silently ignored — rc=0, absent from results.json — so a driver that grew a new
+    configuration knob would have had it dropped on the floor by the reporter while the report
+    continued to describe the session as fully characterised.
+
+    Refused rather than warned, for the reason this whole issue exists: a configuration field
+    nobody reads is a property of the measurement the report does not know about, and a report
+    that does not know a knob was set cannot say anything true about what it measured.
+    """
+    unknown = sorted(k for k in config if k not in MANIFEST_CONFIG_DISPOSITION)
+    if unknown:
+        raise Invalid(
+            f"{path} `config` carries field(s) this reporter has never classified:"
+            f" {', '.join(unknown)}. Every configuration field must be declared in"
+            " MANIFEST_CONFIG_DISPOSITION with HOW it is validated, because an unclassified"
+            " field is one nobody reads: MEASURED, a `prewarm_mode` added to a manifest was"
+            " silently ignored and absent from results.json (#3272 F7). Declare it — and if it"
+            " can change what a figure means, VALIDATE it rather than recording it verbatim."
+        )
 
 
 def session_manifest_config(
@@ -508,6 +605,10 @@ def session_manifest_config(
             " configuration is one the report makes a claim about, so a partial manifest cannot"
             " establish what this session measured. Re-run the session with the current driver."
         )
+    # ...and the OTHER direction (#3272 F7): a field PRESENT in the manifest that nobody
+    # classified is refused, so the next configuration knob cannot be silently dropped the way a
+    # `prewarm_mode` was (measured: rc=0, ignored, absent from results.json).
+    check_manifest_config_surface(p, config)
     # Each field through the SAME validator the CLI used to apply, so a hand-edited manifest
     # cannot smuggle a vacuous configuration (`reps: 0` was #3272 finding 5) past the reader.
     out = {
