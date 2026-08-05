@@ -114,9 +114,11 @@
 #                     it OBSERVED AND REPORTED rather than certified — `prompt-content` is a NOTICE and the
 #                     keys below record what was seen. A snapshot-mode PASS therefore does NOT assert that
 #                     the reviewer received the census paths.
-#   snapshot-path     the snapshot path the prompt named | -
-#   snapshot-digest   <digest observed while the review ran> | UNOBSERVED (<why>) | (empty when inline)
-#   snapshot-expected <n> code census path(s) expected, not asserted | -
+#   snapshot-path     the snapshot path the prompt named. PRESENT ONLY IN SNAPSHOT MODE — in inline mode
+#                     these three keys have no subject and are ABSENT rather than placeholdered, because a
+#                     `-` (or an empty value) would imply a measurement was attempted and came back empty.
+#   snapshot-digest   <digest observed while the review ran> | UNOBSERVED (<why>)
+#   snapshot-expected <n> code census path(s) expected, not asserted
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
@@ -551,9 +553,22 @@ emit_summary() {
   # C‴ INFORMATIONAL KEYS (#3312): what was OBSERVED about a snapshot-delivered diff, so the information
   # survives the loss of certification. Informational, exactly like `census:`/`tokens:` — they carry no
   # verdict and are deliberately absent from the verdict scan.
-  emit_kv 'snapshot-path' "${ROBOREV_SNAPSHOT_PATH:--}"
-  emit_kv 'snapshot-digest' "${ROBOREV_SNAPSHOT_DIGEST:-${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:+UNOBSERVED (}${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-}${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:+)}}"
-  emit_kv 'snapshot-expected' "${SNAPSHOT_EXPECTED:--}"
+  # EMITTED ONLY WHEN SNAPSHOT MODE FIRED (roborev job 15, my own finding). In inline mode these keys have no
+  # subject, and the previous unconditional form printed `snapshot-path: -`, `snapshot-expected: -` and — worse
+  # — `snapshot-digest:` with an EMPTY value, which is precisely the shape this block's doctrine calls out: "an
+  # EMPTY value is this same defect with nothing to print". A `-` placeholder is no better, because it invites a
+  # reader to think a measurement was attempted and came back empty. A key with no subject has no value to
+  # report, so it is ABSENT. Safe by construction: these three are INFORMATIONAL and are deliberately not in
+  # the verdict scan's key list, so their omission cannot create an unrecognised-verdict path.
+  if [ "${SNAPSHOT_NOTICE:-0}" -eq 1 ]; then
+    emit_kv 'snapshot-path' "${ROBOREV_SNAPSHOT_PATH:--}"
+    if [ -n "${ROBOREV_SNAPSHOT_DIGEST:-}" ]; then
+      emit_kv 'snapshot-digest' "$ROBOREV_SNAPSHOT_DIGEST"
+    else
+      emit_kv 'snapshot-digest' "UNOBSERVED (${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-cause not established})"
+    fi
+    emit_kv 'snapshot-expected' "${SNAPSHOT_EXPECTED:--}"
+  fi
   emit_kv 'vacuity-tier1' "$TIER1"
   emit_kv 'vacuity-tier2' "$TIER2"
   emit_kv 'findings' "$FINDINGS"
