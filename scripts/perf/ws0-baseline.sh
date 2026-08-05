@@ -57,27 +57,36 @@
 # Full method, caveats and the recorded pinning: docs/reports/ws0-3096-artifacts/measurement-method.md
 #
 # ---------------------------------------------------------------------------
-# FILE SIZE: over the ~800-line target, and the SEAM if it is split (epic #1116)
+# FILE SIZE, and the seven libraries this driver has been split into (epic #1116)
 # ---------------------------------------------------------------------------
-# This file is ~985 lines against the campsite-rule target of ~800. Note the gate's `file-size`
-# ratchet is `.rs`-ONLY, so a shell file crosses that threshold SILENTLY — checked with `wc -l`
-# rather than left to the gate.
+# The gate's `file-size` ratchet is `.rs`-ONLY, so a shell file crosses the ~800-line
+# campsite-rule target SILENTLY — this is checked with `wc -l` rather than left to the gate. Round
+# 9's guard fixes took this file to 1008 lines, and the MEASUREMENT LEGS were split out in
+# response (see `lib-measure.sh`); it is ~900 now.
 #
-# Six libraries have already been split out by RESPONSIBILITY (`lib-cpu.sh` topology,
-# `lib-host-state.sh` host knobs, `lib-args.sh` argument values, `lib-perf-lint.sh` counting
-# domain, `lib-server.sh` process/socket lifecycle, `lib-outdir.sh` session-dir lifecycle), so
-# what remains is deliberately the part that must stay legible in ONE file: the ORDER of
+# Seven libraries, each owning ONE question about whether a measurement means what it says:
+#
+#     lib-cpu.sh          are the pinned CPUs one physical core?
+#     lib-host-state.sh   is the host's state put back?
+#     lib-args.sh         are the arguments values this rig can measure?
+#     lib-perf-lint.sh    is the counting domain CPU-wide?
+#     lib-server.sh       which program did the Flight arm actually measure?
+#     lib-outdir.sh       do the artifacts being read all come from ONE session?
+#     lib-measure.sh      how is ONE rep of an arm executed, prewarmed and counted?
+#
+# What remains here is deliberately the part that must stay legible in ONE file: the ORDER of
 # operations, which is itself a correctness property (arguments before creation, verification
-# before measurement, the pin before the first rep).
+# before measurement, the pin before the first rep), the round/rotation loop, and `perf_stat_c`.
 #
-# The next seam, when one is taken, is the MEASUREMENT EXECUTION: `perf_stat_c` plus
-# `measure_scan`/`measure_flight` — the three functions that actually run a rep — into a
-# `lib-measure.sh`. That is a responsibility ("how is one rep executed and counted?") rather than
-# a line-count slice, and it is the largest remaining block. The two session-pin heredocs are a
-# second, smaller candidate. NOT split in this round deliberately: the round's changes are guard
-# fixes, and moving `perf_stat_c` is the one edit that would need the whole three-layer perf
-# allowlist re-argued (the allowlist globs `scripts/perf/*.sh`, so the move is safe, but its
-# review cost belongs to a change whose subject it is). Tracked under epic #1116.
+# `perf_stat_c` did NOT move with the legs, and that is load-bearing rather than a preference:
+# `perf_invocation_lint_tree` DISCOVERS which file owns the single wrapper and lints every OTHER
+# `scripts/perf/*.sh` in `library` mode, where DEFINING `perf_stat_c` is itself a finding ("the rig
+# has exactly ONE"). Moving it into a library would flip the owner and make this driver a library
+# that must not define it — inverting layer 1 of the three-layer perf guard — and
+# `test_ws0_cpu_pinning_guards.sh` text-extracts it from THIS file by name.
+#
+# The next seam, if one is needed, is the two session-pin python heredocs (~100 lines). Tracked
+# under epic #1116.
 
 set -euo pipefail
 
@@ -95,6 +104,13 @@ source "$HERE/lib-args.sh"
 source "$HERE/lib-server.sh"
 # shellcheck source=scripts/perf/lib-outdir.sh
 source "$HERE/lib-outdir.sh"
+# LAST, because the sourcing order is the DEPENDENCY order: the measurement legs call
+# `stop_server`/`require_port_free`/`await_server_ready` from lib-server.sh above, plus this
+# driver's own `perf_stat_c` and `drop_caches_if_cold` (both defined below — a function body is
+# resolved at CALL time, and the legs are called only from the measurement loop, which is after
+# both definitions).
+# shellcheck source=scripts/perf/lib-measure.sh
+source "$HERE/lib-measure.sh"
 
 CORPUS=""
 SERVER_CPUS="2,10"
@@ -730,129 +746,20 @@ perf_stat_c() {
 }
 
 # ---------------------------------------------------------------------------
-# Arm A — the bare scan
+# The two MEASUREMENT LEGS live in scripts/perf/lib-measure.sh (#3272 round 9)
 # ---------------------------------------------------------------------------
-measure_scan() {
-  local temp="$1" rep="$2" tag="scan-$temp-$rep"
-  drop_caches_if_cold "$temp"
-
-  # --- untimed PREWARM (warm arm only) -----------------------------------------
-  # A full scan OUTSIDE every perf window, before the measured legs, so the warm
-  # arm measures warm work (issue #3096 review, finding 1).
-  #
-  # Why this is not optional. `--setup-only` opens the corpus and ingests the
-  # schema; it does NOT read the `Data.db` pages the scan streams. So on a
-  # genuinely cold page cache — a fresh box, or a `--temp cold` rep earlier in the
-  # same session having dropped the caches — the FIRST "warm" rep faulted those
-  # pages in from disk and was measured partly cold. At `--reps 1` that partly-cold
-  # rep IS the reported median, and nothing in the output said so: the warm/cold
-  # separation spec R2/AC5 requires had silently broken. The Flight arm has always
-  # prewarmed (below); this arm did not, and it is the DENOMINATOR of the 1.3x
-  # ratio.
-  #
-  # FAIL CLOSED here, unlike the Flight arm's record-and-continue. The bias
-  # direction is what differs: a partly-cold BARE SCAN reads SLOWER, which SHRINKS
-  # `bare/flight` and makes the 1.3x target EASIER to hit — a degradation that can
-  # manufacture a win. (A degraded Flight prewarm biases against do_get, so
-  # continuing with a recorded label is honest there.) A prewarm scan that fails
-  # while the timed scan would succeed is also not a thing: same binary, same
-  # arguments, same corpus.
-  #
-  # Skipped on the cold arm BY DESIGN — a prewarm there would make "cold"
-  # meaningless.
-  local prewarm_status="skipped-cold-arm"
-  if [[ "$temp" == "warm" ]]; then
-    if taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
-        --corpus "$CORPUS" --passes 1 \
-        > "$OUT_DIR/$tag.prewarm.json" 2> "$OUT_DIR/$tag.prewarm.err"; then
-      prewarm_status="ok"
-    else
-      prewarm_status="FAILED-exit-$?"
-      printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
-      echo "FATAL: bare-scan PREWARM failed for $tag ($prewarm_status)." >&2
-      echo "       Without it this 'warm' rep is partly cold, which makes the bare scan" >&2
-      echo "       read SLOWER and the 1.3x bare/flight target EASIER — a degradation" >&2
-      echo "       that can manufacture a win, so it is refused rather than labelled." >&2
-      echo "       See $OUT_DIR/$tag.prewarm.err" >&2
-      exit 1
-    fi
-  fi
-  printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
-
-  # Setup-only leg: the corpus open + schema ingest, under its OWN perf window,
-  # so its cycles can be SUBTRACTED from the full run (spec R2).
-  perf_stat_c "$OUT_DIR/perf-$tag-setup.csv" \
-    taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
-      --corpus "$CORPUS" --setup-only \
-    > "$OUT_DIR/$tag-setup.json" 2> "$OUT_DIR/$tag-setup.err"
-
-  drop_caches_if_cold "$temp"
-  perf_stat_c "$OUT_DIR/perf-$tag.csv" \
-    taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
-      --corpus "$CORPUS" --passes "$SCAN_PASSES" \
-    > "$OUT_DIR/$tag.json" 2> "$OUT_DIR/$tag.err" \
-    || { echo "FATAL: bare-scan rep $tag failed — see $OUT_DIR/$tag.err" >&2; exit 1; }
-  echo "  $tag done"
-}
-
-# ---------------------------------------------------------------------------
-# Arm B — Flight do_get over a real loopback transport
-# ---------------------------------------------------------------------------
-measure_flight() {
-  local temp="$1" rep="$2" arm="$3" tag="flight-$arm-$temp-$rep"
-  local step="$STEP_DURATION"
-  [[ "$temp" == "cold" ]] && step="$COLD_STEP_DURATION"
-  # Only the previous rep's own server — never a `pkill` by name.
-  stop_server
-  require_port_free "before $tag"
-  drop_caches_if_cold "$temp"
-
-  CQLITE_FLIGHT_MERGE_PATH="$arm" taskset -c "$SERVER_CPUS" "$BIN/cqlite-flight" \
-    --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
-    > "$OUT_DIR/$tag.server.log" 2>&1 &
-  SERVER_PID=$!
-  await_server_ready "$tag"
-
-  # Prewarm OUTSIDE the perf window (warm arm only): opens the readers and fills
-  # the warm-handle registry, so the measured window is steady-state scan work
-  # and not one-off setup. On the COLD arm this is deliberately skipped — a
-  # prewarm would make "cold" meaningless.
-  #
-  # The outcome is RECORDED, not swallowed (issue #3096 review). A silently failed
-  # prewarm downgrades a "warm" claim to a partly-cold one, and the old `|| true`
-  # left nothing in results.json or summary.txt to say so. The bias runs AGAINST
-  # the Flight arm (a cold-ish arm measures slower), so it cannot manufacture a
-  # win — but an unrecorded degradation is still an unrecorded degradation. The
-  # run continues rather than aborting: a rep that is honestly labelled
-  # `prewarm-failed` is more useful than no rep, and ws0_report.py surfaces the
-  # label in every report it writes.
-  local prewarm_status="skipped-cold-arm"
-  if [[ "$temp" == "warm" ]]; then
-    if taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
-        --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
-        --shape full --ramp 1 --step-duration 20s --round prewarm --out /dev/null \
-        > "$OUT_DIR/$tag.prewarm.log" 2>&1; then
-      prewarm_status="ok"
-    else
-      prewarm_status="FAILED-exit-$?"
-      echo "  WARNING: prewarm FAILED for $tag ($prewarm_status) — this 'warm' rep is" >&2
-      echo "           partly cold. Recorded in results.json and summary.txt; see" >&2
-      echo "           $OUT_DIR/$tag.prewarm.log" >&2
-    fi
-  fi
-  printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
-
-  perf_stat_c "$OUT_DIR/perf-$tag.csv" \
-    taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
-      --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
-      --shape full --ramp 1 --step-duration "$step" \
-      --round "$tag" --out "$OUT_DIR/$tag.jsonl" \
-    > "$OUT_DIR/$tag.log" 2>&1 \
-    || { stop_server; echo "FATAL: flight rep $tag failed — see $OUT_DIR/$tag.log" >&2; exit 1; }
-
-  stop_server
-  echo "  $tag done"
-}
+# `measure_scan` (arm A, the bare scan) and `measure_flight` (arm B, do_get over a real
+# loopback transport) were split out under the campsite rule — this file was 1008 lines
+# against the ~800 source target, and the gate's `file-size` ratchet is `.rs`-only so a shell
+# file crosses it silently. That library carries the full argument for each leg (the prewarm
+# postures and why they differ per arm, the setup-only leg, the per-rep server lifecycle) and
+# the reason `perf_stat_c` deliberately did NOT move with them: the tree lint DISCOVERS the
+# single wrapper's owner and lints every OTHER scripts/perf/*.sh in `library` mode, where
+# defining it is a FINDING — so moving it would invert layer 1 of the perf guard.
+#
+# Sourced at the TOP of this file, after lib-server.sh, because the sourcing order is the
+# dependency order: these legs call stop_server/require_port_free/await_server_ready. The
+# call sites are the measurement loop below.
 
 echo
 echo "=== issue #3096 same-session baseline (rig hardened by #3272) ==="

@@ -259,7 +259,14 @@ fi
 # It must come BEFORE the sibling check, or the fabricated tree would already have
 # been used to vouch for the pinning by the time the refusal ran.
 assert_line=$(grep -n '^assert_real_cpu_topology || exit 2' "$DRIVER" | head -1 | cut -d: -f1)
-verify_line=$(grep -n '^verify_sibling_pair "\$SERVER_CPUS"' "$DRIVER" | head -1 | cut -d: -f1)
+# The SERVER sibling check, however it is spelled. It used to be a bare statement
+# (`^verify_sibling_pair "$SERVER_CPUS"`); #3272 F6 made it a command SUBSTITUTION, because the
+# verification's output (the expanded sibling set sysfs reported) is now CAPTURED and recorded into
+# the session dir so the report's "verified physical-core siblings" claim cites an observation. The
+# anchor is therefore the CALL, not the line's opening token — and the `-n` guard below is what
+# caught this: after F6 the old pattern matched NOTHING and this check FAILED rather than passing
+# vacuously over an empty line number.
+verify_line=$(grep -nF 'verify_sibling_pair "$SERVER_CPUS"' "$DRIVER" | head -1 | cut -d: -f1)
 if [ -n "$assert_line" ] && [ -n "$verify_line" ] && [ "$assert_line" -lt "$verify_line" ]; then
   pass "override-refused: the refusal (line $assert_line) precedes the sibling check (line $verify_line)"
 else
@@ -1184,13 +1191,23 @@ if grep -q "a COLLISION with another listener is excluded" <<<"$out"; then
 else
   fail "server-owner: the refusal must rule out a collision, or it misdiagnoses again (out: $out)"
 fi
-# And the DRIVER must WIRE both: a guard present but never called is the #3249 shape.
+# And the RIG must WIRE both: a guard present but never called is the #3249 shape.
+#
+# TWO SUBJECTS since #3272 round 9: `require_socket_prober` is a STARTUP check and stays in the
+# driver, while `await_server_ready` is called per rep from `measure_flight`, which moved into
+# `lib-measure.sh` under the campsite rule (the driver was at 1008 lines against the ~800 target).
+# The `-s`/`-n` guards are load-bearing: after the split the old awk range over the DRIVER matched
+# nothing, and this check FAILED rather than going green over an empty subject — which is the
+# property that makes a range test trustworthy at all.
 DRV="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
+MEASURE_LIB="$REPO_ROOT/scripts/perf/lib-measure.sh"
+flight_body=$(awk '/^measure_flight\(\)/,/^}/' "$MEASURE_LIB")
 if grep -qE '^require_socket_prober( |$)' "$DRV" \
-   && awk '/^measure_flight\(\)/,/^}/' "$DRV" | grep -q 'await_server_ready'; then
-  pass "server-owner: the driver CALLS require_socket_prober at startup and await_server_ready per rep"
+   && [ -s "$MEASURE_LIB" ] && [ -n "$flight_body" ] \
+   && grep -q 'await_server_ready' <<<"$flight_body"; then
+  pass "server-owner: the driver CALLS require_socket_prober at startup, and measure_flight (now in lib-measure.sh) calls await_server_ready per rep"
 else
-  fail "server-owner: the driver must wire both the prober check and the readiness check"
+  fail "server-owner: the rig must wire both the prober check and the readiness check (lib present=$([ -s "$MEASURE_LIB" ] && echo yes || echo NO), measure_flight body lines=$(printf '%s' "$flight_body" | grep -c . ))"
 fi
 # The prober check must run BEFORE the first measurement, or a run could reach a rep with
 # ownership unverifiable.

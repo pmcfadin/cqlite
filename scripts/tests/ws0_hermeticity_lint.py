@@ -242,6 +242,16 @@ EXEMPTIONS: dict[str, str] = {
     # only driver mention is prose (its refusals tell an operator which run owns a directory).
     "scripts/perf/lib-outdir.sh":
         "a driver library; sourced by the driver, never invokes it (prose reference only)",
+    # Round 9's campsite-rule split (the guard fixes took the driver to 1008 lines). Reported
+    # UNCOVERED the moment it became tracked, exactly as every previous split was — and note the
+    # PERF tree lint absorbed it SILENTLY (its subject is a `scripts/perf/*.sh` glob, so a new
+    # library joins automatically) while this census, which is CONTENT-based, correctly demanded a
+    # decision. Two lints, two postures, and the difference is why both are checked on a split.
+    # Same class as its five siblings: sourced by the driver, and its only driver mentions are
+    # prose (the split's rationale and the note that `perf_stat_c` stays in the driver).
+    "scripts/perf/lib-measure.sh":
+        "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
+        " are prose explaining the split and why the perf wrapper did not move with it",
     "scripts/perf/README.md": "documentation",
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",

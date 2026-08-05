@@ -616,13 +616,23 @@ else
   fail "cold arm must not be flagged as prewarm-degraded (rc=$rc, out: $out)"
 fi
 
-# The driver must actually contain the untimed bare-scan prewarm — a reporter that
-# merely READS a status file would pass every test above with no prewarm running.
-if grep -q 'prewarm_status="skipped-cold-arm"' "$DRIVER" \
-  && awk '/^measure_scan\(\)/,/^}/' "$DRIVER" | grep -q 'prewarm.status'; then
-  pass "measure_scan itself records a prewarm status (not just the reporter)"
+# The RIG must actually contain the untimed bare-scan prewarm — a reporter that merely READS a
+# status file would pass every test above with no prewarm running.
+#
+# THE SUBJECT IS `lib-measure.sh`, not the driver (#3272 round 9): the two measurement legs moved
+# there under the campsite rule (the driver was at 1008 lines against the ~800 target). The
+# `-s`/`-n` guards below are what caught the staleness — after the split this awk range matched
+# NOTHING in the driver and the check FAILED rather than passing vacuously, which is the same
+# lesson `test_ws0_provenance_guards.sh`'s R1 block records: a range test over a MISSING subject
+# must red, never go green over an empty string.
+MEASURE_LIB="$REPO_ROOT/scripts/perf/lib-measure.sh"
+scan_body=$(awk '/^measure_scan\(\)/,/^}/' "$MEASURE_LIB")
+if [ -s "$MEASURE_LIB" ] && [ -n "$scan_body" ] \
+  && grep -q 'prewarm_status="skipped-cold-arm"' "$MEASURE_LIB" \
+  && grep -q 'prewarm.status' <<<"$scan_body"; then
+  pass "measure_scan itself records a prewarm status (not just the reporter) — read from lib-measure.sh, the file that now owns the legs"
 else
-  fail "measure_scan must run and record its own prewarm"
+  fail "measure_scan must run and record its own prewarm (lib-measure.sh present=$([ -s "$MEASURE_LIB" ] && echo yes || echo NO), body lines=$(printf '%s' "$scan_body" | grep -c . ))"
 fi
 
 # ==========================================================================
