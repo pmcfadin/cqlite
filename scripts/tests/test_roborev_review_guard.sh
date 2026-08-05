@@ -3554,6 +3554,12 @@ assert_lacks '--help no longer documents a roborev-builtin source tag' '\[robore
 # The block's KEY CONTRACT is what readers grep, so --help must list exactly the keys the
 # wrapper emits.
 assert_says '--help still documents the prompt-content key' 'prompt-content'
+# #3312: the second diff-delivery mode is part of the documented contract — an operator reading
+# a `snapshot diff unusable:` FAIL must be able to learn from --help what the check now reads and
+# that the snapshot directory is transient.
+assert_says '--help documents BOTH diff-delivery modes' 'TWO DIFF-DELIVERY MODES'
+assert_says '--help names the transient snapshot directory' 'roborev-snapshot-<id>'
+assert_says '--help says a large review must no longer false-FAIL' 'no longer FALSE-FAILs'
 assert_never_enqueued '--help'
 
 printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'

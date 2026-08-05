@@ -101,10 +101,25 @@
 #   job-record        PASS | PASS (no token accounting in the record) |
 #                     DEGRADED (incomplete after <n> retries: <fields>) | SKIP
 #   sha-assert        PASS | FAIL (...) | SKIP
-#   prompt-content    PASS (<k>/<n> code census paths present) |
-#                     FAIL (<k>/<n> code census paths absent from the prompt) |
+#   prompt-content    PASS (<k>/<n> code census paths present[ in the snapshot diff |
+#                     in the prompt and its snapshot diff]) |
+#                     FAIL (<k>/<n> code census paths absent from <the prompt |
+#                     the snapshot diff the prompt names | ...>) |
 #                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
-#                     FAIL (prompt unretrievable — ...) | SKIP
+#                     FAIL (prompt unretrievable — ...) |
+#                     FAIL (snapshot diff unusable: <cleaned-up | missing | unreadable |
+#                     empty | no-headers | foreign-repo | unbound-job | ambiguous |
+#                     not-absolute | unparseable-path>) | SKIP
+#                     TWO DIFF-DELIVERY MODES (#3312): roborev either inlines the diff or,
+#                     when it is large, writes it to a TRANSIENT snapshot file
+#                     (`<repo>/.roborev/roborev-snapshot-<id>/`) and names that path in the
+#                     prompt — in which case the prompt carries ZERO `diff --git` headers.
+#                     The headers are collected from wherever the diff actually is (union
+#                     when both), which is why a large review no longer false-FAILs. The
+#                     snapshot path is taken ONLY from the verified job's own prompt and must
+#                     be absolute, inside the reviewed repo and under that repo's
+#                     `.roborev/roborev-snapshot-<id>/`; every other outcome FAILs closed
+#                     under its own cause above, never a pass.
 #                     Paths are normalised ONCE, at the census (`git diff --numstat -z`,
 #                     so they arrive RAW) and compared RAW everywhere; membership is
 #                     decided per `diff --git` header by the single canonical matcher
@@ -312,6 +327,18 @@ produced false-PASSes faster than review rounds closed them. Consequence: a path
 the reviewer did not receive surfaces AFTER the review, under prompt-content:,
 whose cause names the symptom rather than the mechanism. Fail-closed, never green
 — but if prompt-content: FAILs, SUSPECT .roborev.toml first.
+
+TWO DIFF-DELIVERY MODES, both read (issue #3312): a large diff is NOT inlined —
+roborev writes it to a TRANSIENT snapshot file under
+<repo>/.roborev/roborev-snapshot-<id>/ and the prompt ends with
+'Read the diff from: \`<abs path>\`', carrying ZERO diff --git headers. prompt-content:
+collects the headers from wherever the diff is (the union when both), so a large
+review no longer FALSE-FAILs; the snapshot path is taken only from the verified
+job's own prompt and must be absolute, inside the reviewed repo and under that
+repo's own snapshot directory. A named snapshot that is cleaned up, missing,
+unreadable, empty, header-less, foreign or unbound FAILs under its own cause —
+"we could not check" is never "nothing was wrong". The snapshot directory is
+removed minutes after a review, so run the wrapper as the review completes.
 
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
