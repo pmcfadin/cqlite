@@ -386,14 +386,54 @@ fn the_artifact_comparison_can_fail() {
                 j["compression_info_present"] = serde_json::json!(true)
             }),
         ),
+        (
+            // THE `COMPARED_WHEN_PRESENT` FIELD (#3272 review round 9, F5). The committed
+            // artifact does NOT carry this key, so the perturbation INSERTS it with a wrong
+            // value — which is exactly the post-regeneration artifact the comparison's
+            // `if let Some(v) = json.get("schema_sha256")` branch exists for.
+            //
+            // Without this case that branch was never entered by any test: deleting it left
+            // every test in this file GREEN, because the coverage subject below read
+            // `COMPARED_FIELDS` while F6 put the field in `COMPARED_WHEN_PRESENT`. A
+            // comparison with no perturbation case is an unproven comparison, which is this
+            // issue's own subject one level up.
+            "schema_sha256",
+            Box::new(|j: &mut serde_json::Value| {
+                j["schema_sha256"] = serde_json::json!("f".repeat(64))
+            }),
+        ),
     ];
     // Every COMPARED field needs a perturbation case, checked against the comparison's
     // own field list rather than against a hardcoded count. `cases.len() == 8` used to
     // stand here, and it could not fail for a field the comparison had never covered:
     // it enumerated the cases, and the cases enumerated the comparisons — the assert
     // certified its own scope (#3272 review B2).
+    //
+    // THE SUBJECT IS BOTH LISTS (#3272 review round 9, F5). It used to be `COMPARED_FIELDS`
+    // alone, so a field `pin_vs_artifact` compares CONDITIONALLY — i.e. everything in
+    // `COMPARED_WHEN_PRESENT` — was outside the subject and needed no case. MEASURED: with the
+    // subject narrow, deleting the whole `schema_sha256` branch from `pin_vs_artifact` left
+    // every test in this file green. Both lists name comparisons the function performs, so both
+    // must be proven; the union is taken from the lists themselves so a third list cannot be
+    // added without appearing here.
     let case_names: Vec<&str> = cases.iter().map(|(n, _)| *n).collect();
-    let uncovered: Vec<&&str> = COMPARED_FIELDS
+    let compared: Vec<&str> = COMPARED_FIELDS
+        .iter()
+        .copied()
+        .chain(COMPARED_WHEN_PRESENT.iter().map(|(k, _)| *k))
+        .collect();
+    // The subject must be NON-EMPTY and must actually include the conditional fields — a
+    // positive measurement of the subject, not an inference from the filter finding nothing
+    // (an empty subject would make the `uncovered` check below pass having checked nothing).
+    assert!(
+        COMPARED_WHEN_PRESENT
+            .iter()
+            .all(|(k, _)| compared.contains(k)),
+        "the coverage subject must INCLUDE every COMPARED_WHEN_PRESENT field — that omission \
+         is the F5 defect itself, and a subject that silently dropped them again would make \
+         this check vacuous rather than failing"
+    );
+    let uncovered: Vec<&&str> = compared
         .iter()
         .filter(|f| !case_names.contains(f))
         .collect();
