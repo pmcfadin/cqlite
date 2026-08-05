@@ -141,66 +141,49 @@ roborev_check_prompt_content() {
     # waived. The resolver below follows the diff to where it is; the census, the canonical
     # matcher and the fail-closed semantics are untouched.
     roborev_collect_review_diff_headers "$PROMPT_FILE"
-    # SELECTED ON THE AFFIRMATIVE STATE NAMES, never on "not a failure". The diff source is a
-    # MULTI-STATE signal, which is the exact shape whose unmeasured states inherit the
-    # permissive branch when only the bad ones are tested — so an unrecognised state lands in
-    # `*)` and FAILs closed, and a state added to the resolver without a decision here cannot
-    # ride to a PASS.
-    pc_source_noun="the prompt"
-    pc_present_suffix=""
+    # SELECTED ON THE AFFIRMATIVE STATE NAMES, never on "not a failure".
     case "${ROBOREV_DIFF_SOURCE_STATE:-}" in
-      inline) ;;
       snapshot)
-        pc_source_noun="the snapshot diff the prompt names"
-        pc_present_suffix=" in the snapshot diff"
-        if [ "${ROBOREV_DIFF_SOURCE_ORIGIN:-live}" = captured ]; then
-          # Measured live: roborev DELETES the snapshot when the review finishes, before
-          # `--wait` returns, so on a real snapshot-mode review the evidence is the copy the
-          # wrapper took while the review ran. The block says so rather than implying it read
-          # the original.
-          pc_source_noun="the snapshot diff captured while the review ran"
-          pc_present_suffix=" in the captured snapshot diff"
+        # ===== C‴: SNAPSHOT MODE IS A NOTICE, NOT A CERTIFICATION =====
+        # Owner ruling, after seven review rounds found eleven false-PASS vectors in the machinery that
+        # made a snapshot-delivered diff certifiable. The information is PRESERVED — the block records
+        # the snapshot path, its digest and the census code-path subset this run expected — so a human
+        # closer can act on it; what is gone is the claim that the reviewer demonstrably received those
+        # paths. THIS IS A DELIBERATE REDUCTION IN CERTIFICATION STRENGTH, and it is the one place in
+        # this wrapper where a previously-FAILing condition no longer fails. It NEVER turns a previous
+        # FAIL into a PASS by itself: `prompt-content` becomes NOTICE, and the wrapper's
+        # verdict-affirmation backstop admits that NOTICE only for this key and only in this mode.
+        SNAPSHOT_NOTICE=1
+        # THE CENSUS SUBSET THIS RUN EXPECTED, for the block. Reported, never asserted (that is the whole
+        # of C‴): a closer reads it to know what a certification WOULD have covered.
+        SNAPSHOT_EXPECTED="${#census_code_paths[@]} code census path(s) expected, not asserted"
+        PROMPT_CONTENT="NOTICE (snapshot mode: not certified — snapshot-path/-digest/-expected record what was observed)"
+        if [ -n "${ROBOREV_SNAPSHOT_DIGEST:-}" ]; then
+          DETAILS+=("NOTICE: prompt-content: roborev delivered this diff BY SNAPSHOT PATH, so it is OBSERVED AND REPORTED rather than certified (C‴, issue #3312). Observed snapshot: ${ROBOREV_SNAPSHOT_PATH:-<unnamed>} (digest ${ROBOREV_SNAPSHOT_DIGEST}, ${ROBOREV_SNAPSHOT_BYTES:-unknown} bytes). This run EXPECTED the ${#census_code_paths[@]} CODE census path(s) below to be in it; that expectation is NOT asserted, and a closer wanting certainty must inspect the diff or re-review with a smaller range.")
+        else
+          # NEVER SILENCE: an unobserved snapshot says WHAT could not be observed.
+          DETAILS+=("NOTICE: prompt-content: roborev delivered this diff BY SNAPSHOT PATH and the snapshot could NOT be observed by this run, so neither its digest nor its contents are recorded (C‴, issue #3312). Named path: ${ROBOREV_SNAPSHOT_PATH:-<none readable from the prompt>}. Cause: ${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-not established}. This run EXPECTED the ${#census_code_paths[@]} CODE census path(s) below; that expectation is NOT asserted.")
         fi
-        ;;
-      both)
-        pc_source_noun="the prompt and the snapshot diff it names"
-        pc_present_suffix=" in the prompt and its snapshot diff"
-        if [ "${ROBOREV_DIFF_SOURCE_ORIGIN:-live}" = captured ]; then
-          pc_source_noun="the prompt and the snapshot diff captured while the review ran"
-          pc_present_suffix=" in the prompt and its captured snapshot diff"
+        printed=0
+        for census_path in ${census_code_paths[@]+"${census_code_paths[@]}"}; do
+          [ "$printed" -lt 10 ] || break
+          DETAILS+=("  $census_path")
+          printed=$((printed + 1))
+        done
+        if [ "${#census_code_paths[@]}" -gt 10 ]; then
+          DETAILS+=("  … and $(( ${#census_code_paths[@]} - 10 )) more (see census: for the total)")
         fi
+        return 0
         ;;
+      inline) ;;
       none)
-        # PERMISSIVE-LOOKING, AND IT IS NOT — the reason is recorded here rather than left to
-        # be re-derived. `none` is a MEASUREMENT ("neither source exists"), and it proceeds to
-        # the census match with an EMPTY header set, which with a non-empty code census can
-        # only ever produce the all-absent FAIL below; an empty code census is refused by the
-        # 0/0 backstop. So this branch cannot reach a PASS by any route. It proceeds rather
-        # than short-circuiting so the value keeps naming HOW MANY paths went undelivered,
-        # which is what the operator acts on, with the no-source condition named as its own
-        # cause immediately below.
+        # A MEASUREMENT, not an excusal: neither source exists, so the census match below reports every
+        # path absent — the fail-closed direction — and this line names the condition.
         DETAILS+=("ERROR: prompt-content: the prompt carries NEITHER an inline diff (no 'diff --git' header) NOR a snapshot diff path (no column-zero 'Read the diff from:' instruction), so nothing in it names a diff the reviewer could have received. This is the T1/T2 family: the review ran against no diff at all.")
-        # WHICH no-source mode it is, when the resolver could tell. THE RESIDUAL, recorded rather
-        # than fixed here: roborev also has a DELEGATED-INSPECTION oversize tier that ships no
-        # diff and no snapshot, telling the reviewer to run git itself. Nothing obtainable
-        # locally can verify what such a review received, so it stays a FAIL — whether that mode
-        # is certifiable at all is an owner decision, out of scope for #3312.
-        if [ -n "${ROBOREV_DIFF_SOURCE_DETAIL:-}" ]; then
-          DETAILS+=("$ROBOREV_DIFF_SOURCE_DETAIL")
-        fi
         ;;
       *)
-        # Either a named snapshot that could not be used (each cause distinct, each naming the
-        # path) or a state this file has never judged. Both fail closed, and neither is
-        # allowed to reach the census comparison — a comparison against headers we could not
-        # obtain would blame the branch for the oracle's absence.
-        PROMPT_CONTENT="FAIL (snapshot diff unusable: ${ROBOREV_DIFF_SOURCE_STATE:-<unset>})"
-        if [ -n "${ROBOREV_DIFF_SOURCE_DETAIL:-}" ]; then
-          DETAILS+=("$ROBOREV_DIFF_SOURCE_DETAIL")
-        else
-          DETAILS+=("ERROR: prompt-content: the diff-source resolver returned the state '${ROBOREV_DIFF_SOURCE_STATE:-<unset>}', which this check has never judged, and no cause text with it. That is a defect in roborev-review-oracles.sh (a branch that returned without setting its state), not something to fix in the branch under review — failing closed rather than letting an unplanned state inherit the non-failing path.")
-        fi
-        DETAILS+=("ERROR: prompt-content: no header source could be read, so the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
+        PROMPT_CONTENT="FAIL (diff-source resolver returned the unrecognised state '${ROBOREV_DIFF_SOURCE_STATE:-<unset>}')"
+        DETAILS+=("ERROR: prompt-content: the diff-source resolver returned a state this check has never judged. That is a defect in roborev-review-oracles.sh, not in the branch under review — failing closed rather than letting an unplanned state inherit a non-failing path.")
         return 0
         ;;
     esac
@@ -238,8 +221,8 @@ roborev_check_prompt_content() {
       PROMPT_CONTENT="FAIL (no code census path was checkable — a 0/0 is never a pass)"
       DETAILS+=("ERROR: prompt-content: there is not one CODE census path to look for in the prompt (census code paths: ${#census_code_paths[@]}), so this key has NO subject and therefore no verdict to give. Failing closed: 'PASS (0/0 code census paths present)' would be textually identical to a genuine pass while the reviewer received an EMPTY prompt. See code-free:, which fails pre-enqueue for the same reason.")
     elif [ "${#missing_paths[@]}" -gt 0 ]; then
-      PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from $pc_source_noun)"
-      DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the diff actually delivered to the reviewer ($pc_source_noun${ROBOREV_DIFF_SOURCE_PATH:+ — $ROBOREV_DIFF_SOURCE_PATH}), so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. Missing (first 10):")
+      PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
+      DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. Missing (first 10):")
       printed=0
       for census_path in "${missing_paths[@]}"; do
         [ "$printed" -lt 10 ] || break
@@ -250,7 +233,7 @@ roborev_check_prompt_content() {
       # The suffix names WHERE the evidence was found, so a pasted block distinguishes an
       # inline-diff review from a snapshot-delivered one. It is EMPTY for the inline case, which
       # keeps the long-standing value spelling byte-identical for every reader that greps it.
-      PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present$pc_present_suffix)"
+      PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"
     fi
   fi
 }

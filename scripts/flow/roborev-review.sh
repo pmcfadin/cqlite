@@ -490,6 +490,11 @@ SHA_ASSERT="SKIP"
 # verdict marker from an ALLOW-list) is now required before PASS is reachable.
 REVIEW_COMPLETED="SKIP"
 PROMPT_CONTENT="SKIP"
+# C‴ (#3312): set to 1 by `prompt-content` when roborev delivered the diff by SNAPSHOT PATH, which the
+# owner ruled is OBSERVED AND REPORTED rather than certified. It is the ONLY thing that admits a
+# `prompt-content: NOTICE` to the affirmation backstop below, and nothing else may set it.
+SNAPSHOT_NOTICE=0
+SNAPSHOT_EXPECTED=""
 TIER1="SKIP"
 TIER2="SKIP"
 FINDINGS="SKIP"
@@ -581,6 +586,12 @@ emit_summary() {
   emit_kv 'sha-assert' "$SHA_ASSERT"
   emit_kv 'review-completed' "$REVIEW_COMPLETED"
   emit_kv 'prompt-content' "$PROMPT_CONTENT"
+  # C‴ INFORMATIONAL KEYS (#3312): what was OBSERVED about a snapshot-delivered diff, so the information
+  # survives the loss of certification. Informational, exactly like `census:`/`tokens:` — they carry no
+  # verdict and are deliberately absent from the verdict scan.
+  emit_kv 'snapshot-path' "${ROBOREV_SNAPSHOT_PATH:--}"
+  emit_kv 'snapshot-digest' "${ROBOREV_SNAPSHOT_DIGEST:-${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:+UNOBSERVED (}${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-}${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:+)}}"
+  emit_kv 'snapshot-expected' "${SNAPSHOT_EXPECTED:--}"
   emit_kv 'vacuity-tier1' "$TIER1"
   emit_kv 'vacuity-tier2' "$TIER2"
   emit_kv 'findings' "$FINDINGS"
@@ -613,23 +624,15 @@ on_exit() {
   # abort before the review returns. Defined in the oracles file, which may not be sourced yet on
   # the earliest failure paths — hence the existence test rather than a bare call.
   if command -v roborev_snapshot_capture_stop >/dev/null 2>&1; then
-    roborev_snapshot_capture_stop
+    roborev_snapshot_observe_stop
   fi
   if [ "$EMITTED" -eq 0 ]; then
     printf 'ERROR: the wrapper terminated unexpectedly (exit %s) before reaching a verdict.\n' "$rc"
     RESULT="FAIL"
     EMITTED=1
     emit_summary
-    # The private capture directory goes AFTER the block is emitted, never before: prompt-content:
-    # reads the capture, so cleaning up at stop would delete the evidence the check needs.
-    if command -v roborev_snapshot_capture_cleanup >/dev/null 2>&1; then
-      roborev_snapshot_capture_cleanup
-    fi
     [ "$rc" -ne 0 ] || rc=1
     exit "$rc"
-  fi
-  if command -v roborev_snapshot_capture_cleanup >/dev/null 2>&1; then
-    roborev_snapshot_capture_cleanup
   fi
 }
 trap on_exit EXIT
@@ -730,7 +733,7 @@ done
 # removed at exit — see the scope note in roborev-review-oracles.sh. It is deliberately NOT a stable
 # path beside the transcript: a shared, guessable directory is reusable across runs, which is a
 # staleness class this design removes by construction rather than by checking for it.
-roborev_snapshot_capture_start
+roborev_snapshot_observe_start "$LOG.snapshot-observed"
 set +e
 roborev review --branch \
   --base "$BASE" \
@@ -1114,6 +1117,17 @@ if [ "$failed" -eq 0 ]; then
     det_value="${keyed#*=}"
     case "${det_value%% *}" in
       PASS) continue ;;
+      # ===== THE ONE OWNER-RULED EXEMPTION (C‴, issue #3312) =====
+      # `prompt-content: NOTICE` is admitted, and ONLY for that key, and ONLY when `SNAPSHOT_NOTICE=1`
+      # says roborev delivered the diff by snapshot path. This is a DELIBERATE REDUCTION in what a PASS
+      # asserts, ruled by the owner after eleven false-PASS vectors were found in the machinery that made
+      # a snapshot certifiable; it is recorded here rather than hidden because a reader of this block is
+      # entitled to know that a snapshot-mode PASS does not assert the reviewer received the census
+      # paths — the `snapshot-*` keys record what was observed instead. It cannot leak: any other key, or
+      # this key in any other mode, still requires an affirmative PASS.
+      NOTICE)
+        if [ "$det_key" = "prompt-content" ] && [ "${SNAPSHOT_NOTICE:-0}" -eq 1 ]; then continue; fi
+        ;;
     esac
     not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
   done
