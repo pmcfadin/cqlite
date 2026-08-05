@@ -907,12 +907,39 @@ roborev_collect_prompt_headers() {
 # the id from the path the prompt names and reads OUR COPY of exactly that snapshot.
 #
 # WHY THIS IS NOT A WEAKENING. The copy is (a) taken from INSIDE the reviewed repository, (b) taken
-# DURING this run, by us, (c) selected by the directory id the reviewed job's OWN prompt names.
-# Nothing is reconstructed: we never compute the diff ourselves. That distinction is the whole
-# point — `git diff` output of our own would make `prompt-content:` compare our census against our
-# own diff, which always agrees, i.e. exactly the vacuous pass this key exists to prevent. A
-# capture that does not happen is not excused either: with no live file and no capture the verdict
-# is still `cleaned-up`, fail-closed.
+# DURING this run, by us, (c) VALIDATED AT CAPTURE TIME and matched afterwards against the exact
+# relative path the reviewed job's OWN prompt names. Nothing is reconstructed: we never compute the
+# diff ourselves. That distinction is the whole point — `git diff` output of our own would make
+# `prompt-content:` compare our census against our own diff, which always agrees, i.e. exactly the
+# vacuous pass this key exists to prevent. A capture that does not happen is not excused either:
+# with no live file and no capture the verdict is still `cleaned-up`, fail-closed.
+#
+# ===== PROVENANCE IS ESTABLISHED AT CAPTURE TIME, NOT AT VALIDATION TIME (roborev job 6) =====
+# Two blockers, and they were two halves of ONE seam: capture provenance was established too LATE
+# and keyed too LOOSELY. Both were false-PASS vectors in the guard whose only job is preventing
+# false passes, so both are closed here rather than argued down.
+#
+# (1) THE CAPTURE-TIME PATH RUNS EARLIER AND THEREFORE WINS. `-f` and `cp` both FOLLOW symlinks, so
+#     a symlink at `<repo>/.roborev/roborev-snapshot-<id>/roborev-snapshot-content.diff` (or a
+#     symlinked `.roborev`/`roborev-snapshot-<id>` component) made the watcher copy an OUTSIDE file
+#     into the capture dir. The validation-time `-L` refusal added earlier cannot see it: roborev
+#     deletes the original first, so by then there is no path left to inspect and the capture is
+#     simply trusted. So the watcher now validates BEFORE it reads — no symlink at the file OR at
+#     any component it descends, a regular file, and a physically-resolved directory that really is
+#     `<repo>/.roborev/<id>` — and RECORDS that validation beside the capture. The consumer requires
+#     the record AFFIRMATIVELY: a capture with no validation record is REJECTED, never trusted,
+#     because "no recorded failure" is not a measurement.
+#
+# (2) A CAPTURE IS KEYED BY ITS FULL VALIDATED RELATIVE PATH, not by the directory id. The binding
+#     accepts any file beneath a snapshot directory while the watcher only ever copies the canonical
+#     `roborev-snapshot-content.diff`, so an id-only lookup let a prompt naming a DIFFERENT (missing)
+#     file in that directory be answered with the canonical sibling's capture — certifying a diff the
+#     reviewer was never instructed to read. The validation record therefore stores the exact
+#     relative path captured, and the consumer requires it to EQUAL the relative path the prompt
+#     names. (Chosen over hard-coding the expected filename + depth in the binding: the PROMPT is the
+#     authority on which file the reviewer was pointed at, and an equality test against what we
+#     actually copied cannot drift with roborev's naming, while a pinned filename would both duplicate
+#     that authority and false-FAIL if roborev ever renames its snapshot file.)
 #
 # RE-COPIED ONLY WHEN THE SOURCE SIZE CHANGES, so a partially-written snapshot converges to the
 # complete file without copying a multi-megabyte diff five times a second for the whole review.
@@ -942,24 +969,71 @@ roborev_snapshot_capture_stop() {
   return 0
 }
 
+# _roborev_capture_validate <repo> <snapshot-dir-id> <file>: may this file be captured as this
+# review's diff? Exit 0 with `_rx_cap_rel` set to its validated REPO-RELATIVE path, else non-zero.
+#
+# EVERY TEST HERE PRECEDES THE READ, which is the entire point of the function: once `cp` has run,
+# a symlink has already been followed and the evidence of it can be (and normally IS) deleted before
+# anything else looks. The four conditions:
+#   1. no SYMLINK at any component this walk descends — `.roborev`, the snapshot dir, and the file
+#      itself. Checked with `-L`, which does NOT follow, and before `-f`, which does.
+#   2. a REGULAR FILE. Safe to ask only after 1, since `-f` would otherwise answer about a target.
+#   3. the containing directory, PHYSICALLY resolved, is exactly `<repo>/.roborev/<id>` — so a
+#      component swapped for a mount point or otherwise re-pointed cannot masquerade as in-repo.
+#      `$repo` is `$REPO`, already `pwd -P`-resolved by the wrapper.
+#   4. the relative path is derived from the components we just validated, never re-parsed.
+_roborev_capture_validate() {
+  local repo="$1" id="$2" f="$3" dirphys
+  _rx_cap_rel=""
+  [ -n "$repo" ] && [ -n "$id" ] && [ -n "$f" ] || return 1
+  [ ! -L "$repo/.roborev" ] || return 1
+  [ ! -L "$repo/.roborev/$id" ] || return 1
+  [ ! -L "$f" ] || return 1
+  [ -f "$f" ] || return 1
+  dirphys=$(cd "${f%/*}" 2>/dev/null && pwd -P) || return 1
+  [ "$dirphys" = "$repo/.roborev/$id" ] || return 1
+  _rx_cap_rel=".roborev/$id/${f##*/}"
+  return 0
+}
+
 _roborev_snapshot_capture_loop() {
-  local repo="$1" out="$2" f id size sizefile
+  local repo="$1" out="$2" f id size sizefile rel ino_before ino_after
   while : ; do
-    # An unmatched glob leaves the PATTERN in `$f`, which the `-f` test rejects — no `nullglob`
+    # An unmatched glob leaves the PATTERN in `$f`, which the validation rejects — no `nullglob`
     # dependency, and inline-mode reviews simply never match.
     for f in "$repo"/.roborev/roborev-snapshot-*/roborev-snapshot-content.diff; do
-      [ -f "$f" ] || continue
       id="${f%/*}"
       id="${id##*/}"
+      # VALIDATE BEFORE ANY READ. Nothing below may run for a path that failed this.
+      _roborev_capture_validate "$repo" "$id" "$f" || continue
+      rel="$_rx_cap_rel"
       size=$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]') || size=""
       [ -n "$size" ] || continue
       sizefile="$out/$id.size"
       if [ -f "$out/$id.diff" ] && [ "$(cat "$sizefile" 2>/dev/null || printf '')" = "$size" ]; then
         continue
       fi
+      # The inode is recorded across the copy so a source SWAPPED mid-read is detected rather than
+      # silently captured: a validated regular file replaced by a symlink between the checks above
+      # and the `cp` would otherwise be the residual TOCTOU window. Re-checked, together with `-L`,
+      # before the capture is published.
+      ino_before=$(ls -i -- "$f" 2>/dev/null | awk '{print $1; exit}') || ino_before=""
       # tmp + mv, so a reader never sees a half-written capture.
-      if cp "$f" "$out/.$id.diff.part" 2>/dev/null; then
-        mv "$out/.$id.diff.part" "$out/$id.diff" 2>/dev/null && printf '%s' "$size" >"$sizefile" 2>/dev/null
+      cp "$f" "$out/.$id.diff.part" 2>/dev/null || { rm -f "$out/.$id.diff.part" 2>/dev/null; continue; }
+      ino_after=$(ls -i -- "$f" 2>/dev/null | awk '{print $1; exit}') || ino_after=""
+      if [ -n "$ino_before" ] && [ "$ino_before" = "$ino_after" ] && [ ! -L "$f" ]; then
+        if mv "$out/.$id.diff.part" "$out/$id.diff" 2>/dev/null; then
+          printf '%s' "$size" >"$sizefile" 2>/dev/null || :
+          # THE AFFIRMATIVE VALIDATION RECORD, written LAST and only on the validated path: the
+          # consumer requires it and rejects any capture without it, so a capture published without
+          # this file can never be read as evidence. It carries the exact relative path captured,
+          # which is what binds the capture to the file the prompt names.
+          printf '%s' "$rel" >"$out/$id.validated" 2>/dev/null || :
+        else
+          rm -f "$out/.$id.diff.part" 2>/dev/null || :
+        fi
+      else
+        rm -f "$out/.$id.diff.part" 2>/dev/null || :
       fi
     done
     sleep "$_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS" 2>/dev/null || sleep 1
@@ -1096,6 +1170,7 @@ roborev_snapshot_path_binding() {
   _rx_snap_bound_path="$p"
   _rx_snap_dir=""
   _rx_snap_dir_id=""
+  _rx_snap_rel=""
   case "$p" in
     /*) ;;
     *) _rx_snap_bind_state="not-absolute"; return 1 ;;
@@ -1111,6 +1186,10 @@ roborev_snapshot_path_binding() {
     *) _rx_snap_bind_state="foreign-repo"; return 2 ;;
   esac
   rel="${_rx_snap_bound_path#"$repo_prefix"/}"
+  # THE FULL RELATIVE PATH the prompt names, kept for the capture lookup: a capture is matched by
+  # this whole path, never by the directory id alone (roborev job 6, blocker 2), so a prompt naming
+  # a different file in the same snapshot directory cannot be answered with the canonical sibling.
+  _rx_snap_rel="$rel"
   IFS='/' read -r -a parts <<<"$rel"
   # At least `.roborev` / `roborev-snapshot-<id>` / a file name.
   if [ "${#parts[@]}" -lt 3 ]; then _rx_snap_bind_state="unbound-job"; return 3; fi
@@ -1256,13 +1335,43 @@ roborev_collect_review_diff_headers() {
   fi
 
   # THE CAPTURE, consulted ONLY when the original is no longer there — which, measured live, is the
-  # NORMAL case (roborev deletes the snapshot before `--wait` returns). It is OUR copy of the very
-  # directory id this job's prompt names, taken from inside the reviewed repo during this run.
+  # NORMAL case (roborev deletes the snapshot before `--wait` returns). It is OUR copy, taken from
+  # inside the reviewed repo during this run, and it is trusted ONLY on two affirmative facts:
+  #   * a VALIDATION RECORD exists beside it, written by the watcher only after the capture-time
+  #     symlink/containment checks passed. A capture without one is REJECTED — the record's ABSENCE
+  #     is not evidence of safety, it is the absence of a measurement (roborev job 6, blocker 1).
+  #   * that record's path EQUALS the relative path this job's prompt names, so the canonical
+  #     sibling of a differently-named file can never stand in for it (blocker 2).
   _rx_snap_capture=""
+  _rx_snap_capture_reject=""
   if [ ! -f "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
-    && [ -n "${_rx_snap_dir_id:-}" ] \
-    && [ -f "$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.diff" ]; then
-    _rx_snap_capture="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.diff"
+    && [ -n "${_rx_snap_dir_id:-}" ]; then
+    _rx_cap_file="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.diff"
+    _rx_cap_marker="$ROBOREV_SNAPSHOT_CAPTURE_DIR/$_rx_snap_dir_id.validated"
+    if [ -f "$_rx_cap_file" ] && [ ! -L "$_rx_cap_file" ]; then
+      if [ ! -f "$_rx_cap_marker" ] || [ -L "$_rx_cap_marker" ]; then
+        _rx_snap_capture_reject="capture-unvalidated"
+      else
+        _rx_cap_recorded=$(cat "$_rx_cap_marker" 2>/dev/null || printf '')
+        # KEYED ON THE AFFIRMATIVE VALUE: the recorded path must be non-empty AND equal. An
+        # unreadable or empty record takes the rejecting branch, never the trusting one.
+        if [ -n "$_rx_cap_recorded" ] && [ "$_rx_cap_recorded" = "${_rx_snap_rel:-}" ]; then
+          _rx_snap_capture="$_rx_cap_file"
+        else
+          _rx_snap_capture_reject="capture-path-mismatch"
+        fi
+      fi
+    fi
+  fi
+  if [ "$_rx_snap_capture_reject" = "capture-unvalidated" ]; then
+    ROBOREV_DIFF_SOURCE_STATE="capture-unvalidated"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a capture of snapshot directory '${_rx_snap_dir_id}' exists ($_rx_cap_file) but carries NO capture-time validation record ($_rx_cap_marker), so nothing establishes that what was copied was a regular file inside the reviewed repository rather than a symlink to somewhere else — and the original is gone, so it cannot be checked now. A capture is evidence only on an AFFIRMATIVE validation record; its absence is the absence of a measurement, never a clean bill of health. Failing closed."
+    return 0
+  fi
+  if [ "$_rx_snap_capture_reject" = "capture-path-mismatch" ]; then
+    ROBOREV_DIFF_SOURCE_STATE="capture-path-mismatch"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the capture for snapshot directory '${_rx_snap_dir_id}' records the validated path '${_rx_cap_recorded:-<unreadable>}', but the prompt instructed the reviewer to read '${_rx_snap_rel:-<unresolved>}'. Reading the file the capture happens to hold would certify a diff the reviewer was never pointed at — a capture is matched by its WHOLE validated relative path, never by the snapshot directory id alone. Failing closed."
+    return 0
   fi
   if [ ! -e "$_rx_snap_bound_path" ] && [ -z "$_rx_snap_capture" ]; then
     if [ ! -d "${_rx_snap_dir:-}" ]; then
