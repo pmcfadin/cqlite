@@ -511,11 +511,17 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
   # until the next reboot, which is precisely what the functional verification exists
   # to prevent, on the path most people take (no --yes).
   perf_remedy_line() {
+    # THE PRINTED REMEDY MUST BE THE VALIDATED PATH, NOT `tee`/`>` (issue #3261, roborev round 5
+    # High). Both former spellings — `--drop-in | sudo tee <path>` and, from a root shell,
+    # `--drop-in > <path>` — open the destination BY NAME, so a symlink planted there between this
+    # advice being printed and the human running it redirects a privileged write anywhere. `--install`
+    # routes through the same containment checks + mktemp + atomic rename bootstrap uses itself, so
+    # the copy-pasteable command is no weaker than the automated one.
     if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
-      info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/perf-capability.sh --drop-in > $PERF_DROPIN && sysctl -q --system"
+      info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/perf-capability.sh --install && sysctl -q --system"
       info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
     else
-      info "write + apply the drop-in:  bash scripts/perf-capability.sh --drop-in | ${PERF_RUN_AS}tee $PERF_DROPIN >/dev/null && ${PERF_RUN_AS}sysctl -q --system"
+      info "write + apply the drop-in:  bash scripts/perf-capability.sh --install ${PERF_RUN_AS%% } && ${PERF_RUN_AS}sysctl -q --system"
     fi
   }
 

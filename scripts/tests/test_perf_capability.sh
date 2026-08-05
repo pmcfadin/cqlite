@@ -874,21 +874,29 @@ done
 #     EXTENDED TO THE PRIVILEGE SHIM (issue #3261 AC4). The guard authorizes EXECUTABLES as
 #     well as paths, and CQLITE_PERF_TEST_PRIV_DIR was read TEXTUALLY — so it joins the seam
 #     regex below, and a second pass audits every function that RESOLVES a privileged tool.
+# CODE ONLY, AND CALL SITES ONLY (roborev round 5, Low). These audits used to match the gate name
+# against RAW lines, so PROSE counted: deleting a real `perf_capability_sandbox_ok` call while leaving
+# a comment that mentions it kept the "unskippable" audit GREEN. An audit that a comment can satisfy
+# is the vacuous-pass shape this repo already has a rule against, and it was cited upward as evidence,
+# so it had to become real. Two changes: `#` comments are stripped before any matching, and the gate
+# must appear in a COMMAND POSITION (start of line or after whitespace/`(`/`|`/`&`/`;`, followed by
+# whitespace, `)` or end) rather than merely occurring somewhere in the text.
 seam_audit=$(awk \
   -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
-  -v gatere='perf_capability_(sandbox_|path_within)' '
+  -v gatere='(^|[^A-Za-z0-9_])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
+  { code = $0; sub(/[[:space:]]*#.*$/, "", code) }
   /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
     fn = $1; sub(/\(\)$/, "", fn); seam = 0; gate = 0
-    if ($0 ~ seamre) seam = 1
-    if ($0 ~ gatere) gate = 1
+    if (code ~ seamre) seam = 1
+    if (code ~ gatere) gate = 1
     if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, seam, gate; inb = 0 }
     else inb = 1
     next
   }
   inb && /^\}/ { printf "%s %d %d\n", fn, seam, gate; inb = 0; next }
   inb {
-    if ($0 ~ seamre) seam = 1
-    if ($0 ~ gatere) gate = 1
+    if (code ~ seamre) seam = 1
+    if (code ~ gatere) gate = 1
   }
 ' "$PERFLIB")
 # The ONLY function allowed to read a seam without the gate, and why: it asks whether a seam
@@ -925,21 +933,23 @@ fi
 #        not a DESTINATION — so they get the same STRUCTURAL treatment: every function that
 #        resolves a privileged tool must route through the containment family, or be
 #        allowlisted by name with a reason. Floor + explicit expectations, same as above.
+# Same de-vacuuming as the seam audit above: comments stripped, gate matched in a command position.
 priv_audit=$(awk \
   -v privre='(for [a-z_]+ in (sudo|sysctl)|command -v .*(sudo|sysctl))' \
-  -v gatere='perf_capability_(sandbox_|path_within)' '
+  -v gatere='(^|[^A-Za-z0-9_])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
+  { code = $0; sub(/[[:space:]]*#.*$/, "", code) }
   /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
     fn = $1; sub(/\(\)$/, "", fn); priv = 0; gate = 0
-    if ($0 ~ privre) priv = 1
-    if ($0 ~ gatere) gate = 1
+    if (code ~ privre) priv = 1
+    if (code ~ gatere) gate = 1
     if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, priv, gate; inb = 0 }
     else inb = 1
     next
   }
   inb && /^\}/ { printf "%s %d %d\n", fn, priv, gate; inb = 0; next }
   inb {
-    if ($0 ~ privre) priv = 1
-    if ($0 ~ gatere) gate = 1
+    if (code ~ privre) priv = 1
+    if (code ~ gatere) gate = 1
   }
 ' "$PERFLIB")
 # The ONE function allowed to resolve a privileged tool without the containment gate, and why:
@@ -1114,7 +1124,13 @@ rm -f "$wt_d/99-cqlite-perf.conf"
 # the two refusal cases and be useless, so a correctly-owned 0755 directory must still install.
 wt_perm_d="$tmp/wt-perm.d"
 wt_perm_fail=0
-for wt_mode in 0775 0777 0757; do
+# SHORT MODES ARE THE INTERESTING ONES (roborev round 5, High). `stat -c %a` drops leading zeros, so
+# 0033 arrives as "33" — two characters. The old `${dmode%???}` suffix-strip could not match that,
+# left the permission field EMPTY, matched none of the write-bit patterns, and PASSED a group- AND
+# world-writable directory. These three are exactly the shapes that regress it: group-only (0030),
+# other-only (0003), and both (0033). 0300 is the CONTROL — owner-write only, three digits, must be
+# ACCEPTED — so the case cannot pass by refusing everything short.
+for wt_mode in 0775 0777 0757 0030 0003 0033; do
   rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod "$wt_mode" "$wt_perm_d"
   wt_perm_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_perm_rc=$?
