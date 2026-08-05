@@ -720,19 +720,310 @@ else
 fi
 
 # ===========================================================================
+# PART 3 — THE FLIGHT SERVER WE MEASURE IS THE ONE WE STARTED (#3272 B4)
+# ===========================================================================
+# The third structural guard, and it belongs in THIS file rather than the reporter's: it
+# decides whether an observation is of the right PROGRAM, which is the same question PART 1
+# asks about the right CPUs.
+#
+# # The defect
+#
+# Readiness was inferred SOLELY from `(echo >/dev/tcp/127.0.0.1/$PORT)` succeeding. If our
+# server FAILS TO BIND and another process holds the port, that probe succeeds on the first
+# attempt, the load generator measures THAT server, and `perf stat -C` counts OUR pinned
+# CPUs. The figure is published as `flight_do_get_<arm>` for a program the rig did not start
+# and cannot name. The `for i in $(seq 1 120)` loop's exhaustion was not an error either —
+# it just ended, and the measurement proceeded.
+#
+# #3096's `require_port_free` does NOT cover this, and the distinction is the finding: it
+# runs BEFORE the spawn and answers "is the port free now". The case here is a port free at
+# preflight and held by someone else at measurement time — our bind losing a race, or
+# failing for its own reason while a peer's server binds in the gap.
+#
+# Driven against `lib-server.sh` as SHIPPED, sourced rather than re-implemented, with a
+# REAL listener started by python3 on a high port so the ownership question is a real one.
+SERVER_LIB="$REPO_ROOT/scripts/perf/lib-server.sh"
+if [ ! -f "$SERVER_LIB" ]; then
+  fail "server-owner: missing $SERVER_LIB"
+else
+  pass "server-owner: lib-server.sh is present (the shipped implementation, not a copy)"
+fi
+# A port the KERNEL chose, not a number picked as "probably free" (#3272 review round 3,
+# found while writing this: a hardcoded 18931 collided with a leftover listener from an
+# earlier run of this very file and made four cases fail for the wrong reason — the
+# fixture's own listener could not bind, so the ownership check reported "the server
+# exited"). The helper binds port 0, reads back what it was given, and releases it; a
+# fixture that guesses is a fixture whose failures are unattributable.
+free_port() {
+  python3 -c '
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+'
+}
+PROBE_PORT="$(free_port)"
+if [ -n "$PROBE_PORT" ] && [ "$PROBE_PORT" -gt 0 ] 2>/dev/null; then
+  pass "server-owner: the fixture uses a KERNEL-ASSIGNED port ($PROBE_PORT), never a guessed one"
+else
+  fail "server-owner: could not obtain a free port; every case below would be unattributable"
+fi
+# server_lib_call <function> [args…] — source the SHIPPED lib and run one function with
+# `$PORT`/`$OUT_DIR`/`$SERVER_PID` set, in a subshell so no case inherits another's state.
+server_lib_call() {
+  local fn="$1"; shift
+  ( set -uo pipefail
+    PORT="$PROBE_PORT"; OUT_DIR="$TMP"; SERVER_PID="${SERVER_PID:-}"
+    # shellcheck disable=SC1090
+    source "$SERVER_LIB"
+    "$fn" "$@" ) 2>&1
+}
+# start_listener <port> — a real TCP listener; echoes its pid.
+#
+# It ACCEPTS AND CLOSES in a loop, and the backlog is 64, neither of which is incidental
+# (#3272 review round 3, found while writing this). The first version was
+# `s.listen(1)` + `time.sleep(60)` — never accepting — so the wait-loop's own connection
+# filled the single backlog slot and stayed queued, and EVERY LATER CONNECT FAILED. The
+# ownership cases then reported "the server exited" (the `kill -0` branch was reached on the
+# next iteration) instead of exercising the check under test: a fixture failing for a reason
+# that looks like the thing it is testing. A real Flight server accepts, so the fixture
+# should too.
+start_listener() {
+  python3 -c '
+import socket, sys, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(64)
+s.settimeout(60)
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    try:
+        c, _ = s.accept()
+        c.close()
+    except OSError:
+        break
+' "$1" >/dev/null 2>&1 &
+  echo $!
+}
+wait_listening() { # wait_listening <port>
+  local i
+  for i in $(seq 1 40); do
+    (echo >"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1 && return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+# --- 3a. THE PROBER CAN ANSWER, on a socket whose owner we KNOW ---------------
+# Every ownership check below reads a verdict off `socket_owner_pid`, so a prober that
+# returns nothing for every port would make them all pass vacuously — a positive verdict
+# from an oracle that cannot answer. This is the positive control, and it is also the
+# fixture's own non-vacuity: if it fails, the cases after it prove nothing.
+LISTENER_PID="$(start_listener "$PROBE_PORT")"
+if wait_listening "$PROBE_PORT"; then
+  observed="$(server_lib_call socket_owner_pid "$PROBE_PORT")"
+  if [ "$observed" = "$LISTENER_PID" ]; then
+    pass "server-owner: socket_owner_pid IDENTIFIES a listener we started (pid $LISTENER_PID) — the oracle can answer"
+  else
+    fail "server-owner: socket_owner_pid must identify a known listener (expected $LISTENER_PID, got '${observed:-<nothing>}')"
+  fi
+else
+  fail "server-owner: the fixture's own listener never came up on $PROBE_PORT"
+fi
+
+# --- 3b. A FOREIGN listener on the port is REFUSED, naming it -----------------
+# THE HEADLINE CASE. `SERVER_PID` is a live process that is NOT the listener — exactly the
+# shape of "our server failed to bind and someone else holds the port". Pre-fix, the
+# connect-probe succeeded on the first attempt and the measurement RAN.
+sleep 60 & FOREIGN_SELF=$!      # a live pid that owns no socket, standing in for our server
+out=$( SERVER_PID="$FOREIGN_SELF" server_lib_call await_server_ready probe-rep ); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is being served by pid $LISTENER_PID" <<<"$out" \
+   && grep -q "NOT the Flight server this rig started" <<<"$out"; then
+  pass "server-owner: OBSERVED — a FOREIGN listener on the port is REFUSED, naming the pid that owns it (B4)"
+else
+  fail "server-owner: a foreign listener must be refused naming its pid (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# The refusal must say WHY it matters — that the wrong program would be measured — rather
+# than only that a pid differs.
+if grep -q "would measure THAT server while perf counted OUR" <<<"$out" \
+   && grep -q "proves only that SOMETHING is listening" <<<"$out"; then
+  pass "server-owner: the refusal names the CONSEQUENCE (a figure attributed to another program)"
+else
+  fail "server-owner: the refusal must explain what a port-accepts check cannot establish (out: $out)"
+fi
+# NON-VACUITY for this case against the PRE-FIX logic, stated as the assertion it replaces:
+# the connect-probe ALONE succeeds here, so a check built on it would have proceeded.
+if (echo >"/dev/tcp/127.0.0.1/$PROBE_PORT") >/dev/null 2>&1; then
+  pass "server-owner: NON-VACUITY — the port DOES accept connections, so the pre-fix probe would have proceeded"
+else
+  fail "server-owner: the fixture must have an accepting port, or the case is not the pre-fix one"
+fi
+
+# --- 3c. OUR OWN listener is ACCEPTED (the guard is not one that refuses all) --
+out=$( SERVER_PID="$LISTENER_PID" server_lib_call await_server_ready probe-rep ); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "owns 127.0.0.1:$PROBE_PORT" <<<"$out"; then
+  pass "server-owner: OUR OWN listener is ACCEPTED and the ownership is stated (the accept half)"
+else
+  fail "server-owner: a server we started must be accepted (rc=$rc, out: $out)"
+fi
+kill "$FOREIGN_SELF" 2>/dev/null || true
+kill "$LISTENER_PID" 2>/dev/null || true
+wait "$FOREIGN_SELF" 2>/dev/null || true
+wait "$LISTENER_PID" 2>/dev/null || true
+
+# --- 3c2. A DESCENDANT of our server is ACCEPTED, and only a real descendant --
+# `await_server_ready` deliberately accepts a listener that is a DESCENDANT of the pid we
+# launched, because a supervisor that forks its listener is a legitimate shape. That
+# leniency is exactly where an over-broad test lets a foreign process through, so
+# `descends_from` is driven in BOTH directions.
+#
+# NON-VACUITY: the first version compared PROCESS GROUPS, which looked equivalent and is
+# not — every background job of one shell inherits that shell's pgid, so the foreign
+# listener in 3b and the stand-in server shared one. MEASURED against that version, 3b
+# printed `server ready (pid 28133, a child of 28173, …)` for two processes whose only
+# relationship was a common parent: the guard accepting the situation it exists to refuse.
+descends_probe() { # descends_probe <pid> <ancestor> — echoes YES or NO
+  ( set -uo pipefail
+    # shellcheck disable=SC1090
+    source "$SERVER_LIB"
+    descends_from "$1" "$2" && echo YES || echo NO )
+}
+# A real grandchild: a shell that forks a shell that sleeps.
+GRANDPARENT_OUT="$TMP/grandchild.pid"
+bash -c 'bash -c "sleep 30 & echo \$! > '"$GRANDPARENT_OUT"'; sleep 30" ' >/dev/null 2>&1 &
+GRANDPARENT_PID=$!
+for _i in $(seq 1 40); do [ -s "$GRANDPARENT_OUT" ] && break; sleep 0.25; done
+GRANDCHILD_PID="$(cat "$GRANDPARENT_OUT" 2>/dev/null || true)"
+if [ -n "$GRANDCHILD_PID" ] && kill -0 "$GRANDCHILD_PID" 2>/dev/null; then
+  pass "server-owner: the ancestry fixture built a real grandchild ($GRANDCHILD_PID under $GRANDPARENT_PID)"
+else
+  fail "server-owner: could not build a grandchild; the ancestry cases would be unattributable"
+fi
+if [ "$(descends_probe "$GRANDCHILD_PID" "$GRANDPARENT_PID")" = "YES" ]; then
+  pass "server-owner: descends_from ACCEPTS a real GRANDCHILD (a supervisor that forks is legitimate)"
+else
+  fail "server-owner: descends_from must accept a descendant more than one hop away"
+fi
+# A SIBLING — the pgid-match false accept, stated as its own case.
+sleep 30 & SIBLING_A=$!
+sleep 30 & SIBLING_B=$!
+if [ "$(descends_probe "$SIBLING_A" "$SIBLING_B")" = "NO" ]; then
+  pass "server-owner: OBSERVED — descends_from REFUSES a SIBLING (the pgid check accepted this)"
+else
+  fail "server-owner: two background jobs of one shell are NOT related; a pgid match said they were"
+fi
+# ...and the pgid check really would have said YES, so the case above is the pre-fix one.
+if [ "$(ps -o pgid= -p "$SIBLING_A" | tr -d ' ')" = "$(ps -o pgid= -p "$SIBLING_B" | tr -d ' ')" ]; then
+  pass "server-owner: NON-VACUITY — those two siblings DO share a pgid, so the pre-fix check accepted them"
+else
+  fail "server-owner: the sibling fixture must share a pgid, or it is not the pre-fix case"
+fi
+# A pid IS its own ancestor (the ordinary match), and an unrelated pid is not.
+if [ "$(descends_probe "$SIBLING_A" "$SIBLING_A")" = "YES" ] \
+   && [ "$(descends_probe 1 "$SIBLING_A")" = "NO" ]; then
+  pass "server-owner: descends_from accepts identity and refuses an unrelated pid"
+else
+  fail "server-owner: descends_from must accept identity and refuse an unrelated pid"
+fi
+kill "$GRANDPARENT_PID" "$GRANDCHILD_PID" "$SIBLING_A" "$SIBLING_B" 2>/dev/null || true
+wait "$GRANDPARENT_PID" "$SIBLING_A" "$SIBLING_B" 2>/dev/null || true
+
+# --- 3d. A DEAD server is refused BEFORE the port is consulted ----------------
+# A dead child cannot be what a live socket belongs to, and the diagnostic must name the
+# process rather than the port — the two causes have different remedies.
+sleep 0 & DEAD_PID=$!; wait "$DEAD_PID" 2>/dev/null || true
+out=$( SERVER_PID="$DEAD_PID" server_lib_call await_server_ready probe-rep ); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is not" <<<"$out" && grep -q "exited before serving" <<<"$out"; then
+  pass "server-owner: a server that EXITED is refused, naming the process (not the port)"
+else
+  fail "server-owner: a dead server must be refused with a process diagnostic (rc=$rc, out: $out)"
+fi
+
+# --- 3e. A READINESS TIMEOUT IS FATAL ----------------------------------------
+# The pre-fix loop's exhaustion was SILENT: `for i in $(seq 1 120)` simply ended and the
+# measurement proceeded against a dead port. Driven with the loop bound reduced to 1 (via
+# an extracted copy) so the case costs a second rather than two minutes — the extraction is
+# from the SHIPPED function, and the substitution is asserted to have applied.
+timeout_probe="$TMP/timeout-probe.sh"
+python3 - "$SERVER_LIB" "$timeout_probe" <<'PY'
+import pathlib, re, sys
+src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+s = src.read_text()
+body = re.search(r"^await_server_ready\(\) \{.*?^\}", s, re.S | re.M)
+if not body:
+    sys.exit("await_server_ready not found in lib-server.sh — this fixture is stale")
+patched, n = re.subn(r"seq 1 120", "seq 1 1", body.group(0))
+if n != 1:
+    sys.exit(f"expected exactly one `seq 1 120` in await_server_ready, found {n}")
+dst.write_text("set -uo pipefail\nsocket_owner_pid() { :; }\n" + patched
+               + '\nawait_server_ready "$1"\n')
+PY
+out=$(PORT="$(free_port)" OUT_DIR="$TMP" SERVER_PID=$$ bash "$timeout_probe" probe-rep 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "did not begin serving" <<<"$out" \
+   && grep -q "TIMEOUT is a failure" <<<"$out"; then
+  pass "server-owner: OBSERVED — a readiness TIMEOUT is FATAL (pre-fix: the loop ended and the run proceeded)"
+else
+  fail "server-owner: a readiness timeout must exit non-zero (rc=$rc, out: $out)"
+fi
+
+# --- 3f. AN UNANSWERABLE PROBER STOPS THE RUN --------------------------------
+# `require_socket_prober` is what makes every check above non-vacuous, so its own failure
+# path must fire: pointed at a port with NO listener, it must refuse rather than conclude
+# that ownership is fine.
+out=$( server_lib_call require_socket_prober "$(free_port)" ); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "verified prober" <<<"$out"; then
+  pass "server-owner: require_socket_prober PASSES against a listener it starts itself"
+else
+  fail "server-owner: the prober check must pass on a working host (rc=$rc, out: $out)"
+fi
+# ...and it must FAIL when the prober cannot answer, which is the state that would make
+# every ownership check vacuous. Driven by shimming `socket_owner_pid` to return nothing —
+# the exact behaviour of an `ss` built without process info.
+out=$( set -uo pipefail
+       PORT="$(free_port)"; OUT_DIR="$TMP"
+       # shellcheck disable=SC1090
+       source "$SERVER_LIB"
+       socket_owner_pid() { :; }        # answers NOTHING, like a privilege-less ss
+       require_socket_prober "$PORT" 2>&1 ); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "cannot answer" <<<"$out" \
+   && grep -q "would pass" <<<"$out"; then
+  pass "server-owner: OBSERVED — a prober that cannot answer STOPS the run (never a vacuous ownership pass)"
+else
+  fail "server-owner: an unanswerable prober must be fatal (rc=$rc, out: $out)"
+fi
+# And the DRIVER must WIRE both: a guard present but never called is the #3249 shape.
+DRV="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
+if grep -q '^require_socket_prober ' "$DRV" \
+   && awk '/^measure_flight\(\)/,/^}/' "$DRV" | grep -q 'await_server_ready'; then
+  pass "server-owner: the driver CALLS require_socket_prober at startup and await_server_ready per rep"
+else
+  fail "server-owner: the driver must wire both the prober check and the readiness check"
+fi
+# The prober check must run BEFORE the first measurement, or a run could reach a rep with
+# ownership unverifiable.
+prober_line=$(grep -n '^require_socket_prober ' "$DRV" | head -1 | cut -d: -f1)
+loop_line=$(grep -n '^for temp in \$TEMPS' "$DRV" | head -1 | cut -d: -f1)
+if [ -n "$prober_line" ] && [ -n "$loop_line" ] && [ "$prober_line" -lt "$loop_line" ]; then
+  pass "server-owner: the prober check (line $prober_line) precedes the measurement loop (line $loop_line)"
+else
+  fail "server-owner: require_socket_prober must precede the measurement loop (prober=$prober_line loop=$loop_line)"
+fi
+
 # ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a
 # `$(...)` whose command vanished, a `for` over an empty list — LOWERS the check count and
 # registers NO failure. The gate reads only the exit code, so a suite that ran 3 of its
-# ~95 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
+# ~123 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
 # `0/0` shape this whole issue is about, one level up from the checks themselves.
 #
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=95
+MIN_CHECKS=112
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

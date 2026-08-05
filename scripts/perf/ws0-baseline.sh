@@ -68,6 +68,8 @@ source "$HERE/lib-perf-lint.sh"
 source "$HERE/lib-host-state.sh"
 # shellcheck source=scripts/perf/lib-args.sh
 source "$HERE/lib-args.sh"
+# shellcheck source=scripts/perf/lib-server.sh
+source "$HERE/lib-server.sh"
 
 CORPUS=""
 SERVER_CPUS="2,10"
@@ -344,36 +346,16 @@ verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 # ---------------------------------------------------------------------------
 # Server lifecycle — ONLY the process THIS script started (issue #3096 review)
 # ---------------------------------------------------------------------------
-# This rig used to open each Flight rep with `pkill -x cqlite-flight`, which kills
-# EVERY matching process on the box — including a PEER LANE's Flight server on a
-# shared fleet machine (one worker per machine is the convention, but the fleet
-# runs concurrent gates, e2e tiers and loadgen lanes that start their own
-# servers). Clearing the box to make room for a measurement is a destructive
-# cross-lane action, and it is silent: the peer just dies.
+# `stop_server`, `require_port_free`, `require_socket_prober` and `await_server_ready`
+# live in scripts/perf/lib-server.sh: the rig's one responsibility that is a PROCESS AND A
+# SOCKET rather than a number — which program the Flight arm actually measured. That file
+# carries the full argument for each, including why a port that ACCEPTS is not evidence
+# that our server is the one serving it (#3272 review round 3, B4).
 #
-# Instead: remember the PID we launched, kill only that, and treat an occupied
-# port as a FAILURE to be reported rather than an obstacle to be removed.
-SERVER_PID=""
+# The driver keeps `on_exit` and its single `trap` registration below, because composing
+# them is a decision about THIS file's exit paths: bash keeps one handler per signal, so a
+# second top-level `trap ... EXIT` would silently discard the first.
 
-# Host sysctl capture/mutate/restore lives in scripts/perf/lib-host-state.sh — the
-# only part of this rig that changes state outside its own process tree. The
-# driver composes `restore_sysctls` into its single `on_exit` handler below and
-# calls `relax_perf_sysctls` once, before the results dir exists.
-
-
-stop_server() {
-  [[ -n "$SERVER_PID" ]] || return 0
-  local pid="$SERVER_PID"
-  SERVER_PID=""
-  kill "$pid" 2>/dev/null || true
-  local i
-  for i in $(seq 1 20); do
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.5
-  done
-  kill -9 "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-}
 
 # Runs on EVERY exit path — success, a FATAL, or a Ctrl-C — so no rep can leave an
 # orphaned server holding the port (which used to be what the next run's `pkill` was
@@ -395,26 +377,14 @@ on_exit() {
 }
 trap on_exit EXIT INT TERM HUP
 
-# Is $PORT free? Fail closed if not: an occupied port means either an orphan of
-# ours (report it, do not silently reap something that might not be ours) or
-# another lane's server (never ours to kill). `--port` is the remedy.
-require_port_free() {
-  local where="$1" i
-  for i in $(seq 1 10); do
-    (echo >"/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1 || return 0
-    sleep 1
-  done
-  echo "FATAL: 127.0.0.1:$PORT is already accepting connections ($where)." >&2
-  echo "       This rig will NOT clear the box: a matching process may be another" >&2
-  echo "       lane's Flight server on a shared machine, and killing it is a" >&2
-  echo "       destructive cross-lane action (issue #3096 review)." >&2
-  echo "       Pick a free port with --port N, or stop the listener yourself after" >&2
-  echo "       confirming whose it is (e.g. 'ss -ltnp \"sport = :$PORT\"')." >&2
-  exit 2
-}
 
 # Fail BEFORE the release build, not after it.
 require_port_free "preflight"
+# ...and establish, ONCE, that the ownership prober every rep depends on actually works
+# (#3272 B4). Uses a port well away from `$PORT` so the probe cannot collide with the
+# measurement's own listener; `$PORT` itself was just verified free, and the probe binds
+# and releases in under a second.
+require_socket_prober "$(( PORT + 1 ))"
 
 # Weaken the host knobs CPU-wide counting needs — AFTER `trap on_exit` above, never
 # before: the interval between the write and the trap being armed is the one window in
@@ -615,11 +585,7 @@ measure_flight() {
     --data-dir "$CORPUS" --listen "127.0.0.1:$PORT" \
     > "$OUT_DIR/$tag.server.log" 2>&1 &
   SERVER_PID=$!
-  local i
-  for i in $(seq 1 120); do
-    (echo >"/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1 && break
-    sleep 1
-  done
+  await_server_ready "$tag"
 
   # Prewarm OUTSIDE the perf window (warm arm only): opens the readers and fills
   # the warm-handle registry, so the measured window is steady-state scan work
