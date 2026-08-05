@@ -1382,9 +1382,10 @@ _roborev_resolve_existing_ancestor() {
 # costing one re-run plus a one-line update here, chosen over the alternative (accept any path
 # the prompt names), which would hand the strongest anti-vacuity key an oracle nobody bound.
 roborev_snapshot_path_binding() {
-  local p="$1" rel comp i repo_prefix
-  local -a parts=()
+  local p="$1" rel comp i repo_prefix orig_tail orig_prefix orig_prefix_phys walk
+  local -a parts=() orig_parts=()
   _rx_snap_bind_state=""
+  _rx_snap_bind_detail=""
   _rx_snap_bound_path="$p"
   _rx_snap_dir=""
   _rx_snap_dir_id=""
@@ -1393,6 +1394,33 @@ roborev_snapshot_path_binding() {
     /*) ;;
     *) _rx_snap_bind_state="not-absolute"; return 1 ;;
   esac
+
+  # ============ VALIDATE BEFORE YOU NORMALISE (roborev job 12) ============
+  # THE SAME ORDERING ERROR AS THE CAPTURE-TIME TOCTOU, in a second place: there, the read happened
+  # before the validation; here, the RESOLUTION happened before it. Physical resolution ERASES exactly
+  # what the component checks exist to find — an existing `..` segment and an in-repository directory
+  # symlink are both normalised away — so a prompt path nominally under snapshot id A could resolve
+  # into snapshot directory B and pass every component and job-binding test while naming a diff from a
+  # different snapshot. The rule the codebase has now learned twice: **validate before you normalise,
+  # and validate before you read.** Resolution below is used ONLY for the containment test.
+  #
+  # STEP 1 — DOT SEGMENTS ARE REJECTED ON THE ORIGINAL SPELLING, anywhere in the path. No legitimate
+  # roborev snapshot path contains `.`, `..` or an empty component, and checking the original needs no
+  # prefix stripping, so it works whatever spelling of the repo root the prompt carries.
+  IFS='/' read -r -a orig_parts <<<"$p"
+  for ((i = 0; i < ${#orig_parts[@]}; i++)); do
+    case "${orig_parts[$i]}" in
+      '.'|'..')
+        _rx_snap_bind_state="unbound-job"
+        _rx_snap_bind_detail="the path contains a '${orig_parts[$i]}' segment, which resolution would erase — a traversal like '.roborev/roborev-snapshot-A/../roborev-snapshot-B/...' names one snapshot directory and lands in another"
+        return 3
+        ;;
+    esac
+  done
+
+  # STEP 2 — CONTAINMENT, and only containment, from the physically resolved path. Resolution is what
+  # lets a legitimately symlinked spelling of the repo ROOT (a symlinked checkout, a /tmp -> /private/tmp
+  # box) be recognised as in-repo; it is deliberately not trusted for anything else.
   _roborev_resolve_existing_ancestor "$p"
   _rx_snap_bound_path="$_rx_resolved"
   # The trailing slash is stripped so a repo AT the filesystem root (`$REPO` = `/`) yields the
@@ -1404,36 +1432,77 @@ roborev_snapshot_path_binding() {
     *) _rx_snap_bind_state="foreign-repo"; return 2 ;;
   esac
   rel="${_rx_snap_bound_path#"$repo_prefix"/}"
+  IFS='/' read -r -a parts <<<"$rel"
+  # At least `.roborev` / `roborev-snapshot-<id>` / a file name.
+  if [ "${#parts[@]}" -lt 3 ]; then
+    _rx_snap_bind_state="unbound-job"
+    _rx_snap_bind_detail="the path has too few components inside the repository to be a snapshot file"
+    return 3
+  fi
+
+  # STEP 3 — THE ORIGINAL'S OWN TAIL MUST BE THE SAME COMPONENTS. Split the ORIGINAL path into a
+  # prefix and its last N components (N from the resolved rel). The prefix must resolve to the repo
+  # root — that is the allowance for a differently-spelled root — and the tail names must MATCH the
+  # resolved ones. A directory symlink inside the repo is exactly what makes them differ, so this is
+  # where `.roborev/roborev-snapshot-A -> roborev-snapshot-B` is caught rather than normalised away.
+  orig_tail=""
+  orig_prefix="$p"
+  for ((i = 0; i < ${#parts[@]}; i++)); do
+    orig_tail="${orig_prefix##*/}${orig_tail:+/$orig_tail}"
+    orig_prefix="${orig_prefix%/*}"
+  done
+  [ -n "$orig_prefix" ] || orig_prefix="/"
+  orig_prefix_phys=$(cd "$orig_prefix" 2>/dev/null && pwd -P) || orig_prefix_phys=""
+  if [ -z "$orig_prefix_phys" ] || [ "${orig_prefix_phys%/}" != "$repo_prefix" ]; then
+    _rx_snap_bind_state="unbound-job"
+    _rx_snap_bind_detail="the path's own prefix '$orig_prefix' does not resolve to the reviewed repository root ('${orig_prefix_phys:-<unresolvable>}' vs '$repo_prefix'), so its components inside the repo cannot be established without trusting resolution to invent them"
+    return 3
+  fi
+  if [ "$orig_tail" != "$rel" ]; then
+    _rx_snap_bind_state="symlinked"
+    _rx_snap_bind_detail="the path's components inside the repository ('$orig_tail') are not the ones it actually resolves to ('$rel'), so a directory symlink or equivalent rewrote them — the prompt names one snapshot directory and the path lands in another"
+    return 4
+  fi
+
+  # STEP 4 — NO SYMLINK AT ANY COMPONENT WE TRAVERSE, tested on the ORIGINAL spelling, top down. This
+  # covers `.roborev`, the snapshot directory and the file itself. `-L` does not follow, so each answer
+  # is about the component named rather than about its target. (Step 3 already rejects a rewriting
+  # symlink; this additionally rejects one that happens to point at the same place, because a snapshot
+  # path roborev wrote never traverses one and "it points somewhere harmless today" is not a property
+  # this check should have to reason about.)
+  walk="$orig_prefix"
+  for ((i = 0; i < ${#parts[@]}; i++)); do
+    walk="$walk/${parts[$i]}"
+    if [ -L "$walk" ]; then
+      _rx_snap_bind_state="symlinked"
+      if [ "$i" -eq $(( ${#parts[@]} - 1 )) ]; then
+        _rx_snap_bind_detail="the named file itself is a SYMLINK ('$walk'), and roborev writes a regular file there"
+      else
+        _rx_snap_bind_detail="a traversed DIRECTORY component is a SYMLINK ('$walk'), so the path the prompt names is not the directory it appears to name"
+      fi
+      return 4
+    fi
+  done
+
+  # STEP 5 — THE SHAPE, on components now known to be the original's own.
+  [ "${parts[0]}" = ".roborev" ] || {
+    _rx_snap_bind_state="unbound-job"
+    _rx_snap_bind_detail="the path does not sit under the repository's own '.roborev' directory"
+    return 3
+  }
+  case "${parts[1]}" in
+    roborev-snapshot-?*) ;;
+    *)
+      _rx_snap_bind_state="unbound-job"
+      _rx_snap_bind_detail="the second component '${parts[1]}' is not a 'roborev-snapshot-<id>' directory"
+      return 3
+      ;;
+  esac
   # THE FULL RELATIVE PATH the prompt names, kept for the capture lookup: a capture is matched by
   # this whole path, never by the directory id alone (roborev job 6, blocker 2), so a prompt naming
   # a different file in the same snapshot directory cannot be answered with the canonical sibling.
+  # Set only HERE, after the original's tail has been shown to be these very components.
   _rx_snap_rel="$rel"
-  IFS='/' read -r -a parts <<<"$rel"
-  # At least `.roborev` / `roborev-snapshot-<id>` / a file name.
-  if [ "${#parts[@]}" -lt 3 ]; then _rx_snap_bind_state="unbound-job"; return 3; fi
-  for ((i = 0; i < ${#parts[@]}; i++)); do
-    comp="${parts[$i]}"
-    case "$comp" in
-      ''|'.'|'..') _rx_snap_bind_state="unbound-job"; return 3 ;;
-    esac
-  done
-  # A SYMLINK AT THE FINAL COMPONENT DEFEATS A LEXICAL CONTAINMENT TEST (roborev job 5, Medium).
-  # The ancestor resolution above canonicalises every DIRECTORY in the path, so a symlinked parent
-  # is resolved and cannot smuggle the path out of the repo — but the LAST component was never
-  # resolved, so `<repo>/.roborev/roborev-snapshot-<id>/roborev-snapshot-content.diff` could be a
-  # symlink to any file on the host and still read as "inside the reviewed repository". roborev
-  # writes a REGULAR FILE there, so a symlink is refused outright rather than followed: refusing is
-  # exact, while following it would need the containment test repeated on the target and would still
-  # leave a TOCTOU window between the resolution and the read.
-  if [ -L "$_rx_snap_bound_path" ]; then
-    _rx_snap_bind_state="symlinked"
-    return 4
-  fi
-  [ "${parts[0]}" = ".roborev" ] || { _rx_snap_bind_state="unbound-job"; return 3; }
-  case "${parts[1]}" in
-    roborev-snapshot-?*) ;;
-    *) _rx_snap_bind_state="unbound-job"; return 3 ;;
-  esac
   # The snapshot DIRECTORY, so a cleaned-up directory can be distinguished from a missing file.
   _rx_snap_dir="$repo_prefix/${parts[0]}/${parts[1]}"
   # The DIRECTORY ID is what a capture is keyed by, so it is derived HERE, from the same components
@@ -1537,7 +1606,7 @@ roborev_collect_review_diff_headers() {
         ;;
       symlinked)
         ROBOREV_DIFF_SOURCE_STATE="symlinked"
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the path the prompt names is a SYMLINK: $_rx_snap_bound_path. Containment in the reviewed repository ($REPO) is decided on the path, and a symlink at the final component can point anywhere on the host — so a symlink would let an arbitrary file stand in as this review's diff while still looking in-repo. roborev writes a regular file there, so this is refused rather than followed. Failing closed."
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot path the prompt names cannot be trusted to name what it appears to name — ${_rx_snap_bind_detail:-a symlink was found on the path}. Path: $snap_path (resolves to $_rx_snap_bound_path). Containment and job binding are decided on the path's OWN components, so a symlink is refused rather than followed or normalised away: roborev writes a regular file under a real directory, and 'it happens to point somewhere harmless' is not a property this check should have to reason about. Failing closed."
         ;;
       foreign-repo)
         ROBOREV_DIFF_SOURCE_STATE="foreign-repo"
@@ -1546,7 +1615,7 @@ roborev_collect_review_diff_headers() {
       *)
         # `unbound-job`, and any binding state a future edit adds without a decision here.
         ROBOREV_DIFF_SOURCE_STATE="unbound-job"
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the path the prompt names is inside the reviewed repository but is NOT a roborev snapshot for this review: $_rx_snap_bound_path does not sit under $REPO/.roborev/roborev-snapshot-<id>/ (binding state '${_rx_snap_bind_state:-<unset>}'). Failing closed rather than reading an unbound file as this review's diff — if roborev's snapshot layout has changed, update roborev_snapshot_path_binding."
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the path the prompt names is NOT a roborev snapshot for this review — ${_rx_snap_bind_detail:-it does not sit under \$REPO/.roborev/roborev-snapshot-<id>/}. Path: $snap_path (resolves to $_rx_snap_bound_path; binding state '${_rx_snap_bind_state:-<unset>}'). Failing closed rather than reading an unbound file as this review's diff — if roborev's snapshot layout has changed, update roborev_snapshot_path_binding."
         ;;
     esac
     return 0
