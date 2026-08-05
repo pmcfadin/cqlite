@@ -689,88 +689,37 @@ else
     fi
   done
 
-  # --- AC2, THE CLASS RATHER THAN THE INSTANCES: no mutation call site may DISCARD the
-  # helper's status. `sed_inplace`/`sed_inplace_verified` return non-zero when the edit did not
-  # land, but that is protection only if the caller READS it; a bare statement call leaves
-  # "matched nothing" (and every other unmeasured state) on the permissive path, so the case's
-  # later assertion can be satisfied by the STALE content — the roborev finding on
-  # test_roborev_review_guard.sh's cx29 restore, which read `ok` on cx28's mutation.
+  # --- DELIBERATELY NOT BUILT: a STRUCTURAL rule that every `sed_inplace`/`sed_inplace_verified`
+  # call in the guard test reads the helper's status (owner ruling, #3296 round 6; the #3283
+  # disposition pattern).
   #
-  # AN ALLOW-LIST, NOT A DENY-LIST (#3296 round-5 blocker 3). The first form of this rule
-  # EXCLUDED lines containing `&&`/`||` anywhere, which accepted `true && sed_inplace "$f" "$e"`
-  # and `sed_inplace "$f" "$e"; true || bad` — two forms in which the mutation's status is
-  # DISCARDED under this script's non-errexit execution. That is the very shape this rule exists
-  # to catch, reintroduced inside the rule: unanticipated spellings inheriting the permissive
-  # branch. So the ACCEPTED forms are now ENUMERATED and everything else FAILs, including forms
-  # nobody anticipated:
-  #   (1) directly controlled:      [if|elif|while|until] [!] sed_inplace… ; then|do
-  #   (2) direct failure handler:   sed_inplace… || bad|return|exit
-  # Both are anchored at the start of the logical line, and NEITHER tolerates `;`, `&` or a single
-  # `|` between the call and its terminator — so `if sed_inplace … || true; then` (a condition that
-  # reads the status and then neutralises it) and `… | foo || bad` are NOT accepted either. That
-  # costs a sed expression delimited with `|` a false FAIL; the marker below is its route.
-  # Deciding "is this status consumed?" in general is shell-semantics analysis and is deliberately
-  # OUT OF BOUNDS. A call in an unlisted form reds the gate with a message saying the FORM was not
-  # recognised, and the author rewrites it into an accepted form (or marks the line
-  # `portability-lint-allow`, the repo's visible-in-the-diff escape marker, which scan_hits
-  # honours). False FAILs are acceptable noise here; a false PASS is blindness.
+  # WHAT IT WOULD HAVE CHECKED: that no mutation call site discards the helper's non-zero
+  # "nothing changed" status — the defect behind the round-4 finding, where cx29's restore ignored
+  # it and the case then passed on cx28's stale value.
   #
-  # Reuses scan_hits, so comment-only lines are blanked and a call whose `|| bad …` sits on a
-  # CONTINUATION line is judged on the joined logical line (the deliberate design: line-oriented
-  # matching plus continuation joining, never a shell tokeniser).
-  _ss_call_re='(^|[^[:alnum:]_])sed_inplace(_verified)?[[:space:]]+"'
-  _ss_ok_controlled='^[0-9]+:[[:space:]]*(if|elif|while|until)[[:space:]]+(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"[^;&|]*;[[:space:]]*(then|do)([[:space:]]|$)'
-  _ss_ok_handler='^[0-9]+:[[:space:]]*(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"[^;&|]*\|\|[[:space:]]*(bad|return|exit)([[:space:]]|$)'
-  sed_status_offenders() { # sed_status_offenders <file> -> "lineno:logical-line" per unaccepted call
-    scan_hits "$_ss_call_re" "$1" \
-      | grep -vE "$_ss_ok_controlled" \
-      | grep -vE "$_ss_ok_handler" \
-      || printf ''
-  }
-  # BOTH DIRECTIONS, and the FALSE-ACCEPTING forms the round-5 review named are PERMANENT
-  # negative controls: the complement of the allow-list is pinned, so a widening cannot regress
-  # unnoticed. `flag` = must be reported, `ok` = must be accepted.
-  _ss_ctl_dir="$tmp/sed-status"
-  mkdir -p "$_ss_ctl_dir"
-  _sq="'"
-  printf '%s\n' "  sed_inplace \"\$f\" ${_sq}s/a/b/${_sq}" >"$_ss_ctl_dir/flag-bare.sh"
-  printf '%s\n' "  true && sed_inplace \"\$f\" \"\$expr\"" >"$_ss_ctl_dir/flag-and-chain.sh"
-  printf '%s\n' "  sed_inplace \"\$f\" \"\$expr\"; true || bad no" >"$_ss_ctl_dir/flag-semicolon-or.sh"
-  printf '%s\n' "  sed_inplace \"\$f\" \"\$expr\" && ok yes" >"$_ss_ctl_dir/flag-and-success.sh"
-  printf '%s\n' "  if sed_inplace \"\$f\" \"\$expr\" || true; then :; fi" >"$_ss_ctl_dir/flag-if-or-true.sh"
-  printf '%s\n' "if sed_inplace \"\$f\" ${_sq}s/a/b/${_sq}; then :; fi" >"$_ss_ctl_dir/ok-if.sh"
-  printf '%s\n' "  sed_inplace \"\$f\" \\" "    ${_sq}s/a/b/${_sq} || bad no" >"$_ss_ctl_dir/ok-or-bad.sh"
-  printf '%s\n' "  elif ! sed_inplace_verified \"\$f\" \"\$expr\" \"\$want\"; then" >"$_ss_ctl_dir/ok-elif-negated.sh"
-  for _ssc in \
-    'flag:bare statement call:flag-bare.sh' \
-    'flag:`true && sed_inplace …` (status discarded — the round-5 finding):flag-and-chain.sh' \
-    'flag:`sed_inplace …; true || bad` (the handler belongs to `true`):flag-semicolon-or.sh' \
-    'flag:`sed_inplace … && ok` (a SUCCESS chain handles no failure):flag-and-success.sh' \
-    'flag:`if sed_inplace … || true; then` (reads the status, then neutralises it):flag-if-or-true.sh' \
-    'ok:`if sed_inplace …; then`:ok-if.sh' \
-    'ok:a line-broken call with `|| bad` on the continuation:ok-or-bad.sh' \
-    'ok:`elif ! sed_inplace_verified …; then`:ok-elif-negated.sh'; do
-    _ss_want="${_ssc%%:*}"
-    _ss_rest="${_ssc#*:}"
-    _ss_why="${_ss_rest%:*}"
-    _ss_file="$_ss_ctl_dir/${_ss_rest##*:}"
-    _ss_got=$(sed_status_offenders "$_ss_file")
-    if [ "$_ss_want" = flag ] && [ -n "$_ss_got" ]; then
-      ok "AC2 control: the status-check allow-list REPORTS $_ss_why"
-    elif [ "$_ss_want" = flag ]; then
-      bad "AC2 control: the status-check allow-list ACCEPTED $_ss_why — the mutation's status is discarded there, so a stale-content pass is possible again"
-    elif [ -z "$_ss_got" ]; then
-      ok "AC2 control: the status-check allow-list accepts $_ss_why"
-    else
-      bad "AC2 control: the status-check allow-list reported an ACCEPTED form ($_ss_why) — it would force callers to hide from it rather than measure"
-    fi
-  done
-  _ss_hits=$(sed_status_offenders "$GUARD")
-  if [ -z "$_ss_hits" ]; then
-    ok 'AC2: every sed_inplace/sed_inplace_verified call in the guard test is in an ACCEPTED status-reading form (no mutation is asserted against without being measured)'
-  else
-    bad "AC2: the guard test has a mutation call in an UNRECOGNISED form (its status may be discarded) at: $(printf '%s' "$_ss_hits" | tr '\n' ' ') — rewrite it as \`if [!] sed_inplace…\` or \`sed_inplace… || bad|return|exit\`"
-  fi
+  # WHY IT IS GONE: it existed for three review rounds and produced a false PASS in every one
+  # (1 -> 2 -> 1 -> 2), each time in code the preceding fix round had just introduced: a
+  # `&&`/`||`-anywhere deny-list accepted `true && sed_inplace …` and `sed_inplace …; true || bad`;
+  # the allow-list that replaced it accepted `if sed_inplace … || true; then`; and it could not see
+  # an unquoted `sed_inplace $file "$expr"` at all. That is not a series of typos, it is the shape
+  # of the task: the rule is a bash ERE approximating SHELL GRAMMAR, and the correctness of a
+  # second implementation of a grammar is knowable only by differential testing against the real
+  # parser — which is out of scope here. CLAUDE.md's #3229 owner ruling applies verbatim: a guard
+  # with known documented false-PASSes is worse than no guard, because it invites reliance it
+  # cannot support, and subtraction cannot introduce a false PASS.
+  #
+  # WHAT PROTECTS THE PROPERTY INSTEAD: the four call sites in the guard test are correct today and
+  # each is verified BEHAVIOURALLY — every one routes a failed mutation to `bad` (proved by making
+  # each expression non-matching and observing the case FAIL at the edit site rather than passing on
+  # stale content), `sed_inplace_verified` requires its three affirmative facts at the edit site
+  # itself, and the AC2 text pins above still assert each case carries its own post-edit
+  # verification. The BSD-shim differential below exercises the helper's fail-closed no-op return
+  # and its mode preservation directly.
+  #
+  # ACCEPTED RESIDUAL, stated plainly and not argued away: a FIFTH call site added later that
+  # discards the status is caught only BEHAVIOURALLY — i.e. only if it happens to break a case —
+  # and nothing here will name it. Per the ruling this is recorded, not tracked as an issue, and is
+  # re-raisable only if it ever bites in practice.
 
   # --- summary_key_order under the paste shim, plus the RED side of the differential.
   printf 'vacuity-tier2: PASS\nroborev-exit: PASS\nfindings: NONE\nlog: /tmp/x\n' >"$tmp/block.txt"

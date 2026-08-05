@@ -101,7 +101,28 @@ trap 'rm -rf "$tmp"' EXIT
 # still used as the staging buffer (sed cannot read and write one file at once) and the
 # no-change check still runs BEFORE anything is written back, so the fail-closed contract
 # is unchanged: a no-op patch touches nothing and returns non-zero.
-sed_inplace() { # sed_inplace <file> <sed-expr>  -> non-zero if nothing changed
+# ===========================================================================
+# CALLER CONTRACT — READ THIS BEFORE ADDING A CALL (#3296).
+#
+# EVERY caller MUST check the status of this helper. It returns NON-ZERO when the edit did
+# not land (sed failed, or the expression matched nothing and the file is unchanged), and
+# that return is the ONLY thing standing between a silently unapplied mutation and a case
+# that then asserts against STALE content — a pass for a reason the case is not about. That
+# is not hypothetical: cx29's restore discarded the status once, and with its expression made
+# non-matching the case still reported `ok` on the PREVIOUS case's mutation.
+#
+# So: `if sed_inplace … ; then` / `elif ! sed_inplace_verified … ; then`, or
+# `sed_inplace … || bad "…"`. NEVER a bare statement call, and never a `|| true`.
+#
+# PREFER `sed_inplace_verified` (below) for any mutate-then-assert case: it additionally
+# requires the intended post-edit STATE to be present and, optionally, the state it replaces
+# to be gone, so "the edit ran" cannot be mistaken for "the edit did what I meant".
+#
+# No lint enforces this — the structural rule that tried was DELETED by owner ruling; see the
+# "DELIBERATELY NOT BUILT" record in scripts/tests/test_roborev_guard_portability.sh for why,
+# and for the residual it leaves. This comment is the enforcement.
+# ===========================================================================
+sed_inplace() { # sed_inplace <file> <sed-expr>  -> non-zero if nothing changed; CHECK THE STATUS
   local _f="$1" _expr="$2" _t
   _t="$_f.sed-inplace.$$"
   sed "$_expr" "$_f" >"$_t" || { rm -f "$_t"; return 1; }
