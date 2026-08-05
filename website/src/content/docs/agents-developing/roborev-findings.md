@@ -174,7 +174,26 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    Re-running cannot help; the wrapper's deterministic
    pre-enqueue `code-free:` check fails it before any review is enqueued, rather than matching reviewer
    prose after the fact. The same mechanism is why `prompt-content:` asserts the **CODE subset** of the
-   census — and why an unretrievable prompt is a `FAIL` there, never a passing `UNAVAILABLE`. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
+   census — and why an unretrievable prompt is a `FAIL` there, never a passing `UNAVAILABLE`.
+
+   **`prompt-content:` reads both of roborev's diff-delivery modes (issue #3312).** A large diff is *not*
+   inlined: roborev writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file and the
+   prompt ends with ``Read the diff from: `<abs path>` ``, carrying **zero** `diff --git` headers. Reading
+   only the prompt text therefore FALSE-FAILED every large review — measured `FAIL (21/21 code census paths
+   absent from the prompt)` on job 6836, a review with 1.47M input / 1.35M cached / 6.1k output, four
+   findings at real `file:line`, and both vacuity tiers PASS. That reds exactly the diffs that most need
+   review, which is how a guard gets waived. The fix is **not** "treat an empty prompt as a pass" (that
+   reopens the discarded-diff trigger and the `0/0` false pass) — it is *follow the diff to where it
+   actually is*: headers are collected from the snapshot file, unioned with any inline ones, judged by the
+   same canonical matcher against the same census. The snapshot path is taken **only** from the verified
+   job's own prompt, matched at column zero (so prose inside the reviewed diff cannot name its own oracle),
+   and must be absolute, inside the reviewed repo and under that repo's own `roborev-snapshot-<id>`
+   directory. Every other outcome — cleaned-up, missing, unreadable, empty, header-less, foreign-repo,
+   unbound-job, ambiguous, relative, unparseable — is a distinct `FAIL (snapshot diff unusable: …)` cause.
+   Because that directory is deleted minutes after a review, **run the wrapper while the review is fresh**;
+   a cleaned-up snapshot is a FAIL, never a pass.
+
+   The sanctioned substitute is primary-source verification recorded in the PR (for a docs
    change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may
    ever record "roborev clean."**
 

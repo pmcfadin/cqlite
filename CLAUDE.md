@@ -492,6 +492,18 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
   **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
   Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
+  **And it reads BOTH of roborev's diff-delivery modes (#3312).** A large diff is **not inlined**: roborev
+  writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file and the prompt ends with
+  ``Read the diff from: `<abs path>` ``, carrying **zero** `diff --git` headers — which made the key
+  FALSE-FAIL `(21/21 … absent)` on a demonstrably genuine review (job 6836: 1.47M input / 1.35M cached,
+  4 findings with real `file:line`, both vacuity tiers PASS), i.e. it red exactly the diffs that most need
+  review and taught agents to waive the one layer #3229 kept. The fix is **not** "an empty prompt is a
+  pass" — it is *follow the diff to where it actually is*: the headers now come from the snapshot file (the
+  union when a prompt carries both), the path is taken only from the verified job's own prompt and must be
+  absolute, inside the reviewed repo and under that repo's own snapshot dir, and every other outcome
+  (cleaned-up, missing, unreadable, empty, header-less, foreign-repo, unbound-job, ambiguous, relative,
+  unparseable) FAILs closed under its own cause. The snapshot dir is deleted minutes after the review, so
+  **the wrapper must run while the review is fresh** — "already cleaned up" is a FAIL, never a pass.
   **That is ONE SHAPE, found repeatedly on #3229, so it is now a RULE: a positive verdict requires an
   AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
   every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state signal took the permissive
