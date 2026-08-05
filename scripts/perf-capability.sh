@@ -422,6 +422,14 @@ perf_capability_dropin_path() {
 # temp name is derived from the managed basename, never from a caller-supplied string, and an
 # entry already occupying it is removed and its removal VERIFIED before anything is written —
 # otherwise `tee` would follow a symlink planted at the temp name instead.
+#   The staging name is FIXED rather than pid-suffixed, deliberately: two bootstraps racing on one
+#   box would then collide and ONE would fail loudly, which is the honest outcome (they are writing
+#   the same managed bytes to the same managed path), whereas a pid suffix would leave
+#   per-pid litter behind whenever a run is killed between the `tee` and the `mv`. Bootstrap is
+#   once-per-box and the fleet rule is one worker per machine, so the race is not a live concern;
+#   the litter would be.
+#   It does not end in `.conf`, so the competing-file scan (which globs `*.conf`) can never mistake
+#   a staging entry for a rival sysctl drop-in.
 perf_capability_dropin_install() {
   local __pin_d __pin_p __pin_t
   __pin_d=$(perf_capability_sysctl_dir) || return 1
