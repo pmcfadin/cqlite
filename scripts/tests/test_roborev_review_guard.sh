@@ -82,12 +82,32 @@ trap 'rm -rf "$tmp"' EXIT
 # Do NOT reintroduce `sed -i` (or any other GNU-only construct) here: the structural
 # assert in scripts/tests/test_roborev_guard_portability.sh forbids it, and that test
 # also exercises this helper under a BSD-semantics `sed` shim.
+#
+# THE ORIGINAL FILE IS TRUNCATED AND REWRITTEN, NOT REPLACED (#3296 round-6): the first
+# form ended in `mv "$_t" "$_f"`, and the scratch file was created fresh by `>`, so it
+# carried `0666 & ~umask` — i.e. NO execute bits under ANY umask. Every mutation of an
+# executable script (the cases here copy and patch `roborev-review-checks.sh`, mode 755)
+# therefore silently made it non-executable: measured `-rwxr-xr-x` -> `-rw-rw-r--`. That
+# is the same class as the defect this branch exists to fix — an environment-dependent
+# breakage introduced by a portability fix.
+#
+# Writing the transformed bytes back into the ORIGINAL path with `>` avoids the whole
+# question rather than answering it: POSIX redirection opens an EXISTING file with
+# O_TRUNC, and the `mode` argument of open() applies only on CREATION, so the file's
+# permission bits, owner and inode are untouched. No mode is ever queried — deliberately:
+# `stat`'s format flags are themselves GNU-vs-BSD divergent (`stat -c %a` vs `stat -f %Lp`),
+# and `cp`'s no-`-p` destination mode is umask-modified, so both of the obvious repairs
+# would have reintroduced exactly the platform divergence under test. The scratch file is
+# still used as the staging buffer (sed cannot read and write one file at once) and the
+# no-change check still runs BEFORE anything is written back, so the fail-closed contract
+# is unchanged: a no-op patch touches nothing and returns non-zero.
 sed_inplace() { # sed_inplace <file> <sed-expr>  -> non-zero if nothing changed
   local _f="$1" _expr="$2" _t
   _t="$_f.sed-inplace.$$"
   sed "$_expr" "$_f" >"$_t" || { rm -f "$_t"; return 1; }
   if cmp -s "$_f" "$_t"; then rm -f "$_t"; return 1; fi
-  mv "$_t" "$_f"
+  cat "$_t" >"$_f" || { rm -f "$_t"; return 1; }
+  rm -f "$_t"
 }
 
 # AFFIRMATIVE MEASUREMENT AT THE EDIT SITE (#3296, CLAUDE.md "a positive verdict requires an

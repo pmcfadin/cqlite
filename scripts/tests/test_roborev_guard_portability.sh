@@ -601,6 +601,40 @@ else
   else
     bad 'sed_inplace: a no-op patch changed the file'
   fi
+  # --- MODE PRESERVATION, BOTH DIRECTIONS (#3296 round-6). The cases in the guard test mutate
+  # COPIES OF EXECUTABLE FLOW SCRIPTS (roborev-review-checks.sh, mode 755). The first form of the
+  # helper ended in `mv scratch original`, and the scratch was created fresh by `>`, so it carried
+  # `0666 & ~umask` — no execute bits under ANY umask: measured `-rwxr-xr-x` -> `-rw-rw-r--` on a
+  # successful edit. An environment-dependent breakage introduced by a portability fix is the very
+  # class this branch closes, so it is pinned here in both directions: a SUCCESSFUL edit and a
+  # FAILED (no-change, non-zero) edit must both leave the file executable. `[ -x ]` is POSIX test,
+  # not a `stat` format flag (those are the GNU-vs-BSD divergence itself).
+  printf '#!/bin/sh\necho alpha\n' >"$tmp/exec-ok.sh"
+  chmod 755 "$tmp/exec-ok.sh"
+  if [ ! -x "$tmp/exec-ok.sh" ]; then
+    bad 'sed_inplace control: the fixture could not be made executable, so mode preservation was NOT MEASURED (a filesystem mounted noexec-ish?)'
+  else
+    if PATH="$SHIM_PATH" sed_inplace "$tmp/exec-ok.sh" 's/alpha/ALPHA/' &&
+      grep -qF 'echo ALPHA' "$tmp/exec-ok.sh"; then
+      if [ -x "$tmp/exec-ok.sh" ]; then
+        ok 'sed_inplace: a SUCCESSFUL edit preserves the executable bit (the original file is truncated and rewritten, never replaced by a fresh umask-moded file)'
+      else
+        bad 'sed_inplace: a successful edit LOST the executable bit — mutating a copied flow script would make it non-executable, which is a new platform/umask-dependent breakage'
+      fi
+    else
+      bad 'sed_inplace: the mode-preservation fixture edit did not land, so the executable-bit contract was NOT MEASURED'
+    fi
+    printf '#!/bin/sh\necho beta\n' >"$tmp/exec-noop.sh"
+    chmod 755 "$tmp/exec-noop.sh"
+    if PATH="$SHIM_PATH" sed_inplace "$tmp/exec-noop.sh" 's/^nothing-matches-this$/x/'; then
+      bad 'sed_inplace: the no-op fixture edit returned SUCCESS, so the FAILED-edit direction of the mode contract was not exercised'
+    elif [ -x "$tmp/exec-noop.sh" ]; then
+      ok 'sed_inplace: a FAILED (no-change, non-zero) edit also preserves the executable bit'
+    else
+      bad 'sed_inplace: a FAILED edit LOST the executable bit — the failure path must leave the file exactly as it was'
+    fi
+  fi
+
   # And no temp spill: the helper must not leave its scratch file behind on the failure path.
   #
   # AFFIRMATIVE MEASUREMENT (CLAUDE.md: "never derive a pass from the ABSENCE of a bad
