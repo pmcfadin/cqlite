@@ -235,6 +235,13 @@ EXEMPTIONS: dict[str, str] = {
     "scripts/perf/lib-args.sh": "a driver library; sourced by the driver, never invokes it",
     "scripts/perf/lib-host-state.sh": "a driver library; prose reference only",
     "scripts/perf/lib-perf-lint.sh": "a driver library; prose reference only",
+    # Round 7's campsite-rule split (F3 took the driver to 1035 lines). Reported UNCOVERED the
+    # moment it became tracked, exactly as round 5's three splits were — the census is
+    # CONTENT-based, so this entry is the decision, recorded, and not a pattern widening to
+    # accommodate it. Same class as its three siblings above: sourced by the driver, and its
+    # only driver mention is prose (its refusals tell an operator which run owns a directory).
+    "scripts/perf/lib-outdir.sh":
+        "a driver library; sourced by the driver, never invokes it (prose reference only)",
     "scripts/perf/README.md": "documentation",
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",
