@@ -837,6 +837,10 @@ roborev_collect_prompt_headers() {
   _rx_hdrs=()
   _rx_hdr_from=()
   _rx_hdr_to=()
+  # observability-justified: every caller has already established this file's state — the wrapper's own
+  # prompt file, or a snapshot/capture path that `_roborev_regular_readable_state` reported PRESENT. This
+  # test is a defensive no-op guard, and its falsity yields an EMPTY header set, which is the fail-closed
+  # direction (every census path then reads absent) rather than an absence claim about the path.
   [ -f "$f" ] || return 0
   while IFS= read -r _h && IFS= read -r _f && IFS= read -r _t; do
     _rx_hdrs+=("$_h")
@@ -1012,6 +1016,9 @@ roborev_snapshot_capture_start() {
   ROBOREV_SNAPSHOT_CAPTURE_DIR=""
   ROBOREV_SNAPSHOT_CAPTURE_PID=""
   dir=$(mktemp -d "${TMPDIR:-/tmp}/roborev-snapshot-capture.XXXXXX" 2>/dev/null) || return 0
+  # observability-justified: this asks about a directory `mktemp -d` JUST created for us. Its falsity is
+  # not an absence claim about anyone else's file, and it leads to "no capture is running", which surfaces
+  # downstream as a fail-closed `cleaned-up` rather than as a pass.
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   chmod 700 "$dir" 2>/dev/null || :
   # OUTSIDE THE REVIEWED REPOSITORY, DECIDED ON THE PHYSICALLY RESOLVED PATH (roborev job 9). A
@@ -1253,13 +1260,20 @@ _roborev_file_digest() {
 #      `$repo` is `$REPO`, already `pwd -P`-resolved by the wrapper.
 #   4. the relative path is derived from the components we just validated, never re-parsed.
 _roborev_capture_validate() {
-  local repo="$1" id="$2" f="$3" dirphys
+  local repo="$1" id="$2" f="$3" dirphys _cv_walk
   _rx_cap_rel=""
   [ -n "$repo" ] && [ -n "$id" ] && [ -n "$f" ] || return 1
-  [ ! -L "$repo/.roborev" ] || return 1
-  [ ! -L "$repo/.roborev/$id" ] || return 1
-  [ ! -L "$f" ] || return 1
-  [ -f "$f" ] || return 1
+  # OBSERVABILITY FIRST, then type — the predicate family (see `_roborev_path_state`). An unobservable
+  # component must not fall through `-L`'s two-valued falsity into a capture: refusing to capture is the
+  # fail-closed direction here, since a missing capture surfaces later as `cleaned-up`.
+  for _cv_walk in "$repo/.roborev" "$repo/.roborev/$id" "$f"; do
+    _roborev_path_state "$_cv_walk" || :
+    [ "$_rx_path_state" = "present" ] || return 1
+    # observability-justified: `-L` is asked only of a PRESENT component, so its falsity is a
+    # measurement about type rather than an inference from a failed lookup.
+    [ ! -L "$_cv_walk" ] || return 1
+  done
+  _roborev_regular_readable_state "$f" || return 1
   dirphys=$(cd "${f%/*}" 2>/dev/null && pwd -P) || return 1
   [ "$dirphys" = "$repo/.roborev/$id" ] || return 1
   _rx_cap_rel=".roborev/$id/${f##*/}"
@@ -1301,6 +1315,9 @@ _roborev_snapshot_capture_loop() {
       # the padded-sequence glob. Reuse is skipped only when that publication records the SAME digest.
       published=""
       for _pub in "$out"/pub."$id".*; do
+        # observability-justified: OUR OWN publications, in a private per-run 0700 directory we created.
+        # A false negative here only means "re-capture", which is the safe direction; it never asserts
+        # that anything is absent.
         [ -f "$_pub/meta" ] && published="$_pub/meta"
       done
       if [ -n "$published" ] \
@@ -1334,6 +1351,10 @@ _roborev_snapshot_capture_loop() {
       dg_staged="$_rx_digest"
       if [ -z "$dg_pre" ] || [ -z "$dg_post" ] || [ -z "$dg_staged" ] \
         || [ "$dg_pre" != "$dg_post" ] || [ "$dg_pre" != "$dg_staged" ] || [ -L "$f" ]; then
+        # observability-justified (the `-L` above): the source was established PRESENT by
+        # `_roborev_capture_validate` earlier in this same iteration, and an unobservable source would
+        # already have failed the two digest reads that precede this line — so this `-L` decides type,
+        # never existence.
         rm -rf "$stage" 2>/dev/null || :
         continue
       fi
@@ -1404,6 +1425,9 @@ roborev_prompt_snapshot_paths() {
   _rx_snap_paths=()
   _rx_snap_unparseable=0
   _rx_snap_oversize_markers=0
+  # observability-justified: `$f` is the wrapper's OWN prompt file, written by this run beside its
+  # transcript. Its falsity yields no snapshot paths, which the caller reports as the `none` state — a
+  # fail-closed measurement about the prompt, not a claim about a roborev file.
   [ -f "$f" ] || return 0
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -1455,6 +1479,11 @@ _roborev_resolve_existing_ancestor() {
   local p="$1" dir="$1" rest="" base phys
   _rx_resolved="$p"
   while : ; do
+    # observability-justified: this walk exists ONLY to find a directory whose PHYSICAL path can be read
+    # for the containment test. An unobservable component makes the walk continue to a shallower
+    # ancestor, which can only ever make containment STRICTER; the components inside the repo are
+    # separately required to be observable by `roborev_snapshot_path_binding`, which is where an
+    # unreadable one is reported.
     if [ -d "$dir" ]; then
       phys=$(cd "$dir" 2>/dev/null && pwd -P) || phys=""
       if [ -n "$phys" ]; then
@@ -1565,6 +1594,15 @@ roborev_snapshot_path_binding() {
   done
   [ -n "$orig_prefix" ] || orig_prefix="/"
   orig_prefix_phys=$(cd "$orig_prefix" 2>/dev/null && pwd -P) || orig_prefix_phys=""
+  if [ -z "$orig_prefix_phys" ]; then
+    # A `cd` THAT FAILS IS AMBIGUOUS in exactly the family's way — gone, or not searchable. Ask.
+    _roborev_path_state "$orig_prefix" || :
+    if [ "$_rx_path_state" = "unreadable" ]; then
+      _rx_snap_bind_state="unreadable-component"
+      _rx_snap_bind_detail="the path's own prefix '$orig_prefix' could not be observed — ${_rx_path_why:-the lookup did not answer}"
+      return 5
+    fi
+  fi
   if [ -z "$orig_prefix_phys" ] || [ "${orig_prefix_phys%/}" != "$repo_prefix" ]; then
     _rx_snap_bind_state="unbound-job"
     _rx_snap_bind_detail="the path's own prefix '$orig_prefix' does not resolve to the reviewed repository root ('${orig_prefix_phys:-<unresolvable>}' vs '$repo_prefix'), so its components inside the repo cannot be established without trusting resolution to invent them"
@@ -1585,6 +1623,17 @@ roborev_snapshot_path_binding() {
   walk="$orig_prefix"
   for ((i = 0; i < ${#parts[@]}; i++)); do
     walk="$walk/${parts[$i]}"
+    # EVERY TRAVERSED COMPONENT MUST BE OBSERVABLE. Asking the three-valued helper first means an
+    # UNREADABLE component is reported as such instead of falling through `-L` (which is false both for
+    # "not a symlink" and for "cannot tell") into the shape checks — the predicate family again.
+    _roborev_path_state "$walk" || :
+    if [ "$_rx_path_state" = "unreadable" ]; then
+      _rx_snap_bind_state="unreadable-component"
+      _rx_snap_bind_detail="the component '$walk' could not be observed — ${_rx_path_why:-the lookup did not answer} — so neither its type nor the identity of the snapshot it belongs to could be established"
+      return 5
+    fi
+    # observability-justified: `-L` is consulted only where the component is PRESENT or verified-absent;
+    # in both of those states its falsity is a measurement about type, not a guess about existence.
     if [ -L "$walk" ]; then
       _rx_snap_bind_state="symlinked"
       if [ "$i" -eq $(( ${#parts[@]} - 1 )) ]; then
@@ -1657,7 +1706,7 @@ ROBOREV_DIFF_SOURCE_PATH=""
 # every call so a previous run's value can never be reported for this one.
 ROBOREV_DIFF_SOURCE_ORIGIN="live"
 roborev_collect_review_diff_headers() {
-  local prompt="$1" snap_path snap_bytes
+  local prompt="$1" snap_path snap_bytes _rx_live_state _rx_live_why
   local -a in_hdrs=() in_from=() in_to=()
   ROBOREV_DIFF_SOURCE_STATE=""
   ROBOREV_DIFF_SOURCE_DETAIL=""
@@ -1716,6 +1765,10 @@ roborev_collect_review_diff_headers() {
         ROBOREV_DIFF_SOURCE_STATE="not-absolute"
         ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt names a RELATIVE snapshot diff path ('$snap_path'), which would resolve against THIS PROCESS's working directory rather than the reviewed repository ($REPO) — so reading it could answer about a different file entirely. Failing closed; roborev writes an absolute path."
         ;;
+      unreadable-component)
+        ROBOREV_DIFF_SOURCE_STATE="unreadable"
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a component of the snapshot path the prompt names could not be OBSERVED — ${_rx_snap_bind_detail:-the lookup did not answer}. Path: $snap_path. 'Cannot tell' is not 'not there': the path is neither bound to this review nor declared absent, and no capture may answer for it. Failing closed and naming what was unobservable."
+        ;;
       symlinked)
         ROBOREV_DIFF_SOURCE_STATE="symlinked"
         ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot path the prompt names cannot be trusted to name what it appears to name — ${_rx_snap_bind_detail:-a symlink was found on the path}. Path: $snap_path (resolves to $_rx_snap_bound_path). Containment and job binding are decided on the path's OWN components, so a symlink is refused rather than followed or normalised away: roborev writes a regular file under a real directory, and 'it happens to point somewhere harmless' is not a property this check should have to reason about. Failing closed."
@@ -1756,15 +1809,33 @@ roborev_collect_review_diff_headers() {
   # which is why no rename-aside or backup path exists to be checked.
   _rx_snap_capture=""
   _rx_snap_capture_reject=""
-  if [ ! -e "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
+  # THE LIVE PATH'S STATE IS MEASURED ONCE, three-valued, and every branch below keys on the AFFIRMATIVE
+  # value (see the predicate-family note at `_roborev_path_state`). `verified-absent` is the ONLY state
+  # that may consult a capture: "gone" is a measurement, while "cannot tell" must never be answered with
+  # an older copy — that was vector 10 (roborev job 13).
+  _roborev_path_state "$_rx_snap_bound_path" || :
+  _rx_live_state="$_rx_path_state"
+  _rx_live_why="$_rx_path_why"
+  if [ "$_rx_live_state" = "unreadable" ]; then
+    ROBOREV_DIFF_SOURCE_STATE="unreadable"
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names could not be OBSERVED at all: $_rx_snap_bound_path — ${_rx_live_why:-the lookup did not answer}. This is NOT the same fact as the snapshot having been deleted, so it is NOT answered from a capture: an existing-but-inaccessible snapshot replaced by an older copy would certify a diff the reviewer never received. Failing closed and naming what was unobservable."
+    return 0
+  fi
+  if [ "$_rx_live_state" = "verified-absent" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
     && [ -n "${_rx_snap_dir_id:-}" ]; then
     _rx_cap_pub=""
     for _rx_cap_cand in "$ROBOREV_SNAPSHOT_CAPTURE_DIR"/pub."$_rx_snap_dir_id".*; do
+      # observability-justified: OUR OWN capture publications in a private per-run 0700 directory. A
+      # false negative leaves `_rx_cap_pub` empty, which reaches the fail-closed `cleaned-up` cause; it
+      # never asserts that a roborev file is absent.
       [ -f "$_rx_cap_cand/content.diff" ] && _rx_cap_pub="$_rx_cap_cand"
     done
     if [ -n "$_rx_cap_pub" ]; then
       _rx_cap_file="$_rx_cap_pub/content.diff"
       _rx_cap_marker="$_rx_cap_pub/meta"
+      # observability-justified: our own identity record, beside our own capture. Its falsity is already
+      # the fail-closed `capture-unidentified` refusal below — the strict direction — and makes no claim
+      # about any path roborev wrote.
       if [ ! -f "$_rx_cap_marker" ]; then
         _rx_snap_capture_reject="capture-unidentified"
       else
@@ -1789,8 +1860,16 @@ roborev_collect_review_diff_headers() {
     ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the capture for snapshot directory '${_rx_snap_dir_id}' records the captured path '${_rx_cap_recorded:-<unreadable>}', but the prompt instructed the reviewer to read '${_rx_snap_rel:-<unresolved>}'. Reading the file the capture happens to hold would certify a diff the reviewer was never pointed at — a capture is matched by its WHOLE relative path, never by the snapshot directory id alone. Failing closed."
     return 0
   fi
-  if [ ! -e "$_rx_snap_bound_path" ] && [ -z "$_rx_snap_capture" ]; then
-    if [ ! -d "${_rx_snap_dir:-}" ]; then
+  if [ "$_rx_live_state" = "verified-absent" ] && [ -z "$_rx_snap_capture" ]; then
+    # The snapshot DIRECTORY is measured the same way: `cleaned-up` requires it to be VERIFIED absent,
+    # and a directory we cannot observe is reported as such instead of being called "cleaned up".
+    _roborev_path_state "${_rx_snap_dir:-}" || :
+    if [ "$_rx_path_state" = "unreadable" ]; then
+      ROBOREV_DIFF_SOURCE_STATE="unreadable"
+      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the named snapshot file is verified absent, but its DIRECTORY could not be observed either: ${_rx_snap_dir:-<unresolved>} — ${_rx_path_why:-the lookup did not answer}. Whether roborev cleaned up or the directory is merely inaccessible is therefore unknown, and 'cleaned-up' would assert the former. Failing closed on what was actually established."
+      return 0
+    fi
+    if [ "$_rx_path_state" = "verified-absent" ]; then
       ROBOREV_DIFF_SOURCE_STATE="cleaned-up"
       ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists AND this run captured no copy of it — roborev deletes ${_rx_snap_dir:-<unresolved>} when the review finishes, which is BEFORE 'roborev review --wait' returns, so the copy taken while the review ran (${ROBOREV_SNAPSHOT_CAPTURE_DIR:-<capture never started>}/pub.${_rx_snap_dir_id:-<unknown id>}.<seq>/content.diff) is the only possible evidence and it is not there. There is therefore NO evidence of what the reviewer received. Failing closed: check that the wrapper's capture watcher started (it needs a writable temp directory OUTSIDE the reviewed repo) and re-run the review."
     else
@@ -1807,12 +1886,15 @@ roborev_collect_review_diff_headers() {
     _rx_snap_bound_path="$_rx_snap_capture"
     ROBOREV_DIFF_SOURCE_PATH="$_rx_snap_capture"
   fi
-  # THE LIVE PATH EXISTS BUT IS NOT SOMETHING WE CAN READ AS A DIFF — a directory, a FIFO, a socket, a
-  # file we lack permission on. Reported, never substituted: the capture branch above is not reachable
-  # in this state, precisely so that "the named path is unusable" cannot be answered with a copy.
-  if [ ! -f "$_rx_snap_bound_path" ] || [ ! -r "$_rx_snap_bound_path" ]; then
+  # THE PATH WE ARE ABOUT TO READ MUST BE A PRESENT, READABLE REGULAR FILE — asked as an affirmative
+  # three-valued question, so "there but a directory/FIFO", "there but unreadable" and "unobservable"
+  # all land in `unreadable` with a cause, and none of them can be mistaken for absence. Reported,
+  # never substituted: the capture branch above requires `verified-absent`, precisely so that "the named
+  # path is unusable" cannot be answered with a copy.
+  _roborev_regular_readable_state "$_rx_snap_bound_path" || :
+  if [ "$_rx_path_state" != "present" ]; then
     ROBOREV_DIFF_SOURCE_STATE="unreadable"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names is not a READABLE REGULAR FILE: $_rx_snap_bound_path. An oracle that cannot be consulted is a NON-PASSING verdict, never a pass — and it is NOT answered from a capture, because a path that exists as something unreadable is a different fact from a snapshot that was deleted. Failing closed and naming the path."
+    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names is not a READABLE REGULAR FILE: $_rx_snap_bound_path (state '$_rx_path_state'${_rx_path_why:+ — $_rx_path_why}). An oracle that cannot be consulted is a NON-PASSING verdict, never a pass — and it is NOT answered from a capture, because a path that exists as something unreadable is a different fact from a snapshot that was deleted. Failing closed and naming the path."
     return 0
   fi
   snap_bytes=$(tr -d '[:space:]' <"$_rx_snap_bound_path" | wc -c | tr -d '[:space:]')
