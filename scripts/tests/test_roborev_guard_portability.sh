@@ -669,9 +669,12 @@ else
   # to catch, reintroduced inside the rule: unanticipated spellings inheriting the permissive
   # branch. So the ACCEPTED forms are now ENUMERATED and everything else FAILs, including forms
   # nobody anticipated:
-  #   (1) directly controlled:      [if|elif|while|until] [!] sed_inplace…      (start of line)
-  #   (2) direct failure handler:   sed_inplace… || bad|return|exit              (start of line,
-  #                                 with no `;`/`&` between the call and the `||`)
+  #   (1) directly controlled:      [if|elif|while|until] [!] sed_inplace… ; then|do
+  #   (2) direct failure handler:   sed_inplace… || bad|return|exit
+  # Both are anchored at the start of the logical line, and NEITHER tolerates `;`, `&` or a single
+  # `|` between the call and its terminator — so `if sed_inplace … || true; then` (a condition that
+  # reads the status and then neutralises it) and `… | foo || bad` are NOT accepted either. That
+  # costs a sed expression delimited with `|` a false FAIL; the marker below is its route.
   # Deciding "is this status consumed?" in general is shell-semantics analysis and is deliberately
   # OUT OF BOUNDS. A call in an unlisted form reds the gate with a message saying the FORM was not
   # recognised, and the author rewrites it into an accepted form (or marks the line
@@ -682,8 +685,8 @@ else
   # CONTINUATION line is judged on the joined logical line (the deliberate design: line-oriented
   # matching plus continuation joining, never a shell tokeniser).
   _ss_call_re='(^|[^[:alnum:]_])sed_inplace(_verified)?[[:space:]]+"'
-  _ss_ok_controlled='^[0-9]+:[[:space:]]*(if|elif|while|until)[[:space:]]+(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"'
-  _ss_ok_handler='^[0-9]+:[[:space:]]*(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"[^;&]*\|\|[[:space:]]*(bad|return|exit)([[:space:]]|$)'
+  _ss_ok_controlled='^[0-9]+:[[:space:]]*(if|elif|while|until)[[:space:]]+(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"[^;&|]*;[[:space:]]*(then|do)([[:space:]]|$)'
+  _ss_ok_handler='^[0-9]+:[[:space:]]*(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"[^;&|]*\|\|[[:space:]]*(bad|return|exit)([[:space:]]|$)'
   sed_status_offenders() { # sed_status_offenders <file> -> "lineno:logical-line" per unaccepted call
     scan_hits "$_ss_call_re" "$1" \
       | grep -vE "$_ss_ok_controlled" \
@@ -700,6 +703,7 @@ else
   printf '%s\n' "  true && sed_inplace \"\$f\" \"\$expr\"" >"$_ss_ctl_dir/flag-and-chain.sh"
   printf '%s\n' "  sed_inplace \"\$f\" \"\$expr\"; true || bad no" >"$_ss_ctl_dir/flag-semicolon-or.sh"
   printf '%s\n' "  sed_inplace \"\$f\" \"\$expr\" && ok yes" >"$_ss_ctl_dir/flag-and-success.sh"
+  printf '%s\n' "  if sed_inplace \"\$f\" \"\$expr\" || true; then :; fi" >"$_ss_ctl_dir/flag-if-or-true.sh"
   printf '%s\n' "if sed_inplace \"\$f\" ${_sq}s/a/b/${_sq}; then :; fi" >"$_ss_ctl_dir/ok-if.sh"
   printf '%s\n' "  sed_inplace \"\$f\" \\" "    ${_sq}s/a/b/${_sq} || bad no" >"$_ss_ctl_dir/ok-or-bad.sh"
   printf '%s\n' "  elif ! sed_inplace_verified \"\$f\" \"\$expr\" \"\$want\"; then" >"$_ss_ctl_dir/ok-elif-negated.sh"
@@ -708,6 +712,7 @@ else
     'flag:`true && sed_inplace …` (status discarded — the round-5 finding):flag-and-chain.sh' \
     'flag:`sed_inplace …; true || bad` (the handler belongs to `true`):flag-semicolon-or.sh' \
     'flag:`sed_inplace … && ok` (a SUCCESS chain handles no failure):flag-and-success.sh' \
+    'flag:`if sed_inplace … || true; then` (reads the status, then neutralises it):flag-if-or-true.sh' \
     'ok:`if sed_inplace …; then`:ok-if.sh' \
     'ok:a line-broken call with `|| bad` on the continuation:ok-or-bad.sh' \
     'ok:`elif ! sed_inplace_verified …; then`:ok-elif-negated.sh'; do
@@ -914,28 +919,58 @@ else
   #   UNRECOGNISED  everything else -> a counted FAILURE naming what was not recognised
   # An unrecognised state FAILs; it never inherits DEP-SKIP. The classifier is itself controlled
   # below, in all three directions.
+  #
+  # DEP-SKIP IS ONE NAMED CONDITION, NOT A SHAPE (#3296 round-5 blocker 4). The round-4 form
+  # accepted "rc 0 AND some line begins `SKIP -`", so an unrelated earlier skip followed by an
+  # accidental `exit 0` would hide a truncated composition as an allowed dependency skip — a
+  # deny-list wearing an allow-list's clothes. The permissive branch now requires the ONE
+  # supported dependency condition, identified two ways at once:
+  #   * a DEDICATED SENTINEL EXIT CODE (77, the long-standing "skipped" convention), distinct from
+  #     the guard test's own failure exit (1) and from bash's syntax-error exit (2); and
+  #   * the EXACT message line of that condition, read out of the guard test itself (never a
+  #     hand-copied duplicate that could drift): the python3 preflight, the only dependency the
+  #     guard test declines for. If that message cannot be extracted, the recognised cause is
+  #     unidentifiable, which is a FAILURE TO MEASURE and is reported as such — DEP-SKIP then
+  #     has no legitimate route at all rather than a loose one.
+  # A future prologue skip for a DIFFERENT dependency is therefore UNRECOGNISED until it is added
+  # here deliberately (the FAIL message says so) — noise, never blindness.
+  _AC5_SKIP_RC=77
   _ac5_dep='python3: present'
   command -v python3 >/dev/null 2>&1 ||
     _ac5_dep='python3: ABSENT (the guard test SKIPs its structured-payload cases without it)'
+  # The exact expected line, extracted from the guard test's own printf (not duplicated here).
+  _ac5_dep_msg=$(grep -F "printf 'SKIP - no python3:" "$GUARD" | head -1 \
+    | sed -e "s/^[[:space:]]*printf '//" -e "s/\\\\n'[[:space:]]*\$//")
+  case "$_ac5_dep_msg" in
+    'SKIP - no python3:'*) ;;
+    *) _ac5_dep_msg='' ;;
+  esac
+  if [ -n "$_ac5_dep_msg" ]; then
+    ok 'AC5 control: the ONE supported dependency-skip message was extracted from the guard test, so the permissive branch is keyed on a real, current condition'
+  else
+    bad "AC5 control: the guard test's python3 dependency-skip message could not be extracted, so the ONE permissive cause cannot be identified — every early exit will be reported UNRECOGNISED until this contract is updated"
+  fi
   _ac5_out=''; _ac5_rc=0; _ac5_state=''; _ac5_cause=''
   run_ac5_probe() { # run_ac5_probe <script> -> _ac5_out / _ac5_rc / _ac5_state / _ac5_cause
     _ac5_out=$(bash "$1" 2>&1); _ac5_rc=$?
     if printf '%s\n' "$_ac5_out" | grep -qF '==== ROBOREV REVIEW GUARD TEST TALLY'; then
       _ac5_state='MEASURED'
       _ac5_cause='the probe reached the guard test tally epilogue'
-    elif [ "$_ac5_rc" -eq 0 ] && printf '%s\n' "$_ac5_out" | grep -q '^SKIP - '; then
+    elif [ "$_ac5_rc" -eq "$_AC5_SKIP_RC" ] && [ -n "$_ac5_dep_msg" ] &&
+      printf '%s\n' "$_ac5_out" | grep -qxF -- "$_ac5_dep_msg"; then
       # THE ONE PERMISSIVE CAUSE, and the reason it is legitimately permissive, recorded here at
-      # the branch: the guard test may decline to run on a host that lacks a dependency, and it
-      # says so in its OWN idiom — a `SKIP - ` line — and then exits ZERO. Both facts are
-      # required and both are AFFIRMATIVE: the marker identifies the cause as a declared skip
-      # (not an accident), and rc 0 says the probe chose to stop rather than broke. A stripped
-      # runner is a supported host, so this must not red the gate; anything that cannot show
-      # BOTH facts is not this cause and is not permitted to borrow its verdict.
+      # the branch: the guard test may decline to run on a host that lacks python3, the single
+      # dependency it declines for. TWO independent affirmative facts are required — the
+      # dedicated sentinel rc (nothing else in the guard test exits 77) and the EXACT declared
+      # message line (whole-line match, `grep -xF`, against text read from the guard test itself).
+      # A stripped runner is a supported host, so this must not red the gate; anything that cannot
+      # show BOTH facts is not this cause and may not borrow its verdict — including an unrelated
+      # `SKIP -` line followed by an accidental `exit 0`, which is what the round-4 form accepted.
       _ac5_state='DEP-SKIP'
-      _ac5_cause='the probe declined with the guard test SKIP marker and exited zero'
+      _ac5_cause="the probe declined with the sentinel rc $_AC5_SKIP_RC and the exact python3 dependency message"
     elif [ "$_ac5_rc" -eq 0 ]; then
       _ac5_state='UNRECOGNISED'
-      _ac5_cause='it exited ZERO before the tally but printed NO `SKIP - ` marker, so nothing identifies this as a declared dependency skip (a silently truncated prologue looks exactly like this)'
+      _ac5_cause="it exited ZERO before the tally, which is not the sentinel rc $_AC5_SKIP_RC a declared dependency skip must use (a silently truncated prologue, or an unrelated skip followed by a stray \`exit 0\`, looks exactly like this)"
     else
       _ac5_state='UNRECOGNISED'
       _ac5_cause="it exited NON-ZERO (rc $_ac5_rc) before the tally — a syntax error in the composition, a stray \`exit\`, or a prologue that failed; none of those is a dependency skip"
@@ -953,33 +988,38 @@ else
 
   compose_probe "$tmp/mirror/tests/ac5-fail.sh" "bad 'AC5 injected failure'"
   compose_probe "$tmp/mirror/tests/ac5-pass.sh" ":"
-  # CONTROL FIRST: a prologue that short-circuits must be classified NOT-MEASURED, not FAIL.
-  # Without this the skip branch could be dead code and the red-gate hazard would be unfixed.
+  # CONTROL FIRST: the ONE supported dependency condition — the guard test's own python3 message,
+  # verbatim, plus the sentinel rc — must be classified DEP-SKIP, or the permissive branch is dead
+  # code and the red-gate hazard on a stripped runner is unfixed.
   compose_probe "$tmp/mirror/tests/ac5-skip.sh" \
-    "printf 'SKIP - simulated prologue dependency skip\\n'; exit 0"
+    "printf '%s\\n' '$_ac5_dep_msg'; exit $_AC5_SKIP_RC"
   run_ac5_probe "$tmp/mirror/tests/ac5-skip.sh"
   if [ "$_ac5_state" = 'DEP-SKIP' ]; then
-    ok 'AC5 control: a composition that DECLARES a dependency skip (SKIP marker + exit 0) is classified DEP-SKIP, so a stripped runner degrades to a loud SKIP instead of a red gate'
+    ok "AC5 control: the ONE supported dependency skip (sentinel rc $_AC5_SKIP_RC + the exact python3 message) is classified DEP-SKIP, so a stripped runner degrades to a loud SKIP instead of a red gate"
   else
-    bad "AC5 control: a declared dependency skip was classified $_ac5_state ($_ac5_cause) — the one permissive cause cannot be identified, so a legitimate skip on a stripped runner would red the gate"
+    bad "AC5 control: the supported dependency skip was classified $_ac5_state ($_ac5_cause) — the one permissive cause cannot be identified, so a legitimate skip on a stripped runner would red the gate"
   fi
 
   # THE OTHER DIRECTION, AND IT IS THE BLOCKER (#3296): the permissive branch must be reachable
-  # ONLY from that affirmatively identified cause. Three compositions that exit early for reasons
-  # which are NOT a declared skip must each classify UNRECOGNISED — and `ac5_not_measured` routes
-  # UNRECOGNISED to `bad`, so each of these WOULD red the gate. Pre-fix, all three were absorbed
-  # into the same non-failing SKIP as the declared skip above.
+  # ONLY from that affirmatively identified cause, so its COMPLEMENT is pinned case by case —
+  # including the two halves of the signature taken separately, and the round-5 finding (an
+  # unrelated `SKIP -` line plus an accidental `exit 0`, which the previous form accepted).
+  # `ac5_not_measured` routes UNRECOGNISED to `bad`, so every one of these WOULD red the gate.
   for _ac5_u in \
     "syntax:bad 'AC5 injected failure'; fi" \
     "nonzero-exit:exit 1" \
-    "silent-exit-zero:exit 0"; do
+    "silent-exit-zero:exit 0" \
+    "unrelated-skip-line-then-exit-zero:printf 'SKIP - some unrelated earlier skip\\n'; exit 0" \
+    "unrelated-skip-line-then-sentinel-rc:printf 'SKIP - some unrelated earlier skip\\n'; exit $_AC5_SKIP_RC" \
+    "exact-message-without-sentinel-rc:printf '%s\\n' '$_ac5_dep_msg'; exit 0" \
+    "exact-message-as-a-substring-only:printf '%s\\n' 'noise $_ac5_dep_msg noise'; exit $_AC5_SKIP_RC"; do
     _ac5_ulabel="${_ac5_u%%:*}"
     compose_probe "$tmp/mirror/tests/ac5-unrec.sh" "${_ac5_u#*:}"
     run_ac5_probe "$tmp/mirror/tests/ac5-unrec.sh"
     if [ "$_ac5_state" = 'UNRECOGNISED' ]; then
-      ok "AC5 control: an early exit with no declared skip ($_ac5_ulabel, rc $_ac5_rc) is classified UNRECOGNISED, so it is a counted FAILURE and not a skip"
+      ok "AC5 control: an early exit that is not the supported dependency condition ($_ac5_ulabel, rc $_ac5_rc) is classified UNRECOGNISED, so it is a counted FAILURE and not a skip"
     else
-      bad "AC5 control: an early exit with no declared skip ($_ac5_ulabel, rc $_ac5_rc) was classified $_ac5_state — a broken composition, or a broken exit-code contract, would then pass as a skip"
+      bad "AC5 control: an early exit that is not the supported dependency condition ($_ac5_ulabel, rc $_ac5_rc) was classified $_ac5_state — a broken composition, or a broken exit-code contract, would then pass as a skip"
     fi
   done
 
