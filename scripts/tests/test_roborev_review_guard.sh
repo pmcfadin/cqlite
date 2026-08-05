@@ -3644,8 +3644,8 @@ run_wrapper "$snap_work"
 assert_verdict 'case (cx31k)' FAIL 1
 assert_says 'case (cx31k) an unbound in-repo path FAILs' \
   '^prompt-content: FAIL \(snapshot diff unusable: unbound-job\)$'
-assert_says 'case (cx31k) the cause names the path and the required snapshot shape' \
-  "^ERROR: prompt-content: .*NOT a roborev snapshot for this review: $stale_snap"
+assert_says 'case (cx31k) the cause names WHICH component is wrong, and the path' \
+  "^ERROR: prompt-content: .*NOT a roborev snapshot for this review — the second component 'stale' is not a 'roborev-snapshot-<id>' directory\. Path: $stale_snap"
 
 printf '== (cx31k2) a SYMLINK at the named path is refused, not followed ==\n'
 # FOUND BY ROBOREV ON THIS CHANGE (job 5, Medium): the containment test is decided on the PATH, and
@@ -3665,7 +3665,7 @@ assert_verdict 'case (cx31k2)' FAIL 1
 assert_says 'case (cx31k2) a symlinked snapshot path is its own cause' \
   '^prompt-content: FAIL \(snapshot diff unusable: symlinked\)$'
 assert_says 'case (cx31k2) the cause names the path and why it is refused rather than followed' \
-  "^ERROR: prompt-content: the path the prompt names is a SYMLINK: $snap_file"
+  "^ERROR: prompt-content: the snapshot path the prompt names cannot be trusted to name what it appears to name — the named file itself is a SYMLINK \('$snap_file'\)"
 assert_lacks 'case (cx31k2) a valid out-of-repo target never reaches a PASS through a symlink' '^prompt-content: PASS'
 rm -f "$snap_file"
 
@@ -4203,6 +4203,51 @@ else
   bad "case (cx32c): the probe exited non-zero — the KILL escalation aborted the wrapper (#3312 job 11): $(cat "$cx32c_out")"
 fi
 
+printf '== (cx32d) a `..` traversal between snapshot directories is refused (job 12) ==\n'
+# VALIDATE BEFORE YOU NORMALISE. The path nominally names snapshot A and traverses into snapshot B, and
+# BOTH directories exist — so physical resolution erases the `..`, every component check then inspects
+# B's components, and the binding reports B while the prompt named A. The fixture makes B's capture the
+# complete one, so an accepted traversal would certify a diff from a snapshot the prompt did not name.
+reset_stub
+trav_a="$snap_repo/.roborev/roborev-snapshot-A11111"
+trav_b="$snap_repo/.roborev/roborev-snapshot-B22222"
+mkdir -p "$trav_a" "$trav_b"
+write_snap_diff "$trav_b/roborev-snapshot-content.diff" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$trav_a/../roborev-snapshot-B22222/roborev-snapshot-content.diff")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx32d)' FAIL 1
+assert_says 'case (cx32d) the traversal is refused as unbound' \
+  '^prompt-content: FAIL \(snapshot diff unusable: unbound-job\)$'
+assert_says 'case (cx32d) the cause names the dot segment and what resolution would have done' \
+  "the path contains a '\.\.' segment, which resolution would erase"
+assert_lacks 'case (cx32d) a traversal never certifies from the directory it lands in' '^prompt-content: PASS'
+rm -rf "$trav_a" "$trav_b"
+reset_stub
+
+printf '== (cx32e) a snapshot DIRECTORY symlink is refused, not resolved away (job 12) ==\n'
+# The other half of the same defect: `.roborev/roborev-snapshot-C -> roborev-snapshot-D`. Resolution
+# rewrites the path into D, so the id, the relative path and the capture lookup would all silently
+# become D's while the prompt named C. Checked on the path's OWN components instead.
+reset_stub
+sym_c="$snap_repo/.roborev/roborev-snapshot-C33333"
+sym_d="$snap_repo/.roborev/roborev-snapshot-D44444"
+mkdir -p "$sym_d"
+rm -rf "$sym_c"
+write_snap_diff "$sym_d/roborev-snapshot-content.diff" alpha.rs beta.rs
+ln -s "$sym_d" "$sym_c"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$sym_c/roborev-snapshot-content.diff")
+run_wrapper "$snap_work"
+assert_verdict 'case (cx32e)' FAIL 1
+assert_says 'case (cx32e) the directory symlink is refused' \
+  '^prompt-content: FAIL \(snapshot diff unusable: symlinked\)$'
+assert_says 'case (cx32e) the cause names which component is the symlink, or that the tail was rewritten' \
+  "(a traversed DIRECTORY component is a SYMLINK|are not the ones it actually resolves to)"
+assert_lacks 'case (cx32e) a symlinked snapshot dir never certifies from its target' '^prompt-content: PASS'
+rm -rf "$sym_c" "$sym_d"
+reset_stub
+
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs
@@ -4454,6 +4499,35 @@ if grep -qF 'index($0, "Read the diff from:") == 1' "$ORACLES"; then
   ok 'structural: the snapshot instruction is matched at column zero (a quoted line in a diff body cannot pose as it)'
 else
   bad 'structural: the snapshot-instruction match is not anchored at column zero — prose inside the reviewed diff could name the file its own review is judged against (#3312)'
+fi
+# VALIDATION PRECEDES NORMALISATION IN THE BINDING (job 12), asserted by LINE ORDER: physical
+# resolution erases `..` segments and directory symlinks, which is exactly what the component checks
+# exist to find, so a resolution that runs first makes them inspect a path the prompt never named.
+_vb_s=$(grep -nE '^roborev_snapshot_path_binding\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_vb_e=""
+[ -z "$_vb_s" ] || _vb_e=$(awk -v s="$_vb_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+if [ -z "$_vb_s" ] || [ -z "$_vb_e" ]; then
+  bad 'structural: could not locate roborev_snapshot_path_binding to inspect its ordering'
+else
+  _vb_body=$(sed -n "${_vb_s},${_vb_e}p" "$ORACLES")
+  _vb_dot=$(printf '%s\n' "$_vb_body" | grep -nF "'.'|'..')" | head -1 | cut -d: -f1)
+  _vb_res=$(printf '%s\n' "$_vb_body" | grep -nF '_roborev_resolve_existing_ancestor "$p"' | head -1 | cut -d: -f1)
+  _vb_tail=$(printf '%s\n' "$_vb_body" | grep -nF 'if [ "$orig_tail" != "$rel" ]' | head -1 | cut -d: -f1)
+  if [ -n "$_vb_dot" ] && [ -n "$_vb_res" ] && [ "$_vb_dot" -lt "$_vb_res" ]; then
+    ok 'structural: dot-segment validation precedes physical resolution in the snapshot binding'
+  else
+    bad "structural: the binding resolves before it validates dot segments (dot at ${_vb_dot:-<absent>}, resolve at ${_vb_res:-<absent>}) — a '..' traversal between snapshot directories would be normalised away (#3312 job 12)"
+  fi
+  if [ -n "$_vb_tail" ]; then
+    ok "structural: the binding requires the path's OWN tail components to equal the resolved ones (a directory symlink cannot rewrite them)"
+  else
+    bad 'structural: the binding no longer compares the original tail with the resolved one — a directory symlink would silently rebind the snapshot id (#3312 job 12)'
+  fi
+  if printf '%s\n' "$_vb_body" | grep -qF 'if [ -L "$walk" ]; then'; then
+    ok 'structural: the binding rejects a symlink at EVERY traversed component, on the original spelling'
+  else
+    bad 'structural: the binding checks only the final component for a symlink — a symlinked .roborev or snapshot directory would be traversed (#3312 job 12)'
+  fi
 fi
 _bind_start=$(grep -nE '^roborev_snapshot_path_binding\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
 if [ -z "$_bind_start" ]; then
