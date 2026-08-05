@@ -85,8 +85,48 @@ trap 'rm -rf "$tmp"' EXIT
 # Comment-only lines are stripped before scanning, so prose ABOUT a construct (including
 # this file's own citations, and the guard test's `sed -i` explanation) is not a violation.
 # ===========================================================================
+#
+# SCOPE OF THIS SCANNER — ENUMERATED, NOT EXHAUSTIVE, AND SAID SO IN CODE (#3296 round-8;
+# CLAUDE.md: "where a signal genuinely SHOULD be permissive, record the reason IN CODE at the
+# branch"). Three consecutive review rounds each produced the same class of finding — "here is
+# another spelling the table does not detect" — and the spelling space of a shell command is
+# UNBOUNDED: `--in-place=`, `-i''`, `-e X -i`, line continuations, `$SED -i`, `eval`, string
+# concatenation. A scanner that implicitly claims completeness therefore generates a finding
+# EVERY round, forever. That non-convergence is exactly why the sibling structural lint on this
+# branch was DELETED by owner ruling (see the "DELIBERATELY NOT BUILT" record further down this
+# file, and CLAUDE.md's #3229 ruling: a guard with known false-PASSes is worse than no guard).
+#
+# So, stated plainly rather than left to be rediscovered:
+#   * WHAT THIS IS: a BEST-EFFORT DRIFT TRIPWIRE over an ENUMERATED set of spellings — the ones
+#     that actually caused #3296 plus their nearest measured relatives. Enumerated today:
+#     `sed -i EXPR`, `sed -i` beyond an option run, bundled clusters ending in `i` (-Ei/-ni/-nEi),
+#     `--in-place` and `--in-place=SUFFIX`, the empty-suffix forms `-i''`/`-i""` (adjacent or
+#     beyond an option run), backslash-continued invocations of all of the above; `paste` with no
+#     file operand (bare, separated `-d ARG`, and with input/output/fd redirections); plus
+#     `readlink -f`, `stat -c`, `grep -P`, `date -d`, `sed -z`/`grep -z`, `find -printf`,
+#     `xargs -r`, `base64 -w`, `timeout`, and the bash-4-only constructs.
+#   * WHAT IS AUTHORITATIVE: mechanism (2), the BEHAVIOURAL BSD-shim differential. It EXECUTES
+#     the guard test's own helpers under BSD `sed -i` and BSD `paste` semantics, so it does not
+#     care how a construct is spelled at all.
+#   * WHY THIS SURVIVES WHERE THE DELETED LINT DID NOT: a spelling this table misses is a
+#     BOUNDED FALSE NEGATIVE with a backstop underneath it. The deleted lint had no backstop and
+#     its misses were false PASSES about the property it was the only check for.
+#   * WHAT A NEWLY-DISCOVERED SPELLING MEANS: add a row and a positive control — a cheap ADDITIVE
+#     fix. It is NOT evidence that the mechanism is broken, and it is not a reason to attempt a
+#     shell tokeniser here (a second implementation of shell grammar, whose correctness is
+#     knowable only by differential testing against the first).
+# The residual it leaves is enumerated in full under "STATED RESIDUAL" below.
+#
+# THIS FILE SCANS ITSELF. It runs inside the macOS-sensitive `roborev-lints` gate component and
+# is mostly shell scaffolding, so a GNU-only construct added HERE would reproduce the exact
+# Linux-green/macOS-red regression the file exists to prevent — and nothing else would see it.
+# The self-scan is not vacuous: this file is NOT blanket-exempt. It deliberately CONTAINS the
+# banned constructs, in two places only — its BSD-emulation fixtures and its positive controls —
+# and each such LINE carries a `portability-lint-allow` marker naming why, so the exemption is
+# visible in the diff and every other line of this file is scanned like any other target.
 SCAN_FILES=(
   "$GUARD"
+  "$SCRIPT_DIR/$(basename "$0")"
   "$FLOW_DIR/roborev-review.sh"
   "$FLOW_DIR/roborev-review-checks.sh"
   "$FLOW_DIR/roborev-review-oracles.sh"
@@ -165,49 +205,49 @@ RE_PASTE_NO_OPERAND='(^|[^[:alnum:]_-])paste('"$_PASTE_DARG"'|'"$_PASTE_OPT"')*'
 
 add_construct "$RE_SED_INPLACE" \
   "BSD sed's -i takes a REQUIRED suffix argument, so it eats the EXPRESSION and the edit never lands (#3296 cx28/cx29/cx28b/cx28c) — use the guard test's sed_inplace helper" \
-  "  sed -i 's/a/b/' \"\$f\""
+  "  sed -i 's/a/b/' \"\$f\"" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct "$RE_SED_INPLACE_CLUSTER" \
   "a BUNDLED cluster ending in -i (-Ei, -ni, -nEi, …) reaches the SAME BSD argument-consuming -i as a bare -i, so the edit never lands — use sed_inplace" \
-  "  sed -Ei 's/a/b/' \"\$f\""
+  "  sed -Ei 's/a/b/' \"\$f\"" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct "$RE_SED_INPLACE_EMPTY_DQ" \
   'the empty-suffix spelling -i"" is GNU-only (BSD needs -i "" or no -i at all) — use sed_inplace' \
-  '  sed -i"" -e s/a/b/ f'
+  '  sed -i"" -e s/a/b/ f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct "$RE_SED_INPLACE_EMPTY_SQ" \
   "the empty-suffix spelling -i'' is GNU-only — use sed_inplace" \
-  "  sed -i'' -e s/a/b/ f"
+  "  sed -i'' -e s/a/b/ f" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct "$RE_PASTE_NO_OPERAND" \
   'a paste with NO FILE OPERAND is empty output + exit 1 on BSD (it usage()-errors instead of reading stdin) — pass an explicit `-`, or extract with awk (#3296 case (j2))' \
-  '  order=$(grep -n x f | cut -d: -f2 | paste -sd,)'
+  '  order=$(grep -n x f | cut -d: -f2 | paste -sd,)' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])readlink[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-f' \
   'readlink -f is absent from older BSD readlink — canonicalise with `cd "$p" && pwd -P` (which is what the wrapper does)' \
-  '  p=$(readlink -f "$x")'
+  '  p=$(readlink -f "$x")' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])stat[[:space:]]+-c' \
   'stat -c is GNU-only (BSD spells it stat -f)' \
-  '  n=$(stat -c %s "$f")'
+  '  n=$(stat -c %s "$f")' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])grep[[:space:]]+-[a-zA-Z]*P([[:space:]]|$)' \
   'grep -P (PCRE) is GNU-only — BSD grep has no -P' \
-  "  grep -P '\\\\d+' f"
+  "  grep -P '\\\\d+' f" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])date[[:space:]]+(-d[[:space:]]|--date)' \
   'date -d/--date is GNU-only (BSD date uses -r / -v / -j -f)' \
-  '  t=$(date -d @1700000000)'
+  '  t=$(date -d @1700000000)' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])(sed|grep)[[:space:]]+-[a-zA-Z]*z([[:space:]]|$)' \
   'sed -z / grep -z (NUL-delimited records) are GNU-only — read `git … -z` output with a shell read loop or awk RS' \
-  '  grep -z foo f'
+  '  grep -z foo f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '\-printf[[:space:]]' \
   'find -printf is GNU-only — use -exec or -print with a shell loop' \
-  "  find . -printf '%p\\\\n'"
+  "  find . -printf '%p\\\\n'" # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])xargs[[:space:]]+(-[a-zA-Z]*r|--)' \
   'xargs -r (and GNU long options) are not in BSD xargs; BSD already skips an empty input line only with -0' \
-  '  printf "" | xargs -r rm'
+  '  printf "" | xargs -r rm' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])base64[[:space:]]+-w' \
   'base64 -w is GNU-only (BSD/macOS base64 has no wrap flag; use -b or fold)' \
-  '  base64 -w0 <f'
+  '  base64 -w0 <f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])timeout[[:space:]]+[0-9]' \
   'timeout(1) is NOT installed on stock macOS — guard it with `command -v timeout` or restructure' \
-  '  timeout 30 some-command'
+  '  timeout 30 some-command' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 add_construct '(^|[^[:alnum:]_-])(mapfile|readarray)([[:space:]]|$)|declare[[:space:]]+-A|\$\{[A-Za-z_][A-Za-z_0-9]*,,\}' \
   'bash 4 only — stock macOS /bin/bash is 3.2, so mapfile/readarray/associative arrays/${v,,} can abort the script outright' \
-  '  mapfile -t arr <f'
+  '  mapfile -t arr <f' # portability-lint-allow: the SAMPLE VIOLATION this rule must detect (table data, not an invocation)
 
 if [ "${#CONSTRUCT_RE[@]}" -ne "${#CONSTRUCT_WHY[@]}" ] ||
   [ "${#CONSTRUCT_RE[@]}" -ne "${#CONSTRUCT_SAMPLE[@]}" ]; then
@@ -314,7 +354,7 @@ printf '%s\n' \
   "  sed -Ei 's/a/b/' \"\$f\"" \
   "  sed -ni '\$p' \"\$f\"" \
   "  sed -nEi 's/a/b/' \"\$f\"" \
-  "  sed -E -i 's/a/b/' \"\$f\"" >"$tmp/cluster-bad.sh"
+  "  sed -E -i 's/a/b/' \"\$f\"" >"$tmp/cluster-bad.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 # Asserted against the UNION of the two in-place rules, because that union is what the scan
 # actually applies: `-E -i` (separated) is the BARE rule's job and `-Ei` (bundled) is the
 # cluster rule's, and what matters to a reader of this file is that NO in-place spelling
@@ -333,7 +373,7 @@ if [ -z "$_cluster_missed" ]; then
 else
   bad "structural control: the in-place rules MISS:$_cluster_missed — a scanner with a known hole invites reliance it cannot support"
 fi
-printf '%s\n' "  sed -Ei 's/a/b/' \"\$f\"" >"$tmp/cluster-one.sh"
+printf '%s\n' "  sed -Ei 's/a/b/' \"\$f\"" >"$tmp/cluster-one.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 if [ -z "$(scan_hits "$RE_SED_INPLACE" "$tmp/cluster-one.sh")" ]; then
   ok 'structural control: `sed -Ei` is (still) invisible to the bare -i rule — which is WHY the cluster rule exists, stated as a measurement rather than an assumption'
 else
@@ -388,35 +428,35 @@ assert_not_flagged() { # assert_not_flagged <label> <file>
 }
 
 # (a) -i AFTER an intervening option argument. BSD eats `file` as the backup suffix.
-printf '%s\n' "  sed -e 's/a/b/' -i file" >"$tmp/sp-optrun.sh"
-assert_flagged '`sed -e EXPR -i file` (-i beyond the adjacent option run)' "$tmp/sp-optrun.sh"
+printf '%s\n' "  sed -e 's/a/b/' -i file" >"$tmp/sp-optrun.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
+assert_flagged '`sed -e EXPR -i file` (-i beyond the adjacent option run)' "$tmp/sp-optrun.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 # (b) a LINE-BROKEN invocation — invisible to any single-line ERE, hence the joiner.
-printf '%s\n' '  sed \' '    -i '"'"'s/a/b/'"'"' file' >"$tmp/sp-break.sh"
+printf '%s\n' '  sed \' '    -i '"'"'s/a/b/'"'"' file' >"$tmp/sp-break.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`sed \` + newline + `-i …` (backslash-continued across lines)' "$tmp/sp-break.sh"
-printf '%s\n' '  sed -e '"'"'s/a/b/'"'"' \' '    -Ei file' >"$tmp/sp-break2.sh"
+printf '%s\n' '  sed -e '"'"'s/a/b/'"'"' \' '    -Ei file' >"$tmp/sp-break2.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged 'a line-broken invocation whose continuation carries a BUNDLED -Ei' "$tmp/sp-break2.sh"
 # (c) the delimiter argument SEPARATED from -d, with no operand.
-printf '%s\n' '  order=$(paste -d ,)' >"$tmp/sp-darg.sh"
+printf '%s\n' '  order=$(paste -d ,)' >"$tmp/sp-darg.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -d ,` (separated delimiter argument, still no file operand)' "$tmp/sp-darg.sh"
 # (d) a REDIRECTION is not an operand — BSD usage()-errors just the same.
-printf '%s\n' '  order=$(paste -sd, < input)' >"$tmp/sp-redir.sh"
+printf '%s\n' '  order=$(paste -sd, < input)' >"$tmp/sp-redir.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -sd, < input` (a redirection is not a file operand)' "$tmp/sp-redir.sh"
-printf '%s\n' '  order=$(paste -sd, <"$f")' >"$tmp/sp-redir2.sh"
+printf '%s\n' '  order=$(paste -sd, <"$f")' >"$tmp/sp-redir2.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -sd, <"$f"` (redirection with no space)' "$tmp/sp-redir2.sh"
 # (d2) OUTPUT and FILE-DESCRIPTOR redirections are not operands either — one control per spelling,
 # because an input-only grammar reported every one of these CLEAN (#3296 round-8 finding 3).
-printf '%s\n' '  paste -sd, >output' >"$tmp/sp-redir-out.sh"
+printf '%s\n' '  paste -sd, >output' >"$tmp/sp-redir-out.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -sd, >output` (an OUTPUT redirection is not a file operand)' "$tmp/sp-redir-out.sh"
-printf '%s\n' '  paste -sd, >>output' >"$tmp/sp-redir-app.sh"
+printf '%s\n' '  paste -sd, >>output' >"$tmp/sp-redir-app.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -sd, >>output` (an APPEND redirection is not a file operand)' "$tmp/sp-redir-app.sh"
-printf '%s\n' '  paste -sd, 2>/dev/null' >"$tmp/sp-redir-fd.sh"
+printf '%s\n' '  paste -sd, 2>/dev/null' >"$tmp/sp-redir-fd.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -sd, 2>/dev/null` (a FILE-DESCRIPTOR redirection is not a file operand)' "$tmp/sp-redir-fd.sh"
-printf '%s\n' '  paste -sd, >out 2>&1' >"$tmp/sp-redir-both.sh"
+printf '%s\n' '  paste -sd, >out 2>&1' >"$tmp/sp-redir-both.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -sd, >out 2>&1` (a RUN of redirections, one of them an fd duplication)' "$tmp/sp-redir-both.sh"
-printf '%s\n' '  paste -sd, <in >out' >"$tmp/sp-redir-inout.sh"
+printf '%s\n' '  paste -sd, <in >out' >"$tmp/sp-redir-inout.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`paste -sd, <in >out` (input AND output redirection, still no operand)' "$tmp/sp-redir-inout.sh"
-printf '%s\n' '  order=$(paste -sd, >"$out")' >"$tmp/sp-redir-subst.sh"
-assert_flagged '`order=$(paste -sd, >"$out")` (output redirection inside a command substitution)' "$tmp/sp-redir-subst.sh"
+printf '%s\n' '  order=$(paste -sd, >"$out")' >"$tmp/sp-redir-subst.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
+assert_flagged '`order=$(paste -sd, >"$out")` (output redirection inside a command substitution)' "$tmp/sp-redir-subst.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 # And the NEGATIVE direction for the widened grammar, which is where widening can go wrong: a
 # paste that HAS an operand must stay unflagged even when it also redirects.
 printf '%s\n' '  paste -sd, "$f" >out' >"$tmp/sp-redir-okfile.sh"
@@ -426,23 +466,23 @@ assert_not_flagged '`paste -sd, - 2>/dev/null` (the explicit `-` stdin operand p
 printf '%s\n' '#  paste -sd, >output and paste -sd, 2>/dev/null are both banned' >"$tmp/sp-redir-cmt.sh"
 assert_not_flagged 'the redirection spellings named in a COMMENT (prose, not an invocation)' "$tmp/sp-redir-cmt.sh"
 # (e) the GNU long spelling, absent from BSD sed entirely.
-printf '%s\n' "  sed --in-place -e 's/a/b/' file" >"$tmp/sp-long.sh"
+printf '%s\n' "  sed --in-place -e 's/a/b/' file" >"$tmp/sp-long.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged '`sed --in-place` (GNU long option; BSD sed has no such flag)' "$tmp/sp-long.sh"
 # (f) the long spelling with an ATTACHED `=SUFFIX`, in BOTH positions — adjacent to `sed` and
 # beyond an intervening option. A long-option rule that requires WHITESPACE after the option name
 # sees neither; this table's does not, and both positions are now pinned by measurement instead of
 # left to inspection of the regex (#3296 round-8 finding 2).
-printf '%s\n' "  sed --in-place=.bak -e 's/a/b/' file" >"$tmp/sp-long-eq.sh"
-assert_flagged '`sed --in-place=.bak …` (long option with an ATTACHED suffix, adjacent to sed)' "$tmp/sp-long-eq.sh"
-printf '%s\n' "  sed -e 's/a/b/' --in-place=.bak file" >"$tmp/sp-long-eq2.sh"
-assert_flagged '`sed -e EXPR --in-place=.bak file` (attached-suffix long option BEYOND an intervening option)' "$tmp/sp-long-eq2.sh"
+printf '%s\n' "  sed --in-place=.bak -e 's/a/b/' file" >"$tmp/sp-long-eq.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
+assert_flagged '`sed --in-place=.bak …` (long option with an ATTACHED suffix, adjacent to sed)' "$tmp/sp-long-eq.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
+printf '%s\n' "  sed -e 's/a/b/' --in-place=.bak file" >"$tmp/sp-long-eq2.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
+assert_flagged '`sed -e EXPR --in-place=.bak file` (attached-suffix long option BEYOND an intervening option)' "$tmp/sp-long-eq2.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 # (g) the EMPTY-SUFFIX spellings beyond the adjacent position. Before the empty-suffix rules were
 # given the same option-run handling as the bare `-i` rule, these were invisible to EVERY rule in
 # the table — the hole this control now closes and keeps closed.
-printf '%s\n' "  sed -e 's/a/b/' -i'' file" >"$tmp/sp-empty-sq.sh"
-assert_flagged "\`sed -e EXPR -i'' file\` (empty SINGLE-quoted suffix beyond the adjacent position)" "$tmp/sp-empty-sq.sh"
+printf '%s\n' "  sed -e 's/a/b/' -i'' file" >"$tmp/sp-empty-sq.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
+assert_flagged "\`sed -e EXPR -i'' file\` (empty SINGLE-quoted suffix beyond the adjacent position)" "$tmp/sp-empty-sq.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 printf '%s\n' "  sed -e 's/a/b/' -i\"\" file" >"$tmp/sp-empty-dq.sh"
-assert_flagged '`sed -e EXPR -i"" file` (empty DOUBLE-quoted suffix beyond the adjacent position)' "$tmp/sp-empty-dq.sh"
+assert_flagged '`sed -e EXPR -i"" file` (empty DOUBLE-quoted suffix beyond the adjacent position)' "$tmp/sp-empty-dq.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 # The widening must not reach past a shell metacharacter here either: an empty-suffix `-i` on the
 # far side of a pipe belongs to a DIFFERENT command.
 printf '%s\n' '  sed '"'"'s/x/y/'"'"' f | grep -i'"''"' foo' >"$tmp/sp-empty-pipe.sh"
@@ -450,7 +490,7 @@ assert_not_flagged "a \`grep -i''\` AFTER a pipe (the empty-suffix rules stop at
 # And the same spellings in PROSE stay invisible: this repo documents the constructs it bans, so a
 # comment naming one is not an invocation.
 printf '%s\n' "# prose: sed -e 's/a/b/' -i'' file, and sed --in-place=.bak, are both banned here" \
-  >"$tmp/sp-new-cmt.sh"
+  >"$tmp/sp-new-cmt.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_not_flagged 'the new in-place spellings named in a COMMENT (prose about a banned construct is not an invocation)' "$tmp/sp-new-cmt.sh"
 
 # NEGATIVE CONTROLS for the widened option run — this is where widening can go wrong.
@@ -469,12 +509,12 @@ assert_not_flagged 'a benign backslash-continued command (joining must not manuf
 printf '%s\n' '# sed \' "  echo ok" >"$tmp/sp-cmtbreak.sh"
 assert_not_flagged 'a COMMENT ending in a backslash (it must not join the code line beneath it)' "$tmp/sp-cmtbreak.sh"
 printf '%s\n' '# prose about sed, ending in a backslash \' "  sed -i 's/a/b/' file" \
-  >"$tmp/sp-cmtbreak2.sh"
+  >"$tmp/sp-cmtbreak2.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 assert_flagged 'a REAL `sed -i` on the line beneath a backslash-ended COMMENT (joining it into the comment would MASK it)' "$tmp/sp-cmtbreak2.sh"
 
 # The joiner rewrites the stream, so LINE NUMBERS are asserted rather than assumed: a report
 # naming the wrong line sends the next reader to the wrong place.
-printf '%s\n' '# a comment' '' "  sed -i 's/a/b/' f" '  echo tail' >"$tmp/sp-lineno.sh"
+printf '%s\n' '# a comment' '' "  sed -i 's/a/b/' f" '  echo tail' >"$tmp/sp-lineno.sh" # portability-lint-allow: deliberate fixture: the unportable spelling this control must DETECT
 _ln=$(scan_hits "$RE_SED_INPLACE" "$tmp/sp-lineno.sh")
 if [ "${_ln%%:*}" = 3 ]; then
   ok 'structural control: a hit is reported at its REAL file line (blanking, not deleting, keeps numbering exact)'
@@ -502,19 +542,54 @@ else
   bad 'structural control: the portability-lint-allow marker does not exempt its line'
 fi
 
+# ---------------------------------------------------------------------------
+# THE SELF-SCAN, AND THE TWO WAYS IT COULD BE VACUOUS (#3296 round-8 finding 1).
+#
+# This file is one of the SCAN_FILES: it runs inside the macOS-sensitive `roborev-lints`
+# component and is mostly shell scaffolding, so a GNU-only construct added HERE would reproduce
+# the exact Linux-green/macOS-red regression it exists to prevent, and nothing else would catch
+# it. But it also DELIBERATELY contains the banned constructs — in its BSD-emulation fixtures and
+# its positive controls — each exempted by a per-line `portability-lint-allow` marker rather than
+# by any blanket rule. A self-scan of a file full of sanctioned violations can go green two ways
+# that have nothing to do with the file being clean, so BOTH are measured here rather than
+# asserted in prose:
+#   (i)  EXEMPT IN EFFECT — this file dropped from SCAN_FILES, or so heavily marked that nothing
+#        in it is scanned any more. Controlled by appending an UNMARKED violation to a COPY of
+#        this file: it must be FLAGGED.
+#   (ii) DECORATIVE MARKERS — if the rules did not in fact match this file's own fixtures, the
+#        green would come from the rules MISSING them, not from the exemption doing its job, and
+#        the markers would be hiding nothing. Controlled by neutralising the marker token in a
+#        copy: the file must then be FLAGGED, i.e. the markers are load-bearing.
+# ---------------------------------------------------------------------------
+_self="$SCRIPT_DIR/$(basename "$0")"
+_self_in_scan=no
+for _sf in "${SCAN_FILES[@]}"; do
+  [ "$_sf" = "$_self" ] && _self_in_scan=yes
+done
+if [ "$_self_in_scan" = yes ]; then
+  ok 'self-scan: this file is one of the SCAN_FILES — a GNU-only construct added to the portability guard itself FAILs the same component it gates'
+else
+  bad 'self-scan: this file is NOT in SCAN_FILES — the guard that runs in the macOS-sensitive roborev-lints component does not check its own scaffolding, which is where #3296 lived'
+fi
+cat "$_self" >"$tmp/self-unmarked.sh"
+printf '%s\n' "  sed -i 's/a/b/' \"\$f\"" >>"$tmp/self-unmarked.sh" # portability-lint-allow: writes an UNMARKED violation into the self-scan copy on purpose
+assert_flagged 'an UNMARKED violation appended to a COPY of this file (so the self-scan is a real scan, not a blanket exemption)' "$tmp/self-unmarked.sh"
+awk '{ gsub(/portability-lint-allow/, "portability-lint-NEUTRALISED"); print }' "$_self" >"$tmp/self-nomarker.sh"
+assert_flagged "this file with its exemption markers NEUTRALISED (proving the markers are load-bearing — the rules really do match this file's own deliberate fixtures)" "$tmp/self-nomarker.sh"
+
 # ===========================================================================
 # (2) THE BSD SHIMS, and the controls that prove they reproduce the reported defects.
 # ===========================================================================
 shim="$tmp/shim"
 mkdir -p "$shim"
 REAL_SED=$(command -v sed || printf '')
-REAL_PASTE=$(command -v paste || printf '')
+REAL_PASTE=$(command -v paste || printf '') # portability-lint-allow: names the binary for the shim; `command -v` does not invoke paste
 if [ -z "$REAL_SED" ] || [ -z "$REAL_PASTE" ]; then
   bad 'shim setup: sed/paste not found on PATH — the differential cannot run (this is a failure to measure, not a measurement)'
 fi
 
 {
-  printf '#!/usr/bin/env bash\n# BSD/macOS sed emulation, -i only (see test_roborev_guard_portability.sh).\n'
+  printf '#!/usr/bin/env bash\n# BSD/macOS sed emulation, -i only (see test_roborev_guard_portability.sh).\n' # portability-lint-allow: prose inside the shim script this printf writes, not an invocation
   printf 'REAL_SED=%q\n' "$REAL_SED"
   cat <<'SHIM_SED'
 set -uo pipefail
@@ -591,16 +666,16 @@ SHIM_PATH="$shim:$PATH"
 # CONTROL A: the sed shim must reproduce the #3296 defect — non-zero exit AND an UNCHANGED
 # file. If it silently worked, every sed_inplace assert below would be vacuous.
 printf 'foo\n' >"$tmp/ctl-sed.txt"
-if PATH="$SHIM_PATH" sed -i 's/foo/bar/' "$tmp/ctl-sed.txt" 2>/dev/null; then
-  bad 'shim control: `sed -i EXPR FILE` SUCCEEDED under the BSD shim — the shim does not emulate BSD, so the differential below would prove nothing'
+if PATH="$SHIM_PATH" sed -i 's/foo/bar/' "$tmp/ctl-sed.txt" 2>/dev/null; then # portability-lint-allow: BSD-shim control: this `sed -i` MUST run, to prove the shim reproduces #3296
+  bad 'shim control: `sed -i EXPR FILE` SUCCEEDED under the BSD shim — the shim does not emulate BSD, so the differential below would prove nothing' # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 elif [ "$(cat "$tmp/ctl-sed.txt")" = foo ]; then
-  ok 'shim control: under BSD -i semantics `sed -i EXPR FILE` fails AND leaves the file unpatched (the #3296 root cause 1, reproduced on this platform)'
+  ok 'shim control: under BSD -i semantics `sed -i EXPR FILE` fails AND leaves the file unpatched (the #3296 root cause 1, reproduced on this platform)' # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 else
   bad "shim control: the file changed despite the failure: $(cat "$tmp/ctl-sed.txt")"
 fi
 
 # CONTROL B: the paste shim must reproduce case (j2) — empty stdout, non-zero exit.
-_ctl_paste=$(printf 'a\nb\n' | PATH="$SHIM_PATH" paste -sd, 2>/dev/null)
+_ctl_paste=$(printf 'a\nb\n' | PATH="$SHIM_PATH" paste -sd, 2>/dev/null) # portability-lint-allow: BSD-shim control: the operand-less paste IS the defect being reproduced
 _ctl_paste_rc=$?
 if [ "$_ctl_paste_rc" -eq 0 ] || [ -n "$_ctl_paste" ]; then
   bad "shim control: operand-less `paste -sd,` produced '$_ctl_paste' (rc $_ctl_paste_rc) under the BSD shim — the shim does not emulate BSD"
