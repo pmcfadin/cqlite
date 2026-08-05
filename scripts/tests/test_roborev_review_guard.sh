@@ -364,7 +364,11 @@ case "$cmd" in
       # REPLACE the snapshot file with a NON-REGULAR object instead of deleting the directory (job 10,
       # blocker 2): the live path then EXISTS but cannot be read as a diff, while a valid capture sits
       # ready. The block must say `unreadable`, not answer from the capture.
-      if [ -n "${STUB_SNAPSHOT_REPLACE_WITH:-}" ]; then
+      # An INACCESSIBLE snapshot directory (job 13): the file STAYS, only the parent's search bit goes,
+      # so `[ ! -e ]` is false while the snapshot is very much there.
+      if [ -n "${STUB_SNAPSHOT_CHMOD_AFTER:-}" ]; then
+        chmod "$STUB_SNAPSHOT_CHMOD_AFTER" "$STUB_SNAPSHOT_LIFECYCLE_DIR" 2>/dev/null || :
+      elif [ -n "${STUB_SNAPSHOT_REPLACE_WITH:-}" ]; then
         rm -f "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
         case "$STUB_SNAPSHOT_REPLACE_WITH" in
           dir)  mkdir -p "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ;;
@@ -1117,6 +1121,9 @@ export STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
 # STUB_SNAPSHOT_REPLACE_WITH leaves the snapshot DIRECTORY in place and replaces the content file with a
 # non-regular object (`dir` or `fifo`), so the live path EXISTS but is unreadable while a capture exists.
 export STUB_SNAPSHOT_REPLACE_WITH=''
+# STUB_SNAPSHOT_CHMOD_AFTER leaves the snapshot file in place and makes its DIRECTORY unsearchable, so the
+# path exists but cannot be observed — the job-13 vector.
+export STUB_SNAPSHOT_CHMOD_AFTER=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -1142,6 +1149,7 @@ reset_stub() {
   STUB_SNAPSHOT_REWRITE_PATHS=''
   STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
   STUB_SNAPSHOT_REPLACE_WITH=''
+  STUB_SNAPSHOT_CHMOD_AFTER=''
   CP_SHIM_MODE=''
   CP_SHIM_WITNESS=''
 }
@@ -4248,6 +4256,41 @@ assert_lacks 'case (cx32e) a symlinked snapshot dir never certifies from its tar
 rm -rf "$sym_c" "$sym_d"
 reset_stub
 
+printf '== (cx32f) an INACCESSIBLE snapshot dir with a valid capture reports unreadable (job 13) ==\n'
+# THE RULING'S OWN CASE. `[ ! -e "$path" ]` is false when the parent is not searchable, so an existing
+# snapshot behind a `chmod 000` directory read as "gone" and was answered from the capture. The fixture
+# makes the capture VALID and COMPLETE and leaves the snapshot FILE IN PLACE, so only the
+# absent-vs-unobservable distinction stands between it and a green.
+if [ "$(id -u)" != 0 ]; then
+  reset_stub
+  inacc_dir="$snap_repo/.roborev/roborev-snapshot-575757"
+  inacc_log="$tmp/cx32f-transcript.log"
+  STUB_SNAPSHOT_LIFECYCLE_DIR="$inacc_dir"
+  STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+  STUB_SNAPSHOT_CHMOD_AFTER=000
+  STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+  STUB_PROMPT=$(snap_prompt "$inacc_dir/roborev-snapshot-content.diff")
+  run_wrapper "$snap_work" --log "$inacc_log"
+  chmod 755 "$inacc_dir" 2>/dev/null || :
+  # The capture really was published, so the refusal below is not vacuous.
+  if [ -s "$INVOKED.capture-seen" ]; then
+    ok 'case (cx32f): a valid capture was published and was still not substituted for an unobservable path'
+  else
+    bad 'case (cx32f): no capture was published, so the refusal is reached with nothing to substitute'
+  fi
+  assert_verdict 'case (cx32f)' FAIL 1
+  assert_says 'case (cx32f) an unobservable snapshot is reported unreadable, not absent' \
+    '^prompt-content: FAIL \(snapshot diff unusable: unreadable\)$'
+  assert_says 'case (cx32f) the cause says WHAT was unobservable rather than asserting absence' \
+    "(could not be OBSERVED|could not be observed)"
+  assert_lacks 'case (cx32f) an inaccessible snapshot is never called cleaned-up' 'cleaned-up'
+  assert_lacks 'case (cx32f) and never certifies from the capture' '^prompt-content: PASS'
+  rm -rf "$inacc_dir"
+  reset_stub
+else
+  printf 'SKIP - case (cx32f): running as root, where a chmod 000 directory is still searchable\n'
+fi
+
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs
@@ -4695,11 +4738,18 @@ if [ -n "${_cap_val_defs:-}" ] && [ "${_cap_val_defs:-0}" -eq 1 ]; then
   _cvs=$(grep -nE '^_roborev_capture_validate\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
   _cve=$(awk -v s="$_cvs" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
   _cv_body=$(sed -n "${_cvs},${_cve:-$_cvs}p" "$ORACLES")
-  _cv_l_tests=$(printf '%s\n' "$_cv_body" | grep -cE '\[ ! -L ' || true)
-  if [ "${_cv_l_tests:-0}" -ge 3 ]; then
-    ok "structural: the capture validator refuses symlinks at the file AND at each component it descends ($_cv_l_tests -L tests)"
+  # The validator now WALKS the components it descends (`.roborev`, the snapshot dir, the file) asking the
+  # three-way helper first and `-L` second, so the property is "every traversed component is checked",
+  # expressed as a loop rather than as three copies of a test.
+  _cv_missing=""
+  printf '%s\n' "$_cv_body" | grep -qF 'for _cv_walk in "$repo/.roborev" "$repo/.roborev/$id" "$f"' \
+    || _cv_missing="$_cv_missing component-walk"
+  printf '%s\n' "$_cv_body" | grep -qF '_roborev_path_state "$_cv_walk"' || _cv_missing="$_cv_missing observability-first"
+  printf '%s\n' "$_cv_body" | grep -qF '[ ! -L "$_cv_walk" ] || return 1' || _cv_missing="$_cv_missing symlink-refusal"
+  if [ -z "$_cv_missing" ]; then
+    ok 'structural: the capture validator walks EVERY component it descends, asking observability before type'
   else
-    bad "structural: the capture validator carries only ${_cv_l_tests:-0} symlink test(s) — a symlinked .roborev or snapshot directory would still be followed (#3312 blocker 1)"
+    bad "structural: the capture validator no longer checks every traversed component —$_cv_missing. A symlinked .roborev or snapshot directory would be followed (#3312 blocker 1)"
   fi
   if printf '%s\n' "$_cv_body" | grep -qF 'pwd -P'; then
     ok 'structural: the capture validator resolves the containing directory physically before trusting it'
@@ -4720,16 +4770,77 @@ if [ -n "${_src_defs:-}" ] && [ "${_src_defs:-0}" -eq 1 ]; then
   fi
   # THE FALLBACK PREDICATE IS NON-EXISTENCE, NOT "not a regular file" (job 10, blocker 2): a directory
   # or FIFO at the named path is "unreadable", a fact to REPORT, not "the snapshot is gone".
-  if printf '%s\n' "$_r_body" | grep -qF 'if [ ! -e "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ]'; then
-    ok 'structural: a capture is consulted only when the live path does NOT EXIST'
+  # STRONGER THAN THE ORIGINAL `! -e` FORM (job 13 superseded job 10 here): the fallback is keyed on the
+  # MEASURED `verified-absent` state, so neither a non-regular file nor an unobservable one — both of which
+  # made `! -e`/`! -f` true or false for the wrong reason — can be answered from a capture.
+  if printf '%s\n' "$_r_body" | grep -qF '[ "$_rx_live_state" = "verified-absent" ]' \
+    && printf '%s\n' "$_r_body" | grep -qF 'if [ "$_rx_live_state" = "unreadable" ]'; then
+    ok 'structural: the capture fallback is keyed on a MEASURED verified-absent, with unreadable reported separately'
   else
-    bad 'structural: the capture fallback is not keyed on non-existence — an unreadable non-regular file at the named path would be silently answered from a capture (#3312 job 10, blocker 2)'
+    bad 'structural: the capture fallback is not keyed on the measured absence state — an unreadable or inaccessible path at the named location could be silently answered from a capture (#3312 jobs 10, 13)'
   fi
   if printf '%s\n' "$_r_body" | grep -qE '\[ "\$_rx_cap_recorded" = "\$\{_rx_snap_rel:-\}" \]'; then
     ok 'structural: a capture is accepted only when its recorded path EQUALS the path the prompt names'
   else
     bad 'structural: the capture lookup no longer compares the recorded path with the prompt-named path — the canonical sibling could stand in for another file in the same snapshot dir (#3312 blocker 2)'
   fi
+fi
+
+# ===== CATEGORICAL: NO BARE EXISTENCE PREDICATE MAY READ ITS OWN FALSITY AS ABSENCE =====
+# The third instance of one family (roborev jobs 5, 10, 13) made this a CLASS fix rather than a third
+# patch, and only a structural assert makes it categorical: every file predicate in the capture apparatus
+# must either go through the three-way helper (`verified-absent` / `present` / `unreadable`) or carry an
+# explicit `observability-justified:` rationale at the site. An unannotated new `[ -e ]`/`[ -f ]`/`[ -d ]`
+# whose falsity is treated as "not there" therefore FAILs the fast loop instead of costing a review round.
+_apparatus_fns='roborev_snapshot_capture_start|roborev_snapshot_capture_stop|roborev_snapshot_capture_cleanup|_roborev_file_digest|_roborev_capture_validate|_roborev_snapshot_capture_loop|roborev_prompt_snapshot_paths|_roborev_resolve_existing_ancestor|roborev_snapshot_path_binding|roborev_collect_review_diff_headers|roborev_collect_prompt_headers|_roborev_path_state|_roborev_regular_readable_state'
+_pf_unjustified=$(awk -v fns="$_apparatus_fns" '
+  $0 ~ "^(" fns ")\\(\\) \\{" { inf = 1; just = 0; next }
+  inf && /^}/ { inf = 0; next }
+  !inf { next }
+  /observability-justified/ { just = 1; next }
+  /^[[:space:]]*#/ { next }
+  # A bare file predicate: `[ -e|-f|-d|-r|-L|-s|-x path ]`, with or without a leading `!`.
+  /\[[[:space:]]*!?[[:space:]]*-(e|f|d|r|L|s|x)[[:space:]]/ {
+    if (just == 0) printf "%d: %s\n", NR, $0
+    just = 0
+    next
+  }
+  { just = 0 }
+' "$ORACLES" || true)
+if [ -z "$_pf_unjustified" ]; then
+  ok 'structural: every file predicate in the capture apparatus is routed through the three-way helper or justified in code'
+else
+  bad "structural: an UNJUSTIFIED bare file predicate in the capture apparatus reads its own falsity as absence — ${_pf_unjustified%%$'\n'*} — route it through _roborev_path_state or annotate it 'observability-justified:' with the reason (#3312 predicate family: jobs 5, 10, 13)"
+fi
+# The helper itself must exist, be three-valued, and name the family so instance four is prevented.
+if grep -qE '^_roborev_path_state\(\) \{' "$ORACLES"; then
+  _ps_s=$(grep -nE '^_roborev_path_state\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+  _ps_e=$(awk -v s="$_ps_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  _ps_body=$(sed -n "${_ps_s},${_ps_e:-$_ps_s}p" "$ORACLES")
+  _ps_missing=""
+  for _v in verified-absent present unreadable; do
+    printf '%s\n' "$_ps_body" | grep -qF "$_v" || _ps_missing="$_ps_missing $_v"
+  done
+  printf '%s\n' "$_ps_body" | grep -qF 'No such file or directory' || _ps_missing="$_ps_missing ENOENT-discrimination"
+  printf '%s\n' "$_ps_body" | grep -qF '[ -d "$parent" ] && [ -x "$parent" ]' || _ps_missing="$_ps_missing parent-observability"
+  if [ -z "$_ps_missing" ]; then
+    ok 'structural: the path-state helper is three-valued and establishes absence affirmatively (ENOENT + observable parent)'
+  else
+    bad "structural: the path-state helper is incomplete —$_ps_missing. Absence must be MEASURED, not inferred from a two-valued test (#3312 jobs 5, 10, 13)"
+  fi
+  if grep -qE 'jobs 5, 10, 13|jobs 5, 10 and 13' "$ORACLES"; then
+    ok 'structural: the predicate family is named at the helper, citing all three instances'
+  else
+    bad 'structural: the helper does not name the three instances of the family — instance four would be awaited rather than prevented (#3272 three-recurrence rule)'
+  fi
+else
+  bad 'structural: _roborev_path_state is not defined — the predicate family has no shared home (#3312)'
+fi
+# And the vector itself: the capture may be consulted ONLY on a verified-absent live path.
+if grep -qF 'if [ "$_rx_live_state" = "verified-absent" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ]' "$ORACLES"; then
+  ok 'structural: a capture is consulted only when the live path is VERIFIED absent (not merely un-`-e`-able)'
+else
+  bad 'structural: the capture fallback is not keyed on verified-absent — an inaccessible snapshot could be answered from an older capture (#3312 job 13)'
 fi
 
 # THE ESCALATION STAYS GUARDED (job 11). Its expected failure mode is "the watcher already exited", and

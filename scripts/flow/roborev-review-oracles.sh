@@ -1182,6 +1182,10 @@ _roborev_path_state() {
   # THE PARENT MUST BE AFFIRMATIVELY OBSERVABLE before an ENOENT is accepted as absence. `-d` and `-x`
   # are used here as a POSITIVE pair (both must hold), never as "not the bad case": if either fails the
   # question is passed to the parent rather than answered.
+  # observability-justified: THIS IS THE PRIMITIVE the rest of the apparatus is routed through, and the
+  # one place such a test is the measurement rather than a guess: the pair is required AFFIRMATIVELY
+  # (both must hold) and only to CONFIRM an ENOENT already obtained, and when it does not hold the
+  # question is passed to the parent instead of being answered. Nothing here reads a falsity as absence.
   if [ -d "$parent" ] && [ -x "$parent" ]; then
     _rx_path_state="verified-absent"
     return 1
