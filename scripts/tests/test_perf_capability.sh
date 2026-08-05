@@ -863,8 +863,12 @@ done
 #     Same shape as the fork-free audit in test_agent_gate_summary.sh: parse the function
 #     bodies (a column-0 `name() {` … column-0 `}`), and treat FINDING NOTHING as a failure,
 #     so a parser that stops matching can never pass this vacuously.
+#
+#     EXTENDED TO THE PRIVILEGE SHIM (issue #3261 AC4). The guard authorizes EXECUTABLES as
+#     well as paths, and CQLITE_PERF_TEST_PRIV_DIR was read TEXTUALLY — so it joins the seam
+#     regex below, and a second pass audits every function that RESOLVES a privileged tool.
 seam_audit=$(awk \
-  -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX)' \
+  -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
   -v gatere='perf_capability_(sandbox_|path_within)' '
   /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
     fn = $1; sub(/\(\)$/, "", fn); seam = 0; gate = 0
@@ -894,16 +898,248 @@ while read -r fn seam gate; do
 done <<EOF
 $seam_audit
 EOF
-# 4 is the count at the time of writing (proc_dir_into, sysctl_dir, sysctl_search_path,
-# test_seams_ok) plus the two allowlisted readers; the assert is a FLOOR, so adding a
-# consumer is fine and losing the parse is not.
-if [ "$seam_consumers" -ge 5 ] && [ -z "$seam_ungated" ] \
+# 5 is the count at the time of writing (proc_dir_into, sysctl_dir, sysctl_search_path,
+# test_seams_ok, env_guard) plus the two allowlisted readers; the assert is a FLOOR, so adding
+# a consumer is fine and losing the parse is not.
+if [ "$seam_consumers" -ge 6 ] && [ -z "$seam_ungated" ] \
    && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_sysctl_search_path 1 1$' \
-   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_proc_dir_into 1 1$'; then
-  ok "perf-capability: STRUCTURAL — all $seam_consumers seam-dereferencing functions route through the single containment gate (only the documented presence-check + the root reader are allowlisted), so a new entry point cannot silently skip it"
+   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_proc_dir_into 1 1$' \
+   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_env_guard 1 1$'; then
+  ok "perf-capability: STRUCTURAL — all $seam_consumers seam-dereferencing functions (CQLITE_PERF_TEST_PRIV_DIR included) route through the single containment gate (only the documented presence-check + the root reader are allowlisted), so a new entry point cannot silently skip it"
 else
   bad "perf-capability: STRUCTURAL audit failed — seam consumers found: $seam_consumers; UNGATED:${seam_ungated:- none}"
   printf '%s\n' "$seam_audit"
+fi
+# 1f-ii. THE SAME AUDIT FOR THE BINARIES THE GUARD AUTHORIZES (issue #3261 AC4). AC4 was the
+#        EIGHTH escape from this family and the first about an EXECUTABLE rather than a path:
+#        `CQLITE_PERF_TEST_PRIV_DIR=/usr` and a symlink-to-real-`sudo` inside a declared shim
+#        dir both passed a textual check, so a privileged test-mode bootstrap could run the
+#        host's real `sysctl --system`. Paths and executables are the same problem — a NAME is
+#        not a DESTINATION — so they get the same STRUCTURAL treatment: every function that
+#        resolves a privileged tool must route through the containment family, or be
+#        allowlisted by name with a reason. Floor + explicit expectations, same as above.
+priv_audit=$(awk \
+  -v privre='(for [a-z_]+ in (sudo|sysctl)|command -v .*(sudo|sysctl))' \
+  -v gatere='perf_capability_(sandbox_|path_within)' '
+  /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
+    fn = $1; sub(/\(\)$/, "", fn); priv = 0; gate = 0
+    if ($0 ~ privre) priv = 1
+    if ($0 ~ gatere) gate = 1
+    if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, priv, gate; inb = 0 }
+    else inb = 1
+    next
+  }
+  inb && /^\}/ { printf "%s %d %d\n", fn, priv, gate; inb = 0; next }
+  inb {
+    if ($0 ~ privre) priv = 1
+    if ($0 ~ gatere) gate = 1
+  }
+' "$PERFLIB")
+# The ONE function allowed to resolve a privileged tool without the containment gate, and why:
+# perf_capability_drop_prefix_into resolves setpriv/runuser/sudo to DE-escalate (run the `perf
+# stat` probe as a LESS privileged identity). It cannot grant privilege, and in test mode
+# perf_capability_env_guard has already refused if any real sudo/sysctl was reachable at all —
+# so its inputs are already contained by the time it runs. Joining this list is a visible act.
+priv_audit_allow=' perf_capability_drop_prefix_into '
+priv_consumers=0; priv_ungated=''
+while read -r fn priv gate; do
+  [ -n "$fn" ] || continue
+  [ "$priv" = 1 ] || continue
+  priv_consumers=$((priv_consumers + 1))
+  case "$priv_audit_allow" in *" $fn "*) continue ;; esac
+  [ "$gate" = 1 ] || priv_ungated="$priv_ungated $fn"
+done <<EOF
+$priv_audit
+EOF
+if [ "$priv_consumers" -ge 2 ] && [ -z "$priv_ungated" ] \
+   && printf '%s\n' "$priv_audit" | grep -q '^perf_capability_env_guard 1 1$'; then
+  ok "perf-capability: STRUCTURAL — all $priv_consumers functions that RESOLVE a privileged tool route through the containment gate (only the documented de-escalation prefix builder is allowlisted), so the EXECUTABLES the guard authorizes are validated by destination too (#3261 AC4)"
+else
+  bad "perf-capability: STRUCTURAL privilege-shim audit failed — resolvers found: $priv_consumers; UNGATED:${priv_ungated:- none}"
+  printf '%s\n' "$priv_audit"
+fi
+
+# ---- 1g. #3261: A NAME IS NOT A DESTINATION — the four remaining escapes ------------------
+# Positive containment closed the PATH SPELLINGS. These four are what containment of a
+# spelling still does not buy, and each is asserted BY ITS OWN OBSERVABLE CONSEQUENCE (a
+# followed write, a fabricated /proc verdict, a refused legitimate file, a real privileged
+# tool), never by an rc alone — this guard has several refusals and an rc-only check would let
+# the wrong one satisfy the case.
+
+# 1g-i. AC1 (High) — DIRECTORY containment is not WRITE-TARGET containment. `tee <path>` opens
+#       O_WRONLY|O_CREAT|O_TRUNC and FOLLOWS a symlink, so a symlink at the managed basename
+#       inside a perfectly-contained directory pointed the privileged write at the LINK'S
+#       TARGET — anywhere on the box. A contained directory says nothing about where its
+#       entries point. Two independent requirements, both asserted:
+#         * anything that merely NAMES the write target REFUSES (rc 1, empty, loud);
+#         * the WRITE ITSELF replaces the directory ENTRY (rename), so a symlink planted in
+#           the window between the check and the write is replaced, not written through.
+wt_d="$tmp/wt-sandbox.d"; mkdir -p "$wt_d"
+wt_outside="$tmp/wt-outside-target"; printf 'PRECIOUS-HOST-FILE\n' >"$wt_outside"
+wt_before=$(cat "$wt_outside")
+rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outside" "$wt_d/99-cqlite-perf.conf"
+wt_path=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>/dev/null); wt_rc=$?
+wt_err=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>&1 >/dev/null)
+if [ "$wt_rc" -ne 0 ] && [ -z "$wt_path" ] \
+   && printf '%s' "$wt_err" | grep -qi 'symlink' \
+   && [ -L "$wt_d/99-cqlite-perf.conf" ] && [ "$(cat "$wt_outside")" = "$wt_before" ]; then
+  ok "perf-capability: the drop-in WRITE TARGET is refused when the managed basename is itself a SYMLINK (rc 1, empty, named) — a contained directory does not license writing through its entries (#3261 AC1)"
+else
+  bad "perf-capability: a SYMLINKED write target was NAMED for a privileged tee (rc=$wt_rc, path='$wt_path', err='$wt_err')"
+fi
+# ...and the CONTENTS read that decides idempotency may not follow it either: a symlink whose
+# TARGET happens to hold the canonical bytes must not report "already current" (that would
+# leave the host file in place and claim success).
+printf '%s\n' "$(bash "$PERFLIB" --drop-in)" >"$wt_outside"
+if env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB" 2>/dev/null; then
+  bad "perf-capability: dropin_current followed a SYMLINK and reported the drop-in 'already current' from a file outside the managed name"
+else
+  ok "perf-capability: dropin_current does NOT follow a symlinked managed name, even when the link's TARGET holds byte-identical canonical content (#3261 AC1)"
+fi
+# ...and the WRITE replaces the ENTRY. The refusal above is a check with a TOCTOU window; the
+# rename has none. After it, the managed name is a REGULAR file holding the canonical bytes,
+# the outside target is byte-identical to before, and no temp entry is left behind.
+wt_outside_bytes=$(cat "$wt_outside")
+wt_ins=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ins_rc=$?
+wt_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+if [ "$wt_ins_rc" -eq 0 ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ] && [ -f "$wt_d/99-cqlite-perf.conf" ] \
+   && [ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && [ -z "$wt_leftover" ] \
+   && env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB"; then
+  ok "perf-capability: the drop-in write REPLACES the directory entry (temp + rename), so a pre-existing symlink at the managed name is replaced and its outside target is untouched — and no temp entry is left behind (#3261 AC1)"
+else
+  bad "perf-capability: the atomic drop-in install did not replace a symlinked entry (rc=$wt_ins_rc, out='$wt_ins', link=$([ -L "$wt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$wt_leftover', outside-changed=$([ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && echo no || echo YES))"
+fi
+# ...and the install is still gated: an out-of-sandbox seam may not be written at all.
+if env CQLITE_PERF_SYSCTL_DIR="$symanc/sysctl.d" \
+     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" >/dev/null 2>&1; then
+  bad "perf-capability: dropin_install wrote through a seam resolving OUT of the sandbox"
+else
+  ok "perf-capability: dropin_install inherits the containment gate — a seam resolving out of the sandbox writes nothing"
+fi
+
+# 1g-ii. AC2 (Medium) — the inversion REGRESSED symlink rejection on the READ path. The
+#        fork-free proc check judges the SPELLING, so a symlink INSIDE the sandbox pointing at
+#        the real /proc/sys/kernel satisfies containment: the run then reports a capability
+#        token derived from the HOST's real controls while claiming to have read a stand-in.
+#        That is a FABRICATED verdict, which is worse than a refusal, and it is a regression
+#        against the pre-inversion behaviour. The token path is contractually fork-free, so the
+#        fix must reject symlinked COMPONENTS with builtins only.
+ac2_fail=0
+ac2_link="$tmp/ac2-proc-is-a-symlink"; rm -f "$ac2_link"; ln -s /proc/sys/kernel "$ac2_link"
+ac2_dirlink="$tmp/ac2-ancestor-link"; rm -f "$ac2_dirlink"; ln -s /proc/sys "$ac2_dirlink"
+for ac2_seam in "$ac2_link" "$ac2_dirlink/kernel"; do
+  ac2_tok=$(env CQLITE_PERF_PROC_DIR="$ac2_seam" bash "$PERFLIB" --token 2>/dev/null)
+  [ "$ac2_tok" = absent ] || {
+    bad "perf-capability: the fork-free READ path followed a SYMLINK inside the sandbox to the real /proc and reported a FABRICATED token '$ac2_tok' for seam '$ac2_seam' (expected 'absent')"
+    ac2_fail=1; }
+  env CQLITE_PERF_PROC_DIR="$ac2_seam" \
+    bash -c '. "$1"; perf_capability_proc_dir_into d' _ "$PERFLIB" >/dev/null 2>&1 && {
+    bad "perf-capability: proc_dir_into ACCEPTED a symlinked seam '$ac2_seam'"; ac2_fail=1; }
+done
+[ "$ac2_fail" -ne 0 ] || ok "perf-capability: the fork-free READ path rejects a SYMLINKED path component even when the SPELLING is strictly inside the sandbox — a symlink to the real /proc/sys/kernel reads nothing (token 'absent'), never a fabricated capability (#3261 AC2)"
+# ...and the rejection is not vacuous: a REAL directory of the same shape still reads.
+ac2_real="$tmp/ac2-real-proc"; mkdir -p "$ac2_real"
+printf '%s\n' -1 >"$ac2_real/perf_event_paranoid"; printf '%s\n' 0 >"$ac2_real/kptr_restrict"
+if [ "$(env CQLITE_PERF_PROC_DIR="$ac2_real" bash "$PERFLIB" --token 2>/dev/null)" = ok ]; then
+  ok "perf-capability: a REAL (symlink-free) stand-in directory inside the sandbox still reads — the AC2 rejection is per-component, not a blanket refusal"
+else
+  bad "perf-capability: the symlink rejection made the fork-free read path vacuous (a real stand-in dir no longer reads)"
+fi
+
+# 1g-iii. AC3 (Low) — a STRICTLY CONTAINED file was wrongly REFUSED. The file variant judged
+#         its PARENT with the strict-containment predicate, so `<root>/sysctl.conf` failed:
+#         the parent IS the root, and a root is not strictly inside itself. The judged path
+#         must be <canonical parent>/<basename>, which IS strictly inside. A guard that
+#         refuses legitimate input is the guard people learn to work around, so this is a
+#         correctness case, not a convenience.
+ac3_ok() { env CQLITE_PERF_TEST_SANDBOX="$1" \
+  bash -c '. "$1"; perf_capability_sandbox_file_ok_resolved "$2"' _ "$PERFLIB" "$2"; }
+: >"$sbx/sysctl.conf"
+ac3_fail=0
+ac3_ok "$sbx" "$sbx/sysctl.conf" || { bad "perf-capability: '<sandbox-root>/sysctl.conf' was REFUSED though strictly contained"; ac3_fail=1; }
+ac3_ok "$sbx" "$sbx/inside/sysctl.conf" || { bad "perf-capability: a sysctl.conf one level deeper inside the sandbox was refused"; ac3_fail=1; }
+# ...while every genuine escape is still refused: outside the root, the root itself, a `..`
+# spelling, and — the AC1 lesson applied here — a SYMLINKED final component, whose CONTENTS
+# the competing-file scan would otherwise read out of the host's real configuration.
+rm -f "$sbx/linked-sysctl.conf"; ln -s /etc/sysctl.conf "$sbx/linked-sysctl.conf"
+for ac3_bad in "$tmp/outside-the-root/sysctl.conf" "$sbx" "$sbx/../sysctl.conf" \
+               "$sbx/linked-sysctl.conf" "relative/sysctl.conf" ''; do
+  ac3_ok "$sbx" "$ac3_bad" && { bad "perf-capability: sandbox_file_ok_resolved ACCEPTED '$ac3_bad'"; ac3_fail=1; }
+done
+[ "$ac3_fail" -ne 0 ] || ok "perf-capability: the FILE variant accepts a strictly-contained '<root>/sysctl.conf' (canonical parent + basename) while still refusing one outside the root, the root itself, a '..' spelling, a relative path and a SYMLINKED final component (#3261 AC3)"
+# ...and end-to-end through the seam that consumes it: a contained sysctl.conf stand-in is a
+# legitimate CQLITE_PERF_SYSCTL_EXTRA_DIRS entry and must appear on the search path.
+: >"$tmp/sysctl.conf"
+ac3_path=$(env CQLITE_PERF_SYSCTL_DIR="$seamed_d" CQLITE_PERF_SYSCTL_EXTRA_DIRS="$tmp/sysctl.conf" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); ac3_path_rc=$?
+if [ "$ac3_path_rc" -eq 0 ] && printf '%s\n' "$ac3_path" | grep -qx -- "$tmp/sysctl.conf"; then
+  ok "perf-capability: a sysctl.conf stand-in directly inside the sandbox root is accepted as a CQLITE_PERF_SYSCTL_EXTRA_DIRS entry and reaches the search path (#3261 AC3, end to end)"
+else
+  bad "perf-capability: a contained sysctl.conf stand-in was dropped from the test-mode search path (rc=$ac3_path_rc, path='$ac3_path')"
+fi
+
+# 1g-iv. AC4 (High) — the guard authorizes EXECUTABLES, and never resolved them. Two escapes,
+#        one shape: an absolute shim dir that is not in the sandbox at all (`/usr` — it does
+#        contain the real /usr/bin/sudo, so the textual "inside the declared dir" check
+#        PASSED), and a SYMLINK to the real tool sitting inside a genuine shim dir (spelled
+#        locally, resolving to the host's binary). Either one let a privileged test-mode
+#        bootstrap execute a real `sysctl --system` and reconfigure the host kernel.
+#        `$ac4_sys` stands in for `/usr` PORTABLY: an absolute directory OUTSIDE the declared
+#        sandbox root that holds tools named `sudo`/`sysctl`. Asserting against the literal
+#        /usr would make the case depend on whether this host happens to ship sudo there.
+ac4_sys=''
+if ac4_sys=$(mktemp -d "${TMPDIR:-/tmp}/perf-cap-outside.XXXXXX") && [ -d "$ac4_sys" ]; then
+  trap 'rm -rf "$tmp" "$ac4_sys"' EXIT
+else
+  ac4_sys=''
+fi
+if [ -z "$ac4_sys" ]; then
+  bad "perf-capability: could not create the out-of-sandbox dir the AC4 cases need"
+else
+  for t in sudo sysctl; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$ac4_sys/$t"; chmod +x "$ac4_sys/$t"
+  done
+  ac4_guard() { # ac4_guard <PATH-prefix> <priv-dir> -> rc + stderr; sandbox root is $sbx
+    env PATH="$1:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$sbx" \
+      CQLITE_PERF_TEST_PRIV_DIR="$2" CQLITE_PERF_PROC_DIR="$sbx/inside-proc" \
+      CQLITE_PERF_SYSCTL_DIR="$sbx/inside" \
+      bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1
+  }
+  ac4_fail=0
+  # (a) the `/usr` shape: absolute, CONTAINS the tools, not in the sandbox.
+  ac4_out=$(ac4_guard "$ac4_sys" "$ac4_sys") && ac4_fail=1
+  printf '%s' "$ac4_out" | grep -q 'sandbox' || ac4_fail=1
+  [ "$ac4_fail" -eq 0 ] || bad "perf-capability: an absolute shim dir OUTSIDE the sandbox root (the '/usr' shape) was accepted, or refused without naming the sandbox: '$ac4_out'"
+  # (b) the SYMLINK shape: a declared shim dir genuinely inside the sandbox, whose `sudo`
+  #     RESOLVES to the tool outside it.
+  ac4_link="$sbx/ac4-shims"; mkdir -p "$ac4_link"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$ac4_link/sysctl"; chmod +x "$ac4_link/sysctl"
+  rm -f "$ac4_link/sudo"; ln -s "$ac4_sys/sudo" "$ac4_link/sudo"
+  ac4_out2=$(ac4_guard "$ac4_link" "$ac4_link") && {
+    bad "perf-capability: a SYMLINK to a real privileged tool inside the declared shim dir was accepted — test mode could run the host's own sudo/sysctl"; ac4_fail=1; }
+  # (c) the SWEEP: with NO sudo/sysctl reachable on PATH at all the per-tool loop resolves
+  #     nothing, so a symlinked `sysctl` PARKED in the declared shim dir must still be
+  #     refused — otherwise it is one PATH-order change away from being executed.
+  ac4_nopath="$sbx/ac4-nopath"; mkdir -p "$ac4_nopath"
+  for t in bash cat printf env grep; do
+    s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$ac4_nopath/$t"
+  done
+  ac4_park="$sbx/ac4-parked"; mkdir -p "$ac4_park"
+  rm -f "$ac4_park/sysctl"; ln -s "$ac4_sys/sysctl" "$ac4_park/sysctl"
+  ac4_out3=$(env PATH="$ac4_nopath" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$sbx" \
+    CQLITE_PERF_TEST_PRIV_DIR="$ac4_park" CQLITE_PERF_PROC_DIR="$sbx/inside-proc" \
+    CQLITE_PERF_SYSCTL_DIR="$sbx/inside" \
+    bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1) && {
+    bad "perf-capability: a privileged tool PARKED as a symlink in the declared shim dir was accepted because PATH did not happen to reach it"; ac4_fail=1; }
+  # ...and NOT vacuous: a shim dir inside the sandbox holding REAL FILES is still accepted.
+  ac4_good="$sbx/ac4-good-shims"; mkdir -p "$ac4_good"
+  for t in sudo sysctl; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$ac4_good/$t"; chmod +x "$ac4_good/$t"
+  done
+  ac4_guard "$ac4_good" "$ac4_good" >/dev/null 2>&1 || {
+    bad "perf-capability: a legitimate shim dir of REAL FILES inside the sandbox was refused — the AC4 fix is vacuous"; ac4_fail=1; }
+  [ "$ac4_fail" -ne 0 ] || ok "perf-capability: every privileged executable the guard authorizes is validated by DESTINATION — a shim dir outside the sandbox ('/usr' shape), a symlink to a real tool inside a declared shim dir, and one merely PARKED there out of PATH reach are all refused, while a shim dir of real files inside the sandbox still works (#3261 AC4)"
 fi
 
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
