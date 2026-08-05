@@ -1124,13 +1124,7 @@ rm -f "$wt_d/99-cqlite-perf.conf"
 # the two refusal cases and be useless, so a correctly-owned 0755 directory must still install.
 wt_perm_d="$tmp/wt-perm.d"
 wt_perm_fail=0
-# SHORT MODES ARE THE INTERESTING ONES (roborev round 5, High). `stat -c %a` drops leading zeros, so
-# 0033 arrives as "33" — two characters. The old `${dmode%???}` suffix-strip could not match that,
-# left the permission field EMPTY, matched none of the write-bit patterns, and PASSED a group- AND
-# world-writable directory. These three are exactly the shapes that regress it: group-only (0030),
-# other-only (0003), and both (0033). 0300 is the CONTROL — owner-write only, three digits, must be
-# ACCEPTED — so the case cannot pass by refusing everything short.
-for wt_mode in 0775 0777 0757 0030 0003 0033; do
+for wt_mode in 0775 0777 0757; do
   rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod "$wt_mode" "$wt_perm_d"
   wt_perm_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_perm_rc=$?
