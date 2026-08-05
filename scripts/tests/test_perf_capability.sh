@@ -1041,10 +1041,14 @@ fi
 rm -f "$wt_d/.99-cqlite-perf.conf.new"
 # ...structurally: the staging entry is created by `mktemp` with a random-suffix template, no
 # hardcoded staging literal survives, the rename carries `-T`, and the WHOLE staged install is ONE
-# privileged invocation (issue #3261 roborev round 2). That last property is the fix for the
-# create->reopen race and cannot be observed after the fact — a split back into `mktemp` in one
-# privileged call and the write in another would leave every behavioural assert green — so it is
-# pinned here, in the spirit of the other structural audits on this branch.
+# privileged invocation (issue #3261 roborev round 2).
+#   THE LAST PROPERTY IS HYGIENE, NOT THE FIX, and this comment previously said otherwise. roborev
+#   round 3 corrected it: a single `sh -c` sequences ONE PROCESS's commands and is not mutual
+#   exclusion against other processes, which run concurrently on other CPUs regardless of how we
+#   grouped ours. Consolidation NARROWS the create-to-reopen window; it does not close it. It is
+#   still worth pinning — a split back into `mktemp` in one privileged call and the write in another
+#   would re-widen the window while every behavioural assert stayed green, which no after-the-fact
+#   observation can catch — but it is pinned as hygiene, not as the guarantee.
 wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
 wt_privcalls=$(printf '%s\n' "$wt_body" | grep -c '"\$@"')
 wt_struct_fail=''
@@ -1056,7 +1060,7 @@ printf '%s\n' "$wt_body" | grep -q 'mv -fT -- "\$t" "\$p"' \
 [ "$wt_privcalls" -eq 1 ] || wt_struct_fail="$wt_struct_fail privileged-invocations=$wt_privcalls"
 printf '%s\n' "$wt_body" | grep -q '"\$@" sh -c' || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
 if [ -z "$wt_struct_fail" ]; then
-  ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, so no unprivileged process is scheduled between create and reopen), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
+  ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, which NARROWS the create-to-reopen window but does NOT close it — see the note above), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
 else
   bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
   printf '%s\n' "$wt_body" | grep -n '\$@\|mktemp\|mv -' | head -8
