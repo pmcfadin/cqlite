@@ -276,7 +276,15 @@ EOF
 # difference; without those, the whole suite would have read green having tested nothing.
 # So the cleanup is EXPLICIT, at the single exit point.
 self_test() {
-  local tmp fails=0 checks=0 rc=0
+  # `case_rc` and `rc` are DELIBERATELY SEPARATE variables, and the separation is load-bearing.
+  # Several cases below capture a DELIBERATELY NON-ZERO exit status from a probe — that is the
+  # property they assert. When those captures wrote into `rc`, the last one left `rc=1` standing
+  # and the terminal `[ "$fails" -eq 0 ] || rc=1` never wrote it back to 0 on the success path,
+  # so a FULLY PASSING self-test printed "0 failure(s)" and RETURNED 1 (#3272). That is this
+  # rig's own doctrine turned on itself: a verdict must come from an AFFIRMATIVE MEASUREMENT
+  # (`fails`), never from a variable an earlier line may have dirtied. `case_rc` holds a probe's
+  # observed status; `rc` is written ONCE, at the terminal, from `fails` alone.
+  local tmp fails=0 checks=0 case_rc=0 rc=0
   tmp="$(mktemp -d)" || { echo "FAIL - could not create a temp dir"; return 1; }
   local repo="$tmp/probe"
   mkdir -p "$repo/docs"
@@ -366,11 +374,11 @@ self_test() {
   # present. Without this, round 8's narrowing could have been an over-broad filter that greened
   # the very case the guard exists for whenever any untracked debris happened to be lying around.
   : > "$repo/2"
-  out="$(scan "$repo" 2>&1)"; rc=$?
-  if [ "$rc" -ne 0 ] && grep -qF '[tracked] 0' <<<"$out"; then
+  out="$(scan "$repo" 2>&1)"; case_rc=$?
+  if [ "$case_rc" -ne 0 ] && grep -qF '[tracked] 0' <<<"$out"; then
     _ok "self-test: OBSERVED (round 8) — a TRACKED '0' still FAILS while UNTRACKED debris is also present (the notice does not swallow the verdict)"
   else
-    _no "self-test: round 8 — a tracked finding must survive concurrent untracked debris (rc=$rc, out: $out)"
+    _no "self-test: round 8 — a tracked finding must survive concurrent untracked debris (rc=$case_rc, out: $out)"
   fi
   rm -f "$repo/2"
   git -C "$repo" rm -q --cached ./0 >/dev/null 2>&1
@@ -453,11 +461,11 @@ SHIM
   else
     _no "self-test: the F4 shim must pass rev-parse and fail ls-files, else the case below proves nothing"
   fi
-  out="$(PATH="$shim_bin:$PATH" scan "$repo" 2>&1)"; rc=$?
-  if [ "$rc" -ne 0 ]; then
+  out="$(PATH="$shim_bin:$PATH" scan "$repo" 2>&1)"; case_rc=$?
+  if [ "$case_rc" -ne 0 ]; then
     _ok "self-test: OBSERVED (round7 F4) — a FAILING git ls-files makes the scan exit NON-ZERO (pre-fix: the process substitution's status was unobservable, so it printed a clean root)"
   else
-    _no "self-test: round7 F4 — a failing git ls-files must FAIL the scan (rc=$rc, out: $out)"
+    _no "self-test: round7 F4 — a failing git ls-files must FAIL the scan (rc=$case_rc, out: $out)"
   fi
   # ...and it must NOT print the affirmative clean line, which is the specific fail-open text.
   if ! grep -qF 'root-junk: PASS' <<<"$out"; then
@@ -521,7 +529,15 @@ SHIM
   fi
 
   echo "root-junk self-test: $checks checks, $fails failure(s)"
-  [ "$fails" -eq 0 ] || rc=1
+  # The verdict is written UNCONDITIONALLY from `fails`, both branches assigned, so no earlier
+  # line can contribute to it. The previous form was `[ "$fails" -eq 0 ] || rc=1`, which sets
+  # `rc` only on the FAILING path and leaves whatever was already there on the passing path —
+  # and the probe cases above had left `rc=1`. A passing suite therefore returned 1 (#3272).
+  if [ "$fails" -eq 0 ]; then
+    rc=0
+  else
+    rc=1
+  fi
   rm -rf "$tmp"
   return "$rc"
 }
