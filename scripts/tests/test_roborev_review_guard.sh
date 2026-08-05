@@ -326,7 +326,21 @@ case "$cmd" in
         snap_write "$STUB_SNAPSHOT_CONTROL_DIR/roborev-snapshot-content.diff" control.rs
         wait_id="${STUB_SNAPSHOT_CONTROL_DIR##*/}"
       fi
-      if snap_await "$wait_id"; then
+      if [ -n "${STUB_SNAPSHOT_EXPECT_NO_CAPTURE:-}" ]; then
+        # NO CAPTURE IS EXPECTED, so the wait is on evidence the watcher TRIED — the interposed copy's
+        # own witness — plus one further poll interval. That makes the absence below a measurement
+        # instead of a timeout, the same discipline as the (cx31s) control.
+        waited=0
+        while [ "$waited" -lt 600 ]; do
+          [ -s "${CP_SHIM_WITNESS:-/nonexistent}" ] && break
+          waited=$((waited + 1))
+          sleep 0.1
+        done
+        sleep 1.5
+        if snap_capture_of "$wait_id" >/dev/null; then
+          printf '%s' "$(snap_capture_of "$wait_id")" >"$STUB_INVOKED.capture-seen"
+        fi
+      elif snap_await "$wait_id"; then
         printf '%s' "$(snap_capture_of "$wait_id")" >"$STUB_INVOKED.capture-seen"
       fi
       # SAME-LENGTH REWRITE (roborev job 7, finding 3): republish the snapshot with the SAME byte count
@@ -386,6 +400,53 @@ case "$cmd" in
 esac
 STUB
 chmod +x "$stubbin/roborev"
+
+# ---------------------------------------------------------------------------
+# THE `cp` INTERPOSER (#3312, roborev job 8). The capture's copy step is OUR OWN code, so unlike the
+# SIGTERM case there is no "unexpressible state" argument available: a source that changes while it is
+# being copied is directly constructible. This shim stands in for `cp` ONLY for the snapshot content
+# file (everything else is delegated to the real binary, since the wrapper copies other files too) and
+# reproduces the two ways a staged copy can fail to be what was digested:
+#   mutate-source   the copy succeeds and the SOURCE is then changed, which is what the loop's
+#                   pre-copy/post-copy comparison exists to see. Deterministic by construction: no
+#                   racing against a real concurrent writer.
+#   truncate-copy   the copy "succeeds" but the DESTINATION holds fewer bytes than the source — the leg
+#                   only the STAGED digest can catch, since the source is untouched and pre == post.
+# Driven by CP_SHIM_MODE; each invocation appends to CP_SHIM_WITNESS, which is what the roborev stub
+# waits on so "no capture was published" is a measurement rather than a timeout.
+cpshim="$tmp/cpshim"
+mkdir -p "$cpshim"
+cat >"$cpshim/cp" <<'CPSHIM'
+#!/usr/bin/env bash
+set -uo pipefail
+real=/bin/cp
+src=""
+for a in "$@"; do
+  case "$a" in *roborev-snapshot-content.diff) src="$a" ;; esac
+done
+if [ -z "$src" ] || [ -z "${CP_SHIM_MODE:-}" ]; then exec "$real" "$@"; fi
+dest="${@: -1}"
+case "$CP_SHIM_MODE" in
+  mutate-source)
+    "$real" "$@" || exit $?
+    printf 'diff --git a/mutated-during-copy.rs b/mutated-during-copy.rs\n' >>"$src"
+    ;;
+  truncate-copy)
+    head -1 "$src" >"$dest" || exit $?
+    ;;
+  *) exec "$real" "$@" ;;
+esac
+printf '%s\n' "$CP_SHIM_MODE" >>"${CP_SHIM_WITNESS:-/dev/null}"
+exit 0
+CPSHIM
+chmod +x "$cpshim/cp"
+export CP_SHIM_MODE=''
+export CP_SHIM_WITNESS=''
+HAVE_REAL_CP=1
+if [ ! -x /bin/cp ]; then
+  HAVE_REAL_CP=0
+  printf 'SKIP - /bin/cp is absent: the mid-copy-mutation cases cannot delegate to a real cp\n'
+fi
 
 # The structured-payload cases need python3 (the wrapper decodes the doubly-encoded
 # token_usage with it). Loud SKIP, never a silent pass, matching the gate's other
@@ -1018,6 +1079,9 @@ export STUB_SNAPSHOT_CONTROL_DIR=''
 # STUB_SNAPSHOT_REWRITE_PATHS republishes the snapshot with these paths at the SAME byte length, to
 # exercise digest-keyed reuse (a byte count cannot see a same-length rewrite).
 export STUB_SNAPSHOT_REWRITE_PATHS=''
+# STUB_SNAPSHOT_EXPECT_NO_CAPTURE flips the lifecycle wait from "wait for the publication" to "wait for
+# the interposed copy's witness, then one more poll" — for the cases where a capture must be DISCARDED.
+export STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -1041,6 +1105,9 @@ reset_stub() {
   STUB_SNAPSHOT_SYMLINK_TARGET=''
   STUB_SNAPSHOT_CONTROL_DIR=''
   STUB_SNAPSHOT_REWRITE_PATHS=''
+  STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
+  CP_SHIM_MODE=''
+  CP_SHIM_WITNESS=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -3804,6 +3871,87 @@ else
   bad 'case (cx31u): no capture existed, so the mismatch cause was reached without a substitute being available'
 fi
 reset_stub
+
+printf '== (cx31w) a source mutated DURING the copy is DISCARDED, not published (job 8) ==\n'
+# THE BLOCKER, constructed deterministically. The copy step is our own code, so a source that changes
+# while it is read is directly expressible: the interposed `cp` copies and then appends to the SOURCE,
+# which is exactly what the pre-copy/post-copy digest comparison exists to see. Before the fix the
+# post-copy digest overwrote the pre-copy one and was never compared, so a mixed capture was published
+# STAMPED WITH THE FINAL DIGEST — and every later poll matched that digest and reused it.
+if [ "$HAVE_REAL_CP" -eq 1 ]; then
+  reset_stub
+  mut_dir="$snap_repo/.roborev/roborev-snapshot-909090"
+  mut_log="$tmp/cx31w-transcript.log"
+  CP_SHIM_MODE=mutate-source
+  CP_SHIM_WITNESS="$tmp/cx31w-cp-witness"
+  : >"$CP_SHIM_WITNESS"
+  STUB_SNAPSHOT_LIFECYCLE_DIR="$mut_dir"
+  STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+  STUB_SNAPSHOT_EXPECT_NO_CAPTURE=1
+  STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+  STUB_PROMPT=$(snap_prompt "$mut_dir/roborev-snapshot-content.diff")
+  WRAPPER_PATH_PREFIX="$cpshim"
+  run_wrapper "$snap_work" --log "$mut_log"
+  WRAPPER_PATH_PREFIX=""
+  # THE WATCHER DEMONSTRABLY TRIED — without this the absence below would be a timeout, not a finding.
+  if [ -s "$CP_SHIM_WITNESS" ]; then
+    ok "case (cx31w): the interposed copy ran ($(wc -l <"$CP_SHIM_WITNESS" | tr -d '[:space:]') attempt(s)), so the discard is a measured outcome"
+  else
+    bad 'case (cx31w): the interposed copy never ran, so nothing below can be concluded'
+  fi
+  if [ -s "$INVOKED.capture-seen" ]; then
+    bad 'case (cx31w): a capture was PUBLISHED from a source that changed during the copy — the staged bytes may be a mix of two versions and every later poll would reuse them (#3312 job 8)'
+  else
+    ok 'case (cx31w): the mid-copy mutation was discarded, never published'
+  fi
+  assert_verdict 'case (cx31w)' FAIL 1
+  assert_says 'case (cx31w) with nothing publishable the cause names the ORACLE, not the branch' \
+    '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
+  assert_lacks 'case (cx31w) a mixed capture never certifies the census' '^prompt-content: PASS'
+  reset_stub
+else
+  printf 'SKIP - case (cx31w): no /bin/cp to delegate to\n'
+fi
+
+printf '== (cx31x) a copy that does not reproduce the source is DISCARDED (the STAGED digest leg) ==\n'
+# The leg the pre/post comparison cannot see: the source is untouched (pre == post) while the staged
+# copy holds fewer bytes. Only digesting the STAGED FILE catches it. Without that leg the truncated
+# capture is published and `prompt-content:` reports the missing path as though the BRANCH had not
+# delivered it — a FAIL that blames the diff for the oracle's defect.
+if [ "$HAVE_REAL_CP" -eq 1 ]; then
+  reset_stub
+  trunc_dir="$snap_repo/.roborev/roborev-snapshot-919191"
+  trunc_log="$tmp/cx31x-transcript.log"
+  CP_SHIM_MODE=truncate-copy
+  CP_SHIM_WITNESS="$tmp/cx31x-cp-witness"
+  : >"$CP_SHIM_WITNESS"
+  STUB_SNAPSHOT_LIFECYCLE_DIR="$trunc_dir"
+  STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+  STUB_SNAPSHOT_EXPECT_NO_CAPTURE=1
+  STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+  STUB_PROMPT=$(snap_prompt "$trunc_dir/roborev-snapshot-content.diff")
+  WRAPPER_PATH_PREFIX="$cpshim"
+  run_wrapper "$snap_work" --log "$trunc_log"
+  WRAPPER_PATH_PREFIX=""
+  if [ -s "$CP_SHIM_WITNESS" ]; then
+    ok 'case (cx31x): the interposed copy ran, so the discard is a measured outcome'
+  else
+    bad 'case (cx31x): the interposed copy never ran, so nothing below can be concluded'
+  fi
+  if [ -s "$INVOKED.capture-seen" ]; then
+    bad 'case (cx31x): a capture whose staged bytes differ from the source was PUBLISHED (#3312 job 8, staged-digest leg)'
+  else
+    ok 'case (cx31x): the short copy was discarded, never published'
+  fi
+  assert_verdict 'case (cx31x)' FAIL 1
+  assert_says 'case (cx31x) the cause names the oracle rather than blaming the branch for a missing path' \
+    '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
+  assert_lacks 'case (cx31x) the truncated capture never becomes an absent-path verdict against the diff' \
+    'code census paths absent from'
+  reset_stub
+else
+  printf 'SKIP - case (cx31x): no /bin/cp to delegate to\n'
+fi
 
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
