@@ -231,6 +231,58 @@ fn reject_identity_out_aliasing_inputs(cli: &Cli) -> GenResult<()> {
             .into());
         }
     }
+    // 3. ANYWHERE ELSE BENEATH THE CORPUS ROOT (#3272 review round 9, F3).
+    //
+    // # The bypass checks 1 and 2 could not see
+    //
+    // `same_file` is the only test that sees a CASE-INSENSITIVE spelling, and it requires BOTH
+    // PATHS TO EXIST — it compares `dev`+`ino`. Before generation NEITHER exists, so on a default
+    // APFS/NTFS volume `--identity-out <out>/WS0-EVENTS.CQL` falls through to the lexical
+    // fallback, which sees two different strings and answers "not an alias". Generation then
+    // proceeds, records the DDL's digest, and `write_json` OVERWRITES the DDL — through the
+    // case-insensitive spelling, after its digest is in the artifact — and exits 0. That is the
+    // exact defect R3 closed, reachable again by changing the case of a filename. Differently-cased
+    // `WS0/EVENTS/...` bypasses check 1 the same way.
+    //
+    // # Why containment rather than better path canonicalization
+    //
+    // Canonicalizing a NON-EXISTENT path against a case-insensitive filesystem means asking the
+    // filesystem how it would fold a name that is not there — which is not a question the OS
+    // answers, and modelling the fold ourselves would be a per-filesystem case-folding table (APFS
+    // normalizes differently from NTFS, and both differ from a case-SENSITIVE APFS volume). That is
+    // a second implementation of the filesystem, and its divergence would be silent in exactly the
+    // permissive direction.
+    //
+    // Containment needs no such model: nothing may be written anywhere beneath `--out` except the
+    // ONE canonical path the generator writes itself. It is simpler, it FAILS CLOSED, and it
+    // subsumes checks 1 and 2 for every spelling — including hardlinks pointing in, and names no
+    // one has thought of yet. Checks 1 and 2 are KEPT because they name the specific input at
+    // risk, which is a better diagnostic than "somewhere under the corpus".
+    let canonical_identity = cli.out.join("corpus-identity.json");
+    // The documented no-op spelling stays ACCEPTED: `--identity-out <out>/corpus-identity.json` is
+    // the path the code writes unconditionally, and the second write is skipped when they are
+    // equal. `same_path` (not a string compare) so the accepted case also covers `./` prefixes and
+    // an already-existing file reached by another name.
+    if !same_path(identity_out, &canonical_identity) && path_is_inside(identity_out, &cli.out) {
+        return Err(format!(
+            "--identity-out {} resolves INSIDE the corpus root ({}), and the only path this run \
+             may write there is {}. Every other path under the corpus is refused whatever it is \
+             called — because the checks that name a specific input cannot see a CASE-INSENSITIVE \
+             spelling before generation: on APFS/NTFS `{}/WS0-EVENTS.CQL` and `{}/ws0-events.cql` \
+             are ONE file, but neither exists when the check runs, so the file-identity test has \
+             no inodes to compare and a string comparison sees two different names. The identity \
+             would then overwrite the DDL after recording its digest, and generation would exit 0 \
+             (issue #3272 round 9, F3). Write the identity OUTSIDE the corpus (e.g. an in-tree \
+             docs/reports/ws0-3096-artifacts/corpus-identity.json); the copy beside the data is \
+             written automatically.",
+            identity_out.display(),
+            cli.out.display(),
+            canonical_identity.display(),
+            cli.out.display(),
+            cli.out.display()
+        )
+        .into());
+    }
     Ok(())
 }
 

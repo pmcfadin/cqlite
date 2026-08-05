@@ -284,6 +284,100 @@ fn a_legitimate_identity_out_is_written_and_every_input_survives() {
     );
 }
 
+/// THE CASE-INSENSITIVE BYPASS (#3272 review round 9, F3), and the containment rule that closes it.
+///
+/// # What the two earlier checks could not see
+///
+/// `same_file` is the only test that sees a case-insensitive spelling, and it needs BOTH PATHS TO
+/// EXIST (it compares `dev`+`ino`). Before generation NEITHER does, so on a default APFS/NTFS
+/// volume `--identity-out <out>/WS0-EVENTS.CQL` fell through to the lexical fallback, which sees
+/// two different strings and answers "not an alias". Generation then recorded the DDL's digest and
+/// `write_json` OVERWROTE the DDL — through the differently-cased spelling, after its digest was in
+/// the artifact — exiting 0. The exact defect R3 closed, reachable again by changing a filename's
+/// case.
+///
+/// # Why this case asserts the REFUSAL rather than the overwrite
+///
+/// The refusal is now filesystem-INDEPENDENT: containment under `--out` does not depend on whether
+/// this volume folds case, so the case runs identically on a case-sensitive Linux CI box and a
+/// case-insensitive macOS one. Asserting the pre-fix OVERWRITE would only reproduce on a
+/// case-insensitive volume, which would make the test's subject depend on the host — a case that
+/// silently does not test anything on CI. The non-vacuity is stated instead as the property that
+/// makes the old check unable to answer: NEITHER path exists at check time.
+#[test]
+fn identity_out_differently_cased_under_the_corpus_root_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    // The DDL's name in a DIFFERENT CASE, under a corpus root that does not exist yet.
+    let target = out.join("WS0-EVENTS.CQL");
+
+    // NON-VACUITY, and it is the whole reason the file-identity test could not answer: at the
+    // moment the check runs, NEITHER the corpus root nor either spelling exists, so there are no
+    // inodes to compare and `same_file` must answer `false` however the volume folds case.
+    assert!(
+        !out.exists() && !target.exists() && !out.join("ws0-events.cql").exists(),
+        "the check runs BEFORE generation — that absence is why file identity cannot see the \
+         alias, and it is what made the pre-fix lexical fallback answer 'different file'"
+    );
+
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--identity-out",
+        target.to_str().expect("utf8"),
+    ]);
+
+    assert!(
+        !run.ok,
+        "a differently-cased --identity-out under the corpus root must FAIL. On APFS this is the \
+         SAME FILE as the emitted DDL, and pre-fix it exited 0 having overwritten the DDL after \
+         recording its digest. Output:\n{}",
+        run.all()
+    );
+    assert!(
+        run.all().contains("resolves INSIDE the corpus root"),
+        "the refusal must name the CONTAINMENT rule, so an operator learns the actual constraint \
+         (only the canonical identity path may be written under --out) rather than a fact about \
+         one filename: {}",
+        run.all()
+    );
+    // Refused BEFORE generating: nothing was written at all, so no input could have been
+    // destroyed. A guard that refused after `write_json` would still exit non-zero here.
+    assert!(
+        !out.join("ws0").join("events").exists(),
+        "the refusal must precede generation: {}",
+        run.all()
+    );
+}
+
+/// The containment rule covers a name NOBODY ANTICIPATED under the corpus root — which is the
+/// point of asking about containment rather than about a list of known inputs.
+///
+/// Neither `same_path` nor the table-directory check would refuse this: it aliases no generated
+/// input and it is not inside `<out>/ws0/events`. It is refused because nothing but the canonical
+/// identity may be written under `--out`, which is the property that holds for spellings that do
+/// not exist yet.
+#[test]
+fn identity_out_anywhere_else_under_the_corpus_root_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    let target = out.join("my-notes").join("identity.json");
+
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--identity-out",
+        target.to_str().expect("utf8"),
+    ]);
+
+    assert!(
+        !run.ok,
+        "the corpus root is off limits except for the canonical identity path, whatever the \
+         subdirectory is called — a name-based check would wave this through: {}",
+        run.all()
+    );
+}
+
 /// `--identity-out` naming the corpus root's OWN `corpus-identity.json` stays a NO-OP, not a
 /// refusal.
 ///
