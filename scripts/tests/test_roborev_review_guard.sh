@@ -3970,6 +3970,78 @@ else
     fi
   fi
 fi
+# (7) CAPTURE PROVENANCE IS ESTABLISHED AT CAPTURE TIME AND KEYED BY THE WHOLE PATH (roborev job 6).
+#     Behavioural cases cx31s/cx31t/cx31u prove the three refusals fire; only a structural assert can
+#     pin the ORDERING and the AFFIRMATIVE requirement, which is where both blockers lived: `-f` and
+#     `cp` follow symlinks, so a validation that runs after the copy — or after roborev has deleted the
+#     original — cannot see what was followed.
+_cap_val_defs=$(grep -cE '^_roborev_capture_validate\(\) \{' "$ORACLES" || true)
+if [ "${_cap_val_defs:-0}" -eq 1 ]; then
+  ok 'structural: the capture-time validator is defined exactly once, in the oracles file'
+else
+  bad "structural: expected exactly 1 definition of _roborev_capture_validate, found ${_cap_val_defs:-0} — capture-time provenance has no single home (#3312)"
+fi
+_cap_loop_start=$(grep -nE '^_roborev_snapshot_capture_loop\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+if [ -z "$_cap_loop_start" ]; then
+  bad 'structural: _roborev_snapshot_capture_loop is not defined — nothing captures the snapshot (#3312)'
+else
+  _cap_loop_end=$(awk -v s="$_cap_loop_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  if [ -z "$_cap_loop_end" ] || [ "$_cap_loop_end" -le "$_cap_loop_start" ]; then
+    bad "structural: the capture-loop bounds could not be resolved (start $_cap_loop_start, end '${_cap_loop_end:-<none>}') — the asserts below would scan nothing"
+  else
+    _cap_body=$(sed -n "${_cap_loop_start},${_cap_loop_end}p" "$ORACLES")
+    # THE ORDERING, asserted by LINE NUMBER: every read of the source must come after the validation
+    # call. A validator that exists but runs late is the defect, not the remedy.
+    _val_line=$(printf '%s\n' "$_cap_body" | grep -nE '_roborev_capture_validate "\$repo"' | head -1 | cut -d: -f1)
+    _cp_line=$(printf '%s\n' "$_cap_body" | grep -nE '^ *cp "\$f"' | head -1 | cut -d: -f1)
+    if [ -n "$_val_line" ] && [ -n "$_cp_line" ] && [ "$_val_line" -lt "$_cp_line" ]; then
+      ok 'structural: the capture loop validates BEFORE it reads the snapshot (cp follows symlinks, so order is the property)'
+    else
+      bad "structural: the capture loop does not validate before copying (validate at ${_val_line:-<absent>}, cp at ${_cp_line:-<absent>}) — a symlinked source would be followed and the evidence deleted before any later check (#3312 blocker 1)"
+    fi
+    if printf '%s\n' "$_cap_body" | grep -qF '.validated'; then
+      ok 'structural: the capture loop records an affirmative validation marker beside the capture'
+    else
+      bad 'structural: the capture loop writes no validation record, so a reader could only infer safety from the absence of a failure (#3312 blocker 1)'
+    fi
+  fi
+fi
+# The validator must refuse symlinks at the FILE and at the components it descends — parent-component
+# symlinks are the half that a `-L` on the file alone misses.
+if [ -n "${_cap_val_defs:-}" ] && [ "${_cap_val_defs:-0}" -eq 1 ]; then
+  _cvs=$(grep -nE '^_roborev_capture_validate\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+  _cve=$(awk -v s="$_cvs" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  _cv_body=$(sed -n "${_cvs},${_cve:-$_cvs}p" "$ORACLES")
+  _cv_l_tests=$(printf '%s\n' "$_cv_body" | grep -cE '\[ ! -L ' || true)
+  if [ "${_cv_l_tests:-0}" -ge 3 ]; then
+    ok "structural: the capture validator refuses symlinks at the file AND at each component it descends ($_cv_l_tests -L tests)"
+  else
+    bad "structural: the capture validator carries only ${_cv_l_tests:-0} symlink test(s) — a symlinked .roborev or snapshot directory would still be followed (#3312 blocker 1)"
+  fi
+  if printf '%s\n' "$_cv_body" | grep -qF 'pwd -P'; then
+    ok 'structural: the capture validator resolves the containing directory physically before trusting it'
+  else
+    bad 'structural: the capture validator does not physically resolve the snapshot directory (#3312 blocker 1)'
+  fi
+fi
+# The consumer must REQUIRE the record and compare the WHOLE relative path, never the dir id alone.
+if [ -n "${_src_defs:-}" ] && [ "${_src_defs:-0}" -eq 1 ]; then
+  _rs=$(grep -nE '^roborev_collect_review_diff_headers\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+  _re=$(awk -v s="$_rs" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  _r_body=$(sed -n "${_rs},${_re:-$_rs}p" "$ORACLES")
+  if printf '%s\n' "$_r_body" | grep -qF 'capture-unvalidated' \
+    && printf '%s\n' "$_r_body" | grep -qF 'capture-path-mismatch'; then
+    ok 'structural: the resolver has both capture-provenance refusals (unvalidated, path-mismatch)'
+  else
+    bad 'structural: the resolver is missing a capture-provenance refusal — an unvalidated or mis-keyed capture could be read as evidence (#3312 job 6)'
+  fi
+  if printf '%s\n' "$_r_body" | grep -qE '\[ "\$_rx_cap_recorded" = "\$\{_rx_snap_rel:-\}" \]'; then
+    ok 'structural: a capture is accepted only when its recorded path EQUALS the path the prompt names'
+  else
+    bad 'structural: the capture lookup no longer compares the recorded path with the prompt-named path — the canonical sibling could stand in for another file in the same snapshot dir (#3312 blocker 2)'
+  fi
+fi
+
 # THE AFFIRMATIVE-MEASUREMENT SHAPE, at the new branch point (CLAUDE.md; #3229 round-10). The
 # diff-source state is MULTI-VALUED, which is precisely the shape whose unmeasured states inherit
 # the permissive branch when only the bad ones are tested. So prompt-content: must select on the

@@ -109,7 +109,8 @@
 #                     FAIL (prompt unretrievable — ...) |
 #                     FAIL (snapshot diff unusable: <cleaned-up | missing | unreadable |
 #                     empty | no-headers | foreign-repo | unbound-job | symlinked |
-#                     ambiguous | not-absolute | unparseable-path>) | SKIP
+#                     capture-unvalidated | capture-path-mismatch | ambiguous |
+#                     not-absolute | unparseable-path>) | SKIP
 #                     TWO DIFF-DELIVERY MODES (#3312): roborev either inlines the diff or,
 #                     when it is large, writes it to a TRANSIENT snapshot file
 #                     (`<repo>/.roborev/roborev-snapshot-<id>/`) and names that path in the
@@ -348,9 +349,14 @@ symlinked or unbound FAILs under its own cause —
 "we could not check" is never "nothing was wrong". roborev DELETES the snapshot
 when the review finishes (before this wrapper's own --wait returns) and offers no
 'show --diff', so a watcher armed before the review copies it out of the repo and
-the check reads that copy, beside the transcript in <log>.snapshots/. The diff is
-never recomputed from our own git: a key compared against our own output would
-always agree, which is the vacuous pass this wrapper exists to prevent.
+the check reads that copy, beside the transcript in <log>.snapshots/. Each capture is
+VALIDATED AT CAPTURE TIME (no symlink at the file or at any component descended, a
+regular file, a physically-resolved in-repo directory) and its validated relative
+path is recorded next to it; the check REQUIRES that record and requires it to equal
+the path the prompt names, so an unvalidated capture or the canonical sibling of a
+differently-named file is refused rather than trusted. The diff is never recomputed
+from our own git: a key compared against our own output would always agree, which is
+the vacuous pass this wrapper exists to prevent.
 
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
