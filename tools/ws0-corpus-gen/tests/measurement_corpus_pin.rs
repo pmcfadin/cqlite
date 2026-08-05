@@ -232,7 +232,7 @@ fn the_in_source_pin_matches_the_committed_artifact() {
         "the in-source measurement-corpus pin (tools/ws0-corpus-gen/src/measurement_corpus.rs) \
          disagrees with the committed {ARTIFACT}. ONE of them was edited alone; both must move \
          together, and whichever is wrong must be corrected against a real re-run \
-         (see ws0_corpus_gen::measurement_corpus::OPERATOR_VERIFY_CORPUS):\n  {}",
+         (see ws0_corpus_gen::measurement_corpus::operator_verify_corpus):\n  {}",
         diffs.join("\n  ")
     );
     // The Data.db component's own recorded digest must equal the top-level one —
@@ -640,7 +640,7 @@ fn the_pinned_digest_is_anchored_to_the_seed_that_produced_it() {
          NO code path in this repo can reproduce it, and the operator procedure would \
          regenerate at the new seed and 'fail' against a digest nothing can produce. \
          Either restore the seed, or regenerate the corpus and re-pin BOTH the seed and \
-         every digest together (see measurement_corpus::OPERATOR_VERIFY_CORPUS).",
+         every digest together (see measurement_corpus::operator_verify_corpus).",
         ws0_corpus_gen::generate::DEFAULT_SEED,
         mc::DATA_DB_SHA256,
     );
@@ -683,8 +683,20 @@ fn the_pinned_digest_carries_a_consistent_batch_accounting() {
 /// It fails closed if `CQLITE_WS0_VERIFY_ROOT` is unset: an `--ignored` run the
 /// operator asked for must not silently do nothing. The Arrow-digest half is NOT
 /// run here (it lives in `cqlite-flight`, a different crate) — the command is
-/// printed instead, from [`mc::OPERATOR_VERIFY_DIGEST`], so the two halves of the
+/// printed instead, from [`mc::operator_verify_digest`], so the two halves of the
 /// procedure stay together.
+///
+/// # Two defects that made this procedure unable to verify its own output (#3272 round 4)
+///
+/// * IT NEVER WROTE `corpus-identity.json`. It called `generate()` directly, which
+///   returns the identity in memory; only the BINARY writes the file. The digest
+///   command it then printed REQUIRES that file (the Flight oracle reads the corpus
+///   root's identity for its row count), so following the printed procedure failed
+///   on a missing file the procedure itself was supposed to have produced.
+/// * IT PRINTED A HARDCODED ROOT. Both commands were `&'static str`s naming
+///   `/data/ws0-3096(-verify)` while the generation went to `CQLITE_WS0_VERIFY_ROOT`
+///   — so the operator was handed commands pointing at a directory their corpus was
+///   not in. Both commands are now built from the ACTUAL root.
 #[test]
 #[ignore = "writes ~2.8 GB and takes minutes; needs CQLITE_WS0_VERIFY_ROOT (see the doc comment)"]
 fn the_full_size_verification_is_an_operator_procedure() {
@@ -693,9 +705,11 @@ fn the_full_size_verification_is_an_operator_procedure() {
             "CQLITE_WS0_VERIFY_ROOT is unset. This test writes ~2.8 GB — point it at a scratch \
              volume OUTSIDE the repo. It fails rather than skipping: an --ignored test the \
              operator explicitly selected must never quietly measure nothing.\n\n\
-             Corpus verification:\n{}\n\nDigest verification:\n{}",
-            mc::OPERATOR_VERIFY_CORPUS,
-            mc::OPERATOR_VERIFY_DIGEST
+             Corpus verification (substitute your scratch root for {example}):\n{corpus}\n\n\
+             Digest verification:\n{digest}",
+            example = mc::EXAMPLE_VERIFY_ROOT,
+            corpus = mc::operator_verify_corpus(mc::EXAMPLE_VERIFY_ROOT),
+            digest = mc::operator_verify_digest(mc::EXAMPLE_VERIFY_ROOT)
         )
     });
 
@@ -736,13 +750,36 @@ fn the_full_size_verification_is_an_operator_procedure() {
         !identity.compression_info_present,
         "a CompressionInfo.db appeared (#1406)"
     );
+
+    // WRITE `corpus-identity.json` BESIDE THE CORPUS (#3272 review round 4). `generate()`
+    // returns the identity in memory; only the BINARY writes the file, and this procedure
+    // calls `generate()` directly — so the corpus it produced carried NO identity, while the
+    // digest command it printed REQUIRES one (the Flight oracle reads the corpus root's
+    // identity for its row count). The procedure could not verify its own output.
+    let identity_path = spec.out.join("corpus-identity.json");
+    identity
+        .write_json(&identity_path)
+        .unwrap_or_else(|e| panic!("could not write {}: {e}", identity_path.display()));
+    // ...and it must be READABLE AND COMPLETE, asserted rather than assumed: a procedure whose
+    // output is unusable is the same failure one step later.
+    let written = std::fs::read_to_string(&identity_path)
+        .unwrap_or_else(|e| panic!("could not read back {}: {e}", identity_path.display()));
+    assert!(
+        written.contains(&identity.data_db_sha256),
+        "the written {} does not carry the digest it was generated with",
+        identity_path.display()
+    );
+
     eprintln!(
         "corpus verified: {} rows / {} partitions / Data.db {} B / sha256 {}\n\
-         now re-fold the Arrow-buffer digest:\n{}",
+         identity written: {}\n\
+         now re-fold the Arrow-buffer digest (this command names the root you generated \
+         into, not a hardcoded one):\n{}",
         identity.rows,
         identity.partitions,
         identity.data_db_bytes,
         identity.data_db_sha256,
-        mc::OPERATOR_VERIFY_DIGEST
+        identity_path.display(),
+        mc::operator_verify_digest(&root)
     );
 }

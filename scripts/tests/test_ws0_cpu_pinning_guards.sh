@@ -1102,11 +1102,53 @@ fi
 # `require_socket_prober` is what makes every check above non-vacuous, so its own failure
 # path must fire: pointed at a port with NO listener, it must refuse rather than conclude
 # that ownership is fine.
-out=$( server_lib_call require_socket_prober "$(free_port)" ); rc=$?
+out=$( server_lib_call require_socket_prober ); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "verified prober" <<<"$out"; then
   pass "server-owner: require_socket_prober PASSES against a listener it starts itself"
 else
   fail "server-owner: the prober check must pass on a working host (rc=$rc, out: $out)"
+fi
+# THE PORT IS KERNEL-ASSIGNED, and that is asserted rather than assumed (#3272 review round 4
+# nit). The caller used to pass `$((PORT + 1))` — a port NOTHING had checked free, since
+# `require_port_free` covers `$PORT` only. Two failures: `--port 65535` asked for 65536, and an
+# OCCUPIED `PORT+1` made the python `bind` fail while the wait-loop connect SUCCEEDED against the
+# foreign listener, so `observed != probe_pid` and a CORRECT run died with "the prober cannot
+# answer" — whose three stated causes (an `ss` without process info, no /proc visibility,
+# insufficient privilege) were all WRONG. A diagnosis naming the wrong cause sends the operator
+# to fix a working tool.
+if grep -q "kernel-assigned port" <<<"$out"; then
+  pass "server-owner: the prober's own listener uses a KERNEL-ASSIGNED port (collision-free by construction)"
+else
+  fail "server-owner: the prober must report a kernel-assigned port (out: $out)"
+fi
+# It must ACCEPT NO PORT ARGUMENT, i.e. the collision hazard is gone by construction rather than
+# by a check someone has to keep correct.
+if awk '/^require_socket_prober\(\)/,/^}/' "$SERVER_LIB" | grep -q 'bind(("127.0.0.1", 0))' \
+  && ! awk '/^require_socket_prober\(\)/,/^}/' "$SERVER_LIB" | grep -q 'local probe_port="\$1"'; then
+  pass "server-owner: STRUCTURAL — the prober binds port 0 and takes no port argument"
+else
+  fail "server-owner: the prober must bind port 0 rather than a caller-supplied port"
+fi
+# ...and the DRIVER must not pass one either — `$((PORT + 1))` must be gone from the call site.
+if ! grep -q 'require_socket_prober "\$(( *PORT' "$REPO_ROOT/scripts/perf/ws0-baseline.sh"; then
+  pass "server-owner: the driver no longer passes \$((PORT+1)) (an unchecked port, 65536 at --port 65535)"
+else
+  fail "server-owner: the driver must not pass PORT+1 to the prober"
+fi
+# A BIND FAILURE must be diagnosed AS a bind failure, not as an unanswering prober — the whole
+# point of the nit is that the diagnosis named the wrong cause. Driven by shimming `python3` to a
+# non-binding stub, so the port file is never written.
+out=$( set -uo pipefail
+       PORT="$(free_port)"; OUT_DIR="$TMP"
+       # shellcheck disable=SC1090
+       source "$SERVER_LIB"
+       python3() { return 1; }          # cannot bind / cannot start
+       require_socket_prober 2>&1 ); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "could not BIND" <<<"$out" \
+   && grep -q "NOT a prober that" <<<"$out"; then
+  pass "server-owner: OBSERVED — a listener that cannot BIND is diagnosed as THAT, not as an unanswering prober"
+else
+  fail "server-owner: a bind failure must name itself (rc=$rc, out: $out)"
 fi
 # ...and it must FAIL when the prober cannot answer, which is the state that would make
 # every ownership check vacuous. Driven by shimming `socket_owner_pid` to return nothing —
@@ -1116,16 +1158,24 @@ out=$( set -uo pipefail
        # shellcheck disable=SC1090
        source "$SERVER_LIB"
        socket_owner_pid() { :; }        # answers NOTHING, like a privilege-less ss
-       require_socket_prober "$PORT" 2>&1 ); rc=$?
+       require_socket_prober 2>&1 ); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "cannot answer" <<<"$out" \
    && grep -q "would pass" <<<"$out"; then
   pass "server-owner: OBSERVED — a prober that cannot answer STOPS the run (never a vacuous ownership pass)"
 else
   fail "server-owner: an unanswerable prober must be fatal (rc=$rc, out: $out)"
 fi
+# ...and that refusal must EXCLUDE a port collision from its stated causes, since the port is
+# kernel-assigned. The pre-fix text offered three causes, all of them wrong for the collision
+# case it could actually reach.
+if grep -q "a COLLISION with another listener is excluded" <<<"$out"; then
+  pass "server-owner: the unanswerable-prober refusal EXCLUDES a collision (its causes are now all true)"
+else
+  fail "server-owner: the refusal must rule out a collision, or it misdiagnoses again (out: $out)"
+fi
 # And the DRIVER must WIRE both: a guard present but never called is the #3249 shape.
 DRV="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
-if grep -q '^require_socket_prober ' "$DRV" \
+if grep -qE '^require_socket_prober( |$)' "$DRV" \
    && awk '/^measure_flight\(\)/,/^}/' "$DRV" | grep -q 'await_server_ready'; then
   pass "server-owner: the driver CALLS require_socket_prober at startup and await_server_ready per rep"
 else
@@ -1133,7 +1183,11 @@ else
 fi
 # The prober check must run BEFORE the first measurement, or a run could reach a rep with
 # ownership unverifiable.
-prober_line=$(grep -n '^require_socket_prober ' "$DRV" | head -1 | cut -d: -f1)
+# The pattern allows the ARGUMENT-LESS form: the prober now binds a kernel-assigned port, so
+# it takes no port argument, and a `^require_socket_prober ` grep (with the trailing space)
+# matched nothing and reported a MISSING call for a call that is right there — the same
+# "diagnosis names the wrong cause" shape as the nit itself, in the test.
+prober_line=$(grep -nE '^require_socket_prober( |$)' "$DRV" | head -1 | cut -d: -f1)
 loop_line=$(grep -n '^for temp in \$TEMPS' "$DRV" | head -1 | cut -d: -f1)
 if [ -n "$prober_line" ] && [ -n "$loop_line" ] && [ "$prober_line" -lt "$loop_line" ]; then
   pass "server-owner: the prober check (line $prober_line) precedes the measurement loop (line $loop_line)"
@@ -1325,7 +1379,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=155
+MIN_CHECKS=160
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

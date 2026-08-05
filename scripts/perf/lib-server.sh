@@ -112,7 +112,24 @@ require_socket_prober() {
   # ...and it must ANSWER. Probed against a listener started HERE, whose pid is known, so
   # a prober that runs but returns nothing (a container without /proc visibility, an `ss`
   # lacking the process-info build option) is caught before it can wave a run through.
-  local probe_port="$1" probe_pid observed
+  #
+  # THE PORT IS KERNEL-ASSIGNED, NOT `$PORT + 1` (#3272 review round 4 nit). The caller used to
+  # pass `$((PORT + 1))`, a port NOTHING had checked free — `require_port_free` covers `$PORT`
+  # only — with two failures:
+  #
+  #   * `--port 65535` makes it 65536, which is not a port at all;
+  #   * if `PORT+1` is OCCUPIED, the python `bind` fails, the wait-loop connect SUCCEEDS
+  #     against the FOREIGN listener, `observed` is that listener's pid rather than
+  #     `probe_pid`, and a CORRECT run dies with "the socket-ownership prober cannot answer"
+  #     whose three stated causes (an `ss` without process info, no /proc visibility,
+  #     insufficient privilege) are all WRONG. A diagnosis that names the wrong cause is
+  #     worse than none: it sends the operator to fix a working tool.
+  #
+  # So the listener binds port 0 and the KERNEL picks a free one, which cannot collide by
+  # construction — no check, no arithmetic, no ceiling. The chosen port is printed by the child
+  # and read back here, and a bind that fails anyway is diagnosed AS A BIND FAILURE.
+  local probe_pid observed probe_port port_file
+  port_file="$(mktemp)"
   # ACCEPTS in a loop rather than `listen(1)` + `sleep`: a listener that never accepts
   # fills its backlog on the first connect and refuses every later one, so a probe that
   # connected more than once would fail for a reason unrelated to ownership.
@@ -120,8 +137,11 @@ require_socket_prober() {
 import socket, sys, time
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", int(sys.argv[1])))
+# PORT 0: the kernel assigns a free ephemeral port. It cannot collide with the measurement
+# listener, with a peer lane, or with anything else, which is the whole point (#3272 round 4).
+s.bind(("127.0.0.1", 0))
 s.listen(64)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
 s.settimeout(float(sys.argv[2]))
 deadline = time.monotonic() + float(sys.argv[2])
 while time.monotonic() < deadline:
@@ -130,9 +150,30 @@ while time.monotonic() < deadline:
         c.close()
     except OSError:
         break
-' "$probe_port" 10 &
+' "$port_file" 10 &
   probe_pid=$!
+  # Wait for the child to publish its port. A child that never does either failed to bind or
+  # failed to start, and BOTH are diagnosed as that rather than as an unanswering prober.
   local i
+  for i in $(seq 1 40); do
+    probe_port="$(cat "$port_file" 2>/dev/null || true)"
+    [[ -n "$probe_port" ]] && break
+    kill -0 "$probe_pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  if [[ -z "${probe_port:-}" ]]; then
+    rm -f "$port_file"
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    echo "FATAL: the ownership prober's own listener could not BIND (or could not start)." >&2
+    echo "       It asked the kernel for any free ephemeral port on 127.0.0.1 and never" >&2
+    echo "       reported one, so this is a LOCAL SOCKET/python failure — NOT a prober that" >&2
+    echo "       cannot identify a socket, and not a port collision (a kernel-assigned port" >&2
+    echo "       cannot collide). Check that python3 can create a listening socket here" >&2
+    echo "       (a sandbox or seccomp policy denying bind() is the usual cause)." >&2
+    exit 2
+  fi
+  rm -f "$port_file"
   for i in $(seq 1 20); do
     (echo >"/dev/tcp/127.0.0.1/$probe_port") >/dev/null 2>&1 && break
     sleep 0.25
@@ -142,16 +183,18 @@ while time.monotonic() < deadline:
   wait "$probe_pid" 2>/dev/null || true
   if [[ "$observed" != "$probe_pid" ]]; then
     echo "FATAL: the socket-ownership prober cannot answer. It was pointed at a listener" >&2
-    echo "       this script started on 127.0.0.1:$probe_port (pid $probe_pid) and reported" >&2
-    echo "       '${observed:-<nothing>}'." >&2
+    echo "       this script started on 127.0.0.1:$probe_port (pid $probe_pid, a" >&2
+    echo "       KERNEL-ASSIGNED free port) and reported '${observed:-<nothing>}'." >&2
     echo "       An ownership check that cannot identify a KNOWN socket would pass" >&2
     echo "       vacuously for every server below, so the run stops here rather than" >&2
-    echo "       measuring a process it cannot attribute (#3272 B4). Common causes: an" >&2
-    echo "       'ss' built without process info, a container without /proc visibility," >&2
-    echo "       or insufficient privilege to see the socket's owner." >&2
+    echo "       measuring a process it cannot attribute (#3272 B4). Because the port was" >&2
+    echo "       kernel-assigned, a COLLISION with another listener is excluded — the" >&2
+    echo "       remaining causes are all about the prober itself: an 'ss' built without" >&2
+    echo "       process info, a container without /proc visibility, or insufficient" >&2
+    echo "       privilege to see the socket's owner." >&2
     exit 2
   fi
-  echo "socket ownership: verified prober (identified a known listener on port $probe_port)"
+  echo "socket ownership: verified prober (identified a known listener on kernel-assigned port $probe_port)"
 }
 
 # Is $PORT free? Fail closed if not: an occupied port means either an orphan of

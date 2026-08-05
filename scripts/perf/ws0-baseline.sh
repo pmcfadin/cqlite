@@ -381,10 +381,14 @@ trap on_exit EXIT INT TERM HUP
 # Fail BEFORE the release build, not after it.
 require_port_free "preflight"
 # ...and establish, ONCE, that the ownership prober every rep depends on actually works
-# (#3272 B4). Uses a port well away from `$PORT` so the probe cannot collide with the
-# measurement's own listener; `$PORT` itself was just verified free, and the probe binds
-# and releases in under a second.
-require_socket_prober "$(( PORT + 1 ))"
+# (#3272 B4). It binds a KERNEL-ASSIGNED ephemeral port (`bind(…, 0)`), so no argument is
+# passed and no collision is possible.
+#
+# It used to be called with `$(( PORT + 1 ))` — a port NOTHING had checked free
+# (`require_port_free` covers `$PORT` only), which made `--port 65535` ask for port 65536 and,
+# when `PORT+1` happened to be occupied, made a CORRECT run die with "the prober cannot answer"
+# whose stated causes were all wrong (#3272 review round 4 nit). See `require_socket_prober`.
+require_socket_prober
 
 # Weaken the host knobs CPU-wide counting needs — AFTER `trap on_exit` above, never
 # before: the interval between the write and the trap being armed is the one window in
