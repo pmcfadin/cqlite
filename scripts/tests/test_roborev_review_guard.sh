@@ -4797,15 +4797,19 @@ _pf_unjustified=$(awk -v fns="$_apparatus_fns" '
   $0 ~ "^(" fns ")\\(\\) \\{" { inf = 1; just = 0; next }
   inf && /^}/ { inf = 0; next }
   !inf { next }
-  /observability-justified/ { just = 1; next }
+  /observability-justified/ { just = 1; cont = 0; next }
   /^[[:space:]]*#/ { next }
+  # A `\`-CONTINUED statement is ONE statement: the justification above it must cover every line of it,
+  # or an annotated multi-line predicate would read as unjustified (measured — it did).
+  cont == 1 && /\\$/ { if (just == 0) { } ; next }
   # A bare file predicate: `[ -e|-f|-d|-r|-L|-s|-x path ]`, with or without a leading `!`.
   /\[[[:space:]]*!?[[:space:]]*-(e|f|d|r|L|s|x)[[:space:]]/ {
     if (just == 0) printf "%d: %s\n", NR, $0
-    just = 0
+    if ($0 ~ /\\$/) { cont = 1 } else { just = 0; cont = 0 }
     next
   }
-  { just = 0 }
+  /\\$/ { cont = 1; next }
+  { just = 0; cont = 0 }
 ' "$ORACLES" || true)
 if [ -z "$_pf_unjustified" ]; then
   ok 'structural: every file predicate in the capture apparatus is routed through the three-way helper or justified in code'

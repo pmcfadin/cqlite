@@ -1353,12 +1353,16 @@ _roborev_snapshot_capture_loop() {
       dg_post="$_rx_digest"
       _roborev_file_digest "$stage/content.diff" || { rm -rf "$stage" 2>/dev/null || :; continue; }
       dg_staged="$_rx_digest"
+      # observability-justified: the source was established PRESENT by `_roborev_capture_validate`
+      # earlier in this same iteration, and an unobservable source would already have failed the two
+      # digest reads above — so this `-L` decides TYPE, never existence. Kept as its own statement so the
+      # justification sits directly above the predicate it justifies.
+      if [ -L "$f" ]; then
+        rm -rf "$stage" 2>/dev/null || :
+        continue
+      fi
       if [ -z "$dg_pre" ] || [ -z "$dg_post" ] || [ -z "$dg_staged" ] \
-        || [ "$dg_pre" != "$dg_post" ] || [ "$dg_pre" != "$dg_staged" ] || [ -L "$f" ]; then
-        # observability-justified (the `-L` above): the source was established PRESENT by
-        # `_roborev_capture_validate` earlier in this same iteration, and an unobservable source would
-        # already have failed the two digest reads that precede this line — so this `-L` decides type,
-        # never existence.
+        || [ "$dg_pre" != "$dg_post" ] || [ "$dg_pre" != "$dg_staged" ]; then
         rm -rf "$stage" 2>/dev/null || :
         continue
       fi
