@@ -1158,6 +1158,30 @@ if [ "$wt_ns_rc" -eq 0 ] || ! printf '%s' "$wt_ns_out" | grep -q 'cannot determi
   bad "perf-capability: an undeterminable directory owner/mode did not fail closed (rc=$wt_ns_rc, out='$wt_ns_out')"
   wt_perm_fail=1
 fi
+# ...a SHORT MODE from `stat -c %a` must not bypass the write-bit check (roborev round 5, High).
+# WHY A SHIM AND NOT A REAL chmod: `%a` only drops below three digits when the OWNER digit is 0,
+# and a directory its owner cannot enter fails containment long before the mode check — so the real
+# bypass is NOT reachable through an actual chmod under test mode. It IS reachable as root in
+# production, where root ignores permission bits and enters a mode-0033 /etc/sysctl.d happily while
+# group and other retain write. So the honest reproduction is to feed the parser the short string a
+# root `stat` would really print, against an enterable directory. Without the zero-padding this
+# reports "33", the suffix-strip leaves the permission field EMPTY, no write-bit pattern matches,
+# and a group- AND world-writable directory is ACCEPTED.
+wt_short="$tmp/wt-shortmode"; mkdir -p "$wt_short"
+for st in bash sh cat printf tee mv rm chmod env grep mktemp id ls; do
+  s=$(command -v "$st" 2>/dev/null) && ln -sf "$s" "$wt_short/$st"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s 33\n" "$(id -u)"' >"$wt_short/stat"
+chmod +x "$wt_short/stat"
+rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+wt_sm_out=$(env PATH="$wt_short" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_sm_rc=$?
+if [ "$wt_sm_rc" -eq 0 ] || [ -e "$wt_perm_d/99-cqlite-perf.conf" ] \
+   || ! printf '%s' "$wt_sm_out" | grep -q 'group- or world-writable'; then
+  bad "perf-capability: a SHORT mode (stat reported '33' = 0033, group+world writable) was accepted — the zero-padding is missing or ineffective (rc=$wt_sm_rc, out='$wt_sm_out')"
+  wt_perm_fail=1
+fi
+
 # ...a SYMLINKED destination directory is refused OUTRIGHT (owner ruling A', condition 2: lstat
 # semantics ASSERTED, not inherited from `stat`'s default). The link itself may look perfectly
 # owned and 0755 while entries would be created somewhere else entirely, so measuring the link
