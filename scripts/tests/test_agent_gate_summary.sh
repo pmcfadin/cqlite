@@ -1177,15 +1177,22 @@ for _fn in _perf_state_into _perf_accel_token_into; do
   perf_path_text="$perf_path_text$_t
 "
 done
-# The containment gate reached from here is the SYNTACTIC one and its two builtin-only
-# helpers (#3249 review R6-1/R6-2). Its resolving sibling — perf_capability_sandbox_ok_resolved
-# — canonicalizes with `$(cd -P …)` and is deliberately NOT on this path: naming it here would
-# be the tell that a fork had been introduced into the emit chain.
+# The containment gate reached from here is the SYNTACTIC one and its THREE builtin-only
+# helpers (#3249 review R6-1/R6-2, plus perf_capability_nosymlink from #3261 AC2). Its resolving
+# sibling — perf_capability_sandbox_ok_resolved — canonicalizes with `$(cd -P …)` and is
+# deliberately NOT on this path: naming it here would be the tell that a fork had been introduced
+# into the emit chain.
+#   perf_capability_nosymlink joined this set with #3261 AC2 (roborev finding 2): sandbox_ok now
+#   calls it on the summary path, so a `$(readlink -f …)`/`$(realpath …)` added there later — the
+#   obvious way to "improve" a symlink check — would fork the emit chain. Omitting it left exactly
+#   the silently-eroding-guard gap this issue exists to close. It is a CLOSED set: a function that
+#   is renamed or removed makes fn_text return empty and reds `perf_path_missing`, so this list
+#   cannot quietly under-count.
 for _fn in perf_capability_token_into perf_capability_proc_read \
            perf_capability_proc_dir_into perf_capability_test_mode \
            perf_capability_seam_set perf_capability_is_int \
            perf_capability_sandbox_ok perf_capability_sandbox_root_into \
-           perf_capability_path_within; do
+           perf_capability_nosymlink perf_capability_path_within; do
   _t=$(fn_text "$PERF_LIB" "$_fn")
   [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
   perf_path_text="$perf_path_text$_t
