@@ -105,16 +105,37 @@ trap 'rm -rf "$tmp"' EXIT
 #     file operand (bare, separated `-d ARG`, and with input/output/fd redirections); plus
 #     `readlink -f`, `stat -c`, `grep -P`, `date -d`, `sed -z`/`grep -z`, `find -printf`,
 #     `xargs -r`, `base64 -w`, `timeout`, and the bash-4-only constructs.
-#   * WHAT IS AUTHORITATIVE: mechanism (2), the BEHAVIOURAL BSD-shim differential. It EXECUTES
-#     the guard test's own helpers under BSD `sed -i` and BSD `paste` semantics, so it does not
-#     care how a construct is spelled at all.
-#   * WHY THIS SURVIVES WHERE THE DELETED LINT DID NOT: a spelling this table misses is a
-#     BOUNDED FALSE NEGATIVE with a backstop underneath it. The deleted lint had no backstop and
-#     its misses were false PASSES about the property it was the only check for.
+#   * WHAT IS AUTHORITATIVE, AND OVER EXACTLY WHAT CODE: mechanism (2), the BEHAVIOURAL BSD-shim
+#     differential. It does not care how a construct is SPELLED — but it can only speak for the
+#     code it actually EXECUTES, and that is a SHORT, NAMED LIST: the guard test's `sed_inplace`,
+#     `sed_inplace_verified` and `summary_key_order`, extracted verbatim and run under the BSD
+#     `sed -i` / BSD `paste` shims, plus the two bare shim controls. (Sections (3) and (4) also
+#     EXECUTE real guard-test text — the `case-f-invocation-asserts` block, and the prologue +
+#     tally epilogue — but NOT under the shims, so they are not portability coverage.) Everything
+#     else in the scanned files — the whole of the rest of test_roborev_review_guard.sh, all of
+#     scripts/flow/roborev-review*.sh, and roborev-job-facts.py — is covered by the ENUMERATED
+#     SCANNER ALONE.
+#   * SO THE COVERAGE CLAIM IS NARROW, AND THIS IS ITS HONEST FORM (#3296 round-9 finding 2, which
+#     CORRECTS the round-8 wording here — the earlier text called a missed spelling a "BOUNDED
+#     FALSE NEGATIVE with a backstop underneath it" without qualification, and that was WRONG):
+#       - INSIDE the three executed helpers, a missed spelling IS bounded: the behavioural probe
+#         catches the defect whatever the spelling, because it runs the code under BSD semantics.
+#       - ANYWHERE ELSE in the scanned files there is NO backstop. An unenumerated spelling
+#         introduced there — `$SED -i`, an alias, `eval`, a quoted metacharacter inside the option
+#         run — is an UNCOVERED false negative: this file reports the code path clean and nothing
+#         in it will contradict that. See residual 5 below, which states it as a residual rather
+#         than leaving it to be rediscovered.
+#   * WHY THIS STILL SURVIVES WHERE THE DELETED LINT DID NOT — and the difference is NOT "it has a
+#     backstop everywhere", which is the claim just retracted. It is that the deleted lint's misses
+#     were false PASSES about the property it was the SOLE check for, and its false-PASS count GREW
+#     across review rounds (1, 1, 2, 3). This table's misses are false NEGATIVES of a tripwire that
+#     claims only to be a tripwire; its coverage is stated rather than implied; and every fix to it
+#     is additive.
 #   * WHAT A NEWLY-DISCOVERED SPELLING MEANS: add a row and a positive control — a cheap ADDITIVE
 #     fix. It is NOT evidence that the mechanism is broken, and it is not a reason to attempt a
 #     shell tokeniser here (a second implementation of shell grammar, whose correctness is
-#     knowable only by differential testing against the first).
+#     knowable only by differential testing against the first). Extending the differential to one
+#     more real call site is the other additive route, and is how `sed_inplace_verified` got here.
 # The residual it leaves is enumerated in full under "STATED RESIDUAL" below.
 #
 # THIS FILE SCANS ITSELF. It runs inside the macOS-sensitive `roborev-lints` gate component and
@@ -275,8 +296,30 @@ fi
 #      quiet direction — noise here would be worse than a miss, per the negative controls).
 #   4. A construct built by string concatenation or eval (`cmd="sed -"; cmd="$cmd i"`).
 #
-# Each of these is a MISS, never a false green elsewhere; the behavioural shim differential in
-# section (2) is the backstop that catches what the text scan cannot see.
+#   5. THE BACKSTOP DOES NOT COVER THE WHOLE SCANNED SET, AND 1-4 ARE UNCOVERED OUTSIDE IT
+#      (#3296 round-9 finding 2 — this bullet CORRECTS an earlier claim made right here, that the
+#      shim differential "is the backstop that catches what the text scan cannot see", full stop).
+#      It is not, in general. The differential EXECUTES exactly three helpers — `sed_inplace`,
+#      `sed_inplace_verified`, `summary_key_order` — under BSD `sed -i` / BSD `paste` semantics.
+#      For code INSIDE those three, residuals 1-4 are bounded: the probe runs the code and a defect
+#      surfaces as a failing case whatever the spelling. For every OTHER line of the scanned set —
+#      the rest of test_roborev_review_guard.sh, all four scripts/flow/roborev-review* files —
+#      the enumerated scanner is the ONLY mechanism in this file, so a spelling from 1-4 introduced
+#      THERE is an UNCOVERED false negative: the scan reports the code path clean and no probe
+#      contradicts it.
+#      This is a KNOWN REDUCTION IN COVERAGE, accepted and recorded, not argued away. It is NOT
+#      closed by adding "parsing-based validation": a bash re-implementation of shell word
+#      splitting is a second implementation of a grammar, and a second implementation's correctness
+#      is knowable only by differential testing against the original — the failure recorded in
+#      CLAUDE.md for the deleted `census-exclusion:` predictor (which was tested against a MODEL of
+#      Go rather than against Go) and for the deleted status lint further down this file (a
+#      false-PASS count that GREW: 1, 1, 2, 3). The two routes that ARE open are both additive and
+#      cheap: extend the differential to one more real call site (which is how
+#      `sed_inplace_verified` came to be covered), or add the spelling to the table with a positive
+#      control.
+#
+# Residuals 1-4 are MISSES, never false greens about something else. Residual 5 says where those
+# misses have a behavioural backstop underneath them and where they do not.
 # ---------------------------------------------------------------------------
 
 # The scan body: code only. A construct named in a comment (this repo documents the ones it
@@ -901,7 +944,12 @@ extract_fn() { # extract_fn <name> -> the function's source text
   awk -v fn="$1" '$0 ~ "^" fn "\\(\\) \\{" { inside = 1 } inside { print } inside && /^\}$/ { exit }' "$GUARD"
 }
 
-for _fn in sed_inplace summary_key_order; do
+# `sed_inplace_verified` is extracted and exercised too (#3296 round-9): it is the helper the
+# caller contract PREFERS for every mutate-then-assert case, it wraps `sed_inplace`, and running it
+# under the BSD sed shim costs one more name in this list. That widens the behavioural coverage by
+# one real call site — which is the only honest way to widen the backstop claim in the scope
+# statement above.
+for _fn in sed_inplace sed_inplace_verified summary_key_order; do
   _src=$(extract_fn "$_fn")
   if [ -z "$_src" ]; then
     bad "extraction: $_fn is not defined in $(basename "$GUARD") — the portable helper was removed or renamed, so nothing below tests it"
@@ -916,7 +964,8 @@ for _fn in sed_inplace summary_key_order; do
   eval "$_src"
 done
 
-if ! declare -f sed_inplace >/dev/null || ! declare -f summary_key_order >/dev/null; then
+if ! declare -f sed_inplace >/dev/null || ! declare -f sed_inplace_verified >/dev/null ||
+  ! declare -f summary_key_order >/dev/null; then
   bad 'extraction: the guard test helpers are not available — the differential below cannot run'
 else
   # --- sed_inplace, single-line substitution, under BSD -i semantics.
@@ -939,6 +988,39 @@ else
     ok 'sed_inplace: the cx29-shaped two-line replacement lands, with the new line immediately after the header'
   else
     bad "sed_inplace: the multi-line replacement did not land as two lines (line 2 = '$_mp')"
+  fi
+
+  # --- sed_inplace_verified UNDER THE BSD sed SHIM (#3296 round-9): the helper the caller contract
+  # prefers, exercised behaviourally rather than only pinned by text. All three of its affirmative
+  # facts are covered — the edit landed, the wanted post-edit state is PRESENT, and the state it
+  # replaces is GONE — because a helper that returns 0 without checking them would let a case assert
+  # against content the edit never produced.
+  printf 'TIER1="PASS"\n' >"$tmp/ver.txt"
+  if PATH="$SHIM_PATH" sed_inplace_verified "$tmp/ver.txt" \
+    's/^TIER1="PASS"$/TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' \
+    'TIER1="MEASUREMENT-DID-NOT-HAPPEN"' 'TIER1="PASS"' &&
+    grep -qF 'TIER1="MEASUREMENT-DID-NOT-HAPPEN"' "$tmp/ver.txt"; then
+    ok 'sed_inplace_verified: a mutation whose wanted state is present and whose replaced state is gone SUCCEEDS under BSD sed semantics'
+  else
+    bad "sed_inplace_verified: the verified mutation did not land under the BSD shim: $(cat "$tmp/ver.txt")"
+  fi
+  # The edit LANDS but the wanted state is NOT what was asked for: must be non-zero, or "the edit
+  # ran" would be mistaken for "the edit did what I meant".
+  printf 'TIER1="PASS"\n' >"$tmp/ver2.txt"
+  if PATH="$SHIM_PATH" sed_inplace_verified "$tmp/ver2.txt" \
+    's/^TIER1="PASS"$/TIER1="SOMETHING-ELSE"/' 'TIER1="WHAT-THE-CALLER-WANTED"'; then
+    bad 'sed_inplace_verified: an edit that landed but produced a DIFFERENT state returned SUCCESS — the wanted-state check is not enforced under BSD semantics'
+  else
+    ok 'sed_inplace_verified: an edit that lands but does NOT produce the wanted state returns NON-ZERO (the affirmative post-edit fact is enforced, not assumed)'
+  fi
+  # And the must-be-ABSENT direction: the edit landed and the wanted state is present, but the
+  # state that was supposed to be replaced is still in the file.
+  printf 'TIER1="PASS"\nTIER1="PASS"\n' >"$tmp/ver3.txt"
+  if PATH="$SHIM_PATH" sed_inplace_verified "$tmp/ver3.txt" \
+    '1s/^TIER1="PASS"$/TIER1="NEW"/' 'TIER1="NEW"' 'TIER1="PASS"'; then
+    bad 'sed_inplace_verified: a mutation that left the state it was supposed to REPLACE still in the file returned SUCCESS — the must-be-absent fact is not enforced'
+  else
+    ok 'sed_inplace_verified: a mutation that leaves the REPLACED state behind returns NON-ZERO (all three affirmative facts are required, under BSD semantics)'
   fi
 
   # --- AC2 AT THE EDIT SITE: an expression that matches NOTHING must be an ERROR, and the
