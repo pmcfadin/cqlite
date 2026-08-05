@@ -1107,6 +1107,118 @@ roborev_snapshot_capture_cleanup() {
   return 0
 }
 
+# ============ THE EXISTENCE/OBSERVABILITY PREDICATE FAMILY (roborev jobs 5, 10, 13) ============
+# THREE INSTANCES OF ONE MISTAKE, which is why this is a shared helper and not a third patch:
+#   1. job 5  — `[ ! -f "$live" ]` was read as "the snapshot is gone", so a DIRECTORY or FIFO at the
+#               named path took the capture branch. Narrowed to `-e`.
+#   2. job 10 — the same predicate, now `-e`, still conflated two facts: it is false for "absent" AND
+#               for "exists but is not a regular file". Split into an explicit `unreadable` report.
+#   3. job 13 — `[ ! -e "$live" ]` is ALSO false when the parent is not searchable or the lookup
+#               errors, so an existing but INACCESSIBLE snapshot could be replaced by an older
+#               capture. That is the same shape a third time: **a shell file test collapses "not
+#               there" and "cannot tell" into one false.**
+#
+# THE FAMILY, stated so instance four is prevented rather than awaited: **every `test`/`[` file
+# predicate is TWO-VALUED, and the value it collapses "unobservable" onto is the one that reads as
+# "nothing is wrong".** Absence must therefore be established AFFIRMATIVELY — parent searchable, the
+# lookup actually performed, and the answer actually ENOENT — and everything else must be reported as
+# `unreadable`, fail-closed. No consumer in this apparatus may read a bare predicate's own falsity as
+# absence; the guard suite asserts that structurally.
+#
+# _roborev_path_state <path>: the THREE-valued state of `<path>`. Exit status IS the state, and
+# `_rx_path_state` / `_rx_path_why` carry it for message text:
+#   0  present         the lookup SUCCEEDED and the path is there (any type).
+#   1  verified-absent the lookup was PERFORMED and answered ENOENT, and the containing directory was
+#                      itself observable — or an ancestor is itself verified-absent, which is absence
+#                      just as surely. A MEASUREMENT, not an inference from a failed test.
+#   2  unreadable      anything else: permission denied on a parent, a symlink loop, an I/O error, a
+#                      probe that could not run. NOTHING was established, so callers fail closed.
+#
+# WHY `ls` AND NOT `[ -e ]`: the shell's file tests expose no errno, so they cannot distinguish ENOENT
+# from EACCES — which is exactly the defect. `ls -d` reports the distinction in its message, read under
+# `LC_ALL=C` so it is not locale-dependent. Belt and braces on top of the message: an ENOENT answer is
+# only accepted as absence once the PARENT is affirmatively observable (a searchable directory), and
+# when it is not, the question recurses to the parent — so "absent because an ancestor is missing" is
+# still absence, while "cannot tell because an ancestor is unreadable" is `unreadable`. Recursion is
+# bounded by path depth and terminates at `/`.
+_roborev_path_state() {
+  local path="$1" probe rc parent
+  _rx_path_state=""
+  _rx_path_why=""
+  if [ -z "$path" ]; then
+    _rx_path_state="unreadable"
+    _rx_path_why="the empty path names nothing that could be looked up"
+    return 2
+  fi
+  probe=$(LC_ALL=C ls -d -- "$path" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    _rx_path_state="present"
+    return 0
+  fi
+  case "$probe" in
+    *'No such file or directory'*) ;;
+    *)
+      _rx_path_state="unreadable"
+      _rx_path_why="the lookup FAILED for a reason other than absence: ${probe:-<no message>}"
+      return 2
+      ;;
+  esac
+  parent="${path%/*}"
+  [ -n "$parent" ] || parent="/"
+  if [ "$parent" = "$path" ]; then
+    # No parent to appeal to (a root-level name); the ENOENT answer is all there is, and it came from
+    # a successful lookup in a directory the kernel resolved, so it is a measurement.
+    _rx_path_state="verified-absent"
+    return 1
+  fi
+  # THE PARENT MUST BE AFFIRMATIVELY OBSERVABLE before an ENOENT is accepted as absence. `-d` and `-x`
+  # are used here as a POSITIVE pair (both must hold), never as "not the bad case": if either fails the
+  # question is passed to the parent rather than answered.
+  if [ -d "$parent" ] && [ -x "$parent" ]; then
+    _rx_path_state="verified-absent"
+    return 1
+  fi
+  _roborev_path_state "$parent"
+  case "$_rx_path_state" in
+    verified-absent)
+      _rx_path_state="verified-absent"
+      _rx_path_why=""
+      return 1
+      ;;
+    *)
+      _rx_path_state="unreadable"
+      _rx_path_why="the containing directory '$parent' is not an observable searchable directory${_rx_path_why:+ ($_rx_path_why)}, so the absence of '$path' could not be established"
+      return 2
+      ;;
+  esac
+}
+
+# _roborev_regular_readable_state <path>: the state of `<path>` AS A DIFF WE COULD READ. Same three
+# values, with `present` meaning "present AND a readable regular file". A path that exists but is a
+# directory/FIFO/socket, or that we cannot read, is `unreadable` — never `verified-absent`, because it
+# IS there. Callers wanting "is this file usable" ask this; callers wanting "is this gone" ask above.
+_roborev_regular_readable_state() {
+  local path="$1"
+  _roborev_path_state "$path" || :
+  case "$_rx_path_state" in
+    present)
+      # observability-justified: `-f`/`-r` are consulted ONLY after `present` was established by the
+      # helper above, so their falsity here cannot mean "absent" — it means "there but not a readable
+      # regular file", which is the `unreadable` verdict this branch returns.
+      if [ -f "$path" ] && [ -r "$path" ]; then
+        _rx_path_state="present"
+        return 0
+      fi
+      _rx_path_state="unreadable"
+      _rx_path_why="the path exists but is not a readable regular file"
+      return 2
+      ;;
+    verified-absent) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # _roborev_file_digest <file>: a content digest into `_rx_digest`; non-zero when none can be taken.
 # Any of the three tools distinguishes a same-length rewrite, which is the whole requirement; the
 # fallback chain exists because `sha256sum` is GNU, `shasum` is what macOS ships, and `cksum` is
