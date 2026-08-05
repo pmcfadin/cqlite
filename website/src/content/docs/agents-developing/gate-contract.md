@@ -352,6 +352,61 @@ gate. Delta re-certification leans on that nightly as the net for anything a
 test/docs round scoped past. `--delta` (like `--lite` and `--only`) is EXEMPT from
 the machine-wide concurrency cap.
 
+## CITE-AND-WAIVE: waiving a red on a genuinely prose diff (#3042, narrowed by #3250)
+
+A **genuinely prose** diff cannot change the compiled binary, so a test failure in
+its full gate is by definition **pre-existing on `main` or a flake**, and the
+correct response is CITE-AND-WAIVE — never a source patch to turn the gate green
+(that is a real change smuggled in under a docs diff, certified by nothing, and it
+masks the actual main-red).
+
+The waiver's precondition is that the diff touches **no compiled input**: no `src`,
+no `Cargo.*`, no build script, no workflow, no test-data. **That qualifier is a
+path-shape test, and a path shape is not evidence. Don't judge it — run it:**
+
+```bash
+git diff --name-only origin/main...HEAD | bash scripts/ci/classify-docs-only.sh
+# exit 0 => docs-only  (the waiver is available)
+# exit 1 => full       (the waiver does NOT apply — the failure is presumed yours)
+```
+
+`scripts/ci/classify-docs-only.sh` is the same classifier that decides whether
+`pr-gate-core` runs at all, so running it here asks the gate's own question rather
+than a paraphrase of it. It answers documentation only on an **affirmative**
+allowlist match — prose/images/legal text, inert report artifacts under `docs/`,
+and code-bearing report formats (`.json`, `.html`) **only inside** an
+artifact-bearing directory — and fails closed on every unrecognized extension and
+on **every** extensionless path. `scripts/tests/test_classify_docs_only.sh` pins
+that behaviour, and it runs inside the full gate's `tooling-tests` component.
+
+**Why the old wording was unsafe, in one concrete case.** This repository ships
+measurement harnesses under `docs/reports/*-artifacts/` **by convention**, so a
+PR-#3222-shaped diff contains `src/main.rs` **and** `Cargo.toml` under
+`docs/reports/ws0-3026-artifacts/ws0-cqlite/scan-harness/`. It satisfies "no
+`src`, no `Cargo.*`" **textually** while being false **materially** — measured, the
+three merged `docs/`-only PRs #3222 / #3081 / #3216 carried 35 / 30 / 1 executable
+or config-as-code paths and reported `required` green in 13–16 s against a
+~14-minute baseline. An agent correctly following the old text would waive a red
+that was genuinely its own.
+
+Everything else about the rule is unchanged:
+
+1. Confirm the diff really is non-compiling input — with the classifier, not by eye.
+2. Identify the failure as a **known** main-red issue or a known flake; reproduce it
+   on a clean `origin/main` checkout if it is not already filed, and FILE it if not.
+3. Record the waiver in the PR body, naming the failing component **and** the issue
+   number it belongs to. **A waiver with no cited issue is not a waiver — it is an
+   unexplained red.**
+
+Conversely, **if ANY compiled input is in the diff the waiver is void**: the failure
+is presumed yours until proven otherwise.
+
+**Same definition, two sides.** This is the gate-side spelling of the review-side
+rule in [roborev findings](/cqlite/agents-developing/roborev-findings/): "docs-only"
+means a **code-free census**, never a `docs/` path prefix. The two definitions are
+cross-referenced deliberately so they cannot drift apart again — #3229 fixed the
+reviewer's copy of this bug and #3250 fixed the gate's.
+
 ## New-machine setup
 
 A fresh machine that will run the gate should first run

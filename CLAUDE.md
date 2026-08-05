@@ -112,16 +112,25 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   a **just-launched or still-queued** gate as its gate of record — a verdict that does not exist.
   Anchor every poll (agents, skills, docs, helper scripts) on `PASS|FAIL`; a sentinel-only summary
   means "still running, died, or queued", never certified.
-- **A markdown/docs-only diff cannot change the compiled binary — so a test failure in its full gate
+- **A GENUINELY PROSE diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
-  (#3042).** If your diff touches no compiled input (no `src`, no `Cargo.*`, no build script, no
-  workflow, no test-data), it cannot have caused a test to fail. (Read "docs-only" here the same way
-  roborev doctrine does — a **code-free census**, not a `docs/` path prefix: a PR carrying
-  `docs/reports/*-artifacts/` harness executables ships real programs, so this waiver does not apply to
-  it.) **NEVER patch source to turn such a
+  (#3042).** The waiver's precondition is that the diff touches no compiled input (no `src`, no
+  `Cargo.*`, no build script, no workflow, no test-data). **That qualifier is a path-shape test, and a
+  path shape is not evidence — DON'T JUDGE IT, RUN IT (#3250):**
+  ```bash
+  git diff --name-only origin/main...HEAD | bash scripts/ci/classify-docs-only.sh   # exit 0 = prose
+  ```
+  A non-zero exit means the waiver does not apply, full stop. **The falsifying case is not
+  hypothetical**: this repository ships measurement harnesses under `docs/reports/*-artifacts/` **by
+  convention**, so a #3222-shaped diff contains `src/main.rs` **and** `Cargo.toml` under
+  `docs/reports/ws0-3026-artifacts/ws0-cqlite/scan-harness/` — it satisfies "no `src`, no `Cargo.*`"
+  **textually** while being false **materially**, and an agent correctly following the old wording
+  waives a red that is genuinely theirs. (Read "docs-only" here the same way roborev doctrine does — a
+  **code-free census**, never a `docs/` path prefix; the classifier above is the gate-side spelling of
+  the same idea, and `scripts/tests/test_classify_docs_only.sh` pins it.) **NEVER patch source to turn such a
   gate green** — that is a real change smuggled in under a docs diff, certified by nothing, and it
-  masks the actual main-red. Instead: (1) confirm the diff really is non-compiling-input
-  (`git diff --stat origin/main...HEAD`); (2) identify the failure as a known main-red issue or a
+  masks the actual main-red. Instead: (1) confirm the diff really is non-compiling-input, with the
+  classifier above rather than by eye; (2) identify the failure as a known main-red issue or a
   known flake — reproduce it on a clean `origin/main` checkout if it is not already filed, and FILE it
   if it is not; (3) record the waiver in the PR body naming the failing component and the issue number
   it belongs to. A waiver with no cited issue is not a waiver — it is an unexplained red. Conversely,
