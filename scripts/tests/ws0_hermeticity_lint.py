@@ -113,11 +113,20 @@ EXEMPTIONS: dict[str, str] = {
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",
     "scripts/perf/ws0_collect.py": "the reporter; prose reference only",
-    # Added when its refusals gained "re-run the session with scripts/perf/ws0-baseline.sh"
-    # prose (#3272 round 4). The census is CONTENT-based, so it flagged the file as UNCOVERED
-    # the moment that text landed — which is the completeness oracle working: a driver mention
-    # in a new file is a decision someone has to record, not a pattern that quietly widens.
-    "scripts/perf/ws0_validate.py": "the reporter's validator; prose reference only",
+    # `ws0_validate.py` is deliberately ABSENT: #3272 round 5 moved its driver-mentioning
+    # refusals into `ws0_session.py`, and the STALE-EXEMPTION check flagged the leftover entry
+    # — the oracle working in the other direction, refusing a claim nobody checks any more.
+    #
+    # These three arrived with round 5's campsite-rule splits. The census is CONTENT-based, so
+    # each was reported UNCOVERED the moment the prose moved into it: a driver mention in a new
+    # file is a decision someone records here, not a pattern that quietly widens.
+    "scripts/perf/ws0_session.py":
+        "the session/corpus identity module; prose reference only (its refusals tell an"
+        " operator to re-run the session with the driver)",
+    "scripts/perf/ws0_flight_arm.py": "the Flight arm collector; prose reference only",
+    # `ws0_loadgen_record.py` is deliberately absent too: it never names the driver, so an
+    # exemption for it would be a claim about nothing — which the STALE-EXEMPTION check
+    # correctly refused when it was added speculatively.
     "tools/ws0-corpus-gen/README.md": "documentation",
     "tools/ws0-corpus-gen/src/bin/scan_bench.rs": "rust; cannot invoke a shell script bare",
 }
