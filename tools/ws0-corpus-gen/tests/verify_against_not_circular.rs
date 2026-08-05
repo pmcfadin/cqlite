@@ -100,8 +100,11 @@ fn write_foreign_identity(path: &Path) {
         "not_a_correctness_oracle": "performance fixture only (#3042)",
         "differs_from_prior_corpus": "n/a",
     });
-    std::fs::write(path, serde_json::to_string_pretty(&json).expect("serialize"))
-        .expect("write foreign identity");
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&json).expect("serialize"),
+    )
+    .expect("write foreign identity");
 }
 
 /// ALIAS 1 — `--verify-against` naming the corpus root's own `corpus-identity.json`.
@@ -250,7 +253,11 @@ fn a_non_aliasing_prior_passes_when_reproduced_and_fails_when_it_diverges() {
         "--identity-out",
         recorded.to_str().expect("utf8"),
     ]);
-    assert!(first.ok, "the first generation must succeed: {}", first.all());
+    assert!(
+        first.ok,
+        "the first generation must succeed: {}",
+        first.all()
+    );
     assert!(recorded.is_file(), "the recorded identity must exist");
 
     // Generation 2, independent root, SAME inputs: must reproduce it exactly.

@@ -435,6 +435,53 @@ else
   fail "--validate-args-only must refuse --reps 0 (rc=$rc, out: $out)"
 fi
 
+# `lib-args.sh` must be SELF-CONTAINED under `set -u` (#3272 review round 2 nit).
+# NON-VACUITY, measured against HEAD~1: `duration_reject` interpolated
+# `$COLD_STEP_MAX_MS`, defined only in the DRIVER, so sourcing the library alone and
+# calling it died with `COLD_STEP_MAX_MS: unbound variable` — no diagnostic, and the
+# `exit 2` on the next line never ran. A library that dies rather than diagnoses is worse
+# than one that says nothing, because the failure names the wrong thing.
+out=$(bash -c '
+  set -uo pipefail
+  # shellcheck disable=SC1090
+  source "'"$ARGS_LIB"'"
+  duration_reject cold-step-duration 99999999999999999999s 3
+' 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && grep -q "is too LONG" <<<"$out" \
+   && grep -q "5000ms cold-step ceiling" <<<"$out" \
+   && ! grep -q "unbound variable" <<<"$out"; then
+  pass "lib-args.sh is SELF-CONTAINED: duration_reject diagnoses and exits 2 with NO driver sourced"
+else
+  fail "duration_reject must work with only lib-args.sh sourced (rc=$rc, out: $out)"
+fi
+# ...and the ceiling must be a real NUMBER, not an empty default that would print
+# "the ms cold-step ceiling" and compare against nothing in the driver.
+if bash -c '
+  set -uo pipefail
+  # shellcheck disable=SC1090
+  source "'"$ARGS_LIB"'"
+  [ "$COLD_STEP_MAX_MS" -gt 0 ] 2>/dev/null
+'; then
+  pass "COLD_STEP_MAX_MS is a positive integer in the library that quotes it"
+else
+  fail "COLD_STEP_MAX_MS must be a positive integer owned by lib-args.sh"
+fi
+# And the DRIVER must READ it rather than define its own — two definitions would drift, and
+# the diagnostic would then name a ceiling other than the one enforced.
+if ! grep -qE '^COLD_STEP_MAX_MS=' "$DRIVER"; then
+  pass "the driver does NOT redefine COLD_STEP_MAX_MS (one owner, no drift)"
+else
+  fail "COLD_STEP_MAX_MS must have ONE owner (lib-args.sh); the driver redefines it"
+fi
+# The cap-drift assert's OWN reference must be right: lib-args.sh names the file that
+# contains it. A pointer to the wrong file reads as coverage that does not exist.
+if grep -q 'test_ws0_report_guards.sh' "$ARGS_LIB" \
+   && ! grep -q 'pinned equal by' <<<"$(grep -A2 'test_ws0_fabrication_guards.sh' "$ARGS_LIB")"; then
+  pass "lib-args.sh points the cap-drift assert at the file that actually contains it"
+else
+  fail "lib-args.sh must reference test_ws0_report_guards.sh for the cap-drift assert"
+fi
+
 check_driver_reject "a 45s cold step is refused up front (would admit warm requests)" \
   "exceeds the" --corpus "$TMP/corpus" --temp cold --cold-step-duration 45s
 check_driver_reject "a 10s cold step is refused (above the 5000ms ceiling)" \

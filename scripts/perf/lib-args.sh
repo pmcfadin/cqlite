@@ -40,8 +40,12 @@
 # It is deliberately NOT read out of the python module at runtime: the driver must be
 # able to validate its arguments before it depends on anything else, and a cap parsed by
 # grepping a python file is a second failure mode. Instead the two are pinned equal by
-# `scripts/tests/test_ws0_fabrication_guards.sh`, which reads both and FAILS on a
-# mismatch — the drift is caught mechanically rather than trusted to a comment.
+# `scripts/tests/test_ws0_report_guards.sh` (the "driver's MAX_COUNT EQUALS
+# ws0_validate.MAX_COUNT" case), which reads both and FAILS on a mismatch — the drift is
+# caught mechanically rather than trusted to a comment. The reference used to name
+# `test_ws0_fabrication_guards.sh`, which does not contain that assert (#3272 review round
+# 2 nit): a pointer to the wrong file reads as coverage that does not exist, and the next
+# reader either hunts for it or concludes the drift is unguarded.
 MAX_COUNT=100000
 require_positive_int() { # require_positive_int <flag> <value> [max]
   local flag="$1" value="$2" max="${3:-$MAX_COUNT}"
@@ -152,6 +156,22 @@ parse_duration_ms() {
     *m)  echo "$((10#$n * 60000))" ;;
   esac
 }
+
+# The COLD-STEP CEILING, in milliseconds. Owned HERE, and read by the driver — never the
+# other way round (#3272 review round 2 nit).
+#
+# `duration_reject` interpolated `$COLD_STEP_MAX_MS`, which was defined ONLY in
+# `ws0-baseline.sh`. So this library was not self-contained: under the `set -u` its own
+# header tells callers to expect, ANY other caller — a test sourcing it to drive one
+# validator, a future second driver — died on an unbound variable instead of printing the
+# diagnostic, and the `exit 2` on the next line never ran. A library that dies rather than
+# diagnoses is worse than one that says nothing, because the failure names the wrong thing.
+#
+# The value lives with the function that quotes it, and the driver reads it from here.
+# `${COLD_STEP_MAX_MS:-}` would have been the smaller edit and the wrong one: it defaults a
+# LOAD-BEARING NUMBER to empty, so the diagnostic would read "slip UNDER the ms cold-step
+# ceiling" and the ceiling comparison in the driver would compare against nothing.
+COLD_STEP_MAX_MS=5000
 
 # duration_reject <flag> <value> <rc> — the diagnostic for the SPECIFIC failure, then
 # exit. Split out because both call sites need it and neither may guess the cause.

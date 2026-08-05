@@ -231,7 +231,11 @@ require_positive_int port "$PORT" 65535
 #       be exactly 1, whatever the duration was. That is the ground truth, and it
 #       holds on a corpus whose scan is faster than any duration ceiling could
 #       anticipate. A ceiling alone would be a guess; the observed count is not.
-COLD_STEP_MAX_MS=5000
+#
+# `COLD_STEP_MAX_MS` is defined in `lib-args.sh`, beside the `duration_reject` diagnostic
+# that quotes it — it used to be defined HERE and interpolated THERE, which made that
+# library non-self-contained: under `set -u` any other caller died on an unbound variable
+# instead of printing the diagnostic (#3272 review round 2 nit).
 
 
 for _spec in "step-duration:$STEP_DURATION" "cold-step-duration:$COLD_STEP_DURATION"; do

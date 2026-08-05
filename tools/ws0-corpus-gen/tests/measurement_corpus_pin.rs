@@ -88,24 +88,31 @@ fn read_artifact() -> serde_json::Value {
 /// perturbation CASES (`cases.len() == 8`), which enumerated only the fields already
 /// compared — it certified its own scope, and could not have caught the missing `seed`
 /// and `table` anchors that prompted this.
+// Each reason NAMES ITS FIELD and states WHY the field is not a pin — the two properties
+// asserted at the bottom of `the_comparison_covers_every_artifact_field`. Writing the field
+// name into the reason is what makes a copied-from-a-neighbour entry detectable; the old
+// `reason.len() > 20` could not see one at all (#3272 review round 2 nit).
 const DELIBERATELY_NOT_COMPARED: &[(&str, &str)] = &[
     (
         "issue",
-        "a provenance label, not a measured quantity; #3096 is stated in prose everywhere",
+        "`issue` is a provenance label, not a measured quantity; #3096 is stated in prose \
+         everywhere this corpus is described",
     ),
     (
         "components",
-        "compared SEPARATELY and more strictly in \
+        "`components` is compared separately and more strictly in \
          the_in_source_pin_matches_the_committed_artifact, which asserts the Data.db \
          COMPONENT's own sha256 and size equal the pinned ones",
     ),
     (
         "not_a_correctness_oracle",
-        "the #3042 disclaimer string; its wording is not a pin",
+        "`not_a_correctness_oracle` is the #3042 disclaimer string; its wording is prose \
+         and not a pin",
     ),
     (
         "differs_from_prior_corpus",
-        "prose recording which digest this corpus is NOT (#3058/#3100)",
+        "`differs_from_prior_corpus` is prose recording which digest this corpus is NOT \
+         (#3058/#3100), so there is nothing to compare it against",
     ),
 ];
 
@@ -408,14 +415,127 @@ fn the_comparison_covers_every_artifact_field() {
         absent.is_empty(),
         "pin_vs_artifact compares field(s) {absent:?} that {ARTIFACT} does not carry"
     );
-    // And every exemption must carry a non-empty reason: "not compared, no reason
-    // given" is how a real gap gets parked as an exemption.
+    // Every exemption must NAME ITS FIELD and say why that field is not a pin.
+    //
+    // This used to be `reason.len() > 20` (#3272 review round 2 nit) — a test of LENGTH
+    // where the property is CONTENT. A 21-character placeholder ("not compared for now.")
+    // satisfies it, which is precisely how a real gap gets parked as an audited exemption:
+    // the check reads as coverage, the reason reads as a decision, and nobody looks again.
+    //
+    // The property is stated instead, and it is checkable without judging prose:
+    //
+    //  * the reason MENTIONS THE FIELD, so it is about this exemption rather than copied
+    //    from a neighbour (the copy-paste failure a length test cannot see at all);
+    //  * it says WHY, evidenced by a rationale connective — and the acceptable set is
+    //    small and CLOSED, so a reason that merely restates the field name does not pass;
+    //  * it is not one of the placeholder forms.
+    //
+    // This is still a proxy for "a human wrote a real reason", and it is deliberately a
+    // WEAK one — a strong one would be judging English. The strength is elsewhere: the
+    // exemption list is EXHAUSTIVE against the artifact's real key set above, so an
+    // exemption cannot be added without appearing here, and there are four of them,
+    // reviewed in code. What is closed here is the specific way a length test fails.
     for (key, reason) in DELIBERATELY_NOT_COMPARED {
         assert!(
-            reason.len() > 20,
-            "the exemption for `{key}` must state a real reason, got {reason:?}"
+            reason_is_acceptable(key, reason),
+            "the exemption for `{key}` must NAME the field and say WHY it is not compared, \
+             and must not be a placeholder. This replaced a `reason.len() > 20` check, \
+             which a 21-character placeholder satisfied (#3272 review round 2). See \
+             `reason_is_acceptable` for the three properties; got {reason:?}"
         );
     }
+}
+
+/// The three properties an exemption reason must have. Named so
+/// [`the_exemption_reason_check_rejects_a_placeholder_and_a_copied_reason`] drives the
+/// SAME predicate the assertion uses — a re-implemented check in the non-vacuity test
+/// would be a second thing to keep in sync, and its divergence would be invisible in
+/// exactly the permissive direction.
+///
+/// It is a deliberately WEAK proxy for "a human wrote a real reason"; a strong one would be
+/// judging English. The strength is elsewhere: the exemption list is EXHAUSTIVE against the
+/// artifact's real key set, so an exemption cannot be added without appearing in code
+/// review. What this closes is the specific way a LENGTH test fails — it cannot see a
+/// placeholder, and it cannot see a reason copied from a neighbouring entry.
+fn reason_is_acceptable(key: &str, reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    // (1) NAMES ITS FIELD, so a copied reason is detectable. A field name that does not
+    // read naturally in prose may instead name the ALTERNATIVE check that covers it.
+    let names_field = lower.contains(&key.to_ascii_lowercase())
+        || lower.contains("compared separately")
+        || lower.contains("digest");
+    // (2) SAYS WHY, from a small CLOSED set of rationale forms — so a reason that merely
+    // restates the field name does not pass.
+    const RATIONALE: [&str; 8] = [
+        "not a measured quantity",
+        "not a pin",
+        "compared separately",
+        "prose",
+        "label",
+        "disclaimer",
+        "because",
+        "nothing to compare",
+    ];
+    let says_why = RATIONALE.iter().any(|r| lower.contains(r));
+    // (3) IS NOT A PLACEHOLDER — the form that parks a real gap as an audited decision.
+    let placeholder = ["tbd", "todo", "fixme", "for now", "n/a reason", "see above"]
+        .iter()
+        .any(|p| lower.contains(p));
+    names_field && says_why && !placeholder
+}
+
+/// NON-VACUITY for the exemption-reason check (#3272 review round 2 nit).
+///
+/// The check above replaced `reason.len() > 20`, which a 21-character placeholder
+/// satisfied. So the replacement is itself driven over the inputs it must REJECT — the
+/// placeholder that used to pass, and a reason copied from a neighbouring entry — and over
+/// one it must ACCEPT. A check whose own discriminating power is unmeasured is the #3249
+/// shape one level up: `_PERF_STATE="ok"` survived 118/118 tests.
+///
+/// The predicate is factored here so the test and the assertion cannot diverge; the
+/// assertion above calls the same function.
+#[test]
+fn the_exemption_reason_check_rejects_a_placeholder_and_a_copied_reason() {
+    // A 21-CHARACTER PLACEHOLDER: passes `len() > 20`, names nothing, says nothing.
+    let placeholder = "not compared for now.";
+    assert!(
+        placeholder.len() > 20,
+        "the historical check was `len() > 20`; this input must satisfy it, or it is not \
+         the input that used to pass"
+    );
+    assert!(
+        !reason_is_acceptable("rows", placeholder),
+        "a 21-character placeholder must be REJECTED — it satisfied the length check it \
+         replaced"
+    );
+    // A reason COPIED from a neighbouring entry: real prose, real rationale, WRONG FIELD.
+    // A length check cannot see this at all.
+    let copied = "`issue` is a provenance label, not a measured quantity";
+    assert!(
+        !reason_is_acceptable("partitions", copied),
+        "a reason naming a DIFFERENT field must be rejected: {copied:?}"
+    );
+    // A reason that only RESTATES the field name says why nothing.
+    assert!(
+        !reason_is_acceptable("partitions", "`partitions` is the partitions field value"),
+        "a reason that restates the field without a rationale must be rejected"
+    );
+    // The ACCEPT direction, so the check is not one that rejects everything — which is the
+    // check whose exemption list someone deletes.
+    for (key, reason) in DELIBERATELY_NOT_COMPARED {
+        assert!(
+            reason_is_acceptable(key, reason),
+            "the shipped exemption for `{key}` must be acceptable: {reason:?}"
+        );
+    }
+    assert!(
+        reason_is_acceptable(
+            "bytes_per_row",
+            "`bytes_per_row` is derived from two fields already pinned, so it is not a pin \
+             of its own"
+        ),
+        "a well-formed new exemption must be accepted"
+    );
 }
 
 /// The seed anchor, stated as its own assertion so the failure NAMES the hazard.
