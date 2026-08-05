@@ -354,6 +354,18 @@
 #                      and ANY line mentioning "self-check" (the `grep -v` discarded by
 #                      CONTENT, so a comment suppressed the guard). Hermetic: fake sysfs +
 #                      driver copies under $TMPDIR; no perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_host_state_guards.sh (#3272
+#                      finding 3) — the HOST STATE half, split out of the reporter test
+#                      in review round 3 because it is the only part of the rig that
+#                      changes anything OUTSIDE its own process tree and the only part
+#                      whose failure is SECURITY-ADJACENT rather than a wrong number.
+#                      The rig weakens perf_event_paranoid + kptr_restrict and used to
+#                      NEVER restore them (its only trap was `trap stop_server EXIT`);
+#                      the first fix was itself PARTIAL (the success/warning split keyed
+#                      on 'was ANYTHING restored'), so both halves are per-knob and the
+#                      root cause is closed too — a knob whose prior could not be
+#                      CAPTURED is never MUTATED. Behavioural through a recording `sudo`
+#                      shim + a real SIGINT probe; no privileged call, no knob touched.
 #                      Also runs scripts/tests/test_ws0_hermeticity.sh (#3272 review round
 #                      3, B1) — the MECHANISM that keeps the three files above hermetic ON
 #                      LINUX, which is where the property matters and where it broke twice.
@@ -5758,6 +5770,32 @@ run_tooling_tests() {
   # Both directions are measured (six bare spellings fire, six ordinary lines do not), and
   # the platform property is OBSERVED on a LINUX-SHAPED fixture with a positive control
   # proving the bare run really does mutate that host. Hermetic; sub-second.
+  # ws0 HOST STATE (#3272 finding 3, split out of the reporter test in review round 3). The
+  # rig weakens `kernel.perf_event_paranoid` and `kernel.kptr_restrict` so `perf stat -C` can
+  # count CPU-wide, and used to NEVER put them back: its only trap was `trap stop_server
+  # EXIT`, so a success, a FATAL and a Ctrl-C all left the host less hardened than the rig
+  # found it — permanently, for every subsequent process on a shared fleet machine, with
+  # nothing in the output saying so. The FIRST fix of that was itself PARTIAL (the
+  # success/warning split keyed on "was ANYTHING restored", so a partial restore printed the
+  # affirmative line and no warning), which is why the ROOT CAUSE is closed too: a knob whose
+  # prior could not be CAPTURED is never MUTATED. Behavioural, through a recording `sudo`
+  # shim plus a real SIGINT probe on the driver's trap wiring — no privileged call happens and
+  # no host knob is touched, and the exact `sysctl -w` argv the handler WOULD issue is
+  # asserted instead. A separate file from the reporter guards because this is the only part
+  # of the rig that changes anything OUTSIDE its own process tree, and the only part whose
+  # failure is SECURITY-ADJACENT rather than a wrong number.
+  echo ">>> [$name] bash scripts/tests/test_ws0_host_state_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_host_state_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 host-state restore guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_ws0_hermeticity.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_hermeticity.sh" >>"$log" 2>&1; then
     status=FAIL

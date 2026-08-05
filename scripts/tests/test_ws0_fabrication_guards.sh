@@ -74,55 +74,20 @@ CORPUS_ROWS=1000
 # --------------------------------------------------------------------------
 # Fixture builders
 # --------------------------------------------------------------------------
-perf_csv() { # perf_csv <path> <cycles> <instructions>
-  printf '%s,,cycles,,,,\n%s,,instructions,,,,\n' "$2" "$3" > "$1"
-}
+# `perf_csv`, `make_corpus` and `make_round` are SHARED with
+# `test_ws0_report_guards.sh` (scripts/tests/lib-ws0-fixtures.sh): they were identical in
+# both files, and `make_round` gained a `monotonic_ns` field this round which had to be
+# edited in two places — exactly the drift a shared builder removes. The `make_*_rep`
+# builders below stay HERE because their signatures are specific to this file's subject
+# (the flight JSONL is passed VERBATIM, so a case can omit a key or supply two records).
+# shellcheck source=scripts/tests/lib-ws0-fixtures.sh
+source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 
-# make_corpus <dir> [rows] — a corpus whose recorded identity MATCHES the synthetic
-# `Data.db` it also writes, so the byte verification passes on the happy path.
-# `data_db_bytes` and `data_db_sha256` are MEASURED from the file, never asserted.
-make_corpus() {
-  local dir="$1" rows="${2:-$CORPUS_ROWS}" table
-  table="$dir/ws0/events"
-  mkdir -p "$table"
-  # A few KB of deterministic bytes: the verification must work at ANY size (the real
-  # corpus is 2.8 GB, and a test may not write one).
-  python3 - "$table/nb-1-big-Data.db" <<'PY'
-import sys
-open(sys.argv[1], "wb").write(bytes(range(256)) * 16)
-PY
-  python3 - "$dir" "$table/nb-1-big-Data.db" "$rows" <<'PY'
-import hashlib, json, os, sys
-out, data, rows = sys.argv[1], sys.argv[2], int(sys.argv[3])
-raw = open(data, "rb").read()
-ident = {
-    "rows": rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
-    "data_db_bytes": len(raw),
-    "data_db_sha256": hashlib.sha256(raw).hexdigest(),
-    "bytes_per_row": len(raw) / rows,
-}
-json.dump(ident, open(os.path.join(out, "corpus-identity.json"), "w"))
-PY
-}
-
-# The INTERLEAVING metadata every rep must carry (#3272 R3). Written by default, with the
-# bare scan and the Flight arm ALTERNATING position by round exactly as the driver does —
-# a fixture with a fixed order would be refused by the rotation check, and correctly so.
-# `make_round <dir> <tag> <round> <position> [arms] [monotonic-ns]`
-#
-# `monotonic_ns` is the field that makes the interleaving an OBSERVATION rather than a
-# label (#3272 review round 3, B3): the reporter verifies ROUND-MAJOR ORDERING from it —
-# every rep of round r completing before any rep of round r+1 — which is the one property
-# an arm-major session cannot forge by relabelling. The default is
-# `round * 1e9 + position * 1e6`, i.e. round-major and distinct, exactly the shape a real
-# sequential loop produces. A case that needs a NON-interleaved (arm-major) session
-# overrides it, and must then be REFUSED.
-make_round() {
-  local rnd="$3" pos="$4" arms="${5:-2}"
-  local ns="${6:-$(( rnd * 1000000000 + pos * 1000000 ))}"
-  printf 'round=%s\nposition=%s\narms_in_round=%s\nmonotonic_ns=%s\n' \
-    "$rnd" "$pos" "$arms" "$ns" > "$1/$2.round"
-}
+# This file's corpora are deliberately SMALL (4 KiB of Data.db). The byte verification must
+# work at ANY size — the real corpus is 2.8 GB and a test may not write one — and this file
+# builds a corpus per case, so the size is the one thing worth keeping local.
+FIXTURE_DATA_DB_BYTES=4096
+make_corpus() { ws0_make_corpus "$1" "${2:-$CORPUS_ROWS}" "$FIXTURE_DATA_DB_BYTES" "${3:-}"; }
 
 make_scan_rep() { # make_scan_rep <dir> <temp> <rep> <prewarm>
   local d="$1" tag="scan-$2-$3"
@@ -132,8 +97,10 @@ EOF
   perf_csv "$d/perf-$tag.csv" 2000000 4000000
   perf_csv "$d/perf-$tag-setup.csv" 100000 200000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
-  # scan holds position 1 on odd rounds, 2 on even — the driver's alternation.
-  make_round "$d" "$tag" "$3" "$(( ($3 % 2 == 1) ? 1 : 2 ))"
+  # The driver's alternation, from the shared helper so the two files cannot spell it
+  # differently (a fixture whose positions do not alternate is refused by the rotation
+  # check — correctly, but diagnosed as a rotation failure rather than a fixture mistake).
+  make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" scan)"
 }
 
 # make_flight_rep <dir> <temp> <rep> <prewarm> <jsonl-body>
@@ -144,7 +111,7 @@ make_flight_rep() {
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
   # ...and the flight arm takes the OTHER position, mirroring the driver.
-  make_round "$d" "$tag" "$3" "$(( ($3 % 2 == 1) ? 2 : 1 ))"
+  make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" flight)"
 }
 
 GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
