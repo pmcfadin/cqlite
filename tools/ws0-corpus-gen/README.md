@@ -103,6 +103,28 @@ Digest/TOC as well).
 `--verify-against` compares the regenerated identity field by field and exits
 non-zero on any divergence, naming the component that moved.
 
+### Three verdicts, not two (issue #3272 F1)
+
+A recorded identity may PREDATE a field the current generator emits — the committed
+`docs/reports/ws0-3096-artifacts/corpus-identity.json` was recorded 2026-08-03 and
+carries no `schema_sha256`, which #3272 R2 added afterwards. Such an identity is
+READ (a required field would make the determinism check permanently unrunnable
+against the only artifact it is ever pointed at), but its absent field is **never**
+folded into "matched":
+
+| verdict | meaning | exit |
+|---|---|---|
+| `PASS` | every recorded field was compared, and every one agreed | 0 |
+| `PARTIAL` | everything comparable agreed, but ≥1 field is **UNVERIFIED** because the recorded identity does not carry it — each one named | **non-zero** |
+| `FAIL` | ≥1 field disagreed (unverified fields are listed too) | non-zero |
+
+`PARTIAL` exits non-zero on purpose: a scripted caller reads the exit code, and a
+zero exit *is* a pass claim however the text is worded. A check that did not run
+must not print like one that passed.
+
+Generation always records every field, so a `None` in an identity can only mean
+"recorded before that field existed", never "this run declined to look".
+
 ## The digest this corpus is NOT
 
 Issue #3096 quotes

@@ -44,6 +44,27 @@ REFUSED, not silently accepted: an absent digest means the schema was never pinn
 condition the finding is about, and treating "no record" as "nothing to check" is precisely the
 fail-open shape (a check that does not run prints exactly like one that passed). The remedy is a
 regeneration, and the refusal says so.
+
+## Why this REFUSES while `--verify-against` reads a pre-pin identity (#3272 round 7, F1/F6)
+
+The two look inconsistent and are not — they are asked different questions, so the same absence
+means different things:
+
+* HERE the question is "may this session's measurement be reported?" The schema is a LIVE
+  MEASUREMENT INPUT that both arms are reading right now, asymmetrically, so an unpinned schema
+  means the two arms may not have read the same one. That is unreportable, and refusing is the
+  only answer that is not a claim about something unmeasured. The remedy is available and cheap:
+  regenerate, which the current generator always records the digest for.
+* `--verify-against` (`tools/ws0-corpus-gen/src/main.rs`) is asked "does this regeneration
+  reproduce a RECORDED identity?" That record may legitimately predate any given field, and a
+   2026-08-03 artifact will always predate a 2026-08-04 field, so a required-field read makes the
+  determinism check permanently unrunnable against it. It therefore READS the absence — and
+  reports it as a THIRD STATE (`PARTIAL`, exit non-zero, the field named as UNVERIFIED), never
+  as agreement.
+
+The shared rule is the one that matters: **neither path treats an absent digest as a match.** One
+refuses to report, the other reports that it could not verify. What is forbidden in both is
+silence.
 """
 
 from __future__ import annotations

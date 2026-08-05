@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use ws0_corpus_gen::generate::{generate, CorpusSpec, GenResult, DEFAULT_SEED};
-use ws0_corpus_gen::identity::CorpusIdentity;
+use ws0_corpus_gen::identity::{CorpusIdentity, IdentityVerdict};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -445,22 +445,56 @@ async fn run(cli: Cli) -> GenResult<ExitCode> {
     // `prior` was read BEFORE `generate()` ran, so it cannot be this run's own output
     // whatever the paths are (issue #3272 review R5).
     if let Some((prior_path, prior)) = prior {
-        let diffs = identity.diff(&prior);
-        if diffs.is_empty() {
-            println!(
-                "determinism:    PASS — reproduced {} exactly",
-                prior_path.display()
-            );
-        } else {
-            eprintln!(
-                "determinism:    FAIL against {} ({} divergence(s)):",
-                prior_path.display(),
-                diffs.len()
-            );
-            for d in &diffs {
-                eprintln!("  - {d}");
+        let cmp = identity.compare(&prior);
+        // THREE outcomes, not two (#3272 review round 7, F1). `PARTIAL` exists because a
+        // prior recorded before a field was pinned cannot be compared on that field, and a
+        // comparison that could not see a field must not print `PASS`: an unverified field
+        // silently folded into "matched" is the fail-open shape this issue exists to remove.
+        // It exits NON-ZERO for the same reason — a caller scripting `--verify-against` reads
+        // the exit code, and a zero exit IS a pass claim however the text is worded.
+        match cmp.verdict() {
+            IdentityVerdict::Reproduced => {
+                println!(
+                    "determinism:    PASS — reproduced {} exactly (every recorded field compared)",
+                    prior_path.display()
+                );
             }
-            return Ok(ExitCode::FAILURE);
+            IdentityVerdict::PartialUnverified => {
+                eprintln!(
+                    "determinism:    PARTIAL against {} — every field that COULD be compared \
+                     agreed, but {} field(s) are UNVERIFIED because the recorded identity does \
+                     not carry them. This is NOT a pass:",
+                    prior_path.display(),
+                    cmp.unverified.len()
+                );
+                for u in &cmp.unverified {
+                    eprintln!("  ? {u}");
+                }
+                eprintln!(
+                    "                A field the recorded identity does not carry was not \
+                     checked, and a check that did not run prints exactly like one that passed \
+                     (#3272). Exiting non-zero so a scripted caller cannot read this as \
+                     reproduction."
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+            IdentityVerdict::Diverged => {
+                eprintln!(
+                    "determinism:    FAIL against {} ({} divergence(s)):",
+                    prior_path.display(),
+                    cmp.divergences.len()
+                );
+                for d in &cmp.divergences {
+                    eprintln!("  - {d}");
+                }
+                // An unverified field is reported EVEN on the FAIL path: the operator is about
+                // to act on this output, and "these fields also could not be compared" changes
+                // what the divergence list means.
+                for u in &cmp.unverified {
+                    eprintln!("  ? {u}");
+                }
+                return Ok(ExitCode::FAILURE);
+            }
         }
     }
 

@@ -78,7 +78,83 @@ pub struct CorpusIdentity {
     ///
     /// Recorded as the digest of the FILE CONTENT (`DDL` + a trailing newline, which is what
     /// `generate` writes), so the recorded value is comparable against `sha256sum` on disk.
-    pub schema_sha256: String,
+    ///
+    /// # Why this is `Option`, and what the `None` state is NOT (#3272 review round 7, F1)
+    ///
+    /// It was a REQUIRED `String`, which broke the one command every determinism claim rests
+    /// on. `--verify-against` DESERIALIZES a previously recorded identity, and the committed
+    /// `docs/reports/ws0-3096-artifacts/corpus-identity.json` was recorded on 2026-08-03,
+    /// BEFORE this field existed — so every documented verification command failed with
+    /// `missing field schema_sha256` **before generation even began**. The retrospective check
+    /// was unrunnable against the only artifact it was ever pointed at.
+    ///
+    /// Identities recorded before the pin genuinely exist and always will, so reading them is
+    /// correct. What must NOT happen is the `None` being folded into "matches": an unobserved
+    /// field treated as agreement is precisely this issue's defect class. So `None` is a
+    /// DISTINGUISHABLE THIRD STATE — [`CorpusIdentity::compare`] reports it under
+    /// [`IdentityComparison::unverified`], never under `divergences` and never as silence, and
+    /// `main.rs` turns a non-empty `unverified` into a `PARTIAL` verdict with a NON-ZERO exit.
+    /// A comparison that could not see a field does not get to say `PASS`.
+    ///
+    /// GENERATION always records `Some`: `generate()` hashes the file it just wrote and refuses
+    /// an empty one. That is asserted affirmatively on REAL generated output by
+    /// `tests/determinism_byte_compare.rs::two_independent_generations_are_byte_identical`, so
+    /// `None` can only ever mean "this identity predates the pin", never "this run declined to
+    /// look".
+    #[serde(default)]
+    pub schema_sha256: Option<String>,
+}
+
+/// The result of comparing a regenerated identity against a recorded one.
+///
+/// # Why this is a STRUCT and not a `Vec<String>` (#3272 review round 7, F1)
+///
+/// `diff` returned only DIVERGENCES, so a caller had exactly two states available to it:
+/// "some fields differ" and "everything matched". There is a third, and it is the one that
+/// matters here — "a field could not be compared at all, because the recorded identity does
+/// not carry it". Returning that as an empty divergence list would make an UNVERIFIED field
+/// read exactly like a verified one.
+///
+/// The two channels are returned TOGETHER, in one value, deliberately: an `unverified`
+/// accessor a caller had to remember to call would be a recorded observation with no reader,
+/// which is round 6's B2 lesson (a field nothing reads is not a guard). A caller that wants a
+/// verdict must go through [`Self::verdict`], which cannot ignore either channel.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IdentityComparison {
+    /// Fields whose recorded and regenerated values DISAGREE. Non-empty = the corpus did not
+    /// reproduce.
+    pub divergences: Vec<String>,
+    /// Fields the recorded identity does not carry, so nothing could be compared. Non-empty =
+    /// the comparison is INCOMPLETE, which is neither a pass nor a reproduction failure.
+    pub unverified: Vec<String>,
+}
+
+/// The three-way verdict of a comparison. There is deliberately no `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityVerdict {
+    /// Every field was compared and every field agreed.
+    Reproduced,
+    /// Every field that COULD be compared agreed, but at least one could not be compared.
+    /// Not a pass: a check that did not run prints exactly like one that passed.
+    PartialUnverified,
+    /// At least one field disagreed.
+    Diverged,
+}
+
+impl IdentityComparison {
+    /// The verdict, derived from BOTH channels.
+    ///
+    /// `Diverged` wins over `PartialUnverified` because a divergence is the stronger, more
+    /// actionable fact; the unverified list is still carried and still printed.
+    pub fn verdict(&self) -> IdentityVerdict {
+        if !self.divergences.is_empty() {
+            IdentityVerdict::Diverged
+        } else if !self.unverified.is_empty() {
+            IdentityVerdict::PartialUnverified
+        } else {
+            IdentityVerdict::Reproduced
+        }
+    }
 }
 
 /// The standing caveat, recorded in every identity artifact.
@@ -156,8 +232,12 @@ impl CorpusIdentity {
         std::fs::write(path, json)
     }
 
-    /// Compare against a previously recorded identity, returning every field that
-    /// differs. An EMPTY vec means the corpus reproduced exactly.
+    /// Compare against a previously recorded identity.
+    ///
+    /// Returns BOTH channels (see [`IdentityComparison`]): the fields that DIFFER, and the
+    /// fields the recorded identity does not carry so that nothing could be compared. An
+    /// empty `divergences` alone does NOT mean the corpus reproduced — check
+    /// [`IdentityComparison::verdict`].
     ///
     /// `Data.db` is checked first and named explicitly, because it is the artifact
     /// both measurement arms actually read.
@@ -178,7 +258,7 @@ impl CorpusIdentity {
     /// with full field patterns, so adding a field to [`CorpusIdentity`] without
     /// extending this comparison is a COMPILE ERROR ("pattern does not mention
     /// field") rather than a silently unchecked field.
-    pub fn diff(&self, prior: &CorpusIdentity) -> Vec<String> {
+    pub fn compare(&self, prior: &CorpusIdentity) -> IdentityComparison {
         // Exhaustiveness enforcement — see the doc comment above. Do NOT replace
         // these patterns with field access.
         let Self {
@@ -219,6 +299,7 @@ impl CorpusIdentity {
         } = prior;
 
         let mut out = Vec::new();
+        let mut unverified = Vec::new();
         // `Data.db` first and by name: it is the artifact both measurement arms
         // read, so it is the primary determinism assertion.
         if data_db_sha256 != p_data_db_sha256 {
@@ -234,10 +315,36 @@ impl CorpusIdentity {
         // THE SCHEMA (#3272 R2). A measurement input read by BOTH arms — asymmetrically, so a
         // change between the two makes them use DIFFERENT SCHEMAS — and it was outside every
         // recorded identity, so nothing could see it.
-        if schema_sha256 != p_schema_sha256 {
-            out.push(format!(
-                "ws0-events.cql sha256: recorded {p_schema_sha256} != {schema_sha256}"
-            ));
+        //
+        // THREE states, not two (#3272 review round 7, F1). A prior recorded BEFORE the pin
+        // existed carries no digest, and an absent digest is neither agreement nor divergence:
+        // it is the comparison NOT HAVING HAPPENED, which goes to `unverified` and makes the
+        // verdict `PartialUnverified`. Folding it into "matches" is the fail-open shape this
+        // whole issue exists to remove.
+        match (schema_sha256, p_schema_sha256) {
+            (Some(now), Some(prior)) if now != prior => {
+                out.push(format!("ws0-events.cql sha256: recorded {prior} != {now}"))
+            }
+            (Some(_), Some(_)) => {}
+            (now, None) => unverified.push(format!(
+                "ws0-events.cql sha256: the recorded identity carries NO `schema_sha256`, so the \
+                 SCHEMA both measurement arms read was NOT compared. This identity predates the \
+                 #3272 R2 schema pin (the committed \
+                 docs/reports/ws0-3096-artifacts/corpus-identity.json was recorded 2026-08-03, \
+                 before the field existed). The regenerated corpus's schema digest is {}. To \
+                 VERIFY the schema, re-record the prior identity with a generator that emits \
+                 the field.",
+                now.as_deref().unwrap_or("also absent")
+            )),
+            // A prior that HAS the digest compared against a regenerated identity that does
+            // not is a different fault: `generate()` always records it, so this can only be a
+            // hand-edited or truncated identity. Reported as a DIVERGENCE, because something
+            // that should be present is missing.
+            (None, Some(prior)) => out.push(format!(
+                "ws0-events.cql sha256: recorded {prior} but the regenerated identity carries \
+                 NONE — `generate()` always records this digest, so this identity was \
+                 hand-edited rather than generated"
+            )),
         }
         // Corpus SHAPE. Any of these differing means the two identities describe
         // different corpora, whatever the digests say.
@@ -330,7 +437,10 @@ impl CorpusIdentity {
                 ));
             }
         }
-        out
+        IdentityComparison {
+            divergences: out,
+            unverified,
+        }
     }
 }
 
@@ -364,27 +474,146 @@ mod tests {
             compression_info_present: false,
             not_a_correctness_oracle: NOT_A_CORRECTNESS_ORACLE.to_string(),
             differs_from_prior_corpus: DIFFERS_FROM_PRIOR_CORPUS.to_string(),
-            schema_sha256: "cc".to_string(),
+            schema_sha256: Some("cc".to_string()),
         }
+    }
+
+    /// Every field name a [`CorpusIdentity`] actually carries, **DERIVED FROM THE STRUCT**
+    /// through serde rather than counted by hand (#3272 review round 7, F5).
+    ///
+    /// # Why the hand-written count had to go
+    ///
+    /// The backstop below used to end in `assert_eq!(mutations.len(), 15)`, whose stated
+    /// purpose (in the doc comment two paragraphs down) was to FORCE a future field to get a
+    /// divergence case. R2 then added a 16th field, `schema_sha256`, and the count stayed at
+    /// `15` — so the assert PASSED while the new field had no case at all. The mechanism meant
+    /// to catch exactly that could not, because a hardcoded number is not a measurement of the
+    /// struct: it is a second copy of a fact, free to drift from the first. Bumping it to `16`
+    /// would reinstate the same shape for the 17th field.
+    ///
+    /// serde's derived `Serialize` emits one key per field, so the serialized key set IS the
+    /// field set — read from the type at runtime, with no reflection and no macro. A 17th field
+    /// therefore appears here the moment it is added to the struct, and the coverage assertion
+    /// below FAILS naming it.
+    ///
+    /// This is a genuine derivation and not a cleverer enumeration: nothing in this function
+    /// mentions any field name.
+    fn corpus_identity_field_names() -> Vec<String> {
+        let value = serde_json::to_value(ident("aa", 10)).expect("an identity serializes");
+        let obj = value
+            .as_object()
+            .expect("CorpusIdentity serializes to a JSON object");
+        // A struct with no fields would make the coverage check below vacuous, so the subject
+        // is asserted non-empty rather than trusted — the same rule the rest of this issue
+        // applies to every other subject.
+        assert!(
+            !obj.is_empty(),
+            "the serialized identity carries NO keys, so the coverage check below would have \
+             an empty subject and pass having compared nothing"
+        );
+        obj.keys().cloned().collect()
     }
 
     #[test]
     fn identical_identities_diff_empty() {
-        assert!(ident("aa", 10).diff(&ident("aa", 10)).is_empty());
+        let cmp = ident("aa", 10).compare(&ident("aa", 10));
+        assert!(cmp.divergences.is_empty(), "got {cmp:?}");
+        // ...and nothing UNVERIFIED either: two identities that both carry every field are
+        // fully compared, so the verdict must be the strong one.
+        assert_eq!(cmp.verdict(), IdentityVerdict::Reproduced, "got {cmp:?}");
     }
 
     /// A changed `Data.db` digest must be reported FIRST and by name — that is the
     /// determinism assertion the committed corpus rests on.
     #[test]
     fn a_changed_data_db_digest_is_reported() {
-        let d = ident("bb", 10).diff(&ident("aa", 10));
+        let d = ident("bb", 10).compare(&ident("aa", 10)).divergences;
         assert!(d[0].starts_with("Data.db sha256:"), "got {d:?}");
     }
 
     #[test]
     fn a_changed_row_count_is_reported() {
-        let d = ident("aa", 11).diff(&ident("aa", 10));
+        let d = ident("aa", 11).compare(&ident("aa", 10)).divergences;
         assert!(d.iter().any(|m| m.starts_with("rows:")), "got {d:?}");
+    }
+
+    /// A CHANGED schema digest is a DIVERGENCE (#3272 R2), and it is named.
+    #[test]
+    fn a_changed_schema_digest_is_reported() {
+        let mut now = ident("aa", 10);
+        now.schema_sha256 = Some("dd".to_string());
+        let d = now.compare(&ident("aa", 10)).divergences;
+        assert!(
+            d.iter().any(|m| m.starts_with("ws0-events.cql sha256:")),
+            "got {d:?}"
+        );
+    }
+
+    /// THE THIRD STATE (#3272 review round 7, F1): a prior with NO schema digest is
+    /// `unverified`, never `divergences`, and NEVER `Reproduced`.
+    ///
+    /// This is the assertion whose absence would let the fail-open read ship: an `Option` field
+    /// compared with `!=` would have made `None == None` read as agreement, and a `None` prior
+    /// against a `Some` regeneration read as a divergence about a schema that never changed.
+    #[test]
+    fn a_prior_without_a_schema_digest_is_unverified_not_reproduced() {
+        let mut prior = ident("aa", 10);
+        prior.schema_sha256 = None;
+        let cmp = ident("aa", 10).compare(&prior);
+        assert!(
+            cmp.divergences.is_empty(),
+            "an absent recorded digest is not a DIVERGENCE — nothing disagreed; got {cmp:?}"
+        );
+        assert_eq!(
+            cmp.unverified.len(),
+            1,
+            "the absent schema digest must be reported as UNVERIFIED; got {cmp:?}"
+        );
+        assert!(
+            cmp.unverified[0].contains("NO `schema_sha256`"),
+            "the unverified entry must name what could not be compared; got {cmp:?}"
+        );
+        assert_eq!(
+            cmp.verdict(),
+            IdentityVerdict::PartialUnverified,
+            "a comparison that could not see a field must NOT read as Reproduced; got {cmp:?}"
+        );
+        // NON-VACUITY, stated as the failing alternative: had the field been compared with a
+        // plain `!=` on the `Option` (the smaller edit), `None` vs `None` would have compared
+        // EQUAL and the verdict would have been `Reproduced` — a schema that was never checked
+        // reported as reproduced. Driven here rather than argued.
+        let mut both_absent_prior = ident("aa", 10);
+        both_absent_prior.schema_sha256 = None;
+        let mut both_absent_now = ident("aa", 10);
+        both_absent_now.schema_sha256 = None;
+        assert_eq!(
+            both_absent_now.schema_sha256, both_absent_prior.schema_sha256,
+            "the pre-fix `!=` comparison really did see these two as EQUAL — which is why \
+             `None` had to become a third state rather than a compared value"
+        );
+        let cmp = both_absent_now.compare(&both_absent_prior);
+        assert_eq!(
+            cmp.verdict(),
+            IdentityVerdict::PartialUnverified,
+            "two identities that BOTH lack the digest are still UNVERIFIED, not reproduced"
+        );
+    }
+
+    /// A regenerated identity missing the digest a prior HAS is a divergence, not an
+    /// unverified field: `generate()` always records it, so its absence means a hand-edited
+    /// identity — a different fault with a different remedy.
+    #[test]
+    fn a_regenerated_identity_missing_the_schema_digest_is_a_divergence() {
+        let mut now = ident("aa", 10);
+        now.schema_sha256 = None;
+        let cmp = now.compare(&ident("aa", 10));
+        assert!(
+            cmp.divergences
+                .iter()
+                .any(|m| m.contains("hand-edited rather than generated")),
+            "got {cmp:?}"
+        );
+        assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
     }
 
     /// The caveat travels IN the artifact — a reader of the JSON alone must see it.
@@ -437,12 +666,15 @@ mod tests {
     }
 
     /// Mutate one field of an otherwise byte-identical identity and return
-    /// `(current diff, pre-review diff)` for it.
+    /// `(current divergences, pre-review diff)` for it.
     fn diverge(mutate: impl FnOnce(&mut CorpusIdentity)) -> (Vec<String>, Vec<String>) {
         let prior = ident("aa", 10);
         let mut now = ident("aa", 10);
         mutate(&mut now);
-        (now.diff(&prior), diff_pre_review(&now, &prior))
+        (
+            now.compare(&prior).divergences,
+            diff_pre_review(&now, &prior),
+        )
     }
 
     /// Every field the pre-review `diff` ignored is now reported — and each case
@@ -522,14 +754,16 @@ mod tests {
         |i: &mut CorpusIdentity| i.differs_from_prior_corpus = String::new()
     );
 
-    /// The backstop property, stated directly: for EVERY field, a divergence in it
-    /// alone must produce a non-empty diff. Enumerated here as a set so a future
-    /// field added to `CorpusIdentity` (which the destructure in `diff` forces the
-    /// author to handle) also gets its "must be reported" assertion here.
-    #[test]
-    fn no_single_field_divergence_reads_as_reproduced_exactly() {
-        type Mut = fn(&mut CorpusIdentity);
-        let mutations: Vec<(&str, Mut)> = vec![
+    /// One perturbation of an identity, applied to a single field.
+    type FieldMutation = fn(&mut CorpusIdentity);
+
+    /// One perturbation per field of [`CorpusIdentity`], KEYED BY THE FIELD'S SERDE NAME.
+    ///
+    /// Separate from the assertions so BOTH the per-field property and the
+    /// COVERAGE-OF-THE-STRUCT property can be driven from the same single source, rather than
+    /// one list plus a hand-written count of it (#3272 review round 7, F5).
+    fn single_field_mutations() -> Vec<(&'static str, FieldMutation)> {
+        vec![
             ("issue", |i| i.issue = "#0000".to_string()),
             ("seed", |i| i.seed = 2),
             ("table", |i| i.table = "ws0.other".to_string()),
@@ -553,21 +787,112 @@ mod tests {
             ("differs_from_prior_corpus", |i| {
                 i.differs_from_prior_corpus = "nope".to_string()
             }),
-        ];
-        // Every field of CorpusIdentity is covered — the count is asserted so a new
-        // field cannot be added with no case here.
-        assert_eq!(
-            mutations.len(),
-            15,
-            "CorpusIdentity has 15 fields; add the new field's divergence case"
+            // The R2 field. Its case was MISSING for a whole review round while the
+            // `mutations.len() == 15` assert passed (#3272 F5), which is why the coverage
+            // check below is now derived from the struct instead of counted here.
+            ("schema_sha256", |i| {
+                i.schema_sha256 = Some("dd".to_string())
+            }),
+        ]
+    }
+
+    /// EVERY field of [`CorpusIdentity`] has a divergence case — DERIVED FROM THE STRUCT.
+    ///
+    /// # The mechanism, and why the count it replaces was the defect
+    ///
+    /// This used to be `assert_eq!(mutations.len(), 15)` inside the per-field test, whose
+    /// stated purpose was to force a NEW field to acquire a case. It could not: R2 added
+    /// `schema_sha256` and left the number at 15, so the assert passed with the new field
+    /// uncovered — the guard satisfied without covering its subject. Bumping the literal would
+    /// reinstate exactly that for the 17th field.
+    ///
+    /// So the subject is READ FROM THE TYPE ([`corpus_identity_field_names`], via serde's
+    /// derived `Serialize`) and the mutation set is compared against it in BOTH directions:
+    ///
+    ///  * a field of the struct with NO mutation case FAILS, naming the field. This is the
+    ///    property the count was meant to have.
+    ///  * a mutation case naming a field the struct does not have FAILS too, so a rename
+    ///    leaves a case pointing at nothing rather than silently testing a field that is gone.
+    ///
+    /// Nothing here mentions a field name or a count, so a 17th field cannot compile-and-pass.
+    #[test]
+    fn every_identity_field_has_a_divergence_case() {
+        let fields = corpus_identity_field_names();
+        let cases: Vec<&str> = single_field_mutations().iter().map(|(k, _)| *k).collect();
+
+        let uncovered: Vec<&String> = fields
+            .iter()
+            .filter(|f| !cases.contains(&f.as_str()))
+            .collect();
+        assert!(
+            uncovered.is_empty(),
+            "CorpusIdentity carries field(s) {uncovered:?} with NO divergence case in \
+             `single_field_mutations`. This subject is DERIVED from the struct via serde, \
+             precisely because the `mutations.len() == 15` assert it replaced passed while R2's \
+             `schema_sha256` had no case at all (#3272 F5). Add the case; do not relax this."
         );
-        for (field, mutate) in mutations {
+
+        let stale: Vec<&&str> = cases
+            .iter()
+            .filter(|c| !fields.contains(&c.to_string()))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "`single_field_mutations` names field(s) {stale:?} that CorpusIdentity does not \
+             carry — a renamed or removed field leaves a case testing nothing"
+        );
+    }
+
+    /// The backstop property, stated directly: for EVERY field, a divergence in it alone must
+    /// produce a non-empty divergence list. Coverage of the field set is asserted separately by
+    /// [`every_identity_field_has_a_divergence_case`], which derives it from the struct.
+    #[test]
+    fn no_single_field_divergence_reads_as_reproduced_exactly() {
+        for (field, mutate) in single_field_mutations() {
             let (now, _) = diverge(mutate);
             assert!(
                 !now.is_empty(),
                 "a divergence in `{field}` alone read as 'reproduced exactly'"
             );
         }
+    }
+
+    /// NON-VACUITY for the coverage check above: it must FAIL on a field with no case.
+    ///
+    /// Driven by SUBTRACTING a case from the real set and re-running the same comparison the
+    /// assertion performs — so "the coverage check has teeth" is observed rather than asserted
+    /// of the code. Without this, a `corpus_identity_field_names` that returned an empty vec
+    /// (or a `contains` that always answered true) would leave the check green forever, which
+    /// is the shape the count-assert died of.
+    #[test]
+    fn the_field_coverage_check_fires_on_an_uncovered_field() {
+        let fields = corpus_identity_field_names();
+        // Drop the R2 field's case — the exact state round 7 found in the tree.
+        let cases: Vec<&str> = single_field_mutations()
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|k| *k != "schema_sha256")
+            .collect();
+        let uncovered: Vec<&String> = fields
+            .iter()
+            .filter(|f| !cases.contains(&f.as_str()))
+            .collect();
+        assert_eq!(
+            uncovered.len(),
+            1,
+            "removing ONE case must leave exactly one field uncovered; got {uncovered:?}"
+        );
+        assert_eq!(
+            uncovered[0], "schema_sha256",
+            "the uncovered field must be NAMED, so the failure is actionable"
+        );
+        // ...and the positive control: with the case present, nothing is uncovered. A check
+        // that reported an uncovered field unconditionally would satisfy the half above.
+        let all: Vec<&str> = single_field_mutations().iter().map(|(k, _)| *k).collect();
+        assert!(
+            fields.iter().all(|f| all.contains(&f.as_str())),
+            "with every case present the check must find NOTHING uncovered"
+        );
     }
 
     /// A missing or extra component must be visible, so a component-set change
@@ -584,13 +909,13 @@ mod tests {
                 sha256: "cc".to_string(),
             },
         );
-        let d = now.diff(&prior);
+        let d = now.compare(&prior).divergences;
         assert!(
             d.iter().any(|m| m.contains("CompressionInfo.db: NEW")),
             "got {d:?}"
         );
 
-        let d = prior.diff(&now);
+        let d = prior.compare(&now).divergences;
         assert!(
             d.iter()
                 .any(|m| m.contains("CompressionInfo.db: recorded, now MISSING")),

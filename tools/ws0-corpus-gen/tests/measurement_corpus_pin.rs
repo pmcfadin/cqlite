@@ -136,6 +136,40 @@ const COMPARED_FIELDS: &[&str] = &[
     "compression_info_present",
 ];
 
+/// Fields that ARE compared, but which the committed 2026-08-03 artifact PREDATES — so their
+/// absence from that artifact is accounted for rather than either red or silent (#3272 review
+/// round 7, F6).
+///
+/// # The decision this records, made NOW rather than on the regeneration
+///
+/// `schema_sha256` was added to [`CorpusIdentity`] by R2. The committed artifact was recorded
+/// before the field existed, so it carries 15 keys and not this one — which is why
+/// [`the_comparison_covers_every_artifact_field`] passed while the field was in neither
+/// [`COMPARED_FIELDS`] nor [`DELIBERATELY_NOT_COMPARED`]: the check derives its subject from the
+/// artifact's REAL key set, and a key the artifact does not carry is not in that subject.
+///
+/// That left a trap on the documented remedy: the next real regeneration emits the key, and the
+/// coverage check would then red it as an unaccounted field — i.e. the honest fix (regenerate)
+/// would break the gate, and the tempting fix (add it to the exempt list) would park a field
+/// with a complete machine oracle as "not a pin". So the decision is recorded here instead:
+///
+/// **COMPARED, not exempted.** `mc::SCHEMA_SHA256` is asserted equal to `sha256(DDL + "\n")` by
+/// [`the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written`], which is the strongest
+/// oracle any value in this pin has (the INPUT, not a record of it). A field with that oracle is
+/// exactly what a pin is for.
+///
+/// The third state is what keeps this from being a permissive branch: absence is not "skip",
+/// it is a NAMED, ASSERTED condition — [`the_schema_digest_is_compared_or_recorded_as_pre_pin`]
+/// fails unless the key is either present-and-equal-to-the-pin, or absent-and-listed-here.
+/// There is no branch in which nothing is checked.
+const COMPARED_WHEN_PRESENT: &[(&str, &str)] = &[(
+    "schema_sha256",
+    "`schema_sha256` is absent from this artifact BECAUSE #3272 R2 added it to CorpusIdentity \
+     AFTER the artifact was recorded (2026-08-03), so the 15-key record cannot carry it. It IS \
+     compared — against mc::SCHEMA_SHA256, itself asserted equal to sha256(DDL + \"\\n\") — the \
+     moment a regeneration emits it; see the_schema_digest_is_compared_or_recorded_as_pre_pin",
+)];
+
 /// Every way the in-source pin and the committed artifact disagree. EMPTY = agree.
 ///
 /// Split out from the assertion so [`the_artifact_comparison_can_fail`] can drive
@@ -216,6 +250,26 @@ fn pin_vs_artifact(json: &serde_json::Value) -> Vec<String> {
     // Issue #1406: the corpus is uncompressed, and the artifact must say so.
     if field(json, "compression_info_present").as_bool() != Some(false) {
         out.push("compression_info_present: artifact does not record `false` (#1406)".to_string());
+    }
+    // THE SCHEMA DIGEST, compared WHEN THE ARTIFACT CARRIES IT (#3272 review round 7, F6).
+    //
+    // The committed 2026-08-03 artifact predates the field, so `field()` (which PANICS on an
+    // absent key, deliberately) cannot be used here. `get` is, and the absence is NOT a
+    // permissive branch: it is accounted for by `COMPARED_WHEN_PRESENT` and asserted by
+    // `the_schema_digest_is_compared_or_recorded_as_pre_pin`, which fails unless the key is
+    // either present-and-equal or absent-and-listed. So a post-regeneration artifact that
+    // carries a WRONG digest is caught here, and one that carries none is caught there.
+    if let Some(v) = json.get("schema_sha256") {
+        match v.as_str() {
+            Some(sha) if sha == mc::SCHEMA_SHA256 => {}
+            Some(sha) => out.push(format!(
+                "schema_sha256: artifact {sha} != pinned {}",
+                mc::SCHEMA_SHA256
+            )),
+            None => out.push(format!(
+                "schema_sha256: artifact records {v}, which is not a string"
+            )),
+        }
     }
     out
 }
@@ -393,9 +447,19 @@ fn the_comparison_covers_every_artifact_field() {
         .as_object()
         .expect("the committed artifact is a JSON object");
     let exempt: Vec<&str> = DELIBERATELY_NOT_COMPARED.iter().map(|(k, _)| *k).collect();
+    // `COMPARED_WHEN_PRESENT` counts as ACCOUNTED FOR, because those fields ARE compared by
+    // `pin_vs_artifact` — see `COMPARED_WHEN_PRESENT`'s own doc for why they are listed
+    // separately from `COMPARED_FIELDS` (the artifact predates them, so the `absent` direction
+    // below must not red on them). This is what makes the documented regeneration remedy land
+    // green instead of turning the honest fix into a gate failure (#3272 F6).
+    let when_present: Vec<&str> = COMPARED_WHEN_PRESENT.iter().map(|(k, _)| *k).collect();
     let unaccounted: Vec<&String> = obj
         .keys()
-        .filter(|k| !COMPARED_FIELDS.contains(&k.as_str()) && !exempt.contains(&k.as_str()))
+        .filter(|k| {
+            !COMPARED_FIELDS.contains(&k.as_str())
+                && !exempt.contains(&k.as_str())
+                && !when_present.contains(&k.as_str())
+        })
         .collect();
     assert!(
         unaccounted.is_empty(),
@@ -874,4 +938,166 @@ fn the_schema_digest_comparison_can_fail() {
         "a MODIFIED schema must not hash to the pinned digest — otherwise the schema pin cannot \
          detect the change that makes the two measurement arms read different schemas"
     );
+}
+
+// ===========================================================================================
+// #3272 review round 7, F1 — THE COMMITTED ARTIFACT MUST DESERIALIZE AS A `CorpusIdentity`
+// ===========================================================================================
+
+/// The committed artifact loads as a [`CorpusIdentity`] — THE test whose absence let F1 ship.
+///
+/// # The regression, and why nothing above could see it
+///
+/// R2 added `schema_sha256` to [`CorpusIdentity`] as a REQUIRED `String`. Every test in this
+/// file reads the artifact as a `serde_json::Value` and compares fields individually, so all of
+/// them stayed green — while `--verify-against`, which DESERIALIZES the artifact into the
+/// struct, failed with `missing field schema_sha256` **before generation began**. The documented
+/// determinism command (`tools/ws0-corpus-gen/README.md` §Quick start step 2,
+/// `docs/reports/ws0-3096-artifacts/measurement-method.md` §1) was unrunnable against the only
+/// artifact it has ever been pointed at, and the 2.8 GB corpus that artifact describes became
+/// un-reportable (`ws0_schema_input.recorded_schema_digest` refuses an identity with no schema
+/// digest).
+///
+/// A field-by-field `Value` comparison is not a substitute for loading the type: serde's
+/// required/optional decision is invisible to it. So this test asserts the DESERIALIZATION
+/// itself, which is what every consumer of the artifact actually performs.
+#[test]
+fn the_committed_artifact_deserializes_as_a_corpus_identity() {
+    let path = repo_root().join(ARTIFACT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read the committed pin artifact {path:?}: {e}"));
+    let identity: ws0_corpus_gen::identity::CorpusIdentity = serde_json::from_str(&text)
+        .unwrap_or_else(|e| {
+            panic!(
+                "the COMMITTED artifact {ARTIFACT} no longer deserializes as a CorpusIdentity: \
+                 {e}.\n\nThis is F1 recurring. A field added to CorpusIdentity WITHOUT \
+                 `#[serde(default)]` (or `Option`) makes every recorded identity that predates \
+                 it unreadable, which breaks `--verify-against` — the determinism check every \
+                 future comparison against this corpus rests on — BEFORE generation begins, and \
+                 makes the corpus this artifact describes un-reportable. Identities recorded \
+                 before a field existed genuinely exist and always will: make the new field \
+                 optional AND give its absence a LOUD third state (see \
+                 IdentityComparison::unverified), never a silent skip."
+            )
+        });
+    // ...and the load is not vacuous: the values that came back are the recorded ones.
+    assert_eq!(identity.rows, mc::ROWS, "deserialized row count");
+    assert_eq!(
+        identity.data_db_sha256,
+        mc::DATA_DB_SHA256,
+        "deserialized Data.db digest"
+    );
+    assert!(
+        !identity.compression_info_present,
+        "deserialized compression flag (#1406)"
+    );
+    assert!(
+        !identity.components.is_empty(),
+        "the deserialized identity carries no components — an empty load would satisfy the \
+         assertions above only if they were also empty"
+    );
+}
+
+/// The documented `--verify-against` COMPARISON against the committed artifact reaches a
+/// verdict, and that verdict is the LOUD third state — never `Reproduced` (#3272 F1).
+///
+/// Two properties in one, because separating them would let either half look fine alone:
+///
+///  * the comparison RUNS (it did not, pre-fix: the deserialization failed first);
+///  * a prior with no `schema_sha256` yields `PartialUnverified` with the schema NAMED in
+///    `unverified` — the schema is UNVERIFIED against a pre-pin identity, and saying so is the
+///    whole point. Folded into "matches", it would be an unobserved field read as agreement.
+#[test]
+fn comparing_against_the_committed_pre_pin_artifact_is_partial_never_reproduced() {
+    use ws0_corpus_gen::identity::{CorpusIdentity, IdentityVerdict};
+    let path = repo_root().join(ARTIFACT);
+    let text = std::fs::read_to_string(&path).expect("read the committed artifact");
+    let prior: CorpusIdentity = serde_json::from_str(&text).expect("deserialize the artifact");
+    assert!(
+        prior.schema_sha256.is_none(),
+        "the committed 2026-08-03 artifact predates the R2 schema pin, so it must carry NO \
+         schema digest. If it now does, this artifact was regenerated — in which case this test \
+         should be comparing a genuine digest and `COMPARED_WHEN_PRESENT` should become a plain \
+         `COMPARED_FIELDS` entry (#3272 F6)"
+    );
+    // Compare the artifact against ITSELF, so the ONLY thing that can be reported is the
+    // unverified schema: every other field is trivially equal. That isolates the third state.
+    let cmp = prior.compare(&prior);
+    assert!(
+        cmp.divergences.is_empty(),
+        "an artifact compared against itself must show no divergence; got {:?}",
+        cmp.divergences
+    );
+    assert_eq!(
+        cmp.verdict(),
+        IdentityVerdict::PartialUnverified,
+        "a prior carrying NO schema digest must yield PartialUnverified — a comparison that \
+         could not see a field must not read as reproduction (#3272 F1); got {cmp:?}"
+    );
+    assert!(
+        cmp.unverified
+            .iter()
+            .any(|u| u.contains("ws0-events.cql") && u.contains("NO `schema_sha256`")),
+        "the unverified entry must NAME the schema and say it was not compared; got {:?}",
+        cmp.unverified
+    );
+}
+
+/// F6's DECISION, asserted: the schema digest is either COMPARED against the pin, or the
+/// artifact's lack of it is RECORDED as pre-pin. There is no third, silent branch.
+///
+/// This is what makes the documented regeneration remedy safe. Post-regeneration the artifact
+/// carries the key, `pin_vs_artifact` compares it against `mc::SCHEMA_SHA256` (itself asserted
+/// equal to `sha256(DDL + "\n")`), and this test takes its first branch. Pre-regeneration it
+/// takes the second, which requires the `COMPARED_WHEN_PRESENT` entry to exist — so the absence
+/// is an accounted-for state rather than a gap nobody named.
+#[test]
+fn the_schema_digest_is_compared_or_recorded_as_pre_pin() {
+    let json = read_artifact();
+    let obj = json.as_object().expect("the artifact is a JSON object");
+    match obj.get("schema_sha256") {
+        Some(v) => {
+            let sha = v
+                .as_str()
+                .unwrap_or_else(|| panic!("{ARTIFACT}.schema_sha256 is not a string: {v}"));
+            assert_eq!(
+                sha,
+                mc::SCHEMA_SHA256,
+                "{ARTIFACT} carries a schema digest that disagrees with the in-source pin. The \
+                 pin is asserted equal to sha256(DDL + \"\\n\"), so either the DDL changed (the \
+                 corpus must be REGENERATED — a corpus written from a different schema is a \
+                 different corpus) or one of the two was edited alone."
+            );
+        }
+        None => {
+            let listed = COMPARED_WHEN_PRESENT
+                .iter()
+                .any(|(k, _)| *k == "schema_sha256");
+            assert!(
+                listed,
+                "{ARTIFACT} carries no `schema_sha256` and nothing records WHY. An absent field \
+                 with no recorded reason is indistinguishable from an unnoticed gap — list it in \
+                 COMPARED_WHEN_PRESENT with the reason, or regenerate the artifact (#3272 F6)."
+            );
+        }
+    }
+    // Every `COMPARED_WHEN_PRESENT` reason must pass the SAME content check the exemption
+    // reasons do, so this list cannot become the softer place to park a field.
+    for (key, reason) in COMPARED_WHEN_PRESENT {
+        assert!(
+            reason_is_acceptable(key, reason),
+            "the COMPARED_WHEN_PRESENT reason for `{key}` must NAME the field and say WHY it is \
+             not yet in the artifact, and must not be a placeholder; got {reason:?}"
+        );
+    }
+    // ...and the two lists must be DISJOINT: a field in both would be compared under one rule
+    // and excused under another, and which one applied would depend on read order.
+    let exempt: Vec<&str> = DELIBERATELY_NOT_COMPARED.iter().map(|(k, _)| *k).collect();
+    for (key, _) in COMPARED_WHEN_PRESENT {
+        assert!(
+            !exempt.contains(key) && !COMPARED_FIELDS.contains(key),
+            "`{key}` appears in COMPARED_WHEN_PRESENT and ALSO in COMPARED_FIELDS or \
+             DELIBERATELY_NOT_COMPARED — one field, one rule"
+        );
+    }
 }

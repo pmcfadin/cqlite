@@ -230,14 +230,44 @@ async fn two_independent_generations_are_byte_identical() {
     let ddl_b = std::fs::read(spec_b.out.join("ws0-events.cql")).expect("DDL B");
     assert_eq!(ddl_a, ddl_b, "the emitted DDL differs between generations");
 
-    // And the recorded identities agree field-for-field (the `diff` that
+    // And the recorded identities agree field-for-field (the `compare` that
     // `--verify-against` uses, exercised over two REAL generations rather than
     // hand-built structs).
-    let id_diffs = id_b.diff(&id_a);
+    //
+    // The verdict is asserted, not just the divergence list (#3272 review round 7, F1): two
+    // GENERATED identities both carry every field, so the only acceptable verdict is the strong
+    // one. A `PartialUnverified` here would mean generation stopped recording something — the
+    // affirmative half of "generation always records the schema digest", measured on real
+    // output rather than on a hand-built struct.
+    let cmp = id_b.compare(&id_a);
     assert!(
-        id_diffs.is_empty(),
-        "the recorded identities of two identical generations diverge: {id_diffs:?}"
+        cmp.divergences.is_empty(),
+        "the recorded identities of two identical generations diverge: {:?}",
+        cmp.divergences
     );
+    assert_eq!(
+        cmp.verdict(),
+        ws0_corpus_gen::identity::IdentityVerdict::Reproduced,
+        "two GENERATED identities must compare fully — an unverified field here means \
+         generation stopped recording it; got {cmp:?}"
+    );
+    // Stated directly too, because the property is about GENERATION and not about comparison:
+    // `generate()` ALWAYS records the schema digest, so `None` in an identity can only ever
+    // mean "recorded before the pin existed" (#3272 F1).
+    for (label, id) in [("A", &id_a), ("B", &id_b)] {
+        let sha = id.schema_sha256.as_deref().unwrap_or_else(|| {
+            panic!(
+                "generation {label} recorded NO schema_sha256. The field is Option ONLY so a \
+                 pre-pin identity can be READ; a generated one is never None, and that is what \
+                 makes `None` mean 'predates the pin' rather than 'this run declined to look'"
+            )
+        });
+        assert_eq!(
+            sha.len(),
+            64,
+            "generation {label}'s schema digest is not 64 hex characters: {sha}"
+        );
+    }
 
     eprintln!(
         "determinism: {} components byte-identical across 2 generations at {} rows \

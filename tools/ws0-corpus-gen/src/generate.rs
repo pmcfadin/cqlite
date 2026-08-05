@@ -205,7 +205,12 @@ pub async fn generate(spec: &CorpusSpec) -> GenResult<CorpusIdentity> {
         compression_info_present: false,
         not_a_correctness_oracle: NOT_A_CORRECTNESS_ORACLE.to_string(),
         differs_from_prior_corpus: DIFFERS_FROM_PRIOR_CORPUS.to_string(),
-        schema_sha256,
+        // ALWAYS `Some` on the generation path (#3272 review round 7, F1). The field is
+        // `Option` only so a PRE-PIN recorded identity can be READ; a generated one is never
+        // `None`, and the digest above is taken from the file just written (with an empty file
+        // refused), so `None` in an identity can only mean "recorded before the pin existed" —
+        // never "this run declined to look".
+        schema_sha256: Some(schema_sha256),
     })
 }
 
