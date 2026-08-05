@@ -313,7 +313,7 @@ nosudo_out=$(PATH="$nosudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 nosudo_rc=$?
 if [ "$nosudo_rc" -eq 0 ] && [ -z "$(ls -A "$nosudo_sysctl")" ] \
    && printf '%s' "$nosudo_out" | grep -q "no 'sudo' binary on this box" \
-   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*--drop-in > .*99-cqlite-perf.conf && sysctl -q --system' \
+   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*perf-capability.sh --install && sysctl -q --system' \
    && ! printf '%s' "$nosudo_out" | grep -q 'perf-capability.sh --install sudo'; then
   ok "perf section: a box with no sudo BINARY warns + prints the root-shell remedy (never a useless 'sudo tee'), writes nothing, exits 0"
 else
@@ -390,7 +390,7 @@ rootbox_out=$(PATH="$rootbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 rootbox_rc=$?
 rootbox_remedy=$(printf '%s\n' "$rootbox_out" | grep 'write + apply the drop-in' || true)
 if [ "$rootbox_rc" -eq 0 ] && [ -z "$(ls -A "$rootbox_d")" ] \
-   && printf '%s' "$rootbox_remedy" | grep -q '| tee .*99-cqlite-perf.conf >/dev/null && sysctl -q --system' \
+   && printf '%s' "$rootbox_remedy" | grep -q 'perf-capability.sh --install && sysctl -q --system' \
    && ! printf '%s' "$rootbox_remedy" | grep -q 'sudo'; then
   ok "perf section: when ALREADY ROOT the printed write+apply remedy carries no 'sudo' prefix"
 else
