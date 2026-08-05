@@ -9,8 +9,10 @@
 > boundary with mutation-tested structural asserts; narrow the #3042 CITE-AND-WAIVE doctrine in the same
 > change. AC→requirement map is at the top of `specs/docs-only-gate-classification/spec.md`.
 >
-> **AC7 needs the owner.** The recommendation and its evidence are in `design.md` D7 (accept as-is, one
-> ruling covering #3229 AC7 and #3250 AC7, with the promotion condition). Do not decide it in-band.
+> **AC7 is RULED (owner, 2026-08-04, Seam 1): accept as-is, no retroactive core-gate run** — one ruling
+> covering #3229 AC7 and #3250 AC7, with the promotion condition. Task 8 is therefore the RECORDING only;
+> the ruling as given, its date, reason, bounding evidence and condition of change are in `design.md`
+> D7.RULING. Do not re-ask it.
 
 ## 1. Import #3229's artifact declaration, fail-closed (surface: `scripts/ci/classify-docs-only.sh`)
 - [ ] Source `scripts/flow/roborev-review-oracles.sh` resolved **relative to the classifier's own

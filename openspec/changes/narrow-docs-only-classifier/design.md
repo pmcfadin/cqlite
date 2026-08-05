@@ -13,6 +13,17 @@ This is the same bug **class** as #3229 — a path glob that swallows executable
 **correctness gate** rather than the reviewer. #3229 merged first, deliberately, so that the docs-scoped
 artifact declaration exists in exactly one place before a second consumer appears.
 
+**Owner rulings at Seam 1 (2026-08-04), in force and not re-litigated below:**
+
+- **D2(a)** — directory-scope the code-bearing formats (`json`, `html`). Where AC3's literal text and
+  CLAUDE.md's *"an extension describes a FORMAT; a directory records an INTENT"* rule disagree, the
+  doctrine wins; AC3's negative case (prose + artifacts still short-circuits) is delivered against the
+  **inert** extensions instead. See D3b.
+- **D3(a)** — add `core.quotePath=false` to `pr-gate.yml`'s existing `git diff --name-only` in the
+  `Classify docs-only diff` step; do **not** switch to `-z`. See D5.
+- **AC7 / D1(a)** — no retroactive core-gate run; one ruling covers #3229 AC7 and #3250 AC7. Recorded
+  verbatim with its evidence in **D7.RULING**.
+
 Two constraints from #3229's post-mortem govern this design and are treated as given:
 
 - **Fix the BOUNDARY, not the sites.** #3229 burned three review rounds patching one path-normalisation
@@ -320,6 +331,24 @@ classifier's **structure** and about the **real declaration**:
 5. **The verdicts themselves** stay behavioural, in the existing `assert_docs_only`/`assert_full` style, so
    the suite reads as one thing.
 
+**D6a — how the declaration-mutation scenario is delivered, and why it is two-sided.** The scenario as
+written ("a synthetic inert extension added [upstream] ⇒ `docs-only`") cannot hold together with AC1's
+fail-closed rule, because an imported extension this classifier has **not** bucketed must classify `full`
+(otherwise a new upstream extension would become documentation by default — the fail-OPEN shape AC1
+forbids). Both properties are therefore delivered, as three measured sub-cases against a temp tree holding
+a copy of the classifier beside a copy of the **real** declaration:
+
+| mutation | path | verdict | proves |
+|---|---|---|---|
+| `txt` **removed** from the declaration | `docs/reports/ws0-3217-artifacts/results/run.txt` | `docs-only` → **`full`** | the verdict follows the declaration's content |
+| one directory glob **removed** | `docs/round-artifacts/soak/report.html` | `docs-only` → **`full`** | the verdict follows the declared globs, through the imported matcher |
+| synthetic `zzz` added **upstream only** | `.../out.zzz` | stays **`full`**, and the partition assert FAILs naming `zzz` + `#3250` | AC1's fail-closed rule for an unbucketed imported extension |
+| synthetic `zzz` added **upstream AND bucketed here** | `.../out.zzz` | `full` → **`docs-only`** | the scenario's letter: a declared+assigned extension is documentation |
+| synthetic `zzz` **bucketed here only** | `.../out.zzz` | stays **`full`** | the DECLARATION is authoritative — a classifier carrying its own hardcoded list would answer `docs-only` here and fail |
+
+The last row is the discriminator that makes this a test of the *import* rather than a mirror of the
+constant: a hardcoded classifier passes rows 1–4 by accident and fails row 5 by construction.
+
 The suite is **additive**: existing asserts and the Ruby workflow-contract block are preserved, so it
 rebases cleanly over #3296, which is editing the *sibling* suite `test_roborev_review_guard.sh` — a
 different file. Should the two lanes ever touch the same lines, the standing instruction is to raise
@@ -362,6 +391,41 @@ result, which is cheap, harmless, and honest about proving only `main`'s health 
 the ruling and its reason are recorded in this change before it is done; the requirement is satisfied by
 the record, not by a particular verdict.
 
+### D7.RULING — the owner's decision, as given
+
+> **Ruling: NO retroactive core-gate run over PRs #3081 (issue #3026), #3216 (issue #3100) and
+> #3222 (issue #3217). Accept as-is.**
+>
+> - **Date / authority:** 2026-08-04, owner decision taken at Seam 1 of this change (issue #3250).
+> - **Scope:** ONE ruling covers **both** #3229 AC7 (the review side) and #3250 AC7 (the gate side) —
+>   the same three PRs, asked from two directions, answered once.
+> - **Reason:** every affected file is a measurement harness that ships nowhere and is imported by
+>   nothing, so a retroactive run would report on `main`'s health rather than on the harnesses. The
+>   exposure is bounded by the evidence below, and `main` has been re-certified nightly since by
+>   `gate.yml`'s full-gate deep check.
+> - **Condition of change, verbatim:** *the exemption ends the moment harness code is promoted into a
+>   shipped path.* At that moment it inherits the obligations of the surface it joins (a gate
+>   component, a CI step, an imported module), and the question is re-opened for that code.
+
+**Bounding evidence, re-verified in this change rather than inherited as prose:**
+
+1. **The docs-hosted crate is not a workspace member.** `cargo metadata --no-deps --format-version 1`
+   run at this change's HEAD lists **16 packages** — `cassandra-parity`, `cqlite`, `cqlite-cli`,
+   `cqlite-core`, `cqlite-examples`, `cqlite-flight`, `cqlite-integration-tests`, `cqlite-node`,
+   `cqlite-py`, `cqlite-validator`, `flight-loadgen`, `format-compatibility-tests`, `format-validator`,
+   `memory-safety-runner`, `sstabledump-validator`, `xtask` — and **none** of their manifest paths lies
+   under `docs/`. `docs/reports/ws0-3026-artifacts/ws0-cqlite/scan-harness` is **absent** from the
+   package set, so `cargo fmt --all`, `cargo clippy -p cqlite-core`,
+   `cargo build -p cqlite-core --all-features` and the lib tests would not have compiled, formatted or
+   linted a single byte of it even had the core run.
+2. **No skipped `pr-gate-core` step reads any path in those three diffs.** Workflow-policy validation
+   reads `.github/workflows/**`; dataset-pin agreement, release-version agreement, the Dockerfile
+   Rust-pin lockstep, `Cargo.lock` freshness and the #2644 oracle read workspace manifests,
+   `test-data/**` and `cqlite-core`. The measured diffs are 188 / 269 / 197 paths (D10), of which
+   **exactly one** (`process_improvements.md`, in #3081) is outside `docs/` and it is prose.
+3. **Therefore a retroactive run is equivalent to running the core on `main` at those commits** — which
+   is the substance of the ruling, not an excuse appended to it.
+
 ---
 
 ## D8 — AC6: doctrine, in the same change
@@ -391,6 +455,60 @@ census definition so the review-side and gate-side definitions of "docs-only" ca
 successful deploy) and is re-checked, never banked.
 
 ---
+
+## D10 — AC4: the recorded demonstration on the real merged-PR shapes
+
+Evidence, **not** a gate assertion: the input is a historical API response, so asserting it would either
+pin a network call or commit a fixture that ages. No fixture is committed and no gate assertion depends on
+the network. Replayed 2026-08-05 at this change's HEAD.
+
+**How it was obtained and replayed** (per PR `<N>` ∈ {3222, 3081, 3216}):
+
+```bash
+for page in 1 2 3; do
+  gh api "repos/pmcfadin/cqlite/pulls/<N>/files?per_page=100&page=$page" --jq '.[].filename'
+done > pr-<N>.txt                                   # every page, so nothing is silently truncated
+bash scripts/ci/classify-docs-only.sh < pr-<N>.txt   # amended  (POST)
+git show origin/main:scripts/ci/classify-docs-only.sh > pre.sh
+bash pre.sh                       < pr-<N>.txt       # pre-change (PRE)
+# per-path census: each path fed alone, so the offending set is measured, not inferred
+```
+
+| PR | paths | PRE verdict | POST verdict | offending | first offending path |
+|---|---|---|---|---|---|
+| **#3222** (issue #3217) | **188** | `docs-only` / **exit 0** | `full` / **exit 1** | **35** | `docs/reports/ws0-3217-artifacts/harness/classify-offcpu.py` |
+| **#3081** (issue #3026) | **269** | `docs-only` / **exit 0** | `full` / **exit 1** | **30** | `docs/reports/ws0-3026-artifacts/ws0-corpus/.gen-p200000-pl375x6-ba96x3-bb96x16-cl2x10.yaml` |
+| **#3216** (issue #3100) | **197** | `docs-only` / **exit 0** | `full` / **exit 1** | **1** | `docs/reports/ws0-3100-artifacts/ws0-h2h/schemas/ws0-events.cql` |
+
+**The verdict CHANGED on every one of the three**, which is the point of recording the PRE column: the
+`full` is attributable to this change and not to an unexplained difference in the input.
+
+**The prose-only replay — the fast path is intact on real data.** The same lists with the offending paths
+removed:
+
+| PR | remaining paths | verdict |
+|---|---|---|
+| #3222 | **153** | `docs-only` / **exit 0** |
+| #3081 | **239** | `docs-only` / **exit 0** |
+| #3216 | **196** | `docs-only` / **exit 0** |
+
+**What the offending sets are made of** (measured per path, so a false positive would show up here as
+prose or as an inert artifact — none does):
+
+- **#3222 — 35 paths: 17 `.sh`, 15 `.py`, 2 `.bt`, 1 extensionless** (`partB-run/offcputime-bigmap`).
+  **The count reconciles with the issue's "34" rather than contradicting it:** 34 is the
+  extension-bearing executable count (17+15+2); the 35th is the extensionless harness binary, which AC1
+  forces to `full` unconditionally and without a mode lookup. The measured number is recorded as
+  measured.
+- **#3081 — 30 paths: 13 `.sh`, 6 `.py`, 3 `.c`, 2 extensionless (`ws0-readbw`, `ws0-stream`), 2 `.yaml`,
+  1 `.toml`, 1 `.rs`, 1 `.cql`, 1 `.bt`.** The `.toml` + `.rs` pair is
+  `ws0-cqlite/scan-harness/Cargo.toml` and `.../src/main.rs` — the docs-hosted crate that is the
+  falsifying case for the old CITE-AND-WAIVE qualifier (D8).
+- **#3216 — 1 path: 1 `.cql`** (a schema-as-created fixture). One path is enough: a set is `full` when
+  ANY member is, so #3216's 13-second green rested on a single unclassified file.
+
+**One path in the three diffs is outside `docs/`**: `process_improvements.md` (#3081), prose, classified
+documentation by the pre-existing global `*.md` arm, unchanged by this change.
 
 ## D9 — what this change deliberately does not do
 
