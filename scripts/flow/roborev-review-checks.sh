@@ -197,6 +197,9 @@ roborev_check_prompt_content() {
         # A MEASUREMENT, not an excusal: neither source exists, so the census match below reports every
         # path absent — the fail-closed direction — and this line names the condition.
         DETAILS+=("ERROR: prompt-content: the prompt carries NEITHER an inline diff (no 'diff --git' header) NOR a snapshot diff path (no column-zero 'Read the diff from:' instruction), so nothing in it names a diff the reviewer could have received. This is the T1/T2 family: the review ran against no diff at all.")
+        if [ -n "${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-}" ]; then
+          DETAILS+=("ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path — ${ROBOREV_SNAPSHOT_UNOBSERVED_WHY}. Whether such a review is certifiable at all is an owner decision; by rule 13 an unverifiable input is non-passing, so it stays a named FAIL.")
+        fi
         ;;
       *)
         PROMPT_CONTENT="FAIL (diff-source resolver returned the unrecognised state '${ROBOREV_DIFF_SOURCE_STATE:-<unset>}')"

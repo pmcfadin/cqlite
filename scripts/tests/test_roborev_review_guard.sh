@@ -3439,8 +3439,11 @@ assert_says 'case (cx31b2) an ordinary in-repo file is refused as not-a-snapshot
   'not safe to read as this repository.s snapshot \(unbound-job\)'
 assert_says 'case (cx31b2) the cause says WHY it is not one of roborev'"'"'s snapshot files' \
   "does not sit under the repository's own '\.roborev' directory"
-assert_says 'case (cx31b2) so nothing was observed for it' '^snapshot-digest: UNOBSERVED \('
-assert_lacks 'case (cx31b2) an ordinary file is never hashed into the block' '^snapshot-digest: [0-9a-f]{16,}$'
+# A REFUSED PATH IS NOT A NOTICE (roborev job 16): with no validly bound snapshot there is nothing to report a
+# digest for, so the run FAILs by name and the three snapshot keys are ABSENT rather than `UNOBSERVED`.
+assert_says 'case (cx31b2) a refused path is a named FAIL, not an exempted NOTICE' \
+  '^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)$'
+assert_lacks 'case (cx31b2) an ordinary file is never hashed into the block' '^snapshot-digest:'
 reset_stub
 
 printf '== (cx31c) the safety refusals survive C‴: a symlinked component is not read ==\n'
@@ -3458,8 +3461,9 @@ STUB_PROMPT=$(snap_prompt "$sym_dir/roborev-snapshot-content.diff")
 run_wrapper "$snap_work"
 assert_says 'case (cx31c) a symlinked snapshot is not read, and the NOTICE says so' \
   'not safe to read as this repository.s snapshot \(symlinked\)'
-assert_says 'case (cx31c) the digest is UNOBSERVED rather than a digest of the symlink target' \
-  '^snapshot-digest: UNOBSERVED \('
+assert_says 'case (cx31c) a symlinked path is a named FAIL, so no digest of its target is ever reported' \
+  '^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)$'
+assert_lacks 'case (cx31c) and no snapshot digest is emitted at all' '^snapshot-digest:'
 rm -rf "$sym_dir" "$sym_target"
 reset_stub
 
@@ -3474,6 +3478,99 @@ assert_says 'case (cx31d) a path outside the reviewed repo is not read' \
   'not safe to read as this repository.s snapshot \(foreign-repo\)'
 assert_lacks 'case (cx31d) and its content never reaches a census claim' 'code census paths present'
 reset_stub
+
+printf '== (cx31g) BLOCKER 1: a COMPACT instruction carrying a git COMMAND cannot PASS ==\n'
+# THE FALSE PASS THE OWNER RULED MUST NOT EXIST. roborev'"'"'s third oversize tier puts a git COMMAND where the
+# compact instruction'"'"'s token goes. Selecting snapshot mode on the mere PRESENCE of that line made
+# prompt-content an EXEMPTED NOTICE, so the wrapper PASSED having received neither an inline diff nor a
+# snapshot. The owner: an unverifiable input is a non-passing verdict by rule 13.
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT='Review the change.\n\n(Diff too large; read `git diff --stat HEAD~1`.)'
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31g)' FAIL 1
+assert_says 'case (cx31g) a command in the compact token is NOT a snapshot' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (cx31g) the delegated tier is still named' \
+  "^ERROR: prompt-content: the prompt carries a .\(Diff too large. notice but NO snapshot path"
+assert_lacks 'case (cx31g) it never becomes an exempted NOTICE' '^prompt-content: NOTICE'
+assert_lacks 'case (cx31g) and no digest is reported for a command' '^snapshot-digest:'
+reset_stub
+
+printf '== (cx31g2) BLOCKER 1b: a selected-but-UNBOUND snapshot mode cannot PASS ==\n'
+# The other half: a compact token that IS snapshot-shaped but names a path outside the repo. Snapshot mode is
+# selected, the binding FAILS, and that must be a named FAIL rather than an exempted NOTICE — `SNAPSHOT_NOTICE`
+# asserts "validly bound", not "mode selected".
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT='Review the change.\n\n(Diff too large; read `/elsewhere/.roborev/roborev-snapshot-777/roborev-snapshot-content.diff`.)'
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31g2)' FAIL 1
+assert_says 'case (cx31g2) a selected-but-unbound snapshot is a named FAIL' \
+  '^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)$'
+assert_says 'case (cx31g2) the cause says we received neither an inline diff nor a readable snapshot' \
+  'received neither an inline diff nor a snapshot it could read'
+assert_says 'case (cx31g2) and names the binding failure' 'foreign-repo'
+assert_lacks 'case (cx31g2) it never becomes an exempted NOTICE' '^prompt-content: NOTICE'
+reset_stub
+
+printf '== (cx31p) BLOCKER 2: a readable instruction line does NOT excuse an unreadable one (C‴ shape) ==\n'
+# THE REGRESSED CONTRACT, restored and re-pinned in its post-C‴ form. One line parses to a real snapshot, a
+# second carries no readable path; reporting the parsed path and its digest while saying nothing about the
+# undecidable line is the shape whose revert once produced a real false PASS.
+reset_stub
+write_snap_diff "$snap_file" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT="$(snap_prompt "$snap_file")\\nRead the diff from: somewhere unreadable"
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31p)' FAIL 1
+assert_says 'case (cx31p) an unreadable sibling makes the input unverifiable' \
+  '^prompt-content: FAIL \(snapshot named but unusable: unparseable-instruction\)$'
+assert_says 'case (cx31p) the cause counts the malformed line(s)' \
+  '1 snapshot instruction line\(s\) carried no readable backtick-delimited path'
+assert_says 'case (cx31p) and discloses the parsed path too, rather than reporting it as fine' \
+  "while 1 other line\(s\) did \(first: $snap_file\)"
+assert_lacks 'case (cx31p) the readable sibling never yields an exempted NOTICE' '^prompt-content: NOTICE'
+rm -rf "$snap_dir"
+reset_stub
+
+printf '== (cx31h) BLOCKER 3: the size read is bounded, and DECLINED when nothing can bound it ==\n'
+# The open must happen inside the bounded child — a shell redirection is performed by the PARENT before the
+# bound starts — and the fallback must actually bound, since a stock macOS worker has no `timeout`. Probed
+# directly: with `timeout` hidden from PATH the portable watchdog must still return, and a FIFO must not hang.
+cx31h_probe="$tmp/cx31h-probe.sh"
+cx31h_out="$tmp/cx31h-out.txt"
+cat >"$cx31h_probe" <<'CX31H'
+set -uo pipefail
+REPO="$2"
+. "$1"
+ROBOREV_READ_TIMEOUT_SECS=2
+_ROBOREV_READ_TIMEOUT_SECS=2
+mkfifo "$3/blocker.fifo" 2>/dev/null || exit 3
+# No `timeout` on PATH: the portable watchdog is the only thing standing between this and a hang.
+PATH=/nonexistent-bin
+if _roborev_file_size "$3/blocker.fifo"; then
+  printf 'SIZE-RETURNED-FOR-A-FIFO\n'
+else
+  printf 'refused-or-bounded rc=%s kind=%s\n' "$?" "${_rx_bounded_kind:-none}"
+fi
+printf 'probe-survived\n'
+CX31H
+mkdir -p "$tmp/cx31h"
+if bash "$cx31h_probe" "$ORACLES_SRC" "$tmp/cx31h-repo" "$tmp/cx31h" >"$cx31h_out" 2>&1; then
+  if grep -qF 'probe-survived' "$cx31h_out"; then
+    ok 'case (cx31h): a FIFO does not hang the size read, with no `timeout` available'
+  else
+    bad "case (cx31h): the probe did not return — the read is still unbounded: $(cat "$cx31h_out")"
+  fi
+  if grep -qF 'SIZE-RETURNED-FOR-A-FIFO' "$cx31h_out"; then
+    bad 'case (cx31h): a size was reported for a FIFO — the immediately-before regular-file check did not hold'
+  else
+    ok 'case (cx31h): no size is reported for a non-regular file (refused by name, not by hanging)'
+  fi
+else
+  bad "case (cx31h): the bounded-read probe did not run: $(cat "$cx31h_out")"
+fi
 
 printf '== (cx31e) INVARIANT: inline mode is UNCHANGED and still FAILs on an absent census path ==\n'
 # C‴ changes snapshot mode ONLY. An inline prompt missing a code census path must still be a hard FAIL with

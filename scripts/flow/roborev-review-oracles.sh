@@ -1620,6 +1620,14 @@ roborev_collect_review_diff_headers() {
       ROBOREV_DIFF_SOURCE_STATE="inline"
     else
       ROBOREV_DIFF_SOURCE_STATE="none"
+      if [ "${_rx_snap_oversize_markers:-0}" -gt 0 ]; then
+        # THE DELEGATED-INSPECTION TIER, named rather than reported as a bare empty prompt. roborev's
+        # `codex_*`/`generic_*` oversize templates — and a COMPACT instruction whose token is a git command
+        # rather than a snapshot path — ship neither the diff nor a snapshot: they ask the reviewer to run git
+        # itself. Nothing obtainable locally can establish what such a review received, and the owner ruled
+        # that stays a NAMED FAIL. The verdict is the all-absent census FAIL below; this names WHICH mode it is.
+        ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt carries a '(Diff too large' notice but NO snapshot path (roborev's delegated-inspection tier, or a compact instruction naming a command rather than a path), so nothing local can establish which files the reviewer looked at"
+      fi
     fi
     return 0
   fi
