@@ -212,7 +212,23 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    perfectly good snapshot as unvalidated, a false FAIL of exactly the kind this issue removes); reuse is
    keyed on a **content digest**, so a same-length rewrite cannot leave a stale capture in place; and the
    capture is matched to the prompt by **whole-path equality**, so the canonical sibling of a
-   differently-named file cannot stand in for it.
+   differently-named file cannot stand in for it. Publication also requires **three digests that agree** —
+   the source before the copy, the source after it, and the staged copy, each of them *measured*, because an
+   empty digest compares equal to another empty one — so a source mutated mid-copy is discarded and retried
+   rather than published under the final digest and reused. The capture directory's containment is decided on
+   its **`pwd -P`-resolved** path, since a lexical test admits a relative `TMPDIR` or one whose path traverses
+   a symlink into the checkout; a refusal is reported as a named notice, and the review then fails closed on
+   the absent capture rather than certifying from a directory inside the tree under review.
+
+   **One limitation is stated rather than chased.** Polling establishes *which versions of the snapshot
+   existed at the polls*, not that the captured one was the file's final bytes — roborev deletes it without
+   telling us. This is left as a documented residual for three reasons: the proposed remedies (hold an open
+   descriptor until completion, or ask roborev for a finalized artifact) need cooperation the tool does not
+   offer (`roborev show` has `--prompt`/`--json`, no `--diff`, and the file is gone before `--wait` returns);
+   the check's subject is **the diff the reviewer received**, so a version materialising after the read is not
+   what it should assert about; and the exposure is bounded to a rewrite inside the final ≤1s poll window,
+   which measured roborev behaviour does not exhibit (it writes the snapshot, then invokes the reviewer). If
+   evidence of a mid-review rewrite appears, that reasoning is what changes first.
 
    Two further facts, read out of the installed binary (roborev v0.61.2) rather than inferred from a single
    transcript: roborev has **two** snapshot instruction spellings — the full one and a compact

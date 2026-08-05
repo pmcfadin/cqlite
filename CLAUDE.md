@@ -516,8 +516,16 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   SIGTERM between them report `capture-unvalidated` on a good snapshot, i.e. the very false FAIL this issue
   fixes), **re-taken whenever the source's content DIGEST changes** (a byte count cannot see a same-length
   rewrite, which would certify a stale diff), and matched by **whole-path equality** with the path the prompt
-  names (an id-only match let the canonical sibling certify a file the reviewer was never pointed at). Every
-  one of those holes was real: reverted, each reached `prompt-content: PASS`. **Scope, recorded in code:** this
+  names (an id-only match let the canonical sibling certify a file the reviewer was never pointed at). Publication additionally requires **three digests that
+  agree** (source before the copy, source after it, and the staged copy — each measured, since an empty digest
+  compares equal to another empty one), and the capture directory's containment is decided on its
+  **`pwd -P`-resolved** path, so a relative `TMPDIR` or one symlinked into the checkout is refused with a named
+  notice rather than putting our copies in the tree under review. Every one of those holes was real: reverted,
+  each reached `prompt-content: PASS`. **STATED LIMITATION, deliberately not chased:** a poller cannot prove
+  the version it captured was the snapshot's *final* bytes — but the remedy needs an API roborev does not
+  offer (no `show --diff`, and the file is deleted before `--wait` returns), the check's subject is *the diff
+  the reviewer received* rather than a version that materialised after the read, and the residual is a rewrite
+  inside the last ≤1s poll window, unobserved in measured roborev behaviour. **Scope, recorded in code:** this
   defends against silent tooling failure and staleness — *not* against an adversary with write access to the
   reviewed repo, who can simply write the diff, the wrapper or the tests, so hardening the copy against them
   is unwinnable and out of scope.
