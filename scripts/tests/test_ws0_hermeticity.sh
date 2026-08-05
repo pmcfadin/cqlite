@@ -601,6 +601,92 @@ else
 fi
 
 # ===========================================================================
+# 6b — NO ws0 self-test may put an UNESCAPED BACKTICK in a double-quoted label
+# ===========================================================================
+# A backtick inside a double-quoted string is COMMAND SUBSTITUTION, so a label that quotes an
+# idiom in backticks RUNS it. Two shipped labels did, and were found by the root-junk guard
+# firing on the gate's own tree during round 6's campsite-rule split:
+#
+#   pass "the refusal names the shape (a `> 0` test where `== 0` was meant)"
+#       -> ran `> 0`, which CREATED an empty file named `0` in the invoking CWD, and printed
+#          the label as "a  test where  was meant"
+#   pass "STRUCTURAL: the rotated arm list includes `scan` as a peer of the Flight arms"
+#       -> ran `scan` (command not found on stderr), printed "…includes  as a peer"
+#
+# BOTH HALVES MATTER, and the second is the worse one: the label is the ONLY description of
+# what a check asserts, so a substituted-away label is a check whose evidence is unreadable —
+# it prints as a PASS naming nothing. The file-creation half is merely the visible symptom, and
+# it is the reason #3272 F5 spent three commits deleting a stray repo-root `0` as "the residue
+# of an ad-hoc shell redirect that a `git add -A` swept up". It was a COMMITTED LINE, in the
+# suite the gate runs, recreating the file on every run. A guard is the right answer rather
+# than a third deletion, and unlike F5's guard this one names the CAUSE.
+#
+# Asked over the LABEL argument of `pass`/`fail` only — not over the whole file — because
+# backticks in a COMMENT are ordinary prose (this very block has several) and a `$( … )`
+# substitution in a label is deliberate and common (`${benign:0:38}`).
+backtick_bad=""
+for suite in "$TESTS_DIR"/test_ws0_*.sh "$TESTS_DIR"/lib-ws0-*.sh; do
+  hits=$(python3 - "$suite" <<'PY'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+for n, line in enumerate(p.read_text().splitlines(), 1):
+    s = line.lstrip()
+    if s.startswith("#"):
+        continue
+    m = re.match(r'(?:pass|fail) "((?:[^"\\]|\\.)*)"', s)
+    if not m:
+        continue
+    label = m.group(1)
+    # An UNESCAPED backtick — `\`` is fine, a bare ` is substitution.
+    if re.search(r'(?<!\\)`', label):
+        print(f"{p.name}:{n}")
+PY
+)
+  [ -n "$hits" ] && backtick_bad="$backtick_bad $hits"
+done
+if [ -z "$backtick_bad" ]; then
+  pass "label-backticks: no ws0 suite label carries an UNESCAPED backtick (which would RUN the quoted idiom and blank the label)"
+else
+  fail "label-backticks: an unescaped backtick in a pass/fail label RUNS the quoted text and blanks the label:$backtick_bad"
+fi
+# NON-VACUITY, both directions, because a detector that finds nothing is textually identical to
+# a clean tree. The BAD form is the exact shipped line that created the stray `0`; the GOOD form
+# is its escaped fix, which must NOT be flagged (or the guard reds on every correct label).
+backtick_probe() { # backtick_probe <line> — echoes the finding count
+  local probe="$TMP/backtick-probe.sh"
+  printf '%s\n' "$1" > "$probe"
+  python3 - "$probe" <<'PY'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+n = 0
+for line in p.read_text().splitlines():
+    s = line.lstrip()
+    if s.startswith("#"):
+        continue
+    m = re.match(r'(?:pass|fail) "((?:[^"\\]|\\.)*)"', s)
+    if m and re.search(r'(?<!\\)`', m.group(1)):
+        n += 1
+print(n)
+PY
+}
+bad_n=$(backtick_probe 'pass "the refusal names the shape (a `> 0` test where `== 0` was meant)"')
+good_n=$(backtick_probe 'pass "the refusal names the shape (a \`> 0\` test where \`== 0\` was meant)"')
+if [ "$bad_n" = "1" ] && [ "$good_n" = "0" ]; then
+  pass "label-backticks: OBSERVED — the real pre-fix line is FLAGGED and its escaped fix is NOT (the guard discriminates)"
+else
+  fail "label-backticks: the detector must flag the unescaped form only (bad=$bad_n good=$good_n)"
+fi
+# ...and the FILE-CREATION half is observed directly, so the consequence is recorded as measured
+# rather than asserted: running the pre-fix label really does write a file named `0`.
+bt_dir="$TMP/backtick-cwd"; mkdir -p "$bt_dir"
+( cd "$bt_dir" && bash -c 'pass() { :; }; pass "a `> 0` label"' >/dev/null 2>&1 )
+if [ -e "$bt_dir/0" ]; then
+  pass "label-backticks: OBSERVED — the unescaped label really CREATES a file named \`0\` in the invoking CWD (#3272 F5's actual cause)"
+else
+  fail "label-backticks: the file-creation consequence must be observed, or the cause claim is unproven"
+fi
+
+# ===========================================================================
 # 7 — EVERY ws0 self-test carries a minimum-check-count FLOOR WITH TEETH, and it FIRES
 # ===========================================================================
 # `set -uo pipefail` (no `-e`) means a block that silently never executes lowers a suite's

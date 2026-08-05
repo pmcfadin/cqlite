@@ -204,7 +204,10 @@ fi
 # R4a, so a future edit cannot revert to rotating the Flight arms alone while every
 # behavioural case above still passes on a re-plumbed loop.
 if grep -qE '^_ARM_LIST=\(scan \$ARMS\)' "$REPO_ROOT/scripts/perf/ws0-baseline.sh"; then
-  pass "STRUCTURAL: the rotated arm list includes `scan` as a peer of the Flight arms"
+  # ESCAPED backticks: unescaped they are COMMAND SUBSTITUTION, and this label really did run
+  # `scan` (a `command not found` on stderr) and print itself as "…includes  as a peer" — the
+  # same defect as the fabrication suite's `\`> 0\`` label, which additionally created a file.
+  pass "STRUCTURAL: the rotated arm list includes \`scan\` as a peer of the Flight arms"
 else
   fail "the rotated list must be (scan \$ARMS): rotating only the Flight arms is R4a"
 fi

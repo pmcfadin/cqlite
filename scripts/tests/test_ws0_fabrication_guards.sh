@@ -163,7 +163,13 @@ expect_reject "a NEGATIVE requests_error is FATAL (pre-fix: counted as ZERO erro
 out=$(run_report "$d" "$TMP/corpus")
 if grep -q "CORRUPT artifact, not a clean zero" <<<"$out" \
   && grep -q "used to be \`if errors > 0\`" <<<"$out"; then
-  pass "the refusal names the shape (a `> 0` test where `== 0` was meant)"
+  # The backticks are ESCAPED. Unescaped inside a double-quoted string they are COMMAND
+  # SUBSTITUTION, so this label ran `> 0` as a command — which emptied the label to "a  test
+  # where  was meant" AND created an empty file named `0` in the CWD the suite was invoked
+  # from. That is the mechanism behind the stray repo-root `0` #3272 F5 built a guard for and
+  # deleted three times as "the residue of an ad-hoc redirect": it was a COMMITTED line all
+  # along, and the guard fires on the gate's own tree every time this suite runs.
+  pass "the refusal names the shape (a \`> 0\` test where \`== 0\` was meant)"
 else
   fail "the negative-counter refusal must name the defect shape (out: $out)"
 fi
