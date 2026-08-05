@@ -529,31 +529,6 @@ def has_driver_handle(text: str) -> bool:
     return bool(_HANDLE_RE.search(text))
 
 
-def strip_python(text: str) -> str:
-    """Python source with docstrings and `#` comments removed, or the text unchanged.
-
-    A python file's PROSE necessarily quotes the invocations it forbids — this very file's
-    header does, and the first run of the rewritten lint reported FIVE findings against its own
-    docstring. Stripping via `ast` scans what a run can EXECUTE, which is the same technique
-    `test_ws0_fabrication_guards.sh` uses on the reporter modules. Unparseable source falls back
-    to the raw text: a syntax error must not silently narrow the subject to nothing.
-    """
-    import ast
-
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return text
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            body = node.body
-            if body and isinstance(body[0], ast.Expr) \
-                    and isinstance(body[0].value, ast.Constant) \
-                    and isinstance(body[0].value.value, str):
-                node.body = body[1:] or [ast.Pass()]
-    return ast.unparse(ast.fix_missing_locations(tree))
-
-
 # The python APIs that can start a process. A python file's driver MENTION is a string constant
 # or a comparison in almost every case (this file is full of them); what matters is whether it
 # reaches one of these.
