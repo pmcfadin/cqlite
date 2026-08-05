@@ -971,7 +971,11 @@ roborev_collect_prompt_headers() {
 #      defect #3312 exists to remove. Ordering cannot be got wrong when there is no ordering.
 #   3. REUSE IS KEYED ON A CONTENT DIGEST, never on the byte count. A snapshot rewritten to the SAME
 #      LENGTH would otherwise keep the stale capture and certify a diff other than the delivered one.
-#      An unmeasurable digest re-captures (the safe direction), never keeps.
+#      An unmeasurable digest re-captures (the safe direction), never keeps — and PUBLICATION requires
+#      THREE digests that agree (source before the copy, source after it, and the staged copy), so a
+#      source mutated mid-copy is discarded instead of published under the final digest and then
+#      reused forever. Each digest is held in its OWN variable: the helper returns through one global,
+#      and re-reading it is precisely how the post-copy check once compared a value with itself.
 ROBOREV_SNAPSHOT_CAPTURE_DIR=""
 ROBOREV_SNAPSHOT_CAPTURE_PID=""
 # One second, because each poll DIGESTS the source: the point is that no same-size rewrite can hide,
@@ -1084,7 +1088,7 @@ _roborev_capture_validate() {
 # The published unit is a DIRECTORY per snapshot id: `<capture-dir>/<id>/{content.diff,meta}`, where
 # `meta` records the validated relative path and the digest captured. One rename publishes both.
 _roborev_snapshot_capture_loop() {
-  local repo="$1" out="$2" f id rel stage published
+  local repo="$1" out="$2" f id rel stage published dg_pre dg_post dg_staged
   # GRACEFUL SHUTDOWN: TERM only asks the loop to stop; the current iteration completes, so a capture
   # in flight when the review ends is finished rather than abandoned.
   _rx_capture_stop=0
@@ -1100,10 +1104,21 @@ _roborev_snapshot_capture_loop() {
       rel="$_rx_cap_rel"
       # DIGEST-KEYED REUSE: skip only when the published capture records the SAME digest. A digest we
       # could not take is not a match, so it re-captures.
+      #
+      # THE PRE-COPY DIGEST IS KEPT IN ITS OWN VARIABLE. `_roborev_file_digest` returns through a
+      # single global, so reading it again LATER OVERWRITES this value — which is exactly how the
+      # post-copy check below came to compare nothing at all (roborev job 8). Each of the three
+      # digests gets its own name, and none of them is the shared global by the time it is compared.
       _roborev_file_digest "$f" || continue
+      dg_pre="$_rx_digest"
+      # NON-EMPTY IS REQUIRED EXPLICITLY, not inferred from the call having succeeded: an empty digest
+      # compares EQUAL to another empty digest, so an unmeasurable read would otherwise satisfy the
+      # agreement below and publish an unverified capture — a textbook vacuous pass. Belt and braces
+      # on top of the `|| continue` above, because the guarantee must not depend on one call site.
+      [ -n "$dg_pre" ] || continue
       published="$out/$id/meta"
       if [ -f "$published" ] \
-        && [ "$(sed -n 's/^digest=//p' "$published" 2>/dev/null | head -1)" = "$_rx_digest" ]; then
+        && [ "$(sed -n 's/^digest=//p' "$published" 2>/dev/null | head -1)" = "$dg_pre" ]; then
         continue
       fi
       stage="$out/.stage.$$.$id"
@@ -1113,14 +1128,32 @@ _roborev_snapshot_capture_loop() {
         rm -rf "$stage" 2>/dev/null || :
         continue
       fi
-      # RE-DIGEST AFTER THE READ: a source mutated (or swapped) mid-copy yields a different digest, so
-      # the staged copy is discarded rather than published as though it were what we validated. This
-      # replaces the earlier inode dance and covers the same-length case the byte count missed.
-      if ! _roborev_file_digest "$f" || [ -L "$f" ]; then
+      # PUBLICATION REQUIRES THREE DIGESTS THAT AGREE — the source BEFORE the copy, the source AFTER
+      # it, and the STAGED COPY itself — plus the source still not being a symlink. Agreement is an
+      # AFFIRMATIVE requirement, not the absence of an observed change:
+      #   * pre != post   the source changed while we were reading it, so the staged bytes may be a
+      #                   MIX of two versions. Discard.
+      #   * pre != staged the copy did not reproduce the source (a short write, an interposed copy),
+      #                   so the staged bytes are not what we digested. Discard.
+      #   * any empty     nothing was measured for that leg, and "unmeasured" must never satisfy an
+      #                   equality test. Discard.
+      # A discard is the correct outcome, not a loss: the next poll retries, and "no capture yet" is a
+      # state the consumer already fails closed on. The previous revision took the post-copy digest
+      # into the SAME global as the pre-copy one and then STAMPED THE META WITH IT, so a source mutated
+      # during `cp` published a mixed capture bearing the final digest — and every later poll matched
+      # that digest and reused it, certifying a diff the reviewer never received (roborev job 8).
+      _roborev_file_digest "$f" || { rm -rf "$stage" 2>/dev/null || :; continue; }
+      dg_post="$_rx_digest"
+      _roborev_file_digest "$stage/content.diff" || { rm -rf "$stage" 2>/dev/null || :; continue; }
+      dg_staged="$_rx_digest"
+      if [ -z "$dg_pre" ] || [ -z "$dg_post" ] || [ -z "$dg_staged" ] \
+        || [ "$dg_pre" != "$dg_post" ] || [ "$dg_pre" != "$dg_staged" ] || [ -L "$f" ]; then
         rm -rf "$stage" 2>/dev/null || :
         continue
       fi
-      printf 'rel=%s\ndigest=%s\n' "$rel" "$_rx_digest" >"$stage/meta" 2>/dev/null || {
+      # STAMPED WITH THE AGREED DIGEST. All three are equal here, so naming the pre-copy one is a
+      # statement about what was actually verified rather than whatever the last read happened to see.
+      printf 'rel=%s\ndigest=%s\n' "$rel" "$dg_pre" >"$stage/meta" 2>/dev/null || {
         rm -rf "$stage" 2>/dev/null || :
         continue
       }
