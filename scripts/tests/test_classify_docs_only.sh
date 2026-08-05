@@ -188,6 +188,38 @@ assert_docs_only "svg under the diagrams dir"   $'docs/sstables-definitive-guide
 assert_docs_only "raw non-ASCII prose path"     $'docs/\303\251-notes.md\n'
 assert_docs_only "space-bearing prose path"     $'docs/research/CQLite Writes (M5) \342\200\224 notes.md\n'
 
+echo "== (e2) #3250 roborev r1 (High): a legal NAME must not launder an extension =="
+# `LICENSE.* | NOTICE.*` accepted ANY extension at any depth, so a legal-looking
+# NAME laundered an executable straight through the gate — the same bypass class
+# this change exists to close. Both arms are now exact-name + closed prose suffix.
+assert_full "LICENSE.sh under docs/"            $'docs/tools/LICENSE.sh\n'
+assert_full "NOTICE.json under docs/"           $'docs/observability/NOTICE.json\n'
+assert_full "LICENSE.py under docs/"            $'docs/foo/LICENSE.py\n'
+# An artifact directory must not rescue a code-bearing legal-named file either.
+assert_full "LICENSE.bt inside an artifact dir" $'docs/reports/ws0-3217-artifacts/LICENSE.bt\n'
+# Root level: the identical wildcard was PRE-EXISTING (not introduced by #3250)
+# and is fixed opportunistically in the same hunk.
+assert_full "LICENSE.sh at the repo root"       $'LICENSE.sh\n'
+assert_full "NOTICE.py at the repo root"        $'NOTICE.py\n'
+# ...and the legitimate legal fast path survives the tightening.
+assert_docs_only "exact LICENSE at the root"    $'LICENSE\n'
+assert_docs_only "exact NOTICE at the root"     $'NOTICE\n'
+assert_docs_only "exact LICENSE under docs/"    $'docs/x/LICENSE\n'
+assert_docs_only "exact NOTICE under docs/"     $'docs/x/NOTICE\n'
+assert_docs_only "LICENSE.md"                   $'LICENSE.md\n'
+assert_docs_only "LICENSE.txt"                  $'LICENSE.txt\n'
+assert_docs_only "NOTICE.rst under docs/"       $'docs/x/NOTICE.rst\n'
+# The three legal files this repo actually tracks, read from git rather than
+# assumed, so the "regresses nothing real" claim is measured and not asserted.
+# Two are NESTED, and a nested legal file was `full` BEFORE this change too (the
+# global arm is anchored to the whole path); #3250 does not widen that.
+while IFS= read -r _legal; do
+  case "$_legal" in
+    */*) assert_full     "tracked legal file (nested, unchanged): $_legal" "$_legal"$'\n' ;;
+    *)   assert_docs_only "tracked legal file (root): $_legal"             "$_legal"$'\n' ;;
+  esac
+done < <(git -C "$REPO_ROOT" ls-files | grep -E '(^|/)(LICENSE|NOTICE)([.][^/]*)?$')
+
 echo "== (f) #3250: ONE canonical decision point for a docs/ path (structural) =="
 # docs_case_arms <file>: one line per `case` ARM whose PATTERN mentions `docs/`,
 # as "<first-line-number>:<arm text, multi-line arms joined>". Joining is what

@@ -185,10 +185,20 @@ docs_path_is_documentation() {
   base="${path##*/}"
 
   # L1 — prose / image / legal, at any depth. This classifier's own semantics.
+  #
+  # The legal names are an EXACT-NAME plus CLOSED-PROSE-SUFFIX allowlist, never a
+  # `LICENSE.*` wildcard (roborev round 1, High): a wildcard suffix accepts ANY
+  # extension, so `docs/tools/LICENSE.sh` and `docs/observability/NOTICE.json`
+  # would be documentation — the very bypass class this change exists to close,
+  # and a direct contradiction of both the fail-closed rule for unrecognized
+  # extensions and the directory scoping of code-bearing formats. Measured before
+  # tightening: only 3 LICENSE/NOTICE files are tracked repo-wide and all 3 carry
+  # the exact extensionless name, so this regresses nothing real.
   case "$base" in
     *.md | *.markdown) return 0 ;;
     *.png | *.jpg | *.jpeg | *.gif | *.svg | *.webp | *.ico) return 0 ;;
-    LICENSE | LICENSE.* | NOTICE | NOTICE.*) return 0 ;;
+    LICENSE | LICENSE.md | LICENSE.markdown | LICENSE.txt | LICENSE.rst) return 0 ;;
+    NOTICE | NOTICE.md | NOTICE.markdown | NOTICE.txt | NOTICE.rst) return 0 ;;
   esac
 
   # No extension at all => full, unconditionally, with no mode lookup.
@@ -249,10 +259,21 @@ is_docs_file() {
     docs/*) docs_path_is_documentation "$path"; return $? ;;
   esac
 
+  # The global legal arm carries the same exact-name + closed-prose-suffix
+  # allowlist as L1, for the same reason. The `LICENSE.*` wildcard here was
+  # PRE-EXISTING (it long predates issue #3250 and this change did not introduce
+  # it), and it let a root-level `LICENSE.sh` short-circuit the gate. It is fixed
+  # opportunistically because it is the identical one-line defect in the function
+  # this change hardens, and leaving a known gate bypass in place merely because
+  # it predates the change would be indefensible. Deliberately still anchored to
+  # the WHOLE path, exactly as before: making it match a basename would WIDEN the
+  # fast path to nested legal files outside `docs/` (e.g. `bindings/node/LICENSE`,
+  # `full` before and after), which is a loosening this change does not make.
   case "$path" in
     *.md | *.markdown) return 0 ;;
     *.png | *.jpg | *.jpeg | *.gif | *.svg | *.webp | *.ico) return 0 ;;
-    LICENSE | LICENSE.* | NOTICE | NOTICE.*) return 0 ;;
+    LICENSE | LICENSE.md | LICENSE.markdown | LICENSE.txt | LICENSE.rst) return 0 ;;
+    NOTICE | NOTICE.md | NOTICE.markdown | NOTICE.txt | NOTICE.rst) return 0 ;;
     *) return 1 ;;
   esac
 }
