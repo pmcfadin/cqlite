@@ -510,6 +510,35 @@ prose or as an inert artifact — none does):
 **One path in the three diffs is outside `docs/`**: `process_improvements.md` (#3081), prose, classified
 documentation by the pre-existing global `*.md` arm, unchanged by this change.
 
+### D10a — the whole tracked `docs/` tree, classified (the "no prose moved" claim, measured)
+
+The spec requires that this change move **no** tracked prose or image file from the fast path to the full
+path. That is measurable, so it is measured rather than asserted. Every tracked path under `docs/` was fed
+to the amended classifier and the offending set extracted path by path
+(`git -c core.quotePath=false ls-files 'docs/*'`, then repeatedly classify-and-remove the named offender):
+
+| | count |
+|---|---|
+| tracked files under `docs/` | **1277** |
+| still `docs-only` (fast path) | **1184** |
+| now forcing the full path | **93** |
+
+The 93 by extension: **43 `.sh`, 27 `.py`, 4 `.yml`, 4 `.c`, 3 extensionless, 3 `.yaml`, 3 `.bt`, 2 `.json`,
+2 `.cql`, 1 `.toml`, 1 `.rs`**. **Zero prose files. Zero images.** Every one is executable code or
+functional configuration; the notable non-harness members are the observability kit
+(`docs/observability/docker-compose.yml`, `prometheus/prometheus.yml`, the two Grafana `provisioning/*.yml`
+files, `otel-collector/config.yaml`) and the two `.json` falsifying cases named in D3b
+(`grafana/dashboards/cqlite-overview.json`, guarded by the gate's own `kit-dashboard-drift` component, and
+`reports/delivery-telemetry.schema.json`).
+
+**A live confirmation of the raw-path boundary, found while running this census.** The first attempt used
+`git ls-files 'docs/*'` **without** `core.quotePath=false`, and the classifier stopped on
+`"docs/research/CQLite Writes (M5) \342\200\224 Analysis & Recommended Paths.md"` with
+`is not a raw repo-relative path (C-quoted spelling) -> FULL PATH (fail-closed, #3250)`. That is exactly
+D5's failure mode reproducing on a real tracked path — quoted, it would otherwise have been read as
+extension `md"` — and exactly why `pr-gate.yml` now passes `core.quotePath=false`. The boundary
+fail-closed and named its cause instead of guessing.
+
 ## D9 — what this change deliberately does not do
 
 - It does not model roborev's exclusion set (#3283) or its compiled-in built-ins (#3278). It consumes a
