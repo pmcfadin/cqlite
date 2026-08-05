@@ -44,7 +44,26 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # from PERF_ROOT is a defect every functional assert would still pass. Lines from other
 # bootstrap sections (e.g. the mold `sudo apt-get install`) are out of this issue's scope.
 sudo_perf_offenders() {
-  grep -E '^sudo ' "$1" 2>/dev/null | grep -E '(\btee\b|\bsysctl\b|\btrue\b)' | grep -v '^sudo -n ' || true
+  grep -E '^sudo ' "$1" 2>/dev/null | grep -E '(\btee\b|\bsysctl\b|\btrue\b|\bsh\b)' | grep -v '^sudo -n ' || true
+}
+
+# THE STAGED INSTALL IS ONE PRIVILEGED INVOCATION, SO THE TRIPWIRE IS MULTI-LINE (issue #3261,
+# roborev round 2). `mktemp` + write + `chmod` + `mv -T` all run inside a single privileged
+# `sh -c` — that is the fix for the create->reopen race — so the shim records `sudo -n sh -c `
+# followed by the SCRIPT TEXT across many lines. A line-wise `grep 'tee .*99-cqlite-perf.conf'`
+# therefore no longer identifies a write, and asserting on it would silently stop testing
+# anything. These two helpers name the invocation instead of its internals:
+#   perf_write_count <log>   how many privileged staged installs were recorded (expect exactly 1
+#                            per write; more than one would mean the consolidation regressed into
+#                            several privileged calls, which is the race coming back)
+#   perf_wrote_dropin <log>  rc 0 iff a staged install was aimed at the managed drop-in path. The
+#                            argv's LAST line carries `perf-capability-install <dir> <path> <base>`,
+#                            so this matches the invocation marker AND the target on one line.
+perf_write_count() {
+  grep -c '^sudo -n sh -c' "$1" 2>/dev/null || true
+}
+perf_wrote_dropin() {
+  grep -q 'perf-capability-install .*99-cqlite-perf\.conf' "$1" 2>/dev/null
 }
 
 # `mktemp` IS A COMMAND THAT CAN FAIL, and these suites deliberately run WITHOUT

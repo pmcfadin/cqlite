@@ -443,31 +443,59 @@ perf_capability_dropin_path() {
 #   idempotency compare (perf_capability_dropin_current) is run by an UNPRIVILEGED bootstrap
 #   process, which could not read a root-owned 0600 file — every subsequent run would then see
 #   "not current" and rewrite. The old `tee` produced 0644 via root's umask; this preserves that.
+#
+# ONE PRIVILEGED INVOCATION, AND THE RESIDUAL THAT REMAINS (issue #3261, roborev round 2 — the
+# TENTH escape, the same shape one level deeper). `mktemp` closed the CREATE race but moved the
+# window rather than closing it: mktemp returns a NAME, and `tee`/`chmod`/`mv` each REOPEN that name
+# afterwards, so between the create and the reopen an attacker who can write the directory could
+# observe the random entry and replace it with a symlink. Every step therefore now runs inside a
+# SINGLE privileged `sh -c` — content on stdin — so no unprivileged process is scheduled between
+# them and there is no point at which a less-privileged observer gets to act.
+#   STATED PLAINLY, BECAUSE THIS FAMILY HAS PUNISHED OPTIMISM NINE TIMES AND ONE COMMENT HERE
+#   ALREADY HAD TO BE RETRACTED: consolidation SHRINKS the reopen window to the inside of one root
+#   process; it does NOT mathematically eliminate it. POSIX shell has no `O_NOFOLLOW|O_EXCL` open
+#   primitive — `mktemp` hands back a name and every subsequent open is by name — so the last
+#   name-based assumption cannot be removed in shell alone. Eliminating it needs a non-shell helper
+#   that holds the descriptor from creation to rename (deferred: it would add an interpreter
+#   dependency to the privileged bootstrap path, which is an owner call, not this issue's).
+#   RECORDED REACHABILITY BOUNDARY — a boundary, NOT a "cannot happen". Exploitation needs BOTH a
+#   real privileged `tee` AND a drop-in directory an attacker can write. In production that
+#   directory is `/etc/sysctl.d`, root-owned; in test mode AC4 requires every privileged tool to be
+#   a sandbox-contained shim, so a real `tee` is refused before this function runs. Neither is a
+#   proof of unreachability, and neither is offered as one.
+#   `mv -fT` requires GNU coreutils. That is satisfied by construction rather than by luck: these
+#   are Linux kernel controls and bootstrap skips this whole section on any non-Linux platform.
 perf_capability_dropin_install() {
-  local __pin_d __pin_p __pin_t
+  local __pin_d __pin_p
   __pin_d=$(perf_capability_sysctl_dir) || return 1
   __pin_p="$__pin_d/$PERF_CAPABILITY_DROPIN_BASENAME"
-  __pin_t=$("$@" mktemp -- "$__pin_d/.$PERF_CAPABILITY_DROPIN_BASENAME.XXXXXX" 2>/dev/null) || return 1
-  # `mktemp` is the one creating the entry, so its answer is what must be checked: it has to name a
-  # fresh REGULAR file (never a symlink) directly inside the directory we validated. A tool that
-  # answered anything else has not given us a safe staging entry, and there is nothing to clean up.
-  case "$__pin_t" in
-    "$__pin_d"/.?*) ;;
-    *) printf 'perf-capability: REFUSING: mktemp did not create a staging entry inside the validated directory %s (got %s).\n' \
-         "'$__pin_d'" "'${__pin_t:-<empty>}'" >&2
-       return 1 ;;
-  esac
-  if [ -L "$__pin_t" ] || [ ! -f "$__pin_t" ]; then
-    printf 'perf-capability: REFUSING: the staging entry %s is not a fresh regular file.\n' "'$__pin_t'" >&2
-    "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
-    return 1
-  fi
-  if ! perf_capability_dropin_content | "$@" tee -- "$__pin_t" >/dev/null 2>&1 \
-     || ! "$@" chmod 0644 -- "$__pin_t" >/dev/null 2>&1 \
-     || ! "$@" mv -f -- "$__pin_t" "$__pin_p" >/dev/null 2>&1; then
-    "$@" rm -f -- "$__pin_t" >/dev/null 2>&1
-    return 1
-  fi
+  # ONE privileged invocation for the WHOLE staged install. The content arrives on this shell's
+  # stdin; `mktemp`, the write, `chmod` and the rename all run inside it.
+  perf_capability_dropin_content | "$@" sh -c '
+    set -u
+    d=$1; p=$2; b=$3
+    t=$(mktemp -- "$d/.$b.XXXXXX") || exit 1
+    # mktemp CREATED the entry, so mktemp is what must be checked, INSIDE this privileged shell and
+    # fail-closed: it has to name a fresh regular file (never a symlink) directly in the directory
+    # the caller already validated. Anything else is not a safe staging entry.
+    case "$t" in
+      "$d"/.?*) ;;
+      *) printf "perf-capability: REFUSING: mktemp did not create a staging entry inside the validated directory %s (got %s).\n" "$d" "${t:-<empty>}" >&2
+         exit 1 ;;
+    esac
+    if [ -L "$t" ] || [ ! -f "$t" ]; then
+      printf "perf-capability: REFUSING: the staging entry %s is not a fresh regular file.\n" "$t" >&2
+      rm -f -- "$t"; exit 1
+    fi
+    # `mv -T` (--no-target-directory) is REQUIRED, not cosmetic: without it a symlink-to-DIRECTORY
+    # planted at the managed name makes `mv` move the staging file INTO that directory, i.e. the
+    # rename that exists to avoid following a symlink follows one instead. With -T the destination
+    # is always treated as a plain name to replace.
+    if ! tee -- "$t" >/dev/null || ! chmod 0644 -- "$t" || ! mv -fT -- "$t" "$p"; then
+      rm -f -- "$t"; exit 1
+    fi
+  ' perf-capability-install "$__pin_d" "$__pin_p" "$PERF_CAPABILITY_DROPIN_BASENAME" >/dev/null \
+    || return 1
   perf_capability_dropin_current
 }
 
