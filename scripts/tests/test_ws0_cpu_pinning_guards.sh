@@ -1304,6 +1304,49 @@ if lint_shipped "$PERF_DIR/lib-cpu.sh" library >/dev/null 2>&1 \
 else
   fail "lint-complete: the completion marker must be emitted for a real file"
 fi
+# THE `did not COMPLETE` DIAGNOSTIC MUST BE REACHABLE ON THE DRIVER'S PATH (#3272 round 4 nit).
+#
+# THE FINDING: the driver runs under `set -e -o pipefail` and CAPTURES the lint —
+# `_perf_lint_out="$(perf_invocation_lint_tree "$HERE")"`. An awk that died mid-file made the
+# pipeline non-zero, made the substitution non-zero, and under `-e` KILLED THE DRIVER at the
+# assignment — BEFORE `[[ -n "$_perf_lint_out" ]]` inspected the text. So the run died with a
+# bare status and NO diagnostic, and the `did not COMPLETE` branch above was UNREACHABLE on the
+# one path it was written for. A guard whose diagnostic cannot print is not a guard.
+#
+# Driven under the driver's EXACT shell options with a REAL non-zero awk exit. The fixture is an
+# UNREADABLE FILE (mode 000): `awk` reports it and exits 2 — MEASURED, vs a directory, which
+# `awk` reads as an empty stream and exits 0, so a directory fixture would have asserted nothing.
+# (The first version of this case used a directory and passed while the fix was reverted, which
+# is why the failure mode is now measured rather than assumed.) The assertion is that the CAPTURE
+# COMPLETES and the text is inspectable.
+dying_probe="$TMP/dying-input.sh"
+printf 'x\n' > "$dying_probe"
+chmod 000 "$dying_probe"
+out=$( set -e -o pipefail
+       # shellcheck disable=SC1090
+       source "$PERF_LINT_LIB"
+       captured="$(perf_invocation_lint "$dying_probe" library)"
+       printf 'CAPTURED:%s\n' "$captured" ) 2>&1; rc=$?
+chmod 644 "$dying_probe"
+if [ "$rc" -eq 0 ] && grep -q 'CAPTURED:' <<<"$out"; then
+  pass "lint-pipefail: OBSERVED — under the driver's \`set -e -o pipefail\` the capture COMPLETES on a dying awk (pre-fix: the driver died at the assignment)"
+else
+  fail "lint-pipefail: the capture must survive a dying awk so its diagnostic can be inspected (rc=$rc, out: $out)"
+fi
+# ...and what it captured must be the DIAGNOSTIC, not an empty string — surviving the assignment
+# is worthless if the text is empty, which would read exactly like a clean file.
+if grep -q 'did not COMPLETE\|NO LINES' <<<"$out"; then
+  pass "lint-pipefail: the captured text IS the diagnostic (an empty capture would read as clean)"
+else
+  fail "lint-pipefail: the capture must carry the incompleteness finding (out: $out)"
+fi
+# STRUCTURAL: the awk's status is absorbed at the awk, NOT at the pipeline — the helper's own
+# status is meaningful and must stay intact.
+if awk '/^perf_invocation_lint\(\)/,/^}/' "$PERF_LINT_LIB" | grep -q '|| true; } | _perf_lint_verify_complete'; then
+  pass "lint-pipefail: STRUCTURAL — the status is absorbed at the AWK, leaving the helper's own status intact"
+else
+  fail "lint-pipefail: the awk's status must be absorbed without swallowing the helper's"
+fi
 
 # --- 4d. STRUCTURAL: no APOSTROPHE inside the single-quoted awk program -------
 # Not a style rule — a correctness one, and it bit THREE TIMES writing this round. The awk
@@ -1379,7 +1422,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=160
+MIN_CHECKS=163
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

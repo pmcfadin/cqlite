@@ -143,9 +143,29 @@ PERF_DOMAIN_OPTS="$_PP_SHORT $_PP_LONG $_PT_SHORT $_PT_LONG --per-thread -a --al
 #              finding instead.
 perf_invocation_lint() {
   local mode="${2:-owner}"
+  # THE AWK'S STATUS IS ABSORBED, DELIBERATELY (#3272 review round 4 nit).
+  #
+  # The driver runs under `set -e -o pipefail` and captures this function's output:
+  #
+  #     _perf_lint_out="$(perf_invocation_lint_tree "$HERE")"
+  #
+  # so an awk that DIED mid-file made the pipeline non-zero, which made the command
+  # substitution non-zero, which under `-e` KILLED THE DRIVER at the assignment — before
+  # `[[ -n "$_perf_lint_out" ]]` ever inspected the text. The run died with a bare exit status
+  # and no diagnostic, and `_perf_lint_verify_complete`'s "did not COMPLETE over this file"
+  # branch — added for exactly that case — was UNREACHABLE on the driver's path.
+  #
+  # A guard whose diagnostic cannot be printed on the path it was written for is not a guard.
+  # So the awk's status is absorbed here: the FINDING travels as TEXT (which is this function's
+  # whole contract — the caller counts output), and the missing `#LINT-COMPLETE` marker is what
+  # tells `_perf_lint_verify_complete` the scan died. Absorbing the status cannot hide a
+  # failure, because the marker's ABSENCE is the signal.
+  #
+  # `|| true` on the awk alone, not on the pipeline: `_perf_lint_verify_complete`'s own status
+  # is meaningful and is left intact.
   # `SQ` carries a literal single quote INTO the awk program, so the program text (itself
   # inside a single-quoted shell string) never has to contain one — see `is_var_command`.
-  awk -v pp_short="$_PP_SHORT" -v pp_long="$_PP_LONG" \
+  { awk -v pp_short="$_PP_SHORT" -v pp_long="$_PP_LONG" \
       -v pt_short="$_PT_SHORT" -v pt_long="$_PT_LONG" \
       -v allowed="$PERF_ALLOWED_OPTS" -v mode="$mode" -v SQ="'" '
     BEGIN { n = split(allowed, a, /[[:space:]]+/); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
@@ -334,7 +354,7 @@ perf_invocation_lint() {
       }
       printf "#LINT-COMPLETE lines=%d mode=%s\n", NR, mode
     }
-  ' "$1" | _perf_lint_verify_complete "$1" "$mode"
+  ' "$1" 2>/dev/null || true; } | _perf_lint_verify_complete "$1" "$mode"
 }
 
 # _perf_lint_verify_complete <file> <mode> — pass the findings through, but turn a MISSING

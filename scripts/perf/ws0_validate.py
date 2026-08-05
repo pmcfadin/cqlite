@@ -88,42 +88,29 @@ class Invalid(Exception):
 #   float and ACCEPTS a bool: `requests_error: 0.9` reported CLEAN (0), `requests_ok:
 #   1.9` satisfied the exactly-one-cold-request guard (1), and `true` became 1.
 #
-# Fixing the cited line again would be the fourth partial fix. So every quantity in the
-# reporting path goes through ONE of the functions below, each of which states its
-# VALIDITY DOMAIN in its name, and a new counter cannot be read without choosing one.
-# The complete inventory, enumerated MECHANICALLY (an `ast` walk for every `int()`/
-# `float()` call and every arithmetic `BinOp` across `ws0_*.py`) rather than by reading:
+# Fixing the cited line again would be the fourth partial fix, which is why the answer is a
+# shared validator rather than another site fix.
 #
-# OBSERVED (read from an artifact):
-#   perf CSV counter value          non_negative_int      hardware counters never go
-#                                                         below zero; a negative one is
-#                                                         a corrupt artifact
-#   identity seed                   non_negative_int
-#   identity rows/partitions/
-#     cells_per_row/data_db_bytes   positive_int
-#   identity bytes_per_row          positive_finite_float
-#   <tag>.round round/position/
-#     arms_in_round                 positive_int          1-based indices
-#   scan rows_denominator           positive_int          a DENOMINATOR
-#   scan timed_scan_secs            positive_finite_float a measurement WINDOW
-#   flight rows_total               positive_int          a DENOMINATOR
-#   flight rows_per_s               positive_finite_float
-#   flight requests_ok              positive_int          >=1, and ==1 when cold
-#   flight requests_error           non_negative_int      then required == 0
-#   --reps / --scan-passes          positive_int (capped) CLI, not an artifact
+# The INVENTORY that used to sit here — 11 coercions and 17 derived quantities, listed by
+# hand — is DELETED (#3272 review round 4).
 #
-# DERIVED (computed here):
-#   cyc  = total.cycles - setup.cycles              positive_derived
-#   ins  = total.instructions - setup.instructions  positive_derived   <- the B2 gap
-#   flight cyc = counters["cycles"]                 positive_derived
-#   flight ins = counters["instructions"]           positive_derived   <- the B2 gap
-#   rows/secs, cyc/rows, ins/cyc (IPC)              positive by construction from the above
-#   spread() median                                 positive_derived (in ws0_collect)
-#   bare/flight ratio, 1.3x target                  positive_derived (in ws0_report)
-#   per-round ratio                                 positive_derived (in ws0_rounds)
-#   cycles/row DELTA, bytes/rows cross-check        UNCONSTRAINED — a delta may legitimately
-#                                                   be negative; its DIVISOR is a validated
-#                                                   median, which is what needs the domain
+# It claimed to be "the complete inventory, enumerated MECHANICALLY", and it was neither
+# complete nor mechanically checked: `rows_per_scan_observed` (ws0_collect), `spread_pct_of_median`
+# (ws0_collect) and `within_round_span_ns` (ws0_rounds) were all absent from it. Prose that
+# claims an audited set and is wrong is worse than no prose, because a reader who trusts it
+# stops looking — the same shape as a guard that reports success without measuring.
+#
+# What replaced it is a MECHANISM, not a better list: `test_ws0_fabrication_guards.sh` walks the
+# `ast` of every `ws0_*.py` and FAILS on any bare `int()`/`float()` coercion of an artifact value
+# and on any defaulting `.get(k, <literal>)` in the reporting path. That check cannot go stale,
+# because it derives its subject from the code rather than restating it — which is the property
+# the deleted comment claimed and did not have.
+#
+# The RULE the list was trying to express, stated as a rule so it needs no enumeration: every
+# quantity in the reporting path goes through ONE of the functions below, each of which states
+# its VALIDITY DOMAIN in its name, and a new counter cannot be read without choosing one. The
+# only quantities deliberately UNCONSTRAINED in sign are DELTAS (a cycles/row delta may
+# legitimately be negative); their DIVISORS are validated, which is what needs the domain.
 #
 # There is deliberately no `lenient=` parameter and no env var. An escape hatch on a
 # measurement domain can only buy a confident wrong number.

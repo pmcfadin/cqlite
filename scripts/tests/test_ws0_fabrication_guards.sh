@@ -1083,7 +1083,7 @@ d="$TMP/frac-csv"; make_session "$d" "$GOOD_FLIGHT"
 printf '4000000.5,,cycles,,,,\n8000000,,instructions,,,,\n' > "$d/perf-scan-warm-1.csv"
 expect_reject "a FRACTIONAL perf CSV counter is FATAL (not a canonical integer)" \
   "unparseable value" "$d" "$TMP/corpus"
-# ...and the identity fields, the last coercion in the enumeration.
+# ...and the identity fields.
 make_corpus "$TMP/corpus-frac-rows"
 python3 - "$TMP/corpus-frac-rows" <<'PY'
 import json, pathlib, sys
@@ -1106,6 +1106,72 @@ if [ "$rc" -eq 0 ]; then
 else
   fail "an integral float must be accepted; refusing it would red every producer writing doubles (rc=$rc, out: $out)"
 fi
+# NO HAND-WRITTEN INVENTORY OF THE COERCIONS MAY RETURN (#3272 review round 4 nit).
+#
+# `ws0_validate.py` carried a comment claiming to be "the complete inventory, enumerated
+# MECHANICALLY" of 11 coercions and 17 derived quantities. It was neither complete nor checked:
+# `rows_per_scan_observed`, `spread_pct_of_median` and `within_round_span_ns` were all absent.
+# Prose that claims an audited set and is wrong is worse than none, because a reader who trusts
+# it stops looking — the shape this whole file is about, one level up.
+#
+# It was DELETED rather than corrected, because a corrected list drifts again on the next
+# quantity. What remains is the ast scan above, whose subject is derived from the code. This
+# case keeps the list from coming back: no reporting-path file may claim a COMPLETE ENUMERATION
+# of its own quantities in prose.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import pathlib, sys
+d = pathlib.Path(sys.argv[1])
+files = sorted(d.glob("ws0_*.py"))
+if not files:
+    raise SystemExit(f"the scan's SUBJECT is EMPTY (no ws0_*.py in {d})")
+CLAIMS = ("complete inventory", "the complete enumeration", "full inventory")
+# The exemption is asked over the SURROUNDING BLOCK, not the single line, and that distinction
+# is the finding this case produced against itself: the historical record in `ws0_validate.py`
+# necessarily QUOTES the phrase it removed ('It claimed to be "the complete inventory…"'), and a
+# per-line test flagged it. A block-scoped test is also the right shape — an inventory is a
+# multi-line structure, so "is this block about a deleted inventory?" is the real question.
+#
+# A block is the contiguous run of comment lines around the match. `deleted`/`used to`/`no
+# longer` anywhere in it marks the whole block as a RECORD of the removal rather than a claim.
+EXEMPT_MARKERS = ("deleted", "used to", "no longer", "is not an inventory")
+bad = []
+for p in files:
+    lines = p.read_text().splitlines()
+    for n, line in enumerate(lines, 1):
+        low = line.lower()
+        if not any(claim in low for claim in CLAIMS):
+            continue
+        lo = n - 1
+        while lo > 0 and lines[lo - 1].lstrip().startswith("#"):
+            lo -= 1
+        hi = n
+        while hi < len(lines) and lines[hi].lstrip().startswith("#"):
+            hi += 1
+        block = "\n".join(lines[lo:hi]).lower()
+        if any(m in block for m in EXEMPT_MARKERS):
+            continue
+        bad.append(f"{p.name}:{n}: {line.strip()[:100]}")
+if bad:
+    raise SystemExit(
+        "a hand-written 'complete inventory' claim has returned to the reporting path;\n"
+        "the previous one omitted three quantities and nothing checked it:\n  "
+        + "\n  ".join(bad)
+    )
+print(f"scanned {len(files)} reporting-path file(s)")
+PY
+then
+  pass "STRUCTURAL: no reporting-path file claims a hand-written COMPLETE INVENTORY of its quantities"
+else
+  fail "a hand-written coercion inventory has returned (it was deleted for being incomplete + unchecked)"
+fi
+# ...and the MECHANISM that replaced it must be the one this file actually runs — asserted by
+# NAME, so the pointer in `ws0_validate.py` cannot outlive the check it points at.
+if grep -q 'strip_prose' "$TESTS_DIR/ws0_prose_strip.py" \
+  && grep -q 'ws0_prose_strip' "$0"; then
+  pass "the replacement MECHANISM (the ast coercion scan) is present and used by this suite"
+else
+  fail "ws0_validate.py points at an ast scan this suite must run; it is missing"
+fi
 
 # ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
@@ -1119,7 +1185,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=68
+MIN_CHECKS=80
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

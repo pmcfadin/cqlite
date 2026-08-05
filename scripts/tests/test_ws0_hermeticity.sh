@@ -433,6 +433,55 @@ if [ "$(cat "$LINUX_RIG/proc/perf_event_paranoid")" = "2" ] \
 else
   fail "linux-hermetic: the hermetic run must not change host state"
 fi
+# 5c. THE CORPUS-PRESENCE GUARD, whose only coverage the B1 fix REMOVED (#3272 round 4 nit).
+#
+# `ws0-baseline.sh:321-327` refuses a `--corpus` holding no `*-Data.db`. That guard sits BELOW
+# the argument boundary, so routing every self-test call site through `ws0_driver_run` (which
+# always prepends `--validate-args-only`) made it UNREACHABLE FROM ANY SELF-TEST: the case that
+# used to assert it now asserts `ARGUMENTS OK`. The guard survived; its only coverage did not.
+#
+# It is exercised HERE, on the Linux-shaped fixture, because this is the one place in the suite
+# where control legitimately runs PAST the boundary — and it runs SHIM-FENCED, so the recording
+# file is the evidence that the refusal happened before anything executed. That is strictly
+# better than the pre-B1 coverage, which ran the real driver on a real host.
+#
+# The fixture is the SAME Linux-shaped rig with the `*-Data.db` REMOVED, so the run reaches the
+# corpus check having passed the argument boundary and the sibling verification.
+EMPTY_CORPUS="$TMP/linux-empty-corpus"
+mkdir -p "$EMPTY_CORPUS/ws0/events"
+printf 'CREATE TABLE ws0.events (id text PRIMARY KEY);\n' > "$EMPTY_CORPUS/ws0-events.cql"
+ws0_hermetic_reset
+empty_out=$(PATH="$WS0_SHIM_BIN:$PATH" bash "$LINUX_DRIVER" \
+  --corpus "$EMPTY_CORPUS" --temp warm --cold-step-duration 45s 2>&1); empty_rc=$?  # ws0-hermetic-allow: exercises the BELOW-BOUNDARY corpus guard, shim-fenced
+empty_calls="$(ws0_hermetic_calls)"
+if [ "$empty_rc" -ne 0 ] && grep -q "holds no \*-Data.db" <<<"$empty_out"; then
+  pass "corpus-guard: OBSERVED — a corpus with no *-Data.db is REFUSED below the boundary (the guard B1's fix left uncovered)"
+else
+  fail "corpus-guard: an empty corpus must be refused, naming the missing Data.db (rc=$empty_rc, out: $(head -5 <<<"$empty_out"))"
+fi
+# ...and the refusal must happen BEFORE anything executes: no sysctl write, no build, no perf.
+# That is what makes exercising a below-boundary guard safe to do here at all.
+if [ -z "$empty_calls" ]; then
+  pass "corpus-guard: the refusal fires with the recording file EMPTY (before any sysctl/build/perf)"
+else
+  fail "corpus-guard: the corpus refusal must precede every host mutation (calls: $empty_calls)"
+fi
+# ...and the guard must have been reached BELOW THE ARGUMENT BOUNDARY, which is the whole reason
+# it lost its coverage. The witness is that `ARGUMENTS OK` was NOT printed: the boundary stamp is
+# the last thing above it, so its absence beside the corpus refusal means control ran past the
+# boundary — and this is exactly what `ws0_driver_run` (which always prepends
+# `--validate-args-only`) cannot reach.
+#
+# Asserted this way rather than on the sibling check, which measurement shows runs AFTER the
+# corpus check in the driver (`CORPUS=…`/Data.db at :321-327, `verify_sibling_pair` at :341): the
+# first version of this case looked for the sibling line and failed, i.e. it asserted an order
+# the driver does not have.
+if ! grep -q "ARGUMENTS OK" <<<"$empty_out"; then
+  pass "corpus-guard: the refusal came from BELOW the argument boundary (no ARGUMENTS OK stamp — unreachable via ws0_driver_run)"
+else
+  fail "corpus-guard: the run must pass the argument boundary to reach this guard (out: $(head -5 <<<"$empty_out"))"
+fi
+
 # And the REJECT direction is hermetic on this host too — round 2 left every reject call
 # site bare on the reasoning that a rejection exits early, which holds for the rejection
 # asserted and not for the accept-adjacent probe beside it.
@@ -569,7 +618,7 @@ fi
 # failure, and the gate reads only the exit code — so a suite that runs 3 of its checks
 # and passes them exits 0. The floor is the suite-level `0/0` guard. It is deliberately
 # below the current count (so adding a case does not red the suite) and far above zero.
-MIN_CHECKS=40
+MIN_CHECKS=48
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
