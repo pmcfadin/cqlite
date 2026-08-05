@@ -241,7 +241,10 @@ fn reject_identity_out_aliasing_inputs(cli: &Cli) -> GenResult<()> {
 /// they are equal), not a mistake.
 fn generated_input_paths(cli: &Cli) -> Vec<(&'static str, PathBuf)> {
     vec![
-        ("the emitted DDL ws0-events.cql", cli.out.join("ws0-events.cql")),
+        (
+            "the emitted DDL ws0-events.cql",
+            cli.out.join("ws0-events.cql"),
+        ),
         (
             "the Flight ticket template ticket-template.json",
             cli.out.join("ticket-template.json"),

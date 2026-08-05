@@ -104,7 +104,8 @@ fn identity_out_inside_the_table_directory_is_refused_before_generating() {
         run.all()
     );
     assert!(
-        run.all().contains("resolves INSIDE the generated table directory"),
+        run.all()
+            .contains("resolves INSIDE the generated table directory"),
         "the refusal must name the containment, so an operator knows WHY: {}",
         run.all()
     );
@@ -156,7 +157,11 @@ fn identity_out_aliasing_the_emitted_ddl_is_refused_and_the_ddl_survives() {
     let out = dir.path().join("corpus");
     // Generate a real corpus first, so the DDL EXISTS and its bytes can be compared.
     let first = generate_corpus(&out);
-    assert!(first.ok, "the fixture generation must succeed: {}", first.all());
+    assert!(
+        first.ok,
+        "the fixture generation must succeed: {}",
+        first.all()
+    );
     let ddl = out.join("ws0-events.cql");
     let before = std::fs::read(&ddl).expect("read the generated DDL");
     assert!(!before.is_empty(), "the DDL fixture must be non-empty");
@@ -201,7 +206,11 @@ fn identity_out_hardlinked_to_a_generated_input_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = dir.path().join("corpus");
     let first = generate_corpus(&out);
-    assert!(first.ok, "the fixture generation must succeed: {}", first.all());
+    assert!(
+        first.ok,
+        "the fixture generation must succeed: {}",
+        first.all()
+    );
     let ddl = out.join("ws0-events.cql");
     let before = std::fs::read(&ddl).expect("read the generated DDL");
 
