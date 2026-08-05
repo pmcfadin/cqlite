@@ -713,17 +713,37 @@ echo
 # and every existing artifact reader are unaffected — this changes WHEN each rep runs,
 # not what is written.
 #
-# The ROUND is also recorded per rep (`<tag>.round`), which is what makes a paired
-# within-round comparison possible at all: ws0_report.py prints the per-round
-# bare/flight ratios and how many rounds favour which arm, beside the median-vs-median
-# figure. At the spreads this rig measures (5-10% per arm) a couple of percent of
-# median difference is not readable, and the recorded #3096 session is the case in
-# point — a +2.3% median difference measured at ZERO (median −0.03%, 4 of 8 rounds
-# positive) when re-measured on 8 interleaved rounds.
+# THE BARE SCAN IS ONE OF THE ROTATED ARMS (issue #3272 review round 2, R4a). It used to
+# lead EVERY round with only the Flight arms rotating among themselves — so with the
+# DEFAULT single Flight arm (`--arm bypass`) NO ROTATION OCCURRED AT ALL: round 1 was
+# `scan, flight-bypass`, and so was every round after it. The round-1 fix for the drift
+# hazard therefore did not close it. And the bare scan is the one arm where a fixed
+# position matters most: it is the DENOMINATOR of the reported ratio, so a systematic
+# within-round effect that always lands on it (a page cache left by the previous round's
+# Flight rep, a thermal ramp early in each round) moves the ratio in one direction every
+# time — a bias the per-round direction count cannot see, because it is present in every
+# round equally.
+#
+# So the rotated list is `scan` PLUS each Flight arm, and each entry is DISPATCHED to
+# `measure_scan` or `measure_flight` by name. For the 2-arm default that is a genuine
+# alternation (`scan,bypass` / `bypass,scan` / `scan,bypass` / …) rather than a fixed
+# order — a "rotation" that degenerates to a fixed order at n=2 would be the same defect.
+#
+# The ROUND AND THE ARM'S POSITION WITHIN IT are recorded per rep (`<tag>.round`), and
+# ws0_report.py REQUIRES and VERIFIES them: it pairs by the OBSERVED round and refuses a
+# session whose interleaving cannot be established, instead of printing an interleaving
+# claim unconditionally (which is what it used to do while pairing by rep index and
+# reading none of these files — #3272 R3). `position` is what makes the rotation checkable
+# at all: a round index alone cannot distinguish an interleaved session from an arm-major
+# one, since both have a rep index.
+#
+# At the spreads this rig measures (5-10% per arm) a couple of percent of median
+# difference is not readable, and the recorded #3096 session is the case in point — a
+# +2.3% median difference measured at ZERO (median −0.03%, 4 of 8 rounds positive) when
+# re-measured on 8 interleaved rounds.
 #
 # `rotate_arms <round> <arms…>` — the arm list left-rotated by `(round-1) % n`, so over
-# n rounds every arm occupies every position. With a single arm it is a no-op, which is
-# the common case (`--arm bypass`); the rotation matters for `--arm both`.
+# n rounds every arm occupies every position.
 rotate_arms() {
   local round="$1"; shift
   local -a all=("$@")
@@ -734,18 +754,31 @@ rotate_arms() {
   done
 }
 
+# record_round <tag> <round> <position> <arms-in-round> — the interleaving metadata the
+# reporter REQUIRES. Written after the rep, so a rep that died leaves no metadata and the
+# report refuses it rather than attributing it to a round.
+record_round() {
+  printf 'round=%s\nposition=%s\narms_in_round=%s\n' "$2" "$3" "$4" > "$OUT_DIR/$1.round"
+}
+
+# The rotated arm list: the bare scan and every selected Flight arm, as PEERS.
 # shellcheck disable=SC2206  # word-splitting $ARMS into an array is intended
-_ARM_LIST=($ARMS)
+_ARM_LIST=(scan $ARMS)
+_N_ARMS="${#_ARM_LIST[@]}"
 for temp in $TEMPS; do
   for rep in $(seq 1 "$REPS"); do
-    echo "-- round $rep/$REPS ($temp) — one rep per arm, interleaved --"
-    # The bare scan leads each round. It is the DENOMINATOR of the ratio and the drift
-    # control, so it is measured in every round rather than once per temperature.
-    measure_scan "$temp" "$rep"
-    printf '%s\n' "$rep" > "$OUT_DIR/scan-$temp-$rep.round"
+    echo "-- round $rep/$REPS ($temp) — one rep of each of the $_N_ARMS arms, interleaved --"
+    _pos=0
     for arm in $(rotate_arms "$rep" "${_ARM_LIST[@]}"); do
-      measure_flight "$temp" "$rep" "$arm"
-      printf '%s\n' "$rep" > "$OUT_DIR/flight-$arm-$temp-$rep.round"
+      _pos=$((_pos + 1))
+      case "$arm" in
+        scan)
+          measure_scan "$temp" "$rep"
+          record_round "scan-$temp-$rep" "$rep" "$_pos" "$_N_ARMS" ;;
+        *)
+          measure_flight "$temp" "$rep" "$arm"
+          record_round "flight-$arm-$temp-$rep" "$rep" "$_pos" "$_N_ARMS" ;;
+      esac
     done
   done
 done

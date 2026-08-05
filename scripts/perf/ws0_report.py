@@ -47,6 +47,12 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+from ws0_rounds import (  # noqa: E402  (path set above; stdlib-only, no deps)
+    collect_round_meta,
+    interleaving_lines,
+    paired_rounds,
+    verify_interleaving,
+)
 from ws0_validate import (  # noqa: E402  (path set above; stdlib-only, no deps)
     Invalid,
     classify_prewarm,
@@ -155,6 +161,12 @@ def prewarm_warning(block: dict, arm_label: str, temp: str) -> list[str]:
 
 
 def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
+    """The bare-scan arm, WITH each rep's observed round/position (#3272 R3).
+
+    The round is read from the rep's own `<tag>.round` artifact and cross-checked against
+    the rep index in its filename, so every figure below is attributed to the round it
+    was MEASURED in rather than to the index this loop happens to be on.
+    """
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
     ipc: list[float] = []
@@ -163,6 +175,7 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
     per_rep = []
     missing: list[str] = []
     prewarm: list[dict] = []
+    round_meta: dict[int, dict[str, int]] = {}
     for rep in range(1, reps + 1):
         tag = f"scan-{temp}-{rep}"
         payload_path = d / f"{tag}.json"
@@ -201,6 +214,8 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
         # DENOMINATOR of the 1.3x ratio, so an unprewarmed "warm" rep biases the
         # ratio in the claim's favour and must be visible in the artifact.
         prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
+        meta = collect_round_meta(d, tag, rep)
+        round_meta[rep] = meta
         rows_per_sec.append(rows / secs)
         cycles_per_row.append(cyc / rows)
         ipc.append(ins / cyc)
@@ -209,6 +224,9 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
         per_rep.append(
             {
                 "rep": rep,
+                "round": meta["round"],
+                "position_in_round": meta["position"],
+                "arms_in_round": meta["arms_in_round"],
                 "rows": rows,
                 "secs": secs,
                 "rows_per_sec": rows / secs,
@@ -231,6 +249,7 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
         "cycles_per_row": spread(cycles_per_row),
         "ipc": spread(ipc),
         "row_denominator_total": rows_total,
+        "round_metadata": round_meta,
         "setup_cycles_subtracted_total": setup_cycles_total,
         # Issue #3096 review, finding 1: the warm bare-scan arm had no untimed
         # prewarm at all, so `prewarm_all_ok` here is the single field a reader can
@@ -316,6 +335,7 @@ def collect_flight(
     per_rep = []
     missing: list[str] = []
     prewarm: list[dict] = []
+    round_meta: dict[int, dict[str, int]] = {}
     for rep in range(1, reps + 1):
         tag = f"flight-{arm}-{temp}-{rep}"
         jsonl = d / f"{tag}.jsonl"
@@ -370,6 +390,9 @@ def collect_flight(
         requests_ok = check_request_count(tag, temp, rec.get("requests_ok"), rows, corpus_rows)
         # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
         prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
+        # ...and its OBSERVED round + position within that round (#3272 R3).
+        meta = collect_round_meta(d, tag, rep)
+        round_meta[rep] = meta
         counters = read_perf_counters(d / f"perf-{tag}.csv", tag, REQUIRED_EVENTS)
         cyc = counters["cycles"]
         ins = counters["instructions"]
@@ -382,6 +405,9 @@ def collect_flight(
         per_rep.append(
             {
                 "rep": rep,
+                "round": meta["round"],
+                "position_in_round": meta["position"],
+                "arms_in_round": meta["arms_in_round"],
                 "rows": rows,
                 "requests_ok": requests_ok,
                 "requests_expected": expected_requests(temp),
@@ -408,6 +434,7 @@ def collect_flight(
         # have, asserted per rep by `check_request_count` and stated here so no
         # reader has to reconstruct it from row denominators.
         "requests_expected_per_rep": expected_requests(temp),
+        "round_metadata": round_meta,
         # Unconditionally true now: the corpus identity is REQUIRED, so this can
         # never be a report that skipped the check while claiming it (#3272 f1).
         "full_corpus_per_request_verified": True,
@@ -458,76 +485,6 @@ def selection_lines(temps: list[str], arms: list[str], reps: int) -> list[str]:
             " here; do not read this report as covering them."
         )
     return lines
-
-
-def paired_rounds(scan: dict, fl: dict) -> tuple[list[dict], list[str]]:
-    """The WITHIN-ROUND bare/flight comparison, paired by rep index (#3272 B5).
-
-    The driver interleaves — one rep per arm per round, arm order rotated — so rep `k`
-    of the bare scan and rep `k` of each Flight arm were measured within a few minutes
-    of each other. Differencing THOSE, rather than the two medians, is what
-    `measurement-method.md` §3b step 4 requires:
-
-        "**Difference within a round**, and report the per-round deltas and how many
-        were positive — not the medians alone. At these spreads (5-10% per arm) a
-        median-vs-median difference of a couple of percent is not readable."
-
-    That is not a stylistic preference; it is the check that caught a real error. The
-    #3096 session's `+4,817 rows/s / +2.3%` lever-4 result re-measured at ZERO on 8
-    interleaved rounds — median −72 rows/s (−0.03%), 4 of 8 rounds positive. A
-    median-vs-median reading would have published the 2.3%.
-
-    Returns `(per_round_records, summary_lines)`. Refuses rather than skips if the two
-    arms' rep indices do not line up: an unpairable set is a set the report cannot
-    difference within a round, and saying nothing about that would leave the reader with
-    only the median comparison the method forbids on its own.
-    """
-    scan_by_rep = {r["rep"]: r for r in scan["reps"]}
-    fl_by_rep = {r["rep"]: r for r in fl["reps"]}
-    if set(scan_by_rep) != set(fl_by_rep):
-        raise Invalid(
-            f"the bare scan and {fl['arm']} do not cover the same rep indices"
-            f" (scan {sorted(scan_by_rep)}, flight {sorted(fl_by_rep)}), so no"
-            " within-round comparison is possible. The driver interleaves one rep per"
-            " arm per round precisely so rep k of each arm is contemporaneous;"
-            " differencing medians alone is what measurement-method.md §3b forbids."
-        )
-    rounds = []
-    for rep in sorted(scan_by_rep):
-        s, f = scan_by_rep[rep], fl_by_rep[rep]
-        if f["rows_per_sec"] <= 0 or s["rows_per_sec"] <= 0:
-            raise Invalid(
-                f"round {rep} has a non-positive rows/s (bare {s['rows_per_sec']},"
-                f" flight {f['rows_per_sec']}) — there is no ratio for that round"
-            )
-        rounds.append(
-            {
-                "round": rep,
-                "bare_rows_per_sec": s["rows_per_sec"],
-                "flight_rows_per_sec": f["rows_per_sec"],
-                "ratio_bare_over_flight": s["rows_per_sec"] / f["rows_per_sec"],
-                "cycles_per_row_delta": f["cycles_per_row"] - s["cycles_per_row"],
-                # The 1.3x verdict, decided WITHIN the round rather than across windows.
-                "flight_meets_target": f["rows_per_sec"] >= s["rows_per_sec"] / 1.3,
-            }
-        )
-    met = sum(1 for r in rounds if r["flight_meets_target"])
-    ratios = [r["ratio_bare_over_flight"] for r in rounds]
-    lines = [
-        "      per-round (PAIRED, the comparison method §3b step 4 requires):",
-        "        ratios "
-        + ", ".join(f"r{r['round']}={r['ratio_bare_over_flight']:.2f}x" for r in rounds),
-        f"        within-round 1.3x target met in {met}/{len(rounds)} round(s);"
-        f" paired ratio median {statistics.median(ratios):.2f}x"
-        f" [{min(ratios):.2f}..{max(ratios):.2f}]",
-    ]
-    if len(rounds) < 3:
-        lines.append(
-            f"        !! only {len(rounds)} round(s): the per-round direction count is"
-            " the readable signal at this rig's 5-10% per-arm spread, and it needs"
-            " several rounds. Raise --reps."
-        )
-    return rounds, lines
 
 
 def corpus_identity_lines(verification: dict) -> list[str]:
@@ -639,6 +596,10 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "",
     ]
 
+    # The INTERLEAVING is ESTABLISHED per temperature, from the recorded metadata, before
+    # anything is printed about it (#3272 R3). `interleaving` accumulates the observation
+    # for each temperature; the NOTES are derived from it below rather than asserted.
+    interleaving: dict[str, dict] = {}
     for temp in temps:
         scan = collect_scan(d, temp, reps)
         results["measurements"].append(scan)
@@ -687,18 +648,30 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             rounds, paired_lines = paired_rounds(scan, fl)
             fl["per_round_paired"] = rounds
             lines += paired_lines
+        # The POSITIONAL interleaving/rotation check, over every arm of this temperature
+        # at once — it is a property of the ROUND, so it cannot be checked per arm-pair.
+        # `bare_scan` participates as an arm because it IS one: it is measured in every
+        # round as the drift control, and the pre-fix loop gave it a FIXED first position,
+        # which with the default single Flight arm meant no rotation happened at all
+        # (#3272 R4a).
+        arms_meta = {"bare_scan": scan["round_metadata"]}
+        for m in results["measurements"]:
+            if m["temperature"] == temp and m["arm"].startswith("flight_"):
+                arms_meta[m["arm"]] = m["round_metadata"]
+        interleaving[temp] = verify_interleaving(temp, arms_meta)
         lines.append("")
 
+    results["interleaving"] = interleaving
     lines += [
         "NOTES",
         "  * warm and cold are SEPARATE claims above; nothing here is blended.",
-        "  * the reps were INTERLEAVED — one rep per arm per round, arm order rotated "
-        "— so rep k of each arm is contemporaneous, and the per-round PAIRED ratios "
-        "above are differenced WITHIN a round. This rig produces no cross-session "
-        "absolute: the untouched bare scan drifted ~10% in one hour on the recorded "
-        "box, so an arm-after-arm ordering would put that drift straight onto the "
-        "bare/flight ratio. Read the per-round direction count, not the median "
-        "difference alone (measurement-method.md §3b).",
+    ]
+    # DERIVED from the recorded round/position artifacts, per temperature — never an
+    # unconditional sentence (#3272 R3). A session whose interleaving could not be
+    # established never reaches here: `verify_interleaving` raised.
+    for temp in temps:
+        lines += interleaving_lines(interleaving[temp])
+    lines += [
         "  * only the SELECTION printed above was measured; an absent temperature or "
         "arm was NOT run and nothing here speaks to it (results.json .selection).",
         "  * every COLD flight rep is verified to be EXACTLY ONE successful request "

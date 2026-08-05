@@ -168,6 +168,15 @@ json.dump(
 PY
 }
 
+# The INTERLEAVING metadata every rep must carry (#3272 R3): the round, this arm's
+# POSITION within that round, and how many arms the round measured. Written by default
+# with the bare scan and the Flight arm ALTERNATING by round, exactly as the driver does —
+# a fixture with a fixed order would be refused by the rotation check, and correctly so.
+# `make_round <dir> <tag> <round> <position> [arms-in-round]`
+make_round() {
+  printf 'round=%s\nposition=%s\narms_in_round=%s\n' "$3" "$4" "${5:-2}" > "$1/$2.round"
+}
+
 # make_scan_rep <dir> <temp> <rep> <prewarm-status|-none->
 make_scan_rep() {
   local d="$1" temp="$2" rep="$3" pw="$4" tag="scan-$2-$3"
@@ -177,6 +186,7 @@ EOF
   perf_csv "$d/perf-$tag.csv" 2000000 4000000
   perf_csv "$d/perf-$tag-setup.csv" 100000 200000
   [ "$pw" = "-none-" ] || printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
+  make_round "$d" "$tag" "$rep" "$(( (rep % 2 == 1) ? 1 : 2 ))"
 }
 
 # make_flight_rep <dir> <temp> <rep> <requests_ok> <rows> <prewarm-status|-none->
@@ -187,6 +197,7 @@ make_flight_rep() {
 EOF
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   [ "$pw" = "-none-" ] || printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
+  make_round "$d" "$tag" "$rep" "$(( (rep % 2 == 1) ? 2 : 1 ))"
 }
 
 # run_report <dir> <corpus> <temps> — prints the reporter's stdout+stderr. Call as

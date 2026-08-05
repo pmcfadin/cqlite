@@ -98,6 +98,14 @@ json.dump(ident, open(os.path.join(out, "corpus-identity.json"), "w"))
 PY
 }
 
+# The INTERLEAVING metadata every rep must carry (#3272 R3). Written by default, with the
+# bare scan and the Flight arm ALTERNATING position by round exactly as the driver does —
+# a fixture with a fixed order would be refused by the rotation check, and correctly so.
+# `make_round <dir> <tag> <round> <position> [arms]`
+make_round() {
+  printf 'round=%s\nposition=%s\narms_in_round=%s\n' "$3" "$4" "${5:-2}" > "$1/$2.round"
+}
+
 make_scan_rep() { # make_scan_rep <dir> <temp> <rep> <prewarm>
   local d="$1" tag="scan-$2-$3"
   cat > "$d/$tag.json" <<EOF
@@ -106,6 +114,8 @@ EOF
   perf_csv "$d/perf-$tag.csv" 2000000 4000000
   perf_csv "$d/perf-$tag-setup.csv" 100000 200000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
+  # scan holds position 1 on odd rounds, 2 on even — the driver's alternation.
+  make_round "$d" "$tag" "$3" "$(( ($3 % 2 == 1) ? 1 : 2 ))"
 }
 
 # make_flight_rep <dir> <temp> <rep> <prewarm> <jsonl-body>
@@ -115,6 +125,8 @@ make_flight_rep() {
   printf '%s\n' "$5" > "$d/$tag.jsonl"
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
+  # ...and the flight arm takes the OTHER position, mirroring the driver.
+  make_round "$d" "$tag" "$3" "$(( ($3 % 2 == 1) ? 2 : 1 ))"
 }
 
 GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
@@ -523,32 +535,53 @@ order_probe() { # order_probe <reps> <arms…> — echoes the observed measureme
   ) 2>/dev/null | grep -E '^(scan|flight)-' | tr '\n' ' '
 }
 
+# NON-VACUITY for the ROUND-2 half, measured against the round-1 "interleaved" loop:
+#   measure_scan "$temp" "$rep"                      # ALWAYS first
+#   for arm in $(rotate_arms "$rep" "${_ARM_LIST[@]}"); do measure_flight …; done
+# with REPS=4, ARMS="bypass" (the DEFAULT), the observed order was
+#   scan-1 flight-bypass-1  scan-2 flight-bypass-2  scan-3 flight-bypass-3  scan-4 …
+# — the bare scan in position 1 of EVERY round and NO ROTATION AT ALL, because the only
+# rotated list held one element. The fix for the drift hazard did not close it: the bare
+# scan is the DENOMINATOR of the ratio, so any within-round systematic effect that always
+# lands on it (a page cache left by the previous round's Flight rep, a thermal ramp early
+# in the round) moves the ratio one way in every round — invisible to the per-round
+# direction count, because it is present in every round equally (#3272 review R4a).
 got=$(order_probe 3 bypass merge)
-# Round-major: each round's scan is immediately followed by that round's two arms.
-if grep -q 'scan-1 flight-bypass-1 flight-merge-1 scan-2 flight-merge-2 flight-bypass-2 scan-3 flight-bypass-3 flight-merge-3' <<<"$got"; then
-  pass "OBSERVED: the loop is ROUND-MAJOR and the arm order ROTATES (pre-fix: arm-major)"
+# Round-major, with the BARE SCAN ROTATING as a peer: round 1 leads with scan, round 2
+# with bypass, round 3 with merge.
+if grep -q 'scan-1 flight-bypass-1 flight-merge-1 flight-bypass-2 flight-merge-2 scan-2 flight-merge-3 scan-3 flight-bypass-3' <<<"$got"; then
+  pass "OBSERVED: the loop is ROUND-MAJOR and the bare scan ROTATES with the Flight arms"
 else
-  fail "the loop must interleave one rep per arm per round with rotation (order: $got)"
+  fail "the loop must interleave one rep of EVERY arm per round, scan included (order: $got)"
 fi
-# The two properties, asserted separately so a partial regression is diagnosable.
-if ! grep -qE 'scan-1 scan-2' <<<"$got"; then
+# The three properties, asserted separately so a partial regression is diagnosable.
+if ! grep -qE 'scan-1 scan-2|scan-2 scan-3' <<<"$got"; then
   pass "OBSERVED: no two bare-scan reps run back to back (rule §3b step 1)"
 else
   fail "bare-scan reps must not run back to back (order: $got)"
 fi
-if grep -q 'flight-bypass-1' <<<"$got" && grep -q 'flight-merge-2' <<<"$got" \
-   && grep -qE 'scan-2 flight-merge-2' <<<"$got"; then
-  pass "OBSERVED: 'merge' holds FIRST position in round 2 (rule §3b step 2, rotation)"
+if grep -qE 'flight-bypass-2 flight-merge-2 scan-2' <<<"$got" \
+   && grep -qE 'flight-merge-3 scan-3 flight-bypass-3' <<<"$got"; then
+  pass "OBSERVED: every arm occupies every POSITION over 3 rounds (rule §3b step 2)"
 else
   fail "the arm order must rotate per round (order: $got)"
 fi
-# A single arm must still work — the common case (`--arm bypass`), where rotation is a
-# no-op and the interleave is just scan/flight alternation.
-got=$(order_probe 2 bypass)
-if grep -q 'scan-1 flight-bypass-1 scan-2 flight-bypass-2' <<<"$got"; then
-  pass "OBSERVED: a single arm interleaves scan/flight per round (rotation is a no-op)"
+# THE DEFAULT CASE, which is the one round 1 got wrong: `--arm bypass` is TWO arms
+# (scan + bypass), and a "rotation" that reduces to a fixed order at n=2 is the same
+# defect. So it must genuinely ALTERNATE.
+got=$(order_probe 4 bypass)
+if grep -q 'scan-1 flight-bypass-1 flight-bypass-2 scan-2 scan-3 flight-bypass-3 flight-bypass-4 scan-4' <<<"$got"; then
+  pass "OBSERVED: the DEFAULT 2-arm case genuinely ALTERNATES (pre-fix: scan first in all 4 rounds)"
 else
-  fail "a single-arm run must still alternate scan/flight per round (order: $got)"
+  fail "the default single-Flight-arm run must alternate scan/flight, not fix scan first (order: $got)"
+fi
+# ...and the bare scan must NOT hold position 1 in every round — stated as its own
+# assertion because that is the defect, positionally.
+if [ "$(grep -o 'scan-[0-9]' <<<"$got" | head -1)" = "scan-1" ] \
+   && grep -qE 'flight-bypass-2 scan-2' <<<"$got"; then
+  pass "OBSERVED: the bare scan does NOT hold a fixed position across rounds (R4a)"
+else
+  fail "the bare scan must not lead every round (order: $got)"
 fi
 # `rotate_arms` itself: over n rounds every arm must occupy every position, or the
 # rotation is decorative.
@@ -559,11 +592,21 @@ if bash -c '
   [ "$(rotate_arms 2 a b c)" = "b c a " ] || { echo "round2: $(rotate_arms 2 a b c)"; exit 1; }
   [ "$(rotate_arms 3 a b c)" = "c a b " ] || { echo "round3: $(rotate_arms 3 a b c)"; exit 1; }
   [ "$(rotate_arms 4 a b c)" = "a b c " ] || { echo "round4 (wraps): $(rotate_arms 4 a b c)"; exit 1; }
+  [ "$(rotate_arms 1 a b)" = "a b " ]     || { echo "n=2 r1: $(rotate_arms 1 a b)"; exit 1; }
+  [ "$(rotate_arms 2 a b)" = "b a " ]     || { echo "n=2 r2 (must SWAP): $(rotate_arms 2 a b)"; exit 1; }
   [ "$(rotate_arms 7 x)" = "x " ]         || { echo "single arm: $(rotate_arms 7 x)"; exit 1; }
 ' >/dev/null 2>&1; then
-  pass "OBSERVED: rotate_arms puts every arm in every position over n rounds, and wraps"
+  pass "OBSERVED: rotate_arms puts every arm in every position over n rounds, incl. n=2, and wraps"
 else
-  fail "rotate_arms must rotate by (round-1) mod n and wrap"
+  fail "rotate_arms must rotate by (round-1) mod n and wrap (incl. a real swap at n=2)"
+fi
+# And the ARM LIST the loop rotates must CONTAIN the bare scan — the structural half of
+# R4a, so a future edit cannot revert to rotating the Flight arms alone while every
+# behavioural case above still passes on a re-plumbed loop.
+if grep -qE '^_ARM_LIST=\(scan \$ARMS\)' "$REPO_ROOT/scripts/perf/ws0-baseline.sh"; then
+  pass "STRUCTURAL: the rotated arm list includes `scan` as a peer of the Flight arms"
+else
+  fail "the rotated list must be (scan \$ARMS): rotating only the Flight arms is R4a"
 fi
 
 # --- the reporter differences WITHIN a round --------------------------------
@@ -589,6 +632,10 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         "rows_total": rows, "rows_per_s": rps, "duration_s": 4.0}) + "\n")
     (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
     (d / f"{tag}.prewarm.status").write_text("ok\n")
+    # The interleaving metadata the reporter REQUIRES (#3272 R3), alternating position by
+    # round exactly as the driver does — the scan fixture takes the complement.
+    (d / f"{tag}.round").write_text(
+        f"round={rep}\nposition={1 if rep % 2 == 0 else 2}\narms_in_round=2\n")
 PY
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
@@ -614,6 +661,187 @@ then
 else
   fail "results.json must record the paired per-round records"
 fi
+# ==========================================================================
+# R3 — the INTERLEAVING CLAIM is DERIVED from recorded metadata, never asserted
+# ==========================================================================
+# NON-VACUITY, measured against the round-1 reporter: the NOTES block printed
+#
+#   "the reps were INTERLEAVED — one rep per arm per round, arm order rotated"
+#
+# UNCONDITIONALLY, as a claim about the session, while `paired_rounds` paired by REP
+# INDEX and read NOTHING the driver recorded. The driver DID write `<tag>.round` files
+# (and carried a comment saying the reporter read them); `grep -c '\.round' ws0_report.py`
+# on that revision is **0**. MEASURED: a session dir with EVERY `.round` file deleted —
+# i.e. one that could equally be an arm-major run, or reps re-run individually into one
+# `--out` — exited **0** and printed the interleaving sentence verbatim.
+#
+# So: the metadata is REQUIRED, the pairing is by the OBSERVED round, and the sentence is
+# derived from what was observed.
+d="$TMP/no-round-meta"; make_session "$d" "$GOOD_FLIGHT"
+rm -f "$d"/*.round
+expect_reject "a session with NO round metadata is REFUSED (the interleaving is unestablished)" \
+  "has no round metadata" "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus")
+if grep -q "may not print the interleaving claim" <<<"$out"; then
+  pass "the refusal says the CLAIM is what cannot be printed (not merely 'a file is missing')"
+else
+  fail "the round-metadata refusal must name the claim it protects (out: $out)"
+fi
+# ...and NOTHING is written: a report that cannot establish its own headline property must
+# not leave a results.json a later reader could quote.
+if [ ! -e "$d/results.json" ]; then
+  pass "no results.json is written when the interleaving cannot be established"
+else
+  fail "a refused run must not leave a results.json behind"
+fi
+# ONE arm's metadata missing is equally fatal — a partial record cannot establish a round.
+d="$TMP/half-round-meta"; make_session "$d" "$GOOD_FLIGHT"
+rm -f "$d"/flight-*.round
+expect_reject "ONE arm's missing round metadata is FATAL too (a round needs every arm)" \
+  "has no round metadata" "$d" "$TMP/corpus"
+
+# A corrupt/incomplete metadata field is an ERROR, never a defaulted 0.
+d="$TMP/round-meta-partial"; make_session "$d" "$GOOD_FLIGHT"
+printf 'round=1\n' > "$d/scan-warm-1.round"     # no position, no arms_in_round
+expect_reject "round metadata with no 'position' is REFUSED (a round index alone proves nothing)" \
+  "carries no 'position'" "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus")
+if grep -q "cannot distinguish an interleaved session from an arm-major one" <<<"$out"; then
+  pass "the refusal explains WHY position is required (a rep index exists either way)"
+else
+  fail "the position refusal must explain why the round index is insufficient (out: $out)"
+fi
+d="$TMP/round-meta-garbage"; make_session "$d" "$GOOD_FLIGHT"
+printf 'round=one\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
+expect_reject "an unparseable round field is REFUSED (a corrupt field is not a zero)" \
+  "not an integer" "$d" "$TMP/corpus"
+d="$TMP/round-meta-mismatch"; make_session "$d" "$GOOD_FLIGHT"
+printf 'round=7\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
+expect_reject "a round that disagrees with the rep index in the FILENAME is REFUSED" \
+  "does not describe one session" "$d" "$TMP/corpus"
+
+# THE ROTATION CHECK, positionally. Two arms over two rounds with the SCAN AT POSITION 1
+# BOTH TIMES is exactly what the round-1 driver produced for the default `--arm bypass`,
+# and it must be refused rather than reported under a claim that the order rotated.
+d="$TMP/no-rotation"; mkdir -p "$d"
+for rep in 1 2; do
+  make_scan_rep "$d" warm "$rep" ok
+  make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
+  printf 'round=%s\nposition=1\narms_in_round=2\n' "$rep" > "$d/scan-warm-$rep.round"
+  printf 'round=%s\nposition=2\narms_in_round=2\n' "$rep" > "$d/flight-bypass-warm-$rep.round"
+done
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "held ONE FIXED POSITION" <<<"$out" \
+  && grep -q "bare_scan" <<<"$out"; then
+  pass "OBSERVED: an arm at a FIXED position across rounds is REFUSED, naming the arm (R4a)"
+else
+  fail "a fixed arm position must be refused (rc=$rc, out: $out)"
+fi
+# TWO ARMS SHARING A POSITION is not a round at all.
+d="$TMP/dup-position"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+printf 'round=1\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
+printf 'round=1\nposition=1\narms_in_round=2\n' > "$d/flight-bypass-warm-1.round"
+expect_reject "two arms at the SAME position is REFUSED (that is not a round)" \
+  "which is not 1..2 exactly once" "$d" "$TMP/corpus"
+# A round that RECORDS more arms than are present is a PARTIAL round.
+d="$TMP/partial-round"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+printf 'round=1\nposition=1\narms_in_round=3\n' > "$d/scan-warm-1.round"
+printf 'round=1\nposition=2\narms_in_round=3\n' > "$d/flight-bypass-warm-1.round"
+expect_reject "a round recording MORE arms than are present is REFUSED (a partial round)" \
+  "is a PARTIAL round" "$d" "$TMP/corpus"
+
+# THE ACCEPT DIRECTION, affirmatively: a properly interleaved session must print the
+# claim AS AN OBSERVATION, naming the rounds and the positions, and record it in
+# results.json — so the sentence cannot be present without the artifacts behind it.
+d="$TMP/rotated-ok"; mkdir -p "$d"
+for rep in 1 2; do
+  make_scan_rep "$d" warm "$rep" ok
+  make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
+done
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "OBSERVED, not asserted" <<<"$out" \
+  && grep -q "The arm ORDER ROTATED" <<<"$out" \
+  && grep -q "Positions by round" <<<"$out"; then
+  pass "OBSERVED: a genuinely rotated session prints the claim as an OBSERVATION, with positions"
+else
+  fail "a rotated session must print the derived interleaving claim (rc=$rc, out: $out)"
+fi
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+iv = r["interleaving"]["warm"]
+assert iv["verified"] is True, iv
+assert iv["rounds"] == [1, 2], iv
+assert iv["arms_per_round"] == 2, iv
+assert iv["rotation_checked"] is True, iv
+# The bare scan is a ROTATED ARM, so its position must differ across rounds.
+pos = [iv["positions_by_round"][str(k)]["bare_scan"] for k in (1, 2)]
+assert sorted(pos) == [1, 2], pos
+# ...and every rep carries the round it was MEASURED in, plus its position.
+for m in r["measurements"]:
+    for rep in m["reps"]:
+        assert rep["round"] == rep["rep"], rep
+        assert rep["position_in_round"] in (1, 2), rep
+        assert rep["arms_in_round"] == 2, rep
+PY
+then
+  pass "results.json records the interleaving OBSERVATION and each rep's round+position"
+else
+  fail "results.json must record the interleaving observation (out: $out)"
+fi
+# At ONE round the rotation is NOT OBSERVABLE, and must therefore NOT be claimed — the
+# same rule as everything else here: a positive verdict needs an affirmative measurement.
+d="$TMP/one-round"; make_session "$d" "$GOOD_FLIGHT"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q "The arm ORDER ROTATED" <<<"$out" \
+  && grep -q "rotation is not observable at this size" <<<"$out"; then
+  pass "OBSERVED: at ONE round the rotation is NOT claimed, and the report says why"
+else
+  fail "a single-round session must not claim rotation (rc=$rc, out: $out)"
+fi
+# STRUCTURAL: no unconditional interleaving sentence may survive in the reporter. The
+# claim must come from `interleaving_lines`, which only runs on a verified observation.
+if python3 - "$REPO_ROOT/scripts/perf/ws0_report.py" <<'PY'
+import ast, sys
+tree = ast.parse(open(sys.argv[1]).read())
+for node in ast.walk(tree):
+    if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        b = node.body
+        if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+                and isinstance(b[0].value.value, str):
+            node.body = b[1:] or [ast.Pass()]
+code = ast.unparse(ast.fix_missing_locations(tree))
+if "arm order rotated" in code:
+    raise SystemExit("ws0_report.py still carries an unconditional 'arm order rotated' claim")
+if "interleaving_lines" not in code:
+    raise SystemExit("ws0_report.py does not derive the interleaving claim from the observation")
+PY
+then
+  pass "STRUCTURAL: the reporter carries NO unconditional interleaving sentence"
+else
+  fail "an unconditional interleaving claim remains in ws0_report.py"
+fi
+# And the DRIVER must record all three fields — the wiring half, so the reporter's
+# requirement cannot be satisfied only by test fixtures.
+if awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+     | grep -q 'round=%s' \
+   && awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+     | grep -q 'position=%s' \
+   && awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+     | grep -q 'arms_in_round=%s'; then
+  pass "the DRIVER records round/position/arms_in_round per rep (the reporter's requirement is wired)"
+else
+  fail "ws0-baseline.sh must record all three interleaving fields per rep"
+fi
+
 # And the reporter REFUSES an unpairable set rather than silently falling back to
 # medians alone — which is the comparison §3b forbids on its own.
 d="$TMP/unpairable"; mkdir -p "$d"
