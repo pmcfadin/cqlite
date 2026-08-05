@@ -1062,7 +1062,24 @@ roborev_snapshot_capture_stop() {
     waited=$((waited + 1))
     sleep 0.1 2>/dev/null || sleep 1
   done
-  kill -0 "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null && kill -KILL "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null
+  # THE ESCALATION IS GUARDED, because its EXPECTED failure mode is "the thing already went away"
+  # (roborev job 11). `kill -0` can succeed and the watcher can then exit before `kill -KILL` runs, and
+  # `kill -KILL` is the LAST command of that AND-OR list — so under `set -e` its failure ABORTED THE
+  # WRAPPER. That is a spurious non-PASS `RESULT` on a genuine review: the same defect class #3312
+  # exists to remove, just in the loud direction. Measured before fixing: with `kill -0` succeeding and
+  # the following `kill` failing, execution stops at that line; with `|| :` it continues.
+  #
+  # THE SWEEP THIS PROMPTED (recorded so it is not re-done from scratch): every other command in this
+  # facility whose expected failure is "already gone" was checked — the `kill -TERM`, the `kill -0` in
+  # the wait loop (`|| break`), `wait`, `chmod`, every `rm -rf`, the `mv` of a transient stage, the
+  # `mktemp`, and the `cd`-based resolutions are each already guarded (`|| :`, `|| break`, `|| return`,
+  # or a handled `||` branch). The two glob loops of the shape `for x in <maybe-unmatched>/*; do
+  # [ -f "$x/y" ] && v="$x"; done` were MEASURED rather than assumed: a failing non-last command in an
+  # AND-OR list does not trip `set -e`, and such a loop does not abort even unguarded. So this was the
+  # only live instance, not a family — but the shape is named here so the next reader recognises it.
+  if kill -0 "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null; then
+    kill -KILL "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
+  fi
   wait "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
   ROBOREV_SNAPSHOT_CAPTURE_PID=""
   return 0
