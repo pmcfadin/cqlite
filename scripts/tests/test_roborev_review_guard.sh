@@ -286,12 +286,16 @@ case "$cmd" in
       # is private and per-run (mktemp -d), so it is DISCOVERED rather than known, and the wait is on
       # the finished publication, never on the content file appearing: waiting on the earlier of two
       # events is flaky by construction (roborev job 7, finding 2).
-      snap_capture_of() { # snap_capture_of <snapshot-id> -> prints the published meta path, if any
-        local d
-        for d in "${CAPTURES_PARENT:?}"/roborev-snapshot-capture.*/"$1"/meta; do
-          [ -f "$d" ] && { printf '%s' "$d"; return 0; }
+      snap_capture_of() { # snap_capture_of <snapshot-id> -> prints the NEWEST published meta path
+        # Publications are `pub.<id>.<zero-padded-seq>`, so the LAST match of the glob is the newest —
+        # the same rule the resolver uses. Scoped to this process's capture parent (job 9, F3).
+        local d found=""
+        for d in "${CAPTURES_PARENT:?}"/roborev-snapshot-capture.*/pub."$1".*/meta; do
+          [ -f "$d" ] && found="$d"
         done
-        return 1
+        [ -n "$found" ] || return 1
+        printf '%s' "$found"
+        return 0
       }
       snap_await() { # snap_await <snapshot-id> [<digest-to-differ-from>] -> 0 when published
                      # (and, when a digest is given, when it has CHANGED)
@@ -357,7 +361,20 @@ case "$cmd" in
       if [ -n "${STUB_SNAPSHOT_SYMLINK_TARGET:-}" ] && snap_capture_of "$snap_id" >/dev/null; then
         printf 'captured' >"$STUB_INVOKED.symlink-captured"
       fi
-      rm -rf "$STUB_SNAPSHOT_LIFECYCLE_DIR" "${STUB_SNAPSHOT_CONTROL_DIR:-/nonexistent/x}"
+      # REPLACE the snapshot file with a NON-REGULAR object instead of deleting the directory (job 10,
+      # blocker 2): the live path then EXISTS but cannot be read as a diff, while a valid capture sits
+      # ready. The block must say `unreadable`, not answer from the capture.
+      if [ -n "${STUB_SNAPSHOT_REPLACE_WITH:-}" ]; then
+        rm -f "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+        case "$STUB_SNAPSHOT_REPLACE_WITH" in
+          dir)  mkdir -p "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ;;
+          fifo) mkfifo "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" 2>/dev/null \
+                  || mkdir -p "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff" ;;
+        esac
+      else
+        rm -rf "$STUB_SNAPSHOT_LIFECYCLE_DIR"
+      fi
+      rm -rf "${STUB_SNAPSHOT_CONTROL_DIR:-/nonexistent/x}"
     fi
     if [ -n "${STUB_ANNOUNCE_SHA:-}" ]; then
       printf 'Enqueued job %s for %s\n' "${STUB_JOB:-4600}" "$STUB_ANNOUNCE_SHA"
@@ -1097,6 +1114,9 @@ export STUB_SNAPSHOT_REWRITE_PATHS=''
 # STUB_SNAPSHOT_EXPECT_NO_CAPTURE flips the lifecycle wait from "wait for the publication" to "wait for
 # the interposed copy's witness, then one more poll" — for the cases where a capture must be DISCARDED.
 export STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
+# STUB_SNAPSHOT_REPLACE_WITH leaves the snapshot DIRECTORY in place and replaces the content file with a
+# non-regular object (`dir` or `fifo`), so the live path EXISTS but is unreadable while a capture exists.
+export STUB_SNAPSHOT_REPLACE_WITH=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -1121,6 +1141,7 @@ reset_stub() {
   STUB_SNAPSHOT_CONTROL_DIR=''
   STUB_SNAPSHOT_REWRITE_PATHS=''
   STUB_SNAPSHOT_EXPECT_NO_CAPTURE=''
+  STUB_SNAPSHOT_REPLACE_WITH=''
   CP_SHIM_MODE=''
   CP_SHIM_WITNESS=''
 }
@@ -3722,7 +3743,7 @@ else
 fi
 # ...and it does not survive the run: a stable, reusable capture path is the staleness class the
 # private directory removes by construction.
-if snap_capture_dirs=$(ls -d "$CAPTURES_PARENT"/roborev-snapshot-capture.*/roborev-snapshot-424242 2>/dev/null); then
+if snap_capture_dirs=$(ls -d "$CAPTURES_PARENT"/roborev-snapshot-capture.*/pub.roborev-snapshot-424242.* 2>/dev/null); then
   bad "case (cx31r): the capture outlived the wrapper ($snap_capture_dirs) — a reusable capture directory is exactly the reuse hazard the private one removes"
 else
   ok 'case (cx31r): the private capture directory was removed at exit (nothing to go stale, nothing to reuse)'
@@ -3828,8 +3849,8 @@ LOG="$4/cx31t.log"
 PROMPT_FILE="$LOG.prompt"
 ROBOREV_SNAPSHOT_CAPTURE_DIR="$4/capture"
 # A capture with content but NO meta — the state the private-directory design makes unreachable.
-mkdir -p "$ROBOREV_SNAPSHOT_CAPTURE_DIR/roborev-snapshot-313131"
-printf 'diff --git a/alpha.rs b/alpha.rs\n' >"$ROBOREV_SNAPSHOT_CAPTURE_DIR/roborev-snapshot-313131/content.diff"
+mkdir -p "$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-313131.000001"
+printf 'diff --git a/alpha.rs b/alpha.rs\n' >"$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-313131.000001/content.diff"
 printf 'Read the diff from: `%s`\n' "$REPO/.roborev/roborev-snapshot-313131/roborev-snapshot-content.diff" >"$PROMPT_FILE"
 CENSUS='1 file, +1/-0'
 BASE='origin/main'
@@ -4062,6 +4083,80 @@ else
 fi
 rm -rf "$tmp_inside" "$tmp_symlink"
 reset_stub
+
+printf '== (cx32) a NON-REGULAR live path is reported unreadable, never answered from a capture (job 10) ==\n'
+# THE AFFIRMATIVE-MEASUREMENT DEFECT IN ITS PUREST FORM: the fallback was keyed on `! -f` — "anything
+# other than a regular file" — so a DIRECTORY or FIFO at the named path (not "the snapshot is gone", but
+# "the named path is something we cannot read") silently took the capture branch and could PASS. The
+# fixture makes the capture VALID and COMPLETE, so only the predicate stands between it and a green.
+reset_stub
+nonreg_dir="$snap_repo/.roborev/roborev-snapshot-323232"
+nonreg_log="$tmp/cx32-transcript.log"
+STUB_SNAPSHOT_LIFECYCLE_DIR="$nonreg_dir"
+STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+STUB_SNAPSHOT_REPLACE_WITH=fifo
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$nonreg_dir/roborev-snapshot-content.diff")
+run_wrapper "$snap_work" --log "$nonreg_log"
+# The capture really was published — otherwise the refusal below would be vacuous.
+if [ -s "$INVOKED.capture-seen" ]; then
+  ok 'case (cx32): a valid capture was published and was still not substituted for the unreadable path'
+else
+  bad 'case (cx32): no capture was published, so the refusal below is reached with nothing to substitute'
+fi
+assert_verdict 'case (cx32)' FAIL 1
+assert_says 'case (cx32) an existing-but-unreadable live path is reported as such' \
+  '^prompt-content: FAIL \(snapshot diff unusable: unreadable\)$'
+assert_says 'case (cx32) the cause distinguishes unreadable from deleted' \
+  'a path that exists as something unreadable is a different fact from a snapshot that was deleted'
+assert_lacks 'case (cx32) the capture never answers for an unreadable live path' '^prompt-content: PASS'
+rm -rf "$nonreg_dir"
+reset_stub
+
+printf "== (cx32b) the resolver takes the NEWEST publication for an id (direct unit probe) ==\n"
+# Publications are append-only per run (`pub.<id>.<seq>`), so "which one" is decided by the sequence.
+# Probed directly: two publications for one id, the older one carrying a path the prompt does NOT name.
+# Picking the older would certify a diff the reviewer was not pointed at — the same class as the sibling
+# substitution, one level along.
+cx32b_probe="$tmp/cx32b-probe.sh"
+cx32b_out="$tmp/cx32b-out.txt"
+cat >"$cx32b_probe" <<'CX32B'
+set -uo pipefail
+REPO="$3"
+. "$1"
+. "$2"
+LOG="$4/cx32b.log"
+PROMPT_FILE="$LOG.prompt"
+ROBOREV_SNAPSHOT_CAPTURE_DIR="$4/cx32b-capture"
+rel=".roborev/roborev-snapshot-565656/roborev-snapshot-content.diff"
+# OLDER publication: identifies a DIFFERENT file, and would be rejected as a path mismatch if chosen.
+mkdir -p "$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-565656.000001"
+printf 'diff --git a/stale.rs b/stale.rs\n' >"$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-565656.000001/content.diff"
+printf 'rel=%s\ndigest=old\n' ".roborev/roborev-snapshot-565656/some-other.diff" >"$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-565656.000001/meta"
+# NEWER publication: the real one.
+mkdir -p "$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-565656.000002"
+printf 'diff --git a/alpha.rs b/alpha.rs\n' >"$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-565656.000002/content.diff"
+printf 'rel=%s\ndigest=new\n' "$rel" >"$ROBOREV_SNAPSHOT_CAPTURE_DIR/pub.roborev-snapshot-565656.000002/meta"
+printf 'Read the diff from: `%s`\n' "$REPO/$rel" >"$PROMPT_FILE"
+CENSUS='1 file, +1/-0'
+BASE='origin/main'
+JOB=11
+census_code_paths=(alpha.rs)
+DETAILS=()
+PROMPT_CONTENT=""
+roborev_check_prompt_content
+printf 'prompt-content: %s\n' "$PROMPT_CONTENT"
+CX32B
+mkdir -p "$tmp/cx32b-repo/.roborev"
+if bash "$cx32b_probe" "$ORACLES_SRC" "$CHECKS_SRC" "$tmp/cx32b-repo" "$tmp" >"$cx32b_out" 2>&1; then
+  if grep -qE '^prompt-content: PASS \(1/1 code census paths present in the captured snapshot diff\)$' "$cx32b_out"; then
+    ok 'case (cx32b): the newest publication is the one read'
+  else
+    bad "case (cx32b): expected the newest publication to be read, got '$(head -2 "$cx32b_out")'"
+  fi
+else
+  bad "case (cx32b): the unit probe did not run: $(cat "$cx32b_out")"
+fi
 
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
@@ -4426,10 +4521,24 @@ else
     else
       bad 'structural: the capture loop writes no identity record, so a capture could not be matched to the path the prompt names (#3312)'
     fi
-    if printf '%s\n' "$_cap_body" | grep -qE 'mv "\$stage" "\$out/\$id"'; then
+    if printf '%s\n' "$_cap_body" | grep -qE 'mv "\$stage" "\$out/\$dest"'; then
       ok 'structural: a capture is published by ONE rename of the staged directory (no half-published state)'
     else
       bad 'structural: the capture is not published by a single rename — an observer could see content without its identity, which is the SIGTERM false-FAIL race (#3312 job 7, finding 2)'
+    fi
+    # THE DESTINATION IS FRESH BY CONSTRUCTION (job 10, blocker 1). `mv <dir> <existing-dir>` does not
+    # fail — it NESTS, leaving the previous content.diff/meta exactly where the resolver reads them. So
+    # the property is not "check the rename": it is "there is no pre-existing destination", which also
+    # means no rename-aside and no backup path exist to be checked.
+    if printf '%s\n' "$_cap_body" | grep -qE "printf -v dest 'pub\.%s\.%06d'"; then
+      ok 'structural: each capture publishes to a fresh pub.<id>.<seq> destination that cannot already exist'
+    else
+      bad 'structural: publications do not carry a per-run unique sequence — a fixed destination can be nested into rather than replaced (#3312 job 10, blocker 1)'
+    fi
+    if printf '%s\n' "$_cap_body" | grep -qE '\.old\.|mv "\$out/\$id"'; then
+      bad 'structural: the rename-aside/backup path is back in the capture loop — that is the nesting hazard, and it was deleted rather than hardened (#3312 job 10, blocker 1)'
+    else
+      ok 'structural: no rename-aside or backup path exists in the capture loop (deleted, not hardened)'
     fi
     if printf '%s\n' "$_cap_body" | grep -qF '_roborev_file_digest'; then
       ok 'structural: reuse is keyed on a content digest, not on the byte count'
@@ -4489,6 +4598,13 @@ if [ -n "${_src_defs:-}" ] && [ "${_src_defs:-0}" -eq 1 ]; then
     ok 'structural: the resolver has both capture-identity refusals (unidentified, path-mismatch)'
   else
     bad 'structural: the resolver is missing a capture-identity refusal — an unidentified or mis-keyed capture could be read as evidence (#3312)'
+  fi
+  # THE FALLBACK PREDICATE IS NON-EXISTENCE, NOT "not a regular file" (job 10, blocker 2): a directory
+  # or FIFO at the named path is "unreadable", a fact to REPORT, not "the snapshot is gone".
+  if printf '%s\n' "$_r_body" | grep -qF 'if [ ! -e "$_rx_snap_bound_path" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ]'; then
+    ok 'structural: a capture is consulted only when the live path does NOT EXIST'
+  else
+    bad 'structural: the capture fallback is not keyed on non-existence — an unreadable non-regular file at the named path would be silently answered from a capture (#3312 job 10, blocker 2)'
   fi
   if printf '%s\n' "$_r_body" | grep -qE '\[ "\$_rx_cap_recorded" = "\$\{_rx_snap_rel:-\}" \]'; then
     ok 'structural: a capture is accepted only when its recorded path EQUALS the path the prompt names'
