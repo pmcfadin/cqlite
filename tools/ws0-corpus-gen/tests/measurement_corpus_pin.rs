@@ -459,11 +459,34 @@ fn the_comparison_covers_every_artifact_field() {
 /// placeholder, and it cannot see a reason copied from a neighbouring entry.
 fn reason_is_acceptable(key: &str, reason: &str) -> bool {
     let lower = reason.to_ascii_lowercase();
-    // (1) NAMES ITS FIELD, so a copied reason is detectable. A field name that does not
-    // read naturally in prose may instead name the ALTERNATIVE check that covers it.
-    let names_field = lower.contains(&key.to_ascii_lowercase())
-        || lower.contains("compared separately")
-        || lower.contains("digest");
+    // (1) NAMES ITS FIELD — and NAMES IT, with no key-independent escape hatch (#3272
+    // review round 3 nit).
+    //
+    // This used to read:
+    //
+    //     lower.contains(&key.to_ascii_lowercase())
+    //         || lower.contains("compared separately")
+    //         || lower.contains("digest")
+    //
+    // The two alternatives are KEY-INDEPENDENT, so they satisfy property (1) for EVERY key
+    // — and `"compared separately"` is also in the RATIONALE set below, so it satisfies (2)
+    // as well. MEASURED: the shipped `components` reason, copy-pasted verbatim onto a new
+    // exemption, is ACCEPTED for `rows`, for `partitions` and for `seed`. That is the
+    // COPY-PASTE CASE THIS CHECK EXISTS TO CATCH, waved through by the escape hatch added
+    // to accommodate a field name that "does not read naturally in prose".
+    //
+    // The accommodation is kept but made KEY-BOUND: a reason may name the field, or the
+    // field's SNAKE-CASE WORDS individually (`not_a_correctness_oracle` reads as "the #3042
+    // disclaimer", so requiring the literal identifier would force awkward prose). Both
+    // forms are ABOUT THIS KEY, which a blanket phrase is not.
+    let key_lower = key.to_ascii_lowercase();
+    let names_field = lower.contains(&key_lower)
+        || key_lower
+            .split('_')
+            // Words too short to identify a field ("a", "of", "not") would reintroduce the
+            // key-independent hole through the back door.
+            .filter(|w| w.len() >= 4)
+            .all(|w| lower.contains(w));
     // (2) SAYS WHY, from a small CLOSED set of rationale forms — so a reason that merely
     // restates the field name does not pass.
     const RATIONALE: [&str; 8] = [
@@ -535,6 +558,64 @@ fn the_exemption_reason_check_rejects_a_placeholder_and_a_copied_reason() {
              of its own"
         ),
         "a well-formed new exemption must be accepted"
+    );
+
+    // THE EXACT COPY-PASTE THE KEY-INDEPENDENT ESCAPE HATCH ADMITTED (#3272 round 3 nit).
+    //
+    // `names_field` used to be satisfied by the phrase `"compared separately"` or the word
+    // `"digest"` IRRESPECTIVE OF KEY — and `"compared separately"` is also a RATIONALE, so
+    // one blanket phrase satisfied BOTH properties. MEASURED against that version, the
+    // SHIPPED `components` reason, copy-pasted verbatim, was ACCEPTED for `rows`, for
+    // `partitions` and for `seed`: the copy-paste case the check exists to catch.
+    let shipped_components_reason = DELIBERATELY_NOT_COMPARED
+        .iter()
+        .find(|(k, _)| *k == "components")
+        .map(|(_, r)| *r)
+        .expect("the `components` exemption is the one whose reason contains the hatch phrase");
+    assert!(
+        shipped_components_reason.contains("compared separately"),
+        "this case needs the reason that carried the key-independent phrase; got \
+         {shipped_components_reason:?}"
+    );
+    for foreign_key in ["rows", "partitions", "seed", "data_db_bytes"] {
+        assert!(
+            !reason_is_acceptable(foreign_key, shipped_components_reason),
+            "the shipped `components` reason must NOT be acceptable for `{foreign_key}` — \
+             copy-pasting it onto a new exemption is exactly the case this check exists to \
+             catch, and the key-independent `contains(\"compared separately\")` alternative \
+             admitted it for every key (#3272 round 3)"
+        );
+    }
+    // ...and the same for the OTHER key-independent phrase.
+    for foreign_key in ["rows", "partitions"] {
+        assert!(
+            !reason_is_acceptable(
+                foreign_key,
+                "`data_db_sha256` is the digest, compared separately"
+            ),
+            "a reason naming a DIFFERENT field's digest must not be acceptable for \
+             `{foreign_key}`"
+        );
+    }
+    // The ACCOMMODATION the hatch existed for must still work, KEY-BOUND: a field whose
+    // identifier does not read naturally in prose may name its snake-case WORDS instead.
+    assert!(
+        reason_is_acceptable(
+            "not_a_correctness_oracle",
+            "this is the #3042 correctness oracle disclaimer string; its wording is prose \
+             and not a pin"
+        ),
+        "a reason naming the field's WORDS rather than its identifier must be accepted — \
+         removing the escape hatch must not force awkward prose"
+    );
+    // ...but the words must be THAT field's: a subset does not identify it.
+    assert!(
+        !reason_is_acceptable(
+            "not_a_correctness_oracle",
+            "this is a disclaimer string; its wording is prose and not a pin"
+        ),
+        "naming NONE of the field's words must be rejected, or the word rule is the old \
+         blanket hatch under another name"
     );
 }
 

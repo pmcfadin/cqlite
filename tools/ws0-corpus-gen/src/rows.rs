@@ -255,6 +255,9 @@ fn write(column: &str, value: Value) -> CellOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // For the FULL-payload pin in `the_synth_payload_extraction_did_not_change_the_bytes`
+    // (#3272 review round 3 nit): a prefix cannot see a tail-only rng divergence.
+    use sha2::{Digest, Sha256};
 
     /// Row content is a pure function of `(seed, p, r)` — the property the
     /// committed corpus `sha256` rests on. Compared through the debug rendering
@@ -435,14 +438,44 @@ mod tests {
     /// close, arriving via a change made to close it.
     ///
     /// So the payload for one fixed coordinate is pinned against the value MEASURED from the
-    /// pre-refactor code (a `git worktree` at the parent commit, `row_mutation(11, 17, 42,
-    /// 1742)`). A prefix is sufficient and is what is recorded: the full 414 characters in
-    /// source would be unreadable, and a divergence in the rng stream shows up in the first
-    /// bytes. The whole-corpus property remains pinned by `measurement_corpus_pin.rs`.
+    /// pre-refactor code. The whole-corpus property remains pinned by
+    /// `measurement_corpus_pin.rs`.
+    ///
+    /// # PROVENANCE, RE-DERIVED (#3272 review round 3 nit)
+    ///
+    /// The nit was that this constant's provenance is unverifiable from the diff: a value
+    /// measured POST-refactor is textually identical to one measured PRE-refactor, and a
+    /// circular pin is exactly the class this issue exists to close. So it was re-derived
+    /// independently, at the parent commit, and the command and its output are recorded here
+    /// so a reader can repeat it rather than trust it:
+    ///
+    /// ```text
+    /// # `c4fb5a8e6` is the commit BEFORE `a69b17ed6` (which extracted synth_payload).
+    /// # At c4fb5a8e6 `synth_payload` does not exist: row_mutation inlines the synthesis.
+    /// git worktree add --detach /tmp/pre-refactor-wt c4fb5a8e6
+    /// # ...append a test to tools/ws0-corpus-gen/src/rows.rs printing the payload for
+    /// # row_mutation(11, 17, 42, 1742), then:
+    /// cargo test -q -p ws0-corpus-gen --lib pre_refactor_derivation -- --nocapture
+    ///
+    /// PRE_REFACTOR_FULL_LEN=414
+    /// PRE_REFACTOR_PREFIX_48=wuoabdjlxsgeduci1md0l12nhq0a1un2tyif4i10aw052mjx
+    /// PRE_REFACTOR_SHA256_OF_FULL=a7f8a27d56cf702e990817c9069d12c01e497f44e4e88c623c1f544205f54f2c
+    /// ```
+    ///
+    /// Both values below are that output. The SHA-256 is pinned ALONGSIDE the prefix
+    /// because a prefix is a WEAKER pin than it looks: a change to the rng stream that
+    /// happens to leave the first 48 characters intact — a later draw reordered, a
+    /// different consumption in the tail — would satisfy the prefix and still invalidate
+    /// `DATA_DB_SHA256`. The digest covers all 414 bytes and costs nothing.
     #[test]
     fn the_synth_payload_extraction_did_not_change_the_bytes() {
-        /// MEASURED from the pre-refactor `row_mutation(11, 17, 42, 1742)`.
+        /// MEASURED at the pre-refactor parent commit `c4fb5a8e6` — see the derivation
+        /// command and output in this test's doc comment.
         const PRE_REFACTOR_PREFIX: &str = "wuoabdjlxsgeduci1md0l12nhq0a1un2tyif4i10aw052mjx";
+        /// The sha256 of the WHOLE 414-byte payload, from the same derivation. A prefix
+        /// alone would admit a change confined to the tail.
+        const PRE_REFACTOR_SHA256: &str =
+            "a7f8a27d56cf702e990817c9069d12c01e497f44e4e88c623c1f544205f54f2c";
 
         let m = row_mutation(11, 17, 42, 1742).expect("the pinned alphabet is ASCII");
         let payload = m
@@ -466,6 +499,20 @@ mod tests {
              #3272 exists to close, arriving via a change made to close it.\n  expected \
              prefix: {PRE_REFACTOR_PREFIX}\n  got:             {}",
             &text[..PRE_REFACTOR_PREFIX.len().min(text.len())]
+        );
+        // ...and the WHOLE payload, because a prefix cannot see a tail-only divergence
+        // (#3272 review round 3 nit). Same derivation, same command, recorded above.
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        assert_eq!(
+            digest, PRE_REFACTOR_SHA256,
+            "the payload's first {} characters match the pre-refactor value but its FULL \
+             {} bytes do not, so the rng stream diverged somewhere after the prefix — a \
+             change the prefix check alone cannot see, and one that still invalidates \
+             measurement_corpus::DATA_DB_SHA256.",
+            PRE_REFACTOR_PREFIX.len(),
+            text.len()
         );
     }
 

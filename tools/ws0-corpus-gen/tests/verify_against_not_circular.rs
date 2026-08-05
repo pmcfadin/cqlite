@@ -231,6 +231,145 @@ fn the_alias_check_is_not_a_lexical_string_comparison() {
     );
 }
 
+/// A **HARDLINK** to a write target is the same file, and must be refused (#3272 round 3).
+///
+/// The nit that prompted this: `same_path` used `canonicalize`, which resolves symlinks,
+/// `..` and duplicate separators — and sees NEITHER of the two aliases that reach the same
+/// inode by a genuinely different name. A hardlink is two directory entries over one inode,
+/// so `canonicalize` returns each unchanged and they compare unequal.
+///
+/// The CIRCULARITY half was already closed by reading the prior BEFORE generation (#3272
+/// R5): whatever the paths are, the comparison is against bytes that predate this run. But
+/// the ARTIFACT-PRESERVATION half did not fire — the operator's recorded prior is a write
+/// target under another name, so `identity.write_json` TRUNCATES it and a re-run then
+/// compares against the new bytes. That is what this asserts, and it asserts it on the
+/// artifact rather than only on the exit code.
+#[test]
+fn a_hardlink_to_a_write_target_is_refused_and_the_artifact_survives() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    std::fs::create_dir_all(&out).expect("mkdir");
+    // The write target, holding a FOREIGN identity so a comparison against it would be a
+    // real (failing) comparison rather than a no-op.
+    let target = out.join("corpus-identity.json");
+    write_foreign_identity(&target);
+    // ...and a second NAME for the same inode, outside the corpus dir so no path
+    // comparison could relate the two.
+    let link = dir.path().join("operator-recorded-prior.json");
+    std::fs::hard_link(&target, &link).expect("hard_link");
+
+    // NON-VACUITY for the fixture: the two paths really are one file, and really do have
+    // different names. Without this the case could pass on a filesystem that silently
+    // copied instead of linking.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let a = std::fs::metadata(&target).expect("stat target");
+        let b = std::fs::metadata(&link).expect("stat link");
+        assert_eq!(
+            (a.dev(), a.ino()),
+            (b.dev(), b.ino()),
+            "the fixture must be a real hardlink (one inode, two names), or this case tests \
+             nothing"
+        );
+    }
+    assert_ne!(
+        target.canonicalize().expect("canon target"),
+        link.canonicalize().expect("canon link"),
+        "the two paths must CANONICALIZE DIFFERENTLY — that is the whole point: \
+         canonicalize cannot see a hardlink, so a canonicalize-only check let this through"
+    );
+
+    let before = std::fs::read(&link).expect("read prior");
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--verify-against",
+        link.to_str().expect("utf8"),
+    ]);
+    assert!(
+        !run.ok && run.all().contains("SAME FILE"),
+        "a HARDLINK to `<out>/corpus-identity.json` is the same file and must be refused; \
+         canonicalize cannot see it (#3272 round 3): {}",
+        run.all()
+    );
+    assert_eq!(
+        std::fs::read(&link).expect("re-read"),
+        before,
+        "the operator's recorded prior must survive the refusal UNTOUCHED — the \
+         artifact-preservation half is what a hardlink defeats, since reading the prior \
+         first already makes the comparison honest"
+    );
+}
+
+/// A CASE-DIFFERING spelling on a case-INSENSITIVE filesystem is the same file too.
+///
+/// The second alias `canonicalize` cannot see (#3272 round 3): on APFS (macOS default) and
+/// NTFS, `<out>/CORPUS-IDENTITY.JSON` and `<out>/corpus-identity.json` are ONE file and two
+/// strings.
+///
+/// The case-sensitivity of the filesystem is DETECTED rather than assumed, and the
+/// assertion is made only when the detection says insensitive — a `#[cfg(target_os)]` guess
+/// would be wrong on a case-sensitive APFS volume (which macOS can format) and on a
+/// case-insensitive mount under Linux. When the filesystem IS case-sensitive the two paths
+/// are genuinely different files and there is nothing to refuse, which is reported rather
+/// than silently passing.
+#[test]
+fn a_case_differing_spelling_is_refused_on_a_case_insensitive_filesystem() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    std::fs::create_dir_all(&out).expect("mkdir");
+    let target = out.join("corpus-identity.json");
+    write_foreign_identity(&target);
+    let upper = out.join("CORPUS-IDENTITY.JSON");
+
+    // DETECT, never assume: does opening the upper-case spelling reach the same inode?
+    let case_insensitive = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            match (std::fs::metadata(&target), std::fs::metadata(&upper)) {
+                (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+                _ => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::metadata(&upper).is_ok()
+        }
+    };
+    if !case_insensitive {
+        // A case-SENSITIVE filesystem: the two paths are different files, so there is no
+        // alias to refuse. Said out loud, because a test that silently returns is
+        // indistinguishable from one that ran.
+        eprintln!(
+            "case-sensitive filesystem: `CORPUS-IDENTITY.JSON` is a DIFFERENT file from \
+             `corpus-identity.json` here, so there is no alias to detect. The hardlink case \
+             covers the same `same_file` code path unconditionally."
+        );
+        return;
+    }
+
+    let before = std::fs::read(&target).expect("read prior");
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--verify-against",
+        upper.to_str().expect("utf8"),
+    ]);
+    assert!(
+        !run.ok && run.all().contains("SAME FILE"),
+        "on a case-INSENSITIVE filesystem `<out>/CORPUS-IDENTITY.JSON` IS \
+         `<out>/corpus-identity.json`, so it must be refused: {}",
+        run.all()
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("re-read"),
+        before,
+        "the recorded prior must survive the refusal untouched"
+    );
+}
+
 /// The ACCEPT direction, and the FAIL direction, on a NON-aliasing prior.
 ///
 /// Without these the three cases above would be satisfied by a `--verify-against` that

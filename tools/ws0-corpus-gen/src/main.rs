@@ -95,7 +95,26 @@ fn identity_write_targets(cli: &Cli) -> Vec<PathBuf> {
 /// failed canonicalize as "different" would be the permissive branch on an unmeasured
 /// state — the exact shape #3272 exists to remove — so an unresolvable parent falls back
 /// to the lexical comparison rather than to `false`.
+///
+/// # What `canonicalize` does NOT see (#3272 review round 3 nit)
+///
+/// Two aliases it cannot resolve, both of which reach the same bytes by a different path:
+///
+/// * a **HARDLINK**. Two directory entries, one inode; `canonicalize` resolves symlinks
+///   and returns each name unchanged. So `--verify-against prior.json` hardlinked to
+///   `<out>/corpus-identity.json` compares unequal.
+/// * a **CASE-INSENSITIVE filesystem** (APFS by default, NTFS). `<out>/CORPUS-IDENTITY.JSON`
+///   and `<out>/corpus-identity.json` are ONE file on macOS and two strings here.
+///
+/// [`same_file`] closes both by comparing the FILE IDENTITY (device + inode) when both paths
+/// exist, which is what "the same file" actually means. Reading the prior BEFORE generation
+/// already makes the COMPARISON honest whatever the paths are — that is #3272 R5 and it
+/// stands — but it does not save the operator's recorded artifact from being truncated by
+/// `identity.write_json`, which is the half this closes.
 fn same_path(a: &Path, b: &Path) -> bool {
+    if same_file(a, b) {
+        return true;
+    }
     if let (Ok(ra), Ok(rb)) = (a.canonicalize(), b.canonicalize()) {
         return ra == rb;
     }
@@ -109,6 +128,34 @@ fn same_path(a: &Path, b: &Path) -> bool {
         }
     };
     resolve(a) == resolve(b)
+}
+
+/// Do `a` and `b` name the SAME FILE — one inode reached by two names?
+///
+/// The authoritative test, and the only one that sees a HARDLINK or a case-insensitive
+/// spelling (#3272 review round 3 nit). Both paths must EXIST; a path that does not exist
+/// is not an alias of anything, so `false` here is a measured answer rather than a
+/// permissive default — and `same_path`'s canonicalize/lexical fallbacks handle the
+/// not-yet-created `--identity-out` case that this deliberately cannot.
+///
+/// Uses `std::fs::metadata` (which FOLLOWS symlinks, so a symlink to the target is caught
+/// here too) and the Unix `dev`+`ino` pair. On a non-Unix target the pair is unavailable,
+/// so this answers `false` and `same_path`'s path comparison is the whole check — stated
+/// rather than silently degraded, and honest: the rig runs on Linux.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
+    }
 }
 
 /// The PRIOR identity `--verify-against` names, read BEFORE anything is generated.
