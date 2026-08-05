@@ -110,7 +110,10 @@ add_construct() { CONSTRUCT_RE+=("$1"); CONSTRUCT_WHY+=("$2"); CONSTRUCT_SAMPLE+
 # a DIFFERENT command. This is deliberately a LINE-ORIENTED approximation of shell parsing and
 # not a tokeniser; the residual it leaves is stated in full below the table.
 _OPT_RUN='([[:space:]]+[^[:space:]|;&<>()]+)*'
-RE_SED_INPLACE='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+(-i|--in-place)([[:space:]]|$)'
+# `--in-place` is matched with an OPTIONAL `=SUFFIX` (#3296 round 8): GNU accepts
+# `--in-place=.bak`, and requiring whitespace after the option name made that spelling — a long
+# option BSD sed does not have AT ALL — invisible to this rule.
+RE_SED_INPLACE='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+(-i|--in-place(=[^[:space:]|;&<>()]*)?)([[:space:]]|$)'
 # BUNDLED CLUSTERS ending in `i` — the hole the bare `-i` rule above leaves open. BSD getopt
 # processes `-Ei` as `-E` then `-i`, and `i` is declared WITH A REQUIRED ARGUMENT (Apple
 # text_cmds sed/main.c: `getopt(argc, argv, "EI:ae:f:i:lnru")`), so with nothing left in the
@@ -729,16 +732,67 @@ else
   else
     bad "summary_key_order: wrong extraction under the BSD shim: '$(PATH="$SHIM_PATH" summary_key_order "$tmp/block.txt" 'vacuity-tier2|roborev-exit|log')'"
   fi
-  # The pre-#3296 pipeline, run under the same shim, on the same input: it must come back
-  # EMPTY. This is the control that the fix fixed something — the reported case (j2) symptom
-  # was `unexpected key order: ` with nothing after the colon. The operand-less paste below is
-  # DELIBERATE (it is the defect being reproduced) and is why the structural scan above covers
-  # the roborev code path rather than this file.
-  _old=$(PATH="$SHIM_PATH" bash -c "grep -nE '^(vacuity-tier2|roborev-exit|log):' '$tmp/block.txt' | cut -d: -f2 | paste -sd," 2>/dev/null)
-  if [ -z "$_old" ]; then
-    ok 'differential: the pre-#3296 `grep | cut | paste -sd,` pipeline returns EMPTY under BSD paste — the reported case (j2) symptom, reproduced'
+  # THE OLD-PIPELINE DIFFERENTIAL — the RED side of the fix, and (with the shim controls above)
+  # the AUTHORITATIVE half of this file, so a control that can pass for the wrong reason here
+  # undermines the whole guard (#3296 round-8 finding 4). The reported case (j2) symptom was
+  # `unexpected key order: ` with nothing after the colon; the operand-less paste below is
+  # DELIBERATE — it IS the defect being reproduced — and carries a per-line lint marker.
+  #
+  # EMPTY OUTPUT ALONE IS NOT PROOF THAT `paste` REFUSED. The previous form captured the
+  # composed pipeline's stdout, DISCARDED ITS EXIT STATUS, and read `[ -z "$_old" ]` as "BSD
+  # paste usage()-errored". But every UNRELATED failure in that pipeline yields the very same
+  # empty string — a mistyped fixture path, a grep that matched nothing, a `cut` missing from
+  # the shimmed PATH, a quoting error in the `bash -c` text — so the control that is supposed to
+  # prove the shim reproduces case (j2) could pass for a reason that has nothing to do with
+  # paste. That is CLAUDE.md's shape verbatim: a positive verdict derived from the ABSENCE of a
+  # bad signal, with every unmeasured state inheriting the permissive branch.
+  #
+  # So THREE affirmative facts are required before emptiness may be ATTRIBUTED to the paste
+  # stage, and the classifier is itself controlled below against a PLANTED upstream failure:
+  #   1. the UPSTREAM `grep | cut` prefix, run alone on the same input under the same PATH,
+  #      produces NON-EMPTY output (paste is therefore demonstrably fed real data);
+  #   2. the full pipeline's STATUS is non-zero — measured with `set -o pipefail` inside the
+  #      probe shell, so a failing paste stage is not masked by the last command's status;
+  #   3. and its stdout is EMPTY, which is the reported case (j2) symptom.
+  # The reason for each rejection is reported, so a red here names which stage misbehaved.
+  _old_why=''
+  old_pipeline_reproduces() { # old_pipeline_reproduces <block-file>; sets _old_why
+    local _bf="$1" _up _up_rc=0 _full _full_rc=0
+    _up=$(PATH="$SHIM_PATH" bash -c 'set -o pipefail; grep -nE "^(vacuity-tier2|roborev-exit|log):" "$1" | cut -d: -f2' _ "$_bf" 2>/dev/null) || _up_rc=$?
+    if [ "$_up_rc" -ne 0 ] || [ -z "$_up" ]; then
+      _old_why="UPSTREAM: the \`grep | cut\` prefix produced nothing on its own (rc $_up_rc, output '$_up'), so an empty full-pipeline result cannot be attributed to paste at all — a failure to measure, not a reproduction"
+      return 1
+    fi
+    _full=$(PATH="$SHIM_PATH" bash -c 'set -o pipefail; grep -nE "^(vacuity-tier2|roborev-exit|log):" "$1" | cut -d: -f2 | paste -sd,' _ "$_bf" 2>/dev/null) || _full_rc=$? # portability-lint-allow: the operand-less paste IS the #3296 defect being reproduced
+    if [ "$_full_rc" -eq 0 ]; then
+      _old_why="STATUS: the pipeline SUCCEEDED (rc 0, output '$_full') — BSD paste semantics were not in force on this run"
+      return 1
+    fi
+    if [ -n "$_full" ]; then
+      _old_why="OUTPUT: the pipeline failed (rc $_full_rc) but still produced '$_full', so its failure is not the empty-stdout symptom of case (j2)"
+      return 1
+    fi
+    _old_why="upstream alone produced '$(printf '%s' "$_up" | tr '\n' ' ')'; the paste stage then failed (rc $_full_rc) with EMPTY stdout"
+    return 0
+  }
+  if old_pipeline_reproduces "$tmp/block.txt"; then
+    ok "differential: the pre-#3296 \`grep | cut | paste\` pipeline FAILS with EMPTY stdout under BSD paste, and the emptiness is ATTRIBUTED to the paste stage rather than assumed — $_old_why (the reported case (j2) symptom, reproduced)"
   else
-    bad "differential: the old pipeline returned '$_old' under the shim, so this platform cannot reproduce case (j2) and the fix is unverified here"
+    bad "differential: case (j2) was NOT reproduced on this platform, so the fix is unverified here — $_old_why"
+  fi
+  # CONTROL, THE DIRECTION THAT WAS BROKEN: a pipeline failure that is NOT paste's must not be
+  # reported as a successful reproduction. Planted as a MISSING INPUT FILE — grep then exits
+  # non-zero with empty output, byte for byte the shape the status-discarding form accepted as
+  # proof that BSD paste had refused.
+  if old_pipeline_reproduces "$tmp/no-such-block-file.txt"; then
+    bad 'differential control: a pipeline whose UPSTREAM failed (missing input file) was reported as a successful BSD-paste reproduction — the control passes for the wrong reason, so the differential proves nothing'
+  else
+    case "$_old_why" in
+      UPSTREAM:*)
+        ok 'differential control: an unrelated pipeline failure (missing input) is REJECTED and attributed to the upstream stages, not to paste — empty output alone is no longer read as proof' ;;
+      *)
+        bad "differential control: the unrelated failure was rejected, but for the wrong reason ($_old_why) — the classifier must identify the upstream stages as the cause" ;;
+    esac
   fi
   if printf '%s\n' "$(extract_fn summary_key_order)" | grep -qE '(^|[^[:alnum:]_-])paste([[:space:]]|$)'; then
     bad 'summary_key_order: it still shells out to paste'
