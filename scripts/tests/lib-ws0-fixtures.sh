@@ -10,7 +10,7 @@
 # `test_ws0_report_guards.sh` and `test_ws0_fabrication_guards.sh` both feed the reporter
 # synthetic session dirs, and three builders were IDENTICAL in both files — the perf CSV,
 # the corpus (a real `Data.db` plus a `corpus-identity.json` whose digest is MEASURED from
-# it), and the interleaving metadata. Round 3 grew both files past the ~1500-line test
+# it), and the per-rep round metadata. Round 3 grew both files past the ~1500-line test
 # target, and duplicated fixtures are the wrong thing to keep two copies of: `make_round`
 # gained a `monotonic_ns` field this round and had to be edited in both places, which is
 # exactly the drift a shared builder removes.
@@ -65,19 +65,17 @@ json.dump(
 PY
 }
 
-# make_round <dir> <tag> <round> <position> [arms] [monotonic-ns] — the INTERLEAVING
-# metadata every rep must carry (#3272 R3), including the field that makes the claim an
-# OBSERVATION rather than a label.
+# make_round <dir> <tag> <round> <position> [arms] [monotonic-ns] — the per-rep ROUND
+# METADATA every rep must carry: the four RECORDED fields the reporter requires.
 #
-# `monotonic_ns` is the reporter's only evidence about WHEN a rep ran (#3272 review round 3,
-# B3): it verifies ROUND-MAJOR ORDERING from these instants — every rep of round r
-# completing before any rep of round r+1 — which is the one property an ARM-MAJOR session
-# cannot forge by relabelling, since `round`/`position`/`arms_in_round` are all numbers the
-# driver COMPUTES.
+# The reporter derives NO ordering property from them (the interleaving claim was deleted in
+# #3272 round 4; #3287/#3299 own re-adding an observed control). It uses `round` to pair the
+# per-round comparison, INTEGRITY-CHECKS the fields against each other and against the other
+# arms, and records them verbatim.
 #
-# The default is `round * 1e9 + position * 1e6`: round-major, distinct, and exactly the
-# shape a real sequential loop produces. A case that needs a NON-interleaved session
-# overrides it — and must then be REFUSED.
+# The default instant is `round * 1e9 + position * 1e6`: distinct, and non-contradictory with
+# the round labels — the shape a sequential rounds-outside loop produces. A case that needs
+# labels CONTRADICTING the instants overrides it, and must then be REFUSED.
 make_round() {
   local rnd="$3" pos="$4" arms="${5:-2}"
   local ns="${6:-$(( rnd * 1000000000 + pos * 1000000 ))}"

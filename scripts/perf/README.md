@@ -88,29 +88,41 @@ dirs and perf CSVs — no cargo, `perf`, `sudo`, corpus or network).
 There is deliberately **no environment variable that relaxes any of this.** An
 escape hatch on a measurement guard can only ever buy a confident wrong number.
 
-## No cross-session absolutes — interleave or do not compare
+## No cross-session absolutes, and NO DRIFT CONTROL — read every difference as uncontrolled
 
 **Measured on the delivery box in one day: the untouched warm bare scan read
 370,134 rows/s and, an hour later, 333,206 rows/s — a ~10% drift with nothing
 changed on the measured path.** So this rig produces **no reusable absolute**.
 
-**The rule: same-session interleaved A/B/C with a drift control that is
-code-identical across arms, or NO COMPARISON.** One rep at a time, arm order
-rotated per round, the control carried in every run, differenced *within* a
-round. Mechanics: `docs/reports/ws0-3096-artifacts/measurement-method.md` §3b.
+`docs/reports/ws0-3096-artifacts/measurement-method.md` §3b specifies the control
+that would make a cross-arm comparison readable — same-session interleaved A/B/C
+with a drift control code-identical across arms, "or NO COMPARISON".
 
-**`ws0-baseline.sh` now IMPLEMENTS that rule rather than documenting it (#3272
-review).** Its loop is round-major — one bare-scan rep, then one rep of each Flight
-arm, arm order rotated by round — so rep *k* of every arm is contemporaneous. It had
-been arm-major (all bare-scan reps, then all of arm 1, then all of arm 2), which put
-the ~10% intra-session drift straight onto the `bare/flight` ratio and the 1.3x
-verdict, in whichever direction the box drifted. `ws0_report.py` prints the **paired
-per-round ratios and the within-round direction count** beside the medians, and
-refuses a rep set it cannot pair. Read the direction count: #3096's lever 4 measured
-`+2.3%` by medians and **zero** on 8 interleaved rounds (median −0.03%, 4 of 8
-positive).
-Worked example with all 30 per-run numbers, and a discarded run with the reason
-it was discarded: `docs/reports/ws0-3096-artifacts/abc-interleaved-2026-08-03.md`.
+**That control is NOT IMPLEMENTED OR ENFORCED by this rig, and the rig makes NO
+INTERLEAVING CLAIM (#3272 review round 4).** What `ws0-baseline.sh` does have is a
+loop ordered rounds-outside/arms-inside with the arm order rotated by round and the
+bare scan rotating as a peer — a reasonable ordering, but **not a verified control**:
+nothing downstream establishes that a session ran that way. An earlier round of
+#3272 printed "the reps were INTERLEAVED … OBSERVED FROM THE CLOCK" and carried
+`round_major_verified: true` in `results.json`; at the default `--reps 1` there is
+one round, so **zero orderings were compared** while the verdict still said true.
+The claim and its verdict fields were **deleted** rather than re-worded a third
+time. Re-adding an OBSERVED control on real hardware is tracked by **#3287/#3299**.
+
+What the rig *does* do with the per-rep round metadata: `ws0_report.py` requires all
+four recorded fields (`round`/`position`/`arms_in_round`/`monotonic_ns`),
+**integrity-checks** them (every arm covering the same rounds, positions `1..n`
+exactly once, `arms_in_round` matching the arms present, no two reps sharing an
+instant, and the round labels not contradicting the recorded instants — any
+violation is a REFUSAL), carries them into `results.json` under
+`recorded_round_metadata` as **inert recorded data**, and prints the **paired
+per-round ratios and the within-round direction count** beside the medians.
+
+Read the direction count, and read it as *uncontrolled for drift*: #3096's lever 4
+measured `+2.3%` by medians and **zero** over 8 rounds (median −0.03%, 4 of 8
+positive). Worked example with all 30 per-run numbers, and a discarded run with the
+reason it was discarded:
+`docs/reports/ws0-3096-artifacts/abc-interleaved-2026-08-03.md`.
 
 ## Reusing this rig for another corpus (issues #3232, #3234)
 

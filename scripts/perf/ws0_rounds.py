@@ -1,47 +1,57 @@
 #!/usr/bin/env python3
-"""The INTERLEAVING contract: recorded round/position metadata, verified (#3272 R3/R4a).
+"""RECORDED per-rep round metadata: kept, consistency-checked, and CLAIMED NOTHING ABOUT.
 
 Split out of `ws0_report.py` under the campsite rule, along a real responsibility seam:
-this module owns everything about *when* each rep ran and whether the arms were genuinely
-interleaved, while `ws0_report.py` aggregates the measurements themselves and
-`ws0_validate.py` decides what may be aggregated.
+this module owns *what each rep recorded about when and where it ran*, while
+`ws0_report.py` aggregates the measurements themselves and `ws0_validate.py` decides what
+may be aggregated.
 
-# What was wrong, and why it is a whole module rather than a line
+# THE INTERLEAVING CLAIM WAS DELETED (#3272 review round 4, owner ruling)
 
-The report's NOTES printed, UNCONDITIONALLY:
+Earlier rounds of #3272 had this module DERIVE and PRINT an interleaving claim: "the reps
+were INTERLEAVED … OBSERVED FROM THE CLOCK … the report verifies that every rep of round r
+finished before any rep of round r+1", plus `results.json` verdict fields
+(`interleaving.verified`, `timing.round_major_verified`, `timing.established`).
 
-    "the reps were INTERLEAVED — one rep per arm per round, arm order rotated"
+Round 4 found that claim FALSE at the rig's own default. At `--reps 1` there is exactly ONE
+round, `zip(ordered, ordered[1:])` is EMPTY, **zero orderings are compared** — and the code
+still returned `round_major_verified: True` and printed the sentence verbatim. That is a
+positive verdict derived from the ABSENCE of a bad signal, which is the precise defect the
+whole issue exists to remove; the fix that introduced the stronger wording is what made the
+claim false.
 
-as a claim about the session — while `paired_rounds` paired by REP INDEX and never read
-anything the driver recorded about the actual round. The driver DID write `<tag>.round`
-files (and a comment claiming the reporter read them); NOTHING read them. So any session
-dir not produced by that exact loop — an arm-major run, reps re-run individually into one
-`--out`, a hand-assembled dir — yielded a report ASSERTING an interleaving that was never
-observed. An unconditional claim is not a measurement, and this rig exists because
-"reports success without having measured" is the failure mode that costs the most.
+The governing ruling was: the claim may stay only if it becomes a genuine observation whose
+wording is bounded by what the artifacts prove — otherwise DELETE it, and amend
+`docs/reports/ws0-3096-artifacts/measurement-method.md` §3b in the same change, because a
+method doc calling a nonexistent control "binding" is worse than no control. It was
+deleted. Re-adding an observed drift control on real hardware is tracked by #3287/#3299.
 
-Two further things the same defect hid (#3272 R4a):
+# What is left, and the line between the two kinds of thing
 
-* the driver's "rotation" ran the BARE SCAN FIRST every round and rotated only the
-  FLIGHT arms — so with the default single Flight arm (`--arm bypass`) NO ROTATION
-  OCCURRED AT ALL. The fix for the drift hazard did not close it: the bare scan, which
-  is the DENOMINATOR of the reported ratio, held position 1 in every round.
-* a "rotation" that reduces to a fixed order for the 2-arm case is the same defect, so
-  the property asserted here is POSITIONAL — no arm may hold one position across all
-  rounds — rather than "the driver called a function named rotate".
-
-# The recorded shape
-
-The driver writes one `<tag>.round` per rep, `key=value` per line:
+KEPT — RECORDED DATA. The driver writes one `<tag>.round` per rep, `key=value` per line:
 
     round=<1-based round index>
     position=<1-based position of this arm WITHIN the round>
     arms_in_round=<how many arms the round measured>
+    monotonic_ns=<time.monotonic_ns() at the rep's COMPLETION>
 
-`position` is what makes the rotation checkable at all: `round` alone cannot distinguish
-an interleaved session from an arm-major one, because an arm-major run also has a rep
-index. And `arms_in_round` is recorded rather than inferred so a round that measured
-fewer arms than it should is visible instead of looking like a complete smaller round.
+All four are REQUIRED and validated, and they are surfaced in `results.json` verbatim under
+`recorded_round_metadata` — inert data an operator (or #3287/#3299) can analyse. Nothing
+derives a property from them.
+
+KEPT — FAIL-CLOSED REFUSALS over that data. These are INTEGRITY checks on the artifact set,
+not evidence of anything about the measurement:
+
+* every arm covers the same rounds (otherwise `paired_rounds` has nothing to pair);
+* within a round the positions are exactly `1..n`, no duplicate;
+* `arms_in_round` agrees with the number of arms actually present in that round;
+* no two reps record the IDENTICAL instant (a sequential loop cannot; that is a copy);
+* the recorded round LABELS do not contradict the recorded INSTANTS (see
+  `refuse_label_instant_contradiction`).
+
+DELETED — every CLAIM and every VERDICT FIELD. No `verified`, no `established`, no
+`round_major_verified`, no printed interleaving/rotation sentence. The report says, once and
+explicitly, that it makes no such claim.
 """
 
 from __future__ import annotations
@@ -63,24 +73,28 @@ def round_meta_path(d: pathlib.Path, tag: str) -> pathlib.Path:
 
 
 def load_round_meta(d: pathlib.Path, tag: str) -> dict[str, int]:
-    """This rep's recorded `round`/`position`/`arms_in_round`, or `Invalid`.
+    """This rep's recorded `round`/`position`/`arms_in_round`/`monotonic_ns`, or `Invalid`.
 
-    REQUIRED, never defaulted. An absent file means the interleaving of this rep was not
-    recorded, and the report may not then claim the session was interleaved — that claim
-    is the whole subject of #3272 R3. Every field is parsed to an int and range-checked;
-    an unparseable one is an error rather than a value the caller would treat as 0.
+    REQUIRED, never defaulted, and RECORDED rather than interpreted: these four fields are
+    what the driver wrote about where and when this rep ran. The report derives no property
+    from them (#3272 round 4 — the interleaving claim was deleted); it pairs the per-round
+    comparison by the recorded `round`, refuses an artifact set whose fields contradict each
+    other, and passes the values through to `results.json` unchanged.
+
+    Required rather than optional because an absent file makes the artifact set
+    unpairable and unattributable — a figure could not be tied to the round it was
+    recorded in at all. Every field is parsed to an int and range-checked; an unparseable
+    one is an error rather than a value the caller would treat as 0.
     """
     p = round_meta_path(d, tag)
     if not p.exists():
         raise Invalid(
             f"rep {tag} has no round metadata at {p.name} — the round and the arm's"
-            " POSITION within it were not recorded, so this session's interleaving cannot"
-            " be established. The report may not print the interleaving claim over"
-            " artifacts that do not carry it (#3272 R3): a median-vs-median comparison"
-            " across two different time windows is exactly what measurement-method.md"
-            " §3b forbids, and it is indistinguishable from an interleaved one without"
-            " this file. Re-run the session with scripts/perf/ws0-baseline.sh, which"
-            " records it per rep."
+            " POSITION within it were not recorded, so this rep's figures cannot be"
+            " attributed to a round and the per-round pairing has nothing to pair."
+            " Re-run the session with scripts/perf/ws0-baseline.sh, which records it per"
+            " rep. (This file is RECORDED DATA: the report makes no interleaving or"
+            " ordering claim from it — see #3287/#3299.)"
         )
     if p.stat().st_size > _MAX_META_BYTES:
         raise Invalid(
@@ -117,11 +131,13 @@ def load_round_meta(d: pathlib.Path, tag: str) -> dict[str, int]:
         if key not in fields:
             raise Invalid(
                 f"{p.name} carries no {key!r}. All four of"
-                " round/position/arms_in_round/monotonic_ns are required: `round` alone"
-                " cannot distinguish an interleaved session from an arm-major one (both have"
-                " a rep index), `position` is a LABEL the driver computes rather than"
-                " observes, and `monotonic_ns` is the only field that records WHEN the rep"
-                " ran — the one thing an arm-major forgery cannot reproduce (#3272 B3)."
+                " round/position/arms_in_round/monotonic_ns are required as RECORDED DATA:"
+                " `round` is what the per-round pairing pairs on, `position` and"
+                " `arms_in_round` are LABELS the driver computes, and `monotonic_ns` is when"
+                " the rep completed. A partial record is refused rather than defaulted"
+                " because the missing field cannot be reconstructed. NOTE: no ORDERING"
+                " property is derived from these — the interleaving claim was deleted"
+                " (#3272 round 4; re-adding an observed control is #3287/#3299)."
                 " Re-run the session with scripts/perf/ws0-baseline.sh."
             )
     if fields["position"] > fields["arms_in_round"]:
@@ -149,38 +165,46 @@ def collect_round_meta(d: pathlib.Path, tag: str, rep: int) -> dict[str, int]:
     return meta
 
 
-def verify_interleaving(temp: str, arms_meta: dict[str, dict[int, dict[str, int]]]) -> dict:
-    """Establish — or REFUSE — that this temperature's reps were interleaved.
+def collect_recorded_round_metadata(
+    temp: str, arms_meta: dict[str, dict[int, dict[str, int]]]
+) -> dict:
+    """INTEGRITY-check this temperature's recorded metadata, and return it VERBATIM.
 
-    `arms_meta` maps arm label -> {round -> metadata}. Returns the OBSERVATION record the
-    report prints; raises `Invalid` when interleaving cannot be established, because a
-    report that cannot establish it must not claim it.
+    `arms_meta` maps arm label -> {round -> metadata}. Returns a record of WHAT WAS
+    RECORDED — no verdict field, no `verified`, no `established`. Raises `Invalid` when the
+    artifact set CONTRADICTS ITSELF, which is a statement about the files, never about the
+    measurement.
 
-    FIVE properties, each of which a real session shape violates. The FIRST is the only one
-    that is an OBSERVATION; the other four are consistency checks over LABELS (#3272 review
-    round 3, B3 — see `record_round` in the driver for why that distinction is the finding):
+    # No ordering/interleaving property is derived here (#3272 round 4)
 
-    * ROUND-MAJOR ORDERING, from the recorded `monotonic_ns` instants: every rep of round
-      `r` must have completed BEFORE every rep of round `r+1`. This is the interleaving
-      claim itself, and nothing else here can establish it — an arm-major loop keeping the
-      same rotation arithmetic emits byte-identical `round`/`position`/`arms_in_round`, so
-      the pre-fix reporter printed "the reps were INTERLEAVED … this is OBSERVED" over a
-      NON-interleaved session. The clock is what a forgery cannot reproduce.
-    * every arm covers the SAME rounds — otherwise there is no round to difference within;
-    * within each round the positions are exactly `1..n` with no duplicate — two arms at
-      one position means the recorded round is not a round;
-    * `arms_in_round` AGREES with the number of arms actually present in that round — a
-      round that measured fewer arms than it recorded is a partial round, not a small one;
-    * ROTATION: with >=2 arms and >=2 rounds, NO arm may hold the same position in every
-      round. This is the property, stated positionally. `--arm bypass` (the default) plus
-      the bare scan is the 2-arm case, and it is exactly the case the pre-fix loop got
-      wrong: the bare scan led every round and only the Flight arms rotated, so with one
-      Flight arm nothing rotated at all. NOTE what this rests on: `position` is a label,
-      so rotation is checkable only as far as the labels are honest. The returned record
-      says so, and `interleaving_lines` prints the two claims with different strength.
+    The deleted version returned `verified: True` and a `timing.round_major_verified: True`
+    that was reached WITHOUT COMPARING ANYTHING at one round (`zip(ordered, ordered[1:])` is
+    empty), and `interleaving_lines` then printed "the reps were INTERLEAVED … OBSERVED FROM
+    THE CLOCK". A verdict no measurement backed is the defect this whole issue is about, so
+    the claim is gone rather than re-worded a third time. `#3287/#3299` own re-adding a real,
+    observed drift control on hardware that can support one.
+
+    # The four refusals that remain, and why each is an INTEGRITY check
+
+    None of these establishes a property of the session; each says the FILES disagree with
+    each other, which makes the figures unattributable:
+
+    * arms covering DIFFERENT round sets — `paired_rounds` would have nothing to pair;
+    * positions within a round that are not exactly `1..n` — two arms at one position, or a
+      gap, means the recorded round does not describe the arms present;
+    * `arms_in_round` disagreeing with the number of arms actually present;
+    * two reps recording the IDENTICAL `monotonic_ns` — a strictly sequential loop cannot
+      produce that, so the file was copied rather than written by a measurement.
+
+    The LABEL/INSTANT contradiction check lives in `refuse_label_instant_contradiction`,
+    called from here, and its SCOPE (how many comparisons it was able to make) is recorded as
+    a plain count rather than a pass.
     """
     if not arms_meta:
-        raise Invalid(f"no arms recorded for the {temp} temperature — nothing to interleave")
+        raise Invalid(
+            f"no arms recorded for the {temp} temperature — there is no round metadata to"
+            " check or to record"
+        )
     labels = sorted(arms_meta)
     round_sets = {label: set(arms_meta[label]) for label in labels}
     rounds = round_sets[labels[0]]
@@ -189,8 +213,8 @@ def verify_interleaving(temp: str, arms_meta: dict[str, dict[int, dict[str, int]
             raise Invalid(
                 f"the {temp} arms do not cover the same rounds"
                 f" ({ {k: sorted(v) for k, v in round_sets.items()} }), so there is no"
-                " round to difference WITHIN. The driver measures one rep of every arm per"
-                " round precisely so each round is a contemporaneous set."
+                " round to difference WITHIN. Every figure would be attributed to a round"
+                " some other arm never recorded."
             )
     n_arms = len(labels)
     for rnd in sorted(rounds):
@@ -199,17 +223,28 @@ def verify_interleaving(temp: str, arms_meta: dict[str, dict[int, dict[str, int]
             raise Invalid(
                 f"round {rnd} ({temp}) records positions {positions}, which is not"
                 f" 1..{n_arms} exactly once. Two arms cannot share a position, and a gap"
-                " means an arm of this round was not measured."
+                " means an arm of this round was not recorded."
             )
         for label in labels:
             recorded = arms_meta[label][rnd]["arms_in_round"]
             if recorded != n_arms:
                 raise Invalid(
                     f"round {rnd} ({temp}) has {n_arms} arms present but {label} records"
-                    f" arms_in_round={recorded}. A round that measured fewer arms than it"
-                    " recorded is a PARTIAL round, and differencing within it would"
-                    " compare against an arm that was not there."
+                    f" arms_in_round={recorded}. A round that recorded fewer arms than it"
+                    " claims is a PARTIAL round, and differencing within it would compare"
+                    " against an arm that was not there."
                 )
+    # AN ARM AT A FIXED POSITION IS REFUSED — as a PRODUCER-CONTRACT check, not as evidence
+    # of anything (#3272 round 4). `ws0-baseline.sh` rotates its arm list by round index
+    # (`rotate_arms`), and with >=2 arms over >=2 rounds that rotation necessarily moves
+    # every arm. So a recorded set in which some arm holds ONE position throughout did not
+    # come from this driver's loop — either the artifacts were produced by something else, or
+    # the loop regressed to the pre-#3272 shape where the bare scan led every round. Both
+    # make the artifact set unattributable, which is why it is refused.
+    #
+    # WHAT THIS IS NOT: it is not a drift control, and passing it establishes NOTHING about
+    # the session. The rotation CLAIM this check used to license was deleted; only the
+    # refusal remains, because dropping a fail-closed check would be a loss of coverage.
     fixed = [
         label
         for label in labels
@@ -218,98 +253,71 @@ def verify_interleaving(temp: str, arms_meta: dict[str, dict[int, dict[str, int]
     if n_arms >= 2 and len(rounds) >= 2 and fixed:
         raise Invalid(
             f"the {temp} arm(s) {', '.join(fixed)} held ONE FIXED POSITION across all"
-            f" {len(rounds)} rounds. measurement-method.md §3b step 2 requires the arm"
-            " order to ROTATE every round so no arm holds a fixed position: a fixed"
-            " position means any within-round systematic effect (a cache left by the"
-            " previous arm, a thermal ramp inside the round) lands on the same arm every"
-            " time, and that is a bias the per-round direction count cannot see."
-            " MEASURED before this was checked: the bare scan led every round and only the"
-            " FLIGHT arms rotated, so with the default single Flight arm NOTHING rotated"
-            " (#3272 R4a)."
+            f" {len(rounds)} rounds, which ws0-baseline.sh's rotation cannot produce for"
+            f" {n_arms} arms over {len(rounds)} rounds: it left-rotates the arm list by round"
+            " index, so every arm moves. This artifact set therefore was not written by this"
+            " driver's loop (or the loop regressed to leading every round with the bare scan,"
+            " #3272 R4a), and its figures cannot be attributed. This is a PRODUCER-CONTRACT"
+            " refusal, not a drift control: the rig makes no rotation or interleaving claim"
+            " (#3272 round 4; #3287/#3299)."
         )
-    timing = verify_round_major_timing(temp, arms_meta, labels, rounds)
+    integrity = refuse_label_instant_contradiction(temp, arms_meta, labels, rounds)
     return {
-        "verified": True,
-        # NAMED PRECISELY (#3272 review round 3, B3). This used to read "files written by
-        # ws0-baseline.sh", which was never verified and cannot be: the reporter reads a
-        # directory, and any producer could have written it. What IS true is where the fields
-        # came from and what each one is worth.
+        # PROVENANCE, named precisely: the reporter reads a directory and cannot establish
+        # which program wrote it. There is deliberately no field here a reader could mistake
+        # for a verified property of the session.
         "source": (
             "per-rep <tag>.round artifacts in the session dir (provenance UNVERIFIED — the"
             " reporter reads a directory and cannot establish which program wrote it)"
         ),
-        "rounds": sorted(rounds),
-        "arms_per_round": n_arms,
-        "positions_by_round": {
+        "claims_made": "NONE",
+        "claim_note": (
+            "this block is RECORDED DATA, not a verdict. The rig makes no interleaving,"
+            " round-major-ordering or rotation claim: the earlier claim was DELETED because"
+            " it reported a positive verdict at one round having compared nothing (#3272"
+            " round 4). Re-adding an OBSERVED drift control is tracked by #3287/#3299."
+        ),
+        "rounds_recorded": sorted(rounds),
+        "arms_per_round_recorded": n_arms,
+        "positions_by_round_recorded": {
             str(r): {label: arms_meta[label][r]["position"] for label in labels}
             for r in sorted(rounds)
         },
-        # The OBSERVATION: what the clock says, and how strong a claim it supports.
-        "timing": timing,
-        "rotation_checked": n_arms >= 2 and len(rounds) >= 2,
-        "rotation_note": (
-            "no arm held a fixed position across rounds, as recorded by each rep's"
-            " `position` LABEL (a number the driver computes; the clock cannot corroborate"
-            " WITHIN-round order, only round-major order — see `timing`)"
-            if n_arms >= 2 and len(rounds) >= 2
-            else f"only {len(rounds)} round(s) x {n_arms} arm(s): rotation is not"
-            " observable at this size, so it is NOT claimed"
-        ),
+        "instants_by_round_recorded": {
+            str(r): {label: arms_meta[label][r]["monotonic_ns"] for label in labels}
+            for r in sorted(rounds)
+        },
+        # What the integrity check was ABLE to compare, as a count. Not a pass.
+        "integrity_checks": integrity,
     }
 
 
-def verify_round_major_timing(
+def refuse_label_instant_contradiction(
     temp: str,
     arms_meta: dict[str, dict[int, dict[str, int]]],
     labels: list[str],
     rounds: set[int],
 ) -> dict:
-    """ROUND-MAJOR ordering, established from the recorded clock — or `Invalid` (#3272 B3).
+    """Refuse an artifact set whose round LABELS contradict its recorded INSTANTS.
 
-    # Why this exists
+    This is an INTEGRITY check over the files, deliberately NOT a claim about the session
+    (#3272 round 4). It answers one question: do the recorded `round` labels and the recorded
+    `monotonic_ns` instants tell the same story? Two ways they can fail to:
 
-    The pre-round-3 artifact set carried NO TIMESTAMP ANYWHERE. `round`, `position` and
-    `arms_in_round` are numbers the driver COMPUTES, and `collect_round_meta` additionally
-    forces `round == rep`, so `round` carried zero independent information. An ARM-MAJOR
-    loop keeping the identical rotation arithmetic —
+    * two reps sharing an instant — a strictly sequential loop cannot, so the file was
+      copied;
+    * a rep labelled round `r+1` completing BEFORE a rep labelled round `r` — the labels and
+      the clock cannot both be right, so neither can be used to attribute a figure.
 
-        for arm in rotate_arms(...):         # arms outside
-            for rep in 1..REPS:              # reps inside
-                measure(arm, rep); record_round(tag, rep, pos, n)
-
-    — emits BYTE-IDENTICAL metadata for a session in which no two arms of a "round" ran
-    anywhere near each other. And the reporter printed, over exactly that:
-
-        "the reps were INTERLEAVED … and this is OBSERVED, not asserted"
-
-    which is a re-statement of a label. Since the whole point of interleaving is that the
-    box DRIFTS (~10% in one hour on the recorded machine, nothing changed on the measured
-    path), a claim that cannot see time cannot support it.
-
-    # The property, and its limit — stated because the limit is the honest part
-
-    ESTABLISHED: round-major ordering. `max(completion of round r) < min(completion of round
-    r+1)` for every consecutive pair. An arm-major session violates this necessarily: arm A
-    completes ALL its reps before arm B starts, so A's round-2 instant precedes B's round-1
-    instant.
-
-    NOT ESTABLISHED: the ORDER WITHIN a round, and therefore the ROTATION. Each rep records
-    ONE instant, so within-round order is visible, but which POSITION the driver intended is
-    still a label — the two agree here, and `position` remains the field the rotation check
-    reads. So `interleaving_lines` prints the round-major claim as OBSERVED and the rotation
-    claim as RECORDED, rather than both as observed. Round 3's instruction was to weaken the
-    wording to exactly what is provable, and this is where the line falls.
-
-    Also NOT established: that the gap between rounds is small. A session with a 10-hour
-    pause between two round-major rounds passes — correctly, because that is a fact about
-    the operator, not a defect in the ordering — but the OBSERVED SPAN is returned so a
-    reader can see it, and the report prints it.
+    THE SCOPE IS RETURNED AS A COUNT, never as a pass. At one recorded round there are ZERO
+    consecutive pairs to compare, so `round_pairs_compared` is 0 and this function has
+    established nothing — which is exactly why nothing here returns a `verified` flag and why
+    the report prints no ordering claim. The deleted version returned
+    `round_major_verified: True` in precisely that case.
     """
     completed = {
         label: {r: arms_meta[label][r]["monotonic_ns"] for r in rounds} for label in labels
     }
-    # Every instant is distinct: two reps of a sequential loop cannot complete at the same
-    # nanosecond, so a duplicate means the metadata was copied rather than measured.
     flat = [(label, r, completed[label][r]) for label in labels for r in sorted(rounds)]
     seen: dict[int, tuple[str, int]] = {}
     for label, r, ns in flat:
@@ -317,21 +325,21 @@ def verify_round_major_timing(
             other_label, other_r = seen[ns]
             raise Invalid(
                 f"the {temp} reps {other_label}@round{other_r} and {label}@round{r} record"
-                f" the IDENTICAL completion instant {ns}. The measurement loop is strictly"
-                " sequential, so two reps cannot complete at the same nanosecond: this"
-                " metadata was COPIED, not measured, and a copied timestamp establishes"
-                " nothing about when anything ran (#3272 B3)."
+                f" the IDENTICAL completion instant {ns}. A strictly sequential measurement"
+                " loop cannot complete two reps at the same nanosecond, so this metadata was"
+                " COPIED rather than written by a measurement, and nothing recorded in it can"
+                " be attributed to a rep."
             )
         seen[ns] = (label, r)
 
     ordered = sorted(rounds)
     by_round = {r: [completed[label][r] for label in labels] for r in ordered}
+    pairs = 0
     for earlier, later in zip(ordered, ordered[1:]):
+        pairs += 1
         last_of_earlier = max(by_round[earlier])
         first_of_later = min(by_round[later])
         if last_of_earlier >= first_of_later:
-            # Name the arms, because the shape of the violation identifies the loop that
-            # produced it: an arm-major session shows ONE arm spanning every round.
             late_arm = next(
                 label for label in labels if completed[label][earlier] == last_of_earlier
             )
@@ -339,93 +347,64 @@ def verify_round_major_timing(
                 label for label in labels if completed[label][later] == first_of_later
             )
             raise Invalid(
-                f"the {temp} reps were NOT INTERLEAVED. Round {earlier} did not finish"
-                f" before round {later} began: {late_arm} completed round {earlier} at"
-                f" {last_of_earlier} ns, but {early_arm} completed round {later} earlier, at"
-                f" {first_of_later} ns. This is read from the per-rep `monotonic_ns`"
-                " instants, so it is a fact about WHEN the reps ran and not about how they"
-                " are labelled — an ARM-MAJOR session (all reps of one arm, then all of the"
-                " next) produces exactly this shape while carrying byte-identical"
-                " round/position labels. measurement-method.md §3b: 'same-session"
-                " interleaved A/B/C with a drift control that is code-identical across arms,"
-                " or NO COMPARISON' — the untouched bare scan drifted ~10% in one hour on"
-                " the recorded box, so a cross-window comparison lands that drift straight"
-                " on the bare/flight ratio (#3272 B3)."
+                f"the {temp} round LABELS CONTRADICT the recorded INSTANTS. {late_arm} is"
+                f" labelled round {earlier} and completed at {last_of_earlier} ns, while"
+                f" {early_arm} is labelled round {later} and completed EARLIER, at"
+                f" {first_of_later} ns. The labels and the clock cannot both describe this"
+                " session, so no figure can be attributed to a round: the per-round pairing"
+                " would pair reps by a label the artifact's own timestamps refute. Re-run the"
+                " session rather than reporting it. (This is an INTEGRITY refusal over the"
+                " artifact set — the rig claims no ordering property; see #3287/#3299.)"
             )
-
-    spans = [max(by_round[r]) - min(by_round[r]) for r in ordered]
     return {
-        "established": "round-major ordering",
-        "source": "per-rep `monotonic_ns` completion instants (time.monotonic_ns)",
-        "round_major_verified": True,
-        "within_round_span_ns": {str(r): max(by_round[r]) - min(by_round[r]) for r in ordered},
-        "max_within_round_span_ns": max(spans) if spans else 0,
-        "rounds_compared": len(ordered),
-        # Said explicitly, in the artifact, so a later reader does not have to infer the
-        # limit of the claim from the absence of a field.
-        "not_established": (
-            "the WITHIN-round arm order, and therefore the rotation: each rep records one"
-            " instant, and which POSITION the driver intended remains a computed label."
-            " Also not established: that the gap between rounds is small — see"
-            " within_round_span_ns for what was observed."
+        "duplicate_instant_check": "applied to every recorded rep",
+        "reps_examined": len(flat),
+        # THE HONEST SCOPE. Zero pairs means zero orderings were compared, which is what a
+        # single-round session gives you — and it is recorded rather than converted into a
+        # verdict, because a verdict from zero comparisons is the round-4 finding itself.
+        "round_pairs_compared": pairs,
+        "scope_note": (
+            f"{pairs} consecutive round pair(s) were available to compare. This count is NOT"
+            " a verdict: at fewer than two recorded rounds it is 0 and nothing about ordering"
+            " was — or could be — established. No ordering claim is derived from it anywhere"
+            " (#3272 round 4)."
         ),
     }
 
 
-def interleaving_lines(observation: dict) -> list[str]:
-    """The interleaving claim, DERIVED — and each half printed at ITS OWN STRENGTH (#3272 B3).
+def recorded_round_metadata_lines(record: dict) -> list[str]:
+    """State what the round metadata IS, and state that no claim is made from it.
 
-    Round 3's finding was that the printed text said "OBSERVED, not asserted" for something
-    INFERRED: the source was `round`/`position`/`arms_in_round`, all three computed by the
-    driver, with `round` additionally forced equal to `rep` — so an arm-major session
-    produced byte-identical metadata and got the interleaving claim printed over it.
-
-    Two claims now, with different words for different evidence:
-
-    * the INTERLEAVING is **OBSERVED**, from the per-rep `monotonic_ns` completion instants:
-      round-major ordering is a fact about the clock, which is the one thing a relabelled
-      arm-major session cannot forge.
-    * the ROTATION is **RECORDED**, from each rep's `position` LABEL. The clock corroborates
-      round-major ordering, not which position within a round the driver intended, so the
-      weaker word is the accurate one.
-
-    The rotation sentence is printed only when `rotation_checked` is true: at one round (or
-    one arm) there is nothing to rotate, and saying "arm order rotated" would be a claim
-    about something not measured — the unconditional-NOTES shape this replaces.
+    The DELETED predecessor (`interleaving_lines`) printed "the reps were INTERLEAVED …
+    OBSERVED FROM THE CLOCK … the report verifies that every rep of round r finished before
+    any rep of round r+1" — unconditionally, including at one round where nothing was
+    compared. These lines make no claim at all: they say what was recorded, that it is inert,
+    and where the real control is tracked.
     """
-    timing = observation["timing"]
-    lines = [
-        "  * the reps were INTERLEAVED — one rep of every arm per round — and this is"
-        " OBSERVED FROM THE CLOCK, not inferred from a label: every rep records the"
-        " monotonic instant at which it COMPLETED, and the report verifies that every rep"
-        " of round r finished before any rep of round r+1, REFUSING the session otherwise."
-        f" Rounds observed: {observation['rounds']},"
-        f" {observation['arms_per_round']} arm(s) per round; widest within-round span"
-        f" {timing['max_within_round_span_ns'] / 1e9:.1f}s."
-        " (An ARM-MAJOR session — all reps of one arm, then all of the next — carries"
-        " byte-identical round/position labels and is caught only here.)"
+    integrity = record["integrity_checks"]
+    return [
+        "  * this rig makes NO INTERLEAVING CLAIM and NO ROUND-ORDERING CLAIM. Each rep's"
+        " recorded round/position/arms_in_round/monotonic_ns are carried through to"
+        " results.json (.recorded_round_metadata) as INERT RECORDED DATA for an operator to"
+        " analyse; nothing here derives a property from them."
+        f" Rounds recorded: {record['rounds_recorded']},"
+        f" {record['arms_per_round_recorded']} arm(s) per round.",
+        "    What IS enforced is artifact-set INTEGRITY, which is a statement about the"
+        " files and not about the measurement: every arm must cover the same rounds, the"
+        " positions within a round must be 1..n exactly once, arms_in_round must match the"
+        " arms present, no two reps may share an instant, and the round LABELS must not"
+        " contradict the recorded INSTANTS. A session violating any of these is REFUSED."
+        f" Consecutive round pairs available to compare: {integrity['round_pairs_compared']}"
+        f" (over {integrity['reps_examined']} rep(s)) — a COUNT, not a verdict: at one"
+        " recorded round it is 0 and no ordering was compared.",
+        "    A same-session interleaved drift control WAS specified for this rig and is NOT"
+        " IMPLEMENTED OR ENFORCED here. The earlier claim was deleted because it reported a"
+        " positive verdict having compared nothing at the default --reps 1 (#3272 round 4);"
+        " re-adding an OBSERVED control on real hardware is tracked by #3287/#3299. Until"
+        " then, read the per-round direction count below and treat any cross-arm difference"
+        " as UNCONTROLLED for drift: the untouched bare scan moved ~10% in one hour on the"
+        " recorded box.",
     ]
-    if observation["rotation_checked"]:
-        lines.append(
-            "    The arm ORDER ROTATED — RECORDED, not clock-observed: no arm held a fixed"
-            " `position` across rounds, so no arm carries a within-round systematic effect"
-            " every time (measurement-method.md §3b step 2). `position` is a label the"
-            " driver computes; the clock establishes round-major ordering only, so this"
-            " half rests on the artifacts being the driver's. Positions by round:"
-            f" {observation['positions_by_round']}."
-        )
-    else:
-        lines.append(f"    NOTE: {observation['rotation_note']}.")
-    lines.append(
-        f"    NOT ESTABLISHED by the artifacts: {timing['not_established']}"
-    )
-    lines.append(
-        "    This rig produces no cross-session absolute: the untouched bare scan drifted"
-        " ~10% in one hour on the recorded box, so an arm-after-arm ordering would put"
-        " that drift straight onto the bare/flight ratio. Read the per-round direction"
-        " count, not the median difference alone (measurement-method.md §3b)."
-    )
-    return lines
 
 
 def paired_rounds(scan: dict, fl: dict) -> tuple[list[dict], list[str]]:
@@ -433,9 +412,12 @@ def paired_rounds(scan: dict, fl: dict) -> tuple[list[dict], list[str]]:
 
     Each rep's `round` field is the one `collect_round_meta` read from that rep's own
     `<tag>.round` artifact and cross-checked against its filename — NOT the rep index the
-    reporter happened to iterate. That distinction is the finding: pairing by index
-    produces a per-round table for an arm-major session too, and prints it under a claim
-    that the session was interleaved.
+    reporter happened to iterate. That distinction is the finding: pairing by index produces
+    a per-round table for a session whose artifacts say something else entirely.
+
+    STATED PLAINLY (#3272 round 4): pairing by the recorded round is NOT evidence that the
+    reps were interleaved, and this rig makes no such claim. The pairing is only as
+    contemporaneous as the session that produced the artifacts actually was.
 
     Differencing within a round, rather than the two medians, is what
     `measurement-method.md` §3b step 4 requires:
@@ -453,11 +435,11 @@ def paired_rounds(scan: dict, fl: dict) -> tuple[list[dict], list[str]]:
     fl_by_round = {r["round"]: r for r in fl["reps"]}
     if set(scan_by_round) != set(fl_by_round):
         raise Invalid(
-            f"the bare scan and {fl['arm']} do not cover the same OBSERVED rounds"
+            f"the bare scan and {fl['arm']} do not cover the same RECORDED rounds"
             f" (scan {sorted(scan_by_round)}, flight {sorted(fl_by_round)}), so no"
-            " within-round comparison is possible. The driver interleaves one rep of every"
-            " arm per round precisely so each round is contemporaneous; differencing"
-            " medians alone is what measurement-method.md §3b forbids."
+            " within-round comparison is possible. The driver records one rep of every arm"
+            " per round; differencing medians alone is what measurement-method.md §3b"
+            " forbids."
         )
     rounds = []
     for rnd in sorted(scan_by_round):

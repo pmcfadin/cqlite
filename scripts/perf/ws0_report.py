@@ -52,9 +52,9 @@ from ws0_collect import (  # noqa: E402  (path set above; stdlib-only, no deps)
     prewarm_warning,
 )
 from ws0_rounds import (  # noqa: E402
-    interleaving_lines,
+    collect_recorded_round_metadata,
     paired_rounds,
-    verify_interleaving,
+    recorded_round_metadata_lines,
 )
 from ws0_validate import (  # noqa: E402
     Invalid,
@@ -212,10 +212,11 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "",
     ]
 
-    # The INTERLEAVING is ESTABLISHED per temperature, from the recorded metadata, before
-    # anything is printed about it (#3272 R3). `interleaving` accumulates the observation
-    # for each temperature; the NOTES are derived from it below rather than asserted.
-    interleaving: dict[str, dict] = {}
+    # The per-rep round metadata is INTEGRITY-CHECKED and RECORDED per temperature. No
+    # ordering/interleaving property is derived from it: that claim was DELETED in #3272
+    # round 4 (it returned a positive verdict at one round having compared nothing), and
+    # re-adding an OBSERVED drift control is tracked by #3287/#3299.
+    recorded_rounds: dict[str, dict] = {}
     for temp in temps:
         scan = collect_scan(d, temp, reps)
         results["measurements"].append(scan)
@@ -287,29 +288,27 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             rounds, paired_lines = paired_rounds(scan, fl)
             fl["per_round_paired"] = rounds
             lines += paired_lines
-        # The POSITIONAL interleaving/rotation check, over every arm of this temperature
-        # at once — it is a property of the ROUND, so it cannot be checked per arm-pair.
+        # The artifact-set INTEGRITY check over every arm of this temperature at once — it
+        # is a property of the recorded ROUND, so it cannot be checked per arm-pair.
         # `bare_scan` participates as an arm because it IS one: it is measured in every
-        # round as the drift control, and the pre-fix loop gave it a FIXED first position,
-        # which with the default single Flight arm meant no rotation happened at all
-        # (#3272 R4a).
+        # round. This produces RECORDED DATA plus refusals, never a verdict (#3272 round 4).
         arms_meta = {"bare_scan": scan["round_metadata"]}
         for m in results["measurements"]:
             if m["temperature"] == temp and m["arm"].startswith("flight_"):
                 arms_meta[m["arm"]] = m["round_metadata"]
-        interleaving[temp] = verify_interleaving(temp, arms_meta)
+        recorded_rounds[temp] = collect_recorded_round_metadata(temp, arms_meta)
         lines.append("")
 
-    results["interleaving"] = interleaving
+    results["recorded_round_metadata"] = recorded_rounds
     lines += [
         "NOTES",
         "  * warm and cold are SEPARATE claims above; nothing here is blended.",
     ]
-    # DERIVED from the recorded round/position artifacts, per temperature — never an
-    # unconditional sentence (#3272 R3). A session whose interleaving could not be
-    # established never reaches here: `verify_interleaving` raised.
+    # What the round artifacts RECORD, and an explicit statement that no ordering claim is
+    # made from them (#3272 round 4). There is no code path here that asserts the session
+    # was interleaved.
     for temp in temps:
-        lines += interleaving_lines(interleaving[temp])
+        lines += recorded_round_metadata_lines(recorded_rounds[temp])
     lines += [
         "  * only the SELECTION printed above was measured; an absent temperature or "
         "arm was NOT run and nothing here speaks to it (results.json .selection).",

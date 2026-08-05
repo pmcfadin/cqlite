@@ -393,7 +393,7 @@ else
 fi
 # STRUCTURAL, over EVERY reporting-path file's EXECUTABLE source (#3272 review round 2
 # nit). It used to parse `ws0_report.py` alone — but every fail-closed DECISION now lives
-# in `ws0_validate.py`, the collection in `ws0_collect.py` and the interleaving in
+# in `ws0_validate.py`, the collection in `ws0_collect.py` and the round metadata in
 # `ws0_rounds.py`, so a new `.get(k, 0)` in any of them was outside the scan's subject
 # entirely. The file list is DISCOVERED from the directory, not enumerated: a fifth module
 # would otherwise be unscanned the moment someone adds it, which is how this hole opened.
@@ -741,23 +741,24 @@ for script in test_ws0_report_guards.sh test_ws0_cpu_pinning_guards.sh \
 done
 
 # ==========================================================================
-# 7 — the reps are INTERLEAVED, and the comparison is differenced WITHIN a round
+# 7 — the LOOP ORDER is rounds-outside/arms-inside/rotated, and the comparison is
+#     differenced WITHIN a round
 # ==========================================================================
-# The repo DOES carry a binding interleaving rule; the reviewer's claim was verified
-# before acting on it. `docs/reports/ws0-3096-artifacts/measurement-method.md` §3b:
+# SCOPE, stated first because round 4 turned on exactly this confusion. What is asserted
+# below is a property of the DRIVER'S LOOP ORDER, driven directly. It is NOT a claim that any
+# session was interleaved, and the rig does not make one: see §3b.1 of
+# `docs/reports/ws0-3096-artifacts/measurement-method.md` — the specified drift control is NOT
+# IMPLEMENTED OR ENFORCED, and re-adding an OBSERVED one is #3287/#3299.
 #
-#   "**THE RULE, binding on every future use of this rig: same-session interleaved
-#   A/B/C with a drift control that is code-identical across arms, or NO COMPARISON.**"
-#   (1) "run **one rep at a time**, never all reps of an arm back to back";
-#   (2) "**rotate the arm order every round** so no arm holds a fixed position";
-#   (4) "**Difference within a round** … not the medians alone."
-#
-# and `scripts/perf/README.md` §"No cross-session absolutes — interleave or do not
-# compare" restates it. It was paid for: the UNTOUCHED warm bare scan read 370,134
-# rows/s and 333,206 rows/s an hour later on the same box — ~10% drift with nothing
-# changed on the measured path. The pre-fix driver ran ALL bare-scan reps, then all
-# Flight reps of arm 1, then all of arm 2, so that drift landed directly on the
-# `bare/flight` ratio and the 1.3x verdict.
+# The ordering is still worth asserting because the ALTERNATIVE is measurably worse. §3b
+# requires (1) "run one rep at a time, never all reps of an arm back to back", (2) "rotate the
+# arm order every round so no arm holds a fixed position", (4) "difference within a round …
+# not the medians alone" — and the rule was paid for: the UNTOUCHED warm bare scan read
+# 370,134 rows/s and 333,206 rows/s an hour later on the same box, ~10% drift with nothing
+# changed on the measured path. The pre-fix driver ran ALL bare-scan reps, then all Flight reps
+# of arm 1, then all of arm 2, so that drift landed directly on the `bare/flight` ratio and
+# the 1.3x verdict. Ordering the loop this way removes that specific structural hazard; it
+# does not measure drift, and nothing downstream verifies it happened.
 #
 # NON-VACUITY, measured on the pre-fix loop
 #   for temp in $TEMPS; do
@@ -799,7 +800,7 @@ got=$(order_probe 3 bypass merge)
 if grep -q 'scan-1 flight-bypass-1 flight-merge-1 flight-bypass-2 flight-merge-2 scan-2 flight-merge-3 scan-3 flight-bypass-3' <<<"$got"; then
   pass "OBSERVED: the loop is ROUND-MAJOR and the bare scan ROTATES with the Flight arms"
 else
-  fail "the loop must interleave one rep of EVERY arm per round, scan included (order: $got)"
+  fail "the loop must run one rep of EVERY arm per round, scan included (order: $got)"
 fi
 # The three properties, asserted separately so a partial regression is diagnosable.
 if ! grep -qE 'scan-1 scan-2|scan-2 scan-3' <<<"$got"; then
@@ -860,7 +861,7 @@ fi
 # Interleaving the driver is half the fix; the other half is that the REPORT states the
 # paired per-round comparison rather than only the median-vs-median difference. The
 # recorded case for that: #3096's lever 4 measured `+4,817 rows/s / +2.3%` by medians
-# and ZERO on 8 interleaved rounds (median −0.03%, 4 of 8 rounds positive).
+# and ZERO over 8 rounds (median −0.03%, 4 of 8 rounds positive).
 d="$TMP/paired"; mkdir -p "$d"
 # Three rounds where the MEDIAN favours flight but the per-round direction is split —
 # the exact shape a median-only reading misreports.
@@ -879,7 +880,7 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         "rows_total": rows, "rows_per_s": rps, "duration_s": 4.0}) + "\n")
     (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
     (d / f"{tag}.prewarm.status").write_text("ok\n")
-    # The interleaving metadata the reporter REQUIRES (#3272 R3), alternating position by
+    # The round metadata the reporter REQUIRES, alternating position by
     # round exactly as the driver does — the scan fixture takes the complement.
     # `monotonic_ns` too (#3272 review round 3, B3): round-major and distinct, which is
     # the shape a real sequential loop produces and the property the reporter verifies.
@@ -913,35 +914,38 @@ else
   fail "results.json must record the paired per-round records"
 fi
 # ==========================================================================
-# R3 — the INTERLEAVING CLAIM is DERIVED from recorded metadata, never asserted
+# R3/round-4 — the round metadata is REQUIRED and INTEGRITY-CHECKED, and NO CLAIM
+# is made from it
 # ==========================================================================
-# NON-VACUITY, measured against the round-1 reporter: the NOTES block printed
+# HISTORY, because it is the reason this section is shaped the way it is. Round 1's
+# reporter printed
 #
 #   "the reps were INTERLEAVED — one rep per arm per round, arm order rotated"
 #
-# UNCONDITIONALLY, as a claim about the session, while `paired_rounds` paired by REP
-# INDEX and read NOTHING the driver recorded. The driver DID write `<tag>.round` files
-# (and carried a comment saying the reporter read them); `grep -c '\.round' ws0_report.py`
-# on that revision is **0**. MEASURED: a session dir with EVERY `.round` file deleted —
-# i.e. one that could equally be an arm-major run, or reps re-run individually into one
-# `--out` — exited **0** and printed the interleaving sentence verbatim.
+# UNCONDITIONALLY, while `paired_rounds` paired by REP INDEX and read NOTHING the driver
+# recorded. Rounds 2 and 3 made the claim conditional and then "clock-observed" — and round
+# 4 found the clock-observed version FALSE at the rig's own default: at `--reps 1` there is
+# one round, `zip(ordered, ordered[1:])` is EMPTY, so ZERO orderings were compared while
+# `round_major_verified` still said `True` and the sentence still printed.
 #
-# So: the metadata is REQUIRED, the pairing is by the OBSERVED round, and the sentence is
-# derived from what was observed.
+# By owner ruling the CLAIM WAS DELETED (not re-worded a fourth time). What remains, and
+# what this section asserts: the metadata is REQUIRED, the pairing is by the RECORDED
+# round, the artifact set is INTEGRITY-CHECKED against itself, and the report makes NO
+# ordering claim on ANY session shape.
 d="$TMP/no-round-meta"; make_session "$d" "$GOOD_FLIGHT"
 rm -f "$d"/*.round
-expect_reject "a session with NO round metadata is REFUSED (the interleaving is unestablished)" \
+expect_reject "a session with NO round metadata is REFUSED (unattributable, unpairable)" \
   "has no round metadata" "$d" "$TMP/corpus"
 out=$(run_report "$d" "$TMP/corpus")
-if grep -q "may not print the interleaving claim" <<<"$out"; then
-  pass "the refusal says the CLAIM is what cannot be printed (not merely 'a file is missing')"
+if grep -q "the per-round pairing has nothing to pair" <<<"$out"; then
+  pass "the refusal says what is lost (attribution + pairing), not merely 'a file is missing'"
 else
-  fail "the round-metadata refusal must name the claim it protects (out: $out)"
+  fail "the round-metadata refusal must name what it protects (out: $out)"
 fi
 # ...and NOTHING is written: a report that cannot establish its own headline property must
 # not leave a results.json a later reader could quote.
 if [ ! -e "$d/results.json" ]; then
-  pass "no results.json is written when the interleaving cannot be established"
+  pass "no results.json is written when the round metadata is absent"
 else
   fail "a refused run must not leave a results.json behind"
 fi
@@ -957,10 +961,11 @@ printf 'round=1\n' > "$d/scan-warm-1.round"     # no position, no arms_in_round
 expect_reject "round metadata with no 'position' is REFUSED (a round index alone proves nothing)" \
   "carries no 'position'" "$d" "$TMP/corpus"
 out=$(run_report "$d" "$TMP/corpus")
-if grep -q "cannot distinguish an interleaved session from an arm-major one" <<<"$out"; then
-  pass "the refusal explains WHY position is required (a rep index exists either way)"
+if grep -q "A partial record is refused rather than defaulted" <<<"$out" \
+  && grep -q "no ORDERING property is derived from these" <<<"$out"; then
+  pass "the refusal states the field is REQUIRED RECORDED DATA and that no ordering claim rests on it"
 else
-  fail "the position refusal must explain why the round index is insufficient (out: $out)"
+  fail "the position refusal must name what it is and disclaim the ordering property (out: $out)"
 fi
 d="$TMP/round-meta-garbage"; make_session "$d" "$GOOD_FLIGHT"
 printf 'round=one\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
@@ -971,16 +976,16 @@ make_round "$d" scan-warm-1 7 1 2 1000000
 expect_reject "a round that disagrees with the rep index in the FILENAME is REFUSED" \
   "does not describe one session" "$d" "$TMP/corpus"
 
-# THE ROTATION CHECK, positionally. Two arms over two rounds with the SCAN AT POSITION 1
-# BOTH TIMES is exactly what the round-1 driver produced for the default `--arm bypass`,
-# and it must be refused rather than reported under a claim that the order rotated.
+# THE FIXED-POSITION REFUSAL, as a PRODUCER-CONTRACT check. Two arms over two rounds with
+# the SCAN AT POSITION 1 BOTH TIMES is exactly what the round-1 driver produced for the
+# default `--arm bypass`, and `rotate_arms` cannot produce it — so the artifact set was not
+# written by this driver's loop and must be refused. It licenses NO claim (#3272 round 4).
 d="$TMP/no-rotation"; mkdir -p "$d"
 for rep in 1 2; do
   make_scan_rep "$d" warm "$rep" ok
   make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
-  # SCAN AT POSITION 1 BOTH ROUNDS, with round-major timestamps: the timing check must
-  # PASS (the session really was interleaved) so the refusal below is attributable to the
-  # ROTATION property alone, not to the clock.
+  # SCAN AT POSITION 1 BOTH ROUNDS, with non-contradictory instants, so the refusal below is
+  # attributable to the FIXED POSITION alone and not to the label/instant check.
   make_round "$d" "scan-warm-$rep" "$rep" 1 2 "$(( rep * 1000000000 + 1000000 ))"
   make_round "$d" "flight-bypass-warm-$rep" "$rep" 2 2 "$(( rep * 1000000000 + 2000000 ))"
 done
@@ -992,6 +997,14 @@ if [ "$rc" -ne 0 ] && grep -q "held ONE FIXED POSITION" <<<"$out" \
   pass "OBSERVED: an arm at a FIXED position across rounds is REFUSED, naming the arm (R4a)"
 else
   fail "a fixed arm position must be refused (rc=$rc, out: $out)"
+fi
+# ...and the refusal must say what it IS — a producer-contract check — rather than imply the
+# rig verified a rotation.
+if grep -q "PRODUCER-CONTRACT refusal, not a drift control" <<<"$out" \
+  && grep -q "no rotation or interleaving claim" <<<"$out"; then
+  pass "the fixed-position refusal disclaims being a drift control (#3272 round 4)"
+else
+  fail "the fixed-position refusal must not read as a verified rotation (out: $out)"
 fi
 # TWO ARMS SHARING A POSITION is not a round at all.
 d="$TMP/dup-position"; mkdir -p "$d"
@@ -1010,17 +1023,9 @@ make_round "$d" flight-bypass-warm-1 1 2 3 1000000002
 expect_reject "a round recording MORE arms than are present is REFUSED (a partial round)" \
   "is a PARTIAL round" "$d" "$TMP/corpus"
 
-# THE ACCEPT DIRECTION, affirmatively: a properly interleaved session must print the
-# claim AS AN OBSERVATION, naming the rounds and the positions, and record it in
-# results.json — so the sentence cannot be present without the artifacts behind it.
-#
-# AND THE TWO HALVES MUST BE WORDED DIFFERENTLY (#3272 review round 3, B3). The
-# interleaving is OBSERVED FROM THE CLOCK (per-rep `monotonic_ns`, round-major ordering
-# verified); the rotation is only RECORDED, because `position` is a number the driver
-# COMPUTES and the clock cannot corroborate within-round order. The pre-fix text said
-# "OBSERVED, not asserted" for BOTH — over a source (`round`/`position`/`arms_in_round`)
-# that an arm-major loop reproduces byte-for-byte. So the assertion below checks the
-# strength of each sentence, not merely that a sentence exists.
+# THE ACCEPT DIRECTION, affirmatively: a complete session is ACCEPTED, its round metadata
+# is RECORDED VERBATIM in results.json, and the report says — in words — that it makes no
+# interleaving/ordering claim and that the drift control is not implemented.
 d="$TMP/rotated-ok"; mkdir -p "$d"
 for rep in 1 2; do
   make_scan_rep "$d" warm "$rep" ok
@@ -1029,33 +1034,51 @@ done
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
   --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "OBSERVED FROM THE CLOCK" <<<"$out" \
-  && grep -q "The arm ORDER ROTATED — RECORDED, not clock-observed" <<<"$out" \
-  && grep -q "Positions by round" <<<"$out"; then
-  pass "OBSERVED: a rotated session prints the interleaving as CLOCK-OBSERVED and the rotation as RECORDED (B3)"
+if [ "$rc" -eq 0 ] && grep -q "makes NO INTERLEAVING CLAIM and NO ROUND-ORDERING CLAIM" <<<"$out" \
+  && grep -q "INERT RECORDED DATA" <<<"$out"; then
+  pass "OBSERVED: an accepted session states that NO interleaving/ordering claim is made"
 else
-  fail "a rotated session must print the derived interleaving claim (rc=$rc, out: $out)"
+  fail "the report must disclaim the interleaving/ordering property (rc=$rc, out: $out)"
 fi
-# ...and the printed text must NOT claim more than the artifacts prove: the report states
-# what is NOT established, so a reader is not left to infer the limit from an absence.
-if grep -q "NOT ESTABLISHED by the artifacts" <<<"$out" \
-  && grep -q "the WITHIN-round arm order, and therefore the rotation" <<<"$out"; then
-  pass "the report STATES what the artifacts do not establish (the within-round order)"
+# ...and it must name the ABSENT CONTROL and where it is tracked, so a reader is not left to
+# infer from silence that the §3b control ran.
+if grep -q "NOT IMPLEMENTED OR ENFORCED here" <<<"$out" \
+  && grep -q "#3287/#3299" <<<"$out" \
+  && grep -q "UNCONTROLLED for drift" <<<"$out"; then
+  pass "the report names the ABSENT drift control, the tracking issues, and the consequence"
 else
-  fail "the report must state the limit of its own interleaving claim (out: $out)"
+  fail "the report must state that the drift control is not implemented (out: $out)"
+fi
+# THE DELETED KEYS MUST BE GONE, everywhere in the document. That property holds of EVERY
+# report this rig writes, so it lives in ONE place three suites call
+# (`scripts/tests/ws0_assert_no_verdict_fields.py`) rather than in a heredoc per call site,
+# and it is asked over JSON KEYS rather than the serialized text — the replacement prose
+# legitimately says the word "interleaving" (it says the rig makes none).
+if python3 "$REPO_ROOT/scripts/tests/ws0_assert_no_verdict_fields.py" "$d/results.json" >/dev/null; then
+  pass "results.json carries NONE of the 13 deleted interleaving verdict fields (shared assert)"
+else
+  fail "results.json still carries a deleted verdict field: $(python3 "$REPO_ROOT/scripts/tests/ws0_assert_no_verdict_fields.py" "$d/results.json" 2>&1)"
 fi
 if python3 - "$d/results.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
-iv = r["interleaving"]["warm"]
-assert iv["verified"] is True, iv
-assert iv["rounds"] == [1, 2], iv
-assert iv["arms_per_round"] == 2, iv
-assert iv["rotation_checked"] is True, iv
-# The bare scan is a ROTATED ARM, so its position must differ across rounds.
-pos = [iv["positions_by_round"][str(k)]["bare_scan"] for k in (1, 2)]
+rec = r["recorded_round_metadata"]["warm"]
+assert rec["claims_made"] == "NONE", rec
+assert "no interleaving" in rec["claim_note"], rec
+assert "#3287/#3299" in rec["claim_note"], rec
+assert "UNVERIFIED" in rec["source"], rec
+assert rec["rounds_recorded"] == [1, 2], rec
+assert rec["arms_per_round_recorded"] == 2, rec
+# The RECORDED positions and instants are carried through verbatim.
+pos = [rec["positions_by_round_recorded"][str(k)]["bare_scan"] for k in (1, 2)]
 assert sorted(pos) == [1, 2], pos
-# ...and every rep carries the round it was MEASURED in, plus its position.
+assert set(rec["instants_by_round_recorded"]) == {"1", "2"}, rec
+# The integrity SCOPE is a COUNT, not a verdict: 2 rounds => 1 consecutive pair.
+integ = rec["integrity_checks"]
+assert integ["round_pairs_compared"] == 1, integ
+assert integ["reps_examined"] == 4, integ
+assert "NOT a verdict" in integ["scope_note"], integ
+# ...and every rep carries the round it RECORDED, plus its position.
 for m in r["measurements"]:
     for rep in m["reps"]:
         assert rep["round"] == rep["rep"], rep
@@ -1063,41 +1086,104 @@ for m in r["measurements"]:
         assert rep["arms_in_round"] == 2, rep
 PY
 then
-  pass "results.json records the interleaving OBSERVATION and each rep's round+position"
+  pass "results.json RECORDS the round metadata and carries NO verdict field (deleted keys absent)"
 else
-  fail "results.json must record the interleaving observation (out: $out)"
+  fail "results.json must record the metadata without any verdict field (out: $out)"
 fi
-# At ONE round the rotation is NOT OBSERVABLE, and must therefore NOT be claimed — the
-# same rule as everything else here: a positive verdict needs an affirmative measurement.
+# ==========================================================================
+# ROUND 4 — NO INTERLEAVING CLAIM ON *ANY* SESSION SHAPE
+# ==========================================================================
+# This is the assertion the deleted claim could not satisfy. At ONE round `zip(ordered,
+# ordered[1:])` is empty, so the pre-fix code compared ZERO orderings and still printed "the
+# reps were INTERLEAVED … OBSERVED FROM THE CLOCK … every rep of round r finished before any
+# rep of round r+1" with `round_major_verified: True`. MEASURED on that revision:
+# `$TMP/one-round` exited 0 and printed the sentence verbatim, and the only assertion over it
+# checked the ROTATION text, so the timing half went unexamined.
+#
+# So the property is now asserted over EVERY session shape a legal run can have — one round,
+# many rounds — and over a FORGED one, at the level of the FORBIDDEN PHRASES rather than a
+# single expected sentence. Phrases, because the failure mode is a claim reappearing in new
+# words: any of these in the transcript is a finding.
+claim_phrases=(
+  'were INTERLEAVED'
+  'reps were INTERLEAVED'
+  'OBSERVED FROM THE CLOCK'
+  'round-major'
+  'round-major ordering'
+  'ORDER ROTATED'
+  'finished before any rep of round'
+)
+no_claim_probe() { # no_claim_probe <label> <transcript>
+  local label="$1" transcript="$2" phrase hit=""
+  for phrase in "${claim_phrases[@]}"; do
+    if grep -qi -- "$phrase" <<<"$transcript"; then hit="$phrase"; break; fi
+  done
+  if [ -z "$hit" ]; then
+    pass "no-claim: $label prints NO interleaving/ordering claim (all ${#claim_phrases[@]} phrases absent)"
+  else
+    fail "no-claim: $label printed the forbidden phrase '$hit' (out: $transcript)"
+  fi
+}
+# The MANY-ROUND shape (the transcript captured just above).
+no_claim_probe "a 2-round session" "$out"
+# The ONE-ROUND shape — the `--reps 1` default, and the exact case round 4 flagged.
 d="$TMP/one-round"; make_session "$d" "$GOOD_FLIGHT"
-out=$(run_report "$d" "$TMP/corpus"); rc=$?
-if [ "$rc" -eq 0 ] && ! grep -q "The arm ORDER ROTATED" <<<"$out" \
-  && grep -q "rotation is not observable at this size" <<<"$out"; then
-  pass "OBSERVED: at ONE round the rotation is NOT claimed, and the report says why"
+out_one=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "a ONE-ROUND session is still ACCEPTED (the claim was deleted, not the report)"
 else
-  fail "a single-round session must not claim rotation (rc=$rc, out: $out)"
+  fail "a one-round session must be accepted (rc=$rc, out: $out_one)"
 fi
-# STRUCTURAL: no unconditional interleaving sentence may survive in the reporter. The
-# claim must come from `interleaving_lines`, which only runs on a verified observation.
-if python3 - "$REPO_ROOT/scripts/perf/ws0_report.py" <<'PY'
-import ast, sys
-tree = ast.parse(open(sys.argv[1]).read())
-for node in ast.walk(tree):
-    if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        b = node.body
-        if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
-                and isinstance(b[0].value.value, str):
-            node.body = b[1:] or [ast.Pass()]
-code = ast.unparse(ast.fix_missing_locations(tree))
-if "arm order rotated" in code:
-    raise SystemExit("ws0_report.py still carries an unconditional 'arm order rotated' claim")
-if "interleaving_lines" not in code:
-    raise SystemExit("ws0_report.py does not derive the interleaving claim from the observation")
+no_claim_probe "the ONE-ROUND default (--reps 1)" "$out_one"
+# ...and at one round the recorded scope must SAY zero orderings were comparable, rather than
+# omitting the number — the count is what makes the absence of a claim legible.
+if python3 "$REPO_ROOT/scripts/tests/ws0_assert_no_verdict_fields.py" "$d/results.json" >/dev/null \
+  && python3 - "$d/results.json" <<'PY'
+import json, sys
+integ = json.load(open(sys.argv[1]))["recorded_round_metadata"]["warm"]["integrity_checks"]
+assert integ["round_pairs_compared"] == 0, integ
+assert "NOT a verdict" in integ["scope_note"], integ
 PY
 then
-  pass "STRUCTURAL: the reporter carries NO unconditional interleaving sentence"
+  pass "OBSERVED: at ONE round results.json records round_pairs_compared=0 and NO verdict (round 4's finding)"
 else
-  fail "an unconditional interleaving claim remains in ws0_report.py"
+  fail "the one-round session must record a ZERO comparison count and no verdict"
+fi
+if grep -q "it is 0 and no ordering was compared" <<<"$out_one"; then
+  pass "the one-round transcript SAYS zero orderings were compared (an absence made legible)"
+else
+  fail "the one-round report must state that no ordering was compared (out: $out_one)"
+fi
+# STRUCTURAL: the reporter and the rounds module must carry NO claim-bearing sentence and no
+# verdict-producing function at all. Docstrings are stripped first (prose necessarily quotes
+# the claim it removed), so this scans EXECUTABLE code — the same technique the earlier
+# rounds used, pointed at the phrases and the identifiers instead.
+if python3 - "$REPO_ROOT/scripts/perf/ws0_report.py" "$REPO_ROOT/scripts/perf/ws0_rounds.py" <<'PY'
+import ast, sys
+BANNED_TEXT = ("were INTERLEAVED", "OBSERVED FROM THE CLOCK", "ORDER ROTATED",
+               "round-major ordering", "finished before any rep of round")
+BANNED_NAMES = ("verify_interleaving", "verify_round_major_timing", "interleaving_lines",
+                "round_major_verified", "rotation_checked")
+for path in sys.argv[1:]:
+    tree = ast.parse(open(path).read())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            b = node.body
+            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+                    and isinstance(b[0].value.value, str):
+                node.body = b[1:] or [ast.Pass()]
+    code = ast.unparse(ast.fix_missing_locations(tree))
+    for bad in BANNED_TEXT:
+        if bad in code:
+            raise SystemExit(f"{path} still carries the claim text {bad!r}")
+    for bad in BANNED_NAMES:
+        if bad in code:
+            raise SystemExit(f"{path} still carries the verdict identifier {bad!r}")
+PY
+then
+  pass "STRUCTURAL: neither reporter module carries a claim sentence or a verdict identifier"
+else
+  fail "a deleted interleaving claim/verdict has returned to the reporting path"
 fi
 # And the DRIVER must record all three fields — the wiring half, so the reporter's
 # requirement cannot be satisfied only by test fixtures.
@@ -1109,7 +1195,47 @@ if awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
      | grep -q 'arms_in_round=%s'; then
   pass "the DRIVER records round/position/arms_in_round per rep (the reporter's requirement is wired)"
 else
-  fail "ws0-baseline.sh must record all three interleaving fields per rep"
+  fail "ws0-baseline.sh must record all three round-metadata fields per rep"
+fi
+# ...and NO FILE of the rig may EMIT the deleted claim. The claim came back twice in new
+# words, so the whole `scripts/perf/` tree is scanned for the forbidden PHRASES — asked by
+# LOCATION, not by a per-line marker: python docstrings are stripped through `ast` and shell
+# full-line comments are dropped, so what is scanned is the text a run can PRINT. That is why
+# the historical explanations (which say the claim was deleted, and must stay) do not trip it
+# while an `echo`/`raise`/f-string carrying the claim would.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import ast, pathlib, sys
+BANNED = ("were INTERLEAVED", "OBSERVED FROM THE CLOCK", "ORDER ROTATED",
+          "round-major ordering", "finished before any rep of round")
+d = pathlib.Path(sys.argv[1])
+py = sorted(d.glob("*.py"))
+sh = sorted(d.glob("*.sh"))
+if not py or not sh:
+    raise SystemExit(f"the scan's SUBJECT is empty ({len(py)} py, {len(sh)} sh) in {d}")
+bad = []
+for p in py:
+    tree = ast.parse(p.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            b = node.body
+            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+                    and isinstance(b[0].value.value, str):
+                node.body = b[1:] or [ast.Pass()]
+    code = ast.unparse(ast.fix_missing_locations(tree))
+    bad += [f"{p.name} (executable code): {ph}" for ph in BANNED if ph in code]
+for p in sh:
+    for n, line in enumerate(p.read_text().splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        bad += [f"{p.name}:{n}: {ph}" for ph in BANNED if ph in line]
+if bad:
+    raise SystemExit("the deleted claim text can be EMITTED again:\n" + "\n".join(bad))
+print(f"scanned {len(py)} python + {len(sh)} shell file(s)")
+PY
+then
+  pass "STRUCTURAL: no file in scripts/perf/ can EMIT the deleted claim text (docstrings/comments stripped)"
+else
+  fail "the deleted interleaving claim text has reappeared on an emitting path in scripts/perf/"
 fi
 
 # And the reporter REFUSES an unpairable set rather than silently falling back to
@@ -1341,29 +1467,28 @@ else
 fi
 
 # ==========================================================================
-# B3 — the INTERLEAVING is observed FROM A CLOCK, and an ARM-MAJOR FORGERY fails
+# The round LABELS may not CONTRADICT the recorded INSTANTS (integrity, not a claim)
 # ==========================================================================
-# NON-VACUITY, and this is the case the whole finding rests on. Pre-fix, `<tag>.round`
-# carried `round`/`position`/`arms_in_round` and NO TIMESTAMP, and `collect_round_meta`
-# forced `round == rep` — so `round` carried zero independent information and `position`
-# was a number the driver COMPUTED. An ARM-MAJOR loop keeping the identical rotation
-# arithmetic:
+# The fixture is a FORGERY: round/position labels a rounds-outside loop would write, over
+# timestamps an arms-outside loop produces. The reporter refuses it — because the labels and
+# the clock cannot both describe the session, so no figure can be attributed to a round.
 #
-#     for arm in rotate_arms(...):        # arms OUTSIDE
-#         for rep in 1..REPS:             # reps INSIDE
-#             measure(arm, rep); record_round(tag, rep, pos, n)
+# WHAT THIS IS NOT (#3272 round 4): passing this check is NOT evidence that a session was
+# interleaved, and the report makes no such claim. It is a statement about the FILES. The
+# distinction matters because the earlier round DID license a claim off this check and got it
+# wrong at one round, where there is nothing to compare.
 #
-# emits BYTE-IDENTICAL metadata for a session in which no two arms of a "round" ran
-# anywhere near each other — and the reporter printed "the reps were INTERLEAVED … this is
-# OBSERVED, not asserted" over it. The fixture below IS that forgery: labels a genuine
-# interleaved session would carry, timestamps an arm-major run produces.
+# NON-VACUITY: pre-fix, `<tag>.round` carried `round`/`position`/`arms_in_round` and NO
+# TIMESTAMP, and `collect_round_meta` forced `round == rep` — so an arms-outside loop keeping
+# the identical rotation arithmetic emitted BYTE-IDENTICAL metadata, and the reporter printed
+# "the reps were INTERLEAVED … this is OBSERVED, not asserted" over it.
 d="$TMP/arm-major-forgery"; mkdir -p "$d"
 for rep in 1 2 3; do
   make_scan_rep "$d" warm "$rep" ok
   make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
 done
-# The LABELS: exactly what the real interleaved driver writes (rotating positions).
-# The CLOCK: arm-major — all three scan reps complete, THEN all three flight reps.
+# The LABELS: rotating positions, exactly what a rounds-outside loop writes.
+# The CLOCK: arms-outside — all three scan reps complete, THEN all three flight reps.
 for rep in 1 2 3; do
   scan_pos=$(( rep % 2 == 1 ? 1 : 2 ))
   fl_pos=$(( rep % 2 == 1 ? 2 : 1 ))
@@ -1373,19 +1498,22 @@ done
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
   --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "were NOT INTERLEAVED" <<<"$out"; then
-  pass "OBSERVED: an ARM-MAJOR session carrying PERFECT interleaved LABELS is REFUSED (B3)"
+if [ "$rc" -ne 0 ] && grep -q "round LABELS CONTRADICT the recorded INSTANTS" <<<"$out"; then
+  pass "OBSERVED: labels that contradict the recorded instants are REFUSED"
 else
-  fail "the arm-major forgery must be refused — the labels alone cannot establish interleaving (rc=$rc, out: $out)"
+  fail "the label/instant contradiction must be refused (rc=$rc, out: $out)"
 fi
-if grep -q "byte-identical" <<<"$out" && grep -q "ARM-MAJOR" <<<"$out"; then
-  pass "the refusal explains that the LABELS were indistinguishable, so the clock is the evidence"
+if grep -q "cannot both describe this session" <<<"$out" \
+  && grep -q "INTEGRITY refusal over the" <<<"$out"; then
+  pass "the refusal states it is an INTEGRITY refusal over the artifact set, claiming no property"
 else
-  fail "the arm-major refusal must say why the labels could not catch it (out: $out)"
+  fail "the contradiction refusal must name itself an integrity refusal (out: $out)"
 fi
-# ...and NOTHING is written: the report cannot establish its headline property.
+# ...and it must NOT read as a verified-interleaving claim in either direction.
+no_claim_probe "the contradiction REFUSAL transcript" "$out"
+# NOTHING is written: an artifact set that contradicts itself cannot be reported.
 if [ ! -e "$d/results.json" ]; then
-  pass "no results.json is written for a session whose interleaving the clock refutes"
+  pass "no results.json is written for a session whose labels the instants refute"
 else
   fail "a refused run must not leave a results.json behind"
 fi
@@ -1398,7 +1526,7 @@ else
   fail "ws0-baseline.sh must record monotonic_ns per rep, from a monotonic clock"
 fi
 # An ABSENT instant is fatal, not defaulted — a session from the pre-fix driver cannot be
-# reported under the interleaving claim, and saying so is the honest outcome.
+# reported at all, and saying so is the honest outcome.
 d="$TMP/no-instant"; mkdir -p "$d"
 make_scan_rep "$d" warm 1 ok
 make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
@@ -1406,10 +1534,11 @@ printf 'round=1\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
 expect_reject "round metadata with NO monotonic_ns is REFUSED (a pre-fix session cannot carry the claim)" \
   "carries no 'monotonic_ns'" "$d" "$TMP/corpus"
 out=$(run_report "$d" "$TMP/corpus")
-if grep -q "the only field that records WHEN the rep ran" <<<"$out"; then
-  pass "the refusal explains why an instant is required (labels cannot establish when)"
+if grep -q "when the rep completed" <<<"$out" \
+  && grep -q "no ORDERING property is derived from these" <<<"$out"; then
+  pass "the refusal names the field's content AND disclaims deriving an ordering from it"
 else
-  fail "the monotonic_ns refusal must state what it is for (out: $out)"
+  fail "the monotonic_ns refusal must state what it is and what it is not (out: $out)"
 fi
 # COPIED metadata is refused: two reps of a sequential loop cannot share a nanosecond, so
 # an identical instant means the file was duplicated rather than measured.
@@ -1420,9 +1549,9 @@ make_round "$d" scan-warm-1          1 1 2 1234567890
 make_round "$d" flight-bypass-warm-1 1 2 2 1234567890
 expect_reject "two reps recording the IDENTICAL instant is REFUSED (copied, not measured)" \
   "IDENTICAL completion instant" "$d" "$TMP/corpus"
-# THE ACCEPT DIRECTION: a genuinely round-major clock is accepted and the observation is
-# recorded in results.json with the span it measured — so the claim cannot be printed
-# without a number behind it.
+# THE ACCEPT DIRECTION: a non-contradictory 3-round session is accepted, its instants are
+# recorded VERBATIM, and the integrity SCOPE is a plain count (2 consecutive pairs over 3
+# rounds) rather than a verdict.
 d="$TMP/round-major-ok"; mkdir -p "$d"
 for rep in 1 2 3; do
   make_scan_rep "$d" warm "$rep" ok
@@ -1431,27 +1560,32 @@ done
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
   --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && python3 - "$d/results.json" <<'PY'
+if [ "$rc" -eq 0 ] \
+  && python3 "$REPO_ROOT/scripts/tests/ws0_assert_no_verdict_fields.py" "$d/results.json" >/dev/null \
+  && python3 - "$d/results.json" <<'PY'
 import json, sys
-il = json.load(open(sys.argv[1]))["interleaving"]["warm"]
-t = il["timing"]
-assert t["round_major_verified"] is True, t
-assert t["established"] == "round-major ordering", t
-assert t["rounds_compared"] == 3, t
-assert "monotonic_ns" in t["source"], t
-# The LIMIT of the claim is recorded too, so a later reader is not left to infer it.
-assert "WITHIN-round arm order" in t["not_established"], t
-# ...and the per-round spans are real numbers, not a placeholder.
-assert set(t["within_round_span_ns"]) == {"1", "2", "3"}, t
-assert all(v > 0 for v in t["within_round_span_ns"].values()), t
-# The `source` of the whole observation must not claim a provenance it cannot verify.
-assert "UNVERIFIED" in il["source"], il["source"]
+doc = json.load(open(sys.argv[1]))
+rec = doc["recorded_round_metadata"]["warm"]
+integ = rec["integrity_checks"]
+# 3 rounds x 2 arms = 6 reps examined, and 2 consecutive round pairs available.
+assert integ["reps_examined"] == 6, integ
+assert integ["round_pairs_compared"] == 2, integ
+assert "NOT a verdict" in integ["scope_note"], integ
+# The RECORDED instants are carried through per round, per arm — the raw timeline #3287/#3299
+# would need, with no property derived from it here.
+inst = rec["instants_by_round_recorded"]
+assert set(inst) == {"1", "2", "3"}, inst
+assert all(set(v) == {"bare_scan", "flight_do_get_bypass"} for v in inst.values()), inst
+assert all(isinstance(x, int) and x > 0 for v in inst.values() for x in v.values()), inst
+# Provenance is stated as UNVERIFIED (the verdict-field absence is the shared assert above).
+assert "UNVERIFIED" in rec["source"], rec["source"]
 PY
 then
-  pass "a round-major session is ACCEPTED and records the timing OBSERVATION plus its stated LIMIT"
+  pass "a 3-round session is ACCEPTED, its instants RECORDED, and the scope is a COUNT not a verdict"
 else
-  fail "the accept direction must record the timing observation (rc=$rc, out: $out)"
+  fail "the accept direction must record the raw instants without a verdict (rc=$rc, out: $out)"
 fi
+no_claim_probe "the accepted 3-round session" "$out"
 
 # ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)

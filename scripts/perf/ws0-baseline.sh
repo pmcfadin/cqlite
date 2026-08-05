@@ -653,64 +653,47 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# The measurement loop is INTERLEAVED — one rep per arm per round, arm order
-# rotated (issue #3272 review B5)
+# The measurement loop: ROUNDS outside, arms inside, order rotated by round
 # ---------------------------------------------------------------------------
 # This loop used to run ALL `$REPS` bare-scan reps, then all Flight reps of arm 1, then
 # all of arm 2. That makes each arm's median a measurement of a DIFFERENT TIME WINDOW,
-# and this rig's own recorded evidence says those windows are not comparable:
+# and this rig's own recorded evidence says those windows are not comparable: on the
+# delivery box, in one session, the UNTOUCHED warm bare scan read 370,134 rows/s at
+# 05:06 UTC and 333,206 rows/s at 06:05 — a ~10% drift with nothing changed on the
+# measured path. The whole claim this driver exists to produce is the `bare/flight`
+# RATIO, so a drift between the bare-scan block and the Flight block lands DIRECTLY on
+# the reported ratio and on the 1.3x PASS/BELOW-TARGET verdict.
 #
-#   `docs/reports/ws0-3096-artifacts/measurement-method.md` §3b — "**THE RULE, binding
-#   on every future use of this rig: same-session interleaved A/B/C with a drift control
-#   that is code-identical across arms, or NO COMPARISON.**" It then states the shape
-#   explicitly: (1) "run **one rep at a time**, never all reps of an arm back to back",
-#   (2) "**rotate the arm order every round** so no arm holds a fixed position",
-#   (4) "**difference within a round**".
+# So: ROUNDS on the outside, arms on the inside, order rotated by round index, with the
+# BARE SCAN AS ONE OF THE ROTATED ARMS rather than leading every round (it is the
+# DENOMINATOR of the ratio, so a fixed position would put any within-round systematic
+# effect on it every time). For the 2-arm default that is a genuine alternation
+# (`scan,bypass` / `bypass,scan` / …) rather than a fixed order. The per-rep artifacts
+# are named exactly as before (`scan-<temp>-<rep>`, `flight-<arm>-<temp>-<rep>`).
 #
-# The rule exists because it was PAID FOR: on the delivery box, in one session, the
-# UNTOUCHED warm bare scan read 370,134 rows/s at 05:06 UTC and 333,206 rows/s at 06:05
-# — a ~10% drift with nothing changed on the measured path. And the failure is not
-# hypothetical for THIS driver: the whole claim it exists to produce is the
-# `bare/flight` RATIO, so a drift between the bare-scan block and the Flight block
-# lands DIRECTLY on the reported ratio and on the 1.3x PASS/BELOW-TARGET verdict, in
-# whichever direction the box happened to drift. The sequential order made a
-# same-session run a cross-window comparison wearing a same-session label.
+# WHAT THIS LOOP DOES *NOT* BUY, STATED BECAUSE THE DIFFERENCE MATTERS (#3272 round 4).
+# Ordering the loop this way is a REASONABLE THING TO DO; it is NOT a DRIFT CONTROL, and
+# nothing downstream verifies that it happened. `measurement-method.md` §3b specifies a
+# same-session interleaved control ("or NO COMPARISON") — that control is **NOT
+# IMPLEMENTED OR ENFORCED** by this rig, and the reporter accordingly makes NO
+# interleaving claim. An earlier round of #3272 did print one ("the reps were INTERLEAVED
+# … OBSERVED FROM THE CLOCK"), and it was DELETED: at the default `--reps 1` there is one
+# round, so ZERO orderings were compared while the verdict field still said `True`. A
+# positive verdict from zero comparisons is the exact defect this issue exists to remove.
+# Re-adding an OBSERVED control on real hardware is tracked by **#3287/#3299**. Until
+# then, treat any cross-arm difference this rig prints as UNCONTROLLED FOR DRIFT.
 #
-# So: ROUNDS on the outside, arms on the inside, order rotated by round index. Every
-# round measures the bare scan and each Flight arm within a few minutes of each other,
-# and no arm holds a fixed position across rounds. The per-rep artifacts are named
-# exactly as before (`scan-<temp>-<rep>`, `flight-<arm>-<temp>-<rep>`), so the reporter
-# and every existing artifact reader are unaffected — this changes WHEN each rep runs,
-# not what is written.
-#
-# THE BARE SCAN IS ONE OF THE ROTATED ARMS (issue #3272 review round 2, R4a). It used to
-# lead EVERY round with only the Flight arms rotating among themselves — so with the
-# DEFAULT single Flight arm (`--arm bypass`) NO ROTATION OCCURRED AT ALL: round 1 was
-# `scan, flight-bypass`, and so was every round after it. The round-1 fix for the drift
-# hazard therefore did not close it. And the bare scan is the one arm where a fixed
-# position matters most: it is the DENOMINATOR of the reported ratio, so a systematic
-# within-round effect that always lands on it (a page cache left by the previous round's
-# Flight rep, a thermal ramp early in each round) moves the ratio in one direction every
-# time — a bias the per-round direction count cannot see, because it is present in every
-# round equally.
-#
-# So the rotated list is `scan` PLUS each Flight arm, and each entry is DISPATCHED to
-# `measure_scan` or `measure_flight` by name. For the 2-arm default that is a genuine
-# alternation (`scan,bypass` / `bypass,scan` / `scan,bypass` / …) rather than a fixed
-# order — a "rotation" that degenerates to a fixed order at n=2 would be the same defect.
-#
-# The ROUND AND THE ARM'S POSITION WITHIN IT are recorded per rep (`<tag>.round`), and
-# ws0_report.py REQUIRES and VERIFIES them: it pairs by the OBSERVED round and refuses a
-# session whose interleaving cannot be established, instead of printing an interleaving
-# claim unconditionally (which is what it used to do while pairing by rep index and
-# reading none of these files — #3272 R3). `position` is what makes the rotation checkable
-# at all: a round index alone cannot distinguish an interleaved session from an arm-major
-# one, since both have a rep index.
+# The ROUND, the ARM'S POSITION WITHIN IT and the rep's COMPLETION INSTANT are recorded
+# per rep (`<tag>.round`). `ws0_report.py` REQUIRES all four fields, uses `round` to pair
+# the per-round comparison, INTEGRITY-CHECKS them against each other (same round set per
+# arm, positions 1..n exactly once, arms_in_round matching, no duplicate instants, labels
+# not contradicting instants) and passes them through to `results.json` as INERT RECORDED
+# DATA. It derives no ordering property from them.
 #
 # At the spreads this rig measures (5-10% per arm) a couple of percent of median
 # difference is not readable, and the recorded #3096 session is the case in point — a
 # +2.3% median difference measured at ZERO (median −0.03%, 4 of 8 rounds positive) when
-# re-measured on 8 interleaved rounds.
+# re-measured on 8 rounds.
 #
 # `rotate_arms <round> <arms…>` — the arm list left-rotated by `(round-1) % n`, so over
 # n rounds every arm occupies every position.
@@ -724,22 +707,24 @@ rotate_arms() {
   done
 }
 
-# record_round <tag> <round> <position> <arms-in-round> — the interleaving metadata the
+# record_round <tag> <round> <position> <arms-in-round> — the per-rep round metadata the
 # reporter REQUIRES. Written after the rep, so a rep that died leaves no metadata and the
 # report refuses it rather than attributing it to a round.
 #
-# `monotonic_ns` IS THE OBSERVATION; the other three are LABELS (#3272 review round 3, B3).
-# `round`, `position` and `arms_in_round` are numbers THIS LOOP COMPUTES, and the reporter
-# additionally forces `round == rep`, so `round` carries no independent information at all.
-# An arm-major loop keeping the same rotation arithmetic emits BYTE-IDENTICAL metadata for a
-# NON-interleaved session — and the report then printed "the reps were INTERLEAVED … this is
-# OBSERVED, not asserted", which was a re-statement of a label rather than an observation.
+# THIS IS RECORDED DATA, NOT EVIDENCE OF A PROPERTY (#3272 round 4). `round`, `position` and
+# `arms_in_round` are numbers THIS LOOP COMPUTES, and the reporter additionally forces
+# `round == rep`, so `round` carries no independent information at all. `monotonic_ns` is the
+# only field that records something the loop did not choose — WHEN the rep completed.
 #
-# A monotonic timestamp per rep is the thing a forgery cannot reproduce: round-major
-# ordering (every arm of round r finishing before any arm of round r+1) is a FACT ABOUT THE
-# CLOCK, and an arm-major session violates it in a way no relabelling can hide. So the
-# reporter derives the interleaving claim from these instants and refuses a session whose
-# timestamps say arm-major, whatever the labels say.
+# What the reporter does with all four: it pairs the per-round comparison on `round`,
+# INTEGRITY-CHECKS the four fields against each other and against the other arms (a
+# duplicate instant means a copied file; labels contradicting instants means neither can
+# attribute a figure), and passes the values through to `results.json` verbatim. It derives
+# NO ordering or interleaving claim from them — that claim was deleted because it reported a
+# positive verdict at one round having compared nothing. Re-adding an OBSERVED drift control
+# is #3287/#3299. Recording the metadata is kept because an operator (or that later work)
+# needs the raw per-rep timeline, and because the integrity refusals catch a partial or
+# forged session.
 #
 # `time.monotonic_ns()` and not `date`: it is monotonic (immune to an NTP step or a DST
 # change mid-session, either of which could otherwise reorder two reps), it is
@@ -753,9 +738,10 @@ rotate_arms() {
 record_round() {
   local now
   now="$(python3 -c 'import time; print(time.monotonic_ns())')" || {
-    echo "FATAL: could not read a monotonic clock for $1 — the interleaving of this" >&2
-    echo "       session would be UNOBSERVABLE, and the report refuses to claim an" >&2
-    echo "       interleaving it cannot establish (#3272 B3). This rig requires python3." >&2
+    echo "FATAL: could not read a monotonic clock for $1 — this rep's completion instant" >&2
+    echo "       cannot be recorded, and the reporter REQUIRES all four round-metadata" >&2
+    echo "       fields (they are integrity-checked against each other). This rig" >&2
+    echo "       requires python3." >&2
     exit 1
   }
   printf 'round=%s\nposition=%s\narms_in_round=%s\nmonotonic_ns=%s\n' \
@@ -768,7 +754,7 @@ _ARM_LIST=(scan $ARMS)
 _N_ARMS="${#_ARM_LIST[@]}"
 for temp in $TEMPS; do
   for rep in $(seq 1 "$REPS"); do
-    echo "-- round $rep/$REPS ($temp) — one rep of each of the $_N_ARMS arms, interleaved --"
+    echo "-- round $rep/$REPS ($temp) — one rep of each of the $_N_ARMS arms, rotated --"
     _pos=0
     for arm in $(rotate_arms "$rep" "${_ARM_LIST[@]}"); do
       _pos=$((_pos + 1))
