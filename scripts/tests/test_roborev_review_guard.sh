@@ -3747,357 +3747,64 @@ if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_review_diff_head
 else
   bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not go through the oracles' diff-source resolver"
 fi
-# (6) THE SNAPSHOT DELIVERY MODE LIVES WITH THE HEADER COLLECTOR TOO (#3312). roborev delivers a
-#     large diff by writing it to a transient snapshot file and naming that path in the prompt,
-#     so "where the diff actually is" is prompt-shape knowledge of exactly the kind (5) keeps out
-#     of the checks file. The resolver is therefore defined ONCE in the oracles file, the checks
-#     file calls it and does no prompt scanning of its own, and the repo/job binding is asserted
-#     to exist in the resolver — a resolver that stopped comparing against $REPO would let a
-#     stale snapshot from another checkout certify this review.
+# (6) C‴ (#3312): WHAT MUST STILL BE TRUE AFTER THE CAPTURE APPARATUS WAS RETIRED. The certification
+#     machinery is deleted, so the asserts that pinned it are deleted with it — leaving these, which are
+#     the properties C‴ itself depends on.
 _src_defs=$(grep -cE '^roborev_collect_review_diff_headers\(\) \{' "$ORACLES" || true)
 if [ "${_src_defs:-0}" -eq 1 ]; then
-  ok 'structural: roborev_collect_review_diff_headers is defined exactly once, in the oracles file'
+  ok 'structural: the diff-source resolver is defined exactly once, in the oracles file'
 else
-  bad "structural: expected exactly 1 definition of roborev_collect_review_diff_headers in the oracles file, found ${_src_defs:-0}"
+  bad "structural: expected exactly 1 definition of roborev_collect_review_diff_headers, found ${_src_defs:-0}"
 fi
-_snap_defs=$(grep -cE '^roborev_prompt_snapshot_paths\(\) \{' "$ORACLES" || true)
-if [ "${_snap_defs:-0}" -eq 1 ]; then
-  ok 'structural: the snapshot-path extraction is defined exactly once, in the oracles file'
-else
-  bad "structural: expected exactly 1 definition of roborev_prompt_snapshot_paths in the oracles file, found ${_snap_defs:-0}"
-fi
-if grep -nE '(grep|awk|sed)[^#]*Read the diff from' "$CHECKS_FILE" 2>/dev/null | grep -qv '^[0-9]*: *#'; then
-  bad 'structural: roborev-review-checks.sh scans the prompt for the snapshot instruction itself — prompt-shape knowledge must stay with the collector in the oracles file (#3312)'
-else
-  ok 'structural: roborev-review-checks.sh does no snapshot-instruction scanning of its own'
-fi
-# The extraction must be anchored at COLUMN ZERO: a diff body line always carries a leading
-# `+`/`-`/space, so an unanchored match would let the reviewed change name its own oracle.
 if grep -qF 'index($0, "Read the diff from:") == 1' "$ORACLES"; then
   ok 'structural: the snapshot instruction is matched at column zero (a quoted line in a diff body cannot pose as it)'
 else
-  bad 'structural: the snapshot-instruction match is not anchored at column zero — prose inside the reviewed diff could name the file its own review is judged against (#3312)'
+  bad 'structural: the snapshot-instruction match is not anchored at column zero (#3312)'
 fi
-# VALIDATION PRECEDES NORMALISATION IN THE BINDING (job 12), asserted by LINE ORDER: physical
-# resolution erases `..` segments and directory symlinks, which is exactly what the component checks
-# exist to find, so a resolution that runs first makes them inspect a path the prompt never named.
-_vb_s=$(grep -nE '^roborev_snapshot_path_binding\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-_vb_e=""
-[ -z "$_vb_s" ] || _vb_e=$(awk -v s="$_vb_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-if [ -z "$_vb_s" ] || [ -z "$_vb_e" ]; then
-  bad 'structural: could not locate roborev_snapshot_path_binding to inspect its ordering'
+# THE RETIREMENT IS ASSERTED, so a future edit cannot quietly resurrect what C‴ removed: nothing may copy a
+# snapshot, publish it, or derive a verdict from a stored copy.
+_resurrected=""
+for _gone in 'roborev_snapshot_capture_start' '_roborev_snapshot_capture_loop' '_roborev_capture_validate' \
+  'ROBOREV_SNAPSHOT_CAPTURE_DIR' 'dg_staged' 'capture-unidentified' 'capture-path-mismatch'; do
+  if grep -qE "$_gone" "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null; then
+    _resurrected="$_resurrected $_gone"
+  fi
+done
+if [ -z "$_resurrected" ]; then
+  ok 'structural: the retired capture/publication/digest-agreement machinery is GONE, not left running unread (C‴)'
 else
-  _vb_body=$(sed -n "${_vb_s},${_vb_e}p" "$ORACLES")
-  _vb_dot=$(printf '%s\n' "$_vb_body" | grep -nF "'.'|'..')" | head -1 | cut -d: -f1)
-  _vb_res=$(printf '%s\n' "$_vb_body" | grep -nF '_roborev_resolve_existing_ancestor "$p"' | head -1 | cut -d: -f1)
-  _vb_tail=$(printf '%s\n' "$_vb_body" | grep -nF 'if [ "$orig_tail" != "$rel" ]' | head -1 | cut -d: -f1)
-  if [ -n "$_vb_dot" ] && [ -n "$_vb_res" ] && [ "$_vb_dot" -lt "$_vb_res" ]; then
-    ok 'structural: dot-segment validation precedes physical resolution in the snapshot binding'
-  else
-    bad "structural: the binding resolves before it validates dot segments (dot at ${_vb_dot:-<absent>}, resolve at ${_vb_res:-<absent>}) — a '..' traversal between snapshot directories would be normalised away (#3312 job 12)"
-  fi
-  if [ -n "$_vb_tail" ]; then
-    ok "structural: the binding requires the path's OWN tail components to equal the resolved ones (a directory symlink cannot rewrite them)"
-  else
-    bad 'structural: the binding no longer compares the original tail with the resolved one — a directory symlink would silently rebind the snapshot id (#3312 job 12)'
-  fi
-  if printf '%s\n' "$_vb_body" | grep -qF 'if [ -L "$walk" ]; then'; then
-    ok 'structural: the binding rejects a symlink at EVERY traversed component, on the original spelling'
-  else
-    bad 'structural: the binding checks only the final component for a symlink — a symlinked .roborev or snapshot directory would be traversed (#3312 job 12)'
-  fi
+  bad "structural: retired C‴ machinery is back in the flow scripts —$_resurrected. Nothing may derive a verdict from a stored copy of the snapshot (#3312 owner ruling)"
 fi
-_bind_start=$(grep -nE '^roborev_snapshot_path_binding\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-if [ -z "$_bind_start" ]; then
-  bad 'structural: roborev_snapshot_path_binding is not defined — the snapshot path would be read without being bound to the reviewed repo (#3312)'
+_obs_start=$(grep -nE '^_roborev_snapshot_observe_loop\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+if [ -z "$_obs_start" ]; then
+  bad 'structural: _roborev_snapshot_observe_loop is not defined — nothing observes the snapshot (C‴)'
 else
-  _bind_end=$(awk -v s="$_bind_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-  if [ -z "$_bind_end" ] || [ "$_bind_end" -le "$_bind_start" ]; then
-    bad "structural: the snapshot-binding body bounds could not be resolved (start $_bind_start, end '${_bind_end:-<none>}') — the asserts below would scan nothing"
+  _obs_end=$(awk -v s="$_obs_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  _obs_body=$(sed -n "${_obs_start},${_obs_end:-$_obs_start}p" "$ORACLES")
+  if printf '%s\n' "$_obs_body" | grep -qE '^[[:space:]]*(cp|mv|install)[[:space:]]'; then
+    bad 'structural: the observer COPIES or MOVES the snapshot — C‴ retired the capture; it may only read and digest (#3312)'
   else
-    _bind_body=$(sed -n "${_bind_start},${_bind_end}p" "$ORACLES")
-    if printf '%s\n' "$_bind_body" | grep -qE '\$\{?REPO' \
-      && printf '%s\n' "$_bind_body" | grep -qF 'foreign-repo'; then
-      ok "structural: the snapshot path is bound to the reviewed repo \$REPO, with a foreign-repo verdict (lines $_bind_start-$_bind_end)"
-    else
-      bad 'structural: the snapshot binding no longer derives its containment test from $REPO (or has no foreign-repo verdict) — a snapshot from another checkout could satisfy prompt-content: (#3312)'
-    fi
-    if printf '%s\n' "$_bind_body" | grep -qF 'roborev-snapshot-'; then
-      ok 'structural: the snapshot path must sit under a roborev-snapshot-<id> directory'
-    else
-      bad 'structural: the snapshot binding no longer requires the roborev-snapshot-<id> directory shape — any in-repo file could pose as the review oracle (#3312)'
-    fi
+    ok 'structural: the observer only reads and digests the snapshot (no copy, no publication)'
+  fi
+  if printf '%s\n' "$_obs_body" | grep -qF '_roborev_snapshot_safe_to_read'; then
+    ok 'structural: the observer applies the surviving SAFETY checks before reading'
+  else
+    bad 'structural: the observer reads without the safety checks — those survive C‴ (#3312)'
   fi
 fi
-# (7) CAPTURE PROVENANCE IS ESTABLISHED AT CAPTURE TIME AND KEYED BY THE WHOLE PATH (roborev job 6).
-#     Behavioural cases cx31s/cx31t/cx31u prove the three refusals fire; only a structural assert can
-#     pin the ORDERING and the AFFIRMATIVE requirement, which is where both blockers lived: `-f` and
-#     `cp` follow symlinks, so a validation that runs after the copy — or after roborev has deleted the
-#     original — cannot see what was followed.
-# THE CAPTURE DIRECTORY IS PRIVATE AND PER-RUN (job 7, finding 1): created by `mktemp -d`, refused if it
-# resolves inside the reviewed repo, and removed at exit. A shared `mkdir -p` path is reusable across
-# runs, which is the staleness/planting class this removes BY CONSTRUCTION rather than by checking.
-if grep -qE 'mktemp -d "\$\{TMPDIR:-/tmp\}/roborev-snapshot-capture' "$ORACLES"; then
-  ok 'structural: the capture directory is created by mktemp -d (private, per-run, unpredictable)'
+if grep -qF 'PROMPT_CONTENT="NOTICE (snapshot mode' "$CHECKS_FILE"; then
+  ok 'structural: snapshot mode reports a NOTICE (C‴)'
 else
-  bad 'structural: the capture directory is not a per-run mktemp -d — a shared, guessable path can be reused across runs and predate one (#3312 job 7, finding 1)'
+  bad 'structural: snapshot mode does not report a NOTICE — C‴ is not implemented (#3312)'
 fi
-# THE CONTAINMENT TEST IS DECIDED ON A PHYSICALLY RESOLVED PATH (job 9, F2): a lexical test admits a
-# relative TMPDIR and one whose path traverses a symlink into the checkout.
-_start_s=$(grep -nE '^roborev_snapshot_capture_start\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-_start_e=""
-[ -z "$_start_s" ] || _start_e=$(awk -v s="$_start_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-if [ -z "$_start_s" ] || [ -z "$_start_e" ]; then
-  bad 'structural: could not locate roborev_snapshot_capture_start to inspect its containment test'
+_ckeys_missing=""
+for _ck in snapshot-path snapshot-digest snapshot-expected; do
+  grep -qF "emit_kv '$_ck'" "$WRAPPER" || _ckeys_missing="$_ckeys_missing $_ck"
+done
+if [ -z "$_ckeys_missing" ]; then
+  ok 'structural: the block emits snapshot-path / snapshot-digest / snapshot-expected (the information C‴ preserves)'
 else
-  _start_body=$(sed -n "${_start_s},${_start_e}p" "$ORACLES")
-  _sb_missing=""
-  printf '%s\n' "$_start_body" | grep -qF 'pwd -P' || _sb_missing="$_sb_missing physical-resolution"
-  printf '%s\n' "$_start_body" | grep -qF '"$phys/" in' || _sb_missing="$_sb_missing containment-on-resolved-path"
-  printf '%s\n' "$_start_body" | grep -qF 'ROBOREV_SNAPSHOT_CAPTURE_DIR="$phys"' || _sb_missing="$_sb_missing stores-resolved-path"
-  printf '%s\n' "$_start_body" | grep -qE 'case "\$phys" in' || _sb_missing="$_sb_missing absolute-check"
-  if [ -z "$_sb_missing" ]; then
-    ok 'structural: containment is decided on the pwd -P-resolved path, which is also what gets stored'
-  else
-    bad "structural: the capture-directory containment test is incomplete —$_sb_missing. A lexical test admits a relative TMPDIR or one symlinked into the checkout (#3312 job 9, F2)"
-  fi
-fi
-# THE TEST HARNESS'S OWN DISCOVERY MUST BE PER-PROCESS (job 9, F3): a glob over the shared temp dir can
-# be satisfied by a concurrent run's capture, which is this change's own false-PASS class one layer down.
-# THE PROPERTY IS "no discovery searches a location SHARED with other runs", not "every glob names one
-# variable": a glob rooted at a path inside this process's own `$tmp` (the fixture repo, for instance) is
-# already unique. What must never appear is a glob rooted at the SHARED temp dir — `${TMPDIR...}` or a
-# literal `/tmp/` — since that is what another run's capture can satisfy.
-_selfglobs=$(grep -n 'roborev-snapshot-capture\.' "$0" \
-  | grep -E '(\$\{TMPDIR|"/tmp/|[^a-zA-Z_]/tmp/)' | grep -v '^[0-9]*: *#' || true)
-if [ -z "$_selfglobs" ]; then
-  ok 'structural: no capture discovery in this suite searches the SHARED temp dir (per-process scoping only)'
-else
-  bad "structural: a capture glob in this suite searches the shared temp dir: ${_selfglobs%%$'\n'*} — a concurrent run's artifact could satisfy a wait (#3312 job 9, F3)"
-fi
-if grep -qE '^CAPTURES_PARENT="\$tmp/captures"$' "$0" && grep -qF 'TMPDIR="${WRAPPER_TMPDIR:-$CAPTURES_PARENT}"' "$0"; then
-  ok 'structural: wrapper runs are pinned to the per-process capture parent'
-else
-  bad 'structural: wrapper runs do not pin TMPDIR to a per-process capture parent (#3312 job 9, F3)'
-fi
-if grep -qE '^roborev_snapshot_capture_cleanup\(\) \{' "$ORACLES" \
-  && grep -qF 'roborev_snapshot_capture_cleanup' "$WRAPPER"; then
-  ok 'structural: the private capture directory is removed by a cleanup the wrapper calls'
-else
-  bad 'structural: nothing removes the private capture directory (#3312 job 7)'
-fi
-_cap_val_defs=$(grep -cE '^_roborev_capture_validate\(\) \{' "$ORACLES" || true)
-if [ "${_cap_val_defs:-0}" -eq 1 ]; then
-  ok 'structural: the capture-time validator is defined exactly once, in the oracles file'
-else
-  bad "structural: expected exactly 1 definition of _roborev_capture_validate, found ${_cap_val_defs:-0} — capture-time provenance has no single home (#3312)"
-fi
-_cap_loop_start=$(grep -nE '^_roborev_snapshot_capture_loop\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-if [ -z "$_cap_loop_start" ]; then
-  bad 'structural: _roborev_snapshot_capture_loop is not defined — nothing captures the snapshot (#3312)'
-else
-  _cap_loop_end=$(awk -v s="$_cap_loop_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-  if [ -z "$_cap_loop_end" ] || [ "$_cap_loop_end" -le "$_cap_loop_start" ]; then
-    bad "structural: the capture-loop bounds could not be resolved (start $_cap_loop_start, end '${_cap_loop_end:-<none>}') — the asserts below would scan nothing"
-  else
-    _cap_body=$(sed -n "${_cap_loop_start},${_cap_loop_end}p" "$ORACLES")
-    # THE ORDERING, asserted by LINE NUMBER: every read of the source must come after the validation
-    # call. A validator that exists but runs late is the defect, not the remedy.
-    _val_line=$(printf '%s\n' "$_cap_body" | grep -nE '_roborev_capture_validate "\$repo"' | head -1 | cut -d: -f1)
-    _cp_line=$(printf '%s\n' "$_cap_body" | grep -nE 'cp "\$f"' | head -1 | cut -d: -f1)
-    if [ -n "$_val_line" ] && [ -n "$_cp_line" ] && [ "$_val_line" -lt "$_cp_line" ]; then
-      ok 'structural: the capture loop validates BEFORE it reads the snapshot (cp follows symlinks, so order is the property)'
-    else
-      bad "structural: the capture loop does not validate before copying (validate at ${_val_line:-<absent>}, cp at ${_cp_line:-<absent>}) — a symlinked source would be followed and the evidence deleted before any later check (#3312 blocker 1)"
-    fi
-    # The published unit carries its own IDENTITY (`meta`: the captured relative path + digest) and is
-    # published by ONE rename, so no observer can see content without identity — the SIGTERM race that
-    # two separate writes had (job 7, finding 2) is unexpressible here.
-    if printf '%s\n' "$_cap_body" | grep -qF 'stage/meta'; then
-      ok 'structural: the capture loop stages an identity record beside the content'
-    else
-      bad 'structural: the capture loop writes no identity record, so a capture could not be matched to the path the prompt names (#3312)'
-    fi
-    if printf '%s\n' "$_cap_body" | grep -qE 'mv "\$stage" "\$out/\$dest"'; then
-      ok 'structural: a capture is published by ONE rename of the staged directory (no half-published state)'
-    else
-      bad 'structural: the capture is not published by a single rename — an observer could see content without its identity, which is the SIGTERM false-FAIL race (#3312 job 7, finding 2)'
-    fi
-    # THE DESTINATION IS FRESH BY CONSTRUCTION (job 10, blocker 1). `mv <dir> <existing-dir>` does not
-    # fail — it NESTS, leaving the previous content.diff/meta exactly where the resolver reads them. So
-    # the property is not "check the rename": it is "there is no pre-existing destination", which also
-    # means no rename-aside and no backup path exist to be checked.
-    if printf '%s\n' "$_cap_body" | grep -qE "printf -v dest 'pub\.%s\.%06d'"; then
-      ok 'structural: each capture publishes to a fresh pub.<id>.<seq> destination that cannot already exist'
-    else
-      bad 'structural: publications do not carry a per-run unique sequence — a fixed destination can be nested into rather than replaced (#3312 job 10, blocker 1)'
-    fi
-    if printf '%s\n' "$_cap_body" | grep -qE '\.old\.|mv "\$out/\$id"'; then
-      bad 'structural: the rename-aside/backup path is back in the capture loop — that is the nesting hazard, and it was deleted rather than hardened (#3312 job 10, blocker 1)'
-    else
-      ok 'structural: no rename-aside or backup path exists in the capture loop (deleted, not hardened)'
-    fi
-    if printf '%s\n' "$_cap_body" | grep -qF '_roborev_file_digest'; then
-      ok 'structural: reuse is keyed on a content digest, not on the byte count'
-    else
-      bad 'structural: the capture loop has no digest check — a same-length rewrite would keep a stale capture (#3312 job 7, finding 3)'
-    fi
-    # THREE DIGESTS, THREE VARIABLES, AND AN EXPLICIT EMPTINESS REFUSAL (job 8). The helper returns
-    # through ONE global, so re-reading it into the same name is how the post-copy check came to compare
-    # a value with itself; and an empty digest compares equal to another empty one, so "unmeasured" must
-    # be refused by name rather than assumed impossible.
-    _dg_missing=""
-    for _dgv in dg_pre dg_post dg_staged; do
-      printf '%s\n' "$_cap_body" | grep -qF "$_dgv=" || _dg_missing="$_dg_missing $_dgv"
-      printf '%s\n' "$_cap_body" | grep -qF "[ -z \"\$$_dgv\" ]" || _dg_missing="$_dg_missing ${_dgv}-emptiness"
-    done
-    printf '%s\n' "$_cap_body" | grep -qF '[ "$dg_pre" != "$dg_post" ]' || _dg_missing="$_dg_missing pre-vs-post"
-    printf '%s\n' "$_cap_body" | grep -qF '[ "$dg_pre" != "$dg_staged" ]' || _dg_missing="$_dg_missing pre-vs-staged"
-    printf '%s\n' "$_cap_body" | grep -qF 'digest=%s\\n' >/dev/null 2>&1 || true
-    printf '%s\n' "$_cap_body" | grep -qF '"$rel" "$dg_pre"' || _dg_missing="$_dg_missing meta-stamped-with-agreed-digest"
-    if [ -z "$_dg_missing" ]; then
-      ok 'structural: publication requires pre/post/staged digests that are each MEASURED and all AGREE'
-    else
-      bad "structural: the three-way digest agreement is incomplete —$_dg_missing. A digest re-read into the same variable compares with itself, and an empty one compares equal to another empty one (#3312 job 8)"
-    fi
-    if printf '%s\n' "$_cap_body" | grep -qF '_rx_capture_stop'; then
-      ok 'structural: the watcher shuts down gracefully (TERM asks; the in-flight iteration completes)'
-    else
-      bad 'structural: the watcher has no graceful-shutdown flag — a kill mid-capture would abandon a good snapshot (#3312 job 7, finding 2)'
-    fi
-  fi
-fi
-# The validator must refuse symlinks at the FILE and at the components it descends — parent-component
-# symlinks are the half that a `-L` on the file alone misses.
-if [ -n "${_cap_val_defs:-}" ] && [ "${_cap_val_defs:-0}" -eq 1 ]; then
-  _cvs=$(grep -nE '^_roborev_capture_validate\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-  _cve=$(awk -v s="$_cvs" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-  _cv_body=$(sed -n "${_cvs},${_cve:-$_cvs}p" "$ORACLES")
-  # The validator now WALKS the components it descends (`.roborev`, the snapshot dir, the file) asking the
-  # three-way helper first and `-L` second, so the property is "every traversed component is checked",
-  # expressed as a loop rather than as three copies of a test.
-  _cv_missing=""
-  printf '%s\n' "$_cv_body" | grep -qF 'for _cv_walk in "$repo/.roborev" "$repo/.roborev/$id" "$f"' \
-    || _cv_missing="$_cv_missing component-walk"
-  printf '%s\n' "$_cv_body" | grep -qF '_roborev_path_state "$_cv_walk"' || _cv_missing="$_cv_missing observability-first"
-  printf '%s\n' "$_cv_body" | grep -qF '[ ! -L "$_cv_walk" ] || return 1' || _cv_missing="$_cv_missing symlink-refusal"
-  if [ -z "$_cv_missing" ]; then
-    ok 'structural: the capture validator walks EVERY component it descends, asking observability before type'
-  else
-    bad "structural: the capture validator no longer checks every traversed component —$_cv_missing. A symlinked .roborev or snapshot directory would be followed (#3312 blocker 1)"
-  fi
-  if printf '%s\n' "$_cv_body" | grep -qF 'pwd -P'; then
-    ok 'structural: the capture validator resolves the containing directory physically before trusting it'
-  else
-    bad 'structural: the capture validator does not physically resolve the snapshot directory (#3312 blocker 1)'
-  fi
-fi
-# The consumer must REQUIRE the record and compare the WHOLE relative path, never the dir id alone.
-if [ -n "${_src_defs:-}" ] && [ "${_src_defs:-0}" -eq 1 ]; then
-  _rs=$(grep -nE '^roborev_collect_review_diff_headers\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-  _re=$(awk -v s="$_rs" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-  _r_body=$(sed -n "${_rs},${_re:-$_rs}p" "$ORACLES")
-  if printf '%s\n' "$_r_body" | grep -qF 'capture-unidentified' \
-    && printf '%s\n' "$_r_body" | grep -qF 'capture-path-mismatch'; then
-    ok 'structural: the resolver has both capture-identity refusals (unidentified, path-mismatch)'
-  else
-    bad 'structural: the resolver is missing a capture-identity refusal — an unidentified or mis-keyed capture could be read as evidence (#3312)'
-  fi
-  # THE FALLBACK PREDICATE IS NON-EXISTENCE, NOT "not a regular file" (job 10, blocker 2): a directory
-  # or FIFO at the named path is "unreadable", a fact to REPORT, not "the snapshot is gone".
-  # STRONGER THAN THE ORIGINAL `! -e` FORM (job 13 superseded job 10 here): the fallback is keyed on the
-  # MEASURED `verified-absent` state, so neither a non-regular file nor an unobservable one — both of which
-  # made `! -e`/`! -f` true or false for the wrong reason — can be answered from a capture.
-  if printf '%s\n' "$_r_body" | grep -qF '[ "$_rx_live_state" = "verified-absent" ]' \
-    && printf '%s\n' "$_r_body" | grep -qF 'if [ "$_rx_live_state" = "unreadable" ]'; then
-    ok 'structural: the capture fallback is keyed on a MEASURED verified-absent, with unreadable reported separately'
-  else
-    bad 'structural: the capture fallback is not keyed on the measured absence state — an unreadable or inaccessible path at the named location could be silently answered from a capture (#3312 jobs 10, 13)'
-  fi
-  if printf '%s\n' "$_r_body" | grep -qE '\[ "\$_rx_cap_recorded" = "\$\{_rx_snap_rel:-\}" \]'; then
-    ok 'structural: a capture is accepted only when its recorded path EQUALS the path the prompt names'
-  else
-    bad 'structural: the capture lookup no longer compares the recorded path with the prompt-named path — the canonical sibling could stand in for another file in the same snapshot dir (#3312 blocker 2)'
-  fi
-fi
-
-# ===== CATEGORICAL: NO BARE EXISTENCE PREDICATE MAY READ ITS OWN FALSITY AS ABSENCE =====
-# The third instance of one family (roborev jobs 5, 10, 13) made this a CLASS fix rather than a third
-# patch, and only a structural assert makes it categorical: every file predicate in the capture apparatus
-# must either go through the three-way helper (`verified-absent` / `present` / `unreadable`) or carry an
-# explicit `observability-justified:` rationale at the site. An unannotated new `[ -e ]`/`[ -f ]`/`[ -d ]`
-# whose falsity is treated as "not there" therefore FAILs the fast loop instead of costing a review round.
-_apparatus_fns='roborev_snapshot_capture_start|roborev_snapshot_capture_stop|roborev_snapshot_capture_cleanup|_roborev_file_digest|_roborev_capture_validate|_roborev_snapshot_capture_loop|roborev_prompt_snapshot_paths|_roborev_resolve_existing_ancestor|roborev_snapshot_path_binding|roborev_collect_review_diff_headers|roborev_collect_prompt_headers|_roborev_path_state|_roborev_regular_readable_state'
-_pf_unjustified=$(awk -v fns="$_apparatus_fns" '
-  $0 ~ "^(" fns ")\\(\\) \\{" { inf = 1; just = 0; next }
-  inf && /^}/ { inf = 0; next }
-  !inf { next }
-  /observability-justified/ { just = 1; cont = 0; next }
-  /^[[:space:]]*#/ { next }
-  # A `\`-CONTINUED statement is ONE statement: the justification above it must cover every line of it,
-  # or an annotated multi-line predicate would read as unjustified (measured — it did).
-  cont == 1 && /\\$/ { if (just == 0) { } ; next }
-  # A bare file predicate: `[ -e|-f|-d|-r|-L|-s|-x path ]`, with or without a leading `!`.
-  /\[[[:space:]]*!?[[:space:]]*-(e|f|d|r|L|s|x)[[:space:]]/ {
-    if (just == 0) printf "%d: %s\n", NR, $0
-    if ($0 ~ /\\$/) { cont = 1 } else { just = 0; cont = 0 }
-    next
-  }
-  /\\$/ { cont = 1; next }
-  { just = 0; cont = 0 }
-' "$ORACLES" || true)
-if [ -z "$_pf_unjustified" ]; then
-  ok 'structural: every file predicate in the capture apparatus is routed through the three-way helper or justified in code'
-else
-  bad "structural: an UNJUSTIFIED bare file predicate in the capture apparatus reads its own falsity as absence — ${_pf_unjustified%%$'\n'*} — route it through _roborev_path_state or annotate it 'observability-justified:' with the reason (#3312 predicate family: jobs 5, 10, 13)"
-fi
-# The helper itself must exist, be three-valued, and name the family so instance four is prevented.
-if grep -qE '^_roborev_path_state\(\) \{' "$ORACLES"; then
-  _ps_s=$(grep -nE '^_roborev_path_state\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-  _ps_e=$(awk -v s="$_ps_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-  _ps_body=$(sed -n "${_ps_s},${_ps_e:-$_ps_s}p" "$ORACLES")
-  _ps_missing=""
-  for _v in verified-absent present unreadable; do
-    printf '%s\n' "$_ps_body" | grep -qF "$_v" || _ps_missing="$_ps_missing $_v"
-  done
-  printf '%s\n' "$_ps_body" | grep -qF 'No such file or directory' || _ps_missing="$_ps_missing ENOENT-discrimination"
-  printf '%s\n' "$_ps_body" | grep -qF '[ -d "$parent" ] && [ -x "$parent" ]' || _ps_missing="$_ps_missing parent-observability"
-  if [ -z "$_ps_missing" ]; then
-    ok 'structural: the path-state helper is three-valued and establishes absence affirmatively (ENOENT + observable parent)'
-  else
-    bad "structural: the path-state helper is incomplete —$_ps_missing. Absence must be MEASURED, not inferred from a two-valued test (#3312 jobs 5, 10, 13)"
-  fi
-  if grep -qE 'jobs 5, 10, 13|jobs 5, 10 and 13' "$ORACLES"; then
-    ok 'structural: the predicate family is named at the helper, citing all three instances'
-  else
-    bad 'structural: the helper does not name the three instances of the family — instance four would be awaited rather than prevented (#3272 three-recurrence rule)'
-  fi
-else
-  bad 'structural: _roborev_path_state is not defined — the predicate family has no shared home (#3312)'
-fi
-# And the vector itself: the capture may be consulted ONLY on a verified-absent live path.
-if grep -qF 'if [ "$_rx_live_state" = "verified-absent" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ]' "$ORACLES"; then
-  ok 'structural: a capture is consulted only when the live path is VERIFIED absent (not merely un-`-e`-able)'
-else
-  bad 'structural: the capture fallback is not keyed on verified-absent — an inaccessible snapshot could be answered from an older capture (#3312 job 13)'
-fi
-
-# THE ESCALATION STAYS GUARDED (job 11). Its expected failure mode is "the watcher already exited", and
-# an unguarded `kill -KILL` as the last command of an AND-OR list aborts the wrapper under `set -e`.
-_stop_s=$(grep -nE '^roborev_snapshot_capture_stop\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-_stop_e=""
-[ -z "$_stop_s" ] || _stop_e=$(awk -v s="$_stop_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-if [ -z "$_stop_s" ] || [ -z "$_stop_e" ]; then
-  bad 'structural: could not locate roborev_snapshot_capture_stop to inspect its escalation'
-else
-  _stop_body=$(sed -n "${_stop_s},${_stop_e}p" "$ORACLES")
-  if printf '%s\n' "$_stop_body" | grep -qE 'kill -0 [^&]*&& kill -KILL'; then
-    bad 'structural: the KILL escalation is back to an unguarded AND-OR list — an already-exited watcher aborts the wrapper under set -e (#3312 job 11)'
-  elif printf '%s\n' "$_stop_body" | grep -qE 'kill -KILL "\$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null \|\| :'; then
-    ok 'structural: the KILL escalation tolerates an already-exited watcher (no spurious wrapper abort)'
-  else
-    bad 'structural: the KILL escalation is neither guarded nor absent — check roborev_snapshot_capture_stop (#3312 job 11)'
-  fi
+  bad "structural: the block does not emit —$_ckeys_missing. C‴ replaces certification WITH this record, so its absence is the whole loss and none of the gain (#3312)"
 fi
 
 # THE AFFIRMATIVE-MEASUREMENT SHAPE, at the new branch point (CLAUDE.md; #3229 round-10). The
