@@ -4158,6 +4158,51 @@ else
   bad "case (cx32b): the unit probe did not run: $(cat "$cx32b_out")"
 fi
 
+printf "== (cx32c) the watcher's KILL escalation cannot abort the wrapper (job 11, direct probe) ==\n"
+# THE LOUD DIRECTION OF THIS ISSUE'S OWN DEFECT: `kill -0` can succeed and the watcher can exit before
+# `kill -KILL` runs. `kill -KILL` was the LAST command of that AND-OR list, so its failure tripped
+# `set -e` and ABORTED the wrapper — a spurious non-PASS on a genuine review. Probed directly, with
+# `kill` shimmed to reproduce exactly that interleaving (alive for `-0`, gone for `-KILL`): constructing
+# a real process that dies inside the window would be a race, and a racy test for a race is no evidence.
+cx32c_probe="$tmp/cx32c-probe.sh"
+cx32c_out="$tmp/cx32c-out.txt"
+cat >"$cx32c_probe" <<'CX32C'
+set -euo pipefail
+REPO="$2"
+. "$1"
+# The interleaving, deterministically: TERM and -0 succeed (the watcher looks alive for the whole grace
+# window), then the process exits, so -KILL fails.
+kill() {
+  case "${1:-}" in
+    -TERM) return 0 ;;
+    -0) return 0 ;;
+    -KILL) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+sleep() { return 0; }
+wait() { return 1; }
+ROBOREV_SNAPSHOT_CAPTURE_PID=999999
+ROBOREV_SNAPSHOT_CAPTURE_DIR=""
+roborev_snapshot_capture_stop
+printf 'stop-returned-%s\n' "$?"
+printf 'wrapper-survived\n'
+CX32C
+if bash "$cx32c_probe" "$ORACLES_SRC" "$tmp" >"$cx32c_out" 2>&1; then
+  if grep -qF 'wrapper-survived' "$cx32c_out"; then
+    ok 'case (cx32c): a watcher that exits inside the escalation window does not abort the wrapper'
+  else
+    bad "case (cx32c): stop() did not return control — the escalation aborted under set -e: $(cat "$cx32c_out")"
+  fi
+  if grep -qF 'stop-returned-0' "$cx32c_out"; then
+    ok 'case (cx32c): stop() reports success, so no caller sees a spurious failure either'
+  else
+    bad "case (cx32c): stop() returned non-zero, which under set -e aborts its caller: $(cat "$cx32c_out")"
+  fi
+else
+  bad "case (cx32c): the probe exited non-zero — the KILL escalation aborted the wrapper (#3312 job 11): $(cat "$cx32c_out")"
+fi
+
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs
@@ -4610,6 +4655,24 @@ if [ -n "${_src_defs:-}" ] && [ "${_src_defs:-0}" -eq 1 ]; then
     ok 'structural: a capture is accepted only when its recorded path EQUALS the path the prompt names'
   else
     bad 'structural: the capture lookup no longer compares the recorded path with the prompt-named path — the canonical sibling could stand in for another file in the same snapshot dir (#3312 blocker 2)'
+  fi
+fi
+
+# THE ESCALATION STAYS GUARDED (job 11). Its expected failure mode is "the watcher already exited", and
+# an unguarded `kill -KILL` as the last command of an AND-OR list aborts the wrapper under `set -e`.
+_stop_s=$(grep -nE '^roborev_snapshot_capture_stop\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_stop_e=""
+[ -z "$_stop_s" ] || _stop_e=$(awk -v s="$_stop_s" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+if [ -z "$_stop_s" ] || [ -z "$_stop_e" ]; then
+  bad 'structural: could not locate roborev_snapshot_capture_stop to inspect its escalation'
+else
+  _stop_body=$(sed -n "${_stop_s},${_stop_e}p" "$ORACLES")
+  if printf '%s\n' "$_stop_body" | grep -qE 'kill -0 [^&]*&& kill -KILL'; then
+    bad 'structural: the KILL escalation is back to an unguarded AND-OR list — an already-exited watcher aborts the wrapper under set -e (#3312 job 11)'
+  elif printf '%s\n' "$_stop_body" | grep -qE 'kill -KILL "\$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null \|\| :'; then
+    ok 'structural: the KILL escalation tolerates an already-exited watcher (no spurious wrapper abort)'
+  else
+    bad 'structural: the KILL escalation is neither guarded nor absent — check roborev_snapshot_capture_stop (#3312 job 11)'
   fi
 fi
 
