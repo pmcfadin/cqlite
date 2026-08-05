@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# lib-ws0-report-fixtures.sh — the SYNTHETIC SESSION-DIR builders and the `expect_reject`
+# helper shared by the two reporter self-test suites (issue #3272 review round 4,
+# campsite-rule split).
+#
+# Sourced, not executed, and it sets NO shell options: `set -uo pipefail` in a library mutates
+# the SOURCING shell's options, which is the caller's decision.
+#
+# # Why this exists, and where the seam falls
+#
+# `test_ws0_fabrication_guards.sh` grew past the ~1500-line test target while closing round 4's
+# derived-throughput finding, so it was split by SUBJECT:
+#
+#   test_ws0_fabrication_guards.sh   — no fabricated VALUE anywhere in the reporting path
+#                                      (defaulted counters, permissive verdicts, truncating
+#                                      coercions, a forged throughput, the corpus-byte identity)
+#   test_ws0_round_metadata.sh       — the per-rep ROUND METADATA: the loop order, the required
+#                                      fields, the integrity refusals, and the assertion that
+#                                      NO interleaving/ordering claim is made on any session
+#                                      shape (the round-4 deletion)
+#
+# The two need the SAME fixture builders, and a duplicated builder is the wrong thing to keep
+# two copies of: `make_round` gaining a `monotonic_ns` field had to be edited in two files in
+# round 3, which is exactly the drift this removes. `perf_csv`/`ws0_make_corpus`/`make_round`
+# come from `lib-ws0-fixtures.sh` (shared with `test_ws0_report_guards.sh`); this file adds the
+# builders whose signatures are specific to the two reporter suites — the flight JSONL is
+# passed VERBATIM, so a case can omit a key or supply two records.
+#
+# It expects the sourcing suite to have set `REPO_ROOT`, `REPORT`, `TMP`, `CORPUS_ROWS`, and to
+# provide `pass`/`fail`.
+
+# shellcheck source=scripts/tests/lib-ws0-fixtures.sh
+source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
+
+# This file's corpora are deliberately SMALL (4 KiB of Data.db). The byte verification must
+# work at ANY size — the real corpus is 2.8 GB and a test may not write one — and this file
+# builds a corpus per case, so the size is the one thing worth keeping local.
+FIXTURE_DATA_DB_BYTES=4096
+make_corpus() { ws0_make_corpus "$1" "${2:-$CORPUS_ROWS}" "$FIXTURE_DATA_DB_BYTES" "${3:-}"; }
+
+make_scan_rep() { # make_scan_rep <dir> <temp> <rep> <prewarm>
+  local d="$1" tag="scan-$2-$3"
+  cat > "$d/$tag.json" <<EOF
+{ "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5 }
+EOF
+  perf_csv "$d/perf-$tag.csv" 2000000 4000000
+  perf_csv "$d/perf-$tag-setup.csv" 100000 200000
+  printf '%s\n' "$4" > "$d/$tag.prewarm.status"
+  # The driver's alternation, from the shared helper so the two files cannot spell it
+  # differently (a fixture whose positions do not alternate is refused by the rotation
+  # check — correctly, but diagnosed as a rotation failure rather than a fixture mistake).
+  make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" scan)"
+}
+
+# make_flight_rep <dir> <temp> <rep> <prewarm> <jsonl-body>
+# The JSONL body is given VERBATIM so a case can omit a key or supply two records.
+make_flight_rep() {
+  local d="$1" tag="flight-bypass-$2-$3"
+  printf '%s\n' "$5" > "$d/$tag.jsonl"
+  perf_csv "$d/perf-$tag.csv" 8000000 16000000
+  printf '%s\n' "$4" > "$d/$tag.prewarm.status"
+  # ...and the flight arm takes the OTHER position, mirroring the driver.
+  make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" flight)"
+}
+
+GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+
+# make_session <dir> <flight-jsonl> — a complete one-warm-rep session dir.
+make_session() {
+  mkdir -p "$1"
+  make_scan_rep "$1" warm 1 ok
+  make_flight_rep "$1" warm 1 ok "$2"
+}
+
+run_report() { # run_report <dir> <corpus> [extra args…]
+  local d="$1" c="$2"; shift 2
+  python3 "$REPORT" --dir "$d" --corpus "$c" --server-cpus 2,10 \
+    --client-cpus 4,12 --reps 1 --temps warm --arms bypass \
+    --step-duration 45s/1s --scan-passes 1 "$@" 2>&1
+}
+
+# expect_reject <label> <expect-substring> <dir> <corpus> [extra…]
+expect_reject() {
+  local label="$1" expect="$2"; shift 2
+  local out rc
+  out=$(run_report "$@"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "$expect" <<<"$out"; then
+    pass "$label"
+  else
+    fail "$label: expected non-zero + '$expect' (rc=$rc, out: $out)"
+  fi
+}

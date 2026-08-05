@@ -5820,6 +5820,36 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 PER-REP ROUND METADATA (#3272 review round 4). Split out of the fabrication suite
+  # under the campsite rule, by SUBJECT: the driver's loop order, the four RECORDED per-rep
+  # fields, the artifact-set INTEGRITY refusals over them (same round set per arm, positions
+  # 1..n exactly once, arms_in_round matching, no duplicate instant, labels not contradicting
+  # instants, no arm at a fixed position), and — the reason it is its own subject — the
+  # assertion that NO INTERLEAVING OR ORDERING CLAIM is made on ANY session shape.
+  #
+  # That last property is a round-4 owner ruling. Earlier rounds had the reporter print "the
+  # reps were INTERLEAVED … OBSERVED FROM THE CLOCK …" and record `round_major_verified: true`;
+  # at the rig's default `--reps 1` there is ONE round, so `zip(ordered, ordered[1:])` is
+  # empty, ZERO orderings were compared, and the verdict was returned anyway — a positive
+  # verdict from an absent measurement, which is the defect the whole issue exists to remove.
+  # The claim and all 13 verdict fields were DELETED rather than re-worded a fourth time, and
+  # this component is what keeps them deleted: forbidden PHRASES over every session shape
+  # (one round, many rounds, a forged one), a shared key-walking assert over results.json
+  # (`scripts/tests/ws0_assert_no_verdict_fields.py`), and two structural scans of the
+  # reporter's ast-stripped executable code. Re-adding an OBSERVED drift control on real
+  # hardware is #3287/#3299. Hermetic: synthetic session dirs only.
+  echo ">>> [$name] bash scripts/tests/test_ws0_round_metadata.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_round_metadata.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 round-metadata / no-interleaving-claim guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
   # `tools/*` package tests are run by NO other gate component and by no CI lane
   # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so

@@ -172,10 +172,18 @@ EOF
 }
 
 # make_flight_rep <dir> <temp> <rep> <requests_ok> <rows> <prewarm-status|-none->
+#
+# `rows_per_s` is COMPUTED from `rows_total / duration_s` rather than hardcoded (#3272 review
+# round 4). The reporter now DERIVES the throughput from those two counters and cross-checks
+# the recorded rate against it, so a fixture carrying a fixed `250000.0` beside a varying
+# `rows` would be refused for a reason that has nothing to do with the case under test — and
+# it is also what the load generator itself writes (record.rs `per_s(self.rows_total)`).
 make_flight_rep() {
   local d="$1" temp="$2" rep="$3" ok="$4" rows="$5" pw="$6" tag="flight-bypass-$2-$3"
+  local secs=4.0 rps
+  rps="$(python3 -c "print($rows / $secs)")"
   cat > "$d/$tag.jsonl" <<EOF
-{"round":"$tag","requests_ok":$ok,"requests_error":0,"rows_total":$rows,"rows_per_s":250000.0,"duration_s":4.0}
+{"round":"$tag","requests_ok":$ok,"requests_error":0,"rows_total":$rows,"rows_per_s":$rps,"duration_s":$secs}
 EOF
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   [ "$pw" = "-none-" ] || printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
@@ -1057,8 +1065,10 @@ for temp in warm cold; do
   for arm in bypass merge; do
     pos=$((pos + 1))
     tag="flight-$arm-$temp-1"
+    # rows_per_s COMPUTED, as in make_flight_rep — the reporter derives it (#3272 round 4).
+    fm_rps="$(python3 -c "print($CORPUS_ROWS / 4.0)")"
     cat > "$d/$tag.jsonl" <<EOF
-{"round":"$tag","requests_ok":1,"requests_error":0,"rows_total":$CORPUS_ROWS,"rows_per_s":250000.0,"duration_s":4.0}
+{"round":"$tag","requests_ok":1,"requests_error":0,"rows_total":$CORPUS_ROWS,"rows_per_s":$fm_rps,"duration_s":4.0}
 EOF
     perf_csv "$d/perf-$tag.csv" 8000000 16000000
     printf '%s\n' "$pw" > "$d/$tag.prewarm.status"

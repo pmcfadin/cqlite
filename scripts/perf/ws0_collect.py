@@ -447,15 +447,55 @@ def collect_flight(
             counters["instructions"],
             "IPC = instructions/cycles, so a zero here publishes a zero IPC",
         )
-        # The loadgen's own rows/s, on the SAME rule as every other quantity: positive and
-        # finite. `spread()` refuses a non-positive MEDIAN, which is not the same property —
-        # one impossible rep among three leaves the median positive.
-        arm_rps = positive_finite_float(
-            f"flight rep {tag} rows_per_s",
-            rec["rows_per_s"],
-            "That is not a positive finite rate. `spread()` only refuses a non-positive"
-            " MEDIAN, so a single impossible rep would survive into the printed spread.",
+        # THE THROUGHPUT IS DERIVED, NOT TRUSTED (#3272 review round 4). It used to be read
+        # straight from `rec["rows_per_s"]` while `duration_s` went completely unvalidated —
+        # so a record with plausible rows/request counters and an ARBITRARY throughput
+        # produced a successful report, and the reported figure was the one field nothing
+        # cross-checked. The loadgen's own invariant is
+        # `rows_per_s == rows_total / duration_s` (tools/flight-loadgen/src/record.rs:150,
+        # `per_s(self.rows_total)`), so the rate is RECOMPUTED from the two counters that ARE
+        # checked. A derived value cannot be forged.
+        #
+        # `duration_s` is therefore now a REQUIRED, positive, finite quantity in its own
+        # right — it is the divisor of the reported figure. An absent one used to reach
+        # `results.json` as a `None` via `rec.get("duration_s")`.
+        secs = positive_finite_float(
+            f"flight rep {tag} duration_s",
+            rec.get("duration_s"),
+            "It is the DIVISOR of this rep's throughput, which is now DERIVED rather than"
+            " read from the artifact: an unvalidated duration beside a trusted rate meant"
+            " an arbitrary rows_per_s produced a successful report (#3272 round 4).",
         )
+        arm_rps = positive_derived(
+            f"flight rep {tag} rows/s (DERIVED as rows_total/duration_s)",
+            rows / secs,
+            f"rows_total={rows}, duration_s={secs}",
+        )
+        # The RECORDED rate is still read — and CROSS-CHECKED against the derived one, so a
+        # record whose own fields disagree is refused rather than silently overridden. Which
+        # of the two is wrong cannot be known, so neither is reported: that is the same rule
+        # `load_corpus_identity` applies to `bytes_per_row` vs `data_db_bytes/rows`.
+        recorded_rps = positive_finite_float(
+            f"flight rep {tag} rows_per_s (recorded)",
+            rec.get("rows_per_s"),
+            "That is not a positive finite rate. It is cross-checked against the DERIVED"
+            " rows_total/duration_s; both must be present for the check to mean anything.",
+        )
+        # A relative tolerance, because both sides are floats the producer wrote and read
+        # back through JSON. 1e-6 is far tighter than any real divergence and far looser than
+        # float round-trip noise.
+        if abs(recorded_rps - arm_rps) > max(1e-9, arm_rps * 1e-6):
+            raise Invalid(
+                f"flight rep {tag} records rows_per_s={recorded_rps!r} but its own counters"
+                f" give rows_total/duration_s = {rows}/{secs} = {arm_rps!r}. The load"
+                " generator computes the rate from exactly those two fields"
+                " (flight-loadgen record.rs, `per_s(self.rows_total)`), so a record whose"
+                " rate disagrees with its counters is not one this reporter models — and"
+                " which of the three fields is wrong cannot be determined, so none of them"
+                " is reported. The reported figure is the DERIVED one; this check exists"
+                " because trusting the recorded rate while never validating duration_s let"
+                " an arbitrary throughput produce a successful report (#3272 round 4)."
+            )
         rows_per_sec.append(arm_rps)
         cycles_per_row.append(cyc / rows)
         ipc.append(ins / cyc)
@@ -471,8 +511,16 @@ def collect_flight(
                 "requests_expected": expected_requests(temp),
                 "rows_per_scan_observed": rows / requests_ok,
                 "rows_per_scan_expected": corpus_rows,
-                "duration_s": rec.get("duration_s"),
+                # Validated, never `rec.get(...)` — it is the DIVISOR of the figure above.
+                "duration_s": secs,
+                # DERIVED from rows_total/duration_s (#3272 round 4), with the recorded value
+                # kept beside it so a reader can see the two agreed.
                 "rows_per_sec": arm_rps,
+                "rows_per_sec_recorded": recorded_rps,
+                "rows_per_sec_source": (
+                    "DERIVED as rows_total/duration_s; the artifact's recorded rows_per_s was"
+                    " cross-checked against it and agreed within 1e-6 relative"
+                ),
                 "cycles": cyc,
                 "cycles_per_row": cyc / rows,
                 "prewarm": prewarm[-1]["status"],
