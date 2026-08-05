@@ -98,10 +98,22 @@ HOST_STATE="$REPO_ROOT/scripts/perf/lib-host-state.sh"
 # behavioural cases still run the driver end to end; the structural checks below read
 # the implementation from here.
 ARGS_LIB="$REPO_ROOT/scripts/perf/lib-args.sh"
+# THE ONE SANCTIONED WAY THIS FILE MAY INVOKE THE DRIVER (#3272 review round 3, B1).
+# `ws0_driver_run` prepends `--validate-args-only` AND the recording PATH shims, so no
+# case can reach `relax_perf_sysctls` (a host `sudo -n sysctl -w`), `cargo build
+# --release` or the measurement loop. `scripts/tests/test_ws0_hermeticity.sh` runs the
+# STRUCTURAL lint from the same library over every `test_ws0_*.sh`, so a bare invocation
+# added later FAILS rather than being caught by a manual sweep — which missed one twice.
+# shellcheck source=scripts/tests/lib-ws0-hermetic.sh
+source "$REPO_ROOT/scripts/tests/lib-ws0-hermetic.sh"
 
 fails=0
-pass() { echo "ok   - $1"; }
-fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
+# `checks` counts what actually RAN (incremented here, not derived from the file), so
+# the minimum-check-count floor at the end can see a block that silently never executed
+# (#3272 review round 3 nit).
+checks=0
+pass() { checks=$((checks + 1)); echo "ok   - $1"; }
+fail() { checks=$((checks + 1)); echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$REPORT" ] || { echo "FAIL - missing $REPORT"; exit 1; }
@@ -300,10 +312,25 @@ fi
 # --------------------------------------------------------------------------
 # Exits at argument validation, before any build/corpus/cache-drop, so this runs
 # with no corpus and no sudo.
+#
+# HERMETIC LIKE THE ACCEPT DIRECTION (#3272 review round 3, B1). Every refusal this
+# helper asserts fires ABOVE the argument-validation boundary — the numeric checks, the
+# duration parser, the cold ceiling, the scan-passes interaction — so routing through
+# `ws0_driver_run` (which prepends `--validate-args-only` and the recording shims)
+# exercises exactly the same code and CANNOT reach the world below it. Round 2 hardened
+# only the accept direction and left every reject call site bare, on the reasoning that a
+# rejection exits early anyway: true for the rejection it asserts, and NOT true for the
+# accept-adjacent probes beside it, which is how :497 survived. The distinction is not
+# worth keeping — one path, mechanically enforced.
 check_driver_reject() { # check_driver_reject <label> <expect-substring> <args...>
   local label="$1" expect="$2"; shift 2
-  local out rc2
-  out=$(bash "$DRIVER" "$@" 2>&1); rc2=$?
+  local out rc2 calls
+  out=$(ws0_driver_run "$DRIVER" "$@"); rc2=$?
+  calls="$(ws0_hermetic_calls)"
+  if [ -n "$calls" ]; then
+    fail "$label: the REJECT path invoked something outside this process — $calls"
+    return
+  fi
   if [ "$rc2" -ne 0 ] && grep -q "$expect" <<<"$out"; then
     pass "$label"
   else
@@ -327,19 +354,11 @@ check_driver_reject() { # check_driver_reject <label> <expect-substring> <args..
 # LINUX — where the gate's `tooling-tests` component runs this file — it mutated the host
 # and built the workspace. A suite whose hermeticity depends on the host LACKING a tool is
 # not hermetic; it is untested on the platform that matters.
-SHIM_BIN="$TMP/hermetic-bin"
-HERMETIC_CALLS="$TMP/hermetic-calls.txt"
-mkdir -p "$SHIM_BIN"
-: > "$HERMETIC_CALLS"
-for _tool in sudo cargo perf taskset; do
-  cat > "$SHIM_BIN/$_tool" <<SHIM
-#!/usr/bin/env bash
-printf '%s %s\n' "$_tool" "\$*" >> "$HERMETIC_CALLS"
-exit 97
-SHIM
-  chmod +x "$SHIM_BIN/$_tool"
-done
-unset _tool
+# The shim construction lives in `lib-ws0-hermetic.sh` so all three self-tests share ONE
+# implementation and the structural lint has one call shape to recognise (#3272 round 3).
+ws0_hermetic_init "$TMP"
+SHIM_BIN="$WS0_SHIM_BIN"
+HERMETIC_CALLS="$WS0_HERMETIC_CALLS"
 
 # expect_driver_accepts <label> <args…> — the ACCEPT direction, asserted
 # AFFIRMATIVELY and HERMETICALLY (#3272 review R1).
@@ -355,9 +374,8 @@ unset _tool
 expect_driver_accepts() {
   local label="$1"; shift
   local out rc calls
-  : > "$HERMETIC_CALLS"
-  out=$(PATH="$SHIM_BIN:$PATH" bash "$DRIVER" --validate-args-only "$@" 2>&1); rc=$?
-  calls="$(cat "$HERMETIC_CALLS")"
+  out=$(ws0_driver_run "$DRIVER" "$@"); rc=$?
+  calls="$(ws0_hermetic_calls)"
   if [ "$rc" -ne 0 ] || ! grep -q "ARGUMENTS OK" <<<"$out"; then
     fail "$label: the driver did not reach its argument-validation boundary, so acceptance is UNMEASURED (rc=$rc, out: $out)"
     return
@@ -418,17 +436,17 @@ fi
 # to the unrecognized-argument branch would make every accept case fail loudly; one that
 # was PARSED AND IGNORED would make them all pass while executing the world. So the
 # flag's own effect is asserted: even a corpus that does not exist is never stat'ed.
-out=$(PATH="$SHIM_BIN:$PATH" bash "$DRIVER" --validate-args-only --corpus /nonexistent-corpus 2>&1); rc=$?
+out=$(ws0_driver_run "$DRIVER" --corpus /nonexistent-corpus); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "ARGUMENTS OK" <<<"$out" \
    && grep -q "nothing was executed" <<<"$out" \
-   && ! grep -q "holds no" <<<"$out" && [ ! -s "$HERMETIC_CALLS" ]; then
+   && ! grep -q "holds no" <<<"$out" && ws0_driver_ran_hermetically; then
   pass "--validate-args-only stops AT the argument boundary (no corpus stat, nothing executed)"
 else
-  fail "--validate-args-only must exit 0 at the boundary without touching the world (rc=$rc, out: $out, calls: $(cat "$HERMETIC_CALLS"))"
+  fail "--validate-args-only must exit 0 at the boundary without touching the world (rc=$rc, out: $out, calls: $(ws0_hermetic_calls))"
 fi
 # ...and it must still REFUSE a bad argument: a validate-only mode that accepted
 # everything would turn every accept case into a tautology.
-out=$(PATH="$SHIM_BIN:$PATH" bash "$DRIVER" --validate-args-only --corpus "$TMP/corpus" --reps 0 2>&1); rc=$?
+out=$(ws0_driver_run "$DRIVER" --corpus "$TMP/corpus" --reps 0); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "must be at least 1" <<<"$out"; then
   pass "--validate-args-only still REFUSES an invalid argument (it validates, it does not wave through)"
 else
@@ -493,16 +511,35 @@ check_driver_reject "a zero-length step is refused" \
 
 # A long step is fine when NO cold temperature is selected — the guard is scoped to
 # the claim it protects, not a blanket restriction.
-# The refusal must NOT fire (the ceiling is cold-scoped)…
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp warm --cold-step-duration 45s 2>&1)
-if grep -q "exceeds the" <<<"$out"; then
-  fail "--temp warm must not be blocked by the cold-step ceiling (out: $out)"
+#
+# THIS WAS THE ONE LEAKY CALL SITE (#3272 review round 3, B1). It used to be TWO cases:
+# a BARE `bash "$DRIVER" --corpus … --temp warm --cold-step-duration 45s` asserting only
+# that "exceeds the" was ABSENT, followed by the `expect_driver_accepts` below asserting
+# the same property AFFIRMATIVELY. The bare one was therefore redundant AND was the
+# defect: with no `--validate-args-only` and no shims, on any Linux host with `perf` and
+# `taskset` present and `2,10` genuine siblings — i.e. the box the gate's `tooling-tests`
+# runs on — `--temp warm` skips the cold ceiling and control falls PAST the argument
+# boundary. MEASURED on a Linux-shaped host (fake sysfs with real `2,10` siblings,
+# readable sysctl priors, recording shims), the shim file held:
+#   sudo -n sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+#   sudo -n sysctl -w kernel.perf_event_paranoid=2
+#   sudo -n sysctl -w kernel.kptr_restrict=1
+# — a real host mutation; where `sudo -n` succeeds it continues into
+# `cargo build --release` and then `measure_scan`/`measure_flight` (3 reps x 2 arms of
+# 45s Flight steps under real `perf stat`), inside a gate component.
+#
+# Both properties are now asserted off ONE hermetic run: the ceiling did NOT fire, AND
+# the run reached the argument boundary and executed nothing.
+out=$(ws0_driver_run "$DRIVER" --corpus "$TMP/corpus" --temp warm --cold-step-duration 45s); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "ARGUMENTS OK" <<<"$out" \
+   && ! grep -q "exceeds the" <<<"$out" && ws0_driver_ran_hermetically; then
+  pass "--temp warm with a 45s cold step is ACCEPTED (the ceiling is cold-scoped) and executes NOTHING"
 else
-  pass "--temp warm is not blocked by the cold-step ceiling (the ceiling is cold-scoped)"
+  fail "--temp warm must not be blocked by the cold-step ceiling and must stay hermetic (rc=$rc, calls: $(ws0_hermetic_calls), out: $out)"
 fi
-# …AND the run must be observed getting PAST argument validation, so this cannot pass
-# on an unrelated early failure.
-expect_driver_accepts "--temp warm with a 45s cold step REACHES a later stage (affirmative)" \
+# …and the same property through the shared helper, which carries its own three-way
+# non-vacuity probe above.
+expect_driver_accepts "--temp warm with a 45s cold step REACHES the argument boundary (affirmative)" \
   --corpus "$TMP/corpus" --temp warm --cold-step-duration 45s
 
 # --------------------------------------------------------------------------
@@ -937,7 +974,7 @@ check_driver_reject "the DRIVER refuses an out-of-range --port" \
 # very end. Refusing a value after acting on it is not refusing it.
 check_driver_reject "the DRIVER refuses --reps 200000 UP FRONT (the reporter's own cap)" \
   "must be at most 100000" --corpus "$TMP/corpus" --reps 200000
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --reps 200000 2>&1)
+out=$(ws0_driver_run "$DRIVER" --corpus "$TMP/corpus" --reps 200000)
 if grep -q 'SAME bound ws0_report.py enforces' <<<"$out"; then
   pass "the cap refusal says it is the reporter's bound, refused before the reps run"
 else
@@ -1095,7 +1132,7 @@ check_driver_reject "'010000ms' is 10000ms, not octal 4096 — it cannot sneak u
   "10000ms) exceeds the" --corpus "$TMP/corpus" --temp cold --cold-step-duration 010000ms
 # `08s` is a legitimate spelling of 8s: it must reach the CEILING check (8000 > 5000)
 # and be refused for its VALUE, not die with a format complaint about a valid format.
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 08s 2>&1)
+out=$(ws0_driver_run "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 08s)
 if grep -q "8000ms) exceeds the" <<<"$out"; then
   pass "'08s' parses as 8000ms (pre-fix: a bash 'value too great for base' error)"
 else
@@ -1134,8 +1171,8 @@ fi
 check_driver_reject "a 64-bit-WRAPPING cold step is refused (would wrap to 4000ms, under the ceiling)" \
   "is too LONG" --corpus "$TMP/corpus" --temp cold \
   --cold-step-duration 2305843009213693956s
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold \
-  --cold-step-duration 2305843009213693956s 2>&1)
+out=$(ws0_driver_run "$DRIVER" --corpus "$TMP/corpus" --temp cold \
+  --cold-step-duration 2305843009213693956s)
 if grep -q '19 digits' <<<"$out" && grep -q 'maximum' <<<"$out" \
   && ! grep -q 'must be <n>ms' <<<"$out"; then
   pass "the too-long refusal states the DIGIT COUNT and the maximum, not a format complaint"
@@ -1155,7 +1192,7 @@ check_driver_reject "a 20-digit duration is refused before arithmetic touches it
 check_driver_reject "a genuinely malformed value still gets the FORMAT message" \
   "must be <n>ms, <n>s or <n>m" --corpus "$TMP/corpus" --temp cold \
   --cold-step-duration 45
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 45 2>&1)
+out=$(ws0_driver_run "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 45)
 if ! grep -q 'too LONG' <<<"$out"; then
   pass "a malformed value is NOT reported as too long (the two causes stay distinct)"
 else
@@ -1171,7 +1208,7 @@ fi
 # The largest value inside the cap must still PARSE — the fix is a cap, not a ban on
 # big-but-sane durations. 999999999ms is ~11.5 days: over the cold ceiling, so it must
 # be refused for its VALUE, which proves it reached the ceiling rather than the parser.
-out=$(bash "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 999999999ms 2>&1)
+out=$(ws0_driver_run "$DRIVER" --corpus "$TMP/corpus" --temp cold --cold-step-duration 999999999ms)
 if grep -q "999999999ms) exceeds the" <<<"$out"; then
   pass "the largest in-cap duration still parses (judged on value, not rejected as malformed)"
 else
@@ -1510,10 +1547,31 @@ else
   fail "the handler must run on a normal exit and preserve the exit code (rc=$exit_rc)"
 fi
 
+# ==========================================================================
+# A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
+# ==========================================================================
+# Without `-e` a block that silently never executes — an early `return` in a helper, a
+# `$(...)` whose command vanished, a `for` over an empty list — LOWERS the check count and
+# registers NO failure. The gate reads only the exit code, so a suite that ran 3 of its
+# ~120 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
+# `0/0` shape this whole issue is about, one level up from the checks themselves.
+#
+# The floor is deliberately BELOW the current count (adding a case must not red the suite)
+# and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
+# what actually RAN rather than what is written in the file.
+MIN_CHECKS=120
+if [ "$checks" -lt "$MIN_CHECKS" ]; then
+  echo
+  echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
+  echo "       A block that silently never executed would lower the count with no failure"
+  echo "       registered, and the gate reads only the exit code (#3272 round 3)."
+  exit 1
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "ws0-report guards: all checks passed"
+  echo "ws0-report guards: all $checks checks passed"
   exit 0
 fi
-echo "ws0-report guards: $fails check(s) FAILED"
+echo "ws0-report guards: $fails of $checks check(s) FAILED"
 exit 1

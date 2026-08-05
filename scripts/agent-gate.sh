@@ -354,6 +354,30 @@
 #                      and ANY line mentioning "self-check" (the `grep -v` discarded by
 #                      CONTENT, so a comment suppressed the guard). Hermetic: fake sysfs +
 #                      driver copies under $TMPDIR; no perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_hermeticity.sh (#3272 review round
+#                      3, B1) — the MECHANISM that keeps the three files above hermetic ON
+#                      LINUX, which is where the property matters and where it broke twice.
+#                      The WS0 driver has an argument-validation boundary; BELOW it, it
+#                      writes host sysctls via `sudo -n`, runs `cargo build --release`,
+#                      drops the page cache and takes 45s `perf stat` measurements. Round 1
+#                      ran the world from six accept call sites; round 2 added
+#                      `--validate-args-only` + recording shims and left ONE bare (the
+#                      cold-ceiling `--temp warm` case, which skips the ceiling and falls
+#                      straight past the boundary) — a MANUAL SWEEP MISSED IT TWICE. So the
+#                      contract is a STRUCTURAL LINT over every `test_ws0_*.sh` (subject
+#                      DISCOVERED by glob; an empty subject or an unreadable file is a
+#                      FINDING, not a clean tree), which flags any driver invocation not
+#                      routed through `ws0_driver_run`, by LOCATION rather than spelling.
+#                      Its discriminating power is MEASURED: six bare spellings must fire
+#                      ($DRIVER, ${DRIVER}, a literal path, a $copy, a PATH-prefixed call,
+#                      `sh`) and six ordinary lines must not. And the platform property is
+#                      OBSERVED end to end on a LINUX-SHAPED fixture (fake sysfs where the
+#                      default 2,10 really are siblings, readable non-`-1` sysctl priors,
+#                      recording shims): a POSITIVE CONTROL first proves the bare run DOES
+#                      write `kernel.perf_event_paranoid=-1` on it, then the same fixture
+#                      through `ws0_driver_run` leaves the recording file EMPTY and the
+#                      priors UNCHANGED. Hermetic everywhere; a check-count floor closes
+#                      the suite-level 0/0.
 #                      Also runs `cargo test -p ws0-corpus-gen` (#3272 items 8-9) — a
 #                      tools/* package NO other component and no CI lane compiles, so
 #                      without this hook the corpus determinism oracle would be a test
@@ -5721,6 +5745,31 @@ run_tooling_tests() {
   # perf CSVs, and a few-KB synthetic Data.db whose real sha256 is computed with
   # hashlib; no cargo, perf, sudo, corpus, network or root. python3 absence FAILS
   # here (it is a hard requirement of the rig), never skips.
+  # ws0 SELF-TEST HERMETICITY, as a MECHANISM (#3272 review round 3, B1). The three files
+  # above must not, while testing the rig, RUN the rig: below its argument-validation
+  # boundary the driver writes host sysctls via `sudo -n`, runs `cargo build --release`,
+  # drops the page cache and takes 45-second `perf stat` measurements — inside this gate
+  # component, on this Linux box. Round 1 of the review found six such call sites; round 2
+  # introduced `--validate-args-only` + recording shims and left ONE bare, and a manual
+  # sweep missed it TWICE. So this is a STRUCTURAL LINT over every `test_ws0_*.sh` rather
+  # than a rule in a comment: any driver invocation not routed through `ws0_driver_run` is
+  # a finding, judged by LOCATION (the same posture as the perf lint's layer 1), with the
+  # subject DISCOVERED by glob so a fourth self-test cannot be added outside the contract.
+  # Both directions are measured (six bare spellings fire, six ordinary lines do not), and
+  # the platform property is OBSERVED on a LINUX-SHAPED fixture with a positive control
+  # proving the bare run really does mutate that host. Hermetic; sub-second.
+  echo ">>> [$name] bash scripts/tests/test_ws0_hermeticity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_hermeticity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 self-test hermeticity); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_ws0_fabrication_guards.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_fabrication_guards.sh" >>"$log" 2>&1; then
     status=FAIL

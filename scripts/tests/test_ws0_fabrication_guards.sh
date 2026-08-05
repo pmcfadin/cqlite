@@ -42,8 +42,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPORT="$REPO_ROOT/scripts/perf/ws0_report.py"
 
 fails=0
-pass() { echo "ok   - $1"; }
-fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
+# `checks` counts what actually RAN (incremented here, not derived from the file), so
+# the minimum-check-count floor at the end can see a block that silently never executed
+# (#3272 review round 3 nit).
+checks=0
+pass() { checks=$((checks + 1)); echo "ok   - $1"; }
+fail() { checks=$((checks + 1)); echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$REPORT" ] || { echo "FAIL - missing $REPORT"; exit 1; }
 # python3 is a HARD REQUIREMENT of this rig — ws0-baseline.sh refuses to run without
@@ -1097,10 +1101,31 @@ else
   fail "an unpairable rep set must be refused (rc=$rc, out: $out)"
 fi
 
+# ==========================================================================
+# A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
+# ==========================================================================
+# Without `-e` a block that silently never executes — an early `return` in a helper, a
+# `$(...)` whose command vanished, a `for` over an empty list — LOWERS the check count and
+# registers NO failure. The gate reads only the exit code, so a suite that ran 3 of its
+# ~62 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
+# `0/0` shape this whole issue is about, one level up from the checks themselves.
+#
+# The floor is deliberately BELOW the current count (adding a case must not red the suite)
+# and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
+# what actually RAN rather than what is written in the file.
+MIN_CHECKS=62
+if [ "$checks" -lt "$MIN_CHECKS" ]; then
+  echo
+  echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
+  echo "       A block that silently never executed would lower the count with no failure"
+  echo "       registered, and the gate reads only the exit code (#3272 round 3)."
+  exit 1
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "ws0 fabrication guards: all checks passed"
+  echo "ws0 fabrication guards: all $checks checks passed"
   exit 0
 fi
-echo "ws0 fabrication guards: $fails check(s) FAILED"
+echo "ws0 fabrication guards: $fails of $checks check(s) FAILED"
 exit 1

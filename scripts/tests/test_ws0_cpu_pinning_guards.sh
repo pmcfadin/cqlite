@@ -54,10 +54,21 @@ LIB="$REPO_ROOT/scripts/perf/lib-cpu.sh"
 # second thing to keep in sync, and its divergence would be invisible in exactly the
 # permissive direction.
 PERF_LINT_LIB="$REPO_ROOT/scripts/perf/lib-perf-lint.sh"
+# THE ONE SANCTIONED WAY THIS FILE MAY INVOKE THE DRIVER (#3272 review round 3, B1).
+# See lib-ws0-hermetic.sh: `ws0_driver_run` prepends `--validate-args-only` and the
+# recording shims. The perf-invocation lint this file drives runs at driver STARTUP,
+# ABOVE the argument boundary, so every case below is reachable through that path — and
+# `scripts/tests/test_ws0_hermeticity.sh` FAILS on any bare invocation added later.
+# shellcheck source=scripts/tests/lib-ws0-hermetic.sh
+source "$REPO_ROOT/scripts/tests/lib-ws0-hermetic.sh"
 
 fails=0
-pass() { echo "ok   - $1"; }
-fail() { echo "FAIL - $1"; fails=$((fails + 1)); }
+# `checks` counts what actually RAN (incremented here, not derived from the file), so
+# the minimum-check-count floor at the end can see a block that silently never executed
+# (#3272 review round 3 nit).
+checks=0
+pass() { checks=$((checks + 1)); echo "ok   - $1"; }
+fail() { checks=$((checks + 1)); echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
 [ -f "$LIB" ] || { echo "FAIL - missing $LIB"; exit 1; }
@@ -80,6 +91,7 @@ command -v python3 >/dev/null 2>&1 || {
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
+ws0_hermetic_init "$TMP"
 
 # ===========================================================================
 # PART 1 — the verified-sibling taskset check, BOTH directions
@@ -296,7 +308,7 @@ PY
 
 # expect_selfgrep_fires <label> <injected-line>
 expect_selfgrep_fires() {
-  local label="$1" repl="$2" copy out rc
+  local label="$1" repl="$2" copy out rc calls
   copy="$(driver_copy_with "$repl")" || { fail "$label: could not build the injected copy"; return; }
   # NON-VACUITY for the fixture itself: the injection must be present in the copy,
   # or a no-op replacement would make the guard "fire" on nothing.
@@ -304,7 +316,12 @@ expect_selfgrep_fires() {
     fail "$label: the injected line is not in the copy — the fixture did not apply"
     return
   fi
-  out=$(bash "$copy" --corpus /nonexistent 2>&1); rc=$?
+  out=$(ws0_driver_run "$copy" --corpus /nonexistent); rc=$?
+  calls="$(ws0_hermetic_calls)"
+  if [ -n "$calls" ]; then
+    fail "selfgrep-fires: $label — the injected copy INVOKED something outside this process: $calls"
+    return
+  fi
   if [ "$rc" -ne 0 ] \
      && grep -qE "contains a per-process/per-thread perf invocation" <<<"$out" \
      && grep -q "CPU-wide counting is mandatory" <<<"$out"; then
@@ -368,18 +385,30 @@ _ws0_injected_noop() {'
 
 # --- NEGATIVE direction: the driver AS SHIPPED passes its own check --------
 # The half that keeps this from being a guard that reds unconditionally — which is
-# the guard an operator deletes. The shipped driver must get PAST the self-check,
-# so its failure must be about the (absent) corpus, never about `-p`.
-out=$(bash "$DRIVER" --corpus /nonexistent 2>&1); rc=$?
-# AFFIRMATIVE (#3272 review): the absence of "per-process" alone would pass on ANY early
-# failure, including one that never reached the lint at all. So the diagnostic must ALSO
-# be the LATER one this invocation is designed to hit — the unresolvable `--corpus` path
-# — which is only reachable past the lint.
-if [ "$rc" -ne 0 ] && ! grep -q "per-process" <<<"$out" \
-   && grep -qE "/nonexistent" <<<"$out"; then
-  pass "selfgrep-silent: the shipped driver passes its own lint and fails LATER, on the corpus (affirmative)"
+# the guard an operator deletes. The shipped driver must get PAST the self-check.
+#
+# AFFIRMATIVE, and STRONGER than what it replaced (#3272 review round 3, B1). It used to
+# run the driver BARE and assert it reached the unresolvable `--corpus` complaint, i.e. a
+# checkpoint BELOW the argument boundary — which is the leak class B1 is about, and it is
+# also a weaker witness than it looks: the corpus stat is several host-dependent checks
+# past the lint. The `ARGUMENTS OK` stamp is emitted by the boundary, which sits strictly
+# AFTER `perf_invocation_lint_tree` in the driver's source order, so reaching it proves
+# the lint passed — and it proves it without touching the world.
+out=$(ws0_driver_run "$DRIVER" --corpus /nonexistent); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "ARGUMENTS OK" <<<"$out" \
+   && ! grep -q "per-process" <<<"$out" && ws0_driver_ran_hermetically; then
+  pass "selfgrep-silent: the shipped driver passes its own lint and reaches the argument boundary (affirmative, hermetic)"
 else
-  fail "selfgrep-silent: the shipped driver must pass its lint and reach the corpus check (rc=$rc, out: $(head -3 <<<"$out"))"
+  fail "selfgrep-silent: the shipped driver must pass its lint and reach ARGUMENTS OK (rc=$rc, calls: $(ws0_hermetic_calls), out: $(head -3 <<<"$out"))"
+fi
+# The lint's POSITION is what makes the stamp a witness for it, so that is asserted
+# structurally rather than assumed from the driver's current shape.
+lint_line=$(grep -n '^_perf_lint_out="\$(perf_invocation_lint_tree' "$DRIVER" | head -1 | cut -d: -f1)
+stamp_line=$(grep -n '^  echo "ARGUMENTS OK' "$DRIVER" | head -1 | cut -d: -f1)
+if [ -n "$lint_line" ] && [ -n "$stamp_line" ] && [ "$lint_line" -lt "$stamp_line" ]; then
+  pass "selfgrep-silent: the perf lint (line $lint_line) runs BEFORE the ARGUMENTS OK stamp (line $stamp_line), so the stamp witnesses it"
+else
+  fail "the perf lint must precede the argument boundary, else ARGUMENTS OK is not evidence the lint ran (lint=$lint_line stamp=$stamp_line)"
 fi
 # Stated directly too, using the driver's OWN lint function rather than a second
 # hand-written pattern: a reimplemented check in the test would be a second thing to
@@ -549,7 +578,7 @@ for libname in lib-host-state.sh lib-args.sh; do
   # body is structurally inside the rig exactly as a real edit would be, and never runs.
   printf '_ws0_planted() {\n  perf stat -x, -e cycles -C 0 -t 1234 -o /dev/null -- true\n}\n' \
     >> "$treedir/scripts/perf/$libname"
-  out=$(bash "$treedir/scripts/perf/ws0-baseline.sh" --corpus /nonexistent 2>&1); rc=$?
+  out=$(ws0_driver_run "$treedir/scripts/perf/ws0-baseline.sh" --corpus /nonexistent); rc=$?
   if [ "$rc" -ne 0 ] && grep -q "per-thread option token" <<<"$out" \
      && grep -q "$libname" <<<"$out"; then
     pass "selfgrep-e2e: a per-thread invocation in $libname STOPS THE DRIVER, naming the file"
@@ -691,10 +720,31 @@ else
 fi
 
 # ===========================================================================
+# ==========================================================================
+# A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
+# ==========================================================================
+# Without `-e` a block that silently never executes — an early `return` in a helper, a
+# `$(...)` whose command vanished, a `for` over an empty list — LOWERS the check count and
+# registers NO failure. The gate reads only the exit code, so a suite that ran 3 of its
+# ~95 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
+# `0/0` shape this whole issue is about, one level up from the checks themselves.
+#
+# The floor is deliberately BELOW the current count (adding a case must not red the suite)
+# and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
+# what actually RAN rather than what is written in the file.
+MIN_CHECKS=95
+if [ "$checks" -lt "$MIN_CHECKS" ]; then
+  echo
+  echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
+  echo "       A block that silently never executed would lower the count with no failure"
+  echo "       registered, and the gate reads only the exit code (#3272 round 3)."
+  exit 1
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "PASS - all WS0 cpu-pinning / perf-invocation guard checks fired as specified"
+  echo "PASS - all $checks WS0 cpu-pinning / perf-invocation guard checks fired as specified"
   exit 0
 fi
-echo "FAIL - $fails check(s) failed"
+echo "FAIL - $fails of $checks check(s) failed"
 exit 1
