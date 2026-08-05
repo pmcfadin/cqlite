@@ -273,19 +273,38 @@ case "$cmd" in
     # A capture that never appears therefore FAILs the case, which is the point of it.
     if [ -n "${STUB_SNAPSHOT_LIFECYCLE_DIR:-}" ]; then
       mkdir -p "$STUB_SNAPSHOT_LIFECYCLE_DIR"
-      : >"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
-      for p in ${STUB_SNAPSHOT_PATHS:-}; do
-        printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -0,0 +1 @@\n+x\n' \
-          "$p" "$p" "$p" "$p" >>"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
-      done
+      if [ -n "${STUB_SNAPSHOT_SYMLINK_TARGET:-}" ]; then
+        # THE TOCTOU ORDERING (roborev job 6, blocker 1): the snapshot file is a SYMLINK to a file
+        # OUTSIDE the repo, and the whole directory is deleted before the wrapper validates. `-f`
+        # and `cp` both follow symlinks, so a watcher that copied first would hold outside content
+        # with no path left to inspect.
+        ln -s "$STUB_SNAPSHOT_SYMLINK_TARGET" "$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+      else
+        : >"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+        for p in ${STUB_SNAPSHOT_PATHS:-}; do
+          printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n--- a/%s\n+++ b/%s\n@@ -0,0 +1 @@\n+x\n' \
+            "$p" "$p" "$p" "$p" >>"$STUB_SNAPSHOT_LIFECYCLE_DIR/roborev-snapshot-content.diff"
+        done
+      fi
+      # THE POSITIVE CONTROL, in the SAME run: a second, ordinary snapshot directory whose capture
+      # MUST appear. Waiting on IT rather than on a fixed sleep is what makes "the symlinked one was
+      # not captured" a measurement instead of a race — the watcher is PROVEN to have been alive and
+      # polling before the case concludes anything from an absence.
       snap_id="${STUB_SNAPSHOT_LIFECYCLE_DIR##*/}"
+      wait_id="$snap_id"
+      if [ -n "${STUB_SNAPSHOT_CONTROL_DIR:-}" ]; then
+        mkdir -p "$STUB_SNAPSHOT_CONTROL_DIR"
+        printf 'diff --git a/control.rs b/control.rs\n@@ -0,0 +1 @@\n+x\n' \
+          >"$STUB_SNAPSHOT_CONTROL_DIR/roborev-snapshot-content.diff"
+        wait_id="${STUB_SNAPSHOT_CONTROL_DIR##*/}"
+      fi
       waited=0
       while [ "$waited" -lt 300 ]; do
-        [ -f "${STUB_SNAPSHOT_CAPTURE_WAIT_DIR:-/nonexistent}/$snap_id.diff" ] && break
+        [ -f "${STUB_SNAPSHOT_CAPTURE_WAIT_DIR:-/nonexistent}/$wait_id.diff" ] && break
         waited=$((waited + 1))
         sleep 0.1
       done
-      rm -rf "$STUB_SNAPSHOT_LIFECYCLE_DIR"
+      rm -rf "$STUB_SNAPSHOT_LIFECYCLE_DIR" "${STUB_SNAPSHOT_CONTROL_DIR:-/nonexistent/x}"
     fi
     if [ -n "${STUB_ANNOUNCE_SHA:-}" ]; then
       printf 'Enqueued job %s for %s\n' "${STUB_JOB:-4600}" "$STUB_ANNOUNCE_SHA"
@@ -952,6 +971,11 @@ export STUB_ANNOUNCE_SHA=''
 export STUB_SNAPSHOT_LIFECYCLE_DIR=''
 export STUB_SNAPSHOT_PATHS=''
 export STUB_SNAPSHOT_CAPTURE_WAIT_DIR=''
+# STUB_SNAPSHOT_SYMLINK_TARGET makes the snapshot file a SYMLINK to that path (the TOCTOU fixture);
+# STUB_SNAPSHOT_CONTROL_DIR is a second, ordinary snapshot dir used as the in-run positive control
+# the stub waits on, so an ABSENT capture is a measurement rather than a race.
+export STUB_SNAPSHOT_SYMLINK_TARGET=''
+export STUB_SNAPSHOT_CONTROL_DIR=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -972,6 +996,8 @@ reset_stub() {
   STUB_SNAPSHOT_LIFECYCLE_DIR=''
   STUB_SNAPSHOT_PATHS=''
   STUB_SNAPSHOT_CAPTURE_WAIT_DIR=''
+  STUB_SNAPSHOT_SYMLINK_TARGET=''
+  STUB_SNAPSHOT_CONTROL_DIR=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -3583,6 +3609,92 @@ assert_says 'case (cx31r2) an uncaptured, deleted snapshot FAILs' \
   '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
 assert_says 'case (cx31r2) the cause names the capture that would have been the evidence' \
   'is the only possible evidence and it is not there'
+
+printf '== (cx31s) TOCTOU: a SYMLINKED snapshot source is never captured (roborev job 6, blocker 1) ==\n'
+# THE ORDERING THAT DEFEATS VALIDATION-TIME CHECKING: `-f` and `cp` both FOLLOW symlinks, and roborev
+# deletes the original BEFORE the wrapper validates — so a watcher that copied first would hold an
+# OUTSIDE file as this review's diff with no path left to inspect. The refusal therefore has to happen
+# at CAPTURE time. The fixture is the strongest form: the symlink target is a VALID snapshot carrying
+# every census path, so only the capture-time refusal stands between it and a green.
+reset_stub
+write_snap_diff "$tmp/toctou-outside-target.diff" alpha.rs beta.rs
+toctou_dir="$snap_repo/.roborev/roborev-snapshot-777777"
+toctou_control="$snap_repo/.roborev/roborev-snapshot-777778"
+toctou_log="$tmp/cx31s-transcript.log"
+STUB_SNAPSHOT_LIFECYCLE_DIR="$toctou_dir"
+STUB_SNAPSHOT_SYMLINK_TARGET="$tmp/toctou-outside-target.diff"
+STUB_SNAPSHOT_CONTROL_DIR="$toctou_control"
+STUB_SNAPSHOT_CAPTURE_WAIT_DIR="$toctou_log.snapshots"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$toctou_dir/roborev-snapshot-content.diff")
+run_wrapper "$snap_work" --log "$toctou_log"
+assert_verdict 'case (cx31s)' FAIL 1
+assert_lacks 'case (cx31s) an outside file never certifies the review through a symlinked capture' '^prompt-content: PASS'
+# THE POSITIVE CONTROL FIRST: the ordinary sibling WAS captured, so the watcher was demonstrably
+# alive and polling — without this, the absence below could just be a race.
+if [ -f "$toctou_log.snapshots/roborev-snapshot-777778.diff" ]; then
+  ok 'case (cx31s): the watcher was alive (the ordinary sibling snapshot WAS captured)'
+else
+  bad 'case (cx31s): the control snapshot was not captured, so nothing below can be concluded from an absent capture'
+fi
+if [ -f "$toctou_log.snapshots/roborev-snapshot-777777.diff" ]; then
+  bad 'case (cx31s): the SYMLINKED snapshot was captured — cp followed the symlink and an outside file became this review evidence (#3312 blocker 1)'
+else
+  ok 'case (cx31s): the symlinked snapshot was refused at capture time (no capture, and no validation record)'
+fi
+if [ -f "$toctou_log.snapshots/roborev-snapshot-777777.validated" ]; then
+  bad 'case (cx31s): a validation record exists for the symlinked snapshot'
+else
+  ok 'case (cx31s): no validation record was written for the refused snapshot'
+fi
+assert_says 'case (cx31s) with nothing captured the verdict is the fail-closed cleaned-up cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
+reset_stub
+
+printf '== (cx31t) a capture with NO validation record is REJECTED, not trusted ==\n'
+# The consumer half of blocker 1: "capture was validated" must be an AFFIRMATIVE recorded fact the
+# reader REQUIRES. A capture published without one — by a crash between the two writes, by an older
+# wrapper, by anything at all — must be non-passing rather than assumed safe. Planted directly,
+# because the current watcher deliberately cannot produce this state.
+reset_stub
+unval_log="$tmp/cx31t-transcript.log"
+mkdir -p "$unval_log.snapshots"
+write_snap_diff "$unval_log.snapshots/roborev-snapshot-313131.diff" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$snap_repo/.roborev/roborev-snapshot-313131/roborev-snapshot-content.diff")
+run_wrapper "$snap_work" --log "$unval_log"
+assert_verdict 'case (cx31t)' FAIL 1
+assert_says 'case (cx31t) an unvalidated capture is its own cause' \
+  '^prompt-content: FAIL \(snapshot diff unusable: capture-unvalidated\)$'
+assert_says 'case (cx31t) the cause says an absent record is an absent MEASUREMENT' \
+  'absence is the absence of a measurement, never a clean bill of health'
+assert_lacks 'case (cx31t) a complete-looking capture never passes without its record' '^prompt-content: PASS'
+
+printf '== (cx31u) a capture is matched by its FULL path, not the snapshot dir id (blocker 2) ==\n'
+# The prompt names a DIFFERENT file in the same snapshot directory. The canonical sibling's capture is
+# present, valid and complete — so an id-keyed lookup would answer with it and certify a diff the
+# reviewer was never instructed to read.
+reset_stub
+mism_dir="$snap_repo/.roborev/roborev-snapshot-616161"
+mism_log="$tmp/cx31u-transcript.log"
+STUB_SNAPSHOT_LIFECYCLE_DIR="$mism_dir"
+STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+STUB_SNAPSHOT_CAPTURE_WAIT_DIR="$mism_log.snapshots"
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$mism_dir/some-other-diff-the-reviewer-was-pointed-at.diff")
+run_wrapper "$snap_work" --log "$mism_log"
+assert_verdict 'case (cx31u)' FAIL 1
+assert_says 'case (cx31u) the canonical sibling capture does NOT stand in for another file' \
+  '^prompt-content: FAIL \(snapshot diff unusable: capture-path-mismatch\)$'
+assert_says 'case (cx31u) the cause names both the recorded and the instructed path' \
+  "records the validated path '\.roborev/roborev-snapshot-616161/roborev-snapshot-content\.diff', but the prompt instructed the reviewer to read '\.roborev/roborev-snapshot-616161/some-other-diff-the-reviewer-was-pointed-at\.diff'"
+# The sibling capture really was there — otherwise the mismatch above would be vacuous.
+if [ -f "$mism_log.snapshots/roborev-snapshot-616161.diff" ]; then
+  ok 'case (cx31u): the canonical capture existed and was still refused for the other path'
+else
+  bad 'case (cx31u): no capture existed, so the mismatch cause was reached without a substitute being available'
+fi
+reset_stub
 
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
