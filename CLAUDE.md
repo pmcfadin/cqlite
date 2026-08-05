@@ -526,7 +526,14 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   compares equal to another empty one), and the capture directory's containment is decided on its
   **`pwd -P`-resolved** path, so a relative `TMPDIR` or one symlinked into the checkout is refused with a named
   notice rather than putting our copies in the tree under review. Every one of those holes was real: reverted,
-  each reached `prompt-content: PASS`. **STATED LIMITATION, deliberately not chased:** a poller cannot prove
+  each reached `prompt-content: PASS`. **One PREDICATE FAMILY, fixed categorically (#3272's three-recurrence rule):** three vectors were one
+  mistake — `! -f` read "not a regular file" as gone, `! -e` read "not stat-able" as gone, and `! -e` again
+  read "parent not searchable" as gone. **Every shell file test is two-valued and collapses "cannot tell"
+  onto the value that reads as "nothing is wrong."** So the apparatus now routes every such probe through one
+  three-way helper — **`verified-absent`** (ENOENT *and* an observable parent) / **`present`** /
+  **`unreadable`** (anything else, fail-closed, naming what was unobservable) — a capture may be consulted
+  ONLY on `verified-absent`, and a `--lite` lint FAILs any unannotated bare file predicate in the apparatus
+  that would read its own falsity as absence. **STATED LIMITATION, deliberately not chased:** a poller cannot prove
   the version it captured was the snapshot's *final* bytes — but the remedy needs an API roborev does not
   offer (no `show --diff`, and the file is deleted before `--wait` returns), the check's subject is *the diff
   the reviewer received* rather than a version that materialised after the read, and the residual is a rewrite

@@ -225,6 +225,16 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    a symlink into the checkout; a refusal is reported as a named notice, and the review then fails closed on
    the absent capture rather than certifying from a directory inside the tree under review.
 
+   **One predicate family, fixed categorically.** Three separate vectors turned out to be a single
+   mistake: `[ ! -f ]` read "not a regular file" as *gone*, `[ ! -e ]` read "not stat-able" as *gone*, and
+   `[ ! -e ]` again read "an unsearchable parent" as *gone*. The general fact — worth carrying to any shell
+   guard — is that **every `test`/`[` file predicate is two-valued, so it must collapse "cannot tell" onto
+   one of its answers, and the one it picks is always the permissive one.** Absence is therefore established
+   affirmatively by a single shared helper (ENOENT **and** an observable parent ⇒ `verified-absent`;
+   anything else ⇒ `unreadable`, fail-closed, naming what could not be observed), a capture may substitute
+   for the live snapshot ONLY on `verified-absent`, and a `--lite` lint fails any unannotated bare file
+   predicate in the apparatus — so instance four is prevented rather than awaited.
+
    **One limitation is stated rather than chased.** Polling establishes *which versions of the snapshot
    existed at the polls*, not that the captured one was the file's final bytes — roborev deletes it without
    telling us. This is left as a documented residual for three reasons: the proposed remedies (hold an open
