@@ -864,22 +864,58 @@ else
   # stripped runner into a red gate, which is #3296's own failure mode reproduced one level down.
   #
   # So reaching the tally is measured FIRST and is a precondition for any verdict: no tally means
-  # NOT MEASURED (a loud, counted SKIP naming the dependency state and the probe's last line),
-  # never a pass and never a failure. The classifier is itself controlled below.
+  # the exit-code contract was not measured, and such a run is never reported as a pass.
+  #
+  # CLOSED GRAMMAR (#3296, roborev blocker 2). "Did not reach the tally" is not one state, it is
+  # the WHOLE SPACE of early exits: a dependency skip, a syntax error in the composition, a stray
+  # `exit 1`, a prologue that dies silently. Classifying that space as one non-failing SKIP is the
+  # CLAUDE.md defect in its purest form — a permissive branch keyed on the ABSENCE of a good
+  # signal, so an ACTUALLY BROKEN exit-code contract (or an actually broken composition) reports
+  # the same green as a stripped runner. Measured before this fix: injecting a syntax error into
+  # the ac5-fail probe, and injecting `exit 1`, each produced `skipped: 1` and
+  # `PORTABILITY RESULT: PASS`.
+  #
+  # So the classifier returns ONE of three ENUMERATED states, and only ONE of them is permissive:
+  #   MEASURED      the tally was reached; the rc/text verdict below applies
+  #   DEP-SKIP      the ONE permissive cause, AFFIRMATIVELY identified (see the branch)
+  #   UNRECOGNISED  everything else -> a counted FAILURE naming what was not recognised
+  # An unrecognised state FAILs; it never inherits DEP-SKIP. The classifier is itself controlled
+  # below, in all three directions.
   _ac5_dep='python3: present'
   command -v python3 >/dev/null 2>&1 ||
     _ac5_dep='python3: ABSENT (the guard test SKIPs its structured-payload cases without it)'
-  _ac5_out=''; _ac5_rc=0; _ac5_reached=0
-  run_ac5_probe() { # run_ac5_probe <script> -> _ac5_out / _ac5_rc / _ac5_reached
+  _ac5_out=''; _ac5_rc=0; _ac5_state=''; _ac5_cause=''
+  run_ac5_probe() { # run_ac5_probe <script> -> _ac5_out / _ac5_rc / _ac5_state / _ac5_cause
     _ac5_out=$(bash "$1" 2>&1); _ac5_rc=$?
     if printf '%s\n' "$_ac5_out" | grep -qF '==== ROBOREV REVIEW GUARD TEST TALLY'; then
-      _ac5_reached=1
+      _ac5_state='MEASURED'
+      _ac5_cause='the probe reached the guard test tally epilogue'
+    elif [ "$_ac5_rc" -eq 0 ] && printf '%s\n' "$_ac5_out" | grep -q '^SKIP - '; then
+      # THE ONE PERMISSIVE CAUSE, and the reason it is legitimately permissive, recorded here at
+      # the branch: the guard test may decline to run on a host that lacks a dependency, and it
+      # says so in its OWN idiom — a `SKIP - ` line — and then exits ZERO. Both facts are
+      # required and both are AFFIRMATIVE: the marker identifies the cause as a declared skip
+      # (not an accident), and rc 0 says the probe chose to stop rather than broke. A stripped
+      # runner is a supported host, so this must not red the gate; anything that cannot show
+      # BOTH facts is not this cause and is not permitted to borrow its verdict.
+      _ac5_state='DEP-SKIP'
+      _ac5_cause='the probe declined with the guard test SKIP marker and exited zero'
+    elif [ "$_ac5_rc" -eq 0 ]; then
+      _ac5_state='UNRECOGNISED'
+      _ac5_cause='it exited ZERO before the tally but printed NO `SKIP - ` marker, so nothing identifies this as a declared dependency skip (a silently truncated prologue looks exactly like this)'
     else
-      _ac5_reached=0
+      _ac5_state='UNRECOGNISED'
+      _ac5_cause="it exited NON-ZERO (rc $_ac5_rc) before the tally — a syntax error in the composition, a stray \`exit\`, or a prologue that failed; none of those is a dependency skip"
     fi
   }
+  # The ONLY route to a SKIP: an affirmatively identified DEP-SKIP. Every other non-MEASURED
+  # state is a counted FAILURE whose message names what was not recognised.
   ac5_not_measured() { # ac5_not_measured <label>
-    skip "AC5 ($1): the composed probe EXITED BEFORE the guard test's tally epilogue (rc $_ac5_rc; $_ac5_dep; last line: $(printf '%s' "$_ac5_out" | tail -1)) — the prologue short-circuited, so the exit-code contract was NOT MEASURED on this host. Not a pass: rerun where the guard test's prologue dependencies are present."
+    if [ "$_ac5_state" = 'DEP-SKIP' ]; then
+      skip "AC5 ($1): the composed probe DECLINED before the guard test's tally epilogue (rc $_ac5_rc; $_ac5_dep; last line: $(printf '%s' "$_ac5_out" | tail -1)) — a declared dependency skip, so the exit-code contract was NOT MEASURED on this host. Not a pass: rerun where the guard test's prologue dependencies are present."
+    else
+      bad "AC5 ($1): the composed probe exited before the guard test's tally for an UNRECOGNISED reason — $_ac5_cause (state $_ac5_state; rc $_ac5_rc; $_ac5_dep; last line: $(printf '%s' "$_ac5_out" | tail -1)). An unrecognised early exit is a FAILURE, never a skip: it may BE the broken exit-code contract this case exists to catch."
+    fi
   }
 
   compose_probe "$tmp/mirror/tests/ac5-fail.sh" "bad 'AC5 injected failure'"
@@ -889,14 +925,33 @@ else
   compose_probe "$tmp/mirror/tests/ac5-skip.sh" \
     "printf 'SKIP - simulated prologue dependency skip\\n'; exit 0"
   run_ac5_probe "$tmp/mirror/tests/ac5-skip.sh"
-  if [ "$_ac5_reached" -eq 0 ]; then
-    ok 'AC5 control: a composition whose prologue short-circuits is detected as NOT MEASURED (it never reaches the tally), so a stripped runner degrades to a loud SKIP instead of a red gate'
+  if [ "$_ac5_state" = 'DEP-SKIP' ]; then
+    ok 'AC5 control: a composition that DECLARES a dependency skip (SKIP marker + exit 0) is classified DEP-SKIP, so a stripped runner degrades to a loud SKIP instead of a red gate'
   else
-    bad 'AC5 control: a short-circuited composition was reported as having reached the tally — the not-measured detector cannot fire, so a legitimate dependency skip would be misclassified as a contract failure'
+    bad "AC5 control: a declared dependency skip was classified $_ac5_state ($_ac5_cause) — the one permissive cause cannot be identified, so a legitimate skip on a stripped runner would red the gate"
   fi
 
+  # THE OTHER DIRECTION, AND IT IS THE BLOCKER (#3296): the permissive branch must be reachable
+  # ONLY from that affirmatively identified cause. Three compositions that exit early for reasons
+  # which are NOT a declared skip must each classify UNRECOGNISED — and `ac5_not_measured` routes
+  # UNRECOGNISED to `bad`, so each of these WOULD red the gate. Pre-fix, all three were absorbed
+  # into the same non-failing SKIP as the declared skip above.
+  for _ac5_u in \
+    "syntax:bad 'AC5 injected failure'; fi" \
+    "nonzero-exit:exit 1" \
+    "silent-exit-zero:exit 0"; do
+    _ac5_ulabel="${_ac5_u%%:*}"
+    compose_probe "$tmp/mirror/tests/ac5-unrec.sh" "${_ac5_u#*:}"
+    run_ac5_probe "$tmp/mirror/tests/ac5-unrec.sh"
+    if [ "$_ac5_state" = 'UNRECOGNISED' ]; then
+      ok "AC5 control: an early exit with no declared skip ($_ac5_ulabel, rc $_ac5_rc) is classified UNRECOGNISED, so it is a counted FAILURE and not a skip"
+    else
+      bad "AC5 control: an early exit with no declared skip ($_ac5_ulabel, rc $_ac5_rc) was classified $_ac5_state — a broken composition, or a broken exit-code contract, would then pass as a skip"
+    fi
+  done
+
   run_ac5_probe "$tmp/mirror/tests/ac5-fail.sh"
-  if [ "$_ac5_reached" -eq 0 ]; then
+  if [ "$_ac5_state" != 'MEASURED' ]; then
     ac5_not_measured 'injected failing case'
   elif [ "$_ac5_rc" -ne 0 ] && printf '%s\n' "$_ac5_out" | grep -qF 'GUARD-TEST RESULT: FAIL' &&
     printf '%s\n' "$_ac5_out" | grep -qF 'failed: 1'; then
@@ -906,7 +961,7 @@ else
   fi
 
   run_ac5_probe "$tmp/mirror/tests/ac5-pass.sh"
-  if [ "$_ac5_reached" -eq 0 ]; then
+  if [ "$_ac5_state" != 'MEASURED' ]; then
     ac5_not_measured 'clean control'
   elif [ "$_ac5_rc" -eq 0 ] && printf '%s\n' "$_ac5_out" | grep -qF 'GUARD-TEST RESULT: PASS'; then
     ok 'AC5 control: with no failing case the same epilogue exits 0 with GUARD-TEST RESULT: PASS'
