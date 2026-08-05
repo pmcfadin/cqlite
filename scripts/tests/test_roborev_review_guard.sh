@@ -90,6 +90,28 @@ sed_inplace() { # sed_inplace <file> <sed-expr>  -> non-zero if nothing changed
   mv "$_t" "$_f"
 }
 
+# AFFIRMATIVE MEASUREMENT AT THE EDIT SITE (#3296, CLAUDE.md "a positive verdict requires an
+# AFFIRMATIVE MEASUREMENT"). `sed_inplace`'s non-zero status is only protection if a CALLER
+# READS IT, and a mutate-then-assert case that ignores it inherits the permissive branch for
+# every unmeasured state: sed matched nothing, sed matched a DIFFERENT line, an earlier case's
+# mutation is still in the file. The later assertion is then satisfied by the STALE content the
+# edit never replaced — a pass for a reason the case is not about. (Concretely: the cx29 restore
+# below ignored the status, and with the expression made non-matching cx29's own causal assert
+# `assert_verdict FAIL 1` still read `ok`, on cx28's grammar violation.)
+#
+# So every mutation in this file goes through this wrapper, which requires THREE affirmative
+# facts before the caller may believe its mutation: the edit changed the file, the intended
+# post-edit STATE is present, and (optionally) the state it was supposed to replace is GONE.
+# Anything else is non-zero, and every call site routes non-zero to `bad`. Fixed-string
+# (`grep -F`) comparisons throughout: the states are literal source lines, not patterns.
+sed_inplace_verified() { # sed_inplace_verified <file> <expr> <must-be-present> [<must-be-absent>]
+  local _f="$1" _expr="$2" _want="$3" _gone="${4:-}"
+  sed_inplace "$_f" "$_expr" || return 1
+  grep -qF -- "$_want" "$_f" || return 1
+  if [ -n "$_gone" ] && grep -qF -- "$_gone" "$_f"; then return 1; fi
+  return 0
+}
+
 # PORTABILITY (#3296): the summary block's key ORDER, extracted with one awk.
 # The previous form was `grep -nE '^(k1|k2|k3):' "$OUT" | cut -d: -f2 | paste -sd,`,
 # whose `paste -sd,` carries NO FILE OPERAND. GNU paste reads stdin in that case; BSD
@@ -2017,9 +2039,9 @@ assert_verdict 'case (cx28 control) the UNPATCHED copy reaches PASS' PASS 0
 assert_lacks 'case (cx28 control) and reports no grammar violation' 'verdict-grammar'
 # ONE key, ONE value, outside the grammar. `MEASUREMENT-DID-NOT-HAPPEN` is deliberately not a
 # near-miss of a recognised prefix, so the case pins the ALLOW-LIST rather than a spelling.
-if sed_inplace "$_gm_dir/roborev-review-checks.sh" \
-  's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' &&
-  grep -qF 'TIER1="MEASUREMENT-DID-NOT-HAPPEN"' "$_gm_dir/roborev-review-checks.sh"; then
+if sed_inplace_verified "$_gm_dir/roborev-review-checks.sh" \
+  's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' \
+  '    TIER1="MEASUREMENT-DID-NOT-HAPPEN"' '    TIER1="PASS"'; then
   ok 'case (cx28): the unrecognised-verdict patch was really applied to the copy'
   run_wrapper "$work"
   assert_verdict 'case (cx28)' FAIL 1
@@ -2043,20 +2065,32 @@ printf '== case (cx29): a check that never ran cannot ride to PASS on its initia
 # before assigning anything, which is exactly what an aborted helper or a stray `return` in a
 # new branch looks like. cx28's control (the unpatched copy PASSes on this fixture) is the
 # both-directions control for this case too; the patch is verified applied before it is run.
-sed_inplace "$_gm_dir/roborev-review-checks.sh" \
+# VERIFIED, not assumed, in BOTH halves (#3296): the edit must have CHANGED the file (the
+# helper's status, read here rather than discarded) and the `return 0` must be the line
+# IMMEDIATELY AFTER the function header. A sed that matched nothing leaves a copy identical to
+# the control, and this case would then be asserting against an unpatched wrapper — a probe
+# failing in the direction that looks like success.
+_gm_patched=''
+if sed_inplace "$_gm_dir/roborev-review-checks.sh" \
   's/^roborev_check_prompt_content() {$/roborev_check_prompt_content() {\
-  return 0/'
-# VERIFIED, not assumed: the `return 0` must be the line IMMEDIATELY AFTER the function
-# header. A sed that matched nothing leaves a copy identical to the control, and this case
-# would then be asserting against an unpatched wrapper — a probe failing in the
-# direction that looks like success.
-_gm_patched=$(grep -A1 '^roborev_check_prompt_content() {$' "$_gm_dir/roborev-review-checks.sh" \
-  | sed -n '2p')
-if [ "$_gm_patched" = '  return 0' ]; then
-  # Undo cx28's patch so the ONLY grammar-relevant difference is the un-run check.
-  sed_inplace "$_gm_dir/roborev-review-checks.sh" \
-    's/^    TIER1="MEASUREMENT-DID-NOT-HAPPEN"$/    TIER1="PASS"/'
-  ok 'case (cx29): the early-return patch was really applied to the copy'
+  return 0/'; then
+  _gm_patched=$(grep -A1 '^roborev_check_prompt_content() {$' "$_gm_dir/roborev-review-checks.sh" \
+    | sed -n '2p')
+fi
+if [ "$_gm_patched" != '  return 0' ]; then
+  bad "case (cx29): could not patch the copied checks file for an early return (the line after the header reads '$_gm_patched'), so the never-ran-check path was never exercised"
+# Undo cx28's patch so the ONLY grammar-relevant difference is the un-run check. This restore
+# is REQUIRED to succeed and its post-state is MEASURED — `TIER1="PASS"` present AND cx28's
+# invalid value gone. A restore that silently stopped matching leaves the copy carrying cx28's
+# out-of-grammar value, and then cx29's own causal assert (`RESULT: FAIL`, exit 1) is satisfied
+# by cx28's verdict-grammar violation instead of the un-run check this case is about: a
+# stale-value pass, measured as such before this guard existed.
+elif ! sed_inplace_verified "$_gm_dir/roborev-review-checks.sh" \
+  's/^    TIER1="MEASUREMENT-DID-NOT-HAPPEN"$/    TIER1="PASS"/' \
+  '    TIER1="PASS"' 'MEASUREMENT-DID-NOT-HAPPEN'; then
+  bad 'case (cx29): the cx28 TIER1 mutation could not be verifiably restored to PASS on the copy, so a FAIL below would be cx28 grammar violation rather than cx29 never-ran check — the case is NOT MEASURED and must not report a pass'
+else
+  ok 'case (cx29): the early-return patch was really applied to the copy, and the cx28 TIER1 mutation was verified restored to PASS'
   run_wrapper "$work"
   assert_verdict 'case (cx29)' FAIL 1
   assert_says 'case (cx29) the un-run key is named as never having affirmatively passed' "^ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — prompt-content: 'SKIP'\. "
@@ -2064,8 +2098,6 @@ if [ "$_gm_patched" = '  return 0' ]; then
   assert_says 'case (cx29) it points the reader at the wrapper, not the branch under review' 'NOT something to fix in the branch under review'
   assert_says 'case (cx29) the un-run key is visible in the block' '^prompt-content: SKIP$'
   assert_lacks 'case (cx29) and the grammar check does not misreport it as unrecognised' 'verdict-grammar'
-else
-  bad 'case (cx29): could not patch the copied checks file for an early return, so the never-ran-check path was never exercised'
 fi
 WRAPPER="$_gm_real_wrapper"
 
@@ -2109,9 +2141,9 @@ for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
   # would prove nothing about the mutation.
   run_wrapper "$work"
   assert_verdict "case ($_np_label control) the restored copy reaches PASS" PASS 0
-  if sed_inplace "$_gm_dir/roborev-review-checks.sh" \
-    "s/^    TIER1=\"PASS\"\$/    TIER1=\"$_np_value\"/" &&
-    grep -qF "TIER1=\"$_np_value\"" "$_gm_dir/roborev-review-checks.sh"; then
+  if sed_inplace_verified "$_gm_dir/roborev-review-checks.sh" \
+    "s/^    TIER1=\"PASS\"\$/    TIER1=\"$_np_value\"/" \
+    "    TIER1=\"$_np_value\"" '    TIER1="PASS"'; then
     ok "case ($_np_label): the near-prefix patch was really applied to the copy"
     run_wrapper "$work"
     assert_verdict "case ($_np_label)" FAIL 1

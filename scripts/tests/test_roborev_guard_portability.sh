@@ -638,11 +638,14 @@ else
 
   # --- AC2 IN THE CASES: the four cases must STILL verify the mutation landed. Asserted on
   # the guard test's TEXT, because a helper that is fail-closed today does not keep the CASES
-  # fail-closed tomorrow. These are the three verification forms cx28 / cx29 / cx28b+cx28c use.
+  # fail-closed tomorrow. These are the verification forms cx28 / cx29 / cx28b+cx28c use — each
+  # now names the state that must be PRESENT after the edit and, where an earlier case's
+  # mutation must be gone, the state that must be ABSENT (`sed_inplace_verified`, #3296).
   for _vpair in \
-    "grep -qF 'TIER1=\"MEASUREMENT-DID-NOT-HAPPEN\"'|cx28 verifies its unrecognised-verdict patch landed" \
+    "'    TIER1=\"MEASUREMENT-DID-NOT-HAPPEN\"' '    TIER1=\"PASS\"'|cx28 verifies its unrecognised-verdict patch landed and replaced the valid value" \
     "= '  return 0'|cx29 verifies its early-return patch is the line after the header" \
-    "grep -qF \"TIER1=\\\"\$_np_value\\\"\"|cx28b/cx28c verify their near-prefix patch landed"; do
+    "'    TIER1=\"PASS\"' 'MEASUREMENT-DID-NOT-HAPPEN'|cx29 verifies the cx28 mutation was really restored (present PASS, absent stale value)" \
+    "\"    TIER1=\\\"\$_np_value\\\"\" '    TIER1=\"PASS\"'|cx28b/cx28c verify their near-prefix patch landed and replaced the valid value"; do
     _vtext="${_vpair%%|*}"
     _vwhy="${_vpair#*|}"
     if grep -qF -- "$_vtext" "$GUARD"; then
@@ -651,6 +654,51 @@ else
       bad "AC2: the guard test no longer contains this verification ($_vwhy) — a case that cannot detect an unapplied patch is a regression even when green"
     fi
   done
+
+  # --- AC2, THE CLASS RATHER THAN THE INSTANCES: no mutation call site may DISCARD the
+  # helper's status. `sed_inplace`/`sed_inplace_verified` return non-zero when the edit did not
+  # land, but that is protection only if the caller READS it; a bare statement call leaves
+  # "matched nothing" (and every other unmeasured state) on the permissive path, so the case's
+  # later assertion can be satisfied by the STALE content — the roborev finding on
+  # test_roborev_review_guard.sh's cx29 restore, which read `ok` on cx28's mutation. Line-
+  # oriented on purpose (no shell tokeniser here, by design): a call is required to sit in a
+  # CONDITIONAL position, i.e. after `if`/`elif`/`while`/`until` (optionally negated) or joined
+  # with `&&`/`||`. Definitions and prose are excluded, and the rule carries a POSITIVE CONTROL
+  # below so a regex that silently matches nothing cannot pass.
+  # Reuses scan_hits, so comment-only lines are blanked and a call whose `|| bad …` sits on a
+  # CONTINUATION line is judged on the joined logical line (the deliberate design: line-oriented
+  # matching plus continuation joining, never a shell tokeniser).
+  _ss_call_re='(^|[^[:alnum:]_])sed_inplace(_verified)?[[:space:]]+"'
+  sed_status_offenders() { # sed_status_offenders <file> -> "lineno:logical-line" per discarding call
+    scan_hits "$_ss_call_re" "$1" \
+      | grep -vE '^[0-9]+:[[:space:]]*(if|elif|while|until)[[:space:]]+!?[[:space:]]*sed_inplace' \
+      | grep -vE '^[0-9]+:.*(\&\&|\|\|)[[:space:]]*!?[[:space:]]*sed_inplace' \
+      | grep -vE '^[0-9]+:.*sed_inplace(_verified)?[[:space:]].*(\&\&|\|\|)' \
+      || printf ''
+  }
+  # BOTH DIRECTIONS. The rule must flag the discarding form and must NOT flag the two accepted
+  # status-reading forms, or it would either pass vacuously or force the callers to hide from it.
+  printf '%s\n' '  sed_inplace "$f" '"'"'s/a/b/'"'" >"$tmp/sed-status-violation.sh"
+  printf '%s\n' 'if sed_inplace "$f" '"'"'s/a/b/'"'"'; then :; fi' >"$tmp/sed-status-ok-if.sh"
+  printf '%s\n' '  sed_inplace "$f" \' '    '"'"'s/a/b/'"'"' || bad no' >"$tmp/sed-status-ok-or.sh"
+  if [ -n "$(sed_status_offenders "$tmp/sed-status-violation.sh")" ]; then
+    ok 'AC2 control: the discarded-status rule DETECTS a bare `sed_inplace` statement call (so its clean verdict below is a measurement)'
+  else
+    bad 'AC2 control: the discarded-status rule did not flag a bare `sed_inplace` statement call — every clean verdict from it would be vacuous'
+  fi
+  for _ssok in if:"$tmp/sed-status-ok-if.sh" or:"$tmp/sed-status-ok-or.sh"; do
+    if [ -z "$(sed_status_offenders "${_ssok#*:}")" ]; then
+      ok "AC2 control: the rule accepts a status-READING call (${_ssok%%:*} form)"
+    else
+      bad "AC2 control: the rule flagged a status-READING call (${_ssok%%:*} form) — it would force callers to hide from it rather than measure"
+    fi
+  done
+  _ss_hits=$(sed_status_offenders "$GUARD")
+  if [ -z "$_ss_hits" ]; then
+    ok 'AC2: every sed_inplace/sed_inplace_verified call in the guard test READS the status (no mutation is asserted against without being measured)'
+  else
+    bad "AC2: the guard test discards a mutation helper's status at: $(printf '%s' "$_ss_hits" | tr '\n' ' ') — an unapplied edit would be asserted against, and the case could pass on stale content"
+  fi
 
   # --- summary_key_order under the paste shim, plus the RED side of the differential.
   printf 'vacuity-tier2: PASS\nroborev-exit: PASS\nfindings: NONE\nlog: /tmp/x\n' >"$tmp/block.txt"
