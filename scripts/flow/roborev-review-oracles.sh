@@ -901,6 +901,18 @@ roborev_collect_prompt_headers() {
 # reviewed change — this repo's own docs and tests quote it — can never pose as roborev's own
 # instruction. Without the anchor a branch could name the file its own review is judged against.
 #
+# TWO INSTRUCTION SPELLINGS, both READ OUT OF THE INSTALLED BINARY rather than inferred from one
+# transcript (roborev v0.61.2, `strings`):
+#     Read the diff from: `%s`          the full form, beside `roborev-snapshot-content.diff`
+#     (Diff too large; read `%s`.)      the compact form emitted under a tight prompt budget
+# Accepting both can only ADD coverage: whatever the compact form's `%s` turns out to be, the
+# token still has to pass `roborev_snapshot_path_binding` before anything is read, so a token
+# that is not a bound snapshot path FAILs closed exactly as it does today. The DECLARED
+# UNCERTAINTY: the compact form's `%s` was measured as a format string, not observed on a live
+# prompt, so if it names a COMMAND rather than a path the binding reports `not-absolute` — a
+# fail-closed verdict under a cause that would then be worth renaming (see the residual noted
+# under `none` in roborev-review-checks.sh).
+#
 # LINE-ORIENTED, soundly: the instruction is one line and a path on it cannot contain a newline,
 # so there is nothing `-z` could add. (Git PLUMBING output still gets `-z` — see the census.)
 # The path is taken RAW, exactly as the prompt spells it: it is not a git-quoted token and the
@@ -909,10 +921,12 @@ roborev_prompt_snapshot_paths() {
   local f="$1" row seen p q
   _rx_snap_paths=()
   _rx_snap_unparseable=0
+  _rx_snap_oversize_markers=0
   [ -f "$f" ] || return 0
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     case "$row" in
+      OVERSIZE) _rx_snap_oversize_markers=$((_rx_snap_oversize_markers + 1)); continue ;;
       UNPARSEABLE) _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue ;;
     esac
     p="${row#PATH	}"
@@ -923,7 +937,8 @@ roborev_prompt_snapshot_paths() {
     done
     [ "$seen" -eq 1 ] || _rx_snap_paths+=("$p")
   done < <(LC_ALL=C awk '
-      index($0, "Read the diff from:") == 1 {
+      # THE INSTRUCTION LINES, both spellings, each anchored at COLUMN ZERO (index(...) == 1).
+      index($0, "Read the diff from:") == 1 || index($0, "(Diff too large; read ") == 1 {
         line = $0
         sub(/\r$/, "", line)
         s = index(line, "`")
@@ -933,7 +948,14 @@ roborev_prompt_snapshot_paths() {
         for (i = length(rest); i >= 1; i--) if (substr(rest, i, 1) == "`") { e = i; break }
         if (e <= 1) { print "UNPARSEABLE"; next }
         printf "PATH\t%s\n", substr(rest, 1, e - 1)
+        next
       }
+      # THE OTHER OVERSIZE TIERS, reported so the caller can say WHICH mode it is looking at
+      # rather than only "the paths are absent". Measured in the same binary: the
+      # `codex_*_fallback_*` and `generic_*_fallback` templates open with a `(Diff too large`
+      # line and then ask the reviewer to run git commands ITSELF — no snapshot file exists, so
+      # nothing local can establish what the reviewer saw. Counted, never excused.
+      index($0, "(Diff too large") == 1 { print "OVERSIZE" }
     ' "$f" 2>/dev/null)
   return 0
 }
@@ -1092,6 +1114,13 @@ roborev_collect_review_diff_headers() {
       ROBOREV_DIFF_SOURCE_STATE="inline"
     else
       ROBOREV_DIFF_SOURCE_STATE="none"
+      if [ "${_rx_snap_oversize_markers:-0}" -gt 0 ]; then
+        # A THIRD DELIVERY MODE, and naming it is the whole value here: the verdict is unchanged
+        # (FAIL — nothing in the prompt establishes what the reviewer received), but "roborev
+        # asked the reviewer to run git itself" is a different fact from "the reviewer got an
+        # empty prompt", and an operator told the latter will look for the wrong defect.
+        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path, which is roborev's DELEGATED-INSPECTION tier (its codex_*/generic_* oversize templates ask the reviewer to run git commands locally instead of shipping the diff). No snapshot file exists in that mode, so NOTHING obtainable locally can establish which files the reviewer actually looked at — this run is therefore UNVERIFIED, not certified, and whether such a review is certifiable at all is a decision for the issue owner, not for this wrapper to assume. Measured in roborev v0.61.2's own templates."
+      fi
     fi
     return 0
   fi

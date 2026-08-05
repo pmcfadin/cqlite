@@ -3483,6 +3483,37 @@ assert_says 'case (cx31n) an unparseable instruction line is its own cause' \
 assert_says 'case (cx31n) the cause says what could not be read' \
   '^ERROR: prompt-content: .*no backtick-delimited path could be read'
 
+printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
+reset_stub
+write_snap_diff "$snap_file" alpha.rs beta.rs
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+# MEASURED IN THE INSTALLED BINARY, not inferred from one transcript: roborev v0.61.2 carries TWO
+# instruction spellings — the full 'Read the diff from: `%s`' and a compact
+# '(Diff too large; read `%s`.)' emitted under a tight prompt budget. Reading only the first
+# would leave the same false FAIL in the tier that uses the second.
+STUB_PROMPT="Review the change.\\n\\n(Diff too large; read \`$snap_file\`.)"
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31q)' PASS 0
+assert_says 'case (cx31q) the compact instruction resolves to the same snapshot source' \
+  '^prompt-content: PASS \(2/2 code census paths present in the snapshot diff\)$'
+
+printf '== (cx31q2) the DELEGATED-INSPECTION oversize tier is named, not mistaken for an empty prompt ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+# roborev's OTHER oversize tiers (its codex_*/generic_* fallback templates, measured in the same
+# binary) ship neither the diff nor a snapshot: they tell the reviewer to run git itself. Nothing
+# obtainable locally can establish what such a review received, so the verdict stays FAIL — but
+# the cause must say WHICH mode this is, or an operator hunts the wrong defect.
+STUB_PROMPT='Review the change.\n\n### Combined Diff\n\n(Diff too large to include inline)\nFor Codex in read-only review mode, inspect the commit range locally before writing findings.\n- `git diff --stat`\n- `git diff`'
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31q2)' FAIL 1
+assert_says 'case (cx31q2) the no-source verdict is unchanged' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (cx31q2) the delegated-inspection tier is named as the cause' \
+  '^ERROR: prompt-content: the prompt carries a .\(Diff too large. notice but NO snapshot path'
+assert_says 'case (cx31q2) and it says why nothing local can verify it' \
+  'NOTHING obtainable locally can establish which files the reviewer actually looked at'
+
 printf '== (cx31p) a READABLE instruction line does not excuse an UNREADABLE one ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs

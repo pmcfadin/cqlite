@@ -168,6 +168,14 @@ roborev_check_prompt_content() {
         # which is what the operator acts on, with the no-source condition named as its own
         # cause immediately below.
         DETAILS+=("ERROR: prompt-content: the prompt carries NEITHER an inline diff (no 'diff --git' header) NOR a snapshot diff path (no column-zero 'Read the diff from:' instruction), so nothing in it names a diff the reviewer could have received. This is the T1/T2 family: the review ran against no diff at all.")
+        # WHICH no-source mode it is, when the resolver could tell. THE RESIDUAL, recorded rather
+        # than fixed here: roborev also has a DELEGATED-INSPECTION oversize tier that ships no
+        # diff and no snapshot, telling the reviewer to run git itself. Nothing obtainable
+        # locally can verify what such a review received, so it stays a FAIL — whether that mode
+        # is certifiable at all is an owner decision, out of scope for #3312.
+        if [ -n "${ROBOREV_DIFF_SOURCE_DETAIL:-}" ]; then
+          DETAILS+=("$ROBOREV_DIFF_SOURCE_DETAIL")
+        fi
         ;;
       *)
         # Either a named snapshot that could not be used (each cause distinct, each naming the
