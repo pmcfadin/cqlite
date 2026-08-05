@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use ws0_corpus_gen::generate::{generate, CorpusSpec, GenResult, DEFAULT_SEED};
-use ws0_corpus_gen::identity::{CorpusIdentity, IdentityVerdict};
+use ws0_corpus_gen::identity::{CorpusIdentity, IdentityVerdict, SourceOracles};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -445,7 +445,14 @@ async fn run(cli: Cli) -> GenResult<ExitCode> {
     // `prior` was read BEFORE `generate()` ran, so it cannot be this run's own output
     // whatever the paths are (issue #3272 review R5).
     if let Some((prior_path, prior)) = prior {
-        let cmp = identity.compare(&prior);
+        // WITH SOURCE ORACLES (#3272 review round 9, F1). Round 8 correctly made an absent
+        // `schema_sha256` a `PARTIAL` with a non-zero exit — but the only artifact the documented
+        // command is ever pointed at predates that field, so the documented command could NEVER
+        // succeed. The way out is not a weaker verdict: the schema's expected digest is derivable
+        // from `schema::DDL`, a source constant, so the field is compared against SOURCE — the
+        // input rather than a record of it. Every other field still needs the recorded prior, and
+        // a field with neither still lands in `unverified` and still exits non-zero.
+        let cmp = identity.compare_with_source_oracles(&prior, &SourceOracles::from_source());
         // THREE outcomes, not two (#3272 review round 7, F1). `PARTIAL` exists because a
         // prior recorded before a field was pinned cannot be compared on that field, and a
         // comparison that could not see a field must not print `PASS`: an unverified field
@@ -454,9 +461,17 @@ async fn run(cli: Cli) -> GenResult<ExitCode> {
         // the exit code, and a zero exit IS a pass claim however the text is worded.
         match cmp.verdict() {
             IdentityVerdict::Reproduced => {
+                // The wording states WHAT WAS VERIFIED AGAINST WHAT, because after the F1 fix
+                // those are two different oracles: the recorded artifact for every corpus
+                // quantity, and `schema::DDL` for the emitted schema. A blanket "every recorded
+                // field compared" would be false for a pre-pin artifact — it carries no schema
+                // digest, and the schema was verified anyway, against something better.
                 println!(
-                    "determinism:    PASS — reproduced {} exactly (every recorded field compared)",
-                    prior_path.display()
+                    "determinism:    PASS — reproduced {} exactly (every recorded field compared \
+                     against the artifact; the emitted schema verified against SOURCE, \
+                     sha256(schema::DDL + newline) = {})",
+                    prior_path.display(),
+                    ws0_corpus_gen::schema::ddl_file_sha256()
                 );
             }
             IdentityVerdict::PartialUnverified => {

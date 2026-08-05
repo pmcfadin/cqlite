@@ -60,6 +60,44 @@ pub const COLUMNS: [(&str, &str); 12] = [
 /// clustering columns in order.
 const PK_COLUMNS: [&str; 3] = ["part_id", "seq", "event_time"];
 
+/// The EXACT bytes `generate()` writes to `<out>/ws0-events.cql`.
+///
+/// Named once, here, so the writer and the oracle below cannot disagree about what "the
+/// schema file" is: `generate` writes `format!("{DDL}\n")` and hashes the file it wrote, and
+/// [`ddl_file_sha256`] hashes this. A trailing-newline mismatch between the two would make the
+/// oracle reject a correct corpus.
+pub fn ddl_file_content() -> String {
+    format!("{DDL}\n")
+}
+
+/// The SOURCE-DERIVED oracle for the emitted schema's `sha256` (issue #3272 review round 9, F1).
+///
+/// # Why a source oracle exists for this field and for no other corpus quantity
+///
+/// Every other recorded corpus quantity (`data_db_sha256`, `data_db_bytes`, …) describes 2.8 GB
+/// of GENERATED data, so the only way to know it is to generate it and compare against a
+/// recorded value. The schema is different in kind: the file's content is [`DDL`], a **source
+/// constant**, so its digest is computable from source ALONE — without a corpus, without an
+/// artifact, and without anyone having recorded it.
+///
+/// That makes this the ONE identity field whose verification does not need the prior artifact to
+/// carry it. `CorpusIdentity::compare_with_source_oracles` uses it exactly that way: a recorded
+/// identity that predates the field is no longer UNVERIFIABLE on it, because the oracle is the
+/// INPUT rather than a record of the input — strictly stronger than the comparison a complete
+/// artifact would have permitted, since a co-edit of pin and artifact cannot satisfy it.
+///
+/// Computed rather than copied from
+/// [`crate::measurement_corpus::SCHEMA_SHA256`] deliberately: that constant is the human-readable
+/// PIN, and `measurement_corpus_pin.rs` asserts it equals this function's output, so a DDL change
+/// reds the gate instead of silently moving the oracle. Two copies with an asserted relationship,
+/// never two copies free to drift.
+pub fn ddl_file_sha256() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(ddl_file_content().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// The pinned `ws0.events` [`TableSchema`], built from [`COLUMNS`] so the schema
 /// and the emitted DDL can never drift.
 pub fn ws0_events_schema() -> TableSchema {

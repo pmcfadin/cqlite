@@ -201,6 +201,121 @@ fn a_regenerated_identity_missing_the_schema_digest_is_a_divergence() {
     assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
 }
 
+/// THE SOURCE ORACLE (#3272 review round 9, F1): a prior with NO schema digest is VERIFIED
+/// against source, not left unverified — and the resulting `Reproduced` is a REAL pass.
+///
+/// # The defect this closes, which round 8's own fix created
+///
+/// Round 8 made an absent recorded `schema_sha256` a `PartialUnverified` with a non-zero exit.
+/// Right on its own terms. But the only artifact
+/// [`ws0_corpus_gen::measurement_corpus::operator_verify_corpus`] is ever pointed at was recorded
+/// before the field existed, so the documented verification command could NEVER succeed — over any
+/// corpus, however perfectly it reproduced. That is a broken instrument reached from the other
+/// side: an operator who cannot get a green stops running the command.
+///
+/// The schema does not need the artifact to carry it, because it has an oracle the artifact could
+/// only ever have RECORDED: `sha256(schema::DDL + "\n")`, computed from source. So the field is
+/// COMPARED — against something stronger — rather than skipped.
+#[test]
+fn a_prior_without_a_schema_digest_is_verified_against_source_and_reproduces() {
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    // The regenerated identity carries what `generate()` would have written: the digest of the
+    // file whose content is `DDL` + a newline.
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = Some(ws0_corpus_gen::schema::ddl_file_sha256());
+
+    // WITHOUT the oracle, this is exactly round 8's behaviour — kept as the non-vacuity control,
+    // so the improvement is measured rather than asserted.
+    let without = now.compare(&prior);
+    assert_eq!(
+        without.verdict(),
+        IdentityVerdict::PartialUnverified,
+        "without a source oracle the third state must STAND — round 8's fix is not being \
+         weakened, it is being given an oracle; got {without:?}"
+    );
+
+    let with = now.compare_with_source_oracles(&prior, &SourceOracles::from_source());
+    assert!(
+        with.divergences.is_empty(),
+        "the emitted schema IS the schema source produces, so nothing may diverge; got {with:?}"
+    );
+    assert!(
+        with.unverified.is_empty(),
+        "the schema was compared against a SOURCE oracle, so it is verified and must not be \
+         listed as unverified — that is the whole F1 fix; got {with:?}"
+    );
+    assert_eq!(
+        with.verdict(),
+        IdentityVerdict::Reproduced,
+        "a corpus that reproduces every recorded field, whose schema matches SOURCE, must yield a \
+         REAL pass — the documented operator command has to be able to succeed; got {with:?}"
+    );
+}
+
+/// The source oracle is an ORACLE, not a waiver: a schema that does NOT match source is a
+/// DIVERGENCE.
+///
+/// Without this the F1 fix would be indistinguishable from deleting the check — an oracle that
+/// accepts every value is the permissive branch under a better name.
+#[test]
+fn a_prior_without_a_schema_digest_still_diverges_when_source_disagrees() {
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    let mut now = ident("aa", 10);
+    // A digest that is NOT sha256(DDL + "\n") — i.e. the corpus emitted some other schema.
+    now.schema_sha256 = Some("f".repeat(64));
+
+    let cmp = now.compare_with_source_oracles(&prior, &SourceOracles::from_source());
+    assert!(
+        cmp.divergences
+            .iter()
+            .any(|m| m.contains("SOURCE oracle sha256(schema::DDL")),
+        "a schema disagreeing with SOURCE must be reported as a divergence naming the oracle; \
+         got {cmp:?}"
+    );
+    assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
+}
+
+/// `PartialUnverified` STAYS REACHABLE with the oracles in hand: a field with no oracle and no
+/// recorded value is still unverified.
+///
+/// This is the assertion that keeps the F1 fix honest. Supplying `SourceOracles` must not become a
+/// blanket "everything is fine" — it covers exactly the ONE field it has an oracle for, and an
+/// oracle-less absent field must still refuse to print `PASS`.
+#[test]
+fn the_third_state_survives_the_source_oracle() {
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = Some(ws0_corpus_gen::schema::ddl_file_sha256());
+
+    // An EMPTY oracle set is what "no oracle for this field" looks like, and it is the shape a
+    // future field with no source oracle will have.
+    let cmp = now.compare_with_source_oracles(&prior, &SourceOracles::default());
+    assert_eq!(
+        cmp.unverified.len(),
+        1,
+        "with no oracle for the field, the absent recorded digest must stay UNVERIFIED; got {cmp:?}"
+    );
+    assert!(
+        cmp.unverified[0].contains("NO source oracle was supplied"),
+        "the unverified entry must say that no oracle was available, so the reader knows WHICH of \
+         the two reasons applies; got {cmp:?}"
+    );
+    assert_eq!(
+        cmp.verdict(),
+        IdentityVerdict::PartialUnverified,
+        "got {cmp:?}"
+    );
+}
+
 /// The caveat travels IN the artifact — a reader of the JSON alone must see it.
 #[test]
 fn the_json_carries_the_performance_fixture_only_caveat() {

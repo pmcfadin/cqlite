@@ -100,6 +100,25 @@ pub const BYTES_PER_ROW: f64 = 693.6901055;
 /// which is stronger (it is the input, not a record of it). The next real corpus regeneration
 /// will emit the field, and the exhaustiveness check will then require it to be compared —
 /// which is the correct time for the artifact to acquire it.
+///
+/// # That residual had a cost nobody priced, and round 9's F1 is paying it
+///
+/// "The artifact cannot corroborate this constant" read as a documentation footnote. It was not:
+/// round 8 (correctly) made an absent recorded `schema_sha256` a `PartialUnverified` with a
+/// NON-ZERO exit, so the two facts together made [`operator_verify_corpus`] — the ONE command
+/// every determinism claim rests on — **unable to succeed at all**, against the only artifact it
+/// is ever pointed at. An operator who cannot obtain a green stops running the command, which is
+/// the same broken-instrument failure as a guard that never fires, arrived at from the other side.
+///
+/// The fix does not touch the verdict. It uses the fact this doc comment already stated and then
+/// filed away: the oracle for this field is `DDL`, a **source constant**, so it needs no artifact.
+/// [`crate::schema::ddl_file_sha256`] computes it, `SourceOracles` carries it, and
+/// `CorpusIdentity::compare_with_source_oracles` compares the emitted schema against it — so the
+/// field is VERIFIED rather than unverified, against a strictly stronger oracle than a recorded
+/// value would have been. `PartialUnverified` stays reachable for a field that genuinely has no
+/// oracle. Asserted equal to the function's output by
+/// `tests/measurement_corpus_pin.rs::the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written`,
+/// so this constant and that oracle cannot drift.
 pub const SCHEMA_SHA256: &str = "6bdd1d06ad7eb597b3103ace250930b28b19a76aa128bbf2e4170c90406baed0";
 
 /// Recorded total bytes across every emitted component.
@@ -156,12 +175,27 @@ pub const EXAMPLE_VERIFY_ROOT: &str = "/data/ws0-3096-verify";
 /// command an operator was handed named a directory the corpus was NOT in. A
 /// procedure that cannot verify its own output is worse than none, because it looks
 /// like it did.
+///
+/// # THIS COMMAND COULD NOT SUCCEED, AND THAT WAS A DEFECT OF THE SAME FAMILY (#3272 round 9, F1)
+///
+/// The artifact it names was recorded 2026-08-03, before [`SCHEMA_SHA256`]'s field existed, and
+/// round 8 made an absent field a `PARTIAL` with a NON-ZERO exit. Correct on its own terms — an
+/// unverified field must not print `PASS` — but in combination the documented command was
+/// **permanently unable to succeed**, over any corpus, however perfectly it reproduced. A command
+/// that always fails teaches an operator to stop running it, which loses the whole check.
+///
+/// It now succeeds on a reproducing corpus, with nothing skipped: the artifact's fields are
+/// compared against the artifact, and the emitted schema is verified against SOURCE
+/// (`sha256(schema::DDL + "\n")`, see [`crate::schema::ddl_file_sha256`]) — an oracle that does
+/// not need the artifact to carry the value, and is stronger than one that did.
 pub fn operator_verify_corpus(root: &str) -> String {
     format!(
         "cargo run --release -p ws0-corpus-gen --bin ws0-corpus-gen -- \\\n\
          \x20 --out {root} --progress-every 0 \\\n\
          \x20 --verify-against docs/reports/ws0-3096-artifacts/corpus-identity.json\n\
-         # exits non-zero, naming the divergent component, on ANY field difference"
+         # exits non-zero, naming the divergent component, on ANY field difference; the emitted\n\
+         # schema is verified against SOURCE (sha256(schema::DDL + newline)), which the 2026-08-03\n\
+         # artifact predates and therefore cannot corroborate"
     )
 }
 

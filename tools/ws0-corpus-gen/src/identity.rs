@@ -157,6 +157,48 @@ impl IdentityComparison {
     }
 }
 
+/// The SOURCE-DERIVED oracles a comparison may use INSTEAD of the recorded prior.
+///
+/// # Why this type exists (#3272 review round 9, F1)
+///
+/// Round 7 made an absent `schema_sha256` a `PartialUnverified` with a NON-ZERO exit, which is
+/// right on its own terms — a field nobody compared must not print `PASS`. But the only artifact
+/// the documented verification command is ever pointed at
+/// (`docs/reports/ws0-3096-artifacts/corpus-identity.json`, recorded before the field existed)
+/// carries no `schema_sha256`, so the combination made **the documented operator command
+/// permanently unable to succeed**, even over a corpus that reproduced every comparable field.
+/// A command an operator cannot ever get a green from is its own broken instrument: they stop
+/// running it.
+///
+/// The way out is not to weaken the verdict. It is that this ONE field has an oracle that does
+/// not need the artifact at all: the schema file's content is
+/// [`crate::schema::DDL`] — a source constant — so
+/// [`crate::schema::ddl_file_sha256`] computes the expected digest from SOURCE. Verifying against
+/// it is STRICTLY STRONGER than comparing two recorded values, because the oracle is the INPUT
+/// rather than a record of it: a co-edit of pin and artifact cannot satisfy it, only an actual
+/// DDL change can move it.
+///
+/// So a comparison given this carries no unverified schema field — not because the check was
+/// skipped, but because it was made against a better oracle. [`IdentityVerdict::PartialUnverified`]
+/// stays reachable for a field that genuinely has no oracle (see
+/// [`CorpusIdentity::compare_with_source_oracles`]).
+#[derive(Debug, Clone, Default)]
+pub struct SourceOracles {
+    /// Expected `sha256` of the emitted `ws0-events.cql`, derived from
+    /// [`crate::schema::DDL`]. `None` = no oracle available, so an absent recorded digest stays
+    /// UNVERIFIED exactly as before.
+    pub schema_sha256: Option<String>,
+}
+
+impl SourceOracles {
+    /// The oracles this build can derive from source. Currently exactly one: the schema digest.
+    pub fn from_source() -> Self {
+        Self {
+            schema_sha256: Some(crate::schema::ddl_file_sha256()),
+        }
+    }
+}
+
 /// The standing caveat, recorded in every identity artifact.
 pub const NOT_A_CORRECTNESS_ORACLE: &str =
     "PERFORMANCE FIXTURE ONLY. This corpus is CQLite-written and CQLite-read, so it is \
@@ -259,6 +301,24 @@ impl CorpusIdentity {
     /// extending this comparison is a COMPILE ERROR ("pattern does not mention
     /// field") rather than a silently unchecked field.
     pub fn compare(&self, prior: &CorpusIdentity) -> IdentityComparison {
+        self.compare_with_source_oracles(prior, &SourceOracles::default())
+    }
+
+    /// [`Self::compare`], plus any field that can be verified against a SOURCE ORACLE rather
+    /// than against the recorded prior (#3272 review round 9, F1).
+    ///
+    /// See [`SourceOracles`] for why this exists and why it is stronger than the comparison it
+    /// substitutes for. The rule it obeys: a field is only reported as verified when it was
+    /// ACTUALLY compared against something — either the prior's recorded value or a source-derived
+    /// expected value. A field with neither stays in
+    /// [`IdentityComparison::unverified`], so
+    /// [`IdentityVerdict::PartialUnverified`] remains reachable and the verdict is never derived
+    /// from the ABSENCE of a bad signal.
+    pub fn compare_with_source_oracles(
+        &self,
+        prior: &CorpusIdentity,
+        oracles: &SourceOracles,
+    ) -> IdentityComparison {
         // Exhaustiveness enforcement — see the doc comment above. Do NOT replace
         // these patterns with field access.
         let Self {
@@ -321,19 +381,49 @@ impl CorpusIdentity {
         // it is the comparison NOT HAVING HAPPENED, which goes to `unverified` and makes the
         // verdict `PartialUnverified`. Folding it into "matches" is the fail-open shape this
         // whole issue exists to remove.
+        //
+        // ...AND A FOURTH ROUTE, which is the round-9 F1 fix: the schema is the ONE identity
+        // field with a SOURCE ORACLE. When [`SourceOracles::schema_sha256`] is supplied, an
+        // absent recorded digest no longer leaves the field unverified — it is verified against
+        // `sha256(DDL + "\n")`, which is the INPUT rather than a record of it. That is not a
+        // relaxation of the third state: the field is still compared against something, and it
+        // is compared against a stronger something. Without an oracle the third state stands
+        // exactly as round 7 left it.
         match (schema_sha256, p_schema_sha256) {
             (Some(now), Some(prior)) if now != prior => {
                 out.push(format!("ws0-events.cql sha256: recorded {prior} != {now}"))
             }
             (Some(_), Some(_)) => {}
+            // ABSENT FROM THE PRIOR, BUT VERIFIABLE FROM SOURCE. Compared against the
+            // source-derived expectation; a mismatch is a DIVERGENCE (the emitted schema is not
+            // the schema this build's `DDL` produces), and a match is a genuine verification.
+            (Some(now), None) if oracles.schema_sha256.is_some() => {
+                // `is_some()` was just established; the `else` arm cannot be taken and carries
+                // its own diagnostic rather than a silent skip.
+                match oracles.schema_sha256.as_deref() {
+                    Some(expected) if now == expected => {}
+                    Some(expected) => out.push(format!(
+                        "ws0-events.cql sha256: the regenerated corpus emitted {now}, but the \
+                         SOURCE oracle sha256(schema::DDL + \"\\n\") is {expected}. The recorded \
+                         identity predates the field, so this is compared against SOURCE rather \
+                         than against the prior — and source says the emitted schema is not the \
+                         one this build's DDL produces."
+                    )),
+                    None => unverified.push(
+                        "ws0-events.cql sha256: the source oracle became unavailable between the \
+                         two reads of it — reported as UNVERIFIED rather than assumed"
+                            .to_string(),
+                    ),
+                }
+            }
             (now, None) => unverified.push(format!(
-                "ws0-events.cql sha256: the recorded identity carries NO `schema_sha256`, so the \
-                 SCHEMA both measurement arms read was NOT compared. This identity predates the \
-                 #3272 R2 schema pin (the committed \
+                "ws0-events.cql sha256: the recorded identity carries NO `schema_sha256` and NO \
+                 source oracle was supplied, so the SCHEMA both measurement arms read was NOT \
+                 compared. This identity predates the #3272 R2 schema pin (the committed \
                  docs/reports/ws0-3096-artifacts/corpus-identity.json was recorded 2026-08-03, \
-                 before the field existed). The regenerated corpus's schema digest is {}. To \
-                 VERIFY the schema, re-record the prior identity with a generator that emits \
-                 the field.",
+                 before the field existed). The regenerated corpus's schema digest is {}. Verify \
+                 it against SOURCE by comparing with `compare_with_source_oracles`, or re-record \
+                 the prior identity with a generator that emits the field.",
                 now.as_deref().unwrap_or("also absent")
             )),
             // A prior that HAS the digest compared against a regenerated identity that does
