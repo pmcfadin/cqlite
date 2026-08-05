@@ -428,7 +428,15 @@ else
   fi
 fi
 if [ "$PERF_SECTION_OK" = 1 ]; then
-  PERF_DROPIN=$(perf_capability_dropin_path)
+  # FAIL CLOSED if the write target cannot even be NAMED (issue #3261 AC1): the resolver refuses
+  # an out-of-sandbox seam AND a managed name that is itself a symlink. An empty PERF_DROPIN would
+  # otherwise flow into the messages and the write as an empty path, so the section stops here.
+  if ! PERF_DROPIN=$(perf_capability_dropin_path) || [ -z "$PERF_DROPIN" ]; then
+    warn "perf capability SKIPPED — the drop-in write target could not be resolved (an out-of-sandbox test seam, or the managed name is a SYMLINK a privileged write would follow — details on stderr); wrote nothing"
+    PERF_SECTION_OK=0
+  fi
+fi
+if [ "$PERF_SECTION_OK" = 1 ]; then
 
   # perf_apply_now: run (under --yes) or PRINT (check mode) `sysctl -q --system`,
   # recording THREE INDEPENDENT FACTS instead of collapsing them into one rc:
