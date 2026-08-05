@@ -25,6 +25,7 @@ import pathlib
 import statistics
 
 from ws0_rounds import collect_round_meta
+from ws0_loadgen_record import check_record_surface  # noqa: F401  (re-exported)
 from ws0_validate import (
     Invalid,
     classify_prewarm,
@@ -39,142 +40,6 @@ from ws0_validate import (
 # The events every perf leg must carry. Named here so an absent one is reported by
 # name rather than defaulting to zero.
 REQUIRED_EVENTS = ("cycles", "instructions")
-
-# ===========================================================================
-# THE LOAD GENERATOR'S COMPLETE RECORD SURFACE (#3272 review round 5, F4)
-# ===========================================================================
-# `requests_unavailable` — the loadgen's ADMISSION-SHED counter — was COMPLETELY UNREAD.
-# Not defaulted, not mis-validated: never mentioned in the reporting path at all, while its
-# sibling `requests_error` had by then been through three rounds of hardening. So a rep in
-# which the server shed requests under admission control (`--max-concurrent-scans`, #2420)
-# was reported as a clean, failure-free measurement — a DEGRADED run reading as a healthy
-# one, and the degradation is precisely the thing a throughput figure must not hide.
-#
-# That is the SECOND counter found simply unread on this issue (the first was
-# `requests_error` itself, defaulted to 0). Fixing this one site would be the same partial
-# fix the whole issue keeps finding, so what follows is a CENSUS of the loadgen's ENTIRE
-# record surface — every field of `StepRecord` (tools/flight-loadgen/src/record.rs), each
-# classified, with a REASON IN CODE at the branch for every field deliberately not consumed.
-#
-# `RECORD_FIELD_DISPOSITION` is not decorative: `check_record_surface` walks it against the
-# record actually present, so a field the loadgen ADDS and this reporter has never
-# considered is a REFUSAL rather than a silent omission. An unclassified field cannot become
-# a second `requests_unavailable`.
-#
-# Verified against `StepRecord` at `tools/flight-loadgen/src/record.rs` (19 fields).
-RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
-    # ---- CONSUMED: validated and used to derive a reported figure ----------------
-    "rows_total": ("consumed", "the row denominator of every figure for this rep"),
-    "duration_s": ("consumed", "the DIVISOR of the derived throughput"),
-    "rows_per_s": ("consumed", "cross-checked against the DERIVED rows_total/duration_s"),
-    "requests_ok": ("consumed", "the per-temperature request contract (cold == exactly 1)"),
-    "requests_error": ("consumed", "required, and the rep is refused unless it is zero"),
-    "requests_unavailable": (
-        "consumed",
-        "required, and the rep is refused unless it is zero: a shed request means the"
-        " server was over its admission limit, so the throughput measures a degraded"
-        " server (#3272 F4)",
-    ),
-    # ---- IGNORED, each with the reason recorded HERE, at the branch ---------------
-    # A counter is only ever ignored when it CANNOT change the validity of a figure this
-    # reporter prints. Anything that could is above.
-    "error_codes": (
-        "ignored",
-        "a BREAKDOWN of requests_error, which must already be ZERO for the rep to be"
-        " reported — so this map is empty whenever the rep is accepted, and carries no"
-        " information the accept condition has not already used",
-    ),
-    "qps": (
-        "ignored",
-        "requests_ok/duration_s — both operands are validated and the rig reports ROWS/s,"
-        " never a request rate; a figure this reporter does not print needs no domain",
-    ),
-    "bytes_total": (
-        "ignored",
-        "the rig's claims are rows/s and cycles/row (spec R1); no byte-throughput figure is"
-        " printed, so this is recorded by the loadgen and not read here",
-    ),
-    "bytes_per_s": ("ignored", "as bytes_total: no byte-rate figure is reported"),
-    "latency_ms": (
-        "ignored",
-        "per-request percentiles over a single full-corpus scan per rep, which is a"
-        " DURATION this rig already reads as duration_s; no latency claim is made",
-    ),
-    "schema": ("ignored", "the record's own version tag, not a measurement"),
-    "round": ("ignored", "the driver's label for the rep; the ROUND METADATA the reporter"
-                         " integrity-checks comes from <tag>.round, not from here"),
-    "endpoint": ("ignored", "the loopback address; not a measurement"),
-    "ts_unix_ms": ("ignored", "wall-clock stamp; the rig's ordering uses monotonic_ns from"
-                              " <tag>.round, never a wall clock"),
-    "seed": ("ignored", "the loadgen's RNG seed; an INPUT, not a measurement"),
-    "step": ("ignored", "the ramp step index; this rig runs exactly ONE step per rep and"
-                        " refuses a file carrying more, so the index adds nothing"),
-    "target_concurrency": ("ignored", "the requested concurrency (--ramp 1 here); an INPUT"),
-    "shape": ("ignored", "the request shape (`full`); an INPUT, fixed by the driver"),
-}
-
-# Every counter that must be present AND zero for a rep to be reported.
-ZERO_REQUIRED_COUNTERS = ("requests_error", "requests_unavailable")
-
-# WHAT A NON-ZERO VALUE MEANS, per counter — appended to the refusal so the diagnostic names
-# the MEASUREMENT rather than only the domain. The two are different failures and an operator
-# acts differently on each: an error is a broken request, a shed is a server over its
-# admission limit.
-_ZERO_COUNTER_MEANING = {
-    "requests_error": (
-        "A failed request means the rep did not complete the work its row count is divided"
-        " by, so the figure is not a measurement of a successful full-corpus scan."
-    ),
-    "requests_unavailable": (
-        "A SHED request means the server refused admission (cqlite-flight's"
-        " --max-concurrent-scans, #2420), so this rep measured a server operating at its"
-        " admission limit rather than the steady-state scan the report claims. That is a"
-        " DEGRADED run, and it was previously INVISIBLE: this counter was not read anywhere"
-        " in the reporting path, so a shed rep was reported as failure-free (#3272 F4)."
-        " Lower the concurrency, raise the server's limit, or report this as a shed run."
-    ),
-}
-
-# The census and the zero-required list are the same fact written twice, so they are checked
-# against each other AT IMPORT rather than left to drift. A counter added to one and not the
-# other would otherwise be exactly the kind of half-wired guard this issue keeps finding.
-for _k in ZERO_REQUIRED_COUNTERS:
-    if RECORD_FIELD_DISPOSITION.get(_k, ("", ""))[0] != "consumed":
-        raise Invalid(
-            f"{_k} is required to be zero but is not classified as CONSUMED in"
-            " RECORD_FIELD_DISPOSITION — the census and the accept rule disagree"
-        )
-    if _k not in _ZERO_COUNTER_MEANING:
-        raise Invalid(f"{_k} must carry a stated MEANING for its non-zero refusal")
-del _k
-
-
-def check_record_surface(tag: str, rec: dict) -> None:
-    """Refuse a step record carrying a field this reporter has never CLASSIFIED (#3272 F4).
-
-    The mechanism that keeps `requests_unavailable` from happening a third time. A new
-    loadgen counter arrives as an unclassified key, and an unclassified key is refused —
-    so the decision to consume or ignore it is FORCED, in `RECORD_FIELD_DISPOSITION`, where
-    the reason is recorded beside the choice.
-
-    Deliberately NOT a check that every classified field is PRESENT: this reporter models
-    one schema version, and an OLDER record legitimately lacks a field added later. What it
-    must never do is silently skip a field that EXISTS and nobody has considered. The fields
-    it actually depends on are required INDIVIDUALLY, by name, at their point of use.
-    """
-    unknown = sorted(k for k in rec if k not in RECORD_FIELD_DISPOSITION)
-    if unknown:
-        raise Invalid(
-            f"flight rep {tag} step record carries field(s) this reporter has never"
-            f" classified: {', '.join(unknown)}."
-            " Every field of the load generator's record must be recorded in"
-            " RECORD_FIELD_DISPOSITION as either CONSUMED or IGNORED-with-a-reason, because"
-            " a counter nobody classified is a counter nobody reads: `requests_unavailable`"
-            " (admission shed) went COMPLETELY UNREAD, so a rep whose requests were shed"
-            " was reported as failure-free (#3272 F4). Classify it — and if it is a counter"
-            " that can invalidate a figure, VALIDATE it rather than ignoring it."
-        )
-
 
 def spread(values: list[float]) -> dict[str, float]:
     """Median + observed spread of a rep series, or `Invalid`.
@@ -273,12 +138,144 @@ def prewarm_warning(block: dict, arm_label: str, temp: str) -> list[str]:
     ]
 
 
-def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
+def check_scan_passes(
+    tag: str, payload: dict, scan_passes: int, corpus_rows: int
+) -> tuple[int, float, list[dict]]:
+    """`(rows, secs, passes)` DERIVED from the per-pass records, or `Invalid` (#3272 F2).
+
+    # The finding
+
+    The bare-scan collector read the aggregate `rows_denominator` and `timed_scan_secs` and
+    NEVER LOOKED AT the `passes` array beside them, although `ws0-scan-bench` writes one
+    record per timed pass and computes both aggregates from exactly those records
+    (`scan_bench.rs`: `rows_denominator` and `scan_secs` are `passes.iter()…sum()`). Three
+    things were therefore invisible:
+
+    * a TRUNCATED scan — a rep that ran fewer passes than `--scan-passes` asked for, e.g. a
+      bench killed mid-run, reported the aggregate of the passes that DID happen as if it
+      were the whole measurement;
+    * a MISMATCHED `--scan-passes` between the driver and the reporter — the reporter's own
+      `--scan-passes` was recorded in `results.json` and compared against NOTHING;
+    * a PASS THAT DID NOT SCAN THE WHOLE CORPUS — each pass is a full-corpus scan by
+      construction, so a pass whose rows are not the corpus row count is a partial scan,
+      and summing it into the aggregate hid it. This is the bare-scan analogue of the check
+      the Flight arm already had (`check_request_count`), which the bare-scan arm lacked
+      entirely.
+
+    # The fix: three requirements, and the aggregates are DERIVED
+
+    Exactly `scan_passes` records; every one observing `corpus_rows`; and `rows`/`secs`
+    RECOMPUTED from those records rather than read. A derived value cannot be forged — the
+    same principle as round 4's derived Flight throughput. The recorded aggregates are still
+    read and CROSS-CHECKED against the derived ones, so a payload whose own fields disagree
+    is refused rather than silently overridden: which of them is wrong cannot be known, so
+    neither is reported.
+    """
+    passes = payload.get("passes")
+    if passes is None:
+        raise Invalid(
+            f"bare-scan rep {tag} payload carries no `passes` array — the per-pass records"
+            " were NOT OBSERVED, so the reported aggregate cannot be checked against the"
+            " passes it is a sum of. A truncated scan (fewer passes than --scan-passes) and"
+            " a pass that did not scan the whole corpus are both invisible in the aggregate"
+            " alone (#3272 F2). Re-run with a ws0-scan-bench that records its passes."
+        )
+    if not isinstance(passes, list):
+        raise Invalid(
+            f"bare-scan rep {tag} `passes` is a {type(passes).__name__}, not a list of"
+            " per-pass records"
+        )
+    if len(passes) != scan_passes:
+        raise Invalid(
+            f"bare-scan rep {tag} recorded {len(passes)} timed pass(es) but --scan-passes"
+            f" is {scan_passes}. A rep with fewer passes than requested is not a smaller"
+            " measurement — it is a TRUNCATED one, and its aggregate rows/seconds would be"
+            " reported as though the whole scan had run. More passes than requested means"
+            " the artifact is not the one this reporter models (a stale file, or a driver"
+            " and reporter given different --scan-passes). Re-run the rep, or report it"
+            " with the --scan-passes it actually ran."
+        )
+    derived_rows = 0
+    derived_secs = 0.0
+    records: list[dict] = []
+    for i, p in enumerate(passes):
+        if not isinstance(p, dict):
+            raise Invalid(
+                f"bare-scan rep {tag} pass {i} is a {type(p).__name__}, not a record"
+            )
+        p_rows = positive_int(
+            f"bare-scan rep {tag} pass {i} rows",
+            p.get("rows"),
+            "It is this pass's contribution to the rep's row denominator, so a"
+            " non-positive or absent value is refused rather than summed.",
+        )
+        p_secs = positive_finite_float(
+            f"bare-scan rep {tag} pass {i} secs",
+            p.get("secs"),
+            "It is this pass's contribution to the rep's measurement window, and the"
+            " window is the divisor of the reported rows/s.",
+        )
+        # EVERY pass observed the WHOLE corpus, not just the total. Each pass is a full-corpus
+        # scan by construction, so a pass short of the corpus row count is a PARTIAL SCAN —
+        # and a partial pass plus a compensating one sums to a plausible aggregate, which is
+        # exactly what the aggregate-only check could not see.
+        if p_rows != corpus_rows:
+            raise Invalid(
+                f"bare-scan rep {tag} pass {i} observed {p_rows:,} rows, but the corpus has"
+                f" {corpus_rows:,}. Every timed pass is a FULL-corpus scan, so this pass did"
+                " not read the whole corpus and the rep's row denominator is not the number"
+                " this report would print. Checking only the SUM cannot see this: a short"
+                " pass beside a long one adds up to a plausible total (#3272 F2)."
+            )
+        derived_rows += p_rows
+        derived_secs += p_secs
+        records.append({"pass": p.get("pass", i), "rows": p_rows, "secs": p_secs})
+    # The RECORDED aggregates are cross-checked against the derived ones — same rule
+    # `load_corpus_identity` applies to `bytes_per_row`, and `collect_flight` to `rows_per_s`.
+    recorded_rows = positive_int(
+        f"bare-scan rep {tag} rows_denominator",
+        payload.get("rows_denominator"),
+        "That is not a measurement: it is the denominator of every figure for this rep, so a"
+        " non-positive one is refused rather than divided by.",
+    )
+    recorded_secs = positive_finite_float(
+        f"bare-scan rep {tag} timed_scan_secs",
+        payload.get("timed_scan_secs"),
+        "There is no rows/s for a measurement window that is zero, negative, or not finite:"
+        " the scan either never ran or its timer was never read, and dividing by it would"
+        " raise inside the reporting path instead of naming the artifact.",
+    )
+    if recorded_rows != derived_rows:
+        raise Invalid(
+            f"bare-scan rep {tag} records rows_denominator={recorded_rows:,} but its own"
+            f" {len(records)} pass record(s) sum to {derived_rows:,}. ws0-scan-bench computes"
+            " that field from exactly those records, so a payload whose aggregate disagrees"
+            " with its passes is not one this reporter models — and which of the two is wrong"
+            " cannot be determined, so neither is reported. The reported figure is the DERIVED"
+            " one; this check exists because the aggregate used to be trusted with the passes"
+            " never read (#3272 F2)."
+        )
+    if abs(recorded_secs - derived_secs) > max(1e-9, derived_secs * 1e-6):
+        raise Invalid(
+            f"bare-scan rep {tag} records timed_scan_secs={recorded_secs!r} but its own pass"
+            f" record(s) sum to {derived_secs!r}. As with the row count, the bench derives the"
+            " aggregate from the passes, so a disagreement means neither can be reported."
+        )
+    return derived_rows, derived_secs, records
+
+
+def collect_scan(
+    d: pathlib.Path, temp: str, reps: int, scan_passes: int, corpus_rows: int
+) -> dict:
     """The bare-scan arm, WITH each rep's observed round/position (#3272 R3).
 
     The round is read from the rep's own `<tag>.round` artifact and cross-checked against
     the rep index in its filename, so every figure below is attributed to the round it
     was MEASURED in rather than to the index this loop happens to be on.
+
+    `scan_passes` and `corpus_rows` are REQUIRED (#3272 F2): the per-pass records are
+    validated against both, and the rep's rows/seconds are DERIVED from them rather than
+    read from the aggregate the bench also wrote. See `check_scan_passes`.
     """
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
@@ -300,29 +297,15 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
             missing.append(payload_path.name)
             continue
         payload = json.loads(payload_path.read_text())
-        # THE SHARED VALIDATOR, not a bare `int()`/`float()` plus a local range test
-        # (#3272 review round 3, B2/B5). `positive_int` refuses a bool, a fractional value
-        # (`int(0.9)` was 0 — a fabricated zero arrived at by truncation), a junk-bearing
-        # string, and `<= 0` — the row count is the DENOMINATOR of every figure this rep
-        # produces, and a negative one used to sail past an `== 0` test to become a negative
-        # rows/s and a negative cycles/row, printed and plausible-looking.
-        rows = positive_int(
-            f"bare-scan rep {tag} rows_denominator",
-            payload["rows_denominator"],
-            "That is not a measurement: it is the denominator of every figure for this"
-            " rep, so a non-positive one is refused rather than divided by.",
-        )
-        # A DEGENERATE window is a named refusal, not a traceback (#3272 review round 2
-        # nit). `rows / secs` with `timed_scan_secs: 0.0` raised `ZeroDivisionError` and
-        # exited 1 with a Python traceback — a traceback names the DIVISION rather than the
-        # artifact. `inf`/`nan` are refused for the same reason: they would propagate into
-        # rows/s and into `spread()` as printable numbers standing in for an absent one.
-        secs = positive_finite_float(
-            f"bare-scan rep {tag} timed_scan_secs",
-            payload["timed_scan_secs"],
-            "There is no rows/s for a measurement window that is zero, negative, or not"
-            " finite: the scan either never ran or its timer was never read, and dividing"
-            " by it would raise inside the reporting path instead of naming the artifact.",
+        # THE ROWS AND SECONDS ARE DERIVED FROM THE PER-PASS RECORDS (#3272 F2), not read
+        # from the aggregate. `check_scan_passes` requires exactly `--scan-passes` records,
+        # requires EVERY one to have observed the whole corpus, sums them, and cross-checks
+        # the recorded aggregates against the sums. Both quantities go through the same shared
+        # validators as before (`positive_int` / `positive_finite_float`, which refuse a bool,
+        # a fractional value, a junk-bearing string and a non-positive or non-finite one) —
+        # per pass now, as well as on the aggregate.
+        rows, secs, pass_records = check_scan_passes(
+            tag, payload, scan_passes, corpus_rows
         )
         # Both legs' counters must be OBSERVED. `.get("cycles", 0)` used to
         # fabricate a zero here, so a run with no setup artifact at all was
@@ -379,6 +362,17 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
                 "cycles_scan": cyc,
                 "cycles_per_row": cyc / rows,
                 "setup_secs": payload.get("setup_secs"),
+                # The per-pass records the rows/seconds above were DERIVED from, carried so a
+                # reader can see the aggregate was checked against its parts rather than
+                # trusted (#3272 F2), plus the count that was REQUIRED.
+                "passes": pass_records,
+                "passes_observed": len(pass_records),
+                "passes_expected": scan_passes,
+                "rows_source": (
+                    "DERIVED as the sum of the per-pass rows, each of which was required to"
+                    " equal the corpus row count; the payload's recorded rows_denominator"
+                    " and timed_scan_secs were cross-checked against the derived sums"
+                ),
                 "prewarm": prewarm[-1]["status"],
             }
         )
@@ -398,323 +392,6 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
         # Issue #3096 review, finding 1: the warm bare-scan arm had no untimed
         # prewarm at all, so `prewarm_all_ok` here is the single field a reader can
         # check that this arm's "warm" really was warm.
-        **prewarm_block(prewarm, temp),
-        "reps": per_rep,
-    }
-
-
-def expected_requests(temp: str) -> str:
-    """The request count a rep of this temperature MUST have, stated not implied.
-
-    Issue #3096 review, finding 2: this used to be reconstructible only by dividing
-    a rep's `rows` by the corpus row count in your head. Recorded explicitly here so
-    a reader sees the contract, and asserted per rep by `check_request_count`.
-    """
-    if temp == "cold":
-        return "exactly 1 (only the first request after the cache drop is cold)"
-    return ">=1, each one a full corpus scan"
-
-
-def check_request_count(
-    tag: str, temp: str, requests_ok: object, rows: int, corpus_rows: int
-) -> int:
-    """Assert the per-temperature request contract, or raise.
-
-    Two properties, both fail-closed (issue #3096 review, finding 2):
-
-    * A **cold** rep must have completed **exactly one** successful request. The
-      driver keeps `--cold-step-duration` short precisely so the loadgen issues one
-      request, but that is a duration heuristic against an unknown scan time — if
-      the corpus finishes inside the step, requests 2..N read the pages request 1
-      faulted in and their WARM rows land in a figure labelled "cold". A caller can
-      also trigger it directly by raising the option. So the OBSERVED count is
-      checked, not the duration.
-    * Every rep's rows must be an exact multiple of the corpus row count, i.e.
-      `rows == requests_ok * corpus_rows`. A remainder means some request did not
-      scan the whole corpus, so the per-request row denominator is not what the
-      report says it is.
-
-    `corpus_rows` is a REQUIRED int, never `None`: an absent corpus identity used to
-    disable the second property silently while the NOTES claimed it ran (#3272
-    finding 1), so the identity is now loaded fail-closed by
-    `ws0_validate.load_corpus_identity` before any of this runs.
-    """
-    if requests_ok is None:
-        raise Invalid(
-            f"flight rep {tag} step record carries no `requests_ok` — the"
-            " per-temperature request contract cannot be verified, and an unverified"
-            " cold rep is exactly how warm requests get reported as cold"
-        )
-    # `positive_int`, never a bare `int()` (#3272 review round 3, B5). `int(1.9)` is 1, so
-    # `requests_ok: 1.9` SATISFIED the exactly-one-cold-request guard below — the guard of
-    # #3096 finding 2 defeated by a truncation — and `requests_ok: true` became 1 the same
-    # way. Both are now named refusals.
-    count = positive_int(
-        f"flight rep {tag} requests_ok",
-        requests_ok,
-        f"flight rep {tag} completed no successful requests, so there is nothing to"
-        " report for it.",
-    )
-    if temp == "cold" and count != 1:
-        raise Invalid(
-            f"flight COLD rep {tag} completed {count} successful requests;"
-            f" expected {expected_requests('cold')}."
-            " Only the FIRST request after the cache drop is cold: requests 2..N read the"
-            " pages request 1 faulted in, so their WARM rows would be blended into a figure"
-            " reported as 'cold', which spec R2/AC5 forbids."
-            " Lower --cold-step-duration so the loadgen issues a single request, or measure"
-            " this as a warm rep."
-        )
-    if rows % corpus_rows != 0 or rows // corpus_rows != count:
-        raise Invalid(
-            f"flight rep {tag} observed {rows:,} rows over {count} successful"
-            f" request(s), which is not {count} x the corpus row count"
-            f" ({corpus_rows:,}). At least one request did not scan the whole corpus,"
-            " so the per-request row denominator is not the one this report would"
-            " print. Re-run rather than reporting a partial scan."
-        )
-    return count
-
-
-def collect_flight(
-    d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int
-) -> dict:
-    rows_per_sec: list[float] = []
-    cycles_per_row: list[float] = []
-    ipc: list[float] = []
-    rows_total = 0
-    per_rep = []
-    missing: list[str] = []
-    prewarm: list[dict] = []
-    round_meta: dict[int, dict[str, int]] = {}
-    for rep in range(1, reps + 1):
-        tag = f"flight-{arm}-{temp}-{rep}"
-        jsonl = d / f"{tag}.jsonl"
-        if not jsonl.exists():
-            missing.append(jsonl.name)
-            continue
-        records = [json.loads(x) for x in jsonl.read_text().splitlines() if x.strip()]
-        if not records:
-            raise Invalid(f"flight rep {tag} produced no step record")
-        # EXACTLY ONE step record per rep, or refuse (#3272 review). This used to be
-        # `rec = records[-1]`, which SILENTLY DROPPED every earlier record: the driver
-        # runs one `--ramp 1` step per rep, so a second line means the artifact is not
-        # the one this reporter models (a loadgen that ramped, a rep whose file was
-        # appended to by a prior run, two reps sharing an --out path). Reporting the
-        # last line alone would publish ONE step's rows as the rep's whole measurement
-        # while the others existed on disk, unread and unmentioned.
-        if len(records) != 1:
-            raise Invalid(
-                f"flight rep {tag} carries {len(records)} step records; this rig runs"
-                " exactly ONE step per rep (--ramp 1), and reporting only the last"
-                " would silently drop the others. Rounds present:"
-                f" {[r.get('round') for r in records]}."
-                " Re-run the rep into a fresh --out directory rather than reporting a"
-                " subset of what was measured."
-            )
-        rec = records[0]
-        # `positive_int`, the shared validator (#3272 review round 3, B2/B5): this is the
-        # denominator of this rep's cycles/row and the numerator of its full-corpus check, so
-        # it must be a real positive integer — not a bool, not a fractional value a bare
-        # `int()` would truncate, not a negative one an `== 0` test would miss.
-        rows = positive_int(
-            f"flight rep {tag} rows_total",
-            rec["rows_total"],
-            "That is not a measurement: it is the denominator of this rep's cycles/row and"
-            " the numerator of its full-corpus check, so a non-positive one is refused,"
-            " not divided by.",
-        )
-        # NO UNCLASSIFIED FIELD (#3272 F4): a counter nobody has considered is refused,
-        # which is what stops a third `requests_unavailable`. See the census above.
-        check_record_surface(tag, rec)
-        # EVERY ZERO-REQUIRED COUNTER, in ONE loop over `ZERO_REQUIRED_COUNTERS` (#3272 F4).
-        #
-        # This was written for `requests_error` alone, and its admission-shed sibling
-        # `requests_unavailable` was COMPLETELY UNREAD — so a rep whose requests the server
-        # SHED under admission control (#2420) was reported as a clean, failure-free
-        # measurement. Validating the two by a shared rule rather than at two sites is the
-        # point: a counter added to `ZERO_REQUIRED_COUNTERS` is validated identically, and
-        # cannot be the one somebody hardened three times while its sibling went unread.
-        #
-        # Each counter is:
-        #   * REQUIRED — absent is an ERROR, never a fabricated 0. `int(rec.get(k, 0))` used
-        #     to default `requests_error`, so a record with no such key was reported CLEAN
-        #     with the failed-request count never measured (#3272 AC3);
-        #   * `non_negative_int` — which closes three defects at once rather than one each: a
-        #     NEGATIVE value (round 2's `if errors > 0` read -3 as "no failed requests"), a
-        #     FRACTIONAL one (round 3's B5 — a bare `int()` read 0.9 as a clean 0), and a
-        #     BOOLEAN (`int(True)` is 1);
-        #   * required to be EXACTLY ZERO, stated as the AFFIRMATIVE value the counter must
-        #     have rather than as `> 0`.
-        #
-        # The domain sentence is attached by RE-RAISING rather than passed as a `why=`
-        # argument, and that is not stylistic: the banned-idiom scan in
-        # `test_ws0_fabrication_guards.sh` blanks string constants reachable from a `raise`
-        # (prose necessarily quotes what it refuses) and deliberately leaves ARGUMENT
-        # literals alone — blanking those made the whole scan vacuous, which was a real
-        # defect of an earlier round. Prose that quotes the idiom therefore belongs in a
-        # `raise`, where the scan can see it is prose.
-        counters_zero: dict[str, int] = {}
-        for key in ZERO_REQUIRED_COUNTERS:
-            observed = rec.get(key)
-            if observed is None:
-                raise Invalid(
-                    f"flight rep {tag} step record carries no `{key}` — that count was NOT"
-                    f" OBSERVED, so a report cannot assert it was zero. A counter that was"
-                    " not observed is an error, never a fabricated 0 (#3272 AC3)."
-                    f" {_ZERO_COUNTER_MEANING[key]}"
-                )
-            try:
-                observed = non_negative_int(f"flight rep {tag} {key}", observed)
-            except Invalid as exc:
-                raise Invalid(
-                    f"{exc} A negative counter is a CORRUPT artifact, not a clean zero: the"
-                    " check used to be `if errors > 0`, so -3 passed as 'no failed requests'"
-                    f" (#3272 R6). An unparseable `{key}` is refused for the same reason — a"
-                    " counter that was not validly observed is an error, never a 0 (AC3)."
-                ) from None
-            if observed != 0:
-                # `requests_error` keeps its ORIGINAL wording ("had N failed request(s)").
-                # Not cosmetic: that phrasing is what `test_ws0_fabrication_guards.sh`
-                # asserts on, and rewording it while generalising the loop would have
-                # SILENTLY WEAKENED an existing observed guard into one whose test no longer
-                # matched its diagnostic. A refactor may not quietly relabel a refusal a test
-                # is pinned to.
-                headline = (
-                    f"flight rep {tag} had {observed} failed request(s)"
-                    if key == "requests_error"
-                    else f"flight rep {tag} recorded {key}={observed}, which must be 0."
-                )
-                raise Invalid(f"{headline} {_ZERO_COUNTER_MEANING[key]}")
-            counters_zero[key] = observed
-        errors = counters_zero["requests_error"]
-        requests_ok = check_request_count(tag, temp, rec.get("requests_ok"), rows, corpus_rows)
-        # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
-        prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
-        # ...and its OBSERVED round + position within that round (#3272 R3).
-        meta = collect_round_meta(d, tag, rep)
-        round_meta[rep] = meta
-        counters = read_perf_counters(d / f"perf-{tag}.csv", tag, REQUIRED_EVENTS)
-        # BOTH counters, not only `cycles` (#3272 review round 3, B2). This arm has no setup
-        # leg to subtract, so the perf values ARE the derived quantities — and round 2
-        # checked `cyc <= 0` while `ins` went straight into `ipc.append(ins / cyc)`. A perf
-        # CSV recording `instructions,0` therefore published a ZERO IPC: `spread()` refuses
-        # only a non-positive MEDIAN, so one such rep among three survived as `ipc.min`, and
-        # as the printed `IPC` if it was the median.
-        cyc = positive_derived(
-            f"flight rep {tag} cycles", counters["cycles"], "the perf -C window was empty"
-        )
-        ins = positive_derived(
-            f"flight rep {tag} instructions",
-            counters["instructions"],
-            "IPC = instructions/cycles, so a zero here publishes a zero IPC",
-        )
-        # THE THROUGHPUT IS DERIVED, NOT TRUSTED (#3272 review round 4). It used to be read
-        # straight from `rec["rows_per_s"]` while `duration_s` went completely unvalidated —
-        # so a record with plausible rows/request counters and an ARBITRARY throughput
-        # produced a successful report, and the reported figure was the one field nothing
-        # cross-checked. The loadgen's own invariant is
-        # `rows_per_s == rows_total / duration_s` (tools/flight-loadgen/src/record.rs:150,
-        # `per_s(self.rows_total)`), so the rate is RECOMPUTED from the two counters that ARE
-        # checked. A derived value cannot be forged.
-        #
-        # `duration_s` is therefore now a REQUIRED, positive, finite quantity in its own
-        # right — it is the divisor of the reported figure. An absent one used to reach
-        # `results.json` as a `None` via `rec.get("duration_s")`.
-        secs = positive_finite_float(
-            f"flight rep {tag} duration_s",
-            rec.get("duration_s"),
-            "It is the DIVISOR of this rep's throughput, which is now DERIVED rather than"
-            " read from the artifact: an unvalidated duration beside a trusted rate meant"
-            " an arbitrary rows_per_s produced a successful report (#3272 round 4).",
-        )
-        arm_rps = positive_derived(
-            f"flight rep {tag} rows/s (DERIVED as rows_total/duration_s)",
-            rows / secs,
-            f"rows_total={rows}, duration_s={secs}",
-        )
-        # The RECORDED rate is still read — and CROSS-CHECKED against the derived one, so a
-        # record whose own fields disagree is refused rather than silently overridden. Which
-        # of the two is wrong cannot be known, so neither is reported: that is the same rule
-        # `load_corpus_identity` applies to `bytes_per_row` vs `data_db_bytes/rows`.
-        recorded_rps = positive_finite_float(
-            f"flight rep {tag} rows_per_s (recorded)",
-            rec.get("rows_per_s"),
-            "That is not a positive finite rate. It is cross-checked against the DERIVED"
-            " rows_total/duration_s; both must be present for the check to mean anything.",
-        )
-        # A relative tolerance, because both sides are floats the producer wrote and read
-        # back through JSON. 1e-6 is far tighter than any real divergence and far looser than
-        # float round-trip noise.
-        if abs(recorded_rps - arm_rps) > max(1e-9, arm_rps * 1e-6):
-            raise Invalid(
-                f"flight rep {tag} records rows_per_s={recorded_rps!r} but its own counters"
-                f" give rows_total/duration_s = {rows}/{secs} = {arm_rps!r}. The load"
-                " generator computes the rate from exactly those two fields"
-                " (flight-loadgen record.rs, `per_s(self.rows_total)`), so a record whose"
-                " rate disagrees with its counters is not one this reporter models — and"
-                " which of the three fields is wrong cannot be determined, so none of them"
-                " is reported. The reported figure is the DERIVED one; this check exists"
-                " because trusting the recorded rate while never validating duration_s let"
-                " an arbitrary throughput produce a successful report (#3272 round 4)."
-            )
-        rows_per_sec.append(arm_rps)
-        cycles_per_row.append(cyc / rows)
-        ipc.append(ins / cyc)
-        rows_total += rows
-        per_rep.append(
-            {
-                "rep": rep,
-                "round": meta["round"],
-                "position_in_round": meta["position"],
-                "arms_in_round": meta["arms_in_round"],
-                "rows": rows,
-                "requests_ok": requests_ok,
-                "requests_expected": expected_requests(temp),
-                "rows_per_scan_observed": rows / requests_ok,
-                "rows_per_scan_expected": corpus_rows,
-                # Validated, never `rec.get(...)` — it is the DIVISOR of the figure above.
-                "duration_s": secs,
-                # DERIVED from rows_total/duration_s (#3272 round 4), with the recorded value
-                # kept beside it so a reader can see the two agreed.
-                "rows_per_sec": arm_rps,
-                "rows_per_sec_recorded": recorded_rps,
-                "rows_per_sec_source": (
-                    "DERIVED as rows_total/duration_s; the artifact's recorded rows_per_s was"
-                    " cross-checked against it and agreed within 1e-6 relative"
-                ),
-                "cycles": cyc,
-                "cycles_per_row": cyc / rows,
-                "prewarm": prewarm[-1]["status"],
-            }
-        )
-    require_complete(f"flight do_get {arm} ({temp})", per_rep, reps, missing)
-    return {
-        "arm": f"flight_do_get_{arm}",
-        "surface": "arrow_flight FlightService::do_get (loopback gRPC)",
-        "temperature": temp,
-        "forced_merge_path": arm,
-        "rows_per_sec": spread(rows_per_sec),
-        "cycles_per_row": spread(cycles_per_row),
-        "ipc": spread(ipc),
-        "row_denominator_total": rows_total,
-        # Issue #3096 review, finding 2: the request count each temperature MUST
-        # have, asserted per rep by `check_request_count` and stated here so no
-        # reader has to reconstruct it from row denominators.
-        "requests_expected_per_rep": expected_requests(temp),
-        "round_metadata": round_meta,
-        # Unconditionally true now: the corpus identity is REQUIRED, so this can
-        # never be a report that skipped the check while claiming it (#3272 f1).
-        "full_corpus_per_request_verified": True,
-        "corpus_rows_used_for_verification": corpus_rows,
-        "setup_cycles_subtracted_total": 0,
-        "setup_note": (
-            "server start + (warm only) prewarm happen BEFORE the perf window opens, "
-            "so setup is outside the window by construction rather than subtracted"
-        ),
-        # Issue #3096 review: a failed prewarm silently degraded a "warm" claim.
-        # Every rep's outcome is recorded here, and `prewarm_all_ok` is the single
-        # field a reader can check.
         **prewarm_block(prewarm, temp),
         "reps": per_rep,
     }

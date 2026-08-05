@@ -163,7 +163,8 @@ make_corpus() { ws0_make_corpus "$1" "${2:-$CORPUS_ROWS}" "${3:-700000}" "${4:-}
 make_scan_rep() {
   local d="$1" temp="$2" rep="$3" pw="$4" tag="scan-$2-$3"
   cat > "$d/$tag.json" <<EOF
-{ "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5 }
+{ "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
+  "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "secs": 2.0 } ] }
 EOF
   perf_csv "$d/perf-$tag.csv" 2000000 4000000
   perf_csv "$d/perf-$tag-setup.csv" 100000 200000

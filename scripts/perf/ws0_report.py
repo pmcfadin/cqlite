@@ -47,10 +47,13 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from ws0_collect import (  # noqa: E402  (path set above; stdlib-only, no deps)
-    collect_flight,
     collect_scan,
     prewarm_warning,
 )
+# ARM B lives in its own module since #3272's F2 split: one file per MEASUREMENT ARM, which is
+# the seam the rig is built around (the two arms are separate claims measured through different
+# surfaces with different contracts).
+from ws0_flight_arm import collect_flight  # noqa: E402
 from ws0_rounds import (  # noqa: E402
     collect_recorded_round_metadata,
     paired_rounds,
@@ -242,7 +245,12 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # re-adding an OBSERVED drift control is tracked by #3287/#3299.
     recorded_rounds: dict[str, dict] = {}
     for temp in temps:
-        scan = collect_scan(d, temp, reps)
+        # `scan_passes` and `corpus_rows` are passed IN (#3272 F2): the bare-scan collector
+        # now validates the per-pass records against both — exactly `--scan-passes` of them,
+        # each having observed the whole corpus — and DERIVES the rep's rows and seconds from
+        # them. Previously `--scan-passes` was recorded in results.json and compared against
+        # nothing, and the `passes` array was never read at all.
+        scan = collect_scan(d, temp, reps, scan_passes, corpus_rows)
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")
         lines.append(fmt("bare scan (execute_streaming)", scan))

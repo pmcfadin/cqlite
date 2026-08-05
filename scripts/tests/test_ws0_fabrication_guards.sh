@@ -180,11 +180,11 @@ done
 # the only degenerate case in the file without a stated cause, and a traceback names the
 # DIVISION rather than the artifact (#3272 review round 2 nit).
 d="$TMP/scan-neg-rows"; make_session "$d" "$GOOD_FLIGHT"
-printf '{ "rows_denominator": -5, "timed_scan_secs": 2.0, "setup_secs": 0.5 }\n' > "$d/scan-warm-1.json"
+printf '{ "rows_denominator": -5, "timed_scan_secs": 2.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
 expect_reject "a NEGATIVE bare-scan rows_denominator is FATAL" \
   "not a measurement" "$d" "$TMP/corpus"
 d="$TMP/scan-zero-secs"; make_session "$d" "$GOOD_FLIGHT"
-printf '{ "rows_denominator": 1000, "timed_scan_secs": 0.0, "setup_secs": 0.5 }\n' > "$d/scan-warm-1.json"
+printf '{ "rows_denominator": 1000, "timed_scan_secs": 0.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "no rows/s for a measurement window that is zero" <<<"$out" \
   && ! grep -q "ZeroDivisionError\|Traceback" <<<"$out"; then
@@ -194,7 +194,7 @@ else
 fi
 for bad in -1.0 Infinity NaN; do
   d="$TMP/scan-secs-$bad"; make_session "$d" "$GOOD_FLIGHT"
-  printf '{ "rows_denominator": 1000, "timed_scan_secs": %s, "setup_secs": 0.5 }\n' "$bad" \
+  printf '{ "rows_denominator": 1000, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' "$bad" \
     > "$d/scan-warm-1.json"
   expect_reject "a $bad timed_scan_secs is FATAL (not a measurement window)" \
     "zero, negative, or not finite" "$d" "$TMP/corpus"
@@ -208,6 +208,122 @@ if [ "$rc" -eq 0 ]; then
   pass "an OBSERVED requests_error of 0 is accepted (the fix demands observation, not absence)"
 else
   fail "requests_error=0 must be accepted (rc=$rc, out: $out)"
+fi
+
+# --- F2: THE BARE SCAN'S `passes` ARRAY WAS NEVER READ (#3272 round 5) -----------------
+# The collector took the AGGREGATE `rows_denominator`/`timed_scan_secs` and never looked at
+# the per-pass records beside them, although `ws0-scan-bench` computes both aggregates from
+# exactly those records (`scan_bench.rs`: both are `passes.iter()…sum()`). So a truncated
+# scan, a `--scan-passes` mismatch, and a pass that did not read the whole corpus were all
+# invisible — and the reporter's own `--scan-passes` was recorded in results.json and
+# compared against NOTHING.
+#
+# `scan_payload <rows_denominator> <secs> <passes-json>` builds the payload VERBATIM so each
+# case perturbs exactly one property.
+scan_payload() { # scan_payload <dir> <rows_denom> <secs> <passes-json>
+  local d="$1"
+  mkdir -p "$d"
+  printf '{ "rows_denominator": %s, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": %s }\n' \
+    "$2" "$3" "$4" > "$d/scan-warm-1.json"
+  perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
+  perf_csv "$d/perf-scan-warm-1-setup.csv" 100000 200000
+  printf 'ok\n' > "$d/scan-warm-1.prewarm.status"
+  make_round "$d" "scan-warm-1" 1 1
+  make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+}
+# 1. TRUNCATED: the reporter was asked for 3 passes and the artifact carries 1, with an
+#    aggregate that is SELF-CONSISTENT with the one pass present.
+#    NON-VACUITY, measured against this branch at 06c295289: exit **0**, full report written.
+d="$TMP/f2-truncated"; scan_payload "$d" 1000 2.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 } ]'
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 --client-cpus 4,12 --reps 1 \
+  --temps warm --arms bypass --step-duration 45s/1s --scan-passes 3); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'recorded 1 timed pass(es) but --scan-passes is 3' <<<"$out"; then
+  pass "a TRUNCATED scan (1 pass, --scan-passes 3) is REFUSED (pre-fix: exit 0)"
+else
+  fail "a truncated scan must be refused naming both counts (rc=$rc, out: $out)"
+fi
+# 2. A PASS THAT DID NOT SCAN THE WHOLE CORPUS, hidden by a compensating pass: 300 + 1700
+#    sums to a plausible 2000, which is exactly what an aggregate-only check cannot see.
+#    NON-VACUITY: measured exit **0** pre-fix.
+d="$TMP/f2-partial-pass"
+scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 300, "secs": 2.0 }, { "pass": 1, "rows": 1700, "secs": 2.0 } ]'
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 --client-cpus 4,12 --reps 1 \
+  --temps warm --arms bypass --step-duration 45s/1s --scan-passes 2); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'pass 0 observed 300 rows' <<<"$out"; then
+  pass "a PARTIAL pass hidden by a compensating one is REFUSED (pre-fix: exit 0, sum looked fine)"
+else
+  fail "a partial pass must be refused per pass, not per sum (rc=$rc, out: $out)"
+fi
+if grep -q 'Checking only the SUM cannot see this' <<<"$out"; then
+  pass "the partial-pass refusal states WHY the aggregate could not catch it"
+else
+  fail "the partial-pass refusal must name the aggregate blind spot (out: $out)"
+fi
+# 3. A FORGED AGGREGATE: the passes say 1000 rows, the aggregate claims 5000. The reported
+#    figure is DERIVED, so a disagreement means neither operand can be reported.
+#    NON-VACUITY: measured exit **0** pre-fix, publishing the forged 5000.
+d="$TMP/f2-forged-aggregate"; scan_payload "$d" 5000 2.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 } ]'
+expect_reject "a FORGED rows_denominator disagreeing with its passes is REFUSED" \
+  "pass record(s) sum to 1,000" "$d" "$TMP/corpus"
+# ...and the same for the SECONDS aggregate, which is the divisor of every rows/s figure.
+d="$TMP/f2-forged-secs"; scan_payload "$d" 1000 99.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 } ]'
+expect_reject "a FORGED timed_scan_secs disagreeing with its passes is REFUSED" \
+  "pass record(s) sum to" "$d" "$TMP/corpus"
+# 4. An ABSENT `passes` array is an ERROR, not an unchecked aggregate.
+#    NON-VACUITY: measured exit **0** pre-fix — the array was never read at all.
+d="$TMP/f2-no-passes"; mkdir -p "$d"
+printf '{ "rows_denominator": 1000, "timed_scan_secs": 2.0, "setup_secs": 0.5 }\n' > "$d/scan-warm-1.json"
+perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
+perf_csv "$d/perf-scan-warm-1-setup.csv" 100000 200000
+printf 'ok\n' > "$d/scan-warm-1.prewarm.status"
+make_round "$d" "scan-warm-1" 1 1
+make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+expect_reject "an ABSENT bare-scan \`passes\` array is FATAL (pre-fix: never read)" \
+  "carries no \`passes\` array" "$d" "$TMP/corpus"
+# 5. The per-pass quantities go through the SHARED domain validators, so a bad pass value is
+#    refused by the same rules as every other quantity (not by a local ad-hoc test).
+for bad_pass in '{ "pass": 0, "rows": 1000 }' \
+                '{ "pass": 0, "rows": 1000, "secs": 0.0 }' \
+                '{ "pass": 0, "rows": -1000, "secs": 2.0 }' \
+                '{ "pass": 0, "rows": 1000.5, "secs": 2.0 }' \
+                '{ "pass": 0, "rows": true, "secs": 2.0 }'; do
+  d="$TMP/f2-bad-pass-$(printf '%s' "$bad_pass" | md5 -q 2>/dev/null || printf '%s' "$bad_pass" | md5sum | cut -c1-8)"
+  scan_payload "$d" 1000 2.0 "[ $bad_pass ]"
+  out=$(run_report "$d" "$TMP/corpus"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q 'pass 0' <<<"$out"; then
+    pass "a bad per-pass value ($(printf '%s' "$bad_pass" | cut -c1-42)…) is REFUSED, naming the pass"
+  else
+    fail "a bad per-pass value must be refused naming the pass (rc=$rc, out: $out)"
+  fi
+done
+# 6. THE ACCEPT DIRECTION, so none of the above is a guard that reds unconditionally: a
+#    MULTI-pass rep whose passes are each a full corpus scan is ACCEPTED, and the derived
+#    row denominator is passes x corpus_rows.
+d="$TMP/f2-multipass-ok"
+scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 }, { "pass": 1, "rows": 1000, "secs": 2.0 } ]'
+out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 --client-cpus 4,12 --reps 1 \
+  --temps warm --arms bypass --step-duration 45s/1s --scan-passes 2); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'rows=2,000' <<<"$out"; then
+  pass "a HEALTHY 2-pass rep is ACCEPTED and its DERIVED denominator is 2 x corpus rows"
+else
+  fail "a healthy multi-pass rep must be accepted (rc=$rc, out: $out)"
+fi
+# ...and the derivation is RECORDED in results.json, so a reader can see the aggregate was
+# checked against its parts rather than trusted.
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+scan = next(m for m in r["measurements"] if m["arm"] == "bare_scan")
+rep = scan["reps"][0]
+assert rep["passes_observed"] == 2, rep["passes_observed"]
+assert rep["passes_expected"] == 2, rep["passes_expected"]
+assert len(rep["passes"]) == 2, rep["passes"]
+assert "DERIVED" in rep["rows_source"], rep["rows_source"]
+PY
+then
+  pass "results.json records the per-pass records and states the rows were DERIVED"
+else
+  fail "results.json must record the passes the aggregate was derived from"
 fi
 
 # --- F4: THE ADMISSION-SHED COUNTER WAS COMPLETELY UNREAD (#3272 round 5) --------------
@@ -290,7 +406,7 @@ if [ -r "$LOADGEN_RECORD" ]; then
 import pathlib, re, sys
 src = pathlib.Path(sys.argv[1]).read_text()
 sys.path.insert(0, sys.argv[2])
-from ws0_collect import RECORD_FIELD_DISPOSITION as D
+from ws0_loadgen_record import RECORD_FIELD_DISPOSITION as D
 m = re.search(r"pub struct StepRecord \{(.*?)\n\}", src, re.S)
 if not m:
     sys.exit("could not locate `pub struct StepRecord` — this check's SUBJECT is absent, "
@@ -1299,7 +1415,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=93
+MIN_CHECKS=110
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
