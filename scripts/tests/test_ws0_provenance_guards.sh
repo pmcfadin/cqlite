@@ -1127,6 +1127,89 @@ else
 fi
 
 # ==========================================================================
+# ROUND 9, F6 — "VERIFIED PHYSICAL-CORE SIBLINGS" MUST REST ON A RECORDED OBSERVATION
+# ==========================================================================
+# The reporter printed, unconditionally:
+#
+#     "verified": "thread_siblings_list, fail-closed (scripts/perf/lib-cpu.sh)"
+#     pinning      : server 2,10 (verified physical-core siblings), client 4,12
+#
+# ...about CPU lists it read from the session manifest and NEVER validated. The manifest reader
+# deliberately declines to re-check them (correctly — that would be a second implementation of
+# `cpu_list_expand`), but the check that DID run was against the DRIVER'S ARGV, and nothing tied
+# the argv to the string the manifest recorded. So F1 closed the argv substitution and the
+# identical false claim survived one layer in, via the artifact.
+#
+# The fix records the verification where it was made (the driver, against the real sysfs on the
+# real measuring host) and asserts it where it is used. NOT re-derived at report time: a results
+# dir is routinely reviewed on another host, whose topology describes a machine that never ran the
+# measurement.
+f6_dir="$TMP/f6-tampered"; make_session "$f6_dir" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$f6_dir" "$TMP/corpus"
+# THE REVIEWER'S MEASURED CASE: the manifest's CPU lists are edited to CPUs no verification was
+# ever performed against. Pre-fix this exited 0 printing `server 99,99 (verified physical-core
+# siblings)` — byte-identical to the pre-F1 defect line.
+python3 - "$f6_dir/session-corpus-pin.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+j["config"]["server_cpus"] = "99,99"
+j["config"]["client_cpus"] = "77,77"
+json.dump(j, open(p, "w"), indent=1)
+PY
+out=$(run_report "$f6_dir" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'was performed against' <<<"$out"; then
+  pass "OBSERVED (round9 F6): a manifest whose CPU pins were edited to 99,99 is REFUSED — the verification on record is about different CPUs (pre-fix: exit 0, printing 'server 99,99 (verified physical-core siblings)')"
+else
+  fail "round9 F6: a tampered CPU pin must be refused (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# ...and the refusal must NAME BOTH VALUES, or an operator cannot tell which artifact was edited.
+if grep -q "'99,99'" <<<"$out" && grep -q "'2,10'" <<<"$out"; then
+  pass "OBSERVED (round9 F6): the refusal names BOTH the manifest's value and the verified one (which artifact was edited is the operator's next question)"
+else
+  fail "round9 F6: the refusal must name both values (out: $(head -4 <<<"$out"))"
+fi
+# AN ABSENT RECORD IS REFUSED, not silently trusted — the pre-fix state of every session dir.
+f6_absent="$TMP/f6-absent"; make_session "$f6_absent" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$f6_absent" "$TMP/corpus"
+rm -f "$f6_absent/pinning-verification.json"
+out=$(run_report "$f6_absent" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'does not record' <<<"$out" \
+   && grep -q 'pinning-verification.json' <<<"$out"; then
+  pass "OBSERVED (round9 F6): a session dir with NO pinning-verification.json is REFUSED (a 'verified' claim resting on nothing is the finding, not an exemption from it)"
+else
+  fail "round9 F6: an absent pinning record must be refused (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# THE ACCEPT DIRECTION, and it is what the whole fix is for: an untampered session REPORTS, and
+# the printed claim NAMES ITS EVIDENCE rather than asserting the word "verified" over a module.
+f6_ok="$TMP/f6-ok"; make_session "$f6_ok" "$GOOD_FLIGHT"
+out=$(run_report "$f6_ok" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'physical-core siblings' <<<"$out" \
+   && grep -q 'recorded in pinning-verification.json' <<<"$out"; then
+  pass "OBSERVED (round9 F6): an untampered session REPORTS, and the pinning line cites the RECORDED observation (host + artifact) rather than printing 'verified' over a module name"
+else
+  fail "round9 F6: an honest session must report with an evidence-citing pinning line (rc=$rc, out: $(grep pinning <<<"$out" | head -2))"
+fi
+# ...and results.json must carry the record's OWN provenance limit, so the document takes ONE
+# posture about its artifacts. The contradiction was the compounding half of the finding:
+# `recorded_round_metadata.source` said "provenance UNVERIFIED" two fields away from an
+# unconditional "verified".
+if python3 - "$f6_ok/results.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+v = j["pinning"]["verification"]
+assert "written BY THE DRIVER" in v["provenance"], v
+assert v["server_cpus"] == "2,10", v
+assert "NOT re-derived" in v["note"] or "not re-derived" in v["note"], v
+# The bare unconditional claim must be GONE, not merely supplemented.
+assert "verified" not in j["pinning"], j["pinning"].keys()
+PY
+then
+  pass "OBSERVED (round9 F6): results.json carries the record's OWN provenance limit and its re-derivation caveat, and the unconditional \`\"verified\": …\` string is GONE (one document, one posture about its artifacts)"
+else
+  fail "round9 F6: results.json must carry the recorded provenance and drop the unconditional verified string"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a

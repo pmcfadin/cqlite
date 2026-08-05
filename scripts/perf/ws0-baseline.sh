@@ -55,6 +55,29 @@
 #   cargo run --release -p ws0-corpus-gen --bin ws0-corpus-gen -- --out /data/ws0-3096
 #
 # Full method, caveats and the recorded pinning: docs/reports/ws0-3096-artifacts/measurement-method.md
+#
+# ---------------------------------------------------------------------------
+# FILE SIZE: over the ~800-line target, and the SEAM if it is split (epic #1116)
+# ---------------------------------------------------------------------------
+# This file is ~985 lines against the campsite-rule target of ~800. Note the gate's `file-size`
+# ratchet is `.rs`-ONLY, so a shell file crosses that threshold SILENTLY — checked with `wc -l`
+# rather than left to the gate.
+#
+# Six libraries have already been split out by RESPONSIBILITY (`lib-cpu.sh` topology,
+# `lib-host-state.sh` host knobs, `lib-args.sh` argument values, `lib-perf-lint.sh` counting
+# domain, `lib-server.sh` process/socket lifecycle, `lib-outdir.sh` session-dir lifecycle), so
+# what remains is deliberately the part that must stay legible in ONE file: the ORDER of
+# operations, which is itself a correctness property (arguments before creation, verification
+# before measurement, the pin before the first rep).
+#
+# The next seam, when one is taken, is the MEASUREMENT EXECUTION: `perf_stat_c` plus
+# `measure_scan`/`measure_flight` — the three functions that actually run a rep — into a
+# `lib-measure.sh`. That is a responsibility ("how is one rep executed and counted?") rather than
+# a line-count slice, and it is the largest remaining block. The two session-pin heredocs are a
+# second, smaller candidate. NOT split in this round deliberately: the round's changes are guard
+# fixes, and moving `perf_stat_c` is the one edit that would need the whole three-layer perf
+# allowlist re-argued (the allowlist globs `scripts/perf/*.sh`, so the move is safe, but its
+# review cost belongs to a change whose subject it is). Tracked under epic #1116.
 
 set -euo pipefail
 
@@ -350,7 +373,14 @@ done
 # otherwise be a way to satisfy the pinning guarantee with a fabricated
 # `thread_siblings_list`, so a measurement run refuses it here, before it measures.
 assert_real_cpu_topology || exit 2
-verify_sibling_pair "$SERVER_CPUS" "server"
+# CAPTURED, not merely printed (#3272 review round 9, F6). `verify_sibling_pair` echoes the
+# EXPANDED sibling set it verified (`2,10 -> verified siblings of one physical core (2 10)`), and
+# that expansion is the substance of the verification — the sysfs answer, not a restatement of the
+# argument. It is recorded into the session dir below so the REPORT's "verified physical-core
+# siblings" claim rests on an observation instead of on trust. The status is still checked (the
+# function fails closed; `set -e` plus this `||` makes that explicit rather than implicit).
+WS0_SERVER_SIBLINGS="$(verify_sibling_pair "$SERVER_CPUS" "server")" || exit 2
+echo "$WS0_SERVER_SIBLINGS"
 verify_sibling_pair "$CLIENT_CPUS" "client" 2>/dev/null \
   || echo "client CPUs: $CLIENT_CPUS (a multi-core set — only the SERVER set must be one physical core)"
 verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
@@ -546,6 +576,67 @@ print(f"config pin:   reps={config[\"reps\"]} temps=[{config[\"temps\"]}] arms=[
   || { echo "FATAL: could not pin this session's corpus identity — the report REQUIRES it," >&2
        echo "       because a session dir that does not record WHICH corpus it measured can" >&2
        echo "       be re-reported against any other corpus (#3272 round 4)." >&2
+       exit 2; }
+
+# --- RECORD THE SIBLING VERIFICATION THIS DRIVER PERFORMED (#3272 round 9, F6) --------
+# The report prints `server <list> (verified physical-core siblings)`. That claim was backed by
+# NOTHING readable: the CPU lists reach the reporter through the manifest, whose reader
+# deliberately declines to re-check them, while the check that DID run was against this script's
+# argv — and nothing tied the two together. MEASURED: a manifest hand-edited to
+# `config.server_cpus = "99,99"` made the report exit 0 printing
+# `pinning : server 99,99 (verified physical-core siblings)`.
+#
+# So the verification is written down WHERE IT WAS MADE. This driver read the real
+# `thread_siblings_list` on the real measuring host and failed closed; it now records WHICH lists
+# it checked and WHAT sysfs answered, and `ws0_report.py` requires the record and requires the
+# manifest's lists to EQUAL the verified ones.
+#
+# NOT re-derived at report time, deliberately: a results dir is routinely reviewed on a different
+# host, whose topology describes a machine that never ran the measurement — a check whose verdict
+# depends on where the report is generated is not evidence about the session.
+WS0_PIN_SERVER_CPUS="$SERVER_CPUS" \
+WS0_PIN_CLIENT_CPUS="$CLIENT_CPUS" \
+WS0_PIN_SIBLINGS="$WS0_SERVER_SIBLINGS" \
+WS0_PIN_TOPOLOGY_ROOT="$CPU_TOPOLOGY_ROOT" \
+python3 -c '
+import json, os, pathlib, socket, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_pinning import PINNING_RECORD_FIELDS, pinning_record_path
+rec = {
+    "server_cpus": os.environ["WS0_PIN_SERVER_CPUS"],
+    "client_cpus": os.environ["WS0_PIN_CLIENT_CPUS"],
+    # The sysfs ANSWER, which is the substance of the verification rather than a restatement of
+    # the argument: `verify_sibling_pair`s own output line, carrying the expanded sibling set it
+    # read out of thread_siblings_list.
+    "server_siblings_expanded": os.environ["WS0_PIN_SIBLINGS"],
+    "topology_root": os.environ["WS0_PIN_TOPOLOGY_ROOT"],
+    "host": socket.gethostname() or "unknown",
+    "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed,"
+                   " against the real thread_siblings_list BEFORE the first rep",
+    # The LIMIT of the record, carried in the record — the same posture
+    # `recorded_round_metadata` takes about itself, so results.json tells ONE story about its
+    # own artifacts instead of two contradictory ones (#3272 F6).
+    "provenance": "written BY THE DRIVER that performed the verification, so it establishes what"
+                  " that driver observed on the measuring host — not an independent truth about"
+                  " the host. What it closes is the SUBSTITUTION: a manifest CPU list the driver"
+                  " never verified can no longer be printed as verified.",
+}
+absent = [f for f in PINNING_RECORD_FIELDS if f not in rec]
+if absent:
+    # A field the reader requires and the writer does not produce would surface as an absent-record
+    # refusal at report time, blaming the session dir for a driver defect. Named here instead.
+    print(f"FATAL: the pinning record is missing {absent} — the writer and"
+          " ws0_pinning.PINNING_RECORD_FIELDS disagree.", file=sys.stderr)
+    raise SystemExit(1)
+p = pinning_record_path(pathlib.Path(sys.argv[2]))
+p.write_text(json.dumps(rec, indent=1) + "\n")
+print(f"pinning pin:  {rec[\"server_cpus\"]} verified against"
+      f" {rec[\"topology_root\"]} on {rec[\"host\"]} — recorded in {p.name} so the report cites an"
+      " OBSERVATION, not lib-cpu.sh by name")
+' "$HERE" "$OUT_DIR" \
+  || { echo "FATAL: could not record this session's CPU-pin verification — the report REQUIRES" >&2
+       echo "       it, because otherwise 'verified physical-core siblings' is printed about a" >&2
+       echo "       manifest string nothing ever checked (#3272 F6)." >&2
        exit 2; }
 python3 - "$DDL_FILE" "$TICKET_TEMPLATE" <<'PY'
 import json, sys

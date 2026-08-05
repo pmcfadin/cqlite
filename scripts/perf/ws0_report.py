@@ -76,6 +76,10 @@ from ws0_session import (  # noqa: E402
 # The SCHEMA as a verified measurement input — its own module since #3272 R2 (ws0_session.py was
 # at the ~800-line source target exactly, so this is a split by responsibility, not a waiver).
 from ws0_schema_input import verify_schema_input  # noqa: E402
+# The CPU PINNING's recorded verification — #3272 round 9 F6. The reporter printed "verified
+# physical-core siblings" about manifest strings nothing had checked; the driver now records what
+# it verified and this asserts the manifest agrees with it.
+from ws0_pinning import verify_pinning_record  # noqa: E402
 
 TEMPS_ALLOWED = ("warm", "cold")
 ARMS_ALLOWED = ("bypass", "merge")
@@ -216,6 +220,12 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     server_cpus = config["server_cpus"]
     client_cpus = config["client_cpus"]
     step_duration = config["step_duration"]
+    # THE PINNING CLAIM'S EVIDENCE (#3272 round 9, F6). The two CPU lists above are manifest
+    # strings, and `session_manifest_config` deliberately does not re-check them — correctly, but
+    # the check that DID run was against the driver's argv and nothing tied the two together, so
+    # a manifest edited to `99,99` printed "verified physical-core siblings" and exited 0. This
+    # REQUIRES the driver's recorded sibling verification and requires it to be ABOUT these lists.
+    pinning_verification = verify_pinning_record(d, server_cpus, client_cpus)
     corpus_rows = identity["rows"]
     full_matrix = len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
 
@@ -261,7 +271,13 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             "server_cpus": server_cpus,
             "client_cpus": client_cpus,
             "counter_mode": f"perf stat -C {server_cpus} (CPU-WIDE; never -p)",
-            "verified": "thread_siblings_list, fail-closed (scripts/perf/lib-cpu.sh)",
+            # THE RECORDED OBSERVATION, not the word "verified" over a module name (#3272 F6).
+            # This used to read `"verified": "thread_siblings_list, fail-closed
+            # (scripts/perf/lib-cpu.sh)"` — an unconditional string, printed about CPU lists the
+            # reporting path never validated. It now carries the driver's own record of what it
+            # checked (including that record's stated provenance limit), asserted above to be
+            # ABOUT the lists this report prints.
+            "verification": pinning_verification,
         },
         # The SELECTION this session ran, recorded so a narrow run can never be
         # read as a full matrix (#3272 finding 6). Completeness is judged against
@@ -314,8 +330,16 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f"corpus shape : {identity['rows']} rows / "
         f"{identity['partitions']} partitions / "
         f"{identity['bytes_per_row']:.2f} B/row",
-        f"pinning      : server {server_cpus} (verified physical-core siblings), "
-        f"client {client_cpus}",
+        # The claim NAMES ITS EVIDENCE (#3272 round 9, F6). It used to read
+        # `server {server_cpus} (verified physical-core siblings)` unconditionally, about a
+        # manifest string nothing had validated — MEASURED, a manifest edited to `99,99` printed
+        # `server 99,99 (verified physical-core siblings)` and exited 0. The word "verified" now
+        # stands on the driver's recorded observation, which the reporter has asserted is about
+        # exactly these lists, and the line says WHERE that observation came from.
+        f"pinning      : server {server_cpus} (physical-core siblings"
+        f" {pinning_verification['server_siblings_expanded'].split('(')[-1].rstrip(')')} verified"
+        f" on {pinning_verification['host']} pre-measurement, recorded in"
+        f" {pathlib.Path(pinning_verification['source']).name}), client {client_cpus}",
         f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]",
         f"reps         : {reps} (median reported, spread shown)",
         *selection_lines(temps, arms, reps),

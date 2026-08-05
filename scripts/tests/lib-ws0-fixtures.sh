@@ -153,6 +153,50 @@ except Invalid:
     session.mkdir(parents=True, exist_ok=True)
     session_pin_path(session).write_text(json.dumps({"config": config}, indent=1) + "\n")
 ' "$perf_dir" "$corpus" "$session" "$reps" "$temps" "$arms" "$passes"
+  # ...and the PINNING VERIFICATION the driver records beside the manifest (#3272 round 9, F6).
+  # Stamped with the SAME CPU lists the manifest above carries, because that agreement is the
+  # property the reporter asserts: the report may print "verified" only about lists a verification
+  # was actually performed against. A case whose SUBJECT is the record (absent, or disagreeing
+  # with a tampered manifest) removes or rewrites it explicitly — this is the healthy default, so
+  # every OTHER case reaches its own subject instead of dying on an absent record here.
+  ws0_pin_verification "$session" "2,10" "4,12"
+}
+
+# ws0_pin_verification <session-dir> <server-cpus> <client-cpus> — the driver's recorded sibling
+# verification (#3272 round 9, F6).
+#
+# Separate from `ws0_pin_session_corpus` so a case can stamp a record that DISAGREES with the
+# manifest (the substitution the reporter must refuse) without rebuilding the whole manifest.
+ws0_pin_verification() {
+  local session="$1" server="$2" client="$3" perf_dir
+  # DOES NOT CREATE the session dir, and that is load-bearing rather than tidiness: an earlier
+  # draft used `mkdir(parents=True)`, which brought a deliberately-NONEXISTENT `--dir` into
+  # existence and turned the reporter's "not an existing directory" refusal into a
+  # missing-manifest one. A fixture must never manufacture the condition a case is testing the
+  # absence of. Absent dir => nothing to stamp; the case's own subject then fires.
+  [[ -d "$session" ]] || return 0
+  perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
+  python3 -c '
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_pinning import pinning_record_path
+session, server, client = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+# The expanded form mirrors `verify_sibling_pair`s real output line, so the reporter parses the
+# same shape a driver produces rather than a fixture-only spelling.
+rec = {
+    "server_cpus": server,
+    "client_cpus": client,
+    "server_siblings_expanded":
+        f"server CPUs: {server} -> verified siblings of one physical core"
+        f" ({server.replace(chr(44), chr(32))})",
+    "topology_root": "/sys/devices/system/cpu",
+    "host": "fixture-host",
+    "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed,"
+                   " against the real thread_siblings_list BEFORE the first rep",
+    "provenance": "written BY THE DRIVER that performed the verification (synthetic fixture)",
+}
+pinning_record_path(session).write_text(json.dumps(rec, indent=1) + "\n")
+' "$perf_dir" "$session" "$server" "$client"
 }
 
 # ws0_alternating_position <rep> <which> — the position an arm holds in `<rep>`, matching

@@ -257,6 +257,13 @@ EXEMPTIONS: dict[str, str] = {
         "the session/corpus identity module; prose reference only (its refusals tell an"
         " operator to re-run the session with the driver)",
     "scripts/perf/ws0_flight_arm.py": "the Flight arm collector; prose reference only",
+    # Round 9's F6 module, and the census reported it UNCOVERED the moment it was staged — the
+    # fourth time this oracle has caught a split/addition, which is what it is for. Same class as
+    # its siblings: its only driver mention is prose (its refusal tells an operator to re-run the
+    # session with the driver, which is the one thing that can produce the record it requires).
+    "scripts/perf/ws0_pinning.py":
+        "the CPU-pin verification record; prose reference only (its refusal tells an operator to"
+        " re-run the session with the driver, which is what records the verification)",
     # `ws0_loadgen_record.py` is deliberately absent too: it never names the driver, so an
     # exemption for it would be a claim about nothing — which the STALE-EXEMPTION check
     # correctly refused when it was added speculatively.
