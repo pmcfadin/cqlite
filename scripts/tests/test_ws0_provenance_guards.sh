@@ -83,6 +83,19 @@ CORPUS_ROWS=1000
 # 3, and `make_flight_rep` gaining a DERIVED `rows_per_s` in two more in round 4.
 # shellcheck source=scripts/tests/lib-ws0-report-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
+# ...and the HERMETIC driver harness, for round 6's R1 cases: the output-dir refusal is a
+# property of the DRIVER (which session a rep file belongs to), so it belongs to this file's
+# subject rather than to the cpu-pinning suite's measurement-apparatus one — and moving it here
+# also kept that file under the ~1500-line test target it would otherwise have crossed.
+# `ws0_driver_run` prepends `--validate-args-only` and the recording shims, so those cases
+# execute nothing outside their own process.
+# shellcheck source=scripts/tests/lib-ws0-hermetic.sh
+source "$REPO_ROOT/scripts/tests/lib-ws0-hermetic.sh"
+DRIVER="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
+[ -f "$DRIVER" ] || { echo "FAIL - missing $DRIVER"; exit 1; }
+# The recording shims for round 6's R1 cases, which run the real driver through
+# `ws0_driver_run` (`--validate-args-only` + shimmed PATH) and assert it executed NOTHING.
+ws0_hermetic_init "$TMP"
 
 GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
@@ -678,6 +691,84 @@ else
 fi
 
 # ==========================================================================
+# ROUND 6, R1 — THE OUTPUT DIR IS NEVER REUSED, AND IS CREATED ATOMICALLY
+# ==========================================================================
+# It used to be `mkdir -p "$OUT_DIR"` over a default name with only SECOND-level uniqueness.
+# Two ways that assembles ONE report from artifacts of DIFFERENT SESSIONS, and the reporter
+# cannot see either — it reads whatever rep files are present:
+#
+#   * two runs started in the SAME SECOND share the default dir; `mkdir -p` succeeds for both,
+#     and the second run's pin overwrites the first's;
+#   * an explicit `--out` at a previous run's dir keeps that run's rep files, so any rep this
+#     session does not overwrite (a different temperature or arm, a higher rep index from a
+#     longer previous run) is read as part of THIS one.
+#
+# All three cases run through `ws0_driver_run`, i.e. `--validate-args-only`: the used-dir
+# REFUSAL is deliberately placed ABOVE the argument boundary (it needs no perf, no topology, no
+# corpus), which is what makes it observable hermetically. CREATION stays below the boundary, so
+# these cases also assert that nothing is created.
+r1_dir="$TMP/r1"
+mkdir -p "$r1_dir/used" && : > "$r1_dir/used/warm-rep1-scan.perf.csv"
+out=$(ws0_driver_run "$DRIVER" --corpus /nonexistent --out "$r1_dir/used"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'already exists and is NOT EMPTY' <<<"$out" \
+   && ws0_driver_ran_hermetically; then
+  pass "OBSERVED (round6 R1): an explicit --out holding a previous session's rep file is REFUSED (pre-fix: mkdir -p reused it and the report mixed both sessions)"
+else
+  fail "round6 R1: a non-empty --out must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# NON-VACUITY / the ACCEPT direction, both halves — without these the refusal could be a check
+# that rejects every --out, which would make the flag unusable rather than safe.
+mkdir -p "$r1_dir/empty"
+out=$(ws0_driver_run "$DRIVER" --corpus /nonexistent --out "$r1_dir/empty"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'ARGUMENTS OK' <<<"$out"; then
+  pass "OBSERVED (round6 R1): an EXISTING-BUT-EMPTY --out is ACCEPTED (the guard discriminates on CONTENT, not on existence)"
+else
+  fail "round6 R1: an empty --out dir must be accepted (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+out=$(ws0_driver_run "$DRIVER" --corpus /nonexistent --out "$r1_dir/absent"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'ARGUMENTS OK' <<<"$out" && [ ! -e "$r1_dir/absent" ]; then
+  pass "OBSERVED (round6 R1): an ABSENT --out is accepted AND is NOT created above the argument boundary (--validate-args-only still creates nothing)"
+else
+  fail "round6 R1: an absent --out must be accepted without being created (rc=$rc, exists=$([ -e "$r1_dir/absent" ] && echo yes || echo no))"
+fi
+# A `--out` that exists as a FILE is refused too, with its own diagnosis rather than the
+# non-empty one — a reader sent to "remove that directory" for a regular file is sent wrong.
+: > "$r1_dir/afile"
+out=$(ws0_driver_run "$DRIVER" --corpus /nonexistent --out "$r1_dir/afile"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'is not a directory' <<<"$out"; then
+  pass "OBSERVED (round6 R1): an --out that is a regular FILE is refused with its own diagnosis"
+else
+  fail "round6 R1: an --out naming a file must be refused as such (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# THE DEFAULT NAME'S UNIQUENESS RESTS ON AN ATOMIC CREATE, not on the name. Asserted
+# STRUCTURALLY, because the racing behaviour itself cannot be driven deterministically from a
+# self-test: the default branch must use `mkdir` WITHOUT `-p` (an existing dir is then an ERROR,
+# which IS the exclusion) and the name must carry more than a second-resolution timestamp.
+r1_block=$(awk '/^  _ws0_base=/,/^  unset _ws0_base/' "$DRIVER")
+if [ -n "$r1_block" ] \
+   && grep -q 'if mkdir "\$OUT_DIR" 2>/dev/null; then' <<<"$r1_block" \
+   && ! grep -q 'mkdir -p "\$OUT_DIR"' <<<"$r1_block" \
+   && grep -q 'OUT_DIR="\$_ws0_base/\$TS-\$\$"' <<<"$r1_block"; then
+  pass "round6 R1: the DEFAULT out dir is created with \`mkdir\` (no -p) — an atomic exclusive create — and its name carries the pid, not just a UTC second"
+else
+  fail "round6 R1: the default out dir must be created atomically without -p and be more than second-unique (block: $(head -5 <<<"$r1_block"))"
+fi
+# ...and the atomic-create claim is driven, not merely grepped: the SAME primitive the driver
+# uses must actually refuse a second create of one name. This is the property `mkdir -p` lacks
+# and is what makes the retry loop an exclusion rather than a decoration.
+r1_race="$r1_dir/race"
+if mkdir "$r1_race" 2>/dev/null && ! mkdir "$r1_race" 2>/dev/null; then
+  pass "OBSERVED (round6 R1): \`mkdir\` without -p REFUSES a second create of the same name (the exclusion the default branch relies on), while \`mkdir -p\` would succeed twice"
+else
+  fail "round6 R1: the atomic-create primitive must fail on an existing dir, else the default branch's uniqueness is not enforced"
+fi
+if mkdir -p "$r1_race" 2>/dev/null; then
+  pass "OBSERVED (round6 R1): the CONTROL — \`mkdir -p\` on that same existing dir SUCCEEDS, which is exactly why the pre-fix code reused a session dir"
+else
+  fail "round6 R1: mkdir -p must succeed on an existing dir; if it does not, the control proves nothing"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a
@@ -690,7 +781,7 @@ fi
 # `pass`/`fail` to report their call site), set just below it so adding a case does not red the
 # suite, and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=47
+MIN_CHECKS=54
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

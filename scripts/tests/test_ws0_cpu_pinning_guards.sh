@@ -540,6 +540,7 @@ if [ -n "$lint_line" ] && [ -n "$stamp_line" ] && [ "$lint_line" -lt "$stamp_lin
 else
   fail "the perf lint must precede the argument boundary, else ARGUMENTS OK is not evidence the lint ran (lint=$lint_line stamp=$stamp_line)"
 fi
+
 # Stated directly too, using the driver's OWN lint function rather than a second
 # hand-written pattern: a reimplemented check in the test would be a second thing to
 # keep in sync, and its divergence would be invisible in exactly the permissive
