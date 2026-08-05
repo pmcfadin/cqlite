@@ -43,6 +43,53 @@ enumeration to be wrong about; the alternative was a fourth round of adding spel
 Line continuations are handled by JOINING LOGICAL LINES before classifying, which is what
 bash does, and the finding is reported at the line where the logical line STARTED.
 
+## B3 (round 6) — the WRAPPER SET WAS A HAND-WRITTEN LIST, so compound-command position was blind
+
+B1's fix above claimed "no enumeration left to be wrong about". That claim was FALSE, and this
+is the THIRD recurrence of the same class (B1: predicate by spelling; F6: a hardcoded
+five-token line gate; B3: a hand-written keyword list). `WRAPPERS` enumerated
+`then`/`else`/`elif`/`do` and OMITTED `if`, `while`, `until` — **the omission of `if` beside the
+presence of `elif` is the tell that the list was written by hand.** Traced for
+`if bash "$DRIVER" --corpus /c; then`: `if` was not a wrapper, so it was appended as the command
+word and set `expect = False`; `bash` and `"$DRIVER"` then both hit `if not expect: continue`;
+`command_words` came out `['if', 'then']` and the driver token was NEVER passed to
+`_word_could_be_driver`.
+
+MEASURING it found FIVE MORE shapes the report did not name, from a SECOND cause: control
+operators were classified AFTER `_bare()`, which strips exactly the operator characters, so
+`_bare(";") == _bare("&&") == _bare("|") == ""` and every STANDALONE operator hit
+`if not bare: continue` WITHOUT resetting command position. Eight shapes, all measured at ZERO
+findings, all one character from code these suites already contain:
+
+    if bash "$DRIVER" …          while …           until …          elif …
+    true && bash "$DRIVER" …     false || …        echo x | …
+    ( bash "$DRIVER" … )         a) bash "$DRIVER" … ;;   (a case branch)
+    for f in $(bash "$DRIVER" --list)      (`in` is opaque; `$(` was erased to whitespace)
+
+THE FIX IS AN INVERSION TO A CLOSED GRAMMAR, not three more keywords. Every token is exactly
+one of: a control operator (closed — bash's grammar fixes it), a RESERVED WORD (closed — see
+below), a wrapper, an assignment prefix, or **anything else, which is treated as a possible
+command word**. Nothing is stepped over for failing to appear on a list; the unrecognised case
+is the FAIL-CLOSED case.
+
+**WHICH FINITE SET THIS RELIES ON, and why it is closed.** `RESERVED_WORDS` is the one
+enumeration that remains, and it is closed because **bash itself enumerates it**: `compgen -k`.
+`test_ws0_hermeticity.sh`'s `reserved-closure` asserts SET EQUALITY against that oracle in both
+directions (plus a positive control on the oracle), so a bash release adding a reserved word
+FAILS the suite instead of silently opening a hole. That is the difference from the three
+enumerations that preceded it: variable NAMES, invocation SPELLINGS and argument SHAPES are open
+sets with no oracle, so enumerating them could only ever be wrong. Each reserved word is
+classified TRANSPARENT or OPAQUE, and the partition is asserted TOTAL AND DISJOINT **at import**
+— an unclassified word raises rather than inheriting the stop-scanning branch.
+
+**RESIDUAL ENUMERATION, STATED RATHER THAN CLAIMED AWAY.** `WRAPPERS` (external commands that
+take a command as an argument: `env`, `timeout`, `taskset`, …) has NO oracle — "programs that run
+another program" is open-ended. A wrapper not listed there consumes command position, so a driver
+token immediately after it is not examined. That hole is not closable without a model of every
+command on `PATH`, and it is not closable by widening either: flagging a driver token in ARGUMENT
+position was measured to red on this repo's own shipped code. So it is recorded at the constant
+and here, and it is what the header no longer claims to have eliminated.
+
 ## B2 — the SUBJECT was one glob, and its completeness check compared that glob to itself
 
 The predecessor's subject was `"$dir"/test_ws0_*.sh` only. Round 3 had itself introduced two
@@ -85,15 +132,94 @@ DRIVER_BASENAME = "ws0-baseline.sh"
 # (the positive controls in test_ws0_hermeticity.sh, and `ws0_driver_run` itself).
 LINE_MARKER = "ws0-hermetic-allow"
 
-# The sanctioned wrappers. A line whose command word is one of these is not itself the
-# finding; the lint steps over it and keeps looking, exactly as bash would.
+# BASH'S RESERVED WORDS — a CLOSED set, and the ONLY reason a complete enumeration is
+# achievable in this file at all (see the header's B3 section).
+#
+# It is closed because BASH ITSELF enumerates it: `bash -c 'compgen -k'`. So this is not a
+# hand-written list that someone must remember to extend — `reserved-closure` in
+# test_ws0_hermeticity.sh asserts SET EQUALITY against `compgen -k`, so a bash release that adds
+# a reserved word FAILS the suite rather than silently opening a hole. That is the difference
+# between this enumeration and the three that preceded it: variable NAMES, invocation
+# SPELLINGS and argument SHAPES are all open sets with no oracle, so enumerating them could
+# only ever be wrong; reserved words have an oracle that ships with the shell.
+RESERVED_WORDS = frozenset(
+    {
+        "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while",
+        "until", "do", "done", "in", "function", "time", "{", "}", "!", "[[", "]]",
+        "coproc",
+    }
+)
+
+# Every reserved word is classified into exactly one of these two, and
+# `reserved-classification` asserts the partition is TOTAL over `RESERVED_WORDS` — so a newly
+# added reserved word cannot land unclassified and inherit a default.
+#
+# TRANSPARENT: a COMMAND may begin at the next token, so keep scanning in command position.
+# This is where `if`/`while`/`until` were missing (round 6, B1): `elif` was present and `if`
+# was not, which is the signature of a list written by hand.
+RESERVED_TRANSPARENT = frozenset(
+    {
+        "if", "then", "else", "elif", "fi", "while", "until", "do", "done", "esac",
+        "time", "coproc", "!", "{", "}",
+    }
+)
+# OPAQUE: the next token is NOT a command — it is a NAME (`for`/`select`), a case SUBJECT
+# (`case`), a WORD LIST (`in`), a function name (`function`) or a conditional expression
+# (`[[`/`]]`). A command inside one of those positions can only arrive through a command
+# SUBSTITUTION, and `open_substitutions` puts that back into command position explicitly, so
+# nothing is lost by refusing to scan a word list: MEASURED, `for f in $(bash "$DRIVER")` is
+# flagged with `in` opaque.
+RESERVED_OPAQUE = frozenset({"case", "for", "select", "in", "function", "[[", "]]"})
+
+# THE PARTITION IS TOTAL AND DISJOINT, asserted at IMPORT — not in a test that could be skipped.
+# A reserved word added to `RESERVED_WORDS` without a classification would otherwise fall through
+# `stripped_ops in RESERVED_TRANSPARENT` to the OPAQUE branch and silently stop scanning: an
+# unrecognised value inheriting the permissive-for-a-bypass default, which is the shape this whole
+# file exists to stop. So it is a hard error at import instead.
+_unclassified = RESERVED_WORDS - (RESERVED_TRANSPARENT | RESERVED_OPAQUE)
+_both = RESERVED_TRANSPARENT & RESERVED_OPAQUE
+_extra = (RESERVED_TRANSPARENT | RESERVED_OPAQUE) - RESERVED_WORDS
+if _unclassified or _both or _extra:
+    raise AssertionError(
+        "the reserved-word classification is not a total disjoint partition of RESERVED_WORDS:"
+        f" unclassified={sorted(_unclassified)} both={sorted(_both)}"
+        f" not-reserved={sorted(_extra)}"
+    )
+
+# The sanctioned WRAPPERS — external commands that take a COMMAND as an argument. A line whose
+# command word is one of these is not itself the finding; the lint steps over it and keeps
+# looking, exactly as bash would.
+#
+# RESIDUAL ENUMERATION, STATED (round 6, B1): unlike `RESERVED_WORDS`, this set has NO oracle —
+# "programs that run another program" is open-ended (`strace`, `nsenter`, `firejail`, `unshare`
+# …), so a wrapper NOT listed here consumes command position and a driver token after it is not
+# examined. That hole is not closable without a model of every command on `PATH`, and it is NOT
+# closable by widening: flagging a driver token in ARGUMENT position was measured to red on this
+# repo's own shipped code (`grep -n '…' "$REPO/scripts/perf/ws0-baseline.sh"`). So it is recorded
+# here as a known limit rather than claimed away. What bounds it in practice: the driver token
+# after an unknown wrapper is still examined whenever a control operator or a reserved word
+# re-enters command position later on the line, and the SUBJECT/CENSUS oracle still puts the
+# file in scope.
 WRAPPERS = frozenset(
     {
         "exec", "env", "command", "builtin", "nohup", "time", "timeout", "sudo",
         "taskset", "nice", "ionice", "stdbuf", "setsid", "xargs", "bash", "sh",
-        "dash", "zsh", "ksh", "then", "else", "elif", "do", "!", "{", "(",
+        "dash", "zsh", "ksh",
     }
 )
+
+# The CONTROL OPERATORS, also closed — this is bash's own operator set, fixed by the grammar
+# rather than by anyone's memory. A token made only of these characters ENDS the current command
+# and puts the next token in command position.
+#
+# The previous code checked these AFTER reducing the token with `_bare`, which strips exactly
+# these characters — so `_bare(";") == ""`, `_bare("&&") == ""`, `_bare("|") == ""` and every
+# standalone operator hit `if not bare: continue` and NEVER reset command position. MEASURED at
+# zero findings for `true && bash "$DRIVER" …`, `false || bash "$DRIVER" …` and
+# `echo x | bash "$DRIVER" …` before this fix.
+_OP_ONLY_RE = re.compile(r"^[;&|()]+$")
+_OP_LEADING_RE = re.compile(r"^[;&|()]+")
+_OP_TRAILING_RE = re.compile(r"[;&|()]+$")
 
 # Tokens that name the driver, or COULD. The last case is the whole point: a variable this
 # file cannot resolve MIGHT hold the driver path, so it counts (fail closed).
@@ -192,12 +318,25 @@ def open_substitutions(line: str) -> str:
     Replacing the punctuation with spaces (rather than parsing nesting) is deliberate: the inner
     text then goes through the same command-word rules as any other line, and the only cost is
     that a substitution's first token is treated as a command word — which it IS.
+
+    ROUND 6, B1: the delimiters are replaced with STANDALONE OPERATOR TOKENS rather than with
+    whitespace, because whitespace DESTROYS the command boundary the operator carries and two
+    shapes were MEASURED at zero findings because of it:
+
+    * `for f in $(bash "$DRIVER" --list); do` — `in` is an OPAQUE reserved word (a word LIST
+      follows, not a command), so with `$(` erased the substitution's contents inherited that
+      non-command position and `bash "$DRIVER"` was never examined. `$(` now becomes `;`, which
+      is exactly what it means: a command substitution starts a FRESH command.
+    * `a) bash "$DRIVER" --corpus /c ;;` — a `case` branch. With `)` erased, `a` became a plain
+      word in command position, consumed it, and `bash "$DRIVER"` after it was skipped. `)` now
+      survives as an operator token, so the pattern ends the (non-)command and the branch body
+      is scanned.
     """
     return (
-        line.replace("$(", " ")
-        .replace("`", " ")
-        .replace(")", " ")
-        .replace("<(", " ")
+        line.replace("$(", " ; ")
+        .replace("`", " ; ")
+        .replace(")", " ) ")
+        .replace("<(", " ; ")
     )
 
 
@@ -250,19 +389,42 @@ def command_words(line: str) -> list[str]:
         # token that opens the quote must be skipped as content too.
         if inside or (sq % 2 == 1) or (dq % 2 == 1):
             continue
+        # ---- token classification, as a CLOSED GRAMMAR (round 6, B1) --------------------
+        # Order matters: operators first (they delimit commands), then reserved words (they are
+        # the shell's own vocabulary), then everything else — and "everything else" is the
+        # FAIL-CLOSED bucket: an unrecognised token in command position is treated as a
+        # possible command word, never stepped over. That is the inversion round 6 required:
+        # nothing is skipped because it was not on a list.
+        stripped_ops = _OP_TRAILING_RE.sub("", _OP_LEADING_RE.sub("", token))
+        if _OP_ONLY_RE.match(token):
+            # A STANDALONE control operator: `;`, `&&`, `||`, `|`, `&`, `(`, `)`, `;;`. Ends
+            # the current command; the next token is in command position.
+            expect = True
+            in_wrapper = False
+            continue
         bare = _bare(token)
         if not bare:
             continue
-        if bare in {";", "&&", "||", "|", "&", "&&;"} or bare in {"(", "{"}:
-            expect = True
+        if stripped_ops in RESERVED_WORDS or bare in RESERVED_WORDS:
+            stripped_ops = stripped_ops if stripped_ops in RESERVED_WORDS else bare
+            # A RESERVED WORD, possibly with an operator glued on (`;;` after a case body,
+            # `(` before a subshell). TOTAL over `RESERVED_WORDS` by assertion, so there is no
+            # unclassified default: transparent => next token is a command; opaque => it is not.
+            if stripped_ops in RESERVED_TRANSPARENT:
+                expect = True
+            else:
+                expect = False
+            in_wrapper = False
             continue
-        if token.endswith(";") or token.endswith("&&") or token.endswith("||") \
-                or token.endswith("|") or token.endswith("&"):
-            # A control operator attached to the token: this token is still a word, and the
-            # NEXT one starts a new command.
-            if expect:
-                words.append(bare)
+        if _OP_TRAILING_RE.search(token) or _OP_LEADING_RE.match(token):
+            # A control operator ATTACHED to a word (`cmd;`, `cmd&&`, `(cmd`). The word itself
+            # is still a word — in command position when we were expecting one, and note a
+            # LEADING operator puts it in command position regardless (`(bash "$D"`).
+            if expect or _OP_LEADING_RE.match(token):
+                if not (in_wrapper and not could_be_driver_token(bare)):
+                    words.append(bare)
             expect = True
+            in_wrapper = False
             continue
         if not expect:
             continue
@@ -818,10 +980,28 @@ def cmd_subject(root_arg: str) -> int:
     return 0
 
 
+def cmd_reserved() -> int:
+    """Print the reserved-word set the grammar relies on, one per line, with its class.
+
+    This exists so the SHELL suite can compare it against `bash -c 'compgen -k'` — the oracle
+    that makes `RESERVED_WORDS` a CLOSED enumeration rather than a fourth hand-written list. The
+    comparison has to happen in shell because only bash can answer what bash's reserved words
+    are; python asserting against its own constant would confirm its own definition, which is
+    exactly B2's self-confirming shape.
+    """
+    for word in sorted(RESERVED_WORDS):
+        cls = "TRANSPARENT" if word in RESERVED_TRANSPARENT else "OPAQUE"
+        print(f"{cls}\t{word}")
+    print(f"#COMPLETE reserved={len(RESERVED_WORDS)}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[1] == "reserved":
+        return cmd_reserved()
     if len(argv) < 3:
-        print(f"usage: {argv[0]} lint <file>… | {argv[0]} subject <tests-dir>",
-              file=sys.stderr)
+        print(f"usage: {argv[0]} lint <file>… | {argv[0]} subject <tests-dir>"
+              f" | {argv[0]} reserved", file=sys.stderr)
         return 2
     if argv[1] == "lint":
         return cmd_lint(argv[2:])

@@ -387,6 +387,141 @@ else
   fail "lint-silent (B1 scope): a file that never names the driver must not be linted for unresolvable words"
 fi
 
+# --- ROUND 6, B1: COMPOUND-COMMAND POSITION — the THIRD recurrence of "asks by spelling" ----
+# The classifier's wrapper set enumerated `then`/`else`/`elif`/`do` and OMITTED `if`, `while`
+# and `until`. The omission of `if` BESIDE the presence of `elif` is the tell that the list was
+# written by hand. Traced for `if bash "$DRIVER" --corpus /c; then`: `if` was not a wrapper, so
+# it was appended as the command word and set `expect=False`; `bash` and `"$DRIVER"` then both
+# hit `if not expect: continue`; `command_words` came out as `['if','then']` and the driver token
+# was NEVER passed to `_word_could_be_driver`. Zero findings.
+#
+# MEASURING it turned up FIVE MORE the report did not name, all at zero findings, from a
+# SECOND cause: control operators were classified AFTER `_bare()`, which strips exactly the
+# operator characters — so `_bare(";")`, `_bare("&&")`, `_bare("|")` are all `""` and every
+# STANDALONE operator hit `if not bare: continue` without ever resetting command position:
+#
+#     true && bash "$DRIVER" …      false || bash "$DRIVER" …     echo x | bash "$DRIVER" …
+#     ( bash "$DRIVER" … )          a) bash "$DRIVER" … ;;   (a case branch)
+#     for f in $(bash "$DRIVER" --list)   (`in` is opaque, and `$(` was erased to whitespace)
+#
+# Eight shapes total, one character from code THESE SUITES ALREADY CONTAIN
+# (`test_ws0_hermeticity.sh:775` `if bash "$probe_root/…"`, `test_ws0_report_guards.sh:923`
+# `if timeout 15 python3 …`), and the pre-round-6 probe corpus covered
+# `exec`/`env -i`/`timeout`/`taskset` but NO conditional or loop form, so nothing observed it.
+#
+# THE FIX IS NOT "ADD if/while/until". It is a CLOSED GRAMMAR: every token is an operator, a
+# reserved word (classified TRANSPARENT or OPAQUE, partition asserted TOTAL at import), a
+# wrapper, an assignment prefix, or — the fail-closed bucket — a possible command word. Nothing
+# is stepped over for failing to be on a list. `RESERVED_WORDS` is the one enumeration that
+# remains, and it is the only one with an ORACLE (`compgen -k`, asserted below), which is why a
+# complete enumeration is achievable here and was not for names/spellings/argument shapes.
+#
+# Every shape below was CONFIRMED at zero findings against the pre-fix lint.
+compound_probe() { # compound_probe <line…> — a multi-line probe file WITH a driver handle
+  { printf 'DRIVER=/x/ws0-baseline.sh\n'; printf '%s\n' "$@"; } > "$TMP/probe-compound.sh"
+  ws0_hermeticity_lint "$TMP/probe-compound.sh"
+}
+# `$SH` composition again — a LITERAL `if bash "$DRIVER"` in this file would be a real finding
+# against this file, which is inside the lint's own subject.
+#
+# The field delimiter is a TAB, not `|`: the first draft used `IFS='|'` and the `|| chain` and
+# `pipeline` probe LABELS contain `|`, so their rows split into an EMPTY label and hit
+# `[ -n "$label" ] || continue` — SILENTLY SKIPPED, 11 fires printed where 12 shapes were
+# listed. A probe corpus that quietly drops a case is the vacuous-skip class this issue is
+# about, so the count is asserted below rather than eyeballed from the labels.
+compound_expected=12
+compound_ran=0
+while IFS=$'\t' read -r label line1 line2; do
+  [ -n "$label" ] || continue
+  if [ -n "$line2" ]; then
+    got=$(compound_probe "$line1" "$line2")
+  else
+    got=$(compound_probe "$line1")
+  fi
+  compound_ran=$((compound_ran + 1))
+  if grep -q 'invokes (or could invoke)' <<<"$got"; then
+    pass "lint-fires (round6 B1): a bare invocation in $label position is FLAGGED (was 0 findings)"
+  else
+    fail "lint-fires (round6 B1): $label must be flagged — it reaches the measurement loop on Linux (got: $got)"
+  fi
+done <<PROBES
+if	if $SH "\$DRIVER" --corpus /c; then echo y; fi
+while	while $SH "\$DRIVER" --corpus /c; do echo y; done
+until	until $SH "\$DRIVER" --corpus /c; do echo y; done
+elif	if [ -f /x ]; then :; elif $SH "\$DRIVER" --corpus /c; then :; fi
+&& chain	true && $SH "\$DRIVER" --corpus /c
+|| chain	false || $SH "\$DRIVER" --corpus /c
+pipeline	echo x | $SH "\$DRIVER" --corpus /c
+! negation	! $SH "\$DRIVER" --corpus /c
+subshell ( )	( $SH "\$DRIVER" --corpus /c )
+brace group { }	{ $SH "\$DRIVER" --corpus /c; }
+case branch	case "\$x" in	  a) $SH "\$DRIVER" --corpus /c ;;
+for-in substitution	for f in \$($SH "\$DRIVER" --list); do echo "\$f"; done
+PROBES
+# EVERY listed shape must have RUN. Without this the loop above could drop a row (it did) and
+# the suite would still print all-green, which is the shape of the defect being fixed.
+if [ "$compound_ran" -eq "$compound_expected" ]; then
+  pass "lint-fires (round6 B1): all $compound_expected listed compound-position shapes RAN (none silently dropped by the probe reader)"
+else
+  fail "lint-fires (round6 B1): only $compound_ran of $compound_expected compound-position probes RAN — a dropped row prints exactly like a passing one"
+fi
+# The SILENT direction for the same grammar: the two `case` SCAFFOLD lines carry no invocation
+# and must stay clean, or the operator-token rewrite of `)` would red on every case statement.
+if [ -z "$(compound_probe 'case "$x" in' 'esac')" ]; then
+  pass "lint-silent (round6 B1): a \`case\`/\`esac\` scaffold with no invocation is NOT flagged"
+else
+  fail "lint-silent (round6 B1): case scaffolding must not be flagged (got: $(compound_probe 'case "$x" in' 'esac'))"
+fi
+
+# --- THE CLOSURE OF THE ONE REMAINING ENUMERATION, against BASH ITSELF ---------------------
+# `RESERVED_WORDS` is the only enumeration the grammar relies on, and the claim that it is
+# CLOSED needs an oracle that is not the lint's own constant — python asserting against its own
+# frozenset would confirm its own definition, which is B2's self-confirming shape exactly. Only
+# bash can say what bash's reserved words are, so the comparison lives here, in shell.
+#
+# SET EQUALITY, both directions: a bash release that ADDS a reserved word reds this (a hole the
+# grammar would otherwise inherit), and a word in the lint that bash does not consider reserved
+# reds it too (a stale claim). `compgen -k` is a bash builtin, so this needs no external tool.
+bash_kw=$(bash -c 'compgen -k' | sort -u)
+lint_kw=$(ws0_hermeticity_lint_reserved | awk -F'\t' '/^(TRANSPARENT|OPAQUE)\t/{print $2}' | sort -u)
+if [ -z "$lint_kw" ]; then
+  fail "reserved-closure: the lint reported NO reserved words — an empty set would compare equal to nothing and prove nothing"
+elif [ "$bash_kw" = "$lint_kw" ]; then
+  pass "reserved-closure: RESERVED_WORDS equals \`compgen -k\` exactly ($(printf '%s\n' "$lint_kw" | wc -l | tr -d ' ') words) — the enumeration has an ORACLE, which is why it can be closed"
+else
+  fail "reserved-closure: RESERVED_WORDS != \`compgen -k\`; only-in-bash: $(comm -23 <(printf '%s\n' "$bash_kw") <(printf '%s\n' "$lint_kw") | tr '\n' ' '); only-in-lint: $(comm -13 <(printf '%s\n' "$bash_kw") <(printf '%s\n' "$lint_kw") | tr '\n' ' ')"
+fi
+# ...and that the ORACLE ITSELF is non-vacuous: if `compgen -k` returned nothing the equality
+# above could pass against an empty lint set. A positive control on the oracle, per #3249.
+if [ "$(printf '%s\n' "$bash_kw" | wc -l | tr -d ' ')" -ge 20 ]; then
+  pass "reserved-closure: the \`compgen -k\` oracle itself returned a plausible set (>=20 words), so the equality above is not vacuous"
+else
+  fail "reserved-closure: \`compgen -k\` returned only $(printf '%s\n' "$bash_kw" | wc -l | tr -d ' ') words — the oracle is broken and the equality assertion means nothing"
+fi
+# The CLASSIFICATION is a TOTAL DISJOINT PARTITION of that set, asserted at IMPORT (an
+# AssertionError, not a test that could be skipped) so a newly-added reserved word cannot land
+# unclassified and inherit the OPAQUE default — an unrecognised value taking the
+# stop-scanning branch is precisely the bypass shape this file exists to stop. Driven here by
+# checking the import raises, so the assertion is OBSERVED rather than assumed present.
+part_probe=$(python3 - "$REPO_ROOT/scripts/tests/ws0_hermeticity_lint.py" <<'PYEOF' 2>&1 || true
+import pathlib, sys
+src = pathlib.Path(sys.argv[1]).read_text()
+# Add a reserved word WITHOUT classifying it, exactly as a future bash release would force.
+src = src.replace('"coproc",\n    }', '"coproc", "newkw",\n    }', 1)
+ns: dict = {}
+try:
+    exec(compile(src, "probe", "exec"), ns)
+    print("NO-ERROR")
+except AssertionError as e:
+    print(f"RAISED {e}")
+PYEOF
+)
+if grep -q 'RAISED.*unclassified.*newkw' <<<"$part_probe"; then
+  pass "reserved-classification: an UNCLASSIFIED reserved word raises at IMPORT (observed), so it cannot inherit the stop-scanning default"
+else
+  fail "reserved-classification: an unclassified reserved word must raise at import (got: $part_probe)"
+fi
+
 # ===========================================================================
 # 4 — the lint does NOT fire on ordinary lines
 # ===========================================================================
@@ -785,7 +920,7 @@ fi
 # failure, and the gate reads only the exit code — so a suite that runs 3 of its checks
 # and passes them exits 0. The floor is the suite-level `0/0` guard. It is deliberately
 # below the current count (so adding a case does not red the suite) and far above zero.
-MIN_CHECKS=48
+MIN_CHECKS=64
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

@@ -227,6 +227,22 @@ ws0_hermeticity_lint_subject() {
   done < <(python3 "$WS0_HERMETIC_LINT_PY" subject "$dir" 2>/dev/null)
 }
 
+# ws0_hermeticity_lint_reserved — the RESERVED-WORD set the lint's grammar relies on, as
+# `<CLASS>\t<word>` lines. Exists so the suite can compare it against `bash -c 'compgen -k'`:
+# that enumeration is the ONLY one the grammar depends on, and the claim that it is CLOSED needs
+# an oracle outside the lint's own constant (#3272 round 6, B1). VACUITY IS REPORTED — a missing
+# `#COMPLETE` marker becomes a finding line rather than an empty set that would compare equal to
+# an empty lint set.
+ws0_hermeticity_lint_reserved() {
+  local out rc
+  out="$(python3 "$WS0_HERMETIC_LINT_PY" reserved 2>&1)"; rc=$?
+  if ! grep -q '^#COMPLETE reserved=' <<<"$out"; then
+    echo "INCOMPLETE${TAB:-	}the reserved-word report did not COMPLETE (exit $rc): $(head -2 <<<"$out" | tr '\n' ' ')"
+    return 0
+  fi
+  grep -v '^#COMPLETE ' <<<"$out"
+}
+
 # ws0_hermeticity_subject_report <dir> — the RAW subject/census report: `SUBJECT`, `EXEMPT`,
 # `UNCOVERED`, `STALE-EXEMPTION` and the `#COMPLETE` marker. For a test that needs to assert
 # on the completeness oracle itself.
