@@ -53,13 +53,31 @@ out, rows, nbytes = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 # consistent case. A caller that passes one is deliberately building an INCONSISTENT
 # identity, and the reporter must refuse it.
 bpr = float(sys.argv[4]) if sys.argv[4] else nbytes / rows
-data = os.path.join(out, "ws0", "events", "nb-1-big-Data.db")
+tbl = os.path.join(out, "ws0", "events")
+data = os.path.join(tbl, "nb-1-big-Data.db")
 raw = (bytes(range(256)) * ((nbytes // 256) + 1))[:nbytes]
 open(data, "wb").write(raw)
+# The AUXILIARY components too, with their sizes and digests RECORDED, because the reporter
+# verifies the COMPLETE recorded set (#3272 F3): a scan reads Index.db and is shaped by the
+# Statistics/Summary/Filter components, so verifying Data.db alone left a modified auxiliary
+# file able to change measured behaviour under a "corpus verified" claim. Tiny by design —
+# the property is per-component identity, not size. NO CompressionInfo.db: this rig's write
+# surface is uncompressed-only (#1406).
+components = {}
+for name, body in (("nb-1-big-Data.db", raw),
+                   ("nb-1-big-Index.db", b"IDX" * 16),
+                   ("nb-1-big-Statistics.db", b"STAT" * 8),
+                   ("nb-1-big-Summary.db", b"SUM" * 8),
+                   ("nb-1-big-Filter.db", b"FLT" * 8)):
+    path = os.path.join(tbl, name)
+    if name != "nb-1-big-Data.db":
+        open(path, "wb").write(body)
+    components[name] = {"name": name, "bytes": len(body),
+                        "sha256": hashlib.sha256(body).hexdigest()}
 json.dump(
     {"rows": rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
      "data_db_bytes": nbytes, "data_db_sha256": hashlib.sha256(raw).hexdigest(),
-     "bytes_per_row": bpr},
+     "bytes_per_row": bpr, "components": components},
     open(os.path.join(out, "corpus-identity.json"), "w"),
 )
 PY
@@ -90,16 +108,43 @@ make_round() {
 # and that is the point: a fixture that hand-rolled the pin's shape would keep passing after the
 # real writer's shape changed — the drift `make_round` already demonstrated in round 3. The
 # driver calls the same function.
+# The CONFIG is stamped with it (#3272 F1): the reporter READS reps/temps/arms/scan-passes
+# and the CPU pins from the manifest rather than taking them as arguments, so a fixture that
+# omitted them would be refused for a reason unrelated to its subject. Defaults match the
+# one-warm-rep/bypass session the suites build; a case whose subject IS the configuration
+# overrides them positionally.
+#
+# ws0_pin_session_corpus <session> <corpus> [reps] [temps] [arms] [scan_passes]
 ws0_pin_session_corpus() {
   local session="$1" corpus="$2" perf_dir
+  # `${N-default}`, NOT `${N:-default}`: the colon form substitutes the default for an EMPTY
+  # value as well as an unset one, which would silently turn a case's deliberately-empty
+  # `temps`/`arms` into the healthy default and make the empty-selection guard untestable.
+  # Measured: the "an EMPTY temps is REFUSED" case reported exit 0 with a full report, because
+  # its empty string had become `warm` in here. An absent argument takes the default; a
+  # supplied-but-empty one is passed THROUGH, so the reader refuses it.
+  local reps="${3-1}" temps="${4-warm}" arms="${5-bypass}" passes="${6-1}"
   perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
   python3 -c '
-import pathlib, sys
+import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_validate import load_corpus_identity, write_session_corpus_pin
-write_session_corpus_pin(pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2]),
-                         load_corpus_identity(pathlib.Path(sys.argv[2])))
-' "$perf_dir" "$corpus" "$session"
+from ws0_validate import Invalid, load_corpus_identity
+from ws0_session import session_pin_path, write_session_corpus_pin
+config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
+          "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
+          "step_duration": "45s/1s"}
+session, corpus = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2])
+try:
+    write_session_corpus_pin(session, corpus, load_corpus_identity(corpus), config)
+except Invalid:
+    # The case DELIBERATELY broke the corpus identity (absent, incomplete, inconsistent) and
+    # asserts on the CORPUS refusal. Stamp a config-only manifest so the reporter reaches that
+    # refusal — which it validates BEFORE the manifest — instead of dying here on the fixture.
+    # A pin with no corpus fields cannot mask anything: `verify_session_corpus_pin` refuses an
+    # incomplete pin, so any case that got PAST the corpus check still meets a real check.
+    session.mkdir(parents=True, exist_ok=True)
+    session_pin_path(session).write_text(json.dumps({"config": config}, indent=1) + "\n")
+' "$perf_dir" "$corpus" "$session" "$reps" "$temps" "$arms" "$passes"
 }
 
 # ws0_alternating_position <rep> <which> — the position an arm holds in `<rep>`, matching

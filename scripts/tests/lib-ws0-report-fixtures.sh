@@ -91,9 +91,9 @@ make_session() {
 run_report() { # run_report <dir> <corpus> [extra args…]
   local d="$1" c="$2"; shift 2
   [[ -e "$d/session-corpus-pin.json" ]] || ws0_pin_session_corpus "$d" "$c"
-  python3 "$REPORT" --dir "$d" --corpus "$c" --server-cpus 2,10 \
-    --client-cpus 4,12 --reps 1 --temps warm --arms bypass \
-    --step-duration 45s/1s --scan-passes 1 "$@" 2>&1
+  # ONLY the two paths: reps/temps/arms/scan-passes and the CPU pins are READ FROM the
+  # session manifest since #3272 F1, so passing them here would be an argparse error.
+  python3 "$REPORT" --dir "$d" --corpus "$c" "$@" 2>&1
 }
 
 # run_report_args <dir> <corpus> <args…> — the reporter with the caller's OWN argument list,
@@ -103,9 +103,17 @@ run_report() { # run_report <dir> <corpus> [extra args…]
 # offer and were calling `python3 "$REPORT" …` directly. Every such site is a place the pin
 # would have to be remembered — and when the pin landed, nine of them failed for a reason
 # unrelated to their subject (#3272 review round 4). One helper, one place that knows.
+# run_report_args <dir> <corpus> <reps> <temps> <arms> <scan-passes> [extra reporter args…]
+#
+# The configuration is STAMPED INTO THE MANIFEST rather than passed to the reporter (#3272 F1):
+# reps/temps/arms/scan-passes are properties of the SESSION now, and the reporter reads them.
+# Stamped unconditionally with THIS call's values — a preserved neighbour manifest made cases
+# report a configuration they had not set.
 run_report_args() {
-  local d="$1" c="$2"; shift 2
-  [[ -e "$d/session-corpus-pin.json" ]] || ws0_pin_session_corpus "$d" "$c"
+  local d="$1" c="$2" reps="${3-1}" temps="${4-warm}" arms="${5-bypass}" passes="${6-1}"
+  shift 6 2>/dev/null || shift $#
+  rm -f "$d/session-corpus-pin.json"
+  ws0_pin_session_corpus "$d" "$c" "$reps" "$temps" "$arms" "$passes"
   python3 "$REPORT" --dir "$d" --corpus "$c" "$@" 2>&1
 }
 

@@ -210,6 +210,212 @@ else
   fail "requests_error=0 must be accepted (rc=$rc, out: $out)"
 fi
 
+# --- F1: THE CONFIGURATION CAME FROM THE CURRENT CLI (#3272 round 5) -------------------
+# `ws0_report.py` took --reps/--temps/--arms/--scan-passes and the CPU pins from ITS OWN
+# command line, tied to nothing about the session being reported. So a re-report could
+# SUBSTITUTE a configuration and the report asserted the substitute had been verified.
+#
+# NON-VACUITY, MEASURED against this branch with only F1/F3 reverted (F2+F4 present), over a
+# session dir holding a COMPLETE 3-rep measurement:
+#
+#     ws0_report.py --dir <3-rep session> --reps 1 --server-cpus 99,99 --client-cpus 77,77
+#     => EXIT 0
+#        pinning      : server 99,99 (verified physical-core siblings), client 77,77
+#        reps         : 1 (median reported, spread shown)
+#        bare scan …  rows=1,000 (n=1)
+#
+# i.e. it IGNORED two of the three measured reps and published rep 1 as the run, and printed
+# CPU pins the session never used under a "verified physical-core siblings" claim.
+#
+# The fix READS the configuration from the pre-measurement manifest and REMOVES the flags, so
+# the substitution is not merely detected — it cannot be expressed. Both halves are asserted.
+d="$TMP/f1-three-rep"; mkdir -p "$d"
+for _rep in 1 2 3; do
+  make_scan_rep "$d" warm "$_rep" ok
+  make_flight_rep "$d" warm "$_rep" ok "$GOOD_FLIGHT"
+done
+unset _rep
+# 1. THE FLAGS NO LONGER EXIST. An accepted-but-ignored flag would be a silent lie to whoever
+#    passed it, so each is an argparse error (exit 2) rather than a value that does nothing.
+for gone_flag in --reps --temps --arms --scan-passes --server-cpus --client-cpus --step-duration; do
+  rm -f "$d/session-corpus-pin.json"
+  ws0_pin_session_corpus "$d" "$TMP/corpus" 3 warm bypass 1
+  out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" "$gone_flag" 1 2>&1); rc=$?
+  if [ "$rc" -eq 2 ] && grep -q 'unrecognized arguments' <<<"$out"; then
+    pass "OBSERVED: \`$gone_flag\` is REJECTED by the reporter (a session property cannot be substituted)"
+  else
+    fail "$gone_flag must be an argparse error, not an ignored value (rc=$rc, out: $out)"
+  fi
+done
+# 2. THE CONFIGURATION IS THE MANIFEST'S. The same session dir reports 3 reps because its
+#    manifest says 3 — not because anything was passed — and `n=3` is the observable proof
+#    that all three measured reps were used.
+rm -f "$d/session-corpus-pin.json"
+ws0_pin_session_corpus "$d" "$TMP/corpus" 3 warm bypass 1
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'n=3' <<<"$out" && grep -q 'reps         : 3' <<<"$out"; then
+  pass "the reporter uses the MANIFEST's rep count (n=3 over a 3-rep session, pre-fix: n=1 was claimable)"
+else
+  fail "the manifest's reps must drive the report (rc=$rc, out: $out)"
+fi
+# ...and the summary SAYS where its configuration came from, so a reader need not infer it.
+if grep -q 'READ FROM the pre-measurement session manifest' <<<"$out"; then
+  pass "the summary states that the configuration was READ FROM the manifest"
+else
+  fail "the summary must state its configuration source (out: $out)"
+fi
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+src = r["configuration_source"]
+assert src["manifest"].endswith("session-corpus-pin.json"), src
+assert "READ FROM" in src["note"], src
+assert r["reps"] == 3, r["reps"]
+PY
+then
+  pass "results.json records the configuration SOURCE (the manifest, not this invocation)"
+else
+  fail "results.json must record where the configuration came from"
+fi
+# 3. A SESSION WITH NO RECORDED CONFIGURATION IS REFUSED, never filled in from the CLI —
+#    that substitution is the finding, so there is no path that supplies it.
+d="$TMP/f1-no-config"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus" 1 warm bypass 1
+python3 - "$d" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "session-corpus-pin.json"
+pin = json.loads(p.read_text())
+pin.pop("config", None)          # a round-4-era manifest: corpus pinned, configuration not
+p.write_text(json.dumps(pin, indent=1) + "\n")
+PY
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'records no `config`' <<<"$out"; then
+  pass "OBSERVED: a manifest with NO recorded configuration is REFUSED (never supplied from argv)"
+else
+  fail "a config-less manifest must be refused (rc=$rc, out: $out)"
+fi
+# 4. A PARTIAL manifest is refused naming the absent field — a configuration half-recorded
+#    cannot establish what was measured.
+d="$TMP/f1-partial-config"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus" 1 warm bypass 1
+python3 - "$d" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "session-corpus-pin.json"
+pin = json.loads(p.read_text())
+pin["config"].pop("server_cpus")
+p.write_text(json.dumps(pin, indent=1) + "\n")
+PY
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'INCOMPLETE — no server_cpus' <<<"$out"; then
+  pass "a PARTIAL manifest configuration is refused, naming the absent field"
+else
+  fail "an incomplete manifest config must be refused by field name (rc=$rc, out: $out)"
+fi
+# 5. A HAND-EDITED manifest cannot smuggle a vacuous configuration past the reader: every
+#    field goes through the SAME validator the CLI used, so `reps: 0` is still refused (that
+#    was #3272 finding 5, and moving the value's source must not lose its guard).
+d="$TMP/f1-vacuous-config"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus" 1 warm bypass 1
+python3 - "$d" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "session-corpus-pin.json"
+pin = json.loads(p.read_text())
+pin["config"]["reps"] = "0"
+p.write_text(json.dumps(pin, indent=1) + "\n")
+PY
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'must be at least 1' <<<"$out"; then
+  pass "a hand-edited \`reps: 0\` in the MANIFEST is refused (finding 5's guard survived the move)"
+else
+  fail "the manifest's config must go through the CLI validators (rc=$rc, out: $out)"
+fi
+
+# --- F3: CORPUS VERIFICATION CHECKED ONLY Data.db (#3272 round 5) -----------------------
+# The identity records EVERY emitted component with its size and sha256, and a scan reads more
+# than `Data.db` — `Index.db` above all, plus the Statistics/Summary/Filter components that
+# shape how it reads. Only `Data.db` was verified, so a MODIFIED AUXILIARY COMPONENT could
+# change measured behaviour while the report stated that corpus verification had succeeded.
+#
+# NON-VACUITY, measured with F3 reverted: rewriting `nb-1-big-Index.db` under a corpus whose
+# identity records its digest left the report at EXIT 0 with its "corpus verify: size AND
+# sha256 re-derived … the identity describes the bytes that were measured" line intact.
+d="$TMP/f3-modified-index"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-f3"
+printf 'TAMPERED-INDEX-CONTENT' > "$TMP/corpus-f3/ws0/events/nb-1-big-Index.db"
+out=$(run_report "$d" "$TMP/corpus-f3"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'nb-1-big-Index.db' <<<"$out"; then
+  pass "OBSERVED: a MODIFIED Index.db is REFUSED (pre-fix: exit 0 under a 'corpus verified' claim)"
+else
+  fail "a modified auxiliary component must be refused (rc=$rc, out: $out)"
+fi
+# A same-LENGTH modification is the case a size check alone cannot see.
+d="$TMP/f3-same-size"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-f3b"
+python3 - "$TMP/corpus-f3b" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "ws0" / "events" / "nb-1-big-Statistics.db"
+raw = bytearray(p.read_bytes())
+raw[0] ^= 0xFF          # SAME LENGTH, different bytes
+p.write_bytes(bytes(raw))
+PY
+expect_reject "a SAME-SIZE modification of an auxiliary component is REFUSED (digest, not size)" \
+  "nb-1-big-Statistics.db hashes to" "$d" "$TMP/corpus-f3b"
+# An ABSENT recorded component is refused: the identity describes a corpus that is not there.
+d="$TMP/f3-missing"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-f3c"
+rm -f "$TMP/corpus-f3c/ws0/events/nb-1-big-Index.db"
+expect_reject "an ABSENT recorded component is REFUSED" \
+  "MISSING recorded component" "$d" "$TMP/corpus-f3c"
+# ...and a component PRESENT but NOT RECORDED, which is equally not the described corpus.
+d="$TMP/f3-extra"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-f3d"
+printf 'STRAY' > "$TMP/corpus-f3d/ws0/events/nb-1-big-Digest.crc32"
+expect_reject "a component the identity does NOT describe is REFUSED" \
+  "does NOT describe" "$d" "$TMP/corpus-f3d"
+# An identity with NO component map cannot support the claim at all.
+d="$TMP/f3-no-components"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-f3e"
+python3 - "$TMP/corpus-f3e" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "corpus-identity.json"
+ident = json.loads(p.read_text())
+ident.pop("components", None)
+p.write_text(json.dumps(ident, indent=1) + "\n")
+PY
+expect_reject "an identity with NO components map is REFUSED (only Data.db could be verified)" \
+  "records no \`components\` map" "$d" "$TMP/corpus-f3e"
+# THE ACCEPT DIRECTION, and the SCOPE is stated affirmatively: the summary reports how many
+# components were verified, so a reader can tell a full verification from a partial one without
+# inferring it from a flag's absence.
+d="$TMP/f3-accept"; make_session "$d" "$GOOD_FLIGHT"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && grep -qE 'corpus comps : all 5 recorded component\(s\) were re-stat.ed and 5 of 5 re-hashed' <<<"$out"; then
+  pass "the COMPLETE component set is verified and the summary states the count (5 of 5)"
+else
+  fail "the summary must state the full component verification (rc=$rc, out: $out)"
+fi
+# ...and --skip-corpus-digest stays HONEST for the WHOLE set: it is never a silent partial
+# verification, and never claims a digest it did not derive.
+out=$(run_report "$d" "$TMP/corpus" --skip-corpus-digest); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'NO digest was re-derived' <<<"$out"; then
+  pass "--skip-corpus-digest stamps 'NO digest was re-derived' for the whole component set"
+else
+  fail "the skip path must state that no component digest was observed (rc=$rc, out: $out)"
+fi
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+v = json.load(open(sys.argv[1]))["corpus_component_verification"]
+assert v["components_recorded"] == 5, v["components_recorded"]
+assert v["components_verified_size"] == 5, v
+assert v["components_verified_sha256"] == 0, v          # the skip run
+assert set(v["components"]) >= {"nb-1-big-Data.db", "nb-1-big-Index.db"}, v
+PY
+then
+  pass "results.json records the per-component verification record (size verified, digest not)"
+else
+  fail "results.json must record the component verification per component"
+fi
+
 # --- F2: THE BARE SCAN'S `passes` ARRAY WAS NEVER READ (#3272 round 5) -----------------
 # The collector took the AGGREGATE `rows_denominator`/`timed_scan_secs` and never looked at
 # the per-pass records beside them, although `ws0-scan-bench` computes both aggregates from
@@ -235,8 +441,7 @@ scan_payload() { # scan_payload <dir> <rows_denom> <secs> <passes-json>
 #    aggregate that is SELF-CONSISTENT with the one pass present.
 #    NON-VACUITY, measured against this branch at 06c295289: exit **0**, full report written.
 d="$TMP/f2-truncated"; scan_payload "$d" 1000 2.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 } ]'
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 --client-cpus 4,12 --reps 1 \
-  --temps warm --arms bypass --step-duration 45s/1s --scan-passes 3); rc=$?
+out=$(run_report_args "$d" "$TMP/corpus" 1 warm bypass 3); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'recorded 1 timed pass(es) but --scan-passes is 3' <<<"$out"; then
   pass "a TRUNCATED scan (1 pass, --scan-passes 3) is REFUSED (pre-fix: exit 0)"
 else
@@ -247,8 +452,7 @@ fi
 #    NON-VACUITY: measured exit **0** pre-fix.
 d="$TMP/f2-partial-pass"
 scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 300, "secs": 2.0 }, { "pass": 1, "rows": 1700, "secs": 2.0 } ]'
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 --client-cpus 4,12 --reps 1 \
-  --temps warm --arms bypass --step-duration 45s/1s --scan-passes 2); rc=$?
+out=$(run_report_args "$d" "$TMP/corpus" 1 warm bypass 2); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'pass 0 observed 300 rows' <<<"$out"; then
   pass "a PARTIAL pass hidden by a compensating one is REFUSED (pre-fix: exit 0, sum looked fine)"
 else
@@ -301,8 +505,7 @@ done
 #    row denominator is passes x corpus_rows.
 d="$TMP/f2-multipass-ok"
 scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 }, { "pass": 1, "rows": 1000, "secs": 2.0 } ]'
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 --client-cpus 4,12 --reps 1 \
-  --temps warm --arms bypass --step-duration 45s/1s --scan-passes 2); rc=$?
+out=$(run_report_args "$d" "$TMP/corpus" 1 warm bypass 2); rc=$?
 if [ "$rc" -eq 0 ] && grep -q 'rows=2,000' <<<"$out"; then
   pass "a HEALTHY 2-pass rep is ACCEPTED and its DERIVED denominator is 2 x corpus rows"
 else
@@ -999,9 +1202,7 @@ ws0_pin_session_corpus "$d" "$TMP/corpus"
 rm -f "$d/session-corpus-pin.json"
 # NOT through `run_report`, which stamps a pin when one is absent (standing in for the driver):
 # this case's subject IS the absence, so the reporter is called directly.
-out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 1 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "carries no session-corpus-pin.json" <<<"$out"; then
   pass "OBSERVED: an ABSENT session corpus pin is FATAL (a dir that does not say which corpus it measured)"
 else
@@ -1210,9 +1411,7 @@ three_reps() { # three_reps <dir>
 d="$TMP/one-bad-scan-ins-of-three"; three_reps "$d"
 perf_csv "$d/perf-scan-warm-2.csv" 2000000 4000000
 perf_csv "$d/perf-scan-warm-2-setup.csv" 100000 9000000     # rep 2 only; CYCLES healthy
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_args "$d" "$TMP/corpus" 3 warm bypass 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "setup-subtracted instructions" <<<"$out"; then
   pass "OBSERVED: ONE corrupt scan rep of three is REFUSED (pre-fix: exit 0, ipc.min -2.63)"
 else
@@ -1225,9 +1424,7 @@ else
 fi
 d="$TMP/one-bad-flight-ins-of-three"; three_reps "$d"
 perf_csv "$d/perf-flight-bypass-warm-2.csv" 8000000 0       # rep 2 only; CYCLES healthy
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_args "$d" "$TMP/corpus" 3 warm bypass 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "flight rep flight-bypass-warm-2 instructions" <<<"$out"; then
   pass "OBSERVED: ONE corrupt flight rep of three is REFUSED (pre-fix: exit 0, ipc.min 0.0)"
 else
@@ -1290,9 +1487,7 @@ FRAC_OK='{"round":"r","requests_ok":1.9,"requests_error":0,"requests_unavailable
 d="$TMP/frac-ok"; mkdir -p "$d"
 make_scan_rep "$d" cold 1 skipped-cold-arm
 make_flight_rep "$d" cold 1 skipped-cold-arm "$FRAC_OK"
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 1 --temps cold --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_args "$d" "$TMP/corpus" 1 cold bypass 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "fractional value 1.9" <<<"$out"; then
   pass "OBSERVED: a FRACTIONAL requests_ok is refused (pre-fix: int(1.9)==1 SATISFIED the cold guard)"
 else
@@ -1415,7 +1610,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=110
+MIN_CHECKS=135
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

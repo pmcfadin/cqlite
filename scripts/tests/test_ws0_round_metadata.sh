@@ -41,6 +41,20 @@ pass() { checks=$((checks + 1)); echo "ok   - $1"; }
 fail() { checks=$((checks + 1)); echo "FAIL - $1"; fails=$((fails + 1)); }
 
 [ -f "$REPORT" ] || { echo "FAIL - missing $REPORT"; exit 1; }
+# run_report_cfg <dir> <corpus> <reps> <temps> <arms> <scan-passes> — the reporter over a
+# session whose MANIFEST carries the given configuration (#3272 F1).
+#
+# The configuration is no longer a reporter argument: it is a property of the SESSION, stamped
+# before the first rep, and the reporter READS it. So a case that wants 3 reps stamps 3 reps
+# rather than asking the reporter for them — which is the whole point of F1, since asking was
+# what let a re-report substitute a configuration and claim it had been verified.
+run_report_cfg() {
+  local d="$1" c="$2"
+  rm -f "$d/session-corpus-pin.json"
+  ws0_pin_session_corpus "$d" "$c" "$3" "$4" "$5" "$6"
+  python3 "$REPORT" --dir "$d" --corpus "$c" 2>&1
+}
+
 # python3 is a HARD REQUIREMENT of this rig — ws0-baseline.sh refuses to run without
 # it — so its absence is a FAILURE, not a skip. A `exit 0` here would record the gate
 # component as SUCCESS with none of the checks below having run, which is the vacuous
@@ -237,9 +251,7 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         f"round={rep}\nposition={pos}\narms_in_round=2\n"
         f"monotonic_ns={rep * 10**9 + pos * 10**6}\n")
 PY
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_cfg "$d" "$TMP/corpus" 3 warm bypass 1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q 'per-round (PAIRED' <<<"$out" \
   && grep -q 'within-round 1.3x target met in 1/3 round' <<<"$out"; then
   pass "OBSERVED: the report prints PAIRED per-round ratios and the direction count"
@@ -342,9 +354,7 @@ for rep in 1 2; do
   make_round "$d" "scan-warm-$rep" "$rep" 1 2 "$(( rep * 1000000000 + 1000000 ))"
   make_round "$d" "flight-bypass-warm-$rep" "$rep" 2 2 "$(( rep * 1000000000 + 2000000 ))"
 done
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_cfg "$d" "$TMP/corpus" 2 warm bypass 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "held ONE FIXED POSITION" <<<"$out" \
   && grep -q "bare_scan" <<<"$out"; then
   pass "OBSERVED: an arm at a FIXED position across rounds is REFUSED, naming the arm (R4a)"
@@ -384,9 +394,7 @@ for rep in 1 2; do
   make_scan_rep "$d" warm "$rep" ok
   make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
 done
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_cfg "$d" "$TMP/corpus" 2 warm bypass 1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "makes NO INTERLEAVING CLAIM and NO ROUND-ORDERING CLAIM" <<<"$out" \
   && grep -q "INERT RECORDED DATA" <<<"$out"; then
   pass "OBSERVED: an accepted session states that NO interleaving/ordering claim is made"
@@ -599,9 +607,7 @@ make_scan_rep "$d" warm 2 ok
 make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
 make_flight_rep "$d" warm 2 ok "$GOOD_FLIGHT"
 rm -f "$d/scan-warm-2.json"          # scan has rep 1 only; flight has 1 and 2
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_cfg "$d" "$TMP/corpus" 2 warm bypass 1); rc=$?
 if [ "$rc" -ne 0 ]; then
   pass "an unpairable rep set is REFUSED (never a silent fallback to median-only)"
 else
@@ -638,9 +644,7 @@ for rep in 1 2 3; do
   make_round "$d" "scan-warm-$rep"          "$rep" "$scan_pos" 2 "$(( 1000000000 + rep * 1000000 ))"
   make_round "$d" "flight-bypass-warm-$rep" "$rep" "$fl_pos"   2 "$(( 5000000000 + rep * 1000000 ))"
 done
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_cfg "$d" "$TMP/corpus" 3 warm bypass 1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "round LABELS CONTRADICT the recorded INSTANTS" <<<"$out"; then
   pass "OBSERVED: labels that contradict the recorded instants are REFUSED"
 else
@@ -700,9 +704,7 @@ for rep in 1 2 3; do
   make_scan_rep "$d" warm "$rep" ok
   make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
 done
-out=$(run_report_args "$d" "$TMP/corpus" --server-cpus 2,10 \
-  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
-  --step-duration 45s/1s --scan-passes 1); rc=$?
+out=$(run_report_cfg "$d" "$TMP/corpus" 3 warm bypass 1); rc=$?
 if [ "$rc" -eq 0 ] \
   && python3 "$REPO_ROOT/scripts/tests/ws0_assert_no_verdict_fields.py" "$d/results.json" >/dev/null \
   && python3 - "$d/results.json" <<'PY'

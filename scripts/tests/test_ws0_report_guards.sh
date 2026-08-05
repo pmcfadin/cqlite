@@ -197,19 +197,26 @@ EOF
 run_report() {
   # The PRE-MEASUREMENT corpus pin, stamped IF ABSENT — see lib-ws0-report-fixtures.sh's
   # `run_report` for why "if absent" and not unconditionally (#3272 review round 4).
-  [ -e "$1/session-corpus-pin.json" ] || ws0_pin_session_corpus "$1" "$2"
-  python3 "$REPORT" --dir "$1" --corpus "$2" --server-cpus 2,10 \
-    --client-cpus 4,12 --reps 1 --temps "$3" --arms bypass \
-    --step-duration 45s/1s --scan-passes 1 2>&1
+  [ -e "$1/session-corpus-pin.json" ] || ws0_pin_session_corpus "$1" "$2" 1 "$3" bypass 1
+  # The TEMPS are a property of the SESSION now (#3272 F1), so they are stamped into the
+  # manifest above rather than passed here.
+  python3 "$REPORT" --dir "$1" --corpus "$2" 2>&1
 }
 
 # run_report_full <dir> <corpus> <temps> <arms> <reps> <scan-passes> — same, with
 # every quantity a caller can get wrong exposed.
 run_report_full() {
-  [ -e "$1/session-corpus-pin.json" ] || ws0_pin_session_corpus "$1" "$2"
-  python3 "$REPORT" --dir "$1" --corpus "$2" --server-cpus 2,10 \
-    --client-cpus 4,12 --reps "$5" --temps "$3" --arms "$4" \
-    --step-duration 45s/1s --scan-passes "$6" 2>&1
+  # The manifest is stamped UNCONDITIONALLY, with THIS call's configuration (#3272 F1).
+  #
+  # Not `[ -e ] ||`: the configuration is now the SUBJECT of ~10 cases, several of which share
+  # one session dir, so preserving a pre-existing manifest made every later case report the
+  # FIRST one's configuration. Measured: the empty-temps, unknown-temps and repeated-temps cases
+  # all failed with `--reps is absurdly large`, inherited from a neighbour — each "passed or
+  # failed" on a value it had not set, which is the wrong-subject shape this suite exists to
+  # refuse. Cases whose subject is a MISSING manifest remove it explicitly after this call.
+  rm -f "$1/session-corpus-pin.json"
+  ws0_pin_session_corpus "$1" "$2" "$5" "$3" "$4" "$6"
+  python3 "$REPORT" --dir "$1" --corpus "$2" 2>&1
 }
 
 # expect_report_reject <label> <expect-substring> <report-args...> — the reporter
@@ -908,17 +915,27 @@ expect_report_reject "an absurdly large --scan-passes is REFUSED" \
   "absurdly large" "$d" "$TMP/corpus" warm bypass 1 99999999999999999999
 # And the reporter must TERMINATE on that input rather than merely printing something:
 # the whole point is that the pre-cap code did not.
-if timeout 15 python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
-    --client-cpus 4,12 --reps 99999999999999999999 --temps warm --arms bypass \
-    --step-duration 45s/1s --scan-passes 1 >/dev/null 2>&1; rc=$?; [ "$rc" -eq 1 ]; then
+# The configuration now arrives from the MANIFEST (#3272 F1), so the absurd count is stamped
+# there rather than passed as an argument — the guard is the same one, applied at the point the
+# value actually enters the reporting path.
+rm -f "$d/session-corpus-pin.json"
+ws0_pin_session_corpus "$d" "$TMP/corpus" 99999999999999999999 warm bypass 1
+if timeout 15 python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" >/dev/null 2>&1; rc=$?; [ "$rc" -eq 1 ]; then
   pass "OBSERVED: the reporter TERMINATES (rc=1) on an absurd --reps (pre-cap: timed out)"
 else
   fail "the reporter must terminate non-zero on an absurd --reps (rc=$rc; 124 = still hangs)"
 fi
 expect_report_reject "--scan-passes -1 is REFUSED" \
   "must be at least 1" "$d" "$TMP/corpus" warm bypass 1 -1
-# The non-numeric selections had the same vacuous-green hole: an empty --temps/--arms
-# produced zero measurements and exit 0.
+# The non-numeric selections had the same vacuous-green hole: an empty temps/arms produced
+# zero measurements and exit 0.
+#
+# SINCE #3272 F1 these values are read from the SESSION MANIFEST rather than the reporter's
+# command line, and every guard below still applies AT THAT BOUNDARY: `session_manifest_config`
+# puts each field through the SAME validator the CLI used (`cli_count`, `nonempty_selection`),
+# so a hand-edited manifest cannot smuggle `reps: 0` or an unknown temperature past the reader.
+# The cases are unchanged in substance — only where the bad value comes FROM has moved, and it
+# moved to the only place that can be authoritative about what was measured.
 expect_report_reject "an EMPTY --temps is REFUSED (would report zero measurements)" \
   "is empty" "$d" "$TMP/corpus" "" bypass 1 1
 expect_report_reject "an EMPTY --arms is REFUSED" \

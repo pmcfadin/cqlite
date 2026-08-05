@@ -61,12 +61,16 @@ from ws0_rounds import (  # noqa: E402
 )
 from ws0_validate import (  # noqa: E402
     Invalid,
-    cli_count,
     existing_dir,
     load_corpus_identity,
-    nonempty_selection,
     positive_derived,
+)
+# The SESSION's identity — which corpus, which configuration — lives in its own module since
+# #3272 F1/F3 (ws0_validate.py was already at 855 lines against a ~800 target).
+from ws0_session import (  # noqa: E402
+    session_manifest_config,
     verify_corpus_bytes,
+    verify_corpus_components,
     verify_session_corpus_pin,
 )
 
@@ -134,12 +138,22 @@ def corpus_identity_lines(verification: dict) -> list[str]:
 
 def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     """The whole report, or `Invalid`. No fabricated value anywhere in here."""
-    reps = cli_count("reps", args.reps)
-    scan_passes = cli_count("scan-passes", args.scan_passes)
     d = existing_dir("dir", args.dir)
     corpus = existing_dir("corpus", args.corpus)
-    temps = nonempty_selection("temps", args.temps, TEMPS_ALLOWED)
-    arms = nonempty_selection("arms", args.arms, ARMS_ALLOWED)
+    # THE CONFIGURATION COMES FROM THE SESSION, NOT FROM THIS COMMAND LINE (#3272 F1).
+    #
+    # `--reps`, `--temps`, `--arms`, `--scan-passes`, `--server-cpus`, `--client-cpus` and
+    # `--step-duration` used to be arguments HERE, tied to nothing. Re-reporting a measured
+    # session with fewer reps IGNORED the surplus artifacts and published rep 1 as the run's
+    # median; a narrower `--arms` silently dropped an arm with no PARTIAL MATRIX banner; a
+    # different `--server-cpus` printed the REPLACEMENT pins under a "verified physical-core
+    # siblings" claim about CPUs the session never used. Each produced a confident report
+    # asserting that the replacement configuration had been verified.
+    #
+    # The flags are REMOVED rather than validated against the manifest: a value that cannot be
+    # supplied cannot disagree, so there is no comparison left to omit — and an
+    # accepted-but-ignored flag is a silent lie to whoever passed it. See
+    # `ws0_session.session_manifest_config`.
 
     # REQUIRED, fail-closed: an absent identity used to silently disable the
     # full-corpus-per-request assert while the NOTES claimed it ran (#3272 f1).
@@ -151,6 +165,14 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     identity_verification = verify_corpus_bytes(
         corpus, identity, skip_digest=args.skip_corpus_digest
     )
+    # ...and EVERY OTHER RECORDED COMPONENT (#3272 F3). Verifying `Data.db` alone left the
+    # auxiliary components unchecked, although a scan reads `Index.db` and is shaped by the
+    # Statistics/Summary/Filter components — so a modified auxiliary file could change measured
+    # behaviour while the report claimed corpus verification had succeeded. Which components
+    # must exist comes from the recorded identity, never a hardcoded list.
+    component_verification = verify_corpus_components(
+        corpus, identity, skip_digest=args.skip_corpus_digest
+    )
     # ...and the identity re-derived above must be the one this SESSION WAS STARTED AGAINST
     # (#3272 review round 4). `verify_corpus_bytes` compares the recorded identity to the bytes
     # present AT REPORT TIME, which is self-consistent for both of the sequences that attribute
@@ -158,6 +180,19 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # `--corpus`, and a corpus regenerated mid-run. The driver stamps `session-corpus-pin.json`
     # before the first rep; this REQUIRES it and refuses a mismatch.
     session_pin = verify_session_corpus_pin(d, corpus, identity)
+
+    # ORDER MATTERS, and it is a diagnostic decision: the CORPUS is validated first (below),
+    # then the manifest. A session pointed at a corpus with no identity must be refused AS a
+    # corpus problem — naming the absent `corpus-identity.json` — rather than as an absent
+    # manifest, which would send the reader to the wrong artifact.
+    config = session_manifest_config(d, TEMPS_ALLOWED, ARMS_ALLOWED)
+    reps = config["reps"]
+    scan_passes = config["scan_passes"]
+    temps = config["temps"]
+    arms = config["arms"]
+    server_cpus = config["server_cpus"]
+    client_cpus = config["client_cpus"]
+    step_duration = config["step_duration"]
     corpus_rows = identity["rows"]
     full_matrix = len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
 
@@ -179,13 +214,27 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # What was OBSERVED about the corpus at report time, not what it claimed
         # about itself (#3272 review B6).
         "corpus_identity_verification": identity_verification,
+        # The COMPLETE component set, re-stat'ed and (unless --skip-corpus-digest) re-hashed
+        # (#3272 F3).
+        "corpus_component_verification": component_verification,
+        # WHERE THIS REPORT'S CONFIGURATION CAME FROM (#3272 F1) — the pre-measurement manifest,
+        # not this invocation's arguments.
+        "configuration_source": {
+            "manifest": config["source"],
+            "note": (
+                "reps, temperatures, arms, scan_passes and the CPU pins were READ FROM the"
+                " session manifest stamped before the first rep; they are not arguments to"
+                " ws0_report.py, so a re-report cannot substitute a different configuration"
+                " and claim it was verified (#3272 F1)"
+            ),
+        },
         # ...and that the corpus is the one the SESSION STARTED against, established from a pin
         # written before the first rep (#3272 round 4).
         "session_corpus_pin": session_pin,
         "pinning": {
-            "server_cpus": args.server_cpus,
-            "client_cpus": args.client_cpus,
-            "counter_mode": f"perf stat -C {args.server_cpus} (CPU-WIDE; never -p)",
+            "server_cpus": server_cpus,
+            "client_cpus": client_cpus,
+            "counter_mode": f"perf stat -C {server_cpus} (CPU-WIDE; never -p)",
             "verified": "thread_siblings_list, fail-closed (scripts/perf/lib-cpu.sh)",
         },
         # The SELECTION this session ran, recorded so a narrow run can never be
@@ -204,7 +253,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             ),
         },
         "reps": reps,
-        "step_duration": args.step_duration,
+        "step_duration": step_duration,
         "scan_passes": scan_passes,
         "measurements": [],
     }
@@ -215,6 +264,14 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f"corpus       : {corpus}",
         f"corpus sha256: {identity['data_db_sha256']}",
         *corpus_identity_lines(identity_verification),
+        # THE COMPLETE COMPONENT SET (#3272 F3), stated so a reader can see the verification
+        # covered everything a scan reads and not `Data.db` alone.
+        f"corpus comps : {component_verification['note']}",
+        # ...and where the CONFIGURATION below came from (#3272 F1): the session, not this
+        # command line.
+        "config       : READ FROM the pre-measurement session manifest"
+        f" ({pathlib.Path(config['source']).name}) — reps/temps/arms/scan-passes/CPU pins are"
+        " NOT arguments to this reporter, so a re-report cannot substitute them",
         # The PRE-MEASUREMENT pin, stated so a reader can see the report is about the corpus
         # the session started against and not merely one that is self-consistent now (#3272
         # round 4).
@@ -231,9 +288,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f"corpus shape : {identity['rows']} rows / "
         f"{identity['partitions']} partitions / "
         f"{identity['bytes_per_row']:.2f} B/row",
-        f"pinning      : server {args.server_cpus} (verified physical-core siblings), "
-        f"client {args.client_cpus}",
-        f"counters     : perf stat -C {args.server_cpus}  [CPU-WIDE; no -p anywhere]",
+        f"pinning      : server {server_cpus} (verified physical-core siblings), "
+        f"client {client_cpus}",
+        f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]",
         f"reps         : {reps} (median reported, spread shown)",
         *selection_lines(temps, arms, reps),
         "",
@@ -382,16 +439,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
     ap.add_argument("--corpus", required=True)
-    ap.add_argument("--server-cpus", required=True)
-    ap.add_argument("--client-cpus", required=True)
-    # Deliberately NOT `type=int`: argparse would exit 2 with its own message for a
-    # non-integer, but would happily accept `0` and `-3`. The validation is in
-    # ws0_validate.cli_count, where both cases fail with a reason (#3272 f5).
-    ap.add_argument("--reps", required=True)
-    ap.add_argument("--temps", required=True)
-    ap.add_argument("--arms", required=True)
-    ap.add_argument("--step-duration", required=True)
-    ap.add_argument("--scan-passes", required=True)
+    # `--server-cpus`, `--client-cpus`, `--reps`, `--temps`, `--arms`, `--step-duration` and
+    # `--scan-passes` are DELIBERATELY ABSENT (#3272 F1). They are properties OF THE SESSION and
+    # are read from its pre-measurement manifest; accepting them here let a re-report substitute
+    # a different configuration and claim it had been verified. They are removed rather than
+    # ignored, so passing one is an argparse error a caller can see rather than a value that
+    # silently does nothing.
     # The ONLY relaxation anywhere in the reporting path, and it is not a relaxation
     # of a VERDICT: it omits a multi-GB re-hash and RECORDS that it did, in both the
     # summary (a loud `CORPUS DIGEST UNVERIFIED` banner) and results.json

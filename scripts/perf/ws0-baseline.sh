@@ -435,18 +435,53 @@ DDL_FILE="$CORPUS/ws0-events.cql"
 # re-hash, because this is on the measurement's critical path and a 2.8 GB hash per session
 # would be paid by every run. The digest RE-DERIVATION stays at report time; what the pin adds
 # is that the identity being re-derived is the one the session STARTED with.
+# The CONFIGURATION is stamped with it (#3272 F1): the reporter READS its reps,
+# temperatures, arms, scan-passes and CPU pins from here rather than taking them as
+# arguments, because taking them from the reporting command line let a re-report with
+# fewer reps or a narrower arm set ignore measured artifacts and still claim the
+# replacement configuration had been verified. The component set is recorded too
+# (#3272 F3), so the pre-measurement identity covers everything a scan reads.
+# The configuration reaches python through the ENVIRONMENT rather than a positional argument
+# list, and that is not a style choice: a continuation line whose first token is a bare `"$VAR"`
+# is treated as an INVOCATION by `perf_invocation_lint`'s fail-closed layer 1 (an unresolvable
+# command word could be anything, including perf), so a multi-line positional argv here FAILS
+# the rig's own startup lint. Named env vars are also self-describing at the call site.
+WS0_CFG_REPS="$REPS" \
+WS0_CFG_TEMPS="$TEMPS" \
+WS0_CFG_ARMS="$ARMS" \
+WS0_CFG_SCAN_PASSES="$SCAN_PASSES" \
+WS0_CFG_SERVER_CPUS="$SERVER_CPUS" \
+WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
+WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
 python3 -c '
-import pathlib, sys
+import os, pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_validate import Invalid, load_corpus_identity, write_session_corpus_pin
+from ws0_validate import Invalid, load_corpus_identity
+from ws0_session import MANIFEST_CONFIG_FIELDS, write_session_corpus_pin
 corpus, out = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+# Every field the manifest requires, read from the environment by NAME. A field the driver
+# failed to export is an ERROR here rather than an absent key the reporter would refuse later,
+# so the diagnostic names the driver rather than the session dir.
+config = {}
+for field in MANIFEST_CONFIG_FIELDS:
+    var = "WS0_CFG_" + field.upper()
+    value = os.environ.get(var)
+    if value is None or value == "":
+        print(f"FATAL: {var} was not exported, so the session manifest cannot record"
+              f" {field!r} — the reporter READS its configuration from the manifest (#3272 F1)"
+              " and would refuse this session.", file=sys.stderr)
+        raise SystemExit(1)
+    config[field] = value
 try:
-    pin = write_session_corpus_pin(out, corpus, load_corpus_identity(corpus))
+    pin = write_session_corpus_pin(out, corpus, load_corpus_identity(corpus), config)
 except Invalid as exc:
     print(f"FATAL: {exc}", file=sys.stderr)
     raise SystemExit(1)
-print(f"corpus pin:   {pin[\"data_db_sha256\"]} ({pin[\"rows\"]} rows / {pin[\"data_db_bytes\"]} B)"
+print(f"corpus pin:   {pin[\"data_db_sha256\"]} ({pin[\"rows\"]} rows / {pin[\"data_db_bytes\"]} B,"
+      f" {len(pin[\"components\"])} components)"
       " recorded in session-corpus-pin.json BEFORE the first rep")
+print(f"config pin:   reps={config[\"reps\"]} temps=[{config[\"temps\"]}] arms=[{config[\"arms\"]}]"
+      f" scan-passes={config[\"scan_passes\"]} — the reporter READS these, never its own argv")
 ' "$HERE" "$CORPUS" "$OUT_DIR" \
   || { echo "FATAL: could not pin this session's corpus identity — the report REQUIRES it," >&2
        echo "       because a session dir that does not record WHICH corpus it measured can" >&2
@@ -810,10 +845,11 @@ for temp in $TEMPS; do
   done
 done
 
-python3 "$HERE/ws0_report.py" \
-  --dir "$OUT_DIR" --corpus "$CORPUS" --server-cpus "$SERVER_CPUS" \
-  --client-cpus "$CLIENT_CPUS" --reps "$REPS" --temps "$TEMPS" --arms "$ARMS" \
-  --step-duration "$STEP_DURATION/$COLD_STEP_DURATION" --scan-passes "$SCAN_PASSES" \
+# The reporter takes ONLY the two paths: everything else is read from the session manifest
+# stamped above (#3272 F1). Passing `--reps`/`--temps`/`--arms`/`--scan-passes`/the CPU pins
+# here would be the substitution the manifest exists to prevent, so those flags no longer
+# exist — an accepted-but-ignored flag is a silent lie to whoever passed it.
+python3 "$HERE/ws0_report.py" --dir "$OUT_DIR" --corpus "$CORPUS" \
   | tee "$OUT_DIR/summary.txt"
 
 echo
