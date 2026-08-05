@@ -3953,6 +3953,60 @@ else
   printf 'SKIP - case (cx31x): no /bin/cp to delegate to\n'
 fi
 
+printf '== (cx31y) an UNMEASURABLE digest never satisfies the three-way agreement (job 8) ==\n'
+# THE EMPTY-EQUALS-EMPTY TRAP, checked rather than asserted in prose: three digests that must AGREE are
+# trivially satisfiable if a failed measurement yields an empty string on every leg. This runs a PATCHED
+# COPY of the flow scripts whose digest helper SUCCEEDS while returning nothing — the shape a renamed or
+# missing `sha256sum`/`shasum`/`cksum` would produce if the helper's status were ever loosened — and
+# requires that no capture is published. cx31r is the control: the unpatched copy publishes and PASSes on
+# this same fixture.
+_dg_dir="$tmp/digest-mutant"
+mkdir -p "$_dg_dir"
+cp "$SCRIPT_DIR/../flow/roborev-review.sh" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_dg_dir/"
+[ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ] && cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dg_dir/"
+reset_stub
+_dg_real_wrapper="$WRAPPER"
+_dg_dir_snap="$snap_repo/.roborev/roborev-snapshot-939393"
+_dg_log="$tmp/cx31y-transcript.log"
+# THE CONTROL FIRST: the UNPATCHED copy must publish a capture and PASS, or a later absence proves nothing.
+WRAPPER="$_dg_dir/roborev-review.sh"
+STUB_SNAPSHOT_LIFECYCLE_DIR="$_dg_dir_snap"
+STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT=$(snap_prompt "$_dg_dir_snap/roborev-snapshot-content.diff")
+run_wrapper "$snap_work" --log "$_dg_log"
+assert_verdict 'case (cx31y control) the UNPATCHED copy captures and PASSes' PASS 0
+# Now make every digest read SUCCEED WITH AN EMPTY VALUE.
+if sed_inplace_verified "$_dg_dir/roborev-review-oracles.sh" \
+  's/^  \[ -n "\$out" \] || return 1$/  out=""/' \
+  '  out=""' '  [ -n "$out" ] || return 1'; then
+  ok 'case (cx31y): the empty-digest patch was really applied to the copy'
+  reset_stub
+  _dg_dir_snap2="$snap_repo/.roborev/roborev-snapshot-949494"
+  _dg_log2="$tmp/cx31y2-transcript.log"
+  STUB_SNAPSHOT_LIFECYCLE_DIR="$_dg_dir_snap2"
+  STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
+  STUB_SNAPSHOT_EXPECT_NO_CAPTURE=1
+  CP_SHIM_WITNESS="$tmp/cx31y-nocp-witness"
+  printf 'no interposed copy in this case; the wait falls back to one poll\n' >"$CP_SHIM_WITNESS"
+  STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+  STUB_PROMPT=$(snap_prompt "$_dg_dir_snap2/roborev-snapshot-content.diff")
+  run_wrapper "$snap_work" --log "$_dg_log2"
+  if [ -s "$INVOKED.capture-seen" ]; then
+    bad 'case (cx31y): a capture was published while EVERY digest was unmeasurable — three empty strings compared equal and satisfied the agreement (#3312 job 8)'
+  else
+    ok 'case (cx31y): an unmeasurable digest is refused, never treated as agreement'
+  fi
+  assert_verdict 'case (cx31y)' FAIL 1
+  assert_says 'case (cx31y) the fail-closed cause is the absent capture, not a silent pass' \
+    '^prompt-content: FAIL \(snapshot diff unusable: cleaned-up\)$'
+else
+  bad 'case (cx31y): could not patch the copied oracles, so the empty-digest path was never exercised'
+fi
+WRAPPER="$_dg_real_wrapper"
+reset_stub
+
 printf '== (cx31q) the COMPACT instruction spelling is read too ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs
@@ -4287,6 +4341,24 @@ else
       ok 'structural: reuse is keyed on a content digest, not on the byte count'
     else
       bad 'structural: the capture loop has no digest check — a same-length rewrite would keep a stale capture (#3312 job 7, finding 3)'
+    fi
+    # THREE DIGESTS, THREE VARIABLES, AND AN EXPLICIT EMPTINESS REFUSAL (job 8). The helper returns
+    # through ONE global, so re-reading it into the same name is how the post-copy check came to compare
+    # a value with itself; and an empty digest compares equal to another empty one, so "unmeasured" must
+    # be refused by name rather than assumed impossible.
+    _dg_missing=""
+    for _dgv in dg_pre dg_post dg_staged; do
+      printf '%s\n' "$_cap_body" | grep -qF "$_dgv=" || _dg_missing="$_dg_missing $_dgv"
+      printf '%s\n' "$_cap_body" | grep -qF "[ -z \"\$$_dgv\" ]" || _dg_missing="$_dg_missing ${_dgv}-emptiness"
+    done
+    printf '%s\n' "$_cap_body" | grep -qF '[ "$dg_pre" != "$dg_post" ]' || _dg_missing="$_dg_missing pre-vs-post"
+    printf '%s\n' "$_cap_body" | grep -qF '[ "$dg_pre" != "$dg_staged" ]' || _dg_missing="$_dg_missing pre-vs-staged"
+    printf '%s\n' "$_cap_body" | grep -qF 'digest=%s\\n' >/dev/null 2>&1 || true
+    printf '%s\n' "$_cap_body" | grep -qF '"$rel" "$dg_pre"' || _dg_missing="$_dg_missing meta-stamped-with-agreed-digest"
+    if [ -z "$_dg_missing" ]; then
+      ok 'structural: publication requires pre/post/staged digests that are each MEASURED and all AGREE'
+    else
+      bad "structural: the three-way digest agreement is incomplete —$_dg_missing. A digest re-read into the same variable compares with itself, and an empty one compares equal to another empty one (#3312 job 8)"
     fi
     if printf '%s\n' "$_cap_body" | grep -qF '_rx_capture_stop'; then
       ok 'structural: the watcher shuts down gracefully (TERM asks; the in-flight iteration completes)'
