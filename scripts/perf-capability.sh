@@ -507,8 +507,21 @@ perf_capability_dropin_path() {
 #   Deliberately conservative: a group-writable directory is refused even when the sticky bit would
 #   stop others from replacing our entry. Sticky-plus-group-writable is arguably safe here, and that
 #   is exactly the kind of "arguably safe" that has already cost this function three review rounds.
-#   `mv -fT` and `stat -c` want GNU coreutils. Satisfied by construction rather than by luck: these
-#   are Linux kernel controls and bootstrap skips this whole section on any non-Linux platform.
+#   GNU-COREUTILS DEPENDENCY, STATED EXACTLY (verified for #3261, not assumed — the earlier wording
+#   here overclaimed). `mv -fT` (`--no-target-directory`) and `stat -c` are GNU-only: macOS `mv` has
+#   no `-T` and its `stat` spells the format `-f`. For the PRODUCTION path that is genuinely gated:
+#   bootstrap-agent-machine.sh:412 is `elif [ "$PLATFORM" != linux ]; then`, whose branch only
+#   reports "nothing to configure" — the `else` that sources this file and enables the section is
+#   reachable only when PLATFORM=linux (set at :85 from `uname`), and PERF_SECTION_OK is initialised
+#   to 0 at :405 so no ambient export can steer it. So bootstrap never reaches this function off
+#   Linux.
+#   WHAT IS *NOT* GATED, said plainly: scripts/tests/test_perf_capability.sh calls this function
+#   DIRECTLY, bypassing bootstrap and its platform check, so on a macOS gate host those cases would
+#   run `mv -fT`/`stat -c` and fail. Neither portability guard in the repo scans this file
+#   (test_roborev_guard_portability.sh scans the roborev guard set; test_agent_gate_tree_portability.sh
+#   lints the tree-integrity functions), so NOTHING mechanically protects this. That is a known,
+#   unmitigated gap in the TEST path — not a production exposure — and it is recorded rather than
+#   papered over.
 #   The non-shell descriptor-holding helper stays DEFERRED (an owner call — it would add an
 #   interpreter dependency to the privileged bootstrap path), and with the precondition in place it
 #   is probably unnecessary rather than merely postponed.
