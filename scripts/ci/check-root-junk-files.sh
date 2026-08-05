@@ -42,8 +42,15 @@
 # `--self-test` builds a throwaway git repo under `$TMPDIR`, plants each junk shape and
 # requires a FAIL, plants the legitimate look-alikes and requires a PASS, and asserts the
 # untracked and tracked halves SEPARATELY — per #3249 a guard that has not been observed
-# firing is not evidence. It needs `git` and nothing else: no python3, no network, no
-# cargo, so there is NO SKIP PATH and therefore no way for it to record a vacuous success.
+# firing is not evidence. It also drives a `git` SHIM that FAILS the enumeration, which must
+# FAIL the guard rather than green it (#3272 F4), paired with a frozen replica of the pre-fix
+# loop observed to have been fail-open.
+#
+# It needs `git` and `mktemp` (coreutils, present wherever git is) and nothing else: no python3,
+# no network, no cargo. `mktemp` was added by the F4 fix — the enumeration is written to a FILE so
+# its exit status is observable, because command substitution STRIPS NUL BYTES and `-z` output is
+# NUL-separated. Its failure is handled as a FAILURE, so neither dependency introduces a SKIP
+# PATH and there is still no way for this guard to record a vacuous success.
 #
 # Usage:
 #   scripts/ci/check-root-junk-files.sh [<repo-root>]   # scan (default: this checkout)
@@ -82,28 +89,100 @@ is_junk_name() {
 #   * `git ls-files --others --exclude-standard` — UNTRACKED (pre-`git add`).
 #   * `git ls-files` — TRACKED (already committed).
 # Both are restricted to depth 1 (`*/*` excluded), which is the subject.
+#
+# # THE ENUMERATION'S STATUS IS CHECKED, NOT DISCARDED (#3272 review round 7, F4)
+#
+# Each `git ls-files` used to run inside a PROCESS SUBSTITUTION with its stderr suppressed:
+#
+#     done < <(git "${args[@]}" 2>/dev/null)
+#
+# A process substitution's exit status is UNAVAILABLE to the shell — it is not in
+# `PIPESTATUS`, `$?` is the `while` loop's, and `set -o pipefail` does not apply. So a `git`
+# that FAILED produced no lines, the `while` body never ran, `root_junk` printed nothing, and
+# `scan` reported the AFFIRMATIVE "no accidental-redirect artifact at the root" — over a subject
+# that was never enumerated. Exactly the fail-open shape this guard exists to catch, inside the
+# guard that caught a live recurrence: it reported CLEAN because it had looked at NOTHING.
+#
+# Fixed by REDIRECTING each enumeration TO A FILE, where the status IS observable, then reading
+# that file. `scan` can then distinguish "enumerated, found nothing" from "could not enumerate" —
+# the two states that used to print identically.
+#
+# # Why a FILE and not a variable (found by this file's own self-test)
+#
+# The obvious smaller fix, `raw="$(git … )" || rc=$?`, is WRONG here and the self-test caught it
+# immediately: COMMAND SUBSTITUTION STRIPS NUL BYTES (bash warns "ignored null byte in input"),
+# and `-z` output is NUL-separated — so capturing it collapses every path into one unsplittable
+# blob and 12 of 22 checks failed. `-z` cannot be dropped in exchange: a newline-separated
+# enumeration makes a path's FIRST LINE stand in for the path, which is the membership defect
+# recorded in CLAUDE.md's roborev notes (a `grep -Fxq` over newline-delimited paths producing a
+# genuine false PASS). A file preserves the bytes exactly AND makes the status checkable.
+#
+# `mktemp` is the one addition to this guard's dependencies. Recorded rather than glossed: the
+# header says "needs git and nothing else, so there is NO SKIP PATH". `mktemp` is coreutils —
+# present wherever git is — and its failure is handled as a FAILURE below, so it introduces no
+# skip path either.
+#
+# Returns: 0 with the findings on stdout; 2 (and a diagnostic on stderr) if EITHER enumeration
+# failed. Deliberately NOT 1: `scan` returns 1 for "junk found", and a failure to look is a
+# different verdict from a finding.
+ROOT_JUNK_RC_ERROR=2
 root_junk() {
-  local root="$1" rel state
+  local root="$1" rel state rc tmpf errf
+  tmpf="$(mktemp)" || {
+    echo "FAIL: could not create a temp file to enumerate the root of $root." >&2
+    echo "      The enumeration is written to a file so its EXIT STATUS is observable;" >&2
+    echo "      without that, a failing git produces no lines and reads as a clean root" >&2
+    echo "      (#3272 F4). Refused rather than falling back to an unstatused read." >&2
+    return "$ROOT_JUNK_RC_ERROR"
+  }
+  errf="$(mktemp)" || { rm -f "$tmpf"; echo "FAIL: could not create a temp file for git's stderr." >&2; return "$ROOT_JUNK_RC_ERROR"; }
   for state in untracked tracked; do
     local -a args=(-C "$root" ls-files -z)
     [ "$state" = untracked ] && args+=(--others --exclude-standard)
+    # REDIRECTED, so the status is a plain command status. stderr is KEPT rather than discarded —
+    # a `git` that explains itself should not have that explanation thrown away.
+    rc=0
+    git "${args[@]}" >"$tmpf" 2>"$errf" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "FAIL: could not enumerate the $state files at the root of $root:" >&2
+      echo "      git ls-files exited $rc: $(tr '\n' ' ' < "$errf")" >&2
+      echo "      This is a FAILURE and not an empty result. The enumeration used to run inside" >&2
+      echo "      a process substitution whose status is unavailable to the shell (not in" >&2
+      echo "      PIPESTATUS, not \$?, unaffected by pipefail), so a failing git produced no" >&2
+      echo "      lines and the scan printed 'no accidental-redirect artifact' over a subject it" >&2
+      echo "      had never enumerated (#3272 F4)." >&2
+      rm -f "$tmpf" "$errf"
+      return "$ROOT_JUNK_RC_ERROR"
+    fi
     while IFS= read -r -d '' rel; do
       case "$rel" in */*) continue ;; esac
       is_junk_name "$rel" || continue
       printf '%s\t%s\n' "$state" "$rel"
-    done < <(git "${args[@]}" 2>/dev/null)
+    done < "$tmpf"
   done
+  rm -f "$tmpf" "$errf"
 }
 
 # scan <repo-root> — exit 0 when the root is clean, 1 naming every junk file otherwise.
 scan() {
-  local root="$1" found
+  local root="$1" found rc
   if ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
     echo "FAIL: $root is not a git checkout, so the root-junk subject cannot be" >&2
     echo "      enumerated — an unenumerated subject prints exactly like a clean one." >&2
     return 1
   fi
-  found="$(root_junk "$root")"
+  # The status is checked BEFORE the emptiness (#3272 F4). Checking emptiness first would put
+  # the failure case straight into the "clean root" branch, which is the defect: an enumeration
+  # that FAILED and one that found nothing produce the same empty string, and only the status
+  # tells them apart. `root_junk`'s own diagnostic is already on stderr.
+  found="$(root_junk "$root")" || rc=$?
+  rc="${rc:-0}"
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: the root-junk subject could not be ENUMERATED, so this checkout is" >&2
+    echo "      UNVERIFIED rather than clean. A guard that cannot look must not report a" >&2
+    echo "      pass (#3272 F4)." >&2
+    return 1
+  fi
   if [ -z "$found" ]; then
     # AFFIRMATIVE, not the absence of a complaint: the line states that the subject was
     # enumerated, so a pasted log shows the check RAN.
@@ -244,9 +323,93 @@ self_test() {
     _ok "self-test: OBSERVED — a non-git path FAILS (an unenumerable subject is not clean)"
   fi
 
+  # 6. A FAILING `git ls-files` MUST FAIL THE GUARD (#3272 review round 7, F4).
+  #
+  # The `rev-parse` probe in case 5 catches a non-repo, and that is a DIFFERENT failure: it runs
+  # before the enumeration and is a plain `if !`. F4 is about the enumeration ITSELF failing on a
+  # path that IS a repo — which the process-substitution form could not observe at all (a process
+  # substitution's status is not in PIPESTATUS, is not `$?`, and is unaffected by pipefail), so a
+  # failing `git ls-files` produced no lines and `scan` printed its AFFIRMATIVE clean line.
+  #
+  # Driven with a `git` SHIM on PATH that succeeds for `rev-parse` (so the repo probe passes and
+  # the run reaches the enumeration) and FAILS for `ls-files`. That isolates F4 from case 5.
+  local shim_bin="$tmp/shim"
+  mkdir -p "$shim_bin"
+  cat > "$shim_bin/git" <<'SHIM'
+#!/usr/bin/env bash
+# Succeed for the repo probe; FAIL for the enumeration. `-C <dir>` may precede the subcommand.
+for a in "$@"; do
+  case "$a" in
+    rev-parse) exit 0 ;;
+    ls-files) echo "fatal: simulated ls-files failure (#3272 F4 probe)" >&2; exit 128 ;;
+  esac
+done
+exit 0
+SHIM
+  chmod +x "$shim_bin/git"
+  # The shim must genuinely behave as described, or the case below proves nothing about the guard.
+  if PATH="$shim_bin:$PATH" git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
+     && ! PATH="$shim_bin:$PATH" git -C "$repo" ls-files -z >/dev/null 2>&1; then
+    _ok "self-test: the F4 probe shim is correct — rev-parse SUCCEEDS and ls-files FAILS (so the run reaches the enumeration)"
+  else
+    _no "self-test: the F4 shim must pass rev-parse and fail ls-files, else the case below proves nothing"
+  fi
+  out="$(PATH="$shim_bin:$PATH" scan "$repo" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _ok "self-test: OBSERVED (round7 F4) — a FAILING git ls-files makes the scan exit NON-ZERO (pre-fix: the process substitution's status was unobservable, so it printed a clean root)"
+  else
+    _no "self-test: round7 F4 — a failing git ls-files must FAIL the scan (rc=$rc, out: $out)"
+  fi
+  # ...and it must NOT print the affirmative clean line, which is the specific fail-open text.
+  if ! grep -qF 'root-junk: PASS' <<<"$out"; then
+    _ok "self-test: OBSERVED (round7 F4) — the failing enumeration does NOT print the affirmative 'root-junk: PASS' line"
+  else
+    _no "self-test: round7 F4 — a failed enumeration must never print the clean line (out: $out)"
+  fi
+  # ...and the diagnostic must NAME the enumeration as the cause, or a reader is sent after the
+  # wrong thing — the same property every other refusal in this rig is held to.
+  if grep -qF 'could not enumerate' <<<"$out"; then
+    _ok "self-test: the F4 diagnostic NAMES the failed enumeration (not a generic error)"
+  else
+    _no "self-test: round7 F4 — the diagnostic must name the enumeration failure (out: $out)"
+  fi
+  # THE CONTROL: with the shim OFF, the very same repo scans clean. Without this, the three cases
+  # above could be satisfied by a guard that fails on this repo for some unrelated reason.
+  if scan "$repo" >/dev/null 2>&1; then
+    _ok "self-test: the CONTROL — the same repo scans CLEAN without the shim (so F4's failure is the shim, not the repo)"
+  else
+    _no "self-test: round7 F4 — the repo must scan clean without the shim (got: $(scan "$repo" 2>&1))"
+  fi
+  # NON-VACUITY, driven rather than asserted: the PRE-FIX form really was fail-open. A frozen
+  # replica of the removed loop, run against the SAME shim — it must exit 0 with an EMPTY result
+  # from a `git` that exited 128, which is what made `scan` print its clean line. Without this
+  # half, the cases above could be about an input that was never a bypass.
+  #
+  # A frozen historical replica: never called by the guard, and never to be "kept in sync".
+  prefix_root_junk_prefix4() {
+    local root="$1" rel state
+    for state in untracked tracked; do
+      local -a args=(-C "$root" ls-files -z)
+      [ "$state" = untracked ] && args+=(--others --exclude-standard)
+      while IFS= read -r -d '' rel; do
+        printf '%s\t%s\n' "$state" "$rel"
+      done < <(git "${args[@]}" 2>/dev/null)
+    done
+  }
+  local pre_out pre_rc
+  pre_out="$(PATH="$shim_bin:$PATH" prefix_root_junk_prefix4 "$repo")"; pre_rc=$?
+  if [ "$pre_rc" -eq 0 ] && [ -z "$pre_out" ]; then
+    _ok "self-test: NON-VACUITY (round7 F4) — the PRE-FIX process-substitution form exits 0 with an EMPTY result from a git that exited 128 (this is the fail-open that printed a clean root)"
+  else
+    _no "self-test: round7 F4 — the pre-fix form must have been fail-open, else the cases above prove nothing (rc=$pre_rc, out: $pre_out)"
+  fi
+  rm -f "$shim_bin/git"
+
   # 6. the CHECK-COUNT FLOOR: a block that silently never ran would leave `checks` short,
   #    and a suite that asserts nothing exits 0 exactly like one that asserted everything.
-  local min=22
+  # Raised from 22 with round 7's six F4 cases (#3272). Deliberately below the current count so
+  # adding a case does not red the guard, and far above zero.
+  local min=27
   if [ "$checks" -lt "$min" ]; then
     echo "FAIL - only $checks checks RAN (expected at least $min) — a block never executed"
     fails=$((fails + 1))
