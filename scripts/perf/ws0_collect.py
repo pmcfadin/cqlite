@@ -21,7 +21,6 @@ stated as the AFFIRMATIVE value the quantity must have (#3272 R6).
 from __future__ import annotations
 
 import json
-import math
 import pathlib
 import statistics
 
@@ -29,6 +28,10 @@ from ws0_rounds import collect_round_meta
 from ws0_validate import (
     Invalid,
     classify_prewarm,
+    non_negative_int,
+    positive_derived,
+    positive_finite_float,
+    positive_int,
     read_perf_counters,
     require_complete,
 )
@@ -59,6 +62,15 @@ def spread(values: list[float]) -> dict[str, float]:
             " median is not a series whose spread is undefined — it is a series that"
             " measured nothing, and `spread 0.0%` would read as the tightest possible"
             " result rather than as the absent one."
+        )
+    # EVERY member, not only the median (#3272 review round 3, B2). Refusing a non-positive
+    # MEDIAN is a different property from refusing a non-positive MEMBER: with three reps,
+    # one corrupt value leaves the median positive and is published as `min` — and, if it is
+    # the middle value, as the figure itself. This is the last line of defence; each caller
+    # validates its own quantities before appending, so reaching here means one slipped.
+    for i, v in enumerate(values, start=1):
+        positive_derived(
+            f"rep {i} of a series reaching spread()", v, f"whole series {values}"
         )
     return {
         "median": med,
@@ -153,31 +165,30 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
             missing.append(payload_path.name)
             continue
         payload = json.loads(payload_path.read_text())
-        rows = int(payload["rows_denominator"])
-        # `< 1`, not `== 0` (#3272 review round 2, R6 audit). The row count is the
-        # DENOMINATOR of every figure this rep produces, and a negative one would sail past
-        # an equality test to become a negative rows/s and a negative cycles/row — printed,
-        # plausible-looking, and wrong in a direction nobody checks.
-        if rows < 1:
-            raise Invalid(
-                f"bare-scan rep {tag} observed {rows} rows — not a measurement. It is the"
-                " denominator of every figure for this rep; a non-positive one is refused"
-                " rather than divided by."
-            )
-        secs = float(payload["timed_scan_secs"])
+        # THE SHARED VALIDATOR, not a bare `int()`/`float()` plus a local range test
+        # (#3272 review round 3, B2/B5). `positive_int` refuses a bool, a fractional value
+        # (`int(0.9)` was 0 — a fabricated zero arrived at by truncation), a junk-bearing
+        # string, and `<= 0` — the row count is the DENOMINATOR of every figure this rep
+        # produces, and a negative one used to sail past an `== 0` test to become a negative
+        # rows/s and a negative cycles/row, printed and plausible-looking.
+        rows = positive_int(
+            f"bare-scan rep {tag} rows_denominator",
+            payload["rows_denominator"],
+            "That is not a measurement: it is the denominator of every figure for this"
+            " rep, so a non-positive one is refused rather than divided by.",
+        )
         # A DEGENERATE window is a named refusal, not a traceback (#3272 review round 2
         # nit). `rows / secs` with `timed_scan_secs: 0.0` raised `ZeroDivisionError` and
-        # exited 1 with a Python traceback — the only degenerate case in this file without
-        # a stated refusal, and a traceback names the DIVISION rather than the artifact.
-        # Non-finite is refused for the same reason: `inf`/`nan` would propagate into
-        # rows/s and into `spread()` as a printable number standing in for an absent one.
-        if not math.isfinite(secs) or secs <= 0:
-            raise Invalid(
-                f"bare-scan rep {tag} records timed_scan_secs={secs!r} — there is no"
-                " rows/s for a measurement window that is zero, negative, or not finite."
-                " The scan either never ran or its timer was never read, and dividing by"
-                " it would raise inside the reporting path instead of naming the artifact."
-            )
+        # exited 1 with a Python traceback — a traceback names the DIVISION rather than the
+        # artifact. `inf`/`nan` are refused for the same reason: they would propagate into
+        # rows/s and into `spread()` as printable numbers standing in for an absent one.
+        secs = positive_finite_float(
+            f"bare-scan rep {tag} timed_scan_secs",
+            payload["timed_scan_secs"],
+            "There is no rows/s for a measurement window that is zero, negative, or not"
+            " finite: the scan either never ran or its timer was never read, and dividing"
+            " by it would raise inside the reporting path instead of naming the artifact.",
+        )
         # Both legs' counters must be OBSERVED. `.get("cycles", 0)` used to
         # fabricate a zero here, so a run with no setup artifact at all was
         # reported "SETUP-SUBTRACTED" having subtracted nothing (#3272 finding 4).
@@ -188,14 +199,25 @@ def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
         # Setup SUBTRACTED (spec R2). A non-positive result would mean the setup
         # leg somehow cost more than the full run, which is a broken measurement,
         # not a small number — surfaced rather than hidden.
-        cyc = total["cycles"] - setup["cycles"]
-        ins = total["instructions"] - setup["instructions"]
-        if cyc <= 0:
-            raise Invalid(
-                f"{tag} setup-subtracted cycles are {cyc} (total="
-                f"{total['cycles']}, setup={setup['cycles']}) — "
-                "the subtraction is not meaningful; re-run"
-            )
+        #
+        # BOTH SUBTRACTIONS, which is #3272 review round 3's B2. Round 2 checked `cyc` and
+        # not `ins` — the SAME subtraction over the same two artifacts, feeding
+        # `ipc.append(ins / cyc)`. A perf CSV recording `instructions,0` for the full run (or
+        # a setup leg that counted more instructions than the run) produced a zero or
+        # negative IPC that `spread()` published as `ipc.min`, and as the printed `IPC` if it
+        # was the median. Checking one arm of a two-arm subtraction is the partial-fix shape
+        # this issue keeps finding, so both go through the same validator.
+        cyc = positive_derived(
+            f"{tag} setup-subtracted cycles",
+            total["cycles"] - setup["cycles"],
+            f"total={total['cycles']}, setup={setup['cycles']}; re-run",
+        )
+        ins = positive_derived(
+            f"{tag} setup-subtracted instructions",
+            total["instructions"] - setup["instructions"],
+            f"total={total['instructions']}, setup={setup['instructions']};"
+            " IPC = instructions/cycles, so this would publish a non-positive IPC; re-run",
+        )
         # This arm's prewarm outcome, recorded by ws0-baseline.sh exactly as the
         # Flight arm's is (issue #3096 review, finding 1): the bare scan is the
         # DENOMINATOR of the 1.3x ratio, so an unprewarmed "warm" rep biases the
@@ -288,9 +310,16 @@ def check_request_count(
             " per-temperature request contract cannot be verified, and an unverified"
             " cold rep is exactly how warm requests get reported as cold"
         )
-    count = int(requests_ok)
-    if count < 1:
-        raise Invalid(f"flight rep {tag} completed {count} successful requests")
+    # `positive_int`, never a bare `int()` (#3272 review round 3, B5). `int(1.9)` is 1, so
+    # `requests_ok: 1.9` SATISFIED the exactly-one-cold-request guard below — the guard of
+    # #3096 finding 2 defeated by a truncation — and `requests_ok: true` became 1 the same
+    # way. Both are now named refusals.
+    count = positive_int(
+        f"flight rep {tag} requests_ok",
+        requests_ok,
+        f"flight rep {tag} completed no successful requests, so there is nothing to"
+        " report for it.",
+    )
     if temp == "cold" and count != 1:
         raise Invalid(
             f"flight COLD rep {tag} completed {count} successful requests;"
@@ -349,14 +378,17 @@ def collect_flight(
                 " subset of what was measured."
             )
         rec = records[0]
-        rows = int(rec["rows_total"])
-        # `< 1`, not `== 0` — same audit as the bare scan's denominator (#3272 R6).
-        if rows < 1:
-            raise Invalid(
-                f"flight rep {tag} observed {rows} rows — not a measurement. It is the"
-                " denominator of this rep's cycles/row and the numerator of its"
-                " full-corpus check; a non-positive one is refused, not divided by."
-            )
+        # `positive_int`, the shared validator (#3272 review round 3, B2/B5): this is the
+        # denominator of this rep's cycles/row and the numerator of its full-corpus check, so
+        # it must be a real positive integer — not a bool, not a fractional value a bare
+        # `int()` would truncate, not a negative one an `== 0` test would miss.
+        rows = positive_int(
+            f"flight rep {tag} rows_total",
+            rec["rows_total"],
+            "That is not a measurement: it is the denominator of this rep's cycles/row and"
+            " the numerator of its full-corpus check, so a non-positive one is refused,"
+            " not divided by.",
+        )
         # OBSERVED, never defaulted (#3272 review). `int(rec.get("requests_error", 0))`
         # fabricated a zero for a counter the artifact did not carry, so a rep with no
         # `requests_error` key at all was reported CLEAN with the failed-request count
@@ -370,28 +402,29 @@ def collect_flight(
                 " asserted. A counter that was not observed is an error, never a"
                 " fabricated 0 (#3272 AC3)."
             )
+        # `non_negative_int` states the DOMAIN of a count, which closes three defects at
+        # once rather than one each: a NEGATIVE value (round 2's `if errors > 0` read -3 as
+        # "no failed requests"), a FRACTIONAL one (round 3's B5 — a bare `int()` read 0.9 as
+        # a clean 0), and a BOOLEAN (`int(True)` is 1). The accept condition below is then
+        # stated as the AFFIRMATIVE value the counter must have.
+        # The domain sentence is attached by RE-RAISING rather than passed as a `why=`
+        # argument, and that is not stylistic: the banned-idiom scan in
+        # `test_ws0_fabrication_guards.sh` blanks string constants reachable from a `raise`
+        # (prose necessarily quotes what it refuses) and deliberately leaves ARGUMENT
+        # literals alone — blanking those made the whole scan vacuous, which was a real
+        # defect of an earlier round. Prose that quotes the idiom therefore belongs in a
+        # `raise`, where the scan can see it is prose.
         try:
-            errors = int(errors)
-        except (TypeError, ValueError):
+            errors = non_negative_int(f"flight rep {tag} requests_error", errors)
+        except Invalid as exc:
             raise Invalid(
-                f"flight rep {tag} has an unparseable `requests_error` ({errors!r}) —"
-                " a corrupt counter is not a zero"
+                f"{exc} A negative counter is a CORRUPT artifact, not a clean zero: the"
+                " check used to be `if errors > 0`, so -3 passed as 'no failed requests'"
+                " (#3272 R6). An unparseable `requests_error` is refused for the same"
+                " reason — a counter that was not validly observed is an error, never a 0"
+                " (AC3)."
             ) from None
-        # `== 0`, NOT `> 0` (#3272 review round 2, R6). `> 0` accepted a NEGATIVE
-        # `requests_error` as a clean zero-error measurement: -3 is not "fewer than no
-        # errors", it is a corrupt counter, and reading it as clean is the same
-        # fabricated-zero class as the defaulting `.get` this branch already replaced —
-        # arrived at from the other side. A count is a NON-NEGATIVE integer, so the
-        # accept condition is stated as the AFFIRMATIVE value it must have.
         if errors != 0:
-            if errors < 0:
-                raise Invalid(
-                    f"flight rep {tag} records requests_error={errors}, which is not a"
-                    " possible count. A negative counter is a CORRUPT artifact, not a"
-                    " clean zero: the check used to be `if errors > 0`, so this value"
-                    " passed as 'no failed requests' (#3272 R6). A counter that was not"
-                    " validly observed is an error, never a 0 (AC3)."
-                )
             raise Invalid(f"flight rep {tag} had {errors} failed request(s)")
         requests_ok = check_request_count(tag, temp, rec.get("requests_ok"), rows, corpus_rows)
         # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
@@ -400,21 +433,29 @@ def collect_flight(
         meta = collect_round_meta(d, tag, rep)
         round_meta[rep] = meta
         counters = read_perf_counters(d / f"perf-{tag}.csv", tag, REQUIRED_EVENTS)
-        cyc = counters["cycles"]
-        ins = counters["instructions"]
-        if cyc <= 0:
-            raise Invalid(f"flight rep {tag} recorded no cycles — perf -C window was empty")
-        # The loadgen's own rows/s, validated on the SAME rule as every other counter
-        # (#3272 R6 audit): positive and finite. `spread()` refuses a non-positive MEDIAN,
-        # which is not the same property — one negative rep among three leaves the median
-        # positive and publishes a spread computed over a value that cannot exist.
-        arm_rps = float(rec["rows_per_s"])
-        if not math.isfinite(arm_rps) or arm_rps <= 0:
-            raise Invalid(
-                f"flight rep {tag} records rows_per_s={arm_rps!r}, which is not a positive"
-                " finite rate. `spread()` only refuses a non-positive MEDIAN, so a single"
-                " impossible rep would survive into the printed spread."
-            )
+        # BOTH counters, not only `cycles` (#3272 review round 3, B2). This arm has no setup
+        # leg to subtract, so the perf values ARE the derived quantities — and round 2
+        # checked `cyc <= 0` while `ins` went straight into `ipc.append(ins / cyc)`. A perf
+        # CSV recording `instructions,0` therefore published a ZERO IPC: `spread()` refuses
+        # only a non-positive MEDIAN, so one such rep among three survived as `ipc.min`, and
+        # as the printed `IPC` if it was the median.
+        cyc = positive_derived(
+            f"flight rep {tag} cycles", counters["cycles"], "the perf -C window was empty"
+        )
+        ins = positive_derived(
+            f"flight rep {tag} instructions",
+            counters["instructions"],
+            "IPC = instructions/cycles, so a zero here publishes a zero IPC",
+        )
+        # The loadgen's own rows/s, on the SAME rule as every other quantity: positive and
+        # finite. `spread()` refuses a non-positive MEDIAN, which is not the same property —
+        # one impossible rep among three leaves the median positive.
+        arm_rps = positive_finite_float(
+            f"flight rep {tag} rows_per_s",
+            rec["rows_per_s"],
+            "That is not a positive finite rate. `spread()` only refuses a non-positive"
+            " MEDIAN, so a single impossible rep would survive into the printed spread.",
+        )
         rows_per_sec.append(arm_rps)
         cycles_per_row.append(cyc / rows)
         ipc.append(ins / cyc)

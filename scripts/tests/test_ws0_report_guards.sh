@@ -184,9 +184,20 @@ PY
 # POSITION within that round, and how many arms the round measured. Written by default
 # with the bare scan and the Flight arm ALTERNATING by round, exactly as the driver does —
 # a fixture with a fixed order would be refused by the rotation check, and correctly so.
-# `make_round <dir> <tag> <round> <position> [arms-in-round]`
+# `make_round <dir> <tag> <round> <position> [arms] [monotonic-ns]`
+#
+# `monotonic_ns` is the field that makes the interleaving an OBSERVATION rather than a
+# label (#3272 review round 3, B3): the reporter verifies ROUND-MAJOR ORDERING from it —
+# every rep of round r completing before any rep of round r+1 — which is the one property
+# an arm-major session cannot forge by relabelling. The default is
+# `round * 1e9 + position * 1e6`, i.e. round-major and distinct, exactly the shape a real
+# sequential loop produces. A case that needs a NON-interleaved (arm-major) session
+# overrides it, and must then be REFUSED.
 make_round() {
-  printf 'round=%s\nposition=%s\narms_in_round=%s\n' "$3" "$4" "${5:-2}" > "$1/$2.round"
+  local rnd="$3" pos="$4" arms="${5:-2}"
+  local ns="${6:-$(( rnd * 1000000000 + pos * 1000000 ))}"
+  printf 'round=%s\nposition=%s\narms_in_round=%s\nmonotonic_ns=%s\n' \
+    "$rnd" "$pos" "$arms" "$ns" > "$1/$2.round"
 }
 
 # make_scan_rep <dir> <temp> <rep> <prewarm-status|-none->

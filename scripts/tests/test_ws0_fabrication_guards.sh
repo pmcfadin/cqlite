@@ -105,9 +105,20 @@ PY
 # The INTERLEAVING metadata every rep must carry (#3272 R3). Written by default, with the
 # bare scan and the Flight arm ALTERNATING position by round exactly as the driver does —
 # a fixture with a fixed order would be refused by the rotation check, and correctly so.
-# `make_round <dir> <tag> <round> <position> [arms]`
+# `make_round <dir> <tag> <round> <position> [arms] [monotonic-ns]`
+#
+# `monotonic_ns` is the field that makes the interleaving an OBSERVATION rather than a
+# label (#3272 review round 3, B3): the reporter verifies ROUND-MAJOR ORDERING from it —
+# every rep of round r completing before any rep of round r+1 — which is the one property
+# an arm-major session cannot forge by relabelling. The default is
+# `round * 1e9 + position * 1e6`, i.e. round-major and distinct, exactly the shape a real
+# sequential loop produces. A case that needs a NON-interleaved (arm-major) session
+# overrides it, and must then be REFUSED.
 make_round() {
-  printf 'round=%s\nposition=%s\narms_in_round=%s\n' "$3" "$4" "${5:-2}" > "$1/$2.round"
+  local rnd="$3" pos="$4" arms="${5:-2}"
+  local ns="${6:-$(( rnd * 1000000000 + pos * 1000000 ))}"
+  printf 'round=%s\nposition=%s\narms_in_round=%s\nmonotonic_ns=%s\n' \
+    "$rnd" "$pos" "$arms" "$ns" > "$1/$2.round"
 }
 
 make_scan_rep() { # make_scan_rep <dir> <temp> <rep> <prewarm>
@@ -876,8 +887,12 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
     (d / f"{tag}.prewarm.status").write_text("ok\n")
     # The interleaving metadata the reporter REQUIRES (#3272 R3), alternating position by
     # round exactly as the driver does — the scan fixture takes the complement.
+    # `monotonic_ns` too (#3272 review round 3, B3): round-major and distinct, which is
+    # the shape a real sequential loop produces and the property the reporter verifies.
+    pos = 1 if rep % 2 == 0 else 2
     (d / f"{tag}.round").write_text(
-        f"round={rep}\nposition={1 if rep % 2 == 0 else 2}\narms_in_round=2\n")
+        f"round={rep}\nposition={pos}\narms_in_round=2\n"
+        f"monotonic_ns={rep * 10**9 + pos * 10**6}\n")
 PY
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
@@ -958,7 +973,7 @@ printf 'round=one\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
 expect_reject "an unparseable round field is REFUSED (a corrupt field is not a zero)" \
   "not an integer" "$d" "$TMP/corpus"
 d="$TMP/round-meta-mismatch"; make_session "$d" "$GOOD_FLIGHT"
-printf 'round=7\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
+make_round "$d" scan-warm-1 7 1 2 1000000
 expect_reject "a round that disagrees with the rep index in the FILENAME is REFUSED" \
   "does not describe one session" "$d" "$TMP/corpus"
 
@@ -969,8 +984,11 @@ d="$TMP/no-rotation"; mkdir -p "$d"
 for rep in 1 2; do
   make_scan_rep "$d" warm "$rep" ok
   make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
-  printf 'round=%s\nposition=1\narms_in_round=2\n' "$rep" > "$d/scan-warm-$rep.round"
-  printf 'round=%s\nposition=2\narms_in_round=2\n' "$rep" > "$d/flight-bypass-warm-$rep.round"
+  # SCAN AT POSITION 1 BOTH ROUNDS, with round-major timestamps: the timing check must
+  # PASS (the session really was interleaved) so the refusal below is attributable to the
+  # ROTATION property alone, not to the clock.
+  make_round "$d" "scan-warm-$rep" "$rep" 1 2 "$(( rep * 1000000000 + 1000000 ))"
+  make_round "$d" "flight-bypass-warm-$rep" "$rep" 2 2 "$(( rep * 1000000000 + 2000000 ))"
 done
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
@@ -985,22 +1003,30 @@ fi
 d="$TMP/dup-position"; mkdir -p "$d"
 make_scan_rep "$d" warm 1 ok
 make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
-printf 'round=1\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
-printf 'round=1\nposition=1\narms_in_round=2\n' > "$d/flight-bypass-warm-1.round"
+make_round "$d" scan-warm-1 1 1 2 1000000001
+make_round "$d" flight-bypass-warm-1 1 1 2 1000000002
 expect_reject "two arms at the SAME position is REFUSED (that is not a round)" \
   "which is not 1..2 exactly once" "$d" "$TMP/corpus"
 # A round that RECORDS more arms than are present is a PARTIAL round.
 d="$TMP/partial-round"; mkdir -p "$d"
 make_scan_rep "$d" warm 1 ok
 make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
-printf 'round=1\nposition=1\narms_in_round=3\n' > "$d/scan-warm-1.round"
-printf 'round=1\nposition=2\narms_in_round=3\n' > "$d/flight-bypass-warm-1.round"
+make_round "$d" scan-warm-1 1 1 3 1000000001
+make_round "$d" flight-bypass-warm-1 1 2 3 1000000002
 expect_reject "a round recording MORE arms than are present is REFUSED (a partial round)" \
   "is a PARTIAL round" "$d" "$TMP/corpus"
 
 # THE ACCEPT DIRECTION, affirmatively: a properly interleaved session must print the
 # claim AS AN OBSERVATION, naming the rounds and the positions, and record it in
 # results.json — so the sentence cannot be present without the artifacts behind it.
+#
+# AND THE TWO HALVES MUST BE WORDED DIFFERENTLY (#3272 review round 3, B3). The
+# interleaving is OBSERVED FROM THE CLOCK (per-rep `monotonic_ns`, round-major ordering
+# verified); the rotation is only RECORDED, because `position` is a number the driver
+# COMPUTES and the clock cannot corroborate within-round order. The pre-fix text said
+# "OBSERVED, not asserted" for BOTH — over a source (`round`/`position`/`arms_in_round`)
+# that an arm-major loop reproduces byte-for-byte. So the assertion below checks the
+# strength of each sentence, not merely that a sentence exists.
 d="$TMP/rotated-ok"; mkdir -p "$d"
 for rep in 1 2; do
   make_scan_rep "$d" warm "$rep" ok
@@ -1009,12 +1035,20 @@ done
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
   --client-cpus 4,12 --reps 2 --temps warm --arms bypass \
   --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "OBSERVED, not asserted" <<<"$out" \
-  && grep -q "The arm ORDER ROTATED" <<<"$out" \
+if [ "$rc" -eq 0 ] && grep -q "OBSERVED FROM THE CLOCK" <<<"$out" \
+  && grep -q "The arm ORDER ROTATED — RECORDED, not clock-observed" <<<"$out" \
   && grep -q "Positions by round" <<<"$out"; then
-  pass "OBSERVED: a genuinely rotated session prints the claim as an OBSERVATION, with positions"
+  pass "OBSERVED: a rotated session prints the interleaving as CLOCK-OBSERVED and the rotation as RECORDED (B3)"
 else
   fail "a rotated session must print the derived interleaving claim (rc=$rc, out: $out)"
+fi
+# ...and the printed text must NOT claim more than the artifacts prove: the report states
+# what is NOT established, so a reader is not left to infer the limit from an absence.
+if grep -q "NOT ESTABLISHED by the artifacts" <<<"$out" \
+  && grep -q "the WITHIN-round arm order, and therefore the rotation" <<<"$out"; then
+  pass "the report STATES what the artifacts do not establish (the within-round order)"
+else
+  fail "the report must state the limit of its own interleaving claim (out: $out)"
 fi
 if python3 - "$d/results.json" <<'PY'
 import json, sys
@@ -1102,18 +1136,342 @@ else
 fi
 
 # ==========================================================================
+# B2 — `instructions` is validated on the SAME rule as `cycles` (review round 3)
+# ==========================================================================
+# NON-VACUITY, and this is the THIRD round this class has been fixed partially. Round 2
+# added `if cyc <= 0` after the setup subtraction and left `ins` — the SAME subtraction
+# over the same two artifacts — unchecked, feeding `ipc.append(ins / cyc)`. So each case
+# below is an artifact whose `cycles` are perfectly healthy and whose `instructions` are
+# not, which the pre-fix code accepted and PUBLISHED as an IPC.
+#
+# MEASURED against the pre-fix reporter, THREE reps with exactly ONE corrupt — which is the
+# shape the finding is about, because `spread()`'s non-positive-MEDIAN check is what a
+# single-rep case would trip on for the wrong reason:
+#   * rep 2's SCAN setup instructions 9M > total 4M (cycles healthy) -> exit **0**, and
+#     `results.json` carried `ipc: {median: 2.0, min: -2.6315789473684212, …}`; the per-rep
+#     IPCs were [2.0, -2.632, 2.0].
+#   * rep 2's FLIGHT CSV recording `instructions,0` (cycles healthy) -> exit **0**, and
+#     `ipc: {median: 2.0, min: 0.0, …}`.
+# The median stayed positive in both, so the impossible value was published as `ipc.min` —
+# and would have been the printed `IPC` had it been the middle value. Both cases below are
+# driven at three reps for that reason; the single-rep variants are kept beside them
+# because they are the cheapest diagnosis of the same defect.
+
+# (a) BARE SCAN, setup instructions > total instructions. Cycles are untouched, so this
+#     isolates the missing check rather than re-testing the one that existed.
+d="$TMP/ins-subtraction"; make_session "$d" "$GOOD_FLIGHT"
+perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
+perf_csv "$d/perf-scan-warm-1-setup.csv" 100000 9000000
+expect_reject "a setup leg with MORE instructions than the full run is FATAL (round 2 checked only cycles)" \
+  "setup-subtracted instructions" "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus")
+if grep -q "IPC = instructions/cycles" <<<"$out" \
+  && grep -q "non-positive IPC" <<<"$out"; then
+  pass "the refusal names WHAT the unchecked value would have published (a non-positive IPC)"
+else
+  fail "the instructions refusal must name the IPC it protects (out: $out)"
+fi
+# ...and the CYCLES half must still fire, so the fix did not move the check rather than add
+# one. Same fixture shape, the other counter.
+d="$TMP/cyc-subtraction"; make_session "$d" "$GOOD_FLIGHT"
+perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
+perf_csv "$d/perf-scan-warm-1-setup.csv" 9000000 200000
+expect_reject "a setup leg with MORE cycles than the full run is still FATAL (both arms of the subtraction)" \
+  "setup-subtracted cycles" "$d" "$TMP/corpus"
+
+# (b) FLIGHT ARM, `instructions,0`. This arm has no setup leg, so the perf value IS the
+#     derived quantity — and round 2 checked `cyc <= 0` here too while `ins` went straight
+#     into the IPC.
+d="$TMP/flight-zero-ins"; make_session "$d" "$GOOD_FLIGHT"
+perf_csv "$d/perf-flight-bypass-warm-1.csv" 8000000 0
+expect_reject "a flight perf CSV recording instructions=0 is FATAL (pre-fix: published IPC 0.0)" \
+  "flight rep flight-bypass-warm-1 instructions" "$d" "$TMP/corpus"
+d="$TMP/flight-zero-cyc"; make_session "$d" "$GOOD_FLIGHT"
+perf_csv "$d/perf-flight-bypass-warm-1.csv" 0 16000000
+expect_reject "a flight perf CSV recording cycles=0 is still FATAL" \
+  "flight rep flight-bypass-warm-1 cycles" "$d" "$TMP/corpus"
+
+# (c) A NEGATIVE hardware counter is refused AT PARSE TIME, before any arithmetic. perf
+#     cannot emit one, so it is a corrupt artifact — and `int("-4")` used to sail through
+#     to become a negative `cycles`, a negative subtraction result, and a negative IPC.
+d="$TMP/neg-counter"; make_session "$d" "$GOOD_FLIGHT"
+printf -- '-4000000,,cycles,,,,\n8000000,,instructions,,,,\n' > "$d/perf-scan-warm-1.csv"
+expect_reject "a NEGATIVE perf counter value is FATAL at parse time (a counter cannot be negative)" \
+  "not a possible count" "$d" "$TMP/corpus"
+
+# (d) THE SURVIVING-REP CASES, which are the ones the pre-fix code ACCEPTED. `spread()`
+#     refuses a non-positive MEDIAN, so a single corrupt rep tripped that check for the
+#     wrong reason; with THREE reps and ONE corrupt, the median stays positive and the
+#     impossible value is published as `ipc.min`. Both arms are driven, because the B2 gap
+#     was present in both.
+#
+#     MEASURED against the pre-fix reporter, both exited **0**:
+#       scan  -> ipc {median: 2.0, min: -2.6315789473684212}, per-rep [2.0, -2.632, 2.0]
+#       flight-> ipc {median: 2.0, min: 0.0}
+three_reps() { # three_reps <dir>
+  local dd="$1" r
+  mkdir -p "$dd"
+  for r in 1 2 3; do
+    make_scan_rep "$dd" warm "$r" ok
+    make_flight_rep "$dd" warm "$r" ok "$GOOD_FLIGHT"
+  done
+}
+d="$TMP/one-bad-scan-ins-of-three"; three_reps "$d"
+perf_csv "$d/perf-scan-warm-2.csv" 2000000 4000000
+perf_csv "$d/perf-scan-warm-2-setup.csv" 100000 9000000     # rep 2 only; CYCLES healthy
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "setup-subtracted instructions" <<<"$out"; then
+  pass "OBSERVED: ONE corrupt scan rep of three is REFUSED (pre-fix: exit 0, ipc.min -2.63)"
+else
+  fail "one corrupt scan rep among three must be refused, not published as ipc.min (rc=$rc, out: $out)"
+fi
+if [ ! -e "$d/results.json" ]; then
+  pass "no results.json is written for the surviving-rep case (pre-fix it held the negative ipc.min)"
+else
+  fail "a refused run must not leave a results.json behind"
+fi
+d="$TMP/one-bad-flight-ins-of-three"; three_reps "$d"
+perf_csv "$d/perf-flight-bypass-warm-2.csv" 8000000 0       # rep 2 only; CYCLES healthy
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "flight rep flight-bypass-warm-2 instructions" <<<"$out"; then
+  pass "OBSERVED: ONE corrupt flight rep of three is REFUSED (pre-fix: exit 0, ipc.min 0.0)"
+else
+  fail "one corrupt flight rep among three must be refused (rc=$rc, out: $out)"
+fi
+# And `spread()` itself must refuse a non-positive MEMBER, not only a non-positive MEDIAN —
+# the last line of defence, driven directly so it is not merely reachable in theory.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_collect import spread
+from ws0_validate import Invalid
+# A series whose MEDIAN is positive and one of whose MEMBERS cannot exist. The pre-fix
+# spread() accepted this and returned min=-1.0.
+for series in ([2.0, -1.0, 3.0], [2.0, 0.0, 3.0], [2.0, float("inf"), 3.0]):
+    try:
+        got = spread(series)
+    except Invalid as e:
+        assert "not meaningful" in str(e) or "not finite" in str(e), str(e)
+    else:
+        raise SystemExit(f"spread({series}) must refuse a non-positive/non-finite MEMBER, got {got}")
+# ...and a healthy series is still accepted, so it is not a function that refuses everything.
+got = spread([2.0, 3.0, 4.0])
+assert got["median"] == 3.0 and got["min"] == 2.0 and got["n"] == 3, got
+PY
+then
+  pass "spread() REFUSES a non-positive/non-finite MEMBER of an otherwise-healthy series (B2)"
+else
+  fail "spread() must refuse a bad member, not only a bad median — that is the surviving-rep hole"
+fi
+
+# ==========================================================================
+# B5 — a coercion may not TRUNCATE or accept a BOOLEAN (review round 3)
+# ==========================================================================
+# NON-VACUITY: every coercion in the reporting path was a bare `int()`. Measured against
+# HEAD~1 of this commit, each of these exited **0** with a full report:
+#   * `requests_error: 0.9` -> `int(0.9)` is 0 -> reported CLEAN, no failed requests
+#   * `requests_ok: 1.9`    -> `int(1.9)` is 1 -> SATISFIED the exactly-one-cold-request
+#                              guard of #3096 finding 2, from a value that is not 1
+#   * `requests_error: true`-> `int(True)` is 1 -> then refused as "1 failed request",
+#                              i.e. a boolean silently became a count
+# A truncation is a FABRICATED VALUE arrived at by rounding rather than by defaulting —
+# the same class as `.get(k, 0)`, which is why it belongs in this file.
+FRAC_ERR='{"round":"r","requests_ok":1,"requests_error":0.9,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/frac-error"; make_session "$d" "$FRAC_ERR"
+expect_reject "a FRACTIONAL requests_error is FATAL (pre-fix: int(0.9) reported CLEAN)" \
+  "fractional value" "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus")
+if grep -q "TRUNCATED it to 0" <<<"$out" && grep -q "fabricated value" <<<"$out"; then
+  pass "the refusal names the TRUNCATION and what it would have reported"
+else
+  fail "the fractional-counter refusal must name the truncated value (out: $out)"
+fi
+BOOL_ERR='{"round":"r","requests_ok":1,"requests_error":true,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/bool-error"; make_session "$d" "$BOOL_ERR"
+expect_reject "a BOOLEAN requests_error is FATAL (pre-fix: int(True) became a count of 1)" \
+  "is the boolean True" "$d" "$TMP/corpus"
+# `requests_ok`, where the truncation defeats the COLD guard rather than the error count.
+FRAC_OK='{"round":"r","requests_ok":1.9,"requests_error":0,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/frac-ok"; mkdir -p "$d"
+make_scan_rep "$d" cold 1 skipped-cold-arm
+make_flight_rep "$d" cold 1 skipped-cold-arm "$FRAC_OK"
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 1 --temps cold --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "fractional value 1.9" <<<"$out"; then
+  pass "OBSERVED: a FRACTIONAL requests_ok is refused (pre-fix: int(1.9)==1 SATISFIED the cold guard)"
+else
+  fail "a fractional requests_ok must be refused, not truncated into the cold guard (rc=$rc, out: $out)"
+fi
+BOOL_OK='{"round":"r","requests_ok":true,"requests_error":0,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/bool-ok"; make_session "$d" "$BOOL_OK"
+expect_reject "a BOOLEAN requests_ok is FATAL (int(True) is 1, which is a valid count)" \
+  "is the boolean True" "$d" "$TMP/corpus"
+# A FRACTIONAL rows_total, which would silently change the DENOMINATOR of cycles/row.
+FRAC_ROWS='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000.5,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/frac-rows"; make_session "$d" "$FRAC_ROWS"
+expect_reject "a FRACTIONAL rows_total is FATAL (it is the cycles/row denominator)" \
+  "fractional value" "$d" "$TMP/corpus"
+# The same class in a perf CSV, which is TEXT: `int("4.7")` raises, but `int(" 4 ")` used
+# to accept padding silently, and neither is a canonical counter value.
+d="$TMP/frac-csv"; make_session "$d" "$GOOD_FLIGHT"
+printf '4000000.5,,cycles,,,,\n8000000,,instructions,,,,\n' > "$d/perf-scan-warm-1.csv"
+expect_reject "a FRACTIONAL perf CSV counter is FATAL (not a canonical integer)" \
+  "unparseable value" "$d" "$TMP/corpus"
+# ...and the identity fields, the last coercion in the enumeration.
+make_corpus "$TMP/corpus-frac-rows"
+python3 - "$TMP/corpus-frac-rows" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "corpus-identity.json"
+ident = json.loads(p.read_text())
+ident["cells_per_row"] = 12.5
+p.write_text(json.dumps(ident))
+PY
+d="$TMP/frac-identity"; make_session "$d" "$GOOD_FLIGHT"
+expect_reject "a FRACTIONAL corpus-identity field is FATAL (pre-fix: silently truncated)" \
+  "fractional value" "$d" "$TMP/corpus-frac-rows"
+# THE ACCEPT DIRECTION for the whole class: an INTEGRAL float (`1000.0`) is the value it
+# would be read as, so it is ACCEPTED. The rule is "not the integer it would be read as",
+# not "never a float" — a producer writing an integer-valued double is not an error.
+INTEGRAL_FLOAT='{"round":"r","requests_ok":1.0,"requests_error":0.0,"rows_total":1000.0,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/integral-float"; make_session "$d" "$INTEGRAL_FLOAT"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "an INTEGRAL float (1000.0) is ACCEPTED — the rule is exactness, not 'never a float'"
+else
+  fail "an integral float must be accepted; refusing it would red every producer writing doubles (rc=$rc, out: $out)"
+fi
+
+# ==========================================================================
+# B3 — the INTERLEAVING is observed FROM A CLOCK, and an ARM-MAJOR FORGERY fails
+# ==========================================================================
+# NON-VACUITY, and this is the case the whole finding rests on. Pre-fix, `<tag>.round`
+# carried `round`/`position`/`arms_in_round` and NO TIMESTAMP, and `collect_round_meta`
+# forced `round == rep` — so `round` carried zero independent information and `position`
+# was a number the driver COMPUTED. An ARM-MAJOR loop keeping the identical rotation
+# arithmetic:
+#
+#     for arm in rotate_arms(...):        # arms OUTSIDE
+#         for rep in 1..REPS:             # reps INSIDE
+#             measure(arm, rep); record_round(tag, rep, pos, n)
+#
+# emits BYTE-IDENTICAL metadata for a session in which no two arms of a "round" ran
+# anywhere near each other — and the reporter printed "the reps were INTERLEAVED … this is
+# OBSERVED, not asserted" over it. The fixture below IS that forgery: labels a genuine
+# interleaved session would carry, timestamps an arm-major run produces.
+d="$TMP/arm-major-forgery"; mkdir -p "$d"
+for rep in 1 2 3; do
+  make_scan_rep "$d" warm "$rep" ok
+  make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
+done
+# The LABELS: exactly what the real interleaved driver writes (rotating positions).
+# The CLOCK: arm-major — all three scan reps complete, THEN all three flight reps.
+for rep in 1 2 3; do
+  scan_pos=$(( rep % 2 == 1 ? 1 : 2 ))
+  fl_pos=$(( rep % 2 == 1 ? 2 : 1 ))
+  make_round "$d" "scan-warm-$rep"          "$rep" "$scan_pos" 2 "$(( 1000000000 + rep * 1000000 ))"
+  make_round "$d" "flight-bypass-warm-$rep" "$rep" "$fl_pos"   2 "$(( 5000000000 + rep * 1000000 ))"
+done
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "were NOT INTERLEAVED" <<<"$out"; then
+  pass "OBSERVED: an ARM-MAJOR session carrying PERFECT interleaved LABELS is REFUSED (B3)"
+else
+  fail "the arm-major forgery must be refused — the labels alone cannot establish interleaving (rc=$rc, out: $out)"
+fi
+if grep -q "byte-identical" <<<"$out" && grep -q "ARM-MAJOR" <<<"$out"; then
+  pass "the refusal explains that the LABELS were indistinguishable, so the clock is the evidence"
+else
+  fail "the arm-major refusal must say why the labels could not catch it (out: $out)"
+fi
+# ...and NOTHING is written: the report cannot establish its headline property.
+if [ ! -e "$d/results.json" ]; then
+  pass "no results.json is written for a session whose interleaving the clock refutes"
+else
+  fail "a refused run must not leave a results.json behind"
+fi
+# The DRIVER must record the instant, or every check above is unreachable in practice.
+if grep -q 'monotonic_ns=%s' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+  && awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+     | grep -q 'time.monotonic_ns'; then
+  pass "the DRIVER records a monotonic instant per rep (the reporter's requirement is wired)"
+else
+  fail "ws0-baseline.sh must record monotonic_ns per rep, from a monotonic clock"
+fi
+# An ABSENT instant is fatal, not defaulted — a session from the pre-fix driver cannot be
+# reported under the interleaving claim, and saying so is the honest outcome.
+d="$TMP/no-instant"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+printf 'round=1\nposition=1\narms_in_round=2\n' > "$d/scan-warm-1.round"
+expect_reject "round metadata with NO monotonic_ns is REFUSED (a pre-fix session cannot carry the claim)" \
+  "carries no 'monotonic_ns'" "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus")
+if grep -q "the only field that records WHEN the rep ran" <<<"$out"; then
+  pass "the refusal explains why an instant is required (labels cannot establish when)"
+else
+  fail "the monotonic_ns refusal must state what it is for (out: $out)"
+fi
+# COPIED metadata is refused: two reps of a sequential loop cannot share a nanosecond, so
+# an identical instant means the file was duplicated rather than measured.
+d="$TMP/copied-instant"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+make_round "$d" scan-warm-1          1 1 2 1234567890
+make_round "$d" flight-bypass-warm-1 1 2 2 1234567890
+expect_reject "two reps recording the IDENTICAL instant is REFUSED (copied, not measured)" \
+  "IDENTICAL completion instant" "$d" "$TMP/corpus"
+# THE ACCEPT DIRECTION: a genuinely round-major clock is accepted and the observation is
+# recorded in results.json with the span it measured — so the claim cannot be printed
+# without a number behind it.
+d="$TMP/round-major-ok"; mkdir -p "$d"
+for rep in 1 2 3; do
+  make_scan_rep "$d" warm "$rep" ok
+  make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
+done
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" --server-cpus 2,10 \
+  --client-cpus 4,12 --reps 3 --temps warm --arms bypass \
+  --step-duration 45s/1s --scan-passes 1 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && python3 - "$d/results.json" <<'PY'
+import json, sys
+il = json.load(open(sys.argv[1]))["interleaving"]["warm"]
+t = il["timing"]
+assert t["round_major_verified"] is True, t
+assert t["established"] == "round-major ordering", t
+assert t["rounds_compared"] == 3, t
+assert "monotonic_ns" in t["source"], t
+# The LIMIT of the claim is recorded too, so a later reader is not left to infer it.
+assert "WITHIN-round arm order" in t["not_established"], t
+# ...and the per-round spans are real numbers, not a placeholder.
+assert set(t["within_round_span_ns"]) == {"1", "2", "3"}, t
+assert all(v > 0 for v in t["within_round_span_ns"].values()), t
+# The `source` of the whole observation must not claim a provenance it cannot verify.
+assert "UNVERIFIED" in il["source"], il["source"]
+PY
+then
+  pass "a round-major session is ACCEPTED and records the timing OBSERVATION plus its stated LIMIT"
+else
+  fail "the accept direction must record the timing observation (rc=$rc, out: $out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a
 # `$(...)` whose command vanished, a `for` over an empty list — LOWERS the check count and
 # registers NO failure. The gate reads only the exit code, so a suite that ran 3 of its
-# ~62 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
+# ~96 checks and passed them exits 0 and reports SUCCESS. That is the suite-level
 # `0/0` shape this whole issue is about, one level up from the checks themselves.
 #
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=62
+MIN_CHECKS=88
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

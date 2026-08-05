@@ -761,8 +761,39 @@ rotate_arms() {
 # record_round <tag> <round> <position> <arms-in-round> — the interleaving metadata the
 # reporter REQUIRES. Written after the rep, so a rep that died leaves no metadata and the
 # report refuses it rather than attributing it to a round.
+#
+# `monotonic_ns` IS THE OBSERVATION; the other three are LABELS (#3272 review round 3, B3).
+# `round`, `position` and `arms_in_round` are numbers THIS LOOP COMPUTES, and the reporter
+# additionally forces `round == rep`, so `round` carries no independent information at all.
+# An arm-major loop keeping the same rotation arithmetic emits BYTE-IDENTICAL metadata for a
+# NON-interleaved session — and the report then printed "the reps were INTERLEAVED … this is
+# OBSERVED, not asserted", which was a re-statement of a label rather than an observation.
+#
+# A monotonic timestamp per rep is the thing a forgery cannot reproduce: round-major
+# ordering (every arm of round r finishing before any arm of round r+1) is a FACT ABOUT THE
+# CLOCK, and an arm-major session violates it in a way no relabelling can hide. So the
+# reporter derives the interleaving claim from these instants and refuses a session whose
+# timestamps say arm-major, whatever the labels say.
+#
+# `time.monotonic_ns()` and not `date`: it is monotonic (immune to an NTP step or a DST
+# change mid-session, either of which could otherwise reorder two reps), it is
+# nanosecond-resolution, and python3 is already a HARD requirement of this rig. The cost is
+# one interpreter start per rep — tens of milliseconds against a 45-second step.
+#
+# The instant recorded is the rep's COMPLETION. The loop is strictly sequential — one rep
+# runs to completion before the next starts — so completion order IS the order the reps ran,
+# and using the later instant means a rep that died leaves no metadata at all rather than a
+# start time for a measurement that never finished.
 record_round() {
-  printf 'round=%s\nposition=%s\narms_in_round=%s\n' "$2" "$3" "$4" > "$OUT_DIR/$1.round"
+  local now
+  now="$(python3 -c 'import time; print(time.monotonic_ns())')" || {
+    echo "FATAL: could not read a monotonic clock for $1 — the interleaving of this" >&2
+    echo "       session would be UNOBSERVABLE, and the report refuses to claim an" >&2
+    echo "       interleaving it cannot establish (#3272 B3). This rig requires python3." >&2
+    exit 1
+  }
+  printf 'round=%s\nposition=%s\narms_in_round=%s\nmonotonic_ns=%s\n' \
+    "$2" "$3" "$4" "$now" > "$OUT_DIR/$1.round"
 }
 
 # The rotated arm list: the bare scan and every selected Flight arm, as PEERS.

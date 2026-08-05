@@ -58,10 +58,11 @@ from ws0_rounds import (  # noqa: E402
 )
 from ws0_validate import (  # noqa: E402
     Invalid,
+    cli_count,
     existing_dir,
     load_corpus_identity,
     nonempty_selection,
-    positive_int,
+    positive_derived,
     verify_corpus_bytes,
 )
 
@@ -129,8 +130,8 @@ def corpus_identity_lines(verification: dict) -> list[str]:
 
 def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     """The whole report, or `Invalid`. No fabricated value anywhere in here."""
-    reps = positive_int("reps", args.reps)
-    scan_passes = positive_int("scan-passes", args.scan_passes)
+    reps = cli_count("reps", args.reps)
+    scan_passes = cli_count("scan-passes", args.scan_passes)
     d = existing_dir("dir", args.dir)
     corpus = existing_dir("corpus", args.corpus)
     temps = nonempty_selection("temps", args.temps, TEMPS_ALLOWED)
@@ -226,22 +227,37 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             results["measurements"].append(fl)
             lines.append(fmt(f"flight do_get ({arm})", fl))
             lines += prewarm_warning(fl, f"flight/{arm}", temp)
-            scan_rps = scan["rows_per_sec"]["median"]
-            fl_rps = fl["rows_per_sec"]["median"]
-            # No permissive numeric fallback in the reporting path (#3272 review).
-            # `scan_rps / fl_rps if fl_rps else float("inf")` published `inf x` as the
-            # bare/flight ratio for a Flight arm that measured NOTHING — a printable
-            # figure standing in for an absent one, and the most flattering possible
-            # reading of the arm under study. `spread()` already refuses a
-            # non-positive median, so this is a second, local, fail-closed statement
-            # of the same rule rather than a reachable branch.
-            if scan_rps <= 0 or fl_rps <= 0:
-                raise Invalid(
-                    f"the bare/flight ratio for {arm} ({temp}) has a non-positive"
-                    f" denominator or numerator (bare {scan_rps}, flight {fl_rps}) —"
-                    " there is no ratio to report, and `inf` is a printable number"
-                    " standing in for an absent measurement"
-                )
+            # Every operand of every printed figure, through the SHARED validator (#3272
+            # review round 3, B2). No permissive numeric fallback anywhere in the reporting
+            # path: `scan_rps / fl_rps if fl_rps else float("inf")` used to publish `inf x`
+            # as the bare/flight ratio for a Flight arm that measured NOTHING — a printable
+            # figure standing in for an absent one, and the most flattering possible reading
+            # of the arm under study. The pre-round-3 replacement tested `<= 0`, which still
+            # admitted `inf`/`nan`; `positive_derived` requires FINITE and positive, so a
+            # `nan` median cannot reach the `>= target` comparison (NaN compares False, which
+            # would print BELOW TARGET for an arm that measured nothing — a verdict, from an
+            # absence). `spread()` refuses these upstream too; this is the local statement of
+            # the same rule at the point of use.
+            scan_rps = positive_derived(
+                f"the bare-scan median rows/s for {arm} ({temp})",
+                scan["rows_per_sec"]["median"],
+                "it is the ratio's NUMERATOR and the 1.3x target's basis",
+            )
+            fl_rps = positive_derived(
+                f"the flight median rows/s for {arm} ({temp})",
+                fl["rows_per_sec"]["median"],
+                "it is the ratio's DENOMINATOR",
+            )
+            scan_cpr = positive_derived(
+                f"the bare-scan median cycles/row for {arm} ({temp})",
+                scan["cycles_per_row"]["median"],
+                "it is the DIVISOR of the printed cycles/row percentage delta",
+            )
+            fl_cpr = positive_derived(
+                f"the flight median cycles/row for {arm} ({temp})",
+                fl["cycles_per_row"]["median"],
+                "it is the numerator of the printed cycles/row percentage delta",
+            )
             ratio = scan_rps / fl_rps
             target = scan_rps / 1.3
             verdict = "PASS" if fl_rps >= target else "BELOW TARGET"
@@ -249,17 +265,25 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
                 f"      ratio bare/flight = {ratio:.2f}x   "
                 f"1.3x target => do_get must reach {target:,.0f} rows/s   [{verdict}]"
             )
+            # The DELTA is deliberately unconstrained in sign — a Flight arm that costs
+            # FEWER cycles/row than the bare scan is a legitimate (and desirable) result.
+            # Its DIVISOR is what needed the domain, and both operands are validated above.
             lines.append(
-                f"      cycles/row delta  = "
-                f"{fl['cycles_per_row']['median'] - scan['cycles_per_row']['median']:+,.0f} "
-                f"({(fl['cycles_per_row']['median'] / scan['cycles_per_row']['median'] - 1) * 100:+.1f}%)"
+                f"      cycles/row delta  = {fl_cpr - scan_cpr:+,.0f} "
+                f"({(fl_cpr / scan_cpr - 1) * 100:+.1f}%)"
             )
             # The PAIRED within-round comparison, beside the medians (#3272 B5). The
             # median-vs-median line above is retained because it is the figure the
             # 1.3x spec target is stated against, but it is not left standing ALONE:
             # this rig's own recorded evidence is that a couple of percent of median
             # difference is not readable at its spreads.
-            fl["per_round_paired"] = None
+            #
+            # `fl["per_round_paired"] = None` used to precede this call as a "reset". It was
+            # DEAD CODE (#3272 review round 3 nit): the very next statement overwrites it on
+            # success, and on a raise nothing is written at all — the reporter exits 1 without
+            # producing a results.json. A line whose only effect is invisible reads as a
+            # deliberate initialization and invites a reader to assume a partial-write path
+            # exists, so it is removed rather than commented.
             rounds, paired_lines = paired_rounds(scan, fl)
             fl["per_round_paired"] = rounds
             lines += paired_lines
@@ -331,7 +355,7 @@ def main() -> int:
     ap.add_argument("--client-cpus", required=True)
     # Deliberately NOT `type=int`: argparse would exit 2 with its own message for a
     # non-integer, but would happily accept `0` and `-3`. The validation is in
-    # ws0_validate.positive_int, where both cases fail with a reason (#3272 f5).
+    # ws0_validate.cli_count, where both cases fail with a reason (#3272 f5).
     ap.add_argument("--reps", required=True)
     ap.add_argument("--temps", required=True)
     ap.add_argument("--arms", required=True)

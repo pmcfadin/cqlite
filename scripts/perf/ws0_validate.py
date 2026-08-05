@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import re
 
@@ -58,9 +59,224 @@ PREWARM_REQUIRED = {
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# A CANONICAL decimal integer, and nothing else. No surrounding whitespace beyond what the
+# caller strips, no `+`, no `_` separators (`int("1_0")` is 10 in Python, which would read a
+# malformed artifact as a number), no fractional part, no exponent. A leading `-` is
+# admitted so a NEGATIVE counter reaches its domain check and is refused BY NAME rather
+# than as a format complaint — the two causes stay distinct, as the duration parser's do.
+_INT_RE = re.compile(r"^-?(0|[1-9][0-9]*)$")
+
 
 class Invalid(Exception):
     """A property the report depends on was not observed. Always fatal."""
+
+
+# ===========================================================================
+# THE SHARED QUANTITY VALIDATOR (#3272 review round 3, B2 + B5)
+# ===========================================================================
+# Three rounds fixed this class PARTIALLY, each time at the site review named:
+#
+#   round 2 checked `cyc <= 0` after the setup subtraction, and `rows < 1`, and
+#   `arm_rps` finite-and-positive — and never checked `ins`, which is the SAME
+#   subtraction (`total["instructions"] - setup["instructions"]`) feeding
+#   `ipc.append(ins / cyc)`. `spread()` refuses a non-positive MEDIAN, which is a
+#   different property: one corrupt rep among three leaves the median positive and
+#   publishes `ipc.min` computed from a value that cannot exist. `collect_flight` had
+#   the identical gap on a perf CSV recording `instructions,0`.
+#
+#   and every coercion in the path was a bare `int()`, which SILENTLY TRUNCATES a
+#   float and ACCEPTS a bool: `requests_error: 0.9` reported CLEAN (0), `requests_ok:
+#   1.9` satisfied the exactly-one-cold-request guard (1), and `true` became 1.
+#
+# Fixing the cited line again would be the fourth partial fix. So every quantity in the
+# reporting path goes through ONE of the functions below, each of which states its
+# VALIDITY DOMAIN in its name, and a new counter cannot be read without choosing one.
+# The complete inventory, enumerated MECHANICALLY (an `ast` walk for every `int()`/
+# `float()` call and every arithmetic `BinOp` across `ws0_*.py`) rather than by reading:
+#
+# OBSERVED (read from an artifact):
+#   perf CSV counter value          non_negative_int      hardware counters never go
+#                                                         below zero; a negative one is
+#                                                         a corrupt artifact
+#   identity seed                   non_negative_int
+#   identity rows/partitions/
+#     cells_per_row/data_db_bytes   positive_int
+#   identity bytes_per_row          positive_finite_float
+#   <tag>.round round/position/
+#     arms_in_round                 positive_int          1-based indices
+#   scan rows_denominator           positive_int          a DENOMINATOR
+#   scan timed_scan_secs            positive_finite_float a measurement WINDOW
+#   flight rows_total               positive_int          a DENOMINATOR
+#   flight rows_per_s               positive_finite_float
+#   flight requests_ok              positive_int          >=1, and ==1 when cold
+#   flight requests_error           non_negative_int      then required == 0
+#   --reps / --scan-passes          positive_int (capped) CLI, not an artifact
+#
+# DERIVED (computed here):
+#   cyc  = total.cycles - setup.cycles              positive_derived
+#   ins  = total.instructions - setup.instructions  positive_derived   <- the B2 gap
+#   flight cyc = counters["cycles"]                 positive_derived
+#   flight ins = counters["instructions"]           positive_derived   <- the B2 gap
+#   rows/secs, cyc/rows, ins/cyc (IPC)              positive by construction from the above
+#   spread() median                                 positive_derived (in ws0_collect)
+#   bare/flight ratio, 1.3x target                  positive_derived (in ws0_report)
+#   per-round ratio                                 positive_derived (in ws0_rounds)
+#   cycles/row DELTA, bytes/rows cross-check        UNCONSTRAINED — a delta may legitimately
+#                                                   be negative; its DIVISOR is a validated
+#                                                   median, which is what needs the domain
+#
+# There is deliberately no `lenient=` parameter and no env var. An escape hatch on a
+# measurement domain can only buy a confident wrong number.
+
+
+def _reject_bool(label: str, value: object, why: str = "") -> None:
+    """`True`/`False` is not a counter, even though `int(True) == 1`.
+
+    JSON `true` reaching a counter field means the artifact is not the artifact this
+    reporter models; silently reading it as 1 let `requests_ok: true` satisfy the
+    exactly-one-cold-request guard (#3272 review round 3, B5).
+    """
+    if isinstance(value, bool):
+        raise Invalid(
+            f"{label} is the boolean {value!r}, not a number. `int(True)` is 1, so a"
+            " bare int() would have read this as a count of one — a JSON boolean in a"
+            f" counter field means the artifact is not the one this reporter models."
+            f"{(' ' + why) if why else ''}"
+        )
+
+
+def exact_int(label: str, value: object, why: str = "") -> int:
+    """`value` as an int, refusing anything that is not EXACTLY an integer.
+
+    Accepted: a JSON integer, and a string whose whole content is a canonical decimal
+    integer (perf CSVs and `<tag>.round` files carry text).
+
+    REFUSED, where a bare `int()` would have silently converted (#3272 B5):
+
+    * a bool — `int(True) == 1`;
+    * a FLOAT with a fractional part — `int(0.9) == 0`, so `requests_error: 0.9` was
+      reported as a clean zero and `requests_ok: 1.9` satisfied the cold-rep guard;
+    * a float that is integral but not exact in the domain (`1e30`), and `inf`/`nan`;
+    * a string with surrounding junk or a fractional part — `int(" 3 ")` is 3, which
+      hides a malformed artifact, and `int("3.7")` raises where the caller wants a
+      NAMED refusal rather than a traceback.
+
+    An integral float (`3.0`) IS accepted: `json` decodes `3.0` for a field a producer
+    wrote as an integer-valued double, and the value is exactly the integer. What is
+    refused is a value that is NOT the integer it would be read as.
+    """
+    _reject_bool(label, value, why)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise Invalid(
+                f"{label} is {value!r}, which is not a finite number."
+                f"{(' ' + why) if why else ''}"
+            )
+        if value != int(value):
+            raise Invalid(
+                f"{label} is the fractional value {value!r}. A bare int() would have"
+                f" TRUNCATED it to {int(value)} and reported that as the observed"
+                " quantity — a fabricated value, arrived at by rounding rather than by"
+                f" defaulting (#3272 AC3).{(' ' + why) if why else ''}"
+            )
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not _INT_RE.match(text):
+            raise Invalid(
+                f"{label} must be an integer: {value!r} is an unparseable value, not a"
+                " canonical decimal integer. A fractional, padded or junk-bearing value is"
+                f" a corrupt artifact, not a number to be coerced.{(' ' + why) if why else ''}"
+            )
+        return int(text)
+    raise Invalid(
+        f"{label} must be an integer: {value!r} is a {type(value).__name__}."
+        f"{(' ' + why) if why else ''}"
+    )
+
+
+def non_negative_int(label: str, value: object, why: str = "") -> int:
+    """`exact_int`, and `>= 0`. The domain of every COUNT and every hardware counter.
+
+    `why` is the CALLER's sentence about what this particular quantity IS — appended to
+    the refusal so the diagnostic names the measurement rather than only the domain. The
+    coercion and domain rules are shared (they are the same for every counter); what a
+    number MEANS is local, and a shared validator that swallowed that would make every
+    refusal read the same and name nothing (#3272 review round 3, B2/B5).
+    """
+    n = exact_int(label, value, why)
+    if n < 0:
+        raise Invalid(
+            f"{label} is {n}, which is not a possible count. Counts and hardware"
+            " counters are non-negative; a negative one is a CORRUPT artifact, and"
+            " reading it as a small number publishes a figure that cannot exist"
+            f" (#3272 R6).{(' ' + why) if why else ''}"
+        )
+    return n
+
+
+def positive_int(label: str, value: object, why: str = "") -> int:
+    """`exact_int`, and `>= 1`. The domain of a DENOMINATOR and a 1-based index."""
+    n = exact_int(label, value, why)
+    if n < 1:
+        raise Invalid(
+            f"{label} is {n}, which is not a positive integer. It is a denominator or a"
+            " 1-based index; a non-positive value is refused rather than divided by or"
+            f" indexed with.{(' ' + why) if why else ''}"
+        )
+    return n
+
+
+def positive_finite_float(label: str, value: object, why: str = "") -> float:
+    """`value` as a float that is finite and `> 0`.
+
+    `inf`/`nan` are refused for the same reason a zero is: they are PRINTABLE numbers
+    standing in for an absent measurement, and they propagate silently through
+    `spread()` into the summary.
+    """
+    _reject_bool(label, value, why)
+    if isinstance(value, str):
+        value = value.strip()
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise Invalid(
+            f"{label} is {value!r}, which is not a number.{(' ' + why) if why else ''}"
+        ) from None
+    if not math.isfinite(f):
+        raise Invalid(
+            f"{label} is {f!r}, which is not a finite number. inf/nan are printable"
+            " values standing in for an absent measurement and would propagate into"
+            f" every figure derived from this one.{(' ' + why) if why else ''}"
+        )
+    if f <= 0:
+        raise Invalid(
+            f"{label} is {f!r}, which is not positive. A zero or negative rate,"
+            " window or size is not a small measurement — it is not a measurement."
+            f"{(' ' + why) if why else ''}"
+        )
+    return f
+
+
+def positive_derived(label: str, value: float, detail: str = "") -> float:
+    """A quantity COMPUTED here, required to be finite and `> 0`.
+
+    Distinct from `positive_finite_float` because the diagnostic is different: an
+    observed value out of domain is a corrupt artifact, while a DERIVED one out of
+    domain means the computation was not meaningful — a setup leg that cost more than
+    the full run, a perf window that counted nothing. `detail` carries the operands, so
+    the refusal names what was subtracted from what rather than only the result.
+    """
+    if not math.isfinite(value) or value <= 0:
+        raise Invalid(
+            f"{label} is {value!r}{(' (' + detail + ')') if detail else ''} — the"
+            " computation is not meaningful, so nothing derived from it may be"
+            " reported. A non-positive or non-finite derived quantity is refused"
+            " rather than divided by or printed (#3272 B2)."
+        )
+    return value
 
 
 # An upper bound on any count that drives a loop. Python ints are arbitrary-precision,
@@ -72,19 +288,23 @@ class Invalid(Exception):
 MAX_COUNT = 100_000
 
 
-def positive_int(name: str, value: object) -> int:
-    """`value` as an int in `1..MAX_COUNT`, or `Invalid`.
+def cli_count(name: str, value: object) -> int:
+    """A COMMAND-LINE count as an int in `1..MAX_COUNT`, or `Invalid`.
 
     `--reps 0` used to run the whole reporter over an empty rep range and exit
     ZERO with `measurements: []` — a report that measured nothing, indistinguishable
     at the exit code from one that measured everything (#3272 finding 5). The upper
     bound is the same class from the other end: not a wrong number but no number,
     since an unbounded loop never reaches a verdict.
+
+    Named `cli_count` rather than `positive_int` since round 3 (#3272 B2): a CLI count
+    and an OBSERVED counter need different diagnostics — this one names a `--flag` an
+    operator can change, `positive_int` names an ARTIFACT FIELD that is corrupt — and a
+    shared name for both invites reaching for whichever is imported. Its argument is
+    always an argparse string, so it goes through `exact_int` for the bool/fractional
+    refusals and then applies the CLI bounds and the CLI wording.
     """
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        raise Invalid(f"--{name} must be an integer >= 1 (got {value!r})") from None
+    n = exact_int(f"--{name}", value)
     if n < 1:
         raise Invalid(
             f"--{name} must be at least 1 (got {n}). A run with {name}<1 measures"
@@ -146,7 +366,12 @@ def read_perf_counters(
     * a value is one of perf's `<not counted>` / `<not supported>` markers — the
       line exists but the measurement does not, which is the silent-instrument
       failure in its purest form;
-    * a value is present but unparseable — a corrupt artifact, not a zero.
+    * a value is present but unparseable, fractional, or NEGATIVE — a corrupt artifact,
+      not a zero. The negative half is #3272 review round 3, B2: hardware counters are
+      non-negative by construction, and `int("-4")` used to sail through to become a
+      negative `cycles`/`instructions`, then a negative setup-subtracted `ins`, then a
+      negative IPC in `results.json`. Every value goes through `non_negative_int`, which
+      also refuses `4.7` (a bare `int()` would truncate it to 4 and report that).
     """
     if not path.exists():
         raise Invalid(
@@ -172,13 +397,15 @@ def read_perf_counters(
                 " perf_event_paranoid)."
             )
         try:
-            counters[event] = counters.get(event, 0) + int(raw)
-        except ValueError:
+            value = non_negative_int(
+                f"{label}: {path.name} line {lineno} event {event!r}", raw
+            )
+        except Invalid as exc:
             raise Invalid(
-                f"{label}: {path.name} line {lineno} has an unparseable value"
-                f" {raw!r} for event {event!r}; a corrupt perf artifact is not a"
-                " zero counter"
+                f"{path.name} line {lineno} has an unusable value {raw!r} for event"
+                f" {event!r}: {exc} A corrupt perf artifact is not a zero counter."
             ) from None
+        counters[event] = counters.get(event, 0) + value
     absent = [e for e in required if e not in counters]
     if absent:
         raise Invalid(
@@ -190,9 +417,21 @@ def read_perf_counters(
     return counters
 
 
-# Every field the report prints or asserts on. Absent or malformed => the corpus
-# identity is not authoritative, so nothing derived from it may be reported.
-IDENTITY_INT_FIELDS = ("seed", "rows", "partitions", "cells_per_row", "data_db_bytes")
+# Every field the report prints or asserts on, WITH ITS VALIDITY DOMAIN (#3272 review
+# round 3, B2). Domains, not a flat tuple plus a second list of the ones that must be
+# positive: the pre-round-3 code coerced all five with a bare `int()` and then separately
+# range-checked four of them, so `seed` had no domain at all and a FRACTIONAL or BOOLEAN
+# value for any of the five was silently truncated (`rows: 0.9` -> 0, then refused for the
+# wrong reason; `cells_per_row: true` -> 1, accepted).
+IDENTITY_INT_FIELDS = {
+    # a seed of 0 is legitimate — it is an INPUT, not a measured quantity
+    "seed": "non_negative",
+    # the row DENOMINATOR of every cross-arm property the rig asserts
+    "rows": "positive",
+    "partitions": "positive",
+    "cells_per_row": "positive",
+    "data_db_bytes": "positive",
+}
 
 
 def load_corpus_identity(corpus: pathlib.Path) -> dict:
@@ -228,19 +467,19 @@ def load_corpus_identity(corpus: pathlib.Path) -> dict:
     if not isinstance(identity, dict):
         raise Invalid(f"{idp} must hold a JSON object, got {type(identity).__name__}")
 
-    for key in IDENTITY_INT_FIELDS:
+    for key, domain in IDENTITY_INT_FIELDS.items():
         if key not in identity:
             raise Invalid(f"{idp} carries no {key!r} — the corpus identity is incomplete")
-        try:
-            identity[key] = int(identity[key])
-        except (TypeError, ValueError):
-            raise Invalid(f"{idp}: {key!r} is not an integer ({identity[key]!r})") from None
-    for key in ("rows", "partitions", "cells_per_row", "data_db_bytes"):
-        if identity[key] < 1:
-            raise Invalid(
-                f"{idp}: {key!r} is {identity[key]} — a corpus with no {key} is not a"
-                " measurable corpus"
-            )
+        label = f"{idp}: {key!r}"
+        if domain == "positive":
+            try:
+                identity[key] = positive_int(label, identity[key])
+            except Invalid as exc:
+                raise Invalid(
+                    f"{exc} A corpus with no {key} is not a measurable corpus."
+                ) from None
+        else:
+            identity[key] = non_negative_int(label, identity[key])
 
     sha = identity.get("data_db_sha256")
     if not isinstance(sha, str) or not _SHA256_RE.match(sha):
@@ -250,10 +489,13 @@ def load_corpus_identity(corpus: pathlib.Path) -> dict:
             " digest cannot identify the bytes that were measured."
         )
 
-    try:
-        bpr = float(identity["bytes_per_row"])
-    except (KeyError, TypeError, ValueError):
-        raise Invalid(f"{idp}: 'bytes_per_row' is absent or not a number") from None
+    if "bytes_per_row" not in identity:
+        raise Invalid(f"{idp}: 'bytes_per_row' is absent or not a number")
+    # `positive_finite_float`, so `inf`/`nan`/0/negative are refused BEFORE the
+    # cross-check below compares against them — `abs(derived - inf)` is `inf`, which
+    # exceeds any tolerance and would report an INTERNAL INCONSISTENCY for what is
+    # really an unusable field, naming the wrong cause (#3272 B2 enumeration).
+    bpr = positive_finite_float(f"{idp}: 'bytes_per_row'", identity["bytes_per_row"])
     # Cross-check rather than trust: an identity whose own fields disagree is not
     # authoritative metadata, whichever field is the wrong one.
     derived = identity["data_db_bytes"] / identity["rows"]
