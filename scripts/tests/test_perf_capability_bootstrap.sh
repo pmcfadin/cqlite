@@ -219,6 +219,41 @@ else
   printf '%s\n' "$yes2_out" | sed -n '/Perf profiling/,/^$/p'
 fi
 
+# 3a. WIRING EVIDENCE FOR THE ATOMIC WRITE (issue #3261 AC1), end to end through bootstrap.
+#     The unit cases in the sibling suite prove the helper; this proves BOOTSTRAP uses it. A
+#     symlink at the managed name inside a perfectly-contained sandbox directory used to aim
+#     `sudo tee` at the link's TARGET — a privileged write anywhere on the box, from a run whose
+#     whole promise is that it cannot touch the host. Bootstrap's OUTER answer is a REFUSAL — the
+#     write target cannot even be named, so the section is skipped and nothing privileged runs. The
+#     installer's rename (unit-tested in the sibling suite) is the inner backstop for a symlink
+#     planted in the window between that check and the write; it is not what happens here, so this
+#     case asserts the refusal SPECIFICALLY rather than accepting either outcome.
+symtgt_d="$tmp/perf-symtarget.d"; mkdir -p "$symtgt_d"
+symtgt_out="$tmp/perf-symtarget-victim"; printf 'PRECIOUS-HOST-FILE\n' >"$symtgt_out"
+symtgt_before=$(cat "$symtgt_out")
+rm -f "$symtgt_d/99-cqlite-perf.conf"; ln -s "$symtgt_out" "$symtgt_d/99-cqlite-perf.conf"
+symtgt_proc="$tmp/perf-symtarget-proc"; mkdir -p "$symtgt_proc"
+printf '4\n' >"$symtgt_proc/perf_event_paranoid"; printf '1\n' >"$symtgt_proc/kptr_restrict"
+: >"$yestrip"
+mkperfshim 8888888
+symtgt_run=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$symtgt_proc" CQLITE_PERF_SYSCTL_DIR="$symtgt_d" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+symtgt_rc=$?
+symtgt_leftover=$(ls -A "$symtgt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+symtgt_priv=$(grep -E 'perf-symtarget' "$yestrip" || true)
+if [ "$symtgt_rc" -eq 0 ] \
+   && printf '%s' "$symtgt_run" | grep -q 'is a SYMLINK' \
+   && printf '%s' "$symtgt_run" | grep -q 'perf capability SKIPPED' \
+   && [ "$(cat "$symtgt_out")" = "$symtgt_before" ] \
+   && [ -L "$symtgt_d/99-cqlite-perf.conf" ] && [ -z "$symtgt_leftover" ] \
+   && [ -z "$symtgt_priv" ]; then
+  ok "perf section: --yes against a SYMLINKED managed name REFUSES by name, skips the section, runs NO privileged command against that directory, leaves the link's target byte-unchanged and writes no staging entry — the run still exits 0 (#3261 AC1)"
+else
+  bad "perf section: a symlinked managed drop-in name was not refused fail-closed (rc=$symtgt_rc, target-changed=$([ "$(cat "$symtgt_out")" = "$symtgt_before" ] && echo no || echo YES), still-a-link=$([ -L "$symtgt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$symtgt_leftover', privileged='$symtgt_priv')"
+  printf '%s\n' "$symtgt_run" | sed -n '/Perf profiling/,/^$/p'
+fi
+
 # --- 4. The verification VERDICT is honoured, and no-sudo degrades gracefully --
 # 4a. A perf that exits 0 but reports an unusable counter must produce a WARN and
 #      must NEVER be reported as verified. This is the #3119-style mutation (test_bootstrap_agent_machine.sh case 10) applied

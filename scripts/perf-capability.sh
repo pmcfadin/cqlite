@@ -403,7 +403,7 @@ perf_capability_dropin_path() {
   __pdi_d=$(perf_capability_sysctl_dir) || return 1
   __pdi_p="$__pdi_d/$PERF_CAPABILITY_DROPIN_BASENAME"
   if [ -L "$__pdi_p" ]; then
-    printf 'perf-capability: REFUSING: the managed drop-in name %s is a SYMLINK. A privileged `tee` FOLLOWS it and would overwrite the link target instead of the managed file — a contained directory does not license writing through its entries. Remove the symlink (or let the atomic installer replace the entry).\n' \
+    printf 'perf-capability: REFUSING: the managed drop-in name %s is a SYMLINK. A privileged `tee` FOLLOWS it and would overwrite the link target instead of the managed file — a contained directory does not license writing through its entries. Inspect where it points and remove it; nothing here will write through it.\n' \
       "'$__pdi_p'" >&2
     return 1
   fi
