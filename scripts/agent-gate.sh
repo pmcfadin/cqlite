@@ -5773,16 +5773,16 @@ run_tooling_tests() {
   #   * `rec = records[-1]`, silently DROPPING every earlier step record (measured: a
   #     rep whose first record held 9 failed requests over a 37-row partial scan
   #     published the second record's clean 250,000 rows/s).
-  # Plus the corpus-identity BYTE verification: the recorded size is re-stat'ed and
-  # the recorded sha256 re-derived from the Data.db actually present, so stale
-  # metadata beside different bytes can no longer misidentify the corpus while the
-  # summary prints the recorded digest as the measured one. The digest is skippable
-  # for a multi-GB corpus ONLY via --skip-corpus-digest, which STAMPS
-  # `CORPUS DIGEST UNVERIFIED` into the summary and `sha256_verified: false` into
-  # results.json — never a silent skip. Hermetic: synthetic session dirs, synthetic
-  # perf CSVs, and a few-KB synthetic Data.db whose real sha256 is computed with
-  # hashlib; no cargo, perf, sudo, corpus, network or root. python3 absence FAILS
-  # here (it is a hard requirement of the rig), never skips.
+  # Plus the coercion class (a truncating `int()`, a boolean read as a count), the
+  # DERIVED flight throughput, and the two structural ast scans that keep a
+  # permissive-default idiom and a hand-written "complete inventory" out of the
+  # reporting path. The MEASUREMENT-PROVENANCE half — the corpus identity's BYTES, the
+  # complete component set, the pre-measurement pin and the manifest-read
+  # configuration — is its own component below (review round 6's campsite-rule split).
+  # Hermetic: synthetic session dirs, synthetic perf CSVs, and a few-KB synthetic
+  # Data.db whose real sha256 is computed with hashlib; no cargo, perf, sudo, corpus,
+  # network or root. python3 absence FAILS here (it is a hard requirement of the rig),
+  # never skips.
   # ws0 SELF-TEST HERMETICITY, as a MECHANISM (#3272 review round 3, B1). The three files
   # above must not, while testing the rig, RUN the rig: below its argument-validation
   # boundary the driver writes host sysctls via `sudo -n`, runs `cargo build --release`,
@@ -5838,6 +5838,53 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_fabrication_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 no-fabricated-value guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 MEASUREMENT PROVENANCE (#3272 review round 6). Split out of the fabrication suite
+  # under the campsite rule, by SUBJECT: that suite asserts a property of a NUMBER (a counter
+  # or verdict not OBSERVED is an error, never a default), this one a property of the RUN the
+  # numbers came from — a report must identify the BYTES and the CONFIGURATION it describes.
+  # The two are orthogonal, which is the reason for the seam: every check in the fabrication
+  # suite is satisfiable by an artifact set that is internally consistent about the WRONG run.
+  # Four findings, each with its accept direction:
+  #   * F1 — reps/temps/arms/scan-passes and the CPU pins were the REPORTER'S arguments, tied
+  #     to nothing about the session, so a re-report could SUBSTITUTE a configuration and state
+  #     it had been verified (measured: a 3-rep session reported at `--reps 1` published rep 1
+  #     as the whole run, under CPU pins the session never used, beside a "verified
+  #     physical-core siblings" claim). The configuration is now READ FROM the pre-measurement
+  #     manifest and the flags are GONE — each is an argparse error, so the substitution cannot
+  #     be expressed rather than merely being detected.
+  #   * F3 — corpus verification checked ONLY `Data.db`, while a scan reads `Index.db` above
+  #     all plus the Statistics/Summary/Filter components that shape how it reads. Measured
+  #     with the fix reverted: rewriting `nb-1-big-Index.db` left the report at exit 0 with its
+  #     "the identity describes the bytes that were measured" line intact. All 5 recorded
+  #     components are now re-stat'ed and re-hashed, and the summary states the count.
+  #   * B6 — `corpus-identity.json` was validated for internal consistency and the `Data.db`
+  #     was NEVER OPENED, so a 4 KB file beside an identity claiming 700,000 bytes and an
+  #     unrelated sha256 exited 0 and printed that sha256 as the measured one. The digest is
+  #     skippable for a multi-GB corpus ONLY via --skip-corpus-digest, which STAMPS
+  #     `CORPUS DIGEST UNVERIFIED` into the summary and `sha256_verified: false` into
+  #     results.json — never a silent skip, and the cheap size half still fires under it.
+  #   * The PRE-MEASUREMENT PIN (round 4) — the report-time digest cannot see either sequence
+  #     that attributes figures to bytes nobody measured (re-reporting an old session against a
+  #     different corpus; a corpus regenerated mid-run), because BOTH are self-consistent AT
+  #     REPORT TIME. The driver stamps a pin BEFORE the first rep and the reporter REQUIRES it;
+  #     the driver-side wiring is asserted too, including that the stamp PRECEDES the
+  #     measurement loop.
+  # Hermetic: synthetic session dirs, synthetic perf CSVs, and synthetic few-KB Data.db files
+  # whose real sha256 is computed with hashlib; no cargo, perf, sudo, corpus, network or root.
+  # python3 absence FAILS here (it is a hard requirement of the rig), never skips, and a
+  # check-count floor closes the suite-level 0/0.
+  echo ">>> [$name] bash scripts/tests/test_ws0_provenance_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_provenance_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 measurement-provenance guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
