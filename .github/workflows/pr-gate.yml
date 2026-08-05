@@ -84,9 +84,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Names only, NUL-safe path handling, base..head three-dot compare so
-          # only files the PR actually changed are considered.
-          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          # Names only, base..head three-dot compare so only files the PR
+          # actually changed are considered.
+          #
+          # `core.quotePath=false` (issue #3250) is load-bearing: git C-QUOTES a
+          # path containing non-ASCII bytes by default, and this repo tracks
+          # non-ASCII and space-bearing prose paths under docs/. The classifier
+          # now decides on the EXTENSION, so a quoted `"docs/\303\251.md"` would
+          # be read as extension `md"` — an accident of spelling. Raw paths make
+          # the verdict come from the real extension instead. `-z` is
+          # deliberately NOT used: it would change the classifier's
+          # newline-delimited stdin contract.
+          git -c core.quotePath=false diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
 
           echo "Changed files:"
           sed 's/^/  - /' changed-files.txt
