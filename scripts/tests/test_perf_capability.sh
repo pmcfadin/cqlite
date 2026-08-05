@@ -1039,31 +1039,66 @@ else
   bad "perf-capability: the install wrote through a PREDICTABLE staging name (rc=$wt_st_rc, bait-changed=$([ "$(cat "$wt_bait")" = "$wt_bait_before" ] && echo no || echo YES), out='$wt_st')"
 fi
 rm -f "$wt_d/.99-cqlite-perf.conf.new"
-# ...structurally: the staging entry is created by `mktemp` with a random-suffix template, and no
-# hardcoded staging literal survives. A future edit back to a fixed name FAILS here.
+# ...structurally: the staging entry is created by `mktemp` with a random-suffix template, no
+# hardcoded staging literal survives, the rename carries `-T`, and the WHOLE staged install is ONE
+# privileged invocation (issue #3261 roborev round 2). That last property is the fix for the
+# create->reopen race and cannot be observed after the fact — a split back into `mktemp` in one
+# privileged call and the write in another would leave every behavioural assert green — so it is
+# pinned here, in the spirit of the other structural audits on this branch.
 wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
-if printf '%s\n' "$wt_body" | grep -q 'mktemp -- "\$__pin_d/\.\$PERF_CAPABILITY_DROPIN_BASENAME\.XXXXXX"' \
-   && ! printf '%s\n' "$wt_body" | grep -qF '.new"' \
-   && [ "$(printf '%s\n' "$wt_body" | grep -c 'mktemp')" -ge 1 ]; then
-  ok "perf-capability: STRUCTURAL — the staging entry is created by 'mktemp' (O_CREAT|O_EXCL, 6 random chars) inside the validated directory, with no hardcoded staging name left, so the check-then-open race is gone by construction (#3261 roborev-1)"
+wt_privcalls=$(printf '%s\n' "$wt_body" | grep -c '"\$@"')
+wt_struct_fail=''
+printf '%s\n' "$wt_body" | grep -q 'mktemp -- "\$d/\.\$b\.XXXXXX"' \
+  || wt_struct_fail="$wt_struct_fail no-mktemp-template"
+printf '%s\n' "$wt_body" | grep -qF '.new"' && wt_struct_fail="$wt_struct_fail hardcoded-staging-name"
+printf '%s\n' "$wt_body" | grep -q 'mv -fT -- "\$t" "\$p"' \
+  || wt_struct_fail="$wt_struct_fail no-mv-T"
+[ "$wt_privcalls" -eq 1 ] || wt_struct_fail="$wt_struct_fail privileged-invocations=$wt_privcalls"
+printf '%s\n' "$wt_body" | grep -q '"\$@" sh -c' || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
+if [ -z "$wt_struct_fail" ]; then
+  ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, so no unprivileged process is scheduled between create and reopen), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
 else
-  bad "perf-capability: the installer no longer creates its staging entry with an unpredictable mktemp name"
-  printf '%s\n' "$wt_body" | grep -n 'pin_t' | head -5
+  bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
+  printf '%s\n' "$wt_body" | grep -n '\$@\|mktemp\|mv -' | head -8
 fi
-# ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted.
+# ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted —
+# the check now lives INSIDE the privileged shell, so this also proves it survived consolidation.
 wt_mt="$tmp/wt-bad-mktemp"; mkdir -p "$wt_mt"
-for t in bash cat printf tee mv rm chmod env grep; do
+for t in bash sh cat printf tee mv rm chmod env grep; do
   s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_mt/$t"
 done
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "/tmp/perf-cap-elsewhere.$$"' >"$wt_mt/mktemp"
 chmod +x "$wt_mt/mktemp"
 wt_mt_out=$(env PATH="$wt_mt:$PATH" CQLITE_PERF_SYSCTL_DIR="$wt_d" \
   bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_mt_rc=$?
-if [ "$wt_mt_rc" -ne 0 ] && printf '%s' "$wt_mt_out" | grep -q 'mktemp did not create a staging entry inside the validated directory'; then
-  ok "perf-capability: a 'mktemp' answering a path OUTSIDE the validated directory is REFUSED by name, never written to (the tool's answer is checked, not trusted)"
+if [ "$wt_mt_rc" -ne 0 ] \
+   && printf '%s' "$wt_mt_out" | grep -q 'mktemp did not create a staging entry inside the validated directory' \
+   && [ ! -e "/tmp/perf-cap-elsewhere.$$" ]; then
+  ok "perf-capability: a 'mktemp' answering a path OUTSIDE the validated directory is REFUSED by name from INSIDE the privileged shell, and that path is never created (the tool's answer is checked, not trusted)"
 else
   bad "perf-capability: a mktemp answering outside the validated directory was trusted (rc=$wt_mt_rc, out='$wt_mt_out')"
 fi
+# ...and the POST-CREATION destination race: a symlink-to-DIRECTORY planted at the managed name.
+# Without `mv -T` (--no-target-directory) `mv` would move the staging file INTO the linked
+# directory — the rename that exists to avoid FOLLOWING a symlink would follow one instead, landing
+# the managed bytes outside the sandbox under a different name. With -T the destination is always a
+# plain name to replace. Asserted by consequence: nothing may appear inside the outside directory.
+wt_outdir="$tmp/wt-outside-dir"; rm -rf "$wt_outdir"; mkdir -p "$wt_outdir"
+rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outdir" "$wt_d/99-cqlite-perf.conf"
+wt_td=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_td_rc=$?
+wt_outdir_contents=$(ls -A "$wt_outdir")
+wt_td_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+# Measured without `-T`: the staging entry landed INSIDE $wt_outdir as `.99-cqlite-perf.conf.XXXXXX`
+# — the managed bytes escaped the sandbox under a name nothing tracks. With `-T`: rc 0, the symlink
+# is REPLACED by a regular file, the outside directory stays empty. All four pinned.
+if [ "$wt_td_rc" -eq 0 ] && [ -z "$wt_outdir_contents" ] && [ -z "$wt_td_leftover" ] \
+   && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
+  ok "perf-capability: a symlink-to-DIRECTORY planted at the managed name does NOT redirect the staged write into it ('mv -T') — the link is REPLACED by a regular file, the outside directory stays empty, no staging entry is left behind (#3261 roborev-2)"
+else
+  bad "perf-capability: the staged write was redirected through a symlink-to-directory at the managed name (rc=$wt_td_rc, outside-dir='$wt_outdir_contents', leftover='$wt_td_leftover', out='$wt_td')"
+fi
+rm -f "$wt_d/99-cqlite-perf.conf"
 # ...and the install is still gated: an out-of-sandbox seam may not be written at all.
 if env CQLITE_PERF_SYSCTL_DIR="$symanc/sysctl.d" \
      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" >/dev/null 2>&1; then

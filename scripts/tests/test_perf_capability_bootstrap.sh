@@ -178,17 +178,27 @@ else
   bad "perf section: --yes did not write the canonical drop-in"
   ls -l "$sysctl_yes" 2>&1 | head -3
 fi
-if grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" && grep -q 'sysctl -q --system' "$yestrip"; then
-  ok "perf section: --yes wrote through sudo tee and applied with 'sysctl --system'"
+if perf_wrote_dropin "$yestrip" && grep -q 'sysctl -q --system' "$yestrip"; then
+  ok "perf section: --yes wrote the drop-in through the privileged staged installer and applied with 'sysctl --system'"
 else
-  bad "perf section: --yes did not use sudo tee + sysctl --system"
+  bad "perf section: --yes did not run the staged install + sysctl --system"
   cat "$yestrip"
+fi
+# ...through EXACTLY ONE privileged invocation (issue #3261, roborev round 2). The staged install is
+# consolidated into a single `sh -c` precisely so no unprivileged process can be scheduled between
+# mktemp and the reopen; splitting it back into several privileged calls would reinstate that window
+# while every functional assert above still passed.
+yes_write_n=$(perf_write_count "$yestrip")
+if [ "$yes_write_n" -eq 1 ]; then
+  ok "perf section: the staged install is EXACTLY ONE privileged invocation (no mktemp-in-one-call / write-in-another window)"
+else
+  bad "perf section: the staged install used $yes_write_n privileged invocations, expected 1: $(cat "$yestrip")"
 fi
 # ...and EVERY privileged invocation carried `-n`: an unattended worker must never be
 # able to sit on a password prompt, so `PERF_ROOT=(sudo)` (no -n) is a defect even
 # though every functional assert above would still pass.
 yes_bare_sudo=$(sudo_perf_offenders "$yestrip")
-if [ -z "$yes_bare_sudo" ] && grep -q '^sudo -n tee ' "$yestrip" && grep -q '^sudo -n sysctl ' "$yestrip"; then
+if [ -z "$yes_bare_sudo" ] && grep -q '^sudo -n sh -c' "$yestrip" && grep -q '^sudo -n sysctl ' "$yestrip"; then
   ok "perf section: every --yes privileged call went through 'sudo -n' (write AND apply, never interactive)"
 else
   bad "perf section: a privileged call did not carry sudo -n: $(cat "$yestrip")"
@@ -212,7 +222,7 @@ yes2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$ye
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 if printf '%s' "$yes2_out" | grep -q 'drop-in already current' \
-   && ! grep -q 'tee .*99-cqlite-perf.conf' "$yestrip"; then
+   && ! perf_wrote_dropin "$yestrip"; then
   ok "perf section: a second --yes run is an idempotent no-op (no re-write)"
 else
   bad "perf section: second --yes run re-wrote the drop-in"
@@ -1028,7 +1038,7 @@ nlfix_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$y
 nlfix_rc=$?
 if [ "$nlfix_rc" -eq 0 ] \
    && ! printf '%s' "$nlfix_out" | grep -q 'drop-in already current' \
-   && grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" \
+   && perf_wrote_dropin "$yestrip" \
    && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
   ok "perf section: a drop-in MISSING its final newline is judged NOT current and REWRITTEN to the canonical bytes"
 else
@@ -1042,7 +1052,7 @@ nlfix2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$nlfix_d" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 if ! printf '%s' "$nlfix2_out" | grep -q 'drop-in already current' \
-   && grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" \
+   && perf_wrote_dropin "$yestrip" \
    && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
   ok "perf section: a drop-in with an EXTRA trailing blank line is judged NOT current and REWRITTEN"
 else
