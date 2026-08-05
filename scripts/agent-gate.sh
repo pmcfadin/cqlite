@@ -5923,6 +5923,36 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 NUMERIC WRAPAROUND (#3272 review round 7, F2). Split out of the cpu-pinning suite
+  # under the campsite rule, along a responsibility seam: the cpu suite's subject is TOPOLOGY
+  # (is the pinning a real physical core?), this one's is ARITHMETIC — can a bound be defeated
+  # by the evaluator that checks it? Bash arithmetic is signed 64-bit and WRAPS SILENTLY, and
+  # that has now been the root cause of THREE findings in three places: round 4's
+  # `parse_duration_ms` (`2305843009213693956s` * 1000 -> 4000ms, UNDER the 5000ms cold-step
+  # ceiling, smuggling a blended cold measurement past that guard), round 4's
+  # `require_positive_int` (a 20-digit value range-checked as 7766279631452241919), and round
+  # 7's `cpu_range_validate` (`9223372036854775809-0` -> a NEGATIVE lo passing BOTH the index
+  # ceiling and the expansion cap, whose own `hi - lo + 1` wraps negative too, then driving a
+  # ~9.2e18-iteration array append — an OOM mid-measurement from an ACCEPTED argument).
+  # Three sites, one class, so the fix is a MECHANISM: `lib-args.sh` owns
+  # `decimal_normalize`/`decimal_le`, comparing canonical decimal STRINGS with no arithmetic at
+  # all — no digit cap to choose and nothing left to wrap. Every firing case here carries a
+  # NON-VACUITY half: a replica of the removed arithmetic, OBSERVED to have accepted the same
+  # input. The expansion-loop case runs under `timeout`, because the pre-fix failure mode is a
+  # hang and a hanging test is not a failing test. Hermetic: two sourced libraries plus a
+  # synthetic sysfs topology in $TMPDIR; sub-second.
+  echo ">>> [$name] bash scripts/tests/test_ws0_numeric_wraparound.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_numeric_wraparound.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 numeric-wraparound guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
   # `tools/*` package tests are run by NO other gate component and by no CI lane
   # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so

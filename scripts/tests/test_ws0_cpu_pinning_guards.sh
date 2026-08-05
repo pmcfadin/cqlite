@@ -340,100 +340,14 @@ else
   fail "cpu-grammar: the expansion cap must fire independently of the index ceiling (rc=$rc, out: $out)"
 fi
 # ===========================================================================
-# #3272 review round 7, F2 — 64-BIT WRAPAROUND CANNOT BYPASS EITHER CPU BOUND
+# 64-BIT WRAPAROUND: moved to scripts/tests/test_ws0_numeric_wraparound.sh
 # ===========================================================================
-# The allowlist grammar stops COMMAND SUBSTITUTION; it does not stop a WELL-FORMED decimal too
-# large for signed 64-bit arithmetic. The bound check used to run AFTER `lo=$((10#$part))`, i.e.
-# on the WRAPPED value, so:
-#
-#   * '9223372036854775809-0' became lo=-9223372036854775807, hi=0. That defeats BOTH bounds at
-#     once: `lo -gt 8191`? no. `hi -lt lo`? no. And in `cpu_list_expand` the expansion cap
-#     `hi - lo + 1 + ${#out[@]} > CPU_LIST_MAX` computes ~9.2e18 which ITSELF wraps NEGATIVE, so
-#     the cap passes too — and `for ((i = lo; i <= hi; i++))` then appends ~9.2e18 elements.
-#   * '18446744073709559807' wrapped to exactly 8191 — an out-of-range index accepted AS the
-#     in-range maximum, so the sibling check would go on to verify pinning for cpu8191.
-#
-# Same class as round 4's `010s`/`2305843009213693956s` duration wraparound, in a second place;
-# fixed as a MECHANISM (`decimal_le`, string comparison, no arithmetic), so there is no digit cap
-# to choose and a decimal of ANY length is compared as written.
-#
-# The NON-VACUITY half is what makes each case evidence rather than assertion: the same input is
-# run through a REPLICA of the pre-fix arithmetic and observed to have been ACCEPTED.
-# `wrap_bypassed_prefix <spec>` prints `bypassed` when the pre-fix code would have let it
-# through — computed with the very `$(( ))` forms that were removed.
-wrap_bypassed_prefix() {
-  local part="$1" lo hi
-  if [[ "$part" == *-* ]]; then
-    lo=$((10#${part%%-*})); hi=$((10#${part##*-}))
-  else
-    lo=$((10#$part)); hi="$lo"
-  fi
-  # The pre-fix bounds, verbatim.
-  if [[ "$lo" -gt 8191 || "$hi" -gt 8191 ]]; then echo "refused-index"; return; fi
-  if [[ "$hi" -lt "$lo" ]]; then echo "refused-reversed"; return; fi
-  if (( hi - lo + 1 > 1024 )); then echo "refused-cap"; return; fi
-  echo "bypassed"
-}
-for wrap_spec in '9223372036854775809-0' '18446744073709559807' '18446744073709551616'; do
-  out=$(lib_call cpu_range_validate "$wrap_spec" test); rc=$?
-  if [ "$rc" -ne 0 ] && grep -q 'above 8191' <<<"$out"; then
-    pass "cpu-wrap: OBSERVED (round7 F2) — the 64-bit-wrapping spec '$wrap_spec' is REFUSED on the index ceiling"
-  else
-    fail "round7 F2: '$wrap_spec' must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
-  fi
-  # NON-VACUITY: the pre-fix arithmetic really did accept it. Without this the refusal above
-  # could be about a spec that was never a bypass.
-  pre=$(wrap_bypassed_prefix "$wrap_spec")
-  if [ "$pre" = "bypassed" ]; then
-    pass "cpu-wrap: NON-VACUITY — the PRE-FIX arithmetic ACCEPTED '$wrap_spec' (this is the bypass F2 names)"
-  else
-    fail "round7 F2: '$wrap_spec' must have been accepted pre-fix, else the case proves nothing (pre-fix verdict: $pre)"
-  fi
-done
-# ...and the WHOLE-PIPELINE consequence: `cpu_list_expand` must refuse it too, rather than
-# starting a ~9.2e18-iteration loop. Run under `timeout` because the pre-fix failure mode is a
-# HANG-then-OOM, and a test that hangs is not a test that failed.
-if command -v timeout >/dev/null 2>&1; then
-  out=$(timeout 20 bash -c '
-    export CQLITE_WS0_CPU_TOPOLOGY_ROOT="'"$TOPO"'"
-    source "'"$LIB"'"
-    cpu_list_expand "9223372036854775809-0" test' 2>&1); rc=$?
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && grep -q 'above 8191' <<<"$out"; then
-    pass "cpu-wrap: OBSERVED (round7 F2) — cpu_list_expand REFUSES the wrapping spec promptly (pre-fix: an unbounded expansion loop, i.e. an OOM mid-measurement)"
-  else
-    fail "round7 F2: cpu_list_expand must refuse the wrapping spec without looping (rc=$rc$([ "$rc" -eq 124 ] && echo ' = TIMED OUT, i.e. still looping'), out: $(head -2 <<<"$out"))"
-  fi
-else
-  fail "round7 F2: 'timeout' is required to prove the wrapping spec does not loop"
-fi
-# THE PRIMITIVE ITSELF, over the boundary values — because `decimal_le` is now the mechanism
-# behind the bound and a mechanism whose own arithmetic is unmeasured is the #3249 shape.
-# Cases as `a:b:expected`, where expected is `le` (a <= b) or `gt`.
-for dcase in '0:0:le' '8191:8191:le' '8192:8191:gt' '8190:8191:le' \
-             '007:7:le' '007:6:gt' '0:8191:le' \
-             '99999999999999999999999999999999:8191:gt' \
-             '9223372036854775809:8191:gt' '18446744073709559807:8191:gt' \
-             '8191:99999999999999999999999999999999:le'; do
-  a="${dcase%%:*}"; rest="${dcase#*:}"; b="${rest%%:*}"; want="${rest##*:}"
-  if ( source "$REPO_ROOT/scripts/perf/lib-args.sh"; decimal_le "$a" "$b" ) 2>/dev/null; then
-    got=le
-  else
-    got=gt
-  fi
-  if [ "$got" = "$want" ]; then
-    pass "decimal-le: '$a' vs '$b' => $want (no arithmetic, so any length is compared as written)"
-  else
-    fail "round7 F2: decimal_le '$a' '$b' must be $want, got $got"
-  fi
-done
-# ...and the primitive must be REACHABLE from lib-cpu.sh even when sourced STANDALONE, which is
-# how the tests drive it and how a future non-driver caller would. A missing dependency must
-# REFUSE, never silently fall back to arithmetic.
-if ( source "$LIB" >/dev/null 2>&1; declare -F decimal_le >/dev/null ); then
-  pass "decimal-le: lib-cpu.sh sourced STANDALONE has decimal_le in scope (it sources lib-args.sh itself)"
-else
-  fail "round7 F2: lib-cpu.sh must obtain decimal_le when sourced alone, or its bound check is unwired"
-fi
+# The F2 cases (a well-formed decimal too large for signed 64-bit arithmetic defeating the
+# index ceiling AND the expansion cap) live in their own suite, under the campsite rule and
+# along a responsibility seam: that class spans `lib-cpu.sh` AND `lib-args.sh` and now a shared
+# primitive belonging to neither, whereas THIS file's subject is CPU TOPOLOGY. Pointer left
+# rather than the cases deleted, so the next reader of the grammar knows where the arithmetic
+# half is verified. The gate runs both (`tooling-tests`).
 
 # A REVERSED range used to expand to NOTHING and be silently dropped, so '--server-cpus 10-2'
 # pinned an empty set and the sibling check complained about the wrong thing.
