@@ -198,8 +198,29 @@ RE_SED_INPLACE_CLUSTER='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-[nEralusz
 # rule, the cluster rule and both empty-suffix rules before this fix. `--in-place=SUFFIX` needed
 # no such repair; it is already reached through the option run above, and both of its positions
 # are now pinned by controls below rather than assumed.
-RE_SED_INPLACE_EMPTY_DQ='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-i("")'
-RE_SED_INPLACE_EMPTY_SQ='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-i'"('')"
+#
+# AND THEY REQUIRE A TOKEN BOUNDARY AFTER THE CLOSING QUOTES (#3296 round-9 review, a FALSE
+# POSITIVE in the two rules above). The rules must distinguish two spellings that differ only in
+# what FOLLOWS the quotes, because SHELL QUOTE REMOVAL is what decides which one sed sees:
+#   sed -i''      -> argv is `-i`      : a bare in-place flag. BSD declares -i WITH A REQUIRED
+#                                        argument, so it eats the next token. NON-PORTABLE, flag it.
+#   sed -i''.bak  -> argv is `-i.bak`  : the ATTACHED-SUFFIX form. BOTH seds read this identically,
+#                                        and the cluster rule's own comment above already calls the
+#                                        attached suffix portable (`-Ei.bak` is deliberately not
+#                                        matched). PORTABLE — flagging it reds the gate on correct
+#                                        code, and this lint is GATE-WIRED into roborev-lints, so a
+#                                        false FAIL here recreates #3296 one level down: "a key that
+#                                        reds on correct input is the key agents learn to waive".
+# So a match now requires the quotes to END THE TOKEN: whitespace, a shell metacharacter, or
+# end-of-line. Measured, before -> after, on the two directions: the four attached-suffix forms
+# (`-i''.bak`, `-i"".bak`, either beyond an option run, and at EOL) go from FLAGGED to clean, while
+# all seven bare-empty-suffix forms stay FLAGGED — including the three whose boundary is not a
+# space (`sed -i''` at EOL, `$(sed -i'' f)` closing on `)`, and `sed -i'';`), which is why the
+# boundary set is metacharacters and `$`, not `[[:space:]]` alone. Both directions are pinned by
+# permanent controls below; widening the escape would show up there as a missed positive.
+_TOK_END='([[:space:]]|$|[|;&<>()])'
+RE_SED_INPLACE_EMPTY_DQ='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-i("")'"$_TOK_END"
+RE_SED_INPLACE_EMPTY_SQ='(^|[^[:alnum:]_-])sed'"$_OPT_RUN"'[[:space:]]+-i'"('')$_TOK_END"
 # PASTE WITH NO FILE OPERAND, in every spelling that reaches BSD's `if (*argv == NULL) usage();`:
 #   paste -sd,            bundled flags, nothing after them
 #   paste -d ,            the delimiter argument SEPARATED from -d (consumed as the option's
@@ -721,6 +742,29 @@ printf '%s\n' "  sed -e 's/a/b/' -i'' file" >"$tmp/sp-empty-sq.sh" # portability
 assert_flagged "\`sed -e EXPR -i'' file\` (empty SINGLE-quoted suffix beyond the adjacent position)" "$tmp/sp-empty-sq.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
 printf '%s\n' "  sed -e 's/a/b/' -i\"\" file" >"$tmp/sp-empty-dq.sh"
 assert_flagged '`sed -e EXPR -i"" file` (empty DOUBLE-quoted suffix beyond the adjacent position)' "$tmp/sp-empty-dq.sh" # portability-lint-allow: the construct is named in this assertion LABEL, not invoked
+# (g2) THE OTHER SIDE OF THE SAME TOKEN — a CONCATENATED ATTACHED SUFFIX (#3296 round-9 review
+# false positive). `-i''.bak` and `-i"".bak` survive shell quote removal as `-i.bak`, the attached
+# form BOTH seds read identically, so they are PORTABLE and must NOT be reported. These are
+# PERMANENT negative controls: the rules distinguish the two spellings only by the token boundary
+# after the closing quotes, and nothing but a control keeps that boundary in place. They are
+# deliberately paired with the (g) positives above — a regex change that widens the escape to make
+# these pass would break those, and one that drops the boundary again would break these.
+printf '%s\n' "  sed -i''.bak -e 's/a/b/' file" >"$tmp/sp-attach-sq.sh"
+assert_not_flagged "\`sed -i''.bak …\` (quote removal yields the PORTABLE attached suffix -i.bak)" "$tmp/sp-attach-sq.sh"
+printf '%s\n' "  sed -i\"\".bak -e 's/a/b/' file" >"$tmp/sp-attach-dq.sh"
+assert_not_flagged '`sed -i"".bak …` (quote removal yields the PORTABLE attached suffix -i.bak)' "$tmp/sp-attach-dq.sh"
+printf '%s\n' "  sed -e 's/a/b/' -i''.bak file" >"$tmp/sp-attach-sq2.sh"
+assert_not_flagged "\`sed -e EXPR -i''.bak file\` (portable attached suffix BEYOND an option run — the widened option run must not resurrect the false positive)" "$tmp/sp-attach-sq2.sh"
+printf '%s\n' "  sed -i''.bak" >"$tmp/sp-attach-eol.sh"
+assert_not_flagged "\`sed -i''.bak\` at end-of-line (the boundary set must not treat the suffix as a token end)" "$tmp/sp-attach-eol.sh"
+# And the boundaries that are NOT whitespace must still FLAG the bare empty suffix, or the fix
+# above would have bought its precision by losing coverage at end-of-line, before `)` and before `;`.
+printf '%s\n' "  sed -i''" >"$tmp/sp-empty-eol.sh"
+assert_flagged "a bare \`sed -i''\` at END-OF-LINE (boundary \$)" "$tmp/sp-empty-eol.sh"
+printf '%s\n' "  order=\$(sed -i'' f)" >"$tmp/sp-empty-paren.sh" # portability-lint-allow: deliberate fixture: the bare empty-suffix spelling this control must DETECT
+assert_flagged "a bare \`sed -i''\` inside a command substitution (boundary \`)\`)" "$tmp/sp-empty-paren.sh"
+printf '%s\n' "  sed -i''; echo done" >"$tmp/sp-empty-semi.sh" # portability-lint-allow: deliberate fixture: the bare empty-suffix spelling this control must DETECT
+assert_flagged "a bare \`sed -i''\` terminated by a semicolon (boundary \`;\`)" "$tmp/sp-empty-semi.sh"
 # The widening must not reach past a shell metacharacter here either: an empty-suffix `-i` on the
 # far side of a pipe belongs to a DIFFERENT command.
 printf '%s\n' '  sed '"'"'s/x/y/'"'"' f | grep -i'"''"' foo' >"$tmp/sp-empty-pipe.sh"
