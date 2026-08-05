@@ -521,7 +521,7 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
       info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/perf-capability.sh --install && sysctl -q --system"
       info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
     else
-      info "write + apply the drop-in:  bash scripts/perf-capability.sh --install ${PERF_RUN_AS%% } && ${PERF_RUN_AS}sysctl -q --system"
+      info "write + apply the drop-in:  bash scripts/perf-capability.sh --install ${PERF_RUN_AS% } && ${PERF_RUN_AS}sysctl -q --system"
     fi
   }
 
