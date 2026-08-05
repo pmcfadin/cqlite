@@ -660,44 +660,77 @@ else
   # land, but that is protection only if the caller READS it; a bare statement call leaves
   # "matched nothing" (and every other unmeasured state) on the permissive path, so the case's
   # later assertion can be satisfied by the STALE content — the roborev finding on
-  # test_roborev_review_guard.sh's cx29 restore, which read `ok` on cx28's mutation. Line-
-  # oriented on purpose (no shell tokeniser here, by design): a call is required to sit in a
-  # CONDITIONAL position, i.e. after `if`/`elif`/`while`/`until` (optionally negated) or joined
-  # with `&&`/`||`. Definitions and prose are excluded, and the rule carries a POSITIVE CONTROL
-  # below so a regex that silently matches nothing cannot pass.
+  # test_roborev_review_guard.sh's cx29 restore, which read `ok` on cx28's mutation.
+  #
+  # AN ALLOW-LIST, NOT A DENY-LIST (#3296 round-5 blocker 3). The first form of this rule
+  # EXCLUDED lines containing `&&`/`||` anywhere, which accepted `true && sed_inplace "$f" "$e"`
+  # and `sed_inplace "$f" "$e"; true || bad` — two forms in which the mutation's status is
+  # DISCARDED under this script's non-errexit execution. That is the very shape this rule exists
+  # to catch, reintroduced inside the rule: unanticipated spellings inheriting the permissive
+  # branch. So the ACCEPTED forms are now ENUMERATED and everything else FAILs, including forms
+  # nobody anticipated:
+  #   (1) directly controlled:      [if|elif|while|until] [!] sed_inplace…      (start of line)
+  #   (2) direct failure handler:   sed_inplace… || bad|return|exit              (start of line,
+  #                                 with no `;`/`&` between the call and the `||`)
+  # Deciding "is this status consumed?" in general is shell-semantics analysis and is deliberately
+  # OUT OF BOUNDS. A call in an unlisted form reds the gate with a message saying the FORM was not
+  # recognised, and the author rewrites it into an accepted form (or marks the line
+  # `portability-lint-allow`, the repo's visible-in-the-diff escape marker, which scan_hits
+  # honours). False FAILs are acceptable noise here; a false PASS is blindness.
+  #
   # Reuses scan_hits, so comment-only lines are blanked and a call whose `|| bad …` sits on a
   # CONTINUATION line is judged on the joined logical line (the deliberate design: line-oriented
   # matching plus continuation joining, never a shell tokeniser).
   _ss_call_re='(^|[^[:alnum:]_])sed_inplace(_verified)?[[:space:]]+"'
-  sed_status_offenders() { # sed_status_offenders <file> -> "lineno:logical-line" per discarding call
+  _ss_ok_controlled='^[0-9]+:[[:space:]]*(if|elif|while|until)[[:space:]]+(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"'
+  _ss_ok_handler='^[0-9]+:[[:space:]]*(![[:space:]]*)?sed_inplace(_verified)?[[:space:]]+"[^;&]*\|\|[[:space:]]*(bad|return|exit)([[:space:]]|$)'
+  sed_status_offenders() { # sed_status_offenders <file> -> "lineno:logical-line" per unaccepted call
     scan_hits "$_ss_call_re" "$1" \
-      | grep -vE '^[0-9]+:[[:space:]]*(if|elif|while|until)[[:space:]]+!?[[:space:]]*sed_inplace' \
-      | grep -vE '^[0-9]+:.*(\&\&|\|\|)[[:space:]]*!?[[:space:]]*sed_inplace' \
-      | grep -vE '^[0-9]+:.*sed_inplace(_verified)?[[:space:]].*(\&\&|\|\|)' \
+      | grep -vE "$_ss_ok_controlled" \
+      | grep -vE "$_ss_ok_handler" \
       || printf ''
   }
-  # BOTH DIRECTIONS. The rule must flag the discarding form and must NOT flag the two accepted
-  # status-reading forms, or it would either pass vacuously or force the callers to hide from it.
-  printf '%s\n' '  sed_inplace "$f" '"'"'s/a/b/'"'" >"$tmp/sed-status-violation.sh"
-  printf '%s\n' 'if sed_inplace "$f" '"'"'s/a/b/'"'"'; then :; fi' >"$tmp/sed-status-ok-if.sh"
-  printf '%s\n' '  sed_inplace "$f" \' '    '"'"'s/a/b/'"'"' || bad no' >"$tmp/sed-status-ok-or.sh"
-  if [ -n "$(sed_status_offenders "$tmp/sed-status-violation.sh")" ]; then
-    ok 'AC2 control: the discarded-status rule DETECTS a bare `sed_inplace` statement call (so its clean verdict below is a measurement)'
-  else
-    bad 'AC2 control: the discarded-status rule did not flag a bare `sed_inplace` statement call — every clean verdict from it would be vacuous'
-  fi
-  for _ssok in if:"$tmp/sed-status-ok-if.sh" or:"$tmp/sed-status-ok-or.sh"; do
-    if [ -z "$(sed_status_offenders "${_ssok#*:}")" ]; then
-      ok "AC2 control: the rule accepts a status-READING call (${_ssok%%:*} form)"
+  # BOTH DIRECTIONS, and the FALSE-ACCEPTING forms the round-5 review named are PERMANENT
+  # negative controls: the complement of the allow-list is pinned, so a widening cannot regress
+  # unnoticed. `flag` = must be reported, `ok` = must be accepted.
+  _ss_ctl_dir="$tmp/sed-status"
+  mkdir -p "$_ss_ctl_dir"
+  _sq="'"
+  printf '%s\n' "  sed_inplace \"\$f\" ${_sq}s/a/b/${_sq}" >"$_ss_ctl_dir/flag-bare.sh"
+  printf '%s\n' "  true && sed_inplace \"\$f\" \"\$expr\"" >"$_ss_ctl_dir/flag-and-chain.sh"
+  printf '%s\n' "  sed_inplace \"\$f\" \"\$expr\"; true || bad no" >"$_ss_ctl_dir/flag-semicolon-or.sh"
+  printf '%s\n' "  sed_inplace \"\$f\" \"\$expr\" && ok yes" >"$_ss_ctl_dir/flag-and-success.sh"
+  printf '%s\n' "if sed_inplace \"\$f\" ${_sq}s/a/b/${_sq}; then :; fi" >"$_ss_ctl_dir/ok-if.sh"
+  printf '%s\n' "  sed_inplace \"\$f\" \\" "    ${_sq}s/a/b/${_sq} || bad no" >"$_ss_ctl_dir/ok-or-bad.sh"
+  printf '%s\n' "  elif ! sed_inplace_verified \"\$f\" \"\$expr\" \"\$want\"; then" >"$_ss_ctl_dir/ok-elif-negated.sh"
+  for _ssc in \
+    'flag:bare statement call:flag-bare.sh' \
+    'flag:`true && sed_inplace …` (status discarded — the round-5 finding):flag-and-chain.sh' \
+    'flag:`sed_inplace …; true || bad` (the handler belongs to `true`):flag-semicolon-or.sh' \
+    'flag:`sed_inplace … && ok` (a SUCCESS chain handles no failure):flag-and-success.sh' \
+    'ok:`if sed_inplace …; then`:ok-if.sh' \
+    'ok:a line-broken call with `|| bad` on the continuation:ok-or-bad.sh' \
+    'ok:`elif ! sed_inplace_verified …; then`:ok-elif-negated.sh'; do
+    _ss_want="${_ssc%%:*}"
+    _ss_rest="${_ssc#*:}"
+    _ss_why="${_ss_rest%:*}"
+    _ss_file="$_ss_ctl_dir/${_ss_rest##*:}"
+    _ss_got=$(sed_status_offenders "$_ss_file")
+    if [ "$_ss_want" = flag ] && [ -n "$_ss_got" ]; then
+      ok "AC2 control: the status-check allow-list REPORTS $_ss_why"
+    elif [ "$_ss_want" = flag ]; then
+      bad "AC2 control: the status-check allow-list ACCEPTED $_ss_why — the mutation's status is discarded there, so a stale-content pass is possible again"
+    elif [ -z "$_ss_got" ]; then
+      ok "AC2 control: the status-check allow-list accepts $_ss_why"
     else
-      bad "AC2 control: the rule flagged a status-READING call (${_ssok%%:*} form) — it would force callers to hide from it rather than measure"
+      bad "AC2 control: the status-check allow-list reported an ACCEPTED form ($_ss_why) — it would force callers to hide from it rather than measure"
     fi
   done
   _ss_hits=$(sed_status_offenders "$GUARD")
   if [ -z "$_ss_hits" ]; then
-    ok 'AC2: every sed_inplace/sed_inplace_verified call in the guard test READS the status (no mutation is asserted against without being measured)'
+    ok 'AC2: every sed_inplace/sed_inplace_verified call in the guard test is in an ACCEPTED status-reading form (no mutation is asserted against without being measured)'
   else
-    bad "AC2: the guard test discards a mutation helper's status at: $(printf '%s' "$_ss_hits" | tr '\n' ' ') — an unapplied edit would be asserted against, and the case could pass on stale content"
+    bad "AC2: the guard test has a mutation call in an UNRECOGNISED form (its status may be discarded) at: $(printf '%s' "$_ss_hits" | tr '\n' ' ') — rewrite it as \`if [!] sed_inplace…\` or \`sed_inplace… || bad|return|exit\`"
   fi
 
   # --- summary_key_order under the paste shim, plus the RED side of the differential.
