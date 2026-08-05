@@ -623,7 +623,7 @@ on_exit() {
   # The snapshot-capture watcher (#3312) must never outlive the wrapper, including on a `set -e`
   # abort before the review returns. Defined in the oracles file, which may not be sourced yet on
   # the earliest failure paths — hence the existence test rather than a bare call.
-  if command -v roborev_snapshot_capture_stop >/dev/null 2>&1; then
+  if command -v roborev_snapshot_observe_stop >/dev/null 2>&1; then
     roborev_snapshot_observe_stop
   fi
   if [ "$EMITTED" -eq 0 ]; then
@@ -746,7 +746,7 @@ set -e
 # Stopped as soon as the review returns: the snapshot cannot appear after that, and a watcher left
 # running would outlive the wrapper. Also stopped from the EXIT trap, for the paths that never reach
 # here.
-roborev_snapshot_capture_stop
+roborev_snapshot_observe_stop
 
 # --- step 5: reviewed-RANGE assert (AC2) — STRUCTURED data is the oracle -------
 #
