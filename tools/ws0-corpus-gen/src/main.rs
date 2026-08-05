@@ -12,7 +12,7 @@
 //! ws0-corpus-gen --out /data/ws0-3096-b --verify-against docs/reports/ws0-3096-artifacts/corpus-identity.json
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -75,7 +75,111 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Where this run will write an identity, for the aliasing check below.
+fn identity_write_targets(cli: &Cli) -> Vec<PathBuf> {
+    let mut targets = vec![cli.out.join("corpus-identity.json")];
+    if let Some(p) = cli.identity_out.as_ref() {
+        targets.push(p.clone());
+    }
+    targets
+}
+
+/// Compare two paths for the "same file" relation as robustly as this can be done
+/// WITHOUT the file existing.
+///
+/// `canonicalize` is tried first and is authoritative when it succeeds (it resolves
+/// symlinks, `..` and duplicate separators). It fails for a path that does not exist yet —
+/// which `--identity-out` typically is — so the fallback canonicalizes the PARENT
+/// directory (which does exist, or the write would fail anyway) and compares that against
+/// the file name. A lexical comparison alone would miss `./x` vs `x`, and treating a
+/// failed canonicalize as "different" would be the permissive branch on an unmeasured
+/// state — the exact shape #3272 exists to remove — so an unresolvable parent falls back
+/// to the lexical comparison rather than to `false`.
+fn same_path(a: &Path, b: &Path) -> bool {
+    if let (Ok(ra), Ok(rb)) = (a.canonicalize(), b.canonicalize()) {
+        return ra == rb;
+    }
+    let resolve = |p: &Path| -> PathBuf {
+        match (p.parent(), p.file_name()) {
+            (Some(parent), Some(name)) => match parent.canonicalize() {
+                Ok(real) => real.join(name),
+                Err(_) => p.to_path_buf(),
+            },
+            _ => p.to_path_buf(),
+        }
+    };
+    resolve(a) == resolve(b)
+}
+
+/// The PRIOR identity `--verify-against` names, read BEFORE anything is generated.
+///
+/// # Why this cannot happen after generation (issue #3272 review R5)
+///
+/// It used to. The generated identity was written to `<out>/corpus-identity.json` (and to
+/// `--identity-out`) and only THEN was `--verify-against` read — so if the verification
+/// path aliased either output, the "prior" that was read back was the identity THIS RUN
+/// had just written. `diff` then compared the new identity against itself and reported
+///
+///     determinism:    PASS — reproduced <path> exactly
+///
+/// having reproduced nothing. That is a CIRCULAR SELF-COMPARISON presented as the
+/// determinism check, and the determinism check is the single thing that makes every
+/// figure measured against this corpus comparable to a recorded one.
+///
+/// Two independent closures, because either alone leaves a hole:
+///
+/// * READ FIRST. The prior is loaded and deserialized before `generate()` runs, so what
+///   the comparison sees cannot be a product of this run whatever the paths are. This
+///   also fails FAST — an unreadable or malformed prior is reported before minutes of
+///   generation rather than after.
+/// * REFUSE THE ALIAS. Reading first makes the comparison honest, but a verification path
+///   that aliases an output is still a mistake worth naming: the operator asked to compare
+///   against a file this run is about to overwrite, so the artifact they wanted to keep
+///   would be destroyed and a re-run would compare against the new bytes. Refused with
+///   the remedy, rather than silently doing something defensible.
+fn load_prior_identity(cli: &Cli) -> GenResult<Option<(PathBuf, CorpusIdentity)>> {
+    let Some(prior_path) = cli.verify_against.as_ref() else {
+        return Ok(None);
+    };
+    for target in identity_write_targets(cli) {
+        if same_path(prior_path, &target) {
+            return Err(format!(
+                "--verify-against {} is the SAME FILE this run writes its own identity to \
+                 ({}). Comparing a generated identity against itself is not a determinism \
+                 check — it is a circular self-comparison that reports `determinism: PASS` \
+                 having reproduced nothing, and it would also DESTROY the recorded artifact \
+                 the comparison was supposed to be against. Point --verify-against at a \
+                 committed record (e.g. \
+                 docs/reports/ws0-3096-artifacts/corpus-identity.json), or generate into a \
+                 different --out (issue #3272).",
+                prior_path.display(),
+                target.display()
+            )
+            .into());
+        }
+    }
+    // READ AND DESERIALIZE NOW, before a single byte of corpus exists.
+    let prior_json = std::fs::read_to_string(prior_path).map_err(|e| {
+        format!(
+            "--verify-against {} could not be read: {e}. The prior identity is read BEFORE \
+             generation so the comparison cannot be against this run's own output, and so \
+             an unusable prior fails in seconds rather than after a multi-GB write.",
+            prior_path.display()
+        )
+    })?;
+    let prior: CorpusIdentity = serde_json::from_str(&prior_json).map_err(|e| {
+        format!(
+            "--verify-against {} is not a corpus identity: {e}",
+            prior_path.display()
+        )
+    })?;
+    Ok(Some((prior_path.clone(), prior)))
+}
+
 async fn run(cli: Cli) -> GenResult<ExitCode> {
+    // BEFORE generation, and before any identity is written (issue #3272 review R5).
+    let prior = load_prior_identity(&cli)?;
+
     let spec = CorpusSpec {
         out: cli.out.clone(),
         rows: cli.rows,
@@ -130,9 +234,9 @@ async fn run(cli: Cli) -> GenResult<ExitCode> {
         identity.components.len()
     );
 
-    if let Some(prior_path) = cli.verify_against {
-        let prior_json = std::fs::read_to_string(&prior_path)?;
-        let prior: CorpusIdentity = serde_json::from_str(&prior_json)?;
+    // `prior` was read BEFORE `generate()` ran, so it cannot be this run's own output
+    // whatever the paths are (issue #3272 review R5).
+    if let Some((prior_path, prior)) = prior {
         let diffs = identity.diff(&prior);
         if diffs.is_empty() {
             println!(

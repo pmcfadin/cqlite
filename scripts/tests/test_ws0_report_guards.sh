@@ -994,13 +994,21 @@ d="$TMP/full-matrix"; mkdir -p "$d"
 for temp in warm cold; do
   case "$temp" in warm) pw=ok ;; cold) pw=skipped-cold-arm ;; esac
   make_scan_rep "$d" "$temp" 1 "$pw"
+  # THREE arms this round (scan + bypass + merge), so `arms_in_round` is 3 and the
+  # positions are 1..3 — `make_scan_rep`'s 2-arm default is overridden here rather than
+  # left to disagree with the round it is part of, which the reporter would (correctly)
+  # refuse as a PARTIAL round.
+  make_round "$d" "scan-$temp-1" 1 1 3
+  pos=1
   for arm in bypass merge; do
+    pos=$((pos + 1))
     tag="flight-$arm-$temp-1"
     cat > "$d/$tag.jsonl" <<EOF
 {"round":"$tag","requests_ok":1,"requests_error":0,"rows_total":$CORPUS_ROWS,"rows_per_s":250000.0,"duration_s":4.0}
 EOF
     perf_csv "$d/perf-$tag.csv" 8000000 16000000
     printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
+    make_round "$d" "$tag" 1 "$pos" 3
   done
 done
 out=$(run_report_full "$d" "$TMP/corpus" "warm cold" "bypass merge" 1 1); rc=$?

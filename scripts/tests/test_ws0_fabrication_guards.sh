@@ -206,6 +206,68 @@ REAL_ERR='{"round":"r","requests_ok":1,"requests_error":4,"rows_total":1000,"row
 d="$TMP/real-errors"; make_session "$d" "$REAL_ERR"
 expect_reject "an OBSERVED non-zero requests_error is refused, naming the count" \
   "had 4 failed request" "$d" "$TMP/corpus"
+# --- R6: A NEGATIVE counter is CORRUPT, not a clean zero --------------------
+# NON-VACUITY, measured against the round-1 reporter (`if errors > 0`): a step record
+# carrying `requests_error: -3` exited **0** and printed the full report, with the rep
+# counted as having NO failed requests. Only the POSITIVE half of "not zero" was tested,
+# so every negative value inherited the PERMISSIVE branch — the same fabricated-zero
+# defect as the `.get("requests_error", 0)` that branch had just replaced, arrived at from
+# the other side. `-3` is not "fewer than no errors"; it is a counter that cannot have been
+# validly observed.
+NEG_ERR='{"round":"r","requests_ok":1,"requests_error":-3,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/neg-error"; make_session "$d" "$NEG_ERR"
+expect_reject "a NEGATIVE requests_error is FATAL (pre-fix: counted as ZERO errors)" \
+  "not a possible count" "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus")
+if grep -q "CORRUPT artifact, not a clean zero" <<<"$out" \
+  && grep -q "used to be \`if errors > 0\`" <<<"$out"; then
+  pass "the refusal names the shape (a `> 0` test where `== 0` was meant)"
+else
+  fail "the negative-counter refusal must name the defect shape (out: $out)"
+fi
+# The same audit on every OTHER counter comparison in the reporting path — a `> 0`/`== 0`
+# where the property is "a valid observation" is one class, not one line.
+NEG_ROWS='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":-1000,"rows_per_s":250000.0,"duration_s":4.0}'
+d="$TMP/neg-rows"; make_session "$d" "$NEG_ROWS"
+expect_reject "a NEGATIVE rows_total is FATAL (it is a denominator; == 0 alone missed it)" \
+  "not a measurement" "$d" "$TMP/corpus"
+NEG_RPS='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":-250000.0,"duration_s":4.0}'
+d="$TMP/neg-rps"; make_session "$d" "$NEG_RPS"
+expect_reject "a NEGATIVE rows_per_s is FATAL (spread() only checks the MEDIAN)" \
+  "not a positive finite rate" "$d" "$TMP/corpus"
+# ...and a NON-FINITE one, which would propagate into every derived figure as a printable
+# number standing in for an absent measurement.
+for bad in Infinity NaN; do
+  d="$TMP/nonfinite-$bad"
+  make_session "$d" "{\"round\":\"r\",\"requests_ok\":1,\"requests_error\":0,\"rows_total\":1000,\"rows_per_s\":$bad,\"duration_s\":4.0}"
+  expect_reject "a $bad rows_per_s is FATAL (not a rate)" \
+    "not a positive finite rate" "$d" "$TMP/corpus"
+done
+# The BARE-SCAN denominator, both halves: a negative row count and a degenerate timing
+# window. The latter used to be a `ZeroDivisionError` TRACEBACK rather than a refusal —
+# the only degenerate case in the file without a stated cause, and a traceback names the
+# DIVISION rather than the artifact (#3272 review round 2 nit).
+d="$TMP/scan-neg-rows"; make_session "$d" "$GOOD_FLIGHT"
+printf '{ "rows_denominator": -5, "timed_scan_secs": 2.0, "setup_secs": 0.5 }\n' > "$d/scan-warm-1.json"
+expect_reject "a NEGATIVE bare-scan rows_denominator is FATAL" \
+  "not a measurement" "$d" "$TMP/corpus"
+d="$TMP/scan-zero-secs"; make_session "$d" "$GOOD_FLIGHT"
+printf '{ "rows_denominator": 1000, "timed_scan_secs": 0.0, "setup_secs": 0.5 }\n' > "$d/scan-warm-1.json"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "no rows/s for a measurement window that is zero" <<<"$out" \
+  && ! grep -q "ZeroDivisionError\|Traceback" <<<"$out"; then
+  pass "a ZERO timed_scan_secs is a NAMED refusal, not a ZeroDivisionError traceback"
+else
+  fail "a zero measurement window must be refused by name, not raise (rc=$rc, out: $out)"
+fi
+for bad in -1.0 Infinity NaN; do
+  d="$TMP/scan-secs-$bad"; make_session "$d" "$GOOD_FLIGHT"
+  printf '{ "rows_denominator": 1000, "timed_scan_secs": %s, "setup_secs": 0.5 }\n' "$bad" \
+    > "$d/scan-warm-1.json"
+  expect_reject "a $bad timed_scan_secs is FATAL (not a measurement window)" \
+    "zero, negative, or not finite" "$d" "$TMP/corpus"
+done
+
 # An explicit ZERO is accepted: the fix is "observe it", not "reject the key".
 ZERO_ERR='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250000.0,"duration_s":4.0}'
 d="$TMP/zero-errors"; make_session "$d" "$ZERO_ERR"
@@ -299,8 +361,43 @@ fi
 # an `inf` ratio as the headline. BOTH halves are refused below.
 ZERO_RPS='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":0.0,"duration_s":4.0}'
 d="$TMP/zero-rps"; make_session "$d" "$ZERO_RPS"
-expect_reject "a rep series with a ZERO median is REFUSED (never 'spread 0.0%')" \
-  "non-positive median" "$d" "$TMP/corpus"
+# It is refused EARLIER than it used to be, and the earlier refusal is the stronger one
+# (#3272 review round 2, R6 audit). `spread()` only refuses a non-positive MEDIAN, so one
+# impossible rep among three left the median positive and published a spread computed over
+# a rate that cannot exist. The per-REP check catches that; `spread()`'s median check is
+# retained below as the series-level statement of the same rule.
+expect_reject "a rep recording ZERO rows/s is REFUSED at the REP, before any median" \
+  "not a positive finite rate" "$d" "$TMP/corpus"
+# The SERIES-level half, still live: a series whose reps are individually plausible but
+# whose median is non-positive cannot arise from the per-rep check alone, so `spread()` is
+# driven directly rather than through an artifact it can no longer see.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_collect import spread
+from ws0_validate import Invalid
+for series in ([0.0], [0.0, 0.0, 0.0], [-1.0, 0.0, 1.0]):
+    try:
+        spread(series)
+    except Invalid as e:
+        assert "non-positive median" in str(e), str(e)
+    else:
+        raise SystemExit(f"spread({series}) must refuse a non-positive median")
+try:
+    spread([])
+except Invalid as e:
+    assert "nothing was observed" in str(e), str(e)
+else:
+    raise SystemExit("spread([]) must refuse an empty series")
+# ...and the ACCEPT direction, so it is not a function that refuses everything.
+got = spread([100.0, 200.0, 300.0])
+assert got["median"] == 200.0 and got["n"] == 3, got
+PY
+then
+  pass "spread() REFUSES a non-positive median and an empty series, and accepts a real one"
+else
+  fail "spread() must refuse a non-positive median (series-level) and accept a real series"
+fi
 out=$(run_report "$d" "$TMP/corpus")
 # The report LINE must be absent — asserted on the line's own shape, not on the
 # phrase, because the refusal text quotes the phrase it is refusing.
@@ -309,39 +406,98 @@ if ! grep -q 'rows/s  \[0\.\.0' <<<"$out" && ! grep -q 'bare/flight = infx' <<<"
 else
   fail "the degenerate series must not be printed at all (out: $out)"
 fi
-# STRUCTURAL, over the EXECUTABLE source only: docstrings are stripped via `ast`
-# before the scan, because the comments explaining each fix necessarily quote the
-# idiom they removed — a literal grep over the raw file would red on its own
-# documentation, and the obvious "fix" for that would be to stop documenting it.
-if python3 - "$REPO_ROOT/scripts/perf/ws0_report.py" <<'PY'
-import ast, sys
+# STRUCTURAL, over EVERY reporting-path file's EXECUTABLE source (#3272 review round 2
+# nit). It used to parse `ws0_report.py` alone — but every fail-closed DECISION now lives
+# in `ws0_validate.py`, the collection in `ws0_collect.py` and the interleaving in
+# `ws0_rounds.py`, so a new `.get(k, 0)` in any of them was outside the scan's subject
+# entirely. The file list is DISCOVERED from the directory, not enumerated: a fifth module
+# would otherwise be unscanned the moment someone adds it, which is how this hole opened.
+#
+# EVERY STRING CONSTANT is stripped via `ast` before the scan, not only docstrings: the
+# comments explaining each fix — and the DIAGNOSTICS that name the idiom they refuse
+# ("the check used to be `if errors > 0`") — necessarily quote what they removed. A literal
+# grep over the raw file reds on its own documentation, and the obvious "fix" for that
+# would be to stop documenting it. Stripping constants keeps the scan over CODE, which is
+# the only place an idiom can execute.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import ast, pathlib, sys
 
-tree = ast.parse(open(sys.argv[1]).read())
-for node in ast.walk(tree):
-    if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        body = node.body
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
-                and isinstance(body[0].value.value, str):
-            node.body = body[1:] or [ast.Pass()]
-code = ast.unparse(ast.fix_missing_locations(tree))
+subject = sorted(
+    p for p in pathlib.Path(sys.argv[1]).glob("ws0_*.py")
+)
+if len(subject) < 4:
+    raise SystemExit(
+        f"the banned-idiom scan found only {len(subject)} reporting-path module(s)"
+        f" ({[p.name for p in subject]}); its subject is the whole set, and a subject"
+        " smaller than the set is how ws0_validate.py went unscanned"
+    )
 
-# Each of the five permissive-default idioms round 1 found, as it appeared in the
-# executable source. `ast.unparse` normalises quoting to single quotes.
+# Each permissive-default idiom review found, as it appears in the executable source.
+# `ast.unparse` normalises quoting to single quotes.
 banned = {
     "if med else 0.0": "spread() still defaults a zero-median spread to 0.0",
-    "float('inf')": "the bare/flight ratio still falls back to inf",
+    "float('inf')": "a figure still falls back to inf",
     "get('requests_error', 0)": "requests_error still reads through a defaulting get",
     "get('prewarm_all_ok', True)": "prewarm_all_ok still defaults to the PERMISSIVE value",
     "records[-1]": "the reporter still consumes only the LAST step record",
+    "get('cycles', 0)": "a perf counter still reads through a defaulting get",
+    "get('rows', 0)": "a row count still reads through a defaulting get",
+    "if errors > 0": "a counter is tested for the BAD half only; a negative value inherits the permissive branch (R6)",
 }
-hits = [why for idiom, why in banned.items() if idiom in code]
+hits = []
+for path in subject:
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                node.body = body[1:] or [ast.Pass()]
+        # Every OTHER string constant too — a diagnostic quoting the idiom it refuses is
+        # documentation, not an execution of it.
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            node.value = ""
+    code = ast.unparse(ast.fix_missing_locations(tree))
+    hits += [f"{path.name}: {why}" for idiom, why in banned.items() if idiom in code]
 if hits:
     raise SystemExit("; ".join(hits))
+print(f"scanned {len(subject)} module(s): {', '.join(p.name for p in subject)}", file=sys.stderr)
 PY
 then
-  pass "STRUCTURAL: none of the five permissive-default idioms remains in the EXECUTABLE source"
+  pass "STRUCTURAL: no permissive-default idiom in ANY reporting-path module (subject discovered)"
 else
-  fail "a permissive-default idiom is still present in ws0_report.py"
+  fail "a permissive-default idiom is still present in the reporting path"
+fi
+# NON-VACUITY for that scan: a planted idiom in a module OTHER than ws0_report.py must be
+# caught. The pre-fix scan parsed ws0_report.py alone, so this planted line was invisible.
+if ! python3 - "$TMP/scan-subject" "$REPO_ROOT/scripts/perf" <<'PY'
+import ast, pathlib, shutil, sys
+tmp = pathlib.Path(sys.argv[1]); tmp.mkdir(parents=True, exist_ok=True)
+for p in pathlib.Path(sys.argv[2]).glob("ws0_*.py"):
+    shutil.copy(p, tmp / p.name)
+# Plant the idiom in ws0_validate.py, NOT the reporter — the file the old scan never read.
+target = tmp / "ws0_validate.py"
+target.write_text(target.read_text() + "\n\ndef _planted(rec):\n    return rec.get('cycles', 0)\n")
+subject = sorted(tmp.glob("ws0_*.py"))
+banned = {"get('cycles', 0)": "planted"}
+hits = []
+for path in subject:
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            b = node.body
+            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+                    and isinstance(b[0].value.value, str):
+                node.body = b[1:] or [ast.Pass()]
+    code = ast.unparse(ast.fix_missing_locations(tree))
+    hits += [path.name for idiom in banned if idiom in code]
+if hits:
+    raise SystemExit(f"planted idiom found in {hits} (expected — the scan is not vacuous)")
+PY
+then
+  pass "NON-VACUITY: the scan CATCHES an idiom planted in ws0_validate.py (pre-fix: invisible)"
+else
+  fail "the banned-idiom scan must catch an idiom outside ws0_report.py, else its subject is too small"
 fi
 
 # ==========================================================================

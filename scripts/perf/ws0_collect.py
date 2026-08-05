@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+"""Per-arm COLLECTION: one (arm, temperature) block from a session's artifacts (#3272).
+
+Split out of `ws0_report.py` under the campsite rule (source target ~800 lines), along the
+same seam the other two modules follow — this file turns ARTIFACTS into a measurement
+block, `ws0_validate.py` decides what may be turned into one, `ws0_rounds.py` owns when
+each rep ran, and `ws0_report.py` composes the blocks into a report and prints it.
+
+Everything here obeys the one rule the whole rig exists for:
+
+    **A quantity that was not validly OBSERVED is an ERROR, never a fabricated value.**
+
+Which, after review round 2, includes the shape arrived at from the other side: an
+accept condition written as `!= <bad>` rather than `== <good>`. `if errors > 0` treated a
+NEGATIVE `requests_error` as a clean zero-error measurement, because only the positive
+half of "not zero" was tested — the same fabricated-zero defect as the defaulting
+`.get("requests_error", 0)` it replaced. Every counter comparison in this file is now
+stated as the AFFIRMATIVE value the quantity must have (#3272 R6).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import pathlib
+import statistics
+
+from ws0_rounds import collect_round_meta
+from ws0_validate import (
+    Invalid,
+    classify_prewarm,
+    read_perf_counters,
+    require_complete,
+)
+
+# The events every perf leg must carry. Named here so an absent one is reported by
+# name rather than defaulting to zero.
+REQUIRED_EVENTS = ("cycles", "instructions")
+
+
+def spread(values: list[float]) -> dict[str, float]:
+    """Median + observed spread of a rep series, or `Invalid`.
+
+    The `spread_pct_of_median` divisor used to be written
+    `(hi - lo) / med * 100.0 if med else 0.0` — a PERMISSIVE NUMERIC FALLBACK in the
+    reporting path (#3272 review). A zero median means every rep of this series
+    measured zero rows/s (or zero cycles/row), which is not a series with an
+    undefined spread: it is not a measurement at all. Reporting `spread 0.0%` beside
+    it would have described the degenerate case as the TIGHTEST possible one — the
+    exact inversion of what the number means.
+    """
+    if not values:
+        raise Invalid("a rep series with no values reached spread() — nothing was observed")
+    lo, hi = min(values), max(values)
+    med = statistics.median(values)
+    if med <= 0:
+        raise Invalid(
+            f"a rep series has a non-positive median ({med}; observed {values}). A zero"
+            " median is not a series whose spread is undefined — it is a series that"
+            " measured nothing, and `spread 0.0%` would read as the tightest possible"
+            " result rather than as the absent one."
+        )
+    return {
+        "median": med,
+        "min": lo,
+        "max": hi,
+        "spread_abs": hi - lo,
+        "spread_pct_of_median": (hi - lo) / med * 100.0,
+        "n": len(values),
+    }
+
+
+def read_prewarm(d: pathlib.Path, tag: str) -> str:
+    """The prewarm outcome THIS rep recorded, or `unrecorded`.
+
+    Absent file => the driver predates the recording, or the rep died before its
+    prewarm. Either way the warm/cold separation is UNVERIFIED for that rep, which
+    is reported rather than assumed healthy (issue #3096 review, finding 1).
+    """
+    p = d / f"{tag}.prewarm.status"
+    return p.read_text().strip() if p.exists() else "unrecorded"
+
+
+def prewarm_block(prewarm: list[dict], temp: str) -> dict:
+    """The prewarm record + the single `prewarm_all_ok` field a reader can check.
+
+    `classify_prewarm` is TEMPERATURE-SCOPED (#3272 finding 2): the cold arm's
+    `skipped-cold-arm` sentinel can only satisfy a COLD rep, and raises on a warm
+    one instead of quietly counting as success.
+    """
+    return {
+        "prewarm": prewarm,
+        "prewarm_all_ok": all(
+            classify_prewarm(temp, p["status"]) == "ok" for p in prewarm
+        ),
+        "prewarm_required_status": temp,
+    }
+
+
+def prewarm_warning(block: dict, arm_label: str, temp: str) -> list[str]:
+    """The loud summary line for a degraded prewarm. Never swallowed.
+
+    Keyed on `is True`, never on a defaulting `.get(..., True)` (#3272 review): the
+    old form defaulted a VERDICT-CARRYING key to the PERMISSIVE value, so a block
+    that had lost `prewarm_all_ok` — a future refactor, a hand-edited artifact —
+    would have suppressed the warning by ABSENCE. A verdict that was not computed is
+    an error, never a pass.
+    """
+    verdict = block.get("prewarm_all_ok")
+    if verdict is not True and verdict is not False:
+        raise Invalid(
+            f"the {arm_label} block carries no boolean `prewarm_all_ok` (got"
+            f" {verdict!r}) — the prewarm verdict was never computed, and an absent"
+            " verdict may not be read as a passing one"
+        )
+    if verdict is True:
+        return []
+    degraded = [
+        p for p in block["prewarm"] if classify_prewarm(temp, p["status"]) != "ok"
+    ]
+    return [
+        f"      !! PREWARM DEGRADED on {arm_label} rep(s) "
+        + ", ".join(f"{p['rep']}={p['status']}" for p in degraded)
+        + " — this 'warm' figure may be partly cold; the warm/cold separation"
+        " (spec R2/AC5) is UNVERIFIED for those reps"
+    ]
+
+
+def collect_scan(d: pathlib.Path, temp: str, reps: int) -> dict:
+    """The bare-scan arm, WITH each rep's observed round/position (#3272 R3).
+
+    The round is read from the rep's own `<tag>.round` artifact and cross-checked against
+    the rep index in its filename, so every figure below is attributed to the round it
+    was MEASURED in rather than to the index this loop happens to be on.
+    """
+    rows_per_sec: list[float] = []
+    cycles_per_row: list[float] = []
+    ipc: list[float] = []
+    rows_total = 0
+    setup_cycles_total = 0
+    per_rep = []
+    missing: list[str] = []
+    prewarm: list[dict] = []
+    round_meta: dict[int, dict[str, int]] = {}
+    for rep in range(1, reps + 1):
+        tag = f"scan-{temp}-{rep}"
+        payload_path = d / f"{tag}.json"
+        if not payload_path.exists():
+            # A rep whose artifacts are missing is NOT a smaller sample: it is an
+            # incomplete run, and silently `continue`ing it published a median over
+            # fewer reps than the caller asked for with only `n=` to say so (issue
+            # #3096 review). Fail instead — see require_complete below.
+            missing.append(payload_path.name)
+            continue
+        payload = json.loads(payload_path.read_text())
+        rows = int(payload["rows_denominator"])
+        # `< 1`, not `== 0` (#3272 review round 2, R6 audit). The row count is the
+        # DENOMINATOR of every figure this rep produces, and a negative one would sail past
+        # an equality test to become a negative rows/s and a negative cycles/row — printed,
+        # plausible-looking, and wrong in a direction nobody checks.
+        if rows < 1:
+            raise Invalid(
+                f"bare-scan rep {tag} observed {rows} rows — not a measurement. It is the"
+                " denominator of every figure for this rep; a non-positive one is refused"
+                " rather than divided by."
+            )
+        secs = float(payload["timed_scan_secs"])
+        # A DEGENERATE window is a named refusal, not a traceback (#3272 review round 2
+        # nit). `rows / secs` with `timed_scan_secs: 0.0` raised `ZeroDivisionError` and
+        # exited 1 with a Python traceback — the only degenerate case in this file without
+        # a stated refusal, and a traceback names the DIVISION rather than the artifact.
+        # Non-finite is refused for the same reason: `inf`/`nan` would propagate into
+        # rows/s and into `spread()` as a printable number standing in for an absent one.
+        if not math.isfinite(secs) or secs <= 0:
+            raise Invalid(
+                f"bare-scan rep {tag} records timed_scan_secs={secs!r} — there is no"
+                " rows/s for a measurement window that is zero, negative, or not finite."
+                " The scan either never ran or its timer was never read, and dividing by"
+                " it would raise inside the reporting path instead of naming the artifact."
+            )
+        # Both legs' counters must be OBSERVED. `.get("cycles", 0)` used to
+        # fabricate a zero here, so a run with no setup artifact at all was
+        # reported "SETUP-SUBTRACTED" having subtracted nothing (#3272 finding 4).
+        total = read_perf_counters(d / f"perf-{tag}.csv", f"{tag} (full run)", REQUIRED_EVENTS)
+        setup = read_perf_counters(
+            d / f"perf-{tag}-setup.csv", f"{tag} (setup-only leg)", REQUIRED_EVENTS
+        )
+        # Setup SUBTRACTED (spec R2). A non-positive result would mean the setup
+        # leg somehow cost more than the full run, which is a broken measurement,
+        # not a small number — surfaced rather than hidden.
+        cyc = total["cycles"] - setup["cycles"]
+        ins = total["instructions"] - setup["instructions"]
+        if cyc <= 0:
+            raise Invalid(
+                f"{tag} setup-subtracted cycles are {cyc} (total="
+                f"{total['cycles']}, setup={setup['cycles']}) — "
+                "the subtraction is not meaningful; re-run"
+            )
+        # This arm's prewarm outcome, recorded by ws0-baseline.sh exactly as the
+        # Flight arm's is (issue #3096 review, finding 1): the bare scan is the
+        # DENOMINATOR of the 1.3x ratio, so an unprewarmed "warm" rep biases the
+        # ratio in the claim's favour and must be visible in the artifact.
+        prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
+        meta = collect_round_meta(d, tag, rep)
+        round_meta[rep] = meta
+        rows_per_sec.append(rows / secs)
+        cycles_per_row.append(cyc / rows)
+        ipc.append(ins / cyc)
+        rows_total += rows
+        setup_cycles_total += setup["cycles"]
+        per_rep.append(
+            {
+                "rep": rep,
+                "round": meta["round"],
+                "position_in_round": meta["position"],
+                "arms_in_round": meta["arms_in_round"],
+                "rows": rows,
+                "secs": secs,
+                "rows_per_sec": rows / secs,
+                "cycles_total": total["cycles"],
+                "cycles_setup": setup["cycles"],
+                "cycles_scan": cyc,
+                "cycles_per_row": cyc / rows,
+                "setup_secs": payload.get("setup_secs"),
+                "prewarm": prewarm[-1]["status"],
+            }
+        )
+    # This (arm, temperature) was SELECTED by the caller — an unselected one is
+    # never iterated — so it must be complete (#3272 finding 6).
+    require_complete(f"bare scan ({temp})", per_rep, reps, missing)
+    return {
+        "arm": "bare_scan",
+        "surface": "cqlite_core::Database::execute_streaming",
+        "temperature": temp,
+        "rows_per_sec": spread(rows_per_sec),
+        "cycles_per_row": spread(cycles_per_row),
+        "ipc": spread(ipc),
+        "row_denominator_total": rows_total,
+        "round_metadata": round_meta,
+        "setup_cycles_subtracted_total": setup_cycles_total,
+        # Issue #3096 review, finding 1: the warm bare-scan arm had no untimed
+        # prewarm at all, so `prewarm_all_ok` here is the single field a reader can
+        # check that this arm's "warm" really was warm.
+        **prewarm_block(prewarm, temp),
+        "reps": per_rep,
+    }
+
+
+def expected_requests(temp: str) -> str:
+    """The request count a rep of this temperature MUST have, stated not implied.
+
+    Issue #3096 review, finding 2: this used to be reconstructible only by dividing
+    a rep's `rows` by the corpus row count in your head. Recorded explicitly here so
+    a reader sees the contract, and asserted per rep by `check_request_count`.
+    """
+    if temp == "cold":
+        return "exactly 1 (only the first request after the cache drop is cold)"
+    return ">=1, each one a full corpus scan"
+
+
+def check_request_count(
+    tag: str, temp: str, requests_ok: object, rows: int, corpus_rows: int
+) -> int:
+    """Assert the per-temperature request contract, or raise.
+
+    Two properties, both fail-closed (issue #3096 review, finding 2):
+
+    * A **cold** rep must have completed **exactly one** successful request. The
+      driver keeps `--cold-step-duration` short precisely so the loadgen issues one
+      request, but that is a duration heuristic against an unknown scan time — if
+      the corpus finishes inside the step, requests 2..N read the pages request 1
+      faulted in and their WARM rows land in a figure labelled "cold". A caller can
+      also trigger it directly by raising the option. So the OBSERVED count is
+      checked, not the duration.
+    * Every rep's rows must be an exact multiple of the corpus row count, i.e.
+      `rows == requests_ok * corpus_rows`. A remainder means some request did not
+      scan the whole corpus, so the per-request row denominator is not what the
+      report says it is.
+
+    `corpus_rows` is a REQUIRED int, never `None`: an absent corpus identity used to
+    disable the second property silently while the NOTES claimed it ran (#3272
+    finding 1), so the identity is now loaded fail-closed by
+    `ws0_validate.load_corpus_identity` before any of this runs.
+    """
+    if requests_ok is None:
+        raise Invalid(
+            f"flight rep {tag} step record carries no `requests_ok` — the"
+            " per-temperature request contract cannot be verified, and an unverified"
+            " cold rep is exactly how warm requests get reported as cold"
+        )
+    count = int(requests_ok)
+    if count < 1:
+        raise Invalid(f"flight rep {tag} completed {count} successful requests")
+    if temp == "cold" and count != 1:
+        raise Invalid(
+            f"flight COLD rep {tag} completed {count} successful requests;"
+            f" expected {expected_requests('cold')}."
+            " Only the FIRST request after the cache drop is cold: requests 2..N read the"
+            " pages request 1 faulted in, so their WARM rows would be blended into a figure"
+            " reported as 'cold', which spec R2/AC5 forbids."
+            " Lower --cold-step-duration so the loadgen issues a single request, or measure"
+            " this as a warm rep."
+        )
+    if rows % corpus_rows != 0 or rows // corpus_rows != count:
+        raise Invalid(
+            f"flight rep {tag} observed {rows:,} rows over {count} successful"
+            f" request(s), which is not {count} x the corpus row count"
+            f" ({corpus_rows:,}). At least one request did not scan the whole corpus,"
+            " so the per-request row denominator is not the one this report would"
+            " print. Re-run rather than reporting a partial scan."
+        )
+    return count
+
+
+def collect_flight(
+    d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int
+) -> dict:
+    rows_per_sec: list[float] = []
+    cycles_per_row: list[float] = []
+    ipc: list[float] = []
+    rows_total = 0
+    per_rep = []
+    missing: list[str] = []
+    prewarm: list[dict] = []
+    round_meta: dict[int, dict[str, int]] = {}
+    for rep in range(1, reps + 1):
+        tag = f"flight-{arm}-{temp}-{rep}"
+        jsonl = d / f"{tag}.jsonl"
+        if not jsonl.exists():
+            missing.append(jsonl.name)
+            continue
+        records = [json.loads(x) for x in jsonl.read_text().splitlines() if x.strip()]
+        if not records:
+            raise Invalid(f"flight rep {tag} produced no step record")
+        # EXACTLY ONE step record per rep, or refuse (#3272 review). This used to be
+        # `rec = records[-1]`, which SILENTLY DROPPED every earlier record: the driver
+        # runs one `--ramp 1` step per rep, so a second line means the artifact is not
+        # the one this reporter models (a loadgen that ramped, a rep whose file was
+        # appended to by a prior run, two reps sharing an --out path). Reporting the
+        # last line alone would publish ONE step's rows as the rep's whole measurement
+        # while the others existed on disk, unread and unmentioned.
+        if len(records) != 1:
+            raise Invalid(
+                f"flight rep {tag} carries {len(records)} step records; this rig runs"
+                " exactly ONE step per rep (--ramp 1), and reporting only the last"
+                " would silently drop the others. Rounds present:"
+                f" {[r.get('round') for r in records]}."
+                " Re-run the rep into a fresh --out directory rather than reporting a"
+                " subset of what was measured."
+            )
+        rec = records[0]
+        rows = int(rec["rows_total"])
+        # `< 1`, not `== 0` — same audit as the bare scan's denominator (#3272 R6).
+        if rows < 1:
+            raise Invalid(
+                f"flight rep {tag} observed {rows} rows — not a measurement. It is the"
+                " denominator of this rep's cycles/row and the numerator of its"
+                " full-corpus check; a non-positive one is refused, not divided by."
+            )
+        # OBSERVED, never defaulted (#3272 review). `int(rec.get("requests_error", 0))`
+        # fabricated a zero for a counter the artifact did not carry, so a rep with no
+        # `requests_error` key at all was reported CLEAN with the failed-request count
+        # never measured — the "no failed requests" refusal resting on a default. Its
+        # sibling `requests_ok` was already None-checked and fatal; this now matches.
+        errors = rec.get("requests_error")
+        if errors is None:
+            raise Invalid(
+                f"flight rep {tag} step record carries no `requests_error` — the failed"
+                " request count was NOT OBSERVED, so 'no failed requests' cannot be"
+                " asserted. A counter that was not observed is an error, never a"
+                " fabricated 0 (#3272 AC3)."
+            )
+        try:
+            errors = int(errors)
+        except (TypeError, ValueError):
+            raise Invalid(
+                f"flight rep {tag} has an unparseable `requests_error` ({errors!r}) —"
+                " a corrupt counter is not a zero"
+            ) from None
+        # `== 0`, NOT `> 0` (#3272 review round 2, R6). `> 0` accepted a NEGATIVE
+        # `requests_error` as a clean zero-error measurement: -3 is not "fewer than no
+        # errors", it is a corrupt counter, and reading it as clean is the same
+        # fabricated-zero class as the defaulting `.get` this branch already replaced —
+        # arrived at from the other side. A count is a NON-NEGATIVE integer, so the
+        # accept condition is stated as the AFFIRMATIVE value it must have.
+        if errors != 0:
+            if errors < 0:
+                raise Invalid(
+                    f"flight rep {tag} records requests_error={errors}, which is not a"
+                    " possible count. A negative counter is a CORRUPT artifact, not a"
+                    " clean zero: the check used to be `if errors > 0`, so this value"
+                    " passed as 'no failed requests' (#3272 R6). A counter that was not"
+                    " validly observed is an error, never a 0 (AC3)."
+                )
+            raise Invalid(f"flight rep {tag} had {errors} failed request(s)")
+        requests_ok = check_request_count(tag, temp, rec.get("requests_ok"), rows, corpus_rows)
+        # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
+        prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
+        # ...and its OBSERVED round + position within that round (#3272 R3).
+        meta = collect_round_meta(d, tag, rep)
+        round_meta[rep] = meta
+        counters = read_perf_counters(d / f"perf-{tag}.csv", tag, REQUIRED_EVENTS)
+        cyc = counters["cycles"]
+        ins = counters["instructions"]
+        if cyc <= 0:
+            raise Invalid(f"flight rep {tag} recorded no cycles — perf -C window was empty")
+        # The loadgen's own rows/s, validated on the SAME rule as every other counter
+        # (#3272 R6 audit): positive and finite. `spread()` refuses a non-positive MEDIAN,
+        # which is not the same property — one negative rep among three leaves the median
+        # positive and publishes a spread computed over a value that cannot exist.
+        arm_rps = float(rec["rows_per_s"])
+        if not math.isfinite(arm_rps) or arm_rps <= 0:
+            raise Invalid(
+                f"flight rep {tag} records rows_per_s={arm_rps!r}, which is not a positive"
+                " finite rate. `spread()` only refuses a non-positive MEDIAN, so a single"
+                " impossible rep would survive into the printed spread."
+            )
+        rows_per_sec.append(arm_rps)
+        cycles_per_row.append(cyc / rows)
+        ipc.append(ins / cyc)
+        rows_total += rows
+        per_rep.append(
+            {
+                "rep": rep,
+                "round": meta["round"],
+                "position_in_round": meta["position"],
+                "arms_in_round": meta["arms_in_round"],
+                "rows": rows,
+                "requests_ok": requests_ok,
+                "requests_expected": expected_requests(temp),
+                "rows_per_scan_observed": rows / requests_ok,
+                "rows_per_scan_expected": corpus_rows,
+                "duration_s": rec.get("duration_s"),
+                "rows_per_sec": arm_rps,
+                "cycles": cyc,
+                "cycles_per_row": cyc / rows,
+                "prewarm": prewarm[-1]["status"],
+            }
+        )
+    require_complete(f"flight do_get {arm} ({temp})", per_rep, reps, missing)
+    return {
+        "arm": f"flight_do_get_{arm}",
+        "surface": "arrow_flight FlightService::do_get (loopback gRPC)",
+        "temperature": temp,
+        "forced_merge_path": arm,
+        "rows_per_sec": spread(rows_per_sec),
+        "cycles_per_row": spread(cycles_per_row),
+        "ipc": spread(ipc),
+        "row_denominator_total": rows_total,
+        # Issue #3096 review, finding 2: the request count each temperature MUST
+        # have, asserted per rep by `check_request_count` and stated here so no
+        # reader has to reconstruct it from row denominators.
+        "requests_expected_per_rep": expected_requests(temp),
+        "round_metadata": round_meta,
+        # Unconditionally true now: the corpus identity is REQUIRED, so this can
+        # never be a report that skipped the check while claiming it (#3272 f1).
+        "full_corpus_per_request_verified": True,
+        "corpus_rows_used_for_verification": corpus_rows,
+        "setup_cycles_subtracted_total": 0,
+        "setup_note": (
+            "server start + (warm only) prewarm happen BEFORE the perf window opens, "
+            "so setup is outside the window by construction rather than subtracted"
+        ),
+        # Issue #3096 review: a failed prewarm silently degraded a "warm" claim.
+        # Every rep's outcome is recorded here, and `prewarm_all_ok` is the single
+        # field a reader can check.
+        **prewarm_block(prewarm, temp),
+        "reps": per_rep,
+    }
