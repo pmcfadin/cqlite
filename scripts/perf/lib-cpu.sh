@@ -68,7 +68,90 @@ assert_real_cpu_topology() {
   fi
 }
 
+# The largest logical CPU index this rig will accept, and the largest number of CPUs one
+# `--server-cpus`/`--client-cpus` list may expand to.
+#
+# `CPU_INDEX_MAX` is Linux's own `CONFIG_NR_CPUS` ceiling on x86_64 (8192), so no legitimate
+# spec is refused; `CPU_LIST_MAX` is a size bound on the EXPANSION, because the number of
+# CPUs the rig pins is a physical core's siblings (2) plus a client set (single digits) and
+# a spec expanding to hundreds is a mistake, not a machine.
+CPU_INDEX_MAX=8191
+CPU_LIST_MAX=1024
+
+# Validate ONE element of a CPU list — `N` or `LO-HI` — against a STRICT DECIMAL GRAMMAR.
+# Prints the canonical `lo hi` on success; on failure prints a diagnostic to stderr and
+# returns 1.
+#
+# # This is a SECURITY fix, not tidying (issue #3272 review round 4, B3)
+#
+# `cpu_list_expand` fed range endpoints STRAIGHT INTO BASH ARITHMETIC:
+#
+#     lo="${part%%-*}"; hi="${part##*-}"
+#     for ((i = lo; i <= hi; i++)); do out+=("$i"); done
+#
+# `(( ))` EVALUATES its operands as arithmetic expressions, and bash's arithmetic evaluator
+# performs COMMAND SUBSTITUTION inside an array subscript. MEASURED against the pre-fix
+# function, on this box:
+#
+#     cpu_list_expand '1-x[$(touch /tmp/PWNED2)]'   =>   /tmp/PWNED2 created, exit 0
+#
+# i.e. ARBITRARY COMMAND EXECUTION from a `--server-cpus` argument. Two lesser defects on the
+# same line, also measured: `cpu_list_expand '1+1'` returned the string `1+1` (an arithmetic
+# expression accepted as a CPU id), and `cpu_list_expand 0-999999999` looped a billion times
+# appending to an array — it did not finish in 3 seconds and would exhaust memory long before
+# the measurement started.
+#
+# The fix is an ALLOWLIST GRAMMAR checked with a bash pattern BEFORE any arithmetic, which is
+# the only posture with nothing left to enumerate: every element must match `[0-9]+` or
+# `[0-9]+-[0-9]+` exactly. `+`, `*`, `$(`, `[`, a leading `-`, whitespace, an empty endpoint
+# and a bare `-` are all refused by the same rule, without this function having to know that
+# arithmetic expansion exists.
+#
+# Leading zeros are handled by `10#` on the comparisons, so `08` is 8 and not an invalid octal
+# — the same defect class as the `010s` duration bug in `lib-args.sh` (#3096 review nit 7).
+cpu_range_validate() {
+  local part="$1" label="${2:-CPU list}" lo hi
+  if [[ ! "$part" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+    echo "FATAL: $label element '$part' is not a CPU index or range." >&2
+    echo "       Every element must be N or LO-HI, decimal digits only (e.g. '2', '0-3')." >&2
+    echo "       This is an ALLOWLIST, and it is a security boundary rather than tidiness:" >&2
+    echo "       these endpoints used to enter bash arithmetic directly, and (( )) performs" >&2
+    echo "       COMMAND SUBSTITUTION inside an array subscript. MEASURED on the pre-fix" >&2
+    echo "       code: --server-cpus '1-x[\$(touch /tmp/PWNED)]' created the file and" >&2
+    echo "       exited 0 (issue #3272 B3). An arithmetic expression like '1+1' was also" >&2
+    echo "       accepted as a CPU id." >&2
+    return 1
+  fi
+  if [[ "$part" == *-* ]]; then
+    lo=$((10#${part%%-*})); hi=$((10#${part##*-}))
+  else
+    lo=$((10#$part)); hi="$lo"
+  fi
+  if [[ "$lo" -gt "$CPU_INDEX_MAX" || "$hi" -gt "$CPU_INDEX_MAX" ]]; then
+    echo "FATAL: $label element '$part' names a CPU index above $CPU_INDEX_MAX." >&2
+    echo "       That is Linux's own CONFIG_NR_CPUS ceiling on x86_64, so no real machine" >&2
+    echo "       has it. MEASURED on the pre-fix code: '0-999999999' looped a billion times" >&2
+    echo "       appending to a bash array — it did not finish in 3 seconds and would" >&2
+    echo "       exhaust memory before the measurement started (#3272 B3)." >&2
+    return 1
+  fi
+  if [[ "$hi" -lt "$lo" ]]; then
+    echo "FATAL: $label element '$part' is a REVERSED range ($lo > $hi)." >&2
+    echo "       A reversed range expanded to NOTHING and was silently dropped, so" >&2
+    echo "       '--server-cpus 10-2' pinned to an empty set and the sibling check" >&2
+    echo "       complained about the wrong thing (#3272 B3). State it as $hi-$lo." >&2
+    return 1
+  fi
+  printf '%s %s\n' "$lo" "$hi"
+}
+
 # Expand a Linux CPU list ("0-3,8", "2,10") into one sorted, space-separated list.
+#
+# FAIL-CLOSED on a malformed spec (issue #3272 review round 4, B3): every element goes
+# through `cpu_range_validate` BEFORE any arithmetic, and the total expansion is capped. A
+# rejected spec returns 1 with the diagnostic on stderr rather than an empty or partial list,
+# because an empty list reaches `verify_sibling_pair` as "CPU list is empty" — naming the
+# wrong cause for what is really a refused argument.
 #
 # Two properties that are easy to lose in an edit (issue #3096 review):
 #
@@ -79,16 +162,23 @@ assert_real_cpu_topology() {
 #    error — so an empty/garbage CPU spec died here with a shell diagnostic instead
 #    of reaching `verify_sibling_pair`'s fail-closed "CPU list is empty" message.
 cpu_list_expand() {
-  local spec="$1" part lo hi i
+  local spec="$1" label="${2:-CPU list}" part bounds lo hi i
   local -a out=() _parts=()
   IFS=',' read -r -a _parts <<<"$spec"
   for part in "${_parts[@]}"; do
-    if [[ "$part" == *-* ]]; then
-      lo="${part%%-*}"; hi="${part##*-}"
-      for ((i = lo; i <= hi; i++)); do out+=("$i"); done
-    elif [[ -n "$part" ]]; then
-      out+=("$part")
+    # An empty element (`2,,10`, or the empty spec) is skipped, preserving the documented
+    # empty-expansion behaviour above; anything non-empty must satisfy the grammar.
+    [[ -n "$part" ]] || continue
+    bounds="$(cpu_range_validate "$part" "$label")" || return 1
+    lo="${bounds%% *}"; hi="${bounds##* }"
+    if (( hi - lo + 1 + ${#out[@]} > CPU_LIST_MAX )); then
+      echo "FATAL: $label '$spec' expands to more than $CPU_LIST_MAX CPUs." >&2
+      echo "       This rig pins a physical core's siblings (2) plus a client set; a spec" >&2
+      echo "       this large is a mistake, and expanding it before saying so is how a" >&2
+      echo "       measurement run dies on memory instead of on its arguments (#3272 B3)." >&2
+      return 1
     fi
+    for ((i = lo; i <= hi; i++)); do out+=("$i"); done
   done
   if ((${#out[@]} == 0)); then
     return 0
@@ -105,7 +195,11 @@ cpu_list_expand() {
 cpu_siblings_of() {
   local cpu="$1" f="$CPU_TOPOLOGY_ROOT/cpu$1/topology/thread_siblings_list"
   [[ -r "$f" ]] || { echo "FATAL: $f is unreadable — cannot VERIFY that cpu$cpu's pinning is a physical core" >&2; return 1; }
-  cpu_list_expand "$(cat "$f")"
+  # The failure is PROPAGATED (#3272 review round 4, B3). `cpu_list_expand` can now REFUSE a
+  # malformed list, and sysfs is a file — a truncated or garbage `thread_siblings_list` must
+  # fail the sibling verification rather than becoming an empty `got` that compares unequal and
+  # produces a "not the sibling set" diagnostic for what is really an unreadable topology.
+  cpu_list_expand "$(cat "$f")" "$f" || return 1
 }
 
 # FAIL CLOSED unless `$1` is exactly the sibling set of ONE physical core.
@@ -115,7 +209,10 @@ cpu_siblings_of() {
 # that happens to contain a core's siblings plus a stray CPU.
 verify_sibling_pair() {
   local spec="$1" label="${2:-pinned}" want got cpu
-  want="$(cpu_list_expand "$spec")"
+  # A REFUSED spec fails HERE, with `cpu_range_validate`'s own diagnostic already on stderr
+  # (#3272 B3) — never as an empty `want` reported as "CPU list is empty", which named the
+  # wrong cause for a malformed argument.
+  want="$(cpu_list_expand "$spec" "$label CPUs")" || return 1
   [[ -n "$want" ]] || { echo "FATAL: $label CPU list is empty" >&2; return 1; }
   for cpu in $want; do
     got="$(cpu_siblings_of "$cpu")" || return 1
@@ -135,7 +232,10 @@ list_sibling_pairs() {
   local f seen=() s
   for f in "$CPU_TOPOLOGY_ROOT"/cpu[0-9]*/topology/thread_siblings_list; do
     [[ -r "$f" ]] || continue
-    s="$(cpu_list_expand "$(cat "$f")")"
+    # A malformed sysfs entry is SKIPPED here rather than fatal: this function prints an
+    # informational MENU (`--help`'s "pairs on this box"), so one unreadable entry should not
+    # stop the help text. The load-bearing path is `verify_sibling_pair`, which fails closed.
+    s="$(cpu_list_expand "$(cat "$f")" "$f")" || continue
     if [[ ! " ${seen[*]-} " == *" $s "* ]]; then
       seen+=("$s")
       echo "  ${s// /,}"
@@ -147,7 +247,11 @@ list_sibling_pairs() {
 # server would land the client's own CPU cost inside the server's `perf -C` window.
 verify_disjoint() {
   local a b x y
-  a="$(cpu_list_expand "$1")"; b="$(cpu_list_expand "$2")"
+  # Both specs re-validated and the refusal PROPAGATED (#3272 B3): a spec that expands to
+  # nothing trivially satisfies disjointness, so a silent empty here would turn a malformed
+  # `--client-cpus` into a PASS.
+  a="$(cpu_list_expand "$1" "server CPUs")" || return 1
+  b="$(cpu_list_expand "$2" "client CPUs")" || return 1
   for x in $a; do
     for y in $b; do
       if [[ "$x" == "$y" ]]; then

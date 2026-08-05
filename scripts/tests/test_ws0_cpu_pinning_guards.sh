@@ -266,6 +266,136 @@ else
   fail "override-refused: assert_real_cpu_topology must precede verify_sibling_pair (assert=$assert_line verify=$verify_line)"
 fi
 
+# --- 1g. THE CPU-LIST GRAMMAR: arbitrary code from a --server-cpus argument (B3) --------
+# THE FINDING (#3272 review round 4, B3). `cpu_list_expand` fed range endpoints straight into
+# bash arithmetic:
+#
+#     lo="${part%%-*}"; hi="${part##*-}"
+#     for ((i = lo; i <= hi; i++)); do out+=("$i"); done
+#
+# `(( ))` EVALUATES its operands, and bash's arithmetic evaluator performs COMMAND
+# SUBSTITUTION inside an array subscript. MEASURED against the pre-fix function on this box:
+#
+#     cpu_list_expand '1-x[$(touch /tmp/PWNED2)]'   =>   /tmp/PWNED2 CREATED, exit 0
+#
+# i.e. ARBITRARY COMMAND EXECUTION from a `--server-cpus`/`--client-cpus` argument. Also
+# measured: `'1+1'` returned the STRING `1+1` as a CPU id, and `'0-999999999'` did not finish
+# in 3 seconds (a billion array appends).
+#
+# The NON-VACUITY of each case below is that measurement: every one of these inputs was
+# ACCEPTED (or hung) before the grammar existed.
+#
+# The injection case is asserted on the SIDE EFFECT, not on the exit status: a refusal that
+# still ran the command would be worthless, and the file is the only thing that proves it did
+# not run.
+PWN_MARKER="$TMP/cpu-grammar-pwned"
+rm -f "$PWN_MARKER"
+out=$(lib_call cpu_list_expand "1-x[\$(touch $PWN_MARKER)]"); rc=$?
+if [ "$rc" -ne 0 ] && [ ! -e "$PWN_MARKER" ]; then
+  pass "cpu-grammar: OBSERVED — a command-substitution endpoint is REFUSED and the command DOES NOT RUN (pre-fix: it ran, exit 0)"
+else
+  fail "cpu-grammar: '1-x[\$(touch …)]' must be refused WITHOUT executing (rc=$rc, marker present: $([ -e "$PWN_MARKER" ] && echo yes || echo no), out: $out)"
+fi
+rm -f "$PWN_MARKER"
+# ...and the refusal must NAME the boundary it is, or the next editor will "simplify" it back.
+if grep -q "COMMAND SUBSTITUTION inside an array subscript" <<<"$out"; then
+  pass "cpu-grammar: the refusal states WHY it is an allowlist (the arithmetic-evaluation hazard)"
+else
+  fail "cpu-grammar: the refusal must name the hazard (out: $out)"
+fi
+# Every other malformed shape, through the SAME rule rather than a case each — that is what
+# makes it an allowlist: none of these needed to be anticipated individually.
+for bad_spec in \
+  '1+1' \
+  '2*3' \
+  '$((1+2))' \
+  'a-b' \
+  '-3' \
+  '2-' \
+  '-' \
+  '2 10' \
+  '0x2' \
+  '2,10;id' \
+  ; do
+  out=$(lib_call cpu_list_expand "$bad_spec"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "is not a CPU index or range" <<<"$out"; then
+    pass "cpu-grammar: '$bad_spec' is REFUSED by the decimal allowlist"
+  else
+    fail "cpu-grammar: '$bad_spec' must be refused (rc=$rc, out: $out)"
+  fi
+done
+# THE SIZE BOUNDS, both of them, each with the resource failure it prevents.
+out=$(lib_call cpu_list_expand "0-999999999"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "above 8191" <<<"$out"; then
+  pass "cpu-grammar: OBSERVED — '0-999999999' is REFUSED on the index ceiling (pre-fix: a billion array appends, no completion in 3s)"
+else
+  fail "cpu-grammar: an absurd range must be refused before expanding (rc=$rc, out: $out)"
+fi
+# ...and a range UNDER the index ceiling but over the expansion cap: the two bounds are
+# different properties, and a single check would leave one of them open.
+out=$(lib_call cpu_list_expand "0-8000"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "expands to more than 1024 CPUs" <<<"$out"; then
+  pass "cpu-grammar: a spec under the index ceiling but over the EXPANSION cap is refused (two distinct bounds)"
+else
+  fail "cpu-grammar: the expansion cap must fire independently of the index ceiling (rc=$rc, out: $out)"
+fi
+# A REVERSED range used to expand to NOTHING and be silently dropped, so '--server-cpus 10-2'
+# pinned an empty set and the sibling check complained about the wrong thing.
+out=$(lib_call cpu_list_expand "10-2"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "REVERSED range" <<<"$out"; then
+  pass "cpu-grammar: a REVERSED range is REFUSED, naming itself (pre-fix: silently expanded to nothing)"
+else
+  fail "cpu-grammar: '10-2' must be refused as reversed (rc=$rc, out: $out)"
+fi
+# THE ACCEPT DIRECTION — without it, a grammar hardcoded to refuse everything would satisfy
+# every case above. Includes the LEADING-ZERO case, which is the `010s` duration defect class
+# (#3096 nit 7) one file over: `08` must be 8, not an invalid octal.
+for good_spec in '2,10:2 10' '0-3,8:0 1 2 3 8' '08:8' '0:0' '8191:8191' '2,,10:2 10'; do
+  spec="${good_spec%%:*}"; want="${good_spec##*:}"
+  out=$(lib_call cpu_list_expand "$spec" 2>/dev/null); rc=$?
+  # The override NOTE goes to stderr, which `lib_call` folds in; take the last line.
+  got="$(tail -1 <<<"$out")"
+  if [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then
+    pass "cpu-grammar-accept: '$spec' expands to '$want'"
+  else
+    fail "cpu-grammar-accept: '$spec' must expand to '$want' (rc=$rc, got: '$got')"
+  fi
+done
+# THE REFUSAL MUST REACH THE CALLERS, or the grammar is a function nobody consults. All three
+# consumers propagate it, and each one has a distinct reason it must:
+#  * verify_sibling_pair — an empty `want` was reported as "CPU list is empty", naming the
+#    wrong cause for a malformed argument;
+#  * verify_disjoint — an empty set trivially satisfies disjointness, so a silent empty would
+#    turn a malformed --client-cpus into a PASS;
+#  * cpu_siblings_of — a garbage sysfs entry must fail the verification, not become an empty
+#    `got` diagnosed as "not the sibling set".
+out=$(lib_call verify_sibling_pair "1+1" server); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is not a CPU index or range" <<<"$out" \
+  && ! grep -q "CPU list is empty" <<<"$out"; then
+  pass "cpu-grammar-wired: verify_sibling_pair PROPAGATES the refusal (not 'CPU list is empty')"
+else
+  fail "cpu-grammar-wired: verify_sibling_pair must fail with the grammar's diagnostic (rc=$rc, out: $out)"
+fi
+out=$(lib_call verify_disjoint "2,6" "1+1"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is not a CPU index or range" <<<"$out"; then
+  pass "cpu-grammar-wired: verify_disjoint PROPAGATES the refusal (an empty set would satisfy disjointness)"
+else
+  fail "cpu-grammar-wired: verify_disjoint must refuse a malformed spec (rc=$rc, out: $out)"
+fi
+# The sysfs path: a topology whose `thread_siblings_list` holds garbage must FAIL the
+# verification rather than compare unequal for the wrong reason.
+BAD_TOPO="$TMP/bad-topo/cpu"
+mkdir -p "$BAD_TOPO/cpu2/topology"
+printf 'x[$(true)]\n' > "$BAD_TOPO/cpu2/topology/thread_siblings_list"
+out=$( export CQLITE_WS0_CPU_TOPOLOGY_ROOT="$BAD_TOPO"
+       # shellcheck disable=SC1090
+       source "$LIB"; verify_sibling_pair "2" server 2>&1 ); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is not a CPU index or range" <<<"$out"; then
+  pass "cpu-grammar-wired: a GARBAGE thread_siblings_list fails the sibling check with the grammar's diagnostic"
+else
+  fail "cpu-grammar-wired: a garbage sysfs entry must fail the verification (rc=$rc, out: $out)"
+fi
+
 # ===========================================================================
 # PART 2 — the `perf stat -p` self-grep
 # ===========================================================================
@@ -1195,7 +1325,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=130
+MIN_CHECKS=155
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
