@@ -20,6 +20,61 @@
 #                             arithmetic, with MALFORMED and TOO-LONG reported as
 #                             DIFFERENT causes (`duration_reject`).
 
+# ============================================================================================
+# THE WRAP-PROOF DECIMAL PRIMITIVES (#3272 review round 7, F2)
+# ============================================================================================
+#
+# Bash arithmetic is signed 64-bit and WRAPS SILENTLY. That has now been the root cause of
+# THREE findings in this rig, in three different places, each fixed on its own:
+#
+#   round 4  `parse_duration_ms`: `2305843009213693956s` * 1000 wrapped to 4000ms, UNDER the
+#            5000ms cold-step ceiling — smuggling a blended cold measurement past the guard.
+#   round 4  `require_positive_int`: `99999999999999999999` evaluated to 7766279631452241919,
+#            so the range check compared a number the caller never wrote.
+#   round 7  `cpu_range_validate` (F2): endpoints were digit-UNCAPPED, so
+#            `9223372036854775809-0` became `-9223372036854775807 0` — a NEGATIVE `lo` that
+#            passes BOTH `CPU_INDEX_MAX` and `CPU_LIST_MAX` (the size check `hi-lo+1` is a huge
+#            POSITIVE number that itself wraps NEGATIVE) and then drives
+#            `for ((i = lo; i <= hi; i++))` over ~9.2e18 iterations. MEASURED on this box
+#            pre-fix: `cpu_range_validate '9223372036854775809-0'` returned
+#            `-9223372036854775807 0` with exit 0, and `18446744073709559807` returned
+#            `8191 8191` — an out-of-range index accepted as the in-range maximum.
+#
+# Three sites, one class, so this round fixes the CLASS: comparison happens on CANONICAL
+# DECIMAL STRINGS, before any arithmetic, and is therefore correct for a value of ANY length.
+# There is no cap to choose and no wrap to reason about — which is what makes it a mechanism
+# rather than a fourth per-site patch.
+#
+# `decimal_normalize` and `decimal_le` use NO arithmetic at all (`${#s}` is a string length, and
+# `<` inside `[[ ]]` is a lexicographic string comparison). That is the load-bearing property:
+# a bound check implemented with `(( ))` would itself be evaluated by the evaluator that wraps.
+
+# decimal_normalize <digits> — the same value with leading zeros stripped ("" -> "0").
+#
+# Canonicalization is what makes a LENGTH comparison meaningful: without it `007` (3 chars) would
+# compare "longer" than `10` (2 chars). Callers must already have established that the input is
+# digits-only; this does not validate.
+decimal_normalize() {
+  local s="${1#"${1%%[!0]*}"}"
+  printf '%s' "${s:-0}"
+}
+
+# decimal_le <a> <b> — 0 when decimal <a> <= decimal <b>. Digits-only inputs, ANY length.
+#
+# NO ARITHMETIC: compare canonical lengths first (a longer decimal is a larger number), then
+# compare lexicographically at equal length (which for equal-length decimal strings IS numeric
+# order). Correct for a 100-digit value, where every `(( ))` form is not.
+decimal_le() {
+  local a b
+  a="$(decimal_normalize "$1")"
+  b="$(decimal_normalize "$2")"
+  if [[ "${#a}" -ne "${#b}" ]]; then
+    [[ "${#a}" -lt "${#b}" ]]
+    return
+  fi
+  [[ ! "$a" > "$b" ]]
+}
+
 # Every numeric option is validated POSITIVE, up front, before any build, cache drop
 # or measurement (issue #3272, finding 5). `--reps` had no validation at all: at
 # `--reps 0` every `for rep in $(seq 1 0)` loop body was skipped, so the driver ran

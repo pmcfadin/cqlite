@@ -17,6 +17,31 @@
 # driver sets all three itself; a future non-driver caller (a test sourcing this to
 # drive one function) gets to keep whatever options it chose.
 
+# THE WRAP-PROOF DECIMAL PRIMITIVES live in `lib-args.sh` and are used HERE (#3272 round 7, F2).
+#
+# Sourced defensively rather than assumed: this file is sourced STANDALONE by
+# `scripts/tests/test_ws0_cpu_pinning_guards.sh` to drive one function at a time, so it may not
+# have `lib-args.sh` in scope. Guarded on the FUNCTION rather than on a sentinel variable — the
+# function is what is needed, so its presence is the affirmative measurement of the dependency
+# being satisfied, and a partially-sourced library cannot look satisfied.
+#
+# Why the primitives are not copied here: three bash-arithmetic wraparound findings in three
+# places (rounds 4 and 7) is what motivated a shared mechanism. A second copy would be a fourth
+# site free to drift from the other three, which is the shape being retired.
+if ! declare -F decimal_le >/dev/null 2>&1; then
+  # shellcheck source=scripts/perf/lib-args.sh
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-args.sh"
+fi
+if ! declare -F decimal_le >/dev/null 2>&1; then
+  echo "FATAL: lib-cpu.sh needs decimal_le from lib-args.sh, and sourcing it did not define" >&2
+  echo "       it. Without that primitive, CPU indices would be range-checked with bash" >&2
+  echo "       arithmetic, which WRAPS at 64 bits: MEASURED, '9223372036854775809-0' passed" >&2
+  echo "       BOTH bounds as a negative lo and drove an unbounded expansion loop (#3272 F2)." >&2
+  echo "       This is a refusal rather than a fallback: a bound check that can wrap is not a" >&2
+  echo "       bound check." >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 # --- the sysfs topology root, INJECTABLE for testing only (issue #3272, item 10) --
 #
 # The sibling check below is the load-bearing guarantee of the whole
@@ -109,8 +134,33 @@ CPU_LIST_MAX=1024
 #
 # Leading zeros are handled by `10#` on the comparisons, so `08` is 8 and not an invalid octal
 # — the same defect class as the `010s` duration bug in `lib-args.sh` (#3096 review nit 7).
+#
+# # THE RANGE CHECK HAPPENS BEFORE ANY ARITHMETIC (#3272 review round 7, F2)
+#
+# The allowlist grammar above stops COMMAND SUBSTITUTION, and that half was right. What it does
+# not stop is a well-formed decimal too large for signed 64-bit arithmetic, and the bound check
+# was `[[ "$lo" -gt "$CPU_INDEX_MAX" ]]` AFTER `lo=$((10#$part))` — i.e. it compared the WRAPPED
+# value. MEASURED on this box, against the pre-fix function:
+#
+#     cpu_range_validate '9223372036854775809-0'  =>  '-9223372036854775807 0', exit 0
+#     cpu_range_validate '18446744073709559807'   =>  '8191 8191', exit 0
+#
+# The first is the dangerous one, and it defeats BOTH bounds at once. A negative `lo` is `-gt
+# CPU_INDEX_MAX`? No. `hi -lt lo`? No (0 > -9.2e18). And in `cpu_list_expand` the size guard
+# `hi - lo + 1 + ${#out[@]} > CPU_LIST_MAX` computes ~9.2e18, which ITSELF wraps negative — so
+# the cap is passed too, and `for ((i = lo; i <= hi; i++))` then appends ~9.2e18 elements to a
+# bash array. Not a crash on the arguments: an OOM in the middle of a measurement, with the
+# argument that caused it having been accepted.
+#
+# The second is quieter and worse in kind: an index far above any real CPU accepted AS the
+# in-range maximum, so the sibling check would proceed to verify pinning for cpu8191.
+#
+# So the ENDPOINTS ARE COMPARED AS CANONICAL DECIMAL STRINGS (`decimal_le`, no arithmetic at
+# all) BEFORE `$(( ))` ever sees them. That is correct for a decimal of ANY length — there is no
+# digit cap to choose, and nothing left to wrap. `10#` below then converts values already known
+# to be <= 8191.
 cpu_range_validate() {
-  local part="$1" label="${2:-CPU list}" lo hi
+  local part="$1" label="${2:-CPU list}" lo hi raw_lo raw_hi
   if [[ ! "$part" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
     echo "FATAL: $label element '$part' is not a CPU index or range." >&2
     echo "       Every element must be N or LO-HI, decimal digits only (e.g. '2', '0-3')." >&2
@@ -122,19 +172,29 @@ cpu_range_validate() {
     echo "       accepted as a CPU id." >&2
     return 1
   fi
+  # THE RAW DECIMAL STRINGS, extracted with parameter expansion only — no arithmetic yet.
   if [[ "$part" == *-* ]]; then
-    lo=$((10#${part%%-*})); hi=$((10#${part##*-}))
+    raw_lo="${part%%-*}"; raw_hi="${part##*-}"
   else
-    lo=$((10#$part)); hi="$lo"
+    raw_lo="$part"; raw_hi="$part"
   fi
-  if [[ "$lo" -gt "$CPU_INDEX_MAX" || "$hi" -gt "$CPU_INDEX_MAX" ]]; then
+  # RANGE-CHECKED AS DECIMAL STRINGS, so a value of any length is compared as written rather
+  # than as whatever it wraps to (#3272 F2). `decimal_le` performs no arithmetic.
+  if ! decimal_le "$raw_lo" "$CPU_INDEX_MAX" || ! decimal_le "$raw_hi" "$CPU_INDEX_MAX"; then
     echo "FATAL: $label element '$part' names a CPU index above $CPU_INDEX_MAX." >&2
     echo "       That is Linux's own CONFIG_NR_CPUS ceiling on x86_64, so no real machine" >&2
     echo "       has it. MEASURED on the pre-fix code: '0-999999999' looped a billion times" >&2
     echo "       appending to a bash array — it did not finish in 3 seconds and would" >&2
     echo "       exhaust memory before the measurement started (#3272 B3)." >&2
+    echo "       The comparison is on the DECIMAL STRING, before any arithmetic: bash" >&2
+    echo "       arithmetic is signed 64-bit and WRAPS, so '9223372036854775809-0' used to" >&2
+    echo "       become a NEGATIVE lo that passed this bound AND the expansion cap, then" >&2
+    echo "       drove a ~9.2e18-iteration loop (#3272 F2)." >&2
     return 1
   fi
+  # Only NOW, on values already proved <= 8191, is arithmetic safe. `10#` for the leading-zero
+  # reason above.
+  lo=$((10#$raw_lo)); hi=$((10#$raw_hi))
   if [[ "$hi" -lt "$lo" ]]; then
     echo "FATAL: $label element '$part' is a REVERSED range ($lo > $hi)." >&2
     echo "       A reversed range expanded to NOTHING and was silently dropped, so" >&2
