@@ -945,458 +945,138 @@ roborev_collect_prompt_headers() {
 #     actually copied cannot drift with roborev's naming, while a pinned filename would both duplicate
 #     that authority and false-FAIL if roborev ever renames its snapshot file.)
 #
-# ============ WHAT THIS CAPTURE DEFENDS, AND WHAT IT DELIBERATELY DOES NOT ============
-# STATED HERE so the next reviewer does not have to re-derive it, and so the hardening stops at a
-# principled boundary instead of growing an unbounded series of adversarial patches.
+# ============ C‴: SNAPSHOT MODE IS OBSERVED AND REPORTED, NOT CERTIFIED ============
+# THE HISTORY, because the shape of this code is the conclusion of it. Certifying a snapshot-delivered
+# review meant trusting a copy of a file roborev deletes before it returns, and making that copy
+# trustworthy took a capture watcher, private per-run publication directories, sequenced publications,
+# a three-way digest agreement, an identity record and whole-path matching — across seven review rounds
+# that found ELEVEN false-PASS vectors in that machinery, the last of which (a stale publication
+# remaining eligible after a failed re-capture) fired the pre-registered exit.
 #
-# IT DEFENDS AGAINST SILENT TOOLING FAILURE AND ACCIDENTAL STALENESS — the failure family this whole
-# wrapper exists for: the reviewer never received the diff (T1 wrong sha, T2 empty-tree base, T3
-# silently-excluded paths, T4 single-commit review), or we certify against something that is not the
-# diff it received (a stale copy, a copy of a DIFFERENT file, a snapshot path that is not the one the
-# prompt named). Every one of those is an ACCIDENT mode, and each is caught by construction below.
+# THE OWNER'S RULING: snapshot mode drops to a `NOTICE`, and the wrapper's own summary block records
+# what it observed — the snapshot PATH, its DIGEST, and the census code-path subset it EXPECTED — so the
+# information is preserved and actionable by a human closer even though nothing is certified from it.
 #
-# IT IS NOT A SECURITY BOUNDARY against an adversary with write access to the reviewed repository.
-# Such an adversary does not need to fool the capture: they can write the diff, edit this wrapper, or
-# edit the tests that check it. Hardening a file copy against them is unwinnable and would trade real
-# simplicity for imagined safety. So the checks here are the ones that also catch accidents (a symlink
-# where roborev writes a regular file; a source mutated mid-copy) and no more.
+# WHAT THAT DELETES, and why each deletion is safe: **nothing derives a verdict from an observation any
+# more**, so everything that existed to make an observation trustworthy stops being load-bearing. Gone:
+# the copy itself, the private capture directory (and its containment test and cleanup), staging,
+# sequenced publications and their selection, the identity/`meta` record, whole-path capture matching,
+# the reuse key, and the pre/post/staged digest agreement. A stale or missed observation is now a
+# REPORTING IMPRECISION, not a false certification — which is exactly what made those parts expensive.
 #
-# THREE PROPERTIES MAKE THE APPARATUS SMALL RATHER THAN CLEVER:
-#   1. THE CAPTURE DIRECTORY IS PRIVATE AND PER-RUN — `mktemp -d`, mode 0700, OUTSIDE the reviewed
-#      repository, created at start and removed at exit. Nothing can predate the run, nothing is
-#      shared between runs, and the path is not predictable. That removes a whole class (stale or
-#      planted artifacts in a reused, guessable directory) BY CONSTRUCTION, which is strictly better
-#      than authenticating a shared directory with a nonce.
-#   2. A CAPTURE IS PUBLISHED BY ONE RENAME — content and metadata are staged in a hidden directory
-#      and the DIRECTORY is `mv`d into place, so no observer can ever see a half-published capture.
-#      That is what makes a kill mid-capture harmless: the previous version of this code published
-#      the diff and its validation record as two writes, and a SIGTERM between them turned a perfectly
-#      good snapshot into `capture-unvalidated` — a FALSE FAIL on a genuine review, i.e. the very
-#      defect #3312 exists to remove. Ordering cannot be got wrong when there is no ordering.
-#   3. REUSE IS KEYED ON A CONTENT DIGEST, never on the byte count. A snapshot rewritten to the SAME
-#      LENGTH would otherwise keep the stale capture and certify a diff other than the delivered one.
-#      An unmeasurable digest re-captures (the safe direction), never keeps — and PUBLICATION requires
-#      THREE digests that agree (source before the copy, source after it, and the staged copy), so a
-#      source mutated mid-copy is discarded instead of published under the final digest and then
-#      reused forever. Each digest is held in its OWN variable: the helper returns through one global,
-#      and re-reading it is precisely how the post-copy check once compared a value with itself.
-# ===== WHAT POLLING ESTABLISHES, AND WHAT IT DOES NOT — A STATED LIMITATION (roborev job 9) =====
-# A poller sees the versions of the snapshot that exist AT ITS POLLS. It cannot prove that the version
-# it captured is the file's FINAL byte content, because roborev deletes the file without telling us.
-# This is RECORDED AS A LIMITATION rather than chased, for three reasons:
-#   1. THE REMEDY REQUIRES AN API THAT DOES NOT EXIST. Holding an open descriptor until the review
-#      completes, or asking roborev for a finalized artifact/digest, both need cooperation the tool does
-#      not offer: `roborev show` has `--prompt`/`--json` and NO `--diff` (checked against the installed
-#      CLI), and the snapshot is deleted before `roborev review --wait` returns. There is no bounded
-#      implementation to write.
-#   2. THE SUBJECT IS THE DIFF THE REVIEWER RECEIVED, not the file's last byte state. If a snapshot were
-#      rewritten AFTER the reviewer read it, the reviewer did not see that version either — so a "final
-#      version" materialising post-read is not what `prompt-content:` should be asserting about.
-#      Capturing the version present DURING the review is the correct semantic, not an approximation of
-#      a better one.
-#   3. THE RESIDUAL IS BOUNDED AND UNOBSERVED. Digest-keyed re-capture already follows any rewrite that
-#      happens a poll or more before deletion, so the exposure is a rewrite inside the final
-#      <= poll-interval (1s) window. In measured roborev behaviour (jobs 3 and 5 on this fleet) the
-#      snapshot is written once and then the reviewer is invoked; no mid-review rewrite was observed. To
-#      become a FALSE PASS rather than a false FAIL such a rewrite would additionally have to SHRINK the
-#      path set inside that window.
-# If evidence of a mid-review rewrite ever appears, this reasoning is what changes — not the code first.
-ROBOREV_SNAPSHOT_CAPTURE_DIR=""
-ROBOREV_SNAPSHOT_CAPTURE_PID=""
-# One second, because each poll DIGESTS the source: the point is that no same-size rewrite can hide,
-# and a digest is a sequential read of a page-cached file the size of a diff. A faster poll would buy
-# nothing (roborev writes the snapshot once, minutes before it deletes it).
-_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS=${ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS:-1}
+# WHAT SURVIVES, deliberately:
+#   * the three-way path-state helper (`verified-absent`/`present`/`unreadable`) and its lint. The
+#     predicate family is a general lesson, it is cheap, and it keeps "cannot tell" out of every answer.
+#   * the SAFETY half of the path checks: absolute, no `.`/`..` segments, inside the reviewed repository,
+#     no symlink at any traversed component. Those exist so the wrapper never READS something it should
+#     not, which is independent of whether it certifies anything.
+#   * "never silence": an unobserved snapshot yields a NOTICE that NAMES what could not be observed.
+#
+# The observer therefore only ever READS. It never copies, never publishes, and holds no state a
+# consumer could mistake for evidence.
+ROBOREV_SNAPSHOT_OBSERVE_FILE=""
+ROBOREV_SNAPSHOT_OBSERVE_PID=""
+_ROBOREV_SNAPSHOT_OBSERVE_POLL_SECS=${ROBOREV_SNAPSHOT_OBSERVE_POLL_SECS:-1}
 
-# roborev_snapshot_capture_start: create the private capture directory and begin capturing; sets
-# ROBOREV_SNAPSHOT_CAPTURE_DIR/_PID. Never fatal — a capture that cannot start leaves the check to
-# fail closed later on the absent snapshot, which is the correct direction.
-roborev_snapshot_capture_start() {
-  local dir phys
-  ROBOREV_SNAPSHOT_CAPTURE_DIR=""
-  ROBOREV_SNAPSHOT_CAPTURE_PID=""
-  dir=$(mktemp -d "${TMPDIR:-/tmp}/roborev-snapshot-capture.XXXXXX" 2>/dev/null) || return 0
-  # observability-justified: this asks about a directory `mktemp -d` JUST created for us. Its falsity is
-  # not an absence claim about anyone else's file, and it leads to "no capture is running", which surfaces
-  # downstream as a fail-closed `cleaned-up` rather than as a pass.
-  [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  chmod 700 "$dir" 2>/dev/null || :
-  # OUTSIDE THE REVIEWED REPOSITORY, DECIDED ON THE PHYSICALLY RESOLVED PATH (roborev job 9). A
-  # LEXICAL test on `mktemp`'s output is not enough: `TMPDIR` may be RELATIVE (so the path does not
-  # even start at the root the comparison assumes) or may itself traverse a SYMLINK INTO the checkout,
-  # either of which puts our own copies inside the tree the census and the watcher are both reading.
-  # `pwd -P` answers where the directory actually is — the same resolution the snapshot directory
-  # already gets — and the RESOLVED path is what is stored, so containment and cleanup can never
-  # disagree about which directory this is.
-  phys=$(cd "$dir" 2>/dev/null && pwd -P) || phys=""
-  if [ -z "$phys" ]; then
-    rm -rf "$dir" 2>/dev/null || :
-    DETAILS+=("NOTICE: snapshot-capture: the private capture directory '$dir' could not be resolved to a physical path, so no snapshot capture is running. A snapshot-mode review will therefore report 'snapshot diff unusable: cleaned-up' rather than being certified — that is fail-closed, not a silent pass.")
-    return 0
-  fi
-  case "$phys" in
-    /*) ;;
-    *)
-      rm -rf "$dir" 2>/dev/null || :
-      DETAILS+=("NOTICE: snapshot-capture: the private capture directory resolved to the NON-ABSOLUTE path '$phys' (check TMPDIR), so no snapshot capture is running. A snapshot-mode review will report 'snapshot diff unusable: cleaned-up' rather than being certified.")
-      return 0
-      ;;
-  esac
-  case "$phys/" in
-    "${REPO%/}"/*)
-      rm -rf "$dir" 2>/dev/null || :
-      DETAILS+=("NOTICE: snapshot-capture: the private capture directory resolves INSIDE the reviewed repository ('$phys' is under '$REPO' — TMPDIR is set there, or a component of it is a symlink into the checkout), so no snapshot capture is running: our own copies must never live in the tree being reviewed. Point TMPDIR outside the checkout and re-run. Until then a snapshot-mode review reports 'snapshot diff unusable: cleaned-up' rather than being certified — fail-closed, never a silent pass.")
-      return 0
-      ;;
-  esac
-  ROBOREV_SNAPSHOT_CAPTURE_DIR="$phys"
-  _roborev_snapshot_capture_loop "$REPO" "$phys" &
-  ROBOREV_SNAPSHOT_CAPTURE_PID=$!
+# roborev_snapshot_observe_start <observation-file>: begin observing. Never fatal — an observer that
+# cannot start leaves the NOTICE saying the snapshot was not observed, which is the honest outcome.
+roborev_snapshot_observe_start() {
+  ROBOREV_SNAPSHOT_OBSERVE_FILE=""
+  ROBOREV_SNAPSHOT_OBSERVE_PID=""
+  : >"$1" 2>/dev/null || return 0
+  ROBOREV_SNAPSHOT_OBSERVE_FILE="$1"
+  _roborev_snapshot_observe_loop "$REPO" "$1" &
+  ROBOREV_SNAPSHOT_OBSERVE_PID=$!
   return 0
 }
 
-# roborev_snapshot_capture_stop: stop the watcher GRACEFULLY — TERM sets a flag the loop checks
-# between iterations, so an in-flight capture finishes instead of being torn in half. Idempotent, and
-# safe from an EXIT trap. The bounded escalation to KILL is there so a wedged watcher can never hang
-# the wrapper; publishing is atomic either way, so an escalation loses at most one capture and can
-# never publish a partial one.
-roborev_snapshot_capture_stop() {
+# roborev_snapshot_observe_stop: stop the observer. TERM asks it to finish the current iteration; the
+# bounded escalation to KILL is guarded, because "the observer already exited" is its EXPECTED failure
+# mode and an unguarded `kill` as the last command of an AND-OR list aborts the wrapper under `set -e`.
+roborev_snapshot_observe_stop() {
   local waited=0
-  [ -n "${ROBOREV_SNAPSHOT_CAPTURE_PID:-}" ] || return 0
-  kill -TERM "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
+  [ -n "${ROBOREV_SNAPSHOT_OBSERVE_PID:-}" ] || return 0
+  kill -TERM "$ROBOREV_SNAPSHOT_OBSERVE_PID" 2>/dev/null || :
   while [ "$waited" -lt 50 ]; do
-    kill -0 "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || break
+    kill -0 "$ROBOREV_SNAPSHOT_OBSERVE_PID" 2>/dev/null || break
     waited=$((waited + 1))
     sleep 0.1 2>/dev/null || sleep 1
   done
-  # THE ESCALATION IS GUARDED, because its EXPECTED failure mode is "the thing already went away"
-  # (roborev job 11). `kill -0` can succeed and the watcher can then exit before `kill -KILL` runs, and
-  # `kill -KILL` is the LAST command of that AND-OR list — so under `set -e` its failure ABORTED THE
-  # WRAPPER. That is a spurious non-PASS `RESULT` on a genuine review: the same defect class #3312
-  # exists to remove, just in the loud direction. Measured before fixing: with `kill -0` succeeding and
-  # the following `kill` failing, execution stops at that line; with `|| :` it continues.
-  #
-  # THE SWEEP THIS PROMPTED (recorded so it is not re-done from scratch): every other command in this
-  # facility whose expected failure is "already gone" was checked — the `kill -TERM`, the `kill -0` in
-  # the wait loop (`|| break`), `wait`, `chmod`, every `rm -rf`, the `mv` of a transient stage, the
-  # `mktemp`, and the `cd`-based resolutions are each already guarded (`|| :`, `|| break`, `|| return`,
-  # or a handled `||` branch). The two glob loops of the shape `for x in <maybe-unmatched>/*; do
-  # [ -f "$x/y" ] && v="$x"; done` were MEASURED rather than assumed: a failing non-last command in an
-  # AND-OR list does not trip `set -e`, and such a loop does not abort even unguarded. So this was the
-  # only live instance, not a family — but the shape is named here so the next reader recognises it.
-  if kill -0 "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null; then
-    kill -KILL "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
+  if kill -0 "$ROBOREV_SNAPSHOT_OBSERVE_PID" 2>/dev/null; then
+    kill -KILL "$ROBOREV_SNAPSHOT_OBSERVE_PID" 2>/dev/null || :
   fi
-  wait "$ROBOREV_SNAPSHOT_CAPTURE_PID" 2>/dev/null || :
-  ROBOREV_SNAPSHOT_CAPTURE_PID=""
+  wait "$ROBOREV_SNAPSHOT_OBSERVE_PID" 2>/dev/null || :
+  ROBOREV_SNAPSHOT_OBSERVE_PID=""
   return 0
 }
 
-# roborev_snapshot_capture_cleanup: remove the private directory. Called from the wrapper's EXIT trap
-# AFTER the summary block is emitted — NOT from `stop`, because `prompt-content:` reads the capture
-# after the review returns, so deleting at stop would delete the evidence before the check that needs
-# it. The copy is deliberately not retained past the run: the block's actionable content is the cause
-# text, and keeping copies at a stable path is exactly the shared-directory reuse this design removed.
-roborev_snapshot_capture_cleanup() {
-  local dir="${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" base
-  [ -n "$dir" ] || return 0
-  ROBOREV_SNAPSHOT_CAPTURE_DIR=""
-  # Only ever a directory WE created: an absolute path whose BASENAME carries our own prefix. Keyed on
-  # the basename rather than on a `$TMPDIR` prefix because the stored path is the PHYSICALLY RESOLVED
-  # one, and a symlinked TMPDIR (`/tmp` -> `/private/tmp`) would make a TMPDIR-prefix test silently
-  # never match — leaking the directory instead of removing it, on exactly the platform where the
-  # resolution matters most.
-  case "$dir" in /*) ;; *) return 0 ;; esac
-  base="${dir##*/}"
-  case "$base" in
-    roborev-snapshot-capture.?*) rm -rf "$dir" 2>/dev/null || : ;;
-  esac
-  return 0
-}
-
-# ============ THE EXISTENCE/OBSERVABILITY PREDICATE FAMILY (roborev jobs 5, 10, 13) ============
-# THREE INSTANCES OF ONE MISTAKE, which is why this is a shared helper and not a third patch:
-#   1. job 5  — `[ ! -f "$live" ]` was read as "the snapshot is gone", so a DIRECTORY or FIFO at the
-#               named path took the capture branch. Narrowed to `-e`.
-#   2. job 10 — the same predicate, now `-e`, still conflated two facts: it is false for "absent" AND
-#               for "exists but is not a regular file". Split into an explicit `unreadable` report.
-#   3. job 13 — `[ ! -e "$live" ]` is ALSO false when the parent is not searchable or the lookup
-#               errors, so an existing but INACCESSIBLE snapshot could be replaced by an older
-#               capture. That is the same shape a third time: **a shell file test collapses "not
-#               there" and "cannot tell" into one false.**
-#
-# THE FAMILY, stated so instance four is prevented rather than awaited: **every `test`/`[` file
-# predicate is TWO-VALUED, and the value it collapses "unobservable" onto is the one that reads as
-# "nothing is wrong".** Absence must therefore be established AFFIRMATIVELY — parent searchable, the
-# lookup actually performed, and the answer actually ENOENT — and everything else must be reported as
-# `unreadable`, fail-closed. No consumer in this apparatus may read a bare predicate's own falsity as
-# absence; the guard suite asserts that structurally.
-#
-# _roborev_path_state <path>: the THREE-valued state of `<path>`. Exit status IS the state, and
-# `_rx_path_state` / `_rx_path_why` carry it for message text:
-#   0  present         the lookup SUCCEEDED and the path is there (any type).
-#   1  verified-absent the lookup was PERFORMED and answered ENOENT, and the containing directory was
-#                      itself observable — or an ancestor is itself verified-absent, which is absence
-#                      just as surely. A MEASUREMENT, not an inference from a failed test.
-#   2  unreadable      anything else: permission denied on a parent, a symlink loop, an I/O error, a
-#                      probe that could not run. NOTHING was established, so callers fail closed.
-#
-# WHY `ls` AND NOT `[ -e ]`: the shell's file tests expose no errno, so they cannot distinguish ENOENT
-# from EACCES — which is exactly the defect. `ls -d` reports the distinction in its message, read under
-# `LC_ALL=C` so it is not locale-dependent. Belt and braces on top of the message: an ENOENT answer is
-# only accepted as absence once the PARENT is affirmatively observable (a searchable directory), and
-# when it is not, the question recurses to the parent — so "absent because an ancestor is missing" is
-# still absence, while "cannot tell because an ancestor is unreadable" is `unreadable`. Recursion is
-# bounded by path depth and terminates at `/`.
-_roborev_path_state() {
-  local path="$1" probe rc parent
-  _rx_path_state=""
-  _rx_path_why=""
-  if [ -z "$path" ]; then
-    _rx_path_state="unreadable"
-    _rx_path_why="the empty path names nothing that could be looked up"
-    return 2
-  fi
-  probe=$(LC_ALL=C ls -d -- "$path" 2>&1)
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    _rx_path_state="present"
-    return 0
-  fi
-  case "$probe" in
-    *'No such file or directory'*) ;;
-    *)
-      _rx_path_state="unreadable"
-      _rx_path_why="the lookup FAILED for a reason other than absence: ${probe:-<no message>}"
-      return 2
-      ;;
-  esac
-  parent="${path%/*}"
-  [ -n "$parent" ] || parent="/"
-  if [ "$parent" = "$path" ]; then
-    # No parent to appeal to (a root-level name); the ENOENT answer is all there is, and it came from
-    # a successful lookup in a directory the kernel resolved, so it is a measurement.
-    _rx_path_state="verified-absent"
-    return 1
-  fi
-  # THE PARENT MUST BE AFFIRMATIVELY OBSERVABLE before an ENOENT is accepted as absence. `-d` and `-x`
-  # are used here as a POSITIVE pair (both must hold), never as "not the bad case": if either fails the
-  # question is passed to the parent rather than answered.
-  # observability-justified: THIS IS THE PRIMITIVE the rest of the apparatus is routed through, and the
-  # one place such a test is the measurement rather than a guess: the pair is required AFFIRMATIVELY
-  # (both must hold) and only to CONFIRM an ENOENT already obtained, and when it does not hold the
-  # question is passed to the parent instead of being answered. Nothing here reads a falsity as absence.
-  if [ -d "$parent" ] && [ -x "$parent" ]; then
-    _rx_path_state="verified-absent"
-    return 1
-  fi
-  _roborev_path_state "$parent"
-  case "$_rx_path_state" in
-    verified-absent)
-      _rx_path_state="verified-absent"
-      _rx_path_why=""
-      return 1
-      ;;
-    *)
-      _rx_path_state="unreadable"
-      _rx_path_why="the containing directory '$parent' is not an observable searchable directory${_rx_path_why:+ ($_rx_path_why)}, so the absence of '$path' could not be established"
-      return 2
-      ;;
-  esac
-}
-
-# _roborev_regular_readable_state <path>: the state of `<path>` AS A DIFF WE COULD READ. Same three
-# values, with `present` meaning "present AND a readable regular file". A path that exists but is a
-# directory/FIFO/socket, or that we cannot read, is `unreadable` — never `verified-absent`, because it
-# IS there. Callers wanting "is this file usable" ask this; callers wanting "is this gone" ask above.
-_roborev_regular_readable_state() {
-  local path="$1"
-  _roborev_path_state "$path" || :
-  case "$_rx_path_state" in
-    present)
-      # observability-justified: `-f`/`-r` are consulted ONLY after `present` was established by the
-      # helper above, so their falsity here cannot mean "absent" — it means "there but not a readable
-      # regular file", which is the `unreadable` verdict this branch returns.
-      if [ -f "$path" ] && [ -r "$path" ]; then
-        _rx_path_state="present"
-        return 0
-      fi
-      _rx_path_state="unreadable"
-      _rx_path_why="the path exists but is not a readable regular file"
-      return 2
-      ;;
-    verified-absent) return 1 ;;
-    *) return 2 ;;
-  esac
-}
-
-# _roborev_file_digest <file>: a content digest into `_rx_digest`; non-zero when none can be taken.
-# Any of the three tools distinguishes a same-length rewrite, which is the whole requirement; the
-# fallback chain exists because `sha256sum` is GNU, `shasum` is what macOS ships, and `cksum` is
-# POSIX. A failure returns non-zero and the caller RE-CAPTURES rather than keeping a stale copy.
-_roborev_file_digest() {
-  local f="$1" out=""
-  _rx_digest=""
-  if command -v sha256sum >/dev/null 2>&1; then
-    out=$(sha256sum -- "$f" 2>/dev/null | awk '{print $1; exit}')
-  elif command -v shasum >/dev/null 2>&1; then
-    out=$(shasum -a 256 -- "$f" 2>/dev/null | awk '{print $1; exit}')
-  elif command -v cksum >/dev/null 2>&1; then
-    out=$(cksum -- "$f" 2>/dev/null | awk '{print $1 "-" $2; exit}')
-  fi
-  [ -n "$out" ] || return 1
-  _rx_digest="$out"
-  return 0
-}
-
-# _roborev_capture_validate <repo> <snapshot-dir-id> <file>: may this file be captured as this
-# review's diff? Exit 0 with `_rx_cap_rel` set to its validated REPO-RELATIVE path, else non-zero.
-#
-# EVERY TEST HERE PRECEDES THE READ, which is the entire point of the function: once `cp` has run,
-# a symlink has already been followed and the evidence of it can be (and normally IS) deleted before
-# anything else looks. These are integrity checks against an ACCIDENTAL substitution (roborev writes a
-# regular file; anything else is not the snapshot), not a defence against a repo-writable adversary —
-# see the scope note above. The four conditions:
-#   1. no SYMLINK at any component this walk descends — `.roborev`, the snapshot dir, and the file
-#      itself. Checked with `-L`, which does NOT follow, and before `-f`, which does.
-#   2. a REGULAR FILE. Safe to ask only after 1, since `-f` would otherwise answer about a target.
-#   3. the containing directory, PHYSICALLY resolved, is exactly `<repo>/.roborev/<id>`.
-#      `$repo` is `$REPO`, already `pwd -P`-resolved by the wrapper.
-#   4. the relative path is derived from the components we just validated, never re-parsed.
-_roborev_capture_validate() {
-  local repo="$1" id="$2" f="$3" dirphys _cv_walk
-  _rx_cap_rel=""
+# _roborev_snapshot_safe_to_read <repo> <snapshot-dir-id> <file>: may the wrapper READ this file? This
+# is the SAFETY half of the retired capture validation and nothing more: every traversed component must
+# be observable and not a symlink, the file must be a readable regular file, and its directory must
+# physically be `<repo>/.roborev/<id>`. It answers "may we look", never "is this evidence".
+_roborev_snapshot_safe_to_read() {
+  local repo="$1" id="$2" f="$3" dirphys _sr_walk
   [ -n "$repo" ] && [ -n "$id" ] && [ -n "$f" ] || return 1
-  # OBSERVABILITY FIRST, then type — the predicate family (see `_roborev_path_state`). An unobservable
-  # component must not fall through `-L`'s two-valued falsity into a capture: refusing to capture is the
-  # fail-closed direction here, since a missing capture surfaces later as `cleaned-up`.
-  for _cv_walk in "$repo/.roborev" "$repo/.roborev/$id" "$f"; do
-    _roborev_path_state "$_cv_walk" || :
+  for _sr_walk in "$repo/.roborev" "$repo/.roborev/$id" "$f"; do
+    _roborev_path_state "$_sr_walk" || :
     [ "$_rx_path_state" = "present" ] || return 1
-    # observability-justified: `-L` is asked only of a PRESENT component, so its falsity is a
-    # measurement about type rather than an inference from a failed lookup.
-    [ ! -L "$_cv_walk" ] || return 1
+    # observability-justified: `-L` is asked only of a component the helper reported PRESENT, so its
+    # falsity is a measurement about type rather than an inference from a failed lookup.
+    [ ! -L "$_sr_walk" ] || return 1
   done
   _roborev_regular_readable_state "$f" || return 1
   dirphys=$(cd "${f%/*}" 2>/dev/null && pwd -P) || return 1
   [ "$dirphys" = "$repo/.roborev/$id" ] || return 1
-  _rx_cap_rel=".roborev/$id/${f##*/}"
   return 0
 }
 
-# The published unit is a DIRECTORY per snapshot id: `<capture-dir>/<id>/{content.diff,meta}`, where
-# `meta` records the validated relative path and the digest captured. One rename publishes both.
-_roborev_snapshot_capture_loop() {
-  local repo="$1" out="$2" f id rel stage published dest _pub dg_pre dg_post dg_staged
-  # GRACEFUL SHUTDOWN: TERM only asks the loop to stop; the current iteration completes, so a capture
-  # in flight when the review ends is finished rather than abandoned.
-  _rx_capture_stop=0
-  trap '_rx_capture_stop=1' TERM
+# The observation record is one line per observation, `<path>\t<digest>\t<bytes>`, appended whenever the
+# digest changes; the LAST line for a path is what the block reports. Append-only and read-only-once, so
+# there is no publication, no selection and no staleness rule to get wrong — a superseded line is simply
+# an earlier observation of the same path, and the reader takes the last.
+_roborev_snapshot_observe_loop() {
+  local repo="$1" out="$2" f id last=""
+  _rx_observe_stop=0
+  trap '_rx_observe_stop=1' TERM
   while : ; do
-    # An unmatched glob leaves the PATTERN in `$f`, which the validation rejects — no `nullglob`
-    # dependency, and inline-mode reviews simply never match.
     for f in "$repo"/.roborev/roborev-snapshot-*/roborev-snapshot-content.diff; do
       id="${f%/*}"
       id="${id##*/}"
-      # VALIDATE BEFORE ANY READ. Nothing below may run for a path that failed this.
-      _roborev_capture_validate "$repo" "$id" "$f" || continue
-      rel="$_rx_cap_rel"
-      # DIGEST-KEYED REUSE: skip only when the published capture records the SAME digest. A digest we
-      # could not take is not a match, so it re-captures.
-      #
-      # THE PRE-COPY DIGEST IS KEPT IN ITS OWN VARIABLE. `_roborev_file_digest` returns through a
-      # single global, so reading it again LATER OVERWRITES this value — which is exactly how the
-      # post-copy check below came to compare nothing at all (roborev job 8). Each of the three
-      # digests gets its own name, and none of them is the shared global by the time it is compared.
+      _roborev_snapshot_safe_to_read "$repo" "$id" "$f" || continue
       _roborev_file_digest "$f" || continue
-      dg_pre="$_rx_digest"
-      # NON-EMPTY IS REQUIRED EXPLICITLY, not inferred from the call having succeeded: an empty digest
-      # compares EQUAL to another empty digest, so an unmeasurable read would otherwise satisfy the
-      # agreement below and publish an unverified capture — a textbook vacuous pass. Belt and braces
-      # on top of the `|| continue` above, because the guarantee must not depend on one call site.
-      [ -n "$dg_pre" ] || continue
-      # THE NEWEST PUBLICATION FOR THIS ID, found the same way the resolver finds it: the LAST match of
-      # the padded-sequence glob. Reuse is skipped only when that publication records the SAME digest.
-      published=""
-      for _pub in "$out"/pub."$id".*; do
-        # observability-justified: OUR OWN publications, in a private per-run 0700 directory we created.
-        # A false negative here only means "re-capture", which is the safe direction; it never asserts
-        # that anything is absent.
-        [ -f "$_pub/meta" ] && published="$_pub/meta"
-      done
-      if [ -n "$published" ] \
-        && [ "$(sed -n 's/^digest=//p' "$published" 2>/dev/null | head -1)" = "$dg_pre" ]; then
-        continue
-      fi
-      stage="$out/.stage.$$.$id"
-      rm -rf "$stage" 2>/dev/null || :
-      mkdir -p "$stage" 2>/dev/null || continue
-      if ! cp "$f" "$stage/content.diff" 2>/dev/null; then
-        rm -rf "$stage" 2>/dev/null || :
-        continue
-      fi
-      # PUBLICATION REQUIRES THREE DIGESTS THAT AGREE — the source BEFORE the copy, the source AFTER
-      # it, and the STAGED COPY itself — plus the source still not being a symlink. Agreement is an
-      # AFFIRMATIVE requirement, not the absence of an observed change:
-      #   * pre != post   the source changed while we were reading it, so the staged bytes may be a
-      #                   MIX of two versions. Discard.
-      #   * pre != staged the copy did not reproduce the source (a short write, an interposed copy),
-      #                   so the staged bytes are not what we digested. Discard.
-      #   * any empty     nothing was measured for that leg, and "unmeasured" must never satisfy an
-      #                   equality test. Discard.
-      # A discard is the correct outcome, not a loss: the next poll retries, and "no capture yet" is a
-      # state the consumer already fails closed on. The previous revision took the post-copy digest
-      # into the SAME global as the pre-copy one and then STAMPED THE META WITH IT, so a source mutated
-      # during `cp` published a mixed capture bearing the final digest — and every later poll matched
-      # that digest and reused it, certifying a diff the reviewer never received (roborev job 8).
-      _roborev_file_digest "$f" || { rm -rf "$stage" 2>/dev/null || :; continue; }
-      dg_post="$_rx_digest"
-      _roborev_file_digest "$stage/content.diff" || { rm -rf "$stage" 2>/dev/null || :; continue; }
-      dg_staged="$_rx_digest"
-      # observability-justified: the source was established PRESENT by `_roborev_capture_validate`
-      # earlier in this same iteration, and an unobservable source would already have failed the two
-      # digest reads above — so this `-L` decides TYPE, never existence. Kept as its own statement so the
-      # justification sits directly above the predicate it justifies.
-      if [ -L "$f" ]; then
-        rm -rf "$stage" 2>/dev/null || :
-        continue
-      fi
-      if [ -z "$dg_pre" ] || [ -z "$dg_post" ] || [ -z "$dg_staged" ] \
-        || [ "$dg_pre" != "$dg_post" ] || [ "$dg_pre" != "$dg_staged" ]; then
-        rm -rf "$stage" 2>/dev/null || :
-        continue
-      fi
-      # STAMPED WITH THE AGREED DIGEST. All three are equal here, so naming the pre-copy one is a
-      # statement about what was actually verified rather than whatever the last read happened to see.
-      printf 'rel=%s\ndigest=%s\n' "$rel" "$dg_pre" >"$stage/meta" 2>/dev/null || {
-        rm -rf "$stage" 2>/dev/null || :
-        continue
-      }
-      # ONE RENAME PUBLISHES CONTENT AND METADATA TOGETHER, INTO A DESTINATION THAT CANNOT ALREADY
-      # EXIST (roborev job 10, blocker 1). The previous revision published to the FIXED path
-      # `<out>/<id>`, renamed any existing publication aside first, and ignored whether that rename
-      # worked — and `mv <dir> <existing-dir>` does not fail, it NESTS: the staged directory landed
-      # INSIDE the old one, leaving the previous `content.diff` and `meta` at exactly the paths the
-      # resolver reads, so a rewritten snapshot certified the older version.
-      #
-      # THE FIX IS SUBTRACTION, NOT A RETURN-CODE CHECK. Each capture publishes to
-      # `<out>/pub.<id>.<seq>` with a per-run monotonic sequence, so the destination is fresh by
-      # construction: there is no pre-existing destination, hence no rename-aside, no backup path, no
-      # background delete, and no nesting case to reason about. Superseded publications are simply left
-      # behind — the whole capture directory is removed at exit, so garbage collection would be another
-      # deletion path to get wrong for no benefit.
-      #
-      # THE SEQUENCE IS ZERO-PADDED so a lexicographic glob is also numeric order, which is what lets
-      # the resolver take the LAST match as the newest without parsing anything. Six digits bounds a run
-      # at 999,999 publications (one per poll-with-change; a poll is 1s), which no review approaches.
-      _rx_capture_seq=$((${_rx_capture_seq:-0} + 1))
-      printf -v dest 'pub.%s.%06d' "$id" "$_rx_capture_seq"
-      mv "$stage" "$out/$dest" 2>/dev/null || rm -rf "$stage" 2>/dev/null || :
+      [ "$_rx_digest" != "$last" ] || continue
+      last="$_rx_digest"
+      printf '%s\t%s\t%s\n' "$f" "$_rx_digest" "$(wc -c <"$f" 2>/dev/null | tr -d '[:space:]')" \
+        >>"$out" 2>/dev/null || :
     done
-    [ "$_rx_capture_stop" -eq 0 ] || return 0
-    sleep "$_ROBOREV_SNAPSHOT_CAPTURE_POLL_SECS" 2>/dev/null || sleep 1
-    [ "$_rx_capture_stop" -eq 0 ] || return 0
+    [ "$_rx_observe_stop" -eq 0 ] || return 0
+    sleep "$_ROBOREV_SNAPSHOT_OBSERVE_POLL_SECS" 2>/dev/null || sleep 1
+    [ "$_rx_observe_stop" -eq 0 ] || return 0
   done
+}
+
+# roborev_snapshot_observation_for <path>: the digest and size the observer recorded for `<path>`, into
+# `_rx_obs_digest` / `_rx_obs_bytes`. Exit 1 when the observer recorded nothing for it — which the
+# caller reports as "not observed", never as a fact about the diff.
+roborev_snapshot_observation_for() {
+  local want="$1" line p d b
+  _rx_obs_digest=""
+  _rx_obs_bytes=""
+  [ -n "${ROBOREV_SNAPSHOT_OBSERVE_FILE:-}" ] || return 1
+  # observability-justified: the observation file is the wrapper's OWN, created by this run beside its
+  # transcript. Its absence yields "not observed", which is the honest report rather than a claim.
+  [ -f "$ROBOREV_SNAPSHOT_OBSERVE_FILE" ] || return 1
+  while IFS= read -r line; do
+    p="${line%%$'\t'*}"
+    [ "$p" = "$want" ] || continue
+    d="${line#*$'\t'}"
+    b="${d#*$'\t'}"
+    d="${d%%$'\t'*}"
+    _rx_obs_digest="$d"
+    _rx_obs_bytes="$b"
+  done <"$ROBOREV_SNAPSHOT_OBSERVE_FILE"
+  [ -n "$_rx_obs_digest" ] || return 1
+  return 0
 }
 
 # roborev_prompt_snapshot_paths <prompt-file>: the DISTINCT snapshot diff paths the prompt
@@ -1531,152 +1211,69 @@ _roborev_resolve_existing_ancestor() {
 # costing one re-run plus a one-line update here, chosen over the alternative (accept any path
 # the prompt names), which would hand the strongest anti-vacuity key an oracle nobody bound.
 roborev_snapshot_path_binding() {
-  local p="$1" rel comp i repo_prefix orig_tail orig_prefix orig_prefix_phys walk
+  local p="$1" rel repo_prefix orig_prefix orig_prefix_phys walk i
   local -a parts=() orig_parts=()
   _rx_snap_bind_state=""
   _rx_snap_bind_detail=""
   _rx_snap_bound_path="$p"
-  _rx_snap_dir=""
-  _rx_snap_dir_id=""
-  _rx_snap_rel=""
   case "$p" in
     /*) ;;
-    *) _rx_snap_bind_state="not-absolute"; return 1 ;;
+    *) _rx_snap_bind_state="not-absolute"
+       _rx_snap_bind_detail="a relative path would resolve against this process's working directory rather than the reviewed repository"
+       return 1 ;;
   esac
-
-  # ============ VALIDATE BEFORE YOU NORMALISE (roborev job 12) ============
-  # THE SAME ORDERING ERROR AS THE CAPTURE-TIME TOCTOU, in a second place: there, the read happened
-  # before the validation; here, the RESOLUTION happened before it. Physical resolution ERASES exactly
-  # what the component checks exist to find — an existing `..` segment and an in-repository directory
-  # symlink are both normalised away — so a prompt path nominally under snapshot id A could resolve
-  # into snapshot directory B and pass every component and job-binding test while naming a diff from a
-  # different snapshot. The rule the codebase has now learned twice: **validate before you normalise,
-  # and validate before you read.** Resolution below is used ONLY for the containment test.
-  #
-  # STEP 1 — DOT SEGMENTS ARE REJECTED ON THE ORIGINAL SPELLING, anywhere in the path. No legitimate
-  # roborev snapshot path contains `.`, `..` or an empty component, and checking the original needs no
-  # prefix stripping, so it works whatever spelling of the repo root the prompt carries.
+  # VALIDATE BEFORE YOU NORMALISE (roborev job 12): physical resolution erases `..` segments and
+  # directory symlinks, which is exactly what these checks exist to find, so the original spelling is
+  # checked first and resolution is used ONLY for the containment test below.
   IFS='/' read -r -a orig_parts <<<"$p"
   for ((i = 0; i < ${#orig_parts[@]}; i++)); do
     case "${orig_parts[$i]}" in
       '.'|'..')
-        _rx_snap_bind_state="unbound-job"
-        _rx_snap_bind_detail="the path contains a '${orig_parts[$i]}' segment, which resolution would erase — a traversal like '.roborev/roborev-snapshot-A/../roborev-snapshot-B/...' names one snapshot directory and lands in another"
-        return 3
+        _rx_snap_bind_state="dot-segment"
+        _rx_snap_bind_detail="the path contains a '${orig_parts[$i]}' segment, which resolution would erase — it names one directory and lands in another"
+        return 1
         ;;
     esac
   done
-
-  # STEP 2 — CONTAINMENT, and only containment, from the physically resolved path. Resolution is what
-  # lets a legitimately symlinked spelling of the repo ROOT (a symlinked checkout, a /tmp -> /private/tmp
-  # box) be recognised as in-repo; it is deliberately not trusted for anything else.
   _roborev_resolve_existing_ancestor "$p"
   _rx_snap_bound_path="$_rx_resolved"
-  # The trailing slash is stripped so a repo AT the filesystem root (`$REPO` = `/`) yields the
-  # prefix `` and the pattern `/*`, rather than `//*` — which matches nothing and would report
-  # every path in such a repo foreign. Unreachable in practice, closed by construction anyway.
   repo_prefix="${REPO%/}"
-  case "$_rx_snap_bound_path" in
+  case "$_rx_snap_bound_path/" in
     "$repo_prefix"/*) ;;
-    *) _rx_snap_bind_state="foreign-repo"; return 2 ;;
+    *) _rx_snap_bind_state="foreign-repo"
+       _rx_snap_bind_detail="'$_rx_snap_bound_path' is not under the reviewed repository '$repo_prefix'"
+       return 1 ;;
   esac
   rel="${_rx_snap_bound_path#"$repo_prefix"/}"
   IFS='/' read -r -a parts <<<"$rel"
-  # At least `.roborev` / `roborev-snapshot-<id>` / a file name.
-  if [ "${#parts[@]}" -lt 3 ]; then
-    _rx_snap_bind_state="unbound-job"
-    _rx_snap_bind_detail="the path has too few components inside the repository to be a snapshot file"
-    return 3
-  fi
-
-  # STEP 3 — THE ORIGINAL'S OWN TAIL MUST BE THE SAME COMPONENTS. Split the ORIGINAL path into a
-  # prefix and its last N components (N from the resolved rel). The prefix must resolve to the repo
-  # root — that is the allowance for a differently-spelled root — and the tail names must MATCH the
-  # resolved ones. A directory symlink inside the repo is exactly what makes them differ, so this is
-  # where `.roborev/roborev-snapshot-A -> roborev-snapshot-B` is caught rather than normalised away.
-  orig_tail=""
   orig_prefix="$p"
-  for ((i = 0; i < ${#parts[@]}; i++)); do
-    orig_tail="${orig_prefix##*/}${orig_tail:+/$orig_tail}"
-    orig_prefix="${orig_prefix%/*}"
-  done
+  for ((i = 0; i < ${#parts[@]}; i++)); do orig_prefix="${orig_prefix%/*}"; done
   [ -n "$orig_prefix" ] || orig_prefix="/"
   orig_prefix_phys=$(cd "$orig_prefix" 2>/dev/null && pwd -P) || orig_prefix_phys=""
-  if [ -z "$orig_prefix_phys" ]; then
-    # A `cd` THAT FAILS IS AMBIGUOUS in exactly the family's way — gone, or not searchable. Ask.
-    _roborev_path_state "$orig_prefix" || :
-    if [ "$_rx_path_state" = "unreadable" ]; then
-      _rx_snap_bind_state="unreadable-component"
-      _rx_snap_bind_detail="the path's own prefix '$orig_prefix' could not be observed — ${_rx_path_why:-the lookup did not answer}"
-      return 5
-    fi
+  if [ "${orig_prefix_phys%/}" != "$repo_prefix" ]; then
+    _rx_snap_bind_state="unresolvable-prefix"
+    _rx_snap_bind_detail="the path's own prefix '$orig_prefix' does not resolve to the repository root ('${orig_prefix_phys:-<unresolvable>}')"
+    return 1
   fi
-  if [ -z "$orig_prefix_phys" ] || [ "${orig_prefix_phys%/}" != "$repo_prefix" ]; then
-    _rx_snap_bind_state="unbound-job"
-    _rx_snap_bind_detail="the path's own prefix '$orig_prefix' does not resolve to the reviewed repository root ('${orig_prefix_phys:-<unresolvable>}' vs '$repo_prefix'), so its components inside the repo cannot be established without trusting resolution to invent them"
-    return 3
-  fi
-  if [ "$orig_tail" != "$rel" ]; then
-    _rx_snap_bind_state="symlinked"
-    _rx_snap_bind_detail="the path's components inside the repository ('$orig_tail') are not the ones it actually resolves to ('$rel'), so a directory symlink or equivalent rewrote them — the prompt names one snapshot directory and the path lands in another"
-    return 4
-  fi
-
-  # STEP 4 — NO SYMLINK AT ANY COMPONENT WE TRAVERSE, tested on the ORIGINAL spelling, top down. This
-  # covers `.roborev`, the snapshot directory and the file itself. `-L` does not follow, so each answer
-  # is about the component named rather than about its target. (Step 3 already rejects a rewriting
-  # symlink; this additionally rejects one that happens to point at the same place, because a snapshot
-  # path roborev wrote never traverses one and "it points somewhere harmless today" is not a property
-  # this check should have to reason about.)
+  # NO SYMLINK AT ANY COMPONENT WE WOULD TRAVERSE, tested on the ORIGINAL spelling, top down, with
+  # observability asked FIRST so "cannot tell" is never read as "not a symlink".
   walk="$orig_prefix"
   for ((i = 0; i < ${#parts[@]}; i++)); do
     walk="$walk/${parts[$i]}"
-    # EVERY TRAVERSED COMPONENT MUST BE OBSERVABLE. Asking the three-valued helper first means an
-    # UNREADABLE component is reported as such instead of falling through `-L` (which is false both for
-    # "not a symlink" and for "cannot tell") into the shape checks — the predicate family again.
     _roborev_path_state "$walk" || :
     if [ "$_rx_path_state" = "unreadable" ]; then
       _rx_snap_bind_state="unreadable-component"
-      _rx_snap_bind_detail="the component '$walk' could not be observed — ${_rx_path_why:-the lookup did not answer} — so neither its type nor the identity of the snapshot it belongs to could be established"
-      return 5
+      _rx_snap_bind_detail="the component '$walk' could not be observed — ${_rx_path_why:-the lookup did not answer}"
+      return 1
     fi
-    # observability-justified: `-L` is consulted only where the component is PRESENT or verified-absent;
-    # in both of those states its falsity is a measurement about type, not a guess about existence.
+    # observability-justified: `-L` is asked only where the component is PRESENT or verified-absent, so
+    # its falsity is a measurement about type rather than a guess about existence.
     if [ -L "$walk" ]; then
       _rx_snap_bind_state="symlinked"
-      if [ "$i" -eq $(( ${#parts[@]} - 1 )) ]; then
-        _rx_snap_bind_detail="the named file itself is a SYMLINK ('$walk'), and roborev writes a regular file there"
-      else
-        _rx_snap_bind_detail="a traversed DIRECTORY component is a SYMLINK ('$walk'), so the path the prompt names is not the directory it appears to name"
-      fi
-      return 4
+      _rx_snap_bind_detail="the component '$walk' is a SYMLINK, so the path is not the file it appears to name"
+      return 1
     fi
   done
-
-  # STEP 5 — THE SHAPE, on components now known to be the original's own.
-  [ "${parts[0]}" = ".roborev" ] || {
-    _rx_snap_bind_state="unbound-job"
-    _rx_snap_bind_detail="the path does not sit under the repository's own '.roborev' directory"
-    return 3
-  }
-  case "${parts[1]}" in
-    roborev-snapshot-?*) ;;
-    *)
-      _rx_snap_bind_state="unbound-job"
-      _rx_snap_bind_detail="the second component '${parts[1]}' is not a 'roborev-snapshot-<id>' directory"
-      return 3
-      ;;
-  esac
-  # THE FULL RELATIVE PATH the prompt names, kept for the capture lookup: a capture is matched by
-  # this whole path, never by the directory id alone (roborev job 6, blocker 2), so a prompt naming
-  # a different file in the same snapshot directory cannot be answered with the canonical sibling.
-  # Set only HERE, after the original's tail has been shown to be these very components.
-  _rx_snap_rel="$rel"
-  # The snapshot DIRECTORY, so a cleaned-up directory can be distinguished from a missing file.
-  _rx_snap_dir="$repo_prefix/${parts[0]}/${parts[1]}"
-  # The DIRECTORY ID is what a capture is keyed by, so it is derived HERE, from the same components
-  # the binding already validated — never re-parsed from the path by a second consumer.
-  _rx_snap_dir_id="${parts[1]}"
   _rx_snap_bind_state="ok"
   return 0
 }
@@ -1707,232 +1304,89 @@ roborev_snapshot_path_binding() {
 # A NAMED-BUT-UNUSABLE SNAPSHOT FAILS EVEN WHEN THE PROMPT ALSO CARRIED INLINE HEADERS, and that
 # is deliberate: roborev told the reviewer to read the snapshot, so whatever is inline is by
 # construction PARTIAL. Falling back to it would let a fraction of the diff certify the whole.
+# THE DIFF-SOURCE RESOLVER, after C‴. It answers ONE question — did the prompt deliver the diff inline,
+# by snapshot path, or not at all — and for a snapshot it records what could be OBSERVED about it. It no
+# longer reads the snapshot's headers, unions header sets, selects among captures or matches identities,
+# because no verdict is derived from any of that any more.
+#
+# THE AFFIRMATIVE STATES, unchanged in spirit and now shorter:
+#   inline    the prompt carried `diff --git` headers and named no snapshot  -> certified as before.
+#   snapshot  the prompt named a snapshot path                               -> NOTICE, observed+reported.
+#   none      neither                                                        -> the census match FAILs.
+# There is no failure state left in this function: a snapshot path that is unusable, unsafe to read or
+# unobservable is still `snapshot`, with `ROBOREV_SNAPSHOT_UNOBSERVED_WHY` naming what stopped us. That is
+# the C‴ trade written down: those conditions used to be FAIL causes because a certification depended on
+# them, and nothing depends on them now.
 ROBOREV_DIFF_SOURCE_STATE=""
-ROBOREV_DIFF_SOURCE_DETAIL=""
-ROBOREV_DIFF_SOURCE_PATH=""
-# live | captured — WHICH copy of the snapshot the headers came from. Presentational, and reset on
-# every call so a previous run's value can never be reported for this one.
-ROBOREV_DIFF_SOURCE_ORIGIN="live"
+ROBOREV_SNAPSHOT_PATH=""
+ROBOREV_SNAPSHOT_DIGEST=""
+ROBOREV_SNAPSHOT_BYTES=""
+ROBOREV_SNAPSHOT_UNOBSERVED_WHY=""
 roborev_collect_review_diff_headers() {
-  local prompt="$1" snap_path snap_bytes _rx_live_state _rx_live_why
-  local -a in_hdrs=() in_from=() in_to=()
+  local prompt="$1" snap_path
   ROBOREV_DIFF_SOURCE_STATE=""
-  ROBOREV_DIFF_SOURCE_DETAIL=""
-  ROBOREV_DIFF_SOURCE_PATH=""
-  ROBOREV_DIFF_SOURCE_ORIGIN="live"
+  ROBOREV_SNAPSHOT_PATH=""
+  ROBOREV_SNAPSHOT_DIGEST=""
+  ROBOREV_SNAPSHOT_BYTES=""
+  ROBOREV_SNAPSHOT_UNOBSERVED_WHY=""
 
   roborev_collect_prompt_headers "$prompt"
-  in_hdrs=(${_rx_hdrs[@]+"${_rx_hdrs[@]}"})
-  in_from=(${_rx_hdr_from[@]+"${_rx_hdr_from[@]}"})
-  in_to=(${_rx_hdr_to[@]+"${_rx_hdr_to[@]}"})
-
   roborev_prompt_snapshot_paths "$prompt"
-  # UNPARSEABLE FIRST, and unconditionally: an instruction line whose path could not be read
-  # leaves an UNKNOWN source, and a readable sibling line does not make it known. Checking it only
-  # when NOTHING parsed would let the readable half excuse the unread half.
-  if [ "${_rx_snap_unparseable:-0}" -gt 0 ]; then
-    ROBOREV_DIFF_SOURCE_STATE="unparseable-path"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' carries roborev's snapshot instruction ('Read the diff from:', or the compact '(Diff too large; read ...') but no backtick-delimited path could be read from ${_rx_snap_unparseable:-0} such line(s), so a diff the reviewer was told to read cannot be located. Failing closed: the instruction shape may have changed — inspect the prompt ('roborev show ${JOB:-<job>} --prompt') and update roborev_prompt_snapshot_paths."
-    return 0
-  fi
-  if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
-    # WHICH of several named paths roborev wrote for this job is UNDECIDABLE, so it is not
-    # decided. Picking one would be a guess dressed as a measurement.
-    ROBOREV_DIFF_SOURCE_STATE="ambiguous"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt for job '${JOB:-unknown}' names ${#_rx_snap_paths[@]} DIFFERENT snapshot diff paths, so which one roborev wrote for THIS review is undecidable and no header source can be trusted. Failing closed rather than picking one: ${_rx_snap_paths[*]}"
-    return 0
-  fi
-  if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
-    if [ "${#in_hdrs[@]}" -gt 0 ]; then
+
+  if [ "${#_rx_snap_paths[@]}" -eq 0 ] && [ "${_rx_snap_unparseable:-0}" -eq 0 ]; then
+    if [ "${#_rx_hdrs[@]}" -gt 0 ]; then
       ROBOREV_DIFF_SOURCE_STATE="inline"
     else
       ROBOREV_DIFF_SOURCE_STATE="none"
-      if [ "${_rx_snap_oversize_markers:-0}" -gt 0 ]; then
-        # A THIRD DELIVERY MODE, and naming it is the whole value here: the verdict is unchanged
-        # (FAIL — nothing in the prompt establishes what the reviewer received), but "roborev
-        # asked the reviewer to run git itself" is a different fact from "the reviewer got an
-        # empty prompt", and an operator told the latter will look for the wrong defect.
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path, which is roborev's DELEGATED-INSPECTION tier (its codex_*/generic_* oversize templates ask the reviewer to run git commands locally instead of shipping the diff). No snapshot file exists in that mode, so NOTHING obtainable locally can establish which files the reviewer actually looked at — this run is therefore UNVERIFIED, not certified, and whether such a review is certifiable at all is a decision for the issue owner, not for this wrapper to assume. Measured in roborev v0.61.2's own templates."
-      fi
     fi
     return 0
   fi
 
+  # SNAPSHOT MODE. Everything below only ever REPORTS.
+  ROBOREV_DIFF_SOURCE_STATE="snapshot"
+  if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
+    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt carries roborev's snapshot instruction but no backtick-delimited path could be read from it (${_rx_snap_unparseable:-0} such line(s))"
+    return 0
+  fi
+  if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
+    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt names ${#_rx_snap_paths[@]} different snapshot diff paths, so which one this review was given is undecidable: ${_rx_snap_paths[*]}"
+    return 0
+  fi
   snap_path="${_rx_snap_paths[0]}"
-  ROBOREV_DIFF_SOURCE_PATH="$snap_path"
-  # THE STATE IS CONSULTED, NOT THE STATUS (this function's contract, and the binding's): `|| :`
-  # only keeps `set -e` from aborting on the non-zero states, and deliberately discards a value
-  # that must not become a second source of truth about what happened.
+  ROBOREV_SNAPSHOT_PATH="$snap_path"
+  # THE SAFETY CHECKS SURVIVE C‴ (see the note above): they decide whether the wrapper may READ this
+  # path at all, which is independent of certification. A refusal here means "not observed", with the
+  # reason, never a silent omission.
   roborev_snapshot_path_binding "$snap_path" || :
-  ROBOREV_DIFF_SOURCE_PATH="$_rx_snap_bound_path"
-  # KEYED ON THE AFFIRMATIVE VALUE (`= ok`), never on "not one of the bad ones": a binding state
-  # this function has never judged must not reach the read below.
   if [ "${_rx_snap_bind_state:-}" != ok ]; then
-    case "${_rx_snap_bind_state:-}" in
-      not-absolute)
-        ROBOREV_DIFF_SOURCE_STATE="not-absolute"
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the prompt names a RELATIVE snapshot diff path ('$snap_path'), which would resolve against THIS PROCESS's working directory rather than the reviewed repository ($REPO) — so reading it could answer about a different file entirely. Failing closed; roborev writes an absolute path."
-        ;;
-      unreadable-component)
-        ROBOREV_DIFF_SOURCE_STATE="unreadable"
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a component of the snapshot path the prompt names could not be OBSERVED — ${_rx_snap_bind_detail:-the lookup did not answer}. Path: $snap_path. 'Cannot tell' is not 'not there': the path is neither bound to this review nor declared absent, and no capture may answer for it. Failing closed and naming what was unobservable."
-        ;;
-      symlinked)
-        ROBOREV_DIFF_SOURCE_STATE="symlinked"
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot path the prompt names cannot be trusted to name what it appears to name — ${_rx_snap_bind_detail:-a symlink was found on the path}. Path: $snap_path (resolves to $_rx_snap_bound_path). Containment and job binding are decided on the path's OWN components, so a symlink is refused rather than followed or normalised away: roborev writes a regular file under a real directory, and 'it happens to point somewhere harmless' is not a property this check should have to reason about. Failing closed."
-        ;;
-      foreign-repo)
-        ROBOREV_DIFF_SOURCE_STATE="foreign-repo"
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names lies OUTSIDE the reviewed repository: $_rx_snap_bound_path is not under $REPO. A snapshot belonging to another checkout or another job cannot certify THIS review, however complete it looks, so it is not read at all. Failing closed."
-        ;;
-      *)
-        # `unbound-job`, and any binding state a future edit adds without a decision here.
-        ROBOREV_DIFF_SOURCE_STATE="unbound-job"
-        ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the path the prompt names is NOT a roborev snapshot for this review — ${_rx_snap_bind_detail:-it does not sit under \$REPO/.roborev/roborev-snapshot-<id>/}. Path: $snap_path (resolves to $_rx_snap_bound_path; binding state '${_rx_snap_bind_state:-<unset>}'). Failing closed rather than reading an unbound file as this review's diff — if roborev's snapshot layout has changed, update roborev_snapshot_path_binding."
-        ;;
-    esac
+    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the path is not safe to read as this repository's snapshot (${_rx_snap_bind_state:-unknown}): ${_rx_snap_bind_detail:-no detail}"
     return 0
   fi
-
-  # THE CAPTURE IS CONSULTED ONLY WHEN THE LIVE PATH DOES NOT EXIST — which, measured live, is the
-  # NORMAL case (roborev deletes the snapshot before `--wait` returns). It is OUR copy, taken from
-  # inside the reviewed repo during this run, into a PRIVATE per-run directory nothing else writes.
-  #
-  # `! -e`, NOT `! -f` (roborev job 10, blocker 2). The predicate used to be "not a regular file",
-  # which is the affirmative-measurement defect in its purest form: a permissive branch keyed on the
-  # ABSENCE of one bad signal, so every unmeasured state inherited it. A DIRECTORY or a FIFO at the
-  # named path is not "the snapshot is gone" — it is "the named path is something we cannot read", a
-  # state the block must REPORT rather than silently paper over with a capture. The documented contract
-  # was always "the original no longer exists"; now the code says that too.
-  #
-  # ONE THING IS REQUIRED OF A CAPTURE, and it is an accident guard rather than a trust anchor: its
-  # `meta` must record the SAME relative path the prompt names. The watcher only ever copies the
-  # canonical `roborev-snapshot-content.diff`, while the binding accepts any file under a snapshot
-  # directory — so keying by directory id alone let a prompt naming a DIFFERENT file be answered with
-  # the canonical sibling, certifying a diff the reviewer was never pointed at. Whole-path equality is
-  # what closes that, and `meta` exists to make the comparison possible.
-  #
-  # THE NEWEST PUBLICATION WINS: publications are `pub.<id>.<zero-padded-seq>`, so the LAST match of
-  # the glob is the most recent one the watcher recorded. There is no fixed destination to overwrite,
-  # which is why no rename-aside or backup path exists to be checked.
-  _rx_snap_capture=""
-  _rx_snap_capture_reject=""
-  # THE LIVE PATH'S STATE IS MEASURED ONCE, three-valued, and every branch below keys on the AFFIRMATIVE
-  # value (see the predicate-family note at `_roborev_path_state`). `verified-absent` is the ONLY state
-  # that may consult a capture: "gone" is a measurement, while "cannot tell" must never be answered with
-  # an older copy — that was vector 10 (roborev job 13).
-  _roborev_path_state "$_rx_snap_bound_path" || :
-  _rx_live_state="$_rx_path_state"
-  _rx_live_why="$_rx_path_why"
-  if [ "$_rx_live_state" = "unreadable" ]; then
-    ROBOREV_DIFF_SOURCE_STATE="unreadable"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names could not be OBSERVED at all: $_rx_snap_bound_path — ${_rx_live_why:-the lookup did not answer}. This is NOT the same fact as the snapshot having been deleted, so it is NOT answered from a capture: an existing-but-inaccessible snapshot replaced by an older copy would certify a diff the reviewer never received. Failing closed and naming what was unobservable."
+  ROBOREV_SNAPSHOT_PATH="$_rx_snap_bound_path"
+  # PREFER WHAT THE OBSERVER SAW WHILE THE REVIEW RAN, because roborev deletes the snapshot before
+  # `--wait` returns; fall back to digesting the live file when it is somehow still there.
+  if roborev_snapshot_observation_for "$_rx_snap_bound_path"; then
+    ROBOREV_SNAPSHOT_DIGEST="$_rx_obs_digest"
+    ROBOREV_SNAPSHOT_BYTES="$_rx_obs_bytes"
     return 0
   fi
-  if [ "$_rx_live_state" = "verified-absent" ] && [ -n "${ROBOREV_SNAPSHOT_CAPTURE_DIR:-}" ] \
-    && [ -n "${_rx_snap_dir_id:-}" ]; then
-    _rx_cap_pub=""
-    for _rx_cap_cand in "$ROBOREV_SNAPSHOT_CAPTURE_DIR"/pub."$_rx_snap_dir_id".*; do
-      # observability-justified: OUR OWN capture publications in a private per-run 0700 directory. A
-      # false negative leaves `_rx_cap_pub` empty, which reaches the fail-closed `cleaned-up` cause; it
-      # never asserts that a roborev file is absent.
-      [ -f "$_rx_cap_cand/content.diff" ] && _rx_cap_pub="$_rx_cap_cand"
-    done
-    if [ -n "$_rx_cap_pub" ]; then
-      _rx_cap_file="$_rx_cap_pub/content.diff"
-      _rx_cap_marker="$_rx_cap_pub/meta"
-      # observability-justified: our own identity record, beside our own capture. Its falsity is already
-      # the fail-closed `capture-unidentified` refusal below — the strict direction — and makes no claim
-      # about any path roborev wrote.
-      if [ ! -f "$_rx_cap_marker" ]; then
-        _rx_snap_capture_reject="capture-unidentified"
-      else
-        _rx_cap_recorded=$(sed -n 's/^rel=//p' "$_rx_cap_marker" 2>/dev/null | head -1)
-        # KEYED ON THE AFFIRMATIVE VALUE: the recorded path must be non-empty AND equal. An
-        # unreadable or empty record takes the rejecting branch, never the trusting one.
-        if [ -n "$_rx_cap_recorded" ] && [ "$_rx_cap_recorded" = "${_rx_snap_rel:-}" ]; then
-          _rx_snap_capture="$_rx_cap_file"
-        else
-          _rx_snap_capture_reject="capture-path-mismatch"
-        fi
-      fi
-    fi
-  fi
-  if [ "$_rx_snap_capture_reject" = "capture-unidentified" ]; then
-    ROBOREV_DIFF_SOURCE_STATE="capture-unidentified"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: a capture of snapshot directory '${_rx_snap_dir_id}' exists ($_rx_cap_file) but its identity record is missing or unreadable ($_rx_cap_marker), so this run cannot say WHICH file it copied — and the original is gone, so it cannot be re-derived. Publication is a single rename into a fresh directory, so this is an internal inconsistency in the wrapper rather than anything about the branch under review; it is still non-passing, because a capture we cannot identify is not evidence of what the reviewer received. Failing closed."
-    return 0
-  fi
-  if [ "$_rx_snap_capture_reject" = "capture-path-mismatch" ]; then
-    ROBOREV_DIFF_SOURCE_STATE="capture-path-mismatch"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the capture for snapshot directory '${_rx_snap_dir_id}' records the captured path '${_rx_cap_recorded:-<unreadable>}', but the prompt instructed the reviewer to read '${_rx_snap_rel:-<unresolved>}'. Reading the file the capture happens to hold would certify a diff the reviewer was never pointed at — a capture is matched by its WHOLE relative path, never by the snapshot directory id alone. Failing closed."
-    return 0
-  fi
-  if [ "$_rx_live_state" = "verified-absent" ] && [ -z "$_rx_snap_capture" ]; then
-    # The snapshot DIRECTORY is measured the same way: `cleaned-up` requires it to be VERIFIED absent,
-    # and a directory we cannot observe is reported as such instead of being called "cleaned up".
-    _roborev_path_state "${_rx_snap_dir:-}" || :
-    if [ "$_rx_path_state" = "unreadable" ]; then
-      ROBOREV_DIFF_SOURCE_STATE="unreadable"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the named snapshot file is verified absent, but its DIRECTORY could not be observed either: ${_rx_snap_dir:-<unresolved>} — ${_rx_path_why:-the lookup did not answer}. Whether roborev cleaned up or the directory is merely inaccessible is therefore unknown, and 'cleaned-up' would assert the former. Failing closed on what was actually established."
-      return 0
-    fi
-    if [ "$_rx_path_state" = "verified-absent" ]; then
-      ROBOREV_DIFF_SOURCE_STATE="cleaned-up"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the reviewer was given the diff BY PATH, but the snapshot DIRECTORY no longer exists AND this run captured no copy of it — roborev deletes ${_rx_snap_dir:-<unresolved>} when the review finishes, which is BEFORE 'roborev review --wait' returns, so the copy taken while the review ran (${ROBOREV_SNAPSHOT_CAPTURE_DIR:-<capture never started>}/pub.${_rx_snap_dir_id:-<unknown id>}.<seq>/content.diff) is the only possible evidence and it is not there. There is therefore NO evidence of what the reviewer received. Failing closed: check that the wrapper's capture watcher started (it needs a writable temp directory OUTSIDE the reviewed repo) and re-run the review."
-    else
-      ROBOREV_DIFF_SOURCE_STATE="missing"
-      ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot directory EXISTS but the named diff file is not in it, and no capture of it was taken: $_rx_snap_bound_path. The reviewer was told to read a file that is not there, so nothing establishes what it received. Failing closed."
-    fi
-    return 0
-  fi
-  if [ -n "$_rx_snap_capture" ]; then
-    # The ORIGIN is carried separately from the STATE so the affirmative state set stays exactly
-    # {inline, snapshot, both, none} — a capture is not a different KIND of evidence, it is the same
-    # snapshot read from our copy, and the block says which one it read.
-    ROBOREV_DIFF_SOURCE_ORIGIN="captured"
-    _rx_snap_bound_path="$_rx_snap_capture"
-    ROBOREV_DIFF_SOURCE_PATH="$_rx_snap_capture"
-  fi
-  # THE PATH WE ARE ABOUT TO READ MUST BE A PRESENT, READABLE REGULAR FILE — asked as an affirmative
-  # three-valued question, so "there but a directory/FIFO", "there but unreadable" and "unobservable"
-  # all land in `unreadable` with a cause, and none of them can be mistaken for absence. Reported,
-  # never substituted: the capture branch above requires `verified-absent`, precisely so that "the named
-  # path is unusable" cannot be answered with a copy.
   _roborev_regular_readable_state "$_rx_snap_bound_path" || :
-  if [ "$_rx_path_state" != "present" ]; then
-    ROBOREV_DIFF_SOURCE_STATE="unreadable"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff the prompt names is not a READABLE REGULAR FILE: $_rx_snap_bound_path (state '$_rx_path_state'${_rx_path_why:+ — $_rx_path_why}). An oracle that cannot be consulted is a NON-PASSING verdict, never a pass — and it is NOT answered from a capture, because a path that exists as something unreadable is a different fact from a snapshot that was deleted. Failing closed and naming the path."
-    return 0
-  fi
-  snap_bytes=$(tr -d '[:space:]' <"$_rx_snap_bound_path" | wc -c | tr -d '[:space:]')
-  if [ "${snap_bytes:-0}" -eq 0 ]; then
-    ROBOREV_DIFF_SOURCE_STATE="empty"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff is EMPTY (0 non-whitespace bytes): $_rx_snap_bound_path. The reviewer was pointed at a file carrying no diff, so nothing was delivered — failing closed. (The zero default on that byte count falls the STRICT way: an unmeasurable size reads as empty, which FAILs.)"
-    return 0
-  fi
-
-  roborev_collect_prompt_headers "$_rx_snap_bound_path"
-  if [ "${#_rx_hdrs[@]}" -eq 0 ]; then
-    # A `0/0` IS NEVER A PASS, on this branch as much as on the census one: a snapshot with no
-    # header cannot show that any path was delivered, and proceeding would compare the census
-    # against an EMPTY header set — which is a FAIL either way, but under a cause that blamed the
-    # branch instead of the oracle.
-    ROBOREV_DIFF_SOURCE_STATE="no-headers"
-    ROBOREV_DIFF_SOURCE_DETAIL="ERROR: prompt-content: the snapshot diff carries NO 'diff --git' header at all: $_rx_snap_bound_path (${snap_bytes} non-whitespace bytes). A file with no header cannot establish that ANY census path was delivered, so this is a broken oracle, not a clean review — failing closed."
-    return 0
-  fi
-  # THE UNION, so no header from either source is dropped (a prompt may carry a small inline
-  # diff AND name a snapshot). Appending is enough: membership is decided per header by the
-  # canonical matcher, and asking twice about the same header can only ever agree.
-  if [ "${#in_hdrs[@]}" -gt 0 ]; then
-    _rx_hdrs=(${in_hdrs[@]+"${in_hdrs[@]}"} ${_rx_hdrs[@]+"${_rx_hdrs[@]}"})
-    _rx_hdr_from=(${in_from[@]+"${in_from[@]}"} ${_rx_hdr_from[@]+"${_rx_hdr_from[@]}"})
-    _rx_hdr_to=(${in_to[@]+"${in_to[@]}"} ${_rx_hdr_to[@]+"${_rx_hdr_to[@]}"})
-    ROBOREV_DIFF_SOURCE_STATE="both"
-  else
-    ROBOREV_DIFF_SOURCE_STATE="snapshot"
-  fi
+  case "$_rx_path_state" in
+    present)
+      if _roborev_file_digest "$_rx_snap_bound_path"; then
+        ROBOREV_SNAPSHOT_DIGEST="$_rx_digest"
+        ROBOREV_SNAPSHOT_BYTES=$(wc -c <"$_rx_snap_bound_path" 2>/dev/null | tr -d '[:space:]')
+        return 0
+      fi
+      ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the snapshot is still present but no digest could be taken of it (no sha256sum/shasum/cksum?)"
+      ;;
+    verified-absent)
+      ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the snapshot was already deleted by roborev before this check ran, and the observer recorded nothing for it while the review was running"
+      ;;
+    *)
+      ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the snapshot could not be observed: ${_rx_path_why:-the lookup did not answer}"
+      ;;
+  esac
   return 0
 }
 
