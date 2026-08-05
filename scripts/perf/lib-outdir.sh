@@ -65,8 +65,51 @@ require_unused_out_dir() {
     echo "FATAL: --out $out_dir exists and is not a directory" >&2
     exit 2
   fi
-  # `find -mindepth 1 … -print -quit` answers "non-empty" without listing the whole tree.
-  if [[ -n "$(find "$out_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+  # `find -mindepth 1 … -print -quit` answers "non-empty" without listing the whole tree — but
+  # its EXIT STATUS MUST BE OBSERVED (#3272 review round 9, F4).
+  #
+  # It used to read `if [[ -n "$(find … 2>/dev/null)" ]]`, which is the same class of defect as
+  # `check-root-junk-files.sh`'s process-substitution enumeration (#3272 F4): a `find` that
+  # FAILED — an unreadable directory (mode 0300 is the reproducer: a prior session's rep files
+  # are in there, and `find` cannot read the entries) — produced NO OUTPUT and `2>/dev/null`
+  # threw away the reason. An empty result and a failed look are then INDISTINGUISHABLE, and the
+  # empty result takes the PERMISSIVE branch: the used-directory refusal silently passes, and
+  # this session measures into a directory still holding another session's rep files. The
+  # reporter reads whatever rep files are present and cannot tell.
+  #
+  # So: written to a FILE (a plain command status, not a subshell's), status captured, STATUS
+  # CHECKED BEFORE EMPTINESS, and stderr KEPT so a `find` that explains itself is quoted rather
+  # than discarded. Checking emptiness first would put the failure straight into the
+  # "directory is empty, proceed" branch, which is the defect.
+  local _ru_out _ru_err _ru_rc=0
+  _ru_out="$(mktemp)" || {
+    echo "FATAL: could not create a temp file to enumerate --out $out_dir." >&2
+    echo "       The enumeration is written to a file so its EXIT STATUS is observable;" >&2
+    echo "       without that, a failing find produces no lines and reads as an EMPTY" >&2
+    echo "       directory, which silently passes this refusal (#3272 F4)." >&2
+    exit 2
+  }
+  _ru_err="$(mktemp)" || {
+    rm -f "$_ru_out"
+    echo "FATAL: could not create a temp file for find's stderr while checking --out $out_dir." >&2
+    exit 2
+  }
+  find "$out_dir" -mindepth 1 -print -quit >"$_ru_out" 2>"$_ru_err" || _ru_rc=$?
+  if [[ "$_ru_rc" -ne 0 ]]; then
+    echo "FATAL: could not enumerate --out $out_dir to check whether it is already used." >&2
+    echo "       find exited $_ru_rc: $(tr '\n' ' ' < "$_ru_err")" >&2
+    echo "       This is a FAILURE and not an empty directory. A failed enumeration used to be" >&2
+    echo "       indistinguishable from an empty one (the status was discarded and stderr sent" >&2
+    echo "       to /dev/null), so it took the PERMISSIVE branch and this session would have" >&2
+    echo "       measured into a directory that may still hold another session's rep files —" >&2
+    echo "       which the reporter cannot tell apart from its own (#3272 F4)." >&2
+    echo "       Fix the directory's permissions, or name an --out this user can read." >&2
+    rm -f "$_ru_out" "$_ru_err"
+    exit 2
+  fi
+  # STATUS first, THEN emptiness (see above). Only a SUCCESSFUL enumeration may be read.
+  if [[ -s "$_ru_out" ]]; then
+    rm -f "$_ru_out" "$_ru_err"
     echo "FATAL: --out $out_dir already exists and is NOT EMPTY." >&2
     echo "       Measuring into a used dir mixes artifacts from different sessions into one" >&2
     echo "       report: any rep file this session does not overwrite (a different temperature" >&2
@@ -75,6 +118,9 @@ require_unused_out_dir() {
     echo "       Name an unused directory, or remove that one." >&2
     exit 2
   fi
+  # The ACCEPT path: a SUCCESSFUL enumeration that found nothing. Cleaned up here rather than in
+  # a trap, so this library still sets no options and installs no handlers in the sourcing shell.
+  rm -f "$_ru_out" "$_ru_err"
 }
 
 # --- THE OUTPUT DIR IS CREATED EXCLUSIVELY, NEVER REUSED (#3272 round 6, R1) ---------

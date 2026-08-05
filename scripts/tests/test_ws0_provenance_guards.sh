@@ -775,6 +775,76 @@ else
 fi
 
 # ==========================================================================
+# ROUND 9, F4 — A FAILED USED-DIR ENUMERATION IS NOT AN EMPTY DIRECTORY
+# ==========================================================================
+# `require_unused_out_dir` asked "is this directory non-empty?" as
+# `[[ -n "$(find … 2>/dev/null)" ]]`: the STATUS was discarded and stderr thrown away, so a
+# `find` that FAILED produced no output and was indistinguishable from an empty directory — and
+# the empty result takes the PERMISSIVE branch. R1's whole refusal then silently passes over a
+# directory that may still hold another session's rep files, which the reporter reads as its own.
+#
+# The same class as `check-root-junk-files.sh`'s process-substitution enumeration (also F4), and
+# fixed the same way: enumeration to a FILE, status captured, STATUS CHECKED BEFORE EMPTINESS,
+# stderr KEPT and quoted.
+#
+# THE TRIGGER is a directory the enumeration cannot read: mode 0300 (write+execute, NO read) with
+# a prior session's rep file inside it. `find` cannot list the entries, so it exits non-zero
+# having printed nothing.
+f4_dir="$TMP/f4-unreadable"
+mkdir -p "$f4_dir" && : > "$f4_dir/warm-rep1-scan.perf.csv"
+# `root` bypasses the read bit, so the trigger cannot be constructed as root. SKIPPED with a
+# stated reason rather than passed: a case that could not run must never print like one that did.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "SKIP (round9 F4): running as root, which bypasses the read bit — the unreadable-directory trigger cannot be constructed, so this case is NOT claimed as observed"
+else
+  chmod 300 "$f4_dir"
+  # The SHIPPED library is sourced, never re-implemented (the discipline the F3 block established).
+  f4_out=$( ( # shellcheck disable=SC1090
+    source "$REPO_ROOT/scripts/perf/lib-outdir.sh"
+    require_unused_out_dir "$f4_dir" ) 2>&1 ); f4_rc=$?
+  chmod 700 "$f4_dir"
+  if [ "$f4_rc" -ne 0 ] && grep -q 'could not enumerate --out' <<<"$f4_out" \
+     && grep -q 'find exited' <<<"$f4_out"; then
+    pass "OBSERVED (round9 F4): an UNREADABLE --out is refused as a FAILED ENUMERATION naming find's exit status (pre-fix: find's status was discarded, no output was produced, and the empty result took the PERMISSIVE branch — R1's refusal passed over a used directory)"
+  else
+    fail "round9 F4: a failed enumeration must be refused with find's status, not read as an empty dir (rc=$f4_rc, out: $(head -4 <<<"$f4_out"))"
+  fi
+  # NON-VACUITY, and it is the whole finding: the PRE-FIX expression, run against the SAME
+  # directory, reports EMPTY. Driven rather than argued — this is what "indistinguishable" means.
+  f4_prefix_empty=no
+  [ -z "$(chmod 300 "$f4_dir"; find "$f4_dir" -mindepth 1 -print -quit 2>/dev/null)" ] && f4_prefix_empty=yes
+  chmod 700 "$f4_dir"
+  if [ "$f4_prefix_empty" = yes ]; then
+    pass "OBSERVED (round9 F4): THE CONTROL — the pre-fix \`[[ -n \"\$(find … 2>/dev/null)\" ]]\` reports this same used-but-unreadable dir as EMPTY, i.e. a failed look was read as 'nothing there' and the guard passed"
+  else
+    fail "round9 F4: the pre-fix expression must be shown to report empty here, or the fix's necessity is unproven (the trigger did not reproduce)"
+  fi
+fi
+# THE ACCEPT DIRECTION for the rewritten enumeration — without it, F4's fix could be a function
+# that refuses every directory, which would break R1's accepted empty-dir case.
+f4_ok="$TMP/f4-empty"; mkdir -p "$f4_ok"
+f4_out=$( ( # shellcheck disable=SC1090
+  source "$REPO_ROOT/scripts/perf/lib-outdir.sh"
+  require_unused_out_dir "$f4_ok" ) 2>&1 ); f4_rc=$?
+if [ "$f4_rc" -eq 0 ]; then
+  pass "OBSERVED (round9 F4): a READABLE, EMPTY --out is still ACCEPTED by the status-checking enumeration (R1's accepted case survives)"
+else
+  fail "round9 F4: an empty readable dir must still be accepted (rc=$f4_rc, out: $(head -3 <<<"$f4_out"))"
+fi
+# ...and a readable NON-EMPTY dir is still refused with R1's used-directory diagnosis, not with
+# F4's enumeration-failure one — two different faults must stay distinguishable to a reader.
+f4_used="$TMP/f4-used"; mkdir -p "$f4_used" && : > "$f4_used/warm-rep1-scan.perf.csv"
+f4_out=$( ( # shellcheck disable=SC1090
+  source "$REPO_ROOT/scripts/perf/lib-outdir.sh"
+  require_unused_out_dir "$f4_used" ) 2>&1 ); f4_rc=$?
+if [ "$f4_rc" -ne 0 ] && grep -q 'already exists and is NOT EMPTY' <<<"$f4_out" \
+   && ! grep -q 'could not enumerate' <<<"$f4_out"; then
+  pass "OBSERVED (round9 F4): a READABLE non-empty --out still gets R1's used-directory diagnosis, distinct from the enumeration-failure one"
+else
+  fail "round9 F4: a readable non-empty dir must keep R1's diagnosis (rc=$f4_rc, out: $(head -3 <<<"$f4_out"))"
+fi
+
+# ==========================================================================
 # ROUND 7, F3 — AN EXPLICIT --out IS CLAIMED ATOMICALLY, NOT JUST CREATED
 # ==========================================================================
 # R1 fixed the DEFAULT path (atomic `mkdir` on a unique name) and left the EXPLICIT path on
