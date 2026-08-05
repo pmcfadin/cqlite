@@ -313,6 +313,14 @@ fi
 # is asserted over the shapes these files really contain: the sanctioned call, prose, a
 # marked line, a `-f` test, a `bash -c` sourcing a library, and an `awk` reading the driver
 # as TEXT.
+#
+# The last two are a REAL FALSE FINDING this lint produced against this repo's own test code
+# (#3272 round 4), kept as a permanent case. `grep -n '^for temp in $TEMPS; do' "$DRIVER"` was
+# FLAGGED: a whitespace split does not respect quoting, so the `;` inside the quoted pattern
+# read as a control operator (reset to command position), the next token reduced to the wrapper
+# word `do`, and the driver path — an ARGUMENT to `grep` — became a candidate command word. The
+# fix tracks QUOTE PARITY across tokens; a token inside an open string is skipped, which cannot
+# hide an invocation because a command word is by definition not inside a string.
 MARKER='ws0-hermetic-allow'
 for benign in \
   "out=\$(ws0_driver_run \"\$DRIVER\" --corpus /c --temp warm)" \
@@ -321,6 +329,8 @@ for benign in \
   "if [ -f \"\$DRIVER\" ]; then :; fi" \
   "out=\$($SH -c \"set -u; source \$ARGS_LIB; duration_reject x 1s 3\")" \
   "awk \"/^trap /\" \"\$DRIVER\" | grep -q INT" \
+  "pin_line=\$(grep -n '^for temp in \$TEMPS; do' \"\$DRIVER\" | head -1)" \
+  "line=\$(grep -n 'x; do y' \"\$DRIVER\" | cut -d: -f1)" \
   ; do
   if [ -z "$(lint_probe "$benign")" ]; then
     pass "lint-silent: an ordinary line \`${benign:0:44}…\` is NOT flagged"

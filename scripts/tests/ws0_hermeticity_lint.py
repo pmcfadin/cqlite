@@ -113,6 +113,11 @@ EXEMPTIONS: dict[str, str] = {
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",
     "scripts/perf/ws0_collect.py": "the reporter; prose reference only",
+    # Added when its refusals gained "re-run the session with scripts/perf/ws0-baseline.sh"
+    # prose (#3272 round 4). The census is CONTENT-based, so it flagged the file as UNCOVERED
+    # the moment that text landed — which is the completeness oracle working: a driver mention
+    # in a new file is a decision someone has to record, not a pattern that quietly widens.
+    "scripts/perf/ws0_validate.py": "the reporter's validator; prose reference only",
     "tools/ws0-corpus-gen/README.md": "documentation",
     "tools/ws0-corpus-gen/src/bin/scan_bench.rs": "rust; cannot invoke a shell script bare",
 }
@@ -205,7 +210,37 @@ def command_words(line: str) -> list[str]:
     words: list[str] = []
     expect = True
     in_wrapper = False
+    # QUOTE PARITY, accumulated across tokens. A whitespace split does not respect quoting, so
+    # a token INSIDE a quoted string looks exactly like a token in command position — and that
+    # produced a real FALSE FINDING on this repo's own test code. MEASURED:
+    #
+    #     pin_line=$(grep -n '^for temp in $TEMPS; do' "$REPO/scripts/perf/ws0-baseline.sh" …)
+    #
+    # was flagged, because `$TEMPS;` ended in a `;` that was read as a control operator (reset
+    # to command position) and the next token `do'` reduced to the wrapper word `do`, so the
+    # driver PATH — an argument to `grep` — became a candidate command word. A guard that reds
+    # on `grep -n '… do' "$DRIVER"` is the guard an operator deletes.
+    #
+    # Tracked as parity rather than as a parser: an ODD count of unescaped quotes means the
+    # string is still open, so subsequent tokens are string CONTENT until it closes. That is
+    # cheap, and it errs toward SKIPPING tokens inside quotes — which cannot hide an
+    # invocation, because an invocation's command word is by definition not inside a string.
+    sq = dq = 0
     for token in tokens:
+        inside = (sq % 2 == 1) or (dq % 2 == 1)
+        sq += token.count("'")
+        dq += token.count('"')
+        # Skipped when the token IS inside an open string, and ALSO when it OPENS one that
+        # stays open past itself — because the whole token is then string content.
+        #
+        # The second half is not redundant, and leaving it out was measured: in
+        # `grep -n 'x; do y' "$DRIVER"`, the token `'x;` is not yet inside a string (the quote
+        # opens ON it), so the pre-fix version processed it, saw the trailing `;`, and reset to
+        # command position — after which `"$DRIVER"`, an ARGUMENT to grep, was read as a command
+        # word and flagged. The `;` inside a quoted pattern is not a control operator, so the
+        # token that opens the quote must be skipped as content too.
+        if inside or (sq % 2 == 1) or (dq % 2 == 1):
+            continue
         bare = _bare(token)
         if not bare:
             continue
