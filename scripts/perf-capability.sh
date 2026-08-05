@@ -566,7 +566,25 @@ perf_capability_dropin_install() {
     dinfo=$(stat -c "%u %a" -- "$d" 2>/dev/null) || {
       printf "perf-capability: REFUSING: cannot determine owner/mode of the drop-in directory %s, so it cannot be proven un-writable by less-privileged users.\n" "$d" >&2
       exit 1; }
-    downer=${dinfo%% *}; dmode=${dinfo##* }; dperm=${dmode#${dmode%???}}
+    downer=${dinfo%% *}; dmode=${dinfo##* }
+    # ZERO-PAD BEFORE TAKING THE LAST THREE DIGITS. `stat -c %a` drops leading zeros, so mode 0033
+    # arrives as "33" — and `${dmode%???}` cannot match a 2-character string, leaving `dperm` EMPTY,
+    # matching none of the write-bit patterns below, and PASSING a group- AND world-writable
+    # directory. That was a real bypass of this very precondition (roborev round 5, High), and it
+    # survived a hand audit that reasoned about the 3- and 4-digit cases and never considered a
+    # SHORTER one. The suffix-strip idiom is only safe once the string is known to be long enough,
+    # so the padding is not cosmetic: it is what makes the check below total.
+    case "$dmode" in
+      ?)   dperm="00$dmode" ;;
+      ??)  dperm="0$dmode" ;;
+      ???) dperm="$dmode" ;;
+      *)   dperm=${dmode#"${dmode%???}"} ;;
+    esac
+    case "$dperm" in
+      *[!0-7]*|"")
+        printf "perf-capability: REFUSING: the drop-in directory %s reported a mode (%s) that is not octal digits, so it cannot be proven un-writable by less-privileged users.\n" "$d" "$dmode" >&2
+        exit 1 ;;
+    esac
     if [ "$downer" != "$me" ]; then
       printf "perf-capability: REFUSING: the drop-in directory %s is owned by uid %s, not by the privileged writer uid %s — a directory someone else owns can have its entries replaced under a privileged write.\n" "$d" "$downer" "$me" >&2
       exit 1
@@ -1101,6 +1119,12 @@ perf_capability_usage() {
   printf '                  prints "<result> identity=<state>" — rc 0 only when the state is unprivileged\n'
   printf '  --drop-in       print the canonical /etc/sysctl.d/99-cqlite-perf.conf bytes\n'
   printf '  --drop-in-path  print where that file belongs\n'
+  printf '  --install [priv-cmd...]\n'
+  printf '                  INSTALL the drop-in through the validated staged path (containment checks,\n'
+  printf '                  mktemp + atomic rename). Prefix tokens are the privilege command, e.g.\n'
+  printf '                  `--install sudo`; with none it writes directly (use from a root shell).\n'
+  printf '                  Prefer this over `--drop-in | sudo tee <path>` or `> <path>`: those open the\n'
+  printf '                  destination BY NAME and follow a symlink planted there (issue #3261).\n'
 }
 
 perf_capability_main() {
@@ -1119,6 +1143,12 @@ perf_capability_main() {
       [ "$unpriv" = 1 ] || rc=1
       return $rc ;;
     --drop-in)      perf_capability_dropin_content ;;
+    # The INSTALL entry point exists so the remedy a human is told to run is the SAME validated
+    # path bootstrap itself uses (roborev round 5, High): a printed `--drop-in | sudo tee <path>`
+    # (or `> <path>` from a root shell) re-opens the destination BY NAME and follows a symlink
+    # planted there, reintroducing precisely the write this issue hardened. Hardening the installer
+    # while printing an unsafe command is worse than not hardening it — it reads as safe.
+    --install)      shift; perf_capability_dropin_install "$@" ;;
     # rc PROPAGATED, never masked by the trailing newline: an unsandboxed test mode can
     # resolve no path at all (R4-3), and that is a failure, not an empty success.
     --drop-in-path) perf_capability_dropin_path || return 1; printf '\n' ;;
