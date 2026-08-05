@@ -839,6 +839,12 @@ assert_tracked_mode() { # assert_tracked_mode <label> <work> <ref> <path> <want-
 # range_ref <work>: the git_ref shape a RANGE review records, "<base40>..<head40>".
 range_ref() { printf '%s..%s' "$(git -C "$1" rev-parse "${2:-origin/main}")" "$(git -C "$1" rev-parse HEAD)"; }
 
+# The wrapper's own temp directory for fixture runs. It MUST exist: the census's mode probe uses `mktemp`
+# under $TMPDIR, and a missing directory makes that probe fail — which the census correctly reports as an
+# UNMEASURABLE mode and fails closed on, i.e. every fixture run would abort pre-enqueue (measured).
+WRAPPER_TMP="$tmp/wrapper-tmp"
+mkdir -p "$WRAPPER_TMP"
+
 CASE_N=0
 OUT=""
 RC=0
@@ -886,7 +892,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_OBSERVE_FILE="${WRAPPER_LOG_PATH:-$tmp/transcript-$CASE_N.txt}.snapshot-observed" \
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
-    TMPDIR="${WRAPPER_TMPDIR:-$tmp/wrapper-tmp}" \
+    TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -3422,7 +3428,10 @@ printf '== (cx31b2) FIX 1: an ordinary in-repo path is NOT one of roborev'"'"'s 
 # 15): without it, ANY regular file inside the repo named by a snapshot instruction was read and hashed. The
 # fixture names a perfectly ordinary tracked file, which must be refused by name rather than digested.
 reset_stub
-ordinary="$snap_repo/main.rs"
+# THREE components, so the case exercises the `.roborev` requirement rather than the arity check.
+mkdir -p "$snap_repo/notes/sub"
+ordinary="$snap_repo/notes/sub/looks-like-a.diff"
+printf 'diff --git a/alpha.rs b/alpha.rs\n' >"$ordinary"
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
 STUB_PROMPT=$(snap_prompt "$ordinary")
 run_wrapper "$snap_work"
@@ -3827,10 +3836,22 @@ if [ -z "$_em_start" ] || [ -z "$_em_end" ]; then
   bad 'structural: could not locate the emit_summary() body to inspect'
 else
   # Every executable line in the body is either the block BANNER or an `emit_kv` call.
+  # CONTROL FLOW IS ALLOWED, VALUES ARE NOT (#3312): the three snapshot keys are emitted only in snapshot
+  # mode, so the body now contains `if`/`else`/`fi`. Those carry no value; what must never appear is a raw
+  # `printf` of one, which is asserted separately below.
   _em_raw=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" \
     | grep -vE '^[[:space:]]*(#|$)' \
     | grep -vE "^[[:space:]]*emit_kv '" \
+    | grep -vE '^[[:space:]]*(if|elif|else|fi|then)\b' \
+    | grep -vE '^[[:space:]]*(if|elif) \[' \
     | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
+  _em_printfs=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" \
+    | grep -E '^[[:space:]]*printf' | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
+  if [ -n "$_em_printfs" ]; then
+    bad "structural: emit_summary printf's a value directly, bypassing the neutralising boundary: ${_em_printfs%%$'\n'*}"
+  else
+    ok 'structural: emit_summary contains no raw value printf (only the banner)'
+  fi
   if [ -z "$_em_raw" ]; then
     ok "structural: every emit_summary value goes through emit_kv (lines $_em_start-$_em_end)"
   else
