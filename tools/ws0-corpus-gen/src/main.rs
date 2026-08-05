@@ -158,6 +158,161 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Refuse an `--identity-out` that would OVERWRITE A GENERATED CORPUS INPUT (#3272 R3).
+///
+/// # The finding
+///
+/// `--identity-out` was written verbatim. Nothing stopped it naming a path INSIDE the
+/// generated table directory (`<out>/ws0/events/nb-1-big-Index.db`) or the emitted DDL
+/// (`<out>/ws0-events.cql`), so `identity.write_json` REPLACED a generated input **after its
+/// digest had been recorded in that very identity** — and generation still exited 0. The
+/// artifact then describes a corpus that no longer exists on disk: the identity says
+/// `Index.db` is N bytes with digest D, while `Index.db` is now the identity JSON.
+///
+/// Both consumers are then wrong in the confident direction. The measurement driver verifies
+/// the corpus against this identity and finds a component that disagrees (a refusal, at least
+/// loud) — but a *reporting* path handed the identity alone would cite recorded digests for
+/// bytes that were overwritten by the record of them.
+///
+/// # The mechanism, and why it is the SAME one
+///
+/// This reuses [`same_path`]/[`same_file`] — round 5's alias detection — rather than adding a
+/// second comparison. That matters for more than duplication: `same_file` is the only test
+/// that sees a **HARDLINK** or a **case-insensitive spelling** (`<out>/WS0-EVENTS.CQL` and
+/// `<out>/ws0-events.cql` are ONE file on APFS), and a hand-written second mechanism would
+/// re-acquire exactly the holes round 5 closed.
+///
+/// Two questions, because one does not imply the other:
+///
+/// * is the identity path INSIDE the generated table directory? Component names are not known
+///   until the writer has run, so a name comparison is impossible pre-generation — but
+///   CONTAINMENT is decidable now, and it is the stronger question anyway: nothing may be
+///   written into that directory, whatever it would be called.
+/// * does it ALIAS a named generated input (the DDL, the ticket template, the corpus root's
+///   own `corpus-identity.json`)? Those paths ARE known, so they are compared by file identity.
+///
+/// Checked BEFORE generation, like `load_prior_identity`: an operator who mistyped a path
+/// learns in milliseconds instead of after a multi-GB, minutes-long write.
+fn reject_identity_out_aliasing_inputs(cli: &Cli) -> GenResult<()> {
+    let Some(identity_out) = cli.identity_out.as_ref() else {
+        return Ok(());
+    };
+    // 1. CONTAINMENT in the generated table directory. Resolved through the deepest EXISTING
+    //    ancestor, so `<out>/ws0/events/x.json` is caught before `<out>/ws0/events` exists.
+    let table_dir = cli.out.join("ws0").join("events");
+    if path_is_inside(identity_out, &table_dir) {
+        return Err(format!(
+            "--identity-out {} resolves INSIDE the generated table directory ({}). Writing the \
+             identity there REPLACES a generated SSTable component after its size and digest \
+             have been recorded in that same identity, so the artifact would describe a corpus \
+             that no longer exists on disk — and generation would still exit 0. Write the \
+             identity outside the corpus (e.g. an in-tree \
+             docs/reports/ws0-3096-artifacts/corpus-identity.json); the copy beside the data is \
+             written automatically (issue #3272 R3).",
+            identity_out.display(),
+            table_dir.display()
+        )
+        .into());
+    }
+    // 2. ALIASING a NAMED generated input. `same_path` sees hardlinks and case-insensitive
+    //    spellings (via `same_file`), which a string comparison cannot.
+    for (name, path) in generated_input_paths(cli) {
+        if same_path(identity_out, &path) {
+            return Err(format!(
+                "--identity-out {} is the SAME FILE as {} ({}), which this run GENERATES. \
+                 Writing the identity over it would destroy a measurement input after its \
+                 digest was recorded, leaving both arms reading something other than the \
+                 corpus the identity describes — and generation would still exit 0. Name a \
+                 path outside the corpus directory (issue #3272 R3).",
+                identity_out.display(),
+                name,
+                path.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// The generated files, by name, that `--identity-out` must not alias.
+///
+/// `corpus-identity.json` is deliberately EXCLUDED: `--identity-out` naming it is the
+/// documented no-op (the code writes that path unconditionally and skips the second write when
+/// they are equal), not a mistake.
+fn generated_input_paths(cli: &Cli) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("the emitted DDL ws0-events.cql", cli.out.join("ws0-events.cql")),
+        (
+            "the Flight ticket template ticket-template.json",
+            cli.out.join("ticket-template.json"),
+        ),
+    ]
+}
+
+/// Is `path` inside `dir`, deciding it WITHOUT either having to exist yet?
+///
+/// Both sides are resolved through their deepest EXISTING ancestor (so symlinks and `..` in the
+/// real part are resolved by the OS) with the not-yet-existing tail appended lexically and
+/// normalized for `.`/`..`. That is what makes the answer available BEFORE generation, which is
+/// the whole point: the table directory does not exist when this runs.
+///
+/// Errs toward INSIDE on an unresolvable path: an unmeasured state must not take the permissive
+/// branch (#3272). The cost of a false "inside" is a refusal an operator can see and correct;
+/// the cost of a false "outside" is a silently destroyed measurement input.
+fn path_is_inside(path: &Path, dir: &Path) -> bool {
+    let (Some(p), Some(d)) = (resolve_best_effort(path), resolve_best_effort(dir)) else {
+        return true;
+    };
+    p.starts_with(&d)
+}
+
+/// A path resolved as far as the filesystem can, with the rest normalized lexically.
+///
+/// `None` only when there is nothing to resolve against at all, which callers treat as the
+/// fail-closed case rather than as "not related".
+fn resolve_best_effort(path: &Path) -> Option<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = existing.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                if part == "." {
+                    continue;
+                }
+                if part == ".." {
+                    out.pop();
+                    continue;
+                }
+                out.push(part);
+            }
+            return Some(out);
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                existing = parent.to_path_buf();
+            }
+            // A relative path with no resolvable ancestor: normalize lexically against CWD so
+            // the comparison is still made rather than abandoned.
+            _ => {
+                let mut out = std::env::current_dir().ok()?;
+                for part in tail.iter().rev() {
+                    if part == "." {
+                        continue;
+                    }
+                    if part == ".." {
+                        out.pop();
+                        continue;
+                    }
+                    out.push(part);
+                }
+                return Some(out);
+            }
+        }
+    }
+}
+
 /// The PRIOR identity `--verify-against` names, read BEFORE anything is generated.
 ///
 /// # Why this cannot happen after generation (issue #3272 review R5)
@@ -226,6 +381,9 @@ fn load_prior_identity(cli: &Cli) -> GenResult<Option<(PathBuf, CorpusIdentity)>
 async fn run(cli: Cli) -> GenResult<ExitCode> {
     // BEFORE generation, and before any identity is written (issue #3272 review R5).
     let prior = load_prior_identity(&cli)?;
+    // ...and an `--identity-out` that would OVERWRITE A GENERATED INPUT is refused here too,
+    // for the same reason: milliseconds instead of after a multi-GB write (#3272 R3).
+    reject_identity_out_aliasing_inputs(&cli)?;
 
     let spec = CorpusSpec {
         out: cli.out.clone(),
