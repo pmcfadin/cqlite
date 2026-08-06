@@ -75,6 +75,34 @@ from ws0_validate import (
 # `ws0_ticket_input` already imports `sha256_file` from here; the reverse would be a cycle.)
 PIN_TICKET_FIELD = "ticket_template_sha256"
 
+# THE PIN'S PROVENANCE MARKER (#3272 round 25). A STABLE VERSIONED TOKEN, written by
+# `write_session_corpus_pin` below and required by `verify_session_corpus_pin` on EXACT EQUALITY.
+#
+# # The finding
+#
+# The reader used to accept any `components_source` CONTAINING the substring `measured`. So
+#
+#     "not measured; copied from sidecar"
+#
+# SATISFIED the provenance guard — a value whose plain English states the exact thing the guard
+# exists to reject. The guard against round 21's defect admitted that defect's own confession.
+#
+# # Why a token, compared for equality
+#
+# A substring test asks "does this look a bit like the good value" where the only sound question is
+# "IS this the good value". It is the cousin of the shape CLAUDE.md names as a rule — never derive a
+# pass from the ABSENCE of a bad signal; key a permissive branch on the AFFIRMATIVE value — and of
+# the trap one level down, where a PREFIX test (`PASS*`) accepts `PASSthisNeverRan`. Same fix in all
+# three: reduce to the TOKEN and compare for EQUALITY. No substring, no prefix, no regex that could
+# match a longer string, so `measured`, `measured-v2`, `remeasured-v1` and `MEASURED-V1` are all
+# refused by construction rather than by enumeration.
+#
+# VERSIONED so the field can gain meaning later without the reader having to guess: a future writer
+# recording something different records `measured-v2`, and THIS reader refuses it loudly instead of
+# accepting it as near enough. That is also what makes an OLD-FORMAT artifact fail rather than pass
+# silently — a pin carrying round 21's prose sentence is not this token.
+COMPONENTS_SOURCE_MEASURED = "measured-v1"
+
 
 def _measure_ticket_digest(session_dir: pathlib.Path) -> str:
     """The Flight ticket's digest, from `ws0_ticket_input` (#3272 round 10, M1).
@@ -176,7 +204,17 @@ def write_session_corpus_pin(
         # MEASURED pin from a COPIED one without inferring it, and `verify_session_corpus_pin`
         # REQUIRES this field — a pin that does not say its digests were observed is refused
         # rather than trusted, because a copied pin is textually identical to a measured one.
-        "components_source": measured["source"],
+        #
+        # A STABLE VERSIONED TOKEN since round 25, matched EXACTLY by the reader — see
+        # `COMPONENTS_SOURCE_MEASURED`. It used to be `measured["source"]`, a PROSE SENTENCE, and
+        # the reader tested it with `"measured" in source`, which accepted "not measured; copied
+        # from sidecar". The sentence is retained beside the token, as `components_source_note`, for
+        # a human reading the artifact: it is DESCRIPTION, and nothing is checked against it.
+        "components_source": COMPONENTS_SOURCE_MEASURED,
+        # The prose, kept for the reader of the file and deliberately NOT the checked field. Two
+        # fields because they have two jobs: a machine needs one token it can compare, a human needs
+        # a sentence — and conflating them is what made the guard satisfiable by English.
+        "components_source_note": measured["source"],
         # THE SCHEMA DIGEST (#3272 R2). `ws0-events.cql` is a MEASUREMENT INPUT — both arms
         # read it, ASYMMETRICALLY (the bare scan ingests it per invocation; the Flight ticket is
         # generated from it once) — so a modification between setup and a later rep makes the
@@ -590,16 +628,28 @@ def verify_session_corpus_pin(
     # comparison below is against the sidecar's own assertion, restated. Refused rather than
     # warned — the failure biases TOWARD the claim (a session that measured inconsistent bytes
     # reports as identity-verified), which is the direction that must never be captioned.
+    #
+    # EXACT EQUALITY against a stable versioned token (#3272 round 25), NOT a substring. This test
+    # used to be `"measured" not in source`, and the value `"not measured; copied from sidecar"`
+    # therefore PASSED it — MEASURED against the pre-fix reader, which accepted that string. A guard
+    # whose subject is provenance was satisfiable by a sentence CONFESSING the absence of provenance.
     source = pin.get("components_source")
-    if not isinstance(source, str) or "measured" not in source:
+    if source != COMPONENTS_SOURCE_MEASURED:
         raise Invalid(
-            f"{p} does not record that its component digests were MEASURED"
-            f" (`components_source` is {source!r}). Until #3272 round 21 the pin COPIED"
-            " `data_db_sha256` and the whole component map out of corpus-identity.json, so the pin"
-            " and that sidecar agreed BY CONSTRUCTION however the bytes on disk differed — every"
+            f"{p} does not record that its component digests were MEASURED:"
+            f" `components_source` is {source!r}, and the only accepted value is"
+            f" {COMPONENTS_SOURCE_MEASURED!r} — compared EXACTLY, so no near-miss"
+            " (`measured`, `measured-v2`, `remeasured-v1`, `MEASURED-V1`) and no sentence"
+            " CONTAINING the word passes. Until #3272 round 21 the pin COPIED `data_db_sha256`"
+            " and the whole component map out of corpus-identity.json, so the pin and that"
+            " sidecar agreed BY CONSTRUCTION however the bytes on disk differed — every"
             " comparison against such a pin is the sidecar's own claim restated. A pin whose"
-            " digests were not observed cannot establish what this session measured. Re-run the"
-            " session with the current driver."
+            " digests were not observed cannot establish what this session measured. Round 25:"
+            " this check was a SUBSTRING test, which accepted the literal value 'not measured;"
+            " copied from sidecar' — the guard admitted the confession of the very defect it"
+            " exists to reject. A pin written before round 25 carries a prose sentence rather"
+            " than this token and is refused HERE, loudly, rather than accepted as near enough."
+            " Re-run the session with the current driver."
         )
     # THE PINNED COMPONENT SET — unconditional (#3272 round 6, B2). Raises on any divergence.
     # Imported function-locally, like the schema check below: both sibling modules import
