@@ -3465,8 +3465,11 @@ STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
 STUB_PROMPT='Review the change.\n\n### Combined Diff\n\n(Diff too large; read `git diff --stat HEAD~1`.)'
 run_wrapper "$snap_work"
 assert_verdict 'case (cx31g)' FAIL 1
+# BOTH ROUTES CONVERGE ON THE SAME STATE since job 20: a compact token carrying a git command is a pathless
+# oversize marker, exactly like the header-only `codex_*` fallback of cx31g2, so both report the delegated tier
+# by name rather than counting census paths against a prompt that delivered nothing.
 assert_says 'case (cx31g) a command in the compact token is NOT a snapshot' \
-  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+  '^prompt-content: FAIL \(delegated oversize tier: roborev supplied neither a diff nor a snapshot path\)$'
 assert_says 'case (cx31g) the delegated tier is named' \
   "^ERROR: prompt-content: the prompt carries a .\(Diff too large. notice but NO snapshot path"
 assert_lacks 'case (cx31g) it never becomes an exempted NOTICE' '^prompt-content: NOTICE'
