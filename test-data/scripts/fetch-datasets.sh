@@ -1292,8 +1292,8 @@ print_scoped_repair_command() {
 # census could not be taken), 0 otherwise. Writes only outside the dataset root.
 report_orphaned_tracked_fixtures() {
   local resolve_rc=0 dataset_abs census_file tracked_count=0
-  local record tag path staged_file staged_present=0 shown=0
-  local -a flagged=() worktree_deleted=() staged_deleted=()
+  local record tag path staged_file staged_present=0 shown=0 head_ref show_ref_rc
+  local -a flagged_absent=() worktree_deleted=() staged_deleted=()
 
   resolve_tracked_subtree_readonly || resolve_rc=$?
   case "${resolve_rc}" in
@@ -1348,30 +1348,38 @@ report_orphaned_tracked_fixtures() {
     tag="${record%% *}"
     path="${record#* }"
     tracked_count=$((tracked_count + 1))
-    case "${tag}" in
-      S | [a-z])
-        # Sparse-excluded or assume-unchanged: on-disk absence is INTENTIONAL for a
-        # sparse checkout and invisible to every status oracle otherwise, and
-        # `git restore` cannot rebuild a sparse-excluded path — so its state is
-        # genuinely undeterminable here. Undeterminable is COULD NOT MEASURE, never
-        # a clean verdict (and never a fabricated "missing" either).
-        flagged+=( "${path}" )
-        continue
-        ;;
-    esac
+    # PRESENCE IS TESTED FIRST, index flags second (roborev round 3). skip-worktree
+    # and assume-unchanged hide a path from git's STATUS machinery; they do not
+    # stop this direct filesystem test, so a flagged path that demonstrably EXISTS
+    # has a determinable state and is simply PRESENT. Refusing on the flag alone
+    # turned --verify-only red on an intact checkout that merely carries one.
+    #
     # `-L` as well as `-e`: a tracked symlink whose target is absent is still
     # PRESENT as a checked-out path, and calling it a missing fixture would be a
     # false positive.
-    if [ ! -e "${TRACKED_GUARD_REPO}/${path}" ] && [ ! -L "${TRACKED_GUARD_REPO}/${path}" ]; then
-      worktree_deleted+=( "${path}" )
+    if [ -e "${TRACKED_GUARD_REPO}/${path}" ] || [ -L "${TRACKED_GUARD_REPO}/${path}" ]; then
+      continue
     fi
+    case "${tag}" in
+      S | [a-z])
+        # ABSENT *and* flagged is the genuinely ambiguous case: for a sparse
+        # checkout the absence is INTENTIONAL, for a lost fixture it is damage, and
+        # git reports neither — nor could `git restore` rebuild a sparse-excluded
+        # path. Undeterminable is COULD NOT MEASURE, never a clean verdict, and
+        # never a fabricated "missing" either.
+        flagged_absent+=( "${path}" )
+        ;;
+      *)
+        worktree_deleted+=( "${path}" )
+        ;;
+    esac
   done <"${census_file}"
   rm -f "${census_file}"
 
-  if [ "${#flagged[@]}" -gt 0 ]; then
-    shown="${#flagged[@]}"
+  if [ "${#flagged_absent[@]}" -gt 0 ]; then
+    shown="${#flagged_absent[@]}"
     [ "${shown}" -le 5 ] || shown=5
-    report_unmeasurable_tracked_census "${#flagged[@]} tracked path(s) under '${TRACKED_GUARD_REL}' carry index flags that hide their worktree state from git — SKIP-WORKTREE / sparse-checkout excluded (tag 'S') or ASSUME-UNCHANGED (lowercase tag): $(printf '%s; ' "${flagged[@]:0:shown}")— whether they are present on disk cannot be established, and 'git restore' could not rebuild a sparse-excluded one. Clear the flags (git update-index --no-skip-worktree --no-assume-unchanged), unsparse the path (git sparse-checkout), or point CQLITE_DATASETS_ROOT outside the affected area"
+    report_unmeasurable_tracked_census "${#flagged_absent[@]} tracked path(s) under '${TRACKED_GUARD_REL}' are ABSENT on disk AND carry index flags that hide their worktree state from git — SKIP-WORKTREE / sparse-checkout excluded (tag 'S') or ASSUME-UNCHANGED (lowercase tag): $(printf '%s; ' "${flagged_absent[@]:0:shown}")— so whether they are legitimately excluded from this checkout or LOST cannot be established, and 'git restore' could not rebuild a sparse-excluded one either. Clear the flags (git update-index --no-skip-worktree --no-assume-unchanged), unsparse the path (git sparse-checkout), or point CQLITE_DATASETS_ROOT outside the affected area"
     return 1
   fi
 
@@ -1390,12 +1398,37 @@ report_orphaned_tracked_fixtures() {
   # anywhere between git and the emitted command.
   #
   # `--diff-filter=D` over HEAD..index is exactly the porcelain `D ` class, and
-  # rename detection stays ON (the default): a staged rename reports `R`, so the
-  # old path is not mistaken for a lost fixture.
+  # `--find-renames` is passed EXPLICITLY (roborev round 3): rename detection is
+  # only the default, so `diff.renames=false` in a repo or user config would make a
+  # staged rename report as `D` — a false missing-fixture error whose advertised
+  # repair would REVERSE the rename. A correctness property may not depend on
+  # ambient configuration.
   if ! guard_git -C "${TRACKED_GUARD_REPO}" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    # An UNBORN HEAD cannot have a deletion relative to HEAD — an affirmative
-    # reason to skip, not an unmeasured assumption. (`git diff --cached` would
-    # fail outright here, which must not read as "no staged deletions".)
+    # HEAD did not resolve. That is NOT proof of an unborn branch — a corrupt or
+    # unreadable ref fails identically — and skipping the census on an unproven
+    # assumption is how a clean verdict gets issued for a state never measured
+    # (roborev round 3). So CONFIRM unborn positively, and route everything else to
+    # COULD NOT MEASURE:
+    #   unborn  ⇔  HEAD is a symref to a branch (symbolic-ref succeeds) AND that
+    #              branch does not exist (`show-ref --verify` exits exactly 1,
+    #              git's "ref not found"; a corrupt ref exits 128, and an
+    #              unparseable HEAD fails symbolic-ref outright).
+    # Verified against git 2.43 rather than assumed, in all three states.
+    head_ref=""
+    show_ref_rc=0
+    if head_ref="$(guard_git -C "${TRACKED_GUARD_REPO}" symbolic-ref -q HEAD 2>/dev/null)" \
+      && [ -n "${head_ref}" ]; then
+      guard_git -C "${TRACKED_GUARD_REPO}" show-ref --verify -q -- "${head_ref}" >/dev/null 2>&1 \
+        || show_ref_rc=$?
+    else
+      show_ref_rc=-1
+    fi
+    if [ "${show_ref_rc}" != 1 ]; then
+      report_unmeasurable_tracked_census "HEAD in '${TRACKED_GUARD_REPO}' does not resolve and is NOT a confirmed unborn branch (symbolic-ref gave '${head_ref:-<none>}', show-ref status ${show_ref_rc}) — a corrupt or unreadable ref fails exactly like an unborn one, so staged deletions cannot be ruled out"
+      return 1
+    fi
+    # CONFIRMED unborn: no commit exists, so no path can be deleted RELATIVE TO
+    # HEAD. This is a measured emptiness, not a skipped measurement.
     :
   else
     if ! staged_file="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-staged.XXXXXX")"; then
@@ -1403,7 +1436,7 @@ report_orphaned_tracked_fixtures() {
       return 1
     fi
     if ! guard_git -C "${TRACKED_GUARD_REPO}" --no-optional-locks diff --cached --name-only \
-      --diff-filter=D -z -- ":(literal)${TRACKED_GUARD_REL}" >"${staged_file}"; then
+      --find-renames --diff-filter=D -z -- ":(literal)${TRACKED_GUARD_REL}" >"${staged_file}"; then
       rm -f "${staged_file}"
       report_unmeasurable_tracked_census "'git diff --cached --diff-filter=D' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}', so staged deletions cannot be ruled out"
       return 1
