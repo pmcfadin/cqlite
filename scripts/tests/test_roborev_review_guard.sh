@@ -3322,8 +3322,13 @@ assert_says 'case (wv1) absence is a FAIL, with no delivery-mode excuse' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv1) the machine says it cannot tell WHY they are absent' \
   'THE MACHINE CANNOT TELL WHY THEY ARE ABSENT'
-assert_says 'case (wv1) and points at the waiver route' \
-  "roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason="
+# LAYER 3 (job 23): the diagnostic points at --help and carries NO part of the marker, because a summary
+# block pasted into a PR comment would otherwise authorize the next run — which is how it self-granted.
+assert_says 'case (wv1) the diagnostic points at --help instead of printing a marker' \
+  'THE EXACT MARKER FORM IS DELIBERATELY NOT PRINTED HERE'
+assert_lacks 'case (wv1) and no part of the marker appears anywhere in the output' 'roborev-waive'
+assert_says 'case (wv1) it names the review scope a waiver would have to bind' \
+  "base $w_base, head $w_head, job 4656"
 assert_says 'case (wv1) the waiver state is reported as NONE' \
   '^waiver: NONE \(no anchored waiver line on this PR for this review — see --help for the form\)$'
 assert_lacks 'case (wv1) no NOTICE verdict exists for this key any more' '^prompt-content: NOTICE'
