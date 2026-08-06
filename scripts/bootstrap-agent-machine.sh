@@ -524,9 +524,19 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
     #     applies `sysctl --system`, on the path this suite has always asserted. Removing the escape
     #     hatch is strictly safer than guarding it, and subtraction cannot introduce a false pass.
     # Bootstrap is idempotent (file header), so re-running it is the sanctioned repair everywhere.
+    # THREE states, THREE remedies — a remedy that cannot work on the box it is printed for is
+    # worse than none, because the user spends a cycle before learning that (roborev round 8, Medium,
+    # a regression THIS branch introduced when it pointed every case at `--yes`).
     if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
       info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/bootstrap-agent-machine.sh --yes"
       info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
+    elif [ "$PERF_PRIV_STATE" = sudo-needs-password ]; then
+      # Bootstrap probes privilege NON-INTERACTIVELY (`sudo -n`, see the probe above), so telling this
+      # box to "re-run with --yes" would fail again in exactly the same way and never prompt. The user
+      # must supply the password FIRST — `sudo -v` refreshes the credential timestamp, after which the
+      # `sudo -n` inside bootstrap succeeds — or run from an already-authenticated root shell.
+      info "sudo needs a password here, and bootstrap probes with 'sudo -n' (never prompts) — authenticate first, then re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh --yes"
+      info "(or run it from an authenticated ROOT shell:  sudo -i, then bash scripts/bootstrap-agent-machine.sh --yes)"
     else
       info "write + apply the drop-in:  bash scripts/bootstrap-agent-machine.sh --yes"
     fi
