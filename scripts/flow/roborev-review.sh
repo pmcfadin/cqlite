@@ -606,15 +606,15 @@ emit_kv() { # emit_kv <key> <value> — the ONLY way a value enters the block
 }
 
 emit_summary() {
+  printf '==== ROBOREV REVIEW SUMMARY ====\n'
   # MODE IS DECLARED THE WAY THE GATE DECLARES `MODE: lite` (#3312 job 24): a recheck's PASS is
   # legitimate — the review it re-decides was genuine and a human authorized the absence — but it must
   # never be pasteable as evidence of a FRESH review, so the block says which job it re-decided and that
-  # nothing was enqueued. Emitted FIRST, before any key a reader might grep in isolation.
+  # nothing was enqueued. Emitted as the FIRST key INSIDE the block, so it travels with any paste of it.
   if [ -n "${RECHECK_JOB:-}" ]; then
     emit_kv 'MODE' "recheck (job $RECHECK_JOB re-decided from its job record; NO review was enqueued — not evidence of a fresh review)"
     emit_kv 'recheck-of' "$RECHECK_JOB"
   fi
-  printf '==== ROBOREV REVIEW SUMMARY ====\n'
   emit_kv 'repo' "$REPO"
   emit_kv 'branch' "$BRANCH"
   emit_kv 'base' "$BASE"
@@ -858,6 +858,7 @@ else
     DETAILS+=("NOTICE: sha-assert: the transcript carries $ANNOUNCE_COUNT enqueue announcements; the LAST one (job $JOB) is the effective enqueue and is the one asserted.")
   fi
 fi
+fi
 
 # --- structured job facts (extracted by scripts/flow/roborev-job-facts.py) -----
 # Diagnostics live beside the transcript; `log:` names the base path.
@@ -869,7 +870,6 @@ RECORD_OUTPUT_FILE="$LOG.record-output"
 PROMPT_FILE="$LOG.prompt"
 : >"$FACTS_FILE"
 : >"$PROMPT_FILE"
-fi
 
 extract_job_facts() { # extract_job_facts <job> <json> <facts-out> <prompt-out> [<review-out>]
   command -v python3 >/dev/null 2>&1 || return 1
