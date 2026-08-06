@@ -349,6 +349,318 @@ else
   fail "round13 F3: an absent canonical record must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
 fi
 # ==========================================================================
+# ROUND 14, F4 — THE CLASSIFICATION TRUSTED A *TOTAL*, AND READ 8 OF 15 FIELDS
+# ==========================================================================
+# F3 built the comparison above over nine SCALARS. One of them was `total_component_bytes`, and the
+# module's own docs recorded the resulting gap as a known weakness: the component NAME SET was
+# "covered in aggregate" by that total. A sum is not a set — so a corpus with an altered Index.db
+# and a compensating Statistics.db, or same-length-different-bytes in either, kept the canonical
+# total and was classified CANONICAL.
+#
+# The mitigation those docs cited was CIRCULAR: `verify_pinned_components` compares every component
+# name/size/digest against THE CORPUS'S OWN identity and the bytes beside it. Both sides come from
+# the corpus under test, so it establishes self-consistency and cannot establish that the map is the
+# CANONICAL one.
+#
+# AND THE CITED FIELD WAS ONE OF SEVEN. The first case below MEASURES the classifier's field set
+# against the canonical artifact's real key set, because that is the property that made this a class
+# rather than one field: `seed` and `table` — the INPUT ANCHORS, whose absence is the same defect the
+# RUST side of this same pin already fixed under review B2 — and `compression_info_present`, which IS
+# issue #1406's claim boundary, were never compared at all.
+
+# --- THE CENSUS: EVERY FIELD OF THE CANONICAL ARTIFACT HAS A DISPOSITION ---------------
+# Measured against the artifact's REAL key set, in that direction: an assert over the fields the
+# comparison covers can only certify its own scope, which is how the cited finding sat beside six
+# more uncompared fields. The pre-fix count is asserted too, so this case fails if the premise
+# stops reproducing rather than quietly becoming a tautology.
+f4_out=$(WS0_F4_PERF="$f3c_perf" WS0_F4_ROOT="$REPO_ROOT" python3 - <<'PY' 2>&1
+import json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F4_PERF"])
+from ws0_canonical_corpus import CANONICAL_ARTIFACT_REL, CANONICAL_CENSUS, NOT_IDENTITY
+root = pathlib.Path(os.environ["WS0_F4_ROOT"])
+art = json.loads((root / CANONICAL_ARTIFACT_REL).read_text())
+keys = set(art)
+# THE PRE-FIX FIELD SET, written out verbatim: the nine CANONICAL_FIELDS values F3 shipped.
+prefix = {"rows", "partitions", "rows_per_partition", "cells_per_row", "data_db_bytes",
+          "total_component_bytes", "bytes_per_row", "data_db_sha256", "schema_sha256"}
+print("ARTIFACT_KEYS", len(keys))
+print("PREFIX_NEVER_READ", len(keys - prefix), ",".join(sorted(keys - prefix)))
+print("UNACCOUNTED_NOW", ",".join(sorted(keys - set(CANONICAL_CENSUS) - set(NOT_IDENTITY))) or "NONE")
+print("COMPARED_NOW", len(CANONICAL_CENSUS))
+PY
+)
+if grep -q 'ARTIFACT_KEYS 15' <<<"$f4_out" \
+   && grep -q 'PREFIX_NEVER_READ 7 components,compression_info_present,differs_from_prior_corpus,issue,not_a_correctness_oracle,seed,table' <<<"$f4_out" \
+   && grep -q 'UNACCOUNTED_NOW NONE' <<<"$f4_out"; then
+  pass "OBSERVED (round14 F4) NON-VACUITY, THE CLASS: the PRE-FIX classifier read 8 of the canonical artifact's 15 fields and NEVER consulted 7 — including seed and table (the INPUT ANCHORS, whose absence is the same defect the RUST side of this pin fixed under review B2) and compression_info_present (issue #1406's claim boundary, so a COMPRESSED corpus was classifiable as canonical). Every artifact key now has a disposition, closed against the artifact's OWN key set"
+else
+  fail "round14 F4: the field census must be measured against the artifact's real key set (out: $f4_out)"
+fi
+# ...and that closure is FAIL-CLOSED on a field nobody thought of, which is the only direction that
+# can catch the next instance. Driven with an artifact carrying an extra key.
+f4_fake="$TMP/f4-extrakey"; mkdir -p "$f4_fake/docs/reports/ws0-3096-artifacts" "$f4_fake/tools/ws0-corpus-gen/src"
+cp "$REPO_ROOT/tools/ws0-corpus-gen/src/measurement_corpus.rs" "$f4_fake/tools/ws0-corpus-gen/src/"
+cp "$REPO_ROOT/tools/ws0-corpus-gen/src/generate.rs" "$REPO_ROOT/tools/ws0-corpus-gen/src/schema.rs" \
+   "$f4_fake/tools/ws0-corpus-gen/src/"
+python3 - "$REPO_ROOT" "$f4_fake" <<'PY'
+import json, pathlib, sys
+rel = "docs/reports/ws0-3096-artifacts/corpus-identity.json"
+art = json.loads((pathlib.Path(sys.argv[1]) / rel).read_text())
+art["compaction_strategy"] = "SizeTieredCompactionStrategy"   # a plausible NEW identity field
+(pathlib.Path(sys.argv[2]) / rel).write_text(json.dumps(art, indent=2))
+PY
+f4_out=$(WS0_F4_PERF="$f3c_perf" WS0_F4_ROOT="$f4_fake" python3 - <<'PY' 2>&1
+import json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F4_PERF"])
+from ws0_canonical_corpus import CANONICAL_ARTIFACT_REL, classify_corpus
+from ws0_validate import Invalid
+root = pathlib.Path(os.environ["WS0_F4_ROOT"])
+ident = json.loads((root / CANONICAL_ARTIFACT_REL).read_text())
+try:
+    classify_corpus(root, ident)
+    print("ACCEPTED_AN_UNACCOUNTED_FIELD")
+except Invalid as exc:
+    print("REFUSED", exc)
+PY
+)
+if grep -q '^REFUSED' <<<"$f4_out" && grep -q 'compaction_strategy' <<<"$f4_out"; then
+  pass "OBSERVED (round14 F4): a canonical artifact carrying a field NEITHER map accounts for is REFUSED, naming it — the closure reads the ARTIFACT and subtracts the census, so a field the census's author never thought of FAILS rather than being silently outside the comparison (an assert over what the comparison covers certifies its own scope, which is how the cited total sat beside six more uncompared fields)"
+else
+  fail "round14 F4: an unaccounted artifact field must be refused (out: $f4_out)"
+fi
+
+# --- THE CITED FINDING, MEASURED: A PRESERVED TOTAL HID ALTERED COMPONENTS -------------
+# The bar per #3249 is a measured FLIP on identical input: the PRE-FIX comparison must ACCEPT the
+# substituted corpus and the shipped one must REFUSE it. So F3's nine-scalar comparison is
+# reconstructed VERBATIM here and run over the same identities.
+#
+# Each identity is the REAL canonical one with its component map altered and its
+# `total_component_bytes` PRESERVED — which is the whole point: every scalar the pre-fix code
+# compared is untouched, so it has nothing to see.
+f4_out=$(WS0_F4_PERF="$f3c_perf" WS0_F4_ROOT="$REPO_ROOT" WS0_F4_CORPUS="$f3c_canon" python3 - <<'PY' 2>&1
+import copy, json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F4_PERF"])
+from ws0_canonical_corpus import (CANONICAL_ARTIFACT_REL, MODE_BASELINE, canonical_pins,
+                                  require_canonical_or_declared)
+from ws0_validate import Invalid
+
+def prefix_divergences(identity, pins):
+    """F3'S NINE-SCALAR COMPARISON, VERBATIM — the shipped code before F4."""
+    fields = {"ROWS": ("rows", "int"), "PARTITIONS": ("partitions", "int"),
+              "ROWS_PER_PARTITION": ("rows_per_partition", "int"),
+              "CELLS_PER_ROW": ("cells_per_row", "int"),
+              "DATA_DB_BYTES": ("data_db_bytes", "int"),
+              "TOTAL_COMPONENT_BYTES": ("total_component_bytes", "int"),
+              "BYTES_PER_ROW": ("bytes_per_row", "float"),
+              "DATA_DB_SHA256": ("data_db_sha256", "str"),
+              "SCHEMA_SHA256": ("schema_sha256", "str")}
+    out = []
+    for const, (field, kind) in fields.items():
+        want, got = pins[const], identity.get(field)
+        if got is None:
+            if field == "schema_sha256":
+                continue          # the pre-fix disk fallback; irrelevant to these cases
+            out.append(field); continue
+        if kind == "float":
+            same = abs(float(got) - float(want)) <= 1e-6
+        elif kind == "int":
+            same = int(got) == int(want)
+        else:
+            same = str(got) == str(want)
+        if not same:
+            out.append(field)
+    return out
+
+root = pathlib.Path(os.environ["WS0_F4_ROOT"])
+corpus = pathlib.Path(os.environ["WS0_F4_CORPUS"])
+base = json.loads((root / CANONICAL_ARTIFACT_REL).read_text())
+pins = canonical_pins(root)
+IDX, STATS = "nb-1-big-Index.db", "nb-1-big-Statistics.db"
+
+def compensated(j):
+    """Index.db GROWN by N, Statistics.db SHRUNK by N — the aggregate is IDENTICAL."""
+    n = 1024
+    j["components"][IDX]["bytes"] += n
+    j["components"][STATS]["bytes"] -= n
+
+def same_length_bytes(j):
+    """Index.db REPLACED with same-length DIFFERENT bytes — no size anywhere moves."""
+    sha = j["components"][IDX]["sha256"]
+    j["components"][IDX]["sha256"] = ("b" if sha[0] != "b" else "c") + sha[1:]
+
+def dropped_and_grown(j):
+    """Statistics.db DROPPED, Index.db grown by its size — the total is again identical."""
+    n = j["components"].pop(STATS)["bytes"]
+    j["components"][IDX]["bytes"] += n
+
+for name, mutate in (("compensated-resize", compensated),
+                     ("same-length-different-bytes", same_length_bytes),
+                     ("dropped-and-grown", dropped_and_grown)):
+    j = copy.deepcopy(base)
+    mutate(j)
+    total = sum(c["bytes"] for c in j["components"].values())
+    # THE PREMISE, asserted: the aggregate the pre-fix code compared is UNMOVED.
+    print(f"{name} TOTAL_PRESERVED", total == j["total_component_bytes"] == pins["TOTAL_COMPONENT_BYTES"])
+    print(f"{name} PREFIX", "ACCEPTED_AS_CANONICAL" if not prefix_divergences(j, pins) else "refused")
+    try:
+        require_canonical_or_declared(root, j, MODE_BASELINE, corpus)
+        print(f"{name} SHIPPED ACCEPTED_AS_BASELINE")
+    except Invalid as exc:
+        names_it = IDX in str(exc) or STATS in str(exc)
+        print(f"{name} SHIPPED REFUSED names_component={names_it}")
+PY
+)
+f4_ok=1
+for f4_case in compensated-resize same-length-different-bytes dropped-and-grown; do
+  grep -q "$f4_case TOTAL_PRESERVED True" <<<"$f4_out" || f4_ok=0
+  grep -q "$f4_case PREFIX ACCEPTED_AS_CANONICAL" <<<"$f4_out" || f4_ok=0
+  grep -q "$f4_case SHIPPED REFUSED names_component=True" <<<"$f4_out" || f4_ok=0
+done
+if [ "$f4_ok" -eq 1 ]; then
+  pass "OBSERVED (round14 F4) NON-VACUITY, MEASURED FLIP on identical input: three corpora whose Index.db/Statistics.db DIFFER while total_component_bytes is PRESERVED (a compensating resize, same-length-different-bytes, and a dropped component whose bytes were added to another) were each ACCEPTED AS CANONICAL by F3's nine-scalar comparison reconstructed verbatim, and are each REFUSED by the shipped one, NAMING the component. A sum is not a set, and no aggregate comparison can see any of the three"
+else
+  fail "round14 F4: the pre-fix comparison must ACCEPT a preserved-total component swap that the shipped one REFUSES (out: $f4_out)"
+fi
+
+# --- THE INPUT ANCHORS ARE COMPARED AGAINST THE CONSTANTS THAT DETERMINE THEM ----------
+# `seed` and `table` were in neither the comparison nor any exemption. A digest pin is only a pin
+# together with the inputs that determine it: a corpus generated at another seed, or of another
+# table, was classified CANONICAL. Compared against generate.rs/schema.rs rather than a literal
+# retyped in Python — asserted by reading the values back out of those files.
+f4_out=$(WS0_F4_PERF="$f3c_perf" WS0_F4_ROOT="$REPO_ROOT" WS0_F4_CORPUS="$f3c_canon" python3 - <<'PY' 2>&1
+import copy, json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F4_PERF"])
+from ws0_canonical_corpus import (CANONICAL_ARTIFACT_REL, MODE_BASELINE, _anchor_pins,
+                                  require_canonical_or_declared)
+from ws0_validate import Invalid
+root = pathlib.Path(os.environ["WS0_F4_ROOT"])
+corpus = pathlib.Path(os.environ["WS0_F4_CORPUS"])
+base = json.loads((root / CANONICAL_ARTIFACT_REL).read_text())
+anchors = _anchor_pins(root)
+# FROM THE RUST FILES, not a Python literal: each parsed anchor must appear in the source that
+# determines it, so a hand-copied value could not satisfy this.
+gen = (root / "tools/ws0-corpus-gen/src/generate.rs").read_text()
+sch = (root / "tools/ws0-corpus-gen/src/schema.rs").read_text()
+print("SEED_FROM_RUST", f"{anchors['seed']:_}" in gen)
+ks, tbl = anchors["table"].split(".")
+print("TABLE_FROM_RUST", f'"{ks}"' in sch and f'"{tbl}"' in sch)
+for field, bad in (("seed", 99_999_999), ("table", "somewhere.else"),
+                   ("compression_info_present", True)):
+    j = copy.deepcopy(base); j[field] = bad
+    try:
+        require_canonical_or_declared(root, j, MODE_BASELINE, corpus)
+        print(field, "ACCEPTED")
+    except Invalid as exc:
+        print(field, "REFUSED", field in str(exc))
+PY
+)
+if grep -q 'SEED_FROM_RUST True' <<<"$f4_out" && grep -q 'TABLE_FROM_RUST True' <<<"$f4_out" \
+   && grep -q '^seed REFUSED True' <<<"$f4_out" && grep -q '^table REFUSED True' <<<"$f4_out"; then
+  pass "OBSERVED (round14 F4): the INPUT ANCHORS are compared — a corpus recording another seed or another table is REFUSED as a baseline, and both expectations are read FROM generate.rs/schema.rs (each parsed value present in the file that determines it, so a retyped Python literal could not satisfy this). A digest pin is only a pin together with the inputs that determine it; pre-fix both were in neither the comparison nor any exemption"
+else
+  fail "round14 F4: seed/table must be compared against the Rust constants that determine them (out: $f4_out)"
+fi
+if grep -q '^compression_info_present REFUSED True' <<<"$f4_out"; then
+  pass "OBSERVED (round14 F4): a corpus recording compression_info_present=true is REFUSED as canonical — that field IS issue #1406's claim boundary (the write surface emits UNCOMPRESSED SSTables), and the pre-fix classifier never consulted it, so a COMPRESSED corpus was classifiable as the canonical measurement corpus"
+else
+  fail "round14 F4: compression_info_present must be compared (out: $f4_out)"
+fi
+
+# --- THE CANONICAL MAP IS CORROBORATED BEFORE IT IS USED AS AN EXPECTATION -------------
+# The map is read from the committed artifact (the only place it exists — measurement_corpus.rs
+# pins quantities, not filenames). So a swapped or edited artifact must not silently BECOME the
+# canonical expectation: the sizes must sum to the Rust-pinned TOTAL_COMPONENT_BYTES and the
+# *-Data.db component must equal the pinned size AND digest. Same rule canonical_pins applies to
+# its own parse.
+f4_bad="$TMP/f4-badartifact"; mkdir -p "$f4_bad/docs/reports/ws0-3096-artifacts" "$f4_bad/tools/ws0-corpus-gen/src"
+cp "$REPO_ROOT/tools/ws0-corpus-gen/src/measurement_corpus.rs" \
+   "$REPO_ROOT/tools/ws0-corpus-gen/src/generate.rs" \
+   "$REPO_ROOT/tools/ws0-corpus-gen/src/schema.rs" "$f4_bad/tools/ws0-corpus-gen/src/"
+python3 - "$REPO_ROOT" "$f4_bad" <<'PY'
+import json, pathlib, sys
+rel = "docs/reports/ws0-3096-artifacts/corpus-identity.json"
+art = json.loads((pathlib.Path(sys.argv[1]) / rel).read_text())
+# An EDITED artifact: Index.db grown, and the recorded total grown to match it. Self-consistent,
+# and disagreeing with the Rust pin — which is what must be caught.
+art["components"]["nb-1-big-Index.db"]["bytes"] += 4096
+art["total_component_bytes"] += 4096
+(pathlib.Path(sys.argv[2]) / rel).write_text(json.dumps(art, indent=2))
+PY
+f4_out=$(WS0_F4_PERF="$f3c_perf" WS0_F4_ROOT="$f4_bad" python3 - <<'PY' 2>&1
+import os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F4_PERF"])
+from ws0_canonical_corpus import canonical_components, canonical_pins
+from ws0_validate import Invalid
+root = pathlib.Path(os.environ["WS0_F4_ROOT"])
+try:
+    canonical_components(root, canonical_pins(root))
+    print("ACCEPTED_A_DISAGREEING_ARTIFACT")
+except Invalid as exc:
+    print("REFUSED", exc)
+PY
+)
+if grep -q '^REFUSED' <<<"$f4_out" && grep -q 'TOTAL_COMPONENT_BYTES' <<<"$f4_out"; then
+  pass "OBSERVED (round14 F4): an artifact whose component sizes do not sum to the Rust-pinned TOTAL_COMPONENT_BYTES is REFUSED AS AN ORACLE rather than used as one — the two canonical sources are corroborated against each other before either becomes the expectation, so an edited artifact cannot silently redefine what canonical means (and the total is now a DERIVED consequence of a map that was compared, not a standalone handle)"
+else
+  fail "round14 F4: a disagreeing canonical artifact must be refused as an oracle (out: $f4_out)"
+fi
+# ...and an UNREADABLE canonical artifact is FATAL, never a fallback to the aggregate. That is the
+# one failure mode reading-from-a-file has that a Rust constant does not, so it is the one driven.
+f4_none="$TMP/f4-noartifact"; mkdir -p "$f4_none/tools/ws0-corpus-gen/src"
+cp "$REPO_ROOT/tools/ws0-corpus-gen/src/measurement_corpus.rs" \
+   "$REPO_ROOT/tools/ws0-corpus-gen/src/generate.rs" \
+   "$REPO_ROOT/tools/ws0-corpus-gen/src/schema.rs" "$f4_none/tools/ws0-corpus-gen/src/"
+f4_out=$(WS0_F4_PERF="$f3c_perf" WS0_F4_ROOT="$f4_none" WS0_F4_CORPUS="$f3c_canon" python3 - <<'PY' 2>&1
+import json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F4_PERF"])
+from ws0_canonical_corpus import MODE_BASELINE, require_canonical_or_declared
+from ws0_validate import Invalid
+root = pathlib.Path(os.environ["WS0_F4_ROOT"])
+try:
+    require_canonical_or_declared(root, {"rows": 4000000}, MODE_BASELINE,
+                                  pathlib.Path(os.environ["WS0_F4_CORPUS"]))
+    print("ACCEPTED_WITHOUT_THE_CANONICAL_MAP")
+except Invalid as exc:
+    print("REFUSED", str(exc).replace("\n", " "))
+PY
+)
+if grep -q '^REFUSED' <<<"$f4_out" && grep -q 'unreadable' <<<"$f4_out"; then
+  pass "OBSERVED (round14 F4): an UNREADABLE canonical artifact is FATAL — the comparison never degrades to the aggregate-only classification it replaced, which would be this finding restored silently. That is the one failure mode reading a file has that a Rust constant does not, so it is refused rather than defaulted (a value not observed is never a pass)"
+else
+  fail "round14 F4: an unreadable canonical artifact must be fatal (out: $f4_out)"
+fi
+
+# --- THE REPORT CITES THE WIDENED SCOPE, AND A NARROWER RECORD IS REFUSED --------------
+# The reporter prints "N canonical field(s) compared". A session pinned by the PRE-FIX driver
+# recorded nine, and would otherwise be reported exactly like one that compared all thirteen
+# including the component map — the recorded-scope-weaker-than-claimed shape.
+#
+# ITS OWN SESSION, deliberately: the F3 block's last case POPS `canonical_corpus` from `$f3c_sess`,
+# so reusing it would meet the absent-block refusal instead of this case's subject. Measured — the
+# first version of this case did exactly that and reported the wrong refusal.
+f4_sess="$TMP/f4-scope"
+make_session "$f4_sess" "$GOOD_FLIGHT"
+# STAMPED EXPLICITLY, because `run_report` stamps the pin only IF ABSENT — so a case that edits the
+# pin must create it first. Measured: without this the edit below ran against a nonexistent file.
+ws0_pin_session_corpus "$f4_sess" "$TMP/corpus"
+python3 - "$f4_sess" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "session-corpus-pin.json"
+pin = json.loads(p.read_text())
+# THE PRE-FIX RECORD's compared_fields: F3's nine scalars, no components/seed/table.
+pin["canonical_corpus"]["compared_fields"] = sorted([
+    "rows", "partitions", "rows_per_partition", "cells_per_row", "data_db_bytes",
+    "total_component_bytes", "bytes_per_row", "data_db_sha256", "schema_sha256"])
+p.write_text(json.dumps(pin, indent=1) + "\n")
+PY
+out=$(run_report "$f4_sess" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'records a comparison over 9 field(s), not this module' <<<"$out"; then
+  pass "OBSERVED (round14 F4): a session recording the PRE-FIX nine-field comparison is REFUSED by the reporter rather than printed as a full one — the report cites 'N canonical field(s) compared', so a narrower recorded scope would be published as the widened comparison it never performed"
+else
+  fail "round14 F4: a pre-fix-scope canonical record must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a `$(...)`
@@ -357,10 +669,11 @@ fi
 # exits 0 and reports SUCCESS. That is the suite-level `0/0` shape this whole issue is about, one
 # level up from the checks themselves.
 #
-# The floor is DERIVED from the OBSERVED count — 13 at the split, measured by running the suite —
-# set just below it so adding a case does not red the suite, and far above zero. No case here skips
-# conditionally, so the observed count is the same on every host.
-MIN_CHECKS=11
+# The floor is DERIVED from the OBSERVED count — 13 at the split, 21 after round 14's F4 added its
+# eight cases, each measured by running the suite — set just below it so adding a case does not red
+# the suite, and far above zero. No case here skips conditionally, so the observed count is the same
+# on every host.
+MIN_CHECKS=19
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
