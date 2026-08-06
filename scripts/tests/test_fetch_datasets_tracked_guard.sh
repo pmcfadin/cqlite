@@ -2122,7 +2122,10 @@ make_usable_corpus "$R38/test-data/datasets"
 rm -f "$R38/test-data/datasets/goldens/simple_table-Data.db.jsonl" \
       "$R38/test-data/datasets/goldens/spaced name-Data.db.jsonl"
 run_verify "$R38" "$R38/test-data/datasets"
-R38_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1)"
+# The printed line carries this script's `ERROR:   ` prefix; the COMMAND is what
+# follows it, and that is what an operator copies. Strip the prefix, then run the
+# remainder VERBATIM — anything less would not test the advertised text.
+R38_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
 if [ -n "$R38_CMD" ]; then
   ok "3310-scoped-repair: a --worktree repair line was printed"
 else
@@ -2174,7 +2177,7 @@ if [ "$RC" -ne 0 ]; then
 else
   bad "3310-staged-delete: exited 0; output: $OUT"
 fi
-R39_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1)"
+R39_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
 if [ -n "$R39_CMD" ]; then
   ok "3310-staged-delete: a --staged --worktree repair line was printed"
 else

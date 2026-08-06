@@ -1264,12 +1264,36 @@ report_unmeasurable_tracked_census() {
   echo "ERROR: cannot report this root usable. Nothing was created, deleted or restored." >&2
 }
 
+# Print an `ERROR:   git -C <repo> restore <flags> -- <p1> <p2> …` line naming
+# EXACTLY the paths passed to it (issue #3310, roborev blocker 1).
+#
+# The first cut advertised `restore --worktree -- <the whole dataset subtree>`.
+# That is a DESTRUCTIVE one-liner: it reverts every local change under the root,
+# and `--verify-only` returns BEFORE refuse_modified_tracked_dataset_files, so at
+# this point nothing has ruled such a change out — the very silent-revert loss
+# #3245 exists to prevent, re-advertised by the tool that reports it.
+#
+# Every path is %q-quoted (this repo tracks 40 space-bearing paths; an unquoted
+# `spaced name-Data.db.jsonl` becomes two pathspecs, neither of which exists), and
+# the list is NEVER truncated: an elided path would leave the operator with a
+# command that repairs only part of the damage, and the temptation to "fix" that by
+# widening the pathspec back to the subtree is exactly the defect above.
+print_scoped_repair_command() {
+  local flags="$1" line path
+  shift
+  line="ERROR:   git -C $(printf '%q' "${TRACKED_GUARD_REPO}") restore ${flags} --"
+  for path in "$@"; do
+    line="${line} $(printf '%q' "${path}")"
+  done
+  printf '%s\n' "${line}" >&2
+}
+
 # The probe itself. Returns 1 when it must fail the run (fixtures missing, or the
 # census could not be taken), 0 otherwise. Writes only outside the dataset root.
 report_orphaned_tracked_fixtures() {
-  local resolve_rc=0 dataset_abs census_file tracked_count=0 rel_path
-  local scan_rc=0 entries record xy path staged_deletion=0 repair_flags shown=0
-  local -a deleted=()
+  local resolve_rc=0 dataset_abs census_file tracked_count=0
+  local record tag path scan_rc=0 entries xy staged_present=0 shown=0
+  local -a flagged=() worktree_deleted=() staged_deleted=()
 
   resolve_tracked_subtree_readonly || resolve_rc=$?
   case "${resolve_rc}" in
@@ -1286,8 +1310,8 @@ report_orphaned_tracked_fixtures() {
       ;;
   esac
 
-  # The status scan needs a scratch file, and --verify-only must not write inside
-  # the root it is probing — resolve_guard_state_dir PROVES a location outside it.
+  # The census needs a scratch file, and --verify-only must not write inside the
+  # root it is probing — resolve_guard_state_dir PROVES a location outside it.
   if ! dataset_abs="$(physical_path "${DATASET_ROOT}")"; then
     report_unmeasurable_tracked_census "could not resolve a physical path for '${DATASET_ROOT}'"
     return 1
@@ -1297,31 +1321,65 @@ report_orphaned_tracked_fixtures() {
     return 1
   fi
 
-  # (1) The INDEX census — how many tracked files the subtree is supposed to hold.
-  # Used ONLY to distinguish "no subject" from "all present"; it deliberately does
-  # NOT gate the status scan below, because `git ls-files` reads the index and so
-  # reports 0 precisely when every tracked path is staged-deleted — the state of
-  # maximum risk (the #3245 review blocker, in a new place).
+  # (1) The INDEX census, WITH each entry's index flags, and an AFFIRMATIVE
+  # per-path existence test (issue #3310, roborev blocker 2).
+  #
+  # Presence is established by STATTING each indexed path, never inferred from a
+  # count plus the ABSENCE of deletion entries in the status scan: git deliberately
+  # suppresses worktree-change reporting for skip-worktree (tag `S`) and
+  # assume-unchanged (any lowercase tag) entries, so such a file can be genuinely
+  # gone while every status oracle reports clean. Deriving a positive verdict from
+  # the absence of a bad signal is the shape CLAUDE.md flags; `ls-files -v` is the
+  # same oracle capture_tracked_dataset_files already uses against these flags, so
+  # this probe is not weaker than the code sitting above it.
   if ! census_file="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-census.XXXXXX")"; then
     report_unmeasurable_tracked_census "could not create a scratch file for the tracked-file census"
     return 1
   fi
-  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -z -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}"; then
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -v -z -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}"; then
     rm -f "${census_file}"
-    report_unmeasurable_tracked_census "'git ls-files' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}'"
+    report_unmeasurable_tracked_census "'git ls-files -v' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}'"
     return 1
   fi
   # NUL-delimited (`-z`) throughout: this repo tracks 40 space-bearing paths, and a
-  # whitespace-split census would silently miscount or mangle them.
-  while IFS= read -r -d '' rel_path; do
+  # whitespace-split census would silently miscount or mangle them. Records are
+  # "<tag> <path>"; the tag is a single character, so the path starts at offset 2.
+  while IFS= read -r -d '' record; do
+    tag="${record%% *}"
+    path="${record#* }"
     tracked_count=$((tracked_count + 1))
+    case "${tag}" in
+      S | [a-z])
+        # Sparse-excluded or assume-unchanged: on-disk absence is INTENTIONAL for a
+        # sparse checkout and invisible to every status oracle otherwise, and
+        # `git restore` cannot rebuild a sparse-excluded path — so its state is
+        # genuinely undeterminable here. Undeterminable is COULD NOT MEASURE, never
+        # a clean verdict (and never a fabricated "missing" either).
+        flagged+=( "${path}" )
+        continue
+        ;;
+    esac
+    # `-L` as well as `-e`: a tracked symlink whose target is absent is still
+    # PRESENT as a checked-out path, and calling it a missing fixture would be a
+    # false positive.
+    if [ ! -e "${TRACKED_GUARD_REPO}/${path}" ] && [ ! -L "${TRACKED_GUARD_REPO}/${path}" ]; then
+      worktree_deleted+=( "${path}" )
+    fi
   done <"${census_file}"
   rm -f "${census_file}"
 
-  # (2) The authority: the same porcelain oracle the #3245 guards use. Its `-z`
-  # git read is what makes space-bearing paths safe; its OUTPUT is one "XY <path>"
-  # per line, which is the helper's established contract (shared with
-  # refuse_modified_tracked_dataset_files and verify_tracked_status_clean_or_fail).
+  if [ "${#flagged[@]}" -gt 0 ]; then
+    shown="${#flagged[@]}"
+    [ "${shown}" -le 5 ] || shown=5
+    report_unmeasurable_tracked_census "${#flagged[@]} tracked path(s) under '${TRACKED_GUARD_REL}' carry index flags that hide their worktree state from git — SKIP-WORKTREE / sparse-checkout excluded (tag 'S') or ASSUME-UNCHANGED (lowercase tag): $(printf '%s; ' "${flagged[@]:0:shown}")— whether they are present on disk cannot be established, and 'git restore' could not rebuild a sparse-excluded one. Clear the flags (git update-index --no-skip-worktree --no-assume-unchanged), unsparse the path (git sparse-checkout), or point CQLITE_DATASETS_ROOT outside the affected area"
+    return 1
+  fi
+
+  # (2) STAGED deletions — the class the index walk above structurally cannot see:
+  # `git rm --cached` removes the index entry, so `ls-files` never lists the path.
+  # The porcelain oracle the #3245 guards use DOES report it (`D `), and it is the
+  # same helper rather than a second mechanism. Its output is one "XY <path>" per
+  # line, the helper's established contract.
   entries="$(tracked_dataset_dirty_entries)" || scan_rc=$?
   case "${scan_rc}" in
     0 | 2) ;;
@@ -1336,51 +1394,59 @@ report_orphaned_tracked_fixtures() {
       [ -n "${record}" ] || continue
       xy="${record:0:2}"
       path="${record:3}"
+      # X == 'D' is a staged deletion. A worktree-only deletion (' D', 'MD', 'RD',
+      # 'AD') is already covered by the index walk above — the path is still in the
+      # index — so taking it from here too would double-report it.
       case "${xy}" in
-        # Either half of the status pair reporting a deletion: ' D' (deleted in the
-        # worktree, the SIGKILL shape), 'D ' (staged deletion), 'DD'/'AD'/'MD'/'RD'.
-        D? | ?D) deleted+=( "${path}" ) ;;
+        D?) ;;
         *) continue ;;
       esac
-      case "${xy}" in
-        D?) staged_deletion=1 ;;
-      esac
+      if [ ! -e "${TRACKED_GUARD_REPO}/${path}" ] && [ ! -L "${TRACKED_GUARD_REPO}/${path}" ]; then
+        staged_deleted+=( "${path}" )
+      else
+        staged_present=$((staged_present + 1))
+      fi
     done <<EOF
 ${entries}
 EOF
   fi
 
-  if [ "${#deleted[@]}" -gt 0 ]; then
-    # `git restore --worktree` rebuilds a worktree deletion from the index; a
-    # STAGED deletion has no index entry left, so that spelling would silently do
-    # nothing and `--staged` is required. The printed line is chosen by
-    # MEASUREMENT rather than printing the broader form unconditionally, which
-    # would revert unrelated staged work under the same path.
-    repair_flags="--worktree"
-    [ "${staged_deletion}" = 1 ] && repair_flags="--staged --worktree"
-
-    echo "ERROR: TRACKED FIXTURES MISSING under '${TRACKED_GUARD_REL}' (issue #3310): ${#deleted[@]} git-tracked" >&2
+  if [ "${#worktree_deleted[@]}" -gt 0 ] || [ "${#staged_deleted[@]}" -gt 0 ]; then
+    shown=$(( ${#worktree_deleted[@]} + ${#staged_deleted[@]} ))
+    echo "ERROR: TRACKED FIXTURES MISSING under '${TRACKED_GUARD_REL}' (issue #3310): ${shown} git-tracked" >&2
     echo "ERROR: file(s) recorded in git are DELETED on disk. This is NOT the 'does not hold a" >&2
     echo "ERROR: usable dataset corpus' condition — the fetched corpus may be perfectly fine." >&2
     echo "ERROR: A fetch killed with SIGKILL outruns the #2878 EXIT/INT/TERM/HUP restore and" >&2
     echo "ERROR: leaves exactly this state." >&2
-    echo "ERROR: missing tracked file(s):" >&2
-    for path in "${deleted[@]}"; do
-      shown=$((shown + 1))
-      [ "${shown}" -le 20 ] || break
-      echo "ERROR:   ${path}" >&2
-    done
-    if [ "${#deleted[@]}" -gt 20 ]; then
-      echo "ERROR:   … and $(( ${#deleted[@]} - 20 )) more" >&2
-    fi
     echo "ERROR: --verify-only REPORTS ONLY (issue #3310): nothing was created, deleted or" >&2
-    echo "ERROR: restored. Repair with EXACTLY this command:" >&2
-    # %q for the same reason as guarantee_usable_root's remedy line: a path holding
-    # a space or a shell metacharacter must still paste as a working command.
-    # shellcheck disable=SC2059  # %q is the point; the values are arguments, not the format
-    printf 'ERROR:   git -C %q restore %s -- %q\n' \
-      "${TRACKED_GUARD_REPO}" "${repair_flags}" "${TRACKED_GUARD_REL}" >&2
+    echo "ERROR: restored. Repair with EXACTLY the command(s) below — each names only the" >&2
+    echo "ERROR: paths that are actually missing, so nothing else in your tree is touched." >&2
+    if [ "${#worktree_deleted[@]}" -gt 0 ]; then
+      echo "ERROR: ${#worktree_deleted[@]} deleted from the WORKTREE (still in the index):" >&2
+      for path in "${worktree_deleted[@]}"; do
+        echo "ERROR:   ${path}" >&2
+      done
+      print_scoped_repair_command "--worktree" "${worktree_deleted[@]}"
+    fi
+    if [ "${#staged_deleted[@]}" -gt 0 ]; then
+      # A staged deletion has NO index entry left, so `restore --worktree` alone has
+      # nothing to rebuild from and silently no-ops; `--staged` puts the HEAD entry
+      # back first. Emitted as its OWN command so the worktree class is not widened
+      # to `--staged` (which would also unstage unrelated intentional removals).
+      echo "ERROR: ${#staged_deleted[@]} deleted from the INDEX and the worktree (staged deletion):" >&2
+      for path in "${staged_deleted[@]}"; do
+        echo "ERROR:   ${path}" >&2
+      done
+      print_scoped_repair_command "--staged --worktree" "${staged_deleted[@]}"
+    fi
     return 1
+  fi
+
+  # A measured signal is never dropped silently: a staged deletion whose content is
+  # still on disk is NOT a missing fixture (nothing is absent), but it is the state
+  # in which a fetch would lose that content for good (#3245), so it is reported.
+  if [ "${staged_present}" -gt 0 ]; then
+    echo "NOTE: ${staged_present} tracked path(s) under '${TRACKED_GUARD_REL}' carry a STAGED DELETION but their content is still on disk — nothing is missing, but a fetch would delete content the index can no longer rebuild (#3245)"
   fi
 
   if [ "${tracked_count}" -eq 0 ]; then
@@ -1388,7 +1454,7 @@ EOF
     return 0
   fi
 
-  echo "Tracked-fixture probe (#3310): OK — all ${tracked_count} git-tracked file(s) under '${TRACKED_GUARD_REL}' are present on disk"
+  echo "Tracked-fixture probe (#3310): OK — all ${tracked_count} git-tracked file(s) under '${TRACKED_GUARD_REL}' are present on disk (each stat'ed individually)"
   return 0
 }
 
