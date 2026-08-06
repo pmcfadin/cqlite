@@ -167,7 +167,7 @@ make_scan_rep() {
   cat > "$d/$tag.json" <<EOF
 { $WS0_SCAN_FIXED, $(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}"),
   "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
-  "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "secs": 2.0 } ] }
+  "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "cells": $(ws0_scan_pass_cells "$CORPUS_ROWS"), "secs": 2.0 } ] }
 EOF
   perf_csv "$d/perf-$tag.csv" 2000000 4000000
   perf_csv "$d/perf-$tag-setup.csv" 100000 200000

@@ -51,6 +51,20 @@ WS0_FIXTURE_ENDPOINT="http://127.0.0.1:19999"
 # refused — which is the guard working.
 WS0_SCAN_FIXED='"arm":"bare_scan","surface":"cqlite_core::Database::execute_streaming","query":"SELECT * FROM ws0.events","fold":false'
 
+# The PINNED cells/row every fixture corpus records, and the multiplier the reporter now requires
+# each pass's `cells` counter to satisfy (#3272 round 17): a pass must emit
+# `corpus_rows x WS0_CELLS_PER_ROW`, because the row count says how many rows a pass VISITED and
+# says nothing about how many COLUMNS of each it decoded — so a scan returning every row with
+# MISSING COLUMNS did substantially less work and was published as this arm's figure.
+#
+# Spelled here beside `ws0_make_corpus`'s identity literal, and asserted against it below, so the
+# two cannot drift: a fixture whose corpus pins 12 while its passes are built for 9 would refuse
+# every healthy case for a reason unrelated to its subject.
+WS0_CELLS_PER_ROW=12
+# `ws0_scan_pass_cells <rows>` — the cell count a HEALTHY pass over `<rows>` rows emits. A case
+# whose subject is a THINNER scan writes its own (short) value literally and is then refused.
+ws0_scan_pass_cells() { echo $(( $1 * WS0_CELLS_PER_ROW )); }
+
 # ...and the SESSION-BOUND half (#3272): `corpus`, `schema` and `table_dirs_ingested`, which the
 # reporter compares against the corpus THIS SESSION PINNED. Unlike the four above they are NOT
 # constants — they name the fixture corpus a case built — so they take the corpus path as an
@@ -88,14 +102,27 @@ perf_csv() {
 # case failing on its fixture rather than on its subject.
 ws0_make_corpus() {
   local dir="$1" rows="${2:-1000}" bytes="${3:-700000}" bpr="${4:-}" perf_dir
+  # The pinned cells/row (#3272 round 17) comes from the ONE constant above rather than a literal in
+  # the python body, so the corpus a fixture builds and the pass cell counts `ws0_scan_pass_cells`
+  # computes cannot disagree. A case whose subject is a corpus pinning a DIFFERENT cells/row passes
+  # its own 5th argument — the same arrangement `bytes_per_row` uses for an inconsistent identity.
+  local cpr="${5:-$WS0_CELLS_PER_ROW}"
   mkdir -p "$dir/ws0/events"
   # The shipped modules' directory. It no longer writes the ticket (round 13's F2 moved that into
   # the SESSION dir — see `ws0_pin_session_corpus`), but the argument is kept so the python body
   # keeps one argv shape across both call sites of this library.
   perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
-  python3 - "$dir" "$rows" "$bytes" "$bpr" "$perf_dir" <<'PY'
+  python3 - "$dir" "$rows" "$bytes" "$bpr" "$perf_dir" "$cpr" <<'PY'
 import hashlib, json, os, sys
 out, rows, nbytes = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+# The pinned cells/row, PASSED IN rather than a literal here (#3272 round 17): the reporter requires
+# every pass to have emitted `rows x cells_per_row` cells, so this value and the fixtures' pass
+# counters are the same fact and are written from one constant.
+#
+# Parsed with `json.loads`, not `int()`: a case whose subject is a corpus pinning a FRACTIONAL or
+# otherwise unusable cells/row must be able to write exactly that, and `int()` would TRUNCATE it onto
+# a valid one — the coercion defect round 12's F5 found, reintroduced in a fixture.
+cells_per_row = json.loads(sys.argv[6])
 # An EMPTY 4th argument means "derive bytes_per_row from the two above", which is the
 # consistent case. A caller that passes one is deliberately building an INCONSISTENT
 # identity, and the reporter must refuse it.
@@ -138,7 +165,7 @@ open(os.path.join(out, "ws0-events.cql"), "wb").write(ddl)
 # `test_ws0_provenance_guards.sh` asserts by chmod'ing a corpus read-only and running a session
 # over it.
 json.dump(
-    {"rows": rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
+    {"rows": rows, "partitions": 10, "seed": 1, "cells_per_row": cells_per_row,
      "data_db_bytes": nbytes, "data_db_sha256": hashlib.sha256(raw).hexdigest(),
      "bytes_per_row": bpr, "components": components,
      "schema_sha256": hashlib.sha256(ddl).hexdigest()},

@@ -196,11 +196,11 @@ done
 # the only degenerate case in the file without a stated cause, and a traceback names the
 # DIVISION rather than the artifact (#3272 review round 2 nit).
 d="$TMP/scan-neg-rows"; make_session "$d" "$GOOD_FLIGHT"
-printf '{ '"$WS0_SCAN_FIXED"', '"$(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}")"', "rows_denominator": -5, "timed_scan_secs": 2.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
+printf '{ '"$WS0_SCAN_FIXED"', '"$(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}")"', "rows_denominator": -5, "timed_scan_secs": 2.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "cells": 12000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
 expect_reject "a NEGATIVE bare-scan rows_denominator is FATAL" \
   "not a measurement" "$d" "$TMP/corpus"
 d="$TMP/scan-zero-secs"; make_session "$d" "$GOOD_FLIGHT"
-printf '{ '"$WS0_SCAN_FIXED"', '"$(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}")"', "rows_denominator": 1000, "timed_scan_secs": 0.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
+printf '{ '"$WS0_SCAN_FIXED"', '"$(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}")"', "rows_denominator": 1000, "timed_scan_secs": 0.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "cells": 12000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "no rows/s for a measurement window that is zero" <<<"$out" \
   && ! grep -q "ZeroDivisionError\|Traceback" <<<"$out"; then
@@ -210,7 +210,7 @@ else
 fi
 for bad in -1.0 Infinity NaN; do
   d="$TMP/scan-secs-$bad"; make_session "$d" "$GOOD_FLIGHT"
-  printf '{ '"$WS0_SCAN_FIXED"', '"$(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}")"', "rows_denominator": 1000, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' "$bad" \
+  printf '{ '"$WS0_SCAN_FIXED"', '"$(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}")"', "rows_denominator": 1000, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "cells": 12000, "secs": 2.0 } ] }\n' "$bad" \
     > "$d/scan-warm-1.json"
   expect_reject "a $bad timed_scan_secs is FATAL (not a measurement window)" \
     "zero, negative, or not finite" "$d" "$TMP/corpus"
@@ -250,7 +250,7 @@ scan_payload() { # scan_payload <dir> <rows_denom> <secs> <passes-json>
 # 1. TRUNCATED: the reporter was asked for 3 passes and the artifact carries 1, with an
 #    aggregate that is SELF-CONSISTENT with the one pass present.
 #    NON-VACUITY, measured against this branch at 06c295289: exit **0**, full report written.
-d="$TMP/f2-truncated"; scan_payload "$d" 1000 2.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 } ]'
+d="$TMP/f2-truncated"; scan_payload "$d" 1000 2.0 '[ { "pass": 0, "rows": 1000, "cells": 12000, "secs": 2.0 } ]'
 out=$(run_report_args "$d" "$TMP/corpus" 1 warm bypass 3); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'recorded 1 timed pass(es) but --scan-passes is 3' <<<"$out"; then
   pass "a TRUNCATED scan (1 pass, --scan-passes 3) is REFUSED (pre-fix: exit 0)"
@@ -261,7 +261,7 @@ fi
 #    sums to a plausible 2000, which is exactly what an aggregate-only check cannot see.
 #    NON-VACUITY: measured exit **0** pre-fix.
 d="$TMP/f2-partial-pass"
-scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 300, "secs": 2.0 }, { "pass": 1, "rows": 1700, "secs": 2.0 } ]'
+scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 300, "cells": 3600, "secs": 2.0 }, { "pass": 1, "rows": 1700, "cells": 20400, "secs": 2.0 } ]'
 out=$(run_report_args "$d" "$TMP/corpus" 1 warm bypass 2); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'pass 0 observed 300 rows' <<<"$out"; then
   pass "a PARTIAL pass hidden by a compensating one is REFUSED (pre-fix: exit 0, sum looked fine)"
@@ -276,11 +276,11 @@ fi
 # 3. A FORGED AGGREGATE: the passes say 1000 rows, the aggregate claims 5000. The reported
 #    figure is DERIVED, so a disagreement means neither operand can be reported.
 #    NON-VACUITY: measured exit **0** pre-fix, publishing the forged 5000.
-d="$TMP/f2-forged-aggregate"; scan_payload "$d" 5000 2.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 } ]'
+d="$TMP/f2-forged-aggregate"; scan_payload "$d" 5000 2.0 '[ { "pass": 0, "rows": 1000, "cells": 12000, "secs": 2.0 } ]'
 expect_reject "a FORGED rows_denominator disagreeing with its passes is REFUSED" \
   "pass record(s) sum to 1,000" "$d" "$TMP/corpus"
 # ...and the same for the SECONDS aggregate, which is the divisor of every rows/s figure.
-d="$TMP/f2-forged-secs"; scan_payload "$d" 1000 99.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 } ]'
+d="$TMP/f2-forged-secs"; scan_payload "$d" 1000 99.0 '[ { "pass": 0, "rows": 1000, "cells": 12000, "secs": 2.0 } ]'
 expect_reject "a FORGED timed_scan_secs disagreeing with its passes is REFUSED" \
   "pass record(s) sum to" "$d" "$TMP/corpus"
 # 4. An ABSENT `passes` array is an ERROR, not an unchecked aggregate.
@@ -296,11 +296,11 @@ expect_reject "an ABSENT bare-scan \`passes\` array is FATAL (pre-fix: never rea
   "carries no \`passes\` array" "$d" "$TMP/corpus"
 # 5. The per-pass quantities go through the SHARED domain validators, so a bad pass value is
 #    refused by the same rules as every other quantity (not by a local ad-hoc test).
-for bad_pass in '{ "pass": 0, "rows": 1000 }' \
-                '{ "pass": 0, "rows": 1000, "secs": 0.0 }' \
-                '{ "pass": 0, "rows": -1000, "secs": 2.0 }' \
-                '{ "pass": 0, "rows": 1000.5, "secs": 2.0 }' \
-                '{ "pass": 0, "rows": true, "secs": 2.0 }'; do
+for bad_pass in '{ "pass": 0, "rows": 1000, "cells": 12000 }' \
+                '{ "pass": 0, "rows": 1000, "cells": 12000, "secs": 0.0 }' \
+                '{ "pass": 0, "rows": -1000, "cells": 12000, "secs": 2.0 }' \
+                '{ "pass": 0, "rows": 1000.5, "cells": 12000, "secs": 2.0 }' \
+                '{ "pass": 0, "rows": true, "cells": 12000, "secs": 2.0 }'; do
   d="$TMP/f2-bad-pass-$(printf '%s' "$bad_pass" | md5 -q 2>/dev/null || printf '%s' "$bad_pass" | md5sum | cut -c1-8)"
   scan_payload "$d" 1000 2.0 "[ $bad_pass ]"
   out=$(run_report "$d" "$TMP/corpus"); rc=$?
@@ -314,7 +314,7 @@ done
 #    MULTI-pass rep whose passes are each a full corpus scan is ACCEPTED, and the derived
 #    row denominator is passes x corpus_rows.
 d="$TMP/f2-multipass-ok"
-scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 1000, "secs": 2.0 }, { "pass": 1, "rows": 1000, "secs": 2.0 } ]'
+scan_payload "$d" 2000 4.0 '[ { "pass": 0, "rows": 1000, "cells": 12000, "secs": 2.0 }, { "pass": 1, "rows": 1000, "cells": 12000, "secs": 2.0 } ]'
 out=$(run_report_args "$d" "$TMP/corpus" 1 warm bypass 2); rc=$?
 if [ "$rc" -eq 0 ] && grep -q 'rows=2,000' <<<"$out"; then
   pass "a HEALTHY 2-pass rep is ACCEPTED and its DERIVED denominator is 2 x corpus rows"
