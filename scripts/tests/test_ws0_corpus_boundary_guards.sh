@@ -646,6 +646,53 @@ else
   fail "round23: a refused run must not proceed to later reps or publish (round-2 artifacts=$wired_round2_reps, out: $wired_out)"
 fi
 
+# --------------------------------------------------------------------------
+# B — with the CALL SITE BYPASSED the SAME input COMPLETES and PUBLISHES a figure
+# --------------------------------------------------------------------------
+# This is the half that makes A mean something, and it is an ASSERTION rather than a remark: without
+# it, A would keep passing for a run that died of anything at all — an unrelated fixture error, a
+# reporter refusal, a missing python — and would keep passing after the finding stopped reproducing.
+# What is measured here is the loop MINUS the one call, over the same corpus and the same mutation:
+# it runs both rounds, the reporter accepts the session, and a bare/flight ratio is printed for a
+# session whose two rounds measured DIFFERENT Index.db bytes.
+make_corpus "$TMP/corpus-driver-bypassed"
+bypassed_out=$(driver_probe "$TMP/driver-bypassed" "$TMP/corpus-driver-bypassed" bypassed)
+bypassed_rc=$?
+bypassed_ratio=$(grep -oE 'ratio bare/flight = [0-9.]+x' <<<"$bypassed_out" | head -1)
+if [ "$bypassed_rc" -eq 0 ] \
+   && grep -q 'round 2/2' <<<"$bypassed_out" \
+   && [ -e "$TMP/driver-bypassed/results.json" ] \
+   && [ -n "$bypassed_ratio" ]; then
+  pass "PREMISE ASSERTED (round23): with the call site BYPASSED the SAME mutation COMPLETES both rounds and PUBLISHES a figure ($bypassed_ratio) — so A's refusal is attributable to the boundary check and to nothing else"
+else
+  fail "round23: the bypassed loop must complete and publish, or lane A proves nothing (rc=$bypassed_rc, ratio='$bypassed_ratio', out: $bypassed_out)"
+fi
+# ...and the reason it publishes is the one the finding names: the mutation was RESTORED before the
+# report, so every END-STATE identity check agrees. Asserted from the published results.json, which
+# is the artifact a reader would trust.
+bypassed_ends=$(python3 - "$TMP/driver-bypassed/results.json" <<'PY' 2>&1
+import json, pathlib, sys
+r = json.loads(pathlib.Path(sys.argv[1]).read_text())
+ident = r.get("corpus_identity_verification") or {}
+print("END_DATA_DB_SHA_VERIFIED", ident.get("sha256_verified"))
+comps = r.get("corpus_component_verification") or {}
+print("END_COMPONENTS", comps.get("components_verified_sha256"), "of", comps.get("components_recorded"))
+PY
+)
+if grep -q 'END_DATA_DB_SHA_VERIFIED True' <<<"$bypassed_ends" \
+   && grep -qE 'END_COMPONENTS ([1-9][0-9]*) of \1$' <<<"$bypassed_ends"; then
+  pass "PREMISE ASSERTED (round23): the published report of that run says the corpus digest and EVERY component VERIFIED — the mid-run mutation is invisible in the artifact a reader would trust, which is why the check has to be inside the loop"
+else
+  fail "round23: the bypassed run's published report must show a fully-verified corpus, or the finding it demonstrates has changed (out: $bypassed_ends)"
+fi
+# ...and the two runs are DISCRIMINATED by the call site alone: the bypassed run's log contains no
+# refusal at all. Without this a lane-A refusal appearing in BOTH runs would go unnoticed.
+if ! grep -q 'THE CORPUS CHANGED DURING MEASUREMENT' <<<"$bypassed_out"; then
+  pass "OBSERVED (round23): the bypassed run emits NO boundary refusal, so the pair differs by the CALL SITE and not by their inputs"
+else
+  fail "round23: the bypassed run must not refuse — its loop has no boundary check (out: $bypassed_out)"
+fi
+
 # ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
