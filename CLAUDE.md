@@ -318,7 +318,10 @@ guarantees, and on a fleet box it is often a machine-local root (e.g. `/data/dat
 `$PWD/test-data/datasets`. The printed line beats any root remembered from this file. The script
 rejects every unrecognized argument (exit 2) because its default path is destructive
 (`rm -rf` on the dataset root); `--verify-only` probes a root without mutating anything, `--help`
-lists the flags.
+lists the flags. `--verify-only` also **reports** (never repairs) git-tracked fixtures a
+SIGKILLed fetch left deleted: it names them, prints the exact `git restore` one-liner and exits
+non-zero — distinct from the generic "does not hold a usable dataset corpus", and distinct again
+from `NO SUBJECT` (out-of-repo root) and `COULD NOT MEASURE` (census untakeable) (#3310).
 
 **`CQLITE_DATASETS_ROOT` alone is sufficient on every layout (#3131/#3148)** — the corpus root needs
 no `schemas` sibling. The CQL schema fixtures (`test-data/schemas`, 23 committed files incl.

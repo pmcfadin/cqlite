@@ -51,6 +51,16 @@ unrecognized argument is rejected with exit 2**, deliberately: the script's defa
 destructive (`rm -rf` on the dataset root), so a typo like `-verify-only` must never
 silently select it.
 
+It also **reports** git-tracked fixtures that are missing from the root (issue #3310). A fetch
+killed with `SIGKILL` outruns the crash-safe restore and leaves tracked fixtures deleted while
+the index still records them; `--verify-only` names each one, prints the exact
+`git -C <repo> restore --worktree -- <path>` repair, and exits non-zero — a diagnostic
+deliberately distinct from the generic "does not hold a usable dataset corpus". It **reports,
+it never repairs**: the mode's promise to mutate nothing is absolute. A root outside any git
+work tree (the usual `/data/datasets` layout) has no tracked files, so the probe says it had
+`NO SUBJECT` rather than claiming a clean census of nothing; a census it could not take is
+reported as `COULD NOT MEASURE`, never as "nothing missing".
+
 ## Dataset pins
 
 The fetch script uses these defaults (override with environment variables):
