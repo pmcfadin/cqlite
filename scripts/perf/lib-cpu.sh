@@ -221,14 +221,37 @@ cpu_range_validate() {
 #    `set -u` on bash < 4.4, `"${out[@]}"` on an empty array is an unbound-variable
 #    error — so an empty/garbage CPU spec died here with a shell diagnostic instead
 #    of reaching `verify_sibling_pair`'s fail-closed "CPU list is empty" message.
+#
+# # AN EMPTY ELEMENT IS NOW REFUSED, NOT SKIPPED (#3272 review round 11, F4)
+#
+# `2,,10` and `,` used to be SKIPPED element by element, so `2,,10` expanded to `2 10` and a
+# spec that was nothing but separators expanded to NOTHING and returned SUCCESS. Skipping is
+# the wrong disposition for the same reason a reversed range was: the operator wrote something
+# this rig cannot act on, and quietly acting on a DIFFERENT set than was written is how a
+# measurement ends up describing something nobody asked for. It is refused HERE, where the
+# element is visible, rather than downstream where the diagnostic can only be about the whole
+# list.
+#
+# The TOTALLY EMPTY spec (`""`) is deliberately still an empty SUCCESSFUL expansion: bash splits
+# it into ZERO elements, so there is no empty element to name, and the callers
+# (`verify_sibling_pair`, `verify_disjoint`) are the layer that knows an empty SET is fatal —
+# each now says so in its own terms (that is the other half of F4).
 cpu_list_expand() {
-  local spec="$1" label="${2:-CPU list}" part bounds lo hi i
+  local spec="$1" label="${2:-CPU list}" part bounds lo hi i idx=0
   local -a out=() _parts=()
   IFS=',' read -r -a _parts <<<"$spec"
   for part in "${_parts[@]}"; do
-    # An empty element (`2,,10`, or the empty spec) is skipped, preserving the documented
-    # empty-expansion behaviour above; anything non-empty must satisfy the grammar.
-    [[ -n "$part" ]] || continue
+    idx=$((idx + 1))
+    # An EMPTY element is a REFUSAL (#3272 F4). Pre-fix it was `continue`, so `2,,10` silently
+    # measured `2 10` and `,`/`,,` expanded to nothing and returned 0.
+    if [[ -z "$part" ]]; then
+      echo "FATAL: $label '$spec' has an EMPTY element (position $idx)." >&2
+      echo "       An empty element used to be SKIPPED, so '2,,10' silently expanded to" >&2
+      echo "       '2 10' and a spec of nothing but separators expanded to NOTHING and" >&2
+      echo "       returned SUCCESS — pinning a set the operator did not write, or none at" >&2
+      echo "       all (#3272 F4). State the list without the empty element." >&2
+      return 1
+    fi
     bounds="$(cpu_range_validate "$part" "$label")" || return 1
     lo="${bounds%% *}"; hi="${bounds##* }"
     if (( hi - lo + 1 + ${#out[@]} > CPU_LIST_MAX )); then
@@ -305,6 +328,24 @@ list_sibling_pairs() {
 
 # The two pinned sets must not overlap: a client sharing a physical core with the
 # server would land the client's own CPU cost inside the server's `perf -C` window.
+#
+# # AN EMPTY EXPANDED SET IS REFUSED HERE (#3272 review round 11, F4)
+#
+# The B3 comment below was right that a MALFORMED spec must propagate — and it does. What it did
+# not cover is the spec that is legitimately parseable and expands to NOTHING: `--client-cpus ''`
+# is split by bash into ZERO elements, so `cpu_list_expand` returns SUCCESS with empty output,
+# and the two nested loops below then iterate over nothing and this function returns 0.
+#
+# `verify_sibling_pair` already refuses an empty SERVER set ("CPU list is empty"), but the CLIENT
+# set is deliberately NOT sibling-checked (a multi-core client set is legitimate), so nothing in
+# the topology stage looked at it at all. MEASURED consequence: `--client-cpus ''` passed the
+# whole topology stage and failed later at `taskset -c '' …` inside `measure_flight` — i.e. AFTER
+# `relax_perf_sysctls` mutated the host's perf hardening and AFTER a full `cargo build --release`.
+# An argument-shaped mistake must cost an argument-shaped failure.
+#
+# Refused for BOTH sets rather than the client alone: this function is the one place both
+# expansions exist side by side, and a guard that covers one operand is the partial fix this
+# issue keeps finding.
 verify_disjoint() {
   local a b x y
   # Both specs re-validated and the refusal PROPAGATED (#3272 B3): a spec that expands to
@@ -312,6 +353,26 @@ verify_disjoint() {
   # `--client-cpus` into a PASS.
   a="$(cpu_list_expand "$1" "server CPUs")" || return 1
   b="$(cpu_list_expand "$2" "client CPUs")" || return 1
+  # ...and an EMPTY expansion is refused, naming WHICH set (#3272 F4). Two separate checks, not
+  # one combined test, because the remedy differs per flag and a diagnostic that says "one of
+  # them" makes the operator guess.
+  if [[ -z "$a" ]]; then
+    echo "FATAL: server CPUs ('$1') expand to an EMPTY set." >&2
+    echo "       An empty set trivially satisfies disjointness, so this used to PASS and fail" >&2
+    echo "       later at taskset — after the host sysctls were weakened and after a full" >&2
+    echo "       release build (#3272 F4). Pass --server-cpus as one physical core's" >&2
+    echo "       siblings (see the pairs listed by --help)." >&2
+    return 1
+  fi
+  if [[ -z "$b" ]]; then
+    echo "FATAL: client CPUs ('$2') expand to an EMPTY set." >&2
+    echo "       The client set is deliberately NOT sibling-checked (a multi-core client set is" >&2
+    echo "       legitimate), so this function is the only place it is examined at all. An" >&2
+    echo "       empty set trivially satisfies disjointness, so '--client-cpus \"\"' used to" >&2
+    echo "       pass the whole topology stage and fail later at taskset — after the host" >&2
+    echo "       sysctls were weakened and after a full release build (#3272 F4)." >&2
+    return 1
+  fi
   for x in $a; do
     for y in $b; do
       if [[ "$x" == "$y" ]]; then

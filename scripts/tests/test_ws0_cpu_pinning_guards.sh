@@ -193,12 +193,25 @@ reject_pair "a range spanning two physical cores" "0-3"
 # --- 1c. An EMPTY / garbage spec fails closed ------------------------------
 # Under `set -u` on bash < 4.4 this used to die with a shell diagnostic instead of
 # the intended message; the fail-closed path is what must happen.
-for spec in "" "," ",,"; do
+#
+# TWO DISTINCT DIAGNOSTICS since #3272 round 11's F4, and the distinction is the substance: the
+# TOTALLY EMPTY spec `""` splits into ZERO elements, so there is no element to name and the
+# caller's "CPU list is empty" is the right diagnostic; a spec that is nothing but SEPARATORS
+# (`,`, `,,`) has empty ELEMENTS, and those are now refused where they are visible rather than
+# skipped into an empty expansion. Both still fail closed — what changed is that the second kind
+# names the position instead of blaming the whole list.
+out=$(lib_call verify_sibling_pair "" server); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "CPU list is empty" <<<"$out"; then
+  pass "sibling-reject: the TOTALLY EMPTY spec fails closed with the empty-list message (zero elements, so nothing to name)"
+else
+  fail "sibling-empty (''): expected non-zero + 'CPU list is empty' (rc=$rc, out: $out)"
+fi
+for spec in "," ",,"; do
   out=$(lib_call verify_sibling_pair "$spec" server); rc=$?
-  if [ "$rc" -ne 0 ] && grep -q "CPU list is empty" <<<"$out"; then
-    pass "sibling-reject: an empty/garbage spec ('$spec') fails closed with the empty-list message"
+  if [ "$rc" -ne 0 ] && grep -q "EMPTY element" <<<"$out"; then
+    pass "sibling-reject (round11 F4): a separators-only spec ('$spec') is refused for its EMPTY ELEMENT, naming the position (pre-fix: skipped, expanding to nothing and returning 0)"
   else
-    fail "sibling-empty ('$spec'): expected non-zero + 'CPU list is empty' (rc=$rc, out: $out)"
+    fail "round11 F4: '$spec' must be refused naming the EMPTY element (rc=$rc, out: $out)"
   fi
 done
 
@@ -367,7 +380,13 @@ fi
 # THE ACCEPT DIRECTION — without it, a grammar hardcoded to refuse everything would satisfy
 # every case above. Includes the LEADING-ZERO case, which is the `010s` duration defect class
 # (#3096 nit 7) one file over: `08` must be 8, not an invalid octal.
-for good_spec in '2,10:2 10' '0-3,8:0 1 2 3 8' '08:8' '0:0' '8191:8191' '2,,10:2 10'; do
+#
+# `2,,10` USED TO BE HERE, expanding to `2 10`, and #3272 round 11's F4 MOVED IT to the reject
+# side (below). That move is the finding: an empty element was skipped, so the rig pinned a set
+# the operator had not written and a spec of nothing but separators expanded to NOTHING and
+# returned 0. Recorded rather than silently deleted, because an accept case turning into a reject
+# case is a deliberate behaviour change and the next reader deserves to know it was one.
+for good_spec in '2,10:2 10' '0-3,8:0 1 2 3 8' '08:8' '0:0' '8191:8191'; do
   spec="${good_spec%%:*}"; want="${good_spec##*:}"
   out=$(lib_call cpu_list_expand "$spec" 2>/dev/null); rc=$?
   # The override NOTE goes to stderr, which `lib_call` folds in; take the last line.
@@ -378,6 +397,68 @@ for good_spec in '2,10:2 10' '0-3,8:0 1 2 3 8' '08:8' '0:0' '8191:8191' '2,,10:2
     fail "cpu-grammar-accept: '$spec' must expand to '$want' (rc=$rc, got: '$got')"
   fi
 done
+# --- round 11, F4: AN EMPTY ELEMENT, and AN EMPTY EXPANDED SET ------------------------------
+# `2,,10` is refused rather than quietly measuring `2 10`.
+out=$(lib_call cpu_list_expand "2,,10"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "EMPTY element (position 2)" <<<"$out"; then
+  pass "cpu-grammar (round11 F4): '2,,10' is REFUSED naming the empty element's POSITION (pre-fix: skipped, so the rig pinned '2 10' — a set the operator did not write)"
+else
+  fail "round11 F4: '2,,10' must be refused naming the empty element position (rc=$rc, out: $out)"
+fi
+# NON-VACUITY: the pre-fix disposition really was to accept it. A replica of the removed
+# `[[ -n "$part" ]] || continue` loop, observed to produce a NON-EMPTY expansion from a spec that
+# is now refused — without this the refusal could be about a spec that was never accepted.
+prefix_skip_expand() {
+  local spec="$1" part; local -a out=()
+  IFS=',' read -r -a _pp <<<"$spec"
+  for part in "${_pp[@]}"; do
+    [[ -n "$part" ]] || continue      # the REMOVED line, verbatim
+    out+=("$part")
+  done
+  ((${#out[@]} == 0)) && return 0
+  printf '%s\n' "${out[@]}" | tr '\n' ' ' | sed 's/ $//'
+}
+pre_skip="$(prefix_skip_expand '2,,10')"
+if [ "$pre_skip" = "2 10" ]; then
+  pass "cpu-grammar NON-VACUITY (round11 F4): the PRE-FIX skip loop expanded '2,,10' to '$pre_skip' — a DIFFERENT set from the one written, accepted silently"
+else
+  fail "round11 F4: the pre-fix loop must have expanded '2,,10' to '2 10', else the case proves nothing (got '$pre_skip')"
+fi
+# ...and an EMPTY EXPANDED SET is refused by `verify_disjoint`, per SET, naming which. This is the
+# `--client-cpus ''` path: the client set is deliberately NOT sibling-checked, so `verify_disjoint`
+# is the only place it is examined — and two nested loops over nothing returned 0.
+out=$(lib_call verify_disjoint "" "4,12"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "server CPUs ('') expand to an EMPTY set" <<<"$out"; then
+  pass "disjoint-reject (round11 F4): an EMPTY SERVER set is refused, naming the set"
+else
+  fail "round11 F4: an empty server set must be refused by verify_disjoint (rc=$rc, out: $out)"
+fi
+out=$(lib_call verify_disjoint "2,6" ""); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "client CPUs ('') expand to an EMPTY set" <<<"$out"; then
+  pass "disjoint-reject (round11 F4): an EMPTY CLIENT set is refused — pre-fix '--client-cpus \"\"' passed the WHOLE topology stage and failed later at taskset, after the host sysctls were weakened and after a full release build"
+else
+  fail "round11 F4: an empty client set must be refused by verify_disjoint (rc=$rc, out: $out)"
+fi
+# NON-VACUITY for the empty-set half: the pre-fix body really did return 0. A replica of the two
+# nested loops with no emptiness test, observed to accept the same input.
+prefix_disjoint() {
+  local a="$1" b="$2" x y
+  for x in $a; do for y in $b; do [[ "$x" == "$y" ]] && return 1; done; done
+  return 0
+}
+if prefix_disjoint "" "4 12" && prefix_disjoint "2 6" ""; then
+  pass "disjoint NON-VACUITY (round11 F4): the PRE-FIX loops returned SUCCESS for BOTH empty sets — an empty set trivially satisfies disjointness"
+else
+  fail "round11 F4: the pre-fix disjointness loops must have accepted an empty set, else the case proves nothing"
+fi
+# ...and the ACCEPT direction is unchanged: two real, non-overlapping sets still pass. Without
+# this, a `verify_disjoint` hardcoded to refuse would satisfy every case above.
+out=$(lib_call verify_disjoint "2,6" "1,5"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "disjoint-accept (round11 F4): the emptiness checks did NOT break the accept direction — two real non-overlapping sets still pass"
+else
+  fail "round11 F4: two non-overlapping sets must still be accepted (rc=$rc, out: $out)"
+fi
 # THE REFUSAL MUST REACH THE CALLERS, or the grammar is a function nobody consults. All three
 # consumers propagate it, and each one has a distinct reason it must:
 #  * verify_sibling_pair — an empty `want` was reported as "CPU list is empty", naming the
