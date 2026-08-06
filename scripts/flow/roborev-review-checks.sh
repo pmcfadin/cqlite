@@ -144,18 +144,16 @@ roborev_check_prompt_content() {
     # SELECTED ON THE AFFIRMATIVE STATE NAMES, never on "not a failure".
     case "${ROBOREV_DIFF_SOURCE_STATE:-}" in
       snapshot)
-        # ===== C‴: SNAPSHOT MODE IS A NOTICE, NOT A CERTIFICATION =====
+        # ===== C⁗: SNAPSHOT MODE IS A NOTICE, NOT A CERTIFICATION =====
         # Owner ruling, after seven review rounds found eleven false-PASS vectors in the machinery that
         # made a snapshot-delivered diff certifiable. The information is PRESERVED — the block records
-        # the snapshot path, its digest and the census code-path subset this run expected — so a human
+        # the snapshot path AS THE PROMPT STATED IT, a lexical containment statement about that string,
+        # and the census code-path subset this run expected — so a human
         # closer can act on it; what is gone is the claim that the reviewer demonstrably received those
         # paths. THIS IS A DELIBERATE REDUCTION IN CERTIFICATION STRENGTH, and it is the one place in
         # this wrapper where a previously-FAILing condition no longer fails. It NEVER turns a previous
         # FAIL into a PASS by itself: `prompt-content` becomes NOTICE, and the wrapper's
         # verdict-affirmation backstop admits that NOTICE only for this key and only in this mode.
-        # SET ONLY HERE, AND ONLY ON AN AFFIRMATIVE FACT: the resolver reaches `snapshot` only after the path
-        # was VALIDLY BOUND, so `SNAPSHOT_NOTICE=1` asserts "a snapshot was bound, and either observed or its
-        # non-observation recorded with a cause" — never merely "the mode was selected" (roborev job 16).
         # SET ONLY HERE, AND ONLY ON AN AFFIRMATIVE FACT: the resolver reaches `snapshot` only after the
         # stated path passed the LEXICAL binding, so `SNAPSHOT_NOTICE=1` asserts "a snapshot path was stated
         # and is shaped like one of this repository's snapshot files" — never merely "the mode was selected".
@@ -181,19 +179,20 @@ roborev_check_prompt_content() {
         return 0
         ;;
       snapshot-unbound|unparseable-instruction|mixed-delivery)
-        # ===== A SELECTED MODE IS NOT AN OBSERVED SNAPSHOT (roborev job 16, blocker 1) =====
-        # These two states mean the wrapper received NEITHER an inline diff NOR a snapshot it could read: the
-        # named path could not be bound, or an instruction line could not be read at all. The owner ruled that
+        # ===== A SELECTED MODE IS NOT A NAMED SNAPSHOT (roborev job 16, blocker 1) =====
+        # These three states mean the wrapper received NEITHER an inline diff NOR a usably-named snapshot: the
+        # named path could not be bound, an instruction line could not be read at all, or the prompt carried
+        # BOTH delivery forms at once. The owner ruled that
         # such an input stays a NAMED FAIL — "a review whose reviewer was told to run git itself cannot be
         # verified to have received anything; an unverifiable input is a non-passing verdict by rule 13" — so
-        # they must never reach the C‴ NOTICE, and `SNAPSHOT_NOTICE` is deliberately NOT set here. Before this,
+        # they must never reach the C⁗ NOTICE, and `SNAPSHOT_NOTICE` is deliberately NOT set here. Before this,
         # snapshot mode was selected on the mere PRESENCE of an instruction line, so a compact instruction
         # carrying a git command produced an exempted NOTICE and the run PASSED having received nothing.
         PROMPT_CONTENT="FAIL (snapshot named but unusable: ${ROBOREV_DIFF_SOURCE_STATE})"
         # THE INVARIANT THIS PROTECTS (roborev job 18): inline census verification must not be suppressible by any repository-controlled
         # content. `mixed-delivery` is the state that says something tried: a prompt carrying an inline diff AND
         # a delivery instruction is failed closed rather than resolved in favour of the instruction.
-        DETAILS+=("ERROR: prompt-content: roborev signalled that the diff was delivered BY PATH, but this run received neither an inline diff nor a snapshot it could read: ${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-cause not established}. Named path: ${ROBOREV_SNAPSHOT_PATH:-<none readable from the prompt>}. An input that cannot be established is a NON-PASSING verdict — it is not a C‴ NOTICE, because there is no snapshot to report a digest for. Failing closed.")
+        DETAILS+=("ERROR: prompt-content: roborev signalled that the diff was delivered BY PATH, but this run received neither an inline diff nor a usably-named snapshot: ${ROBOREV_SNAPSHOT_UNUSABLE_WHY:-cause not established}. Named path: ${ROBOREV_SNAPSHOT_PATH:-<none readable from the prompt>}. An input that cannot be established is a NON-PASSING verdict — it is not a C⁗ NOTICE, because nothing here names one snapshot this run could even report. Failing closed.")
         DETAILS+=("ERROR: prompt-content: the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are therefore UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
         return 0
         ;;
@@ -201,9 +200,9 @@ roborev_check_prompt_content() {
       none)
         # A MEASUREMENT, not an excusal: neither source exists, so the census match below reports every
         # path absent — the fail-closed direction — and this line names the condition.
-        DETAILS+=("ERROR: prompt-content: the prompt carries NEITHER an inline diff (no 'diff --git' header) NOR a snapshot diff path (no column-zero 'Read the diff from:' instruction), so nothing in it names a diff the reviewer could have received. This is the T1/T2 family: the review ran against no diff at all.")
-        if [ -n "${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-}" ]; then
-          DETAILS+=("ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path — ${ROBOREV_SNAPSHOT_UNOBSERVED_WHY}. Whether such a review is certifiable at all is an owner decision; by rule 13 an unverifiable input is non-passing, so it stays a named FAIL.")
+        DETAILS+=("ERROR: prompt-content: the prompt carries NEITHER an inline diff (no 'diff --git' header) NOR a snapshot diff path (no column-zero 'Read the diff from:' instruction inside roborev's own diff-delivery block), so nothing in it names a diff the reviewer could have received. This is the T1/T2 family: the review ran against no diff at all.")
+        if [ -n "${ROBOREV_SNAPSHOT_UNUSABLE_WHY:-}" ]; then
+          DETAILS+=("ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path — ${ROBOREV_SNAPSHOT_UNUSABLE_WHY}. Whether such a review is certifiable at all is an owner decision; by rule 13 an unverifiable input is non-passing, so it stays a named FAIL.")
         fi
         ;;
       *)

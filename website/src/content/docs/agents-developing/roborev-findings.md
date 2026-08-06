@@ -193,6 +193,20 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    roborev's delegated-inspection tier (which names no snapshot path at all). **The hang and race classes are
    not reachable because nothing is read** — a weaker claim than "fixed", and the only true one.
 
+   **And the invariant that bounds it: inline census verification must not be suppressible by any
+   repository-controlled content (job 18).** Once nothing is read, a lexically valid but NONEXISTENT snapshot
+   path cannot be refuted — so an instruction *injected* into the prompt would flip an inline review to the
+   exempted NOTICE and skip the census check. The column-zero anchor did not cover it: it was designed against
+   diff-BODY lines (each carries a leading `+`/`-`/space/`@`), while an injected prompt SECTION — an `AGENTS.md`
+   guidelines block is the concrete example — sits at column zero exactly like roborev's own text. RED-verified
+   before the fix: a prompt missing a census path reached `RESULT: PASS`. It is now double-locked — an
+   instruction counts **only inside roborev's own diff-delivery block** (its `### …Diff…` heading, after its own
+   `(Diff too large` notice; the heading is matched *tolerantly*, because it is data in roborev's own template
+   and pinning the observed `### Combined Diff` spelling would false-FAIL a default-`### Diff` review), **and** a
+   prompt carrying BOTH inline headers and a delivery instruction — which roborev never emits — is a named
+   `mixed-delivery` FAIL. Scope: this defends against silent tooling failure, staleness and prompt-content
+   injection, *not* against an adversary with write access to the repo, who can rewrite the wrapper itself.
+
    **The general lesson worth carrying elsewhere** is the predicate family that surfaced three times on the way
    (`! -f`, then `! -e`, then `! -e` again): **every `test`/`[` file predicate is two-valued, so it must collapse
    "cannot tell" onto one of its answers — and it always picks the permissive one.** The three-valued helper that

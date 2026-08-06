@@ -495,7 +495,10 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   **Snapshot-delivered diffs are DETECTED AND REPORTED, and NOTHING IS READ (#3312, owner ruling C⁗).** A large
   diff is not inlined: roborev writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file, names
   it in the prompt, and deletes it before `roborev review --wait` returns — so the prompt carries **zero**
-  `diff --git` headers and the original key FALSE-FAILED every large review. Certifying that mode meant trusting
+  `diff --git` headers and the original key FALSE-FAILED every large review (measured: job 6836, `(21/21 …
+  absent)` on a demonstrably genuine review — 1.47M input / 1.35M cached, 4 findings with real `file:line`,
+  both vacuity tiers PASS — i.e. it red exactly the diffs that most need review and taught agents to waive the
+  one layer #3229 kept). Certifying that mode meant trusting
   a copy of a vanishing file: **seven review rounds found eleven false-PASS vectors** in the machinery built to
   make the copy trustworthy, and after that machinery was retired the remaining defects were all in the code
   that merely **touched the filesystem** to digest the file (TOCTOU, a FIFO hang, watchdog portability, a flag
@@ -507,107 +510,30 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   assert the reviewer received the census paths.** **INLINE mode is unchanged and still FAILs on an absent census
   path**, and a stated path that is relative, dot-segmented, outside the repo prefix or not shaped like a
   snapshot file is a **named FAIL** — as is roborev's delegated-inspection tier, which names no path at all.
+  Read out of the installed binary (v0.61.2) rather than from one transcript: there are **two** snapshot
+  instruction spellings (the full one and a compact ``(Diff too large; read `<path>`.)``), both read, and that
+  **THIRD oversize tier** (`codex_*`/`generic_*` templates) ships **neither** a diff nor a snapshot and tells
+  the reviewer to run git itself — nothing local can verify that mode, so it stays a **FAIL** whose cause NAMES
+  it; whether such a review is certifiable at all is an owner call, not the wrapper's.
+  **THE INVARIANT THAT BOUNDS ALL OF THIS: inline census verification must not be suppressible by any
+  repository-controlled content (#3312 job 18).** Once nothing is read, a lexically valid but NONEXISTENT
+  snapshot path cannot be refuted — so an instruction injected into the prompt (an `AGENTS.md`
+  guidelines section is at column zero, exactly like roborev's own text, and the column-zero anchor was only
+  ever designed against diff-BODY lines) would flip an inline review to the exempted NOTICE and skip the census
+  check entirely. RED-verified: pre-fix, a prompt missing a census path reached `RESULT: PASS`. Double-locked —
+  an instruction counts **only inside roborev's own diff-delivery block** (its `### …Diff…` heading, after its
+  own `(Diff too large` notice; the heading is matched tolerantly because it is *data* in roborev's template,
+  and pinning the observed `### Combined Diff` spelling would false-FAIL a default-heading review), **and** a
+  prompt carrying BOTH inline headers and an instruction — which roborev never emits — is a named
+  `mixed-delivery` FAIL. **Scope, recorded in code:** this defends against silent tooling failure, staleness and
+  prompt-content injection — *not* against an adversary with write access to the reviewed repo, who can rewrite
+  the wrapper and its tests, so hardening against that is unwinnable and out of scope.
   **The hang and race classes are NOT REACHABLE because nothing is read — that is weaker than "fixed", and only
   it is true.** The predicate-family rule survives as **doctrine, not code** (the helper and its lint were
   deleted with the probes they served, since a lint with an empty subject set greens vacuously): **every
   `test`/`[` file predicate is two-valued, so it must collapse "cannot tell" onto one of its answers — and it
   always picks the permissive one.** If a filesystem probe ever returns to that code, this rule obligates the
   three-valued helper (`verified-absent` / `present` / `unreadable`) to return with it.
-
-  **NEITHER HALF OF ROBOREV'S EXCLUSION SET IS MODELLED (#3283 configured, #3278 compiled-in).** Beyond
-  `exclude_patterns`, roborev appends a hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`,
-  `**/pnpm-lock.yaml`, `**/.cache/**`, …) that no configuration can switch off. Modelling either half was
-  built and then **DELETED on #3229**, and **subtraction cannot introduce a false PASS** — with nothing
-  predicted, nothing is excused. So the residual, stated rather than left to be rediscovered: **a path
-  roborev excludes by either half is silently dropped from the reviewer's diff, nothing names it
-  pre-enqueue, and `prompt-content:` FAILs on its absence.** That **fails CLOSED** — the cost is a
-  diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
-  **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
-  Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
-  **Snapshot-delivered diffs are OBSERVED AND REPORTED, not certified (#3312, owner ruling C‴).** A large
-  diff is not inlined: roborev writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file,
-  names it in the prompt, and deletes it before `roborev review --wait` returns — so the prompt carries
-  **zero** `diff --git` headers and the original key FALSE-FAILED every large review. Certifying that mode
-  meant trusting a copy of a vanishing file, and **seven review rounds found eleven false-PASS vectors in the
-  machinery built to make that copy trustworthy** (capture validation, private publication dirs, sequencing,
-  digest agreement, identity binding, path equality). The pre-registered exit therefore fired: in snapshot
-  mode `prompt-content:` reports **`NOTICE`**, and the block records **`snapshot-path:`**,
-  **`snapshot-digest:`** (observed *while the review ran*, else `UNOBSERVED (<why>)`) and
-  **`snapshot-expected:`** (the census code subset the run expected, *not* asserted). **A snapshot-mode PASS
-  does not assert the reviewer received the census paths** — a closer wanting certainty inspects the diff or
-  re-reviews a smaller range. **INLINE mode is unchanged and still FAILs on an absent census path.** The
-  wrapper still refuses to READ a path that is not absolute, not inside the reviewed repo, or reached through
-  a symlink — safety survives the loss of certification — and an unobserved snapshot always names why.
-  **One PREDICATE FAMILY, fixed categorically along the way (#3272's three-recurrence rule):** `! -f`, then
-  `! -e`, then `! -e` again each read "cannot tell" as "not there". **Every shell file test is two-valued and
-  collapses "unobservable" onto the answer that reads as "nothing is wrong"**, so absence is now established
-  affirmatively by one helper (`verified-absent` / `present` / `unreadable`, fail-closed, naming what was
-  unobservable) and a `--lite` lint FAILs any unannotated bare file predicate in that code.
-
-  **NEITHER HALF OF ROBOREV'S EXCLUSION SET IS MODELLED (#3283 configured, #3278 compiled-in).** Beyond
-  `exclude_patterns`, roborev appends a hard-coded lockfile/cache deny-list (`**/Cargo.lock`, `**/go.sum`,
-  `**/pnpm-lock.yaml`, `**/.cache/**`, …) that no configuration can switch off. Modelling either half was
-  built and then **DELETED on #3229**, and **subtraction cannot introduce a false PASS** — with nothing
-  predicted, nothing is excused. So the residual, stated rather than left to be rediscovered: **a path
-  roborev excludes by either half is silently dropped from the reviewer's diff, nothing names it
-  pre-enqueue, and `prompt-content:` FAILs on its absence.** That **fails CLOSED** — the cost is a
-  diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
-  **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
-  Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
-  **And it reads BOTH of roborev's diff-delivery modes (#3312).** A large diff is **not inlined**: roborev
-  writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file and the prompt ends with
-  ``Read the diff from: `<abs path>` ``, carrying **zero** `diff --git` headers — which made the key
-  FALSE-FAIL `(21/21 … absent)` on a demonstrably genuine review (job 6836: 1.47M input / 1.35M cached,
-  4 findings with real `file:line`, both vacuity tiers PASS), i.e. it red exactly the diffs that most need
-  review and taught agents to waive the one layer #3229 kept. The fix is **not** "an empty prompt is a
-  pass" — it is *follow the diff to where it actually is*: the headers now come from the snapshot file (the
-  union when a prompt carries both), the path is taken only from the verified job's own prompt and must be
-  absolute, inside the reviewed repo and under that repo's own snapshot dir, and every other outcome
-  (cleaned-up, missing, unreadable, empty, header-less, foreign-repo, unbound-job, **symlinked**, ambiguous,
-  relative, unparseable) FAILs closed under its own cause — the symlink refusal because containment is decided
-  on the PATH, so a symlink at the last component could point anywhere on the host and still read as in-repo
-  (roborev found that on this very change, and without the refusal an out-of-repo target reached a green). **And the snapshot must be CAPTURED WHILE THE REVIEW RUNS
-  — measured live, roborev deletes it BEFORE `roborev review --wait` returns, and `roborev show` has no
-  `--diff` to hand it back**, so reading the named path after the fact reported `cleaned-up` on *every*
-  genuine snapshot-mode review (a differently-named FAIL is not a fix). The wrapper therefore arms a watcher
-  before the review that copies each snapshot out of the reviewed repo keyed by directory id, and reads its
-  own copy of the id the job's prompt names — **never** a diff it recomputes itself, which would make the key
-  agree with itself. A capture that never happens is still a `cleaned-up` FAIL. The capture is
-  **private and per-run** (`mktemp -d` 0700, outside the repo, removed at exit), **published by ONE rename**
-  (content + identity together, so no observer sees a half-published capture — two separate writes made a
-  SIGTERM between them report `capture-unvalidated` on a good snapshot, i.e. the very false FAIL this issue
-  fixes), **re-taken whenever the source's content DIGEST changes** (a byte count cannot see a same-length
-  rewrite, which would certify a stale diff), and matched by **whole-path equality** with the path the prompt
-  names (an id-only match let the canonical sibling certify a file the reviewer was never pointed at). Each capture publishes to a **fresh `pub.<id>.<seq>`
-  directory that cannot already exist** (a `mv` onto an existing directory does not fail — it NESTS, leaving
-  the previous content where the resolver reads it — so the rename-aside and backup paths were DELETED rather
-  than checked), and the resolver reads the newest publication. A capture is consulted **only when the live
-  path does not exist** (`! -e`, not `! -f`): a directory or FIFO at the named path is `unreadable`, a fact to
-  report, not "the snapshot is gone". Publication additionally requires **three digests that
-  agree** (source before the copy, source after it, and the staged copy — each measured, since an empty digest
-  compares equal to another empty one), and the capture directory's containment is decided on its
-  **`pwd -P`-resolved** path, so a relative `TMPDIR` or one symlinked into the checkout is refused with a named
-  notice rather than putting our copies in the tree under review. Every one of those holes was real: reverted,
-  each reached `prompt-content: PASS`. **One PREDICATE FAMILY, fixed categorically (#3272's three-recurrence rule):** three vectors were one
-  mistake — `! -f` read "not a regular file" as gone, `! -e` read "not stat-able" as gone, and `! -e` again
-  read "parent not searchable" as gone. **Every shell file test is two-valued and collapses "cannot tell"
-  onto the value that reads as "nothing is wrong."** So the apparatus now routes every such probe through one
-  three-way helper — **`verified-absent`** (ENOENT *and* an observable parent) / **`present`** /
-  **`unreadable`** (anything else, fail-closed, naming what was unobservable) — a capture may be consulted
-  ONLY on `verified-absent`, and a `--lite` lint FAILs any unannotated bare file predicate in the apparatus
-  that would read its own falsity as absence. **STATED LIMITATION, deliberately not chased:** a poller cannot prove
-  the version it captured was the snapshot's *final* bytes — but the remedy needs an API roborev does not
-  offer (no `show --diff`, and the file is deleted before `--wait` returns), the check's subject is *the diff
-  the reviewer received* rather than a version that materialised after the read, and the residual is a rewrite
-  inside the last ≤1s poll window, unobserved in measured roborev behaviour. **Scope, recorded in code:** this
-  defends against silent tooling failure and staleness — *not* against an adversary with write access to the
-  reviewed repo, who can simply write the diff, the wrapper or the tests, so hardening the copy against them
-  is unwinnable and out of scope.
-  Read out of the installed binary (v0.61.2) rather than from one transcript: there are **two** snapshot
-  instruction spellings (the full one and a compact ``(Diff too large; read `<path>`.)``), both read, and a
-  **THIRD oversize tier** (`codex_*`/`generic_*` templates) that ships **neither** a diff nor a snapshot and
-  tells the reviewer to run git itself — nothing local can verify that mode, so it stays a **FAIL** whose
-  cause now NAMES it; whether such a review is certifiable at all is an owner call, not the wrapper's.
   **That is ONE SHAPE, found repeatedly on #3229, so it is now a RULE: a positive verdict requires an
   AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
   every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state signal took the permissive

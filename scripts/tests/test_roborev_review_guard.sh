@@ -3861,7 +3861,21 @@ if grep -qF 'ROBOREV_DIFF_SOURCE_STATE="mixed-delivery"' "$ORACLES" \
 else
   bad 'structural: the mixed-delivery lock is missing — an injected instruction beside an inline diff could downgrade the review to a NOTICE (#3312 job 18)'
 fi
-_r1=$(grep -nE 'ROBOREV_SNAPSHOT_UNOBSERVED_WHY="[^"]*\$\(\[' "$ORACLES" || true)
+# NO EMITTED DIAGNOSTIC MAY DESCRIBE A RETIRED MECHANISM AS SOMETHING THIS RUN DOES (#3312 job 18, fix 2).
+# The retirement of the capture/observer/digest apparatus left prose behind that still described it in the
+# present tense, and a diagnostic that names a mechanism the wrapper does not have sends its reader looking
+# for behaviour that cannot be there. The scan covers the strings a reader actually SEES — the DETAILS lines
+# and the verdict values — and only AFFIRMATIVE spellings: the NOTICE deliberately says "there is no digest
+# and no content identity", and a statement of ABSENCE is exactly what must survive.
+_diag=$(grep -hnE 'DETAILS\+=\(|^[[:space:]]*(PROMPT_CONTENT|REVIEW_COMPLETED|TIER1|TIER2|FINDINGS|CENSUS_CHECK|CODE_FREE|PUSH_ASSERT|SHA_ASSERT|JOB_RECORD)=' \
+  "$WRAPPER" "$CHECKS_FILE" "$ORACLES" 2>/dev/null || true)
+_diag_stale=$(printf '%s\n' "$_diag" | grep -inE 'captur|watcher|watchdog|observer|digest(ed|ing)? (of|the snapshot)|snapshot digest|mid-copy|SNAPSHOT_(DIGEST|BYTES)|bounded read|read the snapshot' || true)
+if [ -z "$_diag_stale" ]; then
+  ok 'structural: no emitted diagnostic names a retired mechanism (capture/watcher/watchdog/observer/digest) as current behaviour'
+else
+  bad "structural: an emitted diagnostic describes a mechanism C⁗ deleted — ${_diag_stale%%$'\n'*} (#3312 fix 2)"
+fi
+_r1=$(grep -nE 'ROBOREV_SNAPSHOT_UNUSABLE_WHY="[^"]*\$\(\[' "$ORACLES" || true)
 if [ -z "$_r1" ]; then
   ok 'structural: no cause string is built with an optional command substitution (rider R1: it aborts under set -e)'
 else

@@ -905,45 +905,10 @@ roborev_collect_prompt_headers() {
 # THE DIFF IS NOT RETRIEVABLE AFTER THE FACT. `roborev show <job>` has `--prompt` and `--json` and
 # NO `--diff` (checked against the installed CLI's own help), and the prompt only NAMES the path.
 #
-# SO IT IS CAPTURED WHILE THE REVIEW RUNS: a watcher started before `roborev review` copies each
-# `<repo>/.roborev/roborev-snapshot-*/roborev-snapshot-content.diff` it sees into the wrapper's own
-# diagnostics directory, keyed by the SNAPSHOT DIRECTORY ID. After the review, the check resolves
-# the id from the path the prompt names and reads OUR COPY of exactly that snapshot.
-#
-# WHY THIS IS NOT A WEAKENING. The copy is (a) taken from INSIDE the reviewed repository, (b) taken
-# DURING this run, by us, (c) VALIDATED AT CAPTURE TIME and matched afterwards against the exact
-# relative path the reviewed job's OWN prompt names. Nothing is reconstructed: we never compute the
-# diff ourselves. That distinction is the whole point — `git diff` output of our own would make
-# `prompt-content:` compare our census against our own diff, which always agrees, i.e. exactly the
-# vacuous pass this key exists to prevent. A capture that does not happen is not excused either:
-# with no live file and no capture the verdict is still `cleaned-up`, fail-closed.
-#
-# ===== PROVENANCE IS ESTABLISHED AT CAPTURE TIME, NOT AT VALIDATION TIME (roborev job 6) =====
-# Two blockers, and they were two halves of ONE seam: capture provenance was established too LATE
-# and keyed too LOOSELY. Both were false-PASS vectors in the guard whose only job is preventing
-# false passes, so both are closed here rather than argued down.
-#
-# (1) THE CAPTURE-TIME PATH RUNS EARLIER AND THEREFORE WINS. `-f` and `cp` both FOLLOW symlinks, so
-#     a symlink at `<repo>/.roborev/roborev-snapshot-<id>/roborev-snapshot-content.diff` (or a
-#     symlinked `.roborev`/`roborev-snapshot-<id>` component) made the watcher copy an OUTSIDE file
-#     into the capture dir. The validation-time `-L` refusal added earlier cannot see it: roborev
-#     deletes the original first, so by then there is no path left to inspect and the capture is
-#     simply trusted. So the watcher now validates BEFORE it reads — no symlink at the file OR at
-#     any component it descends, a regular file, and a physically-resolved directory that really is
-#     `<repo>/.roborev/<id>` — and RECORDS that validation beside the capture. The consumer requires
-#     the record AFFIRMATIVELY: a capture with no validation record is REJECTED, never trusted,
-#     because "no recorded failure" is not a measurement.
-#
-# (2) A CAPTURE IS KEYED BY ITS FULL VALIDATED RELATIVE PATH, not by the directory id. The binding
-#     accepts any file beneath a snapshot directory while the watcher only ever copies the canonical
-#     `roborev-snapshot-content.diff`, so an id-only lookup let a prompt naming a DIFFERENT (missing)
-#     file in that directory be answered with the canonical sibling's capture — certifying a diff the
-#     reviewer was never instructed to read. The validation record therefore stores the exact
-#     relative path captured, and the consumer requires it to EQUAL the relative path the prompt
-#     names. (Chosen over hard-coding the expected filename + depth in the binding: the PROMPT is the
-#     authority on which file the reviewer was pointed at, and an equality test against what we
-#     actually copied cannot drift with roborev's naming, while a pinned filename would both duplicate
-#     that authority and false-FAIL if roborev ever renames its snapshot file.)
+# AND IT IS NOT COPIED OUT EITHER, ANY MORE. Holding on to the file while the review ran was the FIRST
+# destination (A-bounded) and it is RETIRED by owner ruling — the history is in the C⁗ section below, and
+# the code is in git history. Nothing in this file reads, copies, digests or stats a snapshot today; what
+# is left is string work over the prompt the wrapper itself wrote.
 #
 # ============ C⁗: SNAPSHOT MODE IS DETECTED AND REPORTED — NOTHING IS READ ============
 # THE END OF A LONG ROAD, recorded so the shape is not rebuilt by someone reading only the endpoint.
@@ -1184,7 +1149,7 @@ roborev_collect_review_diff_headers() {
   ROBOREV_DIFF_SOURCE_STATE=""
   ROBOREV_SNAPSHOT_PATH=""
   ROBOREV_SNAPSHOT_CONTAINMENT=""
-  ROBOREV_SNAPSHOT_UNOBSERVED_WHY=""
+  ROBOREV_SNAPSHOT_UNUSABLE_WHY=""
 
   roborev_collect_prompt_headers "$prompt"
   roborev_prompt_snapshot_paths "$prompt"
@@ -1201,7 +1166,7 @@ roborev_collect_review_diff_headers() {
     && { [ "${#_rx_snap_paths[@]}" -gt 0 ] || [ "${_rx_snap_unparseable:-0}" -gt 0 ]; }; then
     ROBOREV_DIFF_SOURCE_STATE="mixed-delivery"
     ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]:-}"
-    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt carries ${#_rx_hdrs[@]} inline 'diff --git' header(s) AND a snapshot delivery instruction; roborev emits one or the other, so something added an instruction to a prompt that already carried the diff. Honouring it would let prompt content downgrade an inline-delivered review to an uncertified NOTICE"
+    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt carries ${#_rx_hdrs[@]} inline 'diff --git' header(s) AND a snapshot delivery instruction; roborev emits one or the other, so something added an instruction to a prompt that already carried the diff. Honouring it would let prompt content downgrade an inline-delivered review to an uncertified NOTICE"
     return 0
   fi
 
@@ -1214,9 +1179,9 @@ roborev_collect_review_diff_headers() {
     ROBOREV_DIFF_SOURCE_STATE="unparseable-instruction"
     if [ "${#_rx_snap_paths[@]}" -gt 0 ]; then
       ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]}"
-      ROBOREV_SNAPSHOT_UNOBSERVED_WHY="${_rx_snap_unparseable} snapshot instruction line(s) carried no readable backtick-delimited path, while ${#_rx_snap_paths[@]} other line(s) did (first: ${_rx_snap_paths[0]})"
+      ROBOREV_SNAPSHOT_UNUSABLE_WHY="${_rx_snap_unparseable} snapshot instruction line(s) carried no readable backtick-delimited path, while ${#_rx_snap_paths[@]} other line(s) did (first: ${_rx_snap_paths[0]})"
     else
-      ROBOREV_SNAPSHOT_UNOBSERVED_WHY="${_rx_snap_unparseable} snapshot instruction line(s) carried no readable backtick-delimited path, and no line yielded one"
+      ROBOREV_SNAPSHOT_UNUSABLE_WHY="${_rx_snap_unparseable} snapshot instruction line(s) carried no readable backtick-delimited path, and no line yielded one"
     fi
     return 0
   fi
@@ -1231,7 +1196,7 @@ roborev_collect_review_diff_headers() {
         # `codex_*`/`generic_*` oversize templates — and a COMPACT instruction whose token is a git command
         # rather than a snapshot path — ship neither the diff nor a snapshot path. Nothing establishes what
         # such a review received, and an unverifiable input is non-passing by rule 13.
-        ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt carries a '(Diff too large' notice but NO snapshot path (roborev's delegated-inspection tier, or a compact instruction naming a command rather than a path), so nothing establishes which files the reviewer looked at"
+        ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt carries a '(Diff too large' notice but NO snapshot path (roborev's delegated-inspection tier, or a compact instruction naming a command rather than a path), so nothing establishes which files the reviewer looked at"
       fi
     fi
     return 0
@@ -1240,7 +1205,7 @@ roborev_collect_review_diff_headers() {
   if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
     ROBOREV_DIFF_SOURCE_STATE="unparseable-instruction"
     ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]}"
-    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the prompt names ${#_rx_snap_paths[@]} different snapshot diff paths, so which one this review was given is undecidable: ${_rx_snap_paths[*]}"
+    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt names ${#_rx_snap_paths[@]} different snapshot diff paths, so which one this review was given is undecidable: ${_rx_snap_paths[*]}"
     return 0
   fi
 
@@ -1252,7 +1217,7 @@ roborev_collect_review_diff_headers() {
     # of roborev's snapshot files in this repository, this run received neither an inline diff nor a snapshot,
     # and that is a FAIL which must never reach the C‴/C⁗ NOTICE. Keyed on the affirmative `ok`.
     ROBOREV_DIFF_SOURCE_STATE="snapshot-unbound"
-    ROBOREV_SNAPSHOT_UNOBSERVED_WHY="the stated path is not shaped like one of this repository's snapshot files (${_rx_snap_bind_state:-unknown}): ${_rx_snap_bind_detail:-no detail}"
+    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the stated path is not shaped like one of this repository's snapshot files (${_rx_snap_bind_state:-unknown}): ${_rx_snap_bind_detail:-no detail}"
     return 0
   fi
   # RIDER R2: the containment answer is LEXICAL and says so, in the block and in the NOTICE.

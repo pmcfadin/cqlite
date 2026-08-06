@@ -111,9 +111,9 @@
 #                     a hard FAIL. SNAPSHOT (roborev writes the diff to a TRANSIENT file and names it, so
 #                     the prompt carries ZERO headers): after seven review rounds found ELEVEN false-PASS
 #                     vectors in the machinery that made a copy of that file trustworthy, the owner ruled
-#                     it OBSERVED AND REPORTED rather than certified — `prompt-content` is a NOTICE and the
-#                     keys below record what was seen. A snapshot-mode PASS therefore does NOT assert that
-#                     the reviewer received the census paths.
+#                     it DETECTED AND REPORTED rather than certified — `prompt-content` is a NOTICE and the
+#                     keys below record WHAT THE PROMPT STATED, nothing being read. A snapshot-mode PASS
+#                     therefore does NOT assert that the reviewer received the census paths.
 #   snapshot-path     the snapshot path THE PROMPT STATED. PRESENT ONLY IN SNAPSHOT MODE — in inline mode
 #                     these three keys have no subject and are ABSENT rather than placeholdered.
 #   snapshot-containment  a LEXICAL statement about that string (no filesystem access): `lexical: inside the
@@ -331,6 +331,14 @@ the diff or re-reviews a smaller range. A stated path that is relative, carries 
 .roborev/roborev-snapshot-<id>/<file> is a named FAIL, not a NOTICE — as is roborev's
 delegated-inspection tier, which names no snapshot path at all.
 
+THE INVARIANT THAT BOUNDS THAT NOTICE: inline census verification must not be
+suppressible by any repository-controlled content. A delivery instruction is honoured
+ONLY inside roborev's own diff-delivery block (its '### ...Diff...' heading, after its
+own '(Diff too large' notice), and a prompt carrying BOTH an inline diff AND an
+instruction — which roborev never emits — is a named mixed-delivery FAIL. So content
+in the reviewed repository (an AGENTS.md section is at column zero exactly like
+roborev's own text) can never downgrade an inline review to the exempted NOTICE.
+
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
 a worktree; the gate's hermetic check uses a stub reviewer.
@@ -458,8 +466,8 @@ SHA_ASSERT="SKIP"
 # verdict marker from an ALLOW-list) is now required before PASS is reachable.
 REVIEW_COMPLETED="SKIP"
 PROMPT_CONTENT="SKIP"
-# C‴ (#3312): set to 1 by `prompt-content` when roborev delivered the diff by SNAPSHOT PATH, which the
-# owner ruled is OBSERVED AND REPORTED rather than certified. It is the ONLY thing that admits a
+# C⁗ (#3312): set to 1 by `prompt-content` when roborev delivered the diff by SNAPSHOT PATH, which the
+# owner ruled is DETECTED AND REPORTED rather than certified. It is the ONLY thing that admits a
 # `prompt-content: NOTICE` to the affirmation backstop below, and nothing else may set it.
 SNAPSHOT_NOTICE=0
 SNAPSHOT_EXPECTED=""
@@ -692,16 +700,13 @@ done
 # two-positional range form (it anchors the range at git's EMPTY TREE).
 # The transcript goes to the log; stdout stays reserved for the summary block.
 #
-# THE SNAPSHOT CAPTURE MUST BE ARMED BEFORE THE REVIEW STARTS (#3312), because roborev DELETES the
-# snapshot diff when the review finishes — measured: it is gone before this very `--wait` returns —
-# and `roborev show` cannot hand it back (no `--diff`). So a watcher copies it out of the reviewed
-# repo WHILE the review runs, and `prompt-content:` reads OUR copy of the directory id the job's own
-# prompt names. Nothing is reconstructed from our own `git diff`; that would make the key agree with
-# itself. If the capture cannot start or misses, the check fails CLOSED on the absent snapshot.
-# The capture directory is PRIVATE and PER-RUN (`mktemp -d`, 0700, outside the reviewed repo) and is
-# removed at exit — see the scope note in roborev-review-oracles.sh. It is deliberately NOT a stable
-# path beside the transcript: a shared, guessable directory is reusable across runs, which is a
-# staleness class this design removes by construction rather than by checking for it.
+# NOTHING IS ARMED AROUND THIS CALL, and that absence is the design (C⁗, #3312). When roborev delivers
+# the diff BY SNAPSHOT PATH it DELETES that file when the review finishes — measured: it is gone before
+# this very `--wait` returns — and `roborev show` cannot hand it back (no `--diff`). Every attempt to
+# hold on to the file so `prompt-content:` could certify it cost review rounds and produced defects in
+# the machinery rather than in the verdict, so the owner ruled the mode DETECTED AND REPORTED instead:
+# the snapshot path is recorded exactly as the prompt stated it and NEVER read. There is therefore no
+# watcher process, no private capture directory and no artefact to clean up here — only the review call.
 set +e
 roborev review --branch \
   --base "$BASE" \
@@ -711,9 +716,6 @@ roborev review --branch \
   --wait >"$LOG" 2>&1
 REVIEW_RC=$?
 set -e
-# Stopped as soon as the review returns: the snapshot cannot appear after that, and a watcher left
-# running would outlive the wrapper. Also stopped from the EXIT trap, for the paths that never reach
-# here.
 
 # --- step 5: reviewed-RANGE assert (AC2) — STRUCTURED data is the oracle -------
 #
