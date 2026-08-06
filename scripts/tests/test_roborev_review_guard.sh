@@ -321,6 +321,13 @@ if [ "${STUB_GH_RC:-0}" -ne 0 ]; then
   printf 'gh: simulated failure\n' >&2
   exit "${STUB_GH_RC}"
 fi
+# STUB_GH_COMMENTS_FILE is read VERBATIM (no %b interpretation), which is what makes the
+# "repost the failure diagnostic as a PR comment" regression test possible: the diagnostic
+# contains backslashes and quotes that any escaping round-trip would alter.
+if [ -n "${STUB_GH_COMMENTS_FILE:-}" ] && [ -f "${STUB_GH_COMMENTS_FILE}" ]; then
+  cat "${STUB_GH_COMMENTS_FILE}"
+  exit 0
+fi
 printf '%b' "${STUB_GH_COMMENTS:-}"
 exit 0
 GHSTUB
@@ -967,6 +974,7 @@ export STUB_ANNOUNCE_SHA=''
 # `<login><TAB><flattened body>`, exactly the shape the wrapper's `--jq` produces. STUB_GH_RC makes the
 # `gh` call FAIL, which is how "no PR / no auth / API error" is exercised.
 export STUB_GH_COMMENTS=''
+export STUB_GH_COMMENTS_FILE=''
 export STUB_GH_RC=0
 reset_stub() {
   STUB_JOB=4656
@@ -986,6 +994,7 @@ reset_stub() {
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
   STUB_GH_COMMENTS=''
+  STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
 }
 
@@ -3299,6 +3308,7 @@ done
 # waiver unable to touch any other verdict.
 w_work=$(make_fixture case_w two-code-commits)
 w_head=$(git -C "$w_work" rev-parse HEAD)
+w_base=$(git -C "$w_work" rev-parse origin/main)
 
 printf '== (wv1) a prompt naming a snapshot path is NOT special: an absent census path FAILs ==\n'
 # The shape that used to produce an exempted NOTICE. There is no snapshot mode any more, so this is
@@ -3313,9 +3323,9 @@ assert_says 'case (wv1) absence is a FAIL, with no delivery-mode excuse' \
 assert_says 'case (wv1) the machine says it cannot tell WHY they are absent' \
   'THE MACHINE CANNOT TELL WHY THEY ARE ABSENT'
 assert_says 'case (wv1) and points at the waiver route' \
-  "roborev-waive: prompt-content-absent sha=$w_head reason="
+  "roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason="
 assert_says 'case (wv1) the waiver state is reported as NONE' \
-  "^waiver: NONE \(no 'roborev-waive: prompt-content-absent sha=<head> reason=<why>' comment on this PR\)\$"
+  '^waiver: NONE \(no anchored waiver line on this PR for this review — see --help for the form\)$'
 assert_lacks 'case (wv1) no NOTICE verdict exists for this key any more' '^prompt-content: NOTICE'
 assert_lacks 'case (wv1) and no snapshot keys are emitted' '^snapshot-'
 reset_stub
@@ -3353,14 +3363,14 @@ printf '== (wv4) a GRANTED waiver: WAIVED, RESULT PASS, and the provenance is re
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
-STUB_GH_COMMENTS="pmcfadin\troborev-waive: prompt-content-absent sha=$w_head reason=snapshot-delivered, 541k input / 472k cached\n"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered, 541k input / 472k cached\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv4)' PASS 0
 assert_says 'case (wv4) the verdict token is WAIVED, not PASS' \
-  "^prompt-content: WAIVED \(2/2 code census paths absent — authorized by @pmcfadin for $w_head\)\$"
+  "^prompt-content: WAIVED \(2/2 code census paths absent — authorized by @pmcfadin for base=$w_base head=$w_head job=4656\)\$"
 assert_lacks 'case (wv4) a waived run must NOT read as a certification' '^prompt-content: PASS'
-assert_says 'case (wv4) the waiver key records author, sha and reason' \
-  "^waiver: GRANTED \(author=@pmcfadin sha=$w_head reason=snapshot-delivered, 541k input / 472k cached\)\$"
+assert_says 'case (wv4) the waiver key records author, the whole scope and the reason' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=snapshot-delivered, 541k input / 472k cached\)\$"
 assert_says 'case (wv4) the absent paths are still listed' '^  alpha\.rs$'
 assert_says 'case (wv4) and the authorship limitation is stated, not implied' \
   'AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
@@ -3370,13 +3380,13 @@ printf '== (wv5) (b) SHA-BOUND: a waiver for another head is STALE and does not 
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
-STUB_GH_COMMENTS="pmcfadin\troborev-waive: prompt-content-absent sha=0000000000000000000000000000000000000000 reason=stale one\n"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=stale one\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv5)' FAIL 1
 assert_says 'case (wv5) the absence still FAILs' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
-assert_says 'case (wv5) and the staleness is named with both shas' \
-  "^waiver: STALE \(the marker names sha 0000000000000000000000000000000000000000 but this run certified $w_head — a push invalidates a waiver, so re-request it against the new head\)\$"
+assert_says 'case (wv5) and the divergent field is named' \
+  "^waiver: STALE \(the marker names a different review — head \(0000000000000000000000000000000000000000 != $w_head\) — and a waiver may not outlive the review its authorizer judged; re-request it for this base/head/job\)\$"
 assert_lacks 'case (wv5) a stale marker never yields WAIVED' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3384,7 +3394,7 @@ printf '== (wv6) a marker with no reason= is MALFORMED and does not excuse ==\n'
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
-STUB_GH_COMMENTS="pmcfadin\troborev-waive: prompt-content-absent sha=$w_head\n"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv6)' FAIL 1
 assert_says 'case (wv6) a reasonless waiver is refused by name' '^waiver: MALFORMED \(the marker carries no reason= value'
@@ -3396,7 +3406,7 @@ reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_GH_RC=1
-STUB_GH_COMMENTS="pmcfadin\troborev-waive: prompt-content-absent sha=$w_head reason=would have been granted\n"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=would have been granted\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv7)' FAIL 1
 assert_says 'case (wv7) an unreadable PR cannot grant a waiver' \
@@ -3412,7 +3422,7 @@ reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_VERDICT='Waiting for job 4656 to complete...'
-STUB_GH_COMMENTS="pmcfadin\troborev-waive: prompt-content-absent sha=$w_head reason=absence is legitimate\n"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=absence is legitimate\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv8)' FAIL 1
 assert_says 'case (wv8) the absence itself is waived' '^prompt-content: WAIVED'
@@ -3423,22 +3433,129 @@ printf '== (wv9) the LAST granted marker wins, so a re-request supersedes a stal
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
-STUB_GH_COMMENTS="pmcfadin\troborev-waive: prompt-content-absent sha=1111111111111111111111111111111111111111 reason=before the push\npmcfadin\troborev-waive: prompt-content-absent sha=$w_head reason=re-requested after the push\n"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=1111111111111111111111111111111111111111 job=4656 reason=before the push\n\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=re-requested after the push\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv9)' PASS 0
-assert_says 'case (wv9) the current marker grants' "^waiver: GRANTED \(author=@pmcfadin sha=$w_head reason=re-requested after the push\)\$"
+assert_says 'case (wv9) the current marker grants' "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=re-requested after the push\)\$"
 reset_stub
 
-printf '== (wv10) a marker on a LATER line of a multi-line comment is still attributable ==\n'
-# The `gh --jq` program flattens each comment to one line precisely so this works; a line-oriented scan
-# over raw bodies would attribute the marker to a fragment of prose instead of to its author.
+printf '== (wv10) a marker on its OWN line of a multi-line comment is attributable and grants ==\n'
+# Line boundaries are preserved (job 23), so the author record precedes the comment's own lines and a
+# marker on any one of them still attributes to that comment's author — while prose on the SAME line as
+# the marker can no longer make it match at all (see wv11/wv12).
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
-STUB_GH_COMMENTS="pmcfadin\tI checked the token accounting: 541k in / 472k cached, genuine. roborev-waive: prompt-content-absent sha=$w_head reason=token accounting checked\n"
+STUB_GH_COMMENTS="\001pmcfadin\nI checked the token accounting: 541k in / 472k cached, genuine.\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=token accounting checked\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv10)' PASS 0
-assert_says 'case (wv10) the author survives flattening' "^waiver: GRANTED \(author=@pmcfadin sha=$w_head reason=token accounting checked\)\$"
+assert_says 'case (wv10) the author record attaches to the marker line' "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=token accounting checked\)\$"
+reset_stub
+
+printf '== (wv11) BLOCKER 1: the failure diagnostic REPOSTED as a PR comment must not waive ==\n'
+# THE SHARPEST INSTANCE OF THE RECURRING SHAPE ON THIS ISSUE (roborev job 23): AN ARTIFACT THAT DESCRIBES THE
+# ESCAPE HATCH BECAME THE ESCAPE HATCH. The diagnostic used to print a complete marker carrying the live
+# sha, and detection accepted it anywhere inside a flattened comment — so pasting the summary block into a
+# PR comment, which is the documented practice throughout this repo, authorized the next run.
+#
+# THE FIXTURE IS THE EXPLOIT, VERBATIM: run the wrapper on an absent-census prompt, take its ENTIRE output
+# (block + diagnostics), post it as a PR comment, and run again. It must still be unwaived. The comment is
+# fed through a FILE so nothing is re-escaped on the way in.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+run_wrapper "$w_work"
+cp "$OUT" "$tmp/reposted-diagnostic.txt"
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+{ printf '\001pmcfadin\n'; cat "$tmp/reposted-diagnostic.txt"; } >"$tmp/reposted-comment.txt"
+STUB_GH_COMMENTS_FILE="$tmp/reposted-comment.txt"
+run_wrapper "$w_work"
+assert_verdict 'case (wv11)' FAIL 1
+assert_says 'case (wv11) reposting the diagnostic does not waive anything' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (wv11) and no waiver is found in it' \
+  '^waiver: NONE \(no anchored waiver line on this PR for this review — see --help for the form\)$'
+assert_lacks 'case (wv11) the reposted block never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv12) LAYER 1: an indented, quoted or embedded marker copy does not match ==\n'
+# Anchoring, case by case: a `>`-quoted line (a GitHub reply), an indented code-block copy, a bulleted
+# copy, and a marker embedded mid-sentence. Every one of them is a way a HUMAN legitimately quotes the
+# form while discussing it, so every one of them must be inert.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\n> roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=quoted reply\n    roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=indented copy\n- roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=bulleted copy\nthe form is roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=embedded mid-sentence\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv12)' FAIL 1
+assert_says 'case (wv12) no quoted or indented copy is honoured' \
+  '^waiver: NONE \(no anchored waiver line on this PR for this review — see --help for the form\)$'
+assert_lacks 'case (wv12) and none of them grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv13) LAYER 2: a pasted TEMPLATE with placeholder fields is MALFORMED ==\n'
+# The documentation own line, anchored and complete in shape, must still refuse: an unsubstituted
+# `<why>` is the signature of a paste rather than a judgment. Same rule `claim.sh --reason` applies.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=<why>\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv13)' FAIL 1
+assert_says 'case (wv13) an unsubstituted placeholder is refused by name' \
+  '^waiver: MALFORMED \(the marker is missing a-substituted-reason'
+assert_lacks 'case (wv13) and never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv14) LAYER 2: a bare placeholder reason (why/todo/tbd) is MALFORMED ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=TODO\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv14)' FAIL 1
+assert_says 'case (wv14) a bare placeholder is refused by name' \
+  "^waiver: MALFORMED \(the marker is missing a-substantive-reason \(the reason 'TODO' is a bare placeholder\)"
+reset_stub
+
+printf '== (wv15) BLOCKER 2: a waiver for the same head but a DIFFERENT base does not carry over ==\n'
+# The scope binding. The authorizer judged ONE review; a different base is a different census, so the
+# marker must not survive it even though the head is identical.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=2222222222222222222222222222222222222222 head=$w_head job=4656 reason=judged against another base\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv15)' FAIL 1
+assert_says 'case (wv15) the base divergence is named' \
+  "^waiver: STALE \(the marker names a different review — base \(2222222222222222222222222222222222222222 != $w_base\)"
+assert_lacks 'case (wv15) and it does not grant' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv16) BLOCKER 2: a waiver for a DIFFERENT job (a re-run) does not carry over ==\n'
+# One persistent comment must not waive a later, possibly VACUOUS review at the same base and head.
+reset_stub
+STUB_JOB=9999
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=judged the earlier run\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv16)' FAIL 1
+assert_says 'case (wv16) the job divergence is named' \
+  "^waiver: STALE \(the marker names a different review — job \(4656 != 9999\)"
+assert_lacks 'case (wv16) a waiver cannot outlive the review it judged' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv17) BLOCKER 2: a marker missing a field is MALFORMED, not granted ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent head=$w_head job=4656 reason=no base field\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv17)' FAIL 1
+assert_says 'case (wv17) the missing field is named' '^waiver: MALFORMED \(the marker is missing base='
 reset_stub
 
 printf '== the summary header is distinct from every agent-gate header ==\n'
