@@ -528,6 +528,31 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `mixed-delivery` FAIL. **Scope, recorded in code:** this defends against silent tooling failure, staleness and
   prompt-content injection — *not* against an adversary with write access to the reviewed repo, who can rewrite
   the wrapper and its tests, so hardening against that is unwinnable and out of scope.
+  **The scoping is BLOCK-LOCAL on both sides, and the last block wins (#3312 job 19).** The delivery-MODE
+  decision reads only `diff --git` headers seen **inside** a delivery block — what an inline delivery actually
+  looks like — never the global header collection, which kept feeding census certification unchanged: consulting
+  it made a **legitimate** snapshot review FAIL whenever repository instructions merely *quoted* a diff header,
+  i.e. this issue's own false-FAIL in a new shape. And each delivery-block opener **discards the previous
+  block's candidates**, so only the FINAL block is selected and an injected block preceding roborev's own
+  supplies neither a path nor a forged ambiguity. The header evidence stays **prompt-wide** deliberately
+  (asymmetric on purpose): under a strictly same-block rule a genuine inline delivery followed by an injected
+  trailer would present a final block with an instruction and no headers, so it would resolve to the exempted
+  NOTICE and skip census certification — the #3222 class excused by repository content.
+  **AND THE IRREDUCIBLE RESIDUAL, as a property, not a reassurance: delivery mode is inferred from prompt TEXT,
+  and roborev's prompt embeds repository-controlled content** (project guidelines/`AGENTS.md`, additional
+  context, previous-review bodies) **at column zero, exactly like roborev's own text — there is no structural
+  marker separating the generated delivery block from injected text reproducing it, so no amount of further
+  text-scoping closes it.** Concretely: a prompt with **no inline delivery** (no `diff --git` header inside any
+  delivery block) whose repository content reproduces a delivery block, an oversize notice and a lexically valid
+  snapshot path **obtains a `NOTICE` where a `FAIL` was due**. It is **bounded, not new**: snapshot mode is
+  uncertified by C⁗, so the effect is that repository content can move such a review **into the already-accepted
+  uncovered envelope**, widening access to an accepted gap rather than opening a class. Where an inline delivery
+  IS present the `mixed-delivery` lock fails the prompt closed; where its headers cover the census the run is
+  certified inline and snapshot mode is never consulted. **Closing it requires an out-of-band delivery-mode
+  signal roborev measurably does not expose** — established by an exhaustive read-only sweep of every surface
+  (CLI, `show --json`, `list --json`, job logs, sqlite schema, `export reviews`, binary strings): no delivery
+  field, no digest, no size, and `review_jobs.diff_content`/`patch` present in the schema but **empty for every
+  job** (a trap, not an oracle). So it is **disclosed, not fixed**.
   **The hang and race classes are NOT REACHABLE because nothing is read — that is weaker than "fixed", and only
   it is true.** The predicate-family rule survives as **doctrine, not code** (the helper and its lint were
   deleted with the probes they served, since a lint with an empty subject set greens vacuously): **every

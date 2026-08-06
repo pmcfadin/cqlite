@@ -3976,7 +3976,7 @@ else
 fi
 # THE RESIDUAL IS DISCLOSED AT THE DETECTION SITE, as a property with its limits, in code (#3312 job 19).
 if grep -qF 'DELIVERY MODE IS INFERRED FROM PROMPT TEXT' "$ORACLES" \
-  && grep -qF 'out-of-band delivery-mode signal roborev measurably does not expose' "$ORACLES"; then
+  && grep -qiF 'out-of-band delivery-mode signal roborev measurably does not expose' "$ORACLES"; then
   ok 'structural: the text-inference residual is stated at the detection site, with what closing it would require'
 else
   bad 'structural: the irreducible residual is not disclosed in code — a reader would take the scoping for a boundary it is not (#3312 job 19)'

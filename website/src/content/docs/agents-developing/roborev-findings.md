@@ -207,6 +207,30 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    `mixed-delivery` FAIL. Scope: this defends against silent tooling failure, staleness and prompt-content
    injection, *not* against an adversary with write access to the repo, who can rewrite the wrapper itself.
 
+   **The scoping is block-local on both sides, and the last block wins.** The delivery-*mode* decision reads only
+   `diff --git` headers seen **inside** a delivery block — what an inline delivery actually looks like — never the
+   global header collection (which still feeds census certification unchanged): consulting it made a *legitimate*
+   snapshot review FAIL whenever repository instructions merely **quoted** a diff header, this issue's own
+   false-FAIL in a new shape. Each block opener discards the previous block's candidates, so only the **final**
+   delivery block is selected. The header evidence stays prompt-wide on purpose: under a strictly same-block rule,
+   a genuine inline delivery followed by an injected trailer would present a final block with an instruction and
+   no headers, resolve to the exempted NOTICE, and skip census certification — the #3222 class excused by
+   repository content.
+
+   **The irreducible residual, stated as a property.** Delivery mode is inferred from prompt **text**, and
+   roborev's prompt embeds repository-controlled content (project guidelines/`AGENTS.md`, additional context,
+   previous-review bodies) at column zero exactly like roborev's own text. There is **no structural marker**
+   separating the generated delivery block from injected text that reproduces it, so **no amount of further
+   text-scoping closes this**. Concretely: a prompt with **no inline delivery** whose repository content
+   reproduces a delivery block, an oversize notice and a lexically valid snapshot path **obtains a `NOTICE` where
+   a `FAIL` was due**. It is **bounded, not new** — snapshot mode is uncertified by C⁗, so repository content can
+   move such a review *into the already-accepted uncovered envelope*, widening access to an accepted gap rather
+   than opening a class; where an inline delivery is present the `mixed-delivery` lock fails closed, and where its
+   headers cover the census the run is certified inline and snapshot mode is never consulted. **Closing it
+   requires an out-of-band delivery-mode signal roborev measurably does not expose** — no delivery field, no
+   digest, no size, and `review_jobs.diff_content`/`patch` present in the schema but empty for every job. So it is
+   **disclosed, not fixed.**
+
    **The general lesson worth carrying elsewhere** is the predicate family that surfaced three times on the way
    (`! -f`, then `! -e`, then `! -e` again): **every `test`/`[` file predicate is two-valued, so it must collapse
    "cannot tell" onto one of its answers — and it always picks the permissive one.** The three-valued helper that
