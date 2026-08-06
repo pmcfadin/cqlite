@@ -58,7 +58,11 @@ fn repo_root() -> PathBuf {
         .ancestors()
         .nth(2)
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| panic!("the crate manifest dir has no grandparent — expected <repo>/tools/ws0-corpus-gen"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the crate manifest dir has no grandparent — expected <repo>/tools/ws0-corpus-gen"
+            )
+        })
 }
 
 fn read_tracked(rel: &str) -> String {
@@ -104,7 +108,9 @@ fn required_expectation_vars() -> Vec<String> {
         }
         let Some(open) = t.find('"') else { continue };
         let rest = &t[open + 1..];
-        let Some(close) = rest.find('"') else { continue };
+        let Some(close) = rest.find('"') else {
+            continue;
+        };
         let value = &rest[..close];
         if value.starts_with("CQLITE_WS0_EXPECT_") && !found.iter().any(|v| v == value) {
             found.push(value.to_string());

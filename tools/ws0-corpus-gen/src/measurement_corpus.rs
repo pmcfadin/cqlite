@@ -542,20 +542,20 @@ mod tests {
     #[test]
     fn whitespace_and_metacharacters_are_quoted_literally() {
         for hazard in [
-            "/data/ws0 corpus",                 // the tracked-space case
-            "/data/ws0\tcorpus",                // a tab splits too
-            "/data/$(rm -rf /)",                // command substitution
-            "/data/`id`",                       // the other command substitution
-            "/data/x; id",                      // command separator
-            "/data/x && id",                    // and the other two
+            "/data/ws0 corpus",  // the tracked-space case
+            "/data/ws0\tcorpus", // a tab splits too
+            "/data/$(rm -rf /)", // command substitution
+            "/data/`id`",        // the other command substitution
+            "/data/x; id",       // command separator
+            "/data/x && id",     // and the other two
             "/data/x || id",
             "/data/x | id",
-            "/data/x > /etc/passwd",            // redirection
-            "/data/x&",                         // background
-            "/data/${HOME}",                    // parameter expansion
-            "/data/*",                          // glob
-            "/data/x\nid",                      // a newline IS a command separator
-            "~/data",                           // tilde expansion
+            "/data/x > /etc/passwd", // redirection
+            "/data/x&",              // background
+            "/data/${HOME}",         // parameter expansion
+            "/data/*",               // glob
+            "/data/x\nid",           // a newline IS a command separator
+            "~/data",                // tilde expansion
             "/data/#comment",
             "/data/x!ev",
         ] {
