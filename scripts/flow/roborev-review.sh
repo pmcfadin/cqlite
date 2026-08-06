@@ -114,10 +114,11 @@
 #                     it OBSERVED AND REPORTED rather than certified — `prompt-content` is a NOTICE and the
 #                     keys below record what was seen. A snapshot-mode PASS therefore does NOT assert that
 #                     the reviewer received the census paths.
-#   snapshot-path     the snapshot path the prompt named. PRESENT ONLY IN SNAPSHOT MODE — in inline mode
-#                     these three keys have no subject and are ABSENT rather than placeholdered, because a
-#                     `-` (or an empty value) would imply a measurement was attempted and came back empty.
-#   snapshot-digest   <digest observed while the review ran> | UNOBSERVED (<why>)
+#   snapshot-path     the snapshot path THE PROMPT STATED. PRESENT ONLY IN SNAPSHOT MODE — in inline mode
+#                     these three keys have no subject and are ABSENT rather than placeholdered.
+#   snapshot-containment  a LEXICAL statement about that string (no filesystem access): `lexical: inside the
+#                     reviewed repository, shaped as .roborev/roborev-snapshot-<id>/`. Nothing is read, so
+#                     there is NO digest and NO size — see the C⁗ note in roborev-review-oracles.sh.
 #   snapshot-expected <n> code census path(s) expected, not asserted
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
@@ -550,23 +551,14 @@ emit_summary() {
   emit_kv 'sha-assert' "$SHA_ASSERT"
   emit_kv 'review-completed' "$REVIEW_COMPLETED"
   emit_kv 'prompt-content' "$PROMPT_CONTENT"
-  # C‴ INFORMATIONAL KEYS (#3312): what was OBSERVED about a snapshot-delivered diff, so the information
-  # survives the loss of certification. Informational, exactly like `census:`/`tokens:` — they carry no
-  # verdict and are deliberately absent from the verdict scan.
-  # EMITTED ONLY WHEN SNAPSHOT MODE FIRED (roborev job 15, my own finding). In inline mode these keys have no
-  # subject, and the previous unconditional form printed `snapshot-path: -`, `snapshot-expected: -` and — worse
-  # — `snapshot-digest:` with an EMPTY value, which is precisely the shape this block's doctrine calls out: "an
-  # EMPTY value is this same defect with nothing to print". A `-` placeholder is no better, because it invites a
-  # reader to think a measurement was attempted and came back empty. A key with no subject has no value to
-  # report, so it is ABSENT. Safe by construction: these three are INFORMATIONAL and are deliberately not in
-  # the verdict scan's key list, so their omission cannot create an unrecognised-verdict path.
+  # C⁗ INFORMATIONAL KEYS (#3312): what the prompt STATED about a snapshot-delivered diff. Nothing is read,
+  # so there is no digest and no size — the record is the path as stated, a LEXICAL containment statement, and
+  # the census code subset this run expected. Informational, exactly like `census:`/`tokens:`, and deliberately
+  # absent from the verdict scan. Emitted ONLY in snapshot mode: in inline mode they have no subject, and a `-`
+  # placeholder (or an empty value) would imply a measurement was attempted and came back empty.
   if [ "${SNAPSHOT_NOTICE:-0}" -eq 1 ]; then
     emit_kv 'snapshot-path' "${ROBOREV_SNAPSHOT_PATH:--}"
-    if [ -n "${ROBOREV_SNAPSHOT_DIGEST:-}" ]; then
-      emit_kv 'snapshot-digest' "$ROBOREV_SNAPSHOT_DIGEST"
-    else
-      emit_kv 'snapshot-digest' "UNOBSERVED (${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-cause not established})"
-    fi
+    emit_kv 'snapshot-containment' "${ROBOREV_SNAPSHOT_CONTAINMENT:-lexical: not established}"
     emit_kv 'snapshot-expected' "${SNAPSHOT_EXPECTED:--}"
   fi
   emit_kv 'vacuity-tier1' "$TIER1"
@@ -597,12 +589,9 @@ finish() { # finish <PASS|FAIL|NOTHING-TO-REVIEW> <exit-code>
 # shellcheck disable=SC2317 # invoked indirectly, by `trap on_exit EXIT` below
 on_exit() {
   local rc=$?
-  # The snapshot-capture watcher (#3312) must never outlive the wrapper, including on a `set -e`
-  # abort before the review returns. Defined in the oracles file, which may not be sourced yet on
-  # the earliest failure paths — hence the existence test rather than a bare call.
-  if command -v roborev_snapshot_observe_stop >/dev/null 2>&1; then
-    roborev_snapshot_observe_stop
-  fi
+  # C⁗ (#3312): there is no watcher, no background process and no temporary artefact to clean up here —
+  # nothing is read, so nothing outlives the wrapper. The stop/cleanup hooks that used to live here are
+  # deleted with the observer they served.
   if [ "$EMITTED" -eq 0 ]; then
     printf 'ERROR: the wrapper terminated unexpectedly (exit %s) before reaching a verdict.\n' "$rc"
     RESULT="FAIL"
@@ -710,7 +699,6 @@ done
 # removed at exit — see the scope note in roborev-review-oracles.sh. It is deliberately NOT a stable
 # path beside the transcript: a shared, guessable directory is reusable across runs, which is a
 # staleness class this design removes by construction rather than by checking for it.
-roborev_snapshot_observe_start "$LOG.snapshot-observed"
 set +e
 roborev review --branch \
   --base "$BASE" \
@@ -723,7 +711,6 @@ set -e
 # Stopped as soon as the review returns: the snapshot cannot appear after that, and a watcher left
 # running would outlive the wrapper. Also stopped from the EXIT trap, for the paths that never reach
 # here.
-roborev_snapshot_observe_stop
 
 # --- step 5: reviewed-RANGE assert (AC2) — STRUCTURED data is the oracle -------
 #

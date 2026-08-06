@@ -156,17 +156,19 @@ roborev_check_prompt_content() {
         # SET ONLY HERE, AND ONLY ON AN AFFIRMATIVE FACT: the resolver reaches `snapshot` only after the path
         # was VALIDLY BOUND, so `SNAPSHOT_NOTICE=1` asserts "a snapshot was bound, and either observed or its
         # non-observation recorded with a cause" — never merely "the mode was selected" (roborev job 16).
+        # SET ONLY HERE, AND ONLY ON AN AFFIRMATIVE FACT: the resolver reaches `snapshot` only after the
+        # stated path passed the LEXICAL binding, so `SNAPSHOT_NOTICE=1` asserts "a snapshot path was stated
+        # and is shaped like one of this repository's snapshot files" — never merely "the mode was selected".
         SNAPSHOT_NOTICE=1
-        # THE CENSUS SUBSET THIS RUN EXPECTED, for the block. Reported, never asserted (that is the whole
-        # of C‴): a closer reads it to know what a certification WOULD have covered.
         SNAPSHOT_EXPECTED="${#census_code_paths[@]} code census path(s) expected, not asserted"
-        PROMPT_CONTENT="NOTICE (snapshot mode: not certified — snapshot-path/-digest/-expected record what was observed)"
-        if [ -n "${ROBOREV_SNAPSHOT_DIGEST:-}" ]; then
-          DETAILS+=("NOTICE: prompt-content: roborev delivered this diff BY SNAPSHOT PATH, so it is OBSERVED AND REPORTED rather than certified (C‴, issue #3312). Observed snapshot: ${ROBOREV_SNAPSHOT_PATH:-<unnamed>} (digest ${ROBOREV_SNAPSHOT_DIGEST}, ${ROBOREV_SNAPSHOT_BYTES:-unknown} bytes). This run EXPECTED the ${#census_code_paths[@]} CODE census path(s) below to be in it; that expectation is NOT asserted, and a closer wanting certainty must inspect the diff or re-review with a smaller range.")
-        else
-          # NEVER SILENCE: an unobserved snapshot says WHAT could not be observed.
-          DETAILS+=("NOTICE: prompt-content: roborev delivered this diff BY SNAPSHOT PATH and the snapshot could NOT be observed by this run, so neither its digest nor its contents are recorded (C‴, issue #3312). Named path: ${ROBOREV_SNAPSHOT_PATH:-<none readable from the prompt>}. Cause: ${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-not established}. This run EXPECTED the ${#census_code_paths[@]} CODE census path(s) below; that expectation is NOT asserted.")
-        fi
+        PROMPT_CONTENT="NOTICE (snapshot mode: not certified — snapshot-path/-containment/-expected record what the prompt stated)"
+        # ===== C⁗: DETECTED AND REPORTED, NOTHING READ (owner ruling, issue #3312) =====
+        # The diff was delivered by a path to a file roborev deletes before this wrapper regains control.
+        # Certifying that took an apparatus in which seven review rounds found eleven false-PASS vectors, and
+        # every defect after its retirement was in the code that touched the filesystem to digest the file. So
+        # this run records WHAT THE PROMPT STATED and reads nothing: no digest, no size, no stat. The
+        # containment statement is LEXICAL and says so, and the expectation below is reported, never asserted.
+        DETAILS+=("NOTICE: prompt-content: roborev delivered this diff BY SNAPSHOT PATH, so it is DETECTED AND REPORTED rather than certified (C⁗, issue #3312). Stated path: ${ROBOREV_SNAPSHOT_PATH:-<unnamed>} (${ROBOREV_SNAPSHOT_CONTAINMENT:-lexical: not established}). NOTHING WAS READ — this run performs no filesystem access on that path, so there is no digest and no content identity for it; the hang and race classes that came with reading are not reachable rather than fixed. This run EXPECTED the ${#census_code_paths[@]} CODE census path(s) below to be in it; that expectation is NOT asserted, and a closer wanting certainty must inspect the diff or re-review with a smaller range.")
         printed=0
         for census_path in ${census_code_paths[@]+"${census_code_paths[@]}"}; do
           [ "$printed" -lt 10 ] || break
