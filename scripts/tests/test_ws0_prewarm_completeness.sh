@@ -457,6 +457,171 @@ else
   fail "both prewarm legs must pass the session dir to the classifier (matched=$pw_wired of 2)"
 fi
 
+# ==========================================================================
+# #3272 ROUND 19 — A FAILED PREWARM WAS TRUSTED AS THE ARROW-VOLUME REFERENCE
+# ==========================================================================
+# THE FINDING, and it belongs in THIS suite rather than beside the reporter's other checks: its
+# subject is whether a PREWARM'S OWN VERDICT — the thing every case above computes — is CONSULTED by
+# the consumer that calls it "verified-complete".
+#
+# `ws0_content_volume.preflight_arrow_bytes_per_scan` globbed every `*.prewarm.jsonl` in the session
+# and derived the expected Arrow byte count from it WITHOUT EVER READING THE VERDICT ON IT. The rig
+# computes that verdict — the classifiers above decide whether the leg completed a full pass over
+# the PINNED corpus, and `lib-measure.sh` writes it to `<tag>.prewarm.status` — and that consumer did
+# not open the file. So a leg classified FAILED-partial-scan-N-of-M-rows, which the rig had ALREADY
+# decided was broken and had SAID SO ON DISK, supplied the expectation for every timed rep.
+#
+# WHY IT STILL MATTERS AFTER ROUND 18 withdrew the verification claim and kept only the
+# one-sided-shortfall refusal: it matters MORE. A short reference moves the calibration DOWN, so an
+# equally-short timed rep PASSES (exactly the shortfall the surviving check exists to refuse) while
+# a rep that scanned the WHOLE corpus is refused for carrying "more than a complete scan". The fix
+# makes the NARROWED claim true; it does not re-widen it.
+
+# The content-volume expectation, resolved from a session dir by the SHIPPED function — printed as a
+# per-scan figure, `NONE`, or `REFUSED:<message>`. The perf dir is an argument so the same helper
+# drives the shipped modules and the PRE-FIX mutant copy below.
+pw_cv() { # pw_cv <perf-dir> <session-dir>
+  python3 - "$1" "$2" <<'PWCV'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_content_volume import preflight_arrow_bytes_per_scan
+from ws0_validate import Invalid
+try:
+    v = preflight_arrow_bytes_per_scan(pathlib.Path(sys.argv[2]))
+except Invalid as exc:
+    print(f"REFUSED:{exc}")
+else:
+    print("NONE" if v is None else f"{v:.0f}")
+PWCV
+}
+
+# A session dir holding ONE untimed preflight, with its recorded verdict DERIVED FROM THE SHIPPED
+# CLASSIFIER rather than hardcoded (`-derive-` for the label this record really earns, `-none-` for
+# no status file at all, or a literal to write a verdict that DISAGREES with the record — the case
+# the re-classification half exists for).
+PW_CV_TAG="flight-bypass-warm-1"
+pw_cv_session() { # pw_cv_session <dir> <rows_total> <bytes_total> <status> [requests_ok]
+  local d="$1" rows="$2" bytes="$3" st="$4" ok="${5:-3}" jsonl
+  mkdir -p "$d"
+  ws0_pin_session_corpus "$d" "$TMP/corpus"
+  jsonl="$d/$PW_CV_TAG.prewarm.jsonl"
+  printf '%s\n' "{\"schema\":\"flight-loadgen.step/v1\",\"round\":\"prewarm\",\"requests_ok\":$ok,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":$rows,\"bytes_total\":$bytes}" > "$jsonl"
+  [ "$st" != "-derive-" ] || st="$(pw_flight 0 "$jsonl" "$d")"
+  [ "$st" = "-none-" ] || printf '%s\n' "$st" > "$d/$PW_CV_TAG.prewarm.status"
+}
+
+# THE INPUT: a preflight that streamed 40 of the pinned 1000 rows per request, carrying HALF the
+# Arrow volume a complete scan carries — and whose recorded verdict is therefore a FAILED label the
+# shipped classifier itself produced.
+PW_CV_HALF=$(( WS0_PREFLIGHT_BYTES_PER_SCAN / 2 ))
+pw_cv_bad="$TMP/cv-failed-preflight"
+pw_cv_session "$pw_cv_bad" 120 $(( 3 * PW_CV_HALF )) -derive-
+pw_cv_label="$(cat "$pw_cv_bad/$PW_CV_TAG.prewarm.status")"
+if [ "$pw_cv_label" = "FAILED-partial-scan-120-of-3000-rows" ]; then
+  pass "round19 fixture: the failed preflight's recorded verdict is the label the SHIPPED classifier produces for it ($pw_cv_label), not one this test chose"
+else
+  fail "round19 fixture: expected the shipped classifier to label this preflight FAILED-partial-scan-120-of-3000-rows (got '$pw_cv_label')"
+fi
+
+# --- NON-VACUITY, MEASURED AS A FLIP ON IDENTICAL INPUT ----------------------
+# The pre-fix code is reconstructed by MUTATING ONE SITE of a COPY of the shipped module — deleting
+# the verdict check — and the SAME session dir is put through it. It must ACCEPT, publishing the
+# short figure as the expectation every timed rep would then be measured against. Without this half,
+# the refusal below proves only that a new guard returns an error; with it, the change is a measured
+# flip. The premise is ASSERTED, so this case reds if it stops reproducing.
+pw_cv_mutant="$TMP/cv-mutant-prefix"
+mkdir -p "$pw_cv_mutant"
+cp -R "$REPO_ROOT/scripts/perf/." "$pw_cv_mutant/"
+rm -rf "$pw_cv_mutant/__pycache__"
+python3 - "$pw_cv_mutant/ws0_content_volume.py" <<'PWMUT'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+needle = "        _require_verified_preflight(path, session_dir)\n"
+assert s.count(needle) == 1, f"expected exactly one call site, found {s.count(needle)}"
+open(p, "w").write(s.replace(needle, ""))
+PWMUT
+pw_cv_prefix="$(pw_cv "$pw_cv_mutant" "$pw_cv_bad")"
+if [ "$pw_cv_prefix" = "$PW_CV_HALF" ]; then
+  pass "NON-VACUITY (round19), MEASURED: the PRE-FIX code ACCEPTS a preflight the rig classified '$pw_cv_label' and publishes its $pw_cv_prefix B/scan as the expectation every timed rep is measured against"
+else
+  fail "round19 non-vacuity: the pre-fix mutant must accept the failed preflight and return $PW_CV_HALF (got '$pw_cv_prefix')"
+fi
+
+# ...and the SHIPPED code refuses the SAME input, naming the verdict the rig recorded.
+pw_cv_now="$(pw_cv "$REPO_ROOT/scripts/perf" "$pw_cv_bad")"
+if [[ "$pw_cv_now" == REFUSED:* ]] && grep -q "$pw_cv_label" <<<"$pw_cv_now" \
+  && grep -q 'prewarm.status' <<<"$pw_cv_now"; then
+  pass "OBSERVED (round19): the shipped code REFUSES the same preflight, quoting the verdict the rig itself recorded and naming the status file it read"
+else
+  fail "round19: a preflight classified '$pw_cv_label' must be refused, naming that verdict (got: $pw_cv_now)"
+fi
+# The refusal must state the CONSEQUENCE — which direction a short reference moves the expectation —
+# not merely that two strings differ. An operator cannot act on the latter.
+if grep -q 'moves that expectation DOWN' <<<"$pw_cv_now" \
+  && grep -q 'would PASS' <<<"$pw_cv_now"; then
+  pass "OBSERVED (round19): the refusal states the consequence — a short reference moves the expectation DOWN, so an equally-short timed rep would pass the very check that exists to refuse it"
+else
+  fail "round19: the refusal must name the direction the bad reference moves the bar (got: $pw_cv_now)"
+fi
+
+# --- THE STATUS FILE IS NOT TAKEN ON ITS WORD --------------------------------
+# A recorded `ok` beside a PARTIAL record is caught, because the completeness rule is RE-MEASURED
+# here against the session pin rather than believed. This is the half a status-file check alone
+# cannot do, and it is why both are required.
+pw_cv_stale="$TMP/cv-stale-ok"
+pw_cv_session "$pw_cv_stale" 120 $(( 3 * PW_CV_HALF )) ok
+pw_cv_stale_out="$(pw_cv "$REPO_ROOT/scripts/perf" "$pw_cv_stale")"
+if [[ "$pw_cv_stale_out" == REFUSED:* ]] \
+  && grep -q 'RE-CLASSIFYING' <<<"$pw_cv_stale_out" \
+  && grep -q 'FAILED-partial-scan-120-of-3000-rows' <<<"$pw_cv_stale_out"; then
+  pass "OBSERVED (round19): a status file reading 'ok' beside a PARTIAL record is REFUSED — the completeness rule is re-measured against the session pin, so a stale or hand-edited verdict is not sufficient"
+else
+  fail "round19: an 'ok' status over a partial JSONL must be refused by re-classification (got: $pw_cv_stale_out)"
+fi
+# ...and an ABSENT status file is a REFUSAL, never a skip: a preflight whose verdict was never
+# recorded is a preflight nothing verified. Its JSONL is otherwise HEALTHY, so this case can only
+# fire on the missing verdict.
+pw_cv_novrd="$TMP/cv-no-verdict"
+pw_cv_session "$pw_cv_novrd" 3000 $(( 3 * WS0_PREFLIGHT_BYTES_PER_SCAN )) -none-
+pw_cv_novrd_out="$(pw_cv "$REPO_ROOT/scripts/perf" "$pw_cv_novrd")"
+if [[ "$pw_cv_novrd_out" == REFUSED:* ]] && grep -q 'NO recorded verdict' <<<"$pw_cv_novrd_out"; then
+  pass "OBSERVED (round19): a preflight with NO recorded verdict is REFUSED — the status file is the only record of the loadgen's EXIT status, which no artifact on disk can reconstruct"
+else
+  fail "round19: an absent prewarm status must be a refusal, not a comparison run anyway (got: $pw_cv_novrd_out)"
+fi
+
+# --- THE ACCEPT DIRECTION, affirmatively -------------------------------------
+# Without it every case above would be satisfied by a function that refuses everything — the
+# mirror-image broken instrument. The SAME healthy JSONL, with the verdict the shipped classifier
+# gives it, yields the exact per-scan figure.
+pw_cv_good="$TMP/cv-healthy"
+pw_cv_session "$pw_cv_good" 3000 $(( 3 * WS0_PREFLIGHT_BYTES_PER_SCAN )) -derive-
+pw_cv_good_label="$(cat "$pw_cv_good/$PW_CV_TAG.prewarm.status")"
+pw_cv_good_out="$(pw_cv "$REPO_ROOT/scripts/perf" "$pw_cv_good")"
+if [ "$pw_cv_good_label" = "ok" ] && [ "$pw_cv_good_out" = "$WS0_PREFLIGHT_BYTES_PER_SCAN" ]; then
+  pass "AFFIRMATIVE (round19): a COMPLETE preflight the shipped classifier labels 'ok' is accepted and yields exactly $pw_cv_good_out B/scan — the guard does not fire on a healthy reference"
+else
+  fail "round19: a healthy preflight must be accepted (label='$pw_cv_good_label', result='$pw_cv_good_out')"
+fi
+
+# --- AND THE REPORTER IS WIRED TO IT ----------------------------------------
+# Every case above drives the function directly. None would notice the reporter never reaching it.
+# The preflight here carries the HEALTHY per-scan volume and a PARTIAL row count, so the byte
+# comparison would agree and only the VERDICT can refuse this session — which isolates what is
+# under test from round 17's extent check.
+pw_cv_e2e="$TMP/cv-reporter-wired"; mkdir -p "$pw_cv_e2e"
+make_scan_rep "$pw_cv_e2e" warm 1 ok
+make_flight_rep "$pw_cv_e2e" warm 1 ok "$GOOD_FLIGHT"
+pw_cv_session "$pw_cv_e2e" 120 $(( 3 * WS0_PREFLIGHT_BYTES_PER_SCAN )) -derive-
+pw_cv_e2e_out=$(run_report "$pw_cv_e2e" "$TMP/corpus"); pw_cv_e2e_rc=$?
+if [ "$pw_cv_e2e_rc" -ne 0 ] \
+  && grep -q 'FAILED-partial-scan-120-of-3000-rows' <<<"$pw_cv_e2e_out" \
+  && [ ! -e "$pw_cv_e2e/results.json" ]; then
+  pass "WIRED (round19): the REPORTER refuses a whole session whose untimed preflight the rig classified as a partial scan, and writes no results.json for it"
+else
+  fail "round19: the reporter must refuse a session calibrated against a failed preflight (rc=$pw_cv_e2e_rc, results.json=$([ -e "$pw_cv_e2e/results.json" ] && echo present || echo absent), out: $pw_cv_e2e_out)"
+fi
 
 # ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
@@ -465,7 +630,7 @@ fi
 # reads only the exit code. Derived from the real count and set just below it — a floor far behind
 # its count stops being able to see a skipped block, which is the very thing it exists to catch
 # (#3326 item 3).
-MIN_CHECKS=22
+MIN_CHECKS=32
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
