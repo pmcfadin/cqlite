@@ -1286,6 +1286,41 @@ else
   ok "perf-capability: the line-safety predicate rejects CR as well as LF and still accepts an ordinary path"
 fi
 
+# ...and an UNSUPPORTED HOST is reported as rc 2, distinct from rc 1 REFUSED (roborev rounds 16-17).
+# The staged install needs GNU `stat -c` and `mv -T`; bootstrap gates the perf section on
+# PLATFORM=linux, which is NOT the same as GNU, so a musl/busybox Linux host used to die on a raw tool
+# error. The tools are exercised INSIDE the privileged shell (sudo applies its own secure_path, so a
+# caller-side probe can check a different binary than the one that will run) and `mv -T` is EXERCISED
+# rather than grepped out of --help. The all-GNU control is what stops this passing by refusing always.
+us_fail=0
+for us_break in '' mv stat; do
+  us_root=$(mktemp -d "$tmp/us.XXXXXX"); : >"$us_root/.cqlite-perf-sandbox"
+  mkdir -p "$us_root/sysctl.d"; chmod 0755 "$us_root" "$us_root/sysctl.d"
+  us_shim=$(mktemp -d "$tmp/usbin.XXXXXX")
+  for us_t in bash sh cat printf tee rm chmod env grep mktemp id ls stat mv; do
+    [ "$us_t" = "$us_break" ] && continue
+    us_p=$(command -v "$us_t" 2>/dev/null) && ln -sf "$us_p" "$us_shim/$us_t"
+  done
+  [ -n "$us_break" ] && { printf '%s\n' '#!/bin/sh' 'exit 1' >"$us_shim/$us_break"; chmod +x "$us_shim/$us_break"; }
+  us_out=$(env PATH="$us_shim" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$us_root" \
+    CQLITE_PERF_SYSCTL_DIR="$us_root/sysctl.d" CQLITE_PERF_PROC_DIR="$us_root" \
+    CQLITE_PERF_TEST_PRIV_DIR="$us_shim" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); us_rc=$?
+  us_wrote=no; [ -s "$us_root/sysctl.d/99-cqlite-perf.conf" ] && us_wrote=yes
+  if [ -z "$us_break" ]; then
+    [ "$us_rc" -eq 0 ] && [ "$us_wrote" = yes ] \
+      || { bad "perf-capability: an all-GNU host did not install (rc=$us_rc wrote=$us_wrote) — the UNSUPPORTED probe refuses everything"; us_fail=1; }
+  else
+    [ "$us_rc" -eq 2 ] \
+      || { bad "perf-capability: a broken '$us_break' gave rc=$us_rc, not the distinct rc 2 UNSUPPORTED (out='$us_out')"; us_fail=1; }
+    printf '%s' "$us_out" | grep -q 'UNSUPPORTED on this host' \
+      || { bad "perf-capability: a broken '$us_break' failed without naming the host as unsupported (out='$us_out')"; us_fail=1; }
+    [ "$us_wrote" = no ] \
+      || { bad "perf-capability: a broken '$us_break' wrote the drop-in anyway"; us_fail=1; }
+  fi
+done
+[ "$us_fail" -ne 0 ] || ok "perf-capability: a non-GNU host is reported as rc 2 UNSUPPORTED by name and writes nothing (broken stat -c and broken mv -T both), while an all-GNU host still installs (#3261 roborev-16/17)"
+
 # ...and LINE-SAFETY MUST BE JUDGED ON THE ORIGINAL PATH, not the canonicalized one (roborev round
 # 12, Medium). `$(cd -P -- "$p" && pwd -P)` STRIPS trailing newlines, so a directory whose name ends
 # in LF used to pass: the check only ever saw the stripped form, while every later caller emitted the

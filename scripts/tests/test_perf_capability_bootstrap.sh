@@ -1194,4 +1194,29 @@ fi
 
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
+# --- bootstrap reports an UNSUPPORTED HOST and prints NO retry remedy (roborev round 17, Low) -------
+# The rc 2 branch added in round 16 had NO coverage: this suite skips wholly on a non-GNU host, so on
+# a supported host the branch was never reached and on an unsupported one the suite never ran. Here a
+# controlled incompatible `mv` shim is injected on THIS (supported) host, so the branch is exercised
+# where it can actually be observed. Three properties, because a wrong remedy is its own defect:
+# unsupported is NAMED, nothing is written, and the retry remedy is ABSENT (re-running cannot help).
+uns_dir="$tmp/uns-sysctl.d"; rm -rf "$uns_dir"; mkdir -p "$uns_dir"; chmod 0755 "$uns_dir"
+# Only `mv` differs from the KNOWN-WORKING --yes write case above: same shims, same PATH tail, same
+# seams. Isolating the one variable is the point — if anything else drifts, this case would fail for a
+# reason that has nothing to do with unsupported-host handling.
+uns_bin="$tmp/uns-bin"; rm -rf "$uns_bin"; mkdir -p "$uns_bin"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$uns_bin/mv"; chmod +x "$uns_bin/mv"
+uns_out=$(PATH="$uns_bin:$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$uns_dir" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1); uns_rc=$?
+if [ "$uns_rc" -eq 0 ] \
+   && printf '%s' "$uns_out" | grep -q 'cannot install .* on this host' \
+   && [ -z "$(ls -A "$uns_dir")" ] \
+   && ! printf '%s' "$uns_out" | grep -q 'write + apply the drop-in'; then
+  ok "perf section: an UNSUPPORTED host (no GNU mv -T) is NAMED, nothing is written, and the retry remedy is deliberately NOT printed — re-running cannot help"
+else
+  bad "perf section: unsupported-host handling wrong (rc=$uns_rc, dir='$(ls -A "$uns_dir")')"
+  printf '%s\n' "$uns_out" | grep -iE 'perf|drop-in' | tail -4
+fi
+
 perf_test_report
