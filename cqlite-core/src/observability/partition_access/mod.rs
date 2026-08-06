@@ -595,8 +595,10 @@ pub fn close_window() -> Option<WindowSummary> {
     Some(summary)
 }
 
-/// Emit one closed window's four series. Exactly once per closed window; a window
-/// with no accesses never reaches here.
+/// Emit one closed window's series — the three bucketed families plus the four
+/// unlabelled scalars (sampling scale, cumulative drops, per-window drops, sampling
+/// floor). Exactly once per closed window; a window with no accesses never reaches
+/// here.
 fn emit(summary: &WindowSummary) {
     use super::add_counter;
     for b in RepeatBucket::ALL {
@@ -643,6 +645,15 @@ fn emit(summary: &WindowSummary) {
     // The window's trustworthiness, exported so an operator who never calls
     // `close_window` can still tell a lossy or floored window from a clean one —
     // both are conditions the decision procedure refuses on.
+    //
+    // TWO signals for the drops, with deliberately different semantics: the
+    // CUMULATIVE counter answers "has this process ever lost input" (monotonic, so
+    // alertable), while the per-window GAUGE answers "was the window just closed
+    // clean". A counter alone cannot answer the second — once it increments it reads
+    // non-zero forever — and the spec requires that an instantaneous read of the
+    // emitted series distinguish a clean window. Both gauges are emitted on EVERY
+    // closed window, including at zero, so absence is never ambiguous: a window is
+    // clean exactly when both read 0.
     if summary.dropped_accesses > 0 {
         add_counter(
             catalog::READ_PARTITION_ACCESS_DROPPED,
@@ -650,6 +661,11 @@ fn emit(summary: &WindowSummary) {
             &[],
         );
     }
+    super::record_gauge(
+        catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
+        i64::try_from(summary.dropped_accesses).unwrap_or(i64::MAX),
+        &[],
+    );
     super::record_gauge(
         catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
         i64::from(summary.at_sampling_floor),

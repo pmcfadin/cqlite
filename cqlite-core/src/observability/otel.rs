@@ -374,6 +374,7 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
             &i.read_partition_access_sample_denominator
         }
         catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR => &i.read_partition_access_sampling_floor,
+        catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED => &i.read_partition_access_window_dropped,
         catalog::MEMTABLE_SIZE_BYTES => &i.memtable_size_bytes,
         catalog::MEMTABLE_ROWS => &i.memtable_rows,
         catalog::COMPACTION_LAG => &i.compaction_lag,

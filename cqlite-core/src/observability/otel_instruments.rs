@@ -38,6 +38,7 @@ pub(super) struct Instruments {
     pub(super) read_partition_access_sample_denominator: Gauge<i64>,
     pub(super) read_partition_access_dropped: Counter<u64>,
     pub(super) read_partition_access_sampling_floor: Gauge<i64>,
+    pub(super) read_partition_access_window_dropped: Gauge<i64>,
     pub(super) merge_rows_in: Counter<u64>,
     pub(super) merge_rows_out: Counter<u64>,
     pub(super) query_degraded_path: Counter<u64>,
@@ -191,6 +192,11 @@ pub(super) fn instruments() -> &'static Instruments {
                 .i64_gauge(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR)
                 .with_unit(catalog::unit::DIMENSIONLESS)
                 .with_description("1 when the probe window hit its sampling cap (#2827).")
+                .build(),
+            read_partition_access_window_dropped: m
+                .i64_gauge(catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Accesses the last closed probe window lost (#2827).")
                 .build(),
             merge_rows_in: m
                 .u64_counter(catalog::MERGE_ROWS_IN)

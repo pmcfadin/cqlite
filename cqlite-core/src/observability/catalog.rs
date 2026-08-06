@@ -165,7 +165,8 @@ pub mod attr {
     /// this module). Six values × the three [`SIZE_SOURCE`] values is the whole
     /// cardinality budget of
     /// [`super::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS`] — eighteen series, and
-    /// 31 across the whole `cqlite.read.partition_access.*` family.
+    /// 34 across the whole seven-metric `cqlite.read.partition_access.*` family
+    /// (18 + 6 + 6 + four unlabelled scalars).
     pub const REPEAT_BUCKET: &str = "cqlite.read.repeat_bucket";
     /// Provenance of the on-disk byte weight recorded for a partition access
     /// (issue #2827). Bounded to the closed set of EXACTLY three labels:
@@ -385,8 +386,9 @@ pub const READ_BTI_ROWS_ROOT_REJECTED: &str = "cqlite.read.bti.rows_root_rejecte
 /// one closed measurement window of the bounded partition access-distribution
 /// probe. Bounded attributes: [`attr::REPEAT_BUCKET`] (six labels) and
 /// [`attr::SIZE_SOURCE`] (three labels) — eighteen series, fixed forever, regardless
-/// of how many partitions the workload touched. Across all four
-/// `cqlite.read.partition_access.*` metrics the budget is 6x3 + 6 + 6 + 1 = 31.
+/// of how many partitions the workload touched. Across all SEVEN
+/// `cqlite.read.partition_access.*` metrics the budget is
+/// `6x3 + 6 + 6 + 1 + 1 + 1 + 1 = 34`.
 ///
 /// This is the concentration SHAPE of a keyed workload: a distribution
 /// concentrated in `1` is a uniform (cache-hostile) access pattern; mass in
@@ -463,6 +465,25 @@ pub const READ_PARTITION_ACCESS_DROPPED: &str = "cqlite.read.partition_access.dr
 /// signal for a window, readable without calling into the process.
 pub const READ_PARTITION_ACCESS_SAMPLING_FLOOR: &str =
     "cqlite.read.partition_access.sampling_floor";
+
+/// `cqlite.read.partition_access.window_dropped_accesses` — gauge `1` (issue #2827).
+///
+/// Accesses the LAST CLOSED window could not seat, reset every window. No
+/// attributes.
+///
+/// Exists because its cumulative sibling [`READ_PARTITION_ACCESS_DROPPED`] cannot
+/// answer "was THIS window clean": a counter that ever incremented reads non-zero
+/// for the life of the process, so an instantaneous read of it can only say "this
+/// process has lost input at some point". The spec requires that a consumer reading
+/// the emitted series ALONE distinguish a lossy or floored window from a clean one,
+/// and that needs a per-window signal with the same reset semantics as
+/// [`READ_PARTITION_ACCESS_SAMPLING_FLOOR`].
+///
+/// A window is CLEAN exactly when this gauge and
+/// [`READ_PARTITION_ACCESS_SAMPLING_FLOOR`] both read `0`. Both are emitted on every
+/// closed window, including at zero, so absence is never ambiguous.
+pub const READ_PARTITION_ACCESS_WINDOW_DROPPED: &str =
+    "cqlite.read.partition_access.window_dropped_accesses";
 
 /// `cqlite.merge.rows_in` — counter `{row}` (issue #2163).
 ///
@@ -1048,6 +1069,7 @@ pub const ALL_METRICS: &[&str] = &[
     READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
     READ_PARTITION_ACCESS_DROPPED,
     READ_PARTITION_ACCESS_SAMPLING_FLOOR,
+    READ_PARTITION_ACCESS_WINDOW_DROPPED,
     MERGE_ROWS_IN,
     MERGE_ROWS_OUT,
     QUERY_DEGRADED_PATH,

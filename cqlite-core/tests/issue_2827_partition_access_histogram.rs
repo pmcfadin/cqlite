@@ -511,12 +511,27 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
     assert_eq!(summary.distinct_partitions(), 64);
 
     let metrics = capture.flush_and_collect();
+    // D6: the cardinality bound must cover the WHOLE family, not the four names it
+    // happened to start with.
     let names = [
         catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
         catalog::READ_PARTITION_ACCESS_ACCESSES,
         catalog::READ_PARTITION_ACCESS_BYTES,
         catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
+        catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
+        catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
+        // The cumulative drop counter is emitted ONLY on a lossy window, so it is
+        // covered by the lossy-window case below rather than asserted present here.
     ];
+    assert_eq!(
+        catalog::ALL_METRICS
+            .iter()
+            .filter(|m| m.starts_with("cqlite.read.partition_access."))
+            .count(),
+        names.len() + 1,
+        "every catalogued partition_access metric must be covered by this bound \
+         (the +1 is the lossy-only cumulative drop counter)"
+    );
 
     // The trustworthiness signals must be EXPORTED, not merely returned from
     // `close_window` — an operator reading dashboards alone has to be able to tell a
@@ -568,9 +583,9 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
         }
     }
     assert!(
-        series <= 31,
-        "the four metrics may carry at most 6x3 + 6 + 6 + 1 = 31 series regardless \
-         of how many distinct partitions were accessed; saw {series}"
+        series <= 34,
+        "the family may carry at most 6x3 + 6 + 6 + 1 + 1 + 1 + 1 = 34 series \
+         regardless of how many distinct partitions were accessed; saw {series}"
     );
     assert!(
         series > 0,
@@ -591,5 +606,48 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
             catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
             &[(catalog::attr::SIZE_SOURCE, "successor_gap")]
         ) > 0.0
+    );
+
+    // ---- the LOSSY case, same test because the meter provider is process-global --
+    //
+    // F4's other half: a clean window must be distinguishable from a lossy one by
+    // the emitted series alone. Drive a window that cannot seat everything and
+    // assert all three loss signals fire — the cumulative counter, the per-window
+    // gauge, and the floor gauge.
+    capture.reset();
+    partition_access::global().set_window_config(partition_access::WindowConfig {
+        duration: std::time::Duration::from_secs(86_400),
+        max_accesses: u64::MAX,
+        // No widening permitted, so the table saturates and later keys cannot seat.
+        max_prefix_bits: 0,
+    });
+    partition_access::set_probe_enabled(Some(true));
+    for i in 0..300_000u64 {
+        let k = i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes();
+        partition_access::record_partition_access(SCOPE, &k, AccessWeight::SuccessorGap(64));
+    }
+    let lossy = partition_access::close_window().expect("the lossy window recorded accesses");
+    partition_access::set_probe_enabled(Some(false));
+    partition_access::global().set_window_config(partition_access::WindowConfig::default());
+
+    assert!(
+        lossy.dropped_accesses > 0,
+        "this window must have lost input"
+    );
+    assert!(lossy.at_sampling_floor);
+
+    let lossy_metrics = capture.flush_and_collect();
+    assert!(
+        lossy_metrics.counter_sum(catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED) > 0.0,
+        "the per-window drop gauge must report the loss"
+    );
+    assert!(
+        lossy_metrics.counter_sum(catalog::READ_PARTITION_ACCESS_DROPPED) > 0.0,
+        "the cumulative drop counter must report it too"
+    );
+    assert_eq!(
+        lossy_metrics.counter_sum(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
+        1.0,
+        "and the floor gauge must read 1"
     );
 }

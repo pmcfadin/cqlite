@@ -110,6 +110,15 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         round_item: "—",
     },
     MetricDoc {
+        name: catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
+        kind: MetricKind::Gauge,
+        unit: catalog::unit::DIMENSIONLESS,
+        summary: "Accesses the LAST CLOSED probe window could not seat, reset every window (#2827).",
+        attributes: &[],
+        interpretation: "A window is CLEAN exactly when this and sampling_floor both read 0. Use this, not the cumulative dropped_accesses counter, to judge the current window: a counter that ever incremented reads non-zero for the life of the process.",
+        round_item: "—",
+    },
+    MetricDoc {
         name: catalog::READ_BLOOM_CHECKS,
         kind: MetricKind::Counter,
         unit: catalog::unit::DIMENSIONLESS,

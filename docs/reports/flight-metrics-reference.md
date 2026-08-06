@@ -6,7 +6,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **83**.
+Total instruments: **84**.
 
 ## All instruments
 
@@ -69,6 +69,7 @@ Total instruments: **83**.
 | `cqlite.read.partition_access.dropped_accesses` | counter | `1` | _(none)_ | Accesses the access-distribution probe could not seat in its fixed counting table (#2827). | Zero on a healthy window. Non-zero INVALIDATES the window: only keys not already in the table can be dropped, so a loss suppresses the singleton bucket and overstates concentration — the cache-sizing procedure refuses such a window. |
 | `cqlite.read.partition_access.sample_denominator` | gauge | `1` | _(none)_ | Sampling scale in force when the probe window closed (#2827): 1 is a census, 2^k means the recorder downsampled k times to stay inside its fixed 3 MiB table. | 1 is ideal. A large value means the window touched far more distinct partitions than the table holds; bucket fractions stay unbiased but absolute counts must be scaled by it. |
 | `cqlite.read.partition_access.sampling_floor` | gauge | `1` | _(none)_ | 1 when the last closed probe window reached its sampling-prefix cap, 0 otherwise (#2827). | 0 is healthy. 1 means the window is a ~1-in-a-million sample and is statistically worthless; the cache-sizing procedure refuses it. Read alongside sample_denominator. |
+| `cqlite.read.partition_access.window_dropped_accesses` | gauge | `1` | _(none)_ | Accesses the LAST CLOSED probe window could not seat, reset every window (#2827). | A window is CLEAN exactly when this and sampling_floor both read 0. Use this, not the cumulative dropped_accesses counter, to judge the current window: a counter that ever incremented reads non-zero for the life of the process. |
 | `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`<br>`cqlite.read.lookup_route`<br>`cqlite.sstable.format` | Partition point lookups attempted, tagged hit/miss so a dashboard computes the hit ratio from one series. | A healthy point-read workload is dominated by hits; a miss-heavy ratio means keys are absent or mis-routed. |
 | `cqlite.read.partitions` | counter | `{partition}` | `cqlite.sstable.format` | Total partitions scanned by the read path. | Rising in step with read.rows is healthy; many partitions for few rows indicates a full scan. |
 | `cqlite.read.rows` | counter | `{row}` | `cqlite.sstable.format` | Total rows materialised by the read path (climbs incrementally during a long Flight merge scan). | Steadily rising under load is healthy; flat while a scan is in flight suggests a stall. |
