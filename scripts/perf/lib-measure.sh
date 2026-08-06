@@ -98,20 +98,41 @@ measure_scan() {
   #
   # Skipped on the cold arm BY DESIGN — a prewarm there would make "cold"
   # meaningless.
+  #
+  # `ok` REQUIRES A COMPLETE CORPUS SCAN, NOT PROCESS SUCCESS (#3272 round 12, F2).
+  # This used to set `prewarm_status="ok"` from the `if` on the bench's exit alone, while
+  # redirecting its JSON — which carries `rows_denominator` and a per-pass `rows` — to a file
+  # NOBODY READ. `scan_bench` refuses a zero-row pass itself, so exit 0 established "something
+  # was read"; it established nothing about HOW MUCH. A partial ingestion (round 10's F-B class)
+  # exits 0 having scanned a fraction, leaving the pages this rep is about to be MEASURED over
+  # cold while the label reads warm. So the discarded value is read and every timed pass must
+  # have observed exactly the PINNED corpus row count (session-corpus-pin.json `rows` — the
+  # oracle, never a threshold).
   local prewarm_status="skipped-cold-arm"
   if [[ "$temp" == "warm" ]]; then
-    if taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
+    local prewarm_rc=0
+    taskset -c "$SERVER_CPUS" "$BIN/ws0-scan-bench" \
         --corpus "$CORPUS" --passes 1 \
-        > "$OUT_DIR/$tag.prewarm.json" 2> "$OUT_DIR/$tag.prewarm.err"; then
-      prewarm_status="ok"
-    else
-      prewarm_status="FAILED-exit-$?"
+        > "$OUT_DIR/$tag.prewarm.json" 2> "$OUT_DIR/$tag.prewarm.err" || prewarm_rc=$?
+    # ONE LINE deliberately, for the reason the Flight leg below records: a continuation whose
+    # first token is a bare `"$VAR"` is classified a POSSIBLE perf invocation by
+    # `lib-perf-lint.sh`'s fail-closed layer 1.
+    prewarm_status="$(python3 "$WS0_MEASURE_LIB_DIR/ws0_prewarm.py" scan "$prewarm_rc" "$OUT_DIR/$tag.prewarm.json" "$OUT_DIR")"
+    [[ -n "$prewarm_status" ]] || prewarm_status="FAILED-classifier-produced-nothing"
+    # FAIL CLOSED on the label, an EXACT comparison (matching `ws0_validate.PREWARM_REQUIRED`).
+    # The classifier never exits non-zero — the decision to abort belongs to this LEG, whose bias
+    # direction is what makes it different from the Flight arm's record-and-continue.
+    if [[ "$prewarm_status" != "ok" ]]; then
       printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
-      echo "FATAL: bare-scan PREWARM failed for $tag ($prewarm_status)." >&2
-      echo "       Without it this 'warm' rep is partly cold, which makes the bare scan" >&2
-      echo "       read SLOWER and the 1.3x bare/flight target EASIER — a degradation" >&2
-      echo "       that can manufacture a win, so it is refused rather than labelled." >&2
-      echo "       See $OUT_DIR/$tag.prewarm.err" >&2
+      echo "FATAL: bare-scan PREWARM did not complete a FULL corpus scan for $tag" >&2
+      echo "       ($prewarm_status). The status is derived from the bench's OWN JSON —" >&2
+      echo "       every timed pass must have observed exactly the PINNED corpus row" >&2
+      echo "       count — not from its exit code, so an exit-0 run that scanned a" >&2
+      echo "       FRACTION reads as a failure (#3272 F2)." >&2
+      echo "       Without a complete prewarm this 'warm' rep is partly cold, which makes" >&2
+      echo "       the bare scan read SLOWER and the 1.3x bare/flight target EASIER — a" >&2
+      echo "       degradation that can manufacture a win, so it is refused rather than" >&2
+      echo "       labelled. See $OUT_DIR/$tag.prewarm.err and $OUT_DIR/$tag.prewarm.json" >&2
       exit 1
     fi
   fi
@@ -175,8 +196,14 @@ measure_flight() {
   # (`skipped-cold-arm` satisfying the prewarm guard) at a different line.
   #
   # So the JSONL is RETAINED to a real path and `ws0_prewarm.classify_prewarm_jsonl` decides the
-  # label from it: >=1 successful request AND >=1 row, else a named degradation. The
-  # honest-degradation behaviour is unchanged — the run continues either way.
+  # label from it. The honest-degradation behaviour is unchanged — the run continues either way.
+  #
+  # ...AND `ok` NOW REQUIRES A COMPLETE CORPUS SCAN (#3272 round 12, F2). F-A's rule was
+  # `requests_ok >= 1 AND rows_total >= 1`, which is a NON-ZERO check where the property is a
+  # COMPLETENESS one: a request that streamed 40 of 200,000 rows satisfied it while leaving
+  # essentially every page cold. The oracle is the PINNED corpus row count from
+  # session-corpus-pin.json (`rows`), never a threshold — hence `$OUT_DIR` is passed, so the
+  # classifier reads the pin rather than trusting a count this leg supplied.
   local prewarm_status="skipped-cold-arm"
   if [[ "$temp" == "warm" ]]; then
     local prewarm_rc=0
@@ -196,7 +223,7 @@ measure_flight() {
     # real finding, not a false positive, and the fix is to give the lint a resolvable command
     # word rather than to mark the line `perf-lint-allow` — a marker here would suppress a check
     # that is working.
-    prewarm_status="$(python3 "$WS0_MEASURE_LIB_DIR/ws0_prewarm.py" "$prewarm_rc" "$OUT_DIR/$tag.prewarm.jsonl")"
+    prewarm_status="$(python3 "$WS0_MEASURE_LIB_DIR/ws0_prewarm.py" flight "$prewarm_rc" "$OUT_DIR/$tag.prewarm.jsonl" "$OUT_DIR")"
     [[ -n "$prewarm_status" ]] || prewarm_status="FAILED-classifier-produced-nothing"
     # An EXACT comparison, matching `ws0_validate.PREWARM_REQUIRED`'s exact per-temperature match —
     # a prefix test here would call a hypothetical `ok-ish` label healthy while the reporter called
@@ -204,8 +231,9 @@ measure_flight() {
     if [[ "$prewarm_status" != "ok" ]]; then
       echo "  WARNING: prewarm DEGRADED for $tag ($prewarm_status) — this 'warm' rep is" >&2
       echo "           partly cold. The status is derived from the prewarm's OWN JSONL" >&2
-      echo "           (>=1 successful request AND >=1 row), not from its exit code, so an" >&2
-      echo "           exit-0 run that served nothing reads as a failure (#3272 F-A)." >&2
+      echo "           (every successful request must have streamed the PINNED corpus row" >&2
+      echo "           count), not from its exit code, so an exit-0 run that served nothing" >&2
+      echo "           — or scanned only a FRACTION — reads as a failure (#3272 F-A/F2)." >&2
       echo "           Recorded in results.json and summary.txt; see" >&2
       echo "           $OUT_DIR/$tag.prewarm.log and $OUT_DIR/$tag.prewarm.jsonl" >&2
     fi

@@ -658,6 +658,31 @@ else
   fail "scripts/perf/ws0_prewarm.py is missing — the F-A fix derives the prewarm status from the retained JSONL, so its absence means the status is back to an exit code"
 fi
 
+# THE COMPLETENESS ORACLE'S SESSION DIR (#3272 round 12, F2). The classifier reads
+# `session-corpus-pin.json` for the corpus row count rather than taking a count from its caller, so
+# every case below is driven against a session dir carrying the REAL pin — written by the SHIPPED
+# writer through `ws0_pin_session_corpus`, so a fixture cannot pin a row count the writer's shape no
+# longer has. Its `rows` is `$CORPUS_ROWS`, which is what makes `rows_total` values below full
+# passes or fractions.
+PW_SESSION="$TMP/pw-session"; mkdir -p "$PW_SESSION"
+ws0_pin_session_corpus "$PW_SESSION" "$TMP/corpus"
+pw_pin_rows=$(python3 -c '
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["rows"])
+' "$PW_SESSION/session-corpus-pin.json" 2>/dev/null)
+if [ "$pw_pin_rows" = "$CORPUS_ROWS" ]; then
+  pass "F2 fixture: the prewarm cases' session dir carries a REAL corpus pin of $pw_pin_rows rows (written by the shipped writer, so the completeness oracle below is the shipped one)"
+else
+  fail "F2 fixture: the prewarm session pin must record $CORPUS_ROWS rows (got '$pw_pin_rows'); every completeness case below would otherwise test a fixture rather than the oracle"
+fi
+
+# The two LEGS, each named EXPLICITLY at the call site (#3272 round 12, F2) — the classifier does not
+# sniff which reader to use from the artifact's contents, because guessing would report a shape
+# failure about a truncated Flight JSONL instead of the partial scan that caused it. Wrapped so the
+# session dir is not repeated at ~15 call sites; a case whose subject IS the pin passes its own.
+pw_flight() { python3 "$PREWARM_PY" flight "$1" "$2" "${3:-$PW_SESSION}"; }
+pw_scan() { python3 "$PREWARM_PY" scan "$1" "$2" "${3:-$PW_SESSION}"; }
+
 # --- NON-VACUITY, MEASURED: what the PRE-FIX code accepted -------------------
 # The pre-fix logic is reconstructed VERBATIM (the `if <loadgen>; then ok` shape) against a
 # stand-in that exits 0 having served nothing, and asserted to yield `ok`. Then the SAME
@@ -673,7 +698,7 @@ pw_prefix="$(
 # The prewarm JSONL such a run would have written, had it not been sent to /dev/null: every
 # request shed by admission control, nothing served, no rows.
 printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":0,"requests_unavailable":40,"requests_error":0,"rows_total":0}' > "$TMP/pw-nothing.jsonl"
-pw_now="$(python3 "$PREWARM_PY" 0 "$TMP/pw-nothing.jsonl")"
+pw_now="$(pw_flight 0 "$TMP/pw-nothing.jsonl")"
 if [ "$pw_prefix" = "ok" ] && [ "$pw_now" = "FAILED-zero-successful-requests" ]; then
   pass "NON-VACUITY (F-A): the PRE-FIX exit-status logic records '$pw_prefix' for a loadgen that exited 0 having served NOTHING; the classifier records '$pw_now' on the same run"
 else
@@ -685,16 +710,16 @@ fi
 # request COUNT alone would have been satisfied — checking only `requests_ok` would be the
 # same partial fix one field over.
 printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":5,"requests_unavailable":0,"requests_error":0,"rows_total":0}' > "$TMP/pw-norows.jsonl"
-if [ "$(python3 "$PREWARM_PY" 0 "$TMP/pw-norows.jsonl")" = "FAILED-zero-rows" ]; then
+if [ "$(pw_flight 0 "$TMP/pw-norows.jsonl")" = "FAILED-zero-rows" ]; then
   pass "OBSERVED (F-A): successful requests that streamed ZERO ROWS are a degradation — a request count alone cannot establish that anything was warmed"
 else
-  fail "a prewarm with requests_ok>0 but rows_total==0 must NOT read as ok (got $(python3 "$PREWARM_PY" 0 "$TMP/pw-norows.jsonl"))"
+  fail "a prewarm with requests_ok>0 but rows_total==0 must NOT read as ok (got $(pw_flight 0 "$TMP/pw-norows.jsonl"))"
 fi
 
 # THE DISCARDED-EVIDENCE CASE, which is the defect's root rather than a symptom: with
 # `--out /dev/null` there was never a record to inspect. An absent JSONL must therefore be a
 # degradation, or the fix could be undone by reverting one flag and nothing would notice.
-if [ "$(python3 "$PREWARM_PY" 0 "$TMP/pw-absent-$$.jsonl")" = "FAILED-no-jsonl" ]; then
+if [ "$(pw_flight 0 "$TMP/pw-absent-$$.jsonl")" = "FAILED-no-jsonl" ]; then
   pass "OBSERVED (F-A): an ABSENT prewarm JSONL is a degradation — reverting to --out /dev/null cannot silently restore a healthy label"
 else
   fail "an absent prewarm JSONL must be a named degradation, not an ok"
@@ -704,13 +729,13 @@ fi
 # classifier that refuses everything, which is the mirror-image broken instrument (a guard
 # that always fires teaches an operator to ignore it, AC1's own lesson).
 printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":3,"requests_unavailable":0,"requests_error":0,"rows_total":3000}' > "$TMP/pw-good.jsonl"
-pw_good="$(python3 "$PREWARM_PY" 0 "$TMP/pw-good.jsonl")"
+pw_good="$(pw_flight 0 "$TMP/pw-good.jsonl")"
 # ...and a prewarm that shed SOME requests but completed at least one full scan is STILL ok:
 # the prewarm's job (fault the corpus in) demonstrably happened. The MEASURED reps refuse any
 # non-zero shed counter (ws0_loadgen_record.ZERO_REQUIRED_COUNTERS); conflating the two would
 # make this guard fire on a healthy prewarm.
 printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":2,"requests_unavailable":7,"requests_error":0,"rows_total":2000}' > "$TMP/pw-shed.jsonl"
-pw_shed="$(python3 "$PREWARM_PY" 0 "$TMP/pw-shed.jsonl")"
+pw_shed="$(pw_flight 0 "$TMP/pw-shed.jsonl")"
 if [ "$pw_good" = "ok" ] && [ "$pw_shed" = "ok" ]; then
   pass "AFFIRMATIVE (F-A): a prewarm that served requests AND streamed rows reads 'ok', including one that shed some requests while completing others"
 else
@@ -719,7 +744,7 @@ fi
 
 # A NON-ZERO EXIT still fails, and is labelled with the code — the pre-existing behaviour the
 # fix must not have dropped while adding the JSONL requirement.
-if [ "$(python3 "$PREWARM_PY" 7 "$TMP/pw-good.jsonl")" = "FAILED-exit-7" ]; then
+if [ "$(pw_flight 7 "$TMP/pw-good.jsonl")" = "FAILED-exit-7" ]; then
   pass "OBSERVED (F-A): a non-zero loadgen exit is still a labelled failure, naming the code, even with a healthy JSONL beside it"
 else
   fail "a non-zero exit must remain a failure regardless of the JSONL"
@@ -732,9 +757,9 @@ fi
 printf 'not json at all\n' > "$TMP/pw-bad.jsonl"
 printf '%s\n' '{"requests_ok":1.9,"rows_total":10}' > "$TMP/pw-frac.jsonl"
 : > "$TMP/pw-empty.jsonl"
-pw_bad="$(python3 "$PREWARM_PY" 0 "$TMP/pw-bad.jsonl")"
-pw_frac="$(python3 "$PREWARM_PY" 0 "$TMP/pw-frac.jsonl")"
-pw_empty="$(python3 "$PREWARM_PY" 0 "$TMP/pw-empty.jsonl")"
+pw_bad="$(pw_flight 0 "$TMP/pw-bad.jsonl")"
+pw_frac="$(pw_flight 0 "$TMP/pw-frac.jsonl")"
+pw_empty="$(pw_flight 0 "$TMP/pw-empty.jsonl")"
 if [ "$pw_bad" = "FAILED-malformed-jsonl" ] \
   && [ "$pw_frac" = "FAILED-uncounted-requests" ] \
   && [ "$pw_empty" = "FAILED-empty-jsonl" ]; then
@@ -806,6 +831,169 @@ then
   pass "OBSERVED (F-A): the classifier's labels round-trip through ws0_validate.classify_prewarm — ok reads ok, and a served-nothing prewarm reads DEGRADED in the reporter too"
 else
   fail "the prewarm classifier's vocabulary must match ws0_validate.PREWARM_REQUIRED exactly, or the driver and reporter disagree about the same rep"
+fi
+
+# ==========================================================================
+# #3272 ROUND 12, F2 — a prewarm reads `ok` only on a COMPLETE CORPUS SCAN,
+#                      never on a NON-ZERO one, and on BOTH legs
+# ==========================================================================
+# THE FINDING, and it is F-A ABOVE not going far enough. F-A replaced "exit status alone" with
+# `requests_ok >= 1 AND rows_total >= 1` — a real improvement, and a NON-ZERO check where the
+# property is a COMPLETENESS one. A prewarm's entire job is to fault THE WHOLE CORPUS in, so a
+# request that streamed 40 of 200,000 rows satisfied every F-A clause while leaving essentially
+# every page cold, and the reps that followed were reported WARM. The bare-scan leg was worse: it
+# trusted PROCESS SUCCESS while redirecting the bench's JSON — which carries `rows_denominator` and
+# a per-pass `rows` — to a file nobody read.
+#
+# THE ORACLE IS THE PINNED CORPUS ROW COUNT, never a threshold: `session-corpus-pin.json` records
+# `rows` before the first rep, so the completeness question has an authoritative answer on disk and
+# a floor would be a number somebody chose rather than one that was measured.
+
+# --- NON-VACUITY, MEASURED: what the ROUND-10 (F-A) rule accepted -------------
+# F-A's exact predicate is reconstructed and run against a PARTIAL scan — 1 successful request that
+# streamed 40 of the corpus's 1000 rows — and asserted to yield `ok`. Then the SAME record goes to
+# the shipped classifier and must yield a partial-scan label. Without the first half this proves only
+# that a function returns a string; with it, the change is a measured flip on identical input.
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":1,"requests_unavailable":0,"requests_error":0,"rows_total":40}' > "$TMP/pw-partial.jsonl"
+pw_fa_verdict="$(python3 - "$TMP/pw-partial.jsonl" <<'PY'
+import json, sys
+rec = json.loads(open(sys.argv[1]).read().strip())
+# VERBATIM the round-10 rule: exit 0, a parsed record, >=1 successful request, >=1 row.
+ok = rec["requests_ok"] >= 1 and rec["rows_total"] >= 1
+print("ok" if ok else "FAILED")
+PY
+)"
+pw_partial="$(pw_flight 0 "$TMP/pw-partial.jsonl")"
+if [ "$pw_fa_verdict" = "ok" ] && [ "$pw_partial" = "FAILED-partial-scan-40-of-1000-rows" ]; then
+  pass "NON-VACUITY (round12 F2): the ROUND-10 rule records '$pw_fa_verdict' for a prewarm that streamed 40 of the corpus's $CORPUS_ROWS rows; the shipped classifier records '$pw_partial' on the same record"
+else
+  fail "F2 non-vacuity: expected F-A 'ok' and shipped 'FAILED-partial-scan-40-of-1000-rows', got F-A '$pw_fa_verdict' and shipped '$pw_partial'"
+fi
+
+# A SET OF PARTIAL SCANS THAT SUMS TO THE CORPUS is refused too, and this is the case a
+# `rows_total >= pinned_rows` fix would have let through: 4 requests of 250 rows each sum to the
+# 1000-row corpus, but nothing in the record says those quarters were DISJOINT, so the sum
+# establishes nothing about coverage. The rule is `requests_ok * pinned_rows` — every completed
+# request a full pass — which is what `ws0_flight_arm` requires of the MEASURED reps.
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":4,"requests_unavailable":0,"requests_error":0,"rows_total":1000}' > "$TMP/pw-sums.jsonl"
+pw_sums="$(pw_flight 0 "$TMP/pw-sums.jsonl")"
+if [ "$pw_sums" = "FAILED-partial-scan-1000-of-4000-rows" ]; then
+  pass "OBSERVED (round12 F2): 4 requests of a QUARTER each — summing to exactly the corpus — is still REFUSED, because a sum says nothing about which quarter each request covered"
+else
+  fail "a set of partial scans summing to the corpus must not read as ok (got $pw_sums)"
+fi
+
+# THE ORACLE MUST HAVE BEEN CONSULTED. An absent, unreadable or uncounted pin means the ONLY
+# evidence for completeness could not be read — which is a NAMED degradation, never a skip, because
+# a check that silently does not run prints exactly like one that passed.
+pw_nopin="$TMP/pw-nopin"; mkdir -p "$pw_nopin"
+pw_badpin="$TMP/pw-badpin"; mkdir -p "$pw_badpin"; printf 'not json\n' > "$pw_badpin/session-corpus-pin.json"
+pw_zeropin="$TMP/pw-zeropin"; mkdir -p "$pw_zeropin"
+printf '%s\n' '{"rows":0}' > "$pw_zeropin/session-corpus-pin.json"
+pw_a="$(pw_flight 0 "$TMP/pw-good.jsonl" "$pw_nopin")"
+pw_b="$(pw_flight 0 "$TMP/pw-good.jsonl" "$pw_badpin")"
+pw_c="$(pw_flight 0 "$TMP/pw-good.jsonl" "$pw_zeropin")"
+if [ "$pw_a" = "FAILED-no-corpus-pin" ] && [ "$pw_b" = "FAILED-unreadable-corpus-pin" ] \
+  && [ "$pw_c" = "FAILED-uncounted-corpus-pin" ]; then
+  pass "OBSERVED (round12 F2): an ABSENT, UNREADABLE or NON-POSITIVE corpus pin each yields a NAMED degradation ($pw_a / $pw_b / $pw_c) — the completeness oracle could not be consulted, so no passing verdict is available"
+else
+  fail "an unusable corpus pin must be a named degradation, not a pass (absent=$pw_a, unreadable=$pw_b, zero=$pw_c)"
+fi
+# NON-VACUITY for those three: the SAME healthy JSONL against the REAL pin reads `ok`, so the
+# refusals above are the oracle check firing and not the record being rejected for its own reasons.
+if [ "$(pw_flight 0 "$TMP/pw-good.jsonl")" = "ok" ]; then
+  pass "NON-VACUITY (round12 F2): the SAME JSONL against the REAL session pin reads 'ok' — so the three refusals above are the missing-oracle path, not a rejected record"
+else
+  fail "the healthy JSONL must read ok against the real pin, or the missing-pin cases prove nothing"
+fi
+
+# --- THE BARE-SCAN LEG, whose value was being DISCARDED ----------------------
+# `scan_bench` refuses a zero-row pass itself, so exit 0 established "something was read" — and
+# nothing about HOW MUCH. Its JSON carried the answer (`passes[].rows`, `rows_denominator`) and the
+# leg redirected it to a file nobody read.
+printf '%s\n' '{"rows_denominator":1000,"timed_scan_secs":2.0,"passes":[{"pass":0,"rows":1000,"secs":2.0}]}' > "$TMP/pws-full.json"
+printf '%s\n' '{"rows_denominator":40,"timed_scan_secs":0.1,"passes":[{"pass":0,"rows":40,"secs":0.1}]}' > "$TMP/pws-partial.json"
+pws_full="$(pw_scan 0 "$TMP/pws-full.json")"
+pws_partial="$(pw_scan 0 "$TMP/pws-partial.json")"
+if [ "$pws_full" = "ok" ] && [ "$pws_partial" = "FAILED-partial-scan-40-of-1000-rows" ]; then
+  pass "OBSERVED (round12 F2): the bare-scan prewarm reads 'ok' only on a pass observing the PINNED $CORPUS_ROWS rows; an exit-0 run that scanned 40 of them records '$pws_partial' — a value the pre-fix leg discarded"
+else
+  fail "the bare-scan classifier must distinguish a full pass from a partial one (full=$pws_full, partial=$pws_partial)"
+fi
+# NON-VACUITY, MEASURED: the pre-fix bare-scan rule was `if <bench>; then ok`, and the partial run
+# above exits 0 — so it recorded `ok`. Reconstructed verbatim.
+pws_prefix="$(
+  fake_bench() { return 0; }               # exit 0 having scanned a fraction
+  st="skipped-cold-arm"
+  if fake_bench; then st="ok"; else st="FAILED-exit-$?"; fi
+  printf '%s' "$st"
+)"
+if [ "$pws_prefix" = "ok" ]; then
+  pass "NON-VACUITY (round12 F2): the PRE-FIX bare-scan rule (process success alone) records '$pws_prefix' for that same 40-row run, so the label above is a measured flip and not a new function's first output"
+else
+  fail "F2 bare-scan non-vacuity: the pre-fix exit-status rule must yield 'ok' (got '$pws_prefix')"
+fi
+# ...and the bench's OWN aggregate must agree with the per-pass records it published: a
+# `rows_denominator` disagreeing with the passes means this classifier validated the half of the
+# artifact nobody divides by.
+printf '%s\n' '{"rows_denominator":9999,"timed_scan_secs":2.0,"passes":[{"pass":0,"rows":1000,"secs":2.0}]}' > "$TMP/pws-denom.json"
+printf '%s\n' '{"rows_denominator":1000,"timed_scan_secs":2.0,"passes":[]}' > "$TMP/pws-nopasses.json"
+printf 'not json\n' > "$TMP/pws-bad.json"
+pws_denom="$(pw_scan 0 "$TMP/pws-denom.json")"
+pws_nopasses="$(pw_scan 0 "$TMP/pws-nopasses.json")"
+pws_bad="$(pw_scan 0 "$TMP/pws-bad.json")"
+pws_absent="$(pw_scan 0 "$TMP/pws-absent-$$.json")"
+if [ "$pws_denom" = "FAILED-scan-denominator-9999-vs-1000-rows" ] \
+  && [ "$pws_nopasses" = "FAILED-no-scan-passes" ] \
+  && [ "$pws_bad" = "FAILED-malformed-scan-json" ] \
+  && [ "$pws_absent" = "FAILED-no-scan-json" ]; then
+  pass "OBSERVED (round12 F2): a bare-scan artifact whose aggregate disagrees with its passes, or which carries no passes / no parseable JSON / no file at all, is each a NAMED degradation"
+else
+  fail "the bare-scan classifier must name each broken artifact (denom=$pws_denom, nopasses=$pws_nopasses, bad=$pws_bad, absent=$pws_absent)"
+fi
+# The ARM is EXPLICIT, not sniffed: a Flight JSONL handed to the scan reader (and vice versa) must
+# fail as a SHAPE problem rather than being silently read by the wrong rule, and an unrecognised arm
+# is a labelled failure rather than a default to either leg.
+pws_wrongarm="$(pw_scan 0 "$TMP/pw-good.jsonl")"
+pws_badarm="$(python3 "$PREWARM_PY" both 0 "$TMP/pws-full.json" "$PW_SESSION")"
+if [ "$pws_wrongarm" != "ok" ] && [ "$pws_badarm" = "FAILED-bad-classifier-invocation" ]; then
+  pass "OBSERVED (round12 F2): the leg is named EXPLICITLY — a Flight JSONL read as a bare-scan artifact does not read ok ('$pws_wrongarm'), and an unrecognised arm is refused rather than defaulted to either leg"
+else
+  fail "the classifier must not accept a mismatched artifact or an unclassified arm (wrong-arm=$pws_wrongarm, bad-arm=$pws_badarm)"
+fi
+
+# --- BOTH LEGS MUST BE WIRED TO IT -------------------------------------------
+# Every case above tests the classifiers. None would notice `measure_scan` keeping its `if`-on-exit,
+# which is exactly the defect. Comments stripped, for the reason the F-A wiring block records: the
+# leg's own prose describes what it forbids.
+scan_leg=$(awk '/^measure_scan\(\)/,/^}/' "$MEASURE_LIB" | grep -v '^[[:space:]]*#')
+if [ -n "$scan_leg" ] \
+  && grep -q 'ws0_prewarm.py' <<<"$scan_leg" \
+  && grep -q 'prewarm.json' <<<"$scan_leg" \
+  && ! grep -q 'prewarm_status="ok"' <<<"$scan_leg"; then
+  pass "WIRED (round12 F2): measure_scan's CODE derives its prewarm status via ws0_prewarm.py from the bench's retained JSON, and has NO literal assignment of the ok status"
+else
+  fail "measure_scan must classify the bench's JSON rather than trusting its exit status (code lines=$(printf '%s' "$scan_leg" | grep -c . ), literal-ok=$(grep -c 'prewarm_status="ok"' <<<"$scan_leg"))"
+fi
+# ...and the bare-scan leg must still FAIL CLOSED on a degraded label, which is what distinguishes
+# it from the Flight arm's record-and-continue: a partly-cold bare scan reads SLOWER, shrinking
+# `bare/flight` and making the 1.3x target EASIER — a degradation that can manufacture a win.
+if grep -q 'FATAL: bare-scan PREWARM' <<<"$scan_leg" && grep -q 'exit 1' <<<"$scan_leg"; then
+  pass "OBSERVED (round12 F2): the bare-scan leg still FAILS CLOSED on a degraded prewarm (a partly-cold bare scan can manufacture a win, unlike a degraded Flight prewarm)"
+else
+  fail "measure_scan must abort on a degraded prewarm rather than labelling it"
+fi
+# BOTH legs must pass the SESSION DIR, or the classifier cannot reach the pin and every prewarm
+# would record `FAILED-no-corpus-pin` — a guard that always fires, the mirror-image broken
+# instrument. Structural: the behaviour needs a real corpus and a real build.
+# The SESSION DIR is the LAST argument, so the pattern anchors on the classifier call ending in a
+# bare `"$OUT_DIR"` — a path UNDER it (`"$OUT_DIR/$tag…"`) is the ARTIFACT argument, and matching
+# that instead would pass while the pin was unreachable.
+pw_wired=$(printf '%s\n%s\n' "$scan_leg" "$flight_leg" | grep -c 'ws0_prewarm\.py.*"\$OUT_DIR")')
+if [ "$pw_wired" -eq 2 ]; then
+  pass "WIRED (round12 F2): BOTH legs pass \$OUT_DIR as the classifier's LAST argument, so each reads the session's own corpus pin as its completeness oracle rather than trusting a count the leg supplied"
+else
+  fail "both prewarm legs must pass the session dir to the classifier (matched=$pw_wired of 2)"
 fi
 
 # ==========================================================================
