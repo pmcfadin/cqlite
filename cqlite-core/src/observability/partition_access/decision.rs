@@ -344,7 +344,7 @@ pub fn evaluate_with_threshold(
 mod tests {
     use super::*;
     use crate::observability::partition_access::{
-        AccessWeight, PartitionAccessRecorder, WindowConfig,
+        AccessWeight, PartitionAccessRecorder, TableScope, WindowConfig,
     };
     use std::time::Duration;
 
@@ -365,7 +365,11 @@ mod tests {
             for _ in 0..*n {
                 key += 1;
                 for _ in 0..*times {
-                    r.record(&key.to_le_bytes(), AccessWeight::SuccessorGap(*bytes));
+                    r.record(
+                        TableScope::new("ks", "t"),
+                        &key.to_le_bytes(),
+                        AccessWeight::SuccessorGap(*bytes),
+                    );
                 }
             }
         }
@@ -376,9 +380,17 @@ mod tests {
     fn a_window_with_unpriceable_partitions_is_refused_by_name() {
         let r = recorder();
         for i in 0..12_000u64 {
-            r.record(&i.to_le_bytes(), AccessWeight::SuccessorGap(1_024));
+            r.record(
+                TableScope::new("ks", "t"),
+                &i.to_le_bytes(),
+                AccessWeight::SuccessorGap(1_024),
+            );
         }
-        r.record(b"bti-resolved", AccessWeight::Unavailable);
+        r.record(
+            TableScope::new("ks", "t"),
+            b"bti-resolved",
+            AccessWeight::Unavailable,
+        );
         let s = r.close_window().expect("accesses recorded");
         let v = evaluate(
             &s,

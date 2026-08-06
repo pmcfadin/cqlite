@@ -157,6 +157,16 @@ computed on the BIG point path, whose lookup takes raw key bytes
 cheap non-cryptographic 64-bit hash of the same bytes is strictly less work and is only ever used for
 slot addressing and identity within a window.
 
+**Entry identity is TABLE-SCOPED (roborev round 3).** The hash covers
+`(keyspace, table, raw key bytes)`, not the key bytes alone. `global()` is ONE
+process-wide recorder shared by every table, so a key-only identity merges the same
+key in two tables into one entry — and a tenant/user id shared across tables is
+ordinary, not a rare collision. The merge is biased twice toward "build the cache":
+two singletons become a `count = 2` entry (`accesses − distinct` reports a hit where
+the truth is none), and the entry keeps the MAXIMUM byte weight rather than the sum,
+so it is under-priced and ranks EARLIER by access density. Both call sites already
+held the table identity, so this costs nothing on the hot path.
+
 **Overflow handling: adaptive hash-prefix downsampling, never eviction.** When occupancy reaches a
 load factor of 0.75 (98,304 entries) the recorder takes the write lock, increments `k`, and drops
 every entry whose `key_hash` does not satisfy the new `k`-bit prefix predicate — one linear pass that

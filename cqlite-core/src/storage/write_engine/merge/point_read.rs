@@ -377,7 +377,7 @@ pub fn build_single_partition_merger_with_registry(
     // per-generation on-disk sizes. Recorded even when no candidate held the key —
     // a miss is a real access, and omitting it would understate the singleton
     // bucket. A no-op when the probe is disabled.
-    record_logical_accesses(keys, weights);
+    record_logical_accesses(schema, keys, weights);
 
     if runs.is_empty() {
         // No candidate produced a run; any snapshot guard drops here.
@@ -513,7 +513,7 @@ pub fn build_single_partition_merger_from_readers(
     // (issue #2827). Recorded even when no candidate held the key — a miss is a real
     // access, and omitting it would understate the singleton bucket.
     if collect {
-        record_logical_accesses(keys, weights);
+        record_logical_accesses(schema, keys, weights);
     }
 
     if runs.is_empty() {
@@ -638,9 +638,17 @@ fn fold_size_notes(weights: &mut [partition_access::AccessWeightBuilder], notes:
 ///
 /// A no-op when the probe is disabled — `weights` is empty then, so this does not
 /// even iterate.
-fn record_logical_accesses(keys: &[Vec<u8>], weights: Vec<partition_access::AccessWeightBuilder>) {
+fn record_logical_accesses(
+    schema: &TableSchema,
+    keys: &[Vec<u8>],
+    weights: Vec<partition_access::AccessWeightBuilder>,
+) {
+    // The table is part of the entry identity — see `TableScope`. The schema is the
+    // authority here (the builders are driven per-table), so no formatting or
+    // allocation is needed on this path.
+    let scope = partition_access::TableScope::new(&schema.keyspace, &schema.table);
     for (key, weight) in keys.iter().zip(weights) {
-        partition_access::record_partition_access(key, weight.finish());
+        partition_access::record_partition_access(scope, key, weight.finish());
     }
 }
 

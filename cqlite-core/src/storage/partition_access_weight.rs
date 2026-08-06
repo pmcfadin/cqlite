@@ -143,7 +143,13 @@ impl StorageEngine {
             return;
         }
         let weight = self.partition_access_weight(table_id, partition_key).await;
-        partition_access::record_partition_access(partition_key, weight);
+        // The table is part of the entry identity: one recorder serves every table,
+        // so the same key bytes in two tables must not merge into one partition.
+        partition_access::record_partition_access(
+            partition_access::TableScope::from_qualified(table_id.name()),
+            partition_key,
+            weight,
+        );
     }
 
     /// The on-disk byte weight of ONE logical partition access to `partition_key`,

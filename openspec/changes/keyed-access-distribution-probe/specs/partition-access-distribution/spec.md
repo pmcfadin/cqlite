@@ -107,6 +107,11 @@ can fail to seat, so dropping them would suppress the singleton bucket and OVERS
 The prefix width SHALL be capped, and a window that reaches the cap SHALL be marked non-census so the
 decision procedure refuses it (see *A committed decision procedure…*).
 
+A window entry SHALL be identified by `(keyspace, table, raw partition-key bytes)`.
+One recorder serves every table, so a key-only identity would merge the same key in
+two tables into a single entry — reporting two singletons as one repeat and pricing
+it at the larger of the two extents, both of which overstate the case for a cache.
+
 **Rationale that makes this a correctness requirement, not a resource one:** recency- or
 arrival-ordered eviction retains high-frequency keys preferentially, which under-counts the singleton
 bucket and **overstates** concentration — the direction that makes a cache look better than it is. See

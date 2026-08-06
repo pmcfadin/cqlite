@@ -67,7 +67,7 @@ pub(super) const FLAG_SIZE_UNAVAILABLE: u8 = 0b0000_0001;
 pub(super) const FLAG_SIZE_FROM_GAP: u8 = 0b0000_0010;
 
 /// One counting slot. `key_hash == 0` means EMPTY; a hash that would be zero is
-/// remapped to 1 by [`hash_key`], so the sentinel is unambiguous.
+/// remapped to 1 by [`hash_partition`], so the sentinel is unambiguous.
 #[repr(C)]
 pub(super) struct Slot {
     key_hash: AtomicU64,
@@ -133,7 +133,18 @@ pub(super) struct Table {
     occupancy: AtomicUsize,
 }
 
-/// A 64-bit hash of the RAW partition-key bytes the read path already holds.
+/// A 64-bit hash identifying one partition WITHIN ONE TABLE.
+///
+/// # Why the table is part of the identity
+///
+/// [`super::global`] is ONE process-wide recorder shared by every table, so an
+/// identity over raw key bytes alone merges the same key in two different tables
+/// into one entry — and an ordinary tenant/user id shared across tables is common,
+/// not a rare collision. The merge is biased in the unsafe direction twice over:
+/// two singletons become a `count = 2` entry, manufacturing a hit where the truth
+/// is none; and the entry keeps the MAXIMUM byte weight rather than the sum, so it
+/// is under-priced and ranks EARLIER by access density. Both flatter the cache,
+/// which is the bias class D2/D4 disqualify other mechanisms for.
 ///
 /// Deliberately NOT the Murmur3 token: the BIG point path takes raw key bytes and
 /// never computes a token, so hashing the token would make the probe force work
@@ -142,12 +153,25 @@ pub(super) struct Table {
 /// metric attribute (the whole point of the bucket histogram is that no per-key
 /// value leaves the process).
 ///
-/// FNV-1a over the bytes, finalised with a splitmix64 avalanche so the HIGH bits
-/// (used by the sampling predicate) and the LOW bits (used for slot addressing)
-/// are independently well-mixed. `0` is reserved as the empty-slot sentinel and is
-/// remapped to `1`.
-pub(super) fn hash_key(key: &[u8]) -> u64 {
+/// FNV-1a over the table scope and the key bytes, separated by a byte that cannot
+/// occur in the scope's UTF-8 (so `("ab", "c")` and `("a", "bc")` cannot collide),
+/// finalised with a splitmix64 avalanche so the HIGH bits (used by the sampling
+/// predicate) and the LOW bits (used for slot addressing) are independently
+/// well-mixed. `0` is reserved as the empty-slot sentinel and is remapped to `1`.
+pub(super) fn hash_partition(keyspace: &str, table: &str, key: &[u8]) -> u64 {
+    /// Separator that cannot appear inside a UTF-8 scan of the scope strings.
+    const SEP: u8 = 0xFF;
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mix = |bytes: &[u8], h: &mut u64| {
+        for b in bytes {
+            *h ^= *b as u64;
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(keyspace.as_bytes(), &mut h);
+    mix(&[SEP], &mut h);
+    mix(table.as_bytes(), &mut h);
+    mix(&[SEP], &mut h);
     for b in key {
         h ^= *b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -444,7 +468,7 @@ mod tests {
         let mut table = Table::new();
         let n = 40_000u64;
         for i in 0..n {
-            let h = hash_key(&i.to_le_bytes());
+            let h = hash_partition("ks", "t", &i.to_le_bytes());
             assert_eq!(table.record(h, 0, Some(10)), Insert::Recorded);
         }
         let before = table.occupancy();
@@ -456,7 +480,7 @@ mod tests {
         // Every admitted key folds into its existing slot: occupancy is unchanged
         // and each survivor's count becomes exactly 2.
         for i in 0..n {
-            let h = hash_key(&i.to_le_bytes());
+            let h = hash_partition("ks", "t", &i.to_le_bytes());
             match table.record(h, 1, Some(10)) {
                 Insert::Recorded => {}
                 Insert::NotAdmitted => assert!(!admitted(h, 1)),
@@ -478,7 +502,7 @@ mod tests {
     #[test]
     fn bytes_take_the_maximum_not_the_sum() {
         let table = Table::new();
-        let h = hash_key(b"partition-a");
+        let h = hash_partition("ks", "t", b"partition-a");
         for _ in 0..10 {
             assert_eq!(table.record(h, 0, Some(4_096)), Insert::Recorded);
         }
@@ -494,7 +518,7 @@ mod tests {
     #[test]
     fn an_unpriced_access_makes_the_entry_sticky_unavailable() {
         let table = Table::new();
-        let h = hash_key(b"partition-b");
+        let h = hash_partition("ks", "t", b"partition-b");
         assert_eq!(table.record(h, 0, Some(8_192)), Insert::Recorded);
         assert_eq!(table.record(h, 0, None), Insert::Recorded);
         assert_eq!(table.record(h, 0, Some(8_192)), Insert::Recorded);
@@ -512,7 +536,7 @@ mod tests {
     fn reset_empties_the_table_without_changing_its_footprint() {
         let mut table = Table::new();
         for i in 0..1_000u64 {
-            table.record(hash_key(&i.to_le_bytes()), 0, Some(1));
+            table.record(hash_partition("ks", "t", &i.to_le_bytes()), 0, Some(1));
         }
         assert_eq!(table.occupancy(), 1_000);
         table.reset();
@@ -521,6 +545,32 @@ mod tests {
         table.for_each_entry(|_| n += 1);
         assert_eq!(n, 0);
         assert_eq!(table.footprint_bytes(), TABLE_BYTES);
+    }
+
+    #[test]
+    fn the_same_key_in_two_tables_is_two_identities() {
+        // F1: one process-wide recorder serves every table, so an identity over raw
+        // key bytes alone would merge a tenant id shared by two tables into a single
+        // entry — manufacturing a repeat where there are two singletons.
+        let key = b"tenant-42";
+        assert_ne!(
+            hash_partition("ks", "users", key),
+            hash_partition("ks", "orders", key)
+        );
+        assert_ne!(
+            hash_partition("ks_a", "t", key),
+            hash_partition("ks_b", "t", key)
+        );
+        // Same table, same key: one identity.
+        assert_eq!(
+            hash_partition("ks", "users", key),
+            hash_partition("ks", "users", key)
+        );
+        // The separator makes the scope unambiguous: ("ab","c") != ("a","bc").
+        assert_ne!(
+            hash_partition("ab", "c", key),
+            hash_partition("a", "bc", key)
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@
 //! `docs/research/decoded-partition-cache-decision.md`.
 
 use cqlite_core::observability::partition_access::{
-    AccessWeight, PartitionAccessRecorder, RepeatBucket, WindowConfig, WindowSummary,
+    AccessWeight, PartitionAccessRecorder, RepeatBucket, TableScope, WindowConfig, WindowSummary,
 };
 use std::time::Duration;
 
@@ -45,6 +45,12 @@ use std::time::Duration;
 /// This is deliberate, not incidental. A correctness assertion that depends on
 /// elapsed wall time is the mechanized `roborev-lints` failure class (#2642); the
 /// deterministic close hook exists precisely so no test here has to sleep.
+/// One table for every recorder-level case here.
+const SCOPE: TableScope<'static> = TableScope {
+    keyspace: "ks",
+    table: "t",
+};
+
 fn deterministic_recorder() -> PartitionAccessRecorder {
     PartitionAccessRecorder::new(WindowConfig {
         duration: Duration::from_secs(86_400),
@@ -56,7 +62,7 @@ fn deterministic_recorder() -> PartitionAccessRecorder {
 /// Drive `count` accesses to the partition identified by `id`.
 fn access(r: &PartitionAccessRecorder, id: u64, count: u32, bytes: u64) {
     for _ in 0..count {
-        r.record(&id.to_be_bytes(), AccessWeight::SuccessorGap(bytes));
+        r.record(SCOPE, &id.to_be_bytes(), AccessWeight::SuccessorGap(bytes));
     }
 }
 
@@ -496,7 +502,7 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
             } else {
                 AccessWeight::SuccessorGap(4_096)
             };
-            partition_access::record_partition_access(k, weight);
+            partition_access::record_partition_access(SCOPE, k, weight);
         }
     }
     let summary = partition_access::close_window().expect("accesses were recorded");

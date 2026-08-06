@@ -294,14 +294,21 @@ impl PartitionAccessRecorder {
 
     /// Record one LOGICAL partition access.
     ///
-    /// `key` is the raw partition-key bytes the read path already holds; it is
-    /// hashed for slot addressing and within-window identity and is never stored,
-    /// logged, or emitted.
+    /// `scope` names the table the access belongs to and `key` is the raw
+    /// partition-key bytes the read path already holds. Both are hashed together
+    /// for slot addressing and within-window identity; neither is stored, logged,
+    /// or emitted. The scope is part of the identity because ONE recorder serves
+    /// every table — see [`table::hash_partition`].
     ///
     /// Returns the summary of a window this access happened to CLOSE (a duration or
     /// access-count trigger firing), so the global wrapper can emit it.
-    pub fn record(&self, key: &[u8], weight: AccessWeight) -> Option<WindowSummary> {
-        let hash = table::hash_key(key);
+    pub fn record(
+        &self,
+        scope: TableScope<'_>,
+        key: &[u8],
+        weight: AccessWeight,
+    ) -> Option<WindowSummary> {
+        let hash = table::hash_partition(scope.keyspace, scope.table, key);
         let bytes = weight.bytes();
         let flags = match weight.source() {
             SizeSource::SuccessorGap => table::FLAG_SIZE_FROM_GAP,
@@ -523,6 +530,42 @@ pub fn global() -> &'static PartitionAccessRecorder {
     GLOBAL.get_or_init(PartitionAccessRecorder::default)
 }
 
+/// The table an access belongs to — part of the entry identity.
+///
+/// A borrowed pair rather than an owned/formatted name so the hot path allocates
+/// nothing. Both call sites already hold this and previously discarded it, which is
+/// how the same key in two tables came to share one entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableScope<'a> {
+    /// Keyspace name, or `""` when the caller has only a bare table name.
+    pub keyspace: &'a str,
+    /// Table name.
+    pub table: &'a str,
+}
+
+impl<'a> TableScope<'a> {
+    /// A scope from an explicit keyspace and table.
+    pub fn new(keyspace: &'a str, table: &'a str) -> Self {
+        Self { keyspace, table }
+    }
+
+    /// A scope from a possibly-qualified `keyspace.table` identifier, as
+    /// [`crate::types::TableId`] carries. An unqualified name yields an empty
+    /// keyspace, which is still a distinct scope from any qualified one.
+    pub fn from_qualified(name: &'a str) -> Self {
+        match name.split_once('.') {
+            Some((ks, table)) => Self {
+                keyspace: ks,
+                table,
+            },
+            None => Self {
+                keyspace: "",
+                table: name,
+            },
+        }
+    }
+}
+
 /// Record one LOGICAL partition access on the process-global recorder.
 ///
 /// A no-op — one relaxed atomic load, no allocation, no emission — when the probe
@@ -534,11 +577,11 @@ pub fn global() -> &'static PartitionAccessRecorder {
 /// the generation count, shift the whole histogram right and manufacture
 /// concentration the workload does not have — a bias toward "build the cache".
 #[inline]
-pub fn record_partition_access(key: &[u8], weight: AccessWeight) {
+pub fn record_partition_access(scope: TableScope<'_>, key: &[u8], weight: AccessWeight) {
     if !enabled() {
         return;
     }
-    if let Some(summary) = global().record(key, weight) {
+    if let Some(summary) = global().record(scope, key, weight) {
         emit(&summary);
     }
 }
@@ -695,7 +738,11 @@ mod tests {
     #[test]
     fn footprint_is_fixed_once_recording_starts() {
         let r = PartitionAccessRecorder::default();
-        r.record(b"k", AccessWeight::SuccessorGap(1));
+        r.record(
+            TableScope::new("ks", "t"),
+            b"k",
+            AccessWeight::SuccessorGap(1),
+        );
         assert_eq!(
             r.footprint_bytes(),
             PartitionAccessRecorder::declared_footprint_bytes()

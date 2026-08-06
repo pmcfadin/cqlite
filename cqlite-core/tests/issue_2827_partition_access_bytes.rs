@@ -47,9 +47,17 @@
 //! siblings.
 
 use cqlite_core::observability::partition_access::{
-    decision, AccessWeight, PartitionAccessRecorder, Refusal, RepeatBucket, Verdict, WindowConfig,
+    decision, AccessWeight, PartitionAccessRecorder, Refusal, RepeatBucket, TableScope, Verdict,
+    WindowConfig,
 };
 use std::time::Duration;
+
+/// One table for every recorder-level case here; the cross-table identity property
+/// has its own case below.
+const SCOPE: TableScope<'static> = TableScope {
+    keyspace: "ks",
+    table: "t",
+};
 
 fn deterministic_recorder() -> PartitionAccessRecorder {
     PartitionAccessRecorder::new(WindowConfig {
@@ -65,6 +73,7 @@ fn repeated_accesses_to_one_partition_count_its_bytes_once() {
     // One partition of known on-disk size, accessed ten times in the window.
     for _ in 0..10 {
         r.record(
+            SCOPE,
             b"partition-of-known-size",
             AccessWeight::SuccessorGap(65_536),
         );
@@ -89,9 +98,9 @@ fn an_entry_retains_the_maximum_weight_never_a_running_sum() {
     // entry keeps the maximum, which is exact because partition sizes are immutable
     // within a generation set.
     let r = deterministic_recorder();
-    r.record(b"p", AccessWeight::SuccessorGap(1_000));
-    r.record(b"p", AccessWeight::SuccessorGap(3_000));
-    r.record(b"p", AccessWeight::SuccessorGap(2_000));
+    r.record(SCOPE, b"p", AccessWeight::SuccessorGap(1_000));
+    r.record(SCOPE, b"p", AccessWeight::SuccessorGap(3_000));
+    r.record(SCOPE, b"p", AccessWeight::SuccessorGap(2_000));
     let s = r.close_window().expect("accesses were recorded");
     assert_eq!(s.bucket(RepeatBucket::ThreeToFour).bytes, 3_000);
     assert_eq!(s.total_bytes(), 3_000);
@@ -100,7 +109,7 @@ fn an_entry_retains_the_maximum_weight_never_a_running_sum() {
 #[test]
 fn an_unavailable_access_is_counted_as_a_partition_and_contributes_no_bytes() {
     let r = deterministic_recorder();
-    r.record(b"bti-resolved", AccessWeight::Unavailable);
+    r.record(SCOPE, b"bti-resolved", AccessWeight::Unavailable);
     let s = r.close_window().expect("an access was recorded");
 
     let bucket = s.bucket(RepeatBucket::One);
@@ -121,9 +130,9 @@ fn unavailability_is_sticky_for_the_window() {
     // partial size is not a size, and reporting the priced subset would understate
     // the working set — the direction that flatters the cache.
     let r = deterministic_recorder();
-    r.record(b"p", AccessWeight::SuccessorGap(4_096));
-    r.record(b"p", AccessWeight::Unavailable);
-    r.record(b"p", AccessWeight::SuccessorGap(4_096));
+    r.record(SCOPE, b"p", AccessWeight::SuccessorGap(4_096));
+    r.record(SCOPE, b"p", AccessWeight::Unavailable);
+    r.record(SCOPE, b"p", AccessWeight::SuccessorGap(4_096));
     let s = r.close_window().expect("accesses were recorded");
     assert_eq!(s.bucket(RepeatBucket::ThreeToFour).distinct_unavailable, 1);
     assert_eq!(
@@ -139,10 +148,14 @@ fn a_mixed_window_makes_its_incompleteness_visible_and_the_procedure_refuses_it(
     // Enough accesses to clear the procedure's minimum, so the refusal below is
     // about the unpriceable fraction and nothing else.
     for i in 0..12_000u64 {
-        r.record(&i.to_be_bytes(), AccessWeight::SuccessorGap(2_048));
+        r.record(SCOPE, &i.to_be_bytes(), AccessWeight::SuccessorGap(2_048));
     }
     for i in 0..50u64 {
-        r.record(&(i | 1 << 40).to_be_bytes(), AccessWeight::Unavailable);
+        r.record(
+            SCOPE,
+            &(i | 1 << 40).to_be_bytes(),
+            AccessWeight::Unavailable,
+        );
     }
     let s = r.close_window().expect("accesses were recorded");
 
@@ -194,6 +207,7 @@ fn a_window_at_the_sampling_floor_is_non_census_and_refused() {
     });
     for i in 0..400_000u64 {
         r.record(
+            SCOPE,
             &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
             AccessWeight::SuccessorGap(64),
         );
@@ -234,6 +248,7 @@ fn a_downsampled_but_unfloored_window_is_refused_as_a_sample() {
     let r = deterministic_recorder();
     for i in 0..220_000u64 {
         r.record(
+            SCOPE,
             &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
             AccessWeight::SuccessorGap(1_024),
         );
@@ -281,11 +296,12 @@ fn a_gap_measured_census_window_is_priced_not_refused() {
     let r = deterministic_recorder();
     for i in 0..600u64 {
         for _ in 0..20 {
-            r.record(&i.to_be_bytes(), AccessWeight::SuccessorGap(1_024));
+            r.record(SCOPE, &i.to_be_bytes(), AccessWeight::SuccessorGap(1_024));
         }
     }
     for i in 0..10_000u64 {
         r.record(
+            SCOPE,
             &(i | 1 << 40).to_be_bytes(),
             AccessWeight::SuccessorGap(1_024),
         );
@@ -326,11 +342,12 @@ fn the_committed_notes_worked_example_matches_the_shipped_evaluator() {
     let r = deterministic_recorder();
     for i in 0..600u64 {
         for _ in 0..20 {
-            r.record(&i.to_be_bytes(), AccessWeight::SuccessorGap(1_024));
+            r.record(SCOPE, &i.to_be_bytes(), AccessWeight::SuccessorGap(1_024));
         }
     }
     for i in 0..10_000u64 {
         r.record(
+            SCOPE,
             &(i | 1 << 40).to_be_bytes(),
             AccessWeight::SuccessorGap(1_024),
         );
@@ -394,6 +411,7 @@ fn reaching_the_prefix_cap_marks_the_window_non_census_even_when_it_fits_afterwa
     // exactly the state the old condition mis-classified as a census.
     for i in 0..250_000u64 {
         r.record(
+            SCOPE,
             &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
             AccessWeight::SuccessorGap(64),
         );
@@ -437,6 +455,7 @@ fn accesses_dropped_at_the_sampling_floor_are_reported_not_lost() {
     // seated at all.
     for i in 0..400_000u64 {
         r.record(
+            SCOPE,
             &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
             AccessWeight::SuccessorGap(64),
         );
@@ -504,7 +523,7 @@ fn a_concurrent_close_never_splits_an_access_from_its_count() {
             std::thread::spawn(move || {
                 for i in 0..PER_THREAD {
                     let key = (t << 32) | i;
-                    recorder.record(&key.to_be_bytes(), AccessWeight::SuccessorGap(512));
+                    recorder.record(SCOPE, &key.to_be_bytes(), AccessWeight::SuccessorGap(512));
                 }
             })
         })
@@ -547,6 +566,7 @@ fn a_probe_cluster_below_the_load_factor_widens_instead_of_dropping() {
     let n = 95_000u64; // just under LOAD_FACTOR_LIMIT (98,304)
     for i in 0..n {
         r.record(
+            SCOPE,
             &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
             AccessWeight::SuccessorGap(256),
         );
@@ -561,6 +581,67 @@ fn a_probe_cluster_below_the_load_factor_widens_instead_of_dropping() {
     // the floor was reached, and the count covers the table.
     assert!(s.recorded_accesses >= s.total_accesses());
     assert!(s.dropped_accesses == 0 || s.at_sampling_floor);
+}
+
+#[test]
+fn the_same_key_in_two_tables_is_two_partitions_not_one_repeat() {
+    // F1. ONE recorder serves every table, so an entry identity over raw key bytes
+    // alone merges a key shared by two tables — and a tenant/user id shared across
+    // tables is ordinary, not a rare collision.
+    //
+    // The merge is biased twice, both toward "build the cache": two singletons
+    // become a `count = 2` entry, so `hittable = accesses - distinct` reports 1
+    // where the truth is 0; and the entry keeps the MAX byte weight rather than the
+    // sum, so it is under-priced and ranks earlier by access density.
+    let r = deterministic_recorder();
+    let users = TableScope::new("ks", "users");
+    let orders = TableScope::new("ks", "orders");
+    let shared_key = b"tenant-42";
+
+    r.record(users, shared_key, AccessWeight::SuccessorGap(1_000));
+    r.record(orders, shared_key, AccessWeight::SuccessorGap(3_000));
+
+    let s = r.close_window().expect("accesses were recorded");
+    assert_eq!(
+        s.distinct_partitions(),
+        2,
+        "one key in two tables is TWO partitions"
+    );
+    assert_eq!(
+        s.bucket(RepeatBucket::One).distinct(),
+        2,
+        "both are singletons — a merged entry would report one partition in bucket 2"
+    );
+    assert_eq!(s.bucket(RepeatBucket::Two).distinct(), 0);
+    assert_eq!(
+        s.bucket(RepeatBucket::One).accesses,
+        2,
+        "accesses - distinct = 0: nothing here is cacheable, and a merge would have \
+         manufactured one hit"
+    );
+    assert_eq!(
+        s.total_bytes(),
+        4_000,
+        "each partition contributes its OWN extent; a merged entry would keep only \
+         the maximum (3_000) and under-price the working set"
+    );
+
+    // Same table + same key is still ONE partition — the scope must not fragment a
+    // genuine repeat.
+    let r = deterministic_recorder();
+    r.record(users, shared_key, AccessWeight::SuccessorGap(1_000));
+    r.record(users, shared_key, AccessWeight::SuccessorGap(1_000));
+    let s = r.close_window().expect("accesses were recorded");
+    assert_eq!(s.distinct_partitions(), 1);
+    assert_eq!(s.bucket(RepeatBucket::Two).distinct(), 1);
+
+    // And an unqualified name is a distinct scope from a qualified one rather than
+    // silently aliasing onto it.
+    assert_ne!(
+        TableScope::from_qualified("ks.users"),
+        TableScope::from_qualified("users")
+    );
+    assert_eq!(TableScope::from_qualified("ks.users"), users);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +683,8 @@ mod end_to_end {
     );
     /// A BTI (`da`) fixture: the `Partitions.db` trie resolves an offset and no
     /// size, so the extent is measured by a strict-ceiling trie successor walk.
+    /// Its partition key `pk = 1` is the SAME logical value as the BIG fixture's
+    /// `id = 1`, which is what makes the cross-table case below real.
     const BTI: (&str, &str, &str, &str, &str) = (
         "test_da",
         "multiclustering_table",
@@ -740,5 +823,71 @@ mod end_to_end {
             0.0,
             "a measurable extent is not an unavailable one"
         );
+    }
+
+    /// The F1 aliasing case through the REAL read path, on real fixtures.
+    ///
+    /// `test_compaction_tombstone_ttl.shadow_row_delete.id = 1` (BIG) and
+    /// `test_da.multiclustering_table.pk = 1` (BTI) are both `int` partition keys
+    /// with the value 1, so their raw on-disk key bytes are IDENTICAL. Before the
+    /// table became part of the entry identity these two reads of two different
+    /// partitions in two different keyspaces merged into a single entry with
+    /// `count = 2` — a manufactured repeat, priced at the larger of the two extents.
+    #[tokio::test]
+    async fn the_same_key_bytes_in_two_real_tables_stay_two_partitions() {
+        let _guard = PROBE.lock().await;
+
+        let (big_root, big_schema) = resolve(BIG.0, BIG.1, BIG.2);
+        let big_db = open_db(&big_root, &big_schema, BIG.0).await;
+        let (bti_root, bti_schema) = resolve(BTI.0, BTI.1, BTI.2);
+        let bti_db = open_db(&bti_root, &bti_schema, BTI.0).await;
+
+        partition_access::global().set_window_config(partition_access::WindowConfig {
+            duration: Duration::from_secs(86_400),
+            max_accesses: u64::MAX,
+            ..partition_access::WindowConfig::default()
+        });
+        let _ = partition_access::close_window();
+        partition_access::set_probe_enabled(Some(true));
+
+        let big_rows = big_db
+            .execute(&format!(
+                "SELECT * FROM {}.{} WHERE {} = {}",
+                BIG.0, BIG.1, BIG.3, BIG.4
+            ))
+            .await
+            .expect("BIG point read")
+            .rows
+            .len();
+        let bti_rows = bti_db
+            .execute(&format!(
+                "SELECT * FROM {}.{} WHERE {} = {}",
+                BTI.0, BTI.1, BTI.3, BTI.4
+            ))
+            .await
+            .expect("BTI point read")
+            .rows
+            .len();
+
+        let summary = partition_access::close_window();
+        partition_access::set_probe_enabled(Some(false));
+        let summary = summary.expect("both point reads must have been recorded");
+
+        assert!(
+            big_rows > 0 && bti_rows > 0,
+            "both fixtures must return rows"
+        );
+        assert_eq!(
+            summary.distinct_partitions(),
+            2,
+            "two tables, two partitions — even though the key BYTES are identical"
+        );
+        assert_eq!(
+            summary.bucket(RepeatBucket::One).distinct(),
+            2,
+            "both are singletons; a merged identity would report one partition in \
+             bucket 2 and invent a cacheable repeat"
+        );
+        assert_eq!(summary.bucket(RepeatBucket::Two).distinct(), 0);
     }
 }
