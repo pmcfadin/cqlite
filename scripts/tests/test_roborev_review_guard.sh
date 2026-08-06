@@ -4272,7 +4272,10 @@ grep -qF 'if len(nonblank) != 1:' "$SCAN_TOOL" || _sole_ok=0
 grep -qF 'ONE DECISION, NO PARSE' "$SCAN_TOOL" || _sole_ok=0
 # AND NO MARKDOWN RECOGNISER MAY RETURN. Four were tried and superseded; reintroducing one would restore the
 # unbounded game of deciding "data or control?" inside a grammar the comment author controls.
-grep -qE 'FENCE_CHARS|fence_run|def .*fence|<pre>|lstrip\("`"\)' "$SCAN_TOOL" && _sole_ok=0
+# EXECUTABLE LINES ONLY: the comment block RECORDS the four superseded recognisers by name (including
+# HTML <pre>), and that history is the durable artifact — scanning prose would make writing it down a
+# violation, which is the same mistake as the job-18 census assert.
+grep -vE '^[[:space:]]*#' "$SCAN_TOOL" | grep -qE 'FENCE_CHARS|fence_run|def .*fence|<pre>|lstrip\("`"\)' && _sole_ok=0
 grep -qE 'FENCE_CHARS|fence_run' "$ORACLES" && _sole_ok=0
 if [ "$_sole_ok" -eq 1 ]; then
   ok 'structural: an authorization must be the SOLE NONBLANK CONTENT of its comment, decided without parsing Markdown'
