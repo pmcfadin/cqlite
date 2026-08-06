@@ -492,95 +492,47 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
   **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
   Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
-  **Snapshot-delivered diffs are DETECTED AND REPORTED, and NOTHING IS READ (#3312, owner ruling C⁗).** A large
-  diff is not inlined: roborev writes it to a **transient** `<repo>/.roborev/roborev-snapshot-<id>/` file, names
-  it in the prompt, and deletes it before `roborev review --wait` returns — so the prompt carries **zero**
-  `diff --git` headers and the original key FALSE-FAILED every large review (measured: job 6836, `(21/21 …
-  absent)` on a demonstrably genuine review — 1.47M input / 1.35M cached, 4 findings with real `file:line`,
-  both vacuity tiers PASS — i.e. it red exactly the diffs that most need review and taught agents to waive the
-  one layer #3229 kept). Certifying that mode meant trusting
-  a copy of a vanishing file: **seven review rounds found eleven false-PASS vectors** in the machinery built to
-  make the copy trustworthy, and after that machinery was retired the remaining defects were all in the code
-  that merely **touched the filesystem** to digest the file (TOCTOU, a FIFO hang, watchdog portability, a flag
-  that never escaped its subshell, a test that never reached its subject). Four destinations were ruled in turn
-  — A-bounded → categorical+C‴ → C‴ → **C⁗** — and C⁗ is the floor: in snapshot mode `prompt-content:` reports
-  **`NOTICE`** and the block records **`snapshot-path:`** (the path **as the prompt stated it**),
-  **`snapshot-containment:`** (a **`lexical`** statement about that string — no filesystem access) and
-  **`snapshot-expected:`** (the census code subset expected, *not* asserted). **A snapshot-mode PASS does not
-  assert the reviewer received the census paths.** **INLINE mode is unchanged and still FAILs on an absent census
-  path**, and a stated path that is relative, dot-segmented, outside the repo prefix or not shaped like a
-  snapshot file is a **named FAIL** — as is roborev's delegated-inspection tier, which names no path at all.
-  Read out of the installed binary (v0.61.2) rather than from one transcript: there are **two** snapshot
-  instruction spellings (the full one and a compact ``(Diff too large; read `<path>`.)``), both read, and that
-  **THIRD oversize tier** (`codex_*`/`generic_*` templates) ships **neither** a diff nor a snapshot and tells
-  the reviewer to run git itself — nothing local can verify that mode, so it stays a **FAIL** whose cause NAMES
-  it; whether such a review is certifiable at all is an owner call, not the wrapper's.
-  **THE INVARIANT THAT BOUNDS ALL OF THIS: inline census verification must not be suppressible by any
-  repository-controlled content (#3312 job 18).** Once nothing is read, a lexically valid but NONEXISTENT
-  snapshot path cannot be refuted — so an instruction injected into the prompt (an `AGENTS.md`
-  guidelines section is at column zero, exactly like roborev's own text, and the column-zero anchor was only
-  ever designed against diff-BODY lines) would flip an inline review to the exempted NOTICE and skip the census
-  check entirely. RED-verified: pre-fix, a prompt missing a census path reached `RESULT: PASS`. Double-locked —
-  an instruction counts **only inside roborev's own diff-delivery block** (its `### …Diff…` heading, after its
-  own `(Diff too large` notice; the heading is matched tolerantly because it is *data* in roborev's template,
-  and pinning the observed `### Combined Diff` spelling would false-FAIL a default-heading review), **and** a
-  prompt carrying BOTH inline headers and an instruction — which roborev never emits — is a named
-  `mixed-delivery` FAIL. **Scope, recorded in code:** this defends against silent tooling failure, staleness and
-  prompt-content injection — *not* against an adversary with write access to the reviewed repo, who can rewrite
-  the wrapper and its tests, so hardening against that is unwinnable and out of scope.
-  **The scoping is BLOCK-LOCAL on both sides, and the last block wins (#3312 job 19).** The delivery-MODE
-  decision reads only `diff --git` headers seen **inside** a delivery block — what an inline delivery actually
-  looks like — never the global header collection, which kept feeding census certification unchanged: consulting
-  it made a **legitimate** snapshot review FAIL whenever repository instructions merely *quoted* a diff header,
-  i.e. this issue's own false-FAIL in a new shape. And each delivery-block opener **discards the previous
-  block's candidates**, so only the FINAL block is selected and an injected block preceding roborev's own
-  supplies neither a path nor a forged ambiguity. The header evidence stays **prompt-wide** deliberately
-  (asymmetric on purpose): under a strictly same-block rule a genuine inline delivery followed by an injected
-  trailer would present a final block with an instruction and no headers, so it would resolve to the exempted
-  NOTICE and skip census certification — the #3222 class excused by repository content.
-  **BUT QUOTED HEADERS MAY NEVER ESTABLISH THAT A DELIVERY HAPPENED (#3312 job 20).** A **pathless oversize
-  marker** — roborev's delegated tier: `(Diff too large …)` with no snapshot path, the reviewer told to run git
-  itself — is its own hard-failing state (`delegated-oversize`), decided **before** the global header set is
-  consulted anywhere. Read in the other order it resolved as `inline` on any repository-quoted `diff --git` line,
-  and quoted headers that happened to cover the census produced **`prompt-content: PASS` on a review that
-  received nothing** — a PASS, not the disclosed NOTICE residual, and a contradiction of the standing #3325
-  ruling that the tier stays a named FAIL. So the header set has **two separated uses**: prompt-wide evidence for
-  the mixed-delivery lock and for census matching once a delivery is established, never the thing that
-  establishes delivery when roborev's own marker says it delegated. Both routes into the tier are asserted (a
-  compact instruction whose token is a git command, and an oversize notice with no instruction line at all), and
-  the **evaluation ORDER is pinned by a structural assert** — this was the second order-of-evaluation false PASS
-  in that one function, after validate-after-normalise.
-  **CANDIDATE LIFETIME IS BOUNDED BY ITS BLOCK, AND ANY HEADING SUPERSEDES A BLOCK (#3312 job 21 — the THIRD
-  state-lifetime defect in this one classifier).** An unrecognised heading (`### Patch`) used to close the
-  delivery block *without invalidating its candidates*, so a stale injected path stayed selected while roborev
-  delivered its diff inline under that heading — and a review with a **genuine inline delivery** was downgraded
-  to the accepted NOTICE. **That falsified two written claims**: that no exposure existed where a real inline
-  delivery is present, and the in-code residual saying a non-`Diff` heading "suppresses detection and fails
-  CLOSED" — true of the opener *in isolation*, **fail-OPEN in combination** with a candidate outliving its
-  block. Single-property reasoning is what missed it. Now: the reset fires on **every** heading, and roborev's
-  own **fenced** inline diff (```` ```diff ````, the one structural delivery marker that exists — measured on a
-  live inline prompt) counts as delivery evidence whatever the heading says, which closes the variant where the
-  injected trailer comes *after* the genuine delivery. Declared cost, fail-CLOSED: repository content holding a
-  fenced diff containing a `diff --git` line makes a snapshot-delivered review of that repo FAIL
-  `mixed-delivery` rather than NOTICE (measured on both live snapshot prompts: zero fences, zero column-zero
-  headers outside the delivery block). **The assert is now family-level, because pinning instances did not
-  hold**: exactly one `in_trailer` assignment, in a rule that always emits the reset, with the reader clearing
-  all three candidate variables — so a fourth block-ending path cannot be added without reddening the lint.
-  **AND THE IRREDUCIBLE RESIDUAL, as a property, not a reassurance: delivery mode is inferred from prompt TEXT,
-  and roborev's prompt embeds repository-controlled content** (project guidelines/`AGENTS.md`, additional
-  context, previous-review bodies) **at column zero, exactly like roborev's own text — there is no structural
-  marker separating the generated delivery block from injected text reproducing it, so no amount of further
-  text-scoping closes it.** Concretely: a prompt with **no inline delivery** (no `diff --git` header inside any
-  delivery block) whose repository content reproduces a delivery block, an oversize notice and a lexically valid
-  snapshot path **obtains a `NOTICE` where a `FAIL` was due**. It is **bounded, not new**: snapshot mode is
-  uncertified by C⁗, so the effect is that repository content can move such a review **into the already-accepted
-  uncovered envelope**, widening access to an accepted gap rather than opening a class. Where an inline delivery
-  IS present the `mixed-delivery` lock fails the prompt closed; where its headers cover the census the run is
-  certified inline and snapshot mode is never consulted. **Closing it requires an out-of-band delivery-mode
-  signal roborev measurably does not expose** — established by an exhaustive read-only sweep of every surface
-  (CLI, `show --json`, `list --json`, job logs, sqlite schema, `export reviews`, binary strings): no delivery
-  field, no digest, no size, and `review_jobs.diff_content`/`patch` present in the schema but **empty for every
-  job** (a trap, not an oracle). So it is **disclosed, not fixed**.
+  **`prompt-content:` ASKS ONE QUESTION, AND THERE IS NO DELIVERY CLASSIFIER (#3312, owner ruling (4)).** Are
+  the census **CODE** paths present in the prompt the reviewer was sent? **Present ⇒ PASS. Absent ⇒ FAIL,
+  unconditionally**, whatever caused it. The wrapper used to infer HOW roborev delivered the diff — inlined,
+  or by a path to a **transient** `.roborev/roborev-snapshot-<id>/` file it deletes before `--wait` returns,
+  or the delegated tier that ships neither and tells the reviewer to run git itself — and that inference
+  produced **four consecutive High-severity false verdicts, in both directions**: a header set consulted
+  before an oversize marker (a delegated review PASSing on repository-quoted headers), a candidate outliving
+  its block, a real inline delivery under an unrecognised heading producing no evidence, and a block opener
+  keyed on heading text that roborev treats as caller **data**. The instances differed; **the cause did not** —
+  roborev's prompt embeds repository-controlled content (project guidelines/`AGENTS.md`, additional context,
+  previous-review bodies) at column zero, indistinguishable from roborev's own text, so structure inferred
+  from it is spoofable both ways. **No terminating marker exists** (the only structural one was roborev's
+  fenced diff, and repository content can contain fences too), so the owner deleted the inference rather than
+  patch a fifth instance. Gone with it: block detection, heading parsing, fence evidence, `mixed-delivery`,
+  candidate lifetime, the snapshot/delegated distinction, the lexical path binding, snapshot-path extraction,
+  the three `snapshot-*` keys, this key's `NOTICE` verdict and its exemption — so the **affirmation backstop
+  again has no per-key escape hatch**. Every one of the four Highs is now *unexpressible*.
+  **THE ACCEPTED COST, stated because it is real: a snapshot-delivered diff and a vacuous review that
+  received NOTHING are IDENTICAL to the machine** — neither has census paths in its prompt, so both FAIL.
+  What distinguishes them is a **human plus the review's token accounting** (genuine: 398k–649k input /
+  314k–554k cached; vacuous baseline ~18.7k / 0). That trade was chosen over a machine guessing from
+  injectable text.
+  **THE ABSENCE WAIVER — the break-glass, and its four constraints.** The **OWNER or the coordination LEAD**
+  may excuse an absence FAIL with a PR comment carrying
+  `roborev-waive: prompt-content-absent sha=<40-hex head> reason=<why>`. **(a)** Human-authorized, never
+  self-applied: a worker or closer may post **one** REQUEST comment — which must carry the token accounting —
+  and may never waive its own PR; a self-waiving closer would collapse this into "absence never fails".
+  **(b) SHA-bound**, exactly like `ci:waive:<tier-id>`: a push invalidates it, so re-request against the new
+  head. **(c)** It excuses the **ABSENCE verdict ONLY** — never a FAIL with any other cause (unretrievable
+  prompt, `0/0` census, sha-assert, review-completed) — and the block still records **what was absent, the
+  authorizer, the sha and the reason**, under a **distinct `WAIVED` token** so no reader grepping
+  `prompt-content: PASS` mistakes a waived run for a certified one, beside a `waiver:` key that names the
+  state even when nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAVAILABLE`, each leaving the FAIL in
+  place). **(d)** The request carries the token accounting, and the authorizer checks it.
+  **AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED, and the code says so.**
+  On this fleet the worker, the closer and the owner all post through the **same GitHub login**, so no
+  `author.login` check could distinguish a self-applied waiver from a granted one — a check that appeared to
+  verify authorship while verifying nothing is exactly the false-assurance shape this issue spent four review
+  rounds removing, so it is deliberately **not** implemented. Mechanized instead: the marker exists on the PR,
+  it names the **certified** head sha, it carries a reason, and all of it lands in the summary block; the audit
+  trail is the immutable, attributable PR comment.
   **The hang and race classes are NOT REACHABLE because nothing is read — that is weaker than "fixed", and only
   it is true.** The predicate-family rule survives as **doctrine, not code** (the helper and its lint were
   deleted with the probes they served, since a lint with an empty subject set greens vacuously): **every
