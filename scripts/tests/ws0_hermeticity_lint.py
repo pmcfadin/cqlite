@@ -279,6 +279,17 @@ EXEMPTIONS: dict[str, str] = {
     # correctly refused when it was added speculatively.
     "tools/ws0-corpus-gen/README.md": "documentation",
     "tools/ws0-corpus-gen/src/bin/scan_bench.rs": "rust; cannot invoke a shell script bare",
+    # Round 10's F-B test file, and the census reported it UNCOVERED the moment it was staged —
+    # the FIFTH time this oracle has caught an addition, which is what it is for. Note again the
+    # two postures that make checking both worthwhile: `cargo test -p ws0-corpus-gen` absorbed
+    # this new integration target SILENTLY (its subject is the crate's `tests/` directory, so a
+    # new file joins automatically) while this CONTENT-based census correctly demanded a decision.
+    # Same class as its `scan_bench.rs` sibling: rust cannot invoke a shell script bare, and its
+    # single driver mention is prose (it records that `ws0-baseline.sh` runs both of arm A's legs
+    # per rep, which is WHY both output paths must carry the verified scope).
+    "tools/ws0-corpus-gen/tests/scan_bench_ingests_exactly_one_table_dir.rs":
+        "rust; cannot invoke a shell script bare — its ws0-baseline.sh mention is prose stating"
+        " that the driver runs both the scanning and --setup-only legs per rep",
 }
 # Directory prefixes whose every file is documentation.
 EXEMPT_PREFIXES = ("docs/",)

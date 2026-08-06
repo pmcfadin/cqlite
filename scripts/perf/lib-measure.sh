@@ -56,6 +56,17 @@
 # Under the driver's `set -u` an unset global is a fatal error rather than an empty expansion, so
 # a caller that sourced this and skipped the setup fails loudly instead of measuring nothing.
 
+# THIS LIBRARY'S OWN DIRECTORY, resolved from `BASH_SOURCE` at source time (#3272 round 10, F-A).
+#
+# `ws0_prewarm.py` is a sibling of this file, and the obvious spelling for reaching it would be the
+# driver's `$HERE`. Deliberately NOT that: `$HERE` is not in the driver-globals list documented
+# above, so using it would add an UNDOCUMENTED coupling — and under the driver's `set -u` a caller
+# that sourced this library without setting `HERE` would die inside the measurement loop, after the
+# server is up and a rep is in flight. `BASH_SOURCE[0]` inside a sourced function resolves to THIS
+# file whatever the caller did, so the library locates its own sibling and the coupling list above
+# stays true.
+WS0_MEASURE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ---------------------------------------------------------------------------
 # Arm A — the bare scan
 # ---------------------------------------------------------------------------
@@ -153,18 +164,44 @@ measure_flight() {
   # run continues rather than aborting: a rep that is honestly labelled
   # `prewarm-failed` is more useful than no rep, and ws0_report.py surfaces the
   # label in every report it writes.
+  #
+  # `ok` REQUIRES AN AFFIRMATIVE MEASUREMENT, NOT AN EXIT STATUS (#3272 round 10, F-A).
+  # This used to set `prewarm_status="ok"` from the `if` on the loadgen's exit alone, while
+  # passing `--out /dev/null` — discarding the ONLY record of what the prewarm did. The loadgen
+  # exits 0 whenever the ramp completes, and a step whose every request was shed (#2420) or
+  # errored completes normally, because those outcomes are COUNTED rather than fatal. So a
+  # prewarm that served NOTHING, or that streamed zero rows, was recorded as healthy and the rep
+  # claimed a WARM measurement having faulted in nothing. Same class as AC1's finding 2
+  # (`skipped-cold-arm` satisfying the prewarm guard) at a different line.
+  #
+  # So the JSONL is RETAINED to a real path and `ws0_prewarm.classify_prewarm_jsonl` decides the
+  # label from it: >=1 successful request AND >=1 row, else a named degradation. The
+  # honest-degradation behaviour is unchanged — the run continues either way.
   local prewarm_status="skipped-cold-arm"
   if [[ "$temp" == "warm" ]]; then
-    if taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
+    local prewarm_rc=0
+    # NOT `/dev/null`: this artifact IS the evidence the status is derived from.
+    taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
         --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
-        --shape full --ramp 1 --step-duration 20s --round prewarm --out /dev/null \
-        > "$OUT_DIR/$tag.prewarm.log" 2>&1; then
-      prewarm_status="ok"
-    else
-      prewarm_status="FAILED-exit-$?"
-      echo "  WARNING: prewarm FAILED for $tag ($prewarm_status) — this 'warm' rep is" >&2
-      echo "           partly cold. Recorded in results.json and summary.txt; see" >&2
-      echo "           $OUT_DIR/$tag.prewarm.log" >&2
+        --shape full --ramp 1 --step-duration 20s --round prewarm \
+        --out "$OUT_DIR/$tag.prewarm.jsonl" \
+        > "$OUT_DIR/$tag.prewarm.log" 2>&1 || prewarm_rc=$?
+    # The classifier never fails and never exits non-zero (it must not abort a rep the rig has
+    # decided to keep and label), so its output is the status. A classifier that could not run at
+    # all would leave this empty, which is caught immediately below rather than recorded as blank.
+    prewarm_status="$(python3 "$WS0_MEASURE_LIB_DIR/ws0_prewarm.py" \
+      "$prewarm_rc" "$OUT_DIR/$tag.prewarm.jsonl")"
+    [[ -n "$prewarm_status" ]] || prewarm_status="FAILED-classifier-produced-nothing"
+    # An EXACT comparison, matching `ws0_validate.PREWARM_REQUIRED`'s exact per-temperature match —
+    # a prefix test here would call a hypothetical `ok-ish` label healthy while the reporter called
+    # it degraded, i.e. two vocabularies for one fact.
+    if [[ "$prewarm_status" != "ok" ]]; then
+      echo "  WARNING: prewarm DEGRADED for $tag ($prewarm_status) — this 'warm' rep is" >&2
+      echo "           partly cold. The status is derived from the prewarm's OWN JSONL" >&2
+      echo "           (>=1 successful request AND >=1 row), not from its exit code, so an" >&2
+      echo "           exit-0 run that served nothing reads as a failure (#3272 F-A)." >&2
+      echo "           Recorded in results.json and summary.txt; see" >&2
+      echo "           $OUT_DIR/$tag.prewarm.log and $OUT_DIR/$tag.prewarm.jsonl" >&2
     fi
   fi
   printf '%s\n' "$prewarm_status" > "$OUT_DIR/$tag.prewarm.status"
