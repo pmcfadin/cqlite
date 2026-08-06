@@ -511,23 +511,24 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
   # until the next reboot, which is precisely what the functional verification exists
   # to prevent, on the path most people take (no --yes).
   perf_remedy_line() {
-    # THE PRINTED REMEDY MUST BE THE VALIDATED PATH, NOT `tee`/`>` (issue #3261, roborev round 5
-    # High). Both former spellings — `--drop-in | sudo tee <path>` and, from a root shell,
-    # `--drop-in > <path>` — open the destination BY NAME, so a symlink planted there between this
-    # advice being printed and the human running it redirects a privileged write anywhere. `--install`
-    # routes through the same containment checks + mktemp + atomic rename bootstrap uses itself, so
-    # the copy-pasteable command is no weaker than the automated one.
+    # THE PRINTED REMEDY POINTS AT BOOTSTRAP ITSELF (issue #3261, roborev rounds 5-7).
+    # History, because it is the whole reason this is three lines instead of a clever one:
+    #   * originally `--drop-in | sudo tee <path>` (and `--drop-in > <path>` from a root shell) — both
+    #     open the destination BY NAME, so a symlink planted between this advice printing and the human
+    #     running it redirects a privileged write. Hardening the installer while printing that is worse
+    #     than not hardening it: it reads as safe.
+    #   * then a new `perf-capability.sh --install` entry point — which itself shipped an env-guard
+    #     bypass (round 6) and then a supplied-prefix bypass (round 7), i.e. a fresh public surface that
+    #     re-opened the hole AC4 had just closed, twice.
+    #   * now: no new surface at all. `bootstrap --yes` ALREADY performs the guarded staged install and
+    #     applies `sysctl --system`, on the path this suite has always asserted. Removing the escape
+    #     hatch is strictly safer than guarding it, and subtraction cannot introduce a false pass.
+    # Bootstrap is idempotent (file header), so re-running it is the sanctioned repair everywhere.
     if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
-      info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/perf-capability.sh --install && sysctl -q --system"
+      info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/bootstrap-agent-machine.sh --yes"
       info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
     else
-      # The priv token is only appended when there IS one: an empty ${PERF_RUN_AS} would leave a
-      # double space, and the root-box assertion pins the exact line.
-      if [ -n "$PERF_RUN_AS" ]; then
-        info "write + apply the drop-in:  bash scripts/perf-capability.sh --install ${PERF_RUN_AS% } && ${PERF_RUN_AS}sysctl -q --system"
-      else
-        info "write + apply the drop-in:  bash scripts/perf-capability.sh --install && sysctl -q --system"
-      fi
+      info "write + apply the drop-in:  bash scripts/bootstrap-agent-machine.sh --yes"
     fi
   }
 
