@@ -32,6 +32,10 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
+# The structured waiver scanner the wrapper delegates to (#3312 job 26). Defined HERE, beside
+# WRAPPER, because run_wrapper passes it on every call — the structural section is too late.
+SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
+WAIVER_SCAN_TOOL_OVERRIDE=""
 # The two sourced halves, named ONCE here because several cases probe a function DIRECTLY rather
 # than through the wrapper. `WRAPPER` is reassigned later by the gate-mock cases; these are not.
 CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
@@ -896,7 +900,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
-    ${WAIVER_SCAN_TOOL_OVERRIDE:+WAIVER_SCAN_TOOL="$WAIVER_SCAN_TOOL_OVERRIDE"} \
+    WAIVER_SCAN_TOOL="${WAIVER_SCAN_TOOL_OVERRIDE:-$SCAN_TOOL}" \
     TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
@@ -3960,7 +3964,6 @@ printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
 #   (4) no consumer re-implements header parsing or newline-delimited path membership.
 ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 CHECKS_FILE="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
-SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
 FLOW_FILES=("$ORACLES" "$CHECKS_FILE" "$WRAPPER")
 for _f in "${FLOW_FILES[@]}"; do
   if [ ! -f "$_f" ]; then bad "structural: missing $_f"; continue; fi
