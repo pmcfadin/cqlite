@@ -236,14 +236,34 @@ cpu_range_validate() {
 # it into ZERO elements, so there is no empty element to name, and the callers
 # (`verify_sibling_pair`, `verify_disjoint`) are the layer that knows an empty SET is fatal —
 # each now says so in its own terms (that is the other half of F4).
+#
+# # A TRAILING COMMA IS AN EMPTY ELEMENT TOO (#3272 review round 16, L1)
+#
+# The check above was right; the PARSER silently discarded the case it was written for. `IFS=','
+# read -r -a` DROPS a trailing empty field, so `2,10,` split into exactly two elements — `2` and
+# `10`, both non-empty — and sailed past the emptiness test that `2,,10` and `,2,10` hit. The
+# operator wrote a spec this rig cannot act on and got a measurement of a set they did not write,
+# which is the whole of what F4 exists to prevent; F4 just never saw it.
+#
+# It is fixed at the PARSE, not by a second anchored `^,|,$` grammar check, so the ONE diagnostic
+# keeps naming the offending POSITION: a trailing comma is refused as "the empty element at
+# position 3", the same sentence `2,,10` gets, rather than a separate message about commas that
+# would have to be kept in agreement with this one. A `,#` sentinel is appended before the split
+# and its element dropped afterward, which makes every trailing field a REAL element.
 cpu_list_expand() {
   local spec="$1" label="${2:-CPU list}" part bounds lo hi i idx=0
   local -a out=() _parts=()
-  IFS=',' read -r -a _parts <<<"$spec"
-  for part in "${_parts[@]}"; do
+  # An empty spec stays ZERO elements (the sentinel would otherwise invent one, turning `""` into
+  # a position-1 empty-element refusal and changing the callers' "CPU list is empty" diagnostic).
+  if [[ -n "$spec" ]]; then
+    IFS=',' read -r -a _parts <<<"$spec,#"
+    unset "_parts[$((${#_parts[@]} - 1))]"
+  fi
+  for part in ${_parts[@]+"${_parts[@]}"}; do
     idx=$((idx + 1))
     # An EMPTY element is a REFUSAL (#3272 F4). Pre-fix it was `continue`, so `2,,10` silently
-    # measured `2 10` and `,`/`,,` expanded to nothing and returned 0.
+    # measured `2 10` and `,`/`,,` expanded to nothing and returned 0. Round 16's L1 made a
+    # TRAILING empty field reach here at all — bash's split had been dropping it.
     if [[ -z "$part" ]]; then
       echo "FATAL: $label '$spec' has an EMPTY element (position $idx)." >&2
       echo "       An empty element used to be SKIPPED, so '2,,10' silently expanded to" >&2

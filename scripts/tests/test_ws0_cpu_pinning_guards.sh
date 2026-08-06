@@ -424,6 +424,64 @@ if [ "$pre_skip" = "2 10" ]; then
 else
   fail "round11 F4: the pre-fix loop must have expanded '2,,10' to '2 10', else the case proves nothing (got '$pre_skip')"
 fi
+# --- round 16, L1: A TRAILING COMMA IS AN EMPTY ELEMENT TOO ---------------------------------
+# The F4 check above was right; the PARSER discarded the case. `IFS=',' read -r -a` DROPS a
+# trailing empty field, so '2,10,' split into two NON-EMPTY elements and never reached the
+# emptiness test that '2,,10' and ',2,10' hit — the one spec shape an operator produces by
+# accident (a copy-paste, a shell loop that appends a separator per item) was the one shape that
+# slipped through. Refused with the SAME position-naming diagnostic, not a separate comma message.
+for spec in "2,10," "2,10,," "2,10-11,"; do
+  out=$(lib_call cpu_list_expand "$spec"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "EMPTY element (position 3)" <<<"$out"; then
+    pass "cpu-grammar (round16 L1): the TRAILING-comma spec '$spec' is REFUSED naming position 3 — the same sentence '2,,10' gets, not a separate grammar message"
+  else
+    fail "round16 L1: '$spec' must be refused naming the empty element position (rc=$rc, out: $out)"
+  fi
+done
+# NON-VACUITY: the PRE-FIX parse really did accept a trailing comma. A replica of the removed
+# split (no sentinel), observed to yield a set with NO empty element from '2,10,' — so the F4
+# check could not have fired, and the rig would have pinned '2 10' from a malformed spec.
+prefix_split_count_empty() {
+  local spec="$1" part; local -a _sp=(); local n_empty=0 n=0
+  IFS=',' read -r -a _sp <<<"$spec"          # the PRE-FIX split, verbatim (no `,#` sentinel)
+  for part in ${_sp[@]+"${_sp[@]}"}; do
+    n=$((n + 1)); [[ -z "$part" ]] && n_empty=$((n_empty + 1))
+  done
+  echo "$n $n_empty"
+}
+pre_trail="$(prefix_split_count_empty '2,10,')"
+if [ "$pre_trail" = "2 0" ]; then
+  pass "cpu-grammar NON-VACUITY (round16 L1): the PRE-FIX split read '2,10,' as $pre_trail (elements, empty-elements) — ZERO empty elements, so F4's check was never reached and the malformed spec was ACCEPTED"
+else
+  fail "round16 L1: the pre-fix split must have read '2,10,' as '2 0' (2 elements, none empty), else the case proves nothing (got '$pre_trail')"
+fi
+# ...and the sentinel did NOT invent an element for the TOTALLY EMPTY spec: '' must still be a
+# ZERO-element SUCCESSFUL expansion, or the callers' "CPU list is empty" diagnostic (1c above)
+# would be replaced by a position-1 empty-element refusal about an element nobody wrote.
+#
+# STDOUT ONLY here, unlike `lib_call` (which folds stderr in for diagnostic matching): these two
+# cases compare the EXPANSION's value, and the topology-override NOTE on stderr would otherwise
+# read as an expansion of one line.
+lib_call_stdout() {
+  local fn="$1"; shift
+  ( export CQLITE_WS0_CPU_TOPOLOGY_ROOT="$TOPO"
+    # shellcheck disable=SC1090
+    source "$LIB"
+    "$fn" "$@" ) 2>/dev/null
+}
+out=$(lib_call_stdout cpu_list_expand ""); rc=$?
+if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+  pass "cpu-grammar (round16 L1): the empty spec '' is STILL a zero-element successful expansion — the trailing-field fix did not invent a phantom element, so 'CPU list is empty' remains the caller's diagnostic"
+else
+  fail "round16 L1: '' must still expand to nothing with rc=0 (rc=$rc, out: '$out')"
+fi
+# ...and the ACCEPT direction survives the reparse: a well-formed list and a range still expand.
+out=$(lib_call_stdout cpu_list_expand "2,10-11"); rc=$?
+if [ "$rc" -eq 0 ] && [ "$out" = "2 10 11" ]; then
+  pass "cpu-grammar (round16 L1): the reparse did NOT break the accept direction — '2,10-11' still expands to '$out'"
+else
+  fail "round16 L1: '2,10-11' must still expand to '2 10 11' (rc=$rc, out: '$out')"
+fi
 # ...and an EMPTY EXPANDED SET is refused by `verify_disjoint`, per SET, naming which. This is the
 # `--client-cpus ''` path: the client set is deliberately NOT sibling-checked, so `verify_disjoint`
 # is the only place it is examined — and two nested loops over nothing returned 0.
@@ -1531,7 +1589,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=178
+MIN_CHECKS=189
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
