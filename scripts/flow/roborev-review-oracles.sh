@@ -837,10 +837,10 @@ roborev_collect_prompt_headers() {
   _rx_hdrs=()
   _rx_hdr_from=()
   _rx_hdr_to=()
-  # observability-justified: every caller has already established this file's state — the wrapper's own
-  # prompt file, or a snapshot/capture path that `_roborev_regular_readable_state` reported PRESENT. This
-  # test is a defensive no-op guard, and its falsity yields an EMPTY header set, which is the fail-closed
-  # direction (every census path then reads absent) rather than an absence claim about the path.
+  # THE ONLY FILE THIS EVER READS IS THE WRAPPER'S OWN PROMPT FILE, written by this run beside its transcript
+  # — under C⁗ no snapshot is ever read, so this function is never pointed at a path roborev controls. Its
+  # falsity yields an EMPTY header set, which is the fail-closed direction (every census path then reads
+  # absent) rather than an absence claim about anything.
   [ -f "$f" ] || return 0
   while IFS= read -r _h && IFS= read -r _f && IFS= read -r _t; do
     _rx_hdrs+=("$_h")
