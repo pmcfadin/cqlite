@@ -38,6 +38,7 @@ import hashlib
 import json
 import pathlib
 
+from ws0_canonical_corpus import MODE_BASELINE, MODE_NON_BASELINE
 from ws0_validate import (
     Invalid,
     _SHA256_RE,
@@ -354,6 +355,7 @@ def write_session_corpus_pin(
     corpus: pathlib.Path,
     identity: dict,
     config: dict | None = None,
+    canonical: dict | None = None,
 ) -> dict:
     """Record WHICH CORPUS — and, since F1, WHICH CONFIGURATION — this session will measure.
 
@@ -448,6 +450,19 @@ def write_session_corpus_pin(
         # BY THE REPORTER as its own configuration — see `session_manifest_config` for why the
         # reporter reads it rather than matching against it.
         "config": dict(config or {}),
+        # WHETHER THE CORPUS IS THE CANONICAL MEASUREMENT CORPUS (#3272 round 13, F3).
+        #
+        # The `config.baseline_mode` word above says which claim the RUN makes; this records the
+        # COMPARISON that word rests on — which canonical fields were compared, against which
+        # source file, and every divergence found. Recorded rather than derived at report time for
+        # the same reason the corpus pin exists at all: the canonical pin can be re-pinned between
+        # measurement and reporting, and a comparison performed at report time would then be
+        # against a shape the session never ran against.
+        #
+        # DERIVED, never accepted as an argument: `require_canonical_or_declared` performs the
+        # comparison and the driver passes its RECORD through. A caller-supplied verdict would be a
+        # value this writer records without observing, which is the shape this whole issue removes.
+        "canonical_corpus": dict(canonical or {}),
         "note": (
             "the corpus identity AND THE MEASUREMENT CONFIGURATION this session was STARTED"
             " against, stamped before the first rep. ws0_report.py REQUIRES it, refuses a"
@@ -510,6 +525,15 @@ MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
     "step_duration": "a non-empty recorded STRING (`<warm>/<cold>`), reported verbatim; the"
                      " DURATIONS that bound a rep were validated by the driver's own argument"
                      " checks (lib-args.sh) before the session ran",
+    "baseline_mode": "validated as one of ws0_canonical_corpus.MODE_BASELINE /"
+                     " MODE_NON_BASELINE, and — the substance — tied to a REAL pre-measurement"
+                     " COMPARISON against the canonical pin in"
+                     " tools/ws0-corpus-gen/src/measurement_corpus.rs, recorded in the pin's"
+                     " `canonical_corpus` block. `baseline` is only recordable for a corpus that"
+                     " was OBSERVED to match every canonical field, because the driver refuses"
+                     " the run otherwise (#3272 round 13, F3); a noncanonical corpus can only"
+                     " reach `non-baseline`, which the report LABELS in words. Opaque-string"
+                     " recording would have been the F6 shape all over again",
 }
 
 # Declaration order preserved, and DERIVED from the disposition rather than written twice: two
@@ -527,6 +551,7 @@ _MANIFEST_READER_KEYS = (
     "server_cpus",
     "client_cpus",
     "step_duration",
+    "baseline_mode",
 )
 
 # AT IMPORT, both directions, so a half-wired field cannot ship (the pattern
@@ -665,6 +690,20 @@ def session_manifest_config(
         "temps": nonempty_selection("temps", str(config["temps"]), temps_allowed),
         "arms": nonempty_selection("arms", str(config["arms"]), arms_allowed),
     }
+    # A CLOSED SET, not a recorded string (#3272 round 13, F3). An unrecognised value is REFUSED
+    # rather than reported verbatim, for the reason the roborev wrapper's verdict scan is a closed
+    # grammar: a mode nobody planned for would otherwise reach the report as a claim, and the
+    # report's whole job here is to say whether the run IS a baseline. `baseline` additionally
+    # requires the recorded canonical COMPARISON below — the word alone establishes nothing.
+    mode = config["baseline_mode"]
+    if mode not in (MODE_BASELINE, MODE_NON_BASELINE):
+        raise Invalid(
+            f"{p} `config.baseline_mode` is {mode!r}, which is not"
+            f" {MODE_BASELINE!r} or {MODE_NON_BASELINE!r}. An unrecognised mode is refused rather"
+            " than reported verbatim: the report states whether this run is a WS0 baseline, and a"
+            " value nobody planned for cannot support either answer (#3272 round 13, F3)."
+        )
+    out["baseline_mode"] = mode
     for key in ("server_cpus", "client_cpus", "step_duration"):
         value = config[key]
         if not isinstance(value, str) or not value.strip():

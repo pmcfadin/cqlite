@@ -327,3 +327,165 @@ def require_canonical_or_declared(
         )
     )
     return rec
+
+
+# The pin field this module's record is written to. Defined HERE, in the module that owns the
+# record's shape, and imported by the writer/reader — one spelling, so they cannot drift onto two
+# names (which would present as an absent-field refusal on a session that recorded it correctly).
+PIN_CANONICAL_FIELD = "canonical_corpus"
+
+# The record's REQUIRED keys. Every one is read by `verify_pinned_canonical_corpus` below; a key
+# added here without a reader is the written-but-unread shape round 6's B2 found, so the assert at
+# the bottom of this module closes that direction at import.
+CANONICAL_RECORD_FIELDS = (
+    "mode",
+    "is_canonical",
+    "is_baseline",
+    "label",
+    "divergences",
+    "compared_fields",
+    "canonical_pin_source",
+)
+
+
+def verify_pinned_canonical_corpus(pin_path: pathlib.Path, pin: dict) -> dict:
+    """Require the pre-measurement CANONICAL COMPARISON, and require it to be self-supporting.
+
+    # Why the reporter reads this rather than re-deriving it
+
+    Re-deriving at report time would compare the corpus against whatever the canonical pin says
+    NOW. A re-pin between measurement and reporting (or a report generated from a different
+    checkout — results dirs are routinely reviewed elsewhere) would then judge the session against
+    a shape it never ran against, in either direction: a session that WAS canonical reported as
+    divergent, or a divergent one silently blessed by a pin that moved. Same reason the CPU-pin
+    verification is recorded where it was made rather than re-read at report time (#3272 F6).
+
+    # What is checked, and why a bare `is_baseline` would not be enough
+
+    The record must SUPPORT its own verdict. `is_baseline` is re-derived here from `mode` and
+    `is_canonical`, and `is_canonical` from whether `divergences` is empty — so a hand-edited
+    `is_baseline: true` sitting beside a non-empty divergence list is REFUSED rather than printed.
+    A recorded boolean nobody re-derives is the written-but-unread shape with an extra step.
+    """
+    if not isinstance(pin, dict):
+        raise Invalid(f"{pin_path} must hold a JSON object")
+    rec = pin.get(PIN_CANONICAL_FIELD)
+    if not isinstance(rec, dict) or not rec:
+        raise Invalid(
+            f"{pin_path} records no `{PIN_CANONICAL_FIELD}` block, so it does not record whether"
+            " the corpus it measured is THE CANONICAL MEASUREMENT CORPUS. Before #3272 round 13's"
+            " F3 the pin recorded the identity of whatever corpus it was handed and compared it"
+            " against nothing, so a smoke-sized corpus was self-consistent through every"
+            " downstream check and published as a WS0 BASELINE. Re-run the session with the"
+            " current driver, which performs the comparison before the first rep."
+        )
+    absent = [f for f in CANONICAL_RECORD_FIELDS if f not in rec]
+    if absent:
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}` is INCOMPLETE — no {', '.join(absent)}. A"
+            " partial record cannot establish whether this session measured the canonical corpus."
+        )
+    mode, diffs = rec["mode"], rec["divergences"]
+    if mode not in (MODE_BASELINE, MODE_NON_BASELINE):
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.mode` is {mode!r}, not {MODE_BASELINE!r} or"
+            f" {MODE_NON_BASELINE!r} — an unrecognised mode supports neither answer."
+        )
+    if not isinstance(diffs, list):
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.divergences` must be a list, got"
+            f" {type(diffs).__name__} — the verdict below is DERIVED from it."
+        )
+    # THE VERDICTS ARE RE-DERIVED, never trusted. A hand-edited `is_baseline: true` beside a
+    # non-empty divergence list must be refused: that is the substitution this record exists to
+    # make impossible, and a recorded boolean nobody re-derives cannot make it so.
+    if bool(rec["is_canonical"]) != (not diffs):
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}` CONTRADICTS ITSELF: is_canonical="
+            f"{rec['is_canonical']!r} beside {len(diffs)} recorded divergence(s). The verdict is"
+            " DERIVED from the divergences, so these cannot both be true — this record was edited."
+        )
+    if bool(rec["is_baseline"]) != (not diffs and mode == MODE_BASELINE):
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}` CONTRADICTS ITSELF: is_baseline="
+            f"{rec['is_baseline']!r} with mode={mode!r} and {len(diffs)} divergence(s). A run is a"
+            " baseline only when the corpus matched EVERY canonical field AND"
+            f" {MODE_BASELINE!r} was requested."
+        )
+    if not isinstance(rec["label"], str) or not rec["label"].strip():
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.label` is empty — the report PRINTS this label, so"
+            " a non-baseline run would be published carrying no words saying so."
+        )
+    if not rec["is_baseline"] and NON_BASELINE_LABEL not in rec["label"]:
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.label` does not carry"
+            f" {NON_BASELINE_LABEL!r} on a run that is NOT a baseline. The label is the ONLY thing"
+            " in the printed report that distinguishes a smoke run from a baseline, so a softened"
+            " one is the whole finding back again."
+        )
+    # THE COMPARISON'S SCOPE IS CHECKED, not merely carried. A record listing FEWER compared
+    # fields than this module requires describes a WEAKER comparison than the one the report will
+    # cite — a session pinned by an older driver that compared three fields would otherwise be
+    # reported exactly like one that compared all nine.
+    compared = rec["compared_fields"]
+    if not isinstance(compared, list):
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.compared_fields` must be a list, got"
+            f" {type(compared).__name__}."
+        )
+    want = sorted(f for f, _k in CANONICAL_FIELDS.values())
+    if sorted(str(c) for c in compared) != want:
+        missing = sorted(set(want) - {str(c) for c in compared})
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}` records a comparison over"
+            f" {len(compared)} field(s), not this module's {len(want)}"
+            + (f" (no {', '.join(missing)})" if missing else "")
+            + ". The report cites this as 'the canonical fields were compared', so a narrower"
+            " recorded comparison would be published as a full one. Re-run the session with the"
+            " current driver."
+        )
+    # ...and WHICH pin it was compared against, so the report names its source rather than
+    # asserting one. A record naming a different file is not this rig's canonical comparison.
+    if rec["canonical_pin_source"] != RUST_PIN_REL:
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.canonical_pin_source` is"
+            f" {rec['canonical_pin_source']!r}, not {RUST_PIN_REL!r} — the recorded comparison was"
+            " made against a different pin, so it does not establish this rig's canonical shape."
+        )
+    out = dict(rec)
+    out["source"] = str(pin_path)
+    return out
+
+
+# THE DECLARED-BUT-UNREAD DIRECTION, closed at import (#3272 round 6, B2's lesson). Round 5's F3
+# added the component map to the pin and NOTHING in the tree read it, so the field read as a guard
+# while being inert. This assert makes the same mistake impossible for this record: every declared
+# field must be SUBSCRIPTED in the reader's own source.
+#
+# THE ORACLE IS VALIDATED BEFORE ITS NEGATIVE IS TRUSTED, and that is not ceremony — the first
+# version of this assert searched `repr(co_consts)` for `"label"` WITH double quotes, while the repr
+# spells constants with SINGLE quotes, so it FAILED on a field the reader does read. A guard that
+# reds on correct input is the guard people learn to delete. The positive control below is a name
+# this reader provably does NOT read, so if the scan cannot see the difference it says so.
+def _reader_reads(field: str) -> bool:
+    import inspect
+
+    src = inspect.getsource(verify_pinned_canonical_corpus)
+    return f'rec["{field}"]' in src or f"rec[{field!r}]" in src
+
+
+if _reader_reads("a_field_this_reader_does_not_read"):  # pragma: no cover
+    raise Invalid(
+        "the declared-but-unread scan reports a field the reader CANNOT be reading, so it cannot"
+        " distinguish read from unread and its negative means nothing (#3272: validate the oracle"
+        " before trusting it)."
+    )
+for _f in CANONICAL_RECORD_FIELDS:
+    if not _reader_reads(_f):
+        raise Invalid(
+            f"`{_f}` is declared in CANONICAL_RECORD_FIELDS but verify_pinned_canonical_corpus"
+            " never subscripts it — a recorded field nobody reads is the written-but-unread shape"
+            " (#3272 round 6, B2). Wire it, or remove the declaration."
+        )
+del _f

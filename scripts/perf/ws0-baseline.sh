@@ -133,6 +133,14 @@ SCAN_PASSES=1
 PORT=18815
 OUT_DIR=""
 DO_BUILD=1
+# WHETHER THIS RUN CLAIMS TO BE A WS0 BASELINE (#3272 round 13, F3). Defaults to `baseline`,
+# which REQUIRES the canonical measurement corpus: the pre-measurement pin used to snapshot
+# whatever corpus it was handed and compare it against nothing, so a smoke-sized or
+# differently-seeded corpus was self-consistent all the way through the reporter and published as
+# a baseline. `--non-baseline` runs it anyway and LABELS the session and the report — a smoke
+# corpus must still run, and this issue has already broken three documented commands by forbidding
+# an input instead of labelling it. The two words come from `ws0_canonical_corpus.MODE_*`.
+BASELINE_MODE="baseline"
 EVENTS="cycles,instructions"
 # `--validate-args-only`: run every ARGUMENT check, print a stamp, and exit 0 having
 # touched NOTHING outside this process (issue #3272 review R1). See the exit point below
@@ -167,6 +175,14 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
                        atomically). REFUSED if it exists and is non-empty: measuring into a
                        used dir mixes artifacts from different sessions into one report.
   --no-build           Skip the release build; use the binaries already in target/release.
+  --non-baseline       Measure a corpus that is NOT the canonical measurement corpus. By
+                       DEFAULT the corpus is checked against the canonical pin in
+                       tools/ws0-corpus-gen/src/measurement_corpus.rs before the first rep
+                       and a divergent one is REFUSED: a smoke-sized or differently-seeded
+                       corpus is self-consistent through every other check, so it used to be
+                       published as a WS0 baseline. This flag runs it anyway — the smoke path
+                       — and the session manifest and the printed report are LABELLED
+                       'NOT A WS0 BASELINE' in words. It never makes a run a baseline.
   --validate-args-only Run every ARGUMENT check and exit 0 with 'ARGUMENTS OK' — no
                        sysctl write, no build, no cache drop, no perf, no measurement.
                        Exists so the self-tests can assert the ACCEPT direction of
@@ -204,6 +220,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --no-build) DO_BUILD=0; shift ;;
+    --non-baseline) BASELINE_MODE="non-baseline"; shift ;;
     --validate-args-only) VALIDATE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     # Every unrecognized argument is an ERROR, never ignored: a typo'd flag that
@@ -367,8 +384,12 @@ fi
 require_unused_out_dir "${OUT_DIR:-}"
 
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
+  # `baseline-mode` is in the stamp so the hermetic self-tests can observe WHICH claim the run
+  # makes without executing anything. The canonical-corpus COMPARISON itself is necessarily below
+  # this boundary (it reads the corpus's recorded identity off disk), like the schema check.
   echo "ARGUMENTS OK (--validate-args-only): reps=$REPS temps=[$TEMPS] arms=[$ARMS]" \
-       "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION"
+       "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION" \
+       "baseline-mode=$BASELINE_MODE"
   echo "  nothing was executed: no sysctl write, no build, no cache drop, no perf, no measurement."
   exit 0
 fi
@@ -504,6 +525,20 @@ record_measured_binaries || exit 2
 # terminates the run (a refusal resting on `set -e` alone is one `set +e` from decorative).
 verify_corpus_schema_input || exit 2
 write_ticket_template_for_session || exit 2
+
+# --- IS THIS THE CORPUS THE BASELINE IS DEFINED AS? (#3272 round 13, F3) --------------
+# Also in scripts/perf/lib-inputs.sh, which carries the full argument. In one line: the pin below
+# records the identity of whatever corpus it is handed and compares it against NOTHING, so a
+# smoke-sized or differently-seeded corpus is self-consistent through every downstream check and
+# was published as a WS0 BASELINE. This compares the corpus against the canonical pin in
+# tools/ws0-corpus-gen/src/measurement_corpus.rs BEFORE the first rep. `--non-baseline` runs a
+# noncanonical corpus anyway and LABELS the session and the report.
+#
+# BEFORE the pin, deliberately: a refusal must cost seconds, not a multi-minute measurement.
+#
+# Status checked EXPLICITLY: it does not run in a command substitution, so `|| exit 2` is what
+# terminates the run (a refusal resting on `set -e` alone is one `set +e` from decorative).
+verify_corpus_is_canonical_or_declared || exit 2
 
 # --- PIN WHICH CORPUS THIS SESSION IS ABOUT TO MEASURE (#3272 review round 4) --------
 # Stamped into the RESULTS DIR, BEFORE the first rep, and REQUIRED by ws0_report.py.

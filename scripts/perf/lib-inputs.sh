@@ -152,3 +152,55 @@ print(f"ticket pin:   {digest} — ticket-template.json (the REQUEST every Fligh
          echo "       so two arms would answer different queries under one report (#3272 M1)." >&2
          return 2; }
 }
+
+# verify_corpus_is_canonical_or_declared — IS THIS THE CORPUS THE BASELINE IS DEFINED AS?
+# (#3272 round 13, F3)
+#
+# THE FINDING. The pre-measurement pin (`write_session_corpus_pin`, called immediately below this in
+# the driver) snapshots the identity of the corpus it was HANDED and compares it against nothing.
+# Everything downstream is then self-consistency ABOUT THAT CORPUS: the pin matches the report-time
+# identity, the components match the pin, the schema matches its recorded digest, every rep's rows
+# are an exact multiple of the pinned row count. All of it is equally true of a corpus generated with
+# smoke-test row counts, a different seed, or any other noncanonical parameter — so such a corpus
+# passed the driver AND the reporter as a WS0 BASELINE, with nothing in the printed report to
+# distinguish it from the real thing.
+#
+# The identity being verified was never compared to the identity the baseline is DEFINED as. The
+# canonical shape lives in `tools/ws0-corpus-gen/src/measurement_corpus.rs`, and until now NOTHING
+# under `scripts/` referred to it — see `ws0_canonical_corpus.py` for the cross-language bridge and
+# why it is a source parse rather than a build or a committed copy.
+#
+# A SMOKE CORPUS STILL RUNS, under `--non-baseline`, LABELLED in the manifest and the report. That is
+# not a courtesy: rounds 9 and 10 each shipped a fix that made a documented operator command unable
+# to succeed, and a command that always fails teaches an operator to stop running it, which loses the
+# whole check. Forbidding the smoke corpus would be the fourth instance.
+#
+# CALLED BEFORE THE PIN, from the driver, so the ORDER stays legible at the driver's top level and a
+# refusal costs seconds rather than a multi-minute measurement.
+verify_corpus_is_canonical_or_declared() {
+  WS0_BASELINE_MODE_ARG="$BASELINE_MODE" python3 - "$WS0_INPUTS_LIB_DIR" "$CORPUS" "$REPO_ROOT" <<'PY' \
+    || { echo "FATAL: this session's corpus was not established to be the canonical measurement" >&2
+         echo "       corpus, so it cannot be measured as a WS0 BASELINE. The pre-measurement pin" >&2
+         echo "       used to record the identity of whatever corpus it was handed and compare it" >&2
+         echo "       against NOTHING, so a smoke-sized corpus reported as a baseline (#3272 F3)." >&2
+         echo "       Pass --non-baseline to measure it anyway (the run and the report are then" >&2
+         echo "       LABELLED as not a baseline), or regenerate the canonical corpus." >&2
+         return 2; }
+import os, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_canonical_corpus import require_canonical_or_declared
+from ws0_validate import Invalid, load_corpus_identity
+corpus, repo_root = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+mode = os.environ["WS0_BASELINE_MODE_ARG"]
+try:
+    rec = require_canonical_or_declared(
+        repo_root, load_corpus_identity(corpus), mode, corpus
+    )
+except Invalid as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"baseline mode: {rec['mode']} — {rec['label']}"
+      f" ({len(rec['compared_fields'])} canonical field(s) compared against"
+      f" {rec['canonical_pin_source']} BEFORE the first rep)")
+PY
+}
