@@ -241,7 +241,189 @@ is genuinely EMPTY and the verdict is a <em>truthful report of an empty input</e
 Re-running cannot help; the wrapper’s deterministic
 pre-enqueue <code dir="auto">code-free:</code> check fails it before any review is enqueued, rather than matching reviewer
 prose after the fact. The same mechanism is why <code dir="auto">prompt-content:</code> asserts the <strong>CODE subset</strong> of the
-census — and why an unretrievable prompt is a <code dir="auto">FAIL</code> there, never a passing <code dir="auto">UNAVAILABLE</code>. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
+census — and why an unretrievable prompt is a <code dir="auto">FAIL</code> there, never a passing <code dir="auto">UNAVAILABLE</code>.</p>
+<p><strong><code dir="auto">prompt-content:</code> asks one question, and there is no delivery classifier (issue #3312, owner ruling (4)).</strong>
+Are the census <strong>code</strong> paths present in the prompt the reviewer was sent? Present is a PASS; <strong>absent is a
+FAIL, unconditionally</strong>, whatever caused it. The wrapper used to infer <em>how</em> roborev delivered the diff —
+inlined, or by a path to a transient <code dir="auto">.roborev/roborev-snapshot-&#x3C;id>/</code> file it deletes before <code dir="auto">--wait</code>
+returns, or the delegated tier that ships neither and tells the reviewer to run git itself. That inference
+produced <strong>four consecutive High-severity false verdicts, in both directions</strong>, and the instances differed
+while the cause did not: roborev’s prompt embeds repository-controlled content (project guidelines /
+<code dir="auto">AGENTS.md</code>, additional context, previous-review bodies) at column zero, indistinguishable from roborev’s own
+text, so structure read out of it is spoofable both ways. No terminating marker exists — the only structural
+one was roborev’s fenced diff, and repository content can contain fences too — so the owner deleted the
+inference instead of patching a fifth instance. Block detection, heading parsing, fence evidence,
+<code dir="auto">mixed-delivery</code>, candidate lifetime, the snapshot/delegated distinction, the lexical path binding, snapshot
+path extraction, the three <code dir="auto">snapshot-*</code> keys and this key’s <code dir="auto">NOTICE</code> exemption are all gone, so the
+affirmation backstop again has <strong>no per-key escape hatch</strong> and all four Highs are unexpressible.</p>
+<p><strong>The accepted cost, stated because it is real: a snapshot-delivered diff and a vacuous review that received
+nothing are identical to the machine.</strong> Neither has census paths in its prompt, so both FAIL. What
+distinguishes them is a <strong>human plus the review’s token accounting</strong> (genuine: 398k–649k input / 314k–554k
+cached; vacuous baseline ~18.7k / 0). That trade was chosen deliberately over a machine guessing from
+injectable text.</p>
+<p><strong>THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
+credential (#3312 job 23).</strong> The <strong>OWNER or the coordination LEAD</strong> may excuse an absence FAIL with a
+<strong>dedicated, column-zero line</strong> of a PR comment:
+<code dir="auto">roborev-waive: prompt-content-absent base=&#x3C;40-hex> head=&#x3C;40-hex> job=&#x3C;id> reason=&#x3C;why></code>.
+<strong>(a)</strong> Human-authorized, never self-applied: a worker or closer may post <strong>one</strong> REQUEST comment —
+carrying the token accounting — and may never waive its own PR. <strong>(b) Bound to the WHOLE REVIEW SCOPE</strong>,
+not just the head: <strong>base AND head AND job</strong>, all required and all verified, because the authorizer
+judged <strong>one</strong> review — so a push, a different base <em>or a re-run</em> each need a fresh waiver, and one
+persistent comment can no longer excuse a later <strong>vacuous</strong> review at the same head. <strong>(c)</strong> It excuses
+the <strong>ABSENCE verdict ONLY</strong> — never any other cause — and the block still records what was absent, the
+authorizer, the bound scope and the reason, under a <strong>distinct <code dir="auto">WAIVED</code> token</strong> (so nobody grepping
+<code dir="auto">prompt-content: PASS</code> reads a waived run as certified) beside a <code dir="auto">waiver:</code> key that names the state even
+when nothing was granted (<code dir="auto">NONE</code>/<code dir="auto">STALE</code>/<code dir="auto">MALFORMED</code>/<code dir="auto">UNAVAILABLE</code>, each leaving the FAIL). <strong>(d)</strong> The
+request carries the token accounting and the authorizer checks it.
+<strong>AND THE LOOP HAS TO CLOSE, WHICH IT DID NOT (#3312 job 24).</strong> The waiver binds a JOB, but the
+operator only learns the job id — and the token accounting — from the FINISHED run, and re-running the
+wrapper to apply a fresh waiver <strong>enqueues a different job</strong>, so the waiver was instantly <code dir="auto">STALE</code>. As
+first built the break-glass was a <strong>dead letter</strong>: no sequence of actions got a legitimate absence past
+the gate. The fix is <strong>not</strong> to loosen the binding (dropping <code dir="auto">job=</code> reopens the hole where one comment
+waives a later <em>vacuous</em> review at the same base+head) but to add
+<strong><code dir="auto">--recheck-job &#x3C;id></code></strong>: re-decide THAT job’s verdict, enqueueing nothing. The job is named
+<strong>explicitly</strong>, never resolved from base+head, or a re-run could inherit a waiver written for a
+different review. <strong>A recheck inherits nothing</strong>: <code dir="auto">sha-assert</code> re-compares the record’s <code dir="auto">git_ref</code>
+against this base and head, the record’s own review text becomes the transcript so
+<code dir="auto">review-completed</code>, both vacuity tiers and <code dir="auto">findings</code> are re-asserted from it (no review text ⇒ empty
+transcript ⇒ fail-closed), and <code dir="auto">roborev-exit</code> reports <code dir="auto">SKIP</code> rather than claiming an exit status for a
+process that never ran. The block declares <strong><code dir="auto">MODE: recheck (job &#x3C;id> …; NO review was enqueued)</code></strong> and
+<strong><code dir="auto">recheck-of: &#x3C;id></code></strong> as its first keys — the way the gate declares <code dir="auto">MODE: lite</code> — so a recheck PASS is
+legitimate but can never be pasted as evidence of a <em>fresh</em> review. Demonstrated end to end: absence
+FAIL → waiver naming that base/head/job → recheck ⇒ <code dir="auto">WAIVED</code> + <code dir="auto">RESULT: PASS</code>, with zero reviewer
+invocations; and a recheck of a <em>different</em> job stays <code dir="auto">STALE</code>.
+<strong>The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged</strong>, so
+field order and value boundaries are enforced and <code dir="auto">reason=TODO </code> / whitespace-only reasons are refused
+like their untrimmed forms — per-field extraction had enforced neither.
+<strong>AND THREE LAYERS STOP THE ARTIFACT BECOMING THE CREDENTIAL — the sharpest instance of this issue’s
+recurring shape.</strong> The first version accepted the marker <em>anywhere</em> inside a comment whose newlines had
+been flattened, and the absence diagnostic <strong>printed a complete marker carrying the live sha</strong> — so
+pasting the summary block into a PR comment, <em>the documented practice throughout this repo</em>, authorized
+the next run (RED-verified: the pasted block produced <code dir="auto">prompt-content: WAIVED … RESULT: PASS</code>). A quoted
+example or a waiver <em>request</em> self-granted the same way. It is the same defect as prose inside a diff
+naming its own oracle, which is why the census matcher is column-zero anchored. Now: <strong>(1)</strong> comment line
+boundaries are preserved and the marker must <strong>BE</strong> the line — an indented, <code dir="auto">></code>-quoted, bulleted or
+mid-sentence copy is inert; <strong>(2)</strong> placeholder reasons are refused (an unsubstituted <code dir="auto">&#x3C;…></code>, or a bare
+<code dir="auto">why</code>/<code dir="auto">todo</code>/<code dir="auto">tbd</code> — <code dir="auto">claim.sh</code>’s rule), so a pasted <strong>template</strong> reads <code dir="auto">MALFORMED</code>; <strong>(3)</strong> no emitted
+diagnostic carries <strong>any part</strong> of the marker — not even the prefix — and points at <code dir="auto">--help</code> instead.
+<strong>THE UMBRELLA LESSON OF THIS ISSUE, and the most durable thing in it: CONTROL AND DATA MUST NOT SHARE A
+CHANNEL WHEN THE DATA IS ATTACKER-CONTROLLED (#3312).</strong> Four separate High-severity defects were the same
+shape, and each individual fix worked while the family kept regenerating — because the shape was never
+named in one place. The instances, in the order they were found:</p>
+<ol>
+<li><strong>Prose inside a diff naming its own oracle.</strong> A census path quoted in the reviewed text could satisfy
+the check that the reviewer <em>received</em> that path — which is why the matcher is anchored at COLUMN ZERO
+(every unified-diff body line carries a leading <code dir="auto">+</code>/<code dir="auto">-</code>/space/<code dir="auto">@</code>/<code dir="auto">\</code>, so body content cannot pose as
+a header).</li>
+<li><strong>The wrapper’s own diagnostic printing a valid waiver marker</strong> — an artifact that DESCRIBED the escape
+hatch BECAME it, because summary blocks get pasted into PR comments as a matter of course. Fixed by
+three layers: an anchored dedicated line, placeholder-reason refusal, and a diagnostic that emits no
+part of the marker at all.</li>
+<li><strong>Repository text reproducing roborev’s delivery-block markers.</strong> Delivery mode was inferred from
+prompt text that embeds project guidelines / <code dir="auto">AGENTS.md</code>, so repo content could move a review into an
+uncertified mode in either direction. No terminating marker existed, so the owner deleted the
+<em>classifier</em> rather than patch a fifth instance of it.</li>
+<li><strong>A comment body forging its own author record.</strong> Comments were flattened into one stream with an
+in-band author delimiter, so an unauthorized commenter could name an allowlisted login inside their own
+body and defeat the allowlist with one control character. Fixed by parsing <code dir="auto">gh --json</code> STRUCTURALLY —
+author and body stay separate FIELDS of one object — so there is no delimiter to forge.
+<strong>The generalisation to apply elsewhere:</strong> when a decision is made from a stream that carries both your
+markers and someone else’s payload, the fix is to REMOVE the shared channel (structured data, a separate
+field, a distinct file), not to choose a rarer delimiter — a rarer delimiter is still forgeable, and each
+narrowing only postpones the next instance. Where the channel genuinely cannot be separated, anchor the
+control tokens somewhere the payload provably cannot reach (column zero of a diff), and say in code that
+this is what the anchor is for.
+<strong>THE FIFTH VARIATION, AND HOW THE CLASS WAS FINALLY CLOSED (#3312 job 29): AN AUTHORIZATION MUST BE THE
+SOLE NONBLANK CONTENT OF ITS PR COMMENT.</strong> Leading/trailing blank lines are fine; anything else — prose, a
+code fence, a quote, an HTML tag, a second sentence — means the comment is <strong>not</strong> an authorization.
+<strong>FOUR RECOGNISERS WERE TRIED AND SUPERSEDED</strong>, each correct about the case in front of it, and they are
+named here so nobody reintroduces Markdown parsing thinking it was an oversight:
+(1) accept the marker <strong>anywhere</strong> in the comment ⇒ a quoted example granted;
+(2) require it to <strong>be its own line</strong> (column-zero anchor) ⇒ defeated indented, <code dir="auto">></code>-quoted, bulleted and
+mid-sentence copies, but not fences;
+(3) <strong>skip fenced regions</strong> ⇒ a fence preserves column zero, so a quoted example inside one granted;
+(4) <strong>track fence open/close state</strong> ⇒ a <code dir="auto">```bash</code> line <em>inside</em> a fence is CONTENT, not a closing
+delimiter, so the state desynchronised and a later marker granted — and HTML <code dir="auto">&#x3C;pre></code>/<code dir="auto">&#x3C;code></code> was never
+covered at all.
+Every one asked <em>“is this line DATA or CONTROL?”</em> of a grammar the <strong>comment author controls</strong>, which has
+unbounded ways to say “this is data” — so the list of recognisers never closes. <strong>That is this issue’s own
+umbrella lesson applied to itself: remove the shared channel, do not pick a rarer delimiter.</strong> Parsing
+Markdown to separate data from control <em>is</em> sharing a channel. The sole-content rule removes it and is
+decidable <strong>without parsing anything</strong>: no quoting construct can be the only thing in a comment, because
+every quoting construct requires additional content.
+<strong>Cost, and why it is arguably an improvement:</strong> the authorizer posts a comment containing only the marker
+and puts commentary in a <strong>separate</strong> comment — the token accounting already lives inside <code dir="auto">reason=</code>, so
+nothing is lost, and an authorization <em>should</em> be a clean unambiguous act rather than a sentence buried in
+prose. <strong>A comment with other content is ignored silently, not reported malformed:</strong> someone documenting
+the form (this repository’s own threads do) never attempted an authorization, and <code dir="auto">MALFORMED</code> would be a
+false accusation reprinted on every later run. A <strong>marker-only</strong> comment with bad fields is still
+<code dir="auto">MALFORMED</code>. The <code dir="auto">NONE</code> cause teaches both rules — sole content <strong>and</strong> top-level.
+<strong>THE WAIVER’S THREAT MODEL, STATED WITH ITS LIMITS (#3312) — and the triage rule that goes with it.</strong>
+Five consecutive review rounds landed in this one authorization path (marker anchoring, scope binding,
+author authorization, the parse channel, the enforcer path). Every fix was right, and the pattern predicts
+more — so the boundary is recorded to stop the next finding being patched instead of triaged.
+<strong>A HOSTILE INVOKER IS OUT OF SCOPE, by construction.</strong> Whoever runs the wrapper can edit it, replace the
+scanner file beside it, shadow <code dir="auto">gh</code>/<code dir="auto">python3</code> on <code dir="auto">PATH</code>, or skip the wrapper and hand-write a
+<code dir="auto">==== ROBOREV REVIEW SUMMARY ==== … RESULT: PASS</code> block into the PR. <strong>No check inside a process defends
+against the party that controls the process</strong>, and pretending otherwise is the false-assurance shape this
+issue exists to remove. The merge gate’s real protection against a hostile <em>worker</em> is the <strong>audit trail
+plus a human reading the PR</strong>, not the wrapper.
+<strong>WHAT IT DOES DEFEND, which is why the layers were worth building:</strong> (1) <strong>parties who do not control the
+invocation</strong> — this is a public repository, anyone can comment, and a failing block <em>prints</em> base/head/job,
+so the allowlist + anchored marker + structured author association are what stop a stranger; (2)
+<strong>accident and drift</strong>, the larger category in practice — a pasted block, a quoted example, a stale waiver
+riding to a later review, a re-run inheriting an authorization meant for another job, an unsubstituted
+placeholder. Every fix in this path landed in (1) or (2).
+<strong>THE TRIAGE RULE:</strong> <em>“the INVOKER can bypass this”</em> ⇒ <strong>out of model — record it, do not patch it</strong>;
+<em>“a NON-INVOKER can bypass this”</em> or <em>“this can be bypassed BY ACCIDENT”</em> ⇒ <strong>defect</strong>. Same-host actors
+able to write these scripts or roborev’s database are <strong>invoker-class</strong>, not third parties.
+<strong>CHEAP HARDENING REMAINS WORTH IT</strong> where an invoker could reach the same end another way: dropping the
+scanner-path env override cost nothing and closes contexts where the environment is influenced while
+files are not (a workflow injecting a variable). “Theoretically redundant” never justifies leaving a hole
+a non-invoker or an accident can walk through.
+<strong>TWO RESIDUALS INSIDE THE MODEL, named rather than implied:</strong> the marker is read from <strong>top-level PR
+comments only</strong>, so one posted inside a review body or a review-thread reply is silently not applied (the
+run reports <code dir="auto">waiver: NONE</code> and the FAIL stands — fail-closed, but it reads as “my waiver was ignored”);
+and <strong>an authorized human can authorize carelessly</strong> — pre-authorizing a job id, or waiving without
+checking the token accounting. Nothing mechanical detects either; the control is the permanent,
+attributable comment, which is why a substantive reason is required and recorded verbatim.
+<strong>AND A SECOND, EQUALLY TRANSFERABLE RULE FROM THE SAME ISSUE: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS
+OWN ENFORCER (#3312 job 27).</strong> Hardening a check while leaving its <em>invocation</em> configurable moves the hole
+rather than closing it. Concretely: the waiver allowlist was deliberately hard-coded and asserted
+non-env-derived — <em>“an override is settable by the party the allowlist constrains”</em> — and then the <strong>scanner
+that enforces that allowlist</strong> was made env-settable (<code dir="auto">WAIVER_SCAN_TOOL</code>), so an invoker could point it at a
+script printing <code dir="auto">state=granted</code> and pass with <strong>no authorized comment anywhere</strong>. The protection had moved
+outward and been left open. The enforcer is now resolved from the wrapper’s own directory with no override
+and no <code dir="auto">${…:-…}</code> fallback, and the structural assert covers the <strong>invocation</strong> as well as the value.
+<strong>Corollary for tests:</strong> a case needing a different enforcer <strong>substitutes the artifact</strong> in its own scratch
+copy of the tree — never a path variable. A test-only seam is one more thing a real invoker can set, so the
+harness assert forbids reintroducing one (with the needle split so the guard cannot match its own line).
+<strong>WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (#3312 job 25) — and the correction that produced it.</strong>
+The comment author used to be <em>recorded but never authorized</em>, so on this <strong>public</strong> repository ANY
+commenter could copy the <code dir="auto">base</code>/<code dir="auto">head</code>/<code dir="auto">job</code> values out of the failing block (they are printed in it)
+and make the merge gate pass. The residual had been written as <em>“we cannot distinguish the owner from
+the worker on a shared <code dir="auto">GH_TOKEN</code>”</em>, which conflated <strong>cannot enforce perfectly</strong> with <strong>cannot enforce
+at all</strong> — so absence of a perfect check became absence of ANY check, the same permissive shape this
+issue is about. Now: the author must be on <code dir="auto">ROBOREV_WAIVER_AUTHORS</code>, hard-coded in
+<code dir="auto">roborev-review-oracles.sh</code> — <strong>not</strong> a config file and <strong>not</strong> env-overridable, because an override is
+settable by the party it constrains and one visible location keeps “who may grant” inside the diff a
+reviewer already reads. A well-formed marker naming this exact review from a non-allowlisted author
+reports <strong><code dir="auto">waiver: UNAUTHORIZED (...)</code></strong> — distinct from <code dir="auto">MALFORMED</code>, because the marker was fine and
+the author was not.
+<strong>THE RESIDUAL SURVIVES, NARROWED TO WHAT IS TRUE:</strong> the worker, the closer and the owner all post
+through the SAME login on this fleet, so nothing here can tell <strong>which allowlisted human</strong> posted a
+comment. “Only the owner or the coordination lead may GRANT; a worker may only REQUEST” is therefore
+<strong>process-enforced with an audit trail</strong> at that level — never a claim that authorship is unverifiable
+in general. <strong>An unenforceable claim gets scoped to what is enforceable, never dropped whole.</strong>
+<strong>certified</strong> head sha, it carries a reason, and all of it is recorded in the summary block.</li>
+</ol>
+<p><strong>The general lesson worth carrying elsewhere</strong> is the predicate family that surfaced three times on the way
+(<code dir="auto">! -f</code>, then <code dir="auto">! -e</code>, then <code dir="auto">! -e</code> again): <strong>every <code dir="auto">test</code>/<code dir="auto">[</code> file predicate is two-valued, so it must collapse
+“cannot tell” onto one of its answers — and it always picks the permissive one.</strong> The three-valued helper that
+fixed it was deleted with the probes it served (a lint with an empty subject set greens vacuously, which is
+the very shape it existed to catch), so this rule is the durable artifact: if a filesystem probe returns to
+that code, <code dir="auto">verified-absent</code> / <code dir="auto">present</code> / <code dir="auto">unreadable</code> returns with it.</p>
+<p>The sanctioned substitute is primary-source verification recorded in the PR (for a docs
 change describing the on-disk format, <code dir="auto">git show cassandra-5.0.8:&#x3C;path></code>). <strong>No docs-only change may
 ever record “roborev clean.”</strong></p>
 <p><strong>The same mechanism cuts the other way, and did.</strong> A configured <code dir="auto">docs/**</code> discarded <strong>33 executable</strong>
