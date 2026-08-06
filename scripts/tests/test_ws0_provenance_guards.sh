@@ -1436,12 +1436,12 @@ git("init", "-q")
 git("add", "f"); git("commit", "-qm", "c")
 head = int(subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%ct"],
                           capture_output=True, text=True, check=True).stdout.strip())
-# A binary written AFTER the commit is accepted, and the note SAYS what was established.
-note = refuse_binaries_older_than_head(repo, {"b": {"mtime_epoch": head + 60}})
+# A REUSED binary written AFTER the commit is accepted, and the note SAYS what was established.
+note = refuse_binaries_older_than_head(repo, {"b": {"mtime_epoch": head + 60}}, "reused")
 assert "AFTER the HEAD commit" in note, note
 # ...and one written BEFORE it is REFUSED. This is the case --no-build makes reachable.
 try:
-    refuse_binaries_older_than_head(repo, {"b": {"mtime_epoch": head - 3600}})
+    refuse_binaries_older_than_head(repo, {"b": {"mtime_epoch": head - 3600}}, "reused")
 except Invalid as exc:
     assert "STALE BINARIES" in str(exc), str(exc)
     assert "3600s before HEAD" in str(exc), str(exc)
@@ -1449,10 +1449,12 @@ else:
     raise SystemExit("a binary older than HEAD must be REFUSED")
 PY
 then
-  pass "OBSERVED (round10 M2): the staleness check ACCEPTS a binary written after HEAD (with a note stating what was established) and REFUSES one written before it, naming the gap — the case --no-build makes reachable"
+  pass "OBSERVED (round10 M2): under \`reused\` the staleness check ACCEPTS a binary written after HEAD (with a note stating what was established) and REFUSES one written before it, naming the gap — the case --no-build makes reachable"
 else
-  fail "round10 M2: the mtime-vs-HEAD staleness check must discriminate"
+  fail "round10 M2: the mtime-vs-HEAD staleness check must discriminate under reused"
 fi
+
+# ROUND 11's F1 (that check's SCOPING to `reused`) is verified in test_ws0_primary_path_admits_a_legitimate_run.sh.
 # ...and the driver must RECORD the binaries BEFORE it pins the session, so a stale-binary refusal
 # costs seconds rather than a full measurement run.
 binrec_line=$(grep -n 'record_measured_binaries' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
@@ -1632,7 +1634,7 @@ fi
 # `pass`/`fail` to report their call site), set just below it so adding a case does not red the
 # suite, and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=64
+MIN_CHECKS=106
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

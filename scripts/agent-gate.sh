@@ -5964,6 +5964,40 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 PRIMARY-PATH ACCEPT DIRECTION (#3272 review round 11). The complement of the five suites
+  # above, and it exists because of a ROOT CAUSE rather than a sixth guard: review rounds 9, 10 and
+  # 11 each returned four findings, mostly living in the PREVIOUS round's fixes, and the shared
+  # cause is that EVERY fix tested its guard REJECTING bad input while NOTHING tested the ACCEPT
+  # direction of the primary command. Three documented commands were broken that way — round 9's F1
+  # (`--verify-against`), round 10's L1 (the digest-oracle command) and round 10's M2, which broke
+  # THE NORMAL MEASUREMENT COMMAND: the mtime-vs-HEAD staleness check was mode-blind on the premise
+  # that `cargo build` touches every artifact, and cargo does NOT rewrite an already-current one, so
+  # a script/docs-only commit plus a successful build left every mtime before HEAD and the driver
+  # refused (round 11's F1). The five reject suites are green throughout and cannot see this: a guard
+  # that refuses EVERYTHING satisfies all of them. What this asserts: the documented invocations
+  # (`--corpus DIR` alone, then --reps/--temp both/--arm both/--no-build/--out/--scan-passes/the
+  # durations/the CPU pins, and the full matrix in one command) reach `ARGUMENTS OK` having executed
+  # NOTHING; the staleness check ADMITS a freshly-built binary older than HEAD under `built` while
+  # still refusing it under `reused`; the SHIPPED writer's provenance record satisfies the SHIPPED
+  # reader (a round trip no fixture-fed reject case can establish); and the schema/ticket/session-pin
+  # verifiers admit a legitimate corpus written by the shipped writers. Each accept is paired with a
+  # NON-VACUITY half (the same harness refuses `--reps 0` and the illegal cold/scan-passes pair; the
+  # pre-fix mode-blind predicate is observed refusing the input now admitted). Hermetic: the driver
+  # runs ONLY through `ws0_driver_run` (`--validate-args-only` + recording shims, every shim OBSERVED
+  # to record), plus a throwaway git repo and a few KB under $TMPDIR — no cargo, perf, sudo, taskset,
+  # corpus, network or root. What it deliberately does NOT reach is stated in the file's own header.
+  echo ">>> [$name] bash scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 primary-path ACCEPT-direction guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
   # `tools/*` package tests are run by NO other gate component and by no CI lane
   # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so

@@ -46,14 +46,50 @@ So the reporter REQUIRES the record, requires it to be COMPLETE and well-formed,
 that closes is the SUBSTITUTION: a report can no longer be silent about which programs produced its
 ratio, and the revision + digests are on the record for anyone comparing two sessions.
 
-# ...and ONE check that IS enforced at measurement time, because it can be
+# ...and ONE check that IS enforced at measurement time, SCOPED TO `reused` MODE
 
-A binary whose mtime PRECEDES the HEAD commit's time cannot have been built from HEAD. That is a
-one-directional fact, not a heuristic: it produces no false positive (if HEAD moved and nothing was
-rebuilt, the binary IS stale), and it is silent about the converse (a binary newer than HEAD may
-still have been built from other sources — which is exactly why the digests are recorded too). It is
-checked by the DRIVER, before the first rep, and it FAILS CLOSED. Under a build it cannot fire; under
-`--no-build` it is the case the finding describes.
+A binary whose mtime PRECEDES the HEAD commit's time cannot have been built from HEAD — but that is
+only true of a binary NOBODY JUST BUILT, and the check applies to `reused` (`--no-build`) mode ALONE.
+
+## WHY THE UNSCOPED VERSION BROKE THE NORMAL MEASUREMENT COMMAND (#3272 review round 11, F1)
+
+Round 10 asserted "under a build it cannot fire, because `cargo build` has just touched every
+artifact." That is FALSE, and it is false for cargo's central design reason: **cargo does not rewrite
+an artifact that is already current.** A successful `cargo build --release` whose inputs have not
+changed relinks nothing and leaves every mtime exactly where it was.
+
+So the ordinary sequence — commit a change to a script or a doc, then run the rig — produces:
+
+    HEAD commit time  = now
+    binary mtime      = whenever the rust last changed, possibly days earlier
+    `cargo build`     = exits 0, having rewritten nothing
+
+and the driver REFUSED, telling the operator to "re-run without --no-build" when they had not passed
+`--no-build` and a build had just succeeded. **That is the third time on this issue that a guard has
+made a documented command unrunnable** (round 9's F1 broke `--verify-against`, round 10's L1 broke
+the digest-oracle command), and the class is now the issue's dominant defect: a guard's REJECT
+direction gets a test and its ACCEPT direction gets none.
+
+## WHY SCOPING IS THE RIGHT FIX, AND NOT A WEAKENING
+
+Under `built` the premise the check rests on is supplied by something stronger: `cargo build`
+RAN AND SUCCEEDED in this process, on this checkout, immediately before. Cargo's own staleness
+tracking is the authority on whether an artifact matches its sources, and it is a far better one
+than an mtime comparison against a commit timestamp — which cannot see a source change that was
+never committed, and fires on a commit that touched no source at all.
+
+Under `reused` there is no such authority: `--no-build` accepts whatever is on disk, which may be
+an artifact of an entirely different revision. That is the case the finding was about, and the check
+still fails closed there.
+
+The alternative considered and rejected: force an isolated clean build whenever `built` is claimed.
+That would make the normal command correct at the price of a multi-minute rebuild every run, which
+pushes an operator toward `--no-build` — i.e. it would drive traffic into the one mode that has no
+build-side authority at all. Narrower is better here.
+
+Either way the DIGESTS are recorded, so what was actually measured is on the record in both modes;
+and the note the record carries states WHICH of the two regimes applied, so a reader can never
+mistake "the check did not apply" for "the check passed."
 
 `--no-build` is therefore RETAINED rather than forbidden for reportable runs. It exists because
 re-running a measurement without a 5-minute rebuild is the normal operator loop, and removing it
@@ -161,18 +197,48 @@ def observe_binaries(bin_dir: pathlib.Path) -> dict:
     return observed
 
 
-def refuse_binaries_older_than_head(repo_root: pathlib.Path, observed: dict) -> str:
-    """A binary whose mtime PRECEDES the HEAD commit cannot have been built from HEAD (#3272 M2).
+def refuse_binaries_older_than_head(
+    repo_root: pathlib.Path, observed: dict, build_mode: str
+) -> str:
+    """A REUSED binary whose mtime PRECEDES the HEAD commit cannot have been built from HEAD.
 
-    One-directional and therefore not a heuristic: if HEAD moved and nothing was rebuilt the binary
-    IS stale, so there is no false positive; and it says nothing about the converse — a binary newer
-    than HEAD may still have been built from other sources, which is why the digests are recorded
-    beside it rather than instead of it.
+    SCOPED TO `reused` (#3272 review round 11, F1). Under `built` this returns immediately with a
+    note saying so, because **cargo does not rewrite an already-current artifact**: a successful
+    `cargo build --release` after a script- or docs-only commit relinks nothing and leaves every
+    mtime earlier than HEAD, so the unscoped check REFUSED the normal measurement command — telling
+    the operator to "re-run without --no-build" when they had not passed it and a build had just
+    succeeded. See the module docstring for why scoping (rather than forcing a clean build) is the
+    right fix, and why `built` mode's premise is supplied by something stronger.
 
-    Returns the note recorded in the provenance; raises on a stale binary. Under a build it cannot
-    fire, because `cargo build` has just touched every artifact; under `--no-build` it is exactly
-    the case the finding describes.
+    Under `reused` it is one-directional and therefore not a heuristic: if HEAD moved and nothing
+    was rebuilt the binary IS stale, so there is no false positive; and it says nothing about the
+    converse — a binary newer than HEAD may still have been built from other sources, which is why
+    the digests are recorded beside it rather than instead of it.
+
+    Returns the note recorded in the provenance; raises on a stale REUSED binary. The note names
+    WHICH regime applied, so a reader can never mistake "the check did not apply" for "the check
+    passed."
     """
+    if build_mode not in BUILD_MODES:
+        raise Invalid(
+            f"build_mode {build_mode!r} is not one of {BUILD_MODES}, so the staleness check cannot"
+            " decide whether it applies. An unclassified mode is refused rather than defaulted:"
+            " defaulting to `built` would SKIP the check that closes --no-build's silence, and"
+            " defaulting to `reused` would refuse legitimate freshly-built binaries (#3272 F1)."
+        )
+    if build_mode == "built":
+        # NOT a skip that hides: the returned note states the regime, and the DIGESTS are recorded
+        # in both modes, so what was measured is on the record either way.
+        return (
+            "the mtime-vs-HEAD staleness check does NOT APPLY in `built` mode: `cargo build"
+            " --release` ran and succeeded in this process, and cargo does not rewrite an artifact"
+            " it considers current — so an mtime earlier than HEAD is the NORMAL outcome of"
+            " building after a commit that touched no rust, and refusing it made the ordinary"
+            " measurement command fail (#3272 F1). Cargo's own staleness tracking is the authority"
+            " here, and it is a stronger one than a commit-timestamp comparison. The check applies"
+            " under `reused` (--no-build), where there is no such authority; the per-binary digests"
+            " above are recorded in BOTH modes"
+        )
     head_epoch_raw = _git(repo_root, "log", "-1", "--format=%ct")
     try:
         head_epoch = int(head_epoch_raw)
@@ -202,10 +268,10 @@ def refuse_binaries_older_than_head(repo_root: pathlib.Path, observed: dict) -> 
             " (`cargo build --release -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen`)."
         )
     return (
-        f"every measured binary was written AFTER the HEAD commit (epoch {head_epoch}), so none can"
-        " be an artifact of an earlier revision. One-directional: this cannot see a binary NEWER"
-        " than HEAD that was nevertheless built from other sources, which is why the digests above"
-        " are recorded"
+        f"in `reused` (--no-build) mode, every measured binary was written AFTER the HEAD commit"
+        f" (epoch {head_epoch}), so none can be an artifact of an earlier revision."
+        " One-directional: this cannot see a binary NEWER than HEAD that was nevertheless built"
+        " from other sources, which is why the digests above are recorded"
     )
 
 
@@ -225,7 +291,11 @@ def record_binary_provenance(
             " reach the report as an unchecked claim about how the measured binaries came to exist."
         )
     observed = observe_binaries(bin_dir)
-    staleness_note = refuse_binaries_older_than_head(repo_root, observed)
+    # The MODE is passed, because the check applies to `reused` alone (#3272 F1) — cargo does not
+    # rewrite an already-current artifact, so under `built` an mtime earlier than HEAD is the normal
+    # outcome of building after a commit that touched no rust, and refusing it broke the ordinary
+    # measurement command.
+    staleness_note = refuse_binaries_older_than_head(repo_root, observed, build_mode)
     revision = _git(repo_root, "rev-parse", "HEAD")
     if len(revision) != 40:
         raise Invalid(
