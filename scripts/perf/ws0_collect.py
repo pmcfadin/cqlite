@@ -26,6 +26,7 @@ import statistics
 
 from ws0_rounds import collect_round_meta
 from ws0_loadgen_record import check_record_surface  # noqa: F401  (re-exported)
+from ws0_scan_record import SCAN_FIXED_INPUTS, check_scan_fixed_inputs
 from ws0_validate import (
     Invalid,
     classify_prewarm,
@@ -297,6 +298,17 @@ def collect_scan(
             missing.append(payload_path.name)
             continue
         payload = json.loads(payload_path.read_text())
+        # THE FIXED SCAN CONTRACT, BEFORE ANY COUNTER IS CONSUMED (#3272).
+        #
+        # `check_scan_passes` below hardened the COUNTERS thoroughly and validated NOTHING ABOUT
+        # WHAT PRODUCED THEM: `arm`, `surface`, `query` and `fold` were recorded by the bench and
+        # read by nobody. So a scan run under a different `--fold` or `--project` satisfied every
+        # check below — right pass count, every pass observing exactly the pinned corpus row count,
+        # aggregates equal to the derived sums — while measuring materially different work, and was
+        # published as the bare-scan arm the whole ratio is DIVIDED BY. Checked FIRST, like
+        # `collect_flight`'s equivalent: a record from a different workload is refused FOR THAT
+        # rather than for a downstream consequence.
+        scan_fixed = check_scan_fixed_inputs(tag, payload)
         # THE ROWS AND SECONDS ARE DERIVED FROM THE PER-PASS RECORDS (#3272 F2), not read
         # from the aggregate. `check_scan_passes` requires exactly `--scan-passes` records,
         # requires EVERY one to have observed the whole corpus, sums them, and cross-checks
@@ -368,6 +380,18 @@ def collect_scan(
                 "passes": pass_records,
                 "passes_observed": len(pass_records),
                 "passes_expected": scan_passes,
+                # WHAT THE FIXED SCAN CONTRACT WAS VERIFIED TO BE (#3272), recorded per rep so a
+                # later reader can see the arm/surface/query/fold this figure is conditional on
+                # rather than taking the block's word for it — the block's `surface` used to be an
+                # unconditional literal printed about a field nobody compared.
+                #
+                # DELIBERATELY NOT named `verified_fixed_inputs`, which is the FLIGHT arm's key for
+                # the loadgen's own table. `ws0_assert_fixed_inputs_recorded.py` walks EVERY arm's
+                # reps for that key and checks each against `ws0_loadgen_record.FIXED_INPUTS`, so
+                # reusing the name here made a scan rep answer for a loadgen contract it does not
+                # have — measured: that assert failed on `schema` the instant this landed. Two
+                # producers, two tables, two key names.
+                "verified_scan_fixed_inputs": scan_fixed,
                 "rows_source": (
                     "DERIVED as the sum of the per-pass rows, each of which was required to"
                     " equal the corpus row count; the payload's recorded rows_denominator"
@@ -380,8 +404,13 @@ def collect_scan(
     # never iterated — so it must be complete (#3272 finding 6).
     require_complete(f"bare scan ({temp})", per_rep, reps, missing)
     return {
-        "arm": "bare_scan",
-        "surface": "cqlite_core::Database::execute_streaming",
+        # READ FROM THE VERIFIED CONTRACT, never restated (#3272). These two used to be
+        # UNCONDITIONAL LITERALS — the block asserted which arm and which public surface produced
+        # the figure while the artifact's own statement of both went unread beside it. They are now
+        # the values `check_scan_fixed_inputs` REQUIRED of every rep, so the block cannot claim a
+        # surface no rep recorded, and a third spelling of the constant cannot drift from the table.
+        "arm": SCAN_FIXED_INPUTS["arm"][0],
+        "surface": SCAN_FIXED_INPUTS["surface"][0],
         "temperature": temp,
         "rows_per_sec": spread(rows_per_sec),
         "cycles_per_row": spread(cycles_per_row),

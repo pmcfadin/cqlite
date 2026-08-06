@@ -39,9 +39,22 @@ FIXTURE_DATA_DB_BYTES=4096
 make_corpus() { ws0_make_corpus "$1" "${2:-$CORPUS_ROWS}" "$FIXTURE_DATA_DB_BYTES" "${3:-}"; }
 
 make_scan_rep() { # make_scan_rep <dir> <temp> <rep> <prewarm>
-  local d="$1" tag="scan-$2-$3"
+  # `WS0_SCAN_FIXED` (the fixed scan contract, #3272) comes from `lib-ws0-fixtures.sh`, sourced
+  # above — one spelling for all three suites, for the reason stated there.
+  make_scan_rep_fields "$1" "$2" "$3" "$4" "$WS0_SCAN_FIXED"
+}
+
+# make_scan_rep_fields <dir> <temp> <rep> <prewarm> <fixed-contract-json-fragment>
+#
+# `make_scan_rep` with the fixed-contract fragment given VERBATIM, so a case can supply a WRONG
+# value (a folded run, a narrowed projection, the setup-only arm) or omit a field entirely. Same
+# arrangement as `make_flight_rep`'s verbatim JSONL body, and for the same reason: the cases whose
+# subject IS the contract must be able to write the input the guard refuses.
+make_scan_rep_fields() {
+  local d="$1" tag="scan-$2-$3" fixed="$5"
   cat > "$d/$tag.json" <<EOF
-{ "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
+{ $fixed,
+  "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
   "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "secs": 2.0 } ] }
 EOF
   perf_csv "$d/perf-$tag.csv" 2000000 4000000

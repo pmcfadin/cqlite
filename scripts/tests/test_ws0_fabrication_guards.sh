@@ -196,11 +196,11 @@ done
 # the only degenerate case in the file without a stated cause, and a traceback names the
 # DIVISION rather than the artifact (#3272 review round 2 nit).
 d="$TMP/scan-neg-rows"; make_session "$d" "$GOOD_FLIGHT"
-printf '{ "rows_denominator": -5, "timed_scan_secs": 2.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
+printf '{ '"$WS0_SCAN_FIXED"', "rows_denominator": -5, "timed_scan_secs": 2.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
 expect_reject "a NEGATIVE bare-scan rows_denominator is FATAL" \
   "not a measurement" "$d" "$TMP/corpus"
 d="$TMP/scan-zero-secs"; make_session "$d" "$GOOD_FLIGHT"
-printf '{ "rows_denominator": 1000, "timed_scan_secs": 0.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
+printf '{ '"$WS0_SCAN_FIXED"', "rows_denominator": 1000, "timed_scan_secs": 0.0, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' > "$d/scan-warm-1.json"
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "no rows/s for a measurement window that is zero" <<<"$out" \
   && ! grep -q "ZeroDivisionError\|Traceback" <<<"$out"; then
@@ -210,7 +210,7 @@ else
 fi
 for bad in -1.0 Infinity NaN; do
   d="$TMP/scan-secs-$bad"; make_session "$d" "$GOOD_FLIGHT"
-  printf '{ "rows_denominator": 1000, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' "$bad" \
+  printf '{ '"$WS0_SCAN_FIXED"', "rows_denominator": 1000, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": [ { "pass": 0, "rows": 1000, "secs": 2.0 } ] }\n' "$bad" \
     > "$d/scan-warm-1.json"
   expect_reject "a $bad timed_scan_secs is FATAL (not a measurement window)" \
     "zero, negative, or not finite" "$d" "$TMP/corpus"
@@ -239,7 +239,7 @@ fi
 scan_payload() { # scan_payload <dir> <rows_denom> <secs> <passes-json>
   local d="$1"
   mkdir -p "$d"
-  printf '{ "rows_denominator": %s, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": %s }\n' \
+  printf '{ '"$WS0_SCAN_FIXED"', "rows_denominator": %s, "timed_scan_secs": %s, "setup_secs": 0.5, "passes": %s }\n' \
     "$2" "$3" "$4" > "$d/scan-warm-1.json"
   perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
   perf_csv "$d/perf-scan-warm-1-setup.csv" 100000 200000
@@ -286,7 +286,7 @@ expect_reject "a FORGED timed_scan_secs disagreeing with its passes is REFUSED" 
 # 4. An ABSENT `passes` array is an ERROR, not an unchecked aggregate.
 #    NON-VACUITY: measured exit **0** pre-fix — the array was never read at all.
 d="$TMP/f2-no-passes"; mkdir -p "$d"
-printf '{ "rows_denominator": 1000, "timed_scan_secs": 2.0, "setup_secs": 0.5 }\n' > "$d/scan-warm-1.json"
+printf '{ '"$WS0_SCAN_FIXED"', "rows_denominator": 1000, "timed_scan_secs": 2.0, "setup_secs": 0.5 }\n' > "$d/scan-warm-1.json"
 perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
 perf_csv "$d/perf-scan-warm-1-setup.csv" 100000 200000
 printf 'ok\n' > "$d/scan-warm-1.prewarm.status"

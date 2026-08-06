@@ -38,6 +38,19 @@
 # real session.
 WS0_FIXTURE_ENDPOINT="http://127.0.0.1:19999"
 
+# The FIXED SCAN CONTRACT every healthy bare-scan artifact carries (#3272). The reporter requires
+# `arm`, `surface`, `query` and `fold` to hold the values this rig fixes them to, because a scan run
+# under a different `--fold` or `--project` has entirely VALID counters — the right pass count, every
+# pass observing exactly the pinned corpus row count, aggregates equal to the derived sums — while
+# measuring materially different work, and was published as the arm the whole ratio is divided by.
+#
+# Spelled ONCE here, at the healthy values, for the reason `WS0_FIXTURE_ENDPOINT` above is: three
+# suites and ~55 fixture sites write these payloads, and a second spelling would refuse every
+# healthy case in one of them for a reason unrelated to its subject. A case whose SUBJECT is a wrong
+# value writes it explicitly (a folded run, a narrowed projection, the setup-only arm) and is then
+# refused — which is the guard working.
+WS0_SCAN_FIXED='"arm":"bare_scan","surface":"cqlite_core::Database::execute_streaming","query":"SELECT * FROM ws0.events","fold":false'
+
 # perf_csv <path> <cycles> <instructions> — a `perf stat -x,` CSV with both required events.
 #
 # The two-field-then-event layout matches what `perf stat -x, -e cycles,instructions`
