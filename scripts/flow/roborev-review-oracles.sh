@@ -1030,6 +1030,40 @@ roborev_diff_header_has_path() {
 # cached; the vacuous baseline is ~18.7k input / 0 cached), which is why the escape hatch is a
 # human-authorized waiver and not another inference.
 #
+# ===== WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (roborev job 25) =====
+# THE HOLE THIS CLOSES, and it is the permissive shape this whole issue is about: the comment author was
+# RECORDED but never AUTHORIZED, so on a PUBLIC repository ANY commenter could copy the base/head/job
+# values out of the failing block — they are printed in it — and make the merge gate pass. The residual
+# had been written as "we cannot distinguish the owner from the worker on a shared GH_TOKEN", which
+# conflated **cannot enforce perfectly** with **cannot enforce at all**, and so absence of a perfect
+# check became absence of ANY check.
+#
+# HARD-CODED HERE, NOT IN A CONFIG FILE, and deliberately with NO env override:
+#   * one visible location, in the file whose review this mechanism is part of — a reviewer reading the
+#     waiver code sees who may grant, in the same diff;
+#   * an env override (or a path the caller names) would be settable by whoever invokes the wrapper,
+#     i.e. by the very party the allowlist exists to constrain;
+#   * a separate committed config buys nothing here — it is equally repo-controlled — while adding a
+#     read path with its own absent/unreadable failure modes to get wrong.
+# Changing it is a code change: edit this list, and the diff is reviewed like any other.
+#
+# WHAT IT DOES NOT DO, stated because the previous over-broad disclaimer is what invited the hole: it
+# stops third parties. It does NOT distinguish WHICH allowlisted human posted the comment — on this fleet
+# the worker, the closer and the owner all post through the same login — so "only the owner or the
+# coordination lead may GRANT, a worker may only REQUEST" remains a process obligation with an audit
+# trail, now enforced to the level of "an allowlisted human", not to the level of "that specific human".
+ROBOREV_WAIVER_AUTHORS="pmcfadin"
+
+# roborev_waiver_author_allowed <login>: is this comment author permitted to GRANT a waiver?
+roborev_waiver_author_allowed() {
+  local want="$1" allowed
+  [ -n "$want" ] || return 1
+  for allowed in $ROBOREV_WAIVER_AUTHORS; do
+    [ "$want" = "$allowed" ] && return 0
+  done
+  return 1
+}
+
 # roborev_absence_waiver_lookup <base-sha> <head-sha> <job-id>: does the PR for this branch carry a
 # waiver for THIS REVIEW? Sets, and never returns non-zero:
 #   ROBOREV_WAIVER_STATE   granted | stale | malformed | none | unavailable
@@ -1062,17 +1096,19 @@ roborev_diff_header_has_path() {
 # it: `base`, `head` and `job` are ALL required and ALL verified, and a marker missing any field is
 # MALFORMED rather than granted.
 #
-# ===== AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED =====
-# The ruling is that only the OWNER or the coordination LEAD may GRANT this, and that a worker or a
-# closer may only REQUEST it. THIS CODE CANNOT ENFORCE THAT, and says so rather than implying otherwise:
-# on this fleet the worker, the closer and the owner all post through the SAME GitHub login (`GH_TOKEN` is
-# the repository owner's), so a comment's author field cannot distinguish a self-applied waiver from a
-# granted one. An authorization check keyed on `author.login` would therefore LOOK like it verified
-# authorship while verifying nothing — precisely the false-assurance shape this issue spent four review
-# rounds removing — so it is deliberately NOT implemented. What IS mechanized: the marker is a dedicated
-# anchored line on the PR, it names the certified base, head AND job, it carries a substantive reason, and
-# the author, the scope, the reason and the absent paths are all recorded in the summary block. The audit
-# trail is the immutable, timestamped PR comment; the authorization is a process obligation on the human.
+# ===== AUTHORSHIP: ENFORCED TO "AN ALLOWLISTED HUMAN", PROCESS-ENFORCED BEYOND THAT =====
+# WHAT IS MECHANIZED: the author must be on the explicit allowlist above, the marker must be a dedicated
+# anchored line on the PR, it must name the certified base, head AND job, and it must carry a substantive
+# reason — and the author, the scope, the reason and the absent paths all land in the summary block.
+#
+# WHAT REMAINS PROCESS-ENFORCED WITH AN AUDIT TRAIL, and this is the WHOLE residual now: on this fleet the
+# worker, the closer and the owner all post through the SAME GitHub login, so this code cannot tell WHICH
+# ALLOWLISTED HUMAN posted a given comment. The ruling that only the OWNER or the coordination LEAD may
+# GRANT — a worker or closer may only REQUEST — therefore rests on process and on the comment being
+# permanently attributable, NOT on a mechanical check. That is narrower than the disclaimer this once
+# carried ("authorship cannot be verified at all"), and the narrowing matters: the over-broad version is
+# what justified having no author check whatsoever, which let ANY commenter on a public repository grant a
+# waiver (job 25). An unenforceable claim must be scoped to what is actually true, never dropped whole.
 #
 # FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, a marker for another scope, a placeholder reason,
 # a missing field — every one of them leaves the absence FAILing, under its own named state.
@@ -1181,6 +1217,19 @@ roborev_absence_waiver_lookup() {
         ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
         ROBOREV_WAIVER_REASON="$m_reason"
         ROBOREV_WAIVER_DETAIL="the marker names a different review — $mismatch — and a waiver may not outlive the review its authorizer judged; re-request it for this base/head/job (a completed job can be re-decided with --recheck-job <id>, which enqueues nothing)"
+      fi
+      continue
+    fi
+    # AUTHORIZATION IS THE LAST GATE, after shape and scope: a well-formed marker naming this exact
+    # review from a NON-ALLOWLISTED author is a distinct state — the marker was fine, the author was not
+    # permitted — so it reports UNAUTHORIZED rather than being lumped in with malformed input.
+    if ! roborev_waiver_author_allowed "$author"; then
+      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
+        ROBOREV_WAIVER_STATE="unauthorized"
+        ROBOREV_WAIVER_AUTHOR="$author"
+        ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
+        ROBOREV_WAIVER_REASON="$m_reason"
+        ROBOREV_WAIVER_DETAIL="the marker is well-formed and names this review, but its author '@$author' is not on the waiver allowlist ($ROBOREV_WAIVER_AUTHORS) — this is a public repository, so the base/head/job values printed in a failing block are public knowledge and authorship is the only thing that separates an authorization from a stranger"
       fi
       continue
     fi

@@ -559,13 +559,23 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   mid-sentence copy is inert; **(2)** placeholder reasons are refused (an unsubstituted `<…>`, or a bare
   `why`/`todo`/`tbd` — `claim.sh`'s rule), so a pasted **template** reads `MALFORMED`; **(3)** no emitted
   diagnostic carries **any part** of the marker — not even the prefix — and points at `--help` instead.
-  **AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED, and the code says so.**
-  On this fleet the worker, the closer and the owner all post through the **same GitHub login**, so no
-  `author.login` check could distinguish a self-applied waiver from a granted one — a check that appeared to
-  verify authorship while verifying nothing is exactly the false-assurance shape this issue spent four review
-  rounds removing, so it is deliberately **not** implemented. Mechanized instead: the marker exists on the PR,
-  it names the **certified** head sha, it carries a reason, and all of it lands in the summary block; the audit
-  trail is the immutable, attributable PR comment.
+  **WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (#3312 job 25) — and the correction that produced it.**
+  The comment author used to be *recorded but never authorized*, so on this **public** repository ANY
+  commenter could copy the `base`/`head`/`job` values out of the failing block (they are printed in it)
+  and make the merge gate pass. The residual had been written as *"we cannot distinguish the owner from
+  the worker on a shared `GH_TOKEN`"*, which conflated **cannot enforce perfectly** with **cannot enforce
+  at all** — so absence of a perfect check became absence of ANY check, the same permissive shape this
+  issue is about. Now: the author must be on `ROBOREV_WAIVER_AUTHORS`, hard-coded in
+  `roborev-review-oracles.sh` — **not** a config file and **not** env-overridable, because an override is
+  settable by the party it constrains and one visible location keeps "who may grant" inside the diff a
+  reviewer already reads. A well-formed marker naming this exact review from a non-allowlisted author
+  reports **`waiver: UNAUTHORIZED (...)`** — distinct from `MALFORMED`, because the marker was fine and
+  the author was not.
+  **THE RESIDUAL SURVIVES, NARROWED TO WHAT IS TRUE:** the worker, the closer and the owner all post
+  through the SAME login on this fleet, so nothing here can tell **which allowlisted human** posted a
+  comment. "Only the owner or the coordination lead may GRANT; a worker may only REQUEST" is therefore
+  **process-enforced with an audit trail** at that level — never a claim that authorship is unverifiable
+  in general. **An unenforceable claim gets scoped to what is enforceable, never dropped whole.**
   **The hang and race classes are NOT REACHABLE because nothing is read — that is weaker than "fixed", and only
   it is true.** The predicate-family rule survives as **doctrine, not code** (the helper and its lint were
   deleted with the probes they served, since a lint with an empty subject set greens vacuously): **every

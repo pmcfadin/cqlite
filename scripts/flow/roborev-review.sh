@@ -126,9 +126,10 @@
 #                     include the token accounting). It is SHA-BOUND — a push invalidates it — and it
 #                     excuses the ABSENCE verdict ONLY, never any other cause. AUTHORSHIP IS
 #                     PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED: worker, closer
-#                     and owner share one GitHub login on this fleet, so no author check here could
-#                     tell a self-applied waiver from a granted one, and pretending otherwise is the
-#                     false-assurance shape this issue exists to remove.
+#                     and owner share one GitHub login on this fleet, so no check here can tell WHICH
+#                     ALLOWLISTED human posted a comment. The author IS authorized against an explicit
+#                     allowlist (ROBOREV_WAIVER_AUTHORS) — a public repository prints base/head/job in
+#                     the failing block, so without it any commenter could grant a waiver.
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
@@ -395,13 +396,23 @@ token, so no reader grepping 'prompt-content: PASS' mistakes it for a certificat
 beside a waiver: key recording the authorizer, the bound scope, the reason and the
 absent paths. Never silence.
 
-AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED. On this
-fleet the worker, the closer and the owner all post through the SAME GitHub login, so
-no check here could tell a self-applied waiver from a granted one. An author check
-would LOOK like it verified authorship while verifying nothing, which is the exact
-false-assurance shape this issue spent four review rounds removing, so it is
-deliberately absent. What IS mechanized: the marker exists on the PR, it names the
-CERTIFIED head sha, it carries a reason, and all of it is recorded in the block.
+THE AUTHOR MUST BE ON AN EXPLICIT ALLOWLIST (see ROBOREV_WAIVER_AUTHORS in
+roborev-review-oracles.sh). This is a PUBLIC repository and a failing block PRINTS the
+base, head and job, so without that check any commenter could copy them and make the
+merge gate pass. A comment from an author outside the allowlist reports
+'waiver: UNAUTHORIZED (...)' and grants nothing. The list is hard-coded in the wrapper
+rather than read from a config or an env var: an override would be settable by the very
+party it constrains, and one visible location keeps "who may grant" in the same diff a
+reviewer already reads.
+
+BEYOND THAT, AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY
+VERIFIED — and that residual is now narrow: on this fleet the worker, the closer and the
+owner all post through the SAME login, so no check here can tell WHICH ALLOWLISTED HUMAN
+posted a comment. "Only the owner or the coordination lead may GRANT; a worker may only
+REQUEST" therefore rests on process and on the comment being permanently attributable.
+The earlier, broader claim ("authorship cannot be verified at all") is what justified
+having NO author check, which is how any commenter could grant one — an unenforceable
+claim gets SCOPED to what is true, never dropped whole.
 
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside

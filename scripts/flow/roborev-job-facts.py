@@ -205,12 +205,23 @@ def main(argv):
         with open(prompt_path, "w") as handle:
             handle.write(prompt)
     if output_path is not None:
-        # The review text lives beside the job row on the REVIEW payload (`output`), and some payload
-        # shapes name it `verdict_text`. Written VERBATIM — no whitespace collapsing — because the
-        # terminal-verdict-marker regex is line-anchored.
-        review_out = data.get("output") if isinstance(data, dict) else None
-        if not isinstance(review_out, str) or not review_out.strip():
-            review_out = job.get("output") if isinstance(job.get("output"), str) else None
+        # The review text lives beside the job row on the REVIEW payload, and roborev exposes it under
+        # EITHER name: `output` or `verdict_text`. BOTH are read, on the review object AND on the nested
+        # job object, because documenting a field and then not reading it produced an empty transcript on
+        # any payload that used the other spelling — which spuriously FAILed `review-completed` and
+        # `findings` on a legitimate recheck (#3312 job 25). Written VERBATIM — no whitespace collapsing —
+        # because the terminal-verdict-marker regex is line-anchored.
+        review_out = None
+        for container in (data if isinstance(data, dict) else {}, job):
+            if not isinstance(container, dict):
+                continue
+            for key in ("output", "verdict_text"):
+                candidate = container.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    review_out = candidate
+                    break
+            if review_out is not None:
+                break
         with open(output_path, "w") as handle:
             handle.write(review_out if isinstance(review_out, str) else "")
     return 0
