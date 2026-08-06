@@ -286,6 +286,91 @@ fn reject_identity_out_aliasing_inputs(cli: &Cli) -> GenResult<()> {
     Ok(())
 }
 
+/// The SAME containment question, asked again once the corpus root REALLY EXISTS — so the
+/// FILESYSTEM answers the case fold instead of a string comparison (#3272 round 10, F-D).
+///
+/// # The bypass every pre-generation check is structurally unable to see
+///
+/// [`reject_identity_out_aliasing_inputs`] runs before a single byte exists, which is what makes
+/// it fast and what makes it BLIND. Its containment test resolves both sides through their
+/// deepest EXISTING ancestor and then compares components with `Path::starts_with`, which is
+/// **case-SENSITIVE**. With neither `--out` nor `--identity-out`'s parent on disk yet, the
+/// deepest existing ancestor of both is some common grandparent, so
+///
+/// ```text
+/// --out /tmp/x/corpus  --identity-out /tmp/x/CORPUS/notes.json
+/// ```
+///
+/// resolves to `/tmp/x/CORPUS/notes.json` vs `/tmp/x/corpus`, `starts_with` answers **false**,
+/// and the guard admits it. Generation then creates `/tmp/x/corpus`, APFS folds `CORPUS` onto it,
+/// and the identity lands INSIDE the corpus root — the very thing round 9's F3 containment rule
+/// exists to refuse. MEASURED pre-fix, not argued: `--identity-out <out>/CORPUS/ws0-events.cql`
+/// exited 0 having replaced the emitted DDL with the identity JSON, after that identity had
+/// already recorded the DDL's digest `6bdd1d06…`. The artifact then describes a schema that is no
+/// longer on disk, which is this issue's subject exactly.
+///
+/// # Why asking the filesystem is not the "second implementation" round 9 refused
+///
+/// Round 9 declined to canonicalize a non-existent path because that means MODELLING how a
+/// volume would fold a name that is not there — APFS, NTFS and a case-sensitive APFS volume all
+/// answer differently, and a divergence in the model would be silent in the permissive
+/// direction. That reasoning is correct and is untouched. This check does the opposite: it
+/// **creates the root first**, so `canonicalize` is a real syscall against a real directory and
+/// the volume itself performs the fold. No table, no model, no per-filesystem branch — and it is
+/// truthful in BOTH directions, because on a case-SENSITIVE volume `CORPUS` genuinely is a
+/// different directory and the write is genuinely harmless, so the case is admitted there.
+///
+/// Creating `--out` early costs nothing: `generate()` calls `create_dir_all(&spec.out)` itself,
+/// and this runs BEFORE any corpus data, any DDL and any identity is written — so a refusal here
+/// still precedes every destructible input, which is the property the pre-generation checks are
+/// for. The empty directory left behind by a refusal is the one the operator asked for.
+fn reject_identity_out_inside_the_realized_root(cli: &Cli) -> GenResult<()> {
+    let Some(identity_out) = cli.identity_out.as_ref() else {
+        return Ok(());
+    };
+    // The root the generator is about to write into. Created HERE so the containment question
+    // below is answered by the volume rather than by `starts_with` over two hypothetical paths.
+    std::fs::create_dir_all(&cli.out).map_err(|e| {
+        format!(
+            "--out {} could not be created: {e}. It is created before generation so that \
+             `--identity-out` containment can be decided by the FILESYSTEM (which performs any \
+             case fold) rather than by a case-sensitive string comparison over paths that do not \
+             exist yet (issue #3272 round 10, F-D).",
+            cli.out.display()
+        )
+    })?;
+    let canonical_identity = cli.out.join("corpus-identity.json");
+    if same_path(identity_out, &canonical_identity) {
+        // The documented no-op, unchanged.
+        return Ok(());
+    }
+    if !path_is_inside(identity_out, &cli.out) {
+        return Ok(());
+    }
+    Err(format!(
+        "--identity-out {} resolves INSIDE the corpus root ({}) once that root EXISTS — the \
+         filesystem folds the two spellings onto one directory, even though they are different \
+         strings. The only path this run may write under the corpus is {}. This is the same \
+         containment rule the pre-generation check states, re-asked against the real directory \
+         because that check compares path COMPONENTS case-sensitively and therefore cannot see a \
+         case-insensitive spelling of a directory that did not exist yet: on APFS/NTFS \
+         `--out {}` with `--identity-out {}/…` are ONE directory, and pre-fix the identity was \
+         written into the corpus after its inputs' digests had been recorded, exiting 0 (issue \
+         #3272 round 10, F-D). Write the identity OUTSIDE the corpus (e.g. an in-tree \
+         docs/reports/ws0-3096-artifacts/corpus-identity.json); the copy beside the data is \
+         written automatically.",
+        identity_out.display(),
+        cli.out.display(),
+        canonical_identity.display(),
+        cli.out.display(),
+        identity_out
+            .parent()
+            .unwrap_or(identity_out.as_path())
+            .display()
+    )
+    .into())
+}
+
 /// The generated files, by name, that `--identity-out` must not alias.
 ///
 /// `corpus-identity.json` is deliberately EXCLUDED: `--identity-out` naming it is the
@@ -439,6 +524,12 @@ async fn run(cli: Cli) -> GenResult<ExitCode> {
     // ...and an `--identity-out` that would OVERWRITE A GENERATED INPUT is refused here too,
     // for the same reason: milliseconds instead of after a multi-GB write (#3272 R3).
     reject_identity_out_aliasing_inputs(&cli)?;
+    // The SAME containment question, re-asked against the root once it EXISTS, so the FILESYSTEM
+    // performs any case fold (#3272 round 10, F-D). The check above compares path components
+    // case-sensitively over paths that do not exist yet, so `--out <o>/corpus --identity-out
+    // <o>/CORPUS/x.json` passed it and then landed inside the corpus after APFS folded the two.
+    // Still before any corpus data, DDL or identity is written, so a refusal destroys nothing.
+    reject_identity_out_inside_the_realized_root(&cli)?;
 
     let spec = CorpusSpec {
         out: cli.out.clone(),

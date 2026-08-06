@@ -409,3 +409,172 @@ fn identity_out_naming_the_corpus_own_identity_is_still_accepted() {
         run.all()
     );
 }
+
+/// Does this volume FOLD CASE? Answered by the filesystem, never assumed from the target triple.
+///
+/// A default macOS APFS volume folds; Linux ext4/xfs does not; a case-SENSITIVE APFS volume does
+/// not either — so `cfg!(target_os)` would be wrong on two of those three. Measured by creating a
+/// lowercase directory inside `probe_root` and asking whether the uppercase spelling reaches it.
+fn volume_folds_case(probe_root: &Path) -> bool {
+    let lower = probe_root.join("casefold-probe");
+    std::fs::create_dir_all(&lower).expect("probe dir");
+    let upper = probe_root.join("CASEFOLD-PROBE");
+    match (lower.canonicalize(), upper.canonicalize()) {
+        (Ok(l), Ok(u)) => l == u,
+        _ => false,
+    }
+}
+
+/// CASE-FOLD CONTAINMENT: a differently-cased CORPUS ROOT (#3272 round 10, F-D).
+///
+/// # The finding
+///
+/// Round 7's `same_file` closed the ALIASING half of the case-fold hole, and round 9's containment
+/// rule closed a *named* input being reached under another spelling. Neither closed the
+/// **containment** half taking a case-insensitive spelling of the ROOT ITSELF:
+///
+/// ```text
+/// --out <o>/corpus  --identity-out <o>/CORPUS/ws0-events.cql
+/// ```
+///
+/// The pre-generation containment test resolves both sides through their deepest EXISTING
+/// ancestor and compares components with `Path::starts_with`, which is **case-sensitive**. With
+/// neither directory on disk yet, `<o>/CORPUS/ws0-events.cql` does not start with `<o>/corpus`, so
+/// the guard admits it. Generation then creates `<o>/corpus`, APFS folds `CORPUS` onto it, and the
+/// identity is written INSIDE the corpus — over the emitted DDL, after that identity recorded the
+/// DDL's digest — exiting 0.
+///
+/// # NON-VACUITY, measured rather than asserted
+///
+/// The test measures the exact fact that made the old check unable to answer and the new one able
+/// to: `canonicalize` on the two spellings DISAGREES while neither exists (there is nothing to
+/// resolve, so both fail) and AGREES once the root exists. That is the whole difference between
+/// the two checks — one asks before, one asks after — so observing the flip is observing that the
+/// pre-generation check was structurally blind here, without re-implementing it.
+///
+/// # BOTH filesystems assert, so this can never be a case that quietly does nothing
+///
+/// On a folding volume the run must be REFUSED. On a case-sensitive volume `CORPUS` is a genuinely
+/// different directory and the write is genuinely harmless, so the run must SUCCEED — the guard
+/// must not over-refuse there. A `cfg!`-free filesystem probe picks the branch.
+#[test]
+fn identity_out_under_a_differently_cased_corpus_root_is_refused_when_the_volume_folds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let folds = volume_folds_case(dir.path());
+    let out = dir.path().join("corpus");
+    // The DDL, reached through a differently-cased spelling of the ROOT (not of the filename —
+    // that spelling is the round-9 case, already covered above).
+    let cased_root = dir.path().join("CORPUS");
+    let target_via_cased_root = cased_root.join("ws0-events.cql");
+
+    // NON-VACUITY, part 1: while neither exists, canonicalization has nothing to resolve, so no
+    // filesystem answer about the fold is available at all — which is precisely why the
+    // pre-generation containment check falls back to a case-SENSITIVE component comparison.
+    assert!(
+        !out.exists() && !cased_root.exists(),
+        "the pre-generation check runs with neither spelling on disk"
+    );
+    assert!(
+        out.canonicalize().is_err() && cased_root.canonicalize().is_err(),
+        "neither spelling can be canonicalized before generation — the fold is UNOBSERVABLE at \
+         that point, which is the structural blindness this second check exists to remove"
+    );
+
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--identity-out",
+        target_via_cased_root.to_str().expect("utf8"),
+    ]);
+
+    // NON-VACUITY, part 2: the root now exists, so the SAME question has a filesystem answer —
+    // and on a folding volume it is the OPPOSITE of the one the pre-generation check gave.
+    assert!(
+        out.exists(),
+        "the root is created before the containment question is re-asked, which is what makes \
+         the filesystem the oracle: {}",
+        run.all()
+    );
+    let folded_now = match (out.canonicalize(), cased_root.canonicalize()) {
+        (Ok(l), Ok(u)) => l == u,
+        _ => false,
+    };
+    assert_eq!(
+        folded_now, folds,
+        "the fold observed against the realized root must match the volume's measured behaviour"
+    );
+
+    if folds {
+        assert!(
+            !run.ok,
+            "on a CASE-FOLDING volume `{}` IS the corpus root, so the identity would be written \
+             inside the corpus over the emitted DDL after recording its digest — pre-fix this \
+             exited 0 having done exactly that. Output:\n{}",
+            cased_root.display(),
+            run.all()
+        );
+        assert!(
+            run.all().contains("resolves INSIDE the corpus root"),
+            "the refusal must name the CONTAINMENT rule: {}",
+            run.all()
+        );
+        // Refused BEFORE anything destructible was written: no DDL, no table directory, no
+        // identity. A check that fired after `write_json` would still exit non-zero here.
+        assert!(
+            !out.join("ws0-events.cql").exists()
+                && !out.join("ws0").exists()
+                && !out.join("corpus-identity.json").exists(),
+            "the refusal must precede every generated input: {}",
+            run.all()
+        );
+    } else {
+        assert!(
+            run.ok,
+            "on a CASE-SENSITIVE volume `{}` is a genuinely different directory and writing the \
+             identity there destroys nothing — the guard must not refuse it: {}",
+            cased_root.display(),
+            run.all()
+        );
+        assert!(
+            target_via_cased_root.exists() && out.join("ws0-events.cql").exists(),
+            "the identity lands in the separate directory and the DDL survives: {}",
+            run.all()
+        );
+    }
+}
+
+/// The plain (non-cased) containment refusal must still leave the corpus root EMPTY.
+///
+/// Guards the sequencing of the round-10 check: it CREATES `--out` in order to ask the filesystem,
+/// so a reader could reasonably worry it now generates something before refusing. It does not —
+/// the root is an empty directory, which is the one the operator asked for anyway.
+#[test]
+fn a_containment_refusal_leaves_the_corpus_root_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--identity-out",
+        out.join("notes")
+            .join("identity.json")
+            .to_str()
+            .expect("utf8"),
+    ]);
+    assert!(
+        !run.ok,
+        "a path under the corpus root is refused: {}",
+        run.all()
+    );
+    if out.exists() {
+        let entries: Vec<String> = std::fs::read_dir(&out)
+            .expect("read corpus root")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "a refusal must not leave generated artifacts behind; found {entries:?}: {}",
+            run.all()
+        );
+    }
+}
