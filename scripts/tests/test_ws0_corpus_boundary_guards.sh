@@ -565,8 +565,86 @@ fi
 # Method (the same technique as `order_probe` in test_ws0_round_metadata.sh): the driver's loop is
 # EVAL'd out of `ws0-baseline.sh`, over a real corpus and a real `session-corpus-pin.json`, with the
 # boundary function SOURCED FROM THE SHIPPED LIBRARY — never stubbed, or the loop under test would
-# not be the loop the driver runs.
-# TODO(#3272 round 23): fill in — A then B, one increment at a time.
+# not be the loop the driver runs. The verifier is NEVER called directly here: a direct call is what
+# every check above already does, and it is precisely what cannot see whether the RUN refuses.
+#
+# The mutation is timed to land at the END of round 1 (inside the Flight arm's `measure_flight`) and
+# the restore at the START of round 2 (inside that round's `measure_scan`) — the attack from §1, now
+# performed by the loop itself. Under the WIRED loop the round-1 closing boundary refuses before the
+# restore can run; under the BYPASSED loop the restore runs, both ends agree, and the report is
+# published. Same corpus, same mutation, same reps: the ONLY difference is the call site.
+#
+# `driver_probe <session> <corpus> wired|bypassed` — echoes the run's whole output; returns the
+# run's status. The reporter is invoked at the end exactly as the driver invokes it, so "the run
+# published a figure" is observed from a real report and not inferred from an exit code.
+driver_probe() {
+  local session="$1" corpus="$2" mode="$3"
+  # The mutation record lives OUTSIDE the session dir: a stray file inside it would be read by the
+  # reporter's artifact-set integrity check and diagnosed as an unexpected artifact.
+  local rec="$session.mutated"
+  ( set -uo pipefail
+    REPS=2; TEMPS="warm"; ARMS="bypass"; OUT_DIR="$session"; CORPUS="$corpus"; HERE="$PERF_DIR"
+    mkdir -p "$OUT_DIR"
+    # The scan artifacts must name the corpus this session MEASURED (as in §1).
+    export WS0_SCAN_CORPUS="$corpus"
+    ws0_pin_session_corpus "$OUT_DIR" "$CORPUS" 2 warm bypass 1
+    # The two arms write real rep artifacts, so a run that reaches the end has a REPORTABLE session
+    # — without which "the bypassed run publishes a figure" could not be asserted at all.
+    measure_scan() {
+      make_scan_rep "$OUT_DIR" "$1" "$2" ok
+      # ...the RESTORE, at the start of round 2: this is the half that makes the attack invisible at
+      # both ends of the session.
+      [ "$2" != 2 ] || restore_component "$CORPUS" "$(sed -n 1p "$rec")" "$(sed -n 2p "$rec")"
+    }
+    measure_flight() {
+      make_flight_rep "$OUT_DIR" "$1" "$2" ok "$GOOD_FLIGHT"
+      # ...the MUTATION, at the end of round 1, i.e. BETWEEN REPS.
+      [ "$2" != 1 ] || mutate_component "$CORPUS" "-Index.db" "MUTATED-BETWEEN-REPS" > "$rec"
+    }
+    # The boundary function from the SHIPPED library — sourced, never stubbed.
+    # shellcheck source=scripts/perf/lib-corpus-boundary.sh
+    source "$PERF_DIR/lib-corpus-boundary.sh"
+    eval "$(awk '/^rotate_arms\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
+    eval "$(awk '/^record_round\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
+    _loop="$(awk '/^_ARM_LIST=/,/^done$/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
+    # THE BYPASS, and it is the CALL SITE that is removed and nothing else — the same way the
+    # sibling suites re-enact a pre-fix loop: the line is deleted from the driver's own text, so
+    # what runs is this loop minus its boundary check, not a hand-written imitation of it.
+    [ "$mode" = wired ] || _loop="$(grep -v 'verify_corpus_boundary_or_refuse' <<<"$_loop")"
+    eval "$_loop"
+    python3 "$PERF_DIR/ws0_report.py" --dir "$OUT_DIR" --corpus "$CORPUS"
+  ) 2>&1
+}
+
+# --------------------------------------------------------------------------
+# A — the WIRED run REFUSES, names the component, and does not proceed
+# --------------------------------------------------------------------------
+make_corpus "$TMP/corpus-driver-wired"
+wired_out=$(driver_probe "$TMP/driver-wired" "$TMP/corpus-driver-wired" wired); wired_rc=$?
+wired_component=$(grep -oE 'component nb-[0-9]+-big-Index\.db' <<<"$wired_out" | head -1)
+if [ "$wired_rc" -ne 0 ] \
+   && grep -q 'THE CORPUS CHANGED DURING MEASUREMENT' <<<"$wired_out" \
+   && [ -n "$wired_component" ]; then
+  pass "OBSERVED THROUGH THE DRIVER LOOP (round23): a component mutated BETWEEN REPS makes the RUN exit non-zero, naming the component ($wired_component)"
+else
+  fail "round23: the wired driver loop must refuse a mid-run mutation and name the component (rc=$wired_rc, out: $wired_out)"
+fi
+# ...at the boundary that CLOSES round 1, which is the window a pre/post pair cannot see.
+if grep -q "boundary 'warm-1-after-bypass'" <<<"$wired_out"; then
+  pass "OBSERVED (round23): the refusal is attributed to the boundary CLOSING round 1, not to either end of the session"
+else
+  fail "round23: the refusal must name the round-1 closing boundary (out: $wired_out)"
+fi
+# ...and the LATER REPS DID NOT RUN. Asserted from the artifacts on disk as well as the log, because
+# a refusal that printed and then carried on would satisfy the exit-status check alone.
+wired_round2_reps=$(ls "$TMP/driver-wired" 2>/dev/null | grep -c 'warm-2')
+if ! grep -q 'round 2/2' <<<"$wired_out" \
+   && [ "$wired_round2_reps" -eq 0 ] \
+   && [ ! -e "$TMP/driver-wired/results.json" ]; then
+  pass "OBSERVED (round23): the run STOPS at the refusal — round 2 never starts, it leaves no rep artifacts, and no results.json is published"
+else
+  fail "round23: a refused run must not proceed to later reps or publish (round-2 artifacts=$wired_round2_reps, out: $wired_out)"
+fi
 
 # ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
