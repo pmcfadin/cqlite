@@ -3378,112 +3378,86 @@ write_snap_diff() { # write_snap_diff <file> <path>...
   done
 }
 
-printf '== (cx31) snapshot mode OBSERVED: a NOTICE carrying path + digest + expected census subset ==\n'
-# The snapshot exists while the review runs (the stub deletes it before announcing, as roborev does), so
-# the observer records its digest and the block reports it. RESULT is PASS because nothing else failed —
-# and that PASS deliberately does NOT claim the census was covered, which is what C‴ traded away.
+printf '== (cx31) snapshot mode: a NOTICE recording the STATED path, lexically, reading nothing ==\n'
+# C⁗ (owner ruling). The prompt names a snapshot; the block reports the path AS STATED, a LEXICAL containment
+# statement and the census subset it expected. Nothing is read — no digest, no size, no stat — so there is
+# nothing here that can hang, race or go stale. RESULT is PASS because nothing else failed, and that PASS
+# deliberately makes no claim about the census.
 reset_stub
-snap_live_log="$tmp/cx31-transcript.log"
-STUB_SNAPSHOT_LIFECYCLE_DIR="$snap_dir"
-STUB_SNAPSHOT_PATHS='alpha.rs beta.rs'
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
 STUB_PROMPT=$(snap_prompt "$snap_file")
-run_wrapper "$snap_work" --log "$snap_live_log"
+run_wrapper "$snap_work"
 assert_verdict 'case (cx31)' PASS 0
 assert_says 'case (cx31) snapshot mode is a NOTICE, not a certification' \
   '^prompt-content: NOTICE \(snapshot mode: not certified'
-assert_says 'case (cx31) the block records the observed snapshot PATH' "^snapshot-path: $snap_file\$"
-assert_says 'case (cx31) the block records its DIGEST' '^snapshot-digest: [0-9a-f-]{8,}$'
+assert_says 'case (cx31) the block records the STATED path' "^snapshot-path: $snap_file\$"
+assert_says 'case (cx31) containment is labelled LEXICAL, verbatim (rider R2)' \
+  '^snapshot-containment: lexical: inside the reviewed repository'
 assert_says 'case (cx31) the block records the census subset the run EXPECTED' \
   '^snapshot-expected: 2 code census path\(s\) expected, not asserted$'
-assert_says 'case (cx31) the NOTICE says the expectation is not asserted' 'that expectation is NOT asserted'
-assert_says 'case (cx31) and names the paths it would have covered' '^  beta\.rs$'
+assert_says 'case (cx31) the NOTICE says nothing was read' 'NOTHING WAS READ'
+assert_says 'case (cx31) and that the hang/race classes are not reachable rather than fixed' \
+  'not reachable rather than fixed'
+assert_says 'case (cx31) the expectation is explicitly not asserted' 'that expectation is NOT asserted'
+assert_lacks 'case (cx31) no digest is emitted (C⁗ reads nothing)' '^snapshot-digest:'
 assert_lacks 'case (cx31) no PASS is claimed about the census in snapshot mode' '^prompt-content: PASS'
-# FIX 4: the positive case is SYNCHRONISED with observation — the stub waited for the observer's own record to
-# name this path before deleting the snapshot, so a green here cannot come from an unsynchronised timeout.
-if [ -s "$INVOKED.observed" ]; then
-  ok 'case (cx31): the wrapper OBSERVED the snapshot while the review ran (synchronised, not timed out)'
-else
-  bad 'case (cx31): the observer never recorded the snapshot, so this case is not synchronised with the thing it observes'
-fi
 assert_one_result_line 'case (cx31)'
 reset_stub
 
-printf '== (cx31b) snapshot mode UNOBSERVED: the NOTICE names what could not be observed ==\n'
-# NEVER SILENCE. The prompt names a snapshot that never existed, so there is nothing to digest; the NOTICE
-# must say so and say why, rather than being empty or implying the snapshot was fine.
+printf '== (cx31b) a snapshot path that never existed is reported the same way — nothing is read ==\n'
+# The whole point of C⁗: whether the file is there is not consulted, so a deleted snapshot is reported
+# identically to a present one. No observation, no cause-for-non-observation, no difference.
 reset_stub
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
 STUB_PROMPT=$(snap_prompt "$snap_repo/.roborev/roborev-snapshot-999999/roborev-snapshot-content.diff")
 run_wrapper "$snap_work"
 assert_verdict 'case (cx31b)' PASS 0
-assert_says 'case (cx31b) still a NOTICE' '^prompt-content: NOTICE \(snapshot mode'
-assert_says 'case (cx31b) the digest key says UNOBSERVED, with the cause' '^snapshot-digest: UNOBSERVED \('
-assert_says 'case (cx31b) the NOTICE names the cause' 'could NOT be observed by this run'
-assert_lacks 'case (cx31b) an unobserved snapshot never yields a census claim' 'code census paths present'
+assert_says 'case (cx31b) still a NOTICE with the stated path' \
+  "^snapshot-path: $snap_repo/\.roborev/roborev-snapshot-999999/roborev-snapshot-content\.diff\$"
+assert_says 'case (cx31b) and a lexical containment statement' '^snapshot-containment: lexical: inside'
+assert_lacks 'case (cx31b) with no digest and no observation claim' '^snapshot-digest:'
 reset_stub
 
-printf '== (cx31b2) FIX 1: an ordinary in-repo path is NOT one of roborev'"'"'s snapshots, so it is not read ==\n'
-# The layout check belongs to the SAFETY half and was swept out with the certification machinery (roborev job
-# 15): without it, ANY regular file inside the repo named by a snapshot instruction was read and hashed. The
-# fixture names a perfectly ordinary tracked file, which must be refused by name rather than digested.
+printf '== (cx31b2) a path that is not SHAPED like a snapshot is a named FAIL, not a NOTICE ==\n'
+# The lexical layout check is what keeps an ordinary in-repo file — and roborev's third oversize tier — from
+# being reported as this review's snapshot.
 reset_stub
-# THREE components, so the case exercises the `.roborev` requirement rather than the arity check.
-mkdir -p "$snap_repo/notes/sub"
-ordinary="$snap_repo/notes/sub/looks-like-a.diff"
-printf 'diff --git a/alpha.rs b/alpha.rs\n' >"$ordinary"
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
-STUB_PROMPT=$(snap_prompt "$ordinary")
+STUB_PROMPT=$(snap_prompt "$snap_repo/notes/sub/looks-like-a.diff")
 run_wrapper "$snap_work"
-assert_says 'case (cx31b2) an ordinary in-repo file is refused as not-a-snapshot' \
-  'not safe to read as this repository.s snapshot \(unbound-job\)'
-assert_says 'case (cx31b2) the cause says WHY it is not one of roborev'"'"'s snapshot files' \
+assert_verdict 'case (cx31b2)' FAIL 1
+assert_says 'case (cx31b2) an unshaped path is a named FAIL' \
+  '^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)$'
+assert_says 'case (cx31b2) the cause says WHY' \
   "does not sit under the repository's own '\.roborev' directory"
-# A REFUSED PATH IS NOT A NOTICE (roborev job 16): with no validly bound snapshot there is nothing to report a
-# digest for, so the run FAILs by name and the three snapshot keys are ABSENT rather than `UNOBSERVED`.
-assert_says 'case (cx31b2) a refused path is a named FAIL, not an exempted NOTICE' \
-  '^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)$'
-assert_lacks 'case (cx31b2) an ordinary file is never hashed into the block' '^snapshot-digest:'
+assert_lacks 'case (cx31b2) and emits no snapshot keys at all' '^snapshot-path:'
 reset_stub
 
-printf '== (cx31c) the safety refusals survive C‴: a symlinked component is not read ==\n'
-# Certification is gone; SAFETY is not. The wrapper must still refuse to READ a path outside the repo or
-# through a symlink, and must say that is why it observed nothing.
+printf '== (cx31c) a path outside the reviewed repository is refused LEXICALLY ==\n'
 reset_stub
-sym_target="$tmp/cx31c-outside-target.diff"
-write_snap_diff "$sym_target" alpha.rs beta.rs
-sym_dir="$snap_repo/.roborev/roborev-snapshot-C1C1C1"
-mkdir -p "$sym_dir"
-ln -s "$sym_target" "$sym_dir/roborev-snapshot-content.diff"
-STUB_SNAPSHOT_LIFECYCLE_DIR=""
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
-STUB_PROMPT=$(snap_prompt "$sym_dir/roborev-snapshot-content.diff")
+STUB_PROMPT=$(snap_prompt "/elsewhere/.roborev/roborev-snapshot-1/roborev-snapshot-content.diff")
 run_wrapper "$snap_work"
-assert_says 'case (cx31c) a symlinked snapshot is not read, and the NOTICE says so' \
-  'not safe to read as this repository.s snapshot \(symlinked\)'
-assert_says 'case (cx31c) a symlinked path is a named FAIL, so no digest of its target is ever reported' \
+assert_verdict 'case (cx31c)' FAIL 1
+assert_says 'case (cx31c) a foreign path is a named FAIL' \
   '^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)$'
-assert_lacks 'case (cx31c) and no snapshot digest is emitted at all' '^snapshot-digest:'
-rm -rf "$sym_dir" "$sym_target"
+assert_says 'case (cx31c) and the comparison is stated as lexical' 'compared LEXICALLY — no filesystem access'
 reset_stub
 
-printf '== (cx31d) a foreign-repo snapshot path is refused the same way ==\n'
+printf '== (cx31d) a `..` traversal is refused on the STRING, before anything else ==\n'
 reset_stub
-foreign_snap="$tmp/cx31d-foreign/.roborev/roborev-snapshot-F1F1F1/roborev-snapshot-content.diff"
-write_snap_diff "$foreign_snap" alpha.rs beta.rs
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
-STUB_PROMPT=$(snap_prompt "$foreign_snap")
+STUB_PROMPT=$(snap_prompt "$snap_repo/.roborev/roborev-snapshot-A/../roborev-snapshot-B/roborev-snapshot-content.diff")
 run_wrapper "$snap_work"
-assert_says 'case (cx31d) a path outside the reviewed repo is not read' \
-  'not safe to read as this repository.s snapshot \(foreign-repo\)'
-assert_lacks 'case (cx31d) and its content never reaches a census claim' 'code census paths present'
+assert_verdict 'case (cx31d)' FAIL 1
+assert_says 'case (cx31d) a dot segment is refused by name' \
+  "^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)\$"
+assert_says 'case (cx31d) the cause names the segment' "contains a '\.\.' segment"
 reset_stub
 
-printf '== (cx31g) BLOCKER 1: a COMPACT instruction carrying a git COMMAND cannot PASS ==\n'
-# THE FALSE PASS THE OWNER RULED MUST NOT EXIST. roborev'"'"'s third oversize tier puts a git COMMAND where the
-# compact instruction'"'"'s token goes. Selecting snapshot mode on the mere PRESENCE of that line made
-# prompt-content an EXEMPTED NOTICE, so the wrapper PASSED having received neither an inline diff nor a
-# snapshot. The owner: an unverifiable input is a non-passing verdict by rule 13.
+printf '== (cx31g) RIDER R3: a COMPACT instruction carrying a git COMMAND still FAILs ==\n'
+# The standing #3325 ruling survives C⁗ in string form: the delegated tier ships neither an inline diff nor a
+# snapshot PATH, and an unverifiable input is non-passing by rule 13.
 reset_stub
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
 STUB_PROMPT='Review the change.\n\n(Diff too large; read `git diff --stat HEAD~1`.)'
@@ -3491,33 +3465,13 @@ run_wrapper "$snap_work"
 assert_verdict 'case (cx31g)' FAIL 1
 assert_says 'case (cx31g) a command in the compact token is NOT a snapshot' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
-assert_says 'case (cx31g) the delegated tier is still named' \
+assert_says 'case (cx31g) the delegated tier is named' \
   "^ERROR: prompt-content: the prompt carries a .\(Diff too large. notice but NO snapshot path"
 assert_lacks 'case (cx31g) it never becomes an exempted NOTICE' '^prompt-content: NOTICE'
-assert_lacks 'case (cx31g) and no digest is reported for a command' '^snapshot-digest:'
+assert_lacks 'case (cx31g) and emits no snapshot keys' '^snapshot-path:'
 reset_stub
 
-printf '== (cx31g2) BLOCKER 1b: a selected-but-UNBOUND snapshot mode cannot PASS ==\n'
-# The other half: a compact token that IS snapshot-shaped but names a path outside the repo. Snapshot mode is
-# selected, the binding FAILS, and that must be a named FAIL rather than an exempted NOTICE — `SNAPSHOT_NOTICE`
-# asserts "validly bound", not "mode selected".
-reset_stub
-STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
-STUB_PROMPT='Review the change.\n\n(Diff too large; read `/elsewhere/.roborev/roborev-snapshot-777/roborev-snapshot-content.diff`.)'
-run_wrapper "$snap_work"
-assert_verdict 'case (cx31g2)' FAIL 1
-assert_says 'case (cx31g2) a selected-but-unbound snapshot is a named FAIL' \
-  '^prompt-content: FAIL \(snapshot named but unusable: snapshot-unbound\)$'
-assert_says 'case (cx31g2) the cause says we received neither an inline diff nor a readable snapshot' \
-  'received neither an inline diff nor a snapshot it could read'
-assert_says 'case (cx31g2) and names the binding failure' 'foreign-repo'
-assert_lacks 'case (cx31g2) it never becomes an exempted NOTICE' '^prompt-content: NOTICE'
-reset_stub
-
-printf '== (cx31p) BLOCKER 2: a readable instruction line does NOT excuse an unreadable one (C‴ shape) ==\n'
-# THE REGRESSED CONTRACT, restored and re-pinned in its post-C‴ form. One line parses to a real snapshot, a
-# second carries no readable path; reporting the parsed path and its digest while saying nothing about the
-# undecidable line is the shape whose revert once produced a real false PASS.
+printf '== (cx31p) RIDER R1: a malformed instruction line — WITH a valid sibling ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
@@ -3526,55 +3480,30 @@ run_wrapper "$snap_work"
 assert_verdict 'case (cx31p)' FAIL 1
 assert_says 'case (cx31p) an unreadable sibling makes the input unverifiable' \
   '^prompt-content: FAIL \(snapshot named but unusable: unparseable-instruction\)$'
-assert_says 'case (cx31p) the cause counts the malformed line(s)' \
-  '1 snapshot instruction line\(s\) carried no readable backtick-delimited path'
-assert_says 'case (cx31p) and discloses the parsed path too, rather than reporting it as fine' \
-  "while 1 other line\(s\) did \(first: $snap_file\)"
+assert_says 'case (cx31p) the cause counts the malformed line(s) AND discloses the parsed path' \
+  "1 snapshot instruction line\(s\) carried no readable backtick-delimited path, while 1 other line\(s\) did \(first: $snap_file\)"
 assert_lacks 'case (cx31p) the readable sibling never yields an exempted NOTICE' '^prompt-content: NOTICE'
 rm -rf "$snap_dir"
 reset_stub
 
-printf '== (cx31h) BLOCKER 3: the size read is bounded, and DECLINED when nothing can bound it ==\n'
-# The open must happen inside the bounded child — a shell redirection is performed by the PARENT before the
-# bound starts — and the fallback must actually bound, since a stock macOS worker has no `timeout`. Probed
-# directly: with `timeout` hidden from PATH the portable watchdog must still return, and a FIFO must not hang.
-cx31h_probe="$tmp/cx31h-probe.sh"
-cx31h_out="$tmp/cx31h-out.txt"
-cat >"$cx31h_probe" <<'CX31H'
-set -uo pipefail
-REPO="$2"
-. "$1"
-ROBOREV_READ_TIMEOUT_SECS=2
-_ROBOREV_READ_TIMEOUT_SECS=2
-mkfifo "$3/blocker.fifo" 2>/dev/null || exit 3
-# No `timeout` on PATH: the portable watchdog is the only thing standing between this and a hang.
-PATH=/nonexistent-bin
-if _roborev_file_size "$3/blocker.fifo"; then
-  printf 'SIZE-RETURNED-FOR-A-FIFO\n'
-else
-  printf 'refused-or-bounded rc=%s kind=%s\n' "$?" "${_rx_bounded_kind:-none}"
-fi
-printf 'probe-survived\n'
-CX31H
-mkdir -p "$tmp/cx31h"
-if bash "$cx31h_probe" "$ORACLES_SRC" "$tmp/cx31h-repo" "$tmp/cx31h" >"$cx31h_out" 2>&1; then
-  if grep -qF 'probe-survived' "$cx31h_out"; then
-    ok 'case (cx31h): a FIFO does not hang the size read, with no `timeout` available'
-  else
-    bad "case (cx31h): the probe did not return — the read is still unbounded: $(cat "$cx31h_out")"
-  fi
-  if grep -qF 'SIZE-RETURNED-FOR-A-FIFO' "$cx31h_out"; then
-    bad 'case (cx31h): a size was reported for a FIFO — the immediately-before regular-file check did not hold'
-  else
-    ok 'case (cx31h): no size is reported for a non-regular file (refused by name, not by hanging)'
-  fi
-else
-  bad "case (cx31h): the bounded-read probe did not run: $(cat "$cx31h_out")"
-fi
+printf '== (cx31p2) RIDER R1: a MALFORMED-ONLY prompt reaches its verdict, and does not abort ==\n'
+# THE UNCOVERED HALF (roborev job 17). The cause string was built with an optional command substitution, and a
+# simple assignment takes the substitution status — so with NO parsed paths `set -e` killed the wrapper BEFORE
+# this verdict was returned. A spurious abort is a spurious non-PASS: this issue's own bug class.
+reset_stub
+STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
+STUB_PROMPT='Review the change.\nRead the diff from: nowhere in particular\nRead the diff from: also unreadable'
+run_wrapper "$snap_work"
+assert_verdict 'case (cx31p2)' FAIL 1
+assert_says 'case (cx31p2) the intended verdict is REACHED, not aborted past' \
+  '^prompt-content: FAIL \(snapshot named but unusable: unparseable-instruction\)$'
+assert_says 'case (cx31p2) the cause says no line yielded a path' \
+  '2 snapshot instruction line\(s\) carried no readable backtick-delimited path, and no line yielded one'
+assert_lacks 'case (cx31p2) the wrapper did not abort before its verdict' 'terminated unexpectedly'
+assert_one_result_line 'case (cx31p2)'
+reset_stub
 
 printf '== (cx31e) INVARIANT: inline mode is UNCHANGED and still FAILs on an absent census path ==\n'
-# C‴ changes snapshot mode ONLY. An inline prompt missing a code census path must still be a hard FAIL with
-# the original value spelling, because that is the T3 direction the whole wrapper exists for.
 reset_stub
 work=$(make_fixture case_cx31e two-code-commits)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
@@ -3585,10 +3514,8 @@ assert_says 'case (cx31e) inline mode still FAILs with the original value spelli
   '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
 assert_says 'case (cx31e) and still names the absent path' '^  beta\.rs$'
 assert_lacks 'case (cx31e) inline mode never becomes a NOTICE' '^prompt-content: NOTICE'
-# FIX 5 (roborev job 15): in inline mode the three keys have NO SUBJECT, so they are ABSENT — not `-`, and
-# above all not an empty value, which is the shape the block's own doctrine calls out.
 assert_lacks 'case (cx31e) snapshot-path is ABSENT in inline mode' '^snapshot-path:'
-assert_lacks 'case (cx31e) snapshot-digest is ABSENT in inline mode (never an empty value)' '^snapshot-digest:'
+assert_lacks 'case (cx31e) snapshot-containment is ABSENT in inline mode' '^snapshot-containment:'
 assert_lacks 'case (cx31e) snapshot-expected is ABSENT in inline mode' '^snapshot-expected:'
 reset_stub
 
@@ -3773,9 +3700,16 @@ if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_review_diff_head
 else
   bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not go through the oracles' diff-source resolver"
 fi
-# (6) C‴ (#3312): WHAT MUST STILL BE TRUE AFTER THE CAPTURE APPARATUS WAS RETIRED. The certification
-#     machinery is deleted, so the asserts that pinned it are deleted with it — leaving these, which are
-#     the properties C‴ itself depends on.
+# (6) C⁗ (#3312): WHAT MUST STILL BE TRUE NOW THAT NOTHING IS READ. The observer, the digest, the size, the
+#     bounded-read watchdog and the three-valued path-state helper are all DELETED by owner ruling, so the
+#     asserts that pinned them are deleted with them and the ones below take their place.
+#
+#     THE PREDICATE-FAMILY LINT GOES WITH ITS SUBJECT, deliberately: it scanned the capture apparatus for bare
+#     file predicates, and that apparatus performs no filesystem access any more — a lint with an EMPTY subject
+#     set greens vacuously, which is the very shape it existed to catch. The durable artifact is the RULE, kept
+#     in CLAUDE.md and the doctrine page: every `test`/`[` file predicate is two-valued, so it must collapse
+#     "cannot tell" onto one of its answers, and it always picks the permissive one. The "performs NO
+#     filesystem access" assert below is what makes that empty subject set TRUE rather than assumed.
 _src_defs=$(grep -cE '^roborev_collect_review_diff_headers\(\) \{' "$ORACLES" || true)
 if [ "${_src_defs:-0}" -eq 1 ]; then
   ok 'structural: the diff-source resolver is defined exactly once, in the oracles file'
@@ -3787,50 +3721,61 @@ if grep -qF 'index($0, "Read the diff from:") == 1' "$ORACLES"; then
 else
   bad 'structural: the snapshot-instruction match is not anchored at column zero (#3312)'
 fi
-# THE RETIREMENT IS ASSERTED, so a future edit cannot quietly resurrect what C‴ removed: nothing may copy a
-# snapshot, publish it, or derive a verdict from a stored copy.
 _resurrected=""
-for _gone in 'roborev_snapshot_capture_start' '_roborev_snapshot_capture_loop' '_roborev_capture_validate' \
-  'ROBOREV_SNAPSHOT_CAPTURE_DIR' 'dg_staged' 'capture-unidentified' 'capture-path-mismatch'; do
+for _gone in 'roborev_snapshot_observe_start' '_roborev_snapshot_observe_loop' 'roborev_snapshot_observation_for' \
+  '_roborev_snapshot_safe_to_read' '_roborev_file_digest' '_roborev_file_size' '_roborev_bounded' \
+  '_roborev_path_state' '_roborev_regular_readable_state' '_roborev_resolve_existing_ancestor' \
+  'ROBOREV_SNAPSHOT_DIGEST' 'ROBOREV_SNAPSHOT_BYTES'; do
   if grep -qE "$_gone" "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null; then
     _resurrected="$_resurrected $_gone"
   fi
 done
 if [ -z "$_resurrected" ]; then
-  ok 'structural: the retired capture/publication/digest-agreement machinery is GONE, not left running unread (C‴)'
+  ok 'structural: the observer, digest, size, watchdog and path-state helper are GONE (C⁗ reads nothing)'
 else
-  bad "structural: retired C‴ machinery is back in the flow scripts —$_resurrected. Nothing may derive a verdict from a stored copy of the snapshot (#3312 owner ruling)"
+  bad "structural: retired C⁗ machinery is back in the flow scripts —$_resurrected. Nothing may read the snapshot: the hang and race classes are absent only because nothing is read (#3312 owner ruling)"
 fi
-_obs_start=$(grep -nE '^_roborev_snapshot_observe_loop\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
-if [ -z "$_obs_start" ]; then
-  bad 'structural: _roborev_snapshot_observe_loop is not defined — nothing observes the snapshot (C‴)'
+for _fn in roborev_snapshot_path_binding roborev_collect_review_diff_headers; do
+  _fs=$(grep -nE "^$_fn\(\) \{" "$ORACLES" | head -1 | cut -d: -f1)
+  if [ -z "$_fs" ]; then bad "structural: $_fn is not defined"; continue; fi
+  _fe=$(awk -v s="$_fs" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+  _body=$(sed -n "${_fs},${_fe:-$_fs}p" "$ORACLES" | grep -vE '^[[:space:]]*#')
+  _touch=$(printf '%s\n' "$_body" | grep -nE '\[[[:space:]]*!?[[:space:]]*-(e|f|d|r|L|s|x)[[:space:]]|\bstat\b|pwd -P|sha256sum|shasum|cksum|wc -c' || true)
+  if [ -z "$_touch" ]; then
+    ok "structural: $_fn performs NO filesystem access (C⁗: the snapshot path is only ever a string here)"
+  else
+    bad "structural: $_fn touches the filesystem — ${_touch%%$'\n'*} — re-opening the TOCTOU/hang class C⁗ removed by construction (#3312)"
+  fi
+done
+if grep -qF 'lexical: inside the reviewed repository' "$ORACLES"; then
+  ok 'structural: the containment statement is labelled `lexical` (rider R2)'
 else
-  _obs_end=$(awk -v s="$_obs_start" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
-  _obs_body=$(sed -n "${_obs_start},${_obs_end:-$_obs_start}p" "$ORACLES")
-  if printf '%s\n' "$_obs_body" | grep -qE '^[[:space:]]*(cp|mv|install)[[:space:]]'; then
-    bad 'structural: the observer COPIES or MOVES the snapshot — C‴ retired the capture; it may only read and digest (#3312)'
-  else
-    ok 'structural: the observer only reads and digests the snapshot (no copy, no publication)'
-  fi
-  if printf '%s\n' "$_obs_body" | grep -qF '_roborev_snapshot_safe_to_read'; then
-    ok 'structural: the observer applies the surviving SAFETY checks before reading'
-  else
-    bad 'structural: the observer reads without the safety checks — those survive C‴ (#3312)'
-  fi
+  bad 'structural: the containment statement is not labelled `lexical` — a reader could mistake a string prefix for a verified property (#3312 rider R2)'
+fi
+if grep -qF 'NOTHING WAS READ' "$CHECKS_FILE" && grep -qF 'not reachable rather than fixed' "$CHECKS_FILE"; then
+  ok 'structural: the NOTICE states that nothing was read, and that the hang class is not reachable rather than fixed'
+else
+  bad 'structural: the NOTICE does not state that nothing was read, or mis-describes the hang class as fixed (#3312)'
 fi
 if grep -qF 'PROMPT_CONTENT="NOTICE (snapshot mode' "$CHECKS_FILE"; then
-  ok 'structural: snapshot mode reports a NOTICE (C‴)'
+  ok 'structural: snapshot mode reports a NOTICE'
 else
-  bad 'structural: snapshot mode does not report a NOTICE — C‴ is not implemented (#3312)'
+  bad 'structural: snapshot mode does not report a NOTICE (#3312)'
 fi
 _ckeys_missing=""
-for _ck in snapshot-path snapshot-digest snapshot-expected; do
+for _ck in snapshot-path snapshot-containment snapshot-expected; do
   grep -qF "emit_kv '$_ck'" "$WRAPPER" || _ckeys_missing="$_ckeys_missing $_ck"
 done
 if [ -z "$_ckeys_missing" ]; then
-  ok 'structural: the block emits snapshot-path / snapshot-digest / snapshot-expected (the information C‴ preserves)'
+  ok 'structural: the block emits snapshot-path / snapshot-containment / snapshot-expected'
 else
-  bad "structural: the block does not emit —$_ckeys_missing. C‴ replaces certification WITH this record, so its absence is the whole loss and none of the gain (#3312)"
+  bad "structural: the block does not emit —$_ckeys_missing. C⁗ replaces certification WITH this record (#3312)"
+fi
+_r1=$(grep -nE 'ROBOREV_SNAPSHOT_UNOBSERVED_WHY="[^"]*\$\(\[' "$ORACLES" || true)
+if [ -z "$_r1" ]; then
+  ok 'structural: no cause string is built with an optional command substitution (rider R1: it aborts under set -e)'
+else
+  bad "structural: a cause string embeds an optional command substitution in a simple assignment, which takes its status and aborts under set -e: ${_r1%%$'\n'*} (#3312 rider R1)"
 fi
 
 # THE AFFIRMATIVE-MEASUREMENT SHAPE, at the new branch point (CLAUDE.md; #3229 round-10). The
