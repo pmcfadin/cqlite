@@ -329,7 +329,9 @@ assert the reviewer received the census paths; a closer wanting certainty inspec
 the diff or re-reviews a smaller range. A stated path that is relative, carries a
 \`.\`/\`..\` segment, lies outside the repository prefix, or is not shaped like
 .roborev/roborev-snapshot-<id>/<file> is a named FAIL, not a NOTICE — as is roborev's
-delegated-inspection tier, which names no snapshot path at all.
+delegated-inspection tier, which names no snapshot path at all. That tier is
+judged BEFORE any diff --git header is consulted, so a header quoted elsewhere in
+the prompt can never make a review that received nothing look inline-delivered.
 
 THE INVARIANT THAT BOUNDS THAT NOTICE: inline census verification must not be
 suppressible by any repository-controlled content. A delivery instruction is honoured

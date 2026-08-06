@@ -538,6 +538,18 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   (asymmetric on purpose): under a strictly same-block rule a genuine inline delivery followed by an injected
   trailer would present a final block with an instruction and no headers, so it would resolve to the exempted
   NOTICE and skip census certification — the #3222 class excused by repository content.
+  **BUT QUOTED HEADERS MAY NEVER ESTABLISH THAT A DELIVERY HAPPENED (#3312 job 20).** A **pathless oversize
+  marker** — roborev's delegated tier: `(Diff too large …)` with no snapshot path, the reviewer told to run git
+  itself — is its own hard-failing state (`delegated-oversize`), decided **before** the global header set is
+  consulted anywhere. Read in the other order it resolved as `inline` on any repository-quoted `diff --git` line,
+  and quoted headers that happened to cover the census produced **`prompt-content: PASS` on a review that
+  received nothing** — a PASS, not the disclosed NOTICE residual, and a contradiction of the standing #3325
+  ruling that the tier stays a named FAIL. So the header set has **two separated uses**: prompt-wide evidence for
+  the mixed-delivery lock and for census matching once a delivery is established, never the thing that
+  establishes delivery when roborev's own marker says it delegated. Both routes into the tier are asserted (a
+  compact instruction whose token is a git command, and an oversize notice with no instruction line at all), and
+  the **evaluation ORDER is pinned by a structural assert** — this was the second order-of-evaluation false PASS
+  in that one function, after validate-after-normalise.
   **AND THE IRREDUCIBLE RESIDUAL, as a property, not a reassurance: delivery mode is inferred from prompt TEXT,
   and roborev's prompt embeds repository-controlled content** (project guidelines/`AGENTS.md`, additional
   context, previous-review bodies) **at column zero, exactly like roborev's own text — there is no structural

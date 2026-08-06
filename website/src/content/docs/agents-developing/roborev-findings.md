@@ -217,6 +217,17 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    no headers, resolve to the exempted NOTICE, and skip census certification — the #3222 class excused by
    repository content.
 
+   **Quoted headers may never establish that a delivery happened.** A **pathless oversize marker** — roborev's
+   delegated tier, `(Diff too large …)` with no snapshot path and the reviewer told to run git itself — is its own
+   hard-failing state, decided **before** the global header set is consulted at all. In the other order it
+   resolved as `inline` on any repository-quoted `diff --git` line, and quoted headers that covered the census
+   produced **`prompt-content: PASS` on a review that received nothing** — a PASS, not the NOTICE residual, and a
+   contradiction of the standing #3325 ruling that the tier stays a named FAIL. The header set therefore has two
+   **separated** uses: prompt-wide evidence for the mixed-delivery lock and for census matching *once a delivery
+   is established*, never the thing that establishes delivery when roborev's own marker says it delegated. Both
+   routes into the tier are covered, and the evaluation **order** is pinned by a structural assert — it was the
+   second order-of-evaluation false PASS in that function.
+
    **The irreducible residual, stated as a property.** Delivery mode is inferred from prompt **text**, and
    roborev's prompt embeds repository-controlled content (project guidelines/`AGENTS.md`, additional context,
    previous-review bodies) at column zero exactly like roborev's own text. There is **no structural marker**
