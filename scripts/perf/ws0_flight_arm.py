@@ -540,6 +540,14 @@ def collect_flight(
                 # is this rep's, from this session's server" — and a swapped JSONL or a record from a
                 # peer lane's server satisfies the first while failing the second.
                 "verified_session_bound_inputs": session_bound,
+                # ...and the ERROR-CODE CROSS-CHECK (#3272 round 20): the breakdown, its SUM, and
+                # the count it was compared against. Spread into the rep rather than nested, so
+                # `requests_error` keeps the top-level key an existing consumer reads while the
+                # two new siblings record that the comparison RAN. Recorded at all for the reason
+                # `verified_fixed_inputs` is: a reader must be able to see WHAT was checked, not
+                # merely that the rep was accepted — `error_codes` was `ignored` for four rounds
+                # and no output said so.
+                **error_breakdown,
                 # ...and the ARROW PAYLOAD VOLUME comparison, or the NAMED reason it could not run.
                 # Never absent and never silently `null`: a cold-only session has no untimed
                 # preflight to compare against (the prewarm is skipped so `cold` stays meaningful),
