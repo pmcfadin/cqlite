@@ -991,217 +991,231 @@ fi
 #         * anything that merely NAMES the write target REFUSES (rc 1, empty, loud);
 #         * the WRITE ITSELF replaces the directory ENTRY (rename), so a symlink planted in
 #           the window between the check and the write is replaced, not written through.
-wt_d="$tmp/wt-sandbox.d"; mkdir -p "$wt_d"
-wt_outside="$tmp/wt-outside-target"; printf 'PRECIOUS-HOST-FILE\n' >"$wt_outside"
-wt_before=$(cat "$wt_outside")
-rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outside" "$wt_d/99-cqlite-perf.conf"
-wt_path=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>/dev/null); wt_rc=$?
-wt_err=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>&1 >/dev/null)
-if [ "$wt_rc" -ne 0 ] && [ -z "$wt_path" ] \
-   && printf '%s' "$wt_err" | grep -qi 'symlink' \
-   && [ -L "$wt_d/99-cqlite-perf.conf" ] && [ "$(cat "$wt_outside")" = "$wt_before" ]; then
-  ok "perf-capability: the drop-in WRITE TARGET is refused when the managed basename is itself a SYMLINK (rc 1, empty, named) — a contained directory does not license writing through its entries (#3261 AC1)"
-else
-  bad "perf-capability: a SYMLINKED write target was NAMED for a privileged tee (rc=$wt_rc, path='$wt_path', err='$wt_err')"
-fi
-# ...and the CONTENTS read that decides idempotency may not follow it either: a symlink whose
-# TARGET happens to hold the canonical bytes must not report "already current" (that would
-# leave the host file in place and claim success).
-printf '%s\n' "$(bash "$PERFLIB" --drop-in)" >"$wt_outside"
-if env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB" 2>/dev/null; then
-  bad "perf-capability: dropin_current followed a SYMLINK and reported the drop-in 'already current' from a file outside the managed name"
-else
-  ok "perf-capability: dropin_current does NOT follow a symlinked managed name, even when the link's TARGET holds byte-identical canonical content (#3261 AC1)"
-fi
-# ...and the WRITE replaces the ENTRY. The refusal above is a check with a TOCTOU window; the
-# rename has none. After it, the managed name is a REGULAR file holding the canonical bytes,
-# the outside target is byte-identical to before, and no temp entry is left behind.
-wt_outside_bytes=$(cat "$wt_outside")
-wt_ins=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ins_rc=$?
-wt_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
-if [ "$wt_ins_rc" -eq 0 ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ] && [ -f "$wt_d/99-cqlite-perf.conf" ] \
-   && [ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && [ -z "$wt_leftover" ] \
-   && env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB"; then
-  ok "perf-capability: the drop-in write REPLACES the directory entry (temp + rename), so a pre-existing symlink at the managed name is replaced and its outside target is untouched — and no temp entry is left behind (#3261 AC1)"
-else
-  bad "perf-capability: the atomic drop-in install did not replace a symlinked entry (rc=$wt_ins_rc, out='$wt_ins', link=$([ -L "$wt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$wt_leftover', outside-changed=$([ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && echo no || echo YES))"
-fi
-# ...and the STAGING entry is UNPREDICTABLE, created by `mktemp` (roborev finding 1 on #3261 — the
-# NINTH escape, same shape as the other eight: a NAME trusted instead of a DESTINATION). A fixed
-# staging path that is checked, cleared and only THEN opened by a privileged `tee` is a TOCTOU
-# window: anyone who can create entries in the directory re-plants that KNOWN name as a symlink
-# between the verify and the open, and root follows it. Two asserts, because neither alone is
-# enough — a behavioural one (the previously-predictable name is planted as a symlink at a victim
-# file and must be left strictly alone) and a structural one (unpredictability is a property of the
-# NAME, which is gone by the time the write succeeds, so the source is the only place to see it).
-wt_bait="$tmp/wt-staging-bait"; printf 'BAIT-MUST-NOT-BE-WRITTEN\n' >"$wt_bait"
-wt_bait_before=$(cat "$wt_bait")
-rm -f "$wt_d/.99-cqlite-perf.conf.new"; ln -s "$wt_bait" "$wt_d/.99-cqlite-perf.conf.new"
-rm -f "$wt_d/99-cqlite-perf.conf"
-wt_st=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_st_rc=$?
-if [ "$wt_st_rc" -eq 0 ] && [ "$(cat "$wt_bait")" = "$wt_bait_before" ] \
-   && [ -L "$wt_d/.99-cqlite-perf.conf.new" ] \
-   && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
-  ok "perf-capability: the drop-in staging entry does NOT reuse the previously-predictable name — a symlink planted there is left untouched and its target is byte-unchanged, while the managed file is still written (#3261 roborev-1 TOCTOU)"
-else
-  bad "perf-capability: the install wrote through a PREDICTABLE staging name (rc=$wt_st_rc, bait-changed=$([ "$(cat "$wt_bait")" = "$wt_bait_before" ] && echo no || echo YES), out='$wt_st')"
-fi
-rm -f "$wt_d/.99-cqlite-perf.conf.new"
-# ...structurally: the staging entry is created by `mktemp` with a random-suffix template, no
-# hardcoded staging literal survives, the rename carries `-T`, and the WHOLE staged install is ONE
-# privileged invocation (issue #3261 roborev round 2).
-#   THE LAST PROPERTY IS HYGIENE, NOT THE FIX, and this comment previously said otherwise. roborev
-#   round 3 corrected it: a single `sh -c` sequences ONE PROCESS's commands and is not mutual
-#   exclusion against other processes, which run concurrently on other CPUs regardless of how we
-#   grouped ours. Consolidation NARROWS the create-to-reopen window; it does not close it. It is
-#   still worth pinning — a split back into `mktemp` in one privileged call and the write in another
-#   would re-widen the window while every behavioural assert stayed green, which no after-the-fact
-#   observation can catch — but it is pinned as hygiene, not as the guarantee.
-wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
-wt_privcalls=$(printf '%s\n' "$wt_body" | grep -c '"\$@"')
-wt_struct_fail=''
-printf '%s\n' "$wt_body" | grep -q 'mktemp -- "\$d/\.\$b\.XXXXXX"' \
-  || wt_struct_fail="$wt_struct_fail no-mktemp-template"
-printf '%s\n' "$wt_body" | grep -qF '.new"' && wt_struct_fail="$wt_struct_fail hardcoded-staging-name"
-printf '%s\n' "$wt_body" | grep -q 'mv -fT -- "\$t" "\$p"' \
-  || wt_struct_fail="$wt_struct_fail no-mv-T"
-[ "$wt_privcalls" -eq 1 ] || wt_struct_fail="$wt_struct_fail privileged-invocations=$wt_privcalls"
-printf '%s\n' "$wt_body" | grep -q '"\$@" sh -c' || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
-if [ -z "$wt_struct_fail" ]; then
-  ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, which NARROWS the create-to-reopen window but does NOT close it — see the note above), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
-else
-  bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
-  printf '%s\n' "$wt_body" | grep -n '\$@\|mktemp\|mv -' | head -8
-fi
-# ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted —
-# the check now lives INSIDE the privileged shell, so this also proves it survived consolidation.
-wt_mt="$tmp/wt-bad-mktemp"; mkdir -p "$wt_mt"
-for t in bash sh cat printf tee mv rm chmod env grep; do
-  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_mt/$t"
-done
-printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "/tmp/perf-cap-elsewhere.$$"' >"$wt_mt/mktemp"
-chmod +x "$wt_mt/mktemp"
-wt_mt_out=$(env PATH="$wt_mt:$PATH" CQLITE_PERF_SYSCTL_DIR="$wt_d" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_mt_rc=$?
-if [ "$wt_mt_rc" -ne 0 ] \
-   && printf '%s' "$wt_mt_out" | grep -q 'mktemp did not create a staging entry inside the validated directory' \
-   && [ ! -e "/tmp/perf-cap-elsewhere.$$" ]; then
-  ok "perf-capability: a 'mktemp' answering a path OUTSIDE the validated directory is REFUSED by name from INSIDE the privileged shell, and that path is never created (the tool's answer is checked, not trusted)"
-else
-  bad "perf-capability: a mktemp answering outside the validated directory was trusted (rc=$wt_mt_rc, out='$wt_mt_out')"
-fi
-# ...and the POST-CREATION destination race: a symlink-to-DIRECTORY planted at the managed name.
-# Without `mv -T` (--no-target-directory) `mv` would move the staging file INTO the linked
-# directory — the rename that exists to avoid FOLLOWING a symlink would follow one instead, landing
-# the managed bytes outside the sandbox under a different name. With -T the destination is always a
-# plain name to replace. Asserted by consequence: nothing may appear inside the outside directory.
-wt_outdir="$tmp/wt-outside-dir"; rm -rf "$wt_outdir"; mkdir -p "$wt_outdir"
-rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outdir" "$wt_d/99-cqlite-perf.conf"
-wt_td=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_td_rc=$?
-wt_outdir_contents=$(ls -A "$wt_outdir")
-wt_td_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
-# Measured without `-T`: the staging entry landed INSIDE $wt_outdir as `.99-cqlite-perf.conf.XXXXXX`
-# — the managed bytes escaped the sandbox under a name nothing tracks. With `-T`: rc 0, the symlink
-# is REPLACED by a regular file, the outside directory stays empty. All four pinned.
-if [ "$wt_td_rc" -eq 0 ] && [ -z "$wt_outdir_contents" ] && [ -z "$wt_td_leftover" ] \
-   && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
-  ok "perf-capability: a symlink-to-DIRECTORY planted at the managed name does NOT redirect the staged write into it ('mv -T') — the link is REPLACED by a regular file, the outside directory stays empty, no staging entry is left behind (#3261 roborev-2)"
-else
-  bad "perf-capability: the staged write was redirected through a symlink-to-directory at the managed name (rc=$wt_td_rc, outside-dir='$wt_outdir_contents', leftover='$wt_td_leftover', out='$wt_td')"
-fi
-rm -f "$wt_d/99-cqlite-perf.conf"
-# ...and THE PRECONDITION THAT ACTUALLY CLOSES THE STAGING RACE (issue #3261, roborev round 3): a
-# drop-in directory writable by anyone less privileged than the writer is REFUSED before anything is
-# staged. Three rounds of this defect were each answered by trying to make the race unwinnable
-# (unpredictable name, then one privileged invocation); neither works, because a single `sh -c`
-# sequences OUR commands and says nothing about other processes on other CPUs. Removing the
-# attacker's precondition does work — with no one able to create or replace entries in the
-# directory, there is no actor to race, whatever the timing.
-# The negative control is the whole point of the group: a check that refuses everything would pass
-# the two refusal cases and be useless, so a correctly-owned 0755 directory must still install.
-wt_perm_d="$tmp/wt-perm.d"
-wt_perm_fail=0
-for wt_mode in 0775 0777 0757; do
-  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod "$wt_mode" "$wt_perm_d"
-  wt_perm_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
-    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_perm_rc=$?
-  wt_perm_left=$(ls -A "$wt_perm_d")
-  if [ "$wt_perm_rc" -eq 0 ] \
-     || ! printf '%s' "$wt_perm_out" | grep -q 'group- or world-writable' \
-     || [ -n "$wt_perm_left" ]; then
-    bad "perf-capability: a mode-$wt_mode drop-in directory was accepted for a privileged staged write (rc=$wt_perm_rc, left='$wt_perm_left', out='$wt_perm_out')"
+# ---- STAGED-INSTALL CASES: GNU-ONLY TOOLCHAIN, LOUDLY AND COUNTABLY SKIPPED ELSEWHERE ----------
+# (issue #3261, roborev round 5 Medium.) Everything from here to the matching `fi` drives
+# perf_capability_dropin_install, which needs GNU `stat -c` and `mv --no-target-directory`. macOS is a
+# FIRST-CLASS gate host here, so invoking these unconditionally red-ed the gate on the TOOLCHAIN
+# rather than on behaviour. The probe is AFFIRMATIVE (it runs the flags) rather than a `uname` guess,
+# and the non-GNU branch emits one COUNTED skip per case group so a green macOS run shows them
+# skipped-with-reason instead of silently absent. Production is unaffected on either branch:
+# bootstrap gates the whole perf section on PLATFORM=linux.
+if perf_install_supported; then
+  wt_d="$tmp/wt-sandbox.d"; mkdir -p "$wt_d"
+  wt_outside="$tmp/wt-outside-target"; printf 'PRECIOUS-HOST-FILE\n' >"$wt_outside"
+  wt_before=$(cat "$wt_outside")
+  rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outside" "$wt_d/99-cqlite-perf.conf"
+  wt_path=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>/dev/null); wt_rc=$?
+  wt_err=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>&1 >/dev/null)
+  if [ "$wt_rc" -ne 0 ] && [ -z "$wt_path" ] \
+     && printf '%s' "$wt_err" | grep -qi 'symlink' \
+     && [ -L "$wt_d/99-cqlite-perf.conf" ] && [ "$(cat "$wt_outside")" = "$wt_before" ]; then
+    ok "perf-capability: the drop-in WRITE TARGET is refused when the managed basename is itself a SYMLINK (rc 1, empty, named) — a contained directory does not license writing through its entries (#3261 AC1)"
+  else
+    bad "perf-capability: a SYMLINKED write target was NAMED for a privileged tee (rc=$wt_rc, path='$wt_path', err='$wt_err')"
+  fi
+  # ...and the CONTENTS read that decides idempotency may not follow it either: a symlink whose
+  # TARGET happens to hold the canonical bytes must not report "already current" (that would
+  # leave the host file in place and claim success).
+  printf '%s\n' "$(bash "$PERFLIB" --drop-in)" >"$wt_outside"
+  if env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB" 2>/dev/null; then
+    bad "perf-capability: dropin_current followed a SYMLINK and reported the drop-in 'already current' from a file outside the managed name"
+  else
+    ok "perf-capability: dropin_current does NOT follow a symlinked managed name, even when the link's TARGET holds byte-identical canonical content (#3261 AC1)"
+  fi
+  # ...and the WRITE replaces the ENTRY. The refusal above is a check with a TOCTOU window; the
+  # rename has none. After it, the managed name is a REGULAR file holding the canonical bytes,
+  # the outside target is byte-identical to before, and no temp entry is left behind.
+  wt_outside_bytes=$(cat "$wt_outside")
+  wt_ins=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ins_rc=$?
+  wt_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+  if [ "$wt_ins_rc" -eq 0 ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ] && [ -f "$wt_d/99-cqlite-perf.conf" ] \
+     && [ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && [ -z "$wt_leftover" ] \
+     && env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB"; then
+    ok "perf-capability: the drop-in write REPLACES the directory entry (temp + rename), so a pre-existing symlink at the managed name is replaced and its outside target is untouched — and no temp entry is left behind (#3261 AC1)"
+  else
+    bad "perf-capability: the atomic drop-in install did not replace a symlinked entry (rc=$wt_ins_rc, out='$wt_ins', link=$([ -L "$wt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$wt_leftover', outside-changed=$([ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && echo no || echo YES))"
+  fi
+  # ...and the STAGING entry is UNPREDICTABLE, created by `mktemp` (roborev finding 1 on #3261 — the
+  # NINTH escape, same shape as the other eight: a NAME trusted instead of a DESTINATION). A fixed
+  # staging path that is checked, cleared and only THEN opened by a privileged `tee` is a TOCTOU
+  # window: anyone who can create entries in the directory re-plants that KNOWN name as a symlink
+  # between the verify and the open, and root follows it. Two asserts, because neither alone is
+  # enough — a behavioural one (the previously-predictable name is planted as a symlink at a victim
+  # file and must be left strictly alone) and a structural one (unpredictability is a property of the
+  # NAME, which is gone by the time the write succeeds, so the source is the only place to see it).
+  wt_bait="$tmp/wt-staging-bait"; printf 'BAIT-MUST-NOT-BE-WRITTEN\n' >"$wt_bait"
+  wt_bait_before=$(cat "$wt_bait")
+  rm -f "$wt_d/.99-cqlite-perf.conf.new"; ln -s "$wt_bait" "$wt_d/.99-cqlite-perf.conf.new"
+  rm -f "$wt_d/99-cqlite-perf.conf"
+  wt_st=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_st_rc=$?
+  if [ "$wt_st_rc" -eq 0 ] && [ "$(cat "$wt_bait")" = "$wt_bait_before" ] \
+     && [ -L "$wt_d/.99-cqlite-perf.conf.new" ] \
+     && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
+    ok "perf-capability: the drop-in staging entry does NOT reuse the previously-predictable name — a symlink planted there is left untouched and its target is byte-unchanged, while the managed file is still written (#3261 roborev-1 TOCTOU)"
+  else
+    bad "perf-capability: the install wrote through a PREDICTABLE staging name (rc=$wt_st_rc, bait-changed=$([ "$(cat "$wt_bait")" = "$wt_bait_before" ] && echo no || echo YES), out='$wt_st')"
+  fi
+  rm -f "$wt_d/.99-cqlite-perf.conf.new"
+  # ...structurally: the staging entry is created by `mktemp` with a random-suffix template, no
+  # hardcoded staging literal survives, the rename carries `-T`, and the WHOLE staged install is ONE
+  # privileged invocation (issue #3261 roborev round 2).
+  #   THE LAST PROPERTY IS HYGIENE, NOT THE FIX, and this comment previously said otherwise. roborev
+  #   round 3 corrected it: a single `sh -c` sequences ONE PROCESS's commands and is not mutual
+  #   exclusion against other processes, which run concurrently on other CPUs regardless of how we
+  #   grouped ours. Consolidation NARROWS the create-to-reopen window; it does not close it. It is
+  #   still worth pinning — a split back into `mktemp` in one privileged call and the write in another
+  #   would re-widen the window while every behavioural assert stayed green, which no after-the-fact
+  #   observation can catch — but it is pinned as hygiene, not as the guarantee.
+  wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
+  wt_privcalls=$(printf '%s\n' "$wt_body" | grep -c '"\$@"')
+  wt_struct_fail=''
+  printf '%s\n' "$wt_body" | grep -q 'mktemp -- "\$d/\.\$b\.XXXXXX"' \
+    || wt_struct_fail="$wt_struct_fail no-mktemp-template"
+  printf '%s\n' "$wt_body" | grep -qF '.new"' && wt_struct_fail="$wt_struct_fail hardcoded-staging-name"
+  printf '%s\n' "$wt_body" | grep -q 'mv -fT -- "\$t" "\$p"' \
+    || wt_struct_fail="$wt_struct_fail no-mv-T"
+  [ "$wt_privcalls" -eq 1 ] || wt_struct_fail="$wt_struct_fail privileged-invocations=$wt_privcalls"
+  printf '%s\n' "$wt_body" | grep -q '"\$@" sh -c' || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
+  if [ -z "$wt_struct_fail" ]; then
+    ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, which NARROWS the create-to-reopen window but does NOT close it — see the note above), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
+  else
+    bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
+    printf '%s\n' "$wt_body" | grep -n '\$@\|mktemp\|mv -' | head -8
+  fi
+  # ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted —
+  # the check now lives INSIDE the privileged shell, so this also proves it survived consolidation.
+  wt_mt="$tmp/wt-bad-mktemp"; mkdir -p "$wt_mt"
+  for t in bash sh cat printf tee mv rm chmod env grep; do
+    s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_mt/$t"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "/tmp/perf-cap-elsewhere.$$"' >"$wt_mt/mktemp"
+  chmod +x "$wt_mt/mktemp"
+  wt_mt_out=$(env PATH="$wt_mt:$PATH" CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_mt_rc=$?
+  if [ "$wt_mt_rc" -ne 0 ] \
+     && printf '%s' "$wt_mt_out" | grep -q 'mktemp did not create a staging entry inside the validated directory' \
+     && [ ! -e "/tmp/perf-cap-elsewhere.$$" ]; then
+    ok "perf-capability: a 'mktemp' answering a path OUTSIDE the validated directory is REFUSED by name from INSIDE the privileged shell, and that path is never created (the tool's answer is checked, not trusted)"
+  else
+    bad "perf-capability: a mktemp answering outside the validated directory was trusted (rc=$wt_mt_rc, out='$wt_mt_out')"
+  fi
+  # ...and the POST-CREATION destination race: a symlink-to-DIRECTORY planted at the managed name.
+  # Without `mv -T` (--no-target-directory) `mv` would move the staging file INTO the linked
+  # directory — the rename that exists to avoid FOLLOWING a symlink would follow one instead, landing
+  # the managed bytes outside the sandbox under a different name. With -T the destination is always a
+  # plain name to replace. Asserted by consequence: nothing may appear inside the outside directory.
+  wt_outdir="$tmp/wt-outside-dir"; rm -rf "$wt_outdir"; mkdir -p "$wt_outdir"
+  rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outdir" "$wt_d/99-cqlite-perf.conf"
+  wt_td=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_td_rc=$?
+  wt_outdir_contents=$(ls -A "$wt_outdir")
+  wt_td_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+  # Measured without `-T`: the staging entry landed INSIDE $wt_outdir as `.99-cqlite-perf.conf.XXXXXX`
+  # — the managed bytes escaped the sandbox under a name nothing tracks. With `-T`: rc 0, the symlink
+  # is REPLACED by a regular file, the outside directory stays empty. All four pinned.
+  if [ "$wt_td_rc" -eq 0 ] && [ -z "$wt_outdir_contents" ] && [ -z "$wt_td_leftover" ] \
+     && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
+    ok "perf-capability: a symlink-to-DIRECTORY planted at the managed name does NOT redirect the staged write into it ('mv -T') — the link is REPLACED by a regular file, the outside directory stays empty, no staging entry is left behind (#3261 roborev-2)"
+  else
+    bad "perf-capability: the staged write was redirected through a symlink-to-directory at the managed name (rc=$wt_td_rc, outside-dir='$wt_outdir_contents', leftover='$wt_td_leftover', out='$wt_td')"
+  fi
+  rm -f "$wt_d/99-cqlite-perf.conf"
+  # ...and THE PRECONDITION THAT ACTUALLY CLOSES THE STAGING RACE (issue #3261, roborev round 3): a
+  # drop-in directory writable by anyone less privileged than the writer is REFUSED before anything is
+  # staged. Three rounds of this defect were each answered by trying to make the race unwinnable
+  # (unpredictable name, then one privileged invocation); neither works, because a single `sh -c`
+  # sequences OUR commands and says nothing about other processes on other CPUs. Removing the
+  # attacker's precondition does work — with no one able to create or replace entries in the
+  # directory, there is no actor to race, whatever the timing.
+  # The negative control is the whole point of the group: a check that refuses everything would pass
+  # the two refusal cases and be useless, so a correctly-owned 0755 directory must still install.
+  wt_perm_d="$tmp/wt-perm.d"
+  wt_perm_fail=0
+  for wt_mode in 0775 0777 0757; do
+    rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod "$wt_mode" "$wt_perm_d"
+    wt_perm_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_perm_rc=$?
+    wt_perm_left=$(ls -A "$wt_perm_d")
+    if [ "$wt_perm_rc" -eq 0 ] \
+       || ! printf '%s' "$wt_perm_out" | grep -q 'group- or world-writable' \
+       || [ -n "$wt_perm_left" ]; then
+      bad "perf-capability: a mode-$wt_mode drop-in directory was accepted for a privileged staged write (rc=$wt_perm_rc, left='$wt_perm_left', out='$wt_perm_out')"
+      wt_perm_fail=1
+    fi
+  done
+  # ...the NEGATIVE CONTROL: a directory owned by the writer and not group/world-writable installs.
+  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+  wt_ok_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ok_rc=$?
+  if [ "$wt_ok_rc" -ne 0 ] || [ ! -f "$wt_perm_d/99-cqlite-perf.conf" ]; then
+    bad "perf-capability: a correctly-owned 0755 drop-in directory was REFUSED — the writability precondition is vacuous (rc=$wt_ok_rc, out='$wt_ok_out')"
     wt_perm_fail=1
   fi
-done
-# ...the NEGATIVE CONTROL: a directory owned by the writer and not group/world-writable installs.
-rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
-wt_ok_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ok_rc=$?
-if [ "$wt_ok_rc" -ne 0 ] || [ ! -f "$wt_perm_d/99-cqlite-perf.conf" ]; then
-  bad "perf-capability: a correctly-owned 0755 drop-in directory was REFUSED — the writability precondition is vacuous (rc=$wt_ok_rc, out='$wt_ok_out')"
-  wt_perm_fail=1
-fi
-# ...and an UNDETERMINABLE owner/mode is a refusal, not an assumption: with `stat` unusable the
-# install must fail closed rather than proceed on the hope that the directory is fine.
-wt_nostat="$tmp/wt-nostat"; mkdir -p "$wt_nostat"
-for t in bash sh cat printf tee mv rm chmod env grep mktemp id; do
-  s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_nostat/$t"
-done
-printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$wt_nostat/stat"; chmod +x "$wt_nostat/stat"
-rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
-wt_ns_out=$(env PATH="$wt_nostat" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ns_rc=$?
-if [ "$wt_ns_rc" -eq 0 ] || ! printf '%s' "$wt_ns_out" | grep -q 'cannot determine owner/mode'; then
-  bad "perf-capability: an undeterminable directory owner/mode did not fail closed (rc=$wt_ns_rc, out='$wt_ns_out')"
-  wt_perm_fail=1
-fi
-# ...a SHORT MODE from `stat -c %a` must not bypass the write-bit check (roborev round 5, High).
-# WHY A SHIM AND NOT A REAL chmod: `%a` only drops below three digits when the OWNER digit is 0,
-# and a directory its owner cannot enter fails containment long before the mode check — so the real
-# bypass is NOT reachable through an actual chmod under test mode. It IS reachable as root in
-# production, where root ignores permission bits and enters a mode-0033 /etc/sysctl.d happily while
-# group and other retain write. So the honest reproduction is to feed the parser the short string a
-# root `stat` would really print, against an enterable directory. Without the zero-padding this
-# reports "33", the suffix-strip leaves the permission field EMPTY, no write-bit pattern matches,
-# and a group- AND world-writable directory is ACCEPTED.
-wt_short="$tmp/wt-shortmode"; mkdir -p "$wt_short"
-for st in bash sh cat printf tee mv rm chmod env grep mktemp id ls; do
-  s=$(command -v "$st" 2>/dev/null) && ln -sf "$s" "$wt_short/$st"
-done
-printf '%s\n' '#!/usr/bin/env bash' 'printf "%s 33\n" "$(id -u)"' >"$wt_short/stat"
-chmod +x "$wt_short/stat"
-rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
-wt_sm_out=$(env PATH="$wt_short" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_sm_rc=$?
-if [ "$wt_sm_rc" -eq 0 ] || [ -e "$wt_perm_d/99-cqlite-perf.conf" ] \
-   || ! printf '%s' "$wt_sm_out" | grep -q 'group- or world-writable'; then
-  bad "perf-capability: a SHORT mode (stat reported '33' = 0033, group+world writable) was accepted — the zero-padding is missing or ineffective (rc=$wt_sm_rc, out='$wt_sm_out')"
-  wt_perm_fail=1
-fi
+  # ...and an UNDETERMINABLE owner/mode is a refusal, not an assumption: with `stat` unusable the
+  # install must fail closed rather than proceed on the hope that the directory is fine.
+  wt_nostat="$tmp/wt-nostat"; mkdir -p "$wt_nostat"
+  for t in bash sh cat printf tee mv rm chmod env grep mktemp id; do
+    s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_nostat/$t"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$wt_nostat/stat"; chmod +x "$wt_nostat/stat"
+  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+  wt_ns_out=$(env PATH="$wt_nostat" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ns_rc=$?
+  if [ "$wt_ns_rc" -eq 0 ] || ! printf '%s' "$wt_ns_out" | grep -q 'cannot determine owner/mode'; then
+    bad "perf-capability: an undeterminable directory owner/mode did not fail closed (rc=$wt_ns_rc, out='$wt_ns_out')"
+    wt_perm_fail=1
+  fi
+  # ...a SHORT MODE from `stat -c %a` must not bypass the write-bit check (roborev round 5, High).
+  # WHY A SHIM AND NOT A REAL chmod: `%a` only drops below three digits when the OWNER digit is 0,
+  # and a directory its owner cannot enter fails containment long before the mode check — so the real
+  # bypass is NOT reachable through an actual chmod under test mode. It IS reachable as root in
+  # production, where root ignores permission bits and enters a mode-0033 /etc/sysctl.d happily while
+  # group and other retain write. So the honest reproduction is to feed the parser the short string a
+  # root `stat` would really print, against an enterable directory. Without the zero-padding this
+  # reports "33", the suffix-strip leaves the permission field EMPTY, no write-bit pattern matches,
+  # and a group- AND world-writable directory is ACCEPTED.
+  wt_short="$tmp/wt-shortmode"; mkdir -p "$wt_short"
+  for st in bash sh cat printf tee mv rm chmod env grep mktemp id ls; do
+    s=$(command -v "$st" 2>/dev/null) && ln -sf "$s" "$wt_short/$st"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s 33\n" "$(id -u)"' >"$wt_short/stat"
+  chmod +x "$wt_short/stat"
+  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+  wt_sm_out=$(env PATH="$wt_short" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_sm_rc=$?
+  if [ "$wt_sm_rc" -eq 0 ] || [ -e "$wt_perm_d/99-cqlite-perf.conf" ] \
+     || ! printf '%s' "$wt_sm_out" | grep -q 'group- or world-writable'; then
+    bad "perf-capability: a SHORT mode (stat reported '33' = 0033, group+world writable) was accepted — the zero-padding is missing or ineffective (rc=$wt_sm_rc, out='$wt_sm_out')"
+    wt_perm_fail=1
+  fi
 
-# ...a SYMLINKED destination directory is refused OUTRIGHT (owner ruling A', condition 2: lstat
-# semantics ASSERTED, not inherited from `stat`'s default). The link itself may look perfectly
-# owned and 0755 while entries would be created somewhere else entirely, so measuring the link
-# and proceeding is exactly the by-name reasoning this family has punished eleven times. The
-# link target here is a legitimate, correctly-owned, non-group-writable directory precisely so
-# the case cannot pass for the wrong reason: only the SYMLINK-NESS may cause the refusal.
-wt_ln_target="$tmp/wt-ln-target"; wt_ln_dir="$tmp/wt-ln-dir"
-rm -rf "$wt_ln_target" "$wt_ln_dir"; mkdir -p "$wt_ln_target"; chmod 0755 "$wt_ln_target"
-ln -s "$wt_ln_target" "$wt_ln_dir"
-wt_ln_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_ln_dir" \
-  bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ln_rc=$?
-if [ "$wt_ln_rc" -eq 0 ] || ! printf '%s' "$wt_ln_out" | grep -q 'is a SYMLINK'; then
-  bad "perf-capability: a SYMLINKED drop-in directory was not refused by name (rc=$wt_ln_rc, out='$wt_ln_out')"
-  wt_perm_fail=1
+  # ...a SYMLINKED destination directory is refused OUTRIGHT (owner ruling A', condition 2: lstat
+  # semantics ASSERTED, not inherited from `stat`'s default). The link itself may look perfectly
+  # owned and 0755 while entries would be created somewhere else entirely, so measuring the link
+  # and proceeding is exactly the by-name reasoning this family has punished eleven times. The
+  # link target here is a legitimate, correctly-owned, non-group-writable directory precisely so
+  # the case cannot pass for the wrong reason: only the SYMLINK-NESS may cause the refusal.
+  wt_ln_target="$tmp/wt-ln-target"; wt_ln_dir="$tmp/wt-ln-dir"
+  rm -rf "$wt_ln_target" "$wt_ln_dir"; mkdir -p "$wt_ln_target"; chmod 0755 "$wt_ln_target"
+  ln -s "$wt_ln_target" "$wt_ln_dir"
+  wt_ln_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_ln_dir" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ln_rc=$?
+  if [ "$wt_ln_rc" -eq 0 ] || ! printf '%s' "$wt_ln_out" | grep -q 'is a SYMLINK'; then
+    bad "perf-capability: a SYMLINKED drop-in directory was not refused by name (rc=$wt_ln_rc, out='$wt_ln_out')"
+    wt_perm_fail=1
+  fi
+  if [ -e "$wt_ln_target/99-cqlite-perf.conf" ]; then
+    bad "perf-capability: the symlinked drop-in directory was refused but its TARGET was written anyway"
+    wt_perm_fail=1
+  fi
+  [ "$wt_perm_fail" -ne 0 ] || ok "perf-capability: a privileged staged install REFUSES a group-/world-writable drop-in directory by name and writes nothing, refuses a SYMLINKED destination outright (lstat semantics asserted, target left unwritten), refuses when owner/mode cannot be determined, and still installs into a correctly-owned 0755 directory — the staging race is closed at its PRECONDITION rather than by trying to win it (#3261 roborev-3, owner A' condition 2)"
+else
+  skip "perf-capability: staged-install write-target cases (symlinked managed name refused; dropin_current does not follow it; the write REPLACES the directory entry)" "no GNU stat -c / mv --no-target-directory on this host"
+  skip "perf-capability: staged-install staging-race cases (unpredictable mktemp name; ONE privileged sh -c; mktemp answer outside the validated dir refused; symlink-to-directory not followed)" "no GNU stat -c / mv --no-target-directory on this host"
+  skip "perf-capability: staged-install writability-precondition cases (group/world-writable refused; SHORT mode 0033 refused; SYMLINKED destination refused; undeterminable owner/mode fails closed; correctly-owned 0755 still installs)" "no GNU stat -c / mv --no-target-directory on this host"
 fi
-if [ -e "$wt_ln_target/99-cqlite-perf.conf" ]; then
-  bad "perf-capability: the symlinked drop-in directory was refused but its TARGET was written anyway"
-  wt_perm_fail=1
-fi
-[ "$wt_perm_fail" -ne 0 ] || ok "perf-capability: a privileged staged install REFUSES a group-/world-writable drop-in directory by name and writes nothing, refuses a SYMLINKED destination outright (lstat semantics asserted, target left unwritten), refuses when owner/mode cannot be determined, and still installs into a correctly-owned 0755 directory — the staging race is closed at its PRECONDITION rather than by trying to win it (#3261 roborev-3, owner A' condition 2)"
 
 # ...and CR/LF IN A PATH SEAM IS REFUSED (issue #3261, roborev round 3). Not a containment defect —
 # the path IS contained — a SERIALIZATION one, which is why nine rounds of containment work never
@@ -1234,8 +1248,11 @@ else
   ok "perf-capability: the line-safety predicate rejects CR as well as LF and still accepts an ordinary path"
 fi
 
-# ...and the install is still gated: an out-of-sandbox seam may not be written at all.
-if env CQLITE_PERF_SYSCTL_DIR="$symanc/sysctl.d" \
+# ...and the install is still gated: an out-of-sandbox seam may not be written at all. Same GNU-only
+# toolchain dependency as the staged-install block above, so same counted skip off GNU.
+if ! perf_install_supported; then
+  skip "perf-capability: dropin_install refuses a seam resolving OUT of the sandbox" "no GNU stat -c / mv --no-target-directory on this host"
+elif env CQLITE_PERF_SYSCTL_DIR="$symanc/sysctl.d" \
      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" >/dev/null 2>&1; then
   bad "perf-capability: dropin_install wrote through a seam resolving OUT of the sandbox"
 else
