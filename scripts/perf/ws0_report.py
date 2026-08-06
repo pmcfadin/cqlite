@@ -348,8 +348,22 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # questions.
         # WHICH PROGRAMS (#3272 round 10, M2). The corpus pin says over which bytes, the request pin
         # which query — this says which binaries, which is what the reported ratio is BETWEEN.
-        f"binary pin   : {len(binary_provenance['binaries'])} binaries at"
-        f" {binary_provenance['source_revision_short']}"
+        # ...and the REVISION IS NAMED ONLY WHEN IT WAS OBSERVED (#3272 round 12, F1). This line
+        # used to print a sha in BOTH build modes, so a `--no-build` session — binaries accepted off
+        # the disk, possibly another branch's — was REPORTED as belonging to this checkout's HEAD. A
+        # newer mtime establishes that they were written after that commit and nothing about which
+        # revision produced them, so the sha was a value nobody observed: the fabricated-value class
+        # AC3 exists to remove, in its most dangerous form, because a plausible sha reads exactly
+        # like an established one. `checkout_revision_at_measurement` is printed instead, under a
+        # name that claims only what it can support.
+        f"binary pin   : {len(binary_provenance['binaries'])} binaries"
+        + (
+            f" at {binary_provenance['source_revision_short']}"
+            if binary_provenance["source_revision_observed"]
+            else " at an UNKNOWN source revision (reused binaries: --no-build accepted them off the"
+            " disk, so which revision BUILT them is NOT established; checkout was at"
+            f" {binary_provenance['checkout_revision_at_measurement'][:12]} while measuring)"
+        )
         + (
             f" (DIRTY tree, {binary_provenance['source_dirty_paths']} changed path(s) — the"
             " revision does NOT fully describe what was built)"

@@ -206,7 +206,8 @@ ws0_pin_binaries() {
   python3 -c '
 import hashlib, json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_binaries import MEASURED_BINARIES, measured_bin_dir, provenance_path
+from ws0_binaries import (MEASURED_BINARIES, REVISION_UNKNOWN, measured_bin_dir,
+                          provenance_path)
 session, mode = pathlib.Path(sys.argv[2]), sys.argv[3]
 # The recorded PATHS must be inside the session own measured-bin/ directory (#3272 F2): the reader
 # REQUIRES it, because a record pointing into target/release describes a session whose binaries
@@ -215,9 +216,18 @@ session, mode = pathlib.Path(sys.argv[2]), sys.argv[3]
 # freeze that never happened.
 frozen = measured_bin_dir(session)
 rev = "1" * 40
+# THE REVISION FIELDS TRACK THE BUILD MODE (#3272 round 12, F1): in `reused` mode the source
+# revision is the UNKNOWN sentinel, because --no-build accepted the binaries off the disk and
+# nothing establishes which revision built them. The reader checks the two against each other, so a
+# fixture pinning a sha beside mode=reused would be refused for that rather than reaching its case.
+# `REVISION_UNKNOWN` is IMPORTED, never spelled again here: two spellings of a sentinel is two
+# things to keep in step, and the failure mode is a fixture refused for its own typo.
+observed = mode == "built"
 rec = {
-    "source_revision": rev,
-    "source_revision_short": rev[:12],
+    "source_revision": rev if observed else REVISION_UNKNOWN,
+    "source_revision_short": (rev if observed else REVISION_UNKNOWN)[:12],
+    "source_revision_observed": observed,
+    "checkout_revision_at_measurement": rev,
     "source_dirty": False,
     "source_dirty_paths": 0,
     "build_mode": mode,

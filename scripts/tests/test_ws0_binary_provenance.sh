@@ -364,13 +364,244 @@ else
 fi
 
 # ==========================================================================
+# ROUND 12, F1 — A REUSED BINARY'S SOURCE REVISION IS *UNKNOWN*, NOT HEAD
+# ==========================================================================
+# THE FINDING, and it is round 10's M2 and round 11's F1 both stopping one step short. M2 recorded
+# `source_revision = git rev-parse HEAD` in BOTH build modes; round 11 correctly scoped the
+# mtime-vs-HEAD STALENESS check to `reused` and left the ATTRIBUTION untouched. So a `--no-build`
+# session — binaries accepted off the disk, possibly built on another branch, in another worktree, or
+# from a tree since changed — was RECORDED AND REPORTED as belonging to the current checkout's HEAD.
+#
+# A newer mtime establishes that the binary was WRITTEN after that commit. It establishes NOTHING
+# about which revision produced it. So the recorded sha was a value nobody observed: the
+# FABRICATED-VALUE class this issue's AC3 exists to remove, in its most dangerous form, because a
+# plausible sha is indistinguishable in the report from an established one — the same shape as a
+# counter defaulting to 0, one field over.
+#
+# THE FIX IS AN HONEST UNKNOWN (option 2, not a build-provenance sidecar): under `reused`,
+# `source_revision` is the `REVISION_UNKNOWN` sentinel and `source_revision_observed` is false, in
+# the manifest AND in the report. `git rev-parse HEAD` is not discarded — it moves to
+# `checkout_revision_at_measurement`, a differently-named field claiming only what it can support.
+
+# --- NON-VACUITY, MEASURED: what the PRE-FIX writer recorded ------------------
+# The pre-fix rule is reconstructed VERBATIM — `revision = rev-parse HEAD` regardless of mode — and
+# run against a throwaway repo, and asserted to yield the checkout's own sha for a REUSED build. Then
+# the SHIPPED writer is run over the SAME repo and the same mode and must record the sentinel. Both
+# halves run through the real `record_binary_provenance`, over real files, so this is a measured flip
+# on identical input rather than a new function's first output.
+#
+# Hermetic: a throwaway `git init` repo under $TMP with three fake "binaries" (chmod +x stubs — the
+# writer only stats, hashes and copies them, it never executes anything), no cargo and no perf.
+if python3 - "$REPO_ROOT/scripts/perf" "$TMP/f1" <<'PY'
+import os, pathlib, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import (MEASURED_BINARIES, REVISION_UNKNOWN, record_binary_provenance,
+                          verify_binary_provenance)
+root = pathlib.Path(sys.argv[2]); root.mkdir(parents=True, exist_ok=True)
+repo, bindir = root / "repo", root / "repo" / "target" / "release"
+bindir.mkdir(parents=True, exist_ok=True)
+env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+def git(*a):
+    subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, env=env)
+git("init", "-q")
+(repo / "f").write_text("x")
+git("add", "f"); git("commit", "-qm", "c")
+head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                      capture_output=True, text=True, check=True).stdout.strip()
+# The binaries this rig measures, as executable stubs written AFTER the commit (so the staleness
+# check — which applies under `reused` — accepts them and the case reaches its own subject).
+for name in MEASURED_BINARIES:
+    p = bindir / name
+    p.write_bytes(b"\x7fELF-stub-" + name.encode())
+    p.chmod(0o755)
+
+# THE PRE-FIX RULE, verbatim: HEAD, whatever the mode.
+prefix_revision = head
+assert len(prefix_revision) == 40
+
+# THE SHIPPED WRITER, in `reused` mode.
+reused_dir = root / "session-reused"; reused_dir.mkdir()
+rec = record_binary_provenance(reused_dir, bindir, repo, "reused")
+assert rec["source_revision"] == REVISION_UNKNOWN, rec["source_revision"]
+assert rec["source_revision_observed"] is False, rec
+# ...and the checkout revision IS kept, under its own name — the fix records less, not nothing.
+assert rec["checkout_revision_at_measurement"] == head, rec
+# The MEASURED FLIP: identical repo, identical binaries, identical mode.
+assert prefix_revision != rec["source_revision"], (prefix_revision, rec["source_revision"])
+# The record's own prose must SAY the revision is unknown, so a reader of the manifest alone cannot
+# miss it. (Asserted on `provenance`, which the SHIPPED writer composes.)
+assert "UNKNOWN" in rec["provenance"], rec["provenance"]
+
+# ...and in `built` mode the revision IS observed, because `cargo build` ran in-process on this
+# checkout. Without this half the fix would be a guard that always fires — the mirror-image broken
+# instrument, and the "documented path made unrunnable" defect this issue has hit three times.
+built_dir = root / "session-built"; built_dir.mkdir()
+rb = record_binary_provenance(built_dir, bindir, repo, "built")
+assert rb["source_revision"] == head, rb["source_revision"]
+assert rb["source_revision_observed"] is True, rb
+assert rb["checkout_revision_at_measurement"] == head, rb
+
+# BOTH records must READ BACK through the shipped reader: a writer/reader disagreement would surface
+# at report time as a refusal blaming the session dir for a driver defect.
+for d, want_observed in ((reused_dir, False), (built_dir, True)):
+    back = verify_binary_provenance(d)
+    assert back["source_revision_observed"] is want_observed, (d, back)
+    if not want_observed:
+        assert back["source_revision"] == REVISION_UNKNOWN, back
+        assert "UNKNOWN source revision" in back["note"], back["note"]
+    else:
+        assert back["source_revision"] == head, back
+print("OK")
+PY
+then
+  pass "NON-VACUITY (round12 F1): the PRE-FIX rule records this checkout's HEAD for a REUSED build; the SHIPPED writer records the UNKNOWN sentinel over the same repo, same binaries, same mode — and still records HEAD under 'built', so the fix is not a guard that always fires"
+else
+  fail "round12 F1: a reused build's source revision must be UNKNOWN and a built one's must be HEAD"
+fi
+
+# THE READER REFUSES A RECORD THAT CONFLATES THE TWO STATES, in BOTH directions. Keyed on the
+# AFFIRMATIVE boolean rather than on the sentinel's spelling: a reader accepting "either a sha or the
+# sentinel" would let a record claim `observed=true` beside the sentinel (a verdict presented as
+# provenance) or `observed=false` beside a real sha (the fabricated value, relabelled).
+d="$TMP/f1-sha-unobserved"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+# EXACTLY the pre-fix record for a reused build: a real-looking sha, mode reused, and the honest
+# `observed=false` beside it — i.e. the record admits it did not observe the revision it names.
+j["build_mode"] = "reused"
+j["source_revision"] = "9" * 40
+j["source_revision_short"] = "9" * 12
+j["source_revision_observed"] = False
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "not the 'UNKNOWN-reused" <<<"$out"; then
+  pass "OBSERVED (round12 F1): a record naming a REVISION it did not observe is REFUSED — a sha beside 'observed: false' is the fabricated value with an honest flag bolted on, and the report must never print a revision nobody established"
+else
+  fail "round12 F1: an unobserved sha must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the converse: the sentinel presented AS observed provenance.
+d="$TMP/f1-unknown-observed"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" "$REPO_ROOT/scripts/perf" <<'PY'
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[2])
+from ws0_binaries import REVISION_UNKNOWN
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+j["source_revision"] = REVISION_UNKNOWN
+j["source_revision_short"] = REVISION_UNKNOWN[:12]
+j["source_revision_observed"] = True
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "not a 40-character sha, while" <<<"$out"; then
+  pass "OBSERVED (round12 F1): the UNKNOWN sentinel claimed AS an observed revision is REFUSED too — the two fields are checked against each other, so neither can be flipped alone"
+else
+  fail "round12 F1: the sentinel must not pass as an observed revision (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# A NON-BOOLEAN `source_revision_observed` is refused: it decides which of the two rules applies, so
+# an unclassified value leaves the record's central claim unchecked (the F7 posture, applied here).
+d="$TMP/f1-observed-nonbool"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+j["source_revision_observed"] = "yes"
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "not a boolean" <<<"$out"; then
+  pass "OBSERVED (round12 F1): a NON-BOOLEAN 'source_revision_observed' is REFUSED — it decides whether the revision field is provenance or a verdict, so a truthy string would leave that unclassified"
+else
+  fail "round12 F1: a non-boolean observed flag must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# The CHECKOUT revision is required in BOTH modes, always as a real sha: where the checkout stood is
+# observable whatever the build mode, so an absent or sentinel value there means the record dropped a
+# fact it had — which would leave a reused session with no revision information at all.
+d="$TMP/f1-no-checkout-rev"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+j["checkout_revision_at_measurement"] = "unknown"
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "never legitimately unknown" <<<"$out"; then
+  pass "OBSERVED (round12 F1): an absent/sentinel 'checkout_revision_at_measurement' is REFUSED — that fact is observable in BOTH build modes, so the fix records LESS, never nothing"
+else
+  fail "round12 F1: a missing checkout revision must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# THE REPORT MUST NOT PRINT A REVISION IT DID NOT OBSERVE — the half of the finding that a manifest
+# check alone cannot cover, since the summary line is what a human actually reads.
+d="$TMP/f1-report-reused"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+ws0_pin_binaries "$d" reused
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+# The fixture's checkout sha is 40 x "1", so its 12-char prefix is what a pre-fix report would have
+# printed as the source revision. It must appear ONLY as the checkout's, beside an UNKNOWN verdict.
+if [ "$rc" -eq 0 ] && grep -q 'binary pin.*UNKNOWN source revision' <<<"$out" \
+  && grep -q 'checkout was at 111111111111' <<<"$out" \
+  && python3 - "$d/results.json" "$REPO_ROOT/scripts/perf" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from ws0_binaries import REVISION_UNKNOWN
+bp = json.load(open(sys.argv[1]))["binary_provenance"]
+assert bp["source_revision"] == REVISION_UNKNOWN, bp
+assert bp["source_revision_observed"] is False, bp
+assert bp["checkout_revision_at_measurement"] == "1" * 40, bp
+assert "UNKNOWN source revision" in bp["note"], bp["note"]
+PY
+then
+  pass "OBSERVED (round12 F1): a REUSED session REPORTS (the documented --no-build loop still works) and its summary says 'UNKNOWN source revision', naming the checkout sha only under its own weaker description — results.json agrees"
+else
+  fail "round12 F1: a reused session must report with an UNKNOWN revision (rc=$rc, out: $(grep 'binary pin' <<<"$out"))"
+fi
+# NON-VACUITY for that case: the SAME session in `built` mode prints the sha. So the UNKNOWN above is
+# the mode-scoped path firing, and the report has not simply stopped printing revisions.
+d="$TMP/f1-report-built"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'binary pin.*at 111111111111' <<<"$out" \
+  && ! grep -q 'UNKNOWN source revision' <<<"$out"; then
+  pass "NON-VACUITY (round12 F1): the SAME session in BUILT mode prints the revision — so the UNKNOWN above is the reused-mode path firing, not the report having stopped reporting revisions"
+else
+  fail "round12 F1: a built session must still print its source revision (rc=$rc, out: $(grep 'binary pin' <<<"$out"))"
+fi
+
+# ...and the DRIVER's own one-line summary must say it too: the operator reading the driver's output
+# during a run must not take a reused binary for one built at HEAD. Asserted through the SHIPPED
+# `describe_record` over both modes, because that is the function the driver prints.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import REVISION_UNKNOWN, describe_record
+base = {"binaries": {"a": {}, "b": {}, "c": {}}, "source_dirty": False, "source_dirty_paths": 0,
+        "checkout_revision_at_measurement": "a" * 40}
+reused = describe_record({**base, "build_mode": "reused", "source_revision": REVISION_UNKNOWN,
+                          "source_revision_short": REVISION_UNKNOWN[:12],
+                          "source_revision_observed": False})
+built = describe_record({**base, "build_mode": "built", "source_revision": "b" * 40,
+                         "source_revision_short": "b" * 12, "source_revision_observed": True})
+assert "UNKNOWN source revision" in reused, reused
+# The sentinel's own text must NOT be printed as though it were a revision label.
+assert "at UNKNOWN-reuse" not in reused, reused
+assert "checkout was at aaaaaaaaaaaa" in reused, reused
+assert "at bbbbbbbbbbbb" in built, built
+assert "UNKNOWN" not in built, built
+PY
+then
+  pass "OBSERVED (round12 F1): the DRIVER's own 'binary pin' line says UNKNOWN under --no-build and names the sha under a build — the operator watching a run cannot mistake a reused binary for one built at HEAD"
+else
+  fail "round12 F1: describe_record must distinguish the two modes"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # A block that silently never executes lowers the count and registers NO failure, while the gate
 # reads only the exit code. Derived from the real count and set just below it — a floor far behind
 # its count stops being able to see a skipped block, which is the very thing it exists to catch
 # (#3326 item 3).
-MIN_CHECKS=15
+MIN_CHECKS=23
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

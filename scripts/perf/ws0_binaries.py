@@ -95,6 +95,49 @@ mistake "the check did not apply" for "the check passed."
 re-running a measurement without a 5-minute rebuild is the normal operator loop, and removing it
 would push an operator toward editing the driver. What made it dangerous was the SILENCE, and the
 silence is what is fixed.
+
+# ROUND 12, F1 — IN `reused` MODE THE SOURCE REVISION IS `UNKNOWN`, NOT `HEAD`
+
+The staleness check above is one-directional and says so. What was NOT fixed with it is the
+ATTRIBUTION: this writer recorded `source_revision = git rev-parse HEAD` in BOTH modes, so a reused
+binary — an artifact `--no-build` accepted off the disk, possibly built on another branch, in another
+worktree, or from a tree since changed — was RECORDED AND REPORTED as belonging to the current
+checkout's HEAD. A newer mtime establishes that the binary was WRITTEN after that commit; it
+establishes nothing whatever about WHICH REVISION produced it.
+
+That is precisely the FABRICATED-VALUE class this issue's AC3 exists to remove — a value recorded
+without having been observed — and it is the same shape as a counter defaulting to 0, one field over.
+It is arguably worse here, because the fabricated value is CONFIDENT and PLAUSIBLE: nothing in the
+report distinguishes it from a revision that was genuinely established.
+
+## The fix: an honest UNKNOWN, in the manifest AND in the report
+
+Under `reused`, `source_revision` is the sentinel [`REVISION_UNKNOWN`] and `source_revision_observed`
+is `False`. The report prints `source revision UNKNOWN (reused binaries)` rather than a sha. Under
+`built` the revision IS observed — `cargo build --release` ran and succeeded in this process, on this
+checkout, immediately before the binaries were frozen — so it is recorded as before, with
+`source_revision_observed = True`.
+
+The `git rev-parse HEAD` value is NOT silently discarded in `reused` mode: it is recorded under the
+separate, differently-named `checkout_revision_at_measurement` field, which claims only what it can
+support — where THIS CHECKOUT stood while the measurement ran. That is genuinely useful context
+(it is what the operator will compare against), and keeping it under a name that cannot be mistaken
+for build provenance is what stops the reader inferring one from the other.
+
+## Why an UNKNOWN and not a build-provenance sidecar
+
+The stronger fix is to persist authoritative provenance at BUILD time — a sidecar beside each binary
+recording the revision that produced it — and verify it when freezing. It is the right long-term
+mechanism and it is deliberately NOT built here: a sidecar is a new artifact with its own writer, its
+own reader, its own absent/stale/forged cases and its own tests, and half of it would be unverifiable
+in this rig anyway (a binary built by a peer agent's `cargo build`, or by an editor save-hook, gets
+no sidecar at all — so the reader would still need an UNKNOWN path for exactly the case the finding
+is about). An honest UNKNOWN is therefore not a placeholder for the real fix: it is the correct
+terminal state for a build this rig did not perform, and the sidecar would only narrow how often it
+is reached.
+
+An honest "unknown" is strictly better than a confident wrong value. That is this issue's whole
+thesis, and it applies to the issue's own code.
 """
 
 from __future__ import annotations
@@ -120,6 +163,17 @@ BUILD_MODES = ("built", "reused")
 
 BINARY_PROVENANCE = "binary-provenance.json"
 
+# THE SENTINEL FOR A REVISION THAT WAS NOT OBSERVED (#3272 round 12, F1). Recorded in `reused`
+# (`--no-build`) mode, where the binaries were accepted off the disk and NOTHING establishes which
+# revision produced them — a newer mtime establishes only that they were written after HEAD.
+#
+# A SENTINEL rather than an absent field, and rather than a sha: an absent field would be
+# indistinguishable from a pre-fix record whose writer never had the concept, and a sha would be the
+# fabricated value the finding is about. This string is a VERDICT, and it is spelled so that it can
+# never be mistaken for one — `_SHA_RE`-shaped validation refuses it, and any reader that compares
+# revisions between two sessions gets a value that cannot accidentally equal another session's.
+REVISION_UNKNOWN = "UNKNOWN-reused-binaries-not-built-by-this-session"
+
 # The SESSION-OWNED directory the measured executables are COPIED into (#3272 F2). Inside the
 # session's output dir, so the copies live beside the results they produced and anyone reviewing a
 # session can re-hash the exact bytes that ran.
@@ -132,6 +186,15 @@ MEASURED_BIN_SUBDIR = "measured-bin"
 PROVENANCE_FIELDS = (
     "source_revision",
     "source_revision_short",
+    # WHETHER THE REVISION ABOVE WAS OBSERVED, as a first-class boolean (#3272 round 12, F1). A
+    # reader must not have to pattern-match the sentinel to know whether it is looking at build
+    # provenance or at a verdict about the absence of it — and a check that infers a state from a
+    # string's SPELLING is one rename away from silently passing.
+    "source_revision_observed",
+    # WHERE THIS CHECKOUT STOOD while the measurement ran. Named for what it can support, and
+    # deliberately NOT `source_revision`: in `reused` mode these are different facts, and merging
+    # them is the finding.
+    "checkout_revision_at_measurement",
     "source_dirty",
     "source_dirty_paths",
     "build_mode",
@@ -394,12 +457,26 @@ def record_binary_provenance(
     # outcome of building after a commit that touched no rust, and refusing it broke the ordinary
     # measurement command.
     staleness_note = refuse_binaries_older_than_head(repo_root, observed, build_mode)
-    revision = _git(repo_root, "rev-parse", "HEAD")
-    if len(revision) != 40:
+    checkout_revision = _git(repo_root, "rev-parse", "HEAD")
+    if len(checkout_revision) != 40:
         raise Invalid(
-            f"`git rev-parse HEAD` returned {revision!r}, which is not a 40-character sha — the"
-            " revision that built the measured binaries could not be established"
+            f"`git rev-parse HEAD` returned {checkout_revision!r}, which is not a 40-character sha —"
+            " the revision this checkout stood at during the measurement could not be established"
         )
+    # THE SOURCE REVISION IS ONLY OBSERVED UNDER `built` (#3272 round 12, F1).
+    #
+    # Under `built`, `cargo build --release` ran and succeeded in THIS process, on THIS checkout,
+    # immediately before the binaries were frozen — so HEAD genuinely is the revision they were built
+    # from, and cargo's own staleness tracking is the authority that makes that true.
+    #
+    # Under `reused`, `--no-build` accepted whatever was on disk: another branch's artifact, another
+    # worktree's, or one from a tree since changed. The mtime check above establishes that the binary
+    # was WRITTEN after HEAD and NOTHING about which revision produced it, so recording HEAD here was
+    # a value nobody observed — the fabricated-value class AC3 exists to remove, in its most
+    # dangerous form, because a plausible sha is indistinguishable in the report from an established
+    # one.
+    observed_revision = build_mode == "built"
+    revision = checkout_revision if observed_revision else REVISION_UNKNOWN
     # `--porcelain` over the whole tree: a dirty tree means the revision does NOT fully describe
     # what was built, which is a first-class fact about the measurement rather than a detail to
     # drop. Recorded, not refused: measuring a work-in-progress tree is a legitimate and common
@@ -408,7 +485,12 @@ def record_binary_provenance(
     dirty_paths = [ln for ln in porcelain.splitlines() if ln.strip()]
     rec = {
         "source_revision": revision,
+        # The short form is a PREFIX of whatever the long form is, sentinel included: deriving it any
+        # other way (e.g. falling back to the checkout sha) would put a real-looking 12-hex string in
+        # the field a summary line prints, i.e. re-fabricate the value one layer down.
         "source_revision_short": revision[:12],
+        "source_revision_observed": observed_revision,
+        "checkout_revision_at_measurement": checkout_revision,
         "source_dirty": bool(dirty_paths),
         "source_dirty_paths": len(dirty_paths),
         "build_mode": build_mode,
@@ -421,7 +503,20 @@ def record_binary_provenance(
             " after a rebuild, where target/release describes the REVIEWING checkout's build and a"
             " re-derivation would both compare against an unrelated artifact and make a legitimate"
             " re-report fail (the same argument that keeps the CPU-sibling verification out of the"
-            f" reporter, #3272 F6). {staleness_note}"
+            f" reporter, #3272 F6). {staleness_note}."
+            + (
+                " THE SOURCE REVISION WAS OBSERVED: `cargo build --release` ran and succeeded in"
+                " this process, on this checkout, immediately before the binaries were frozen, so"
+                " HEAD is the revision they were built from"
+                if observed_revision
+                else " THE SOURCE REVISION IS UNKNOWN AND IS RECORDED AS SUCH (#3272 F1):"
+                " `--no-build` accepted these binaries off the disk, and they may be artifacts of"
+                " another branch, another worktree, or a tree since changed. The mtime check"
+                " establishes only that they were WRITTEN after HEAD — never which revision"
+                " produced them — so recording HEAD here would be a value nobody observed."
+                " `checkout_revision_at_measurement` records where this checkout stood, which is a"
+                " different fact and is named for the one it can support"
+            )
         ),
     }
     absent = [f for f in PROVENANCE_FIELDS if f not in rec]
@@ -447,8 +542,18 @@ def describe_record(rec: dict) -> str:
         if rec["source_dirty"]
         else " (clean tree)"
     )
+    # THE REVISION IS NAMED ONLY WHEN IT WAS OBSERVED (#3272 round 12, F1). In `reused` mode the
+    # line says UNKNOWN and names the checkout revision under its own, weaker description — so the
+    # operator reading the driver's own output cannot take a reused binary for one built at HEAD.
+    where = (
+        f"at {rec['source_revision_short']}{tree}"
+        if rec["source_revision_observed"]
+        else f"at an UNKNOWN source revision{tree} — --no-build accepted them off the disk, so"
+        " which revision BUILT them is not established (checkout was at"
+        f" {rec['checkout_revision_at_measurement'][:12]} during the measurement)"
+    )
     return (
-        f"binary pin:   {len(rec['binaries'])} binaries at {rec['source_revision_short']}{tree},"
+        f"binary pin:   {len(rec['binaries'])} binaries {where},"
         f" build mode {rec['build_mode']} — digests recorded in {BINARY_PROVENANCE} BEFORE the"
         f" first rep, and the executables FROZEN into {MEASURED_BIN_SUBDIR}/ (a concurrent rebuild"
         " of target/release cannot change what this session runs, #3272 F2)"
@@ -486,11 +591,47 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
                 f"{p} carries no {field!r} — the binary provenance is incomplete, so it cannot"
                 " establish which programs this session's ratio is about"
             )
+    # THE REVISION'S SHAPE IS DECIDED BY `source_revision_observed`, NOT GUESSED (#3272 round 12, F1).
+    #
+    # `reused` sessions legitimately carry the UNKNOWN sentinel, so a flat "must be 40 hex" would
+    # refuse every `--no-build` session — the "a guard made a documented command unrunnable" defect
+    # this issue has now hit three times. But the two states must each be checked STRICTLY, keyed on
+    # the AFFIRMATIVE boolean rather than on the string's spelling: a reader that accepted "either a
+    # sha or the sentinel" would let a record claim `observed=True` beside the sentinel, or
+    # `observed=False` beside a real sha, i.e. exactly the conflation the fix removes.
     revision = rec["source_revision"]
-    if not isinstance(revision, str) or len(revision) != 40:
+    observed = rec["source_revision_observed"]
+    if not isinstance(observed, bool):
         raise Invalid(
-            f"{p}: 'source_revision' is {revision!r}, which is not a 40-character sha. A truncated"
-            " or absent revision cannot identify the source the measured binaries were built from."
+            f"{p}: 'source_revision_observed' is {observed!r}, not a boolean. It decides whether"
+            " 'source_revision' is build provenance or a verdict about the absence of it, so a"
+            " non-boolean leaves the record's central claim unclassified (#3272 F1)."
+        )
+    if observed:
+        if not isinstance(revision, str) or len(revision) != 40:
+            raise Invalid(
+                f"{p}: 'source_revision' is {revision!r}, which is not a 40-character sha, while"
+                " 'source_revision_observed' is true. A record claiming the revision WAS observed"
+                " must carry it."
+            )
+    elif revision != REVISION_UNKNOWN:
+        raise Invalid(
+            f"{p}: 'source_revision_observed' is false but 'source_revision' is {revision!r}, not"
+            f" the {REVISION_UNKNOWN!r} sentinel. A revision nobody observed may not be recorded as"
+            " a value: `--no-build` accepts binaries off the disk and a newer mtime establishes only"
+            " that they were WRITTEN after HEAD, never which revision produced them — so a sha here"
+            " is the fabricated value AC3 exists to remove, in its most dangerous form, because it"
+            " is indistinguishable in the report from an established one (#3272 F1)."
+        )
+    # ...and the CHECKOUT revision is required in BOTH modes, always as a real sha: it is a fact the
+    # driver can always observe (where this checkout stood while measuring), so an absent or
+    # sentinel value there would mean the record dropped something it had.
+    checkout_rev = rec["checkout_revision_at_measurement"]
+    if not isinstance(checkout_rev, str) or len(checkout_rev) != 40:
+        raise Invalid(
+            f"{p}: 'checkout_revision_at_measurement' is {checkout_rev!r}, which is not a"
+            " 40-character sha. Where the checkout stood during the measurement is observable in"
+            " BOTH build modes, so this is never legitimately unknown."
         )
     if rec["build_mode"] not in BUILD_MODES:
         raise Invalid(
@@ -555,6 +696,8 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
     return {
         "source_revision": revision,
         "source_revision_short": rec["source_revision_short"],
+        "source_revision_observed": observed,
+        "checkout_revision_at_measurement": checkout_rev,
         "source_dirty": bool(rec["source_dirty"]),
         "source_dirty_paths": rec["source_dirty_paths"],
         "build_mode": rec["build_mode"],
@@ -564,12 +707,19 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
             f"the {len(MEASURED_BINARIES)} measured binaries were identified by digest BEFORE the"
             f" first rep AND FROZEN into the session's own {MEASURED_BIN_SUBDIR}/ directory (so a"
             " concurrent rebuild of target/release could not change what the reps ran, #3272 F2),"
-            f" at source revision {rec['source_revision_short']}"
             + (
-                f" with a DIRTY working tree ({rec['source_dirty_paths']} changed path(s)), so the"
+                f" at source revision {rec['source_revision_short']}"
+                if observed
+                else " at an UNKNOWN source revision — `--no-build` accepted these binaries off the"
+                " disk, so which revision BUILT them is NOT established and is recorded as unknown"
+                " rather than as this checkout's HEAD, which would be a value nobody observed"
+                f" (#3272 F1); the checkout stood at {checkout_rev[:12]} during the measurement"
+            )
+            + (
+                f", with a DIRTY working tree ({rec['source_dirty_paths']} changed path(s)), so the"
                 " revision does not fully describe what was built"
                 if rec["source_dirty"]
-                else " with a clean working tree"
+                else ", with a clean working tree"
             )
             + f"; build mode {rec['build_mode']}"
         ),
