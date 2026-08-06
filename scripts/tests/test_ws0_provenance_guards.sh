@@ -1424,6 +1424,153 @@ else
 fi
 
 # ==========================================================================
+# ROUND 25 — THE PROVENANCE MARKER IS MATCHED EXACTLY, NOT AS A SUBSTRING
+# ==========================================================================
+# Round 21 made the pin HASH its digests instead of copying them out of the corpus's own sidecar,
+# and recorded WHICH of the two had happened in `components_source` so a reader could tell a
+# measured pin from a copied one. The reader then tested that field with
+#
+#     if not isinstance(source, str) or "measured" not in source:
+#
+# — a SUBSTRING test. So the value
+#
+#     "not measured; copied from sidecar"
+#
+# SATISFIED the provenance guard: a string whose plain English states the exact thing the guard
+# exists to reject. The guard against round 21's defect admitted that defect's own confession, and
+# the field that was supposed to distinguish the two cases could be set to a sentence describing the
+# bad one.
+#
+# It is the same shape CLAUDE.md states as a rule one level down — never derive a pass from the
+# ABSENCE of a bad signal, key a permissive branch on the AFFIRMATIVE value — and the same shape as
+# the PREFIX trap recorded beside it, where `PASS*` accepts `PASSthisNeverRan`. A substring test asks
+# whether a value LOOKS A BIT LIKE the good one; the only sound question is whether it IS the good
+# one. Fix: a stable versioned token, compared for EQUALITY.
+r25_dir="$TMP/r25-confession"; make_session "$r25_dir" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$r25_dir" "$TMP/corpus"
+# THE WRITER's own output first, because the reader's requirement is only meaningful if a real run
+# satisfies it: the SHIPPED writer must emit the token, and the round-21 prose must survive beside
+# it as description rather than as the checked value.
+if python3 - "$r25_dir/session-corpus-pin.json" <<'PY'
+import json, sys
+sys.path.insert(0, "scripts/perf")
+from ws0_session import COMPONENTS_SOURCE_MEASURED
+pin = json.load(open(sys.argv[1]))
+assert pin["components_source"] == COMPONENTS_SOURCE_MEASURED, pin["components_source"]
+# The token must be a TOKEN — no whitespace, so it cannot be a sentence that happens to compare
+# equal, and no reader can be tempted back into scanning it for words.
+assert COMPONENTS_SOURCE_MEASURED.split() == [COMPONENTS_SOURCE_MEASURED], COMPONENTS_SOURCE_MEASURED
+# ...and the round-21 prose is RETAINED, in its own field, so nothing was lost for a human reading
+# the artifact. Two fields because they have two jobs; conflating them is the finding.
+note = pin["components_source_note"]
+assert "measured from the component bytes on disk" in note, note
+print("WRITER_EMITS_TOKEN", pin["components_source"])
+PY
+then
+  pass "OBSERVED (round25): the SHIPPED pin writer emits the exact versioned provenance token, whitespace-free, with round 21's prose retained in a separate description-only field"
+else
+  fail "round25: the writer must emit the exact token and keep the prose in components_source_note"
+fi
+# THE FINDING, through the full report path: the sidecar confession must be REFUSED, naming the
+# value found.
+r25_set_source() { # r25_set_source <pin-path> <value>
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+j["components_source"] = sys.argv[2]
+json.dump(j, open(p, "w"), indent=1)
+PY
+}
+R25_CONFESSION="not measured; copied from sidecar"
+r25_set_source "$r25_dir/session-corpus-pin.json" "$R25_CONFESSION"
+out=$(run_report "$r25_dir" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'components_source' <<<"$out" \
+   && grep -q "$R25_CONFESSION" <<<"$out" && grep -q 'measured-v1' <<<"$out"; then
+  pass "OBSERVED (round25): a pin whose components_source is the sentence 'not measured; copied from sidecar' is REFUSED, naming both the value found and the only accepted token"
+else
+  fail "round25: the sidecar confession must be refused naming the value (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# NON-VACUITY, MEASURED: the PRE-FIX guard is fed that same literal and its verdict is OBSERVED. The
+# predicate below is the removed line transcribed exactly, so this case reds if the premise ever
+# stops reproducing — i.e. if the pre-fix reader would NOT have accepted the confession, the finding
+# was not the finding and this whole section is unfounded.
+r25_prefix=$(python3 - "$R25_CONFESSION" <<'PY'
+import sys
+sys.path.insert(0, "scripts/perf")
+from ws0_session import COMPONENTS_SOURCE_MEASURED
+source = sys.argv[1]
+# THE PRE-FIX TEST, verbatim from the reader as it stood before round 25.
+prefix_refuses = not isinstance(source, str) or "measured" not in source
+print("PREFIX_ACCEPTS_THE_CONFESSION", not prefix_refuses)
+print("FIXED_REFUSES_THE_CONFESSION", source != COMPONENTS_SOURCE_MEASURED)
+PY
+)
+if grep -q 'PREFIX_ACCEPTS_THE_CONFESSION True' <<<"$r25_prefix" \
+   && grep -q 'FIXED_REFUSES_THE_CONFESSION True' <<<"$r25_prefix"; then
+  pass "NON-VACUITY MEASURED (round25): the PRE-FIX substring guard ACCEPTS the literal 'not measured; copied from sidecar' — measured, not asserted — and the exact-equality guard refuses it. The defect reproduces, so the refusal above is attributable to the fix"
+else
+  fail "round25: the pre-fix acceptance must REPRODUCE, or this section proves nothing (out: $r25_prefix)"
+fi
+# THE NEAR-MISSES a sloppier check would let through, each through the full report path. Enumerated
+# for the RECORD of what was covered; they are refused by CONSTRUCTION (equality) rather than by
+# this list, which is why a future value nobody thought of is refused too.
+#
+#   measured-v2   a DIFFERENT version of this field's meaning — the case a version number exists for
+#   measured      the bare word, i.e. every prose value round 21 wrote and every sentence containing it
+#   remeasured-v1 a longer string ENDING in the token, which a suffix or substring test admits
+#   MEASURED-V1   the same token in another case, which any case-insensitive comparison admits
+r25_near_ok=1
+for r25_val in "measured-v2" "measured" "remeasured-v1" "MEASURED-V1"; do
+  r25_set_source "$r25_dir/session-corpus-pin.json" "$r25_val"
+  out=$(run_report "$r25_dir" "$TMP/corpus"); rc=$?
+  if [ "$rc" -eq 0 ] || ! grep -q "components_source" <<<"$out"; then
+    r25_near_ok=0
+    echo "     near-miss $r25_val was NOT refused (rc=$rc): $(head -2 <<<"$out")"
+  fi
+done
+if [ "$r25_near_ok" -eq 1 ]; then
+  pass "OBSERVED (round25): all four near-misses are REFUSED — measured-v2 (another version), measured (the bare word every round-21 prose value contains), remeasured-v1 (a longer string ending in the token), MEASURED-V1 (another case) — none of which a substring, prefix, suffix or case-insensitive test would catch"
+else
+  fail "round25: every near-miss must be refused by exact equality"
+fi
+# POSITIVE CONTROL: the GENUINE token still reports. Without this the case above is satisfied by a
+# reader that refuses every value, which would be a different defect with the same test output.
+r25_set_source "$r25_dir/session-corpus-pin.json" "measured-v1"
+out=$(run_report "$r25_dir" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "POSITIVE CONTROL (round25): the genuine measured-v1 token REPORTS, so the four refusals above are attributable to the values and not to a guard that refuses everything"
+else
+  fail "round25: the genuine token must still be accepted (rc=$rc, out: $(head -4 <<<"$out"))"
+fi
+# ...and the fix must be the SHAPE, not one blocked value: no executable line of the reader may test
+# this field with containment, a prefix, a suffix or a regex. Asked of the RUNNABLE text only — the
+# prose above the check QUOTES the retired substring test to record what went wrong, and a
+# whole-file scan would red on a correct file, which is the false FAIL an agent learns to waive.
+if python3 - <<'PY'
+import pathlib, re, sys
+sys.path.insert(0, "scripts/perf")
+from ws0_session import COMPONENTS_SOURCE_MEASURED
+src = pathlib.Path("scripts/perf/ws0_session.py").read_text().splitlines()
+code = [ln for ln in src if not ln.lstrip().startswith("#")]
+# The reader must compare the field for EQUALITY against the shared constant, and nothing else.
+eq = [ln for ln in code if "COMPONENTS_SOURCE_MEASURED" in ln and re.search(r"[!=]=", ln)]
+assert eq, "the reader does not compare the marker with equality"
+loose = [ln.strip() for ln in code
+         if re.search(r"\bin\s+source\b|source\.(startswith|endswith|find|lower|upper|strip)"
+                      r"|re\.(match|search|fullmatch)\(.*source", ln)]
+assert not loose, "a loose test on the provenance marker survives: " + "; ".join(loose)
+# ...and the token is VERSIONED, so a future writer recording something else is refused loudly
+# rather than accepted as near enough.
+assert re.fullmatch(r"measured-v\d+", COMPONENTS_SOURCE_MEASURED), COMPONENTS_SOURCE_MEASURED
+print("EXACT-EQUALITY-ONLY")
+PY
+then
+  pass "OBSERVED (round25): the reader compares the provenance marker for EQUALITY against the shared versioned constant, and no executable line tests it by containment, prefix, suffix, case-folding or regex (the shape is fixed, not one blocked value)"
+else
+  fail "round25: the marker must be compared only by exact equality against the versioned constant"
+fi
+
+# ==========================================================================
 # CANONICAL-CORPUS COMPARISON: moved to scripts/tests/test_ws0_canonical_corpus.sh
 # ==========================================================================
 # Round 13's F3 — is the measured corpus the one a WS0 BASELINE is DEFINED as? — is its own
