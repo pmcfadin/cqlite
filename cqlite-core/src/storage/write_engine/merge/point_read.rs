@@ -21,6 +21,7 @@
 use super::{
     egress_budget, KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter,
 };
+use crate::observability::partition_access;
 use crate::schema::{TableSchema, UdtRegistry};
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
@@ -145,6 +146,66 @@ impl SSTableRowIterator for SinglePartitionFilterRun {
     }
 }
 
+/// What one candidate SSTable reported about ONE requested key's on-disk size —
+/// the byte-weight half of the partition access-distribution probe (issue #2827).
+///
+/// The probe sites supply byte weights ONLY; they never count accesses. Counting
+/// here would multiply a partition's repeat count by the number of generations
+/// holding it and manufacture concentration the workload does not have, which is a
+/// bias toward "build the cache". The single access is recorded once per logical
+/// point read by the builder below.
+/// Only the default `not(tombstones)` seek path resolves per-key sizes (the
+/// alternate build always falls back to a whole-file scan and produces no notes),
+/// so the variants are dead there — same shape as [`PathProbe`].
+#[cfg_attr(feature = "tombstones", allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeySizeNote {
+    /// This SSTable does not hold the key, so it contributes nothing either way.
+    NotHeld,
+    /// This SSTable holds the key and its index recorded an authoritative on-disk
+    /// size for it.
+    Sized(u32),
+    /// This SSTable holds the key and its on-disk extent was MEASURED as the
+    /// partition's successor gap.
+    Measured(u64),
+    /// This SSTable holds (or may hold) the key but no authoritative extent is
+    /// available — e.g. a fail-safe whole-file scan resolves no per-partition
+    /// layout, or no data-section length is known. Never estimated.
+    Unsized,
+}
+
+/// Whether a merger builder records the #2827 partition accesses itself.
+///
+/// The reader-based builder has TWO callers with opposite needs, so this cannot be a
+/// property of the function:
+///
+/// - the **core executor's** multi-generation targeted read reaches it through
+///   `generation_merge::seek_merge_generations_for_read`, and the executor already
+///   records the access at its own logical boundary
+///   (`StorageEngine::scan_partition_clustering`) — recording here too would count
+///   one logical read twice;
+/// - the **Flight warm point path** reaches it directly, and this IS its logical
+///   point-read boundary, so recording must happen here or not at all.
+///
+/// Counting stays once per logical partition read either way. Nothing is ever
+/// recorded at a per-SSTable probe site, which would multiply a repeat count by the
+/// number of generations holding the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointAccessRecording {
+    /// This call is the logical point-read boundary: record one access per key.
+    Record,
+    /// The caller records at its own logical boundary; do not record here.
+    CallerRecords,
+}
+
+/// A candidate probe plus, when the probe is enabled, one [`KeySizeNote`] per
+/// requested key in the requested order.
+struct ProbeOutcome {
+    probe: PathProbe,
+    /// Empty when the probe is disabled — the default, so this costs nothing.
+    notes: Vec<KeySizeNote>,
+}
+
 /// Per-candidate probe outcome across ALL requested keys. `Seeked`/`Empty` are
 /// produced only by the default `not(tombstones)` seek path (the alternate build
 /// always returns `NeedsScan`), so they are dead under `tombstones`.
@@ -226,12 +287,34 @@ pub fn build_single_partition_merger_with_registry(
     let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
+    // Byte weights for the partition access-distribution probe (issue #2827), one
+    // accumulator per requested key, summed across the candidates that resolved it.
+    // Allocated only when the probe is enabled (it is OFF by default).
+    // The path-based builder IS the cold Flight point path's logical boundary, so it
+    // always records. Extent measurement is nonetheless gated on the probe being on:
+    // it is real work (an index materialize + a successor resolution per key per
+    // generation) and must never be paid by a process that asked for no telemetry.
+    let collect = partition_access::enabled();
+    let mut weights: Vec<partition_access::AccessWeightBuilder> = if collect {
+        vec![partition_access::AccessWeightBuilder::new(); keys.len()]
+    } else {
+        Vec::new()
+    };
     for (run_index, path) in paths.iter().enumerate() {
         // Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
         // seek/open, so a disconnected point read does no further per-SSTable work.
         scan_cancel.check()?;
 
-        match probe_path(path, keys, schema, udt_registry, scan_cancel.clone())? {
+        let ProbeOutcome { probe, notes } = probe_path(
+            path,
+            keys,
+            schema,
+            udt_registry,
+            scan_cancel.clone(),
+            collect,
+        )?;
+        fold_size_notes(&mut weights, &notes);
+        match probe {
             PathProbe::Empty => {
                 // Pruned / absent for every key. No run.
             }
@@ -287,6 +370,15 @@ pub fn build_single_partition_merger_with_registry(
         }
     }
 
+    // ONE access per LOGICAL partition read, recorded after every candidate has
+    // reported (issue #2827). This is the point-read path's logical boundary: the
+    // key list is canonical (deduplicated), so `pk IN (5, 5)` is one access, and a
+    // key present in seven generations is still one access carrying the SUM of the
+    // per-generation on-disk sizes. Recorded even when no candidate held the key —
+    // a miss is a real access, and omitting it would understate the singleton
+    // bucket. A no-op when the probe is disabled.
+    record_logical_accesses(schema, keys, weights);
+
     if runs.is_empty() {
         // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
@@ -312,11 +404,16 @@ pub fn build_single_partition_merger_with_registry(
 /// WHO opens/owns the `SSTableReader` differs. `readers` must be the same
 /// (token-pruned) candidate list, in the same order, the full-scan reader-based
 /// merger ([`KWayMerger::new_from_readers`]) would merge.
+/// `recording` (issue #2827) governs ONLY whether this call records one partition
+/// access per requested key; it changes no rows, no ordering and no probe behaviour.
+/// It is an explicit caller decision because this builder's two callers sit at
+/// different levels — see [`PointAccessRecording`].
 pub fn build_single_partition_merger_from_readers(
     readers: Vec<Arc<SSTableReader>>,
     keys: &[Vec<u8>],
     schema: &TableSchema,
     scan_cancel: ScanCancel,
+    recording: PointAccessRecording,
 ) -> Result<Option<KWayMerger>> {
     schema.validate_dropped_columns()?;
     if keys.is_empty() {
@@ -336,13 +433,32 @@ pub fn build_single_partition_merger_from_readers(
     // snapshot is memoized so every channel in THIS merge shares ONE capacity.
     let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
+    // `CallerRecords` must measure NOTHING. Measuring an extent costs an index
+    // materialize plus an O(N) `Index.db` successor scan per key per generation, and
+    // under `CallerRecords` the result is discarded and re-derived by the caller —
+    // a per-read O(N) scan whose output is thrown away.
+    let collect = recording == PointAccessRecording::Record && partition_access::enabled();
+    let mut weights: Vec<partition_access::AccessWeightBuilder> = if collect {
+        vec![partition_access::AccessWeightBuilder::new(); keys.len()]
+    } else {
+        Vec::new()
+    };
+
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
     for (run_index, reader) in readers.into_iter().enumerate() {
         // Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
         // probe, so a disconnected point read does no further per-SSTable work.
         scan_cancel.check()?;
 
-        match probe_reader(Arc::clone(&reader), keys, schema, scan_cancel.clone())? {
+        let ProbeOutcome { probe, notes } = probe_reader(
+            Arc::clone(&reader),
+            keys,
+            schema,
+            scan_cancel.clone(),
+            collect,
+        )?;
+        fold_size_notes(&mut weights, &notes);
+        match probe {
             PathProbe::Empty => {
                 // Pruned / absent for every key. No run.
             }
@@ -393,6 +509,13 @@ pub fn build_single_partition_merger_from_readers(
         }
     }
 
+    // ONE access per LOGICAL partition read, when this call is the boundary
+    // (issue #2827). Recorded even when no candidate held the key — a miss is a real
+    // access, and omitting it would understate the singleton bucket.
+    if collect {
+        record_logical_accesses(schema, keys, weights);
+    }
+
     if runs.is_empty() {
         // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
@@ -421,26 +544,132 @@ async fn probe_reader_async(
     keys: &[Vec<u8>],
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
-) -> Result<PathProbe> {
+    collect_notes: bool,
+) -> Result<ProbeOutcome> {
+    let mut notes: Vec<KeySizeNote> = Vec::new();
     let mut rows: Vec<CompactionRow> = Vec::new();
     for key in keys {
         match reader
             .read_single_partition_for_compaction(key, Some(schema), scan_cancel)
             .await?
         {
-            SinglePartitionCompaction::DefinitelyAbsent => {}
-            SinglePartitionCompaction::Rows(mut r) => rows.append(&mut r),
+            SinglePartitionCompaction::DefinitelyAbsent => {
+                if collect_notes {
+                    notes.push(KeySizeNote::NotHeld);
+                }
+            }
+            SinglePartitionCompaction::Rows(mut r) => {
+                if collect_notes {
+                    notes.push(resolved_size_note(reader, key).await);
+                }
+                rows.append(&mut r)
+            }
             // Index availability is per-SSTable, not per-key: fall back to
             // scanning the whole file once, filtered to the key set.
             SinglePartitionCompaction::IndexUnavailable => {
-                return Ok(PathProbe::NeedsScan);
+                return Ok(ProbeOutcome {
+                    probe: PathProbe::NeedsScan,
+                    // A whole-file fail-safe scan resolves no per-partition size,
+                    // so EVERY key this SSTable might hold is unpriceable through
+                    // it. Reported as unavailable rather than skipped, so the
+                    // window's byte total is visibly incomplete instead of quietly
+                    // short (issue #2827, design D6).
+                    notes: if collect_notes {
+                        vec![KeySizeNote::Unsized; keys.len()]
+                    } else {
+                        Vec::new()
+                    },
+                });
             }
         }
     }
-    if rows.is_empty() {
-        Ok(PathProbe::Empty)
+    let probe = if rows.is_empty() {
+        PathProbe::Empty
     } else {
-        Ok(PathProbe::Seeked(rows))
+        PathProbe::Seeked(rows)
+    };
+    Ok(ProbeOutcome { probe, notes })
+}
+
+/// This SSTable's authoritative on-disk extent for `key`.
+///
+/// The partition's location comes from what the read that just ran already resolved
+/// into the process-global key→partition-offset cache (issue #2059's
+/// `PartitionLoc`), so the instrument never re-drives a lookup and can never
+/// perturb the read path's own telemetry. The EXTENT is then measured as the
+/// successor gap — `[data_offset, successor_offset)`, bounding to the authoritative
+/// uncompressed data-section length for the last partition — which is the same
+/// authoritative index-layout bound the single-partition seek uses to size its
+/// decompression window.
+///
+/// Nothing is ever estimated. Where no extent is resolvable the note is
+/// [`KeySizeNote::Unsized`]: the access is still counted, and it contributes zero
+/// bytes under `size_source = unavailable`.
+///
+/// A key-cache MISS is NOT treated as "no extent". This function is only reached
+/// when the probe returned rows for the key, so the partition IS held; the offset is
+/// then resolved authoritatively, exactly as the core path's resolver does. Pricing
+/// the same partition differently on the two paths — measured on one, unpriceable on
+/// the other — would make a window's byte total depend on which executor served the
+/// read.
+#[cfg(not(feature = "tombstones"))]
+async fn resolved_size_note(reader: &SSTableReader, key: &[u8]) -> KeySizeNote {
+    // An index-recorded size, if one ever exists. No Cassandra 5.0 index records
+    // one, so in practice this never fires.
+    if let Some(loc) = reader.key_cache_get(key) {
+        if loc.data_size > 0 {
+            return KeySizeNote::Sized(loc.data_size);
+        }
+        if let Ok(Some(gap)) = reader.measure_partition_extent(loc.data_offset, key).await {
+            return KeySizeNote::Measured(gap);
+        }
+        return KeySizeNote::Unsized;
+    }
+    // Cache miss on a partition the read just returned rows for: resolve the offset
+    // rather than declaring it unpriceable.
+    use crate::storage::sstable::reader::partition_successor::PartitionResidency;
+    match reader.partition_residency(key).await {
+        PartitionResidency::HeldAt(offset) => {
+            match reader.measure_partition_extent(offset, key).await {
+                Ok(Some(gap)) => KeySizeNote::Measured(gap),
+                Ok(None) | Err(_) => KeySizeNote::Unsized,
+            }
+        }
+        // `NotHeld` is unreachable here (the read returned rows for this key) and
+        // `Unknown` is genuinely unpriceable; both fail closed.
+        PartitionResidency::NotHeld | PartitionResidency::Unknown => KeySizeNote::Unsized,
+    }
+}
+
+/// Fold one candidate's per-key size notes into the per-key weight accumulators.
+///
+/// A no-op when the probe is disabled (both vectors are empty).
+fn fold_size_notes(weights: &mut [partition_access::AccessWeightBuilder], notes: &[KeySizeNote]) {
+    for (w, note) in weights.iter_mut().zip(notes.iter()) {
+        match note {
+            KeySizeNote::NotHeld => {}
+            KeySizeNote::Sized(n) => w.note_sized(*n),
+            KeySizeNote::Measured(n) => w.note_measured(*n),
+            KeySizeNote::Unsized => w.note_unsized(),
+        }
+    }
+}
+
+/// Record ONE logical partition access per requested key (issue #2827).
+///
+/// A no-op when the probe is disabled — `weights` is empty then, so this does not
+/// even iterate.
+fn record_logical_accesses(
+    schema: &TableSchema,
+    keys: &[Vec<u8>],
+    weights: Vec<partition_access::AccessWeightBuilder>,
+) {
+    // The table is part of the entry identity — see `TableScope`. The schema is the
+    // authority here (the builders are driven per-table), so no formatting or
+    // allocation is needed on this path.
+    let scope = partition_access::TableScope::new(&schema.keyspace, &schema.table);
+    for (key, weight) in keys.iter().zip(weights) {
+        partition_access::record_partition_access(scope, key, weight.finish());
     }
 }
 
@@ -457,7 +686,8 @@ fn probe_path(
     schema: &TableSchema,
     udt_registry: Option<&UdtRegistry>,
     scan_cancel: ScanCancel,
-) -> Result<PathProbe> {
+    collect_notes: bool,
+) -> Result<ProbeOutcome> {
     let path = path.to_path_buf();
     let schema = schema.clone();
     let keys: Vec<Vec<u8>> = keys.to_vec();
@@ -473,7 +703,7 @@ fn probe_path(
         if let Some(registry) = udt_registry {
             reader.set_udt_registry(registry);
         }
-        probe_reader_async(&reader, &keys, &schema, &scan_cancel).await
+        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
     })
 }
 
@@ -488,10 +718,13 @@ fn probe_reader(
     keys: &[Vec<u8>],
     schema: &TableSchema,
     scan_cancel: ScanCancel,
-) -> Result<PathProbe> {
+    collect_notes: bool,
+) -> Result<ProbeOutcome> {
     let schema = schema.clone();
     let keys: Vec<Vec<u8>> = keys.to_vec();
-    block_on_async(async move { probe_reader_async(&reader, &keys, &schema, &scan_cancel).await })
+    block_on_async(async move {
+        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
+    })
 }
 
 /// Tombstones-build fallback: the single-partition SEEK machinery
@@ -506,8 +739,12 @@ fn probe_path(
     _schema: &TableSchema,
     _udt_registry: Option<&UdtRegistry>,
     _scan_cancel: ScanCancel,
-) -> Result<PathProbe> {
-    Ok(PathProbe::NeedsScan)
+    _collect_notes: bool,
+) -> Result<ProbeOutcome> {
+    Ok(ProbeOutcome {
+        probe: PathProbe::NeedsScan,
+        notes: Vec::new(),
+    })
 }
 
 /// Tombstones-build fallback for the reader-based probe (issue #2346) — mirrors
@@ -518,6 +755,10 @@ fn probe_reader(
     _keys: &[Vec<u8>],
     _schema: &TableSchema,
     _scan_cancel: ScanCancel,
-) -> Result<PathProbe> {
-    Ok(PathProbe::NeedsScan)
+    _collect_notes: bool,
+) -> Result<ProbeOutcome> {
+    Ok(ProbeOutcome {
+        probe: PathProbe::NeedsScan,
+        notes: Vec::new(),
+    })
 }

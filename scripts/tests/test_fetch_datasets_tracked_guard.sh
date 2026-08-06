@@ -202,12 +202,15 @@ IGN
 # script with curl stubbed and CI explicitly unset unless an override is passed.
 # A dataset-root of "-" leaves CQLITE_DATASETS_ROOT UNSET so the script's
 # documented relative default (test-data/datasets) is exercised. Set
-# FETCH_PAYLOAD/FETCH_PAYLOAD_SHA to serve a different archive.
+# FETCH_PAYLOAD/FETCH_PAYLOAD_SHA to serve a different archive, and FETCH_ARGS to
+# pass SCRIPT arguments (issue #3310 drives the same real script through
+# `--verify-only`; every other case passes none).
 # Sets $OUT (combined output) and $RC.
 FETCH_PAYLOAD=""
 FETCH_PAYLOAD_SHA=""
 FETCH_BIN=""
 FETCH_TMPDIR=""
+FETCH_ARGS=()
 run_fetch() {
   local cwd="$1" root="$2"
   shift 2
@@ -223,19 +226,22 @@ run_fetch() {
     # FETCH_TMPDIR overrides it for the cases that probe a hostile TMPDIR.
     export TMPDIR="${FETCH_TMPDIR:-$T}"
     export STUB_CURL_PAYLOAD="$payload"
+    # `${arr[@]+"${arr[@]}"}` — an EMPTY array expands to nothing under `set -u`
+    # on every bash this suite runs on (bash 3.2 included), which a bare
+    # `"${arr[@]}"` does not.
     if [ "$root" = "-" ]; then
       env -u CQLITE_DATASETS_ROOT "$@" \
         DATASET_TAG="fake-tag" \
         DATASET_ASSET="$ASSET" \
         DATASET_SHA256="$sha" \
-        bash "$FETCH" 2>&1
+        bash "$FETCH" ${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"} 2>&1
     else
       env "$@" \
         CQLITE_DATASETS_ROOT="$root" \
         DATASET_TAG="fake-tag" \
         DATASET_ASSET="$ASSET" \
         DATASET_SHA256="$sha" \
-        bash "$FETCH" 2>&1
+        bash "$FETCH" ${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"} 2>&1
     fi
   )
   RC=$?
@@ -1718,6 +1724,902 @@ else
   bad "no-tracked-fixtures: false refusal on a clean in-repo root (exit $RC); output: $OUT"
 fi
 assert_archive_extracted "$R31/test-data/datasets" "no-tracked-fixtures"
+
+# =============================================================================
+# Issue #3310 — `--verify-only` must REPORT SIGKILL-orphaned tracked fixtures.
+#
+# The #2878 crash-safe restore covers EXIT/INT/TERM/HUP; SIGKILL outruns all of
+# them and leaves tracked fixtures DELETED on disk with the index still recording
+# them. Recovery exists, but only in the DESTRUCTIVE path's `missing-only`
+# pre-flight — and `--verify-only` returns before it. So the first diagnostic an
+# agent reaches for used to answer "root unusable" (or, with the corpus intact,
+# a clean green) for a checkout whose git-tracked fixtures are gone.
+#
+# The contract these cases pin: `--verify-only` REPORTS, never repairs. It names
+# the missing tracked file(s), prints the exact one-line repair command, exits
+# non-zero, and mutates NOTHING — the deleted files stay deleted.
+# =============================================================================
+
+# make_usable_corpus <root> — the minimal CONTENT has_required_content() demands,
+# so `--verify-only` can reach a VERIFIED verdict. Everything it writes is either
+# .gitignore'd by make_repo's .gitignore (*.db, metadata.yml, sstables/) or lives
+# under sstables/, so a repo built by make_repo stays `git status`-clean.
+make_usable_corpus() {
+  local root="$1" c
+  mkdir -p "$root/sstables/test_basic/simple_table-aaaa" "$root/$WIDE_DIR" \
+    || { echo "FAIL - could not create the synthetic corpus under $root"; exit 1; }
+  printf 'synthetic: true\n' >"$root/metadata.yml"
+  printf '{"synthetic":"wide golden"}\n' >"$root/$WIDE_DIR/nb-2-big-Data.db.jsonl"
+  for c in nb-2-big-Data.db nb-2-big-Index.db nb-2-big-Digest.crc32 nb-2-big-CompressionInfo.db; do
+    printf 'wide %s\n' "$c" >"$root/$WIDE_DIR/$c"
+  done
+  for c in nb-1-big-Data.db nb-1-big-Index.db nb-1-big-Summary.db nb-1-big-Statistics.db; do
+    printf 'basic %s\n' "$c" >"$root/sstables/test_basic/simple_table-aaaa/$c"
+  done
+}
+
+# mtime_of / census_of — a NO-WRITES oracle for a report-only probe. The census is
+# every path under the root with its type, mtime and content hash, NUL-walked and
+# sorted, so a rewritten file (same size, same name) is caught as surely as a
+# created or deleted one. Assertion (b) of #3310 compares it across the run.
+mtime_of() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || printf '?\n'; }
+census_of() {
+  local root="$1" p
+  if [ ! -d "$root" ]; then printf 'ABSENT\t%s\n' "$root"; return 0; fi
+  ( cd "$root" && find . -print0 | LC_ALL=C sort -z ) | while IFS= read -r -d '' p; do
+    if [ -L "$root/$p" ]; then
+      printf '%s\tsymlink\n' "$p"
+    elif [ -f "$root/$p" ]; then
+      printf '%s\tfile\t%s\t%s\n' "$p" "$(mtime_of "$root/$p")" "$(sha256_of "$root/$p")"
+    else
+      printf '%s\tdir\n' "$p"
+    fi
+  done
+}
+
+# run_verify <cwd> <dataset-root> [env...] — the same real script, `--verify-only`.
+run_verify() {
+  FETCH_ARGS=(--verify-only)
+  run_fetch "$@"
+  FETCH_ARGS=()
+}
+
+# The three verdict markers the probe may print. Kept in one place so a case can
+# assert BOTH that the right one appeared and that the others did not.
+PROBE_MISSING_MARKER="TRACKED FIXTURES MISSING"
+PROBE_UNMEASURED_MARKER="TRACKED-FIXTURE PROBE COULD NOT MEASURE"
+PROBE_NOSUBJECT_MARKER="NO SUBJECT"
+UNUSABLE_MARKER="does not hold a usable dataset corpus"
+
+# === Case 32: --verify-only NAMES the orphaned fixtures and REPAIRS NOTHING ====
+R32="$T/case32-repo"
+make_repo "$R32"
+R32_ROOT="$R32/test-data/datasets"
+make_usable_corpus "$R32_ROOT"
+# Exactly what a SIGKILL mid-`rm -rf` leaves: tracked fixtures gone from disk, the
+# index unchanged. One of the two carries a SPACE — this repo tracks 40
+# space-bearing paths, and a probe that splits on whitespace would drop or mangle
+# it (git's `-z` output is the only reason it survives).
+R32_DELETED_A="goldens/simple_table-Data.db.jsonl"
+R32_DELETED_B="goldens/spaced name-Data.db.jsonl"
+rm -f "$R32_ROOT/$R32_DELETED_A" "$R32_ROOT/$R32_DELETED_B"
+R32_CENSUS_BEFORE="$(census_of "$R32_ROOT")"
+R32_STATUS_BEFORE="$(git -C "$R32" status --porcelain 2>&1)"
+run_verify "$R32" "$R32_ROOT"
+R32_CENSUS_AFTER="$(census_of "$R32_ROOT")"
+R32_STATUS_AFTER="$(git -C "$R32" status --porcelain 2>&1)"
+
+if [ "$RC" -ne 0 ]; then
+  ok "3310-report: --verify-only exits non-zero on orphaned tracked fixtures (exit $RC)"
+else
+  bad "3310-report: --verify-only exited 0 with tracked fixtures DELETED; output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*) ok "3310-report: names the condition ('$PROBE_MISSING_MARKER')" ;;
+  *) bad "3310-report: missing the '$PROBE_MISSING_MARKER' marker; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$R32_DELETED_A"*) ok "3310-report: names the missing tracked file" ;;
+  *) bad "3310-report: does not name '$R32_DELETED_A'; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$R32_DELETED_B"*) ok "3310-report: names the SPACE-bearing missing tracked file intact" ;;
+  *) bad "3310-report: does not name '$R32_DELETED_B'; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"git -C "*"restore"*"--worktree"*"test-data/datasets/$R32_DELETED_A"*)
+    ok "3310-report: prints a one-line repair command naming the deleted PATH" ;;
+  *) bad "3310-report: no copy-pasteable path-scoped repair command; output: $OUT" ;;
+esac
+# The repair must be SCOPED TO THE DELETED PATHS. A subtree-wide
+# `git restore --worktree -- test-data/datasets` reverts every unrelated local
+# change under the root — and --verify-only returns BEFORE the destructive path's
+# refuse_modified_tracked_dataset_files, so nothing here has ruled such a
+# modification out. Advertising that line as "EXACTLY this command" would make
+# this change a new instance of the data loss #2878/#3245 exist to prevent.
+R32_SUBTREE_WIDE=0
+while IFS= read -r line; do
+  case "$line" in
+    *"git -C "*" restore "*)
+      case "$line" in
+        *"-- test-data/datasets" | *"-- 'test-data/datasets'" | *"-- test-data/datasets ") R32_SUBTREE_WIDE=1 ;;
+      esac ;;
+  esac
+done <<EOF
+$OUT
+EOF
+if [ "$R32_SUBTREE_WIDE" -eq 0 ]; then
+  ok "3310-report: no subtree-wide restore is advertised (the repair cannot revert unrelated work)"
+else
+  bad "3310-report: advertised a subtree-wide 'restore -- test-data/datasets'; output: $OUT"
+fi
+# Textually DISTINCT from the generic unusable-root diagnostic: an agent must be
+# able to tell "your fixtures are missing, here is the repair" from "this root has
+# no corpus". The corpus here is fine, so the unusable message would be a lie.
+case "$OUT" in
+  *"$UNUSABLE_MARKER"*) bad "3310-report: reported the generic root-unusable message instead; output: $OUT" ;;
+  *) ok "3310-report: diagnostic is distinct from the generic '$UNUSABLE_MARKER'" ;;
+esac
+case "$OUT" in
+  *"Dataset root VERIFIED"*) bad "3310-report: still reported the root VERIFIED; output: $OUT" ;;
+  *) ok "3310-report: does not report the root VERIFIED while fixtures are orphaned" ;;
+esac
+# --- (b) REPORT-ONLY: the run must have written nothing at all ----------------
+if [ "$R32_CENSUS_BEFORE" = "$R32_CENSUS_AFTER" ]; then
+  ok "3310-report: the dataset root is byte-for-byte unchanged (no writes, no repair)"
+else
+  bad "3310-report: the root CHANGED across a report-only probe:"
+  diff <(printf '%s\n' "$R32_CENSUS_BEFORE") <(printf '%s\n' "$R32_CENSUS_AFTER") | head -10
+fi
+if [ "$R32_STATUS_BEFORE" = "$R32_STATUS_AFTER" ]; then
+  ok "3310-report: git status --porcelain is unchanged (the index was not touched)"
+else
+  bad "3310-report: git status changed: '$R32_STATUS_BEFORE' -> '$R32_STATUS_AFTER'"
+fi
+# DIRECT existence assertion, deliberately INDEPENDENT of the census above: the
+# headline guarantee is "reports, never repairs", and it must survive any future
+# refactor of census_of. Asserted per file so a partial restore cannot hide.
+for rel in "$R32_DELETED_A" "$R32_DELETED_B"; do
+  if [ ! -e "$R32_ROOT/$rel" ]; then
+    ok "3310-report: '$rel' is STILL deleted (it reported, it did not repair)"
+  else
+    bad "3310-report: --verify-only RESTORED '$rel'; it must never mutate the tree"
+  fi
+done
+
+# === Case 32b: the SAME report when the corpus content is ALSO absent =========
+# The reported motivation: with the corpus gone too, the pre-#3310 probe answered
+# only "root unusable", which sends an agent to re-fetch instead of to the
+# one-line restore. The fixture diagnosis must come FIRST and must still appear.
+R32B="$T/case32b-repo"
+make_repo "$R32B"
+rm -f "$R32B/test-data/datasets/$R32_DELETED_A"
+run_verify "$R32B" "$R32B/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-report-no-corpus: still exits non-zero (exit $RC)"
+else
+  bad "3310-report-no-corpus: exited 0; output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*"$R32_DELETED_A"*)
+    ok "3310-report-no-corpus: reports the missing tracked fixture, not just 'root unusable'" ;;
+  *) bad "3310-report-no-corpus: no tracked-fixture diagnosis; output: $OUT" ;;
+esac
+if [ -f "$R32B/test-data/datasets/${TRACKED_RELATIVE[0]}" ]; then
+  ok "3310-report-no-corpus: the surviving tracked fixtures were left alone"
+else
+  bad "3310-report-no-corpus: a surviving tracked fixture disappeared"
+fi
+
+# === Case 32c: NON-VACUITY — with the probe disabled the defect returns =======
+# The mutant is the pre-#3310 script: `--verify-only` skips the probe entirely.
+# With a usable corpus and tracked fixtures deleted it must report a GREEN
+# VERIFIED root — the misleading answer this issue exists to remove.
+MUTANT_NO_PROBE="$T/fetch-datasets-mutant-no-verify-probe.sh"
+sed 's/^  report_orphaned_tracked_fixtures || exit 1$/  : mutant-no-verify-probe/' \
+  "$FETCH" >"$MUTANT_NO_PROBE"
+if grep -q ': mutant-no-verify-probe' "$MUTANT_NO_PROBE"; then
+  ok "non-vacuity: built a verify-probe-disabled mutant"
+  R32C="$T/case32c-repo"
+  make_repo "$R32C"
+  make_usable_corpus "$R32C/test-data/datasets"
+  rm -f "$R32C/test-data/datasets/$R32_DELETED_A"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_NO_PROBE"
+  run_verify "$R32C" "$R32C/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  if [ "$RC" -eq 0 ]; then
+    ok "non-vacuity: mutant reports the root usable (exit 0) with a tracked fixture DELETED"
+  else
+    bad "non-vacuity: mutant did not reproduce the misleading green (exit $RC); output: $OUT"
+  fi
+  case "$OUT" in
+    *"$R32_DELETED_A"*) bad "non-vacuity: mutant named the missing file — the assert is vacuous" ;;
+    *) ok "non-vacuity: mutant never names the orphaned fixture (the pre-#3310 blind spot)" ;;
+  esac
+else
+  bad "non-vacuity: could not build the verify-probe-disabled mutant (call site renamed?)"
+fi
+
+# === Case 33: NO SUBJECT — an out-of-repo root has no tracked files at all =====
+# The fleet layout (/data/datasets). Nothing there is tracked by construction, so
+# the probe must NOT fire — and must not print a vacuous "0 of 0 clean" verdict
+# either: a probe with no subject has no clean verdict to give.
+if [ "$SANDBOX_IN_REPO" = 1 ]; then
+  printf 'INFO - skipping the out-of-repo probe case (sandbox is inside a checkout)\n'
+else
+  R33_ROOT="$T/case33-outside/test-data/datasets"
+  make_usable_corpus "$R33_ROOT"
+  run_verify "$T/case33-outside" "$R33_ROOT"
+  if [ "$RC" -eq 0 ]; then
+    ok "3310-no-subject-outside: an out-of-repo root still verifies clean (exit 0)"
+  else
+    bad "3310-no-subject-outside: false failure on an out-of-repo root (exit $RC); output: $OUT"
+  fi
+  case "$OUT" in
+    *"$PROBE_MISSING_MARKER"*) bad "3310-no-subject-outside: the probe fired with no subject; output: $OUT" ;;
+    *) ok "3310-no-subject-outside: the probe does not fire" ;;
+  esac
+  case "$OUT" in
+    *"$PROBE_NOSUBJECT_MARKER"*) ok "3310-no-subject-outside: says it had NO SUBJECT rather than claiming a clean census" ;;
+    *) bad "3310-no-subject-outside: no no-subject statement; output: $OUT" ;;
+  esac
+  case "$OUT" in
+    *"all 0 git-tracked"*) bad "3310-no-subject-outside: printed a vacuous 0/0 clean verdict; output: $OUT" ;;
+    *) ok "3310-no-subject-outside: no vacuous 0/0 clean count" ;;
+  esac
+fi
+
+# === Case 34: NO SUBJECT — an IN-repo root that tracks nothing ================
+# The other no-subject shape: inside a work tree, but the index holds no path
+# under the root (case 31's repo, probed instead of fetched).
+R34="$T/case34-repo"
+mkdir -p "$R34"
+git -C "$R34" init -q
+git -C "$R34" config user.email test@example.com
+git -C "$R34" config user.name "Test"
+printf 'placeholder\n' >"$R34/README.md"
+git -C "$R34" add README.md
+git -C "$R34" commit -qm "repo with no tracked dataset fixtures"
+make_usable_corpus "$R34/test-data/datasets"
+run_verify "$R34" "$R34/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-no-subject-in-repo: an in-repo root tracking nothing verifies clean (exit 0)"
+else
+  bad "3310-no-subject-in-repo: false failure (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_NOSUBJECT_MARKER"*) ok "3310-no-subject-in-repo: reports NO SUBJECT, not a clean census of nothing" ;;
+  *) bad "3310-no-subject-in-repo: no no-subject statement; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"all 0 git-tracked"*) bad "3310-no-subject-in-repo: printed a vacuous 0/0 clean verdict; output: $OUT" ;;
+  *) ok "3310-no-subject-in-repo: no vacuous 0/0 clean count" ;;
+esac
+
+# === Case 35: POSITIVE CONTROL — every tracked fixture present ================
+# An affirmative measurement, not the absence of a bad signal: the probe must say
+# how many tracked files it found and that all of them are on disk.
+R35="$T/case35-repo"
+make_repo "$R35"
+make_usable_corpus "$R35/test-data/datasets"
+run_verify "$R35" "$R35/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-positive: an intact checkout verifies clean (exit 0)"
+else
+  bad "3310-positive: false failure on an intact checkout (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"all ${#TRACKED_RELATIVE[@]} git-tracked file(s)"*)
+    ok "3310-positive: reports the measured count (${#TRACKED_RELATIVE[@]}) as present" ;;
+  *) bad "3310-positive: no affirmative count in the verdict; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"Dataset root VERIFIED"*) ok "3310-positive: the probe does not block the normal VERIFIED report" ;;
+  *) bad "3310-positive: the usual verify-only output disappeared; output: $OUT" ;;
+esac
+
+# === Case 36: UNMEASURABLE — an in-checkout root whose census cannot be taken ==
+# A positive verdict requires an AFFIRMATIVE measurement. With git unusable and
+# the root inside a checkout, "no missing fixtures" is unknown, not true — the
+# unmeasured state must NOT inherit the permissive branch.
+GITBIN="$T/bin-broken-git"
+mkdir -p "$GITBIN" || { echo "FAIL - could not create $GITBIN"; exit 1; }
+cp "$BIN/curl" "$GITBIN/curl"
+cat >"$GITBIN/git" <<'MOCK'
+#!/usr/bin/env bash
+echo "git: simulated failure (issue #3310 unmeasurable-census case)" >&2
+exit 1
+MOCK
+chmod +x "$GITBIN/git"
+R36="$T/case36-repo"
+make_repo "$R36"
+make_usable_corpus "$R36/test-data/datasets"
+R36_CENSUS_BEFORE="$(census_of "$R36/test-data/datasets")"
+FETCH_BIN="$GITBIN"
+run_verify "$R36" "$R36/test-data/datasets"
+FETCH_BIN=""
+R36_CENSUS_AFTER="$(census_of "$R36/test-data/datasets")"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-unmeasurable: an untakeable census exits non-zero (exit $RC)"
+else
+  bad "3310-unmeasurable: an unmeasured census took the permissive branch (exit 0); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-unmeasurable: says the census could not be taken" ;;
+  *) bad "3310-unmeasurable: no could-not-measure statement; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"Dataset root VERIFIED"*) bad "3310-unmeasurable: reported VERIFIED without the measurement; output: $OUT" ;;
+  *) ok "3310-unmeasurable: no VERIFIED verdict without the measurement" ;;
+esac
+if [ "$R36_CENSUS_BEFORE" = "$R36_CENSUS_AFTER" ]; then
+  ok "3310-unmeasurable: still mutated nothing"
+else
+  bad "3310-unmeasurable: the root changed across a report-only probe"
+fi
+
+# === Case 37: a DELETED fixture carrying skip-worktree must not read clean ====
+# roborev #3310 blocker 2. `git status` SUPPRESSES worktree reporting for
+# skip-worktree ('S') and assume-unchanged (lowercase tag) index entries, so a
+# probe that infers presence from "no deletion entries appeared" reports every
+# file present while the file is genuinely gone. Presence must be established
+# AFFIRMATIVELY (stat each indexed path) — and where an index flag makes the
+# state undeterminable, the answer is COULD NOT MEASURE, never a clean verdict.
+# The destructive path already refuses these flags; this probe must not be weaker
+# than the code sitting above it.
+#
+# probe_flagged_case <label> <case-dir> <git update-index flag>
+probe_flagged_case() {
+  local label="$1" dir="$2" flag="$3" rel="goldens/simple_table-Data.db.jsonl"
+  make_repo "$dir"
+  make_usable_corpus "$dir/test-data/datasets"
+  git -C "$dir" update-index "$flag" -- "test-data/datasets/$rel"
+  rm -f "$dir/test-data/datasets/$rel"
+  # Precondition: git really is blind to the deletion (else the case is vacuous).
+  if [ -z "$(git -C "$dir" status --porcelain -- "test-data/datasets/$rel")" ]; then
+    ok "$label: git status is BLIND to the deletion (the flag really hides it)"
+  else
+    bad "$label: git status still reports the deletion; case is vacuous"
+  fi
+  run_verify "$dir" "$dir/test-data/datasets"
+  if [ "$RC" -ne 0 ]; then
+    ok "$label: does not report a clean root (exit $RC)"
+  else
+    bad "$label: reported the root usable with a hidden tracked fixture DELETED; output: $OUT"
+  fi
+  case "$OUT" in
+    *"Tracked-fixture probe (#3310): OK"*)
+      bad "$label: printed a CLEAN tracked-fixture verdict about a file it cannot see; output: $OUT" ;;
+    *) ok "$label: no clean tracked-fixture verdict" ;;
+  esac
+  case "$OUT" in
+    *"$PROBE_MISSING_MARKER"* | *"$PROBE_UNMEASURED_MARKER"*)
+      ok "$label: reports it as missing or explicitly unmeasurable" ;;
+    *) bad "$label: neither reported nor declared unmeasurable; output: $OUT" ;;
+  esac
+  case "$OUT" in
+    *"$rel"*) ok "$label: names the affected path" ;;
+    *) bad "$label: does not name '$rel'; output: $OUT" ;;
+  esac
+  if [ ! -e "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: still repaired nothing"
+  else
+    bad "$label: the probe restored the file"
+  fi
+}
+probe_flagged_case "3310-skip-worktree" "$T/case37-repo" --skip-worktree
+probe_flagged_case "3310-assume-unchanged" "$T/case37b-repo" --assume-unchanged
+
+# === Case 38: the repair is SCOPED, and every path in it is shell-quoted ======
+# roborev #3310 blocker 1, positive control: two deletions, one space-bearing.
+# The printed command must name both paths (so it actually repairs both) and must
+# round-trip through a shell — an unquoted `spaced name-...` would silently become
+# two pathspecs, neither of which exists.
+R38="$T/case38-repo"
+make_repo "$R38"
+make_usable_corpus "$R38/test-data/datasets"
+rm -f "$R38/test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+      "$R38/test-data/datasets/goldens/spaced name-Data.db.jsonl"
+run_verify "$R38" "$R38/test-data/datasets"
+# The printed line carries this script's `ERROR:   ` prefix; the COMMAND is what
+# follows it, and that is what an operator copies. Strip the prefix, then run the
+# remainder VERBATIM — anything less would not test the advertised text.
+R38_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+if [ -n "$R38_CMD" ]; then
+  ok "3310-scoped-repair: a --worktree repair line was printed"
+else
+  bad "3310-scoped-repair: no --worktree repair line; output: $OUT"
+fi
+case "$R38_CMD" in
+  *"goldens/simple_table-Data.db.jsonl"*) ok "3310-scoped-repair: the command names the first deleted path" ;;
+  *) bad "3310-scoped-repair: first path absent from the command: '$R38_CMD'" ;;
+esac
+case "$R38_CMD" in
+  *"goldens/spaced name-Data.db.jsonl"* | *"goldens/spaced\\ name-Data.db.jsonl"*)
+    ok "3310-scoped-repair: the command names the SPACE-bearing deleted path" ;;
+  *) bad "3310-scoped-repair: space-bearing path absent from the command: '$R38_CMD'" ;;
+esac
+case "$R38_CMD" in
+  *"-- test-data/datasets" | *"-- 'test-data/datasets'")
+    bad "3310-scoped-repair: the command is subtree-wide, not path-scoped: '$R38_CMD'" ;;
+  *) ok "3310-scoped-repair: the command is not subtree-wide" ;;
+esac
+# The advertised line must WORK: run it verbatim and require both files back.
+( cd "$R38" && eval "$R38_CMD" ) >/dev/null 2>&1
+if [ -f "$R38/test-data/datasets/goldens/simple_table-Data.db.jsonl" ] \
+   && [ -f "$R38/test-data/datasets/goldens/spaced name-Data.db.jsonl" ]; then
+  ok "3310-scoped-repair: pasting the advertised command verbatim restores BOTH files"
+else
+  bad "3310-scoped-repair: the advertised command did not repair the deletions: '$R38_CMD'"
+fi
+# ...and it must not have touched the tracked fixtures it was not asked about.
+if [ -z "$(git -C "$R38" status --porcelain 2>&1)" ]; then
+  ok "3310-scoped-repair: the checkout is clean after the advertised repair"
+else
+  bad "3310-scoped-repair: the repair left the checkout dirty: $(git -C "$R38" status --porcelain | head -3)"
+fi
+
+# === Case 39: a STAGED deletion needs a DIFFERENT repair command ==============
+# `git rm --cached` removes the index entry, so `git restore --worktree` has
+# nothing to rebuild from and silently no-ops; only `--staged --worktree` works.
+# Lumping this class in with worktree deletions would advertise a command that
+# does not repair it.
+R39="$T/case39-repo"
+make_repo "$R39"
+make_usable_corpus "$R39/test-data/datasets"
+R39_REL="goldens/simple_table-Data.db.jsonl"
+git -C "$R39" rm -q --cached "test-data/datasets/$R39_REL" >/dev/null
+rm -f "$R39/test-data/datasets/$R39_REL"
+run_verify "$R39" "$R39/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-staged-delete: reports the staged+worktree deletion (exit $RC)"
+else
+  bad "3310-staged-delete: exited 0; output: $OUT"
+fi
+R39_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+if [ -n "$R39_CMD" ]; then
+  ok "3310-staged-delete: a --staged --worktree repair line was printed"
+else
+  bad "3310-staged-delete: no staged-class repair line; output: $OUT"
+fi
+case "$R39_CMD" in
+  *"$R39_REL"*) ok "3310-staged-delete: the staged-class command names the path" ;;
+  *) bad "3310-staged-delete: path absent from the staged-class command: '$R39_CMD'" ;;
+esac
+case "$R39_CMD" in
+  *"-- test-data/datasets" | *"-- 'test-data/datasets'")
+    bad "3310-staged-delete: the staged-class command is subtree-wide: '$R39_CMD'" ;;
+  *) ok "3310-staged-delete: the staged-class command is not subtree-wide" ;;
+esac
+if [ ! -e "$R39/test-data/datasets/$R39_REL" ]; then
+  ok "3310-staged-delete: still repaired nothing"
+else
+  bad "3310-staged-delete: the probe restored the staged-deleted file"
+fi
+( cd "$R39" && eval "$R39_CMD" ) >/dev/null 2>&1
+if [ -f "$R39/test-data/datasets/$R39_REL" ]; then
+  ok "3310-staged-delete: pasting the advertised command verbatim restores the file"
+else
+  bad "3310-staged-delete: the advertised staged-class command did not repair it: '$R39_CMD'"
+fi
+
+# === Case 39b: a staged deletion whose CONTENT IS STILL ON DISK is not missing =
+# The boundary of the probe's subject: nothing is absent, so it must not claim a
+# missing fixture — but it must not stay silent about a measured signal either.
+R39B="$T/case39b-repo"
+make_repo "$R39B"
+make_usable_corpus "$R39B/test-data/datasets"
+git -C "$R39B" rm -q --cached "test-data/datasets/$R39_REL" >/dev/null
+run_verify "$R39B" "$R39B/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-staged-present: content on disk is not a missing fixture (exit 0)"
+else
+  bad "3310-staged-present: false positive on a staged deletion whose content is present (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*) bad "3310-staged-present: called a present file missing; output: $OUT" ;;
+  *) ok "3310-staged-present: no missing-fixture claim" ;;
+esac
+case "$OUT" in
+  *"STAGED DELETION"*) ok "3310-staged-present: still reports the measured staged deletion as a NOTE" ;;
+  *) bad "3310-staged-present: silently dropped a measured signal; output: $OUT" ;;
+esac
+
+# === Case 40: STAGED deletions of AWKWARDLY-NAMED paths (#3310 roborev r2) =====
+# The staged-deletion scan is the one path-reading step of the probe that did not
+# consume git's NUL-delimited output directly: it read the porcelain helper's
+# newline-JOINED return value. Measured facts that set the scope of these cases:
+#   * `git status --porcelain -z` emits paths VERBATIM — `-z` disables the
+#     C-quoting that plain porcelain applies to space-bearing and non-ASCII paths.
+#     So the space/non-ASCII cases below pass on the newline-joined reader too;
+#     they are REGRESSION PINS for the quoting class, not reproductions.
+#   * a path containing a NEWLINE is a genuine defect on that reader: the record
+#     splits, the probe reports a truncated path, and the "EXACTLY this command"
+#     repair then names a file that does not exist. That case is the red one.
+# All three are kept: the pins are what stop a future edit from reintroducing
+# C-quoted parsing, which is invisible until someone tracks such a path.
+#
+# stage_delete_case <label> <dir> <rel-under-datasets> <expect-missing:1|0>
+#   Adds a tracked fixture at <rel>, stage-deletes it (git rm --cached), and
+#   removes it from disk when a missing report is expected. Asserts the report,
+#   the EXACT path in both the listing and the repair command, and that pasting
+#   the advertised command verbatim really restores the file.
+stage_delete_case() {
+  local label="$1" dir="$2" rel="$3" expect_missing="$4" cmd
+  make_repo "$dir"
+  make_usable_corpus "$dir/test-data/datasets"
+  mkdir -p "$dir/test-data/datasets/$(dirname "$rel")"
+  printf 'awkwardly named tracked fixture\n' >"$dir/test-data/datasets/$rel"
+  git -C "$dir" add -f -- "test-data/datasets/$rel"
+  git -C "$dir" commit -qm "add awkward fixture"
+  git -C "$dir" rm -q --cached -- "test-data/datasets/$rel" >/dev/null
+  if [ "$expect_missing" = 1 ]; then
+    rm -f "$dir/test-data/datasets/$rel"
+  fi
+  run_verify "$dir" "$dir/test-data/datasets"
+
+  if [ "$expect_missing" != 1 ]; then
+    # The false-ABSENT direction: the content is still on disk, so a probe that
+    # mis-parses the path would call a present file missing.
+    if [ "$RC" -eq 0 ]; then
+      ok "$label: content on disk is not reported missing (exit 0)"
+    else
+      bad "$label: false 'missing' on a staged deletion whose content is present (exit $RC); output: $OUT"
+    fi
+    case "$OUT" in
+      *"$PROBE_MISSING_MARKER"*) bad "$label: called a present file missing; output: $OUT" ;;
+      *) ok "$label: no missing-fixture claim" ;;
+    esac
+    case "$OUT" in
+      *"STAGED DELETION"*) ok "$label: still reports the measured staged deletion as a NOTE" ;;
+      *) bad "$label: silently dropped the measured staged deletion; output: $OUT" ;;
+    esac
+    return 0
+  fi
+
+  if [ "$RC" -ne 0 ]; then
+    ok "$label: reports the staged deletion (exit $RC)"
+  else
+    bad "$label: exited 0 with the fixture gone; output: $OUT"
+  fi
+  # The EXACT path must appear — a truncated or quoted spelling must not pass.
+  case "$OUT" in
+    *"test-data/datasets/$rel"*) ok "$label: the report names the exact path" ;;
+    *) bad "$label: the exact path is absent (truncated or re-quoted?); output: $OUT" ;;
+  esac
+  cmd="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+  if [ -n "$cmd" ]; then
+    ok "$label: a --staged --worktree repair line was printed"
+  else
+    bad "$label: no staged-class repair line; output: $OUT"
+  fi
+  if [ ! -e "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: repaired nothing itself"
+  else
+    bad "$label: the probe restored the file"
+  fi
+  # The decisive assertion: the ADVERTISED command, pasted verbatim, must repair.
+  # A mangled path here fails loudly instead of silently no-op'ing, because the
+  # file's return is what is checked — not the command's exit status.
+  ( cd "$dir" && eval "$cmd" ) >/dev/null 2>&1
+  if [ -f "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: pasting the advertised command verbatim restores the file"
+  else
+    bad "$label: the advertised command did not repair it: '$cmd'"
+  fi
+}
+
+stage_delete_case "3310-staged-space" "$T/case40a-repo" "goldens/staged spaced-Data.db.jsonl" 1
+stage_delete_case "3310-staged-utf8"  "$T/case40b-repo" "goldens/é-café-Data.db.jsonl" 1
+stage_delete_case "3310-staged-newline" "$T/case40c-repo" "$(printf 'goldens/line\nbreak-Data.db.jsonl')" 1
+
+# === Case 41: the false-ABSENT direction for the same awkward names ===========
+stage_delete_case "3310-staged-space-present" "$T/case41a-repo" "goldens/present spaced-Data.db.jsonl" 0
+stage_delete_case "3310-staged-utf8-present"  "$T/case41b-repo" "goldens/présent-Data.db.jsonl" 0
+
+# === Case 42: a WORKTREE deletion of the same awkward names ===================
+# The index-census half already reads `ls-files -z` NUL-delimited, so this is a
+# regression pin on the half that was correct — the two halves must not diverge.
+R42="$T/case42-repo"
+make_repo "$R42"
+make_usable_corpus "$R42/test-data/datasets"
+R42_NL="$(printf 'goldens/worktree line\nbreak-Data.db.jsonl')"
+mkdir -p "$R42/test-data/datasets/goldens"
+printf 'x\n' >"$R42/test-data/datasets/$R42_NL"
+git -C "$R42" add -f -- "test-data/datasets/$R42_NL"
+git -C "$R42" commit -qm "add newline-bearing fixture"
+rm -f "$R42/test-data/datasets/$R42_NL"
+run_verify "$R42" "$R42/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-worktree-newline: reports the worktree deletion of a newline-bearing path (exit $RC)"
+else
+  bad "3310-worktree-newline: exited 0 with the fixture gone; output: $OUT"
+fi
+R42_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+( cd "$R42" && eval "$R42_CMD" ) >/dev/null 2>&1
+if [ -f "$R42/test-data/datasets/$R42_NL" ]; then
+  ok "3310-worktree-newline: the advertised command restores a newline-bearing path"
+else
+  bad "3310-worktree-newline: the advertised command did not repair it: '$R42_CMD'"
+fi
+
+# === Case 43: a FLAGGED path that is PRESENT is simply present (#3310 r3 B1) ===
+# skip-worktree / assume-unchanged hide a path's state from git's STATUS
+# machinery; they do not stop the direct `-e`/`-L` test this probe performs. So a
+# flagged path that demonstrably EXISTS has a determinable state and must not
+# make the probe fail — the first cut refused every flagged path, which turned the
+# primary diagnostic red on an intact checkout that merely carries one.
+flagged_present_case() {
+  local label="$1" dir="$2" flag="$3" rel="goldens/simple_table-Data.db.jsonl"
+  make_repo "$dir"
+  make_usable_corpus "$dir/test-data/datasets"
+  git -C "$dir" update-index "$flag" -- "test-data/datasets/$rel"
+  if [ -f "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: the flagged fixture is present on disk (precondition)"
+  else
+    bad "$label: fixture missing before the probe; case is vacuous"
+  fi
+  run_verify "$dir" "$dir/test-data/datasets"
+  if [ "$RC" -eq 0 ]; then
+    ok "$label: an intact checkout carrying a flagged fixture still verifies (exit 0)"
+  else
+    bad "$label: false failure on a PRESENT flagged fixture (exit $RC); output: $OUT"
+  fi
+  case "$OUT" in
+    *"$PROBE_UNMEASURED_MARKER"*) bad "$label: called a present path unmeasurable; output: $OUT" ;;
+    *) ok "$label: no unmeasurable verdict for a path it can see" ;;
+  esac
+  case "$OUT" in
+    *"Tracked-fixture probe (#3310): OK"*) ok "$label: reports the clean verdict" ;;
+    *) bad "$label: no clean verdict; output: $OUT" ;;
+  esac
+}
+flagged_present_case "3310-flagged-present-skip" "$T/case43a-repo" --skip-worktree
+flagged_present_case "3310-flagged-present-assume" "$T/case43b-repo" --assume-unchanged
+
+# === Case 44: rename classification must not depend on ambient config (r3 B2) ==
+# `diff.renames=false` makes a staged rename report as `D` + `A`, so a probe that
+# relies on the DEFAULT being on emits a false missing-fixture error and
+# advertises a repair that REVERSES intentional work. The invocation must pass
+# rename detection explicitly.
+R44="$T/case44-repo"
+make_repo "$R44"
+make_usable_corpus "$R44/test-data/datasets"
+git -C "$R44" config diff.renames false
+git -C "$R44" mv "test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+                 "test-data/datasets/goldens/renamed-Data.db.jsonl"
+if [ "$(git -C "$R44" config --get diff.renames)" = "false" ] \
+   && [ -f "$R44/test-data/datasets/goldens/renamed-Data.db.jsonl" ]; then
+  ok "3310-rename-config: staged rename in place with diff.renames=false (precondition)"
+else
+  bad "3310-rename-config: could not set up the staged rename; case is vacuous"
+fi
+run_verify "$R44" "$R44/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-rename-config: a staged rename is not a missing fixture (exit 0)"
+else
+  bad "3310-rename-config: false missing-fixture report under diff.renames=false (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*) bad "3310-rename-config: reported the renamed-away path as missing; output: $OUT" ;;
+  *) ok "3310-rename-config: no missing-fixture claim for a renamed path" ;;
+esac
+case "$OUT" in
+  *"restore"*"simple_table-Data.db.jsonl"*)
+    bad "3310-rename-config: advertised a repair that would REVERSE the rename; output: $OUT" ;;
+  *) ok "3310-rename-config: advertises no rename-reversing repair" ;;
+esac
+
+# === Case 45: an unresolvable HEAD is UNMEASURABLE, not empty (r3 B3) =========
+# A failing `rev-parse --verify HEAD` does not prove an unborn branch: a corrupt
+# ref fails the same way. Treating both as "no commits" skips the staged-deletion
+# census entirely and can still reach a CLEAN verdict for a state never measured.
+# The corruption here is content-only (no chmod), and it leaves the repository
+# otherwise usable — `rev-parse --show-toplevel` and `ls-files` still work — so
+# the probe really does reach the HEAD decision.
+R45="$T/case45-repo"
+make_repo "$R45"
+make_usable_corpus "$R45/test-data/datasets"
+R45_BRANCH="$(git -C "$R45" symbolic-ref -q HEAD)"
+git -C "$R45" pack-refs --all >/dev/null 2>&1 || true
+rm -f "$R45/.git/packed-refs"
+mkdir -p "$R45/.git/$(dirname "${R45_BRANCH#refs/}" | sed 's|^|refs/|')" 2>/dev/null || true
+printf 'corrupt-not-a-sha\n' >"$R45/.git/$R45_BRANCH"
+if ! git -C "$R45" rev-parse --verify -q HEAD >/dev/null 2>&1 \
+   && git -C "$R45" rev-parse --show-toplevel >/dev/null 2>&1; then
+  ok "3310-head-corrupt: HEAD is unresolvable while the repo still works (precondition)"
+else
+  bad "3310-head-corrupt: could not create the unresolvable-HEAD state; case is vacuous"
+fi
+run_verify "$R45" "$R45/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-head-corrupt: an unresolvable HEAD does not yield a clean run (exit $RC)"
+else
+  bad "3310-head-corrupt: reported success without measuring staged deletions; output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-head-corrupt: reports COULD NOT MEASURE" ;;
+  *) bad "3310-head-corrupt: no unmeasurable verdict; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"Tracked-fixture probe (#3310): OK"*)
+    bad "3310-head-corrupt: printed a clean tracked-fixture verdict; output: $OUT" ;;
+  *) ok "3310-head-corrupt: no clean verdict" ;;
+esac
+
+# === Case 46: a genuinely UNBORN branch is still measurable and clean =========
+# The other side of case 45: the discriminator must not over-fire. A repo with
+# staged fixtures and no commit yet cannot HAVE a deletion relative to HEAD, so
+# the probe must verify normally rather than refusing.
+R46="$T/case46-repo"
+mkdir -p "$R46/test-data/datasets/goldens"
+git -C "$R46" init -q
+git -C "$R46" config user.email test@example.com
+git -C "$R46" config user.name "Test"
+printf 'unborn fixture\n' >"$R46/test-data/datasets/goldens/unborn-Data.db.jsonl"
+git -C "$R46" add -f -- "test-data/datasets/goldens/unborn-Data.db.jsonl"
+make_usable_corpus "$R46/test-data/datasets"
+if ! git -C "$R46" rev-parse --verify -q HEAD >/dev/null 2>&1 \
+   && [ -n "$(git -C "$R46" ls-files -- test-data/datasets)" ]; then
+  ok "3310-head-unborn: unborn HEAD with staged fixtures (precondition)"
+else
+  bad "3310-head-unborn: could not create the unborn state; case is vacuous"
+fi
+run_verify "$R46" "$R46/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-head-unborn: an unborn branch verifies normally (exit 0)"
+else
+  bad "3310-head-unborn: false failure on an unborn branch (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) bad "3310-head-unborn: refused a measurable unborn repo; output: $OUT" ;;
+  *) ok "3310-head-unborn: no unmeasurable verdict" ;;
+esac
+
+# =============================================================================
+# Issue #3310 round 4 — UNCLASSIFIABLE GIT STATE IS DECLARED, NOT CLASSIFIED.
+#
+# Two states defeat the probe's subtree-scoped census, each in a way that would
+# produce a CONFIDENT WRONG REPAIR rather than a wrong verdict:
+#   * a staged rename whose destination leaves the dataset subtree — the census
+#     pathspec hides the destination, so rename detection cannot fire and the old
+#     path looks deleted; the advertised repair would REVERSE intentional work;
+#   * an unmerged (conflict) entry — `ls-files` lists it once per stage, and
+#     `git restore --worktree` cannot rebuild a conflicted path at all, so the
+#     promised repair simply fails.
+# Rather than model each, the probe detects MARKERS of unclassifiable state and
+# emits its existing COULD NOT MEASURE verdict, with NO repair command. An honest
+# unmeasurable beats a confident wrong repair.
+# =============================================================================
+
+# assert_no_repair_advertised <label> — the whole point of the rule: when the
+# probe cannot classify, it must not print a command for anyone to paste.
+assert_no_repair_advertised() {
+  local label="$1" n
+  n="$(printf '%s\n' "$OUT" | grep -cE "git -C .* restore " || true)"
+  if [ "$n" -eq 0 ]; then
+    ok "$label: advertises NO repair command"
+  else
+    bad "$label: advertised $n repair command(s) for a state it cannot classify; output: $OUT"
+  fi
+}
+
+# === Case 47: a staged rename OUT of the dataset subtree ======================
+R47="$T/case47-repo"
+make_repo "$R47"
+make_usable_corpus "$R47/test-data/datasets"
+mkdir -p "$R47/relocated"
+git -C "$R47" mv "test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+                 "relocated/simple_table-Data.db.jsonl"
+if [ -f "$R47/relocated/simple_table-Data.db.jsonl" ] \
+   && [ ! -e "$R47/test-data/datasets/goldens/simple_table-Data.db.jsonl" ]; then
+  ok "3310-rename-out: fixture staged-renamed outside the dataset subtree (precondition)"
+else
+  bad "3310-rename-out: could not stage the boundary-crossing rename; case is vacuous"
+fi
+run_verify "$R47" "$R47/test-data/datasets"
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*)
+    bad "3310-rename-out: called an intentionally relocated fixture MISSING; output: $OUT" ;;
+  *) ok "3310-rename-out: no false missing-fixture report" ;;
+esac
+assert_no_repair_advertised "3310-rename-out"
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-rename-out: declares the state unclassifiable" ;;
+  *) bad "3310-rename-out: no COULD NOT MEASURE verdict; output: $OUT" ;;
+esac
+if [ "$RC" -ne 0 ]; then
+  ok "3310-rename-out: an unclassifiable state is not a clean run (exit $RC)"
+else
+  bad "3310-rename-out: exited 0 on a state it cannot classify; output: $OUT"
+fi
+if [ -f "$R47/relocated/simple_table-Data.db.jsonl" ]; then
+  ok "3310-rename-out: the relocated file is untouched"
+else
+  bad "3310-rename-out: the probe disturbed the renamed file"
+fi
+
+# === Case 48/49: an ABSENT unmerged path — declared, deduplicated, no repair ===
+# Built from a REAL merge conflict (the case-16 idiom), then deleted from disk:
+# `ls-files` lists it once per stage, so a probe that classifies it as an ordinary
+# worktree deletion both duplicates it and promises a repair that cannot work.
+R48="$T/case48-repo"
+make_repo "$R48"
+make_usable_corpus "$R48/test-data/datasets"
+R48_REL="test-data/datasets/goldens/simple_table-Data.db.jsonl"
+R48_BASE="$(git -C "$R48" rev-parse --abbrev-ref HEAD)"
+git -C "$R48" checkout -q -b conflicting-48
+printf 'branch side\n' >"$R48/$R48_REL"
+git -C "$R48" add -f "$R48_REL"
+git -C "$R48" commit -qm "branch side"
+git -C "$R48" checkout -q "$R48_BASE"
+printf 'base side\n' >"$R48/$R48_REL"
+git -C "$R48" add -f "$R48_REL"
+git -C "$R48" commit -qm "base side"
+git -C "$R48" merge -q conflicting-48 >/dev/null 2>&1 || true
+R48_STAGES="$(git -C "$R48" ls-files -u -- "$R48_REL" | wc -l | tr -d ' ')"
+rm -f "$R48/$R48_REL"
+if [ "$R48_STAGES" -gt 1 ] && [ ! -e "$R48/$R48_REL" ]; then
+  ok "3310-unmerged-absent: $R48_STAGES stage entries for an ABSENT path (precondition)"
+else
+  bad "3310-unmerged-absent: could not build the unmerged+absent fixture ($R48_STAGES stages); case is vacuous"
+fi
+run_verify "$R48" "$R48/test-data/datasets"
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-unmerged-absent: declares COULD NOT MEASURE" ;;
+  *) bad "3310-unmerged-absent: no unmeasurable verdict; output: $OUT" ;;
+esac
+assert_no_repair_advertised "3310-unmerged-absent"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-unmerged-absent: does not report a clean run (exit $RC)"
+else
+  bad "3310-unmerged-absent: exited 0 mid-conflict; output: $OUT"
+fi
+# Case 49 (dedup): the path is listed once per STAGE by git; the report must name
+# it exactly once however the verdict was reached.
+R48_MENTIONS="$(printf '%s\n' "$OUT" | grep -o "goldens/simple_table-Data.db.jsonl" | wc -l | tr -d ' ')"
+if [ "$R48_MENTIONS" -eq 1 ]; then
+  ok "3310-unmerged-dedup: the multi-stage path is named exactly once"
+else
+  bad "3310-unmerged-dedup: named $R48_MENTIONS times (stage duplication leaked); output: $OUT"
+fi
+
+# === Case 50: the pre-check must NOT trip on a healthy checkout ===============
+# The false-positive direction. Last round's flagged-present regression showed how
+# easily an over-broad guard reds a good root, and a guard that reds on correct
+# input is the guard people disable.
+R50="$T/case50-repo"
+make_repo "$R50"
+make_usable_corpus "$R50/test-data/datasets"
+run_verify "$R50" "$R50/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-precheck-healthy: a healthy checkout still verifies (exit 0)"
+else
+  bad "3310-precheck-healthy: the pre-check reds a good root (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) bad "3310-precheck-healthy: the pre-check tripped on a healthy checkout; output: $OUT" ;;
+  *) ok "3310-precheck-healthy: the pre-check does not trip" ;;
+esac
+case "$OUT" in
+  *"Tracked-fixture probe (#3310): OK"*) ok "3310-precheck-healthy: the clean verdict is still reached" ;;
+  *) bad "3310-precheck-healthy: no clean verdict; output: $OUT" ;;
+esac
+# ...and a rename that stays INSIDE the subtree is classifiable, so it must not
+# trip the boundary marker either (the pre-check is about the BOUNDARY, not about
+# renames as such — case 44 already pins the diff.renames=false half).
+R50B="$T/case50b-repo"
+make_repo "$R50B"
+make_usable_corpus "$R50B/test-data/datasets"
+git -C "$R50B" mv "test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+                  "test-data/datasets/goldens/renamed-inside-Data.db.jsonl"
+run_verify "$R50B" "$R50B/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-precheck-inside-rename: a rename INSIDE the subtree stays classifiable (exit 0)"
+else
+  bad "3310-precheck-inside-rename: false unmeasurable on an in-subtree rename (exit $RC); output: $OUT"
+fi
 
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"

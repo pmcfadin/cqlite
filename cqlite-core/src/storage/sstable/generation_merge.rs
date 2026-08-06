@@ -358,7 +358,9 @@ pub(super) async fn seek_merge_generations_for_read(
     target_key: &RowKey,
 ) -> Result<Vec<(RowKey, ScanRow)>> {
     use crate::storage::scan_cancel::ScanCancel;
-    use crate::storage::write_engine::merge::build_single_partition_merger_from_readers;
+    use crate::storage::write_engine::merge::{
+        build_single_partition_merger_from_readers, PointAccessRecording,
+    };
 
     // Issue #2063: one operation-level scan-admission permit; ONLY call site is the
     // top-level `scan_partition_clustering`, never nested. Rationale + cancellation
@@ -379,8 +381,16 @@ pub(super) async fn seek_merge_generations_for_read(
                                     // applies (read-time TTL clock captured ONCE), REQUIRED for byte-identity.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let keys = [target_bytes.clone()];
-        let Some(mut merger) =
-            build_single_partition_merger_from_readers(ordered, &keys, &schema, ScanCancel::new())?
+        let Some(mut merger) = build_single_partition_merger_from_readers(
+            ordered,
+            &keys,
+            &schema,
+            ScanCancel::new(),
+            // The executor records this logical access at its own storage
+            // boundary (`StorageEngine::scan_partition_clustering`), so
+            // recording here as well would count one read twice (#2827).
+            PointAccessRecording::CallerRecords,
+        )?
         else {
             return Ok(Vec::new()); // no candidate holds the target
         };

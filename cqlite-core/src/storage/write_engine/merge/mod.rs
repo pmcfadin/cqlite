@@ -105,7 +105,7 @@ mod point_read;
 #[cfg(feature = "write-support")]
 pub use point_read::{
     build_single_partition_merger, build_single_partition_merger_from_readers,
-    build_single_partition_merger_with_registry,
+    build_single_partition_merger_with_registry, PointAccessRecording,
 };
 
 /// Warm/shared-reader k-way merge construction (issue #2346): builds a merger

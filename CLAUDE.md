@@ -318,7 +318,10 @@ guarantees, and on a fleet box it is often a machine-local root (e.g. `/data/dat
 `$PWD/test-data/datasets`. The printed line beats any root remembered from this file. The script
 rejects every unrecognized argument (exit 2) because its default path is destructive
 (`rm -rf` on the dataset root); `--verify-only` probes a root without mutating anything, `--help`
-lists the flags.
+lists the flags. `--verify-only` also **reports** (never repairs) git-tracked fixtures a
+SIGKILLed fetch left deleted: it names them, prints the exact `git restore` one-liner and exits
+non-zero — distinct from the generic "does not hold a usable dataset corpus", and distinct again
+from `NO SUBJECT` (out-of-repo root) and `COULD NOT MEASURE` (census untakeable) (#3310).
 
 **`CQLITE_DATASETS_ROOT` alone is sufficient on every layout (#3131/#3148)** — the corpus root needs
 no `schemas` sibling. The CQL schema fixtures (`test-data/schemas`, 23 committed files incl.
@@ -489,6 +492,187 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   diagnostic whose stated cause names the symptom, not the mechanism. `prompt-content:` accordingly expects
   **every** census code path and subtracts nothing: no key is licensed to tell another which paths to skip.
   Also: **`prompt-content:` never prints a `0/0` PASS** — a key with no subject has no verdict to give.
+  **`prompt-content:` ASKS ONE QUESTION, AND THERE IS NO DELIVERY CLASSIFIER (#3312, owner ruling (4)).** Are
+  the census **CODE** paths present in the prompt the reviewer was sent? **Present ⇒ PASS. Absent ⇒ FAIL,
+  unconditionally**, whatever caused it. The wrapper used to infer HOW roborev delivered the diff — inlined,
+  or by a path to a **transient** `.roborev/roborev-snapshot-<id>/` file it deletes before `--wait` returns,
+  or the delegated tier that ships neither and tells the reviewer to run git itself — and that inference
+  produced **four consecutive High-severity false verdicts, in both directions**: a header set consulted
+  before an oversize marker (a delegated review PASSing on repository-quoted headers), a candidate outliving
+  its block, a real inline delivery under an unrecognised heading producing no evidence, and a block opener
+  keyed on heading text that roborev treats as caller **data**. The instances differed; **the cause did not** —
+  roborev's prompt embeds repository-controlled content (project guidelines/`AGENTS.md`, additional context,
+  previous-review bodies) at column zero, indistinguishable from roborev's own text, so structure inferred
+  from it is spoofable both ways. **No terminating marker exists** (the only structural one was roborev's
+  fenced diff, and repository content can contain fences too), so the owner deleted the inference rather than
+  patch a fifth instance. Gone with it: block detection, heading parsing, fence evidence, `mixed-delivery`,
+  candidate lifetime, the snapshot/delegated distinction, the lexical path binding, snapshot-path extraction,
+  the three `snapshot-*` keys, this key's `NOTICE` verdict and its exemption — so the **affirmation backstop
+  again has no per-key escape hatch**. Every one of the four Highs is now *unexpressible*.
+  **THE ACCEPTED COST, stated because it is real: a snapshot-delivered diff and a vacuous review that
+  received NOTHING are IDENTICAL to the machine** — neither has census paths in its prompt, so both FAIL.
+  What distinguishes them is a **human plus the review's token accounting** (genuine: 398k–649k input /
+  314k–554k cached; vacuous baseline ~18.7k / 0). That trade was chosen over a machine guessing from
+  injectable text.
+  **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
+  credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
+  **dedicated, column-zero line** of a PR comment:
+  `roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>`.
+  **(a)** Human-authorized, never self-applied: a worker or closer may post **one** REQUEST comment —
+  carrying the token accounting — and may never waive its own PR. **(b) Bound to the WHOLE REVIEW SCOPE**,
+  not just the head: **base AND head AND job**, all required and all verified, because the authorizer
+  judged **one** review — so a push, a different base *or a re-run* each need a fresh waiver, and one
+  persistent comment can no longer excuse a later **vacuous** review at the same head. **(c)** It excuses
+  the **ABSENCE verdict ONLY** — never any other cause — and the block still records what was absent, the
+  authorizer, the bound scope and the reason, under a **distinct `WAIVED` token** (so nobody grepping
+  `prompt-content: PASS` reads a waived run as certified) beside a `waiver:` key that names the state even
+  when nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAVAILABLE`, each leaving the FAIL). **(d)** The
+  request carries the token accounting and the authorizer checks it.
+  **AND THE LOOP HAS TO CLOSE, WHICH IT DID NOT (#3312 job 24).** The waiver binds a JOB, but the
+  operator only learns the job id — and the token accounting — from the FINISHED run, and re-running the
+  wrapper to apply a fresh waiver **enqueues a different job**, so the waiver was instantly `STALE`. As
+  first built the break-glass was a **dead letter**: no sequence of actions got a legitimate absence past
+  the gate. The fix is **not** to loosen the binding (dropping `job=` reopens the hole where one comment
+  waives a later *vacuous* review at the same base+head) but to add
+  **`--recheck-job <id>`**: re-decide THAT job's verdict, enqueueing nothing. The job is named
+  **explicitly**, never resolved from base+head, or a re-run could inherit a waiver written for a
+  different review. **A recheck inherits nothing**: `sha-assert` re-compares the record's `git_ref`
+  against this base and head, the record's own review text becomes the transcript so
+  `review-completed`, both vacuity tiers and `findings` are re-asserted from it (no review text ⇒ empty
+  transcript ⇒ fail-closed), and `roborev-exit` reports `SKIP` rather than claiming an exit status for a
+  process that never ran. The block declares **`MODE: recheck (job <id> …; NO review was enqueued)`** and
+  **`recheck-of: <id>`** as its first keys — the way the gate declares `MODE: lite` — so a recheck PASS is
+  legitimate but can never be pasted as evidence of a *fresh* review. Demonstrated end to end: absence
+  FAIL → waiver naming that base/head/job → recheck ⇒ `WAIVED` + `RESULT: PASS`, with zero reviewer
+  invocations; and a recheck of a *different* job stays `STALE`.
+  **The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged**, so
+  field order and value boundaries are enforced and `reason=TODO ` / whitespace-only reasons are refused
+  like their untrimmed forms — per-field extraction had enforced neither.
+  **AND THREE LAYERS STOP THE ARTIFACT BECOMING THE CREDENTIAL — the sharpest instance of this issue's
+  recurring shape.** The first version accepted the marker *anywhere* inside a comment whose newlines had
+  been flattened, and the absence diagnostic **printed a complete marker carrying the live sha** — so
+  pasting the summary block into a PR comment, *the documented practice throughout this repo*, authorized
+  the next run (RED-verified: the pasted block produced `prompt-content: WAIVED … RESULT: PASS`). A quoted
+  example or a waiver *request* self-granted the same way. It is the same defect as prose inside a diff
+  naming its own oracle, which is why the census matcher is column-zero anchored. Now: **(1)** comment line
+  boundaries are preserved and the marker must **BE** the line — an indented, `>`-quoted, bulleted or
+  mid-sentence copy is inert; **(2)** placeholder reasons are refused (an unsubstituted `<…>`, or a bare
+  `why`/`todo`/`tbd` — `claim.sh`'s rule), so a pasted **template** reads `MALFORMED`; **(3)** no emitted
+  diagnostic carries **any part** of the marker — not even the prefix — and points at `--help` instead.
+  **THE UMBRELLA LESSON OF THIS ISSUE, and the most durable thing in it: CONTROL AND DATA MUST NOT SHARE A
+  CHANNEL WHEN THE DATA IS ATTACKER-CONTROLLED (#3312).** Four separate High-severity defects were the same
+  shape, and each individual fix worked while the family kept regenerating — because the shape was never
+  named in one place. The instances, in the order they were found:
+  1. **Prose inside a diff naming its own oracle.** A census path quoted in the reviewed text could satisfy
+     the check that the reviewer *received* that path — which is why the matcher is anchored at COLUMN ZERO
+     (every unified-diff body line carries a leading `+`/`-`/space/`@`/`\`, so body content cannot pose as
+     a header).
+  2. **The wrapper's own diagnostic printing a valid waiver marker** — an artifact that DESCRIBED the escape
+     hatch BECAME it, because summary blocks get pasted into PR comments as a matter of course. Fixed by
+     three layers: an anchored dedicated line, placeholder-reason refusal, and a diagnostic that emits no
+     part of the marker at all.
+  3. **Repository text reproducing roborev's delivery-block markers.** Delivery mode was inferred from
+     prompt text that embeds project guidelines / `AGENTS.md`, so repo content could move a review into an
+     uncertified mode in either direction. No terminating marker existed, so the owner deleted the
+     *classifier* rather than patch a fifth instance of it.
+  4. **A comment body forging its own author record.** Comments were flattened into one stream with an
+     in-band author delimiter, so an unauthorized commenter could name an allowlisted login inside their own
+     body and defeat the allowlist with one control character. Fixed by parsing `gh --json` STRUCTURALLY —
+     author and body stay separate FIELDS of one object — so there is no delimiter to forge.
+  **The generalisation to apply elsewhere:** when a decision is made from a stream that carries both your
+  markers and someone else's payload, the fix is to REMOVE the shared channel (structured data, a separate
+  field, a distinct file), not to choose a rarer delimiter — a rarer delimiter is still forgeable, and each
+  narrowing only postpones the next instance. Where the channel genuinely cannot be separated, anchor the
+  control tokens somewhere the payload provably cannot reach (column zero of a diff), and say in code that
+  this is what the anchor is for.
+  **THE FIFTH VARIATION, AND HOW THE CLASS WAS FINALLY CLOSED (#3312 job 29): AN AUTHORIZATION MUST BE THE
+  SOLE NONBLANK CONTENT OF ITS PR COMMENT.** Leading/trailing blank lines are fine; anything else — prose, a
+  code fence, a quote, an HTML tag, a second sentence — means the comment is **not** an authorization.
+  **FOUR RECOGNISERS WERE TRIED AND SUPERSEDED**, each correct about the case in front of it, and they are
+  named here so nobody reintroduces Markdown parsing thinking it was an oversight:
+  (1) accept the marker **anywhere** in the comment ⇒ a quoted example granted;
+  (2) require it to **be its own line** (column-zero anchor) ⇒ defeated indented, `>`-quoted, bulleted and
+  mid-sentence copies, but not fences;
+  (3) **skip fenced regions** ⇒ a fence preserves column zero, so a quoted example inside one granted;
+  (4) **track fence open/close state** ⇒ a ```` ```bash ```` line *inside* a fence is CONTENT, not a closing
+  delimiter, so the state desynchronised and a later marker granted — and HTML `<pre>`/`<code>` was never
+  covered at all.
+  Every one asked *"is this line DATA or CONTROL?"* of a grammar the **comment author controls**, which has
+  unbounded ways to say "this is data" — so the list of recognisers never closes. **That is this issue's own
+  umbrella lesson applied to itself: remove the shared channel, do not pick a rarer delimiter.** Parsing
+  Markdown to separate data from control *is* sharing a channel. The sole-content rule removes it and is
+  decidable **without parsing anything**: no quoting construct can be the only thing in a comment, because
+  every quoting construct requires additional content.
+  **Cost, and why it is arguably an improvement:** the authorizer posts a comment containing only the marker
+  and puts commentary in a **separate** comment — the token accounting already lives inside `reason=`, so
+  nothing is lost, and an authorization *should* be a clean unambiguous act rather than a sentence buried in
+  prose. **A comment with other content is ignored silently, not reported malformed:** someone documenting
+  the form (this repository's own threads do) never attempted an authorization, and `MALFORMED` would be a
+  false accusation reprinted on every later run. A **marker-only** comment with bad fields is still
+  `MALFORMED`. The `NONE` cause teaches both rules — sole content **and** top-level.
+  **THE WAIVER'S THREAT MODEL, STATED WITH ITS LIMITS (#3312) — and the triage rule that goes with it.**
+  Five consecutive review rounds landed in this one authorization path (marker anchoring, scope binding,
+  author authorization, the parse channel, the enforcer path). Every fix was right, and the pattern predicts
+  more — so the boundary is recorded to stop the next finding being patched instead of triaged.
+  **A HOSTILE INVOKER IS OUT OF SCOPE, by construction.** Whoever runs the wrapper can edit it, replace the
+  scanner file beside it, shadow `gh`/`python3` on `PATH`, or skip the wrapper and hand-write a
+  `==== ROBOREV REVIEW SUMMARY ==== … RESULT: PASS` block into the PR. **No check inside a process defends
+  against the party that controls the process**, and pretending otherwise is the false-assurance shape this
+  issue exists to remove. The merge gate's real protection against a hostile *worker* is the **audit trail
+  plus a human reading the PR**, not the wrapper.
+  **WHAT IT DOES DEFEND, which is why the layers were worth building:** (1) **parties who do not control the
+  invocation** — this is a public repository, anyone can comment, and a failing block *prints* base/head/job,
+  so the allowlist + anchored marker + structured author association are what stop a stranger; (2)
+  **accident and drift**, the larger category in practice — a pasted block, a quoted example, a stale waiver
+  riding to a later review, a re-run inheriting an authorization meant for another job, an unsubstituted
+  placeholder. Every fix in this path landed in (1) or (2).
+  **THE TRIAGE RULE:** *"the INVOKER can bypass this"* ⇒ **out of model — record it, do not patch it**;
+  *"a NON-INVOKER can bypass this"* or *"this can be bypassed BY ACCIDENT"* ⇒ **defect**. Same-host actors
+  able to write these scripts or roborev's database are **invoker-class**, not third parties.
+  **CHEAP HARDENING REMAINS WORTH IT** where an invoker could reach the same end another way: dropping the
+  scanner-path env override cost nothing and closes contexts where the environment is influenced while
+  files are not (a workflow injecting a variable). "Theoretically redundant" never justifies leaving a hole
+  a non-invoker or an accident can walk through.
+  **TWO RESIDUALS INSIDE THE MODEL, named rather than implied:** the marker is read from **top-level PR
+  comments only**, so one posted inside a review body or a review-thread reply is silently not applied (the
+  run reports `waiver: NONE` and the FAIL stands — fail-closed, but it reads as "my waiver was ignored");
+  and **an authorized human can authorize carelessly** — pre-authorizing a job id, or waiving without
+  checking the token accounting. Nothing mechanical detects either; the control is the permanent,
+  attributable comment, which is why a substantive reason is required and recorded verbatim.
+  **AND A SECOND, EQUALLY TRANSFERABLE RULE FROM THE SAME ISSUE: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS
+  OWN ENFORCER (#3312 job 27).** Hardening a check while leaving its *invocation* configurable moves the hole
+  rather than closing it. Concretely: the waiver allowlist was deliberately hard-coded and asserted
+  non-env-derived — *"an override is settable by the party the allowlist constrains"* — and then the **scanner
+  that enforces that allowlist** was made env-settable (`WAIVER_SCAN_TOOL`), so an invoker could point it at a
+  script printing `state=granted` and pass with **no authorized comment anywhere**. The protection had moved
+  outward and been left open. The enforcer is now resolved from the wrapper's own directory with no override
+  and no `${…:-…}` fallback, and the structural assert covers the **invocation** as well as the value.
+  **Corollary for tests:** a case needing a different enforcer **substitutes the artifact** in its own scratch
+  copy of the tree — never a path variable. A test-only seam is one more thing a real invoker can set, so the
+  harness assert forbids reintroducing one (with the needle split so the guard cannot match its own line).
+  **WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (#3312 job 25) — and the correction that produced it.**
+  The comment author used to be *recorded but never authorized*, so on this **public** repository ANY
+  commenter could copy the `base`/`head`/`job` values out of the failing block (they are printed in it)
+  and make the merge gate pass. The residual had been written as *"we cannot distinguish the owner from
+  the worker on a shared `GH_TOKEN`"*, which conflated **cannot enforce perfectly** with **cannot enforce
+  at all** — so absence of a perfect check became absence of ANY check, the same permissive shape this
+  issue is about. Now: the author must be on `ROBOREV_WAIVER_AUTHORS`, hard-coded in
+  `roborev-review-oracles.sh` — **not** a config file and **not** env-overridable, because an override is
+  settable by the party it constrains and one visible location keeps "who may grant" inside the diff a
+  reviewer already reads. A well-formed marker naming this exact review from a non-allowlisted author
+  reports **`waiver: UNAUTHORIZED (...)`** — distinct from `MALFORMED`, because the marker was fine and
+  the author was not.
+  **THE RESIDUAL SURVIVES, NARROWED TO WHAT IS TRUE:** the worker, the closer and the owner all post
+  through the SAME login on this fleet, so nothing here can tell **which allowlisted human** posted a
+  comment. "Only the owner or the coordination lead may GRANT; a worker may only REQUEST" is therefore
+  **process-enforced with an audit trail** at that level — never a claim that authorship is unverifiable
+  in general. **An unenforceable claim gets scoped to what is enforceable, never dropped whole.**
+  **The hang and race classes are NOT REACHABLE because nothing is read — that is weaker than "fixed", and only
+  it is true.** The predicate-family rule survives as **doctrine, not code** (the helper and its lint were
+  deleted with the probes they served, since a lint with an empty subject set greens vacuously): **every
+  `test`/`[` file predicate is two-valued, so it must collapse "cannot tell" onto one of its answers — and it
+  always picks the permissive one.** If a filesystem probe ever returns to that code, this rule obligates the
+  three-valued helper (`verified-absent` / `present` / `unreadable`) to return with it.
   **That is ONE SHAPE, found repeatedly on #3229, so it is now a RULE: a positive verdict requires an
   AFFIRMATIVE MEASUREMENT.** The shape is *a multi-state signal where only the BAD states are tested, so
   every unknown/unmeasured state inherits the PERMISSIVE branch* — a three-state signal took the permissive

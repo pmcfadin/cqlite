@@ -1168,6 +1168,537 @@ guarantee_usable_root() {
   echo "NOTE: checkout-relative — not fetched here and not a sibling of this root (#3148)."
 }
 
+# ---------------------------------------------------------------------------
+# --verify-only tracked-fixture probe (issue #3310) — REPORT ONLY, NEVER REPAIR.
+#
+# The #2878 crash-safe restore covers EXIT/INT/TERM/HUP. SIGKILL outruns all of
+# them, so a killed fetch can leave git-tracked fixtures DELETED on disk with the
+# index still recording them. Recovery does exist — the DESTRUCTIVE path's
+# `restore_tracked_dataset_files missing-only` pre-flight — but `--verify-only`
+# exits above it, so the documented "is my root usable?" probe answered either a
+# clean green (corpus intact, fixtures gone) or the generic "does not hold a usable
+# dataset corpus" (corpus gone too), and neither names the actual damage or its
+# one-line repair. The first diagnostic an agent reaches for therefore misled.
+#
+# DESIGN DECISION, recorded in #3310 and enforced here structurally: this probe
+# REPORTS, it does not repair. `--verify-only` promises to mutate nothing (#3131
+# blocker B2), and a probe that quietly fixed the tree would be a second,
+# unannounced destructive-adjacent path in the one mode operators trust to be
+# inert. It therefore names the files, prints the exact repair command, and exits
+# non-zero; the repair is the operator's (or the next real fetch's) to run.
+# ---------------------------------------------------------------------------
+
+# Locate the (repository, subtree) pair a tracked census would apply to, using the
+# SAME git plumbing as capture_tracked_dataset_files but with NONE of its
+# refusals: every refuse_* there is a statement about a `rm -rf` that this mode
+# never performs, and printing "refusing to replace ..." from a read-only probe
+# would be false. Sets TRACKED_GUARD_REPO/TRACKED_GUARD_REL on success.
+#
+#   0  in-repo — REPO/REL are valid
+#   1  provably OUTSIDE any git work tree; the probe has NO SUBJECT
+#   2  COULD NOT MEASURE; the reason is in TRACKED_PROBE_REASON
+#
+# The reason travels in a GLOBAL rather than on stdout because this function
+# PUBLISHES globals: `reason="$(resolve_tracked_subtree_readonly)"` would run it in
+# a subshell, and TRACKED_GUARD_REPO/REL would be discarded with it — an empty REL
+# then makes the `:(literal)` pathspec match the WHOLE repository, so the probe
+# would census (and report on) every tracked file in the checkout.
+#
+# The `1` verdict is an affirmative proof (git says there is no work tree, or —
+# when git is absent — no ancestor carries a `.git`), never a fallback for an
+# unanswered question: that distinction is the whole point of the `2` verdict.
+TRACKED_PROBE_REASON=""
+resolve_tracked_subtree_readonly() {
+  local dataset_abs probe repo_root repo_root_phys rel
+  TRACKED_PROBE_REASON=""
+  TRACKED_GUARD_REPO=""
+  TRACKED_GUARD_REL=""
+
+  if ! dataset_abs="$(physical_path "${DATASET_ROOT}")"; then
+    TRACKED_PROBE_REASON="could not resolve a physical path for '${DATASET_ROOT}'"
+    return 2
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    if ancestor_has_git_dir "${dataset_abs}"; then
+      TRACKED_PROBE_REASON="git is not installed, but '${dataset_abs}' is inside a git checkout, so its tracked files cannot be enumerated"
+      return 2
+    fi
+    return 1
+  fi
+
+  probe="$(nearest_existing_dir "${dataset_abs}")"
+  if ! repo_root="$(guard_git -C "${probe}" rev-parse --show-toplevel 2>/dev/null)" || [ -z "${repo_root}" ]; then
+    if ancestor_has_git_dir "${dataset_abs}"; then
+      TRACKED_PROBE_REASON="'${dataset_abs}' looks like it is inside a git checkout, but 'git -C ${probe} rev-parse --show-toplevel' reported no work tree"
+      return 2
+    fi
+    return 1
+  fi
+
+  if ! repo_root_phys="$(physical_path "${repo_root}")"; then
+    TRACKED_PROBE_REASON="could not resolve a physical path for the enclosing repository '${repo_root}'"
+    return 2
+  fi
+
+  if ! rel="$(path_relative_inside "${repo_root_phys}" "${dataset_abs}")"; then
+    TRACKED_PROBE_REASON="could not decide whether '${dataset_abs}' is inside the git work tree at '${repo_root_phys}' (probed from '${probe}')"
+    return 2
+  fi
+
+  if [ "${rel}" = "." ]; then
+    TRACKED_PROBE_REASON="'${dataset_abs}' IS the root of the git work tree at '${repo_root_phys}', so a tracked census there would cover the whole repository rather than a fixture subtree"
+    return 2
+  fi
+
+  TRACKED_GUARD_REPO="${repo_root_phys}"
+  TRACKED_GUARD_REL="${rel}"
+  return 0
+}
+
+# True when a repo-relative path lies at or under the captured subtree. Compared
+# COMPONENT-WISE (the trailing slash), so `test-data/datasets-old` is not read as
+# inside `test-data/datasets` — the same rule as path_relative_inside.
+path_under_tracked_rel() {
+  case "$1" in
+    "${TRACKED_GUARD_REL}" | "${TRACKED_GUARD_REL}"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Order-preserving de-duplication of a path list into DEDUPED_PATHS (issue #3310
+# roborev round 4). `git ls-files` reports an UNMERGED path once per stage, so a
+# report built from it can name the same file three times. O(n²) is deliberate:
+# the input is the DELETED/unmerged set, and a portable, obviously-correct loop
+# beats a `sort -zu` pipeline whose NUL support is not universal on macOS.
+DEDUPED_PATHS=()
+dedupe_paths() {
+  local candidate existing seen
+  DEDUPED_PATHS=()
+  for candidate in "$@"; do
+    seen=0
+    for existing in ${DEDUPED_PATHS[@]+"${DEDUPED_PATHS[@]}"}; do
+      if [ "${existing}" = "${candidate}" ]; then
+        seen=1
+        break
+      fi
+    done
+    if [ "${seen}" = 0 ]; then
+      DEDUPED_PATHS+=( "${candidate}" )
+    fi
+  done
+}
+
+# Classify HEAD once, for every consumer of a staged (HEAD-vs-index) diff.
+#   0  HEAD resolves — staged diffs are meaningful
+#   1  CONFIRMED unborn — no commit exists, so no path can be deleted or renamed
+#      RELATIVE TO HEAD; a measured emptiness, not a skipped measurement
+#   2  COULD NOT MEASURE (reason in TRACKED_PROBE_REASON)
+#
+# A failing `rev-parse --verify HEAD` proves nothing on its own: a corrupt ref
+# fails identically to an unborn branch (roborev round 3). Unborn is therefore
+# CONFIRMED — HEAD is a symref to a branch AND that branch does not exist, which
+# `show-ref --verify` reports with exit status exactly 1 ("ref not found"); a
+# corrupt ref exits 128 and an unparseable HEAD fails `symbolic-ref` outright.
+# Exit codes verified against git 2.43 in all three states, not assumed.
+classify_head_state() {
+  local head_ref="" show_ref_rc=0
+  TRACKED_PROBE_REASON=""
+  if guard_git -C "${TRACKED_GUARD_REPO}" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+  if head_ref="$(guard_git -C "${TRACKED_GUARD_REPO}" symbolic-ref -q HEAD 2>/dev/null)" \
+    && [ -n "${head_ref}" ]; then
+    guard_git -C "${TRACKED_GUARD_REPO}" show-ref --verify -q -- "${head_ref}" >/dev/null 2>&1 \
+      || show_ref_rc=$?
+  else
+    show_ref_rc=-1
+  fi
+  if [ "${show_ref_rc}" = 1 ]; then
+    return 1
+  fi
+  TRACKED_PROBE_REASON="HEAD in '${TRACKED_GUARD_REPO}' does not resolve and is NOT a confirmed unborn branch (symbolic-ref gave '${head_ref:-<none>}', show-ref status ${show_ref_rc}) — a corrupt or unreadable ref fails exactly like an unborn one, so staged changes cannot be ruled out"
+  return 2
+}
+
+# ---------------------------------------------------------------------------
+# UNCLASSIFIABLE GIT STATE: DECLARE, DO NOT CLASSIFY (issue #3310, roborev r4).
+#
+# Two states defeat the subtree-scoped census in the same way — not by producing a
+# wrong VERDICT, but by producing a CONFIDENT WRONG REPAIR:
+#   * a staged rename whose destination leaves the dataset subtree. The census
+#     pathspec hides the destination, so rename detection cannot fire and the old
+#     path looks deleted; the advertised "EXACTLY this command" would REVERSE
+#     intentional work.
+#   * an unmerged (conflict) index entry. `git restore --worktree` cannot rebuild a
+#     conflicted path — there is no single stage to restore from — so the promised
+#     repair simply fails, and `ls-files` lists the path once per stage.
+#
+# Modelling each state is how a probe accumulates confident wrong answers, so this
+# instead detects MARKERS of unclassifiable state and hands the verdict to the
+# existing COULD NOT MEASURE path, which prints NO repair command. An honest
+# unmeasurable beats a confident wrong repair.
+#
+# AFFIRMATIVE BY CONSTRUCTION: the clean branch is reached only after both marker
+# scans have RUN and reported nothing. Neither scan's failure is permitted to look
+# like "no marker" — a scan that cannot run returns 2, which is also COULD NOT
+# MEASURE. Nothing here infers classifiability from the absence of trouble.
+#
+#   0  measured: no unclassifiable-state marker under the subtree
+#   1  a marker was found (reason in TRACKED_PROBE_REASON)
+#   2  the pre-check itself could not run (reason in TRACKED_PROBE_REASON)
+# ---------------------------------------------------------------------------
+detect_unclassifiable_git_state() {
+  local scratch record path old new head_rc=0 shown
+  local -a unmerged=()
+  TRACKED_PROBE_REASON=""
+
+  # MARKER 1 — unmerged index entries under the subtree. Index-only, so it needs
+  # no HEAD and runs unconditionally. `-z` (unlike the destructive path's
+  # `ls-files -u` read at the top of this file, which is newline-framed): the
+  # records here are turned into report text, so they must be exact.
+  if ! scratch="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-unmerged.XXXXXX")"; then
+    TRACKED_PROBE_REASON="could not create a scratch file for the unmerged-entry scan"
+    return 2
+  fi
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -u -z -- ":(literal)${TRACKED_GUARD_REL}" >"${scratch}"; then
+    rm -f "${scratch}"
+    TRACKED_PROBE_REASON="'git ls-files -u' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}', so unmerged (conflicted) entries cannot be ruled out"
+    return 2
+  fi
+  # Records are "<mode> <sha> <stage>\t<path>"; the path follows the TAB.
+  while IFS= read -r -d '' record; do
+    case "${record}" in
+      *"$(printf '\t')"*) unmerged+=( "${record#*$'\t'}" ) ;;
+      *)
+        rm -f "${scratch}"
+        TRACKED_PROBE_REASON="unparseable 'git ls-files -u -z' record '${record}' for '${TRACKED_GUARD_REL}'"
+        return 2
+        ;;
+    esac
+  done <"${scratch}"
+  rm -f "${scratch}"
+  if [ "${#unmerged[@]}" -gt 0 ]; then
+    dedupe_paths "${unmerged[@]}"
+    shown="${#DEDUPED_PATHS[@]}"
+    [ "${shown}" -le 5 ] || shown=5
+    TRACKED_PROBE_REASON="${#DEDUPED_PATHS[@]} path(s) under '${TRACKED_GUARD_REL}' have UNMERGED (conflicted) index entries: $(printf '%s; ' "${DEDUPED_PATHS[@]:0:shown}")— a conflicted path has no single stage to restore from, so whether it is present, lost, or mid-resolution cannot be classified and 'git restore --worktree' could not repair it. Resolve or abort the merge first"
+    return 1
+  fi
+
+  # MARKER 2 — a staged rename CROSSING the subtree boundary. Detected on a
+  # WHOLE-REPO staged diff (no pathspec): restricting it to the subtree is exactly
+  # what hides the destination and defeats rename detection, so the marker scan
+  # must look wider than the census does.
+  classify_head_state || head_rc=$?
+  case "${head_rc}" in
+    0) ;;
+    1) return 0 ;;  # unborn: no staged rename can exist relative to a HEAD that does not exist
+    *) return 2 ;;  # TRACKED_PROBE_REASON already set
+  esac
+
+  if ! scratch="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-renames.XXXXXX")"; then
+    TRACKED_PROBE_REASON="could not create a scratch file for the boundary-rename scan"
+    return 2
+  fi
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" --no-optional-locks diff --cached --name-status \
+    --find-renames -z >"${scratch}"; then
+    rm -f "${scratch}"
+    TRACKED_PROBE_REASON="'git diff --cached --name-status' failed in '${TRACKED_GUARD_REPO}', so a rename crossing the '${TRACKED_GUARD_REL}' boundary cannot be ruled out"
+    return 2
+  fi
+  # `--name-status -z` frames a plain change as "<status>\0<path>\0" and a
+  # rename/copy as "R<score>\0<old>\0<new>\0". A truncated record means the framing
+  # is not what is being parsed — refusing to guess is mandatory here.
+  while IFS= read -r -d '' record; do
+    case "${record}" in
+      R* | C*)
+        if ! IFS= read -r -d '' old || ! IFS= read -r -d '' new; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="truncated 'git diff --cached --name-status -z' rename record '${record}' in '${TRACKED_GUARD_REPO}'"
+          return 2
+        fi
+        if path_under_tracked_rel "${old}" && ! path_under_tracked_rel "${new}"; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="a staged RENAME moves '${old}' out of '${TRACKED_GUARD_REL}' to '${new}' — the census is scoped to '${TRACKED_GUARD_REL}', so within that scope the old path is indistinguishable from a deleted fixture, and a repair advertised for it would REVERSE the rename"
+          return 1
+        fi
+        if path_under_tracked_rel "${new}" && ! path_under_tracked_rel "${old}"; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="a staged RENAME moves '${old}' into '${TRACKED_GUARD_REL}' as '${new}' — the census is scoped to '${TRACKED_GUARD_REL}', so the two halves of that rename cannot be related to each other within this scope"
+          return 1
+        fi
+        ;;
+      *)
+        if ! IFS= read -r -d '' path; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="truncated 'git diff --cached --name-status -z' record '${record}' in '${TRACKED_GUARD_REPO}'"
+          return 2
+        fi
+        ;;
+    esac
+  done <"${scratch}"
+  rm -f "${scratch}"
+
+  # Both scans RAN and reported nothing. That — not the absence of an error — is
+  # what licenses the classifying census below.
+  return 0
+}
+
+# The COULD-NOT-MEASURE verdict, textually distinct from both the missing-fixture
+# report and guarantee_usable_root's "does not hold a usable dataset corpus".
+report_unmeasurable_tracked_census() {
+  echo "ERROR: TRACKED-FIXTURE PROBE COULD NOT MEASURE '${DATASET_ROOT}' (issue #3310): $1" >&2
+  echo "ERROR: an unmeasured tracked-fixture census is NOT a clean one, so --verify-only" >&2
+  echo "ERROR: cannot report this root usable. Nothing was created, deleted or restored." >&2
+}
+
+# Print an `ERROR:   git -C <repo> restore <flags> -- <p1> <p2> …` line naming
+# EXACTLY the paths passed to it (issue #3310, roborev blocker 1).
+#
+# The first cut advertised `restore --worktree -- <the whole dataset subtree>`.
+# That is a DESTRUCTIVE one-liner: it reverts every local change under the root,
+# and `--verify-only` returns BEFORE refuse_modified_tracked_dataset_files, so at
+# this point nothing has ruled such a change out — the very silent-revert loss
+# #3245 exists to prevent, re-advertised by the tool that reports it.
+#
+# Every path is %q-quoted (this repo tracks 40 space-bearing paths; an unquoted
+# `spaced name-Data.db.jsonl` becomes two pathspecs, neither of which exists), and
+# the list is NEVER truncated: an elided path would leave the operator with a
+# command that repairs only part of the damage, and the temptation to "fix" that by
+# widening the pathspec back to the subtree is exactly the defect above.
+print_scoped_repair_command() {
+  local flags="$1" line path
+  shift
+  line="ERROR:   git -C $(printf '%q' "${TRACKED_GUARD_REPO}") restore ${flags} --"
+  for path in "$@"; do
+    line="${line} $(printf '%q' "${path}")"
+  done
+  printf '%s\n' "${line}" >&2
+}
+
+# The probe itself. Returns 1 when it must fail the run (fixtures missing, or the
+# census could not be taken), 0 otherwise. Writes only outside the dataset root.
+report_orphaned_tracked_fixtures() {
+  local resolve_rc=0 dataset_abs census_file tracked_count=0
+  local record tag path staged_file staged_present=0 shown=0 precheck_rc head_rc
+  local -a flagged_absent=() worktree_deleted=() staged_deleted=()
+
+  resolve_tracked_subtree_readonly || resolve_rc=$?
+  case "${resolve_rc}" in
+    0) ;;
+    1)
+      # No subject — and said as such. A "0 of 0 clean" verdict here would be a
+      # positive claim about a census that has no subject to take (#3310).
+      echo "Tracked-fixture probe (#3310): NO SUBJECT — '${DATASET_ROOT}' lies outside any git work tree, so no git-tracked fixture can be missing from it"
+      return 0
+      ;;
+    *)
+      report_unmeasurable_tracked_census "${TRACKED_PROBE_REASON}"
+      return 1
+      ;;
+  esac
+
+  # The census needs a scratch file, and --verify-only must not write inside the
+  # root it is probing — resolve_guard_state_dir PROVES a location outside it.
+  if ! dataset_abs="$(physical_path "${DATASET_ROOT}")"; then
+    report_unmeasurable_tracked_census "could not resolve a physical path for '${DATASET_ROOT}'"
+    return 1
+  fi
+  if ! TRACKED_GUARD_STATE_DIR="$(resolve_guard_state_dir "${dataset_abs}")"; then
+    report_unmeasurable_tracked_census "no writable temporary directory (of TMPDIR, /tmp, HOME) could be PROVEN to lie outside '${dataset_abs}', so the census could not be taken without writing inside the root this probe promises not to touch"
+    return 1
+  fi
+
+  # (0) BEFORE classifying anything: refuse to classify a state this probe does not
+  # model (issue #3310, roborev round 4). Both outcomes route to the same
+  # COULD NOT MEASURE verdict, which prints NO repair command.
+  precheck_rc=0
+  detect_unclassifiable_git_state || precheck_rc=$?
+  if [ "${precheck_rc}" != 0 ]; then
+    report_unmeasurable_tracked_census "${TRACKED_PROBE_REASON}"
+    return 1
+  fi
+
+  # (1) The INDEX census, WITH each entry's index flags, and an AFFIRMATIVE
+  # per-path existence test (issue #3310, roborev blocker 2).
+  #
+  # Presence is established by STATTING each indexed path, never inferred from a
+  # count plus the ABSENCE of deletion entries in the status scan: git deliberately
+  # suppresses worktree-change reporting for skip-worktree (tag `S`) and
+  # assume-unchanged (any lowercase tag) entries, so such a file can be genuinely
+  # gone while every status oracle reports clean. Deriving a positive verdict from
+  # the absence of a bad signal is the shape CLAUDE.md flags; `ls-files -v` is the
+  # same oracle capture_tracked_dataset_files already uses against these flags, so
+  # this probe is not weaker than the code sitting above it.
+  if ! census_file="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-census.XXXXXX")"; then
+    report_unmeasurable_tracked_census "could not create a scratch file for the tracked-file census"
+    return 1
+  fi
+  # `--deduplicate` (git >= 2.31) so a path in a merge conflict is not counted once
+  # per stage; older git lacks the option, so retry without it and let the
+  # dedupe_paths pass below cover the difference.
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -v -z --deduplicate -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}" 2>/dev/null; then
+    if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -v -z -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}"; then
+      rm -f "${census_file}"
+      report_unmeasurable_tracked_census "'git ls-files -v' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}'"
+      return 1
+    fi
+  fi
+  # NUL-delimited (`-z`) throughout: this repo tracks 40 space-bearing paths, and a
+  # whitespace-split census would silently miscount or mangle them. Records are
+  # "<tag> <path>"; the tag is a single character, so the path starts at offset 2.
+  while IFS= read -r -d '' record; do
+    tag="${record%% *}"
+    path="${record#* }"
+    tracked_count=$((tracked_count + 1))
+    # PRESENCE IS TESTED FIRST, index flags second (roborev round 3). skip-worktree
+    # and assume-unchanged hide a path from git's STATUS machinery; they do not
+    # stop this direct filesystem test, so a flagged path that demonstrably EXISTS
+    # has a determinable state and is simply PRESENT. Refusing on the flag alone
+    # turned --verify-only red on an intact checkout that merely carries one.
+    #
+    # `-L` as well as `-e`: a tracked symlink whose target is absent is still
+    # PRESENT as a checked-out path, and calling it a missing fixture would be a
+    # false positive.
+    if [ -e "${TRACKED_GUARD_REPO}/${path}" ] || [ -L "${TRACKED_GUARD_REPO}/${path}" ]; then
+      continue
+    fi
+    case "${tag}" in
+      S | [a-z])
+        # ABSENT *and* flagged is the genuinely ambiguous case: for a sparse
+        # checkout the absence is INTENTIONAL, for a lost fixture it is damage, and
+        # git reports neither — nor could `git restore` rebuild a sparse-excluded
+        # path. Undeterminable is COULD NOT MEASURE, never a clean verdict, and
+        # never a fabricated "missing" either.
+        flagged_absent+=( "${path}" )
+        ;;
+      *)
+        worktree_deleted+=( "${path}" )
+        ;;
+    esac
+  done <"${census_file}"
+  rm -f "${census_file}"
+
+  if [ "${#flagged_absent[@]}" -gt 0 ]; then
+    shown="${#flagged_absent[@]}"
+    [ "${shown}" -le 5 ] || shown=5
+    report_unmeasurable_tracked_census "${#flagged_absent[@]} tracked path(s) under '${TRACKED_GUARD_REL}' are ABSENT on disk AND carry index flags that hide their worktree state from git — SKIP-WORKTREE / sparse-checkout excluded (tag 'S') or ASSUME-UNCHANGED (lowercase tag): $(printf '%s; ' "${flagged_absent[@]:0:shown}")— so whether they are legitimately excluded from this checkout or LOST cannot be established, and 'git restore' could not rebuild a sparse-excluded one either. Clear the flags (git update-index --no-skip-worktree --no-assume-unchanged), unsparse the path (git sparse-checkout), or point CQLITE_DATASETS_ROOT outside the affected area"
+    return 1
+  fi
+
+  # (2) STAGED deletions — the class the index walk above structurally cannot see:
+  # `git rm --cached` removes the index entry, so `ls-files` never lists the path.
+  #
+  # Read NUL-delimited, DIRECTLY from git (issue #3310, roborev round 2). The
+  # earlier cut consumed tracked_dataset_dirty_entries, whose git read IS `-z`
+  # (so, measured: space-bearing and non-ASCII paths arrive verbatim — `-z`
+  # disables porcelain's C-quoting) but whose RETURN VALUE is newline-JOINED. That
+  # framing is sound for its own callers, which only count entries and `head -3`
+  # them, and unsound here: a path containing a NEWLINE splits into two records, so
+  # the probe reports a TRUNCATED path and then advertises an "EXACTLY this
+  # command" repair naming a file that does not exist. Every path-reading git
+  # command in this function is therefore `-z`, end to end, with no line framing
+  # anywhere between git and the emitted command.
+  #
+  # `--diff-filter=D` over HEAD..index is exactly the porcelain `D ` class, and
+  # `--find-renames` is passed EXPLICITLY (roborev round 3): rename detection is
+  # only the default, so `diff.renames=false` in a repo or user config would make a
+  # staged rename report as `D` — a false missing-fixture error whose advertised
+  # repair would REVERSE the rename. A correctness property may not depend on
+  # ambient configuration.
+  head_rc=0
+  classify_head_state || head_rc=$?
+  if [ "${head_rc}" = 2 ]; then
+    report_unmeasurable_tracked_census "${TRACKED_PROBE_REASON}"
+    return 1
+  fi
+  if [ "${head_rc}" = 1 ]; then
+    # CONFIRMED unborn (classify_head_state proves it rather than inferring it from
+    # a failed rev-parse): no commit exists, so no path can be deleted RELATIVE TO
+    # HEAD. A measured emptiness, not a skipped measurement.
+    :
+  else
+    if ! staged_file="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-staged.XXXXXX")"; then
+      report_unmeasurable_tracked_census "could not create a scratch file for the staged-deletion scan"
+      return 1
+    fi
+    if ! guard_git -C "${TRACKED_GUARD_REPO}" --no-optional-locks diff --cached --name-only \
+      --find-renames --diff-filter=D -z -- ":(literal)${TRACKED_GUARD_REL}" >"${staged_file}"; then
+      rm -f "${staged_file}"
+      report_unmeasurable_tracked_census "'git diff --cached --diff-filter=D' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}', so staged deletions cannot be ruled out"
+      return 1
+    fi
+    while IFS= read -r -d '' path; do
+      if [ ! -e "${TRACKED_GUARD_REPO}/${path}" ] && [ ! -L "${TRACKED_GUARD_REPO}/${path}" ]; then
+        staged_deleted+=( "${path}" )
+      else
+        staged_present=$((staged_present + 1))
+      fi
+    done <"${staged_file}"
+    rm -f "${staged_file}"
+  fi
+
+  # Defensive de-duplication of both report arrays (roborev round 4). The
+  # `--deduplicate` census above covers the stage-duplication case on git >= 2.31;
+  # this covers the fallback, and makes "named exactly once" a property of the
+  # REPORT rather than of a git version.
+  if [ "${#worktree_deleted[@]}" -gt 0 ]; then
+    dedupe_paths "${worktree_deleted[@]}"
+    worktree_deleted=( ${DEDUPED_PATHS[@]+"${DEDUPED_PATHS[@]}"} )
+  fi
+  if [ "${#staged_deleted[@]}" -gt 0 ]; then
+    dedupe_paths "${staged_deleted[@]}"
+    staged_deleted=( ${DEDUPED_PATHS[@]+"${DEDUPED_PATHS[@]}"} )
+  fi
+
+  if [ "${#worktree_deleted[@]}" -gt 0 ] || [ "${#staged_deleted[@]}" -gt 0 ]; then
+    shown=$(( ${#worktree_deleted[@]} + ${#staged_deleted[@]} ))
+    echo "ERROR: TRACKED FIXTURES MISSING under '${TRACKED_GUARD_REL}' (issue #3310): ${shown} git-tracked" >&2
+    echo "ERROR: file(s) recorded in git are DELETED on disk. This is NOT the 'does not hold a" >&2
+    echo "ERROR: usable dataset corpus' condition — the fetched corpus may be perfectly fine." >&2
+    echo "ERROR: A fetch killed with SIGKILL outruns the #2878 EXIT/INT/TERM/HUP restore and" >&2
+    echo "ERROR: leaves exactly this state." >&2
+    echo "ERROR: --verify-only REPORTS ONLY (issue #3310): nothing was created, deleted or" >&2
+    echo "ERROR: restored. Repair with EXACTLY the command(s) below — each names only the" >&2
+    echo "ERROR: paths that are actually missing, so nothing else in your tree is touched." >&2
+    if [ "${#worktree_deleted[@]}" -gt 0 ]; then
+      echo "ERROR: ${#worktree_deleted[@]} deleted from the WORKTREE (still in the index):" >&2
+      for path in "${worktree_deleted[@]}"; do
+        echo "ERROR:   ${path}" >&2
+      done
+      print_scoped_repair_command "--worktree" "${worktree_deleted[@]}"
+    fi
+    if [ "${#staged_deleted[@]}" -gt 0 ]; then
+      # A staged deletion has NO index entry left, so `restore --worktree` alone has
+      # nothing to rebuild from and silently no-ops; `--staged` puts the HEAD entry
+      # back first. Emitted as its OWN command so the worktree class is not widened
+      # to `--staged` (which would also unstage unrelated intentional removals).
+      echo "ERROR: ${#staged_deleted[@]} deleted from the INDEX and the worktree (staged deletion):" >&2
+      for path in "${staged_deleted[@]}"; do
+        echo "ERROR:   ${path}" >&2
+      done
+      print_scoped_repair_command "--staged --worktree" "${staged_deleted[@]}"
+    fi
+    return 1
+  fi
+
+  # A measured signal is never dropped silently: a staged deletion whose content is
+  # still on disk is NOT a missing fixture (nothing is absent), but it is the state
+  # in which a fetch would lose that content for good (#3245), so it is reported.
+  if [ "${staged_present}" -gt 0 ]; then
+    echo "NOTE: ${staged_present} tracked path(s) under '${TRACKED_GUARD_REL}' carry a STAGED DELETION but their content is still on disk — nothing is missing, but a fetch would delete content the index can no longer rebuild (#3245)"
+  fi
+
+  if [ "${tracked_count}" -eq 0 ]; then
+    echo "Tracked-fixture probe (#3310): NO SUBJECT — the git work tree at '${TRACKED_GUARD_REPO}' tracks no file under '${TRACKED_GUARD_REL}', so none can be missing"
+    return 0
+  fi
+
+  echo "Tracked-fixture probe (#3310): OK — all ${tracked_count} git-tracked file(s) under '${TRACKED_GUARD_REL}' are present on disk (each stat'ed individually)"
+  return 0
+}
+
 # --verify-only (issue #3131): report whether the resolved root is usable and print the
 # guaranteed export line, WITHOUT downloading, extracting, removing or re-pinning
 # anything. Two reasons this exists rather than being a pure internal:
@@ -1181,6 +1712,11 @@ guarantee_usable_root() {
 # script, before any filesystem work; canonicalize_dataset_root honors VERIFY_ONLY by
 # never creating the parent directory.
 if [ "${VERIFY_ONLY}" = 1 ]; then
+  # BEFORE guarantee_usable_root, deliberately (issue #3310): with the corpus also
+  # gone, the content check would exit first and answer "root unusable", sending an
+  # operator to a re-fetch instead of to the one-line restore. The more specific
+  # diagnosis has to be the one that speaks.
+  report_orphaned_tracked_fixtures || exit 1
   guarantee_usable_root "verify-only (no download, no extraction)"
   exit 0
 fi

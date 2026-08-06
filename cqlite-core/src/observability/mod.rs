@@ -58,6 +58,7 @@ pub mod config;
 mod error_schema;
 pub mod operator_docs;
 mod operator_docs_annotations;
+pub mod partition_access;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
@@ -68,6 +69,10 @@ use crate::error::{Error, Result};
 
 #[cfg(feature = "observability")]
 mod otel;
+
+// Instrument construction, split from `otel.rs` per the campsite rule (#1116).
+#[cfg(feature = "observability")]
+mod otel_instruments;
 
 #[cfg(feature = "observability")]
 pub use otel::{init, tracing_layer, ObservabilityGuard};

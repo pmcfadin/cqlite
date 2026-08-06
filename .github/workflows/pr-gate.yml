@@ -149,6 +149,24 @@ jobs:
           "flight dockerfile rust-pin"
           -- bash scripts/ci/check-dockerfile-rust-pin.sh
 
+      # Corpus-safety guard for the DESTRUCTIVE dataset fetch (issues #2878 /
+      # #3245 / #3310). It ran only in the local agent gate and the nightly deep
+      # check, so `required` did not pin it on a PR that edits
+      # test-data/scripts/fetch-datasets.sh — the one file whose regressions
+      # `rm -rf` an operator's checkout. Enrolled HERE, in the required gate's own
+      # compute job, rather than in ci.yml's `flow-tooling-tests` (that job is
+      # `ci:broad`-label-gated AND ci.yml is a registry `exempt:` workflow, so it
+      # can never gate a merge) and rather than as a new tier in
+      # .github/ci-gating-tiers.yml (a whole new always-emitting context, plus the
+      # base-ref property that a registry entry cannot certify itself). Hermetic:
+      # no network, no dataset, ~10s.
+      - name: Dataset-fetch tracked-fixture guard (#2878/#3245/#3310)
+        if: steps.classify.outputs.docs_only != 'true'
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "dataset fetch tracked-fixture guard"
+          -- bash scripts/tests/test_fetch_datasets_tracked_guard.sh
+
       - name: Setup Rust
         if: steps.classify.outputs.docs_only != 'true'
         uses: ./.github/actions/setup-rust-ci

@@ -341,7 +341,7 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
 | M10 → #2824 | RESPEC #1518-adjacent (NEW) | `madvise(WILLNEED)` under Auto-mmap + `MADV_DONTNEED` post-scan | P3 | M0 (re-measure) |
 | M11 → #2825 | NEW | T4 byte-bounded batch sizing | P2 | — |
 | M12 → #2826 | NEW | T1+T2 bulk `ArrowToTrino` per-column copy + async prefetch | P3 | M2/M3 (post-server) |
-| M13 → #2827 | NEW | Keyed access-distribution probe | P2 | — |
+| M13 → #2827 | NEW | Keyed access-distribution probe: instrument + decision procedure (re-scoped; verdict lands with a real keyed workload — scoped to BTI and BIG-with-resident-index, see §M13) | P2 | — |
 | M14 → #2828 | NEW (config) | Chunk-cache `block_cache.max_size` retune for 512Mi pod | P2 | — |
 | M15 → #2605 | EXTEND #2605 | Sharpen the DataFusion PoC measurement | P2 | — |
 | M16 → #2165 | RE-SCOPE #2165 | Decode-plane consolidation only (not a throughput lever) | P3 | — |
@@ -501,12 +501,29 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   ~0.05% of the per-batch cycle). **Dep:** M2/M3 — sequenced LAST. **Dedup:** NEW connector surface
   (AE #1470 is the server-side sibling); it is a **bulk copy**, not zero-copy.
 
-- **M13 (#2827) — keyed access-distribution probe (NEW, P2).** Instrument the field keyed partition access
-  distribution (skew/Zipf over existing `cqlite.read.partition_lookup.*`). *Accept:* reports the
-  hot-set concentration for the field keyed workload at A2-scale qps; **decides** whether a
-  64–128MiB decoded-partition cache clears a useful hit ratio. **Dep:** none — standalone, decoupled
-  from #2037. **Dedup:** NEW; it is the **gate** for the K-A decoded-cache build (which stays
-  reconciled with #2037 WS6, not filed standalone).
+- **M13 (#2827) — keyed access-distribution probe: instrument + decision procedure (NEW, P2).**
+  **RE-SCOPED (2026-08-06).** Delivers **the instrument and the procedure, not the field number.**
+  A bounded, default-OFF partition repeat-access histogram (`cqlite.read.partition_access.*`, six
+  buckets `1|2|3-4|5-8|9-16|17+`, fixed 3 MiB, no per-key attribute — the originally-planned
+  skew-from-`partition_lookup.*` method is impossible, since that counter carries only bounded
+  attributes and per-key labels are forbidden), plus MEASURED distinct-partition working-set bytes
+  and a committed decision procedure at `docs/research/decoded-partition-cache-decision.md`.
+  *Accept:* reports the hot-set concentration shape of whatever workload runs with the probe
+  enabled — the **verdict lands with a real keyed workload**, with no further analysis round.
+  **That is SCOPED, not universal:** it holds for BTI and for BIG whose `Index.db` is already
+  resident. The probe will not materialize an index to answer (that would defeat #2412's lazy
+  Summary-guided open and change the process memory profile), so a Summary-guided BIG window is
+  REFUSED rather than priced — as are a non-census window and one with a non-zero `unavailable`
+  fraction. All three fail SAFE (a refusal is never a false "go"), but the FIRST window may be
+  refused. Separately, `H_max` is an ESTIMATE under a stated ranking heuristic, not a ceiling, and
+  **#3340 must land before any go/no-go verdict is derived from a real production window.**
+  **NOT delivered:** the field skew number and the 64–128 MiB go/no-go. That AC is **not satisfied
+  and not waived** — it is blocked solely by the absence of a field keyed workload with captured
+  concentration (`docs/research/phase2-verify-caching.md:214-216`); the only keyed loadtest on record
+  is ~0.9 qps with no reported concentration. A synthetic Zipf sweep was rejected as a circular
+  oracle. **Dep:** none — standalone, decoupled from #2037. **Follow-up:** #3330 (keyed loadgen mode,
+  the natural driver). **Dedup:** NEW; it is an **input** to the K-A decoded-cache decision, not the
+  gate for it (#2037 WS6 stays owner-gated).
 
 - **M14 (#2828) — chunk-cache retune (NEW config, P2).** Retune `block_cache.max_size` (256MiB default =
   `max_memory/4`) down for the 512Mi Flight/Trino pod; confirm cqlite-flight currently inherits the

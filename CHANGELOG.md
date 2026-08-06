@@ -89,6 +89,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (API):** `storage::write_engine::build_single_partition_merger_from_readers`
+  takes a required 5th argument,
+  `PointAccessRecording::{Record, CallerRecords}`, selecting whether THAT call records
+  the partition access for the #2827 access-distribution probe. Migration: pass
+  `PointAccessRecording::CallerRecords` when an enclosing layer already records the
+  logical read at its own boundary (what the core executor's multi-generation targeted
+  read does, via `generation_merge`), or `PointAccessRecording::Record` when the call
+  IS the logical point-read boundary (what the Flight warm point path does). Rows,
+  ordering and probe behaviour are otherwise unchanged, and the argument is inert
+  unless the default-OFF probe is enabled.
+  - **No defaulted compatibility wrapper is provided, deliberately.** The two in-tree
+    callers pass OPPOSITE values by design, so any default would be wrong for one of
+    them — silently double-counting a logical read on one path or dropping it on the
+    other. Both failures corrupt the histogram the probe exists to produce, and a
+    dropped or duplicated access biases the derived cache verdict. Making the choice
+    explicit at the call site is the whole point of the parameter, so a 4-argument
+    wrapper would reintroduce exactly the hazard it removes (#2827).
 - `BtiRowIndexHeader::trie_root` is now
   `Result<ValidatedRowsTrieRoot, RowsTrieRootRejection>` instead of a bare `usize`, so
   an unvalidated row-index root cannot be traversed by accident; use

@@ -32,6 +32,10 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
+# The structured waiver scanner the wrapper delegates to (#3312 job 26). Defined HERE, beside
+# WRAPPER, because run_wrapper passes it on every call — the structural section is too late.
+SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
+TEST_SELF="$SCRIPT_DIR/$(basename "$0")"
 # The two sourced halves, named ONCE here because several cases probe a function DIRECTLY rather
 # than through the wrapper. `WRAPPER` is reassigned later by the gate-mock cases; these are not.
 CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
@@ -241,6 +245,11 @@ emit_job_object() {
   if [ -n "${STUB_VERDICT_FIELD:-}" ]; then
     extra="$extra,\"verdict\":\"${STUB_VERDICT_FIELD}\""
   fi
+  # The review TEXT the record carries (#3312 job 24). On the JOB row as well as the review row, so every
+  # payload shape a recheck may read from carries it, exactly as roborev's own payloads do.
+  if [ -n "${STUB_RECORD_OUTPUT:-}" ]; then
+    extra="$extra,\"${STUB_RECORD_OUTPUT_FIELD:-output}\":\"${STUB_RECORD_OUTPUT}\""
+  fi
   printf '{"id":%s,"git_ref":"%s","status":"%s","model":"%s","requested_model":"%s","prompt":"%s"%s}' \
     "${STUB_PAYLOAD_JOB:-${STUB_JOB:-4600}}" \
     "$git_ref" \
@@ -278,11 +287,14 @@ case "$cmd" in
     esac
     record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_SHOW_JSON:-object}" != none ] || { printf 'null\n'; exit 0; }
+    # STUB_RECORD_OUTPUT is the review TEXT the record carries — what a recheck re-asserts
+    # `review-completed`, the vacuity tiers and `findings` against (#3312 job 24). Empty means the record
+    # has none, which a recheck must read as "not re-establishable" rather than inherit.
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
       # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
       # `id` (equal to the job id) that NESTS the job row under a "job" key.
-      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
+      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"%s":"%s","prompt":"%s","job":' \
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -307,6 +319,60 @@ case "$cmd" in
 esac
 STUB
 chmod +x "$stubbin/roborev"
+
+# ===== THE `gh` STUB (#3312 owner ruling (4)) =====
+# The wrapper reads the absence waiver from ONE call — `gh pr view --json comments --jq '<program>'` —
+# so the stub reproduces that call's OUTPUT rather than re-implementing jq: one line per comment,
+# `<login><TAB><body, newlines flattened to spaces>`. `STUB_GH_RC` makes it exit non-zero, which is the
+# single state covering "no PR for this branch", "no auth" and "API error" — all of which must leave the
+# absence FAILing.
+# ===== THE `gh` STUB RETURNS JSON, because the wrapper now decides STRUCTURALLY (#3312 job 26) =====
+# The wrapper asks for raw `gh pr view --json comments` and hands the JSON to
+# scripts/flow/roborev-waiver-scan.py, so author and body stay separate FIELDS all the way to the
+# decision — there is no in-band delimiter to forge. The stub therefore has to produce that shape.
+#
+# FIXTURE AUTHORING: `STUB_GH_COMMENTS` keeps the compact `<SOH><login>` + body-lines form, which the
+# stub CONVERTS to JSON. That form is a convenience of the test double, NOT a channel the wrapper reads.
+# A case that needs a body containing a literal SOH line — the forgery fixture — sets
+# `STUB_GH_COMMENTS_JSON` and passes JSON through verbatim, so nothing in the fixture layer can turn a
+# forged body line into a separate comment and accidentally test the harness instead of the code.
+cat >"$stubbin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >>"${STUB_INVOKED:-/dev/null}"
+if [ "${STUB_GH_RC:-0}" -ne 0 ]; then
+  printf 'gh: simulated failure\n' >&2
+  exit "${STUB_GH_RC}"
+fi
+if [ -n "${STUB_GH_COMMENTS_JSON:-}" ]; then
+  printf '%s\n' "$STUB_GH_COMMENTS_JSON"
+  exit 0
+fi
+if [ -n "${STUB_GH_COMMENTS_FILE:-}" ] && [ -f "${STUB_GH_COMMENTS_FILE}" ]; then
+  STUB_GH_SRC=$(cat "${STUB_GH_COMMENTS_FILE}")
+else
+  STUB_GH_SRC=$(printf '%b' "${STUB_GH_COMMENTS:-}")
+fi
+printf '%s' "$STUB_GH_SRC" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+comments = []
+author = None
+body = []
+for line in raw.split("\n"):
+    if line.startswith("\u0001"):
+        if author is not None:
+            comments.append({"author": {"login": author}, "body": "\n".join(body)})
+        author = line[1:]
+        body = []
+    elif author is not None:
+        body.append(line)
+if author is not None:
+    comments.append({"author": {"login": author}, "body": "\n".join(body)})
+json.dump({"comments": comments}, sys.stdout)
+'
+exit 0
+GHSTUB
+chmod +x "$stubbin/gh"
 
 # The structured-payload cases need python3 (the wrapper decodes the doubly-encoded
 # token_usage with it). Loud SKIP, never a silent pass, matching the gate's other
@@ -782,6 +848,12 @@ assert_tracked_mode() { # assert_tracked_mode <label> <work> <ref> <path> <want-
 # range_ref <work>: the git_ref shape a RANGE review records, "<base40>..<head40>".
 range_ref() { printf '%s..%s' "$(git -C "$1" rev-parse "${2:-origin/main}")" "$(git -C "$1" rev-parse HEAD)"; }
 
+# The wrapper's own temp directory for fixture runs. It MUST exist: the census's mode probe uses `mktemp`
+# under $TMPDIR, and a missing directory makes that probe fail — which the census correctly reports as an
+# UNMEASURABLE mode and fails closed on, i.e. every fixture run would abort pre-enqueue (measured).
+WRAPPER_TMP="$tmp/wrapper-tmp"
+mkdir -p "$WRAPPER_TMP"
+
 CASE_N=0
 OUT=""
 RC=0
@@ -793,6 +865,9 @@ mkdir -p "$FIXTURE_HOME"
 # FAULT-INJECT one git subcommand (#3229 round-14: `git ls-tree` failing is the only way to reach
 # the UNMEASURABLE state end-to-end). Empty for every other case, and every user restores it.
 WRAPPER_PATH_PREFIX=""
+# An OPTIONAL TMPDIR override for the single case that must exercise a hostile TMPDIR (one resolving
+# INSIDE the reviewed repo). Every other run gets the per-process capture parent.
+WRAPPER_TMPDIR=""
 
 run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   local work="$1"; shift
@@ -808,6 +883,14 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   CASE_N=$((CASE_N + 1))
   OUT="$tmp/out-$CASE_N.txt"
   INVOKED="$tmp/invoked-$CASE_N.txt"
+  # The observer writes beside the transcript, so the stub is told which record to wait on (FIX 4).
+  WRAPPER_LOG_PATH="$tmp/transcript-$CASE_N.txt"
+  for _rw_i in $(seq 1 $#); do
+    if [ "${!_rw_i}" = "--log" ]; then
+      _rw_next=$((_rw_i + 1))
+      WRAPPER_LOG_PATH="${!_rw_next}"
+    fi
+  done
   : >"$INVOKED"
   # The sanctioned invocation reviews the RANGE <base>..HEAD, so the job record's
   # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
@@ -817,6 +900,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+    TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
@@ -925,6 +1009,17 @@ export STUB_PAYLOAD_JOB=''
 export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
+# #3312 (owner ruling (4)): the WAIVER knobs. There are no snapshot knobs any more — nothing reads a
+# snapshot and nothing classifies delivery mode, so the lifecycle fixtures went with the machinery.
+# STUB_GH_COMMENTS is what the `gh` stub prints for `gh pr view --json comments`: one line per comment,
+# `<login><TAB><flattened body>`, exactly the shape the wrapper's `--jq` produces. STUB_GH_RC makes the
+# `gh` call FAIL, which is how "no PR / no auth / API error" is exercised.
+export STUB_RECORD_OUTPUT=''
+export STUB_RECORD_OUTPUT_FIELD=''
+export STUB_GH_COMMENTS=''
+export STUB_GH_COMMENTS_JSON=''
+export STUB_GH_COMMENTS_FILE=''
+export STUB_GH_RC=0
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -942,6 +1037,12 @@ reset_stub() {
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
+  STUB_RECORD_OUTPUT=''
+  STUB_RECORD_OUTPUT_FIELD=''
+  STUB_GH_COMMENTS=''
+  STUB_GH_COMMENTS_JSON=''
+  STUB_GH_COMMENTS_FILE=''
+  STUB_GH_RC=0
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -2405,7 +2506,7 @@ run_wrapper "$work"
 assert_verdict 'case (n)' FAIL 1
 assert_says 'case (n) prompt-content FAIL counts the absent paths' '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
 assert_says 'case (n) names the missing path' '^  main\.rs$'
-assert_says 'case (n) says the reviewer never received the diffs' 'the reviewer never received their diffs'
+assert_says 'case (n) says the reviewer never received the diffs' 'nothing establishes that the reviewer received their diffs'
 assert_says 'case (n) every other check passed' '^vacuity-tier1: PASS$'
 assert_says 'case (n) review-completed still PASS' '^review-completed: PASS$'
 
@@ -2885,7 +2986,7 @@ run_wrapper "$work"
 assert_verdict 'case (x1)' FAIL 1
 assert_says 'case (x1) prompt-content names the uncovered code path' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
 assert_says 'case (x1) lists the missing file' '^  alpha\.rs$'
-assert_says 'case (x1) says the reviewer never received the diffs' 'the reviewer never received their diffs'
+assert_says 'case (x1) says the reviewer never received the diffs' 'nothing establishes that the reviewer received their diffs'
 assert_says 'case (x1) the range itself verified fine' '^sha-assert: PASS$'
 
 printf '== case (x3): a range anchored at the EMPTY TREE FAILs (two-positional form) ==\n'
@@ -3237,6 +3338,668 @@ for pair in "--agent codex" "--model gpt-5.6-sol"; do
   assert_never_enqueued "usage: '$pair'"
 done
 
+# =============================================================================================
+# (wv*) ONE QUESTION, NO CLASSIFIER — AND A HUMAN-AUTHORIZED WAIVER (issue #3312, ruling (4))
+# =============================================================================================
+# WHAT THIS FAMILY REPLACED, so nobody rebuilds it. The wrapper used to infer HOW roborev delivered
+# the diff — inline, or by a path to a transient snapshot file, or the delegated tier that ships
+# neither — and this file used to carry ~20 cases pinning that inference. FOUR consecutive review
+# rounds each found a High-severity false verdict in it, in both directions, and every one had the
+# same cause: structure inferred from prompt text that embeds repository-controlled content. The
+# owner deleted the inference. So there is nothing here about blocks, headings, fences,
+# mixed-delivery, candidate lifetime or snapshot paths: those states no longer exist to be tested.
+#
+# WHAT IS PINNED NOW: present ⇒ PASS, absent ⇒ FAIL whatever the prompt looks like, and the ONLY way
+# past an absence is a waiver comment that names THIS head sha and a reason — with every non-granting
+# state (none / stale / malformed / unavailable) leaving the FAIL in place under its own name, and the
+# waiver unable to touch any other verdict.
+w_work=$(make_fixture case_w two-code-commits)
+w_head=$(git -C "$w_work" rev-parse HEAD)
+w_base=$(git -C "$w_work" rev-parse origin/main)
+
+printf '== (wv1) a prompt naming a snapshot path is NOT special: an absent census path FAILs ==\n'
+# The shape that used to produce an exempted NOTICE. There is no snapshot mode any more, so this is
+# just a prompt whose census paths are absent — a FAIL, and no `waiver:` grant.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT='Review the change.\n\n### Combined Diff\n\n(Diff too large to include inline)\nRead the diff from: `'"$w_work"'/.roborev/roborev-snapshot-157393586/roborev-snapshot-content.diff`'
+run_wrapper "$w_work"
+assert_verdict 'case (wv1)' FAIL 1
+assert_says 'case (wv1) absence is a FAIL, with no delivery-mode excuse' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (wv1) the machine says it cannot tell WHY they are absent' \
+  'THE MACHINE CANNOT TELL WHY THEY ARE ABSENT'
+# LAYER 3 (job 23): the diagnostic points at --help and carries NO part of the marker, because a summary
+# block pasted into a PR comment would otherwise authorize the next run — which is how it self-granted.
+assert_says 'case (wv1) the diagnostic points at --help instead of printing a marker' \
+  'THE EXACT MARKER FORM IS DELIBERATELY NOT PRINTED HERE'
+assert_lacks 'case (wv1) and no part of the marker appears anywhere in the output' 'roborev-waive'
+assert_says 'case (wv1) it names the review scope a waiver would have to bind' \
+  "base $w_base, head $w_head, job 4656"
+assert_says 'case (wv1) the NONE cause names the SHAPE requirement (job 29)' \
+  'the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment'
+assert_says 'case (wv1) and it names the contexts that do not count' \
+  'a marker inside prose, a code fence, a quote or a review body is not read'
+assert_says 'case (wv1) the waiver state is reported as NONE' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+assert_lacks 'case (wv1) no NOTICE verdict exists for this key any more' '^prompt-content: NOTICE'
+assert_lacks 'case (wv1) and no snapshot keys are emitted' '^snapshot-'
+reset_stub
+
+printf '== (wv2) the delegated oversize tier FAILs too, with quoted headers present ==\n'
+# The job-20 shape: roborev ships neither a diff nor a path, and repository content quotes headers
+# that cover the census. Under the classifier this needed an ordering fix to avoid a PASS. Now the
+# quoted headers ARE the prompt content, so they satisfy the one question that is asked — which is
+# why the honest answer is that this case is no longer distinguishable, and the block says so.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT='## Project Guidelines\nExample header:\ndiff --git a/alpha.rs b/alpha.rs\n\n### Combined Diff\n\n(Diff too large to include inline)\nFor Codex, inspect locally with `git diff HEAD~1`.'
+run_wrapper "$w_work"
+assert_verdict 'case (wv2)' FAIL 1
+assert_says 'case (wv2) the path the prompt never carried is still absent' \
+  '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_says 'case (wv2) and names it' '^  beta\.rs$'
+reset_stub
+
+printf '== (wv3) present ⇒ PASS, and the waiver key has no subject so it is ABSENT ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT='### Combined Diff\n\ndiff --git a/alpha.rs b/alpha.rs\n@@ x @@\ndiff --git a/beta.rs b/beta.rs\n@@ y @@'
+run_wrapper "$w_work"
+assert_verdict 'case (wv3)' PASS 0
+assert_says 'case (wv3) the certification spelling is unchanged' \
+  '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_lacks 'case (wv3) no waiver was looked for, so no waiver key is printed' '^waiver:'
+assert_lacks 'case (wv3) and gh was never called' '^gh '
+reset_stub
+
+printf '== (wv4) a GRANTED waiver: WAIVED, RESULT PASS, and the provenance is recorded ==\n'
+# (a)+(c): a human-authored PR comment naming THIS head excuses the absence — and the block records
+# what was absent, who authorized it, for which sha and why. Never silence.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered, 541k input / 472k cached\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv4)' PASS 0
+assert_says 'case (wv4) the verdict token is WAIVED, not PASS' \
+  "^prompt-content: WAIVED \(2/2 code census paths absent — authorized by @pmcfadin for base=$w_base head=$w_head job=4656\)\$"
+assert_lacks 'case (wv4) a waived run must NOT read as a certification' '^prompt-content: PASS'
+assert_says 'case (wv4) the waiver key records author, the whole scope and the reason' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=snapshot-delivered, 541k input / 472k cached\)\$"
+assert_says 'case (wv4) the absent paths are still listed' '^  alpha\.rs$'
+assert_says 'case (wv4) and the authorship limitation is stated, not implied' \
+  'PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
+assert_says 'case (wv4) the limitation is SCOPED to which allowlisted human, not authorship in general' \
+  'WHICH ALLOWLISTED HUMAN'
+assert_says 'case (wv4) and the authorization that IS enforced is named' \
+  'AUTHORIZED AGAINST AN EXPLICIT ALLOWLIST'
+reset_stub
+
+printf '== (wv5) (b) SHA-BOUND: a waiver for another head is STALE and does not excuse ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=stale one\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv5)' FAIL 1
+assert_says 'case (wv5) the absence still FAILs' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (wv5) and the divergent field is named' \
+  "^waiver: STALE \(the marker names a different review — head \(0000000000000000000000000000000000000000 != $w_head\)"
+assert_says 'case (wv5) the diagnostic names how to re-decide that job without re-reviewing' \
+  'can be re-decided with --recheck-job'
+assert_lacks 'case (wv5) a stale marker never yields WAIVED' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv6) a marker with no reason= is MALFORMED and does not excuse ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv6)' FAIL 1
+# A MISSING FIELD IS NOW REFUSED BY THE SINGLE ANCHORED PATTERN rather than by a per-field check, so
+# every shape violation reports the same cause: the required form.
+assert_says 'case (wv6) a reasonless marker does not match the required form' \
+  '^waiver: MALFORMED \(the line does not match the required form'
+assert_lacks 'case (wv6) and never yields WAIVED' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv7) a gh failure (no PR / no auth / API error) is UNAVAILABLE, and FAILs closed ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_RC=1
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=would have been granted\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv7)' FAIL 1
+assert_says 'case (wv7) an unreadable PR cannot grant a waiver' \
+  '^waiver: UNAVAILABLE .*gh pr view --json comments'
+assert_says 'case (wv7) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+reset_stub
+
+printf '== (wv8) (c) the waiver excuses the ABSENCE ONLY — another cause still FAILs ==\n'
+# The constraint that keeps the waiver from becoming a general override: here the transcript carries no
+# terminal verdict marker, so `review-completed` FAILs. A granted absence waiver must not rescue it.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_VERDICT='Waiting for job 4656 to complete...'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=absence is legitimate\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv8)' FAIL 1
+assert_says 'case (wv8) the absence itself is waived' '^prompt-content: WAIVED'
+assert_says 'case (wv8) but the other cause still FAILs the run' '^review-completed: FAIL'
+reset_stub
+
+printf '== (wv9) the LAST granted marker wins, so a re-request supersedes a stale one ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=1111111111111111111111111111111111111111 job=4656 reason=before the push\n\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=re-requested after the push\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv9)' PASS 0
+assert_says 'case (wv9) the current marker grants' "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=re-requested after the push\)\$"
+reset_stub
+
+printf '== (wv10) JOB 29: a marker PLUS PROSE in one comment does NOT grant ==\n'
+# THE NEW NEGATIVE THAT PAIRS WITH THE POSITIVE CONTROL (wv4). Under the sole-content rule the marker must be
+# the ONLY nonblank line of its comment, so the commonest well-meant shape — a sentence of explanation above
+# the marker — is not an authorization. That pair is what proves the sole-content rule is doing the deciding:
+# same author, same scope, same reason, and the ONLY difference is the extra line.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nToken accounting checked: 541812 in / 472576 cached, genuine.\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=token accounting checked\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv10)' FAIL 1
+assert_says 'case (wv10) a marker buried in prose is not an authorization' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+assert_lacks 'case (wv10) and it does not grant' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv10b) JOB 29: the SANCTIONED workflow — commentary and authorization as SEPARATE comments ==\n'
+# The cost of the rule, and the proof it is trivial: the authorizer explains in one comment (fenced example
+# included) and authorizes in another. The second comment is marker-only, so it grants.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(SOLE_BASE="$w_base" SOLE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=token accounting checked"
+          % (os.environ["SOLE_BASE"], os.environ["SOLE_HEAD"]))
+doc = "Token accounting checked: 541812 in / 472576 cached. The form is:\n\n```\n" + marker + "\n```"
+print(json.dumps({"comments": [
+    {"author": {"login": "pmcfadin"}, "body": doc},
+    {"author": {"login": "pmcfadin"}, "body": marker}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv10b)' PASS 0
+assert_says 'case (wv10b) the marker-only comment grants; the documentation comment is inert' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=token accounting checked\)\$"
+reset_stub
+
+printf '== (wv11) BLOCKER 1: the failure diagnostic REPOSTED as a PR comment must not waive ==\n'
+# THE SHARPEST INSTANCE OF THE RECURRING SHAPE ON THIS ISSUE (roborev job 23): AN ARTIFACT THAT DESCRIBES THE
+# ESCAPE HATCH BECAME THE ESCAPE HATCH. The diagnostic used to print a complete marker carrying the live
+# sha, and detection accepted it anywhere inside a flattened comment — so pasting the summary block into a
+# PR comment, which is the documented practice throughout this repo, authorized the next run.
+#
+# THE FIXTURE IS THE EXPLOIT, VERBATIM: run the wrapper on an absent-census prompt, take its ENTIRE output
+# (block + diagnostics), post it as a PR comment, and run again. It must still be unwaived. The comment is
+# fed through a FILE so nothing is re-escaped on the way in.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+run_wrapper "$w_work"
+cp "$OUT" "$tmp/reposted-diagnostic.txt"
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+{ printf '\001pmcfadin\n'; cat "$tmp/reposted-diagnostic.txt"; } >"$tmp/reposted-comment.txt"
+STUB_GH_COMMENTS_FILE="$tmp/reposted-comment.txt"
+run_wrapper "$w_work"
+assert_verdict 'case (wv11)' FAIL 1
+assert_says 'case (wv11) reposting the diagnostic does not waive anything' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (wv11) and no waiver is found in it' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+assert_lacks 'case (wv11) the reposted block never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv12) LAYER 1: an indented, quoted or embedded marker copy does not match ==\n'
+# Anchoring, case by case: a `>`-quoted line (a GitHub reply), an indented code-block copy, a bulleted
+# copy, and a marker embedded mid-sentence. Every one of them is a way a HUMAN legitimately quotes the
+# form while discussing it, so every one of them must be inert.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\n> roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=quoted reply\n    roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=indented copy\n- roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=bulleted copy\nthe form is roborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=embedded mid-sentence\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv12)' FAIL 1
+assert_says 'case (wv12) no quoted or indented copy is honoured' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
+assert_lacks 'case (wv12) and none of them grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv13) LAYER 2: a pasted TEMPLATE with placeholder fields is MALFORMED ==\n'
+# The documentation own line, anchored and complete in shape, must still refuse: an unsubstituted
+# `<why>` is the signature of a paste rather than a judgment. Same rule `claim.sh --reason` applies.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=<why>\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv13)' FAIL 1
+assert_says 'case (wv13) an unsubstituted placeholder is refused by name' \
+  '^waiver: MALFORMED \(the marker is missing a-substituted-reason'
+assert_lacks 'case (wv13) and never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv14) LAYER 2: a bare placeholder reason (why/todo/tbd) is MALFORMED ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=TODO\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv14)' FAIL 1
+assert_says 'case (wv14) a bare placeholder is refused by name' \
+  "^waiver: MALFORMED \(the marker is missing a-substantive-reason \(the reason 'TODO' is a bare placeholder\)"
+reset_stub
+
+printf '== (wv15) BLOCKER 2: a waiver for the same head but a DIFFERENT base does not carry over ==\n'
+# The scope binding. The authorizer judged ONE review; a different base is a different census, so the
+# marker must not survive it even though the head is identical.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=2222222222222222222222222222222222222222 head=$w_head job=4656 reason=judged against another base\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv15)' FAIL 1
+assert_says 'case (wv15) the base divergence is named' \
+  "^waiver: STALE \(the marker names a different review — base \(2222222222222222222222222222222222222222 != $w_base\)"
+assert_lacks 'case (wv15) and it does not grant' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv16) BLOCKER 2: a waiver for a DIFFERENT job (a re-run) does not carry over ==\n'
+# One persistent comment must not waive a later, possibly VACUOUS review at the same base and head.
+reset_stub
+STUB_JOB=9999
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=judged the earlier run\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv16)' FAIL 1
+assert_says 'case (wv16) the job divergence is named' \
+  "^waiver: STALE \(the marker names a different review — job \(4656 != 9999\)"
+assert_lacks 'case (wv16) a waiver cannot outlive the review it judged' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv17) BLOCKER 2: a marker missing a field is MALFORMED, not granted ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent head=$w_head job=4656 reason=no base field\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv17)' FAIL 1
+assert_says 'case (wv17) a marker missing a field does not match the required form' \
+  '^waiver: MALFORMED \(the line does not match the required form'
+assert_says 'case (wv17) and the cause quotes the required form in full' \
+  'base=<40-hex> head=<40-hex> job=<id> reason=<why>'
+reset_stub
+
+printf '== (wv18) JOB 24: the waiver loop CLOSES — absence FAIL, waiver, recheck, WAIVED ==\n'
+# THE ACCEPTANCE TEST FOR THE WHOLE MECHANISM, not a unit of it. The waiver binds base+head+job and is
+# evaluated after that job finishes, but the operator learns the job id FROM the finished run — so before
+# `--recheck-job` existed, applying a waiver meant re-running, which enqueued a DIFFERENT job and made the
+# fresh waiver instantly STALE. The mechanism was a dead letter: no sequence of actions got a legitimate
+# absence past the gate. This case walks the real sequence.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+run_wrapper "$w_work"
+assert_verdict 'case (wv18) step 1: the absence FAILs' FAIL 1
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv18) step 3: the recheck PASSes' PASS 0
+assert_says 'case (wv18) the absence is waived for exactly that review' \
+  "^prompt-content: WAIVED \(2/2 code census paths absent — authorized by @pmcfadin for base=$w_base head=$w_head job=4656\)\$"
+assert_says 'case (wv18) and the waiver key records the whole scope' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\)\$"
+reset_stub
+
+printf '== (wv19) JOB 24: a recheck DECLARES itself and ENQUEUES NOTHING ==\n'
+# A recheck PASS is legitimate but must never be pasteable as evidence of a FRESH review, so the block
+# says so in its first key — the way the gate says `MODE: lite`. And the reviewer must not be invoked at
+# all: that is checked against the stub's own invocation record, not inferred from the output.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_says 'case (wv19) the block declares the mode and the job' \
+  '^MODE: recheck \(job 4656 re-decided from its job record; NO review was enqueued — not evidence of a fresh review\)$'
+assert_says 'case (wv19) and names it under its own key' '^recheck-of: 4656$'
+assert_says 'case (wv19) roborev-exit does not claim an exit status for a process that never ran' \
+  '^roborev-exit: SKIP \(recheck: no reviewer ran in this invocation; job 4656 re-decided from its record\)$'
+if grep -q '^review ' "$INVOKED"; then
+  bad 'case (wv19) a recheck ENQUEUED a review — the one thing it must never do'
+else
+  ok 'case (wv19) no review was enqueued (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (wv20) JOB 24: a recheck RE-ASSERTS from the record, it does not inherit ==\n'
+# The original run passing is not evidence for the recheck. With a record whose status is not `done`,
+# `review-completed` must FAIL on the recheck exactly as it would on a fresh run.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_STATUS="running"
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv20)' FAIL 1
+assert_says 'case (wv20) completion is re-asserted from the record, not assumed' \
+  "^review-completed: FAIL \(job status 'running' is not done\)\$"
+reset_stub
+
+printf '== (wv21) JOB 24: a WHITESPACE-ONLY reason is MALFORMED ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=   \n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv21)' FAIL 1
+assert_says 'case (wv21) whitespace is not a reason' \
+  '^waiver: MALFORMED \(the marker is missing a-non-empty-reason \(the reason is empty or whitespace only\)'
+assert_lacks 'case (wv21) and it never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv22) JOB 24: a placeholder with TRAILING WHITESPACE is still a placeholder ==\n'
+# The classic defeat of a placeholder check: `reason=TODO ` compared before trimming is not equal to
+# `todo`, so it passed. The trim now happens BEFORE the judgment.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=TODO   \n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv22)' FAIL 1
+assert_says 'case (wv22) the trimmed value is judged' \
+  "^waiver: MALFORMED \(the marker is missing a-substantive-reason \(the reason 'TODO' is a bare placeholder\)"
+reset_stub
+
+printf '== (wv23) JOB 24: the documented FIELD ORDER is enforced ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent head=$w_head base=$w_base job=4656 reason=fields out of order\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv23)' FAIL 1
+assert_says 'case (wv23) a re-ordered marker does not match the required form' \
+  '^waiver: MALFORMED \(the line does not match the required form'
+assert_lacks 'case (wv23) and never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv24) JOB 24: field-value BOUNDARIES are enforced ==\n'
+# `job=4656x` and a sha with a trailing non-hex character used to survive the per-field `case` extraction
+# because nothing bounded the value; one anchored pattern refuses them.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=${w_head}z job=4656x reason=boundary violation\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv24)' FAIL 1
+assert_says 'case (wv24) an unbounded field value does not match the required form' \
+  '^waiver: MALFORMED \(the line does not match the required form'
+reset_stub
+
+printf '== (wv25) JOB 25: a well-formed marker from a NON-ALLOWLISTED author is UNAUTHORIZED ==\n'
+# THE HOLE: the author was recorded but never authorized, and this is a PUBLIC repository whose failing
+# block PRINTS base, head and job — so any commenter could copy them and pass the merge gate. The state is
+# distinct from MALFORMED on purpose: this marker is perfectly well-formed and names exactly this review;
+# what disqualifies it is WHO wrote it.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001drive-by-contributor\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=copied from the public failing block\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv25)' FAIL 1
+assert_says 'case (wv25) a stranger cannot grant a waiver' \
+  "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor' is not on the waiver allowlist"
+assert_says 'case (wv25) the cause says why authorship is the only separator here' \
+  'this is a public repository'
+assert_says 'case (wv25) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_lacks 'case (wv25) and it never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv26) JOB 25: an allowlisted author with the SAME marker DOES grant ==\n'
+# The positive control for wv25: the ONLY difference is the author, so the case pins that the allowlist is
+# what decided it — not some incidental property of the marker.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=copied from the public failing block\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv26)' PASS 0
+assert_says 'case (wv26) the same marker from an allowlisted author grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv27) JOB 25: an UNAUTHORIZED marker does not shadow an allowlisted one ==\n'
+# Ordering matters: a stranger commenting first must not make the real authorization unreachable.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001drive-by-contributor\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=stranger first\n\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=authorized after review of the token accounting\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv27)' PASS 0
+assert_says 'case (wv27) the allowlisted grant is still found' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=authorized after review of the token accounting\)\$"
+reset_stub
+
+printf '== (wv28) JOB 25: the record review text is read under EITHER field name ==\n'
+# `roborev-job-facts.py` documented `verdict_text` and read only `output`, so a payload using the other
+# spelling produced an EMPTY transcript and spuriously failed review-completed/findings on a recheck. Both
+# payload shapes are fixtured: the field on the nested JOB row, and the field on the REVIEW row.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_PROMPT='### Combined Diff\n\ndiff --git a/alpha.rs b/alpha.rs\n@@ x @@\ndiff --git a/beta.rs b/beta.rs\n@@ y @@'
+STUB_RECORD_OUTPUT_FIELD=verdict_text
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv28) verdict_text on the job row' PASS 0
+assert_says 'case (wv28) completion is re-asserted from verdict_text' '^review-completed: PASS$'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_SHOW_JSON=nested
+STUB_PROMPT='### Combined Diff\n\ndiff --git a/alpha.rs b/alpha.rs\n@@ x @@\ndiff --git a/beta.rs b/beta.rs\n@@ y @@'
+STUB_RECORD_OUTPUT_FIELD=verdict_text
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv28b) verdict_text on the review row' PASS 0
+assert_says 'case (wv28b) completion is re-asserted from the review row field' '^review-completed: PASS$'
+reset_stub
+
+printf '== (wv29) JOB 26: a FORGED author line inside a stranger comment does not grant ==\n'
+# THE DEFEAT OF LAST ROUND'S ALLOWLIST, and the fourth member of one family on this issue: CONTROL AND
+# DATA MUST NOT SHARE A CHANNEL WHEN THE DATA IS ATTACKER-CONTROLLED. Comments used to be flattened into
+# one stream where an author record was a leading-SOH line and the body followed verbatim, so an
+# unauthorized commenter could put an allowlisted login on its own SOH line INSIDE their own body and
+# have the next marker attributed to it. The fixture is that exploit, passed as raw JSON so the forged
+# line is unambiguously BODY CONTENT of a stranger's comment — the harness cannot turn it into a second
+# comment, which would test the fixture layer instead of the code.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(FORGE_BASE="$w_base" FORGE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=forged an author line"
+          % (os.environ["FORGE_BASE"], os.environ["FORGE_HEAD"]))
+body = "\u0001pmcfadin\n" + marker
+print(json.dumps({"comments": [{"author": {"login": "drive-by-contributor"}, "body": body}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv29)' FAIL 1
+# TWO LAYERS NOW REFUSE THIS, and the outer one fires first: the forged author line is a SECOND nonblank
+# line, so the comment is not an authorization at all (job 29). Even if it were marker-only, the author would
+# still be off the allowlist (job 25) — (wv25) pins that half with a marker-only fixture.
+assert_says 'case (wv29) a forged author line is not an authorization at all' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+assert_lacks 'case (wv29) a forged author line cannot grant' '^prompt-content: WAIVED'
+assert_lacks 'case (wv29) and the forged login is never credited' 'authorized by @pmcfadin'
+assert_says 'case (wv29) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+reset_stub
+
+printf '== (wv30) JOB 26: a body line that merely LOOKS like a delimiter is inert ==\n'
+# The complement: with no delimiter left to interpret, a bare login line in a body is just prose. The
+# case pins that the fix is "no in-band channel", not "a rarer delimiter" — the latter would still grant
+# for some spelling.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001drive-by-contributor\npmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=bare login line above the marker\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv30)' FAIL 1
+assert_says 'case (wv30) a bare login line is extra content, so the comment is not an authorization' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+reset_stub
+
+printf '== (wv31) JOB 26/27: an ABSENT scanner is UNAVAILABLE, never a text fallback ==\n'
+# A waiver is never decided from a flattened text stream, so a missing scanner fails closed instead of
+# degrading to line parsing — the shape that produced this whole family.
+#
+# THE FIXTURE SUBSTITUTES THE FILE, NOT THE PATH (job 27). There is no environment override to point the
+# wrapper elsewhere — that override was itself the hole: the constrained party must not choose its own
+# enforcer. So this case runs the wrapper from a SCRATCH COPY of `scripts/flow/` with the scanner omitted,
+# which is a state a real checkout can be in and needs no seam in production code.
+reset_stub
+noscan="$tmp/flow-without-scanner"
+mkdir -p "$noscan"
+cp "$WRAPPER" "$noscan/roborev-review.sh"
+cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$noscan/"
+cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$noscan/"
+cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$noscan/"
+# ...and deliberately NOT roborev-waiver-scan.py.
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=would otherwise grant\n"
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_GIT_REF=$(range_ref "$w_work")
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+  TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
+  bash "$noscan/roborev-review.sh" --repo "$w_work" --agent codex --model gpt-5.6-sol \
+  --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+RC=$?
+assert_verdict 'case (wv31)' FAIL 1
+assert_says 'case (wv31) an unusable scanner is UNAVAILABLE and fails closed' \
+  '^waiver: UNAVAILABLE \(the structured waiver scanner is unusable'
+assert_says 'case (wv31) and it says a waiver is never decided from a text stream' \
+  'NEVER decided from a flattened text stream'
+assert_lacks 'case (wv31) no grant without the scanner' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv32) JOB 27: a hostile WAIVER_SCAN_TOOL in the environment is IGNORED ==\n'
+# THE BYPASS THIS CLOSES: the enforcer path was env-settable, so an invoker could point it at a script
+# printing `state=granted` and turn an absent prompt into an overall PASS with no authorized comment at
+# all. That is the allowlist argument one level out — THE CONSTRAINED PARTY MUST NOT CHOOSE ITS OWN
+# ENFORCER — so the path is now resolved from the wrapper's own directory and the variable is inert.
+reset_stub
+forge_scanner="$tmp/forged-scanner.py"
+cat >"$forge_scanner" <<'FORGED'
+#!/usr/bin/env python3
+print("state=granted")
+print("author=attacker")
+print("scope=base=deadbee head=deadbee job=1")
+print("reason=fabricated by a hostile scanner")
+print("detail=")
+FORGED
+chmod +x "$forge_scanner"
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS=""
+WAIVER_SCAN_TOOL="$forge_scanner" run_wrapper "$w_work"
+assert_verdict 'case (wv32)' FAIL 1
+assert_says 'case (wv32) the absence FAIL stands, with no waiver found' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (wv32) and the waiver state comes from the real scanner' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+assert_lacks 'case (wv32) a hostile scanner cannot fabricate a grant' '^prompt-content: WAIVED'
+assert_lacks 'case (wv32) and its fabricated author is never credited' 'attacker'
+reset_stub
+
+printf '== (wv33) JOB 28/29 REGRESSION: a FENCED marker from an allowlisted author does NOT grant ==\n'
+# KEPT AS A REGRESSION ACROSS TWO DESIGNS (jobs 28 and 29). It used to grant because a fence preserves
+# column zero; the fence machine then excluded it; the sole-content rule now excludes it for a SIMPLER
+# reason — a fenced marker is never the only nonblank line. The case is pinned from both designs so a future
+# edit cannot reopen it by deleting the newer rule.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(FENCE_BASE="$w_base" FENCE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=documenting the form"
+          % (os.environ["FENCE_BASE"], os.environ["FENCE_HEAD"]))
+body = "Here is how the waiver marker looks:\n\n```\n" + marker + "\n```\n\nPost it as a top-level comment."
+print(json.dumps({"comments": [{"author": {"login": "pmcfadin"}, "body": body}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv33)' FAIL 1
+assert_says 'case (wv33) a fenced marker is data, not an authorization' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+assert_lacks 'case (wv33) documenting the syntax must not grant' '^prompt-content: WAIVED'
+assert_says 'case (wv33) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+reset_stub
+
+printf '== (wv33b) JOB 28: the SAME marker unfenced, same author, still grants (positive control) ==\n'
+# The control that makes wv33 meaningful: only the fence differs, so the case pins that the FENCE decided
+# it — not the author, the scope, the reason or some incidental fixture difference.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=documenting the form\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv33b)' PASS 0
+assert_says 'case (wv33b) the unfenced marker grants' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=documenting the form\)\$"
+reset_stub
+
+printf '== (wv33c) JOB 29: an HTML <pre> block and a `bash`-info-string fence are BOTH inert ==\n'
+# The two contexts the fence machine got wrong (job 29 finding): ````bash` inside a fence is CONTENT, not a
+# closing delimiter, so fence state desynchronised and a later marker granted; and HTML <pre>/<code> was
+# never handled at all. Under the sole-content rule neither needs handling — both are extra content.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(SOLE_BASE="$w_base" SOLE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=documenting the form"
+          % (os.environ["SOLE_BASE"], os.environ["SOLE_HEAD"]))
+fence_confusion = "```\n```bash\n" + marker + "\n```"
+html_pre = "<pre>\n" + marker + "\n</pre>"
+print(json.dumps({"comments": [
+    {"author": {"login": "pmcfadin"}, "body": fence_confusion},
+    {"author": {"login": "pmcfadin"}, "body": html_pre}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv33c)' FAIL 1
+assert_says 'case (wv33c) neither preformatted context is an authorization' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+assert_lacks 'case (wv33c) and neither grants' '^prompt-content: WAIVED'
+reset_stub
+
 printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
@@ -3293,6 +4056,38 @@ assert_lacks '--help no longer documents a roborev-builtin source tag' '\[robore
 # The block's KEY CONTRACT is what readers grep, so --help must list exactly the keys the
 # wrapper emits.
 assert_says '--help still documents the prompt-content key' 'prompt-content'
+# #3312 (owner ruling (4)): the CONTRACT --help documents is now the ONE QUESTION plus the waiver.
+# An operator reading an absence FAIL must be able to learn from --help what was asked, that the
+# machine cannot tell WHY the paths are absent, and exactly how a human may waive it — including the
+# limitation that authorship is not mechanically verified. Each of these is a promise to a reader, so
+# each is asserted rather than assumed.
+assert_says '--help documents the single question, with no delivery classifier' \
+  'ONE QUESTION, NO DELIVERY CLASSIFIER'
+assert_says '--help says absence is unconditionally a FAIL' \
+  'ABSENT is a FAIL, unconditionally, whatever caused it'
+assert_says '--help states the accepted cost: the two absences are indistinguishable' \
+  'IDENTICAL to the machine'
+assert_says '--help names the token accounting as the human evidence' '398k-649k input'
+assert_says '--help gives the waiver marker verbatim, with every bound field' \
+  'roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>'
+assert_says '--help says who may grant it, and that a worker may only request' \
+  'may REQUEST one'
+assert_says '--help says the waiver is bound to the whole review scope' \
+  'IT IS BOUND TO THE WHOLE REVIEW SCOPE'
+assert_says '--help says a re-run needs a fresh waiver' 'a push, a different base or a$|re-run each need a fresh one'
+assert_says '--help states the three anti-self-grant layers' \
+  'THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL'
+assert_says '--help says the diagnostic prints no part of the marker' \
+  'diagnostic prints NO part of the$|marker; it points here instead'
+assert_says '--help says it excuses the absence verdict only' 'excuses the ABSENCE'
+assert_says '--help says the waived token is DISTINCT from PASS' 'a DISTINCT'
+assert_says '--help states the authorship limitation, not an implied guarantee' \
+  'PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY$|VERIFIED'
+assert_says '--help says the author must be on an explicit allowlist' \
+  'THE AUTHOR MUST BE ON AN EXPLICIT ALLOWLIST'
+assert_says '--help scopes the residual to which allowlisted human' 'WHICH ALLOWLISTED HUMAN'
+assert_lacks '--help no longer documents the deleted snapshot record keys' 'snapshot-path/-containment/-expected'
+assert_lacks '--help no longer claims two delivery modes are treated differently' 'TWO DIFF-DELIVERY MODES'
 assert_never_enqueued '--help'
 
 printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
@@ -3390,7 +4185,232 @@ _coll_defs=$(grep -cE '^roborev_collect_prompt_headers\(\) \{' "$ORACLES" || tru
 if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_prompt_headers "\$PROMPT_FILE"' "$CHECKS_FILE"; then
   ok 'structural: the prompt headers (and their rename from/to lines) are collected by the oracles file'
 else
-  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not use it"
+  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not call it (#3312 ruling (4): the prompt is the only source there is)"
+fi
+# (6) C⁗ (#3312): WHAT MUST STILL BE TRUE NOW THAT NOTHING IS READ. The observer, the digest, the size, the
+#     bounded-read watchdog and the three-valued path-state helper are all DELETED by owner ruling, so the
+#     asserts that pinned them are deleted with them and the ones below take their place.
+#
+#     THE PREDICATE-FAMILY LINT GOES WITH ITS SUBJECT, deliberately: it scanned the capture apparatus for bare
+#     file predicates, and that apparatus performs no filesystem access any more — a lint with an EMPTY subject
+#     set greens vacuously, which is the very shape it existed to catch. The durable artifact is the RULE, kept
+#     in CLAUDE.md and the doctrine page: every `test`/`[` file predicate is two-valued, so it must collapse
+#     "cannot tell" onto one of its answers, and it always picks the permissive one. The "performs NO
+#     filesystem access" assert below is what makes that empty subject set TRUE rather than assumed.
+# ===== THE CLASSIFIER IS GONE, AND MUST STAY GONE (owner ruling (4), #3312) =====
+# Every state, helper and marker below carried one of the four High-severity false verdicts. They are
+# asserted ABSENT rather than fixed, because absence is what the ruling bought: with no delivery-mode
+# inference there is nothing left for a fifth round to find wrong. A reintroduction is a design
+# regression, not a refactor, and it reds here.
+_classifier=""
+for _gone in 'roborev_collect_review_diff_headers' 'roborev_prompt_snapshot_paths' \
+  'roborev_snapshot_path_binding' 'ROBOREV_DIFF_SOURCE_STATE' 'mixed-delivery' 'delegated-oversize' \
+  'snapshot-unbound' 'unparseable-instruction' 'BLOCKRESET' 'BLOCKHDR' 'in_trailer' 'in_fence' \
+  '_rx_delivery_hdrs' '_rx_snap_paths' 'SNAPSHOT_NOTICE' 'ROBOREV_SNAPSHOT_PATH' \
+  'ROBOREV_SNAPSHOT_CONTAINMENT'; do
+  # EXECUTABLE LINES ONLY: a comment that RECORDS what was deleted (and why it may not come back) is
+  # the durable artifact of this ruling, so scanning prose would make the history itself a violation.
+  if grep -hv '^[[:space:]]*#' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null | grep -qF "$_gone"; then
+    _classifier="$_classifier $_gone"
+  fi
+done
+if [ -z "$_classifier" ]; then
+  ok 'structural: the delivery-mode classifier is GONE — no block/heading/fence/candidate state, no snapshot or delegated distinction, no NOTICE exemption'
+else
+  bad "structural: delivery-mode classification is back in the flow scripts —$_classifier. Owner ruling (4) deleted it because FOUR consecutive review rounds each found a High-severity false verdict in inferring structure from prompt text that embeds repository-controlled content (#3312)"
+fi
+# THE THREE SNAPSHOT KEYS GO WITH IT: a block that still emitted them would be describing a
+# measurement the wrapper no longer makes.
+_skeys=""
+for _sk in snapshot-path snapshot-containment snapshot-expected; do
+  grep -qF "emit_kv '$_sk'" "$WRAPPER" && _skeys="$_skeys $_sk"
+done
+if [ -z "$_skeys" ]; then
+  ok 'structural: the block emits no snapshot-* keys (nothing is classified, so there is nothing to record about a mode)'
+else
+  bad "structural: the block still emits —$_skeys. Those keys described the retired classifier's output (#3312 ruling (4))"
+fi
+# ===== ABSENCE IS A FAIL, AND THE WAIVER IS THE ONLY WAY PAST IT =====
+_pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | head -1 | cut -d: -f1)
+_pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
+_pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
+_pc_exec=$(printf '%s\n' "$_pc_body" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
+  && [ "$(printf '%s\n' "$_pc_exec" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
+  && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="WAIVED ('; then
+  ok 'structural: the waiver is looked up EXACTLY ONCE, inside the absence branch, so it can excuse only that verdict (constraint (c))'
+else
+  bad 'structural: the absence waiver is not confined to the absence branch — a lookup anywhere else could excuse a verdict the ruling says it may never touch (#3312 ruling (4c))'
+fi
+# THE WAIVER TOKEN IS DISTINCT FROM `PASS`, so no reader grepping `prompt-content: PASS` counts a waived
+# run as a certification — the false-assurance shape this whole issue is about.
+if ! grep -qE 'PROMPT_CONTENT="PASS \(.*[Ww]aive' "$CHECKS_FILE" \
+  && grep -qF 'WAIVED|SKIP|NOTICE' "$WRAPPER"; then
+  ok 'structural: a waived absence reports the DISTINCT token WAIVED, and the grammar recognises it'
+else
+  bad 'structural: a waived absence is spelled as a PASS, or WAIVED is outside the block grammar — either way a reader cannot tell a waived run from a certified one (#3312 ruling (4))'
+fi
+# THE AFFIRMATION BACKSTOP ADMITS `WAIVED` ONLY ON COMPLETE PROVENANCE, and gates on the provenance
+# rather than on which key carries it: a key-scoped exemption is the shape the ruling deleted.
+_aff_start=$(grep -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER" | head -1 | cut -d: -f1)
+_aff_body=$(sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER")
+if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' \
+  && printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_STATE:-}" = "granted"' \
+  && ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
+  ok 'structural: WAIVED is admitted only with a complete, sha-matching provenance, and the gate is not key-scoped'
+else
+  bad 'structural: the affirmation backstop admits WAIVED without checking its provenance, or reintroduces a per-key escape hatch (#3312 ruling (4))'
+fi
+# ===== FENCED REGIONS ARE SKIPPED, IN THE SCANNER (#3312 job 28) =====
+# A fence preserves column zero, so the anchor alone did not stop a populated marker quoted inside one from
+# granting — the accidental bypass most likely to occur, since a fence is how a human documents a syntax.
+# The state machine must live in the SCANNER (one implementation of the parse) and must track both fence
+# characters; a shell-side copy is how the in-band channel of job 26 came back.
+_sole_ok=1
+grep -qF 'def sole_marker_line(body):' "$SCAN_TOOL" || _sole_ok=0
+grep -qF 'if len(nonblank) != 1:' "$SCAN_TOOL" || _sole_ok=0
+grep -qF 'ONE DECISION, NO PARSE' "$SCAN_TOOL" || _sole_ok=0
+# AND NO MARKDOWN RECOGNISER MAY RETURN. Four were tried and superseded; reintroducing one would restore the
+# unbounded game of deciding "data or control?" inside a grammar the comment author controls.
+# EXECUTABLE LINES ONLY: the comment block RECORDS the four superseded recognisers by name (including
+# HTML <pre>), and that history is the durable artifact — scanning prose would make writing it down a
+# violation, which is the same mistake as the job-18 census assert.
+grep -vE '^[[:space:]]*#' "$SCAN_TOOL" | grep -qE 'FENCE_CHARS|fence_run|def .*fence|<pre>|lstrip\("`"\)' && _sole_ok=0
+grep -qE 'FENCE_CHARS|fence_run' "$ORACLES" && _sole_ok=0
+if [ "$_sole_ok" -eq 1 ]; then
+  ok 'structural: an authorization must be the SOLE NONBLANK CONTENT of its comment, decided without parsing Markdown'
+else
+  bad 'structural: the sole-content rule is missing, or a Markdown recogniser (fence/HTML) came back — the class was closed by REMOVING the shared channel, not by extending the parser, and four successive recognisers were superseded proving it (#3312 job 29)'
+fi
+# ===== THE THREAT-MODEL BOUNDARY IS STATED, ON EVERY SURFACE (#3312) =====
+# Five consecutive rounds landed in the waiver's authorization path, so the boundary is recorded to get the
+# NEXT finding triaged rather than patched: a hostile INVOKER is out of model by construction (they control
+# the process), while a NON-INVOKER bypass or an ACCIDENTAL one is a defect. An unstated boundary is how
+# "the invoker can bypass this" becomes another round — and how the opposite error, treating a real
+# third-party hole as unpatchable, would creep in.
+_tm_missing=""
+for _f in "$ORACLES" "$WRAPPER"; do
+  grep -qF 'A HOSTILE INVOKER' "$_f" || _tm_missing="$_tm_missing $(basename "$_f")"
+done
+grep -qF 'the INVOKER can bypass this' "$ORACLES" || _tm_missing="$_tm_missing oracles-triage-rule"
+grep -qF 'top-level PR comments only' "$ORACLES" \
+  || grep -qF 'TOP-LEVEL PR COMMENTS ONLY' "$ORACLES" || _tm_missing="$_tm_missing comment-channel-residual"
+if [ -z "$_tm_missing" ]; then
+  ok 'structural: the waiver threat model, its triage rule and the comment-channel residual are stated in code'
+else
+  bad "structural: the waiver threat model is not stated —$_tm_missing. Without the boundary, an out-of-model 'the invoker can bypass this' finding gets patched instead of recorded, and a real non-invoker hole could be waved away as unpatchable (#3312)"
+fi
+# ===== NO COMMENT-PROVENANCE DECISION FROM A FLATTENED TEXT STREAM (#3312 job 26) =====
+# The class, not the instance: an in-band author channel is forgeable by the very data it labels, so the
+# association must come from the JSON structure. This asserts (a) the wrapper asks for raw `--json`
+# without a `--jq` flattening program, (b) the decision is delegated to the structured scanner, and
+# (c) no SOH-style delimiter or comment-line loop survives in the oracles.
+_prov_ok=1
+grep -qF 'gh pr view --json comments 2>/dev/null' "$ORACLES" || _prov_ok=0
+grep -qF 'python3 "$WAIVER_SCAN_TOOL"' "$ORACLES" || _prov_ok=0
+grep -q 'u0001' "$ORACLES" && _prov_ok=0
+grep -qF 'author.login' "$ORACLES" && _prov_ok=0
+if [ "$_prov_ok" -eq 1 ]; then
+  ok 'structural: comment provenance is decided from the JSON structure, with no in-band author channel'
+else
+  bad 'structural: the waiver still associates author and body through a flattened text stream (or asks jq to flatten them) — a comment body can forge its own author record, which defeats the allowlist (#3312 job 26)'
+fi
+# AND THE SCANNER OWNS THE MARKER FORM: two implementations of the pattern would drift, and the shell
+# having one at all is what made the text channel possible.
+if ! grep -v '^[[:space:]]*#' "$ORACLES" | grep -qF 'roborev-waive: prompt-content-absent' \
+  && grep -qF 'roborev-waive: prompt-content-absent' "$SCAN_TOOL"; then
+  ok 'structural: the marker form is expressed once, in the structured scanner'
+else
+  bad 'structural: the marker pattern exists in the shell as well as the scanner — two implementations drift, and a shell-side parse is how the in-band channel returns (#3312 job 26)'
+fi
+# ===== AUTHORIZATION IS ENFORCED, AND THE RESIDUAL IS SCOPED TO WHAT REMAINS TRUE (#3312 job 25) =====
+# This assert used to forbid ANY author check, on the reasoning that one could not distinguish worker from
+# owner on a shared login. That reasoning conflated "cannot enforce perfectly" with "cannot enforce at
+# all", and the hole it left was that ANY commenter on a public repository could grant a waiver. So the
+# assert is inverted where it was wrong and kept where it was right: the allowlist comparison MUST exist,
+# and the disclaimer MUST be scoped to "which allowlisted human", never to authorship in general.
+_allow_ok=1
+grep -qF 'ROBOREV_WAIVER_AUTHORS=' "$ORACLES" || _allow_ok=0
+# The allowlist VALUE is visible in the shell; the DECISION lives in the structured scanner (job 26), so
+# the author is compared against it where author and body are still separate fields.
+grep -qF '"$ROBOREV_WAIVER_AUTHORS"' "$ORACLES" || _allow_ok=0
+grep -qF 'if author not in allowlist' "$SCAN_TOOL" || _allow_ok=0
+grep -qF 'return "unauthorized"' "$SCAN_TOOL" || _allow_ok=0
+grep -qF 'unauthorized|stale|malformed|none' "$ORACLES" || _allow_ok=0
+if [ "$_allow_ok" -eq 1 ]; then
+  ok 'structural: the waiver author is authorized against an explicit allowlist, with its own UNAUTHORIZED state'
+else
+  bad 'structural: the waiver has no author allowlist — on a public repository any commenter could copy the base/head/job from a failing block and grant one (#3312 job 25)'
+fi
+# NOT ENV-OVERRIDABLE — AND NEITHER IS ITS ENFORCER (#3312 job 25, extended by job 27).
+# THE CONSTRAINED PARTY MUST NOT CHOOSE ITS OWN ENFORCER: hardening a check while leaving its INVOCATION
+# configurable moves the hole instead of closing it. The allowlist VALUE was covered first; the scanner
+# PATH was then left env-settable, which let an invoker point it at a script printing `state=granted`. Both
+# halves are asserted here, and the path must be a literal repository-relative resolution with no `${…:-…}`.
+_enf_bad=""
+grep -qE 'ROBOREV_WAIVER_AUTHORS="?\$\{?ROBOREV_WAIVER_AUTHORS' "$ORACLES" && _enf_bad="$_enf_bad allowlist-value-env-derived"
+grep -qE 'WAIVER_SCAN_TOOL="?\$\{WAIVER_SCAN_TOOL' "$ORACLES" && _enf_bad="$_enf_bad scanner-path-env-derived"
+grep -qF 'WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-scan.py"' "$ORACLES" \
+  || _enf_bad="$_enf_bad scanner-path-not-literally-repo-relative"
+if [ -z "$_enf_bad" ]; then
+  ok 'structural: neither the allowlist nor its enforcer is env-derived (the scanner path is resolved from the wrapper own directory)'
+else
+  bad "structural: the waiver protection is configurable by its invoker —$_enf_bad. An override is settable by the very party being constrained, so the constrained party would choose its own enforcer (#3312 job 25/27)"
+fi
+# AND NO TEST SEAM MAY REINTRODUCE IT: a case needing a different scanner substitutes the FILE in a
+# scratch copy of scripts/flow/, never a path variable — a test-only hatch is one more thing an invoker sets.
+# THE NEEDLE IS SPLIT so this assert cannot match ITSELF — a self-matching grep would fire on the very
+# line that forbids the seam, which is a guard that can only ever be red.
+_seam_needle="WAIVER_SCAN_TOOL""_OVERRIDE"
+if grep -qF "$_seam_needle" "$TEST_SELF"; then
+  bad 'structural: the harness carries a scanner-path override — substitute the scanner FILE in a scratch copy instead, so production keeps one literal resolution (#3312 job 27)'
+else
+  ok 'structural: the harness substitutes the scanner file rather than redirecting its path'
+fi
+# THE SCOPED RESIDUAL IS STATED ON EVERY SURFACE, in its NARROW form.
+_resid_missing=""
+for _f in "$ORACLES" "$CHECKS_FILE" "$WRAPPER"; do
+  grep -qiF 'WHICH ALLOWLISTED HUMAN' "$_f" || _resid_missing="$_resid_missing $(basename "$_f")"
+done
+if [ -z "$_resid_missing" ]; then
+  ok 'structural: the process-enforcement residual is scoped to "which allowlisted human", on all three surfaces'
+else
+  bad "structural: the authorship residual is missing or unscoped in —$_resid_missing. An over-broad 'authorship cannot be verified' disclaimer is what justified having no author check at all (#3312 job 25)"
+fi
+# NO EMITTED DIAGNOSTIC MAY DESCRIBE A RETIRED MECHANISM AS SOMETHING THIS RUN DOES (#3312 job 18, fix 2).
+# The retirement of the capture/observer/digest apparatus left prose behind that still described it in the
+# present tense, and a diagnostic that names a mechanism the wrapper does not have sends its reader looking
+# for behaviour that cannot be there. The scan covers the strings a reader actually SEES — the DETAILS lines
+# and the verdict values — and only AFFIRMATIVE spellings: the NOTICE deliberately says "there is no digest
+# and no content identity", and a statement of ABSENCE is exactly what must survive.
+_diag=$(grep -hnE 'DETAILS\+=\(|^[[:space:]]*(PROMPT_CONTENT|REVIEW_COMPLETED|TIER1|TIER2|FINDINGS|CENSUS_CHECK|CODE_FREE|PUSH_ASSERT|SHA_ASSERT|JOB_RECORD)=' \
+  "$WRAPPER" "$CHECKS_FILE" "$ORACLES" 2>/dev/null || true)
+_diag_stale=$(printf '%s\n' "$_diag" | grep -inE 'captur|watcher|watchdog|observer|digest(ed|ing)? (of|the snapshot)|snapshot digest|mid-copy|SNAPSHOT_(DIGEST|BYTES)|bounded read|read the snapshot' || true)
+if [ -z "$_diag_stale" ]; then
+  ok 'structural: no emitted diagnostic names a retired mechanism (capture/watcher/watchdog/observer/digest) as current behaviour'
+else
+  bad "structural: an emitted diagnostic describes a mechanism C⁗ deleted — ${_diag_stale%%$'\n'*} (#3312 fix 2)"
+fi
+_r1=$(grep -nE 'ROBOREV_SNAPSHOT_UNUSABLE_WHY="[^"]*\$\(\[' "$ORACLES" || true)
+if [ -z "$_r1" ]; then
+  ok 'structural: no cause string is built with an optional command substitution (rider R1: it aborts under set -e)'
+else
+  bad "structural: a cause string embeds an optional command substitution in a simple assignment, which takes its status and aborts under set -e: ${_r1%%$'\n'*} (#3312 rider R1)"
+fi
+
+# THE AFFIRMATIVE-MEASUREMENT SHAPE, at the branch point that remains (CLAUDE.md; #3229 round-10).
+# There is no diff-source state machine any more — owner ruling (4) deleted it — so what must hold is
+# narrower and stronger: `prompt-content:` has exactly THREE outcomes, each reached by an affirmative
+# test, and none of them is a fall-through. PASS requires every code census path to have been FOUND;
+# FAIL is the absence; WAIVED is the absence plus a complete human provenance. A `0/0` is still never a
+# pass, which is the one case where "nothing to measure" must not read as "measured fine".
+if printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"' \
+  && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"' \
+  && printf '%s\n' "$_pc_body" | grep -qF 'a 0/0 is never a pass' \
+  && printf '%s\n' "$_pc_body" | grep -qF 'FAIL (prompt unretrievable'; then
+  ok 'structural: prompt-content has exactly its three affirmative outcomes (present PASS / absent FAIL / absent+provenance WAIVED), plus the 0/0 and unretrievable-prompt refusals'
+else
+  bad 'structural: prompt-content no longer reaches its outcomes affirmatively — a missing absent-FAIL, a missing 0/0 refusal or a missing unretrievable-prompt refusal each turns an unmeasured prompt into a pass (#3312 ruling (4))'
 fi
 # The matcher must resolve ambiguity from git's rename/copy lines, not positionally. Asserted
 # against the matcher body: a future edit that drops the rename-line branch and goes back to
@@ -3458,10 +4478,22 @@ if [ -z "$_em_start" ] || [ -z "$_em_end" ]; then
   bad 'structural: could not locate the emit_summary() body to inspect'
 else
   # Every executable line in the body is either the block BANNER or an `emit_kv` call.
+  # CONTROL FLOW IS ALLOWED, VALUES ARE NOT (#3312): the three snapshot keys are emitted only in snapshot
+  # mode, so the body now contains `if`/`else`/`fi`. Those carry no value; what must never appear is a raw
+  # `printf` of one, which is asserted separately below.
   _em_raw=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" \
     | grep -vE '^[[:space:]]*(#|$)' \
     | grep -vE "^[[:space:]]*emit_kv '" \
+    | grep -vE '^[[:space:]]*(if|elif|else|fi|then)\b' \
+    | grep -vE '^[[:space:]]*(if|elif) \[' \
     | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
+  _em_printfs=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" \
+    | grep -E '^[[:space:]]*printf' | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
+  if [ -n "$_em_printfs" ]; then
+    bad "structural: emit_summary printf's a value directly, bypassing the neutralising boundary: ${_em_printfs%%$'\n'*}"
+  else
+    ok 'structural: emit_summary contains no raw value printf (only the banner)'
+  fi
   if [ -z "$_em_raw" ]; then
     ok "structural: every emit_summary value goes through emit_kv (lines $_em_start-$_em_end)"
   else
@@ -3577,7 +4609,7 @@ else
   # edit could delete the positive arm while every behavioural case except cx28 stayed green.
   # Both halves are required: an allow-list whose fallthrough is permissive pins nothing.
   _scan_positive=$(printf '%s\n' "$_scan_block" \
-    | grep -E 'PASS\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' | head -1 || printf '')
+    | grep -E 'PASS\|WAIVED\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' | head -1 || printf '')
   if [ -n "$_scan_positive" ]; then
     ok 'structural: the verdict scan has a POSITIVE arm — the non-failing set is an allow-list, not "not-failing"'
   else
@@ -3586,7 +4618,7 @@ else
   # The `*)` fallback must SET failed=1. Read from the positive `case`'s own body: from the
   # allow-list line to the `esac` that closes it.
   _scan_fallthrough=$(printf '%s\n' "$_scan_block" \
-    | awk '/PASS\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
+    | awk '/PASS\|WAIVED\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
     | grep -A 3 -E '^[[:space:]]*\*\)' || printf '')
   if printf '%s\n' "$_scan_fallthrough" | grep -qE '^[[:space:]]*failed=1[[:space:]]*$'; then
     ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
@@ -3628,12 +4660,22 @@ else
   if [ -z "$_aff_body" ]; then
     bad 'structural: could not locate the affirmation backstop case body to inspect for per-key exemptions'
   else
+    # EXACTLY ONE NON-`PASS` ADMISSION IS AUTHORISED, and it is the human-authorized absence waiver
+    # (owner ruling (4), #3312). It is NOT the retired per-key hatch: that one admitted a `NOTICE` for a
+    # named key in a machine-inferred mode, and both the mode and the inference are deleted. This one
+    # admits `WAIVED` only when the provenance is COMPLETE — a granted state, an authorizer, a reason,
+    # and a sha equal to the certified head — and is deliberately NOT keyed on `det_key`, so it cannot
+    # become the "which keys are exempt" argument again. A third `continue`, or a provenance-free
+    # admission, is the escape hatch #3229 forbade.
     _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
-    if [ "$_aff_continues" -eq 1 ] &&
-      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;'; then
-      ok 'structural: the affirmation backstop has exactly ONE exempting arm, the affirmative PASS) one — no per-key escape hatch'
+    if [ "$_aff_continues" -eq 2 ] &&
+      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;' &&
+      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' &&
+      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' &&
+      ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
+      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on the complete scope-matching provenance (base+head+job) and not on the key'
     else
-      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s); a non-PASS value is exempted for some key, so that key can reach finish PASS on a non-measurement (#3229 owner ruling / #3283)"
+      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED without complete provenance, or is keyed on det_key — the per-key escape hatch #3229 forbade and ruling (4) deleted (#3312)"
     fi
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this

@@ -837,6 +837,10 @@ roborev_collect_prompt_headers() {
   _rx_hdrs=()
   _rx_hdr_from=()
   _rx_hdr_to=()
+  # THE ONLY FILE THIS EVER READS IS THE WRAPPER'S OWN PROMPT FILE, written by this run beside its transcript
+  # — under C⁗ no snapshot is ever read, so this function is never pointed at a path roborev controls. Its
+  # falsity yields an EMPTY header set, which is the fail-closed direction (every census path then reads
+  # absent) rather than an absence claim about anything.
   [ -f "$f" ] || return 0
   while IFS= read -r _h && IFS= read -r _f && IFS= read -r _t; do
     _rx_hdrs+=("$_h")
@@ -1002,4 +1006,221 @@ roborev_diff_header_has_path() {
   # 4b: a rename/copy whose `rename from`/`rename to` lines did not reach us.
   [ "$any_match" -eq 1 ] && return 0
   return 1
+}
+
+# ===================== THE ABSENCE WAIVER (issue #3312, owner ruling (4)) =====================
+# WHY THIS EXISTS, AND WHAT IT REPLACED. `prompt-content:` asks exactly ONE question — are the census
+# CODE paths present in the prompt the reviewer was sent? PRESENT is a PASS; ABSENT is a FAIL,
+# unconditionally. There is deliberately NO CLASSIFIER: the wrapper used to infer HOW roborev
+# delivered the diff (inline / snapshot path / delegated tier) from the prompt TEXT, and four
+# consecutive review rounds each found a High-severity false verdict in that inference — a header set
+# consulted before an oversize marker, a candidate outliving its block, a delivery under an
+# unrecognised heading producing no evidence, and a block opener keyed on heading text that roborev
+# treats as caller DATA. The instances differed; the cause did not. roborev's prompt EMBEDS
+# repository-controlled content at column zero, so structure inferred from that text is spoofable in
+# both directions, and no marker was found that terminates the sequence: the only structural one was
+# roborev's fenced diff, and repository content can contain fences too. The owner therefore ruled the
+# inference out of existence rather than patching its fifth instance.
+#
+# THE COST THAT RULING ACCEPTS, stated plainly: a review whose diff roborev delivered BY PATH has no
+# census paths in its prompt, so it now FAILs exactly like a review that received nothing at all.
+# **To the machine those two are IDENTICAL.** That is not a limitation to be engineered away here; it
+# is the trade being chosen over a machine guessing from injectable text. What distinguishes them is a
+# HUMAN plus the review's token accounting (genuine reviews measured 398k–649k input / 314k–554k
+# cached; the vacuous baseline is ~18.7k input / 0 cached), which is why the escape hatch is a
+# human-authorized waiver and not another inference.
+#
+# ===================== THE WAIVER'S THREAT MODEL, WITH ITS LIMITS (#3312) =====================
+# STATED because five consecutive review rounds landed in this authorization path, and the next finding of
+# the form "the invoker can bypass this" needs to be TRIAGED rather than patched.
+#
+# A HOSTILE INVOKER CANNOT BE DEFENDED AGAINST HERE, AT ALL. Whoever runs this wrapper can edit it,
+# replace the scanner file beside it, shadow `gh` or `python3` on PATH, or skip the wrapper entirely and
+# hand-write a `==== ROBOREV REVIEW SUMMARY ==== … RESULT: PASS` block into the PR. No check inside a
+# process defends against the party that controls the process, and claiming otherwise would be the exact
+# false-assurance shape this issue exists to remove. The merge gate's real protection against a hostile
+# WORKER is the audit trail plus a human reading the PR — not this code.
+#
+# WHAT IT DOES DEFEND, which is what makes it worth having:
+#   (1) PARTIES WHO DO NOT CONTROL THE INVOCATION. On a public repository anyone can comment on a PR, and
+#       the base/head/job values are printed in the failing block; the allowlist, the anchored marker and
+#       the structured (non-forgeable) author association are what stop a stranger granting a waiver.
+#   (2) ACCIDENT AND DRIFT — the larger category in practice. A pasted summary block, a quoted example, a
+#       stale waiver riding to a later review, a re-run inheriting an authorization written for a different
+#       job, a placeholder reason left unsubstituted. Every fix in this path landed in (1) or (2).
+#
+# THE TRIAGE RULE THAT FOLLOWS, so a future round does not spend itself here:
+#   * "the INVOKER can bypass this"      -> OUT OF MODEL. Record it; do not patch it.
+#   * "a NON-INVOKER can bypass this"    -> DEFECT.
+#   * "this can be bypassed BY ACCIDENT" -> DEFECT.
+# Same-host actors that can write the roborev database or the scripts are invoker-class, not third parties.
+#
+# CHEAP HARDENING IS STILL WORTH IT even where an invoker could reach the same end another way: removing
+# the scanner-path env override cost nothing, removed a footgun, and closes contexts where the environment
+# is influenced while files are not (a workflow injecting a variable). "Theoretically redundant" is not a
+# reason to leave a hole that a non-invoker or an accident can walk through.
+#
+# TWO RESIDUALS INSIDE THE MODEL, named rather than implied:
+#   * THE MARKER IS READ FROM TOP-LEVEL PR COMMENTS ONLY (`gh pr view --json comments`). A marker posted
+#     inside a REVIEW body or as a review-thread reply is NOT read, so it silently does not apply — the
+#     run reports `waiver: NONE` and the FAIL stands. That direction is fail-CLOSED, but it will read as
+#     "my waiver was ignored", so the form documents the channel.
+#   * AN AUTHORIZED HUMAN CAN AUTHORIZE CARELESSLY — pre-authorizing a job id, or waiving without checking
+#     the token accounting. Nothing here can detect that; the control is the permanent, attributable
+#     comment, which is why the reason is required and recorded verbatim.
+
+# ===== WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (roborev job 25) =====
+# THE HOLE THIS CLOSES, and it is the permissive shape this whole issue is about: the comment author was
+# RECORDED but never AUTHORIZED, so on a PUBLIC repository ANY commenter could copy the base/head/job
+# values out of the failing block — they are printed in it — and make the merge gate pass. The residual
+# had been written as "we cannot distinguish the owner from the worker on a shared GH_TOKEN", which
+# conflated **cannot enforce perfectly** with **cannot enforce at all**, and so absence of a perfect
+# check became absence of ANY check.
+#
+# HARD-CODED HERE, NOT IN A CONFIG FILE, and deliberately with NO env override:
+#   * one visible location, in the file whose review this mechanism is part of — a reviewer reading the
+#     waiver code sees who may grant, in the same diff;
+#   * an env override (or a path the caller names) would be settable by whoever invokes the wrapper,
+#     i.e. by the very party the allowlist exists to constrain;
+#   * a separate committed config buys nothing here — it is equally repo-controlled — while adding a
+#     read path with its own absent/unreadable failure modes to get wrong.
+# Changing it is a code change: edit this list, and the diff is reviewed like any other.
+#
+# WHAT IT DOES NOT DO, stated because the previous over-broad disclaimer is what invited the hole: it
+# stops third parties. It does NOT distinguish WHICH allowlisted human posted the comment — on this fleet
+# the worker, the closer and the owner all post through the same login — so "only the owner or the
+# coordination lead may GRANT, a worker may only REQUEST" remains a process obligation with an audit
+# trail, now enforced to the level of "an allowlisted human", not to the level of "that specific human".
+ROBOREV_WAIVER_AUTHORS="pmcfadin"
+# ===== THE ENFORCER IS RESOLVED FROM THIS FILE'S OWN DIRECTORY, NEVER FROM THE ENVIRONMENT =====
+# (roborev job 27.) This used to carry a `${WAIVER_SCAN_TOOL:-…}` override, which handed the same hole
+# outward that the allowlist itself closes: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS OWN ENFORCER.
+# Hardening a check while leaving its INVOCATION configurable moves the hole rather than closing it — an
+# invoker could point this at a script printing `state=granted` and turn an absent prompt into a PASS with
+# no authorized comment anywhere. There is deliberately no override, no fallback and no `${…:-…}` here, and
+# a structural assert fails if one reappears. A test that needs a different scanner SUBSTITUTES THE FILE in
+# its own scratch copy of `scripts/flow/` — replacing the artifact, not redirecting the path — so the
+# production resolution stays single, literal and unreachable from any invocation.
+WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-scan.py"
+
+# roborev_waiver_author_allowed <login>: is this comment author permitted to GRANT a waiver?
+roborev_waiver_author_allowed() {
+  local want="$1" allowed
+  [ -n "$want" ] || return 1
+  for allowed in $ROBOREV_WAIVER_AUTHORS; do
+    [ "$want" = "$allowed" ] && return 0
+  done
+  return 1
+}
+
+# roborev_absence_waiver_lookup <base-sha> <head-sha> <job-id>: does the PR for this branch carry a
+# waiver for THIS REVIEW? Sets, and never returns non-zero:
+#   ROBOREV_WAIVER_STATE   granted | stale | malformed | none | unavailable
+#   ROBOREV_WAIVER_AUTHOR / _SCOPE / _REASON / _DETAIL
+#
+# THE MARKER — a DEDICATED LINE of a PR comment, anchored at column zero, all four fields required:
+#     roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>
+#
+# ===== WHY IT IS ANCHORED, AND WHY THE DIAGNOSTIC NEVER PRINTS A COMPLETE ONE (roborev job 23) =====
+# THE DEFECT THIS CLOSES, which is the sharpest instance of a shape this issue keeps producing: AN
+# ARTIFACT THAT DESCRIBES THE ESCAPE HATCH BECAME THE ESCAPE HATCH. Detection used to accept the marker
+# ANYWHERE inside a comment whose newlines had been flattened, and the absence-FAIL diagnostic printed a
+# complete marker carrying the live sha — so pasting the summary block into a PR comment, which is the
+# documented practice throughout this repo, silently authorized the next run. A quoted example or a
+# waiver REQUEST self-granted the same way. It is the same defect as prose inside a diff naming its own
+# oracle, which is why the column-zero anchor exists on the census matcher.
+#
+# THREE INDEPENDENT LAYERS, because these blocks get pasted routinely:
+#   (1) LINE BOUNDARIES ARE PRESERVED and the marker must BE the line — no leading whitespace, no
+#       quoting prefix, nothing before it. An indented, `>`-quoted or mid-sentence copy cannot match.
+#   (2) PLACEHOLDER REASONS ARE REFUSED: empty, an unsubstituted `<…>`, or one of the bare placeholders
+#       `claim.sh` already refuses (`why`/`todo`/`tbd`/…). A pasted TEMPLATE therefore reads MALFORMED.
+#   (3) THE DIAGNOSTIC EMITS NO VALID MARKER AT ALL — it points the requester at `--help`. Layers 1 and 2
+#       make a pasted block harmless; layer 3 means the block never carries a live credential to begin with.
+#
+# ===== AND THE WAIVER IS BOUND TO THE WHOLE REVIEW SCOPE, NOT JUST THE HEAD (roborev job 23) =====
+# Binding `head` alone let ONE persistent comment waive a LATER, different review at the same head — a
+# vacuous re-run, or a review against a different base with a different census. The authorizer's judgment
+# under constraint (d) was about a SPECIFIC review and its token accounting, so the waiver may not outlive
+# it: `base`, `head` and `job` are ALL required and ALL verified, and a marker missing any field is
+# MALFORMED rather than granted.
+#
+# ===== AUTHORSHIP: ENFORCED TO "AN ALLOWLISTED HUMAN", PROCESS-ENFORCED BEYOND THAT =====
+# WHAT IS MECHANIZED: the author must be on the explicit allowlist above, the marker must be a dedicated
+# anchored line on the PR, it must name the certified base, head AND job, and it must carry a substantive
+# reason — and the author, the scope, the reason and the absent paths all land in the summary block.
+#
+# WHAT REMAINS PROCESS-ENFORCED WITH AN AUDIT TRAIL, and this is the WHOLE residual now: on this fleet the
+# worker, the closer and the owner all post through the SAME GitHub login, so this code cannot tell WHICH
+# ALLOWLISTED HUMAN posted a given comment. The ruling that only the OWNER or the coordination LEAD may
+# GRANT — a worker or closer may only REQUEST — therefore rests on process and on the comment being
+# permanently attributable, NOT on a mechanical check. That is narrower than the disclaimer this once
+# carried ("authorship cannot be verified at all"), and the narrowing matters: the over-broad version is
+# what justified having no author check whatsoever, which let ANY commenter on a public repository grant a
+# waiver (job 25). An unenforceable claim must be scoped to what is actually true, never dropped whole.
+#
+# FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, a marker for another scope, a placeholder reason,
+# a missing field — every one of them leaves the absence FAILing, under its own named state.
+roborev_absence_waiver_lookup() {
+  local base="$1" head="$2" job="$3" json result
+  ROBOREV_WAIVER_STATE="none"
+  ROBOREV_WAIVER_AUTHOR=""
+  ROBOREV_WAIVER_SCOPE=""
+  ROBOREV_WAIVER_REASON=""
+  ROBOREV_WAIVER_DETAIL=""
+  if [ -z "$base" ] || [ -z "$head" ] || [ -z "$job" ] || [ "$job" = "-" ]; then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="this run has no complete review scope (base='$base' head='$head' job='$job') for a waiver to be bound to"
+    return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="'gh' is not on PATH, so no PR comment could be read"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="the structured waiver scanner is unusable (python3 present: $(command -v python3 >/dev/null 2>&1 && printf yes || printf no); tool: $WAIVER_SCAN_TOOL) — a waiver is NEVER decided from a flattened text stream, so this fails closed rather than falling back to line parsing"
+    return 0
+  fi
+  # ===== ONE `gh` CALL, RAW JSON, DECIDED STRUCTURALLY (#3312 job 26) =====
+  # `--json comments` WITHOUT `--jq`: the author and the body must stay SEPARATE FIELDS of the same
+  # object all the way to the decision. The previous form asked `jq` to flatten them into one text
+  # stream with an in-band author record, and a comment body is attacker-controlled on a public
+  # repository — so a body could carry its own author line and be attributed to an allowlisted login,
+  # defeating the allowlist entirely. CONTROL AND DATA MUST NOT SHARE A CHANNEL WHEN THE DATA IS
+  # ATTACKER-CONTROLLED; the fix removes the delimiter rather than choosing a rarer one.
+  #
+  # The `gh` FAILURE IS A STATE, never a silent empty result: it exits non-zero when there is no PR for
+  # the branch, when auth is missing and when the API errors, and all three mean no waiver could be
+  # established — which keeps the absence FAILing.
+  if ! json=$(cd "$REPO" && gh pr view --json comments 2>/dev/null); then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no waiver could be read"
+    return 0
+  fi
+  [ -n "$json" ] || return 0
+  # The scanner owns the WHOLE decision — shape, scope, reason and authorization — so this shell never
+  # associates an author with a body. Its output is `key=value` lines with whitespace-collapsed values,
+  # the same shape `roborev-job-facts.py` emits, so a free-text reason cannot introduce a second channel.
+  if ! result=$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null); then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="the PR comments could not be parsed as JSON, so no waiver could be established"
+    return 0
+  fi
+  ROBOREV_WAIVER_STATE=$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)
+  ROBOREV_WAIVER_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
+  ROBOREV_WAIVER_SCOPE=$(printf '%s\n' "$result" | sed -n 's/^scope=//p' | head -1)
+  ROBOREV_WAIVER_REASON=$(printf '%s\n' "$result" | sed -n 's/^reason=//p' | head -1)
+  ROBOREV_WAIVER_DETAIL=$(printf '%s\n' "$result" | sed -n 's/^detail=//p' | head -1)
+  # A STATE THIS CODE HAS NEVER JUDGED IS NOT A PASS: an unrecognised (or empty) verdict from the
+  # scanner fails closed instead of inheriting the permissive path.
+  case "$ROBOREV_WAIVER_STATE" in
+    granted|unauthorized|stale|malformed|none) ;;
+    *)
+      ROBOREV_WAIVER_DETAIL="the waiver scanner returned the unrecognised state '$ROBOREV_WAIVER_STATE'; failing closed"
+      ROBOREV_WAIVER_STATE="unavailable"
+      ;;
+  esac
+  return 0
 }

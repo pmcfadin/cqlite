@@ -31,6 +31,9 @@ These are read by every surface through
 | `CQLITE_OTEL_SERVICE_VERSION` | string | crate version | `service.version` resource attribute. |
 | `CQLITE_OTEL_SAMPLING_RATIO` | f64 | `1.0` | Trace-ID-ratio sampling probability, clamped to `[0.0, 1.0]`. |
 | `CQLITE_OTEL_TIMEOUT_MS` | u64 | `10000` | Exporter export timeout in milliseconds. |
+| `CQLITE_PARTITION_ACCESS_PROBE` | bool | `false` | Bounded partition access-distribution probe (issue #2827). Off by default; costs zero bytes and one relaxed atomic load when off, exactly 3 MiB fixed when on. Turn it on to measure a keyed workload's hot-set concentration, then read `cqlite.read.partition_access.*`. |
+| `CQLITE_PARTITION_ACCESS_WINDOW_SECS` | u64 | `60` | Measurement-window length for that probe. **Lower it if the cache-sizing procedure refuses your window as a non-census sample:** the counting table holds ~98,304 distinct partitions, so a workload touching more than that in one window is sampled rather than counted, and a sample cannot be priced against a real cache budget. A shorter window is the operator-side remedy. Unparseable or zero values keep the default and log an error. |
+| `CQLITE_PARTITION_ACCESS_WINDOW_ACCESSES` | u64 | `5000000` | Second window bound for the same probe: close after this many recorded accesses, whichever comes first. Also lowerable to force a census on a high-cardinality workload. |
 | `CQLITE_VERIFY_PRESENCE_ORACLE` | bool | `false` | Opt-in soundness check (issue #2163). When true, an SSTable read whose bloom/BTI-trie reports a key "definitely absent" runs an AUTHORITATIVE confirmation scan and increments `cqlite.read.bloom.false_negatives` on a contradiction. Off by default — it is the one presence-oracle counter that costs real work; turn it on transiently to prove the oracle-soundness invariant (expected value: 0), then off. |
 
 Unparseable values fall back to the documented default rather than erroring, so
@@ -212,10 +215,17 @@ dot-separated under the `cqlite.` root; units use UCUM annotations
 | `cqlite.read.bytes` | counter | `By` | `cqlite.sstable.format`, `cqlite.compression` |
 | `cqlite.read.partitions` | counter | `{partition}` | `cqlite.sstable.format` |
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` |
-| `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`, `cqlite.query.access_path`, `cqlite.sstable.format` |
+| `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`, `cqlite.read.lookup_route`, `cqlite.sstable.format` |
 | `cqlite.read.bloom.checks` | counter | `1` | `cqlite.result`, `cqlite.sstable.format` |
 | `cqlite.read.sstables_pruned` | counter | `{sstable}` | `cqlite.sstable.format` |
 | `cqlite.read.bloom.false_negatives` | counter | `1` | `cqlite.sstable.format` |
+| `cqlite.read.partition_access.distinct_partitions` | counter | `{partition}` | `cqlite.read.repeat_bucket`, `cqlite.read.size_source` |
+| `cqlite.read.partition_access.accesses` | counter | `1` | `cqlite.read.repeat_bucket` |
+| `cqlite.read.partition_access.bytes` | counter | `By` | `cqlite.read.repeat_bucket` |
+| `cqlite.read.partition_access.sample_denominator` | gauge | `1` | (none) |
+| `cqlite.read.partition_access.dropped_accesses` | counter | `1` | (none) |
+| `cqlite.read.partition_access.sampling_floor` | gauge | `1` | (none) |
+| `cqlite.read.partition_access.window_dropped_accesses` | gauge | `1` | (none) |
 | `cqlite.storage.open.sstables` | counter | `{sstable}` | (none) |
 | `cqlite.storage.open.bytes` | counter | `By` | (none) |
 | `cqlite.storage.open.tables` | counter | `1` | (none) |
@@ -295,7 +305,9 @@ closed value space so cardinality stays bounded. Source:
 | `cqlite.compression` | `lz4`, `snappy`, `none`, … |
 | `cqlite.result` | `hit`, `miss` |
 | `cqlite.read.lookup_route` | `index`, `bti_trie` |
-| `cqlite.query.access_path` | `full_scan`, `partition_lookup`, `multi_partition_lookup`, `clustering_slice`, `fallback_full_scan` |
+| `cqlite.read.repeat_bucket` | `1`, `2`, `3-4`, `5-8`, `9-16`, `17+` (issue #2827) |
+| `cqlite.read.size_source` | `index`, `successor_gap`, `unavailable` (issue #2827) — `successor_gap` is a MEASURED on-disk extent, `index` an index-recorded size (no Cassandra 5.0 index format records one), `unavailable` a genuinely unknown extent contributing zero bytes |
+| `cqlite.query.access_path` | `full_scan`, `partition_lookup`, `multi_partition_lookup`, `streaming_partition_lookup`, `metadata_partition_lookup`, `clustering_slice`, `fallback_full_scan` — a plain full-PK equality point read reports **`streaming_partition_lookup`**, never bare `partition_lookup` |
 | `cqlite.query.fallback_reason` | `no_schema`, `partition_key_not_fully_constrained`, `partition_key_encoding_failed`, `metadata_scan_path`, `legacy_executor_path`, `tombstones_build_no_prune` |
 | `cqlite.query.plan_type` | `table_scan`, `point_lookup`, `index_scan`, `range_scan`, `aggregation` |
 | `cqlite.rpc.method` | fixed `FlightService` method set (`do_get`, `get_flight_info`, `get_schema`, `handshake`, …) |
