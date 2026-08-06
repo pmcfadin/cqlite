@@ -3594,13 +3594,17 @@ assert_says '--help still documents the prompt-content key' 'prompt-content'
 assert_says '--help documents BOTH diff-delivery modes' 'TWO DIFF-DELIVERY MODES'
 # C‴ (#3312): the documented CONTRACT changed with the verdict semantics, so --help must say that snapshot
 # mode is reported rather than certified, and must name the keys that carry the record instead.
-assert_says '--help says snapshot mode is observed and reported, not certified' \
-  'SNAPSHOT mode is OBSERVED AND REPORTED, not certified'
+# C⁗ (#3312): the documented contract moved with the verdict semantics again — snapshot mode is now DETECTED
+# and reported, nothing is read, and the hang class must be described as unreachable rather than fixed.
+assert_says '--help says snapshot mode is detected and reported, not certified' \
+  'SNAPSHOT mode is DETECTED AND REPORTED, not certified'
 assert_says '--help states plainly what a snapshot-mode PASS does NOT assert' \
-  'does NOT assert the reviewer received the census paths'
+  'does NOT.{0,3}\n?assert the reviewer received the census paths|does NOT$'
+assert_says '--help says nothing is read' 'NOTHING IS READ: no digest, no size, no stat'
+assert_says '--help describes the hang class as unreachable, NOT fixed' 'NOT REACHABLE rather than fixed'
 assert_says '--help says inline mode is unchanged' 'INLINE mode$|INLINE mode is certified exactly as before'
-assert_says '--help documents the snapshot record keys' 'snapshot-path/-digest/-expected'
-assert_says '--help says safety survives the loss of certification' 'safety survives the loss of'
+assert_says '--help documents the snapshot record keys' 'snapshot-path/-containment/-expected'
+assert_says '--help says an unshaped path or the delegated tier is a named FAIL' 'is a named FAIL, not a NOTICE'
 assert_never_enqueued '--help'
 
 printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
