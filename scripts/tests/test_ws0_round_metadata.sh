@@ -122,13 +122,30 @@ make_corpus "$TMP/corpus"
 #   scan-1 scan-2 scan-3  bypass-1 bypass-2 bypass-3  merge-1 merge-2 merge-3
 # i.e. every arm's three reps back to back, `merge` never in first position, and no two
 # arms of the same round contemporaneous. The post-fix order is asserted below.
+#
+# ROUND 22 — WHY THIS PROBE NOW NEEDS A REAL PIN AND A REAL CORPUS
+#
+# The extracted loop below is the DRIVER'S loop, verbatim, and since round 22 that loop ends each
+# arm-rep with `verify_corpus_boundary_or_refuse … || exit 1` — the corpus-boundary check, WIRED.
+# So the probe must satisfy it, which means a real corpus and a real `session-corpus-pin.json`; the
+# alternative (stubbing the boundary function out) would make this probe run a loop the driver does
+# not have, which is the drift the extraction exists to prevent.
+#
+# It is also a POSITIVE CONTROL for the wiring, sitting where it costs nothing: every ordering
+# assertion below now passes THROUGH the boundary check over an UNTOUCHED corpus, so a guard that
+# refused a legitimate run would red every one of them.
 order_probe() { # order_probe <reps> <arms…> — echoes the observed measurement order
   local reps="$1"; shift
   ( set -uo pipefail
-    REPS="$reps"; TEMPS="warm"; ARMS="$*"; OUT_DIR="$TMP/order"
+    REPS="$reps"; TEMPS="warm"; ARMS="$*"; OUT_DIR="$TMP/order"; CORPUS="$TMP/corpus"
     mkdir -p "$OUT_DIR"
+    ws0_pin_session_corpus "$OUT_DIR" "$CORPUS" "$reps" warm "$*" 1
     measure_scan()   { printf 'scan-%s\n' "$2"; }
     measure_flight() { printf 'flight-%s-%s\n' "$3" "$2"; }
+    # The boundary check the driver's loop calls, from the SHIPPED library — sourced, never
+    # stubbed, so the extracted loop is the loop the driver runs.
+    # shellcheck source=scripts/perf/lib-corpus-boundary.sh
+    source "$REPO_ROOT/scripts/perf/lib-corpus-boundary.sh"
     eval "$(awk '/^rotate_arms\(\)/,/^}/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
     # The loop itself, taken from the driver so this cannot drift into testing a copy.
     eval "$(awk '/^_ARM_LIST=/,/^done$/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
