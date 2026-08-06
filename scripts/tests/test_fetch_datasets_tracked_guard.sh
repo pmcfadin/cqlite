@@ -2226,6 +2226,124 @@ case "$OUT" in
   *) bad "3310-staged-present: silently dropped a measured signal; output: $OUT" ;;
 esac
 
+# === Case 40: STAGED deletions of AWKWARDLY-NAMED paths (#3310 roborev r2) =====
+# The staged-deletion scan is the one path-reading step of the probe that did not
+# consume git's NUL-delimited output directly: it read the porcelain helper's
+# newline-JOINED return value. Measured facts that set the scope of these cases:
+#   * `git status --porcelain -z` emits paths VERBATIM — `-z` disables the
+#     C-quoting that plain porcelain applies to space-bearing and non-ASCII paths.
+#     So the space/non-ASCII cases below pass on the newline-joined reader too;
+#     they are REGRESSION PINS for the quoting class, not reproductions.
+#   * a path containing a NEWLINE is a genuine defect on that reader: the record
+#     splits, the probe reports a truncated path, and the "EXACTLY this command"
+#     repair then names a file that does not exist. That case is the red one.
+# All three are kept: the pins are what stop a future edit from reintroducing
+# C-quoted parsing, which is invisible until someone tracks such a path.
+#
+# stage_delete_case <label> <dir> <rel-under-datasets> <expect-missing:1|0>
+#   Adds a tracked fixture at <rel>, stage-deletes it (git rm --cached), and
+#   removes it from disk when a missing report is expected. Asserts the report,
+#   the EXACT path in both the listing and the repair command, and that pasting
+#   the advertised command verbatim really restores the file.
+stage_delete_case() {
+  local label="$1" dir="$2" rel="$3" expect_missing="$4" cmd
+  make_repo "$dir"
+  make_usable_corpus "$dir/test-data/datasets"
+  mkdir -p "$dir/test-data/datasets/$(dirname "$rel")"
+  printf 'awkwardly named tracked fixture\n' >"$dir/test-data/datasets/$rel"
+  git -C "$dir" add -f -- "test-data/datasets/$rel"
+  git -C "$dir" commit -qm "add awkward fixture"
+  git -C "$dir" rm -q --cached -- "test-data/datasets/$rel" >/dev/null
+  if [ "$expect_missing" = 1 ]; then
+    rm -f "$dir/test-data/datasets/$rel"
+  fi
+  run_verify "$dir" "$dir/test-data/datasets"
+
+  if [ "$expect_missing" != 1 ]; then
+    # The false-ABSENT direction: the content is still on disk, so a probe that
+    # mis-parses the path would call a present file missing.
+    if [ "$RC" -eq 0 ]; then
+      ok "$label: content on disk is not reported missing (exit 0)"
+    else
+      bad "$label: false 'missing' on a staged deletion whose content is present (exit $RC); output: $OUT"
+    fi
+    case "$OUT" in
+      *"$PROBE_MISSING_MARKER"*) bad "$label: called a present file missing; output: $OUT" ;;
+      *) ok "$label: no missing-fixture claim" ;;
+    esac
+    case "$OUT" in
+      *"STAGED DELETION"*) ok "$label: still reports the measured staged deletion as a NOTE" ;;
+      *) bad "$label: silently dropped the measured staged deletion; output: $OUT" ;;
+    esac
+    return 0
+  fi
+
+  if [ "$RC" -ne 0 ]; then
+    ok "$label: reports the staged deletion (exit $RC)"
+  else
+    bad "$label: exited 0 with the fixture gone; output: $OUT"
+  fi
+  # The EXACT path must appear — a truncated or quoted spelling must not pass.
+  case "$OUT" in
+    *"test-data/datasets/$rel"*) ok "$label: the report names the exact path" ;;
+    *) bad "$label: the exact path is absent (truncated or re-quoted?); output: $OUT" ;;
+  esac
+  cmd="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+  if [ -n "$cmd" ]; then
+    ok "$label: a --staged --worktree repair line was printed"
+  else
+    bad "$label: no staged-class repair line; output: $OUT"
+  fi
+  if [ ! -e "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: repaired nothing itself"
+  else
+    bad "$label: the probe restored the file"
+  fi
+  # The decisive assertion: the ADVERTISED command, pasted verbatim, must repair.
+  # A mangled path here fails loudly instead of silently no-op'ing, because the
+  # file's return is what is checked — not the command's exit status.
+  ( cd "$dir" && eval "$cmd" ) >/dev/null 2>&1
+  if [ -f "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: pasting the advertised command verbatim restores the file"
+  else
+    bad "$label: the advertised command did not repair it: '$cmd'"
+  fi
+}
+
+stage_delete_case "3310-staged-space" "$T/case40a-repo" "goldens/staged spaced-Data.db.jsonl" 1
+stage_delete_case "3310-staged-utf8"  "$T/case40b-repo" "goldens/é-café-Data.db.jsonl" 1
+stage_delete_case "3310-staged-newline" "$T/case40c-repo" "$(printf 'goldens/line\nbreak-Data.db.jsonl')" 1
+
+# === Case 41: the false-ABSENT direction for the same awkward names ===========
+stage_delete_case "3310-staged-space-present" "$T/case41a-repo" "goldens/present spaced-Data.db.jsonl" 0
+stage_delete_case "3310-staged-utf8-present"  "$T/case41b-repo" "goldens/présent-Data.db.jsonl" 0
+
+# === Case 42: a WORKTREE deletion of the same awkward names ===================
+# The index-census half already reads `ls-files -z` NUL-delimited, so this is a
+# regression pin on the half that was correct — the two halves must not diverge.
+R42="$T/case42-repo"
+make_repo "$R42"
+make_usable_corpus "$R42/test-data/datasets"
+R42_NL="$(printf 'goldens/worktree line\nbreak-Data.db.jsonl')"
+mkdir -p "$R42/test-data/datasets/goldens"
+printf 'x\n' >"$R42/test-data/datasets/$R42_NL"
+git -C "$R42" add -f -- "test-data/datasets/$R42_NL"
+git -C "$R42" commit -qm "add newline-bearing fixture"
+rm -f "$R42/test-data/datasets/$R42_NL"
+run_verify "$R42" "$R42/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-worktree-newline: reports the worktree deletion of a newline-bearing path (exit $RC)"
+else
+  bad "3310-worktree-newline: exited 0 with the fixture gone; output: $OUT"
+fi
+R42_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1 | sed 's/^ERROR:[[:space:]]*//')"
+( cd "$R42" && eval "$R42_CMD" ) >/dev/null 2>&1
+if [ -f "$R42/test-data/datasets/$R42_NL" ]; then
+  ok "3310-worktree-newline: the advertised command restores a newline-bearing path"
+else
+  bad "3310-worktree-newline: the advertised command did not repair it: '$R42_CMD'"
+fi
+
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
