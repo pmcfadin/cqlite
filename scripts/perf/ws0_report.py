@@ -298,7 +298,12 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # rebuilds — see ws0_binaries for the full argument, which is F6's).
     binary_provenance = verify_binary_provenance(d)
     corpus_rows = identity["rows"]
-    full_matrix = len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
+    # The PINNED columns-per-row, taken from the same REQUIRED-and-complete identity as the row
+    # count (#3272 round 17). `load_corpus_identity` has already validated it as a positive exact
+    # integer, so this is a read of an established quantity — the bare-scan collector's cell check
+    # is a wiring of a pin the rig already had, not a new source of truth.
+    corpus_cells_per_row = identity["cells_per_row"]
+    full_matrix =len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
 
     results = {
         "issue": "#3096 (rig hardened by #3272)",
@@ -507,8 +512,18 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # compared. Taken from the PIN rather than from `--corpus`, for the reason `flight_endpoint`
         # is: it is a pre-measurement fact, so a scan performed over other bytes cannot be excused
         # by re-reporting with a matching flag.
+        # `corpus_cells_per_row` (#3272 round 17): every pass's CELL count must be
+        # `corpus_rows x cells_per_row`, so a scan returning every row with MISSING COLUMNS is
+        # refused instead of published — the row check could not see it, and the rig's ratio is a
+        # measurement of exactly that content volume.
         scan = collect_scan(
-            d, temp, reps, scan_passes, corpus_rows, pinned_scan_corpus
+            d,
+            temp,
+            reps,
+            scan_passes,
+            corpus_rows,
+            corpus_cells_per_row,
+            pinned_scan_corpus,
         )
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")

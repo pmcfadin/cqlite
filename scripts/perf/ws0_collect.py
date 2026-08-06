@@ -145,9 +145,9 @@ def prewarm_warning(block: dict, arm_label: str, temp: str) -> list[str]:
 
 
 def check_scan_passes(
-    tag: str, payload: dict, scan_passes: int, corpus_rows: int
-) -> tuple[int, float, list[dict]]:
-    """`(rows, secs, passes)` DERIVED from the per-pass records, or `Invalid` (#3272 F2).
+    tag: str, payload: dict, scan_passes: int, corpus_rows: int, cells_per_row: int
+) -> tuple[int, int, float, list[dict]]:
+    """`(rows, cells, secs, passes)` DERIVED from the per-pass records, or `Invalid` (#3272 F2).
 
     # The finding
 
@@ -176,6 +176,29 @@ def check_scan_passes(
     read and CROSS-CHECKED against the derived ones, so a payload whose own fields disagree
     is refused rather than silently overridden: which of them is wrong cannot be known, so
     neither is reported.
+
+    # ROWS WERE CHECKED AND **CELLS** WERE NOT (#3272 round 17)
+
+    The row check above is a check on HOW MANY ROWS the pass visited, and nothing here read the
+    `cells` counter the bench writes beside it (`scan_bench.rs`: `cells += row.values.len()`).
+    A row's COLUMN COUNT is the other half of how much work a scan did, so a pass returning
+    every row with FEWER COLUMNS EACH satisfied every requirement above — right pass count,
+    every pass observing exactly the pinned corpus row count, aggregates equal to the derived
+    sums — while decoding materially less data, and its rows/s was published as the denominator
+    of the rig's only output.
+
+    That is not a counter-hygiene nit, because of what the rig's parent issue is FOR. #3096
+    measures ARROW-ENCODE COST as a bare-scan-vs-Flight ratio, and BOTH arms counted rows and
+    ignored content volume. So a shortfall in cells makes work DISAPPEAR FROM THE MEASUREMENT
+    rather than from the validation — and an ASYMMETRIC shortfall (one arm thin, the other full)
+    moves the headline ratio directly, in whichever direction the thin arm sits.
+
+    The oracle already exists and is already pinned: `cells_per_row` is a recorded corpus-identity
+    field (`positive` in `IDENTITY_INT_FIELDS`, printed in the report's `corpus_identity`, 12 for
+    the canonical corpus), so this is wiring a pinned quantity to a check that did not consult it.
+    Stated as `cells == rows * cells_per_row` and DERIVED-then-compared, never accepted as
+    reported: the same rule F2 set for rows and seconds, for the same reason — the sum of a
+    payload's own `cells` fields would be self-consistent with any thinner scan that wrote them.
     """
     passes = payload.get("passes")
     if passes is None:
@@ -201,7 +224,20 @@ def check_scan_passes(
             " and reporter given different --scan-passes). Re-run the rep, or report it"
             " with the --scan-passes it actually ran."
         )
+    # The per-pass CELL count this rig requires, derived from the PINNED identity rather than from
+    # anything the bench wrote (#3272 round 17). `positive_int` because it is a MULTIPLIER of the
+    # required cell count: a zero or fractional `cells_per_row` would make the requirement below
+    # satisfiable by a scan that emitted no cells at all.
+    per_row_cells = positive_int(
+        f"bare-scan rep {tag}: the corpus identity's cells_per_row",
+        cells_per_row,
+        "It is the pinned columns-per-row this rig requires every pass to have emitted, so a"
+        " non-positive or fractional value would make the cell requirement satisfiable by a scan"
+        " that decoded fewer columns than the corpus has — the defect the requirement closes.",
+    )
+    required_cells = corpus_rows * per_row_cells
     derived_rows = 0
+    derived_cells = 0
     derived_secs = 0.0
     records: list[dict] = []
     for i, p in enumerate(passes):
@@ -214,6 +250,15 @@ def check_scan_passes(
             p.get("rows"),
             "It is this pass's contribution to the rep's row denominator, so a"
             " non-positive or absent value is refused rather than summed.",
+        )
+        p_cells = positive_int(
+            f"bare-scan rep {tag} pass {i} cells",
+            p.get("cells"),
+            "It is this pass's CONTENT VOLUME — the columns it actually decoded — which the row"
+            " count cannot express, and which the rig's ratio is a measurement OF. An absent"
+            " value is an error rather than an assumed full row: defaulting it would make the"
+            " requirement below pass exactly when the artifact is silent about the work done"
+            " (#3272 round 17).",
         )
         p_secs = positive_finite_float(
             f"bare-scan rep {tag} pass {i} secs",
@@ -233,9 +278,31 @@ def check_scan_passes(
                 " this report would print. Checking only the SUM cannot see this: a short"
                 " pass beside a long one adds up to a plausible total (#3272 F2)."
             )
+        # ...and EVERY pass emitted THE WHOLE ROW, not merely every row (#3272 round 17). The
+        # requirement is the DERIVED product `corpus_rows * cells_per_row`, both operands pinned
+        # before the measurement — never the payload's own `cells` sum, which is self-consistent
+        # with any thinner scan that wrote it. Per pass and not on a total, for the reason the row
+        # check is: a thin pass beside a fat one sums to a plausible aggregate.
+        if p_cells != required_cells:
+            raise Invalid(
+                f"bare-scan rep {tag} pass {i} emitted {p_cells:,} cells, but this corpus'"
+                f" {corpus_rows:,} rows x {per_row_cells} pinned cells/row is {required_cells:,}."
+                " THE ROW COUNT CANNOT SEE THIS: this pass returned every row while decoding"
+                f" {'FEWER' if p_cells < required_cells else 'MORE'} COLUMNS PER ROW than the"
+                " corpus has, so it did substantially"
+                f" {'less' if p_cells < required_cells else 'more'} work than the figure it is"
+                " published as. The rig's whole output is a bare-scan-vs-Flight ratio measuring"
+                " ARROW-ENCODE COST (#3096), so content volume that disappears from the"
+                " measurement moves the headline number rather than failing validation. Re-run"
+                " the rep with the driver (whose projection is fixed to `SELECT *`); do not"
+                " report a scan of thinner rows as this arm's result (#3272 round 17)."
+            )
         derived_rows += p_rows
+        derived_cells += p_cells
         derived_secs += p_secs
-        records.append({"pass": p.get("pass", i), "rows": p_rows, "secs": p_secs})
+        records.append(
+            {"pass": p.get("pass", i), "rows": p_rows, "cells": p_cells, "secs": p_secs}
+        )
     # The RECORDED aggregates are cross-checked against the derived ones — same rule
     # `load_corpus_identity` applies to `bytes_per_row`, and `collect_flight` to `rows_per_s`.
     recorded_rows = positive_int(
@@ -267,7 +334,11 @@ def check_scan_passes(
             f" record(s) sum to {derived_secs!r}. As with the row count, the bench derives the"
             " aggregate from the passes, so a disagreement means neither can be reported."
         )
-    return derived_rows, derived_secs, records
+    # NO recorded CELL aggregate is cross-checked, and that is a statement about the artifact rather
+    # than an omission: `scan_bench.rs` writes `cells` PER PASS only — there is no `cells_denominator`
+    # beside `rows_denominator` — so there is no second field to disagree with. The derived total is
+    # returned for the record; the requirement that made it correct was applied per pass above.
+    return derived_rows, derived_cells, derived_secs, records
 
 
 def collect_scan(
@@ -276,6 +347,7 @@ def collect_scan(
     reps: int,
     scan_passes: int,
     corpus_rows: int,
+    cells_per_row: int,
     pinned_corpus: pathlib.Path,
 ) -> dict:
     """The bare-scan arm, WITH each rep's observed round/position (#3272 R3).
@@ -288,6 +360,12 @@ def collect_scan(
     validated against both, and the rep's rows/seconds are DERIVED from them rather than
     read from the aggregate the bench also wrote. See `check_scan_passes`.
 
+    `cells_per_row` is REQUIRED the same way (#3272 round 17), and positionally rather than
+    defaulted for the reason `pinned_corpus` is: the rows check was a check on how many rows a pass
+    VISITED and nothing read the CELL count beside it, so a scan returning every row with missing
+    columns passed while doing materially less work. A default here would silently disable that
+    comparison for a caller that forgot to pass one — which is the shape this issue keeps finding.
+
     `pinned_corpus` is REQUIRED positionally, never defaulted (#3272): every rep's recorded
     `corpus`, `schema` and `table_dirs_ingested` are compared against it, so a default would
     silently disable those comparisons for a caller that forgot to pass one — the
@@ -299,6 +377,7 @@ def collect_scan(
     cycles_per_row: list[float] = []
     ipc: list[float] = []
     rows_total = 0
+    cells_total = 0
     setup_cycles_total = 0
     per_rep = []
     missing: list[str] = []
@@ -341,8 +420,13 @@ def collect_scan(
         # validators as before (`positive_int` / `positive_finite_float`, which refuse a bool,
         # a fractional value, a junk-bearing string and a non-positive or non-finite one) —
         # per pass now, as well as on the aggregate.
-        rows, secs, pass_records = check_scan_passes(
-            tag, payload, scan_passes, corpus_rows
+        # ...and the CELL count of every pass must be the pinned `corpus_rows * cells_per_row`
+        # (#3272 round 17): the row count says how many rows a pass VISITED and nothing said how
+        # much of each it DECODED, so a scan returning every row with missing columns satisfied
+        # every check here while doing substantially less work — and this arm is the denominator
+        # of a ratio whose subject is exactly that content volume.
+        rows, cells, secs, pass_records = check_scan_passes(
+            tag, payload, scan_passes, corpus_rows, cells_per_row
         )
         # Both legs' counters must be OBSERVED. `.get("cycles", 0)` used to
         # fabricate a zero here, so a run with no setup artifact at all was
@@ -384,6 +468,7 @@ def collect_scan(
         cycles_per_row.append(cyc / rows)
         ipc.append(ins / cyc)
         rows_total += rows
+        cells_total += cells
         setup_cycles_total += setup["cycles"]
         per_rep.append(
             {
@@ -392,6 +477,12 @@ def collect_scan(
                 "position_in_round": meta["position"],
                 "arms_in_round": meta["arms_in_round"],
                 "rows": rows,
+                # THE CONTENT VOLUME the rows above were carried by (#3272 round 17), recorded
+                # beside them so the report states how much was DECODED and not only how many rows
+                # were visited — the quantity the pre-fix collector never read.
+                "cells": cells,
+                "cells_required_per_pass": corpus_rows * cells_per_row,
+                "cells_per_row_pinned": cells_per_row,
                 "secs": secs,
                 "rows_per_sec": rows / secs,
                 "cycles_total": total["cycles"],
@@ -426,6 +517,12 @@ def collect_scan(
                     " equal the corpus row count; the payload's recorded rows_denominator"
                     " and timed_scan_secs were cross-checked against the derived sums"
                 ),
+                "cells_source": (
+                    "DERIVED as the sum of the per-pass cells, each of which was required to equal"
+                    " the corpus row count x the corpus identity's pinned cells_per_row — so a"
+                    " pass returning every row with MISSING COLUMNS is refused rather than"
+                    " published, which the row count alone could not see (#3272 round 17)"
+                ),
                 "prewarm": prewarm[-1]["status"],
             }
         )
@@ -445,6 +542,11 @@ def collect_scan(
         "cycles_per_row": spread(cycles_per_row),
         "ipc": spread(ipc),
         "row_denominator_total": rows_total,
+        # The CONTENT VOLUME behind that denominator (#3272 round 17). Recorded at the block level
+        # too, because `row_denominator_total` is the figure a reader compares across arms and it
+        # cannot express how much of each row was decoded.
+        "cell_total": cells_total,
+        "cells_per_row_pinned": cells_per_row,
         "round_metadata": round_meta,
         "setup_cycles_subtracted_total": setup_cycles_total,
         # Issue #3096 review, finding 1: the warm bare-scan arm had no untimed
