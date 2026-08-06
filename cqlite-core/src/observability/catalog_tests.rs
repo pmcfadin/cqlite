@@ -164,6 +164,44 @@ fn read_scan_window_refill_counter_is_registered_and_namespaced() {
 }
 
 #[test]
+fn partition_access_probe_metrics_have_dedicated_otel_arms_not_the_adhoc_fallback() {
+    // Issue #2827: without a dedicated arm these fall through `add_counter`'s
+    // ad-hoc `_ =>` branch, which builds a fresh instrument per emit and exports
+    // the series with NO unit (`By`, `{partition}`) and no description — and, by
+    // construction, `every_instrument_registered_in_otel_is_catalogued` cannot see
+    // them either. Assert the arms exist at the source level, like the #2419
+    // saturation-gauge guard above.
+    let otel_src = include_str!("otel.rs");
+    for (metric, arm) in [
+        (
+            READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
+            "catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS => &i.read_partition_access_distinct",
+        ),
+        (
+            READ_PARTITION_ACCESS_ACCESSES,
+            "catalog::READ_PARTITION_ACCESS_ACCESSES => &i.read_partition_access_accesses",
+        ),
+        (
+            READ_PARTITION_ACCESS_BYTES,
+            "catalog::READ_PARTITION_ACCESS_BYTES => &i.read_partition_access_bytes",
+        ),
+        (
+            READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
+            "catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR",
+        ),
+    ] {
+        assert!(
+            otel_src.contains(arm),
+            "{metric} must have a DEDICATED otel.rs dispatch arm so its series carries \
+             its catalogued unit and description, never the ad-hoc fallback"
+        );
+    }
+    // And the instruments must be constructed with their catalogued units.
+    assert!(otel_src.contains(".u64_counter(catalog::READ_PARTITION_ACCESS_BYTES)"));
+    assert!(otel_src.contains(".i64_gauge(catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR)"));
+}
+
+#[test]
 fn every_instrument_registered_in_otel_is_catalogued() {
     // Issue #2426 (roborev MEDIUM, F1): guard the "emitted instrument absent
     // from ALL_METRICS" bug class. `otel.rs` is the canonical instrument
@@ -186,21 +224,35 @@ fn every_instrument_registered_in_otel_is_catalogued() {
 
     // Collect the const IDENTIFIERS present in the ALL_METRICS array so we can
     // map an `otel.rs` `catalog::IDENT` reference to a catalogued name. The
-    // constants are `pub const IDENT: &str = "cqlite. …";`, so build the map
-    // from this source file.
+    // constants are `pub const IDENT: &str = "cqlite. …";`.
+    //
+    // Parsed over the WHOLE declaration, not line-by-line. rustfmt wraps a long
+    // declaration onto two lines:
+    //
+    // ```ignore
+    // pub const READ_PARTITION_ACCESS_DISTINCT_PARTITIONS: &str =
+    //     "cqlite.read.partition_access.distinct_partitions";
+    // ```
+    //
+    // A line-scoped parser finds no string literal on the `pub const` line and
+    // drops the constant from the map — so the very metrics most likely to be new
+    // (long names) would slip past this guard, which is the bug class it exists to
+    // catch. Scan from each `pub const ` to its terminating `;` instead.
     let this_src = include_str!("catalog.rs");
     let mut ident_to_value = std::collections::HashMap::new();
-    for line in this_src.lines() {
-        let line = line.trim_start();
-        if let Some(rest) = line.strip_prefix("pub const ") {
-            if let Some((ident, tail)) = rest.split_once(':') {
-                if let Some(start) = tail.find('"') {
-                    let after = &tail[start + 1..];
-                    if let Some(end) = after.find('"') {
-                        ident_to_value.insert(ident.trim(), &after[..end]);
-                    }
-                }
-            }
+    for (i, _) in this_src.match_indices("pub const ") {
+        let rest = &this_src[i + "pub const ".len()..];
+        let Some(end) = rest.find(';') else { continue };
+        let decl = &rest[..end];
+        let Some((ident, tail)) = decl.split_once(':') else {
+            continue;
+        };
+        let Some(start) = tail.find('"') else {
+            continue;
+        };
+        let after = &tail[start + 1..];
+        if let Some(close) = after.find('"') {
+            ident_to_value.insert(ident.trim(), &after[..close]);
         }
     }
 

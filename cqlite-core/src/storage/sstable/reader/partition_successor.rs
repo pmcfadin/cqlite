@@ -168,25 +168,30 @@ impl SSTableReader {
     /// [`successor_partition_offset`](Self::successor_partition_offset) returns
     /// `None` (there is no successor).
     ///
-    /// Two authoritative sources, in order:
+    /// The source depends on whether the table is compressed, and the two are NOT
+    /// interchangeable:
     ///
     /// - **Compressed**: `CompressionInfo.db`'s `data_length` field, which Cassandra
-    ///   writes as the total uncompressed data length
-    ///   (`docs/sstables-definitive-guide/` CompressionInfo layout).
+    ///   writes as the total UNCOMPRESSED data length. This is the ONLY source for a
+    ///   compressed table. If it is absent or zero the answer is `None` — falling
+    ///   back to the file length would silently substitute the **compressed** size,
+    ///   producing a too-small extent that would then be published as a *measured*
+    ///   number. A missing measurement must read as missing.
     /// - **Uncompressed**: the `Data.db` file length. For an uncompressed SSTable the
     ///   file IS the data section, so its length is the uncompressed length — and the
     ///   production write surface is uncompressed-only (#1406).
     ///
-    /// `None` when neither is available, in which case a caller that needs an end
-    /// bound must fail closed rather than guess one.
+    /// `None` when no authoritative length exists, in which case the caller fails
+    /// closed and reports `size_source = unavailable` rather than guessing one.
     pub(crate) fn uncompressed_data_section_len(&self) -> Option<u64> {
-        if let Some(info) = self.compression_info.as_ref() {
-            if info.data_length > 0 {
-                return Some(info.data_length);
+        match self.compression_info.as_ref() {
+            // Compressed: `data_length` or nothing. NEVER the file length.
+            Some(info) => (info.data_length > 0).then_some(info.data_length),
+            None => {
+                let len = self.point_source.len();
+                (len > 0).then_some(len)
             }
         }
-        let len = self.point_source.len();
-        (len > 0).then_some(len)
     }
 
     /// MEASURE this partition's on-disk extent as the successor gap.

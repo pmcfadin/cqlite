@@ -285,6 +285,16 @@ pub struct WindowSummary {
     /// Every access the recorder was asked to record, including accesses to keys
     /// the sampling predicate did not admit. Always `>= total_accesses()`.
     pub recorded_accesses: u64,
+    /// Accesses that could NOT be landed in the counting table at all: it was at its
+    /// load factor with the sampling prefix already at its cap, so no slot could be
+    /// claimed.
+    ///
+    /// Distinct from an access whose key the sampling predicate declined to admit —
+    /// that is the sample working as designed and is unbiased. This is input LOST,
+    /// and a measurement instrument must never lose input silently, so it is
+    /// reported. Non-zero only in a window that also reports
+    /// [`Self::at_sampling_floor`], which the decision procedure already refuses.
+    pub dropped_accesses: u64,
 }
 
 impl WindowSummary {

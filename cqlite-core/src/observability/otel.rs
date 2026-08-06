@@ -291,6 +291,10 @@ struct Instruments {
     read_sstables_pruned: Counter<u64>,
     read_bloom_false_negatives: Counter<u64>,
     read_bti_rows_root_rejected: Counter<u64>,
+    read_partition_access_distinct: Counter<u64>,
+    read_partition_access_accesses: Counter<u64>,
+    read_partition_access_bytes: Counter<u64>,
+    read_partition_access_sample_denominator: Gauge<i64>,
     merge_rows_in: Counter<u64>,
     merge_rows_out: Counter<u64>,
     query_degraded_path: Counter<u64>,
@@ -414,6 +418,26 @@ fn instruments() -> &'static Instruments {
                     "Clustering reads that decoded a whole BTI partition because its Rows.db \
                      row-index root failed validation, keyed by {reason} (#3002).",
                 )
+                .build(),
+            read_partition_access_distinct: m
+                .u64_counter(catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS)
+                .with_unit(catalog::unit::PARTITIONS)
+                .with_description("Distinct partitions per repeat-access bucket (#2827).")
+                .build(),
+            read_partition_access_accesses: m
+                .u64_counter(catalog::READ_PARTITION_ACCESS_ACCESSES)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Accesses per repeat-access bucket (#2827).")
+                .build(),
+            read_partition_access_bytes: m
+                .u64_counter(catalog::READ_PARTITION_ACCESS_BYTES)
+                .with_unit(catalog::unit::BYTES)
+                .with_description("Distinct-partition on-disk bytes per bucket (#2827).")
+                .build(),
+            read_partition_access_sample_denominator: m
+                .i64_gauge(catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Probe sampling scale at window close; 1 = census.")
                 .build(),
             merge_rows_in: m
                 .u64_counter(catalog::MERGE_ROWS_IN)
@@ -754,6 +778,9 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::READ_SSTABLES_PRUNED => &i.read_sstables_pruned,
         catalog::READ_BLOOM_FALSE_NEGATIVES => &i.read_bloom_false_negatives,
         catalog::READ_BTI_ROWS_ROOT_REJECTED => &i.read_bti_rows_root_rejected,
+        catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS => &i.read_partition_access_distinct,
+        catalog::READ_PARTITION_ACCESS_ACCESSES => &i.read_partition_access_accesses,
+        catalog::READ_PARTITION_ACCESS_BYTES => &i.read_partition_access_bytes,
         catalog::MERGE_ROWS_IN => &i.merge_rows_in,
         catalog::MERGE_ROWS_OUT => &i.merge_rows_out,
         catalog::QUERY_DEGRADED_PATH => &i.query_degraded_path,
@@ -826,6 +853,9 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
     let i = instruments();
     let gauge = match name {
         catalog::SSTABLES_OPEN => &i.sstables_open,
+        catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR => {
+            &i.read_partition_access_sample_denominator
+        }
         catalog::MEMTABLE_SIZE_BYTES => &i.memtable_size_bytes,
         catalog::MEMTABLE_ROWS => &i.memtable_rows,
         catalog::COMPACTION_LAG => &i.compaction_lag,
@@ -909,39 +939,8 @@ pub(crate) fn set_span_parent_from_traceparent(span: &tracing::Span, traceparent
 #[allow(dead_code)]
 pub(crate) const DEFAULT_FLUSH: Duration = Duration::from_secs(1);
 
+/// Tests live in a sibling file so this module stays inside the campsite-rule
+/// source target (#1116).
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn init_disabled_returns_inert_guard() {
-        let cfg = ObservabilityConfig::builder().enabled(false).build();
-        let guard = init(cfg).expect("inert init never fails");
-        assert!(!guard.is_active());
-        guard.force_flush(); // no-op, must not panic
-    }
-
-    #[test]
-    fn sampler_builds_for_ratio() {
-        // Just exercise the builder for coverage; sampler has no public getter.
-        let _ = build_sampler(0.5);
-        let _ = build_sampler(2.0); // clamps internally
-    }
-
-    #[test]
-    fn traceparent_none_empty_and_invalid_are_noops() {
-        // Must not panic for absent / blank / malformed headers.
-        let span = tracing::info_span!("test");
-        set_span_parent_from_traceparent(&span, None);
-        set_span_parent_from_traceparent(&span, Some("   "));
-        set_span_parent_from_traceparent(&span, Some("not-a-traceparent"));
-    }
-
-    #[test]
-    fn traceparent_valid_header_is_accepted() {
-        // A well-formed W3C traceparent should parse and re-parent without panic.
-        let span = tracing::info_span!("test");
-        let valid = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-        set_span_parent_from_traceparent(&span, Some(valid));
-    }
-}
+#[path = "otel_tests.rs"]
+mod tests;

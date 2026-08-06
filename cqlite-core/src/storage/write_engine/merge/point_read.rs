@@ -290,7 +290,12 @@ pub fn build_single_partition_merger_with_registry(
     // Byte weights for the partition access-distribution probe (issue #2827), one
     // accumulator per requested key, summed across the candidates that resolved it.
     // Allocated only when the probe is enabled (it is OFF by default).
-    let mut weights: Vec<partition_access::AccessWeightBuilder> = if partition_access::enabled() {
+    // The path-based builder IS the cold Flight point path's logical boundary, so it
+    // always records. Extent measurement is nonetheless gated on the probe being on:
+    // it is real work (an index materialize + a successor resolution per key per
+    // generation) and must never be paid by a process that asked for no telemetry.
+    let collect = partition_access::enabled();
+    let mut weights: Vec<partition_access::AccessWeightBuilder> = if collect {
         vec![partition_access::AccessWeightBuilder::new(); keys.len()]
     } else {
         Vec::new()
@@ -300,8 +305,14 @@ pub fn build_single_partition_merger_with_registry(
         // seek/open, so a disconnected point read does no further per-SSTable work.
         scan_cancel.check()?;
 
-        let ProbeOutcome { probe, notes } =
-            probe_path(path, keys, schema, udt_registry, scan_cancel.clone())?;
+        let ProbeOutcome { probe, notes } = probe_path(
+            path,
+            keys,
+            schema,
+            udt_registry,
+            scan_cancel.clone(),
+            collect,
+        )?;
         fold_size_notes(&mut weights, &notes);
         match probe {
             PathProbe::Empty => {
@@ -422,6 +433,10 @@ pub fn build_single_partition_merger_from_readers(
     // snapshot is memoized so every channel in THIS merge shares ONE capacity.
     let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
+    // `CallerRecords` must measure NOTHING. Measuring an extent costs an index
+    // materialize plus an O(N) `Index.db` successor scan per key per generation, and
+    // under `CallerRecords` the result is discarded and re-derived by the caller —
+    // a per-read O(N) scan whose output is thrown away.
     let collect = recording == PointAccessRecording::Record && partition_access::enabled();
     let mut weights: Vec<partition_access::AccessWeightBuilder> = if collect {
         vec![partition_access::AccessWeightBuilder::new(); keys.len()]
@@ -435,8 +450,13 @@ pub fn build_single_partition_merger_from_readers(
         // probe, so a disconnected point read does no further per-SSTable work.
         scan_cancel.check()?;
 
-        let ProbeOutcome { probe, notes } =
-            probe_reader(Arc::clone(&reader), keys, schema, scan_cancel.clone())?;
+        let ProbeOutcome { probe, notes } = probe_reader(
+            Arc::clone(&reader),
+            keys,
+            schema,
+            scan_cancel.clone(),
+            collect,
+        )?;
         fold_size_notes(&mut weights, &notes);
         match probe {
             PathProbe::Empty => {
@@ -524,8 +544,8 @@ async fn probe_reader_async(
     keys: &[Vec<u8>],
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
+    collect_notes: bool,
 ) -> Result<ProbeOutcome> {
-    let collect_notes = partition_access::enabled();
     let mut notes: Vec<KeySizeNote> = Vec::new();
     let mut rows: Vec<CompactionRow> = Vec::new();
     for key in keys {
@@ -637,6 +657,7 @@ fn probe_path(
     schema: &TableSchema,
     udt_registry: Option<&UdtRegistry>,
     scan_cancel: ScanCancel,
+    collect_notes: bool,
 ) -> Result<ProbeOutcome> {
     let path = path.to_path_buf();
     let schema = schema.clone();
@@ -653,7 +674,7 @@ fn probe_path(
         if let Some(registry) = udt_registry {
             reader.set_udt_registry(registry);
         }
-        probe_reader_async(&reader, &keys, &schema, &scan_cancel).await
+        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
     })
 }
 
@@ -668,10 +689,13 @@ fn probe_reader(
     keys: &[Vec<u8>],
     schema: &TableSchema,
     scan_cancel: ScanCancel,
+    collect_notes: bool,
 ) -> Result<ProbeOutcome> {
     let schema = schema.clone();
     let keys: Vec<Vec<u8>> = keys.to_vec();
-    block_on_async(async move { probe_reader_async(&reader, &keys, &schema, &scan_cancel).await })
+    block_on_async(async move {
+        probe_reader_async(&reader, &keys, &schema, &scan_cancel, collect_notes).await
+    })
 }
 
 /// Tombstones-build fallback: the single-partition SEEK machinery
@@ -686,6 +710,7 @@ fn probe_path(
     _schema: &TableSchema,
     _udt_registry: Option<&UdtRegistry>,
     _scan_cancel: ScanCancel,
+    _collect_notes: bool,
 ) -> Result<ProbeOutcome> {
     Ok(ProbeOutcome {
         probe: PathProbe::NeedsScan,
@@ -701,6 +726,7 @@ fn probe_reader(
     _keys: &[Vec<u8>],
     _schema: &TableSchema,
     _scan_cancel: ScanCancel,
+    _collect_notes: bool,
 ) -> Result<ProbeOutcome> {
     Ok(ProbeOutcome {
         probe: PathProbe::NeedsScan,

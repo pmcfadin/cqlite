@@ -49,7 +49,7 @@ pub mod decision;
 mod table;
 mod types;
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -210,7 +210,18 @@ pub const DEFAULT_MAX_PREFIX_BITS: u32 = 20;
 pub struct PartitionAccessRecorder {
     state: RwLock<Option<WindowState>>,
     recorded: AtomicU64,
-    config: WindowConfig,
+    /// Accesses the recorder was asked to record but could NOT land in the table —
+    /// the table was at its load factor with the sampling prefix already at its cap,
+    /// so no slot could be claimed. Reported on the closed window
+    /// ([`WindowSummary::dropped_accesses`]) rather than lost silently.
+    dropped: AtomicU64,
+    /// Window-close policy, held as atomics rather than a plain field so
+    /// [`PartitionAccessRecorder::set_window_config`] can retune the PROCESS-GLOBAL
+    /// recorder — which is otherwise unreachable behind a `OnceLock` — without
+    /// putting a lock on the record path.
+    duration_nanos: AtomicU64,
+    max_accesses: AtomicU64,
+    max_prefix_bits: AtomicU32,
 }
 
 impl Default for PartitionAccessRecorder {
@@ -223,10 +234,46 @@ impl PartitionAccessRecorder {
     /// A recorder that has allocated nothing. The 3 MiB table appears on the first
     /// recorded access and never grows.
     pub fn new(config: WindowConfig) -> Self {
-        Self {
+        let recorder = Self {
             state: RwLock::new(None),
             recorded: AtomicU64::new(0),
-            config,
+            dropped: AtomicU64::new(0),
+            duration_nanos: AtomicU64::new(0),
+            max_accesses: AtomicU64::new(0),
+            max_prefix_bits: AtomicU32::new(0),
+        };
+        recorder.set_window_config(config);
+        recorder
+    }
+
+    /// Replace the window-close policy.
+    ///
+    /// Exists because the process-global recorder ([`global`]) is created behind a
+    /// `OnceLock` with [`WindowConfig::default`], so an end-to-end test driving the
+    /// real read path cannot otherwise reach it — and with the default 60 s duration
+    /// such a test depends on WALL CLOCK: a stalled or CPU-starved run whose reads
+    /// straddle the boundary auto-closes the window mid-flow and the assertions
+    /// evaporate. Tests set an unreachable duration and close explicitly.
+    ///
+    /// Takes effect from the next recorded access; it does not close the open
+    /// window.
+    pub fn set_window_config(&self, config: WindowConfig) {
+        self.duration_nanos.store(
+            u64::try_from(config.duration.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.max_accesses
+            .store(config.max_accesses, Ordering::Relaxed);
+        self.max_prefix_bits
+            .store(config.max_prefix_bits, Ordering::Relaxed);
+    }
+
+    /// The window-close policy currently in force.
+    pub fn window_config(&self) -> WindowConfig {
+        WindowConfig {
+            duration: Duration::from_nanos(self.duration_nanos.load(Ordering::Relaxed)),
+            max_accesses: self.max_accesses.load(Ordering::Relaxed),
+            max_prefix_bits: self.max_prefix_bits.load(Ordering::Relaxed),
         }
     }
 
@@ -323,27 +370,40 @@ impl PartitionAccessRecorder {
             }
             Some(state) => {
                 // Widen until the table is back under its load factor, or until the
-                // sampling floor is reached (at which point the window is marked
-                // non-census and simply stops admitting new keys — survivors keep
-                // counting so the window stays internally consistent).
+                // sampling floor is reached (at which point the window stops
+                // admitting new keys — survivors keep counting so the window stays
+                // internally consistent).
                 while state.table.occupancy() >= table::LOAD_FACTOR_LIMIT
-                    && state.prefix_bits < self.config.max_prefix_bits
+                    && state.prefix_bits < self.max_prefix_bits.load(Ordering::Relaxed)
                 {
                     state.prefix_bits += 1;
                     state.table.downsample(state.prefix_bits);
                 }
-                if state.prefix_bits >= self.config.max_prefix_bits
-                    && state.table.occupancy() >= table::LOAD_FACTOR_LIMIT
-                {
+                // The floor is a property of the SCALE REACHED, not of whether the
+                // last widen happened to get under the load factor. Gating this on
+                // occupancy too would let a window that widened all the way to the
+                // cap and then dropped below the factor report
+                // `at_sampling_floor = false` beside a 1-in-2^cap denominator — and
+                // the decision procedure would price that sample. D4/D7 and the
+                // spec are unconditional: a window at the cap is refused.
+                if state.prefix_bits >= self.max_prefix_bits.load(Ordering::Relaxed) {
                     state.at_sampling_floor = true;
                 }
-                // Re-attempt the access ONLY if the fast path did not already
-                // count it. A `Full` here (an unlucky 64-long probe run at the
-                // floor) simply drops the access rather than looping.
-                if replay {
-                    let _ = state
-                        .table
-                        .record_with_flags(hash, state.prefix_bits, bytes, flags);
+                // Re-attempt the access ONLY if the fast path did not already count
+                // it. A `Full` here — an unlucky long probe run, or a table still at
+                // its load factor because the prefix cannot widen further — DROPS
+                // the access, so it must be counted where a reader can see it: a
+                // measurement instrument that silently loses input is worse than one
+                // that admits it did.
+                if replay
+                    && matches!(
+                        state
+                            .table
+                            .record_with_flags(hash, state.prefix_bits, bytes, flags),
+                        Insert::Full
+                    )
+                {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -354,8 +414,9 @@ impl PartitionAccessRecorder {
             let guard = self.read_state();
             let state = guard.as_ref()?;
             (
-                state.started.elapsed() >= self.config.duration,
-                self.recorded.load(Ordering::Relaxed) >= self.config.max_accesses,
+                u64::try_from(state.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+                    >= self.duration_nanos.load(Ordering::Relaxed),
+                self.recorded.load(Ordering::Relaxed) >= self.max_accesses.load(Ordering::Relaxed),
             )
         };
         if elapsed || over_count {
@@ -376,11 +437,13 @@ impl PartitionAccessRecorder {
         let mut guard = self.write_state();
         let state = guard.as_mut()?;
         let recorded = self.recorded.swap(0, Ordering::Relaxed);
+        let dropped = self.dropped.swap(0, Ordering::Relaxed);
 
         let mut summary = WindowSummary {
             sample_denominator: 1u64 << state.prefix_bits,
             at_sampling_floor: state.at_sampling_floor,
             recorded_accesses: recorded,
+            dropped_accesses: dropped,
             ..Default::default()
         };
         state.table.for_each_entry(|e| {
