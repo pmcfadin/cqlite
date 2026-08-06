@@ -503,8 +503,23 @@ perf_capability_dropin_path() {
 #   NOT gated: scripts/tests/test_perf_capability.sh calls this DIRECTLY, so its staged-install cases
 #   are capability-probed and COUNTED-skipped off GNU (roborev round 5). Neither portability guard in
 #   the repo scans this file, so nothing mechanically protects the gate; recorded, not papered over.
+# perf_capability_install_tools_ok: does THIS host have the GNU coreutils behaviour the staged
+# install needs (roborev round 16, Medium)? `stat -c` and `mv --no-target-directory` are GNU-only, and
+# bootstrap gates the perf section on PLATFORM=linux — which is NOT the same as GNU. A musl/busybox
+# Linux host would previously reach the installer and fail on a raw tool error. Probed AFFIRMATIVELY
+# (run the flags) rather than inferred from a distro name.
+perf_capability_install_tools_ok() {
+  stat -c '%a' . >/dev/null 2>&1 || return 1
+  mv --help 2>&1 | grep -q -- '--no-target-directory' || return 1
+}
+
 perf_capability_dropin_install() {
   local __pin_d __pin_p
+  # rc 2 is UNSUPPORTED-HOST, distinct from rc 1 REFUSED, so a caller can report "this host
+  # cannot do an atomic install" instead of implying the attempt was unsafe.
+  perf_capability_install_tools_ok || {
+    printf 'perf-capability: UNSUPPORTED on this host: the atomic staged install needs GNU coreutils (stat -c and mv --no-target-directory); neither is present, so the drop-in cannot be installed safely. Install GNU coreutils or set the sysctls another way.\n' >&2
+    return 2; }
   __pin_d=$(perf_capability_sysctl_dir) || return 1
   # TRAILING SLASHES ARE STRIPPED BEFORE ANY CHECK OR PATH CONSTRUCTION (roborev round 10, Low).
   # `[ -L "$d" ]` FOLLOWS a trailing slash: for a symlinked directory `link`, `[ -L link ]` is true

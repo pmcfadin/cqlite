@@ -645,9 +645,14 @@ EOF
       # this privileged write at the link's target — anywhere on the box. The helper writes a
       # staging entry in the validated directory and renames it over the name, so a pre-existing
       # symlink is REPLACED rather than written through, and it re-reads the file to confirm.
-      if perf_capability_dropin_install ${PERF_ROOT[@]+"${PERF_ROOT[@]}"}; then
+      perf_capability_dropin_install ${PERF_ROOT[@]+"${PERF_ROOT[@]}"}; PERF_INS_RC=$?
+      if [ "$PERF_INS_RC" -eq 0 ]; then
         ok "wrote $PERF_DROPIN (kernel.perf_event_paranoid = -1, kernel.kptr_restrict = 0)"
         PERF_DROPIN_OK=1
+      elif [ "$PERF_INS_RC" -eq 2 ]; then
+        # UNSUPPORTED HOST, not a failed attempt: re-running cannot help, so the remedy line is
+        # deliberately NOT printed — advice that cannot work is worse than none (roborev round 16).
+        warn "cannot install $PERF_DROPIN on this host: the atomic staged install needs GNU coreutils"
       else
         warn "could NOT write $PERF_DROPIN"
         perf_remedy_line

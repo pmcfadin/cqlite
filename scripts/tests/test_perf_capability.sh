@@ -1195,8 +1195,14 @@ if perf_install_supported; then
   rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
   wt_ns_out=$(env PATH="$wt_nostat" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ns_rc=$?
-  if [ "$wt_ns_rc" -eq 0 ] || ! printf '%s' "$wt_ns_out" | grep -q 'cannot determine owner/mode'; then
-    bad "perf-capability: an undeterminable directory owner/mode did not fail closed (rc=$wt_ns_rc, out='$wt_ns_out')"
+  # A `stat` that cannot answer AT ALL is now reported as an UNSUPPORTED HOST (rc 2) rather than as
+  # "owner/mode indeterminate" — a broken `stat -c` means this host cannot do the atomic install,
+  # which is the more accurate diagnosis and the one added in roborev round 16. The property under
+  # test is unchanged and is what matters: it FAILS CLOSED and NAMES why, never proceeding on a
+  # directory whose ownership was never established. Either wording satisfies that; silence does not.
+  if [ "$wt_ns_rc" -eq 0 ] \
+     || ! printf '%s' "$wt_ns_out" | grep -qE 'cannot determine owner/mode|UNSUPPORTED on this host'; then
+    bad "perf-capability: an unusable 'stat' did not fail closed with a named reason (rc=$wt_ns_rc, out='$wt_ns_out')"
     wt_perm_fail=1
   fi
   # ...a SHORT MODE from `stat -c %a` must not bypass the write-bit check (roborev round 5, High).
