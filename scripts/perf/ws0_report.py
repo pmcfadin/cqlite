@@ -80,6 +80,7 @@ from ws0_schema_input import verify_schema_input  # noqa: E402
 # physical-core siblings" about manifest strings nothing had checked; the driver now records what
 # it verified and this asserts the manifest agrees with it.
 from ws0_pinning import verify_pinning_record  # noqa: E402
+from ws0_binaries import verify_binary_provenance  # noqa: E402
 
 TEMPS_ALLOWED = ("warm", "cold")
 ARMS_ALLOWED = ("bypass", "merge")
@@ -226,6 +227,12 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # a manifest edited to `99,99` printed "verified physical-core siblings" and exited 0. This
     # REQUIRES the driver's recorded sibling verification and requires it to be ABOUT these lists.
     pinning_verification = verify_pinning_record(d, server_cpus, client_cpus)
+    # WHICH BINARIES PRODUCED THIS RATIO (#3272 round 10, M2). `--no-build` accepts any executable
+    # already under target/release and nothing recorded the revision or any digest, so a stale
+    # artifact could be measured and reported as a result for the current checkout. REQUIRED here;
+    # the digests are deliberately NOT re-derived (a results dir is reviewed on other hosts and after
+    # rebuilds — see ws0_binaries for the full argument, which is F6's).
+    binary_provenance = verify_binary_provenance(d)
     corpus_rows = identity["rows"]
     full_matrix = len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
 
@@ -267,6 +274,10 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # ...and that the corpus is the one the SESSION STARTED against, established from a pin
         # written before the first rep (#3272 round 4).
         "session_corpus_pin": session_pin,
+        # WHICH PROGRAMS the ratio is between (#3272 round 10, M2) — the revision, the dirty state,
+        # the build mode and every measured binary's digest, observed by the driver before the first
+        # rep. This rig's output is a ratio between two binaries, so this is provenance.
+        "binary_provenance": binary_provenance,
         "pinning": {
             "server_cpus": server_cpus,
             "client_cpus": client_cpus,
@@ -335,6 +346,17 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # was outside every verified record, so a template changed between arms left the corpus
         # untouched and every corpus digest in agreement while two arms answered different
         # questions.
+        # WHICH PROGRAMS (#3272 round 10, M2). The corpus pin says over which bytes, the request pin
+        # which query — this says which binaries, which is what the reported ratio is BETWEEN.
+        f"binary pin   : {len(binary_provenance['binaries'])} binaries at"
+        f" {binary_provenance['source_revision_short']}"
+        + (
+            f" (DIRTY tree, {binary_provenance['source_dirty_paths']} changed path(s) — the"
+            " revision does NOT fully describe what was built)"
+            if binary_provenance["source_dirty"]
+            else " (clean tree)"
+        )
+        + f", build mode {binary_provenance['build_mode']}; digests in binary-provenance.json",
         f"request pin  : ticket-template.json sha256"
         f" {session_pin['pinned_ticket_sha256'][:16]}…"
         f" ({session_pin['pinned_ticket_bytes']} B) — pinned BEFORE the first rep and re-derived"

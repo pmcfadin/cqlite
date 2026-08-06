@@ -57,14 +57,15 @@
 # Full method, caveats and the recorded pinning: docs/reports/ws0-3096-artifacts/measurement-method.md
 #
 # ---------------------------------------------------------------------------
-# FILE SIZE, and the seven libraries this driver has been split into (epic #1116)
+# FILE SIZE, and the eight libraries this driver has been split into (epic #1116)
 # ---------------------------------------------------------------------------
 # The gate's `file-size` ratchet is `.rs`-ONLY, so a shell file crosses the ~800-line
 # campsite-rule target SILENTLY — this is checked with `wc -l` rather than left to the gate. Round
 # 9's guard fixes took this file to 1008 lines, and the MEASUREMENT LEGS were split out in
-# response (see `lib-measure.sh`); it is ~900 now.
+# response (see `lib-measure.sh`); round 10's M2 provenance record took it to 986 and the BUILD +
+# BINARY IDENTITY went out the same way (`lib-binaries.sh`). It is ~900 now.
 #
-# Seven libraries, each owning ONE question about whether a measurement means what it says:
+# Eight libraries, each owning ONE question about whether a measurement means what it says:
 #
 #     lib-cpu.sh          are the pinned CPUs one physical core?
 #     lib-host-state.sh   is the host's state put back?
@@ -73,6 +74,7 @@
 #     lib-server.sh       which program did the Flight arm actually measure?
 #     lib-outdir.sh       do the artifacts being read all come from ONE session?
 #     lib-measure.sh      how is ONE rep of an arm executed, prewarmed and counted?
+#     lib-binaries.sh     WHICH PROGRAMS are measured, and are they this revision's?
 #
 # What remains here is deliberately the part that must stay legible in ONE file: the ORDER of
 # operations, which is itself a correctness property (arguments before creation, verification
@@ -83,10 +85,8 @@
 # `scripts/perf/*.sh` in `library` mode, where DEFINING `perf_stat_c` is itself a finding ("the rig
 # has exactly ONE"). Moving it into a library would flip the owner and make this driver a library
 # that must not define it — inverting layer 1 of the three-layer perf guard — and
-# `test_ws0_cpu_pinning_guards.sh` text-extracts it from THIS file by name.
-#
-# The next seam, if one is needed, is the two session-pin python heredocs (~100 lines). Tracked
-# under epic #1116.
+# `test_ws0_cpu_pinning_guards.sh` text-extracts it from THIS file by name. The next seam, if one
+# is needed, is the session-pin python heredocs (~100 lines) — tracked under epic #1116.
 
 set -euo pipefail
 
@@ -104,6 +104,8 @@ source "$HERE/lib-args.sh"
 source "$HERE/lib-server.sh"
 # shellcheck source=scripts/perf/lib-outdir.sh
 source "$HERE/lib-outdir.sh"
+# shellcheck source=scripts/perf/lib-binaries.sh
+source "$HERE/lib-binaries.sh"
 # LAST, because the sourcing order is the DEPENDENCY order: the measurement legs call
 # `stop_server`/`require_port_free`/`await_server_ready` from lib-server.sh above, plus this
 # driver's own `perf_stat_c` and `drop_caches_if_cold` (both defined below — a function body is
@@ -475,15 +477,16 @@ OUT_DIR="$(create_out_dir "${OUT_DIR:-}" "$REPO_ROOT/target/perf-ws0-3096")" || 
   exit 2
 }
 
-if [[ "$DO_BUILD" == "1" ]]; then
-  echo "building release binaries…"
-  (cd "$REPO_ROOT" && cargo build --release -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen) \
-    > "$OUT_DIR/build.log" 2>&1 \
-    || { echo "FATAL: release build failed — see $OUT_DIR/build.log" >&2; exit 2; }
-fi
-for b in ws0-scan-bench cqlite-flight flight-loadgen; do
-  [[ -x "$BIN/$b" ]] || { echo "FATAL: $BIN/$b missing (drop --no-build, or build it)" >&2; exit 2; }
-done
+# --- BUILD, AND RECORD WHICH BINARIES ARE MEASURED (#3272 round 10, M2) ---------------
+# Both live in scripts/perf/lib-binaries.sh, which carries the full argument for each: the release
+# build plus the existence loop, and the provenance record that closes `--no-build`'s silence about
+# WHICH programs produced the reported ratio. The CALL SITES stay here so the ORDER remains legible
+# at the driver's top level — binaries before the corpus pin, the pin before the first rep.
+#
+# Status checked EXPLICITLY: neither runs in a command substitution, so `|| exit 2` is what
+# terminates the run (a refusal resting on `set -e` alone is one `set +e` from decorative).
+build_release_binaries || exit 2
+record_measured_binaries || exit 2
 
 # The Flight ticket is derived from the DDL the corpus was WRITTEN with (the
 # generator emits it beside the data), so both arms provably read one schema.

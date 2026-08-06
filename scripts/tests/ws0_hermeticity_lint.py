@@ -252,6 +252,17 @@ EXEMPTIONS: dict[str, str] = {
     "scripts/perf/lib-measure.sh":
         "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
         " are prose explaining the split and why the perf wrapper did not move with it",
+    # Round 10's M2 campsite-rule split (the provenance record took the driver to 986 lines).
+    # Reported UNCOVERED the moment it became tracked, exactly as its seven predecessors were — and
+    # note the two postures again: the PERF tree lint's subject is a `scripts/perf/*.sh` glob, so
+    # this library joined it AUTOMATICALLY and was linted in `library` mode (correctly finding no
+    # perf invocation and no second `perf_stat_c`), while this CONTENT-based census demanded a
+    # decision. Two lints, two postures, and checking BOTH on a split is why. Same class as its six
+    # library siblings: sourced by the driver, never invokes it, and its `ws0-baseline.sh` mentions
+    # are prose (the split's rationale, the coupling list, and why the perf wrapper did not move).
+    "scripts/perf/lib-binaries.sh":
+        "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
+        " are prose explaining the split, the driver globals it reads, and why perf_stat_c stayed",
     "scripts/perf/README.md": "documentation",
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",
@@ -275,6 +286,13 @@ EXEMPTIONS: dict[str, str] = {
     "scripts/perf/ws0_ticket_input.py":
         "the Flight TICKET (request) identity module; prose reference only (its refusals tell an"
         " operator to re-run the session with the driver, which is what pins the request)",
+    # Round 10's M2 python half, staged alongside `lib-binaries.sh` above and reported UNCOVERED
+    # with it. Same class as its four python siblings: imported by the driver (through
+    # `python3 -c`) and its only driver mention is prose — the refusal that tells an operator to
+    # re-run the session with the driver, which is the one thing that can write the record it needs.
+    "scripts/perf/ws0_binaries.py":
+        "the measured-BINARIES identity module; prose reference only (its refusal tells an operator"
+        " to re-run the session with the driver, which is what records which programs were measured)",
     # Round 9's F6 module, and the census reported it UNCOVERED the moment it was staged — the
     # fourth time this oracle has caught a split/addition, which is what it is for. Same class as
     # its siblings: its only driver mention is prose (its refusal tells an operator to re-run the
