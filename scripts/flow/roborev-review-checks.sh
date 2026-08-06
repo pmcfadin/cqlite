@@ -195,7 +195,12 @@ roborev_check_prompt_content() {
         case "$ROBOREV_WAIVER_STATE" in
           # NOT EVEN THE MARKER PREFIX IS PRINTED (layer 3, job 23): no emitted diagnostic may carry any
           # part of the marker, so no pasted block can be mistaken for one, and the rule is assertable.
-          none) WAIVER_REPORT="NONE (no anchored waiver line on this PR for this review — see --help for the form)" ;;
+          # THE CAUSE NAMES THE CHANNEL, not just the absence (#3312). `gh pr view --json comments` returns
+          # TOP-LEVEL issue comments only, so a perfectly-formed marker posted inside a review body is never
+          # read — and an authorizer told merely "no waiver line exists" re-checks their SYNTAX rather than
+          # the channel, and concludes the mechanism is broken. Same failure mode as a documented-but-unread
+          # field, one level out: the documentation was right and the diagnostic was silent about it.
+          none) WAIVER_REPORT="NONE (no anchored waiver line in a TOP-LEVEL PR comment for this review; a marker inside a review body or a review-thread reply is NOT read — see --help for the form)" ;;
           *) WAIVER_REPORT="$(printf '%s' "$ROBOREV_WAIVER_STATE" | tr '[:lower:]' '[:upper:]') (${ROBOREV_WAIVER_DETAIL:-cause not established})" ;;
         esac
         # ===== LAYER 3 (roborev job 23): THIS DIAGNOSTIC MUST NOT BE A CREDENTIAL =====

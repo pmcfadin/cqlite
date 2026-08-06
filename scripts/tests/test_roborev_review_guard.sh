@@ -3376,8 +3376,10 @@ assert_says 'case (wv1) the diagnostic points at --help instead of printing a ma
 assert_lacks 'case (wv1) and no part of the marker appears anywhere in the output' 'roborev-waive'
 assert_says 'case (wv1) it names the review scope a waiver would have to bind' \
   "base $w_base, head $w_head, job 4656"
+assert_says 'case (wv1) the NONE cause names the CHANNEL requirement, not just the absence' \
+  'a marker inside a review body or a review-thread reply is NOT read'
 assert_says 'case (wv1) the waiver state is reported as NONE' \
-  '^waiver: NONE \(no anchored waiver line on this PR for this review — see --help for the form\)$'
+  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review; a marker inside a review body or a review-thread reply is NOT read — see --help for the form\)$'
 assert_lacks 'case (wv1) no NOTICE verdict exists for this key any more' '^prompt-content: NOTICE'
 assert_lacks 'case (wv1) and no snapshot keys are emitted' '^snapshot-'
 reset_stub
@@ -3537,7 +3539,7 @@ assert_verdict 'case (wv11)' FAIL 1
 assert_says 'case (wv11) reposting the diagnostic does not waive anything' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv11) and no waiver is found in it' \
-  '^waiver: NONE \(no anchored waiver line on this PR for this review — see --help for the form\)$'
+  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review; a marker inside a review body or a review-thread reply is NOT read — see --help for the form\)$'
 assert_lacks 'case (wv11) the reposted block never grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3552,7 +3554,7 @@ STUB_GH_COMMENTS="\001pmcfadin\n> roborev-waive: prompt-content-absent base=$w_b
 run_wrapper "$w_work"
 assert_verdict 'case (wv12)' FAIL 1
 assert_says 'case (wv12) no quoted or indented copy is honoured' \
-  '^waiver: NONE \(no anchored waiver line on this PR for this review — see --help for the form\)$'
+  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review; a marker inside a review body or a review-thread reply is NOT read — see --help for the form\)$'
 assert_lacks 'case (wv12) and none of them grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3903,7 +3905,7 @@ assert_verdict 'case (wv32)' FAIL 1
 assert_says 'case (wv32) the absence FAIL stands, with no waiver found' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv32) and the waiver state comes from the real scanner' \
-  '^waiver: NONE \(no anchored waiver line on this PR for this review'
+  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review'
 assert_lacks 'case (wv32) a hostile scanner cannot fabricate a grant' '^prompt-content: WAIVED'
 assert_lacks 'case (wv32) and its fabricated author is never credited' 'attacker'
 reset_stub
