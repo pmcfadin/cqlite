@@ -57,6 +57,14 @@ from ws0_flight_arm import (  # noqa: E402
     collect_flight,
     MERGE_PATH_NOT_OBSERVED,
 )
+# THE ARROW-VOLUME CAVEAT, BESIDE THE FIGURES (#3272 round 20). Rounds 18/19 stated the withdrawal
+# in `results.json` and in ONE bullet at the bottom of the NOTES; a reader of the summary's numbers
+# and its PASS / BELOW TARGET verdicts saw nothing. Imported from the module that owns the claim's
+# wording, so the summary text and the record cannot describe it differently.
+from ws0_content_volume import (  # noqa: E402
+    content_volume_caveat_lines,
+    content_volume_verdict_caveat_lines,
+)
 from ws0_rounds import (  # noqa: E402
     collect_recorded_round_metadata,
     paired_rounds,
@@ -547,6 +555,14 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             #   rather than print a label the JSON does not support.
             lines.append(fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl))
             lines += prewarm_warning(fl, f"flight/{arm}", temp)
+            # THE ARROW-VOLUME CAVEAT, DIRECTLY UNDER THE FIGURE IT QUALIFIES (#3272 round 20).
+            # Beside the number, not appended once at the bottom — a caveat eleven bullets below
+            # the figure is the shape that produced this finding, and on a COLD-ONLY session (no
+            # preflight, so NO comparison at all) the only human-readable text was a NOTES bullet
+            # worded for the compared case, i.e. it said the opposite of what happened. Emitted in
+            # BOTH states because neither is a verification; the function has no silent branch, and
+            # an unrecognised record shape raises rather than printing nothing.
+            lines += content_volume_caveat_lines(fl, f"flight/{arm}", temp)
             # Every operand of every printed figure, through the SHARED validator (#3272
             # review round 3, B2). No permissive numeric fallback anywhere in the reporting
             # path: `scan_rps / fl_rps if fl_rps else float("inf")` used to publish `inf x`
@@ -585,6 +601,11 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
                 f"      ratio bare/flight = {ratio:.2f}x   "
                 f"1.3x target => do_get must reach {target:,.0f} rows/s   [{verdict}]"
             )
+            # ...AND UNDER THE VERDICT ITSELF (#3272 round 20). A `[PASS]`/`[BELOW TARGET]` is the
+            # line somebody quotes, so it carries what it is conditional on rather than relying on
+            # the reader having read the figure caveat two lines up. The `verdict` is passed in so
+            # the text can name the direction a short payload moves THIS verdict.
+            lines += content_volume_verdict_caveat_lines(fl, f"flight/{arm}", verdict)
             # The DELTA is deliberately unconstrained in sign — a Flight arm that costs
             # FEWER cycles/row than the bare scan is a legitimate (and desirable) result.
             # Its DIVISOR is what needed the domain, and both operands are validated above.
@@ -661,9 +682,21 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # the timed requests, so a uniform omission cancels and the comparison passes on a short
         # payload. The check is RETAINED (it still refuses a one-sided shortfall) and the CLAIM is
         # withdrawn.
+        # ...and the bullet says WHICH OF ITS TWO CASES this session is in (#3272 round 20). It used
+        # to open "the ARROW PAYLOAD VOLUME of each flight rep IS COMPARED against this session's
+        # UNTIMED PREFLIGHT" unconditionally — which is FALSE on a session that has no preflight (a
+        # cold-only run: lib-measure.sh skips the prewarm on the cold arm by design). So on exactly
+        # the session where NOTHING was compared, the only human-readable text about the payload
+        # asserted that a comparison had happened. The per-arm caveat lines above now name each
+        # rep's real state; this bullet no longer over-claims the case it is describing.
         "  * the ARROW PAYLOAD VOLUME of each flight rep is compared against this session's "
-        "UNTIMED PREFLIGHT, per scan and exactly, and that comparison is a SELF-CONSISTENCY "
-        "check — NOT a verification (results.json .content_volume_self_consistency).",
+        "UNTIMED PREFLIGHT WHERE ONE EXISTS — per scan and exactly — and that comparison is a "
+        "SELF-CONSISTENCY check, NOT a verification "
+        "(results.json .content_volume_self_consistency).",
+        "    A session with NO PREFLIGHT (a cold-only run: the prewarm is skipped on the cold arm "
+        "by design, because prewarming it would make `cold` meaningless) has NO COMPARISON AT ALL "
+        "for this property — not a weak one, none. Which reps are in which state is stated beside "
+        "each arm's figure above, never left to this bullet.",
         "    The preflight traverses the SAME ticket, the SAME server process and the SAME "
         "response path as the timed requests, so an omission that is a property of that path "
         "(a dropped Arrow column, a narrowed buffer) is present in BOTH in equal measure, their "

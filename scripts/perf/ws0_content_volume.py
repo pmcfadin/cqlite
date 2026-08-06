@@ -522,3 +522,164 @@ def check_content_volume(
         "bytes_per_scan_reference_source": source,
         "scope": CONTENT_VOLUME_ESTABLISHES,
     }
+
+
+# ============================================================================
+# ...AND THE CAVEAT BELONGS WHERE THE FIGURES ARE, NOT ONLY IN results.json (#3272 round 20)
+# ============================================================================
+# THE FINDING. Round 18 withdrew the verification claim and round 19 made the surviving
+# calibration true — both correctly, and BOTH ONLY IN THE MACHINE-READABLE RECORD plus one bullet
+# at the BOTTOM of the NOTES. The human summary's figures and its PASS / BELOW TARGET verdicts were
+# printed with NOTHING beside them. A reader who reads the numbers — which is what a summary is FOR
+# — took a verdict at face value while the caveat sat eleven bullets below it, or, for a session
+# with no preflight at all, existed only inside `results.json`.
+#
+# The cold-only case is the sharp one, and it is the one this round names. `lib-measure.sh` skips
+# the prewarm on the COLD arm by design, so a `--temp cold` session legitimately has NO PREFLIGHT
+# and therefore NO COMPARISON WHATSOEVER — not a weak one, none — and MEASURED against the
+# pre-fix reporter it printed `250 rows/s`, `ratio bare/flight = 2.00x` and `[BELOW TARGET]` with
+# not one word about the unchecked payload anywhere in the human output. The standing NOTES bullet
+# is worded for the COMPARED case ("is compared against this session's UNTIMED PREFLIGHT"), so on
+# such a session the only text a reader could find said the OPPOSITE of what happened.
+#
+# WHY A CAVEAT AND NOT A REFUSAL, which is the other route the review offered. Refusing a verdict
+# without a content oracle would refuse EVERY session: round 18 measured the pinned
+# `ARROW_BUFFER_DIGEST` unreachable for any `ws0-corpus-gen` corpus (`assert_arms_agree` returns
+# before the digest compares, because no tap observes a null cell), and no pinned substitute
+# exists — a per-column-width bound carries 17.8x slack against the real per-row Arrow extent. So
+# "reject without an oracle" is a rig that cannot report at all, which is not a fix. The honest
+# route is the one round 16's F2 established for the unobservable arm and round 18 for this very
+# comparison: state the absence, where a reader of the numbers will see it.
+#
+# THREE PROPERTIES, each of them a defect this round is closing rather than a preference:
+#
+#   * The lines are emitted BESIDE the figure and BESIDE the verdict, not appended once at the
+#     end. "A single line at the bottom" is the exact shape that produced this finding.
+#   * There is NO STATE THAT PRINTS NOTHING. Both branches emit — a compared session is not
+#     verified either (its reference is not independent of its subject), so a silent branch could
+#     only mean "verified", which no session is. `content_volume_caveat_lines` has no code path
+#     returning an empty list, and a record whose shape it does not recognise is a REFUSAL: an
+#     unrecognised state must not inherit the quiet branch (the closed-grammar rule).
+#   * The wording is DERIVED FROM THE RECORD, never from the loop variable — the same rule the
+#     printed arm label follows since round 16. A rename in `check_content_volume`'s return raises
+#     here rather than printing a caveat `results.json` does not support.
+#
+# The text RECONCILES with round 18's rather than re-stating it: the tokens a reader (and the
+# round-18 case in test_ws0_round_metadata.sh) already knows — SELF-CONSISTENCY, NOT a
+# verification, the SAME ticket, ARROW_BUFFER_DIGEST — are spelled the same way here, and the
+# NOT-COMPARED branch reuses the sentinel's own words. Neither branch re-widens or re-narrows the
+# claim: one says the comparison RAN and is not verification, the other says it did not run.
+
+# The pointer both branches end with, so a summary reader is sent to the mechanism rather than
+# being asked to reconstruct it from a warning line.
+CONTENT_VOLUME_SEE_NOTES = "see the ARROW PAYLOAD VOLUME bullet in NOTES for the mechanism"
+
+
+def _content_volume_states(block: dict, arm_label: str) -> dict[str, list[int]]:
+    """`{state: [rep numbers]}` read from the BLOCK'S OWN records (#3272 round 20).
+
+    A CLOSED grammar: exactly two states are recognised, and a record carrying anything else is
+    an `Invalid` rather than a rep quietly omitted from a warning. Keyed on the AFFIRMATIVE
+    presence of each state's own field, never on the absence of the other's.
+    """
+    states: dict[str, list[int]] = {"not-compared": [], "self-consistent": []}
+    for rep in block.get("reps", []):
+        num = rep.get("rep")
+        record = rep.get("content_volume_self_consistency")
+        if not isinstance(record, dict):
+            raise Invalid(
+                f"the {arm_label} block's rep {num!r} carries no"
+                " `content_volume_self_consistency` record, so the summary cannot state whether"
+                " that rep's ARROW PAYLOAD VOLUME was compared against anything. An absent"
+                " record may not be printed as a clean one, and it may not be passed over in"
+                " silence either: silence here would read as VERIFIED, which no session is"
+                " (#3272 round 20)."
+            )
+        # If an INDEPENDENT ORACLE ever exists, this caveat becomes WRONG — so it is refused
+        # rather than printed stale. The successor work (a per-step Arrow digest in flight-loadgen
+        # plus a null plan in ws0-corpus-gen) must revise this text as part of landing, which is
+        # what this refusal makes unavoidable.
+        if record.get("bytes_total_verified_against_independent_oracle") is not False:
+            raise Invalid(
+                f"the {arm_label} block's rep {num!r} records"
+                " bytes_total_verified_against_independent_oracle="
+                f"{record.get('bytes_total_verified_against_independent_oracle')!r}, but this"
+                " summary's caveat states that NO independent oracle exists for the Arrow payload"
+                " volume. Printing it over a record that claims one would be a stale caveat"
+                " contradicting the data beside it. If an oracle has landed, revise this text"
+                " (#3272 round 20)."
+            )
+        if record.get("bytes_total_checked") == CONTENT_VOLUME_NO_ORACLE:
+            states["not-compared"].append(num)
+        elif "bytes_per_scan_self_consistent_with" in record:
+            states["self-consistent"].append(num)
+        else:
+            raise Invalid(
+                f"the {arm_label} block's rep {num!r} carries a"
+                " `content_volume_self_consistency` record in a shape this summary does not"
+                f" recognise (keys: {sorted(record)}). Neither the NOT-COMPARED sentinel nor a"
+                " self-consistency comparison is present, so what to tell a reader beside this"
+                " rep's figure cannot be determined — and an unrecognised state may not inherit"
+                " the silent branch (#3272 round 20)."
+            )
+    return states
+
+
+def content_volume_caveat_lines(block: dict, arm_label: str, temp: str) -> list[str]:
+    """The caveat printed DIRECTLY UNDER this arm's figure. Never empty (#3272 round 20).
+
+    See the module note above for why there is no verified state to stay silent for, and why the
+    cold-only branch is the one that had no human-readable text at all.
+    """
+    states = _content_volume_states(block, arm_label)
+    lines: list[str] = []
+    if states["not-compared"]:
+        reps = ", ".join(str(r) for r in states["not-compared"])
+        lines += [
+            f"      !! ARROW PAYLOAD VOLUME NOT COMPARED on {arm_label} ({temp}) rep(s) {reps}"
+            " — no untimed preflight in this session, so this figure stands on a response payload"
+            " NOTHING in this rig checked, not even for self-consistency.",
+            "         A response carrying the expected ROW COUNT with FEWER ARROW COLUMNS (or"
+            " narrower buffers) satisfies every other check on those reps and makes Arrow"
+            " encoding look CHEAPER — the one quantity #3096 exists to measure."
+            f" {CONTENT_VOLUME_SEE_NOTES}.",
+        ]
+    if states["self-consistent"]:
+        reps = ", ".join(str(r) for r in states["self-consistent"])
+        lines += [
+            f"      !! ARROW PAYLOAD VOLUME is a SELF-CONSISTENCY check — NOT a verification —"
+            f" on {arm_label} ({temp}) rep(s) {reps}: the reference is this session's UNTIMED"
+            " PREFLIGHT, over the SAME ticket, server process and response path.",
+            "         So a UNIFORM shortfall is present on both sides in equal measure, the byte"
+            " counts AGREE, and this figure can stand on a payload that is short. The independent"
+            " oracle (ARROW_BUFFER_DIGEST) is UNREACHABLE for this corpus."
+            f" {CONTENT_VOLUME_SEE_NOTES}.",
+        ]
+    return lines
+
+
+def content_volume_verdict_caveat_lines(block: dict, arm_label: str, verdict: str) -> list[str]:
+    """The caveat printed DIRECTLY UNDER the ratio + PASS/BELOW TARGET verdict (#3272 round 20).
+
+    Separate from the figure caveat above, because a verdict is a stronger artifact than a number:
+    `[PASS]` is the line somebody quotes. It says what the VERDICT is conditional on, in the same
+    vocabulary, and it is emitted in BOTH states for the reason the module note gives — the
+    payload is unverified on every session this rig can run, so a verdict printed bare would be
+    the only unqualified claim in the report.
+
+    The DIRECTION is stated as an absolute — toward PASS — never as "toward `verdict`". A short
+    Flight payload raises that arm's rows/s and lowers its cycles/row, which moves the comparison
+    toward PASS whatever the verdict currently reads; the first version of this text interpolated
+    the observed verdict and therefore told a BELOW TARGET reader the bias ran toward BELOW TARGET,
+    which is backwards and would have made the caveat reassuring on exactly the sessions where it
+    is not. `verdict` is still named, because WHICH verdict is being qualified is the point.
+    """
+    states = _content_volume_states(block, arm_label)
+    unchecked = "NOT COMPARED AT ALL" if states["not-compared"] else "SELF-CONSISTENCY-CHECKED ONLY"
+    return [
+        f"      !! this [{verdict}] verdict and the ratio above are CONDITIONAL on an Arrow"
+        f" payload volume that is {unchecked}, and on the arm the server was free to decline.",
+        "         A short payload in the Flight arm RAISES its rows/s and LOWERS its cycles/row,"
+        " so an unchecked shortfall biases this comparison TOWARD PASS — the flattering"
+        f" direction, whichever verdict is printed above. {CONTENT_VOLUME_SEE_NOTES}.",
+    ]
