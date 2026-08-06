@@ -228,15 +228,31 @@ impl SizeSource {
 
 /// The on-disk byte weight of one logical partition access.
 ///
-/// **`Unavailable` fails closed and is never filled in.** BTI trie resolution
-/// records only an offset (`PartitionLoc::offset_only`, `data_size = 0`), so a
-/// BTI-resolved access has no authoritative size. Such an access is still COUNTED
+/// **`Unavailable` fails closed and is never filled in.** A resolution that yields
+/// no size — BTI trie resolution records only an offset
+/// (`PartitionLoc::offset_only`, `data_size = 0`), and see the reachability note
+/// below — has no authoritative weight. Such an access is still COUNTED
 /// as a partition access — dropping it would make the histogram itself wrong — but
 /// it contributes ZERO bytes and is reported under
 /// `distinct_partitions{cqlite.read.size_source="unavailable"}`, so an incomplete
 /// byte total always has a visible `unavailable` series beside it and the decision
 /// procedure can refuse the window. A size is never estimated, interpolated from a
 /// successor offset, or defaulted to a nominal value (no-heuristics, #28).
+///
+/// # Reachability of [`AccessWeight::Index`] today — an OPEN finding on #2827
+///
+/// The approved design assumed the BIG `Index.db` supplies a per-partition size.
+/// It does not: a Cassandra 5.0 BIG index entry is
+/// `[key][data_offset vint][promoted_index_len vint][promoted_index]`
+/// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`), with no
+/// size field, which is why the reader's own seek path bounds a partition with the
+/// SUCCESSOR offset instead. So `PartitionLoc.data_size` is `0` for BIG as well as
+/// BTI, and in practice every access resolves to [`AccessWeight::Unavailable`]:
+/// the histogram is fully live, the byte weighting is not, and the decision
+/// procedure consequently refuses every window on its unpriceable-fraction
+/// condition. The successor gap the read path already computes is the available
+/// authoritative extent; wiring it was explicitly deferred by the approved design
+/// and is not taken unilaterally here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessWeight {
     /// Authoritative on-disk bytes, summed across the SSTables resolved for this
@@ -390,6 +406,16 @@ pub struct WindowConfig {
     /// Recorded-access bound; closes the window before the sample degrades on a
     /// workload far above the design rate.
     pub max_accesses: u64,
+    /// Sampling-prefix cap. Once the recorder has widened the admission predicate
+    /// this far and the table is STILL at its load factor, the surviving sample is
+    /// too small to mean anything: the window is marked non-census and the decision
+    /// procedure refuses it.
+    ///
+    /// Configurable only so the floor is reachable in a test. At the production
+    /// default of [`DEFAULT_MAX_PREFIX_BITS`] the sample is 1-in-1,048,576, which
+    /// no realistic corpus reaches — a property worth keeping, and a scenario worth
+    /// being able to exercise.
+    pub max_prefix_bits: u32,
 }
 
 impl Default for WindowConfig {
@@ -397,6 +423,7 @@ impl Default for WindowConfig {
         Self {
             duration: Duration::from_secs(60),
             max_accesses: 5_000_000,
+            max_prefix_bits: DEFAULT_MAX_PREFIX_BITS,
         }
     }
 }
@@ -423,10 +450,10 @@ struct WindowState {
     started: Instant,
 }
 
-/// Sampling-prefix cap. At `k = 20` the sample is 1-in-1,048,576, which over a
-/// field-scale corpus admits a couple of keys — statistically worthless, so the
-/// window is marked non-census and the decision procedure refuses it.
-const MAX_PREFIX_BITS: u32 = 20;
+/// Production sampling-prefix cap. At `k = 20` the sample is 1-in-1,048,576, which
+/// over a field-scale corpus admits a couple of keys — statistically worthless, so
+/// the window is marked non-census and the decision procedure refuses it.
+pub const DEFAULT_MAX_PREFIX_BITS: u32 = 20;
 
 /// A bounded partition repeat-access recorder.
 ///
@@ -546,12 +573,12 @@ impl PartitionAccessRecorder {
                 // non-census and simply stops admitting new keys — survivors keep
                 // counting so the window stays internally consistent).
                 while state.table.occupancy() >= table::LOAD_FACTOR_LIMIT
-                    && state.prefix_bits < MAX_PREFIX_BITS
+                    && state.prefix_bits < self.config.max_prefix_bits
                 {
                     state.prefix_bits += 1;
                     state.table.downsample(state.prefix_bits);
                 }
-                if state.prefix_bits >= MAX_PREFIX_BITS
+                if state.prefix_bits >= self.config.max_prefix_bits
                     && state.table.occupancy() >= table::LOAD_FACTOR_LIMIT
                 {
                     state.at_sampling_floor = true;

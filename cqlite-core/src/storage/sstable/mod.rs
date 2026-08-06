@@ -1909,7 +1909,7 @@ impl SSTableManager {
     /// scan never observed the new reader either. Readers removed from the map
     /// mid-scan stay alive for the snapshot holder — that is precisely what the
     /// `Arc` clone guarantees.
-    async fn resolve_reader_snapshot(
+    pub(crate) async fn resolve_reader_snapshot(
         &self,
         table_id: &TableId,
     ) -> (Vec<Arc<reader::SSTableReader>>, bool) {

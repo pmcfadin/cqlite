@@ -170,12 +170,23 @@ pub mod attr {
     /// (issue #2827). Bounded to the closed set of EXACTLY two labels:
     ///
     /// - `"index"` — every SSTable resolved for that access reported an
-    ///   authoritative partition size (BIG `Index.db`, via `PartitionLoc`).
-    /// - `"unavailable"` — at least one resolved SSTable reported NO size (BTI
-    ///   trie resolution records only an offset), so the access contributes
-    ///   ZERO bytes and is counted here instead. A size is never estimated,
-    ///   interpolated from a successor offset, or defaulted (no-heuristics #28):
-    ///   the incompleteness is published as a ratio rather than absorbed.
+    ///   authoritative partition size through `PartitionLoc.data_size`.
+    /// - `"unavailable"` — at least one resolved SSTable reported NO size, so the
+    ///   access contributes ZERO bytes and is counted here instead. A size is never
+    ///   estimated, interpolated from a successor offset, or defaulted
+    ///   (no-heuristics #28): the incompleteness is published as a ratio rather
+    ///   than absorbed.
+    ///
+    /// **Reachability today (issue #2827, open finding).** NEITHER Cassandra 5.0
+    /// index format records a per-partition byte size: the BIG `Index.db` entry is
+    /// `[key][data_offset vint][promoted_index_len vint][promoted_index]`
+    /// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, entry
+    /// layout) and the BTI `Partitions.db` trie resolves an offset only. So every
+    /// access currently reports `"unavailable"` and
+    /// [`READ_PARTITION_ACCESS_BYTES`] stays at zero. The only authoritative
+    /// on-disk extent available is the SUCCESSOR-offset gap the read path already
+    /// computes as its decode end bound; wiring it is out of this change's
+    /// approved scope.
     pub const SIZE_SOURCE: &str = "cqlite.read.size_source";
 }
 
@@ -404,8 +415,7 @@ pub const READ_PARTITION_ACCESS_ACCESSES: &str = "cqlite.read.partition_access.a
 ///
 /// Bytes come from the size the read path already resolved
 /// (`PartitionLoc.data_size`), never from an estimate. An access whose size was
-/// not authoritatively available (BTI trie resolution records no size)
-/// contributes ZERO here and is counted under
+/// not authoritatively available contributes ZERO here and is counted under
 /// `distinct_partitions{cqlite.read.size_source="unavailable"}`, so an
 /// incomplete byte total always has a visible `unavailable` series beside it.
 pub const READ_PARTITION_ACCESS_BYTES: &str = "cqlite.read.partition_access.bytes";

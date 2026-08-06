@@ -282,6 +282,7 @@ mod tests {
         PartitionAccessRecorder::new(WindowConfig {
             duration: Duration::from_secs(86_400),
             max_accesses: u64::MAX,
+            ..WindowConfig::default()
         })
     }
 

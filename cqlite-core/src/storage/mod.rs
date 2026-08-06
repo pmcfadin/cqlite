@@ -32,6 +32,10 @@ pub mod commitlog;
 // the scan path needs it even without `write-support`.
 pub mod partition_key_codec;
 
+// Byte weighting for the #2827 partition access-distribution probe: recovers the
+// sizes a targeted read already resolved, without re-driving any lookup.
+mod partition_access_weight;
+
 // M5: Write engine and serialization (Issue #359)
 #[cfg(feature = "write-support")]
 pub mod serialization;
@@ -384,8 +388,7 @@ impl StorageEngine {
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
-        self.sstables
-            .scan_partition(table_id, partition_key, schema)
+        self.scan_partition_recorded(table_id, partition_key, schema)
             .await
     }
 
@@ -423,8 +426,7 @@ impl StorageEngine {
         clustering: Option<&crate::storage::sstable::reader::ClusteringSlice>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
-        self.sstables
-            .scan_partition_clustering(table_id, partition_key, clustering, schema)
+        self.scan_partition_clustering_recorded(table_id, partition_key, clustering, schema)
             .await
     }
 
@@ -441,8 +443,7 @@ impl StorageEngine {
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
-        self.sstables
-            .scan_partition_clustering_reverse(table_id, partition_key, schema)
+        self.scan_partition_clustering_reverse_recorded(table_id, partition_key, schema)
             .await
     }
 
