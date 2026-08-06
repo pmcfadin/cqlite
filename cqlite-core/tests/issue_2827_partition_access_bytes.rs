@@ -275,6 +275,63 @@ fn a_gap_measured_census_window_is_priced_not_refused() {
     }
 }
 
+/// The worked example in `docs/research/decoded-partition-cache-decision.md` must be
+/// reproducible by the shipped evaluator — otherwise the committed note documents
+/// arithmetic the code does not perform.
+///
+/// It is an INSTRUMENT SELF-CHECK and never a field result: the note labels it so,
+/// and refusal condition 4 rejects the same window when its source is declared
+/// synthetic (asserted below).
+#[test]
+fn the_committed_notes_worked_example_matches_the_shipped_evaluator() {
+    let r = deterministic_recorder();
+    for i in 0..600u64 {
+        for _ in 0..20 {
+            r.record(&i.to_be_bytes(), AccessWeight::SuccessorGap(1_024));
+        }
+    }
+    for i in 0..10_000u64 {
+        r.record(
+            &(i | 1 << 40).to_be_bytes(),
+            AccessWeight::SuccessorGap(1_024),
+        );
+    }
+    let s = r.close_window().expect("accesses were recorded");
+    assert_eq!(s.total_accesses(), 22_000, "A in the note");
+    assert_eq!(s.bucket(RepeatBucket::SeventeenPlus).accesses, 12_000);
+    assert_eq!(s.bucket(RepeatBucket::SeventeenPlus).distinct(), 600);
+    assert_eq!(s.bucket(RepeatBucket::SeventeenPlus).bytes, 614_400);
+    assert_eq!(s.bucket(RepeatBucket::One).bytes, 10_240_000);
+
+    match decision::evaluate(
+        &s,
+        decision::WindowSource::Field,
+        128 * 1024 * 1024,
+        decision::ASSUMED_DECODE_MULTIPLIER,
+    ) {
+        Verdict::Priced(c) => {
+            assert!(
+                (c.h_max - 0.518).abs() < 0.001,
+                "the note states H_max(128 MiB) = 0.518; evaluator says {}",
+                c.h_max
+            );
+            assert!(c.clears_threshold, "0.518 >= the recorded 0.50 threshold");
+        }
+        other => panic!("the note's example window must be priceable: got {other:?}"),
+    }
+
+    // The same window, declared for what it is, is refused.
+    assert_eq!(
+        decision::evaluate(
+            &s,
+            decision::WindowSource::Synthetic,
+            128 * 1024 * 1024,
+            decision::ASSUMED_DECODE_MULTIPLIER,
+        ),
+        Verdict::Refused(Refusal::SyntheticWorkload)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // End-to-end: real committed fixtures through the real read path.
 // ---------------------------------------------------------------------------
