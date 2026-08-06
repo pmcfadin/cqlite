@@ -3473,6 +3473,34 @@ assert_lacks 'case (cx31g) it never becomes an exempted NOTICE' '^prompt-content
 assert_lacks 'case (cx31g) and emits no snapshot keys' '^snapshot-path:'
 reset_stub
 
+printf '== (cx31g2) RIDER R3: the DELEGATED tier FAILs even when quoted headers cover the census ==\n'
+# THE BLOCKER FROM ROBOREV JOB 20, and the second evaluation-order defect in the resolver. The zero-path branch
+# consulted the GLOBAL header set FIRST, so this prompt shape — roborev's `codex_*` delegated tier, which ships
+# NO inline diff and NO snapshot path and tells the reviewer to run git itself — resolved as `inline` because
+# repository-controlled content quoted `diff --git` lines. Those quoted headers COVER the census here, so the
+# run reached `prompt-content: PASS` on a review that received nothing at all. That is not the disclosed NOTICE
+# residual: different mechanism, and a PASS instead of a NOTICE. A pathless oversize marker is now its own state
+# decided before any header is consulted. Both routes into the tier are asserted: cx31g (a compact instruction
+# whose token is a git command) and this one (an oversize notice with no instruction line at all).
+reset_stub
+work=$(make_fixture case_cx31g2 two-code-commits)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='## Project Guidelines\nOur reviewers expect headers like\ndiff --git a/alpha.rs b/alpha.rs\ndiff --git a/beta.rs b/beta.rs\n\n### Combined Diff\n\n(Diff too large to include inline)\nFor Codex in read-only review mode, inspect the commit range locally with read-only git commands.\n- `git diff --stat HEAD~1`\n- `git diff HEAD~1`'
+run_wrapper "$work"
+assert_verdict 'case (cx31g2)' FAIL 1
+assert_says 'case (cx31g2) the delegated tier is a named FAIL, whatever headers the prompt quotes' \
+  '^prompt-content: FAIL \(delegated oversize tier: roborev supplied neither a diff nor a snapshot path\)$'
+assert_says 'case (cx31g2) the cause names the tier and the owner decision' \
+  "^ERROR: prompt-content: the prompt carries a .\(Diff too large. notice but NO snapshot path"
+assert_says 'case (cx31g2) and says a quoted header is not a delivery' \
+  'quoted ELSEWHERE in the prompt is NOT a delivery and cannot satisfy the census here'
+assert_says 'case (cx31g2) the census paths are reported UNVERIFIED, not absent-and-checked' \
+  'CODE census path\(s\) of .* are therefore UNVERIFIED'
+assert_lacks 'case (cx31g2) quoted headers never certify a delegated review' '^prompt-content: PASS'
+assert_lacks 'case (cx31g2) and it never becomes an exempted NOTICE' '^prompt-content: NOTICE'
+assert_lacks 'case (cx31g2) no snapshot record is emitted' '^snapshot-path:'
+reset_stub
+
 printf '== (cx31p) RIDER R1: a malformed instruction line — WITH a valid sibling ==\n'
 reset_stub
 write_snap_diff "$snap_file" alpha.rs beta.rs
@@ -3974,6 +4002,24 @@ if [ -n "$_lock_line" ] \
 else
   bad 'structural: the delivery-mode lock still decides the MODE from the global diff --git collection — a quoted header example in repository instructions would FAIL a legitimate snapshot review (#3312 job 19 fix 1)'
 fi
+# THE EVALUATION ORDER IS PINNED, NOT DESCRIBED (#3312 job 20). A pathless oversize marker must be judged
+# BEFORE the global `diff --git` collection is consulted for the mode: read in the other order, roborev's
+# DELEGATED tier resolved as `inline` on repository-quoted headers, and headers that covered the census turned a
+# review that received NOTHING into a PASS. This is the SECOND evaluation-order defect in this one function (the
+# first was validate-after-normalise), which is why the order is asserted rather than left to a comment.
+_res_start=$(grep -nE '^roborev_collect_review_diff_headers\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_res_end=$(awk -v s="${_res_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+_ovz_at=$(awk -v s="${_res_start:-0}" -v e="${_res_end:-0}" \
+  'NR>s && NR<e && index($0, "_rx_snap_oversize_markers:-0") > 0 && index($0, "if [") > 0 {print NR; exit}' "$ORACLES")
+_hdr_at=$(awk -v s="${_res_start:-0}" -v e="${_res_end:-0}" \
+  'NR>s && NR<e && index($0, "#_rx_hdrs[@]") > 0 {print NR; exit}' "$ORACLES")
+if [ -n "$_ovz_at" ] && [ -n "$_hdr_at" ] && [ "$_ovz_at" -lt "$_hdr_at" ] \
+  && grep -qF 'ROBOREV_DIFF_SOURCE_STATE="delegated-oversize"' "$ORACLES" \
+  && grep -qE '^[[:space:]]*delegated-oversize\)' "$CHECKS_FILE"; then
+  ok 'structural: a pathless oversize marker is judged BEFORE the global header set is consulted, under its own failing state'
+else
+  bad "structural: the delegated-tier check does not precede the global-header consultation (oversize at ${_ovz_at:-<none>}, headers at ${_hdr_at:-<none>}) or has no failing state — a delegated review could resolve as inline and PASS on repository-quoted headers (#3312 job 20)"
+fi
 # THE RESIDUAL IS DISCLOSED AT THE DETECTION SITE, as a property with its limits, in code (#3312 job 19).
 if grep -qF 'DELIVERY MODE IS INFERRED FROM PROMPT TEXT' "$ORACLES" \
   && grep -qiF 'out-of-band delivery-mode signal roborev measurably does not expose' "$ORACLES"; then
@@ -4040,7 +4086,7 @@ else
     _pc_arm_missing=""
     printf '%s\n' "$_pc_body" | grep -qF 'case "${ROBOREV_DIFF_SOURCE_STATE:-}" in' \
       || _pc_arm_missing="$_pc_arm_missing the-state-switch"
-    for _st in inline snapshot none; do
+    for _st in inline snapshot none delegated-oversize; do
       printf '%s\n' "$_pc_body" | grep -qE "^[[:space:]]*$_st\)" || _pc_arm_missing="$_pc_arm_missing $_st"
     done
     # The catch-all arm is what makes the allow-list CLOSED: without it every unmeasured state
