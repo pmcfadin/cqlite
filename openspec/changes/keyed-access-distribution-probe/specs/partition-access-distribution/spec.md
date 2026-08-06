@@ -27,7 +27,7 @@ re-scoping a GitHub issue is an **owner action**; the worker does not take it un
 | AC | Verdict | Requirement(s) |
 |----|---------|----------------|
 | 1 — reports the **hot-set concentration (skew/Zipf)** for the field keyed workload at A2-scale qps | **PARTIAL — the instrument that reports it is delivered; the field number is NOT.** The concentration shape is delivered as a bounded bucket histogram (the owner's replacement for a Zipf parameter, `design.md` D3); it reports whatever workload runs with the probe enabled. No field workload exists to run it against, so no field number ships. NOT waived. | ADDED *A bounded partition repeat-access histogram reports the access-concentration shape without per-key attributes*; *Repeat counting uses fixed memory independent of partition count*; *The measurement window is tumbling, closes deterministically, and emits exactly once*; *The instrument is wired into the logical point-read boundary and is zero-cost when disabled*; *The instrument's recovery of a known input distribution is verified* |
-| 2 — **decides** whether a 64–128 MiB decoded-partition cache clears a useful hit ratio (the go/no-go for the K-A build) | **NOT SATISFIED by this change.** Not waived, not deferred to another issue: **satisfiable on the first real keyed workload run with the probe enabled**, because the procedure that turns a closed window into the verdict ships here. The blocker is the absence of a field workload, not the absence of analysis. | ADDED *Distinct-partition working-set bytes are MEASURED, and an unknown extent fails closed*; *A committed decision procedure converts a closed window into a go/no-go, and refuses when it cannot* — these deliver the **procedure**, not the verdict |
+| 2 — **decides** whether a 64–128 MiB decoded-partition cache clears a useful hit ratio (the go/no-go for the K-A build) | **NOT SATISFIED by this change.** Not waived, not deferred to another issue: **satisfiable on a real keyed workload run with the probe enabled**, because the procedure that turns a closed window into the verdict ships here. The blocker is the absence of a field workload, not the absence of analysis. That satisfiability is SCOPED, not universal: pricing holds for BTI and for BIG whose `Index.db` is already resident, and a window is REFUSED rather than priced when the index is not resident (#2412 lazy open), when the window is a sample rather than a census, or when its `unavailable` fraction is non-zero — all three fail SAFE, so the FIRST window may be refused. Separately, `H_max` is an ESTIMATE under a stated ranking heuristic, not a ceiling, and **#3340 must land before any go/no-go verdict is derived from a real production window**. | ADDED *Distinct-partition working-set bytes are MEASURED, and an unknown extent fails closed*; *A committed decision procedure converts a closed window into a go/no-go, and refuses when it cannot* — these deliver the **procedure**, not the verdict |
 | 3 — standalone, **decoupled from #2037** (the measurement proceeds without the owner-gated cache build) | **SATISFIED.** No cache is built, sized, wired or benchmarked; nothing in this change references or depends on #2037's surface. | All requirements below (the property is negative — evidenced by the absence of a cache dependency, pinned by the scope scenario in *The change records what it does not deliver*) |
 
 ## ADDED Requirements
@@ -114,7 +114,18 @@ Satisfying that clause requires **per-window reset semantics**, so the loss sign
 
 Both GAUGES SHALL be emitted on **every** closed window, including when their value is zero, so an
 absent series is never ambiguous between "clean" and "not emitted". A window SHALL be reportable as
-clean exactly when both gauges read `0`. A probe-cluster failure
+clean exactly when both gauges read `0`.
+
+Because "LAST CLOSED window" is the property those gauges carry, **a gauge SHALL NOT be written by a
+window older than one already published.** Windows close atomically but are emitted after the
+recorder's lock is released, so with concurrent recorders an older window's emit can arrive after a
+newer one's; writing it would leave the gauges describing the older window and invert the very
+property they exist to provide. Each closed window SHALL therefore carry a monotonic close sequence
+assigned at close time, and the emit path SHALL skip the gauge writes for a sequence older than the
+newest already emitted. The CUMULATIVE `dropped_accesses` counter is additive and SHALL still be
+emitted for every closed window regardless of order, as SHALL the three bucketed counter families.
+
+A probe-cluster failure
 to seat a key SHALL widen the sample rather than drop the key: only keys not already in the table
 can fail to seat, so dropping them would suppress the singleton bucket and OVERSTATE concentration.
 
@@ -146,6 +157,12 @@ downsample correctness; unbiased-fraction recovery under forced downsampling).
 - **THEN** `cqlite.read.partition_access.sample_denominator` reports a value greater than 1
 - **AND** the per-bucket share of `distinct_partitions` matches the known distribution's shares within a stated tolerance
 - **AND** no admitted partition's recorded access count is lower than the number of accesses it actually received
+
+#### Scenario: An out-of-order emit does not make the gauges describe an older window
+- **GIVEN** two windows closed in sequence, whose series are emitted in the REVERSE order
+- **WHEN** the emitted gauges are read back
+- **THEN** `window_dropped_accesses` and `sampling_floor` describe the window that closed LAST, not the one that emitted last
+- **AND** the cumulative `dropped_accesses` counter and the three bucketed counter families still reflect BOTH windows
 
 #### Scenario: A clean window is distinguishable from a lossy one by the emitted series alone
 - **GIVEN** a closed window in which every access was seated and the prefix cap was not reached

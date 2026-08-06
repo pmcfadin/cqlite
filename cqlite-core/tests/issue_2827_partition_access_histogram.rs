@@ -656,3 +656,92 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
         "and the floor gauge must read 1"
     );
 }
+
+/// L3: an out-of-order emit must not leave the per-window gauges describing an OLDER
+/// window.
+///
+/// Windows close atomically under the recorder's write lock but are EMITTED after it
+/// drops, so with concurrent recorders window N's emit can arrive after N+1's. The
+/// three unlabelled gauges are last-writer-wins, and two of them
+/// (`window_dropped_accesses`, `sampling_floor`) carry the normative "was the LAST
+/// CLOSED window clean" property — so a late emit of an older window would invert
+/// exactly what F4 was raised to deliver.
+///
+/// Driven deterministically rather than by racing threads: close two windows, then
+/// emit them in REVERSE order through the public global path. The older window here is
+/// deliberately the LOSSY one, so a regression is unmissable — the gauges would read
+/// "lossy and floored" for a window that was clean.
+#[cfg(feature = "observability-testing")]
+#[test]
+fn a_stale_window_emit_does_not_overwrite_the_newer_windows_gauges() {
+    use cqlite_core::observability::{catalog, partition_access, testing};
+
+    let capture = testing::metrics_capture();
+
+    // Window A (closes first): lossy and floored — no widening permitted, so the
+    // table saturates and later keys cannot be seated.
+    let lossy_recorder = PartitionAccessRecorder::new(WindowConfig {
+        duration: std::time::Duration::from_secs(86_400),
+        max_accesses: u64::MAX,
+        max_prefix_bits: 0,
+    });
+    for i in 0..300_000u64 {
+        lossy_recorder.record(
+            SCOPE,
+            &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
+            AccessWeight::SuccessorGap(64),
+        );
+    }
+    let older = lossy_recorder
+        .close_window()
+        .expect("window A recorded accesses");
+    assert!(older.dropped_accesses > 0, "window A must be lossy");
+    assert!(older.at_sampling_floor, "window A must be floored");
+
+    // Window B (closes second, on the SAME recorder so the sequence is comparable):
+    // clean.
+    for id in 0..10u64 {
+        lossy_recorder.record(SCOPE, &id.to_be_bytes(), AccessWeight::SuccessorGap(128));
+    }
+    let newer = lossy_recorder
+        .close_window()
+        .expect("window B recorded accesses");
+    assert!(
+        newer.close_sequence > older.close_sequence,
+        "B must have closed after A ({} vs {})",
+        newer.close_sequence,
+        older.close_sequence
+    );
+    assert_eq!(newer.dropped_accesses, 0, "window B must be clean");
+    assert!(!newer.at_sampling_floor);
+
+    // Emit NEWEST first, then the stale older one — the interleaving the lock cannot
+    // prevent because emission happens outside it.
+    capture.reset();
+    partition_access::emit_for_test(&newer);
+    partition_access::emit_for_test(&older);
+    let metrics = capture.flush_and_collect();
+
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED),
+        0.0,
+        "the per-window drop gauge must still describe window B (clean), not the \
+         stale window A that emitted last"
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
+        0.0,
+        "likewise the floor gauge"
+    );
+    // The additive families are order-free and must reflect BOTH windows.
+    assert!(
+        metrics.counter_sum(catalog::READ_PARTITION_ACCESS_DROPPED) > 0.0,
+        "the CUMULATIVE drop counter is additive — window A's loss must still be \
+         reported"
+    );
+    assert!(
+        metrics.counter_sum(catalog::READ_PARTITION_ACCESS_ACCESSES)
+            >= (newer.total_accesses() + older.total_accesses()) as f64,
+        "both windows' accesses must be counted"
+    );
+}

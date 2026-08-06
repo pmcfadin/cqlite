@@ -463,6 +463,11 @@ pub const READ_PARTITION_ACCESS_DROPPED: &str = "cqlite.read.partition_access.dr
 /// worthless; the decision procedure refuses it. Paired with
 /// [`READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR`] this is the whole trustworthiness
 /// signal for a window, readable without calling into the process.
+///
+/// Like [`READ_PARTITION_ACCESS_WINDOW_DROPPED`], this gauge is written only by the
+/// NEWEST closed window: emission happens after the recorder's lock is released, so a
+/// stale emit is skipped by close sequence rather than allowed to overwrite a newer
+/// window's value.
 pub const READ_PARTITION_ACCESS_SAMPLING_FLOOR: &str =
     "cqlite.read.partition_access.sampling_floor";
 
@@ -482,6 +487,14 @@ pub const READ_PARTITION_ACCESS_SAMPLING_FLOOR: &str =
 /// A window is CLEAN exactly when this gauge and
 /// [`READ_PARTITION_ACCESS_SAMPLING_FLOOR`] both read `0`. Both are emitted on every
 /// closed window, including at zero, so absence is never ambiguous.
+///
+/// **"LAST CLOSED" is enforced, not incidental.** Windows close atomically but are
+/// emitted after the recorder's lock is released, so an older window's emit can
+/// arrive after a newer one's. Each closed window carries a monotonic close sequence
+/// and the emit path skips this gauge for a stale sequence — without that, a late
+/// emit would leave it describing the older window and invert the property. The
+/// cumulative [`READ_PARTITION_ACCESS_DROPPED`] counter is additive and is emitted
+/// regardless of order.
 pub const READ_PARTITION_ACCESS_WINDOW_DROPPED: &str =
     "cqlite.read.partition_access.window_dropped_accesses";
 

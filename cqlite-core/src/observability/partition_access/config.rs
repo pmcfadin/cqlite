@@ -78,10 +78,39 @@ pub fn enabled() -> bool {
     match EFFECTIVE.load(Ordering::Relaxed) {
         STATE_ON => true,
         STATE_OFF => false,
+        // First observation (or a `set_probe_enabled(None)` reset): resolve from the
+        // environment and PUBLISH IT ONLY IF NOTHING ELSE HAS.
+        //
+        // A bare `store` here loses a concurrent programmatic enable, silently
+        // inverting the documented programmatic-over-environment precedence: T1 reads
+        // UNRESOLVED and computes `false` from an unset env, T2 stores `STATE_ON`, then
+        // T1's store overwrites it with `STATE_OFF` and the probe is off despite an
+        // explicit enable. The window is not once-per-process either —
+        // `set_probe_enabled(None)` re-opens it — so this is reachable whenever a
+        // caller resets the gate while reads are running.
         _ => {
-            let on = resolve_from_env();
-            EFFECTIVE.store(if on { STATE_ON } else { STATE_OFF }, Ordering::Relaxed);
-            on
+            let resolved = if resolve_from_env() {
+                STATE_ON
+            } else {
+                STATE_OFF
+            };
+            match EFFECTIVE.compare_exchange(
+                STATE_UNRESOLVED,
+                resolved,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                // We published our own resolution.
+                Ok(_) => resolved == STATE_ON,
+                // Someone else won. Honour THEIR value, not ours — that is the whole
+                // point of the precedence rule. An `Err` still carrying UNRESOLVED
+                // means a racing `set_probe_enabled(None)` re-opened the window
+                // between our load and our CAS; our env resolution is as good an
+                // answer as any for this call, and the next call re-resolves.
+                Err(STATE_ON) => true,
+                Err(STATE_OFF) => false,
+                Err(_) => resolved == STATE_ON,
+            }
         }
     }
 }
@@ -91,6 +120,12 @@ pub fn enabled() -> bool {
 ///
 /// `Some(true)`/`Some(false)` pin the state; `None` returns the process to
 /// resolving from the environment on the next [`enabled`] call.
+///
+/// This store is unconditional BY DESIGN — an explicit programmatic setting outranks
+/// whatever the environment resolved to, so it must win against a concurrent
+/// [`enabled`] that is mid-resolution. `enabled` cooperates by publishing its env
+/// resolution with a compare-exchange rather than a store, so it can never overwrite
+/// a value set here.
 pub fn set_probe_enabled(state: Option<bool>) {
     let v = match state {
         Some(true) => STATE_ON,
@@ -171,4 +206,83 @@ pub fn window_config_from_env() -> WindowConfig {
         }
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Barrier};
+
+    /// L2: a programmatic enable must WIN against a concurrent environment
+    /// resolution — the precedence this module documents, not merely the absence of a
+    /// clobber.
+    ///
+    /// The defect was a bare `store` in [`enabled`]: T1 reads UNRESOLVED and computes
+    /// `false` from an unset env, T2 stores `STATE_ON`, then T1's store overwrites it
+    /// with `STATE_OFF`. The probe is silently off despite an explicit enable, and the
+    /// UNRESOLVED window re-opens on every `set_probe_enabled(None)`.
+    ///
+    /// Asserted as the POSITIVE property: after a `set_probe_enabled(Some(true))` that
+    /// races a resolution, the observed state is `true`. Ordered with a barrier so
+    /// both threads are inside the window together; repeated so a single lucky
+    /// interleaving cannot pass it.
+    ///
+    /// This test mutates the process-global gate, so it is the only test in this
+    /// module that does — the integration suites serialise their own probe mutation
+    /// behind a mutex, and this module has no other global-state case to race with.
+    #[test]
+    fn a_programmatic_enable_wins_against_a_concurrent_env_resolution() {
+        for _ in 0..200 {
+            // Re-open the UNRESOLVED window, exactly as a caller resetting the gate
+            // does.
+            set_probe_enabled(None);
+
+            let barrier = Arc::new(Barrier::new(2));
+            let resolved = Arc::new(AtomicBool::new(false));
+
+            let reader = {
+                let barrier = Arc::clone(&barrier);
+                let resolved = Arc::clone(&resolved);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    resolved.store(enabled(), Ordering::Relaxed);
+                })
+            };
+            let writer = {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    set_probe_enabled(Some(true));
+                })
+            };
+            reader.join().expect("reader thread");
+            writer.join().expect("writer thread");
+
+            // Whatever the interleaving, the explicit setting must be what stands:
+            // `enabled()` may legitimately have observed `false` if it resolved and
+            // published BEFORE the programmatic call, but the FINAL state must be the
+            // programmatic one — the env resolution may never overwrite it.
+            assert!(
+                enabled(),
+                "an explicit programmatic enable must outrank a concurrent env \
+                 resolution; the probe read back as OFF"
+            );
+        }
+        // Leave the gate as the rest of the process expects to find it.
+        set_probe_enabled(None);
+    }
+
+    #[test]
+    fn a_programmatic_setting_survives_repeated_reads() {
+        set_probe_enabled(Some(true));
+        for _ in 0..1_000 {
+            assert!(enabled(), "a resolution must never clobber a pinned state");
+        }
+        set_probe_enabled(Some(false));
+        for _ in 0..1_000 {
+            assert!(!enabled());
+        }
+        set_probe_enabled(None);
+    }
 }

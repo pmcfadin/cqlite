@@ -283,6 +283,23 @@ pub struct WindowSummary {
     /// Every access the recorder was asked to record, including accesses to keys
     /// the sampling predicate did not admit. Always `>= total_accesses()`.
     pub recorded_accesses: u64,
+    /// Monotonic close sequence, assigned under the recorder's write lock at the
+    /// moment this window closed.
+    ///
+    /// Windows close atomically but their series are EMITTED after the lock is
+    /// released, so with several recording threads window `N`'s emit can be overtaken
+    /// by `N+1`'s. That is harmless for the additive counter families, but the three
+    /// unlabelled scalars — `sample_denominator`, `sampling_floor` and
+    /// `window_dropped_accesses` — are gauges, and a late emit of an older window
+    /// would leave them describing it. Since `sampling_floor` and
+    /// `window_dropped_accesses` are the "was the LAST CLOSED window clean" signals
+    /// (normative in the catalog docs and the spec), that would invert exactly the
+    /// property they exist to provide.
+    ///
+    /// The global emit path therefore keeps a high-water mark and skips the gauge
+    /// writes for a stale sequence. Per-recorder and monotonic within one recorder;
+    /// two independent recorders number independently.
+    pub close_sequence: u64,
     /// Accesses that could NOT be landed in the counting table at all: it was at its
     /// load factor with the sampling prefix already at its cap, so no slot could be
     /// claimed.
