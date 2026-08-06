@@ -241,6 +241,11 @@ emit_job_object() {
   if [ -n "${STUB_VERDICT_FIELD:-}" ]; then
     extra="$extra,\"verdict\":\"${STUB_VERDICT_FIELD}\""
   fi
+  # The review TEXT the record carries (#3312 job 24). On the JOB row as well as the review row, so every
+  # payload shape a recheck may read from carries it, exactly as roborev's own payloads do.
+  if [ -n "${STUB_RECORD_OUTPUT:-}" ]; then
+    extra="$extra,\"output\":\"${STUB_RECORD_OUTPUT}\""
+  fi
   printf '{"id":%s,"git_ref":"%s","status":"%s","model":"%s","requested_model":"%s","prompt":"%s"%s}' \
     "${STUB_PAYLOAD_JOB:-${STUB_JOB:-4600}}" \
     "$git_ref" \
@@ -3396,7 +3401,9 @@ assert_verdict 'case (wv5)' FAIL 1
 assert_says 'case (wv5) the absence still FAILs' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv5) and the divergent field is named' \
-  "^waiver: STALE \(the marker names a different review — head \(0000000000000000000000000000000000000000 != $w_head\) — and a waiver may not outlive the review its authorizer judged; re-request it for this base/head/job\)\$"
+  "^waiver: STALE \(the marker names a different review — head \(0000000000000000000000000000000000000000 != $w_head\)"
+assert_says 'case (wv5) the diagnostic names how to re-decide that job without re-reviewing' \
+  'can be re-decided with --recheck-job'
 assert_lacks 'case (wv5) a stale marker never yields WAIVED' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3407,7 +3414,10 @@ STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv6)' FAIL 1
-assert_says 'case (wv6) a reasonless waiver is refused by name' '^waiver: MALFORMED \(the marker is missing reason='
+# A MISSING FIELD IS NOW REFUSED BY THE SINGLE ANCHORED PATTERN rather than by a per-field check, so
+# every shape violation reports the same cause: the required form.
+assert_says 'case (wv6) a reasonless marker does not match the required form' \
+  '^waiver: MALFORMED \\(the line does not match the required form'
 assert_lacks 'case (wv6) and never yields WAIVED' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3565,7 +3575,10 @@ STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent head=$w_head job=4656 reason=no base field\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv17)' FAIL 1
-assert_says 'case (wv17) the missing field is named' '^waiver: MALFORMED \(the marker is missing base='
+assert_says 'case (wv17) a marker missing a field does not match the required form' \
+  '^waiver: MALFORMED \\(the line does not match the required form'
+assert_says 'case (wv17) and the cause quotes the required form in full' \
+  'base=<40-hex> head=<40-hex> job=<id> reason=<why>'
 reset_stub
 
 printf '== (wv18) JOB 24: the waiver loop CLOSES — absence FAIL, waiver, recheck, WAIVED ==\n'

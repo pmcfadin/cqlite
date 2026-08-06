@@ -350,6 +350,28 @@ fields present:
 
     roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>
 
+AND THEN APPLY IT WITH A RECHECK, which is what closes the loop:
+
+    bash scripts/flow/roborev-review.sh --repo <abs> --recheck-job <id> \
+      --agent <agent> --model <model>
+
+A recheck RE-DECIDES that job's verdict and ENQUEUES NOTHING. It exists because the
+waiver names a job, the operator only learns the job id (and the token accounting)
+from the FINISHED run, and re-running the wrapper would enqueue a DIFFERENT job —
+making the fresh waiver instantly STALE. Without it the mechanism was a dead letter.
+The job is named EXPLICITLY, never resolved from base+head: a resolver would let a
+re-run inherit a waiver written for a different review, which is the hole the job
+binding closes.
+
+A recheck INHERITS NOTHING from the original run. sha-assert re-compares the record's
+git_ref against this base and head; the record's own review text becomes the
+transcript, so review-completed, both vacuity tiers and findings are re-asserted from
+it (a record with no review text leaves the transcript empty, which fails closed);
+roborev-exit reports SKIP rather than claiming an exit status for a process that did
+not run. The block declares 'MODE: recheck (job <id> …; NO review was enqueued)' and
+'recheck-of: <id>' as its first keys, the way the gate declares MODE: lite, so a
+recheck PASS can never be pasted as evidence of a fresh review.
+
 A worker or a closer may REQUEST one — one comment, including the token accounting —
 and may never apply it to its own PR.
 
