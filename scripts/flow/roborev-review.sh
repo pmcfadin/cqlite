@@ -327,7 +327,7 @@ machinery that made a copy of the vanishing snapshot certifiable, and three more
 defects in the code that merely digested it. A snapshot-mode PASS therefore does NOT
 assert the reviewer received the census paths; a closer wanting certainty inspects
 the diff or re-reviews a smaller range. A stated path that is relative, carries a
-`.`/`..` segment, lies outside the repository prefix, or is not shaped like
+\`.\`/\`..\` segment, lies outside the repository prefix, or is not shaped like
 .roborev/roborev-snapshot-<id>/<file> is a named FAIL, not a NOTICE — as is roborev's
 delegated-inspection tier, which names no snapshot path at all.
 
