@@ -181,7 +181,7 @@ Verified by search across the workspace:
   reports it*; AC2 is **not delivered at all**. Nothing here may be cited as "measured field skew".
 - **Not the decoded-partition cache.** No cache is built, sized, wired or benchmarked. #2827 stays
   decoupled from #2037 (AC3), and the K-A build stays owner-gated.
-- **Not a keyed load mode for `tools/flight-loadgen`.** Proposed as follow-up **F1** below.
+- **Not a keyed load mode for `tools/flight-loadgen`.** Tracked as follow-up **F1**, filed as issue #3330.
 - **Not a cross-language Murmur3 parity test.** Proposed as follow-up **F2** below.
 - **Not a decoded-size measurement.** The decode multiplier `m` stays an input to the procedure with
   a cited provenance (the Phase-0 wire estimate at `phase2-verify-caching.md:221-222`), explicitly
@@ -190,9 +190,9 @@ Verified by search across the workspace:
 - **No on-disk format work, no decode-path change, no no-heuristics surface.** The instrument reads
   values the read path already resolved; it infers nothing from bytes.
 
-## Proposed follow-ups (stated, not specified here)
+## Follow-ups (stated, not specified here)
 
-- **F1 — a keyed load mode for `tools/flight-loadgen`.** A `KeyedZipf`-style `Shape` over an
+- **F1 — a keyed load mode for `tools/flight-loadgen` (issue #3330).** A `KeyedZipf`-style `Shape` over an
   operator-supplied partition-key corpus that sets a **full-PK equality `FlightTicket::filter`**
   (`cqlite-flight/src/ticket.rs:259`) *and* key-derived Murmur3 token bounds (`:240`, `:243`) as a
   consistent accompaniment, asserted to emit `streaming_partition_lookup`
@@ -207,14 +207,14 @@ Verified by search across the workspace:
   instrument at load. Requires amending `tools/flight-loadgen/README.md:68-71`, which currently
   states the `point` shape is a request-setup/admission-cost proxy and that "a true keyed read needs
   a partition-key corpus (a follow-up)".
-- **F2 — an automated cross-language Murmur3 parity test.** A shared golden-vector file consumed by
+- **F2 — an automated cross-language Murmur3 parity test** (unfiled). A shared golden-vector file consumed by
   both suites, closing the hand-copy coupling: the Java vectors at
   `trino-connector/src/test/java/in/mcfad/cqlite/flight/Murmur3TokenTest.java:120-128` are, by their
   own Javadoc (`:14-16`), "copied verbatim from the Rust unit tests" at
   `cqlite-core/src/util/cassandra_murmur3.rs:488-513`. They agree today
   (`('hello',42) → 7666157718303755816`, `('world',99) → -4641306270390207264`) but nothing
   mechanically keeps them agreeing.
-- **F3 — measure the decode multiplier.** Replace the Phase-0 ~3.5× wire estimate with a measured
+- **F3 — measure the decode multiplier** (unfiled). Replace the Phase-0 ~3.5× wire estimate with a measured
   decoded-bytes-per-on-disk-byte ratio on real fixtures, removing the last assumption from the
   decision procedure.
 

@@ -6,7 +6,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **77**.
+Total instruments: **81**.
 
 ## All instruments
 
@@ -63,6 +63,10 @@ Total instruments: **77**.
 | `cqlite.read.bti.rows_root_rejected` | counter | `{partition}` | `cqlite.read.rows_root_reject_reason` | Clustering-slice reads that decoded a WHOLE BTI partition because its Rows.db row-index root failed structural validation, tagged by the violated invariant. | Should be 0. Non-zero explains clustering-read latency with no narrowing: the rows are correct but the row index is unusable — re-flush/re-compact a Rows.db written by CQLite <= 0.16 (#3002). |
 | `cqlite.read.bytes` | counter | `By` | `cqlite.sstable.format`<br>`cqlite.compression` | Total Data.db bytes read (post-decompression). | Track against read.rows to spot read amplification; a spike with flat rows means wide scans. |
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` | Distribution of single read/scan operation durations. | Watch p99; a growing tail is the read-latency alarm. |
+| `cqlite.read.partition_access.accesses` | counter | `1` | `cqlite.read.repeat_bucket` | Accesses attributable to each repeat-access bucket over one closed probe window (#2827) — the sum of the repeat counts of the partitions in that bucket. | accesses minus distinct_partitions is the number of reads a cache holding that bucket could have served; equal values mean every access was a first touch (nothing to cache). |
+| `cqlite.read.partition_access.bytes` | counter | `By` | `cqlite.read.repeat_bucket` | Distinct-partition on-disk bytes per repeat-access bucket over one closed probe window (#2827); a partition read ten times counts its bytes once. | Zero while every access reports size_source=unavailable — no Cassandra 5.0 index format records a per-partition size today, so this series stays empty until an authoritative extent is wired. Never an estimate. |
+| `cqlite.read.partition_access.distinct_partitions` | counter | `{partition}` | `cqlite.read.repeat_bucket`<br>`cqlite.read.size_source` | Distinct partitions per repeat-access bucket over one closed window of the default-OFF access-distribution probe (#2827) — the workload's concentration shape, with no per-key label. | Absent unless an operator enabled CQLITE_PARTITION_ACCESS_PROBE. Mass in bucket 1 is a uniform, cache-hostile pattern; mass in 9-16/17+ is a hot set. A non-zero size_source=unavailable share means the byte total beside it is incomplete. |
+| `cqlite.read.partition_access.sample_denominator` | gauge | `1` | _(none)_ | Sampling scale in force when the probe window closed (#2827): 1 is a census, 2^k means the recorder downsampled k times to stay inside its fixed 3 MiB table. | 1 is ideal. A large value means the window touched far more distinct partitions than the table holds; bucket fractions stay unbiased but absolute counts must be scaled by it. |
 | `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`<br>`cqlite.read.lookup_route`<br>`cqlite.sstable.format` | Partition point lookups attempted, tagged hit/miss so a dashboard computes the hit ratio from one series. | A healthy point-read workload is dominated by hits; a miss-heavy ratio means keys are absent or mis-routed. |
 | `cqlite.read.partitions` | counter | `{partition}` | `cqlite.sstable.format` | Total partitions scanned by the read path. | Rising in step with read.rows is healthy; many partitions for few rows indicates a full scan. |
 | `cqlite.read.rows` | counter | `{row}` | `cqlite.sstable.format` | Total rows materialised by the read path (climbs incrementally during a long Flight merge scan). | Steadily rising under load is healthy; flat while a scan is in flight suggests a stall. |

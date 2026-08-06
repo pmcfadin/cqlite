@@ -9,46 +9,46 @@
 > itself the gate is **recorded, not executed** (retitle/re-scope is an owner action).
 
 ## 1. Catalog + attribute registration (surface: `cqlite_core::observability::catalog`)
-- [ ] Add the four metric constants to `cqlite-core/src/observability/catalog.rs` with doc comments in
+- [x] Add the four metric constants to `cqlite-core/src/observability/catalog.rs` with doc comments in
       the existing house style (name, instrument, unit, bounded attributes):
       `READ_PARTITION_ACCESS_DISTINCT_PARTITIONS` (`cqlite.read.partition_access.distinct_partitions`,
       counter, `{partition}`), `READ_PARTITION_ACCESS_ACCESSES` (`…accesses`, counter, `1`),
       `READ_PARTITION_ACCESS_BYTES` (`…bytes`, counter, `By`),
       `READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR` (`…sample_denominator`, gauge, `1`).
-- [ ] Add the two bounded attribute keys to `catalog::attr` beside `LOOKUP_ROUTE` (`catalog.rs:82`):
+- [x] Add the two bounded attribute keys to `catalog::attr` beside `LOOKUP_ROUTE` (`catalog.rs:82`):
       `REPEAT_BUCKET = "cqlite.read.repeat_bucket"` (closed set `1|2|3-4|5-8|9-16|17+`) and
       `SIZE_SOURCE = "cqlite.read.size_source"` (closed set `index|unavailable`). Document both value
       sets in the doc comment — this is what the docs generator and the reviewer read.
-- [ ] Register all four in `ALL_METRICS` (`catalog.rs:907`) in read-path order.
-- [ ] Add four `MetricDoc` entries to `cqlite-core/src/observability/operator_docs_annotations.rs`
+- [x] Register all four in `ALL_METRICS` (`catalog.rs:907`) in read-path order.
+- [x] Add four `MetricDoc` entries to `cqlite-core/src/observability/operator_docs_annotations.rs`
       (`kind`, `unit`, `summary`, `attributes`, `interpretation`, `round_item`). Generation is
       fail-closed on a missing annotation (`operator_docs.rs:16-19`, `:116`) — an omission fails the
       build, not review.
 
 ## 2. The recorder (surface: `cqlite_core::observability::partition_access`) — TDD, tests first
-- [ ] New module `cqlite-core/src/observability/partition_access.rs`, exported from
+- [x] New module `cqlite-core/src/observability/partition_access.rs`, exported from
       `observability/mod.rs` beside `catalog`/`config`. Keep it under the ~800-line source target
       (campsite rule); if the emit path grows, split emit from counting rather than growing the file.
-- [ ] Write the failing tests first in `cqlite-core/tests/issue_2827_partition_access_histogram.rs`:
+- [x] Write the failing tests first in `cqlite-core/tests/issue_2827_partition_access_histogram.rs`:
       bucket boundaries at 1/2/3/4/8/9/16/17, `accesses` per bucket = sum of member counts,
       emit-exactly-once + reset on close, empty-window silence, ≤25 distinct series, and the
       attribute-key allowlist assertion.
-- [ ] Implement the counting table: open-addressed, linear probing, `SLOTS = 1 << 17`, entry =
+- [x] Implement the counting table: open-addressed, linear probing, `SLOTS = 1 << 17`, entry =
       `key_hash: AtomicU64` + `bytes: AtomicU64` + `count: AtomicU32` + `flags: AtomicU8` + padding =
       24 B ⇒ **exactly 3 MiB**. `RwLock` read-locked on the hot path (relaxed atomics on the slot),
       write-locked only for downsample and window close. Allocate **lazily** on first enable.
-- [ ] Implement adaptive hash-prefix downsampling at load factor 0.75: increment `k`, one linear pass
+- [x] Implement adaptive hash-prefix downsampling at load factor 0.75: increment `k`, one linear pass
       dropping non-matching entries, `sample_denominator = 2^k`. Cap `k` at 20 and mark the window
       non-census at the cap. **No recency/frequency/arrival-order eviction** — `design.md` D4 records
       why those bias toward "go".
-- [ ] Implement the window: tumbling; closes on duration (default 60 s) **or** access count (default
+- [x] Implement the window: tumbling; closes on duration (default 60 s) **or** access count (default
       5,000,000) **or** an explicit public `close_window()`. Every correctness test drives
       `close_window()` — no test asserts on elapsed wall time (`roborev-lints` / #2642).
-- [ ] Implement the runtime gate `CQLITE_PARTITION_ACCESS_PROBE` (default OFF): `OnceLock`-cached env
+- [x] Implement the runtime gate `CQLITE_PARTITION_ACCESS_PROBE` (default OFF): `OnceLock`-cached env
       read plus a programmatic override that wins, mirroring `CQLITE_READ_PATH`
       (`cqlite-core/src/query/select_executor/forcing.rs:42`, `:78-82`). Disabled ⇒ one relaxed atomic
       load, zero allocation, zero emission.
-- [ ] Verify the hash is over the **raw partition-key bytes** the point path already holds
+- [x] Verify the hash is over the **raw partition-key bytes** the point path already holds
       (`partition_lookup.rs:52-57`), not the Murmur3 token — the BIG point path
       (`partition_lookup.rs:63-66`) does not compute a token and must not be made to.
 
@@ -57,32 +57,48 @@
       max-not-sum semantics over repeated accesses; a BIG-sized access lands under
       `size_source="index"`; a BTI access lands under `size_source="unavailable"` with **zero** bytes;
       a mixed window shows both series.
-- [ ] Thread the byte weight from the per-SSTable resolution sites into the open logical access:
+- [x] Thread the byte weight from the per-SSTable resolution sites into the open logical access:
       `PartitionLoc.data_size` (`cqlite-core/src/storage/cache/global_key_offset.rs:76-81`) summed
       across resolved SSTables for that one access.
-- [ ] Implement the entry rule `bytes = max(bytes, this_access_bytes)` and the sticky
+- [x] Implement the entry rule `bytes = max(bytes, this_access_bytes)` and the sticky
       `size_source = unavailable` flag, set whenever **any** resolved SSTable reported no size
       (BTI: `global_key_offset.rs:72-74`, `:94-100`; bare-offset return at `partition_lookup.rs:433`).
-- [ ] Assert in code and in test that **no size is ever estimated** — no successor-offset
+- [x] Assert in code and in test that **no size is ever estimated** — no successor-offset
       interpolation, no nominal default. Unavailable is reported, not filled in (`design.md` D6; this
       is the #28 no-heuristics boundary for this change).
-- [ ] Make the BTI test resolve its fixture per TABLE via
+- [x] Make the BTI test resolve its fixture per TABLE via
       `cqlite-core/tests/support/datasets_root.rs::sstables_root_for_table` and assert **per case**
       (`must_run` for committed fixtures) — never a suite-wide `assert!(ran > 0)` (#3220).
 
+> **OPEN FINDING against design D6, raised 2026-08-06 and NOT resolved unilaterally.**
+> D6 assumes the BIG `Index.db` supplies an authoritative per-partition size. It does
+> not: a Cassandra 5.0 BIG index entry is
+> `[key][data_offset vint][promoted_index_len vint][promoted_index]`
+> (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`) with no size
+> field — which is why the reader's own seek path bounds a partition by the SUCCESSOR
+> offset and calls that authoritative. So `PartitionLoc.data_size` is `0` on BOTH
+> formats, every access records `size_source=unavailable`, `…partition_access.bytes`
+> stays at zero, and the decision procedure refuses every real window on refusal
+> condition 1. The histogram (the primary deliverable) is unaffected. Resolving this
+> needs an owner decision between (a) accepting a byte-blind instrument today and
+> promoting F4 to a prerequisite for AC2, or (b) sourcing the extent from the
+> successor gap the read path already computes. Sections 6 and 7 below are held
+> pending that decision, because the decision note's byte arithmetic would otherwise
+> document a number the instrument cannot produce.
+
 ## 4. Wiring at the logical point-read boundary (wiring evidence)
-- [ ] Call `record_partition_access` once per logical partition at the core targeted path:
+- [x] Call `record_partition_access` once per logical partition at the core targeted path:
       `classify_partition_lookup` yielding `Targeted`/`MultiTargeted`
       (`cqlite-core/src/query/select_executor/lookup.rs:92`), at its consumers
       `streaming.rs:107` and `stream_agg.rs:196`.
-- [ ] Call it once per key of the returned `PointReadPlan` at the Flight point path
+- [x] Call it once per key of the returned `PointReadPlan` at the Flight point path
       (`cqlite-flight/src/producer_point.rs:83` `point_read_keys`).
 - [ ] Do **NOT** count at the per-SSTable probe sites in
       `cqlite-core/src/storage/sstable/reader/partition_lookup.rs` (`:84`, `:128`, `:152`, `:349`,
       `:410`, `:436`) — they supply byte weights only. Add a comment at each naming the D2 reason
       (per-SSTable counting multiplies repeats by the generation count and manufactures
       concentration), so the next reader does not "fix" it.
-- [ ] Add a regression test that a partition present in several generations registers exactly **one**
+- [x] Add a regression test that a partition present in several generations registers exactly **one**
       access for one logical read.
 - [ ] End-to-end wiring test `cqlite-flight/tests/issue_2827_partition_access_e2e.rs`
       (`#![cfg(feature = "observability-testing")]`, own test binary — the capture harness installs a
@@ -95,15 +111,15 @@
       never bare `partition_lookup` (`:122`), which this route does not emit.
 
 ## 5. Known-input validation (the oracle-legitimacy requirement)
-- [ ] Add the census recovery cases to
+- [x] Add the census recovery cases to
       `cqlite-core/tests/issue_2827_partition_access_histogram.rs`: a known skewed sequence
       (10 partitions × 20 accesses, 100 × 3, 1000 × 1) recovered **exactly**, and a uniform sequence
       (5,000 × 1) that reports everything in bucket `1`.
-- [ ] Add a forced-downsample case asserting the bucket **fractions** survive, `sample_denominator > 1`,
+- [x] Add a forced-downsample case asserting the bucket **fractions** survive, `sample_denominator > 1`,
       and no survivor's count is under-recorded.
-- [ ] Derive every expected value from the input sequence by arithmetic that does **not** pass through
+- [x] Derive every expected value from the input sequence by arithmetic that does **not** pass through
       the instrument, so the test can fail.
-- [ ] Put the oracle-legitimacy note in the test file header, in its own words: a synthetic input is a
+- [x] Put the oracle-legitimacy note in the test file header, in its own words: a synthetic input is a
       legitimate oracle for a claim about the **instrument** and an illegitimate one for a claim about
       the **world** (CLAUDE.md round-trip invariance #3042 / two parity oracles #1742). Assert **no**
       hit ratio, cache size or skew parameter anywhere in this file.
@@ -124,7 +140,7 @@
       keyed workload; AC2 is unmet.
 
 ## 7. Docs, catalog pages and the bundled correction
-- [ ] Regenerate the operator pages: `cargo run -p cqlite-core --example gen_operator_metrics_doc` →
+- [x] Regenerate the operator pages: `cargo run -p cqlite-core --example gen_operator_metrics_doc` →
       `docs/reports/flight-metrics-reference.md` + `website/src/content/docs/agents-using/flight-metrics-reference.md`
       (`operator_docs.rs:35`, `:40`). Do not hand-edit either file.
 - [ ] Hand-edit `docs/observability/configuration.md`: add the four metric rows to the read-path table
