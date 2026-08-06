@@ -173,6 +173,63 @@ except Invalid:
   # with a tampered manifest) removes or rewrites it explicitly — this is the healthy default, so
   # every OTHER case reaches its own subject instead of dying on an absent record here.
   ws0_pin_verification "$session" "2,10" "4,12"
+  # ...and the BINARY PROVENANCE the driver records before the first rep (#3272 round 10, M2). The
+  # reporter REQUIRES it, so every OTHER case would die here rather than reaching its own subject.
+  # Stamped with the healthy default; a case whose SUBJECT is the record (absent, incomplete,
+  # tampered) removes or rewrites it explicitly.
+  ws0_pin_binaries "$session"
+}
+
+# ws0_pin_binaries <session-dir> [build-mode] — the driver's record of WHICH BINARIES it measured
+# (#3272 round 10, M2).
+#
+# Separate from `ws0_pin_session_corpus` so a case can stamp a record that is absent, incomplete or
+# describes different programs without rebuilding the whole manifest.
+#
+# It does NOT call the shipped `record_binary_provenance`, and that is the one place in this file
+# where hand-writing the shape is the RIGHT call rather than the drift hazard `make_round` warns
+# about: the real writer OBSERVES `target/release` binaries and runs `git` in the repo, which is
+# host-dependent and (under `--no-build`) may legitimately find nothing — a fixture that depended on
+# either would fail on the machine rather than on its subject. The completeness contract is asserted
+# instead: `test_ws0_provenance_guards.sh` requires this fixture's key set to equal the shipped
+# `PROVENANCE_FIELDS`, so the shape cannot drift silently.
+ws0_pin_binaries() {
+  local session="$1" mode="${2-built}" perf_dir
+  # DOES NOT CREATE the session dir — the same load-bearing rule `ws0_pin_verification` records, and
+  # MEASURED here for the second time: a `mkdir(parents=True)` in this function brought a
+  # deliberately-NONEXISTENT `--dir` into existence and turned test_ws0_report_guards.sh's
+  # "not an existing directory" refusal into a missing-PIN one. A fixture must never manufacture the
+  # condition a case is testing the absence of. Absent dir => nothing to stamp; the case's own
+  # subject then fires.
+  [[ -d "$session" ]] || return 0
+  perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
+  python3 -c '
+import hashlib, json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import MEASURED_BINARIES, provenance_path
+session, mode = pathlib.Path(sys.argv[2]), sys.argv[3]
+rev = "1" * 40
+rec = {
+    "source_revision": rev,
+    "source_revision_short": rev[:12],
+    "source_dirty": False,
+    "source_dirty_paths": 0,
+    "build_mode": mode,
+    "binaries": {
+        name: {"path": f"/nonexistent/target/release/{name}",
+               "sha256": hashlib.sha256(name.encode()).hexdigest(),
+               "bytes": 1024 + i, "mtime_epoch": 2000000000}
+        for i, name in enumerate(MEASURED_BINARIES)
+    },
+    # NO APOSTROPHE anywhere in this heredoc-free `python3 -c ...` body: it is inside SHELL SINGLE
+    # QUOTES, so one `'"'"'` would terminate the string and silently truncate this whole library —
+    # which is what happened while writing it, and it presented as every OTHER case in the suite
+    # failing on an absent pinning-verification.json.
+    "provenance": "a TEST FIXTURE record, shaped like the record the driver writes"
+                  " (see ws0_pin_binaries for why the shape is asserted, not shared)",
+}
+provenance_path(session).write_text(json.dumps(rec, indent=1) + "\n")
+' "$perf_dir" "$session" "$mode"
 }
 
 # ws0_pin_verification <session-dir> <server-cpus> <client-cpus> — the driver's recorded sibling
