@@ -33,6 +33,7 @@ from ws0_loadgen_record import (
     SESSION_BOUND_INPUTS,
     ZERO_REQUIRED_COUNTERS,
     _ZERO_COUNTER_MEANING,
+    check_error_code_breakdown,
     check_fixed_inputs,
     check_record_surface,
     check_session_bound_inputs,
@@ -406,6 +407,17 @@ def collect_flight(
                 raise Invalid(f"{headline} {_ZERO_COUNTER_MEANING[key]}")
             counters_zero[key] = observed
         errors = counters_zero["requests_error"]
+        # ...and THE PER-CODE BREAKDOWN MUST ACCOUNT FOR THAT COUNT (#3272 round 20). `error_codes`
+        # was classified IGNORED because it "must be empty whenever the rep is accepted" — an
+        # invariant ASSUMED and never enforced, so a record carrying `requests_error: 0` beside
+        # `error_codes: {"Internal": 1}` passed every check above and was published as a clean,
+        # failure-free scan with the failing code named nowhere in the output. Checked as a SUM
+        # rather than as an emptiness test, because the sum is the producer's own invariant
+        # (`StepAgg::record_outcome` increments both on one line) and it also catches a breakdown
+        # that disagrees at a non-zero count. Passed the ALREADY-VALIDATED count from the loop
+        # above rather than re-reading `rec`: two reads of one field is how two sites drift, and
+        # this check's whole subject is two fields agreeing.
+        error_breakdown = check_error_code_breakdown(tag, rec, errors)
         requests_ok = check_request_count(tag, temp, rec.get("requests_ok"), rows, corpus_rows)
         # ...and THE RESPONSE MUST HAVE CARRIED THE ARROW A COMPLETE SCAN CARRIES (#3272 round 17).
         # Every check above counts REQUESTS and ROWS. `bytes_total` — the client-side sum of each

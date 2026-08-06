@@ -33,7 +33,7 @@ checker lost in the move is refused AT IMPORT rather than leaving a field unveri
 from __future__ import annotations
 
 from ws0_content_volume import CONTENT_VOLUME_INPUTS, check_content_volume
-from ws0_validate import Invalid
+from ws0_validate import Invalid, non_negative_int
 
 # ============================================================================
 # THE FIXED INPUTS — VERIFIED, NOT IGNORED (#3272 review round 11, F3)
@@ -182,6 +182,77 @@ SESSION_BOUND_INPUTS: dict[str, tuple[str, str, str]] = {
 }
 
 
+# ============================================================================
+# THE CROSS-CHECKED COUNTERS — AN INVARIANT ASSUMED IS AN INVARIANT UNENFORCED (#3272 round 20)
+# ============================================================================
+# `error_codes` was classified `ignored`, and the reason it carried was:
+#
+#     "a BREAKDOWN of requests_error, which must already be ZERO for the rep to be reported —
+#      so this map is empty whenever the rep is accepted"
+#
+# That sentence is TRUE OF A WELL-FORMED RECORD and SILENT ABOUT A MALFORMED ONE, which is the
+# same shape as `target_concurrency` ("an INPUT", round 12 F3), `endpoint` ("not a measurement",
+# round 14 F2) and `bytes_total` ("no byte-throughput figure is printed", round 17). The word
+# "must" is doing the work, and NOTHING IN THIS REPORTER ENFORCED IT. So the reporter accepted
+#
+#     {"requests_error": 0, "error_codes": {"Internal": 1}, …}
+#
+# — MEASURED, pre-fix: exit 0, the full five-line report published, and the string `Internal`
+# appearing NOWHERE in the output. A record that states in one field that a request failed with an
+# internal error and in another that no request failed is not a record this reporter models, and it
+# was reported as a clean, failure-free scan. Which of the two fields is wrong cannot be known from
+# the artifact, so NEITHER is reported — the rule `load_corpus_identity` applies to `bytes_per_row`
+# vs `data_db_bytes/rows` and the derived-vs-recorded `rows_per_s` cross-check applies to the rate.
+#
+# THE INVARIANT ENFORCED IS THE SUM, NOT THE EMPTINESS, and the difference is not pedantic. "empty
+# whenever requests_error is 0" is the special case at zero; `sum(error_codes.values()) ==
+# requests_error` is the producer's actual invariant (`record_outcome` increments `self.error` and
+# `self.error_codes[code]` on the SAME line — tools/flight-loadgen/src/record.rs), and it also
+# catches a record whose breakdown DISAGREES at a non-zero count: `requests_error: 3` with a single
+# code counted once. That record is refused for its self-contradiction rather than only for the
+# non-zero count it would otherwise be refused for — the diagnostic an operator reads is then about
+# a corrupt artifact, not about a failing server. An emptiness check would say nothing about it.
+#
+# `error_codes` is therefore CONSUMED, not a sixth disposition, and the precedent is in the census
+# already: `rows_per_s` is `consumed` with the reason "cross-checked against the DERIVED
+# rows_total/duration_s" — a field that produces no figure of its own, is validated, and is compared
+# against OTHER FIELDS OF THE SAME RECORD. That is exactly this. It is NOT `session-bound` or
+# `content-volume`, because those two exist for expectations that come from OUTSIDE the record (the
+# session's configuration; a separate measurement), and this one's comes from the record itself —
+# collapsing them would put "compared to another field of this same object" under a word that means
+# "compared to something we established elsewhere".
+#
+# So the wiring mirrors `ZERO_REQUIRED_COUNTERS` (the other `consumed`-side mechanism) rather than
+# `_EXPECTATION_TABLES` (which is for the VERIFYING dispositions): a table declared as data, a
+# checker declared beside it, and closures in BOTH DIRECTIONS at import — a member not classified
+# `consumed` is refused, and a member no checker reads is refused. `_EXPECTATION_TABLES` is
+# deliberately NOT extended to cover it: registering a table against `consumed` would demand an
+# entry for EVERY consumed field (that closure is bidirectional), so `rows_total` and `duration_s`
+# would need cross-check entries they do not have, and the honest way to say "this is a consumed
+# field with a cross-check" is a table of the consumed fields that have one.
+#
+# Each entry is `(SOURCE, WHY, CONSEQUENCE)`, the shape `SESSION_BOUND_INPUTS` uses, for the same
+# reason: the CONSEQUENCE is the sentence the refusal ends with, and a refusal that names two
+# disagreeing numbers and nothing about what the disagreement costs is one an operator cannot act on.
+CROSS_CHECKED_COUNTERS: dict[str, tuple[str, str, str]] = {
+    "error_codes": (
+        "`requests_error` in this same record — the loadgen increments the count and the"
+        " per-code breakdown on the same line (StepAgg::record_outcome)",
+        "the PER-CODE BREAKDOWN of requests_error. It was classified IGNORED because the map"
+        " `must be empty whenever the rep is accepted` — an invariant this reporter ASSUMED"
+        " and NEVER ENFORCED, so a record carrying `requests_error: 0` beside"
+        " `error_codes: {\"Internal\": 1}` was accepted and reported as a clean, failure-free"
+        " scan with the failing code appearing nowhere in the output. The invariant checked is"
+        " the SUM rather than the emptiness, because the sum is the producer's actual invariant"
+        " and it also catches a breakdown that disagrees at a NON-ZERO count (#3272 round 20)",
+        "THE RECORD CONTRADICTS ITSELF about whether any request failed, so neither field can be"
+        " reported: this reporter cannot know whether the rep suffered failures its error count"
+        " omitted or carries a breakdown from elsewhere, and both readings make the rows a"
+        " measurement of something other than a clean full-corpus scan. Re-run the rep rather"
+        " than reporting a self-contradictory record.",
+    ),
+}
+
 # `requests_unavailable` — the loadgen's ADMISSION-SHED counter — was COMPLETELY UNREAD.
 # Not defaulted, not mis-validated: never mentioned in the reporting path at all, while its
 # sibling `requests_error` had by then been through three rounds of hardening. So a rep in
@@ -214,15 +285,10 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
         " server was over its admission limit, so the throughput measures a degraded"
         " server (#3272 F4)",
     ),
+    "error_codes": ("consumed", CROSS_CHECKED_COUNTERS["error_codes"][1]),
     # ---- IGNORED, each with the reason recorded HERE, at the branch ---------------
     # A counter is only ever ignored when it CANNOT change the validity of a figure this
     # reporter prints. Anything that could is above.
-    "error_codes": (
-        "ignored",
-        "a BREAKDOWN of requests_error, which must already be ZERO for the rep to be"
-        " reported — so this map is empty whenever the rep is accepted, and carries no"
-        " information the accept condition has not already used",
-    ),
     "qps": (
         "ignored",
         "requests_ok/duration_s — both operands are validated and the rig reports ROWS/s,"
@@ -396,6 +462,7 @@ del _k, _d, _disp, _table_name, _table
 _TRIPLE_TABLES = (
     ("SESSION_BOUND_INPUTS", SESSION_BOUND_INPUTS),
     ("CONTENT_VOLUME_INPUTS", CONTENT_VOLUME_INPUTS),
+    ("CROSS_CHECKED_COUNTERS", CROSS_CHECKED_COUNTERS),
 )
 for _tname, _tbl in _TRIPLE_TABLES:
     for _k, _spec in _tbl.items():
@@ -415,16 +482,57 @@ for _tname, _tbl in _TRIPLE_TABLES:
                     " names two differing values and nothing about what the mismatch costs, which"
                     " an operator cannot act on."
                 )
-# ...and every table of this shape must be one the registry knows about, or its entries would be
+# WHICH REGISTRY VOUCHES FOR A CROSS-CHECK TABLE (#3272 round 20). The sibling of
+# `_EXPECTATION_TABLES` for the `consumed`-side mechanism, and it is a SEPARATE registry rather than
+# an entry in that one for the reason stated at `CROSS_CHECKED_COUNTERS`: `_EXPECTATION_TABLES`'
+# closure is bidirectional over its disposition, so registering a table against `consumed` would
+# demand a cross-check entry for EVERY consumed field. A cross-checked counter is a consumed field
+# that HAS one, which is a subset — so it gets its own table, its own checker, and its own closures.
+_CROSS_CHECK_TABLES: dict[str, dict[str, tuple[object, ...]]] = {
+    "CROSS_CHECKED_COUNTERS": CROSS_CHECKED_COUNTERS,
+}
+# ...and every table of this shape must be one A REGISTRY knows about, or its entries would be
 # shape-checked while nothing ever compared them.
+#
+# Read as a UNION over the registries rather than against `_EXPECTATION_TABLES` alone (#3272 round
+# 20). The single-registry form would have refused `CROSS_CHECKED_COUNTERS` at import — correctly, by
+# its own lights: a table nothing reads IS the defect it guards. But the fix it forces is the wrong
+# one (register a cross-check table against a verifying disposition, weakening that closure), so the
+# registry set is what this loop is over. A NEW registry must be added HERE, in one place, or its
+# tables are unvouched-for and refused.
+_TABLE_REGISTRIES = (
+    ("_EXPECTATION_TABLES", {_n for _n, _ in _EXPECTATION_TABLES.values()}),
+    ("_CROSS_CHECK_TABLES", set(_CROSS_CHECK_TABLES)),
+)
 for _tname, _tbl in _TRIPLE_TABLES:
-    if not any(_n == _tname for _n, _ in _EXPECTATION_TABLES.values()):
+    _vouchers = sorted(_r for _r, _names in _TABLE_REGISTRIES if _tname in _names)
+    if not _vouchers:
         raise Invalid(
-            f"{_tname} is shape-checked as an expectation table but is not registered in"
-            " _EXPECTATION_TABLES, so no disposition reads it and no field could be verified"
-            " against it (#3272 round 17)"
+            f"{_tname} is shape-checked as an expectation/cross-check table but is registered in"
+            f" NONE of {[_r for _r, _ in _TABLE_REGISTRIES]}, so nothing reads it and no field"
+            " could be checked against it (#3272 round 17 / round 20)"
         )
-del _k, _spec, _pos, _label, _tname, _tbl
+    if len(_vouchers) > 1:
+        raise Invalid(
+            f"{_tname} is registered in {_vouchers} — TWO registries claim it, so a field would be"
+            " checked by two mechanisms with two different meanings of 'verified', and a change to"
+            " one would silently leave the other reading as covering it (#3272 round 20)"
+        )
+del _k, _spec, _pos, _label, _tname, _tbl, _vouchers
+
+# ...and the cross-check table and the census are the same fact written twice, IN BOTH DIRECTIONS
+# (#3272 round 20). A member left classified `ignored` would be cross-checked by nothing while the
+# table read as covering it — which is precisely the state `error_codes` was in — and a census entry
+# pointing at this table with no member would claim a check that does not exist.
+for _k in CROSS_CHECKED_COUNTERS:
+    if RECORD_FIELD_DISPOSITION.get(_k, ("", ""))[0] != "consumed":
+        raise Invalid(
+            f"{_k} has a cross-check in CROSS_CHECKED_COUNTERS but is not classified `consumed` in"
+            " RECORD_FIELD_DISPOSITION — the census and the cross-check disagree, and a field left"
+            " `ignored` here is checked by nothing while the table reads as covering it (#3272"
+            " round 20)"
+        )
+del _k
 
 # Every counter that must be present AND zero for a rep to be reported.
 ZERO_REQUIRED_COUNTERS = ("requests_error", "requests_unavailable")
@@ -610,6 +718,96 @@ def check_session_bound_inputs(tag: str, rec: dict, expected: dict[str, str]) ->
     return verified
 
 
+def check_error_code_breakdown(tag: str, rec: dict, requests_error: int) -> dict:
+    """REQUIRE the per-code breakdown to ACCOUNT FOR every failed request (#3272 round 20).
+
+    `error_codes` was classified `ignored` because it "must be empty whenever the rep is accepted".
+    The reporter never enforced that, so `{"requests_error": 0, "error_codes": {"Internal": 1}}` was
+    accepted and published as a clean, failure-free scan with `Internal` appearing nowhere in the
+    output. A record that says in one field that a request failed and in another that none did is
+    self-contradictory, and neither reading may be reported.
+
+    The invariant is the SUM, not the emptiness: `sum(error_codes.values()) == requests_error` is the
+    producer's own invariant (`StepAgg::record_outcome` increments `self.error` and
+    `self.error_codes[code]` on the same line), and unlike an emptiness test it also refuses a
+    breakdown that disagrees at a NON-ZERO count — `requests_error: 3` beside one code counted once.
+
+    `requests_error` is passed in ALREADY VALIDATED (the caller's `non_negative_int` over
+    `ZERO_REQUIRED_COUNTERS`) rather than re-read from `rec` here: two independent reads of one field
+    is how the two sites drift, and the whole subject of this function is two fields that must agree.
+
+    Every count goes through `non_negative_int`, never a bare `int()` or a bare `sum()`: a bool
+    (`int(True)` is 1), a fractional count (`int(0.9)` is 0 — which would make a broken breakdown sum
+    to the clean total), a string, `inf`/`nan` and a negative count are each refused by name. A
+    negative count matters specifically here, because summing one CANCELS a positive sibling: a
+    `{"A": 2, "B": -2}` breakdown sums to 0 and would satisfy a clean `requests_error: 0`.
+
+    ABSENT is an ERROR, never an assumed empty map — the AC3 rule. `rec.get("error_codes", {})` would
+    make the check pass precisely when the record is silent about the breakdown, which is the
+    fabricated-default shape this module refuses everywhere else.
+
+    Returns what was verified, so the rep's record can state the check ran.
+    """
+    source, why, consequence = CROSS_CHECKED_COUNTERS["error_codes"]
+    if "error_codes" not in rec:
+        raise Invalid(
+            f"flight rep {tag} step record carries no `error_codes`, so the per-code breakdown of"
+            f" its {requests_error} failed request(s) was NOT OBSERVED and cannot be compared"
+            f" against {source}. A missing field is an error, never an assumed empty map —"
+            " defaulting it would make this check pass precisely when the record is silent about"
+            f" the breakdown (#3272 round 20). {why}"
+        )
+    got = rec["error_codes"]
+    if not isinstance(got, dict):
+        raise Invalid(
+            f"flight rep {tag} recorded `error_codes` = {got!r} ({type(got).__name__}), but the"
+            " load generator writes it as a MAP of status-code label -> count"
+            " (StepRecord.error_codes is a BTreeMap<String, u64>). A value of another shape cannot"
+            f" be summed and compared against {source}, so it is refused rather than skipped:"
+            " a breakdown this reporter cannot read is not a breakdown it may ignore (#3272"
+            f" round 20). {why}"
+        )
+    total = 0
+    for code, count in sorted(got.items()):
+        if not isinstance(code, str):
+            raise Invalid(
+                f"flight rep {tag} recorded an `error_codes` key {code!r}"
+                f" ({type(code).__name__}), but the load generator writes each key as a STATUS-CODE"
+                " LABEL string (classify.rs). A key of another type means this is not the map this"
+                f" reporter models (#3272 round 20). {why}"
+            )
+        total += non_negative_int(
+            f"flight rep {tag} error_codes[{code!r}]",
+            count,
+            "It is a per-code FAILED-REQUEST COUNT, summed and compared against this record's own"
+            " requests_error. A fractional one would be TRUNCATED by a bare int() into agreement"
+            " with a clean total, and a NEGATIVE one would CANCEL a positive sibling so that a"
+            " breakdown naming real failures summed to zero (#3272 round 20).",
+        )
+    if total != requests_error:
+        raise Invalid(
+            f"flight rep {tag} recorded `requests_error` = {requests_error} but its"
+            f" `error_codes` breakdown sums to {total} ({dict(sorted(got.items()))}). The load"
+            " generator increments the count and the per-code entry on the SAME line"
+            " (StepAgg::record_outcome, tools/flight-loadgen/src/record.rs), so the two are the"
+            " same fact written twice and a record whose halves disagree is not one this reporter"
+            f" models. {consequence}"
+        )
+    return {
+        "error_codes": dict(sorted(got.items())),
+        "error_codes_sum": total,
+        "requests_error": requests_error,
+        "error_codes_source": (
+            "CROSS-CHECKED: sum(error_codes.values()) == requests_error, the invariant the load"
+            " generator maintains at StepAgg::record_outcome. This field used to be classified"
+            " IGNORED on the ASSUMED invariant that the map is empty whenever requests_error is 0,"
+            " which nothing enforced — so a record carrying requests_error 0 beside"
+            " error_codes {'Internal': 1} was reported as a clean, failure-free scan (#3272"
+            " round 20)"
+        ),
+    }
+
+
 # WHICH DISPOSITIONS A CHECKER ACTUALLY COMPARES — asserted against `_EXPECTATION_TABLES` at import,
 # so a field cannot be classified as verified by a table no function reads. That is round 12's F2
 # one level out: the freeze happened and the CHECK ON IT was nominal, which is the same defect as a
@@ -633,5 +831,31 @@ for _disp in _CHECKED_DISPOSITIONS:
             " against nothing"
         )
 del _disp
+
+# ...and the SAME closure for the cross-check side, keyed on the FIELD rather than on a disposition
+# (#3272 round 20). `_CHECKED_DISPOSITIONS` cannot express this: `error_codes` is `consumed`, and the
+# other consumed fields have no cross-check — so a per-disposition mapping would either demand a
+# checker for all of them or vouch for `error_codes` by vouching for the whole word `consumed`, which
+# is how a table comes to read as covering a field nothing compares. Both directions, because both
+# have been the defect on this issue: a table no checker reads (round 12's F2) and a checker whose
+# table nobody registered.
+_CROSS_CHECKERS = {
+    "error_codes": check_error_code_breakdown,
+}
+for _k in CROSS_CHECKED_COUNTERS:
+    if _k not in _CROSS_CHECKERS:
+        raise Invalid(
+            f"{_k} has a cross-check stated in CROSS_CHECKED_COUNTERS but NO CHECKER FUNCTION reads"
+            " it, so the field would be compared against nothing while the table reads as covering"
+            " it — the half-wired guard #3272 keeps finding (round 20)"
+        )
+for _k in _CROSS_CHECKERS:
+    if _k not in CROSS_CHECKED_COUNTERS:
+        raise Invalid(
+            f"{_k} has a cross-checker but no entry in CROSS_CHECKED_COUNTERS, so its refusal would"
+            " carry no stated source or consequence and the census would not record that the field"
+            " is cross-checked at all (#3272 round 20)"
+        )
+del _k
 
 
