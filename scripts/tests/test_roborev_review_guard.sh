@@ -35,7 +35,7 @@ WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
 # The structured waiver scanner the wrapper delegates to (#3312 job 26). Defined HERE, beside
 # WRAPPER, because run_wrapper passes it on every call — the structural section is too late.
 SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
-WAIVER_SCAN_TOOL_OVERRIDE=""
+TEST_SELF="$SCRIPT_DIR/$(basename "$0")"
 # The two sourced halves, named ONCE here because several cases probe a function DIRECTLY rather
 # than through the wrapper. `WRAPPER` is reassigned later by the gate-mock cases; these are not.
 CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
@@ -900,7 +900,6 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
-    WAIVER_SCAN_TOOL="${WAIVER_SCAN_TOOL_OVERRIDE:-$SCAN_TOOL}" \
     TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
@@ -3843,22 +3842,70 @@ assert_says 'case (wv30) a bare login line is prose, not an author record' \
   "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor'"
 reset_stub
 
-printf '== (wv31) JOB 26: the scanner being unusable is UNAVAILABLE, never a text fallback ==\n'
-# A waiver is never decided from a flattened text stream, so an absent scanner fails closed instead of
+printf '== (wv31) JOB 26/27: an ABSENT scanner is UNAVAILABLE, never a text fallback ==\n'
+# A waiver is never decided from a flattened text stream, so a missing scanner fails closed instead of
 # degrading to line parsing — the shape that produced this whole family.
+#
+# THE FIXTURE SUBSTITUTES THE FILE, NOT THE PATH (job 27). There is no environment override to point the
+# wrapper elsewhere — that override was itself the hole: the constrained party must not choose its own
+# enforcer. So this case runs the wrapper from a SCRATCH COPY of `scripts/flow/` with the scanner omitted,
+# which is a state a real checkout can be in and needs no seam in production code.
 reset_stub
+noscan="$tmp/flow-without-scanner"
+mkdir -p "$noscan"
+cp "$WRAPPER" "$noscan/roborev-review.sh"
+cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$noscan/"
+cp "$CHECKS_FILE" "$noscan/"
+cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$noscan/"
+# ...and deliberately NOT roborev-waiver-scan.py.
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=would otherwise grant\n"
-WAIVER_SCAN_TOOL_OVERRIDE="$tmp/no-such-scanner.py"
-run_wrapper "$w_work"
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_GIT_REF=$(range_ref "$w_work")
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+  TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
+  bash "$noscan/roborev-review.sh" --repo "$w_work" --agent codex --model gpt-5.6-sol \
+  --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+RC=$?
 assert_verdict 'case (wv31)' FAIL 1
 assert_says 'case (wv31) an unusable scanner is UNAVAILABLE and fails closed' \
   '^waiver: UNAVAILABLE \(the structured waiver scanner is unusable'
 assert_says 'case (wv31) and it says a waiver is never decided from a text stream' \
   'NEVER decided from a flattened text stream'
 assert_lacks 'case (wv31) no grant without the scanner' '^prompt-content: WAIVED'
-WAIVER_SCAN_TOOL_OVERRIDE=""
+reset_stub
+
+printf '== (wv32) JOB 27: a hostile WAIVER_SCAN_TOOL in the environment is IGNORED ==\n'
+# THE BYPASS THIS CLOSES: the enforcer path was env-settable, so an invoker could point it at a script
+# printing `state=granted` and turn an absent prompt into an overall PASS with no authorized comment at
+# all. That is the allowlist argument one level out — THE CONSTRAINED PARTY MUST NOT CHOOSE ITS OWN
+# ENFORCER — so the path is now resolved from the wrapper's own directory and the variable is inert.
+reset_stub
+forge_scanner="$tmp/forged-scanner.py"
+cat >"$forge_scanner" <<'FORGED'
+#!/usr/bin/env python3
+print("state=granted")
+print("author=attacker")
+print("scope=base=deadbee head=deadbee job=1")
+print("reason=fabricated by a hostile scanner")
+print("detail=")
+FORGED
+chmod +x "$forge_scanner"
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS=""
+WAIVER_SCAN_TOOL="$forge_scanner" run_wrapper "$w_work"
+assert_verdict 'case (wv32)' FAIL 1
+assert_says 'case (wv32) the absence FAIL stands, with no waiver found' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (wv32) and the waiver state comes from the real scanner' \
+  '^waiver: NONE \(no anchored waiver line on this PR for this review'
+assert_lacks 'case (wv32) a hostile scanner cannot fabricate a grant' '^prompt-content: WAIVED'
+assert_lacks 'case (wv32) and its fabricated author is never credited' 'attacker'
 reset_stub
 
 printf '== the summary header is distinct from every agent-gate header ==\n'
@@ -4164,11 +4211,30 @@ if [ "$_allow_ok" -eq 1 ]; then
 else
   bad 'structural: the waiver has no author allowlist — on a public repository any commenter could copy the base/head/job from a failing block and grant one (#3312 job 25)'
 fi
-# NOT ENV-OVERRIDABLE: an override is settable by the very party the allowlist constrains.
-if grep -qE 'ROBOREV_WAIVER_AUTHORS="?\$\{?ROBOREV_WAIVER_AUTHORS' "$ORACLES"; then
-  bad 'structural: the waiver allowlist is env-overridable — whoever invokes the wrapper could set it, which is the party it exists to constrain (#3312 job 25)'
+# NOT ENV-OVERRIDABLE — AND NEITHER IS ITS ENFORCER (#3312 job 25, extended by job 27).
+# THE CONSTRAINED PARTY MUST NOT CHOOSE ITS OWN ENFORCER: hardening a check while leaving its INVOCATION
+# configurable moves the hole instead of closing it. The allowlist VALUE was covered first; the scanner
+# PATH was then left env-settable, which let an invoker point it at a script printing `state=granted`. Both
+# halves are asserted here, and the path must be a literal repository-relative resolution with no `${…:-…}`.
+_enf_bad=""
+grep -qE 'ROBOREV_WAIVER_AUTHORS="?\$\{?ROBOREV_WAIVER_AUTHORS' "$ORACLES" && _enf_bad="$_enf_bad allowlist-value-env-derived"
+grep -qE 'WAIVER_SCAN_TOOL="?\$\{WAIVER_SCAN_TOOL' "$ORACLES" && _enf_bad="$_enf_bad scanner-path-env-derived"
+grep -qF 'WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-scan.py"' "$ORACLES" \
+  || _enf_bad="$_enf_bad scanner-path-not-literally-repo-relative"
+if [ -z "$_enf_bad" ]; then
+  ok 'structural: neither the allowlist nor its enforcer is env-derived (the scanner path is resolved from the wrapper own directory)'
 else
-  ok 'structural: the waiver allowlist is not env-overridable'
+  bad "structural: the waiver protection is configurable by its invoker —$_enf_bad. An override is settable by the very party being constrained, so the constrained party would choose its own enforcer (#3312 job 25/27)"
+fi
+# AND NO TEST SEAM MAY REINTRODUCE IT: a case needing a different scanner substitutes the FILE in a
+# scratch copy of scripts/flow/, never a path variable — a test-only hatch is one more thing an invoker sets.
+# THE NEEDLE IS SPLIT so this assert cannot match ITSELF — a self-matching grep would fire on the very
+# line that forbids the seam, which is a guard that can only ever be red.
+_seam_needle="WAIVER_SCAN_TOOL""_OVERRIDE"
+if grep -qF "$_seam_needle" "$TEST_SELF"; then
+  bad 'structural: the harness carries a scanner-path override — substitute the scanner FILE in a scratch copy instead, so production keeps one literal resolution (#3312 job 27)'
+else
+  ok 'structural: the harness substitutes the scanner file rather than redirecting its path'
 fi
 # THE SCOPED RESIDUAL IS STATED ON EVERY SURFACE, in its NARROW form.
 _resid_missing=""

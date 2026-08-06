@@ -1053,8 +1053,16 @@ roborev_diff_header_has_path() {
 # coordination lead may GRANT, a worker may only REQUEST" remains a process obligation with an audit
 # trail, now enforced to the level of "an allowlisted human", not to the level of "that specific human".
 ROBOREV_WAIVER_AUTHORS="pmcfadin"
-# The structured scanner lives beside this file; the shell never parses comment text itself.
-WAIVER_SCAN_TOOL="${WAIVER_SCAN_TOOL:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-scan.py}"
+# ===== THE ENFORCER IS RESOLVED FROM THIS FILE'S OWN DIRECTORY, NEVER FROM THE ENVIRONMENT =====
+# (roborev job 27.) This used to carry a `${WAIVER_SCAN_TOOL:-…}` override, which handed the same hole
+# outward that the allowlist itself closes: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS OWN ENFORCER.
+# Hardening a check while leaving its INVOCATION configurable moves the hole rather than closing it — an
+# invoker could point this at a script printing `state=granted` and turn an absent prompt into a PASS with
+# no authorized comment anywhere. There is deliberately no override, no fallback and no `${…:-…}` here, and
+# a structural assert fails if one reappears. A test that needs a different scanner SUBSTITUTES THE FILE in
+# its own scratch copy of `scripts/flow/` — replacing the artifact, not redirecting the path — so the
+# production resolution stays single, literal and unreachable from any invocation.
+WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-scan.py"
 
 # roborev_waiver_author_allowed <login>: is this comment author permitted to GRANT a waiver?
 roborev_waiver_author_allowed() {
