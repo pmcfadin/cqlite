@@ -597,6 +597,21 @@ fn emit(summary: &WindowSummary) {
         i64::try_from(summary.sample_denominator).unwrap_or(i64::MAX),
         &[],
     );
+    // The window's trustworthiness, exported so an operator who never calls
+    // `close_window` can still tell a lossy or floored window from a clean one —
+    // both are conditions the decision procedure refuses on.
+    if summary.dropped_accesses > 0 {
+        add_counter(
+            catalog::READ_PARTITION_ACCESS_DROPPED,
+            summary.dropped_accesses,
+            &[],
+        );
+    }
+    super::record_gauge(
+        catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
+        i64::from(summary.at_sampling_floor),
+        &[],
+    );
 }
 
 #[cfg(test)]

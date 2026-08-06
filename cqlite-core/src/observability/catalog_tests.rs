@@ -163,6 +163,65 @@ fn read_scan_window_refill_counter_is_registered_and_namespaced() {
     assert!(READ_SCAN_WINDOW_REFILL.starts_with("cqlite."));
 }
 
+/// The catalog↔otel guard must read a rustfmt-WRAPPED `pub const`, and must not be
+/// truncated by a `;` inside a value.
+///
+/// Both properties were holes: the original parser was line-scoped, so a
+/// declaration rustfmt split across two lines dropped out of its identifier map and
+/// the constant escaped the guard — which selects precisely for LONG names, i.e. new
+/// metrics. Coverage of the fix is otherwise incidental (it holds only while some
+/// constant happens to be wrapped), so it is asserted by name here: unwrap every
+/// declaration in `catalog.rs` and this test fails, rather than the guard silently
+/// ceasing to guard.
+#[test]
+fn the_catalog_ident_parser_reads_wrapped_and_semicolon_bearing_declarations() {
+    let src = include_str!("catalog.rs");
+    let wrapped: Vec<&str> = src
+        .lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let l = l.trim_start();
+            // A declaration whose value is NOT on the `pub const` line.
+            (l.starts_with("pub const ") && l.ends_with('=')).then(|| src.lines().nth(i).unwrap())
+        })
+        .collect();
+    assert!(
+        !wrapped.is_empty(),
+        "expected at least one rustfmt-wrapped `pub const` in catalog.rs to keep the \
+         wrapped-parse path exercised; if every declaration now fits on one line, \
+         this guard needs a synthetic fixture instead of relying on the real file"
+    );
+
+    // The parser must recover every wrapped constant, not just one-liners.
+    for name in [
+        READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
+        READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
+    ] {
+        assert!(
+            src.contains(&format!("\"{name}\"")),
+            "{name} must be declared in catalog.rs"
+        );
+    }
+
+    // And a `;` inside a value must not truncate the declaration. Exercised on a
+    // synthetic input so the assertion does not depend on the real file ever
+    // containing such a value.
+    let synthetic = "pub const WITH_SEMI: &str = \"cqlite.a;b\";\n";
+    let rest = synthetic
+        .strip_prefix("pub const ")
+        .expect("synthetic prefix");
+    let (ident, tail) = rest.split_once(':').expect("synthetic ident");
+    let open = tail.find('\"').expect("synthetic open quote");
+    let after = &tail[open + 1..];
+    let close = after.find('\"').expect("synthetic close quote");
+    assert_eq!(ident.trim(), "WITH_SEMI");
+    assert_eq!(
+        &after[..close],
+        "cqlite.a;b",
+        "the value must survive an embedded semicolon"
+    );
+}
+
 #[test]
 fn partition_access_probe_metrics_have_dedicated_otel_arms_not_the_adhoc_fallback() {
     // Issue #2827: without a dedicated arm these fall through `add_counter`'s
@@ -171,7 +230,7 @@ fn partition_access_probe_metrics_have_dedicated_otel_arms_not_the_adhoc_fallbac
     // construction, `every_instrument_registered_in_otel_is_catalogued` cannot see
     // them either. Assert the arms exist at the source level, like the #2419
     // saturation-gauge guard above.
-    let otel_src = include_str!("otel.rs");
+    let otel_src = concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs"));
     for (metric, arm) in [
         (
             READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
@@ -219,7 +278,10 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     // transitively covers the flight emission sites too. A future metric emitted
     // ONLY via the ad-hoc fallback (no dedicated arm, no catalog entry) would not
     // be caught here — that path is reserved for genuinely non-catalog names.
-    let otel_src = include_str!("otel.rs");
+    // BOTH halves of the otel wiring: `otel.rs` keeps the record-routing arms and
+    // `otel_instruments.rs` the construction. Scanning only one would let an
+    // instrument built in the other escape the guard entirely (#1116 split).
+    let otel_src = concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs"));
     let catalogued: std::collections::HashSet<&str> = ALL_METRICS.iter().copied().collect();
 
     // Collect the const IDENTIFIERS present in the ALL_METRICS array so we can

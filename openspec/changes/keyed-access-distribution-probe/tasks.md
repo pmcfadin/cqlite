@@ -17,7 +17,8 @@
       `READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR` (`…sample_denominator`, gauge, `1`).
 - [x] Add the two bounded attribute keys to `catalog::attr` beside `LOOKUP_ROUTE` (`catalog.rs:82`):
       `REPEAT_BUCKET = "cqlite.read.repeat_bucket"` (closed set `1|2|3-4|5-8|9-16|17+`) and
-      `SIZE_SOURCE = "cqlite.read.size_source"` (closed set `index|unavailable`). Document both value
+      `SIZE_SOURCE = "cqlite.read.size_source"` (closed set `index|successor_gap|unavailable` —
+      **amended by the R1 rider below**; originally written `index|unavailable`). Document both value
       sets in the doc comment — this is what the docs generator and the reviewer read.
 - [x] Register all four in `ALL_METRICS` (`catalog.rs:907`) in read-path order.
 - [x] Add four `MetricDoc` entries to `cqlite-core/src/observability/operator_docs_annotations.rs`
@@ -54,9 +55,11 @@
 
 ## 3. Byte weighting + the BTI fail-closed path (surface: `record_partition_access`)
 - [x] Write the failing tests in `cqlite-core/tests/issue_2827_partition_access_bytes.rs`:
-      max-not-sum semantics over repeated accesses; a BIG-sized access lands under
-      `size_source="index"`; a BTI access lands under `size_source="unavailable"` with **zero** bytes;
-      a mixed window shows both series.
+      max-not-sum semantics over repeated accesses; **per the R1 rider below**, an access whose
+      extent is measured lands under `size_source="successor_gap"` (BOTH formats — no Cassandra 5.0
+      index records a size) and an unmeasurable one under `size_source="unavailable"` with **zero**
+      bytes; a mixed window shows both series. (Originally written as a BIG `index` /
+      BTI `unavailable` split, which the false-premise finding superseded.)
 - [x] Thread the byte weight from the per-SSTable resolution sites into the open logical access:
       `PartitionLoc.data_size` (`cqlite-core/src/storage/cache/global_key_offset.rs:76-81`) summed
       across resolved SSTables for that one access.

@@ -31,8 +31,9 @@
 //! projection's point read — is a logical point read that this module does NOT wrap,
 //! so its accesses are invisible to the histogram. The direction is conservative
 //! (those partitions are under-counted, understating concentration), but it is a gap:
-//! a workload dominated by WRITETIME/TTL projections is measured badly. Recorded in
-//! `design.md` D2 and in the decision note.
+//! **a workload whose keyed traffic is predominantly WRITETIME/TTL projections is
+//! measured badly, and its window MUST NOT be used for the decision.** Recorded in
+//! `design.md` D2, the spec's wiring requirement, and the decision note.
 //!
 //! # Where it fails closed, stated rather than hidden
 //!

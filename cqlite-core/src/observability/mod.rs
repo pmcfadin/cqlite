@@ -70,6 +70,10 @@ use crate::error::{Error, Result};
 #[cfg(feature = "observability")]
 mod otel;
 
+// Instrument construction, split from `otel.rs` per the campsite rule (#1116).
+#[cfg(feature = "observability")]
+mod otel_instruments;
+
 #[cfg(feature = "observability")]
 pub use otel::{init, tracing_layer, ObservabilityGuard};
 

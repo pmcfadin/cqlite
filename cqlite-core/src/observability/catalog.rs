@@ -162,9 +162,10 @@ pub mod attr {
     /// The bucket label is the ONLY thing that leaves the process about a
     /// partition's access count: no partition key, key hash, key prefix, key
     /// length or token is ever attached (the binding constraint at the top of
-    /// this module). Six values × the two [`SIZE_SOURCE`] values is the whole
-    /// cardinality budget of the
-    /// [`super::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS`] family.
+    /// this module). Six values × the three [`SIZE_SOURCE`] values is the whole
+    /// cardinality budget of
+    /// [`super::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS`] — eighteen series, and
+    /// 31 across the whole `cqlite.read.partition_access.*` family.
     pub const REPEAT_BUCKET: &str = "cqlite.read.repeat_bucket";
     /// Provenance of the on-disk byte weight recorded for a partition access
     /// (issue #2827). Bounded to the closed set of EXACTLY three labels:
@@ -437,6 +438,31 @@ pub const READ_PARTITION_ACCESS_BYTES: &str = "cqlite.read.partition_access.byte
 /// independent of a key's access frequency). No attributes.
 pub const READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR: &str =
     "cqlite.read.partition_access.sample_denominator";
+
+/// `cqlite.read.partition_access.dropped_accesses` — counter `1` (issue #2827).
+///
+/// Accesses the probe was asked to record but could NOT seat in its fixed counting
+/// table, summed over closed windows. No attributes.
+///
+/// **Zero on a healthy window, and a non-zero value invalidates the window.** Only
+/// keys NOT already in the table can be dropped, so a loss suppresses the
+/// singleton bucket and OVERSTATES concentration — the direction that flatters a
+/// cache. The decision procedure refuses any window reporting a non-zero value.
+/// Exported (rather than only returned from `close_window`) so an operator reading
+/// dashboards alone can tell a lossy window from a clean one.
+pub const READ_PARTITION_ACCESS_DROPPED: &str = "cqlite.read.partition_access.dropped_accesses";
+
+/// `cqlite.read.partition_access.sampling_floor` — gauge `1` (issue #2827).
+///
+/// `1` when the closed window reached the sampling-prefix cap, `0` otherwise. No
+/// attributes.
+///
+/// A window at the floor is a ~1-in-a-million sample and is statistically
+/// worthless; the decision procedure refuses it. Paired with
+/// [`READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR`] this is the whole trustworthiness
+/// signal for a window, readable without calling into the process.
+pub const READ_PARTITION_ACCESS_SAMPLING_FLOOR: &str =
+    "cqlite.read.partition_access.sampling_floor";
 
 /// `cqlite.merge.rows_in` — counter `{row}` (issue #2163).
 ///
@@ -1020,6 +1046,8 @@ pub const ALL_METRICS: &[&str] = &[
     READ_PARTITION_ACCESS_ACCESSES,
     READ_PARTITION_ACCESS_BYTES,
     READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
+    READ_PARTITION_ACCESS_DROPPED,
+    READ_PARTITION_ACCESS_SAMPLING_FLOOR,
     MERGE_ROWS_IN,
     MERGE_ROWS_OUT,
     QUERY_DEGRADED_PATH,

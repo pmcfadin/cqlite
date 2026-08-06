@@ -85,10 +85,21 @@ Each yields **no answer**, never a default verdict. Check all four before comput
    be cited as the go/no-go, because the answer would be a function of a distribution we
    chose. **Refuse.**
 
-A window that survives all four is priceable. Under sampling (`2^k > 1`) the bucket
-*fractions* are unbiased with no correction — the admission predicate is a function of the
-key hash alone, hence independent of a key's access frequency — while absolute `n_b` and
-`B_b` must be scaled by `2^k`. The ceiling below is a ratio, so it needs no scaling.
+The procedure additionally REFUSES a window that is not a census
+(`sample_denominator > 1`) and one reporting a non-zero `dropped_accesses`. Both are
+consequences of the conditions already stated rather than new policy: a sample's
+per-bucket bytes are sample-domain totals, so filling a real budget against them
+overstates what fits; and only keys not already in the table can be dropped, so a
+loss suppresses the singleton bucket and overstates concentration. Scaling a sample
+by `2^k` was rejected in favour of refusing: it yields a point estimate whose
+variance this instrument cannot bound, and the output is a go/no-go rather than an
+interval.
+
+A window that survives every condition is priceable. Under sampling (`2^k > 1`) the bucket *fractions* remain unbiased with no correction — the
+admission predicate is a function of the key hash alone, hence independent of a key's access
+frequency — so a sampled window is still worth reading for SHAPE. It is not priceable: absolute
+`n_b` and `B_b` are sample-domain totals, which is why such a window is refused above rather
+than scaled.
 
 ## Step 2 — the clairvoyant hit-ratio ceiling
 
@@ -176,6 +187,8 @@ export CQLITE_PARTITION_ACCESS_PROBE=1
 #      cqlite.read.partition_access.accesses{repeat_bucket}
 #      cqlite.read.partition_access.bytes{repeat_bucket}
 #      cqlite.read.partition_access.sample_denominator
+#      cqlite.read.partition_access.dropped_accesses    (0 on a healthy window)
+#      cqlite.read.partition_access.sampling_floor      (0 on a healthy window)
 ```
 
 Costs, so enabling it needs no further investigation: **zero bytes and one relaxed atomic

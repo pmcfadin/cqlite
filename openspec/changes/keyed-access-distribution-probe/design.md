@@ -189,6 +189,15 @@ downsampling only ever removes keys, never invalidates a survivor's count). Scal
 `distinct_partitions` and `bytes` by `2^k` therefore gives unbiased estimates, and the bucket
 *fractions* — which are what the decision procedure consumes — are unbiased with no scaling at all.
 
+**Failing to seat a key is never a drop (roborev round 2).** The probe bound is 64 slots, while the
+expected longest cluster near a 0.75 load factor is several hundred — so a new key can fail to seat
+well BELOW the load factor, where the occupancy-gated widen loop never fires. Dropping it there is
+biased in the same direction eviction is: an existing entry is always within 64 probes of its home,
+so only NEW keys are lost, the singleton bucket is suppressed and concentration is OVERSTATED. The
+recorder therefore widens (unbiased, frequency-independent) and retries; a key that still cannot be
+seated at the cap is counted and PUBLISHED as a dropped access, and the decision procedure refuses
+any window reporting one.
+
 **Sampling floor.** `k` is capped at 20. At `k = 20` the sample is 1/1,048,576 of the key space,
 which over a 1.93 M-partition corpus admits ~2 keys; a window that reaches the cap is
 statistically worthless, so the recorder marks it non-census and the decision procedure refuses it

@@ -220,6 +220,8 @@ dot-separated under the `cqlite.` root; units use UCUM annotations
 | `cqlite.read.partition_access.accesses` | counter | `1` | `cqlite.read.repeat_bucket` |
 | `cqlite.read.partition_access.bytes` | counter | `By` | `cqlite.read.repeat_bucket` |
 | `cqlite.read.partition_access.sample_denominator` | gauge | `1` | (none) |
+| `cqlite.read.partition_access.dropped_accesses` | counter | `1` | (none) |
+| `cqlite.read.partition_access.sampling_floor` | gauge | `1` | (none) |
 | `cqlite.storage.open.sstables` | counter | `{sstable}` | (none) |
 | `cqlite.storage.open.bytes` | counter | `By` | (none) |
 | `cqlite.storage.open.tables` | counter | `1` | (none) |

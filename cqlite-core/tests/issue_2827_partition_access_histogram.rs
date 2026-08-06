@@ -364,9 +364,34 @@ fn the_corrected_partition_lookup_attribute_documentation_matches_the_code() {
     // The emission sites are the authority for the attribute SET. Assert against
     // the module source so this holds with or without an OTel exporter installed,
     // and so a future site that attaches `access_path` to this counter fails here.
-    let sites = include_str!("../src/storage/sstable/reader/partition_lookup.rs");
-    let summary_site = include_str!("../src/storage/sstable/reader/summary_point.rs");
-    for src in [sites, summary_site] {
+    //
+    // ALL THREE emission sites, not a hand-picked pair: a census that misses one is
+    // a guard with a hole, and `bti_lookup_memo.rs` (the C3 memo-hit path, which
+    // re-emits the presence decision a skipped descent would have) was exactly that.
+    //
+    // `data_access/full_index_stream.rs` is deliberately NOT here: it only NAMES the
+    // counter in a comment explaining that the path it describes is accounted for
+    // elsewhere — it emits nothing. Including it would put a non-emitting file in a
+    // census of emitters, which is how a list stops meaning what it says.
+    //
+    // The list is hand-maintained (a source scan cannot enumerate modules), so the
+    // completeness assertion below fails loudly if an entry stops emitting.
+    let sites = [
+        include_str!("../src/storage/sstable/reader/partition_lookup.rs"),
+        include_str!("../src/storage/sstable/reader/summary_point.rs"),
+        include_str!("../src/storage/sstable/reader/bti_lookup_memo.rs"),
+    ];
+    let emitting = sites
+        .iter()
+        .filter(|src| src.contains("catalog::READ_PARTITION_LOOKUP"))
+        .count();
+    assert_eq!(
+        emitting,
+        sites.len(),
+        "every file in this census must actually emit the counter — a stale entry \
+         hides the fact that a real site went uncovered"
+    );
+    for src in sites {
         for chunk in src.split("catalog::READ_PARTITION_LOOKUP,").skip(1) {
             // The attribute list follows immediately; bound the scan to it.
             let attrs = chunk.split(");").next().unwrap_or("");
@@ -439,6 +464,14 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
     let capture = testing::metrics_capture();
     capture.reset();
 
+    // Pin the PROCESS-GLOBAL window open (C6): its default is 60 s and
+    // `close_if_triggered` reads `Instant::elapsed()` on every record, so a stalled
+    // runner would auto-close mid-flow and break the counts asserted below.
+    partition_access::global().set_window_config(partition_access::WindowConfig {
+        duration: std::time::Duration::from_secs(86_400),
+        max_accesses: u64::MAX,
+        ..partition_access::WindowConfig::default()
+    });
     partition_access::set_probe_enabled(Some(true));
     assert!(partition_access::enabled());
 
@@ -478,6 +511,28 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
         catalog::READ_PARTITION_ACCESS_BYTES,
         catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
     ];
+
+    // The trustworthiness signals must be EXPORTED, not merely returned from
+    // `close_window` — an operator reading dashboards alone has to be able to tell a
+    // clean window from a lossy or floored one (C5). This window is clean, so the
+    // floor gauge must be present and zero and the drop counter must be absent.
+    assert!(
+        metrics.contains(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
+        "the sampling-floor gauge must be exported on every closed window"
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
+        0.0,
+        "this window is nowhere near the sampling cap"
+    );
+    assert_eq!(
+        summary.dropped_accesses, 0,
+        "and it lost nothing, so the drop counter stays silent"
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_PARTITION_ACCESS_DROPPED),
+        0.0
+    );
 
     let mut series = 0usize;
     for name in names {
