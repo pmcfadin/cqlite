@@ -530,15 +530,18 @@ fn the_access_that_crosses_a_window_boundary_opens_the_next_window() {
     });
 
     // First access: nothing to close (no window yet), so it is seated.
-    assert_eq!(
-        r.record(SCOPE, b"hot", AccessWeight::SuccessorGap(100)),
-        None
-    );
+    assert!(r
+        .record(SCOPE, b"hot", AccessWeight::SuccessorGap(100))
+        .is_empty());
     // Second access to the SAME key: the expired window closes FIRST, carrying only
     // access #1, and access #2 opens the next window.
-    let first = r
-        .record(SCOPE, b"hot", AccessWeight::SuccessorGap(100))
-        .expect("the expired window must close before the new access is seated");
+    let closed = r.record(SCOPE, b"hot", AccessWeight::SuccessorGap(100));
+    assert_eq!(
+        closed.len(),
+        1,
+        "the expired window must close before the new access is seated"
+    );
+    let first = closed[0];
     assert_eq!(
         first.total_accesses(),
         1,
@@ -555,6 +558,35 @@ fn the_access_that_crosses_a_window_boundary_opens_the_next_window() {
     let second = r.close_window().expect("access #2 opened a window");
     assert_eq!(second.total_accesses(), 1);
     assert_eq!(second.bucket(RepeatBucket::One).distinct(), 1);
+}
+
+#[test]
+fn both_window_triggers_firing_on_one_access_lose_neither_window() {
+    // Nit from round 5: the duration bound closes BEFORE the access is seated and
+    // the access-count bound AFTER it, so with an access bound of 1 EVERY access
+    // fires both. Returning only one of the two summaries would drop a closed
+    // window's whole measurement on the floor.
+    let r = PartitionAccessRecorder::new(WindowConfig {
+        duration: Duration::ZERO,
+        max_accesses: 1,
+        ..WindowConfig::default()
+    });
+
+    // First access: no window exists to expire, but it fills its own immediately.
+    let first = r.record(SCOPE, b"a", AccessWeight::SuccessorGap(10));
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].total_accesses(), 1);
+
+    // Second access: the (already expired, already emptied) window closes with
+    // nothing — silent — and the access then fills its own.
+    let second = r.record(SCOPE, b"b", AccessWeight::SuccessorGap(10));
+    assert_eq!(
+        second.len(),
+        1,
+        "an empty expired window is silent, so only the filled one is reported"
+    );
+    assert_eq!(second[0].total_accesses(), 1);
+    assert_eq!(second[0].distinct_partitions(), 1);
 }
 
 #[test]

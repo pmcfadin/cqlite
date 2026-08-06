@@ -216,6 +216,18 @@ impl SSTableReader {
         data_offset: u64,
         partition_key: &[u8],
     ) -> Result<Option<u64>> {
+        // Explicit guard, not an implicit coupling: `successor_partition_offset` is
+        // shared with the READ path, where forcing materialization is correct and
+        // intended. Reached from the probe it must not be, so refuse before the call
+        // rather than relying on `partition_residency` having already established
+        // residency (which today implies the index is resident). Costs one
+        // `OnceCell` peek.
+        if !self.is_bti() {
+            match self.index_reader.as_ref() {
+                Some(index) if index.is_materialized() => {}
+                _ => return Ok(None),
+            }
+        }
         let end = match self
             .successor_partition_offset(data_offset, partition_key)
             .await?
@@ -276,10 +288,24 @@ impl SSTableReader {
     ///   absence (#1572), so it is `Unknown` rather than `NotHeld`; with a bloom in
     ///   front this is only reached on a bloom false positive.
     ///
-    /// Nothing here emits: it uses the slice-level trie primitive and the resident
-    /// index map directly, never the counter-emitting lookup façades, so switching
-    /// the probe on cannot perturb `cqlite.read.partition_lookup.total`,
-    /// `cqlite.read.bloom.checks` or `cqlite.read.sstables_pruned`.
+    /// # What it does not do
+    ///
+    /// - **Emits no metric.** It uses the slice-level trie primitive and the
+    ///   resident index map directly, never the counter-emitting lookup façades, so
+    ///   switching the probe on cannot perturb `cqlite.read.partition_lookup.total`,
+    ///   `cqlite.read.bloom.checks` or `cqlite.read.sstables_pruned`.
+    /// - **Bumps no read-work counter.** The BTI path uses the `_uncounted` key
+    ///   encode and `Rows.db` resolve, so the C4 one-hash-per-read (#1575) and L1
+    ///   single-resolve (#1647) assertions still hold with the probe enabled.
+    /// - **Mutates no reader state.** It never calls `ensure_materialized`, so it
+    ///   cannot defeat #2412's lazy Summary-guided open or add resident index bytes
+    ///   to the process.
+    ///
+    /// The last one has a cost, stated rather than hidden: a BIG generation whose
+    /// `Index.db` is not already resident cannot be priced, and is reported
+    /// `Unknown` → `size_source = unavailable` → the window is refused. Pricing a
+    /// lazily-opened BIG table therefore needs the index resident for some other
+    /// reason; the probe will not materialize it to get an answer.
     pub(crate) async fn partition_residency(&self, partition_key: &[u8]) -> PartitionResidency {
         // C5 authoritative range short-circuit: provably outside this SSTable's
         // key bound is definitive absence, for either format.
@@ -289,10 +315,15 @@ impl SSTableReader {
 
         if let Some(partitions_db) = &self.bti_partitions_db {
             use crate::storage::sstable::bti::{
-                encode_partition_key_for_bti_trie, lookup_partition_in_bti_slice,
-                resolve_rows_db_entry, BtiPartitionLocation,
+                encode_partition_key_for_bti_trie_uncounted, lookup_partition_in_bti_slice,
+                resolve_rows_db_entry_uncounted, BtiPartitionLocation,
             };
-            let encoded = encode_partition_key_for_bti_trie(partition_key);
+            // UNCOUNTED variants: the probe must not bump the read-work counters
+            // (`KEY_HASH_CALLS`, `ROWS_DB_ENTRY_RESOLVES`). Those back the C4
+            // one-hash-per-read (#1575) and L1 single-resolve (#1647) assertions, so
+            // a counted call here would fail those tests once per candidate
+            // generation and inflate a `work-counters` build's reported read work.
+            let encoded = encode_partition_key_for_bti_trie_uncounted(partition_key);
             return match lookup_partition_in_bti_slice(partitions_db.as_slice(), &encoded) {
                 // A trie miss is AUTHORITATIVE absence for BTI.
                 Ok(None) => PartitionResidency::NotHeld,
@@ -300,7 +331,10 @@ impl SSTableReader {
                 Ok(Some(BtiPartitionLocation::RowsOffset(rows_offset))) => {
                     match self.bti_rows_db.as_ref() {
                         Some(rows_db) => {
-                            match resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize) {
+                            match resolve_rows_db_entry_uncounted(
+                                rows_db.as_slice(),
+                                rows_offset as usize,
+                            ) {
                                 Ok(header) => PartitionResidency::HeldAt(header.data_position),
                                 Err(_) => PartitionResidency::Unknown,
                             }
@@ -321,11 +355,14 @@ impl SSTableReader {
         let Some(index_reader) = &self.index_reader else {
             return PartitionResidency::Unknown;
         };
-        if index_reader
-            .ensure_materialized(&self.scan_cancel)
-            .await
-            .is_err()
-        {
+        // NEVER force materialization. `ensure_materialized` is `File::open` +
+        // `read_to_end` + a full parse that PERMANENTLY populates the reader's
+        // `OnceCell`, so calling it here would defeat #2412's lazy Summary-guided
+        // open for every candidate generation and permanently change the process
+        // memory profile — an observability probe must not mutate the read path's
+        // resident state. A generation whose index is not already resident is
+        // therefore `Unknown` (fail closed), not silently absent.
+        if !index_reader.is_materialized() {
             return PartitionResidency::Unknown;
         }
         match index_reader.lookup_partition(partition_key) {

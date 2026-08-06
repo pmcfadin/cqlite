@@ -186,14 +186,16 @@ impl PartitionAccessRecorder {
     /// or emitted. The scope is part of the identity because ONE recorder serves
     /// every table — see [`table::hash_partition`].
     ///
-    /// Returns the summary of a window this access happened to CLOSE (a duration or
-    /// access-count trigger firing), so the global wrapper can emit it.
+    /// Returns the summaries of any windows this access CLOSED, so the global
+    /// wrapper can emit them. Usually empty. Both triggers can fire for one access —
+    /// the duration bound before it is seated and the access-count bound after — so
+    /// this can carry two, and neither may be discarded.
     pub fn record(
         &self,
         scope: TableScope<'_>,
         key: &[u8],
         weight: AccessWeight,
-    ) -> Option<WindowSummary> {
+    ) -> Vec<WindowSummary> {
         let hash = table::hash_partition(scope.keyspace, scope.table, key);
         let bytes = weight.bytes();
         let flags = match weight.source() {
@@ -258,10 +260,22 @@ impl PartitionAccessRecorder {
         }
         // A count-bound close is evaluated AFTER seating: the bound is on accesses
         // RECORDED, so the access that reaches it belongs to the window it filled.
-        match self.close_if_over_count() {
-            Some(summary) => Some(summary),
-            None => closed,
-        }
+        //
+        // BOTH can fire in one `record` — reachable at
+        // `CQLITE_PARTITION_ACCESS_WINDOW_ACCESSES=1`, where every access both
+        // expires the previous window and immediately fills its own. Returning only
+        // one of the two summaries would DROP a closed window's measurement on the
+        // floor, so the duration-close is emitted here and the count-close is
+        // returned to the caller.
+        // Returning `Option` would DROP one of the two on the floor. Emitting the
+        // extra one here instead is not an option either: an OWNED recorder (every
+        // recorder-level test) must stay free of process-global emission, which is
+        // the whole reason `record` returns summaries rather than emitting them.
+        // A `Vec` does not allocate while empty, so the common path is unchanged.
+        let mut closed_windows = Vec::new();
+        closed_windows.extend(closed);
+        closed_windows.extend(self.close_if_over_count());
+        closed_windows
     }
 
     /// Allocate the table on first use, or widen the sampling prefix when the
@@ -508,7 +522,7 @@ pub fn record_partition_access(scope: TableScope<'_>, key: &[u8], weight: Access
     if !enabled() {
         return;
     }
-    if let Some(summary) = global().record(scope, key, weight) {
+    for summary in global().record(scope, key, weight) {
         emit(&summary);
     }
 }

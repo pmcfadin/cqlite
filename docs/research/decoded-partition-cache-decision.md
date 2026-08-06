@@ -232,10 +232,29 @@ A window is trustworthy exactly when the first three read `1`, `0`, `0`. Reading
 cumulative counter as the per-window signal mis-refuses every window after the first
 loss.
 
-Costs, so enabling it needs no further investigation: **zero bytes and one relaxed atomic
-load when off** (the counting table is allocated lazily on first use), **exactly 3 MiB fixed**
-when on — with no growth term in partition count, in qps, in window length, or in the
-sampling scale.
+Costs, stated in full so enabling it needs no further investigation.
+
+**Off (the default): zero.** No allocation at all — the counting table is allocated lazily
+on first use — and the hot path is one relaxed atomic load.
+
+**On, the instrument's own footprint: exactly 3 MiB, fixed** — no growth term in partition
+count, in qps, in window length, or in the sampling scale.
+
+**On, what pricing costs the read path** — this is NOT zero, and it is not covered by the
+3 MiB above:
+
+- Per access, per candidate generation, the probe resolves the partition's extent. BTI pays
+  O(trie depth) — one strict-ceiling walk. **BIG pays O(partition count)**: the successor
+  offset is the minimum `Index.db` `data_offset` strictly greater than the target, taken over
+  every entry. On a million-partition table across `k` generations that is ~`k` million
+  iterations per point read.
+- The probe **will not materialize an `Index.db`** to get an answer — doing so would defeat
+  the lazy Summary-guided open (#2412) and permanently add resident index bytes to the
+  process. So a BIG generation whose index is not already resident is reported
+  `size_source = unavailable`, and the window is refused rather than priced.
+
+Both are why the probe is default-OFF and is meant to be switched on for a measurement
+window, not left on.
 
 The procedure is also available as code — `cqlite_core::observability::partition_access::decision`
 — so a captured window can be priced without re-deriving any of the above. It implements

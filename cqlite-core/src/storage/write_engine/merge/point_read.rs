@@ -602,21 +602,42 @@ async fn probe_reader_async(
 /// authoritative index-layout bound the single-partition seek uses to size its
 /// decompression window.
 ///
-/// Nothing is ever estimated. Where no location is available at all (the key cache
-/// is off, or the entry was reclaimed) or no extent is resolvable, the note is
+/// Nothing is ever estimated. Where no extent is resolvable the note is
 /// [`KeySizeNote::Unsized`]: the access is still counted, and it contributes zero
 /// bytes under `size_source = unavailable`.
+///
+/// A key-cache MISS is NOT treated as "no extent". This function is only reached
+/// when the probe returned rows for the key, so the partition IS held; the offset is
+/// then resolved authoritatively, exactly as the core path's resolver does. Pricing
+/// the same partition differently on the two paths — measured on one, unpriceable on
+/// the other — would make a window's byte total depend on which executor served the
+/// read.
 #[cfg(not(feature = "tombstones"))]
 async fn resolved_size_note(reader: &SSTableReader, key: &[u8]) -> KeySizeNote {
-    let Some(loc) = reader.key_cache_get(key) else {
+    // An index-recorded size, if one ever exists. No Cassandra 5.0 index records
+    // one, so in practice this never fires.
+    if let Some(loc) = reader.key_cache_get(key) {
+        if loc.data_size > 0 {
+            return KeySizeNote::Sized(loc.data_size);
+        }
+        if let Ok(Some(gap)) = reader.measure_partition_extent(loc.data_offset, key).await {
+            return KeySizeNote::Measured(gap);
+        }
         return KeySizeNote::Unsized;
-    };
-    if loc.data_size > 0 {
-        return KeySizeNote::Sized(loc.data_size);
     }
-    match reader.measure_partition_extent(loc.data_offset, key).await {
-        Ok(Some(gap)) => KeySizeNote::Measured(gap),
-        Ok(None) | Err(_) => KeySizeNote::Unsized,
+    // Cache miss on a partition the read just returned rows for: resolve the offset
+    // rather than declaring it unpriceable.
+    use crate::storage::sstable::reader::partition_successor::PartitionResidency;
+    match reader.partition_residency(key).await {
+        PartitionResidency::HeldAt(offset) => {
+            match reader.measure_partition_extent(offset, key).await {
+                Ok(Some(gap)) => KeySizeNote::Measured(gap),
+                Ok(None) | Err(_) => KeySizeNote::Unsized,
+            }
+        }
+        // `NotHeld` is unreachable here (the read returned rows for this key) and
+        // `Unknown` is genuinely unpriceable; both fail closed.
+        PartitionResidency::NotHeld | PartitionResidency::Unknown => KeySizeNote::Unsized,
     }
 }
 

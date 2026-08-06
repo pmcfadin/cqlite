@@ -2,28 +2,63 @@
 //! targeted read path (issue #2827, design D6).
 //!
 //! The probe counts one access per LOGICAL partition read and weights it by the
-//! on-disk bytes that read actually resolved. On the core executor's targeted path
-//! (`WHERE pk = ?` served by [`StorageEngine::scan_partition`]) the resolution
-//! happens inside the SSTable manager, across the candidate generations that hold
-//! the key; this module recovers the resolved sizes at the logical boundary,
-//! immediately after the read.
+//! partition's on-disk extent. This module resolves that weight at the logical
+//! boundary, immediately after the read, by asking each candidate generation two
+//! questions: does it hold the key, and if so what is the partition's extent.
 //!
-//! # It never performs its own lookup, and that is the whole design
+//! # Residency is RESOLVED, never inferred from the key cache
 //!
-//! The weight comes only from what the read that just ran already resolved and
-//! recorded in the process-global key→partition-offset cache
-//! ([`PartitionLoc`](crate::storage::cache::PartitionLoc), issue #2059). The
-//! instrument therefore:
+//! An earlier version read a key-cache MISS as "this generation did not hold the
+//! key". That is not what a miss means: the cache is a byte-budgeted LRU that
+//! evicts, has a disabled mode returning `None` unconditionally, misses whenever a
+//! reader has no generation identity, and is populated by only one resolution path.
+//! Under that reading, one surviving cached generation beside one
+//! evicted-but-held generation produced a PARTIAL sum published as a fully measured
+//! extent — under-pricing the working set, which flatters the cache, and violating
+//! the spec's "SHALL NOT silently under-report" outright.
 //!
-//! - **cannot perturb the read path's own telemetry.** Re-driving `locate` would
-//!   double-count `cqlite.read.partition_lookup.total` and
-//!   `cqlite.read.bloom.checks` for every access, corrupting an operator's
-//!   dashboards exactly when they switch the probe on.
-//! - **cannot invent a size.** A partition whose location the read left with no
-//!   size — BTI trie resolution stores `data_size = 0`, since the trie records an
-//!   offset and nothing else — is reported `size_source = unavailable` and
-//!   contributes ZERO bytes. Never bounded from a successor offset, never
-//!   defaulted (no-heuristics, #28).
+//! So each candidate is classified by
+//! [`PartitionResidency`](crate::storage::sstable::reader::partition_successor::PartitionResidency),
+//! which keeps three states distinct:
+//!
+//! - **`NotHeld`** — definitive absence (BTI trie miss, BIG bloom negative, or a C5
+//!   range short-circuit). Contributes nothing, and its absence is not a gap.
+//! - **`HeldAt(offset)`** — present. The extent is MEASURED as the successor gap.
+//! - **`Unknown`** — indeterminate (corrupt trie, unresolvable `Rows.db`, a BIG
+//!   `Index.db` miss — which is NOT definitive absence, #1572 — or an index that is
+//!   not resident). **Fails closed**: the access is reported
+//!   `size_source = unavailable` and contributes ZERO bytes.
+//!
+//! Pricing therefore does not depend on cache retention at all. The key cache is
+//! still consulted, but only for an index-recorded `data_size` — which no Cassandra
+//! 5.0 index actually records, so in practice the extent is always the measured gap.
+//!
+//! # What it will not do to get an answer
+//!
+//! - **It emits no metric and bumps no read-work counter.** Residency uses the
+//!   slice-level trie primitive and the resident index map (and the `_uncounted` BTI
+//!   helpers), never the counter-emitting façades, so enabling the probe cannot
+//!   perturb `cqlite.read.partition_lookup.total`, `cqlite.read.bloom.checks`,
+//!   `cqlite.read.sstables_pruned`, or the #1575/#1647 read-work assertions.
+//! - **It never materializes an `Index.db`.** Forcing materialization would defeat
+//!   #2412's lazy Summary-guided open and permanently add resident index bytes to
+//!   the process — an observability probe must not mutate the read path's state.
+//! - **It never estimates a size.** No interpolation, no nominal default (#28).
+//!
+//! # Cost, stated rather than implied
+//!
+//! Enabling the probe is NOT free on the BIG path, and the two things it costs are:
+//!
+//! 1. **A BIG generation whose `Index.db` is not already resident cannot be priced.**
+//!    It is reported `Unknown` → `unavailable` → the window is refused. Pricing a
+//!    lazily-opened BIG table needs the index resident for some other reason.
+//! 2. **The successor-gap resolution is O(partition-count) per access per
+//!    generation** for BIG: `successor_partition_offset` takes the minimum
+//!    `data_offset` strictly greater than the target over every `Index.db` entry.
+//!    On a million-partition table across `k` generations that is ~`k` million
+//!    iterations per point read. BTI pays O(depth) instead (one strict-ceiling trie
+//!    walk). This is a real per-read cost that only an operator who has switched the
+//!    probe on pays, and it is why the probe is default-OFF.
 //!
 //! # Known coverage limitation
 //!
@@ -34,19 +69,6 @@
 //! **a workload whose keyed traffic is predominantly WRITETIME/TTL projections is
 //! measured badly, and its window MUST NOT be used for the decision.** Recorded in
 //! `design.md` D2, the spec's wiring requirement, and the decision note.
-//!
-//! # Where it fails closed, stated rather than hidden
-//!
-//! A candidate whose cached location is absent is treated as "did not hold the
-//! key" (no contribution), because the read that just ran inserts a location for
-//! every generation that DID hold it. The residual case — the key cache disabled,
-//! or an entry reclaimed between the read and this call — therefore yields an
-//! access with nothing to price, which
-//! [`AccessWeightBuilder::finish`](crate::observability::partition_access::AccessWeightBuilder::finish)
-//! reports as `unavailable` rather than as zero bytes. A refused window is the
-//! cost; the alternative failure would understate the working set, i.e. point
-//! toward "the cache fits, build it", which is the one direction a go/no-go
-//! instrument must not be wrong in.
 
 use super::StorageEngine;
 use crate::observability::partition_access::{self, AccessWeight, AccessWeightBuilder};
@@ -158,9 +180,15 @@ impl StorageEngine {
     /// summed across the SSTable generations the read resolved.
     ///
     /// Call immediately AFTER the targeted read, and only when
-    /// [`partition_access::enabled`](crate::observability::partition_access::enabled)
-    /// — it is cheap (a per-candidate hash-map probe, no I/O) but it is not free,
-    /// and the probe is off by default.
+    /// [`partition_access::enabled`](crate::observability::partition_access::enabled).
+    ///
+    /// **This is not cheap on the BIG path.** Per candidate generation it costs a
+    /// presence check plus a successor resolution: O(depth) for BTI (one trie walk),
+    /// but O(partition-count) for BIG (a linear minimum over the resident `Index.db`
+    /// entries). It performs no I/O and materializes nothing — a generation whose
+    /// index is not already resident is reported unpriceable instead — but the CPU
+    /// cost is real, and is one reason the probe is default-OFF. See the module
+    /// header.
     pub(crate) async fn partition_access_weight(
         &self,
         table_id: &TableId,

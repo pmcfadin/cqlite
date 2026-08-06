@@ -314,7 +314,7 @@ the recorder alone are not sufficient.
 - **GIVEN** a table whose generations all contain the same partition key
 - **WHEN** that partition is read once through the logical point path
 - **THEN** the recorder registers exactly one access for it, regardless of how many per-SSTable probes the read performed
-- **AND** its byte weight is the sum of the per-SSTable `data_size` values resolved for that one access
+- **AND** its byte weight is the sum of the per-SSTable MEASURED extents (successor gaps) resolved for that one access — no Cassandra 5.0 index records a `data_size`
 
 #### Scenario: Disabled by default, and costless when disabled
 - **GIVEN** a process with `CQLITE_PARTITION_ACCESS_PROBE` unset and no programmatic override
@@ -464,7 +464,7 @@ documentation.
 #### Scenario: A new metric cannot ship undocumented
 - **GIVEN** the seven metrics added to `ALL_METRICS`
 - **WHEN** the operator-metrics doc generator runs
-- **THEN** it succeeds only because each has an operator annotation, and the regenerated pages contain all four with their units and bounded attribute sets
+- **THEN** it succeeds only because each has an operator annotation, and the regenerated pages contain all seven with their units and bounded attribute sets
 - **AND** the `operator-metrics-doc` gate component reports no drift
 
 #### Scenario: The corrected attribute documentation matches what the code emits
