@@ -5904,6 +5904,38 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 OUTPUT-DIRECTORY EXCLUSIVITY (#3272 review round 13, campsite split). Split out of
+  # `test_ws0_provenance_guards.sh` (1606 lines against the ~1500 test target — the `file-size`
+  # ratchet is `.rs`-ONLY, so a shell file crosses it silently) along a responsibility seam: the
+  # parent's subject is WHICH BYTES AND WHICH CONFIGURATION a report describes; this file's is
+  # whether the DIRECTORY holding those artifacts belongs to exactly ONE session. Distinct because
+  # every parent check is satisfiable by a session whose corpus, components, schema, request and
+  # configuration are impeccably pinned and whose rep files were assembled from TWO RUNS that
+  # shared a directory — the reporter reads whatever rep files are present, and a pin identifies
+  # the corpus of the session that WROTE it, not the provenance of every sibling file beside it.
+  # Four findings share the subject, all over `scripts/perf/lib-outdir.sh`: round 6's R1
+  # (`mkdir -p` over a second-unique default name, and an explicit `--out` keeping a previous
+  # run's rep files), round 9's F4 (the used-dir enumeration's STATUS discarded, so a FAILED
+  # `find` was indistinguishable from an empty directory and took the permissive branch), round
+  # 7's F3 (R1 hardened the DEFAULT branch and left the EXPLICIT one on `mkdir -p`, so two
+  # concurrent runs given the same empty `--out` both proceeded) and the boundary placement both
+  # rest on (REFUSAL above `--validate-args-only`, CREATION below it). Hermetic: synthetic
+  # directories under $TMPDIR, the SHIPPED `lib-outdir.sh` sourced into subshells, driver
+  # invocations ONLY through `ws0_driver_run`; no cargo, perf, sudo, taskset, corpus, network or
+  # root. One case SKIPS as root (which bypasses the read bit the F4 trigger needs), with a stated
+  # reason rather than a pass.
+  echo ">>> [$name] bash scripts/tests/test_ws0_output_dir_exclusivity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_output_dir_exclusivity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 output-dir exclusivity guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 PER-REP ROUND METADATA (#3272 review round 4). Split out of the fabrication suite
   # under the campsite rule, by SUBJECT: the driver's loop order, the four RECORDED per-rep
   # fields, the artifact-set INTEGRITY refusals over them (same round set per arm, positions
