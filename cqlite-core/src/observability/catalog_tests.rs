@@ -6,27 +6,6 @@
 
 use super::*;
 
-/// Parse `pub const IDENT: &str = "VALUE";` declarations out of Rust source.
-///
-/// **ONE implementation, called by the catalog↔otel guard AND by the test that
-/// pins its behaviour.** An earlier version of that test hand-rolled a parallel
-/// parser, so it asserted a program the guard did not run and passed whether or not
-/// the guard was fixed — CLAUDE.md's "a port is a second implementation, and its
-/// correctness is only knowable against the original", reproduced inside a test
-/// written to close a guard hole.
-///
-/// Two shapes it must handle, both of which broke naive versions:
-///
-/// - **rustfmt-WRAPPED** declarations, where the value sits on the next line. A
-///   line-scoped parser drops these — and wrapping selects for LONG names, i.e.
-///   exactly the new metrics the guard exists to catch.
-/// - **a `;` INSIDE the value** (`"cqlite.a;b"`). Scanning to the first `;` first
-///   truncates the declaration, silently drops the constant, and makes the caller
-///   fail later with a misleading message.
-///
-/// Hence: locate the string literal FIRST, then require the `;` after it. A
-/// declaration whose first `;` precedes any quote has no string value at all
-/// (`pub const N: usize = 5;`) and is skipped.
 /// The otel source the instrument guards scan, as ONE string.
 ///
 /// `otel.rs` holds the record-routing arms and `otel_instruments.rs` the
@@ -60,6 +39,27 @@ fn assert_every_otel_source_is_scanned() {
     }
 }
 
+/// Parse `pub const IDENT: &str = "VALUE";` declarations out of Rust source.
+///
+/// **ONE implementation, called by the catalog↔otel guard AND by the test that
+/// pins its behaviour.** An earlier version of that test hand-rolled a parallel
+/// parser, so it asserted a program the guard did not run and passed whether or not
+/// the guard was fixed — CLAUDE.md's "a port is a second implementation, and its
+/// correctness is only knowable against the original", reproduced inside a test
+/// written to close a guard hole.
+///
+/// Two shapes it must handle, both of which broke naive versions:
+///
+/// - **rustfmt-WRAPPED** declarations, where the value sits on the next line. A
+///   line-scoped parser drops these — and wrapping selects for LONG names, i.e.
+///   exactly the new metrics the guard exists to catch.
+/// - **a `;` INSIDE the value** (`"cqlite.a;b"`). Scanning to the first `;` first
+///   truncates the declaration, silently drops the constant, and makes the caller
+///   fail later with a misleading message.
+///
+/// Hence: locate the string literal FIRST, then require the `;` after it. A
+/// declaration whose first `;` precedes any quote has no string value at all
+/// (`pub const N: usize = 5;`) and is skipped.
 fn parse_str_consts(src: &str) -> std::collections::HashMap<&str, &str> {
     let mut out = std::collections::HashMap::new();
     for (i, _) in src.match_indices("pub const ") {

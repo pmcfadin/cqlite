@@ -198,14 +198,39 @@ export CQLITE_PARTITION_ACCESS_WINDOW_ACCESSES=50000 # default 5,000,000
 # 2. Let a real workload run. The window is tumbling (60 s or 5,000,000 accesses,
 #    whichever first); an operator can also close one deterministically in-process.
 
-# 3. Read the series off the dashboard / OTLP collector:
-#      cqlite.read.partition_access.distinct_partitions{repeat_bucket,size_source}
-#      cqlite.read.partition_access.accesses{repeat_bucket}
-#      cqlite.read.partition_access.bytes{repeat_bucket}
-#      cqlite.read.partition_access.sample_denominator
-#      cqlite.read.partition_access.dropped_accesses    (0 on a healthy window)
-#      cqlite.read.partition_access.sampling_floor      (0 on a healthy window)
+# 3. Price ONE window. Use the in-process evaluator, which takes a single
+#    `WindowSummary`:
+#
+#      cqlite_core::observability::partition_access::{close_window, decision};
+#      if let Some(w) = close_window() {
+#          match decision::evaluate(&w, decision::WindowSource::Field,
+#                                   128 * 1024 * 1024,
+#                                   decision::ASSUMED_DECODE_MULTIPLIER) { .. }
+#      }
 ```
+
+**Do NOT price the bucketed series off a dashboard.**
+`distinct_partitions`, `accesses` and `bytes` are COUNTERS: a collector read of them
+on a process that has closed more than one window is the SUM OVER ALL WINDOWS since
+start. Distinct partitions and bytes are then double-counted while the budget `C`
+stays fixed, so `H_max` collapses roughly as `1/N` — a **false no-go**. Either price
+one window in-process as above, or read the dashboard only on a run that closed
+exactly one window.
+
+What the dashboard IS for is the trustworthiness check, which is per-window by
+construction and needs no arithmetic:
+
+```text
+cqlite.read.partition_access.sample_denominator      # 1 = census
+cqlite.read.partition_access.window_dropped_accesses # per-window; 0 = nothing lost
+cqlite.read.partition_access.sampling_floor          # per-window; 0 = not floored
+cqlite.read.partition_access.dropped_accesses        # CUMULATIVE — "ever lost input",
+                                                     # NOT the per-window signal
+```
+
+A window is trustworthy exactly when the first three read `1`, `0`, `0`. Reading the
+cumulative counter as the per-window signal mis-refuses every window after the first
+loss.
 
 Costs, so enabling it needs no further investigation: **zero bytes and one relaxed atomic
 load when off** (the counting table is allocated lazily on first use), **exactly 3 MiB fixed**

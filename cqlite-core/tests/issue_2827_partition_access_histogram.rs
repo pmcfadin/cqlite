@@ -533,26 +533,31 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
          (the +1 is the lossy-only cumulative drop counter)"
     );
 
-    // The trustworthiness signals must be EXPORTED, not merely returned from
-    // `close_window` — an operator reading dashboards alone has to be able to tell a
-    // clean window from a lossy or floored one (C5). This window is clean, so the
-    // floor gauge must be present and zero and the drop counter must be absent.
-    assert!(
-        metrics.contains(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
-        "the sampling-floor gauge must be exported on every closed window"
-    );
-    assert_eq!(
-        metrics.counter_sum(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
-        0.0,
-        "this window is nowhere near the sampling cap"
-    );
-    assert_eq!(
-        summary.dropped_accesses, 0,
-        "and it lost nothing, so the drop counter stays silent"
-    );
+    // F4: the spec requires that a consumer reading the emitted SERIES alone can
+    // tell a clean window from a lossy or floored one — so BOTH per-window gauges
+    // must be PRESENT (not merely absent-meaning-zero) and BOTH must read 0 here.
+    // Asserting presence without the value would pass on a stale non-zero gauge,
+    // which is exactly the confusion the per-window signal exists to remove.
+    for gauge in [
+        catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
+        catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
+    ] {
+        assert!(
+            metrics.contains(gauge),
+            "{gauge} must be exported on EVERY closed window, including at zero — \
+             an absent series is ambiguous between 'clean' and 'not emitted'"
+        );
+        assert_eq!(
+            metrics.counter_sum(gauge),
+            0.0,
+            "{gauge} must read 0 for this clean window"
+        );
+    }
+    assert_eq!(summary.dropped_accesses, 0, "and the summary agrees");
     assert_eq!(
         metrics.counter_sum(catalog::READ_PARTITION_ACCESS_DROPPED),
-        0.0
+        0.0,
+        "the cumulative counter stays silent when nothing was lost"
     );
 
     let mut series = 0usize;

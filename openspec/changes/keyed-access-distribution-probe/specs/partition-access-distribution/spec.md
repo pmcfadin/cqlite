@@ -100,10 +100,21 @@ The scale in force at window close SHALL be published as
 `cqlite.read.partition_access.sample_denominator`, so a consumer can distinguish a census
 (`denominator = 1`) from a sample.
 
-Accesses the recorder could NOT seat in the table SHALL be counted and published
-(`cqlite.read.partition_access.dropped_accesses`), and whether the window reached the prefix cap
-SHALL be published (`cqlite.read.partition_access.sampling_floor`), so a consumer reading the
-emitted series ALONE can tell a lossy or floored window from a clean one. A probe-cluster failure
+Accesses the recorder could NOT seat in the table SHALL be counted and published, and whether the
+window reached the prefix cap SHALL be published, so a consumer reading the emitted series ALONE can
+tell a lossy or floored window from a clean one.
+
+Satisfying that clause requires **per-window reset semantics**, so the loss signals SHALL be:
+
+| Series | Instrument | Semantics |
+|---|---|---|
+| `cqlite.read.partition_access.dropped_accesses` | counter | CUMULATIVE — "has this process ever lost input". Alertable, but it cannot answer "was THIS window clean": once it increments it reads non-zero for the life of the process. |
+| `cqlite.read.partition_access.window_dropped_accesses` | gauge | Accesses the LAST CLOSED window could not seat. Reset every window. |
+| `cqlite.read.partition_access.sampling_floor` | gauge | `1` when the last closed window reached the prefix cap, else `0`. Reset every window. |
+
+Both GAUGES SHALL be emitted on **every** closed window, including when their value is zero, so an
+absent series is never ambiguous between "clean" and "not emitted". A window SHALL be reportable as
+clean exactly when both gauges read `0`. A probe-cluster failure
 to seat a key SHALL widen the sample rather than drop the key: only keys not already in the table
 can fail to seat, so dropping them would suppress the singleton bucket and OVERSTATE concentration.
 
@@ -135,6 +146,13 @@ downsample correctness; unbiased-fraction recovery under forced downsampling).
 - **THEN** `cqlite.read.partition_access.sample_denominator` reports a value greater than 1
 - **AND** the per-bucket share of `distinct_partitions` matches the known distribution's shares within a stated tolerance
 - **AND** no admitted partition's recorded access count is lower than the number of accesses it actually received
+
+#### Scenario: A clean window is distinguishable from a lossy one by the emitted series alone
+- **GIVEN** a closed window in which every access was seated and the prefix cap was not reached
+- **WHEN** the emitted series are read back through the observability capture harness
+- **THEN** `cqlite.read.partition_access.window_dropped_accesses` and `cqlite.read.partition_access.sampling_floor` are both PRESENT and both read `0`
+- **AND** for a window that did lose accesses, the per-window gauge, the cumulative `dropped_accesses` counter and `sampling_floor` all report the loss
+- **AND** the clean verdict does not depend on the cumulative counter, which stays non-zero for the life of the process once it has incremented
 
 #### Scenario: A window that exhausts the sampling floor is marked non-census
 - **GIVEN** a window driven past the prefix-width cap

@@ -200,7 +200,18 @@ impl PartitionAccessRecorder {
             SizeSource::SuccessorGap => table::FLAG_SIZE_FROM_GAP,
             SizeSource::Index | SizeSource::Unavailable => 0,
         };
-        // Fast path: shared read lock, relaxed atomics on one slot.
+
+        // Close BEFORE seating this access, not after (E2).
+        //
+        // The window is TUMBLING, so an access arriving past the boundary belongs to
+        // the NEXT window. Seating it first and closing afterwards banked it in the
+        // window it had already left: a key touched at t=0 and again at t=61s
+        // reported a repeat count of 2 inside one nominal 60 s window, which
+        // OVERSTATES concentration. The design accepts the opposite bias — a
+        // partition split across a boundary becomes two lower-repeat entries, so the
+        // histogram understates — precisely because understating is the safe
+        // direction for a go/no-go.
+        let closed = self.close_if_expired();
         let mut slow = SlowPath::None;
         {
             let guard = self.read_state();
@@ -245,7 +256,12 @@ impl PartitionAccessRecorder {
             SlowPath::Allocate => self.grow_or_downsample(hash, bytes, flags, true),
             SlowPath::Downsample { replay } => self.grow_or_downsample(hash, bytes, flags, replay),
         }
-        self.close_if_triggered()
+        // A count-bound close is evaluated AFTER seating: the bound is on accesses
+        // RECORDED, so the access that reaches it belongs to the window it filled.
+        match self.close_if_over_count() {
+            Some(summary) => Some(summary),
+            None => closed,
+        }
     }
 
     /// Allocate the table on first use, or widen the sampling prefix when the
@@ -337,17 +353,38 @@ impl PartitionAccessRecorder {
         }
     }
 
-    fn close_if_triggered(&self) -> Option<WindowSummary> {
-        let (elapsed, over_count) = {
+    /// Close the window if its wall-clock length has elapsed. Called BEFORE an
+    /// access is seated, so the access that crosses the boundary opens the NEXT
+    /// window instead of being folded into the one it just left (E2).
+    ///
+    /// This also bounds an idle process: a window whose duration elapsed while
+    /// nothing was being recorded is closed by the next access rather than silently
+    /// spanning the idle period. A window with no accesses at all still emits
+    /// nothing — there is no measurement to report.
+    fn close_if_expired(&self) -> Option<WindowSummary> {
+        let expired = {
             let guard = self.read_state();
             let state = guard.as_ref()?;
-            (
-                u64::try_from(state.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-                    >= self.duration_nanos.load(Ordering::Relaxed),
-                state.recorded.load(Ordering::Relaxed) >= self.max_accesses.load(Ordering::Relaxed),
-            )
+            u64::try_from(state.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+                >= self.duration_nanos.load(Ordering::Relaxed)
         };
-        if elapsed || over_count {
+        if expired {
+            self.close_window()
+        } else {
+            None
+        }
+    }
+
+    /// Close the window if it has recorded its access bound. Evaluated AFTER the
+    /// access is seated: the bound counts accesses RECORDED, so the one that reaches
+    /// it belongs to the window it completed.
+    fn close_if_over_count(&self) -> Option<WindowSummary> {
+        let over = {
+            let guard = self.read_state();
+            let state = guard.as_ref()?;
+            state.recorded.load(Ordering::Relaxed) >= self.max_accesses.load(Ordering::Relaxed)
+        };
+        if over {
             self.close_window()
         } else {
             None

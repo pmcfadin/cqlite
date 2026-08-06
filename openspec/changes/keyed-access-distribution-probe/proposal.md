@@ -238,8 +238,8 @@ Verified by search across the workspace:
   path (`cqlite-core/src/query/select_executor/lookup.rs:92`, consumed at `streaming.rs:107` and
   `stream_agg.rs:196`) and the Flight point path (`cqlite-flight/src/producer_point.rs:83` `point_read_keys` → `drive_merge`). Per-SSTable probe sites are deliberately **not** call sites; see
   `design.md` D2.
-- **Catalog / docs:** `catalog.rs` (4 metric constants, 2 attribute constants, `ALL_METRICS`),
-  `operator_docs_annotations.rs` (4 `MetricDoc` entries — fail-closed, mandatory), `otel.rs`
+- **Catalog / docs:** `catalog.rs` (7 metric constants, 2 attribute constants, `ALL_METRICS`),
+  `operator_docs_annotations.rs` (7 `MetricDoc` entries — fail-closed, mandatory), `otel.rs`
   (instrument construction + `add_counter`/`record_gauge` dispatch), regenerated
   `docs/reports/flight-metrics-reference.md` + `website/src/content/docs/agents-using/flight-metrics-reference.md`,
   hand-edited `docs/observability/configuration.md` (new rows + the two corrections above).

@@ -14,14 +14,17 @@
       `READ_PARTITION_ACCESS_DISTINCT_PARTITIONS` (`cqlite.read.partition_access.distinct_partitions`,
       counter, `{partition}`), `READ_PARTITION_ACCESS_ACCESSES` (`…accesses`, counter, `1`),
       `READ_PARTITION_ACCESS_BYTES` (`…bytes`, counter, `By`),
-      `READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR` (`…sample_denominator`, gauge, `1`).
+      `READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR` (`…sample_denominator`, gauge, `1`), plus the three
+      trustworthiness signals added by later review rounds: `…dropped_accesses` (counter, `1`,
+      cumulative), `…window_dropped_accesses` (gauge, `1`, per window) and `…sampling_floor`
+      (gauge, `1`, per window) — SEVEN metrics, 34 series.
 - [x] Add the two bounded attribute keys to `catalog::attr` beside `LOOKUP_ROUTE` (`catalog.rs:82`):
       `REPEAT_BUCKET = "cqlite.read.repeat_bucket"` (closed set `1|2|3-4|5-8|9-16|17+`) and
       `SIZE_SOURCE = "cqlite.read.size_source"` (closed set `index|successor_gap|unavailable` —
       **amended by the R1 rider below**; originally written `index|unavailable`). Document both value
       sets in the doc comment — this is what the docs generator and the reviewer read.
-- [x] Register all four in `ALL_METRICS` (`catalog.rs:907`) in read-path order.
-- [x] Add four `MetricDoc` entries to `cqlite-core/src/observability/operator_docs_annotations.rs`
+- [x] Register them all in `ALL_METRICS` (`catalog.rs:907`) in read-path order.
+- [x] Add a `MetricDoc` entry per metric to `cqlite-core/src/observability/operator_docs_annotations.rs`
       (`kind`, `unit`, `summary`, `attributes`, `interpretation`, `round_item`). Generation is
       fail-closed on a missing annotation (`operator_docs.rs:16-19`, `:116`) — an omission fails the
       build, not review.
@@ -32,7 +35,7 @@
       (campsite rule); if the emit path grows, split emit from counting rather than growing the file.
 - [x] Write the failing tests first in `cqlite-core/tests/issue_2827_partition_access_histogram.rs`:
       bucket boundaries at 1/2/3/4/8/9/16/17, `accesses` per bucket = sum of member counts,
-      emit-exactly-once + reset on close, empty-window silence, ≤25 distinct series, and the
+      emit-exactly-once + reset on close, empty-window silence, ≤34 distinct series, and the
       attribute-key allowlist assertion.
 - [x] Implement the counting table: open-addressed, linear probing, `SLOTS = 1 << 17`, entry =
       `key_hash: AtomicU64` + `bytes: AtomicU64` + `count: AtomicU32` + `flags: AtomicU8` + padding =

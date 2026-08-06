@@ -512,6 +512,52 @@ fn accesses_dropped_at_the_sampling_floor_are_reported_not_lost() {
 }
 
 #[test]
+fn the_access_that_crosses_a_window_boundary_opens_the_next_window() {
+    // E2, tested WITHOUT sleeping on a clock. A zero-length window means every
+    // access finds the window already expired, so the ordering of "close" and "seat"
+    // is observable directly: with the close BEFORE the seat, each access lands in a
+    // fresh window and the same key can never accumulate a repeat count.
+    //
+    // Under the old ordering (seat, then close) the second access was folded into
+    // the window it had already left, so one nominal window reported count 2 — a
+    // manufactured repeat. The design accepts the OPPOSITE bias: a partition split
+    // across a boundary becomes two lower-repeat entries, understating
+    // concentration, because understating is the safe direction for a go/no-go.
+    let r = PartitionAccessRecorder::new(WindowConfig {
+        duration: Duration::ZERO,
+        max_accesses: u64::MAX,
+        ..WindowConfig::default()
+    });
+
+    // First access: nothing to close (no window yet), so it is seated.
+    assert_eq!(
+        r.record(SCOPE, b"hot", AccessWeight::SuccessorGap(100)),
+        None
+    );
+    // Second access to the SAME key: the expired window closes FIRST, carrying only
+    // access #1, and access #2 opens the next window.
+    let first = r
+        .record(SCOPE, b"hot", AccessWeight::SuccessorGap(100))
+        .expect("the expired window must close before the new access is seated");
+    assert_eq!(
+        first.total_accesses(),
+        1,
+        "the boundary-crossing access must NOT be banked in the window it left"
+    );
+    assert_eq!(first.bucket(RepeatBucket::One).distinct(), 1);
+    assert_eq!(
+        first.bucket(RepeatBucket::Two).distinct(),
+        0,
+        "a repeat count of 2 here would be the manufactured concentration E2 removes"
+    );
+
+    // And access #2 really is in the next window.
+    let second = r.close_window().expect("access #2 opened a window");
+    assert_eq!(second.total_accesses(), 1);
+    assert_eq!(second.bucket(RepeatBucket::One).distinct(), 1);
+}
+
+#[test]
 fn a_concurrent_close_never_splits_an_access_from_its_count() {
     // C3: the access count and the table entry must be banked in the SAME window
     // generation. When they were not, a close landing between the two put the count
