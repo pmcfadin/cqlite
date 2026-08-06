@@ -26,7 +26,7 @@ use arrow::record_batch::RecordBatch;
 use cqlite_core::query::AccessPath;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::write_engine::{
-    build_single_partition_merger_from_readers_recording, KWayMerger, PointAccessRecording,
+    build_single_partition_merger_from_readers, KWayMerger, PointAccessRecording,
 };
 
 use crate::bypass::{bypass_reason, ForcedMergePath, ScanRowSource};
@@ -85,7 +85,7 @@ impl MergeProducer {
             // boundary — one access per key, recorded here because no enclosing
             // layer records it (the cold path's builder records for itself, and the
             // core executor records at its own storage boundary). Never per-SSTable.
-            let built = build_single_partition_merger_from_readers_recording(
+            let built = build_single_partition_merger_from_readers(
                 readers,
                 &key_bytes,
                 &self.schema,

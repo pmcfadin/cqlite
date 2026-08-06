@@ -393,31 +393,11 @@ pub fn build_single_partition_merger_with_registry(
 /// WHO opens/owns the `SSTableReader` differs. `readers` must be the same
 /// (token-pruned) candidate list, in the same order, the full-scan reader-based
 /// merger ([`KWayMerger::new_from_readers`]) would merge.
+/// `recording` (issue #2827) governs ONLY whether this call records one partition
+/// access per requested key; it changes no rows, no ordering and no probe behaviour.
+/// It is an explicit caller decision because this builder's two callers sit at
+/// different levels — see [`PointAccessRecording`].
 pub fn build_single_partition_merger_from_readers(
-    readers: Vec<Arc<SSTableReader>>,
-    keys: &[Vec<u8>],
-    schema: &TableSchema,
-    scan_cancel: ScanCancel,
-) -> Result<Option<KWayMerger>> {
-    // Default: the caller records. The core executor's targeted read reaches this
-    // through `generation_merge` and records at its own logical boundary.
-    build_single_partition_merger_from_readers_recording(
-        readers,
-        keys,
-        schema,
-        scan_cancel,
-        PointAccessRecording::CallerRecords,
-    )
-}
-
-/// [`build_single_partition_merger_from_readers`] with an explicit
-/// [`PointAccessRecording`] mode (issue #2827).
-///
-/// Behaviour is otherwise IDENTICAL — same canonicalization, same per-candidate
-/// probe, same run ordering, same rows. `recording` governs only whether this call
-/// records one #2827 partition access per requested key, which the Flight warm point
-/// path needs because it *is* its own logical point-read boundary.
-pub fn build_single_partition_merger_from_readers_recording(
     readers: Vec<Arc<SSTableReader>>,
     keys: &[Vec<u8>],
     schema: &TableSchema,
