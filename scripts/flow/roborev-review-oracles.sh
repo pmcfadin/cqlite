@@ -1053,6 +1053,8 @@ roborev_diff_header_has_path() {
 # coordination lead may GRANT, a worker may only REQUEST" remains a process obligation with an audit
 # trail, now enforced to the level of "an allowlisted human", not to the level of "that specific human".
 ROBOREV_WAIVER_AUTHORS="pmcfadin"
+# The structured scanner lives beside this file; the shell never parses comment text itself.
+WAIVER_SCAN_TOOL="${WAIVER_SCAN_TOOL:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-scan.py}"
 
 # roborev_waiver_author_allowed <login>: is this comment author permitted to GRANT a waiver?
 roborev_waiver_author_allowed() {
@@ -1113,8 +1115,7 @@ roborev_waiver_author_allowed() {
 # FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, a marker for another scope, a placeholder reason,
 # a missing field — every one of them leaves the absence FAILing, under its own named state.
 roborev_absence_waiver_lookup() {
-  local base="$1" head="$2" job="$3" line author cur_author rest
-  local m_base m_head m_job m_reason missing mismatch
+  local base="$1" head="$2" job="$3" json result
   ROBOREV_WAIVER_STATE="none"
   ROBOREV_WAIVER_AUTHOR=""
   ROBOREV_WAIVER_SCOPE=""
@@ -1130,116 +1131,49 @@ roborev_absence_waiver_lookup() {
     ROBOREV_WAIVER_DETAIL="'gh' is not on PATH, so no PR comment could be read"
     return 0
   fi
-  # ONE `gh` call, and its FAILURE IS A STATE rather than a silent empty result: `gh pr view` exits
-  # non-zero when there is no PR for the branch, when auth is missing, and when the API errors, and all
-  # three mean "no waiver could be established" — which keeps the absence FAILing.
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="the structured waiver scanner is unusable (python3 present: $(command -v python3 >/dev/null 2>&1 && printf yes || printf no); tool: $WAIVER_SCAN_TOOL) — a waiver is NEVER decided from a flattened text stream, so this fails closed rather than falling back to line parsing"
+    return 0
+  fi
+  # ===== ONE `gh` CALL, RAW JSON, DECIDED STRUCTURALLY (#3312 job 26) =====
+  # `--json comments` WITHOUT `--jq`: the author and the body must stay SEPARATE FIELDS of the same
+  # object all the way to the decision. The previous form asked `jq` to flatten them into one text
+  # stream with an in-band author record, and a comment body is attacker-controlled on a public
+  # repository — so a body could carry its own author line and be attributed to an allowlisted login,
+  # defeating the allowlist entirely. CONTROL AND DATA MUST NOT SHARE A CHANNEL WHEN THE DATA IS
+  # ATTACKER-CONTROLLED; the fix removes the delimiter rather than choosing a rarer one.
   #
-  # LINE STRUCTURE IS PRESERVED, which is layer 1: each comment is emitted as an author record (a line
-  # beginning with the SOH control character, which no reviewer types) followed by the comment's OWN
-  # lines, unmodified. The previous form flattened newlines to spaces to keep the author attached, and
-  # that flattening is exactly what let an embedded copy of the marker match.
-  local body
-  if ! body=$(cd "$REPO" && gh pr view --json comments \
-      --jq '.comments[] | "\u0001" + (.author.login // "unknown") + "\n" + (.body // "")' 2>/dev/null); then
+  # The `gh` FAILURE IS A STATE, never a silent empty result: it exits non-zero when there is no PR for
+  # the branch, when auth is missing and when the API errors, and all three mean no waiver could be
+  # established — which keeps the absence FAILing.
+  if ! json=$(cd "$REPO" && gh pr view --json comments 2>/dev/null); then
     ROBOREV_WAIVER_STATE="unavailable"
     ROBOREV_WAIVER_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no waiver could be read"
     return 0
   fi
-  [ -n "$body" ] || return 0
-  cur_author="unknown"
-  # THE LAST GRANTING MARKER WINS, so a re-request after a push supersedes an earlier one; a non-granting
-  # marker is still REPORTED when nothing granted, because "your marker names the wrong scope" is the
-  # diagnostic the human needs.
-  while IFS= read -r line; do
-    line="${line%$'\r'}"
-    case "$line" in
-      $'\001'*) cur_author="${line#?}"; continue ;;
-      # LAYER 1: THE MARKER MUST *BE* THE LINE. `case` with no leading-whitespace alternative means an
-      # indented, `>`-quoted, bulleted or mid-sentence copy simply does not match.
-      'roborev-waive: prompt-content-absent '*) ;;
-      *) continue ;;
-    esac
-    author="$cur_author"
-    # ===== ONE STRICT PATTERN FOR THE WHOLE MARKER (roborev job 23/24) =====
-    # The previous form pulled each field out with an independent `case`, which enforced neither the
-    # documented ORDER nor token BOUNDARIES: `base=<x>` could sit after `reason=`, a value could run into
-    # the next field, and `reason=TODO ` (trailing space) or a whitespace-only reason slipped past the
-    # placeholder checks and GRANTED. One anchored ERE decides the whole line, so a marker either has
-    # exactly the documented shape or it is MALFORMED — there is no partially-parsed middle state.
-    if [[ ! "$line" =~ ^roborev-waive:\ prompt-content-absent\ base=([0-9a-f]{7,40})\ head=([0-9a-f]{7,40})\ job=([0-9]+)\ reason=(.*)$ ]]; then
-      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
-        ROBOREV_WAIVER_STATE="malformed"
-        ROBOREV_WAIVER_AUTHOR="$author"
-        ROBOREV_WAIVER_DETAIL="the line does not match the required form 'roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>' — every field is required, in that order, with single-space separators"
-      fi
-      continue
-    fi
-    m_base="${BASH_REMATCH[1]}"
-    m_head="${BASH_REMATCH[2]}"
-    m_job="${BASH_REMATCH[3]}"
-    m_reason="${BASH_REMATCH[4]}"
-    # TRIMMED BEFORE IT IS JUDGED: a reason of spaces or tabs is not a reason, and `TODO ` is the same
-    # placeholder as `TODO`. Trailing whitespace defeating a placeholder check is the classic form of this
-    # defect, so the trim happens FIRST and the checks below see only the trimmed value.
-    m_reason="${m_reason#"${m_reason%%[![:space:]]*}"}"
-    m_reason="${m_reason%"${m_reason##*[![:space:]]}"}"
-    missing=""
-    [ -n "$m_reason" ] || missing="a-non-empty-reason (the reason is empty or whitespace only)"
-    if [ -z "$missing" ]; then
-      case "$m_reason" in
-        *'<'*'>'*) missing="a-substituted-reason (the reason still holds an unsubstituted <…> placeholder)" ;;
-      esac
-    fi
-    if [ -z "$missing" ]; then
-      case "$(printf '%s' "$m_reason" | tr '[:upper:]' '[:lower:]')" in
-        why|todo|tbd|tba|reason|n/a|na|none|-|placeholder)
-          missing="a-substantive-reason (the reason '$m_reason' is a bare placeholder)" ;;
-      esac
-    fi
-    if [ -n "$missing" ]; then
-      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
-        ROBOREV_WAIVER_STATE="malformed"
-        ROBOREV_WAIVER_AUTHOR="$author"
-        ROBOREV_WAIVER_DETAIL="the marker is missing $missing, so it does not say why this review was waived"
-      fi
-      continue
-    fi
-    # EVERY FIELD IS VERIFIED, and the cause names WHICH one diverged: base, head and job together are
-    # the review the authorizer actually judged.
-    mismatch=""
-    [ "$m_base" = "$base" ] || mismatch="base ($m_base != $base)"
-    [ "$m_head" = "$head" ] || mismatch="${mismatch:+$mismatch, }head ($m_head != $head)"
-    [ "$m_job" = "$job" ] || mismatch="${mismatch:+$mismatch, }job ($m_job != $job)"
-    if [ -n "$mismatch" ]; then
-      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
-        ROBOREV_WAIVER_STATE="stale"
-        ROBOREV_WAIVER_AUTHOR="$author"
-        ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
-        ROBOREV_WAIVER_REASON="$m_reason"
-        ROBOREV_WAIVER_DETAIL="the marker names a different review — $mismatch — and a waiver may not outlive the review its authorizer judged; re-request it for this base/head/job (a completed job can be re-decided with --recheck-job <id>, which enqueues nothing)"
-      fi
-      continue
-    fi
-    # AUTHORIZATION IS THE LAST GATE, after shape and scope: a well-formed marker naming this exact
-    # review from a NON-ALLOWLISTED author is a distinct state — the marker was fine, the author was not
-    # permitted — so it reports UNAUTHORIZED rather than being lumped in with malformed input.
-    if ! roborev_waiver_author_allowed "$author"; then
-      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
-        ROBOREV_WAIVER_STATE="unauthorized"
-        ROBOREV_WAIVER_AUTHOR="$author"
-        ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
-        ROBOREV_WAIVER_REASON="$m_reason"
-        ROBOREV_WAIVER_DETAIL="the marker is well-formed and names this review, but its author '@$author' is not on the waiver allowlist ($ROBOREV_WAIVER_AUTHORS) — this is a public repository, so the base/head/job values printed in a failing block are public knowledge and authorship is the only thing that separates an authorization from a stranger"
-      fi
-      continue
-    fi
-    ROBOREV_WAIVER_STATE="granted"
-    ROBOREV_WAIVER_AUTHOR="$author"
-    ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
-    ROBOREV_WAIVER_REASON="$m_reason"
-    ROBOREV_WAIVER_DETAIL=""
-  done <<WAIVER_SCAN_EOF
-$body
-WAIVER_SCAN_EOF
+  [ -n "$json" ] || return 0
+  # The scanner owns the WHOLE decision — shape, scope, reason and authorization — so this shell never
+  # associates an author with a body. Its output is `key=value` lines with whitespace-collapsed values,
+  # the same shape `roborev-job-facts.py` emits, so a free-text reason cannot introduce a second channel.
+  if ! result=$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null); then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="the PR comments could not be parsed as JSON, so no waiver could be established"
+    return 0
+  fi
+  ROBOREV_WAIVER_STATE=$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)
+  ROBOREV_WAIVER_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
+  ROBOREV_WAIVER_SCOPE=$(printf '%s\n' "$result" | sed -n 's/^scope=//p' | head -1)
+  ROBOREV_WAIVER_REASON=$(printf '%s\n' "$result" | sed -n 's/^reason=//p' | head -1)
+  ROBOREV_WAIVER_DETAIL=$(printf '%s\n' "$result" | sed -n 's/^detail=//p' | head -1)
+  # A STATE THIS CODE HAS NEVER JUDGED IS NOT A PASS: an unrecognised (or empty) verdict from the
+  # scanner fails closed instead of inheriting the permissive path.
+  case "$ROBOREV_WAIVER_STATE" in
+    granted|unauthorized|stale|malformed|none) ;;
+    *)
+      ROBOREV_WAIVER_DETAIL="the waiver scanner returned the unrecognised state '$ROBOREV_WAIVER_STATE'; failing closed"
+      ROBOREV_WAIVER_STATE="unavailable"
+      ;;
+  esac
   return 0
 }
