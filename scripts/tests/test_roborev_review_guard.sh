@@ -244,7 +244,7 @@ emit_job_object() {
   # The review TEXT the record carries (#3312 job 24). On the JOB row as well as the review row, so every
   # payload shape a recheck may read from carries it, exactly as roborev's own payloads do.
   if [ -n "${STUB_RECORD_OUTPUT:-}" ]; then
-    extra="$extra,\"output\":\"${STUB_RECORD_OUTPUT}\""
+    extra="$extra,\"${STUB_RECORD_OUTPUT_FIELD:-output}\":\"${STUB_RECORD_OUTPUT}\""
   fi
   printf '{"id":%s,"git_ref":"%s","status":"%s","model":"%s","requested_model":"%s","prompt":"%s"%s}' \
     "${STUB_PAYLOAD_JOB:-${STUB_JOB:-4600}}" \
@@ -289,8 +289,8 @@ case "$cmd" in
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
       # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
       # `id` (equal to the job id) that NESTS the job row under a "job" key.
-      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"output":"%s","prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
+      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"%s":"%s","prompt":"%s","job":' \
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -982,6 +982,7 @@ export STUB_ANNOUNCE_SHA=''
 # `<login><TAB><flattened body>`, exactly the shape the wrapper's `--jq` produces. STUB_GH_RC makes the
 # `gh` call FAIL, which is how "no PR / no auth / API error" is exercised.
 export STUB_RECORD_OUTPUT=''
+export STUB_RECORD_OUTPUT_FIELD=''
 export STUB_GH_COMMENTS=''
 export STUB_GH_COMMENTS_FILE=''
 export STUB_GH_RC=0
@@ -1003,6 +1004,7 @@ reset_stub() {
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
   STUB_RECORD_OUTPUT=''
+  STUB_RECORD_OUTPUT_FIELD=''
   STUB_GH_COMMENTS=''
   STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
@@ -3690,6 +3692,73 @@ assert_says 'case (wv24) an unbounded field value does not match the required fo
   '^waiver: MALFORMED \(the line does not match the required form'
 reset_stub
 
+printf '== (wv25) JOB 25: a well-formed marker from a NON-ALLOWLISTED author is UNAUTHORIZED ==\n'
+# THE HOLE: the author was recorded but never authorized, and this is a PUBLIC repository whose failing
+# block PRINTS base, head and job — so any commenter could copy them and pass the merge gate. The state is
+# distinct from MALFORMED on purpose: this marker is perfectly well-formed and names exactly this review;
+# what disqualifies it is WHO wrote it.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001drive-by-contributor\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=copied from the public failing block\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv25)' FAIL 1
+assert_says 'case (wv25) a stranger cannot grant a waiver' \
+  "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor' is not on the waiver allowlist"
+assert_says 'case (wv25) the cause says why authorship is the only separator here' \
+  'this is a public repository'
+assert_says 'case (wv25) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_lacks 'case (wv25) and it never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv26) JOB 25: an allowlisted author with the SAME marker DOES grant ==\n'
+# The positive control for wv25: the ONLY difference is the author, so the case pins that the allowlist is
+# what decided it — not some incidental property of the marker.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=copied from the public failing block\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv26)' PASS 0
+assert_says 'case (wv26) the same marker from an allowlisted author grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv27) JOB 25: an UNAUTHORIZED marker does not shadow an allowlisted one ==\n'
+# Ordering matters: a stranger commenting first must not make the real authorization unreachable.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001drive-by-contributor\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=stranger first\n\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=authorized after review of the token accounting\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv27)' PASS 0
+assert_says 'case (wv27) the allowlisted grant is still found' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=authorized after review of the token accounting\)\$"
+reset_stub
+
+printf '== (wv28) JOB 25: the record review text is read under EITHER field name ==\n'
+# `roborev-job-facts.py` documented `verdict_text` and read only `output`, so a payload using the other
+# spelling produced an EMPTY transcript and spuriously failed review-completed/findings on a recheck. Both
+# payload shapes are fixtured: the field on the nested JOB row, and the field on the REVIEW row.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_RECORD_OUTPUT_FIELD=verdict_text
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv28) verdict_text on the job row' PASS 0
+assert_says 'case (wv28) completion is re-asserted from verdict_text' '^review-completed: PASS$'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_SHOW_JSON=nested
+STUB_RECORD_OUTPUT_FIELD=verdict_text
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv28b) verdict_text on the review row' PASS 0
+assert_says 'case (wv28b) completion is re-asserted from the review row field' '^review-completed: PASS$'
+reset_stub
+
 printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
@@ -3948,16 +4017,36 @@ if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${BAS
 else
   bad 'structural: the affirmation backstop admits WAIVED without checking its provenance, or reintroduces a per-key escape hatch (#3312 ruling (4))'
 fi
-# AND THE AUTHORSHIP LIMITATION IS STATED, NOT IMPLIED: the one thing this mechanism must never do is
-# look like it verifies who granted the waiver.
-_auth_ok=1
-for _f in "$ORACLES" "$CHECKS_FILE" "$WRAPPER"; do
-  grep -qF 'PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED' "$_f" || _auth_ok=0
-done
-if [ "$_auth_ok" -eq 1 ] && ! grep -qE 'author\.login[^)]*==|\.author\.login" =' "$ORACLES"; then
-  ok 'structural: authorship is documented as process-enforced with an audit trail, and no code pretends to verify it'
+# ===== AUTHORIZATION IS ENFORCED, AND THE RESIDUAL IS SCOPED TO WHAT REMAINS TRUE (#3312 job 25) =====
+# This assert used to forbid ANY author check, on the reasoning that one could not distinguish worker from
+# owner on a shared login. That reasoning conflated "cannot enforce perfectly" with "cannot enforce at
+# all", and the hole it left was that ANY commenter on a public repository could grant a waiver. So the
+# assert is inverted where it was wrong and kept where it was right: the allowlist comparison MUST exist,
+# and the disclaimer MUST be scoped to "which allowlisted human", never to authorship in general.
+_allow_ok=1
+grep -qF 'ROBOREV_WAIVER_AUTHORS=' "$ORACLES" || _allow_ok=0
+grep -qF 'roborev_waiver_author_allowed' "$ORACLES" || _allow_ok=0
+grep -qF 'ROBOREV_WAIVER_STATE="unauthorized"' "$ORACLES" || _allow_ok=0
+if [ "$_allow_ok" -eq 1 ]; then
+  ok 'structural: the waiver author is authorized against an explicit allowlist, with its own UNAUTHORIZED state'
 else
-  bad 'structural: the authorship limitation is unstated on some surface, or an author check was added that cannot work (worker, closer and owner share one GitHub login on this fleet) — #3312 ruling (4)'
+  bad 'structural: the waiver has no author allowlist — on a public repository any commenter could copy the base/head/job from a failing block and grant one (#3312 job 25)'
+fi
+# NOT ENV-OVERRIDABLE: an override is settable by the very party the allowlist constrains.
+if grep -qE 'ROBOREV_WAIVER_AUTHORS="?\$\{?ROBOREV_WAIVER_AUTHORS' "$ORACLES"; then
+  bad 'structural: the waiver allowlist is env-overridable — whoever invokes the wrapper could set it, which is the party it exists to constrain (#3312 job 25)'
+else
+  ok 'structural: the waiver allowlist is not env-overridable'
+fi
+# THE SCOPED RESIDUAL IS STATED ON EVERY SURFACE, in its NARROW form.
+_resid_missing=""
+for _f in "$ORACLES" "$CHECKS_FILE" "$WRAPPER"; do
+  grep -qiF 'WHICH ALLOWLISTED HUMAN' "$_f" || _resid_missing="$_resid_missing $(basename "$_f")"
+done
+if [ -z "$_resid_missing" ]; then
+  ok 'structural: the process-enforcement residual is scoped to "which allowlisted human", on all three surfaces'
+else
+  bad "structural: the authorship residual is missing or unscoped in —$_resid_missing. An over-broad 'authorship cannot be verified' disclaimer is what justified having no author check at all (#3312 job 25)"
 fi
 # NO EMITTED DIAGNOSTIC MAY DESCRIBE A RETIRED MECHANISM AS SOMETHING THIS RUN DOES (#3312 job 18, fix 2).
 # The retirement of the capture/observer/digest apparatus left prose behind that still described it in the
