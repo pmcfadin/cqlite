@@ -156,15 +156,58 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     // --- setup, timed separately so the caller can subtract it (spec R2) -------
+    //
+    // EXACT DIRECTORY IDENTITY, NEVER A SUBSTRING FILTER (#3272 round 10, F-B).
+    //
+    // This used to pass `table_directory_filter: Some(format!("/{ks}/{table}"))`. `cqlite-core`
+    // documents that field as a SUBSTRING match, "loose by design", which "cannot express 'exactly
+    // this directory': any sibling whose full name extends the filter also matches". MEASURED
+    // against this corpus: with a `ws0/events-backup/` sibling present, the filter selected
+    // BOTH `…/ws0/events` and `…/ws0/events-backup`, while `Exact` selected only `…/ws0/events`.
+    //
+    // Why that voids the rig rather than merely adding a directory: this binary is ARM A, and the
+    // ONLY thing the rig reports is arm A against arm B over THE SAME BYTES. The two arms reach
+    // ingestion by different routes (this `IngestionConfig`, versus `cqlite-flight --data-dir`), so
+    // a sibling silently absorbed here and not there means the arms measured DIFFERENT SSTable
+    // SETS — and the cross-arm ratio, which is the rig's entire output, compares nothing. It is
+    // also not only a row-count effect: an extra directory changes the GENERATION COUNT, and the
+    // generation count selects the scan route.
+    //
+    // `Exact` compares complete path components after canonicalization (issue #3234), so a
+    // `<table>-<uuid>-backup`, a `<table>-backup`, or any other name-extending sibling contributes
+    // nothing. `table_directory_filter` is left `None` so no second, looser scope exists at all —
+    // the same shape `cqlite-core/examples/bti_perf_scan` uses.
     let setup_start = Instant::now();
     let cfg = cqlite_core::ingestion::IngestionConfig {
         schema_paths: vec![schema_path.clone()],
         data_dir: cli.corpus.clone(),
         version_hint: Some("5.0".to_string()),
         core_config: cqlite_core::Config::default(),
-        table_directory_filter: Some(format!("/{}/{}", cli.keyspace, cli.table)),
+        table_directory_filter: None,
     };
-    let db = cqlite_core::ingestion::ingest(cfg).await?.database;
+    let wanted = [table_dir.clone()];
+    let ingested = cqlite_core::ingestion::ingest_with_selection(
+        cfg,
+        cqlite_core::ingestion::TableDirSelection::Exact(&wanted),
+    )
+    .await?;
+    // The selected set is OBSERVED and refused unless it is exactly the intended directory, rather
+    // than assumed from having asked for `Exact`. `Exact` is the mechanism; this is the affirmative
+    // verification that the mechanism did what was asked — reporting the INTENDED scope is exactly
+    // how the substring filter could scan extra SSTables while printing the smaller number.
+    //
+    // The predicate lives in `ws0_corpus_gen::scan_scope` so BOTH its refusal branches are
+    // unit-testable: reached from a shell they are (correctly) near-unprovokable once `Exact` is in
+    // use, and a guard no test can watch fail is the very defect this issue is about. `true` because
+    // the `*-Data.db` precondition above ESTABLISHED there is something to ingest, so an empty
+    // selection here is a refusal rather than a legitimately empty corpus.
+    let selected = &ingested.discovery_summary.table_directories;
+    ws0_corpus_gen::scan_scope::verify_exact_scope(selected, &table_dir, true)?;
+    // Recorded so the scope this arm measured is READABLE in the artifact rather than inferred
+    // from the code, on both this branch and the scanning one below. It is what the refusals above
+    // observed, so an artifact and a claim about the artifact cannot disagree.
+    let ingested_dirs: Vec<String> = selected.iter().map(|d| d.display().to_string()).collect();
+    let db = ingested.database;
     let setup_secs = setup_start.elapsed().as_secs_f64();
 
     let sql = format!("SELECT {} FROM {}.{}", cli.project, cli.keyspace, cli.table);
@@ -176,9 +219,10 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         drop(db);
         let out = serde_json::json!({
             "arm": "bare_scan_setup_only",
-            "surface": "cqlite_core::ingestion::ingest",
+            "surface": "cqlite_core::ingestion::ingest_with_selection (TableDirSelection::Exact)",
             "corpus": cli.corpus.display().to_string(),
             "schema": schema_path.display().to_string(),
+            "table_dirs_ingested": ingested_dirs,
             "setup_secs": setup_secs,
             "passes": [],
             "rows_denominator": 0,
@@ -250,6 +294,10 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         "surface": "cqlite_core::Database::execute_streaming",
         "corpus": cli.corpus.display().to_string(),
         "schema": schema_path.display().to_string(),
+        // The EXACT table directories ingestion selected (#3272 round 10, F-B). A substring filter
+        // silently absorbed a name-extending sibling, so the set this arm measured is recorded
+        // rather than left to be assumed equal to the intended one.
+        "table_dirs_ingested": ingested_dirs,
         "query": sql,
         "fold": cli.fold,
         "setup_secs": setup_secs,

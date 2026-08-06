@@ -45,6 +45,9 @@ pub mod generate;
 pub mod identity;
 pub mod measurement_corpus;
 pub mod rows;
+/// Arm A's ingest-scope verification (#3272 round 10, F-B) — see the module docs for why the
+/// predicate lives here rather than inside `ws0-scan-bench`'s `run()`.
+pub mod scan_scope;
 pub mod schema;
 
 /// Deterministic, portable PRNG (SplitMix64).
