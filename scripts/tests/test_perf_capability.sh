@@ -1286,6 +1286,39 @@ else
   ok "perf-capability: the line-safety predicate rejects CR as well as LF and still accepts an ordinary path"
 fi
 
+# ...and LINE-SAFETY MUST BE JUDGED ON THE ORIGINAL PATH, not the canonicalized one (roborev round
+# 12, Medium). `$(cd -P -- "$p" && pwd -P)` STRIPS trailing newlines, so a directory whose name ends
+# in LF used to pass: the check only ever saw the stripped form, while every later caller emitted the
+# ORIGINAL spelling and split the one-per-line search path in two. Round 3 added the CR/LF guard for
+# exactly that split; it was running too late to see it. Both variants are pinned — a directory whose
+# name ends in LF, and a file whose PARENT ends in LF — because they canonicalize by different routes.
+lf_root=$(mktemp -d "$tmp/lf.XXXXXX"); : >"$lf_root/.cqlite-perf-sandbox"
+lf_dir="$lf_root/evil"$'\n'
+lf_fail=0
+if mkdir -p "$lf_dir" 2>/dev/null; then
+  if env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$lf_root" \
+       bash -c '. "$1"; perf_capability_sandbox_ok_resolved "$2"' _ "$PERFLIB" "$lf_dir" 2>/dev/null; then
+    bad "perf-capability: a directory whose name ends in LF was ACCEPTED by the resolved containment check (the newline was laundered through pwd -P)"
+    lf_fail=1
+  fi
+  # ...and the FILE variant, whose parent is the LF-named directory.
+  : >"$lf_dir/sysctl.conf" 2>/dev/null
+  if env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$lf_root" \
+       bash -c '. "$1"; perf_capability_sandbox_file_ok_resolved "$2"' _ "$PERFLIB" "$lf_dir/sysctl.conf" 2>/dev/null; then
+    bad "perf-capability: a file whose PARENT directory name ends in LF was ACCEPTED by the resolved file containment check"
+    lf_fail=1
+  fi
+  # ...NEGATIVE CONTROL: the same shapes WITHOUT a newline are still accepted, so the check is not
+  # refusing every path that merely looks unusual.
+  mkdir -p "$lf_root/ordinary"
+  env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$lf_root" \
+    bash -c '. "$1"; perf_capability_sandbox_ok_resolved "$2"' _ "$PERFLIB" "$lf_root/ordinary" 2>/dev/null \
+    || { bad "perf-capability: an ORDINARY contained directory was refused by the line-safety ordering fix (vacuous)"; lf_fail=1; }
+  [ "$lf_fail" -ne 0 ] || ok "perf-capability: line-safety is judged on the ORIGINAL path — a directory ending in LF and a file whose parent ends in LF are both REFUSED (the newline cannot launder through pwd -P), while an ordinary contained directory still passes (#3261 roborev-12)"
+else
+  skip "perf-capability: LF-in-path containment cases" "this filesystem refused to create a directory whose name contains a newline"
+fi
+
 # ...and the COMPETING-FILE SCAN must validate every globbed file, not just its directory (roborev
 # round 11, Medium). `[ -f ]` and `grep` FOLLOW symlinks, so a link sitting inside a perfectly
 # contained sandbox directory but pointing at a real host `*.conf` was read, and its contents
