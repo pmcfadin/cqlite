@@ -162,12 +162,15 @@ impl SSTableRowIterator for SinglePartitionFilterRun {
 enum KeySizeNote {
     /// This SSTable does not hold the key, so it contributes nothing either way.
     NotHeld,
-    /// This SSTable holds the key and the read path resolved an authoritative
-    /// on-disk size for it.
+    /// This SSTable holds the key and its index recorded an authoritative on-disk
+    /// size for it.
     Sized(u32),
-    /// This SSTable holds (or may hold) the key but no authoritative size is
-    /// available — BTI trie resolution records only an offset, and a fail-safe
-    /// whole-file scan resolves no per-partition size at all. Never estimated.
+    /// This SSTable holds the key and its on-disk extent was MEASURED as the
+    /// partition's successor gap.
+    Measured(u64),
+    /// This SSTable holds (or may hold) the key but no authoritative extent is
+    /// available — e.g. a fail-safe whole-file scan resolves no per-partition
+    /// layout, or no data-section length is known. Never estimated.
     Unsized,
 }
 
@@ -498,7 +501,7 @@ async fn probe_reader_async(
             }
             SinglePartitionCompaction::Rows(mut r) => {
                 if collect_notes {
-                    notes.push(resolved_size_note(reader, key));
+                    notes.push(resolved_size_note(reader, key).await);
                 }
                 rows.append(&mut r)
             }
@@ -529,26 +532,32 @@ async fn probe_reader_async(
     Ok(ProbeOutcome { probe, notes })
 }
 
-/// The on-disk size this reader authoritatively resolved for `key`, as recorded by
-/// the read path itself in the process-global key→partition-offset cache
-/// (issue #2059's `PartitionLoc`).
+/// This SSTable's authoritative on-disk extent for `key`.
 ///
-/// The instrument NEVER performs its own lookup: it reads only what the read that
-/// just ran already resolved. Two consequences, both deliberate:
+/// The partition's location comes from what the read that just ran already resolved
+/// into the process-global key→partition-offset cache (issue #2059's
+/// `PartitionLoc`), so the instrument never re-drives a lookup and can never
+/// perturb the read path's own telemetry. The EXTENT is then measured as the
+/// successor gap — `[data_offset, successor_offset)`, bounding to the authoritative
+/// uncompressed data-section length for the last partition — which is the same
+/// authoritative index-layout bound the single-partition seek uses to size its
+/// decompression window.
 ///
-/// - A BTI-resolved partition has `data_size == 0` (the trie records an offset and
-///   nothing else), which is not a size and is reported [`KeySizeNote::Unsized`].
-///   It is never bounded from a successor offset or defaulted to a nominal value —
-///   that would be an estimate wearing a measurement's clothes (#28).
-/// - When no authoritative location is available at all (the key cache is
-///   disabled, or the entry was reclaimed), the note is likewise `Unsized`. Failing
-///   closed here costs a refused window; guessing would cost a wrong verdict, and
-///   the error would point toward "the working set fits, build the cache".
+/// Nothing is ever estimated. Where no location is available at all (the key cache
+/// is off, or the entry was reclaimed) or no extent is resolvable, the note is
+/// [`KeySizeNote::Unsized`]: the access is still counted, and it contributes zero
+/// bytes under `size_source = unavailable`.
 #[cfg(not(feature = "tombstones"))]
-fn resolved_size_note(reader: &SSTableReader, key: &[u8]) -> KeySizeNote {
-    match reader.key_cache_get(key) {
-        Some(loc) if loc.data_size > 0 => KeySizeNote::Sized(loc.data_size),
-        _ => KeySizeNote::Unsized,
+async fn resolved_size_note(reader: &SSTableReader, key: &[u8]) -> KeySizeNote {
+    let Some(loc) = reader.key_cache_get(key) else {
+        return KeySizeNote::Unsized;
+    };
+    if loc.data_size > 0 {
+        return KeySizeNote::Sized(loc.data_size);
+    }
+    match reader.measure_partition_extent(loc.data_offset, key).await {
+        Ok(Some(gap)) => KeySizeNote::Measured(gap),
+        Ok(None) | Err(_) => KeySizeNote::Unsized,
     }
 }
 
@@ -560,6 +569,7 @@ fn fold_size_notes(weights: &mut [partition_access::AccessWeightBuilder], notes:
         match note {
             KeySizeNote::NotHeld => {}
             KeySizeNote::Sized(n) => w.note_sized(*n),
+            KeySizeNote::Measured(n) => w.note_measured(*n),
             KeySizeNote::Unsized => w.note_unsized(),
         }
     }

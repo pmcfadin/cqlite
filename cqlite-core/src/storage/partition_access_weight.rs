@@ -152,14 +152,62 @@ impl StorageEngine {
             self.sstables.resolve_reader_snapshot(table_id).await;
         let mut weight = AccessWeightBuilder::new();
         for reader in &readers {
-            // `Some(loc)`: `data_size == 0` is the "offset only" marker, not a
-            // size, and `note_sized` folds it to unavailable. `None`: this
-            // generation did not hold the key (or left no authoritative location),
-            // so it contributes nothing either way.
-            if let Some(loc) = reader.key_cache_get(partition_key) {
+            // `None` means this generation did not hold the key (or left no
+            // authoritative location), so it contributes nothing either way.
+            let Some(loc) = reader.key_cache_get(partition_key) else {
+                continue;
+            };
+            // An index-recorded size, if one ever exists. No Cassandra 5.0 index
+            // format records one, so in practice this never fires — it is kept so a
+            // producer that genuinely knows a size is not forced to report a
+            // measured one.
+            if loc.data_size > 0 {
                 weight.note_sized(loc.data_size);
+                continue;
             }
+            Self::note_measured_extent(reader, loc.data_offset, partition_key, &mut weight).await;
         }
         weight.finish()
+    }
+
+    /// MEASURE one candidate's contribution as the partition's successor gap.
+    ///
+    /// Any error, or a genuinely unknowable extent, becomes `unavailable` — the
+    /// instrument reports a missing extent rather than inventing one (#28).
+    #[cfg(not(feature = "tombstones"))]
+    async fn note_measured_extent(
+        reader: &std::sync::Arc<crate::storage::sstable::reader::SSTableReader>,
+        data_offset: u64,
+        partition_key: &[u8],
+        weight: &mut AccessWeightBuilder,
+    ) {
+        match reader
+            .measure_partition_extent(data_offset, partition_key)
+            .await
+        {
+            Ok(Some(gap)) => weight.note_measured(gap),
+            Ok(None) => weight.note_unsized(),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "partition-access probe could not measure a partition extent; \
+                     recording the access as size_source=unavailable (#2827)"
+                );
+                weight.note_unsized();
+            }
+        }
+    }
+
+    /// `tombstones` build: the successor-gap machinery is compiled out with the
+    /// seek path it serves, so no extent is measurable and every access is honestly
+    /// unpriceable.
+    #[cfg(feature = "tombstones")]
+    async fn note_measured_extent(
+        _reader: &std::sync::Arc<crate::storage::sstable::reader::SSTableReader>,
+        _data_offset: u64,
+        _partition_key: &[u8],
+        weight: &mut AccessWeightBuilder,
+    ) {
+        weight.note_unsized();
     }
 }

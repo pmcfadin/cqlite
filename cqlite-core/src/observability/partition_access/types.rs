@@ -73,20 +73,43 @@ impl RepeatBucket {
 }
 
 /// Provenance of an access's on-disk byte weight — the closed
-/// `cqlite.read.size_source` value set.
+/// `cqlite.read.size_source` value set of THREE values.
+///
+/// A reader must always be able to tell a MEASURED weight from a weight the index
+/// handed over, and both from a genuinely unknown one — so the provenance is a
+/// distinct label rather than being folded into `index`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SizeSource {
-    /// Every SSTable resolved for the access reported an authoritative size.
+    /// Every SSTable resolved for the access reported a size directly in its index
+    /// metadata (`PartitionLoc.data_size`). No Cassandra 5.0 index format records
+    /// one, so this is unreachable for Cassandra-written SSTables today; it is kept
+    /// because a producer that genuinely knows a size must not be forced to report
+    /// a measured one.
     Index,
-    /// At least one resolved SSTable reported no authoritative size.
+    /// The weight was MEASURED as the partition's successor gap —
+    /// `[data_offset, successor_offset)`, bounding to the authoritative uncompressed
+    /// data-section length for the last partition. Authoritative index-layout
+    /// metadata, the same bound the single-partition seek uses to size its decode
+    /// window; never an estimate.
+    SuccessorGap,
+    /// At least one resolved SSTable yielded no authoritative extent at all. The
+    /// access is still counted; it contributes ZERO bytes.
     Unavailable,
 }
 
 impl SizeSource {
+    /// Every value, in order.
+    pub const ALL: [SizeSource; 3] = [
+        SizeSource::Index,
+        SizeSource::SuccessorGap,
+        SizeSource::Unavailable,
+    ];
+
     /// The bounded attribute value for `cqlite.read.size_source`.
     pub fn label(self) -> &'static str {
         match self {
             SizeSource::Index => "index",
+            SizeSource::SuccessorGap => "successor_gap",
             SizeSource::Unavailable => "unavailable",
         }
     }
@@ -121,18 +144,29 @@ impl SizeSource {
 /// and is not taken unilaterally here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessWeight {
-    /// Authoritative on-disk bytes, summed across the SSTables resolved for this
-    /// one logical access.
+    /// On-disk bytes taken directly from index-recorded sizes, summed across the
+    /// SSTables resolved for this one logical access.
     Index(u64),
-    /// No authoritative size was available for at least one resolved SSTable.
+    /// On-disk bytes MEASURED as the successor gap, summed across the SSTables
+    /// resolved for this one logical access.
+    SuccessorGap(u64),
+    /// No authoritative extent was available for at least one resolved SSTable.
     Unavailable,
 }
 
 impl AccessWeight {
     pub(super) fn bytes(self) -> Option<u64> {
         match self {
-            AccessWeight::Index(b) => Some(b),
+            AccessWeight::Index(b) | AccessWeight::SuccessorGap(b) => Some(b),
             AccessWeight::Unavailable => None,
+        }
+    }
+
+    pub(super) fn source(self) -> SizeSource {
+        match self {
+            AccessWeight::Index(_) => SizeSource::Index,
+            AccessWeight::SuccessorGap(_) => SizeSource::SuccessorGap,
+            AccessWeight::Unavailable => SizeSource::Unavailable,
         }
     }
 }
@@ -148,6 +182,7 @@ impl AccessWeight {
 pub struct AccessWeightBuilder {
     bytes: u64,
     sized: u32,
+    measured: bool,
     unavailable: bool,
 }
 
@@ -170,15 +205,37 @@ impl AccessWeightBuilder {
         self.sized = self.sized.saturating_add(1);
     }
 
-    /// Record that one resolved SSTable reported no authoritative size.
+    /// Record that one resolved SSTable's extent was MEASURED as its successor gap
+    /// (`[data_offset, successor_offset)`, or the data-section-length bound for the
+    /// last partition). A zero-length gap is not an extent and folds to
+    /// [`Self::note_unsized`].
+    pub fn note_measured(&mut self, gap_bytes: u64) {
+        if gap_bytes == 0 {
+            self.note_unsized();
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(gap_bytes);
+        self.sized = self.sized.saturating_add(1);
+        self.measured = true;
+    }
+
+    /// Record that one resolved SSTable yielded no authoritative extent.
     pub fn note_unsized(&mut self) {
         self.unavailable = true;
     }
 
     /// Finish the accumulation.
+    ///
+    /// Provenance is the WEAKEST of the contributions: a total that mixes an
+    /// index-recorded size with a measured gap is reported as measured, because the
+    /// total is only as well-founded as its weakest component. Any unpriceable
+    /// contribution — or no contribution at all — makes the whole access
+    /// unavailable.
     pub fn finish(self) -> AccessWeight {
         if self.unavailable || self.sized == 0 {
             AccessWeight::Unavailable
+        } else if self.measured {
+            AccessWeight::SuccessorGap(self.bytes)
         } else {
             AccessWeight::Index(self.bytes)
         }
@@ -188,9 +245,13 @@ impl AccessWeightBuilder {
 /// Per-bucket totals for one closed window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BucketStats {
-    /// Distinct partitions in this bucket whose bytes were authoritative.
+    /// Distinct partitions in this bucket whose bytes came from an index-recorded
+    /// size.
     pub distinct_index: u64,
-    /// Distinct partitions in this bucket whose bytes could not be priced.
+    /// Distinct partitions in this bucket whose bytes were MEASURED as the
+    /// successor gap.
+    pub distinct_successor_gap: u64,
+    /// Distinct partitions in this bucket whose bytes could not be priced at all.
     pub distinct_unavailable: u64,
     /// Sum of the repeat counts of every partition in this bucket.
     pub accesses: u64,
@@ -202,7 +263,12 @@ pub struct BucketStats {
 impl BucketStats {
     /// Distinct partitions in this bucket, priced or not.
     pub fn distinct(&self) -> u64 {
-        self.distinct_index + self.distinct_unavailable
+        self.distinct_index + self.distinct_successor_gap + self.distinct_unavailable
+    }
+
+    /// Distinct partitions in this bucket that carry an authoritative extent.
+    pub fn distinct_priced(&self) -> u64 {
+        self.distinct_index + self.distinct_successor_gap
     }
 }
 

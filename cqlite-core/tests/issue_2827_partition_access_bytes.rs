@@ -24,19 +24,19 @@
 //!   values, and the decision procedure REFUSES it by naming the unpriceable
 //!   fraction rather than pricing a partial byte total.
 //!
-//! # Open finding: neither Cassandra 5.0 index format records a partition size
+//! # Where the bytes come from: the successor gap, not an index-recorded size
 //!
-//! The approved design expected BIG (`Index.db`) to supply an authoritative
-//! per-partition size and only BTI to fail closed. It does not. A Cassandra 5.0
-//! BIG index entry is
-//! `[key][data_offset vint][promoted_index_len vint][promoted_index]`
-//! (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`) with no size
-//! field — which is why the reader's own seek path bounds a partition by the
-//! SUCCESSOR offset. So `PartitionLoc.data_size` is `0` on both formats, every
-//! access reports `unavailable`, and the decision procedure refuses every real
-//! window on its unpriceable-fraction condition. The end-to-end cases below pin
-//! that ACTUAL behaviour; the recorder-level cases pin the byte semantics the
-//! weighting will have once an authoritative extent is available.
+//! Neither Cassandra 5.0 index format records a per-partition size. A BIG index
+//! entry is `[key][data_offset vint][promoted_index_len vint][promoted_index]`
+//! (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, "Index.db
+//! Entry Format"; written by `BigTableWriter.createRowIndexEntry` at
+//! `cassandra-5.0.8`) and the BTI `Partitions.db` trie resolves an offset only.
+//!
+//! So a partition's on-disk extent is MEASURED as `[data_offset,
+//! successor_offset)` — the same authoritative index-layout bound the
+//! single-partition seek already uses to size its decompression window — reported
+//! under the distinct `size_source = successor_gap` so a reader can always tell a
+//! measured extent from an index-supplied one, and from a genuinely unknown one.
 //!
 //! # Fixture contract (#3220)
 //!
@@ -64,12 +64,16 @@ fn repeated_accesses_to_one_partition_count_its_bytes_once() {
     let r = deterministic_recorder();
     // One partition of known on-disk size, accessed ten times in the window.
     for _ in 0..10 {
-        r.record(b"partition-of-known-size", AccessWeight::Index(65_536));
+        r.record(
+            b"partition-of-known-size",
+            AccessWeight::SuccessorGap(65_536),
+        );
     }
     let s = r.close_window().expect("accesses were recorded");
 
     let bucket = s.bucket(RepeatBucket::NineToSixteen);
-    assert_eq!(bucket.distinct_index, 1, "one distinct partition");
+    assert_eq!(bucket.distinct_successor_gap, 1, "one distinct partition");
+    assert_eq!(bucket.distinct_index, 0);
     assert_eq!(bucket.accesses, 10);
     assert_eq!(
         bucket.bytes, 65_536,
@@ -85,9 +89,9 @@ fn an_entry_retains_the_maximum_weight_never_a_running_sum() {
     // entry keeps the maximum, which is exact because partition sizes are immutable
     // within a generation set.
     let r = deterministic_recorder();
-    r.record(b"p", AccessWeight::Index(1_000));
-    r.record(b"p", AccessWeight::Index(3_000));
-    r.record(b"p", AccessWeight::Index(2_000));
+    r.record(b"p", AccessWeight::SuccessorGap(1_000));
+    r.record(b"p", AccessWeight::SuccessorGap(3_000));
+    r.record(b"p", AccessWeight::SuccessorGap(2_000));
     let s = r.close_window().expect("accesses were recorded");
     assert_eq!(s.bucket(RepeatBucket::ThreeToFour).bytes, 3_000);
     assert_eq!(s.total_bytes(), 3_000);
@@ -117,11 +121,15 @@ fn unavailability_is_sticky_for_the_window() {
     // partial size is not a size, and reporting the priced subset would understate
     // the working set — the direction that flatters the cache.
     let r = deterministic_recorder();
-    r.record(b"p", AccessWeight::Index(4_096));
+    r.record(b"p", AccessWeight::SuccessorGap(4_096));
     r.record(b"p", AccessWeight::Unavailable);
-    r.record(b"p", AccessWeight::Index(4_096));
+    r.record(b"p", AccessWeight::SuccessorGap(4_096));
     let s = r.close_window().expect("accesses were recorded");
     assert_eq!(s.bucket(RepeatBucket::ThreeToFour).distinct_unavailable, 1);
+    assert_eq!(
+        s.bucket(RepeatBucket::ThreeToFour).distinct_successor_gap,
+        0
+    );
     assert_eq!(s.bucket(RepeatBucket::ThreeToFour).bytes, 0);
 }
 
@@ -131,7 +139,7 @@ fn a_mixed_window_makes_its_incompleteness_visible_and_the_procedure_refuses_it(
     // Enough accesses to clear the procedure's minimum, so the refusal below is
     // about the unpriceable fraction and nothing else.
     for i in 0..12_000u64 {
-        r.record(&i.to_be_bytes(), AccessWeight::Index(2_048));
+        r.record(&i.to_be_bytes(), AccessWeight::SuccessorGap(2_048));
     }
     for i in 0..50u64 {
         r.record(&(i | 1 << 40).to_be_bytes(), AccessWeight::Unavailable);
@@ -141,9 +149,9 @@ fn a_mixed_window_makes_its_incompleteness_visible_and_the_procedure_refuses_it(
     // Both arms present with non-zero values.
     let priced: u64 = RepeatBucket::ALL
         .iter()
-        .map(|b| s.bucket(*b).distinct_index)
+        .map(|b| s.bucket(*b).distinct_priced())
         .sum();
-    assert!(priced > 0, "the BIG-resolved partitions must be priced");
+    assert!(priced > 0, "the measured partitions must be priced");
     assert_eq!(s.unavailable_partitions(), 50);
     assert!(s.unavailable_fraction() > 0.0);
     assert!(s.total_bytes() > 0);
@@ -187,7 +195,7 @@ fn a_window_at_the_sampling_floor_is_non_census_and_refused() {
     for i in 0..400_000u64 {
         r.record(
             &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
-            AccessWeight::Index(64),
+            AccessWeight::SuccessorGap(64),
         );
     }
     let s = r.close_window().expect("accesses were recorded");
@@ -206,6 +214,64 @@ fn a_window_at_the_sampling_floor_is_non_census_and_refused() {
             assert!(sample_denominator > 1);
         }
         other => panic!("a floored window must be refused, not priced: got {other:?}"),
+    }
+}
+
+#[test]
+fn a_mixed_provenance_total_reports_the_weakest_provenance() {
+    // An access whose bytes came partly from an index-recorded size and partly from
+    // a measured gap is reported MEASURED: a total is only as well-founded as its
+    // weakest component, and collapsing it to `index` would overstate how the number
+    // was obtained.
+    let mut b = cqlite_core::observability::partition_access::AccessWeightBuilder::new();
+    b.note_sized(100);
+    b.note_measured(400);
+    assert_eq!(b.finish(), AccessWeight::SuccessorGap(500));
+
+    // A zero-length gap is not an extent.
+    let mut b = cqlite_core::observability::partition_access::AccessWeightBuilder::new();
+    b.note_measured(0);
+    assert_eq!(b.finish(), AccessWeight::Unavailable);
+}
+
+#[test]
+fn a_gap_measured_census_window_is_priced_not_refused() {
+    // The point of the successor-gap mechanism: a window whose bytes were MEASURED
+    // is priceable. Refusal condition 1 exists to reject an INCOMPLETE byte total,
+    // and a fully gap-measured window is complete.
+    let r = deterministic_recorder();
+    for i in 0..600u64 {
+        for _ in 0..20 {
+            r.record(&i.to_be_bytes(), AccessWeight::SuccessorGap(1_024));
+        }
+    }
+    for i in 0..10_000u64 {
+        r.record(
+            &(i | 1 << 40).to_be_bytes(),
+            AccessWeight::SuccessorGap(1_024),
+        );
+    }
+    let s = r.close_window().expect("accesses were recorded");
+    assert_eq!(s.unavailable_partitions(), 0);
+    assert!(s.total_bytes() > 0, "measured bytes must be reported");
+
+    match decision::evaluate(
+        &s,
+        decision::WindowSource::Field,
+        128 * 1024 * 1024,
+        decision::ASSUMED_DECODE_MULTIPLIER,
+    ) {
+        Verdict::Priced(c) => {
+            // Hand-computed: A = 600*20 + 10_000 = 22_000; the hot bucket can serve
+            // 12_000 - 600 = 11_400 and the singleton bucket 0; both fit the
+            // 38.34 MiB on-disk budget, so H_max = 11_400 / 22_000 = 0.51818...
+            assert!(
+                (c.h_max - 11_400.0 / 22_000.0).abs() < 1e-9,
+                "unexpected ceiling {}",
+                c.h_max
+            );
+        }
+        other => panic!("a fully measured window must be priceable: got {other:?}"),
     }
 }
 
@@ -315,27 +381,13 @@ mod end_to_end {
         )
     }
 
-    /// A BIG point read is COUNTED, and — today — is not priceable either.
+    /// A BIG point read is counted once and PRICED from its measured successor gap.
     ///
-    /// # An open finding against the approved design (issue #2827)
-    ///
-    /// The design expected this case to report `size_source = "index"` with the
-    /// partition's on-disk bytes, on the premise that "BIG (`Index.db`) resolves
-    /// both fields". **That premise is false for Cassandra 5.0.** A BIG index entry
-    /// is `[key][data_offset vint][promoted_index_len vint][promoted_index]`
-    /// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`) — there
-    /// is no per-partition size field, which is exactly why the reader's own seek
-    /// path bounds a partition with the SUCCESSOR offset and calls that its
-    /// authoritative end bound.
-    ///
-    /// So `PartitionLoc.data_size` is `0` for BIG as well as BTI, and this test
-    /// pins what the shipped instrument ACTUALLY does rather than what the design
-    /// hoped for: the access is counted exactly once and reported unpriceable. The
-    /// histogram — the instrument's primary deliverable — is unaffected. Closing
-    /// the byte gap means sourcing the extent from the successor offset, which the
-    /// approved design deferred; it is not taken unilaterally here.
+    /// The provenance label matters and is asserted: `successor_gap`, never `index`
+    /// — Cassandra 5.0's BIG `Index.db` records no partition size, so a weight
+    /// claiming `index` here would be a lie about how the number was obtained.
     #[tokio::test]
-    async fn a_big_resolved_access_is_counted_once_and_reports_its_price_honestly() {
+    async fn a_big_access_is_counted_once_and_priced_from_its_measured_gap() {
         let _guard = PROBE.lock().await;
         let (summary, rows) = window_for(BIG, 5).await;
         assert!(rows > 0, "the fixture partition must return rows");
@@ -349,40 +401,44 @@ mod end_to_end {
         let bucket = summary.bucket(RepeatBucket::FiveToEight);
         assert_eq!(bucket.accesses, 5, "the repeat count is exact");
         assert_eq!(
-            bucket.distinct_index, 0,
-            "Cassandra 5.0's BIG Index.db carries no partition size, so no access \
-             through it can claim an authoritative weight"
+            bucket.distinct_successor_gap, 1,
+            "the extent is MEASURED as the successor gap and labelled as such"
         );
-        assert_eq!(bucket.distinct_unavailable, 1);
         assert_eq!(
-            summary.total_bytes(),
-            0,
-            "a size that the format does not record is reported missing, never \
-             estimated or defaulted"
+            bucket.distinct_index, 0,
+            "Cassandra 5.0's BIG Index.db records no size, so no access may claim \
+             an index-supplied weight"
         );
+        assert_eq!(bucket.distinct_unavailable, 0);
+        assert!(
+            bucket.bytes > 0,
+            "a measured extent must contribute real on-disk bytes"
+        );
+        assert_eq!(summary.unavailable_partitions(), 0);
     }
 
-    /// A BTI point read is marked unavailable and priced at nothing.
+    /// A BTI point read is priced from its measured gap too — via the trie's
+    /// strict-ceiling successor walk rather than an `Index.db` scan.
     #[tokio::test]
-    async fn a_bti_resolved_access_is_unavailable_and_contributes_no_bytes() {
+    async fn a_bti_access_is_priced_from_its_measured_trie_successor_gap() {
         let _guard = PROBE.lock().await;
         let (summary, rows) = window_for(BTI, 3).await;
         assert!(rows > 0, "the fixture partition must return rows");
 
         assert_eq!(summary.distinct_partitions(), 1);
         let bucket = summary.bucket(RepeatBucket::ThreeToFour);
-        assert_eq!(
-            bucket.distinct_unavailable, 1,
-            "the BTI trie resolves an offset with no size, so the access is counted \
-             but not priced"
-        );
-        assert_eq!(bucket.distinct_index, 0);
         assert_eq!(bucket.accesses, 3);
         assert_eq!(
-            summary.total_bytes(),
-            0,
-            "no non-zero size may be recorded for a BTI partition from any source"
+            bucket.distinct_successor_gap, 1,
+            "the BTI trie resolves no size, so the extent is measured as the gap"
         );
-        assert!(summary.unavailable_fraction() > 0.0);
+        assert_eq!(bucket.distinct_index, 0);
+        assert_eq!(bucket.distinct_unavailable, 0);
+        assert!(bucket.bytes > 0);
+        assert_eq!(
+            summary.unavailable_fraction(),
+            0.0,
+            "a measurable extent is not an unavailable one"
+        );
     }
 }

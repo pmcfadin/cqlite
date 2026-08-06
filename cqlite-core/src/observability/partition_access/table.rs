@@ -61,6 +61,11 @@ const MAX_PROBES: usize = 64;
 /// bytes and is counted as `size_source = unavailable`.
 pub(super) const FLAG_SIZE_UNAVAILABLE: u8 = 0b0000_0001;
 
+/// Sticky per-entry flag: at least one access to this partition had its extent
+/// MEASURED as a successor gap rather than read from an index-recorded size, so the
+/// entry's bytes are reported with `size_source = successor_gap`.
+pub(super) const FLAG_SIZE_FROM_GAP: u8 = 0b0000_0010;
+
 /// One counting slot. `key_hash == 0` means EMPTY; a hash that would be zero is
 /// remapped to 1 by [`hash_key`], so the sentinel is unambiguous.
 #[repr(C)]
@@ -107,6 +112,8 @@ pub(super) struct Entry {
     pub(super) bytes: u64,
     /// Sticky: at least one access could not be priced authoritatively.
     pub(super) size_unavailable: bool,
+    /// Sticky: at least one priced access had its extent measured as a gap.
+    pub(super) size_from_gap: bool,
 }
 
 /// Outcome of an insert attempt.
@@ -204,7 +211,19 @@ impl Table {
     /// share the table and mutate their own slots with atomics. Slot claiming is a
     /// CAS on the `key_hash` sentinel, so two threads racing on the same empty slot
     /// cannot both claim it.
+    #[cfg(test)]
     pub(super) fn record(&self, hash: u64, prefix_bits: u32, bytes: Option<u64>) -> Insert {
+        self.record_with_flags(hash, prefix_bits, bytes, 0)
+    }
+
+    /// [`Self::record`] with extra sticky provenance flags OR-ed into the slot.
+    pub(super) fn record_with_flags(
+        &self,
+        hash: u64,
+        prefix_bits: u32,
+        bytes: Option<u64>,
+        extra_flags: u8,
+    ) -> Insert {
         if !admitted(hash, prefix_bits) {
             return Insert::NotAdmitted;
         }
@@ -227,7 +246,7 @@ impl Table {
                 }
             }
             if observed == hash {
-                Self::apply(slot, bytes);
+                Self::apply(slot, bytes, extra_flags);
                 return Insert::Recorded;
             }
             idx = (idx + 1) & SLOT_MASK;
@@ -236,7 +255,10 @@ impl Table {
     }
 
     /// Fold one access into an already-claimed slot.
-    fn apply(slot: &Slot, bytes: Option<u64>) {
+    fn apply(slot: &Slot, bytes: Option<u64>, extra_flags: u8) {
+        if extra_flags != 0 {
+            slot.flags.fetch_or(extra_flags, Ordering::Relaxed);
+        }
         // Saturating rather than wrapping: a window that somehow recorded 2^32
         // accesses to one partition must not wrap back into the `1` bucket.
         let mut cur = slot.count.load(Ordering::Relaxed);
@@ -288,6 +310,7 @@ impl Table {
                 count: slot.count.load(Ordering::Relaxed),
                 bytes: slot.bytes.load(Ordering::Relaxed),
                 size_unavailable: slot.flags.load(Ordering::Relaxed) & FLAG_SIZE_UNAVAILABLE != 0,
+                size_from_gap: slot.flags.load(Ordering::Relaxed) & FLAG_SIZE_FROM_GAP != 0,
             });
         }
     }

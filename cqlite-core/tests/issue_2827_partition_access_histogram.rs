@@ -34,7 +34,7 @@
 //! `docs/research/decoded-partition-cache-decision.md`.
 
 use cqlite_core::observability::partition_access::{
-    AccessWeight, PartitionAccessRecorder, RepeatBucket, WindowConfig, WindowSummary,
+    AccessWeight, PartitionAccessRecorder, RepeatBucket, SizeSource, WindowConfig, WindowSummary,
 };
 use std::time::Duration;
 
@@ -56,7 +56,7 @@ fn deterministic_recorder() -> PartitionAccessRecorder {
 /// Drive `count` accesses to the partition identified by `id`.
 fn access(r: &PartitionAccessRecorder, id: u64, count: u32, bytes: u64) {
     for _ in 0..count {
-        r.record(&id.to_be_bytes(), AccessWeight::Index(bytes));
+        r.record(&id.to_be_bytes(), AccessWeight::SuccessorGap(bytes));
     }
 }
 
@@ -382,7 +382,7 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
             let weight = if i % 8 == 0 {
                 AccessWeight::Unavailable
             } else {
-                AccessWeight::Index(4_096)
+                AccessWeight::SuccessorGap(4_096)
             };
             partition_access::record_partition_access(k, weight);
         }
@@ -420,16 +420,16 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
                 }
                 if key == catalog::attr::SIZE_SOURCE {
                     assert!(
-                        value == "index" || value == "unavailable",
-                        "{value} is not one of the two declared size-source labels"
+                        SizeSource::ALL.iter().any(|s| s.label() == value),
+                        "{value} is not one of the three declared size-source labels"
                     );
                 }
             }
         }
     }
     assert!(
-        series <= 25,
-        "the four metrics may carry at most 6x2 + 6 + 6 + 1 = 25 series regardless \
+        series <= 31,
+        "the four metrics may carry at most 6x3 + 6 + 6 + 1 = 31 series regardless \
          of how many distinct partitions were accessed; saw {series}"
     );
     assert!(
@@ -449,7 +449,7 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
     assert!(
         metrics.sum_where(
             catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
-            &[(catalog::attr::SIZE_SOURCE, "index")]
+            &[(catalog::attr::SIZE_SOURCE, "successor_gap")]
         ) > 0.0
     );
 }

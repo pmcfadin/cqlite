@@ -160,3 +160,67 @@ impl SSTableReader {
         Ok(successor_offset.filter(|&off| off > target_offset))
     }
 }
+
+#[cfg(not(feature = "tombstones"))]
+impl SSTableReader {
+    /// The authoritative UNCOMPRESSED length of this SSTable's `Data.db` data
+    /// section — the exclusive end bound the LAST partition takes when
+    /// [`successor_partition_offset`](Self::successor_partition_offset) returns
+    /// `None` (there is no successor).
+    ///
+    /// Two authoritative sources, in order:
+    ///
+    /// - **Compressed**: `CompressionInfo.db`'s `data_length` field, which Cassandra
+    ///   writes as the total uncompressed data length
+    ///   (`docs/sstables-definitive-guide/` CompressionInfo layout).
+    /// - **Uncompressed**: the `Data.db` file length. For an uncompressed SSTable the
+    ///   file IS the data section, so its length is the uncompressed length — and the
+    ///   production write surface is uncompressed-only (#1406).
+    ///
+    /// `None` when neither is available, in which case a caller that needs an end
+    /// bound must fail closed rather than guess one.
+    pub(crate) fn uncompressed_data_section_len(&self) -> Option<u64> {
+        if let Some(info) = self.compression_info.as_ref() {
+            if info.data_length > 0 {
+                return Some(info.data_length);
+            }
+        }
+        let len = self.point_source.len();
+        (len > 0).then_some(len)
+    }
+
+    /// MEASURE this partition's on-disk extent as the successor gap.
+    ///
+    /// Returns `Ok(Some(bytes))` when the extent is authoritative:
+    /// `successor_offset - data_offset`, or
+    /// `uncompressed_data_section_len() - data_offset` for the last partition.
+    /// Returns `Ok(None)` when it is genuinely unknowable (no index, or no
+    /// data-section length) — the caller then records `unavailable` and contributes
+    /// zero bytes rather than estimating (no-heuristics, #28).
+    ///
+    /// This is the same authoritative index-layout metadata the single-partition
+    /// seek uses to bound its decompression window, read at the same reader-level
+    /// granularity as the B4 key-offset cache — so a caller at the LOGICAL
+    /// point-read boundary can obtain a byte weight without counting per-SSTable
+    /// probes (issue #2827, design D2/D6).
+    ///
+    /// The extent is in UNCOMPRESSED offsets, which is exactly the domain a
+    /// decoded-size multiplier is applied to.
+    pub(crate) async fn measure_partition_extent(
+        &self,
+        data_offset: u64,
+        partition_key: &[u8],
+    ) -> Result<Option<u64>> {
+        let end = match self
+            .successor_partition_offset(data_offset, partition_key)
+            .await?
+        {
+            Some(successor) => successor,
+            None => match self.uncompressed_data_section_len() {
+                Some(len) => len,
+                None => return Ok(None),
+            },
+        };
+        Ok(end.checked_sub(data_offset).filter(|&gap| gap > 0))
+    }
+}

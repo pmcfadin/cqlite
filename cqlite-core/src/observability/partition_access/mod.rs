@@ -258,6 +258,10 @@ impl PartitionAccessRecorder {
     pub fn record(&self, key: &[u8], weight: AccessWeight) -> Option<WindowSummary> {
         let hash = table::hash_key(key);
         let bytes = weight.bytes();
+        let flags = match weight.source() {
+            SizeSource::SuccessorGap => table::FLAG_SIZE_FROM_GAP,
+            SizeSource::Index | SizeSource::Unavailable => 0,
+        };
         self.recorded.fetch_add(1, Ordering::Relaxed);
 
         // Fast path: shared read lock, relaxed atomics on one slot.
@@ -265,7 +269,10 @@ impl PartitionAccessRecorder {
         {
             let guard = self.read_state();
             if let Some(state) = guard.as_ref() {
-                match state.table.record(hash, state.prefix_bits, bytes) {
+                match state
+                    .table
+                    .record_with_flags(hash, state.prefix_bits, bytes, flags)
+                {
                     // The access is ALREADY counted. The slow path must only
                     // widen the sampling prefix — re-recording here would count
                     // this one access twice and shift its partition a bucket to
@@ -286,8 +293,8 @@ impl PartitionAccessRecorder {
 
         match slow {
             SlowPath::None => {}
-            SlowPath::Allocate => self.grow_or_downsample(hash, bytes, true),
-            SlowPath::Downsample { replay } => self.grow_or_downsample(hash, bytes, replay),
+            SlowPath::Allocate => self.grow_or_downsample(hash, bytes, flags, true),
+            SlowPath::Downsample { replay } => self.grow_or_downsample(hash, bytes, flags, replay),
         }
         self.close_if_triggered()
     }
@@ -299,7 +306,7 @@ impl PartitionAccessRecorder {
     /// `false` when the fast path already counted it (the load-factor case) and
     /// `true` when it did not (first allocation, or a probe run that found no
     /// slot).
-    fn grow_or_downsample(&self, hash: u64, bytes: Option<u64>, replay: bool) {
+    fn grow_or_downsample(&self, hash: u64, bytes: Option<u64>, flags: u8, replay: bool) {
         let mut guard = self.write_state();
         match guard.as_mut() {
             None => {
@@ -310,7 +317,7 @@ impl PartitionAccessRecorder {
                     started: Instant::now(),
                 };
                 if replay {
-                    state.table.record(hash, 0, bytes);
+                    state.table.record_with_flags(hash, 0, bytes, flags);
                 }
                 *guard = Some(state);
             }
@@ -334,7 +341,9 @@ impl PartitionAccessRecorder {
                 // count it. A `Full` here (an unlucky 64-long probe run at the
                 // floor) simply drops the access rather than looping.
                 if replay {
-                    let _ = state.table.record(hash, state.prefix_bits, bytes);
+                    let _ = state
+                        .table
+                        .record_with_flags(hash, state.prefix_bits, bytes, flags);
                 }
             }
         }
@@ -381,7 +390,11 @@ impl PartitionAccessRecorder {
             if e.size_unavailable {
                 b.distinct_unavailable += 1;
             } else {
-                b.distinct_index += 1;
+                if e.size_from_gap {
+                    b.distinct_successor_gap += 1;
+                } else {
+                    b.distinct_index += 1;
+                }
                 b.bytes = b.bytes.saturating_add(e.bytes);
             }
         });
@@ -448,28 +461,21 @@ fn emit(summary: &WindowSummary) {
     for b in RepeatBucket::ALL {
         let stats = summary.bucket(b);
         let bucket: AttrValue = b.label().into();
-        if stats.distinct_index > 0 {
-            add_counter(
-                catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
-                stats.distinct_index,
-                &[
-                    (catalog::attr::REPEAT_BUCKET, bucket.clone()),
-                    (catalog::attr::SIZE_SOURCE, SizeSource::Index.label().into()),
-                ],
-            );
-        }
-        if stats.distinct_unavailable > 0 {
-            add_counter(
-                catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
-                stats.distinct_unavailable,
-                &[
-                    (catalog::attr::REPEAT_BUCKET, bucket.clone()),
-                    (
-                        catalog::attr::SIZE_SOURCE,
-                        SizeSource::Unavailable.label().into(),
-                    ),
-                ],
-            );
+        for (count, source) in [
+            (stats.distinct_index, SizeSource::Index),
+            (stats.distinct_successor_gap, SizeSource::SuccessorGap),
+            (stats.distinct_unavailable, SizeSource::Unavailable),
+        ] {
+            if count > 0 {
+                add_counter(
+                    catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
+                    count,
+                    &[
+                        (catalog::attr::REPEAT_BUCKET, bucket.clone()),
+                        (catalog::attr::SIZE_SOURCE, source.label().into()),
+                    ],
+                );
+            }
         }
         if stats.accesses > 0 {
             add_counter(
@@ -548,6 +554,11 @@ mod tests {
         b.note_sized(200);
         assert_eq!(b.finish(), AccessWeight::Index(300));
 
+        // A measured extent is reported with its own provenance, never as `index`.
+        let mut b = AccessWeightBuilder::new();
+        b.note_measured(4_096);
+        assert_eq!(b.finish(), AccessWeight::SuccessorGap(4_096));
+
         // BTI's `data_size = 0` is not a size; it poisons the access.
         let mut b = AccessWeightBuilder::new();
         b.note_sized(100);
@@ -571,7 +582,7 @@ mod tests {
     #[test]
     fn footprint_is_fixed_once_recording_starts() {
         let r = PartitionAccessRecorder::default();
-        r.record(b"k", AccessWeight::Index(1));
+        r.record(b"k", AccessWeight::SuccessorGap(1));
         assert_eq!(
             r.footprint_bytes(),
             PartitionAccessRecorder::declared_footprint_bytes()

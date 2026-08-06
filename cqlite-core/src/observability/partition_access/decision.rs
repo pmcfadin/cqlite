@@ -61,8 +61,11 @@ pub const ASSUMED_DECODE_MULTIPLIER: f64 = 3.5;
 /// default verdict.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Refusal {
-    /// The byte total is incomplete by an unknown amount: some partitions were
-    /// resolved by a path that records no size.
+    /// The byte total is incomplete by an unknown amount: some partitions had no
+    /// authoritative extent at all — neither an index-recorded size nor a
+    /// measurable successor gap. A window whose bytes were MEASURED is complete and
+    /// is NOT refused here; incompleteness, not provenance, is what this condition
+    /// tests.
     UnpriceableFraction {
         /// Fraction of distinct partitions with `size_source = unavailable`.
         fraction: f64,
@@ -225,11 +228,16 @@ pub fn evaluate_with_threshold(
         .iter()
         .filter_map(|b| {
             let s = summary.bucket(*b);
-            if s.bytes == 0 || s.distinct_index == 0 {
+            // PRICED distinct partitions, whichever authoritative provenance they
+            // carry: an extent measured as a successor gap is as real as one an
+            // index handed over, and skipping it here would silently price the
+            // window at zero.
+            let priced = s.distinct_priced();
+            if s.bytes == 0 || priced == 0 {
                 return None;
             }
             let density = s.accesses as f64 / s.bytes as f64;
-            Some((*b, density, s.accesses, s.distinct_index, s.bytes))
+            Some((*b, density, s.accesses, priced, s.bytes))
         })
         .collect();
     ordered.sort_by(|a, b| {
@@ -295,7 +303,7 @@ mod tests {
             for _ in 0..*n {
                 key += 1;
                 for _ in 0..*times {
-                    r.record(&key.to_le_bytes(), AccessWeight::Index(*bytes));
+                    r.record(&key.to_le_bytes(), AccessWeight::SuccessorGap(*bytes));
                 }
             }
         }
@@ -306,7 +314,7 @@ mod tests {
     fn a_window_with_unpriceable_partitions_is_refused_by_name() {
         let r = recorder();
         for i in 0..12_000u64 {
-            r.record(&i.to_le_bytes(), AccessWeight::Index(1_024));
+            r.record(&i.to_le_bytes(), AccessWeight::SuccessorGap(1_024));
         }
         r.record(b"bti-resolved", AccessWeight::Unavailable);
         let s = r.close_window().expect("accesses recorded");
