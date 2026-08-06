@@ -22,6 +22,14 @@ path = "src/main.rs"
 name = "ws0-scan-bench"
 path = "src/bin/scan_bench.rs"
 
+# Prints the two operator VERIFICATION commands, formatted FROM the pinned constants
+# (#3272 round 10, L1). Writes nothing and reads nothing — it exists because a command
+# written down in markdown cannot be reached by a change to the code it invokes, which is
+# how three documented operator commands on this issue became unrunnable.
+[[bin]]
+name = "ws0-verify-commands"
+path = "src/bin/verify_commands.rs"
+
 [lib]
 name = "ws0_corpus_gen"
 path = "src/lib.rs"

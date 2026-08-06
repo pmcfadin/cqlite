@@ -300,8 +300,15 @@ count, and asserts the digest, row count and cells-per-row are identical under
 
 ```bash
 cargo test -p cqlite-flight --test issue_3096_arrow_buffer_digest            # CI fixture
-CQLITE_WS0_CORPUS_DIR=/data/ws0-3096 \
-  cargo test -p cqlite-flight --test issue_3096_arrow_buffer_digest -- --nocapture   # + the big corpus
+
+# + the big corpus. The oracle REQUIRES the three pinned expectations
+# (CQLITE_WS0_EXPECT_ARROW_ROWS/BATCHES/DIGEST) — a corpus dir supplied without them is
+# REFUSED, because the pre-#3272 oracle only checked its two taps agreed WITH EACH OTHER
+# and then printed the digest, so both arms drifting together exited 0. Do NOT retype the
+# expectations here: ask the pins for the command, so a re-pin cannot leave this stale
+# (#3272 L1 — this block set only CQLITE_WS0_CORPUS_DIR and therefore failed immediately).
+cargo run -q -p ws0-corpus-gen --bin ws0-verify-commands -- --digest /data/ws0-3096
+# ...then paste what it prints. `--all` also emits the ~2.8 GB regeneration/identity check.
 ```
 
 ## 6. Framing attribution
