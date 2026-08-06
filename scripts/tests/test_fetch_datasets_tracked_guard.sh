@@ -202,12 +202,15 @@ IGN
 # script with curl stubbed and CI explicitly unset unless an override is passed.
 # A dataset-root of "-" leaves CQLITE_DATASETS_ROOT UNSET so the script's
 # documented relative default (test-data/datasets) is exercised. Set
-# FETCH_PAYLOAD/FETCH_PAYLOAD_SHA to serve a different archive.
+# FETCH_PAYLOAD/FETCH_PAYLOAD_SHA to serve a different archive, and FETCH_ARGS to
+# pass SCRIPT arguments (issue #3310 drives the same real script through
+# `--verify-only`; every other case passes none).
 # Sets $OUT (combined output) and $RC.
 FETCH_PAYLOAD=""
 FETCH_PAYLOAD_SHA=""
 FETCH_BIN=""
 FETCH_TMPDIR=""
+FETCH_ARGS=()
 run_fetch() {
   local cwd="$1" root="$2"
   shift 2
@@ -223,19 +226,22 @@ run_fetch() {
     # FETCH_TMPDIR overrides it for the cases that probe a hostile TMPDIR.
     export TMPDIR="${FETCH_TMPDIR:-$T}"
     export STUB_CURL_PAYLOAD="$payload"
+    # `${arr[@]+"${arr[@]}"}` — an EMPTY array expands to nothing under `set -u`
+    # on every bash this suite runs on (bash 3.2 included), which a bare
+    # `"${arr[@]}"` does not.
     if [ "$root" = "-" ]; then
       env -u CQLITE_DATASETS_ROOT "$@" \
         DATASET_TAG="fake-tag" \
         DATASET_ASSET="$ASSET" \
         DATASET_SHA256="$sha" \
-        bash "$FETCH" 2>&1
+        bash "$FETCH" ${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"} 2>&1
     else
       env "$@" \
         CQLITE_DATASETS_ROOT="$root" \
         DATASET_TAG="fake-tag" \
         DATASET_ASSET="$ASSET" \
         DATASET_SHA256="$sha" \
-        bash "$FETCH" 2>&1
+        bash "$FETCH" ${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"} 2>&1
     fi
   )
   RC=$?
@@ -1718,6 +1724,313 @@ else
   bad "no-tracked-fixtures: false refusal on a clean in-repo root (exit $RC); output: $OUT"
 fi
 assert_archive_extracted "$R31/test-data/datasets" "no-tracked-fixtures"
+
+# =============================================================================
+# Issue #3310 — `--verify-only` must REPORT SIGKILL-orphaned tracked fixtures.
+#
+# The #2878 crash-safe restore covers EXIT/INT/TERM/HUP; SIGKILL outruns all of
+# them and leaves tracked fixtures DELETED on disk with the index still recording
+# them. Recovery exists, but only in the DESTRUCTIVE path's `missing-only`
+# pre-flight — and `--verify-only` returns before it. So the first diagnostic an
+# agent reaches for used to answer "root unusable" (or, with the corpus intact,
+# a clean green) for a checkout whose git-tracked fixtures are gone.
+#
+# The contract these cases pin: `--verify-only` REPORTS, never repairs. It names
+# the missing tracked file(s), prints the exact one-line repair command, exits
+# non-zero, and mutates NOTHING — the deleted files stay deleted.
+# =============================================================================
+
+# make_usable_corpus <root> — the minimal CONTENT has_required_content() demands,
+# so `--verify-only` can reach a VERIFIED verdict. Everything it writes is either
+# .gitignore'd by make_repo's .gitignore (*.db, metadata.yml, sstables/) or lives
+# under sstables/, so a repo built by make_repo stays `git status`-clean.
+make_usable_corpus() {
+  local root="$1" c
+  mkdir -p "$root/sstables/test_basic/simple_table-aaaa" "$root/$WIDE_DIR" \
+    || { echo "FAIL - could not create the synthetic corpus under $root"; exit 1; }
+  printf 'synthetic: true\n' >"$root/metadata.yml"
+  printf '{"synthetic":"wide golden"}\n' >"$root/$WIDE_DIR/nb-2-big-Data.db.jsonl"
+  for c in nb-2-big-Data.db nb-2-big-Index.db nb-2-big-Digest.crc32 nb-2-big-CompressionInfo.db; do
+    printf 'wide %s\n' "$c" >"$root/$WIDE_DIR/$c"
+  done
+  for c in nb-1-big-Data.db nb-1-big-Index.db nb-1-big-Summary.db nb-1-big-Statistics.db; do
+    printf 'basic %s\n' "$c" >"$root/sstables/test_basic/simple_table-aaaa/$c"
+  done
+}
+
+# mtime_of / census_of — a NO-WRITES oracle for a report-only probe. The census is
+# every path under the root with its type, mtime and content hash, NUL-walked and
+# sorted, so a rewritten file (same size, same name) is caught as surely as a
+# created or deleted one. Assertion (b) of #3310 compares it across the run.
+mtime_of() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || printf '?\n'; }
+census_of() {
+  local root="$1" p
+  if [ ! -d "$root" ]; then printf 'ABSENT\t%s\n' "$root"; return 0; fi
+  ( cd "$root" && find . -print0 | LC_ALL=C sort -z ) | while IFS= read -r -d '' p; do
+    if [ -L "$root/$p" ]; then
+      printf '%s\tsymlink\n' "$p"
+    elif [ -f "$root/$p" ]; then
+      printf '%s\tfile\t%s\t%s\n' "$p" "$(mtime_of "$root/$p")" "$(sha256_of "$root/$p")"
+    else
+      printf '%s\tdir\n' "$p"
+    fi
+  done
+}
+
+# run_verify <cwd> <dataset-root> [env...] — the same real script, `--verify-only`.
+run_verify() {
+  FETCH_ARGS=(--verify-only)
+  run_fetch "$@"
+  FETCH_ARGS=()
+}
+
+# The three verdict markers the probe may print. Kept in one place so a case can
+# assert BOTH that the right one appeared and that the others did not.
+PROBE_MISSING_MARKER="TRACKED FIXTURES MISSING"
+PROBE_UNMEASURED_MARKER="TRACKED-FIXTURE PROBE COULD NOT MEASURE"
+PROBE_NOSUBJECT_MARKER="NO SUBJECT"
+UNUSABLE_MARKER="does not hold a usable dataset corpus"
+
+# === Case 32: --verify-only NAMES the orphaned fixtures and REPAIRS NOTHING ====
+R32="$T/case32-repo"
+make_repo "$R32"
+R32_ROOT="$R32/test-data/datasets"
+make_usable_corpus "$R32_ROOT"
+# Exactly what a SIGKILL mid-`rm -rf` leaves: tracked fixtures gone from disk, the
+# index unchanged. One of the two carries a SPACE — this repo tracks 40
+# space-bearing paths, and a probe that splits on whitespace would drop or mangle
+# it (git's `-z` output is the only reason it survives).
+R32_DELETED_A="goldens/simple_table-Data.db.jsonl"
+R32_DELETED_B="goldens/spaced name-Data.db.jsonl"
+rm -f "$R32_ROOT/$R32_DELETED_A" "$R32_ROOT/$R32_DELETED_B"
+R32_CENSUS_BEFORE="$(census_of "$R32_ROOT")"
+R32_STATUS_BEFORE="$(git -C "$R32" status --porcelain 2>&1)"
+run_verify "$R32" "$R32_ROOT"
+R32_CENSUS_AFTER="$(census_of "$R32_ROOT")"
+R32_STATUS_AFTER="$(git -C "$R32" status --porcelain 2>&1)"
+
+if [ "$RC" -ne 0 ]; then
+  ok "3310-report: --verify-only exits non-zero on orphaned tracked fixtures (exit $RC)"
+else
+  bad "3310-report: --verify-only exited 0 with tracked fixtures DELETED; output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*) ok "3310-report: names the condition ('$PROBE_MISSING_MARKER')" ;;
+  *) bad "3310-report: missing the '$PROBE_MISSING_MARKER' marker; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$R32_DELETED_A"*) ok "3310-report: names the missing tracked file" ;;
+  *) bad "3310-report: does not name '$R32_DELETED_A'; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"$R32_DELETED_B"*) ok "3310-report: names the SPACE-bearing missing tracked file intact" ;;
+  *) bad "3310-report: does not name '$R32_DELETED_B'; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"git -C "*"restore"*"--worktree"*"test-data/datasets"*)
+    ok "3310-report: prints the exact one-line repair command" ;;
+  *) bad "3310-report: no copy-pasteable repair command; output: $OUT" ;;
+esac
+# Textually DISTINCT from the generic unusable-root diagnostic: an agent must be
+# able to tell "your fixtures are missing, here is the repair" from "this root has
+# no corpus". The corpus here is fine, so the unusable message would be a lie.
+case "$OUT" in
+  *"$UNUSABLE_MARKER"*) bad "3310-report: reported the generic root-unusable message instead; output: $OUT" ;;
+  *) ok "3310-report: diagnostic is distinct from the generic '$UNUSABLE_MARKER'" ;;
+esac
+case "$OUT" in
+  *"Dataset root VERIFIED"*) bad "3310-report: still reported the root VERIFIED; output: $OUT" ;;
+  *) ok "3310-report: does not report the root VERIFIED while fixtures are orphaned" ;;
+esac
+# --- (b) REPORT-ONLY: the run must have written nothing at all ----------------
+if [ "$R32_CENSUS_BEFORE" = "$R32_CENSUS_AFTER" ]; then
+  ok "3310-report: the dataset root is byte-for-byte unchanged (no writes, no repair)"
+else
+  bad "3310-report: the root CHANGED across a report-only probe:"
+  diff <(printf '%s\n' "$R32_CENSUS_BEFORE") <(printf '%s\n' "$R32_CENSUS_AFTER") | head -10
+fi
+if [ "$R32_STATUS_BEFORE" = "$R32_STATUS_AFTER" ]; then
+  ok "3310-report: git status --porcelain is unchanged (the index was not touched)"
+else
+  bad "3310-report: git status changed: '$R32_STATUS_BEFORE' -> '$R32_STATUS_AFTER'"
+fi
+if [ ! -e "$R32_ROOT/$R32_DELETED_A" ] && [ ! -e "$R32_ROOT/$R32_DELETED_B" ]; then
+  ok "3310-report: the deleted fixtures are STILL deleted (it reported, it did not repair)"
+else
+  bad "3310-report: --verify-only restored a file; it must never mutate the tree"
+fi
+
+# === Case 32b: the SAME report when the corpus content is ALSO absent =========
+# The reported motivation: with the corpus gone too, the pre-#3310 probe answered
+# only "root unusable", which sends an agent to re-fetch instead of to the
+# one-line restore. The fixture diagnosis must come FIRST and must still appear.
+R32B="$T/case32b-repo"
+make_repo "$R32B"
+rm -f "$R32B/test-data/datasets/$R32_DELETED_A"
+run_verify "$R32B" "$R32B/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-report-no-corpus: still exits non-zero (exit $RC)"
+else
+  bad "3310-report-no-corpus: exited 0; output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*"$R32_DELETED_A"*)
+    ok "3310-report-no-corpus: reports the missing tracked fixture, not just 'root unusable'" ;;
+  *) bad "3310-report-no-corpus: no tracked-fixture diagnosis; output: $OUT" ;;
+esac
+if [ -f "$R32B/test-data/datasets/${TRACKED_RELATIVE[0]}" ]; then
+  ok "3310-report-no-corpus: the surviving tracked fixtures were left alone"
+else
+  bad "3310-report-no-corpus: a surviving tracked fixture disappeared"
+fi
+
+# === Case 32c: NON-VACUITY — with the probe disabled the defect returns =======
+# The mutant is the pre-#3310 script: `--verify-only` skips the probe entirely.
+# With a usable corpus and tracked fixtures deleted it must report a GREEN
+# VERIFIED root — the misleading answer this issue exists to remove.
+MUTANT_NO_PROBE="$T/fetch-datasets-mutant-no-verify-probe.sh"
+sed 's/^  report_orphaned_tracked_fixtures || exit 1$/  : mutant-no-verify-probe/' \
+  "$FETCH" >"$MUTANT_NO_PROBE"
+if grep -q ': mutant-no-verify-probe' "$MUTANT_NO_PROBE"; then
+  ok "non-vacuity: built a verify-probe-disabled mutant"
+  R32C="$T/case32c-repo"
+  make_repo "$R32C"
+  make_usable_corpus "$R32C/test-data/datasets"
+  rm -f "$R32C/test-data/datasets/$R32_DELETED_A"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_NO_PROBE"
+  run_verify "$R32C" "$R32C/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  if [ "$RC" -eq 0 ]; then
+    ok "non-vacuity: mutant reports the root usable (exit 0) with a tracked fixture DELETED"
+  else
+    bad "non-vacuity: mutant did not reproduce the misleading green (exit $RC); output: $OUT"
+  fi
+  case "$OUT" in
+    *"$R32_DELETED_A"*) bad "non-vacuity: mutant named the missing file — the assert is vacuous" ;;
+    *) ok "non-vacuity: mutant never names the orphaned fixture (the pre-#3310 blind spot)" ;;
+  esac
+else
+  bad "non-vacuity: could not build the verify-probe-disabled mutant (call site renamed?)"
+fi
+
+# === Case 33: NO SUBJECT — an out-of-repo root has no tracked files at all =====
+# The fleet layout (/data/datasets). Nothing there is tracked by construction, so
+# the probe must NOT fire — and must not print a vacuous "0 of 0 clean" verdict
+# either: a probe with no subject has no clean verdict to give.
+if [ "$SANDBOX_IN_REPO" = 1 ]; then
+  printf 'INFO - skipping the out-of-repo probe case (sandbox is inside a checkout)\n'
+else
+  R33_ROOT="$T/case33-outside/test-data/datasets"
+  make_usable_corpus "$R33_ROOT"
+  run_verify "$T/case33-outside" "$R33_ROOT"
+  if [ "$RC" -eq 0 ]; then
+    ok "3310-no-subject-outside: an out-of-repo root still verifies clean (exit 0)"
+  else
+    bad "3310-no-subject-outside: false failure on an out-of-repo root (exit $RC); output: $OUT"
+  fi
+  case "$OUT" in
+    *"$PROBE_MISSING_MARKER"*) bad "3310-no-subject-outside: the probe fired with no subject; output: $OUT" ;;
+    *) ok "3310-no-subject-outside: the probe does not fire" ;;
+  esac
+  case "$OUT" in
+    *"$PROBE_NOSUBJECT_MARKER"*) ok "3310-no-subject-outside: says it had NO SUBJECT rather than claiming a clean census" ;;
+    *) bad "3310-no-subject-outside: no no-subject statement; output: $OUT" ;;
+  esac
+  case "$OUT" in
+    *"all 0 git-tracked"*) bad "3310-no-subject-outside: printed a vacuous 0/0 clean verdict; output: $OUT" ;;
+    *) ok "3310-no-subject-outside: no vacuous 0/0 clean count" ;;
+  esac
+fi
+
+# === Case 34: NO SUBJECT — an IN-repo root that tracks nothing ================
+# The other no-subject shape: inside a work tree, but the index holds no path
+# under the root (case 31's repo, probed instead of fetched).
+R34="$T/case34-repo"
+mkdir -p "$R34"
+git -C "$R34" init -q
+git -C "$R34" config user.email test@example.com
+git -C "$R34" config user.name "Test"
+printf 'placeholder\n' >"$R34/README.md"
+git -C "$R34" add README.md
+git -C "$R34" commit -qm "repo with no tracked dataset fixtures"
+make_usable_corpus "$R34/test-data/datasets"
+run_verify "$R34" "$R34/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-no-subject-in-repo: an in-repo root tracking nothing verifies clean (exit 0)"
+else
+  bad "3310-no-subject-in-repo: false failure (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_NOSUBJECT_MARKER"*) ok "3310-no-subject-in-repo: reports NO SUBJECT, not a clean census of nothing" ;;
+  *) bad "3310-no-subject-in-repo: no no-subject statement; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"all 0 git-tracked"*) bad "3310-no-subject-in-repo: printed a vacuous 0/0 clean verdict; output: $OUT" ;;
+  *) ok "3310-no-subject-in-repo: no vacuous 0/0 clean count" ;;
+esac
+
+# === Case 35: POSITIVE CONTROL — every tracked fixture present ================
+# An affirmative measurement, not the absence of a bad signal: the probe must say
+# how many tracked files it found and that all of them are on disk.
+R35="$T/case35-repo"
+make_repo "$R35"
+make_usable_corpus "$R35/test-data/datasets"
+run_verify "$R35" "$R35/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-positive: an intact checkout verifies clean (exit 0)"
+else
+  bad "3310-positive: false failure on an intact checkout (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"all ${#TRACKED_RELATIVE[@]} git-tracked file(s)"*)
+    ok "3310-positive: reports the measured count (${#TRACKED_RELATIVE[@]}) as present" ;;
+  *) bad "3310-positive: no affirmative count in the verdict; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"Dataset root VERIFIED"*) ok "3310-positive: the probe does not block the normal VERIFIED report" ;;
+  *) bad "3310-positive: the usual verify-only output disappeared; output: $OUT" ;;
+esac
+
+# === Case 36: UNMEASURABLE — an in-checkout root whose census cannot be taken ==
+# A positive verdict requires an AFFIRMATIVE measurement. With git unusable and
+# the root inside a checkout, "no missing fixtures" is unknown, not true — the
+# unmeasured state must NOT inherit the permissive branch.
+GITBIN="$T/bin-broken-git"
+mkdir -p "$GITBIN" || { echo "FAIL - could not create $GITBIN"; exit 1; }
+cp "$BIN/curl" "$GITBIN/curl"
+cat >"$GITBIN/git" <<'MOCK'
+#!/usr/bin/env bash
+echo "git: simulated failure (issue #3310 unmeasurable-census case)" >&2
+exit 1
+MOCK
+chmod +x "$GITBIN/git"
+R36="$T/case36-repo"
+make_repo "$R36"
+make_usable_corpus "$R36/test-data/datasets"
+R36_CENSUS_BEFORE="$(census_of "$R36/test-data/datasets")"
+FETCH_BIN="$GITBIN"
+run_verify "$R36" "$R36/test-data/datasets"
+FETCH_BIN=""
+R36_CENSUS_AFTER="$(census_of "$R36/test-data/datasets")"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-unmeasurable: an untakeable census exits non-zero (exit $RC)"
+else
+  bad "3310-unmeasurable: an unmeasured census took the permissive branch (exit 0); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-unmeasurable: says the census could not be taken" ;;
+  *) bad "3310-unmeasurable: no could-not-measure statement; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"Dataset root VERIFIED"*) bad "3310-unmeasurable: reported VERIFIED without the measurement; output: $OUT" ;;
+  *) ok "3310-unmeasurable: no VERIFIED verdict without the measurement" ;;
+esac
+if [ "$R36_CENSUS_BEFORE" = "$R36_CENSUS_AFTER" ]; then
+  ok "3310-unmeasurable: still mutated nothing"
+else
+  bad "3310-unmeasurable: the root changed across a report-only probe"
+fi
 
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
