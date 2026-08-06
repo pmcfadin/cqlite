@@ -528,6 +528,26 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `prompt-content: PASS` reads a waived run as certified) beside a `waiver:` key that names the state even
   when nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAVAILABLE`, each leaving the FAIL). **(d)** The
   request carries the token accounting and the authorizer checks it.
+  **AND THE LOOP HAS TO CLOSE, WHICH IT DID NOT (#3312 job 24).** The waiver binds a JOB, but the
+  operator only learns the job id — and the token accounting — from the FINISHED run, and re-running the
+  wrapper to apply a fresh waiver **enqueues a different job**, so the waiver was instantly `STALE`. As
+  first built the break-glass was a **dead letter**: no sequence of actions got a legitimate absence past
+  the gate. The fix is **not** to loosen the binding (dropping `job=` reopens the hole where one comment
+  waives a later *vacuous* review at the same base+head) but to add
+  **`--recheck-job <id>`**: re-decide THAT job's verdict, enqueueing nothing. The job is named
+  **explicitly**, never resolved from base+head, or a re-run could inherit a waiver written for a
+  different review. **A recheck inherits nothing**: `sha-assert` re-compares the record's `git_ref`
+  against this base and head, the record's own review text becomes the transcript so
+  `review-completed`, both vacuity tiers and `findings` are re-asserted from it (no review text ⇒ empty
+  transcript ⇒ fail-closed), and `roborev-exit` reports `SKIP` rather than claiming an exit status for a
+  process that never ran. The block declares **`MODE: recheck (job <id> …; NO review was enqueued)`** and
+  **`recheck-of: <id>`** as its first keys — the way the gate declares `MODE: lite` — so a recheck PASS is
+  legitimate but can never be pasted as evidence of a *fresh* review. Demonstrated end to end: absence
+  FAIL → waiver naming that base/head/job → recheck ⇒ `WAIVED` + `RESULT: PASS`, with zero reviewer
+  invocations; and a recheck of a *different* job stays `STALE`.
+  **The marker is decided by ONE anchored pattern, and the reason is trimmed BEFORE it is judged**, so
+  field order and value boundaries are enforced and `reason=TODO ` / whitespace-only reasons are refused
+  like their untrimmed forms — per-field extraction had enforced neither.
   **AND THREE LAYERS STOP THE ARTIFACT BECOMING THE CREDENTIAL — the sharpest instance of this issue's
   recurring shape.** The first version accepted the marker *anywhere* inside a comment whose newlines had
   been flattened, and the absence diagnostic **printed a complete marker carrying the live sha** — so
