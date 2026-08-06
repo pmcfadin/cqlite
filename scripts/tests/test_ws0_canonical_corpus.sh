@@ -795,9 +795,17 @@ def prefix_verdict(rec):
     ok_base = bool(rec["is_baseline"]) == (not diffs and rec["mode"] == MODE_BASELINE)
     return ok_canon and ok_base
 
+# The surrounding PIN, realistic: a canonical verdict is cross-checked against the number of
+# components the pin recorded for the corpus it measured (round 15's A), so a synthetic record
+# needs the map a real pin carries — 8, matching `canonical_components`.
+PIN_COMPONENTS = {f"nb-1-big-{c}.db": {"bytes": 1, "sha256": "0" * 64}
+                  for c in ("Data", "Index", "Statistics", "Summary", "Filter",
+                            "CompressionInfo", "Digest", "TOC")}
+
 def shipped(rec):
     try:
-        return "ACCEPTED", verify_pinned_canonical_corpus(p, {PIN_CANONICAL_FIELD: rec})
+        return "ACCEPTED", verify_pinned_canonical_corpus(
+            p, {PIN_CANONICAL_FIELD: rec, "components": PIN_COMPONENTS})
     except Invalid as exc:
         return "REFUSED", exc
 
@@ -866,6 +874,112 @@ else
 fi
 
 # ==========================================================================
+# ROUND 15, A — THE COMPONENT MAP'S PROVENANCE AND EXTENT WERE WRITTEN AND NEVER READ
+# ==========================================================================
+# Round 14's F4 added the component-map comparison AND recorded two fields describing its scope —
+# `canonical_component_source` (which artifact the map came from) and `canonical_components` (how
+# many components it covered). The reporter required NEITHER and validated NEITHER, so removing or
+# altering either left the report still claiming the COMPLETE component map had been verified.
+#
+# That is round 6's B2 shape — a field WRITTEN and compared against nothing anywhere in the tree —
+# reintroduced by the very commit that added the comparison those two fields describe. This module's
+# import-time declared-but-unread assert exists to make exactly that impossible, and could not see
+# it: the fields were never DECLARED in CANONICAL_RECORD_FIELDS to be checked against the reader.
+#
+# Driven END-TO-END through the reporter over a real session, because "the report still claimed
+# verification" is a property of the printed output, not of the validator.
+f5a_sess="$TMP/f5a-scope"
+make_session "$f5a_sess" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$f5a_sess" "$TMP/corpus"
+# THE PREMISE, measured on the SHIPPED pin: both fields are RECORDED by the writer.
+f5a_out=$(python3 - "$f5a_sess" <<'PY' 2>&1
+import json, pathlib, sys
+rec = json.loads((pathlib.Path(sys.argv[1]) / "session-corpus-pin.json").read_text())["canonical_corpus"]
+print("WRITTEN_SOURCE", rec.get("canonical_component_source"))
+print("WRITTEN_COUNT", rec.get("canonical_components"))
+PY
+)
+if grep -q 'WRITTEN_SOURCE docs/reports/ws0-3096-artifacts/corpus-identity.json' <<<"$f5a_out" \
+   && grep -q 'WRITTEN_COUNT 8' <<<"$f5a_out"; then
+  pass "OBSERVED (round15 A) PREMISE: the SHIPPED writer records canonical_component_source and canonical_components (8) in every session's pin — so these are fields the rig writes, and the question is whether anything reads them"
+else
+  fail "round15 A: the shipped pin must record both component-scope fields (out: $f5a_out)"
+fi
+# THE FINDING: each field REMOVED, then ALTERED, and the report run over it. Pre-fix all four
+# mutations exited 0 with the report printing its canonical-comparison claim; each is now REFUSED.
+f5a_ok=1
+f5a_detail=""
+for f5a_case in remove-source remove-count wrong-source zero-count fractional-count; do
+  d="$TMP/f5a-$f5a_case"
+  rm -rf "$d"; cp -R "$f5a_sess" "$d"
+  python3 - "$d" "$f5a_case" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "session-corpus-pin.json"
+pin = json.loads(p.read_text())
+rec = pin["canonical_corpus"]
+case = sys.argv[2]
+if case == "remove-source":
+    rec.pop("canonical_component_source")
+elif case == "remove-count":
+    rec.pop("canonical_components")
+elif case == "wrong-source":
+    # A PLAUSIBLE other artifact: the corpus's own identity, which is the CIRCULAR comparison F4's
+    # docstring calls out — both sides from the corpus under test.
+    rec["canonical_component_source"] = "corpus-identity.json"
+elif case == "zero-count":
+    rec["canonical_components"] = 0
+elif case == "fractional-count":
+    rec["canonical_components"] = 8.5
+p.write_text(json.dumps(pin, indent=1) + "\n")
+PY
+  # THE PRE-FIX READER, reconstructed VERBATIM: its required-field list had neither name, and its
+  # only source check was of `canonical_pin_source`. So it accepted every mutation above.
+  f5a_pre=$(WS0_F5_PERF="$f3c_perf" WS0_F5_DIR="$d" python3 - <<'PY' 2>&1
+import json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F5_PERF"])
+from ws0_canonical_corpus import RUST_PIN_REL
+rec = json.loads((pathlib.Path(os.environ["WS0_F5_DIR"]) / "session-corpus-pin.json").read_text())["canonical_corpus"]
+PREFIX_REQUIRED = ("mode", "is_canonical", "is_baseline", "label", "divergences",
+                   "compared_fields", "canonical_pin_source")
+absent = [f for f in PREFIX_REQUIRED if f not in rec]
+ok = not absent and rec["canonical_pin_source"] == RUST_PIN_REL
+print("PREFIX", "ACCEPTED" if ok else "refused")
+PY
+)
+  f5a_rep=$(run_report "$d" "$TMP/corpus" 2>&1); f5a_rc=$?
+  grep -q 'PREFIX ACCEPTED' <<<"$f5a_pre" || { f5a_ok=0; f5a_detail="$f5a_case: pre-fix did not accept"; }
+  if [ "$f5a_rc" -eq 0 ]; then
+    f5a_ok=0; f5a_detail="$f5a_case: the shipped reporter ACCEPTED it (and printed: $(grep -c 'canonical field(s) compared' <<<"$f5a_rep") claim line(s))"
+  fi
+  grep -qE 'canonical_component(_source|s)' <<<"$f5a_rep" \
+    || { f5a_ok=0; f5a_detail="$f5a_case: the refusal does not name the field"; }
+done
+if [ "$f5a_ok" -eq 1 ]; then
+  pass "OBSERVED (round15 A) NON-VACUITY, MEASURED FLIP on identical input: FIVE mutations of the two component-scope fields — each REMOVED, the source pointed at the corpus's OWN identity (F4's CIRCULAR comparison), and the count set to 0 and to 8.5 — were each ACCEPTED by the pre-fix reader reconstructed verbatim, whose required-field list carried NEITHER name and whose only source check was of canonical_pin_source. The report therefore kept citing the COMPLETE component map as verified over a record that no longer said which artifact it came from or how many components it covered. Each is now REFUSED end-to-end through the reporter, naming the field"
+else
+  fail "round15 A: each component-scope mutation must flip from pre-fix ACCEPTED to a shipped refusal naming the field ($f5a_detail)"
+fi
+# ...and the DECLARED-BUT-UNREAD direction is closed at import for these two like every other field:
+# the assert scans the reader's own source for a subscript of each declared name. Driven by asking it
+# about the two fields — a positive control, so a scan that could not tell read from unread says so.
+f5a_out=$(WS0_F5_PERF="$f3c_perf" python3 - <<'PY' 2>&1
+import os, sys
+sys.path.insert(0, os.environ["WS0_F5_PERF"])
+from ws0_canonical_corpus import CANONICAL_RECORD_FIELDS, _reader_reads
+for f in ("canonical_component_source", "canonical_components"):
+    print(f, "DECLARED", f in CANONICAL_RECORD_FIELDS, "READ", _reader_reads(f))
+print("CONTROL_UNREAD_NAME", _reader_reads("a_field_this_reader_does_not_read"))
+PY
+)
+if grep -q 'canonical_component_source DECLARED True READ True' <<<"$f5a_out" \
+   && grep -q 'canonical_components DECLARED True READ True' <<<"$f5a_out" \
+   && grep -q 'CONTROL_UNREAD_NAME False' <<<"$f5a_out"; then
+  pass "OBSERVED (round15 A): both fields are now DECLARED in CANONICAL_RECORD_FIELDS and SUBSCRIPTED by the reader, so the import-time declared-but-unread assert covers them — the assert that exists to make round 6's B2 impossible could not see this instance precisely because the fields were never declared to it. The positive control (a name the reader provably does not read) still reports False, so the scan can tell read from unread"
+else
+  fail "round15 A: both component-scope fields must be declared AND read, with the positive control intact (out: $f5a_out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a `$(...)`
@@ -875,10 +989,11 @@ fi
 # level up from the checks themselves.
 #
 # The floor is DERIVED from the OBSERVED count — 13 at the split, 21 after round 14's F4 added its
-# eight cases, 23 after round 15's C added two and 26 after its B added three, each measured by running the suite — set just below
+# eight cases, and 23/26/29 after round 15's C, B and A each added two/three/three — each measured
+# by running the suite — set just below
 # it so adding a case does not red the suite, and far above zero. No case here skips conditionally,
 # so the observed count is the same on every host.
-MIN_CHECKS=24
+MIN_CHECKS=27
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

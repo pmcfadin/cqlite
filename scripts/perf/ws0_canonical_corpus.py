@@ -779,6 +779,16 @@ CANONICAL_RECORD_FIELDS = (
     "divergences",
     "compared_fields",
     "canonical_pin_source",
+    # THE COMPONENT MAP'S PROVENANCE AND EXTENT (#3272 round 15, A). Both were written by
+    # `classify_corpus` and read by NOTHING: neither was required here nor validated below, so
+    # removing or altering either left the report still claiming the complete component map had been
+    # verified. That is round 6's B2 shape — a field WRITTEN and compared against nothing anywhere
+    # in the tree — reintroduced by round 14's F4, in the very commit that added the map comparison
+    # whose scope these two fields describe. The import-time assert at the bottom of this module
+    # exists to make exactly that impossible and could not see it, because the fields were never
+    # DECLARED here to be checked against the reader.
+    "canonical_component_source",
+    "canonical_components",
 )
 
 
@@ -923,6 +933,65 @@ def verify_pinned_canonical_corpus(pin_path: pathlib.Path, pin: dict) -> dict:
             f" {rec['canonical_pin_source']!r}, not {RUST_PIN_REL!r} — the recorded comparison was"
             " made against a different pin, so it does not establish this rig's canonical shape."
         )
+    # ...and WHICH ARTIFACT the COMPONENT MAP was compared against (#3272 round 15, A). Same rule as
+    # the pin source above, for the second of the two canonical sources: the map is the one canonical
+    # value that lives in the artifact rather than in Rust, so a record naming a different file did
+    # not compare against this rig's canonical component map. This field was WRITTEN and read by
+    # nothing — altering it left the report still citing the complete map as verified.
+    if rec["canonical_component_source"] != CANONICAL_ARTIFACT_REL:
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.canonical_component_source` is"
+            f" {rec['canonical_component_source']!r}, not {CANONICAL_ARTIFACT_REL!r} — the recorded"
+            " COMPONENT MAP comparison was made against a different artifact, so it does not"
+            " establish this rig's canonical component set. The map is the one canonical value that"
+            " lives in the artifact rather than in the Rust pin (#3272 round 15, A)."
+        )
+    # ...and HOW MANY COMPONENTS that comparison covered, CHECKED rather than carried.
+    #
+    # The report prints the component map as compared name-by-name; a record claiming ZERO (or a
+    # fractional, boolean or negative count) would be published under that sentence having compared
+    # nothing. `exact_int` for the same reason as every other integer in this module: `int()` accepts
+    # bools and truncates floats (round 12's F5).
+    comp_count = exact_int(
+        f"{pin_path} `{PIN_CANONICAL_FIELD}.canonical_components`",
+        rec["canonical_components"],
+        "It is the number of canonical components the recorded comparison covered, which the report"
+        " cites as the complete component map (#3272 round 15, A).",
+    )
+    if comp_count < 1:
+        raise Invalid(
+            f"{pin_path} `{PIN_CANONICAL_FIELD}.canonical_components` is {comp_count}, so the"
+            " recorded comparison covered NO components while the report cites the COMPLETE"
+            " component map as compared. An empty canonical map is fatal at classify time"
+            " (`canonical_components` refuses it), so a record claiming one was edited."
+        )
+    # THE COUNT IS CROSS-CHECKED, on the one run where the record itself determines it. A CANONICAL
+    # run compared the corpus's component names against the canonical map BOTH DIRECTIONS and found
+    # no divergence, so the two key sets are EQUAL — therefore this count must equal the number of
+    # components the pin recorded for the corpus it measured. Two records of one fact are two chances
+    # to disagree, so they are compared rather than assumed; the count is deliberately NOT re-derived
+    # from the artifact on disk, for the reason this whole function exists (a re-pin between
+    # measurement and reporting would judge the session against a map it never ran against).
+    #
+    # Only for a CANONICAL run: a divergent corpus legitimately has a different number of components
+    # — that difference IS one of the recorded divergences.
+    if rec["is_canonical"]:
+        pinned = pin.get("components")
+        if not isinstance(pinned, dict) or not pinned:
+            raise Invalid(
+                f"{pin_path} records `{PIN_CANONICAL_FIELD}.is_canonical` true — which means the"
+                " corpus's component map was compared against the canonical one and matched — while"
+                " the pin itself records no `components` map for the corpus it measured. A canonical"
+                " verdict cannot rest on a map that was never recorded (#3272 round 15, A)."
+            )
+        if len(pinned) != comp_count:
+            raise Invalid(
+                f"{pin_path} `{PIN_CANONICAL_FIELD}` CONTRADICTS ITSELF: it records a CANONICAL"
+                f" verdict over {comp_count} canonical component(s) while the pin records"
+                f" {len(pinned)} component(s) for the corpus measured. A canonical corpus matched"
+                " the canonical map in BOTH directions, so the two counts are equal by"
+                " construction — one of them was edited (#3272 round 15, A)."
+            )
     out = dict(rec)
     out["source"] = str(pin_path)
     return out
