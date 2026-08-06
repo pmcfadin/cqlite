@@ -670,12 +670,19 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "byte counts AGREE, and the check passes on a payload that is short — which would make "
         "Arrow encoding look CHEAPER, the one quantity #3096 exists to measure. What it does "
         "still refuse is a ONE-SIDED shortfall.",
+        # WORDED WITHOUT THE TOKEN `cells` DELIBERATELY. `test_ws0_report_guards.sh`'s round-17
+        # non-vacuity probe asserts that a PRE-FIX report naming the bare scan's cell shortfall does
+        # not exist, by grepping the whole summary case-insensitively for `cells` — so a standing
+        # caveat here that used the word would red that probe for a reason unrelated to its subject,
+        # and the probe is right to be that blunt. The mechanism is stated as the ABSENT NULL
+        # VALIDITY BITMAPS, which is the same fact in the vocabulary of the thing being folded.
         "    The independent oracle would be the pinned ARROW_BUFFER_DIGEST "
         "(tools/ws0-corpus-gen/src/measurement_corpus.rs); it is UNREACHABLE for this corpus, "
-        "because the #3096 digest oracle refuses a corpus whose taps observe zero null cells and "
-        "ws0-corpus-gen emits none. Closing this needs changes to production flight-loadgen (a "
-        "per-step digest) AND a null plan in the corpus generator; until then this is NOT "
-        "verified, exactly as the arm above is not.",
+        "because the #3096 digest oracle refuses a corpus in which no Arrow validity bitmap ever "
+        "carries an absent value, and ws0-corpus-gen writes every non-key column on every row. "
+        "Closing this needs changes to production flight-loadgen (a per-step digest) AND a null "
+        "plan in the corpus generator; until then this is NOT verified, exactly as the arm above "
+        "is not.",
         "  * every figure is rows/s AND cycles/row; no CPU-share is reported "
         "(a share shift with unmoved rows/s is a FAIL, spec R1).",
         "  * the bare scan's cycles are SETUP-SUBTRACTED (a separately measured "

@@ -999,6 +999,144 @@ no_claim_probe "the accepted 3-round session" "$out"
 
 
 # ==========================================================================
+# ROUND 18 — THE ARROW-VOLUME COMPARISON IS REPORTED AS SELF-CONSISTENCY, NEVER AS
+# VERIFICATION, AND THE CIRCULARITY IS STATED IN THE OUTPUT
+# ==========================================================================
+# Round 17 added a check on each rep's ARROW PAYLOAD VOLUME and named its output
+# `verified_content_volume`. The expectation came from the session's UNTIMED PREFLIGHT — which
+# traverses the SAME ticket, the SAME server process and the SAME response path as the timed
+# requests it validates. So an omission that is a property of that path (a dropped Arrow column,
+# a narrowed buffer) lands on BOTH sides in equal measure, their byte counts AGREE, and the
+# report marked content volume VERIFIED on a payload that is short — which makes Arrow encoding
+# look CHEAPER, the one quantity #3096 exists to measure.
+#
+# Deriving an expectation from an already-verified artifact is good practice and is NOT the
+# defect; the defect is that this artifact is not INDEPENDENT OF ITS SUBJECT. That is #3042's
+# lesson (a CQLite-written + CQLite-read round trip is invariant to a uniform framing error) and
+# the shape round 14's F4 found in `verify_pinned_components` (a component map compared against
+# THE CORPUS'S OWN identity). Recorded here because the check reads as sound until that
+# distinction is drawn.
+#
+# The independent oracle would be the pinned ARROW_BUFFER_DIGEST, and it is MEASURED unreachable
+# for this corpus: the #3096 digest oracle reaches its digest asserts only through
+# `assert_arms_agree`, which refuses a corpus whose taps observe ZERO NULL CELLS, and
+# `ws0-corpus-gen` writes all nine non-key cells on every row. So the claim is WITHDRAWN rather
+# than re-derived, and the comparison is RETAINED for what it does establish. Round 16's F2
+# precedent: an honest partial with a named gap beats a claim the rig cannot support.
+#
+# THE SUBJECT IS THE CASE THE CIRCULARITY PERMITS: preflight AND timed body short by the SAME
+# amount. A verifying check would refuse it; a self-consistency check accepts it — so the run
+# must SUCCEED while every name it reports under says self-consistency, and it must NOT carry the
+# withdrawn `verified_content_volume` key at all.
+d="$TMP/uniform-short-payload"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+WS0_UNIFORM_SHORT=$(( WS0_PREFLIGHT_BYTES_PER_SCAN / 2 ))
+ws0_short_tag="flight-bypass-warm-1"
+ws0_short_body="${GOOD_FLIGHT//__TAG__/$ws0_short_tag}"
+ws0_short_body="${ws0_short_body//__ENDPOINT__/$WS0_FIXTURE_ENDPOINT}"
+ws0_short_body="${ws0_short_body//\"bytes_total\":$WS0_PREFLIGHT_BYTES_PER_SCAN/\"bytes_total\":$WS0_UNIFORM_SHORT}"
+printf '%s\n' "$ws0_short_body" > "$d/$ws0_short_tag.jsonl"
+perf_csv "$d/perf-$ws0_short_tag.csv" 8000000 16000000
+printf 'ok\n' > "$d/$ws0_short_tag.prewarm.status"
+# BOTH sides carry the SAME halved per-scan volume — the uniform shortfall.
+ws0_make_preflight "$d" "$ws0_short_tag" "$WS0_UNIFORM_SHORT"
+make_round "$d" "$ws0_short_tag" 1 "$(ws0_alternating_position 1 flight)"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+# The MEASUREMENT of the defect: this input is ACCEPTED (that is what the circularity permits,
+# and it is why a verifying NAME on the output was wrong). Asserted so the case cannot silently
+# become a rejection and stop exercising the reporting path under test.
+if [ "$rc" -eq 0 ]; then
+  pass "a UNIFORMLY short payload (preflight and timed both halved) is ACCEPTED — the case the circularity permits"
+else
+  fail "the uniform-shortfall session must be accepted; it is the input whose REPORTING is under test (rc=$rc, out: $out)"
+fi
+if python3 - "$d/results.json" <<'PY'
+import json, sys
+fl = [m for m in json.load(open(sys.argv[1]))["measurements"] if m["arm"].startswith("flight_")][0]
+# The per-rep records live under `reps` (a list), NOT `per_rep` — asserted rather than assumed,
+# because `fl.get("per_rep", [])` would make every check below vacuous if the key ever moved.
+assert isinstance(fl["reps"], list) and len(fl["reps"]) == 1, fl["reps"]
+rep = fl["reps"][0]
+blob = json.dumps(fl)
+# THE WITHDRAWN KEY IS GONE, not supplemented. A consumer of `verified_content_volume` must FAIL
+# to find it and come read what replaced it, rather than keep reading a claim that weakened
+# under an unchanged name (the `forced_merge_path` rule from round 16).
+assert "verified_content_volume" not in blob, "the withdrawn verifying key is still published"
+cv = rep["content_volume_self_consistency"]
+# The claim is stated NEGATIVELY and explicitly, as a bool a consumer can branch on — not left
+# to be inferred from the absence of the word `verified`.
+assert cv["bytes_total_verified_against_independent_oracle"] is False, cv
+# The comparison DID run and DID agree (both sides halved), which is precisely why agreement
+# cannot mean completeness here.
+assert cv["bytes_per_scan_observed"] == cv["bytes_per_scan_self_consistent_with"], cv
+# ...and the scope travels WITH the number, naming both halves.
+scope = cv["scope"]
+assert "DOES NOT ESTABLISH" in scope and "SELF-CONSISTENCY" in scope, scope
+assert "SAME ticket" in scope, scope
+# No key under this record may spell a verifying claim.
+assert not [k for k in cv if k.startswith("verified")], sorted(cv)
+PY
+then
+  pass "results.json reports it as content_volume_self_consistency with an explicit negative claim + scope"
+else
+  fail "the record must publish the withdrawal, not a verifying key (out: $out)"
+fi
+# ...and the REPORT TEXT states the circularity beside the numbers, where a reader of the figures
+# sees it — the posture round 16's F2 established for the unobservable arm.
+if grep -q 'SELF-CONSISTENCY check — NOT a verification' <<<"$out" \
+  && grep -q 'SAME ticket' <<<"$out" \
+  && grep -q 'ARROW_BUFFER_DIGEST' <<<"$out" \
+  && grep -q 'no Arrow validity bitmap ever carries an absent value' <<<"$out"; then
+  pass "the report output STATES the circularity, names the unreachable oracle, and says why"
+else
+  fail "the summary must state the circularity and name the unreachable independent oracle (out: $out)"
+fi
+
+# NON-VACUITY, MEASURED AS A FLIP ON THIS EXACT INPUT (#3272 round 18).
+#
+# The three asserts above would all pass over a reporter that never reached the content-volume
+# path at all — an absent key satisfies "the withdrawn key is absent". So the property is
+# measured the way round 17's bare-scan fix was: mutate ONE site of a COPY of the shipped
+# reporter module so it publishes the PRE-FIX verifying key, run the SAME session dir through
+# it, and require the assertion to FAIL. That proves the checks read the withdrawal rather than
+# reading silence.
+ws0_mutant_dir="$TMP/mutant-verified-key"
+mkdir -p "$ws0_mutant_dir"
+cp -R "$REPO_ROOT/scripts/perf/." "$ws0_mutant_dir/"
+# The single mutation: republish under the WITHDRAWN verifying name.
+python3 - "$ws0_mutant_dir/ws0_flight_arm.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+needle = '"content_volume_self_consistency": ('
+assert s.count(needle) == 1, f"expected exactly one mutation site, found {s.count(needle)}"
+open(p, "w").write(s.replace(needle, '"verified_content_volume": ('))
+PY
+ws0_mutant_out=$(python3 "$ws0_mutant_dir/ws0_report.py" --dir "$d" --corpus "$TMP/corpus" 2>&1)
+ws0_mutant_rc=$?
+if [ "$ws0_mutant_rc" -eq 0 ] && grep -q '"verified_content_volume"' "$d/results.json"; then
+  pass "non-vacuity: the mutant reporter DOES publish the withdrawn verifying key on this same session"
+else
+  fail "the mutant must reproduce the pre-fix publication, else the flip proves nothing (rc=$ws0_mutant_rc, out: $ws0_mutant_out)"
+fi
+# ...and the assertion above must REFUSE that mutant output. Same input, same assertion, opposite
+# verdict — which is what makes the check non-vacuous rather than merely present.
+if python3 - "$d/results.json" <<'PY' 2>/dev/null
+import json, sys
+fl = [m for m in json.load(open(sys.argv[1]))["measurements"] if m["arm"].startswith("flight_")][0]
+assert "verified_content_volume" not in json.dumps(fl)
+PY
+then
+  fail "the withdrawal assertion PASSED over a reporter publishing the verifying key — it is vacuous"
+else
+  pass "non-vacuity MEASURED: the same assertion FAILS on the mutant and passes on the shipped reporter"
+fi
+# Restore the shipped reporter's output over this session dir, so a later reader of
+# `$d/results.json` is not looking at the mutant's artifact.
+run_report "$d" "$TMP/corpus" >/dev/null
+
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e` (#3272 round 3 nit)
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a
@@ -1010,7 +1148,10 @@ no_claim_probe "the accepted 3-round session" "$out"
 # The floor is deliberately BELOW the current count (adding a case must not red the suite) and
 # far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts what
 # actually RAN rather than what is written in the file.
-MIN_CHECKS=57
+# RE-DERIVED BY RUNNING the suite, never estimated from source lines: the checks in loops
+# multiply, so a line count understates the floor. Measured 62 after round 18's five cases
+# (was 57 before them).
+MIN_CHECKS=62
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
