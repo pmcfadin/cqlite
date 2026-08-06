@@ -242,6 +242,32 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    mid-sentence copy is inert; **(2)** placeholder reasons are refused (an unsubstituted `<…>`, or a bare
    `why`/`todo`/`tbd` — `claim.sh`'s rule), so a pasted **template** reads `MALFORMED`; **(3)** no emitted
    diagnostic carries **any part** of the marker — not even the prefix — and points at `--help` instead.
+   **THE UMBRELLA LESSON OF THIS ISSUE, and the most durable thing in it: CONTROL AND DATA MUST NOT SHARE A
+   CHANNEL WHEN THE DATA IS ATTACKER-CONTROLLED (#3312).** Four separate High-severity defects were the same
+   shape, and each individual fix worked while the family kept regenerating — because the shape was never
+   named in one place. The instances, in the order they were found:
+   1. **Prose inside a diff naming its own oracle.** A census path quoted in the reviewed text could satisfy
+      the check that the reviewer *received* that path — which is why the matcher is anchored at COLUMN ZERO
+      (every unified-diff body line carries a leading `+`/`-`/space/`@`/`\`, so body content cannot pose as
+      a header).
+   2. **The wrapper's own diagnostic printing a valid waiver marker** — an artifact that DESCRIBED the escape
+      hatch BECAME it, because summary blocks get pasted into PR comments as a matter of course. Fixed by
+      three layers: an anchored dedicated line, placeholder-reason refusal, and a diagnostic that emits no
+      part of the marker at all.
+   3. **Repository text reproducing roborev's delivery-block markers.** Delivery mode was inferred from
+      prompt text that embeds project guidelines / `AGENTS.md`, so repo content could move a review into an
+      uncertified mode in either direction. No terminating marker existed, so the owner deleted the
+      *classifier* rather than patch a fifth instance of it.
+   4. **A comment body forging its own author record.** Comments were flattened into one stream with an
+      in-band author delimiter, so an unauthorized commenter could name an allowlisted login inside their own
+      body and defeat the allowlist with one control character. Fixed by parsing `gh --json` STRUCTURALLY —
+      author and body stay separate FIELDS of one object — so there is no delimiter to forge.
+   **The generalisation to apply elsewhere:** when a decision is made from a stream that carries both your
+   markers and someone else's payload, the fix is to REMOVE the shared channel (structured data, a separate
+   field, a distinct file), not to choose a rarer delimiter — a rarer delimiter is still forgeable, and each
+   narrowing only postpones the next instance. Where the channel genuinely cannot be separated, anchor the
+   control tokens somewhere the payload provably cannot reach (column zero of a diff), and say in code that
+   this is what the anchor is for.
    **WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (#3312 job 25) — and the correction that produced it.**
    The comment author used to be *recorded but never authorized*, so on this **public** repository ANY
    commenter could copy the `base`/`head`/`job` values out of the failing block (they are printed in it)
