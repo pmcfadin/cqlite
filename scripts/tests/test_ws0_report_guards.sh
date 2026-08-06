@@ -636,6 +636,179 @@ else
 fi
 
 # ==========================================================================
+# #3272 ROUND 10, F-A — a Flight prewarm reads `ok` only on an AFFIRMATIVE
+#                       MEASUREMENT, never on an exit status
+# ==========================================================================
+# THE FINDING. `measure_flight` set `prewarm_status="ok"` from the `if` on
+# flight-loadgen's exit alone, and passed `--out /dev/null` — discarding the only
+# record of what the prewarm did. The loadgen exits 0 whenever the ramp completes,
+# and a step whose every request was SHED (admission control, #2420) or ERRORED
+# completes normally, because those outcomes are COUNTED rather than fatal. So a
+# prewarm that served nothing, or streamed zero rows, was recorded as healthy and
+# the rep it belongs to claims a WARM measurement having faulted in nothing.
+#
+# This is AC1 finding 2's exact class (`skipped-cold-arm` counting as a successful
+# prewarm) recurring at a NEW LINE — the "a fix moved the problem" pattern this
+# split was opened for. The remedy is symmetric with AC1's: a status may read `ok`
+# only when a measurement says so.
+PREWARM_PY="$REPO_ROOT/scripts/perf/ws0_prewarm.py"
+if [ -s "$PREWARM_PY" ]; then
+  pass "the prewarm classifier module exists (scripts/perf/ws0_prewarm.py)"
+else
+  fail "scripts/perf/ws0_prewarm.py is missing — the F-A fix derives the prewarm status from the retained JSONL, so its absence means the status is back to an exit code"
+fi
+
+# --- NON-VACUITY, MEASURED: what the PRE-FIX code accepted -------------------
+# The pre-fix logic is reconstructed VERBATIM (the `if <loadgen>; then ok` shape) against a
+# stand-in that exits 0 having served nothing, and asserted to yield `ok`. Then the SAME
+# scenario is put to the new classifier and must yield a failure label. Without the first
+# half, the second proves only that a new function returns a string; with it, the change is
+# a measured flip on identical input.
+pw_prefix="$(
+  fake_loadgen() { return 0; }              # exit 0 having served nothing: a completed ramp
+  st="skipped-cold-arm"
+  if fake_loadgen; then st="ok"; else st="FAILED-exit-$?"; fi
+  printf '%s' "$st"
+)"
+# The prewarm JSONL such a run would have written, had it not been sent to /dev/null: every
+# request shed by admission control, nothing served, no rows.
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":0,"requests_unavailable":40,"requests_error":0,"rows_total":0}' > "$TMP/pw-nothing.jsonl"
+pw_now="$(python3 "$PREWARM_PY" 0 "$TMP/pw-nothing.jsonl")"
+if [ "$pw_prefix" = "ok" ] && [ "$pw_now" = "FAILED-zero-successful-requests" ]; then
+  pass "NON-VACUITY (F-A): the PRE-FIX exit-status logic records '$pw_prefix' for a loadgen that exited 0 having served NOTHING; the classifier records '$pw_now' on the same run"
+else
+  fail "F-A non-vacuity: expected pre-fix 'ok' and post-fix 'FAILED-zero-successful-requests', got pre-fix '$pw_prefix' and post-fix '$pw_now'"
+fi
+
+# ZERO ROWS with successful requests: a request can complete having streamed an empty
+# stream, and an empty stream warms no page cache. Distinct from the case above because the
+# request COUNT alone would have been satisfied — checking only `requests_ok` would be the
+# same partial fix one field over.
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":5,"requests_unavailable":0,"requests_error":0,"rows_total":0}' > "$TMP/pw-norows.jsonl"
+if [ "$(python3 "$PREWARM_PY" 0 "$TMP/pw-norows.jsonl")" = "FAILED-zero-rows" ]; then
+  pass "OBSERVED (F-A): successful requests that streamed ZERO ROWS are a degradation — a request count alone cannot establish that anything was warmed"
+else
+  fail "a prewarm with requests_ok>0 but rows_total==0 must NOT read as ok (got $(python3 "$PREWARM_PY" 0 "$TMP/pw-norows.jsonl"))"
+fi
+
+# THE DISCARDED-EVIDENCE CASE, which is the defect's root rather than a symptom: with
+# `--out /dev/null` there was never a record to inspect. An absent JSONL must therefore be a
+# degradation, or the fix could be undone by reverting one flag and nothing would notice.
+if [ "$(python3 "$PREWARM_PY" 0 "$TMP/pw-absent-$$.jsonl")" = "FAILED-no-jsonl" ]; then
+  pass "OBSERVED (F-A): an ABSENT prewarm JSONL is a degradation — reverting to --out /dev/null cannot silently restore a healthy label"
+else
+  fail "an absent prewarm JSONL must be a named degradation, not an ok"
+fi
+
+# THE ACCEPT DIRECTION, affirmatively — without it every case above would be satisfied by a
+# classifier that refuses everything, which is the mirror-image broken instrument (a guard
+# that always fires teaches an operator to ignore it, AC1's own lesson).
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":3,"requests_unavailable":0,"requests_error":0,"rows_total":3000}' > "$TMP/pw-good.jsonl"
+pw_good="$(python3 "$PREWARM_PY" 0 "$TMP/pw-good.jsonl")"
+# ...and a prewarm that shed SOME requests but completed at least one full scan is STILL ok:
+# the prewarm's job (fault the corpus in) demonstrably happened. The MEASURED reps refuse any
+# non-zero shed counter (ws0_loadgen_record.ZERO_REQUIRED_COUNTERS); conflating the two would
+# make this guard fire on a healthy prewarm.
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":2,"requests_unavailable":7,"requests_error":0,"rows_total":2000}' > "$TMP/pw-shed.jsonl"
+pw_shed="$(python3 "$PREWARM_PY" 0 "$TMP/pw-shed.jsonl")"
+if [ "$pw_good" = "ok" ] && [ "$pw_shed" = "ok" ]; then
+  pass "AFFIRMATIVE (F-A): a prewarm that served requests AND streamed rows reads 'ok', including one that shed some requests while completing others"
+else
+  fail "the classifier must not refuse a healthy prewarm (clean=$pw_good, partly-shed=$pw_shed)"
+fi
+
+# A NON-ZERO EXIT still fails, and is labelled with the code — the pre-existing behaviour the
+# fix must not have dropped while adding the JSONL requirement.
+if [ "$(python3 "$PREWARM_PY" 7 "$TMP/pw-good.jsonl")" = "FAILED-exit-7" ]; then
+  pass "OBSERVED (F-A): a non-zero loadgen exit is still a labelled failure, naming the code, even with a healthy JSONL beside it"
+else
+  fail "a non-zero exit must remain a failure regardless of the JSONL"
+fi
+
+# A MALFORMED / uncounted record is a degradation rather than a crash: this runs inside the
+# measurement loop, and a traceback there would abort a rep the rig has decided to keep and
+# label. `requests_ok: 1.9` is the shape `ws0_validate.exact_int` exists for — a bare `int()`
+# would truncate it to 1 and satisfy the threshold.
+printf 'not json at all\n' > "$TMP/pw-bad.jsonl"
+printf '%s\n' '{"requests_ok":1.9,"rows_total":10}' > "$TMP/pw-frac.jsonl"
+: > "$TMP/pw-empty.jsonl"
+pw_bad="$(python3 "$PREWARM_PY" 0 "$TMP/pw-bad.jsonl")"
+pw_frac="$(python3 "$PREWARM_PY" 0 "$TMP/pw-frac.jsonl")"
+pw_empty="$(python3 "$PREWARM_PY" 0 "$TMP/pw-empty.jsonl")"
+if [ "$pw_bad" = "FAILED-malformed-jsonl" ] \
+  && [ "$pw_frac" = "FAILED-uncounted-requests" ] \
+  && [ "$pw_empty" = "FAILED-empty-jsonl" ]; then
+  pass "OBSERVED (F-A): malformed, fractional-counter and empty prewarm records are each NAMED degradations, never a traceback and never an ok"
+else
+  fail "malformed/fractional/empty prewarm records must be named degradations (malformed=$pw_bad, fractional=$pw_frac, empty=$pw_empty)"
+fi
+
+# --- THE RIG MUST BE WIRED TO IT --------------------------------------------
+# Every case above tests the classifier. None of them would notice `measure_flight` still
+# passing `--out /dev/null` and keeping its own `if`-on-exit — the guard present but unwired,
+# which is this repo's standing "wiring evidence" rule. Read from `lib-measure.sh`'s
+# `measure_flight` body by position, and the `-n` guard makes a stale awk range RED rather
+# than vacuously green (the lesson the bare-scan block above records).
+#
+# COMMENTS ARE STRIPPED FIRST, and that is not tidiness — writing this block caught it. The
+# leg's own comments DESCRIBE the defect (`passing --out /dev/null`, `used to set
+# prewarm_status="ok"`), so a grep over the raw body matched the prose and reported the code as
+# unwired when it was correctly wired. A structural scan whose subject includes the
+# documentation of what it forbids cannot distinguish a defect from an explanation of it — the
+# same lesson `test_ws0_fabrication_guards.sh` records for its `strip_prose`, arrived at
+# independently here. Full-line comments only: a trailing `#` inside a quoted loadgen argument
+# is not a comment, and stripping from any `#` would corrupt the argv this block inspects.
+flight_leg=$(awk '/^measure_flight\(\)/,/^}/' "$MEASURE_LIB" | grep -v '^[[:space:]]*#')
+if [ -n "$flight_leg" ] \
+  && ! grep -q -- '--out /dev/null' <<<"$flight_leg" \
+  && grep -q 'prewarm.jsonl' <<<"$flight_leg" \
+  && grep -q 'ws0_prewarm.py' <<<"$flight_leg"; then
+  pass "WIRED (F-A): measure_flight's CODE retains the prewarm JSONL (no --out /dev/null) and derives its status via ws0_prewarm.py"
+else
+  fail "measure_flight must retain the prewarm JSONL and classify it (code lines=$(printf '%s' "$flight_leg" | grep -c . ), still-devnull=$(grep -c -- '--out /dev/null' <<<"$flight_leg"))"
+fi
+
+# NON-VACUITY for the strip: the raw body MUST still contain both forbidden strings (in its
+# prose), so this asserts the strip is what makes the check answerable rather than the check
+# having become trivially true. If the comments are ever reworded away, this reds and whoever
+# does it learns the assertion above depends on the strip.
+flight_leg_raw=$(awk '/^measure_flight\(\)/,/^}/' "$MEASURE_LIB")
+if grep -q -- '--out /dev/null' <<<"$flight_leg_raw" \
+  && grep -q 'prewarm_status="ok"' <<<"$flight_leg_raw"; then
+  pass "NON-VACUITY (F-A): the RAW leg still carries both forbidden strings in its prose, so the wiring check passes only because comments are stripped — not because the strings are absent"
+else
+  pass "the leg's prose no longer quotes the forbidden strings; the wiring check above is unconditional (acceptable, and the strip is now redundant rather than load-bearing)"
+fi
+
+# ...and it must not have kept a second, permissive path to `ok`. The status is assigned from
+# the classifier's output; a literal `prewarm_status="ok"` in the CODE would be the old shape
+# surviving beside the new one.
+if [ -n "$flight_leg" ] && ! grep -q 'prewarm_status="ok"' <<<"$flight_leg"; then
+  pass "OBSERVED (F-A): measure_flight's CODE has NO literal assignment of the ok status — the label can only come from the measurement"
+else
+  fail "measure_flight still contains a literal prewarm_status=\"ok\", which is a second path to a healthy label that bypasses the measurement"
+fi
+
+# The status vocabulary must be the reporter's. `ws0_validate.PREWARM_REQUIRED` matches a warm
+# rep's status EXACTLY, so a decorated `ok-with-shed-N` label would be classified `degraded`
+# and flag every such rep — two vocabularies for one fact. Asserted by feeding the
+# classifier's own output through the reporter's classifier.
+if python3 - "$REPO_ROOT/scripts/perf" "$pw_good" "$pw_shed" "$pw_now" <<'PWVOCAB'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import classify_prewarm
+good, shed, nothing = sys.argv[2], sys.argv[3], sys.argv[4]
+assert classify_prewarm("warm", good) == "ok", good
+assert classify_prewarm("warm", shed) == "ok", shed
+assert classify_prewarm("warm", nothing) == "degraded", nothing
+PWVOCAB
+then
+  pass "OBSERVED (F-A): the classifier's labels round-trip through ws0_validate.classify_prewarm — ok reads ok, and a served-nothing prewarm reads DEGRADED in the reporter too"
+else
+  fail "the prewarm classifier's vocabulary must match ws0_validate.PREWARM_REQUIRED exactly, or the driver and reporter disagree about the same rep"
+fi
+
+# ==========================================================================
 # #3272 finding 1 — an ABSENT/INCOMPLETE corpus identity is FATAL, never a
 #                   silently-skipped full-corpus check
 # ==========================================================================

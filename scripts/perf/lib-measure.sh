@@ -189,8 +189,14 @@ measure_flight() {
     # The classifier never fails and never exits non-zero (it must not abort a rep the rig has
     # decided to keep and label), so its output is the status. A classifier that could not run at
     # all would leave this empty, which is caught immediately below rather than recorded as blank.
-    prewarm_status="$(python3 "$WS0_MEASURE_LIB_DIR/ws0_prewarm.py" \
-      "$prewarm_rc" "$OUT_DIR/$tag.prewarm.jsonl")"
+    # ONE LINE deliberately. Split across a `\` continuation, the second line's first token is
+    # `"$prewarm_rc"` — a bare variable expansion — and `lib-perf-lint.sh`'s `is_var_command`
+    # classifies such a line as a POSSIBLE perf invocation (an unresolvable command word fails
+    # CLOSED, which is correct: `$CMD -p 1` must not be waved through). So the continuation was a
+    # real finding, not a false positive, and the fix is to give the lint a resolvable command
+    # word rather than to mark the line `perf-lint-allow` — a marker here would suppress a check
+    # that is working.
+    prewarm_status="$(python3 "$WS0_MEASURE_LIB_DIR/ws0_prewarm.py" "$prewarm_rc" "$OUT_DIR/$tag.prewarm.jsonl")"
     [[ -n "$prewarm_status" ]] || prewarm_status="FAILED-classifier-produced-nothing"
     # An EXACT comparison, matching `ws0_validate.PREWARM_REQUIRED`'s exact per-temperature match —
     # a prefix test here would call a hypothetical `ok-ish` label healthy while the reporter called
