@@ -3460,7 +3460,9 @@ printf '== (cx31g) RIDER R3: a COMPACT instruction carrying a git COMMAND still 
 # snapshot PATH, and an unverifiable input is non-passing by rule 13.
 reset_stub
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
-STUB_PROMPT='Review the change.\n\n(Diff too large; read `git diff --stat HEAD~1`.)'
+# The notice sits where roborev renders it — inside the diff-delivery block (`diff_block` emits the heading
+# and then the oversize fallback), because detection is scoped to that block since job 18.
+STUB_PROMPT='Review the change.\n\n### Combined Diff\n\n(Diff too large; read `git diff --stat HEAD~1`.)'
 run_wrapper "$snap_work"
 assert_verdict 'case (cx31g)' FAIL 1
 assert_says 'case (cx31g) a command in the compact token is NOT a snapshot' \
@@ -3492,7 +3494,7 @@ printf '== (cx31p2) RIDER R1: a MALFORMED-ONLY prompt reaches its verdict, and d
 # this verdict was returned. A spurious abort is a spurious non-PASS: this issue's own bug class.
 reset_stub
 STUB_ANNOUNCE_SHA=$(git -C "$snap_work" rev-parse HEAD)
-STUB_PROMPT='Review the change.\nRead the diff from: nowhere in particular\nRead the diff from: also unreadable'
+STUB_PROMPT='Review the change.\n\n### Combined Diff\n\n(Diff too large to include inline)\nRead the diff from: nowhere in particular\nRead the diff from: also unreadable'
 run_wrapper "$snap_work"
 assert_verdict 'case (cx31p2)' FAIL 1
 assert_says 'case (cx31p2) the intended verdict is REACHED, not aborted past' \
@@ -3819,11 +3821,39 @@ if grep -qF 'inline census verification must not be suppressible by any reposito
 else
   bad 'structural: the bypass invariant is not stated in code — a future widening of snapshot detection would have nothing to stop it (#3312 job 18)'
 fi
-if grep -qF 'index($0, "### Combined Diff") == 1 { in_trailer = 1' "$ORACLES" \
-  && grep -qF '!(in_trailer && oversize) { next }' "$ORACLES"; then
-  ok "structural: snapshot instructions are honoured ONLY inside roborev's generated delivery trailer"
+# AND THE SCOPING LIVES IN THE SNAPSHOT EXTRACTOR, NOT THE INLINE COLLECTOR. Asserted per FUNCTION BODY
+# because the first attempt at this fix edited the awk program of `roborev_collect_prompt_headers` — the
+# INLINE header collector — instead of `roborev_prompt_snapshot_paths`, which silently disabled inline
+# census verification altogether (84 guard cases went red). A whole-file `grep` cannot tell the two apart.
+_snap_start=$(grep -nE '^roborev_prompt_snapshot_paths\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_snap_end=$(awk -v s="${_snap_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+if [ -n "$_snap_start" ] && [ -n "$_snap_end" ]; then
+  _snap_body=$(sed -n "${_snap_start},${_snap_end}p" "$ORACLES")
 else
-  bad 'structural: snapshot-instruction detection is not scoped to the delivery trailer — repository-controlled prompt content could name a snapshot (#3312 job 18)'
+  _snap_body=""
+fi
+if printf '%s\n' "$_snap_body" | grep -qF 'in_trailer = (index($0, "### ") == 1 && index($0, "Diff") > 0)' \
+  && printf '%s\n' "$_snap_body" | grep -qF '!(in_trailer && oversize) { next }' \
+  && printf '%s\n' "$_snap_body" | grep -qF 'index($0, "diff --git ") == 1 { in_trailer = 0'; then
+  ok "structural: snapshot instructions are honoured ONLY inside roborev's own diff-delivery block (scoped in the snapshot extractor)"
+else
+  bad 'structural: snapshot-instruction detection is not scoped to the delivery block inside roborev_prompt_snapshot_paths — repository-controlled prompt content could name a snapshot (#3312 job 18)'
+fi
+# THE INLINE COLLECTOR IS UNTOUCHED BY THAT SCOPING: it still reads every `diff --git` header and the
+# rename/copy lines that disambiguate them, with no trailer state of its own.
+_ic_start=$(grep -nE '^roborev_collect_prompt_headers\(\) \{' "$ORACLES" | head -1 | cut -d: -f1)
+_ic_end=$(awk -v s="${_ic_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$ORACLES")
+if [ -n "$_ic_start" ] && [ -n "$_ic_end" ]; then
+  _ic_body=$(sed -n "${_ic_start},${_ic_end}p" "$ORACLES")
+else
+  _ic_body=""
+fi
+if printf '%s\n' "$_ic_body" | grep -qF '/^diff --git / { flush()' \
+  && printf '%s\n' "$_ic_body" | grep -qF 'ext && /^rename from /' \
+  && ! printf '%s\n' "$_ic_body" | grep -qF 'in_trailer'; then
+  ok 'structural: the inline header collector is unscoped and unchanged (no trailer state leaked into it)'
+else
+  bad 'structural: the inline header collector no longer reads every diff --git header (or carries trailer state) — inline census verification would be silently disabled (#3312 job 18)'
 fi
 if grep -qF 'ROBOREV_DIFF_SOURCE_STATE="mixed-delivery"' "$ORACLES" \
   && grep -qF 'mixed-delivery)' "$CHECKS_FILE"; then

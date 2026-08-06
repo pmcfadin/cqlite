@@ -847,41 +847,15 @@ roborev_collect_prompt_headers() {
     _rx_hdr_from+=("$_f")
     _rx_hdr_to+=("$_t")
   done < <(LC_ALL=C awk '
-      # ===== INSTRUCTIONS ARE HONOURED ONLY INSIDE ROBOREV S GENERATED DELIVERY TRAILER (job 18) =====
-      # THE BYPASS THIS CLOSES, and the non-obvious interaction that produced it. The column-zero anchor was
-      # designed against DIFF-BODY lines: every line of a unified diff carries a leading +, -, space, @ or
-      # backslash, so prose inside the reviewed change cannot pose as roborev own instruction. An injected
-      # PROMPT SECTION — repository-controlled content such as AGENTS.md instructions — is at column zero and
-      # is not diff body, so the anchor never covered it. Under C-quadruple-prime nothing is read, so a
-      # lexically valid but NONEXISTENT path cannot be refuted: the run would flip to an exempted NOTICE and
-      # INLINE CENSUS VERIFICATION WOULD BE BYPASSED. Removing the filesystem check is what made it trivial —
-      # the read had been accidentally limiting the damage.
-      #
-      # THE INVARIANT: inline census verification must not be suppressible by any repository-controlled
-      # content. So an instruction counts only where roborev actually emits one — after its own
-      # "### Combined Diff" heading AND its own "(Diff too large" notice — and any inline diff body ends the
-      # trailer. The complementary half (a prompt carrying BOTH inline headers and an instruction is failed
-      # closed) lives in the resolver.
-      # (No apostrophes in this awk program: it is single-quoted, and one would close the quote.)
-      index($0, "### Combined Diff") == 1 { in_trailer = 1; oversize = 0; next }
-      index($0, "diff --git ") == 1 { in_trailer = 0; oversize = 0; next }
-      in_trailer && index($0, "(Diff too large") == 1 { oversize = 1; print "OVERSIZE"; next }
-      !(in_trailer && oversize) { next }
-      index($0, "Read the diff from:") == 1 { tag = "PATH" }
-      index($0, "(Diff too large; read ") == 1 { tag = "PATHC" }
-      tag != "" {
-        line = $0
-        sub(/\r$/, "", line)
-        s = index(line, "`")
-        if (s == 0) { print "UNPARSEABLE"; tag = ""; next }
-        rest = substr(line, s + 1)
-        e = 0
-        for (i = length(rest); i >= 1; i--) if (substr(rest, i, 1) == "`") { e = i; break }
-        if (e <= 1) { print "UNPARSEABLE"; tag = ""; next }
-        printf "%s\t%s\n", tag, substr(rest, 1, e - 1)
-        tag = ""
-        next
-      }
+      function flush() { if (h != "") { print h; print f; print t } }
+      /^diff --git / { flush(); h = $0; f = ""; t = ""; ext = 1; next }
+      ext && /^rename from / { f = substr($0, 13); next }
+      ext && /^rename to /   { t = substr($0, 11); next }
+      ext && /^copy from /   { f = substr($0, 11); next }
+      ext && /^copy to /     { t = substr($0, 9);  next }
+      ext && /^(similarity index |dissimilarity index |old mode |new mode |new file mode |deleted file mode |index )/ { next }
+      { ext = 0 }
+      END { flush() }
     ' "$f" 2>/dev/null)
   return 0
 }
@@ -1066,6 +1040,44 @@ roborev_prompt_snapshot_paths() {
     done
     [ "$seen" -eq 1 ] || _rx_snap_paths+=("$p")
   done < <(LC_ALL=C awk '
+      # ===== INSTRUCTIONS ARE HONOURED ONLY INSIDE ROBOREV S GENERATED DELIVERY TRAILER (job 18) =====
+      # THE BYPASS THIS CLOSES, and the non-obvious interaction that produced it. The column-zero anchor
+      # below was designed against DIFF-BODY lines: every line of a unified diff carries a leading +, -,
+      # space, @ or backslash, so prose inside the reviewed change cannot pose as roborev own instruction.
+      # An injected PROMPT SECTION — repository-controlled content such as an AGENTS.md instruction block —
+      # sits at column zero and is not diff body, so the anchor never covered it. Under C-quadruple-prime
+      # nothing is read, so a lexically valid but NONEXISTENT path cannot be refuted: the run would flip to
+      # an exempted NOTICE and INLINE CENSUS VERIFICATION WOULD BE BYPASSED. Removing the filesystem check
+      # is what made it trivial — the read had been accidentally limiting the damage.
+      #
+      # THE INVARIANT: inline census verification must not be suppressible by any repository-controlled
+      # content. So an instruction counts only where roborev actually emits one — inside roborev own
+      # DIFF-DELIVERY BLOCK, after its own "(Diff too large" notice — and that block is ended by any
+      # other column-zero markdown heading or by the first inline `diff --git ` header. The
+      # complementary half (a prompt carrying BOTH inline headers and an instruction is failed closed)
+      # lives in the resolver, so narrowing or widening this scope cannot silently reopen the bypass.
+      #
+      # THE BLOCK OPENER IS MATCHED TOLERANTLY, and deliberately: the heading is DATA in roborev own
+      # template (`diff_block` renders `{{if .Diff.Heading}}{{.Diff.Heading}}{{else}}### Diff{{end}}`),
+      # so pinning the literal "### Combined Diff" — the spelling BOTH live snapshot prompts were
+      # observed with — would suppress detection on a review whose heading is the default "### Diff" and
+      # reintroduce this issue own false-FAIL bug under a different review shape. So any level-3 heading
+      # mentioning "Diff" opens the block, every other column-zero heading closes it. DECLARED
+      # RESIDUAL: a future heading carrying no "Diff" at all would suppress detection, which fails
+      # CLOSED (a named FAIL, never a silent pass).
+      index($0, "#") == 1 {
+        in_trailer = (index($0, "### ") == 1 && index($0, "Diff") > 0)
+        oversize = 0
+        next
+      }
+      index($0, "diff --git ") == 1 { in_trailer = 0; oversize = 0; next }
+      # THE OVERSIZE NOTICE opens the instruction window AND is itself the marker for the other oversize
+      # tiers, reported so the caller can say WHICH mode it is looking at rather than only "the paths are
+      # absent". Measured in the same binary: the `codex_*_fallback_*` and `generic_*_fallback` templates
+      # open with a `(Diff too large` line and then ask the reviewer to run git commands ITSELF — no
+      # snapshot file exists, so nothing local can establish what the reviewer saw. Counted, never excused.
+      in_trailer && index($0, "(Diff too large") == 1 { oversize = 1; print "OVERSIZE" }
+      !(in_trailer && oversize) { next }
       # THE INSTRUCTION LINES, both spellings, each anchored at COLUMN ZERO (index(...) == 1).
       # THE TWO SPELLINGS ARE TAGGED DIFFERENTLY (roborev job 16, blocker 1). In the full form the %s is
       # documented to be the snapshot path. In the COMPACT form the %s was only ever read out of the binary
