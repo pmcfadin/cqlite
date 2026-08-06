@@ -428,8 +428,8 @@ assert_real_cpu_topology || exit 2
 # function fails closed; `set -e` plus this `||` makes that explicit rather than implicit).
 WS0_SERVER_SIBLINGS="$(verify_sibling_pair "$SERVER_CPUS" "server")" || exit 2
 echo "$WS0_SERVER_SIBLINGS"
-verify_sibling_pair "$CLIENT_CPUS" "client" 2>/dev/null \
-  || echo "client CPUs: $CLIENT_CPUS (a multi-core set — only the SERVER set must be one physical core)"
+# NOT `verify_sibling_pair … || echo` (#3272 round 21) — that `||` swallowed every failure, so an offline/absent CPU was accepted, affinity silently reduced, manifest wrong: see verify_cpus_online.
+verify_cpus_online "$CLIENT_CPUS" "client" || exit 2
 verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 
 # ---------------------------------------------------------------------------

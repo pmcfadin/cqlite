@@ -330,6 +330,113 @@ verify_sibling_pair() {
   echo "$label CPUs: $spec -> verified siblings of one physical core ($want)"
 }
 
+# --- IS ONE LOGICAL CPU PRESENT AND ONLINE? (#3272 round 21) --------------------------------
+#
+# THREE states, deliberately distinguished rather than collapsed into a boolean, because the
+# remedies differ: a NONEXISTENT index is a typo in the argument, an OFFLINE one is a host that
+# needs `chcpu -e` (or a different set). Echoes the state name and returns non-zero for the two
+# unusable ones, so the caller can NAME which CPU failed and why.
+#
+# `cpuN/online` is ABSENT for a CPU the kernel refuses to offline (normally cpu0), so its absence
+# is evidence of nothing and only an explicit `0` reads as offline. The second half — the
+# topology file — is not a nicety: the kernel REMOVES `cpuN/topology/` when a CPU is offlined, so
+# on a real host that is the load-bearing signal and the `online` read is the corroboration.
+cpu_presence_state() {
+  local cpu="$1" d="$CPU_TOPOLOGY_ROOT/cpu$1" v=""
+  if [[ ! -d "$d" ]]; then echo nonexistent; return 1; fi
+  if [[ -r "$d/online" ]]; then
+    v="$(<"$d/online")"
+    v="${v//[[:space:]]/}"
+    if [[ "$v" != "1" ]]; then echo offline; return 1; fi
+  fi
+  if [[ ! -r "$d/topology/thread_siblings_list" ]]; then echo offline; return 1; fi
+  echo online
+}
+
+# FAIL CLOSED unless EVERY expanded CPU in `$1` exists and is ONLINE on this host.
+#
+# # THE FINDING (#3272 round 21): a fail-open topology check on the CLIENT set
+#
+# The driver used to write the client set off as unverifiable:
+#
+#     verify_sibling_pair "$CLIENT_CPUS" "client" 2>/dev/null \
+#       || echo "client CPUs: $CLIENT_CPUS (a multi-core set — only the SERVER set must be …)"
+#
+# The INTENT was right and stays: a multi-core client set is legitimate, so the SIBLING shape must
+# not be required of it. What the `|| echo` also swallowed is EVERY OTHER REASON the check can
+# fail — including a CPU that does not exist on this box, or one that exists and is OFFLINE. A
+# list holding at least one valid CPU is then accepted, `sched_setaffinity` ANDs the requested mask
+# with `cpu_online_mask` (that is its documented behaviour whenever the mask contains at least one
+# online CPU), the load generator silently runs on the SUBSET — and the session manifest records
+# `client_cpus` as the string the operator PASSED, which `ws0_report.py` prints. So the report
+# asserts CPUs were used that never ran a single instruction.
+#
+# That asymmetry is why this is a bug and not a tradeoff: the degradation biases TOWARD the claim.
+# A degradation biasing AGAINST a claim may be captioned; one biasing toward it must be refused
+# (#3272 round 19). So an unusable CPU is an ERROR that stops the run before the host's perf
+# sysctls are weakened and before a full release build — not a warning, and never a silent subset.
+#
+# # EACH CPU IS CHECKED INDEPENDENTLY, and NO sibling shape is required
+#
+# That is the whole point of the split: the sibling-pair requirement is what the tolerance existed
+# to relax, and that need is real. This function asks only "can this host run something here?",
+# per CPU, so `--client-cpus 4,12,5,13,6,14,7,15` (four physical cores) passes while
+# `--client-cpus 4,9999` does not.
+#
+# # WHY THE SERVER SET DOES NOT ALSO CALL THIS
+#
+# It is already covered, by construction rather than by a second call: `verify_sibling_pair` reads
+# EVERY member's `thread_siblings_list` through `cpu_siblings_of`, which FAILS on an unreadable
+# file. A nonexistent CPU has no such file, and the kernel removes `topology/` from an offlined
+# one, so both states already stop the server check. Stated here so the next reader does not read
+# the single call site as the partial-fix shape this issue keeps finding.
+#
+# # AN UNPROBEABLE TOPOLOGY IS FAIL-CLOSED
+#
+# If NO cpu under the root publishes a `thread_siblings_list`, this refuses rather than concluding
+# the set is fine: "the facility is missing" is not evidence that a CPU list is usable, and
+# assuming fine is how a guard becomes decoration.
+verify_cpus_online() {
+  local spec="$1" label="${2:-pinned}" want cpu state f n_probeable=0
+  local -a bad=() expanded=()
+  # A malformed spec fails with the grammar's OWN diagnostic (#3272 B3), never as an empty set.
+  want="$(cpu_list_expand "$spec" "$label CPUs")" || return 1
+  if [[ -z "$want" ]]; then
+    echo "FATAL: $label CPU list ('$spec') expands to an EMPTY set." >&2
+    echo "       An empty set would make every per-CPU check below iterate over nothing and" >&2
+    echo "       return success — the vacuous pass this check exists to refuse (#3272 F4)." >&2
+    return 1
+  fi
+  for f in "$CPU_TOPOLOGY_ROOT"/cpu[0-9]*/topology/thread_siblings_list; do
+    [[ -r "$f" ]] && n_probeable=$((n_probeable + 1))
+  done
+  if ((n_probeable == 0)); then
+    echo "FATAL: no CPU under $CPU_TOPOLOGY_ROOT publishes topology/thread_siblings_list, so" >&2
+    echo "       whether the $label CPUs ('$spec') exist and are ONLINE cannot be established." >&2
+    echo "       This is a REFUSAL, not an assumption: a missing facility is not evidence that" >&2
+    echo "       a CPU list is usable, and 'assume fine' is how a pinning guard becomes" >&2
+    echo "       decoration (#3272 round 21). This rig runs on Linux." >&2
+    return 1
+  fi
+  expanded=($want)
+  for cpu in $want; do
+    state="$(cpu_presence_state "$cpu")" || bad+=("cpu$cpu ($state)")
+  done
+  if ((${#bad[@]} > 0)); then
+    echo "FATAL: $label CPU set '$spec' (expanded: $want) names ${#bad[@]} CPU(s) this host" >&2
+    echo "       cannot run anything on: ${bad[*]}." >&2
+    echo "       This used to be SWALLOWED: the client set's topology check was fail-open" >&2
+    echo "       ('|| echo …'), so a list holding at least one valid CPU was accepted," >&2
+    echo "       sched_setaffinity silently reduced the affinity to the valid SUBSET, and the" >&2
+    echo "       session manifest recorded — and the report printed — CPUs that never ran an" >&2
+    echo "       instruction (#3272 round 21). The client set is still NOT sibling-checked; a" >&2
+    echo "       multi-core set is legitimate. Every member must merely EXIST and be ONLINE." >&2
+    return 1
+  fi
+  echo "$label CPUs: $spec -> verified ${#expanded[@]} CPU(s) present and ONLINE ($want);" \
+       "a multi-core set is legitimate here — only the SERVER set must be one physical core"
+}
+
 # Print every physical core's sibling pair — the menu a caller picks from.
 list_sibling_pairs() {
   local f seen=() s
