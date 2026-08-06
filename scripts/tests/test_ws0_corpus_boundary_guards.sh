@@ -409,6 +409,55 @@ else
   fail "round21: the measured-pin accept direction must be recorded (rc=$src_ok_rc, out: $src_ok_out)"
 fi
 
+# ...and NO FLAG SCOPES THE PIN'S HASH AWAY. `--skip-corpus-digest` scopes the REPORT-TIME
+# re-derivation, which meant a sidecar whose top-level `data_db_sha256` disagreed with the bytes
+# reached a report with EVERY recorded identity unhashed. The pin's hash is on the SETUP path — once
+# per session, not once per rep — so the writer takes no skip parameter AT ALL: there is no flag to
+# pass, which is stronger than a flag that is checked (a value that cannot be supplied cannot
+# disagree). Driven through the SHIPPED writer, where the refusal now belongs: a stale digest stops
+# the RUN before the first rep rather than the report after the last.
+stale_dir="$TMP/stale-top-sha"; mkdir -p "$stale_dir"
+make_corpus "$TMP/corpus-stale-top"
+# A ONE-CHARACTER change to the sidecar's TOP-LEVEL digest, with the size and the component map left
+# correct: only a hash of the Data.db can see this, and only the top-level field is wrong — so a
+# refusal here is attributable to that field alone.
+python3 - "$TMP/corpus-stale-top/corpus-identity.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+s = list(j["data_db_sha256"]); s[0] = "5" if s[0] != "5" else "6"
+j["data_db_sha256"] = "".join(s)
+json.dump(j, open(p, "w"))
+PY
+stale_out=$(python3 - "$PERF_DIR" "$stale_dir" "$TMP/corpus-stale-top" <<'PY' 2>&1
+import inspect, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_session import write_session_corpus_pin
+from ws0_ticket_input import write_ticket_template
+from ws0_validate import Invalid, load_corpus_identity
+session, corpus = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+write_ticket_template(session, corpus / "ws0-events.cql")
+cfg = {"reps": "1", "temps": "warm", "arms": "bypass", "scan_passes": "1",
+       "server_cpus": "2,10", "client_cpus": "4,12", "step_duration": "45s/1s",
+       "flight_endpoint": "http://127.0.0.1:38017", "baseline_mode": "non-baseline"}
+# STRUCTURAL: the writer has NO skip parameter, so the hash cannot be scoped away by any caller.
+params = inspect.signature(write_session_corpus_pin).parameters
+print("WRITER_HAS_SKIP_PARAM", any("skip" in n for n in params))
+try:
+    write_session_corpus_pin(session, corpus, load_corpus_identity(corpus), cfg,
+                             {"label": "non-baseline"})
+    print("ACCEPTED")
+except Invalid as exc:
+    print(f"REFUSED {exc}")
+PY
+)
+if grep -q 'WRITER_HAS_SKIP_PARAM False' <<<"$stale_out" \
+   && grep -q '^REFUSED' <<<"$stale_out" \
+   && grep -q 'data_db_sha256' <<<"$stale_out"; then
+  pass "OBSERVED (round21): a stale TOP-LEVEL Data.db digest is refused at PIN time, and the writer has no skip parameter at all — the one recorded identity that reached a report unhashed under --skip-corpus-digest"
+else
+  fail "round21: the pin's hash must not be scopable by any flag, and a stale top-level digest must be refused (out: $stale_out)"
+fi
+
 # ==========================================================================
 # 3 — FAIL CLOSED: a component that cannot be hashed is never "assumed unchanged"
 # ==========================================================================
@@ -508,7 +557,7 @@ fi
 #
 # The floor is DERIVED FROM THE OBSERVED COUNT — run, then recorded — never counted off the source:
 # a source estimate understated a floor by 29 on this branch, because loops multiply.
-MIN_CHECKS=16
+MIN_CHECKS=17
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

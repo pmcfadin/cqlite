@@ -438,46 +438,10 @@ fi
 d="$TMP/skip-digest-bad-size"; make_session "$d" "$GOOD_FLIGHT"
 expect_reject "--skip-corpus-digest does NOT skip the size check" \
   "records data_db_bytes" "$d" "$TMP/corpus-stale-size" --skip-corpus-digest
-# ...and, since round 21, the DIGEST is not skippable either for the PIN: the flag scopes the
-# REPORT-TIME re-derivation, and the pin's own hash is on the SETUP path (once per session). So a
-# sidecar whose Data.db digest disagrees with the bytes — the exact `corpus-stale-sha` this case's
-# opt-out used to run over — is REFUSED even under `--skip-corpus-digest`, which is the one place
-# that stale digest previously reached every recorded identity unhashed. Boundary/pin-time coverage
-# of the whole class lives in `test_ws0_corpus_boundary_guards.sh`; this is the interaction with the
-# opt-out, which is this file's subject.
-#
-# Driven at the PIN, through the SHIPPED writer, because that is where the refusal now belongs: the
-# driver stamps the pin before the first rep, so a stale digest stops the RUN rather than the
-# report. (The reporter's own refusal over such a session is covered by the incomplete-pin cases
-# above — the fixture's fallback leaves a config-only manifest, which is refused for being
-# incomplete, so asserting on THAT message here would be asserting on the fixture.)
-d="$TMP/skip-digest-stale-sha"; WS0_SCAN_CORPUS="$TMP/corpus-stale-sha" make_session "$d" "$GOOD_FLIGHT"
-out=$(python3 - "$REPO_ROOT/scripts/perf" "$d" "$TMP/corpus-stale-sha" <<'PY' 2>&1
-import pathlib, sys
-sys.path.insert(0, sys.argv[1])
-from ws0_session import write_session_corpus_pin
-from ws0_ticket_input import write_ticket_template
-from ws0_validate import Invalid, load_corpus_identity
-session, corpus = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
-write_ticket_template(session, corpus / "ws0-events.cql")
-cfg = {"reps": "1", "temps": "warm", "arms": "bypass", "scan_passes": "1",
-       "server_cpus": "2,10", "client_cpus": "4,12", "step_duration": "45s/1s",
-       "flight_endpoint": "http://127.0.0.1:38017", "baseline_mode": "non-baseline"}
-try:
-    # `skip_digest` is not even a PARAMETER of the writer, which is the point: there is no flag to
-    # pass, so the pin's hash cannot be scoped away by the one the reporter has.
-    write_session_corpus_pin(session, corpus, load_corpus_identity(corpus), cfg,
-                             {"label": "non-baseline"})
-    print("ACCEPTED")
-except Invalid as exc:
-    print(f"REFUSED {exc}")
-PY
-); rc=0
-if grep -q '^REFUSED' <<<"$out" && grep -q 'data_db_sha256' <<<"$out"; then
-  pass "OBSERVED (round21): --skip-corpus-digest cannot let a stale Data.db DIGEST through — the PIN hashes the bytes on the setup path and takes no skip flag at all, so the one identity that reached a report unhashed under this opt-out is now refused before the first rep"
-else
-  fail "round21: a stale Data.db digest must be refused at pin time, with no flag able to scope it away (rc=$rc, out: $out)"
-fi
+# ...and, since round 21, the DIGEST is not skippable either for the PIN — the flag scopes the
+# REPORT-TIME re-derivation only, and the pin hashes on the SETUP path. That case lives in
+# `test_ws0_corpus_boundary_guards.sh` with the rest of the pin-time hashing subject; this file keeps
+# the two above, which are about the OPT-OUT's honesty rather than about where hashing happens.
 
 # ==========================================================================
 # 5b — the corpus is PINNED BEFORE MEASUREMENT, and re-compared after (round 4)
