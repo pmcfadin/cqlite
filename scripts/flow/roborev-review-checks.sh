@@ -180,7 +180,7 @@ roborev_check_prompt_content() {
         fi
         return 0
         ;;
-      snapshot-unbound|unparseable-instruction)
+      snapshot-unbound|unparseable-instruction|mixed-delivery)
         # ===== A SELECTED MODE IS NOT AN OBSERVED SNAPSHOT (roborev job 16, blocker 1) =====
         # These two states mean the wrapper received NEITHER an inline diff NOR a snapshot it could read: the
         # named path could not be bound, or an instruction line could not be read at all. The owner ruled that
@@ -190,6 +190,8 @@ roborev_check_prompt_content() {
         # snapshot mode was selected on the mere PRESENCE of an instruction line, so a compact instruction
         # carrying a git command produced an exempted NOTICE and the run PASSED having received nothing.
         PROMPT_CONTENT="FAIL (snapshot named but unusable: ${ROBOREV_DIFF_SOURCE_STATE})"
+        # THE INVARIANT THIS PROTECTS (roborev job 18): inline census verification must not be suppressible by
+        # any repository-controlled content. `mixed-delivery` is the state that says something tried.
         DETAILS+=("ERROR: prompt-content: roborev signalled that the diff was delivered BY PATH, but this run received neither an inline diff nor a snapshot it could read: ${ROBOREV_SNAPSHOT_UNOBSERVED_WHY:-cause not established}. Named path: ${ROBOREV_SNAPSHOT_PATH:-<none readable from the prompt>}. An input that cannot be established is a NON-PASSING verdict — it is not a C‴ NOTICE, because there is no snapshot to report a digest for. Failing closed.")
         DETAILS+=("ERROR: prompt-content: the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are therefore UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
         return 0
