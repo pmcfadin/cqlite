@@ -775,9 +775,8 @@ fi
 f5b_out=$(WS0_F5_PERF="$f3c_perf" python3 - <<'PY' 2>&1
 import copy, os, pathlib, sys
 sys.path.insert(0, os.environ["WS0_F5_PERF"])
-from ws0_canonical_corpus import (CANONICAL_CENSUS, MODE_BASELINE, NON_BASELINE_LABEL,
-                                  PIN_CANONICAL_FIELD, RUST_PIN_REL,
-                                  verify_pinned_canonical_corpus)
+from ws0_canonical_corpus import CANONICAL_CENSUS, MODE_BASELINE, NON_BASELINE_LABEL, RUST_PIN_REL
+from ws0_canonical_record import PIN_CANONICAL_FIELD, verify_pinned_canonical_corpus
 from ws0_validate import Invalid
 
 p = pathlib.Path("/synthetic/session-corpus-pin.json")
@@ -965,7 +964,7 @@ fi
 f5a_out=$(WS0_F5_PERF="$f3c_perf" python3 - <<'PY' 2>&1
 import os, sys
 sys.path.insert(0, os.environ["WS0_F5_PERF"])
-from ws0_canonical_corpus import CANONICAL_RECORD_FIELDS, _reader_reads
+from ws0_canonical_record import CANONICAL_RECORD_FIELDS, _reader_reads
 for f in ("canonical_component_source", "canonical_components"):
     print(f, "DECLARED", f in CANONICAL_RECORD_FIELDS, "READ", _reader_reads(f))
 print("CONTROL_UNREAD_NAME", _reader_reads("a_field_this_reader_does_not_read"))

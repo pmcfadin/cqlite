@@ -82,7 +82,7 @@ from ws0_schema_input import verify_schema_input  # noqa: E402
 # smoke-sized or differently-seeded corpus was self-consistent through every check here and
 # published as a WS0 BASELINE. The comparison is made BEFORE measurement and RECORDED; this reads
 # the record and re-derives its verdict.
-from ws0_canonical_corpus import verify_pinned_canonical_corpus  # noqa: E402
+from ws0_canonical_record import verify_pinned_canonical_corpus  # noqa: E402
 # The CPU PINNING's recorded verification — #3272 round 9 F6. The reporter printed "verified
 # physical-core siblings" about manifest strings nothing had checked; the driver now records what
 # it verified and this asserts the manifest agrees with it.
