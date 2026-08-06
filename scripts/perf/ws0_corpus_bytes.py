@@ -7,6 +7,7 @@ The seam across the four session modules:
 
     ws0_session.py        the SESSION's identity — which corpus, which configuration?
     ws0_corpus_bytes.py   the CORPUS's BYTES — what is actually on disk, right now?
+    ws0_declared_inputs.py the SCOPE — WHICH inputs must a boundary check cover? (round 24)
     ws0_pin_components.py the PINNED COMPONENT SET — are all the corpus's parts the pinned ones?
     ws0_schema_input.py   the SCHEMA's identity — which schema was it read WITH?
 
@@ -300,10 +301,10 @@ def verify_corpus_boundary(
     `ticket-template.json` are BOTH re-read during measurement — so the same mutate-then-restore
     attack still worked, aimed at the schema or the request, and the boundary published a count that
     was complete relative to its own too-small list. The covered set is now DERIVED from the pin's
-    own digest-declaring fields (`declared_inputs`), because a hand-kept enumeration is precisely how
-    those two came to be omitted. A declared field with no coverage in `_input_coverage` REFUSES the
-    rep and names the field: a per-invocation input added later that nothing covers fails, rather
-    than passing silently at a third scope.
+    own digest-declaring fields (`ws0_declared_inputs.declared_inputs`), because a hand-kept
+    enumeration is precisely how those two came to be omitted. A declared field that module cannot
+    resolve REFUSES the rep and names the field: a per-invocation input added later that nothing
+    covers fails, rather than passing silently at a third scope.
 
     # What it compares, and what it refuses
 

@@ -714,7 +714,8 @@ fi
 if python3 - "$PERF_DIR" "$derived_dir" <<'PY'
 import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_corpus_bytes import declared_inputs, session_pin_path
+from ws0_corpus_bytes import session_pin_path
+from ws0_declared_inputs import declared_inputs
 pin = json.loads(session_pin_path(pathlib.Path(sys.argv[2])).read_text())
 got = declared_inputs(pin)
 for want in ("components", "data_db_sha256", "schema_sha256", "ticket_template_sha256"):
