@@ -257,22 +257,10 @@ perf_capability_sandbox_ok_resolved() {
   # split; it was simply running too late to see it. Order matters more than the predicate here.
   perf_capability_path_lines_ok "${1:-}" || return 1
   perf_capability_sandbox_root_into __pdr_root || return 1
-  # KNOWN, TRACKED, DELIBERATELY-UNFIXED RESIDUAL — **#3323 entry 3** (roborev round 12, Medium).
-  # THE DEFECT, in the reviewer's words: "cd -P/pwd -P resolves symlinks but cannot detect bind
-  # mounts. A sandbox path bind-mounted to /etc/sysctl.d or /proc/sys/kernel still appears lexically
-  # contained; the installer's ownership/mode check also accepts a root-owned bound /etc/sysctl.d,
-  # allowing test mode to read or modify host state."
-  # THE NAMED FIX, verbatim: "use mount-aware, descriptor-relative containment such as openat2 with
-  # appropriate no-cross-mount constraints, or explicitly reject mount-boundary crossings."
-  # WHY NOT FIXED HERE: that fix IS openat2 — the same non-shell mechanism already rejected for this
-  # family (an interpreter dependency on the privileged bootstrap path). Shell cannot decide this:
-  # comparing st_dev via `stat -c %d` catches a cross-FILESYSTEM bind but NOT a same-filesystem one,
-  # so a device check would be a guard with a known hole, which is worse than a recorded boundary.
-  # By owner ruling this whole class (a NAME that does not correspond to its real DESTINATION) is
-  # CLOSED: it is recorded and appended to #3323 automatically, not escalated and not re-attempted.
-  # CONSEQUENCE, SCOPED: requires the ability to CREATE a bind mount, i.e. root or CAP_SYS_ADMIN on a
-  # box we own — an actor who already has what the escape would obtain. Test-mode only.
-  # BOTH sides canonicalized the same way, so the comparison is between destinations
+# RESIDUAL — #3323 entry 3: bind mounts defeat lexical containment. `cd -P`/`pwd -P` resolve
+# symlinks but not MOUNTS, so a bind-mounted sandbox path looks contained. Deliberately unfixed:
+# the fix is mount-aware fd-relative containment (openat2), not expressible in shell, and this
+# escape class is CLOSED by owner ruling. Read #3323 before widening this trust.
   __pdr_root=$(cd -P -- "$__pdr_root" 2>/dev/null && pwd -P) || return 1
   __pdr_real=$(cd -P -- "${1:-/dev/null/never}" 2>/dev/null && pwd -P) || return 1
   perf_capability_path_within "$__pdr_real" "${__pdr_root%/}"
@@ -362,28 +350,10 @@ perf_capability_env_guard() {
     }
     perf_capability_priv_tool_ok "$resolved" "$tool" || return 1
   done
-  # KNOWN, TRACKED, DELIBERATELY-UNFIXED RESIDUAL — recorded in **#3323** (the THIRTEENTH escape in
-  # this family; the twelfth, the ancestor-chain rename race, is recorded at the install site).
-  # THE DEFECT, in the reviewer's words: this validation "validates the current sudo/sysctl entries,
-  # discards their resolved paths, and later callers resolve them again through PATH. A writable test
-  # shim directory can replace a validated file with a symlink to the host binary after the guard,
-  # allowing test mode to execute real privileged tools."
-  # THE NAMED FIX, also verbatim, so nobody has to re-derive it: "require the shim directory to be
-  # owned by the executing identity and not group/world-writable, and invoke the exact validated
-  # executable paths rather than resolving their names again."
-  # WHY IT IS NOT FIXED HERE: this is the same validate-a-NAME-then-re-resolve shape as the twelve
-  # before it, and by owner ruling this family is CLOSED — thirteen escapes established the class is
-  # unbounded in shell, and the two authorized in-shell fixes (A-prime, and the `--install` surface)
-  # each produced further defects of their own. A fourteenth attempt is not authorized.
-  # CONSEQUENCE, SCOPED HONESTLY: a TEST-MODE containment escape (a real `sudo`/`sysctl` becoming
-  # reachable during tests on a box we own), not a production exposure — production never sets
-  # CQLITE_PERF_TEST_MODE, so this whole function returns early there. Same latency class as #3323's
-  # ancestor race. #3323 re-raises on EVIDENCE the boundary is reachable, and nothing else.
-  # Do NOT "just add a check here" — read #3323 first.
-  # ...and every privileged tool PARKED in the declared shim dir, whether or not PATH happens to
-  # reach it: one PATH-order change is all that separates "not resolved" from "executed", and the
-  # loop above is driven by PATH. Only `sudo`/`sysctl` are swept — a shim dir legitimately holds
-  # `ln -s`ed real coreutils (cat, mv, uname), which grant no privilege.
+  # RESIDUAL — #3323 entry 2: privileged-tool validation resolves sudo/sysctl, DISCARDS the
+  # resolved paths, and later callers re-resolve by name, so a writable shim dir can swap in a
+  # link to the host binary afterwards. Deliberately unfixed (13th escape; class CLOSED by owner
+  # ruling; the fix needs held fds). Test-mode only. Read #3323 before widening this trust.
   if [ -n "$dir" ] && [ -d "$dir" ]; then
     for tool in sudo sysctl; do
       [ -e "$dir/$tool" ] || [ -L "$dir/$tool" ] || continue
@@ -611,28 +581,10 @@ perf_capability_dropin_install() {
     #   no window. It removes the ATTACKER PRECONDITION, turning "production is safe because
     #   /etc/sysctl.d is root-owned" from a recorded ASSUMPTION into an ENFORCED INVARIANT: assume
     #   nothing about the destination, measure it, fail closed.
-    #   KNOWN, TRACKED, DELIBERATELY-UNFIXED RESIDUAL — **issue #3323** (ancestor-chain rename race,
-    #   the TWELFTH escape in this family). This precondition validates the target DIRECTORY; it does
-    #   NOT prove the PATH BY WHICH that directory is reached is stable. An actor able to write an
-    #   ANCESTOR can rename the validated directory and substitute a symlink after these checks, and
-    #   the later `mktemp`/write/rename re-resolve `$d`. The correct fix is a held directory
-    #   descriptor with no-follow fd-relative operations (`openat2` containment) — NOT expressible in
-    #   shell, which is why twelve in-shell attempts at this class stopped here by owner ruling
-    #   rather than a thirteenth. #3323 records that fix and re-raises on EVIDENCE the boundary is
-    #   reachable (multi-tenant boxes, an attacker-writable ancestor, or a real privileged helper
-    #   reachable from test mode). Production ancestors are `/etc` and `/`, both root-owned; test
-    #   mode reaches only AC4 shims. Do NOT widen the trust of this function without reading #3323 first.
-    #   THE REMAINING BOUNDARY, STATED: this check races only against an actor who can `chmod` a
-    #   directory owned by the privileged writer — and that actor is already the privileged writer
-    #   (or root), so it has no privilege left to escalate to. That is the whole of the residual;
-    #   it is a boundary, not a proof, and it is deliberately not phrased as "cannot happen" —
-    #   this function has already had TWO such phrasings retracted (a fixed staging name, and a
-    #   single `sh -c` mistaken for mutual exclusion).
-    # NO SYMLINK FOLLOWING IN THE CHECK, ASSERTED RATHER THAN INHERITED: `stat -c` is lstat-like on
-    # GNU (it does not dereference without -L), so a symlinked $d would be measured as the LINK.
-    # Relying on that implicitly is the same by-name reasoning this family has punished eleven
-    # times, so the symlink case is refused OUTRIGHT and first — the destination directory must be
-    # a real directory, not a link to one, whatever a future stat implementation would report.
+    #   RESIDUAL — #3323 entry 1: the ancestor-chain rename race. This validates the target
+    #   directory, NOT the path by which it is reached, so an actor able to write an ANCESTOR can
+    #   swap the validated directory for a symlink after these checks. Deliberately unfixed (12th
+    #   escape; class CLOSED; needs openat2). Read #3323 before widening this trust.
     if [ -L "$d" ]; then
       printf "perf-capability: REFUSING: the drop-in directory %s is a SYMLINK — its owner and mode say nothing about where entries would actually be created, so it cannot be proven un-writable by less-privileged users.\n" "$d" >&2
       exit 1
