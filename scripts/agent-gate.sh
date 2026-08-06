@@ -5756,6 +5756,32 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 CELL-VOLUME guards — "rows were checked and CELLS were not" (#3272 round 17).
+  # Split out of the reporter suite above under the campsite rule (that file reached 1602 lines
+  # against the ~1500 test target) along a SUBJECT seam, and it must be wired here or the 11
+  # checks it carries become a test nothing executes — the #1597/#1618 gate-wiring class this
+  # rig has already paid for. The reporter suite asks whether a quantity was validly OBSERVED;
+  # this asks whether, given a session whose every quantity IS observed and internally
+  # consistent, the WORK the published figure divides by was actually done. A pass returning
+  # EVERY ROW WITH MISSING COLUMNS satisfies every check in the sibling suite — right pass count,
+  # every pass observing exactly the pinned corpus row count, recorded aggregates equal to the
+  # derived sums — while decoding materially less data, and its rows/s is the DENOMINATOR of the
+  # rig's only output. Different oracle (`cells_per_row` from the corpus identity, not the row
+  # count) and a different non-vacuity mutation site (`ws0_collect.py`'s per-pass requirement).
+  # Hermetic: synthetic session dirs under $TMPDIR driven through the shipped reporter; no cargo,
+  # perf, sudo, taskset, corpus, network or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_cell_volume_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cell_volume_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 cell-volume guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 MEASUREMENT-APPARATUS guards (#3272, item 10): the sibling of the reporter
   # test above, split out because it covers a different question over disjoint
   # fixtures — that one asks what the rig DOES with its observations, this one asks

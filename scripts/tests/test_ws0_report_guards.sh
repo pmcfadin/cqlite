@@ -156,55 +156,17 @@ FAKE_SHA="$(printf 'ab%.0s' $(seq 1 32))"
 # request COUNT and a row total, for the per-temperature request contract).
 # shellcheck source=scripts/tests/lib-ws0-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
-# This file's corpora are 700 KB, which is what its `bytes_per_row: 700.0` cases assert.
-make_corpus() { ws0_make_corpus "$1" "${2:-$CORPUS_ROWS}" "${3:-700000}" "${4:-}"; }
-
-# make_scan_rep <dir> <temp> <rep> <prewarm-status|-none->
-make_scan_rep() {
-  local d="$1" temp="$2" rep="$3" pw="$4" tag="scan-$2-$3"
-  # The seven-field scan contract (#3272), from `lib-ws0-fixtures.sh`: `WS0_SCAN_FIXED` is the
-  # constant half, `ws0_scan_session_bound` the corpus-valued half.
-  cat > "$d/$tag.json" <<EOF
-{ $WS0_SCAN_FIXED, $(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}"),
-  "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
-  "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "cells": $(ws0_scan_pass_cells "$CORPUS_ROWS"), "secs": 2.0 } ] }
-EOF
-  perf_csv "$d/perf-$tag.csv" 2000000 4000000
-  perf_csv "$d/perf-$tag-setup.csv" 100000 200000
-  [ "$pw" = "-none-" ] || printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
-  make_round "$d" "$tag" "$rep" "$(ws0_alternating_position "$rep" scan)"
-}
-
-# make_flight_rep <dir> <temp> <rep> <requests_ok> <rows> <prewarm-status|-none->
-#
-# `rows_per_s` is COMPUTED from `rows_total / duration_s` rather than hardcoded (#3272 review
-# round 4). The reporter now DERIVES the throughput from those two counters and cross-checks
-# the recorded rate against it, so a fixture carrying a fixed `250000.0` beside a varying
-# `rows` would be refused for a reason that has nothing to do with the case under test — and
-# it is also what the load generator itself writes (record.rs `per_s(self.rows_total)`).
-make_flight_rep() {
-  local d="$1" temp="$2" rep="$3" ok="$4" rows="$5" pw="$6" tag="flight-bypass-$2-$3"
-  local secs=4.0 rps
-  rps="$(python3 -c "print($rows / $secs)")"
-  cat > "$d/$tag.jsonl" <<EOF
-{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"$tag","endpoint":"$WS0_FIXTURE_ENDPOINT","requests_ok":$ok,"requests_error":0,"requests_unavailable":0,"rows_total":$rows,"rows_per_s":$rps,"duration_s":$secs}
-EOF
-  perf_csv "$d/perf-$tag.csv" 8000000 16000000
-  [ "$pw" = "-none-" ] || printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
-  make_round "$d" "$tag" "$rep" "$(ws0_alternating_position "$rep" flight)"
-}
-
-# run_report <dir> <corpus> <temps> — prints the reporter's stdout+stderr. Call as
-# `out=$(run_report ...); rc=$?`: a command substitution runs in a SUBSHELL, so a
-# status the function assigned to a variable would not survive the call.
-run_report() {
-  # The PRE-MEASUREMENT corpus pin, stamped IF ABSENT — see lib-ws0-report-fixtures.sh's
-  # `run_report` for why "if absent" and not unconditionally (#3272 review round 4).
-  [ -e "$1/session-corpus-pin.json" ] || ws0_pin_session_corpus "$1" "$2" 1 "$3" bypass 1
-  # The TEMPS are a property of the SESSION now (#3272 F1), so they are stamped into the
-  # manifest above rather than passed here.
-  python3 "$REPORT" --dir "$1" --corpus "$2" 2>&1
-}
+# ...and the BARE-SCAN-ARM builders this file shares with `test_ws0_cell_volume_guards.sh`
+# (`make_corpus`, `make_scan_rep`, `make_flight_rep`, `run_report`). They moved to ONE
+# definition when the round-17 cell block was split out under the campsite rule: both suites
+# feed the reporter the same healthy scan/flight reps and the same corpus shape, and a builder
+# copied into two suites is a builder that will disagree with itself — `lib-ws0-fixtures.sh`'s
+# own header records paying for exactly that (its `make_round` gained a `monotonic_ns` field in
+# one round and had to be edited in two places). `run_report_full` and the `expect_*` helpers
+# stay HERE: their subject is this file's session CONFIGURATION, which the cell suite never
+# perturbs.
+# shellcheck source=scripts/tests/lib-ws0-scan-arm-fixtures.sh
+source "$REPO_ROOT/scripts/tests/lib-ws0-scan-arm-fixtures.sh"
 
 # run_report_full <dir> <corpus> <temps> <arms> <reps> <scan-passes> — same, with
 # every quantity a caller can get wrong exposed.
@@ -1365,199 +1327,24 @@ else
 fi
 
 # ==========================================================================
-# #3272 round 17 — ROWS WERE CHECKED AND **CELLS** WERE NOT
+# #3272 round 17 — the CELL volume: see test_ws0_cell_volume_guards.sh
 # ==========================================================================
-# Round 12's F2 made the bare-scan collector require every pass to have observed the pinned corpus
-# ROW COUNT, and derived the rep's rows/seconds from the per-pass records. It never read the `cells`
-# counter `ws0-scan-bench` writes beside them (`scan_bench.rs`: `cells += row.values.len()`).
+# The round-17 cases (a pass returning EVERY ROW with MISSING COLUMNS; an absent per-pass
+# `cells`; an over-count refused as an equality failure; the one-site mutation of
+# `ws0_collect.py` that measures the pre-fix acceptance; the accept direction and the recorded
+# derivation) moved to `scripts/tests/test_ws0_cell_volume_guards.sh` under the campsite rule
+# — eighteen review rounds took this file to 1602 lines against the ~1500 test target.
 #
-# So a pass returning EVERY ROW WITH MISSING COLUMNS satisfied every requirement — the right pass
-# count, every pass observing exactly the pinned corpus row count, the recorded aggregates equal to
-# the derived sums — while decoding materially less data, and its rows/s was published as the
-# DENOMINATOR of the rig's only output.
+# The seam is by SUBJECT, not by size. This file asks whether a quantity was validly OBSERVED
+# at all; that one asks whether, given a session whose every quantity IS observed and internally
+# consistent, the WORK the figure divides by was actually done. Different oracle
+# (`cells_per_row` from the corpus identity, not the row count), different mutation site.
 #
-# Why this is not counter hygiene. The rig's whole output is a bare-scan-vs-Flight ratio and its
-# parent issue (#3096) exists to measure ARROW-ENCODE COST, so a corpus yielding fewer columns per
-# row makes work DISAPPEAR FROM THE MEASUREMENT rather than from the validation — and an ASYMMETRIC
-# shortfall moves the headline number directly. The measurement was satisfiable by thinner data than
-# the report claims.
-#
-# The oracle already existed: `cells_per_row` is a recorded corpus-identity field, REQUIRED and
-# validated `positive` by `load_corpus_identity`, printed in the report's `corpus_identity`, and 12
-# on the canonical corpus. So the requirement is `cells == rows x cells_per_row` with BOTH operands
-# pinned before the measurement — wiring an existing pin to a check that did not consult it, not a
-# new source of truth. Compared PER PASS and DERIVED, never against the payload's own aggregate:
-# round 12's F2 rule, for its reason (a thin pass beside a fat one sums to a plausible total, and a
-# payload's own `cells` sum is self-consistent with any thinner scan that wrote it).
-# --------------------------------------------------------------------------
-# The subject: rows EXACTLY RIGHT, cells SHORT. Nine of the twelve columns, which is the realistic
-# shape (`--project` narrowed to the non-key columns) and the one every pre-fix check waved through.
-CELLS_SHORT=$((CORPUS_ROWS * 9))
-CELLS_FULL="$(ws0_scan_pass_cells "$CORPUS_ROWS")"
-make_thin_scan_rep() { # make_thin_scan_rep <dir> <cells>
-  local d="$1" cells="$2" tag="scan-warm-1"
-  cat > "$d/$tag.json" <<EOF
-{ $WS0_SCAN_FIXED, $(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}"),
-  "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
-  "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "cells": $cells, "secs": 2.0 } ] }
-EOF
-  perf_csv "$d/perf-$tag.csv" 2000000 4000000
-  perf_csv "$d/perf-$tag-setup.csv" 100000 200000
-  printf 'ok\n' > "$d/$tag.prewarm.status"
-  make_round "$d" "$tag" 1 "$(ws0_alternating_position 1 scan)"
-}
-d="$TMP/thin-cells"; mkdir -p "$d"
-make_thin_scan_rep "$d" "$CELLS_SHORT"
-make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
-out=$(run_report "$d" "$TMP/corpus" warm); rc=$?
-# BOTH quantities must be named — an operator has to see what was emitted and what was required.
-if [ "$rc" -ne 0 ] && grep -q "emitted $(printf "%'d" "$CELLS_SHORT") cells" <<<"$out" \
-   && grep -q "$(printf "%'d" "$CELLS_FULL")" <<<"$out"; then
-  pass "OBSERVED (round 17): a pass returning EVERY ROW with MISSING COLUMNS is REFUSED, naming both the emitted cell count and the pinned requirement"
-else
-  fail "round 17: a cell-short pass must be refused naming both counts (rc=$rc, out: $out)"
-fi
-# ...and the refusal must state WHAT IS LOST, not merely that two numbers differ: that the ROW COUNT
-# cannot see it, and that the rig's ratio is a measurement of exactly this content volume.
-if grep -q "THE ROW COUNT CANNOT SEE THIS" <<<"$out" \
-   && grep -q "FEWER COLUMNS PER ROW" <<<"$out" \
-   && grep -q "ARROW-ENCODE COST" <<<"$out"; then
-  pass "round 17: the refusal states the MEASUREMENT consequence (less work published as this figure; the ratio's subject IS the content volume), not just a mismatch"
-else
-  fail "round 17: the cell refusal must state what the shortfall corrupts (out: $out)"
-fi
-if [ ! -e "$d/results.json" ]; then
-  pass "round 17: no results.json is written for the cell-short session"
-else
-  fail "round 17: a refused run must not leave a results.json behind"
-fi
-# An ABSENT `cells` is an ERROR, not an assumed full row — defaulting it would make the requirement
-# pass exactly when the artifact is silent about the work done.
-d="$TMP/no-cells"; mkdir -p "$d"
-cat > "$d/scan-warm-1.json" <<EOF
-{ $WS0_SCAN_FIXED, $(ws0_scan_session_bound "$TMP/corpus"),
-  "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
-  "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "secs": 2.0 } ] }
-EOF
-perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
-perf_csv "$d/perf-scan-warm-1-setup.csv" 100000 200000
-printf 'ok\n' > "$d/scan-warm-1.prewarm.status"
-make_round "$d" scan-warm-1 1 "$(ws0_alternating_position 1 scan)"
-make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
-out=$(run_report "$d" "$TMP/corpus" warm); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "pass 0 cells" <<<"$out"; then
-  pass "round 17: an ABSENT per-pass \`cells\` is FATAL, naming the pass (never an assumed full row)"
-else
-  fail "round 17: an absent cells counter must be refused naming the pass (rc=$rc, out: $out)"
-fi
-# A cell count ABOVE the requirement is refused too, and the check is stated as the AFFIRMATIVE
-# equality rather than `< required`: a thicker-than-pinned pass is an artifact this reporter does not
-# model (another corpus, another projection), and `!= <bad>` is the accept-condition shape round 6
-# already paid for in this file.
-d="$TMP/fat-cells"; mkdir -p "$d"
-make_thin_scan_rep "$d" $((CELLS_FULL + CORPUS_ROWS))
-make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
-out=$(run_report "$d" "$TMP/corpus" warm); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "MORE COLUMNS PER ROW" <<<"$out"; then
-  pass "round 17: a pass emitting MORE cells than the pinned product is ALSO refused (the check is an equality, not a floor)"
-else
-  fail "round 17: an over-count must be refused as an equality failure (rc=$rc, out: $out)"
-fi
-# NON-VACUITY, MEASURED — the pre-fix collector is RUN over this exact artifact, not restated. The
-# defect was that NOTHING READ THE FIELD, so it is reproduced as a ONE-SITE MUTATION of a COPY of
-# the shipped reporter: the per-pass cell requirement is removed and everything else stands. A
-# one-site mutation rather than a wholesale revert, for round 14 F2's reason — reverting every site
-# would be a second implementation whose fidelity is a claim about my re-derivation.
-r17_pre="$TMP/r17-prefix-tree"; rm -rf "$r17_pre"; mkdir -p "$r17_pre"
-cp -R "$REPO_ROOT/scripts/perf" "$r17_pre/perf"
-if python3 - "$r17_pre/perf/ws0_collect.py" <<'PY'
-import pathlib, sys
-p = pathlib.Path(sys.argv[1]); s = p.read_text()
-anchor = "        if p_cells != required_cells:\n"
-if s.count(anchor) != 1:
-    raise SystemExit("could not locate the per-pass cell requirement to mutate, so this "
-                     "non-vacuity probe would be measuring UNMODIFIED code and would read as a "
-                     "pass having reverted nothing")
-s = s.replace(anchor, "        if False:  # the PRE-FIX state: the cells counter is never compared\n")
-p.write_text(s)
-print("mutated the probe copy: the per-pass cell requirement no longer compares `cells`")
-PY
-then
-  pass "round 17 NON-VACUITY: the mutation (the per-pass loop stops comparing \`cells\`) was really applied to the probe copy"
-else
-  fail "round 17: the pre-fix mutation could not be applied, so the probe below would measure nothing"
-fi
-# The SAME cell-short session, through the mutated reporter. It must EXIT 0 and PUBLISH the figure —
-# that is the finding: a scan of thinner rows, reported as this arm's rows/s.
-r17_out=$(python3 "$r17_pre/perf/ws0_report.py" --dir "$TMP/thin-cells" --corpus "$TMP/corpus" 2>&1)
-r17_rc=$?
-if [ "$r17_rc" -eq 0 ] && grep -q 'bare scan (execute_streaming)' <<<"$r17_out" \
-   && grep -q '500 rows/s' <<<"$r17_out"; then
-  pass "round 17 NON-VACUITY (MEASURED): with nothing comparing \`cells\`, the reporter ACCEPTS a pass that returned every row with 9 of 12 columns and PUBLISHES its 500 rows/s as this arm's figure"
-else
-  fail "round 17: the unmutated-comparison reporter must ACCEPT the cell-short session and publish its rows/s, else the refusal above closed nothing (rc=$r17_rc, out: $(head -8 <<<"$r17_out"))"
-fi
-# ...and the shortfall is INVISIBLE in that output: neither the emitted cell count nor the pinned
-# requirement is named anywhere. Stronger than "unchecked" — a report naming it would be honest.
-if ! grep -q "$(printf "%'d" "$CELLS_SHORT")" <<<"$r17_out" \
-   && ! grep -qi 'cells' <<<"$r17_out"; then
-  pass "round 17 NON-VACUITY: that accepted report never mentions cells at all (the shortfall was INVISIBLE, not merely unchecked)"
-else
-  fail "round 17: the pre-fix report must not name the cell shortfall (out: $(grep -i cells <<<"$r17_out" | head -3))"
-fi
-# ...and the MUTANT MUST NOT BE UNIFORMLY BROKEN: it still refuses a ROW-short pass, so what the
-# probe measured is the loss of the CELL comparison rather than a copy that validates nothing.
-d="$TMP/r17-row-short"; mkdir -p "$d"
-cat > "$d/scan-warm-1.json" <<EOF
-{ $WS0_SCAN_FIXED, $(ws0_scan_session_bound "$TMP/corpus"),
-  "rows_denominator": 300, "timed_scan_secs": 2.0, "setup_secs": 0.5,
-  "passes": [ { "pass": 0, "rows": 300, "cells": $((300 * 12)), "secs": 2.0 } ] }
-EOF
-perf_csv "$d/perf-scan-warm-1.csv" 2000000 4000000
-perf_csv "$d/perf-scan-warm-1-setup.csv" 100000 200000
-printf 'ok\n' > "$d/scan-warm-1.prewarm.status"
-make_round "$d" scan-warm-1 1 "$(ws0_alternating_position 1 scan)"
-make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
-ws0_pin_session_corpus "$d" "$TMP/corpus" 1 warm bypass 1
-if r17_mut_out=$(python3 "$r17_pre/perf/ws0_report.py" --dir "$d" --corpus "$TMP/corpus" 2>&1); then
-  fail "round 17: the mutant accepted a ROW-short pass too, so it lost more than the cell comparison"
-else
-  if grep -q 'observed 300 rows' <<<"$r17_mut_out"; then
-    pass "round 17 NON-VACUITY: the mutant still REFUSES a ROW-short pass — it lost exactly the cell comparison, not its whole validation"
-  else
-    fail "round 17: the mutant must still refuse a row-short pass (out: $(head -4 <<<"$r17_mut_out"))"
-  fi
-fi
-# THE ACCEPT DIRECTION, so none of the above is a guard that reds unconditionally: the SAME fixture
-# with the FULL cell count reports cleanly, and the derivation is RECORDED so a reader can see the
-# content volume was checked rather than assumed.
-d="$TMP/full-cells"; mkdir -p "$d"
-make_thin_scan_rep "$d" "$CELLS_FULL"
-make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
-out=$(run_report "$d" "$TMP/corpus" warm); rc=$?
-if [ "$rc" -eq 0 ] && grep -q 'bare scan (execute_streaming)' <<<"$out"; then
-  pass "round 17: the SAME fixture with the PINNED cell count is ACCEPTED (the guard is not unconditional)"
-else
-  fail "round 17: a full-cell rep must be accepted (rc=$rc, out: $out)"
-fi
-if python3 - "$d/results.json" "$CELLS_FULL" <<'PY'
-import json, sys
-r = json.load(open(sys.argv[1])); want = int(sys.argv[2])
-scan = next(m for m in r["measurements"] if m["arm"] == "bare_scan")
-assert scan["cell_total"] == want, scan["cell_total"]
-assert scan["cells_per_row_pinned"] == 12, scan["cells_per_row_pinned"]
-rep = scan["reps"][0]
-assert rep["cells"] == want, rep["cells"]
-assert rep["cells_required_per_pass"] == want, rep["cells_required_per_pass"]
-assert rep["passes"][0]["cells"] == want, rep["passes"][0]
-assert "DERIVED" in rep["cells_source"], rep["cells_source"]
-assert "MISSING COLUMNS" in rep["cells_source"], rep["cells_source"]
-PY
-then
-  pass "round 17: results.json records the CELL total, the pinned cells/row and the per-pass cells, and states they were DERIVED against the pin"
-else
-  fail "round 17: results.json must record the content volume the row count cannot express"
-fi
+# Both suites are wired into the gate's `tooling-tests` component, and the four builders they
+# share (`make_corpus`, `make_scan_rep`, `make_flight_rep`, `run_report`) now live in ONE
+# definition at `scripts/tests/lib-ws0-scan-arm-fixtures.sh` rather than being copied — the
+# drift `lib-ws0-fixtures.sh`'s own header records paying for.
+
 
 # ==========================================================================
 # #3272 finding 3 — the host sysctls: see test_ws0_host_state_guards.sh
@@ -1581,10 +1368,14 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-# RE-DERIVED BY RUNNING THE SUITE, never estimated from the source (#3272 round 17): the round-17
-# cell-volume block adds 11 checks, and a source-line count understates a floor because loops
-# multiply — 118 measured, floor set below it.
-MIN_CHECKS=115
+# RE-DERIVED BY RUNNING THE SUITE, never estimated from the source. It has moved twice, and the
+# second move is the one worth recording: round 17 measured 118 and set the floor at 115; the
+# campsite-rule split of the round-17 CELL-VOLUME block to `test_ws0_cell_volume_guards.sh` then
+# took 11 of those checks OUT of this file, so a re-run measured 107 and the 115 floor FIRED — a
+# floor left pointing at a count that no longer exists is a red on correct code. RE-MEASURED at
+# 107 here and 11 there (118 total, fully accounted), so the floor is set below 107. A source-line
+# count would understate it either way, because loops multiply.
+MIN_CHECKS=104
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
