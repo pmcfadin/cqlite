@@ -931,11 +931,8 @@ for temp in $TEMPS; do
           measure_flight "$temp" "$rep" "$arm"
           record_round "flight-$arm-$temp-$rep" "$rep" "$_pos" "$_N_ARMS" ;;
       esac
-      # THE MEASUREMENT BOUNDARY (#3272 round 22): the pinned components are re-hashed FROM DISK
-      # against the pin, and a rep whose corpus changed is REFUSED rather than reported. Per
-      # ARM-rep, not per round: the ratio's numerator and denominator are measured by DIFFERENT
-      # ARMS within one round. Status checked EXPLICITLY, so `|| exit 1` is what terminates the
-      # run. Full argument, and why nothing here is swallowed: lib-corpus-boundary.sh.
+      # THE MEASUREMENT BOUNDARY (#3272 round 22), per ARM-rep. Status checked EXPLICITLY, so
+      # `|| exit 1` refuses the run. Full argument: lib-corpus-boundary.sh.
       verify_corpus_boundary_or_refuse "$temp-$rep-after-$arm" || exit 1
     done
   done

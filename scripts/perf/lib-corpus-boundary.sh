@@ -40,7 +40,13 @@
 #
 # What stays in the driver is the CALL SITE, inside the rep loop, because the ORDER is the property:
 # a boundary check that ran anywhere but between reps would verify the ends, which is exactly the
-# window a pre/post pair is blind to.
+# window a pre/post pair is blind to. The driver's comment there is deliberately two lines pointing
+# here — the driver is at a hard 950-line budget, so its prose budget goes to the ORDER of
+# operations, and the ARGUMENT for each check lives with the check.
+#
+# What the call site does at the boundary, stated here because the driver only points: the pinned
+# components are re-hashed FROM DISK against `session-corpus-pin.json` and a rep whose corpus
+# changed is REFUSED rather than reported. Nothing is swallowed — see the fail-closed note below.
 #
 # # WHY IT IS CALLED PER ARM-REP AND NOT ONCE PER ROUND
 #
