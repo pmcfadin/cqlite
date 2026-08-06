@@ -57,24 +57,27 @@
 # Full method, caveats and the recorded pinning: docs/reports/ws0-3096-artifacts/measurement-method.md
 #
 # ---------------------------------------------------------------------------
-# FILE SIZE, and the eight libraries this driver has been split into (epic #1116)
+# FILE SIZE, and the ten libraries this driver has been split into (epic #1116)
 # ---------------------------------------------------------------------------
 # The gate's `file-size` ratchet is `.rs`-ONLY, so a shell file crosses the ~800-line
-# campsite-rule target SILENTLY — this is checked with `wc -l` rather than left to the gate. Round
-# 9's guard fixes took this file to 1008 lines, and the MEASUREMENT LEGS were split out in
-# response (see `lib-measure.sh`); round 10's M2 provenance record took it to 986 and the BUILD +
-# BINARY IDENTITY went out the same way (`lib-binaries.sh`). It is ~900 now.
+# campsite-rule target SILENTLY — this is checked with `wc -l` rather than left to the gate. Every
+# guard round since round 9 has pushed this file over and been answered by a SPLIT rather than by
+# growth: the MEASUREMENT LEGS (`lib-measure.sh`), the BUILD + BINARY IDENTITY
+# (`lib-binaries.sh`), the SCHEMA + REQUEST (`lib-inputs.sh`) and round 22's BOUNDARY CHECK
+# (`lib-corpus-boundary.sh`), which landed net-NEGATIVE. It is ~950 now, against a hard 950.
 #
-# Eight libraries, each owning ONE question about whether a measurement means what it says:
+# Ten libraries, each owning ONE question about whether a measurement means what it says:
 #
-#     lib-cpu.sh          are the pinned CPUs one physical core?
-#     lib-host-state.sh   is the host's state put back?
-#     lib-args.sh         are the arguments values this rig can measure?
-#     lib-perf-lint.sh    is the counting domain CPU-wide?
-#     lib-server.sh       which program did the Flight arm actually measure?
-#     lib-outdir.sh       do the artifacts being read all come from ONE session?
-#     lib-measure.sh      how is ONE rep of an arm executed, prewarmed and counted?
-#     lib-binaries.sh     WHICH PROGRAMS are measured, and are they this revision's?
+#     lib-cpu.sh             are the pinned CPUs one physical core?
+#     lib-host-state.sh      is the host's state put back?
+#     lib-args.sh            are the arguments values this rig can measure?
+#     lib-perf-lint.sh       is the counting domain CPU-wide?
+#     lib-server.sh          which program did the Flight arm actually measure?
+#     lib-outdir.sh          do the artifacts being read all come from ONE session?
+#     lib-measure.sh         how is ONE rep of an arm executed, prewarmed and counted?
+#     lib-binaries.sh        WHICH PROGRAMS are measured, and are they this revision's?
+#     lib-inputs.sh          WHICH SCHEMA are the bytes read with, and WHICH REQUEST is asked?
+#     lib-corpus-boundary.sh are the bytes still the PINNED bytes, MID-RUN?
 #
 # What remains here is deliberately the part that must stay legible in ONE file: the ORDER of
 # operations, which is itself a correctness property (arguments before creation, verification
@@ -83,10 +86,9 @@
 # `perf_stat_c` did NOT move with the legs, and that is load-bearing rather than a preference:
 # `perf_invocation_lint_tree` DISCOVERS which file owns the single wrapper and lints every OTHER
 # `scripts/perf/*.sh` in `library` mode, where DEFINING `perf_stat_c` is itself a finding ("the rig
-# has exactly ONE"). Moving it into a library would flip the owner and make this driver a library
-# that must not define it — inverting layer 1 of the three-layer perf guard — and
-# `test_ws0_cpu_pinning_guards.sh` text-extracts it from THIS file by name. The next seam, if one
-# is needed, is the session-pin python heredocs (~100 lines) — tracked under epic #1116.
+# has exactly ONE"). Moving it would flip the owner and invert layer 1 of the three-layer perf
+# guard, and `test_ws0_cpu_pinning_guards.sh` text-extracts it from THIS file by name. The next
+# seam is the session-pin python heredocs (~100 lines) — tracked under epic #1116.
 
 set -euo pipefail
 
@@ -108,6 +110,8 @@ source "$HERE/lib-outdir.sh"
 source "$HERE/lib-binaries.sh"
 # shellcheck source=scripts/perf/lib-inputs.sh
 source "$HERE/lib-inputs.sh"
+# shellcheck source=scripts/perf/lib-corpus-boundary.sh
+source "$HERE/lib-corpus-boundary.sh"
 # LAST, because the sourcing order is the DEPENDENCY order: the measurement legs call
 # `stop_server`/`require_port_free`/`await_server_ready` from lib-server.sh above, plus this
 # driver's own `perf_stat_c` and `drop_caches_if_cold` (both defined below — a function body is
@@ -783,18 +787,11 @@ perf_stat_c() {
 # ---------------------------------------------------------------------------
 # The two MEASUREMENT LEGS live in scripts/perf/lib-measure.sh (#3272 round 9)
 # ---------------------------------------------------------------------------
-# `measure_scan` (arm A, the bare scan) and `measure_flight` (arm B, do_get over a real
-# loopback transport) were split out under the campsite rule — this file was 1008 lines
-# against the ~800 source target, and the gate's `file-size` ratchet is `.rs`-only so a shell
-# file crosses it silently. That library carries the full argument for each leg (the prewarm
-# postures and why they differ per arm, the setup-only leg, the per-rep server lifecycle) and
-# the reason `perf_stat_c` deliberately did NOT move with them: the tree lint DISCOVERS the
-# single wrapper's owner and lints every OTHER scripts/perf/*.sh in `library` mode, where
-# defining it is a FINDING — so moving it would invert layer 1 of the perf guard.
-#
-# Sourced at the TOP of this file, after lib-server.sh, because the sourcing order is the
-# dependency order: these legs call stop_server/require_port_free/await_server_ready. The
-# call sites are the measurement loop below.
+# `measure_scan` (arm A) and `measure_flight` (arm B, do_get over a real loopback transport)
+# were split out under the campsite rule; that library carries the full argument for each leg
+# and for why `perf_stat_c` deliberately did NOT move with them. Sourced at the TOP of this
+# file, after lib-server.sh, because the sourcing order is the dependency order: these legs
+# call stop_server/require_port_free/await_server_ready. Call sites: the loop below.
 
 echo
 echo "=== issue #3096 same-session baseline (rig hardened by #3272) ==="
@@ -934,6 +931,12 @@ for temp in $TEMPS; do
           measure_flight "$temp" "$rep" "$arm"
           record_round "flight-$arm-$temp-$rep" "$rep" "$_pos" "$_N_ARMS" ;;
       esac
+      # THE MEASUREMENT BOUNDARY (#3272 round 22): the pinned components are re-hashed FROM DISK
+      # against the pin, and a rep whose corpus changed is REFUSED rather than reported. Per
+      # ARM-rep, not per round: the ratio's numerator and denominator are measured by DIFFERENT
+      # ARMS within one round. Status checked EXPLICITLY, so `|| exit 1` is what terminates the
+      # run. Full argument, and why nothing here is swallowed: lib-corpus-boundary.sh.
+      verify_corpus_boundary_or_refuse "$temp-$rep-after-$arm" || exit 1
     done
   done
 done

@@ -276,6 +276,20 @@ EXEMPTIONS: dict[str, str] = {
         "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
         " are prose explaining the split, the driver globals it reads/sets, and why perf_stat_c"
         " stayed",
+    # Round 22's campsite-rule split: the per-rep BOUNDARY CHECK, wired into the measurement loop
+    # against a driver already at its hard 950-line budget. Reported UNCOVERED the moment it became
+    # tracked, exactly as its nine predecessors were — the TENTH time this oracle has caught a
+    # split, which is what it is for. Note the two postures once more: the PERF tree lint's subject
+    # is a `scripts/perf/*.sh` glob, so this library joined it AUTOMATICALLY and was linted in
+    # `library` mode (correctly finding no perf invocation and no second `perf_stat_c`), while this
+    # CONTENT-based census demanded a decision. Same class as its eight library siblings: sourced by
+    # the driver, never invokes it, and its `ws0-baseline.sh` mentions are prose (the line budget
+    # that forced the split, the driver globals it reads, and the finding's statement — that round
+    # 21's boundary verifier was built, tested and CALLED BY NOTHING).
+    "scripts/perf/lib-corpus-boundary.sh":
+        "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
+        " are prose explaining the split, the driver globals it reads, and the round-21 finding"
+        " that the boundary verifier was unwired",
     "scripts/perf/README.md": "documentation",
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",
