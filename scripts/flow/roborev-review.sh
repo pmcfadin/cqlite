@@ -317,16 +317,19 @@ TWO DIFF-DELIVERY MODES, TREATED DIFFERENTLY (issue #3312): a large diff is NOT
 inlined — roborev writes it to a TRANSIENT file and the prompt ends with
 'Read the diff from: \`<abs path>\`', carrying ZERO diff --git headers. INLINE mode
 is certified exactly as before: an absent CODE census path is a hard FAIL.
-SNAPSHOT mode is OBSERVED AND REPORTED, not certified — prompt-content: reports a
-NOTICE and snapshot-path/-digest/-expected record the path, its digest as observed
-while the review ran, and the census code subset this run expected. That is an
-owner ruling (C‴), taken after seven review rounds found eleven false-PASS vectors
-in the machinery that made a copy of the vanishing snapshot trustworthy. So a
-snapshot-mode PASS does NOT assert the reviewer received the census paths, and a
-closer wanting certainty inspects the diff or re-reviews a smaller range. The
-wrapper still refuses to READ a path that is not absolute, not inside the reviewed
-repository, or reached through a symlink — safety survives the loss of
-certification — and an unobserved snapshot always says why.
+SNAPSHOT mode is DETECTED AND REPORTED, not certified — prompt-content: reports a
+NOTICE and snapshot-path/-containment/-expected record the path AS THE PROMPT STATED
+IT, a LEXICAL statement about that string, and the census code subset this run
+expected. NOTHING IS READ: no digest, no size, no stat, so the hang and race classes
+that came with reading are NOT REACHABLE rather than fixed. That is an owner ruling
+(C⁗), reached after seven review rounds found eleven false-PASS vectors in the
+machinery that made a copy of the vanishing snapshot certifiable, and three more
+defects in the code that merely digested it. A snapshot-mode PASS therefore does NOT
+assert the reviewer received the census paths; a closer wanting certainty inspects
+the diff or re-reviews a smaller range. A stated path that is relative, carries a
+`.`/`..` segment, lies outside the repository prefix, or is not shaped like
+.roborev/roborev-snapshot-<id>/<file> is a named FAIL, not a NOTICE — as is roborev's
+delegated-inspection tier, which names no snapshot path at all.
 
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside

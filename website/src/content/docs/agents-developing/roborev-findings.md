@@ -176,25 +176,29 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    prose after the fact. The same mechanism is why `prompt-content:` asserts the **CODE subset** of the
    census — and why an unretrievable prompt is a `FAIL` there, never a passing `UNAVAILABLE`.
 
-   **Snapshot-delivered diffs are observed and reported, not certified (issue #3312, owner ruling).** A
-   large diff is not inlined: roborev writes it to a **transient** `.roborev/roborev-snapshot-<id>/` file,
-   names it in the prompt, and deletes it before `roborev review --wait` returns, so the prompt carries
-   **zero** `diff --git` headers — which made the original check false-FAIL every large review. Certifying
-   that mode required trusting a copy of a vanishing file, and **seven review rounds found eleven false-PASS
-   vectors in the machinery built to make the copy trustworthy**. So the pre-registered exit fired and that
-   machinery was retired: in snapshot mode `prompt-content:` reports a **`NOTICE`**, and the block records
-   `snapshot-path:`, `snapshot-digest:` (observed while the review ran, else `UNOBSERVED (<why>)`) and
-   `snapshot-expected:` (the census code subset the run expected, not asserted). **A snapshot-mode PASS does
-   not assert that the reviewer received the census paths** — inspect the diff, or re-review a smaller range,
-   if you need that. **Inline mode is unchanged and still FAILs on an absent census path.** Safety survives
-   the loss of certification: the wrapper still refuses to read a path that is not absolute, not inside the
-   reviewed repository, or reached through a symlink, and an unobserved snapshot always says why.
+   **Snapshot-delivered diffs are detected and reported, and nothing is read (issue #3312, owner ruling C⁗).**
+   A large diff is not inlined: roborev writes it to a **transient** `.roborev/roborev-snapshot-<id>/` file,
+   names it in the prompt, and deletes it before `roborev review --wait` returns, so the prompt carries **zero**
+   `diff --git` headers — which made the original check false-FAIL every large review. Certifying that mode
+   required trusting a copy of a vanishing file, and **seven review rounds found eleven false-PASS vectors** in
+   the machinery built to make the copy trustworthy; once that was retired, every remaining defect was in the
+   code that merely **touched the filesystem** to digest it. Four destinations were ruled in turn (A-bounded →
+   categorical + C‴ → C‴ → C⁗), and **C⁗ is the floor**: in snapshot mode `prompt-content:` reports a
+   **`NOTICE`**, and the block records `snapshot-path:` (the path *as the prompt stated it*),
+   `snapshot-containment:` (a **`lexical`** statement about that string — no filesystem access at all) and
+   `snapshot-expected:` (the census code subset expected, not asserted). **A snapshot-mode PASS does not assert
+   that the reviewer received the census paths** — inspect the diff, or re-review a smaller range, if you need
+   that. **Inline mode is unchanged and still FAILs on an absent census path.** A stated path that is relative,
+   dot-segmented, outside the repository prefix, or not shaped like a snapshot file is a **named FAIL**, as is
+   roborev's delegated-inspection tier (which names no snapshot path at all). **The hang and race classes are
+   not reachable because nothing is read** — a weaker claim than "fixed", and the only true one.
 
-   **The general lesson worth carrying elsewhere** is the predicate family that surfaced three times on the
-   way (`! -f`, then `! -e`, then `! -e` again): **every `test`/`[` file predicate is two-valued, so it must
-   collapse "cannot tell" onto one of its answers — and it always picks the permissive one.** Absence is
-   therefore established affirmatively by a single helper (`verified-absent` / `present` / `unreadable`,
-   fail-closed, naming what could not be observed), with a `--lite` lint over any bare file predicate.
+   **The general lesson worth carrying elsewhere** is the predicate family that surfaced three times on the way
+   (`! -f`, then `! -e`, then `! -e` again): **every `test`/`[` file predicate is two-valued, so it must collapse
+   "cannot tell" onto one of its answers — and it always picks the permissive one.** The three-valued helper that
+   fixed it was deleted with the probes it served (a lint with an empty subject set greens vacuously, which is
+   the very shape it existed to catch), so this rule is the durable artifact: if a filesystem probe returns to
+   that code, `verified-absent` / `present` / `unreadable` returns with it.
 
    The sanctioned substitute is primary-source verification recorded in the PR (for a docs
    change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may
