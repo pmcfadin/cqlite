@@ -293,6 +293,16 @@ async fn the_probe_is_off_by_default_and_costless_when_off() {
 /// `generations > 1` check proves two SSTables exist without proving both HOLD the
 /// key — see the second affirmative check below, which is what makes the sum clause
 /// falsifiable.
+///
+/// # Residual this case does NOT cover
+///
+/// The byte clause is SELECTED by measurement, so if the Flight warm path ever stopped
+/// pricing at all, this case would take the fail-closed arm and stay green. It is not
+/// the pin for "pricing works": that is
+/// `cqlite-core/tests/issue_2827_partition_access_bytes.rs::a_big_access_is_counted_once_and_priced_from_its_measured_gap`,
+/// a different fixture on a different path, which asserts a non-zero measured extent
+/// and `unavailable == 0` unconditionally. What THIS case pins is the per-generation
+/// ACCOUNTING — one access, summed extents — which nothing else can see.
 #[tokio::test]
 async fn a_partition_in_several_generations_is_one_access_weighing_their_summed_gaps() {
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};

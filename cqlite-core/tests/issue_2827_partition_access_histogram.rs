@@ -655,28 +655,16 @@ fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
         1.0,
         "and the floor gauge must read 1"
     );
-}
 
-/// L3: an out-of-order emit must not leave the per-window gauges describing an OLDER
-/// window.
-///
-/// Windows close atomically under the recorder's write lock but are EMITTED after it
-/// drops, so with concurrent recorders window N's emit can arrive after N+1's. The
-/// three unlabelled gauges are last-writer-wins, and two of them
-/// (`window_dropped_accesses`, `sampling_floor`) carry the normative "was the LAST
-/// CLOSED window clean" property — so a late emit of an older window would invert
-/// exactly what F4 was raised to deliver.
-///
-/// Driven deterministically rather than by racing threads: close two windows, then
-/// emit them in REVERSE order through the public global path. The older window here is
-/// deliberately the LOSSY one, so a regression is unmissable — the gauges would read
-/// "lossy and floored" for a window that was clean.
-#[cfg(feature = "observability-testing")]
-#[test]
-fn a_stale_window_emit_does_not_overwrite_the_newer_windows_gauges() {
-    use cqlite_core::observability::{catalog, partition_access, testing};
-
-    let capture = testing::metrics_capture();
+    // ---- gauge SEQUENCING, same test: the capture harness is process-global -------
+    //
+    // This file's header records a one-capture-test-per-binary invariant; a second
+    // `#[test]` touching the harness broke it, and the breakage was not theoretical —
+    // the gauges are one shared series, so a sibling's emits and this scenario's raced
+    // for the value being read back, and a suppressed gauge reads as ABSENT, which
+    // `counter_sum` reports as `0.0`. The scenario could therefore pass having emitted
+    // nothing. Folded back in here, and every assertion below checks PRESENCE before
+    // value.
 
     // Window A (closes first): lossy and floored — no widening permitted, so the
     // table saturates and later keys cannot be seated.
@@ -718,10 +706,23 @@ fn a_stale_window_emit_does_not_overwrite_the_newer_windows_gauges() {
     // Emit NEWEST first, then the stale older one — the interleaving the lock cannot
     // prevent because emission happens outside it.
     capture.reset();
-    partition_access::emit_for_test(&newer);
-    partition_access::emit_for_test(&older);
+    lossy_recorder.emit_for_test(&newer);
+    lossy_recorder.emit_for_test(&older);
     let metrics = capture.flush_and_collect();
 
+    // PRESENCE BEFORE VALUE. `counter_sum` returns `0.0` for a metric that was never
+    // collected, so asserting `== 0.0` alone passes when the gauge was not emitted at
+    // all — which is precisely how the suppressed-by-a-sibling failure hid.
+    for gauge in [
+        catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
+        catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
+    ] {
+        assert!(
+            metrics.contains(gauge),
+            "{gauge} must actually have been emitted — an absent series reads as 0.0 \
+             and would satisfy the value assertion below having emitted nothing"
+        );
+    }
     assert_eq!(
         metrics.counter_sum(catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED),
         0.0,
@@ -744,4 +745,82 @@ fn a_stale_window_emit_does_not_overwrite_the_newer_windows_gauges() {
             >= (newer.total_accesses() + older.total_accesses()) as f64,
         "both windows' accesses must be counted"
     );
+
+    // ---- CONCURRENT emission, not just reverse-ordered --------------------------
+    //
+    // The reverse-order case above is structurally blind to the interleaving that
+    // motivated the mutex: `emit_for_test(&newer)` RETURNS before `emit_for_test(&older)`
+    // begins, so a design that merely decided admission atomically and then wrote
+    // unguarded would pass it. Drive the two emitters CONCURRENTLY through a barrier so
+    // both are inside the emit path together, repeatedly, and require the newest window's
+    // values to be what stands every time.
+    for round in 0..64 {
+        // Two fresh windows on one recorder, the OLDER one lossy+floored so a stale
+        // write is unmissable.
+        let recorder = PartitionAccessRecorder::new(WindowConfig {
+            duration: std::time::Duration::from_secs(86_400),
+            max_accesses: u64::MAX,
+            max_prefix_bits: 0,
+        });
+        for i in 0..300_000u64 {
+            recorder.record(
+                SCOPE,
+                &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
+                AccessWeight::SuccessorGap(64),
+            );
+        }
+        let stale = recorder.close_window().expect("lossy window");
+        assert!(stale.dropped_accesses > 0 && stale.at_sampling_floor);
+
+        let clean_recorder = PartitionAccessRecorder::new(WindowConfig {
+            duration: std::time::Duration::from_secs(86_400),
+            max_accesses: u64::MAX,
+            ..WindowConfig::default()
+        });
+        for id in 0..4u64 {
+            clean_recorder.record(SCOPE, &id.to_be_bytes(), AccessWeight::SuccessorGap(128));
+        }
+        // Give the clean window a HIGHER sequence on the same recorder as the stale one.
+        let clean = {
+            let c = clean_recorder.close_window().expect("clean window");
+            let mut c = c;
+            c.close_sequence = stale.close_sequence + 1;
+            c
+        };
+
+        capture.reset();
+        let recorder = std::sync::Arc::new(recorder);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = [clean, stale]
+            .into_iter()
+            .map(|summary| {
+                let recorder = std::sync::Arc::clone(&recorder);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    recorder.emit_for_test(&summary);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("emitter thread");
+        }
+
+        let metrics = capture.flush_and_collect();
+        assert!(
+            metrics.contains(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
+            "round {round}: the floor gauge must have been emitted"
+        );
+        assert_eq!(
+            metrics.counter_sum(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR),
+            0.0,
+            "round {round}: the newest window is clean, so no concurrent stale emit \
+             may leave the floor gauge reading 1"
+        );
+        assert_eq!(
+            metrics.counter_sum(catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED),
+            0.0,
+            "round {round}: likewise the per-window drop gauge"
+        );
+    }
 }

@@ -105,6 +105,11 @@ pub struct PartitionAccessRecorder {
     /// [`Self::close_locked`], so a summary's sequence orders it against every other
     /// close on this recorder even though the emit happens after the lock drops.
     close_sequence: AtomicU64,
+    /// Highest `close_sequence + 1` whose per-window gauges have been published, for
+    /// THIS recorder. Guarded by a mutex rather than an atomic because the compare
+    /// and the three gauge writes must be ONE critical section — see
+    /// [`Self::emit_window`].
+    gauge_order: std::sync::Mutex<u64>,
     /// Window-close policy, held as atomics rather than a plain field so
     /// [`PartitionAccessRecorder::set_window_config`] can retune the PROCESS-GLOBAL
     /// recorder — which is otherwise unreachable behind a `OnceLock` — without
@@ -127,6 +132,7 @@ impl PartitionAccessRecorder {
         let recorder = Self {
             state: RwLock::new(None),
             close_sequence: AtomicU64::new(0),
+            gauge_order: std::sync::Mutex::new(0),
             duration_nanos: AtomicU64::new(0),
             max_accesses: AtomicU64::new(0),
             max_prefix_bits: AtomicU32::new(0),
@@ -485,6 +491,78 @@ impl PartitionAccessRecorder {
         Some(summary)
     }
 
+    /// Emit one closed window's series, sequencing the per-window GAUGES.
+    ///
+    /// The counter families are additive and emitted unconditionally. The three
+    /// unlabelled gauges are last-writer-wins and carry the normative "was the LAST
+    /// CLOSED window clean" property, so a stale window must not write them.
+    ///
+    /// Two properties this needs, both of which an earlier `fetch_max` high-water
+    /// mark failed to provide:
+    ///
+    /// - **Per-recorder scope.** `close_sequence` is per-recorder, so one
+    ///   PROCESS-GLOBAL mark conflated independent recorders: an owned recorder
+    ///   emitting sequences 0,1 and the global one emitting 0,1,2 would suppress each
+    ///   other's gauges depending on interleaving — silently, since a suppressed
+    ///   gauge is an ABSENT series and `counter_sum` reads absent as `0.0`.
+    /// - **Atomic compare-and-write.** `fetch_max` decides WHETHER an emitter may
+    ///   write; it does not serialize the writes. Older (seq 5) could be admitted,
+    ///   be preempted, let newer (seq 6) admit and write, then resume and overwrite
+    ///   with stale values — inverting exactly the property the sequencing exists to
+    ///   guarantee. Both callers emit outside the recorder's window lock by design,
+    ///   so that interleaving is reachable.
+    ///
+    /// Hence one mutex per recorder held across the comparison AND all three writes.
+    /// It is taken once per CLOSED WINDOW, never on the record hot path.
+    fn emit_window(&self, summary: &WindowSummary) {
+        emit_counters(summary);
+
+        let mut high_water = self
+            .gauge_order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `high_water` is the highest sequence already published, PLUS ONE, so a
+        // sequence strictly below it has been superseded.
+        if summary.close_sequence < *high_water {
+            // A newer window of THIS recorder already published; skip, never queue.
+            return;
+        }
+        *high_water = summary.close_sequence + 1;
+
+        // Saturating rather than wrapping: the denominator is at most 2^20, so the
+        // cast is exact, but the clamp keeps the gauge honest under any future cap.
+        super::record_gauge(
+            catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
+            i64::try_from(summary.sample_denominator).unwrap_or(i64::MAX),
+            &[],
+        );
+        // The two per-window trustworthiness gauges: a window is clean exactly when
+        // both read 0, and both are emitted on EVERY closed window including at zero
+        // so an absent series is never ambiguous.
+        super::record_gauge(
+            catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
+            i64::try_from(summary.dropped_accesses).unwrap_or(i64::MAX),
+            &[],
+        );
+        super::record_gauge(
+            catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
+            i64::from(summary.at_sampling_floor),
+            &[],
+        );
+    }
+
+    /// [`Self::emit_window`], for tests that need to control emission ORDER.
+    ///
+    /// The sequencing guarantee is only observable when two windows are emitted out
+    /// of order or concurrently, which cannot be produced deterministically by the
+    /// ordinary paths. Gated to `observability-testing`, the feature that installs the
+    /// in-memory meter, so it is absent from every production build. Being a METHOD
+    /// is load-bearing: the ordering state it exercises is per-recorder.
+    #[cfg(feature = "observability-testing")]
+    pub fn emit_for_test(&self, summary: &WindowSummary) {
+        self.emit_window(summary);
+    }
+
     fn read_state(&self) -> std::sync::RwLockReadGuard<'_, Option<WindowState>> {
         self.state.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -556,7 +634,7 @@ pub fn record_partition_access(scope: TableScope<'_>, key: &[u8], weight: Access
         return;
     }
     for summary in global().record(scope, key, weight) {
-        emit(&summary);
+        global().emit_window(&summary);
     }
 }
 
@@ -565,50 +643,14 @@ pub fn record_partition_access(scope: TableScope<'_>, key: &[u8], weight: Access
 /// Returns the summary, or `None` when the window recorded nothing.
 pub fn close_window() -> Option<WindowSummary> {
     let summary = global().close_window()?;
-    emit(&summary);
+    global().emit_window(&summary);
     Some(summary)
 }
 
-/// Emit one closed window's series through the same path
-/// [`record_partition_access`] and [`close_window`] use, for tests that need to
-/// control emission ORDER.
-///
-/// The ordering guarantee this exists to pin — that a stale window may not overwrite
-/// a newer one's gauges — is only observable when two windows are emitted out of
-/// order, which cannot be produced deterministically by racing threads. Gated to
-/// `observability-testing`, the feature that installs the in-memory meter, so it is
-/// absent from every production build.
-#[cfg(feature = "observability-testing")]
-pub fn emit_for_test(summary: &WindowSummary) {
-    emit(summary);
-}
-
-/// Emit one closed window's series — the three bucketed families plus the four
-/// unlabelled scalars (sampling scale, cumulative drops, per-window drops, sampling
-/// floor). Exactly once per closed window; a window with no accesses never reaches
-/// here.
-fn emit(summary: &WindowSummary) {
+/// Emit the ORDER-FREE part of a closed window: the three bucketed counter families
+/// and the cumulative drop counter. Additive, so no sequencing is needed.
+fn emit_counters(summary: &WindowSummary) {
     use super::add_counter;
-
-    // Windows close atomically under the recorder's write lock, but they are EMITTED
-    // after that lock drops — so with several recording threads window N's emit can be
-    // overtaken by N+1's. The counter families below are additive and order-free. The
-    // three unlabelled GAUGES are not: a late emit of an older window would leave
-    // `sampling_floor` and `window_dropped_accesses` describing it, inverting the
-    // "was the LAST CLOSED window clean" property those two exist to provide
-    // (normative in `catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED` and the spec).
-    //
-    // So gauges are written only by the newest window observed. A high-water mark
-    // rather than a lock: a stale emit must be SKIPPED, never queued behind a newer
-    // one. `fetch_max` returns the previous value, so `prev > seq` means a newer
-    // window already published.
-    //
-    // This lives in the global emit path only, so an owned recorder stays
-    // emission-free — the stated reason `record` returns summaries instead of
-    // emitting them — and `record` itself is untouched.
-    static GAUGE_HIGH_WATER: AtomicU64 = AtomicU64::new(0);
-    let previous = GAUGE_HIGH_WATER.fetch_max(summary.close_sequence + 1, Ordering::Relaxed);
-    let gauges_are_current = previous <= summary.close_sequence;
 
     for b in RepeatBucket::ALL {
         let stats = summary.bucket(b);
@@ -644,47 +686,12 @@ fn emit(summary: &WindowSummary) {
             );
         }
     }
-    // Saturating rather than wrapping: the denominator is at most 2^20, so this
-    // cast is exact, but the clamp keeps the gauge honest under any future cap.
-    if gauges_are_current {
-        super::record_gauge(
-            catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
-            i64::try_from(summary.sample_denominator).unwrap_or(i64::MAX),
-            &[],
-        );
-    }
-    // The window's trustworthiness, exported so an operator who never calls
-    // `close_window` can still tell a lossy or floored window from a clean one —
-    // both are conditions the decision procedure refuses on.
-    //
-    // TWO signals for the drops, with deliberately different semantics: the
-    // CUMULATIVE counter answers "has this process ever lost input" (monotonic, so
-    // alertable), while the per-window GAUGE answers "was the window just closed
-    // clean". A counter alone cannot answer the second — once it increments it reads
-    // non-zero forever — and the spec requires that an instantaneous read of the
-    // emitted series distinguish a clean window. Both gauges are emitted on EVERY
-    // closed window, including at zero, so absence is never ambiguous: a window is
-    // clean exactly when both read 0.
-    // The CUMULATIVE counter is additive — "has this process ever lost input" — so it
-    // is emitted for every closed window regardless of ordering.
+    // The CUMULATIVE drop counter is additive — "has this process ever lost input" —
+    // so it is emitted for every closed window regardless of ordering.
     if summary.dropped_accesses > 0 {
         add_counter(
             catalog::READ_PARTITION_ACCESS_DROPPED,
             summary.dropped_accesses,
-            &[],
-        );
-    }
-    // The two per-window gauges answer "was the window just closed clean", so only
-    // the newest close may write them.
-    if gauges_are_current {
-        super::record_gauge(
-            catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
-            i64::try_from(summary.dropped_accesses).unwrap_or(i64::MAX),
-            &[],
-        );
-        super::record_gauge(
-            catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
-            i64::from(summary.at_sampling_floor),
             &[],
         );
     }

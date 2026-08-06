@@ -122,7 +122,11 @@ recorder's lock is released, so with concurrent recorders an older window's emit
 newer one's; writing it would leave the gauges describing the older window and invert the very
 property they exist to provide. Each closed window SHALL therefore carry a monotonic close sequence
 assigned at close time, and the emit path SHALL skip the gauge writes for a sequence older than the
-newest already emitted. The CUMULATIVE `dropped_accesses` counter is additive and SHALL still be
+newest already emitted. That sequencing state SHALL be **per-recorder** (the sequence itself is
+per-recorder, so a process-wide mark would let independent recorders suppress each other's gauges —
+silently, since a suppressed gauge is an ABSENT series), and the comparison SHALL be **atomic with
+the gauge writes** (deciding admission alone does not serialize the writes: an admitted older
+emitter can be preempted, let a newer one write, then resume and overwrite with stale values). The CUMULATIVE `dropped_accesses` counter is additive and SHALL still be
 emitted for every closed window regardless of order, as SHALL the three bucketed counter families.
 
 A probe-cluster failure
@@ -343,10 +347,19 @@ the recorder alone are not sufficient.
 unevidenced): `cqlite-flight/tests/issue_2827_partition_access_e2e.rs`
 `a_partition_in_several_generations_is_one_access_weighing_their_summed_gaps`, over a two-flush
 fixture. Every other fixture in the suite is single-generation, which makes a `distinct == 1`
-assertion vacuous for `k > 1`. The test therefore asserts affirmatively that at least TWO
-generations individually resolve a non-zero extent for the key BEFORE asserting the accounting,
-and its byte oracle is derived from the SSTables' own resolved extents rather than from the
-accumulator under test. Verified discriminating against both hazards this scenario exists to
+assertion vacuous for `k > 1`. The test therefore SELECTS the byte clause on an
+affirmative measurement — whether at least TWO generations individually resolve a non-zero extent
+for the key — with BOTH arms falsifiable: the measured arm asserts the summed weight and a zero
+`unavailable` count, the other asserts the fail-closed contract (`unavailable == 1`, zero bytes).
+Its byte oracle is derived from the SSTables' own resolved extents rather than from the accumulator
+under test.
+
+**Residual, recorded:** if the Flight warm path ever stopped pricing, that case would flip to the
+fail-closed arm and stay green. The default-build pin for pricing is therefore a DIFFERENT
+fixture on a different path —
+`cqlite-core/tests/issue_2827_partition_access_bytes.rs::a_big_access_is_counted_once_and_priced_from_its_measured_gap`,
+which asserts a non-zero measured extent and `unavailable == 0` — so a silent slide into the
+fail-closed arm is caught there, not here. Verified discriminating against both hazards this scenario exists to
 close: dropping one generation's extent yields 25 against an expected 50, and recording per
 candidate instead of per logical read yields 3 accesses against an expected 1.
 
@@ -417,7 +430,10 @@ It SHALL state, at minimum:
   EITHER direction. It SHALL name **issue #3340** and SHALL state that **#3340 must land before any
   go/no-go verdict is derived from a real production window**. The clairvoyance assumption remains
   optimistic, so a high value is at most a licence to simulate LRU against the captured window;
-- the **refusal conditions**, each of which yields *no answer* rather than a default verdict: a
+- the **refusal conditions**, each of which yields *no answer* rather than a default verdict: an
+  out-of-domain input (a decode multiplier that is not finite and positive, or a threshold outside
+  `[0.0, 1.0]` — a zero multiplier makes the on-disk budget infinite so every bucket "fits" and the
+  procedure reports a maximal hit ratio clearing any threshold, i.e. a FALSE GO), a
   non-zero `unavailable` fraction, accesses the recorder could not seat at all, a window at the
   sampling floor, a window that is a SAMPLE rather than a census (its per-bucket bytes are
   sample-domain totals, so filling a real budget against them overstates what fits), a window below

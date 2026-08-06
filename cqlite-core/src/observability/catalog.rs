@@ -493,8 +493,12 @@ pub const READ_PARTITION_ACCESS_SAMPLING_FLOOR: &str =
 /// arrive after a newer one's. Each closed window carries a monotonic close sequence
 /// and the emit path skips this gauge for a stale sequence — without that, a late
 /// emit would leave it describing the older window and invert the property. The
-/// cumulative [`READ_PARTITION_ACCESS_DROPPED`] counter is additive and is emitted
-/// regardless of order.
+/// sequencing state is PER-RECORDER and its comparison is ATOMIC with the gauge
+/// writes: a process-wide mark would let independent recorders suppress each other's
+/// gauges, and deciding admission without holding it through the write would let an
+/// admitted older emitter be preempted and then overwrite a newer one. The cumulative
+/// [`READ_PARTITION_ACCESS_DROPPED`] counter is additive and is emitted regardless of
+/// order.
 pub const READ_PARTITION_ACCESS_WINDOW_DROPPED: &str =
     "cqlite.read.partition_access.window_dropped_accesses";
 

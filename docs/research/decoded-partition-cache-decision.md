@@ -89,6 +89,10 @@ Each yields **no answer**, never a default verdict. Check every one before compu
 They are in the order the shipped evaluator applies them, so a window failing several is
 diagnosed by the most fundamental.
 
+0. **An out-of-domain input.** The decode multiplier must be finite and `> 0`; the go
+   threshold must be finite and in `[0.0, 1.0]`. **Refuse** otherwise — a zero multiplier
+   makes the on-disk budget infinite, so every bucket "fits" and the procedure reports a
+   maximal hit ratio that clears any threshold: a false GO rather than a visible error.
 1. **A non-zero `unavailable` fraction** (`distinct_partitions{size_source="unavailable"}`).
    The byte total is incomplete by an unknown amount, so any budget-filling arithmetic
    overstates what fits. **Refuse**, naming the fraction. This tests *incompleteness*, not

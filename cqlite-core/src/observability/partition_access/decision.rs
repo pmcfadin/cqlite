@@ -119,6 +119,20 @@ pub enum Refusal {
     SyntheticWorkload,
     /// Every priced partition reported zero bytes, so no budget can be filled.
     NoPricedBytes,
+    /// An input was outside the domain the arithmetic is defined on.
+    ///
+    /// Checked before anything else because the failure is a FALSE GO, not a wrong
+    /// number: `decode_multiplier == 0.0` makes the on-disk budget `+inf`, every
+    /// bucket then "fits", and the procedure reports a maximal hit ratio clearing any
+    /// threshold. A `NaN` multiplier yields a `NaN` ratio that clears nothing but
+    /// reports a verdict anyway; a non-positive or `NaN` threshold makes
+    /// `clears_threshold` meaningless.
+    InvalidInput {
+        /// Which input, and what was wrong with it.
+        detail: &'static str,
+        /// The offending value, for the operator reading the refusal.
+        value: f64,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -173,6 +187,13 @@ impl std::fmt::Display for Refusal {
                 f,
                 "REFUSED: no partition in the window carried authoritative on-disk bytes, \
                  so no budget can be filled"
+            ),
+            Refusal::InvalidInput { detail, value } => write!(
+                f,
+                "REFUSED: {detail} (got {value}). This is rejected rather than computed \
+                 because the arithmetic would still produce a verdict — a zero decode \
+                 multiplier makes the on-disk budget infinite, every bucket fits, and \
+                 the result is a maximal hit ratio that clears any threshold: a FALSE GO"
             ),
         }
     }
@@ -247,6 +268,10 @@ pub fn evaluate(
 
 /// [`evaluate`] with an explicit go threshold — the threshold is the owner's
 /// parameter, so it is an argument rather than a constant baked into the answer.
+///
+/// `decode_multiplier` must be finite and `> 0`; `threshold` must be finite and in
+/// `[0.0, 1.0]`. Anything else is [`Refusal::InvalidInput`] — see that variant for why
+/// these are refused rather than computed.
 pub fn evaluate_with_threshold(
     summary: &WindowSummary,
     source: WindowSource,
@@ -254,6 +279,25 @@ pub fn evaluate_with_threshold(
     decode_multiplier: f64,
     threshold: f64,
 ) -> Verdict {
+    // 0. INPUT DOMAIN, before anything else. No in-repo caller can supply a bad value
+    //    today (they all pass `ASSUMED_DECODE_MULTIPLIER` / `RECOMMENDED_GO_THRESHOLD`),
+    //    but both are `f64` on a public function, and the failure mode is a false GO
+    //    rather than a visible error — the exact bias class this instrument exists to
+    //    avoid. The day a CLI flag or config plumbs the multiplier through, this is the
+    //    guard that stops a typo from reading as a verdict.
+    if !decode_multiplier.is_finite() || decode_multiplier <= 0.0 {
+        return Verdict::Refused(Refusal::InvalidInput {
+            detail: "the decode multiplier must be a finite number greater than zero",
+            value: decode_multiplier,
+        });
+    }
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Verdict::Refused(Refusal::InvalidInput {
+            detail: "the go threshold must be a finite hit ratio in [0.0, 1.0]",
+            value: threshold,
+        });
+    }
+
     // 1. An incomplete byte total cannot be priced.
     let unavailable = summary.unavailable_partitions();
     if unavailable > 0 {
@@ -439,6 +483,74 @@ mod tests {
             }
             other => panic!("expected an unpriceable-fraction refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_out_of_domain_input_is_refused_rather_than_priced() {
+        // M2: every one of these produces a VERDICT if the arithmetic is allowed to
+        // run, and the first is a false GO — the failure class this whole change
+        // exists to eliminate.
+        let s = window(&[(600, 20, 1_024), (10_000, 1, 1_024)]);
+        assert!(
+            s.total_accesses() >= MIN_ACCESSES,
+            "so only the input is at issue"
+        );
+
+        // A zero multiplier makes the on-disk budget +inf: every bucket fits and the
+        // ratio is maximal, clearing any threshold.
+        for bad_multiplier in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            match evaluate(&s, WindowSource::Field, 128 * 1024 * 1024, bad_multiplier) {
+                Verdict::Refused(Refusal::InvalidInput { value, .. }) => {
+                    assert!(
+                        value.is_nan() == bad_multiplier.is_nan()
+                            && (value.is_nan() || value == bad_multiplier),
+                        "the refusal must name the offending value"
+                    );
+                }
+                other => panic!("multiplier {bad_multiplier} must be refused: {other:?}"),
+            }
+        }
+
+        // A threshold outside [0,1] makes `clears_threshold` meaningless: <= 0 always
+        // clears, > 1 never can, NaN never compares.
+        for bad_threshold in [-0.1, 1.5, f64::NAN, f64::INFINITY] {
+            let v = evaluate_with_threshold(
+                &s,
+                WindowSource::Field,
+                128 * 1024 * 1024,
+                ASSUMED_DECODE_MULTIPLIER,
+                bad_threshold,
+            );
+            assert!(
+                matches!(v, Verdict::Refused(Refusal::InvalidInput { .. })),
+                "threshold {bad_threshold} must be refused: {v:?}"
+            );
+        }
+
+        // The BOUNDARIES are inside the domain and must still price.
+        for ok_threshold in [0.0, 1.0, RECOMMENDED_GO_THRESHOLD] {
+            let v = evaluate_with_threshold(
+                &s,
+                WindowSource::Field,
+                128 * 1024 * 1024,
+                ASSUMED_DECODE_MULTIPLIER,
+                ok_threshold,
+            );
+            assert!(
+                matches!(v, Verdict::Priced(_)),
+                "threshold {ok_threshold} is in domain and must price: {v:?}"
+            );
+        }
+        // A tiny-but-positive multiplier is in domain — unhelpful, not invalid.
+        assert!(matches!(
+            evaluate(
+                &s,
+                WindowSource::Field,
+                128 * 1024 * 1024,
+                f64::MIN_POSITIVE
+            ),
+            Verdict::Priced(_)
+        ));
     }
 
     #[test]
