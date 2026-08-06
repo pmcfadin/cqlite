@@ -952,8 +952,12 @@ import pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_binaries import MEASURED_BINARIES
 from ws0_binary_spec import frozen_relpath
-src = pathlib.Path(sys.argv[1], "ws0_binaries.py").read_text()
-body = src[src.index("def freeze_measured_binaries"):src.index("def record_binary_provenance")]
+# `freeze_measured_binaries` moved to `ws0_binary_snapshot.py` in round 21's F5 campsite split (the
+# snapshot's ONE-BUILD verification went in beside it). The assert follows the code rather than
+# being deleted with the file it used to read — a structural check pointed at a moved function
+# passes by reading nothing.
+src = pathlib.Path(sys.argv[1], "ws0_binary_snapshot.py").read_text()
+body = src[src.index("def freeze_measured_binaries"):]
 assert '"path": frozen_relpath(name)' in body, "the writer must record the shared relative spelling"
 assert '"path": str(dst)' not in body, "the writer must not record an absolute path"
 for name in MEASURED_BINARIES:
