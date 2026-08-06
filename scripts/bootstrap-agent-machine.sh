@@ -536,7 +536,11 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
       # must supply the password FIRST — `sudo -v` refreshes the credential timestamp, after which the
       # `sudo -n` inside bootstrap succeeds — or run from an already-authenticated root shell.
       info "sudo needs a password here, and bootstrap probes with 'sudo -n' (never prompts) — authenticate first, then re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh --yes"
-      info "(or run it from an authenticated ROOT shell:  sudo -i, then bash scripts/bootstrap-agent-machine.sh --yes)"
+      # NOT `sudo -i` (roborev round 11, Low): a login shell switches to root HOME, so the relative
+      # `scripts/...` path below it usually would not exist — advice that fails on the box it is
+      # printed for. `sudo bash <script>` prompts once, keeps the working directory, and makes
+      # bootstrap itself root, so its internal `sudo -n` probe is never reached.
+      info "(or simply:  sudo bash scripts/bootstrap-agent-machine.sh --yes)"
     else
       info "write + apply the drop-in:  bash scripts/bootstrap-agent-machine.sh --yes"
     fi
