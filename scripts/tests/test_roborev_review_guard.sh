@@ -4139,7 +4139,7 @@ else
 fi
 # AND THE SCANNER OWNS THE MARKER FORM: two implementations of the pattern would drift, and the shell
 # having one at all is what made the text channel possible.
-if ! grep -qF 'roborev-waive: prompt-content-absent base=' "$ORACLES" \
+if ! grep -v '^[[:space:]]*#' "$ORACLES" | grep -qF 'roborev-waive: prompt-content-absent' \
   && grep -qF 'roborev-waive: prompt-content-absent' "$SCAN_TOOL"; then
   ok 'structural: the marker form is expressed once, in the structured scanner'
 else
@@ -4153,8 +4153,12 @@ fi
 # and the disclaimer MUST be scoped to "which allowlisted human", never to authorship in general.
 _allow_ok=1
 grep -qF 'ROBOREV_WAIVER_AUTHORS=' "$ORACLES" || _allow_ok=0
-grep -qF 'roborev_waiver_author_allowed' "$ORACLES" || _allow_ok=0
-grep -qF 'ROBOREV_WAIVER_STATE="unauthorized"' "$ORACLES" || _allow_ok=0
+# The allowlist VALUE is visible in the shell; the DECISION lives in the structured scanner (job 26), so
+# the author is compared against it where author and body are still separate fields.
+grep -qF '"$ROBOREV_WAIVER_AUTHORS"' "$ORACLES" || _allow_ok=0
+grep -qF 'if author not in allowlist' "$SCAN_TOOL" || _allow_ok=0
+grep -qF 'return "unauthorized"' "$SCAN_TOOL" || _allow_ok=0
+grep -qF 'unauthorized|stale|malformed|none' "$ORACLES" || _allow_ok=0
 if [ "$_allow_ok" -eq 1 ]; then
   ok 'structural: the waiver author is authorized against an explicit allowlist, with its own UNAUTHORIZED state'
 else
