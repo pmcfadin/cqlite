@@ -3402,7 +3402,7 @@ STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv6)' FAIL 1
-assert_says 'case (wv6) a reasonless waiver is refused by name' '^waiver: MALFORMED \(the marker carries no reason= value'
+assert_says 'case (wv6) a reasonless waiver is refused by name' '^waiver: MALFORMED \(the marker is missing reason='
 assert_lacks 'case (wv6) and never yields WAIVED' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3631,13 +3631,19 @@ assert_says '--help says absence is unconditionally a FAIL' \
 assert_says '--help states the accepted cost: the two absences are indistinguishable' \
   'IDENTICAL to the machine'
 assert_says '--help names the token accounting as the human evidence' '398k-649k input'
-assert_says '--help gives the waiver marker verbatim' \
-  'roborev-waive: prompt-content-absent sha=<40-hex head> reason=<why>'
+assert_says '--help gives the waiver marker verbatim, with every bound field' \
+  'roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>'
 assert_says '--help says who may grant it, and that a worker may only request' \
   'may REQUEST one'
-assert_says '--help says the waiver is sha-bound' 'SHA-BOUND: a push invalidates it'
+assert_says '--help says the waiver is bound to the whole review scope' \
+  'IT IS BOUND TO THE WHOLE REVIEW SCOPE'
+assert_says '--help says a re-run needs a fresh waiver' 'a push, a different base or a$|re-run each need a fresh one'
+assert_says '--help states the three anti-self-grant layers' \
+  'THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL'
+assert_says '--help says the diagnostic prints no part of the marker' \
+  'diagnostic prints NO part of the$|marker; it points here instead'
 assert_says '--help says it excuses the absence verdict only' 'excuses the ABSENCE'
-assert_says '--help says the waived token is DISTINCT from PASS' 'a DISTINCT token'
+assert_says '--help says the waived token is DISTINCT from PASS' 'a DISTINCT'
 assert_says '--help states the authorship limitation, not an implied guarantee' \
   'AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
 assert_lacks '--help no longer documents the deleted snapshot record keys' 'snapshot-path/-containment/-expected'
@@ -3789,7 +3795,7 @@ _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | hea
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
 _pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
 _pc_exec=$(printf '%s\n' "$_pc_body" | grep -v '^[[:space:]]*#')
-if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${HEAD_SHA:-}"' \
+if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
   && [ "$(printf '%s\n' "$_pc_exec" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
   && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="WAIVED ('; then
   ok 'structural: the waiver is looked up EXACTLY ONCE, inside the absence branch, so it can excuse only that verdict (constraint (c))'
