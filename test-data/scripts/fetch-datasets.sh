@@ -1256,6 +1256,195 @@ resolve_tracked_subtree_readonly() {
   return 0
 }
 
+# True when a repo-relative path lies at or under the captured subtree. Compared
+# COMPONENT-WISE (the trailing slash), so `test-data/datasets-old` is not read as
+# inside `test-data/datasets` — the same rule as path_relative_inside.
+path_under_tracked_rel() {
+  case "$1" in
+    "${TRACKED_GUARD_REL}" | "${TRACKED_GUARD_REL}"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Order-preserving de-duplication of a path list into DEDUPED_PATHS (issue #3310
+# roborev round 4). `git ls-files` reports an UNMERGED path once per stage, so a
+# report built from it can name the same file three times. O(n²) is deliberate:
+# the input is the DELETED/unmerged set, and a portable, obviously-correct loop
+# beats a `sort -zu` pipeline whose NUL support is not universal on macOS.
+DEDUPED_PATHS=()
+dedupe_paths() {
+  local candidate existing seen
+  DEDUPED_PATHS=()
+  for candidate in "$@"; do
+    seen=0
+    for existing in ${DEDUPED_PATHS[@]+"${DEDUPED_PATHS[@]}"}; do
+      if [ "${existing}" = "${candidate}" ]; then
+        seen=1
+        break
+      fi
+    done
+    if [ "${seen}" = 0 ]; then
+      DEDUPED_PATHS+=( "${candidate}" )
+    fi
+  done
+}
+
+# Classify HEAD once, for every consumer of a staged (HEAD-vs-index) diff.
+#   0  HEAD resolves — staged diffs are meaningful
+#   1  CONFIRMED unborn — no commit exists, so no path can be deleted or renamed
+#      RELATIVE TO HEAD; a measured emptiness, not a skipped measurement
+#   2  COULD NOT MEASURE (reason in TRACKED_PROBE_REASON)
+#
+# A failing `rev-parse --verify HEAD` proves nothing on its own: a corrupt ref
+# fails identically to an unborn branch (roborev round 3). Unborn is therefore
+# CONFIRMED — HEAD is a symref to a branch AND that branch does not exist, which
+# `show-ref --verify` reports with exit status exactly 1 ("ref not found"); a
+# corrupt ref exits 128 and an unparseable HEAD fails `symbolic-ref` outright.
+# Exit codes verified against git 2.43 in all three states, not assumed.
+classify_head_state() {
+  local head_ref="" show_ref_rc=0
+  TRACKED_PROBE_REASON=""
+  if guard_git -C "${TRACKED_GUARD_REPO}" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+  if head_ref="$(guard_git -C "${TRACKED_GUARD_REPO}" symbolic-ref -q HEAD 2>/dev/null)" \
+    && [ -n "${head_ref}" ]; then
+    guard_git -C "${TRACKED_GUARD_REPO}" show-ref --verify -q -- "${head_ref}" >/dev/null 2>&1 \
+      || show_ref_rc=$?
+  else
+    show_ref_rc=-1
+  fi
+  if [ "${show_ref_rc}" = 1 ]; then
+    return 1
+  fi
+  TRACKED_PROBE_REASON="HEAD in '${TRACKED_GUARD_REPO}' does not resolve and is NOT a confirmed unborn branch (symbolic-ref gave '${head_ref:-<none>}', show-ref status ${show_ref_rc}) — a corrupt or unreadable ref fails exactly like an unborn one, so staged changes cannot be ruled out"
+  return 2
+}
+
+# ---------------------------------------------------------------------------
+# UNCLASSIFIABLE GIT STATE: DECLARE, DO NOT CLASSIFY (issue #3310, roborev r4).
+#
+# Two states defeat the subtree-scoped census in the same way — not by producing a
+# wrong VERDICT, but by producing a CONFIDENT WRONG REPAIR:
+#   * a staged rename whose destination leaves the dataset subtree. The census
+#     pathspec hides the destination, so rename detection cannot fire and the old
+#     path looks deleted; the advertised "EXACTLY this command" would REVERSE
+#     intentional work.
+#   * an unmerged (conflict) index entry. `git restore --worktree` cannot rebuild a
+#     conflicted path — there is no single stage to restore from — so the promised
+#     repair simply fails, and `ls-files` lists the path once per stage.
+#
+# Modelling each state is how a probe accumulates confident wrong answers, so this
+# instead detects MARKERS of unclassifiable state and hands the verdict to the
+# existing COULD NOT MEASURE path, which prints NO repair command. An honest
+# unmeasurable beats a confident wrong repair.
+#
+# AFFIRMATIVE BY CONSTRUCTION: the clean branch is reached only after both marker
+# scans have RUN and reported nothing. Neither scan's failure is permitted to look
+# like "no marker" — a scan that cannot run returns 2, which is also COULD NOT
+# MEASURE. Nothing here infers classifiability from the absence of trouble.
+#
+#   0  measured: no unclassifiable-state marker under the subtree
+#   1  a marker was found (reason in TRACKED_PROBE_REASON)
+#   2  the pre-check itself could not run (reason in TRACKED_PROBE_REASON)
+# ---------------------------------------------------------------------------
+detect_unclassifiable_git_state() {
+  local scratch record path old new head_rc=0 shown
+  local -a unmerged=()
+  TRACKED_PROBE_REASON=""
+
+  # MARKER 1 — unmerged index entries under the subtree. Index-only, so it needs
+  # no HEAD and runs unconditionally. `-z` (unlike the destructive path's
+  # `ls-files -u` read at the top of this file, which is newline-framed): the
+  # records here are turned into report text, so they must be exact.
+  if ! scratch="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-unmerged.XXXXXX")"; then
+    TRACKED_PROBE_REASON="could not create a scratch file for the unmerged-entry scan"
+    return 2
+  fi
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -u -z -- ":(literal)${TRACKED_GUARD_REL}" >"${scratch}"; then
+    rm -f "${scratch}"
+    TRACKED_PROBE_REASON="'git ls-files -u' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}', so unmerged (conflicted) entries cannot be ruled out"
+    return 2
+  fi
+  # Records are "<mode> <sha> <stage>\t<path>"; the path follows the TAB.
+  while IFS= read -r -d '' record; do
+    case "${record}" in
+      *"$(printf '\t')"*) unmerged+=( "${record#*$'\t'}" ) ;;
+      *)
+        rm -f "${scratch}"
+        TRACKED_PROBE_REASON="unparseable 'git ls-files -u -z' record '${record}' for '${TRACKED_GUARD_REL}'"
+        return 2
+        ;;
+    esac
+  done <"${scratch}"
+  rm -f "${scratch}"
+  if [ "${#unmerged[@]}" -gt 0 ]; then
+    dedupe_paths "${unmerged[@]}"
+    shown="${#DEDUPED_PATHS[@]}"
+    [ "${shown}" -le 5 ] || shown=5
+    TRACKED_PROBE_REASON="${#DEDUPED_PATHS[@]} path(s) under '${TRACKED_GUARD_REL}' have UNMERGED (conflicted) index entries: $(printf '%s; ' "${DEDUPED_PATHS[@]:0:shown}")— a conflicted path has no single stage to restore from, so whether it is present, lost, or mid-resolution cannot be classified and 'git restore --worktree' could not repair it. Resolve or abort the merge first"
+    return 1
+  fi
+
+  # MARKER 2 — a staged rename CROSSING the subtree boundary. Detected on a
+  # WHOLE-REPO staged diff (no pathspec): restricting it to the subtree is exactly
+  # what hides the destination and defeats rename detection, so the marker scan
+  # must look wider than the census does.
+  classify_head_state || head_rc=$?
+  case "${head_rc}" in
+    0) ;;
+    1) return 0 ;;  # unborn: no staged rename can exist relative to a HEAD that does not exist
+    *) return 2 ;;  # TRACKED_PROBE_REASON already set
+  esac
+
+  if ! scratch="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-renames.XXXXXX")"; then
+    TRACKED_PROBE_REASON="could not create a scratch file for the boundary-rename scan"
+    return 2
+  fi
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" --no-optional-locks diff --cached --name-status \
+    --find-renames -z >"${scratch}"; then
+    rm -f "${scratch}"
+    TRACKED_PROBE_REASON="'git diff --cached --name-status' failed in '${TRACKED_GUARD_REPO}', so a rename crossing the '${TRACKED_GUARD_REL}' boundary cannot be ruled out"
+    return 2
+  fi
+  # `--name-status -z` frames a plain change as "<status>\0<path>\0" and a
+  # rename/copy as "R<score>\0<old>\0<new>\0". A truncated record means the framing
+  # is not what is being parsed — refusing to guess is mandatory here.
+  while IFS= read -r -d '' record; do
+    case "${record}" in
+      R* | C*)
+        if ! IFS= read -r -d '' old || ! IFS= read -r -d '' new; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="truncated 'git diff --cached --name-status -z' rename record '${record}' in '${TRACKED_GUARD_REPO}'"
+          return 2
+        fi
+        if path_under_tracked_rel "${old}" && ! path_under_tracked_rel "${new}"; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="a staged RENAME moves '${old}' out of '${TRACKED_GUARD_REL}' to '${new}' — the census is scoped to '${TRACKED_GUARD_REL}', so within that scope the old path is indistinguishable from a deleted fixture, and a repair advertised for it would REVERSE the rename"
+          return 1
+        fi
+        if path_under_tracked_rel "${new}" && ! path_under_tracked_rel "${old}"; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="a staged RENAME moves '${old}' into '${TRACKED_GUARD_REL}' as '${new}' — the census is scoped to '${TRACKED_GUARD_REL}', so the two halves of that rename cannot be related to each other within this scope"
+          return 1
+        fi
+        ;;
+      *)
+        if ! IFS= read -r -d '' path; then
+          rm -f "${scratch}"
+          TRACKED_PROBE_REASON="truncated 'git diff --cached --name-status -z' record '${record}' in '${TRACKED_GUARD_REPO}'"
+          return 2
+        fi
+        ;;
+    esac
+  done <"${scratch}"
+  rm -f "${scratch}"
+
+  # Both scans RAN and reported nothing. That — not the absence of an error — is
+  # what licenses the classifying census below.
+  return 0
+}
+
 # The COULD-NOT-MEASURE verdict, textually distinct from both the missing-fixture
 # report and guarantee_usable_root's "does not hold a usable dataset corpus".
 report_unmeasurable_tracked_census() {
@@ -1292,7 +1481,7 @@ print_scoped_repair_command() {
 # census could not be taken), 0 otherwise. Writes only outside the dataset root.
 report_orphaned_tracked_fixtures() {
   local resolve_rc=0 dataset_abs census_file tracked_count=0
-  local record tag path staged_file staged_present=0 shown=0 head_ref show_ref_rc
+  local record tag path staged_file staged_present=0 shown=0 precheck_rc head_rc
   local -a flagged_absent=() worktree_deleted=() staged_deleted=()
 
   resolve_tracked_subtree_readonly || resolve_rc=$?
@@ -1321,6 +1510,16 @@ report_orphaned_tracked_fixtures() {
     return 1
   fi
 
+  # (0) BEFORE classifying anything: refuse to classify a state this probe does not
+  # model (issue #3310, roborev round 4). Both outcomes route to the same
+  # COULD NOT MEASURE verdict, which prints NO repair command.
+  precheck_rc=0
+  detect_unclassifiable_git_state || precheck_rc=$?
+  if [ "${precheck_rc}" != 0 ]; then
+    report_unmeasurable_tracked_census "${TRACKED_PROBE_REASON}"
+    return 1
+  fi
+
   # (1) The INDEX census, WITH each entry's index flags, and an AFFIRMATIVE
   # per-path existence test (issue #3310, roborev blocker 2).
   #
@@ -1336,10 +1535,15 @@ report_orphaned_tracked_fixtures() {
     report_unmeasurable_tracked_census "could not create a scratch file for the tracked-file census"
     return 1
   fi
-  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -v -z -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}"; then
-    rm -f "${census_file}"
-    report_unmeasurable_tracked_census "'git ls-files -v' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}'"
-    return 1
+  # `--deduplicate` (git >= 2.31) so a path in a merge conflict is not counted once
+  # per stage; older git lacks the option, so retry without it and let the
+  # dedupe_paths pass below cover the difference.
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -v -z --deduplicate -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}" 2>/dev/null; then
+    if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -v -z -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}"; then
+      rm -f "${census_file}"
+      report_unmeasurable_tracked_census "'git ls-files -v' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}'"
+      return 1
+    fi
   fi
   # NUL-delimited (`-z`) throughout: this repo tracks 40 space-bearing paths, and a
   # whitespace-split census would silently miscount or mangle them. Records are
@@ -1403,32 +1607,16 @@ report_orphaned_tracked_fixtures() {
   # staged rename report as `D` — a false missing-fixture error whose advertised
   # repair would REVERSE the rename. A correctness property may not depend on
   # ambient configuration.
-  if ! guard_git -C "${TRACKED_GUARD_REPO}" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    # HEAD did not resolve. That is NOT proof of an unborn branch — a corrupt or
-    # unreadable ref fails identically — and skipping the census on an unproven
-    # assumption is how a clean verdict gets issued for a state never measured
-    # (roborev round 3). So CONFIRM unborn positively, and route everything else to
-    # COULD NOT MEASURE:
-    #   unborn  ⇔  HEAD is a symref to a branch (symbolic-ref succeeds) AND that
-    #              branch does not exist (`show-ref --verify` exits exactly 1,
-    #              git's "ref not found"; a corrupt ref exits 128, and an
-    #              unparseable HEAD fails symbolic-ref outright).
-    # Verified against git 2.43 rather than assumed, in all three states.
-    head_ref=""
-    show_ref_rc=0
-    if head_ref="$(guard_git -C "${TRACKED_GUARD_REPO}" symbolic-ref -q HEAD 2>/dev/null)" \
-      && [ -n "${head_ref}" ]; then
-      guard_git -C "${TRACKED_GUARD_REPO}" show-ref --verify -q -- "${head_ref}" >/dev/null 2>&1 \
-        || show_ref_rc=$?
-    else
-      show_ref_rc=-1
-    fi
-    if [ "${show_ref_rc}" != 1 ]; then
-      report_unmeasurable_tracked_census "HEAD in '${TRACKED_GUARD_REPO}' does not resolve and is NOT a confirmed unborn branch (symbolic-ref gave '${head_ref:-<none>}', show-ref status ${show_ref_rc}) — a corrupt or unreadable ref fails exactly like an unborn one, so staged deletions cannot be ruled out"
-      return 1
-    fi
-    # CONFIRMED unborn: no commit exists, so no path can be deleted RELATIVE TO
-    # HEAD. This is a measured emptiness, not a skipped measurement.
+  head_rc=0
+  classify_head_state || head_rc=$?
+  if [ "${head_rc}" = 2 ]; then
+    report_unmeasurable_tracked_census "${TRACKED_PROBE_REASON}"
+    return 1
+  fi
+  if [ "${head_rc}" = 1 ]; then
+    # CONFIRMED unborn (classify_head_state proves it rather than inferring it from
+    # a failed rev-parse): no commit exists, so no path can be deleted RELATIVE TO
+    # HEAD. A measured emptiness, not a skipped measurement.
     :
   else
     if ! staged_file="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-staged.XXXXXX")"; then
@@ -1449,6 +1637,19 @@ report_orphaned_tracked_fixtures() {
       fi
     done <"${staged_file}"
     rm -f "${staged_file}"
+  fi
+
+  # Defensive de-duplication of both report arrays (roborev round 4). The
+  # `--deduplicate` census above covers the stage-duplication case on git >= 2.31;
+  # this covers the fallback, and makes "named exactly once" a property of the
+  # REPORT rather than of a git version.
+  if [ "${#worktree_deleted[@]}" -gt 0 ]; then
+    dedupe_paths "${worktree_deleted[@]}"
+    worktree_deleted=( ${DEDUPED_PATHS[@]+"${DEDUPED_PATHS[@]}"} )
+  fi
+  if [ "${#staged_deleted[@]}" -gt 0 ]; then
+    dedupe_paths "${staged_deleted[@]}"
+    staged_deleted=( ${DEDUPED_PATHS[@]+"${DEDUPED_PATHS[@]}"} )
   fi
 
   if [ "${#worktree_deleted[@]}" -gt 0 ] || [ "${#staged_deleted[@]}" -gt 0 ]; then
