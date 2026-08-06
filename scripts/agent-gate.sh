@@ -6027,6 +6027,30 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 PREWARM COMPLETENESS — "was the measurement actually WARM?" (#3272 review round 12, F2).
+  # Split out of the reporter suite along a responsibility seam: this property is decided at
+  # MEASUREMENT time, in `lib-measure.sh`, by classifiers in `ws0_prewarm.py`, over artifacts the
+  # reporter never reads (it reads only the one-word `<tag>.prewarm.status` they produce) — so every
+  # check in the reporter suite is satisfiable by a session whose statuses all read `ok` and whose
+  # prewarms warmed 0.02% of the corpus. Two findings: round 10's F-A (a status taken from the
+  # loadgen's EXIT CODE while `--out /dev/null` discarded the only evidence) and round 12's F2 (F-A's
+  # replacement was `requests_ok >= 1 AND rows_total >= 1` — a NON-ZERO check where the property is a
+  # COMPLETENESS one, plus a bare-scan leg that trusted process success while discarding the bench's
+  # own row counts). Both legs now require a FULL corpus scan against the PINNED row count.
+  # Hermetic: synthetic prewarm artifacts, a few-KB Data.db hashed with hashlib, a session pin from
+  # the shipped writer; no cargo, perf, sudo, taskset, corpus, network, root or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_prewarm_completeness.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_prewarm_completeness.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 prewarm-completeness guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
   # `tools/*` package tests are run by NO other gate component and by no CI lane
   # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so
