@@ -1,0 +1,6 @@
+SCAN ranges           : 512
+SCAN rows counted     : 3999890
+SCAN wall seconds     : 13.041
+SCAN rows/s           : 306,723
+SCAN uncompressed MB/s: 212.5  (at measured 692.70 B/row)
+SCAN compressed  MB/s : 60.1  (at measured 195.96 B/row)
