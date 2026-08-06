@@ -1,0 +1,467 @@
+# Design: bounded partition repeat-access instrument (issue #2827)
+
+## Context
+
+Issue #2827 was filed to *measure* the field keyed hot-set concentration and *decide* whether a
+64–128 MiB decoded-partition cache is worth building. Four owner comments on the thread established
+that the filed method cannot work and that the obvious replacement is circular. This design records
+the third option the owner named — a bounded repeat-access histogram — and the smallest set of
+decisions that turn it from "a histogram" into "a decision procedure that fires on the first real
+workload".
+
+Three facts frame every decision below.
+
+1. **No per-key attribute is permissible.** `docs/observability/configuration.md:304-305`:
+   "Unbounded values (raw error messages, **partition keys**, full query text) are **NEVER** attached
+   as attributes or span fields." Mirrored in code at
+   `cqlite-core/src/observability/catalog.rs:19-24`. So the instrument must summarise *inside the
+   process* and emit only bounded buckets.
+2. **No field workload exists to measure.** `docs/research/phase2-verify-caching.md:214-216` — the
+   only field keyed loadtest on record is ~0.9 qps with no captured concentration. This is why the
+   deliverable is the instrument, not the number.
+3. **The one thing we must not build is a synthetic answer.** The owner's rejection of the
+   sensitivity-curve plan is a doctrine statement, not a preference — see D8.
+
+## Recommended design
+
+### D1 — Scope: build the instrument and the decision procedure; do NOT run a synthetic field round
+
+**Decision.** #2827 delivers (a) a bounded partition repeat-access instrument, (b) measured
+working-set bytes, (c) a validation test against a known input distribution, and (d) a written
+decision procedure. It does **not** deliver a skew number or the go/no-go.
+
+**Alternatives considered.**
+
+- *(A1) Build the synthetic Zipf sweep as originally scoped in the first thread comment.* **Rejected**
+  by the owner: "It converts a *measurement* into an *owner judgment about an assumed skew* … A
+  sensitivity curve restates that conditional with more decimal places." The output would be a
+  function of a distribution we selected; `phase2-verify-caching.md:220-227` already records that
+  conditional, so the curve adds decimal places, not knowledge. Building it anyway would also have
+  cost the F1 loadgen work first (see D9), for an output already ruled non-decisive.
+- *(A2) Do nothing until a field keyed workload exists.* **Rejected.** The instrument is the thing
+  that makes such a workload informative when it appears; without it, the first real keyed round
+  produces latency numbers and no distribution, exactly as #2866 did. Cheap now, expensive to
+  retrofit under a live round.
+- *(A3) Instrument AND run the synthetic round, labelling the curve carefully.* **Rejected.** A
+  carefully-labelled synthetic curve is still read as a measurement by the next reader — which is
+  precisely the owner's stated concern ("a green sensitivity curve will later be read as 'measured
+  field skew' by someone who did not read this thread"). Publishing the number is the hazard; the
+  label is not a control.
+
+**Consequence, stated rather than hidden:** issue #2827's AC2 is **unmet** by this change. See the AC
+table in `specs/partition-access-distribution/spec.md`, D10, and the honesty clause in every artifact.
+
+### D2 — The instrument sits at the LOGICAL point-read boundary, not at the per-SSTable probe sites
+
+**Decision.** One access is recorded per **logical partition read** — one call at the core targeted
+path (`cqlite-core/src/query/select_executor/lookup.rs:92` `classify_partition_lookup` returning
+`Targeted`/`MultiTargeted`, consumed at `streaming.rs:107` and `stream_agg.rs:196`) and one at the
+Flight point path (`cqlite-flight/src/producer_point.rs:83` `point_read_keys`, one record per key in
+the returned `PointReadPlan`). The per-SSTable probe sites in
+`cqlite-core/src/storage/sstable/reader/partition_lookup.rs` (`:84`, `:128`, `:152`, `:349`, `:410`,
+`:436`) report **byte sizes** into the open access, but do **not** count accesses.
+
+**Why this is a correctness decision, not a convenience one.** With STCS a live partition is present
+in *k* SSTables at once. Counting at the probe sites multiplies every partition's repeat count by
+approximately *k* — which shifts the entire histogram to the right and **manufactures concentration
+that the workload does not have**. A uniform workload over a 4-generation table would report every
+partition in the `3-4` bucket instead of the `1` bucket, and the decision procedure would read that
+as a hot set. The bias direction is the dangerous one (it makes the cache look good), so the cheaper
+wiring is disqualified outright.
+
+The cache being sized is a **decoded-partition** cache, whose unit is the reconciled logical
+partition — so the logical boundary is also the semantically correct one: it counts exactly the
+events such a cache would serve.
+
+**Alternative considered.** *Count at the probe sites and divide by an SSTable count.* Rejected: the
+divisor varies per partition (a key may be in 1 or 7 generations) and is not knowable at the probe
+site, so the correction would itself be an estimate — a heuristic in the sense CLAUDE.md's #28
+mandate exists to prevent.
+
+### D3 — Metric shape: four counters/gauges, two new bounded attributes, twelve series
+
+**Decision.**
+
+| Metric | Instrument | Unit | Bounded attributes |
+|---|---|---|---|
+| `cqlite.read.partition_access.distinct_partitions` | counter | `{partition}` | `cqlite.read.repeat_bucket`, `cqlite.read.size_source` |
+| `cqlite.read.partition_access.accesses` | counter | `1` | `cqlite.read.repeat_bucket` |
+| `cqlite.read.partition_access.bytes` | counter | `By` | `cqlite.read.repeat_bucket` |
+| `cqlite.read.partition_access.sample_denominator` | gauge | `1` | (none) |
+
+New attribute keys, both closed sets:
+
+- `cqlite.read.repeat_bucket` ∈ { `1`, `2`, `3-4`, `5-8`, `9-16`, `17+` } — exactly the owner's six
+  buckets, verbatim.
+- `cqlite.read.size_source` ∈ { `index`, `unavailable` } — see D6.
+
+Total series: 6 × 2 + 6 + 6 + 1 = **25**, fixed forever. Compare the existing bounded sets:
+`cqlite.read.partition_lookup.total` carries three attributes (`catalog.rs:283`) and
+`cqlite.rpc.phase.duration` carries a five-value closed phase set — this is the same order.
+
+**Naming.** The briefing's working name was `cqlite.read.partition_access.repeat_count`. Rejected on
+the catalog's own convention: "counters describe a monotonically increasing total; **their name
+reflects the thing being counted**" (`catalog.rs:14-15`). The thing counted is *distinct partitions*,
+not repeats, so a counter called `repeat_count` whose value is a partition count would be a
+mis-named series on a dashboard. The chosen names each say what their value is.
+
+**Why `accesses` is emitted per bucket and not just as a total.** Emitting, per bucket, the *sum of
+the repeat counts of the partitions in that bucket* removes the within-bucket mean from the
+hit-ratio math entirely (D7): the bound becomes a point value rather than an interval, and the
+open-ended `17+` bucket stops being unbounded. This is one extra series for a materially stronger
+output.
+
+**Why `cqlite.sstable.format` is NOT carried.** Per D2 the unit is a *logical* partition access, which
+may span a BIG and a BTI generation in the same read; attaching a format would require picking one
+arbitrarily. Format information survives where it matters — via `size_source`, since BTI is the
+reason a size is unavailable (D6).
+
+**Composition with existing attributes.** These are new series, not new attributes on existing
+metrics: `cqlite.read.partition_lookup.total` is left exactly as it is. Adding `repeat_bucket` to it
+was considered and rejected — that counter is emitted once per *probe*, so it is subject to the D2
+inflation, and adding a 6-value attribute would multiply its existing 3-attribute series count.
+
+### D4 — Counting structure: one 3 MiB open-addressed table with adaptive hash-prefix downsampling
+
+**Decision.** A single lazily-allocated, open-addressed (linear-probing) table:
+
+- `SLOTS = 1 << 17` = 131,072
+- entry = `key_hash: AtomicU64` (8 B) + `bytes: AtomicU64` (8 B) + `count: AtomicU32` (4 B) +
+  `flags: AtomicU8` (1 B) + 3 B padding = **24 B**
+- **total = 131,072 × 24 B = 3,145,728 B = exactly 3 MiB, fixed** — independent of partition count,
+  of qps, and of window length.
+
+The table lives behind an `RwLock`: the hot path takes the **read** lock and mutates its slot with
+relaxed atomics (no exclusive lock, no allocation, no per-access `String`); the **write** lock is
+taken only on a downsample pass and on window close, both rare.
+
+`key_hash` is a 64-bit hash of the **raw partition-key bytes** the read path already holds (the
+`PartitionKey::to_bytes` form documented at `partition_lookup.rs:52-57`), not the Murmur3 token.
+Murmur3 was considered because it is already computed on some paths
+(`cqlite-core/src/query/select_executor/predicate.rs:58`, `scan_merge.rs:170`) — but it is **not**
+computed on the BIG point path, whose lookup takes raw key bytes
+(`partition_lookup.rs:63-66`), so using it would mean computing a token that path does not need. A
+cheap non-cryptographic 64-bit hash of the same bytes is strictly less work and is only ever used for
+slot addressing and identity within a window.
+
+**Overflow handling: adaptive hash-prefix downsampling, never eviction.** When occupancy reaches a
+load factor of 0.75 (98,304 entries) the recorder takes the write lock, increments `k`, and drops
+every entry whose `key_hash` does not satisfy the new `k`-bit prefix predicate — one linear pass that
+halves occupancy — and doubles `sample_denominator = 2^k`. Thereafter only keys satisfying the
+predicate are admitted.
+
+**Why this and not the obvious alternatives.**
+
+- *(B1) LRU eviction when full.* **Rejected, and the bias is the reason.** Evicting cold entries
+  keeps hot ones, so the surviving population is enriched in high-repeat keys: the singleton bucket
+  is under-counted and the histogram **overstates concentration** — the direction that makes the
+  cache look better than it is. A go/no-go instrument must not be biased toward "go".
+- *(B2) Drop new keys when full (first-come admission).* **Rejected, same direction.** Hot keys
+  arrive early by construction (they are accessed often), so late-dropped keys are disproportionately
+  cold — again understating the singleton bucket.
+- *(B3) Count-Min Sketch.* **Rejected on capability, not size.** CMS answers "what is the count of
+  *this* key"; it cannot enumerate the key population, and this instrument needs the *distribution of
+  counts over distinct keys*. There is no way to produce the bucket histogram from a CMS without a
+  separate key list — i.e. without the thing CMS was chosen to avoid.
+- *(B4) Unbounded `HashMap`.* **Rejected**: 1.93 M partitions/node
+  (`phase2-verify-caching.md:212`, `:224`) at ~48 B/entry is ~90 MiB against a <128 MB whole-process
+  budget, and it is unbounded in principle.
+
+**Why hash-prefix sampling is unbiased where B1/B2 are not.** The admission predicate is a function
+of the key hash alone — it is statistically independent of the key's access frequency. So the
+admitted set is a uniform random sample of the *distinct* partitions touched in the window, and each
+admitted key's count is **exact** (every access to an admitted key is counted, from window start,
+because the predicate is monotone: a key admitted under `k` is admitted under all `k' < k`, so
+downsampling only ever removes keys, never invalidates a survivor's count). Scaling
+`distinct_partitions` and `bytes` by `2^k` therefore gives unbiased estimates, and the bucket
+*fractions* — which are what the decision procedure consumes — are unbiased with no scaling at all.
+
+**Sampling floor.** `k` is capped at 20. At `k = 20` the sample is 1/1,048,576 of the key space,
+which over a 1.93 M-partition corpus admits ~2 keys; a window that reaches the cap is
+statistically worthless, so the recorder marks it non-census and the decision procedure refuses it
+(D7). In practice `k` stabilises: a window whose distinct accessed set is under ~98k never
+downsamples at all.
+
+**Memory bound, stated once:** 0 bytes when the probe is off (lazy allocation); **3 MiB exactly**
+when on; no term in partition count, qps, window length, or `k`.
+
+### D5 — Window semantics: tumbling, closed deterministically, emitted exactly once
+
+**Decision.** A **tumbling** window, closed on whichever comes first:
+
+- a wall-clock duration (default 60 s), or
+- an access-count bound (default 5,000,000 recorded accesses), or
+- an explicit `close_window()` call.
+
+On close, under the write lock: walk the table, bucket every live entry by its `count`, emit the four
+series once, zero the table, reset `k` to 0. Emission is **exactly once per closed window**; a window
+with zero accesses emits nothing (a `0/0` emission would be a series with no subject — the same
+"affirmative measurement" rule CLAUDE.md records for the roborev wrapper's `prompt-content:` key).
+
+**Why tumbling rather than a sliding two-generation window.** A sliding window (current + previous
+generation, rotated) costs **double the memory** (6 MiB) and materially more code, to fix a bias whose
+direction is *conservative*: a partition accessed on both sides of a boundary is recorded as two
+lower-repeat entries rather than one high-repeat entry, so a tumbling window **understates**
+concentration. Understating concentration makes the cache look *worse*, which is the safe direction
+for a go/no-go — a "go" produced despite this bias is a stronger signal, and a "no-go" is the one
+verdict this instrument can produce cheaply and wrongly only in the direction of not building
+something. The bias is bounded by the ratio of window length to inter-access interval and shrinks
+with window length; 60 s at A2-scale qps is thousands of accesses per hot key.
+
+**Why the access-count bound exists alongside the duration.** At A2 scale (≥1,000 qps/pod) a 60 s
+window is ~60,000 accesses, comfortably inside the table. The count bound only fires on a workload
+far above that, and its purpose is to close the window *before* downsampling degrades the sample
+rather than after.
+
+**Why `close_window()` is public.** So tests can close a window **deterministically** and never
+assert on elapsed wall time. CLAUDE.md mechanizes a `--lite` lint against wall-clock threshold
+asserts in the correctness test path (`roborev-lints` / #2642); the deterministic hook is what keeps
+every test in this change on the right side of it. The wall-clock trigger is a property of the
+*instrument*, exercised only by an explicitly-`#[ignore]`d timing test if at all.
+
+### D6 — Byte weighting, and the BTI `data_size = 0` case fails closed
+
+**Decision.** Each logical access carries a byte weight: the **sum of `PartitionLoc.data_size` over
+the SSTables resolved for that access** (`cqlite-core/src/storage/cache/global_key_offset.rs:76-81`).
+The window entry stores `bytes = max(bytes, this_access_bytes)`, not a sum — the working set wants
+**distinct-partition** bytes, so ten accesses to one partition must contribute its size once. `max`
+(rather than "first wins") is exact because partition sizes are immutable within a generation set,
+and it is robust to an access that resolved fewer generations than another.
+
+**The BTI case is a real constraint, and it is handled by refusing to guess.** BTI trie resolution
+resolves only an offset; the cache location type records this explicitly
+(`global_key_offset.rs:72-74`: "BTI resolves only `data_offset` … so a BTI wiring site stores
+`data_size = 0`"; the constructor is `PartitionLoc::offset_only` at `:94-100`), and the BTI point
+lookup itself returns a bare offset (`partition_lookup.rs:433`). Therefore:
+
+- An access for which **any** resolved SSTable reported no size is recorded with the entry's
+  `size_source = unavailable` flag set (sticky for the window).
+- Such an entry contributes **zero** to `cqlite.read.partition_access.bytes` and is counted under
+  `distinct_partitions{size_source="unavailable"}`.
+- The `unavailable` fraction is therefore **visible as a ratio on the dashboard**, and the decision
+  procedure (D7) **REFUSES** to produce a go/no-go from a window whose `unavailable` fraction exceeds
+  0. Silent under-reporting is impossible: an incomplete byte total always has a non-zero
+  `unavailable` series beside it.
+
+**Alternatives considered.**
+
+- *Estimate BTI partition size from the successor offset.* This is the technique the doc comment at
+  `global_key_offset.rs:72-74` alludes to ("bounded later via the successor offset"). **Rejected for
+  this change**: it requires a second trie descent per access on the hot path, it is an *estimate*
+  (the successor gap includes any inter-partition framing), and shipping an estimate that looks like
+  a measurement is exactly the failure mode this whole change exists to avoid. Naming it as a
+  possible future improvement is honest; shipping it silently is not.
+- *Skip BTI accesses entirely.* **Rejected**: it would make the histogram itself wrong (BTI reads are
+  real accesses), not merely the byte total.
+- *Fall back to `0` bytes with no marker.* **Rejected**: this is the silent under-report the AC
+  explicitly forbids, and it biases the working set **down**, i.e. toward "the cache fits, go".
+
+### D7 — The decision procedure is a committed document, and it refuses more often than it answers
+
+**Decision.** `docs/research/decoded-partition-cache-decision.md` states the procedure completely, so
+that any closed window plus one assumption yields the verdict with no further analysis round.
+
+**Inputs.** For each bucket `b` ∈ {1, 2, 3-4, 5-8, 9-16, 17+}: `n_b` (distinct partitions), `a_b`
+(accesses attributable to `b`), `B_b` (distinct on-disk bytes). Plus `sample_denominator = 2^k`, the
+`unavailable` fraction, and one assumption: the decode multiplier `m` (Phase-0 wire estimate ≈ 3.5×,
+`phase2-verify-caching.md:221-222` — explicitly the only assumption left).
+
+**Refusal conditions (checked FIRST; each is a NO ANSWER, never a default verdict).**
+
+1. `unavailable` fraction > 0 → the byte total is incomplete by an unknown amount. Refuse.
+2. `k` reached the cap (20) → the sample is statistically worthless. Refuse.
+3. Total accesses `A = Σ a_b` below a stated minimum (10,000) → the window is not a workload. Refuse.
+4. The window came from a synthetic or self-generated load → **not a field measurement**; the output
+   may be recorded as an instrument self-check and may **never** be cited as the go/no-go (D8).
+
+**The bound.** Buckets are ordered by access density `a_b / B_b` (accesses per on-disk byte),
+descending. Fill the budget greedily: with a decoded budget `C` (64 or 128 MiB) the on-disk bytes
+that fit are `C / m`. Taking buckets whole while they fit and the last one fractionally by byte
+share `f`, the clairvoyant (Belady) hit-ratio upper bound is
+
+```
+H_max(C) = [ Σ_{fully-taken b} (a_b − n_b)  +  f · (a_last − n_last) ] / A
+```
+
+— each selected partition's first access in the window is compulsory (hence `− n_b`), and every
+subsequent access hits. This is an **upper** bound because a real LRU cache is not clairvoyant; the
+procedure records it as a ceiling, so a *low* `H_max` is a definitive **no-go** while a *high*
+`H_max` is a necessary-not-sufficient condition for "go". That asymmetry is deliberate: the cheap,
+sound verdict this instrument can produce is a **rejection**, and the document says so.
+
+**Recommended go threshold (an OWNER-SETTABLE parameter, recorded as such).** `H_max(128 MiB) ≥ 0.50`.
+Rationale, from the owner's own Arm-1 repricing (#2818, quoted in the thread): a decoded-partition
+cache targets decode/merge work, and k-way merge measured **3.2%** of on-CPU while LZ4 decompress +
+CRC measured **~23%**. A cache with a *ceiling* below 50% on a ≤~3% work share cannot move the
+end-to-end number by more than ~1.5% — under the round harness's noise floor. Below the threshold the
+verdict is a sound no-go; at or above it the verdict is "worth a real LRU simulation against the
+captured window", not an automatic build.
+
+**Why a threshold is named at all,** given it is the owner's call: an unnamed threshold means the
+first person to run the procedure re-litigates it, which is the "owner judgment about an assumed
+parameter" failure this change exists to remove. Naming a default with its arithmetic, and labelling
+it owner-settable, is the smallest form that still terminates.
+
+### D8 — Why a synthetic input is a legitimate oracle for the instrument and an illegitimate one for the field claim
+
+This is the distinction the whole change turns on, so it is stated as a rule.
+
+**The rule.** A synthetic input is a legitimate oracle for a claim about the **instrument**, and an
+illegitimate oracle for a claim about the **world**.
+
+- Validation test (**legitimate**): *"Given an access sequence I constructed, the instrument reports
+  the bucket histogram that sequence has."* The expected value is derived from the input by
+  arithmetic that does not pass through the instrument, so the test can fail. It is measuring the
+  instrument, and the instrument is the thing we built.
+- Sensitivity curve (**illegitimate**): *"Given a Zipf distribution I chose, the cache would hit
+  70%."* The claim is about a field workload; the evidence is about a parameter I selected. Nothing
+  in the artefact can fail, because the input was never in question.
+
+**Why this is CLAUDE.md doctrine and not a local preference.** CLAUDE.md records the same asymmetry
+twice:
+
+- *Two parity oracles (#1742)*: a physical-dump oracle "CANNOT catch a read-time-reconciliation bug
+  (both sides keep the shadowed rows → green while a real `SELECT` diverges)". The oracle must be
+  chosen for the property under test; an oracle that cannot see the property is decoration.
+- *Round-trip invariance (#3042)*: "a CQLite-WRITTEN + CQLite-READ round-trip test is INVARIANT to a
+  uniform framing/serialization error … Both sides make the *identical* mistake, so the round-trip
+  closes and the test stays green." A synthetic-skew sensitivity curve is structurally the same
+  object: our assumption about the workload goes in, our conclusion about the workload comes out, and
+  the loop closes on itself. CLAUDE.md's remedy there — "for any on-disk framing/encoding property,
+  the oracle must be **Cassandra-written bytes**, never CQLite's own output" — generalises here to:
+  *for any claim about a workload's access distribution, the oracle must be a real workload, never a
+  distribution we generated.*
+
+**Consequence, enforced in the artifacts.** The validation test's assertions are on *recovery of a
+known input*, never on a hit ratio. The decision procedure's refusal condition #4 forbids citing a
+synthetic window as the go/no-go. And the honesty clause (D10) states that the field number is
+undelivered, so no reader has to reconstruct this argument to know what they are holding.
+
+### D9 — The keyed load driver is a follow-up (F1), and this change does not depend on it
+
+**Decision.** `tools/flight-loadgen` gains no keyed mode here. The instrument is validated
+hermetically (D8) and wired end-to-end through the existing in-process rig — `serve_fixture()` at
+`tools/flight-loadgen/src/selftest.rs:47` stands up a real `CqliteFlightService` on `127.0.0.1:0`
+(`:66`) over a 1-SSTable `cassandra_easy_stress.keyvalue` fixture built from the committed constants
+in `cqlite-flight/src/test_fixtures.rs:40-53` (feature `test-util`, `cqlite-flight/src/lib.rs:72-74`)
+and drives the ordinary `run_ramp` engine (`selftest.rs:123`) — plus the
+`observability-testing` capture harness pattern established by
+`cqlite-flight/tests/metrics_capture_test.rs`.
+
+**Why F1 is a separate issue rather than part of this one.** Three reasons, in order of weight:
+
+1. **It is needed by more than this probe.** Every future keyed-latency measurement needs it; folding
+   it into #2827 hides a general capability inside a probe's scope.
+2. **It is where the subtle mechanism lives, and that deserves its own review.** Tokens do not route
+   — `detect_route(filter, schema)` (`cqlite-flight/src/point_read.rs:67`) decides the point route
+   from the typed predicate tree plus the schema partition key alone, and token bounds are pruning
+   applied *afterwards* (`cqlite-flight/src/producer_point.rs:130-135`; see the comment at
+   `:186-193`). A ticket with correct key-derived Murmur3 bounds and **no `filter`** still resolves to
+   `full_scan`, and the failure is silent: correct rows at scan latency, the bimodal p50 17 ms /
+   p99 34 s symptom #2866 measured. The correct assertion is on
+   **`streaming_partition_lookup`** (`cqlite-core/src/query/access_path.rs:126`) for a plain full-PK
+   equality, or `multi_partition_lookup` (`:123`) for an IN-list — never bare `partition_lookup`
+   (`:122`), which this route does not emit. Entangling that with an observability change makes one
+   PR carry two independent correctness stories.
+3. **This change does not need it.** Nothing in D1–D8 requires a keyed load generator; requiring one
+   would make an instrument's delivery depend on a load tool's delivery for no gain.
+
+**F2 (cross-language Murmur3 parity)** is likewise deferred and likewise not a dependency: this
+change computes no tokens (D4 hashes raw key bytes). It is proposed because the coupling is real —
+the Java golden vectors at `Murmur3TokenTest.java:120-128` are, per their own Javadoc (`:14-16`),
+copied verbatim from `cqlite-core/src/util/cassandra_murmur3.rs:488-513`, and nothing mechanically
+keeps them in step. F1 would make that coupling load-bearing (a client computing tokens from keys),
+which is the moment it should be closed.
+
+### D10 — The honesty clause, and the owner action this change does not take
+
+**Decision.** Every artifact in this change states, in its own words and without hedging:
+
+> #2827 as re-scoped delivers **the instrument and the procedure, not the field number**. Its original
+> AC2 — "decides whether a 64–128 MiB decoded-partition cache clears a useful hit ratio" — is **not
+> satisfied by this change**. It becomes satisfiable on the first real keyed workload run with the
+> probe enabled. The reason it cannot be satisfied here is that **no field keyed workload with
+> captured concentration exists** (`docs/research/phase2-verify-caching.md:214-216`).
+
+**Owner instruction recorded, not executed.** The owner's standing instruction from the thread — *"the
+issue must stop calling itself a gate"*, with the request to retitle/re-scope to reflect that the
+output is an **input** rather than the go/no-go — is recorded verbatim in the spec and surfaced as a
+NEEDS-YOU item. It is **not** acted on: CLAUDE.md reserves retitling and re-scoping an issue to the
+owner. Recording it prevents the artifacts from silently re-inheriting the "gate" framing while the
+issue title still carries it.
+
+**Why the clause is a requirement and not a note.** Because the failure mode is a reader six months
+out, not a reviewer today. The owner named it precisely: "a green sensitivity curve will later be read
+as 'measured field skew' by someone who did not read this thread." The same hazard applies to a green
+instrument: a merged, tested, documented probe reads as "we measured the skew" unless every artifact
+says otherwise. So it is an auditable requirement with a scenario, not a paragraph in a proposal.
+
+### D11 — Doctrine and catalog registration in the same change, including a bundled correction
+
+**Decision.** The four metrics are registered in `cqlite-core/src/observability/catalog.rs` (constants
++ `ALL_METRICS` at `:907`) and annotated in `operator_docs_annotations.rs`. The generator is
+**fail-closed** — "a metric present in `ALL_METRICS` with no operator annotation" is rejected
+(`cqlite-core/src/observability/operator_docs.rs:16-19`, `:116`) — so registration cannot ship
+undocumented. Instruments are constructed in `otel.rs` alongside the existing read counters
+(`:381-385`) and dispatched in `add_counter` (`:751`). The generated pages
+`docs/reports/flight-metrics-reference.md` and
+`website/src/content/docs/agents-using/flight-metrics-reference.md` (`operator_docs.rs:35`, `:40`) are
+regenerated by `cargo run -p cqlite-core --example gen_operator_metrics_doc`; the
+`operator-metrics-doc` and `kit-dashboard-drift` gate components (`scripts/agent-gate.sh:2033`) fail
+closed on drift. `docs/observability/configuration.md` is hand-maintained and gains the four rows plus
+the two new attribute value-sets.
+
+**Bundled correction, in scope because it is this change's own premise.** The proposal's central
+factual claim is about `cqlite.read.partition_lookup.total`'s attribute set, and the tree states it
+three ways:
+
+| Source | Claimed attributes |
+|---|---|
+| `docs/observability/configuration.md:215` | `cqlite.result`, **`cqlite.query.access_path`**, `cqlite.sstable.format` |
+| `cqlite-core/src/observability/otel.rs:384` (instrument description) | "keyed by {result, **access_path**}" |
+| `catalog.rs:283` + every emission site (`partition_lookup.rs:87`, `:156`, `:353`, `:414`, `:440`) | `cqlite.result`, **`cqlite.read.lookup_route`** (`catalog.rs:82`), `cqlite.sstable.format` |
+
+The code is authoritative; the doc and the instrument description are stale. Shipping a change whose
+premise quotes the stale row without fixing it would leave the next reader with the same wrong fact.
+Related and fixed in the same pass: `docs/observability/configuration.md:298` documents the
+`cqlite.query.access_path` value set as `full_scan, partition_lookup, multi_partition_lookup,
+clustering_slice, fallback_full_scan`, omitting **`streaming_partition_lookup`** and
+**`metadata_partition_lookup`**, both of which `cqlite-core/src/query/access_path.rs:125-126` emits —
+and `streaming_partition_lookup` is precisely the label a correct keyed point read reports, so the
+omission is the documented source of the "assert on `partition_lookup`" mistake the owner flagged.
+
+This correction is **documentation and a description string only** — no attribute is added, removed
+or renamed on any existing metric, so no dashboard or alert changes behaviour.
+
+## Doctrine compliance notes
+
+- **No-heuristics (#28):** the instrument consumes values the read path already resolved from
+  authoritative metadata (`PartitionLoc.data_size`, the resolved key bytes). Where a value is genuinely
+  unknown (BTI size) it records `unavailable` rather than inferring one — D6. Nothing is inferred from
+  byte content.
+- **Memory target (<128 MB):** 0 when off, +3 MiB fixed when on — D4.
+- **Zero-cost when off:** two independent gates. Compile-time, the `observability` feature (call sites
+  always compiled, helpers no-op — `cqlite-core/src/observability/mod.rs:49-54`; the dependency
+  isolation is itself guarded by `cqlite-core/tests/observability_no_otel_default.rs`). Runtime,
+  `CQLITE_PARTITION_ACCESS_PROBE` default-off via a `OnceLock` plus a programmatic override, mirroring
+  `CQLITE_READ_PATH` (`cqlite-core/src/query/select_executor/forcing.rs:42`, `:78-82`).
+- **Wiring evidence:** the public surface is `cqlite_core::observability::partition_access`; the call
+  chain is `select_executor` targeted path / Flight `point_read_keys` → `record_partition_access` →
+  window close → `obs::add_counter`; the end-to-end test is a Flight `do_get` point-read test under
+  `observability-testing` that reads back the emitted series.
+- **Wall-clock in tests:** every correctness assertion drives `close_window()` explicitly; no test
+  asserts on elapsed time (CLAUDE.md's `roborev-lints` / #2642 class) — D5.
+- **File size (campsite rule):** the recorder is a new module
+  (`cqlite-core/src/observability/partition_access.rs`); `catalog.rs`, `otel.rs` and
+  `operator_docs_annotations.rs` grow by table entries only. `operator_docs_annotations.rs` and
+  `catalog.rs` are already large — if either crosses its ratchet, split by responsibility per the
+  campsite rule rather than setting `CQLITE_ALLOW_FILE_GROWTH=1` without a note.
+
+## Follow-ups (named here, deliberately not built here)
+
+- **F1 — keyed load mode for `tools/flight-loadgen`** (D9). Requires amending
+  `tools/flight-loadgen/README.md:68-71`.
+- **F2 — automated cross-language Murmur3 parity test** (D9).
+- **F3 — measure the decode multiplier `m`**, removing the last assumption from D7's procedure.
+- **F4 — BTI partition size via successor offset**, replacing D6's `unavailable` with a real
+  measurement, if and only if it can be made exact rather than estimated.
