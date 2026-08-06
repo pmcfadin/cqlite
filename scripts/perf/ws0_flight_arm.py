@@ -24,12 +24,16 @@ import pathlib
 
 from ws0_collect import prewarm_block, read_prewarm, spread, REQUIRED_EVENTS
 from ws0_loadgen_record import (
+    CONTENT_VOLUME_NO_ORACLE,
+    CONTENT_VOLUME_NO_ORACLE_NOTE,
     SESSION_BOUND_INPUTS,
     ZERO_REQUIRED_COUNTERS,
     _ZERO_COUNTER_MEANING,
+    check_content_volume,
     check_fixed_inputs,
     check_record_surface,
     check_session_bound_inputs,
+    preflight_arrow_bytes_per_scan,
 )
 from ws0_rounds import collect_round_meta
 from ws0_validate import (
@@ -253,6 +257,18 @@ def collect_flight(
     F2), REQUIRED positionally rather than defaulted: every rep's record is compared against it, so
     a default would silently disable the check for a caller that forgot to pass it.
     """
+    # THE UNTIMED PREFLIGHT, resolved ONCE for the session (#3272 round 17). It is the expectation
+    # every timed rep's ARROW PAYLOAD VOLUME is compared against: `bytes_total` was classified
+    # IGNORED, so a response carrying the expected ROW COUNT with FEWER ARROW COLUMNS satisfied
+    # every check in this function — and made Arrow encoding look CHEAPER, which is the one quantity
+    # #3096 exists to measure. The oracle is the warm prewarm leg's retained JSONL, which
+    # `ws0_prewarm` has already verified to be a COMPLETE full-corpus scan and which ran OUTSIDE the
+    # perf window, so nothing new is executed and the timed measurement is untouched.
+    #
+    # `None` means this session has NO preflight (a cold-only session, where the prewarm is skipped
+    # by design so `cold` stays meaningful). That is a real gap, and it is NAMED in every rep's
+    # record rather than passed over — see CONTENT_VOLUME_NO_ORACLE.
+    arrow_bytes_per_scan = preflight_arrow_bytes_per_scan(d)
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
     ipc: list[float] = []
@@ -389,6 +405,19 @@ def collect_flight(
             counters_zero[key] = observed
         errors = counters_zero["requests_error"]
         requests_ok = check_request_count(tag, temp, rec.get("requests_ok"), rows, corpus_rows)
+        # ...and THE RESPONSE MUST HAVE CARRIED THE ARROW A COMPLETE SCAN CARRIES (#3272 round 17).
+        # Every check above counts REQUESTS and ROWS. `bytes_total` — the client-side sum of each
+        # decoded batch's `get_array_memory_size()` — was classified IGNORED because "no
+        # byte-throughput figure is printed", which is true and is not the test: a response with the
+        # expected number of rows and FEWER ARROW COLUMNS passed everything above while the server
+        # encoded LESS ARROW, making the encode look cheaper. This rig's headline is a
+        # bare-scan-vs-Flight RATIO, so that shortfall moves the published number rather than merely
+        # mislabelling it. Compared per SCAN against the untimed preflight resolved above, exactly.
+        content_volume = (
+            check_content_volume(tag, rec, requests_ok, arrow_bytes_per_scan)
+            if arrow_bytes_per_scan is not None
+            else None
+        )
         # The prewarm outcome for THIS rep, recorded by ws0-baseline.sh.
         prewarm.append({"rep": rep, "status": read_prewarm(d, tag)})
         # ...and its OBSERVED round + position within that round (#3272 R3).
@@ -497,6 +526,19 @@ def collect_flight(
                 # is this rep's, from this session's server" — and a swapped JSONL or a record from a
                 # peer lane's server satisfies the first while failing the second.
                 "verified_session_bound_inputs": session_bound,
+                # ...and the ARROW PAYLOAD VOLUME check (#3272 round 17), or the NAMED reason it
+                # could not run. Never absent and never silently `null`: a cold-only session has no
+                # untimed preflight to compare against (the prewarm is skipped so `cold` stays
+                # meaningful), and a reader must be able to see that this rep's payload was
+                # UNVERIFIED rather than infer it from a missing key.
+                "verified_content_volume": (
+                    content_volume
+                    if content_volume is not None
+                    else {
+                        "bytes_total_verified": CONTENT_VOLUME_NO_ORACLE,
+                        "why": CONTENT_VOLUME_NO_ORACLE_NOTE,
+                    }
+                ),
                 "prewarm": prewarm[-1]["status"],
             }
         )

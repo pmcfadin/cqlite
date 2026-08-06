@@ -22,7 +22,10 @@ against the real producer rather than agreeing with itself.
 
 from __future__ import annotations
 
-from ws0_validate import Invalid
+import json
+import pathlib
+
+from ws0_validate import Invalid, positive_int
 
 # ============================================================================
 # THE FIXED INPUTS — VERIFIED, NOT IGNORED (#3272 review round 11, F3)
@@ -170,6 +173,87 @@ SESSION_BOUND_INPUTS: dict[str, tuple[str, str, str]] = {
     ),
 }
 
+# ============================================================================
+# THE CONTENT-VOLUME INPUT — ROWS WERE VERIFIED, THE PAYLOAD WAS NOT (#3272 round 17)
+# ============================================================================
+# Every check above and below counts REQUESTS and ROWS. Not one of them looks at how much
+# ARROW there was. `bytes_total` was classified `ignored` with the reason "the rig's claims are
+# rows/s and cycles/row (spec R1); no byte-throughput figure is printed" — true, and insufficient
+# in precisely the way the last five wrong reasons on this file were ("an INPUT", "not a
+# measurement", "the loopback address", "a second source of truth"): a true statement about the
+# FIELD standing in for a claim about the FIGURE. Whether a figure is PRINTED is not the test.
+# The test the census states for itself is whether the field can change the VALIDITY of a printed
+# figure — and this one can, more directly than any field yet found here.
+#
+# THE EXPOSURE. A `do_get` response carrying the expected NUMBER OF ROWS but FEWER ARROW COLUMNS
+# (or narrower buffers) satisfies every existing check: `rows_total == requests_ok * corpus_rows`
+# holds exactly, the request/error/shed counters are clean, the derived rate matches the recorded
+# one, the tag and endpoint match the session. And it makes ARROW ENCODING LOOK FASTER, because
+# the server encoded less. #3096 exists to measure Arrow-encode cost. So this defect flatters
+# EXACTLY the quantity the parent issue set out to measure — and the rig's headline is a
+# bare-scan-vs-Flight RATIO, so an asymmetric shortfall in one arm moves the published number
+# directly rather than merely mislabelling it.
+#
+# WHY IT IS DERIVABLE AND SO IS VERIFIED RATHER THAN CONFESSED. `bytes` is summed client-side by
+# `client.rs::do_get_drain` as `batch.get_array_memory_size()` per decoded `RecordBatch` — a
+# function of the SCHEMA and the row count, not of timing, machine or load. It is therefore
+# CONSTANT ACROSS EVERY FULL-CORPUS SCAN of a given corpus, and per-request it must be identical.
+# Measured across all 40 committed loadgen records that carry both fields (#3217 partB counters,
+# #3224 llc-s1/s6 steps, spanning concurrency 1..16 and 3..48 requests): `bytes_total /
+# requests_ok` is 48,764,091,712 in EVERY ONE, with `bytes_total % requests_ok == 0` in every one,
+# over the same 3,999,890-row full scan. So the per-scan Arrow extent is an OBSERVED INVARIANT of
+# the corpus, not a hoped-for one.
+#
+# WHAT IS VERIFIED, AND FROM WHAT. The expectation is the rep's OWN UNTIMED PREFLIGHT — the warm
+# prewarm leg, which `lib-measure.sh` already runs OUTSIDE the perf window and whose JSONL
+# `ws0_prewarm` already requires to be a COMPLETE full-corpus scan (round 12's F2). That artifact
+# is therefore a verified-complete observation of this corpus's Arrow extent, taken through the
+# same server, before the timed window opened and at no cost to it. The timed requests must match
+# it PER SCAN and EXACTLY:
+#
+#     bytes_total == requests_ok * (preflight bytes_total / preflight requests_ok)
+#
+# DERIVE, DON'T TRUST (round 12's F2 principle): the expectation comes from a separately-validated
+# observation, never from the timed record itself. A record cannot certify its own payload.
+#
+# NO TOLERANCE, and no threshold. `get_array_memory_size()` is integer arithmetic over buffer
+# capacities, so a legitimate full scan reproduces it bit-for-bit; a percentage band would be a
+# number somebody chose, and the whole exposure here is a SHORTFALL, which a band lets through in
+# the flattering direction by construction.
+#
+# WHAT THIS DOES NOT VERIFY, stated rather than left to be assumed: it pins the Arrow buffer
+# EXTENT, not the SCHEMA identity. Two different column sets whose buffers happened to sum to the
+# same capacity would pass. The oracle for that is the pinned `ARROW_BUFFER_DIGEST`
+# (tools/ws0-corpus-gen/src/measurement_corpus.rs), which is folded per-column over validity
+# bitmaps and value buffers and cannot be fooled that way — but NOTHING ON THIS PATH CAN REACH IT:
+# `bytes` is the only thing `do_get_drain` retains from a batch before dropping it, so the loadgen
+# record carries no per-column information at all, and making it carry any means changing
+# `flight-loadgen`. That is outside this issue's scope. Successor work: have the loadgen fold the
+# #3096 Arrow digest over the batches it drains and record it, so the rig can compare a rep's
+# response against `ARROW_BUFFER_DIGEST` itself instead of against its total extent.
+CONTENT_VOLUME_INPUTS: dict[str, tuple[str, str, str]] = {
+    "bytes_total": (
+        "this rep's own UNTIMED PREFLIGHT (`<tag>.prewarm.jsonl`), whose full-corpus completeness"
+        " ws0_prewarm already verified, scaled to this rep's requests_ok",
+        "the ARROW PAYLOAD VOLUME of the measured response. Every other check on this record"
+        " counts REQUESTS and ROWS, so a response carrying the expected number of rows and FEWER"
+        " ARROW COLUMNS — or narrower buffers — satisfied all of them: the rows are an exact"
+        " multiple of the corpus count, the counters are clean, the derived rate matches the"
+        " recorded one. And it makes ARROW ENCODING LOOK FASTER, because the server encoded less."
+        " #3096 exists to measure Arrow-encode cost and the rig's headline is a bare-scan-vs-"
+        "Flight RATIO, so this defect flattered exactly the quantity the measurement was for."
+        " It was classified IGNORED as `no byte-throughput figure is printed`, which is true and"
+        " is not the test: the test is whether the field can invalidate a figure that IS printed"
+        " (#3272 round 17)",
+        "THE MEASURED RESPONSE CARRIED A DIFFERENT ARROW PAYLOAD than the verified-complete"
+        " preflight scan of this same corpus through this same server. A SHORT payload means the"
+        " server encoded less Arrow than the report's cycles/row is divided by, which makes"
+        " Arrow encoding look CHEAPER — the one quantity #3096 exists to measure — and moves the"
+        " published bare/Flight ratio in the flattering direction. Re-run the rep; do not report"
+        " a response whose payload volume disagrees with a complete scan of the corpus.",
+    ),
+}
+
 # `requests_unavailable` — the loadgen's ADMISSION-SHED counter — was COMPLETELY UNREAD.
 # Not defaulted, not mis-validated: never mentioned in the reporting path at all, while its
 # sibling `requests_error` had by then been through three rounds of hardening. So a rep in
@@ -216,12 +300,18 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
         "requests_ok/duration_s — both operands are validated and the rig reports ROWS/s,"
         " never a request rate; a figure this reporter does not print needs no domain",
     ),
-    "bytes_total": (
+    "bytes_per_s": (
         "ignored",
-        "the rig's claims are rows/s and cycles/row (spec R1); no byte-throughput figure is"
-        " printed, so this is recorded by the loadgen and not read here",
+        "DERIVABLE FROM TWO VERIFIED OPERANDS, which is the only reason it needs no domain of"
+        " its own: the loadgen computes it as `per_s(self.bytes_total)` = bytes_total/duration_s"
+        " (tools/flight-loadgen/src/record.rs), and BOTH operands are now checked — bytes_total"
+        " by CONTENT_VOLUME_VERIFIED below, duration_s as the validated positive finite divisor"
+        " of the reported throughput. So no value of this field can be wrong while both of those"
+        " are right, and no figure this reporter prints reads it. The reason it USED to carry —"
+        " `no byte-rate figure is reported` — was true and insufficient in exactly the way its"
+        " sibling's was (#3272 round 17): whether a figure is PRINTED is not the test; whether"
+        " the field can invalidate a printed figure is",
     ),
-    "bytes_per_s": ("ignored", "as bytes_total: no byte-rate figure is reported"),
     "latency_ms": (
         "ignored",
         "per-request percentiles over a single full-corpus scan per rep, which is a"
@@ -243,6 +333,13 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
     # cover `round` (`required-present`, i.e. verified only to EXIST) is what F1 found.
     "round": ("session-bound", SESSION_BOUND_INPUTS["round"][1]),
     "endpoint": ("session-bound", SESSION_BOUND_INPUTS["endpoint"][1]),
+    # ---- CONTENT-VOLUME INPUT (#3272 round 17) — see CONTENT_VOLUME_INPUTS above ----
+    # A fifth disposition, and it is not `session-bound` for a reason worth stating: a session-bound
+    # field's expectation comes from the session's CONFIGURATION (a tag, a pinned endpoint), known
+    # before anything ran. This one's comes from a SEPARATE MEASUREMENT — the untimed preflight —
+    # which had to be taken and validated first. Collapsing the two would put "compared to a string
+    # we chose" and "compared to another observation we verified" under one word.
+    "bytes_total": ("content-volume", CONTENT_VOLUME_INPUTS["bytes_total"][1]),
     "ts_unix_ms": ("ignored", "wall-clock stamp; the rig's ordering uses monotonic_ns from"
                               " <tag>.round, never a wall clock. It cannot affect what was"
                               " measured: no figure, no pairing and no refusal reads it — the"
@@ -280,7 +377,13 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
 # measurement-determining field into it, so it is removed rather than left empty: an empty
 # disposition also makes the loop that reads it vacuous, and a check with no subject prints exactly
 # like a passing one.
-DISPOSITIONS = ("consumed", "verified-fixed-input", "session-bound", "ignored")
+DISPOSITIONS = (
+    "consumed",
+    "verified-fixed-input",
+    "session-bound",
+    "content-volume",
+    "ignored",
+)
 
 # WHICH TABLE STATES THE EXPECTATION FOR EACH VERIFYING DISPOSITION. Declared as DATA, so the
 # both-directions closure below is ONE loop over every verifying disposition rather than a
@@ -299,6 +402,7 @@ DISPOSITIONS = ("consumed", "verified-fixed-input", "session-bound", "ignored")
 _EXPECTATION_TABLES: dict[str, tuple[str, dict[str, tuple[object, ...]]]] = {
     "verified-fixed-input": ("FIXED_INPUTS", FIXED_INPUTS),
     "session-bound": ("SESSION_BOUND_INPUTS", SESSION_BOUND_INPUTS),
+    "content-volume": ("CONTENT_VOLUME_INPUTS", CONTENT_VOLUME_INPUTS),
 }
 for _f, (_d, _why) in RECORD_FIELD_DISPOSITION.items():
     if _d not in DISPOSITIONS:
@@ -347,32 +451,52 @@ for _k, (_d, _) in RECORD_FIELD_DISPOSITION.items():
 # level out: the freeze was performed and the check on it was nominal.
 del _k, _d, _disp, _table_name, _table
 
-# ...and EVERY SESSION-BOUND ENTRY MUST CARRY ALL THREE ELEMENTS (#3272 round 14, F2). The table
-# grew a third element — the per-field CONSEQUENCE sentence the mismatch refusal ends with — and a
-# two-element entry would raise an unpacking `ValueError` deep inside the checker at report time
-# rather than being refused here. Worse, an entry with an EMPTY consequence would unpack cleanly and
-# produce a refusal that names two differing strings and nothing about what is lost, which is the
-# diagnostic this table's whole third element exists to prevent. So the shape is a REQUIREMENT
-# stated at import, where the table is: a field cannot be session-bound without a stated source, a
-# stated reason and a stated consequence.
-for _k, _spec in SESSION_BOUND_INPUTS.items():
-    if len(_spec) != 3:
-        raise Invalid(
-            f"SESSION_BOUND_INPUTS[{_k!r}] has {len(_spec)} element(s); every entry must be"
-            " (SOURCE, WHY, CONSEQUENCE). The consequence is the sentence the MISMATCH refusal ends"
-            " with, and it is per-field because the members lose different things — a wrong `round`"
-            " means another REP's record, a wrong `endpoint` means another SERVER's (#3272 round 14,"
-            " F2)."
-        )
-    for _pos, _label in enumerate(("SOURCE", "WHY", "CONSEQUENCE")):
-        if not isinstance(_spec[_pos], str) or len(_spec[_pos].strip()) < 20:
+# ...and EVERY (SOURCE, WHY, CONSEQUENCE) ENTRY MUST CARRY ALL THREE ELEMENTS (#3272 round 14, F2).
+# `SESSION_BOUND_INPUTS` grew a third element — the per-field CONSEQUENCE sentence the mismatch
+# refusal ends with — and a two-element entry would raise an unpacking `ValueError` deep inside the
+# checker at report time rather than being refused here. Worse, an entry with an EMPTY consequence
+# would unpack cleanly and produce a refusal that names two differing strings and nothing about what
+# is lost, which is the diagnostic that third element exists to prevent. So the shape is a
+# REQUIREMENT stated at import, where the tables are: a field cannot carry one of these dispositions
+# without a stated source, a stated reason and a stated consequence.
+#
+# Applied to EVERY table of this shape, from a list, rather than to `SESSION_BOUND_INPUTS` by name
+# (#3272 round 17). `CONTENT_VOLUME_INPUTS` arrived with the identical shape, and a per-name loop
+# would have left it with NO shape check at all while this one read as covering "the tables" — the
+# half-wired shape the `_EXPECTATION_TABLES` registry exists to remove, one level down. A table of
+# this shape is registered HERE or its entries are unchecked.
+_TRIPLE_TABLES = (
+    ("SESSION_BOUND_INPUTS", SESSION_BOUND_INPUTS),
+    ("CONTENT_VOLUME_INPUTS", CONTENT_VOLUME_INPUTS),
+)
+for _tname, _tbl in _TRIPLE_TABLES:
+    for _k, _spec in _tbl.items():
+        if len(_spec) != 3:
             raise Invalid(
-                f"SESSION_BOUND_INPUTS[{_k!r}]'s {_label} is not a substantive sentence"
-                f" ({_spec[_pos]!r}). An empty one unpacks cleanly and produces a refusal that"
-                " names two differing strings and nothing about what the mismatch costs, which an"
-                " operator cannot act on."
+                f"{_tname}[{_k!r}] has {len(_spec)} element(s); every entry must be"
+                " (SOURCE, WHY, CONSEQUENCE). The consequence is the sentence the MISMATCH refusal"
+                " ends with, and it is per-field because the members lose different things — a wrong"
+                " `round` means another REP's record, a wrong `endpoint` means another SERVER's, a"
+                " wrong `bytes_total` means a SHORT ARROW PAYLOAD (#3272 round 14 F2 / round 17)."
             )
-del _k, _spec, _pos, _label
+        for _pos, _label in enumerate(("SOURCE", "WHY", "CONSEQUENCE")):
+            if not isinstance(_spec[_pos], str) or len(_spec[_pos].strip()) < 20:
+                raise Invalid(
+                    f"{_tname}[{_k!r}]'s {_label} is not a substantive sentence"
+                    f" ({_spec[_pos]!r}). An empty one unpacks cleanly and produces a refusal that"
+                    " names two differing values and nothing about what the mismatch costs, which"
+                    " an operator cannot act on."
+                )
+# ...and every table of this shape must be one the registry knows about, or its entries would be
+# shape-checked while nothing ever compared them.
+for _tname, _tbl in _TRIPLE_TABLES:
+    if not any(_n == _tname for _n, _ in _EXPECTATION_TABLES.values()):
+        raise Invalid(
+            f"{_tname} is shape-checked as an expectation table but is not registered in"
+            " _EXPECTATION_TABLES, so no disposition reads it and no field could be verified"
+            " against it (#3272 round 17)"
+        )
+del _k, _spec, _pos, _label, _tname, _tbl
 
 # Every counter that must be present AND zero for a rep to be reported.
 ZERO_REQUIRED_COUNTERS = ("requests_error", "requests_unavailable")
@@ -558,6 +682,202 @@ def check_session_bound_inputs(tag: str, rec: dict, expected: dict[str, str]) ->
     return verified
 
 
+# WHAT THE SESSION HAS NO ORACLE FOR, NAMED IN THE OUTPUT (#3272 round 17).
+#
+# The preflight the expectation comes from is the WARM prewarm leg, and `lib-measure.sh` skips the
+# prewarm on the COLD arm BY DESIGN — a prewarm there would make "cold" meaningless. So a COLD-ONLY
+# session legitimately contains no preflight at all, and there is no way to manufacture one without
+# destroying the thing it would verify.
+#
+# That is a real gap and it is RECORDED rather than skipped. The branch is keyed on the AFFIRMATIVE
+# presence of the oracle, never on the absence of a bad signal, and when it is absent the rep's
+# record carries THIS STRING instead of a verified block — so a reader sees the check did not run
+# rather than reading a silence as a pass. Round 16's F2 precedent: an honest partial with a named
+# gap beats a check that cannot fire, and beats a claim the rig cannot support.
+CONTENT_VOLUME_NO_ORACLE = "NOT VERIFIED — no untimed preflight in this session"
+
+CONTENT_VOLUME_NO_ORACLE_NOTE = (
+    "The measured response's ARROW PAYLOAD VOLUME (`bytes_total`) was NOT verified for this rep."
+    " The expectation is one verified-complete full-corpus scan's payload, taken from the UNTIMED"
+    " prewarm leg — and lib-measure.sh skips the prewarm on the COLD arm by design, because a"
+    " prewarm would make `cold` meaningless. So a cold-only session has no oracle for this"
+    " property and one cannot be synthesised without destroying what it would verify. What that"
+    " leaves unverified, stated plainly: a response carrying the expected ROW COUNT with FEWER"
+    " ARROW COLUMNS, or narrower buffers, would satisfy every other check on this rep and would"
+    " make Arrow encoding look CHEAPER — the quantity #3096 exists to measure. A session that"
+    " includes a WARM arm verifies it from that arm's preflight. Successor work: have"
+    " flight-loadgen fold the #3096 Arrow-buffer digest over the batches it drains and record it"
+    " per step, so a rep's response can be compared against the pinned ARROW_BUFFER_DIGEST"
+    " directly — that also closes the SCHEMA-identity half this extent check cannot reach, and it"
+    " needs no prewarm, so it would cover the cold arm too."
+)
+
+
+def preflight_arrow_bytes_per_scan(session_dir: pathlib.Path) -> float | None:
+    """The Arrow payload volume of ONE VERIFIED-COMPLETE full-corpus scan (#3272 round 17).
+
+    THE UNTIMED PREFLIGHT, and it already exists. `lib-measure.sh` runs a prewarm leg per WARM rep
+    OUTSIDE the perf window and retains its JSONL at `<tag>.prewarm.jsonl`; `ws0_prewarm` already
+    refuses to call that leg `ok` unless EVERY successful request streamed the PINNED corpus row
+    count (round 12's F2). So the rig already possesses, at zero cost to the timed measurement and
+    with no change to `cqlite-flight` or `flight-loadgen`, a validated-complete observation of this
+    corpus's Arrow extent taken through the same server — exactly the expectation the timed
+    requests must match.
+
+    Resolved at SESSION level, over EVERY preflight present, not per rep. The Arrow extent of a full
+    scan is a function of the SCHEMA and the ROW COUNT alone (`client.rs::do_get_drain` sums
+    `batch.get_array_memory_size()`), so it is invariant across reps, arms and temperatures of one
+    corpus — which is why a cold rep can be checked against a warm rep's preflight, and why every
+    preflight in the session MUST AGREE. A disagreement is refused: two different payload volumes
+    for the same corpus means at least one of them is not what this report thinks it measured.
+
+    Returns bytes PER SCAN (`bytes_total / requests_ok`), or `None` when the session holds no
+    preflight at all — a COLD-ONLY session, where the prewarm is skipped by design. `None` is a
+    NAMED gap the caller records in the output (`CONTENT_VOLUME_NO_ORACLE`), never a silent skip.
+
+    Operands go through `positive_int`, never a bare `int()`: this value MULTIPLIES the expectation
+    for every timed rep, so a truncated or boolean operand would silently move the bar rather than
+    being refused (the #3272 R6/B5 class).
+    """
+    per_scan: dict[float, str] = {}
+    for path in sorted(session_dir.glob("*.prewarm.jsonl")):
+        try:
+            records = [
+                json.loads(line) for line in path.read_text().splitlines() if line.strip()
+            ]
+        except (OSError, ValueError) as exc:
+            raise Invalid(
+                f"the untimed preflight {path.name} is not readable JSONL ({exc}), so the"
+                " verified-complete Arrow payload volume it is the record of cannot be read. An"
+                " unparseable oracle is a refusal, never a skipped comparison (#3272 round 17)."
+            ) from None
+        if not records:
+            raise Invalid(
+                f"the untimed preflight {path.name} holds no step record, so it observed nothing"
+                " and cannot state this corpus's Arrow payload volume (#3272 round 17)"
+            )
+        ok = 0
+        total = 0
+        for idx, rec in enumerate(records):
+            for key in ("requests_ok", "bytes_total"):
+                if key not in rec:
+                    raise Invalid(
+                        f"the untimed preflight {path.name} record {idx} carries no `{key}`, so"
+                        " the Arrow payload volume of a complete scan was NOT OBSERVED and cannot"
+                        " be asserted. A missing operand is an error, never an assumed default —"
+                        " defaulting it would make the comparison pass precisely when the"
+                        " preflight is silent about it (#3272 round 17)."
+                    )
+            ok += positive_int(
+                f"preflight {path.name} record {idx} requests_ok",
+                rec["requests_ok"],
+                "The preflight's Arrow volume is divided by it to get bytes PER SCAN, so a"
+                " non-positive or fractional count would move the expectation every timed rep is"
+                " measured against.",
+            )
+            total += positive_int(
+                f"preflight {path.name} record {idx} bytes_total",
+                rec["bytes_total"],
+                "It IS the verified-complete Arrow payload volume every timed rep's response is"
+                " compared against; a zero means the preflight streamed no Arrow at all.",
+            )
+        if total % ok != 0:
+            raise Invalid(
+                f"the untimed preflight {path.name} streamed {total:,} Arrow bytes over {ok}"
+                " successful request(s), which is not a whole number per scan. Every request in a"
+                " verified-complete preflight scanned the SAME corpus, and the client's per-batch"
+                " `get_array_memory_size()` sum is a function of the schema and the row count"
+                " alone — so a remainder means those requests did not all carry the same payload,"
+                " and no single per-scan volume describes them. Re-run rather than reporting"
+                " against an expectation that averages unequal responses (#3272 round 17)."
+            )
+        per_scan.setdefault(total / ok, path.name)
+    if not per_scan:
+        return None
+    if len(per_scan) != 1:
+        detail = ", ".join(
+            f"{name} = {v:,.0f} B/scan" for v, name in sorted(per_scan.items())
+        )
+        raise Invalid(
+            "this session's untimed preflights DISAGREE about the Arrow payload volume of a"
+            f" full-corpus scan: {detail}. That volume is a function of the SCHEMA and the ROW"
+            " COUNT alone (the client sums `get_array_memory_size()` per decoded batch), so one"
+            " corpus has exactly one value and a disagreement means at least one preflight did not"
+            " scan what this report thinks it measured. No single expectation can be derived from"
+            " these, so none is invented — re-run the session (#3272 round 17)."
+        )
+    return next(iter(per_scan))
+
+
+def check_content_volume(
+    tag: str, rec: dict, requests_ok: int, expected_per_scan: float
+) -> dict:
+    """REQUIRE the measured response to carry the PAYLOAD a complete scan carries (#3272 round 17).
+
+    `bytes_total` was classified IGNORED because "no byte-throughput figure is printed" — true, and
+    not the test. Every other check on this record counts REQUESTS and ROWS, so a response with the
+    expected number of rows and FEWER ARROW COLUMNS (or narrower buffers) passed all of them, and
+    it makes ARROW ENCODING LOOK FASTER because the server encoded less. #3096 exists to measure
+    Arrow-encode cost, and the rig's headline is a bare-scan-vs-Flight RATIO, so the defect
+    flattered exactly the quantity being measured.
+
+    `expected_per_scan` comes from `preflight_arrow_bytes_per_scan` — the rep's OWN UNTIMED
+    PREFLIGHT, already verified to be a complete full-corpus scan. DERIVE, DON'T TRUST: the
+    expectation is a separately-validated observation, never this record's own field. A record
+    cannot certify its own payload.
+
+    Compared EXACTLY, with no tolerance and no threshold. `get_array_memory_size()` is integer
+    arithmetic over buffer capacities, so a legitimate full scan reproduces it bit-for-bit — and
+    the exposure is a SHORTFALL, which a percentage band would admit in the flattering direction by
+    construction. `expected_per_scan` is a float only because it is a quotient; the product is
+    compared against the integer `bytes_total` after an exact-integer check on the expectation, so
+    no float rounding decides a verdict.
+
+    Returns what was verified, so the rep's record can state it.
+    """
+    source, why, consequence = CONTENT_VOLUME_INPUTS["bytes_total"]
+    if "bytes_total" not in rec:
+        raise Invalid(
+            f"flight rep {tag} step record carries no `bytes_total`, so the ARROW PAYLOAD VOLUME"
+            " of the measured response was NOT OBSERVED and cannot be asserted. A missing field is"
+            f" an error, never an assumed default (#3272 round 17). {why}"
+        )
+    observed = positive_int(
+        f"flight rep {tag} bytes_total",
+        rec["bytes_total"],
+        "It is the ARROW PAYLOAD VOLUME of the measured response — the evidence that the server"
+        " encoded the Arrow this rep's cycles/row is divided by. A zero means it encoded none.",
+    )
+    want = expected_per_scan * requests_ok
+    if want != int(want):
+        raise Invalid(
+            f"internal: rep {tag}'s expected Arrow volume ({expected_per_scan!r} per scan x"
+            f" {requests_ok} request(s) = {want!r}) is not a whole number of bytes, so no exact"
+            " comparison is possible. The per-scan figure is validated as an exact quotient by"
+            " preflight_arrow_bytes_per_scan; reaching this means that guard was bypassed."
+        )
+    if observed != int(want):
+        short = int(want) - observed
+        direction = (
+            f"{short:,} bytes SHORT ({100.0 * short / want:.4f}% less Arrow than a complete scan"
+            " carries — the flattering direction)"
+            if short > 0
+            else f"{-short:,} bytes MORE than a complete scan carries"
+        )
+        raise Invalid(
+            f"flight rep {tag} streamed {observed:,} Arrow bytes over {requests_ok}"
+            f" successful request(s), but {source} is {expected_per_scan:,.0f} bytes per scan, so"
+            f" this rep should have carried {int(want):,} — it is {direction}."
+            f" {why}. {consequence}"
+        )
+    return {
+        "bytes_total": observed,
+        "bytes_per_scan_observed": observed / requests_ok,
+        "bytes_per_scan_expected": expected_per_scan,
+        "bytes_per_scan_expected_source": source,
+    }
+
+
 # WHICH DISPOSITIONS A CHECKER ACTUALLY COMPARES — asserted against `_EXPECTATION_TABLES` at import,
 # so a field cannot be classified as verified by a table no function reads. That is round 12's F2
 # one level out: the freeze happened and the CHECK ON IT was nominal, which is the same defect as a
@@ -565,6 +885,7 @@ def check_session_bound_inputs(tag: str, rec: dict, expected: dict[str, str]) ->
 _CHECKED_DISPOSITIONS = {
     "verified-fixed-input": check_fixed_inputs,
     "session-bound": check_session_bound_inputs,
+    "content-volume": check_content_volume,
 }
 for _disp in _EXPECTATION_TABLES:
     if _disp not in _CHECKED_DISPOSITIONS:
