@@ -1168,6 +1168,230 @@ guarantee_usable_root() {
   echo "NOTE: checkout-relative — not fetched here and not a sibling of this root (#3148)."
 }
 
+# ---------------------------------------------------------------------------
+# --verify-only tracked-fixture probe (issue #3310) — REPORT ONLY, NEVER REPAIR.
+#
+# The #2878 crash-safe restore covers EXIT/INT/TERM/HUP. SIGKILL outruns all of
+# them, so a killed fetch can leave git-tracked fixtures DELETED on disk with the
+# index still recording them. Recovery does exist — the DESTRUCTIVE path's
+# `restore_tracked_dataset_files missing-only` pre-flight — but `--verify-only`
+# exits above it, so the documented "is my root usable?" probe answered either a
+# clean green (corpus intact, fixtures gone) or the generic "does not hold a usable
+# dataset corpus" (corpus gone too), and neither names the actual damage or its
+# one-line repair. The first diagnostic an agent reaches for therefore misled.
+#
+# DESIGN DECISION, recorded in #3310 and enforced here structurally: this probe
+# REPORTS, it does not repair. `--verify-only` promises to mutate nothing (#3131
+# blocker B2), and a probe that quietly fixed the tree would be a second,
+# unannounced destructive-adjacent path in the one mode operators trust to be
+# inert. It therefore names the files, prints the exact repair command, and exits
+# non-zero; the repair is the operator's (or the next real fetch's) to run.
+# ---------------------------------------------------------------------------
+
+# Locate the (repository, subtree) pair a tracked census would apply to, using the
+# SAME git plumbing as capture_tracked_dataset_files but with NONE of its
+# refusals: every refuse_* there is a statement about a `rm -rf` that this mode
+# never performs, and printing "refusing to replace ..." from a read-only probe
+# would be false. Sets TRACKED_GUARD_REPO/TRACKED_GUARD_REL on success.
+#
+#   0  in-repo — REPO/REL are valid
+#   1  provably OUTSIDE any git work tree; the probe has NO SUBJECT
+#   2  COULD NOT MEASURE; the reason is in TRACKED_PROBE_REASON
+#
+# The reason travels in a GLOBAL rather than on stdout because this function
+# PUBLISHES globals: `reason="$(resolve_tracked_subtree_readonly)"` would run it in
+# a subshell, and TRACKED_GUARD_REPO/REL would be discarded with it — an empty REL
+# then makes the `:(literal)` pathspec match the WHOLE repository, so the probe
+# would census (and report on) every tracked file in the checkout.
+#
+# The `1` verdict is an affirmative proof (git says there is no work tree, or —
+# when git is absent — no ancestor carries a `.git`), never a fallback for an
+# unanswered question: that distinction is the whole point of the `2` verdict.
+TRACKED_PROBE_REASON=""
+resolve_tracked_subtree_readonly() {
+  local dataset_abs probe repo_root repo_root_phys rel
+  TRACKED_PROBE_REASON=""
+  TRACKED_GUARD_REPO=""
+  TRACKED_GUARD_REL=""
+
+  if ! dataset_abs="$(physical_path "${DATASET_ROOT}")"; then
+    TRACKED_PROBE_REASON="could not resolve a physical path for '${DATASET_ROOT}'"
+    return 2
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    if ancestor_has_git_dir "${dataset_abs}"; then
+      TRACKED_PROBE_REASON="git is not installed, but '${dataset_abs}' is inside a git checkout, so its tracked files cannot be enumerated"
+      return 2
+    fi
+    return 1
+  fi
+
+  probe="$(nearest_existing_dir "${dataset_abs}")"
+  if ! repo_root="$(guard_git -C "${probe}" rev-parse --show-toplevel 2>/dev/null)" || [ -z "${repo_root}" ]; then
+    if ancestor_has_git_dir "${dataset_abs}"; then
+      TRACKED_PROBE_REASON="'${dataset_abs}' looks like it is inside a git checkout, but 'git -C ${probe} rev-parse --show-toplevel' reported no work tree"
+      return 2
+    fi
+    return 1
+  fi
+
+  if ! repo_root_phys="$(physical_path "${repo_root}")"; then
+    TRACKED_PROBE_REASON="could not resolve a physical path for the enclosing repository '${repo_root}'"
+    return 2
+  fi
+
+  if ! rel="$(path_relative_inside "${repo_root_phys}" "${dataset_abs}")"; then
+    TRACKED_PROBE_REASON="could not decide whether '${dataset_abs}' is inside the git work tree at '${repo_root_phys}' (probed from '${probe}')"
+    return 2
+  fi
+
+  if [ "${rel}" = "." ]; then
+    TRACKED_PROBE_REASON="'${dataset_abs}' IS the root of the git work tree at '${repo_root_phys}', so a tracked census there would cover the whole repository rather than a fixture subtree"
+    return 2
+  fi
+
+  TRACKED_GUARD_REPO="${repo_root_phys}"
+  TRACKED_GUARD_REL="${rel}"
+  return 0
+}
+
+# The COULD-NOT-MEASURE verdict, textually distinct from both the missing-fixture
+# report and guarantee_usable_root's "does not hold a usable dataset corpus".
+report_unmeasurable_tracked_census() {
+  echo "ERROR: TRACKED-FIXTURE PROBE COULD NOT MEASURE '${DATASET_ROOT}' (issue #3310): $1" >&2
+  echo "ERROR: an unmeasured tracked-fixture census is NOT a clean one, so --verify-only" >&2
+  echo "ERROR: cannot report this root usable. Nothing was created, deleted or restored." >&2
+}
+
+# The probe itself. Returns 1 when it must fail the run (fixtures missing, or the
+# census could not be taken), 0 otherwise. Writes only outside the dataset root.
+report_orphaned_tracked_fixtures() {
+  local resolve_rc=0 dataset_abs census_file tracked_count=0 rel_path
+  local scan_rc=0 entries record xy path staged_deletion=0 repair_flags shown=0
+  local -a deleted=()
+
+  resolve_tracked_subtree_readonly || resolve_rc=$?
+  case "${resolve_rc}" in
+    0) ;;
+    1)
+      # No subject — and said as such. A "0 of 0 clean" verdict here would be a
+      # positive claim about a census that has no subject to take (#3310).
+      echo "Tracked-fixture probe (#3310): NO SUBJECT — '${DATASET_ROOT}' lies outside any git work tree, so no git-tracked fixture can be missing from it"
+      return 0
+      ;;
+    *)
+      report_unmeasurable_tracked_census "${TRACKED_PROBE_REASON}"
+      return 1
+      ;;
+  esac
+
+  # The status scan needs a scratch file, and --verify-only must not write inside
+  # the root it is probing — resolve_guard_state_dir PROVES a location outside it.
+  if ! dataset_abs="$(physical_path "${DATASET_ROOT}")"; then
+    report_unmeasurable_tracked_census "could not resolve a physical path for '${DATASET_ROOT}'"
+    return 1
+  fi
+  if ! TRACKED_GUARD_STATE_DIR="$(resolve_guard_state_dir "${dataset_abs}")"; then
+    report_unmeasurable_tracked_census "no writable temporary directory (of TMPDIR, /tmp, HOME) could be PROVEN to lie outside '${dataset_abs}', so the census could not be taken without writing inside the root this probe promises not to touch"
+    return 1
+  fi
+
+  # (1) The INDEX census — how many tracked files the subtree is supposed to hold.
+  # Used ONLY to distinguish "no subject" from "all present"; it deliberately does
+  # NOT gate the status scan below, because `git ls-files` reads the index and so
+  # reports 0 precisely when every tracked path is staged-deleted — the state of
+  # maximum risk (the #3245 review blocker, in a new place).
+  if ! census_file="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-census.XXXXXX")"; then
+    report_unmeasurable_tracked_census "could not create a scratch file for the tracked-file census"
+    return 1
+  fi
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -z -- ":(literal)${TRACKED_GUARD_REL}" >"${census_file}"; then
+    rm -f "${census_file}"
+    report_unmeasurable_tracked_census "'git ls-files' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}'"
+    return 1
+  fi
+  # NUL-delimited (`-z`) throughout: this repo tracks 40 space-bearing paths, and a
+  # whitespace-split census would silently miscount or mangle them.
+  while IFS= read -r -d '' rel_path; do
+    tracked_count=$((tracked_count + 1))
+  done <"${census_file}"
+  rm -f "${census_file}"
+
+  # (2) The authority: the same porcelain oracle the #3245 guards use. Its `-z`
+  # git read is what makes space-bearing paths safe; its OUTPUT is one "XY <path>"
+  # per line, which is the helper's established contract (shared with
+  # refuse_modified_tracked_dataset_files and verify_tracked_status_clean_or_fail).
+  entries="$(tracked_dataset_dirty_entries)" || scan_rc=$?
+  case "${scan_rc}" in
+    0 | 2) ;;
+    *)
+      report_unmeasurable_tracked_census "${entries}"
+      return 1
+      ;;
+  esac
+
+  if [ "${scan_rc}" = 2 ]; then
+    while IFS= read -r record; do
+      [ -n "${record}" ] || continue
+      xy="${record:0:2}"
+      path="${record:3}"
+      case "${xy}" in
+        # Either half of the status pair reporting a deletion: ' D' (deleted in the
+        # worktree, the SIGKILL shape), 'D ' (staged deletion), 'DD'/'AD'/'MD'/'RD'.
+        D? | ?D) deleted+=( "${path}" ) ;;
+        *) continue ;;
+      esac
+      case "${xy}" in
+        D?) staged_deletion=1 ;;
+      esac
+    done <<EOF
+${entries}
+EOF
+  fi
+
+  if [ "${#deleted[@]}" -gt 0 ]; then
+    # `git restore --worktree` rebuilds a worktree deletion from the index; a
+    # STAGED deletion has no index entry left, so that spelling would silently do
+    # nothing and `--staged` is required. The printed line is chosen by
+    # MEASUREMENT rather than printing the broader form unconditionally, which
+    # would revert unrelated staged work under the same path.
+    repair_flags="--worktree"
+    [ "${staged_deletion}" = 1 ] && repair_flags="--staged --worktree"
+
+    echo "ERROR: TRACKED FIXTURES MISSING under '${TRACKED_GUARD_REL}' (issue #3310): ${#deleted[@]} git-tracked" >&2
+    echo "ERROR: file(s) recorded in git are DELETED on disk. This is NOT the 'does not hold a" >&2
+    echo "ERROR: usable dataset corpus' condition — the fetched corpus may be perfectly fine." >&2
+    echo "ERROR: A fetch killed with SIGKILL outruns the #2878 EXIT/INT/TERM/HUP restore and" >&2
+    echo "ERROR: leaves exactly this state." >&2
+    echo "ERROR: missing tracked file(s):" >&2
+    for path in "${deleted[@]}"; do
+      shown=$((shown + 1))
+      [ "${shown}" -le 20 ] || break
+      echo "ERROR:   ${path}" >&2
+    done
+    if [ "${#deleted[@]}" -gt 20 ]; then
+      echo "ERROR:   … and $(( ${#deleted[@]} - 20 )) more" >&2
+    fi
+    echo "ERROR: --verify-only REPORTS ONLY (issue #3310): nothing was created, deleted or" >&2
+    echo "ERROR: restored. Repair with EXACTLY this command:" >&2
+    # %q for the same reason as guarantee_usable_root's remedy line: a path holding
+    # a space or a shell metacharacter must still paste as a working command.
+    # shellcheck disable=SC2059  # %q is the point; the values are arguments, not the format
+    printf 'ERROR:   git -C %q restore %s -- %q\n' \
+      "${TRACKED_GUARD_REPO}" "${repair_flags}" "${TRACKED_GUARD_REL}" >&2
+    return 1
+  fi
+
+  if [ "${tracked_count}" -eq 0 ]; then
+    echo "Tracked-fixture probe (#3310): NO SUBJECT — the git work tree at '${TRACKED_GUARD_REPO}' tracks no file under '${TRACKED_GUARD_REL}', so none can be missing"
+    return 0
+  fi
+
+  echo "Tracked-fixture probe (#3310): OK — all ${tracked_count} git-tracked file(s) under '${TRACKED_GUARD_REL}' are present on disk"
+  return 0
+}
+
 # --verify-only (issue #3131): report whether the resolved root is usable and print the
 # guaranteed export line, WITHOUT downloading, extracting, removing or re-pinning
 # anything. Two reasons this exists rather than being a pure internal:
@@ -1181,6 +1405,11 @@ guarantee_usable_root() {
 # script, before any filesystem work; canonicalize_dataset_root honors VERIFY_ONLY by
 # never creating the parent directory.
 if [ "${VERIFY_ONLY}" = 1 ]; then
+  # BEFORE guarantee_usable_root, deliberately (issue #3310): with the corpus also
+  # gone, the content check would exit first and answer "root unusable", sending an
+  # operator to a re-fetch instead of to the one-line restore. The more specific
+  # diagnosis has to be the one that speaks.
+  report_orphaned_tracked_fixtures || exit 1
   guarantee_usable_root "verify-only (no download, no extraction)"
   exit 0
 fi
