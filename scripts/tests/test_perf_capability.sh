@@ -874,13 +874,7 @@ done
 #     EXTENDED TO THE PRIVILEGE SHIM (issue #3261 AC4). The guard authorizes EXECUTABLES as
 #     well as paths, and CQLITE_PERF_TEST_PRIV_DIR was read TEXTUALLY — so it joins the seam
 #     regex below, and a second pass audits every function that RESOLVES a privileged tool.
-# CODE ONLY, AND CALL SITES ONLY (roborev round 5, Low). These audits used to match the gate name
-# against RAW lines, so PROSE counted: deleting a real `perf_capability_sandbox_ok` call while leaving
-# a comment that mentions it kept the "unskippable" audit GREEN. An audit that a comment can satisfy
-# is the vacuous-pass shape this repo already has a rule against, and it was cited upward as evidence,
-# so it had to become real. Two changes: `#` comments are stripped before any matching, and the gate
-# must appear in a COMMAND POSITION (start of line or after whitespace/`(`/`|`/`&`/`;`, followed by
-# whitespace, `)` or end) rather than merely occurring somewhere in the text.
+# CODE ONLY, AND CALL SITES ONLY — see the code/codeq note in the awk below for why.
 seam_audit=$(awk \
   -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
   -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
