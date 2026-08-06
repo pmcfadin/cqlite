@@ -549,6 +549,26 @@ else
 fi
 
 # ==========================================================================
+# 6 — THE GUARD HAS BEEN OBSERVED TO FIRE THROUGH THE DRIVER'S OWN LOOP
+# ==========================================================================
+# Every check above calls the verifier DIRECTLY. That proves the VERIFIER refuses a changed corpus;
+# it does not prove the RUN does. The one thing #3249's bar actually asks for is the asymmetric
+# pair, taken through the driver's rep loop:
+#
+#   A. a component mutated BETWEEN REPS  -> the run exits NON-ZERO, the component is NAMED, and
+#      the later reps DO NOT RUN.
+#   B. the SAME input with the CALL SITE BYPASSED -> the run COMPLETES and PUBLISHES a figure.
+#
+# B is what makes A mean something: without it, A passes for any run that dies for any reason, and
+# the case would keep passing after the finding stopped reproducing. Asserted, not narrated.
+#
+# Method (the same technique as `order_probe` in test_ws0_round_metadata.sh): the driver's loop is
+# EVAL'd out of `ws0-baseline.sh`, over a real corpus and a real `session-corpus-pin.json`, with the
+# boundary function SOURCED FROM THE SHIPPED LIBRARY — never stubbed, or the loop under test would
+# not be the loop the driver runs.
+# TODO(#3272 round 23): fill in — A then B, one increment at a time.
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # Without `-e` a block that silently never executes LOWERS the count and registers NO failure, and
