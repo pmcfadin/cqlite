@@ -27,9 +27,10 @@ The fix is to remove the delimiter rather than choose a rarer one: `gh --json` a
 and body as SEPARATE FIELDS, so the association is carried by the DATA STRUCTURE and there is nothing
 to forge. Nothing a body can contain changes which object it sits in.
 
-Markers inside fenced/preformatted Markdown regions are IGNORED: a fence preserves column zero, so a
-populated marker quoted inside one would otherwise grant — the accidental bypass most likely to happen,
-since a fence is how a human documents an exact syntax (#3312 job 28).
+A marker counts ONLY when it is the SOLE NONBLANK CONTENT of its comment (#3312 job 29). That replaces
+four successive Markdown recognisers — anywhere-in-comment, column-zero anchor, fence skipping, fence
+state tracking — because deciding "data or control?" inside a grammar the author controls is an unbounded
+game. No quoting construct can be the only thing in a comment, so quoting cannot grant.
 
 The whole decision lives here — shape, scope, reason and authorization — so the shell never associates
 an author with a body at all. Values are whitespace-collapsed on output for the same reason
@@ -47,34 +48,44 @@ MARKER = re.compile(
     r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
 )
 PREFIX = "roborev-waive: prompt-content-absent "
-# ===== FENCED REGIONS ARE DATA, NOT MARKERS (#3312 job 28) =====
-# THE ACCIDENT THIS CLOSES, and it is the most likely spelling of all of them: the anchor requires the
-# marker to BE its own line, which correctly defeats indented, `>`-quoted, bulleted and mid-sentence
-# copies — but a Markdown FENCE preserves column zero, so a populated marker quoted inside ``` … ```
-# still matched. An allowlisted human documenting the exact syntax, or pasting a real example into a PR
-# comment, would therefore GRANT the waiver by explaining it. That contradicts the anti-accidental-bypass
-# guarantee we state, so fenced/preformatted regions are skipped entirely.
+# ===== AN AUTHORIZATION MUST BE THE SOLE NONBLANK CONTENT OF ITS COMMENT (#3312 job 29) =====
+# THE FIFTH VARIATION OF ONE DEFECT, and the reason this rule replaces a parser rather than extending it.
+# Four recognisers were tried, each correct about the case in front of it and each superseded:
+#   1. accept the marker ANYWHERE in the comment            -> a quoted example granted
+#   2. require it to BE its own line (column-zero anchor)    -> defeated indented/quoted/bulleted/mid-line
+#   3. skip fenced regions (``` and ~~~)                    -> a fence preserves column zero, so a quoted
+#                                                              example inside one granted
+#   4. track fence open/close state properly                -> ````bash` inside a fence is CONTENT, not a
+#                                                              closing fence, so fence state desynchronised;
+#                                                              and HTML <pre>/<code> were never covered
+# Each fix asked "is this line DATA or CONTROL?" of a grammar the AUTHOR controls and which has unbounded
+# ways to say "this is data" — so the list of recognisers never closes. That is the umbrella lesson of this
+# issue applied to itself: REMOVE THE SHARED CHANNEL, DO NOT PICK A RARER DELIMITER. Parsing Markdown to
+# separate data from control IS sharing a channel with the author.
 #
-# CommonMark, bounded and deliberately minimal: a fence opens with 3+ backticks or 3+ tildes, indented up
-# to 3 spaces, and closes with a fence of the SAME character that is AT LEAST as long, also indented up to
-# 3 spaces, with nothing but whitespace after it. Indented (4-space) code blocks need no handling — the
-# column-zero anchor already excludes them. An UNCLOSED fence swallows the rest of the comment, which is
-# the fail-closed direction (a marker after it is ignored, never granted).
-FENCE_CHARS = ("`", "~")
+# THE RULE: the marker must be the ONLY nonblank line in the comment. Leading and trailing blank lines are
+# fine; ANY other content — prose, a fence delimiter, an HTML tag, a second sentence — means the comment is
+# not an authorization. No quoting construct can satisfy it, because every quoting construct requires
+# additional content. It is decidable without parsing anything.
+#
+# COST: the authorizer posts a comment containing only the marker and puts commentary in a separate comment.
+# The token accounting already lives inside `reason=`, so nothing is lost — and an authorization SHOULD be a
+# clean unambiguous act rather than a sentence buried in prose.
+#
+# A COMMENT WITH OTHER CONTENT IS IGNORED SILENTLY, not reported as malformed: someone documenting the form
+# (this repository's own PR threads do) has not attempted an authorization, and reporting MALFORMED on their
+# comment would be a false accusation printed on every later run. A marker-only comment whose FIELDS are
+# wrong is still MALFORMED — there the author plainly meant to authorize. The `NONE` cause teaches the rule.
 
 
-def fence_run(line):
-    """(char, length) when `line` is a fence delimiter, else None."""
-    stripped = line.lstrip(" ")
-    if len(line) - len(stripped) > 3:
+def sole_marker_line(body):
+    """The comment's only nonblank line when it is a marker line, else None."""
+    lines = [raw.rstrip("\r") for raw in body.split("\n")]
+    nonblank = [line for line in lines if line.strip()]
+    if len(nonblank) != 1:
         return None
-    if not stripped or stripped[0] not in FENCE_CHARS:
-        return None
-    char = stripped[0]
-    run = len(stripped) - len(stripped.lstrip(char))
-    if run < 3:
-        return None
-    return char, run
+    line = nonblank[0]
+    return line if line.startswith(PREFIX) else None
 
 
 PLACEHOLDERS = {
@@ -188,23 +199,9 @@ def main(argv):
         body = comment.get("body")
         if not isinstance(body, str):
             continue
-        fence = None  # (char, length) of the open fence, or None
-        for raw in body.split("\n"):
-            line = raw.rstrip("\r")
-            run = fence_run(line)
-            if fence is None:
-                if run is not None:
-                    fence = run
-                    continue
-            else:
-                # A closing fence uses the SAME character and is at least as long as the opener.
-                if run is not None and run[0] == fence[0] and run[1] >= fence[1]:
-                    fence = None
-                continue  # everything inside a fence is DATA, including a column-zero marker
-            # ANCHORED: the marker must BE the line, so an indented, quoted, bulleted or
-            # mid-sentence copy — the ways a human legitimately quotes the form — cannot match.
-            if not line.startswith(PREFIX):
-                continue
+        # ONE DECISION, NO PARSE: is the marker the whole comment?
+        line = sole_marker_line(body)
+        if line is not None:
             state, fields = judge_line(line, author, base, head, job, allowlist)
             if state == "granted":
                 granted = fields

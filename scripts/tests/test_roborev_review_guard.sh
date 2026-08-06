@@ -3376,10 +3376,12 @@ assert_says 'case (wv1) the diagnostic points at --help instead of printing a ma
 assert_lacks 'case (wv1) and no part of the marker appears anywhere in the output' 'roborev-waive'
 assert_says 'case (wv1) it names the review scope a waiver would have to bind' \
   "base $w_base, head $w_head, job 4656"
-assert_says 'case (wv1) the NONE cause names the CHANNEL requirement, not just the absence' \
-  'a marker inside a review body or a review-thread reply is NOT read'
+assert_says 'case (wv1) the NONE cause names the SHAPE requirement (job 29)' \
+  'the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment'
+assert_says 'case (wv1) and it names the contexts that do not count' \
+  'a marker inside prose, a code fence, a quote or a review body is not read'
 assert_says 'case (wv1) the waiver state is reported as NONE' \
-  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review; a marker inside a review body or a review-thread reply is NOT read — see --help for the form\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
 assert_lacks 'case (wv1) no NOTICE verdict exists for this key any more' '^prompt-content: NOTICE'
 assert_lacks 'case (wv1) and no snapshot keys are emitted' '^snapshot-'
 reset_stub
@@ -3502,17 +3504,41 @@ assert_verdict 'case (wv9)' PASS 0
 assert_says 'case (wv9) the current marker grants' "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=re-requested after the push\)\$"
 reset_stub
 
-printf '== (wv10) a marker on its OWN line of a multi-line comment is attributable and grants ==\n'
-# Line boundaries are preserved (job 23), so the author record precedes the comment's own lines and a
-# marker on any one of them still attributes to that comment's author — while prose on the SAME line as
-# the marker can no longer make it match at all (see wv11/wv12).
+printf '== (wv10) JOB 29: a marker PLUS PROSE in one comment does NOT grant ==\n'
+# THE NEW NEGATIVE THAT PAIRS WITH THE POSITIVE CONTROL (wv4). Under the sole-content rule the marker must be
+# the ONLY nonblank line of its comment, so the commonest well-meant shape — a sentence of explanation above
+# the marker — is not an authorization. That pair is what proves the sole-content rule is doing the deciding:
+# same author, same scope, same reason, and the ONLY difference is the extra line.
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
-STUB_GH_COMMENTS="\001pmcfadin\nI checked the token accounting: 541k in / 472k cached, genuine.\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=token accounting checked\n"
+STUB_GH_COMMENTS="\001pmcfadin\nToken accounting checked: 541812 in / 472576 cached, genuine.\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=token accounting checked\n"
 run_wrapper "$w_work"
-assert_verdict 'case (wv10)' PASS 0
-assert_says 'case (wv10) the author record attaches to the marker line' "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=token accounting checked\)\$"
+assert_verdict 'case (wv10)' FAIL 1
+assert_says 'case (wv10) a marker buried in prose is not an authorization' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+assert_lacks 'case (wv10) and it does not grant' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv10b) JOB 29: the SANCTIONED workflow — commentary and authorization as SEPARATE comments ==\n'
+# The cost of the rule, and the proof it is trivial: the authorizer explains in one comment (fenced example
+# included) and authorizes in another. The second comment is marker-only, so it grants.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(SOLE_BASE="$w_base" SOLE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=token accounting checked"
+          % (os.environ["SOLE_BASE"], os.environ["SOLE_HEAD"]))
+doc = "Token accounting checked: 541812 in / 472576 cached. The form is:\n\n```\n" + marker + "\n```"
+print(json.dumps({"comments": [
+    {"author": {"login": "pmcfadin"}, "body": doc},
+    {"author": {"login": "pmcfadin"}, "body": marker}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv10b)' PASS 0
+assert_says 'case (wv10b) the marker-only comment grants; the documentation comment is inert' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=token accounting checked\)\$"
 reset_stub
 
 printf '== (wv11) BLOCKER 1: the failure diagnostic REPOSTED as a PR comment must not waive ==\n'
@@ -3539,7 +3565,7 @@ assert_verdict 'case (wv11)' FAIL 1
 assert_says 'case (wv11) reposting the diagnostic does not waive anything' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv11) and no waiver is found in it' \
-  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review; a marker inside a review body or a review-thread reply is NOT read — see --help for the form\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
 assert_lacks 'case (wv11) the reposted block never grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3554,7 +3580,7 @@ STUB_GH_COMMENTS="\001pmcfadin\n> roborev-waive: prompt-content-absent base=$w_b
 run_wrapper "$w_work"
 assert_verdict 'case (wv12)' FAIL 1
 assert_says 'case (wv12) no quoted or indented copy is honoured' \
-  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review; a marker inside a review body or a review-thread reply is NOT read — see --help for the form\)$'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — a marker inside prose, a code fence, a quote or a review body is not read\)$'
 assert_lacks 'case (wv12) and none of them grants' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3822,8 +3848,11 @@ print(json.dumps({"comments": [{"author": {"login": "drive-by-contributor"}, "bo
 ')
 run_wrapper "$w_work"
 assert_verdict 'case (wv29)' FAIL 1
-assert_says 'case (wv29) the author comes from the JSON object, not from the body' \
-  "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor' is not on the waiver allowlist"
+# TWO LAYERS NOW REFUSE THIS, and the outer one fires first: the forged author line is a SECOND nonblank
+# line, so the comment is not an authorization at all (job 29). Even if it were marker-only, the author would
+# still be off the allowlist (job 25) — (wv25) pins that half with a marker-only fixture.
+assert_says 'case (wv29) a forged author line is not an authorization at all' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
 assert_lacks 'case (wv29) a forged author line cannot grant' '^prompt-content: WAIVED'
 assert_lacks 'case (wv29) and the forged login is never credited' 'authorized by @pmcfadin'
 assert_says 'case (wv29) the absence FAIL stands' \
@@ -3840,8 +3869,8 @@ STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_GH_COMMENTS="\001drive-by-contributor\npmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=bare login line above the marker\n"
 run_wrapper "$w_work"
 assert_verdict 'case (wv30)' FAIL 1
-assert_says 'case (wv30) a bare login line is prose, not an author record' \
-  "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor'"
+assert_says 'case (wv30) a bare login line is extra content, so the comment is not an authorization' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
 reset_stub
 
 printf '== (wv31) JOB 26/27: an ABSENT scanner is UNAVAILABLE, never a text fallback ==\n'
@@ -3905,17 +3934,16 @@ assert_verdict 'case (wv32)' FAIL 1
 assert_says 'case (wv32) the absence FAIL stands, with no waiver found' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
 assert_says 'case (wv32) and the waiver state comes from the real scanner' \
-  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
 assert_lacks 'case (wv32) a hostile scanner cannot fabricate a grant' '^prompt-content: WAIVED'
 assert_lacks 'case (wv32) and its fabricated author is never credited' 'attacker'
 reset_stub
 
-printf '== (wv33) JOB 28: a FENCED marker from an allowlisted author does NOT grant ==\n'
-# THE ACCIDENT THIS CLOSES, and the most likely spelling of the whole family: the anchor requires the
-# marker to BE its own line, which defeats indented, `>`-quoted, bulleted and mid-sentence copies — but a
-# Markdown FENCE preserves column zero. So an ALLOWLISTED human documenting the exact syntax, or pasting a
-# real example into a PR comment, granted the waiver by explaining it. In-model by our own boundary: this is
-# the ACCIDENT category, not a hostile invoker.
+printf '== (wv33) JOB 28/29 REGRESSION: a FENCED marker from an allowlisted author does NOT grant ==\n'
+# KEPT AS A REGRESSION ACROSS TWO DESIGNS (jobs 28 and 29). It used to grant because a fence preserves
+# column zero; the fence machine then excluded it; the sole-content rule now excludes it for a SIMPLER
+# reason — a fenced marker is never the only nonblank line. The case is pinned from both designs so a future
+# edit cannot reopen it by deleting the newer rule.
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
@@ -3929,7 +3957,7 @@ print(json.dumps({"comments": [{"author": {"login": "pmcfadin"}, "body": body}]}
 run_wrapper "$w_work"
 assert_verdict 'case (wv33)' FAIL 1
 assert_says 'case (wv33) a fenced marker is data, not an authorization' \
-  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review'
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
 assert_lacks 'case (wv33) documenting the syntax must not grant' '^prompt-content: WAIVED'
 assert_says 'case (wv33) the absence FAIL stands' \
   '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
@@ -3948,24 +3976,28 @@ assert_says 'case (wv33b) the unfenced marker grants' \
   "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=documenting the form\)\$"
 reset_stub
 
-printf '== (wv33c) JOB 28: tilde fences and a marker AFTER a closed fence ==\n'
-# Both fence characters are tracked, and the region ENDS: a marker after a properly closed fence is a
-# genuine authorization and must still grant. A fence rule that swallowed the rest of the comment would be
-# fail-closed but would break the ordinary "here is the form, and here is my authorization" comment.
+printf '== (wv33c) JOB 29: an HTML <pre> block and a `bash`-info-string fence are BOTH inert ==\n'
+# The two contexts the fence machine got wrong (job 29 finding): ````bash` inside a fence is CONTENT, not a
+# closing delimiter, so fence state desynchronised and a later marker granted; and HTML <pre>/<code> was
+# never handled at all. Under the sole-content rule neither needs handling — both are extra content.
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
-STUB_GH_COMMENTS_JSON=$(FENCE_BASE="$w_base" FENCE_HEAD="$w_head" python3 -c '
+STUB_GH_COMMENTS_JSON=$(SOLE_BASE="$w_base" SOLE_HEAD="$w_head" python3 -c '
 import json, os
-marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=token accounting checked"
-          % (os.environ["FENCE_BASE"], os.environ["FENCE_HEAD"]))
-body = "~~~\n" + marker.replace("token accounting checked", "just an example") + "\n~~~\n" + marker
-print(json.dumps({"comments": [{"author": {"login": "pmcfadin"}, "body": body}]}))
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=documenting the form"
+          % (os.environ["SOLE_BASE"], os.environ["SOLE_HEAD"]))
+fence_confusion = "```\n```bash\n" + marker + "\n```"
+html_pre = "<pre>\n" + marker + "\n</pre>"
+print(json.dumps({"comments": [
+    {"author": {"login": "pmcfadin"}, "body": fence_confusion},
+    {"author": {"login": "pmcfadin"}, "body": html_pre}]}))
 ')
 run_wrapper "$w_work"
-assert_verdict 'case (wv33c)' PASS 0
-assert_says 'case (wv33c) the tilde-fenced example is ignored and the real marker grants' \
-  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=token accounting checked\)\$"
+assert_verdict 'case (wv33c)' FAIL 1
+assert_says 'case (wv33c) neither preformatted context is an authorization' \
+  '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
+assert_lacks 'case (wv33c) and neither grants' '^prompt-content: WAIVED'
 reset_stub
 
 printf '== the summary header is distinct from every agent-gate header ==\n'
@@ -4234,15 +4266,18 @@ fi
 # granting — the accidental bypass most likely to occur, since a fence is how a human documents a syntax.
 # The state machine must live in the SCANNER (one implementation of the parse) and must track both fence
 # characters; a shell-side copy is how the in-band channel of job 26 came back.
-_fence_ok=1
-grep -qF 'FENCE_CHARS = ("`", "~")' "$SCAN_TOOL" || _fence_ok=0
-grep -qF 'def fence_run(line):' "$SCAN_TOOL" || _fence_ok=0
-grep -qF 'everything inside a fence is DATA' "$SCAN_TOOL" || _fence_ok=0
-grep -q 'FENCE_CHARS\|fence_run' "$ORACLES" && _fence_ok=0
-if [ "$_fence_ok" -eq 1 ]; then
-  ok 'structural: fenced regions are skipped by the scanner (both fence characters), with no shell-side copy'
+_sole_ok=1
+grep -qF 'def sole_marker_line(body):' "$SCAN_TOOL" || _sole_ok=0
+grep -qF 'if len(nonblank) != 1:' "$SCAN_TOOL" || _sole_ok=0
+grep -qF 'ONE DECISION, NO PARSE' "$SCAN_TOOL" || _sole_ok=0
+# AND NO MARKDOWN RECOGNISER MAY RETURN. Four were tried and superseded; reintroducing one would restore the
+# unbounded game of deciding "data or control?" inside a grammar the comment author controls.
+grep -qE 'FENCE_CHARS|fence_run|def .*fence|<pre>|lstrip\("`"\)' "$SCAN_TOOL" && _sole_ok=0
+grep -qE 'FENCE_CHARS|fence_run' "$ORACLES" && _sole_ok=0
+if [ "$_sole_ok" -eq 1 ]; then
+  ok 'structural: an authorization must be the SOLE NONBLANK CONTENT of its comment, decided without parsing Markdown'
 else
-  bad 'structural: fenced markers are not excluded, or the fence logic leaked into the shell — a populated marker quoted in a code fence would grant, which is the accidental bypass the anti-accident guarantee forbids (#3312 job 28)'
+  bad 'structural: the sole-content rule is missing, or a Markdown recogniser (fence/HTML) came back — the class was closed by REMOVING the shared channel, not by extending the parser, and four successive recognisers were superseded proving it (#3312 job 29)'
 fi
 # ===== THE THREAT-MODEL BOUNDARY IS STATED, ON EVERY SURFACE (#3312) =====
 # Five consecutive rounds landed in the waiver's authorization path, so the boundary is recorded to get the

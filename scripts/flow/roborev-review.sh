@@ -414,9 +414,18 @@ should be recorded rather than patched. "A non-invoker can bypass this", or "thi
 be bypassed by accident", is a DEFECT. Same-host actors who can write these scripts
 are invoker-class, not third parties.
 
-CHANNEL: the marker is read from TOP-LEVEL PR comments only. One posted inside a
-review body or a review-thread reply is not read, so it silently does not apply and
-the FAIL stands (fail-closed, but it will look like the waiver was ignored).
+SHAPE AND CHANNEL, both load-bearing:
+
+  * THE MARKER MUST BE THE SOLE NONBLANK CONTENT OF ITS COMMENT. Leading and trailing
+    blank lines are fine; anything else — prose, a code fence, a quote, an HTML tag, a
+    second sentence — means the comment is not an authorization. Put commentary in a
+    SEPARATE comment; the token accounting belongs inside reason= anyway. This replaced
+    four successive Markdown recognisers (anywhere-in-comment, column-zero anchor,
+    fence skipping, fence-state tracking): deciding "data or control?" inside a grammar
+    the author controls is unbounded, and no quoting construct can be the ONLY thing in
+    a comment, so quoting cannot grant.
+  * THE COMMENT MUST BE TOP-LEVEL. Markers inside a review body or a review-thread
+    reply are not read (fail-closed, but it looks like the waiver was ignored).
 
 THE AUTHOR MUST BE ON AN EXPLICIT ALLOWLIST (see ROBOREV_WAIVER_AUTHORS in
 roborev-review-oracles.sh). This is a PUBLIC repository and a failing block PRINTS the
