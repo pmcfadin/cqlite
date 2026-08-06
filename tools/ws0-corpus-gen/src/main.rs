@@ -371,7 +371,83 @@ fn reject_identity_out_inside_the_realized_root(cli: &Cli) -> GenResult<()> {
     .into())
 }
 
-/// The generated files, by name, that `--identity-out` must not alias.
+/// Refuse a `--verify-against` that this run would DESTROY (#3272 review round 13, F1).
+///
+/// # The finding: one path argument was guarded, its sibling was not
+///
+/// Round 10's F3 gave `--identity-out` a containment check AND a `same_file` check.
+/// `--verify-against` got NEITHER — only the narrow "is it one of the two identity WRITE
+/// TARGETS" test in [`load_prior_identity`]. So two spellings walked straight through:
+///
+/// * a prior at `<out>/ws0/events/…` — anywhere inside the regenerated table directory, which
+///   `generate()` `remove_dir_all`s before writing. The prior is loaded (so the comparison is
+///   honest) and then SILENTLY DELETED, so the artifact the operator was comparing against no
+///   longer exists and a re-run cannot reproduce the comparison at all;
+/// * a prior at `<out>/ws0-events.cql` — the emitted DDL, which `generate()` OVERWRITES.
+///
+/// Either way the run can exit 0 having destroyed the verification artifact, which contradicts
+/// the guarantee `load_prior_identity` states in prose ("it would also DESTROY the recorded
+/// artifact the comparison was supposed to be against"). Reading the prior first made the
+/// COMPARISON honest; it never made the ARTIFACT safe.
+///
+/// # The mechanism is round 10's, reused rather than re-written
+///
+/// [`path_is_inside`] for containment and [`same_path`]/[`same_file`] for the named outputs —
+/// the same two functions `reject_identity_out_aliasing_inputs` calls, and the same
+/// [`generated_input_paths`] list, so a generated file added there is protected from BOTH
+/// arguments in one edit. A second hand-written comparison would re-acquire exactly the
+/// hardlink and case-fold holes rounds 3/9/10 closed.
+///
+/// # Why this needs no "realize the root first" second pass (unlike `--identity-out`)
+///
+/// Round 10's F-D exists because `--identity-out` names a file that DOES NOT EXIST YET, so
+/// before generation there are no inodes to compare and no directory for the volume to fold.
+/// A `--verify-against` path is the opposite: it MUST already exist (it is read, and an
+/// unreadable prior is refused). So `canonicalize` has something real to resolve on the prior
+/// side, and a case-differing spelling is answered BY THE FILESYSTEM here:
+/// `--verify-against <out>/WS0/EVENTS/prior.json` makes `<out>/ws0/events` canonicalize
+/// successfully on a folding volume (the directory exists, under the other spelling), so
+/// containment is decided against the real folded path rather than by a string comparison.
+/// Nothing is created, which is what lets the refusal leave the corpus root untouched.
+fn reject_verify_against_a_destroyed_input(cli: &Cli) -> GenResult<()> {
+    let Some(prior) = cli.verify_against.as_ref() else {
+        return Ok(());
+    };
+    let table_dir = cli.out.join("ws0").join("events");
+    if path_is_inside(prior, &table_dir) {
+        return Err(format!(
+            "--verify-against {} resolves INSIDE the generated table directory ({}), which this \
+             run DELETES (`remove_dir_all`) before writing the corpus. The prior would be loaded \
+             and then silently destroyed, so the recorded artifact this comparison was supposed \
+             to be against would no longer exist — and the run could still exit 0, leaving no way \
+             to reproduce the comparison. Point --verify-against at a committed record (e.g. \
+             docs/reports/ws0-3096-artifacts/corpus-identity.json), or generate into a different \
+             --out (issue #3272 round 13, F1).",
+            prior.display(),
+            table_dir.display()
+        )
+        .into());
+    }
+    for (name, path) in generated_input_paths(cli) {
+        if same_path(prior, &path) {
+            return Err(format!(
+                "--verify-against {} is the SAME FILE as {} ({}), which this run OVERWRITES. The \
+                 prior would be loaded and then destroyed by generation, so the artifact the \
+                 determinism check was made against would be gone and a re-run would compare \
+                 against the new bytes. Point --verify-against at a record outside the corpus \
+                 (e.g. docs/reports/ws0-3096-artifacts/corpus-identity.json) (issue #3272 round \
+                 13, F1).",
+                prior.display(),
+                name,
+                path.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// The generated files, by name, that `--identity-out` and `--verify-against` must not alias.
 ///
 /// `corpus-identity.json` is deliberately EXCLUDED: `--identity-out` naming it is the
 /// documented no-op (the code writes that path unconditionally and skips the second write when
@@ -519,6 +595,11 @@ fn load_prior_identity(cli: &Cli) -> GenResult<Option<(PathBuf, CorpusIdentity)>
 }
 
 async fn run(cli: Cli) -> GenResult<ExitCode> {
+    // A `--verify-against` this run would DELETE or OVERWRITE is refused FIRST (#3272 round 13,
+    // F1). Before `load_prior_identity` even reads it, because the refusal is about the ARTIFACT
+    // rather than about the comparison: reading first (R5) already made the comparison honest, and
+    // it never made the prior safe from `generate()`'s `remove_dir_all`/DDL write.
+    reject_verify_against_a_destroyed_input(&cli)?;
     // BEFORE generation, and before any identity is written (issue #3272 review R5).
     let prior = load_prior_identity(&cli)?;
     // ...and an `--identity-out` that would OVERWRITE A GENERATED INPUT is refused here too,

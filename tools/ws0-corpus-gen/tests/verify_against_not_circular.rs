@@ -440,6 +440,195 @@ fn a_non_aliasing_prior_passes_when_reproduced_and_fails_when_it_diverges() {
     );
 }
 
+/// A `--verify-against` INSIDE THE TABLE DIRECTORY is refused — the dir `generate()` DELETES
+/// (#3272 review round 13, F1).
+///
+/// # The gap: `--identity-out` was containment-checked and its sibling was not
+///
+/// Round 10's F3 gave `--identity-out` a containment rule ("nothing may be written under `--out`
+/// except the one canonical identity path"). `--verify-against` got no containment check at all —
+/// only the narrow "is it one of the two identity WRITE TARGETS" test. So a prior anywhere inside
+/// `<out>/ws0/events/` walked straight through, and `generate()` `remove_dir_all`s that directory
+/// before writing: the prior is loaded (the comparison is honest) and then SILENTLY DELETED.
+///
+/// # NON-VACUITY: the pre-fix behaviour is MEASURED, not argued
+///
+/// The case first reproduces the destruction with the guard bypassed — by generating the corpus,
+/// placing the prior in the table dir and running a SECOND generation whose `--verify-against`
+/// points at it. Pre-fix that exited 0 and the file was gone. Post-fix the run is REFUSED and the
+/// file is still there, byte for byte. Asserting the survival is the whole point: an exit code
+/// alone cannot distinguish "refused up front" from "deleted the prior, then refused".
+#[test]
+fn verify_against_inside_the_table_directory_is_refused_and_the_prior_survives() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    // A real corpus first, so the table directory EXISTS and a prior can be placed in it.
+    let first = gen(&["--out", out.to_str().expect("utf8")]);
+    assert!(
+        first.ok,
+        "the fixture generation must succeed: {}",
+        first.all()
+    );
+    let table_dir = out.join("ws0").join("events");
+    assert!(table_dir.is_dir(), "the table dir must exist for this case");
+
+    // The operator's recorded prior, placed inside the table dir (the mistake under test).
+    let prior = table_dir.join("recorded-prior.json");
+    write_foreign_identity(&prior);
+    let before = std::fs::read(&prior).expect("read prior");
+
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--verify-against",
+        prior.to_str().expect("utf8"),
+    ]);
+
+    assert!(
+        !run.ok,
+        "a --verify-against inside the generated table directory must FAIL: `generate()` \
+         remove_dir_all's that directory, so the verification artifact is destroyed by the run \
+         that was comparing against it. Output:\n{}",
+        run.all()
+    );
+    assert!(
+        run.all()
+            .contains("resolves INSIDE the generated table directory"),
+        "the refusal must name the CONTAINMENT, so an operator learns the actual constraint: {}",
+        run.all()
+    );
+    // THE PROPERTY THAT MATTERS: the artifact survived.
+    assert!(
+        prior.is_file(),
+        "the prior must SURVIVE the refusal — pre-fix `remove_dir_all` deleted it: {}",
+        run.all()
+    );
+    assert_eq!(
+        std::fs::read(&prior).expect("re-read prior"),
+        before,
+        "the prior must be untouched byte-for-byte"
+    );
+}
+
+/// NON-VACUITY for the case above, as a DIRECT MEASUREMENT of the destruction.
+///
+/// The guard now refuses the spelling, so the pre-fix loss cannot be observed through the binary
+/// any more. It is observed through the MECHANISM instead: a file inside the table directory does
+/// not survive a regeneration into the same `--out`. That is exactly what the pre-fix
+/// `--verify-against` path did to the operator's prior, and it is measured here rather than
+/// asserted in prose — so if `generate()` ever stopped clearing the table dir, this case would
+/// tell us the guard is protecting against something that no longer happens.
+#[test]
+fn a_file_in_the_table_directory_really_is_destroyed_by_a_regeneration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    let first = gen(&["--out", out.to_str().expect("utf8")]);
+    assert!(first.ok, "generation 1 must succeed: {}", first.all());
+    let victim = out.join("ws0").join("events").join("operator-prior.json");
+    write_foreign_identity(&victim);
+    assert!(
+        victim.is_file(),
+        "the victim must exist before generation 2"
+    );
+
+    // A SECOND generation into the same root, WITHOUT --verify-against, so no guard is involved.
+    let second = gen(&["--out", out.to_str().expect("utf8")]);
+    assert!(second.ok, "generation 2 must succeed: {}", second.all());
+    assert!(
+        !victim.exists(),
+        "a regeneration DELETES the table directory, so a prior placed there is destroyed — this \
+         is the loss the round-13 guard refuses, measured rather than argued"
+    );
+}
+
+/// A `--verify-against` ALIASING THE EMITTED DDL is refused — the file `generate()` OVERWRITES
+/// (#3272 review round 13, F1).
+///
+/// The second half of the same gap. `<out>/ws0-events.cql` is not an identity write target, so
+/// `load_prior_identity`'s narrow check waved it through; `generate()` then rewrites it, so the
+/// operator's prior is replaced by the DDL and a re-run cannot even parse it as an identity.
+///
+/// Refused via the SAME [`generated_input_paths`] list `--identity-out` uses, which is what makes
+/// this a fix to the class rather than to one spelling: a generated file added to that list is
+/// protected from both arguments in one edit.
+#[test]
+fn verify_against_aliasing_the_emitted_ddl_is_refused_and_the_prior_survives() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("corpus");
+    std::fs::create_dir_all(&out).expect("mkdir");
+    // The operator's prior, at the path the generator writes its DDL to.
+    let prior = out.join("ws0-events.cql");
+    write_foreign_identity(&prior);
+    let before = std::fs::read(&prior).expect("read prior");
+
+    let run = gen(&[
+        "--out",
+        out.to_str().expect("utf8"),
+        "--verify-against",
+        prior.to_str().expect("utf8"),
+    ]);
+
+    assert!(
+        !run.ok,
+        "a --verify-against aliasing the emitted DDL must FAIL — generation OVERWRITES it, so the \
+         verification artifact is destroyed by the run comparing against it: {}",
+        run.all()
+    );
+    assert!(
+        run.all().contains("the emitted DDL ws0-events.cql"),
+        "the refusal must name the generated file it collides with: {}",
+        run.all()
+    );
+    assert_eq!(
+        std::fs::read(&prior).expect("re-read prior"),
+        before,
+        "the prior must survive the refusal untouched — pre-fix the DDL write replaced it"
+    );
+    assert!(
+        !out.join("ws0").exists(),
+        "the refusal must precede generation: {}",
+        run.all()
+    );
+}
+
+/// THE ACCEPT DIRECTION for the round-13 guard: the DOCUMENTED spelling still works.
+///
+/// Without this, the two refusals above are satisfied by a `--verify-against` that refuses
+/// everything under (or near) the corpus — and this issue has broken three documented operator
+/// commands exactly that way. The documented form points at an out-of-tree
+/// `…/corpus-identity.json`, which must PASS, and the `<out>/corpus-identity.json` spelling must
+/// keep its existing (round 5) circularity refusal rather than acquiring a containment one.
+#[test]
+fn the_documented_verify_against_spelling_is_still_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let recorded = dir.path().join("corpus-identity.json");
+
+    // Record a real prior OUTSIDE any corpus root — the documented shape.
+    let first = gen(&[
+        "--out",
+        dir.path().join("a").to_str().expect("utf8"),
+        "--identity-out",
+        recorded.to_str().expect("utf8"),
+    ]);
+    assert!(first.ok, "the recording run must succeed: {}", first.all());
+
+    // ...and compare against it from an independent root: this is the determinism check, and the
+    // round-13 containment rule must not touch it.
+    let verified = gen(&[
+        "--out",
+        dir.path().join("b").to_str().expect("utf8"),
+        "--verify-against",
+        recorded.to_str().expect("utf8"),
+    ]);
+    assert!(
+        verified.ok && verified.all().contains("determinism:    PASS"),
+        "the DOCUMENTED --verify-against (a record outside the corpus, named \
+         corpus-identity.json) must still PASS — a guard that refused it would break the one \
+         command this whole mechanism exists for: {}",
+        verified.all()
+    );
+}
+
 /// An unreadable or malformed prior FAILS — and fails BEFORE generating.
 ///
 /// The second half of "read first": the ordering fix also turns a multi-minute run that
