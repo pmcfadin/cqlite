@@ -111,14 +111,26 @@ pub const BYTES_PER_ROW: f64 = 693.6901055;
 /// the same broken-instrument failure as a guard that never fires, arrived at from the other side.
 ///
 /// The fix does not touch the verdict. It uses the fact this doc comment already stated and then
-/// filed away: the oracle for this field is `DDL`, a **source constant**, so it needs no artifact.
-/// [`crate::schema::ddl_file_sha256`] computes it, `SourceOracles` carries it, and
-/// `CorpusIdentity::compare_with_source_oracles` compares the emitted schema against it — so the
-/// field is VERIFIED rather than unverified, against a strictly stronger oracle than a recorded
-/// value would have been. `PartialUnverified` stays reachable for a field that genuinely has no
-/// oracle. Asserted equal to the function's output by
-/// `tests/measurement_corpus_pin.rs::the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written`,
-/// so this constant and that oracle cannot drift.
+/// filed away: the schema's expected digest needs no artifact, because it is pinned HERE.
+/// `SourceOracles` carries THIS CONSTANT and `CorpusIdentity::compare_with_source_oracles` compares
+/// the emitted schema against it — so the field is VERIFIED rather than unverified, against a
+/// stronger oracle than a recorded value would have been. `PartialUnverified` stays reachable for a
+/// field that genuinely has no oracle.
+///
+/// # IT IS THIS LITERAL, NOT `ddl_file_sha256()` (#3272 round 10, F-C)
+///
+/// Round 9 wired the oracle as `crate::schema::ddl_file_sha256()`, which is
+/// `sha256(DDL + "\n")` — the SAME computation over the SAME `DDL` that produced the emitted
+/// schema being checked. The two therefore moved together and agreed for every possible value of
+/// `DDL`: a self-comparison that could not fail, and could not see the one thing the arm exists
+/// for (a `DDL` edited since the prior corpus was recorded, which is exactly when the prior carries
+/// no digest). This constant is a LITERAL and does not move when `DDL` moves, so a DDL change makes
+/// the emitted digest DIVERGE from it.
+///
+/// The pin is not free to drift silently either:
+/// `tests/measurement_corpus_pin.rs::the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written`
+/// asserts it equals `crate::schema::ddl_file_sha256()`, so a DDL change reds the suite and
+/// re-pinning is an explicit reviewable act — never a silently relabelled oracle.
 pub const SCHEMA_SHA256: &str = "6bdd1d06ad7eb597b3103ace250930b28b19a76aa128bbf2e4170c90406baed0";
 
 /// Recorded total bytes across every emitted component.
@@ -185,17 +197,18 @@ pub const EXAMPLE_VERIFY_ROOT: &str = "/data/ws0-3096-verify";
 /// that always fails teaches an operator to stop running it, which loses the whole check.
 ///
 /// It now succeeds on a reproducing corpus, with nothing skipped: the artifact's fields are
-/// compared against the artifact, and the emitted schema is verified against SOURCE
-/// (`sha256(schema::DDL + "\n")`, see [`crate::schema::ddl_file_sha256`]) — an oracle that does
-/// not need the artifact to carry the value, and is stronger than one that did.
+/// compared against the artifact, and the emitted schema is verified against the PINNED
+/// [`SCHEMA_SHA256`] — a value that does not need the artifact to carry it, and (unlike a digest
+/// recomputed from `schema::DDL`, which round 10's F-C removed) one that does not move when `DDL`
+/// moves, so the comparison can actually fail.
 pub fn operator_verify_corpus(root: &str) -> String {
     format!(
         "cargo run --release -p ws0-corpus-gen --bin ws0-corpus-gen -- \\\n\
          \x20 --out {root} --progress-every 0 \\\n\
          \x20 --verify-against docs/reports/ws0-3096-artifacts/corpus-identity.json\n\
          # exits non-zero, naming the divergent component, on ANY field difference; the emitted\n\
-         # schema is verified against SOURCE (sha256(schema::DDL + newline)), which the 2026-08-03\n\
-         # artifact predates and therefore cannot corroborate"
+         # schema is verified against the PINNED measurement_corpus::SCHEMA_SHA256, which the\n\
+         # 2026-08-03 artifact predates and therefore cannot corroborate"
     )
 }
 

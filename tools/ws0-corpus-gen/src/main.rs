@@ -606,15 +606,19 @@ async fn run(cli: Cli) -> GenResult<ExitCode> {
             IdentityVerdict::Reproduced => {
                 // The wording states WHAT WAS VERIFIED AGAINST WHAT, because after the F1 fix
                 // those are two different oracles: the recorded artifact for every corpus
-                // quantity, and `schema::DDL` for the emitted schema. A blanket "every recorded
-                // field compared" would be false for a pre-pin artifact — it carries no schema
-                // digest, and the schema was verified anyway, against something better.
+                // quantity, and the PINNED schema digest for the emitted schema. A blanket "every
+                // recorded field compared" would be false for a pre-pin artifact — it carries no
+                // schema digest, and the schema was verified anyway, against something better.
+                //
+                // The pin is named rather than `ddl_file_sha256()`, because after round 10's F-C
+                // that IS the oracle: recomputing the digest from the same `DDL` the emitted
+                // schema came from was a self-comparison that could not fail.
                 println!(
                     "determinism:    PASS — reproduced {} exactly (every recorded field compared \
-                     against the artifact; the emitted schema verified against SOURCE, \
-                     sha256(schema::DDL + newline) = {})",
+                     against the artifact; the emitted schema verified against the PINNED \
+                     measurement_corpus::SCHEMA_SHA256 = {})",
                     prior_path.display(),
-                    ws0_corpus_gen::schema::ddl_file_sha256()
+                    ws0_corpus_gen::measurement_corpus::SCHEMA_SHA256
                 );
             }
             IdentityVerdict::PartialUnverified => {

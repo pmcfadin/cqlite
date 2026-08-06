@@ -170,13 +170,15 @@ impl IdentityComparison {
 /// A command an operator cannot ever get a green from is its own broken instrument: they stop
 /// running it.
 ///
-/// The way out is not to weaken the verdict. It is that this ONE field has an oracle that does
-/// not need the artifact at all: the schema file's content is
-/// [`crate::schema::DDL`] — a source constant — so
-/// [`crate::schema::ddl_file_sha256`] computes the expected digest from SOURCE. Verifying against
-/// it is STRICTLY STRONGER than comparing two recorded values, because the oracle is the INPUT
-/// rather than a record of it: a co-edit of pin and artifact cannot satisfy it, only an actual
-/// DDL change can move it.
+/// The way out is not to weaken the verdict. It is that this ONE field has an oracle that does not
+/// need the artifact at all: the expected digest of the measurement schema is PINNED in source, as
+/// [`crate::measurement_corpus::SCHEMA_SHA256`]. Verifying against it is stronger than comparing
+/// two recorded values, because the pin is not carried by the artifact under test: a co-edit of
+/// artifact fields cannot satisfy it.
+///
+/// The oracle is that LITERAL and must never be recomputed from [`crate::schema::DDL`] — see
+/// [`SourceOracles::from_source`] for why round 9's `ddl_file_sha256()` spelling made this arm a
+/// self-comparison that could not fail (#3272 round 10, F-C).
 ///
 /// So a comparison given this carries no unverified schema field — not because the check was
 /// skipped, but because it was made against a better oracle. [`IdentityVerdict::PartialUnverified`]
@@ -184,17 +186,50 @@ impl IdentityComparison {
 /// [`CorpusIdentity::compare_with_source_oracles`]).
 #[derive(Debug, Clone, Default)]
 pub struct SourceOracles {
-    /// Expected `sha256` of the emitted `ws0-events.cql`, derived from
-    /// [`crate::schema::DDL`]. `None` = no oracle available, so an absent recorded digest stays
-    /// UNVERIFIED exactly as before.
+    /// Expected `sha256` of the emitted `ws0-events.cql`: the PINNED LITERAL
+    /// [`crate::measurement_corpus::SCHEMA_SHA256`], never a value recomputed from the same
+    /// `DDL` the emitted schema came from (that was circular — see [`Self::from_source`]).
+    /// `None` = no oracle available, so an absent recorded digest stays UNVERIFIED exactly as
+    /// before.
     pub schema_sha256: Option<String>,
 }
 
 impl SourceOracles {
     /// The oracles this build can derive from source. Currently exactly one: the schema digest.
+    ///
+    /// # THE ORACLE IS THE PINNED LITERAL, NOT A RECOMPUTATION (#3272 round 10, F-C)
+    ///
+    /// This used to be `crate::schema::ddl_file_sha256()`, and against a prior with no recorded
+    /// digest that made the comparison CIRCULAR — it could not fail. Trace both operands:
+    ///
+    /// ```text
+    /// operand A (`now.schema_sha256`)   generate() writes format!("{DDL}\n") to disk,
+    ///                                   then sha256s THAT FILE
+    /// operand B (the "oracle")          ddl_file_sha256() = sha256(format!("{DDL}\n"))
+    /// ```
+    ///
+    /// Both are `sha256` of `DDL + "\n"` from the SAME build's `DDL`. Any change to `DDL` moves
+    /// them **together**, so the comparison is a value against itself and reports agreement for
+    /// every possible value of `DDL`. It cannot detect the thing the schema pin exists to detect:
+    /// a DDL that changed since the prior corpus was recorded, which is precisely the case where
+    /// the prior carries no digest to compare against. A guard that cannot fail is the shape this
+    /// whole issue exists to remove, and it appeared inside round 9's fix FOR that shape.
+    ///
+    /// The oracle is now [`crate::measurement_corpus::SCHEMA_SHA256`] — a `&'static str` LITERAL,
+    /// `6bdd1d06ad7eb597…`, unchanged at every commit that has ever touched
+    /// `measurement_corpus.rs` (verified over its full history). Being a literal is the whole
+    /// property: it does not move when `DDL` moves, so an edit to `DDL` makes the emitted digest
+    /// diverge FROM the pin and the comparison FAILS — which is the historical drift a prior
+    /// without a recorded digest could otherwise never be checked for.
+    ///
+    /// It stays non-circular in the other direction too, because the pin is not free to drift
+    /// silently: `measurement_corpus_pin.rs::the_pinned_schema_digest_is_the_digest_of_the_ddl_that_is_written`
+    /// asserts `SCHEMA_SHA256 == ddl_file_sha256()`. So a DDL change reds the SUITE (an explicit,
+    /// reviewable act of re-pinning) rather than silently relabelling the oracle — whereas
+    /// recomputing here relabelled it with no test able to notice.
     pub fn from_source() -> Self {
         Self {
-            schema_sha256: Some(crate::schema::ddl_file_sha256()),
+            schema_sha256: Some(crate::measurement_corpus::SCHEMA_SHA256.to_string()),
         }
     }
 }
@@ -385,18 +420,25 @@ impl CorpusIdentity {
         // ...AND A FOURTH ROUTE, which is the round-9 F1 fix: the schema is the ONE identity
         // field with a SOURCE ORACLE. When [`SourceOracles::schema_sha256`] is supplied, an
         // absent recorded digest no longer leaves the field unverified — it is verified against
-        // `sha256(DDL + "\n")`, which is the INPUT rather than a record of it. That is not a
-        // relaxation of the third state: the field is still compared against something, and it
-        // is compared against a stronger something. Without an oracle the third state stands
-        // exactly as round 7 left it.
+        // the PINNED digest of the schema, which is a fact about the corpus this rig measures
+        // rather than a record carried by one artifact. That is not a relaxation of the third
+        // state: the field is still compared against something. Without an oracle the third state
+        // stands exactly as round 7 left it.
+        //
+        // THE ORACLE MUST NOT BE RECOMPUTED FROM `DDL` (#3272 round 10, F-C). It was, and that
+        // made this arm a SELF-COMPARISON: `now` is `sha256` of the file `generate()` wrote from
+        // `DDL`, so an oracle of `sha256(DDL + "\n")` moves with `DDL` and the two agree for every
+        // possible value of it — including a `DDL` edited since the prior corpus was recorded,
+        // which is the ONE thing this arm exists to catch. The oracle is now the pinned literal
+        // `measurement_corpus::SCHEMA_SHA256`; see `SourceOracles::from_source`.
         match (schema_sha256, p_schema_sha256) {
             (Some(now), Some(prior)) if now != prior => {
                 out.push(format!("ws0-events.cql sha256: recorded {prior} != {now}"))
             }
             (Some(_), Some(_)) => {}
-            // ABSENT FROM THE PRIOR, BUT VERIFIABLE FROM SOURCE. Compared against the
-            // source-derived expectation; a mismatch is a DIVERGENCE (the emitted schema is not
-            // the schema this build's `DDL` produces), and a match is a genuine verification.
+            // ABSENT FROM THE PRIOR, BUT VERIFIABLE AGAINST THE PIN. A mismatch is a DIVERGENCE
+            // (the emitted schema is not the pinned measurement schema), and a match is a genuine
+            // verification against a value that does not move when `DDL` does.
             (Some(now), None) if oracles.schema_sha256.is_some() => {
                 // `is_some()` was just established; the `else` arm cannot be taken and carries
                 // its own diagnostic rather than a silent skip.
@@ -404,10 +446,13 @@ impl CorpusIdentity {
                     Some(expected) if now == expected => {}
                     Some(expected) => out.push(format!(
                         "ws0-events.cql sha256: the regenerated corpus emitted {now}, but the \
-                         SOURCE oracle sha256(schema::DDL + \"\\n\") is {expected}. The recorded \
-                         identity predates the field, so this is compared against SOURCE rather \
-                         than against the prior — and source says the emitted schema is not the \
-                         one this build's DDL produces."
+                         PINNED measurement schema digest (measurement_corpus::SCHEMA_SHA256) is \
+                         {expected}. The recorded identity predates the field, so this is compared \
+                         against the PIN rather than against the prior — and the pin says the \
+                         emitted schema is not the one this rig's figures were measured over. The \
+                         pin is a literal and does NOT move when schema::DDL moves, which is what \
+                         makes this able to fail: an oracle recomputed from DDL would agree with \
+                         the emitted digest for every possible DDL (#3272 round 10, F-C)."
                     )),
                     None => unverified.push(
                         "ws0-events.cql sha256: the source oracle became unavailable between the \

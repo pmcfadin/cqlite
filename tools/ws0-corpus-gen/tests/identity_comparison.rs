@@ -274,11 +274,120 @@ fn a_prior_without_a_schema_digest_still_diverges_when_source_disagrees() {
     assert!(
         cmp.divergences
             .iter()
-            .any(|m| m.contains("SOURCE oracle sha256(schema::DDL")),
-        "a schema disagreeing with SOURCE must be reported as a divergence naming the oracle; \
+            .any(|m| m.contains("PINNED measurement schema digest")),
+        "a schema disagreeing with the PIN must be reported as a divergence naming the oracle; \
          got {cmp:?}"
     );
     assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
+}
+
+/// THE ORACLE IS THE PINNED LITERAL, NOT A RECOMPUTATION FROM `DDL` (#3272 round 10, F-C).
+///
+/// # The mechanism found
+///
+/// Round 9 wired `SourceOracles::from_source()` as `schema::ddl_file_sha256()`. Trace the two
+/// operands of the comparison it feeds:
+///
+/// ```text
+/// operand A  now.schema_sha256  = sha256 of the file generate() wrote as format!("{DDL}\n")
+/// operand B  the "oracle"       = ddl_file_sha256() = sha256(format!("{DDL}\n"))
+/// ```
+///
+/// Same computation, same `DDL`, same build. They move TOGETHER under any edit to `DDL`, so the arm
+/// agreed for every possible value of it — and the case it runs in is precisely the one where the
+/// prior carries NO digest, i.e. where a `DDL` edited since the prior corpus was recorded is the
+/// only drift there is to find. A comparison that cannot fail, inside round 9's fix for
+/// comparisons that cannot fail.
+///
+/// # The non-vacuity assertion: what the PRE-FIX code ACCEPTED
+///
+/// This test reconstructs round 9's oracle exactly (`ddl_file_sha256()`) and perturbs `DDL` — the
+/// historical drift the arm exists to catch, modelled as "the emitted schema is the digest of a
+/// DIFFERENT DDL". Under the pre-fix oracle that perturbation is INVISIBLE, because the oracle is
+/// re-derived from the same perturbed input; under the pinned oracle it DIVERGES. Both directions
+/// are asserted in one test so the improvement is measured rather than claimed.
+#[test]
+fn the_schema_oracle_is_the_pin_and_therefore_can_fail() {
+    use sha2::{Digest, Sha256};
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    // A PERTURBED DDL: one column type changed. This stands for any DDL edit made after the prior
+    // identity was recorded — the case a prior with no `schema_sha256` cannot be checked for by
+    // comparison against the prior.
+    let perturbed_ddl = ws0_corpus_gen::schema::DDL.replace("metric_a int", "metric_a bigint");
+    assert_ne!(
+        perturbed_ddl,
+        ws0_corpus_gen::schema::DDL,
+        "the perturbation must actually change the DDL, or this test asserts nothing"
+    );
+    let digest_of = |s: &str| -> String {
+        let mut h = Sha256::new();
+        h.update(format!("{s}\n").as_bytes());
+        format!("{:x}", h.finalize())
+    };
+    // What `generate()` would record having emitted the perturbed schema.
+    let emitted_perturbed = digest_of(&perturbed_ddl);
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = Some(emitted_perturbed.clone());
+
+    // --- NON-VACUITY: round 9's oracle, reconstructed, ACCEPTS the perturbation ---------------
+    // `ddl_file_sha256()` recomputes from whatever `DDL` is, so in a build carrying the perturbed
+    // DDL the oracle equals the emitted digest and the arm reports agreement.
+    let prefix_oracle = SourceOracles {
+        schema_sha256: Some(emitted_perturbed.clone()),
+    };
+    let prefix_cmp = now.compare_with_source_oracles(&prior, &prefix_oracle);
+    assert!(
+        prefix_cmp.divergences.is_empty() && prefix_cmp.unverified.is_empty(),
+        "NON-VACUITY CONTROL: an oracle recomputed from the SAME DDL that produced the emitted \
+         schema agrees with it by construction, so a DDL edit is invisible — this is what the \
+         pre-fix code accepted; got {prefix_cmp:?}"
+    );
+    assert_eq!(
+        prefix_cmp.verdict(),
+        IdentityVerdict::Reproduced,
+        "the pre-fix wiring reported a full PASS over a CHANGED schema; got {prefix_cmp:?}"
+    );
+
+    // --- THE FIX: the PINNED oracle does not move with `DDL`, so it FAILS ----------------------
+    let cmp = now.compare_with_source_oracles(&prior, &SourceOracles::from_source());
+    assert!(
+        cmp.divergences
+            .iter()
+            .any(|m| m.contains("PINNED measurement schema digest")),
+        "the pinned oracle must DIVERGE on a perturbed DDL — that is the whole F-C fix, and the \
+         difference from the control above is that the pin is a literal; got {cmp:?}"
+    );
+    assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
+
+    // And the oracle really is the pin, by value — so a future edit cannot quietly re-point it at
+    // a recomputation while this test keeps passing on the perturbation case alone.
+    assert_eq!(
+        SourceOracles::from_source().schema_sha256.as_deref(),
+        Some(ws0_corpus_gen::measurement_corpus::SCHEMA_SHA256),
+        "the source oracle for the schema must BE measurement_corpus::SCHEMA_SHA256, the literal"
+    );
+}
+
+/// The pin and the current `DDL` must AGREE — the other half of what keeps F-C's fix honest.
+///
+/// A pinned oracle that has drifted from the DDL the generator writes would fail every honest
+/// corpus (the mirror-image broken instrument: a guard that always fires). The authoritative
+/// assertion of this lives in `measurement_corpus_pin.rs`; it is restated here because THIS file
+/// is where the oracle is wired, so a reader of the wiring sees both obligations together.
+#[test]
+fn the_pinned_oracle_agrees_with_the_ddl_this_build_writes() {
+    assert_eq!(
+        ws0_corpus_gen::measurement_corpus::SCHEMA_SHA256,
+        ws0_corpus_gen::schema::ddl_file_sha256(),
+        "the pinned schema digest and the DDL this build emits have DIVERGED. Re-pinning is a \
+         deliberate reviewable act: update measurement_corpus::SCHEMA_SHA256 in the same change \
+         that edits schema::DDL. Do NOT make the oracle recompute the digest — that was #3272 \
+         round 10's F-C, a comparison that could not fail."
+    );
 }
 
 /// `PartialUnverified` STAYS REACHABLE with the oracles in hand: a field with no oracle and no
