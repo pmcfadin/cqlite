@@ -250,3 +250,241 @@ async fn the_probe_is_off_by_default_and_costless_when_off() {
         "a disabled keyed workload must not allocate or grow the counting table"
     );
 }
+
+/// L1: a partition present in SEVERAL generations is ONE access, and its byte weight
+/// is the SUM of the per-generation measured gaps.
+///
+/// # Why this needs its own fixture
+///
+/// Every other fixture in the suite is single-generation, which makes the existing
+/// `distinct_partitions() == 1` assertions **vacuous for k > 1**: they hold trivially
+/// when there is only one SSTable to probe. Nothing in the suite would fail if
+/// recording moved to a per-SSTable probe site — the spec's own "multiplies the repeat
+/// count by the generation count, manufacturing concentration ⇒ bias toward go"
+/// hazard — or if one generation's gap were silently dropped from the sum, its "SHALL
+/// NOT silently under-report" hazard. Both need k > 1 to be visible at all.
+///
+/// So the fixture is two `WriteEngine` flushes of the SAME key into a temp dir, and
+/// the test **affirmatively asserts k > 1 before asserting the accounting** — a
+/// multi-generation test that silently landed on a single generation would be vacuous
+/// in exactly the way it exists to close.
+///
+/// # Oracle note
+///
+/// CQLite writes these SSTables and CQLite reads them, and that is legitimate here.
+/// The #3042 symmetric-oracle rule binds on-disk FRAMING properties, where a writer
+/// and reader can make the same mistake and cancel. The property under test is
+/// CQLite's own read-path access ACCOUNTING across generations — a counter cannot
+/// cancel against an encoder. The expected byte total is derived from the SSTables'
+/// own resolved extents, not from `AccessWeightBuilder`, so the sum clause is not
+/// evidenced by the helper that computes it.
+///
+/// # Verified discriminating
+///
+/// Both hazards were reproduced against this test before it was accepted, on the
+/// builder this service actually takes (the WARM readers-based one):
+///
+/// - folding only the first generation's extent ⇒ `total_bytes` 25 against an
+///   expected 50 (the silent under-report);
+/// - recording once per candidate instead of once per logical read ⇒ 3 accesses
+///   against an expected 1 (the manufactured concentration).
+///
+/// The first attempt at this test passed under BOTH mutations, because the fixture's
+/// `generations > 1` check proves two SSTables exist without proving both HOLD the
+/// key — see the second affirmative check below, which is what makes the sum clause
+/// falsifiable.
+#[tokio::test]
+async fn a_partition_in_several_generations_is_one_access_weighing_their_summed_gaps() {
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    let _guard = PROBE.lock().await;
+
+    // Two flushes of the SAME partition key → two generations that both hold it.
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, fx::keyvalue_schema());
+    let mut engine = WriteEngine::new(config).expect("write engine");
+    for generation in 0..2 {
+        // Same key each time, different value so the flushes are not deduplicated
+        // away; plus a filler key so neither generation is degenerate.
+        engine
+            .write(fx::keyvalue_write("k1", &format!("v{generation}")))
+            .expect("write target key");
+        engine
+            .write(fx::keyvalue_write(&format!("filler{generation}"), "x"))
+            .expect("write filler");
+        engine
+            .flush()
+            .await
+            .expect("flush")
+            .expect("flush produced an SSTable");
+    }
+
+    // AFFIRMATIVE fixture check, BEFORE any accounting assertion: count the Data.db
+    // files on disk. Inferring k from "we called flush twice" is exactly the
+    // unmeasured assumption that would make this test vacuous.
+    let generations = count_data_db(&data_dir);
+    assert!(
+        generations > 1,
+        "this case is meaningless on a single generation — the assertions below are \
+         trivially true at k == 1. Found {generations} Data.db file(s) under {}",
+        data_dir.display()
+    );
+
+    let svc = CqliteFlightService::new(data_dir.clone(), fx::KEYVALUE_BATCH_SIZE);
+
+    // The independently-derived oracle: each generation's own measured extent for
+    // this key, summed. Resolved from the SSTables directly, NOT via the accumulator
+    // under test.
+    let per_generation = per_generation_extents_for_key(&data_dir, "k1").await;
+    let holding: Vec<u64> = per_generation.iter().copied().filter(|b| *b > 0).collect();
+    let extents_resolvable = holding.len() > 1;
+    // SECOND affirmative check, and the one that actually protects the sum clause.
+    // `generations > 1` above only proves two SSTables exist — it does NOT prove both
+    // HOLD this key, and if only one does then a summed weight and a single-generation
+    // weight are identical and the byte assertion is vacuous. (Measured: that is
+    // exactly what happened on the first attempt at this test, which passed with a
+    // generation's contribution deliberately dropped.)
+    let expected_bytes: u64 = holding.iter().sum();
+
+    let summary = window_over(|| async {
+        assert!(
+            point_read(&svc, "k1").await > 0,
+            "the point read must return rows"
+        );
+    })
+    .await
+    .expect("the point read must have been recorded");
+
+    assert_eq!(
+        summary.total_accesses(),
+        1,
+        "ONE logical read of a partition held by {generations} generations is ONE \
+         access — a per-SSTable recording site would report {generations}"
+    );
+    assert_eq!(
+        summary.distinct_partitions(),
+        1,
+        "and one distinct partition"
+    );
+    assert_eq!(
+        summary.bucket(RepeatBucket::One).distinct(),
+        1,
+        "in the singleton bucket — a per-SSTable site would land it in `2` and \
+         manufacture a cacheable repeat"
+    );
+    // The access-count clauses above hold in EVERY build. The byte-sum clause needs
+    // the seek/extent machinery, which the alternate `tombstones` build compiles out —
+    // so the expectation is selected by an affirmative measurement of what the fixture
+    // could actually resolve, and BOTH branches assert something falsifiable rather
+    // than one of them skipping.
+    if extents_resolvable {
+        assert_eq!(
+            summary.total_bytes(),
+            expected_bytes,
+            "the access must weigh the SUM of every generation's measured extent; a \
+             dropped generation would under-report and flatter the cache \
+             (per-generation extents: {per_generation:?})"
+        );
+        assert_eq!(
+            summary.unavailable_partitions(),
+            0,
+            "a fully measured access must not be marked unavailable"
+        );
+    } else {
+        // No extent was resolvable, so the probe must FAIL CLOSED rather than publish
+        // a partial or zero weight as a measurement. That this branch is not silently
+        // taken on the default build is pinned by
+        // `issue_2827_partition_access_bytes.rs::a_big_access_is_counted_once_and_priced_from_its_measured_gap`,
+        // which asserts `unavailable == 0` and a non-zero measured extent there.
+        assert_eq!(
+            summary.unavailable_partitions(),
+            1,
+            "an unpriceable access must be reported unavailable, not priced \
+             (per-generation extents: {per_generation:?})"
+        );
+        assert_eq!(summary.total_bytes(), 0, "and must contribute no bytes");
+    }
+}
+
+/// Data.db files under a data dir, recursively — the affirmative generation count.
+fn count_data_db(data_dir: &std::path::Path) -> usize {
+    fn walk(dir: &std::path::Path, found: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+            {
+                *found += 1;
+            }
+        }
+    }
+    let mut found = 0;
+    walk(data_dir, &mut found);
+    found
+}
+
+/// Sum each generation's OWN measured extent for `key`, resolved per SSTable through
+/// the reader — independent of `AccessWeightBuilder`, so it can contradict it.
+async fn per_generation_extents_for_key(data_dir: &std::path::Path, key: &str) -> Vec<u64> {
+    use cqlite_core::storage::sstable::reader::SSTableReader;
+    use cqlite_core::storage::write_engine::mutation::PartitionKey;
+    use cqlite_core::{types::Value, Config};
+
+    let schema = fx::keyvalue_schema();
+    let key_bytes = PartitionKey::new(vec![(
+        "key".to_string(),
+        Value::Text(key.as_bytes().to_vec().into()),
+    )])
+    .to_bytes(&schema)
+    .expect("encode partition key");
+
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    walk(data_dir, &mut paths);
+    paths.sort();
+
+    let config = Config::default();
+    let platform = std::sync::Arc::new(
+        cqlite_core::platform::Platform::new(&config)
+            .await
+            .expect("platform"),
+    );
+    let mut per_generation = Vec::new();
+    for path in paths {
+        let reader = SSTableReader::open(&path, &config, platform.clone())
+            .await
+            .expect("open generation");
+        per_generation.push(
+            reader
+                .measured_partition_extent_for_test(&key_bytes)
+                .await
+                .unwrap_or(0),
+        );
+    }
+    per_generation
+}

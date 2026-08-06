@@ -13,7 +13,10 @@
 //! Split out of `partition_lookup.rs` (campsite / epic #1116) so the B4 key-cache
 //! wiring (issue #1570) does not push that file over the source-size threshold.
 
-#[cfg(not(feature = "tombstones"))]
+// `SSTableReader` is needed by the always-compiled test oracle at the end of this
+// file as well as the `not(tombstones)` seek helpers, so its import is unconditional
+// when either is present.
+#[cfg(any(not(feature = "tombstones"), feature = "observability-testing"))]
 use super::SSTableReader;
 #[cfg(not(feature = "tombstones"))]
 use crate::{Error, Result};
@@ -371,6 +374,57 @@ impl SSTableReader {
             // truncated or incomplete, so the read path re-checks by scanning. The
             // probe cannot re-check cheaply, so it fails closed.
             None => PartitionResidency::Unknown,
+        }
+    }
+}
+
+/// Test-only extent oracle, compiled in EVERY build configuration.
+///
+/// It lives outside the `not(tombstones)` impl block above because the cross-crate
+/// test that uses it (`cqlite-flight`) has no `tombstones` feature of its own to gate
+/// on, so the method has to exist even in the build where the seek machinery it needs
+/// does not.
+#[cfg(feature = "observability-testing")]
+impl SSTableReader {
+    /// This generation's OWN measured extent for `partition_key`, or `None` when it
+    /// does not hold the key or the extent is unresolvable.
+    ///
+    /// Exists so a test can build an ORACLE for the per-generation sum independently
+    /// of `AccessWeightBuilder` — evidencing the sum with the accumulator that
+    /// computes it would close nothing.
+    ///
+    /// Gated on `observability-testing`, which the cross-crate test that needs it
+    /// already enables (`cqlite-flight/observability-testing` turns on the core
+    /// feature), so it is absent from every production build.
+    ///
+    /// Unlike the probe, this helper MAY force `Index.db` materialization. The probe
+    /// deliberately will not (it would defeat #2412's lazy open and change the process
+    /// memory profile, so it reports `unavailable` instead), but an oracle opening its
+    /// own fresh readers has no read to have materialized them for it — and an oracle
+    /// that silently resolved nothing would make the comparison it exists for
+    /// vacuous.
+    pub async fn measured_partition_extent_for_test(&self, partition_key: &[u8]) -> Option<u64> {
+        #[cfg(not(feature = "tombstones"))]
+        {
+            if let Some(index) = self.index_reader.as_ref() {
+                index.ensure_materialized(&self.scan_cancel).await.ok()?;
+            }
+            match self.partition_residency(partition_key).await {
+                PartitionResidency::HeldAt(offset) => self
+                    .measure_partition_extent(offset, partition_key)
+                    .await
+                    .ok()
+                    .flatten(),
+                PartitionResidency::NotHeld | PartitionResidency::Unknown => None,
+            }
+        }
+        // `tombstones`: the seek/residency machinery is compiled out with the path it
+        // serves, so no extent is resolvable — the same answer the probe itself gives
+        // in that build.
+        #[cfg(feature = "tombstones")]
+        {
+            let _ = partition_key;
+            None
         }
     }
 }

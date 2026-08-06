@@ -339,6 +339,17 @@ the recorder alone are not sufficient.
 - **THEN** the emitted `distinct_partitions` series reports one partition in `5-8` and four in `1`
 - **AND** the reads report access path `streaming_partition_lookup`, confirming the instrument sat on the keyed route rather than a degraded scan
 
+**Evidence for the multi-generation scenario below** (added after the C intent audit found it
+unevidenced): `cqlite-flight/tests/issue_2827_partition_access_e2e.rs`
+`a_partition_in_several_generations_is_one_access_weighing_their_summed_gaps`, over a two-flush
+fixture. Every other fixture in the suite is single-generation, which makes a `distinct == 1`
+assertion vacuous for `k > 1`. The test therefore asserts affirmatively that at least TWO
+generations individually resolve a non-zero extent for the key BEFORE asserting the accounting,
+and its byte oracle is derived from the SSTables' own resolved extents rather than from the
+accumulator under test. Verified discriminating against both hazards this scenario exists to
+close: dropping one generation's extent yields 25 against an expected 50, and recording per
+candidate instead of per logical read yields 3 accesses against an expected 1.
+
 #### Scenario: A partition present in several SSTables is one access, not several
 - **GIVEN** a table whose generations all contain the same partition key
 - **WHEN** that partition is read once through the logical point path
