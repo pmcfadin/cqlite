@@ -401,6 +401,21 @@ impl Default for WindowConfig {
     }
 }
 
+/// What the fast path decided the write-locked slow path must do.
+#[derive(Clone, Copy, Debug)]
+enum SlowPath {
+    /// Nothing — the access was handled entirely under the read lock.
+    None,
+    /// The table does not exist yet.
+    Allocate,
+    /// The table is at its load factor (or gave up probing); widen the sampling
+    /// prefix, replaying the triggering access only if it is not yet counted.
+    Downsample {
+        /// Whether the triggering access still needs recording.
+        replay: bool,
+    },
+}
+
 struct WindowState {
     table: Table,
     prefix_bits: u32,
@@ -472,31 +487,45 @@ impl PartitionAccessRecorder {
         self.recorded.fetch_add(1, Ordering::Relaxed);
 
         // Fast path: shared read lock, relaxed atomics on one slot.
-        let mut needs_downsample = false;
+        let mut slow = SlowPath::None;
         {
             let guard = self.read_state();
             if let Some(state) = guard.as_ref() {
                 match state.table.record(hash, state.prefix_bits, bytes) {
+                    // The access is ALREADY counted. The slow path must only
+                    // widen the sampling prefix — re-recording here would count
+                    // this one access twice and shift its partition a bucket to
+                    // the right, manufacturing concentration out of nothing.
                     Insert::Recorded => {
-                        needs_downsample = state.table.occupancy() >= table::LOAD_FACTOR_LIMIT;
+                        if state.table.occupancy() >= table::LOAD_FACTOR_LIMIT {
+                            slow = SlowPath::Downsample { replay: false };
+                        }
                     }
                     Insert::NotAdmitted => {}
-                    Insert::Full => needs_downsample = true,
+                    // Not counted: make room, then replay it.
+                    Insert::Full => slow = SlowPath::Downsample { replay: true },
                 }
             } else {
-                needs_downsample = true; // stands in for "needs allocation"
+                slow = SlowPath::Allocate;
             }
         }
 
-        if needs_downsample {
-            self.grow_or_downsample(hash, bytes);
+        match slow {
+            SlowPath::None => {}
+            SlowPath::Allocate => self.grow_or_downsample(hash, bytes, true),
+            SlowPath::Downsample { replay } => self.grow_or_downsample(hash, bytes, replay),
         }
         self.close_if_triggered()
     }
 
     /// Allocate the table on first use, or widen the sampling prefix when the
     /// table is at its load factor. Takes the WRITE lock; both events are rare.
-    fn grow_or_downsample(&self, hash: u64, bytes: Option<u64>) {
+    ///
+    /// `replay` says whether the triggering access still needs to be counted. It is
+    /// `false` when the fast path already counted it (the load-factor case) and
+    /// `true` when it did not (first allocation, or a probe run that found no
+    /// slot).
+    fn grow_or_downsample(&self, hash: u64, bytes: Option<u64>, replay: bool) {
         let mut guard = self.write_state();
         match guard.as_mut() {
             None => {
@@ -506,7 +535,9 @@ impl PartitionAccessRecorder {
                     at_sampling_floor: false,
                     started: Instant::now(),
                 };
-                state.table.record(hash, 0, bytes);
+                if replay {
+                    state.table.record(hash, 0, bytes);
+                }
                 *guard = Some(state);
             }
             Some(state) => {
@@ -525,10 +556,12 @@ impl PartitionAccessRecorder {
                 {
                     state.at_sampling_floor = true;
                 }
-                // Re-attempt the access that triggered this pass. A `Full` here
-                // (an unlucky 64-long probe run at the floor) simply drops the
-                // access rather than looping.
-                let _ = state.table.record(hash, state.prefix_bits, bytes);
+                // Re-attempt the access ONLY if the fast path did not already
+                // count it. A `Full` here (an unlucky 64-long probe run at the
+                // floor) simply drops the access rather than looping.
+                if replay {
+                    let _ = state.table.record(hash, state.prefix_bits, bytes);
+                }
             }
         }
     }
