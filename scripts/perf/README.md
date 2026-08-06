@@ -63,11 +63,22 @@ dirs and perf CSVs — no cargo, `perf`, `sudo`, corpus or network).
 * **The corpus identity is REQUIRED and complete-checked.** Its absence used to
   silently disable the `rows == requests_ok x corpus_rows` assert while the report's
   NOTES claimed the property had been verified.
-* **The cold arm's `skipped-cold-arm` prewarm sentinel satisfies a COLD rep only.**
-  A temperature-blind acceptance set let an UNPREWARMED WARM rep reach
-  `prewarm_all_ok=true` — the prewarm guard satisfied by its own sentinel. Scoped in
-  both directions: a *prewarmed* "cold" rep is refused too. An honestly recorded
-  failure (`FAILED-exit-N`, `unrecorded`) stays a flagged degradation, not a refusal.
+* **The cold arm's `skipped-cold-arm` prewarm sentinel satisfies a COLD rep only, and
+  a COLD rep must carry it EXACTLY.** A temperature-blind acceptance set let an
+  UNPREWARMED WARM rep reach `prewarm_all_ok=true` — the prewarm guard satisfied by its
+  own sentinel. Scoped in both directions: a *prewarmed* "cold" rep is refused too.
+  An honestly recorded failure (`FAILED-exit-N`, `unrecorded`) stays a flagged
+  degradation **on a WARM rep**, whose prewarm is a real operation that can really fail
+  and whose bias is self-limiting (an unprewarmed "warm" rep reads SLOWER). On a **COLD**
+  rep any other value — including `unrecorded`, i.e. no `<tag>.prewarm.status` file at
+  all — is a **REFUSAL**: a cold rep has no prewarm leg to fail (`lib-measure.sh` writes
+  the sentinel unconditionally and only a warm rep runs a prewarm), so such a value means
+  nothing establishes the rep was not prewarmed — and that bias is UNBOUNDED, because a
+  secretly-warm rep reported cold reads FASTER, flattering its own figure. It used to be
+  captioned and its rows/s, ratio and PASS/BELOW-TARGET verdict published anyway.
+  `PREWARM_DEGRADATION_ADMITTED` states this per temperature and is read affirmatively,
+  so a temperature it has no entry for refuses rather than inheriting the permissive
+  branch.
 * **Every numeric argument is validated positive up front.** `--reps 0` produced a
   vacuous but *successful* report.
 * **Completeness is judged against the SELECTION, and the selection is stated.**

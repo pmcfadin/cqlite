@@ -316,7 +316,11 @@
 #                      `skipped-cold-arm` sentinel may satisfy a COLD rep ONLY (a warm rep
 #                      carrying it is an UNPREWARMED warm measurement passing the very
 #                      guard added to refuse one — and the bare scan is the DENOMINATOR of
-#                      the 1.3x ratio); the corpus identity is REQUIRED, so the
+#                      the 1.3x ratio), while a COLD rep carrying ANY OTHER value —
+#                      `unrecorded` (no status file) included — is REFUSED rather than
+#                      captioned, because nothing then establishes it was not prewarmed and
+#                      a secretly-warm rep reported cold reads FASTER; the corpus identity
+#                      is REQUIRED, so the
 #                      full-corpus-per-request check can never be silently skipped while
 #                      the report's notes claim it ran; an absent, uncounted
 #                      (`<not counted>`/`<not supported>`) or unparseable perf counter is
@@ -5730,7 +5734,11 @@ run_tooling_tests() {
   #   * a WARM rep of EITHER arm must record an untimed prewarm, and the cold arm's
   #     `skipped-cold-arm` sentinel may satisfy a COLD rep ONLY — a warm rep carrying
   #     it is an UNPREWARMED warm measurement passing the guard added to refuse one,
-  #     and the bare scan is the DENOMINATOR of the 1.3x ratio;
+  #     and the bare scan is the DENOMINATOR of the 1.3x ratio. A COLD rep must carry
+  #     that sentinel EXACTLY: any other value (including `unrecorded` = no status file)
+  #     means nothing establishes the rep was not prewarmed, and unlike the warm
+  #     direction that bias is UNBOUNDED — a secretly-warm rep reported cold reads
+  #     FASTER — so it is a REFUSAL, not a captioned figure plus a verdict;
   #   * the corpus identity is REQUIRED, so the full-corpus-per-request check can
   #     never be skipped while the report's notes claim it ran;
   #   * an absent, uncounted or unparseable perf counter is an ERROR, never a
