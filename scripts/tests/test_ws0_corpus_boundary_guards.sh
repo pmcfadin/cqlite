@@ -549,6 +549,224 @@ else
 fi
 
 # ==========================================================================
+# 5 — THE GUARD'S SCOPE: EVERY INPUT THE PIN DECLARES, NOT ONLY THE COMPONENTS
+# ==========================================================================
+# ROUND 24'S FINDING. The boundary check covered the SSTable components ONLY, while TWO other files
+# are re-read DURING measurement:
+#
+#   * `ws0-events.cql`      — the bare scan INGESTS IT ON EVERY INVOCATION;
+#   * `ticket-template.json` — `flight-loadgen --ticket-template` RE-READS IT ON EVERY INVOCATION of
+#                              every rep of every arm.
+#
+# So the mutate-then-restore attack from section 1 still worked, aimed at either one instead of a
+# component: both ends of the session agree, every report-time check agrees, and the boundary
+# published `N of N components verified` — a count complete RELATIVE TO ITS OWN TOO-SMALL LIST. A
+# guard that verifies 7 of 9 inputs and reports success is issuing a verdict about 2 it never looked
+# at, and the omission biases TOWARD the claim.
+#
+# `prefix_boundary <session> <corpus> <label>` — THE PRE-FIX (round-23) BOUNDARY CHECK, reconstructed:
+# the component-set comparison and the per-component re-hash, and NOTHING ELSE. Reconstructed here
+# rather than reverted in the shipped module for the same reason `prefix_pin` is — it is what makes
+# the pre-fix ACCEPTANCE assertable, so each case below reds if its premise stops reproducing instead
+# of quietly becoming a test of something else. Every primitive it uses is the SHIPPED one, so the
+# only difference from the shipped verifier is the scope the finding is about.
+prefix_boundary() {
+  python3 - "$PERF_DIR" "$1" "$2" "$3" <<'PY' 2>&1
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_corpus_bytes import CORPUS_TABLE_SUBPATH, session_pin_path, sha256_file
+from ws0_validate import Invalid
+session, corpus, label = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4]
+pin = json.loads(session_pin_path(session).read_text())
+pinned = pin["components"]
+table = corpus.joinpath(*CORPUS_TABLE_SUBPATH)
+try:
+    present = {q.name for q in table.iterdir() if q.is_file()}
+    assert not (set(pinned) ^ present), sorted(set(pinned) ^ present)
+    checked = 0
+    for name in sorted(pinned):
+        p = table / name
+        if p.stat().st_size != pinned[name]["bytes"] or sha256_file(p) != pinned[name]["sha256"]:
+            raise Invalid(f"THE CORPUS CHANGED DURING MEASUREMENT: component {name}")
+        checked += 1
+except Invalid as exc:
+    print(f"PREFIX_BOUNDARY_REFUSED {exc}")
+else:
+    # The pre-fix success text, verbatim in shape: a count that is complete about COMPONENTS and
+    # silent about every other input the session declares.
+    print(f"PREFIX_BOUNDARY_OK {checked} of {len(pinned)} pinned component(s) unchanged")
+PY
+}
+
+# `mutate_file <path> <suffix-bytes>` / `restore_file <path> <base64>` — a real byte change to a real
+# per-invocation input, with the original bytes kept so the restore is EXACT. Distinct from
+# `mutate_component`, which resolves a name inside the corpus table dir.
+mutate_file() {
+  python3 - "$1" "$2" <<'PY'
+import base64, pathlib, sys
+p = pathlib.Path(sys.argv[1]); raw = p.read_bytes()
+print(base64.b64encode(raw).decode())
+p.write_bytes(raw + sys.argv[2].encode())
+PY
+}
+restore_file() {
+  python3 - "$1" "$2" <<'PY'
+import base64, pathlib, sys
+pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.argv[2]))
+PY
+}
+
+# `input_case <name> <field> <path-expr> <needle>` — one newly-covered input, measured through the
+# SAME four-part shape as section 1, SEPARATELY per input:
+#
+#   (a) the PRE-FIX boundary check over the MUTATED input reports SUCCESS   [premise, ASSERTED]
+#   (b) the SHIPPED boundary check over the same state REFUSES and NAMES it [the fix]
+#   (c) restored, the report accepts the session and calls it verified      [why (a) is invisible]
+#   (d) the SHIPPED check over the restored state PASSES                    [positive control]
+#
+# (a) is an assertion rather than a remark: without it (b) would keep passing for a verifier that
+# refuses everything, and the case would survive the finding ceasing to reproduce.
+input_case() {
+  local name="$1" field="$2" target="$3" needle="$4"
+  local corpus="$TMP/corpus-$name" session="$TMP/session-$name"
+  make_corpus "$corpus"
+  WS0_SCAN_CORPUS="$corpus" make_session "$session" "$GOOD_FLIGHT"
+  # The shipped writer, so the pin under test is a real one (the ticket is written into the session
+  # dir by the fixture, as the driver does).
+  ws0_pin_session_corpus "$session" "$corpus"
+  local path; path=$(eval "printf '%s' \"$target\"")
+  [ -f "$path" ] || { fail "round24/$name: the input $path is not present, so this case cannot run"; return; }
+  local b64; b64=$(mutate_file "$path" "MUTATED-BETWEEN-ARMS-$name")
+
+  # (a) THE MEASURED PRE-FIX ACCEPTANCE.
+  local pre; pre=$(prefix_boundary "$session" "$corpus" rep-2)
+  if grep -qE 'PREFIX_BOUNDARY_OK ([1-9][0-9]*) of \1 pinned component' <<<"$pre"; then
+    pass "NON-VACUITY MEASURED (round24/$name): with $(basename "$path") LIVE-MUTATED, the PRE-FIX boundary check reports SUCCESS — a component count complete relative to its own too-small list, about an input it never looked at"
+  else
+    fail "round24/$name: the pre-fix boundary check must ACCEPT the mutated input, or this case proves nothing (out: $pre)"
+  fi
+  # (b) THE FIX: the shipped check refuses, and NAMES the input.
+  local out rc; out=$(boundary "$session" "$corpus" rep-2); rc=$?
+  if [ "$rc" -ne 0 ] \
+     && grep -q 'A MEASUREMENT INPUT CHANGED DURING MEASUREMENT' <<<"$out" \
+     && grep -q "$(basename "$path")" <<<"$out" \
+     && grep -q "$field" <<<"$out" \
+     && grep -q "$needle" <<<"$out"; then
+    pass "OBSERVED (round24/$name): the shipped boundary check REFUSES the mutated $(basename "$path"), naming the file and the pin field \`$field\`"
+  else
+    fail "round24/$name: the boundary check must refuse a mutated $field input and name it (rc=$rc, out: $out)"
+  fi
+  # (c) restored before reporting -> every END-STATE check agrees, which is why (a) is invisible.
+  restore_file "$path" "$b64"
+  local rep_out rep_rc; rep_out=$(run_report "$session" "$corpus"); rep_rc=$?
+  if [ "$rep_rc" -eq 0 ]; then
+    pass "PREMISE ASSERTED (round24/$name): with the mutation RESTORED the reporter ACCEPTS the session — the mid-run change to $(basename "$path") is invisible at both ends, so covering it INSIDE the run is the only place it can be seen"
+  else
+    fail "round24/$name: the restored session must report cleanly, or the attack this case demonstrates has changed (rc=$rep_rc, out: $rep_out)"
+  fi
+  # (d) POSITIVE CONTROL: the same check over the untouched inputs passes, and it NAMES what it
+  # covered — so the refusal above is attributable to the mutated bytes and not to a broken verifier.
+  local ok_out ok_rc; ok_out=$(boundary "$session" "$corpus" rep-3); ok_rc=$?
+  if [ "$ok_rc" -eq 0 ] && grep -q "declared inputs verified: .*$field" <<<"$ok_out"; then
+    pass "POSITIVE CONTROL (round24/$name): with every input untouched the SAME check PASSES and NAMES \`$field\` among the inputs it verified (a count alone is complete only about its own list)"
+  else
+    fail "round24/$name: the boundary check must accept untouched inputs and name the covered field (rc=$ok_rc, out: $ok_out)"
+  fi
+}
+
+# THE SCHEMA — ingested by the bare scan on every invocation.
+input_case schema schema_sha256 '${corpus}/ws0-events.cql' 'DIFFERENT SCHEMAS'
+# THE FLIGHT TICKET — re-read by `flight-loadgen --ticket-template` on every invocation. It lives in
+# the SESSION's exclusively-claimed output dir, not the corpus (#3272 round 13, F2).
+input_case ticket ticket_template_sha256 '${session}/ticket-template.json' 'the REQUEST'
+
+# --------------------------------------------------------------------------
+# THE DERIVATION: a NEW declared input with NO coverage must FAIL, not pass
+# --------------------------------------------------------------------------
+# This is the property that stops the finding recurring at a FOURTH scope. The covered set is read
+# OFF THE PIN, so a per-invocation input added later — a digest field nothing knows how to resolve —
+# refuses the rep and names the field, rather than being silently omitted from a complete-looking
+# count the way `schema_sha256` and `ticket_template_sha256` were.
+make_corpus "$TMP/corpus-derived"
+derived_dir="$TMP/derived"
+WS0_SCAN_CORPUS="$TMP/corpus-derived" make_session "$derived_dir" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$derived_dir" "$TMP/corpus-derived"
+# The BASELINE first: this pin verifies, so the refusal below is attributable to the added field.
+base_out=$(boundary "$derived_dir" "$TMP/corpus-derived" rep-1); base_rc=$?
+# ...now a FUTURE input is declared in the pin and nothing covers it.
+python3 - "$derived_dir/session-corpus-pin.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+j["prewarm_profile_sha256"] = "a" * 64
+json.dump(j, open(p, "w"), indent=1)
+PY
+derived_out=$(boundary "$derived_dir" "$TMP/corpus-derived" rep-2); derived_rc=$?
+if [ "$base_rc" -eq 0 ] && [ "$derived_rc" -ne 0 ] \
+   && grep -q 'does not cover' <<<"$derived_out" \
+   && grep -q 'prewarm_profile_sha256' <<<"$derived_out"; then
+  pass "OBSERVED (round24): a NEW per-invocation input DECLARED in the pin with NO coverage REFUSES the rep and NAMES the field — the covered set is DERIVED from the pin, so the omission that produced this finding cannot recur silently at a third scope"
+else
+  fail "round24: an uncovered declared input must refuse and name the field (base_rc=$base_rc, rc=$derived_rc, out: $derived_out)"
+fi
+# ...and the DERIVATION is asserted directly, not only through its refusal: the covered set read off
+# a real pin NAMES the schema and the ticket. A count could satisfy everything above while covering
+# the wrong things.
+if python3 - "$PERF_DIR" "$derived_dir" <<'PY'
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_corpus_bytes import declared_inputs, session_pin_path
+pin = json.loads(session_pin_path(pathlib.Path(sys.argv[2])).read_text())
+got = declared_inputs(pin)
+for want in ("components", "data_db_sha256", "schema_sha256", "ticket_template_sha256"):
+    assert want in got, (want, got)
+# ...and it is DERIVED, not a constant: the field added to this pin above appears too.
+assert "prewarm_profile_sha256" in got, got
+PY
+then
+  pass "OBSERVED (round24): the covered set is DERIVED from the pin — it names the components, the Data.db declaration, the SCHEMA and the TICKET, and it picks up a field added to the pin that no list mentions"
+else
+  fail "round24: the covered set must be derived from the pin's own digest declarations"
+fi
+# ...and the RECORD names which inputs were covered, not just how many: a bare count is complete
+# relative to whatever list produced it, which is the shape this whole section is about.
+if python3 - "$derived_dir" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "corpus-boundary-observations.jsonl"
+obs = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+assert obs, "no boundary observation was recorded"
+o = obs[-1]
+for want in ("components", "schema_sha256", "ticket_template_sha256"):
+    assert want in o["declared_inputs_verified"], (want, o)
+assert {e["input"] for e in o["inputs"]} == set(o["declared_inputs_verified"]), o
+# The REFUSED boundary (rep-2, the uncovered field) recorded NOTHING.
+assert "rep-2" not in [x["boundary"] for x in obs], obs
+PY
+then
+  pass "OBSERVED (round24): the boundary observation RECORDS WHICH declared inputs were verified — the schema and the ticket by name — and the refused boundary records none"
+else
+  fail "round24: the observation must name the covered inputs, not only count components"
+fi
+# ...and FAIL CLOSED: a covered input that cannot be hashed is never assumed unchanged. The
+# uncovered field is removed FIRST, deliberately: the uncovered-declaration refusal is raised before
+# any single-file input is resolved, so leaving it would make this case refuse for the previous
+# case's reason and report a pass about a check that never ran.
+python3 - "$derived_dir/session-corpus-pin.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p)); j.pop("prewarm_profile_sha256")
+json.dump(j, open(p, "w"), indent=1)
+PY
+gone_schema="$TMP/corpus-derived/ws0-events.cql"
+mv "$gone_schema" "$TMP/derived-schema.bak"
+missing_out=$(boundary "$derived_dir" "$TMP/corpus-derived" rep-4); missing_rc=$?
+mv "$TMP/derived-schema.bak" "$gone_schema"
+if [ "$missing_rc" -ne 0 ] && grep -q 'IS ABSENT at boundary' <<<"$missing_out" \
+   && grep -q 'NOT assumed unchanged' <<<"$missing_out"; then
+  pass "OBSERVED (round24): a covered input that is ABSENT at the boundary FAILS CLOSED — never assumed unchanged"
+else
+  fail "round24: an absent covered input must fail closed (rc=$missing_rc, out: $missing_out)"
+fi
+
+# ==========================================================================
 # 6 — THE GUARD HAS BEEN OBSERVED TO FIRE THROUGH THE DRIVER'S OWN LOOP
 # ==========================================================================
 # Every check above calls the verifier DIRECTLY. That proves the VERIFIER refuses a changed corpus;
@@ -702,7 +920,7 @@ fi
 #
 # The floor is DERIVED FROM THE OBSERVED COUNT — run, then recorded — never counted off the source:
 # a source estimate understated a floor by 29 on this branch, because loops multiply.
-MIN_CHECKS=23
+MIN_CHECKS=35
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
