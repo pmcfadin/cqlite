@@ -578,12 +578,15 @@ WS0_CFG_SCAN_PASSES="$SCAN_PASSES" \
 WS0_CFG_SERVER_CPUS="$SERVER_CPUS" \
 WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
 WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
+WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
 python3 -c '
 import os, pathlib, sys
 sys.path.insert(0, sys.argv[1])
+from ws0_canonical_corpus import require_canonical_or_declared
 from ws0_validate import Invalid, load_corpus_identity
 from ws0_session import MANIFEST_CONFIG_FIELDS, write_session_corpus_pin
 corpus, out = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+repo_root = pathlib.Path(sys.argv[4])
 # Every field the manifest requires, read from the environment by NAME. A field the driver
 # failed to export is an ERROR here rather than an absent key the reporter would refuse later,
 # so the diagnostic names the driver rather than the session dir.
@@ -598,7 +601,16 @@ for field in MANIFEST_CONFIG_FIELDS:
         raise SystemExit(1)
     config[field] = value
 try:
-    pin = write_session_corpus_pin(out, corpus, load_corpus_identity(corpus), config)
+    identity = load_corpus_identity(corpus)
+    # THE CANONICAL COMPARISON (#3272 round 13, F3), re-derived HERE so the record the pin carries
+    # is one this process OBSERVED rather than a verdict passed in as a string. The comparison
+    # already ran (and already refused a divergent corpus in `baseline` mode) in
+    # `verify_corpus_is_canonical_or_declared` above; running it again is cheap (a source parse and
+    # a few comparisons) and it is what makes a caller-supplied verdict impossible.
+    canonical = require_canonical_or_declared(
+        repo_root, identity, config["baseline_mode"], corpus
+    )
+    pin = write_session_corpus_pin(out, corpus, identity, config, canonical)
 except Invalid as exc:
     print(f"FATAL: {exc}", file=sys.stderr)
     raise SystemExit(1)
@@ -607,7 +619,9 @@ print(f"corpus pin:   {pin[\"data_db_sha256\"]} ({pin[\"rows\"]} rows / {pin[\"d
       " recorded in session-corpus-pin.json BEFORE the first rep")
 print(f"config pin:   reps={config[\"reps\"]} temps=[{config[\"temps\"]}] arms=[{config[\"arms\"]}]"
       f" scan-passes={config[\"scan_passes\"]} — the reporter READS these, never its own argv")
-' "$HERE" "$CORPUS" "$OUT_DIR" \
+print(f"canonical pin: {canonical[\"label\"]} — recorded in session-corpus-pin.json"
+      " (canonical_corpus), which the reporter REQUIRES and re-derives the verdict from")
+' "$HERE" "$CORPUS" "$OUT_DIR" "$REPO_ROOT" \
   || { echo "FATAL: could not pin this session's corpus identity — the report REQUIRES it," >&2
        echo "       because a session dir that does not record WHICH corpus it measured can" >&2
        echo "       be re-reported against any other corpus (#3272 round 4)." >&2

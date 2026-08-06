@@ -69,6 +69,7 @@ from ws0_validate import (  # noqa: E402
 # #3272 F1/F3 (ws0_validate.py was already at 855 lines against a ~800 target).
 from ws0_session import (  # noqa: E402
     session_manifest_config,
+    session_pin_path,
     verify_corpus_bytes,
     verify_corpus_components,
     verify_session_corpus_pin,
@@ -76,6 +77,12 @@ from ws0_session import (  # noqa: E402
 # The SCHEMA as a verified measurement input — its own module since #3272 R2 (ws0_session.py was
 # at the ~800-line source target exactly, so this is a split by responsibility, not a waiver).
 from ws0_schema_input import verify_schema_input  # noqa: E402
+# IS THIS CORPUS THE CANONICAL MEASUREMENT CORPUS — #3272 round 13, F3. The pre-measurement pin
+# recorded the identity of whatever corpus it was handed and compared it against NOTHING, so a
+# smoke-sized or differently-seeded corpus was self-consistent through every check here and
+# published as a WS0 BASELINE. The comparison is made BEFORE measurement and RECORDED; this reads
+# the record and re-derives its verdict.
+from ws0_canonical_corpus import verify_pinned_canonical_corpus  # noqa: E402
 # The CPU PINNING's recorded verification — #3272 round 9 F6. The reporter printed "verified
 # physical-core siblings" about manifest strings nothing had checked; the driver now records what
 # it verified and this asserts the manifest agrees with it.
@@ -214,6 +221,25 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # corpus problem — naming the absent `corpus-identity.json` — rather than as an absent
     # manifest, which would send the reader to the wrong artifact.
     config = session_manifest_config(d, TEMPS_ALLOWED, ARMS_ALLOWED)
+    # WHETHER THIS SESSION IS A WS0 BASELINE AT ALL (#3272 round 13, F3). Read from the
+    # pre-measurement record, never re-derived here: the canonical pin can be re-pinned between
+    # measurement and reporting (and a results dir is routinely reviewed from another checkout), so
+    # a report-time comparison would judge the session against a shape it never ran against — in
+    # EITHER direction. `verify_pinned_canonical_corpus` requires the record AND requires it to
+    # support its own verdict, so a hand-edited `is_baseline: true` beside recorded divergences is
+    # refused rather than printed.
+    canonical = verify_pinned_canonical_corpus(
+        session_pin_path(d), json.loads(session_pin_path(d).read_text())
+    )
+    # The mode the manifest declares and the mode the comparison was MADE under must agree. Two
+    # records of one fact are two chances to disagree, so they are checked rather than assumed —
+    # this is the only place both are in scope.
+    if canonical["mode"] != config["baseline_mode"]:
+        raise Invalid(
+            f"the session manifest declares baseline_mode={config['baseline_mode']!r} while its"
+            f" recorded canonical comparison was made under {canonical['mode']!r}. One of the two"
+            " was edited; a report cannot say which claim this run makes."
+        )
     reps = config["reps"]
     scan_passes = config["scan_passes"]
     temps = config["temps"]
@@ -274,6 +300,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # ...and that the corpus is the one the SESSION STARTED against, established from a pin
         # written before the first rep (#3272 round 4).
         "session_corpus_pin": session_pin,
+        "canonical_corpus": canonical,
         # WHICH PROGRAMS the ratio is between (#3272 round 10, M2) — the revision, the dirty state,
         # the build mode and every measured binary's digest, observed by the driver before the first
         # rep. This rig's output is a ratio between two binaries, so this is provenance.
@@ -313,7 +340,33 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
 
     lines = [
         "",
-        "==== WS0 SAME-SESSION BASELINE (issue #3096 rig, hardened #3272) ====",
+        # THE HEADLINE SAYS WHETHER THIS IS A BASELINE (#3272 round 13, F3). The title used to read
+        # "WS0 SAME-SESSION BASELINE" unconditionally, over ANY corpus — so a smoke-sized corpus was
+        # published under the word BASELINE in the first line of the report. The label is the ONLY
+        # thing distinguishing the two to a reader, so it goes in the title rather than in a field
+        # somebody would have to know to look for.
+        (
+            "==== WS0 SAME-SESSION BASELINE (issue #3096 rig, hardened #3272) ===="
+            if canonical["is_baseline"]
+            else "==== WS0 SAME-SESSION MEASUREMENT — *** NOT A BASELINE *** (issue #3096 rig,"
+            " hardened #3272) ===="
+        ),
+        # ...and the label IN WORDS, on its own line, in BOTH modes — an affirmative statement in
+        # the baseline case too, so a reader can tell "this run was checked and IS canonical" from
+        # "this rig does not check", which the absence of a line cannot express.
+        f"baseline     : {canonical['label']}"
+        + (
+            ""
+            if canonical["is_baseline"]
+            else "\n               DIVERGES from "
+            + canonical["canonical_pin_source"]
+            + " in: "
+            + "; ".join(canonical["divergences"])
+            if canonical["divergences"]
+            else ""
+        )
+        + f" [{len(canonical['compared_fields'])} canonical field(s) compared BEFORE the first"
+        f" rep, recorded in {pathlib.Path(canonical['source']).name}]",
         f"corpus       : {corpus}",
         f"corpus sha256: {identity['data_db_sha256']}",
         *corpus_identity_lines(identity_verification),

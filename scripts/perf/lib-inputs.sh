@@ -178,19 +178,27 @@ print(f"ticket pin:   {digest} — ticket-template.json (the REQUEST every Fligh
 # CALLED BEFORE THE PIN, from the driver, so the ORDER stays legible at the driver's top level and a
 # refusal costs seconds rather than a multi-minute measurement.
 verify_corpus_is_canonical_or_declared() {
-  WS0_BASELINE_MODE_ARG="$BASELINE_MODE" python3 - "$WS0_INPUTS_LIB_DIR" "$CORPUS" "$REPO_ROOT" <<'PY' \
-    || { echo "FATAL: this session's corpus was not established to be the canonical measurement" >&2
-         echo "       corpus, so it cannot be measured as a WS0 BASELINE. The pre-measurement pin" >&2
-         echo "       used to record the identity of whatever corpus it was handed and compare it" >&2
-         echo "       against NOTHING, so a smoke-sized corpus reported as a baseline (#3272 F3)." >&2
-         echo "       Pass --non-baseline to measure it anyway (the run and the report are then" >&2
-         echo "       LABELLED as not a baseline), or regenerate the canonical corpus." >&2
-         return 2; }
+  # THE STATUS IS CAPTURED ON THE REDIRECT LINE ITSELF (`|| rc=$?`), not in a `{ ... }` branch
+  # written after `<<'PY'`. In that spelling the branch text lands BETWEEN the redirect and the
+  # heredoc body, so bash never finds the terminator — and `bash -n` on this library ACCEPTED it,
+  # because the driver SOURCES the file, so the parse error only surfaced at source time. The
+  # ACCEPT-direction suite is what caught it, on all ten documented invocations at once, which is
+  # exactly the regression class that suite exists for.
+  # ...and EVERY argument travels by NAMED ENVIRONMENT VARIABLE on ONE line, not as a positional
+  # argv continuation. That is the rig's own startup lint talking, not style: a continuation line
+  # whose first token is a bare `"$VAR"` is treated as an INVOCATION by `perf_invocation_lint`'s
+  # fail-closed layer 1 (an unresolvable command word could be anything, including perf), so a
+  # multi-line positional argv here FAILS the driver's own lint before it measures anything —
+  # OBSERVED: `lib-inputs.sh:189: perf/stat invocation outside the single perf_stat_c wrapper`.
+  # The pin call site in the driver carries the same note for the same reason.
+  local rc=0
+  WS0_CANON_LIB_DIR="$WS0_INPUTS_LIB_DIR" WS0_CANON_CORPUS="$CORPUS" WS0_CANON_REPO="$REPO_ROOT" WS0_BASELINE_MODE_ARG="$BASELINE_MODE" python3 - <<'PY' || rc=$?
 import os, pathlib, sys
-sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, os.environ["WS0_CANON_LIB_DIR"])
 from ws0_canonical_corpus import require_canonical_or_declared
 from ws0_validate import Invalid, load_corpus_identity
-corpus, repo_root = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+corpus = pathlib.Path(os.environ["WS0_CANON_CORPUS"])
+repo_root = pathlib.Path(os.environ["WS0_CANON_REPO"])
 mode = os.environ["WS0_BASELINE_MODE_ARG"]
 try:
     rec = require_canonical_or_declared(
@@ -203,4 +211,13 @@ print(f"baseline mode: {rec['mode']} — {rec['label']}"
       f" ({len(rec['compared_fields'])} canonical field(s) compared against"
       f" {rec['canonical_pin_source']} BEFORE the first rep)")
 PY
+  if [[ "$rc" -ne 0 ]]; then
+    echo "FATAL: this session's corpus was not established to be the canonical measurement" >&2
+    echo "       corpus, so it cannot be measured as a WS0 BASELINE. The pre-measurement pin" >&2
+    echo "       used to record the identity of whatever corpus it was handed and compare it" >&2
+    echo "       against NOTHING, so a smoke-sized corpus reported as a baseline (#3272 F3)." >&2
+    echo "       Pass --non-baseline to measure it anyway (the run and the report are then" >&2
+    echo "       LABELLED as not a baseline), or regenerate the canonical corpus." >&2
+    return 2
+  fi
 }
