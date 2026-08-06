@@ -34,11 +34,30 @@ identity is established.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import pathlib
 
 from ws0_canonical_corpus import MODE_BASELINE, MODE_NON_BASELINE
+
+# THE CORPUS'S BYTES — split into `ws0_corpus_bytes.py` in round 21, when the pin stopped COPYING
+# `corpus-identity.json`'s digests and started HASHING the files. Re-exported here because the
+# sibling modules and the reporter import these names from this module; the seam is documented in
+# `ws0_corpus_bytes.py`'s docstring. `CORPUS_TABLE_SUBPATH`/`SESSION_CORPUS_PIN`/`sha256_file` are
+# re-exported for the same reason — one spelling, so no consumer has to know which module a name
+# moved to.
+from ws0_corpus_bytes import (  # noqa: F401  (re-exported for this module's consumers)
+    BOUNDARY_OBSERVATIONS,
+    CORPUS_TABLE_SUBPATH,
+    SESSION_CORPUS_PIN,
+    boundary_observations_path,
+    locate_corpus_data_db,
+    measure_component_digests,
+    session_pin_path,
+    sha256_file,
+    verify_corpus_boundary,
+    verify_corpus_bytes,
+    verify_corpus_components,
+)
 from ws0_validate import (
     Invalid,
     _SHA256_RE,
@@ -49,290 +68,12 @@ from ws0_validate import (
 )
 
 
-# Where a ws0 corpus's SSTable components live, relative to the corpus root — the
-# layout `ws0-corpus-gen` writes and both measurement arms resolve.
-CORPUS_TABLE_SUBPATH = ("ws0", "events")
-
-# Read the Data.db in 8 MiB slices. The measurement corpus is ~2.8 GB, so the digest
-# must stream: reading it whole would need 2.8 GB of RSS to verify a fixture.
-_DIGEST_CHUNK = 8 << 20
-
-
-def locate_corpus_data_db(corpus: pathlib.Path) -> pathlib.Path:
-    """The single `*-Data.db` the measurement read, or `Invalid`.
-
-    Ambiguity is fatal in both directions. NO `Data.db` means there is nothing for
-    the recorded identity to be the identity OF. TWO means the identity records one
-    digest for two candidate files, and picking either would be a guess about which
-    the measurement actually streamed — a heuristic, in the one place the whole rig
-    is trying to be authoritative about (#28, #3272 review B6).
-    """
-    table_dir = corpus.joinpath(*CORPUS_TABLE_SUBPATH)
-    if not table_dir.is_dir():
-        raise Invalid(
-            f"{table_dir} is not a directory — the corpus identity cannot be verified"
-            " against the bytes that were measured, because there are no bytes there."
-            " Regenerate with tools/ws0-corpus-gen."
-        )
-    found = sorted(p for p in table_dir.iterdir() if p.name.endswith("-Data.db"))
-    if not found:
-        raise Invalid(
-            f"{table_dir} holds no *-Data.db, so the recorded corpus identity"
-            " describes nothing that is present. A report may not identify bytes it"
-            " cannot read."
-        )
-    if len(found) > 1:
-        raise Invalid(
-            f"{table_dir} holds {len(found)} *-Data.db files"
-            f" ({', '.join(p.name for p in found)}), but corpus-identity.json records"
-            " ONE digest. Which one the measurement streamed cannot be determined, and"
-            " guessing is exactly the heuristic this rig refuses. Measure a corpus with"
-            " a single SSTable."
-        )
-    return found[0]
-
-
-def sha256_file(path: pathlib.Path) -> str:
-    """Streaming lowercase-hex sha256 of `path` (constant memory, any file size)."""
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        while True:
-            chunk = fh.read(_DIGEST_CHUNK)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def verify_corpus_bytes(
-    corpus: pathlib.Path, identity: dict, skip_digest: bool = False
-) -> dict:
-    """Compare the RECORDED identity against the `Data.db` actually present.
-
-    #3272 review B6: corpus identity was trusted ENTIRELY from
-    `corpus-identity.json`. The file was validated for internal consistency and the
-    `Data.db` was never opened, so stale metadata sitting beside different bytes
-    misidentified the corpus while every other check — including the row-count
-    validation the identity feeds — passed. The report then printed that recorded
-    sha256 under "corpus sha256:" as the identity of the measured bytes.
-
-    Two comparisons, deliberately split by cost:
-
-    * **SIZE — always.** A `stat`. There is no argument for skipping it, so there is
-      no flag that can.
-    * **SHA-256 — streamed, opt-outable ONLY visibly.** Digesting 2.8 GB costs
-      seconds of IO per report run. `skip_digest` (the driver/reporter's
-      `--skip-corpus-digest`) omits it, and the returned record then carries
-      `sha256_verified: False` with `data_db_sha256_measured: None`, which the
-      reporter STAMPS into the summary as `CORPUS DIGEST UNVERIFIED`. A silent skip
-      is not available: an unverified identity that reads like a verified one is the
-      defect, not the cost.
-
-    Returns the verification RECORD (what was measured, and by what), so the report
-    carries the observation rather than a bare boolean.
-    """
-    data_db = locate_corpus_data_db(corpus)
-    measured_bytes = data_db.stat().st_size
-    recorded_bytes = identity["data_db_bytes"]
-    if measured_bytes != recorded_bytes:
-        raise Invalid(
-            f"{corpus / 'corpus-identity.json'} records data_db_bytes"
-            f" {recorded_bytes:,} but {data_db.name} is {measured_bytes:,} bytes on"
-            " disk. The recorded identity does not describe the corpus that would be"
-            " measured, so every figure derived from it (bytes/row, the row"
-            " denominator, the corpus digest printed in the summary) would name the"
-            " wrong bytes. Regenerate the corpus, or point --corpus at the one the"
-            " identity was recorded from."
-        )
-
-    record = {
-        "data_db": str(data_db),
-        "data_db_bytes_measured": measured_bytes,
-        "size_verified": True,
-        "data_db_sha256_recorded": identity["data_db_sha256"],
-        "data_db_sha256_measured": None,
-        "sha256_verified": False,
-        "note": "",
-    }
-    if skip_digest:
-        record["note"] = (
-            "CORPUS DIGEST UNVERIFIED: --skip-corpus-digest was passed, so the"
-            f" recorded sha256 was NOT compared against {data_db.name}. The size"
-            " matched. Anything citing this report's corpus identity is citing the"
-            " RECORDED digest, not an observed one."
-        )
-        return record
-
-    measured_sha = sha256_file(data_db)
-    record["data_db_sha256_measured"] = measured_sha
-    if measured_sha != identity["data_db_sha256"]:
-        raise Invalid(
-            f"{corpus / 'corpus-identity.json'} records data_db_sha256"
-            f" {identity['data_db_sha256']} but {data_db.name} hashes to"
-            f" {measured_sha}. The size matched, so this is the case a size check"
-            " alone cannot see: DIFFERENT BYTES of the same length, or an identity"
-            " file that outlived the corpus beside it. Every #3096 figure is bound to"
-            " a specific corpus digest; measuring one corpus and reporting another's"
-            " identity is how a comparison against a recorded number becomes"
-            " meaningless. Regenerate, or measure the corpus this identity describes."
-        )
-    record["sha256_verified"] = True
-    record["note"] = (
-        f"the recorded size and sha256 were both re-derived from {data_db.name} at"
-        " report time; the identity describes the bytes that were measured"
-    )
-    return record
-
-
-def verify_corpus_components(
-    corpus: pathlib.Path, identity: dict, skip_digest: bool = False
-) -> dict:
-    """Verify the COMPLETE recorded component set, not only `Data.db` (#3272 F3).
-
-    # The finding
-
-    `verify_corpus_bytes` above checks one file. But a scan does not read only `Data.db`: it
-    reads `Index.db`, and the `Statistics.db`/`Summary.db`/`Filter.db`/`CompressionInfo.db`
-    components shape how it reads. So a MODIFIED AUXILIARY COMPONENT could change measured
-    behaviour — a truncated `Index.db` alters the read pattern the whole rig exists to
-    measure — while the report stated that corpus verification had succeeded. The generator
-    already records every emitted component with its size and sha256
-    (`CorpusIdentity.components`, `scan_components` in tools/ws0-corpus-gen/src/identity.rs);
-    nothing read them.
-
-    # Which components must be present is taken from the RECORDED IDENTITY, never a list
-
-    There is deliberately no hardcoded component set here. Formats differ (a BTI corpus has
-    `Rows.db`/`Partitions.db` where BIG has `Index.db`; an uncompressed corpus has no
-    `CompressionInfo.db` at all, which for this rig is REQUIRED by #1406), so a hardcoded list
-    would either reject a legitimate corpus or quietly skip a component. The recorded identity
-    is the authority: exactly the components it records must be present, with the sizes and
-    digests it records, and a component present on disk that the identity does NOT record is
-    equally a finding — that is a corpus which is not the one described.
-
-    # Cost
-
-    Sizes are always verified (a `stat` each). Digests stream in 8 MiB slices, so a multi-GB
-    corpus stays feasible under bounded memory, and `--skip-corpus-digest` omits them for
-    EVERY component uniformly — never for some and not others, because a partial verification
-    reported as a verification is this issue's whole subject. The unverified case stamps the
-    same `identity unverified` note the `Data.db` path does, now covering the full set.
-    """
-    recorded = identity.get("components")
-    if not isinstance(recorded, dict) or not recorded:
-        raise Invalid(
-            f"{corpus / 'corpus-identity.json'} records no `components` map, so the corpus's"
-            " AUXILIARY components cannot be verified — only Data.db could be, and a scan also"
-            " reads Index.db (plus the Statistics/Summary/Filter components that shape how it"
-            " reads). A modified auxiliary component changes measured behaviour while the"
-            " report claims the corpus identity was verified (#3272 F3). Regenerate the corpus"
-            " with tools/ws0-corpus-gen, which records every emitted component."
-        )
-    table_dir = corpus.joinpath(*CORPUS_TABLE_SUBPATH)
-    present = {p.name for p in table_dir.iterdir() if p.is_file()}
-    missing = sorted(set(recorded) - present)
-    if missing:
-        raise Invalid(
-            f"{table_dir} is MISSING recorded component(s): {', '.join(missing)}."
-            " The recorded identity describes a corpus whose components are not all there, so"
-            " it does not describe the corpus that would be measured. A scan reads more than"
-            " Data.db — an absent Index.db changes the read pattern this rig measures."
-            " Regenerate the corpus."
-        )
-    # A component PRESENT but NOT RECORDED is equally a finding: this is not the corpus the
-    # identity describes, and a stray component can be read by a scan.
-    unrecorded = sorted(present - set(recorded))
-    if unrecorded:
-        raise Invalid(
-            f"{table_dir} holds component(s) the recorded identity does NOT describe:"
-            f" {', '.join(unrecorded)}. The identity is the authority for what this corpus IS,"
-            " so an extra component means the directory is not that corpus — a second SSTable"
-            " generation, or a hand-added file a scan may read. Regenerate, or measure the"
-            " corpus this identity was recorded from."
-        )
-    components: dict[str, dict] = {}
-    for name in sorted(recorded):
-        spec = recorded[name]
-        if not isinstance(spec, dict):
-            raise Invalid(
-                f"{corpus / 'corpus-identity.json'}: component {name!r} is a"
-                f" {type(spec).__name__}, not a record with its size and digest"
-            )
-        path = table_dir / name
-        rec_bytes = positive_int(
-            f"corpus-identity.json: component {name!r} 'bytes'", spec.get("bytes")
-        )
-        rec_sha = spec.get("sha256")
-        if not isinstance(rec_sha, str) or not _SHA256_RE.match(rec_sha):
-            raise Invalid(
-                f"corpus-identity.json: component {name!r} records 'sha256' {rec_sha!r},"
-                " which is not 64 lowercase hex characters — a truncated or absent digest"
-                " cannot identify the component that was measured"
-            )
-        measured_bytes = path.stat().st_size
-        if measured_bytes != rec_bytes:
-            raise Invalid(
-                f"corpus component {name} is {measured_bytes:,} bytes on disk but the"
-                f" recorded identity says {rec_bytes:,}. The corpus that would be measured is"
-                " not the one the identity describes, and this component is READ BY THE SCAN"
-                " (or shapes how it reads), so the measurement would be of something other"
-                " than the recorded corpus (#3272 F3)."
-            )
-        entry = {
-            "bytes_recorded": rec_bytes,
-            "bytes_measured": measured_bytes,
-            "size_verified": True,
-            "sha256_recorded": rec_sha,
-            "sha256_measured": None,
-            "sha256_verified": False,
-        }
-        if not skip_digest:
-            measured_sha = sha256_file(path)
-            entry["sha256_measured"] = measured_sha
-            if measured_sha != rec_sha:
-                raise Invalid(
-                    f"corpus component {name} hashes to {measured_sha} but the recorded"
-                    f" identity says {rec_sha}. The size matched, so this is the case a size"
-                    " check alone cannot see: DIFFERENT BYTES of the same length. This"
-                    " component is consumed by the scan, so the measured behaviour is not the"
-                    " recorded corpus's behaviour (#3272 F3)."
-                )
-            entry["sha256_verified"] = True
-        components[name] = entry
-    verified = sum(1 for e in components.values() if e["sha256_verified"])
-    return {
-        "components_recorded": len(components),
-        "components_verified_size": len(components),
-        "components_verified_sha256": verified,
-        "components": components,
-        # AFFIRMATIVE, and it states the SCOPE of what was verified: a reader can tell a full
-        # verification from a size-only one without inferring it from a flag's absence.
-        "note": (
-            f"all {len(components)} recorded component(s) were re-stat'ed and"
-            f" {verified} of {len(components)} re-hashed at report time"
-            if verified
-            else f"all {len(components)} recorded component(s) were re-stat'ed; NO digest was"
-            " re-derived (--skip-corpus-digest), so every component's identity below is the"
-            " RECORDED one, not an observed one"
-        ),
-    }
-
-
-# The name of the identity the DRIVER stamps into the session dir BEFORE it measures
-# anything. Distinct from the corpus's own `corpus-identity.json`, which lives beside the data
-# and can be replaced under a session at any time.
-SESSION_CORPUS_PIN = "session-corpus-pin.json"
-
 # The pin's Flight-ticket digest field (#3272 round 10, M1). Defined HERE, in the module that owns
 # the pin's shape, and imported by `ws0_ticket_input` — one spelling, so the writer below and the
 # reader over there cannot drift onto two names, which would present as an absent-field refusal on
 # a session that pinned the ticket correctly. (The dependency runs THIS WAY because
 # `ws0_ticket_input` already imports `sha256_file` from here; the reverse would be a cycle.)
 PIN_TICKET_FIELD = "ticket_template_sha256"
-
-
-def session_pin_path(session_dir: pathlib.Path) -> pathlib.Path:
-    return session_dir / SESSION_CORPUS_PIN
 
 
 def _measure_ticket_digest(session_dir: pathlib.Path) -> str:
@@ -380,11 +121,12 @@ def write_session_corpus_pin(
     Verifying at report time cannot see either, because both are consistent at report time.
     The pin is the missing half: an identity captured BEFORE, compared AFTER.
 
-    What is recorded is the SIZE and the recorded DIGEST plus the corpus path — never a
-    re-hash: this runs on the measurement's critical path, and a 2.8 GB hash per session would
-    be paid by every run. The digest RE-DERIVATION stays at report time
-    (`verify_corpus_bytes`); what the pin adds is that the identity being re-derived is the one
-    the session STARTED with.
+    What is recorded is the corpus path plus the size and the MEASURED digest of every component
+    — see the round-21 section below, which retracts the previous version of this paragraph (it
+    recorded the sidecar's digests unmeasured, on a cost argument). The digest is ALSO re-derived
+    at report time (`verify_corpus_bytes`); what the pin adds is that the identity being
+    re-derived is the one the session STARTED with, and `verify_corpus_boundary` adds that it was
+    still that one at each measurement boundary in between.
 
     # SCOPE, corrected (#3272 round 6, B2)
 
@@ -394,15 +136,33 @@ def write_session_corpus_pin(
     compares every pinned component's name, size and digest against both the report-time
     identity and the bytes on disk — and stated as what the pin covers rather than as what it
     records, because "recorded" was the word doing the misleading work.
+
+    # THE DIGESTS ARE MEASURED, not copied (#3272 round 21) — and the paragraph above was WRONG
+
+    Everything above described a pin that COPIED `data_db_sha256` and the whole `components` map
+    out of `corpus-identity.json`, on the argument (stated below, in the old text, as a cost
+    decision) that hashing is on the measurement's critical path. That made the corpus's own
+    sidecar both the subject and the oracle: the pin and the sidecar agreed BY CONSTRUCTION,
+    whatever the bytes on disk had done, so every downstream comparison against the pin was the
+    sidecar's assertion restated. A pin that copies a claim is not a measurement.
+
+    `measure_component_digests` now HASHES the files, and the sidecar is COMPARED against the
+    measured values — a disagreement is refused HERE, before the first rep, naming the component.
+    The cost argument was also weaker than it read: the reporter already hashes the whole corpus
+    once per run, so this adds one pass on the setup path, not one per rep.
     """
+    # HASHED, not copied. Raises `Invalid` naming any component whose bytes disagree with the
+    # sidecar, and fails closed on a component that cannot be read (#3272 round 21).
+    measured = measure_component_digests(corpus, identity)
     pin = {
         "corpus": str(corpus),
         "rows": identity["rows"],
-        "data_db_bytes": identity["data_db_bytes"],
-        "data_db_sha256": identity["data_db_sha256"],
-        # THE COMPLETE RECORDED COMPONENT SET (#3272 F3): every component's size and digest,
-        # not just Data.db's. Copied from the identity rather than re-hashed — this is on the
-        # measurement's critical path (see the note below).
+        # ...from the bytes, with the sidecar's own values already compared against them by
+        # `measure_component_digests`. `identity["data_db_bytes"]`/`["data_db_sha256"]` are what
+        # this used to record, and recording them was the round-21 finding.
+        "data_db_bytes": measured["data_db_bytes"],
+        "data_db_sha256": measured["data_db_sha256"],
+        # THE COMPLETE COMPONENT SET (#3272 F3), every entry MEASURED FROM DISK (#3272 round 21).
         #
         # READ BACK by `verify_session_corpus_pin`, which compares this map against the
         # report-time identity AND the bytes on disk. That reader did NOT exist when F3 added
@@ -411,11 +171,12 @@ def write_session_corpus_pin(
         # guard while being inert. What F3 actually closed was `verify_corpus_components`,
         # against the corpus's OWN report-time `corpus-identity.json` — self-consistent at
         # report time, which is precisely the blind spot the PIN exists to cover.
-        "components": {
-            name: {"bytes": spec.get("bytes"), "sha256": spec.get("sha256")}
-            for name, spec in sorted((identity.get("components") or {}).items())
-            if isinstance(spec, dict)
-        },
+        "components": measured["components"],
+        # WHERE THE DIGESTS ABOVE CAME FROM, affirmatively (#3272 round 21). A reader can tell a
+        # MEASURED pin from a COPIED one without inferring it, and `verify_session_corpus_pin`
+        # REQUIRES this field — a pin that does not say its digests were observed is refused
+        # rather than trusted, because a copied pin is textually identical to a measured one.
+        "components_source": measured["source"],
         # THE SCHEMA DIGEST (#3272 R2). `ws0-events.cql` is a MEASUREMENT INPUT — both arms
         # read it, ASYMMETRICALLY (the bare scan ingests it per invocation; the Flight ticket is
         # generated from it once) — so a modification between setup and a later rep makes the
@@ -823,6 +584,23 @@ def verify_session_corpus_pin(
             " The digest matched, so this is an identity file that was edited rather than"
             " regenerated — two independent numbers must agree, not one."
         )
+    # THE PIN'S DIGESTS MUST HAVE BEEN MEASURED (#3272 round 21). A pin that COPIED them out of
+    # `corpus-identity.json` is textually indistinguishable from one that hashed the files, so the
+    # writer records WHERE they came from and this REQUIRES the record: without it, every
+    # comparison below is against the sidecar's own assertion, restated. Refused rather than
+    # warned — the failure biases TOWARD the claim (a session that measured inconsistent bytes
+    # reports as identity-verified), which is the direction that must never be captioned.
+    source = pin.get("components_source")
+    if not isinstance(source, str) or "measured" not in source:
+        raise Invalid(
+            f"{p} does not record that its component digests were MEASURED"
+            f" (`components_source` is {source!r}). Until #3272 round 21 the pin COPIED"
+            " `data_db_sha256` and the whole component map out of corpus-identity.json, so the pin"
+            " and that sidecar agreed BY CONSTRUCTION however the bytes on disk differed — every"
+            " comparison against such a pin is the sidecar's own claim restated. A pin whose"
+            " digests were not observed cannot establish what this session measured. Re-run the"
+            " session with the current driver."
+        )
     # THE PINNED COMPONENT SET — unconditional (#3272 round 6, B2). Raises on any divergence.
     # Imported function-locally, like the schema check below: both sibling modules import
     # `sha256_file`/`CORPUS_TABLE_SUBPATH` from THIS module, so a module-scope import here would
@@ -863,6 +641,9 @@ def verify_session_corpus_pin(
         # The WEAKEST of the three comparisons, reported rather than enforced: a corpus can
         # legitimately be moved, and the two byte-level fields already decided the question.
         "corpus_path_unchanged": pin.get("corpus") == str(corpus),
+        # WHERE THE PIN'S DIGESTS CAME FROM (#3272 round 21) — carried into results.json, so a
+        # reader of a report can tell a MEASURED identity from a COPIED one.
+        "pinned_components_source": source,
         "pinned_components": comps["pinned_components"],
         "pinned_components_verified_size": comps["pinned_components_verified_size"],
         "pinned_components_verified_sha256": comps["pinned_components_verified_sha256"],
