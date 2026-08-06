@@ -59,12 +59,17 @@ PREWARM_REQUIRED = {
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
-# A CANONICAL decimal integer, and nothing else. No surrounding whitespace beyond what the
-# caller strips, no `+`, no `_` separators (`int("1_0")` is 10 in Python, which would read a
+# A CANONICAL decimal integer, and nothing else. NO surrounding whitespace at all (#3272 round
+# 16, L2 — `exact_int` used to `.strip()` first, so it accepted the `" 3 "` its own docstring
+# calls corrupt), no `+`, no `_` separators (`int("1_0")` is 10 in Python, which would read a
 # malformed artifact as a number), no fractional part, no exponent. A leading `-` is
 # admitted so a NEGATIVE counter reaches its domain check and is refused BY NAME rather
 # than as a format complaint — the two causes stay distinct, as the duration parser's do.
-_INT_RE = re.compile(r"^-?(0|[1-9][0-9]*)$")
+#
+# `\Z`, NOT `$`: Python's `$` also matches BEFORE a final newline, so `^…$` accepted `"3\n"` —
+# the same permissiveness as the removed strip, one character wide, and the shape a value read
+# from a line-oriented artifact actually arrives in.
+_INT_RE = re.compile(r"^-?(0|[1-9][0-9]*)\Z")
 
 
 class Invalid(Exception):
@@ -146,7 +151,13 @@ def exact_int(label: str, value: object, why: str = "") -> int:
     * a float that is integral but not exact in the domain (`1e30`), and `inf`/`nan`;
     * a string with surrounding junk or a fractional part — `int(" 3 ")` is 3, which
       hides a malformed artifact, and `int("3.7")` raises where the caller wants a
-      NAMED refusal rather than a traceback.
+      NAMED refusal rather than a traceback. WHITESPACE IS JUNK: `" 3 "` is refused,
+      not stripped. Until #3272 round 16's L2 this function `.strip()`ed the string
+      before matching, so it accepted the padding its own docstring called corrupt —
+      i.e. it did exactly what the bare `int()` it replaces does. That is worse here
+      than in an ordinary validator, because `exact_int` is the SHARED facility every
+      counter and identity field is now routed through: one permissive line weakened
+      every caller at once, silently.
 
     An integral float (`3.0`) IS accepted: `json` decodes `3.0` for a field a producer
     wrote as an integer-valued double, and the value is exactly the integer. What is
@@ -170,7 +181,10 @@ def exact_int(label: str, value: object, why: str = "") -> int:
             )
         return int(value)
     if isinstance(value, str):
-        text = value.strip()
+        # NOT `.strip()`ed (#3272 round 16, L2). `_INT_RE` is anchored, so the ORIGINAL string
+        # is the subject: padding is junk, and stripping it first accepted `" 3 "` — the exact
+        # value the docstring above calls a corrupt artifact.
+        text = value
         if not _INT_RE.match(text):
             raise Invalid(
                 f"{label} must be an integer: {value!r} is an unparseable value, not a"

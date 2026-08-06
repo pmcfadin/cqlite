@@ -1265,6 +1265,70 @@ if [ "$rc" -eq 0 ]; then
 else
   fail "an integral float must be accepted; refusing it would red every producer writing doubles (rc=$rc, out: $out)"
 fi
+# --- round 16, L2: exact_int STRIPPED the whitespace it documents as corrupt ----------------
+# The docstring says a padded string is "a corrupt artifact, not a number to be coerced" and
+# names `int(" 3 ")` as the defect being closed — then the body called `.strip()` before
+# matching, so `" 3 "` was accepted. `exact_int` is the SHARED facility this issue built and has
+# since routed every counter and identity field through, so one permissive line weakened all of
+# them at once, silently. Exercised as a UNIT (the direct callers all pass their own strings, so
+# a session fixture would only reach one of them).
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid, exact_int, _INT_RE     # noqa: E402
+
+# NON-VACUITY, measured HERE rather than asserted from the commit message: the PRE-FIX body,
+# replicated verbatim (`.strip()` then match), ACCEPTS every padded form below. Without this the
+# refusals could be about values that were never accepted.
+def prefix_exact_int(value):
+    text = value.strip()                       # the REMOVED line
+    if not _INT_RE.match(text):
+        raise Invalid("refused")
+    return int(text)
+
+padded = [" 3 ", "  3  ", "3 ", " 3", "\t3", "3\n", "\n3", " -3 "]
+for value in padded:
+    try:
+        got = prefix_exact_int(value)
+    except Invalid:
+        raise SystemExit(f"pre-fix replica REFUSED {value!r}; the case would prove nothing")
+    assert got in (3, -3), (value, got)
+
+# ...and the fixed function refuses all of them, BY NAME (the corrupt-artifact sentence), not
+# with a traceback.
+for value in padded:
+    try:
+        exact_int("counter", value)
+    except Invalid as exc:
+        assert "corrupt artifact" in str(exc), (value, str(exc))
+        assert repr(value) in str(exc), f"the refusal must quote the value as read: {exc}"
+    else:
+        raise SystemExit(f"a PADDED string {value!r} was accepted — exact_int strips again")
+
+# `3\n` is the `\Z`-not-`$` half: Python's `$` matches before a final newline, so an anchored
+# regex alone still admitted it. It is the shape a value read from a line-oriented artifact
+# arrives in, which makes it the likeliest of these to occur.
+try:
+    exact_int("counter", "3\n")
+except Invalid:
+    pass
+else:
+    raise SystemExit("'3\\n' accepted: `$` matches before a trailing newline, use `\\Z`")
+
+# THE ACCEPT DIRECTION, or a function hardcoded to refuse would satisfy every case above. Every
+# canonical spelling a real artifact carries still reads, and the non-str paths are untouched.
+assert exact_int("c", "3") == 3
+assert exact_int("c", "0") == 0
+assert exact_int("c", "-3") == -3
+assert exact_int("c", "18446744073709551615") == 18446744073709551615
+assert exact_int("c", 3) == 3
+assert exact_int("c", 3.0) == 3
+PY
+then
+  pass "exact-int (round16 L2): a PADDED string is REFUSED as a corrupt artifact, and the pre-fix replica is OBSERVED accepting all 8 padded forms — including the '3\\n' that survived the anchored regex via Python's newline-tolerant \`\$\`"
+else
+  fail "round16 L2: exact_int must refuse surrounding whitespace without stripping it, and keep every canonical spelling"
+fi
 # NO HAND-WRITTEN INVENTORY OF THE COERCIONS MAY RETURN (#3272 review round 4 nit).
 #
 # `ws0_validate.py` carried a comment claiming to be "the complete inventory, enumerated
@@ -1348,7 +1412,7 @@ fi
 # just BELOW the observed count — adding a case must not red the suite — and far above zero.
 # `$checks` is incremented by `pass`/`fail` themselves, so it counts what actually RAN rather
 # than what is written in the file.
-MIN_CHECKS=104
+MIN_CHECKS=108
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
