@@ -57,6 +57,38 @@ PREWARM_REQUIRED = {
     "cold": "skipped-cold-arm",
 }
 
+# Which temperatures may report an UNRECOGNISED status as an honest degradation (#3272 round 21).
+# Keyed AFFIRMATIVELY per temperature, and read as `is True`, so a temperature absent from this
+# table — a third temperature added later — REFUSES rather than inheriting the permissive branch.
+# That is the `== OK` shape this issue keeps having to re-apply: the pre-fix `classify_prewarm`
+# ended in a bare `return "degraded"`, so EVERY unrecognised value, INCLUDING `unrecorded` (the
+# sentinel `ws0_collect.read_prewarm` returns for an ABSENT status file), reached it.
+#
+# `warm: True` — a warm prewarm is a REAL OPERATION that can really fail, and its classifiers
+# (`ws0_prewarm.classify_prewarm_jsonl`/`_scan_json`) exist to emit a NAMED failure label rather
+# than raise, precisely so a rep can be kept and honestly flagged. The degradation is also
+# self-limiting in direction: an unprewarmed "warm" rep reads SLOWER, and the report prints a loud
+# PREWARM DEGRADED line beside its figure saying the separation is unverified.
+#
+# `cold: False` — a cold rep has NO PREWARM LEG AT ALL. `lib-measure.sh` initialises
+# `prewarm_status="skipped-cold-arm"`, enters the classifier only under `[[ "$temp" == "warm" ]]`,
+# and writes the status UNCONDITIONALLY, so `skipped-cold-arm` is the ONLY value a cold rep can
+# carry and there is no cold failure mode for a label to honestly describe. Any other value —
+# absent file, a truncated write, a hand edit, a future driver — means NOTHING ESTABLISHES THAT THIS
+# REP WAS NOT PREWARMED, i.e. that it is cold at all. Unlike the warm case that is UNBOUNDED IN
+# DIRECTION: a secretly-warm rep reported cold reads FASTER, so the unverified label can flatter the
+# figure it is attached to. So a cold figure whose temperature cannot be verified is refused, not
+# captioned.
+PREWARM_DEGRADATION_ADMITTED = {
+    "warm": True,
+    "cold": False,
+}
+
+# The two tables are keyed on the same closed set of temperatures, asserted at import rather than
+# left to drift: a temperature added to one and not the other would be exactly the missing-entry
+# case above, discovered as a refusal on somebody's real session instead of here.
+assert PREWARM_REQUIRED.keys() == PREWARM_DEGRADATION_ADMITTED.keys()
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # A CANONICAL decimal integer, and nothing else. NO surrounding whitespace at all (#3272 round
@@ -621,10 +653,36 @@ def classify_prewarm(temp: str, status: str) -> str:
       prewarmed while claiming a cold-arm skip, or a "cold" rep was prewarmed and
       is therefore not cold. Both invalidate the claim the figure carries, and
       neither is a degradation that could be honestly labelled.
-    * anything else (`unrecorded`, `FAILED-exit-N`, a future label) => `degraded`.
-      An honest record of a real failure: flagged loudly in the summary and in
-      `prewarm_all_ok`, but reported, because a rep labelled `prewarm-failed` is
-      more useful than a silently dropped one.
+    * anything else — but ONLY where that temperature admits a degradation, which is
+      WARM alone (`PREWARM_DEGRADATION_ADMITTED`) => `degraded`. An honest record of a
+      real failure: flagged loudly in the summary and in `prewarm_all_ok`, but
+      reported, because a rep labelled `prewarm-failed` is more useful than a silently
+      dropped one. On a COLD rep the same value is `Invalid` — see below.
+
+    # #3272 round 21 — an UNVERIFIABLE COLD rep still got a cold figure AND a verdict
+
+    The final line used to be a bare `return "degraded"`, so EVERY unrecognised status
+    took it — including `unrecorded`, which is the sentinel
+    `ws0_collect.read_prewarm` returns for a **status file that is not there at all**.
+    A cold rep with no status file was therefore merely captioned, and the reporter went
+    on to publish its rows/s, its bare/flight ratio and its `[PASS]`/`[BELOW TARGET]`
+    verdict. MEASURED before the fix, on a cold-only session with its two
+    `*.prewarm.status` files deleted: `rc=0`, `500 rows/s` and `250 rows/s` printed, and
+    `ratio bare/flight = 2.00x ... [BELOW TARGET]`.
+
+    Nothing in that session established the reps were NOT prewarmed — i.e. that they
+    were cold at all — and the bias is UNBOUNDED IN DIRECTION: a secretly-warm rep
+    labelled cold reads FASTER, so an unverified cold label can flatter the very figure
+    it is attached to. (The warm direction is self-limiting, which is why warm still
+    degrades: an unprewarmed "warm" rep reads slower.)
+
+    This is the `!= BAD` shape rather than `== OK` — the permissive branch reached by
+    every value nobody enumerated — and it is the defect this issue has now corrected
+    most often. The fix is the affirmative form: a cold rep must carry EXACTLY
+    `skipped-cold-arm`, which the driver writes unconditionally
+    (`lib-measure.sh` initialises it and only a WARM rep enters the classifier), so
+    there is no legitimate cold run without it and no cold failure mode for a label to
+    honestly describe.
     """
     required = PREWARM_REQUIRED.get(temp)
     if required is None:
@@ -646,6 +704,28 @@ def classify_prewarm(temp: str, status: str) -> str:
                 else " A prewarmed rep is not cold, so a 'cold' figure may not carry"
                 " a successful prewarm."
             )
+        )
+    # AFFIRMATIVE (`is True`), never `!= False` and never a `.get(temp, True)`: an absent
+    # entry is an unanswered question, and the whole class of defect here is a
+    # verdict-carrying key defaulting to its permissive value (#3272 round 21).
+    if PREWARM_DEGRADATION_ADMITTED.get(temp) is not True:
+        raise Invalid(
+            f"a {temp.upper()} rep recorded prewarm status {status!r}, which is not the"
+            f" required {required!r} and is not a degradation a {temp.upper()} rep can"
+            " have: it has NO PREWARM LEG to fail. lib-measure.sh writes"
+            f" {required!r} unconditionally for a {temp} rep and only a WARM rep runs a"
+            " prewarm at all, so this value means the status was NEVER RECORDED"
+            " (`unrecorded` = no <tag>.prewarm.status file), was truncated, or was"
+            " hand-edited."
+            f" NOTHING therefore establishes that this rep was not prewarmed — i.e."
+            f" that it is {temp} at all — so its figure carries an UNVERIFIED"
+            f" temperature and its rows/s, ratio and PASS/BELOW-TARGET verdict may not"
+            " be published. This is refused rather than captioned because the bias is"
+            " UNBOUNDED IN DIRECTION: a secretly-warm rep reported cold reads FASTER,"
+            " which flatters the figure (a degraded WARM rep reads slower, which is why"
+            " that direction is a labelled degradation instead). Re-run the rep, or"
+            f" restore its recorded {required!r} status if the run really was {temp}"
+            " (#3272 round 21)."
         )
     return "degraded"
 
