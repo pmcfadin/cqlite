@@ -3417,7 +3417,7 @@ assert_verdict 'case (wv6)' FAIL 1
 # A MISSING FIELD IS NOW REFUSED BY THE SINGLE ANCHORED PATTERN rather than by a per-field check, so
 # every shape violation reports the same cause: the required form.
 assert_says 'case (wv6) a reasonless marker does not match the required form' \
-  '^waiver: MALFORMED \\(the line does not match the required form'
+  '^waiver: MALFORMED \(the line does not match the required form'
 assert_lacks 'case (wv6) and never yields WAIVED' '^prompt-content: WAIVED'
 reset_stub
 
@@ -3576,7 +3576,7 @@ STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent head=$w_hea
 run_wrapper "$w_work"
 assert_verdict 'case (wv17)' FAIL 1
 assert_says 'case (wv17) a marker missing a field does not match the required form' \
-  '^waiver: MALFORMED \\(the line does not match the required form'
+  '^waiver: MALFORMED \(the line does not match the required form'
 assert_says 'case (wv17) and the cause quotes the required form in full' \
   'base=<40-hex> head=<40-hex> job=<id> reason=<why>'
 reset_stub
