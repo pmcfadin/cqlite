@@ -3814,7 +3814,7 @@ fi
 # rather than on which key carries it: a key-scoped exemption is the shape the ruling deleted.
 _aff_start=$(grep -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER" | head -1 | cut -d: -f1)
 _aff_body=$(sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER")
-if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SHA:-}" = "${HEAD_SHA:-}"' \
+if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' \
   && printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_STATE:-}" = "granted"' \
   && ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
   ok 'structural: WAIVED is admitted only with a complete, sha-matching provenance, and the gate is not key-scoped'
@@ -4126,9 +4126,9 @@ else
     if [ "$_aff_continues" -eq 2 ] &&
       printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;' &&
       printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' &&
-      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SHA:-}" = "${HEAD_SHA:-}"' &&
+      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' &&
       ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
-      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on complete sha-matching provenance and not on the key'
+      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on the complete scope-matching provenance (base+head+job) and not on the key'
     else
       bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED without complete provenance, or is keyed on det_key — the per-key escape hatch #3229 forbade and ruling (4) deleted (#3312)"
     fi
