@@ -128,20 +128,18 @@ impl SizeSource {
 /// procedure can refuse the window. A size is never estimated, interpolated from a
 /// successor offset, or defaulted to a nominal value (no-heuristics, #28).
 ///
-/// # Reachability of [`AccessWeight::Index`] today — an OPEN finding on #2827
+/// # Which variant a Cassandra-written SSTable produces
 ///
-/// The approved design assumed the BIG `Index.db` supplies a per-partition size.
-/// It does not: a Cassandra 5.0 BIG index entry is
+/// [`AccessWeight::SuccessorGap`], essentially always. Neither Cassandra 5.0 index
+/// format records a per-partition size — a BIG index entry is
 /// `[key][data_offset vint][promoted_index_len vint][promoted_index]`
-/// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`), with no
-/// size field, which is why the reader's own seek path bounds a partition with the
-/// SUCCESSOR offset instead. So `PartitionLoc.data_size` is `0` for BIG as well as
-/// BTI, and in practice every access resolves to [`AccessWeight::Unavailable`]:
-/// the histogram is fully live, the byte weighting is not, and the decision
-/// procedure consequently refuses every window on its unpriceable-fraction
-/// condition. The successor gap the read path already computes is the available
-/// authoritative extent; wiring it was explicitly deferred by the approved design
-/// and is not taken unilaterally here.
+/// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, "Index.db
+/// Entry Format"), and the BTI `Partitions.db` trie resolves an offset only — which
+/// is why the reader's own seek path bounds a partition with the SUCCESSOR offset
+/// and treats that as authoritative. The probe measures the same extent.
+/// [`AccessWeight::Index`] therefore stays unreachable for such SSTables and exists
+/// so a producer that genuinely knows a size is never forced to report a measured
+/// one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessWeight {
     /// On-disk bytes taken directly from index-recorded sizes, summed across the

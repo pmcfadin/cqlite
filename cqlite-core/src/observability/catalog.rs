@@ -167,26 +167,29 @@ pub mod attr {
     /// [`super::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS`] family.
     pub const REPEAT_BUCKET: &str = "cqlite.read.repeat_bucket";
     /// Provenance of the on-disk byte weight recorded for a partition access
-    /// (issue #2827). Bounded to the closed set of EXACTLY two labels:
+    /// (issue #2827). Bounded to the closed set of EXACTLY three labels:
     ///
-    /// - `"index"` — every SSTable resolved for that access reported an
-    ///   authoritative partition size through `PartitionLoc.data_size`.
-    /// - `"unavailable"` — at least one resolved SSTable reported NO size, so the
-    ///   access contributes ZERO bytes and is counted here instead. A size is never
-    ///   estimated, interpolated from a successor offset, or defaulted
-    ///   (no-heuristics #28): the incompleteness is published as a ratio rather
-    ///   than absorbed.
+    /// - `"successor_gap"` — the extent was MEASURED as `[data_offset,
+    ///   successor_offset)`, bounding to the authoritative uncompressed
+    ///   data-section length for the last partition. This is the normal value:
+    ///   NEITHER Cassandra 5.0 index format records a per-partition size (a BIG
+    ///   index entry is `[key][data_offset vint][promoted_index_len vint]
+    ///   [promoted_index]` —
+    ///   `docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, "Index.db
+    ///   Entry Format" — and the BTI trie resolves an offset only), so the extent is
+    ///   measured from index LAYOUT, the same bound the single-partition seek uses
+    ///   to size its decompression window.
+    /// - `"index"` — an SSTable reported a size directly in its index metadata
+    ///   (`PartitionLoc.data_size`). Unreachable for Cassandra-written SSTables per
+    ///   the above; retained so a producer that genuinely knows a size is never
+    ///   forced to report a measured one.
+    /// - `"unavailable"` — no authoritative extent at all, so the access contributes
+    ///   ZERO bytes and is counted here instead. A size is never estimated,
+    ///   interpolated by proportion, or defaulted (no-heuristics #28): the
+    ///   incompleteness is published as a ratio rather than absorbed.
     ///
-    /// **Reachability today (issue #2827, open finding).** NEITHER Cassandra 5.0
-    /// index format records a per-partition byte size: the BIG `Index.db` entry is
-    /// `[key][data_offset vint][promoted_index_len vint][promoted_index]`
-    /// (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, entry
-    /// layout) and the BTI `Partitions.db` trie resolves an offset only. So every
-    /// access currently reports `"unavailable"` and
-    /// [`READ_PARTITION_ACCESS_BYTES`] stays at zero. The only authoritative
-    /// on-disk extent available is the SUCCESSOR-offset gap the read path already
-    /// computes as its decode end bound; wiring it is out of this change's
-    /// approved scope.
+    /// Where an access mixes provenances the WEAKEST is reported — a total is only
+    /// as well-founded as its weakest component.
     pub const SIZE_SOURCE: &str = "cqlite.read.size_source";
 }
 
@@ -380,8 +383,9 @@ pub const READ_BTI_ROWS_ROOT_REJECTED: &str = "cqlite.read.bti.rows_root_rejecte
 /// Number of DISTINCT partitions that fell into each repeat-access bucket over
 /// one closed measurement window of the bounded partition access-distribution
 /// probe. Bounded attributes: [`attr::REPEAT_BUCKET`] (six labels) and
-/// [`attr::SIZE_SOURCE`] (two labels) — twelve series, fixed forever, regardless
-/// of how many partitions the workload touched.
+/// [`attr::SIZE_SOURCE`] (three labels) — eighteen series, fixed forever, regardless
+/// of how many partitions the workload touched. Across all four
+/// `cqlite.read.partition_access.*` metrics the budget is 6x3 + 6 + 6 + 1 = 31.
 ///
 /// This is the concentration SHAPE of a keyed workload: a distribution
 /// concentrated in `1` is a uniform (cache-hostile) access pattern; mass in
@@ -413,9 +417,11 @@ pub const READ_PARTITION_ACCESS_ACCESSES: &str = "cqlite.read.partition_access.a
 /// times contributes its size ONCE — the working set is defined over distinct
 /// partitions.
 ///
-/// Bytes come from the size the read path already resolved
-/// (`PartitionLoc.data_size`), never from an estimate. An access whose size was
-/// not authoritatively available contributes ZERO here and is counted under
+/// Bytes come from each partition's MEASURED on-disk extent — its successor gap,
+/// bounding to the authoritative uncompressed data-section length for the last
+/// partition — never from an estimate. These are UNCOMPRESSED offsets, which is the
+/// correct input for a decoded-size multiplier. An access with no authoritative
+/// extent contributes ZERO here and is counted under
 /// `distinct_partitions{cqlite.read.size_source="unavailable"}`, so an
 /// incomplete byte total always has a visible `unavailable` series beside it.
 pub const READ_PARTITION_ACCESS_BYTES: &str = "cqlite.read.partition_access.bytes";

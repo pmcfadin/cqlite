@@ -187,6 +187,16 @@ The procedure is also available as code — `cqlite_core::observability::partiti
 — so a captured window can be priced without re-deriving any of the above. It implements
 exactly the four refusal conditions and the ceiling in this note.
 
+## Known coverage limitation of the instrument
+
+`SELECT WRITETIME(col) / TTL(col) … WHERE pk = ?` takes a separate metadata point-read
+boundary that the probe does **not** record, so those accesses never reach the
+histogram. The direction is conservative — the affected partitions are under-counted,
+which understates concentration — but if the workload you instrumented is
+predominantly WRITETIME/TTL projections, **do not use its window for the decision**:
+the measurement would be of the traffic that happens to be visible, not of the
+workload.
+
 ## What this note does NOT do
 
 - It does not report a field skew. See the scope statement at the top.

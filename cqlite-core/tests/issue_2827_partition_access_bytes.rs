@@ -444,7 +444,8 @@ mod end_to_end {
     /// dependency: each case still closes its window explicitly.)
     static PROBE: Mutex<()> = Mutex::const_new(());
 
-    /// A BIG (`nb`) fixture: `Index.db` resolves an authoritative partition size.
+    /// A BIG (`nb`) fixture. Its `Index.db` records NO partition size (no Cassandra
+    /// 5.0 index format does), so the extent is measured as the successor gap.
     const BIG: (&str, &str, &str, &str, &str) = (
         "test_compaction_tombstone_ttl",
         "shadow_row_delete",
@@ -453,7 +454,7 @@ mod end_to_end {
         "1",
     );
     /// A BTI (`da`) fixture: the `Partitions.db` trie resolves an offset and no
-    /// size, so the read path records `data_size = 0`.
+    /// size, so the extent is measured by a strict-ceiling trie successor walk.
     const BTI: (&str, &str, &str, &str, &str) = (
         "test_da",
         "multiclustering_table",

@@ -73,12 +73,23 @@ The cache being sized is a **decoded-partition** cache, whose unit is the reconc
 partition — so the logical boundary is also the semantically correct one: it counts exactly the
 events such a cache would serve.
 
+**Known coverage limitation, recorded rather than left implicit.**
+`StorageEngine::scan_partition_with_cell_metadata` — the WRITETIME/TTL-projection
+sibling of `scan_partition` (`SELECT WRITETIME(col) … WHERE pk = ?`) — is also a
+logical point read, and it is **NOT** recorded. Those accesses are therefore invisible
+to the histogram. The direction is conservative: a partition read only through the
+metadata path is under-counted, which **understates** concentration and so understates
+the case for a cache. It is a gap in coverage, not a bias toward "go", and a workload
+whose keyed traffic is predominantly WRITETIME/TTL projections would be measured
+badly — such a window should not be used for the decision. Closing it is a
+one-wrapper change on the same pattern as the three recorded boundaries.
+
 **Alternative considered.** *Count at the probe sites and divide by an SSTable count.* Rejected: the
 divisor varies per partition (a key may be in 1 or 7 generations) and is not knowable at the probe
 site, so the correction would itself be an estimate — a heuristic in the sense CLAUDE.md's #28
 mandate exists to prevent.
 
-### D3 — Metric shape: four counters/gauges, two new bounded attributes, twelve series
+### D3 — Metric shape: four counters/gauges, two new bounded attributes, 31 series
 
 **Decision.**
 

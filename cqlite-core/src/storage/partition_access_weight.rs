@@ -25,6 +25,15 @@
 //!   contributes ZERO bytes. Never bounded from a successor offset, never
 //!   defaulted (no-heuristics, #28).
 //!
+//! # Known coverage limitation
+//!
+//! [`StorageEngine::scan_partition_with_cell_metadata`] — the WRITETIME/TTL
+//! projection's point read — is a logical point read that this module does NOT wrap,
+//! so its accesses are invisible to the histogram. The direction is conservative
+//! (those partitions are under-counted, understating concentration), but it is a gap:
+//! a workload dominated by WRITETIME/TTL projections is measured badly. Recorded in
+//! `design.md` D2 and in the decision note.
+//!
 //! # Where it fails closed, stated rather than hidden
 //!
 //! A candidate whose cached location is absent is treated as "did not hold the

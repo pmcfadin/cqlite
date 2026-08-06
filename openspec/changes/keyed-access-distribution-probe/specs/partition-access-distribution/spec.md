@@ -256,6 +256,14 @@ compiled and helpers compiling to no-ops when the feature is off
 (`cqlite-core/src/observability/mod.rs:49-54`). A default `cqlite-core` build SHALL continue to link no
 OpenTelemetry crates.
 
+**Known coverage limitation (recorded, not waived):**
+`StorageEngine::scan_partition_with_cell_metadata` (the WRITETIME/TTL-projection point
+read) is a logical point read that is NOT recorded, so its accesses are invisible to
+the histogram. The direction is conservative — those partitions are under-counted,
+which **understates** concentration — but a workload whose keyed traffic is
+predominantly WRITETIME/TTL projections is measured badly and its window must not be
+used for the decision.
+
 **Wiring evidence (a public surface + a call chain + an end-to-end test):** public surface
 `cqlite_core::observability::partition_access`; call chain *point-read boundary →
 `record_partition_access` → window close → `obs::add_counter`*; end-to-end test
