@@ -624,13 +624,219 @@ else
 fi
 
 # ==========================================================================
+# #3272 ROUND 20 — THE CAVEAT IS IN THE HUMAN SUMMARY, BESIDE THE FIGURE AND THE VERDICT
+# ==========================================================================
+# THE FINDING. Round 18 withdrew the Arrow-volume verification claim and round 19 made the
+# surviving calibration true — both only in `results.json` plus ONE bullet at the BOTTOM of the
+# NOTES. The human summary's rows/s figures and its `[PASS]`/`[BELOW TARGET]` verdicts were printed
+# with nothing beside them, so a reader who reads the numbers (which is what a summary is FOR) took
+# a verdict at face value.
+#
+# THE CASE THIS SUITE OWNS is the COLD-ONLY session, and it belongs here because it is a PREWARM
+# fact: `lib-measure.sh` skips the prewarm on the cold arm BY DESIGN — prewarming it would make
+# `cold` meaningless — so a `--temp cold` session has NO PREFLIGHT and therefore NO COMPARISON
+# WHATSOEVER for the payload. Not a weak one, none. And it was the case with NO human-readable text
+# at all: the standing NOTES bullet was worded for the COMPARED case ("is compared against this
+# session's UNTIMED PREFLIGHT"), so on exactly the session where nothing was compared, the only
+# prose a reader could find said the opposite of what happened.
+#
+# WHY A CAVEAT AND NOT A REFUSAL, since the review offered both. Round 18 MEASURED the pinned
+# `ARROW_BUFFER_DIGEST` unreachable for any `ws0-corpus-gen` corpus, and no pinned substitute exists
+# — so "reject a verdict without a content oracle" rejects EVERY session, which is a rig that cannot
+# report rather than a fix. The route taken is the one round 16's F2 established for the
+# unobservable arm: state the absence where a reader of the numbers will see it.
+pw_r20="$TMP/r20-cold-only-caveat"; mkdir -p "$pw_r20"
+make_scan_rep "$pw_r20" cold 1 skipped-cold-arm
+# NO `<tag>.prewarm.jsonl` is written for a cold rep by `make_flight_rep`, matching the driver —
+# which is the whole subject: this session has no preflight to compare against.
+make_flight_rep "$pw_r20" cold 1 skipped-cold-arm "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$pw_r20" "$TMP/corpus" 1 cold bypass 1
+pw_r20_out=$(run_report "$pw_r20" "$TMP/corpus"); pw_r20_rc=$?
+# The session is ACCEPTED — asserted, because everything below is about what a SUCCESSFUL report
+# prints, and a case that silently became a rejection would stop exercising the reporting path.
+if [ "$pw_r20_rc" -eq 0 ] && grep -q 'flight do_get (bypass requested)' <<<"$pw_r20_out"; then
+  pass "round20: a COLD-ONLY session (no preflight, so NO payload comparison at all) is still ACCEPTED and publishes its figure"
+else
+  fail "round20: the cold-only session must be accepted; it is the input whose REPORTING is under test (rc=$pw_r20_rc, out: $pw_r20_out)"
+fi
+# ...and the caveat is BESIDE THE FIGURE. Asserted POSITIONALLY, not merely as "somewhere in the
+# output": a line at the bottom of the NOTES is the shape that produced this finding, so a
+# substring test over the whole summary would pass over the very defect. The flight figure line and
+# the caveat must be CONSECUTIVE-ish within the arm's block — measured as: the caveat appears
+# between the flight figure and the `ratio` line.
+pw_r20_fig=$(grep -n 'flight do_get (bypass requested)' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
+pw_r20_cav=$(grep -n 'ARROW PAYLOAD VOLUME NOT COMPARED' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
+pw_r20_rat=$(grep -n 'ratio bare/flight' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
+pw_r20_vrd=$(grep -n 'verdict and the ratio above are CONDITIONAL' <<<"$pw_r20_out" | head -1 | cut -d: -f1)
+if [ -n "$pw_r20_fig" ] && [ -n "$pw_r20_cav" ] && [ -n "$pw_r20_rat" ] \
+  && [ "$pw_r20_cav" -gt "$pw_r20_fig" ] && [ "$pw_r20_cav" -lt "$pw_r20_rat" ]; then
+  pass "round20: the NOT-COMPARED caveat sits BETWEEN the flight figure (line $pw_r20_fig) and the ratio (line $pw_r20_rat) — beside the number, not appended at the bottom"
+else
+  fail "round20: the caveat must be printed beside the figure (figure=$pw_r20_fig caveat=$pw_r20_cav ratio=$pw_r20_rat, out: $pw_r20_out)"
+fi
+# ...and BESIDE THE VERDICT, which is the stronger artifact: `[BELOW TARGET]` is the line somebody
+# quotes out of the report.
+if [ -n "$pw_r20_vrd" ] && [ -n "$pw_r20_rat" ] && [ "$pw_r20_vrd" -eq $(( pw_r20_rat + 1 )) ] \
+  && grep -q '\[BELOW TARGET\] verdict and the ratio above are CONDITIONAL' <<<"$pw_r20_out"; then
+  pass "round20: the verdict caveat is the line DIRECTLY AFTER the ratio+verdict line, and it NAMES the verdict it qualifies"
+else
+  fail "round20: the verdict must carry its caveat on the next line (ratio=$pw_r20_rat verdict-caveat=$pw_r20_vrd, out: $pw_r20_out)"
+fi
+# ...and it must STATE WHAT IS AND IS NOT ESTABLISHED, in F1's vocabulary rather than a vague hedge
+# — a caveat a reader cannot act on is how one concludes the figure is probably fine. Four required
+# elements: that NOTHING checked it, the concrete defect it therefore admits, the direction that
+# defect biases the verdict, and where to read the mechanism.
+pw_r20_missing=""
+for frag in \
+  "no untimed preflight in this session" \
+  "NOTHING in this rig checked, not even for self-consistency" \
+  "FEWER ARROW COLUMNS" \
+  "look CHEAPER" \
+  "NOT COMPARED AT ALL" \
+  "biases this comparison TOWARD PASS" \
+  "see the ARROW PAYLOAD VOLUME bullet in NOTES"; do
+  grep -qF "$frag" <<<"$pw_r20_out" || pw_r20_missing="$pw_r20_missing [$frag]"
+done
+if [ -z "$pw_r20_missing" ]; then
+  pass "round20: the caveat states the absence, the defect it admits, the FLATTERING direction (toward PASS), and where the mechanism is written"
+else
+  fail "round20: the caveat is missing required element(s):$pw_r20_missing"
+fi
+# ...and the BIAS DIRECTION IS AN ABSOLUTE, never the observed verdict interpolated back. A short
+# Flight payload raises that arm's rows/s, which moves the comparison toward PASS whatever the
+# verdict currently reads — so on a BELOW TARGET session the text must NOT say the bias runs toward
+# BELOW TARGET, which would make the caveat reassuring on exactly the runs where it is not. Measured
+# during this round: the first draft did precisely that.
+if ! grep -q "toward 'BELOW TARGET'" <<<"$pw_r20_out" \
+  && ! grep -q 'toward "BELOW TARGET"' <<<"$pw_r20_out"; then
+  pass "round20: the bias direction is stated as an absolute (TOWARD PASS), not as the observed verdict echoed back"
+else
+  fail "round20: the caveat must not claim the bias runs toward the printed verdict (out: $(grep -n 'toward' <<<"$pw_r20_out"))"
+fi
+# ...and the NOTES bullet no longer over-claims the case it describes. On THIS session nothing was
+# compared, so an unconditional "is compared against this session's UNTIMED PREFLIGHT" is false.
+if grep -q 'UNTIMED PREFLIGHT WHERE ONE EXISTS' <<<"$pw_r20_out" \
+  && grep -q 'has NO COMPARISON AT ALL for this property' <<<"$pw_r20_out"; then
+  pass "round20: the NOTES bullet is conditional (WHERE ONE EXISTS) and names the no-preflight case, instead of asserting a comparison that did not happen"
+else
+  fail "round20: the NOTES bullet must not assert a comparison on a session that has none (out: $pw_r20_out)"
+fi
+
+# --- NON-VACUITY, MEASURED AS A FLIP ON THIS EXACT INPUT ----------------------
+# Every assert above would pass over a reporter that prints a caveat for an unrelated reason, and
+# the POSITIONAL asserts would pass over any implementation that happens to emit those lines. What
+# must be measured is the PRE-FIX ABSENCE: the same cold-only session, through a reporter whose
+# caveat calls are removed, printing a headline ratio and a PASS/BELOW TARGET verdict with NO
+# caveat in the human summary. One-site-per-call mutation of a COPY of the shipped reporter, for
+# round 14 F2's reason: a wholesale revert would be a second implementation whose fidelity is a
+# claim about my re-derivation.
+pw_r20_pre="$TMP/r20-prefix-tree"; rm -rf "$pw_r20_pre"; mkdir -p "$pw_r20_pre"
+cp -R "$REPO_ROOT/scripts/perf/." "$pw_r20_pre/"
+if python3 - "$pw_r20_pre/ws0_report.py" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+# The two call sites, each asserted to occur EXACTLY ONCE — a moved site must fail the probe loudly
+# rather than leave it measuring unmutated code and reading as a pass having reverted nothing.
+for needle in ('            lines += content_volume_caveat_lines(fl, f"flight/{arm}", temp)\n',
+               '            lines += content_volume_verdict_caveat_lines(fl, f"flight/{arm}", verdict)\n'):
+    if s.count(needle) != 1:
+        raise SystemExit(f"could not locate the caveat call site to remove ({needle.strip()!r}), so "
+                         "this non-vacuity probe would be measuring UNMODIFIED code")
+    s = s.replace(needle, "")
+p.write_text(s)
+print("mutated the probe copy: neither Arrow-volume caveat is emitted into the summary")
+PY
+then
+  pass "round20 NON-VACUITY: the mutation (both caveat call sites removed) was really applied to the probe copy"
+else
+  fail "round20: the pre-fix mutation could not be applied, so the probe below would measure nothing"
+fi
+pw_r20_pre_out=$(python3 "$pw_r20_pre/ws0_report.py" --dir "$pw_r20" --corpus "$TMP/corpus" 2>&1)
+pw_r20_pre_rc=$?
+# The pre-fix reporter SUCCEEDS and PUBLISHES the ratio and the verdict — that is the finding.
+if [ "$pw_r20_pre_rc" -eq 0 ] \
+  && grep -q 'ratio bare/flight = 2.00x' <<<"$pw_r20_pre_out" \
+  && grep -q '\[BELOW TARGET\]' <<<"$pw_r20_pre_out"; then
+  pass "round20 NON-VACUITY (MEASURED): the pre-fix reporter ACCEPTS the cold-only session and PUBLISHES a 2.00x headline ratio and a [BELOW TARGET] verdict"
+else
+  fail "round20: the pre-fix reporter must publish the ratio and verdict, else the caveat above closed nothing (rc=$pw_r20_pre_rc, out: $(head -40 <<<"$pw_r20_pre_out" | tail -12))"
+fi
+# ...and it does so with NO caveat ANYWHERE in the human summary — the buried-caveat defect itself,
+# asserted over the WHOLE output rather than beside the figure, because "nowhere at all" is the
+# stronger and the true statement for the cold-only case.
+if ! grep -q 'ARROW PAYLOAD VOLUME NOT COMPARED' <<<"$pw_r20_pre_out" \
+  && ! grep -q 'verdict and the ratio above are CONDITIONAL' <<<"$pw_r20_pre_out"; then
+  pass "round20 NON-VACUITY: that published report carries NO Arrow-volume caveat anywhere in the human summary — the figure and verdict stood bare"
+else
+  fail "round20: the pre-fix summary must carry no caveat, else the flip is not a flip (out: $(grep -n 'ARROW PAYLOAD\|CONDITIONAL' <<<"$pw_r20_pre_out" | head -3))"
+fi
+# ...and the MUTANT IS NOT UNIFORMLY BROKEN: it still writes the record's own withdrawal into
+# `results.json`, so what the probe measured is the loss of the HUMAN-READABLE caveat specifically
+# and not a copy that reports nothing. This is the finding stated precisely — the warning existed
+# only in nested results.json.
+if python3 - "$pw_r20/results.json" <<'PY'
+import json, sys
+fl = [m for m in json.load(open(sys.argv[1]))["measurements"] if m["arm"].startswith("flight_")][0]
+cv = fl["reps"][0]["content_volume_self_consistency"]
+assert cv["bytes_total_verified_against_independent_oracle"] is False, cv
+assert cv["bytes_total_checked"].startswith("NOT COMPARED"), cv
+PY
+then
+  pass "round20 NON-VACUITY: the mutant still records the withdrawal in results.json — the probe measured the loss of the HUMAN-READABLE caveat exactly, which is the finding"
+else
+  fail "round20: the mutant must retain the results.json record, else it lost more than the summary caveat"
+fi
+# --- AND A RECORD SHAPE THE CAVEAT CANNOT DESCRIBE IS A REFUSAL, NOT A SILENT OMISSION ---------
+# The caveat reader is a CLOSED grammar: an unrecognised state must not inherit a quiet branch,
+# because silence beside a figure reads as VERIFIED and no session is. Driven by dropping the key
+# the reader is keyed on from a copy of the SHIPPED publisher, so the reader meets a record whose
+# shape it does not recognise.
+pw_r20_blind="$TMP/r20-unrecognised-record"; rm -rf "$pw_r20_blind"; mkdir -p "$pw_r20_blind"
+cp -R "$REPO_ROOT/scripts/perf/." "$pw_r20_blind/"
+python3 - "$pw_r20_blind/ws0_flight_arm.py" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+needle = '"content_volume_self_consistency": ('
+assert s.count(needle) == 1, f"expected one publication site, found {s.count(needle)}"
+p.write_text(s.replace(needle, '"content_volume_UNRECOGNISED": ('))
+PY
+pw_r20_blind_out=$(python3 "$pw_r20_blind/ws0_report.py" --dir "$pw_r20" --corpus "$TMP/corpus" 2>&1)
+pw_r20_blind_rc=$?
+if [ "$pw_r20_blind_rc" -ne 0 ] \
+  && grep -q 'carries no `content_volume_self_consistency` record' <<<"$pw_r20_blind_out" \
+  && grep -q 'silence here would read as VERIFIED' <<<"$pw_r20_blind_out"; then
+  pass "round20: a record shape the caveat cannot describe is a REFUSAL naming why silence is not an option — not a rep quietly omitted from the warning"
+else
+  fail "round20: an unrecognised content-volume record must be refused (rc=$pw_r20_blind_rc, out: $pw_r20_blind_out)"
+fi
+# --- AND THE COMPARED (WARM) BRANCH IS NOT SILENT EITHER ----------------------
+# A compared session is not VERIFIED either — its reference is not independent of its subject — so a
+# silent branch there could only mean "verified". The accept direction for that state, so the guard
+# is neither unconditional nor half-wired: the SAME assertions over a WARM session, whose caveat
+# must say SELF-CONSISTENCY rather than NOT COMPARED.
+pw_r20_warm="$TMP/r20-warm-caveat"; make_session "$pw_r20_warm" "$GOOD_FLIGHT"
+pw_r20_warm_out=$(run_report "$pw_r20_warm" "$TMP/corpus"); pw_r20_warm_rc=$?
+if [ "$pw_r20_warm_rc" -eq 0 ] \
+  && grep -q 'ARROW PAYLOAD VOLUME is a SELF-CONSISTENCY check — NOT a verification' <<<"$pw_r20_warm_out" \
+  && grep -q 'SELF-CONSISTENCY-CHECKED ONLY' <<<"$pw_r20_warm_out" \
+  && ! grep -q 'NOT COMPARED AT ALL' <<<"$pw_r20_warm_out"; then
+  pass "round20: a WARM session's caveat says SELF-CONSISTENCY (not NOT-COMPARED) beside its figure and its verdict — both states print, neither is silent"
+else
+  fail "round20: the compared branch must print its own caveat (rc=$pw_r20_warm_rc, out: $pw_r20_warm_out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # A block that silently never executes lowers the count and registers NO failure, while the gate
 # reads only the exit code. Derived from the real count and set just below it — a floor far behind
 # its count stops being able to see a skipped block, which is the very thing it exists to catch
 # (#3326 item 3).
-MIN_CHECKS=32
+# RE-DERIVED BY RUNNING THIS SUITE after round 20's twelve cases, never estimated from source
+# lines: MEASURED at 44 (was 32 before them), so the floor is set just below that. A line count
+# understates a floor because loops multiply — an earlier split on this branch understated one by 29
+# that way.
+MIN_CHECKS=42
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

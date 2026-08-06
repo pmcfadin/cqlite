@@ -1103,14 +1103,27 @@ fi
 ws0_mutant_dir="$TMP/mutant-verified-key"
 mkdir -p "$ws0_mutant_dir"
 cp -R "$REPO_ROOT/scripts/perf/." "$ws0_mutant_dir/"
-# The single mutation: republish under the WITHDRAWN verifying name.
-python3 - "$ws0_mutant_dir/ws0_flight_arm.py" <<'PY'
+# The mutation: ONE rename — the record key goes back to the WITHDRAWN verifying name — applied at
+# BOTH ENDS of that key, its PUBLISHER (`ws0_flight_arm.py`) and its CONSUMER
+# (`ws0_content_volume.py`, whose round-20 summary caveat reads the same key to state which reps
+# were compared against what). Renaming only the publisher would leave the mutant INTERNALLY
+# INCONSISTENT and it would exit 1 at the caveat reader — which is that reader's round-20 guard
+# working exactly as documented (a rename raises rather than printing a caveat `results.json` does
+# not support), and NOT the pre-fix publication this probe must reproduce. It is still one
+# conceptual mutation, not two: the same key spelled the old way wherever it appears, which is what
+# the pre-round-18 rig looked like.
+python3 - "$ws0_mutant_dir/ws0_flight_arm.py" "$ws0_mutant_dir/ws0_content_volume.py" <<'PY'
 import sys
-p = sys.argv[1]
-s = open(p).read()
-needle = '"content_volume_self_consistency": ('
-assert s.count(needle) == 1, f"expected exactly one mutation site, found {s.count(needle)}"
-open(p, "w").write(s.replace(needle, '"verified_content_volume": ('))
+# (file, needle) pairs — each asserted to occur EXACTLY ONCE, so a moved site fails the probe loudly
+# rather than leaving it measuring unmutated code.
+for path, needle in (
+    (sys.argv[1], '"content_volume_self_consistency": ('),
+    (sys.argv[2], 'rep.get("content_volume_self_consistency")'),
+):
+    s = open(path).read()
+    assert s.count(needle) == 1, f"{path}: expected exactly one mutation site, found {s.count(needle)}"
+    open(path, "w").write(s.replace(needle, needle.replace(
+        "content_volume_self_consistency", "verified_content_volume")))
 PY
 ws0_mutant_out=$(python3 "$ws0_mutant_dir/ws0_report.py" --dir "$d" --corpus "$TMP/corpus" 2>&1)
 ws0_mutant_rc=$?
