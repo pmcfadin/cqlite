@@ -526,16 +526,25 @@ def collect_flight(
                 # is this rep's, from this session's server" — and a swapped JSONL or a record from a
                 # peer lane's server satisfies the first while failing the second.
                 "verified_session_bound_inputs": session_bound,
-                # ...and the ARROW PAYLOAD VOLUME check (#3272 round 17), or the NAMED reason it
-                # could not run. Never absent and never silently `null`: a cold-only session has no
-                # untimed preflight to compare against (the prewarm is skipped so `cold` stays
-                # meaningful), and a reader must be able to see that this rep's payload was
-                # UNVERIFIED rather than infer it from a missing key.
-                "verified_content_volume": (
+                # ...and the ARROW PAYLOAD VOLUME comparison, or the NAMED reason it could not run.
+                # Never absent and never silently `null`: a cold-only session has no untimed
+                # preflight to compare against (the prewarm is skipped so `cold` stays meaningful),
+                # and a reader must be able to see that this rep's payload was UNCHECKED rather than
+                # infer it from a missing key.
+                #
+                # KEY RENAMED from `verified_content_volume` (#3272 round 18). The old name asserted
+                # a verification the comparison cannot deliver: its reference is the untimed
+                # preflight, which traverses the SAME ticket, server and response path as the timed
+                # requests, so a UNIFORM shortfall cancels and passes. The rename is deliberate
+                # rather than an added sibling — a consumer reading `verified_content_volume` must
+                # FAIL to find it and come read what replaced it, rather than keep reading a
+                # weakened claim under an unchanged key (the `forced_merge_path` rule, round 16).
+                "content_volume_self_consistency": (
                     content_volume
                     if content_volume is not None
                     else {
-                        "bytes_total_verified": CONTENT_VOLUME_NO_ORACLE,
+                        "bytes_total_verified_against_independent_oracle": False,
+                        "bytes_total_checked": CONTENT_VOLUME_NO_ORACLE,
                         "why": CONTENT_VOLUME_NO_ORACLE_NOTE,
                     }
                 ),

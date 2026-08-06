@@ -653,6 +653,29 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "a request the server was free to decline — in the limit the two arm rows could be the "
         "same code measured twice. Emitting the selected arm needs a change to production "
         "cqlite-flight; until then this is NOT verified, exactly as §3b.1's drift control is not.",
+        # THE ARROW PAYLOAD VOLUME IS NOT VERIFIED EITHER (#3272 round 18) — the same posture as the
+        # arm above and as §3b.1's drift control: the honest absence, stated where a reader of the
+        # numbers will see it, rather than a claim the rig cannot support. Round 17 added this check
+        # and named its output `verified_content_volume`; the reference it compares against is the
+        # untimed preflight, which goes through the SAME ticket, server process and response path as
+        # the timed requests, so a uniform omission cancels and the comparison passes on a short
+        # payload. The check is RETAINED (it still refuses a one-sided shortfall) and the CLAIM is
+        # withdrawn.
+        "  * the ARROW PAYLOAD VOLUME of each flight rep is compared against this session's "
+        "UNTIMED PREFLIGHT, per scan and exactly, and that comparison is a SELF-CONSISTENCY "
+        "check — NOT a verification (results.json .content_volume_self_consistency).",
+        "    The preflight traverses the SAME ticket, the SAME server process and the SAME "
+        "response path as the timed requests, so an omission that is a property of that path "
+        "(a dropped Arrow column, a narrowed buffer) is present in BOTH in equal measure, their "
+        "byte counts AGREE, and the check passes on a payload that is short — which would make "
+        "Arrow encoding look CHEAPER, the one quantity #3096 exists to measure. What it does "
+        "still refuse is a ONE-SIDED shortfall.",
+        "    The independent oracle would be the pinned ARROW_BUFFER_DIGEST "
+        "(tools/ws0-corpus-gen/src/measurement_corpus.rs); it is UNREACHABLE for this corpus, "
+        "because the #3096 digest oracle refuses a corpus whose taps observe zero null cells and "
+        "ws0-corpus-gen emits none. Closing this needs changes to production flight-loadgen (a "
+        "per-step digest) AND a null plan in the corpus generator; until then this is NOT "
+        "verified, exactly as the arm above is not.",
         "  * every figure is rows/s AND cycles/row; no CPU-share is reported "
         "(a share shift with unmoved rows/s is a FAIL, spec R1).",
         "  * the bare scan's cycles are SETUP-SUBTRACTED (a separately measured "
