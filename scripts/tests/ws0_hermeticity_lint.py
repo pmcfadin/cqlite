@@ -299,6 +299,16 @@ EXEMPTIONS: dict[str, str] = {
     "scripts/perf/ws0_ticket_input.py":
         "the Flight TICKET (request) identity module; prose reference only (its refusals tell an"
         " operator to re-run the session with the driver, which is what pins the request)",
+    # Round 13's F3 module, and the census reported it UNCOVERED the moment it was staged — the
+    # SEVENTH time this oracle has caught an addition, which is what it is for, and it caught this
+    # one on the same run as the shipped-lint check. Same class as its siblings: imported by the
+    # driver (through `python3 -c` in `lib-inputs.sh`) and by `ws0_session.py`/`ws0_report.py`, and
+    # its only `ws0-baseline.sh` mentions are prose — the finding's statement (the DRIVER's pin
+    # compared the corpus against nothing) and the refusal that tells an operator which flag runs a
+    # noncanonical corpus anyway.
+    "scripts/perf/ws0_canonical_corpus.py":
+        "the CANONICAL-corpus comparison module; prose reference only (it names the driver in its"
+        " statement of the finding and in the refusal that points an operator at --non-baseline)",
     # Round 10's M2 python half, staged alongside `lib-binaries.sh` above and reported UNCOVERED
     # with it. Same class as its four python siblings: imported by the driver (through
     # `python3 -c`) and its only driver mention is prose — the refusal that tells an operator to
