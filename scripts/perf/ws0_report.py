@@ -99,6 +99,14 @@ from ws0_canonical_record import verify_pinned_canonical_corpus  # noqa: E402
 # it verified and this asserts the manifest agrees with it.
 from ws0_pinning import verify_pinning_record  # noqa: E402
 from ws0_binaries import verify_binary_provenance  # noqa: E402
+# DID EVERY MEASUREMENT BOUNDARY THIS SESSION OWED ACTUALLY HAPPEN — #3272 round 22. Round 21 wrote
+# the boundary record and round 22 wired the check that produces it; NOTHING READ IT. Own module
+# because ws0_report.py was at the ~800-line source target; full argument there.
+from ws0_boundary_observations import (  # noqa: E402
+    boundary_observation_lines,
+    boundary_observation_note_lines,
+    verify_boundary_observations,
+)
 
 TEMPS_ALLOWED = ("warm", "cold")
 ARMS_ALLOWED = ("bypass", "merge")
@@ -311,7 +319,18 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # integer, so this is a read of an established quantity — the bare-scan collector's cell check
     # is a wiring of a pin the rig already had, not a new source of truth.
     corpus_cells_per_row = identity["cells_per_row"]
-    full_matrix =len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
+    # DID EVERY MEASUREMENT BOUNDARY HAPPEN (#3272 round 22)? The boundary verifier refuses a rep
+    # whose corpus changed and RECORDS what it re-hashed — and until now nothing read that record.
+    # Because each `.round` artifact is written BEFORE its boundary check, a refusal after the final
+    # arm leaves a COMPLETE, reportable artifact set; restore the corpus and invoke this reporter
+    # directly and every end-state check agrees (pin, sidecar and report-time re-hash all see the
+    # restored bytes), so the figure PUBLISHED. Publishing because no failure reached us is a pass
+    # derived from an ABSENCE — the failure was out-of-band by construction, it killed the driver —
+    # so the evidence is REQUIRED and required to be COMPLETE: exactly one observation per boundary,
+    # with missing, duplicate and unexpected each refusing. The expected set is DERIVED from the
+    # manifest read above, never enumerated.
+    boundary_observations = verify_boundary_observations(d, temps, arms, reps)
+    full_matrix = len(temps) == len(TEMPS_ALLOWED) and len(arms) == len(ARMS_ALLOWED)
 
     results = {
         "issue": "#3096 (rig hardened by #3272)",
@@ -351,6 +370,13 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # ...and that the corpus is the one the SESSION STARTED against, established from a pin
         # written before the first rep (#3272 round 4).
         "session_corpus_pin": session_pin,
+        # ...and that EVERY BOUNDARY BETWEEN THE ENDS was verified too (#3272 round 22), read back
+        # from the driver's own record. The three fields above are END-STATE checks and a mutation
+        # restored before reporting satisfies all of them; this is the only field in the document
+        # that can distinguish that state. It is reached only on a COMPLETE record, so the report
+        # cannot claim `sha256_verified: true` over a bypassed boundary — there is no results.json
+        # at all in that case (the single `Invalid` exit writes nothing).
+        "boundary_observation_completeness": boundary_observations,
         "canonical_corpus": canonical,
         # WHICH PROGRAMS the ratio is between (#3272 round 10, M2) — the revision, the dirty state,
         # the build mode and every measured binary's digest, observed by the driver before the first
@@ -442,6 +468,13 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             f" {session_pin['pinned_corpus_path']}) — the bytes match, so this is reported"
             " rather than fatal"
         ),
+        # ...and EVERY BOUNDARY BETWEEN THE ENDS (#3272 round 22), printed directly under the pin
+        # because it is the half the pin cannot cover: the pin and the report-time re-hash are both
+        # END-STATE observations, and a component mutated mid-run and restored before reporting
+        # satisfies both. Printed in the AFFIRMATIVE case too — the absence of a line cannot tell a
+        # reader "verified between every rep" from "this rig checks the ends only", which is how a
+        # record that was written and never read went unnoticed for a round.
+        *boundary_observation_lines(boundary_observations),
         f"corpus shape : {identity['rows']} rows / "
         f"{identity['partitions']} partitions / "
         f"{identity['bytes_per_row']:.2f} B/row",
@@ -735,6 +768,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "from corpus-identity.json: the recorded size is always re-stat'ed and the "
         "recorded sha256 re-derived from the Data.db unless --skip-corpus-digest was "
         "passed, in which case the line above says CORPUS DIGEST UNVERIFIED (#3272).",
+        *boundary_observation_note_lines(),
         "  * the corpus is CQLite-written + CQLite-read: a PERFORMANCE FIXTURE ONLY "
         "(#3042), never a correctness oracle.",
         "  * the #3058/#3100 absolutes (240,100 / 312,155 rows/s) were corpus- and "
