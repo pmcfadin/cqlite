@@ -62,23 +62,26 @@
 //!
 //! # Known limitations, with their DIRECTION stated
 //!
-//! Both of these can bias the measurement toward "the cache is worth building", so
-//! neither is left implicit.
+//! They fail in DIFFERENT directions, and the difference is the point of stating
+//! them: the first can bias the measurement toward "the cache is worth building", the
+//! second only ever REFUSES to measure. Neither is left implicit.
 //!
-//! 1. **The generation set is captured before the read, not shared with it.**
+//! 1. **UNSAFE direction — the generation set is captured before the read, not shared
+//!    with it.**
 //!    [`Self::snapshot_for_probe`] resolves the reader list immediately BEFORE the
 //!    read and holds the `Arc`s across it, so a generation the read used that
 //!    compaction removed mid-read is still priced. It does NOT eliminate the race:
 //!    the read takes its own snapshot a moment later, so a generation created in
 //!    between — a flush, or a compaction output — is priced by neither, and that
-//!    partition is UNDER-priced. Closing it properly means threading the read's own
+//!    partition is UNDER-priced — and under-pricing bytes lets more buckets fit the
+//!    budget, so it RAISES `H_max`. Closing it properly means threading the read's own
 //!    snapshot out of `SSTableManager`, which is not reachable from here today.
-//! 2. **A BIG generation whose `Index.db` is not resident cannot be priced at all**
-//!    (see the cost section above), so under #2412's lazy Summary-guided open such a
-//!    window is REFUSED rather than priced. That direction is safe — a refusal is
-//!    never a false "go" — but it does mean the promise that a verdict falls out of
-//!    the first real window holds for BTI and for BIG-with-resident-index, not
-//!    universally.
+//! 2. **REFUSAL, not a bias — a BIG generation whose `Index.db` is not resident
+//!    cannot be priced at all** (see the cost section above), so under #2412's lazy
+//!    Summary-guided open such a window is REFUSED rather than priced. A refusal is
+//!    never a false "go", so this cannot skew a verdict; what it costs is
+//!    availability — the promise that a verdict falls out of the first real window
+//!    holds for BTI and for BIG-with-resident-index, not universally.
 //!
 //! The WRITETIME/TTL projection point read (`scan_partition_with_cell_metadata`) is
 //! **no longer** a limitation: it is recorded like every other logical point read.

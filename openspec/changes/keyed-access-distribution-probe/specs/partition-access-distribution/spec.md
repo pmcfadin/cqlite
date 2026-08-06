@@ -246,7 +246,12 @@ so a reader of the verdict sees it.
 **Evidence:** `cqlite-core/tests/issue_2827_partition_access_bytes.rs` (max-not-sum semantics;
 weakest-provenance mixing; a gap-measured census window is priced rather than refused; and both a
 real BIG (`nb`) and a real BTI (`da`) committed fixture priced end-to-end from their measured gaps,
-per-case fail-closed on fixture resolution (#3220)).
+per-case fail-closed on fixture resolution (#3220)). The accuracy-limitation clause above is a
+DOCUMENTATION obligation, not a behaviour, so its evidence is by inspection:
+`docs/research/decoded-partition-cache-decision.md` § "Known accuracy limitations of the
+measurement" states it with its direction (it RAISES `H_max`), beside the tumbling-window bias
+that runs the other way; `design.md` D6 and
+`cqlite-core/src/storage/partition_access_weight.rs`'s module header carry the same statement.
 
 #### Scenario: Repeated accesses to one partition count its bytes once
 - **GIVEN** a partition of known on-disk extent accessed ten times in one window

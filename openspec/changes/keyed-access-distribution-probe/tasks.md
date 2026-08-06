@@ -199,6 +199,37 @@
       decision procedure (verdict lands with the first real keyed workload)"*, and no artifact in
       this change carries the "gate" framing (verified: the only occurrences are negations).
 
+> **Review round 6 (roborev) — close-race + limitation disclosure. Both fixed.**
+>
+> - **J1 — two concurrent recorders could close the same window boundary twice.** Both
+>   window triggers evaluated their predicate under the READ lock, dropped it, then called
+>   `close_window()`, which takes the WRITE lock and closes whatever it finds, re-checking
+>   nothing. The first closer emitted the real window and reset it (table, prefix width,
+>   `started`); the second then closed the FRESH one — emitting a spurious micro-window of
+>   near-all singletons, or silently shifting the next boundary. Fixed by `close_window_if`,
+>   which evaluates the predicate under the SAME write lock that performs the close, with
+>   `close_locked` as the single close implementation so a conditional close cannot diverge
+>   from an unconditional one. DISTINCT from E2, which was single-threaded seat-then-close
+>   ordering; this was check-then-act across two lock acquisitions. The regression test was
+>   verified DISCRIMINATING against the restored racy form (it fails reporting a window that
+>   banked 12 accesses against a bound of 500).
+> - **J2 — the snapshot residual was documented only in a Rust module header.** The artifact
+>   an operator reads the verdict from — `docs/research/decoded-partition-cache-decision.md`
+>   — did not mention it, so a verdict could be acted on without it. Now stated there, in
+>   `design.md` D6 and in the spec, each recording that it UNDER-prices bytes and therefore
+>   **RAISES `H_max`** — the UNSAFE direction, unlike the tumbling-window bias it sits beside.
+>
+> **Review round 7 — no defect in the code delta.** Remaining items were prose/traceability
+> (I1–I5: the WRITETIME limitation text asserting the opposite of the shipped code, surviving
+> "ceiling" language, the `Arc`-retention cost, two unqualified promise sites, a type-level
+> note on `Ceiling`) plus K1–K4 (a `CHANGELOG.md` breaking-API bullet, the limitations
+> lead-in, inspection evidence for J2's documentation `SHALL`, and this log entry).
+> roborev's proposed 4-argument compat wrapper for
+> `build_single_partition_merger_from_readers` was DECLINED and the reason recorded in the
+> CHANGELOG: the two callers pass opposite values by design, so any default silently
+> double-counts on one path or drops the access on the other — the exact hazard the explicit
+> argument removes.
+
 ## 9. Verification and delivery
 - [ ] `bash scripts/agent-gate.sh --lite` green on every fix round (summary-file redirect;
       `AGENT_GATE_SUMMARY_FILE=/tmp/gate-2827-lite.txt`), plus the diff-relevant targets:
