@@ -590,6 +590,81 @@ fn both_window_triggers_firing_on_one_access_lose_neither_window() {
 }
 
 #[test]
+fn concurrent_recorders_never_close_the_same_boundary_twice() {
+    // J1: both window triggers used to evaluate their predicate under the READ lock,
+    // drop it, then call `close_window()`, which takes the WRITE lock and closes
+    // whatever it finds — re-checking nothing. Two threads could both observe "over
+    // count" and both close: the first emitted the real window and reset it, the
+    // second closed the FRESH one, emitting a spurious micro-window of near-all
+    // singletons (or resetting `started` and shifting the next boundary).
+    //
+    // The invariant that catches it: with an access bound of N, every window closed
+    // BY THAT TRIGGER must have banked at least N accesses. A window emitted by a
+    // second racing closer has far fewer.
+    //
+    // Distinct from `a_concurrent_close_never_splits_an_access_from_its_count`, which
+    // covers an access being banked in one window while its table entry lands in the
+    // next; this covers two closers agreeing to close the same boundary.
+    use std::sync::Arc;
+
+    const BOUND: u64 = 500;
+    const THREADS: u64 = 8;
+    const PER_THREAD: u64 = 4_000;
+
+    let recorder = Arc::new(PartitionAccessRecorder::new(WindowConfig {
+        // Unreachable duration: the ONLY trigger under test is the access bound, so
+        // nothing here depends on elapsed time.
+        duration: Duration::from_secs(86_400),
+        max_accesses: BOUND,
+        ..WindowConfig::default()
+    }));
+
+    let workers: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let recorder = Arc::clone(&recorder);
+            std::thread::spawn(move || {
+                let mut closed = Vec::new();
+                for i in 0..PER_THREAD {
+                    let key = (t << 32) | i;
+                    closed.extend(recorder.record(
+                        SCOPE,
+                        &key.to_be_bytes(),
+                        AccessWeight::SuccessorGap(64),
+                    ));
+                }
+                closed
+            })
+        })
+        .collect();
+
+    let mut all: Vec<_> = Vec::new();
+    for w in workers {
+        all.extend(w.join().expect("worker thread"));
+    }
+    let tail = recorder.close_window();
+
+    assert!(
+        !all.is_empty(),
+        "{} accesses against a bound of {BOUND} must have closed some windows",
+        THREADS * PER_THREAD
+    );
+    for (i, w) in all.iter().enumerate() {
+        assert!(
+            w.recorded_accesses >= BOUND,
+            "window {i} closed by the access-bound trigger banked only {} accesses, \
+             below the bound of {BOUND} — a second closer raced the first and emitted \
+             a fresh, near-empty window",
+            w.recorded_accesses
+        );
+    }
+
+    // Conservation still holds: every access is banked in exactly one closed window.
+    let total: u64 = all.iter().map(|w| w.recorded_accesses).sum::<u64>()
+        + tail.map(|w| w.recorded_accesses).unwrap_or(0);
+    assert_eq!(total, THREADS * PER_THREAD);
+}
+
+#[test]
 fn a_concurrent_close_never_splits_an_access_from_its_count() {
     // C3: the access count and the table entry must be banked in the SAME window
     // generation. When they were not, a close landing between the two put the count

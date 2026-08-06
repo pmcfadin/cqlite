@@ -376,33 +376,51 @@ impl PartitionAccessRecorder {
     /// spanning the idle period. A window with no accesses at all still emits
     /// nothing — there is no measurement to report.
     fn close_if_expired(&self) -> Option<WindowSummary> {
-        let expired = {
-            let guard = self.read_state();
-            let state = guard.as_ref()?;
-            u64::try_from(state.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-                >= self.duration_nanos.load(Ordering::Relaxed)
-        };
-        if expired {
-            self.close_window()
-        } else {
-            None
-        }
+        let duration_nanos = self.duration_nanos.load(Ordering::Relaxed);
+        self.close_window_if(|state| {
+            u64::try_from(state.started.elapsed().as_nanos()).unwrap_or(u64::MAX) >= duration_nanos
+        })
     }
 
     /// Close the window if it has recorded its access bound. Evaluated AFTER the
     /// access is seated: the bound counts accesses RECORDED, so the one that reaches
     /// it belongs to the window it completed.
     fn close_if_over_count(&self) -> Option<WindowSummary> {
-        let over = {
-            let guard = self.read_state();
-            let state = guard.as_ref()?;
-            state.recorded.load(Ordering::Relaxed) >= self.max_accesses.load(Ordering::Relaxed)
-        };
-        if over {
-            self.close_window()
-        } else {
-            None
+        let max_accesses = self.max_accesses.load(Ordering::Relaxed);
+        self.close_window_if(|state| state.recorded.load(Ordering::Relaxed) >= max_accesses)
+    }
+
+    /// Close the window IFF `should_close` holds — evaluated under the SAME write
+    /// lock that performs the close.
+    ///
+    /// # Why the predicate cannot be checked separately
+    ///
+    /// Both triggers used to read their predicate under the READ lock, drop the
+    /// guard, then call [`Self::close_window`], which takes the write lock and closes
+    /// whatever window it finds — re-checking nothing. `record_partition_access` runs
+    /// on concurrent read tasks, so two threads could both observe "expired" or "over
+    /// count" and both close: the first emitted the real window and reset it
+    /// (`table.reset()`, `prefix_bits = 0`, `started = Instant::now()`), and the
+    /// second then closed the FRESH one. If accesses had landed in the gap that
+    /// emitted a spurious micro-window of near-all singletons; if none had, it still
+    /// reset `started` and shifted the next boundary.
+    ///
+    /// The bias direction is the safe one — splitting repeats across two windows
+    /// lowers `H_max` — but it corrupts the per-window series an operator prices from,
+    /// which is the whole point of the boundary semantics. Nothing in the approved
+    /// spec or design sanctions concurrent closes, so it is a gap, not a behaviour.
+    ///
+    /// Distinct from the seat-then-close ordering fixed earlier (E2): that was
+    /// single-threaded ordering, this is check-then-act across two lock acquisitions.
+    fn close_window_if(
+        &self,
+        should_close: impl FnOnce(&WindowState) -> bool,
+    ) -> Option<WindowSummary> {
+        let mut guard = self.write_state();
+        if !should_close(guard.as_ref()?) {
+            return None;
         }
+        Self::close_locked(&mut guard)
     }
 
     /// Close the current window DETERMINISTICALLY: bucket every live entry, reset
@@ -414,6 +432,12 @@ impl PartitionAccessRecorder {
     /// this change off the wall clock.
     pub fn close_window(&self) -> Option<WindowSummary> {
         let mut guard = self.write_state();
+        Self::close_locked(&mut guard)
+    }
+
+    /// The close itself, with the write lock already held. Single implementation so
+    /// a conditional close cannot diverge from an unconditional one.
+    fn close_locked(guard: &mut Option<WindowState>) -> Option<WindowSummary> {
         let state = guard.as_mut()?;
         let recorded = state.recorded.swap(0, Ordering::Relaxed);
         let dropped = state.dropped.swap(0, Ordering::Relaxed);

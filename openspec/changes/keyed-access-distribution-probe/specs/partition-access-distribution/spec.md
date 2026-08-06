@@ -235,6 +235,14 @@ A size SHALL NOT be estimated, interpolated by proportion, or defaulted to a nom
 SHALL refuse any window whose `unavailable` fraction is non-zero. That condition tests
 **incompleteness, not provenance**: a fully gap-measured window is complete and SHALL be priced.
 
+**Known accuracy limitation, recorded with its direction.** The generation set priced
+against is captured immediately BEFORE the read and held across it, so a generation removed
+by compaction mid-read is still priced. A generation CREATED between that capture and the
+read's own snapshot (a flush, or a compaction output) is priced by neither, and the
+partition is UNDER-priced — which lets more buckets fit the budget and therefore RAISES
+`H_max`, a bias in the UNSAFE direction. It SHALL be stated in the committed decision note
+so a reader of the verdict sees it.
+
 **Evidence:** `cqlite-core/tests/issue_2827_partition_access_bytes.rs` (max-not-sum semantics;
 weakest-provenance mixing; a gap-measured census window is priced rather than refused; and both a
 real BIG (`nb`) and a real BTI (`da`) committed fixture priced end-to-end from their measured gaps,

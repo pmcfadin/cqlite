@@ -332,6 +332,18 @@ provenance**: a fully gap-measured window is complete and is priced, which is th
 point of this amendment. A size is still never estimated, interpolated by
 proportion, or defaulted to a nominal value (no-heuristics, #28).
 
+**A pricing race, recorded with its direction (roborev round 6).** The probe captures the
+table's generation set immediately BEFORE the read and holds the `Arc`s across it, so a
+generation the read used that compaction removed mid-read is still priced. The read takes
+its OWN snapshot a moment later, so a generation created between the two — a flush, or a
+compaction output — is priced by NEITHER. That partition is under-priced, and under-pricing
+bytes lets more buckets fit the budget, so it **RAISES `H_max`**: unlike the tumbling-window
+bias this one runs in the UNSAFE direction. Narrow (bounded by the gap between two snapshot
+acquisitions on one read) but not zero; closing it needs the read's own snapshot threaded
+out of `SSTableManager`, which is not reachable from the boundary today. Holding the `Arc`s
+also defers reclamation of a compacted-away generation's fd/mmap/resident index until the
+last in-flight probed read completes.
+
 **Two honest costs, recorded rather than buried (rider R3).**
 
 1. **The last partition's extent is bounded by the data-section length, not by a

@@ -301,6 +301,22 @@ What DOES still limit priceability is listed under the refusal conditions above 
 unmeasurable extent, a sample rather than a census, a lossy window) and in the scope note
 at the top: a BIG generation whose `Index.db` is not resident cannot be priced.
 
+## Known accuracy limitations of the measurement
+
+Two, and they push in OPPOSITE directions, so neither cancels the other. Read them
+alongside the #3340 ranking caveat in Step 2 before acting on any value.
+
+- **The generation set is captured just before the read, not shared with it, so a
+  generation created in between is priced by neither** — a flush, or a compaction
+  output, landing in that window. The affected partition is UNDER-priced, and
+  under-pricing bytes lets more buckets fit the budget, so this **RAISES `H_max`**:
+  a bias in the UNSAFE direction. It is narrow (bounded by the gap between two
+  snapshot acquisitions on one read) but it is not zero, and closing it properly
+  requires threading the read's own snapshot out of the SSTable manager.
+- **The tumbling-window boundary splits a partition accessed on both sides into two
+  lower-repeat entries**, which UNDERSTATES concentration and so LOWERS `H_max` — the
+  safe direction, accepted for that reason. It shrinks as the window lengthens.
+
 ## What this note does NOT do
 
 - It does not report a field skew. See the scope statement at the top.
