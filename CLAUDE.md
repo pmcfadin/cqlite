@@ -585,6 +585,31 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   narrowing only postpones the next instance. Where the channel genuinely cannot be separated, anchor the
   control tokens somewhere the payload provably cannot reach (column zero of a diff), and say in code that
   this is what the anchor is for.
+  **THE FIFTH VARIATION, AND HOW THE CLASS WAS FINALLY CLOSED (#3312 job 29): AN AUTHORIZATION MUST BE THE
+  SOLE NONBLANK CONTENT OF ITS PR COMMENT.** Leading/trailing blank lines are fine; anything else — prose, a
+  code fence, a quote, an HTML tag, a second sentence — means the comment is **not** an authorization.
+  **FOUR RECOGNISERS WERE TRIED AND SUPERSEDED**, each correct about the case in front of it, and they are
+  named here so nobody reintroduces Markdown parsing thinking it was an oversight:
+  (1) accept the marker **anywhere** in the comment ⇒ a quoted example granted;
+  (2) require it to **be its own line** (column-zero anchor) ⇒ defeated indented, `>`-quoted, bulleted and
+  mid-sentence copies, but not fences;
+  (3) **skip fenced regions** ⇒ a fence preserves column zero, so a quoted example inside one granted;
+  (4) **track fence open/close state** ⇒ a ```` ```bash ```` line *inside* a fence is CONTENT, not a closing
+  delimiter, so the state desynchronised and a later marker granted — and HTML `<pre>`/`<code>` was never
+  covered at all.
+  Every one asked *"is this line DATA or CONTROL?"* of a grammar the **comment author controls**, which has
+  unbounded ways to say "this is data" — so the list of recognisers never closes. **That is this issue's own
+  umbrella lesson applied to itself: remove the shared channel, do not pick a rarer delimiter.** Parsing
+  Markdown to separate data from control *is* sharing a channel. The sole-content rule removes it and is
+  decidable **without parsing anything**: no quoting construct can be the only thing in a comment, because
+  every quoting construct requires additional content.
+  **Cost, and why it is arguably an improvement:** the authorizer posts a comment containing only the marker
+  and puts commentary in a **separate** comment — the token accounting already lives inside `reason=`, so
+  nothing is lost, and an authorization *should* be a clean unambiguous act rather than a sentence buried in
+  prose. **A comment with other content is ignored silently, not reported malformed:** someone documenting
+  the form (this repository's own threads do) never attempted an authorization, and `MALFORMED` would be a
+  false accusation reprinted on every later run. A **marker-only** comment with bad fields is still
+  `MALFORMED`. The `NONE` cause teaches both rules — sole content **and** top-level.
   **THE WAIVER'S THREAT MODEL, STATED WITH ITS LIMITS (#3312) — and the triage rule that goes with it.**
   Five consecutive review rounds landed in this one authorization path (marker anchoring, scope binding,
   author authorization, the parse channel, the enforcer path). Every fix was right, and the pattern predicts
