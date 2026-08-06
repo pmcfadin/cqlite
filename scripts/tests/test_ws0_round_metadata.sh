@@ -696,7 +696,7 @@ if recs["flight-bypass-warm-1"]["rows_total"] == recs["flight-bypass-warm-2"]["r
 print("pre-fix presence check SATISFIED by both swapped records; row counts differ")
 PY
 then
-  pass "F1 NON-VACUITY: the PRE-FIX rule (`round` is PRESENT) is SATISFIED by both swapped records, and their row counts differ — so the swap was accepted and did corrupt cycles/row"
+  pass "F1 NON-VACUITY: the PRE-FIX rule (\`round\` is PRESENT) is SATISFIED by both swapped records, and their row counts differ — so the swap was accepted and did corrupt cycles/row"
 else
   fail "F1: the swapped records must satisfy the pre-fix presence rule, else the refusal above proves nothing was closed"
 fi
