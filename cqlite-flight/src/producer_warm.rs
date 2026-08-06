@@ -25,7 +25,9 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use cqlite_core::query::AccessPath;
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::storage::write_engine::{build_single_partition_merger_from_readers, KWayMerger};
+use cqlite_core::storage::write_engine::{
+    build_single_partition_merger_from_readers_recording, KWayMerger, PointAccessRecording,
+};
 
 use crate::bypass::{bypass_reason, ForcedMergePath, ScanRowSource};
 use crate::cancel::CancelFlag;
@@ -79,11 +81,16 @@ impl MergeProducer {
                 on_merger_built();
                 return Ok(());
             }
-            let built = build_single_partition_merger_from_readers(
+            // Issue #2827: THIS is the Flight warm point path's logical point-read
+            // boundary — one access per key, recorded here because no enclosing
+            // layer records it (the cold path's builder records for itself, and the
+            // core executor records at its own storage boundary). Never per-SSTable.
+            let built = build_single_partition_merger_from_readers_recording(
                 readers,
                 &key_bytes,
                 &self.schema,
                 cancel.scan_cancel(),
+                PointAccessRecording::Record,
             )
             .map_err(|e| match e {
                 cqlite_core::Error::Cancelled => ProducerError::Cancelled,

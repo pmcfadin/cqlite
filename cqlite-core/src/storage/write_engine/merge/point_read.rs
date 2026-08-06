@@ -174,6 +174,30 @@ enum KeySizeNote {
     Unsized,
 }
 
+/// Whether a merger builder records the #2827 partition accesses itself.
+///
+/// The reader-based builder has TWO callers with opposite needs, so this cannot be a
+/// property of the function:
+///
+/// - the **core executor's** multi-generation targeted read reaches it through
+///   `generation_merge::seek_merge_generations_for_read`, and the executor already
+///   records the access at its own logical boundary
+///   (`StorageEngine::scan_partition_clustering`) — recording here too would count
+///   one logical read twice;
+/// - the **Flight warm point path** reaches it directly, and this IS its logical
+///   point-read boundary, so recording must happen here or not at all.
+///
+/// Counting stays once per logical partition read either way. Nothing is ever
+/// recorded at a per-SSTable probe site, which would multiply a repeat count by the
+/// number of generations holding the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointAccessRecording {
+    /// This call is the logical point-read boundary: record one access per key.
+    Record,
+    /// The caller records at its own logical boundary; do not record here.
+    CallerRecords,
+}
+
 /// A candidate probe plus, when the probe is enabled, one [`KeySizeNote`] per
 /// requested key in the requested order.
 struct ProbeOutcome {
@@ -375,6 +399,31 @@ pub fn build_single_partition_merger_from_readers(
     schema: &TableSchema,
     scan_cancel: ScanCancel,
 ) -> Result<Option<KWayMerger>> {
+    // Default: the caller records. The core executor's targeted read reaches this
+    // through `generation_merge` and records at its own logical boundary.
+    build_single_partition_merger_from_readers_recording(
+        readers,
+        keys,
+        schema,
+        scan_cancel,
+        PointAccessRecording::CallerRecords,
+    )
+}
+
+/// [`build_single_partition_merger_from_readers`] with an explicit
+/// [`PointAccessRecording`] mode (issue #2827).
+///
+/// Behaviour is otherwise IDENTICAL — same canonicalization, same per-candidate
+/// probe, same run ordering, same rows. `recording` governs only whether this call
+/// records one #2827 partition access per requested key, which the Flight warm point
+/// path needs because it *is* its own logical point-read boundary.
+pub fn build_single_partition_merger_from_readers_recording(
+    readers: Vec<Arc<SSTableReader>>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    scan_cancel: ScanCancel,
+    recording: PointAccessRecording,
+) -> Result<Option<KWayMerger>> {
     schema.validate_dropped_columns()?;
     if keys.is_empty() {
         return Ok(None);
@@ -393,19 +442,22 @@ pub fn build_single_partition_merger_from_readers(
     // snapshot is memoized so every channel in THIS merge shares ONE capacity.
     let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
+    let collect = recording == PointAccessRecording::Record && partition_access::enabled();
+    let mut weights: Vec<partition_access::AccessWeightBuilder> = if collect {
+        vec![partition_access::AccessWeightBuilder::new(); keys.len()]
+    } else {
+        Vec::new()
+    };
+
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
     for (run_index, reader) in readers.into_iter().enumerate() {
         // Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
         // probe, so a disconnected point read does no further per-SSTable work.
         scan_cancel.check()?;
 
-        // The reader-based builder deliberately records NO partition access and
-        // collects NO byte weight (issue #2827). Its caller is the core executor's
-        // multi-generation targeted read, which records the access itself at the
-        // logical point-read boundary; recording here as well would count that one
-        // logical read twice.
-        let ProbeOutcome { probe, notes: _ } =
+        let ProbeOutcome { probe, notes } =
             probe_reader(Arc::clone(&reader), keys, schema, scan_cancel.clone())?;
+        fold_size_notes(&mut weights, &notes);
         match probe {
             PathProbe::Empty => {
                 // Pruned / absent for every key. No run.
@@ -455,6 +507,13 @@ pub fn build_single_partition_merger_from_readers(
                 }));
             }
         }
+    }
+
+    // ONE access per LOGICAL partition read, when this call is the boundary
+    // (issue #2827). Recorded even when no candidate held the key — a miss is a real
+    // access, and omitting it would understate the singleton bucket.
+    if collect {
+        record_logical_accesses(keys, weights);
     }
 
     if runs.is_empty() {
