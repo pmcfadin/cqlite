@@ -364,6 +364,10 @@ except Invalid:
   # Stamped with the healthy default; a case whose SUBJECT is the record (absent, incomplete,
   # tampered) removes or rewrites it explicitly.
   ws0_pin_binaries "$session"
+  # ...and the MEASUREMENT-BOUNDARY record the driver appends per boundary (#3272 round 22), which
+  # the reporter now READS and requires to be COMPLETE. Derived from THIS call's configuration, so
+  # the record covers exactly the boundaries this manifest's reps/temps/arms owe.
+  ws0_pin_boundary_observations "$session" "$reps" "$temps" "$arms"
 }
 
 # ws0_pin_binaries <session-dir> [build-mode] — the driver's record of WHICH BINARIES it measured
@@ -474,6 +478,64 @@ rec = {
 }
 pinning_record_path(session).write_text(json.dumps(rec, indent=1) + "\n")
 ' "$perf_dir" "$session" "$server" "$client"
+}
+
+# ws0_pin_boundary_observations <session-dir> <reps> <temps> <arms> — the driver's MEASUREMENT-BOUNDARY
+# record (#3272 round 22), one observation per boundary the configuration owes.
+#
+# The reporter now READS this record and REQUIRES it to be COMPLETE, so every OTHER case would die
+# here on an absent record rather than reaching its own subject. Stamped with the healthy default; a
+# case whose SUBJECT is the record (absent, short, duplicated, carrying a foreign boundary) removes
+# or rewrites it EXPLICITLY.
+#
+# The label set is DERIVED by calling the SHIPPED `expected_boundary_labels`, never re-spelled here.
+# That is the same rule `ws0_pin_session_corpus` follows in calling the real pin writer: a fixture
+# that composed the labels itself would keep passing after the derivation changed, and a divergence
+# would present as EVERY BOUNDARY MISSING — a refusal blaming the operator for a fixture defect.
+#
+# TRUNCATES rather than appends, because `run_report_args` re-pins a session dir in place: appending
+# would produce the DUPLICATE the reporter refuses, for a reason unrelated to any case's subject.
+ws0_pin_boundary_observations() {
+  local session="$1" reps="${2-1}" temps="${3-warm}" arms="${4-bypass}" perf_dir
+  # DOES NOT CREATE the session dir — the load-bearing rule `ws0_pin_binaries` and
+  # `ws0_pin_verification` both record, for the third time: a `mkdir(parents=True)` here would bring
+  # a deliberately-NONEXISTENT `--dir` into existence and turn the reporter's "not an existing
+  # directory" refusal into a boundary-record one.
+  [[ -d "$session" ]] || return 0
+  perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
+  python3 -c '
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_boundary_observations import expected_boundary_labels
+from ws0_corpus_bytes import SESSION_CORPUS_PIN, boundary_observations_path, session_pin_path
+session = pathlib.Path(sys.argv[2])
+reps, temps, arms = int(sys.argv[3]), sys.argv[4].split(), sys.argv[5].split()
+# The component COUNT comes from the pin when there is one, so the observation describes the same
+# pinned set a real boundary check would have re-hashed. A session dir with no pin (a case whose
+# subject is the absent pin) takes a floor that keeps the record well-formed — that case is refused
+# on the PIN, which it must reach rather than dying here.
+pinned = 5
+p = session_pin_path(session)
+if p.exists():
+    try:
+        comps = json.loads(p.read_text()).get("components")
+        if isinstance(comps, dict) and comps:
+            pinned = len(comps)
+    except ValueError:
+        pass
+lines = []
+for label in expected_boundary_labels(temps, arms, reps):
+    lines.append(json.dumps({
+        "boundary": label,
+        "corpus": str(session),
+        "components_verified": pinned,
+        "components_pinned": pinned,
+        "verified_against": SESSION_CORPUS_PIN,
+        "note": f"all {pinned} pinned component(s) were re-stat-ed and re-hashed FROM DISK at this"
+                " boundary and compared against the pin (synthetic fixture)",
+    }))
+boundary_observations_path(session).write_text("\n".join(lines) + "\n")
+' "$perf_dir" "$session" "$reps" "$temps" "$arms"
 }
 
 # ws0_alternating_position <rep> <which> — the position an arm holds in `<rep>`, matching
