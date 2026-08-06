@@ -826,17 +826,254 @@ else
 fi
 
 # ==========================================================================
+# #3272 ROUND 21 — AN UNVERIFIABLE COLD REP STILL GOT A COLD FIGURE AND A VERDICT
+# ==========================================================================
+# THE FINDING, and it belongs in THIS suite for the reason round 19's does: its subject is whether a
+# PREWARM'S OWN VERDICT is consulted before a figure that DEPENDS on it is published.
+#
+# `ws0_validate.classify_prewarm` ended in a bare `return "degraded"`, so EVERY unrecognised status
+# took that branch — including `unrecorded`, which is what `ws0_collect.read_prewarm` returns for a
+# `<tag>.prewarm.status` file THAT IS NOT THERE AT ALL. So a COLD rep with no recorded status was
+# merely CAPTIONED (a "PREWARM DEGRADED" line), and the reporter went on to publish its rows/s, its
+# bare/flight ratio and its `[PASS]`/`[BELOW TARGET]` verdict — although nothing in the session
+# established the rep had not been prewarmed, i.e. that it was cold at all.
+#
+# WHY REFUSAL AND NOT A CAPTION, when the reviewer offered both and rounds 13/16/18/20 all took the
+# caption route. Those were properties with NO available oracle (the pinned ARROW_BUFFER_DIGEST is
+# unreachable for any ws0-corpus-gen corpus), where refusing rejects EVERY session. This one has an
+# oracle already on disk and always written: `lib-measure.sh` initialises
+# `prewarm_status="skipped-cold-arm"`, enters a classifier ONLY under `[[ "$temp" == "warm" ]]`, and
+# writes the file UNCONDITIONALLY — so `skipped-cold-arm` is the ONLY value a legitimate cold rep can
+# carry, and there is no cold failure mode a label could honestly describe. Two directions,
+# asymmetric, which is the whole argument:
+#
+#   * a degraded WARM rep reads SLOWER (its pages were not faulted in), so the honest label cannot
+#     manufacture a win and the rep is worth keeping — `warm` still degrades.
+#   * an unverified COLD rep is UNBOUNDED: if it was secretly prewarmed it reads FASTER, so the
+#     unverified label flatters the very figure it is attached to.
+#
+# And the shape is `!= BAD` rather than `== OK` — the permissive branch every unenumerated value
+# falls into — which is this issue's most-repeated defect and the reason `required-present` was
+# deleted in round 14.
+
+# A cold-only session, healthy in every other respect, whose recorded prewarm status is then made
+# UNVERIFIABLE. `mode=absent` DELETES both status files, which is the `unrecorded` case; `mode=bogus`
+# writes a value no classifier produces. Both must be refused, and for the SAME reason.
+pw_r21_session() { # pw_r21_session <dir> <absent|bogus>
+  local d="$1" mode="$2"
+  mkdir -p "$d"
+  make_scan_rep "$d" cold 1 skipped-cold-arm
+  make_flight_rep "$d" cold 1 skipped-cold-arm "$GOOD_FLIGHT"
+  ws0_pin_session_corpus "$d" "$TMP/corpus" 1 cold bypass 1
+  if [ "$mode" = absent ]; then
+    rm -f "$d/scan-cold-1.prewarm.status" "$d/flight-bypass-cold-1.prewarm.status"
+  else
+    printf 'ok-ish\n' > "$d/scan-cold-1.prewarm.status"
+    printf 'ok-ish\n' > "$d/flight-bypass-cold-1.prewarm.status"
+  fi
+}
+
+# --- NON-VACUITY, MEASURED AS A FLIP ON IDENTICAL INPUT ----------------------
+# The pre-fix code is reconstructed by MUTATING ONE SITE of a COPY of the shipped module — replacing
+# the new refusal's affirmative table lookup with the bare permissive branch it replaced — and the
+# SAME session dirs are put through it. It must PUBLISH the cold figures and a verdict. The premise
+# is ASSERTED (the needle must occur exactly once), so this case reds rather than silently measuring
+# unmutated code if the site moves.
+pw_r21_pre="$TMP/r21-prefix-tree"; rm -rf "$pw_r21_pre"; mkdir -p "$pw_r21_pre"
+cp -R "$REPO_ROOT/scripts/perf/." "$pw_r21_pre/"
+rm -rf "$pw_r21_pre/__pycache__"
+if python3 - "$pw_r21_pre/ws0_validate.py" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+needle = "    if PREWARM_DEGRADATION_ADMITTED.get(temp) is not True:\n"
+if s.count(needle) != 1:
+    raise SystemExit(f"could not locate the refusal to revert ({needle.strip()!r}); this "
+                     "non-vacuity probe would be measuring UNMODIFIED code")
+# The pre-fix shape exactly: every unrecognised status, at every temperature, is a degradation.
+head, _, tail = s.partition(needle)
+p.write_text(head + '    if False:\n' + tail)
+print("mutated the probe copy: an unrecognised status degrades at ANY temperature, as before")
+PY
+then
+  pass "round21 NON-VACUITY: the mutation (the affirmative per-temperature refusal reverted to the bare permissive branch) was really applied to the probe copy"
+else
+  fail "round21: the pre-fix mutation could not be applied, so the probes below would measure nothing"
+fi
+
+for pw_r21_mode in absent bogus; do
+  pw_r21_d="$TMP/r21-cold-$pw_r21_mode"
+  pw_r21_session "$pw_r21_d" "$pw_r21_mode"
+  # THE PRE-FIX BEHAVIOUR, MEASURED: accepted, cold figures published, verdict published.
+  pw_r21_pre_out=$(python3 "$pw_r21_pre/ws0_report.py" --dir "$pw_r21_d" --corpus "$TMP/corpus" 2>&1)
+  pw_r21_pre_rc=$?
+  if [ "$pw_r21_pre_rc" -eq 0 ] \
+    && grep -q '^\[COLD\]' <<<"$pw_r21_pre_out" \
+    && grep -q 'ratio bare/flight = 2.00x' <<<"$pw_r21_pre_out" \
+    && grep -q '\[BELOW TARGET\]' <<<"$pw_r21_pre_out" \
+    && grep -q 'PREWARM DEGRADED' <<<"$pw_r21_pre_out"; then
+    pass "round21 NON-VACUITY (MEASURED, $pw_r21_mode): the PRE-FIX code ACCEPTS a COLD session whose prewarm status is unverifiable and PUBLISHES its cold figures, a 2.00x ratio and a [BELOW TARGET] verdict — captioned 'PREWARM DEGRADED' and reported anyway"
+  else
+    fail "round21 non-vacuity ($pw_r21_mode): the pre-fix reporter must publish the cold figure and verdict, else the refusal closed nothing (rc=$pw_r21_pre_rc, out: $(grep -nE '\[COLD\]|ratio|PREWARM' <<<"$pw_r21_pre_out" | head -5))"
+  fi
+  # The pre-fix run above also wrote a `results.json` into this dir, carrying the unverified cold
+  # figure into the machine-readable record — which is the finding's other half, asserted rather than
+  # assumed. It is then REMOVED, so the shipped run's "wrote no results.json" assert below measures
+  # the shipped run and not the mutant's leftover. (Measured during this round: without the removal
+  # that assert failed against a file the probe itself had created — a fixture artifact reading as a
+  # defect, which is the mirror of a defect reading as a pass.)
+  if [ -e "$pw_r21_d/results.json" ]; then
+    pass "round21 NON-VACUITY (MEASURED, $pw_r21_mode): the pre-fix run also wrote the unverified cold figure into results.json, so a downstream consumer read it too"
+  else
+    fail "round21 non-vacuity ($pw_r21_mode): the pre-fix run must have written a results.json (it exited 0), else this probe is not measuring a published report"
+  fi
+  rm -f "$pw_r21_d/results.json"
+  # ...and the SHIPPED code REFUSES the SAME input, writing NO results.json — so no downstream
+  # consumer can read the figure out of the record either.
+  pw_r21_out=$(run_report "$pw_r21_d" "$TMP/corpus"); pw_r21_rc=$?
+  if [ "$pw_r21_rc" -ne 0 ] \
+    && [ ! -e "$pw_r21_d/results.json" ] \
+    && ! grep -q 'ratio bare/flight' <<<"$pw_r21_out"; then
+    pass "OBSERVED (round21, $pw_r21_mode): the shipped reporter REFUSES the same session, publishes no ratio and writes no results.json"
+  else
+    fail "round21 ($pw_r21_mode): an unverifiable cold rep must be refused (rc=$pw_r21_rc, results.json=$([ -e "$pw_r21_d/results.json" ] && echo present || echo absent), out: $pw_r21_out)"
+  fi
+  # ...and the refusal must be ACTIONABLE: what was unverifiable, why a COLD rep has no honest
+  # degradation, the FLATTERING direction that makes it a refusal rather than a caption, and the
+  # remedy. A message that says only "unexpected status" is one an operator waives.
+  pw_r21_missing=""
+  for frag in \
+    "NO PREWARM LEG to fail" \
+    "unconditionally for a cold rep" \
+    "only a WARM rep runs a prewarm at all" \
+    "NOTHING therefore establishes that this rep was not prewarmed" \
+    "UNVERIFIED" \
+    "UNBOUNDED IN DIRECTION" \
+    "reported cold reads FASTER" \
+    "Re-run the rep"; do
+    grep -qF "$frag" <<<"$pw_r21_out" || pw_r21_missing="$pw_r21_missing [$frag]"
+  done
+  if [ -z "$pw_r21_missing" ]; then
+    pass "round21 ($pw_r21_mode): the refusal names what was unverifiable, that a cold rep has no prewarm leg to fail, the FLATTERING direction (a secretly-warm rep reads faster), and the remedy"
+  else
+    fail "round21 ($pw_r21_mode): the refusal is missing required element(s):$pw_r21_missing"
+  fi
+done
+
+# --- THE `unrecorded` SENTINEL IS THE ONE THAT MATTERED, NAMED EXPLICITLY -----
+# Asserted at the SEAM rather than only end-to-end: `ws0_collect.read_prewarm` returns the literal
+# `unrecorded` for an absent file, and that exact string must be what `classify_prewarm` refuses for a
+# cold rep. A test that only deleted files would still pass if the sentinel were renamed on one side.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import pathlib, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+from ws0_collect import read_prewarm
+from ws0_validate import Invalid, classify_prewarm
+with tempfile.TemporaryDirectory() as t:
+    sentinel = read_prewarm(pathlib.Path(t), "scan-cold-1")   # no status file at all
+assert sentinel == "unrecorded", sentinel
+# WARM keeps its honest degradation...
+assert classify_prewarm("warm", sentinel) == "degraded", sentinel
+# ...and COLD refuses the very same value.
+try:
+    classify_prewarm("cold", sentinel)
+except Invalid:
+    pass
+else:
+    raise AssertionError(f"a COLD rep must refuse {sentinel!r}, not classify it")
+PY
+then
+  pass "OBSERVED (round21): the absent-file sentinel read_prewarm really returns is 'unrecorded', it still DEGRADES on a warm rep (that direction reads slower, so it is kept and flagged), and the SAME value is REFUSED on a cold one"
+else
+  fail "round21: the absent-status sentinel must degrade warm and refuse cold — the two directions are not symmetric"
+fi
+
+# --- AND THE ADMISSION TABLE IS AFFIRMATIVE, NOT A DEFAULTING LOOKUP ----------
+# The fix's own shape is the subject: a temperature MISSING from `PREWARM_DEGRADATION_ADMITTED` must
+# REFUSE, because an unanswered question is not a permissive answer. Driven by DELETING the `warm`
+# entry from a copy, which makes warm behave as the unenumerated third temperature would.
+pw_r21_tbl="$TMP/r21-table-shape"; rm -rf "$pw_r21_tbl"; mkdir -p "$pw_r21_tbl"
+cp -R "$REPO_ROOT/scripts/perf/." "$pw_r21_tbl/"
+rm -rf "$pw_r21_tbl/__pycache__"
+python3 - "$pw_r21_tbl/ws0_validate.py" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+# Both the entry and the key-set assertion go, so the module still imports; what remains is a
+# temperature the table does not answer for.
+for needle in ('    "warm": True,\n',
+               "assert PREWARM_REQUIRED.keys() == PREWARM_DEGRADATION_ADMITTED.keys()\n"):
+    assert s.count(needle) == 1, f"expected one occurrence of {needle.strip()!r}, found {s.count(needle)}"
+    s = s.replace(needle, "")
+p.write_text(s)
+PY
+if python3 - "$pw_r21_tbl" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid, classify_prewarm
+try:
+    classify_prewarm("warm", "unrecorded")
+except Invalid:
+    pass
+else:
+    raise AssertionError("a temperature absent from the admission table must REFUSE, not degrade")
+PY
+then
+  pass "round21: the admission table is read AFFIRMATIVELY — a temperature it carries no entry for REFUSES rather than inheriting the permissive branch, so a third temperature cannot be added into a silent pass"
+else
+  fail "round21: an unenumerated temperature must not reach the degraded branch (the '!= BAD' shape this round exists to remove)"
+fi
+
+# ...and the two temperature tables cannot drift apart unnoticed, asserted at IMPORT rather than left
+# to be discovered as a refusal on somebody's real session.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import PREWARM_DEGRADATION_ADMITTED, PREWARM_REQUIRED
+assert PREWARM_REQUIRED.keys() == PREWARM_DEGRADATION_ADMITTED.keys(), (
+    PREWARM_REQUIRED, PREWARM_DEGRADATION_ADMITTED)
+assert PREWARM_DEGRADATION_ADMITTED["cold"] is False, PREWARM_DEGRADATION_ADMITTED
+assert PREWARM_DEGRADATION_ADMITTED["warm"] is True, PREWARM_DEGRADATION_ADMITTED
+PY
+then
+  pass "round21: both temperature tables are keyed on ONE closed set (asserted at import), and only WARM admits a degradation"
+else
+  fail "round21: PREWARM_REQUIRED and PREWARM_DEGRADATION_ADMITTED must share a key set, with cold=False and warm=True"
+fi
+
+# --- AND A HEALTHY COLD SESSION IS STILL ACCEPTED ----------------------------
+# The accept direction, so the guard is not unconditional: the same session with its recorded
+# `skipped-cold-arm` intact publishes its figure with no prewarm complaint. Round 20's case asserts
+# the caveat text on this session; this one asserts the PREWARM verdict specifically.
+pw_r21_ok="$TMP/r21-cold-healthy"; mkdir -p "$pw_r21_ok"
+make_scan_rep "$pw_r21_ok" cold 1 skipped-cold-arm
+make_flight_rep "$pw_r21_ok" cold 1 skipped-cold-arm "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$pw_r21_ok" "$TMP/corpus" 1 cold bypass 1
+pw_r21_ok_out=$(run_report "$pw_r21_ok" "$TMP/corpus"); pw_r21_ok_rc=$?
+if [ "$pw_r21_ok_rc" -eq 0 ] \
+  && grep -q 'ratio bare/flight' <<<"$pw_r21_ok_out" \
+  && ! grep -q 'PREWARM DEGRADED' <<<"$pw_r21_ok_out" \
+  && python3 -c "
+import json, sys
+ms = json.load(open('$pw_r21_ok/results.json'))['measurements']
+assert ms and all(m['prewarm_all_ok'] is True for m in ms), ms
+"; then
+  pass "AFFIRMATIVE (round21): a COLD session carrying its recorded 'skipped-cold-arm' is still accepted, publishes its ratio, and records prewarm_all_ok=true — the refusal does not fire on a legitimate cold run"
+else
+  fail "round21: a healthy cold session must remain accepted (rc=$pw_r21_ok_rc, out: $pw_r21_ok_out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # A block that silently never executes lowers the count and registers NO failure, while the gate
 # reads only the exit code. Derived from the real count and set just below it — a floor far behind
 # its count stops being able to see a skipped block, which is the very thing it exists to catch
 # (#3326 item 3).
-# RE-DERIVED BY RUNNING THIS SUITE after round 20's twelve cases, never estimated from source
-# lines: MEASURED at 44 (was 32 before them), so the floor is set just below that. A line count
+# RE-DERIVED BY RUNNING THIS SUITE after round 21's cases, never estimated from source lines:
+# MEASURED at 57 (44 after round 20, 32 before it), so the floor is set just below that. A line count
 # understates a floor because loops multiply — an earlier split on this branch understated one by 29
-# that way.
-MIN_CHECKS=42
+# that way, and round 21's own block adds THIRTEEN checks from nine written cases for exactly that
+# reason (its four-check `absent`/`bogus` body runs twice).
+MIN_CHECKS=55
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
