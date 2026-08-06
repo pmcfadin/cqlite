@@ -37,7 +37,8 @@
 #
 # TEST-ONLY ENV SEAMS — INERT UNLESS CQLITE_PERF_TEST_MODE=1 (issue #3249 review).
 # The PRODUCTION paths below are HARDCODED LITERALS (/etc/sysctl.d, /proc/sys/kernel) because
-# bootstrap pipes the drop-in through `sudo tee <path>`: were that path env-derived, one stray
+# bootstrap installs the drop-in through the STAGED installer below (mktemp + atomic rename, no
+# `tee <path>`): were that path env-derived, one stray
 # export (say CQLITE_PERF_SYSCTL_DIR=/etc/sudoers.d) would make ROOT write an
 # attacker/accident-chosen file while the real drop-in was never installed — and an unparsable
 # sudoers entry can wedge `sudo` outright. Likewise an env-chosen /proc stand-in would let a
@@ -547,9 +548,21 @@ perf_capability_dropin_install() {
   local __pin_d __pin_p
   __pin_d=$(perf_capability_sysctl_dir) || return 1
   __pin_p="$__pin_d/$PERF_CAPABILITY_DROPIN_BASENAME"
+  # CONTENT IS GENERATED AND CHECKED **BEFORE** ANY PRIVILEGED COMMAND RUNS (roborev round 9,
+  # Medium). This used to pipe the generator straight into the privileged shell, so the pipeline's
+  # status was the LAST command's and a failed generator was invisible unless the CALLER happened to
+  # have `pipefail` set — a correctness property no library function should delegate to its caller.
+  # Worse, the privileged write would already have started on empty or partial content. Generating
+  # first means a generator failure returns before privilege is acquired at all. Same sentinel trick
+  # as dropin_current, for the same reason: `$( )` strips trailing newlines, and the drop-in's final
+  # newline is part of the canonical bytes the idempotency compare comes back for.
+  local __pin_c
+  __pin_c=$(perf_capability_dropin_content; __pdc_rc=$?; printf 'X'; exit "$__pdc_rc") || return 1
+  __pin_c=${__pin_c%X}
+  [ -n "$__pin_c" ] || { printf 'perf-capability: REFUSING: the drop-in content generator produced nothing.\n' >&2; return 1; }
   # ONE privileged invocation for the WHOLE staged install. The content arrives on this shell's
   # stdin; `mktemp`, the write, `chmod` and the rename all run inside it.
-  perf_capability_dropin_content | "$@" sh -c '
+  printf '%s' "$__pin_c" | "$@" sh -c '
     set -u
     d=$1; p=$2; b=$3
     # THE PRECONDITION (roborev round 3): nobody less privileged than this shell may be able to
@@ -651,7 +664,9 @@ perf_capability_dropin_install() {
 # perf_capability_dropin_content: the EXACT bytes of the managed drop-in. It is a WHOLE
 # managed file (not a delimited block inside a foreign one), so idempotency is a plain
 # byte-compare of the entire file — simpler and safer than editing someone else's config.
-# Callers may pipe this straight into `sudo tee`, which is also the remedy line bootstrap
+# Callers wanting to INSTALL must use perf_capability_dropin_install (staged, containment-checked,
+# atomic rename) — never `sudo tee <path>`, which opens the destination by name and follows a
+# symlink planted there. This function only PRINTS the canonical bytes, which is also what bootstrap
 # prints, so a hand-applied fix is byte-identical and the next bootstrap run is a no-op.
 perf_capability_dropin_content() {
   cat <<'EOF'
@@ -705,7 +720,14 @@ perf_capability_dropin_current() {
   local path want got=''
   path=$(perf_capability_dropin_path) || return 1
   [ -f "$path" ] && [ -r "$path" ] || return 1
-  want=$(perf_capability_dropin_content; printf 'X')
+  # THE SENTINEL MUST NOT SWALLOW THE GENERATOR'S STATUS (roborev round 9, Medium). `printf X`
+  # exists so a trailing newline survives command substitution, but it also RAN LAST, so the
+  # substitution reported ITS status and a failed content generator looked like success: `want`
+  # became bare "X", and against an empty file `${got}X` is also "X" — equal, so a broken
+  # generator reported the drop-in ALREADY CURRENT. A positive verdict from an unmeasured state,
+  # which is the exact shape this repo has a standing rule against. The rc is now captured
+  # BEFORE the sentinel and re-raised as the subshell's exit status, so both properties hold.
+  want=$(perf_capability_dropin_content; __pdc_rc=$?; printf 'X'; exit "$__pdc_rc") || return 1
   if IFS= read -r -d '' got <"$path"; then
     return 1
   fi
@@ -1166,13 +1188,6 @@ perf_capability_main() {
       [ "$unpriv" = 1 ] || rc=1
       return $rc ;;
     --drop-in)      perf_capability_dropin_content ;;
-    # The INSTALL entry point exists so the remedy a human is told to run is the SAME validated
-    # path bootstrap itself uses (roborev round 5, High): a printed `--drop-in | sudo tee <path>`
-    # (or `> <path>` from a root shell) re-opens the destination BY NAME and follows a symlink
-    # planted there, reintroducing precisely the write this issue hardened. Hardening the installer
-    # while printing an unsafe command is worse than not hardening it — it reads as safe.
-    # rc PROPAGATED, never masked by the trailing newline: an unsandboxed test mode can
-    # resolve no path at all (R4-3), and that is a failure, not an empty success.
     --drop-in-path) perf_capability_dropin_path || return 1; printf '\n' ;;
     -h|--help|'')   perf_capability_usage ;;
     *)              printf 'perf-capability: unknown arg: %s\n' "$1" >&2; perf_capability_usage >&2; return 2 ;;
