@@ -761,6 +761,111 @@ else
 fi
 
 # ==========================================================================
+# ROUND 15, B — THE VERDICT WAS COERCED, SO THE STRING "false" WAS TRUE
+# ==========================================================================
+# `verify_pinned_canonical_corpus` re-derived its verdicts through `bool()`, which is TRUTHINESS —
+# so a record carrying `"is_baseline": "false"` was ACCEPTED, and re-emitted with `is_baseline`
+# still the STRING `'false'`, which the reporter reads as TRUE in `if canonical["is_baseline"]` and
+# prints the BASELINE title over. This is the `!= BAD` permissive-coercion shape the whole issue is
+# about, and `divergences`'s own bool comparison already did it correctly (isinstance, then
+# identity) two hundred lines up in the same file.
+#
+# And the divergence LIST's shape was checked while its CONTENTS were not, so a non-string element
+# passed validation and raised an UNCAUGHT TypeError in the reporter's `"; ".join(...)`.
+f5b_out=$(WS0_F5_PERF="$f3c_perf" python3 - <<'PY' 2>&1
+import copy, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F5_PERF"])
+from ws0_canonical_corpus import (CANONICAL_CENSUS, MODE_BASELINE, NON_BASELINE_LABEL,
+                                  PIN_CANONICAL_FIELD, RUST_PIN_REL,
+                                  verify_pinned_canonical_corpus)
+from ws0_validate import Invalid
+
+p = pathlib.Path("/synthetic/session-corpus-pin.json")
+GOOD = {"mode": MODE_BASELINE, "is_canonical": True, "is_baseline": True,
+        "label": "the canonical measurement corpus, measured as a WS0 BASELINE",
+        "divergences": [], "compared_fields": sorted(CANONICAL_CENSUS),
+        "canonical_pin_source": RUST_PIN_REL,
+        "canonical_component_source": "docs/reports/ws0-3096-artifacts/corpus-identity.json",
+        "canonical_components": 8}
+
+def prefix_verdict(rec):
+    """THE PRE-FIX VERDICT RE-DERIVATION, VERBATIM: bool() on both sides."""
+    diffs = rec["divergences"]
+    ok_canon = bool(rec["is_canonical"]) == (not diffs)
+    ok_base = bool(rec["is_baseline"]) == (not diffs and rec["mode"] == MODE_BASELINE)
+    return ok_canon and ok_base
+
+def shipped(rec):
+    try:
+        return "ACCEPTED", verify_pinned_canonical_corpus(p, {PIN_CANONICAL_FIELD: rec})
+    except Invalid as exc:
+        return "REFUSED", exc
+
+# (1) THE FINDING: the STRING "false" as a verdict.
+for verdict in ("is_baseline", "is_canonical"):
+    r = copy.deepcopy(GOOD)
+    r[verdict] = "false"
+    print(verdict, 'STRFALSE PREFIX', "ACCEPTED_AS_TRUE" if prefix_verdict(r) else "refused")
+    state, res = shipped(r)
+    print(verdict, "STRFALSE SHIPPED", state, verdict in str(res))
+# (2) A NON-STRING divergence: accepted by the pre-fix validation, then an UNCAUGHT TypeError where
+#     the reporter joins them. Both halves driven.
+r = copy.deepcopy(GOOD)
+r.update({"is_canonical": False, "is_baseline": False,
+          "label": NON_BASELINE_LABEL + " (1 field(s) diverge)",
+          "divergences": [{"rows": "wrong"}]})
+print("NONSTR PREFIX_VERDICT_OK", prefix_verdict(r))
+try:
+    "; ".join(r["divergences"])
+    print("NONSTR JOIN_OK")
+except TypeError as exc:
+    print("NONSTR PREFIX_UNCAUGHT_TYPEERROR", exc)
+state, res = shipped(r)
+print("NONSTR SHIPPED", state, "divergences[0]" in str(res))
+# (3) An EMPTY divergence string: it counts toward len(diffs) so the verdict re-derivation is
+#     satisfied, while printing NO reason — a reader is told N fields diverged and shown fewer.
+r["divergences"] = [""]
+print("EMPTY PREFIX_VERDICT_OK", prefix_verdict(r))
+state, res = shipped(r)
+print("EMPTY SHIPPED", state)
+# (4) THE ACCEPT DIRECTION, both modes — a guard that refused everything would satisfy the above.
+state, res = shipped(copy.deepcopy(GOOD))
+print("ACCEPT_BASELINE", state, res["is_baseline"] is True if state == "ACCEPTED" else res)
+r = copy.deepcopy(GOOD)
+r.update({"is_canonical": False, "is_baseline": False,
+          "label": NON_BASELINE_LABEL + " (1 field(s) diverge)",
+          "divergences": ["rows: 1000 (canonical 4000000)"]})
+state, res = shipped(r)
+print("ACCEPT_NONBASELINE", state, res["is_baseline"] is False if state == "ACCEPTED" else res)
+PY
+)
+f5b_ok=1
+for f5b_v in is_baseline is_canonical; do
+  grep -q "$f5b_v STRFALSE PREFIX ACCEPTED_AS_TRUE" <<<"$f5b_out" || f5b_ok=0
+  grep -q "$f5b_v STRFALSE SHIPPED REFUSED True" <<<"$f5b_out" || f5b_ok=0
+done
+if [ "$f5b_ok" -eq 1 ]; then
+  pass "OBSERVED (round15 B) NON-VACUITY, MEASURED FLIP on identical input: a record carrying the STRING \"false\" for is_baseline (and for is_canonical) was ACCEPTED AS TRUE by the pre-fix bool() re-derivation reconstructed verbatim — bool('false') is True — and is REFUSED now, naming the field. The reporter reads the value straight into \`if canonical[\"is_baseline\"]\`, so the string would have printed the BASELINE title over a smoke corpus; the verdicts must be EXACT JSON booleans, which is what divergences's own bool comparison already did correctly in the same file"
+else
+  fail "round15 B: a string verdict must be refused where the pre-fix bool() read it as true (out: $f5b_out)"
+fi
+if grep -q 'NONSTR PREFIX_VERDICT_OK True' <<<"$f5b_out" \
+   && grep -q 'NONSTR PREFIX_UNCAUGHT_TYPEERROR' <<<"$f5b_out" \
+   && grep -q 'NONSTR SHIPPED REFUSED True' <<<"$f5b_out" \
+   && grep -q 'EMPTY PREFIX_VERDICT_OK True' <<<"$f5b_out" \
+   && grep -q 'EMPTY SHIPPED REFUSED' <<<"$f5b_out"; then
+  pass "OBSERVED (round15 B): a NON-STRING divergence element passed the pre-fix validation and then raised an UNCAUGHT TypeError where the reporter joins them (measured: 'expected str instance, dict found') — a traceback instead of the named refusal this record exists to give; and an EMPTY divergence string satisfied the verdict re-derivation while printing NO reason, so a reader was told N fields diverged and shown fewer than N. Every element must now be a non-empty string"
+else
+  fail "round15 B: divergences must be a list of non-empty strings, driven against the pre-fix TypeError (out: $f5b_out)"
+fi
+if grep -q 'ACCEPT_BASELINE ACCEPTED True' <<<"$f5b_out" \
+   && grep -q 'ACCEPT_NONBASELINE ACCEPTED True' <<<"$f5b_out"; then
+  pass "OBSERVED (round15 B) ACCEPT: a healthy record is ACCEPTED in BOTH modes — a canonical baseline with an empty divergence list, and a labelled non-baseline carrying a real divergence SENTENCE — so the stricter validation cannot be satisfied by refusing everything"
+else
+  fail "round15 B: the stricter verdict/divergence validation must still admit a healthy record in both modes (out: $f5b_out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a `$(...)`
@@ -770,10 +875,10 @@ fi
 # level up from the checks themselves.
 #
 # The floor is DERIVED from the OBSERVED count — 13 at the split, 21 after round 14's F4 added its
-# eight cases, 23 after round 15's C added two, each measured by running the suite — set just below
+# eight cases, 23 after round 15's C added two and 26 after its B added three, each measured by running the suite — set just below
 # it so adding a case does not red the suite, and far above zero. No case here skips conditionally,
 # so the observed count is the same on every host.
-MIN_CHECKS=21
+MIN_CHECKS=24
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

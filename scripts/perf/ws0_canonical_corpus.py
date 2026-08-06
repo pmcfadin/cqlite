@@ -830,16 +830,52 @@ def verify_pinned_canonical_corpus(pin_path: pathlib.Path, pin: dict) -> dict:
             f"{pin_path} `{PIN_CANONICAL_FIELD}.divergences` must be a list, got"
             f" {type(diffs).__name__} — the verdict below is DERIVED from it."
         )
-    # THE VERDICTS ARE RE-DERIVED, never trusted. A hand-edited `is_baseline: true` beside a
-    # non-empty divergence list must be refused: that is the substitution this record exists to
-    # make impossible, and a recorded boolean nobody re-derives cannot make it so.
-    if bool(rec["is_canonical"]) != (not diffs):
+    # ...AND EVERY ELEMENT IS A NON-EMPTY STRING (#3272 round 15, B). The list's shape was checked
+    # and its CONTENTS were not, so a non-string element passed validation and then raised an
+    # UNCAUGHT `TypeError` in the reporter's `"; ".join(canonical["divergences"])` — a traceback
+    # instead of a named refusal, on the artifact this record exists to police. MEASURED: a
+    # `[{"rows": "wrong"}]` reached `sequence item 0: expected str instance, dict found`.
+    #
+    # An EMPTY string is refused too, and that is the load-bearing half: `divergences` is the
+    # evidence for the verdict, and the report PRINTS these strings as the reason a run is not a
+    # baseline. An empty element counts toward `len(diffs)` (so the verdict re-derivation is
+    # satisfied) while printing NOTHING, so a reader is told a run diverged in N fields and shown
+    # fewer than N reasons.
+    for i, d in enumerate(diffs):
+        if not isinstance(d, str) or not d.strip():
+            raise Invalid(
+                f"{pin_path} `{PIN_CANONICAL_FIELD}.divergences[{i}]` is {d!r}, not a non-empty"
+                " string. Each element is the SENTENCE the report prints as a reason this corpus is"
+                " not the canonical one: a non-string raises an uncaught TypeError where the report"
+                " joins them, and an empty one counts toward the divergence total while printing no"
+                " reason at all (#3272 round 15, B)."
+            )
+    # THE VERDICTS ARE RE-DERIVED, never trusted — and they must be EXACT JSON BOOLEANS.
+    #
+    # `bool()` was the defect (#3272 round 15, B): it is TRUTHINESS, so the STRING `"false"` is
+    # TRUE. MEASURED — a record carrying `"is_baseline": "false"` was ACCEPTED and re-emitted with
+    # `is_baseline` still the string `'false'`, which the reporter then treats as true in
+    # `if canonical["is_baseline"]` and prints the BASELINE title over it. Symmetrically `0`, `""`
+    # and `None` are FALSE to `bool()` without being the recorded `false`. This is the `!= BAD`
+    # permissive-coercion shape this whole issue exists to remove, and `divergences`'s own `bool`
+    # comparison two hundred lines up already does it correctly: `isinstance(got, bool)`, then
+    # identity. Same rule here.
+    for verdict in ("is_canonical", "is_baseline"):
+        if not isinstance(rec[verdict], bool):
+            raise Invalid(
+                f"{pin_path} `{PIN_CANONICAL_FIELD}.{verdict}` is {rec[verdict]!r}"
+                f" ({type(rec[verdict]).__name__}), not the JSON boolean true or false. It is"
+                " re-derived below and read by the reporter as a verdict, and a truthiness test"
+                f" would have read the STRING 'false' as TRUE — publishing a smoke corpus under the"
+                " BASELINE title (#3272 round 15, B)."
+            )
+    if rec["is_canonical"] != (not diffs):
         raise Invalid(
             f"{pin_path} `{PIN_CANONICAL_FIELD}` CONTRADICTS ITSELF: is_canonical="
             f"{rec['is_canonical']!r} beside {len(diffs)} recorded divergence(s). The verdict is"
             " DERIVED from the divergences, so these cannot both be true — this record was edited."
         )
-    if bool(rec["is_baseline"]) != (not diffs and mode == MODE_BASELINE):
+    if rec["is_baseline"] != (not diffs and mode == MODE_BASELINE):
         raise Invalid(
             f"{pin_path} `{PIN_CANONICAL_FIELD}` CONTRADICTS ITSELF: is_baseline="
             f"{rec['is_baseline']!r} with mode={mode!r} and {len(diffs)} divergence(s). A run is a"
