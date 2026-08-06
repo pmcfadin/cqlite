@@ -3390,7 +3390,11 @@ assert_says 'case (wv4) the waiver key records author, the whole scope and the r
   "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=snapshot-delivered, 541k input / 472k cached\)\$"
 assert_says 'case (wv4) the absent paths are still listed' '^  alpha\.rs$'
 assert_says 'case (wv4) and the authorship limitation is stated, not implied' \
-  'AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
+  'PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
+assert_says 'case (wv4) the limitation is SCOPED to which allowlisted human, not authorship in general' \
+  'WHICH ALLOWLISTED HUMAN'
+assert_says 'case (wv4) and the authorization that IS enforced is named' \
+  'AUTHORIZED AGAINST AN EXPLICIT ALLOWLIST'
 reset_stub
 
 printf '== (wv5) (b) SHA-BOUND: a waiver for another head is STALE and does not excuse ==\n'
@@ -3743,6 +3747,7 @@ printf '== (wv28) JOB 25: the record review text is read under EITHER field name
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_PROMPT='### Combined Diff\n\ndiff --git a/alpha.rs b/alpha.rs\n@@ x @@\ndiff --git a/beta.rs b/beta.rs\n@@ y @@'
 STUB_RECORD_OUTPUT_FIELD=verdict_text
 STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
 run_wrapper "$w_work" --recheck-job 4656
@@ -3752,6 +3757,7 @@ reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITH_PATHS"
 STUB_SHOW_JSON=nested
+STUB_PROMPT='### Combined Diff\n\ndiff --git a/alpha.rs b/alpha.rs\n@@ x @@\ndiff --git a/beta.rs b/beta.rs\n@@ y @@'
 STUB_RECORD_OUTPUT_FIELD=verdict_text
 STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
 run_wrapper "$w_work" --recheck-job 4656
@@ -3841,7 +3847,10 @@ assert_says '--help says the diagnostic prints no part of the marker' \
 assert_says '--help says it excuses the absence verdict only' 'excuses the ABSENCE'
 assert_says '--help says the waived token is DISTINCT from PASS' 'a DISTINCT'
 assert_says '--help states the authorship limitation, not an implied guarantee' \
-  'AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
+  'PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY$|VERIFIED'
+assert_says '--help says the author must be on an explicit allowlist' \
+  'THE AUTHOR MUST BE ON AN EXPLICIT ALLOWLIST'
+assert_says '--help scopes the residual to which allowlisted human' 'WHICH ALLOWLISTED HUMAN'
 assert_lacks '--help no longer documents the deleted snapshot record keys' 'snapshot-path/-containment/-expected'
 assert_lacks '--help no longer claims two delivery modes are treated differently' 'TWO DIFF-DELIVERY MODES'
 assert_never_enqueued '--help'
