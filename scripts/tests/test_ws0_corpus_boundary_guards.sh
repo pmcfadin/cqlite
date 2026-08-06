@@ -702,7 +702,7 @@ fi
 #
 # The floor is DERIVED FROM THE OBSERVED COUNT — run, then recorded — never counted off the source:
 # a source estimate understated a floor by 29 on this branch, because loops multiply.
-MIN_CHECKS=17
+MIN_CHECKS=23
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
