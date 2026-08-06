@@ -157,7 +157,7 @@ import json
 import pathlib
 import re
 
-from ws0_validate import Invalid, _SHA256_RE
+from ws0_validate import Invalid, _SHA256_RE, exact_int
 
 # The Rust module that IS the pin, repo-relative. Named once.
 RUST_PIN_REL = "tools/ws0-corpus-gen/src/measurement_corpus.rs"
@@ -600,10 +600,25 @@ def divergences(
             except (TypeError, ValueError):
                 same = False
         elif kind == "int":
+            # `exact_int`, NEVER a bare `int()` (#3272 round 15, C). `int(100.9)` is 100, so a
+            # corpus recording `rows_per_partition: 100.9` was TRUNCATED to the canonical 100 and
+            # produced NO divergence — a noncanonical corpus classified canonical by rounding. That
+            # is the defect round 12's F5 built `exact_int` for, reintroduced in new code that never
+            # reached for the facility already there. Both sides go through it: `want` comes from a
+            # REGEX over Rust source, so requiring it to be an exact integer too costs nothing and
+            # closes the parse side.
+            #
+            # A value `exact_int` REFUSES is a DIVERGENCE carrying its refusal, not a raise: this
+            # function's contract is to report every way a corpus differs, and a corpus whose field
+            # is not an integer at all differs from one whose field is.
             try:
-                same = int(got) == int(want)
-            except (TypeError, ValueError):
-                same = False
+                same = exact_int(field, got) == exact_int(f"canonical {field}", want)
+            except Invalid as exc:
+                out.append(
+                    f"{field}: {got!r} is not the exact integer the canonical {field}"
+                    f" {want!r} is — {exc}"
+                )
+                continue
         elif kind == "bool":
             # EXACT, not truthiness: `0`, `""` and `None` are not the recorded `false` that
             # asserts #1406's claim boundary, and a truthy test would accept any of them.

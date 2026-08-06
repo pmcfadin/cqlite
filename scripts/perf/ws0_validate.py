@@ -467,6 +467,30 @@ IDENTITY_INT_FIELDS = {
     "data_db_bytes": "positive",
 }
 
+# The identity integers that are VALIDATED WHEN RECORDED but not REQUIRED (#3272 round 15, C).
+#
+# `rows_per_partition` and `total_component_bytes` had NO DOMAIN AT ALL: they were in neither this
+# map nor any other check, so they reached `ws0_canonical_corpus.divergences` unvalidated and its
+# bare `int()` TRUNCATED `rows_per_partition: 100.9` onto the canonical 100, reporting no
+# divergence. That is round 12's F5 defect (`int()` accepts bools and truncates floats) in a field
+# nobody had given a domain, so the fix is a domain here rather than a coercion at one call site.
+#
+# NOT MOVED INTO `IDENTITY_INT_FIELDS`, and the reason is a decision rather than a softening: that
+# map is REQUIRED-AND-COMPLETE, and the fields there are the ones the REPORT itself divides by. A
+# SMOKE corpus legitimately records neither of these two, and this rig's `--non-baseline` mode
+# exists precisely so such a corpus still runs (rounds 9/10/11 each shipped a fix that made a
+# documented operator command unable to succeed — requiring these here would be the fourth). Their
+# ABSENCE is already fail-closed where it decides something: `ws0_canonical_corpus.divergences`
+# reports an absent census field as `RECORDED NOTHING`, which refuses the corpus AS A BASELINE. So
+# absence is REFUSED by the check that cares, and what was missing — and is added here — is that a
+# value which IS recorded must be the exact integer it will be read as.
+IDENTITY_OPTIONAL_INT_FIELDS = {
+    # rows per partition: the canonical corpus's shape, compared against Rust's ROWS_PER_PARTITION
+    "rows_per_partition": "positive",
+    # the corpus's total component bytes, compared against Rust's TOTAL_COMPONENT_BYTES
+    "total_component_bytes": "positive",
+}
+
 
 def load_corpus_identity(corpus: pathlib.Path) -> dict:
     """The corpus's recorded identity, or `Invalid`. Never a partial dict.
@@ -514,6 +538,23 @@ def load_corpus_identity(corpus: pathlib.Path) -> dict:
                 ) from None
         else:
             identity[key] = non_negative_int(label, identity[key])
+
+    # ...and the OPTIONAL integers, validated WHEN RECORDED (#3272 round 15, C). See
+    # `IDENTITY_OPTIONAL_INT_FIELDS` for why absence is not refused here and where it IS refused.
+    # `100.9` for either was previously carried through unvalidated and truncated by the canonical
+    # comparison's bare `int()`, so a noncanonical corpus was classified canonical by rounding.
+    for key, domain in IDENTITY_OPTIONAL_INT_FIELDS.items():
+        if key not in identity:
+            continue
+        label = f"{idp}: {key!r}"
+        checker = positive_int if domain == "positive" else non_negative_int
+        identity[key] = checker(
+            label,
+            identity[key],
+            "It is compared against the canonical measurement corpus's pinned shape, so a"
+            " fractional or boolean value would be TRUNCATED onto the canonical integer and"
+            " report no divergence (#3272 round 15, C).",
+        )
 
     sha = identity.get("data_db_sha256")
     if not isinstance(sha, str) or not _SHA256_RE.match(sha):

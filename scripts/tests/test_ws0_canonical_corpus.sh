@@ -661,6 +661,106 @@ else
 fi
 
 # ==========================================================================
+# ROUND 15, C — THE INTEGER COMPARISON TRUNCATED, USING A FACILITY THAT EXISTS
+# ==========================================================================
+# `divergences` compared integers with a bare `int()`, so `int(100.9)` was 100 and a corpus
+# recording `rows_per_partition: 100.9` MATCHED the canonical 100 and produced NO DIVERGENCE. And
+# `load_corpus_identity` validated neither `rows_per_partition` nor `total_component_bytes`, so
+# neither field had a domain ANYWHERE — the value reached the comparison unvalidated and was
+# rounded into agreement.
+#
+# This is round 12's F5 defect verbatim: `exact_int` was built THAT round because `int()` accepts
+# bools and truncates floats, and this code — written after it — reached for `int()` anyway. The
+# fix is `exact_int` on both sides plus a domain for the two fields in `load_corpus_identity`.
+f5c_out=$(WS0_F5_PERF="$f3c_perf" WS0_F5_ROOT="$REPO_ROOT" WS0_F5_CORPUS="$f3c_canon" python3 - <<'PY' 2>&1
+import copy, json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F5_PERF"])
+from ws0_canonical_corpus import (CANONICAL_ARTIFACT_REL, MODE_BASELINE, _anchor_pins,
+                                  canonical_components, canonical_pins, divergences,
+                                  require_canonical_or_declared)
+from ws0_validate import Invalid
+root = pathlib.Path(os.environ["WS0_F5_ROOT"])
+corpus = pathlib.Path(os.environ["WS0_F5_CORPUS"])
+base = json.loads((root / CANONICAL_ARTIFACT_REL).read_text())
+pins, anchors = canonical_pins(root), _anchor_pins(root)
+comps = canonical_components(root, pins)
+
+def prefix_int_same(got, want):
+    """THE PRE-FIX INTEGER COMPARISON, VERBATIM: a bare int() on both sides."""
+    try:
+        return int(got) == int(want)
+    except (TypeError, ValueError):
+        return False
+
+# The three integer census fields a FRACTIONAL value truncates onto, including the two that had no
+# domain anywhere. `data_db_bytes` is the control: it IS validated by load_corpus_identity, so it
+# shows the comparison itself was the defect and not only the absent validation.
+for field, const, bad in (("rows_per_partition", "ROWS_PER_PARTITION", 100.9),
+                          ("total_component_bytes", "TOTAL_COMPONENT_BYTES",
+                           base["total_component_bytes"] + 0.9),
+                          ("data_db_bytes", "DATA_DB_BYTES", base["data_db_bytes"] + 0.9)):
+    j = copy.deepcopy(base)
+    j[field] = bad
+    # THE PREMISE: the pre-fix comparison saw NO difference at all.
+    print(field, "PREFIX", "MATCHED_AS_CANONICAL" if prefix_int_same(bad, pins[const]) else "refused")
+    diffs = divergences(j, pins, corpus, anchors, comps)
+    print(field, "SHIPPED", "REFUSED" if any(field in d for d in diffs) else "ACCEPTED")
+    try:
+        require_canonical_or_declared(root, j, MODE_BASELINE, corpus)
+        print(field, "BASELINE ACCEPTED")
+    except Invalid:
+        print(field, "BASELINE REFUSED")
+# ...and the field with no domain is now validated AT LOAD, by name, before any comparison runs.
+PY
+)
+f5c_ok=1
+for f5c_field in rows_per_partition total_component_bytes data_db_bytes; do
+  grep -q "$f5c_field PREFIX MATCHED_AS_CANONICAL" <<<"$f5c_out" || f5c_ok=0
+  grep -q "$f5c_field SHIPPED REFUSED" <<<"$f5c_out" || f5c_ok=0
+  grep -q "$f5c_field BASELINE REFUSED" <<<"$f5c_out" || f5c_ok=0
+done
+if [ "$f5c_ok" -eq 1 ]; then
+  pass "OBSERVED (round15 C) NON-VACUITY, MEASURED FLIP on identical input: three FRACTIONAL integer census values (rows_per_partition=100.9, and +0.9 on total_component_bytes and data_db_bytes) were each MATCHED AS CANONICAL by the pre-fix bare-int() comparison — truncated into agreement — and are each REFUSED now. The comparison uses ws0_validate.exact_int, the facility round 12's F5 built for exactly this because int() accepts bools and truncates floats; this code was written after it and reached for int() anyway"
+else
+  fail "round15 C: a fractional integer census value must be REFUSED where the pre-fix int() truncated it into agreement (out: $f5c_out)"
+fi
+# ...and the two fields that had NO DOMAIN ANYWHERE are validated AT LOAD, by name — the half that
+# closes the class rather than one call site. Driven through the SHIPPED loader over a real corpus.
+f5c_dom="$TMP/f5c-domain"; make_corpus "$f5c_dom"
+f5c_out=$(WS0_F5_PERF="$f3c_perf" WS0_F5_CORPUS="$f5c_dom" python3 - <<'PY' 2>&1
+import json, os, pathlib, sys
+sys.path.insert(0, os.environ["WS0_F5_PERF"])
+from ws0_validate import Invalid, load_corpus_identity
+corpus = pathlib.Path(os.environ["WS0_F5_CORPUS"])
+idp = corpus / "corpus-identity.json"
+base = json.loads(idp.read_text())
+# ABSENT is NOT refused here: a SMOKE corpus records neither, and --non-baseline exists so it still
+# runs (rounds 9/10/11 each broke a documented command by refusing too much). Absence is refused by
+# the canonical comparison, which reports it as RECORDED NOTHING.
+print("ABSENT_STILL_LOADS", bool(load_corpus_identity(corpus)))
+for field, bad in (("rows_per_partition", 100.9), ("total_component_bytes", 4096.5),
+                   ("rows_per_partition", True), ("total_component_bytes", 0)):
+    j = dict(base); j[field] = bad
+    idp.write_text(json.dumps(j))
+    try:
+        load_corpus_identity(corpus)
+        print(field, repr(bad), "ACCEPTED")
+    except Invalid as exc:
+        print(field, repr(bad), "REFUSED", field in str(exc))
+idp.write_text(json.dumps(base))
+PY
+)
+if grep -q 'ABSENT_STILL_LOADS True' <<<"$f5c_out" \
+   && grep -q "^rows_per_partition 100.9 REFUSED True" <<<"$f5c_out" \
+   && grep -q "^total_component_bytes 4096.5 REFUSED True" <<<"$f5c_out" \
+   && grep -q "^rows_per_partition True REFUSED True" <<<"$f5c_out" \
+   && grep -q "^total_component_bytes 0 REFUSED True" <<<"$f5c_out"; then
+  pass "OBSERVED (round15 C): rows_per_partition and total_component_bytes are VALIDATED AT LOAD by name — fractional, boolean and non-positive values are each REFUSED, where pre-fix they had NO DOMAIN ANYWHERE (in neither IDENTITY_INT_FIELDS nor any other check) and reached the canonical comparison unvalidated. ABSENCE still loads, deliberately: a smoke corpus records neither, and absence is refused by the canonical comparison as RECORDED NOTHING rather than by breaking the --non-baseline path"
+else
+  fail "round15 C: the two undomained identity integers must be validated at load without refusing absence (out: $f5c_out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # Without `-e` a block that silently never executes — an early `return` in a helper, a `$(...)`
@@ -670,10 +770,10 @@ fi
 # level up from the checks themselves.
 #
 # The floor is DERIVED from the OBSERVED count — 13 at the split, 21 after round 14's F4 added its
-# eight cases, each measured by running the suite — set just below it so adding a case does not red
-# the suite, and far above zero. No case here skips conditionally, so the observed count is the same
-# on every host.
-MIN_CHECKS=19
+# eight cases, 23 after round 15's C added two, each measured by running the suite — set just below
+# it so adding a case does not red the suite, and far above zero. No case here skips conditionally,
+# so the observed count is the same on every host.
+MIN_CHECKS=21
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
