@@ -5790,6 +5790,32 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 CORPUS-BOUNDARY guards (#3272 round 21), its own suite under the campsite rule and WIRED
+  # HERE IN THE SAME CHANGE — an unwired suite is the same defect class as a fail-open guard.
+  # Subject: the pre-measurement pin COPIED `data_db_sha256` and the whole component map out of the
+  # corpus's own `corpus-identity.json` instead of hashing the files, so the pin and that sidecar
+  # agreed BY CONSTRUCTION however the bytes on disk differed — a claim restated, not a
+  # measurement, i.e. #3249's hardcoded `_PERF_STATE="ok"` with extra steps. MEASURED: a component
+  # MUTATED during measurement and RESTORED before reporting left the Data.db digest verified, all
+  # components verified and all PINNED components verified, while the reps on either side had
+  # measured different bytes — the failure biases TOWARD the claim. The pin now HASHES (and
+  # COMPARES the sidecar against the measured values), records `components_source` so a copied pin
+  # cannot pass as a measured one, and `verify_corpus_boundary` re-hashes the ACTUAL bytes at each
+  # measurement boundary against the PIN, refusing the rep and naming what changed — the half no
+  # pre/post pair can see. Hermetic: synthetic session dirs and component files under $TMPDIR
+  # through the shipped writer/verifier/reporter; no cargo, perf, sudo, corpus, network or driver.
+  echo ">>> [$name] bash scripts/tests/test_ws0_corpus_boundary_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_corpus_boundary_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 corpus-boundary guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 ERROR-CODE CROSS-CHECK guards (#3272 round 20), split out of the reporter suite under
   # the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a test nothing
   # executes, the #1597/#1618 gate-wiring class this rig has already paid for twice. Subject:
