@@ -3855,7 +3855,7 @@ noscan="$tmp/flow-without-scanner"
 mkdir -p "$noscan"
 cp "$WRAPPER" "$noscan/roborev-review.sh"
 cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$noscan/"
-cp "$CHECKS_FILE" "$noscan/"
+cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$noscan/"
 cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$noscan/"
 # ...and deliberately NOT roborev-waiver-scan.py.
 STUB_ANNOUNCE_SHA="$w_head"
