@@ -422,7 +422,7 @@ fi
 # `set -uo pipefail` (no `-e`) means a block that silently never executes lowers the count and
 # registers NO failure, while the gate reads only the exit code. Deliberately below the current
 # count (so adding a case does not red it) and far above zero.
-MIN_CHECKS=15
+MIN_CHECKS=16
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

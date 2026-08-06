@@ -97,7 +97,7 @@ DRIVER="$REPO_ROOT/scripts/perf/ws0-baseline.sh"
 # `ws0_driver_run` (`--validate-args-only` + shimmed PATH) and assert it executed NOTHING.
 ws0_hermetic_init "$TMP"
 
-GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 

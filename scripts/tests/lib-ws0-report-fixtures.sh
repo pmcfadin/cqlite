@@ -68,7 +68,7 @@ make_flight_rep() {
 # it (#3272 F4): the admission-shed counter was completely unread, so a rep whose requests
 # the server SHED was reported as failure-free. A fixture omitting it is refused — which is
 # the guard working, and is why the cases whose subject IS the omission set it explicitly.
-GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 # make_session <dir> <flight-jsonl> — a complete one-warm-rep session dir.
 make_session() {

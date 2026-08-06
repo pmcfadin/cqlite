@@ -920,7 +920,7 @@ fi
 # failure, and the gate reads only the exit code — so a suite that runs 3 of its checks
 # and passes them exits 0. The floor is the suite-level `0/0` guard. It is deliberately
 # below the current count (so adding a case does not red the suite) and far above zero.
-MIN_CHECKS=64
+MIN_CHECKS=82
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

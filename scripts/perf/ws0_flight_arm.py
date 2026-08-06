@@ -26,6 +26,7 @@ from ws0_collect import prewarm_block, read_prewarm, spread, REQUIRED_EVENTS
 from ws0_loadgen_record import (
     ZERO_REQUIRED_COUNTERS,
     _ZERO_COUNTER_MEANING,
+    check_fixed_inputs,
     check_record_surface,
 )
 from ws0_rounds import collect_round_meta
@@ -164,6 +165,14 @@ def collect_flight(
         # NO UNCLASSIFIED FIELD (#3272 F4): a counter nobody has considered is refused,
         # which is what stops a third `requests_unavailable`. See the census above.
         check_record_surface(tag, rec)
+        # ...and THE INPUTS THE DRIVER FIXES must hold the values it fixed them to (#3272 F3).
+        # `target_concurrency` was classified IGNORED, so a record produced at `--ramp 8` passed
+        # every row/request/error/shed check and was reported as this rig's CONCURRENCY-ONE
+        # baseline while measuring N concurrent scans contending for one pinned physical core.
+        # `shape`, `step` and the `schema` version tag carried the same exposure for the same
+        # "it is only an INPUT" reason. Checked BEFORE the counters below, because a record from a
+        # different workload should be refused for THAT rather than for a downstream consequence.
+        fixed_inputs = check_fixed_inputs(tag, rec)
         # EVERY ZERO-REQUIRED COUNTER, in ONE loop over `ZERO_REQUIRED_COUNTERS` (#3272 F4).
         #
         # This was written for `requests_error` alone, and its admission-shed sibling
@@ -322,6 +331,10 @@ def collect_flight(
                 ),
                 "cycles": cyc,
                 "cycles_per_row": cyc / rows,
+                # WHAT WAS VERIFIED, not merely that something was (#3272 F3): the concurrency,
+                # shape, step index and schema version this rep's figures are conditional on. A
+                # reader comparing two sessions can see the baseline was the same baseline.
+                "verified_fixed_inputs": fixed_inputs,
                 "prewarm": prewarm[-1]["status"],
             }
         )

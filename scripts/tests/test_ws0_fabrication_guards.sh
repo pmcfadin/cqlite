@@ -97,7 +97,7 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
 # set, the pre-measurement pin and the manifest-read configuration — moved to
 # `scripts/tests/test_ws0_provenance_guards.sh` in round 6, on the same rule.
 
-GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 
@@ -122,7 +122,7 @@ fi
 # `requests_ok` but NO `requests_error` key at all exited **0** and printed a full
 # five-line report — the "no failed requests" refusal never having looked at a
 # number. The identical record is refused below.
-NO_ERR_KEY='{"round":"r","requests_ok":1,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+NO_ERR_KEY='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/no-error-key"; make_session "$d" "$NO_ERR_KEY"
 expect_reject "an ABSENT requests_error is FATAL (never a fabricated 0)" \
   "carries no \`requests_error\`" "$d" "$TMP/corpus"
@@ -138,13 +138,13 @@ else
   fail "a refused run must not leave a results.json behind"
 fi
 # An UNPARSEABLE value is a corrupt counter, not a zero either.
-BAD_ERR='{"round":"r","requests_ok":1,"requests_error":"none","requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+BAD_ERR='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":"none","requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/bad-error-key"; make_session "$d" "$BAD_ERR"
 expect_reject "an UNPARSEABLE requests_error is FATAL (corrupt, not 0)" \
   "unparseable \`requests_error\`" "$d" "$TMP/corpus"
 # And a real non-zero error count is still refused, naming it — the guard the
 # fabricated default was standing in for must still work.
-REAL_ERR='{"round":"r","requests_ok":1,"requests_error":4,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+REAL_ERR='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":4,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/real-errors"; make_session "$d" "$REAL_ERR"
 expect_reject "an OBSERVED non-zero requests_error is refused, naming the count" \
   "had 4 failed request" "$d" "$TMP/corpus"
@@ -156,7 +156,7 @@ expect_reject "an OBSERVED non-zero requests_error is refused, naming the count"
 # defect as the `.get("requests_error", 0)` that branch had just replaced, arrived at from
 # the other side. `-3` is not "fewer than no errors"; it is a counter that cannot have been
 # validly observed.
-NEG_ERR='{"round":"r","requests_ok":1,"requests_error":-3,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+NEG_ERR='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":-3,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/neg-error"; make_session "$d" "$NEG_ERR"
 expect_reject "a NEGATIVE requests_error is FATAL (pre-fix: counted as ZERO errors)" \
   "not a possible count" "$d" "$TMP/corpus"
@@ -175,11 +175,11 @@ else
 fi
 # The same audit on every OTHER counter comparison in the reporting path — a `> 0`/`== 0`
 # where the property is "a valid observation" is one class, not one line.
-NEG_ROWS='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":-1000,"rows_per_s":250.0,"duration_s":4.0}'
+NEG_ROWS='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":-1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/neg-rows"; make_session "$d" "$NEG_ROWS"
 expect_reject "a NEGATIVE rows_total is FATAL (it is a denominator; == 0 alone missed it)" \
   "not a measurement" "$d" "$TMP/corpus"
-NEG_RPS='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":-250000.0,"duration_s":4.0}'
+NEG_RPS='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":-250000.0,"duration_s":4.0}'
 d="$TMP/neg-rps"; make_session "$d" "$NEG_RPS"
 expect_reject "a NEGATIVE rows_per_s is FATAL (spread() only checks the MEDIAN)" \
   "not a positive finite rate" "$d" "$TMP/corpus"
@@ -187,7 +187,7 @@ expect_reject "a NEGATIVE rows_per_s is FATAL (spread() only checks the MEDIAN)"
 # number standing in for an absent measurement.
 for bad in Infinity NaN; do
   d="$TMP/nonfinite-$bad"
-  make_session "$d" "{\"round\":\"r\",\"requests_ok\":1,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":1000,\"rows_per_s\":$bad,\"duration_s\":4.0}"
+  make_session "$d" "{\"schema\":\"flight-loadgen.step/v1\",\"step\":0,\"target_concurrency\":1,\"shape\":\"full\",\"round\":\"r\",\"requests_ok\":1,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":1000,\"rows_per_s\":$bad,\"duration_s\":4.0}"
   expect_reject "a $bad rows_per_s is FATAL (not a rate)" \
     "not a positive finite rate" "$d" "$TMP/corpus"
 done
@@ -217,7 +217,7 @@ for bad in -1.0 Infinity NaN; do
 done
 
 # An explicit ZERO is accepted: the fix is "observe it", not "reject the key".
-ZERO_ERR='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+ZERO_ERR='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/zero-errors"; make_session "$d" "$ZERO_ERR"
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
 if [ "$rc" -eq 0 ]; then
@@ -349,7 +349,7 @@ fi
 # NON-VACUITY, MEASURED against the pre-fix reporter (this branch at 06c295289): a step
 # record carrying `requests_unavailable: 37` beside otherwise-healthy counters exited **0**
 # and wrote a full results.json. The identical record is refused below.
-SHED='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":37,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+SHED='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":37,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/shed-requests"; make_session "$d" "$SHED"
 expect_reject "an OBSERVED non-zero requests_unavailable is refused, naming the count" \
   "recorded requests_unavailable=37" "$d" "$TMP/corpus"
@@ -367,7 +367,7 @@ else
   fail "a refused shed run must not leave a results.json behind"
 fi
 # ABSENT is an ERROR, never a fabricated 0 — the same rule its sibling already had.
-NO_SHED_KEY='{"round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+NO_SHED_KEY='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/no-shed-key"; make_session "$d" "$NO_SHED_KEY"
 expect_reject "an ABSENT requests_unavailable is FATAL (never a fabricated 0)" \
   "carries no \`requests_unavailable\`" "$d" "$TMP/corpus"
@@ -375,7 +375,7 @@ expect_reject "an ABSENT requests_unavailable is FATAL (never a fabricated 0)" \
 # than merely being present: negative, fractional and boolean all refused.
 for bad_shed in '-3' '0.9' 'true' '"none"'; do
   d="$TMP/shed-domain-$(printf '%s' "$bad_shed" | tr -dc 'a-z0-9')"
-  make_session "$d" "{\"round\":\"r\",\"requests_ok\":1,\"requests_error\":0,\"requests_unavailable\":$bad_shed,\"rows_total\":1000,\"rows_per_s\":250.0,\"duration_s\":4.0}"
+  make_session "$d" "{\"schema\":\"flight-loadgen.step/v1\",\"step\":0,\"target_concurrency\":1,\"shape\":\"full\",\"round\":\"r\",\"requests_ok\":1,\"requests_error\":0,\"requests_unavailable\":$bad_shed,\"rows_total\":1000,\"rows_per_s\":250.0,\"duration_s\":4.0}"
   out=$(run_report "$d" "$TMP/corpus"); rc=$?
   if [ "$rc" -ne 0 ] && grep -q 'requests_unavailable' <<<"$out"; then
     pass "a requests_unavailable of $bad_shed is REFUSED by the shared domain validator"
@@ -392,6 +392,102 @@ else
   fail "requests_unavailable=0 must be accepted (rc=$rc, out: $out)"
 fi
 
+# ==========================================================================
+# ROUND 11, F3 — THE INPUTS THE DRIVER FIXES ARE VERIFIED, NOT IGNORED
+# ==========================================================================
+# `target_concurrency` was classified IGNORED with the reason "the requested concurrency
+# (--ramp 1 here); an INPUT". The reason was true and the disposition it justified was wrong by the
+# census's own rule: a field may be ignored only when it CANNOT change the validity of a printed
+# figure. This rig's entire claim is a CONCURRENCY-ONE baseline — one request in flight, one
+# full-corpus scan per rep, `requests_ok == 1` for a cold rep, and a cycles/row figure whose perf
+# window holds one scan's work. A record produced at `--ramp 8` satisfies EVERY existing check (rows
+# still equal requests_ok x corpus_rows; errors and sheds still zero; the derived throughput still
+# equals rows_total/duration_s) while measuring eight concurrent scans contending for one pinned
+# physical core, and the report publishes it as the intended baseline with nothing saying otherwise.
+#
+# `shape`, `step` and the `schema` version tag were ignored for the same "only an INPUT" reason and
+# carry the same exposure: a different QUERY, a record salvaged from step N of a ramp, and v2 field
+# semantics read as v1. All four are verified together — one rule for a class, the
+# `ZERO_REQUIRED_COUNTERS` posture.
+CONC8=${GOOD_FLIGHT/'"target_concurrency":1'/'"target_concurrency":8'}
+d="$TMP/f3-conc"; make_session "$d" "$CONC8"
+expect_reject "OBSERVED (round11 F3): a rep produced at target_concurrency=8 is REFUSED — it satisfies every row/request/error/shed check while measuring 8 concurrent scans on one pinned core" \
+  "recorded \`target_concurrency\` = 8" "$d" "$TMP/corpus"
+# The refusal must state WHAT the wrong value means for the figure, not merely that it differed: an
+# operator acts on "this is not the baseline you think it is", not on a mismatch report.
+out=$(run_report "$d" "$TMP/corpus")
+if grep -q "CONCURRENCY-ONE baseline" <<<"$out"; then
+  pass "round11 F3: the concurrency refusal states the MEASUREMENT consequence (a different workload reported as the baseline), not just a mismatch"
+else
+  fail "round11 F3: the refusal must name the measurement consequence (out: $out)"
+fi
+# NON-VACUITY: that record passes EVERY OTHER CHECK. Asserted by reporting the same session with
+# only the concurrency put back — without this the refusal could be about some other defect the
+# fixture happened to carry, and the "it satisfied everything" claim would be untested.
+d="$TMP/f3-conc-control"; make_session "$d" "$GOOD_FLIGHT"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "NON-VACUITY (round11 F3): the SAME record with concurrency 1 reports CLEANLY — so the ramp-8 record differed in nothing else, which is precisely why it was invisible"
+else
+  fail "round11 F3: the control session must report (rc=$rc, out: $out)"
+fi
+# The other three fixed inputs, each refused for its own stated reason.
+SHAPE_PT=${GOOD_FLIGHT/'"shape":"full"'/'"shape":"point"'}
+d="$TMP/f3-shape"; make_session "$d" "$SHAPE_PT"
+expect_reject "OBSERVED (round11 F3): a rep whose shape is not 'full' is REFUSED — a different shape measured a DIFFERENT QUERY (the M1 substitution one layer in)" \
+  "recorded \`shape\` = 'point'" "$d" "$TMP/corpus"
+STEP3=${GOOD_FLIGHT/'"step":0'/'"step":3'}
+d="$TMP/f3-step"; make_session "$d" "$STEP3"
+expect_reject "OBSERVED (round11 F3): a record whose step index is 3 is REFUSED — one record salvaged from step 3 of a RAMP, which the one-record-per-file check cannot see" \
+  "recorded \`step\` = 3" "$d" "$TMP/corpus"
+SCHEMA_V2=${GOOD_FLIGHT//step\/v1/step\/v2}
+d="$TMP/f3-schema"; make_session "$d" "$SCHEMA_V2"
+expect_reject "OBSERVED (round11 F3): a step/v2 record is REFUSED — a version tag IS the statement that these field names mean what this reporter thinks, so v2 semantics must not be read as v1" \
+  "recorded \`schema\`" "$d" "$TMP/corpus"
+# ABSENT is an ERROR, never an assumed default — the AC3 rule, applied to an input rather than a
+# counter. `rec.get(k, <the value we want>)` would pass exactly when the record is silent.
+for f3_absent in target_concurrency shape step schema; do
+  ABSENT_ONE="$(python3 "$REPO_ROOT/scripts/tests/ws0_drop_json_key.py" "$GOOD_FLIGHT" "$f3_absent")"
+  d="$TMP/f3-absent-$f3_absent"; make_session "$d" "$ABSENT_ONE"
+  out=$(run_report "$d" "$TMP/corpus"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "carries no \`$f3_absent\`" <<<"$out"; then
+    pass "OBSERVED (round11 F3): an ABSENT \`$f3_absent\` is FATAL — a value not observed cannot be asserted (never an assumed default)"
+  else
+    fail "round11 F3: an absent $f3_absent must be refused naming it (rc=$rc, out: $(head -2 <<<"$out"))"
+  fi
+done
+# A BOOLEAN, a FRACTIONAL and a STRING concurrency are refused: `True == 1` in python and
+# `int(1.9) == 1`, so a bare `int(...) == 1` would accept the first two. Same truncation class as
+# R6/B5 two checks over.
+for f3_bad in true 1.9 '"1"'; do
+  BAD_CONC=${GOOD_FLIGHT/'"target_concurrency":1'/"\"target_concurrency\":$f3_bad"}
+  d="$TMP/f3-badconc-$(printf '%s' "$f3_bad" | tr -dc 'a-z0-9.')"; make_session "$d" "$BAD_CONC"
+  out=$(run_report "$d" "$TMP/corpus"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q 'target_concurrency' <<<"$out"; then
+    pass "OBSERVED (round11 F3): target_concurrency=$f3_bad is REFUSED (\`True == 1\` and \`int(1.9) == 1\`, so a coercing comparison would accept it)"
+  else
+    fail "round11 F3: target_concurrency=$f3_bad must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+  fi
+done
+# THE VERIFIED VALUES ARE RECORDED, so the report says WHAT the figures are conditional on rather
+# than only that something was checked.
+d="$TMP/f3-recorded"; make_session "$d" "$GOOD_FLIGHT"
+out=$(run_report "$d" "$TMP/corpus")
+if python3 "$REPO_ROOT/scripts/tests/ws0_assert_fixed_inputs_recorded.py" "$d/results.json"; then
+  pass "OBSERVED (round11 F3): results.json records WHICH fixed inputs were verified per rep — a reader comparing two sessions can see the baseline was the same baseline"
+else
+  fail "round11 F3: the verified fixed inputs must be recorded in results.json (out: $(head -3 <<<"$out"))"
+fi
+# ...and THE DRIVER MUST ACTUALLY PASS WHAT THE REPORTER DEMANDS. This is the half that stops the
+# two drifting apart: a reporter requiring `--ramp 1` beside a driver that had moved to `--ramp 2`
+# would refuse every real run — the F1 defect class (a guard breaking the documented command), which
+# is exactly what a reject-only test cannot see.
+if python3 "$REPO_ROOT/scripts/tests/ws0_assert_driver_fixed_argv.py" "$REPO_ROOT"; then
+  pass "round11 F3 wired: the DRIVER's own loadgen argv passes exactly what the reporter demands (--ramp 1, --shape full) — so the reporter cannot demand a value the driver stopped producing, which would refuse every real run"
+else
+  fail "round11 F3: the driver's loadgen argv must agree with FIXED_INPUTS"
+fi
+
 # --- F4's MECHANISM: an UNCLASSIFIED record field is REFUSED --------------------------
 # Fixing the one unread counter would be the same partial fix this issue keeps finding — it
 # is the SECOND counter found simply unread. So the reporter carries a CENSUS of the load
@@ -399,7 +495,7 @@ fi
 # IGNORED-with-a-reason-in-code) and REFUSES a record carrying a field nobody classified.
 # A new loadgen counter therefore cannot become a third `requests_unavailable`: it arrives
 # unclassified and fails the report.
-UNCLASSIFIED='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0,"requests_throttled":5}'
+UNCLASSIFIED='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0,"requests_throttled":5}'
 d="$TMP/unclassified-field"; make_session "$d" "$UNCLASSIFIED"
 expect_reject "an UNCLASSIFIED record field is REFUSED (naming it)" \
   "requests_throttled" "$d" "$TMP/corpus"
@@ -436,13 +532,39 @@ stale = [k for k in D if k not in fields]
 if stale:
     sys.exit("RECORD_FIELD_DISPOSITION classifies fields the loadgen no longer emits: "
              + ", ".join(stale))
-# every IGNORED field must carry a REASON — an empty one is a classification that says nothing
+# EVERY field must carry a substantive REASON, whatever its disposition — a classification with
+# nothing recorded beside it says nothing, and the census's entire value is the reason at the branch.
+# Checked for all four dispositions rather than for `ignored` alone: #3272's F3 moved three fields
+# from `ignored` to `verified-fixed-input`, and a reason requirement scoped to one disposition would
+# have stopped applying to them at exactly the moment they became load-bearing.
+#
+# The disposition set is read from the MODULE's own `DISPOSITIONS` rather than restated here. A
+# literal copy is a second source of truth: the pre-F3 version hardcoded `("consumed", "ignored")`,
+# so adding a legitimate third disposition FAILED this check — a red on correct code, which is the
+# kind an agent learns to waive. What must not be possible is a disposition the MODULE does not
+# recognise, and the module refuses that at import (`DISPOSITIONS`, checked there), so this asserts
+# the two agree rather than re-deciding the set.
+from ws0_loadgen_record import DISPOSITIONS
+if len(DISPOSITIONS) < 2:
+    sys.exit("the module's DISPOSITIONS set looks truncated; a one-value set classifies nothing")
 for k, (kind, why) in D.items():
-    if kind == "ignored" and len(why.strip()) < 20:
-        sys.exit(f"{k} is IGNORED without a substantive recorded reason")
-    if kind not in ("consumed", "ignored"):
+    if len(why.strip()) < 20:
+        sys.exit(f"{k} is classified {kind!r} without a substantive recorded reason")
+    if kind not in DISPOSITIONS:
         sys.exit(f"{k} carries an unrecognised disposition {kind!r}")
-print(f"census: {len(fields)}/{len(fields)} live StepRecord fields classified")
+# ...and the FIXED INPUTS must be VERIFIED, not merely classified: an expected value must exist for
+# each, and it is the value the DRIVER actually passes. That last half is what stops the reporter and
+# the driver drifting apart — see the driver-argv assert below.
+from ws0_loadgen_record import FIXED_INPUTS
+if not FIXED_INPUTS:
+    sys.exit("FIXED_INPUTS is empty: no input the driver fixes would be verified at all")
+for k, (want, why) in FIXED_INPUTS.items():
+    if D.get(k, ("", ""))[0] != "verified-fixed-input":
+        sys.exit(f"{k} has a fixed expected value but is not classified verified-fixed-input")
+    if len(why.strip()) < 20:
+        sys.exit(f"{k}'s fixed-input reason is not substantive")
+print(f"census: {len(fields)}/{len(fields)} live StepRecord fields classified"
+      f"; {len(FIXED_INPUTS)} fixed input(s) verified")
 PY
   then
     pass "the record-surface CENSUS covers every field of the LIVE loadgen StepRecord"
@@ -464,7 +586,7 @@ fi
 d="$TMP/two-records"; mkdir -p "$d"
 make_scan_rep "$d" warm 1 ok
 {
-  printf '%s\n' '{"round":"ramp-1","requests_ok":1,"requests_error":9,"requests_unavailable":0,"rows_total":37,"rows_per_s":99.0,"duration_s":1.0}'
+  printf '%s\n' '{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"ramp-1","requests_ok":1,"requests_error":9,"requests_unavailable":0,"rows_total":37,"rows_per_s":99.0,"duration_s":1.0}'
   printf '%s\n' "$GOOD_FLIGHT"
 } > "$d/flight-bypass-warm-1.jsonl"
 perf_csv "$d/perf-flight-bypass-warm-1.csv" 8000000 16000000
@@ -534,7 +656,7 @@ fi
 #   `flight do_get (bypass)  0 rows/s [0..0, spread 0.0%] … ratio bare/flight = infx`
 # — a series that measured nothing, described as the tightest possible result, with
 # an `inf` ratio as the headline. BOTH halves are refused below.
-ZERO_RPS='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":0.0,"duration_s":4.0}'
+ZERO_RPS='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":0.0,"duration_s":4.0}'
 d="$TMP/zero-rps"; make_session "$d" "$ZERO_RPS"
 # It is refused EARLIER than it used to be, and the earlier refusal is the stronger one
 # (#3272 review round 2, R6 audit). `spread()` only refuses a non-positive MEDIAN, so one
@@ -595,7 +717,7 @@ fi
 # The loadgen's own invariant is `rows_per_s == rows_total / duration_s`
 # (tools/flight-loadgen/src/record.rs, `per_s(self.rows_total)`), so the reporter now DERIVES
 # the rate — a derived value cannot be forged — and cross-checks the recorded one against it.
-FORGED_RPS='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":9999999.0,"duration_s":4.0}'
+FORGED_RPS='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":9999999.0,"duration_s":4.0}'
 d="$TMP/forged-rps"; make_session "$d" "$FORGED_RPS"
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
 if [ "$rc" -ne 0 ] && grep -q "give rows_total/duration_s = 1000/4.0 = 250.0" <<<"$out"; then
@@ -618,7 +740,7 @@ fi
 # `duration_s` is now REQUIRED and validated in its own right — it is the DIVISOR of the
 # reported figure, and every domain violation is a NAMED refusal rather than a `None` in
 # results.json.
-NO_DUR='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0}'
+NO_DUR='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0}'
 d="$TMP/no-duration"; make_session "$d" "$NO_DUR"
 expect_reject "an ABSENT duration_s is FATAL (it used to reach results.json as None)" \
   "duration_s" "$d" "$TMP/corpus"
@@ -630,7 +752,7 @@ else
 fi
 for bad_dur in 0 0.0 -4.0 '"4s"' 'null'; do
   d="$TMP/dur-$(printf '%s' "$bad_dur" | tr -dc 'a-zA-Z0-9')x"
-  make_session "$d" "{\"round\":\"r\",\"requests_ok\":1,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":1000,\"rows_per_s\":250.0,\"duration_s\":$bad_dur}"
+  make_session "$d" "{\"schema\":\"flight-loadgen.step/v1\",\"step\":0,\"target_concurrency\":1,\"shape\":\"full\",\"round\":\"r\",\"requests_ok\":1,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":1000,\"rows_per_s\":250.0,\"duration_s\":$bad_dur}"
   expect_reject "duration_s=$bad_dur is REFUSED (it was UNVALIDATED entirely)" \
     "duration_s" "$d" "$TMP/corpus"
 done
@@ -1037,7 +1159,7 @@ fi
 #                              i.e. a boolean silently became a count
 # A truncation is a FABRICATED VALUE arrived at by rounding rather than by defaulting —
 # the same class as `.get(k, 0)`, which is why it belongs in this file.
-FRAC_ERR='{"round":"r","requests_ok":1,"requests_error":0.9,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+FRAC_ERR='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0.9,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/frac-error"; make_session "$d" "$FRAC_ERR"
 expect_reject "a FRACTIONAL requests_error is FATAL (pre-fix: int(0.9) reported CLEAN)" \
   "fractional value" "$d" "$TMP/corpus"
@@ -1047,12 +1169,12 @@ if grep -q "TRUNCATED it to 0" <<<"$out" && grep -q "fabricated value" <<<"$out"
 else
   fail "the fractional-counter refusal must name the truncated value (out: $out)"
 fi
-BOOL_ERR='{"round":"r","requests_ok":1,"requests_error":true,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+BOOL_ERR='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":true,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/bool-error"; make_session "$d" "$BOOL_ERR"
 expect_reject "a BOOLEAN requests_error is FATAL (pre-fix: int(True) became a count of 1)" \
   "is the boolean True" "$d" "$TMP/corpus"
 # `requests_ok`, where the truncation defeats the COLD guard rather than the error count.
-FRAC_OK='{"round":"r","requests_ok":1.9,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+FRAC_OK='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1.9,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/frac-ok"; mkdir -p "$d"
 make_scan_rep "$d" cold 1 skipped-cold-arm
 make_flight_rep "$d" cold 1 skipped-cold-arm "$FRAC_OK"
@@ -1062,12 +1184,12 @@ if [ "$rc" -ne 0 ] && grep -q "fractional value 1.9" <<<"$out"; then
 else
   fail "a fractional requests_ok must be refused, not truncated into the cold guard (rc=$rc, out: $out)"
 fi
-BOOL_OK='{"round":"r","requests_ok":true,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+BOOL_OK='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":true,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/bool-ok"; make_session "$d" "$BOOL_OK"
 expect_reject "a BOOLEAN requests_ok is FATAL (int(True) is 1, which is a valid count)" \
   "is the boolean True" "$d" "$TMP/corpus"
 # A FRACTIONAL rows_total, which would silently change the DENOMINATOR of cycles/row.
-FRAC_ROWS='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000.5,"rows_per_s":250.0,"duration_s":4.0}'
+FRAC_ROWS='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000.5,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/frac-rows"; make_session "$d" "$FRAC_ROWS"
 expect_reject "a FRACTIONAL rows_total is FATAL (it is the cycles/row denominator)" \
   "fractional value" "$d" "$TMP/corpus"
@@ -1092,7 +1214,7 @@ expect_reject "a FRACTIONAL corpus-identity field is FATAL (pre-fix: silently tr
 # THE ACCEPT DIRECTION for the whole class: an INTEGRAL float (`1000.0`) is the value it
 # would be read as, so it is ACCEPTED. The rule is "not the integer it would be read as",
 # not "never a float" — a producer writing an integer-valued double is not an error.
-INTEGRAL_FLOAT='{"round":"r","requests_ok":1.0,"requests_error":0.0,"requests_unavailable":0,"rows_total":1000.0,"rows_per_s":250.0,"duration_s":4.0}'
+INTEGRAL_FLOAT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1.0,"requests_error":0.0,"requests_unavailable":0,"rows_total":1000.0,"rows_per_s":250.0,"duration_s":4.0}'
 d="$TMP/integral-float"; make_session "$d" "$INTEGRAL_FLOAT"
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
 if [ "$rc" -eq 0 ]; then
@@ -1183,7 +1305,7 @@ fi
 # just BELOW the observed count — adding a case must not red the suite — and far above zero.
 # `$checks` is incremented by `pass`/`fail` themselves, so it counts what actually RAN rather
 # than what is written in the file.
-MIN_CHECKS=90
+MIN_CHECKS=104
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

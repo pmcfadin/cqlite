@@ -88,7 +88,7 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # shellcheck source=scripts/tests/lib-ws0-report-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
 
-GOOD_FLIGHT='{"round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 
@@ -241,6 +241,10 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         # `requests_unavailable` at its HEALTHY value: the reporter REQUIRES the
         # admission-shed counter (#3272 F4), so omitting it is refused — correctly, but for a
         # reason unrelated to this case's subject (the per-round pairing).
+        # ...and the FIXED INPUTS at the values the driver fixes them to (#3272 F3), for the same
+        # reason: the reporter REQUIRES them, so omitting one is refused correctly but for a
+        # reason unrelated to this case's subject.
+        "schema": "flight-loadgen.step/v1", "step": 0, "target_concurrency": 1, "shape": "full",
         "round": tag, "requests_ok": 1, "requests_error": 0, "requests_unavailable": 0,
         "rows_total": rows, "rows_per_s": rows / secs, "duration_s": secs}) + "\n")
     (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
@@ -748,7 +752,7 @@ no_claim_probe "the accepted 3-round session" "$out"
 # The floor is deliberately BELOW the current count (adding a case must not red the suite) and
 # far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts what
 # actually RAN rather than what is written in the file.
-MIN_CHECKS=38
+MIN_CHECKS=41
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
