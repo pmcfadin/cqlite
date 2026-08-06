@@ -197,17 +197,31 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    cached; vacuous baseline ~18.7k / 0). That trade was chosen deliberately over a machine guessing from
    injectable text.
 
-   **The absence waiver, and its four constraints.** The **owner or the coordination lead** may excuse an
-   absence FAIL with a PR comment carrying `roborev-waive: prompt-content-absent sha=<40-hex head> reason=<why>`.
-   **(a)** Human-authorized, never self-applied — a worker or closer may post **one** request comment, carrying
-   the token accounting, and may never waive its own PR. **(b) SHA-bound**, like `ci:waive:<tier-id>`: a push
-   invalidates it, so re-request against the new head. **(c)** It excuses the **absence verdict only** — never a
-   FAIL with any other cause — and the block still records what was absent, the authorizer, the sha and the
-   reason, under a **distinct `WAIVED` token** (so nobody grepping `prompt-content: PASS` reads a waived run as
-   certified) beside a `waiver:` key that names the state even when nothing was granted
-   (`NONE`/`STALE`/`MALFORMED`/`UNAVAILABLE`, each leaving the FAIL in place). **(d)** The request carries the
-   token accounting and the authorizer checks it.
-
+   **THE ABSENCE WAIVER — the break-glass, its four constraints, and why the documentation is not the
+   credential (#3312 job 23).** The **OWNER or the coordination LEAD** may excuse an absence FAIL with a
+   **dedicated, column-zero line** of a PR comment:
+   `roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>`.
+   **(a)** Human-authorized, never self-applied: a worker or closer may post **one** REQUEST comment —
+   carrying the token accounting — and may never waive its own PR. **(b) Bound to the WHOLE REVIEW SCOPE**,
+   not just the head: **base AND head AND job**, all required and all verified, because the authorizer
+   judged **one** review — so a push, a different base *or a re-run* each need a fresh waiver, and one
+   persistent comment can no longer excuse a later **vacuous** review at the same head. **(c)** It excuses
+   the **ABSENCE verdict ONLY** — never any other cause — and the block still records what was absent, the
+   authorizer, the bound scope and the reason, under a **distinct `WAIVED` token** (so nobody grepping
+   `prompt-content: PASS` reads a waived run as certified) beside a `waiver:` key that names the state even
+   when nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAVAILABLE`, each leaving the FAIL). **(d)** The
+   request carries the token accounting and the authorizer checks it.
+   **AND THREE LAYERS STOP THE ARTIFACT BECOMING THE CREDENTIAL — the sharpest instance of this issue's
+   recurring shape.** The first version accepted the marker *anywhere* inside a comment whose newlines had
+   been flattened, and the absence diagnostic **printed a complete marker carrying the live sha** — so
+   pasting the summary block into a PR comment, *the documented practice throughout this repo*, authorized
+   the next run (RED-verified: the pasted block produced `prompt-content: WAIVED … RESULT: PASS`). A quoted
+   example or a waiver *request* self-granted the same way. It is the same defect as prose inside a diff
+   naming its own oracle, which is why the census matcher is column-zero anchored. Now: **(1)** comment line
+   boundaries are preserved and the marker must **BE** the line — an indented, `>`-quoted, bulleted or
+   mid-sentence copy is inert; **(2)** placeholder reasons are refused (an unsubstituted `<…>`, or a bare
+   `why`/`todo`/`tbd` — `claim.sh`'s rule), so a pasted **template** reads `MALFORMED`; **(3)** no emitted
+   diagnostic carries **any part** of the marker — not even the prefix — and points at `--help` instead.
    **Authorship is process-enforced with an audit trail, not mechanically verified — and the code says so.** On
    this fleet the worker, the closer and the owner all post through the **same GitHub login**, so no
    `author.login` check could tell a self-applied waiver from a granted one. A check that appeared to verify
