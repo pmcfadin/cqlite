@@ -5831,6 +5831,15 @@ run_tooling_tests() {
   #     an empty spec and an unreadable topology entry. The override itself fails
   #     closed in a measurement run (asserted, incl. that the refusal PRECEDES the
   #     pinning check), so it can never become the bypass.
+  #     Round 21 adds the CLIENT set, whose check used to fail OPEN: a
+  #     `verify_sibling_pair … || echo` swallowed EVERY failure rather than only the
+  #     sibling shape it meant to tolerate, so a nonexistent or OFFLINE CPU in the
+  #     list was accepted, sched_setaffinity silently reduced the affinity to the
+  #     valid subset, and the manifest recorded — and the report printed — CPUs that
+  #     never ran an instruction. `verify_cpus_online` now validates EACH expanded CPU
+  #     independently (present + online, three states distinguished) and refuses,
+  #     naming every unusable CPU, while still requiring NO sibling shape — measured
+  #     both ways, including the pre-fix compound's rc=0 on a mixed valid/absent list.
   #   * the SERVER-OWNERSHIP check — the same question about the right PROGRAM.
   #     Readiness used to be inferred solely from a connect probe succeeding, so a
   #     failed bind plus a peer holding the port meant the load generator measured

@@ -242,6 +242,242 @@ else
   fail "disjoint-reject: expected non-zero + 'overlap on cpu6' (rc=$rc, out: $out)"
 fi
 
+# --- 1e2. round 21: THE CLIENT SET'S TOPOLOGY CHECK USED TO FAIL **OPEN** ------------------
+#
+# THE FINDING. The driver wrote the client set off as unverifiable:
+#
+#     verify_sibling_pair "$CLIENT_CPUS" "client" 2>/dev/null \
+#       || echo "client CPUs: $CLIENT_CPUS (a multi-core set — only the SERVER set must be …)"
+#
+# The intent was right and is preserved: a multi-core client set is legitimate, so the SIBLING
+# shape must not be demanded of it. What the '||' ALSO swallowed is every other reason the check
+# can fail — a CPU that does not exist on this box, or one that exists and is OFFLINE. Such a list
+# was ACCEPTED, sched_setaffinity reduced the affinity to the valid subset, and the manifest
+# recorded (and the report printed) client_cpus as the string PASSED. The report then asserts CPUs
+# were used that never ran an instruction.
+#
+# Refused rather than captioned because the direction of the error matters: this degradation
+# biases TOWARD the claim (#3272 round 19). Fixed by verify_cpus_online, which validates EACH
+# expanded CPU independently for presence and online state and requires NO sibling shape.
+#
+# A SEPARATE topology root for these cases, so the offline/absent CPUs cannot perturb 1a-1e:
+# the same 4-core/8-thread layout PLUS cpu20 explicitly offline (online=0) and cpu21 offline the
+# way the kernel actually spells it (topology/ REMOVED). Both spellings, because on a real host
+# the removed topology dir is the load-bearing signal and the online file is the corroboration.
+OFF_TOPO="$TMP/sys-offline/cpu"
+mk_offline_topology() {
+  local c s
+  rm -rf "$OFF_TOPO"
+  for c in 0 1 2 3; do
+    for s in "$c" "$((c + 4))"; do
+      mkdir -p "$OFF_TOPO/cpu$s/topology"
+      printf '%s,%s\n' "$c" "$((c + 4))" > "$OFF_TOPO/cpu$s/topology/thread_siblings_list"
+      printf '1\n' > "$OFF_TOPO/cpu$s/online"
+    done
+  done
+  mkdir -p "$OFF_TOPO/cpu20/topology"
+  printf '20,21\n' > "$OFF_TOPO/cpu20/topology/thread_siblings_list"
+  printf '0\n' > "$OFF_TOPO/cpu20/online"   # present, readable topology, DECLARED offline
+  mkdir -p "$OFF_TOPO/cpu21"
+  printf '0\n' > "$OFF_TOPO/cpu21/online"   # offline the way the kernel spells it: no topology/
+}
+mk_offline_topology
+# off_call <fn> [args…] — as lib_call, against the offline-bearing root.
+off_call() {
+  local fn="$1"; shift
+  ( export CQLITE_WS0_CPU_TOPOLOGY_ROOT="$OFF_TOPO"
+    # shellcheck disable=SC1090
+    source "$LIB"
+    "$fn" "$@" ) 2>&1
+}
+# THE ACCEPT HALF FIRST, and it is doing two jobs: it proves the probe is not uniformly broken
+# (a verify_cpus_online hardcoded to refuse would satisfy every reject case below), and it proves
+# the SIBLING requirement was NOT re-introduced — 4,5,6,7 spans FOUR different physical cores on
+# this layout, which verify_sibling_pair refuses and this check must accept.
+out=$(off_call verify_cpus_online "4,5,6,7" client); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "verified 4 CPU(s) present and ONLINE" <<<"$out"; then
+  pass "cpus-online-accept (round21): a 4-PHYSICAL-CORE client set (4,5,6,7) is ACCEPTED — the sibling shape is NOT required, which is why the tolerance existed"
+else
+  fail "cpus-online-accept (round21): a legitimate multi-core client set must pass (rc=$rc, out: $out)"
+fi
+# ...and the same set IS refused by the sibling check, so the case above really is one the
+# sibling check could not have carried. Without this, "no sibling shape required" is an assertion.
+out=$(off_call verify_sibling_pair "4,5,6,7" client); rc=$?
+if [ "$rc" -ne 0 ]; then
+  pass "cpus-online-accept (round21): that same multi-core set IS refused by verify_sibling_pair — so the two checks are genuinely different questions, not a rename"
+else
+  fail "round21: verify_sibling_pair must still refuse 4,5,6,7, else the accept case above proves nothing (rc=$rc, out: $out)"
+fi
+# THE HEADLINE REJECT: a MIXED list — one valid CPU plus one that does not exist. This is the
+# exact shape the fail-open '||' admitted, and the index is in-range for the grammar (100 <= 8191)
+# so the refusal comes from the TOPOLOGY check rather than from the CONFIG_NR_CPUS ceiling.
+out=$(off_call verify_cpus_online "4,100" client); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "cpu100 (nonexistent)" <<<"$out" \
+   && grep -q "cannot run anything on" <<<"$out"; then
+  pass "cpus-online-reject (round21): OBSERVED — a MIXED list (4,100: one valid, one NONEXISTENT) is REFUSED, naming cpu100"
+else
+  fail "round21: a mixed valid/nonexistent client list must be refused naming the CPU (rc=$rc, out: $out)"
+fi
+# ...and a MIXED list with an OFFLINE CPU, both spellings of offline.
+out=$(off_call verify_cpus_online "4,20" client); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "cpu20 (offline)" <<<"$out"; then
+  pass "cpus-online-reject (round21): a MIXED list with a DECLARED-offline CPU (online=0) is REFUSED, naming cpu20"
+else
+  fail "round21: an offline CPU (online=0) must be refused naming it (rc=$rc, out: $out)"
+fi
+out=$(off_call verify_cpus_online "4,21" client); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "cpu21 (offline)" <<<"$out"; then
+  pass "cpus-online-reject (round21): a CPU offline the way the KERNEL spells it (topology/ removed) is REFUSED — the load-bearing signal on a real host"
+else
+  fail "round21: a CPU with no topology dir must be refused as offline (rc=$rc, out: $out)"
+fi
+# MULTIPLE bad CPUs are ALL named, not just the first: an operator who fixes the one CPU the
+# diagnostic mentioned and re-runs must not hit a second refusal for the next one.
+out=$(off_call verify_cpus_online "4,100,20,5" client); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "names 2 CPU(s)" <<<"$out" \
+   && grep -q "cpu100 (nonexistent)" <<<"$out" && grep -q "cpu20 (offline)" <<<"$out"; then
+  pass "cpus-online-reject (round21): EVERY unusable CPU is named in ONE refusal (2 of 4), not just the first"
+else
+  fail "round21: all unusable CPUs must be named in one diagnostic (rc=$rc, out: $out)"
+fi
+# The THREE-STATE probe, driven directly: a boolean would have collapsed nonexistent and offline,
+# whose remedies differ (a typo in the argument vs a host that needs chcpu -e). This is also the
+# positive control for the probe itself — a probe answering "nonexistent" for everything would
+# make every reject case above fire for the wrong reason.
+if [ "$(off_call cpu_presence_state 4 | tail -1)" = "online" ] \
+   && [ "$(off_call cpu_presence_state 100 | tail -1)" = "nonexistent" ] \
+   && [ "$(off_call cpu_presence_state 20 | tail -1)" = "offline" ] \
+   && [ "$(off_call cpu_presence_state 21 | tail -1)" = "offline" ]; then
+  pass "cpus-online (round21): cpu_presence_state distinguishes online / nonexistent / offline — three states, because the remedies differ"
+else
+  fail "round21: cpu_presence_state must report all three states distinctly (4=$(off_call cpu_presence_state 4 | tail -1) 100=$(off_call cpu_presence_state 100 | tail -1) 20=$(off_call cpu_presence_state 20 | tail -1) 21=$(off_call cpu_presence_state 21 | tail -1))"
+fi
+# An EMPTY expanded set must not iterate over nothing and return success — the vacuous-pass shape
+# one level down, inside the very check added to close a vacuous pass.
+out=$(off_call verify_cpus_online "" client); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "expands to an EMPTY set" <<<"$out"; then
+  pass "cpus-online-reject (round21): an EMPTY client set is refused rather than looping over nothing and returning 0"
+else
+  fail "round21: an empty set must be refused by verify_cpus_online (rc=$rc, out: $out)"
+fi
+# ...and a MALFORMED spec surfaces the GRAMMAR's diagnostic, not a topology one: the cause an
+# operator is sent to fix must be the cause.
+out=$(off_call verify_cpus_online "1+1" client); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is not a CPU index or range" <<<"$out"; then
+  pass "cpus-online-reject (round21): a malformed spec PROPAGATES the grammar's diagnostic, not a topology one"
+else
+  fail "round21: verify_cpus_online must propagate the grammar refusal (rc=$rc, out: $out)"
+fi
+# AN UNPROBEABLE TOPOLOGY IS FAIL-CLOSED. "The facility is missing" is not evidence that a CPU
+# list is usable; assuming fine is how this guard would become decoration.
+NO_TOPO="$TMP/sys-notopo/cpu"
+mkdir -p "$NO_TOPO"
+out=$( export CQLITE_WS0_CPU_TOPOLOGY_ROOT="$NO_TOPO"
+       # shellcheck disable=SC1090
+       source "$LIB"; verify_cpus_online "4" client 2>&1 ); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "publishes topology/thread_siblings_list" <<<"$out" \
+   && grep -q "REFUSAL, not an assumption" <<<"$out"; then
+  pass "cpus-online-reject (round21): a topology root that publishes NOTHING is FAIL-CLOSED, not 'assume fine'"
+else
+  fail "round21: an unprobeable topology must refuse (rc=$rc, out: $out)"
+fi
+
+# --- 1e3. round 21 NON-VACUITY: what the PRE-FIX code did, MEASURED -------------------------
+# A replica of the removed compound expression, verbatim in shape, run over the SAME fake
+# topology. Without this the refusals above could be about inputs nothing ever accepted.
+prefix_client_check() { # prefix_client_check <spec> — echoes the line the driver printed; rc is the driver's
+  ( export CQLITE_WS0_CPU_TOPOLOGY_ROOT="$OFF_TOPO"
+    # shellcheck disable=SC1090
+    source "$LIB"
+    verify_sibling_pair "$1" "client" 2>/dev/null \
+      || echo "client CPUs: $1 (a multi-core set — only the SERVER set must be one physical core)" )
+}
+pre_out="$(prefix_client_check "4,100" 2>/dev/null)"; pre_rc=$?
+if [ "$pre_rc" -eq 0 ] && grep -q "a multi-core set" <<<"$pre_out"; then
+  pass "round21 NON-VACUITY: the PRE-FIX compound ACCEPTED the mixed list 4,100 (rc=0) and printed the REASSURING caption 'a multi-core set' — a nonexistent CPU reported as a legitimate multi-core set"
+else
+  fail "round21 NON-VACUITY: the pre-fix compound must have accepted 4,100, else the refusal proves nothing (rc=$pre_rc, out: $pre_out)"
+fi
+pre_out="$(prefix_client_check "4,20" 2>/dev/null)"; pre_rc=$?
+if [ "$pre_rc" -eq 0 ]; then
+  pass "round21 NON-VACUITY: the PRE-FIX compound ACCEPTED an OFFLINE CPU in the list (4,20, rc=0)"
+else
+  fail "round21 NON-VACUITY: the pre-fix compound must have accepted 4,20 (rc=$pre_rc, out: $pre_out)"
+fi
+# Worse, and it is worth its own case: a list in which EVERY CPU is unusable was also accepted,
+# because the '||' fired on the failure and reported success regardless of the cause.
+pre_out="$(prefix_client_check "100,101" 2>/dev/null)"; pre_rc=$?
+if [ "$pre_rc" -eq 0 ]; then
+  pass "round21 NON-VACUITY: the PRE-FIX compound accepted a list where EVERY CPU is nonexistent (100,101, rc=0) — the '||' reported success whatever the cause"
+else
+  fail "round21 NON-VACUITY: the pre-fix compound must have accepted 100,101 (rc=$pre_rc, out: $pre_out)"
+fi
+# ...and the pre-fix compound ALSO accepted a fully VALID multi-core set, which is the control
+# that makes the three cases above findings rather than an artefact: the ONLY thing that changed
+# is the disposition of the UNUSABLE CPUs.
+if prefix_client_check "4,5,6,7" >/dev/null 2>&1; then
+  pass "round21 NON-VACUITY control: the pre-fix compound accepted the VALID set too — so the delta is exactly the unusable CPUs, not a blanket behaviour change"
+else
+  fail "round21 NON-VACUITY control: the pre-fix compound must have accepted 4,5,6,7"
+fi
+# THE SILENT REDUCTION, measured where the facility exists. sched_setaffinity ANDs the requested
+# mask with cpu_online_mask whenever the mask holds at least one online CPU, so the process runs
+# on the SUBSET and nothing says so. Measured with taskset against a real in-range CPU index this
+# host does not have; captioned rather than faked where taskset does not exist (darwin), because
+# the honest report of an unmeasurable state is not a skip of a measurable one.
+if command -v taskset >/dev/null 2>&1; then
+  host_cpus=$(getconf _NPROCESSORS_CONF 2>/dev/null || echo 0)
+  absent_cpu=$((host_cpus + 200))
+  if [ "$host_cpus" -gt 0 ] && [ "$absent_cpu" -lt 1024 ]; then
+    red_out="$(taskset -c "0,$absent_cpu" bash -c 'taskset -cp $$' 2>&1)"; red_rc=$?
+    if [ "$red_rc" -eq 0 ] && grep -qE 'affinity list: 0$' <<<"$red_out"; then
+      pass "round21 NON-VACUITY (MEASURED): taskset -c 0,$absent_cpu SUCCEEDED and the resulting affinity is '0' — the kernel SILENTLY reduced the set to the valid subset, so the run proceeds on CPUs other than the ones recorded"
+    else
+      fail "round21 NON-VACUITY: the silent-reduction premise did not reproduce on this host (rc=$red_rc, out: $red_out) — the fail-open path's consequence must be re-established before this case is trusted"
+    fi
+  else
+    pass "round21 NON-VACUITY: CAPTIONED — the silent-reduction measurement needs an in-range absent CPU index below CPU_SETSIZE and this host reports $host_cpus configured CPUs, so no such index exists here"
+  fi
+else
+  pass "round21 NON-VACUITY: CAPTIONED — taskset is absent (this is not Linux), so the kernel-side silent affinity reduction cannot be measured HERE; the pre-fix ACCEPTANCE cases above are measured on every host and are what make the refusal non-vacuous"
+fi
+# WHAT THE MANIFEST CLAIMED. The recorded client_cpus is the ARGUMENT, unfiltered — the driver
+# passes $CLIENT_CPUS straight into the pinning record and ws0_report.py prints it — so under the
+# fail-open path the report asserted CPUs that the reduced affinity never ran on. Read off the
+# SHIPPED files, and each grep is guarded so an absent subject FAILS rather than passing over an
+# empty match.
+REPORT_PY="$REPO_ROOT/scripts/perf/ws0_report.py"
+if grep -q 'WS0_PIN_CLIENT_CPUS="\$CLIENT_CPUS"' "$DRIVER" \
+   && grep -q '"client_cpus": os.environ\["WS0_PIN_CLIENT_CPUS"\]' "$DRIVER" \
+   && [ -s "$REPORT_PY" ] && grep -q 'client_cpus = config\["client_cpus"\]' "$REPORT_PY"; then
+  pass "round21: WHAT THE MANIFEST CLAIMED — the driver records client_cpus as the ARGUMENT verbatim (no filtering to the usable subset) and ws0_report.py prints that string, so under the fail-open path the report named CPUs the reduced affinity never used"
+else
+  fail "round21: the client_cpus record/print chain must be present, or the manifest half of this finding cannot be stated (driver record=$(grep -c 'WS0_PIN_CLIENT_CPUS' "$DRIVER"), report present=$([ -s "$REPORT_PY" ] && echo yes || echo NO))"
+fi
+
+# --- 1e4. round 21 WIRING: the fail-open form is GONE and the refusal is REACHED -----------
+# A guard present but never called is the #3249 shape, and here the specific hazard is that the
+# OLD line is the one an editor restores. Both halves asserted.
+if grep -qF 'verify_cpus_online "$CLIENT_CPUS" "client" || exit 2' "$DRIVER"; then
+  pass "round21 wiring: the driver calls verify_cpus_online on the CLIENT set, fail-closed"
+else
+  fail "round21 wiring: the driver must call 'verify_cpus_online \"\$CLIENT_CPUS\" \"client\" || exit 2'"
+fi
+if ! grep -qE '^verify_sibling_pair "\$CLIENT_CPUS"' "$DRIVER"; then
+  pass "round21 wiring: the FAIL-OPEN form (verify_sibling_pair on the client set with a '||' fallback) is GONE from the driver"
+else
+  fail "round21 wiring: the fail-open client sibling check must not be restored"
+fi
+# It must run BEFORE the host's perf sysctls are weakened and before the release build — an
+# argument-shaped mistake must cost an argument-shaped failure, not a mutated host.
+client_line=$(grep -nF 'verify_cpus_online "$CLIENT_CPUS"' "$DRIVER" | head -1 | cut -d: -f1)
+relax_line=$(grep -nE '^relax_perf_sysctls' "$DRIVER" | head -1 | cut -d: -f1)
+if [ -n "$client_line" ] && [ -n "$relax_line" ] && [ "$client_line" -lt "$relax_line" ]; then
+  pass "round21 wiring: the client-CPU refusal (line $client_line) precedes relax_perf_sysctls (line $relax_line) — the host is not mutated for a run that cannot proceed"
+else
+  fail "round21 wiring: verify_cpus_online must precede relax_perf_sysctls (client=$client_line relax=$relax_line)"
+fi
+
 # --- 1f. THE OVERRIDE CANNOT REACH A MEASUREMENT RUN -----------------------
 # The injectable topology root is what makes 1a-1e possible, and it would be a
 # BYPASS of the very guarantee they test if a measurement run could use it: the
@@ -940,7 +1176,11 @@ fi
 # 189 would point at a count that no longer exists and would red the suite unconditionally,
 # which is the #3326-item-3 shape (a floor naming a number nothing produces) in its loudest
 # direction rather than its quiet one.
-MIN_CHECKS=72
+# RE-DERIVED at round 21 by RUNNING the suite, never by counting source lines: a source estimate
+# understated a floor by 29 earlier on this branch, because loops multiply. MEASURED after the
+# round-21 client-CPU cases: 95 checks (76 before, +19). Floor moved to 90, still below the count
+# so adding a case cannot red the suite.
+MIN_CHECKS=90
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
