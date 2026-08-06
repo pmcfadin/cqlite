@@ -46,6 +46,9 @@ The instrument SHALL emit the following catalog metrics, and no others under thi
 | `cqlite.read.partition_access.accesses` | counter | `1` | `cqlite.read.repeat_bucket` |
 | `cqlite.read.partition_access.bytes` | counter | `By` | `cqlite.read.repeat_bucket` |
 | `cqlite.read.partition_access.sample_denominator` | gauge | `1` | (none) |
+| `cqlite.read.partition_access.dropped_accesses` | counter | `1` | (none) |
+| `cqlite.read.partition_access.window_dropped_accesses` | gauge | `1` | (none) |
+| `cqlite.read.partition_access.sampling_floor` | gauge | `1` | (none) |
 
 `cqlite.read.repeat_bucket` SHALL be a closed set of exactly the six bucket labels above.
 `cqlite.read.size_source` SHALL be a closed set of exactly `index`, `successor_gap` and
@@ -78,7 +81,7 @@ keys); `cqlite-flight/tests/issue_2827_partition_access_e2e.rs` (emitted-series 
 - **WHEN** the emitted series are read back through the observability capture harness
 - **THEN** the only attribute keys present on any `cqlite.read.partition_access.*` series are `cqlite.read.repeat_bucket` and `cqlite.read.size_source`
 - **AND** every observed `cqlite.read.repeat_bucket` value is one of the six declared labels and every `cqlite.read.size_source` value is `index`, `successor_gap` or `unavailable`
-- **AND** the total number of distinct series across the four metrics does not exceed 31 (`6 x 3 + 6 + 6 + 1`), regardless of how many distinct partitions were accessed
+- **AND** the total number of distinct series across the seven metrics does not exceed 34 (`6 x 3 + 6 + 6 + 1 + 1 + 1 + 1`), regardless of how many distinct partitions were accessed
 
 ### Requirement: Repeat counting uses fixed memory independent of partition count
 
@@ -142,7 +145,7 @@ downsample correctness; unbiased-fraction recovery under forced downsampling).
 ### Requirement: The measurement window is tumbling, closes deterministically, and emits exactly once
 
 The window SHALL be **tumbling**: on close the recorder buckets every live entry, emits each of the
-four series once, and resets the structure to empty with the sampling scale reset.
+series once, and resets the structure to empty with the sampling scale reset.
 
 The window SHALL close on the first of: a configured wall-clock duration, a configured recorded-access
 count, or an explicit programmatic `close_window()` call. `close_window()` SHALL be part of the public
@@ -164,7 +167,7 @@ reset-on-close, empty-window-silence).
 #### Scenario: Closing a window emits once and resets
 - **GIVEN** an open window with recorded accesses
 - **WHEN** `close_window()` is called
-- **THEN** each of the four series is emitted exactly once for that window
+- **THEN** each of the emitted series is emitted exactly once for that window
 - **AND** a subsequent `close_window()` with no intervening accesses emits nothing
 - **AND** the next window's histogram contains no partition from the previous window unless it was accessed again
 
@@ -408,7 +411,7 @@ decision note's own scope paragraph.
 
 ### Requirement: The metric catalog, the operator docs and the published attribute tables record the new metrics correctly
 
-The four metrics SHALL be registered as constants in `cqlite-core/src/observability/catalog.rs` and
+The seven metrics SHALL be registered as constants in `cqlite-core/src/observability/catalog.rs` and
 listed in `ALL_METRICS` (`:907`), and each SHALL carry an operator annotation in
 `operator_docs_annotations.rs` — the generator is fail-closed, so an unannotated catalog metric cannot
 ship (`cqlite-core/src/observability/operator_docs.rs:16-19`, `:116`). The two new attribute keys SHALL
@@ -416,7 +419,7 @@ be added to `catalog::attr` with their closed value sets documented.
 
 The generated operator pages `docs/reports/flight-metrics-reference.md` and
 `website/src/content/docs/agents-using/flight-metrics-reference.md` (`operator_docs.rs:35`, `:40`) SHALL
-be regenerated in the same change, and `docs/observability/configuration.md` SHALL gain the four metric
+be regenerated in the same change, and `docs/observability/configuration.md` SHALL gain the seven metric
 rows and the two attribute value-set rows. The `operator-metrics-doc` and `kit-dashboard-drift` agent-gate
 components SHALL pass (`scripts/agent-gate.sh:2033`).
 
@@ -441,7 +444,7 @@ asserts the emitted attribute keys of `cqlite.read.partition_lookup.total` match
 documentation.
 
 #### Scenario: A new metric cannot ship undocumented
-- **GIVEN** the four metrics added to `ALL_METRICS`
+- **GIVEN** the seven metrics added to `ALL_METRICS`
 - **WHEN** the operator-metrics doc generator runs
 - **THEN** it succeeds only because each has an operator annotation, and the regenerated pages contain all four with their units and bounded attribute sets
 - **AND** the `operator-metrics-doc` gate component reports no drift

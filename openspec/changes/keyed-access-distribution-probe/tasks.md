@@ -9,7 +9,7 @@
 > itself the gate is **recorded, not executed** (retitle/re-scope is an owner action).
 
 ## 1. Catalog + attribute registration (surface: `cqlite_core::observability::catalog`)
-- [x] Add the four metric constants to `cqlite-core/src/observability/catalog.rs` with doc comments in
+- [x] Add the metric constants to `cqlite-core/src/observability/catalog.rs` with doc comments in
       the existing house style (name, instrument, unit, bounded attributes):
       `READ_PARTITION_ACCESS_DISTINCT_PARTITIONS` (`cqlite.read.partition_access.distinct_partitions`,
       counter, `{partition}`), `READ_PARTITION_ACCESS_ACCESSES` (`…accesses`, counter, `1`),
@@ -146,7 +146,7 @@
 ## 6. The decision procedure (surface: a committed research note)
 - [x] Write `docs/research/decoded-partition-cache-decision.md` covering, in order: inputs; the single
       assumption (decode multiplier `m`, cited to the Phase-0 wire estimate at
-      `docs/research/phase2-verify-caching.md:221-222` and labelled an assumption); the four refusal
+      `docs/research/phase2-verify-caching.md:221-222` and labelled an assumption); the refusal
       conditions checked first; the closed-form clairvoyant ceiling
       `H_max(C) = [Σ_taken (a_b − n_b) + f·(a_last − n_last)] / A` with buckets ordered by
       `accesses/bytes` and `C/m` on-disk bytes filled greedily; the recommended threshold
@@ -162,7 +162,7 @@
 - [x] Regenerate the operator pages: `cargo run -p cqlite-core --example gen_operator_metrics_doc` →
       `docs/reports/flight-metrics-reference.md` + `website/src/content/docs/agents-using/flight-metrics-reference.md`
       (`operator_docs.rs:35`, `:40`). Do not hand-edit either file.
-- [x] Hand-edit `docs/observability/configuration.md`: add the four metric rows to the read-path table
+- [x] Hand-edit `docs/observability/configuration.md`: add the metric rows to the read-path table
       and the two attribute value-set rows to the bounded-attribute table.
 - [x] **Correction (same change, because it is this change's premise):** fix
       `docs/observability/configuration.md:215` and the instrument description at

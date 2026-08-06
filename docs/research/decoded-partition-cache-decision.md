@@ -71,29 +71,39 @@ then, report the verdict with the `m` you used and re-run the arithmetic at `m =
 
 ## Step 1 — the refusal conditions, checked FIRST
 
-Each yields **no answer**, never a default verdict. Check all four before computing anything.
+Each yields **no answer**, never a default verdict. Check every one before computing anything.
+They are in the order the shipped evaluator applies them, so a window failing several is
+diagnosed by the most fundamental.
 
-1. **A non-zero `unavailable` fraction.** The byte total is incomplete by an unknown amount,
-   so any budget-filling arithmetic overstates what fits. **Refuse**, naming the fraction.
-   This tests *incompleteness*, not provenance: a window whose bytes are entirely
-   `successor_gap` is complete and proceeds.
-2. **The window reached the sampling floor** (`sample_denominator` at the cap, reported as
-   non-census). The surviving sample is statistically worthless. **Refuse.**
-3. **`A` below 10,000 accesses.** This is not a workload. **Refuse.**
-4. **The window came from synthetic or self-generated load** — a test, an in-repo rig, a
+1. **A non-zero `unavailable` fraction** (`distinct_partitions{size_source="unavailable"}`).
+   The byte total is incomplete by an unknown amount, so any budget-filling arithmetic
+   overstates what fits. **Refuse**, naming the fraction. This tests *incompleteness*, not
+   provenance: a window whose bytes are entirely `successor_gap` is complete and proceeds.
+2. **A non-zero `window_dropped_accesses`.** The recorder could not seat some accesses in its
+   table, so the histogram is missing input — and only keys NOT already in the table can be
+   dropped, which suppresses the singleton bucket and OVERSTATES concentration. **Refuse.**
+3. **`sampling_floor = 1`.** The window reached the sampling-prefix cap; the surviving sample
+   is statistically worthless. **Refuse.**
+4. **`sample_denominator > 1`.** The window is a SAMPLE, not a census. Its per-bucket bytes
+   are sample-domain totals, so filling a real budget against them prices the whole budget
+   against `1/2^k` of the working set — a false "go". **Refuse.** Remedy: shorten the window
+   (`CQLITE_PARTITION_ACCESS_WINDOW_SECS` / `..._WINDOW_ACCESSES`) until the distinct set fits
+   the ~98,304-slot table, and re-measure.
+5. **`A` below 10,000 accesses.** This is not a workload. **Refuse.**
+6. **The window came from synthetic or self-generated load** — a test, an in-repo rig, a
    loadgen run. Its output may be recorded as an **instrument self-check** and may **NEVER**
    be cited as the go/no-go, because the answer would be a function of a distribution we
    chose. **Refuse.**
+7. **No priced bytes at all.** Nothing to fill a budget with. **Refuse.**
 
-The procedure additionally REFUSES a window that is not a census
-(`sample_denominator > 1`) and one reporting a non-zero `dropped_accesses`. Both are
-consequences of the conditions already stated rather than new policy: a sample's
-per-bucket bytes are sample-domain totals, so filling a real budget against them
-overstates what fits; and only keys not already in the table can be dropped, so a
-loss suppresses the singleton bucket and overstates concentration. Scaling a sample
-by `2^k` was rejected in favour of refusing: it yields a point estimate whose
-variance this instrument cannot bound, and the output is a go/no-go rather than an
-interval.
+A window is trustworthy on the emitted series alone exactly when
+`window_dropped_accesses = 0`, `sampling_floor = 0` and `sample_denominator = 1`.
+
+Scaling a sample by `2^k` was rejected in favour of refusing it (condition 4): scaling
+yields an unbiased point estimate of the population totals but says nothing about its
+variance, and this procedure's output is a go/no-go rather than an interval — so a scaled
+verdict would read exactly as authoritative as a census one while resting on an
+extrapolation the instrument cannot bound.
 
 A window that survives every condition is priceable. Under sampling (`2^k > 1`) the bucket *fractions* remain unbiased with no correction — the
 admission predicate is a function of the key hash alone, hence independent of a key's access
@@ -179,10 +189,16 @@ from the bytes that only dilute the budget.
 # 1. Enable the probe on the process serving the real keyed workload. Default is OFF.
 export CQLITE_PARTITION_ACCESS_PROBE=1
 
+# 1b. If step 4 refuses the window as a non-census SAMPLE, shorten the window until
+#     the distinct partition set fits the ~98,304-slot counting table. This is the
+#     operator-side remedy and needs no code change.
+export CQLITE_PARTITION_ACCESS_WINDOW_SECS=10        # default 60
+export CQLITE_PARTITION_ACCESS_WINDOW_ACCESSES=50000 # default 5,000,000
+
 # 2. Let a real workload run. The window is tumbling (60 s or 5,000,000 accesses,
 #    whichever first); an operator can also close one deterministically in-process.
 
-# 3. Read the four series off the dashboard / OTLP collector:
+# 3. Read the series off the dashboard / OTLP collector:
 #      cqlite.read.partition_access.distinct_partitions{repeat_bucket,size_source}
 #      cqlite.read.partition_access.accesses{repeat_bucket}
 #      cqlite.read.partition_access.bytes{repeat_bucket}
@@ -198,7 +214,7 @@ sampling scale.
 
 The procedure is also available as code — `cqlite_core::observability::partition_access::decision`
 — so a captured window can be priced without re-deriving any of the above. It implements
-exactly the four refusal conditions and the ceiling in this note.
+exactly the refusal conditions and the ceiling in this note.
 
 ## Known coverage limitation of the instrument
 

@@ -130,7 +130,9 @@ impl std::fmt::Display for Refusal {
                  census. Its per-bucket bytes are sample-domain totals, so filling a \
                  real cache budget against them would price the whole budget against \
                  1/{sample_denominator} of the working set and OVERSTATE what fits. \
-                 Re-measure with a shorter window so the distinct set fits the table"
+                 Remedy: shorten the measurement window so the distinct set fits the \
+                 counting table — set CQLITE_PARTITION_ACCESS_WINDOW_SECS (or \
+                 CQLITE_PARTITION_ACCESS_WINDOW_ACCESSES) and re-measure"
             ),
             Refusal::DroppedAccesses { dropped, recorded } => write!(
                 f,

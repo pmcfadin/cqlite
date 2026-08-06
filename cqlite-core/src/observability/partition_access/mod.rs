@@ -64,6 +64,13 @@ pub use types::{
 /// Environment variable that turns the probe on. Default OFF.
 const PROBE_ENV: &str = "CQLITE_PARTITION_ACCESS_PROBE";
 
+/// Window length in seconds. Operator-reachable because the decision procedure's
+/// remedy for a refused sample depends on it — see [`window_config_from_env`].
+const WINDOW_SECS_ENV: &str = "CQLITE_PARTITION_ACCESS_WINDOW_SECS";
+
+/// Window bound in recorded accesses.
+const WINDOW_ACCESSES_ENV: &str = "CQLITE_PARTITION_ACCESS_WINDOW_ACCESSES";
+
 /// Effective-state cache so the disabled hot path is ONE relaxed atomic load.
 /// `0` = not yet resolved, `1` = on, `2` = off.
 static EFFECTIVE: AtomicU8 = AtomicU8::new(0);
@@ -524,10 +531,51 @@ impl PartitionAccessRecorder {
     }
 }
 
+/// The window policy an operator asked for, from the environment.
+///
+/// # Why this knob has to exist
+///
+/// The decision procedure REFUSES a window that is not a census, and its stated
+/// remedy is "re-measure with a shorter window". With the window length reachable
+/// only from Rust, that remedy would be unreachable in production: a field workload
+/// touching more than the table's ~98k distinct partitions in the default 60 s would
+/// be refused with nothing an operator could do about it — hollowing out the promise
+/// that the verdict falls out of the first real workload.
+///
+/// Unset or unparseable values keep the default, loudly for the unparseable case: a
+/// mistyped knob that silently no-ops defeats the knob's purpose. A zero or negative
+/// duration is rejected the same way (it would close a window per access).
+pub fn window_config_from_env() -> WindowConfig {
+    let mut config = WindowConfig::default();
+    if let Ok(raw) = std::env::var(WINDOW_SECS_ENV) {
+        match raw.trim().parse::<u64>() {
+            Ok(secs) if secs > 0 => config.duration = Duration::from_secs(secs),
+            _ => tracing::error!(
+                value = raw,
+                "unrecognised {WINDOW_SECS_ENV} value — keeping the default window                  length; expected a positive whole number of seconds"
+            ),
+        }
+    }
+    if let Ok(raw) = std::env::var(WINDOW_ACCESSES_ENV) {
+        match raw.trim().parse::<u64>() {
+            Ok(n) if n > 0 => config.max_accesses = n,
+            _ => tracing::error!(
+                value = raw,
+                "unrecognised {WINDOW_ACCESSES_ENV} value — keeping the default                  access bound; expected a positive whole number"
+            ),
+        }
+    }
+    config
+}
+
 /// The process-global recorder behind [`record_partition_access`].
+///
+/// Initialised from [`window_config_from_env`], so the window length and access
+/// bound are operator-reachable without a code change; [`PartitionAccessRecorder::set_window_config`]
+/// still overrides at runtime.
 pub fn global() -> &'static PartitionAccessRecorder {
     static GLOBAL: OnceLock<PartitionAccessRecorder> = OnceLock::new();
-    GLOBAL.get_or_init(PartitionAccessRecorder::default)
+    GLOBAL.get_or_init(|| PartitionAccessRecorder::new(window_config_from_env()))
 }
 
 /// The table an access belongs to — part of the entry identity.

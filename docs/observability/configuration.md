@@ -31,6 +31,9 @@ These are read by every surface through
 | `CQLITE_OTEL_SERVICE_VERSION` | string | crate version | `service.version` resource attribute. |
 | `CQLITE_OTEL_SAMPLING_RATIO` | f64 | `1.0` | Trace-ID-ratio sampling probability, clamped to `[0.0, 1.0]`. |
 | `CQLITE_OTEL_TIMEOUT_MS` | u64 | `10000` | Exporter export timeout in milliseconds. |
+| `CQLITE_PARTITION_ACCESS_PROBE` | bool | `false` | Bounded partition access-distribution probe (issue #2827). Off by default; costs zero bytes and one relaxed atomic load when off, exactly 3 MiB fixed when on. Turn it on to measure a keyed workload's hot-set concentration, then read `cqlite.read.partition_access.*`. |
+| `CQLITE_PARTITION_ACCESS_WINDOW_SECS` | u64 | `60` | Measurement-window length for that probe. **Lower it if the cache-sizing procedure refuses your window as a non-census sample:** the counting table holds ~98,304 distinct partitions, so a workload touching more than that in one window is sampled rather than counted, and a sample cannot be priced against a real cache budget. A shorter window is the operator-side remedy. Unparseable or zero values keep the default and log an error. |
+| `CQLITE_PARTITION_ACCESS_WINDOW_ACCESSES` | u64 | `5000000` | Second window bound for the same probe: close after this many recorded accesses, whichever comes first. Also lowerable to force a census on a high-cardinality workload. |
 | `CQLITE_VERIFY_PRESENCE_ORACLE` | bool | `false` | Opt-in soundness check (issue #2163). When true, an SSTable read whose bloom/BTI-trie reports a key "definitely absent" runs an AUTHORITATIVE confirmation scan and increments `cqlite.read.bloom.false_negatives` on a contradiction. Off by default — it is the one presence-oracle counter that costs real work; turn it on transiently to prove the oracle-soundness invariant (expected value: 0), then off. |
 
 Unparseable values fall back to the documented default rather than erroring, so

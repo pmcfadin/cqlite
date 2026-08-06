@@ -103,7 +103,7 @@ Verified by search across the workspace:
 
 ## What Changes
 
-1. **A fixed-cardinality partition repeat-access histogram on the read path.** Four new catalog
+1. **A fixed-cardinality partition repeat-access histogram on the read path.** Seven new catalog
    metrics under `cqlite.read.partition_access.*`, carrying a new bounded attribute
    `cqlite.read.repeat_bucket` over exactly the owner's six buckets `1 | 2 | 3-4 | 5-8 | 9-16 | 17+`
    and a new bounded `cqlite.read.size_source` ∈ `index | successor_gap | unavailable` (three values,
