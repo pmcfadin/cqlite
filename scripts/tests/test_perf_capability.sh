@@ -1286,6 +1286,43 @@ else
   ok "perf-capability: the line-safety predicate rejects CR as well as LF and still accepts an ordinary path"
 fi
 
+# ...and the COMPETING-FILE SCAN must validate every globbed file, not just its directory (roborev
+# round 11, Medium). `[ -f ]` and `grep` FOLLOW symlinks, so a link sitting inside a perfectly
+# contained sandbox directory but pointing at a real host `*.conf` was read, and its contents
+# fabricated "a competitor sets these keys" diagnostics out of HOST state — the asserted numbers
+# would come from the box instead of the fixture. Fails CLOSED: a competitor we declined to examine
+# is the UNKNOWN this diagnostic exists to report, not hide.
+cs_root=$(mktemp -d "$tmp/cs.XXXXXX"); : >"$cs_root/.cqlite-perf-sandbox"
+cs_dir="$cs_root/sysctl.d"; mkdir -p "$cs_dir"
+cs_host="$tmp/cs-host-competitor.conf"
+printf 'kernel.perf_event_paranoid = 2\n' >"$cs_host"
+ln -s "$cs_host" "$cs_dir/00-host-link.conf"
+cs_fail=0
+cs_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_rc=$?
+[ "$cs_rc" -ne 0 ] || { bad "perf-capability: the competing-file scan ACCEPTED a symlinked *.conf inside the sandbox (rc=$cs_rc, out='$cs_out')"; cs_fail=1; }
+printf '%s' "$cs_out" | grep -q 'REFUSING to scan' \
+  || { bad "perf-capability: the scan failed on a symlinked competitor without naming the refusal (out='$cs_out')"; cs_fail=1; }
+printf '%s' "$cs_out" | grep -q 'perf_event_paranoid = 2' \
+  && { bad "perf-capability: the scan LEAKED host competitor content through a symlink"; cs_fail=1; }
+# ...the NEGATIVE CONTROL: a REAL file inside the sandbox is still scanned, so the check is not
+# refusing everything. A newline in the basename is included here because the scan is line-oriented.
+cs_nl=$(printf 'zz-real\ncompetitor.conf')
+printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/zz-real.conf" 2>/dev/null
+cs_ok_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_ok_rc=$?
+rm -f -- "$cs_dir/00-host-link.conf"
+cs_ok2_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_ok2_rc=$?
+if [ "$cs_ok2_rc" -ne 0 ] || ! printf '%s' "$cs_ok2_out" | grep -q 'zz-real.conf'; then
+  bad "perf-capability: a REAL contained competitor was not scanned once the symlink was removed — the per-file check is refusing everything (rc=$cs_ok2_rc, out='$cs_ok2_out')"
+  cs_fail=1
+fi
+[ "$cs_fail" -ne 0 ] || ok "perf-capability: the competing-file scan validates EVERY globbed file in test mode — a symlinked *.conf inside the sandbox fails the scan CLOSED by name and leaks no host content, while a real contained competitor is still reported (#3261 roborev-11)"
+
 # ...and a FAILING CONTENT GENERATOR must never look like success (roborev round 9, Medium). Both
 # call sites used to lose the generator's status: dropin_current ran a trailing sentinel `printf`
 # whose rc replaced it, so against an EMPTY file the compare was "X" == "X" and reported the drop-in

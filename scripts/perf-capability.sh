@@ -848,6 +848,26 @@ perf_capability_competing_files() {
     [ -e "$entry" ] || continue
     [ -d "$entry" ] && [ -r "$entry" ] || return 1
     for f in "$entry"/*.conf; do
+      # EVERY GLOBBED FILE IS VALIDATED IN TEST MODE, NOT JUST ITS DIRECTORY (roborev round 11,
+      # Medium). The scan validated the containing DIRECTORY and then trusted whatever the glob
+      # produced inside it — but `[ -f ]` and `grep` both FOLLOW symlinks, so a link sitting inside a
+      # perfectly contained sandbox directory and pointing at a real host `*.conf` was read, and its
+      # contents fabricated "a competitor sets these keys" diagnostics out of HOST state. That is a
+      # hermeticity escape in the DIAGNOSTIC path: the numbers a test asserts on would come from the
+      # box rather than the fixture. Same lesson as the write path, one surface over — a contained
+      # directory says nothing about where its ENTRIES point.
+      # `perf_capability_sandbox_file_ok_resolved` is the AC3 predicate, reused rather than
+      # reimplemented: it refuses a symlink outright and requires the canonical parent-plus-basename
+      # to be strictly inside the declared sandbox. FAILS THE SCAN CLOSED, because a competitor we
+      # declined to examine is exactly the UNKNOWN this diagnostic exists to report rather than hide.
+      # Production is untouched: without CQLITE_PERF_TEST_MODE there is no sandbox and the real
+      # /etc/sysctl.d files are the legitimate subject.
+      if perf_capability_test_mode && [ -e "$f" ] \
+         && ! perf_capability_sandbox_file_ok_resolved "$f"; then
+        printf 'perf-capability: REFUSING to scan %s — CQLITE_PERF_TEST_MODE=1 and it does not resolve to a real file strictly inside the declared sandbox (a symlink, or a path leading outside it), so scanning it would fabricate diagnostics from HOST state.\n' \
+          "'$f'" >&2
+        return 1
+      fi
       # AN UNMATCHED GLOB IS NOT AN UNREADABLE FILE (issue #3249 review R8-4). With no
       # match bash leaves the PATTERN itself in $f (nullglob is not set) and it does not
       # exist — that directory genuinely holds no competitor, skip it. But a file that
