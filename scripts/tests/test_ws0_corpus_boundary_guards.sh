@@ -656,13 +656,49 @@ input_case() {
   else
     fail "round24/$name: the boundary check must refuse a mutated $field input and name it (rc=$rc, out: $out)"
   fi
-  # (c) restored before reporting -> every END-STATE check agrees, which is why (a) is invisible.
+  # (c) restored before reporting -> every END-STATE check AGREES, which is why (a) is invisible.
+  #
+  # Asserted against the END-STATE VERIFIERS THEMSELVES rather than through `run_report`, which is
+  # the same form section 1 uses and is the more exact statement of the premise. `ws0_report.py`
+  # additionally REQUIRES a complete boundary record (round 22's own finding, one layer out), so a
+  # fixture session that never ran a driver loop is refused by that check — for a reason unrelated to
+  # this case, and it would make (c) read as "the attack stopped reproducing" when it has not. What
+  # (c) claims is that the SCHEMA/TICKET/CORPUS identity checks a reader trusts all pass over the
+  # restored bytes, and that is what is measured here.
   restore_file "$path" "$b64"
-  local rep_out rep_rc; rep_out=$(run_report "$session" "$corpus"); rep_rc=$?
-  if [ "$rep_rc" -eq 0 ]; then
-    pass "PREMISE ASSERTED (round24/$name): with the mutation RESTORED the reporter ACCEPTS the session — the mid-run change to $(basename "$path") is invisible at both ends, so covering it INSIDE the run is the only place it can be seen"
+  local rep_out; rep_out=$(python3 - "$PERF_DIR" "$session" "$corpus" <<'PY' 2>&1
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_corpus_bytes import verify_corpus_bytes, verify_corpus_components
+from ws0_pin_components import verify_pinned_components
+from ws0_schema_input import verify_schema_input
+from ws0_session import session_pin_path
+from ws0_ticket_input import verify_pinned_ticket
+from ws0_validate import load_corpus_identity
+session, corpus = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+identity = load_corpus_identity(corpus)
+pin_path = session_pin_path(session)
+pin = json.loads(pin_path.read_text())
+ident_v = verify_corpus_bytes(corpus, identity)
+comp_v = verify_corpus_components(corpus, identity)
+verify_pinned_components(pin_path, pin, corpus, identity, comp_v["components"])
+# The two REPORT-TIME checks that own the newly-covered inputs: both accept, which is precisely why
+# a mutation restored before reporting is invisible from the ends.
+schema_v = verify_schema_input(corpus, identity)
+verify_pinned_ticket(pin_path, pin, session)
+print("END_DATA_DB_SHA_VERIFIED", ident_v["sha256_verified"])
+print("END_COMPONENTS", comp_v["components_verified_sha256"], "of", comp_v["components_recorded"])
+print("END_SCHEMA_VERIFIED", schema_v["sha256_verified"])
+print("END_TICKET_VERIFIED", True)
+PY
+)
+  if grep -q 'END_DATA_DB_SHA_VERIFIED True' <<<"$rep_out" \
+     && grep -qE 'END_COMPONENTS ([1-9][0-9]*) of \1$' <<<"$rep_out" \
+     && grep -q 'END_SCHEMA_VERIFIED True' <<<"$rep_out" \
+     && grep -q 'END_TICKET_VERIFIED True' <<<"$rep_out"; then
+    pass "PREMISE ASSERTED (round24/$name): with the mutation RESTORED every END-STATE check AGREES — the Data.db digest, all components, all PINNED components, the SCHEMA and the TICKET all verify — so the mid-run change to $(basename "$path") is invisible at both ends and covering it INSIDE the run is the only place it can be seen"
   else
-    fail "round24/$name: the restored session must report cleanly, or the attack this case demonstrates has changed (rc=$rep_rc, out: $rep_out)"
+    fail "round24/$name: the restored session must pass every end-state check, or the attack this case demonstrates has changed (out: $rep_out)"
   fi
   # (d) POSITIVE CONTROL: the same check over the untouched inputs passes, and it NAMES what it
   # covered — so the refusal above is attributable to the mutated bytes and not to a broken verifier.
