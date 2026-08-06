@@ -100,6 +100,28 @@ build_release_binaries() {
 #
 # The build MODE is derived from `$DO_BUILD` here rather than passed in, so it cannot disagree with
 # what `build_release_binaries` above actually did.
+#
+# # ...AND IT FREEZES THEM, so the reps run bytes nothing else can replace (#3272 round 11, F2)
+#
+# The digests used to be taken ONCE, before a session that legitimately runs for many minutes
+# (`--reps 3 --temp both --arm both` is 12 Flight reps of 45-second steps plus the bare-scan legs),
+# while every rep executed straight out of `target/release`. A `cargo build` in another terminal — a
+# peer agent's gate, an editor save-hook, the operator's own next branch — REPLACES those files
+# mid-session, so the later reps measure DIFFERENT PROGRAMS and the report attributes all of them to
+# the digests taken before the first rep. Confidently wrong, which is worse than absent.
+#
+# `record_binary_provenance` therefore COPIES the three executables into `$OUT_DIR/measured-bin/` and
+# hashes THE COPIES, and this function then REPOINTS the driver's `$BIN` at that directory. From here
+# on `lib-measure.sh` — which reads `$BIN` for all five of its `taskset` invocations — runs the
+# session's own immutable copies. Re-hashing per invocation was rejected: it narrows the window to
+# the milliseconds between hash and exec rather than closing it, and it re-reads three binaries
+# inside the measurement loop, on the machine whose page cache the rig is measuring.
+#
+# `$BIN` is reassigned HERE rather than in the driver because this function is where the copies come
+# into existence — a driver-side reassignment could drift from the directory the python actually
+# wrote. The value is read back from `ws0_binaries.measured_bin_dir` rather than reconstructed by
+# string-joining `$OUT_DIR` with a duplicated literal, so the shell and the python cannot disagree
+# about where the copies are.
 record_measured_binaries() {
   local mode="reused"
   [[ "$DO_BUILD" == "1" ]] && mode="built"
@@ -125,4 +147,33 @@ print(describe_record(rec))
          echo "       different revision and reported them as results for this checkout, and" >&2
          echo "       this rig's entire output is a RATIO BETWEEN TWO BINARIES (#3272 M2)." >&2
          return 2; }
+  # ...AND FROM HERE ON, `$BIN` IS THE SESSION'S OWN FROZEN COPIES (#3272 F2).
+  #
+  # The path is asked of `ws0_binaries.measured_bin_dir` rather than assembled here from a duplicated
+  # `measured-bin` literal: a second spelling is a second thing to keep in step, and the failure mode
+  # of getting it wrong is that the reps run from `target/release` while the record names the copies —
+  # i.e. the report would state a guarantee the run did not have.
+  local frozen
+  frozen="$(python3 -c '
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import measured_bin_dir
+print(measured_bin_dir(pathlib.Path(sys.argv[2])))
+' "$WS0_BINARIES_LIB_DIR" "$OUT_DIR")" || {
+    echo "FATAL: could not resolve this session's frozen-binary directory." >&2
+    return 2; }
+  # EVERY measured binary must be present and executable THERE before `$BIN` moves. A partial freeze
+  # that repointed `$BIN` anyway would fail at the first `taskset` — mid-session, after the host
+  # sysctls were weakened — instead of here, and the run would already have claimed the guarantee.
+  local b
+  for b in "${WS0_MEASURED_BINARIES[@]}"; do
+    [[ -x "$frozen/$b" ]] || {
+      echo "FATAL: $frozen/$b is missing or not executable, so this session cannot run its OWN" >&2
+      echo "       copy of the program it measures. The digests in binary-provenance.json describe" >&2
+      echo "       the copies, so measuring from target/release instead would attribute figures to" >&2
+      echo "       bytes that are not the ones that ran (#3272 F2)." >&2
+      return 2; }
+  done
+  BIN="$frozen"
+  echo "measured bin: $BIN (frozen copies — a concurrent rebuild of target/release cannot change what this session runs)"
 }

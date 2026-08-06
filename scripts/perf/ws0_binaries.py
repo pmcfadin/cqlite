@@ -100,7 +100,9 @@ silence is what is fixed.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 
 from ws0_session import sha256_file
@@ -117,6 +119,11 @@ MEASURED_BINARIES = ("ws0-scan-bench", "cqlite-flight", "flight-loadgen")
 BUILD_MODES = ("built", "reused")
 
 BINARY_PROVENANCE = "binary-provenance.json"
+
+# The SESSION-OWNED directory the measured executables are COPIED into (#3272 F2). Inside the
+# session's output dir, so the copies live beside the results they produced and anyone reviewing a
+# session can re-hash the exact bytes that ran.
+MEASURED_BIN_SUBDIR = "measured-bin"
 
 # Every field the reader requires. Asserted against the writer's output at import (below), the
 # pattern `PINNING_RECORD_FIELDS` and `ZERO_REQUIRED_COUNTERS` established: a field the reader
@@ -275,13 +282,101 @@ def refuse_binaries_older_than_head(
     )
 
 
+def measured_bin_dir(session_dir: pathlib.Path) -> pathlib.Path:
+    """The SESSION-OWNED directory holding the executables this session actually runs (#3272 F2)."""
+    return session_dir / MEASURED_BIN_SUBDIR
+
+
+def freeze_measured_binaries(session_dir: pathlib.Path, bin_dir: pathlib.Path) -> dict:
+    """COPY the measured executables into the session dir, and digest THE COPIES (#3272 F2).
+
+    # The finding
+
+    The digests were recorded ONCE, before a session that legitimately runs for many minutes
+    (`--reps 3 --temp both --arm both` is 12 reps of 45-second Flight steps plus the bare-scan legs),
+    while every rep executed the binaries directly from `target/release`. A `cargo build` in another
+    terminal — a peer agent's gate, an editor's save-hook, the operator's own next branch — REPLACES
+    those files mid-session. The reps after the rebuild then measure DIFFERENT PROGRAMS, and the
+    report attributes every one of them to the digests taken before the first rep.
+
+    That is worse than an unrecorded provenance, because the record is confidently WRONG rather than
+    absent: the ratio is between two moments in the repo's history and the report names one.
+
+    # Why COPY rather than re-verify per invocation
+
+    Re-hashing before each of ~14 invocations narrows the window to milliseconds but does not close
+    it — the exec happens after the hash, and a replace in between is exactly the same defect with a
+    smaller probability. It also costs a full re-read of three binaries per rep INSIDE the
+    measurement loop, on the machine whose page cache and CPU the rig is measuring.
+
+    Copying removes the race instead of narrowing it: after this returns, the paths the driver
+    executes are inside the session's own output directory, they are the bytes that were hashed, and
+    nothing outside the session writes there. A rebuild mid-session then changes `target/release`
+    and cannot change what this session runs — which is also the honest thing for the report to
+    claim, because the copies are still on disk beside the results for anyone who wants to re-hash
+    them.
+
+    Copied with `shutil.copy2` (mode preserved — they must stay executable) and hashed AT THE
+    DESTINATION, never at the source: hashing the source and copying separately would leave the two
+    reads racing each other, so the digest could describe bytes the copy did not receive.
+
+    Returns the observed record for the COPIES. Raises `Invalid` on any failure — a session that
+    cannot own its executables must not measure with borrowed ones.
+    """
+    dest_dir = measured_bin_dir(session_dir)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise Invalid(
+            f"could not create {dest_dir} ({exc}), so this session cannot take ownership of the"
+            " executables it measures. Every rep would run from target/release, where a concurrent"
+            " rebuild replaces them mid-session and the report would attribute the later reps'"
+            " figures to the digests taken before the first one (#3272 F2)."
+        ) from None
+    observed: dict[str, dict] = {}
+    for name in MEASURED_BINARIES:
+        src, dst = bin_dir / name, dest_dir / name
+        if not src.is_file():
+            raise Invalid(
+                f"{src} does not exist, so the program this session is about to measure cannot be"
+                " copied or identified. Build it (drop --no-build)."
+            )
+        try:
+            # copy2 preserves the mode, so the copy stays executable; the source's mtime comes with
+            # it, which is what keeps the staleness check meaningful about the BUILD rather than
+            # about when this copy happened.
+            shutil.copy2(src, dst)
+            stat = dst.stat()
+            observed[name] = {
+                # The path RECORDED is the one that will be EXECUTED — the session-owned copy, not
+                # the target/release source. A record naming a path the session did not run is the
+                # substitution this fix exists to close.
+                "path": str(dst),
+                "source_path": str(src),
+                "sha256": sha256_file(dst),
+                "bytes": stat.st_size,
+                "mtime_epoch": int(stat.st_mtime),
+            }
+        except OSError as exc:
+            raise Invalid(
+                f"{src} could not be copied to {dst} ({exc}), so this session cannot execute an"
+                " immutable copy of the program it measures (#3272 F2)."
+            ) from None
+        if not os.access(dst, os.X_OK):
+            raise Invalid(
+                f"{dst} is not executable after copying, so the driver could not run it. The copy"
+                " preserves the source's mode, so this means the source was not executable either."
+            )
+    return observed
+
+
 def record_binary_provenance(
     session_dir: pathlib.Path,
     bin_dir: pathlib.Path,
     repo_root: pathlib.Path,
     build_mode: str,
 ) -> dict:
-    """Record WHICH PROGRAMS this session measured, before the first rep.
+    """FREEZE the measured programs into the session dir and record them, before the first rep.
 
     Written by the driver. Read back by `verify_binary_provenance`.
     """
@@ -290,7 +385,10 @@ def record_binary_provenance(
             f"build_mode {build_mode!r} is not one of {BUILD_MODES}. An unclassified mode would"
             " reach the report as an unchecked claim about how the measured binaries came to exist."
         )
-    observed = observe_binaries(bin_dir)
+    # FROZEN, not merely observed (#3272 F2): the executables are copied into the session dir and
+    # the COPIES are hashed, so the paths the driver runs cannot be replaced by a concurrent
+    # `cargo build` mid-session. The digests below therefore describe the bytes that actually ran.
+    observed = freeze_measured_binaries(session_dir, bin_dir)
     # The MODE is passed, because the check applies to `reused` alone (#3272 F1) — cargo does not
     # rewrite an already-current artifact, so under `built` an mtime earlier than HEAD is the normal
     # outcome of building after a commit that touched no rust, and refusing it broke the ordinary
@@ -352,7 +450,8 @@ def describe_record(rec: dict) -> str:
     return (
         f"binary pin:   {len(rec['binaries'])} binaries at {rec['source_revision_short']}{tree},"
         f" build mode {rec['build_mode']} — digests recorded in {BINARY_PROVENANCE} BEFORE the"
-        " first rep"
+        f" first rep, and the executables FROZEN into {MEASURED_BIN_SUBDIR}/ (a concurrent rebuild"
+        " of target/release cannot change what this session runs, #3272 F2)"
     )
 
 
@@ -421,6 +520,32 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
                 f"{p}: {name}'s 'bytes' is {spec.get('bytes')!r}; a zero-length binary cannot have"
                 " been executed, so this record does not describe a measurement"
             )
+        # THE RECORDED PATH MUST BE THE SESSION'S OWN FROZEN COPY (#3272 F2).
+        #
+        # A record whose paths point into `target/release` describes a session that ran binaries
+        # anything else on the box could replace mid-run, so its digests describe the bytes present
+        # BEFORE the first rep rather than the bytes each rep executed. That is precisely the
+        # attribution this fix closes, and it is invisible in a record that merely carries digests.
+        #
+        # Checked on the path's PARENT DIRECTORY NAME rather than on the string containing
+        # `measured-bin` anywhere: a `target/release` path under a checkout that happens to live in a
+        # directory called `measured-bin` would otherwise satisfy it.
+        recorded = spec.get("path")
+        if not isinstance(recorded, str) or not recorded:
+            raise Invalid(
+                f"{p}: {name} records no 'path', so the record cannot say WHICH FILE was executed"
+            )
+        if pathlib.PurePath(recorded).parent.name != MEASURED_BIN_SUBDIR:
+            raise Invalid(
+                f"{p}: {name}'s recorded path is {recorded!r}, which is not inside this session's"
+                f" own {MEASURED_BIN_SUBDIR}/ directory. The measured executables are COPIED into"
+                " the session dir and the copies are what the reps run, because the digests were"
+                " otherwise taken once before a many-minute session while every rep executed"
+                " straight out of target/release — where a concurrent `cargo build` replaces them"
+                " mid-session, so the later reps measured DIFFERENT PROGRAMS and the report"
+                " attributed all of them to the digests taken before the first rep (#3272 F2)."
+                " Re-run the session with scripts/perf/ws0-baseline.sh, which freezes them."
+            )
     unknown = sorted(k for k in binaries if k not in MEASURED_BINARIES)
     if unknown:
         raise Invalid(
@@ -437,7 +562,9 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
         "provenance": rec["provenance"],
         "note": (
             f"the {len(MEASURED_BINARIES)} measured binaries were identified by digest BEFORE the"
-            f" first rep, at source revision {rec['source_revision_short']}"
+            f" first rep AND FROZEN into the session's own {MEASURED_BIN_SUBDIR}/ directory (so a"
+            " concurrent rebuild of target/release could not change what the reps ran, #3272 F2),"
+            f" at source revision {rec['source_revision_short']}"
             + (
                 f" with a DIRTY working tree ({rec['source_dirty_paths']} changed path(s)), so the"
                 " revision does not fully describe what was built"

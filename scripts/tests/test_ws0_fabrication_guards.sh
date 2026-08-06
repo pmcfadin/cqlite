@@ -393,6 +393,73 @@ else
 fi
 
 # ==========================================================================
+# ROUND 11, F2 — THE MEASURED EXECUTABLES ARE THE SESSION'S OWN COPIES
+# ==========================================================================
+# The digests were taken ONCE before a session that legitimately runs for many minutes, while every
+# rep executed straight out of `target/release`. A `cargo build` in another terminal — a peer agent's
+# gate, an editor save-hook, the operator's own next branch — REPLACES those files mid-session, so
+# the later reps measure DIFFERENT PROGRAMS and the report attributes every one of them to the
+# digests taken before the first rep. Confidently wrong, which is worse than absent.
+#
+# The fix COPIES the three executables into the session's own `measured-bin/` and runs those, so the
+# race is removed rather than narrowed. The ACCEPT half — the freeze observed working, by executing
+# the race — lives in test_ws0_primary_path_admits_a_legitimate_run.sh; this is the REFUSAL: a record
+# whose paths point into `target/release` describes a session that did NOT have the guarantee, and it
+# must not be reported as though it did.
+d="$TMP/f2-unfrozen"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+# EXACTLY the pre-fix record: correct digests, correct revision, complete — and paths naming the
+# shared build directory every rep used to execute from.
+for name, spec in j["binaries"].items():
+    spec["path"] = f"/repo/target/release/{name}"
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "not inside this session" <<<"$out"; then
+  pass "OBSERVED (round11 F2): a record whose paths point into target/release is REFUSED — its digests describe the bytes present before the first rep, not the bytes each rep ran, and a concurrent rebuild could replace them mid-session"
+else
+  fail "round11 F2: an unfrozen (target/release) binary path must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# NON-VACUITY: that record is otherwise COMPLETE and self-consistent — which is why the substitution
+# was invisible. The same session with the frozen paths reports cleanly.
+d="$TMP/f2-frozen-control"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "NON-VACUITY (round11 F2): the SAME session with paths inside measured-bin/ reports CLEANLY — so the refusal above is the frozen-path check firing and the pre-fix record differed in nothing else"
+else
+  fail "round11 F2: the frozen control session must report (rc=$rc, out: $out)"
+fi
+# A path that merely CONTAINS the directory name is not enough: the check is on the parent directory,
+# so a checkout that happened to live under a `measured-bin` directory cannot satisfy it.
+d="$TMP/f2-lookalike"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+for name, spec in j["binaries"].items():
+    spec["path"] = f"/home/measured-bin/checkout/target/release/{name}"
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "not inside this session" <<<"$out"; then
+  pass "OBSERVED (round11 F2): a path merely CONTAINING 'measured-bin' higher up is still REFUSED — the check is the PARENT DIRECTORY, not a substring, so a checkout living under such a directory cannot satisfy it"
+else
+  fail "round11 F2: a lookalike path must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+# ...and the DRIVER must repoint `$BIN` at the frozen copies, or the record names paths the reps did
+# not run — the report would then state a guarantee the run did not have. Structural, because the
+# behaviour needs a real build: `lib-measure.sh` reads `$BIN` for every taskset invocation, and
+# `record_measured_binaries` is where the copies come into existence.
+if grep -q '^  BIN="$frozen"' "$REPO_ROOT/scripts/perf/lib-binaries.sh" \
+   && awk '/^record_measured_binaries\(\)/,/^}/' "$REPO_ROOT/scripts/perf/lib-binaries.sh" \
+        | grep -q 'measured_bin_dir'; then
+  pass "round11 F2 wired: record_measured_binaries repoints \$BIN at the frozen directory, resolved from ws0_binaries.measured_bin_dir (not a duplicated literal, so the shell and the python cannot disagree about where the copies are)"
+else
+  fail "round11 F2: the driver must repoint \$BIN at the session's frozen copies"
+fi
+
+# ==========================================================================
 # ROUND 11, F3 — THE INPUTS THE DRIVER FIXES ARE VERIFIED, NOT IGNORED
 # ==========================================================================
 # `target_concurrency` was classified IGNORED with the reason "the requested concurrency
@@ -1305,7 +1372,7 @@ fi
 # just BELOW the observed count — adding a case must not red the suite — and far above zero.
 # `$checks` is incremented by `pass`/`fail` themselves, so it counts what actually RAN rather
 # than what is written in the file.
-MIN_CHECKS=104
+MIN_CHECKS=108
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

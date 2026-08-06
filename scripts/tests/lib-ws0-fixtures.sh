@@ -206,8 +206,14 @@ ws0_pin_binaries() {
   python3 -c '
 import hashlib, json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_binaries import MEASURED_BINARIES, provenance_path
+from ws0_binaries import MEASURED_BINARIES, measured_bin_dir, provenance_path
 session, mode = pathlib.Path(sys.argv[2]), sys.argv[3]
+# The recorded PATHS must be inside the session own measured-bin/ directory (#3272 F2): the reader
+# REQUIRES it, because a record pointing into target/release describes a session whose binaries
+# anything on the box could replace mid-run. Not created on disk here — the reader checks the
+# recorded path, not the file, and a fixture that materialised fake executables would be claiming a
+# freeze that never happened.
+frozen = measured_bin_dir(session)
 rev = "1" * 40
 rec = {
     "source_revision": rev,
@@ -216,7 +222,8 @@ rec = {
     "source_dirty_paths": 0,
     "build_mode": mode,
     "binaries": {
-        name: {"path": f"/nonexistent/target/release/{name}",
+        name: {"path": str(frozen / name),
+               "source_path": f"/nonexistent/target/release/{name}",
                "sha256": hashlib.sha256(name.encode()).hexdigest(),
                "bytes": 1024 + i, "mtime_epoch": 2000000000}
         for i, name in enumerate(MEASURED_BINARIES)

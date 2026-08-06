@@ -58,11 +58,15 @@
 #
 #   * `refuse_binaries_older_than_head` — F1's subject. The ACCEPT case is EXACTLY the input the
 #     unscoped check refused: a binary whose mtime PRECEDES HEAD, under `built`;
-#   * `record_binary_provenance` end to end — observe three real files, hash them, run `git` in a
-#     real repo, write `binary-provenance.json`, and have the SHIPPED READER
-#     (`verify_binary_provenance`) accept what the SHIPPED WRITER produced. That writer/reader
-#     round-trip is the one thing no reject-direction case can establish, and it is where a
-#     writer/reader field disagreement would surface as a refusal blaming the operator;
+#   * `record_binary_provenance` end to end — copy three real executables into the session dir, hash
+#     the copies, run `git` in a real repo, write `binary-provenance.json`, and have the SHIPPED
+#     READER (`verify_binary_provenance`) accept what the SHIPPED WRITER produced. That
+#     writer/reader round-trip is the one thing no reject-direction case can establish, and it is
+#     where a writer/reader field disagreement would surface as a refusal blaming the operator;
+#   * THE FREEZE ITSELF (#3272 F2), by EXECUTING THE RACE: after the freeze, the SOURCE binary under
+#     `target/release` is overwritten — exactly what a concurrent `cargo build` does mid-session —
+#     and the session's copy is asserted unchanged, still matching its recorded digest, with the
+#     reader still accepting. That is the property stated rather than the mechanism assumed;
 #   * `verify_schema_input`, `verify_ticket_template`-shaped ticket verification and
 #     `verify_session_corpus_pin` over a real (tiny) corpus written by the shipped writers.
 #
@@ -307,8 +311,8 @@ fi
 if python3 - "$PERF_DIR" "$TMP/rt" <<'PY'
 import os, pathlib, subprocess, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_binaries import (MEASURED_BINARIES, record_binary_provenance,
-                          verify_binary_provenance, describe_record)
+from ws0_binaries import (MEASURED_BINARIES, describe_record, measured_bin_dir,
+                          record_binary_provenance, verify_binary_provenance)
 
 base = pathlib.Path(sys.argv[2]); base.mkdir(parents=True, exist_ok=True)
 repo, session, bindir = base / "repo", base / "session", base / "bin"
@@ -323,11 +327,14 @@ git("init", "-q")
 git("add", "f"); git("commit", "-qm", "c")
 
 # Three real files standing in for the measured programs. Non-empty (the reader refuses a
-# zero-length binary — it cannot have been executed) and deliberately given an OLD mtime, which is
-# F1's whole point: this is what a default `cargo build` leaves behind, and it must be ADMITTED.
+# zero-length binary — it cannot have been executed), MODE 0755 (the writer copies them and refuses
+# a copy that is not executable, which is the property a real measured binary has), and deliberately
+# given an OLD mtime, which is F1's whole point: this is what a default `cargo build` leaves behind,
+# and it must be ADMITTED.
 for i, name in enumerate(MEASURED_BINARIES):
     p = bindir / name
     p.write_bytes(b"\x7fELF" + bytes([i]) * 64)
+    os.chmod(p, 0o755)
     os.utime(p, (1, 1))
 
 rec = record_binary_provenance(session, bindir, repo, "built")
@@ -336,6 +343,26 @@ back = verify_binary_provenance(session)
 assert set(back["binaries"]) == set(MEASURED_BINARIES), sorted(back["binaries"])
 assert back["source_revision"] == rec["source_revision"], (back, rec)
 assert back["build_mode"] == "built", back
+# THE FREEZE (#3272 F2): the writer must have COPIED the executables into the session's own
+# directory, recorded THOSE paths, and left them executable — so the reps run bytes a concurrent
+# `cargo build` cannot replace. Asserted on the real files, not on the record's own claim.
+import hashlib  # noqa: E402  (used only for this assertion)
+for name, spec in rec["binaries"].items():
+    copied = pathlib.Path(spec["path"])
+    assert copied.parent == measured_bin_dir(session), (name, spec["path"])
+    assert copied.is_file() and os.access(copied, os.X_OK), (name, spec["path"])
+    # The recorded digest must be the digest OF THE COPY — hashing the source and copying separately
+    # would leave the two reads racing, so the digest could describe bytes the copy did not receive.
+    assert hashlib.sha256(copied.read_bytes()).hexdigest() == spec["sha256"], name
+    # ...and the copy must be independent of the source: overwriting the SOURCE after the freeze must
+    # not change what the session would run. This is the race itself, executed.
+    src = pathlib.Path(spec["source_path"])
+    src.write_bytes(b"\x7fELFREBUILT" + b"\xff" * 64)
+    assert hashlib.sha256(copied.read_bytes()).hexdigest() == spec["sha256"], (
+        f"{name}: rebuilding the source changed the frozen copy — the copies are not independent"
+    )
+# ...and the reader still accepts after that "rebuild", because it reads the copies.
+verify_binary_provenance(session)
 # ...and the driver's own one-line summary is derivable from the record (the line an operator reads).
 line = describe_record(rec)
 assert "binary pin" in line, line
@@ -345,7 +372,7 @@ assert rec["source_revision_short"] in line, line
 assert "does NOT APPLY" in rec["provenance"], rec["provenance"]
 PY
 then
-  pass "round11 structural: the SHIPPED WRITER's record (real files, real git repo, OLD mtimes) satisfies the SHIPPED READER — the writer/reader round trip no reject-direction case can establish"
+  pass "round11 structural + F2: the SHIPPED WRITER's record (real files, real git repo, OLD mtimes) satisfies the SHIPPED READER, and the executables were FROZEN into the session dir — OBSERVED by overwriting the SOURCE after the freeze and finding the copy unchanged (the mid-session-rebuild race, executed)"
 else
   fail "round11: record_binary_provenance's output must satisfy verify_binary_provenance"
 fi
