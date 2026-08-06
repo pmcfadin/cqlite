@@ -147,10 +147,18 @@ def as_int(mapping, keys):
 
 
 def main(argv):
-    if len(argv) != 4:
-        sys.stderr.write("usage: roborev-job-facts.py <job-id> <facts-out> <prompt-out>\n")
+    if len(argv) not in (4, 5):
+        sys.stderr.write(
+            "usage: roborev-job-facts.py <job-id> <facts-out> <prompt-out> [<review-output-out>]\n")
         return 2
     want, facts_path, prompt_path = argv[1], argv[2], argv[3]
+    # THE OPTIONAL FOURTH PATH IS FOR RECHECK MODE (#3312 job 24): re-evaluating a completed job has no
+    # transcript of its own, so `review-completed`, the vacuity tiers and `findings` must be re-asserted
+    # against the review text THE RECORD carries. Writing it out here keeps ONE implementation of
+    # "find this job in whichever payload shape roborev returned" rather than a second parse at the
+    # call site. Absent or empty output leaves the file empty, which those checks read as a FAILURE to
+    # establish a completed review — the fail-closed direction.
+    output_path = argv[4] if len(argv) == 5 else None
     try:
         data = json.load(sys.stdin)
     except ValueError:
@@ -196,6 +204,26 @@ def main(argv):
     if isinstance(prompt, str) and prompt.strip():
         with open(prompt_path, "w") as handle:
             handle.write(prompt)
+    if output_path is not None:
+        # The review text lives beside the job row on the REVIEW payload, and roborev exposes it under
+        # EITHER name: `output` or `verdict_text`. BOTH are read, on the review object AND on the nested
+        # job object, because documenting a field and then not reading it produced an empty transcript on
+        # any payload that used the other spelling — which spuriously FAILed `review-completed` and
+        # `findings` on a legitimate recheck (#3312 job 25). Written VERBATIM — no whitespace collapsing —
+        # because the terminal-verdict-marker regex is line-anchored.
+        review_out = None
+        for container in (data if isinstance(data, dict) else {}, job):
+            if not isinstance(container, dict):
+                continue
+            for key in ("output", "verdict_text"):
+                candidate = container.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    review_out = candidate
+                    break
+            if review_out is not None:
+                break
+        with open(output_path, "w") as handle:
+            handle.write(review_out if isinstance(review_out, str) else "")
     return 0
 
 

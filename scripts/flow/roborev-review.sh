@@ -104,22 +104,32 @@
 #   prompt-content    PASS (<k>/<n> code census paths present) |
 #                     FAIL (<k>/<n> code census paths absent from the prompt) |
 #                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
-#                     FAIL (prompt unretrievable — ...) | SKIP
-#                     Paths are normalised ONCE, at the census (`git diff --numstat -z`,
-#                     so they arrive RAW) and compared RAW everywhere; membership is
-#                     decided per `diff --git` header by the single canonical matcher
-#                     `roborev_diff_header_has_path`, which reads EVERY shape git emits:
-#                     unquoted, space-bearing, C-quoted, and the MIXED-quoting shape a
-#                     rename produces (`diff --git a/<ascii> "b/<quoted>"`).
-#                     A header LINE carrying a space is IRREDUCIBLY AMBIGUOUS, so ambiguity
-#                     is resolved from EVIDENCE and never positionally (#3229): first from
-#                     the header's own `rename from`/`rename to` lines (git always writes
-#                     them for a rename/copy, one exact path per line), else by requiring
-#                     the a/ and b/ sides to be EQUAL, which is what a non-rename header
-#                     always is. Positional enumeration is the LAST resort and only for a
-#                     header with no equal split and no rename lines. Because the matcher
-#                     needs the lines FOLLOWING a header, header collection lives with it
-#                     (`roborev_collect_prompt_headers`), not in the consumer.
+#                     FAIL (prompt unretrievable — ...) |
+#                     WAIVED (<k>/<n> code census paths absent — authorized by @<login> for <sha>) | SKIP
+#                     ONE QUESTION, NO CLASSIFIER (owner ruling (4), #3312): are the CODE census paths
+#                     present in the prompt the reviewer was sent? PRESENT is a PASS; ABSENT is a FAIL,
+#                     unconditionally — whatever caused it. The wrapper used to infer roborev's delivery
+#                     MODE from prompt text (inline / snapshot path / delegated tier); four consecutive
+#                     review rounds each found a High-severity false verdict in that inference, whose one
+#                     cause was reading structure out of text that embeds repository-controlled content,
+#                     so the inference is DELETED rather than patched again. THE ACCEPTED COST: a
+#                     snapshot-delivered diff and a vacuous review that received nothing are IDENTICAL
+#                     to the machine. A human plus the review's token accounting distinguishes them.
+#   waiver            GRANTED (author=@<login> sha=<40-hex> reason=<why>) | NONE (...) | STALE (...) |
+#                     MALFORMED (...) | UNAVAILABLE (...)
+#                     PRESENT ONLY WHEN THE ABSENCE BRANCH RAN, so it is absent rather than
+#                     placeholdered on a run that had nothing to waive. INFORMATIONAL: it is not in the
+#                     verdict scan and cannot make anything pass by itself. The waiver is a DEDICATED,
+#                     column-zero line of a PR comment binding base AND head AND job (see --help for the
+#                     exact form, which is deliberately not repeated in any emitted diagnostic), granted by the
+#                     OWNER or the coordination LEAD (a worker or closer may only REQUEST one, and must
+#                     include the token accounting). It is SHA-BOUND — a push invalidates it — and it
+#                     excuses the ABSENCE verdict ONLY, never any other cause. AUTHORSHIP IS
+#                     PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED: worker, closer
+#                     and owner share one GitHub login on this fleet, so no check here can tell WHICH
+#                     ALLOWLISTED human posted a comment. The author IS authorized against an explicit
+#                     allowlist (ROBOREV_WAIVER_AUTHORS) — a public repository prints base/head/job in
+#                     the failing block, so without it any commenter could grant a waiver.
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
@@ -313,6 +323,128 @@ the reviewer did not receive surfaces AFTER the review, under prompt-content:,
 whose cause names the symptom rather than the mechanism. Fail-closed, never green
 — but if prompt-content: FAILs, SUSPECT .roborev.toml first.
 
+ONE QUESTION, NO DELIVERY CLASSIFIER (issue #3312, owner ruling (4)): prompt-content:
+asks only whether the CODE census paths are present in the prompt the reviewer was
+sent. PRESENT is a PASS. ABSENT is a FAIL, unconditionally, whatever caused it.
+
+This wrapper used to infer HOW roborev delivered the diff — inlined in the prompt, or
+written to a transient file whose path the prompt names, or the delegated tier that
+ships neither and tells the reviewer to run git itself. Four consecutive review rounds
+each found a High-severity false verdict in that inference, in BOTH directions, and
+every one had the same cause: it read structure out of prompt text, and roborev's
+prompt embeds repository-controlled content (project guidelines, AGENTS.md sections,
+previous-review bodies) at column zero, indistinguishable from roborev's own. No
+terminating marker exists — the only structural one was roborev's fenced diff, and
+repository content can contain fences too — so the inference was DELETED rather than
+patched a fifth time. Block detection, heading parsing, fence evidence, mixed-delivery,
+candidate lifetime and the snapshot/delegated distinction are all gone with it.
+
+THE ACCEPTED COST, stated because it is real: a diff roborev delivered BY PATH and a
+vacuous review that received NOTHING are IDENTICAL to the machine — both have no
+census paths in the prompt, so both FAIL. What distinguishes them is a HUMAN plus the
+review's token accounting (genuine reviews measured 398k-649k input / 314k-554k cached;
+the vacuous baseline is ~18.7k input / 0 cached).
+
+THE WAIVER, therefore: the OWNER or the coordination LEAD may excuse an absence FAIL
+with a PR comment that carries this as a DEDICATED LINE, at column zero, all four
+fields present:
+
+    roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>
+
+AND THEN APPLY IT WITH A RECHECK, which is what closes the loop:
+
+    bash scripts/flow/roborev-review.sh --repo <abs> --recheck-job <id> \
+      --agent <agent> --model <model>
+
+A recheck RE-DECIDES that job's verdict and ENQUEUES NOTHING. It exists because the
+waiver names a job, the operator only learns the job id (and the token accounting)
+from the FINISHED run, and re-running the wrapper would enqueue a DIFFERENT job —
+making the fresh waiver instantly STALE. Without it the mechanism was a dead letter.
+The job is named EXPLICITLY, never resolved from base+head: a resolver would let a
+re-run inherit a waiver written for a different review, which is the hole the job
+binding closes.
+
+A recheck INHERITS NOTHING from the original run. sha-assert re-compares the record's
+git_ref against this base and head; the record's own review text becomes the
+transcript, so review-completed, both vacuity tiers and findings are re-asserted from
+it (a record with no review text leaves the transcript empty, which fails closed);
+roborev-exit reports SKIP rather than claiming an exit status for a process that did
+not run. The block declares 'MODE: recheck (job <id> …; NO review was enqueued)' and
+'recheck-of: <id>' as its first keys, the way the gate declares MODE: lite, so a
+recheck PASS can never be pasted as evidence of a fresh review.
+
+A worker or a closer may REQUEST one — one comment, including the token accounting —
+and may never apply it to its own PR.
+
+IT IS BOUND TO THE WHOLE REVIEW SCOPE, not just the head: base AND head AND job are all
+required and all verified. The authorizer's judgment under (d) was about ONE review and
+its token accounting, so the waiver may not outlive it — a push, a different base or a
+re-run each need a fresh one. A marker missing any field is MALFORMED, never granted.
+
+THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL. (1) The marker must BE the
+line: an indented, '>'-quoted, bulleted or mid-sentence copy does not match, so pasting
+a block or quoting an example grants nothing. (2) A placeholder reason is refused — an
+unsubstituted '<...>' or a bare 'why'/'todo'/'tbd' — so a pasted TEMPLATE (including the
+line above) reads MALFORMED. (3) The absence-FAIL diagnostic prints NO part of the
+marker; it points here instead. Summary blocks get pasted into PR comments as a matter
+of course, and before this a pasted block silently authorized the next run.
+
+It excuses the ABSENCE verdict ONLY: any other cause (an unretrievable prompt, a 0/0
+census, a failed sha assert, a review that never completed) is reached on a different
+path and is untouched. The block then reports prompt-content: WAIVED (...) — a DISTINCT
+token, so no reader grepping 'prompt-content: PASS' mistakes it for a certification —
+beside a waiver: key recording the authorizer, the bound scope, the reason and the
+absent paths. Never silence.
+
+THREAT MODEL, STATED WITH ITS LIMITS. A HOSTILE INVOKER IS OUT OF SCOPE: whoever
+runs this wrapper can edit it, replace the scanner beside it, shadow gh on PATH, or
+skip it entirely and hand-write a summary block into the PR. No check inside a
+process defends against the party controlling that process. The merge gate's real
+protection against a hostile worker is the audit trail plus a human reading the PR.
+
+What the waiver DOES defend: (1) parties who do NOT control the invocation — anyone
+can comment on a public PR, and the failing block prints base/head/job, so the
+allowlist, the anchored marker and the structured author association are what stop a
+stranger granting one; (2) accident and drift — a pasted block, a quoted example, a
+stale waiver riding to a later review, a re-run inheriting someone else's
+authorization, an unsubstituted placeholder.
+
+TRIAGE: a finding of the form "the invoker can bypass this" is OUT OF MODEL and
+should be recorded rather than patched. "A non-invoker can bypass this", or "this can
+be bypassed by accident", is a DEFECT. Same-host actors who can write these scripts
+are invoker-class, not third parties.
+
+SHAPE AND CHANNEL, both load-bearing:
+
+  * THE MARKER MUST BE THE SOLE NONBLANK CONTENT OF ITS COMMENT. Leading and trailing
+    blank lines are fine; anything else — prose, a code fence, a quote, an HTML tag, a
+    second sentence — means the comment is not an authorization. Put commentary in a
+    SEPARATE comment; the token accounting belongs inside reason= anyway. This replaced
+    four successive Markdown recognisers (anywhere-in-comment, column-zero anchor,
+    fence skipping, fence-state tracking): deciding "data or control?" inside a grammar
+    the author controls is unbounded, and no quoting construct can be the ONLY thing in
+    a comment, so quoting cannot grant.
+  * THE COMMENT MUST BE TOP-LEVEL. Markers inside a review body or a review-thread
+    reply are not read (fail-closed, but it looks like the waiver was ignored).
+
+THE AUTHOR MUST BE ON AN EXPLICIT ALLOWLIST (see ROBOREV_WAIVER_AUTHORS in
+roborev-review-oracles.sh). This is a PUBLIC repository and a failing block PRINTS the
+base, head and job, so without that check any commenter could copy them and make the
+merge gate pass. A comment from an author outside the allowlist reports
+'waiver: UNAUTHORIZED (...)' and grants nothing. The list is hard-coded in the wrapper
+rather than read from a config or an env var: an override would be settable by the very
+party it constrains, and one visible location keeps "who may grant" in the same diff a
+reviewer already reads.
+
+BEYOND THAT, AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY
+VERIFIED — and that residual is now narrow: on this fleet the worker, the closer and the
+owner all post through the SAME login, so no check here can tell WHICH ALLOWLISTED HUMAN
+posted a comment. "Only the owner or the coordination lead may GRANT; a worker may only
+REQUEST" therefore rests on process and on the comment being permanently attributable.
+The earlier, broader claim ("authorship cannot be verified at all") is what justified
+having NO author check, which is how any commenter could grant one — an unenforceable
+claim gets SCOPED to what is true, never dropped whole.
+
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
 a worktree; the gate's hermetic check uses a stub reviewer.
@@ -353,6 +485,21 @@ AGENT=""
 MODEL=""
 REPO_ARG=""
 BASE="origin/main"
+# ===== RECHECK MODE (#3312 job 24): RE-EVALUATE A COMPLETED JOB, ENQUEUE NOTHING =====
+# WHY IT EXISTS, and it is a workflow defect rather than a feature request: the absence waiver is bound
+# to `base+head+job` — which is what makes it unable to outlive the review its authorizer judged — but
+# the operator learns the JOB ID and the token accounting FROM the completed run, and re-running the
+# wrapper to apply a freshly posted waiver ENQUEUES A NEW JOB, so the waiver was instantly STALE. As
+# built, the mechanism was a dead letter: no sequence of actions got a legitimate absence past the gate.
+# `--recheck-job <id>` closes the loop by re-deciding the verdict FOR THAT JOB without reviewing again.
+# The binding is NOT loosened (dropping `job=` would reopen the hole where one persistent comment waives
+# a later VACUOUS review at the same base+head); the loop is closed instead.
+#
+# NOTHING IS ASSUMED BECAUSE IT PASSED ONCE: every assert is re-run against the job record — the range
+# (sha-assert), completion (from the record's own review text), the vacuity tiers, the token accounting
+# and prompt-content. A recheck can therefore FAIL where the original run passed, and does not inherit
+# anything from it.
+RECHECK_JOB=""
 LOG_ARG=""
 
 # An option supplied with an EMPTY value is a usage error, never a silent fallback
@@ -370,6 +517,12 @@ while [ $# -gt 0 ]; do
     --repo)  need_value --repo  $# "${2:-}"; REPO_ARG="$2"; shift 2 ;;
     --base)  need_value --base  $# "${2:-}"; BASE="$2"; shift 2 ;;
     --log)   need_value --log   $# "${2:-}"; LOG_ARG="$2"; shift 2 ;;
+    --recheck-job)
+      need_value --recheck-job $# "${2:-}"
+      case "$2" in
+        ''|*[!0-9]*) die_usage "--recheck-job takes a numeric roborev job id, got '$2'" ;;
+      esac
+      RECHECK_JOB="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) die_usage "unknown option '$1'" ;;
   esac
@@ -440,6 +593,9 @@ SHA_ASSERT="SKIP"
 # verdict marker from an ALLOW-list) is now required before PASS is reachable.
 REVIEW_COMPLETED="SKIP"
 PROMPT_CONTENT="SKIP"
+# The waiver record for the absence branch (owner ruling (4), #3312). Empty means the branch never
+# ran — the census paths were present — so the key is ABSENT from the block rather than placeholdered.
+WAIVER_REPORT=""
 TIER1="SKIP"
 TIER2="SKIP"
 FINDINGS="SKIP"
@@ -515,6 +671,14 @@ emit_kv() { # emit_kv <key> <value> — the ONLY way a value enters the block
 
 emit_summary() {
   printf '==== ROBOREV REVIEW SUMMARY ====\n'
+  # MODE IS DECLARED THE WAY THE GATE DECLARES `MODE: lite` (#3312 job 24): a recheck's PASS is
+  # legitimate — the review it re-decides was genuine and a human authorized the absence — but it must
+  # never be pasteable as evidence of a FRESH review, so the block says which job it re-decided and that
+  # nothing was enqueued. Emitted as the FIRST key INSIDE the block, so it travels with any paste of it.
+  if [ -n "${RECHECK_JOB:-}" ]; then
+    emit_kv 'MODE' "recheck (job $RECHECK_JOB re-decided from its job record; NO review was enqueued — not evidence of a fresh review)"
+    emit_kv 'recheck-of' "$RECHECK_JOB"
+  fi
   emit_kv 'repo' "$REPO"
   emit_kv 'branch' "$BRANCH"
   emit_kv 'base' "$BASE"
@@ -531,6 +695,15 @@ emit_summary() {
   emit_kv 'sha-assert' "$SHA_ASSERT"
   emit_kv 'review-completed' "$REVIEW_COMPLETED"
   emit_kv 'prompt-content' "$PROMPT_CONTENT"
+  # THE WAIVER RECORD (owner ruling (4), #3312). INFORMATIONAL, exactly like `census:`/`tokens:` — it
+  # is NOT in the verdict scan and cannot make anything pass on its own; `prompt-content:` alone
+  # carries that verdict. Emitted ONLY when the absence branch ran and therefore had a waiver to look
+  # for: in the PASS case it has no subject, and a `-` placeholder would imply a lookup that never
+  # happened. It records the state even when no waiver exists, because "your marker names the wrong
+  # sha" is the diagnostic a human needs, and a waived FAIL must never be silent about who waived it.
+  if [ -n "${WAIVER_REPORT:-}" ]; then
+    emit_kv 'waiver' "$WAIVER_REPORT"
+  fi
   emit_kv 'vacuity-tier1' "$TIER1"
   emit_kv 'vacuity-tier2' "$TIER2"
   emit_kv 'findings' "$FINDINGS"
@@ -559,6 +732,9 @@ finish() { # finish <PASS|FAIL|NOTHING-TO-REVIEW> <exit-code>
 # shellcheck disable=SC2317 # invoked indirectly, by `trap on_exit EXIT` below
 on_exit() {
   local rc=$?
+  # C⁗ (#3312): there is no watcher, no background process and no temporary artefact to clean up here —
+  # nothing is read, so nothing outlives the wrapper. The stop/cleanup hooks that used to live here are
+  # deleted with the observer they served.
   if [ "$EMITTED" -eq 0 ]; then
     printf 'ERROR: the wrapper terminated unexpectedly (exit %s) before reaching a verdict.\n' "$rc"
     RESULT="FAIL"
@@ -655,15 +831,32 @@ done
 # WITHOUT `--repo`, which resolves against the ROOT checkout. NEVER the
 # two-positional range form (it anchors the range at git's EMPTY TREE).
 # The transcript goes to the log; stdout stays reserved for the summary block.
-set +e
-roborev review --branch \
-  --base "$BASE" \
-  --repo "$REPO" \
-  --agent "$AGENT" \
-  --model "$MODEL" \
-  --wait >"$LOG" 2>&1
-REVIEW_RC=$?
-set -e
+#
+# NOTHING IS ARMED AROUND THIS CALL, and that absence is the design (#3312, owner ruling (4)). When
+# roborev delivers a large diff by writing it to a file, it DELETES that file when the review finishes
+# — measured: it is gone before this very `--wait` returns — and `roborev show` cannot hand it back (no
+# `--diff`). Every attempt to hold on to it, and then every attempt to classify the delivery from the
+# prompt text instead, produced defects in the machinery rather than in the verdict; both are deleted.
+# `prompt-content:` now asks one question of the prompt itself and an absence is a FAIL a human may
+# waive. So there is no watcher, no capture directory, no classifier state and nothing to clean up
+# here — only the review call.
+# THE ENQUEUE IS THE ONE THING A RECHECK MUST NOT DO, so it is guarded here — the single place the
+# reviewer is ever invoked — rather than by the caller remembering not to. Asserted structurally.
+if [ -n "$RECHECK_JOB" ]; then
+  REVIEW_RC=0
+  RECHECK_ACTIVE=1
+  : >"$LOG"
+else
+  set +e
+  roborev review --branch \
+    --base "$BASE" \
+    --repo "$REPO" \
+    --agent "$AGENT" \
+    --model "$MODEL" \
+    --wait >"$LOG" 2>&1
+  REVIEW_RC=$?
+  set -e
+fi
 
 # --- step 5: reviewed-RANGE assert (AC2) — STRUCTURED data is the oracle -------
 #
@@ -679,6 +872,19 @@ set -e
 # loose enough that a 4-char prefix satisfied the assert), and both fields are
 # validated before use. When several announcements are present the LAST one is the
 # effective enqueue, and the multiplicity is recorded.
+# RECHECK: THE JOB ID COMES FROM THE FLAG, EXPLICITLY (#3312 job 24). Explicit rather than "resolve the
+# latest completed job for this base+head", deliberately: the waiver names ONE job because the authorizer
+# judged ONE review, and a resolver would let a re-run silently become the subject of a waiver written for
+# a different review — the very hole the job binding closes. The enqueue announcement is the ENQUEUE's own
+# cross-check, so it is skipped here (there was no enqueue) while every RECORD-derived assert still runs:
+# `sha-assert` below still compares the record's git_ref against THIS base and head.
+if [ -n "$RECHECK_JOB" ]; then
+  JOB="$RECHECK_JOB"
+  ANNOUNCE_COUNT=0
+  ANNOUNCE="recheck"
+  ANNOUNCED_SHA=""
+  announce_ok=1
+else
 ANNOUNCE_COUNT=$({ grep -ociE 'enqueued job [0-9]+ for [0-9a-f]{7,40}' "$LOG" 2>/dev/null || printf 0; } | tail -1)
 # shellcheck disable=SC2018,SC2019 # ASCII-only on purpose: this normalises a HEX sha,
 # and the POSIX classes would make the transform locale-dependent for no benefit.
@@ -716,19 +922,24 @@ else
     DETAILS+=("NOTICE: sha-assert: the transcript carries $ANNOUNCE_COUNT enqueue announcements; the LAST one (job $JOB) is the effective enqueue and is the one asserted.")
   fi
 fi
+fi
 
 # --- structured job facts (extracted by scripts/flow/roborev-job-facts.py) -----
 # Diagnostics live beside the transcript; `log:` names the base path.
+# RECORD_OUTPUT_FILE holds the review text the JOB RECORD carries. In recheck mode it BECOMES the
+# transcript, so `review-completed`, the vacuity tiers and `findings` are re-asserted from the record
+# rather than inherited from a run that is not happening (#3312 job 24).
 FACTS_FILE="$LOG.facts"
+RECORD_OUTPUT_FILE="$LOG.record-output"
 PROMPT_FILE="$LOG.prompt"
 : >"$FACTS_FILE"
 : >"$PROMPT_FILE"
 
-extract_job_facts() { # extract_job_facts <job> <json> <facts-out> <prompt-out>
+extract_job_facts() { # extract_job_facts <job> <json> <facts-out> <prompt-out> [<review-out>]
   command -v python3 >/dev/null 2>&1 || return 1
   [ -f "$JOB_FACTS_TOOL" ] || return 1
   [ -n "$2" ] || return 1
-  printf '%s' "$2" | python3 "$JOB_FACTS_TOOL" "$1" "$3" "$4" 2>/dev/null
+  printf '%s' "$2" | python3 "$JOB_FACTS_TOOL" "$1" "$3" "$4" ${5:+"$5"} 2>/dev/null
 }
 
 fact() { sed -n "s/^$1=//p" "$FACTS_FILE" | head -1; }
@@ -781,7 +992,7 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
       show) json=$(roborev show "$1" --json 2>/dev/null || printf '') ;;
       list) json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '') ;;
     esac
-    extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" || continue
+    extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE" || continue
     if record_required_present; then
       rm -f "$best_facts"
       return 0
@@ -831,6 +1042,21 @@ if [ "$announce_ok" -eq 1 ]; then
   # The prompt may not be carried in the JSON payload; ask for it directly.
   if [ ! -s "$PROMPT_FILE" ]; then
     roborev show "$JOB" --prompt >"$PROMPT_FILE" 2>/dev/null || : >"$PROMPT_FILE"
+  fi
+fi
+
+# ===== RECHECK: THE RECORD'S OWN REVIEW TEXT IS THE TRANSCRIPT (#3312 job 24) =====
+# A recheck has no transcript of its own, and it must not be allowed to inherit the original run's
+# verdicts either. So the record's review text is copied into `$LOG` and every text-based check runs
+# against it unchanged. If the record carries no review text the file stays EMPTY, which
+# `review-completed` reads as "no terminal verdict marker" — a FAIL. That is the intended direction: a
+# job whose completion cannot be re-established is not recheckable.
+if [ -n "$RECHECK_JOB" ]; then
+  if [ -s "$RECORD_OUTPUT_FILE" ]; then
+    cat "$RECORD_OUTPUT_FILE" >"$LOG"
+  else
+    : >"$LOG"
+    DETAILS+=("NOTICE: recheck: the job record for '$JOB' carries no review text, so the transcript-based checks below have nothing to re-assert against and will fail closed. A recheck never inherits the original run's verdicts.")
   fi
 fi
 
@@ -990,7 +1216,7 @@ for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
   # is that an unplanned value must not inherit the non-failing branch.
   case "$verdict_token" in
     FAIL|FINDINGS|ERROR|INCONSISTENT) ;;
-    PASS|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN) ;;
+    PASS|WAIVED|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN) ;;
     *)
       failed=1
       unrecognised="${unrecognised:+$unrecognised; }'$verdict'"
@@ -1034,6 +1260,20 @@ if [ "$failed" -eq 0 ]; then
     det_value="${keyed#*=}"
     case "${det_value%% *}" in
       PASS) continue ;;
+      # ===== `WAIVED`: A HUMAN-AUTHORIZED ABSENCE, GATED ON ITS OWN PROVENANCE =====
+      # (Owner ruling (4), #3312.) This is NOT the per-key escape hatch that used to live here — that
+      # one admitted a `NOTICE` for one named key in one machine-inferred mode, and the inference it
+      # rested on is deleted. This admits a token that only exists when a human named THIS head sha in
+      # a PR comment, and it is gated on the PROVENANCE being complete rather than on which key
+      # carries it: an authorizer, the certified sha and a reason must all be present, so a `WAIVED`
+      # produced by a future code path that measured nothing cannot ride to a PASS. Not gated on
+      # `det_key`, deliberately: a key-scoped exemption is the shape that has to be re-argued every
+      # time a key is added, and the provenance test is the property that actually matters.
+      WAIVED)
+        if [ -n "${ROBOREV_WAIVER_AUTHOR:-}" ] && [ -n "${ROBOREV_WAIVER_REASON:-}" ] \
+          && [ "${ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ] \
+          && [ "${ROBOREV_WAIVER_STATE:-}" = "granted" ]; then continue; fi
+        ;;
     esac
     not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
   done
@@ -1043,7 +1283,7 @@ if [ "$failed" -eq 0 ]; then
   fi
 fi
 if [ -n "$unrecognised" ]; then
-  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
+  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / WAIVED / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
 fi
 
 if [ "$failed" -eq 0 ]; then
