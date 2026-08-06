@@ -191,6 +191,12 @@ enum SlowPath {
 }
 
 struct WindowState {
+    /// Accesses banked against THIS window. Lives in the state — not beside it —
+    /// so a `close_window` can never bank an access in one generation while its
+    /// table entry lands in the next (C3).
+    recorded: AtomicU64,
+    /// Accesses this window could not seat in its table at all (C4/B8).
+    dropped: AtomicU64,
     table: Table,
     prefix_bits: u32,
     at_sampling_floor: bool,
@@ -209,12 +215,6 @@ pub const DEFAULT_MAX_PREFIX_BITS: u32 = 20;
 /// instance behind [`record_partition_access`] is one of these.
 pub struct PartitionAccessRecorder {
     state: RwLock<Option<WindowState>>,
-    recorded: AtomicU64,
-    /// Accesses the recorder was asked to record but could NOT land in the table —
-    /// the table was at its load factor with the sampling prefix already at its cap,
-    /// so no slot could be claimed. Reported on the closed window
-    /// ([`WindowSummary::dropped_accesses`]) rather than lost silently.
-    dropped: AtomicU64,
     /// Window-close policy, held as atomics rather than a plain field so
     /// [`PartitionAccessRecorder::set_window_config`] can retune the PROCESS-GLOBAL
     /// recorder — which is otherwise unreachable behind a `OnceLock` — without
@@ -236,8 +236,6 @@ impl PartitionAccessRecorder {
     pub fn new(config: WindowConfig) -> Self {
         let recorder = Self {
             state: RwLock::new(None),
-            recorded: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
             duration_nanos: AtomicU64::new(0),
             max_accesses: AtomicU64::new(0),
             max_prefix_bits: AtomicU32::new(0),
@@ -309,8 +307,6 @@ impl PartitionAccessRecorder {
             SizeSource::SuccessorGap => table::FLAG_SIZE_FROM_GAP,
             SizeSource::Index | SizeSource::Unavailable => 0,
         };
-        self.recorded.fetch_add(1, Ordering::Relaxed);
-
         // Fast path: shared read lock, relaxed atomics on one slot.
         let mut slow = SlowPath::None;
         {
@@ -324,16 +320,29 @@ impl PartitionAccessRecorder {
                     // widen the sampling prefix — re-recording here would count
                     // this one access twice and shift its partition a bucket to
                     // the right, manufacturing concentration out of nothing.
+                    // Landed. Bank it against THIS state, under the same read lock
+                    // that received the entry (C3): `close_window` consumes the pair
+                    // under the WRITE lock, so a close can never bank the access in
+                    // one generation while its entry sits in the next.
                     Insert::Recorded => {
+                        state.recorded.fetch_add(1, Ordering::Relaxed);
                         if state.table.occupancy() >= table::LOAD_FACTOR_LIMIT {
                             slow = SlowPath::Downsample { replay: false };
                         }
                     }
-                    Insert::NotAdmitted => {}
-                    // Not counted: make room, then replay it.
+                    // The sampling predicate declined the key. Still an access this
+                    // window was asked to record, and banked here for the same
+                    // reason.
+                    Insert::NotAdmitted => {
+                        state.recorded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // NOT banked here: the write-locked path both seats and banks it
+                    // against whichever generation it ends up holding. Banking it now
+                    // would reintroduce the split a concurrent close causes.
                     Insert::Full => slow = SlowPath::Downsample { replay: true },
                 }
             } else {
+                // No table yet — the write-locked path allocates, seats and banks.
                 slow = SlowPath::Allocate;
             }
         }
@@ -358,6 +367,8 @@ impl PartitionAccessRecorder {
         match guard.as_mut() {
             None => {
                 let state = WindowState {
+                    recorded: AtomicU64::new(0),
+                    dropped: AtomicU64::new(0),
                     table: Table::new(),
                     prefix_bits: 0,
                     at_sampling_floor: false,
@@ -365,6 +376,7 @@ impl PartitionAccessRecorder {
                 };
                 if replay {
                     state.table.record_with_flags(hash, 0, bytes, flags);
+                    state.recorded.fetch_add(1, Ordering::Relaxed);
                 }
                 *guard = Some(state);
             }
@@ -390,20 +402,43 @@ impl PartitionAccessRecorder {
                     state.at_sampling_floor = true;
                 }
                 // Re-attempt the access ONLY if the fast path did not already count
-                // it. A `Full` here — an unlucky long probe run, or a table still at
-                // its load factor because the prefix cannot widen further — DROPS
-                // the access, so it must be counted where a reader can see it: a
-                // measurement instrument that silently loses input is worse than one
-                // that admits it did.
-                if replay
-                    && matches!(
+                // it, banking it against THIS state (C3).
+                //
+                // C4: a `Full` can happen well BELOW the load factor — the probe
+                // bound is 64 slots and, as occupancy approaches 0.75, the expected
+                // longest cluster is several hundred, so a new key whose home sits
+                // in a long run finds no slot while the widen loop above (gated on
+                // occupancy) never fires. Dropping there would be biased in the
+                // dangerous direction: an EXISTING entry is always within 64 probes
+                // of its home, so only NEW keys are lost, which suppresses the
+                // singleton bucket and OVERSTATES concentration — exactly the "makes
+                // the cache look good" bias D4 rejects eviction for. So widen (an
+                // unbiased, frequency-independent thinning) and retry until the key
+                // is seated or the prefix cap is reached.
+                if replay {
+                    let mut seated =
                         state
                             .table
-                            .record_with_flags(hash, state.prefix_bits, bytes, flags),
-                        Insert::Full
-                    )
-                {
-                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                            .record_with_flags(hash, state.prefix_bits, bytes, flags);
+                    while seated == Insert::Full
+                        && state.prefix_bits < self.max_prefix_bits.load(Ordering::Relaxed)
+                    {
+                        state.prefix_bits += 1;
+                        state.table.downsample(state.prefix_bits);
+                        state.at_sampling_floor |=
+                            state.prefix_bits >= self.max_prefix_bits.load(Ordering::Relaxed);
+                        seated =
+                            state
+                                .table
+                                .record_with_flags(hash, state.prefix_bits, bytes, flags);
+                    }
+                    // Banked either way: it is an access this window was asked to
+                    // record. `Full` at the cap is input LOST and is additionally
+                    // reported as dropped, so no reader has to infer it.
+                    state.recorded.fetch_add(1, Ordering::Relaxed);
+                    if seated == Insert::Full {
+                        state.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -416,7 +451,7 @@ impl PartitionAccessRecorder {
             (
                 u64::try_from(state.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
                     >= self.duration_nanos.load(Ordering::Relaxed),
-                self.recorded.load(Ordering::Relaxed) >= self.max_accesses.load(Ordering::Relaxed),
+                state.recorded.load(Ordering::Relaxed) >= self.max_accesses.load(Ordering::Relaxed),
             )
         };
         if elapsed || over_count {
@@ -436,8 +471,8 @@ impl PartitionAccessRecorder {
     pub fn close_window(&self) -> Option<WindowSummary> {
         let mut guard = self.write_state();
         let state = guard.as_mut()?;
-        let recorded = self.recorded.swap(0, Ordering::Relaxed);
-        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+        let recorded = state.recorded.swap(0, Ordering::Relaxed);
+        let dropped = state.dropped.swap(0, Ordering::Relaxed);
 
         let mut summary = WindowSummary {
             sample_denominator: 1u64 << state.prefix_bits,

@@ -204,16 +204,55 @@ fn a_window_at_the_sampling_floor_is_non_census_and_refused() {
         s.at_sampling_floor,
         "the prefix width cap must be reached and reported"
     );
+    // The requirement is "returns a refusal, not a hit-ratio number". A window
+    // driven this hard also loses input it could not seat, and that refusal is
+    // checked first — either name is a correct diagnosis of the same unusable
+    // window, so the assertion is on the refusal, not on which one won the race.
+    let verdict = decision::evaluate(
+        &s,
+        decision::WindowSource::Field,
+        128 * 1024 * 1024,
+        decision::ASSUMED_DECODE_MULTIPLIER,
+    );
+    assert!(
+        verdict.is_refusal(),
+        "a floored window must be refused, not priced: got {verdict:?}"
+    );
+    assert!(matches!(
+        verdict,
+        Verdict::Refused(Refusal::SamplingFloor { .. } | Refusal::DroppedAccesses { .. })
+    ));
+}
+
+#[test]
+fn a_downsampled_but_unfloored_window_is_refused_as_a_sample() {
+    // C2: the budget arithmetic compares REAL bytes (`C / m`) against the window's
+    // per-bucket bytes. In a 1-in-2^k sampled window those bytes cover only the
+    // admitted share, so pricing the full budget against them makes everything look
+    // like it fits — a FALSE "go". The committed note is explicit that absolute
+    // `n_b`/`B_b` are meaningless until scaled; the procedure refuses instead.
+    let r = deterministic_recorder();
+    for i in 0..220_000u64 {
+        r.record(
+            &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
+            AccessWeight::SuccessorGap(1_024),
+        );
+    }
+    let s = r.close_window().expect("accesses were recorded");
+    assert!(!s.is_census(), "220k distinct keys must force a downsample");
+    assert!(!s.at_sampling_floor, "but nowhere near the prefix cap");
+    assert_eq!(s.dropped_accesses, 0, "and nothing was lost");
+
     match decision::evaluate(
         &s,
         decision::WindowSource::Field,
         128 * 1024 * 1024,
         decision::ASSUMED_DECODE_MULTIPLIER,
     ) {
-        Verdict::Refused(Refusal::SamplingFloor { sample_denominator }) => {
+        Verdict::Refused(Refusal::NonCensusSample { sample_denominator }) => {
             assert!(sample_denominator > 1);
         }
-        other => panic!("a floored window must be refused, not priced: got {other:?}"),
+        other => panic!("a sample must never be filled against a real budget: {other:?}"),
     }
 }
 
@@ -414,6 +453,114 @@ fn accesses_dropped_at_the_sampling_floor_are_reported_not_lost() {
         "a drop is a subset of what was offered"
     );
     assert!(s.at_sampling_floor);
+}
+
+#[test]
+fn a_concurrent_close_never_splits_an_access_from_its_count() {
+    // C3: the access count and the table entry must be banked in the SAME window
+    // generation. When they were not, a close landing between the two put the count
+    // in window N and the entry in window N+1 — so a window could hold entries with
+    // `recorded_accesses` short of them, and a window holding entries but a count of
+    // zero returned `None`, losing them outright.
+    //
+    // Drive records from several threads while a closer runs continuously, then
+    // check the documented invariant on EVERY window and the conservation of the
+    // total across all of them.
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let recorder = Arc::new(deterministic_recorder());
+    let stop = Arc::new(AtomicBool::new(false));
+    let closed_accesses = Arc::new(AtomicU64::new(0));
+    let violations = Arc::new(AtomicU64::new(0));
+
+    let closer = {
+        let recorder = Arc::clone(&recorder);
+        let stop = Arc::clone(&stop);
+        let closed_accesses = Arc::clone(&closed_accesses);
+        let violations = Arc::clone(&violations);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                // Yield between closes. A hot spin here does not sharpen the race —
+                // it just makes every writer contend with a full 3 MiB table reset,
+                // which dominated the runtime without exercising anything more.
+                std::thread::yield_now();
+                if let Some(s) = recorder.close_window() {
+                    // The invariant `WindowSummary` documents.
+                    if s.recorded_accesses < s.total_accesses() {
+                        violations.fetch_add(1, Ordering::Relaxed);
+                    }
+                    closed_accesses.fetch_add(s.recorded_accesses, Ordering::Relaxed);
+                }
+            }
+        })
+    };
+
+    const THREADS: u64 = 4;
+    const PER_THREAD: u64 = 5_000;
+    let writers: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let recorder = Arc::clone(&recorder);
+            std::thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    let key = (t << 32) | i;
+                    recorder.record(&key.to_be_bytes(), AccessWeight::SuccessorGap(512));
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().expect("writer thread");
+    }
+    stop.store(true, Ordering::Relaxed);
+    closer.join().expect("closer thread");
+    if let Some(s) = recorder.close_window() {
+        assert!(s.recorded_accesses >= s.total_accesses());
+        closed_accesses.fetch_add(s.recorded_accesses, Ordering::Relaxed);
+    }
+
+    assert_eq!(
+        violations.load(Ordering::Relaxed),
+        0,
+        "no closed window may report fewer recorded accesses than its own table holds"
+    );
+    assert_eq!(
+        closed_accesses.load(Ordering::Relaxed),
+        THREADS * PER_THREAD,
+        "every access must be banked in exactly one closed window — none lost to a \
+         window that closed with a zero count, none double-counted"
+    );
+}
+
+#[test]
+fn a_probe_cluster_below_the_load_factor_widens_instead_of_dropping() {
+    // C4: `Insert::Full` is reachable far below the load factor — the probe bound is
+    // 64 slots while the expected longest cluster near a 0.75 load factor is several
+    // hundred. Dropping there is biased in the dangerous direction: an existing entry
+    // is always within 64 probes of home, so only NEW keys are lost, which suppresses
+    // the singleton bucket and OVERSTATES concentration.
+    //
+    // Fill to just under the load factor with the production prefix cap and assert
+    // nothing was lost: any probe-cluster `Full` must have widened (unbiased) rather
+    // than dropped.
+    let r = deterministic_recorder();
+    let n = 95_000u64; // just under LOAD_FACTOR_LIMIT (98,304)
+    for i in 0..n {
+        r.record(
+            &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
+            AccessWeight::SuccessorGap(256),
+        );
+    }
+    let s = r.close_window().expect("accesses were recorded");
+    assert_eq!(s.recorded_accesses, n);
+    assert_eq!(
+        s.dropped_accesses, 0,
+        "a probe cluster must widen the sample, never silently drop a new key"
+    );
+    // Whatever happened, the two documented invariants hold together: a drop implies
+    // the floor was reached, and the count covers the table.
+    assert!(s.recorded_accesses >= s.total_accesses());
+    assert!(s.dropped_accesses == 0 || s.at_sampling_floor);
 }
 
 // ---------------------------------------------------------------------------

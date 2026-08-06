@@ -77,6 +77,20 @@ pub enum Refusal {
         /// The sampling scale in force at close.
         sample_denominator: u64,
     },
+    /// The window is a SAMPLE, not a census, so its per-bucket byte totals are in
+    /// the sample domain and cannot be filled against a real cache budget.
+    NonCensusSample {
+        /// The sampling scale in force at close (`2^k`).
+        sample_denominator: u64,
+    },
+    /// The recorder could not seat some accesses in its table at all, so the
+    /// histogram is missing input.
+    DroppedAccesses {
+        /// How many accesses were lost.
+        dropped: u64,
+        /// How many the window was asked to record.
+        recorded: u64,
+    },
     /// The window is not a workload.
     TooFewAccesses {
         /// Accesses attributable to the admitted sample.
@@ -109,6 +123,21 @@ impl std::fmt::Display for Refusal {
                 f,
                 "REFUSED: the recorder reached its sampling floor (denominator \
                  {sample_denominator}); the surviving sample is statistically worthless"
+            ),
+            Refusal::NonCensusSample { sample_denominator } => write!(
+                f,
+                "REFUSED: this window is a 1-in-{sample_denominator} SAMPLE, not a \
+                 census. Its per-bucket bytes are sample-domain totals, so filling a \
+                 real cache budget against them would price the whole budget against \
+                 1/{sample_denominator} of the working set and OVERSTATE what fits. \
+                 Re-measure with a shorter window so the distinct set fits the table"
+            ),
+            Refusal::DroppedAccesses { dropped, recorded } => write!(
+                f,
+                "REFUSED: {dropped} of {recorded} accesses could not be seated in the \
+                 counting table, so the histogram is missing input. Only NEW keys are \
+                 ever dropped, which suppresses the singleton bucket and overstates \
+                 concentration — the direction that flatters the cache"
             ),
             Refusal::TooFewAccesses { accesses, minimum } => write!(
                 f,
@@ -167,7 +196,9 @@ impl Verdict {
 /// Apply the procedure to one closed window at one decoded-cache budget.
 ///
 /// Refusal conditions are checked FIRST and in order; each yields no answer rather
-/// than a default verdict.
+/// than a default verdict. Every one of them is a property this procedure cannot
+/// price around: an incomplete byte total, lost input, a sample rather than a
+/// census, too little traffic to be a workload, or load we generated ourselves.
 pub fn evaluate(
     summary: &WindowSummary,
     source: WindowSource,
@@ -200,13 +231,44 @@ pub fn evaluate_with_threshold(
             partitions: unavailable,
         });
     }
-    // 2. A window at the sampling floor is statistically worthless.
+    // 2. Input the recorder could not seat at all. Checked early because the loss
+    //    is BIASED — see the refusal text — so it invalidates the shape, not just
+    //    the totals.
+    if summary.dropped_accesses > 0 {
+        return Verdict::Refused(Refusal::DroppedAccesses {
+            dropped: summary.dropped_accesses,
+            recorded: summary.recorded_accesses,
+        });
+    }
+    // 3. A window at the sampling floor is statistically worthless.
     if summary.at_sampling_floor {
         return Verdict::Refused(Refusal::SamplingFloor {
             sample_denominator: summary.sample_denominator,
         });
     }
-    // 3. A window below the stated minimum is not a workload.
+    // 4. A SAMPLE cannot be filled against a real budget.
+    //
+    //    The budget arithmetic below compares `C / m` — real bytes — against
+    //    `B_b`, which for a downsampled window covers only the admitted 1-in-2^k
+    //    share of the distinct partitions. Pricing the full budget against a
+    //    fraction of the working set makes everything appear to fit and yields a
+    //    FALSE "go". The committed note is explicit that absolute `n_b` and `B_b`
+    //    must be scaled by `2^k` before they mean anything.
+    //
+    //    Refusing rather than scaling, deliberately: scaling by `2^k` gives an
+    //    unbiased POINT estimate of the population totals but says nothing about
+    //    its variance, and the procedure's output is a go/no-go, not an interval —
+    //    so a scaled verdict would look exactly as authoritative as a census one
+    //    while resting on an extrapolation this instrument cannot bound. The spec's
+    //    only priced scenario is a census, the bucket FRACTIONS a sample does
+    //    support are still readable off the emitted series, and a census is cheap
+    //    to obtain (shorten the window until the distinct set fits the table).
+    if !summary.is_census() {
+        return Verdict::Refused(Refusal::NonCensusSample {
+            sample_denominator: summary.sample_denominator,
+        });
+    }
+    // 5. A window below the stated minimum is not a workload.
     let total_accesses = summary.total_accesses();
     if total_accesses < MIN_ACCESSES {
         return Verdict::Refused(Refusal::TooFewAccesses {
@@ -214,7 +276,7 @@ pub fn evaluate_with_threshold(
             minimum: MIN_ACCESSES,
         });
     }
-    // 4. Self-generated load is not evidence about the world.
+    // 6. Self-generated load is not evidence about the world.
     if source == WindowSource::Synthetic {
         return Verdict::Refused(Refusal::SyntheticWorkload);
     }
