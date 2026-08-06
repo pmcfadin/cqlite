@@ -30,7 +30,7 @@ pub mod presence_verification; // #2163 opt-in false-negative verification switc
 mod partition_locator;
 // Next-partition (successor) seek-window offset resolution (issue #953 / #951),
 // split out of `partition_lookup` for the campsite source-size rule (#1116).
-mod partition_successor;
+pub(crate) mod partition_successor;
 // Positional (`pread`-style) point-read backends (issue #1573, Epic C / C2).
 mod read_at;
 // Concurrency scenarios for the ReadAt point-read migration (issue #1573).

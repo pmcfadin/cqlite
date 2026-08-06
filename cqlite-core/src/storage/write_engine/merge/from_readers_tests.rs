@@ -350,6 +350,7 @@ fn build_single_partition_merger_from_readers_matches_path_based() {
             &[key_bytes],
             &schema,
             ScanCancel::default(),
+            super::super::PointAccessRecording::CallerRecords,
         )
         .expect("reader-based probe succeeds")
         .expect("reader-based merger must find the key")
