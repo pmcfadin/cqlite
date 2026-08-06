@@ -5936,6 +5936,37 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 CANONICAL-CORPUS COMPARISON (#3272 review round 13, F3). The third campsite split off
+  # `test_ws0_provenance_guards.sh`, and a distinct SUBJECT: that file asks whether a report
+  # IDENTIFIES the bytes it describes; this asks whether those are the bytes a WS0 BASELINE is
+  # DEFINED as. Every provenance check is a SELF-CONSISTENCY check about whatever corpus was
+  # supplied — pin matches identity, components match pin, schema matches its digest, rows are an
+  # exact multiple of the pinned count — and ALL of it is equally true of a corpus generated with
+  # smoke-test row counts or a different seed. So such a corpus passed the driver AND the reporter
+  # as a WS0 BASELINE with nothing in the printed report to distinguish it. The canonical shape
+  # lives in RUST (`tools/ws0-corpus-gen/src/measurement_corpus.rs`) and NOTHING under `scripts/`
+  # referred to it (measured: zero grep hits), so the fix is a CROSS-LANGUAGE BRIDGE — a PARSE of
+  # the Rust source, because no gate component or hermetic self-test may `cargo build` and a
+  # committed generated copy would be a second copy of every value. A smoke corpus still RUNS,
+  # under an explicit `--non-baseline` mode that LABELS the manifest and the report in words
+  # (forbidding it would be the FOURTH documented operator command this issue broke). Both
+  # directions are measured, with three non-vacuity halves: the pre-fix pin observed accepting a
+  # 1000-row corpus uncompared, all 9 values asserted present in the Rust file's own text (so a
+  # hand-copied Python literal could not satisfy the check), and a renamed constant observed to be
+  # FATAL. Hermetic: synthetic corpora under $TMPDIR, the shipped oracle/writers called directly,
+  # driver invocations only through `ws0_driver_run`; the Rust pin is READ, never compiled.
+  echo ">>> [$name] bash scripts/tests/test_ws0_canonical_corpus.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_canonical_corpus.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 canonical-corpus guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 PER-REP ROUND METADATA (#3272 review round 4). Split out of the fabrication suite
   # under the campsite rule, by SUBJECT: the driver's loop order, the four RECORDED per-rep
   # fields, the artifact-set INTEGRITY refusals over them (same round set per arm, positions
