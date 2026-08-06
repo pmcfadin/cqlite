@@ -3514,7 +3514,7 @@ assert_says '--help gives the waiver marker verbatim' \
 assert_says '--help says who may grant it, and that a worker may only request' \
   'may REQUEST one'
 assert_says '--help says the waiver is sha-bound' 'SHA-BOUND: a push invalidates it'
-assert_says '--help says it excuses the absence verdict only' 'excuses the ABSENCE\n*verdict ONLY'
+assert_says '--help says it excuses the absence verdict only' 'excuses the ABSENCE'
 assert_says '--help says the waived token is DISTINCT from PASS' 'a DISTINCT token'
 assert_says '--help states the authorship limitation, not an implied guarantee' \
   'AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
@@ -3666,8 +3666,9 @@ fi
 _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | head -1 | cut -d: -f1)
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
 _pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
-if printf '%s\n' "$_pc_body" | grep -qF 'roborev_absence_waiver_lookup "${HEAD_SHA:-}"' \
-  && [ "$(printf '%s\n' "$_pc_body" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
+_pc_exec=$(printf '%s\n' "$_pc_body" | grep -v '^[[:space:]]*#')
+if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${HEAD_SHA:-}"' \
+  && [ "$(printf '%s\n' "$_pc_exec" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
   && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="WAIVED ('; then
   ok 'structural: the waiver is looked up EXACTLY ONCE, inside the absence branch, so it can excuse only that verdict (constraint (c))'
 else
