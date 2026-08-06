@@ -43,6 +43,7 @@ from ws0_validate import (
     Invalid,
     _SHA256_RE,
     cli_count,
+    http_endpoint,
     nonempty_selection,
     positive_int,
 )
@@ -525,6 +526,18 @@ MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
     "step_duration": "a non-empty recorded STRING (`<warm>/<cold>`), reported verbatim; the"
                      " DURATIONS that bound a rep were validated by the driver's own argument"
                      " checks (lib-args.sh) before the session ran",
+    "flight_endpoint": "validated as an ABSOLUTE `http://<host>:<port>` URL (a bare host, a bare"
+                       " port, or a trailing path is REFUSED), and — the substance — compared"
+                       " EXACTLY against the `endpoint` field of EVERY loadgen record of every rep"
+                       " of both arms by ws0_loadgen_record.check_session_bound_inputs, which is"
+                       " what makes it provenance rather than a recorded string. `endpoint` was"
+                       " classified IGNORED (`the loopback address; not a measurement`), so a"
+                       " record produced against a DIFFERENT server — a peer lane's process on"
+                       " another port, or a remote host — passed every row/request/error/shed/rate"
+                       " check and had its rows divided by THIS session's perf counters, collected"
+                       " on pinned local cores that served nothing (#3272 round 14, F2). Pinned"
+                       " HERE, before the first rep, so it is the pre-measurement pin every other"
+                       " identity in this manifest is an identity OF",
     "baseline_mode": "validated as one of ws0_canonical_corpus.MODE_BASELINE /"
                      " MODE_NON_BASELINE, and — the substance — tied to a REAL pre-measurement"
                      " COMPARISON against the canonical pin in"
@@ -551,6 +564,7 @@ _MANIFEST_READER_KEYS = (
     "server_cpus",
     "client_cpus",
     "step_duration",
+    "flight_endpoint",
     "baseline_mode",
 )
 
@@ -704,6 +718,19 @@ def session_manifest_config(
             " value nobody planned for cannot support either answer (#3272 round 13, F3)."
         )
     out["baseline_mode"] = mode
+    # THE MEASURED SERVER (#3272 round 14, F2). Validated STRUCTURALLY, not recorded opaquely: it
+    # is compared EXACTLY against every loadgen record's `endpoint`, so an unusable pin (a bare
+    # host, a bare port, a prose placeholder) would compare unequal to every real record and refuse
+    # the session while blaming the ARTIFACT — the error caught at the wrong end. Refused here, where
+    # the mis-stamped pin is.
+    out["flight_endpoint"] = http_endpoint(
+        f"{p} `config.flight_endpoint`",
+        config["flight_endpoint"],
+        "It is the pre-measurement pin of WHICH SERVER produced the measured rows: every loadgen"
+        " record of every rep of both arms is compared against it, because a record from a"
+        " different server had its rows divided by THIS session's perf counters, collected on"
+        " pinned local cores that served nothing (#3272 round 14, F2).",
+    )
     for key in ("server_cpus", "client_cpus", "step_duration"):
         value = config[key]
         if not isinstance(value, str) or not value.strip():

@@ -45,9 +45,16 @@
 # These functions are the rig's most environment-dependent code and are called ONLY by the
 # driver's measurement loop, AFTER every argument check, the topology verification, the corpus
 # and schema verification and the session pin. They read driver globals — `$SERVER_CPUS`,
-# `$CLIENT_CPUS`, `$BIN`, `$CORPUS`, `$OUT_DIR`, `$PORT`, `$TICKET_TEMPLATE`, `$SCAN_PASSES`,
-# `$STEP_DURATION`, `$COLD_STEP_DURATION`, `$SERVER_PID` — and call `perf_stat_c`,
+# `$CLIENT_CPUS`, `$BIN`, `$CORPUS`, `$OUT_DIR`, `$PORT`, `$FLIGHT_ENDPOINT`, `$TICKET_TEMPLATE`,
+# `$SCAN_PASSES`, `$STEP_DURATION`, `$COLD_STEP_DURATION`, `$SERVER_PID` — and call `perf_stat_c`,
 # `drop_caches_if_cold`, `stop_server`, `require_port_free` and `await_server_ready`.
+#
+# `$FLIGHT_ENDPOINT` (#3272 round 14, F2) is the ONE spelling of the measured server: the driver
+# derives it from the validated `$PORT` and stamps it into the session manifest before rep 1, and
+# the reporter compares it EXACTLY against every rep's recorded `endpoint`. These call sites used to
+# compose `http://127.0.0.1:$PORT` themselves, which is a second spelling of a pinned fact — under
+# `set -u` an unset global fails loudly here, whereas a locally-recomposed one would silently differ
+# from the pin and make every rep of a correct run refuse.
 #
 # That coupling is UNCHANGED by the split (these were driver-local functions reading the same
 # globals), and it is recorded rather than hidden. It is also why the driver sources this LAST,
@@ -209,7 +216,7 @@ measure_flight() {
     local prewarm_rc=0
     # NOT `/dev/null`: this artifact IS the evidence the status is derived from.
     taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
-        --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
+        --endpoint "$FLIGHT_ENDPOINT" --ticket-template "$TICKET_TEMPLATE" \
         --shape full --ramp 1 --step-duration 20s --round prewarm \
         --out "$OUT_DIR/$tag.prewarm.jsonl" \
         > "$OUT_DIR/$tag.prewarm.log" 2>&1 || prewarm_rc=$?
@@ -242,7 +249,7 @@ measure_flight() {
 
   perf_stat_c "$OUT_DIR/perf-$tag.csv" \
     taskset -c "$CLIENT_CPUS" "$BIN/flight-loadgen" \
-      --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET_TEMPLATE" \
+      --endpoint "$FLIGHT_ENDPOINT" --ticket-template "$TICKET_TEMPLATE" \
       --shape full --ramp 1 --step-duration "$step" \
       --round "$tag" --out "$OUT_DIR/$tag.jsonl" \
     > "$OUT_DIR/$tag.log" 2>&1 \

@@ -247,6 +247,12 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     server_cpus = config["server_cpus"]
     client_cpus = config["client_cpus"]
     step_duration = config["step_duration"]
+    # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
+    # manifest and passed to every Flight arm, which compares it against EVERY rep's recorded
+    # `endpoint`. Deliberately NOT a reporter argument, for the reason F1 gave for the whole
+    # configuration: a value that cannot be supplied cannot disagree, so a record produced against
+    # another server cannot be excused by re-reporting with a matching flag.
+    flight_endpoint = config["flight_endpoint"]
     # THE PINNING CLAIM'S EVIDENCE (#3272 round 9, F6). The two CPU lists above are manifest
     # strings, and `session_manifest_config` deliberately does not re-check them — correctly, but
     # the check that DID run was against the driver's argv and nothing tied the two together, so
@@ -439,6 +445,15 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f" on {pinning_verification['host']} pre-measurement, recorded in"
         f" {pathlib.Path(pinning_verification['source']).name}), client {client_cpus}",
         f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]",
+        # WHICH SERVER SERVED THE ROWS THOSE COUNTERS DESCRIBE (#3272 round 14, F2). Printed
+        # directly under the `counters` line deliberately: the pairing of the two is the property —
+        # `perf -C` measures the pinned cores, and this states that the rows divided by those cycles
+        # were served by the process on them. Previously `endpoint` was classified IGNORED, so a
+        # record produced against another server (a peer lane's process on another port, a remote
+        # host) was reported here with no line saying so.
+        f"server pinned: {flight_endpoint} — EVERY Flight rep's recorded `endpoint` was compared"
+        " EXACTLY against this pre-measurement pin, so the rows above were served by the process"
+        " those counters measure",
         f"reps         : {reps} (median reported, spread shown)",
         *selection_lines(temps, arms, reps),
         "",
@@ -461,7 +476,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         lines.append(fmt("bare scan (execute_streaming)", scan))
         lines += prewarm_warning(scan, "bare-scan", temp)
         for arm in arms:
-            fl = collect_flight(d, temp, arm, reps, corpus_rows)
+            fl = collect_flight(d, temp, arm, reps, corpus_rows, flight_endpoint)
             results["measurements"].append(fl)
             lines.append(fmt(f"flight do_get ({arm})", fl))
             lines += prewarm_warning(fl, f"flight/{arm}", temp)

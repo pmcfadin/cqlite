@@ -88,7 +88,7 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # shellcheck source=scripts/tests/lib-ws0-report-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
 
-GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","endpoint":"__ENDPOINT__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 
@@ -223,9 +223,9 @@ d="$TMP/paired"; mkdir -p "$d"
 for rep in 1 2 3; do
   make_scan_rep "$d" warm "$rep" ok
 done
-python3 - "$d" "$CORPUS_ROWS" <<'PY'
+python3 - "$d" "$CORPUS_ROWS" "$WS0_FIXTURE_ENDPOINT" <<'PY'
 import json, pathlib, sys
-d, rows = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+d, rows, endpoint = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 # flight rows/s per round: two rounds below the bare scan's 500/s (1000 rows / 2.0s),
 # one above — so 1 of 3 rounds meets a 1.3x target while the median does not.
 #
@@ -245,7 +245,12 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         # reason: the reporter REQUIRES them, so omitting one is refused correctly but for a
         # reason unrelated to this case's subject.
         "schema": "flight-loadgen.step/v1", "step": 0, "target_concurrency": 1, "shape": "full",
-        "round": tag, "requests_ok": 1, "requests_error": 0, "requests_unavailable": 0,
+        # ...and the SESSION-BOUND inputs at the values this session pinned (#3272 round 14,
+        # F1/F2): the rep's own tag, and the manifest's pinned flight endpoint. Both are REQUIRED
+        # and compared, so omitting either is refused correctly but for a reason unrelated to this
+        # case's subject.
+        "round": tag, "endpoint": endpoint,
+        "requests_ok": 1, "requests_error": 0, "requests_unavailable": 0,
         "rows_total": rows, "rows_per_s": rows / secs, "duration_s": secs}) + "\n")
     (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
     (d / f"{tag}.prewarm.status").write_text("ok\n")
@@ -629,15 +634,18 @@ done
 # Distinct ROW COUNTS, so the swap is a real corruption of a figure and not merely a relabelling:
 # post-swap, rep 1's file holds rep 2's rows. Both are exact multiples of the corpus row count, so
 # the full-corpus check cannot catch it either — which is the point.
-python3 - "$d" "$CORPUS_ROWS" <<'PY'
+python3 - "$d" "$CORPUS_ROWS" "$WS0_FIXTURE_ENDPOINT" <<'PY'
 import pathlib, sys
-d, rows = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+d, rows, endpoint = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 for rep, mult in ((1, 1), (2, 2)):
     tag = f"flight-bypass-warm-{rep}"
     # The record is REP 2's when rep == 2 — written correctly first, then swapped below.
+    # `endpoint` is the SESSION'S PINNED one in BOTH records (#3272 round 14, F2), so the swap's
+    # only defect is the one this case is about: a record in the wrong rep's filename. A differing
+    # endpoint would make the refusal ambiguous between two guards.
     (d / f"{tag}.jsonl").write_text(
         '{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full",'
-        f'"round":"{tag}","requests_ok":{mult},"requests_error":0,"requests_unavailable":0,'
+        f'"round":"{tag}","endpoint":"{endpoint}","requests_ok":{mult},"requests_error":0,"requests_unavailable":0,'
         f'"rows_total":{rows * mult},"rows_per_s":{rows * mult / 4.0},"duration_s":4.0}}'
         "\n"
     )

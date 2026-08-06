@@ -115,7 +115,30 @@ FIXED_INPUTS: dict[str, tuple[object, str]] = {
 # The expected values come from the REP TAG and the SESSION MANIFEST, never from a caller's
 # argument: `session_bound_expectations` builds them from the tag and from what was recorded before
 # the first rep.
-SESSION_BOUND_INPUTS: dict[str, tuple[str, str]] = {
+#
+# `endpoint` (#3272 round 14, F2) is the second member, and it is the reason this table is a
+# MECHANISM rather than a one-off: it was classified `ignored` with the reason "the loopback address;
+# not a measurement", which is the same sentence shape that was wrong for `target_concurrency` (F3)
+# and for `round` (F1) — a true statement about the FIELD standing in for a claim about the FIGURE.
+# The endpoint decides WHICH SERVER PRODUCED THE MEASURED ROWS, and the rig's whole arrangement is
+# that one pinned local `cqlite-flight` process, on known cores, with a known data dir and known
+# binaries, served every request. A record produced against a DIFFERENT server — another local
+# process on another port (a peer lane, a hand-run server, a stale instance) or a remote host — is
+# combined with THIS session's `perf -C` counters, which measure the pinned local cores, and
+# published as this rig's cycles/row. Nothing else in the rig can see it: the rows are a legitimate
+# multiple of the corpus row count, the request/error/shed counters are clean, the derived rate
+# matches the record's own, the tag matches the filename, and the whole artifact set is
+# self-consistent on disk. It is the request-substitution class of round 10's M1 and the
+# corpus-substitution class of round 13's F3, one layer further out: the same query over the same
+# bytes on a DIFFERENT MACHINE.
+# Each entry is `(SOURCE, WHY, CONSEQUENCE)`. The third element is the sentence the MISMATCH
+# refusal ends with, and it is per-field rather than one sentence for the table because the two
+# members lose DIFFERENT things: a wrong `round` means this record is another REP's (its rows meet
+# another rep's cycles), while a wrong `endpoint` means it is another SERVER's (its rows meet cores
+# that served nothing). A single shared sentence would have to be true of both, and the only sentence
+# true of both is "two strings differ" — which is exactly the diagnostic round 14's F1 test refuses,
+# because an operator reading it cannot tell whether it matters.
+SESSION_BOUND_INPUTS: dict[str, tuple[str, str, str]] = {
     "round": (
         "the rep TAG the artifact was found under",
         "the driver passes `--round <tag>`, so this field is the record's own statement of WHICH"
@@ -123,6 +146,27 @@ SESSION_BOUND_INPUTS: dict[str, tuple[str, str]] = {
         " passed validation — combining one rep's rows and duration with ANOTHER rep's perf"
         " counters (located by tag from the filename) and round metadata, which corrupts"
         " cycles/row and mis-attributes every paired comparison (#3272 round 14, F1)",
+        "The record does not belong to the rep whose filename it was found under, so its rows and"
+        " duration would be combined with ANOTHER rep's perf counters; re-run rather than"
+        " reporting a record from elsewhere.",
+    ),
+    "endpoint": (
+        "`config.flight_endpoint` in the session manifest, pinned before the first rep",
+        "the driver passes `--endpoint http://127.0.0.1:$PORT`, so this field is the record's own"
+        " statement of WHICH SERVER PRODUCED THE MEASURED ROWS. It was classified IGNORED as `the"
+        " loopback address; not a measurement`, so a record produced against a DIFFERENT server —"
+        " another local process on another port, or a remote host — satisfied every row, request,"
+        " error, shed, rate and tag check and was reported as this rig's result: its rows and"
+        " duration divided by THIS session's `perf -C` cycles, which measure the pinned local"
+        " cores that served nothing. The measured server is what every other pinned identity"
+        " (cores, corpus, ticket, binaries) is an identity OF, so this is the corpus substitution"
+        " of round 13 F3 and the request substitution of round 10 M1 one layer out — the same"
+        " query over the same bytes on a different machine (#3272 round 14, F2)",
+        "THE ROWS WERE SERVED BY A DIFFERENT SERVER than the one this session pinned and measured,"
+        " so they would be divided by perf counters collected on cores that served nothing —"
+        " every other pinned identity in this session (CPUs, corpus, ticket, binaries) describes"
+        " the pinned server, and none of them describes the one that answered. Point the driver at"
+        " the pinned endpoint and re-run; do not report rows measured elsewhere.",
     ),
 }
 
@@ -198,7 +242,7 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
     # they cannot be verified by the `FIXED_INPUTS` mechanism, and the disposition that used to
     # cover `round` (`required-present`, i.e. verified only to EXIST) is what F1 found.
     "round": ("session-bound", SESSION_BOUND_INPUTS["round"][1]),
-    "endpoint": ("ignored", "the loopback address; not a measurement"),
+    "endpoint": ("session-bound", SESSION_BOUND_INPUTS["endpoint"][1]),
     "ts_unix_ms": ("ignored", "wall-clock stamp; the rig's ordering uses monotonic_ns from"
                               " <tag>.round, never a wall clock. It cannot affect what was"
                               " measured: no figure, no pairing and no refusal reads it — the"
@@ -208,8 +252,9 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
                               " prefers precisely because a wall clock can step"),
     "seed": ("ignored", "the loadgen's RNG seed for TICKET SELECTION. It cannot affect what was"
                         " measured HERE, and the reason is specific to this rig's shape rather"
-                        " than to the word INPUT — which is the reason that was wrong twice"
-                        " (#3272 F3's target_concurrency, F1's endpoint). Every rep runs"
+                        " than to the word INPUT — which is the reason that was wrong three times"
+                        " (#3272 F3's target_concurrency, round 14 F1's round, round 14 F2's"
+                        " endpoint). Every rep runs"
                         " `--shape full`, a VERIFIED FIXED INPUT above, and the `Full` transform"
                         " (tools/flight-loadgen/src/shape.rs) is `t.limit = None` on the base"
                         " template: it draws NOTHING from the RNG, so two seeds produce"
@@ -244,7 +289,14 @@ DISPOSITIONS = ("consumed", "verified-fixed-input", "session-bound", "ignored")
 # would have shipped with NO closure check at all, which is the half-wired-guard shape this issue
 # keeps finding. A new verifying disposition is registered HERE, in one place, or it is not one of
 # `DISPOSITIONS` and is refused below.
-_EXPECTATION_TABLES: dict[str, tuple[str, dict[str, tuple[object, str]]]] = {
+#
+# The tuple SHAPES differ between tables — `FIXED_INPUTS` is `(value, why)`, `SESSION_BOUND_INPUTS`
+# is `(source, why, consequence)` — and the annotation says so rather than pretending they agree.
+# The closure loops below read only the KEYS and the census's own disposition, deliberately: a
+# closure check that also decoded each table's value shape would have to know both shapes, i.e. it
+# would break the moment a third table arrived, which is the drift a registry exists to remove.
+# The per-table value contract is asserted by its OWN loop, immediately after this one.
+_EXPECTATION_TABLES: dict[str, tuple[str, dict[str, tuple[object, ...]]]] = {
     "verified-fixed-input": ("FIXED_INPUTS", FIXED_INPUTS),
     "session-bound": ("SESSION_BOUND_INPUTS", SESSION_BOUND_INPUTS),
 }
@@ -294,6 +346,33 @@ for _k, (_d, _) in RECORD_FIELD_DISPOSITION.items():
 # (`_CHECKED_DISPOSITIONS`, defined beside them), which is the direction round 12's F2 missed one
 # level out: the freeze was performed and the check on it was nominal.
 del _k, _d, _disp, _table_name, _table
+
+# ...and EVERY SESSION-BOUND ENTRY MUST CARRY ALL THREE ELEMENTS (#3272 round 14, F2). The table
+# grew a third element — the per-field CONSEQUENCE sentence the mismatch refusal ends with — and a
+# two-element entry would raise an unpacking `ValueError` deep inside the checker at report time
+# rather than being refused here. Worse, an entry with an EMPTY consequence would unpack cleanly and
+# produce a refusal that names two differing strings and nothing about what is lost, which is the
+# diagnostic this table's whole third element exists to prevent. So the shape is a REQUIREMENT
+# stated at import, where the table is: a field cannot be session-bound without a stated source, a
+# stated reason and a stated consequence.
+for _k, _spec in SESSION_BOUND_INPUTS.items():
+    if len(_spec) != 3:
+        raise Invalid(
+            f"SESSION_BOUND_INPUTS[{_k!r}] has {len(_spec)} element(s); every entry must be"
+            " (SOURCE, WHY, CONSEQUENCE). The consequence is the sentence the MISMATCH refusal ends"
+            " with, and it is per-field because the members lose different things — a wrong `round`"
+            " means another REP's record, a wrong `endpoint` means another SERVER's (#3272 round 14,"
+            " F2)."
+        )
+    for _pos, _label in enumerate(("SOURCE", "WHY", "CONSEQUENCE")):
+        if not isinstance(_spec[_pos], str) or len(_spec[_pos].strip()) < 20:
+            raise Invalid(
+                f"SESSION_BOUND_INPUTS[{_k!r}]'s {_label} is not a substantive sentence"
+                f" ({_spec[_pos]!r}). An empty one unpacks cleanly and produces a refusal that"
+                " names two differing strings and nothing about what the mismatch costs, which an"
+                " operator cannot act on."
+            )
+del _k, _spec, _pos, _label
 
 # Every counter that must be present AND zero for a rep to be reported.
 ZERO_REQUIRED_COUNTERS = ("requests_error", "requests_unavailable")
@@ -407,13 +486,19 @@ def check_session_bound_inputs(tag: str, rec: dict, expected: dict[str, str]) ->
     """REQUIRE the SESSION-BOUND inputs to match this rep's own identity (#3272 round 14, F1/F2).
 
     The sibling of `check_fixed_inputs` for the fields whose correct value is not a constant:
-    `round` must be the rep's TAG.
+    `round` must be the rep's TAG, and `endpoint` must be the server the SESSION MANIFEST pinned
+    before the first rep.
 
-    Before this, `round` was verified only to EXIST, and SWAPPING TWO REPS' JSONL files passed
-    everything. `perf-<tag>.csv` and `<tag>.round` are located by TAG (from the filename), so rep
-    1's rows and duration were divided by rep 2's cycles and attributed to rep 2's round — a
-    corrupted `cycles/row` and a mis-paired comparison, from an artifact set that is entirely
-    self-consistent on disk.
+    Before this, each was verified only to EXIST or not at all:
+
+    * `round` (F1) — SWAPPING TWO REPS' JSONL files passed everything. `perf-<tag>.csv` and
+      `<tag>.round` are located by TAG (from the filename), so rep 1's rows and duration were
+      divided by rep 2's cycles and attributed to rep 2's round — a corrupted `cycles/row` and a
+      mis-paired comparison, from an artifact set that is entirely self-consistent on disk.
+    * `endpoint` (F2) — classified IGNORED, so a record produced against ANOTHER SERVER (another
+      local process on another port, or a remote host) was reported as this rig's result. Its rows
+      were divided by THIS session's `perf -C` cycles, collected on the pinned local cores that
+      served nothing.
 
     `expected` maps field -> the value this rep must carry, built by the CALLER from the session
     manifest and the tag (`ws0_flight_arm.session_bound_expectations`) — never from a default here.
@@ -425,10 +510,17 @@ def check_session_bound_inputs(tag: str, rec: dict, expected: dict[str, str]) ->
     would make `round: 1` match the tag `"1"`, and the point is to compare what the loadgen actually
     wrote (`round: String`, `endpoint: String` in `StepRecord`).
 
+    Compared EXACTLY, never by a substring/prefix/host-suffix test. That is the same rule the
+    prewarm status and the roborev verdict scan follow, and it matters most here: an endpoint
+    comparison that accepted a prefix would call `http://127.0.0.1:18815` and
+    `http://127.0.0.1:188150` the same server, and one that compared only the HOST would accept
+    every port on the box — which is precisely the peer-lane case this closes, since a second local
+    server is on the same loopback host by construction.
+
     Returns what was verified, so the rep's record can state it.
     """
     verified: dict[str, str] = {}
-    for key, (source, why) in SESSION_BOUND_INPUTS.items():
+    for key, (source, why, consequence) in SESSION_BOUND_INPUTS.items():
         if key not in expected:
             raise Invalid(
                 f"internal: no expected value was supplied for the session-bound field `{key}`"
@@ -454,11 +546,13 @@ def check_session_bound_inputs(tag: str, rec: dict, expected: dict[str, str]) ->
                 f" spelling '1'. {why}"
             )
         if got != want:
+            # BOTH VALUES ARE NAMED, and the refusal ends with THIS FIELD'S consequence — not a
+            # shared sentence about two differing strings, which an operator cannot act on (round
+            # 14's F1 asserts that property for `round`, and it is the reason the consequence is a
+            # per-field element of the table rather than one sentence for the loop).
             raise Invalid(
                 f"flight rep {tag} recorded `{key}` = {got!r}, but for this rep {source} is"
-                f" {want!r}. {why}. The record does not belong to the rep whose filename it was"
-                " found under, so its rows and duration would be combined with ANOTHER rep's perf"
-                " counters; re-run rather than reporting a record from elsewhere."
+                f" {want!r}. {why}. {consequence}"
             )
         verified[key] = got
     return verified

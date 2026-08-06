@@ -22,6 +22,22 @@
 # with a key omitted or corrupted). Unifying them would need a builder taking both shapes,
 # which is a worse abstraction than two builders. They stay beside the cases that use them.
 
+# THE FIXTURE SESSION'S PINNED FLIGHT ENDPOINT (#3272 round 14, F2).
+#
+# ONE constant, because it is ONE pinned fact stated in two artifacts a healthy session must agree
+# on: the manifest's `config.flight_endpoint` (stamped by `ws0_pin_session_corpus`) and every step
+# record's `endpoint` (substituted into the record bodies by the two suites' `make_flight_rep`, the
+# same way `__TAG__` binds `round`). The reporter compares them EXACTLY, so two spellings of the
+# default would refuse every healthy case in every suite for a reason unrelated to its subject —
+# which is precisely how `round`'s constant `"round":"r"` bodies behaved when F1 landed.
+#
+# A case whose SUBJECT is a record from ANOTHER SERVER overrides ONE side: it writes a different
+# `endpoint` into the record (or pins a different endpoint in the manifest) and asserts the refusal.
+# The port is deliberately NOT the driver's default 18815 — nothing here runs a server, and a
+# fixture constant that looked like the real one invites reading a passing case as evidence about a
+# real session.
+WS0_FIXTURE_ENDPOINT="http://127.0.0.1:19999"
+
 # perf_csv <path> <cycles> <instructions> — a `perf stat -x,` CSV with both required events.
 #
 # The two-field-then-event layout matches what `perf stat -x, -e cycles,instructions`
@@ -144,7 +160,16 @@ make_round() {
 # finding F3 closes. A case whose SUBJECT is the mode/comparison overrides it positionally, and a
 # case wanting a BASELINE-mode manifest must build a canonical-shaped identity for it.
 #
+#
+# ...and the FLIGHT ENDPOINT (#3272 round 14, F2): the manifest pins WHICH SERVER produced the rows
+# and the reporter compares it EXACTLY against every rep's recorded `endpoint`, so the default here
+# must equal the one `WS0_FIXTURE_ENDPOINT` puts in the record bodies — the two are the same pinned
+# fact and a fixture that spelled them differently would refuse every healthy case. A case whose
+# SUBJECT is a record from ANOTHER server overrides one side positionally, and is then refused, which
+# is the guard working.
+#
 # ws0_pin_session_corpus <session> <corpus> [reps] [temps] [arms] [scan_passes] [baseline_mode]
+#                        [flight_endpoint]
 ws0_pin_session_corpus() {
   local session="$1" corpus="$2" perf_dir
   # `${N-default}`, NOT `${N:-default}`: the colon form substitutes the default for an EMPTY
@@ -155,6 +180,7 @@ ws0_pin_session_corpus() {
   # supplied-but-empty one is passed THROUGH, so the reader refuses it.
   local reps="${3-1}" temps="${4-warm}" arms="${5-bypass}" passes="${6-1}"
   local baseline_mode="${7-non-baseline}"
+  local flight_endpoint="${8-$WS0_FIXTURE_ENDPOINT}"
   perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
   python3 -c '
 import json, pathlib, sys
@@ -173,7 +199,8 @@ from ws0_canonical_corpus import require_canonical_or_declared
 repo_root = pathlib.Path(sys.argv[1]).resolve().parent.parent
 config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
-          "step_duration": "45s/1s", "baseline_mode": sys.argv[8]}
+          "step_duration": "45s/1s", "flight_endpoint": sys.argv[9],
+          "baseline_mode": sys.argv[8]}
 session, corpus = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2])
 # NOTHING IS STAMPED FOR A SESSION DIR THAT DOES NOT EXIST — the same load-bearing rule
 # `ws0_pin_binaries` and `ws0_pin_verification` state as an early `return 0`, now stated here too
@@ -235,7 +262,8 @@ except Invalid:
     except Invalid:
         pass
     session_pin_path(session).write_text(json.dumps(fallback, indent=1) + "\n")
-' "$perf_dir" "$corpus" "$session" "$reps" "$temps" "$arms" "$passes" "$baseline_mode"
+' "$perf_dir" "$corpus" "$session" "$reps" "$temps" "$arms" "$passes" "$baseline_mode" \
+    "$flight_endpoint"
   # ...and the PINNING VERIFICATION the driver records beside the manifest (#3272 round 9, F6).
   # Stamped with the SAME CPU lists the manifest above carries, because that agreement is the
   # property the reporter asserts: the report may print "verified" only about lists a verification

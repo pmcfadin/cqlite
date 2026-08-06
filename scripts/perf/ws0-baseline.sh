@@ -281,6 +281,13 @@ require_positive_int scan-passes "$SCAN_PASSES"
 require_positive_int reps "$REPS"
 require_positive_int port "$PORT" 65535
 
+# --- THE MEASURED SERVER, SPELLED ONCE (#3272 round 14, F2) --------------------
+# Derived HERE from the validated port because only this script knows which server it launched; it is
+# BOTH what the reps are pointed at (lib-measure.sh) AND what the manifest pins before rep 1. TWO
+# spellings — a composed argv and a separately-stamped pin — would make every rep of a correct run
+# compare unequal to its own pin. `endpoint` was IGNORED; see SESSION_BOUND_INPUTS for what that let through.
+FLIGHT_ENDPOINT="http://127.0.0.1:$PORT"
+
 # --- trap 3 enforcement, arm B: a COLD rep is ONE request, or it is not cold ---
 # `--cold-step-duration` is the one option a caller can raise to silently turn a
 # cold rep into a blended one (issue #3096 review, finding 2). The loadgen holds a
@@ -578,6 +585,7 @@ WS0_CFG_SCAN_PASSES="$SCAN_PASSES" \
 WS0_CFG_SERVER_CPUS="$SERVER_CPUS" \
 WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
 WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
+WS0_CFG_FLIGHT_ENDPOINT="$FLIGHT_ENDPOINT" \
 WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
 python3 -c '
 import os, pathlib, sys

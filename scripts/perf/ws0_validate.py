@@ -307,6 +307,53 @@ def cli_count(name: str, value: object) -> int:
     return n
 
 
+def http_endpoint(label: str, value: object, why: str = "") -> str:
+    """An absolute `http[s]://<host>:<port>` endpoint URL, or `Invalid` (#3272 round 14, F2).
+
+    The SERVER IDENTITY validator. The Flight endpoint is pinned in the session manifest before
+    the first rep and compared EXACTLY against every loadgen record's `endpoint`, so it has to be
+    a value that CAN identify a server: a bare host (`127.0.0.1`) or a bare port (`18815`) names
+    a set of servers rather than one, and a trailing path (`http://h:1/x`) is a spelling the
+    loadgen never writes — it passes the endpoint through verbatim to
+    `Channel::from_shared(endpoint)` (tools/flight-loadgen/src/client.rs), so what the record
+    carries is what the driver's argv said, character for character.
+
+    Validated STRUCTURALLY rather than merely non-empty, and that distinction is the F6 lesson
+    this rig already paid for once: `server_cpus` sat in the manifest as an opaque non-empty
+    string and reached a "verified" claim having been checked by nothing. An opaque endpoint would
+    do the same one field over — a manifest reading `flight_endpoint: "the usual one"` would
+    compare unequal to every real record and refuse the whole session, so the error is caught at
+    the WRONG END, blaming the artifact for a mis-stamped pin.
+
+    NOT parsed with `urllib.parse` and then partially re-assembled: the comparison downstream is
+    an exact string equality against what the loadgen wrote, so anything that NORMALISED the
+    value here (a stripped default port, a lowercased host, a dropped empty path) would make the
+    manifest and the record differ for a difference that does not exist. This therefore only ever
+    ACCEPTS OR REFUSES the string; it never rewrites it.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise Invalid(
+            f"{label} is {value!r}, which is not a recorded endpoint. It names WHICH SERVER"
+            f" produced the measured rows, so it must have been observed. {why}".rstrip()
+        )
+    m = re.match(r"^https?://([^/:@\s]+):(\d{1,5})$", value)
+    if not m:
+        raise Invalid(
+            f"{label} is {value!r}, which is not an absolute `http://<host>:<port>` endpoint."
+            " A bare host or a bare port names a SET of servers rather than one, and a trailing"
+            " path is a spelling the load generator never writes — it passes --endpoint through"
+            " verbatim, so the recorded value is the driver's argv character for character."
+            f" {why}".rstrip()
+        )
+    port = int(m.group(2))
+    if not 1 <= port <= 65535:
+        raise Invalid(
+            f"{label} is {value!r}, whose port {port} is outside 1..65535, so no server could"
+            f" ever have been reached on it. {why}".rstrip()
+        )
+    return value
+
+
 def existing_dir(name: str, value: str) -> pathlib.Path:
     """`value` as an existing directory, or `Invalid`."""
     p = pathlib.Path(value)

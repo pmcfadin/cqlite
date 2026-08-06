@@ -184,7 +184,7 @@ make_flight_rep() {
   local secs=4.0 rps
   rps="$(python3 -c "print($rows / $secs)")"
   cat > "$d/$tag.jsonl" <<EOF
-{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"$tag","requests_ok":$ok,"requests_error":0,"requests_unavailable":0,"rows_total":$rows,"rows_per_s":$rps,"duration_s":$secs}
+{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"$tag","endpoint":"$WS0_FIXTURE_ENDPOINT","requests_ok":$ok,"requests_error":0,"requests_unavailable":0,"rows_total":$rows,"rows_per_s":$rps,"duration_s":$secs}
 EOF
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   [ "$pw" = "-none-" ] || printf '%s\n' "$pw" > "$d/$tag.prewarm.status"
@@ -1094,7 +1094,7 @@ for temp in warm cold; do
     # rows_per_s COMPUTED, as in make_flight_rep — the reporter derives it (#3272 round 4).
     fm_rps="$(python3 -c "print($CORPUS_ROWS / 4.0)")"
     cat > "$d/$tag.jsonl" <<EOF
-{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"$tag","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":$CORPUS_ROWS,"rows_per_s":$fm_rps,"duration_s":4.0}
+{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"$tag","endpoint":"$WS0_FIXTURE_ENDPOINT","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":$CORPUS_ROWS,"rows_per_s":$fm_rps,"duration_s":4.0}
 EOF
     perf_csv "$d/perf-$tag.csv" 8000000 16000000
     printf '%s\n' "$pw" > "$d/$tag.prewarm.status"

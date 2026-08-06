@@ -116,8 +116,8 @@ def check_request_count(
     return count
 
 
-def session_bound_expectations(tag: str) -> dict[str, str]:
-    """What each SESSION-BOUND field of rep `tag`'s record MUST equal (#3272 round 14, F1).
+def session_bound_expectations(tag: str, flight_endpoint: str) -> dict[str, str]:
+    """What each SESSION-BOUND field of rep `tag`'s record MUST equal (#3272 round 14, F1/F2).
 
     Built here rather than defaulted inside the checker, and every field of
     `SESSION_BOUND_INPUTS` must get an entry — an absent one is an `Invalid` from the checker,
@@ -132,8 +132,30 @@ def session_bound_expectations(tag: str) -> dict[str, str]:
     comparison is worth making: `perf-<tag>.csv` and `<tag>.round` are found by that name, so a
     record whose own `round` disagrees is a record from a different rep sitting in this rep's
     filename — and its rows would be divided by this rep's cycles.
+
+    `endpoint` is the SESSION MANIFEST's `config.flight_endpoint` (#3272 round 14, F2), which the
+    driver stamps before the first rep and passes to every rep as
+    `--endpoint http://127.0.0.1:$PORT`. It is a REQUIRED PARAMETER of this function rather than
+    something read from disk here, for the reason the whole rig prefers a passed-in pin: the caller
+    already read and validated the manifest (`ws0_session.session_manifest_config`), and a second
+    read here would be a second source of truth for one fact — the shape this issue keeps finding.
+    It is NOT defaulted and NOT optional: `flight_endpoint: str = ""` would make the comparison pass
+    against an empty expectation the moment a caller forgot it, which is the `rec.get(k, <what we
+    want>)` silent-skip shape at the parameter list.
+
+    The endpoint is a PRE-MEASUREMENT PIN, not a report-time argument, and that is what makes it
+    provenance: the reporter cannot be told which server to believe, so a record from a different
+    server cannot be excused by re-reporting.
     """
-    expected = {"round": tag}
+    if not isinstance(flight_endpoint, str) or not flight_endpoint.strip():
+        raise Invalid(
+            f"internal: no pinned flight endpoint was supplied for rep {tag}"
+            f" (got {flight_endpoint!r}). `endpoint` is verified against the SESSION MANIFEST's"
+            " `config.flight_endpoint`, so an empty expectation would compare every record against"
+            " nothing while the census says the field is verified — the half-wired guard #3272"
+            " keeps finding (#3272 round 14, F2)."
+        )
+    expected = {"round": tag, "endpoint": flight_endpoint}
     absent = [k for k in SESSION_BOUND_INPUTS if k not in expected]
     if absent:
         raise Invalid(
@@ -142,12 +164,30 @@ def session_bound_expectations(tag: str) -> dict[str, str]:
             " session in ws0_loadgen_record.SESSION_BOUND_INPUTS, so leaving it without an expected"
             " value would mean the census claims a check that nothing performs (#3272 round 14)."
         )
+    # ...AND THE OTHER DIRECTION: an expectation built for a field the table does not classify as
+    # session-bound would be silently DROPPED by the checker, which loops over the TABLE. That is
+    # the same half-wired shape from the other end — a value supplied and never compared — and it is
+    # how a future field could be "wired here" while nothing verified it.
+    extra = [k for k in expected if k not in SESSION_BOUND_INPUTS]
+    if extra:
+        raise Invalid(
+            f"internal: an expectation is built for {', '.join(sorted(extra))} (rep {tag}), which"
+            " ws0_loadgen_record.SESSION_BOUND_INPUTS does not classify as session-bound. The"
+            " checker loops over the TABLE, so this value would be silently dropped — a field wired"
+            " here while nothing verifies it (#3272 round 14)."
+        )
     return expected
 
 
 def collect_flight(
-    d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int
+    d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int, flight_endpoint: str
 ) -> dict:
+    """Arm B's measurement block for `temp`/`arm`, from this session's artifacts.
+
+    `flight_endpoint` is the session manifest's pinned `config.flight_endpoint` (#3272 round 14,
+    F2), REQUIRED positionally rather than defaulted: every rep's record is compared against it, so
+    a default would silently disable the check for a caller that forgot to pass it.
+    """
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
     ipc: list[float] = []
@@ -213,7 +253,15 @@ def collect_flight(
         # merged into `verified_fixed_inputs`: these were verified against the SESSION, not against
         # a constant, and one label for two different kinds of check is how "verified" stops meaning
         # anything specific.
-        session_bound = check_session_bound_inputs(tag, rec, session_bound_expectations(tag))
+        #
+        # `endpoint` joined it in F2. It was classified IGNORED as "the loopback address; not a
+        # measurement" — true of the FIELD, false of the FIGURE: it names WHICH SERVER produced the
+        # measured rows, so a record from another local process on another port, or from a remote
+        # host, satisfied every check above and had its rows divided by the cycles below, which
+        # `perf -C` collected on THIS session's pinned cores. Those cores served nothing.
+        session_bound = check_session_bound_inputs(
+            tag, rec, session_bound_expectations(tag, flight_endpoint)
+        )
         # EVERY ZERO-REQUIRED COUNTER, in ONE loop over `ZERO_REQUIRED_COUNTERS` (#3272 F4).
         #
         # This was written for `requests_error` alone, and its admission-shed sibling
@@ -376,11 +424,13 @@ def collect_flight(
                 # shape, step index and schema version this rep's figures are conditional on. A
                 # reader comparing two sessions can see the baseline was the same baseline.
                 "verified_fixed_inputs": fixed_inputs,
-                # ...and what was verified against THIS REP'S OWN IDENTITY (#3272 round 14, F1):
+                # ...and what was verified against THIS SESSION'S IDENTITY (#3272 round 14, F1/F2):
                 # the `round` label the record carries, compared to the tag the artifact was found
-                # under. Kept separate from the block above because it is a different claim — one
-                # is "this rep ran the workload the rig fixes", the other is "this record is this
-                # rep's" — and a swapped JSONL satisfies the first while failing the second.
+                # under, and the `endpoint` it carries, compared to the SERVER the manifest pinned
+                # before the first rep. Kept separate from the block above because it is a different
+                # claim — one is "this rep ran the workload the rig fixes", the other is "this record
+                # is this rep's, from this session's server" — and a swapped JSONL or a record from a
+                # peer lane's server satisfies the first while failing the second.
                 "verified_session_bound_inputs": session_bound,
                 "prewarm": prewarm[-1]["status"],
             }
