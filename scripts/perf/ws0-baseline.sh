@@ -523,8 +523,46 @@ then
   exit 2
 fi
 
+# --- THE FLIGHT TICKET — WRITTEN BEFORE THE PIN, BECAUSE IT IS PINNED (#3272 round 10, M1) ------
+# `ticket-template.json` IS THE REQUEST (keyspace/table/DDL/token range/projection/predicates/
+# aggregation/limit), and `flight-loadgen --ticket-template` re-reads it on EVERY invocation of
+# every rep of every arm. It used to be written 90 lines BELOW the pin and recorded NOWHERE, so it
+# could be changed between reps or between ARMS while the corpus stayed untouched — leaving every
+# corpus digest, the component set and the schema in agreement and the report exiting 0 having
+# compared two arms that answered DIFFERENT QUERIES. Round 10's F-B one layer out (F-B: different
+# corpora; this: different requests). Full argument: scripts/perf/ws0_ticket_input.py.
+#
+# WHAT the request is lives in that module (a fixed full-ring `SELECT *`, as data, beside the check
+# that decides whether the measured request was the pinned one); it is generated from the DDL whose
+# digest was verified immediately above, so request and data are anchored to one schema. What stays
+# HERE is the ORDER — this before the pin — which is the half of the fix that must remain legible in
+# the driver.
+if ! python3 -c '
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid
+from ws0_ticket_input import write_ticket_template
+corpus, ddl = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+try:
+    digest = write_ticket_template(corpus, ddl)
+except Invalid as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"ticket pin:   {digest} — ticket-template.json (the REQUEST every Flight rep re-reads)"
+      " written from the verified DDL BEFORE the corpus pin, which records this digest")
+' "$HERE" "$CORPUS" "$DDL_FILE"
+then
+  echo "FATAL: the Flight ticket template could not be written, so this session cannot pin" >&2
+  echo "       WHICH REQUEST it measures — and an unpinned request can be changed between" >&2
+  echo "       ARMS while the corpus stays untouched and every corpus digest still agrees," >&2
+  echo "       so two arms would answer different queries under one report (#3272 M1)." >&2
+  exit 2
+fi
+
 # --- PIN WHICH CORPUS THIS SESSION IS ABOUT TO MEASURE (#3272 review round 4) --------
 # Stamped into the RESULTS DIR, BEFORE the first rep, and REQUIRED by ws0_report.py.
+# ...and, since round 10's M1, WHICH REQUEST: the pin records the Flight ticket's digest, which is
+# why the template is written immediately above rather than below.
 #
 # The corpus digest used to be verified only against the corpus present AT REPORT TIME, with
 # no identity captured in the session dir beforehand. Two real sequences attribute figures to
@@ -654,15 +692,9 @@ print(f"pinning pin:  {rec[\"server_cpus\"]} verified against"
        echo "       it, because otherwise 'verified physical-core siblings' is printed about a" >&2
        echo "       manifest string nothing ever checked (#3272 F6)." >&2
        exit 2; }
-python3 - "$DDL_FILE" "$TICKET_TEMPLATE" <<'PY'
-import json, sys
-ddl = open(sys.argv[1]).read().strip().rstrip(';')
-json.dump({"version": 2, "keyspace": "ws0", "table": "events", "ddl": ddl,
-           "snapshot": None, "token_start": None, "token_end": None,
-           "wraparound": False, "columns": None, "predicates": [],
-           "filter": None, "aggregation": None, "limit": None},
-          open(sys.argv[2], "w"), indent=1)
-PY
+# (The Flight ticket template used to be written HERE, after the pin and after the CPU-pin record.
+# It moved ABOVE the pin in #3272 round 10's M1, because the pin now records its digest — see the
+# block that writes it for why an unpinned request is invisible to every corpus check.)
 
 drop_caches_if_cold() {
   [[ "$1" == "cold" ]] || return 0

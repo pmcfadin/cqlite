@@ -44,9 +44,12 @@ perf_csv() {
 # have to be updated whenever the byte count changed, and the update someone forgets is a
 # case failing on its fixture rather than on its subject.
 ws0_make_corpus() {
-  local dir="$1" rows="${2:-1000}" bytes="${3:-700000}" bpr="${4:-}"
+  local dir="$1" rows="${2:-1000}" bytes="${3:-700000}" bpr="${4:-}" perf_dir
   mkdir -p "$dir/ws0/events"
-  python3 - "$dir" "$rows" "$bytes" "$bpr" <<'PY'
+  # The shipped modules' directory, passed in so the fixture can call the REAL ticket writer
+  # (#3272 M1) rather than hand-rolling the request's shape.
+  perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
+  python3 - "$dir" "$rows" "$bytes" "$bpr" "$perf_dir" <<'PY'
 import hashlib, json, os, sys
 out, rows, nbytes = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 # An EMPTY 4th argument means "derive bytes_per_row from the two above", which is the
@@ -81,6 +84,16 @@ for name, body in (("nb-1-big-Data.db", raw),
 # was never pinned.
 ddl = b"CREATE TABLE ws0.events (part_id text, seq int, PRIMARY KEY (part_id, seq));\n"
 open(os.path.join(out, "ws0-events.cql"), "wb").write(ddl)
+# THE FLIGHT TICKET, written through the SHIPPED writer (#3272 round 10, M1). `ticket-template.json`
+# IS THE REQUEST every Flight rep re-reads, and the session pin now records its digest — so a corpus
+# fixture without one is refused, exactly as a fixture without a schema is. Written by
+# `ws0_ticket_input.write_ticket_template` rather than composed here, for the reason
+# `ws0_pin_session_corpus` calls the real pin writer: a fixture that hand-rolled the ticket's shape
+# would keep passing after the shipped writer's shape changed.
+import pathlib
+sys.path.insert(0, sys.argv[5])
+from ws0_ticket_input import write_ticket_template  # noqa: E402
+write_ticket_template(pathlib.Path(out), pathlib.Path(out) / "ws0-events.cql")
 json.dump(
     {"rows": rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
      "data_db_bytes": nbytes, "data_db_sha256": hashlib.sha256(raw).hexdigest(),

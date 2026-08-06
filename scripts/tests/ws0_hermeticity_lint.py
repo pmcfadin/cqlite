@@ -267,6 +267,14 @@ EXEMPTIONS: dict[str, str] = {
         "the session/corpus identity module; prose reference only (its refusals tell an"
         " operator to re-run the session with the driver)",
     "scripts/perf/ws0_flight_arm.py": "the Flight arm collector; prose reference only",
+    # Round 10's M1 module, and the census reported it UNCOVERED the moment it was staged — the
+    # SIXTH time this oracle has caught an addition, which is what it is for. Same class as its
+    # siblings: it is imported by the driver (via `python3 -c`) and by `ws0_session.py`, and its
+    # only `ws0-baseline.sh` mentions are prose — the refusals that tell an operator to re-run the
+    # session with the driver, which is the one thing that can write the pin it requires.
+    "scripts/perf/ws0_ticket_input.py":
+        "the Flight TICKET (request) identity module; prose reference only (its refusals tell an"
+        " operator to re-run the session with the driver, which is what pins the request)",
     # Round 9's F6 module, and the census reported it UNCOVERED the moment it was staged — the
     # fourth time this oracle has caught a split/addition, which is what it is for. Same class as
     # its siblings: its only driver mention is prose (its refusal tells an operator to re-run the

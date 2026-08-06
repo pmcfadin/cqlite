@@ -1107,10 +1107,17 @@ fi
 # reporter-only check would let a full run complete before anything noticed.
 schema_line=$(grep -n 'verify_schema_input' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
 # The GENERATION site, not the variable assignment: `TICKET_TEMPLATE=` (line ~359) is just a
-# path, while the `python3 - "$DDL_FILE" "$TICKET_TEMPLATE"` heredoc is where the ticket is
-# actually DERIVED from the DDL. Anchoring on the assignment measured the wrong line and failed
-# this case for the wrong reason.
-ticket_line=$(grep -n 'python3 - "\$DDL_FILE" "\$TICKET_TEMPLATE"' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+# path, while the `write_ticket_template` call is where the ticket is actually DERIVED from the
+# DDL. Anchoring on the assignment measured the wrong line and failed this case for the wrong
+# reason.
+#
+# The spelling moved in #3272 round 10's M1: the generation was an inline
+# `python3 - "$DDL_FILE" "$TICKET_TEMPLATE"` heredoc BELOW the pin, and is now a call to
+# `ws0_ticket_input.write_ticket_template` ABOVE it (the ticket is pinned, so it must exist before
+# the pin). Anchored on the FUNCTION NAME rather than on an argv shape: the function is what
+# derives the ticket, whatever the call is spelled like, and an empty `ticket_line` fails this case
+# closed rather than silently comparing against nothing.
+ticket_line=$(grep -n 'write_ticket_template' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
 loop_line=$(grep -n '^for temp in \$TEMPS; do' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
 if [ -n "$schema_line" ] && [ -n "$loop_line" ] && [ "$schema_line" -lt "$loop_line" ]; then
   pass "round6 R2: the DRIVER verifies the schema at line $schema_line, BEFORE the measurement loop at line $loop_line (wired, not reporter-only)"
@@ -1124,6 +1131,136 @@ if [ -n "$schema_line" ] && [ -n "$ticket_line" ] && [ "$schema_line" -lt "$tick
   pass "round6 R2: the schema is verified BEFORE the Flight ticket is generated from it (line $schema_line < $ticket_line) — the ticket is built once, the scan re-reads per rep"
 else
   fail "round6 R2: the schema must be verified before the ticket is derived from it (schema=$schema_line ticket=$ticket_line)"
+fi
+
+# ==========================================================================
+# ROUND 10, M1 — THE FLIGHT TICKET IS THE REQUEST, AND IT WAS PINNED BY NOTHING
+# ==========================================================================
+# `ticket-template.json` carries the keyspace, table, DDL, token range, column projection,
+# predicates, aggregation and limit, and `flight-loadgen --ticket-template` re-reads it on EVERY
+# invocation of every rep of every arm. It was created AFTER the session pin and appeared in NO
+# verified record, so it could be changed between reps or between ARMS without invalidating corpus
+# identity: the corpus is untouched, so every corpus digest, the complete component set and the
+# schema all still agree — and the report exits 0 having compared two arms that answered DIFFERENT
+# QUERIES. Round 10's F-B one layer out (F-B: different corpora; this: different requests).
+#
+# THE WIRING HALF FIRST: the ticket must be written BEFORE the pin, because the pin records its
+# digest. Line-ordered, like the schema check above, because a pin that ran first would refuse
+# every session on an absent template — i.e. the ordering is not a style question.
+pin_write_line=$(grep -n 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+if [ -n "$ticket_line" ] && [ -n "$pin_write_line" ] && [ "$ticket_line" -lt "$pin_write_line" ]; then
+  pass "round10 M1: the driver WRITES the Flight ticket at line $ticket_line, BEFORE it pins the session at line $pin_write_line (the pin records the ticket's digest, so the order is load-bearing)"
+else
+  fail "round10 M1: the ticket must be written before the pin (ticket=$ticket_line pin=$pin_write_line)"
+fi
+
+# THE ACCEPT DIRECTION: an untampered session reports, and the pin's ticket digest is a real
+# 64-hex value that came from the file rather than a recorded string nobody measured.
+d="$TMP/ticket-pin-ok"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && python3 - "$d/results.json" "$TMP/corpus" <<'PY'
+import hashlib, json, pathlib, sys
+pin = json.load(open(sys.argv[1]))["session_corpus_pin"]
+digest = pin["pinned_ticket_sha256"]
+assert len(digest) == 64 and digest == digest.lower(), pin
+# The recorded digest must be the digest OF THE FILE — the whole difference between a pin and a
+# string. Re-derived here independently of the reporter.
+on_disk = hashlib.sha256((pathlib.Path(sys.argv[2]) / "ticket-template.json").read_bytes()).hexdigest()
+assert digest == on_disk, (digest, on_disk)
+assert pin["pinned_ticket_bytes"] > 0, pin
+PY
+then
+  pass "OBSERVED (round10 M1): an untampered session REPORTS, and the pin's ticket digest is the digest of the ticket ON DISK (re-derived independently here), not a recorded string"
+else
+  fail "round10 M1: the ticket accept direction must record an observed digest (rc=$rc, out: $out)"
+fi
+# ...and the summary must SAY which request was measured, beside the corpus pin. A verified fact
+# nobody prints leaves an operator comparing two arms with no way to see they answered one query.
+# (Asserted on the reporter's OWN STDOUT, which is what the driver `tee`s to summary.txt — the
+# harness runs the reporter directly, so there is no summary.txt to read here.)
+if grep -q 'request pin' <<<"$out"; then
+  pass "OBSERVED (round10 M1): the summary carries a 'request pin' line — WHICH QUERY is stated beside WHICH BYTES"
+else
+  fail "round10 M1: the summary must report the pinned request (out: $out)"
+fi
+
+# THE REFUSAL: a ticket mutated MID-SESSION. This is the finding — the template is the request, so
+# a changed one means the reps did not all measure the same query.
+d="$TMP/ticket-pin-swap"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-ticket-swap"
+ws0_pin_session_corpus "$d" "$TMP/corpus-ticket-swap"
+python3 - "$TMP/corpus-ticket-swap" <<'PY'
+import json, pathlib, sys
+# A LIMIT added to the request — a change that makes the Flight arm stream a fraction of the rows
+# the bare-scan arm does, i.e. exactly the kind of edit that produces a meaningless ratio while
+# every corpus digest still agrees.
+p = pathlib.Path(sys.argv[1]) / "ticket-template.json"
+j = json.loads(p.read_text())
+j["limit"] = 1000
+p.write_text(json.dumps(j, indent=1))
+PY
+out=$(run_report "$d" "$TMP/corpus-ticket-swap"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'THE FLIGHT TICKET CHANGED under this session' <<<"$out"; then
+  pass "OBSERVED (round10 M1): a Flight ticket mutated MID-SESSION (a LIMIT added) is REFUSED by the pin — the request is not the one the reps measured"
+else
+  fail "round10 M1: a mid-session ticket mutation must be refused (rc=$rc, out: $out)"
+fi
+# NON-VACUITY, and this is the substance: the mutated state is invisible to EVERY OTHER check this
+# report performs. Asserted by running the report over the SAME mutated corpus with the ticket
+# field REMOVED from the pin's reader's reach — i.e. by establishing that the corpus, its complete
+# component set and its schema are all still in agreement. If any of those diverged, the refusal
+# above could have come from them and would prove nothing about the ticket.
+if python3 - "$TMP/corpus-ticket-swap" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+ident = json.loads((root / "corpus-identity.json").read_text())
+tbl = root / "ws0" / "events"
+# Data.db, EVERY component and the schema all still hash to their recorded values: the mutation
+# touched the request only, which is why nothing else can see it.
+data = tbl / "nb-1-big-Data.db"
+assert hashlib.sha256(data.read_bytes()).hexdigest() == ident["data_db_sha256"], "Data.db moved"
+for name, spec in ident["components"].items():
+    got = hashlib.sha256((tbl / name).read_bytes()).hexdigest()
+    assert got == spec["sha256"], (name, got, spec["sha256"])
+schema = hashlib.sha256((root / "ws0-events.cql").read_bytes()).hexdigest()
+assert schema == ident["schema_sha256"], "the schema moved"
+PY
+then
+  pass "NON-VACUITY (round10 M1): the mutated session's corpus, COMPLETE component set and schema ALL still agree with the recorded identity — so no other check could have caught it, and the ticket pin is what refused it"
+else
+  fail "round10 M1: the ticket-swap fixture must leave every other recorded input consistent, or it does not test the ticket pin"
+fi
+# ...and the PRE-FIX state accepted exactly this: a pin with NO ticket field is REFUSED rather than
+# skipped. A session stamped by the old driver recorded no request at all, and treating "no record"
+# as "nothing to check" is the fail-open shape — a check that did not run prints like one that
+# passed.
+d="$TMP/ticket-pin-absent"; make_session "$d" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/session-corpus-pin.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+j = json.loads(p.read_text())
+del j["ticket_template_sha256"]          # exactly what a pre-M1 driver wrote
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'records no .ticket_template_sha256' <<<"$out"; then
+  pass "OBSERVED (round10 M1): a pin with NO ticket digest — what every pre-fix driver wrote — is REFUSED, not skipped (an unpinned request is the finding, not an exemption from it)"
+else
+  fail "round10 M1: an absent ticket pin must be refused (rc=$rc, out: $out)"
+fi
+# ...and a session whose TICKET IS GONE is refused too: every Flight rep read that file, so there
+# is nothing left to establish which query the figures describe.
+d="$TMP/ticket-missing"; make_session "$d" "$GOOD_FLIGHT"
+cp -R "$TMP/corpus" "$TMP/corpus-ticket-missing"
+ws0_pin_session_corpus "$d" "$TMP/corpus-ticket-missing"
+rm -f "$TMP/corpus-ticket-missing/ticket-template.json"
+out=$(run_report "$d" "$TMP/corpus-ticket-missing"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'pinned Flight ticket' <<<"$out"; then
+  pass "OBSERVED (round10 M1): a session whose pinned ticket is MISSING at report time is refused naming the file"
+else
+  fail "round10 M1: a missing pinned ticket must be refused (rc=$rc, out: $out)"
 fi
 
 # ==========================================================================

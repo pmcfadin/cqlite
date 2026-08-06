@@ -321,9 +321,29 @@ def verify_corpus_components(
 # and can be replaced under a session at any time.
 SESSION_CORPUS_PIN = "session-corpus-pin.json"
 
+# The pin's Flight-ticket digest field (#3272 round 10, M1). Defined HERE, in the module that owns
+# the pin's shape, and imported by `ws0_ticket_input` — one spelling, so the writer below and the
+# reader over there cannot drift onto two names, which would present as an absent-field refusal on
+# a session that pinned the ticket correctly. (The dependency runs THIS WAY because
+# `ws0_ticket_input` already imports `sha256_file` from here; the reverse would be a cycle.)
+PIN_TICKET_FIELD = "ticket_template_sha256"
+
 
 def session_pin_path(session_dir: pathlib.Path) -> pathlib.Path:
     return session_dir / SESSION_CORPUS_PIN
+
+
+def _measure_ticket_digest(corpus: pathlib.Path) -> str:
+    """The Flight ticket's digest, from `ws0_ticket_input` (#3272 round 10, M1).
+
+    Imported function-locally for the same reason `verify_pinned_schema` and
+    `verify_pinned_components` are: that module imports `sha256_file` from THIS one, so a
+    module-scope import here would be a cycle. The split is by responsibility — see each module's
+    docstring.
+    """
+    from ws0_ticket_input import measure_ticket_digest
+
+    return measure_ticket_digest(corpus)
 
 
 def write_session_corpus_pin(
@@ -396,6 +416,27 @@ def write_session_corpus_pin(
         # two arms measure DIFFERENT SCHEMAS while every other recorded identity still agrees.
         # READ BACK by `ws0_schema_input.verify_pinned_schema`.
         "schema_sha256": identity.get("schema_sha256"),
+        # THE FLIGHT TICKET'S DIGEST (#3272 round 10, M1). `ticket-template.json` IS THE REQUEST
+        # — keyspace, table, DDL, token range, column projection, predicates, aggregation, limit —
+        # and `flight-loadgen --ticket-template` re-reads it on EVERY invocation of every rep of
+        # every arm. It used to be created AFTER this pin and to appear in no verified record, so it
+        # could be changed between reps or between ARMS while the corpus stayed untouched: every
+        # corpus digest, the component set and the schema all still agreed, and the report exited 0
+        # having compared two arms that answered DIFFERENT QUERIES. Same class as round 10's F-B one
+        # layer out (F-B: different corpora; this: different requests).
+        #
+        # DERIVED HERE, from the bytes on disk, rather than accepted as an argument — deliberately.
+        # A caller-supplied digest is a value this writer would record without observing, and a
+        # recorded value nobody measured is the shape this whole issue exists to remove; it would
+        # also give the fixture path a way to pin a request it never wrote. So there is exactly one
+        # implementation and the pin's ticket field can only ever describe a real file.
+        #
+        # The corollary for the DRIVER: the template must EXIST by the time this runs, i.e. it must
+        # be created BEFORE the pin. That ordering is the other half of the fix, and this call is
+        # what enforces it — an absent template is `Invalid` here, not an absent pin field.
+        #
+        # READ BACK by `ws0_ticket_input.verify_pinned_ticket`.
+        PIN_TICKET_FIELD: _measure_ticket_digest(corpus),
         # THE MEASUREMENT CONFIGURATION (#3272 F1). Recorded here, before rep 1, and READ BACK
         # BY THE REPORTER as its own configuration — see `session_manifest_config` for why the
         # reporter reads it rather than matching against it.
@@ -724,6 +765,20 @@ def verify_session_corpus_pin(
     from ws0_schema_input import verify_pinned_schema
 
     schema = verify_pinned_schema(p, pin, corpus, identity)
+    # ...and THE FLIGHT TICKET (#3272 round 10, M1) — THE REQUEST. Same argument as the schema's,
+    # one layer out: the schema decides how the bytes are INTERPRETED, the ticket decides WHICH
+    # QUERY is asked. `flight-loadgen --ticket-template` re-reads it on every invocation of every
+    # rep of every arm, and it was created AFTER this pin and recorded NOWHERE — so a template
+    # changed between reps, or between ARMS, left the corpus untouched and therefore left every
+    # corpus digest, the component set and the schema all in agreement while the report compared
+    # two arms that answered different questions.
+    #
+    # UNCONDITIONAL, like the component and schema comparisons: a request check that can be
+    # switched off is the fail-open shape one level out, and at a few hundred bytes a skip could
+    # only buy a vacuous green. Function-local import for the cycle reason above.
+    from ws0_ticket_input import verify_pinned_ticket
+
+    ticket = verify_pinned_ticket(p, pin, corpus)
     return {
         "pinned_before_measurement": True,
         "pinned_corpus_path": pin.get("corpus"),
@@ -739,11 +794,17 @@ def verify_session_corpus_pin(
         "pinned_components_note": comps["note"],
         "pinned_schema_sha256": schema["pinned_schema_sha256"],
         "pinned_schema_note": schema["note"],
+        # THE REQUEST (#3272 round 10, M1) — the Flight ticket, pinned before the first rep and
+        # re-derived here from disk.
+        "pinned_ticket_sha256": ticket["pinned_ticket_sha256"],
+        "pinned_ticket_bytes": ticket["ticket_bytes"],
+        "pinned_ticket_note": ticket["note"],
         "note": (
             "the corpus identity was captured in the session dir BEFORE the first rep and"
             " re-compared here on rows + data_db_bytes + sha256, PLUS the complete pinned"
             f" component set ({comps['pinned_components']} component(s)) against both the"
-            " report-time identity and the bytes on disk; the path is reported, not"
-            " enforced (a corpus may be moved)"
+            " report-time identity and the bytes on disk, PLUS the SCHEMA and the FLIGHT TICKET"
+            " (the request every Flight rep re-read); the path is reported, not enforced (a corpus"
+            " may be moved)"
         ),
     }

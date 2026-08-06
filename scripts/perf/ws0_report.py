@@ -330,6 +330,15 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f"corpus shape : {identity['rows']} rows / "
         f"{identity['partitions']} partitions / "
         f"{identity['bytes_per_row']:.2f} B/row",
+        # THE REQUEST (#3272 round 10, M1). Printed beside the corpus pin because it is the other
+        # half of "what was measured": the corpus says over WHICH BYTES, this says WHICH QUERY. It
+        # was outside every verified record, so a template changed between arms left the corpus
+        # untouched and every corpus digest in agreement while two arms answered different
+        # questions.
+        f"request pin  : ticket-template.json sha256"
+        f" {session_pin['pinned_ticket_sha256'][:16]}…"
+        f" ({session_pin['pinned_ticket_bytes']} B) — pinned BEFORE the first rep and re-derived"
+        " from disk here; every Flight rep re-read this file",
         # The claim NAMES ITS EVIDENCE (#3272 round 9, F6). It used to read
         # `server {server_cpus} (verified physical-core siblings)` unconditionally, about a
         # manifest string nothing had validated — MEASURED, a manifest edited to `99,99` printed
