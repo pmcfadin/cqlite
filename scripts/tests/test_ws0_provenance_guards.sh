@@ -407,7 +407,11 @@ fi
 # The digest of a 2.8 GB corpus is seconds of IO per report run, so it is
 # skippable — but ONLY via a flag that STAMPS "identity unverified" into both the
 # summary and results.json. The SIZE half stays unconditional (it is a stat).
-d="$TMP/skip-digest"; make_session "$d" "$GOOD_FLIGHT"
+d="$TMP/skip-digest"
+# The scan artifacts must name the corpus this session MEASURED (#3272), which for this case is
+# the one it is reported against — `WS0_SCAN_CORPUS` is how a case whose corpus is not the
+# default tells the shared builder, rather than restating the seven-field contract.
+WS0_SCAN_CORPUS="$TMP/corpus-stale-sha" make_session "$d" "$GOOD_FLIGHT"
 out=$(run_report "$d" "$TMP/corpus-stale-sha" --skip-corpus-digest); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "CORPUS DIGEST UNVERIFIED" <<<"$out"; then
   pass "--skip-corpus-digest is accepted and STAMPS 'CORPUS DIGEST UNVERIFIED' loudly"
@@ -1048,8 +1052,10 @@ fi
 #
 # CASE 1 — TWO SESSIONS, ONE CORPUS, DIFFERENT REQUESTS: both report, neither is disturbed.
 cp -R "$TMP/corpus" "$TMP/corpus-shared"
-dA="$TMP/ticket-concurrent-a"; make_session "$dA" "$GOOD_FLIGHT"
-dB="$TMP/ticket-concurrent-b"; make_session "$dB" "$GOOD_FLIGHT"
+dA="$TMP/ticket-concurrent-a"; dB="$TMP/ticket-concurrent-b"
+# Both sessions measure the SHARED corpus, so both sets of scan artifacts name it (#3272).
+WS0_SCAN_CORPUS="$TMP/corpus-shared" make_session "$dA" "$GOOD_FLIGHT"
+WS0_SCAN_CORPUS="$TMP/corpus-shared" make_session "$dB" "$GOOD_FLIGHT"
 ws0_pin_session_corpus "$dA" "$TMP/corpus-shared"
 ws0_pin_session_corpus "$dB" "$TMP/corpus-shared"
 # Session B's request is DIFFERENT — a LIMIT, the exact edit the M1 mutation case uses. Pre-fix this
@@ -1107,7 +1113,9 @@ fi
 # was the ONE thing that made this impossible.
 cp -R "$TMP/corpus" "$TMP/corpus-readonly"
 chmod a-w "$TMP/corpus-readonly" "$TMP/corpus-readonly/ws0" "$TMP/corpus-readonly/ws0/events"
-d="$TMP/ticket-readonly-corpus"; make_session "$d" "$GOOD_FLIGHT"
+d="$TMP/ticket-readonly-corpus"
+# This session measures the READ-ONLY corpus, so its scan artifacts name it (#3272).
+WS0_SCAN_CORPUS="$TMP/corpus-readonly" make_session "$d" "$GOOD_FLIGHT"
 # The fixture's pin path calls the SHIPPED ticket writer, so if anything still wrote into the corpus
 # this would fail here rather than in the report.
 ws0_pin_session_corpus "$d" "$TMP/corpus-readonly"

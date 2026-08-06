@@ -40,16 +40,19 @@ make_corpus() { ws0_make_corpus "$1" "${2:-$CORPUS_ROWS}" "$FIXTURE_DATA_DB_BYTE
 
 make_scan_rep() { # make_scan_rep <dir> <temp> <rep> <prewarm>
   # `WS0_SCAN_FIXED` (the fixed scan contract, #3272) comes from `lib-ws0-fixtures.sh`, sourced
-  # above — one spelling for all three suites, for the reason stated there.
-  make_scan_rep_fields "$1" "$2" "$3" "$4" "$WS0_SCAN_FIXED"
+  # above — one spelling for all three suites, for the reason stated there. The session-bound half
+  # names `WS0_SCAN_CORPUS` (the corpus these fixtures pin), which the same file defaults.
+  make_scan_rep_fields "$1" "$2" "$3" "$4" \
+    "$WS0_SCAN_FIXED,$(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}")"
 }
 
-# make_scan_rep_fields <dir> <temp> <rep> <prewarm> <fixed-contract-json-fragment>
+# make_scan_rep_fields <dir> <temp> <rep> <prewarm> <contract-json-fragment>
 #
-# `make_scan_rep` with the fixed-contract fragment given VERBATIM, so a case can supply a WRONG
-# value (a folded run, a narrowed projection, the setup-only arm) or omit a field entirely. Same
-# arrangement as `make_flight_rep`'s verbatim JSONL body, and for the same reason: the cases whose
-# subject IS the contract must be able to write the input the guard refuses.
+# `make_scan_rep` with the whole seven-field contract fragment given VERBATIM, so a case can supply
+# a WRONG value (a folded run, a narrowed projection, the setup-only arm, another session's corpus)
+# or omit a field entirely. Same arrangement as `make_flight_rep`'s verbatim JSONL body, and for the
+# same reason: the cases whose subject IS the contract must be able to write the input the guard
+# refuses.
 make_scan_rep_fields() {
   local d="$1" tag="scan-$2-$3" fixed="$5"
   cat > "$d/$tag.json" <<EOF

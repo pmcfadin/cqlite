@@ -51,6 +51,20 @@ WS0_FIXTURE_ENDPOINT="http://127.0.0.1:19999"
 # refused — which is the guard working.
 WS0_SCAN_FIXED='"arm":"bare_scan","surface":"cqlite_core::Database::execute_streaming","query":"SELECT * FROM ws0.events","fold":false'
 
+# ...and the SESSION-BOUND half (#3272): `corpus`, `schema` and `table_dirs_ingested`, which the
+# reporter compares against the corpus THIS SESSION PINNED. Unlike the four above they are NOT
+# constants — they name the fixture corpus a case built — so they take the corpus path as an
+# argument and every scan-rep builder must be told which corpus its session measures.
+#
+# `__CORPUS__` is the substitution a case uses to write a DIFFERENT corpus (a peer lane's, a second
+# copy) while keeping the rest of the record healthy — the arrangement `__ENDPOINT__` uses in the
+# flight bodies, for the same reason: a case whose subject is a substituted corpus must be able to
+# write the input the guard refuses without restating the other six fields.
+ws0_scan_session_bound() { # ws0_scan_session_bound <corpus-path>
+  printf '"corpus":"%s","schema":"%s/ws0-events.cql","table_dirs_ingested":["%s/ws0/events"]' \
+    "$1" "$1" "$1"
+}
+
 # perf_csv <path> <cycles> <instructions> — a `perf stat -x,` CSV with both required events.
 #
 # The two-field-then-event layout matches what `perf stat -x, -e cycles,instructions`

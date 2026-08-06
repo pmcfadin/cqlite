@@ -162,9 +162,10 @@ make_corpus() { ws0_make_corpus "$1" "${2:-$CORPUS_ROWS}" "${3:-700000}" "${4:-}
 # make_scan_rep <dir> <temp> <rep> <prewarm-status|-none->
 make_scan_rep() {
   local d="$1" temp="$2" rep="$3" pw="$4" tag="scan-$2-$3"
-  # `WS0_SCAN_FIXED` — the fixed scan contract (#3272), from `lib-ws0-fixtures.sh`.
+  # The seven-field scan contract (#3272), from `lib-ws0-fixtures.sh`: `WS0_SCAN_FIXED` is the
+  # constant half, `ws0_scan_session_bound` the corpus-valued half.
   cat > "$d/$tag.json" <<EOF
-{ $WS0_SCAN_FIXED,
+{ $WS0_SCAN_FIXED, $(ws0_scan_session_bound "${WS0_SCAN_CORPUS:-$TMP/corpus}"),
   "rows_denominator": $CORPUS_ROWS, "timed_scan_secs": 2.0, "setup_secs": 0.5,
   "passes": [ { "pass": 0, "rows": $CORPUS_ROWS, "secs": 2.0 } ] }
 EOF

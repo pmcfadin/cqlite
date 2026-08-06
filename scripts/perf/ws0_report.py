@@ -253,6 +253,35 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # configuration: a value that cannot be supplied cannot disagree, so a record produced against
     # another server cannot be excused by re-reporting with a matching flag.
     flight_endpoint = config["flight_endpoint"]
+    # WHICH CORPUS PATH THE BARE-SCAN ARM MUST HAVE OPENED (#3272). Arm A's own record states the
+    # corpus, schema and table directories it read, and those statements were read by NOBODY — so
+    # every corpus check in the rig was about the corpus the REPORTER was pointed at while nothing
+    # established the BENCH opened it.
+    #
+    # Resolved from the PIN and NEVER from `--corpus`, and the MOVED-corpus case is what settles
+    # which of the two it must be. The pin treats a move as REPORTED-not-fatal (the bytes decide;
+    # `corpus_path_unchanged` above), and the first version of this line therefore fell back to the
+    # reporter's `--corpus` on a move — WHICH IS BACKWARDS. The bench ran at MEASUREMENT time, when
+    # the corpus was at the PINNED path, so that is the path it recorded; the moved path is one it
+    # could not have known. Falling back to `--corpus` would have compared the artifacts against a
+    # location that did not exist when they were written, refusing every moved-corpus session — and,
+    # worse, it would have made the expectation follow a REPORT-TIME ARGUMENT, so a substituted
+    # corpus could be excused by re-reporting with a matching `--corpus`. The pin is the whole
+    # reason this is provenance.
+    #
+    # Fail-closed on a pin recording no path: an absent path cannot be compared, and defaulting it
+    # would silently disable three comparisons.
+    pinned_corpus_path = session_pin.get("pinned_corpus_path")
+    if not isinstance(pinned_corpus_path, str) or not pinned_corpus_path.strip():
+        raise Invalid(
+            f"the session corpus pin records no usable corpus PATH (got {pinned_corpus_path!r}), so"
+            " the bare-scan arm's recorded `corpus`, `schema` and `table_dirs_ingested` cannot be"
+            " compared against the corpus this session measured. Refused rather than defaulted:"
+            " falling back to --corpus would make a report-time argument the authority for a"
+            " pre-measurement fact, which is how a substituted corpus gets excused by re-reporting"
+            " (#3272)."
+        )
+    pinned_scan_corpus = pathlib.Path(pinned_corpus_path)
     # THE PINNING CLAIM'S EVIDENCE (#3272 round 9, F6). The two CPU lists above are manifest
     # strings, and `session_manifest_config` deliberately does not re-check them — correctly, but
     # the check that DID run was against the driver's argv and nothing tied the two together, so
@@ -470,7 +499,14 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # each having observed the whole corpus — and DERIVES the rep's rows and seconds from
         # them. Previously `--scan-passes` was recorded in results.json and compared against
         # nothing, and the `passes` array was never read at all.
-        scan = collect_scan(d, temp, reps, scan_passes, corpus_rows)
+        # `pinned_scan_corpus` (#3272): the corpus PATH this session pinned before the first rep,
+        # against which every rep's recorded `corpus`, `schema` and `table_dirs_ingested` are
+        # compared. Taken from the PIN rather than from `--corpus`, for the reason `flight_endpoint`
+        # is: it is a pre-measurement fact, so a scan performed over other bytes cannot be excused
+        # by re-reporting with a matching flag.
+        scan = collect_scan(
+            d, temp, reps, scan_passes, corpus_rows, pinned_scan_corpus
+        )
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")
         lines.append(fmt("bare scan (execute_streaming)", scan))

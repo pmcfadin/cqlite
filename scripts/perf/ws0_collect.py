@@ -26,7 +26,12 @@ import statistics
 
 from ws0_rounds import collect_round_meta
 from ws0_loadgen_record import check_record_surface  # noqa: F401  (re-exported)
-from ws0_scan_record import SCAN_FIXED_INPUTS, check_scan_fixed_inputs
+from ws0_scan_record import (
+    SCAN_FIXED_INPUTS,
+    check_scan_fixed_inputs,
+    check_scan_session_bound_inputs,
+    scan_session_bound_expectations,
+)
 from ws0_validate import (
     Invalid,
     classify_prewarm,
@@ -266,7 +271,12 @@ def check_scan_passes(
 
 
 def collect_scan(
-    d: pathlib.Path, temp: str, reps: int, scan_passes: int, corpus_rows: int
+    d: pathlib.Path,
+    temp: str,
+    reps: int,
+    scan_passes: int,
+    corpus_rows: int,
+    pinned_corpus: pathlib.Path,
 ) -> dict:
     """The bare-scan arm, WITH each rep's observed round/position (#3272 R3).
 
@@ -277,7 +287,14 @@ def collect_scan(
     `scan_passes` and `corpus_rows` are REQUIRED (#3272 F2): the per-pass records are
     validated against both, and the rep's rows/seconds are DERIVED from them rather than
     read from the aggregate the bench also wrote. See `check_scan_passes`.
+
+    `pinned_corpus` is REQUIRED positionally, never defaulted (#3272): every rep's recorded
+    `corpus`, `schema` and `table_dirs_ingested` are compared against it, so a default would
+    silently disable those comparisons for a caller that forgot to pass one — the
+    `.get(k, <what we want>)` shape at the parameter list, which is the argument
+    `collect_flight` makes for `flight_endpoint`.
     """
+    scan_expectations = scan_session_bound_expectations(pinned_corpus)
     rows_per_sec: list[float] = []
     cycles_per_row: list[float] = []
     ipc: list[float] = []
@@ -309,6 +326,14 @@ def collect_scan(
         # `collect_flight`'s equivalent: a record from a different workload is refused FOR THAT
         # rather than for a downstream consequence.
         scan_fixed = check_scan_fixed_inputs(tag, payload)
+        # ...and THE SESSION-BOUND SCAN INPUTS must match THIS SESSION'S PINNED CORPUS (#3272).
+        # `corpus`, `schema` and `table_dirs_ingested` were recorded by the bench and read by
+        # nobody, so every corpus check in the rig was about the corpus the REPORTER was pointed at
+        # while nothing established that the BENCH opened it: a rep run against a second corpus on
+        # the same box passed whenever the two shared a row count. Recorded in its own block below
+        # rather than merged with the fixed inputs — these were verified against the SESSION, and
+        # one label for two kinds of check is how "verified" stops meaning anything specific.
+        scan_session_bound = check_scan_session_bound_inputs(tag, payload, scan_expectations)
         # THE ROWS AND SECONDS ARE DERIVED FROM THE PER-PASS RECORDS (#3272 F2), not read
         # from the aggregate. `check_scan_passes` requires exactly `--scan-passes` records,
         # requires EVERY one to have observed the whole corpus, sums them, and cross-checks
@@ -392,6 +417,10 @@ def collect_scan(
                 # have — measured: that assert failed on `schema` the instant this landed. Two
                 # producers, two tables, two key names.
                 "verified_scan_fixed_inputs": scan_fixed,
+                # ...and WHICH BYTES, WHICH DDL and WHICH SSTable DIRECTORIES this rep's figures
+                # are conditional on, verified against the session's pin rather than assumed equal
+                # to the corpus the reporter was pointed at.
+                "verified_scan_session_bound_inputs": scan_session_bound,
                 "rows_source": (
                     "DERIVED as the sum of the per-pass rows, each of which was required to"
                     " equal the corpus row count; the payload's recorded rows_denominator"
