@@ -249,7 +249,29 @@ perf_capability_sandbox_ok() {
 
 perf_capability_sandbox_ok_resolved() {
   local __pdr_root='' __pdr_real=''
+  # LINE-SAFETY IS CHECKED ON THE ORIGINAL CANDIDATE, BEFORE ANY COMMAND SUBSTITUTION (roborev round
+  # 12, Medium). `$(cd -P -- "$1" && pwd -P)` STRIPS trailing newlines, so a directory whose name ends
+  # in LF arrived here, lost the LF during canonicalization, and passed a check that only ever saw the
+  # stripped form — while every later caller still emits the ORIGINAL spelling, which then splits the
+  # one-per-line search path into two entries. The CR/LF guard was added in round 3 for exactly that
+  # split; it was simply running too late to see it. Order matters more than the predicate here.
+  perf_capability_path_lines_ok "${1:-}" || return 1
   perf_capability_sandbox_root_into __pdr_root || return 1
+  # KNOWN, TRACKED, DELIBERATELY-UNFIXED RESIDUAL — **#3323 entry 3** (roborev round 12, Medium).
+  # THE DEFECT, in the reviewer's words: "cd -P/pwd -P resolves symlinks but cannot detect bind
+  # mounts. A sandbox path bind-mounted to /etc/sysctl.d or /proc/sys/kernel still appears lexically
+  # contained; the installer's ownership/mode check also accepts a root-owned bound /etc/sysctl.d,
+  # allowing test mode to read or modify host state."
+  # THE NAMED FIX, verbatim: "use mount-aware, descriptor-relative containment such as openat2 with
+  # appropriate no-cross-mount constraints, or explicitly reject mount-boundary crossings."
+  # WHY NOT FIXED HERE: that fix IS openat2 — the same non-shell mechanism already rejected for this
+  # family (an interpreter dependency on the privileged bootstrap path). Shell cannot decide this:
+  # comparing st_dev via `stat -c %d` catches a cross-FILESYSTEM bind but NOT a same-filesystem one,
+  # so a device check would be a guard with a known hole, which is worse than a recorded boundary.
+  # By owner ruling this whole class (a NAME that does not correspond to its real DESTINATION) is
+  # CLOSED: it is recorded and appended to #3323 automatically, not escalated and not re-attempted.
+  # CONSEQUENCE, SCOPED: requires the ability to CREATE a bind mount, i.e. root or CAP_SYS_ADMIN on a
+  # box we own — an actor who already has what the escape would obtain. Test-mode only.
   # BOTH sides canonicalized the same way, so the comparison is between destinations
   __pdr_root=$(cd -P -- "$__pdr_root" 2>/dev/null && pwd -P) || return 1
   __pdr_real=$(cd -P -- "${1:-/dev/null/never}" 2>/dev/null && pwd -P) || return 1
@@ -265,6 +287,9 @@ perf_capability_sandbox_ok_resolved() {
 # consumed): a symlinked `sysctl.conf` inside the sandbox would feed the competing-file scan the
 # host's real configuration.
 perf_capability_sandbox_file_ok_resolved() {
+  # Same ordering fix as the directory variant (roborev round 12, Medium): checked on the ORIGINAL
+  # argument, so a file whose PARENT ends in LF cannot launder the newline through `pwd -P`.
+  perf_capability_path_lines_ok "${1:-}" || return 1
   case "${1:-}" in */?*) ;; *) return 1 ;; esac
   local __pfr_base="${1##*/}" __pfr_root='' __pfr_parent=''
   case "$__pfr_base" in ''|.|..) return 1 ;; esac
