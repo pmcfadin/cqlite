@@ -562,6 +562,11 @@ fn a_probe_cluster_below_the_load_factor_widens_instead_of_dropping() {
     // Fill to just under the load factor with the production prefix cap and assert
     // nothing was lost: any probe-cluster `Full` must have widened (unbiased) rather
     // than dropped.
+    //
+    // That a `Full` is genuinely reachable here — rather than this test passing
+    // because the path was never taken — is demonstrated directly at the table
+    // level by `a_probe_cluster_reports_full_well_below_the_load_factor`, which
+    // constructs a cluster longer than the probe bound on an almost-empty table.
     let r = deterministic_recorder();
     let n = 95_000u64; // just under LOAD_FACTOR_LIMIT (98,304)
     for i in 0..n {

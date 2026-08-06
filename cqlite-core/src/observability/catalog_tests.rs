@@ -6,6 +6,87 @@
 
 use super::*;
 
+/// Parse `pub const IDENT: &str = "VALUE";` declarations out of Rust source.
+///
+/// **ONE implementation, called by the catalog↔otel guard AND by the test that
+/// pins its behaviour.** An earlier version of that test hand-rolled a parallel
+/// parser, so it asserted a program the guard did not run and passed whether or not
+/// the guard was fixed — CLAUDE.md's "a port is a second implementation, and its
+/// correctness is only knowable against the original", reproduced inside a test
+/// written to close a guard hole.
+///
+/// Two shapes it must handle, both of which broke naive versions:
+///
+/// - **rustfmt-WRAPPED** declarations, where the value sits on the next line. A
+///   line-scoped parser drops these — and wrapping selects for LONG names, i.e.
+///   exactly the new metrics the guard exists to catch.
+/// - **a `;` INSIDE the value** (`"cqlite.a;b"`). Scanning to the first `;` first
+///   truncates the declaration, silently drops the constant, and makes the caller
+///   fail later with a misleading message.
+///
+/// Hence: locate the string literal FIRST, then require the `;` after it. A
+/// declaration whose first `;` precedes any quote has no string value at all
+/// (`pub const N: usize = 5;`) and is skipped.
+/// The otel source the instrument guards scan, as ONE string.
+///
+/// `otel.rs` holds the record-routing arms and `otel_instruments.rs` the
+/// construction, so a guard reading either alone is blind to half the wiring.
+fn otel_sources() -> String {
+    concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs")).to_string()
+}
+
+/// Fail if a future split adds an `otel*.rs` that [`otel_sources`] does not scan.
+///
+/// The file list is unavoidably hand-maintained (`include_str!` needs a literal), so
+/// the completeness check has to come from the filesystem. Without this, splitting
+/// `otel_instruments.rs` again would silently shrink every instrument guard's
+/// coverage — the same failure mode the split itself just fixed.
+fn assert_every_otel_source_is_scanned() {
+    const SCANNED: [&str; 2] = ["otel.rs", "otel_instruments.rs"];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/observability");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .expect("observability source dir must be readable")
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("otel") && n.ends_with(".rs"))
+        .collect();
+    found.sort();
+    for name in &found {
+        assert!(
+            SCANNED.contains(&name.as_str()) || name == "otel_tests.rs",
+            "{name} is an otel source that no instrument guard scans — add it to \
+             `otel_sources()` (and to SCANNED here), or the guards go blind to it"
+        );
+    }
+}
+
+fn parse_str_consts(src: &str) -> std::collections::HashMap<&str, &str> {
+    let mut out = std::collections::HashMap::new();
+    for (i, _) in src.match_indices("pub const ") {
+        let rest = &src[i + "pub const ".len()..];
+        let Some((ident, tail)) = rest.split_once(':') else {
+            continue;
+        };
+        let open = tail.find('"');
+        let semi = tail.find(';');
+        // No literal, or the declaration ends before one: not a `&str` const.
+        let Some(open) = open else { continue };
+        if semi.is_some_and(|s| s < open) {
+            continue;
+        }
+        let after = &tail[open + 1..];
+        let Some(close) = after.find('"') else {
+            continue;
+        };
+        // A well-formed declaration terminates right after the literal.
+        if !after[close + 1..].trim_start().starts_with(';') {
+            continue;
+        }
+        out.insert(ident.trim(), &after[..close]);
+    }
+    out
+}
+
 #[test]
 fn metric_names_are_namespaced_and_unique() {
     let mut seen = std::collections::HashSet::new();
@@ -163,63 +244,47 @@ fn read_scan_window_refill_counter_is_registered_and_namespaced() {
     assert!(READ_SCAN_WINDOW_REFILL.starts_with("cqlite."));
 }
 
-/// The catalog↔otel guard must read a rustfmt-WRAPPED `pub const`, and must not be
-/// truncated by a `;` inside a value.
+/// The SHARED declaration parser — the one the catalog↔otel guard actually calls —
+/// handles both shapes that broke earlier versions.
 ///
-/// Both properties were holes: the original parser was line-scoped, so a
-/// declaration rustfmt split across two lines dropped out of its identifier map and
-/// the constant escaped the guard — which selects precisely for LONG names, i.e. new
-/// metrics. Coverage of the fix is otherwise incidental (it holds only while some
-/// constant happens to be wrapped), so it is asserted by name here: unwrap every
-/// declaration in `catalog.rs` and this test fails, rather than the guard silently
-/// ceasing to guard.
+/// This asserts [`parse_str_consts`], not a copy of it: the previous version of this
+/// test hand-rolled its own parser without the guard's `find(';')` step, so it
+/// passed whether or not the guard was fixed.
 #[test]
-fn the_catalog_ident_parser_reads_wrapped_and_semicolon_bearing_declarations() {
-    let src = include_str!("catalog.rs");
-    let wrapped: Vec<&str> = src
-        .lines()
-        .enumerate()
-        .filter_map(|(i, l)| {
-            let l = l.trim_start();
-            // A declaration whose value is NOT on the `pub const` line.
-            (l.starts_with("pub const ") && l.ends_with('=')).then(|| src.lines().nth(i).unwrap())
-        })
-        .collect();
-    assert!(
-        !wrapped.is_empty(),
-        "expected at least one rustfmt-wrapped `pub const` in catalog.rs to keep the \
-         wrapped-parse path exercised; if every declaration now fits on one line, \
-         this guard needs a synthetic fixture instead of relying on the real file"
+fn the_shared_catalog_const_parser_reads_wrapped_and_semicolon_bearing_declarations() {
+    // A `;` inside the value must not truncate the declaration.
+    let with_semi = parse_str_consts("pub const WITH_SEMI: &str = \"cqlite.a;b\";\n");
+    assert_eq!(
+        with_semi.get("WITH_SEMI"),
+        Some(&"cqlite.a;b"),
+        "a semicolon inside the value must not truncate the declaration"
     );
 
-    // The parser must recover every wrapped constant, not just one-liners.
-    for name in [
-        READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
-        READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
-    ] {
+    // A rustfmt-wrapped declaration must still be found.
+    let wrapped = parse_str_consts(
+        "pub const A_VERY_LONG_METRIC_NAME_CONSTANT: &str =\n    \"cqlite.a.b.c\";\n",
+    );
+    assert_eq!(
+        wrapped.get("A_VERY_LONG_METRIC_NAME_CONSTANT"),
+        Some(&"cqlite.a.b.c"),
+        "a wrapped declaration must not drop out of the map — wrapping selects for \
+         long names, i.e. exactly the new metrics this guard exists to catch"
+    );
+
+    // A non-string constant must be skipped, not mis-parsed against a later literal.
+    let mixed =
+        parse_str_consts("pub const COUNT: usize = 5;\npub const NAME: &str = \"cqlite.n\";\n");
+    assert_eq!(mixed.get("NAME"), Some(&"cqlite.n"));
+    assert_eq!(mixed.len(), 1, "the usize const must not appear: {mixed:?}");
+
+    // And it recovers the real catalog constants, including the wrapped ones.
+    let real = parse_str_consts(include_str!("catalog.rs"));
+    for name in ALL_METRICS {
         assert!(
-            src.contains(&format!("\"{name}\"")),
-            "{name} must be declared in catalog.rs"
+            real.values().any(|v| v == name),
+            "{name} must be recoverable from catalog.rs by the shared parser"
         );
     }
-
-    // And a `;` inside a value must not truncate the declaration. Exercised on a
-    // synthetic input so the assertion does not depend on the real file ever
-    // containing such a value.
-    let synthetic = "pub const WITH_SEMI: &str = \"cqlite.a;b\";\n";
-    let rest = synthetic
-        .strip_prefix("pub const ")
-        .expect("synthetic prefix");
-    let (ident, tail) = rest.split_once(':').expect("synthetic ident");
-    let open = tail.find('\"').expect("synthetic open quote");
-    let after = &tail[open + 1..];
-    let close = after.find('\"').expect("synthetic close quote");
-    assert_eq!(ident.trim(), "WITH_SEMI");
-    assert_eq!(
-        &after[..close],
-        "cqlite.a;b",
-        "the value must survive an embedded semicolon"
-    );
 }
 
 #[test]
@@ -230,7 +295,8 @@ fn partition_access_probe_metrics_have_dedicated_otel_arms_not_the_adhoc_fallbac
     // construction, `every_instrument_registered_in_otel_is_catalogued` cannot see
     // them either. Assert the arms exist at the source level, like the #2419
     // saturation-gauge guard above.
-    let otel_src = concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs"));
+    assert_every_otel_source_is_scanned();
+    let otel_src = otel_sources();
     for (metric, arm) in [
         (
             READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
@@ -281,7 +347,9 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     // BOTH halves of the otel wiring: `otel.rs` keeps the record-routing arms and
     // `otel_instruments.rs` the construction. Scanning only one would let an
     // instrument built in the other escape the guard entirely (#1116 split).
-    let otel_src = concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs"));
+    assert_every_otel_source_is_scanned();
+    let otel_src = otel_sources();
+    let otel_src = otel_src.as_str();
     let catalogued: std::collections::HashSet<&str> = ALL_METRICS.iter().copied().collect();
 
     // Collect the const IDENTIFIERS present in the ALL_METRICS array so we can
@@ -301,22 +369,7 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     // (long names) would slip past this guard, which is the bug class it exists to
     // catch. Scan from each `pub const ` to its terminating `;` instead.
     let this_src = include_str!("catalog.rs");
-    let mut ident_to_value = std::collections::HashMap::new();
-    for (i, _) in this_src.match_indices("pub const ") {
-        let rest = &this_src[i + "pub const ".len()..];
-        let Some(end) = rest.find(';') else { continue };
-        let decl = &rest[..end];
-        let Some((ident, tail)) = decl.split_once(':') else {
-            continue;
-        };
-        let Some(start) = tail.find('"') else {
-            continue;
-        };
-        let after = &tail[start + 1..];
-        if let Some(close) = after.find('"') {
-            ident_to_value.insert(ident.trim(), &after[..close]);
-        }
-    }
+    let ident_to_value = parse_str_consts(this_src);
 
     // Extract every `catalog::SCREAMING_CONST` reference in otel.rs. `unit`/
     // `attr` submodule refs (`catalog::unit::…`, `catalog::attr::…`) start with
@@ -388,8 +441,10 @@ fn saturation_gauges_have_dedicated_otel_arms_not_the_adhoc_fallback() {
     // field, NOT the ad-hoc `_ =>` fallback (which rebuilds the instrument on
     // every sample). Source-scan otel.rs for a dedicated `catalog::IDENT =>`
     // match arm per gauge — a fully-automatic check needing no `observability`
-    // feature. Delete an arm → this fails.
-    let otel_src = include_str!("otel.rs");
+    // feature. Delete an arm → this fails. Scans BOTH otel sources (#1116 split):
+    // reading `otel.rs` alone would miss an arm that moved with the construction.
+    assert_every_otel_source_is_scanned();
+    let otel_src = otel_sources();
     for ident in [
         "MERGE_EGRESS_CHANNEL_DEPTH",
         "MERGE_ACTIVE_MERGES",

@@ -54,7 +54,7 @@ pub(super) const LOAD_FACTOR_LIMIT: usize = SLOTS / 4 * 3;
 /// At a 0.75 load factor with a well-mixed hash a run this long is
 /// vanishingly rare; treating it as "full" simply triggers a downsample one
 /// insert early, which is harmless (the scale is published).
-const MAX_PROBES: usize = 64;
+pub(super) const MAX_PROBES: usize = 64;
 
 /// Sticky per-entry flag: at least one access to this partition resolved an
 /// SSTable that reported no authoritative size, so the entry contributes ZERO
@@ -545,6 +545,51 @@ mod tests {
         table.for_each_entry(|_| n += 1);
         assert_eq!(n, 0);
         assert_eq!(table.footprint_bytes(), TABLE_BYTES);
+    }
+
+    #[test]
+    fn a_probe_cluster_reports_full_well_below_the_load_factor() {
+        // The premise of the recorder's widen-instead-of-drop path (C4): `Full` is
+        // reachable far below the load factor, because the probe bound is 64 slots
+        // while a cluster can be much longer. Construct the cluster directly —
+        // MAX_PROBES + 1 keys that all hash to the same home slot — so the property
+        // is demonstrated rather than assumed from a statistical argument.
+        let table = Table::new();
+        // Find enough distinct keys sharing one home slot.
+        let mut home: Option<usize> = None;
+        let mut hashes = Vec::new();
+        let mut i = 0u64;
+        while hashes.len() <= MAX_PROBES && i < 50_000_000 {
+            let h = hash_partition("ks", "t", &i.to_le_bytes());
+            let slot = (h as usize) & SLOT_MASK;
+            match home {
+                None => {
+                    home = Some(slot);
+                    hashes.push(h);
+                }
+                Some(target) if slot == target => hashes.push(h),
+                _ => {}
+            }
+            i += 1;
+        }
+        assert!(
+            hashes.len() > MAX_PROBES,
+            "needed {} colliding keys, found {}",
+            MAX_PROBES + 1,
+            hashes.len()
+        );
+
+        for h in hashes.iter().take(MAX_PROBES) {
+            assert_eq!(table.record(*h, 0, Some(1)), Insert::Recorded);
+        }
+        // The table is ~0.05% full, nowhere near LOAD_FACTOR_LIMIT.
+        assert!(table.occupancy() < LOAD_FACTOR_LIMIT / 100);
+        assert_eq!(
+            table.record(hashes[MAX_PROBES], 0, Some(1)),
+            Insert::Full,
+            "a cluster longer than the probe bound reports Full even on an almost \
+             empty table — which is why the recorder must widen rather than drop"
+        );
     }
 
     #[test]
