@@ -855,10 +855,9 @@ echo
 # not contradicting instants) and passes them through to `results.json` as INERT RECORDED
 # DATA. It derives no ordering property from them.
 #
-# At the spreads this rig measures (5-10% per arm) a couple of percent of median
-# difference is not readable, and the recorded #3096 session is the case in point — a
-# +2.3% median difference measured at ZERO (median −0.03%, 4 of 8 rounds positive) when
-# re-measured on 8 rounds.
+# At the spreads this rig measures (5-10% per arm) a couple of percent of median difference
+# is not readable: the recorded #3096 session's +2.3% median difference re-measured at ZERO
+# (median −0.03%, 4 of 8 rounds positive) over 8 rounds.
 #
 # `rotate_arms <round> <arms…>` — the arm list left-rotated by `(round-1) % n`, so over
 # n rounds every arm occupies every position.
@@ -894,12 +893,10 @@ rotate_arms() {
 # `time.monotonic_ns()` and not `date`: it is monotonic (immune to an NTP step or a DST
 # change mid-session, either of which could otherwise reorder two reps), it is
 # nanosecond-resolution, and python3 is already a HARD requirement of this rig. The cost is
-# one interpreter start per rep — tens of milliseconds against a 45-second step.
-#
-# The instant recorded is the rep's COMPLETION. The loop is strictly sequential — one rep
-# runs to completion before the next starts — so completion order IS the order the reps ran,
-# and using the later instant means a rep that died leaves no metadata at all rather than a
-# start time for a measurement that never finished.
+# one interpreter start per rep — tens of milliseconds against a 45-second step. The instant
+# recorded is the rep's COMPLETION, and the loop is strictly sequential, so completion order
+# IS the order the reps ran — and a rep that died leaves NO metadata rather than a start time
+# for a measurement that never finished.
 record_round() {
   local now
   now="$(python3 -c 'import time; print(time.monotonic_ns())')" || {
