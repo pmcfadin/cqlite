@@ -196,14 +196,26 @@ roborev_check_prompt_content() {
         DETAILS+=("ERROR: prompt-content: the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are therefore UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
         return 0
         ;;
+      delegated-oversize)
+        # ===== RIDER R3: THE DELEGATED TIER IS A NAMED FAIL, ON EVERY ROUTE INTO IT (roborev job 20) =====
+        # roborev's `codex_*`/`generic_*` oversize templates — and a compact instruction whose token is a git
+        # COMMAND rather than a path — ship neither the diff nor a snapshot path: the reviewer is told to run git
+        # itself, so nothing local establishes what it received. Standing #3325 ruling: that stays a named FAIL.
+        # THIS ARM EXISTS BECAUSE THE STATE IS NOW DECIDED BEFORE THE GLOBAL HEADER SET IS CONSULTED. Previously
+        # this prompt shape fell through to `inline` whenever ANY `diff --git` line was quoted anywhere in it, and
+        # quoted headers covering the census produced a PASS on a review that received nothing at all.
+        PROMPT_CONTENT="FAIL (delegated oversize tier: roborev supplied neither a diff nor a snapshot path)"
+        DETAILS+=("ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path — ${ROBOREV_SNAPSHOT_UNUSABLE_WHY:-cause not established}. Whether such a review is certifiable at all is an owner decision (#3325); by rule 13 an unverifiable input is non-passing, so it stays a named FAIL. A 'diff --git' header quoted ELSEWHERE in the prompt is NOT a delivery and cannot satisfy the census here (roborev job 20).")
+        DETAILS+=("ERROR: prompt-content: the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are therefore UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
+        return 0
+        ;;
       inline) ;;
       none)
         # A MEASUREMENT, not an excusal: neither source exists, so the census match below reports every
-        # path absent — the fail-closed direction — and this line names the condition.
+        # path absent — the fail-closed direction — and this line names the condition. There is no oversize
+        # sub-case left here: a pathless oversize marker is now its own state, decided earlier (job 20), so a
+        # branch for it in this arm would be unreachable — and an unreachable branch reads as a check that ran.
         DETAILS+=("ERROR: prompt-content: the prompt carries NEITHER an inline diff (no 'diff --git' header) NOR a snapshot diff path (no column-zero 'Read the diff from:' instruction inside roborev's own diff-delivery block), so nothing in it names a diff the reviewer could have received. This is the T1/T2 family: the review ran against no diff at all.")
-        if [ -n "${ROBOREV_SNAPSHOT_UNUSABLE_WHY:-}" ]; then
-          DETAILS+=("ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path — ${ROBOREV_SNAPSHOT_UNUSABLE_WHY}. Whether such a review is certifiable at all is an owner decision; by rule 13 an unverifiable input is non-passing, so it stays a named FAIL.")
-        fi
         ;;
       *)
         PROMPT_CONTENT="FAIL (diff-source resolver returned the unrecognised state '${ROBOREV_DIFF_SOURCE_STATE:-<unset>}')"

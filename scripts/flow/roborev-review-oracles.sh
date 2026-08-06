@@ -1259,18 +1259,34 @@ roborev_collect_review_diff_headers() {
     return 0
   fi
 
+  # ===== RIDER R3, ENFORCED BEFORE ANY GLOBAL-HEADER CONSULTATION (roborev job 20, BLOCKER) =====
+  # A PATHLESS OVERSIZE MARKER IS ITS OWN HARD-FAILING STATE, and the ORDER of this check against the
+  # `_rx_hdrs` consultation below is the whole fix. `_rx_hdrs` used to be read FIRST, so a DELEGATED oversize
+  # prompt — roborev's third tier: no inline diff AND no snapshot path, the reviewer told to run git itself —
+  # was resolved as `inline` on the strength of any `diff --git` line quoted ANYWHERE in the prompt. Quoted
+  # headers that happened to cover the census then produced `prompt-content: PASS` on a review where roborev
+  # supplied NOTHING. That contradicts the standing #3325 ruling that the delegated tier stays a NAMED FAIL,
+  # and it is a PASS, not the disclosed NOTICE residual — a different mechanism with a different verdict.
+  #
+  # THE TWO USES OF THE HEADER SET ARE THEREFORE SEPARATED. Prompt-wide header evidence is right for the
+  # mixed-delivery lock (a later injected block must not hide an earlier inline delivery) and right for census
+  # matching once a delivery is established — but it may NEVER be what establishes that a delivery HAPPENED
+  # when roborev's own marker says it delegated instead. An oversize marker with no usable path means
+  # delegation, full stop, whatever appears elsewhere in the prompt.
+  #
+  # SECOND EVALUATION-ORDER DEFECT IN THIS FUNCTION (the first was validate-after-normalise), so the ordering
+  # is pinned by a structural assert in scripts/tests/test_roborev_review_guard.sh rather than by this comment.
+  if [ "${_rx_snap_oversize_markers:-0}" -gt 0 ] && [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
+    ROBOREV_DIFF_SOURCE_STATE="delegated-oversize"
+    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt carries a '(Diff too large' notice but NO snapshot path (roborev's delegated-inspection tier, or a compact instruction naming a command rather than a path), so nothing establishes which files the reviewer looked at"
+    return 0
+  fi
+
   if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
     if [ "${#_rx_hdrs[@]}" -gt 0 ]; then
       ROBOREV_DIFF_SOURCE_STATE="inline"
     else
       ROBOREV_DIFF_SOURCE_STATE="none"
-      if [ "${_rx_snap_oversize_markers:-0}" -gt 0 ]; then
-        # RIDER R3: THE DELEGATED TIER STAYS A NAMED FAIL (standing #3325 ruling). roborev's
-        # `codex_*`/`generic_*` oversize templates — and a COMPACT instruction whose token is a git command
-        # rather than a snapshot path — ship neither the diff nor a snapshot path. Nothing establishes what
-        # such a review received, and an unverifiable input is non-passing by rule 13.
-        ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt carries a '(Diff too large' notice but NO snapshot path (roborev's delegated-inspection tier, or a compact instruction naming a command rather than a path), so nothing establishes which files the reviewer looked at"
-      fi
     fi
     return 0
   fi
