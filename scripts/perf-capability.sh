@@ -464,81 +464,45 @@ perf_capability_dropin_path() {
 # FOLLOWED (issue #3261 AC1). argv is the privilege prefix (empty when already root); rc 0 iff the
 # managed bytes are in place at the managed path afterwards, verified by re-reading the file.
 #
-# Content goes to a fresh staging entry in the ALREADY-VALIDATED directory, then `mv -f` —
+# Content goes to a fresh staging entry in the ALREADY-VALIDATED directory, then `mv -fT` —
 # rename(2), which replaces the NAME and never dereferences the destination. Same directory, so the
-# rename is same-filesystem and atomic. The check in perf_capability_dropin_path above has a TOCTOU
-# window; a rename has none, which is why both exist rather than either alone.
+# rename is same-filesystem and atomic.
 #
-# THE STAGING NAME IS UNPREDICTABLE, AND `mktemp` — NOT THE SHELL — CREATES IT (issue #3261, roborev
-# finding 1, the NINTH escape in this family and the SAME SHAPE as the other eight: a NAME trusted
-# in place of a DESTINATION). A PREDICTABLE staging path that is checked-then-opened is exactly that
-# assumption: this function used a fixed `.99-cqlite-perf.conf.new`, removed it, verified the
-# removal, and only then let a privileged `tee` open it — so anyone able to create entries in the
-# directory could re-plant that known name as a symlink in the window between the verify and the
-# open, and the root `tee` would follow it to an arbitrary file. Checking harder cannot close that
-# window; only removing the assumption can. So `mktemp` creates the entry with O_CREAT|O_EXCL under
-# the SAME privilege that will write it, and the name carries 6 random characters — an attacker can
-# neither guess the name nor win the create, because there is no create left to win.
-#   An earlier revision of this comment argued the fixed name was preferable ("litter beats a race
-#   that cannot happen"). That was WRONG on both halves and is recorded here rather than quietly
-#   deleted: the race is a real privileged arbitrary-overwrite, and a pid suffix would not have
-#   helped either — a pid is predictable. Unpredictability is the property; `mktemp` is how it is
-#   obtained. The litter it does risk (an unpredictably-named dotfile if a run is killed between the
-#   `tee` and the `mv`) is a cosmetic cost against a root-overwrite, and every exit path here
-#   removes it.
-#   The name does not end in `.conf` (and begins with `.`), so the competing-file scan — which globs
-#   `*.conf` — can never mistake a staging entry for a rival sysctl drop-in.
-#   `chmod 0644` after the write is load-bearing, not cosmetic: `mktemp` creates 0600, and the
-#   idempotency compare (perf_capability_dropin_current) is run by an UNPRIVILEGED bootstrap
-#   process, which could not read a root-owned 0600 file — every subsequent run would then see
-#   "not current" and rewrite. The old `tee` produced 0644 via root's umask; this preserves that.
-#
-# THE STAGING RACE IS CLOSED AT ITS PRECONDITION, NOT BY WINNING IT (issue #3261, roborev rounds
-# 1-3 — the tenth and eleventh looks at ONE defect). The history matters because two successive
-# fixes here were each defended with a claim that turned out to be false:
-#   round 1  a FIXED staging name was checked, cleared and then opened by a privileged `tee`.
-#            Claimed safe because the race "cannot happen". It could.
-#   round 2  `mktemp` made the name unpredictable, closing the CREATE race. But mktemp returns a
-#            NAME, and `tee`/`chmod`/`mv` each REOPEN it, so the window moved rather than closing.
-#   round 2  every step was then put inside ONE privileged `sh -c`, and THAT WAS DEFENDED WITH A
-#     (b)    CLAIM THIS COMMENT PREVIOUSLY MADE AND WHICH IS FALSE: that no unprivileged process is
-#            scheduled between the steps, so no less-privileged observer gets to act. Round 3 of
-#            review corrected it, and the correction is the point: a single `sh -c` gives SEQUENCING
-#            WITHIN ONE PROCESS, not MUTUAL EXCLUSION against other processes — which run
-#            concurrently, on other CPUs, entirely unaffected by how we grouped our own commands.
-#            Consolidation is retained (it is still the right shape and removes needless windows)
-#            but it is NOT what makes this safe, and it is no longer described as if it were.
-#   round 3  what actually closes the class: REMOVE THE ATTACKER'S PRECONDITION. Every step of the
-#            race needs the ability to create or replace entries in the target directory. So the
-#            privileged install now REFUSES a target directory that anyone less privileged than the
-#            writer can write: it must be owned by the identity performing the privileged write and
-#            must be neither group- nor world-writable. There is then no actor to race against,
-#            whatever the timing — which is why this is a precondition and not another check.
-# The ownership/mode test runs INSIDE the privileged shell, against `id -u` of that shell, so it
-# tests the identity that will actually do the writing (root for the production path, the shim's
-# identity under test mode) rather than whoever invoked us. Undeterminable ownership or mode is a
-# REFUSAL, not an assumption.
-#   Deliberately conservative: a group-writable directory is refused even when the sticky bit would
-#   stop others from replacing our entry. Sticky-plus-group-writable is arguably safe here, and that
-#   is exactly the kind of "arguably safe" that has already cost this function three review rounds.
-#   GNU-COREUTILS DEPENDENCY, STATED EXACTLY (verified for #3261, not assumed — the earlier wording
-#   here overclaimed). `mv -fT` (`--no-target-directory`) and `stat -c` are GNU-only: macOS `mv` has
-#   no `-T` and its `stat` spells the format `-f`. For the PRODUCTION path that is genuinely gated:
-#   bootstrap-agent-machine.sh:412 is `elif [ "$PLATFORM" != linux ]; then`, whose branch only
-#   reports "nothing to configure" — the `else` that sources this file and enables the section is
-#   reachable only when PLATFORM=linux (set at :85 from `uname`), and PERF_SECTION_OK is initialised
-#   to 0 at :405 so no ambient export can steer it. So bootstrap never reaches this function off
-#   Linux.
-#   WHAT IS *NOT* GATED, said plainly: scripts/tests/test_perf_capability.sh calls this function
-#   DIRECTLY, bypassing bootstrap and its platform check, so on a macOS gate host those cases would
-#   run `mv -fT`/`stat -c` and fail. Neither portability guard in the repo scans this file
-#   (test_roborev_guard_portability.sh scans the roborev guard set; test_agent_gate_tree_portability.sh
-#   lints the tree-integrity functions), so NOTHING mechanically protects this. That is a known,
-#   unmitigated gap in the TEST path — not a production exposure — and it is recorded rather than
-#   papered over.
-#   The non-shell descriptor-holding helper stays DEFERRED (an owner call — it would add an
-#   interpreter dependency to the privileged bootstrap path), and with the precondition in place it
-#   is probably unnecessary rather than merely postponed.
+# WHAT MAKES THIS SAFE IS THE PRECONDITION, NOT THE STAGING MECHANICS. Three successive fixes here
+# were each defended with a claim that proved FALSE, so the reasoning is recorded rather than the
+# conclusion alone (full history: #3261, roborev rounds 1-3):
+#   * a FIXED staging name, checked-then-opened, claimed safe because the race "cannot happen". It
+#     could: anyone able to create entries in the directory could re-plant that known name as a
+#     symlink between the check and the privileged open.
+#   * `mktemp` (O_CREAT|O_EXCL, 6 random chars, created under the SAME privilege that writes) closed
+#     the CREATE race — but mktemp returns a NAME and each later step REOPENS it, so the window moved
+#     rather than closing. A pid suffix would not have helped either; a pid is predictable.
+#   * grouping every step into ONE privileged `sh -c` was then defended with a claim THIS COMMENT
+#     ITSELF MADE AND WHICH IS FALSE: that no unprivileged process is scheduled between the steps.
+#     `sh -c` gives SEQUENCING WITHIN ONE PROCESS, never MUTUAL EXCLUSION against other processes,
+#     which run concurrently on other CPUs regardless of how we group our own commands. Consolidation
+#     is kept — it removes needless windows — but it is NOT what makes this safe.
+#   * what closes the class: REMOVE THE ATTACKER'S PRECONDITION. Every step of the race needs the
+#     ability to create or replace entries in the target directory, so the install REFUSES a target
+#     directory that anyone less privileged than the writer can write — it must be owned by the
+#     identity performing the privileged write and be neither group- nor world-writable. There is
+#     then no actor to race against, whatever the timing.
+# The ownership/mode test runs INSIDE the privileged shell against `id -u` of that shell, so it tests
+# the identity that will actually write (root in production, the shim under test mode) rather than
+# whoever invoked us. Undeterminable ownership or mode is a REFUSAL, not an assumption. Deliberately
+# conservative: group-writable is refused even with the sticky bit, because "arguably safe" is what
+# already cost this function three review rounds.
+#   `chmod 0644` after the write is load-bearing: `mktemp` creates 0600, and the idempotency compare
+#   runs from an UNPRIVILEGED bootstrap process that could not read a root-owned 0600 file — every
+#   later run would see "not current" and rewrite. The old `tee` got 0644 from root's umask.
+#   The staging name begins with `.` and does not end in `.conf`, so the competing-file scan (which
+#   globs `*.conf`) can never mistake it for a rival drop-in.
+#   GNU-COREUTILS DEPENDENCY, STATED EXACTLY: `mv -fT` and `stat -c` are GNU-only. The PRODUCTION
+#   path is genuinely gated — bootstrap reaches this function only when PLATFORM=linux (set at :85,
+#   branch at :412, PERF_SECTION_OK initialised to 0 at :405 so no ambient export can steer it).
+#   NOT gated: scripts/tests/test_perf_capability.sh calls this DIRECTLY, so its staged-install cases
+#   are capability-probed and COUNTED-skipped off GNU (roborev round 5). Neither portability guard in
+#   the repo scans this file, so nothing mechanically protects the gate; recorded, not papered over.
 perf_capability_dropin_install() {
   local __pin_d __pin_p
   __pin_d=$(perf_capability_sysctl_dir) || return 1
