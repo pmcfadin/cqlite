@@ -5790,6 +5790,30 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 ERROR-CODE CROSS-CHECK guards (#3272 round 20), split out of the reporter suite under
+  # the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a test nothing
+  # executes, the #1597/#1618 gate-wiring class this rig has already paid for twice. Subject:
+  # `error_codes` was classified `ignored` on the ASSUMED invariant that the map is empty
+  # whenever `requests_error` is 0, which nothing enforced — so a record carrying
+  # `requests_error: 0` beside `error_codes: {"Internal": 1}` was accepted and published as a
+  # clean, failure-free scan with the failing code named nowhere in the output (MEASURED). The
+  # invariant now enforced is the SUM, the producer's own (`StepAgg::record_outcome`), which also
+  # catches a breakdown disagreeing at a NON-ZERO count. Different oracle from both siblings
+  # (another field of the SAME record) and a different non-vacuity mutation site
+  # (`ws0_error_codes.py`). Hermetic: synthetic session dirs under $TMPDIR driven through the
+  # shipped reporter; no cargo, perf, sudo, taskset, corpus, network or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_error_code_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_error_code_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 error-code guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 MEASUREMENT-APPARATUS guards (#3272, item 10): the sibling of the reporter
   # test above, split out because it covers a different question over disjoint
   # fixtures — that one asks what the rig DOES with its observations, this one asks
