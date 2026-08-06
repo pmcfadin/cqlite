@@ -1827,10 +1827,32 @@ case "$OUT" in
   *) bad "3310-report: does not name '$R32_DELETED_B'; output: $OUT" ;;
 esac
 case "$OUT" in
-  *"git -C "*"restore"*"--worktree"*"test-data/datasets"*)
-    ok "3310-report: prints the exact one-line repair command" ;;
-  *) bad "3310-report: no copy-pasteable repair command; output: $OUT" ;;
+  *"git -C "*"restore"*"--worktree"*"test-data/datasets/$R32_DELETED_A"*)
+    ok "3310-report: prints a one-line repair command naming the deleted PATH" ;;
+  *) bad "3310-report: no copy-pasteable path-scoped repair command; output: $OUT" ;;
 esac
+# The repair must be SCOPED TO THE DELETED PATHS. A subtree-wide
+# `git restore --worktree -- test-data/datasets` reverts every unrelated local
+# change under the root — and --verify-only returns BEFORE the destructive path's
+# refuse_modified_tracked_dataset_files, so nothing here has ruled such a
+# modification out. Advertising that line as "EXACTLY this command" would make
+# this change a new instance of the data loss #2878/#3245 exist to prevent.
+R32_SUBTREE_WIDE=0
+while IFS= read -r line; do
+  case "$line" in
+    *"git -C "*" restore "*)
+      case "$line" in
+        *"-- test-data/datasets" | *"-- 'test-data/datasets'" | *"-- test-data/datasets ") R32_SUBTREE_WIDE=1 ;;
+      esac ;;
+  esac
+done <<EOF
+$OUT
+EOF
+if [ "$R32_SUBTREE_WIDE" -eq 0 ]; then
+  ok "3310-report: no subtree-wide restore is advertised (the repair cannot revert unrelated work)"
+else
+  bad "3310-report: advertised a subtree-wide 'restore -- test-data/datasets'; output: $OUT"
+fi
 # Textually DISTINCT from the generic unusable-root diagnostic: an agent must be
 # able to tell "your fixtures are missing, here is the repair" from "this root has
 # no corpus". The corpus here is fine, so the unusable message would be a lie.
@@ -1854,11 +1876,16 @@ if [ "$R32_STATUS_BEFORE" = "$R32_STATUS_AFTER" ]; then
 else
   bad "3310-report: git status changed: '$R32_STATUS_BEFORE' -> '$R32_STATUS_AFTER'"
 fi
-if [ ! -e "$R32_ROOT/$R32_DELETED_A" ] && [ ! -e "$R32_ROOT/$R32_DELETED_B" ]; then
-  ok "3310-report: the deleted fixtures are STILL deleted (it reported, it did not repair)"
-else
-  bad "3310-report: --verify-only restored a file; it must never mutate the tree"
-fi
+# DIRECT existence assertion, deliberately INDEPENDENT of the census above: the
+# headline guarantee is "reports, never repairs", and it must survive any future
+# refactor of census_of. Asserted per file so a partial restore cannot hide.
+for rel in "$R32_DELETED_A" "$R32_DELETED_B"; do
+  if [ ! -e "$R32_ROOT/$rel" ]; then
+    ok "3310-report: '$rel' is STILL deleted (it reported, it did not repair)"
+  else
+    bad "3310-report: --verify-only RESTORED '$rel'; it must never mutate the tree"
+  fi
+done
 
 # === Case 32b: the SAME report when the corpus content is ALSO absent =========
 # The reported motivation: with the corpus gone too, the pre-#3310 probe answered
@@ -2031,6 +2058,170 @@ if [ "$R36_CENSUS_BEFORE" = "$R36_CENSUS_AFTER" ]; then
 else
   bad "3310-unmeasurable: the root changed across a report-only probe"
 fi
+
+# === Case 37: a DELETED fixture carrying skip-worktree must not read clean ====
+# roborev #3310 blocker 2. `git status` SUPPRESSES worktree reporting for
+# skip-worktree ('S') and assume-unchanged (lowercase tag) index entries, so a
+# probe that infers presence from "no deletion entries appeared" reports every
+# file present while the file is genuinely gone. Presence must be established
+# AFFIRMATIVELY (stat each indexed path) — and where an index flag makes the
+# state undeterminable, the answer is COULD NOT MEASURE, never a clean verdict.
+# The destructive path already refuses these flags; this probe must not be weaker
+# than the code sitting above it.
+#
+# probe_flagged_case <label> <case-dir> <git update-index flag>
+probe_flagged_case() {
+  local label="$1" dir="$2" flag="$3" rel="goldens/simple_table-Data.db.jsonl"
+  make_repo "$dir"
+  make_usable_corpus "$dir/test-data/datasets"
+  git -C "$dir" update-index "$flag" -- "test-data/datasets/$rel"
+  rm -f "$dir/test-data/datasets/$rel"
+  # Precondition: git really is blind to the deletion (else the case is vacuous).
+  if [ -z "$(git -C "$dir" status --porcelain -- "test-data/datasets/$rel")" ]; then
+    ok "$label: git status is BLIND to the deletion (the flag really hides it)"
+  else
+    bad "$label: git status still reports the deletion; case is vacuous"
+  fi
+  run_verify "$dir" "$dir/test-data/datasets"
+  if [ "$RC" -ne 0 ]; then
+    ok "$label: does not report a clean root (exit $RC)"
+  else
+    bad "$label: reported the root usable with a hidden tracked fixture DELETED; output: $OUT"
+  fi
+  case "$OUT" in
+    *"Tracked-fixture probe (#3310): OK"*)
+      bad "$label: printed a CLEAN tracked-fixture verdict about a file it cannot see; output: $OUT" ;;
+    *) ok "$label: no clean tracked-fixture verdict" ;;
+  esac
+  case "$OUT" in
+    *"$PROBE_MISSING_MARKER"* | *"$PROBE_UNMEASURED_MARKER"*)
+      ok "$label: reports it as missing or explicitly unmeasurable" ;;
+    *) bad "$label: neither reported nor declared unmeasurable; output: $OUT" ;;
+  esac
+  case "$OUT" in
+    *"$rel"*) ok "$label: names the affected path" ;;
+    *) bad "$label: does not name '$rel'; output: $OUT" ;;
+  esac
+  if [ ! -e "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: still repaired nothing"
+  else
+    bad "$label: the probe restored the file"
+  fi
+}
+probe_flagged_case "3310-skip-worktree" "$T/case37-repo" --skip-worktree
+probe_flagged_case "3310-assume-unchanged" "$T/case37b-repo" --assume-unchanged
+
+# === Case 38: the repair is SCOPED, and every path in it is shell-quoted ======
+# roborev #3310 blocker 1, positive control: two deletions, one space-bearing.
+# The printed command must name both paths (so it actually repairs both) and must
+# round-trip through a shell — an unquoted `spaced name-...` would silently become
+# two pathspecs, neither of which exists.
+R38="$T/case38-repo"
+make_repo "$R38"
+make_usable_corpus "$R38/test-data/datasets"
+rm -f "$R38/test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+      "$R38/test-data/datasets/goldens/spaced name-Data.db.jsonl"
+run_verify "$R38" "$R38/test-data/datasets"
+R38_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --worktree --" | head -1)"
+if [ -n "$R38_CMD" ]; then
+  ok "3310-scoped-repair: a --worktree repair line was printed"
+else
+  bad "3310-scoped-repair: no --worktree repair line; output: $OUT"
+fi
+case "$R38_CMD" in
+  *"goldens/simple_table-Data.db.jsonl"*) ok "3310-scoped-repair: the command names the first deleted path" ;;
+  *) bad "3310-scoped-repair: first path absent from the command: '$R38_CMD'" ;;
+esac
+case "$R38_CMD" in
+  *"goldens/spaced name-Data.db.jsonl"* | *"goldens/spaced\\ name-Data.db.jsonl"*)
+    ok "3310-scoped-repair: the command names the SPACE-bearing deleted path" ;;
+  *) bad "3310-scoped-repair: space-bearing path absent from the command: '$R38_CMD'" ;;
+esac
+case "$R38_CMD" in
+  *"-- test-data/datasets" | *"-- 'test-data/datasets'")
+    bad "3310-scoped-repair: the command is subtree-wide, not path-scoped: '$R38_CMD'" ;;
+  *) ok "3310-scoped-repair: the command is not subtree-wide" ;;
+esac
+# The advertised line must WORK: run it verbatim and require both files back.
+( cd "$R38" && eval "$R38_CMD" ) >/dev/null 2>&1
+if [ -f "$R38/test-data/datasets/goldens/simple_table-Data.db.jsonl" ] \
+   && [ -f "$R38/test-data/datasets/goldens/spaced name-Data.db.jsonl" ]; then
+  ok "3310-scoped-repair: pasting the advertised command verbatim restores BOTH files"
+else
+  bad "3310-scoped-repair: the advertised command did not repair the deletions: '$R38_CMD'"
+fi
+# ...and it must not have touched the tracked fixtures it was not asked about.
+if [ -z "$(git -C "$R38" status --porcelain 2>&1)" ]; then
+  ok "3310-scoped-repair: the checkout is clean after the advertised repair"
+else
+  bad "3310-scoped-repair: the repair left the checkout dirty: $(git -C "$R38" status --porcelain | head -3)"
+fi
+
+# === Case 39: a STAGED deletion needs a DIFFERENT repair command ==============
+# `git rm --cached` removes the index entry, so `git restore --worktree` has
+# nothing to rebuild from and silently no-ops; only `--staged --worktree` works.
+# Lumping this class in with worktree deletions would advertise a command that
+# does not repair it.
+R39="$T/case39-repo"
+make_repo "$R39"
+make_usable_corpus "$R39/test-data/datasets"
+R39_REL="goldens/simple_table-Data.db.jsonl"
+git -C "$R39" rm -q --cached "test-data/datasets/$R39_REL" >/dev/null
+rm -f "$R39/test-data/datasets/$R39_REL"
+run_verify "$R39" "$R39/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-staged-delete: reports the staged+worktree deletion (exit $RC)"
+else
+  bad "3310-staged-delete: exited 0; output: $OUT"
+fi
+R39_CMD="$(printf '%s\n' "$OUT" | grep -E "git -C .* restore --staged --worktree --" | head -1)"
+if [ -n "$R39_CMD" ]; then
+  ok "3310-staged-delete: a --staged --worktree repair line was printed"
+else
+  bad "3310-staged-delete: no staged-class repair line; output: $OUT"
+fi
+case "$R39_CMD" in
+  *"$R39_REL"*) ok "3310-staged-delete: the staged-class command names the path" ;;
+  *) bad "3310-staged-delete: path absent from the staged-class command: '$R39_CMD'" ;;
+esac
+case "$R39_CMD" in
+  *"-- test-data/datasets" | *"-- 'test-data/datasets'")
+    bad "3310-staged-delete: the staged-class command is subtree-wide: '$R39_CMD'" ;;
+  *) ok "3310-staged-delete: the staged-class command is not subtree-wide" ;;
+esac
+if [ ! -e "$R39/test-data/datasets/$R39_REL" ]; then
+  ok "3310-staged-delete: still repaired nothing"
+else
+  bad "3310-staged-delete: the probe restored the staged-deleted file"
+fi
+( cd "$R39" && eval "$R39_CMD" ) >/dev/null 2>&1
+if [ -f "$R39/test-data/datasets/$R39_REL" ]; then
+  ok "3310-staged-delete: pasting the advertised command verbatim restores the file"
+else
+  bad "3310-staged-delete: the advertised staged-class command did not repair it: '$R39_CMD'"
+fi
+
+# === Case 39b: a staged deletion whose CONTENT IS STILL ON DISK is not missing =
+# The boundary of the probe's subject: nothing is absent, so it must not claim a
+# missing fixture — but it must not stay silent about a measured signal either.
+R39B="$T/case39b-repo"
+make_repo "$R39B"
+make_usable_corpus "$R39B/test-data/datasets"
+git -C "$R39B" rm -q --cached "test-data/datasets/$R39_REL" >/dev/null
+run_verify "$R39B" "$R39B/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-staged-present: content on disk is not a missing fixture (exit 0)"
+else
+  bad "3310-staged-present: false positive on a staged deletion whose content is present (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*) bad "3310-staged-present: called a present file missing; output: $OUT" ;;
+  *) ok "3310-staged-present: no missing-fixture claim" ;;
+esac
+case "$OUT" in
+  *"STAGED DELETION"*) ok "3310-staged-present: still reports the measured staged deletion as a NOTE" ;;
+  *) bad "3310-staged-present: silently dropped a measured signal; output: $OUT" ;;
+esac
 
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
