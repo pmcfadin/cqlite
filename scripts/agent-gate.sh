@@ -349,11 +349,38 @@
 #                      a cross-core range, an empty spec and an unreadable entry; the
 #                      override itself fails closed in a measurement run, refusal asserted
 #                      to PRECEDE the pinning check, so it can never be the bypass), and
-#                      the `perf stat -p` SELF-GREP, whose two REAL BYPASSES this test
-#                      found — an ATTACHED `-p<pid>` (the pattern needed a trailing space)
-#                      and ANY line mentioning "self-check" (the `grep -v` discarded by
-#                      CONTENT, so a comment suppressed the guard). Hermetic: fake sysfs +
-#                      driver copies under $TMPDIR; no perf/sudo/taskset/root/hardware.
+#                      the SERVER-OWNERSHIP check — the same question about the right
+#                      PROGRAM, driven against the shipped lib-server.sh with a real
+#                      listener on a kernel-assigned port: a FOREIGN listener refused
+#                      naming its pid, our own accepted, a descendant accepted but a
+#                      SIBLING refused (the pgid check accepted those), a dead server and
+#                      a readiness TIMEOUT fatal, an unanswerable prober stopping the run.
+#                      Hermetic: fake sysfs + a loopback listener under $TMPDIR; no
+#                      perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
+#                      item 10) — the THIRD structural guard, split out of the file above
+#                      under the campsite rule (it reached 1607 lines against the ~1500
+#                      test target) along a RESPONSIBILITY seam: that one asks which CPUs
+#                      and which PROGRAM, this one asks whether the COUNTING DOMAIN is the
+#                      one spec R2 mandates. Measured at the split the two shared NO helper
+#                      and NO fixture. The `perf stat -p` SELF-GREP's FIVE REAL BYPASSES
+#                      were all found by driving it: an ATTACHED `-p<pid>` (the pattern
+#                      needed a trailing space), ANY line mentioning "self-check" (the
+#                      `grep -v` discarded by CONTENT, so a comment suppressed the guard),
+#                      a SINGLE-QUOTED attached value, an invocation through a VARIABLE,
+#                      and a GLOBAL OPTION between `perf` and `stat`. Hence the mechanism
+#                      is an ALLOWLIST (one wrapper invokes perf; any other invocation line
+#                      must be marked) + a per-TOKEN option check + a RUNTIME argv check,
+#                      asking WHERE a line is rather than what it looks like. Subject is
+#                      the whole scripts/perf tree, DISCOVERED by glob and asserted against
+#                      `ls` (a hand-maintained list had already drifted past two libs).
+#                      Both directions, plus the lint's OWN vacuity states: an empty
+#                      subject, an absent/doubled/`-C`-less/empty wrapper, a variable
+#                      command word, an UNREADABLE rig file, a mode with no END assertions,
+#                      an awk dying under the driver's `set -e -o pipefail`, and the
+#                      false-positive direction (`perf_stat_c`/`perf_event_paranoid`/
+#                      `target/perf-…` identifiers must NOT flag). Hermetic: driver +
+#                      scripts/perf copies under $TMPDIR and a shimmed `perf` function.
 #                      Also runs scripts/tests/test_ws0_host_state_guards.sh (#3272
 #                      finding 3) — the HOST STATE half, split out of the reporter test
 #                      in review round 3 because it is the only part of the rig that
@@ -5746,19 +5773,61 @@ run_tooling_tests() {
   #     an empty spec and an unreadable topology entry. The override itself fails
   #     closed in a measurement run (asserted, incl. that the refusal PRECEDES the
   #     pinning check), so it can never become the bypass.
-  #   * the `perf stat -p` SELF-GREP — per-process counting measured >2x observer
-  #     cost, so spec R2 mandates CPU-wide `-C`. Driving the guard over injected
-  #     copies found TWO REAL BYPASSES in it: an ATTACHED `-p<pid>` (the pattern
-  #     required a trailing space) and ANY line mentioning "self-check" (the
-  #     `grep -v` discarded by CONTENT, so a comment suppressed the guard). Both now
-  #     fire; the shipped driver must still pass its own check, so the guard cannot
-  #     be one that reds unconditionally.
-  # Hermetic: a fake sysfs tree + driver copies under $TMPDIR. No perf, sudo,
+  #   * the SERVER-OWNERSHIP check — the same question about the right PROGRAM.
+  #     Readiness used to be inferred solely from a connect probe succeeding, so a
+  #     failed bind plus a peer holding the port meant the load generator measured
+  #     THAT server while `perf stat -C` counted OUR CPUs. Driven against the shipped
+  #     lib-server.sh with a real listener on a kernel-assigned port, both directions
+  #     (a foreign listener refused naming its pid, our own accepted, a descendant
+  #     accepted but a SIBLING refused, a dead server and a readiness TIMEOUT fatal,
+  #     and an unanswerable prober stopping the run rather than passing vacuously).
+  # The THIRD guard — the three-layer perf-invocation lint — is its own component
+  # below (the campsite-rule split; this file reached 1607 lines against the ~1500
+  # test target, and the two subjects share no fixture and no helper).
+  # Hermetic: a fake sysfs tree + a loopback listener under $TMPDIR. No perf, sudo,
   # taskset, root, real multi-socket hardware, corpus, network or cargo.
   echo ">>> [$name] bash scripts/tests/test_ws0_cpu_pinning_guards.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
     status=FAIL
-    echo "--- [$name] FAILED (ws0 cpu-pinning / perf-invocation guards); last 40 lines of $log ---"
+    echo "--- [$name] FAILED (ws0 cpu-pinning / server-ownership guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 PERF-INVOCATION LINT, all three layers (#3272, item 10; split out of the
+  # cpu-pinning suite above under the campsite rule, along a RESPONSIBILITY seam —
+  # that one asks which CPUs and which PROGRAM an observation is of, this one asks
+  # whether its COUNTING DOMAIN is the one spec R2 mandates). Per-process counting
+  # measured >2x observer cost, so the driver checks ITSELF at startup. Driving that
+  # guard over injected copies found FIVE REAL BYPASSES across two successive
+  # deny-list patterns: an ATTACHED `-p<pid>` (the pattern required a trailing
+  # space), ANY line mentioning "self-check" (the `grep -v` discarded by CONTENT, so
+  # a comment on a real invocation suppressed the guard), a SINGLE-QUOTED attached
+  # value, an invocation through a VARIABLE, and a GLOBAL OPTION between `perf` and
+  # `stat`. All five fire now, and the mechanism is no longer a deny-list: an
+  # ALLOWLIST (perf is invoked in ONE wrapper; any other invocation line must be
+  # explicitly marked) plus a per-TOKEN option check plus a RUNTIME argv check —
+  # which asks WHERE a line is rather than what it looks like, so a spelling nobody
+  # anticipated still fires. The subject is the WHOLE scripts/perf tree, DISCOVERED
+  # by glob and asserted against `ls` (a hand-maintained list had already drifted
+  # past two libraries). Both directions throughout: the shipped tree must be CLEAN,
+  # and the lint must NOT flag `perf_stat_c`/`perf_event_paranoid`/`target/perf-…`
+  # identifiers — a guard that reds on ordinary code is the one an operator deletes.
+  # Its OWN vacuity states are driven too (an empty subject, an absent or doubled or
+  # `-C`-less wrapper, a variable command word, an UNREADABLE rig file, a mode with
+  # no END assertions, and an awk that dies under the driver's `set -e -o pipefail`),
+  # each an instance of the rule this issue is about: never derive a positive verdict
+  # from the absence of a bad signal. Hermetic: driver and scripts/perf copies under
+  # $TMPDIR plus a shimmed `perf` function; no perf, sudo, taskset, root, corpus,
+  # network or cargo.
+  echo ">>> [$name] bash scripts/tests/test_ws0_perf_invocation_lint.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_perf_invocation_lint.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 perf-invocation lint guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
