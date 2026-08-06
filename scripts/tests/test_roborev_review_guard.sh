@@ -322,6 +322,16 @@ chmod +x "$stubbin/roborev"
 # `<login><TAB><body, newlines flattened to spaces>`. `STUB_GH_RC` makes it exit non-zero, which is the
 # single state covering "no PR for this branch", "no auth" and "API error" — all of which must leave the
 # absence FAILing.
+# ===== THE `gh` STUB RETURNS JSON, because the wrapper now decides STRUCTURALLY (#3312 job 26) =====
+# The wrapper asks for raw `gh pr view --json comments` and hands the JSON to
+# scripts/flow/roborev-waiver-scan.py, so author and body stay separate FIELDS all the way to the
+# decision — there is no in-band delimiter to forge. The stub therefore has to produce that shape.
+#
+# FIXTURE AUTHORING: `STUB_GH_COMMENTS` keeps the compact `<SOH><login>` + body-lines form, which the
+# stub CONVERTS to JSON. That form is a convenience of the test double, NOT a channel the wrapper reads.
+# A case that needs a body containing a literal SOH line — the forgery fixture — sets
+# `STUB_GH_COMMENTS_JSON` and passes JSON through verbatim, so nothing in the fixture layer can turn a
+# forged body line into a separate comment and accidentally test the harness instead of the code.
 cat >"$stubbin/gh" <<'GHSTUB'
 #!/usr/bin/env bash
 printf 'gh %s\n' "$*" >>"${STUB_INVOKED:-/dev/null}"
@@ -329,14 +339,33 @@ if [ "${STUB_GH_RC:-0}" -ne 0 ]; then
   printf 'gh: simulated failure\n' >&2
   exit "${STUB_GH_RC}"
 fi
-# STUB_GH_COMMENTS_FILE is read VERBATIM (no %b interpretation), which is what makes the
-# "repost the failure diagnostic as a PR comment" regression test possible: the diagnostic
-# contains backslashes and quotes that any escaping round-trip would alter.
-if [ -n "${STUB_GH_COMMENTS_FILE:-}" ] && [ -f "${STUB_GH_COMMENTS_FILE}" ]; then
-  cat "${STUB_GH_COMMENTS_FILE}"
+if [ -n "${STUB_GH_COMMENTS_JSON:-}" ]; then
+  printf '%s\n' "$STUB_GH_COMMENTS_JSON"
   exit 0
 fi
-printf '%b' "${STUB_GH_COMMENTS:-}"
+if [ -n "${STUB_GH_COMMENTS_FILE:-}" ] && [ -f "${STUB_GH_COMMENTS_FILE}" ]; then
+  STUB_GH_SRC=$(cat "${STUB_GH_COMMENTS_FILE}")
+else
+  STUB_GH_SRC=$(printf '%b' "${STUB_GH_COMMENTS:-}")
+fi
+printf '%s' "$STUB_GH_SRC" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+comments = []
+author = None
+body = []
+for line in raw.split("\n"):
+    if line.startswith("\u0001"):
+        if author is not None:
+            comments.append({"author": {"login": author}, "body": "\n".join(body)})
+        author = line[1:]
+        body = []
+    elif author is not None:
+        body.append(line)
+if author is not None:
+    comments.append({"author": {"login": author}, "body": "\n".join(body)})
+json.dump({"comments": comments}, sys.stdout)
+'
 exit 0
 GHSTUB
 chmod +x "$stubbin/gh"
@@ -867,6 +896,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # config any more (#3283), but HERMETICITY is asserted structurally at the bottom of this
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
+    ${WAIVER_SCAN_TOOL_OVERRIDE:+WAIVER_SCAN_TOOL="$WAIVER_SCAN_TOOL_OVERRIDE"} \
     TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
@@ -984,6 +1014,7 @@ export STUB_ANNOUNCE_SHA=''
 export STUB_RECORD_OUTPUT=''
 export STUB_RECORD_OUTPUT_FIELD=''
 export STUB_GH_COMMENTS=''
+export STUB_GH_COMMENTS_JSON=''
 export STUB_GH_COMMENTS_FILE=''
 export STUB_GH_RC=0
 reset_stub() {
@@ -1006,6 +1037,7 @@ reset_stub() {
   STUB_RECORD_OUTPUT=''
   STUB_RECORD_OUTPUT_FIELD=''
   STUB_GH_COMMENTS=''
+  STUB_GH_COMMENTS_JSON=''
   STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
 }
@@ -3765,6 +3797,66 @@ assert_verdict 'case (wv28b) verdict_text on the review row' PASS 0
 assert_says 'case (wv28b) completion is re-asserted from the review row field' '^review-completed: PASS$'
 reset_stub
 
+printf '== (wv29) JOB 26: a FORGED author line inside a stranger comment does not grant ==\n'
+# THE DEFEAT OF LAST ROUND'S ALLOWLIST, and the fourth member of one family on this issue: CONTROL AND
+# DATA MUST NOT SHARE A CHANNEL WHEN THE DATA IS ATTACKER-CONTROLLED. Comments used to be flattened into
+# one stream where an author record was a leading-SOH line and the body followed verbatim, so an
+# unauthorized commenter could put an allowlisted login on its own SOH line INSIDE their own body and
+# have the next marker attributed to it. The fixture is that exploit, passed as raw JSON so the forged
+# line is unambiguously BODY CONTENT of a stranger's comment — the harness cannot turn it into a second
+# comment, which would test the fixture layer instead of the code.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(FORGE_BASE="$w_base" FORGE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=forged an author line"
+          % (os.environ["FORGE_BASE"], os.environ["FORGE_HEAD"]))
+body = "\u0001pmcfadin\n" + marker
+print(json.dumps({"comments": [{"author": {"login": "drive-by-contributor"}, "body": body}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv29)' FAIL 1
+assert_says 'case (wv29) the author comes from the JSON object, not from the body' \
+  "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor' is not on the waiver allowlist"
+assert_lacks 'case (wv29) a forged author line cannot grant' '^prompt-content: WAIVED'
+assert_lacks 'case (wv29) and the forged login is never credited' 'authorized by @pmcfadin'
+assert_says 'case (wv29) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+reset_stub
+
+printf '== (wv30) JOB 26: a body line that merely LOOKS like a delimiter is inert ==\n'
+# The complement: with no delimiter left to interpret, a bare login line in a body is just prose. The
+# case pins that the fix is "no in-band channel", not "a rarer delimiter" — the latter would still grant
+# for some spelling.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001drive-by-contributor\npmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=bare login line above the marker\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv30)' FAIL 1
+assert_says 'case (wv30) a bare login line is prose, not an author record' \
+  "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor'"
+reset_stub
+
+printf '== (wv31) JOB 26: the scanner being unusable is UNAVAILABLE, never a text fallback ==\n'
+# A waiver is never decided from a flattened text stream, so an absent scanner fails closed instead of
+# degrading to line parsing — the shape that produced this whole family.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=would otherwise grant\n"
+WAIVER_SCAN_TOOL_OVERRIDE="$tmp/no-such-scanner.py"
+run_wrapper "$w_work"
+assert_verdict 'case (wv31)' FAIL 1
+assert_says 'case (wv31) an unusable scanner is UNAVAILABLE and fails closed' \
+  '^waiver: UNAVAILABLE \(the structured waiver scanner is unusable'
+assert_says 'case (wv31) and it says a waiver is never decided from a text stream' \
+  'NEVER decided from a flattened text stream'
+assert_lacks 'case (wv31) no grant without the scanner' '^prompt-content: WAIVED'
+WAIVER_SCAN_TOOL_OVERRIDE=""
+reset_stub
+
 printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
@@ -3868,6 +3960,7 @@ printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
 #   (4) no consumer re-implements header parsing or newline-delimited path membership.
 ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 CHECKS_FILE="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
+SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
 FLOW_FILES=("$ORACLES" "$CHECKS_FILE" "$WRAPPER")
 for _f in "${FLOW_FILES[@]}"; do
   if [ ! -f "$_f" ]; then bad "structural: missing $_f"; continue; fi
@@ -4025,6 +4118,29 @@ if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${BAS
   ok 'structural: WAIVED is admitted only with a complete, sha-matching provenance, and the gate is not key-scoped'
 else
   bad 'structural: the affirmation backstop admits WAIVED without checking its provenance, or reintroduces a per-key escape hatch (#3312 ruling (4))'
+fi
+# ===== NO COMMENT-PROVENANCE DECISION FROM A FLATTENED TEXT STREAM (#3312 job 26) =====
+# The class, not the instance: an in-band author channel is forgeable by the very data it labels, so the
+# association must come from the JSON structure. This asserts (a) the wrapper asks for raw `--json`
+# without a `--jq` flattening program, (b) the decision is delegated to the structured scanner, and
+# (c) no SOH-style delimiter or comment-line loop survives in the oracles.
+_prov_ok=1
+grep -qF 'gh pr view --json comments 2>/dev/null' "$ORACLES" || _prov_ok=0
+grep -qF 'python3 "$WAIVER_SCAN_TOOL"' "$ORACLES" || _prov_ok=0
+grep -q 'u0001' "$ORACLES" && _prov_ok=0
+grep -qF 'author.login' "$ORACLES" && _prov_ok=0
+if [ "$_prov_ok" -eq 1 ]; then
+  ok 'structural: comment provenance is decided from the JSON structure, with no in-band author channel'
+else
+  bad 'structural: the waiver still associates author and body through a flattened text stream (or asks jq to flatten them) — a comment body can forge its own author record, which defeats the allowlist (#3312 job 26)'
+fi
+# AND THE SCANNER OWNS THE MARKER FORM: two implementations of the pattern would drift, and the shell
+# having one at all is what made the text channel possible.
+if ! grep -qF 'roborev-waive: prompt-content-absent base=' "$ORACLES" \
+  && grep -qF 'roborev-waive: prompt-content-absent' "$SCAN_TOOL"; then
+  ok 'structural: the marker form is expressed once, in the structured scanner'
+else
+  bad 'structural: the marker pattern exists in the shell as well as the scanner — two implementations drift, and a shell-side parse is how the in-band channel returns (#3312 job 26)'
 fi
 # ===== AUTHORIZATION IS ENFORCED, AND THE RESIDUAL IS SCOPED TO WHAT REMAINS TRUE (#3312 job 25) =====
 # This assert used to forbid ANY author check, on the reasoning that one could not distinguish worker from
