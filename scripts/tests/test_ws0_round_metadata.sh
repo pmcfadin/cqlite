@@ -88,7 +88,7 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # shellcheck source=scripts/tests/lib-ws0-report-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
 
-GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","endpoint":"__ENDPOINT__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"bytes_total":'"$WS0_PREFLIGHT_BYTES_PER_SCAN"',"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","endpoint":"__ENDPOINT__","requests_ok":1,"requests_error":0,"error_codes":{},"requests_unavailable":0,"rows_total":1000,"bytes_total":'"$WS0_PREFLIGHT_BYTES_PER_SCAN"',"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 
@@ -254,7 +254,7 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         # and compared, so omitting either is refused correctly but for a reason unrelated to this
         # case's subject.
         "round": tag, "endpoint": endpoint,
-        "requests_ok": 1, "requests_error": 0, "requests_unavailable": 0,
+        "requests_ok": 1, "requests_error": 0, "error_codes": {}, "requests_unavailable": 0,
         # ...and the ARROW PAYLOAD VOLUME at the value one full-corpus scan carries (#3272 round
         # 17), for the same reason again: the reporter now compares it against this rep's untimed
         # preflight, so a body without it is refused correctly but for an unrelated reason.
@@ -266,7 +266,7 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
     # reporter has to divide rather than compare totals whole.
     (d / f"{tag}.prewarm.jsonl").write_text(json.dumps({
         "schema": "flight-loadgen.step/v1", "round": "prewarm", "requests_ok": 3,
-        "requests_error": 0, "requests_unavailable": 0, "rows_total": 3 * rows,
+        "requests_error": 0, "error_codes": {}, "requests_unavailable": 0, "rows_total": 3 * rows,
         "bytes_total": 3 * per_scan_bytes}) + "\n")
     # The round metadata the reporter REQUIRES, alternating position by
     # round exactly as the driver does — the scan fixture takes the complement.
@@ -663,14 +663,14 @@ for rep, mult in ((1, 1), (2, 2)):
     # endpoint would make the refusal ambiguous between two guards.
     (d / f"{tag}.jsonl").write_text(
         '{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full",'
-        f'"round":"{tag}","endpoint":"{endpoint}","requests_ok":{mult},"requests_error":0,"requests_unavailable":0,'
+        f'"round":"{tag}","endpoint":"{endpoint}","requests_ok":{mult},"requests_error":0,"error_codes":{{}},"requests_unavailable":0,'
         f'"rows_total":{rows * mult},"bytes_total":{per_scan_bytes * mult},'
         f'"rows_per_s":{rows * mult / 4.0},"duration_s":4.0}}'
         "\n"
     )
     (d / f"{tag}.prewarm.jsonl").write_text(
         '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":3,'
-        '"requests_error":0,"requests_unavailable":0,'
+        '"requests_error":0,"error_codes":{},"requests_unavailable":0,'
         f'"rows_total":{3 * rows},"bytes_total":{3 * per_scan_bytes}}}'
         "\n"
     )

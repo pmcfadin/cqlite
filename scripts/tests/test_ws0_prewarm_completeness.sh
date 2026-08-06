@@ -158,7 +158,7 @@ pw_prefix="$(
 )"
 # The prewarm JSONL such a run would have written, had it not been sent to /dev/null: every
 # request shed by admission control, nothing served, no rows.
-printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":0,"requests_unavailable":40,"requests_error":0,"rows_total":0}' > "$TMP/pw-nothing.jsonl"
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":0,"requests_unavailable":40,"requests_error":0,"error_codes":{},"rows_total":0}' > "$TMP/pw-nothing.jsonl"
 pw_now="$(pw_flight 0 "$TMP/pw-nothing.jsonl")"
 if [ "$pw_prefix" = "ok" ] && [ "$pw_now" = "FAILED-zero-successful-requests" ]; then
   pass "NON-VACUITY (F-A): the PRE-FIX exit-status logic records '$pw_prefix' for a loadgen that exited 0 having served NOTHING; the classifier records '$pw_now' on the same run"
@@ -170,7 +170,7 @@ fi
 # stream, and an empty stream warms no page cache. Distinct from the case above because the
 # request COUNT alone would have been satisfied — checking only `requests_ok` would be the
 # same partial fix one field over.
-printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":5,"requests_unavailable":0,"requests_error":0,"rows_total":0}' > "$TMP/pw-norows.jsonl"
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":5,"requests_unavailable":0,"requests_error":0,"error_codes":{},"rows_total":0}' > "$TMP/pw-norows.jsonl"
 if [ "$(pw_flight 0 "$TMP/pw-norows.jsonl")" = "FAILED-zero-rows" ]; then
   pass "OBSERVED (F-A): successful requests that streamed ZERO ROWS are a degradation — a request count alone cannot establish that anything was warmed"
 else
@@ -189,13 +189,13 @@ fi
 # THE ACCEPT DIRECTION, affirmatively — without it every case above would be satisfied by a
 # classifier that refuses everything, which is the mirror-image broken instrument (a guard
 # that always fires teaches an operator to ignore it, AC1's own lesson).
-printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":3,"requests_unavailable":0,"requests_error":0,"rows_total":3000}' > "$TMP/pw-good.jsonl"
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":3,"requests_unavailable":0,"requests_error":0,"error_codes":{},"rows_total":3000}' > "$TMP/pw-good.jsonl"
 pw_good="$(pw_flight 0 "$TMP/pw-good.jsonl")"
 # ...and a prewarm that shed SOME requests but completed at least one full scan is STILL ok:
 # the prewarm's job (fault the corpus in) demonstrably happened. The MEASURED reps refuse any
 # non-zero shed counter (ws0_loadgen_record.ZERO_REQUIRED_COUNTERS); conflating the two would
 # make this guard fire on a healthy prewarm.
-printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":2,"requests_unavailable":7,"requests_error":0,"rows_total":2000}' > "$TMP/pw-shed.jsonl"
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":2,"requests_unavailable":7,"requests_error":0,"error_codes":{},"rows_total":2000}' > "$TMP/pw-shed.jsonl"
 pw_shed="$(pw_flight 0 "$TMP/pw-shed.jsonl")"
 if [ "$pw_good" = "ok" ] && [ "$pw_shed" = "ok" ]; then
   pass "AFFIRMATIVE (F-A): a prewarm that served requests AND streamed rows reads 'ok', including one that shed some requests while completing others"
@@ -315,7 +315,7 @@ fi
 # streamed 40 of the corpus's 1000 rows — and asserted to yield `ok`. Then the SAME record goes to
 # the shipped classifier and must yield a partial-scan label. Without the first half this proves only
 # that a function returns a string; with it, the change is a measured flip on identical input.
-printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":1,"requests_unavailable":0,"requests_error":0,"rows_total":40}' > "$TMP/pw-partial.jsonl"
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":1,"requests_unavailable":0,"requests_error":0,"error_codes":{},"rows_total":40}' > "$TMP/pw-partial.jsonl"
 pw_fa_verdict="$(python3 - "$TMP/pw-partial.jsonl" <<'PY'
 import json, sys
 rec = json.loads(open(sys.argv[1]).read().strip())
@@ -336,7 +336,7 @@ fi
 # 1000-row corpus, but nothing in the record says those quarters were DISJOINT, so the sum
 # establishes nothing about coverage. The rule is `requests_ok * pinned_rows` — every completed
 # request a full pass — which is what `ws0_flight_arm` requires of the MEASURED reps.
-printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":4,"requests_unavailable":0,"requests_error":0,"rows_total":1000}' > "$TMP/pw-sums.jsonl"
+printf '%s\n' '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":4,"requests_unavailable":0,"requests_error":0,"error_codes":{},"rows_total":1000}' > "$TMP/pw-sums.jsonl"
 pw_sums="$(pw_flight 0 "$TMP/pw-sums.jsonl")"
 if [ "$pw_sums" = "FAILED-partial-scan-1000-of-4000-rows" ]; then
   pass "OBSERVED (round12 F2): 4 requests of a QUARTER each — summing to exactly the corpus — is still REFUSED, because a sum says nothing about which quarter each request covered"
@@ -505,7 +505,7 @@ pw_cv_session() { # pw_cv_session <dir> <rows_total> <bytes_total> <status> [req
   mkdir -p "$d"
   ws0_pin_session_corpus "$d" "$TMP/corpus"
   jsonl="$d/$PW_CV_TAG.prewarm.jsonl"
-  printf '%s\n' "{\"schema\":\"flight-loadgen.step/v1\",\"round\":\"prewarm\",\"requests_ok\":$ok,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":$rows,\"bytes_total\":$bytes}" > "$jsonl"
+  printf '%s\n' "{\"schema\":\"flight-loadgen.step/v1\",\"round\":\"prewarm\",\"requests_ok\":$ok,\"requests_error\":0,\"error_codes\":{},\"requests_unavailable\":0,\"rows_total\":$rows,\"bytes_total\":$bytes}" > "$jsonl"
   [ "$st" != "-derive-" ] || st="$(pw_flight 0 "$jsonl" "$d")"
   [ "$st" = "-none-" ] || printf '%s\n' "$st" > "$d/$PW_CV_TAG.prewarm.status"
 }

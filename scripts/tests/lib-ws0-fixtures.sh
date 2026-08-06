@@ -92,7 +92,7 @@ ws0_flight_bytes() { echo $(( $1 * WS0_PREFLIGHT_BYTES_PER_SCAN )); }
 # a reporter that compared the totals whole pass every healthy case.
 ws0_make_preflight() {
   local d="$1" tag="$2" per_scan="$3" ok="${4:-3}"
-  printf '%s\n' "{\"schema\":\"flight-loadgen.step/v1\",\"round\":\"prewarm\",\"requests_ok\":$ok,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":$(( ok * ${CORPUS_ROWS:-1000} )),\"bytes_total\":$(( ok * per_scan ))}" \
+  printf '%s\n' "{\"schema\":\"flight-loadgen.step/v1\",\"round\":\"prewarm\",\"requests_ok\":$ok,\"requests_error\":0,\"error_codes\":{},\"requests_unavailable\":0,\"rows_total\":$(( ok * ${CORPUS_ROWS:-1000} )),\"bytes_total\":$(( ok * per_scan ))}" \
     > "$d/$tag.prewarm.jsonl"
 }
 # `ws0_scan_pass_cells <rows>` — the cell count a HEALTHY pass over `<rows>` rows emits. A case
