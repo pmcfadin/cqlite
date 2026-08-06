@@ -1030,101 +1030,154 @@ roborev_diff_header_has_path() {
 # cached; the vacuous baseline is ~18.7k input / 0 cached), which is why the escape hatch is a
 # human-authorized waiver and not another inference.
 #
-# roborev_absence_waiver_lookup <certified-head-sha>: does the PR for this branch carry a waiver
-# comment for THIS head? Sets, and never returns non-zero:
+# roborev_absence_waiver_lookup <base-sha> <head-sha> <job-id>: does the PR for this branch carry a
+# waiver for THIS REVIEW? Sets, and never returns non-zero:
 #   ROBOREV_WAIVER_STATE   granted | stale | malformed | none | unavailable
-#   ROBOREV_WAIVER_AUTHOR / _SHA / _REASON / _DETAIL
+#   ROBOREV_WAIVER_AUTHOR / _SCOPE / _REASON / _DETAIL
 #
-# THE MARKER, one line in a PR comment:
-#     roborev-waive: prompt-content-absent sha=<40-hex> reason=<text>
+# THE MARKER — a DEDICATED LINE of a PR comment, anchored at column zero, all four fields required:
+#     roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>
+#
+# ===== WHY IT IS ANCHORED, AND WHY THE DIAGNOSTIC NEVER PRINTS A COMPLETE ONE (roborev job 23) =====
+# THE DEFECT THIS CLOSES, which is the sharpest instance of a shape this issue keeps producing: AN
+# ARTIFACT THAT DESCRIBES THE ESCAPE HATCH BECAME THE ESCAPE HATCH. Detection used to accept the marker
+# ANYWHERE inside a comment whose newlines had been flattened, and the absence-FAIL diagnostic printed a
+# complete marker carrying the live sha — so pasting the summary block into a PR comment, which is the
+# documented practice throughout this repo, silently authorized the next run. A quoted example or a
+# waiver REQUEST self-granted the same way. It is the same defect as prose inside a diff naming its own
+# oracle, which is why the column-zero anchor exists on the census matcher.
+#
+# THREE INDEPENDENT LAYERS, because these blocks get pasted routinely:
+#   (1) LINE BOUNDARIES ARE PRESERVED and the marker must BE the line — no leading whitespace, no
+#       quoting prefix, nothing before it. An indented, `>`-quoted or mid-sentence copy cannot match.
+#   (2) PLACEHOLDER REASONS ARE REFUSED: empty, an unsubstituted `<…>`, or one of the bare placeholders
+#       `claim.sh` already refuses (`why`/`todo`/`tbd`/…). A pasted TEMPLATE therefore reads MALFORMED.
+#   (3) THE DIAGNOSTIC EMITS NO VALID MARKER AT ALL — it points the requester at `--help`. Layers 1 and 2
+#       make a pasted block harmless; layer 3 means the block never carries a live credential to begin with.
+#
+# ===== AND THE WAIVER IS BOUND TO THE WHOLE REVIEW SCOPE, NOT JUST THE HEAD (roborev job 23) =====
+# Binding `head` alone let ONE persistent comment waive a LATER, different review at the same head — a
+# vacuous re-run, or a review against a different base with a different census. The authorizer's judgment
+# under constraint (d) was about a SPECIFIC review and its token accounting, so the waiver may not outlive
+# it: `base`, `head` and `job` are ALL required and ALL verified, and a marker missing any field is
+# MALFORMED rather than granted.
 #
 # ===== AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED =====
 # The ruling is that only the OWNER or the coordination LEAD may GRANT this, and that a worker or a
-# closer may only REQUEST it. THIS CODE CANNOT ENFORCE THAT, and says so rather than implying
-# otherwise: on this fleet the worker, the closer and the owner all post through the SAME GitHub login
-# (`GH_TOKEN` is the repository owner's), so a comment's author field cannot distinguish a
-# self-applied waiver from a granted one. An authorization check keyed on `author.login` would
-# therefore LOOK like it verified authorship while verifying nothing — precisely the false-assurance
-# shape this issue spent four review rounds removing — so it is deliberately NOT implemented. What IS
-# mechanized: the marker must exist on the PR, it must name the CERTIFIED head sha (so a push
-# invalidates it, exactly like `ci:waive:<tier-id>`), it must carry a non-empty reason, and the
-# author, sha, reason and the absent paths are all recorded in the summary block. The audit trail is
-# the immutable, timestamped PR comment; the authorization is a process obligation on the human.
+# closer may only REQUEST it. THIS CODE CANNOT ENFORCE THAT, and says so rather than implying otherwise:
+# on this fleet the worker, the closer and the owner all post through the SAME GitHub login (`GH_TOKEN` is
+# the repository owner's), so a comment's author field cannot distinguish a self-applied waiver from a
+# granted one. An authorization check keyed on `author.login` would therefore LOOK like it verified
+# authorship while verifying nothing — precisely the false-assurance shape this issue spent four review
+# rounds removing — so it is deliberately NOT implemented. What IS mechanized: the marker is a dedicated
+# anchored line on the PR, it names the certified base, head AND job, it carries a substantive reason, and
+# the author, the scope, the reason and the absent paths are all recorded in the summary block. The audit
+# trail is the immutable, timestamped PR comment; the authorization is a process obligation on the human.
 #
-# FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, a marker for another sha, a marker with no
-# reason — every one leaves the absence FAILing, under its own named state.
+# FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, a marker for another scope, a placeholder reason,
+# a missing field — every one of them leaves the absence FAILing, under its own named state.
 roborev_absence_waiver_lookup() {
-  local head="$1" body line sha reason author rest missing
+  local base="$1" head="$2" job="$3" line author cur_author rest
+  local m_base m_head m_job m_reason missing mismatch
   ROBOREV_WAIVER_STATE="none"
   ROBOREV_WAIVER_AUTHOR=""
-  ROBOREV_WAIVER_SHA=""
+  ROBOREV_WAIVER_SCOPE=""
   ROBOREV_WAIVER_REASON=""
   ROBOREV_WAIVER_DETAIL=""
-  case "$head" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-    *)
-      ROBOREV_WAIVER_STATE="unavailable"
-      ROBOREV_WAIVER_DETAIL="this run has no certified head sha for a waiver to be bound to"
-      return 0
-      ;;
-  esac
+  if [ -z "$base" ] || [ -z "$head" ] || [ -z "$job" ] || [ "$job" = "-" ]; then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="this run has no complete review scope (base='$base' head='$head' job='$job') for a waiver to be bound to"
+    return 0
+  fi
   if ! command -v gh >/dev/null 2>&1; then
     ROBOREV_WAIVER_STATE="unavailable"
     ROBOREV_WAIVER_DETAIL="'gh' is not on PATH, so no PR comment could be read"
     return 0
   fi
   # ONE `gh` call, and its FAILURE IS A STATE rather than a silent empty result: `gh pr view` exits
-  # non-zero when there is no PR for the branch, when auth is missing, and when the API errors, and
-  # all three mean "no waiver could be established" — which keeps the absence FAILing.
+  # non-zero when there is no PR for the branch, when auth is missing, and when the API errors, and all
+  # three mean "no waiver could be established" — which keeps the absence FAILing.
   #
-  # EACH COMMENT IS FLATTENED TO ONE LINE, author first: a marker on the third line of a multi-line
-  # comment must still be attributable, and a line-oriented scan over raw bodies would attribute it to
-  # a fragment of prose instead.
+  # LINE STRUCTURE IS PRESERVED, which is layer 1: each comment is emitted as an author record (a line
+  # beginning with the SOH control character, which no reviewer types) followed by the comment's OWN
+  # lines, unmodified. The previous form flattened newlines to spaces to keep the author attached, and
+  # that flattening is exactly what let an embedded copy of the marker match.
+  local body
   if ! body=$(cd "$REPO" && gh pr view --json comments \
-      --jq '.comments[] | ((.author.login // "unknown") + "\t" + ((.body // "") | gsub("\r?\n"; " ")))' 2>/dev/null); then
+      --jq '.comments[] | "\u0001" + (.author.login // "unknown") + "\n" + (.body // "")' 2>/dev/null); then
     ROBOREV_WAIVER_STATE="unavailable"
     ROBOREV_WAIVER_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no waiver could be read"
     return 0
   fi
   [ -n "$body" ] || return 0
-  # THE LAST GRANTED MARKER WINS, so a re-request after a push supersedes a stale one instead of being
-  # shadowed by it — while a stale or malformed marker is still REPORTED when no valid one exists,
-  # because "your waiver names the wrong sha" is the diagnostic the human needs.
-  # SPLIT ON THE TAB BY `IFS`, not by a literal tab inside a parameter expansion: an invisible
-  # separator character in source is exactly the kind of thing a later edit silently drops.
-  while IFS=$'\t' read -r author line; do
-    case "$line" in *"roborev-waive: prompt-content-absent"*) ;; *) continue ;; esac
-    rest="${line#*roborev-waive: prompt-content-absent}"
-    sha=""
-    reason=""
-    case "$rest" in *sha=*) sha="${rest#*sha=}"; sha="${sha%% *}" ;; esac
-    case "$rest" in *reason=*) reason="${rest#*reason=}" ;; esac
-    if [ -z "$sha" ] || [ -z "$reason" ]; then
+  cur_author="unknown"
+  # THE LAST GRANTING MARKER WINS, so a re-request after a push supersedes an earlier one; a non-granting
+  # marker is still REPORTED when nothing granted, because "your marker names the wrong scope" is the
+  # diagnostic the human needs.
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    case "$line" in
+      $'\001'*) cur_author="${line#?}"; continue ;;
+      # LAYER 1: THE MARKER MUST *BE* THE LINE. `case` with no leading-whitespace alternative means an
+      # indented, `>`-quoted, bulleted or mid-sentence copy simply does not match.
+      'roborev-waive: prompt-content-absent '*) ;;
+      *) continue ;;
+    esac
+    author="$cur_author"
+    rest="${line#roborev-waive: prompt-content-absent }"
+    m_base=""; m_head=""; m_job=""; m_reason=""
+    case "$rest" in *base=*) m_base="${rest#*base=}"; m_base="${m_base%% *}" ;; esac
+    case "$rest" in *head=*) m_head="${rest#*head=}"; m_head="${m_head%% *}" ;; esac
+    case "$rest" in *job=*) m_job="${rest#*job=}"; m_job="${m_job%% *}" ;; esac
+    # `reason=` is LAST and free text to end of line, so it is taken whole rather than word-split.
+    case "$rest" in *reason=*) m_reason="${rest#*reason=}" ;; esac
+    missing=""
+    [ -n "$m_base" ] || missing="base="
+    [ -n "$m_head" ] || missing="${missing:+$missing }head="
+    [ -n "$m_job" ] || missing="${missing:+$missing }job="
+    [ -n "$m_reason" ] || missing="${missing:+$missing }reason="
+    # LAYER 2: A PLACEHOLDER IS NOT A REASON. An unsubstituted `<…>` is the signature of a pasted
+    # template (this is `claim.sh`'s rule, and the same bare-placeholder set), and a template that
+    # granted anything would make the documentation itself a credential.
+    if [ -z "$missing" ]; then
+      case "$m_reason" in
+        *'<'*'>'*) missing="a-substituted-reason (the reason still holds an unsubstituted <…> placeholder)" ;;
+      esac
+    fi
+    if [ -z "$missing" ]; then
+      case "$(printf '%s' "$m_reason" | tr '[:upper:]' '[:lower:]')" in
+        why|todo|tbd|tba|reason|n/a|na|none|-|placeholder)
+          missing="a-substantive-reason (the reason '$m_reason' is a bare placeholder)" ;;
+      esac
+    fi
+    if [ -n "$missing" ]; then
       if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
-        missing=""
-        [ -n "$sha" ] || missing="sha="
-        [ -n "$reason" ] || missing="${missing:+$missing and }reason="
         ROBOREV_WAIVER_STATE="malformed"
         ROBOREV_WAIVER_AUTHOR="$author"
-        ROBOREV_WAIVER_SHA="$sha"
-        ROBOREV_WAIVER_DETAIL="the marker carries no $missing value, so it does not say what it waives or why"
+        ROBOREV_WAIVER_DETAIL="the marker is missing $missing, so it does not identify the review it waives or why"
       fi
       continue
     fi
-    if [ "$sha" != "$head" ]; then
+    # EVERY FIELD IS VERIFIED, and the cause names WHICH one diverged: base, head and job together are
+    # the review the authorizer actually judged.
+    mismatch=""
+    [ "$m_base" = "$base" ] || mismatch="base ($m_base != $base)"
+    [ "$m_head" = "$head" ] || mismatch="${mismatch:+$mismatch, }head ($m_head != $head)"
+    [ "$m_job" = "$job" ] || mismatch="${mismatch:+$mismatch, }job ($m_job != $job)"
+    if [ -n "$mismatch" ]; then
       if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
         ROBOREV_WAIVER_STATE="stale"
         ROBOREV_WAIVER_AUTHOR="$author"
-        ROBOREV_WAIVER_SHA="$sha"
-        ROBOREV_WAIVER_REASON="$reason"
-        ROBOREV_WAIVER_DETAIL="the marker names sha $sha but this run certified $head — a push invalidates a waiver, so re-request it against the new head"
+        ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
+        ROBOREV_WAIVER_REASON="$m_reason"
+        ROBOREV_WAIVER_DETAIL="the marker names a different review — $mismatch — and a waiver may not outlive the review its authorizer judged; re-request it for this base/head/job"
       fi
       continue
     fi
     ROBOREV_WAIVER_STATE="granted"
     ROBOREV_WAIVER_AUTHOR="$author"
-    ROBOREV_WAIVER_SHA="$sha"
-    ROBOREV_WAIVER_REASON="$reason"
+    ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
+    ROBOREV_WAIVER_REASON="$m_reason"
     ROBOREV_WAIVER_DETAIL=""
   done <<WAIVER_SCAN_EOF
 $body

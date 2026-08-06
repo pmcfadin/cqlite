@@ -119,8 +119,9 @@
 #                     MALFORMED (...) | UNAVAILABLE (...)
 #                     PRESENT ONLY WHEN THE ABSENCE BRANCH RAN, so it is absent rather than
 #                     placeholdered on a run that had nothing to waive. INFORMATIONAL: it is not in the
-#                     verdict scan and cannot make anything pass by itself. The waiver is a PR comment,
-#                     `roborev-waive: prompt-content-absent sha=<head> reason=<why>`, granted by the
+#                     verdict scan and cannot make anything pass by itself. The waiver is a DEDICATED,
+#                     column-zero line of a PR comment binding base AND head AND job (see --help for the
+#                     exact form, which is deliberately not repeated in any emitted diagnostic), granted by the
 #                     OWNER or the coordination LEAD (a worker or closer may only REQUEST one, and must
 #                     include the token accounting). It is SHA-BOUND — a push invalidates it — and it
 #                     excuses the ABSENCE verdict ONLY, never any other cause. AUTHORSHIP IS
@@ -344,18 +345,33 @@ review's token accounting (genuine reviews measured 398k-649k input / 314k-554k 
 the vacuous baseline is ~18.7k input / 0 cached).
 
 THE WAIVER, therefore: the OWNER or the coordination LEAD may excuse an absence FAIL
-with a PR comment carrying
+with a PR comment that carries this as a DEDICATED LINE, at column zero, all four
+fields present:
 
-    roborev-waive: prompt-content-absent sha=<40-hex head> reason=<why>
+    roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>
 
 A worker or a closer may REQUEST one — one comment, including the token accounting —
-and may never apply it to its own PR. It is SHA-BOUND: a push invalidates it, exactly
-like ci:waive:<tier-id>, so re-request against the new head. It excuses the ABSENCE
-verdict ONLY: any other cause (an unretrievable prompt, a 0/0 census, a failed sha
-assert, a review that never completed) is reached on a different path and is untouched.
-The block then reports prompt-content: WAIVED (...) — a DISTINCT token, so no reader
-grepping 'prompt-content: PASS' mistakes it for a certification — beside a waiver: key
-recording the authorizer, the sha, the reason and the absent paths. Never silence.
+and may never apply it to its own PR.
+
+IT IS BOUND TO THE WHOLE REVIEW SCOPE, not just the head: base AND head AND job are all
+required and all verified. The authorizer's judgment under (d) was about ONE review and
+its token accounting, so the waiver may not outlive it — a push, a different base or a
+re-run each need a fresh one. A marker missing any field is MALFORMED, never granted.
+
+THREE THINGS STOP THE DOCUMENTATION BECOMING THE CREDENTIAL. (1) The marker must BE the
+line: an indented, '>'-quoted, bulleted or mid-sentence copy does not match, so pasting
+a block or quoting an example grants nothing. (2) A placeholder reason is refused — an
+unsubstituted '<...>' or a bare 'why'/'todo'/'tbd' — so a pasted TEMPLATE (including the
+line above) reads MALFORMED. (3) The absence-FAIL diagnostic prints NO part of the
+marker; it points here instead. Summary blocks get pasted into PR comments as a matter
+of course, and before this a pasted block silently authorized the next run.
+
+It excuses the ABSENCE verdict ONLY: any other cause (an unretrievable prompt, a 0/0
+census, a failed sha assert, a review that never completed) is reached on a different
+path and is untouched. The block then reports prompt-content: WAIVED (...) — a DISTINCT
+token, so no reader grepping 'prompt-content: PASS' mistakes it for a certification —
+beside a waiver: key recording the authorizer, the bound scope, the reason and the
+absent paths. Never silence.
 
 AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED. On this
 fleet the worker, the closer and the owner all post through the SAME GitHub login, so
@@ -1121,7 +1137,7 @@ if [ "$failed" -eq 0 ]; then
       # time a key is added, and the provenance test is the property that actually matters.
       WAIVED)
         if [ -n "${ROBOREV_WAIVER_AUTHOR:-}" ] && [ -n "${ROBOREV_WAIVER_REASON:-}" ] \
-          && [ -n "${ROBOREV_WAIVER_SHA:-}" ] && [ "${ROBOREV_WAIVER_SHA:-}" = "${HEAD_SHA:-}" ] \
+          && [ "${ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ] \
           && [ "${ROBOREV_WAIVER_STATE:-}" = "granted" ]; then continue; fi
         ;;
     esac

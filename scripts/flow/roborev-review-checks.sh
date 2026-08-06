@@ -180,23 +180,31 @@ roborev_check_prompt_content() {
       # never completed — is reached on a different path and is untouched by it. A `WAIVED` token
       # therefore always means "the census paths were absent and a named human accepted that", never
       # anything else.
-      roborev_absence_waiver_lookup "${HEAD_SHA:-}"
+      roborev_absence_waiver_lookup "${BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"
       WAIVER_REPORT="${ROBOREV_WAIVER_STATE}"
       if [ "$ROBOREV_WAIVER_STATE" = "granted" ]; then
         # A DISTINCT VERDICT TOKEN, deliberately not `PASS (waived …)`: every reader that greps
         # `^prompt-content: PASS` — this suite, closers, agents pasting blocks — must NOT see a waived
-        # run as certified. `WAIVED` is admitted by the wrapper's affirmation backstop only when the
-        # authorizer, the sha and the reason are all present, so it can never be a silent placeholder.
-        PROMPT_CONTENT="WAIVED (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent — authorized by @${ROBOREV_WAIVER_AUTHOR} for ${ROBOREV_WAIVER_SHA})"
-        WAIVER_REPORT="GRANTED (author=@${ROBOREV_WAIVER_AUTHOR} sha=${ROBOREV_WAIVER_SHA} reason=${ROBOREV_WAIVER_REASON})"
-        DETAILS+=("NOTICE: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths are ABSENT from the prompt actually sent to the reviewer, and that FAIL is WAIVED by a PR comment naming this head sha. Authorizer as recorded by GitHub: @${ROBOREV_WAIVER_AUTHOR}. Reason as given: ${ROBOREV_WAIVER_REASON}. AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED: on this fleet the worker, the closer and the owner post through the same GitHub login, so this wrapper CANNOT tell a self-applied waiver from an owner-granted one and deliberately does not pretend to — the ruling that only the owner or the coordination lead may grant it rests on process, and on this comment being permanently attributable. What is mechanized: the marker exists, it names the CERTIFIED head sha (a push invalidates it), and it carries a reason. Absent paths (first 10):")
+        # run as certified. `WAIVED` is admitted by the wrapper's affirmation backstop only when the whole
+        # scope and the reason are present and match, so it can never be a silent placeholder.
+        PROMPT_CONTENT="WAIVED (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent — authorized by @${ROBOREV_WAIVER_AUTHOR} for ${ROBOREV_WAIVER_SCOPE})"
+        WAIVER_REPORT="GRANTED (author=@${ROBOREV_WAIVER_AUTHOR} ${ROBOREV_WAIVER_SCOPE} reason=${ROBOREV_WAIVER_REASON})"
+        DETAILS+=("NOTICE: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths are ABSENT from the prompt actually sent to the reviewer, and that FAIL is WAIVED by a PR comment naming THIS review — ${ROBOREV_WAIVER_SCOPE}. Authorizer as recorded by GitHub: @${ROBOREV_WAIVER_AUTHOR}. Reason as given: ${ROBOREV_WAIVER_REASON}. The waiver is bound to the whole review scope (base AND head AND job), so it cannot outlive the review its authorizer judged: a push, a different base or a re-run all require a fresh one. AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED: on this fleet the worker, the closer and the owner post through the same GitHub login, so this wrapper CANNOT tell a self-applied waiver from an owner-granted one and deliberately does not pretend to — the ruling that only the owner or the coordination lead may grant it rests on process, and on this comment being permanently attributable. Absent paths (first 10):")
       else
         PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
         case "$ROBOREV_WAIVER_STATE" in
-          none) WAIVER_REPORT="NONE (no 'roborev-waive: prompt-content-absent sha=<head> reason=<why>' comment on this PR)" ;;
+          # NOT EVEN THE MARKER PREFIX IS PRINTED (layer 3, job 23): no emitted diagnostic may carry any
+          # part of the marker, so no pasted block can be mistaken for one, and the rule is assertable.
+          none) WAIVER_REPORT="NONE (no anchored waiver line on this PR for this review — see --help for the form)" ;;
           *) WAIVER_REPORT="$(printf '%s' "$ROBOREV_WAIVER_STATE" | tr '[:lower:]' '[:upper:]') (${ROBOREV_WAIVER_DETAIL:-cause not established})" ;;
         esac
-        DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so nothing establishes that the reviewer received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. THE MACHINE CANNOT TELL WHY THEY ARE ABSENT — a diff roborev delivered by snapshot path and a vacuous review that received nothing look IDENTICAL from here, which is the accepted cost of not inferring delivery mode from injectable prompt text. If this absence is legitimate, the review's token accounting is the evidence a human weighs (genuine reviews measured 398k-649k input / 314k-554k cached; the vacuous baseline is ~18.7k input / 0 cached), and the owner or the coordination lead may waive it with a PR comment: 'roborev-waive: prompt-content-absent sha=${HEAD_SHA:-<head>} reason=<why>'. Waiver state for this run: ${WAIVER_REPORT}. Absent paths (first 10):")
+        # ===== LAYER 3 (roborev job 23): THIS DIAGNOSTIC MUST NOT BE A CREDENTIAL =====
+        # It used to print a COMPLETE marker carrying the live sha, so pasting this very block into a PR
+        # comment — the documented practice throughout this repo — authorized the next run. The exact form
+        # now lives ONLY in `--help`, which the requester has to go and read; nothing printed here can be
+        # pasted into a grant. The anchoring and placeholder rules make a pasted block harmless anyway,
+        # but this layer means the block never carries a live credential in the first place.
+        DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so nothing establishes that the reviewer received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. THE MACHINE CANNOT TELL WHY THEY ARE ABSENT — a diff roborev delivered by snapshot path and a vacuous review that received nothing look IDENTICAL from here, which is the accepted cost of not inferring delivery mode from injectable prompt text. If this absence is legitimate, the review's token accounting is the evidence a human weighs (genuine reviews measured 398k-649k input / 314k-554k cached; the vacuous baseline is ~18.7k input / 0 cached), and the OWNER or the COORDINATION LEAD may waive it for THIS review only (base ${BASE_SHA:-<unknown>}, head ${HEAD_SHA:-<unknown>}, job ${JOB:-<unknown>}) with a dedicated anchored PR-comment line. THE EXACT MARKER FORM IS DELIBERATELY NOT PRINTED HERE — run 'bash scripts/flow/roborev-review.sh --help' for it — because a summary block gets pasted into PR comments as a matter of course, and a block that carried a complete marker would authorize the next run by being quoted. Waiver state for this run: ${WAIVER_REPORT}. Absent paths (first 10):")
       fi
       printed=0
       for census_path in "${missing_paths[@]}"; do
