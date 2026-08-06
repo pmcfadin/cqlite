@@ -135,7 +135,16 @@ make_round() {
 # one-warm-rep/bypass session the suites build; a case whose subject IS the configuration
 # overrides them positionally.
 #
-# ws0_pin_session_corpus <session> <corpus> [reps] [temps] [arms] [scan_passes]
+# ...and the BASELINE MODE plus the canonical COMPARISON (#3272 round 13, F3): the reporter
+# REQUIRES both, and `baseline_mode` is a declared manifest field, so a fixture that omitted them
+# would make every OTHER case die on an incomplete manifest instead of reaching its own subject.
+# The default is `non-baseline`, and that is the only honest default available: these fixtures build
+# a ~few-KB synthetic corpus, which is NOT the canonical measurement corpus, and the shipped
+# `require_canonical_or_declared` would REFUSE it in `baseline` mode — correctly, since that is the
+# finding F3 closes. A case whose SUBJECT is the mode/comparison overrides it positionally, and a
+# case wanting a BASELINE-mode manifest must build a canonical-shaped identity for it.
+#
+# ws0_pin_session_corpus <session> <corpus> [reps] [temps] [arms] [scan_passes] [baseline_mode]
 ws0_pin_session_corpus() {
   local session="$1" corpus="$2" perf_dir
   # `${N-default}`, NOT `${N:-default}`: the colon form substitutes the default for an EMPTY
@@ -145,6 +154,7 @@ ws0_pin_session_corpus() {
   # its empty string had become `warm` in here. An absent argument takes the default; a
   # supplied-but-empty one is passed THROUGH, so the reader refuses it.
   local reps="${3-1}" temps="${4-warm}" arms="${5-bypass}" passes="${6-1}"
+  local baseline_mode="${7-non-baseline}"
   perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
   python3 -c '
 import json, pathlib, sys
@@ -152,9 +162,18 @@ sys.path.insert(0, sys.argv[1])
 from ws0_validate import Invalid, load_corpus_identity
 from ws0_session import session_pin_path, write_session_corpus_pin
 from ws0_ticket_input import write_ticket_template
+from ws0_canonical_corpus import require_canonical_or_declared
+# The repo root, for the canonical pin the oracle parses. Derived from the shipped perf dir rather
+# than from $PWD, because these suites run from anywhere.
+#
+# NO APOSTROPHE in this comment either, for the reason stated further down: this body is inside
+# SHELL SINGLE QUOTES, so one terminates the string and truncates the library. MEASURED again while
+# writing this line (a possessive in the word module), and it presented as a bash syntax error on an
+# unrelated python line.
+repo_root = pathlib.Path(sys.argv[1]).resolve().parent.parent
 config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
-          "step_duration": "45s/1s"}
+          "step_duration": "45s/1s", "baseline_mode": sys.argv[8]}
 session, corpus = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2])
 # NOTHING IS STAMPED FOR A SESSION DIR THAT DOES NOT EXIST — the same load-bearing rule
 # `ws0_pin_binaries` and `ws0_pin_verification` state as an early `return 0`, now stated here too
@@ -190,7 +209,13 @@ except Invalid:
     # refuses on its own absent-ticket path, which is a real check rather than a fixture crash.
     pass
 try:
-    write_session_corpus_pin(session, corpus, load_corpus_identity(corpus), config)
+    identity = load_corpus_identity(corpus)
+    # THE CANONICAL COMPARISON, through the SHIPPED oracle (#3272 round 13, F3) — never a
+    # hand-written record, for the same reason this function calls the real pin writer: a fixture
+    # that composed the block itself would keep passing after the shipped shape changed. Over a
+    # synthetic corpus in `non-baseline` mode this returns a record whose divergences are real.
+    canonical = require_canonical_or_declared(repo_root, identity, config["baseline_mode"], corpus)
+    write_session_corpus_pin(session, corpus, identity, config, canonical)
 except Invalid:
     # The case DELIBERATELY broke the corpus identity (absent, incomplete, inconsistent) and
     # asserts on the CORPUS refusal. Stamp a config-only manifest so the reporter reaches that
@@ -198,8 +223,19 @@ except Invalid:
     # A pin with no corpus fields cannot mask anything: `verify_session_corpus_pin` refuses an
     # incomplete pin, so any case that got PAST the corpus check still meets a real check.
     session.mkdir(parents=True, exist_ok=True)
-    session_pin_path(session).write_text(json.dumps({"config": config}, indent=1) + "\n")
-' "$perf_dir" "$corpus" "$session" "$reps" "$temps" "$arms" "$passes"
+    # The canonical block too, so a case that got past the corpus check meets the REAL canonical
+    # reader rather than dying on an absent block for a reason unrelated to its subject. Built by
+    # the shipped oracle over a MINIMAL identity, so it is a real record; if even that is
+    # impossible the block is omitted and the reader refuses it, which is a real check.
+    fallback = {"config": config}
+    try:
+        fallback["canonical_corpus"] = require_canonical_or_declared(
+            repo_root, {}, config["baseline_mode"], corpus
+        )
+    except Invalid:
+        pass
+    session_pin_path(session).write_text(json.dumps(fallback, indent=1) + "\n")
+' "$perf_dir" "$corpus" "$session" "$reps" "$temps" "$arms" "$passes" "$baseline_mode"
   # ...and the PINNING VERIFICATION the driver records beside the manifest (#3272 round 9, F6).
   # Stamped with the SAME CPU lists the manifest above carries, because that agreement is the
   # property the reporter asserts: the report may print "verified" only about lists a verification
