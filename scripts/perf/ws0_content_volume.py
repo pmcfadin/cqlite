@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import pathlib
 
+from ws0_prewarm import STATUS_OK, classify_prewarm_jsonl
 from ws0_validate import Invalid, positive_int
 
 # ============================================================================
@@ -234,6 +235,106 @@ CONTENT_VOLUME_NO_ORACLE_NOTE = (
 )
 
 
+# ============================================================================
+# ...AND THE PREFLIGHT'S OWN VERDICT WAS NEVER READ (#3272 round 19)
+# ============================================================================
+# THE FINDING. Everything above — and round 17's whole construction — rests on the phrase
+# "verified-complete preflight". `preflight_arrow_bytes_per_scan` globbed `*.prewarm.jsonl` and
+# derived an expectation from EVERY file it found, WITHOUT EVER CONSULTING THE VERDICT ON IT. The
+# rig computes that verdict: `ws0_prewarm.classify_prewarm_jsonl` decides, at measurement time,
+# whether the leg completed a FULL PASS OVER THE PINNED CORPUS, and `lib-measure.sh` writes it to
+# `<tag>.prewarm.status` — a file this module did not open. So a leg classified
+# `FAILED-partial-scan-40-of-1000-rows`, `FAILED-zero-rows` or `FAILED-exit-7` — a prewarm the rig
+# had ALREADY DECIDED was broken, and had SAID SO ON DISK — supplied the expected byte count for
+# every timed rep in the session. The word "verified" was doing work no code performed: the same
+# half-wired shape this issue keeps finding, one artifact over.
+#
+# WHY IT MATTERS AFTER ROUND 18'S WITHDRAWAL, since round 18 withdrew the verification claim and
+# kept only the one-sided-shortfall refusal. It matters MORE, not less, because a broken preflight
+# defeats exactly the part that survived. The surviving claim is calibration: an expectation drawn
+# from ONE full scan, which a timed rep must match. A `FAILED-partial-scan` preflight moves that
+# calibration DOWN — so a timed rep that was ALSO short passes (a shortfall the check exists to
+# refuse), while a timed rep that scanned the WHOLE corpus is REFUSED as carrying "MORE than a
+# complete scan". Both verdicts are wrong and one of them is wrong in the flattering direction. So
+# this fix does NOT re-widen round 18's withdrawal — it makes the narrowed claim TRUE. The
+# reference remains NON-INDEPENDENT of the subject (same ticket, same server process, same response
+# path), a uniform omission still cancels, and every name on the output still says self-consistency.
+# What changes is that the reference is now the complete scan its use has always assumed.
+#
+# THE RULE, and both halves are required because neither can substitute for the other:
+#
+#   * `<tag>.prewarm.status` must read EXACTLY `ok`. That file is the ONLY record of the loadgen's
+#     EXIT STATUS, which no artifact on disk can reconstruct — a leg that died mid-ramp is knowable
+#     only from the verdict the driver wrote. An ABSENT status file is a REFUSAL, not a skip: a
+#     preflight whose verdict was never recorded is a preflight nothing verified.
+#   * ...and the JSONL is RE-CLASSIFIED HERE, by the shipped `classify_prewarm_jsonl`, against the
+#     session's PINNED corpus row count — i.e. `rows_total == requests_ok * pinned_rows` is
+#     validated INDEPENDENTLY of the status file rather than taken on its word. The status file is
+#     a claim written by the driver; this is the measurement. A hand-edited or stale `ok` beside a
+#     partial JSONL is caught, which the status check alone cannot do.
+#
+# Wired to `ws0_prewarm` rather than recomputed: that module already owns the completeness oracle
+# (round 12's F2), and a second implementation of a rule is a second thing to get wrong — the
+# reason this repo refuses ported oracles. Reading a value that exists beats deriving a new one.
+def _require_verified_preflight(path: pathlib.Path, session_dir: pathlib.Path) -> None:
+    """REFUSE a preflight the rig did not classify as a COMPLETE full-corpus scan (#3272 round 19).
+
+    Two independent halves, both required — see the module note above for why neither suffices
+    alone. Raises `Invalid`; returns `None` only for a preflight that is `ok` on both.
+    """
+    status_path = path.with_name(path.name[: -len(".jsonl")] + ".status")
+    if not status_path.exists():
+        raise Invalid(
+            f"the untimed preflight {path.name} has NO recorded verdict"
+            f" ({status_path.name} is absent), so nothing establishes that it completed a full"
+            " pass over this corpus — and its Arrow payload volume is the expectation EVERY timed"
+            " rep in this session is compared against. The driver writes that file for every"
+            " prewarm leg (lib-measure.sh), so its absence means either the leg predates the"
+            " recording or the artifact set is incomplete. An unverified oracle is a refusal, never"
+            " a comparison run anyway (#3272 round 19)."
+        )
+    try:
+        recorded = status_path.read_text().strip()
+    except OSError as exc:
+        raise Invalid(
+            f"the untimed preflight {path.name}'s recorded verdict ({status_path.name}) is not"
+            f" readable ({exc}), so whether it completed a full corpus scan cannot be established"
+            " (#3272 round 19)."
+        ) from None
+    # EXACTLY `ok`, never a prefix test — the same rule `ws0_validate.PREWARM_REQUIRED` and both
+    # driver legs follow. A prefix would accept a hypothetical `ok-with-shed-N` here while the
+    # reporter classified it degraded: two vocabularies for one fact.
+    if recorded != STATUS_OK:
+        raise Invalid(
+            f"the untimed preflight {path.name} was CLASSIFIED {recorded!r} by the rig itself"
+            f" ({status_path.name}), not {STATUS_OK!r} — so the rig had already decided this prewarm"
+            " did not complete a full pass over the pinned corpus, and said so on disk. Its Arrow"
+            " payload volume is the expectation every timed rep in this session is measured"
+            " against, and a SHORT reference moves that expectation DOWN: a timed rep that was also"
+            " short would PASS (the shortfall this comparison exists to refuse) while a rep that"
+            " scanned the WHOLE corpus would be refused for carrying MORE than a complete scan."
+            " Re-run the session; do not calibrate a payload comparison against a prewarm the rig"
+            " reported as broken (#3272 round 19)."
+        )
+    # ...AND THE VERDICT IS RE-MEASURED, not believed. `exit_status=0` is supplied because the
+    # EXIT-status half is precisely what the status file above establishes and what no artifact can
+    # reconstruct; this call re-runs the COMPLETENESS half — `rows_total == requests_ok *
+    # pinned_rows` against `session-corpus-pin.json` — over the same JSONL, so a stale or
+    # hand-edited `ok` beside a partial record is caught by a measurement rather than trusted.
+    reclassified = classify_prewarm_jsonl(0, path, session_dir)
+    if reclassified != STATUS_OK:
+        raise Invalid(
+            f"the untimed preflight {path.name} records {STATUS_OK!r} in"
+            f" {status_path.name}, but RE-CLASSIFYING its JSONL here yields {reclassified!r}:"
+            " its own records do not show every successful request streaming the PINNED corpus row"
+            " count (session-corpus-pin.json). The recorded verdict is a CLAIM the driver wrote;"
+            " this is the MEASUREMENT, and they disagree — so the artifact set is inconsistent and"
+            " the Arrow payload volume every timed rep is compared against cannot be taken from it."
+            " Validated independently of the status file deliberately: trusting that file about"
+            " completeness would make a stale or edited `ok` sufficient (#3272 round 19)."
+        )
+
+
 def preflight_arrow_bytes_per_scan(session_dir: pathlib.Path) -> float | None:
     """The Arrow payload volume of ONE VERIFIED-COMPLETE full-corpus scan (#3272 round 17).
 
@@ -244,6 +345,13 @@ def preflight_arrow_bytes_per_scan(session_dir: pathlib.Path) -> float | None:
     with no change to `cqlite-flight` or `flight-loadgen`, a validated-complete observation of this
     corpus's Arrow extent taken through the same server — exactly the expectation the timed
     requests must match.
+
+    ...AND THAT VERDICT IS NOW ACTUALLY CONSULTED (#3272 round 19). Round 17 wrote the sentence
+    above and never opened the file it describes: every `*.prewarm.jsonl` was trusted as a
+    verified-complete oracle, so a leg the rig had classified `FAILED-partial-scan-…` supplied the
+    expected byte count. `_require_verified_preflight` now requires the recorded `ok` AND
+    re-measures the completeness rule here. See the module note above it — including why this
+    makes round 18's NARROWED claim true rather than re-widening it.
 
     Resolved at SESSION level, over EVERY preflight present, not per rep. The Arrow extent of a full
     scan is a function of the SCHEMA and the ROW COUNT alone (`client.rs::do_get_drain` sums
@@ -262,6 +370,11 @@ def preflight_arrow_bytes_per_scan(session_dir: pathlib.Path) -> float | None:
     """
     per_scan: dict[float, str] = {}
     for path in sorted(session_dir.glob("*.prewarm.jsonl")):
+        # THE RIG'S OWN VERDICT ON THIS PREFLIGHT, FIRST (#3272 round 19). Before any operand is
+        # read from it: a broken preflight's numbers must not reach the expectation at all, and
+        # checking afterwards would let its remainder/disagreement diagnostics fire first and
+        # describe a bad reference as an artifact inconsistency.
+        _require_verified_preflight(path, session_dir)
         try:
             records = [
                 json.loads(line) for line in path.read_text().splitlines() if line.strip()
