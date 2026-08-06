@@ -213,12 +213,10 @@ impl Table {
             let slot = &self.slots[idx];
             let mut observed = slot.key_hash.load(Ordering::Acquire);
             if observed == 0 {
-                match slot.key_hash.compare_exchange(
-                    0,
-                    hash,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
+                match slot
+                    .key_hash
+                    .compare_exchange(0, hash, Ordering::AcqRel, Ordering::Acquire)
+                {
                     Ok(_) => {
                         self.occupancy.fetch_add(1, Ordering::Relaxed);
                         observed = hash;
@@ -449,13 +447,7 @@ mod tests {
         );
         let mut twos = 0usize;
         let mut others = 0usize;
-        table.for_each_entry(|e| {
-            if e.count == 2 {
-                twos += 1
-            } else {
-                others += 1
-            }
-        });
+        table.for_each_entry(|e| if e.count == 2 { twos += 1 } else { others += 1 });
         assert_eq!(others, 0, "every survivor must have folded, not split");
         assert_eq!(twos, survivors);
     }

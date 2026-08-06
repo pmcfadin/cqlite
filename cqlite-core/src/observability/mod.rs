@@ -58,6 +58,7 @@ pub mod config;
 mod error_schema;
 pub mod operator_docs;
 mod operator_docs_annotations;
+pub mod partition_access;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
