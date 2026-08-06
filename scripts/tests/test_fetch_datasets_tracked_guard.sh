@@ -2477,6 +2477,150 @@ case "$OUT" in
   *) ok "3310-head-unborn: no unmeasurable verdict" ;;
 esac
 
+# =============================================================================
+# Issue #3310 round 4 — UNCLASSIFIABLE GIT STATE IS DECLARED, NOT CLASSIFIED.
+#
+# Two states defeat the probe's subtree-scoped census, each in a way that would
+# produce a CONFIDENT WRONG REPAIR rather than a wrong verdict:
+#   * a staged rename whose destination leaves the dataset subtree — the census
+#     pathspec hides the destination, so rename detection cannot fire and the old
+#     path looks deleted; the advertised repair would REVERSE intentional work;
+#   * an unmerged (conflict) entry — `ls-files` lists it once per stage, and
+#     `git restore --worktree` cannot rebuild a conflicted path at all, so the
+#     promised repair simply fails.
+# Rather than model each, the probe detects MARKERS of unclassifiable state and
+# emits its existing COULD NOT MEASURE verdict, with NO repair command. An honest
+# unmeasurable beats a confident wrong repair.
+# =============================================================================
+
+# assert_no_repair_advertised <label> — the whole point of the rule: when the
+# probe cannot classify, it must not print a command for anyone to paste.
+assert_no_repair_advertised() {
+  local label="$1" n
+  n="$(printf '%s\n' "$OUT" | grep -cE "git -C .* restore " || true)"
+  if [ "$n" -eq 0 ]; then
+    ok "$label: advertises NO repair command"
+  else
+    bad "$label: advertised $n repair command(s) for a state it cannot classify; output: $OUT"
+  fi
+}
+
+# === Case 47: a staged rename OUT of the dataset subtree ======================
+R47="$T/case47-repo"
+make_repo "$R47"
+make_usable_corpus "$R47/test-data/datasets"
+mkdir -p "$R47/relocated"
+git -C "$R47" mv "test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+                 "relocated/simple_table-Data.db.jsonl"
+if [ -f "$R47/relocated/simple_table-Data.db.jsonl" ] \
+   && [ ! -e "$R47/test-data/datasets/goldens/simple_table-Data.db.jsonl" ]; then
+  ok "3310-rename-out: fixture staged-renamed outside the dataset subtree (precondition)"
+else
+  bad "3310-rename-out: could not stage the boundary-crossing rename; case is vacuous"
+fi
+run_verify "$R47" "$R47/test-data/datasets"
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*)
+    bad "3310-rename-out: called an intentionally relocated fixture MISSING; output: $OUT" ;;
+  *) ok "3310-rename-out: no false missing-fixture report" ;;
+esac
+assert_no_repair_advertised "3310-rename-out"
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-rename-out: declares the state unclassifiable" ;;
+  *) bad "3310-rename-out: no COULD NOT MEASURE verdict; output: $OUT" ;;
+esac
+if [ "$RC" -ne 0 ]; then
+  ok "3310-rename-out: an unclassifiable state is not a clean run (exit $RC)"
+else
+  bad "3310-rename-out: exited 0 on a state it cannot classify; output: $OUT"
+fi
+if [ -f "$R47/relocated/simple_table-Data.db.jsonl" ]; then
+  ok "3310-rename-out: the relocated file is untouched"
+else
+  bad "3310-rename-out: the probe disturbed the renamed file"
+fi
+
+# === Case 48/49: an ABSENT unmerged path — declared, deduplicated, no repair ===
+# Built from a REAL merge conflict (the case-16 idiom), then deleted from disk:
+# `ls-files` lists it once per stage, so a probe that classifies it as an ordinary
+# worktree deletion both duplicates it and promises a repair that cannot work.
+R48="$T/case48-repo"
+make_repo "$R48"
+make_usable_corpus "$R48/test-data/datasets"
+R48_REL="test-data/datasets/goldens/simple_table-Data.db.jsonl"
+R48_BASE="$(git -C "$R48" rev-parse --abbrev-ref HEAD)"
+git -C "$R48" checkout -q -b conflicting-48
+printf 'branch side\n' >"$R48/$R48_REL"
+git -C "$R48" add -f "$R48_REL"
+git -C "$R48" commit -qm "branch side"
+git -C "$R48" checkout -q "$R48_BASE"
+printf 'base side\n' >"$R48/$R48_REL"
+git -C "$R48" add -f "$R48_REL"
+git -C "$R48" commit -qm "base side"
+git -C "$R48" merge -q conflicting-48 >/dev/null 2>&1 || true
+R48_STAGES="$(git -C "$R48" ls-files -u -- "$R48_REL" | wc -l | tr -d ' ')"
+rm -f "$R48/$R48_REL"
+if [ "$R48_STAGES" -gt 1 ] && [ ! -e "$R48/$R48_REL" ]; then
+  ok "3310-unmerged-absent: $R48_STAGES stage entries for an ABSENT path (precondition)"
+else
+  bad "3310-unmerged-absent: could not build the unmerged+absent fixture ($R48_STAGES stages); case is vacuous"
+fi
+run_verify "$R48" "$R48/test-data/datasets"
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-unmerged-absent: declares COULD NOT MEASURE" ;;
+  *) bad "3310-unmerged-absent: no unmeasurable verdict; output: $OUT" ;;
+esac
+assert_no_repair_advertised "3310-unmerged-absent"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-unmerged-absent: does not report a clean run (exit $RC)"
+else
+  bad "3310-unmerged-absent: exited 0 mid-conflict; output: $OUT"
+fi
+# Case 49 (dedup): the path is listed once per STAGE by git; the report must name
+# it exactly once however the verdict was reached.
+R48_MENTIONS="$(printf '%s\n' "$OUT" | grep -o "goldens/simple_table-Data.db.jsonl" | wc -l | tr -d ' ')"
+if [ "$R48_MENTIONS" -eq 1 ]; then
+  ok "3310-unmerged-dedup: the multi-stage path is named exactly once"
+else
+  bad "3310-unmerged-dedup: named $R48_MENTIONS times (stage duplication leaked); output: $OUT"
+fi
+
+# === Case 50: the pre-check must NOT trip on a healthy checkout ===============
+# The false-positive direction. Last round's flagged-present regression showed how
+# easily an over-broad guard reds a good root, and a guard that reds on correct
+# input is the guard people disable.
+R50="$T/case50-repo"
+make_repo "$R50"
+make_usable_corpus "$R50/test-data/datasets"
+run_verify "$R50" "$R50/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-precheck-healthy: a healthy checkout still verifies (exit 0)"
+else
+  bad "3310-precheck-healthy: the pre-check reds a good root (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) bad "3310-precheck-healthy: the pre-check tripped on a healthy checkout; output: $OUT" ;;
+  *) ok "3310-precheck-healthy: the pre-check does not trip" ;;
+esac
+case "$OUT" in
+  *"Tracked-fixture probe (#3310): OK"*) ok "3310-precheck-healthy: the clean verdict is still reached" ;;
+  *) bad "3310-precheck-healthy: no clean verdict; output: $OUT" ;;
+esac
+# ...and a rename that stays INSIDE the subtree is classifiable, so it must not
+# trip the boundary marker either (the pre-check is about the BOUNDARY, not about
+# renames as such — case 44 already pins the diff.renames=false half).
+R50B="$T/case50b-repo"
+make_repo "$R50B"
+make_usable_corpus "$R50B/test-data/datasets"
+git -C "$R50B" mv "test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+                  "test-data/datasets/goldens/renamed-inside-Data.db.jsonl"
+run_verify "$R50B" "$R50B/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-precheck-inside-rename: a rename INSIDE the subtree stays classifiable (exit 0)"
+else
+  bad "3310-precheck-inside-rename: false unmeasurable on an in-subtree rename (exit $RC); output: $OUT"
+fi
+
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
