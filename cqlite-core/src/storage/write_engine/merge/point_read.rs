@@ -154,6 +154,10 @@ impl SSTableRowIterator for SinglePartitionFilterRun {
 /// holding it and manufacture concentration the workload does not have, which is a
 /// bias toward "build the cache". The single access is recorded once per logical
 /// point read by the builder below.
+/// Only the default `not(tombstones)` seek path resolves per-key sizes (the
+/// alternate build always falls back to a whole-file scan and produces no notes),
+/// so the variants are dead there — same shape as [`PathProbe`].
+#[cfg_attr(feature = "tombstones", allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeySizeNote {
     /// This SSTable does not hold the key, so it contributes nothing either way.
@@ -566,7 +570,7 @@ fn fold_size_notes(weights: &mut [partition_access::AccessWeightBuilder], notes:
 /// A no-op when the probe is disabled — `weights` is empty then, so this does not
 /// even iterate.
 fn record_logical_accesses(keys: &[Vec<u8>], weights: Vec<partition_access::AccessWeightBuilder>) {
-    for (key, weight) in keys.iter().zip(weights.into_iter()) {
+    for (key, weight) in keys.iter().zip(weights) {
         partition_access::record_partition_access(key, weight.finish());
     }
 }

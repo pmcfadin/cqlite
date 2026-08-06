@@ -152,13 +152,12 @@ impl StorageEngine {
             self.sstables.resolve_reader_snapshot(table_id).await;
         let mut weight = AccessWeightBuilder::new();
         for reader in &readers {
-            match reader.key_cache_get(partition_key) {
-                // `data_size == 0` is BTI's "offset only" marker, not a size;
-                // `note_sized` folds it to unavailable.
-                Some(loc) => weight.note_sized(loc.data_size),
-                // This generation did not hold the key (or left no authoritative
-                // location). Either way it contributes nothing.
-                None => {}
+            // `Some(loc)`: `data_size == 0` is the "offset only" marker, not a
+            // size, and `note_sized` folds it to unavailable. `None`: this
+            // generation did not hold the key (or left no authoritative location),
+            // so it contributes nothing either way.
+            if let Some(loc) = reader.key_cache_get(partition_key) {
+                weight.note_sized(loc.data_size);
             }
         }
         weight.finish()

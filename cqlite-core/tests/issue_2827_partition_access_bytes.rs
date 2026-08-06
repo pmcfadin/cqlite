@@ -226,7 +226,7 @@ mod end_to_end {
     use cqlite_core::observability::partition_access::{self, RepeatBucket, WindowSummary};
     use cqlite_core::{Config, Database};
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
     use super::datasets_root;
     use datasets_root::{describe_search, sstables_root_for_table};
@@ -234,7 +234,7 @@ mod end_to_end {
     /// The probe's enable flag and its window are process-global, so every case
     /// that drives them runs under this lock. (Serialising is not a wall-clock
     /// dependency: each case still closes its window explicitly.)
-    static PROBE: Mutex<()> = Mutex::new(());
+    static PROBE: Mutex<()> = Mutex::const_new(());
 
     /// A BIG (`nb`) fixture: `Index.db` resolves an authoritative partition size.
     const BIG: (&str, &str, &str, &str, &str) = (
@@ -336,7 +336,7 @@ mod end_to_end {
     /// approved design deferred; it is not taken unilaterally here.
     #[tokio::test]
     async fn a_big_resolved_access_is_counted_once_and_reports_its_price_honestly() {
-        let _guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = PROBE.lock().await;
         let (summary, rows) = window_for(BIG, 5).await;
         assert!(rows > 0, "the fixture partition must return rows");
 
@@ -365,7 +365,7 @@ mod end_to_end {
     /// A BTI point read is marked unavailable and priced at nothing.
     #[tokio::test]
     async fn a_bti_resolved_access_is_unavailable_and_contributes_no_bytes() {
-        let _guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = PROBE.lock().await;
         let (summary, rows) = window_for(BTI, 3).await;
         assert!(rows > 0, "the fixture partition must return rows");
 
