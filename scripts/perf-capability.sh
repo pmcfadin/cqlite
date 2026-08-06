@@ -503,23 +503,8 @@ perf_capability_dropin_path() {
 #   NOT gated: scripts/tests/test_perf_capability.sh calls this DIRECTLY, so its staged-install cases
 #   are capability-probed and COUNTED-skipped off GNU (roborev round 5). Neither portability guard in
 #   the repo scans this file, so nothing mechanically protects the gate; recorded, not papered over.
-# perf_capability_install_tools_ok: does THIS host have the GNU coreutils behaviour the staged
-# install needs (roborev round 16, Medium)? `stat -c` and `mv --no-target-directory` are GNU-only, and
-# bootstrap gates the perf section on PLATFORM=linux — which is NOT the same as GNU. A musl/busybox
-# Linux host would previously reach the installer and fail on a raw tool error. Probed AFFIRMATIVELY
-# (run the flags) rather than inferred from a distro name.
-perf_capability_install_tools_ok() {
-  stat -c '%a' . >/dev/null 2>&1 || return 1
-  mv --help 2>&1 | grep -q -- '--no-target-directory' || return 1
-}
-
 perf_capability_dropin_install() {
-  local __pin_d __pin_p
-  # rc 2 is UNSUPPORTED-HOST, distinct from rc 1 REFUSED, so a caller can report "this host
-  # cannot do an atomic install" instead of implying the attempt was unsafe.
-  perf_capability_install_tools_ok || {
-    printf 'perf-capability: UNSUPPORTED on this host: the atomic staged install needs GNU coreutils (stat -c and mv --no-target-directory); neither is present, so the drop-in cannot be installed safely. Install GNU coreutils or set the sysctls another way.\n' >&2
-    return 2; }
+  local __pin_d __pin_p __pin_rc
   __pin_d=$(perf_capability_sysctl_dir) || return 1
   # TRAILING SLASHES ARE STRIPPED BEFORE ANY CHECK OR PATH CONSTRUCTION (roborev round 10, Low).
   # `[ -L "$d" ]` FOLLOWS a trailing slash: for a symlinked directory `link`, `[ -L link ]` is true
@@ -553,6 +538,19 @@ perf_capability_dropin_install() {
     # slashes, but this block is the thing holding privilege and must not depend on someone else
     # having done it. Same reason the mktemp answer is re-checked here rather than trusted.
     while [ "${d%/}" != "$d" ] && [ "${#d}" -gt 1 ]; do d="${d%/}"; done
+    # TOOL COMPATIBILITY IS EXERCISED HERE, IN THE PRIVILEGED SHELL (roborev round 17, Medium — a
+    # defect in the round-16 fix). The previous probe ran in the CALLERS PATH, but this shell is
+    # entered through sudo, which applies its own secure_path: the two can resolve DIFFERENT stat and
+    # mv binaries, so a caller-side check could pass while the privileged tools are incompatible, or
+    # refuse while they would have worked. Same lesson already applied to mktemp here — the block
+    # holding privilege re-checks rather than trusting what someone else established.
+    # And the flags are EXERCISED, not grepped: reading mv --help proves a help string mentions
+    # --no-target-directory, not that rename-over-a-name behaves. Two throwaway entries in the
+    # already-validated directory are renamed one over the other, which is exactly the operation the
+    # install depends on. rc 2 = UNSUPPORTED HOST, distinct from rc 1 = REFUSED.
+    stat -c '%a' -- "$d" >/dev/null 2>&1 || {
+      printf "perf-capability: UNSUPPORTED on this host: stat -c is unavailable (GNU coreutils required), so ownership and mode cannot be established before a privileged write.\n" >&2
+      exit 2; }
     # THE PRECONDITION (roborev round 3): nobody less privileged than this shell may be able to
     # create or replace entries in $d. Without that there is an actor to race; with it there is not.
     #   WHY THIS IS NOT A TWELFTH ATTEMPT TO OUT-TIME THE RACE (owner ruling A-prime): escapes 9-11
@@ -606,6 +604,19 @@ perf_capability_dropin_install() {
         printf "perf-capability: REFUSING: the drop-in directory %s is mode %s — group- or world-writable, so a less-privileged user can replace entries inside it while a privileged write is in progress. Tighten it (chmod go-w) before installing.\n" "$d" "$dmode" >&2
         exit 1 ;;
     esac
+    # mv -T IS EXERCISED HERE, AFTER the ownership precondition and BEFORE the real staging entry.
+    # Placement is deliberate on both sides. AFTER the precondition, because that is what establishes
+    # no less-privileged actor can create entries in $d — which is precisely what makes a PREDICTABLE
+    # probe name safe, so this does not need (and must not consume) mktemp. NOT consuming mktemp also
+    # keeps it from pre-empting the staging entry checks below, which have their own cases.
+    __x1="$d/.perfcap-probe.$$"; __x2="$__x1.b"
+    rm -f -- "$__x1" "$__x2"
+    if ! : >"$__x1" 2>/dev/null || ! mv -fT -- "$__x1" "$__x2" 2>/dev/null; then
+      rm -f -- "$__x1" "$__x2"
+      printf "perf-capability: UNSUPPORTED on this host: mv --no-target-directory (-T) does not work (GNU coreutils required), so the drop-in cannot be replaced atomically without risking a symlinked destination.\n" >&2
+      exit 2
+    fi
+    rm -f -- "$__x2"
     t=$(mktemp -- "$d/.$b.XXXXXX") || exit 1
     # mktemp CREATED the entry, so mktemp is what must be checked, INSIDE this privileged shell and
     # fail-closed: it has to name a fresh regular file (never a symlink) directly in the directory
@@ -626,8 +637,11 @@ perf_capability_dropin_install() {
     if ! tee -- "$t" >/dev/null || ! chmod 0644 -- "$t" || ! mv -fT -- "$t" "$p"; then
       rm -f -- "$t"; exit 1
     fi
-  ' perf-capability-install "$__pin_d" "$__pin_p" "$PERF_CAPABILITY_DROPIN_BASENAME" >/dev/null \
-    || return 1
+  ' perf-capability-install "$__pin_d" "$__pin_p" "$PERF_CAPABILITY_DROPIN_BASENAME" >/dev/null
+  # rc PROPAGATED, not collapsed: `|| return 1` here used to flatten the privileged shell's status,
+  # which silently destroyed the rc 2 UNSUPPORTED signal the caller is meant to distinguish.
+  __pin_rc=$?
+  [ "$__pin_rc" -eq 0 ] || return "$__pin_rc"
   perf_capability_dropin_current
 }
 
