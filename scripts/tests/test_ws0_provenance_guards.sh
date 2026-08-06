@@ -1322,6 +1322,93 @@ else
 fi
 
 # ==========================================================================
+# ROUND 14, F2 — THE MEASURED SERVER IS PINNED IN THE MANIFEST, AND USABLY SO
+# ==========================================================================
+# `config.flight_endpoint` is the pre-measurement pin of WHICH SERVER produced the rows, and the
+# reporter compares it EXACTLY against every rep's recorded `endpoint`. The REFUSAL of a foreign
+# record is `test_ws0_round_metadata.sh`'s subject (identity/attribution); this file owns the
+# MANIFEST SURFACE, so what belongs here is that the field is a DECLARED, VALIDATED configuration
+# field rather than an opaque recorded string.
+#
+# That distinction is the F6 lesson this rig already paid for: `server_cpus` sat in the manifest as
+# an opaque non-empty string and reached the report's "verified physical-core siblings" claim having
+# been checked by nothing. An opaque endpoint would be the same shape one field over — and worse
+# here, because a pin nobody validated (`flight_endpoint: "the usual one"`) compares unequal to every
+# real record, so the session is refused at the WRONG END, blaming the artifact for a mis-stamped pin.
+for f2_bad in '127.0.0.1:19999' 'http://127.0.0.1' '19999' 'http://127.0.0.1:19999/do_get' \
+              'the usual one' 'http://127.0.0.1:0'; do
+  f2_dir="$TMP/f2-badpin-$RANDOM"; make_session "$f2_dir" "$GOOD_FLIGHT"
+  ws0_pin_session_corpus "$f2_dir" "$TMP/corpus"
+  python3 - "$f2_dir/session-corpus-pin.json" "$f2_bad" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+j["config"]["flight_endpoint"] = sys.argv[2]
+json.dump(j, open(p, "w"), indent=1)
+PY
+  out=$(run_report "$f2_dir" "$TMP/corpus"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q 'config.flight_endpoint' <<<"$out"; then
+    pass "OBSERVED (round14 F2): an UNUSABLE pinned endpoint ('$f2_bad') is refused AT THE MANIFEST, naming the field — not left to compare unequal to every record and blame the artifact"
+  else
+    fail "round14 F2: the manifest pin '$f2_bad' must be refused naming config.flight_endpoint (rc=$rc, out: $(head -3 <<<"$out"))"
+  fi
+done
+# ...and an ABSENT pin is an ERROR, not a skipped comparison — a value that was not observed cannot
+# be asserted, and defaulting it would disable the check exactly when the manifest is silent (AC3).
+f2_absent="$TMP/f2-absent-pin"; make_session "$f2_absent" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$f2_absent" "$TMP/corpus"
+python3 - "$f2_absent/session-corpus-pin.json" <<'PY'
+import json, sys
+p = sys.argv[1]; j = json.load(open(p))
+del j["config"]["flight_endpoint"]
+json.dump(j, open(p, "w"), indent=1)
+PY
+out=$(run_report "$f2_absent" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'flight_endpoint' <<<"$out" && grep -q 'INCOMPLETE' <<<"$out"; then
+  pass "OBSERVED (round14 F2): a manifest with NO flight_endpoint is refused as INCOMPLETE naming the field (an absent pin is an error, never a skipped comparison)"
+else
+  fail "round14 F2: an absent flight_endpoint must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the field must be a DECLARED one whose declaration names where the comparison happens —
+# the F6 posture: "opaque here" is only acceptable when something else is not, and this one is not
+# opaque anywhere, so its declaration must name the checker that compares it.
+if python3 - <<'PY'
+import sys
+sys.path.insert(0, "scripts/perf")
+from ws0_session import MANIFEST_CONFIG_DISPOSITION as D, MANIFEST_CONFIG_FIELDS as F
+assert "flight_endpoint" in D, sorted(D)
+assert "flight_endpoint" in F, sorted(F)
+why = D["flight_endpoint"]
+# It must name the VALIDATION (a structural URL check) and the COMPARISON (the checker that reads
+# it) — a declaration that named neither is exactly how server_cpus reached a "verified" claim.
+for token in ("check_session_bound_inputs", "EXACTLY"):
+    assert token in why, (token, why)
+# ...and the DRIVER must export it, or the manifest could never carry it on a real run: the
+# reporter's requirement would be satisfiable only by test fixtures, which is the wiring half.
+import pathlib
+driver = pathlib.Path("scripts/perf/ws0-baseline.sh").read_text()
+assert "WS0_CFG_FLIGHT_ENDPOINT=" in driver, "the driver does not export the endpoint"
+# ...and it must be the SAME spelling the loadgen call sites use, or a correct run's records would
+# compare unequal to its own pin. ONE variable, read by both.
+assert 'FLIGHT_ENDPOINT="http://127.0.0.1:$PORT"' in driver, "the driver does not derive it once"
+measure = pathlib.Path("scripts/perf/lib-measure.sh").read_text()
+assert measure.count('--endpoint "$FLIGHT_ENDPOINT"') == 2, (
+    "both loadgen call sites must use the SINGLE spelling the manifest pins; a locally recomposed "
+    "http://127.0.0.1:$PORT is a second source of truth for a pinned fact")
+# ...and NO EXECUTABLE line may recompose it. Asked of the RUNNABLE text only: the prose above
+# those call sites QUOTES the retired spelling to record what went wrong, and a whole-file scan
+# would red on a correct file — the kind of false FAIL an agent learns to waive.
+recompose = [f"{n}: {ln.strip()}" for n, ln in enumerate(measure.splitlines(), 1)
+             if not ln.lstrip().startswith("#") and 'http://127.0.0.1:$PORT' in ln]
+assert not recompose, "a call site still recomposes the endpoint: " + "; ".join(recompose)
+print("flight_endpoint: declared, validated, compared, and wired driver->argv->pin")
+PY
+then
+  pass "OBSERVED (round14 F2): flight_endpoint is DECLARED (naming its structural validation and the EXACT comparison), and the DRIVER derives it ONCE and feeds both the loadgen argv and the manifest pin — one spelling, so a correct run cannot disagree with its own pin"
+else
+  fail "round14 F2: flight_endpoint must be declared and wired driver->argv->pin from one spelling"
+fi
+
+# ==========================================================================
 # CANONICAL-CORPUS COMPARISON: moved to scripts/tests/test_ws0_canonical_corpus.sh
 # ==========================================================================
 # Round 13's F3 — is the measured corpus the one a WS0 BASELINE is DEFINED as? — is its own
@@ -1351,7 +1438,7 @@ fi
 # the same defect in the other direction as one set too low: both are a number nobody re-measured.
 # F3's 13 cases then took it to 94 MEASURED — and were themselves split out to
 # `test_ws0_canonical_corpus.sh` on the same rule, bringing it back to 81. The floor is 78 again.
-MIN_CHECKS=78
+MIN_CHECKS=89
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

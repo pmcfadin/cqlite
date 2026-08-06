@@ -701,6 +701,144 @@ else
   fail "F1: the swapped records must satisfy the pre-fix presence rule, else the refusal above proves nothing was closed"
 fi
 
+# ==========================================================================
+# THE ROWS MUST COME FROM **THIS SESSION'S SERVER** — `endpoint` (#3272 round 14, F2)
+# ==========================================================================
+# F1's sibling, and the same subject one layer out: F1 asks whether a record belongs to the REP it
+# was found under, this asks whether it came from the SERVER this session pinned and measured.
+#
+# `endpoint` was classified IGNORED ("the loopback address; not a measurement"). It names WHICH
+# SERVER PRODUCED THE MEASURED ROWS, so a record produced against a DIFFERENT server — a peer lane's
+# `cqlite-flight` on another port, a stale instance, a remote host — satisfied EVERY other check
+# (rows an exact multiple of the corpus count; requests/errors/sheds clean; the derived rate equal to
+# the recorded one; `round` equal to the filename's tag) and had its rows and duration divided by
+# THIS session's `perf -C` cycles, which were collected on pinned local cores that served nothing.
+# The whole artifact set is self-consistent on disk, so nothing else in the rig can see it.
+#
+# The expectation is the SESSION MANIFEST's `config.flight_endpoint`, pinned before the first rep —
+# provenance, not a reporting-time argument, so a record from another server cannot be excused by
+# re-reporting with a matching flag.
+d="$TMP/foreign-endpoint"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+# A record IDENTICAL to the healthy one except for the server that produced it. The port is one
+# DIGIT different from the pinned fixture endpoint, which is the realistic shape (a peer lane on the
+# next port) and also the case a prefix/substring comparison would wave through.
+FOREIGN_FLIGHT=${GOOD_FLIGHT/'"endpoint":"__ENDPOINT__"'/'"endpoint":"http://127.0.0.1:19998"'}
+make_flight_rep "$d" warm 1 ok "$FOREIGN_FLIGHT"
+out=$(run_report_cfg "$d" "$TMP/corpus" 1 warm bypass 1); rc=$?
+# BOTH VALUES must be named — an operator has to see which server answered and which was pinned.
+if [ "$rc" -ne 0 ] && grep -q "recorded \`endpoint\`" <<<"$out" \
+   && grep -q "http://127.0.0.1:19998" <<<"$out" \
+   && grep -q "$WS0_FIXTURE_ENDPOINT" <<<"$out"; then
+  pass "OBSERVED (F2): a rep whose \`endpoint\` is a DIFFERENT server is REFUSED, naming BOTH the recorded endpoint and the session's pinned one (#3272 round 14, F2)"
+else
+  fail "F2: a record from another server must be refused naming both endpoints (rc=$rc, out: $out)"
+fi
+# ...and the refusal must state WHAT IS LOST, not merely that two strings differ. That is the
+# property F1 asserts for `round`, and it is why the consequence is a PER-FIELD element of
+# SESSION_BOUND_INPUTS: the two members lose different things, so one shared sentence could only say
+# "these differ".
+if grep -q "SERVED BY A DIFFERENT SERVER" <<<"$out" \
+   && grep -q "cores that served nothing" <<<"$out"; then
+  pass "F2: the refusal states the MEASUREMENT consequence (rows served elsewhere, divided by counters from cores that served nothing), not just a mismatch"
+else
+  fail "F2: the endpoint refusal must state what the mismatch corrupts (out: $out)"
+fi
+if [ ! -e "$d/results.json" ]; then
+  pass "F2: no results.json is written for the foreign-endpoint session"
+else
+  fail "F2: a refused run must not leave a results.json behind"
+fi
+# NON-VACUITY, MEASURED — by RUNNING the pre-fix behaviour over these exact artifacts, not by
+# restating it. The pre-fix defect was precisely that NOTHING COMPARED THE FIELD: the census
+# classified it `ignored`, so it was present in every record and read by no checker. That is
+# reproduced as a ONE-SITE MUTATION of a COPY of the shipped reporter — the comparison loop skips
+# `endpoint` and everything else stands.
+#
+# A one-site mutation rather than a wholesale revert, deliberately. Reverting the disposition alone
+# does not LOAD (the module's own import-time closure refuses a table entry whose census disposition
+# disagrees), and reverting all six F2 sites would be a second implementation of the pre-fix code —
+# whose fidelity is then a claim about my re-derivation rather than a measurement. Skipping the
+# comparison is the DEFECT ITSELF, isolated: field present, nothing reads it.
+f2_pre="$TMP/f2-prefix-tree"; rm -rf "$f2_pre"; mkdir -p "$f2_pre"
+cp -R "$REPO_ROOT/scripts/perf" "$f2_pre/perf"
+if python3 - "$f2_pre/perf/ws0_loadgen_record.py" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+anchor = '    for key, (source, why, consequence) in SESSION_BOUND_INPUTS.items():\n'
+if s.count(anchor) != 1:
+    raise SystemExit("could not locate the session-bound comparison loop to mutate, so this "
+                     "non-vacuity probe would be measuring UNMODIFIED code and would read as a "
+                     "pass having reverted nothing")
+s = s.replace(anchor, anchor + '        if key == "endpoint":\n            continue\n')
+p.write_text(s)
+print("mutated the probe copy: the session-bound loop no longer compares `endpoint`")
+PY
+then
+  pass "F2 NON-VACUITY: the mutation (the comparison loop SKIPS \`endpoint\`) was really applied to the probe copy"
+else
+  fail "F2: the pre-fix mutation could not be applied, so the probe below would measure nothing"
+fi
+# The SAME session dir, through the mutated reporter. It must EXIT 0 and PUBLISH a figure — that is
+# the finding: rows served by another process, divided by this session's perf counters, reported.
+f2_out=$(python3 "$f2_pre/perf/ws0_report.py" --dir "$d" --corpus "$TMP/corpus" 2>&1); f2_rc=$?
+if [ "$f2_rc" -eq 0 ] && grep -q 'flight do_get' <<<"$f2_out"; then
+  pass "F2 NON-VACUITY (MEASURED): with nothing comparing \`endpoint\`, the reporter ACCEPTS this foreign-server record and PUBLISHES its rows/s — rows served by another process, divided by cycles from cores that served nothing"
+else
+  fail "F2: the unmutated-comparison reporter must ACCEPT the foreign-endpoint session, else the refusal above closed nothing (rc=$f2_rc, out: $(head -6 <<<"$f2_out"))"
+fi
+# ...and the substitution is INVISIBLE in that output: the foreign server that actually served the
+# rows is never named. Stronger than "unchecked" — a report naming it would at least be honest.
+if ! grep -q '19998' <<<"$f2_out"; then
+  pass "F2 NON-VACUITY: that accepted report never mentions the server that actually served the rows (the substitution was INVISIBLE, not merely unchecked)"
+else
+  fail "F2: the pre-fix report must not name the foreign endpoint (out: $(head -4 <<<"$f2_out"))"
+fi
+# ...and the MUTANT MUST NOT BE UNIFORMLY BROKEN: it still refuses a wrong `round`, so what the
+# probe above measured is the loss of ONE comparison rather than a copy that validates nothing.
+if f2_mut_out=$(python3 "$f2_pre/perf/ws0_report.py" --dir "$TMP/swapped-jsonl" --corpus "$TMP/corpus" 2>&1); then
+  fail "F2: the mutant accepted the SWAPPED-JSONL session too, so it lost more than the endpoint comparison"
+else
+  if grep -q "recorded \`round\`" <<<"$f2_mut_out"; then
+    pass "F2 NON-VACUITY: the mutant still REFUSES a wrong \`round\` — it lost exactly the endpoint comparison, not its whole validation"
+  else
+    fail "F2: the mutant must still refuse a swapped JSONL on \`round\` (out: $(head -4 <<<"$f2_mut_out"))"
+  fi
+fi
+# THE ACCEPT DIRECTION, so this is not a guard that refuses every session: the same fixture with the
+# PINNED endpoint reports cleanly. Without this, an `endpoint` check that rejected unconditionally
+# would satisfy every case above — the round-11 structural finding this rig has already paid for.
+d="$TMP/pinned-endpoint"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+make_flight_rep "$d" warm 1 ok "$GOOD_FLIGHT"
+out=$(run_report_cfg "$d" "$TMP/corpus" 1 warm bypass 1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "server pinned: $WS0_FIXTURE_ENDPOINT" <<<"$out"; then
+  pass "F2 ACCEPT: a rep carrying the SESSION'S PINNED endpoint reports cleanly, and the summary STATES which server served the rows the counters describe"
+else
+  fail "F2: a record from the pinned server must report, naming it (rc=$rc, out: $out)"
+fi
+# ...and it is RECORDED per rep in results.json, beside `round`, so a later reader can see WHICH
+# server this rep's figures are conditional on rather than taking the summary's word for it.
+if python3 - "$d/results.json" "$WS0_FIXTURE_ENDPOINT" <<'PY'
+import json, sys
+fl = [m for m in json.load(open(sys.argv[1]))["measurements"] if m["arm"].startswith("flight_")][0]
+if not fl["reps"]:
+    raise SystemExit("no reps recorded, so this check has no subject")
+for rep in fl["reps"]:
+    sb = rep["verified_session_bound_inputs"]
+    if sb.get("endpoint") != sys.argv[2]:
+        raise SystemExit(f"rep {rep['rep']} records endpoint={sb.get('endpoint')!r}, expected "
+                         f"{sys.argv[2]!r}")
+    if "round" not in sb:
+        raise SystemExit("`round` is no longer recorded beside it — F1's record was dropped")
+print(f"{len(fl['reps'])} rep(s) record the verified endpoint AND round")
+PY
+then
+  pass "F2: every rep's results.json entry RECORDS the verified endpoint beside its verified round (what was checked, not merely that something was)"
+else
+  fail "F2: results.json must record the verified endpoint per rep"
+fi
+
 # And the reporter REFUSES an unpairable set rather than silently falling back to
 # medians alone — which is the comparison §3b forbids on its own.
 d="$TMP/unpairable"; mkdir -p "$d"
@@ -847,7 +985,7 @@ no_claim_probe "the accepted 3-round session" "$out"
 # The floor is deliberately BELOW the current count (adding a case must not red the suite) and
 # far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts what
 # actually RAN rather than what is written in the file.
-MIN_CHECKS=45
+MIN_CHECKS=57
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
