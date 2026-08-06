@@ -226,7 +226,16 @@ impl StorageEngine {
     /// This narrows the race rather than removing it: the read takes its OWN
     /// snapshot slightly later, so a generation that appears between the two (a
     /// flush, or a compaction output) is priced by neither. See the module header's
-    /// limitations. Returns `None` — and touches no lock — when the probe is off.
+    /// limitations.
+    ///
+    /// **It has a cost, per this file's own standard.** Holding the `Arc`s DEFERS
+    /// reclamation of a compacted-away generation's file descriptor, mmap and
+    /// resident index until the last in-flight probed read finishes — and on BIG
+    /// that read includes the O(partition-count) successor walk, so the deferral is
+    /// not instantaneous. Bounded by in-flight point reads, and paid only while the
+    /// probe is on.
+    ///
+    /// Returns `None` — and touches no lock — when the probe is off.
     async fn snapshot_for_probe(
         &self,
         table_id: &TableId,

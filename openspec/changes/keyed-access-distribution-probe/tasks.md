@@ -150,7 +150,7 @@
 - [x] Write `docs/research/decoded-partition-cache-decision.md` covering, in order: inputs; the single
       assumption (decode multiplier `m`, cited to the Phase-0 wire estimate at
       `docs/research/phase2-verify-caching.md:221-222` and labelled an assumption); the refusal
-      conditions checked first; the closed-form clairvoyant ceiling
+      conditions checked first; the closed-form clairvoyant hit-ratio estimate
       `H_max(C) = [Σ_taken (a_b − n_b) + f·(a_last − n_last)] / A` with buckets ordered by
       `accesses/bytes` and `C/m` on-disk bytes filled greedily; the recommended threshold
       `H_max(128 MiB) ≥ 0.50` **labelled an owner-settable parameter**, with its Arm-1 arithmetic

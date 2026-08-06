@@ -289,13 +289,12 @@ compiled and helpers compiling to no-ops when the feature is off
 (`cqlite-core/src/observability/mod.rs:49-54`). A default `cqlite-core` build SHALL continue to link no
 OpenTelemetry crates.
 
-**Known coverage limitation (recorded, not waived):**
-`StorageEngine::scan_partition_with_cell_metadata` (the WRITETIME/TTL-projection point
-read) is a logical point read that is NOT recorded, so its accesses are invisible to
-the histogram. The direction is conservative — those partitions are under-counted,
-which **understates** concentration — but a workload whose keyed traffic is
-predominantly WRITETIME/TTL projections is measured badly and its window must not be
-used for the decision.
+The WRITETIME/TTL-projection point read
+(`StorageEngine::scan_partition_with_cell_metadata`) SHALL be recorded too. Omitting it is
+NOT conservative: an unrecorded access leaves the DENOMINATOR as well as the numerator, so
+dropping a workload's metadata singletons while keeping its repeat traffic RAISES `H_max`
+— 1M metadata singletons beside 100 partitions read 100 times each measure ≈0.99 against a
+true ≈0.0098, a confident false "go".
 
 **Wiring evidence (a public surface + a call chain + an end-to-end test):** public surface
 `cqlite_core::observability::partition_access`; call chain *point-read boundary →
@@ -367,7 +366,7 @@ It SHALL state, at minimum:
   `unavailable` fraction) and the single remaining **assumption**, the decode multiplier `m`, cited to
   its provenance as a Phase-0 wire estimate (`docs/research/phase2-verify-caching.md:221-222`) and
   labelled an assumption, not a measurement;
-- the closed-form clairvoyant hit-ratio ceiling at a decoded budget `C`, ordering buckets by access
+- the closed-form clairvoyant hit-ratio ESTIMATE at a decoded budget `C`, ordering buckets by access
   density `accesses / bytes` and filling `C / m` of on-disk bytes greedily, charging one compulsory
   miss per selected distinct partition;
 - that the result is **NOT an upper bound** but an ESTIMATE under a stated ranking heuristic —
@@ -397,8 +396,8 @@ known distribution (labelled a self-check, never a field result).
 #### Scenario: The procedure yields a verdict from a complete census window
 - **GIVEN** a closed census window with `sample_denominator = 1`, a zero `unavailable` fraction, and an access count above the stated minimum
 - **WHEN** the procedure is applied at 64 MiB and at 128 MiB with the cited decode multiplier
-- **THEN** it yields a hit-ratio ceiling for each budget and a go/no-go against the recorded threshold
-- **AND** the verdict states that the ceiling is clairvoyant, so a "go" is a licence to simulate LRU against the captured window rather than a licence to build
+- **THEN** it yields a hit-ratio ESTIMATE for each budget and a go/no-go indication against the recorded threshold
+- **AND** the verdict states that the estimate is clairvoyant AND that its bucket ranking is a heuristic (issue #3340), so it is not an upper bound and a "go" is at most a licence to simulate LRU against the captured window, never a licence to build
 
 ### Requirement: The change records what it does not deliver
 

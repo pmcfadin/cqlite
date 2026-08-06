@@ -125,7 +125,7 @@ frequency — so a sampled window is still worth reading for SHAPE. It is not pr
 `n_b` and `B_b` are sample-domain totals, which is why such a window is refused above rather
 than scaled.
 
-## Step 2 — the clairvoyant hit-ratio ceiling
+## Step 2 — the hit-ratio estimate (NOT a ceiling — see below)
 
 Order buckets by **access density** `a_b / B_b` (accesses per on-disk byte), descending: the
 best bytes to spend the budget on are the ones serving the most accesses. With a decoded
@@ -170,7 +170,7 @@ recorded as such**, not a derived constant.
 
 Its arithmetic, so the next reader does not re-litigate it: a decoded-partition cache targets
 decode/merge work, and the Arm-1 CPU decomposition (#2818) measured **k-way merge at 3.2% of
-on-CPU** against **LZ4 decompress + CRC at ~23%**. A cache whose *ceiling* is below 50% on a
+on-CPU** against **LZ4 decompress + CRC at ~23%**. A cache whose *estimated hit ratio* is below 50% on a
 ≤~3% work share cannot move the end-to-end number by more than ~1.5%, which is under the
 round harness's noise floor.
 
@@ -283,17 +283,23 @@ window, not left on.
 
 The procedure is also available as code — `cqlite_core::observability::partition_access::decision`
 — so a captured window can be priced without re-deriving any of the above. It implements
-exactly the refusal conditions and the ceiling in this note.
+exactly the refusal conditions and the `H_max` estimate in this note.
 
 ## Known coverage limitation of the instrument
 
-`SELECT WRITETIME(col) / TTL(col) … WHERE pk = ?` takes a separate metadata point-read
-boundary that the probe does **not** record, so those accesses never reach the
-histogram. The direction is conservative — the affected partitions are under-counted,
-which understates concentration — but if the workload you instrumented is
-predominantly WRITETIME/TTL projections, **do not use its window for the decision**:
-the measurement would be of the traffic that happens to be visible, not of the
-workload.
+**Formerly a coverage gap, now closed.** The WRITETIME/TTL projection point read
+(`scan_partition_with_cell_metadata`) IS recorded, like every other logical point read.
+It was omitted at first on the reasoning that the omission was "conservative"; that
+reasoning was **wrong**, and the correction is worth stating because the failure mode is
+counter-intuitive. An unrecorded access leaves the **denominator** as well as the
+numerator, so dropping a workload's metadata singletons while keeping its repeat traffic
+*raises* `H_max`: 1M metadata singletons beside 100 partitions read 100 times each measure
+≈0.99 against a true ≈0.0098 — a confident false "go", not a safe under-count. Nothing
+needs to be discounted for it now.
+
+What DOES still limit priceability is listed under the refusal conditions above (an
+unmeasurable extent, a sample rather than a census, a lossy window) and in the scope note
+at the top: a BIG generation whose `Index.db` is not resident cannot be priced.
 
 ## What this note does NOT do
 

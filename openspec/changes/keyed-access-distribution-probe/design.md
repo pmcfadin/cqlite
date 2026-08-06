@@ -73,16 +73,15 @@ The cache being sized is a **decoded-partition** cache, whose unit is the reconc
 partition — so the logical boundary is also the semantically correct one: it counts exactly the
 events such a cache would serve.
 
-**Known coverage limitation, recorded rather than left implicit.**
-`StorageEngine::scan_partition_with_cell_metadata` — the WRITETIME/TTL-projection
-sibling of `scan_partition` (`SELECT WRITETIME(col) … WHERE pk = ?`) — is also a
-logical point read, and it is **NOT** recorded. Those accesses are therefore invisible
-to the histogram. The direction is conservative: a partition read only through the
-metadata path is under-counted, which **understates** concentration and so understates
-the case for a cache. It is a gap in coverage, not a bias toward "go", and a workload
-whose keyed traffic is predominantly WRITETIME/TTL projections would be measured
-badly — such a window should not be used for the decision. Closing it is a
-one-wrapper change on the same pattern as the three recorded boundaries.
+**A coverage gap that was closed, and why its original rationale was wrong.**
+`StorageEngine::scan_partition_with_cell_metadata` — the WRITETIME/TTL-projection point
+read — IS recorded, like every other logical point read. It was omitted initially on the
+reasoning that the omission was "conservative". That reasoning was **wrong**: an
+unrecorded access leaves the DENOMINATOR as well as the numerator, so dropping a
+workload's metadata singletons while keeping its repeat traffic RAISES `H_max`. 1M
+metadata singletons beside 100 partitions read 100 times each measure ≈0.99 against a
+true ≈0.0098 — a confident false "go". Recorded here because the mistake is
+counter-intuitive and worth not repeating.
 
 **Alternative considered.** *Count at the probe sites and divide by an SSTable count.* Rejected: the
 divisor varies per partition (a key may be in 1 or 7 generations) and is not knowable at the probe
@@ -404,7 +403,7 @@ LRU against the captured window.
 **Recommended go threshold (an OWNER-SETTABLE parameter, recorded as such).** `H_max(128 MiB) ≥ 0.50`.
 Rationale, from the owner's own Arm-1 repricing (#2818, quoted in the thread): a decoded-partition
 cache targets decode/merge work, and k-way merge measured **3.2%** of on-CPU while LZ4 decompress +
-CRC measured **~23%**. A cache with a *ceiling* below 50% on a ≤~3% work share cannot move the
+CRC measured **~23%**. A cache with an *estimated hit ratio* below 50% on a ≤~3% work share cannot move the
 end-to-end number by more than ~1.5% — under the round harness's noise floor. Below the threshold the
 verdict is a no-go INDICATION (see the #3340 correction above — it is not sound on its own); at or above it the verdict is "worth a real LRU simulation against the
 captured window", not an automatic build.

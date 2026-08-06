@@ -78,8 +78,13 @@ skew is real, and we don't know the skew"); a synthetic curve would restate it, 
 
 This change builds exactly that, plus the two things that make its output *decisive* rather than
 merely interesting: **measured working-set bytes** (so only the decode multiplier remains an
-assumption) and a **written-down closed-form decision procedure** (so the go/no-go falls out of the
-first real window with no further rig round).
+assumption) and a **written-down closed-form decision procedure** (so the go/no-go falls out of a
+real window with no further rig round). That last claim is SCOPED, and the artifacts say so: it
+holds for BTI and for BIG whose `Index.db` is already resident. The probe will not materialize an
+index to obtain an answer — that would defeat #2412's lazy Summary-guided open and change the
+process memory profile — so such a window is REFUSED rather than priced, as are a non-census window
+and one with a non-zero `unavailable` fraction. All three fail SAFE (a refusal is never a false
+"go"), but the FIRST window may be refused.
 
 ### 4. Nothing in the tree does any of this today
 

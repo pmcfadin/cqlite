@@ -11,9 +11,16 @@
 //! **What it does not do.** It does not deliver a field skew number and it does not
 //! deliver the go/no-go for the 64–128 MiB decoded-partition cache. Issue #2827's
 //! original AC2 is **not satisfied** by this change — not waived, not deferred:
-//! satisfiable on the first real keyed workload run with the probe enabled, and
-//! blocked only by the absence of such a workload
-//! (`docs/research/phase2-verify-caching.md:214-216`). Applied to a window this
+//! satisfiable on a real keyed workload run with the probe enabled, whose absence
+//! (`docs/research/phase2-verify-caching.md:214-216`) is the reason it is unmet here.
+//!
+//! "Satisfiable" is SCOPED, not universal: this module REFUSES a window it cannot
+//! price, and three of those refusals are reachable on a healthy system — a
+//! non-census window, a non-zero `unavailable` fraction, and (under #2412's lazy
+//! Summary-guided open) a BIG generation whose `Index.db` is not resident. Every one
+//! fails SAFE — a refusal is never a false "go" — but the FIRST real window may well
+//! be refused, and obtaining a priceable one can take a shorter window, a resident
+//! index, or both. Applied to a window this
 //! repository generated, the procedure REFUSES by construction
 //! ([`WindowSource::Synthetic`]) — a synthetic input is a legitimate oracle for a
 //! claim about the instrument and an illegitimate one for a claim about the world.
@@ -172,6 +179,11 @@ impl std::fmt::Display for Refusal {
 }
 
 /// A priced window.
+///
+/// **The name is historical**: it comes from the Belady/clairvoyant framing the
+/// procedure was originally written around. It is retained because renaming a public
+/// type is not worth a churn here — but [`Self::h_max`] is an ESTIMATE under a stated
+/// ranking heuristic, not a ceiling. See that field's documentation and issue #3340.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ceiling {
     /// The decoded-cache budget priced, in bytes.
@@ -462,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_census_window_is_priced_and_the_ceiling_is_hand_checkable() {
+    fn a_complete_census_window_is_priced_and_the_estimate_is_hand_checkable() {
         // 500 hot partitions × 20 accesses at 1 KiB, plus 10,000 cold partitions
         // accessed once at 1 KiB.
         //   A = 500*20 + 10_000 = 20_000
@@ -496,7 +508,7 @@ mod tests {
     #[test]
     fn a_tight_budget_takes_the_densest_bucket_first() {
         // Same window, but a budget that only fits part of the data: the hot bucket
-        // (highest accesses-per-byte) is taken first, so the ceiling stays high.
+        // (highest accesses-per-byte) is taken first, so the estimate stays high.
         let s = window(&[(500, 20, 1_024), (10_000, 1, 1_024)]);
         // 512_000 on-disk bytes × 3.5 = 1_792_000 decoded bytes fits the hot bucket
         // exactly and nothing else.
@@ -510,7 +522,7 @@ mod tests {
             Verdict::Priced(c) => {
                 assert!(
                     (c.h_max - 0.475).abs() < 1e-6,
-                    "the cold bucket contributes no hits, so the ceiling is unchanged: {}",
+                    "the cold bucket contributes no hits, so the estimate is unchanged: {}",
                     c.h_max
                 );
             }

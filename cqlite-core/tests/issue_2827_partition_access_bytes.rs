@@ -359,7 +359,7 @@ fn a_gap_measured_census_window_is_priced_not_refused() {
             // 38.34 MiB on-disk budget, so H_max = 11_400 / 22_000 = 0.51818...
             assert!(
                 (c.h_max - 11_400.0 / 22_000.0).abs() < 1e-9,
-                "unexpected ceiling {}",
+                "unexpected hit-ratio estimate {}",
                 c.h_max
             );
         }
