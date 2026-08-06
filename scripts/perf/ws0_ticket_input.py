@@ -67,6 +67,35 @@ pin is REFUSED. An absent digest means the request was never pinned, which is th
 finding is about — and treating "no record" as "nothing to check" is the fail-open shape: a check
 that did not run prints exactly like one that passed. The remedy is to re-run the session with
 `scripts/perf/ws0-baseline.sh`, and the refusal says so.
+
+# WHERE THE TICKET LIVES: THE SESSION DIR, NOT THE CORPUS (#3272 round 13, F2)
+
+M1 above brought the ticket into the provenance guarantee and wrote it into the SHARED CORPUS
+DIRECTORY. That is the wrong owner, for two independent reasons:
+
+* CONCURRENT SESSIONS COLLIDE. A corpus is a 2.8 GB read-only-by-nature artifact that two lanes
+  routinely measure at the same time (that is the point of generating one and keeping it). Both
+  drivers wrote `<corpus>/ticket-template.json`, so session B's write landed BETWEEN session A's
+  pin and session A's reps. If the shape happened to differ, A's reps read B's request and A's
+  report refused at the end (a wasted multi-minute run whose diagnosis names a mid-session
+  mutation nobody performed); if the shape happened to be identical, the digests agreed and the
+  collision was silent — a guarantee that holds by luck. Either way the pin's claim ("the request
+  this session STARTED against is the request still on disk") was not a property of the session.
+* IT MADE AN IMMUTABLE CORPUS WRITABLE. A corpus that nothing writes to can be mounted read-only,
+  chmod'ed `a-w`, or shared between users. Requiring a write into it for every session is a
+  needless coupling: the ticket is a property of the SESSION (the driver composes it, at setup,
+  from the corpus's DDL), not of the corpus.
+
+So the ticket now lives in the session's OUTPUT DIRECTORY, which `lib-outdir.sh`'s `claim_out_dir`
+has already claimed EXCLUSIVELY (an atomic `mkdir` marker; a concurrent claim is a refusal, not a
+race). That is the same ownership move round 12's F2 made for the measured binaries — they are
+COPIED into a session-owned `measured-bin/` and hashed AT THE DESTINATION — and this follows that
+precedent rather than inventing a second mechanism: the ticket is WRITTEN at the destination and
+hashed there, so the digest is always of bytes inside the claimed directory.
+
+What that changes for the reader: `ticket_path` and `verify_pinned_ticket` take the SESSION DIR.
+The pin, the ticket and the reps' `--ticket-template` argument therefore all name one path inside
+one exclusively-owned directory, and no other session can reach it.
 """
 
 from __future__ import annotations
@@ -88,8 +117,14 @@ TICKET_FILENAME = "ticket-template.json"
 PIN_FIELD = PIN_TICKET_FIELD
 
 
-def ticket_path(corpus: pathlib.Path) -> pathlib.Path:
-    return corpus / TICKET_FILENAME
+def ticket_path(session_dir: pathlib.Path) -> pathlib.Path:
+    """The ticket inside the SESSION-OWNED output directory (#3272 round 13, F2).
+
+    Takes the SESSION dir, not the corpus. `claim_out_dir` has already claimed that directory
+    exclusively, so this path cannot be written by a concurrent session — and the corpus needs no
+    write permission at all. See the module docstring for the collision that made this necessary.
+    """
+    return session_dir / TICKET_FILENAME
 
 
 # The connector-shaped `FlightTicket` the loadgen sends, with the DDL filled in. Everything except
@@ -113,8 +148,8 @@ _TICKET_SHAPE: dict = {
 }
 
 
-def write_ticket_template(corpus: pathlib.Path, ddl_file: pathlib.Path) -> str:
-    """Write `ticket-template.json` from the corpus's own DDL and return its digest.
+def write_ticket_template(session_dir: pathlib.Path, ddl_file: pathlib.Path) -> str:
+    """Write `ticket-template.json` INTO THE SESSION DIR from the corpus's own DDL; return its digest.
 
     Lives HERE rather than as a heredoc in the driver (#3272 round 10, M1): the module that decides
     whether the request is the one that was measured is the module that should own what the request
@@ -122,6 +157,12 @@ def write_ticket_template(corpus: pathlib.Path, ddl_file: pathlib.Path) -> str:
 
     The DDL is read from the file whose digest the driver has just verified against the recorded
     corpus identity, so the request and the data are anchored to one schema.
+
+    The DESTINATION is the SESSION's exclusively-claimed output directory, never the shared corpus
+    (#3272 round 13, F2): two lanes measuring one corpus used to overwrite each other's request
+    between the pin and the reps, and the corpus had to be writable for no reason. Written at the
+    destination and hashed there — the precedent round 12's F2 set for the frozen binaries — so the
+    digest can only ever describe bytes inside the claimed directory.
 
     Returns the digest so the caller can print it; the PIN takes its own measurement from the file
     (`measure_ticket_digest`) rather than trusting a returned value — one implementation, and a
@@ -140,25 +181,29 @@ def write_ticket_template(corpus: pathlib.Path, ddl_file: pathlib.Path) -> str:
             " all — the request would be unanswerable and a rep would fail for a reason unrelated"
             " to what is being measured."
         )
-    path = ticket_path(corpus)
+    path = ticket_path(session_dir)
     try:
+        # The session dir exists by the time the driver calls this (`create_out_dir` +
+        # `claim_out_dir` run far above), but `parents=True` keeps the fixture path — which builds a
+        # session dir directly — from needing a second spelling of the same setup.
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({**_TICKET_SHAPE, "ddl": ddl}, indent=1))
     except OSError as exc:
         raise Invalid(
             f"{path} could not be written ({exc}), so this session cannot pin WHICH REQUEST it"
             " measures."
         ) from None
-    return measure_ticket_digest(corpus)
+    return measure_ticket_digest(session_dir)
 
 
-def measure_ticket_digest(corpus: pathlib.Path) -> str:
+def measure_ticket_digest(session_dir: pathlib.Path) -> str:
     """The digest of the ticket template ON DISK, for the pin writer.
 
     An ABSENT or unreadable template is `Invalid`, never an absent pin field: the Flight arm
     cannot run without it, so a session pinned without one could only ever produce a report about
     a request nobody recorded.
     """
-    path = ticket_path(corpus)
+    path = ticket_path(session_dir)
     if not path.is_file():
         raise Invalid(
             f"{path} does not exist, so this session cannot pin WHICH REQUEST it is about to"
@@ -178,7 +223,7 @@ def measure_ticket_digest(corpus: pathlib.Path) -> str:
 
 
 def verify_pinned_ticket(
-    pin_path: pathlib.Path, pin: dict, corpus: pathlib.Path
+    pin_path: pathlib.Path, pin: dict, session_dir: pathlib.Path
 ) -> dict:
     """Compare the PINNED ticket digest against the bytes on disk (#3272 round 10, M1).
 
@@ -189,6 +234,11 @@ def verify_pinned_ticket(
     Two values, not three, and that is a property of the input rather than a gap: the template is
     written by the driver at session setup, so no recorded corpus identity carries it (see the
     module docstring).
+
+    Reads the ticket from the SESSION DIR (#3272 round 13, F2). It used to read the shared corpus,
+    where a concurrent session's write landed between this session's pin and its reps: identical
+    shapes agreed silently (a guarantee held by luck) and differing ones refused a correct run for a
+    mutation nobody performed. The session dir is claimed exclusively, so neither is reachable.
     """
     pinned = pin.get(PIN_FIELD)
     if pinned is None:
@@ -209,7 +259,7 @@ def verify_pinned_ticket(
             f"{pin_path}: `{PIN_FIELD}` is {pinned!r}, which is not 64 lowercase hex characters —"
             " a truncated pin cannot identify the request this session measured"
         )
-    path = ticket_path(corpus)
+    path = ticket_path(session_dir)
     if not path.is_file():
         raise Invalid(
             f"the pinned Flight ticket {path} is MISSING, but the session pinned its digest"
@@ -250,6 +300,8 @@ def verify_pinned_ticket(
             " setup, so no recorded corpus identity carries it and none can. What that establishes"
             " is that the request this session STARTED against is the request still on disk; a"
             " modification reverted before reporting is not covered, the same residual the"
-            " per-invocation DDL carries"
+            " per-invocation DDL carries. It lives in this SESSION's exclusively-claimed output"
+            " directory, not in the shared corpus (#3272 F2), so a concurrent session measuring the"
+            " same corpus cannot write it — and the corpus itself needs no write permission"
         ),
     }

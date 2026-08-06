@@ -46,8 +46,9 @@ perf_csv() {
 ws0_make_corpus() {
   local dir="$1" rows="${2:-1000}" bytes="${3:-700000}" bpr="${4:-}" perf_dir
   mkdir -p "$dir/ws0/events"
-  # The shipped modules' directory, passed in so the fixture can call the REAL ticket writer
-  # (#3272 M1) rather than hand-rolling the request's shape.
+  # The shipped modules' directory. It no longer writes the ticket (round 13's F2 moved that into
+  # the SESSION dir — see `ws0_pin_session_corpus`), but the argument is kept so the python body
+  # keeps one argv shape across both call sites of this library.
   perf_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../perf" && pwd)"
   python3 - "$dir" "$rows" "$bytes" "$bpr" "$perf_dir" <<'PY'
 import hashlib, json, os, sys
@@ -84,16 +85,15 @@ for name, body in (("nb-1-big-Data.db", raw),
 # was never pinned.
 ddl = b"CREATE TABLE ws0.events (part_id text, seq int, PRIMARY KEY (part_id, seq));\n"
 open(os.path.join(out, "ws0-events.cql"), "wb").write(ddl)
-# THE FLIGHT TICKET, written through the SHIPPED writer (#3272 round 10, M1). `ticket-template.json`
-# IS THE REQUEST every Flight rep re-reads, and the session pin now records its digest — so a corpus
-# fixture without one is refused, exactly as a fixture without a schema is. Written by
-# `ws0_ticket_input.write_ticket_template` rather than composed here, for the reason
-# `ws0_pin_session_corpus` calls the real pin writer: a fixture that hand-rolled the ticket's shape
-# would keep passing after the shipped writer's shape changed.
-import pathlib
-sys.path.insert(0, sys.argv[5])
-from ws0_ticket_input import write_ticket_template  # noqa: E402
-write_ticket_template(pathlib.Path(out), pathlib.Path(out) / "ws0-events.cql")
+# NO FLIGHT TICKET IS WRITTEN HERE ANY MORE (#3272 round 13, F2). The ticket is a property of the
+# SESSION, not of the corpus: it now lives in the session's exclusively-claimed output directory,
+# because two lanes measuring ONE corpus used to overwrite each other's request between the pin and
+# the reps, and requiring a write into the corpus meant an otherwise immutable artifact could not be
+# read-only. `ws0_pin_session_corpus` writes it into the session dir through the shipped writer.
+#
+# THIS FIXTURE THEREFORE LEAVES THE CORPUS WRITE-FREE, which is the property
+# `test_ws0_provenance_guards.sh` asserts by chmod'ing a corpus read-only and running a session
+# over it.
 json.dump(
     {"rows": rows, "partitions": 10, "seed": 1, "cells_per_row": 12,
      "data_db_bytes": nbytes, "data_db_sha256": hashlib.sha256(raw).hexdigest(),
@@ -151,10 +151,44 @@ import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_validate import Invalid, load_corpus_identity
 from ws0_session import session_pin_path, write_session_corpus_pin
+from ws0_ticket_input import write_ticket_template
 config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
           "step_duration": "45s/1s"}
 session, corpus = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2])
+# NOTHING IS STAMPED FOR A SESSION DIR THAT DOES NOT EXIST — the same load-bearing rule
+# `ws0_pin_binaries` and `ws0_pin_verification` state as an early `return 0`, now stated here too
+# because round 13 F2 gave this function a reason to reach the fallback below on a healthy corpus.
+# MEASURED: with the ticket in the session dir, an absent dir makes the ticket digest Invalid, the
+# fallback fired, its `mkdir(parents=True)` CREATED the dir, and the report guards
+# not-an-existing-directory refusal became an incomplete-pin one. A fixture must never manufacture
+# the condition a case is testing the absence of.
+if not session.is_dir():
+    raise SystemExit(0)
+# THE FLIGHT TICKET, into the SESSION dir, through the SHIPPED writer (#3272 round 10 M1, moved by
+# round 13 F2). `ticket-template.json` IS THE REQUEST every Flight rep re-reads and the pin records
+# its digest, so it must exist BEFORE the pin — the same ordering the driver has. Written by
+# `ws0_ticket_input.write_ticket_template` rather than composed here for the reason this function
+# calls the real pin writer: a fixture that hand-rolled the ticket shape would keep passing after
+# the shipped writer changed. A case whose SUBJECT is an absent/mutated ticket removes or rewrites
+# it explicitly, which is now possible without touching the corpus at all.
+#
+# DOES NOT CREATE the session dir — the load-bearing rule `ws0_pin_binaries` and
+# `ws0_pin_verification` both record, and MEASURED here for the THIRD time: a `mkdir(parents=True)`
+# here brought a deliberately-NONEXISTENT `--dir` into existence and turned the report guards
+# "not an existing directory" refusal into a missing-reps one. A fixture must never manufacture the
+# condition a case is testing the absence of.
+#
+# NO APOSTROPHE in this comment, and that is not style: this body is inside SHELL SINGLE QUOTES, so
+# one would terminate the string and truncate the whole library — MEASURED while writing this, and it
+# presented as 40+ unrelated cases failing on an absent session pin.
+try:
+    if session.is_dir() and (corpus / "ws0-events.cql").is_file():
+        write_ticket_template(session, corpus / "ws0-events.cql")
+except Invalid:
+    # A case deliberately broke the DDL and asserts on the SCHEMA refusal; the pin below then
+    # refuses on its own absent-ticket path, which is a real check rather than a fixture crash.
+    pass
 try:
     write_session_corpus_pin(session, corpus, load_corpus_identity(corpus), config)
 except Invalid:

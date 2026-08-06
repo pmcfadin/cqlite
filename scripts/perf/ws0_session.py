@@ -333,17 +333,20 @@ def session_pin_path(session_dir: pathlib.Path) -> pathlib.Path:
     return session_dir / SESSION_CORPUS_PIN
 
 
-def _measure_ticket_digest(corpus: pathlib.Path) -> str:
+def _measure_ticket_digest(session_dir: pathlib.Path) -> str:
     """The Flight ticket's digest, from `ws0_ticket_input` (#3272 round 10, M1).
 
     Imported function-locally for the same reason `verify_pinned_schema` and
     `verify_pinned_components` are: that module imports `sha256_file` from THIS one, so a
     module-scope import here would be a cycle. The split is by responsibility — see each module's
     docstring.
+
+    Takes the SESSION dir since round 13's F2 moved the ticket out of the shared corpus and into the
+    session's exclusively-claimed output directory.
     """
     from ws0_ticket_input import measure_ticket_digest
 
-    return measure_ticket_digest(corpus)
+    return measure_ticket_digest(session_dir)
 
 
 def write_session_corpus_pin(
@@ -435,8 +438,12 @@ def write_session_corpus_pin(
         # be created BEFORE the pin. That ordering is the other half of the fix, and this call is
         # what enforces it — an absent template is `Invalid` here, not an absent pin field.
         #
+        # Measured from the SESSION DIR, not the corpus (#3272 round 13, F2): the ticket lives in the
+        # exclusively-claimed output directory, so a concurrent session measuring the same corpus
+        # cannot write the file this digest describes.
+        #
         # READ BACK by `ws0_ticket_input.verify_pinned_ticket`.
-        PIN_TICKET_FIELD: _measure_ticket_digest(corpus),
+        PIN_TICKET_FIELD: _measure_ticket_digest(session_dir),
         # THE MEASUREMENT CONFIGURATION (#3272 F1). Recorded here, before rep 1, and READ BACK
         # BY THE REPORTER as its own configuration — see `session_manifest_config` for why the
         # reporter reads it rather than matching against it.
@@ -778,7 +785,9 @@ def verify_session_corpus_pin(
     # only buy a vacuous green. Function-local import for the cycle reason above.
     from ws0_ticket_input import verify_pinned_ticket
 
-    ticket = verify_pinned_ticket(p, pin, corpus)
+    # THE SESSION DIR, not the corpus (#3272 round 13, F2): the request is a property of THIS
+    # session and lives in its exclusively-claimed output directory.
+    ticket = verify_pinned_ticket(p, pin, session_dir)
     return {
         "pinned_before_measurement": True,
         "pinned_corpus_path": pin.get("corpus"),

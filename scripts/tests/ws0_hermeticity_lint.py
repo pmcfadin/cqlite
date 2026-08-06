@@ -263,6 +263,19 @@ EXEMPTIONS: dict[str, str] = {
     "scripts/perf/lib-binaries.sh":
         "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
         " are prose explaining the split, the driver globals it reads, and why perf_stat_c stayed",
+    # Round 13's F2 campsite-rule split (the session-owned ticket path took the driver to 959 lines).
+    # Reported UNCOVERED the moment it became tracked, exactly as its eight predecessors were — the
+    # NINTH time this oracle has caught a split/addition, which is what it is for. Note the two
+    # postures once more: the PERF tree lint's subject is a `scripts/perf/*.sh` glob, so this library
+    # joined it AUTOMATICALLY and was linted in `library` mode (correctly finding no perf invocation
+    # and no second `perf_stat_c`), while this CONTENT-based census demanded a decision. Checking BOTH
+    # on a split is why. Same class as its seven library siblings: sourced by the driver, never
+    # invokes it, and its `ws0-baseline.sh` mentions are prose (the split's rationale, the driver
+    # globals it reads and sets, and why the perf wrapper did not move).
+    "scripts/perf/lib-inputs.sh":
+        "a driver library; sourced by the driver, never invokes it — its ws0-baseline.sh mentions"
+        " are prose explaining the split, the driver globals it reads/sets, and why perf_stat_c"
+        " stayed",
     "scripts/perf/README.md": "documentation",
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",

@@ -106,6 +106,8 @@ source "$HERE/lib-server.sh"
 source "$HERE/lib-outdir.sh"
 # shellcheck source=scripts/perf/lib-binaries.sh
 source "$HERE/lib-binaries.sh"
+# shellcheck source=scripts/perf/lib-inputs.sh
+source "$HERE/lib-inputs.sh"
 # LAST, because the sourcing order is the DEPENDENCY order: the measurement legs call
 # `stop_server`/`require_port_free`/`await_server_ready` from lib-server.sh above, plus this
 # driver's own `perf_stat_c` and `drop_caches_if_cold` (both defined below — a function body is
@@ -378,7 +380,6 @@ if ! ls "$TABLE_DIR"/*-Data.db >/dev/null 2>&1; then
   echo "       Generate it: cargo run --release -p ws0-corpus-gen --bin ws0-corpus-gen -- --out $CORPUS" >&2
   exit 2
 fi
-TICKET_TEMPLATE="$CORPUS/ticket-template.json"
 
 for tool in perf taskset python3; do  # perf-lint-allow: a presence PROBE (command -v), not an invocation
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool is not installed" >&2; exit 2; }
@@ -488,79 +489,21 @@ OUT_DIR="$(create_out_dir "${OUT_DIR:-}" "$REPO_ROOT/target/perf-ws0-3096")" || 
 build_release_binaries || exit 2
 record_measured_binaries || exit 2
 
-# The Flight ticket is derived from the DDL the corpus was WRITTEN with (the
-# generator emits it beside the data), so both arms provably read one schema.
-DDL_FILE="$CORPUS/ws0-events.cql"
-[[ -r "$DDL_FILE" ]] || { echo "FATAL: $DDL_FILE missing — regenerate the corpus" >&2; exit 2; }
-# ...and READABLE IS NOT ENOUGH (#3272 round 6, R2). The DDL is a MEASUREMENT INPUT, and it was
-# outside every verification this rig performs: absent from the Data.db digest check, absent from
-# the component check (it is not in the table directory), absent from the session pin. `-r` was
-# the whole of it.
+# --- THE SCHEMA, THEN THE REQUEST DERIVED FROM IT (#3272 round 6 R2 + round 10 M1) ----
+# Both live in scripts/perf/lib-inputs.sh, which carries the full argument for each: the DDL is a
+# MEASUREMENT INPUT the two arms read ASYMMETRICALLY (the bare scan ingests it per invocation, the
+# Flight ticket is generated from it once), and `ticket-template.json` IS THE REQUEST every Flight rep
+# re-reads. `write_session_ticket` sets `$TICKET_TEMPLATE` beside the write that creates the file —
+# inside `$OUT_DIR`, never the shared corpus (#3272 round 13, F2).
 #
-# THE TWO ARMS READ IT ASYMMETRICALLY, which is what makes a modification both silent and
-# harmful: the TICKET TEMPLATE below is generated from it ONCE, here, at setup — while the BARE
-# SCAN ingests the file on EVERY invocation. So editing it between setup and a later rep makes
-# the two arms measure DIFFERENT SCHEMAS (a different column set, clustering order or type) while
-# every recorded identity still agrees and the report exits 0. A head-to-head number between two
-# arms reading two schemas compares nothing.
+# The CALL SITES stay here so the ORDER remains legible at the driver's top level, and because two
+# suites assert exactly this order BY LINE NUMBER: the schema before the ticket derived from it, the
+# ticket before the pin that records its digest, the pin before the first rep.
 #
-# Verified HERE, before the pin and before the first rep, so a mismatch costs seconds rather than
-# a full measurement run. There is no skip flag: the file is a few hundred bytes.
-if ! python3 - "$HERE" "$CORPUS" <<'PY'
-import pathlib, sys
-sys.path.insert(0, sys.argv[1])
-from ws0_validate import Invalid, load_corpus_identity
-from ws0_schema_input import verify_schema_input
-corpus = pathlib.Path(sys.argv[2])
-try:
-    rec = verify_schema_input(corpus, load_corpus_identity(corpus))
-except Invalid as exc:
-    print(f"FATAL: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-print(f"schema pin:   {rec['schema_sha256_measured']} ({rec['schema_bytes']} B) — ws0-events.cql"
-      " re-hashed from disk and matched the recorded identity BEFORE any measurement")
-PY
-then
-  echo "FATAL: the corpus's schema could not be verified against its recorded identity." >&2
-  echo "       ws0-events.cql is a MEASUREMENT INPUT both arms read (#3272 R2)." >&2
-  exit 2
-fi
-
-# --- THE FLIGHT TICKET — WRITTEN BEFORE THE PIN, BECAUSE IT IS PINNED (#3272 round 10, M1) ------
-# `ticket-template.json` IS THE REQUEST (keyspace/table/DDL/token range/projection/predicates/
-# aggregation/limit), and `flight-loadgen --ticket-template` re-reads it on EVERY invocation of
-# every rep of every arm. It used to be written 90 lines BELOW the pin and recorded NOWHERE, so it
-# could be changed between reps or between ARMS while the corpus stayed untouched — leaving every
-# corpus digest, the component set and the schema in agreement and the report exiting 0 having
-# compared two arms that answered DIFFERENT QUERIES. Round 10's F-B one layer out (F-B: different
-# corpora; this: different requests). Full argument: scripts/perf/ws0_ticket_input.py.
-#
-# WHAT the request is lives in that module (a fixed full-ring `SELECT *`, as data, beside the check
-# that decides whether the measured request was the pinned one); it is generated from the DDL whose
-# digest was verified immediately above, so request and data are anchored to one schema. What stays
-# HERE is the ORDER — this before the pin — which is the half of the fix that must remain legible in
-# the driver.
-if ! python3 -c '
-import pathlib, sys
-sys.path.insert(0, sys.argv[1])
-from ws0_validate import Invalid
-from ws0_ticket_input import write_ticket_template
-corpus, ddl = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
-try:
-    digest = write_ticket_template(corpus, ddl)
-except Invalid as exc:
-    print(f"FATAL: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-print(f"ticket pin:   {digest} — ticket-template.json (the REQUEST every Flight rep re-reads)"
-      " written from the verified DDL BEFORE the corpus pin, which records this digest")
-' "$HERE" "$CORPUS" "$DDL_FILE"
-then
-  echo "FATAL: the Flight ticket template could not be written, so this session cannot pin" >&2
-  echo "       WHICH REQUEST it measures — and an unpinned request can be changed between" >&2
-  echo "       ARMS while the corpus stays untouched and every corpus digest still agrees," >&2
-  echo "       so two arms would answer different queries under one report (#3272 M1)." >&2
-  exit 2
-fi
+# Status checked EXPLICITLY: neither runs in a command substitution, so `|| exit 2` is what
+# terminates the run (a refusal resting on `set -e` alone is one `set +e` from decorative).
+verify_corpus_schema_input || exit 2
+write_ticket_template_for_session || exit 2
 
 # --- PIN WHICH CORPUS THIS SESSION IS ABOUT TO MEASURE (#3272 review round 4) --------
 # Stamped into the RESULTS DIR, BEFORE the first rep, and REQUIRED by ws0_report.py.

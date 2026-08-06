@@ -537,8 +537,12 @@ else
 fi
 # And the DRIVER must WRITE the pin, or the reporter's requirement is satisfiable only by
 # fixtures — the wiring half (#3272 AC "wiring evidence").
+# The RANGE START moved in round 13's F2 campsite split: the driver's `DDL_FILE=` assignment and its
+# inline schema/ticket heredocs became `verify_corpus_schema_input`/`write_ticket_template_for_session`
+# in scripts/perf/lib-inputs.sh. Anchored on the first of those CALL SITES, which is what the driver
+# still owns (the ORDER), so the range covers setup-through-loop exactly as before.
 if grep -q 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-  && awk '/^DDL_FILE=/,/^drop_caches_if_cold/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
+  && awk '/^verify_corpus_schema_input/,/^drop_caches_if_cold/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
      | grep -q 'session-corpus-pin.json'; then
   pass "the DRIVER writes the session corpus pin (the reporter's requirement is WIRED, not fixture-only)"
 else
@@ -1105,7 +1109,12 @@ else
 fi
 # ...and the DRIVER must verify the schema BEFORE the measurement loop — the wiring half. A
 # reporter-only check would let a full run complete before anything noticed.
-schema_line=$(grep -n 'verify_schema_input' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+# The CALL SITE in the driver, which is what the ORDER assertions are about. Round 13's F2 split moved
+# the schema verifier's BODY into scripts/perf/lib-inputs.sh (the driver was 159 lines over the
+# campsite target); the driver still owns the order, so the anchor is the driver-side call
+# `verify_corpus_schema_input`. An empty value fails these cases CLOSED rather than comparing against
+# nothing.
+schema_line=$(grep -n '^verify_corpus_schema_input' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
 # The GENERATION site, not the variable assignment: `TICKET_TEMPLATE=` (line ~359) is just a
 # path, while the `write_ticket_template` call is where the ticket is actually DERIVED from the
 # DDL. Anchoring on the assignment measured the wrong line and failed this case for the wrong
@@ -1117,7 +1126,11 @@ schema_line=$(grep -n 'verify_schema_input' "$REPO_ROOT/scripts/perf/ws0-baselin
 # the pin). Anchored on the FUNCTION NAME rather than on an argv shape: the function is what
 # derives the ticket, whatever the call is spelled like, and an empty `ticket_line` fails this case
 # closed rather than silently comparing against nothing.
-ticket_line=$(grep -n 'write_ticket_template' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+#
+# Round 13's F2 split moved the derivation's BODY into `lib-inputs.sh` too, so the driver-side anchor
+# is now its call `write_ticket_template_for_session` — still the ONE place the driver derives the
+# ticket, and still anchored on a function name rather than an argv shape.
+ticket_line=$(grep -n '^write_ticket_template_for_session' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
 loop_line=$(grep -n '^for temp in \$TEMPS; do' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
 if [ -n "$schema_line" ] && [ -n "$loop_line" ] && [ "$schema_line" -lt "$loop_line" ]; then
   pass "round6 R2: the DRIVER verifies the schema at line $schema_line, BEFORE the measurement loop at line $loop_line (wired, not reporter-only)"
@@ -1166,7 +1179,9 @@ digest = pin["pinned_ticket_sha256"]
 assert len(digest) == 64 and digest == digest.lower(), pin
 # The recorded digest must be the digest OF THE FILE — the whole difference between a pin and a
 # string. Re-derived here independently of the reporter.
-on_disk = hashlib.sha256((pathlib.Path(sys.argv[2]) / "ticket-template.json").read_bytes()).hexdigest()
+# FROM THE SESSION DIR since round 13's F2 — the ticket is a property of the session, and lives in
+# the directory `claim_out_dir` owns exclusively, never in the shared corpus.
+on_disk = hashlib.sha256((pathlib.Path(sys.argv[1]).parent / "ticket-template.json").read_bytes()).hexdigest()
 assert digest == on_disk, (digest, on_disk)
 assert pin["pinned_ticket_bytes"] > 0, pin
 PY
@@ -1190,7 +1205,8 @@ fi
 d="$TMP/ticket-pin-swap"; make_session "$d" "$GOOD_FLIGHT"
 cp -R "$TMP/corpus" "$TMP/corpus-ticket-swap"
 ws0_pin_session_corpus "$d" "$TMP/corpus-ticket-swap"
-python3 - "$TMP/corpus-ticket-swap" <<'PY'
+# MUTATED IN THE SESSION DIR (#3272 round 13, F2): that is where the request lives now.
+python3 - "$d" <<'PY'
 import json, pathlib, sys
 # A LIMIT added to the request — a change that makes the Flight arm stream a fraction of the rows
 # the bare-scan arm does, i.e. exactly the kind of edit that produces a meaningless ratio while
@@ -1255,12 +1271,151 @@ fi
 d="$TMP/ticket-missing"; make_session "$d" "$GOOD_FLIGHT"
 cp -R "$TMP/corpus" "$TMP/corpus-ticket-missing"
 ws0_pin_session_corpus "$d" "$TMP/corpus-ticket-missing"
-rm -f "$TMP/corpus-ticket-missing/ticket-template.json"
+# REMOVED FROM THE SESSION DIR (#3272 round 13, F2).
+rm -f "$d/ticket-template.json"
 out=$(run_report "$d" "$TMP/corpus-ticket-missing"); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'pinned Flight ticket' <<<"$out"; then
   pass "OBSERVED (round10 M1): a session whose pinned ticket is MISSING at report time is refused naming the file"
 else
   fail "round10 M1: a missing pinned ticket must be refused (rc=$rc, out: $out)"
+fi
+
+# ==========================================================================
+# ROUND 13, F2 — THE TICKET IS THE SESSION'S, NOT THE CORPUS'S
+# ==========================================================================
+# M1 above correctly brought the Flight ticket into the provenance guarantee, and wrote it into the
+# SHARED CORPUS DIRECTORY. Two consequences, both real:
+#
+#   * TWO CONCURRENT SESSIONS OVER ONE CORPUS COLLIDE. A corpus is a 2.8 GB artifact whose whole
+#     point is to be generated once and measured repeatedly, so two lanes measuring it at the same
+#     time is the ordinary case. Both drivers wrote `<corpus>/ticket-template.json`, so B's write
+#     landed BETWEEN A's pin and A's reps: a differing shape made A refuse at the end of a
+#     multi-minute run, diagnosing a mid-session mutation nobody performed, and an identical shape
+#     agreed silently — a guarantee held by luck rather than by ownership.
+#   * IT FORCED AN IMMUTABLE CORPUS TO BE WRITABLE. Nothing else in a measurement writes to the
+#     corpus, so it can be mounted read-only, chmod'ed `a-w`, or shared between users — except that
+#     every session had to create a file in it.
+#
+# The ticket now lives in the session's OUTPUT DIR, which `claim_out_dir` claims EXCLUSIVELY. Same
+# ownership move round 12's F2 made for the measured binaries (copied into a session-owned
+# `measured-bin/` and hashed at the destination), reused rather than reinvented.
+#
+# CASE 1 — TWO SESSIONS, ONE CORPUS, DIFFERENT REQUESTS: both report, neither is disturbed.
+cp -R "$TMP/corpus" "$TMP/corpus-shared"
+dA="$TMP/ticket-concurrent-a"; make_session "$dA" "$GOOD_FLIGHT"
+dB="$TMP/ticket-concurrent-b"; make_session "$dB" "$GOOD_FLIGHT"
+ws0_pin_session_corpus "$dA" "$TMP/corpus-shared"
+ws0_pin_session_corpus "$dB" "$TMP/corpus-shared"
+# Session B's request is DIFFERENT — a LIMIT, the exact edit the M1 mutation case uses. Pre-fix this
+# single file was shared, so writing it here would have changed A's request too; A's pin then
+# refused (or agreed by luck). Post-fix the two are separate files and B's write cannot reach A.
+python3 - "$dB" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "ticket-template.json"
+j = json.loads(p.read_text())
+j["limit"] = 1000
+p.write_text(json.dumps(j, indent=1))
+PY
+# ...and B RE-PINS over its own modified ticket, which is what a real second session does: it writes
+# its request and then pins it. (A is already pinned — that is the interleaving under test.)
+python3 - "$REPO_ROOT/scripts/perf" "$dB" <<'PY'
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_ticket_input import measure_ticket_digest
+d = pathlib.Path(sys.argv[2])
+pin = json.loads((d / "session-corpus-pin.json").read_text())
+pin["ticket_template_sha256"] = measure_ticket_digest(d)
+(d / "session-corpus-pin.json").write_text(json.dumps(pin, indent=1) + "\n")
+PY
+outA=$(run_report "$dA" "$TMP/corpus-shared"); rcA=$?
+outB=$(run_report "$dB" "$TMP/corpus-shared"); rcB=$?
+if [ "$rcA" -eq 0 ] && [ "$rcB" -eq 0 ]; then
+  pass "OBSERVED (round13 F2): TWO sessions over ONE corpus, with DIFFERENT requests, BOTH report — the ticket is per-session, so B's write cannot land between A's pin and A's reps"
+else
+  fail "round13 F2: two concurrent sessions over one corpus must not collide (rcA=$rcA rcB=$rcB, A: $outA, B: $outB)"
+fi
+# NON-VACUITY, and it MEASURES the pre-fix collision rather than arguing it: the two sessions really
+# do carry DIFFERENT pinned requests (so pre-fix, over one shared file, at most one of them could
+# have been right), and the corpus holds NO ticket at all.
+if python3 - "$dA" "$dB" "$TMP/corpus-shared" <<'PY'
+import json, pathlib, sys
+a, b, corpus = (pathlib.Path(x) for x in sys.argv[1:4])
+pa = json.loads((a / "session-corpus-pin.json").read_text())["ticket_template_sha256"]
+pb = json.loads((b / "session-corpus-pin.json").read_text())["ticket_template_sha256"]
+assert pa != pb, ("the two sessions must pin DIFFERENT requests, or the collision is not modelled", pa)
+# Each digest is of THAT session's OWN file — the property a shared path cannot have.
+import hashlib
+for d, pinned in ((a, pa), (b, pb)):
+    got = hashlib.sha256((d / "ticket-template.json").read_bytes()).hexdigest()
+    assert got == pinned, (d, got, pinned)
+assert not (corpus / "ticket-template.json").exists(), \
+    "the corpus must hold NO ticket — pre-fix this was the ONE shared file both sessions wrote"
+PY
+then
+  pass "NON-VACUITY (round13 F2): the two sessions pin DIFFERENT requests, each digest is of THAT session's OWN file, and the shared corpus holds NO ticket — pre-fix there was one file and the second writer won"
+else
+  fail "round13 F2: the concurrency fixture must model two different requests over one corpus"
+fi
+# CASE 2 — A READ-ONLY CORPUS. The guarantee stated positively: nothing in a session writes to the
+# corpus, so a corpus with no write permission must still be measurable. Pre-fix the ticket write
+# was the ONE thing that made this impossible.
+cp -R "$TMP/corpus" "$TMP/corpus-readonly"
+chmod a-w "$TMP/corpus-readonly" "$TMP/corpus-readonly/ws0" "$TMP/corpus-readonly/ws0/events"
+d="$TMP/ticket-readonly-corpus"; make_session "$d" "$GOOD_FLIGHT"
+# The fixture's pin path calls the SHIPPED ticket writer, so if anything still wrote into the corpus
+# this would fail here rather than in the report.
+ws0_pin_session_corpus "$d" "$TMP/corpus-readonly"
+out=$(run_report "$d" "$TMP/corpus-readonly"); rc=$?
+# NON-VACUITY for the fixture: the corpus really is unwritable on this box (a root-owned test run,
+# or a filesystem ignoring mode bits, would make the case vacuous — so it is MEASURED, and reported
+# rather than silently skipped).
+if : > "$TMP/corpus-readonly/probe-write" 2>/dev/null; then
+  rm -f "$TMP/corpus-readonly/probe-write"
+  fail "round13 F2: the read-only corpus fixture is NOT read-only on this box (running as root, or a filesystem ignoring mode bits), so this case cannot test the property"
+else
+  pass "NON-VACUITY (round13 F2): the fixture corpus really REFUSES a write, so the case below tests the property rather than passing for free"
+fi
+if [ "$rc" -eq 0 ] && python3 - "$d" "$TMP/corpus-readonly" <<'PY'
+import json, pathlib, sys
+d, corpus = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+assert (d / "ticket-template.json").is_file(), "the ticket must be in the SESSION dir"
+assert not (corpus / "ticket-template.json").exists(), "nothing may be written into the corpus"
+pin = json.loads((d / "results.json").read_text())["session_corpus_pin"]
+assert len(pin["pinned_ticket_sha256"]) == 64, pin
+PY
+then
+  pass "OBSERVED (round13 F2): a session over a READ-ONLY corpus pins its request and REPORTS — the ticket lands in the session dir and the corpus is never written to (pre-fix the ticket write made a read-only corpus unmeasurable)"
+else
+  fail "round13 F2: a read-only corpus must still be measurable (rc=$rc, out: $out)"
+fi
+chmod u+w "$TMP/corpus-readonly" "$TMP/corpus-readonly/ws0" "$TMP/corpus-readonly/ws0/events"
+# ...and the DRIVER must resolve the ticket path under `$OUT_DIR`, not under `$CORPUS`. Structural,
+# because the wiring is what makes the two cases above properties of a real run rather than of the
+# fixtures: a driver still writing into the corpus would satisfy neither.
+#
+# Asserted over the DRIVER **and** its libraries, because F2's campsite split moved the assignment
+# into `lib-inputs.sh` (beside the write that creates the file, the way `record_measured_binaries`
+# reassigns `$BIN` beside the freeze). Scanning only the driver would have read as "no assignment
+# anywhere" and passed the negative half for free — so both halves are asserted over the same set of
+# files, and the ABSENCE of any assignment fails.
+ticket_var_line=$(grep -n '^ *TICKET_TEMPLATE=' \
+  "$REPO_ROOT/scripts/perf/ws0-baseline.sh" "$REPO_ROOT"/scripts/perf/lib-*.sh | head -1)
+if grep -qE '^ *TICKET_TEMPLATE="\$OUT_DIR/' \
+     "$REPO_ROOT/scripts/perf/ws0-baseline.sh" "$REPO_ROOT"/scripts/perf/lib-*.sh \
+   && ! grep -qE '^ *TICKET_TEMPLATE="\$CORPUS/' \
+     "$REPO_ROOT/scripts/perf/ws0-baseline.sh" "$REPO_ROOT"/scripts/perf/lib-*.sh; then
+  pass "round13 F2 wired: the rig resolves the ticket under \$OUT_DIR, never \$CORPUS ($ticket_var_line)"
+else
+  fail "round13 F2: TICKET_TEMPLATE must resolve under \$OUT_DIR (got: ${ticket_var_line:-<absent>})"
+fi
+# ...and it must be written AFTER the output dir is created and claimed, or `$OUT_DIR` would be
+# empty at that point and the write would land at a path rooted at nothing.
+outdir_line=$(grep -n 'OUT_DIR="\$(create_out_dir' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+ticket_write_line=$(grep -n '^write_ticket_template_for_session' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" | head -1 | cut -d: -f1)
+if [ -n "$outdir_line" ] && [ -n "$ticket_write_line" ] && [ "$outdir_line" -lt "$ticket_write_line" ]; then
+  pass "round13 F2 wired: the output dir is created+claimed at line $outdir_line BEFORE the ticket is written at line $ticket_write_line (the session must own the directory before it writes its request into it)"
+else
+  fail "round13 F2: the out dir must be created before the ticket is written (outdir=$outdir_line ticket=$ticket_write_line)"
 fi
 
 # ==========================================================================
@@ -1433,7 +1588,7 @@ fi
 # `pass`/`fail` to report their call site), set just below it so adding a case does not red the
 # suite, and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=94
+MIN_CHECKS=100
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

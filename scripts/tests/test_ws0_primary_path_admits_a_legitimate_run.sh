@@ -417,8 +417,11 @@ rows = 1000
     "bytes_per_row": len(raw) / rows, "components": components,
     "schema_sha256": hashlib.sha256(ddl).hexdigest(),
 }))
-# THE SHIPPED ticket writer, then the shipped verifier over what it wrote.
-write_ticket_template(corpus, corpus / "ws0-events.cql")
+# THE SHIPPED ticket writer, then the shipped verifier over what it wrote. Into the SESSION dir
+# (#3272 round 13, F2): the request is a property of the session and lives in the directory
+# `claim_out_dir` owns exclusively, so the corpus — a shared, potentially read-only artifact — is
+# never written to. Pre-F2 this wrote into `corpus`, which two concurrent sessions collided on.
+write_ticket_template(session, corpus / "ws0-events.cql")
 
 identity = load_corpus_identity(corpus)
 schema_rec = verify_schema_input(corpus, identity)
