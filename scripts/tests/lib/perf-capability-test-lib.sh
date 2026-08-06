@@ -35,8 +35,29 @@ PERFLIB="$SCRIPT_DIR/../perf-capability.sh"
 
 PASS=0
 FAIL=0
+SKIP=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# skip <case> <reason>: a LOUD, COUNTED skip (issue #3261, roborev round 5 Medium). A case that
+# cannot run on this host must still be VISIBLE in the tally — an absent case and a passing case
+# look identical in a green run, which is the vacuous-pass shape this repo has a standing rule
+# against. So every skip prints its own line WITH the reason and increments a counter that the
+# summary always reports, even when zero. It is deliberately NOT a pass: `skip` never touches PASS.
+skip() { printf 'SKIP - %s  [reason: %s]\n' "$1" "$2"; SKIP=$((SKIP + 1)); }
+
+# perf_install_supported: does THIS host have the GNU coreutils behaviour the staged installer
+# needs? Probed AFFIRMATIVELY (does the flag actually work here) rather than inferred from `uname`,
+# because the property that matters is the tool behaviour, not the OS name. `stat -c` and
+# `mv -T`/`--no-target-directory` are GNU-only; macOS/BSD ship neither, and macOS is a FIRST-CLASS
+# gate host in this repo (#3296 spent 13 rounds on exactly this class). Production is unaffected
+# either way — bootstrap gates the whole perf section on PLATFORM=linux — but the SUITE used to
+# invoke the installer unconditionally, so a macOS gate run failed on the toolchain, not on
+# behaviour.
+perf_install_supported() {
+  stat -c '%a' . >/dev/null 2>&1 || return 1
+  mv --help 2>&1 | grep -q -- '--no-target-directory' || return 1
+  return 0
+}
 
 # sudo_perf_offenders <tripwire-log>: the recorded `sudo` lines belonging to the PERF
 # path (its `-n` availability probe, its `tee`, its `sysctl`) that do NOT carry `-n`.
@@ -294,6 +315,9 @@ perf_test_assert_host_clean() {
 # perf_test_report: the trailing count line + the suite's exit status.
 perf_test_report() {
   echo
-  echo "PASS=$PASS FAIL=$FAIL"
+  # SKIP is ALWAYS reported, including as 0. A count that only appears when non-zero teaches a
+  # reader to treat its absence as "nothing was skipped", which is exactly the inference that makes
+  # a silently-absent case indistinguishable from a passing one (#3261 roborev round 5).
+  echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
   [ "$FAIL" -eq 0 ]
 }
