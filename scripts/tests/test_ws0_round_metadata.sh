@@ -88,7 +88,7 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # shellcheck source=scripts/tests/lib-ws0-report-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
 
-GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","endpoint":"__ENDPOINT__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","endpoint":"__ENDPOINT__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"bytes_total":'"$WS0_PREFLIGHT_BYTES_PER_SCAN"',"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 
@@ -223,9 +223,13 @@ d="$TMP/paired"; mkdir -p "$d"
 for rep in 1 2 3; do
   make_scan_rep "$d" warm "$rep" ok
 done
-python3 - "$d" "$CORPUS_ROWS" "$WS0_FIXTURE_ENDPOINT" <<'PY'
+python3 - "$d" "$CORPUS_ROWS" "$WS0_FIXTURE_ENDPOINT" "$WS0_PREFLIGHT_BYTES_PER_SCAN" <<'PY'
 import json, pathlib, sys
 d, rows, endpoint = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+# The ARROW PAYLOAD VOLUME one full-corpus scan carries, from the SHARED fixture constant
+# (#3272 round 17) rather than a literal here — the reporter compares each rep against its
+# untimed preflight, and two spellings would refuse a healthy case for an unrelated reason.
+per_scan_bytes = int(sys.argv[4])
 # flight rows/s per round: two rounds below the bare scan's 500/s (1000 rows / 2.0s),
 # one above — so 1 of 3 rounds meets a 1.3x target while the median does not.
 #
@@ -251,9 +255,19 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         # case's subject.
         "round": tag, "endpoint": endpoint,
         "requests_ok": 1, "requests_error": 0, "requests_unavailable": 0,
-        "rows_total": rows, "rows_per_s": rows / secs, "duration_s": secs}) + "\n")
+        # ...and the ARROW PAYLOAD VOLUME at the value one full-corpus scan carries (#3272 round
+        # 17), for the same reason again: the reporter now compares it against this rep's untimed
+        # preflight, so a body without it is refused correctly but for an unrelated reason.
+        "rows_total": rows, "bytes_total": per_scan_bytes,
+        "rows_per_s": rows / secs, "duration_s": secs}) + "\n")
     (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
     (d / f"{tag}.prewarm.status").write_text("ok\n")
+    # The UNTIMED PREFLIGHT the reporter derives the expectation from — 3 requests, so the
+    # reporter has to divide rather than compare totals whole.
+    (d / f"{tag}.prewarm.jsonl").write_text(json.dumps({
+        "schema": "flight-loadgen.step/v1", "round": "prewarm", "requests_ok": 3,
+        "requests_error": 0, "requests_unavailable": 0, "rows_total": 3 * rows,
+        "bytes_total": 3 * per_scan_bytes}) + "\n")
     # The round metadata the reporter REQUIRES, alternating position by
     # round exactly as the driver does — the scan fixture takes the complement.
     # `monotonic_ns` too (#3272 review round 3, B3): round-major and distinct, which is
@@ -634,9 +648,13 @@ done
 # Distinct ROW COUNTS, so the swap is a real corruption of a figure and not merely a relabelling:
 # post-swap, rep 1's file holds rep 2's rows. Both are exact multiples of the corpus row count, so
 # the full-corpus check cannot catch it either — which is the point.
-python3 - "$d" "$CORPUS_ROWS" "$WS0_FIXTURE_ENDPOINT" <<'PY'
+python3 - "$d" "$CORPUS_ROWS" "$WS0_FIXTURE_ENDPOINT" "$WS0_PREFLIGHT_BYTES_PER_SCAN" <<'PY'
 import pathlib, sys
 d, rows, endpoint = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+# The ARROW PAYLOAD VOLUME one full-corpus scan carries, from the SHARED fixture constant
+# (#3272 round 17) rather than a literal here — the reporter compares each rep against its
+# untimed preflight, and two spellings would refuse a healthy case for an unrelated reason.
+per_scan_bytes = int(sys.argv[4])
 for rep, mult in ((1, 1), (2, 2)):
     tag = f"flight-bypass-warm-{rep}"
     # The record is REP 2's when rep == 2 — written correctly first, then swapped below.
@@ -646,7 +664,14 @@ for rep, mult in ((1, 1), (2, 2)):
     (d / f"{tag}.jsonl").write_text(
         '{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full",'
         f'"round":"{tag}","endpoint":"{endpoint}","requests_ok":{mult},"requests_error":0,"requests_unavailable":0,'
-        f'"rows_total":{rows * mult},"rows_per_s":{rows * mult / 4.0},"duration_s":4.0}}'
+        f'"rows_total":{rows * mult},"bytes_total":{per_scan_bytes * mult},'
+        f'"rows_per_s":{rows * mult / 4.0},"duration_s":4.0}}'
+        "\n"
+    )
+    (d / f"{tag}.prewarm.jsonl").write_text(
+        '{"schema":"flight-loadgen.step/v1","round":"prewarm","requests_ok":3,'
+        '"requests_error":0,"requests_unavailable":0,'
+        f'"rows_total":{3 * rows},"bytes_total":{3 * per_scan_bytes}}}'
         "\n"
     )
 a, b = d / "flight-bypass-warm-1.jsonl", d / "flight-bypass-warm-2.jsonl"

@@ -86,12 +86,24 @@ EOF
 # it to EQUAL the manifest's `config.flight_endpoint`, so the bodies bind to the ONE fixture
 # constant rather than each spelling a literal — a case whose subject is a record from ANOTHER
 # SERVER writes that endpoint literally, and is refused.
+#
+# ...and the UNTIMED PREFLIGHT JSONL (`<tag>.prewarm.jsonl`) is written for every WARM rep
+# (#3272 round 17), because the driver writes one: `lib-measure.sh`'s prewarm leg retains it
+# to that exact path, OUTSIDE the perf window, and the reporter now derives each rep's
+# expected ARROW PAYLOAD VOLUME from it. Without it every fixture session would take the
+# no-oracle branch and the content-volume check would never fire in any suite — a guard
+# present and unexercised, which is the shape this issue keeps finding.
+#
+# The COLD arm deliberately gets NO preflight, matching the driver: a prewarm there would make
+# `cold` meaningless, so a cold-only session legitimately has no oracle and the reporter names
+# that gap. A case whose SUBJECT is a SHORT PAYLOAD writes its own preflight/body pair.
 make_flight_rep() {
   local d="$1" tag="flight-bypass-$2-$3" body="$5"
   body="${body//__TAG__/$tag}"
   printf '%s\n' "${body//__ENDPOINT__/$WS0_FIXTURE_ENDPOINT}" > "$d/$tag.jsonl"
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
+  [ "$2" != "warm" ] || ws0_make_preflight "$d" "$tag" "$WS0_PREFLIGHT_BYTES_PER_SCAN"
   # ...and the flight arm takes the OTHER position, mirroring the driver.
   make_round "$d" "$tag" "$3" "$(ws0_alternating_position "$3" flight)"
 }
@@ -100,7 +112,7 @@ make_flight_rep() {
 # it (#3272 F4): the admission-shed counter was completely unread, so a rep whose requests
 # the server SHED was reported as failure-free. A fixture omitting it is refused — which is
 # the guard working, and is why the cases whose subject IS the omission set it explicitly.
-GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","endpoint":"__ENDPOINT__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","endpoint":"__ENDPOINT__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"bytes_total":'"$WS0_PREFLIGHT_BYTES_PER_SCAN"',"rows_per_s":250.0,"duration_s":4.0}'
 
 # make_session <dir> <flight-jsonl> — a complete one-warm-rep session dir.
 make_session() {

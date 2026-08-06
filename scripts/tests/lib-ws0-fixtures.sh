@@ -61,6 +61,40 @@ WS0_SCAN_FIXED='"arm":"bare_scan","surface":"cqlite_core::Database::execute_stre
 # two cannot drift: a fixture whose corpus pins 12 while its passes are built for 9 would refuse
 # every healthy case for a reason unrelated to its subject.
 WS0_CELLS_PER_ROW=12
+
+# The ARROW PAYLOAD VOLUME one full-corpus scan carries, in the fixture corpora (#3272 round 17).
+#
+# The Flight arm's counterpart of `WS0_CELLS_PER_ROW` above, and it closes the same class on the
+# other arm: the row count says how many rows a RESPONSE carried and says nothing about how many
+# ARROW COLUMNS of each it encoded, so a response with every row and MISSING COLUMNS made Arrow
+# encoding look CHEAPER — the one quantity #3096 exists to measure — while satisfying every
+# request/row/rate/counter check.
+#
+# The reporter derives the expectation from the session's UNTIMED PREFLIGHT, so a healthy fixture
+# must write one that AGREES with its timed bodies. Both are built from this constant: a
+# per-scan volume, multiplied by the rep's `requests_ok`. The value is arbitrary in magnitude and
+# deliberately NOT round — a figure like 1000000 could be produced by a coincidence of two
+# unrelated multiplications, and this one cannot.
+WS0_PREFLIGHT_BYTES_PER_SCAN=87654321
+
+# `ws0_flight_bytes <requests_ok>` — the `bytes_total` a HEALTHY rep serving that many full-corpus
+# scans carries. A case whose subject is a SHORT PAYLOAD writes its own (smaller) value literally
+# and is then refused, which is the guard working.
+ws0_flight_bytes() { echo $(( $1 * WS0_PREFLIGHT_BYTES_PER_SCAN )); }
+
+# `ws0_make_preflight <dir> <tag> <bytes-per-scan> [requests_ok]` — the UNTIMED PREFLIGHT artifact
+# the driver's prewarm leg retains at `<tag>.prewarm.jsonl`, and the reporter's sole oracle for the
+# expected Arrow payload volume.
+#
+# `requests_ok` defaults to 3, NOT 1, and that is the point of having it: the preflight runs a fixed
+# 20s step, so its request count is whatever fits and bears no relation to a timed rep's. The
+# reporter must therefore divide to get a PER-SCAN figure — a fixture that always wrote 1 would let
+# a reporter that compared the totals whole pass every healthy case.
+ws0_make_preflight() {
+  local d="$1" tag="$2" per_scan="$3" ok="${4:-3}"
+  printf '%s\n' "{\"schema\":\"flight-loadgen.step/v1\",\"round\":\"prewarm\",\"requests_ok\":$ok,\"requests_error\":0,\"requests_unavailable\":0,\"rows_total\":$(( ok * ${CORPUS_ROWS:-1000} )),\"bytes_total\":$(( ok * per_scan ))}" \
+    > "$d/$tag.prewarm.jsonl"
+}
 # `ws0_scan_pass_cells <rows>` — the cell count a HEALTHY pass over `<rows>` rows emits. A case
 # whose subject is a THINNER scan writes its own (short) value literally and is then refused.
 ws0_scan_pass_cells() { echo $(( $1 * WS0_CELLS_PER_ROW )); }
