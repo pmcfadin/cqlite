@@ -972,13 +972,261 @@ else
 fi
 
 # ==========================================================================
+# ROUND 21, F5 — WAS THE SNAPSHOT ONE BUILD? A destination digest verifies the WRITE AGAINST ITSELF
+# ==========================================================================
+# F2 froze the executables and F3 verified every field of each recorded spec against the copy on
+# disk. Neither checked THE SNAPSHOT. The copies are taken SEQUENTIALLY, in a loop, AFTER cargo has
+# released its build lock — so a concurrent build can replace an artifact BETWEEN two copies, and the
+# session then measures a ratio between a build-A scan arm and a build-B Flight arm.
+#
+# The finding's whole point is that the pre-fix code cannot see it: the recorded digest is taken AT
+# THE DESTINATION, so it hashes what it WROTE. That proves the COPY SUCCEEDED and ties the bytes to
+# no build at all — the artifact verified against itself, which is #3042's round-trip shape
+# (self-consistency standing in for independence) and #3249's bar restated: a per-file digest that
+# can never disagree with itself cannot be OBSERVED TO FIRE.
+#
+# So the interleaving is EXECUTED, not described: `shutil.copy2` is wrapped so that the FIRST copy,
+# once it has completed, replaces a LATER binary's source — exactly a `cargo build` landing between
+# two iterations of the loop. Three things are then measured, in this order:
+#
+#   (1) THE PRE-FIX CODE ACCEPTS IT. A faithful re-enactment of the pre-fix loop (copy, stat, hash
+#       the destination) is run over the same interleaving and must COMPLETE. Asserted, so this case
+#       REDS if the premise ever stops reproducing.
+#   (2) EVERY PRE-FIX DESTINATION DIGEST VALIDATES ANYWAY. Each recorded digest is re-derived from
+#       the copy it describes and must MATCH — which is the finding: the record is internally
+#       impeccable while describing two builds.
+#   (3) THE FIXED CODE REFUSES, NAMING THE ARTIFACT THAT MOVED.
+if python3 - "$REPO_ROOT/scripts/perf" "$TMP/f5-interleave" <<'PY'
+import hashlib, os, pathlib, shutil, sys
+sys.path.insert(0, sys.argv[1])
+import ws0_binary_snapshot as snap
+from ws0_binaries import MEASURED_BINARIES
+from ws0_validate import Invalid
+
+base = pathlib.Path(sys.argv[2])
+FIRST, LATER = MEASURED_BINARIES[0], MEASURED_BINARIES[-1]
+
+
+def build_tree(tag):
+    """A fresh (bindir, session) pair. Mode 0755 — a measured binary is executable."""
+    root = base / tag
+    bindir, session = root / "bin", root / "session"
+    for d in (bindir, session):
+        d.mkdir(parents=True, exist_ok=True)
+    for i, name in enumerate(MEASURED_BINARIES):
+        p = bindir / name
+        p.write_bytes(b"\x7fELF-BUILD-A" + bytes([i]) * 64)
+        os.chmod(p, 0o755)
+    return bindir, session
+
+
+def interleaving_copy2(bindir, victim):
+    """`copy2`, wrapped so the FIRST copy's completion replaces `victim`'s SOURCE (#3272 F5).
+
+    That is a concurrent `cargo build` landing BETWEEN two iterations of the sequential copy loop —
+    the real interleaving, executed, rather than a hand-edited field. `victim` selects the POSITION,
+    and the two positions are caught by different halves of the fix:
+
+      * `victim is FIRST` — an ALREADY-COPIED artifact's source moves. Its own copy validated at the
+        time and still does, so ONLY the post-loop re-verification can see it. This is the purest
+        form of the finding.
+      * `victim is LATER` — a NOT-YET-COPIED artifact's source moves, so its copy receives bytes the
+        capture did not identify, and the per-copy comparison catches it.
+    """
+    real, fired = shutil.copy2, []
+
+    def wrapper(src, dst, *a, **kw):
+        out = real(src, dst, *a, **kw)
+        if pathlib.PurePath(src).name == FIRST and not fired:
+            fired.append(True)
+            moved = bindir / victim
+            moved.write_bytes(b"\x7fELF-BUILD-B-RELINKED" + b"\xee" * 96)
+            os.chmod(moved, 0o755)
+        return out
+
+    return wrapper, fired
+
+
+# ---- (1) THE PRE-FIX CODE ACCEPTS IT, and (2) every destination digest validates ----------------
+# The pre-fix loop, re-enacted faithfully: copy, stat, hash THE DESTINATION. No source identity is
+# captured, so there is nothing for the digest to disagree with.
+for tag, victim in (("prefix-later", LATER), ("prefix-first", FIRST)):
+    bindir, session = build_tree(tag)
+    dest_dir = session / "measured-bin"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    wrapper, fired = interleaving_copy2(bindir, victim)
+    prefix_record = {}
+    for name in MEASURED_BINARIES:
+        src, dst = bindir / name, dest_dir / name
+        wrapper(src, dst)
+        prefix_record[name] = {"sha256": hashlib.sha256(dst.read_bytes()).hexdigest(),
+                               "bytes": dst.stat().st_size}
+    assert fired, f"{tag}: the interleaving never fired — the probe is broken"
+    assert len(prefix_record) == len(MEASURED_BINARIES), prefix_record
+    # (2) EVERY destination digest re-derives correctly. This is the finding, measured: the record is
+    # internally impeccable, and the session holds binaries from TWO BUILDS.
+    for name, spec in prefix_record.items():
+        copy = dest_dir / name
+        assert hashlib.sha256(copy.read_bytes()).hexdigest() == spec["sha256"], (tag, name)
+        assert copy.stat().st_size == spec["bytes"], (tag, name)
+    # ...and the SESSION really does span two builds, which is what makes the accept above a DEFECT
+    # rather than a session that happened to be consistent. The replacement landed, and the two
+    # positions show it in DIFFERENT PLACES — which is the finding's structure, not an accident:
+    assert (bindir / victim).read_bytes().startswith(b"\x7fELF-BUILD-B-RELINKED"), tag
+    if victim == LATER:
+        # A not-yet-copied source moved, so the FROZEN SET itself holds both builds: the session
+        # would run a build-A scan arm against a build-B Flight/loadgen arm.
+        assert (dest_dir / FIRST).read_bytes().startswith(b"\x7fELF-BUILD-A"), tag
+        assert (dest_dir / LATER).read_bytes().startswith(b"\x7fELF-BUILD-B-RELINKED"), tag
+    else:
+        # An already-copied artifact's source moved, so the FROZEN SET looks entirely consistent and
+        # the divergence exists only between the copy and the build that now sits in target/release.
+        # That is why nothing at the destination — the only thing the pre-fix code read — can see it.
+        assert (dest_dir / victim).read_bytes().startswith(b"\x7fELF-BUILD-A"), tag
+        assert (dest_dir / victim).read_bytes() != (bindir / victim).read_bytes(), tag
+
+# ---- (3) THE FIXED CODE REFUSES, NAMING THE ARTIFACT THAT MOVED, AT BOTH POSITIONS -------------
+for tag, victim, expected in (
+    # A NOT-YET-COPIED source moves: the copy receives bytes the capture did not identify.
+    ("fixed-later", LATER, "did NOT receive the bytes this session identified"),
+    # An ALREADY-COPIED artifact's source moves: its copy validated then and validates now, so ONLY
+    # the post-loop re-read can see it. The purest form of the finding.
+    ("fixed-first", FIRST, "NOT ONE BUILD"),
+):
+    bindir, session = build_tree(tag)
+    wrapper, fired = interleaving_copy2(bindir, victim)
+    saved = shutil.copy2
+    shutil.copy2 = wrapper
+    try:
+        snap.freeze_measured_binaries(session, bindir, MEASURED_BINARIES)
+    except Invalid as exc:
+        msg = str(exc)
+    else:
+        raise AssertionError(
+            f"{tag}: the FIXED code ACCEPTED a snapshot spanning two builds — no refusal fired"
+        )
+    finally:
+        shutil.copy2 = saved
+    assert fired, f"{tag}: the interleaving never fired, so the refusal is not this case's subject"
+    assert victim in msg, f"{tag}: the refusal must NAME the artifact that moved ({victim}): {msg}"
+    assert expected in msg, (tag, msg)
+PY
+then
+  pass "OBSERVED (round21 F5): a source artifact replaced BETWEEN two sequential copies is REFUSED naming it — and MEASURED on the same interleaving, the PRE-FIX code ACCEPTS the session while EVERY destination digest re-derives correctly, because a destination digest hashes what it WROTE and so verifies the write against itself"
+else
+  fail "round21 F5: a mid-snapshot source replacement must be refused, and the pre-fix accept + all-digests-validate premise must reproduce"
+fi
+# NON-VACUITY, the OTHER direction: the probe must not be uniformly broken. An UNDISTURBED snapshot
+# through the SAME shipped function must still PASS — a check that refuses everything is
+# indistinguishable from one that refuses the right thing, and this rig has hit "a guard made a
+# documented command unrunnable" three times (#3272 L1).
+if python3 - "$REPO_ROOT/scripts/perf" "$TMP/f5-undisturbed" <<'PY'
+import hashlib, os, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import MEASURED_BINARIES
+from ws0_binary_snapshot import (SOURCE_IDENTITY_FIELDS, capture_source_identity,
+                                 freeze_measured_binaries, reverify_source_identity)
+
+base = pathlib.Path(sys.argv[2])
+bindir, session = base / "bin", base / "session"
+for d in (bindir, session):
+    d.mkdir(parents=True, exist_ok=True)
+for i, name in enumerate(MEASURED_BINARIES):
+    p = bindir / name
+    p.write_bytes(b"\x7fELF" + bytes([i]) * 64)
+    os.chmod(p, 0o755)
+
+observed, note = freeze_measured_binaries(session, bindir, MEASURED_BINARIES)
+assert set(observed) == set(MEASURED_BINARIES), sorted(observed)
+assert "ONE BUILD" in note, note
+# The recorded digest must be BOTH the copy's and the source's — the tie the pre-fix code lacked.
+for name, spec in observed.items():
+    copy = session / spec["path"]
+    assert copy.is_file() and os.access(copy, os.X_OK), name
+    assert hashlib.sha256(copy.read_bytes()).hexdigest() == spec["sha256"], name
+    assert hashlib.sha256((bindir / name).read_bytes()).hexdigest() == spec["sha256"], name
+# The identity capture must be the DECLARED field set, in both directions — a declared field nobody
+# captures is one the comparison never reads.
+captured = capture_source_identity(bindir, MEASURED_BINARIES)
+for name, ident in captured.items():
+    assert set(ident) == set(SOURCE_IDENTITY_FIELDS), (name, sorted(ident))
+# ...and re-verification of an untouched tree returns its note rather than raising.
+assert "ONE BUILD" in reverify_source_identity(bindir, captured)
+PY
+then
+  pass "NON-VACUITY (round21 F5): an UNDISTURBED snapshot through the SAME shipped function PASSES, each recorded digest equals BOTH the copy's and the source's, and the identity capture is exactly SOURCE_IDENTITY_FIELDS — so the refusal above is the interleaving being caught, not a check that refuses everything"
+else
+  fail "round21 F5: an undisturbed snapshot must be admitted, else the reject case proves nothing"
+fi
+# FAIL CLOSED when identity cannot be established AT ALL — never "assume unchanged". The unknown case
+# IS the case the finding is about: `--no-build` accepts whatever is on disk, so a source that cannot
+# be identified is one whose copy is attributable to nothing.
+if python3 - "$REPO_ROOT/scripts/perf" "$TMP/f5-unreadable" <<'PY'
+import os, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import MEASURED_BINARIES
+from ws0_binary_snapshot import capture_source_identity, reverify_source_identity
+from ws0_validate import Invalid
+
+base = pathlib.Path(sys.argv[2]); bindir = base / "bin"
+bindir.mkdir(parents=True, exist_ok=True)
+for i, name in enumerate(MEASURED_BINARIES):
+    p = bindir / name
+    p.write_bytes(b"\x7fELF" + bytes([i]) * 64)
+    os.chmod(p, 0o755)
+captured = capture_source_identity(bindir, MEASURED_BINARIES)
+# A source that VANISHED between the capture and the re-verification cannot be compared. Deleting is
+# used rather than chmod 000 because a test running as root can read a 000 file, which would turn
+# this case into a silent pass on some hosts.
+(bindir / MEASURED_BINARIES[1]).unlink()
+try:
+    reverify_source_identity(bindir, captured)
+except Invalid as exc:
+    assert "could not be identified" in str(exc), exc
+    assert "assumption of no change" in str(exc), exc
+else:
+    raise AssertionError("an unidentifiable source must REFUSE, never be assumed unchanged")
+PY
+then
+  pass "OBSERVED (round21 F5): a source that cannot be IDENTIFIED AT ALL during re-verification REFUSES the session — never 'assume unchanged', which is the permissive branch a three-state signal inherits"
+else
+  fail "round21 F5: an unidentifiable source must fail closed"
+fi
+# STRUCTURAL: the source capture must actually REACH the comparison. A snapshot verifier nobody wires
+# in would leave every destination digest exactly as circular as before, under a module claiming to
+# have closed it — round 12 F2's own shape (the thing was done, the check was nominal).
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import pathlib, sys
+d = pathlib.Path(sys.argv[1])
+snap = (d / "ws0_binary_snapshot.py").read_text()
+body = snap[snap.index("def freeze_measured_binaries"):]
+assert "capture_source_identity(bin_dir, names)" in body, "the capture must run BEFORE the copies"
+assert "require_copy_matches_source(name, captured[name], digest)" in body, \
+    "each copy's digest must be compared against its CAPTURED SOURCE digest"
+assert "reverify_source_identity(bin_dir, captured)" in body, \
+    "every source must be re-read AFTER the last copy"
+# ...and the capture must precede the loop, the re-verification follow it: the ORDER is the check.
+assert body.index("capture_source_identity") < body.index("for name in names"), "capture is late"
+assert body.index("for name in names") < body.index("reverify_source_identity"), "re-verify is early"
+# ...and the RECORD must carry the snapshot's verdict, so a reader is told the snapshot was checked.
+binaries = (d / "ws0_binaries.py").read_text()
+assert "observed, snapshot_note = freeze_measured_binaries" in binaries, "the note must be received"
+assert "{snapshot_note}" in binaries, "the note must reach the recorded provenance"
+PY
+then
+  pass "round21 F5 wired: the capture runs BEFORE the copy loop, every copy is compared against its CAPTURED SOURCE digest, every source is RE-READ after the last copy, and the snapshot's verdict reaches the recorded provenance (order asserted, because the order IS the check)"
+else
+  fail "round21 F5: the source capture / re-verification must be wired into the freeze in that order"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # A block that silently never executes lowers the count and registers NO failure, while the gate
 # reads only the exit code. Derived from the real count and set just below it — a floor far behind
 # its count stops being able to see a skipped block, which is the very thing it exists to catch
 # (#3326 item 3).
-MIN_CHECKS=35
+MIN_CHECKS=39
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
