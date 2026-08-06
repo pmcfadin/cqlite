@@ -1292,7 +1292,7 @@ print_scoped_repair_command() {
 # census could not be taken), 0 otherwise. Writes only outside the dataset root.
 report_orphaned_tracked_fixtures() {
   local resolve_rc=0 dataset_abs census_file tracked_count=0
-  local record tag path scan_rc=0 entries xy staged_present=0 shown=0
+  local record tag path staged_file staged_present=0 shown=0
   local -a flagged=() worktree_deleted=() staged_deleted=()
 
   resolve_tracked_subtree_readonly || resolve_rc=$?
@@ -1377,38 +1377,45 @@ report_orphaned_tracked_fixtures() {
 
   # (2) STAGED deletions — the class the index walk above structurally cannot see:
   # `git rm --cached` removes the index entry, so `ls-files` never lists the path.
-  # The porcelain oracle the #3245 guards use DOES report it (`D `), and it is the
-  # same helper rather than a second mechanism. Its output is one "XY <path>" per
-  # line, the helper's established contract.
-  entries="$(tracked_dataset_dirty_entries)" || scan_rc=$?
-  case "${scan_rc}" in
-    0 | 2) ;;
-    *)
-      report_unmeasurable_tracked_census "${entries}"
+  #
+  # Read NUL-delimited, DIRECTLY from git (issue #3310, roborev round 2). The
+  # earlier cut consumed tracked_dataset_dirty_entries, whose git read IS `-z`
+  # (so, measured: space-bearing and non-ASCII paths arrive verbatim — `-z`
+  # disables porcelain's C-quoting) but whose RETURN VALUE is newline-JOINED. That
+  # framing is sound for its own callers, which only count entries and `head -3`
+  # them, and unsound here: a path containing a NEWLINE splits into two records, so
+  # the probe reports a TRUNCATED path and then advertises an "EXACTLY this
+  # command" repair naming a file that does not exist. Every path-reading git
+  # command in this function is therefore `-z`, end to end, with no line framing
+  # anywhere between git and the emitted command.
+  #
+  # `--diff-filter=D` over HEAD..index is exactly the porcelain `D ` class, and
+  # rename detection stays ON (the default): a staged rename reports `R`, so the
+  # old path is not mistaken for a lost fixture.
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    # An UNBORN HEAD cannot have a deletion relative to HEAD — an affirmative
+    # reason to skip, not an unmeasured assumption. (`git diff --cached` would
+    # fail outright here, which must not read as "no staged deletions".)
+    :
+  else
+    if ! staged_file="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-probe-staged.XXXXXX")"; then
+      report_unmeasurable_tracked_census "could not create a scratch file for the staged-deletion scan"
       return 1
-      ;;
-  esac
-
-  if [ "${scan_rc}" = 2 ]; then
-    while IFS= read -r record; do
-      [ -n "${record}" ] || continue
-      xy="${record:0:2}"
-      path="${record:3}"
-      # X == 'D' is a staged deletion. A worktree-only deletion (' D', 'MD', 'RD',
-      # 'AD') is already covered by the index walk above — the path is still in the
-      # index — so taking it from here too would double-report it.
-      case "${xy}" in
-        D?) ;;
-        *) continue ;;
-      esac
+    fi
+    if ! guard_git -C "${TRACKED_GUARD_REPO}" --no-optional-locks diff --cached --name-only \
+      --diff-filter=D -z -- ":(literal)${TRACKED_GUARD_REL}" >"${staged_file}"; then
+      rm -f "${staged_file}"
+      report_unmeasurable_tracked_census "'git diff --cached --diff-filter=D' failed for '${TRACKED_GUARD_REL}' in '${TRACKED_GUARD_REPO}', so staged deletions cannot be ruled out"
+      return 1
+    fi
+    while IFS= read -r -d '' path; do
       if [ ! -e "${TRACKED_GUARD_REPO}/${path}" ] && [ ! -L "${TRACKED_GUARD_REPO}/${path}" ]; then
         staged_deleted+=( "${path}" )
       else
         staged_present=$((staged_present + 1))
       fi
-    done <<EOF
-${entries}
-EOF
+    done <"${staged_file}"
+    rm -f "${staged_file}"
   fi
 
   if [ "${#worktree_deleted[@]}" -gt 0 ] || [ "${#staged_deleted[@]}" -gt 0 ]; then
