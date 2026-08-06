@@ -31,6 +31,9 @@ done
 
 emit() { printf '%s\n' "$*"; }
 
+PROBE_DIR="$(mktemp -d -t ws0-3225-rig-probe-XXXXXX)"
+trap 'rm -rf "$PROBE_DIR"' EXIT
+
 {
 emit "CQLite issue #3225 §2 — MEASUREMENT RIG VERIFICATION"
 emit "===================================================="
@@ -130,7 +133,8 @@ emit "        overlap-probe s6 5,6,13,14 1 10 3 bypass"
 emit "  (server set s6 = 0-5,8-13; client set 5,6,13,14 — they share cpus 5 and 13)"
 emit ""
 set +e
-OVERLAP_OUT="$(cd "$HARNESS_DIR" && WS0_DRY_RUN=1 bash ./sweep.sh overlap-probe s6 5,6,13,14 1 10 3 bypass 2>&1)"
+OVERLAP_OUT="$(cd "$HARNESS_DIR" && WS0_DRY_RUN=1 WS0_RESULTS="$PROBE_DIR/results" WS0_LOGS="$PROBE_DIR/logs" \
+  bash ./sweep.sh overlap-probe s6 5,6,13,14 1 10 3 bypass 2>&1)"
 OVERLAP_RC=$?
 set -e
 emit "  observed exit code: $OVERLAP_RC"
@@ -147,7 +151,8 @@ emit "  command:"
 emit "    WS0_DRY_RUN=1 bash docs/reports/ws0-3217-artifacts/harness/sweep.sh \\"
 emit "        s3-form-probe 0-2,8-10 6,7,14,15 1,2,4,8,16,24,32,64 120 3 bypass"
 set +e
-S3_OUT="$(cd "$HARNESS_DIR" && WS0_DRY_RUN=1 bash ./sweep.sh s3-form-probe 0-2,8-10 6,7,14,15 1,2,4,8,16,24,32,64 120 3 bypass 2>&1)"
+S3_OUT="$(cd "$HARNESS_DIR" && WS0_DRY_RUN=1 WS0_RESULTS="$PROBE_DIR/results" WS0_LOGS="$PROBE_DIR/logs" \
+  bash ./sweep.sh s3-form-probe 0-2,8-10 6,7,14,15 1,2,4,8,16,24,32,64 120 3 bypass 2>&1)"
 S3_RC=$?
 set -e
 if printf '%s' "$S3_OUT" | grep -q 'CPU sets overlap'; then

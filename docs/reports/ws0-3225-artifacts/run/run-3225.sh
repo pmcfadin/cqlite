@@ -134,8 +134,13 @@ fi
 [ -x "$WS0_FLIGHT_BIN" ] || die "WS0_FLIGHT_BIN=$WS0_FLIGHT_BIN is not executable (cargo build --release -p cqlite-flight)"
 [ -x "$WS0_LOADGEN_BIN" ]|| die "WS0_LOADGEN_BIN=$WS0_LOADGEN_BIN is not executable (cargo build --release -p flight-loadgen)"
 [ -f "$WS0_TICKET_TPL" ] || die "WS0_TICKET_TPL=$WS0_TICKET_TPL not found"
-ls "$WS0_STAGE"/*/*Data.db >/dev/null 2>&1 || ls "$WS0_STAGE"/*Data.db >/dev/null 2>&1 \
-  || die "no *-Data.db under $WS0_STAGE — the corpus is not staged"
+# Depth-agnostic on purpose: the staged layout is <stage>/<keyspace>/<table-dir>/*-Data.db,
+# which a fixed-depth glob gets wrong by one level (common.sh's own check only WARNs on
+# that, so it cannot be relied on to catch an unstaged corpus).
+STAGED_DATA_DB_COUNT="$(find "$WS0_STAGE" -name '*-Data.db' -type f 2>/dev/null | wc -l)"
+[ "$STAGED_DATA_DB_COUNT" -ge 1 ] \
+  || die "no *-Data.db anywhere under $WS0_STAGE — the corpus is not staged"
+log "staged corpus: $STAGED_DATA_DB_COUNT *-Data.db file(s) under $WS0_STAGE"
 
 # A live Cassandra (or a stray flight server) would compete for the pinned cores
 # and silently spoil every point. Refuse rather than measure noise.
