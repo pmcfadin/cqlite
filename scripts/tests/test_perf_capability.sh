@@ -1280,6 +1280,29 @@ else
   ok "perf-capability: the line-safety predicate rejects CR as well as LF and still accepts an ordinary path"
 fi
 
+# ...and a FAILING CONTENT GENERATOR must never look like success (roborev round 9, Medium). Both
+# call sites used to lose the generator's status: dropin_current ran a trailing sentinel `printf`
+# whose rc replaced it, so against an EMPTY file the compare was "X" == "X" and reported the drop-in
+# ALREADY CURRENT; dropin_install piped the generator into the privileged shell, so the pipeline's rc
+# was the last command's and a failure only surfaced if the CALLER had `pipefail`. Both are vacuous
+# positives from an unmeasured state. No GNU-only tooling is exercised here: each must fail BEFORE
+# any privileged command runs, which is the property under test.
+cg_dir=$(mktemp -d "$tmp/cg.XXXXXX"); : >"$cg_dir/99-cqlite-perf.conf"
+cg_fail=0
+cg_cur_rc=0
+env CQLITE_PERF_SYSCTL_DIR="$cg_dir" bash -c '
+  . "$1"
+  perf_capability_dropin_content() { return 1; }
+  perf_capability_dropin_current' _ "$PERFLIB" >/dev/null 2>&1 || cg_cur_rc=$?
+[ "$cg_cur_rc" -ne 0 ] || { bad "perf-capability: a FAILING content generator let dropin_current report the drop-in already current (empty file compared equal)"; cg_fail=1; }
+cg_ins_out=$(env CQLITE_PERF_SYSCTL_DIR="$cg_dir" bash -c '
+  . "$1"
+  perf_capability_dropin_content() { return 1; }
+  perf_capability_dropin_install' _ "$PERFLIB" 2>&1); cg_ins_rc=$?
+[ "$cg_ins_rc" -ne 0 ] || { bad "perf-capability: dropin_install succeeded with a FAILING content generator (rc=$cg_ins_rc, out='$cg_ins_out')"; cg_fail=1; }
+[ ! -s "$cg_dir/99-cqlite-perf.conf" ] || { bad "perf-capability: dropin_install wrote content despite a failing generator"; cg_fail=1; }
+[ "$cg_fail" -ne 0 ] || ok "perf-capability: a FAILING drop-in content generator propagates — dropin_current does NOT report 'already current' against an empty file, and dropin_install refuses before any privileged command and writes nothing (#3261 roborev-9)"
+
 # ...and the install is still gated: an out-of-sandbox seam may not be written at all. Same GNU-only
 # toolchain dependency as the staged-install block above, so same counted skip off GNU.
 if ! perf_install_supported; then
