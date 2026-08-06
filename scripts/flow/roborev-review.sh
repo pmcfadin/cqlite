@@ -421,6 +421,21 @@ AGENT=""
 MODEL=""
 REPO_ARG=""
 BASE="origin/main"
+# ===== RECHECK MODE (#3312 job 24): RE-EVALUATE A COMPLETED JOB, ENQUEUE NOTHING =====
+# WHY IT EXISTS, and it is a workflow defect rather than a feature request: the absence waiver is bound
+# to `base+head+job` — which is what makes it unable to outlive the review its authorizer judged — but
+# the operator learns the JOB ID and the token accounting FROM the completed run, and re-running the
+# wrapper to apply a freshly posted waiver ENQUEUES A NEW JOB, so the waiver was instantly STALE. As
+# built, the mechanism was a dead letter: no sequence of actions got a legitimate absence past the gate.
+# `--recheck-job <id>` closes the loop by re-deciding the verdict FOR THAT JOB without reviewing again.
+# The binding is NOT loosened (dropping `job=` would reopen the hole where one persistent comment waives
+# a later VACUOUS review at the same base+head); the loop is closed instead.
+#
+# NOTHING IS ASSUMED BECAUSE IT PASSED ONCE: every assert is re-run against the job record — the range
+# (sha-assert), completion (from the record's own review text), the vacuity tiers, the token accounting
+# and prompt-content. A recheck can therefore FAIL where the original run passed, and does not inherit
+# anything from it.
+RECHECK_JOB=""
 LOG_ARG=""
 
 # An option supplied with an EMPTY value is a usage error, never a silent fallback
@@ -438,6 +453,12 @@ while [ $# -gt 0 ]; do
     --repo)  need_value --repo  $# "${2:-}"; REPO_ARG="$2"; shift 2 ;;
     --base)  need_value --base  $# "${2:-}"; BASE="$2"; shift 2 ;;
     --log)   need_value --log   $# "${2:-}"; LOG_ARG="$2"; shift 2 ;;
+    --recheck-job)
+      need_value --recheck-job $# "${2:-}"
+      case "$2" in
+        ''|*[!0-9]*) die_usage "--recheck-job takes a numeric roborev job id, got '$2'" ;;
+      esac
+      RECHECK_JOB="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) die_usage "unknown option '$1'" ;;
   esac
@@ -585,6 +606,14 @@ emit_kv() { # emit_kv <key> <value> — the ONLY way a value enters the block
 }
 
 emit_summary() {
+  # MODE IS DECLARED THE WAY THE GATE DECLARES `MODE: lite` (#3312 job 24): a recheck's PASS is
+  # legitimate — the review it re-decides was genuine and a human authorized the absence — but it must
+  # never be pasteable as evidence of a FRESH review, so the block says which job it re-decided and that
+  # nothing was enqueued. Emitted FIRST, before any key a reader might grep in isolation.
+  if [ -n "${RECHECK_JOB:-}" ]; then
+    emit_kv 'MODE' "recheck (job $RECHECK_JOB re-decided from its job record; NO review was enqueued — not evidence of a fresh review)"
+    emit_kv 'recheck-of' "$RECHECK_JOB"
+  fi
   printf '==== ROBOREV REVIEW SUMMARY ====\n'
   emit_kv 'repo' "$REPO"
   emit_kv 'branch' "$BRANCH"
@@ -747,15 +776,23 @@ done
 # `prompt-content:` now asks one question of the prompt itself and an absence is a FAIL a human may
 # waive. So there is no watcher, no capture directory, no classifier state and nothing to clean up
 # here — only the review call.
-set +e
-roborev review --branch \
-  --base "$BASE" \
-  --repo "$REPO" \
-  --agent "$AGENT" \
-  --model "$MODEL" \
-  --wait >"$LOG" 2>&1
-REVIEW_RC=$?
-set -e
+# THE ENQUEUE IS THE ONE THING A RECHECK MUST NOT DO, so it is guarded here — the single place the
+# reviewer is ever invoked — rather than by the caller remembering not to. Asserted structurally.
+if [ -n "$RECHECK_JOB" ]; then
+  REVIEW_RC=0
+  RECHECK_ACTIVE=1
+  : >"$LOG"
+else
+  set +e
+  roborev review --branch \
+    --base "$BASE" \
+    --repo "$REPO" \
+    --agent "$AGENT" \
+    --model "$MODEL" \
+    --wait >"$LOG" 2>&1
+  REVIEW_RC=$?
+  set -e
+fi
 
 # --- step 5: reviewed-RANGE assert (AC2) — STRUCTURED data is the oracle -------
 #
@@ -771,6 +808,19 @@ set -e
 # loose enough that a 4-char prefix satisfied the assert), and both fields are
 # validated before use. When several announcements are present the LAST one is the
 # effective enqueue, and the multiplicity is recorded.
+# RECHECK: THE JOB ID COMES FROM THE FLAG, EXPLICITLY (#3312 job 24). Explicit rather than "resolve the
+# latest completed job for this base+head", deliberately: the waiver names ONE job because the authorizer
+# judged ONE review, and a resolver would let a re-run silently become the subject of a waiver written for
+# a different review — the very hole the job binding closes. The enqueue announcement is the ENQUEUE's own
+# cross-check, so it is skipped here (there was no enqueue) while every RECORD-derived assert still runs:
+# `sha-assert` below still compares the record's git_ref against THIS base and head.
+if [ -n "$RECHECK_JOB" ]; then
+  JOB="$RECHECK_JOB"
+  ANNOUNCE_COUNT=0
+  ANNOUNCE="recheck"
+  ANNOUNCED_SHA=""
+  announce_ok=1
+else
 ANNOUNCE_COUNT=$({ grep -ociE 'enqueued job [0-9]+ for [0-9a-f]{7,40}' "$LOG" 2>/dev/null || printf 0; } | tail -1)
 # shellcheck disable=SC2018,SC2019 # ASCII-only on purpose: this normalises a HEX sha,
 # and the POSIX classes would make the transform locale-dependent for no benefit.
@@ -811,16 +861,21 @@ fi
 
 # --- structured job facts (extracted by scripts/flow/roborev-job-facts.py) -----
 # Diagnostics live beside the transcript; `log:` names the base path.
+# RECORD_OUTPUT_FILE holds the review text the JOB RECORD carries. In recheck mode it BECOMES the
+# transcript, so `review-completed`, the vacuity tiers and `findings` are re-asserted from the record
+# rather than inherited from a run that is not happening (#3312 job 24).
 FACTS_FILE="$LOG.facts"
+RECORD_OUTPUT_FILE="$LOG.record-output"
 PROMPT_FILE="$LOG.prompt"
 : >"$FACTS_FILE"
 : >"$PROMPT_FILE"
+fi
 
-extract_job_facts() { # extract_job_facts <job> <json> <facts-out> <prompt-out>
+extract_job_facts() { # extract_job_facts <job> <json> <facts-out> <prompt-out> [<review-out>]
   command -v python3 >/dev/null 2>&1 || return 1
   [ -f "$JOB_FACTS_TOOL" ] || return 1
   [ -n "$2" ] || return 1
-  printf '%s' "$2" | python3 "$JOB_FACTS_TOOL" "$1" "$3" "$4" 2>/dev/null
+  printf '%s' "$2" | python3 "$JOB_FACTS_TOOL" "$1" "$3" "$4" ${5:+"$5"} 2>/dev/null
 }
 
 fact() { sed -n "s/^$1=//p" "$FACTS_FILE" | head -1; }
@@ -873,7 +928,7 @@ read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FIL
       show) json=$(roborev show "$1" --json 2>/dev/null || printf '') ;;
       list) json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '') ;;
     esac
-    extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" || continue
+    extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" "$RECORD_OUTPUT_FILE" || continue
     if record_required_present; then
       rm -f "$best_facts"
       return 0
@@ -923,6 +978,21 @@ if [ "$announce_ok" -eq 1 ]; then
   # The prompt may not be carried in the JSON payload; ask for it directly.
   if [ ! -s "$PROMPT_FILE" ]; then
     roborev show "$JOB" --prompt >"$PROMPT_FILE" 2>/dev/null || : >"$PROMPT_FILE"
+  fi
+fi
+
+# ===== RECHECK: THE RECORD'S OWN REVIEW TEXT IS THE TRANSCRIPT (#3312 job 24) =====
+# A recheck has no transcript of its own, and it must not be allowed to inherit the original run's
+# verdicts either. So the record's review text is copied into `$LOG` and every text-based check runs
+# against it unchanged. If the record carries no review text the file stays EMPTY, which
+# `review-completed` reads as "no terminal verdict marker" — a FAIL. That is the intended direction: a
+# job whose completion cannot be re-established is not recheckable.
+if [ -n "$RECHECK_JOB" ]; then
+  if [ -s "$RECORD_OUTPUT_FILE" ]; then
+    cat "$RECORD_OUTPUT_FILE" >"$LOG"
+  else
+    : >"$LOG"
+    DETAILS+=("NOTICE: recheck: the job record for '$JOB' carries no review text, so the transcript-based checks below have nothing to re-assert against and will fail closed. A recheck never inherits the original run's verdicts.")
   fi
 fi
 

@@ -1124,21 +1124,31 @@ roborev_absence_waiver_lookup() {
       *) continue ;;
     esac
     author="$cur_author"
-    rest="${line#roborev-waive: prompt-content-absent }"
-    m_base=""; m_head=""; m_job=""; m_reason=""
-    case "$rest" in *base=*) m_base="${rest#*base=}"; m_base="${m_base%% *}" ;; esac
-    case "$rest" in *head=*) m_head="${rest#*head=}"; m_head="${m_head%% *}" ;; esac
-    case "$rest" in *job=*) m_job="${rest#*job=}"; m_job="${m_job%% *}" ;; esac
-    # `reason=` is LAST and free text to end of line, so it is taken whole rather than word-split.
-    case "$rest" in *reason=*) m_reason="${rest#*reason=}" ;; esac
+    # ===== ONE STRICT PATTERN FOR THE WHOLE MARKER (roborev job 23/24) =====
+    # The previous form pulled each field out with an independent `case`, which enforced neither the
+    # documented ORDER nor token BOUNDARIES: `base=<x>` could sit after `reason=`, a value could run into
+    # the next field, and `reason=TODO ` (trailing space) or a whitespace-only reason slipped past the
+    # placeholder checks and GRANTED. One anchored ERE decides the whole line, so a marker either has
+    # exactly the documented shape or it is MALFORMED — there is no partially-parsed middle state.
+    if [[ ! "$line" =~ ^roborev-waive:\ prompt-content-absent\ base=([0-9a-f]{7,40})\ head=([0-9a-f]{7,40})\ job=([0-9]+)\ reason=(.*)$ ]]; then
+      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
+        ROBOREV_WAIVER_STATE="malformed"
+        ROBOREV_WAIVER_AUTHOR="$author"
+        ROBOREV_WAIVER_DETAIL="the line does not match the required form 'roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>' — every field is required, in that order, with single-space separators"
+      fi
+      continue
+    fi
+    m_base="${BASH_REMATCH[1]}"
+    m_head="${BASH_REMATCH[2]}"
+    m_job="${BASH_REMATCH[3]}"
+    m_reason="${BASH_REMATCH[4]}"
+    # TRIMMED BEFORE IT IS JUDGED: a reason of spaces or tabs is not a reason, and `TODO ` is the same
+    # placeholder as `TODO`. Trailing whitespace defeating a placeholder check is the classic form of this
+    # defect, so the trim happens FIRST and the checks below see only the trimmed value.
+    m_reason="${m_reason#"${m_reason%%[![:space:]]*}"}"
+    m_reason="${m_reason%"${m_reason##*[![:space:]]}"}"
     missing=""
-    [ -n "$m_base" ] || missing="base="
-    [ -n "$m_head" ] || missing="${missing:+$missing }head="
-    [ -n "$m_job" ] || missing="${missing:+$missing }job="
-    [ -n "$m_reason" ] || missing="${missing:+$missing }reason="
-    # LAYER 2: A PLACEHOLDER IS NOT A REASON. An unsubstituted `<…>` is the signature of a pasted
-    # template (this is `claim.sh`'s rule, and the same bare-placeholder set), and a template that
-    # granted anything would make the documentation itself a credential.
+    [ -n "$m_reason" ] || missing="a-non-empty-reason (the reason is empty or whitespace only)"
     if [ -z "$missing" ]; then
       case "$m_reason" in
         *'<'*'>'*) missing="a-substituted-reason (the reason still holds an unsubstituted <…> placeholder)" ;;
@@ -1154,7 +1164,7 @@ roborev_absence_waiver_lookup() {
       if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
         ROBOREV_WAIVER_STATE="malformed"
         ROBOREV_WAIVER_AUTHOR="$author"
-        ROBOREV_WAIVER_DETAIL="the marker is missing $missing, so it does not identify the review it waives or why"
+        ROBOREV_WAIVER_DETAIL="the marker is missing $missing, so it does not say why this review was waived"
       fi
       continue
     fi
@@ -1170,7 +1180,7 @@ roborev_absence_waiver_lookup() {
         ROBOREV_WAIVER_AUTHOR="$author"
         ROBOREV_WAIVER_SCOPE="base=$m_base head=$m_head job=$m_job"
         ROBOREV_WAIVER_REASON="$m_reason"
-        ROBOREV_WAIVER_DETAIL="the marker names a different review — $mismatch — and a waiver may not outlive the review its authorizer judged; re-request it for this base/head/job"
+        ROBOREV_WAIVER_DETAIL="the marker names a different review — $mismatch — and a waiver may not outlive the review its authorizer judged; re-request it for this base/head/job (a completed job can be re-decided with --recheck-job <id>, which enqueues nothing)"
       fi
       continue
     fi

@@ -273,7 +273,13 @@ roborev_check_findings() {
     review_ran=1
   fi
 
-  if [ "$REVIEW_RC" -eq 0 ]; then
+  if [ -n "${RECHECK_JOB:-}" ]; then
+    # NO REVIEWER RAN IN THIS INVOCATION, so claiming its exit status PASSed would be a false statement
+    # about a process that did not exist (#3312 job 24). `SKIP` is in the block grammar and is deliberately
+    # OUTSIDE the affirmation set, so it cannot contribute to a PASS — the original review's outcome is
+    # still re-asserted, by `findings:` and `review-completed` from the job record.
+    ROBOREV_EXIT="SKIP (recheck: no reviewer ran in this invocation; job $RECHECK_JOB re-decided from its record)"
+  elif [ "$REVIEW_RC" -eq 0 ]; then
     ROBOREV_EXIT="PASS"
   elif [ "$review_ran" -eq 1 ]; then
     ROBOREV_EXIT="FINDINGS (exit $REVIEW_RC)"
