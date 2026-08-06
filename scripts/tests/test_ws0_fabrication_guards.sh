@@ -863,6 +863,15 @@ banned = {
     "get('cycles', 0)": "a perf counter still reads through a defaulting get",
     "get('rows', 0)": "a row count still reads through a defaulting get",
     "if errors > 0": "a counter is tested for the BAD half only; a negative value inherits the permissive branch (R6)",
+    # Round 15's C, added because the scan's SUBJECT already covered the file it happened in and
+    # caught nothing: `ws0_canonical_corpus.py` was in the glob all along, but this dict is an
+    # ENUMERATION OF SPELLINGS from previous rounds and neither `int(got)` nor the verdict coercion
+    # beside it was ever in it. So the subject was right and the pattern set was the gap. Stated
+    # rather than left implied: this entry guards the SPELLING, not the class — `int(value)` in a
+    # comparison would evade it — so it is a regression guard for a known instance and not a claim
+    # that `exact_int` non-reuse is detectable in general.
+    "int(got)": "an integer census comparison still coerces with a bare int(), which truncates a"
+                " fractional value into agreement — use ws0_validate.exact_int (round 15, C)",
 }
 hits = []
 for path in subject:
