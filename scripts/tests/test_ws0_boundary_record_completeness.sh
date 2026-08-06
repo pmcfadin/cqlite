@@ -143,6 +143,10 @@ boundary_record_session() {
   # recorded `corpus` differs from the pin is refused for THAT, and MEASURED here: without this the
   # ACCEPT lane refused for a corpus mismatch, i.e. a positive control that never published, which
   # would have left every refusal below unattributable.
+  # Read by `make_scan_rep` in the sourced fixture library through bash's DYNAMIC scoping, which is
+  # why it looks unused here. `local` rather than an assignment or an export deliberately: it is
+  # scoped to this call, so a later case cannot inherit a corpus it did not set.
+  # shellcheck disable=SC2034  # consumed by make_scan_rep via dynamic scope
   local WS0_SCAN_CORPUS="$c"
   for r in 1 2; do
     make_scan_rep "$d" warm "$r" ok
