@@ -1012,13 +1012,24 @@ roborev_prompt_snapshot_paths() {
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     case "$row" in
-      BLOCKSTART)
-        # ===== ONLY THE FINAL DELIVERY BLOCK IS SELECTED (roborev job 19, fix 2) =====
-        # A new delivery block DISCARDS every candidate collected in an earlier one, so an injected block that
-        # precedes roborev own cannot contribute a path, cannot make two paths look "undecidable", and cannot
-        # pose as the delivery. Only `_rx_delivery_hdrs` survives the reset: whether a diff was ever INLINED is
-        # evidence about the whole prompt, and losing it would let a later injected block hide an earlier
-        # inline delivery from the mixed-delivery lock.
+      BLOCKRESET)
+        # ===== CANDIDATE LIFETIME IS BOUNDED BY ITS BLOCK, AND ANY HEADING SUPERSEDES A BLOCK =====
+        # (roborev job 19 fix 2, corrected by job 21.) Every heading DISCARDS every candidate collected in the
+        # preceding block, so an injected block cannot contribute a path, cannot make two paths look
+        # "undecidable", and cannot pose as the delivery of a later section.
+        #
+        # THE JOB-21 CORRECTION, which is the whole reason this event is emitted on EVERY heading rather than
+        # only on a recognised delivery heading: an UNRECOGNISED heading (`### Patch`) used to close the block
+        # WITHOUT invalidating its candidates, so a stale injected path stayed selected while roborev delivered
+        # its diff inline under that heading — and the run resolved as `snapshot`, downgrading a review with a
+        # GENUINE inline delivery to the accepted NOTICE. A block ends when ANYTHING supersedes it, not only
+        # when something we recognise does; the reset is therefore unconditional, and the awk program keeps
+        # exactly ONE assignment to `in_trailer` so no future edit can add a fourth block-ending path that
+        # forgets to reset (pinned by a family-level structural assert, not by this comment).
+        #
+        # Only `_rx_delivery_hdrs` survives the reset: whether a diff was ever INLINED is evidence about the
+        # whole prompt, and losing it would let a later injected block hide an earlier inline delivery from the
+        # mixed-delivery lock.
         _rx_snap_paths=()
         _rx_snap_unparseable=0
         _rx_snap_oversize_markers=0
@@ -1064,6 +1075,25 @@ roborev_prompt_snapshot_paths() {
       # delivery and an instruction is failed closed) lives in the resolver, so narrowing or widening this
       # scope cannot silently reopen the bypass.
       #
+      # ===== ROBOREV OWN INLINE TEMPLATE IS A FENCE, AND THAT IS THE ONE STRUCTURAL DELIVERY MARKER =====
+      # (roborev job 21.) `inline_diff` renders the diff inside a ```diff FENCE, measured on a live inline
+      # prompt: heading, then ```diff, then the column-zero `diff --git` headers. So a header inside a fence is
+      # counted as delivery evidence WHATEVER the enclosing heading says — which is what closes the variant of
+      # the job-21 defect that the reset alone does not: a genuine inline delivery under an unrecognised heading
+      # (`### Patch`) followed by an injected trailer would otherwise present no delivery evidence at all and
+      # resolve to the accepted NOTICE. DECLARED COST, in the fail-CLOSED direction: repository content holding
+      # a fenced diff WITH a `diff --git` line inside it now counts as delivery evidence, so a snapshot-delivered
+      # review of such a repository FAILs `mixed-delivery` instead of reporting a NOTICE. Measured on both live
+      # snapshot prompts: zero fences and zero column-zero `diff --git` lines outside the delivery block, so this
+      # costs nothing today and refuses rather than excuses if that changes.
+      #
+      # A FENCE ALSO SHIELDS ITS CONTENT FROM THE HEADING RULE, deliberately: fenced content is data, so a `#`
+      # line inside it must not be able to reset candidate state. An unterminated fence therefore suppresses
+      # detection for the rest of the prompt — which fails closed (the census is judged with no snapshot).
+      index($0, "```diff") == 1 && !in_fence { in_fence = 1; next }
+      in_fence && index($0, "```") == 1 { in_fence = 0; next }
+      in_fence && index($0, "diff --git ") == 1 { print "BLOCKHDR"; next }
+      in_fence { next }
       # ===== A HEADER INSIDE A BLOCK IS EVIDENCE, NOT A TERMINATOR (roborev job 19, fix 1) =====
       # A `diff --git ` line used to CLOSE the block, which made the resolver decide the delivery MODE from
       # the GLOBAL header collection — so a legitimate snapshot review whose repository instructions merely
@@ -1083,13 +1113,20 @@ roborev_prompt_snapshot_paths() {
       # so pinning the literal "### Combined Diff" — the spelling BOTH live snapshot prompts were
       # observed with — would suppress detection on a review whose heading is the default "### Diff" and
       # reintroduce this issue own false-FAIL bug under a different review shape. So any level-3 heading
-      # mentioning "Diff" opens the block, every other column-zero heading closes it. DECLARED
-      # RESIDUAL: a future heading carrying no "Diff" at all would suppress detection, which fails
-      # CLOSED (a named FAIL, never a silent pass).
+      # mentioning "Diff" opens the block, every other column-zero heading closes it — and CLOSING NOW ALSO
+      # INVALIDATES the closed block candidates, which is the job-21 fix below.
+      #
+      # THE RESIDUAL HERE WAS RECORDED WRONG, AND JOB 21 FALSIFIED IT. It used to read: a heading carrying no
+      # "Diff" suppresses detection, which fails CLOSED. That is true only of the opener IN ISOLATION. In
+      # COMBINATION with a candidate that outlived its block it failed OPEN — an unrecognised heading closed the
+      # block while its injected candidate stayed selected, so a genuine inline delivery under `### Patch`
+      # resolved as `snapshot` and its census verification was downgraded to the accepted NOTICE. Single-property
+      # reasoning is what missed it: the honest statement is that suppression is only fail-closed while candidate
+      # lifetime is bounded by the block, which is why the reset is unconditional and asserted structurally.
       index($0, "#") == 1 {
+        print "BLOCKRESET"
         in_trailer = (index($0, "### ") == 1 && index($0, "Diff") > 0)
         oversize = 0
-        if (in_trailer) print "BLOCKSTART"
         next
       }
       in_trailer && index($0, "diff --git ") == 1 { print "BLOCKHDR"; next }
