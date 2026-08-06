@@ -860,498 +860,6 @@ roborev_collect_prompt_headers() {
   return 0
 }
 
-# ===================== THE SECOND DIFF-DELIVERY MODE (issue #3312) =====================
-# roborev delivers the diff to the reviewer in ONE OF TWO ways, and modelling only the first
-# made `prompt-content:` FALSE-FAIL every large review. When the diff is big it is NOT inlined:
-# roborev writes it to a TRANSIENT snapshot file under `<repo>/.roborev/roborev-snapshot-<id>/`
-# and the prompt ends with an instruction to read it. MEASURED (job 6836 — 23 files, +6561/-1;
-# 1.47M input / 1.35M cached / 6.1k output; 4 findings with real `file:line`):
-#
-#     ### Combined Diff
-#
-#     (Diff too large to include inline)
-#
-#     The full diff has been written to a file for review.
-#     Read the diff from: `/Users/.../issue-3272/.roborev/roborev-snapshot-157393586/roborev-snapshot-content.diff`
-#
-#     Review the actual diff before writing findings.
-#
-# That prompt carries ZERO `diff --git` headers, so the check reported
-# `FAIL (21/21 code census paths absent from the prompt)` on a review the reviewer demonstrably
-# performed — a red no fix can clear, on exactly the diffs that most need reviewing, which is
-# the documented way a guard gets waived. And `prompt-content:` is the layer #3229 deliberately
-# KEPT when the pre-enqueue predictor was deleted.
-#
-# THE FIX IS NOT "AN EMPTY PROMPT IS A PASS" — that would reopen T3 (a silently discarded diff)
-# and the `0/0` false pass. It is: FOLLOW THE DIFF TO WHERE IT ACTUALLY IS. Same census, same
-# canonical matcher, same "no subtraction and no excusal"; only the SOURCE of the headers moves.
-# Every new edge therefore fails CLOSED, with its own cause text, because an oracle that could
-# not be consulted is a NON-PASSING verdict whose text says what was unverifiable.
-#
-# WHY THE EXTRACTION LIVES HERE, beside the header collector: "where the diff actually is" is
-# prompt-shape knowledge, the same class as "how far the extended-header run extends". The
-# checks file must not grow a second idea of it (asserted structurally).
-
-# ============ THE SNAPSHOT IS GONE BEFORE THE WRAPPER CAN READ IT (#3312) ============
-# MEASURED LIVE, on this fleet, with the real binary — and it falsifies the obvious design. Job 3,
-# 12 files / +3311, 232,820-byte snapshot, 541,812 input / 472,576 cached tokens, review-completed
-# PASS, both vacuity tiers PASS: roborev wrote
-# `<repo>/.roborev/roborev-snapshot-898764941/roborev-snapshot-content.diff` (9 `diff --git`
-# headers, exactly the 9 code census paths) — and DELETED the whole directory when the review
-# finished, i.e. BEFORE `roborev review --wait` returned to us. Reading the path after the review
-# therefore reports `cleaned-up` on EVERY genuine snapshot-mode review: a differently-named FAIL
-# is not a fix, because the merge is still blocked on exactly the large diffs the issue is about.
-#
-# THE DIFF IS NOT RETRIEVABLE AFTER THE FACT. `roborev show <job>` has `--prompt` and `--json` and
-# NO `--diff` (checked against the installed CLI's own help), and the prompt only NAMES the path.
-#
-# AND IT IS NOT COPIED OUT EITHER, ANY MORE. Holding on to the file while the review ran was the FIRST
-# destination (A-bounded) and it is RETIRED by owner ruling — the history is in the C⁗ section below, and
-# the code is in git history. Nothing in this file reads, copies, digests or stats a snapshot today; what
-# is left is string work over the prompt the wrapper itself wrote.
-#
-# ============ C⁗: SNAPSHOT MODE IS DETECTED AND REPORTED — NOTHING IS READ ============
-# THE END OF A LONG ROAD, recorded so the shape is not rebuilt by someone reading only the endpoint.
-# roborev delivers a large diff by writing it to a TRANSIENT file and naming that path in the prompt, then
-# deleting the file before `roborev review --wait` returns. Four destinations were ruled in turn:
-#   A-bounded            certify snapshot mode by capturing the file while the review ran.
-#   categorical + C‴     fix the predicate family categorically; then, at the pre-registered exit, drop
-#                        snapshot mode to a NOTICE and retire the capture apparatus.
-#   C‴                   observe-and-report: read the snapshot, record path + digest + expected census.
-#   C⁗ (here)            detect, and report THE PATH AS THE PROMPT STATED IT. Nothing is read.
-# Eleven false-PASS vectors were found and closed inside the certification machinery across seven review
-# rounds; after it was retired, the remaining defects were all in the code that TOUCHED THE FILESYSTEM to
-# digest the snapshot — TOCTOU, a FIFO hang, watchdog portability, a bounded-execution flag that never
-# escaped its subshell, and a test that never reached its subject. The owner's ruling on the digest: a
-# working digest that nothing can corroborate is self-referential metadata, and its one real distinction
-# ("existed with identity X" vs "already gone") is not worth the defect generator that produces it.
-#
-# SO THERE IS NO OBSERVER, NO READ, NO DIGEST, NO SIZE, NO POLLING, NO `timeout`, NO WATCHDOG. What remains
-# is string work over the prompt plus a LEXICAL statement about the path.
-#
-# ON THE HANG CLASS, PRECISELY: it is **not reachable, because nothing is read** — that is a different and
-# weaker claim than "it is fixed", and only this one is true. The watchdog that was supposed to fix it is
-# deleted here, and the liveness property it claimed was twice asserted without being verified; nobody
-# should count it as verified on the way out.
-#
-# ON THE PREDICATE FAMILY (verified-absent / present / unreadable): the helper and its `--lite` lint are
-# DELETED with the filesystem probes they served, by explicit ruling — a lint with no caller greens
-# vacuously, and a positive verdict requires an affirmative measurement, which cuts against keeping a guard
-# whose subject set is empty. The durable artifact is the RULE, written in `CLAUDE.md` and the doctrine page:
-# **every `test`/`[` file predicate is two-valued, so it must collapse "cannot tell" onto one of its answers
-# — and it always picks the permissive one.** If a filesystem probe ever returns to this code, that text is
-# what obligates the three-valued helper to return with it; the implementation is in git history.
-
-# roborev_prompt_snapshot_paths <prompt-file>: the DISTINCT snapshot diff paths the prompt
-# instructs the reviewer to read, into `_rx_snap_paths`, plus `_rx_snap_unparseable` — how many
-# instruction lines carried NO readable path. That second count is not diagnostics: an
-# instruction line we could not read is an UNKNOWN source, so the caller fails closed on it even
-# when another line did parse. Counting only the good ones would be the "only the bad states are
-# tested" shape with the roles swapped — a partially-read instruction block excused by its
-# readable half.
-#
-# ANCHORED AT COLUMN ZERO, and that is load-bearing rather than tidy. Every line of a unified
-# diff BODY carries a leading `+`, `-`, ` `, `@` or `\`, so an instruction quoted INSIDE the
-# reviewed change — this repo's own docs and tests quote it — can never pose as roborev's own
-# instruction. Without the anchor a branch could name the file its own review is judged against.
-#
-# TWO INSTRUCTION SPELLINGS, both READ OUT OF THE INSTALLED BINARY rather than inferred from one
-# transcript (roborev v0.61.2, `strings`):
-#     Read the diff from: `%s`          the full form, beside `roborev-snapshot-content.diff`
-#     (Diff too large; read `%s`.)      the compact form emitted under a tight prompt budget
-# Accepting both can only ADD coverage: whatever the compact form's `%s` turns out to be, the
-# token still has to pass `roborev_snapshot_path_binding` before anything is read, so a token
-# that is not a bound snapshot path FAILs closed exactly as it does today. The DECLARED
-# UNCERTAINTY: the compact form's `%s` was measured as a format string, not observed on a live
-# prompt, so if it names a COMMAND rather than a path the binding reports `not-absolute` — a
-# fail-closed verdict under a cause that would then be worth renaming (see the residual noted
-# under `none` in roborev-review-checks.sh).
-#
-# ===== THE IRREDUCIBLE RESIDUAL, STATED AS A PROPERTY (roborev job 19) =====
-# DELIVERY MODE IS INFERRED FROM PROMPT TEXT, AND ROBOREV'S PROMPT EMBEDS REPOSITORY-CONTROLLED CONTENT
-# (project guidelines / AGENTS.md sections, additional context, previous-review bodies), which is inserted at
-# COLUMN ZERO exactly like roborev's own text. There is NO structural marker separating roborev's generated
-# delivery block from injected text that reproduces it, so the inference is spoofable and NO amount of further
-# text-scoping closes that. The scoping above narrows it in both directions — an instruction counts only inside
-# a delivery block, only after that block's own oversize notice, only in the FINAL such block, and only when
-# no header in any delivery block says a diff was inlined — and then it stops.
-#
-# WHAT REMAINS, precisely: a prompt with NO inline delivery headers at all (the T3 case — the census paths were
-# genuinely excluded from the reviewer's diff) whose repository content reproduces a delivery block, an oversize
-# notice and a lexically valid snapshot path can obtain `prompt-content: NOTICE` where a `FAIL` was due. It does
-# NOT create a new class: snapshot mode is uncertified by owner ruling (C⁗), so the effect is that repository
-# content can move such a review INTO that already-accepted uncovered envelope — it widens access to an accepted
-# gap rather than opening a new one. Where inline delivery headers ARE present the mixed-delivery lock fails the
-# prompt closed, and where they cover the census the run is certified inline and snapshot mode is never consulted.
-#
-# CLOSING IT REQUIRES AN OUT-OF-BAND DELIVERY-MODE SIGNAL ROBOREV MEASURABLY DOES NOT EXPOSE. Established by an
-# exhaustive read-only sweep of every roborev surface (CLI flags, `show --json`, `list --json`, job logs, the
-# sqlite schema, `export reviews`, binary strings): there is no delivery-mode field, no digest and no size, and
-# `review_jobs.diff_content`/`patch` are present in the schema but EMPTY for every job — a trap, not an oracle.
-# So this is disclosed, not fixed, and the disclosure is the honest end of the road rather than a reassurance.
-#
-# LINE-ORIENTED, soundly: the instruction is one line and a path on it cannot contain a newline,
-# so there is nothing `-z` could add. (Git PLUMBING output still gets `-z` — see the census.)
-# The path is taken RAW, exactly as the prompt spells it: it is not a git-quoted token and the
-# single normalisation boundary is untouched.
-roborev_prompt_snapshot_paths() {
-  local f="$1" row seen p q
-  _rx_snap_paths=()
-  _rx_snap_unparseable=0
-  _rx_snap_oversize_markers=0
-  # THE DELIVERY-MODE DECISION IS BLOCK-SCOPED ON BOTH SIDES (roborev job 19, fix 1). `_rx_delivery_hdrs`
-  # counts `diff --git` headers seen INSIDE a delivery block — i.e. evidence that roborev INLINED a diff —
-  # and is what the mixed-delivery lock consults. The GLOBAL header collection (`_rx_hdrs`) keeps feeding
-  # census certification unchanged; it just no longer decides the MODE, because a `diff --git` line quoted in
-  # a repository instructions section is not a delivery.
-  _rx_delivery_hdrs=0
-  # observability-justified: `$f` is the wrapper's OWN prompt file, written by this run beside its
-  # transcript. Its falsity yields no snapshot paths, which the caller reports as the `none` state — a
-  # fail-closed measurement about the prompt, not a claim about a roborev file.
-  [ -f "$f" ] || return 0
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    case "$row" in
-      BLOCKRESET)
-        # ===== CANDIDATE LIFETIME IS BOUNDED BY ITS BLOCK, AND ANY HEADING SUPERSEDES A BLOCK =====
-        # (roborev job 19 fix 2, corrected by job 21.) Every heading DISCARDS every candidate collected in the
-        # preceding block, so an injected block cannot contribute a path, cannot make two paths look
-        # "undecidable", and cannot pose as the delivery of a later section.
-        #
-        # THE JOB-21 CORRECTION, which is the whole reason this event is emitted on EVERY heading rather than
-        # only on a recognised delivery heading: an UNRECOGNISED heading (`### Patch`) used to close the block
-        # WITHOUT invalidating its candidates, so a stale injected path stayed selected while roborev delivered
-        # its diff inline under that heading — and the run resolved as `snapshot`, downgrading a review with a
-        # GENUINE inline delivery to the accepted NOTICE. A block ends when ANYTHING supersedes it, not only
-        # when something we recognise does; the reset is therefore unconditional, and the awk program keeps
-        # exactly ONE assignment to `in_trailer` so no future edit can add a fourth block-ending path that
-        # forgets to reset (pinned by a family-level structural assert, not by this comment).
-        #
-        # Only `_rx_delivery_hdrs` survives the reset: whether a diff was ever INLINED is evidence about the
-        # whole prompt, and losing it would let a later injected block hide an earlier inline delivery from the
-        # mixed-delivery lock.
-        _rx_snap_paths=()
-        _rx_snap_unparseable=0
-        _rx_snap_oversize_markers=0
-        continue
-        ;;
-      BLOCKHDR) _rx_delivery_hdrs=$((_rx_delivery_hdrs + 1)); continue ;;
-      OVERSIZE) _rx_snap_oversize_markers=$((_rx_snap_oversize_markers + 1)); continue ;;
-      UNPARSEABLE) _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue ;;
-      PATHC*)
-        # A COMPACT-FORM CANDIDATE. Accepted as a snapshot path ONLY if it is absolute and carries roborev's
-        # own snapshot directory shape; a git command or a relative token in that position means this is the
-        # DELEGATED oversize tier, which the owner ruled must stay a named FAIL — so it is counted as an
-        # oversize marker and never becomes a snapshot path.
-        p="${row#PATHC	}"
-        case "$p" in
-          /*/.roborev/roborev-snapshot-*/?*) ;;
-          *) _rx_snap_oversize_markers=$((_rx_snap_oversize_markers + 1)); continue ;;
-        esac
-        ;;
-      *) p="${row#PATH	}" ;;
-    esac
-    [ -n "$p" ] || { _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue; }
-    seen=0
-    for q in ${_rx_snap_paths[@]+"${_rx_snap_paths[@]}"}; do
-      [ "$q" = "$p" ] && seen=1
-    done
-    [ "$seen" -eq 1 ] || _rx_snap_paths+=("$p")
-  done < <(LC_ALL=C awk '
-      # ===== INSTRUCTIONS ARE HONOURED ONLY INSIDE ROBOREV S GENERATED DELIVERY TRAILER (job 18) =====
-      # THE BYPASS THIS CLOSES, and the non-obvious interaction that produced it. The column-zero anchor
-      # below was designed against DIFF-BODY lines: every line of a unified diff carries a leading +, -,
-      # space, @ or backslash, so prose inside the reviewed change cannot pose as roborev own instruction.
-      # An injected PROMPT SECTION — repository-controlled content such as an AGENTS.md instruction block —
-      # sits at column zero and is not diff body, so the anchor never covered it. Under C-quadruple-prime
-      # nothing is read, so a lexically valid but NONEXISTENT path cannot be refuted: the run would flip to
-      # an exempted NOTICE and INLINE CENSUS VERIFICATION WOULD BE BYPASSED. Removing the filesystem check
-      # is what made it trivial — the read had been accidentally limiting the damage.
-      #
-      # THE INVARIANT: inline census verification must not be suppressible by any repository-controlled
-      # content. So an instruction counts only where roborev actually emits one — inside roborev own
-      # DIFF-DELIVERY BLOCK, after its own "(Diff too large" notice — and that block is ended by any
-      # other column-zero markdown heading. The complementary half (a prompt carrying BOTH an inline
-      # delivery and an instruction is failed closed) lives in the resolver, so narrowing or widening this
-      # scope cannot silently reopen the bypass.
-      #
-      # ===== ROBOREV OWN INLINE TEMPLATE IS A FENCE, AND THAT IS THE ONE STRUCTURAL DELIVERY MARKER =====
-      # (roborev job 21.) `inline_diff` renders the diff inside a ```diff FENCE, measured on a live inline
-      # prompt: heading, then ```diff, then the column-zero `diff --git` headers. So a header inside a fence is
-      # counted as delivery evidence WHATEVER the enclosing heading says — which is what closes the variant of
-      # the job-21 defect that the reset alone does not: a genuine inline delivery under an unrecognised heading
-      # (`### Patch`) followed by an injected trailer would otherwise present no delivery evidence at all and
-      # resolve to the accepted NOTICE. DECLARED COST, in the fail-CLOSED direction: repository content holding
-      # a fenced diff WITH a `diff --git` line inside it now counts as delivery evidence, so a snapshot-delivered
-      # review of such a repository FAILs `mixed-delivery` instead of reporting a NOTICE. Measured on both live
-      # snapshot prompts: zero fences and zero column-zero `diff --git` lines outside the delivery block, so this
-      # costs nothing today and refuses rather than excuses if that changes.
-      #
-      # A FENCE ALSO SHIELDS ITS CONTENT FROM THE HEADING RULE, deliberately: fenced content is data, so a `#`
-      # line inside it must not be able to reset candidate state. An unterminated fence therefore suppresses
-      # detection for the rest of the prompt — which fails closed (the census is judged with no snapshot).
-      index($0, "```diff") == 1 && !in_fence { in_fence = 1; next }
-      in_fence && index($0, "```") == 1 { in_fence = 0; next }
-      in_fence && index($0, "diff --git ") == 1 { print "BLOCKHDR"; next }
-      in_fence { next }
-      # ===== A HEADER INSIDE A BLOCK IS EVIDENCE, NOT A TERMINATOR (roborev job 19, fix 1) =====
-      # A `diff --git ` line used to CLOSE the block, which made the resolver decide the delivery MODE from
-      # the GLOBAL header collection — so a legitimate snapshot review whose repository instructions merely
-      # QUOTE a diff header (an example in AGENTS.md) was classified `mixed-delivery` and FAILED. That is this
-      # issue own false-FAIL defect in a new shape. A header is now REPORTED (`BLOCKHDR`) when it appears
-      # inside a delivery block — that is what an INLINE delivery looks like — and the block stays open. It is
-      # sound to keep scanning: every line of a diff BODY carries a leading +, -, space, @ or backslash, so no
-      # body line can be mistaken for a column-zero instruction.
-      #
-      # ===== AND EACH BLOCK DISCARDS THE PREVIOUS ONE (roborev job 19, fix 2) =====
-      # `BLOCKSTART` is emitted at every delivery-block opener and the reader resets its candidates on it, so
-      # only the FINAL delivery block is selected. An injected block that precedes roborev own therefore
-      # cannot contribute a path or an ambiguity.
-      #
-      # THE BLOCK OPENER IS MATCHED TOLERANTLY, and deliberately: the heading is DATA in roborev own
-      # template (`diff_block` renders `{{if .Diff.Heading}}{{.Diff.Heading}}{{else}}### Diff{{end}}`),
-      # so pinning the literal "### Combined Diff" — the spelling BOTH live snapshot prompts were
-      # observed with — would suppress detection on a review whose heading is the default "### Diff" and
-      # reintroduce this issue own false-FAIL bug under a different review shape. So any level-3 heading
-      # mentioning "Diff" opens the block, every other column-zero heading closes it — and CLOSING NOW ALSO
-      # INVALIDATES the closed block candidates, which is the job-21 fix below.
-      #
-      # THE RESIDUAL HERE WAS RECORDED WRONG, AND JOB 21 FALSIFIED IT. It used to read: a heading carrying no
-      # "Diff" suppresses detection, which fails CLOSED. That is true only of the opener IN ISOLATION. In
-      # COMBINATION with a candidate that outlived its block it failed OPEN — an unrecognised heading closed the
-      # block while its injected candidate stayed selected, so a genuine inline delivery under `### Patch`
-      # resolved as `snapshot` and its census verification was downgraded to the accepted NOTICE. Single-property
-      # reasoning is what missed it: the honest statement is that suppression is only fail-closed while candidate
-      # lifetime is bounded by the block, which is why the reset is unconditional and asserted structurally.
-      index($0, "#") == 1 {
-        print "BLOCKRESET"
-        in_trailer = (index($0, "### ") == 1 && index($0, "Diff") > 0)
-        oversize = 0
-        next
-      }
-      in_trailer && index($0, "diff --git ") == 1 { print "BLOCKHDR"; next }
-      # THE OVERSIZE NOTICE opens the instruction window AND is itself the marker for the other oversize
-      # tiers, reported so the caller can say WHICH mode it is looking at rather than only "the paths are
-      # absent". Measured in the same binary: the `codex_*_fallback_*` and `generic_*_fallback` templates
-      # open with a `(Diff too large` line and then ask the reviewer to run git commands ITSELF — no
-      # snapshot file exists, so nothing local can establish what the reviewer saw. Counted, never excused.
-      in_trailer && index($0, "(Diff too large") == 1 { oversize = 1; print "OVERSIZE" }
-      !(in_trailer && oversize) { next }
-      # THE INSTRUCTION LINES, both spellings, each anchored at COLUMN ZERO (index(...) == 1).
-      # THE TWO SPELLINGS ARE TAGGED DIFFERENTLY (roborev job 16, blocker 1). In the full form the %s is
-      # documented to be the snapshot path. In the COMPACT form the %s was only ever read out of the binary
-      # format strings, and the sibling oversize templates put a git COMMAND in exactly that position — so a
-      # compact token is emitted as a CANDIDATE and accepted as a path only when it is demonstrably
-      # snapshot-shaped. Otherwise it is an oversize marker (the delegated tier), never a snapshot.
-      # (No apostrophes in this awk program: it is single-quoted, and one would close the quote.)
-      index($0, "Read the diff from:") == 1 { tag = "PATH" }
-      index($0, "(Diff too large; read ") == 1 { tag = "PATHC" }
-      tag != "" {
-        line = $0
-        sub(/\r$/, "", line)
-        s = index(line, "`")
-        if (s == 0) { print "UNPARSEABLE"; tag = ""; next }
-        rest = substr(line, s + 1)
-        e = 0
-        for (i = length(rest); i >= 1; i--) if (substr(rest, i, 1) == "`") { e = i; break }
-        if (e <= 1) { print "UNPARSEABLE"; tag = ""; next }
-        printf "%s\t%s\n", tag, substr(rest, 1, e - 1)
-        tag = ""
-        next
-      }
-    ' "$f" 2>/dev/null)
-  return 0
-}
-
-# roborev_snapshot_path_binding <path>: is `<path>` shaped like one of roborev's snapshot files in THIS
-# repository? Exit 0 with `_rx_snap_bind_state=ok`, else non-zero with a state and a detail.
-#
-# PURELY LEXICAL, AND THAT IS THE WHOLE POINT OF C⁗ (rider R2). Nothing here touches the filesystem: no
-# `pwd -P`, no `-L`, no stat of any kind — so there is no TOCTOU window, no symlink to follow and nothing
-# that can block. The containment answer is therefore a statement about the STRING the prompt printed, and
-# every consumer must label it `lexical` so no reader mistakes it for a verified property.
-#
-# WHAT IT STILL CATCHES, all by string inspection: a relative path (which would have meant something
-# different to us than to roborev), a `.`/`..` segment (which names one directory and lands in another), a
-# path outside the reviewed repository's prefix, and a path that is not shaped like
-# `<repo>/.roborev/roborev-snapshot-<id>/<file>` — the last of which is what keeps roborev's THIRD oversize
-# tier (a git command where the compact instruction's token goes) from being mistaken for a snapshot.
-roborev_snapshot_path_binding() {
-  local p="$1" rel repo_prefix i
-  local -a parts=()
-  _rx_snap_bind_state=""
-  _rx_snap_bind_detail=""
-  _rx_snap_bound_path="$p"
-  case "$p" in
-    /*) ;;
-    *) _rx_snap_bind_state="not-absolute"
-       _rx_snap_bind_detail="the path is relative, so it names something different to this process than it did to roborev"
-       return 1 ;;
-  esac
-  IFS='/' read -r -a parts <<<"$p"
-  for ((i = 0; i < ${#parts[@]}; i++)); do
-    case "${parts[$i]}" in
-      '.'|'..')
-        _rx_snap_bind_state="dot-segment"
-        _rx_snap_bind_detail="the path contains a '${parts[$i]}' segment, so it names one directory and would land in another"
-        return 1
-        ;;
-    esac
-  done
-  repo_prefix="${REPO%/}"
-  case "$p" in
-    "$repo_prefix"/*) ;;
-    *) _rx_snap_bind_state="foreign-repo"
-       _rx_snap_bind_detail="the path is not under the reviewed repository's prefix '$repo_prefix' (compared LEXICALLY — no filesystem access)"
-       return 1 ;;
-  esac
-  rel="${p#"$repo_prefix"/}"
-  parts=()
-  IFS='/' read -r -a parts <<<"$rel"
-  if [ "${#parts[@]}" -lt 3 ]; then
-    _rx_snap_bind_state="unbound-job"
-    _rx_snap_bind_detail="the path has too few components inside the repository to be one of roborev's snapshot files"
-    return 1
-  fi
-  for ((i = 0; i < ${#parts[@]}; i++)); do
-    if [ -z "${parts[$i]}" ]; then
-      _rx_snap_bind_state="unbound-job"
-      _rx_snap_bind_detail="the path contains an empty component"
-      return 1
-    fi
-  done
-  if [ "${parts[0]}" != ".roborev" ]; then
-    _rx_snap_bind_state="unbound-job"
-    _rx_snap_bind_detail="the path does not sit under the repository's own '.roborev' directory, so it is not one of roborev's snapshot files"
-    return 1
-  fi
-  case "${parts[1]}" in
-    roborev-snapshot-?*) ;;
-    *)
-      _rx_snap_bind_state="unbound-job"
-      _rx_snap_bind_detail="the second component '${parts[1]}' is not a 'roborev-snapshot-<id>' directory, so the path is not one of roborev's snapshot files"
-      return 1
-      ;;
-  esac
-  _rx_snap_rel="$rel"
-  _rx_snap_bind_state="ok"
-  return 0
-}
-
-roborev_collect_review_diff_headers() {
-  local prompt="$1" snap_path
-  ROBOREV_DIFF_SOURCE_STATE=""
-  ROBOREV_SNAPSHOT_PATH=""
-  ROBOREV_SNAPSHOT_CONTAINMENT=""
-  ROBOREV_SNAPSHOT_UNUSABLE_WHY=""
-
-  roborev_collect_prompt_headers "$prompt"
-  roborev_prompt_snapshot_paths "$prompt"
-
-  # ===== THE LOAD-BEARING HALF OF THE BYPASS FIX (roborev job 18) =====
-  # A prompt carrying BOTH inline `diff --git` headers AND a snapshot delivery instruction is FAILED CLOSED.
-  # roborev emits one or the other, never both, so the combination means something put an instruction into a
-  # prompt that already carried the diff — and honouring it would let repository-controlled content DOWNGRADE
-  # an inline-delivered review to an exempted NOTICE, bypassing census verification. THE INVARIANT: inline
-  # census verification must not be suppressible by any repository-controlled content. Detection is already
-  # restricted to roborev own delivery trailer; this is the second lock, so widening detection again cannot
-  # silently reopen the bypass.
-  #
-  # ===== BOTH OPERANDS ARE BLOCK-SCOPED (roborev job 19) =====
-  # The lock reads `_rx_delivery_hdrs` — headers seen INSIDE a delivery block, i.e. evidence that roborev
-  # actually INLINED a diff — and NOT the global `_rx_hdrs` count. Consulting the global count made a
-  # legitimate snapshot review FAIL whenever repository instructions merely QUOTED a `diff --git` line
-  # (fix 1). The global collection still drives census certification below; it just no longer decides the MODE.
-  #
-  # WHY THE HEADER EVIDENCE IS PROMPT-WIDE WHILE THE PATH IS FINAL-BLOCK-ONLY, which is deliberately NOT
-  # symmetric. Under a strictly same-block rule, a prompt with a GENUINE inline delivery in one block plus an
-  # injected trailer in a LATER block would present a final block that carries an instruction and no headers —
-  # so it would resolve to the exempted NOTICE and skip census certification on a review whose inline headers
-  # may NOT have covered the census. That is the #3222 class (a configured pattern swallowing a code path)
-  # being excused by repository content, i.e. exposure WITH inline headers present. Keeping the left operand
-  # prompt-wide costs a fail-CLOSED false FAIL only in one narrow shape — repository instructions that both
-  # sit under their own `### …Diff…` heading AND quote a column-zero `diff --git` line — and refuses rather
-  # than excuses.
-  if [ "${_rx_delivery_hdrs:-0}" -gt 0 ] \
-    && { [ "${#_rx_snap_paths[@]}" -gt 0 ] || [ "${_rx_snap_unparseable:-0}" -gt 0 ]; }; then
-    ROBOREV_DIFF_SOURCE_STATE="mixed-delivery"
-    ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]:-}"
-    ROBOREV_SNAPSHOT_UNUSABLE_WHY="a diff-delivery block of this prompt carries ${_rx_delivery_hdrs} inline 'diff --git' header(s) AND a snapshot delivery instruction; roborev emits one or the other, so something added an instruction to a prompt that already carried the diff. Honouring it would let prompt content downgrade an inline-delivered review to an uncertified NOTICE"
-    return 0
-  fi
-
-  # RIDER R1 (roborev job 17): BUILT WITH `if`, NEVER AN OPTIONAL COMMAND SUBSTITUTION. The previous form
-  # embedded `$([ … ] && printf …)` in a simple assignment, and a simple assignment takes the substitution's
-  # status — so on a prompt whose instruction lines were ALL malformed the `&&` list returned 1 and `set -e`
-  # killed the wrapper BEFORE this verdict could be returned. A spurious abort is a spurious non-PASS, which
-  # is this issue's own bug class. Measured in isolation before fixing.
-  if [ "${_rx_snap_unparseable:-0}" -gt 0 ]; then
-    ROBOREV_DIFF_SOURCE_STATE="unparseable-instruction"
-    if [ "${#_rx_snap_paths[@]}" -gt 0 ]; then
-      ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]}"
-      ROBOREV_SNAPSHOT_UNUSABLE_WHY="${_rx_snap_unparseable} snapshot instruction line(s) carried no readable backtick-delimited path, while ${#_rx_snap_paths[@]} other line(s) did (first: ${_rx_snap_paths[0]})"
-    else
-      ROBOREV_SNAPSHOT_UNUSABLE_WHY="${_rx_snap_unparseable} snapshot instruction line(s) carried no readable backtick-delimited path, and no line yielded one"
-    fi
-    return 0
-  fi
-
-  # ===== RIDER R3, ENFORCED BEFORE ANY GLOBAL-HEADER CONSULTATION (roborev job 20, BLOCKER) =====
-  # A PATHLESS OVERSIZE MARKER IS ITS OWN HARD-FAILING STATE, and the ORDER of this check against the
-  # `_rx_hdrs` consultation below is the whole fix. `_rx_hdrs` used to be read FIRST, so a DELEGATED oversize
-  # prompt — roborev's third tier: no inline diff AND no snapshot path, the reviewer told to run git itself —
-  # was resolved as `inline` on the strength of any `diff --git` line quoted ANYWHERE in the prompt. Quoted
-  # headers that happened to cover the census then produced `prompt-content: PASS` on a review where roborev
-  # supplied NOTHING. That contradicts the standing #3325 ruling that the delegated tier stays a NAMED FAIL,
-  # and it is a PASS, not the disclosed NOTICE residual — a different mechanism with a different verdict.
-  #
-  # THE TWO USES OF THE HEADER SET ARE THEREFORE SEPARATED. Prompt-wide header evidence is right for the
-  # mixed-delivery lock (a later injected block must not hide an earlier inline delivery) and right for census
-  # matching once a delivery is established — but it may NEVER be what establishes that a delivery HAPPENED
-  # when roborev's own marker says it delegated instead. An oversize marker with no usable path means
-  # delegation, full stop, whatever appears elsewhere in the prompt.
-  #
-  # SECOND EVALUATION-ORDER DEFECT IN THIS FUNCTION (the first was validate-after-normalise), so the ordering
-  # is pinned by a structural assert in scripts/tests/test_roborev_review_guard.sh rather than by this comment.
-  if [ "${_rx_snap_oversize_markers:-0}" -gt 0 ] && [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
-    ROBOREV_DIFF_SOURCE_STATE="delegated-oversize"
-    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt carries a '(Diff too large' notice but NO snapshot path (roborev's delegated-inspection tier, or a compact instruction naming a command rather than a path), so nothing establishes which files the reviewer looked at"
-    return 0
-  fi
-
-  if [ "${#_rx_snap_paths[@]}" -eq 0 ]; then
-    if [ "${#_rx_hdrs[@]}" -gt 0 ]; then
-      ROBOREV_DIFF_SOURCE_STATE="inline"
-    else
-      ROBOREV_DIFF_SOURCE_STATE="none"
-    fi
-    return 0
-  fi
-
-  if [ "${#_rx_snap_paths[@]}" -gt 1 ]; then
-    ROBOREV_DIFF_SOURCE_STATE="unparseable-instruction"
-    ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]}"
-    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt names ${#_rx_snap_paths[@]} different snapshot diff paths, so which one this review was given is undecidable: ${_rx_snap_paths[*]}"
-    return 0
-  fi
-
-  snap_path="${_rx_snap_paths[0]}"
-  ROBOREV_SNAPSHOT_PATH="$snap_path"
-  roborev_snapshot_path_binding "$snap_path" || :
-  if [ "${_rx_snap_bind_state:-}" != ok ]; then
-    # A SELECTED MODE IS NOT A NAMED SNAPSHOT (roborev job 16): if the stated path is not even shaped like one
-    # of roborev's snapshot files in this repository, this run received neither an inline diff nor a snapshot,
-    # and that is a FAIL which must never reach the C‴/C⁗ NOTICE. Keyed on the affirmative `ok`.
-    ROBOREV_DIFF_SOURCE_STATE="snapshot-unbound"
-    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the stated path is not shaped like one of this repository's snapshot files (${_rx_snap_bind_state:-unknown}): ${_rx_snap_bind_detail:-no detail}"
-    return 0
-  fi
-  # RIDER R2: the containment answer is LEXICAL and says so, in the block and in the NOTICE.
-  ROBOREV_SNAPSHOT_CONTAINMENT="lexical: inside the reviewed repository, shaped as .roborev/roborev-snapshot-<id>/"
-  ROBOREV_DIFF_SOURCE_STATE="snapshot"
-  return 0
-}
-
 # roborev_diff_header_has_path <diff-git-header-line> <RAW census path> [<from-path-token>]
 #   [<to-path-token>]: true when the header names that path on EITHER side.
 #
@@ -1498,4 +1006,128 @@ roborev_diff_header_has_path() {
   # 4b: a rename/copy whose `rename from`/`rename to` lines did not reach us.
   [ "$any_match" -eq 1 ] && return 0
   return 1
+}
+
+# ===================== THE ABSENCE WAIVER (issue #3312, owner ruling (4)) =====================
+# WHY THIS EXISTS, AND WHAT IT REPLACED. `prompt-content:` asks exactly ONE question — are the census
+# CODE paths present in the prompt the reviewer was sent? PRESENT is a PASS; ABSENT is a FAIL,
+# unconditionally. There is deliberately NO CLASSIFIER: the wrapper used to infer HOW roborev
+# delivered the diff (inline / snapshot path / delegated tier) from the prompt TEXT, and four
+# consecutive review rounds each found a High-severity false verdict in that inference — a header set
+# consulted before an oversize marker, a candidate outliving its block, a delivery under an
+# unrecognised heading producing no evidence, and a block opener keyed on heading text that roborev
+# treats as caller DATA. The instances differed; the cause did not. roborev's prompt EMBEDS
+# repository-controlled content at column zero, so structure inferred from that text is spoofable in
+# both directions, and no marker was found that terminates the sequence: the only structural one was
+# roborev's fenced diff, and repository content can contain fences too. The owner therefore ruled the
+# inference out of existence rather than patching its fifth instance.
+#
+# THE COST THAT RULING ACCEPTS, stated plainly: a review whose diff roborev delivered BY PATH has no
+# census paths in its prompt, so it now FAILs exactly like a review that received nothing at all.
+# **To the machine those two are IDENTICAL.** That is not a limitation to be engineered away here; it
+# is the trade being chosen over a machine guessing from injectable text. What distinguishes them is a
+# HUMAN plus the review's token accounting (genuine reviews measured 398k–649k input / 314k–554k
+# cached; the vacuous baseline is ~18.7k input / 0 cached), which is why the escape hatch is a
+# human-authorized waiver and not another inference.
+#
+# roborev_absence_waiver_lookup <certified-head-sha>: does the PR for this branch carry a waiver
+# comment for THIS head? Sets, and never returns non-zero:
+#   ROBOREV_WAIVER_STATE   granted | stale | malformed | none | unavailable
+#   ROBOREV_WAIVER_AUTHOR / _SHA / _REASON / _DETAIL
+#
+# THE MARKER, one line in a PR comment:
+#     roborev-waive: prompt-content-absent sha=<40-hex> reason=<text>
+#
+# ===== AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED =====
+# The ruling is that only the OWNER or the coordination LEAD may GRANT this, and that a worker or a
+# closer may only REQUEST it. THIS CODE CANNOT ENFORCE THAT, and says so rather than implying
+# otherwise: on this fleet the worker, the closer and the owner all post through the SAME GitHub login
+# (`GH_TOKEN` is the repository owner's), so a comment's author field cannot distinguish a
+# self-applied waiver from a granted one. An authorization check keyed on `author.login` would
+# therefore LOOK like it verified authorship while verifying nothing — precisely the false-assurance
+# shape this issue spent four review rounds removing — so it is deliberately NOT implemented. What IS
+# mechanized: the marker must exist on the PR, it must name the CERTIFIED head sha (so a push
+# invalidates it, exactly like `ci:waive:<tier-id>`), it must carry a non-empty reason, and the
+# author, sha, reason and the absent paths are all recorded in the summary block. The audit trail is
+# the immutable, timestamped PR comment; the authorization is a process obligation on the human.
+#
+# FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, a marker for another sha, a marker with no
+# reason — every one leaves the absence FAILing, under its own named state.
+roborev_absence_waiver_lookup() {
+  local head="$1" body line sha reason author rest missing
+  ROBOREV_WAIVER_STATE="none"
+  ROBOREV_WAIVER_AUTHOR=""
+  ROBOREV_WAIVER_SHA=""
+  ROBOREV_WAIVER_REASON=""
+  ROBOREV_WAIVER_DETAIL=""
+  case "$head" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+    *)
+      ROBOREV_WAIVER_STATE="unavailable"
+      ROBOREV_WAIVER_DETAIL="this run has no certified head sha for a waiver to be bound to"
+      return 0
+      ;;
+  esac
+  if ! command -v gh >/dev/null 2>&1; then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="'gh' is not on PATH, so no PR comment could be read"
+    return 0
+  fi
+  # ONE `gh` call, and its FAILURE IS A STATE rather than a silent empty result: `gh pr view` exits
+  # non-zero when there is no PR for the branch, when auth is missing, and when the API errors, and
+  # all three mean "no waiver could be established" — which keeps the absence FAILing.
+  #
+  # EACH COMMENT IS FLATTENED TO ONE LINE, author first: a marker on the third line of a multi-line
+  # comment must still be attributable, and a line-oriented scan over raw bodies would attribute it to
+  # a fragment of prose instead.
+  if ! body=$(cd "$REPO" && gh pr view --json comments \
+      --jq '.comments[] | ((.author.login // "unknown") + "\t" + ((.body // "") | gsub("\r?\n"; " ")))' 2>/dev/null); then
+    ROBOREV_WAIVER_STATE="unavailable"
+    ROBOREV_WAIVER_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no waiver could be read"
+    return 0
+  fi
+  [ -n "$body" ] || return 0
+  # THE LAST GRANTED MARKER WINS, so a re-request after a push supersedes a stale one instead of being
+  # shadowed by it — while a stale or malformed marker is still REPORTED when no valid one exists,
+  # because "your waiver names the wrong sha" is the diagnostic the human needs.
+  # SPLIT ON THE TAB BY `IFS`, not by a literal tab inside a parameter expansion: an invisible
+  # separator character in source is exactly the kind of thing a later edit silently drops.
+  while IFS=$'\t' read -r author line; do
+    case "$line" in *"roborev-waive: prompt-content-absent"*) ;; *) continue ;; esac
+    rest="${line#*roborev-waive: prompt-content-absent}"
+    sha=""
+    reason=""
+    case "$rest" in *sha=*) sha="${rest#*sha=}"; sha="${sha%% *}" ;; esac
+    case "$rest" in *reason=*) reason="${rest#*reason=}" ;; esac
+    if [ -z "$sha" ] || [ -z "$reason" ]; then
+      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
+        missing=""
+        [ -n "$sha" ] || missing="sha="
+        [ -n "$reason" ] || missing="${missing:+$missing and }reason="
+        ROBOREV_WAIVER_STATE="malformed"
+        ROBOREV_WAIVER_AUTHOR="$author"
+        ROBOREV_WAIVER_SHA="$sha"
+        ROBOREV_WAIVER_DETAIL="the marker carries no $missing value, so it does not say what it waives or why"
+      fi
+      continue
+    fi
+    if [ "$sha" != "$head" ]; then
+      if [ "$ROBOREV_WAIVER_STATE" != "granted" ]; then
+        ROBOREV_WAIVER_STATE="stale"
+        ROBOREV_WAIVER_AUTHOR="$author"
+        ROBOREV_WAIVER_SHA="$sha"
+        ROBOREV_WAIVER_REASON="$reason"
+        ROBOREV_WAIVER_DETAIL="the marker names sha $sha but this run certified $head — a push invalidates a waiver, so re-request it against the new head"
+      fi
+      continue
+    fi
+    ROBOREV_WAIVER_STATE="granted"
+    ROBOREV_WAIVER_AUTHOR="$author"
+    ROBOREV_WAIVER_SHA="$sha"
+    ROBOREV_WAIVER_REASON="$reason"
+    ROBOREV_WAIVER_DETAIL=""
+  done <<WAIVER_SCAN_EOF
+$body
+WAIVER_SCAN_EOF
+  return 0
 }

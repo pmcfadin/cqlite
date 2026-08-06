@@ -131,98 +131,15 @@ roborev_check_prompt_content() {
     # `rename to` lines. Which lines those are, and how far the extended-header run
     # extends, is header-shape knowledge — so it lives with the matcher, not here, and this
     # file just carries the three parallel arrays through.
-    # THE HEADERS COME FROM WHEREVER THE DIFF ACTUALLY IS (#3312). roborev has TWO
-    # diff-delivery modes: inline in the prompt, or — when the diff is large — written to a
-    # TRANSIENT snapshot file whose path the prompt names, in which case the prompt itself
-    # carries ZERO 'diff --git' headers. Reading only the prompt text therefore reported
-    # every code path "absent" on genuine large reviews (MEASURED: job 6836, 23 files,
-    # 1.47M input / 1.35M cached / 6.1k output, 4 findings with real file:line) — a false
-    # FAIL on exactly the diffs that most need review, and the documented way a guard gets
-    # waived. The resolver below follows the diff to where it is; the census, the canonical
-    # matcher and the fail-closed semantics are untouched.
-    roborev_collect_review_diff_headers "$PROMPT_FILE"
-    # SELECTED ON THE AFFIRMATIVE STATE NAMES, never on "not a failure".
-    case "${ROBOREV_DIFF_SOURCE_STATE:-}" in
-      snapshot)
-        # ===== C⁗: SNAPSHOT MODE IS A NOTICE, NOT A CERTIFICATION =====
-        # Owner ruling, after seven review rounds found eleven false-PASS vectors in the machinery that
-        # made a snapshot-delivered diff certifiable. The information is PRESERVED — the block records
-        # the snapshot path AS THE PROMPT STATED IT, a lexical containment statement about that string,
-        # and the census code-path subset this run expected — so a human
-        # closer can act on it; what is gone is the claim that the reviewer demonstrably received those
-        # paths. THIS IS A DELIBERATE REDUCTION IN CERTIFICATION STRENGTH, and it is the one place in
-        # this wrapper where a previously-FAILing condition no longer fails. It NEVER turns a previous
-        # FAIL into a PASS by itself: `prompt-content` becomes NOTICE, and the wrapper's
-        # verdict-affirmation backstop admits that NOTICE only for this key and only in this mode.
-        # SET ONLY HERE, AND ONLY ON AN AFFIRMATIVE FACT: the resolver reaches `snapshot` only after the
-        # stated path passed the LEXICAL binding, so `SNAPSHOT_NOTICE=1` asserts "a snapshot path was stated
-        # and is shaped like one of this repository's snapshot files" — never merely "the mode was selected".
-        SNAPSHOT_NOTICE=1
-        SNAPSHOT_EXPECTED="${#census_code_paths[@]} code census path(s) expected, not asserted"
-        PROMPT_CONTENT="NOTICE (snapshot mode: not certified — snapshot-path/-containment/-expected record what the prompt stated)"
-        # ===== C⁗: DETECTED AND REPORTED, NOTHING READ (owner ruling, issue #3312) =====
-        # The diff was delivered by a path to a file roborev deletes before this wrapper regains control.
-        # Certifying that took an apparatus in which seven review rounds found eleven false-PASS vectors, and
-        # every defect after its retirement was in the code that touched the filesystem to digest the file. So
-        # this run records WHAT THE PROMPT STATED and reads nothing: no digest, no size, no stat. The
-        # containment statement is LEXICAL and says so, and the expectation below is reported, never asserted.
-        DETAILS+=("NOTICE: prompt-content: roborev delivered this diff BY SNAPSHOT PATH, so it is DETECTED AND REPORTED rather than certified (C⁗, issue #3312). Stated path: ${ROBOREV_SNAPSHOT_PATH:-<unnamed>} (${ROBOREV_SNAPSHOT_CONTAINMENT:-lexical: not established}). NOTHING WAS READ — this run performs no filesystem access on that path, so there is no digest and no content identity for it; the hang and race classes that came with reading are not reachable rather than fixed. This run EXPECTED the ${#census_code_paths[@]} CODE census path(s) below to be in it; that expectation is NOT asserted, and a closer wanting certainty must inspect the diff or re-review with a smaller range.")
-        printed=0
-        for census_path in ${census_code_paths[@]+"${census_code_paths[@]}"}; do
-          [ "$printed" -lt 10 ] || break
-          DETAILS+=("  $census_path")
-          printed=$((printed + 1))
-        done
-        if [ "${#census_code_paths[@]}" -gt 10 ]; then
-          DETAILS+=("  … and $(( ${#census_code_paths[@]} - 10 )) more (see census: for the total)")
-        fi
-        return 0
-        ;;
-      snapshot-unbound|unparseable-instruction|mixed-delivery)
-        # ===== A SELECTED MODE IS NOT A NAMED SNAPSHOT (roborev job 16, blocker 1) =====
-        # These three states mean the wrapper received NEITHER an inline diff NOR a usably-named snapshot: the
-        # named path could not be bound, an instruction line could not be read at all, or the prompt carried
-        # BOTH delivery forms at once. The owner ruled that
-        # such an input stays a NAMED FAIL — "a review whose reviewer was told to run git itself cannot be
-        # verified to have received anything; an unverifiable input is a non-passing verdict by rule 13" — so
-        # they must never reach the C⁗ NOTICE, and `SNAPSHOT_NOTICE` is deliberately NOT set here. Before this,
-        # snapshot mode was selected on the mere PRESENCE of an instruction line, so a compact instruction
-        # carrying a git command produced an exempted NOTICE and the run PASSED having received nothing.
-        PROMPT_CONTENT="FAIL (snapshot named but unusable: ${ROBOREV_DIFF_SOURCE_STATE})"
-        # THE INVARIANT THIS PROTECTS (roborev job 18): inline census verification must not be suppressible by any repository-controlled
-        # content. `mixed-delivery` is the state that says something tried: a prompt carrying an inline diff AND
-        # a delivery instruction is failed closed rather than resolved in favour of the instruction.
-        DETAILS+=("ERROR: prompt-content: roborev signalled that the diff was delivered BY PATH, but this run received neither an inline diff nor a usably-named snapshot: ${ROBOREV_SNAPSHOT_UNUSABLE_WHY:-cause not established}. Named path: ${ROBOREV_SNAPSHOT_PATH:-<none readable from the prompt>}. An input that cannot be established is a NON-PASSING verdict — it is not a C⁗ NOTICE, because nothing here names one snapshot this run could even report. Failing closed.")
-        DETAILS+=("ERROR: prompt-content: the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are therefore UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
-        return 0
-        ;;
-      delegated-oversize)
-        # ===== RIDER R3: THE DELEGATED TIER IS A NAMED FAIL, ON EVERY ROUTE INTO IT (roborev job 20) =====
-        # roborev's `codex_*`/`generic_*` oversize templates — and a compact instruction whose token is a git
-        # COMMAND rather than a path — ship neither the diff nor a snapshot path: the reviewer is told to run git
-        # itself, so nothing local establishes what it received. Standing #3325 ruling: that stays a named FAIL.
-        # THIS ARM EXISTS BECAUSE THE STATE IS NOW DECIDED BEFORE THE GLOBAL HEADER SET IS CONSULTED. Previously
-        # this prompt shape fell through to `inline` whenever ANY `diff --git` line was quoted anywhere in it, and
-        # quoted headers covering the census produced a PASS on a review that received nothing at all.
-        PROMPT_CONTENT="FAIL (delegated oversize tier: roborev supplied neither a diff nor a snapshot path)"
-        DETAILS+=("ERROR: prompt-content: the prompt carries a '(Diff too large' notice but NO snapshot path — ${ROBOREV_SNAPSHOT_UNUSABLE_WHY:-cause not established}. Whether such a review is certifiable at all is an owner decision (#3325); by rule 13 an unverifiable input is non-passing, so it stays a named FAIL. A 'diff --git' header quoted ELSEWHERE in the prompt is NOT a delivery and cannot satisfy the census here (roborev job 20).")
-        DETAILS+=("ERROR: prompt-content: the ${#census_code_paths[@]} CODE census path(s) of $CENSUS (${BASE}...HEAD) are therefore UNVERIFIED — 'we could not check', never 'nothing was wrong'.")
-        return 0
-        ;;
-      inline) ;;
-      none)
-        # A MEASUREMENT, not an excusal: neither source exists, so the census match below reports every
-        # path absent — the fail-closed direction — and this line names the condition. There is no oversize
-        # sub-case left here: a pathless oversize marker is now its own state, decided earlier (job 20), so a
-        # branch for it in this arm would be unreachable — and an unreachable branch reads as a check that ran.
-        DETAILS+=("ERROR: prompt-content: the prompt carries NEITHER an inline diff (no 'diff --git' header) NOR a snapshot diff path (no column-zero 'Read the diff from:' instruction inside roborev's own diff-delivery block), so nothing in it names a diff the reviewer could have received. This is the T1/T2 family: the review ran against no diff at all.")
-        ;;
-      *)
-        PROMPT_CONTENT="FAIL (diff-source resolver returned the unrecognised state '${ROBOREV_DIFF_SOURCE_STATE:-<unset>}')"
-        DETAILS+=("ERROR: prompt-content: the diff-source resolver returned a state this check has never judged. That is a defect in roborev-review-oracles.sh, not in the branch under review — failing closed rather than letting an unplanned state inherit a non-failing path.")
-        return 0
-        ;;
-    esac
+    # ===== ONE QUESTION, NO CLASSIFIER (owner ruling (4), issue #3312) =====
+    # Are the census CODE paths present in the prompt the reviewer was sent? That is the whole
+    # check. It does NOT ask, and can no longer express, HOW roborev delivered the diff: four
+    # consecutive review rounds each found a High-severity false verdict in that inference, whose
+    # single cause was inferring structure from prompt text that embeds repository-controlled
+    # content. Absence is now a FAIL whatever produced it — a snapshot-delivered diff, a delegated
+    # tier, a vacuous review that received nothing — and the only way past it is a human-authorized,
+    # sha-bound waiver recorded in the block (see `roborev_absence_waiver_lookup`).
+    roborev_collect_prompt_headers "$PROMPT_FILE"
     # EVERY code census path is expected in the prompt. There is NO subtraction and no
     # excusal: NO exclusion set is modelled anywhere in this wrapper (#3283 for the
     # configured half, #3278 for roborev's compiled-in deny-list), so nothing here is
@@ -257,18 +174,40 @@ roborev_check_prompt_content() {
       PROMPT_CONTENT="FAIL (no code census path was checkable — a 0/0 is never a pass)"
       DETAILS+=("ERROR: prompt-content: there is not one CODE census path to look for in the prompt (census code paths: ${#census_code_paths[@]}), so this key has NO subject and therefore no verdict to give. Failing closed: 'PASS (0/0 code census paths present)' would be textually identical to a genuine pass while the reviewer received an EMPTY prompt. See code-free:, which fails pre-enqueue for the same reason.")
     elif [ "${#missing_paths[@]}" -gt 0 ]; then
-      PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
-      DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. Missing (first 10):")
+      # ===== ABSENCE IS A FAIL, AND ONLY A HUMAN CAN EXCUSE IT (owner ruling (4)) =====
+      # The waiver is looked up ONLY here, so it can excuse ONLY this verdict: every other cause this
+      # wrapper can report — an unretrievable prompt, a 0/0 census, a failed sha assert, a review that
+      # never completed — is reached on a different path and is untouched by it. A `WAIVED` token
+      # therefore always means "the census paths were absent and a named human accepted that", never
+      # anything else.
+      roborev_absence_waiver_lookup "${HEAD_SHA:-}"
+      WAIVER_REPORT="${ROBOREV_WAIVER_STATE}"
+      if [ "$ROBOREV_WAIVER_STATE" = "granted" ]; then
+        # A DISTINCT VERDICT TOKEN, deliberately not `PASS (waived …)`: every reader that greps
+        # `^prompt-content: PASS` — this suite, closers, agents pasting blocks — must NOT see a waived
+        # run as certified. `WAIVED` is admitted by the wrapper's affirmation backstop only when the
+        # authorizer, the sha and the reason are all present, so it can never be a silent placeholder.
+        PROMPT_CONTENT="WAIVED (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent — authorized by @${ROBOREV_WAIVER_AUTHOR} for ${ROBOREV_WAIVER_SHA})"
+        WAIVER_REPORT="GRANTED (author=@${ROBOREV_WAIVER_AUTHOR} sha=${ROBOREV_WAIVER_SHA} reason=${ROBOREV_WAIVER_REASON})"
+        DETAILS+=("NOTICE: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths are ABSENT from the prompt actually sent to the reviewer, and that FAIL is WAIVED by a PR comment naming this head sha. Authorizer as recorded by GitHub: @${ROBOREV_WAIVER_AUTHOR}. Reason as given: ${ROBOREV_WAIVER_REASON}. AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED: on this fleet the worker, the closer and the owner post through the same GitHub login, so this wrapper CANNOT tell a self-applied waiver from an owner-granted one and deliberately does not pretend to — the ruling that only the owner or the coordination lead may grant it rests on process, and on this comment being permanently attributable. What is mechanized: the marker exists, it names the CERTIFIED head sha (a push invalidates it), and it carries a reason. Absent paths (first 10):")
+      else
+        PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
+        case "$ROBOREV_WAIVER_STATE" in
+          none) WAIVER_REPORT="NONE (no 'roborev-waive: prompt-content-absent sha=<head> reason=<why>' comment on this PR)" ;;
+          *) WAIVER_REPORT="$(printf '%s' "$ROBOREV_WAIVER_STATE" | tr '[:lower:]' '[:upper:]') (${ROBOREV_WAIVER_DETAIL:-cause not established})" ;;
+        esac
+        DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so nothing establishes that the reviewer received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. THE MACHINE CANNOT TELL WHY THEY ARE ABSENT — a diff roborev delivered by snapshot path and a vacuous review that received nothing look IDENTICAL from here, which is the accepted cost of not inferring delivery mode from injectable prompt text. If this absence is legitimate, the review's token accounting is the evidence a human weighs (genuine reviews measured 398k-649k input / 314k-554k cached; the vacuous baseline is ~18.7k input / 0 cached), and the owner or the coordination lead may waive it with a PR comment: 'roborev-waive: prompt-content-absent sha=${HEAD_SHA:-<head>} reason=<why>'. Waiver state for this run: ${WAIVER_REPORT}. Absent paths (first 10):")
+      fi
       printed=0
       for census_path in "${missing_paths[@]}"; do
         [ "$printed" -lt 10 ] || break
         DETAILS+=("  $census_path")
         printed=$((printed + 1))
       done
+      if [ "${#missing_paths[@]}" -gt 10 ]; then
+        DETAILS+=("  … and $(( ${#missing_paths[@]} - 10 )) more")
+      fi
     else
-      # The suffix names WHERE the evidence was found, so a pasted block distinguishes an
-      # inline-diff review from a snapshot-delivered one. It is EMPTY for the inline case, which
-      # keeps the long-standing value spelling byte-identical for every reader that greps it.
       PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"
     fi
   fi

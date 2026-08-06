@@ -105,21 +105,29 @@
 #                     FAIL (<k>/<n> code census paths absent from the prompt) |
 #                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
 #                     FAIL (prompt unretrievable — ...) |
-#                     NOTICE (snapshot mode: not certified — ...) | SKIP
-#                     TWO DIFF-DELIVERY MODES, TREATED DIFFERENTLY (#3312). INLINE: unchanged — every CODE
-#                     census path must appear on a `diff --git` header of the prompt, and an absent one is
-#                     a hard FAIL. SNAPSHOT (roborev writes the diff to a TRANSIENT file and names it, so
-#                     the prompt carries ZERO headers): after seven review rounds found ELEVEN false-PASS
-#                     vectors in the machinery that made a copy of that file trustworthy, the owner ruled
-#                     it DETECTED AND REPORTED rather than certified — `prompt-content` is a NOTICE and the
-#                     keys below record WHAT THE PROMPT STATED, nothing being read. A snapshot-mode PASS
-#                     therefore does NOT assert that the reviewer received the census paths.
-#   snapshot-path     the snapshot path THE PROMPT STATED. PRESENT ONLY IN SNAPSHOT MODE — in inline mode
-#                     these three keys have no subject and are ABSENT rather than placeholdered.
-#   snapshot-containment  a LEXICAL statement about that string (no filesystem access): `lexical: inside the
-#                     reviewed repository, shaped as .roborev/roborev-snapshot-<id>/`. Nothing is read, so
-#                     there is NO digest and NO size — see the C⁗ note in roborev-review-oracles.sh.
-#   snapshot-expected <n> code census path(s) expected, not asserted
+#                     WAIVED (<k>/<n> code census paths absent — authorized by @<login> for <sha>) | SKIP
+#                     ONE QUESTION, NO CLASSIFIER (owner ruling (4), #3312): are the CODE census paths
+#                     present in the prompt the reviewer was sent? PRESENT is a PASS; ABSENT is a FAIL,
+#                     unconditionally — whatever caused it. The wrapper used to infer roborev's delivery
+#                     MODE from prompt text (inline / snapshot path / delegated tier); four consecutive
+#                     review rounds each found a High-severity false verdict in that inference, whose one
+#                     cause was reading structure out of text that embeds repository-controlled content,
+#                     so the inference is DELETED rather than patched again. THE ACCEPTED COST: a
+#                     snapshot-delivered diff and a vacuous review that received nothing are IDENTICAL
+#                     to the machine. A human plus the review's token accounting distinguishes them.
+#   waiver            GRANTED (author=@<login> sha=<40-hex> reason=<why>) | NONE (...) | STALE (...) |
+#                     MALFORMED (...) | UNAVAILABLE (...)
+#                     PRESENT ONLY WHEN THE ABSENCE BRANCH RAN, so it is absent rather than
+#                     placeholdered on a run that had nothing to waive. INFORMATIONAL: it is not in the
+#                     verdict scan and cannot make anything pass by itself. The waiver is a PR comment,
+#                     `roborev-waive: prompt-content-absent sha=<head> reason=<why>`, granted by the
+#                     OWNER or the coordination LEAD (a worker or closer may only REQUEST one, and must
+#                     include the token accounting). It is SHA-BOUND — a push invalidates it — and it
+#                     excuses the ABSENCE verdict ONLY, never any other cause. AUTHORSHIP IS
+#                     PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED: worker, closer
+#                     and owner share one GitHub login on this fleet, so no author check here could
+#                     tell a self-applied waiver from a granted one, and pretending otherwise is the
+#                     false-assurance shape this issue exists to remove.
 #   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
@@ -313,33 +321,49 @@ the reviewer did not receive surfaces AFTER the review, under prompt-content:,
 whose cause names the symptom rather than the mechanism. Fail-closed, never green
 — but if prompt-content: FAILs, SUSPECT .roborev.toml first.
 
-TWO DIFF-DELIVERY MODES, TREATED DIFFERENTLY (issue #3312): a large diff is NOT
-inlined — roborev writes it to a TRANSIENT file and the prompt ends with
-'Read the diff from: \`<abs path>\`', carrying ZERO diff --git headers. INLINE mode
-is certified exactly as before: an absent CODE census path is a hard FAIL.
-SNAPSHOT mode is DETECTED AND REPORTED, not certified — prompt-content: reports a
-NOTICE and snapshot-path/-containment/-expected record the path AS THE PROMPT STATED
-IT, a LEXICAL statement about that string, and the census code subset this run
-expected. NOTHING IS READ: no digest, no size, no stat, so the hang and race classes
-that came with reading are NOT REACHABLE rather than fixed. That is an owner ruling
-(C⁗), reached after seven review rounds found eleven false-PASS vectors in the
-machinery that made a copy of the vanishing snapshot certifiable, and three more
-defects in the code that merely digested it. A snapshot-mode PASS therefore does NOT
-assert the reviewer received the census paths; a closer wanting certainty inspects
-the diff or re-reviews a smaller range. A stated path that is relative, carries a
-\`.\`/\`..\` segment, lies outside the repository prefix, or is not shaped like
-.roborev/roborev-snapshot-<id>/<file> is a named FAIL, not a NOTICE — as is roborev's
-delegated-inspection tier, which names no snapshot path at all. That tier is
-judged BEFORE any diff --git header is consulted, so a header quoted elsewhere in
-the prompt can never make a review that received nothing look inline-delivered.
+ONE QUESTION, NO DELIVERY CLASSIFIER (issue #3312, owner ruling (4)): prompt-content:
+asks only whether the CODE census paths are present in the prompt the reviewer was
+sent. PRESENT is a PASS. ABSENT is a FAIL, unconditionally, whatever caused it.
 
-THE INVARIANT THAT BOUNDS THAT NOTICE: inline census verification must not be
-suppressible by any repository-controlled content. A delivery instruction is honoured
-ONLY inside roborev's own diff-delivery block (its '### ...Diff...' heading, after its
-own '(Diff too large' notice), and a prompt carrying BOTH an inline diff AND an
-instruction — which roborev never emits — is a named mixed-delivery FAIL. So content
-in the reviewed repository (an AGENTS.md section is at column zero exactly like
-roborev's own text) can never downgrade an inline review to the exempted NOTICE.
+This wrapper used to infer HOW roborev delivered the diff — inlined in the prompt, or
+written to a transient file whose path the prompt names, or the delegated tier that
+ships neither and tells the reviewer to run git itself. Four consecutive review rounds
+each found a High-severity false verdict in that inference, in BOTH directions, and
+every one had the same cause: it read structure out of prompt text, and roborev's
+prompt embeds repository-controlled content (project guidelines, AGENTS.md sections,
+previous-review bodies) at column zero, indistinguishable from roborev's own. No
+terminating marker exists — the only structural one was roborev's fenced diff, and
+repository content can contain fences too — so the inference was DELETED rather than
+patched a fifth time. Block detection, heading parsing, fence evidence, mixed-delivery,
+candidate lifetime and the snapshot/delegated distinction are all gone with it.
+
+THE ACCEPTED COST, stated because it is real: a diff roborev delivered BY PATH and a
+vacuous review that received NOTHING are IDENTICAL to the machine — both have no
+census paths in the prompt, so both FAIL. What distinguishes them is a HUMAN plus the
+review's token accounting (genuine reviews measured 398k-649k input / 314k-554k cached;
+the vacuous baseline is ~18.7k input / 0 cached).
+
+THE WAIVER, therefore: the OWNER or the coordination LEAD may excuse an absence FAIL
+with a PR comment carrying
+
+    roborev-waive: prompt-content-absent sha=<40-hex head> reason=<why>
+
+A worker or a closer may REQUEST one — one comment, including the token accounting —
+and may never apply it to its own PR. It is SHA-BOUND: a push invalidates it, exactly
+like ci:waive:<tier-id>, so re-request against the new head. It excuses the ABSENCE
+verdict ONLY: any other cause (an unretrievable prompt, a 0/0 census, a failed sha
+assert, a review that never completed) is reached on a different path and is untouched.
+The block then reports prompt-content: WAIVED (...) — a DISTINCT token, so no reader
+grepping 'prompt-content: PASS' mistakes it for a certification — beside a waiver: key
+recording the authorizer, the sha, the reason and the absent paths. Never silence.
+
+AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED. On this
+fleet the worker, the closer and the owner all post through the SAME GitHub login, so
+no check here could tell a self-applied waiver from a granted one. An author check
+would LOOK like it verified authorship while verifying nothing, which is the exact
+false-assurance shape this issue spent four review rounds removing, so it is
+deliberately absent. What IS mechanized: the marker exists on the PR, it names the
+CERTIFIED head sha, it carries a reason, and all of it is recorded in the block.
 
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
@@ -468,11 +492,9 @@ SHA_ASSERT="SKIP"
 # verdict marker from an ALLOW-list) is now required before PASS is reachable.
 REVIEW_COMPLETED="SKIP"
 PROMPT_CONTENT="SKIP"
-# C⁗ (#3312): set to 1 by `prompt-content` when roborev delivered the diff by SNAPSHOT PATH, which the
-# owner ruled is DETECTED AND REPORTED rather than certified. It is the ONLY thing that admits a
-# `prompt-content: NOTICE` to the affirmation backstop below, and nothing else may set it.
-SNAPSHOT_NOTICE=0
-SNAPSHOT_EXPECTED=""
+# The waiver record for the absence branch (owner ruling (4), #3312). Empty means the branch never
+# ran — the census paths were present — so the key is ABSENT from the block rather than placeholdered.
+WAIVER_REPORT=""
 TIER1="SKIP"
 TIER2="SKIP"
 FINDINGS="SKIP"
@@ -564,15 +586,14 @@ emit_summary() {
   emit_kv 'sha-assert' "$SHA_ASSERT"
   emit_kv 'review-completed' "$REVIEW_COMPLETED"
   emit_kv 'prompt-content' "$PROMPT_CONTENT"
-  # C⁗ INFORMATIONAL KEYS (#3312): what the prompt STATED about a snapshot-delivered diff. Nothing is read,
-  # so there is no digest and no size — the record is the path as stated, a LEXICAL containment statement, and
-  # the census code subset this run expected. Informational, exactly like `census:`/`tokens:`, and deliberately
-  # absent from the verdict scan. Emitted ONLY in snapshot mode: in inline mode they have no subject, and a `-`
-  # placeholder (or an empty value) would imply a measurement was attempted and came back empty.
-  if [ "${SNAPSHOT_NOTICE:-0}" -eq 1 ]; then
-    emit_kv 'snapshot-path' "${ROBOREV_SNAPSHOT_PATH:--}"
-    emit_kv 'snapshot-containment' "${ROBOREV_SNAPSHOT_CONTAINMENT:-lexical: not established}"
-    emit_kv 'snapshot-expected' "${SNAPSHOT_EXPECTED:--}"
+  # THE WAIVER RECORD (owner ruling (4), #3312). INFORMATIONAL, exactly like `census:`/`tokens:` — it
+  # is NOT in the verdict scan and cannot make anything pass on its own; `prompt-content:` alone
+  # carries that verdict. Emitted ONLY when the absence branch ran and therefore had a waiver to look
+  # for: in the PASS case it has no subject, and a `-` placeholder would imply a lookup that never
+  # happened. It records the state even when no waiver exists, because "your marker names the wrong
+  # sha" is the diagnostic a human needs, and a waived FAIL must never be silent about who waived it.
+  if [ -n "${WAIVER_REPORT:-}" ]; then
+    emit_kv 'waiver' "$WAIVER_REPORT"
   fi
   emit_kv 'vacuity-tier1' "$TIER1"
   emit_kv 'vacuity-tier2' "$TIER2"
@@ -702,13 +723,14 @@ done
 # two-positional range form (it anchors the range at git's EMPTY TREE).
 # The transcript goes to the log; stdout stays reserved for the summary block.
 #
-# NOTHING IS ARMED AROUND THIS CALL, and that absence is the design (C⁗, #3312). When roborev delivers
-# the diff BY SNAPSHOT PATH it DELETES that file when the review finishes — measured: it is gone before
-# this very `--wait` returns — and `roborev show` cannot hand it back (no `--diff`). Every attempt to
-# hold on to the file so `prompt-content:` could certify it cost review rounds and produced defects in
-# the machinery rather than in the verdict, so the owner ruled the mode DETECTED AND REPORTED instead:
-# the snapshot path is recorded exactly as the prompt stated it and NEVER read. There is therefore no
-# watcher process, no private capture directory and no artefact to clean up here — only the review call.
+# NOTHING IS ARMED AROUND THIS CALL, and that absence is the design (#3312, owner ruling (4)). When
+# roborev delivers a large diff by writing it to a file, it DELETES that file when the review finishes
+# — measured: it is gone before this very `--wait` returns — and `roborev show` cannot hand it back (no
+# `--diff`). Every attempt to hold on to it, and then every attempt to classify the delivery from the
+# prompt text instead, produced defects in the machinery rather than in the verdict; both are deleted.
+# `prompt-content:` now asks one question of the prompt itself and an absence is a FAIL a human may
+# waive. So there is no watcher, no capture directory, no classifier state and nothing to clean up
+# here — only the review call.
 set +e
 roborev review --branch \
   --base "$BASE" \
@@ -1044,7 +1066,7 @@ for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
   # is that an unplanned value must not inherit the non-failing branch.
   case "$verdict_token" in
     FAIL|FINDINGS|ERROR|INCONSISTENT) ;;
-    PASS|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN) ;;
+    PASS|WAIVED|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN) ;;
     *)
       failed=1
       unrecognised="${unrecognised:+$unrecognised; }'$verdict'"
@@ -1088,16 +1110,19 @@ if [ "$failed" -eq 0 ]; then
     det_value="${keyed#*=}"
     case "${det_value%% *}" in
       PASS) continue ;;
-      # ===== THE ONE OWNER-RULED EXEMPTION (C‴, issue #3312) =====
-      # `prompt-content: NOTICE` is admitted, and ONLY for that key, and ONLY when `SNAPSHOT_NOTICE=1`
-      # says roborev delivered the diff by snapshot path. This is a DELIBERATE REDUCTION in what a PASS
-      # asserts, ruled by the owner after eleven false-PASS vectors were found in the machinery that made
-      # a snapshot certifiable; it is recorded here rather than hidden because a reader of this block is
-      # entitled to know that a snapshot-mode PASS does not assert the reviewer received the census
-      # paths — the `snapshot-*` keys record what was observed instead. It cannot leak: any other key, or
-      # this key in any other mode, still requires an affirmative PASS.
-      NOTICE)
-        if [ "$det_key" = "prompt-content" ] && [ "${SNAPSHOT_NOTICE:-0}" -eq 1 ]; then continue; fi
+      # ===== `WAIVED`: A HUMAN-AUTHORIZED ABSENCE, GATED ON ITS OWN PROVENANCE =====
+      # (Owner ruling (4), #3312.) This is NOT the per-key escape hatch that used to live here — that
+      # one admitted a `NOTICE` for one named key in one machine-inferred mode, and the inference it
+      # rested on is deleted. This admits a token that only exists when a human named THIS head sha in
+      # a PR comment, and it is gated on the PROVENANCE being complete rather than on which key
+      # carries it: an authorizer, the certified sha and a reason must all be present, so a `WAIVED`
+      # produced by a future code path that measured nothing cannot ride to a PASS. Not gated on
+      # `det_key`, deliberately: a key-scoped exemption is the shape that has to be re-argued every
+      # time a key is added, and the provenance test is the property that actually matters.
+      WAIVED)
+        if [ -n "${ROBOREV_WAIVER_AUTHOR:-}" ] && [ -n "${ROBOREV_WAIVER_REASON:-}" ] \
+          && [ -n "${ROBOREV_WAIVER_SHA:-}" ] && [ "${ROBOREV_WAIVER_SHA:-}" = "${HEAD_SHA:-}" ] \
+          && [ "${ROBOREV_WAIVER_STATE:-}" = "granted" ]; then continue; fi
         ;;
     esac
     not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
@@ -1108,7 +1133,7 @@ if [ "$failed" -eq 0 ]; then
   fi
 fi
 if [ -n "$unrecognised" ]; then
-  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
+  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / WAIVED / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
 fi
 
 if [ "$failed" -eq 0 ]; then
