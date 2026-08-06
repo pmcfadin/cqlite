@@ -1232,16 +1232,22 @@ if perf_install_supported; then
   wt_ln_target="$tmp/wt-ln-target"; wt_ln_dir="$tmp/wt-ln-dir"
   rm -rf "$wt_ln_target" "$wt_ln_dir"; mkdir -p "$wt_ln_target"; chmod 0755 "$wt_ln_target"
   ln -s "$wt_ln_target" "$wt_ln_dir"
-  wt_ln_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_ln_dir" \
-    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ln_rc=$?
-  if [ "$wt_ln_rc" -eq 0 ] || ! printf '%s' "$wt_ln_out" | grep -q 'is a SYMLINK'; then
-    bad "perf-capability: a SYMLINKED drop-in directory was not refused by name (rc=$wt_ln_rc, out='$wt_ln_out')"
-    wt_perm_fail=1
-  fi
-  if [ -e "$wt_ln_target/99-cqlite-perf.conf" ]; then
-    bad "perf-capability: the symlinked drop-in directory was refused but its TARGET was written anyway"
-    wt_perm_fail=1
-  fi
+  # ...and the refusal must survive TRAILING SLASHES (roborev round 10, Low). `[ -L link/ ]` and
+  # `[ -L link// ]` are both FALSE even when `link` IS a symlink, because the test follows the slash,
+  # so one extra character used to walk past the refusal this function explicitly promises. All three
+  # spellings are asserted, and the link TARGET is checked unwritten after each one.
+  for wt_ln_spell in "$wt_ln_dir" "$wt_ln_dir/" "$wt_ln_dir//"; do
+    wt_ln_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_ln_spell" \
+      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ln_rc=$?
+    if [ "$wt_ln_rc" -eq 0 ] || ! printf '%s' "$wt_ln_out" | grep -q 'is a SYMLINK'; then
+      bad "perf-capability: a SYMLINKED drop-in directory spelled '$wt_ln_spell' was not refused (rc=$wt_ln_rc, out='$wt_ln_out')"
+      wt_perm_fail=1
+    fi
+    if [ -e "$wt_ln_target/99-cqlite-perf.conf" ]; then
+      bad "perf-capability: spelling '$wt_ln_spell' was refused but the link TARGET was written anyway"
+      wt_perm_fail=1
+    fi
+  done
   [ "$wt_perm_fail" -ne 0 ] || ok "perf-capability: a privileged staged install REFUSES a group-/world-writable drop-in directory by name and writes nothing, refuses a SYMLINKED destination outright (lstat semantics asserted, target left unwritten), refuses when owner/mode cannot be determined, and still installs into a correctly-owned 0755 directory — the staging race is closed at its PRECONDITION rather than by trying to win it (#3261 roborev-3, owner A' condition 2)"
 else
   skip "perf-capability: staged-install write-target cases (symlinked managed name refused; dropin_current does not follow it; the write REPLACES the directory entry)" "no GNU stat -c / mv --no-target-directory on this host"

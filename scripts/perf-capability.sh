@@ -547,6 +547,16 @@ perf_capability_dropin_path() {
 perf_capability_dropin_install() {
   local __pin_d __pin_p
   __pin_d=$(perf_capability_sysctl_dir) || return 1
+  # TRAILING SLASHES ARE STRIPPED BEFORE ANY CHECK OR PATH CONSTRUCTION (roborev round 10, Low).
+  # `[ -L "$d" ]` FOLLOWS a trailing slash: for a symlinked directory `link`, `[ -L link ]` is true
+  # but `[ -L link/ ]` and `[ -L link// ]` are FALSE, so the destination-symlink refusal this
+  # function explicitly promises could be walked past with one extra character. Stripping is the
+  # right shape here and NOT another spelling denylist: normalising the input to ONE canonical form
+  # makes the affirmative check total, whereas enumerating bad spellings is the unbounded game this
+  # family lost eleven times. The length guard keeps `/` itself from becoming the empty string —
+  # a root destination then fails the ownership/writability precondition on its own merits rather
+  # than by accident.
+  while [ "${__pin_d%/}" != "$__pin_d" ] && [ "${#__pin_d}" -gt 1 ]; do __pin_d="${__pin_d%/}"; done
   __pin_p="$__pin_d/$PERF_CAPABILITY_DROPIN_BASENAME"
   # CONTENT IS GENERATED AND CHECKED **BEFORE** ANY PRIVILEGED COMMAND RUNS (roborev round 9,
   # Medium). This used to pipe the generator straight into the privileged shell, so the pipeline's
@@ -565,6 +575,10 @@ perf_capability_dropin_install() {
   printf '%s' "$__pin_c" | "$@" sh -c '
     set -u
     d=$1; p=$2; b=$3
+    # Normalised again INSIDE the privileged shell, deliberately: the outer caller strips trailing
+    # slashes, but this block is the thing holding privilege and must not depend on someone else
+    # having done it. Same reason the mktemp answer is re-checked here rather than trusted.
+    while [ "${d%/}" != "$d" ] && [ "${#d}" -gt 1 ]; do d="${d%/}"; done
     # THE PRECONDITION (roborev round 3): nobody less privileged than this shell may be able to
     # create or replace entries in $d. Without that there is an actor to race; with it there is not.
     #   WHY THIS IS NOT A TWELFTH ATTEMPT TO OUT-TIME THE RACE (owner ruling A-prime): escapes 9-11
