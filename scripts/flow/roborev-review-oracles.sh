@@ -967,6 +967,29 @@ roborev_collect_prompt_headers() {
 # fail-closed verdict under a cause that would then be worth renaming (see the residual noted
 # under `none` in roborev-review-checks.sh).
 #
+# ===== THE IRREDUCIBLE RESIDUAL, STATED AS A PROPERTY (roborev job 19) =====
+# DELIVERY MODE IS INFERRED FROM PROMPT TEXT, AND ROBOREV'S PROMPT EMBEDS REPOSITORY-CONTROLLED CONTENT
+# (project guidelines / AGENTS.md sections, additional context, previous-review bodies), which is inserted at
+# COLUMN ZERO exactly like roborev's own text. There is NO structural marker separating roborev's generated
+# delivery block from injected text that reproduces it, so the inference is spoofable and NO amount of further
+# text-scoping closes that. The scoping above narrows it in both directions — an instruction counts only inside
+# a delivery block, only after that block's own oversize notice, only in the FINAL such block, and only when
+# no header in any delivery block says a diff was inlined — and then it stops.
+#
+# WHAT REMAINS, precisely: a prompt with NO inline delivery headers at all (the T3 case — the census paths were
+# genuinely excluded from the reviewer's diff) whose repository content reproduces a delivery block, an oversize
+# notice and a lexically valid snapshot path can obtain `prompt-content: NOTICE` where a `FAIL` was due. It does
+# NOT create a new class: snapshot mode is uncertified by owner ruling (C⁗), so the effect is that repository
+# content can move such a review INTO that already-accepted uncovered envelope — it widens access to an accepted
+# gap rather than opening a new one. Where inline delivery headers ARE present the mixed-delivery lock fails the
+# prompt closed, and where they cover the census the run is certified inline and snapshot mode is never consulted.
+#
+# CLOSING IT REQUIRES AN OUT-OF-BAND DELIVERY-MODE SIGNAL ROBOREV MEASURABLY DOES NOT EXPOSE. Established by an
+# exhaustive read-only sweep of every roborev surface (CLI flags, `show --json`, `list --json`, job logs, the
+# sqlite schema, `export reviews`, binary strings): there is no delivery-mode field, no digest and no size, and
+# `review_jobs.diff_content`/`patch` are present in the schema but EMPTY for every job — a trap, not an oracle.
+# So this is disclosed, not fixed, and the disclosure is the honest end of the road rather than a reassurance.
+#
 # LINE-ORIENTED, soundly: the instruction is one line and a path on it cannot contain a newline,
 # so there is nothing `-z` could add. (Git PLUMBING output still gets `-z` — see the census.)
 # The path is taken RAW, exactly as the prompt spells it: it is not a git-quoted token and the
@@ -976,6 +999,12 @@ roborev_prompt_snapshot_paths() {
   _rx_snap_paths=()
   _rx_snap_unparseable=0
   _rx_snap_oversize_markers=0
+  # THE DELIVERY-MODE DECISION IS BLOCK-SCOPED ON BOTH SIDES (roborev job 19, fix 1). `_rx_delivery_hdrs`
+  # counts `diff --git` headers seen INSIDE a delivery block — i.e. evidence that roborev INLINED a diff —
+  # and is what the mixed-delivery lock consults. The GLOBAL header collection (`_rx_hdrs`) keeps feeding
+  # census certification unchanged; it just no longer decides the MODE, because a `diff --git` line quoted in
+  # a repository instructions section is not a delivery.
+  _rx_delivery_hdrs=0
   # observability-justified: `$f` is the wrapper's OWN prompt file, written by this run beside its
   # transcript. Its falsity yields no snapshot paths, which the caller reports as the `none` state — a
   # fail-closed measurement about the prompt, not a claim about a roborev file.
@@ -983,6 +1012,19 @@ roborev_prompt_snapshot_paths() {
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     case "$row" in
+      BLOCKSTART)
+        # ===== ONLY THE FINAL DELIVERY BLOCK IS SELECTED (roborev job 19, fix 2) =====
+        # A new delivery block DISCARDS every candidate collected in an earlier one, so an injected block that
+        # precedes roborev own cannot contribute a path, cannot make two paths look "undecidable", and cannot
+        # pose as the delivery. Only `_rx_delivery_hdrs` survives the reset: whether a diff was ever INLINED is
+        # evidence about the whole prompt, and losing it would let a later injected block hide an earlier
+        # inline delivery from the mixed-delivery lock.
+        _rx_snap_paths=()
+        _rx_snap_unparseable=0
+        _rx_snap_oversize_markers=0
+        continue
+        ;;
+      BLOCKHDR) _rx_delivery_hdrs=$((_rx_delivery_hdrs + 1)); continue ;;
       OVERSIZE) _rx_snap_oversize_markers=$((_rx_snap_oversize_markers + 1)); continue ;;
       UNPARSEABLE) _rx_snap_unparseable=$((_rx_snap_unparseable + 1)); continue ;;
       PATHC*)
@@ -1018,9 +1060,23 @@ roborev_prompt_snapshot_paths() {
       # THE INVARIANT: inline census verification must not be suppressible by any repository-controlled
       # content. So an instruction counts only where roborev actually emits one — inside roborev own
       # DIFF-DELIVERY BLOCK, after its own "(Diff too large" notice — and that block is ended by any
-      # other column-zero markdown heading or by the first inline `diff --git ` header. The
-      # complementary half (a prompt carrying BOTH inline headers and an instruction is failed closed)
-      # lives in the resolver, so narrowing or widening this scope cannot silently reopen the bypass.
+      # other column-zero markdown heading. The complementary half (a prompt carrying BOTH an inline
+      # delivery and an instruction is failed closed) lives in the resolver, so narrowing or widening this
+      # scope cannot silently reopen the bypass.
+      #
+      # ===== A HEADER INSIDE A BLOCK IS EVIDENCE, NOT A TERMINATOR (roborev job 19, fix 1) =====
+      # A `diff --git ` line used to CLOSE the block, which made the resolver decide the delivery MODE from
+      # the GLOBAL header collection — so a legitimate snapshot review whose repository instructions merely
+      # QUOTE a diff header (an example in AGENTS.md) was classified `mixed-delivery` and FAILED. That is this
+      # issue own false-FAIL defect in a new shape. A header is now REPORTED (`BLOCKHDR`) when it appears
+      # inside a delivery block — that is what an INLINE delivery looks like — and the block stays open. It is
+      # sound to keep scanning: every line of a diff BODY carries a leading +, -, space, @ or backslash, so no
+      # body line can be mistaken for a column-zero instruction.
+      #
+      # ===== AND EACH BLOCK DISCARDS THE PREVIOUS ONE (roborev job 19, fix 2) =====
+      # `BLOCKSTART` is emitted at every delivery-block opener and the reader resets its candidates on it, so
+      # only the FINAL delivery block is selected. An injected block that precedes roborev own therefore
+      # cannot contribute a path or an ambiguity.
       #
       # THE BLOCK OPENER IS MATCHED TOLERANTLY, and deliberately: the heading is DATA in roborev own
       # template (`diff_block` renders `{{if .Diff.Heading}}{{.Diff.Heading}}{{else}}### Diff{{end}}`),
@@ -1033,9 +1089,10 @@ roborev_prompt_snapshot_paths() {
       index($0, "#") == 1 {
         in_trailer = (index($0, "### ") == 1 && index($0, "Diff") > 0)
         oversize = 0
+        if (in_trailer) print "BLOCKSTART"
         next
       }
-      index($0, "diff --git ") == 1 { in_trailer = 0; oversize = 0; next }
+      in_trailer && index($0, "diff --git ") == 1 { print "BLOCKHDR"; next }
       # THE OVERSIZE NOTICE opens the instruction window AND is itself the marker for the other oversize
       # tiers, reported so the caller can say WHICH mode it is looking at rather than only "the paths are
       # absent". Measured in the same binary: the `codex_*_fallback_*` and `generic_*_fallback` templates
@@ -1162,11 +1219,27 @@ roborev_collect_review_diff_headers() {
   # census verification must not be suppressible by any repository-controlled content. Detection is already
   # restricted to roborev own delivery trailer; this is the second lock, so widening detection again cannot
   # silently reopen the bypass.
-  if [ "${#_rx_hdrs[@]}" -gt 0 ] \
+  #
+  # ===== BOTH OPERANDS ARE BLOCK-SCOPED (roborev job 19) =====
+  # The lock reads `_rx_delivery_hdrs` — headers seen INSIDE a delivery block, i.e. evidence that roborev
+  # actually INLINED a diff — and NOT the global `_rx_hdrs` count. Consulting the global count made a
+  # legitimate snapshot review FAIL whenever repository instructions merely QUOTED a `diff --git` line
+  # (fix 1). The global collection still drives census certification below; it just no longer decides the MODE.
+  #
+  # WHY THE HEADER EVIDENCE IS PROMPT-WIDE WHILE THE PATH IS FINAL-BLOCK-ONLY, which is deliberately NOT
+  # symmetric. Under a strictly same-block rule, a prompt with a GENUINE inline delivery in one block plus an
+  # injected trailer in a LATER block would present a final block that carries an instruction and no headers —
+  # so it would resolve to the exempted NOTICE and skip census certification on a review whose inline headers
+  # may NOT have covered the census. That is the #3222 class (a configured pattern swallowing a code path)
+  # being excused by repository content, i.e. exposure WITH inline headers present. Keeping the left operand
+  # prompt-wide costs a fail-CLOSED false FAIL only in one narrow shape — repository instructions that both
+  # sit under their own `### …Diff…` heading AND quote a column-zero `diff --git` line — and refuses rather
+  # than excuses.
+  if [ "${_rx_delivery_hdrs:-0}" -gt 0 ] \
     && { [ "${#_rx_snap_paths[@]}" -gt 0 ] || [ "${_rx_snap_unparseable:-0}" -gt 0 ]; }; then
     ROBOREV_DIFF_SOURCE_STATE="mixed-delivery"
     ROBOREV_SNAPSHOT_PATH="${_rx_snap_paths[0]:-}"
-    ROBOREV_SNAPSHOT_UNUSABLE_WHY="the prompt carries ${#_rx_hdrs[@]} inline 'diff --git' header(s) AND a snapshot delivery instruction; roborev emits one or the other, so something added an instruction to a prompt that already carried the diff. Honouring it would let prompt content downgrade an inline-delivered review to an uncertified NOTICE"
+    ROBOREV_SNAPSHOT_UNUSABLE_WHY="a diff-delivery block of this prompt carries ${_rx_delivery_hdrs} inline 'diff --git' header(s) AND a snapshot delivery instruction; roborev emits one or the other, so something added an instruction to a prompt that already carried the diff. Honouring it would let prompt content downgrade an inline-delivered review to an uncertified NOTICE"
     return 0
   fi
 
