@@ -228,6 +228,19 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    routes into the tier are covered, and the evaluation **order** is pinned by a structural assert — it was the
    second order-of-evaluation false PASS in that function.
 
+   **Candidate lifetime is bounded by its block, and *any* heading supersedes a block** — the third
+   state-lifetime defect in this classifier. An unrecognised heading (`### Patch`) closed the delivery block
+   without invalidating its candidates, so a stale injected path stayed selected while roborev delivered its diff
+   inline under that heading, and a review with a **genuine inline delivery** was downgraded to the accepted
+   NOTICE. It falsified the in-code residual claiming a non-`Diff` heading "suppresses detection and fails
+   CLOSED": true of the opener *in isolation*, **fail-open** in combination with a candidate outliving its block
+   — single-property reasoning is what missed it. The reset now fires on every heading, and roborev's own
+   **fenced** inline diff (the one structural delivery marker that exists) counts as delivery evidence whatever
+   the heading says, closing the variant where the injected trailer follows the genuine delivery. **The lesson
+   worth carrying: pin the family, not the instance.** Two earlier fixes each asserted their own case and the next
+   variant still got through, so the assert is now shape-level — exactly one `in_trailer` assignment, in a rule
+   that always emits the reset, with the reader clearing every candidate variable.
+
    **The irreducible residual, stated as a property.** Delivery mode is inferred from prompt **text**, and
    roborev's prompt embeds repository-controlled content (project guidelines/`AGENTS.md`, additional context,
    previous-review bodies) at column zero exactly like roborev's own text. There is **no structural marker**

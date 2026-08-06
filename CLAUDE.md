@@ -550,6 +550,22 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   compact instruction whose token is a git command, and an oversize notice with no instruction line at all), and
   the **evaluation ORDER is pinned by a structural assert** — this was the second order-of-evaluation false PASS
   in that one function, after validate-after-normalise.
+  **CANDIDATE LIFETIME IS BOUNDED BY ITS BLOCK, AND ANY HEADING SUPERSEDES A BLOCK (#3312 job 21 — the THIRD
+  state-lifetime defect in this one classifier).** An unrecognised heading (`### Patch`) used to close the
+  delivery block *without invalidating its candidates*, so a stale injected path stayed selected while roborev
+  delivered its diff inline under that heading — and a review with a **genuine inline delivery** was downgraded
+  to the accepted NOTICE. **That falsified two written claims**: that no exposure existed where a real inline
+  delivery is present, and the in-code residual saying a non-`Diff` heading "suppresses detection and fails
+  CLOSED" — true of the opener *in isolation*, **fail-OPEN in combination** with a candidate outliving its
+  block. Single-property reasoning is what missed it. Now: the reset fires on **every** heading, and roborev's
+  own **fenced** inline diff (```` ```diff ````, the one structural delivery marker that exists — measured on a
+  live inline prompt) counts as delivery evidence whatever the heading says, which closes the variant where the
+  injected trailer comes *after* the genuine delivery. Declared cost, fail-CLOSED: repository content holding a
+  fenced diff containing a `diff --git` line makes a snapshot-delivered review of that repo FAIL
+  `mixed-delivery` rather than NOTICE (measured on both live snapshot prompts: zero fences, zero column-zero
+  headers outside the delivery block). **The assert is now family-level, because pinning instances did not
+  hold**: exactly one `in_trailer` assignment, in a rule that always emits the reset, with the reader clearing
+  all three candidate variables — so a fourth block-ending path cannot be added without reddening the lint.
   **AND THE IRREDUCIBLE RESIDUAL, as a property, not a reassurance: delivery mode is inferred from prompt TEXT,
   and roborev's prompt embeds repository-controlled content** (project guidelines/`AGENTS.md`, additional
   context, previous-review bodies) **at column zero, exactly like roborev's own text — there is no structural
