@@ -341,7 +341,7 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
 | M10 → #2824 | RESPEC #1518-adjacent (NEW) | `madvise(WILLNEED)` under Auto-mmap + `MADV_DONTNEED` post-scan | P3 | M0 (re-measure) |
 | M11 → #2825 | NEW | T4 byte-bounded batch sizing | P2 | — |
 | M12 → #2826 | NEW | T1+T2 bulk `ArrowToTrino` per-column copy + async prefetch | P3 | M2/M3 (post-server) |
-| M13 → #2827 | NEW | Keyed access-distribution probe: instrument + decision procedure (re-scoped; verdict lands with the first real keyed workload) | P2 | — |
+| M13 → #2827 | NEW | Keyed access-distribution probe: instrument + decision procedure (re-scoped; verdict lands with a real keyed workload — scoped to BTI and BIG-with-resident-index, see §M13) | P2 | — |
 | M14 → #2828 | NEW (config) | Chunk-cache `block_cache.max_size` retune for 512Mi pod | P2 | — |
 | M15 → #2605 | EXTEND #2605 | Sharpen the DataFusion PoC measurement | P2 | — |
 | M16 → #2165 | RE-SCOPE #2165 | Decode-plane consolidation only (not a throughput lever) | P3 | — |
@@ -509,7 +509,14 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   attributes and per-key labels are forbidden), plus MEASURED distinct-partition working-set bytes
   and a committed decision procedure at `docs/research/decoded-partition-cache-decision.md`.
   *Accept:* reports the hot-set concentration shape of whatever workload runs with the probe
-  enabled — the **verdict lands with the first real keyed workload**, with no further analysis round.
+  enabled — the **verdict lands with a real keyed workload**, with no further analysis round.
+  **That is SCOPED, not universal:** it holds for BTI and for BIG whose `Index.db` is already
+  resident. The probe will not materialize an index to answer (that would defeat #2412's lazy
+  Summary-guided open and change the process memory profile), so a Summary-guided BIG window is
+  REFUSED rather than priced — as are a non-census window and one with a non-zero `unavailable`
+  fraction. All three fail SAFE (a refusal is never a false "go"), but the FIRST window may be
+  refused. Separately, `H_max` is an ESTIMATE under a stated ranking heuristic, not a ceiling, and
+  **#3340 must land before any go/no-go verdict is derived from a real production window.**
   **NOT delivered:** the field skew number and the 64–128 MiB go/no-go. That AC is **not satisfied
   and not waived** — it is blocked solely by the absence of a field keyed workload with captured
   concentration (`docs/research/phase2-verify-caching.md:214-216`); the only keyed loadtest on record

@@ -285,7 +285,8 @@ Format"; written by `BigTableWriter.createRowIndexEntry` at tag `cassandra-5.0.8
 The BTI `Partitions.db` trie resolves an offset only. Had the original D6 shipped, the
 `size_source` attribute would have had exactly ONE reachable value, the byte counter
 would have been permanently zero, and the decision procedure would have refused every
-real window on refusal condition 1 — i.e. the "measured working-set bytes" half of D1
+real window on refusal condition 1 (a non-zero `unavailable` fraction) — i.e. the
+"measured working-set bytes" half of D1
 would have shipped dead, leaving the decode multiplier as one of TWO unknowns again.
 
 **Decision.** Each logical access carries a byte weight that is **MEASURED** as the
@@ -456,7 +457,8 @@ twice:
   distribution we generated.*
 
 **Consequence, enforced in the artifacts.** The validation test's assertions are on *recovery of a
-known input*, never on a hit ratio. The decision procedure's refusal condition #4 forbids citing a
+known input*, never on a hit ratio. The decision procedure's refusal condition 6 (synthetic or
+self-generated load) forbids citing a
 synthetic window as the go/no-go. And the honesty clause (D10) states that the field number is
 undelivered, so no reader has to reconstruct this argument to know what they are holding.
 

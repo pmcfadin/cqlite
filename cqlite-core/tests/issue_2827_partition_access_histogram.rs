@@ -7,7 +7,8 @@
 //! field number**. Its original AC2 — "decides whether a 64–128 MiB
 //! decoded-partition cache clears a useful hit ratio" — is **NOT satisfied** by
 //! this change. Not waived, not deferred to another issue: it becomes satisfiable
-//! on the first real keyed workload run with the probe enabled, and the reason it
+//! on a real keyed workload run with the probe enabled (scoped to BTI and to BIG
+//! whose `Index.db` is already resident — see the decision note), and the reason it
 //! cannot be satisfied here is that **no field keyed workload with captured
 //! concentration exists** (`docs/research/phase2-verify-caching.md:214-216`).
 //!

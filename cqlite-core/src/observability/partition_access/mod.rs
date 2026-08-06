@@ -602,8 +602,11 @@ impl<'a> TableScope<'a> {
     }
 
     /// A scope from a possibly-qualified `keyspace.table` identifier, as
-    /// [`crate::types::TableId`] carries. An unqualified name yields an empty
-    /// keyspace, which is still a distinct scope from any qualified one.
+    /// [`crate::types::TableId`] carries. An unqualified name yields an empty keyspace,
+    /// so `users` and `ks.users` are distinct scopes for what may be one table — **a
+    /// known measurement limitation, not a feature (#3345)**; its reachability, its
+    /// (safe) direction and why a naive fix could make it worse are recorded in
+    /// `storage::partition_access_weight`'s limitations list.
     pub fn from_qualified(name: &'a str) -> Self {
         match name.split_once('.') {
             Some((ks, table)) => Self {

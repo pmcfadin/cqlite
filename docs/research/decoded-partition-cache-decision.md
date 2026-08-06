@@ -34,7 +34,7 @@ the field keyed workload anywhere in `docs/` (`:212-213`).
 the go/no-go, or as a gate.** There is deliberately no hit-ratio-vs-skew sensitivity curve
 here: a curve over a distribution *we* chose converts a measurement into an owner judgment
 about an assumed skew, and `phase2-verify-caching.md:220-227` already records that
-conditional. Refusal condition 4 below exists to enforce that.
+conditional. Refusal condition 6 below (synthetic or self-generated load) exists to enforce that.
 
 ## Inputs
 
@@ -117,7 +117,8 @@ diagnosed by the most fundamental.
 A window is trustworthy on the emitted series alone exactly when
 `window_dropped_accesses = 0`, `sampling_floor = 0` and `sample_denominator = 1`.
 
-Scaling a sample by `2^k` was rejected in favour of refusing it (condition 4): scaling
+Scaling a sample by `2^k` was rejected in favour of refusing it (condition 4,
+`sample_denominator > 1`): scaling
 yields an unbiased point estimate of the population totals but says nothing about its
 variance, and this procedure's output is a go/no-go rather than an interval — so a scaled
 verdict would read exactly as authoritative as a census one while resting on an
@@ -190,7 +191,7 @@ set is small and the cheaper cache is the one to model.
 ## Worked example — an INSTRUMENT SELF-CHECK, never a field result
 
 Computed from the validation test's known, constructed distribution
-(`cqlite-core/tests/issue_2827_partition_access_bytes.rs`). **Refusal condition 4 applies to
+(`cqlite-core/tests/issue_2827_partition_access_bytes.rs`). **Refusal condition 6 (synthetic or self-generated load) applies to
 it**: this is here to show the arithmetic, and it is *not* evidence about any real workload.
 
 Constructed window: 600 partitions accessed 20× each and 10,000 accessed once each, every

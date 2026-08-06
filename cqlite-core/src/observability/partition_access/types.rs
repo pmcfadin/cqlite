@@ -296,9 +296,18 @@ pub struct WindowSummary {
     /// (normative in the catalog docs and the spec), that would invert exactly the
     /// property they exist to provide.
     ///
-    /// The global emit path therefore keeps a high-water mark and skips the gauge
-    /// writes for a stale sequence. Per-recorder and monotonic within one recorder;
-    /// two independent recorders number independently.
+    /// Each recorder therefore keeps its OWN high-water mark and skips the gauge
+    /// writes for a stale sequence, holding that mark's lock across the comparison
+    /// AND all three writes. Both properties are load-bearing: a process-wide mark
+    /// would let independent recorders suppress each other's gauges (silently — a
+    /// suppressed gauge is an ABSENT series), and comparing without holding the lock
+    /// through the writes would let an admitted older emitter be preempted, let a
+    /// newer one write, then resume and overwrite with stale values. See
+    /// `PartitionAccessRecorder::emit_window`.
+    ///
+    /// This sequence is per-recorder and monotonic within one recorder; two
+    /// independent recorders number independently, which is exactly why the mark
+    /// cannot be shared.
     pub close_sequence: u64,
     /// Accesses that could NOT be landed in the counting table at all: it was at its
     /// load factor with the sampling prefix already at its cap, so no slot could be

@@ -157,7 +157,7 @@
       (#2818: k-way merge 3.2% on-CPU vs decompress+CRC ~23%); and the tumbling-window bias with its
       conservative direction.
 - [x] Include a worked example computed from the validation test's known distribution, labelled a
-      **self-check, never a field result** (refusal condition 4).
+      **self-check, never a field result** (refusal condition 6, synthetic or self-generated load).
 - [x] State the scope paragraph: this note is the procedure, not the verdict; the verdict awaits a real
       keyed workload; AC2 is unmet.
 

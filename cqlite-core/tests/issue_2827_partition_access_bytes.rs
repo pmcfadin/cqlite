@@ -6,10 +6,11 @@
 //! This change delivers **the instrument and the procedure, not the field number**.
 //! Issue #2827's original AC2 — "decides whether a 64–128 MiB decoded-partition
 //! cache clears a useful hit ratio" — is **NOT satisfied** by it. Not waived, not
-//! deferred to another issue: satisfiable on the first real keyed workload run with
+//! deferred to another issue: satisfiable on a real keyed workload run with
 //! the probe enabled, and blocked only by the absence of such a workload
-//! (`docs/research/phase2-verify-caching.md:214-216`). Nothing here is a measured
-//! field skew, a go/no-go, or a gate.
+//! (`docs/research/phase2-verify-caching.md:214-216`). That satisfiability is SCOPED —
+//! it holds for BTI and for BIG whose `Index.db` is already resident; see the decision
+//! note. Nothing here is a measured field skew, a go/no-go, or a gate.
 //!
 //! # What is asserted
 //!
@@ -328,7 +329,8 @@ fn a_mixed_provenance_total_reports_the_weakest_provenance() {
 #[test]
 fn a_gap_measured_census_window_is_priced_not_refused() {
     // The point of the successor-gap mechanism: a window whose bytes were MEASURED
-    // is priceable. Refusal condition 1 exists to reject an INCOMPLETE byte total,
+    // is priceable. Refusal condition 1 (a non-zero `unavailable` fraction) exists to
+    // reject an INCOMPLETE byte total,
     // and a fully gap-measured window is complete.
     let r = deterministic_recorder();
     for i in 0..600u64 {
@@ -372,7 +374,8 @@ fn a_gap_measured_census_window_is_priced_not_refused() {
 /// arithmetic the code does not perform.
 ///
 /// It is an INSTRUMENT SELF-CHECK and never a field result: the note labels it so,
-/// and refusal condition 4 rejects the same window when its source is declared
+/// and refusal condition 6 (synthetic or self-generated load) rejects the same window
+/// when its source is declared
 /// synthetic (asserted below).
 #[test]
 fn the_committed_notes_worked_example_matches_the_shipped_evaluator() {

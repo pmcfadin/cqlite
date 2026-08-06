@@ -212,7 +212,34 @@ pub fn window_config_from_env() -> WindowConfig {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+
+    /// Serialises EVERY test in this module that mutates the process-global gate.
+    ///
+    /// Both such tests were added together, so the two of them could always race:
+    /// under plain `cargo test` (one process, parallel threads) one test's
+    /// `set_probe_enabled(Some(false))` is observable by the other's
+    /// `assert!(enabled())`, and vice versa. That is not theoretical — the agent gate
+    /// documents a fallback to serial `cargo test` when `cargo-nextest` is absent, and
+    /// every developer `cargo test` takes that path too. Nextest's process-per-test
+    /// isolation is what hid it.
+    static GATE: Mutex<()> = Mutex::new(());
+
+    /// Holds [`GATE`] and RESTORES the gate to its unresolved default on drop, so a
+    /// panicking test cannot leak a pinned state into whichever test acquires next.
+    struct GateGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    impl GateGuard {
+        fn acquire() -> Self {
+            Self(GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+        }
+    }
+
+    impl Drop for GateGuard {
+        fn drop(&mut self) {
+            set_probe_enabled(None);
+        }
+    }
 
     /// L2: a programmatic enable must WIN against a concurrent environment
     /// resolution — the precedence this module documents, not merely the absence of a
@@ -228,11 +255,11 @@ mod tests {
     /// both threads are inside the window together; repeated so a single lucky
     /// interleaving cannot pass it.
     ///
-    /// This test mutates the process-global gate, so it is the only test in this
-    /// module that does — the integration suites serialise their own probe mutation
-    /// behind a mutex, and this module has no other global-state case to race with.
+    /// This test mutates the process-global gate, and so does
+    /// [`a_programmatic_setting_survives_repeated_reads`], so both take [`GATE`].
     #[test]
     fn a_programmatic_enable_wins_against_a_concurrent_env_resolution() {
+        let _gate = GateGuard::acquire();
         for _ in 0..200 {
             // Re-open the UNRESOLVED window, exactly as a caller resetting the gate
             // does.
@@ -269,12 +296,13 @@ mod tests {
                  resolution; the probe read back as OFF"
             );
         }
-        // Leave the gate as the rest of the process expects to find it.
-        set_probe_enabled(None);
+        // `GateGuard` restores the gate on drop.
     }
 
+    /// Also mutates the process-global gate — hence [`GATE`].
     #[test]
     fn a_programmatic_setting_survives_repeated_reads() {
+        let _gate = GateGuard::acquire();
         set_probe_enabled(Some(true));
         for _ in 0..1_000 {
             assert!(enabled(), "a resolution must never clobber a pinned state");
@@ -283,6 +311,6 @@ mod tests {
         for _ in 0..1_000 {
             assert!(!enabled());
         }
-        set_probe_enabled(None);
+        // `GateGuard` restores the gate on drop.
     }
 }

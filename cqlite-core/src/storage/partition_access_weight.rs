@@ -62,9 +62,10 @@
 //!
 //! # Known limitations, with their DIRECTION stated
 //!
-//! They fail in DIFFERENT directions, and the difference is the point of stating
-//! them: the first can bias the measurement toward "the cache is worth building", the
-//! second only ever REFUSES to measure. Neither is left implicit.
+//! They fail in DIFFERENT directions, and the difference is the point of stating them:
+//! the first can bias the measurement toward "the cache is worth building", the second
+//! biases the safe way, and the third only ever REFUSES to measure. None is left
+//! implicit.
 //!
 //! 1. **UNSAFE direction — the generation set is captured before the read, not shared
 //!    with it.**
@@ -76,7 +77,19 @@
 //!    partition is UNDER-priced — and under-pricing bytes lets more buckets fit the
 //!    budget, so it RAISES `H_max`. Closing it properly means threading the read's own
 //!    snapshot out of `SSTableManager`, which is not reachable from here today.
-//! 2. **REFUSAL, not a bias — a BIG generation whose `Index.db` is not resident
+//! 2. **SAFE direction — the table scope is derived from the caller's SPELLING of the
+//!    table name (#3345).** This module passes
+//!    `TableScope::from_qualified(table_id.name())`, and `TableId` carries the CQL text
+//!    as typed, so `ks.users` and a bare `users` are two identities for one table — and
+//!    the SSTable manager's deliberate fallback from `keyspace.table` to the bare name
+//!    makes both spellings reachable for the same read. A split raises
+//!    `distinct_partitions` and counts the partition's bytes twice, so it UNDERSTATES
+//!    concentration and inflates the working set: never a false "go". Note the sibling
+//!    Flight pricing path (`merge/point_read.rs`) already derives the canonical
+//!    `TableScope::new(&schema.keyspace, &schema.table)`, so this site is the odd one
+//!    out; #3345 harmonizes them by normalizing against the resolved snapshot's
+//!    fully-qualified-match signal, which `snapshot_for_probe` currently discards.
+//! 3. **REFUSAL, not a bias — a BIG generation whose `Index.db` is not resident
 //!    cannot be priced at all** (see the cost section above), so under #2412's lazy
 //!    Summary-guided open such a window is REFUSED rather than priced. A refusal is
 //!    never a false "go", so this cannot skew a verdict; what it costs is
