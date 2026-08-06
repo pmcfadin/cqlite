@@ -1600,7 +1600,10 @@ fi
 # the same defect in the other direction as one set too low: both are a number nobody re-measured.
 # F3's 13 cases then took it to 94 MEASURED — and were themselves split out to
 # `test_ws0_canonical_corpus.sh` on the same rule, bringing it back to 81. The floor is 78 again.
-MIN_CHECKS=89
+# Round 25's six cases took the MEASURED count to 95, RE-DERIVED BY RUNNING THE SUITE (the only
+# way it may be derived — counting `pass` calls in the source counts what is WRITTEN, not what RAN,
+# which is the property this floor exists to check).
+MIN_CHECKS=95
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
