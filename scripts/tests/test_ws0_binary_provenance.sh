@@ -597,13 +597,384 @@ else
 fi
 
 # ==========================================================================
+# ROUND 14, F3 — "SESSION-OWNED" WAS DECIDED BY A DIRECTORY *NAME*
+# ==========================================================================
+# F2 froze the executables and the check on it was NOMINAL: a path counted as this session's own
+# frozen copy iff its PARENT DIRECTORY WAS NAMED `measured-bin`. A name is not an identity, so three
+# records satisfied it while describing something else. Each case below EXECUTES the substitution
+# against a real session dir and a real reporter, and each is paired with the control establishing
+# the refusal is the new check firing and not a broken fixture.
+#
+# The recorded path is now RELATIVE and the reader RECONSTRUCTS it from the session dir + the
+# binary's key, so all three collapse into one comparison the pre-fix check could not express.
+
+# --- NON-VACUITY, MEASURED: the PRE-FIX CHECK, RECONSTRUCTED VERBATIM, ACCEPTS ALL THREE --------
+# Per #3249 the bar is OBSERVED TO FIRE, and a refusal firing is only half of that: the other half is
+# that the PRE-FIX code did NOT refuse. So round 12 F2's reader loop is reconstructed VERBATIM here
+# and run over the SAME three substituted records the cases below feed the shipped reader. The
+# pre-fix loop must ACCEPT all three; the shipped reader must REFUSE all three. That is a measured
+# flip on identical input, not a claim about a new function's first output.
+if python3 - "$REPO_ROOT/scripts/perf" "$TMP/f3-nonvac" <<'PY'
+import hashlib, json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import MEASURED_BINARIES, verify_binary_provenance
+from ws0_binary_spec import frozen_relpath
+from ws0_validate import Invalid, _SHA256_RE
+
+def prefix_check(binaries):
+    """ROUND 12 F2's READER LOOP, VERBATIM — the three field checks and the parent-name test."""
+    for name in MEASURED_BINARIES:
+        spec = binaries.get(name)
+        if not isinstance(spec, dict):
+            raise Invalid(f"records no digest for {name}")
+        digest = spec.get("sha256")
+        if not isinstance(digest, str) or not _SHA256_RE.match(digest):
+            raise Invalid(f"{name} sha256")
+        if not isinstance(spec.get("bytes"), int) or spec["bytes"] <= 0:
+            raise Invalid(f"{name} bytes")
+        recorded = spec.get("path")
+        if not isinstance(recorded, str) or not recorded:
+            raise Invalid(f"{name} path")
+        # THE WHOLE OF THE PRE-FIX SESSION-OWNERSHIP CHECK: a directory NAME.
+        if pathlib.PurePath(recorded).parent.name != "measured-bin":
+            raise Invalid(f"{name}: not inside this session's own measured-bin/")
+    return "ACCEPTED"
+
+base = pathlib.Path(sys.argv[2]); base.mkdir(parents=True, exist_ok=True)
+
+def build(session, mutate):
+    session.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "source_revision": "1" * 40, "source_revision_short": "1" * 12,
+        "source_revision_observed": True, "checkout_revision_at_measurement": "1" * 40,
+        "source_dirty": False, "source_dirty_paths": 0, "build_mode": "built",
+        "binaries": {
+            n: {"path": frozen_relpath(n), "source_path": f"/repo/target/release/{n}",
+                "sha256": hashlib.sha256(n.encode()).hexdigest(),
+                "bytes": 1024 + i, "mtime_epoch": 2000000000}
+            for i, n in enumerate(MEASURED_BINARIES)},
+        "provenance": "a test fixture record",
+    }
+    mutate(session, rec)
+    (session / "binary-provenance.json").write_text(json.dumps(rec, indent=1) + "\n")
+    return rec
+
+def another_session(session, rec):
+    peer = base / "peer-session" / "measured-bin"; peer.mkdir(parents=True, exist_ok=True)
+    for name, spec in rec["binaries"].items():
+        (peer / name).write_bytes(b"\x7fELF-peer-" + name.encode())
+        (peer / name).chmod(0o755)
+        spec["path"] = str(peer / name)
+
+def wrong_executable(session, rec):
+    names = list(MEASURED_BINARIES); rotated = names[1:] + names[:1]
+    for key, other in zip(names, rotated):
+        rec["binaries"][key]["path"] = f"measured-bin/{other}"
+
+def copy_is_not_the_bytes(session, rec):
+    frozen = session / "measured-bin"; frozen.mkdir(parents=True, exist_ok=True)
+    for name, spec in rec["binaries"].items():
+        body = b"\x7fELF" + name.encode() + b"\x00" * 64
+        spec["bytes"] = len(body); spec["sha256"] = hashlib.sha256(body).hexdigest()
+        (frozen / name).write_bytes(body); (frozen / name).chmod(0o755)
+    target = frozen / "cqlite-flight"; body = target.read_bytes()
+    # SAME LENGTH, different bytes — a DIFFERENT BUILD, which a size check alone cannot see.
+    target.write_bytes(b"\x7fELF" + b"\xff" * (len(body) - 4))
+
+cases = (("another-session", another_session), ("wrong-executable", wrong_executable),
+         ("copy-is-not-the-bytes", copy_is_not_the_bytes))
+for label, mutate in cases:
+    session = base / label
+    rec = build(session, mutate)
+    # THE PRE-FIX LOOP MUST ACCEPT. If it refused, this case would not be measuring the finding.
+    assert prefix_check(rec["binaries"]) == "ACCEPTED", (
+        f"{label}: the reconstructed PRE-FIX check refused, so this record does not reproduce"
+        " the finding and the shipped refusal below would prove nothing"
+    )
+    # ...and the SHIPPED reader must REFUSE the very same record.
+    try:
+        verify_binary_provenance(session)
+    except Invalid:
+        pass
+    else:
+        raise AssertionError(f"{label}: the shipped reader ACCEPTED a record the fix must refuse")
+PY
+then
+  pass "NON-VACUITY MEASURED (round14 F3): round 12 F2's reader loop, RECONSTRUCTED VERBATIM, ACCEPTS all three substitutions (another session's frozen copy, the wrong executable, a copy whose bytes are not the recorded ones) and the SHIPPED reader REFUSES all three — a measured flip on identical records, so the refusals below are the finding and not a new function's first output"
+else
+  fail "round14 F3: the pre-fix check must accept what the fix refuses (else the cases prove nothing)"
+fi
+
+# --- (a) ANOTHER SESSION'S FROZEN COPY ---------------------------------------------------------
+# The most dangerous of the three, because it is a REAL frozen copy — of another session, another
+# revision, possibly another branch — sitting on a path whose parent directory is genuinely named
+# `measured-bin`. Under the pre-fix check it was indistinguishable from this session's own.
+d="$TMP/f3-other-session"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+mkdir -p "$TMP/f3-peer-session/measured-bin"
+python3 - "$d/binary-provenance.json" "$TMP/f3-peer-session" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+peer = pathlib.Path(sys.argv[2]) / "measured-bin"
+for name, spec in j["binaries"].items():
+    # A REAL file on disk, in a REAL measured-bin directory, whose digest MATCHES the record — so
+    # the substitution survives every other check in this suite. It is simply another session's.
+    copy = peer / name
+    copy.write_bytes(b"\x7fELF-peer-" + name.encode())
+    copy.chmod(0o755)
+    spec["path"] = str(copy)
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "the only path a frozen copy of" <<<"$out" \
+   && grep -q "ANOTHER SESSION" <<<"$out"; then
+  pass "OBSERVED (round14 F3): a path naming ANOTHER SESSION's measured-bin/ copy is REFUSED — the file EXISTS, is executable, and its parent directory IS named measured-bin, so the pre-fix parent-name check could not tell it from this session's own"
+else
+  fail "round14 F3: another session's frozen copy must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+
+# --- (b) THE WRONG EXECUTABLE, under the right session and the right directory ------------------
+# Right session dir, right `measured-bin/`, keys ROTATED — so `cqlite-flight`'s slot holds
+# `flight-loadgen`'s path. Every pre-fix check passes: three specs, three valid digests, three
+# parents named `measured-bin`. The report then names one program's identity as another's.
+d="$TMP/f3-rotated"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" "$REPO_ROOT/scripts/perf" <<'PY'
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[2])
+from ws0_binaries import MEASURED_BINARIES
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+names = list(MEASURED_BINARIES)
+rotated = names[1:] + names[:1]
+for key, other in zip(names, rotated):
+    # ONLY the path is rotated — the digest, the size and the source_path stay this key's own, so
+    # nothing but the path-vs-key comparison can see it.
+    j["binaries"][key]["path"] = f"measured-bin/{other}"
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "the only path a frozen copy of" <<<"$out" \
+   && grep -q "WRONG EXECUTABLE" <<<"$out"; then
+  pass "OBSERVED (round14 F3): a spec whose path names a DIFFERENT PROGRAM in the SAME measured-bin/ is REFUSED — right session, right directory, right parent name, wrong executable, so the report would have named one binary's digest as another's"
+else
+  fail "round14 F3: a rotated path/key pairing must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+# The same substitution one step earlier in the SAME operation: the freeze copied the wrong FILE, so
+# `source_path`'s basename disagrees with its key. That field was never read at all before F3.
+d="$TMP/f3-wrong-source"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+j["binaries"]["cqlite-flight"]["source_path"] = "/nonexistent/target/release/flight-loadgen"
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "copied a DIFFERENT PROGRAM" <<<"$out"; then
+  pass "OBSERVED (round14 F3): a 'source_path' whose basename names a DIFFERENT PROGRAM than its key is REFUSED — the freeze copied the wrong file, and that field was UNREAD by every check before F3"
+else
+  fail "round14 F3: a mismatched source_path must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+
+# --- (c) A COPY ON DISK THAT IS NOT THE RECORDED BYTES -----------------------------------------
+# The record carried a digest, the frozen copy sat beside it, and NOTHING compared the two. Both
+# directions are exercised: a size mismatch (truncated/replaced) and a same-size digest mismatch
+# (a DIFFERENT BUILD, which is the one a size check alone cannot see).
+for f3_kind in truncated different-build; do
+  d="$TMP/f3-copy-$f3_kind"; make_session "$d" "$GOOD_FLIGHT"
+  ws0_pin_session_corpus "$d" "$TMP/corpus"
+  python3 - "$d" "$f3_kind" "$REPO_ROOT/scripts/perf" <<'PY'
+import hashlib, json, pathlib, sys
+sys.path.insert(0, sys.argv[3])
+from ws0_binaries import provenance_path
+session, kind = pathlib.Path(sys.argv[1]), sys.argv[2]
+rec = json.loads(provenance_path(session).read_text())
+frozen = session / "measured-bin"; frozen.mkdir(parents=True, exist_ok=True)
+for name, spec in rec["binaries"].items():
+    # Write a copy that MATCHES the record, then break exactly one property of ONE of them, so the
+    # case's subject is the comparison and not a wholesale mismatch.
+    body = b"\x7fELF" + name.encode() + b"\x00" * 64
+    spec["bytes"] = len(body); spec["sha256"] = hashlib.sha256(body).hexdigest()
+    (frozen / name).write_bytes(body)
+    (frozen / name).chmod(0o755)
+target = frozen / "cqlite-flight"
+if kind == "truncated":
+    target.write_bytes(target.read_bytes()[:-8])
+else:
+    # SAME LENGTH, different bytes — a different build of the same program. A size check alone is
+    # blind to this, which is why both are compared.
+    body = target.read_bytes()
+    target.write_bytes(b"\x7fELF" + b"\xff" * (len(body) - 4))
+provenance_path(session).write_text(json.dumps(rec, indent=1) + "\n")
+PY
+  out=$(run_report "$d" "$TMP/corpus"); rc=$?
+  if [ "$f3_kind" = truncated ]; then f3_want='bytes, but the record says'
+  else f3_want='DIFFERENT BUILD'; fi
+  if [ "$rc" -ne 0 ] && grep -q "$f3_want" <<<"$out"; then
+    pass "OBSERVED (round14 F3): a frozen copy on disk that is NOT the recorded bytes ($f3_kind) is REFUSED — the record and the file beside it described different programs and NOTHING compared them before F3"
+  else
+    fail "round14 F3: a $f3_kind frozen copy must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+  fi
+done
+# NON-VACUITY for (c): the SAME session with copies that MATCH reports cleanly, AND states the
+# re-derivation AFFIRMATIVELY as a count. A `0/3` must be visible as a fact about what was checked —
+# never derive a pass from an absence.
+d="$TMP/f3-copy-control"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d" "$REPO_ROOT/scripts/perf" <<'PY'
+import hashlib, json, pathlib, sys
+sys.path.insert(0, sys.argv[2])
+from ws0_binaries import provenance_path
+session = pathlib.Path(sys.argv[1])
+rec = json.loads(provenance_path(session).read_text())
+frozen = session / "measured-bin"; frozen.mkdir(parents=True, exist_ok=True)
+for name, spec in rec["binaries"].items():
+    body = b"\x7fELF" + name.encode() + b"\x00" * 64
+    spec["bytes"] = len(body); spec["sha256"] = hashlib.sha256(body).hexdigest()
+    (frozen / name).write_bytes(body); (frozen / name).chmod(0o755)
+provenance_path(session).write_text(json.dumps(rec, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && python3 - "$d/results.json" "$REPO_ROOT/scripts/perf" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from ws0_binaries import MEASURED_BINARIES
+bp = json.load(open(sys.argv[1]))["binary_provenance"]
+v = bp["binary_spec_verification"]
+assert v["frozen_copies_verified"] == len(MEASURED_BINARIES), v
+assert v["frozen_copies_expected"] == len(MEASURED_BINARIES), v
+assert "RE-DERIVED" in v["note"], v["note"]
+# The record must state WHICH FIELDS were checked, so the census's coverage is on the record rather
+# than only in the module.
+assert set(v["fields_checked"]) == {"path", "sha256", "bytes", "source_path", "mtime_epoch"}, v
+for name, per in v["per_binary"].items():
+    assert per["frozen_copy_verified"] is True, (name, per)
+    assert per["executable"] == "executable", (name, per)
+PY
+then
+  pass "NON-VACUITY (round14 F3): the SAME session whose frozen copies MATCH reports cleanly and records frozen_copies_verified=3/3 with every spec field named — so the three refusals above are the comparison firing, and its coverage is AFFIRMATIVE rather than inferred from an absence"
+else
+  fail "round14 F3: the matching-copies control must report and state its coverage (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+# ...and the ABSENT-copies case (a results dir archived without its release binaries) must REPORT —
+# refusing it would make reviewing a shipped results set impossible — while saying `0/3` OUT LOUD.
+d="$TMP/f3-copies-absent"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -eq 0 ] && python3 - "$d/results.json" <<'PY'
+import json, sys
+v = json.load(open(sys.argv[1]))["binary_provenance"]["binary_spec_verification"]
+assert v["frozen_copies_verified"] == 0, v
+assert "0 of 3" in v["note"] and "NOT re-derived" in v["note"], v["note"]
+for name, per in v["per_binary"].items():
+    assert per["frozen_copy_present"] is False, (name, per)
+    assert per["executable"] == "absent from this session dir", (name, per)
+PY
+then
+  pass "OBSERVED (round14 F3): a session dir REVIEWED WITHOUT its frozen copies still REPORTS (an archived results set stays reviewable) and states '0 of 3 ... NOT re-derived' — the check's silence is a recorded fact, not an unexamined assumption"
+else
+  fail "round14 F3: an absent-copies session must report and state 0/3 (rc=$rc, out: $(head -3 <<<"$out"))"
+fi
+
+# --- THE CENSUS IS CLOSED IN BOTH DIRECTIONS ---------------------------------------------------
+# `path` sat in a five-field object of which the reader considered three; `source_path` and
+# `mtime_epoch` were never mentioned at all — the `requests_unavailable` class, nested. So the fix
+# is a census, and its whole value is that a field the WRITER adds cannot be one the reader silently
+# drops. Both directions are executed against the reporter, not asserted about the table.
+d="$TMP/f3-unclassified"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+# Exactly what a future writer would add: a plausible, useful field nobody classified.
+j["binaries"]["cqlite-flight"]["link_mode"] = "static"
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not classify" <<<"$out" && grep -q "link_mode" <<<"$out"; then
+  pass "OBSERVED (round14 F3): a spec field the census does NOT classify is REFUSED naming it — a field the writer adds cannot become a second unread 'mtime_epoch' under a reader that claims coverage"
+else
+  fail "round14 F3: an unclassified spec field must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+d="$TMP/f3-dropped-field"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
+python3 - "$d/binary-provenance.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); j = json.loads(p.read_text())
+# `mtime_epoch` is the field NO check read before F3, so a record omitting it is precisely the
+# pre-fix blind spot: it passed, and the staleness verdict rested on a value nobody could read.
+del j["binaries"]["cqlite-flight"]["mtime_epoch"]
+p.write_text(json.dumps(j, indent=1) + "\n")
+PY
+out=$(run_report "$d" "$TMP/corpus"); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "missing mtime_epoch" <<<"$out"; then
+  pass "OBSERVED (round14 F3): a spec MISSING a classified field ('mtime_epoch' — the one NO check read before F3) is REFUSED, so the census cannot claim a coverage the record does not support"
+else
+  fail "round14 F3: a spec missing a classified field must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
+fi
+# ...and the CLOSURE ITSELF is refused at IMPORT in both directions — round 12 F2's own shape (the
+# thing was done, the check on it was nominal) made unrepresentable rather than merely avoided.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import importlib, sys
+sys.path.insert(0, sys.argv[1])
+import ws0_binary_spec as m
+from ws0_validate import Invalid
+# A disposition NO CHECKER implements must be refused at import — the half-wired guard.
+saved_disp, saved_checkers = m.SPEC_DISPOSITIONS, dict(m._SPEC_CHECKERS)
+try:
+    src = open(m.__file__).read()
+    ns = {}
+    exec(compile(src.replace('SPEC_DISPOSITIONS = ("session-derived"',
+                             'SPEC_DISPOSITIONS = ("unchecked-invention", "session-derived"'),
+                 m.__file__, "exec"), ns)
+except Invalid as exc:
+    assert "NO CHECKER implements it" in str(exc), exc
+else:
+    raise AssertionError("a disposition with no checker must be refused at import")
+# ...and a CHECKER claiming a disposition no field carries is dead code, also refused.
+try:
+    src = open(m.__file__).read()
+    exec(compile(src.replace('_SPEC_CHECKERS = {\n    "session-derived"',
+                             '_SPEC_CHECKERS = {\n    "never-classified": _check_shape,\n'
+                             '    "session-derived"'), m.__file__, "exec"), {})
+except Invalid as exc:
+    assert "dead code" in str(exc), exc
+else:
+    raise AssertionError("a checker claiming an unknown disposition must be refused at import")
+# ...and there is deliberately NO non-verifying disposition: every field of a binary spec is
+# verified, for F1's reason for DELETING `required-present` rather than leaving it empty.
+assert set(m.SPEC_DISPOSITIONS) == set(m._SPEC_CHECKERS), (m.SPEC_DISPOSITIONS, m._SPEC_CHECKERS)
+assert {d for d, _ in m.BINARY_SPEC_DISPOSITION.values()} == set(m.SPEC_DISPOSITIONS)
+assert saved_disp is m.SPEC_DISPOSITIONS and saved_checkers.keys() == m._SPEC_CHECKERS.keys()
+PY
+then
+  pass "OBSERVED (round14 F3): the census's closure is refused AT IMPORT in BOTH directions — a disposition no checker implements, and a checker claiming a disposition no field carries — so 'classified as verified while nothing compares it' (round 12 F2's own shape) is unrepresentable rather than merely absent"
+else
+  fail "round14 F3: the spec census must assert its closure in both directions at import"
+fi
+# ...and the WRITER must record the RELATIVE path from the shared spelling, not an absolute one:
+# an absolute path can only be checked by SPELLING, which is what the pre-fix reader did.
+if python3 - "$REPO_ROOT/scripts/perf" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_binaries import MEASURED_BINARIES
+from ws0_binary_spec import frozen_relpath
+src = pathlib.Path(sys.argv[1], "ws0_binaries.py").read_text()
+body = src[src.index("def freeze_measured_binaries"):src.index("def record_binary_provenance")]
+assert '"path": frozen_relpath(name)' in body, "the writer must record the shared relative spelling"
+assert '"path": str(dst)' not in body, "the writer must not record an absolute path"
+for name in MEASURED_BINARIES:
+    rel = frozen_relpath(name)
+    assert not pathlib.PurePath(rel).is_absolute(), rel
+    assert pathlib.PurePath(rel).parts[0] == "measured-bin", rel
+PY
+then
+  pass "round14 F3 wired: the WRITER records the RELATIVE frozen path from the SAME \`frozen_relpath\` the reader reconstructs — one spelling, so a reader that reconstructs cannot disagree with a writer that records"
+else
+  fail "round14 F3: the writer must record the shared relative frozen path"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # A block that silently never executes lowers the count and registers NO failure, while the gate
 # reads only the exit code. Derived from the real count and set just below it — a floor far behind
 # its count stops being able to see a skipped block, which is the very thing it exists to catch
 # (#3326 item 3).
-MIN_CHECKS=23
+MIN_CHECKS=35
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
