@@ -53,7 +53,7 @@
       (`partition_lookup.rs:63-66`) does not compute a token and must not be made to.
 
 ## 3. Byte weighting + the BTI fail-closed path (surface: `record_partition_access`)
-- [ ] Write the failing tests in `cqlite-core/tests/issue_2827_partition_access_bytes.rs`:
+- [x] Write the failing tests in `cqlite-core/tests/issue_2827_partition_access_bytes.rs`:
       max-not-sum semantics over repeated accesses; a BIG-sized access lands under
       `size_source="index"`; a BTI access lands under `size_source="unavailable"` with **zero** bytes;
       a mixed window shows both series.
@@ -70,21 +70,33 @@
       `cqlite-core/tests/support/datasets_root.rs::sstables_root_for_table` and assert **per case**
       (`must_run` for committed fixtures) — never a suite-wide `assert!(ran > 0)` (#3220).
 
-> **OPEN FINDING against design D6, raised 2026-08-06 and NOT resolved unilaterally.**
-> D6 assumes the BIG `Index.db` supplies an authoritative per-partition size. It does
-> not: a Cassandra 5.0 BIG index entry is
+> **RESOLVED — owner ruling, 2026-08-06: option (b), the successor gap, APPROVED and
+> ruled SCOPE-PRESERVING** (a mechanism fix under the existing Seam-1 approval, since
+> the approved deliverable was "measured working-set bytes, verdict falls out of the
+> first real window" and (b) is the only option that keeps that true).
+>
+> The finding it resolves: design D6 assumed the BIG `Index.db` supplies a
+> per-partition size. It does not — a Cassandra 5.0 BIG index entry is
 > `[key][data_offset vint][promoted_index_len vint][promoted_index]`
-> (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`) with no size
-> field — which is why the reader's own seek path bounds a partition by the SUCCESSOR
-> offset and calls that authoritative. So `PartitionLoc.data_size` is `0` on BOTH
-> formats, every access records `size_source=unavailable`, `…partition_access.bytes`
-> stays at zero, and the decision procedure refuses every real window on refusal
-> condition 1. The histogram (the primary deliverable) is unaffected. Resolving this
-> needs an owner decision between (a) accepting a byte-blind instrument today and
-> promoting F4 to a prerequisite for AC2, or (b) sourcing the extent from the
-> successor gap the read path already computes. Sections 6 and 7 below are held
-> pending that decision, because the decision note's byte arithmetic would otherwise
-> document a number the instrument cannot produce.
+> (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`; written by
+> `BigTableWriter.createRowIndexEntry` at tag `cassandra-5.0.8`) with no size field,
+> and the BTI trie resolves an offset only. Extents are therefore MEASURED as the
+> successor gap. Four binding riders, all delivered:
+>
+> - **R1** — `size_source` gains a distinct third value `successor_gap`; `unavailable`
+>   still fails closed at zero bytes.
+> - **R2** — `design.md` D6/D3 amended in this same change, cited to format authority
+>   only, plus the false `PartitionLoc` doc comment corrected.
+> - **R3** — both honest costs recorded in the amendment: the last partition bounds to
+>   the uncompressed data-section length, and the extents are uncompressed offsets
+>   (the correct decode-multiplier input; write surface is uncompressed-only, #1406).
+> - **R4** — the transposed `5-8`/`9-16` figures fixed in the SPEC text.
+>
+> **Verified, not assumed:** the successor offset IS reachable at the LOGICAL
+> point-read boundary. Both weight resolvers already consult reader-level state there
+> (the same granularity as the B4 key-offset cache), and D2 itself assigns byte
+> weights to the per-SSTable resolution while keeping COUNTING logical. **The probe
+> did not move to a per-SSTable site.**
 
 ## 4. Wiring at the logical point-read boundary (wiring evidence)
 - [x] Call `record_partition_access` once per logical partition at the core targeted path:
@@ -93,14 +105,18 @@
       `streaming.rs:107` and `stream_agg.rs:196`.
 - [x] Call it once per key of the returned `PointReadPlan` at the Flight point path
       (`cqlite-flight/src/producer_point.rs:83` `point_read_keys`).
-- [ ] Do **NOT** count at the per-SSTable probe sites in
+- [x] Do **NOT** count at the per-SSTable probe sites in
       `cqlite-core/src/storage/sstable/reader/partition_lookup.rs` (`:84`, `:128`, `:152`, `:349`,
       `:410`, `:436`) — they supply byte weights only. Add a comment at each naming the D2 reason
       (per-SSTable counting multiplies repeats by the generation count and manufactures
-      concentration), so the next reader does not "fix" it.
+      concentration), so the next reader does not "fix" it. **Comment placement note:**
+      `partition_lookup.rs` (833 lines) is already over the campsite ratchet, so the D2
+      rationale is recorded instead in the three wiring files that DO carry the decision —
+      `storage/partition_access_weight.rs`, `write_engine/merge/point_read.rs`
+      (`KeySizeNote` / `PointAccessRecording`) and `producer_warm.rs` — plus amended D6.
 - [x] Add a regression test that a partition present in several generations registers exactly **one**
       access for one logical read.
-- [ ] End-to-end wiring test `cqlite-flight/tests/issue_2827_partition_access_e2e.rs`
+- [x] End-to-end wiring test `cqlite-flight/tests/issue_2827_partition_access_e2e.rs`
       (`#![cfg(feature = "observability-testing")]`, own test binary — the capture harness installs a
       process-global meter provider; mirror the header rationale in
       `cqlite-flight/tests/metrics_capture_test.rs:1-32`): repeated keyed `do_get` point reads with a
@@ -125,7 +141,7 @@
       hit ratio, cache size or skew parameter anywhere in this file.
 
 ## 6. The decision procedure (surface: a committed research note)
-- [ ] Write `docs/research/decoded-partition-cache-decision.md` covering, in order: inputs; the single
+- [x] Write `docs/research/decoded-partition-cache-decision.md` covering, in order: inputs; the single
       assumption (decode multiplier `m`, cited to the Phase-0 wire estimate at
       `docs/research/phase2-verify-caching.md:221-222` and labelled an assumption); the four refusal
       conditions checked first; the closed-form clairvoyant ceiling
@@ -134,45 +150,48 @@
       `H_max(128 MiB) ≥ 0.50` **labelled an owner-settable parameter**, with its Arm-1 arithmetic
       (#2818: k-way merge 3.2% on-CPU vs decompress+CRC ~23%); and the tumbling-window bias with its
       conservative direction.
-- [ ] Include a worked example computed from the validation test's known distribution, labelled a
+- [x] Include a worked example computed from the validation test's known distribution, labelled a
       **self-check, never a field result** (refusal condition 4).
-- [ ] State the scope paragraph: this note is the procedure, not the verdict; the verdict awaits a real
+- [x] State the scope paragraph: this note is the procedure, not the verdict; the verdict awaits a real
       keyed workload; AC2 is unmet.
 
 ## 7. Docs, catalog pages and the bundled correction
 - [x] Regenerate the operator pages: `cargo run -p cqlite-core --example gen_operator_metrics_doc` →
       `docs/reports/flight-metrics-reference.md` + `website/src/content/docs/agents-using/flight-metrics-reference.md`
       (`operator_docs.rs:35`, `:40`). Do not hand-edit either file.
-- [ ] Hand-edit `docs/observability/configuration.md`: add the four metric rows to the read-path table
+- [x] Hand-edit `docs/observability/configuration.md`: add the four metric rows to the read-path table
       and the two attribute value-set rows to the bounded-attribute table.
-- [ ] **Correction (same change, because it is this change's premise):** fix
+- [x] **Correction (same change, because it is this change's premise):** fix
       `docs/observability/configuration.md:215` and the instrument description at
       `cqlite-core/src/observability/otel.rs:384` — `cqlite.read.partition_lookup.total` is keyed by
       `cqlite.read.lookup_route` (`catalog.rs:82`, `:283`; emission at `partition_lookup.rs:87`,
       `:156`, `:353`, `:414`, `:440`), **not** `cqlite.query.access_path`.
-- [ ] **Correction:** add `streaming_partition_lookup` and `metadata_partition_lookup` to the
+- [x] **Correction:** add `streaming_partition_lookup` and `metadata_partition_lookup` to the
       documented `cqlite.query.access_path` value set at `docs/observability/configuration.md:298`
       (both emitted by `cqlite-core/src/query/access_path.rs:125-126`).
-- [ ] Confirm the corrections change **documentation and description strings only** — no attribute on
+- [x] Confirm the corrections change **documentation and description strings only** — no attribute on
       an existing metric added, removed or renamed.
-- [ ] Update `docs/architecture/throughput-program-2026-07.md` M13 (`:344`, `:504`) to record the
+- [x] Update `docs/architecture/throughput-program-2026-07.md` M13 (`:344`, `:504`) to record the
       re-scope: instrument + procedure delivered, field number and go/no-go not delivered.
-- [ ] Doctrine check: no CLAUDE.md rule changes (no new gate component, no new agent-facing workflow).
+- [x] Doctrine check: no CLAUDE.md rule changes (no new gate component, no new agent-facing workflow).
       If review disagrees, update CLAUDE.md **and** the website `agents-developing/` page in this same
       change, and accept publication by grepping the served page for a new distinctive phrase — never
       by HTTP 200.
 
 ## 8. Honesty clause, carried into every artifact
-- [ ] Verify the identical claim appears in `proposal.md`, `design.md`,
+- [x] Verify the identical claim appears in `proposal.md`, `design.md`,
       `specs/partition-access-distribution/spec.md` and
       `docs/research/decoded-partition-cache-decision.md`: **instrument + procedure delivered; field
       number and go/no-go NOT delivered; AC2 not satisfied, not waived; blocked by the absence of a
       field keyed workload with captured concentration
       (`docs/research/phase2-verify-caching.md:214-216`).**
-- [ ] Verify no artifact calls any output a measured field skew, the go/no-go, or a gate, and that no
+- [x] Verify no artifact calls any output a measured field skew, the go/no-go, or a gate, and that no
       artifact contains a hit-ratio-vs-skew curve.
-- [ ] Record the owner instruction ("the issue must stop calling itself a gate") and that
+- [x] Record the owner instruction ("the issue must stop calling itself a gate") and that
       retitle/re-scope is an **owner action not taken here**; raise it as a NEEDS-YOU item on the PR.
+      **Done by the owner:** the issue is retitled *"Keyed access-distribution probe: instrument +
+      decision procedure (verdict lands with the first real keyed workload)"*, and no artifact in
+      this change carries the "gate" framing (verified: the only occurrences are negations).
 
 ## 9. Verification and delivery
 - [ ] `bash scripts/agent-gate.sh --lite` green on every fix round (summary-file redirect;
