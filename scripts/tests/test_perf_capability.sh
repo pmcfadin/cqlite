@@ -884,11 +884,27 @@ done
 seam_audit=$(awk \
   -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
   -v gatere='(^|[^A-Za-z0-9_])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
-  { code = $0; sub(/[[:space:]]*#.*$/, "", code) }
+  # TWO representations, because the two matches want different things (roborev round 6, Low).
+  #   `code`  — comments stripped only. The SEAM match needs this: a seam is a VARIABLE REFERENCE
+  #             and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so
+  #             stripping quoted spans would hide real consumers and silently shrink the census.
+  #   `codeq` — comments AND quoted spans stripped. The GATE match needs this: a gate CALL is a
+  #             command, never a string, so matching inside quotes is what made the advertised
+  #             "command position" claim false — swapping a real call for a string that merely
+  #             mentions its name kept the audit green.
+  # Quoted spans are removed before comments so a # inside a stripped string cannot truncate the
+  # line. The single quote is written \047: this awk program sits inside a shell single-quoted
+  # string and cannot contain a literal one.
+  { code = $0
+    sub(/[[:space:]]*#.*$/, "", code)
+    codeq = $0
+    gsub(/"[^"]*"/, " ", codeq)
+    gsub(/\047[^\047]*\047/, " ", codeq)
+    sub(/[[:space:]]*#.*$/, "", codeq) }
   /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
     fn = $1; sub(/\(\)$/, "", fn); seam = 0; gate = 0
     if (code ~ seamre) seam = 1
-    if (code ~ gatere) gate = 1
+    if (codeq ~ gatere) gate = 1
     if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, seam, gate; inb = 0 }
     else inb = 1
     next
@@ -896,7 +912,7 @@ seam_audit=$(awk \
   inb && /^\}/ { printf "%s %d %d\n", fn, seam, gate; inb = 0; next }
   inb {
     if (code ~ seamre) seam = 1
-    if (code ~ gatere) gate = 1
+    if (codeq ~ gatere) gate = 1
   }
 ' "$PERFLIB")
 # The ONLY function allowed to read a seam without the gate, and why: it asks whether a seam
@@ -937,11 +953,27 @@ fi
 priv_audit=$(awk \
   -v privre='(for [a-z_]+ in (sudo|sysctl)|command -v .*(sudo|sysctl))' \
   -v gatere='(^|[^A-Za-z0-9_])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
-  { code = $0; sub(/[[:space:]]*#.*$/, "", code) }
+  # TWO representations, because the two matches want different things (roborev round 6, Low).
+  #   `code`  — comments stripped only. The SEAM match needs this: a seam is a VARIABLE REFERENCE
+  #             and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so
+  #             stripping quoted spans would hide real consumers and silently shrink the census.
+  #   `codeq` — comments AND quoted spans stripped. The GATE match needs this: a gate CALL is a
+  #             command, never a string, so matching inside quotes is what made the advertised
+  #             "command position" claim false — swapping a real call for a string that merely
+  #             mentions its name kept the audit green.
+  # Quoted spans are removed before comments so a # inside a stripped string cannot truncate the
+  # line. The single quote is written \047: this awk program sits inside a shell single-quoted
+  # string and cannot contain a literal one.
+  { code = $0
+    sub(/[[:space:]]*#.*$/, "", code)
+    codeq = $0
+    gsub(/"[^"]*"/, " ", codeq)
+    gsub(/\047[^\047]*\047/, " ", codeq)
+    sub(/[[:space:]]*#.*$/, "", codeq) }
   /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
     fn = $1; sub(/\(\)$/, "", fn); priv = 0; gate = 0
     if (code ~ privre) priv = 1
-    if (code ~ gatere) gate = 1
+    if (codeq ~ gatere) gate = 1
     if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, priv, gate; inb = 0 }
     else inb = 1
     next
@@ -949,7 +981,7 @@ priv_audit=$(awk \
   inb && /^\}/ { printf "%s %d %d\n", fn, priv, gate; inb = 0; next }
   inb {
     if (code ~ privre) priv = 1
-    if (code ~ gatere) gate = 1
+    if (codeq ~ gatere) gate = 1
   }
 ' "$PERFLIB")
 # The ONE function allowed to resolve a privileged tool without the containment gate, and why:

@@ -32,6 +32,21 @@ set -uo pipefail
 # shellcheck source=scripts/tests/lib/perf-capability-test-lib.sh
 . "$(cd "$(dirname "$0")" && pwd)/lib/perf-capability-test-lib.sh"
 
+# --- WHOLE-SUITE CAPABILITY GATE (issue #3261, roborev round 6, Medium) ----------------------
+# EVERY case below drives bootstrap's perf section, and that section stages the drop-in through
+# GNU `stat -c` and `mv --no-target-directory`. The sibling suite grew a per-case skip; this one
+# was left invoking the installer unconditionally, so a macOS gate host — a FIRST-CLASS host here —
+# still failed on the TOOLCHAIN rather than on behaviour. The correct scope is the WHOLE suite, not
+# individual cases: bootstrap gates its entire perf section on PLATFORM=linux, so off Linux there is
+# no perf section to assert about at all, and a per-case skip would imply otherwise.
+# The skip is LOUD and COUNTED, and the report still runs, so a green macOS run SHOWS this suite was
+# skipped with its reason instead of vanishing. It is not a pass: `skip` never increments PASS.
+if ! perf_install_supported; then
+  skip "perf-capability-bootstrap: the ENTIRE suite (all cases drive bootstrap's perf section, which stages the drop-in via GNU stat -c / mv --no-target-directory)" "no GNU stat -c / mv --no-target-directory on this host; bootstrap gates its perf section on PLATFORM=linux, so there is nothing to assert off Linux"
+  perf_test_report
+  exit $?
+fi
+
 # --- 2. Bootstrap perf section: the DEFAULT (no --yes) run mutates NOTHING ----
 # Tripwire shims for every privileged/mutating tool the write path could use, so
 # "wrote nothing" is PROVEN rather than assumed. `perf` may be invoked (the
@@ -184,10 +199,15 @@ else
   bad "perf section: --yes did not run the staged install + sysctl --system"
   cat "$yestrip"
 fi
-# ...through EXACTLY ONE privileged invocation (issue #3261, roborev round 2). The staged install is
-# consolidated into a single `sh -c` precisely so no unprivileged process can be scheduled between
-# mktemp and the reopen; splitting it back into several privileged calls would reinstate that window
-# while every functional assert above still passed.
+# ...through EXACTLY ONE privileged invocation (issue #3261, roborev round 2). CORRECTED at roborev
+# round 6 (Low): an earlier version of this comment claimed the single `sh -c` means "no unprivileged
+# process can be scheduled between mktemp and the reopen". That is FALSE — it gives SEQUENCING within
+# one process, never mutual exclusion against other processes or CPUs — and it contradicted the
+# rationale already corrected in the implementation. Consolidation NARROWS the window; what actually
+# makes the write safe is the DIRECTORY OWNERSHIP AND WRITABILITY PRECONDITION (the destination must
+# be owned by the privileged writer and not group/world-writable, so no less-privileged actor can
+# plant anything to race with). This assert is still worth keeping: splitting the install back into
+# several privileged calls would widen the window again while every functional assert above passed.
 yes_write_n=$(perf_write_count "$yestrip")
 if [ "$yes_write_n" -eq 1 ]; then
   ok "perf section: the staged install is EXACTLY ONE privileged invocation (no mktemp-in-one-call / write-in-another window)"
