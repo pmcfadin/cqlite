@@ -585,6 +585,17 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   narrowing only postpones the next instance. Where the channel genuinely cannot be separated, anchor the
   control tokens somewhere the payload provably cannot reach (column zero of a diff), and say in code that
   this is what the anchor is for.
+  **AND A SECOND, EQUALLY TRANSFERABLE RULE FROM THE SAME ISSUE: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS
+  OWN ENFORCER (#3312 job 27).** Hardening a check while leaving its *invocation* configurable moves the hole
+  rather than closing it. Concretely: the waiver allowlist was deliberately hard-coded and asserted
+  non-env-derived — *"an override is settable by the party the allowlist constrains"* — and then the **scanner
+  that enforces that allowlist** was made env-settable (`WAIVER_SCAN_TOOL`), so an invoker could point it at a
+  script printing `state=granted` and pass with **no authorized comment anywhere**. The protection had moved
+  outward and been left open. The enforcer is now resolved from the wrapper's own directory with no override
+  and no `${…:-…}` fallback, and the structural assert covers the **invocation** as well as the value.
+  **Corollary for tests:** a case needing a different enforcer **substitutes the artifact** in its own scratch
+  copy of the tree — never a path variable. A test-only seam is one more thing a real invoker can set, so the
+  harness assert forbids reintroducing one (with the needle split so the guard cannot match its own line).
   **WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (#3312 job 25) — and the correction that produced it.**
   The comment author used to be *recorded but never authorized*, so on this **public** repository ANY
   commenter could copy the `base`/`head`/`job` values out of the failing block (they are printed in it)
