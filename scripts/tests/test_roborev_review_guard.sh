@@ -278,11 +278,14 @@ case "$cmd" in
     esac
     record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_SHOW_JSON:-object}" != none ] || { printf 'null\n'; exit 0; }
+    # STUB_RECORD_OUTPUT is the review TEXT the record carries — what a recheck re-asserts
+    # `review-completed`, the vacuity tiers and `findings` against (#3312 job 24). Empty means the record
+    # has none, which a recheck must read as "not re-establishable" rather than inherit.
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
       # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
       # `id` (equal to the job id) that NESTS the job row under a "job" key.
-      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$(json_prompt)"
+      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"output":"%s","prompt":"%s","job":' \
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -973,6 +976,7 @@ export STUB_ANNOUNCE_SHA=''
 # STUB_GH_COMMENTS is what the `gh` stub prints for `gh pr view --json comments`: one line per comment,
 # `<login><TAB><flattened body>`, exactly the shape the wrapper's `--jq` produces. STUB_GH_RC makes the
 # `gh` call FAIL, which is how "no PR / no auth / API error" is exercised.
+export STUB_RECORD_OUTPUT=''
 export STUB_GH_COMMENTS=''
 export STUB_GH_COMMENTS_FILE=''
 export STUB_GH_RC=0
@@ -993,6 +997,7 @@ reset_stub() {
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
   STUB_LIST_JSON=array
+  STUB_RECORD_OUTPUT=''
   STUB_GH_COMMENTS=''
   STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
@@ -3561,6 +3566,115 @@ STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent head=$w_hea
 run_wrapper "$w_work"
 assert_verdict 'case (wv17)' FAIL 1
 assert_says 'case (wv17) the missing field is named' '^waiver: MALFORMED \(the marker is missing base='
+reset_stub
+
+printf '== (wv18) JOB 24: the waiver loop CLOSES — absence FAIL, waiver, recheck, WAIVED ==\n'
+# THE ACCEPTANCE TEST FOR THE WHOLE MECHANISM, not a unit of it. The waiver binds base+head+job and is
+# evaluated after that job finishes, but the operator learns the job id FROM the finished run — so before
+# `--recheck-job` existed, applying a waiver meant re-running, which enqueued a DIFFERENT job and made the
+# fresh waiver instantly STALE. The mechanism was a dead letter: no sequence of actions got a legitimate
+# absence past the gate. This case walks the real sequence.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+run_wrapper "$w_work"
+assert_verdict 'case (wv18) step 1: the absence FAILs' FAIL 1
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv18) step 3: the recheck PASSes' PASS 0
+assert_says 'case (wv18) the absence is waived for exactly that review' \
+  "^prompt-content: WAIVED \(2/2 code census paths absent — authorized by @pmcfadin for base=$w_base head=$w_head job=4656\)\$"
+assert_says 'case (wv18) and the waiver key records the whole scope' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\)\$"
+reset_stub
+
+printf '== (wv19) JOB 24: a recheck DECLARES itself and ENQUEUES NOTHING ==\n'
+# A recheck PASS is legitimate but must never be pasteable as evidence of a FRESH review, so the block
+# says so in its first key — the way the gate says `MODE: lite`. And the reviewer must not be invoked at
+# all: that is checked against the stub's own invocation record, not inferred from the output.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_says 'case (wv19) the block declares the mode and the job' \
+  '^MODE: recheck \(job 4656 re-decided from its job record; NO review was enqueued — not evidence of a fresh review\)$'
+assert_says 'case (wv19) and names it under its own key' '^recheck-of: 4656$'
+assert_says 'case (wv19) roborev-exit does not claim an exit status for a process that never ran' \
+  '^roborev-exit: SKIP \(recheck: no reviewer ran in this invocation; job 4656 re-decided from its record\)$'
+if grep -q '^review ' "$INVOKED"; then
+  bad 'case (wv19) a recheck ENQUEUED a review — the one thing it must never do'
+else
+  ok 'case (wv19) no review was enqueued (checked against the stub invocation record)'
+fi
+reset_stub
+
+printf '== (wv20) JOB 24: a recheck RE-ASSERTS from the record, it does not inherit ==\n'
+# The original run passing is not evidence for the recheck. With a record whose status is not `done`,
+# `review-completed` must FAIL on the recheck exactly as it would on a fresh run.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_STATUS="running"
+STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (wv20)' FAIL 1
+assert_says 'case (wv20) completion is re-asserted from the record, not assumed' \
+  "^review-completed: FAIL \(job status 'running' is not done\)\$"
+reset_stub
+
+printf '== (wv21) JOB 24: a WHITESPACE-ONLY reason is MALFORMED ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=   \n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv21)' FAIL 1
+assert_says 'case (wv21) whitespace is not a reason' \
+  '^waiver: MALFORMED \(the marker is missing a-non-empty-reason \(the reason is empty or whitespace only\)'
+assert_lacks 'case (wv21) and it never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv22) JOB 24: a placeholder with TRAILING WHITESPACE is still a placeholder ==\n'
+# The classic defeat of a placeholder check: `reason=TODO ` compared before trimming is not equal to
+# `todo`, so it passed. The trim now happens BEFORE the judgment.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=TODO   \n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv22)' FAIL 1
+assert_says 'case (wv22) the trimmed value is judged' \
+  "^waiver: MALFORMED \(the marker is missing a-substantive-reason \(the reason 'TODO' is a bare placeholder\)"
+reset_stub
+
+printf '== (wv23) JOB 24: the documented FIELD ORDER is enforced ==\n'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent head=$w_head base=$w_base job=4656 reason=fields out of order\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv23)' FAIL 1
+assert_says 'case (wv23) a re-ordered marker does not match the required form' \
+  '^waiver: MALFORMED \(the line does not match the required form'
+assert_lacks 'case (wv23) and never grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== (wv24) JOB 24: field-value BOUNDARIES are enforced ==\n'
+# `job=4656x` and a sha with a trailing non-hex character used to survive the per-field `case` extraction
+# because nothing bounded the value; one anchored pattern refuses them.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=${w_head}z job=4656x reason=boundary violation\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv24)' FAIL 1
+assert_says 'case (wv24) an unbounded field value does not match the required form' \
+  '^waiver: MALFORMED \(the line does not match the required form'
 reset_stub
 
 printf '== the summary header is distinct from every agent-gate header ==\n'
