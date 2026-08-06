@@ -273,153 +273,12 @@ def measure_component_digests(corpus: pathlib.Path, identity: dict) -> dict:
     }
 
 
-# A PIN FIELD THAT DECLARES AN INPUT'S DIGEST is spelled `<something>_sha256`. The covered set is
-# DERIVED from the pin by this suffix rather than enumerated (#3272 round 24): a hand-maintained list
-# is HOW `schema_sha256` and `ticket_template_sha256` came to be omitted from the boundary check
-# while both files were re-read on every invocation. `components_source`/`config`/`note` do not end
-# in it, so the derivation picks out exactly the digest declarations.
-_DIGEST_FIELD_SUFFIX = "_sha256"
-
-# ...plus the COMPONENT MAP, which declares many inputs under one key.
-_COMPONENT_MAP_FIELD = "components"
-
-
-def declared_inputs(pin: dict) -> list[str]:
-    """The pin fields that DECLARE a measurement input's identity — read OFF THE PIN.
-
-    This is the derivation the finding turns on. A boundary check over a hand-written list reports a
-    count that is complete RELATIVE TO ITS OWN LIST (measured: `7 of 7 components verified` while a
-    live mutation of `ws0-events.cql` went unmentioned), so the set is taken from the session's own
-    declaration instead. Every returned field must resolve to coverage in `_input_coverage`, and one
-    that does not REFUSES the rep — which is what makes a per-invocation input added later with
-    nothing covering it a failure rather than a silent third scope for the same defect.
-    """
-    fields = [k for k in pin if isinstance(k, str) and k.endswith(_DIGEST_FIELD_SUFFIX)]
-    if _COMPONENT_MAP_FIELD in pin:
-        fields.append(_COMPONENT_MAP_FIELD)
-    return sorted(fields)
-
-
-def _input_coverage() -> dict:
-    """How each DECLARED input is resolved to bytes on disk, and WHY it needs covering.
-
-    The filenames come from the modules that OWN each input — one spelling, so the boundary cannot
-    hash a different path from the one the report-time check verifies. Imported function-locally
-    because both of those modules import `sha256_file` from `ws0_session`, which re-exports it from
-    HERE; a module-scope import would be a cycle. (The same reason `ws0_session` states for its own
-    function-local imports.)
-
-    `root` names WHICH directory the path is relative to, and the two differ by ownership: the schema
-    belongs to the shared corpus, while the ticket lives in the session's exclusively-claimed output
-    directory (#3272 round 13, F2).
-    """
-    from ws0_schema_input import SCHEMA_FILENAME
-    from ws0_session import PIN_TICKET_FIELD
-    from ws0_ticket_input import TICKET_FILENAME
-
-    return {
-        _COMPONENT_MAP_FIELD: {
-            "kind": "component-set",
-            "why": "the SSTable components a scan reads, and those that shape how it reads",
-        },
-        "data_db_sha256": {
-            "kind": "declared-component",
-            "why": "the pin's TOP-LEVEL Data.db digest, a second declaration of a component's"
-                   " identity that can disagree with the component map it duplicates",
-        },
-        "schema_sha256": {
-            "kind": "file",
-            "root": "corpus",
-            "filename": SCHEMA_FILENAME,
-            "why": "the DDL. The bare scan INGESTS IT ON EVERY INVOCATION while the Flight"
-                   " ticket was generated from it once, so a change mid-run makes the two arms"
-                   " measure DIFFERENT SCHEMAS (#3272 R2)",
-        },
-        PIN_TICKET_FIELD: {
-            "kind": "file",
-            "root": "session",
-            "filename": TICKET_FILENAME,
-            "why": "the REQUEST — keyspace, table, DDL, token range, projection, predicates,"
-                   " aggregation, limit. `flight-loadgen --ticket-template` RE-READS IT ON EVERY"
-                   " INVOCATION of every rep of every arm (#3272 M1)",
-        },
-    }
-
-
-def _pinned_digest(p: pathlib.Path, pin: dict, field: str) -> str:
-    """The pin's digest for `field`, or `Invalid`. An unusable declaration is never a match."""
-    value = pin.get(field)
-    if not isinstance(value, str) or not _SHA256_RE.match(value):
-        raise Invalid(
-            f"{p}: `{field}` is {value!r}, which is not 64 lowercase hex characters. This field"
-            " DECLARES a measurement input, so a truncated or malformed digest cannot identify the"
-            " bytes the reps read — and it is refused rather than skipped: an unverifiable"
-            " declaration is not an absent one (#3272 round 24)."
-        )
-    return value
-
-
-def _verify_declared_file(
-    p: pathlib.Path, pin: dict, field: str, path: pathlib.Path, why: str, label: str
-) -> dict:
-    """Re-hash ONE declared single-file input from disk against the pin, or refuse the rep.
-
-    FAILS CLOSED on an absent or unhashable file (`sha256_file` raises, and a missing one is named
-    here): "assume unchanged" is the vacuous pass the whole check exists to remove.
-    """
-    pinned = _pinned_digest(p, pin, field)
-    if not path.is_file():
-        raise Invalid(
-            f"THE PINNED MEASUREMENT INPUT {path} IS ABSENT at boundary {label}, but this session"
-            f" pinned its digest ({pinned}) before the first rep. It is {why}. A rep cannot be"
-            " verified over an input that is not there, and it is NOT assumed unchanged."
-        )
-    disk = sha256_file(path)
-    if disk != pinned:
-        raise Invalid(
-            f"A MEASUREMENT INPUT CHANGED DURING MEASUREMENT: {path} hashes to {disk} at boundary"
-            f" {label}, but {SESSION_CORPUS_PIN} pinned {pinned} (field `{field}`) before the first"
-            f" rep. This file is {why}. Reps on either side of this boundary read DIFFERENT BYTES,"
-            " and restoring the file before the report would leave every report-time check in"
-            " agreement — which is why it is checked HERE, inside the run. Until round 24 the"
-            " boundary check covered only the SSTable components, so this input was one the check"
-            " reported success about without ever looking at it (#3272 round 24). This session"
-            " cannot be reported."
-        )
-    return {"input": field, "path": str(path), "sha256": disk, "kind": "file"}
-
-
-def _verify_declared_data_db(p: pathlib.Path, pin: dict, pinned: dict, label: str) -> dict:
-    """The pin's TOP-LEVEL `data_db_sha256`, covered AFFIRMATIVELY by the component map.
-
-    Not an exemption. The component map has just been re-hashed from disk at this boundary, so
-    asserting that this second declaration EQUALS the re-hashed entry establishes that it describes
-    the bytes that were observed — rather than leaving it as a field the boundary skipped because
-    something else looked similar.
-    """
-    declared = _pinned_digest(p, pin, "data_db_sha256")
-    names = sorted(n for n in pinned if n.endswith("-Data.db"))
-    if len(names) != 1:
-        raise Invalid(
-            f"{p}: the pinned component map names {len(names)} *-Data.db entries"
-            f" ({', '.join(names) or 'none'}), so the pin's top-level `data_db_sha256` cannot be"
-            f" tied to a component that was re-hashed at boundary {label}. A declaration nothing"
-            " covers is refused, never assumed."
-        )
-    observed = pinned[names[0]].get("sha256")
-    if declared != observed:
-        raise Invalid(
-            f"{p}: the pin declares data_db_sha256 {declared} but its component map records"
-            f" {observed!r} for {names[0]}, which is the entry re-hashed FROM DISK at boundary"
-            f" {label}. The pin contradicts itself about the bytes that were measured, so which"
-            " digest the reps read cannot be established."
-        )
-    return {
-        "input": "data_db_sha256",
-        "path": names[0],
-        "sha256": observed,
-        "kind": "declared-component",
-    }
+# THE SCOPE of a boundary check — WHICH inputs it must cover — lives in `ws0_declared_inputs.py`
+# (#3272 round 24), split out when this file crossed the ~800-line source target. That module owns the
+# DERIVATION of the covered set from the session's own pin, and the resolution of each derived field
+# to bytes on disk; this file owns the HASHING and the COMPARISON. Imported function-locally in
+# `verify_corpus_boundary` because that module imports `sha256_file` from here — the same cycle
+# `ws0_session` avoids the same way.
 
 
 def verify_corpus_boundary(
@@ -535,42 +394,17 @@ def verify_corpus_boundary(
                 " (#3272 round 21). This session cannot be reported."
             )
         checked += 1
-    # EVERY OTHER INPUT THE PIN DECLARES (#3272 round 24). Derived from the pin, resolved through
-    # `_input_coverage`, and a declaration with no coverage REFUSES — see `declared_inputs`.
-    coverage = _input_coverage()
+    # EVERY OTHER INPUT THE PIN DECLARES (#3272 round 24) — the SCHEMA and the FLIGHT TICKET, both
+    # re-read on every invocation and both outside this check until round 24. The covered set is
+    # DERIVED from the pin by `ws0_declared_inputs`, and a declaration it cannot resolve REFUSES the
+    # rep naming the field: that is what stops this finding recurring at a fourth scope. Imported
+    # function-locally because that module imports `sha256_file` from here.
+    from ws0_declared_inputs import declared_inputs, verify_declared_inputs
+
     declared = declared_inputs(pin)
-    uncovered = [f for f in declared if f not in coverage]
-    if uncovered:
-        raise Invalid(
-            f"{p} DECLARES measurement input(s) this boundary check does not cover:"
-            f" {', '.join(uncovered)}. A guard that verifies some of the inputs and reports success"
-            " is issuing a verdict about the ones it never looked at — MEASURED, that shape"
-            " published `7 of 7 components verified` for a session whose schema was live-mutated"
-            " (#3272 round 24). The covered set is DERIVED from the pin precisely so a NEW"
-            " per-invocation input fails HERE instead of being silently omitted the way"
-            " schema_sha256 and ticket_template_sha256 were. Add its coverage to"
-            " `_input_coverage` in scripts/perf/ws0_corpus_bytes.py."
-        )
-    inputs_verified: list[dict] = []
-    for field in declared:
-        spec = coverage[field]
-        kind = spec["kind"]
-        if kind == "component-set":
-            inputs_verified.append({
-                "input": field,
-                "path": str(table_dir),
-                "components": checked,
-                "kind": kind,
-            })
-        elif kind == "declared-component":
-            inputs_verified.append(_verify_declared_data_db(p, pin, pinned, label))
-        else:
-            root = session_dir if spec["root"] == "session" else corpus
-            inputs_verified.append(
-                _verify_declared_file(
-                    p, pin, field, root / spec["filename"], spec["why"], label
-                )
-            )
+    inputs_verified = verify_declared_inputs(
+        p, pin, pinned, session_dir, corpus, table_dir, label, checked
+    )
     observation = {
         "boundary": label,
         "corpus": str(corpus),
