@@ -396,6 +396,28 @@ token, so no reader grepping 'prompt-content: PASS' mistakes it for a certificat
 beside a waiver: key recording the authorizer, the bound scope, the reason and the
 absent paths. Never silence.
 
+THREAT MODEL, STATED WITH ITS LIMITS. A HOSTILE INVOKER IS OUT OF SCOPE: whoever
+runs this wrapper can edit it, replace the scanner beside it, shadow gh on PATH, or
+skip it entirely and hand-write a summary block into the PR. No check inside a
+process defends against the party controlling that process. The merge gate's real
+protection against a hostile worker is the audit trail plus a human reading the PR.
+
+What the waiver DOES defend: (1) parties who do NOT control the invocation — anyone
+can comment on a public PR, and the failing block prints base/head/job, so the
+allowlist, the anchored marker and the structured author association are what stop a
+stranger granting one; (2) accident and drift — a pasted block, a quoted example, a
+stale waiver riding to a later review, a re-run inheriting someone else's
+authorization, an unsubstituted placeholder.
+
+TRIAGE: a finding of the form "the invoker can bypass this" is OUT OF MODEL and
+should be recorded rather than patched. "A non-invoker can bypass this", or "this can
+be bypassed by accident", is a DEFECT. Same-host actors who can write these scripts
+are invoker-class, not third parties.
+
+CHANNEL: the marker is read from TOP-LEVEL PR comments only. One posted inside a
+review body or a review-thread reply is not read, so it silently does not apply and
+the FAIL stands (fail-closed, but it will look like the waiver was ignored).
+
 THE AUTHOR MUST BE ON AN EXPLICIT ALLOWLIST (see ROBOREV_WAIVER_AUTHORS in
 roborev-review-oracles.sh). This is a PUBLIC repository and a failing block PRINTS the
 base, head and job, so without that check any commenter could copy them and make the

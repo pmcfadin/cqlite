@@ -268,6 +268,35 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    narrowing only postpones the next instance. Where the channel genuinely cannot be separated, anchor the
    control tokens somewhere the payload provably cannot reach (column zero of a diff), and say in code that
    this is what the anchor is for.
+   **THE WAIVER'S THREAT MODEL, STATED WITH ITS LIMITS (#3312) — and the triage rule that goes with it.**
+   Five consecutive review rounds landed in this one authorization path (marker anchoring, scope binding,
+   author authorization, the parse channel, the enforcer path). Every fix was right, and the pattern predicts
+   more — so the boundary is recorded to stop the next finding being patched instead of triaged.
+   **A HOSTILE INVOKER IS OUT OF SCOPE, by construction.** Whoever runs the wrapper can edit it, replace the
+   scanner file beside it, shadow `gh`/`python3` on `PATH`, or skip the wrapper and hand-write a
+   `==== ROBOREV REVIEW SUMMARY ==== … RESULT: PASS` block into the PR. **No check inside a process defends
+   against the party that controls the process**, and pretending otherwise is the false-assurance shape this
+   issue exists to remove. The merge gate's real protection against a hostile *worker* is the **audit trail
+   plus a human reading the PR**, not the wrapper.
+   **WHAT IT DOES DEFEND, which is why the layers were worth building:** (1) **parties who do not control the
+   invocation** — this is a public repository, anyone can comment, and a failing block *prints* base/head/job,
+   so the allowlist + anchored marker + structured author association are what stop a stranger; (2)
+   **accident and drift**, the larger category in practice — a pasted block, a quoted example, a stale waiver
+   riding to a later review, a re-run inheriting an authorization meant for another job, an unsubstituted
+   placeholder. Every fix in this path landed in (1) or (2).
+   **THE TRIAGE RULE:** *"the INVOKER can bypass this"* ⇒ **out of model — record it, do not patch it**;
+   *"a NON-INVOKER can bypass this"* or *"this can be bypassed BY ACCIDENT"* ⇒ **defect**. Same-host actors
+   able to write these scripts or roborev's database are **invoker-class**, not third parties.
+   **CHEAP HARDENING REMAINS WORTH IT** where an invoker could reach the same end another way: dropping the
+   scanner-path env override cost nothing and closes contexts where the environment is influenced while
+   files are not (a workflow injecting a variable). "Theoretically redundant" never justifies leaving a hole
+   a non-invoker or an accident can walk through.
+   **TWO RESIDUALS INSIDE THE MODEL, named rather than implied:** the marker is read from **top-level PR
+   comments only**, so one posted inside a review body or a review-thread reply is silently not applied (the
+   run reports `waiver: NONE` and the FAIL stands — fail-closed, but it reads as "my waiver was ignored");
+   and **an authorized human can authorize carelessly** — pre-authorizing a job id, or waiving without
+   checking the token accounting. Nothing mechanical detects either; the control is the permanent,
+   attributable comment, which is why a substantive reason is required and recorded verbatim.
    **AND A SECOND, EQUALLY TRANSFERABLE RULE FROM THE SAME ISSUE: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS
    OWN ENFORCER (#3312 job 27).** Hardening a check while leaving its *invocation* configurable moves the hole
    rather than closing it. Concretely: the waiver allowlist was deliberately hard-coded and asserted

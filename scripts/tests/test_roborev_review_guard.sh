@@ -4169,6 +4169,24 @@ if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${BAS
 else
   bad 'structural: the affirmation backstop admits WAIVED without checking its provenance, or reintroduces a per-key escape hatch (#3312 ruling (4))'
 fi
+# ===== THE THREAT-MODEL BOUNDARY IS STATED, ON EVERY SURFACE (#3312) =====
+# Five consecutive rounds landed in the waiver's authorization path, so the boundary is recorded to get the
+# NEXT finding triaged rather than patched: a hostile INVOKER is out of model by construction (they control
+# the process), while a NON-INVOKER bypass or an ACCIDENTAL one is a defect. An unstated boundary is how
+# "the invoker can bypass this" becomes another round — and how the opposite error, treating a real
+# third-party hole as unpatchable, would creep in.
+_tm_missing=""
+for _f in "$ORACLES" "$WRAPPER"; do
+  grep -qF 'A HOSTILE INVOKER' "$_f" || _tm_missing="$_tm_missing $(basename "$_f")"
+done
+grep -qF 'the INVOKER can bypass this' "$ORACLES" || _tm_missing="$_tm_missing oracles-triage-rule"
+grep -qF 'top-level PR comments only' "$ORACLES" \
+  || grep -qF 'TOP-LEVEL PR COMMENTS ONLY' "$ORACLES" || _tm_missing="$_tm_missing comment-channel-residual"
+if [ -z "$_tm_missing" ]; then
+  ok 'structural: the waiver threat model, its triage rule and the comment-channel residual are stated in code'
+else
+  bad "structural: the waiver threat model is not stated —$_tm_missing. Without the boundary, an out-of-model 'the invoker can bypass this' finding gets patched instead of recorded, and a real non-invoker hole could be waved away as unpatchable (#3312)"
+fi
 # ===== NO COMMENT-PROVENANCE DECISION FROM A FLATTENED TEXT STREAM (#3312 job 26) =====
 # The class, not the instance: an in-band author channel is forgeable by the very data it labels, so the
 # association must come from the JSON structure. This asserts (a) the wrapper asks for raw `--json`

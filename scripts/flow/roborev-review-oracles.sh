@@ -1030,6 +1030,45 @@ roborev_diff_header_has_path() {
 # cached; the vacuous baseline is ~18.7k input / 0 cached), which is why the escape hatch is a
 # human-authorized waiver and not another inference.
 #
+# ===================== THE WAIVER'S THREAT MODEL, WITH ITS LIMITS (#3312) =====================
+# STATED because five consecutive review rounds landed in this authorization path, and the next finding of
+# the form "the invoker can bypass this" needs to be TRIAGED rather than patched.
+#
+# A HOSTILE INVOKER CANNOT BE DEFENDED AGAINST HERE, AT ALL. Whoever runs this wrapper can edit it,
+# replace the scanner file beside it, shadow `gh` or `python3` on PATH, or skip the wrapper entirely and
+# hand-write a `==== ROBOREV REVIEW SUMMARY ==== … RESULT: PASS` block into the PR. No check inside a
+# process defends against the party that controls the process, and claiming otherwise would be the exact
+# false-assurance shape this issue exists to remove. The merge gate's real protection against a hostile
+# WORKER is the audit trail plus a human reading the PR — not this code.
+#
+# WHAT IT DOES DEFEND, which is what makes it worth having:
+#   (1) PARTIES WHO DO NOT CONTROL THE INVOCATION. On a public repository anyone can comment on a PR, and
+#       the base/head/job values are printed in the failing block; the allowlist, the anchored marker and
+#       the structured (non-forgeable) author association are what stop a stranger granting a waiver.
+#   (2) ACCIDENT AND DRIFT — the larger category in practice. A pasted summary block, a quoted example, a
+#       stale waiver riding to a later review, a re-run inheriting an authorization written for a different
+#       job, a placeholder reason left unsubstituted. Every fix in this path landed in (1) or (2).
+#
+# THE TRIAGE RULE THAT FOLLOWS, so a future round does not spend itself here:
+#   * "the INVOKER can bypass this"      -> OUT OF MODEL. Record it; do not patch it.
+#   * "a NON-INVOKER can bypass this"    -> DEFECT.
+#   * "this can be bypassed BY ACCIDENT" -> DEFECT.
+# Same-host actors that can write the roborev database or the scripts are invoker-class, not third parties.
+#
+# CHEAP HARDENING IS STILL WORTH IT even where an invoker could reach the same end another way: removing
+# the scanner-path env override cost nothing, removed a footgun, and closes contexts where the environment
+# is influenced while files are not (a workflow injecting a variable). "Theoretically redundant" is not a
+# reason to leave a hole that a non-invoker or an accident can walk through.
+#
+# TWO RESIDUALS INSIDE THE MODEL, named rather than implied:
+#   * THE MARKER IS READ FROM TOP-LEVEL PR COMMENTS ONLY (`gh pr view --json comments`). A marker posted
+#     inside a REVIEW body or as a review-thread reply is NOT read, so it silently does not apply — the
+#     run reports `waiver: NONE` and the FAIL stands. That direction is fail-CLOSED, but it will read as
+#     "my waiver was ignored", so the form documents the channel.
+#   * AN AUTHORIZED HUMAN CAN AUTHORIZE CARELESSLY — pre-authorizing a job id, or waiving without checking
+#     the token accounting. Nothing here can detect that; the control is the permanent, attributable
+#     comment, which is why the reason is required and recorded verbatim.
+
 # ===== WHO MAY GRANT: AN EXPLICIT AUTHOR ALLOWLIST (roborev job 25) =====
 # THE HOLE THIS CLOSES, and it is the permissive shape this whole issue is about: the comment author was
 # RECORDED but never AUTHORIZED, so on a PUBLIC repository ANY commenter could copy the base/head/job
