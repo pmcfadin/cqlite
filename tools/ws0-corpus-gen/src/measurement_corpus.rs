@@ -177,6 +177,65 @@ pub const ARROW_BUFFER_BATCH_SIZE: u64 = 128;
 /// exists somewhere else — see [`operator_verify_corpus`].
 pub const EXAMPLE_VERIFY_ROOT: &str = "/data/ws0-3096-verify";
 
+/// The characters a path may carry and still be safe to paste into a shell UNQUOTED.
+///
+/// An ALLOWLIST, not a deny-list, and that direction is the whole of the guarantee: a character
+/// nobody thought about is QUOTED rather than waved through, so an unmeasured state takes the
+/// SAFE branch. A deny-list of "the metacharacters we remembered" is the shape that ships the
+/// next one — `$`, backtick, `;`, `&`, `|`, `<`, `>`, `(`, `)`, `*`, `?`, `[`, `]`, `{`, `}`,
+/// `!`, `#`, `~`, `'`, `"`, `\`, whitespace and every control byte are all open sets in
+/// somebody's memory and a closed set here only because this states what IS permitted.
+fn is_shell_safe_unquoted(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '=' | ':' | '+' | ',' | '@')
+}
+
+/// A path rendered so that PASTING IT INTO A SHELL reproduces the path (#3272 round 10, L2).
+///
+/// # The finding
+///
+/// [`operator_verify_corpus`] and [`operator_verify_digest`] emit copy-and-paste commands with
+/// the corpus root interpolated RAW. Two consequences, and the second is the serious one:
+///
+/// * a VALID path containing whitespace simply fails — `--out /data/ws0 corpus` passes
+///   `--out /data/ws0` and a stray `corpus` argument. This repo tracks 40 space-bearing paths
+///   under `docs/`, so whitespace in a path is not hypothetical here;
+/// * a path carrying a shell METACHARACTER alters the pasted command. `$(…)` and a backtick are
+///   command substitutions; `;`/`&`/`|` end the command and begin another; `>` redirects — over
+///   a directory the operator supplies, i.e. exactly the position where this rig hands a string
+///   to a shell it does not control.
+///
+/// # Why single quotes, and why not always
+///
+/// SINGLE quotes are the only shell quoting that is fully literal: inside them nothing expands,
+/// so one escape rule (`'` → `'\''`, closing the quote, emitting a backslash-escaped quote, and
+/// reopening) covers every byte including `$`, backtick and newline. Double quotes would still
+/// expand `$` and backtick, which is the hazard rather than a fix for it.
+///
+/// A path made ENTIRELY of allowlisted characters is returned UNCHANGED, deliberately: the
+/// overwhelmingly common case is `/data/ws0-3096-verify`, an operator reads these commands, and
+/// `'/data/ws0-3096-verify'` is noise that trains a reader to edit the quoting out. The
+/// allowlist is what makes that safe — it is a positive statement of the characters for which
+/// quoted and unquoted are the same string to a shell, not a guess about which are dangerous.
+///
+/// The empty string is QUOTED (`''`), because an empty unquoted word vanishes: an argument the
+/// caller passed would silently not be there.
+pub fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(is_shell_safe_unquoted) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// The exact command that regenerates the corpus into `root` and verifies it
 /// reproduces the recorded identity. Minutes, ~2.8 GB — an operator step, never a
 /// gate step.
@@ -201,7 +260,15 @@ pub const EXAMPLE_VERIFY_ROOT: &str = "/data/ws0-3096-verify";
 /// [`SCHEMA_SHA256`] — a value that does not need the artifact to carry it, and (unlike a digest
 /// recomputed from `schema::DDL`, which round 10's F-C removed) one that does not move when `DDL`
 /// moves, so the comparison can actually fail.
+///
+/// # THE ROOT IS SHELL-QUOTED (#3272 round 10, L2)
+///
+/// The root reaches this string from an operator-supplied directory and the result is PASTED
+/// INTO A SHELL, so it goes through [`shell_quote`]: a whitespace-bearing path would otherwise
+/// split into two arguments, and a metacharacter-bearing one would alter the command. See that
+/// function for why the escape is an allowlist and why single quotes.
 pub fn operator_verify_corpus(root: &str) -> String {
+    let root = shell_quote(root);
     format!(
         "cargo run --release -p ws0-corpus-gen --bin ws0-corpus-gen -- \\\n\
          \x20 --out {root} --progress-every 0 \\\n\
@@ -247,7 +314,15 @@ pub const EXPECT_ROWS_ENV: &str = "CQLITE_WS0_EXPECT_ARROW_ROWS";
 /// retyped, so this command cannot state a stale expectation), and parsed fail-closed on the far
 /// side — the Flight oracle REFUSES a corpus dir given without expectations, and refuses an
 /// expectation it cannot parse, rather than degrading to printing a value nobody compares.
+///
+/// # THE ROOT IS SHELL-QUOTED (#3272 round 10, L2)
+///
+/// As [`operator_verify_corpus`]: the root is operator-supplied and this string is pasted into a
+/// shell, so it goes through [`shell_quote`]. Note the position here is an ENV ASSIGNMENT
+/// (`CQLITE_WS0_CORPUS_DIR=<root>`), where an unquoted space is worse than a split argument — it
+/// ends the assignment and makes the remainder a COMMAND WORD.
 pub fn operator_verify_digest(root: &str) -> String {
+    let root = shell_quote(root);
     format!(
         "CQLITE_WS0_CORPUS_DIR={root} \\\n\
          \x20 {EXPECT_ROWS_ENV}={ROWS} \\\n\
@@ -436,6 +511,126 @@ mod tests {
             assert!(
                 !cmd.contains("/data/ws0-3096"),
                 "the command must NOT name the hardcoded example root (#3272 round 4): {cmd}"
+            );
+        }
+    }
+
+    /// A path a shell reads IDENTICALLY quoted or not is left ALONE — the common case, and the
+    /// reason the escape is an allowlist rather than unconditional quoting.
+    #[test]
+    fn an_allowlisted_path_is_not_quoted() {
+        for safe in [
+            EXAMPLE_VERIFY_ROOT,
+            "/data/ws0-3096",
+            "/scratch/somewhere-else",
+            "relative/path_1.2-3",
+            "/mnt/a=b:c+d,e@f",
+        ] {
+            assert_eq!(
+                shell_quote(safe),
+                safe,
+                "{safe} is entirely allowlisted; quoting it is noise that teaches a reader to \
+                 edit the quoting out"
+            );
+        }
+    }
+
+    /// WHITESPACE AND METACHARACTERS ARE QUOTED, and the quoting is LITERAL (#3272 L2).
+    ///
+    /// The assertion is not "it changed": it is that the result is a single-quoted word whose
+    /// INSIDE is the original path byte-for-byte, which is what makes a shell reproduce the path.
+    #[test]
+    fn whitespace_and_metacharacters_are_quoted_literally() {
+        for hazard in [
+            "/data/ws0 corpus",                 // the tracked-space case
+            "/data/ws0\tcorpus",                // a tab splits too
+            "/data/$(rm -rf /)",                // command substitution
+            "/data/`id`",                       // the other command substitution
+            "/data/x; id",                      // command separator
+            "/data/x && id",                    // and the other two
+            "/data/x || id",
+            "/data/x | id",
+            "/data/x > /etc/passwd",            // redirection
+            "/data/x&",                         // background
+            "/data/${HOME}",                    // parameter expansion
+            "/data/*",                          // glob
+            "/data/x\nid",                      // a newline IS a command separator
+            "~/data",                           // tilde expansion
+            "/data/#comment",
+            "/data/x!ev",
+        ] {
+            let q = shell_quote(hazard);
+            assert!(
+                q.starts_with('\'') && q.ends_with('\''),
+                "{hazard:?} must be single-quoted (the only fully literal shell quoting), got \
+                 {q:?}"
+            );
+            // The inside is the path VERBATIM — no `'` in these cases, so this is exact.
+            assert_eq!(
+                &q[1..q.len() - 1],
+                hazard,
+                "single-quoting must be LITERAL: a shell reading {q} must see {hazard:?}"
+            );
+            // NON-VACUITY for the finding: the PRE-FIX rendering was the raw path, and for every
+            // one of these the two differ — i.e. the pre-fix command really did hand the shell
+            // something other than the path.
+            assert_ne!(
+                q, hazard,
+                "if quoted == raw, the pre-fix command was already safe for {hazard:?} and this \
+                 case proves nothing"
+            );
+        }
+    }
+
+    /// An APOSTROPHE is the one character single-quoting cannot pass through, so its escape is
+    /// asserted on its own: `'` → `'\''` (close, escaped quote, reopen).
+    #[test]
+    fn an_apostrophe_is_escaped_by_closing_and_reopening() {
+        assert_eq!(shell_quote("/data/it's"), r#"'/data/it'\''s'"#);
+        // ...and the pathological all-quotes case, so the rule is not special-cased for one
+        // occurrence.
+        assert_eq!(shell_quote("''"), r#"''\'''\'''"#);
+    }
+
+    /// The EMPTY string is quoted, because an empty UNQUOTED word disappears — an argument the
+    /// caller passed would silently not be there, which is the vanishing-input shape.
+    #[test]
+    fn the_empty_path_is_quoted_so_it_does_not_vanish() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    /// BOTH operator commands quote the root they were given (#3272 round 10, L2).
+    ///
+    /// Asserted on the COMMANDS rather than only on `shell_quote`, because the finding was at the
+    /// two interpolation sites: a correct escape helper that one call site forgot to use is the
+    /// same defect. The digest command's site is an ENV ASSIGNMENT, where an unquoted space does
+    /// not merely split an argument — it ends the assignment and makes the rest a command word.
+    #[test]
+    fn both_operator_commands_quote_a_hazardous_root() {
+        let hazardous = "/data/ws0 corpus$(id)";
+        let quoted = shell_quote(hazardous);
+        for cmd in [
+            operator_verify_corpus(hazardous),
+            operator_verify_digest(hazardous),
+        ] {
+            assert!(
+                cmd.contains(&quoted),
+                "the command must carry the SHELL-QUOTED root {quoted}: {cmd}"
+            );
+            // NON-VACUITY: the RAW spelling must be absent OUTSIDE the quoted word. The quoted
+            // form contains the raw bytes, so the test is that every occurrence of the raw path
+            // lies inside a quoted one — checked by removing the quoted occurrences first.
+            let without = cmd.replace(&quoted, "\u{0}");
+            assert!(
+                !without.contains(hazardous),
+                "the command still interpolates the root UNQUOTED somewhere — pre-fix this was \
+                 the whole of it: {cmd}"
+            );
+            // And the command must still be a single logical command per line: the space in the
+            // root must not have produced a second word at top level.
+            assert!(
+                !cmd.contains("ws0 corpus$(id)") || cmd.contains(&quoted),
+                "the raw space-bearing spelling must never appear outside the quotes: {cmd}"
             );
         }
     }
