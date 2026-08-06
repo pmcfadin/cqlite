@@ -64,7 +64,12 @@
 # guard round since round 9 has pushed this file over and been answered by a SPLIT rather than by
 # growth: the MEASUREMENT LEGS (`lib-measure.sh`), the BUILD + BINARY IDENTITY
 # (`lib-binaries.sh`), the SCHEMA + REQUEST (`lib-inputs.sh`) and round 22's BOUNDARY CHECK
-# (`lib-corpus-boundary.sh`), which landed net-NEGATIVE. It is ~950 now, against a hard 950.
+# (`lib-corpus-boundary.sh`), which landed NET-NEUTRAL — one call line in, its argument out.
+#
+# NO LINE COUNT IS WRITTEN HERE, deliberately — this issue's own lesson applied to its own prose. A
+# number in a comment is a RECORDED CLAIM NOTHING VERIFIES and drifts exactly as `_PERF_STATE="ok"`
+# did (#3249): an earlier draft of THIS paragraph asserted a count already false when written. Run
+# `wc -l`, the only statement of this file's size that cannot be stale.
 #
 # Ten libraries, each owning ONE question about whether a measurement means what it says:
 #
@@ -821,20 +826,18 @@ echo
 # The measurement loop: ROUNDS outside, arms inside, order rotated by round
 # ---------------------------------------------------------------------------
 # This loop used to run ALL `$REPS` bare-scan reps, then all Flight reps of arm 1, then
-# all of arm 2. That makes each arm's median a measurement of a DIFFERENT TIME WINDOW,
-# and this rig's own recorded evidence says those windows are not comparable: on the
-# delivery box, in one session, the UNTOUCHED warm bare scan read 370,134 rows/s at
-# 05:06 UTC and 333,206 rows/s at 06:05 — a ~10% drift with nothing changed on the
-# measured path. The whole claim this driver exists to produce is the `bare/flight`
-# RATIO, so a drift between the bare-scan block and the Flight block lands DIRECTLY on
-# the reported ratio and on the 1.3x PASS/BELOW-TARGET verdict.
+# all of arm 2 — making each arm's median a measurement of a DIFFERENT TIME WINDOW, which
+# this rig's own recorded evidence says are not comparable: on the delivery box, in one
+# session, the UNTOUCHED warm bare scan read 370,134 rows/s at 05:06 UTC and 333,206 at
+# 06:05, a ~10% drift with nothing changed on the measured path. The whole claim this
+# driver produces is the `bare/flight` RATIO, so a drift between the bare-scan block and
+# the Flight block lands DIRECTLY on it and on the 1.3x PASS/BELOW-TARGET verdict.
 #
 # So: ROUNDS on the outside, arms on the inside, order rotated by round index, with the
 # BARE SCAN AS ONE OF THE ROTATED ARMS rather than leading every round (it is the
 # DENOMINATOR of the ratio, so a fixed position would put any within-round systematic
-# effect on it every time). For the 2-arm default that is a genuine alternation
-# (`scan,bypass` / `bypass,scan` / …) rather than a fixed order. The per-rep artifacts
-# are named exactly as before (`scan-<temp>-<rep>`, `flight-<arm>-<temp>-<rep>`).
+# effect on it every time). For the 2-arm default that is a genuine alternation rather
+# than a fixed order. Per-rep artifact names are unchanged.
 #
 # WHAT THIS LOOP DOES *NOT* BUY, STATED BECAUSE THE DIFFERENCE MATTERS (#3272 round 4).
 # Ordering the loop this way is a REASONABLE THING TO DO; it is NOT a DRIFT CONTROL, and
