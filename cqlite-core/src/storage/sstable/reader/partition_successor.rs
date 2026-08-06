@@ -229,3 +229,111 @@ impl SSTableReader {
         Ok(end.checked_sub(data_offset).filter(|&gap| gap > 0))
     }
 }
+
+/// Whether this SSTable holds a partition — the AUTHORITATIVE, non-emitting answer
+/// the #2827 probe needs to price an access.
+#[cfg(not(feature = "tombstones"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PartitionResidency {
+    /// Definitively absent from this SSTable: it contributes nothing to the access,
+    /// and its absence is not a gap in the measurement.
+    NotHeld,
+    /// Present, starting at this uncompressed `Data.db` offset.
+    HeldAt(u64),
+    /// Could not be determined. The caller MUST fail closed — reporting the access
+    /// `unavailable` — rather than assume absence.
+    Unknown,
+}
+
+#[cfg(not(feature = "tombstones"))]
+impl SSTableReader {
+    /// Resolve whether this SSTable holds `partition_key`, WITHOUT emitting any
+    /// metric.
+    ///
+    /// # Why the probe cannot just consult the key cache
+    ///
+    /// The key→offset cache answers "is this location memoised", not "does this
+    /// SSTable hold this key". A miss means *either* — the cache is byte-budgeted
+    /// and evicts, has a disabled mode that returns `None` unconditionally, misses
+    /// entirely when the reader has no generation identity, and is populated by only
+    /// one of the resolution paths. Reading a miss as absence lets ONE surviving
+    /// cached generation plus one evicted-but-held generation report a partial sum
+    /// as a fully measured extent: the working set is under-priced, which flatters
+    /// the cache. That is the direction the whole fail-closed design exists to
+    /// prevent, and the spec forbids it outright ("an access for which ANY resolved
+    /// SSTable yielded no authoritative extent SHALL be `unavailable`"; "SHALL NOT
+    /// silently under-report").
+    ///
+    /// So residency is resolved from the same authoritative structures the read
+    /// itself uses, and the three states are kept DISTINCT:
+    ///
+    /// - **BTI** — the `Partitions.db` trie is the authoritative presence oracle: a
+    ///   trie miss is definitive absence, a hit yields the offset directly (narrow)
+    ///   or via the `Rows.db` row-index entry (wide). A corrupt trie is `Unknown`.
+    /// - **BIG** — the bloom filter never reports a false negative, so
+    ///   `might_contain == false` is definitive absence. Otherwise the raw-key
+    ///   `Index.db` map resolves the offset. An `Index.db` MISS is **not** definitive
+    ///   absence (#1572), so it is `Unknown` rather than `NotHeld`; with a bloom in
+    ///   front this is only reached on a bloom false positive.
+    ///
+    /// Nothing here emits: it uses the slice-level trie primitive and the resident
+    /// index map directly, never the counter-emitting lookup façades, so switching
+    /// the probe on cannot perturb `cqlite.read.partition_lookup.total`,
+    /// `cqlite.read.bloom.checks` or `cqlite.read.sstables_pruned`.
+    pub(crate) async fn partition_residency(&self, partition_key: &[u8]) -> PartitionResidency {
+        // C5 authoritative range short-circuit: provably outside this SSTable's
+        // key bound is definitive absence, for either format.
+        if self.partition_key_out_of_range(partition_key) {
+            return PartitionResidency::NotHeld;
+        }
+
+        if let Some(partitions_db) = &self.bti_partitions_db {
+            use crate::storage::sstable::bti::{
+                encode_partition_key_for_bti_trie, lookup_partition_in_bti_slice,
+                resolve_rows_db_entry, BtiPartitionLocation,
+            };
+            let encoded = encode_partition_key_for_bti_trie(partition_key);
+            return match lookup_partition_in_bti_slice(partitions_db.as_slice(), &encoded) {
+                // A trie miss is AUTHORITATIVE absence for BTI.
+                Ok(None) => PartitionResidency::NotHeld,
+                Ok(Some(BtiPartitionLocation::DataOffset(off))) => PartitionResidency::HeldAt(off),
+                Ok(Some(BtiPartitionLocation::RowsOffset(rows_offset))) => {
+                    match self.bti_rows_db.as_ref() {
+                        Some(rows_db) => {
+                            match resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize) {
+                                Ok(header) => PartitionResidency::HeldAt(header.data_position),
+                                Err(_) => PartitionResidency::Unknown,
+                            }
+                        }
+                        None => PartitionResidency::Unknown,
+                    }
+                }
+                Err(_) => PartitionResidency::Unknown,
+            };
+        }
+
+        // BIG: the bloom filter never yields a false negative.
+        if let Some(bloom) = &self.bloom_filter {
+            if !bloom.might_contain(partition_key) {
+                return PartitionResidency::NotHeld;
+            }
+        }
+        let Some(index_reader) = &self.index_reader else {
+            return PartitionResidency::Unknown;
+        };
+        if index_reader
+            .ensure_materialized(&self.scan_cancel)
+            .await
+            .is_err()
+        {
+            return PartitionResidency::Unknown;
+        }
+        match index_reader.lookup_partition(partition_key) {
+            Some(entry) => PartitionResidency::HeldAt(entry.data_offset),
+            // An `Index.db` miss is NOT definitive absence (#1572): the index may be
+            // truncated or incomplete, so the read path re-checks by scanning. The
+            // probe cannot re-check cheaply, so it fails closed.
+            None => PartitionResidency::Unknown,
+        }
+    }
+}

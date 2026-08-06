@@ -272,6 +272,43 @@ fn a_downsampled_but_unfloored_window_is_refused_as_a_sample() {
 }
 
 #[test]
+fn a_partial_extent_is_never_published_as_a_complete_one() {
+    // E1, at the level the bug lived: the accumulator must not turn "one generation
+    // priced, one generation unpriceable" into a fully-measured total.
+    //
+    // The defect was upstream of this type — the resolver read a key-cache MISS as
+    // "this generation did not hold the key", so an evicted-but-held generation
+    // contributed NOTHING instead of poisoning the access, and the surviving
+    // generation's partial sum shipped as `SuccessorGap`. That under-prices the
+    // working set, i.e. flatters the cache. The resolver now resolves residency
+    // authoritatively and calls `note_unsized` for anything indeterminate; this pins
+    // the contract it relies on.
+    let mut b = cqlite_core::observability::partition_access::AccessWeightBuilder::new();
+    b.note_measured(4_096); // generation A: measured
+    b.note_unsized(); // generation B: held, but not priceable
+    assert_eq!(
+        b.finish(),
+        AccessWeight::Unavailable,
+        "a partial sum must never be published as a measured extent"
+    );
+
+    // And the same through a window: the access is counted, contributes no bytes,
+    // and makes the window unpriceable.
+    let r = deterministic_recorder();
+    r.record(SCOPE, b"p", AccessWeight::Unavailable);
+    let s = r.close_window().expect("the access was recorded");
+    assert_eq!(s.distinct_partitions(), 1);
+    assert_eq!(s.total_bytes(), 0);
+    assert!(decision::evaluate(
+        &s,
+        decision::WindowSource::Field,
+        128 * 1024 * 1024,
+        decision::ASSUMED_DECODE_MULTIPLIER,
+    )
+    .is_refusal());
+}
+
+#[test]
 fn a_mixed_provenance_total_reports_the_weakest_provenance() {
     // An access whose bytes came partly from an index-recorded size and partly from
     // a measured gap is reported MEASURED: a total is only as well-founded as its
@@ -894,5 +931,59 @@ mod end_to_end {
              bucket 2 and invent a cacheable repeat"
         );
         assert_eq!(summary.bucket(RepeatBucket::Two).distinct(), 0);
+    }
+
+    /// E1 end-to-end: pricing must not depend on the key cache retaining anything.
+    ///
+    /// The resolver used to read a key-cache MISS as "this generation did not hold
+    /// the key". Invalidating every cached location for the table between the read
+    /// and the window close reproduces exactly the eviction the cache does on its
+    /// own — and the access must STILL be priced from the authoritative index, not
+    /// silently reported as a complete measurement over the generations that
+    /// happened to survive.
+    #[tokio::test]
+    async fn pricing_survives_an_emptied_key_cache() {
+        let _guard = PROBE.lock().await;
+        let (root, schema) = resolve(BIG.0, BIG.1, BIG.2);
+        let db = open_db(&root, &schema, BIG.0).await;
+        let sql = format!(
+            "SELECT * FROM {}.{} WHERE {} = {}",
+            BIG.0, BIG.1, BIG.3, BIG.4
+        );
+
+        partition_access::global().set_window_config(partition_access::WindowConfig {
+            duration: Duration::from_secs(86_400),
+            max_accesses: u64::MAX,
+            ..partition_access::WindowConfig::default()
+        });
+        let _ = partition_access::close_window();
+        partition_access::set_probe_enabled(Some(true));
+
+        let rows = db.execute(&sql).await.expect("point read").rows.len();
+
+        // Evict everything the read memoised, process-wide.
+        cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();
+
+        let rows2 = db
+            .execute(&sql)
+            .await
+            .expect("second point read")
+            .rows
+            .len();
+        let summary = partition_access::close_window();
+        partition_access::set_probe_enabled(Some(false));
+        let summary = summary.expect("the reads were recorded");
+
+        assert!(rows > 0 && rows2 > 0);
+        assert_eq!(summary.distinct_partitions(), 1);
+        assert_eq!(
+            summary.unavailable_partitions(),
+            0,
+            "an emptied key cache must not make a resolvable partition unpriceable"
+        );
+        assert!(
+            summary.total_bytes() > 0,
+            "the extent comes from the index, not from cache retention"
+        );
     }
 }

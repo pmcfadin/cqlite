@@ -50,6 +50,8 @@
 
 use super::StorageEngine;
 use crate::observability::partition_access::{self, AccessWeight, AccessWeightBuilder};
+#[cfg(not(feature = "tombstones"))]
+use crate::storage::sstable::reader::partition_successor::PartitionResidency;
 use crate::types::{RowKey, ScanRow, TableId};
 use crate::Result;
 
@@ -168,22 +170,53 @@ impl StorageEngine {
             self.sstables.resolve_reader_snapshot(table_id).await;
         let mut weight = AccessWeightBuilder::new();
         for reader in &readers {
-            // `None` means this generation did not hold the key (or left no
-            // authoritative location), so it contributes nothing either way.
-            let Some(loc) = reader.key_cache_get(partition_key) else {
-                continue;
-            };
-            // An index-recorded size, if one ever exists. No Cassandra 5.0 index
-            // format records one, so in practice this never fires — it is kept so a
-            // producer that genuinely knows a size is not forced to report a
-            // measured one.
-            if loc.data_size > 0 {
-                weight.note_sized(loc.data_size);
-                continue;
-            }
-            Self::note_measured_extent(reader, loc.data_offset, partition_key, &mut weight).await;
+            Self::note_reader_contribution(reader, partition_key, &mut weight).await;
         }
         weight.finish()
+    }
+
+    /// One candidate's contribution: definitive absence contributes nothing, a
+    /// resolved partition contributes its MEASURED extent, and anything
+    /// indeterminate fails closed.
+    #[cfg(not(feature = "tombstones"))]
+    async fn note_reader_contribution(
+        reader: &std::sync::Arc<crate::storage::sstable::reader::SSTableReader>,
+        partition_key: &[u8],
+        weight: &mut AccessWeightBuilder,
+    ) {
+        match reader.partition_residency(partition_key).await {
+            // Definitively absent: contributes nothing, and its absence is not a gap
+            // in the measurement.
+            PartitionResidency::NotHeld => {}
+            PartitionResidency::HeldAt(data_offset) => {
+                // An index-recorded size, if one ever exists. No Cassandra 5.0 index
+                // format records one, so in practice this never fires — it is kept
+                // so a producer that genuinely knows a size is not forced to report
+                // a measured one.
+                match reader.key_cache_get(partition_key) {
+                    Some(loc) if loc.data_size > 0 => weight.note_sized(loc.data_size),
+                    _ => {
+                        Self::note_measured_extent(reader, data_offset, partition_key, weight).await
+                    }
+                }
+            }
+            // Held-or-not could not be determined. FAIL CLOSED: treating this as
+            // absence is what lets a partial sum be published as a fully measured
+            // extent.
+            PartitionResidency::Unknown => weight.note_unsized(),
+        }
+    }
+
+    /// `tombstones` build: the seek/residency machinery is compiled out with the
+    /// path it serves, so nothing is measurable and every access is honestly
+    /// unpriceable.
+    #[cfg(feature = "tombstones")]
+    async fn note_reader_contribution(
+        _reader: &std::sync::Arc<crate::storage::sstable::reader::SSTableReader>,
+        _partition_key: &[u8],
+        weight: &mut AccessWeightBuilder,
+    ) {
+        weight.note_unsized();
     }
 
     /// MEASURE one candidate's contribution as the partition's successor gap.
@@ -212,18 +245,5 @@ impl StorageEngine {
                 weight.note_unsized();
             }
         }
-    }
-
-    /// `tombstones` build: the successor-gap machinery is compiled out with the
-    /// seek path it serves, so no extent is measurable and every access is honestly
-    /// unpriceable.
-    #[cfg(feature = "tombstones")]
-    async fn note_measured_extent(
-        _reader: &std::sync::Arc<crate::storage::sstable::reader::SSTableReader>,
-        _data_offset: u64,
-        _partition_key: &[u8],
-        weight: &mut AccessWeightBuilder,
-    ) {
-        weight.note_unsized();
     }
 }
