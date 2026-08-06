@@ -2344,6 +2344,139 @@ else
   bad "3310-worktree-newline: the advertised command did not repair it: '$R42_CMD'"
 fi
 
+# === Case 43: a FLAGGED path that is PRESENT is simply present (#3310 r3 B1) ===
+# skip-worktree / assume-unchanged hide a path's state from git's STATUS
+# machinery; they do not stop the direct `-e`/`-L` test this probe performs. So a
+# flagged path that demonstrably EXISTS has a determinable state and must not
+# make the probe fail — the first cut refused every flagged path, which turned the
+# primary diagnostic red on an intact checkout that merely carries one.
+flagged_present_case() {
+  local label="$1" dir="$2" flag="$3" rel="goldens/simple_table-Data.db.jsonl"
+  make_repo "$dir"
+  make_usable_corpus "$dir/test-data/datasets"
+  git -C "$dir" update-index "$flag" -- "test-data/datasets/$rel"
+  if [ -f "$dir/test-data/datasets/$rel" ]; then
+    ok "$label: the flagged fixture is present on disk (precondition)"
+  else
+    bad "$label: fixture missing before the probe; case is vacuous"
+  fi
+  run_verify "$dir" "$dir/test-data/datasets"
+  if [ "$RC" -eq 0 ]; then
+    ok "$label: an intact checkout carrying a flagged fixture still verifies (exit 0)"
+  else
+    bad "$label: false failure on a PRESENT flagged fixture (exit $RC); output: $OUT"
+  fi
+  case "$OUT" in
+    *"$PROBE_UNMEASURED_MARKER"*) bad "$label: called a present path unmeasurable; output: $OUT" ;;
+    *) ok "$label: no unmeasurable verdict for a path it can see" ;;
+  esac
+  case "$OUT" in
+    *"Tracked-fixture probe (#3310): OK"*) ok "$label: reports the clean verdict" ;;
+    *) bad "$label: no clean verdict; output: $OUT" ;;
+  esac
+}
+flagged_present_case "3310-flagged-present-skip" "$T/case43a-repo" --skip-worktree
+flagged_present_case "3310-flagged-present-assume" "$T/case43b-repo" --assume-unchanged
+
+# === Case 44: rename classification must not depend on ambient config (r3 B2) ==
+# `diff.renames=false` makes a staged rename report as `D` + `A`, so a probe that
+# relies on the DEFAULT being on emits a false missing-fixture error and
+# advertises a repair that REVERSES intentional work. The invocation must pass
+# rename detection explicitly.
+R44="$T/case44-repo"
+make_repo "$R44"
+make_usable_corpus "$R44/test-data/datasets"
+git -C "$R44" config diff.renames false
+git -C "$R44" mv "test-data/datasets/goldens/simple_table-Data.db.jsonl" \
+                 "test-data/datasets/goldens/renamed-Data.db.jsonl"
+if [ "$(git -C "$R44" config --get diff.renames)" = "false" ] \
+   && [ -f "$R44/test-data/datasets/goldens/renamed-Data.db.jsonl" ]; then
+  ok "3310-rename-config: staged rename in place with diff.renames=false (precondition)"
+else
+  bad "3310-rename-config: could not set up the staged rename; case is vacuous"
+fi
+run_verify "$R44" "$R44/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-rename-config: a staged rename is not a missing fixture (exit 0)"
+else
+  bad "3310-rename-config: false missing-fixture report under diff.renames=false (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_MISSING_MARKER"*) bad "3310-rename-config: reported the renamed-away path as missing; output: $OUT" ;;
+  *) ok "3310-rename-config: no missing-fixture claim for a renamed path" ;;
+esac
+case "$OUT" in
+  *"restore"*"simple_table-Data.db.jsonl"*)
+    bad "3310-rename-config: advertised a repair that would REVERSE the rename; output: $OUT" ;;
+  *) ok "3310-rename-config: advertises no rename-reversing repair" ;;
+esac
+
+# === Case 45: an unresolvable HEAD is UNMEASURABLE, not empty (r3 B3) =========
+# A failing `rev-parse --verify HEAD` does not prove an unborn branch: a corrupt
+# ref fails the same way. Treating both as "no commits" skips the staged-deletion
+# census entirely and can still reach a CLEAN verdict for a state never measured.
+# The corruption here is content-only (no chmod), and it leaves the repository
+# otherwise usable — `rev-parse --show-toplevel` and `ls-files` still work — so
+# the probe really does reach the HEAD decision.
+R45="$T/case45-repo"
+make_repo "$R45"
+make_usable_corpus "$R45/test-data/datasets"
+R45_BRANCH="$(git -C "$R45" symbolic-ref -q HEAD)"
+git -C "$R45" pack-refs --all >/dev/null 2>&1 || true
+rm -f "$R45/.git/packed-refs"
+mkdir -p "$R45/.git/$(dirname "${R45_BRANCH#refs/}" | sed 's|^|refs/|')" 2>/dev/null || true
+printf 'corrupt-not-a-sha\n' >"$R45/.git/$R45_BRANCH"
+if ! git -C "$R45" rev-parse --verify -q HEAD >/dev/null 2>&1 \
+   && git -C "$R45" rev-parse --show-toplevel >/dev/null 2>&1; then
+  ok "3310-head-corrupt: HEAD is unresolvable while the repo still works (precondition)"
+else
+  bad "3310-head-corrupt: could not create the unresolvable-HEAD state; case is vacuous"
+fi
+run_verify "$R45" "$R45/test-data/datasets"
+if [ "$RC" -ne 0 ]; then
+  ok "3310-head-corrupt: an unresolvable HEAD does not yield a clean run (exit $RC)"
+else
+  bad "3310-head-corrupt: reported success without measuring staged deletions; output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) ok "3310-head-corrupt: reports COULD NOT MEASURE" ;;
+  *) bad "3310-head-corrupt: no unmeasurable verdict; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"Tracked-fixture probe (#3310): OK"*)
+    bad "3310-head-corrupt: printed a clean tracked-fixture verdict; output: $OUT" ;;
+  *) ok "3310-head-corrupt: no clean verdict" ;;
+esac
+
+# === Case 46: a genuinely UNBORN branch is still measurable and clean =========
+# The other side of case 45: the discriminator must not over-fire. A repo with
+# staged fixtures and no commit yet cannot HAVE a deletion relative to HEAD, so
+# the probe must verify normally rather than refusing.
+R46="$T/case46-repo"
+mkdir -p "$R46/test-data/datasets/goldens"
+git -C "$R46" init -q
+git -C "$R46" config user.email test@example.com
+git -C "$R46" config user.name "Test"
+printf 'unborn fixture\n' >"$R46/test-data/datasets/goldens/unborn-Data.db.jsonl"
+git -C "$R46" add -f -- "test-data/datasets/goldens/unborn-Data.db.jsonl"
+make_usable_corpus "$R46/test-data/datasets"
+if ! git -C "$R46" rev-parse --verify -q HEAD >/dev/null 2>&1 \
+   && [ -n "$(git -C "$R46" ls-files -- test-data/datasets)" ]; then
+  ok "3310-head-unborn: unborn HEAD with staged fixtures (precondition)"
+else
+  bad "3310-head-unborn: could not create the unborn state; case is vacuous"
+fi
+run_verify "$R46" "$R46/test-data/datasets"
+if [ "$RC" -eq 0 ]; then
+  ok "3310-head-unborn: an unborn branch verifies normally (exit 0)"
+else
+  bad "3310-head-unborn: false failure on an unborn branch (exit $RC); output: $OUT"
+fi
+case "$OUT" in
+  *"$PROBE_UNMEASURED_MARKER"*) bad "3310-head-unborn: refused a measurable unborn repo; output: $OUT" ;;
+  *) ok "3310-head-unborn: no unmeasurable verdict" ;;
+esac
+
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
