@@ -93,9 +93,11 @@ New attribute keys, both closed sets:
 
 - `cqlite.read.repeat_bucket` ∈ { `1`, `2`, `3-4`, `5-8`, `9-16`, `17+` } — exactly the owner's six
   buckets, verbatim.
-- `cqlite.read.size_source` ∈ { `index`, `unavailable` } — see D6.
+- `cqlite.read.size_source` ∈ { `index`, `successor_gap`, `unavailable` } — a closed
+  set of THREE values (amended D6 / rider R1).
 
-Total series: 6 × 2 + 6 + 6 + 1 = **25**, fixed forever. Compare the existing bounded sets:
+Total series: 6 × 3 + 6 + 6 + 1 = **31**, fixed forever (amended: `size_source` carries
+three values, not two — see D6). Compare the existing bounded sets:
 `cqlite.read.partition_lookup.total` carries three attributes (`catalog.rs:283`) and
 `cqlite.rpc.phase.duration` carries a five-value closed phase set — this is the same order.
 
@@ -113,8 +115,8 @@ output.
 
 **Why `cqlite.sstable.format` is NOT carried.** Per D2 the unit is a *logical* partition access, which
 may span a BIG and a BTI generation in the same read; attaching a format would require picking one
-arbitrarily. Format information survives where it matters — via `size_source`, since BTI is the
-reason a size is unavailable (D6).
+arbitrarily. (Amended D6 removes the original secondary rationale — `size_source` does NOT stand in
+for the format, because neither format records a size and both are measured the same way.)
 
 **Composition with existing attributes.** These are new series, not new attributes on existing
 metrics: `cqlite.read.partition_lookup.total` is left exactly as it is. Adding `repeat_bucket` to it
@@ -219,42 +221,99 @@ asserts in the correctness test path (`roborev-lints` / #2642); the deterministi
 every test in this change on the right side of it. The wall-clock trigger is a property of the
 *instrument*, exercised only by an explicitly-`#[ignore]`d timing test if at all.
 
-### D6 — Byte weighting, and the BTI `data_size = 0` case fails closed
+### D6 — Byte weighting is MEASURED as the successor gap; a genuinely unknown extent fails closed
 
-**Decision.** Each logical access carries a byte weight: the **sum of `PartitionLoc.data_size` over
-the SSTables resolved for that access** (`cqlite-core/src/storage/cache/global_key_offset.rs:76-81`).
-The window entry stores `bytes = max(bytes, this_access_bytes)`, not a sum — the working set wants
-**distinct-partition** bytes, so ten accesses to one partition must contribute its size once. `max`
-(rather than "first wins") is exact because partition sizes are immutable within a generation set,
-and it is robust to an access that resolved fewer generations than another.
+> **AMENDED 2026-08-06 by owner ruling** (escalation from implementation, accepted in
+> full and ruled **scope-preserving** — a mechanism fix under the existing Seam-1
+> approval, not a renegotiation, because the approved deliverable was "measured
+> working-set bytes, verdict falls out of the first real window" and this is the only
+> mechanism that keeps that true). The original D6 rested on a **false premise about
+> the on-disk format** and is superseded below. Its rejection of the successor gap
+> died with that premise.
 
-**The BTI case is a real constraint, and it is handled by refusing to guess.** BTI trie resolution
-resolves only an offset; the cache location type records this explicitly
-(`global_key_offset.rs:72-74`: "BTI resolves only `data_offset` … so a BTI wiring site stores
-`data_size = 0`"; the constructor is `PartitionLoc::offset_only` at `:94-100`), and the BTI point
-lookup itself returns a bare offset (`partition_lookup.rs:433`). Therefore:
+**The premise that was false.** The original text asserted that "BIG (`Index.db`)
+resolves both fields" and that only BTI lacked a size. **Neither Cassandra 5.0 index
+format records a per-partition byte size.** A BIG index entry is
 
-- An access for which **any** resolved SSTable reported no size is recorded with the entry's
-  `size_source = unavailable` flag set (sticky for the window).
-- Such an entry contributes **zero** to `cqlite.read.partition_access.bytes` and is counted under
-  `distinct_partitions{size_source="unavailable"}`.
-- The `unavailable` fraction is therefore **visible as a ratio on the dashboard**, and the decision
-  procedure (D7) **REFUSES** to produce a go/no-go from a window whose `unavailable` fraction exceeds
-  0. Silent under-reporting is impossible: an incomplete byte total always has a non-zero
-  `unavailable` series beside it.
+```
+[key][data_offset: unsigned vint][promoted_index_len: unsigned vint][promoted_index]
+```
 
-**Alternatives considered.**
+— position and promoted-index length, no size field
+(`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, "Index.db Entry
+Format"; written by `BigTableWriter.createRowIndexEntry` at tag `cassandra-5.0.8`).
+The BTI `Partitions.db` trie resolves an offset only. Had the original D6 shipped, the
+`size_source` attribute would have had exactly ONE reachable value, the byte counter
+would have been permanently zero, and the decision procedure would have refused every
+real window on refusal condition 1 — i.e. the "measured working-set bytes" half of D1
+would have shipped dead, leaving the decode multiplier as one of TWO unknowns again.
 
-- *Estimate BTI partition size from the successor offset.* This is the technique the doc comment at
-  `global_key_offset.rs:72-74` alludes to ("bounded later via the successor offset"). **Rejected for
-  this change**: it requires a second trie descent per access on the hot path, it is an *estimate*
-  (the successor gap includes any inter-partition framing), and shipping an estimate that looks like
-  a measurement is exactly the failure mode this whole change exists to avoid. Naming it as a
-  possible future improvement is honest; shipping it silently is not.
-- *Skip BTI accesses entirely.* **Rejected**: it would make the histogram itself wrong (BTI reads are
-  real accesses), not merely the byte total.
-- *Fall back to `0` bytes with no marker.* **Rejected**: this is the silent under-report the AC
-  explicitly forbids, and it biases the working set **down**, i.e. toward "the cache fits, go".
+**Decision.** Each logical access carries a byte weight that is **MEASURED** as the
+partition's on-disk extent:
+
+- **The successor gap**, `[data_offset, successor_offset)`, summed across the SSTables
+  resolved for that access. This is authoritative index-LAYOUT metadata, not an
+  estimate: it is the same bound the single-partition seek path already uses to size
+  its decompression window, resolved per format by one strict-ceiling trie walk (BTI)
+  or the minimum `Index.db` offset strictly greater than the target (BIG).
+- **The last partition** in an SSTable has no successor, and bounds instead to the
+  authoritative UNCOMPRESSED data-section length: `CompressionInfo.db`'s `data_length`
+  when compressed, else the `Data.db` file length (for an uncompressed SSTable the file
+  IS the data section).
+- The window entry stores `bytes = max(bytes, this_access_bytes)`, not a sum — the
+  working set is defined over **distinct** partitions, so ten accesses to one partition
+  contribute its size once. `max` is exact because partition extents are immutable
+  within a generation set, and it is robust to an access that resolved fewer
+  generations than another.
+
+**Provenance is a distinct, truthful label (rider R1).** `cqlite.read.size_source` is a
+closed set of **three** values, not two:
+
+| value | meaning |
+|---|---|
+| `index` | every resolved SSTable reported a size directly in its index metadata. Unreachable for Cassandra-written SSTables; retained so a producer that genuinely knows a size is never forced to report a measured one. |
+| `successor_gap` | the extent was MEASURED as above. |
+| `unavailable` | at least one resolved SSTable yielded no authoritative extent. Counted as a partition, contributes **ZERO** bytes. |
+
+A reader must always be able to distinguish measured-from-gap from
+index-supplied and from genuinely-unknown, so the provenance is its own label rather
+than being folded into `index`. Where an access mixes provenances the **weakest** wins
+(`successor_gap` over `index`, `unavailable` over both): a total is only as
+well-founded as its weakest component.
+
+**What still fails closed.** `unavailable` is set when the extent is genuinely
+unknowable — no index available, no data-section length, a fail-safe whole-file scan
+that resolves no per-partition layout, or a resolution error. Such an entry contributes
+zero bytes, is counted under
+`distinct_partitions{size_source="unavailable"}`, and makes the byte total's
+incompleteness visible **as a ratio**. The decision procedure refuses any window with a
+non-zero `unavailable` fraction. That condition tests **incompleteness, not
+provenance**: a fully gap-measured window is complete and is priced, which is the whole
+point of this amendment. A size is still never estimated, interpolated by
+proportion, or defaulted to a nominal value (no-heuristics, #28).
+
+**Two honest costs, recorded rather than buried (rider R3).**
+
+1. **The last partition's extent is bounded by the data-section length, not by a
+   successor.** It is authoritative, but it is a different measurement from the others:
+   it includes any trailing data-section bytes after that partition. One partition per
+   SSTable per window is affected. The alternative — reporting the last partition
+   `unavailable` — would refuse every window containing it, which is strictly worse.
+2. **These are UNCOMPRESSED offsets, so the extent is an uncompressed on-disk size.**
+   That is the *correct* input for the decision procedure, whose decode multiplier `m`
+   converts on-disk bytes to decoded bytes; applying `m` to a compressed size would
+   compound two ratios. It also means a compressed table's measured bytes exceed its
+   file bytes, which is a property of the measurement, not an error — and the
+   production write surface is uncompressed-only anyway (#1406).
+
+**Placement is unchanged (verified, not assumed).** The extent is resolved through
+reader-level APIs at the **logical** point-read boundary, exactly where the byte
+weights were always going to come from — D2 says the per-SSTable sites "report byte
+sizes into the open access, but do **not** count accesses". Counting stays once per
+logical read; nothing moved to a per-SSTable site.
+
+**Alternative still rejected.** *Skip unpriceable accesses entirely.* This would make
+the histogram itself wrong (they are real accesses), not merely the byte total.
 
 ### D7 — The decision procedure is a committed document, and it refuses more often than it answers
 
@@ -463,5 +522,7 @@ or renamed on any existing metric, so no dashboard or alert changes behaviour.
   `tools/flight-loadgen/README.md:68-71`.
 - **F2 — automated cross-language Murmur3 parity test** (D9).
 - **F3 — measure the decode multiplier `m`**, removing the last assumption from D7's procedure.
-- **F4 — BTI partition size via successor offset**, replacing D6's `unavailable` with a real
-  measurement, if and only if it can be made exact rather than estimated.
+- ~~**F4 — BTI partition size via successor offset**~~ — **DELIVERED in this change** by the
+  amended D6 (owner ruling, 2026-08-06), for BOTH formats rather than BTI alone, because the
+  premise that BIG had a size was false. It is exact, not an estimate: the successor offset is the
+  partition's exclusive end in the index's own layout.

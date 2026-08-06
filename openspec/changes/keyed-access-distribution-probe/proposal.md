@@ -106,8 +106,9 @@ Verified by search across the workspace:
 1. **A fixed-cardinality partition repeat-access histogram on the read path.** Four new catalog
    metrics under `cqlite.read.partition_access.*`, carrying a new bounded attribute
    `cqlite.read.repeat_bucket` over exactly the owner's six buckets `1 | 2 | 3-4 | 5-8 | 9-16 | 17+`
-   and a new bounded `cqlite.read.size_source` ∈ `index | unavailable`. **No per-key attribute**, ever —
-   `docs/observability/configuration.md:304-305` is the binding constraint, and 6 × 2 = 12 series per
+   and a new bounded `cqlite.read.size_source` ∈ `index | successor_gap | unavailable` (three values,
+   amended — see item 3). **No per-key attribute**, ever —
+   `docs/observability/configuration.md:304-305` is the binding constraint, and 6 × 3 = 18 series per
    counter is the whole cardinality budget. Composition with the existing bounded attributes is
    spelled out in `design.md` D3 (the instrument deliberately does **not** carry
    `cqlite.sstable.format`, because it counts *logical* partition accesses, not per-SSTable probes).
@@ -125,16 +126,25 @@ Verified by search across the workspace:
    (`cqlite-core/src/observability/mod.rs:49-54`).
 
 3. **Byte weighting, so the working set is measured rather than assumed.** Distinct-partition on-disk
-   bytes accumulate per bucket from `PartitionLoc.data_size`
-   (`cqlite-core/src/storage/cache/global_key_offset.rs:76-81`). This turns the working-set question
-   from two unknowns (skew × size) into one (the decode multiplier).
-   **BTI fails closed, it does not under-report:** BTI trie resolution stores `data_size = 0`
-   (`global_key_offset.rs:72-74`, `:94-100`; the BTI lookup returns an offset with no size at
-   `partition_lookup.rs:433` (`Ok(Some(header.data_position))`, no size)), so a BTI-resolved access is recorded as
-   `size_source=unavailable` and contributes **zero** bytes while still being counted as a
-   partition — making the byte total's incompleteness *visible as a ratio* rather than silently
-   absorbed. The decision procedure REFUSES to emit a go/no-go from a window with a non-zero
-   `unavailable` fraction.
+   bytes accumulate per bucket from each partition's **MEASURED extent**: the successor gap
+   `[data_offset, successor_offset)`, bounding to the authoritative uncompressed data-section length
+   for the last partition. This turns the working-set question from two unknowns (skew × size) into
+   one (the decode multiplier).
+   **Amended 2026-08-06 by owner ruling** (scope-preserving mechanism fix): the original plan took the
+   weight from `PartitionLoc.data_size` on the premise that BIG's `Index.db` recorded a partition
+   size. It does not — a BIG index entry is
+   `[key][data_offset vint][promoted_index_len vint][promoted_index]`
+   (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, "Index.db Entry Format";
+   written by `BigTableWriter.createRowIndexEntry` at tag `cassandra-5.0.8`), and the BTI trie
+   resolves an offset only. The successor gap is authoritative index-LAYOUT metadata — the same bound
+   the single-partition seek already uses to size its decompression window — reported under a distinct
+   `size_source=successor_gap` so a measured extent is never mistaken for an index-supplied one.
+   **An UNKNOWN extent still fails closed, it does not under-report:** such an access is recorded
+   `size_source=unavailable` and contributes **zero** bytes while still being counted as a partition —
+   making the byte total's incompleteness *visible as a ratio* rather than silently absorbed. The
+   decision procedure REFUSES to emit a go/no-go from a window with a non-zero `unavailable`
+   fraction; that condition tests incompleteness, not provenance, so a fully measured window is
+   priced.
 
 4. **Validation against a KNOWN input distribution.** An in-repo test drives a controlled access
    sequence (a uniform one and a skewed one) through the instrumented surface and asserts the
@@ -216,7 +226,8 @@ Verified by search across the workspace:
   mechanically keeps them agreeing.
 - **F3 — measure the decode multiplier** (unfiled). Replace the Phase-0 ~3.5× wire estimate with a measured
   decoded-bytes-per-on-disk-byte ratio on real fixtures, removing the last assumption from the
-  decision procedure.
+  decision procedure. Note the measured on-disk side is now UNCOMPRESSED bytes (amended D6), which is
+  the correct denominator for such a ratio.
 
 ## Impact
 

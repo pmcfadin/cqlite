@@ -27,7 +27,7 @@ re-scoping a GitHub issue is an **owner action**; the worker does not take it un
 | AC | Verdict | Requirement(s) |
 |----|---------|----------------|
 | 1 — reports the **hot-set concentration (skew/Zipf)** for the field keyed workload at A2-scale qps | **PARTIAL — the instrument that reports it is delivered; the field number is NOT.** The concentration shape is delivered as a bounded bucket histogram (the owner's replacement for a Zipf parameter, `design.md` D3); it reports whatever workload runs with the probe enabled. No field workload exists to run it against, so no field number ships. NOT waived. | ADDED *A bounded partition repeat-access histogram reports the access-concentration shape without per-key attributes*; *Repeat counting uses fixed memory independent of partition count*; *The measurement window is tumbling, closes deterministically, and emits exactly once*; *The instrument is wired into the logical point-read boundary and is zero-cost when disabled*; *The instrument's recovery of a known input distribution is verified* |
-| 2 — **decides** whether a 64–128 MiB decoded-partition cache clears a useful hit ratio (the go/no-go for the K-A build) | **NOT SATISFIED by this change.** Not waived, not deferred to another issue: **satisfiable on the first real keyed workload run with the probe enabled**, because the procedure that turns a closed window into the verdict ships here. The blocker is the absence of a field workload, not the absence of analysis. | ADDED *Distinct-partition working-set bytes are measured, and an unavailable size fails closed*; *A committed decision procedure converts a closed window into a go/no-go, and refuses when it cannot* — these deliver the **procedure**, not the verdict |
+| 2 — **decides** whether a 64–128 MiB decoded-partition cache clears a useful hit ratio (the go/no-go for the K-A build) | **NOT SATISFIED by this change.** Not waived, not deferred to another issue: **satisfiable on the first real keyed workload run with the probe enabled**, because the procedure that turns a closed window into the verdict ships here. The blocker is the absence of a field workload, not the absence of analysis. | ADDED *Distinct-partition working-set bytes are MEASURED, and an unknown extent fails closed*; *A committed decision procedure converts a closed window into a go/no-go, and refuses when it cannot* — these deliver the **procedure**, not the verdict |
 | 3 — standalone, **decoupled from #2037** (the measurement proceeds without the owner-gated cache build) | **SATISFIED.** No cache is built, sized, wired or benchmarked; nothing in this change references or depends on #2037's surface. | All requirements below (the property is negative — evidenced by the absence of a cache dependency, pinned by the scope scenario in *The change records what it does not deliver*) |
 
 ## ADDED Requirements
@@ -48,7 +48,11 @@ The instrument SHALL emit the following catalog metrics, and no others under thi
 | `cqlite.read.partition_access.sample_denominator` | gauge | `1` | (none) |
 
 `cqlite.read.repeat_bucket` SHALL be a closed set of exactly the six bucket labels above.
-`cqlite.read.size_source` SHALL be a closed set of exactly `index` and `unavailable`.
+`cqlite.read.size_source` SHALL be a closed set of exactly `index`, `successor_gap` and
+`unavailable` (amended 2026-08-06 by owner ruling; see `design.md` D6 and rider R1). A consumer SHALL
+be able to distinguish an extent MEASURED as the partition's successor gap from one an index reported
+directly, and both from a genuinely unknown one — so the provenance is its own label, never folded
+into `index`.
 
 No partition key, key hash, key prefix, key length, token, or any other per-key-derived value SHALL be
 attached as an attribute or span field on any of these metrics, in any build configuration. This is
@@ -66,15 +70,15 @@ keys); `cqlite-flight/tests/issue_2827_partition_access_e2e.rs` (emitted-series 
 #### Scenario: Access counts land in the correct bucket at every boundary
 - **GIVEN** the probe is enabled and a window is open
 - **WHEN** eight distinct partitions are accessed exactly 1, 2, 3, 4, 8, 9, 16 and 17 times respectively and the window is closed
-- **THEN** `cqlite.read.partition_access.distinct_partitions` reports exactly one partition in each of `1`, `2`, `9-16` and `17+`, and exactly two partitions in each of `3-4` and `5-8`
-- **AND** `cqlite.read.partition_access.accesses` for each bucket equals the sum of the access counts of the partitions in it (so `3-4` reports 7 and `17+` reports 17)
+- **THEN** `cqlite.read.partition_access.distinct_partitions` reports exactly one partition in each of `1`, `2`, `5-8` and `17+`, and exactly two partitions in each of `3-4` and `9-16` — counts `3` and `4` fall in `3-4`, count `8` alone falls in `5-8`, and counts `9` and `16` both fall in `9-16` (corrected 2026-08-06: the original text transposed the `5-8` and `9-16` figures, contradicting its own accesses arithmetic below)
+- **AND** `cqlite.read.partition_access.accesses` for each bucket equals the sum of the access counts of the partitions in it (so `1` reports 1, `2` reports 2, `3-4` reports 3+4=7, `5-8` reports 8, `9-16` reports 9+16=25 and `17+` reports 17)
 
 #### Scenario: No emitted attribute is derived from a partition key
 - **GIVEN** a closed window over accesses to partitions with distinct, long, high-entropy keys
 - **WHEN** the emitted series are read back through the observability capture harness
 - **THEN** the only attribute keys present on any `cqlite.read.partition_access.*` series are `cqlite.read.repeat_bucket` and `cqlite.read.size_source`
-- **AND** every observed `cqlite.read.repeat_bucket` value is one of the six declared labels and every `cqlite.read.size_source` value is `index` or `unavailable`
-- **AND** the total number of distinct series across the four metrics does not exceed 25, regardless of how many distinct partitions were accessed
+- **AND** every observed `cqlite.read.repeat_bucket` value is one of the six declared labels and every `cqlite.read.size_source` value is `index`, `successor_gap` or `unavailable`
+- **AND** the total number of distinct series across the four metrics does not exceed 31 (`6 x 3 + 6 + 6 + 1`), regardless of how many distinct partitions were accessed
 
 ### Requirement: Repeat counting uses fixed memory independent of partition count
 
@@ -157,52 +161,76 @@ reset-on-close, empty-window-silence).
 - **WHEN** `close_window()` is called
 - **THEN** no `cqlite.read.partition_access.*` series is emitted at all
 
-### Requirement: Distinct-partition working-set bytes are measured, and an unavailable size fails closed
+### Requirement: Distinct-partition working-set bytes are MEASURED, and an unknown extent fails closed
 
-Each recorded access SHALL carry the **on-disk** byte weight the read path already resolved — the sum
-of `PartitionLoc.data_size` (`cqlite-core/src/storage/cache/global_key_offset.rs:76-81`) across the
-SSTables resolved for that access. A window entry SHALL retain the **maximum** weight observed for
-that partition, never a running sum, because the working set is defined over **distinct** partitions:
-ten accesses to one partition contribute its bytes once.
+> **AMENDED 2026-08-06 by owner ruling** (scope-preserving mechanism fix under the existing Seam-1
+> approval). The original text required the weight to come from `PartitionLoc.data_size`, asserting
+> BIG resolved it. **No Cassandra 5.0 index format records a per-partition size**: a BIG index entry is
+> `[key][data_offset vint][promoted_index_len vint][promoted_index]`
+> (`docs/sstables-definitive-guide/chapters/06-index-and-summary.md`, "Index.db Entry Format"; written
+> by `BigTableWriter.createRowIndexEntry` at tag `cassandra-5.0.8`) and the BTI `Partitions.db` trie
+> resolves an offset only. See `design.md` D6.
+
+Each recorded access SHALL carry the partition's **on-disk extent, MEASURED** as the successor gap
+`[data_offset, successor_offset)`, summed across the SSTables resolved for that access. This is
+authoritative index-LAYOUT metadata — the same bound the single-partition seek path already uses to
+size its decompression window — not an estimate. The LAST partition of an SSTable, which has no
+successor, SHALL bound instead to the authoritative UNCOMPRESSED data-section length
+(`CompressionInfo.db`'s `data_length` when compressed, else the `Data.db` file length).
+
+A window entry SHALL retain the **maximum** weight observed for that partition, never a running sum,
+because the working set is defined over **distinct** partitions: ten accesses to one partition
+contribute its bytes once.
 
 `cqlite.read.partition_access.bytes` per bucket SHALL therefore be the sum of distinct-partition
 on-disk bytes in that bucket. This is the measurement that reduces the working-set question from two
-unknowns (concentration × size) to one (the decode multiplier).
+unknowns (concentration x size) to one (the decode multiplier).
 
-**BTI SHALL fail closed and SHALL NOT silently under-report.** BTI trie resolution resolves an offset
-with no size and stores `data_size = 0` (`global_key_offset.rs:72-74`, `:94-100`; the BTI point lookup
-returns a bare offset at `cqlite-core/src/storage/sstable/reader/partition_lookup.rs:433`). An access
-for which **any** resolved SSTable reported no size SHALL:
+Measured bytes SHALL be reported under the distinct `size_source = successor_gap`, never as `index`.
+Where an access mixes provenances the **weakest** SHALL be reported.
+
+**An UNKNOWN extent SHALL fail closed and SHALL NOT silently under-report.** An access for which
+**any** resolved SSTable yielded no authoritative extent — no index available, no data-section length,
+a fail-safe whole-file scan that resolves no per-partition layout, or a resolution error — SHALL:
 
 - set a sticky `size_source = unavailable` flag on that window entry,
 - contribute **zero** bytes to `cqlite.read.partition_access.bytes`, and
 - be counted under `cqlite.read.partition_access.distinct_partitions{size_source="unavailable"}`.
 
-A size SHALL NOT be estimated, inferred, interpolated from a successor offset, or defaulted to a
-nominal value. The `unavailable` fraction SHALL be readable from the emitted series alone, and the
-decision procedure SHALL refuse any window whose `unavailable` fraction is non-zero.
+A size SHALL NOT be estimated, interpolated by proportion, or defaulted to a nominal value. The
+`unavailable` fraction SHALL be readable from the emitted series alone, and the decision procedure
+SHALL refuse any window whose `unavailable` fraction is non-zero. That condition tests
+**incompleteness, not provenance**: a fully gap-measured window is complete and SHALL be priced.
 
-**Evidence:** `cqlite-core/tests/issue_2827_partition_access_bytes.rs` (max-not-sum semantics; the
-BTI-unavailable path against a real `test_da` BTI fixture, skip-clean when the corpus is absent but
-fail-closed when present).
+**Evidence:** `cqlite-core/tests/issue_2827_partition_access_bytes.rs` (max-not-sum semantics;
+weakest-provenance mixing; a gap-measured census window is priced rather than refused; and both a
+real BIG (`nb`) and a real BTI (`da`) committed fixture priced end-to-end from their measured gaps,
+per-case fail-closed on fixture resolution (#3220)).
 
 #### Scenario: Repeated accesses to one partition count its bytes once
-- **GIVEN** a partition of known on-disk size accessed ten times in one window
+- **GIVEN** a partition of known on-disk extent accessed ten times in one window
 - **WHEN** the window closes
 - **THEN** it appears once in `distinct_partitions` under the `9-16` bucket
-- **AND** `cqlite.read.partition_access.bytes` for that bucket increases by that partition's size exactly once, not ten times
+- **AND** `cqlite.read.partition_access.bytes` for that bucket increases by that partition's extent exactly once, not ten times
 
-#### Scenario: A BTI-resolved access is marked unavailable and contributes no bytes
-- **GIVEN** a BTI (`da`) fixture whose point lookup resolves an offset with no size
-- **WHEN** that partition is accessed and the window closes
+#### Scenario: A partition's extent is measured from its successor and labelled as measured
+- **GIVEN** a Cassandra-written fixture of either format, whose index records no partition size
+- **WHEN** a partition is read and the window closes
+- **THEN** it is counted under `distinct_partitions{size_source="successor_gap"}`, never `{size_source="index"}`
+- **AND** `cqlite.read.partition_access.bytes` for its bucket is non-zero
+- **AND** the window's `unavailable` fraction is zero, so the decision procedure prices it rather than refusing it
+
+#### Scenario: An unmeasurable extent is marked unavailable and contributes no bytes
+- **GIVEN** an access for which no authoritative extent can be resolved
+- **WHEN** the window closes
 - **THEN** it is counted under `distinct_partitions{size_source="unavailable"}`
 - **AND** it contributes zero to `cqlite.read.partition_access.bytes`
 - **AND** no non-zero size is recorded for it from any source
 
 #### Scenario: A mixed window makes its incompleteness visible
-- **GIVEN** a window containing both BIG-resolved (sized) and BTI-resolved (unsized) partition accesses
+- **GIVEN** a window containing both extent-measured and unmeasurable partition accesses
 - **WHEN** the window closes
-- **THEN** both `size_source="index"` and `size_source="unavailable"` series are present with non-zero values
+- **THEN** both `size_source="successor_gap"` and `size_source="unavailable"` series are present with non-zero values
 - **AND** the decision procedure applied to that window returns a refusal naming the non-zero `unavailable` fraction, rather than a hit-ratio number computed from the partial byte total
 
 ### Requirement: The instrument is wired into the logical point-read boundary and is zero-cost when disabled
