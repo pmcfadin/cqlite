@@ -292,6 +292,18 @@ EXEMPTIONS: dict[str, str] = {
         " that the boundary verifier was unwired",
     "scripts/perf/README.md": "documentation",
     "scripts/perf/ws0_report.py": "the reporter; prose reference only",
+    # Round 22's F1 module — the boundary record READ BACK — and the census reported it UNCOVERED
+    # the moment it became tracked, the ELEVENTH time this oracle has caught a split/addition. It
+    # was found by RUNNING this suite while building the observing cases for that very module's
+    # checker (#3272 round 25): F1 landed the module and the exemption record was never updated, so
+    # `test_ws0_hermeticity.sh` was red on the branch. Same class as its python siblings: imported
+    # by `ws0_report.py`, never invokes anything, and its single `ws0-baseline.sh` mention is prose
+    # — the absent-record refusal that tells an operator to re-run the session with the driver,
+    # which is the one thing that can write the observations it requires.
+    "scripts/perf/ws0_boundary_observations.py":
+        "the boundary-record COMPLETENESS reader; prose reference only (its absent-record refusal"
+        " tells an operator to re-run the session with the driver, which is what appends the"
+        " observations)",
     "scripts/perf/ws0_rounds.py": "the reporter; prose reference only",
     "scripts/perf/ws0_collect.py": "the reporter; prose reference only",
     # `ws0_validate.py` is deliberately ABSENT: #3272 round 5 moved its driver-mentioning
