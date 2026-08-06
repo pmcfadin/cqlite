@@ -212,12 +212,36 @@ def measure_component_digests(corpus: pathlib.Path, identity: dict) -> dict:
                 " the corpus this identity was recorded from."
             )
         measured[name] = {"bytes": disk_bytes, "sha256": disk_sha}
+    # The Data.db must be one of the recorded components, checked BEFORE it is subscripted below —
+    # an unrecorded Data.db is a sidecar describing a different corpus, and diagnosing it as a
+    # KeyError would blame the wrong artifact.
     if data_db.name not in measured:
         raise Invalid(
             f"{data_db.name} is the *-Data.db that would be measured, but the recorded identity's"
             f" `components` map does not describe it (it names {', '.join(sorted(measured))})."
             " The pin's Data.db digest is MEASURED from this file, so an unrecorded Data.db means"
             " the sidecar describes a different corpus."
+        )
+    # ...and the sidecar's TOP-LEVEL `data_db_bytes`/`data_db_sha256`, which is a SECOND recorded
+    # copy of the same fact and can disagree with both the `components` map and disk. Compared HERE,
+    # at pin time, and that placement is the substance: `verify_corpus_bytes` catches a stale
+    # top-level digest at report time ONLY when digests are not skipped, so under
+    # `--skip-corpus-digest` this was the one recorded identity nothing ever hashed. The pin's own
+    # hash is on the SETUP path — once per session, not once per rep — so no flag scopes it away.
+    top_sha = identity.get("data_db_sha256")
+    top_bytes = identity.get("data_db_bytes")
+    if top_sha != measured[data_db.name]["sha256"] or top_bytes != measured[data_db.name]["bytes"]:
+        raise Invalid(
+            f"{corpus / 'corpus-identity.json'} records data_db_bytes {top_bytes!r} /"
+            f" data_db_sha256 {top_sha!r}, but {data_db.name} is"
+            f" {measured[data_db.name]['bytes']:,} bytes hashing to"
+            f" {measured[data_db.name]['sha256']}. The sidecar's top-level identity is a SECOND"
+            " recorded copy of the same fact and it does not describe the bytes on disk, so a pin"
+            " taken from it would name a corpus that is not there. Refused at PIN time, before the"
+            " first rep: the report-time check only re-derives this digest when"
+            " --skip-corpus-digest is absent, so under that flag this was the one recorded identity"
+            " nothing ever hashed (#3272 round 21). Regenerate the corpus, or measure the corpus"
+            " this identity was recorded from."
         )
     return {
         "data_db": data_db.name,
