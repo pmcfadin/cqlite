@@ -112,6 +112,16 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    // Pin the PROCESS-GLOBAL window open (B7). Its default is 60 s and
+    // `close_if_triggered` consults `Instant::elapsed()` on every recorded access,
+    // so on a contended gate a >60 s gap between these `do_get` calls would
+    // auto-close the window mid-flow and the assertions would evaporate. Every
+    // close here is explicit; nothing depends on elapsed time.
+    partition_access::global().set_window_config(partition_access::WindowConfig {
+        duration: std::time::Duration::from_secs(86_400),
+        max_accesses: u64::MAX,
+        ..partition_access::WindowConfig::default()
+    });
     // Discard anything a sibling left open, then start clean.
     let _ = partition_access::close_window();
     partition_access::set_probe_enabled(Some(true));

@@ -332,6 +332,90 @@ fn the_committed_notes_worked_example_matches_the_shipped_evaluator() {
     );
 }
 
+#[test]
+fn reaching_the_prefix_cap_marks_the_window_non_census_even_when_it_fits_afterwards() {
+    // The B1 boundary the sibling floor test cannot see. That one drives 400k keys
+    // against `max_prefix_bits: 1`, so the table is STILL over its load factor when
+    // the widen loop gives up — both arms of the old `prefix_bits >= cap &&
+    // occupancy >= limit` condition hold and the flag is set for the wrong reason.
+    //
+    // Here the key count is chosen so the last permitted widen brings occupancy
+    // BELOW the load factor: the window ends at the cap with a comfortable table.
+    // Under the old condition it reported `at_sampling_floor = false` beside
+    // `sample_denominator = 2^cap`, and `decision::evaluate` then PRICED a
+    // 1-in-2^cap sample. The floor is a property of the scale reached, full stop.
+    let r = PartitionAccessRecorder::new(WindowConfig {
+        duration: Duration::from_secs(86_400),
+        max_accesses: u64::MAX,
+        max_prefix_bits: 2,
+    });
+    // 250k distinct keys against a cap of 2. The admitted share halves per widen:
+    // k=1 leaves ~125k, still over the 98,304 load factor, so the recorder widens
+    // again and REACHES the cap; k=2 leaves ~62.5k, comfortably under it. That is
+    // exactly the state the old condition mis-classified as a census.
+    for i in 0..250_000u64 {
+        r.record(
+            &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
+            AccessWeight::SuccessorGap(64),
+        );
+    }
+    let s = r.close_window().expect("accesses were recorded");
+    assert_eq!(s.sample_denominator, 4, "the prefix reached its cap of 2");
+    assert!(
+        s.distinct_partitions() < 98_304,
+        "the table must have ended UNDER its load factor — otherwise this test is \
+         re-testing the sibling case, not the boundary ({} entries)",
+        s.distinct_partitions()
+    );
+    assert!(
+        s.at_sampling_floor,
+        "a window that reached the prefix cap is non-census whatever its final \
+         occupancy"
+    );
+    assert!(
+        decision::evaluate(
+            &s,
+            decision::WindowSource::Field,
+            128 * 1024 * 1024,
+            decision::ASSUMED_DECODE_MULTIPLIER,
+        )
+        .is_refusal(),
+        "a capped sample must never be priced"
+    );
+}
+
+#[test]
+fn accesses_dropped_at_the_sampling_floor_are_reported_not_lost() {
+    // B8: an access the table could not seat is INPUT LOST, distinct from a key the
+    // sampling predicate declined to admit (which is the sample working as designed).
+    // A measurement instrument must never lose input silently.
+    let r = PartitionAccessRecorder::new(WindowConfig {
+        duration: Duration::from_secs(86_400),
+        max_accesses: u64::MAX,
+        max_prefix_bits: 0,
+    });
+    // With no widening permitted the table saturates and further keys cannot be
+    // seated at all.
+    for i in 0..400_000u64 {
+        r.record(
+            &i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes(),
+            AccessWeight::SuccessorGap(64),
+        );
+    }
+    let s = r.close_window().expect("accesses were recorded");
+    assert_eq!(s.recorded_accesses, 400_000);
+    assert!(
+        s.dropped_accesses > 0,
+        "a saturated table at the prefix cap must REPORT the accesses it could not \
+         seat, not absorb them"
+    );
+    assert!(
+        s.dropped_accesses <= s.recorded_accesses,
+        "a drop is a subset of what was offered"
+    );
+    assert!(s.at_sampling_floor);
+}
+
 // ---------------------------------------------------------------------------
 // End-to-end: real committed fixtures through the real read path.
 // ---------------------------------------------------------------------------
@@ -349,6 +433,7 @@ mod end_to_end {
     use cqlite_core::observability::partition_access::{self, RepeatBucket, WindowSummary};
     use cqlite_core::{Config, Database};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
     use tokio::sync::Mutex;
 
     use super::datasets_root;
@@ -421,6 +506,16 @@ mod end_to_end {
         let db = open_db(&root, &schema_path, keyspace).await;
         let sql = format!("SELECT * FROM {keyspace}.{table} WHERE {pk_column} = {pk_value}");
 
+        // Pin the PROCESS-GLOBAL window open (B7). Its default is 60 s, and
+        // `close_if_triggered` consults `Instant::elapsed()` on every record — so on
+        // a contended gate a >60 s gap between these reads would auto-close the
+        // window mid-flow and the assertions below would evaporate. Every close in
+        // this file is explicit; none depends on elapsed time.
+        partition_access::global().set_window_config(partition_access::WindowConfig {
+            duration: Duration::from_secs(86_400),
+            max_accesses: u64::MAX,
+            ..partition_access::WindowConfig::default()
+        });
         // Start from a clean window: close (and discard) anything a sibling left.
         let _ = partition_access::close_window();
         partition_access::set_probe_enabled(Some(true));

@@ -347,6 +347,84 @@ fn recorded_accesses_counts_every_access_including_unadmitted_keys() {
     );
 }
 
+/// The corrected documentation of `cqlite.read.partition_lookup.total` matches what
+/// the code emits (issue #2827's bundled correction).
+///
+/// This change's central factual claim is about that counter's attribute set, and
+/// the tree stated it three ways: `docs/observability/configuration.md` and the
+/// `otel.rs` instrument description both said `cqlite.query.access_path`, while the
+/// catalog doc and every emission site attach `cqlite.read.lookup_route`. The code
+/// is authoritative and the docs were corrected to match — so this asserts the
+/// corrected fact at its source, against the constants the emission sites use,
+/// rather than leaving the correction unpinned.
+#[test]
+fn the_corrected_partition_lookup_attribute_documentation_matches_the_code() {
+    use cqlite_core::observability::catalog;
+
+    // The emission sites are the authority for the attribute SET. Assert against
+    // the module source so this holds with or without an OTel exporter installed,
+    // and so a future site that attaches `access_path` to this counter fails here.
+    let sites = include_str!("../src/storage/sstable/reader/partition_lookup.rs");
+    let summary_site = include_str!("../src/storage/sstable/reader/summary_point.rs");
+    for src in [sites, summary_site] {
+        for chunk in src.split("catalog::READ_PARTITION_LOOKUP,").skip(1) {
+            // The attribute list follows immediately; bound the scan to it.
+            let attrs = chunk.split(");").next().unwrap_or("");
+            assert!(
+                attrs.contains("attr::RESULT")
+                    && attrs.contains("attr::LOOKUP_ROUTE")
+                    && attrs.contains("attr::SSTABLE_FORMAT"),
+                "every cqlite.read.partition_lookup.total emission must carry exactly \
+                 {{result, lookup_route, sstable_format}}; saw: {attrs}"
+            );
+            assert!(
+                !attrs.contains("attr::ACCESS_PATH"),
+                "cqlite.read.partition_lookup.total must NOT carry \
+                 cqlite.query.access_path — that was the stale documentation this \
+                 change corrects; saw: {attrs}"
+            );
+        }
+    }
+
+    // And the corrected published row names the same three keys.
+    let published = include_str!("../../docs/observability/configuration.md");
+    let row = published
+        .lines()
+        .find(|l| l.contains("| `cqlite.read.partition_lookup.total` |"))
+        .expect("the published row must exist");
+    assert!(row.contains(catalog::attr::RESULT), "{row}");
+    assert!(row.contains(catalog::attr::LOOKUP_ROUTE), "{row}");
+    assert!(row.contains(catalog::attr::SSTABLE_FORMAT), "{row}");
+    assert!(
+        !row.contains(catalog::attr::ACCESS_PATH),
+        "the published row must no longer claim access_path: {row}"
+    );
+
+    // The documented access_path value set must contain every label the enum can
+    // return — the omission of `streaming_partition_lookup` is the documented source
+    // of the "assert on bare partition_lookup" mistake.
+    // The value-set row, not the metric row that merely CARRIES the attribute: it
+    // is the one whose FIRST column is the attribute key.
+    let value_row = published
+        .lines()
+        .find(|l| l.trim_start().starts_with("| `cqlite.query.access_path` |"))
+        .expect("the access_path value-set row must exist");
+    for label in [
+        "full_scan",
+        "partition_lookup",
+        "multi_partition_lookup",
+        "streaming_partition_lookup",
+        "metadata_partition_lookup",
+        "clustering_slice",
+        "fallback_full_scan",
+    ] {
+        assert!(
+            value_row.contains(label),
+            "the documented access_path value set omits {label}: {value_row}"
+        );
+    }
+}
+
 /// The emitted-series shape, read back through the process-global capture harness.
 ///
 /// One test, deliberately: the production metric helpers bind a single global
