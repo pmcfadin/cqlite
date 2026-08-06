@@ -5816,6 +5816,36 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 BOUNDARY-RECORD COMPLETENESS guards (#3272 round 25), split out of the corpus-boundary
+  # suite above under the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a
+  # test nothing executes, the #1597/#1618 gate-wiring class this rig has already paid for twice.
+  # The split follows the SAME SEAM the shipped code does (round 22 split the boundary question into
+  # a WRITER module and a READER module), so the two suites are one question each.
+  #
+  # Subject: round 22 wired `verify_boundary_observations` into the reporter, and the only thing
+  # that ever fed it was the fixtures' HEALTHY generator — so MISSING, DUPLICATE and UNEXPECTED were
+  # all UNOBSERVED, and a checker returning OK unconditionally would have been indistinguishable
+  # from the shipped one (#3249's `_PERF_STATE="ok"`, which survived 118/118 tests). All five
+  # directions now fire independently over the SHIPPED generator's record MUTATED — accept, missing,
+  # duplicate (with NOTHING missing, so an `observations >= expected` checker would have accepted
+  # it), unexpected, and absent/unparseable. Non-vacuity MEASURED for MISSING: the PRE-FIX reporter,
+  # reconstructed from `ws0_report.py`'s own text minus exactly its four consuming lines, PUBLISHES a
+  # 2.00x ratio over the same short-record session and writes a results.json with no completeness
+  # field while claiming the digest and every component verified. Hermetic: synthetic session dirs
+  # under $TMPDIR through the shipped fixture generator and reporter; no cargo, perf, sudo, corpus,
+  # network or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_boundary_record_completeness.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_boundary_record_completeness.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 boundary-record completeness guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 ERROR-CODE CROSS-CHECK guards (#3272 round 20), split out of the reporter suite under
   # the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a test nothing
   # executes, the #1597/#1618 gate-wiring class this rig has already paid for twice. Subject:
