@@ -34,7 +34,7 @@
 //! `docs/research/decoded-partition-cache-decision.md`.
 
 use cqlite_core::observability::partition_access::{
-    AccessWeight, PartitionAccessRecorder, RepeatBucket, SizeSource, WindowConfig, WindowSummary,
+    AccessWeight, PartitionAccessRecorder, RepeatBucket, WindowConfig, WindowSummary,
 };
 use std::time::Duration;
 
@@ -355,6 +355,7 @@ fn recorded_accesses_counts_every_access_including_unadmitted_keys() {
 #[cfg(feature = "observability-testing")]
 #[test]
 fn emitted_series_carry_only_the_two_declared_bounded_attribute_keys() {
+    use cqlite_core::observability::partition_access::SizeSource;
     use cqlite_core::observability::{catalog, partition_access, testing};
 
     let capture = testing::metrics_capture();
