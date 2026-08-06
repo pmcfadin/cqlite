@@ -1243,6 +1243,128 @@ else
 fi
 
 # ==========================================================================
+# #3272 round 16 — THE ARM IS A REQUEST, NOT AN OBSERVATION
+# ==========================================================================
+# `CQLITE_FLIGHT_MERGE_PATH=bypass` only PREFERS the single-source fast path. cqlite-flight's
+# own `bypass.rs` docs: "`bypass` requests the fast path but NEVER overrides a correctness
+# precondition — a 2-source table under `bypass` still merges", and
+# `bypass_tests.rs::forced_bypass_never_overrides_a_correctness_precondition` pins exactly that
+# (`ForcedMergePath::Bypass` over two sources => `BypassReason::MultipleSources`). A second route
+# exists too: the predicate SELECTS the fast path and `ScanRowSource::open` then returns
+# `Ok(None)`, so `producer_warm.rs` falls through to `KWayMerger::new_from_readers`.
+#
+# The reporter recorded the REQUESTED value under the key `forced_merge_path` and printed the
+# label `flight do_get (bypass)`, so a rep that EXECUTED THE MERGER was published as a bypass
+# measurement. The rig's headline is a bare/flight RATIO PER ARM, so in the limit the two arm
+# rows are the same code twice under different labels — the comparison, not the label.
+#
+# WHY THIS IS A RELABEL AND NOT AN OBSERVATION (the #3272 round 13 route, not round 14's): the
+# server does not report the arm it took. `producer_warm.rs` consumes `bypass_reason(...)` only
+# in `if reason.is_selected()` — never logged, metered, spanned or returned — and the
+# `ScanRowSource::open` fallback records nothing at all. `bypass.rs` points at
+# `cqlite_core::storage::read_path_probe`, but that is three PROCESS-GLOBAL `AtomicU64`s read
+# IN-PROCESS (its docs: "the consumers are integration tests in a DIFFERENT crate") with no RPC,
+# log or metric export; this rig measures a SEPARATE server process over loopback gRPC, so it is
+# unreachable by construction. The only out-of-band surface is `do_action`'s TABLE_STATS_ACTION,
+# whose response carries row/partition/SSTable counts and no arm. Emitting it would mean changing
+# production cqlite-flight, outside this issue's scope — so the claim is withdrawn rather than
+# faked, exactly as measurement-method.md §3b.1 withdrew the interleaving claim.
+#
+# NON-VACUITY, MEASURED rather than asserted: the first case runs a rep whose EXECUTED arm was
+# the merger through a VERBATIM RECONSTRUCTION of the pre-fix block, and measures that it emits
+# `forced_merge_path: bypass` — the false label, on this exact input. The same input then goes
+# through the shipped reporter, which must emit no such claim.
+# --------------------------------------------------------------------------
+d="$TMP/merge-path-requested"; mkdir -p "$d"
+make_scan_rep "$d" warm 1 ok
+make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
+out=$(run_report "$d" "$TMP/corpus" warm); rc=$?
+
+# (a) NON-VACUITY. The pre-fix tail of `collect_flight` reproduced EXACTLY as it stood at
+# 33c0b8583 (`"forced_merge_path": arm`), fed the SAME `arm` the shipped code is given, for a rep
+# whose executed path was the merger. It must produce the false claim; if it does not, the case
+# below is not observing anything.
+if python3 - <<'PY'
+# The pre-fix line, verbatim: the block keyed the REQUESTED arm under a name that reads as the
+# path taken. `arm` is the driver's `--arm` value, which is all the pre-fix code ever had.
+def collect_flight_prefix_tail(arm):
+    return {"arm": f"flight_do_get_{arm}", "temperature": "warm", "forced_merge_path": arm}
+
+# A rep the SERVER served from the k-way merger despite `CQLITE_FLIGHT_MERGE_PATH=bypass` — the
+# `MultipleSources`/`ScanRowSource::open -> None` fallback. Nothing in the artifact set can say
+# so, which is the whole finding: the rig's input is identical either way.
+block = collect_flight_prefix_tail("bypass")
+assert block["forced_merge_path"] == "bypass", block
+assert "executed_merge_path" not in block, block
+assert "requested_merge_path" not in block, block
+PY
+then
+  pass "NON-VACUITY: the PRE-FIX block labels a MERGER-executed rep 'forced_merge_path: bypass'"
+else
+  fail "the pre-fix reconstruction must emit the false forced_merge_path label"
+fi
+
+# (b) the shipped reporter, on the SAME session: the requested value is recorded UNDER A NAME
+# THAT SAYS SO, the executed arm is recorded as NOT OBSERVED, and the old key is GONE — a
+# consumer of `forced_merge_path` must fail to find it rather than keep reading a value whose
+# meaning changed under an unchanged key.
+if [ "$rc" -eq 0 ] && python3 - "$d/results.json" <<'PY'
+import json, sys
+ms = json.load(open(sys.argv[1]))["measurements"]
+fl = [m for m in ms if m["arm"] == "flight_do_get_bypass"]
+assert fl, [m["arm"] for m in ms]
+b = fl[0]
+assert "forced_merge_path" not in b, "the claiming key must be GONE, not shadowed: %r" % (b,)
+assert b["requested_merge_path"] == "bypass", b
+assert b["executed_merge_path"] == "NOT OBSERVED", b
+# The note must NAME the mechanism, not merely hedge: the two fallback routes and the reason the
+# server cannot be asked. A vague caveat is how a reader concludes the arm is probably fine.
+note = b["merge_path_observability"]
+for frag in ("REQUEST, not an observation", "correctness precondition",
+             "ScanRowSource::open", "DOES NOT REPORT THE ARM IT TOOK", "read_path_probe"):
+    assert frag in note, (frag, note)
+PY
+then
+  pass "results.json records the arm as REQUESTED with the executed arm NOT OBSERVED"
+else
+  fail "results.json must relabel the arm as requested (rc=$rc, out: $out)"
+fi
+
+# (c) THE PRINTED SUMMARY must not out-claim results.json. It used to print `flight do_get
+# (bypass)`, which reads as the path served; and a relabel that fixed only the JSON would leave
+# the human-read artifact making the withdrawn claim.
+if [ "$rc" -eq 0 ] \
+   && grep -q 'flight do_get (bypass requested)' <<<"$out" \
+   && grep -q 'the ARM of each flight row above is the value this rig REQUESTED' <<<"$out" \
+   && grep -q 'arm actually EXECUTED is NOT OBSERVED' <<<"$out"; then
+  pass "the printed summary labels the arm REQUESTED and states the executed arm is NOT OBSERVED"
+else
+  fail "the summary must not print a bare arm label (rc=$rc, out: $out)"
+fi
+
+# (d) ...and the summary must say WHAT IS THEREFORE UNVERIFIED — the per-arm RATIO. Stating the
+# arm is unobserved while leaving the ratio reading as an arm-to-arm comparison would be the
+# caveat without its consequence, which is how §3b.1's earlier wording under-stated its own.
+if [ "$rc" -eq 0 ] \
+   && grep -q 'conditional on a request the server was free to decline' <<<"$out" \
+   && grep -q 'same code measured twice' <<<"$out"; then
+  pass "the summary states the per-arm ratio is conditional on an UNOBSERVED arm"
+else
+  fail "the summary must state the ratio consequence, not just the arm caveat (out: $out)"
+fi
+
+# (e) THE TWO SIDES CANNOT DISAGREE. The printed label is read from the block's own
+# `requested_merge_path`, so a future rename on one side raises rather than printing a label the
+# JSON does not support. Asserted structurally, because a behavioural case can only cover the
+# spelling that exists today.
+if grep -q "fmt(f\"flight do_get ({fl\['requested_merge_path'\]} requested)\", fl)" \
+     "$REPO_ROOT/scripts/perf/ws0_report.py"; then
+  pass "the printed arm label is derived FROM the recorded block, not from the loop variable"
+else
+  fail "the summary's arm label must read the block's requested_merge_path (structural)"
+fi
+
+# ==========================================================================
 # #3272 finding 3 — the host sysctls: see test_ws0_host_state_guards.sh
 # ==========================================================================
 # The sysctl capture/mutate/restore cases moved to
@@ -1264,7 +1386,7 @@ fi
 # The floor is deliberately BELOW the current count (adding a case must not red the suite)
 # and far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts
 # what actually RAN rather than what is written in the file.
-MIN_CHECKS=99
+MIN_CHECKS=104
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

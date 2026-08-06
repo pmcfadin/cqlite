@@ -43,6 +43,71 @@ from ws0_validate import (
 )
 
 
+# WHY THIS ARM'S PATH IS A *REQUEST* AND NOT AN OBSERVATION (#3272 round 16).
+#
+# `CQLITE_FLIGHT_MERGE_PATH=bypass` only PREFERS the single-source fast path. Read
+# `cqlite-flight/src/bypass.rs`'s own module docs: "`bypass` requests the fast path but NEVER
+# overrides a correctness precondition — a 2-source table under `bypass` still merges". The
+# executed arm can therefore be the MERGER while the driver requested `bypass`, by two distinct
+# routes, neither of which the rig can see:
+#
+#   1. the conjunctive predicate declines (`bypass_reason` returns `MultipleSources`,
+#      `DroppedColumns`, `StaticColumns`, `MulticellArmDivergence`, `ReaderUnsupported`, ...) —
+#      pinned by `bypass_tests.rs::forced_bypass_never_overrides_a_correctness_precondition`,
+#      which asserts `ForcedMergePath::Bypass` over two sources yields `MultipleSources`;
+#   2. the predicate SELECTS the fast path and `ScanRowSource::open` then returns `Ok(None)`
+#      (the walk cannot serve that reader), so `producer_warm.rs` falls through to
+#      `KWayMerger::new_from_readers`.
+#
+# This field used to be named `forced_merge_path` and carried the requested value, which read as
+# the path the server took. So a rep whose requested arm was `bypass` and whose EXECUTED arm was
+# the merger was published as a `bypass` measurement — and the rig's headline output is a
+# bare-scan-vs-Flight RATIO PER ARM, so the two arm rows could be two measurements of the same
+# code with different labels. That is not a labelling nit; it is the comparison itself.
+#
+# THE SERVER DOES NOT REPORT THE ARM IT TOOK, and that is why this is a relabel rather than an
+# observation (the #3272 round 13 route — an honest absence beats a false claim — rather than
+# round 14's, which could make its claim real because sysfs answered). Verified in
+# cqlite-flight 2026-08-05:
+#
+#   * `producer_warm.rs` computes `reason = bypass_reason(...)` and consumes it ONLY in
+#     `if reason.is_selected()`. It is never logged, never a metric, never a span attribute and
+#     never returned to the caller; route 2 above records nothing at all.
+#   * `bypass.rs`'s docs point at `cqlite_core::storage::read_path_probe` for observability, but
+#     that is three PROCESS-GLOBAL `AtomicU64`s read IN-PROCESS via `snapshot`/`delta_since`
+#     (its own docs: "the consumers are integration tests in a DIFFERENT crate"). It has no RPC,
+#     log or metric export. This rig measures a SEPARATE server process over loopback gRPC, so
+#     an in-process atomic in that process is unreachable by construction.
+#   * The only out-of-band server→client surface is `do_action`'s `TABLE_STATS_ACTION`, whose
+#     `TableStatsResponse` carries row/partition/SSTable counts and nothing about arms.
+#
+# Emitting the selected arm would mean changing production `cqlite-flight`, which is outside this
+# issue's scope. So the rig states what it KNOWS (the value it set in the server's environment)
+# and states, in results.json AND in the printed summary, that the executed arm was NOT OBSERVED.
+# Successor work: make the server emit the selected `BypassReason` per request and have the rig
+# REJECT any rep whose executed arm differs from the requested one (#3287/#3299 track the rig's
+# other unobserved-control gap; this one needs the server-side emission first).
+MERGE_PATH_NOT_OBSERVED = "NOT OBSERVED"
+
+MERGE_PATH_OBSERVABILITY_NOTE = (
+    "`requested_merge_path` is the value this rig set for CQLITE_FLIGHT_MERGE_PATH in the"
+    " measured server's environment — a REQUEST, not an observation. `bypass` only PREFERS the"
+    " single-source fast path: cqlite-flight/src/bypass.rs never lets it override a correctness"
+    " precondition, so a rep can execute the K-WAY MERGER under a requested `bypass` either"
+    " because `bypass_reason` declined (MultipleSources/DroppedColumns/StaticColumns/"
+    "MulticellArmDivergence/ReaderUnsupported) or because ScanRowSource::open returned None and"
+    " producer_warm.rs fell through to KWayMerger::new_from_readers. THE SERVER DOES NOT REPORT"
+    " THE ARM IT TOOK: the computed reason is consumed only by an `if` and is never logged,"
+    " metered or returned, and read_path_probe is an IN-PROCESS atomic with no export, which this"
+    " rig — measuring a separate process over loopback gRPC — cannot read. Emitting it would"
+    " require changing production cqlite-flight, outside this issue's scope. So the executed arm"
+    " is recorded as NOT OBSERVED rather than asserted, and every per-arm figure and ratio below"
+    " is conditional on a request the server was free to decline. Successor work: emit the"
+    " selected BypassReason per request and REFUSE any rep whose executed arm differs from the"
+    " requested one."
+)
+
+
 def expected_requests(temp: str) -> str:
     """The request count a rep of this temperature MUST have, stated not implied.
 
@@ -440,7 +505,15 @@ def collect_flight(
         "arm": f"flight_do_get_{arm}",
         "surface": "arrow_flight FlightService::do_get (loopback gRPC)",
         "temperature": temp,
-        "forced_merge_path": arm,
+        # RENAMED from `forced_merge_path` (#3272 round 16) — see MERGE_PATH_OBSERVABILITY_NOTE.
+        # The old name asserted an observation the rig cannot make: the server never reports which
+        # arm it took, and a requested `bypass` can legitimately execute the merger. The rename is
+        # deliberate rather than an added sibling field: a consumer reading `forced_merge_path`
+        # must FAIL to find it and come here, rather than keep reading a value whose meaning
+        # silently changed under an unchanged key.
+        "requested_merge_path": arm,
+        "executed_merge_path": MERGE_PATH_NOT_OBSERVED,
+        "merge_path_observability": MERGE_PATH_OBSERVABILITY_NOTE,
         "rows_per_sec": spread(rows_per_sec),
         "cycles_per_row": spread(cycles_per_row),
         "ipc": spread(ipc),

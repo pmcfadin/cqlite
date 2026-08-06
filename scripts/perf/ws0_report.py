@@ -53,7 +53,10 @@ from ws0_collect import (  # noqa: E402  (path set above; stdlib-only, no deps)
 # ARM B lives in its own module since #3272's F2 split: one file per MEASUREMENT ARM, which is
 # the seam the rig is built around (the two arms are separate claims measured through different
 # surfaces with different contracts).
-from ws0_flight_arm import collect_flight  # noqa: E402
+from ws0_flight_arm import (  # noqa: E402
+    collect_flight,
+    MERGE_PATH_NOT_OBSERVED,
+)
 from ws0_rounds import (  # noqa: E402
     collect_recorded_round_metadata,
     paired_rounds,
@@ -514,7 +517,20 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         for arm in arms:
             fl = collect_flight(d, temp, arm, reps, corpus_rows, flight_endpoint)
             results["measurements"].append(fl)
-            lines.append(fmt(f"flight do_get ({arm})", fl))
+            # The label says the arm was REQUESTED, and it is derived FROM THE BLOCK rather than
+            # from the loop variable (#3272 round 16). Two properties, both deliberate:
+            #
+            # * `(bypass requested)` not `(bypass)`. `CQLITE_FLIGHT_MERGE_PATH=bypass` only PREFERS
+            #   the fast path — cqlite-flight declines it on any correctness precondition and falls
+            #   through to the k-way merger — and the server does not report the arm it took (see
+            #   ws0_flight_arm.MERGE_PATH_OBSERVABILITY_NOTE). So a row labelled `(bypass)` could be
+            #   a MERGER measurement, and this rig's headline is a bare/flight ratio PER ARM: the two
+            #   arm rows could be the same code twice under different labels. The printed label must
+            #   not out-claim results.json.
+            # * Read from `fl["requested_merge_path"]`, so the summary and results.json cannot
+            #   disagree: a rename on one side that missed the other would raise a KeyError here
+            #   rather than print a label the JSON does not support.
+            lines.append(fmt(f"flight do_get ({fl['requested_merge_path']} requested)", fl))
             lines += prewarm_warning(fl, f"flight/{arm}", temp)
             # Every operand of every printed figure, through the SHARED validator (#3272
             # review round 3, B2). No permissive numeric fallback anywhere in the reporting
@@ -606,6 +622,22 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "violates either is REFUSED, not blended. The corpus row count is REQUIRED "
         "(an absent corpus-identity.json is fatal), so this check can never be "
         "skipped while these notes claim it ran (#3272).",
+        # THE ARM IS A REQUEST, NOT AN OBSERVATION (#3272 round 16). Stated in the NOTES the same
+        # way §3b.1 states the interleaving control is not implemented: the honest absence, not a
+        # claim the rig cannot support. `MERGE_PATH_NOT_OBSERVED` is interpolated rather than
+        # spelled again so the summary and results.json carry one string.
+        "  * the ARM of each flight row above is the value this rig REQUESTED via "
+        "CQLITE_FLIGHT_MERGE_PATH, and the arm actually EXECUTED is "
+        f"{MERGE_PATH_NOT_OBSERVED} (results.json .executed_merge_path). `bypass` only "
+        "PREFERS the single-source fast path: cqlite-flight never lets it override a "
+        "correctness precondition, so a rep can execute the K-WAY MERGER under a requested "
+        "`bypass` — and the server does not report the arm it took (the computed reason is "
+        "consumed by an `if` and never logged, metered or returned; read_path_probe is an "
+        "IN-PROCESS atomic this rig, measuring a separate process over gRPC, cannot read).",
+        "    So read every per-arm figure and the per-arm bare/flight RATIO as conditional on "
+        "a request the server was free to decline — in the limit the two arm rows could be the "
+        "same code measured twice. Emitting the selected arm needs a change to production "
+        "cqlite-flight; until then this is NOT verified, exactly as §3b.1's drift control is not.",
         "  * every figure is rows/s AND cycles/row; no CPU-share is reported "
         "(a share shift with unmoved rows/s is a FAIL, spec R1).",
         "  * the bare scan's cycles are SETUP-SUBTRACTED (a separately measured "
