@@ -5998,6 +5998,35 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 BINARY/BUILD PROVENANCE (#3272 review round 11, campsite split). Split out of
+  # `test_ws0_provenance_guards.sh` (which reached 1652 lines against the ~1500 test target — the
+  # `file-size` ratchet is `.rs`-ONLY, so a shell file crosses it silently) along a responsibility
+  # seam: the parent's subject is WHICH BYTES AND WHICH CONFIGURATION a report describes (corpus,
+  # components, schema, ticket, output dir, manifest); this file's is WHICH PROGRAMS produced the
+  # ratio. That is distinct because every parent check is satisfiable by a session whose corpus,
+  # schema, request and configuration are impeccably identified and whose two arms were DIFFERENT
+  # BUILDS — and this rig's whole output is a RATIO BETWEEN TWO BINARIES. Three findings share the
+  # subject: round 10's M2 (`--no-build` accepted any executable under target/release with neither
+  # revision nor digest recorded), round 11's F1 (M2's mtime-vs-HEAD check was mode-blind, so a
+  # successful `cargo build` after a script-only commit was refused — its ACCEPT half lives in the
+  # primary-path suite above, its "must still refuse under `reused`" half here beside the check), and
+  # round 11's F2 (digests taken once before a many-minute session while every rep ran from
+  # target/release, where a concurrent rebuild replaces them mid-session — the executables are now
+  # COPIED into the session's own measured-bin/ and the copies are what run). Hermetic: synthetic
+  # session dirs and perf CSVs, a few-KB Data.db hashed with hashlib, and a throwaway `git init` repo
+  # in $TMPDIR; no cargo, perf, sudo, taskset, corpus, network or root.
+  echo ">>> [$name] bash scripts/tests/test_ws0_binary_provenance.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_binary_provenance.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 binary/build-provenance guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
   # `tools/*` package tests are run by NO other gate component and by no CI lane
   # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so
