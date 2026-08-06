@@ -304,15 +304,19 @@ ws0_pin_binaries() {
   python3 -c '
 import hashlib, json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_binaries import (MEASURED_BINARIES, REVISION_UNKNOWN, measured_bin_dir,
-                          provenance_path)
+from ws0_binaries import MEASURED_BINARIES, REVISION_UNKNOWN, provenance_path
+from ws0_binary_spec import frozen_relpath
 session, mode = pathlib.Path(sys.argv[2]), sys.argv[3]
-# The recorded PATHS must be inside the session own measured-bin/ directory (#3272 F2): the reader
-# REQUIRES it, because a record pointing into target/release describes a session whose binaries
-# anything on the box could replace mid-run. Not created on disk here — the reader checks the
-# recorded path, not the file, and a fixture that materialised fake executables would be claiming a
-# freeze that never happened.
-frozen = measured_bin_dir(session)
+# The recorded PATHS must be the RELATIVE `measured-bin/<name>` the reader RECONSTRUCTS from the
+# session dir and the binary key (#3272 F3, tightening F2): a path merely sitting under a directory
+# NAMED measured-bin was another session copy or another program copy, and the reader could not tell.
+# Asked of the shipped `frozen_relpath` rather than spelled again here, so the fixture cannot drift
+# from the reader own definition of a frozen path.
+#
+# NOT created on disk here — the frozen copies are optional at report time (a results dir is
+# archived without its release binaries), so their absence is the DEFAULT the reader must handle, and
+# a fixture that materialised fake executables would be claiming a freeze that never happened. A
+# case whose subject is the re-derivation writes them explicitly.
 rev = "1" * 40
 # THE REVISION FIELDS TRACK THE BUILD MODE (#3272 round 12, F1): in `reused` mode the source
 # revision is the UNKNOWN sentinel, because --no-build accepted the binaries off the disk and
@@ -330,7 +334,7 @@ rec = {
     "source_dirty_paths": 0,
     "build_mode": mode,
     "binaries": {
-        name: {"path": str(frozen / name),
+        name: {"path": frozen_relpath(name),
                "source_path": f"/nonexistent/target/release/{name}",
                "sha256": hashlib.sha256(name.encode()).hexdigest(),
                "bytes": 1024 + i, "mtime_epoch": 2000000000}

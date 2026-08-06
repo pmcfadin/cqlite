@@ -313,6 +313,7 @@ import os, pathlib, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_binaries import (MEASURED_BINARIES, describe_record, measured_bin_dir,
                           record_binary_provenance, verify_binary_provenance)
+from ws0_binary_spec import frozen_relpath
 
 base = pathlib.Path(sys.argv[2]); base.mkdir(parents=True, exist_ok=True)
 repo, session, bindir = base / "repo", base / "session", base / "bin"
@@ -348,7 +349,12 @@ assert back["build_mode"] == "built", back
 # `cargo build` cannot replace. Asserted on the real files, not on the record's own claim.
 import hashlib  # noqa: E402  (used only for this assertion)
 for name, spec in rec["binaries"].items():
-    copied = pathlib.Path(spec["path"])
+    # The recorded path is RELATIVE to the session dir (#3272 F3) — `measured-bin/<name>`, the ONE
+    # spelling `frozen_relpath` owns — so the READER can RECONSTRUCT it from the session dir it was
+    # asked to report and the binary's own key. An absolute path could only be checked by spelling,
+    # and the pre-F3 reader checked exactly that (was the parent directory NAMED `measured-bin`).
+    assert spec["path"] == frozen_relpath(name), (name, spec["path"])
+    copied = session / spec["path"]
     assert copied.parent == measured_bin_dir(session), (name, spec["path"])
     assert copied.is_file() and os.access(copied, os.X_OK), (name, spec["path"])
     # The recorded digest must be the digest OF THE COPY — hashing the source and copying separately

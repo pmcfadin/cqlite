@@ -148,8 +148,16 @@ import pathlib
 import shutil
 import subprocess
 
+from ws0_binary_spec import (
+    BINARY_SPEC_DISPOSITION,
+    MEASURED_BIN_SUBDIR as _MEASURED_BIN_SUBDIR,
+    check_binary_spec,
+    executable_note,
+    frozen_copy_coverage,
+    frozen_relpath,
+)
 from ws0_session import sha256_file
-from ws0_validate import Invalid, _SHA256_RE
+from ws0_validate import Invalid
 
 # The binaries this rig MEASURES. The bare-scan arm, the Flight server, the load generator — the
 # three programs whose behaviour the reported ratio is about. Named here, once, so the driver's
@@ -174,10 +182,11 @@ BINARY_PROVENANCE = "binary-provenance.json"
 # revisions between two sessions gets a value that cannot accidentally equal another session's.
 REVISION_UNKNOWN = "UNKNOWN-reused-binaries-not-built-by-this-session"
 
-# The SESSION-OWNED directory the measured executables are COPIED into (#3272 F2). Inside the
-# session's output dir, so the copies live beside the results they produced and anyone reviewing a
-# session can re-hash the exact bytes that ran.
-MEASURED_BIN_SUBDIR = "measured-bin"
+# The SESSION-OWNED directory the measured executables are COPIED into (#3272 F2), and the identity
+# of one frozen copy (#3272 F3). Both live in `ws0_binary_spec`, which owns the answer to "which
+# file was executed" — see that module for why the pre-fix answer (the path's PARENT DIRECTORY WAS
+# NAMED `measured-bin`) admitted another session's copy and the wrong executable.
+MEASURED_BIN_SUBDIR = _MEASURED_BIN_SUBDIR
 
 # Every field the reader requires. Asserted against the writer's output at import (below), the
 # pattern `PINNING_RECORD_FIELDS` and `ZERO_REQUIRED_COUNTERS` established: a field the reader
@@ -413,8 +422,15 @@ def freeze_measured_binaries(session_dir: pathlib.Path, bin_dir: pathlib.Path) -
             observed[name] = {
                 # The path RECORDED is the one that will be EXECUTED — the session-owned copy, not
                 # the target/release source. A record naming a path the session did not run is the
-                # substitution this fix exists to close.
-                "path": str(dst),
+                # substitution F2 exists to close.
+                #
+                # RELATIVE to the session dir (#3272 F3), from the ONE spelling `frozen_relpath`
+                # owns, because that is what makes it CHECKABLE: the reader reconstructs it from the
+                # session dir it was asked to report and the binary's own key, so neither another
+                # session's frozen copy nor another program's can satisfy it. An absolute path could
+                # only ever be checked by spelling, and the pre-fix reader checked exactly that —
+                # whether the parent directory happened to be NAMED `measured-bin`.
+                "path": frozen_relpath(name),
                 "source_path": str(src),
                 "sha256": sha256_file(dst),
                 "bytes": stat.st_size,
@@ -643,6 +659,16 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
         raise Invalid(f"{p}: 'binaries' must be an object, got {type(binaries).__name__}")
     # EVERY measured binary, not "at least one": a record covering two of the three programs would
     # leave the third's identity unstated while the report read as complete.
+    #
+    # EVERY FIELD of each spec, delegated to `ws0_binary_spec.check_binary_spec` (#3272 F3). This
+    # loop used to check three of the five fields, and the one that decided "is this the session's
+    # own frozen copy" asked only whether the path's PARENT DIRECTORY WAS NAMED `measured-bin` — so
+    # another SESSION's frozen copy, and one program's copy recorded under another's key, both
+    # satisfied it while the report printed that the executables were frozen into THIS session's
+    # directory. `source_path` and `mtime_epoch` were never mentioned at all. The census in that
+    # module classifies all five, refuses an unclassified one in either direction, and refuses at
+    # import a disposition no checker implements.
+    spec_verification: dict[str, dict] = {}
     for name in MEASURED_BINARIES:
         spec = binaries.get(name)
         if not isinstance(spec, dict):
@@ -650,49 +676,28 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
                 f"{p} records no digest for {name}, which this rig MEASURES. A partial record"
                 " leaves one program in the ratio unidentified while the report reads as complete."
             )
-        digest = spec.get("sha256")
-        if not isinstance(digest, str) or not _SHA256_RE.match(digest):
-            raise Invalid(
-                f"{p}: {name}'s 'sha256' is {digest!r}, which is not 64 lowercase hex characters —"
-                " a truncated digest cannot identify the program that was measured"
-            )
-        if not isinstance(spec.get("bytes"), int) or spec["bytes"] <= 0:
-            raise Invalid(
-                f"{p}: {name}'s 'bytes' is {spec.get('bytes')!r}; a zero-length binary cannot have"
-                " been executed, so this record does not describe a measurement"
-            )
-        # THE RECORDED PATH MUST BE THE SESSION'S OWN FROZEN COPY (#3272 F2).
-        #
-        # A record whose paths point into `target/release` describes a session that ran binaries
-        # anything else on the box could replace mid-run, so its digests describe the bytes present
-        # BEFORE the first rep rather than the bytes each rep executed. That is precisely the
-        # attribution this fix closes, and it is invisible in a record that merely carries digests.
-        #
-        # Checked on the path's PARENT DIRECTORY NAME rather than on the string containing
-        # `measured-bin` anywhere: a `target/release` path under a checkout that happens to live in a
-        # directory called `measured-bin` would otherwise satisfy it.
-        recorded = spec.get("path")
-        if not isinstance(recorded, str) or not recorded:
-            raise Invalid(
-                f"{p}: {name} records no 'path', so the record cannot say WHICH FILE was executed"
-            )
-        if pathlib.PurePath(recorded).parent.name != MEASURED_BIN_SUBDIR:
-            raise Invalid(
-                f"{p}: {name}'s recorded path is {recorded!r}, which is not inside this session's"
-                f" own {MEASURED_BIN_SUBDIR}/ directory. The measured executables are COPIED into"
-                " the session dir and the copies are what the reps run, because the digests were"
-                " otherwise taken once before a many-minute session while every rep executed"
-                " straight out of target/release — where a concurrent `cargo build` replaces them"
-                " mid-session, so the later reps measured DIFFERENT PROGRAMS and the report"
-                " attributed all of them to the digests taken before the first rep (#3272 F2)."
-                " Re-run the session with scripts/perf/ws0-baseline.sh, which freezes them."
-            )
+        try:
+            verified = check_binary_spec(session_dir, name, spec)
+        except Invalid as exc:
+            # The session dir is prefixed HERE rather than threaded through every refusal in the
+            # spec checker: the checker's subject is one spec, and an operator needs to know which
+            # session dir it came out of.
+            raise Invalid(f"{p}: {exc}") from None
+        verified["executable"] = executable_note(session_dir, name)
+        spec_verification[name] = verified
     unknown = sorted(k for k in binaries if k not in MEASURED_BINARIES)
     if unknown:
         raise Invalid(
             f"{p} records binaries this rig does not measure: {', '.join(unknown)}. Every recorded"
             " program must be one the report is about, or the record describes a different session."
         )
+    # HOW MANY FROZEN COPIES WERE RE-DERIVED, stated affirmatively (#3272 F3) — a `0/3` is a fact
+    # about what this report checked, not an absence that reads as a pass. A results dir is
+    # legitimately archived without its release binaries, so their presence cannot be required; what
+    # can be required is that the count is on the record either way.
+    frozen_verified, frozen_detail = frozen_copy_coverage(
+        spec_verification, len(MEASURED_BINARIES)
+    )
     return {
         "source_revision": revision,
         "source_revision_short": rec["source_revision_short"],
@@ -702,11 +707,24 @@ def verify_binary_provenance(session_dir: pathlib.Path) -> dict:
         "source_dirty_paths": rec["source_dirty_paths"],
         "build_mode": rec["build_mode"],
         "binaries": binaries,
+        # WHAT WAS CHECKED ABOUT EACH SPEC AT REPORT TIME (#3272 F3), per binary: the reconstructed
+        # frozen path it had to equal, whether the copy is present in this session dir, whether its
+        # size and sha256 were re-derived from it, and whether it is still executable. The pre-fix
+        # report printed the freeze as a guarantee while the reader had identified nothing beyond a
+        # directory NAME, so this block is the evidence for the sentence the report prints.
+        "binary_spec_verification": {
+            "per_binary": spec_verification,
+            "frozen_copies_verified": frozen_verified,
+            "frozen_copies_expected": len(MEASURED_BINARIES),
+            "note": frozen_detail,
+            "fields_checked": sorted(BINARY_SPEC_DISPOSITION),
+        },
         "provenance": rec["provenance"],
         "note": (
             f"the {len(MEASURED_BINARIES)} measured binaries were identified by digest BEFORE the"
             f" first rep AND FROZEN into the session's own {MEASURED_BIN_SUBDIR}/ directory (so a"
             " concurrent rebuild of target/release could not change what the reps ran, #3272 F2),"
+            f" and at report time {frozen_detail} (#3272 F3),"
             + (
                 f" at source revision {rec['source_revision_short']}"
                 if observed

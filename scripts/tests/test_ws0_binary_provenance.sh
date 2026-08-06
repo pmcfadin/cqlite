@@ -321,7 +321,7 @@ for name, spec in j["binaries"].items():
 p.write_text(json.dumps(j, indent=1) + "\n")
 PY
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "not inside this session" <<<"$out"; then
+if [ "$rc" -ne 0 ] && grep -q "the only path a frozen copy of" <<<"$out"; then
   pass "OBSERVED (round11 F2): a record whose paths point into target/release is REFUSED — its digests describe the bytes present before the first rep, not the bytes each rep ran, and a concurrent rebuild could replace them mid-session"
 else
   fail "round11 F2: an unfrozen (target/release) binary path must be refused (rc=$rc, out: $(head -3 <<<"$out"))"
@@ -335,8 +335,10 @@ if [ "$rc" -eq 0 ]; then
 else
   fail "round11 F2: the frozen control session must report (rc=$rc, out: $out)"
 fi
-# A path that merely CONTAINS the directory name is not enough: the check is on the parent directory,
-# so a checkout that happened to live under a `measured-bin` directory cannot satisfy it.
+# A path that merely CONTAINS the directory name is not enough: the recorded path must EQUAL the one
+# the reader reconstructs, so a checkout that happened to live under a `measured-bin` directory cannot
+# satisfy it. (Pre-F3 this was the PARENT-DIRECTORY-NAME test, which this case already defeated on a
+# substring; F3's own cases below defeat the parent-name test itself.)
 d="$TMP/f2-lookalike"; make_session "$d" "$GOOD_FLIGHT"; ws0_pin_session_corpus "$d" "$TMP/corpus"
 python3 - "$d/binary-provenance.json" <<'PY'
 import json, pathlib, sys
@@ -346,8 +348,8 @@ for name, spec in j["binaries"].items():
 p.write_text(json.dumps(j, indent=1) + "\n")
 PY
 out=$(run_report "$d" "$TMP/corpus"); rc=$?
-if [ "$rc" -ne 0 ] && grep -q "not inside this session" <<<"$out"; then
-  pass "OBSERVED (round11 F2): a path merely CONTAINING 'measured-bin' higher up is still REFUSED — the check is the PARENT DIRECTORY, not a substring, so a checkout living under such a directory cannot satisfy it"
+if [ "$rc" -ne 0 ] && grep -q "the only path a frozen copy of" <<<"$out"; then
+  pass "OBSERVED (round11 F2): a path merely CONTAINING 'measured-bin' higher up is still REFUSED — the recorded path must EQUAL the reconstructed one, so a checkout living under such a directory cannot satisfy it"
 else
   fail "round11 F2: a lookalike path must be refused (rc=$rc, out: $(head -2 <<<"$out"))"
 fi
