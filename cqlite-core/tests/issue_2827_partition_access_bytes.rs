@@ -1064,4 +1064,49 @@ mod end_to_end {
             "the extent comes from the index, not from cache retention"
         );
     }
+
+    /// H1: a WRITETIME/TTL projection is a logical point read and MUST be recorded.
+    ///
+    /// Omitting it is not conservative. An unrecorded access leaves the DENOMINATOR
+    /// as well as the numerator, so dropping a workload's metadata singletons while
+    /// keeping its repeat traffic RAISES `H_max` — 1M metadata singletons beside 100
+    /// partitions read 100 times each would measure ≈0.99 against a true ≈0.0098, a
+    /// confident false "go".
+    #[tokio::test]
+    async fn a_writetime_projection_point_read_is_recorded() {
+        let _guard = PROBE.lock().await;
+        let (root, schema) = resolve(BIG.0, BIG.1, BIG.2);
+        let db = open_db(&root, &schema, BIG.0).await;
+
+        partition_access::global().set_window_config(partition_access::WindowConfig {
+            duration: Duration::from_secs(86_400),
+            max_accesses: u64::MAX,
+            ..partition_access::WindowConfig::default()
+        });
+        let _ = partition_access::close_window();
+        partition_access::set_probe_enabled(Some(true));
+
+        let sql = format!(
+            "SELECT {}, WRITETIME(v) FROM {}.{} WHERE {} = {}",
+            BIG.3, BIG.0, BIG.1, BIG.3, BIG.4
+        );
+        let rows = db
+            .execute(&sql)
+            .await
+            .expect("writetime point read")
+            .rows
+            .len();
+
+        let summary = partition_access::close_window();
+        partition_access::set_probe_enabled(Some(false));
+        let summary = summary.expect("a WRITETIME point read must reach the histogram");
+
+        assert!(rows > 0, "the fixture partition must return rows");
+        assert_eq!(
+            summary.distinct_partitions(),
+            1,
+            "the metadata point read is one logical partition access"
+        );
+        assert_eq!(summary.total_accesses(), 1);
+    }
 }

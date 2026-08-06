@@ -14,6 +14,15 @@ waived, and not deferred to another issue: it becomes satisfiable on **the first
 workload run with the probe enabled**, because everything needed to turn one closed window
 into the verdict is written down below.
 
+**Scope of that promise, stated honestly.** It holds for BTI, and for BIG whose `Index.db` is
+already resident. It does **not** hold universally: the probe will not materialize an index to
+get an answer — doing so would defeat the lazy Summary-guided open of #2412 and permanently
+change the process memory profile — so under a Summary-guided BIG read a window is REFUSED
+rather than priced. Two other refusals bite for the same reason: a non-census window, and a
+non-zero `unavailable` fraction. All three fail in the SAFE direction (a refusal is never a
+false "go"), but an operator should expect that the FIRST window may be refused, and that
+obtaining a priceable one can take a shorter window, a resident index, or both.
+
 The reason it cannot be satisfied here is not a shortcut. **No field keyed workload with
 captured concentration exists.** The only keyed loadtest on record is ~0.9 qps aggregate,
 ~30 rows/s, with no reported hot-set concentration — three orders of magnitude below the
@@ -29,16 +38,21 @@ conditional. Refusal condition 4 below exists to enforce that.
 
 ## Inputs
 
-One CLOSED window of the probe (`CQLITE_PARTITION_ACCESS_PROBE=1`), read from the emitted
-series or from `WindowSummary`:
+One CLOSED window of the probe (`CQLITE_PARTITION_ACCESS_PROBE=1`), taken from a
+[`WindowSummary`] — **not** read off a dashboard.
+`distinct_partitions`, `accesses` and `bytes` are CUMULATIVE COUNTERS, so a collector read
+of them after N closed windows is the sum over all N; see "How to run it" below for why that
+produces a false no-go. The series column names where each input appears when exactly one
+window has closed, which is the only case in which the two agree:
 
-| symbol | series | meaning |
+| symbol | series (single-window read only) | meaning |
 |---|---|---|
 | `n_b` | `cqlite.read.partition_access.distinct_partitions{repeat_bucket=b}` | distinct partitions in bucket `b` |
 | `a_b` | `cqlite.read.partition_access.accesses{repeat_bucket=b}` | accesses attributable to bucket `b` (the sum of its members' repeat counts) |
 | `B_b` | `cqlite.read.partition_access.bytes{repeat_bucket=b}` | distinct-partition **on-disk** bytes in bucket `b` |
 | `2^k` | `cqlite.read.partition_access.sample_denominator` | sampling scale; `1` = census |
 | — | `distinct_partitions{size_source="unavailable"}` | partitions whose extent could not be measured |
+| — | `window_dropped_accesses`, `sampling_floor` | per-window GAUGES; these two are safe to read off a dashboard at any time |
 
 Buckets `b` are exactly `1`, `2`, `3-4`, `5-8`, `9-16`, `17+`. `A = Σ a_b`.
 
@@ -125,13 +139,22 @@ H_max(C) = [ Σ_{fully-taken b} (a_b − n_b)  +  f · (a_last − n_last) ] / A
 Each selected partition's **first** access in the window is compulsory (hence `− n_b`); every
 subsequent access hits.
 
-**This is an UPPER bound.** It assumes a clairvoyant (Belady) cache that already holds
-exactly the right partitions. A real LRU cache does strictly worse. So the asymmetry is
-load-bearing:
+**This is NOT an upper bound.** `H_max` is an ESTIMATE UNDER A STATED RANKING HEURISTIC, not a ceiling. Buckets are
+ordered by `accesses / bytes`, but the quantity a cache actually serves is
+`(accesses − distinct) / bytes`, so a bucket of large HOT partitions can be outranked
+by dense small SINGLETONS that serve nothing once admitted — and the greedy fill then
+spends the budget on them. The error from THIS defect was measured at ≈0.10 maximum
+observed. Other mechanisms (the fractional final-bucket take, and the coverage
+limitations of the instrument itself) push independently, so **the total error can
+bias in EITHER direction** — do not treat a low value as automatically safe.
 
-- a **low** `H_max` is a **sound no-go** — no cache policy can beat the ceiling;
-- a **high** `H_max` is **necessary but not sufficient** for a "go". It is a licence to
-  simulate LRU against the captured window, **not** a licence to build.
+Tracked as **issue #3340**, and the ordering constraint is part of the procedure:
+**#3340 MUST land before any go/no-go verdict is derived from a real production
+window.** Until it does, a value near the threshold decides nothing.
+
+What remains true: the clairvoyance assumption is optimistic (a real LRU cache does
+worse than a Belady one), so a **high** `H_max` is at most a licence to simulate LRU
+against the captured window, never a licence to build.
 
 **Known bias, accepted rather than argued away.** The measurement window is *tumbling*, so a
 partition accessed on both sides of a boundary is recorded as two lower-repeat entries
@@ -151,7 +174,9 @@ on-CPU** against **LZ4 decompress + CRC at ~23%**. A cache whose *ceiling* is be
 ≤~3% work share cannot move the end-to-end number by more than ~1.5%, which is under the
 round harness's noise floor.
 
-- `H_max(128 MiB) < threshold` → **sound NO-GO.** Record it and close the question.
+- `H_max(128 MiB) < threshold` → a **no-go INDICATION**, not a sound no-go: per the #3340
+  correction above the estimate can err in either direction, so a value near the threshold
+  decides nothing until #3340 lands.
 - `H_max(128 MiB) ≥ threshold` → **worth a real LRU simulation against the captured
   window.** Not an automatic build; #2037 stays owner-gated.
 

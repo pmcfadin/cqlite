@@ -477,8 +477,7 @@ impl StorageEngine {
         )>,
         bool,
     )> {
-        self.sstables
-            .scan_partition_with_cell_metadata(table_id, partition_key, schema)
+        self.scan_partition_with_cell_metadata_recorded(table_id, partition_key, schema)
             .await
     }
 

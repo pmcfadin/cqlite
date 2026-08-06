@@ -377,24 +377,36 @@ that any closed window plus one assumption yields the verdict with no further an
 **The bound.** Buckets are ordered by access density `a_b / B_b` (accesses per on-disk byte),
 descending. Fill the budget greedily: with a decoded budget `C` (64 or 128 MiB) the on-disk bytes
 that fit are `C / m`. Taking buckets whole while they fit and the last one fractionally by byte
-share `f`, the clairvoyant (Belady) hit-ratio upper bound is
+share `f`, the clairvoyant (Belady) hit-ratio estimate is
 
 ```
 H_max(C) = [ Σ_{fully-taken b} (a_b − n_b)  +  f · (a_last − n_last) ] / A
 ```
 
 — each selected partition's first access in the window is compulsory (hence `− n_b`), and every
-subsequent access hits. This is an **upper** bound because a real LRU cache is not clairvoyant; the
-procedure records it as a ceiling, so a *low* `H_max` is a definitive **no-go** while a *high*
-`H_max` is a necessary-not-sufficient condition for "go". That asymmetry is deliberate: the cheap,
-sound verdict this instrument can produce is a **rejection**, and the document says so.
+subsequent access hits.
+
+**Corrected after review (owner ruling, Option B):** this is **not** an upper bound. `H_max` is an ESTIMATE UNDER A STATED RANKING HEURISTIC, not a ceiling. Buckets are
+ordered by `accesses / bytes`, but the quantity a cache actually serves is
+`(accesses − distinct) / bytes`, so a bucket of large HOT partitions can be outranked
+by dense small SINGLETONS that serve nothing once admitted — and the greedy fill then
+spends the budget on them. The error from THIS defect was measured at ≈0.10 maximum
+observed. Other mechanisms (the fractional final-bucket take, and the coverage
+limitations of the instrument itself) push independently, so **the total error can
+bias in EITHER direction** — do not treat a low value as automatically safe.
+
+Tracked as **issue #3340**, and the ordering constraint is part of the procedure:
+**#3340 MUST land before any go/no-go verdict is derived from a real production
+window.** Until it does, a value near the threshold decides nothing.
+The clairvoyance assumption remains optimistic, so a *high* `H_max` is at most a licence to simulate
+LRU against the captured window.
 
 **Recommended go threshold (an OWNER-SETTABLE parameter, recorded as such).** `H_max(128 MiB) ≥ 0.50`.
 Rationale, from the owner's own Arm-1 repricing (#2818, quoted in the thread): a decoded-partition
 cache targets decode/merge work, and k-way merge measured **3.2%** of on-CPU while LZ4 decompress +
 CRC measured **~23%**. A cache with a *ceiling* below 50% on a ≤~3% work share cannot move the
 end-to-end number by more than ~1.5% — under the round harness's noise floor. Below the threshold the
-verdict is a sound no-go; at or above it the verdict is "worth a real LRU simulation against the
+verdict is a no-go INDICATION (see the #3340 correction above — it is not sound on its own); at or above it the verdict is "worth a real LRU simulation against the
 captured window", not an automatic build.
 
 **Why a threshold is named at all,** given it is the owner's call: an unnamed threshold means the
@@ -482,6 +494,12 @@ which is the moment it should be closed.
 > satisfied by this change**. It becomes satisfiable on the first real keyed workload run with the
 > probe enabled. The reason it cannot be satisfied here is that **no field keyed workload with
 > captured concentration exists** (`docs/research/phase2-verify-caching.md:214-216`).
+>
+> **Scope:** that holds for BTI and for BIG whose `Index.db` is already resident. The probe
+> will not materialize an index to get an answer (it would defeat #2412's lazy open and change
+> the process memory profile), so a Summary-guided BIG window is REFUSED rather than priced —
+> as are a non-census window and one with a non-zero `unavailable` fraction. All three fail
+> SAFE (a refusal is never a false "go"), but the FIRST window may well be refused.
 
 **Owner instruction recorded, not executed.** The owner's standing instruction from the thread — *"the
 issue must stop calling itself a gate"*, with the request to retitle/re-scope to reflect that the

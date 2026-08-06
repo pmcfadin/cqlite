@@ -370,8 +370,13 @@ It SHALL state, at minimum:
 - the closed-form clairvoyant hit-ratio ceiling at a decoded budget `C`, ordering buckets by access
   density `accesses / bytes` and filling `C / m` of on-disk bytes greedily, charging one compulsory
   miss per selected distinct partition;
-- that the result is an **upper bound**, so a low value is a sound **no-go** while a high value is
-  necessary but not sufficient for a "go";
+- that the result is **NOT an upper bound** but an ESTIMATE under a stated ranking heuristic —
+  buckets are ordered by `accesses / bytes` where a cache serves `(accesses − distinct) / bytes`, so
+  large hot partitions can be outranked by dense small singletons; the error from that defect is
+  ≈0.10 max observed, and with other mechanisms pushing independently the total error can bias in
+  EITHER direction. It SHALL name **issue #3340** and SHALL state that **#3340 must land before any
+  go/no-go verdict is derived from a real production window**. The clairvoyance assumption remains
+  optimistic, so a high value is at most a licence to simulate LRU against the captured window;
 - the **refusal conditions**, each of which yields *no answer* rather than a default verdict: a
   non-zero `unavailable` fraction, accesses the recorder could not seat at all, a window at the
   sampling floor, a window that is a SAMPLE rather than a census (its per-bucket bytes are
@@ -401,6 +406,11 @@ The change SHALL state, in `proposal.md`, `design.md`, this spec and the committ
 it delivers **the instrument and the procedure, not the field number**, and that issue #2827's original
 AC2 is **not satisfied** by it — not waived, not deferred to another issue, but satisfiable on the
 first real keyed workload run with the probe enabled, blocked only by the absence of such a workload.
+That satisfiability is SCOPED and the artifacts SHALL say so: it holds for BTI and for BIG whose
+`Index.db` is already resident. The probe SHALL NOT materialize an index to obtain an answer, so a
+Summary-guided BIG window (#2412) is REFUSED rather than priced, as are a non-census window and one
+with a non-zero `unavailable` fraction. Every such outcome fails in the SAFE direction — a refusal
+is never a false "go" — but the first window may be refused.
 
 The change SHALL record the owner's standing instruction that the issue must stop calling itself the
 gate, together with the fact that **retitling or re-scoping the issue is an owner action the worker

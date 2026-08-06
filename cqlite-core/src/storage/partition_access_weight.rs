@@ -60,18 +60,34 @@
 //!    walk). This is a real per-read cost that only an operator who has switched the
 //!    probe on pays, and it is why the probe is default-OFF.
 //!
-//! # Known coverage limitation
+//! # Known limitations, with their DIRECTION stated
 //!
-//! [`StorageEngine::scan_partition_with_cell_metadata`] — the WRITETIME/TTL
-//! projection's point read — is a logical point read that this module does NOT wrap,
-//! so its accesses are invisible to the histogram. The direction is conservative
-//! (those partitions are under-counted, understating concentration), but it is a gap:
-//! **a workload whose keyed traffic is predominantly WRITETIME/TTL projections is
-//! measured badly, and its window MUST NOT be used for the decision.** Recorded in
-//! `design.md` D2, the spec's wiring requirement, and the decision note.
+//! Both of these can bias the measurement toward "the cache is worth building", so
+//! neither is left implicit.
+//!
+//! 1. **The generation set is captured before the read, not shared with it.**
+//!    [`Self::snapshot_for_probe`] resolves the reader list immediately BEFORE the
+//!    read and holds the `Arc`s across it, so a generation the read used that
+//!    compaction removed mid-read is still priced. It does NOT eliminate the race:
+//!    the read takes its own snapshot a moment later, so a generation created in
+//!    between — a flush, or a compaction output — is priced by neither, and that
+//!    partition is UNDER-priced. Closing it properly means threading the read's own
+//!    snapshot out of `SSTableManager`, which is not reachable from here today.
+//! 2. **A BIG generation whose `Index.db` is not resident cannot be priced at all**
+//!    (see the cost section above), so under #2412's lazy Summary-guided open such a
+//!    window is REFUSED rather than priced. That direction is safe — a refusal is
+//!    never a false "go" — but it does mean the promise that a verdict falls out of
+//!    the first real window holds for BTI and for BIG-with-resident-index, not
+//!    universally.
+//!
+//! The WRITETIME/TTL projection point read (`scan_partition_with_cell_metadata`) is
+//! **no longer** a limitation: it is recorded like every other logical point read.
+//! Omitting it was never conservative — an unrecorded access leaves the DENOMINATOR
+//! as well as the numerator, so dropping a workload's metadata singletons while
+//! keeping its repeat traffic raises `H_max`.
 
 use super::StorageEngine;
-use crate::observability::partition_access::{self, AccessWeight, AccessWeightBuilder};
+use crate::observability::partition_access::{self, AccessWeightBuilder};
 #[cfg(not(feature = "tombstones"))]
 use crate::storage::sstable::reader::partition_successor::PartitionResidency;
 use crate::types::{RowKey, ScanRow, TableId};
@@ -102,12 +118,47 @@ impl StorageEngine {
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
+        let generations = self.snapshot_for_probe(table_id).await;
         let outcome = self
             .sstables
             .scan_partition(table_id, partition_key, schema)
             .await;
         if outcome.is_ok() {
-            self.record_access_if_enabled(table_id, partition_key).await;
+            Self::record_access_if_enabled(generations, table_id, partition_key).await;
+        }
+        outcome
+    }
+
+    /// [`StorageEngine::scan_partition_with_cell_metadata`] with the #2827 probe
+    /// attached.
+    ///
+    /// A `SELECT WRITETIME(col) / TTL(col) … WHERE pk = ?` is a LOGICAL POINT READ
+    /// like any other, and omitting it is **not** conservative. An unrecorded access
+    /// leaves the DENOMINATOR as well as the numerator, so dropping a workload's
+    /// metadata singletons while keeping its repeat traffic RAISES `H_max` —
+    /// 1M metadata singletons beside 100 partitions read 100 times each measure
+    /// ≈0.99 against a true ≈0.0098, a confident false "go". It is recorded for
+    /// exactly that reason.
+    pub(crate) async fn scan_partition_with_cell_metadata_recorded(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(
+        Vec<(
+            RowKey,
+            ScanRow,
+            std::collections::HashMap<String, crate::types::CellWriteMetadata>,
+        )>,
+        bool,
+    )> {
+        let generations = self.snapshot_for_probe(table_id).await;
+        let outcome = self
+            .sstables
+            .scan_partition_with_cell_metadata(table_id, partition_key, schema)
+            .await;
+        if outcome.is_ok() {
+            Self::record_access_if_enabled(generations, table_id, partition_key).await;
         }
         outcome
     }
@@ -126,12 +177,13 @@ impl StorageEngine {
         clustering: Option<&crate::storage::sstable::reader::ClusteringSlice>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
+        let generations = self.snapshot_for_probe(table_id).await;
         let outcome = self
             .sstables
             .scan_partition_clustering(table_id, partition_key, clustering, schema)
             .await;
         if outcome.is_ok() {
-            self.record_access_if_enabled(table_id, partition_key).await;
+            Self::record_access_if_enabled(generations, table_id, partition_key).await;
         }
         outcome
     }
@@ -150,57 +202,67 @@ impl StorageEngine {
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
+        let generations = self.snapshot_for_probe(table_id).await;
         let outcome = self
             .sstables
             .scan_partition_clustering_reverse(table_id, partition_key, schema)
             .await;
         if matches!(outcome, Ok(Some(_))) {
-            self.record_access_if_enabled(table_id, partition_key).await;
+            Self::record_access_if_enabled(generations, table_id, partition_key).await;
         }
         outcome
     }
 
-    /// Resolve the weight and record one logical access. A no-op — and it does not
-    /// even resolve the reader snapshot — when the probe is off.
-    async fn record_access_if_enabled(&self, table_id: &TableId, partition_key: &[u8]) {
+    /// The generation set to price against, captured BEFORE the read.
+    ///
+    /// Ordering matters and is not incidental. Resolving the snapshot AFTER the read
+    /// returned meant a generation the read had used but that compaction removed in
+    /// the meantime was simply absent from the pricing — the partition was
+    /// under-priced, which flatters the cache, the one direction this instrument
+    /// must not be wrong in. Capturing first and holding the `Arc`s keeps every
+    /// reader the read could have used alive and priceable for as long as the
+    /// weight resolution needs it.
+    ///
+    /// This narrows the race rather than removing it: the read takes its OWN
+    /// snapshot slightly later, so a generation that appears between the two (a
+    /// flush, or a compaction output) is priced by neither. See the module header's
+    /// limitations. Returns `None` — and touches no lock — when the probe is off.
+    async fn snapshot_for_probe(
+        &self,
+        table_id: &TableId,
+    ) -> Option<Vec<std::sync::Arc<crate::storage::sstable::reader::SSTableReader>>> {
         if !partition_access::enabled() {
-            return;
+            return None;
         }
-        let weight = self.partition_access_weight(table_id, partition_key).await;
+        let (readers, _fully_qualified_match) =
+            self.sstables.resolve_reader_snapshot(table_id).await;
+        Some(readers)
+    }
+
+    /// Price and record one logical access against the pre-read generation set.
+    ///
+    /// A `None` snapshot means the probe was off when the read began; it stays off
+    /// for this access even if it was enabled mid-read, because a weight resolved
+    /// against a snapshot that was never taken would be a guess.
+    async fn record_access_if_enabled(
+        generations: Option<Vec<std::sync::Arc<crate::storage::sstable::reader::SSTableReader>>>,
+        table_id: &TableId,
+        partition_key: &[u8],
+    ) {
+        let Some(readers) = generations else {
+            return;
+        };
+        let mut weight = AccessWeightBuilder::new();
+        for reader in &readers {
+            Self::note_reader_contribution(reader, partition_key, &mut weight).await;
+        }
         // The table is part of the entry identity: one recorder serves every table,
         // so the same key bytes in two tables must not merge into one partition.
         partition_access::record_partition_access(
             partition_access::TableScope::from_qualified(table_id.name()),
             partition_key,
-            weight,
+            weight.finish(),
         );
-    }
-
-    /// The on-disk byte weight of ONE logical partition access to `partition_key`,
-    /// summed across the SSTable generations the read resolved.
-    ///
-    /// Call immediately AFTER the targeted read, and only when
-    /// [`partition_access::enabled`](crate::observability::partition_access::enabled).
-    ///
-    /// **This is not cheap on the BIG path.** Per candidate generation it costs a
-    /// presence check plus a successor resolution: O(depth) for BTI (one trie walk),
-    /// but O(partition-count) for BIG (a linear minimum over the resident `Index.db`
-    /// entries). It performs no I/O and materializes nothing — a generation whose
-    /// index is not already resident is reported unpriceable instead — but the CPU
-    /// cost is real, and is one reason the probe is default-OFF. See the module
-    /// header.
-    pub(crate) async fn partition_access_weight(
-        &self,
-        table_id: &TableId,
-        partition_key: &[u8],
-    ) -> AccessWeight {
-        let (readers, _fully_qualified_match) =
-            self.sstables.resolve_reader_snapshot(table_id).await;
-        let mut weight = AccessWeightBuilder::new();
-        for reader in &readers {
-            Self::note_reader_contribution(reader, partition_key, &mut weight).await;
-        }
-        weight.finish()
     }
 
     /// One candidate's contribution: definitive absence contributes nothing, a

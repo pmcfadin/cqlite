@@ -18,10 +18,19 @@
 //! ([`WindowSource::Synthetic`]) — a synthetic input is a legitimate oracle for a
 //! claim about the instrument and an illegitimate one for a claim about the world.
 //!
-//! **The bound is a CEILING.** `H_max` assumes a clairvoyant (Belady) cache, so a
-//! LOW value is a sound no-go while a HIGH value is necessary but not sufficient
-//! for a "go" — it is a licence to simulate LRU against the captured window, not a
-//! licence to build.
+//! **`H_max` is NOT a ceiling — it is an estimate under a stated ranking
+//! heuristic.** It assumes a clairvoyant (Belady) cache, which alone would make it
+//! an upper bound; but buckets are ordered by `accesses / bytes` rather than by what
+//! a cache actually serves, `(accesses − distinct) / bytes`, so a bucket of large HOT
+//! partitions can be outranked by dense small SINGLETONS that serve nothing once
+//! admitted. The error from that defect was measured at ≈0.10 maximum observed, and
+//! because other mechanisms push independently (the fractional final-bucket take,
+//! and the instrument's own coverage limitations) **the total error can bias in
+//! EITHER direction**.
+//!
+//! Tracked as **issue #3340**. **#3340 MUST land before any go/no-go verdict is
+//! derived from a real production window**; until then a value near the threshold
+//! decides nothing, and neither a high nor a low reading is sound on its own.
 
 use super::{RepeatBucket, WindowSummary};
 
@@ -43,7 +52,7 @@ pub const MIN_ACCESSES: u64 = 10_000;
 /// **An OWNER-SETTABLE parameter, recorded as such**, not a derived constant. Its
 /// arithmetic: a decoded-partition cache targets decode/merge work, and the Arm-1
 /// CPU decomposition (#2818) measured k-way merge at 3.2% of on-CPU against LZ4
-/// decompress + CRC at ~23%. A cache whose CEILING is below 50% on a ≤~3% work
+/// decompress + CRC at ~23%. A cache whose ESTIMATED hit ratio is below 50% on a ≤~3% work
 /// share cannot move the end-to-end number by more than ~1.5%, which is under the
 /// round harness's noise floor. Naming a default with its arithmetic is what stops
 /// the first person to run the procedure from re-litigating it.
@@ -169,11 +178,19 @@ pub struct Ceiling {
     pub budget_bytes: u64,
     /// On-disk bytes that fit in that budget under the assumed decode multiplier.
     pub on_disk_budget_bytes: f64,
-    /// The clairvoyant (Belady) hit-ratio CEILING. A real LRU cache does strictly
-    /// worse.
+    /// Estimated hit ratio under the procedure's stated ranking heuristic.
+    ///
+    /// **Not a ceiling.** The clairvoyance assumption alone would make it one, but
+    /// the bucket ranking uses `accesses / bytes` where a cache serves
+    /// `(accesses − distinct) / bytes`, so large hot partitions can be outranked by
+    /// dense small singletons and the budget spent on them. Measured error from that
+    /// defect ≈0.10 max observed; with the fractional final-bucket take and the
+    /// instrument's coverage limitations pushing independently, the total error can
+    /// go EITHER way. Issue #3340 must land before this decides anything real.
     pub h_max: f64,
-    /// `h_max >= threshold`. A `false` here is a sound no-go; a `true` is a licence
-    /// to simulate LRU against the captured window, not a licence to build.
+    /// `h_max >= threshold`. Given the above this is an INDICATION, not a verdict:
+    /// a `false` is not automatically a sound no-go and a `true` is not a licence to
+    /// build — at most a licence to simulate LRU against the captured window.
     pub clears_threshold: bool,
     /// The threshold applied (an owner-settable parameter).
     pub threshold: f64,
