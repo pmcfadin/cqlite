@@ -6204,14 +6204,20 @@ run_tooling_tests() {
   # components, schema, ticket, output dir, manifest); this file's is WHICH PROGRAMS produced the
   # ratio. That is distinct because every parent check is satisfiable by a session whose corpus,
   # schema, request and configuration are impeccably identified and whose two arms were DIFFERENT
-  # BUILDS — and this rig's whole output is a RATIO BETWEEN TWO BINARIES. Three findings share the
+  # BUILDS — and this rig's whole output is a RATIO BETWEEN TWO BINARIES. Four findings share the
   # subject: round 10's M2 (`--no-build` accepted any executable under target/release with neither
   # revision nor digest recorded), round 11's F1 (M2's mtime-vs-HEAD check was mode-blind, so a
   # successful `cargo build` after a script-only commit was refused — its ACCEPT half lives in the
   # primary-path suite above, its "must still refuse under `reused`" half here beside the check), and
   # round 11's F2 (digests taken once before a many-minute session while every rep ran from
   # target/release, where a concurrent rebuild replaces them mid-session — the executables are now
-  # COPIED into the session's own measured-bin/ and the copies are what run). Hermetic: synthetic
+  # COPIED into the session's own measured-bin/ and the copies are what run), and round 21's F5 (F2's
+  # copies are SEQUENTIAL and taken after cargo releases its build lock, so a rebuild landing BETWEEN
+  # two of them left the session holding binaries from TWO BUILDS while EVERY destination digest still
+  # validated — a destination digest hashes what it WROTE, so it proves the copy succeeded and
+  # verifies the write against itself; `scripts/perf/ws0_binary_snapshot.py` now captures each source
+  # artifact's identity BEFORE the first copy, requires every copy to equal it, and RE-READS every
+  # source after the last copy, refusing and naming whichever moved). Hermetic: synthetic
   # session dirs and perf CSVs, a few-KB Data.db hashed with hashlib, and a throwaway `git init` repo
   # in $TMPDIR; no cargo, perf, sudo, taskset, corpus, network or root.
   echo ">>> [$name] bash scripts/tests/test_ws0_binary_provenance.sh"
