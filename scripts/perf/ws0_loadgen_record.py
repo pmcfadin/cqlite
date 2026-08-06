@@ -56,8 +56,8 @@ from ws0_validate import Invalid
 #     this reporter thinks they mean. A future `step/v2` that redefined `rows_total` would be read
 #     with v1 semantics and silently mis-reported.
 #
-# `round` stays REQUIRED-but-not-compared, and the reason is recorded at its branch below rather
-# than here, because it is the one field of the four whose authority lives elsewhere.
+# `round` is NOT one of these four, because its correct value is not a CONSTANT — it is the rep's
+# own tag, which differs per rep. It is verified all the same, by `SESSION_BOUND_INPUTS` below.
 #
 # Values are stated ONCE, here, as data. `ws0_flight_arm` reads them; the driver's actual argv is
 # asserted against them by `test_ws0_fabrication_guards.sh`, so a driver that changed `--ramp` and
@@ -90,6 +90,39 @@ FIXED_INPUTS: dict[str, tuple[object, str]] = {
         " `duration_s` would otherwise be read with v1 semantics and silently mis-reported. Kept"
         " in sync with `SCHEMA_TAG` in tools/flight-loadgen/src/record.rs, which"
         " test_ws0_fabrication_guards.sh asserts against the live constant",
+    ),
+}
+
+# ============================================================================
+# THE SESSION-BOUND INPUTS — VERIFIED AGAINST THE REP'S OWN IDENTITY (#3272 round 14, F1)
+# ============================================================================
+# `FIXED_INPUTS` above can only verify a field whose correct value is a CONSTANT. Some fields of the
+# record are just as measurement-determining and have no constant correct value: what they must
+# equal depends on WHICH REP is being read and WHICH SESSION produced it. Such a field had no
+# mechanism, so it was verified by the weakest thing available, and `round` was exploitable:
+#
+#   `round` was REQUIRED PRESENT and never compared to the rep's tag. So SWAPPING TWO REPS' JSONL
+#   FILES passed every check: rep 1's rows and duration were read beside rep 2's PERF COUNTERS
+#   (`perf-<tag>.csv` is located by TAG, from the filename) and rep 2's `<tag>.round` metadata.
+#   That corrupts `cycles/row` directly — a cycles count from one rep divided by a row count from
+#   another — and silently re-labels which round each figure belongs to, which is what the
+#   per-round pairing pairs on. The old reasoning ("a second comparison would be a second source
+#   of truth") had it backwards: the tag is not a second source, it is the rep's IDENTITY, and
+#   comparing a record to the identity of the file it was found in is how you learn the record
+#   belongs to that rep at all. `<tag>.round` remains the authority for the round's METADATA
+#   (index, position, arms) — this asserts only that the LOADGEN RECORD is this rep's.
+#
+# The expected values come from the REP TAG and the SESSION MANIFEST, never from a caller's
+# argument: `session_bound_expectations` builds them from the tag and from what was recorded before
+# the first rep.
+SESSION_BOUND_INPUTS: dict[str, tuple[str, str]] = {
+    "round": (
+        "the rep TAG the artifact was found under",
+        "the driver passes `--round <tag>`, so this field is the record's own statement of WHICH"
+        " REP it is. It was REQUIRED PRESENT and never compared, so swapping two reps' JSONL files"
+        " passed validation — combining one rep's rows and duration with ANOTHER rep's perf"
+        " counters (located by tag from the filename) and round metadata, which corrupts"
+        " cycles/row and mis-attributes every paired comparison (#3272 round 14, F1)",
     ),
 }
 
@@ -158,21 +191,32 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
     "target_concurrency": ("verified-fixed-input", FIXED_INPUTS["target_concurrency"][1]),
     "shape": ("verified-fixed-input", FIXED_INPUTS["shape"][1]),
     "step": ("verified-fixed-input", FIXED_INPUTS["step"][1]),
-    # `round` is REQUIRED PRESENT and deliberately NOT compared to a value, which is a real
-    # distinction rather than a softer version of the four above: its authority lives elsewhere.
-    # The reporter's round bookkeeping comes from the driver's `<tag>.round` artifact, which
-    # `ws0_rounds.collect_round_meta` integrity-checks across arms; comparing this copy to a tag
-    # spelling would be a SECOND source of truth for one fact, and the two could disagree. So it
-    # is checked for PRESENCE (an absent label means the record cannot be attributed to a rep at
-    # all) and then left to the artifact that owns it.
-    "round": ("required-present", "the driver's label for the rep. NOT compared to a value: the"
-                                  " ROUND METADATA the reporter integrity-checks comes from"
-                                  " <tag>.round, and a second comparison here would be a second"
-                                  " source of truth for one fact"),
+    # ---- SESSION-BOUND INPUTS (#3272 round 14, F1) — see SESSION_BOUND_INPUTS above ----
+    # A fourth disposition, and the distinction from `verified-fixed-input` is the whole reason it
+    # exists: these fields ALSO decide whether the figures mean what the report says, but their
+    # correct value is NOT A CONSTANT — it is derived from the identity of the rep being read. So
+    # they cannot be verified by the `FIXED_INPUTS` mechanism, and the disposition that used to
+    # cover `round` (`required-present`, i.e. verified only to EXIST) is what F1 found.
+    "round": ("session-bound", SESSION_BOUND_INPUTS["round"][1]),
     "endpoint": ("ignored", "the loopback address; not a measurement"),
     "ts_unix_ms": ("ignored", "wall-clock stamp; the rig's ordering uses monotonic_ns from"
-                              " <tag>.round, never a wall clock"),
-    "seed": ("ignored", "the loadgen's RNG seed; an INPUT, not a measurement"),
+                              " <tag>.round, never a wall clock. It cannot affect what was"
+                              " measured: no figure, no pairing and no refusal reads it — the"
+                              " ATTRIBUTION of a record to a rep is `round` (session-bound,"
+                              " above) and the artifact-set integrity checks are over the"
+                              " monotonic instants in <tag>.round, which this rig deliberately"
+                              " prefers precisely because a wall clock can step"),
+    "seed": ("ignored", "the loadgen's RNG seed for TICKET SELECTION. It cannot affect what was"
+                        " measured HERE, and the reason is specific to this rig's shape rather"
+                        " than to the word INPUT — which is the reason that was wrong twice"
+                        " (#3272 F3's target_concurrency, F1's endpoint). Every rep runs"
+                        " `--shape full`, a VERIFIED FIXED INPUT above, and the `Full` transform"
+                        " (tools/flight-loadgen/src/shape.rs) is `t.limit = None` on the base"
+                        " template: it draws NOTHING from the RNG, so two seeds produce"
+                        " byte-identical tickets and the same full-ring scan. Only the `point`"
+                        " and `mixed` shapes consume the seed — and a record carrying either is"
+                        " already refused by the `shape` check, so the seed becomes measurement-"
+                        "determining only in a record this reporter cannot accept at all"),
     # `step`, `target_concurrency` and `shape` WERE HERE, as `ignored`. #3272's F3 moved them up to
     # `verified-fixed-input`. They are not left behind as duplicate keys, and that is not tidiness:
     # a repeated key in a python dict literal SILENTLY WINS, so a stale `ignored` entry below the
@@ -184,7 +228,26 @@ RECORD_FIELD_DISPOSITION: dict[str, tuple[str, str]] = {
 # rather than reaching `check_record_surface`, where an unrecognised disposition would fall through
 # every branch and behave exactly like `ignored` — a field silently unread while the census claimed
 # otherwise, which is the `requests_unavailable` defect wearing the census's own clothes.
-DISPOSITIONS = ("consumed", "verified-fixed-input", "required-present", "ignored")
+#
+# `required-present` IS GONE (#3272 round 14, F1). It had exactly one member, `round`, and what it
+# meant in practice was "verified to EXIST and nothing more" — which is how a swapped JSONL file
+# passed. A disposition whose whole content is a weaker check is an invitation to classify the next
+# measurement-determining field into it, so it is removed rather than left empty: an empty
+# disposition also makes the loop that reads it vacuous, and a check with no subject prints exactly
+# like a passing one.
+DISPOSITIONS = ("consumed", "verified-fixed-input", "session-bound", "ignored")
+
+# WHICH TABLE STATES THE EXPECTATION FOR EACH VERIFYING DISPOSITION. Declared as DATA, so the
+# both-directions closure below is ONE loop over every verifying disposition rather than a
+# hand-written pair of checks per table (#3272 round 14). The pre-F1 version checked `FIXED_INPUTS`
+# against the census by name and had no equivalent for anything else — so `SESSION_BOUND_INPUTS`
+# would have shipped with NO closure check at all, which is the half-wired-guard shape this issue
+# keeps finding. A new verifying disposition is registered HERE, in one place, or it is not one of
+# `DISPOSITIONS` and is refused below.
+_EXPECTATION_TABLES: dict[str, tuple[str, dict[str, tuple[object, str]]]] = {
+    "verified-fixed-input": ("FIXED_INPUTS", FIXED_INPUTS),
+    "session-bound": ("SESSION_BOUND_INPUTS", SESSION_BOUND_INPUTS),
+}
 for _f, (_d, _why) in RECORD_FIELD_DISPOSITION.items():
     if _d not in DISPOSITIONS:
         raise Invalid(
@@ -196,22 +259,41 @@ for _f, (_d, _why) in RECORD_FIELD_DISPOSITION.items():
         raise Invalid(f"{_f} carries no REASON; the census's whole value is the reason at the branch")
 del _f, _d, _why
 
-# ...and `FIXED_INPUTS` and the census are the same fact written twice, so they are checked against
-# each other at import — the `ZERO_REQUIRED_COUNTERS` pattern. A field given an expected value but
-# left classified `ignored` (or vice versa) is exactly the half-wired guard this issue keeps finding.
-for _k in FIXED_INPUTS:
-    if RECORD_FIELD_DISPOSITION.get(_k, ("", ""))[0] != "verified-fixed-input":
+# ...and each expectation table and the census are the same fact written twice, so they are checked
+# against each other at import, IN BOTH DIRECTIONS, for EVERY verifying disposition — the
+# `ZERO_REQUIRED_COUNTERS` pattern. A field given an expected value but left classified `ignored`
+# (or classified as verified with no table entry, so nothing would be verified) is exactly the
+# half-wired guard this issue keeps finding.
+for _disp, (_table_name, _table) in _EXPECTATION_TABLES.items():
+    if _disp not in DISPOSITIONS:
         raise Invalid(
-            f"{_k} has an expected FIXED value but is not classified `verified-fixed-input` in"
-            " RECORD_FIELD_DISPOSITION — the census and the verification disagree"
+            f"{_table_name} states expectations for the disposition {_disp!r}, which is not one of"
+            f" {DISPOSITIONS} — so no field could ever carry it and the whole table is dead code"
         )
+    if not _table:
+        raise Invalid(
+            f"{_table_name} is EMPTY, so the {_disp!r} disposition verifies nothing while the"
+            " census claims it does — a check with no subject prints exactly like a passing one"
+        )
+    for _k in _table:
+        if RECORD_FIELD_DISPOSITION.get(_k, ("", ""))[0] != _disp:
+            raise Invalid(
+                f"{_k} has an expected value in {_table_name} but is not classified {_disp!r} in"
+                " RECORD_FIELD_DISPOSITION — the census and the verification disagree"
+            )
 for _k, (_d, _) in RECORD_FIELD_DISPOSITION.items():
-    if _d == "verified-fixed-input" and _k not in FIXED_INPUTS:
-        raise Invalid(
-            f"{_k} is classified `verified-fixed-input` but FIXED_INPUTS states no value for it, so"
-            " nothing would be verified — the classification would be a claim about no check"
-        )
-del _k, _d
+    if _d in _EXPECTATION_TABLES:
+        _table_name, _table = _EXPECTATION_TABLES[_d]
+        if _k not in _table:
+            raise Invalid(
+                f"{_k} is classified {_d!r} but {_table_name} states no expectation for it, so"
+                " nothing would be verified — the classification would be a claim about no check"
+            )
+# EVERY verifying disposition must be REACHED BY A CHECKER, or a field could be classified as
+# verified while no code compares it. Asserted against the checker functions' own declared coverage
+# (`_CHECKED_DISPOSITIONS`, defined beside them), which is the direction round 12's F2 missed one
+# level out: the freeze was performed and the check on it was nominal.
+del _k, _d, _disp, _table_name, _table
 
 # Every counter that must be present AND zero for a rep to be reported.
 ZERO_REQUIRED_COUNTERS = ("requests_error", "requests_unavailable")
@@ -268,7 +350,7 @@ def check_record_surface(tag: str, rec: dict) -> None:
             f"flight rep {tag} step record carries field(s) this reporter has never"
             f" classified: {', '.join(unknown)}."
             " Every field of the load generator's record must be recorded in"
-            " RECORD_FIELD_DISPOSITION as CONSUMED, VERIFIED-FIXED-INPUT, REQUIRED-PRESENT or"
+            " RECORD_FIELD_DISPOSITION as CONSUMED, VERIFIED-FIXED-INPUT, SESSION-BOUND or"
             " IGNORED-with-a-reason, because"
             " a counter nobody classified is a counter nobody reads: `requests_unavailable`"
             " (admission shed) went COMPLETELY UNREAD, so a rep whose requests were shed"
@@ -318,16 +400,91 @@ def check_fixed_inputs(tag: str, rec: dict) -> dict:
                 " record produced under different conditions as a result for these."
             )
         verified[key] = got
-    # `round` is REQUIRED PRESENT and not compared — see its census entry for why the comparison
-    # belongs to the `<tag>.round` artifact rather than to a second copy here.
-    for key, (disp, why) in RECORD_FIELD_DISPOSITION.items():
-        if disp != "required-present":
-            continue
+    return verified
+
+
+def check_session_bound_inputs(tag: str, rec: dict, expected: dict[str, str]) -> dict:
+    """REQUIRE the SESSION-BOUND inputs to match this rep's own identity (#3272 round 14, F1/F2).
+
+    The sibling of `check_fixed_inputs` for the fields whose correct value is not a constant:
+    `round` must be the rep's TAG.
+
+    Before this, `round` was verified only to EXIST, and SWAPPING TWO REPS' JSONL files passed
+    everything. `perf-<tag>.csv` and `<tag>.round` are located by TAG (from the filename), so rep
+    1's rows and duration were divided by rep 2's cycles and attributed to rep 2's round — a
+    corrupted `cycles/row` and a mis-paired comparison, from an artifact set that is entirely
+    self-consistent on disk.
+
+    `expected` maps field -> the value this rep must carry, built by the CALLER from the session
+    manifest and the tag (`ws0_flight_arm.session_bound_expectations`) — never from a default here.
+    Every session-bound field must appear in it: a field the caller forgot to supply an expectation
+    for is an ERROR, not a field waved through, because that is precisely the silent-skip shape
+    (`rec.get(k, <what we want>)`) this module refuses everywhere else.
+
+    Compared as STRINGS with an explicit `str` type check, never `str(got) == want`: a coercion
+    would make `round: 1` match the tag `"1"`, and the point is to compare what the loadgen actually
+    wrote (`round: String`, `endpoint: String` in `StepRecord`).
+
+    Returns what was verified, so the rep's record can state it.
+    """
+    verified: dict[str, str] = {}
+    for key, (source, why) in SESSION_BOUND_INPUTS.items():
+        if key not in expected:
+            raise Invalid(
+                f"internal: no expected value was supplied for the session-bound field `{key}`"
+                f" (rep {tag}), whose correct value comes from {source}. A session-bound field"
+                " with no expectation would be verified by nothing while the census says it is"
+                " verified — the half-wired guard #3272 keeps finding. Supply it in"
+                " ws0_flight_arm.session_bound_expectations."
+            )
+        want = expected[key]
         if key not in rec:
             raise Invalid(
-                f"flight rep {tag} step record carries no `{key}`, so this record cannot be"
-                f" attributed to a rep at all. {why}"
+                f"flight rep {tag} step record carries no `{key}`, so {source} could not be"
+                f" compared against it and this record cannot be attributed to this rep or this"
+                f" server at all. A missing field is an error, never an assumed default (#3272"
+                f" round 14). {why}"
             )
+        got = rec[key]
+        if not isinstance(got, str):
+            raise Invalid(
+                f"flight rep {tag} recorded `{key}` = {got!r} ({type(got).__name__}), but the"
+                f" load generator writes it as a STRING (StepRecord.{key}). Compared without a"
+                " coercion deliberately: `str(got) == want` would let a numeric 1 satisfy the tag"
+                f" spelling '1'. {why}"
+            )
+        if got != want:
+            raise Invalid(
+                f"flight rep {tag} recorded `{key}` = {got!r}, but for this rep {source} is"
+                f" {want!r}. {why}. The record does not belong to the rep whose filename it was"
+                " found under, so its rows and duration would be combined with ANOTHER rep's perf"
+                " counters; re-run rather than reporting a record from elsewhere."
+            )
+        verified[key] = got
     return verified
+
+
+# WHICH DISPOSITIONS A CHECKER ACTUALLY COMPARES — asserted against `_EXPECTATION_TABLES` at import,
+# so a field cannot be classified as verified by a table no function reads. That is round 12's F2
+# one level out: the freeze happened and the CHECK ON IT was nominal, which is the same defect as a
+# table that exists and is never consulted.
+_CHECKED_DISPOSITIONS = {
+    "verified-fixed-input": check_fixed_inputs,
+    "session-bound": check_session_bound_inputs,
+}
+for _disp in _EXPECTATION_TABLES:
+    if _disp not in _CHECKED_DISPOSITIONS:
+        raise Invalid(
+            f"the disposition {_disp!r} has an expectation table but no checker function reads it,"
+            " so a field classified with it would be verified by nothing while the census says it"
+            " is verified (#3272 round 14)"
+        )
+for _disp in _CHECKED_DISPOSITIONS:
+    if _disp not in _EXPECTATION_TABLES:
+        raise Invalid(
+            f"{_disp!r} has a checker but no expectation table, so the checker would compare"
+            " against nothing"
+        )
+del _disp
 
 

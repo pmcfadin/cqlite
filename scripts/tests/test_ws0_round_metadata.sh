@@ -88,7 +88,7 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # shellcheck source=scripts/tests/lib-ws0-report-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-report-fixtures.sh"
 
-GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 make_corpus "$TMP/corpus"
 
@@ -606,6 +606,93 @@ else
   fail "the deleted interleaving claim text has reappeared on an emitting path in scripts/perf/"
 fi
 
+# ==========================================================================
+# THE RECORD MUST BE **THIS REP'S** — SWAPPED JSONL FILES (#3272 round 14, F1)
+# ==========================================================================
+# `round` was REQUIRED PRESENT and never compared to anything, so a record could sit in ANOTHER
+# rep's filename and be reported as that rep's measurement. That is not a hypothetical shape: the
+# reporter locates a rep's PERF COUNTERS (`perf-<tag>.csv`) and its ROUND METADATA (`<tag>.round`)
+# by the TAG IN THE FILENAME, and reads its rows and duration from the JSONL under that same name.
+# Swap two reps' JSONL files and rep 1's rows are divided by rep 2's cycles, under rep 2's round
+# label — a corrupted `cycles/row` and a mis-attributed paired comparison, out of an artifact set
+# that is entirely self-consistent on disk. Nothing else in the rig can see it: every counter is
+# valid, every file is present, both reps really were measured.
+#
+# The swap is EXECUTED rather than simulated by hand-editing one field, because the property is
+# "this record belongs to this rep", and a swap is the way a real session acquires the defect (two
+# reps into one `--out`, a salvaged file, a rename).
+d="$TMP/swapped-jsonl"; mkdir -p "$d"
+for rep in 1 2; do
+  make_scan_rep "$d" warm "$rep" ok
+  make_flight_rep "$d" warm "$rep" ok "$GOOD_FLIGHT"
+done
+# Distinct ROW COUNTS, so the swap is a real corruption of a figure and not merely a relabelling:
+# post-swap, rep 1's file holds rep 2's rows. Both are exact multiples of the corpus row count, so
+# the full-corpus check cannot catch it either — which is the point.
+python3 - "$d" "$CORPUS_ROWS" <<'PY'
+import pathlib, sys
+d, rows = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+for rep, mult in ((1, 1), (2, 2)):
+    tag = f"flight-bypass-warm-{rep}"
+    # The record is REP 2's when rep == 2 — written correctly first, then swapped below.
+    (d / f"{tag}.jsonl").write_text(
+        '{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full",'
+        f'"round":"{tag}","requests_ok":{mult},"requests_error":0,"requests_unavailable":0,'
+        f'"rows_total":{rows * mult},"rows_per_s":{rows * mult / 4.0},"duration_s":4.0}}'
+        "\n"
+    )
+a, b = d / "flight-bypass-warm-1.jsonl", d / "flight-bypass-warm-2.jsonl"
+a_text, b_text = a.read_text(), b.read_text()
+a.write_text(b_text)
+b.write_text(a_text)
+PY
+out=$(run_report_cfg "$d" "$TMP/corpus" 2 warm bypass 1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q "recorded \`round\`" <<<"$out"; then
+  pass "OBSERVED: two reps' SWAPPED JSONL files are REFUSED — the record must carry the tag it was found under (#3272 round 14, F1)"
+else
+  fail "a swapped rep JSONL must be refused: rep 1's rows would be divided by rep 2's cycles (rc=$rc, out: $out)"
+fi
+# The refusal must name WHAT IS LOST, not merely that two strings differ — an operator reading
+# "round != tag" cannot tell whether it matters.
+if grep -q "combined with ANOTHER rep's perf counters" <<<"$out"; then
+  pass "the swapped-record refusal names the CONSEQUENCE (another rep's perf counters), not just a mismatch"
+else
+  fail "the swapped-record refusal must state what the mismatch corrupts (out: $out)"
+fi
+# ...and NOTHING is written, so no later reader can quote the corrupted figure.
+if [ ! -e "$d/results.json" ]; then
+  pass "no results.json is written for the swapped-JSONL session"
+else
+  fail "a refused run must not leave a results.json behind"
+fi
+# NON-VACUITY, measured: the PRE-FIX rule was "`round` is present", and the swapped records satisfy
+# it — both files carry a `round` key. Asserted against the swapped artifacts THEMSELVES rather
+# than restated as a claim, so this case cannot be about an input the old code would have refused.
+if python3 - "$d" <<'PY'
+import json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+recs = {}
+for rep in (1, 2):
+    tag = f"flight-bypass-warm-{rep}"
+    recs[tag] = json.loads((d / f"{tag}.jsonl").read_text().strip())
+# The PRE-FIX predicate, in substance: presence, and nothing else.
+for tag, rec in recs.items():
+    if "round" not in rec:
+        raise SystemExit(f"{tag}: no `round` at all, so the pre-fix check would have refused it too")
+# ...and the swap really did happen: each file carries the OTHER rep's label and row count.
+if recs["flight-bypass-warm-1"]["round"] != "flight-bypass-warm-2":
+    raise SystemExit("rep 1's file does not carry rep 2's round label — the swap did not happen")
+if recs["flight-bypass-warm-1"]["rows_total"] == recs["flight-bypass-warm-2"]["rows_total"]:
+    raise SystemExit("the two reps carry the same rows_total, so the swap corrupts no figure and "
+                     "this case would prove nothing about cycles/row")
+print("pre-fix presence check SATISFIED by both swapped records; row counts differ")
+PY
+then
+  pass "F1 NON-VACUITY: the PRE-FIX rule (`round` is PRESENT) is SATISFIED by both swapped records, and their row counts differ — so the swap was accepted and did corrupt cycles/row"
+else
+  fail "F1: the swapped records must satisfy the pre-fix presence rule, else the refusal above proves nothing was closed"
+fi
+
 # And the reporter REFUSES an unpairable set rather than silently falling back to
 # medians alone — which is the comparison §3b forbids on its own.
 d="$TMP/unpairable"; mkdir -p "$d"
@@ -752,7 +839,7 @@ no_claim_probe "the accepted 3-round session" "$out"
 # The floor is deliberately BELOW the current count (adding a case must not red the suite) and
 # far above zero. `$checks` is incremented by `pass`/`fail` themselves, so it counts what
 # actually RAN rather than what is written in the file.
-MIN_CHECKS=41
+MIN_CHECKS=45
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

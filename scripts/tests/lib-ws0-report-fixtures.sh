@@ -54,10 +54,19 @@ EOF
 }
 
 # make_flight_rep <dir> <temp> <rep> <prewarm> <jsonl-body>
-# The JSONL body is given VERBATIM so a case can omit a key or supply two records.
+# The JSONL body is given VERBATIM so a case can omit a key or supply two records — with ONE
+# substitution: the literal `__TAG__` becomes this rep's real tag (#3272 round 14, F1).
+#
+# The reporter now REQUIRES `round` to EQUAL the tag the artifact was found under, because a record
+# whose round disagrees is a record from another rep sitting in this rep's filename — and
+# `perf-<tag>.csv` is located by that filename, so its cycles would be divided by the other rep's
+# rows. The fixtures used to carry a constant `"round":"r"` for every rep, which is exactly the
+# input the new check refuses; `__TAG__` keeps the bodies readable at ~25 call sites while binding
+# each to its own rep. A case whose SUBJECT is a WRONG round writes the wrong value literally, and
+# is then refused — which is the guard working.
 make_flight_rep() {
   local d="$1" tag="flight-bypass-$2-$3"
-  printf '%s\n' "$5" > "$d/$tag.jsonl"
+  printf '%s\n' "${5//__TAG__/$tag}" > "$d/$tag.jsonl"
   perf_csv "$d/perf-$tag.csv" 8000000 16000000
   printf '%s\n' "$4" > "$d/$tag.prewarm.status"
   # ...and the flight arm takes the OTHER position, mirroring the driver.
@@ -68,7 +77,7 @@ make_flight_rep() {
 # it (#3272 F4): the admission-shed counter was completely unread, so a rep whose requests
 # the server SHED was reported as failure-free. A fixture omitting it is refused — which is
 # the guard working, and is why the cases whose subject IS the omission set it explicitly.
-GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"r","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
+GOOD_FLIGHT='{"schema":"flight-loadgen.step/v1","step":0,"target_concurrency":1,"shape":"full","round":"__TAG__","requests_ok":1,"requests_error":0,"requests_unavailable":0,"rows_total":1000,"rows_per_s":250.0,"duration_s":4.0}'
 
 # make_session <dir> <flight-jsonl> — a complete one-warm-rep session dir.
 make_session() {

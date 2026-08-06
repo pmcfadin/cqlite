@@ -24,10 +24,12 @@ import pathlib
 
 from ws0_collect import prewarm_block, read_prewarm, spread, REQUIRED_EVENTS
 from ws0_loadgen_record import (
+    SESSION_BOUND_INPUTS,
     ZERO_REQUIRED_COUNTERS,
     _ZERO_COUNTER_MEANING,
     check_fixed_inputs,
     check_record_surface,
+    check_session_bound_inputs,
 )
 from ws0_rounds import collect_round_meta
 from ws0_validate import (
@@ -114,6 +116,35 @@ def check_request_count(
     return count
 
 
+def session_bound_expectations(tag: str) -> dict[str, str]:
+    """What each SESSION-BOUND field of rep `tag`'s record MUST equal (#3272 round 14, F1).
+
+    Built here rather than defaulted inside the checker, and every field of
+    `SESSION_BOUND_INPUTS` must get an entry — an absent one is an `Invalid` from the checker,
+    not a field waved through. The completeness is ASSERTED against the shipped table rather
+    than trusted to this function staying in step with it: a field added to
+    `SESSION_BOUND_INPUTS` and forgotten here would otherwise be classified as verified while
+    nothing supplied a value to verify it against, which is the half-wired shape #3272 keeps
+    finding one layer in.
+
+    `round` is the rep's TAG. It is the same string the driver passes as `--round "$tag"`
+    (lib-measure.sh) and the same string the artifact is NAMED for, which is exactly why the
+    comparison is worth making: `perf-<tag>.csv` and `<tag>.round` are found by that name, so a
+    record whose own `round` disagrees is a record from a different rep sitting in this rep's
+    filename — and its rows would be divided by this rep's cycles.
+    """
+    expected = {"round": tag}
+    absent = [k for k in SESSION_BOUND_INPUTS if k not in expected]
+    if absent:
+        raise Invalid(
+            f"internal: no expectation is built for the session-bound field(s)"
+            f" {', '.join(sorted(absent))} (rep {tag}). Each is classified as VERIFIED against the"
+            " session in ws0_loadgen_record.SESSION_BOUND_INPUTS, so leaving it without an expected"
+            " value would mean the census claims a check that nothing performs (#3272 round 14)."
+        )
+    return expected
+
+
 def collect_flight(
     d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int
 ) -> dict:
@@ -173,6 +204,16 @@ def collect_flight(
         # "it is only an INPUT" reason. Checked BEFORE the counters below, because a record from a
         # different workload should be refused for THAT rather than for a downstream consequence.
         fixed_inputs = check_fixed_inputs(tag, rec)
+        # ...and THE SESSION-BOUND INPUTS must match THIS REP'S IDENTITY (#3272 round 14, F1).
+        # `round` was REQUIRED PRESENT and never compared to anything, so SWAPPING TWO REPS' JSONL
+        # FILES passed every check above: `perf-<tag>.csv` and `<tag>.round` are located by TAG from
+        # the FILENAME, so rep 1's rows and duration were divided by rep 2's cycles and attributed
+        # to rep 2's round — a corrupted cycles/row and a mis-paired comparison out of an artifact
+        # set that is entirely self-consistent on disk. Recorded in its OWN block below rather than
+        # merged into `verified_fixed_inputs`: these were verified against the SESSION, not against
+        # a constant, and one label for two different kinds of check is how "verified" stops meaning
+        # anything specific.
+        session_bound = check_session_bound_inputs(tag, rec, session_bound_expectations(tag))
         # EVERY ZERO-REQUIRED COUNTER, in ONE loop over `ZERO_REQUIRED_COUNTERS` (#3272 F4).
         #
         # This was written for `requests_error` alone, and its admission-shed sibling
@@ -335,6 +376,12 @@ def collect_flight(
                 # shape, step index and schema version this rep's figures are conditional on. A
                 # reader comparing two sessions can see the baseline was the same baseline.
                 "verified_fixed_inputs": fixed_inputs,
+                # ...and what was verified against THIS REP'S OWN IDENTITY (#3272 round 14, F1):
+                # the `round` label the record carries, compared to the tag the artifact was found
+                # under. Kept separate from the block above because it is a different claim — one
+                # is "this rep ran the workload the rig fixes", the other is "this record is this
+                # rep's" — and a swapped JSONL satisfies the first while failing the second.
+                "verified_session_bound_inputs": session_bound,
                 "prewarm": prewarm[-1]["status"],
             }
         )
