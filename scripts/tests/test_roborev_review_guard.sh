@@ -2450,7 +2450,7 @@ run_wrapper "$work"
 assert_verdict 'case (n)' FAIL 1
 assert_says 'case (n) prompt-content FAIL counts the absent paths' '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
 assert_says 'case (n) names the missing path' '^  main\.rs$'
-assert_says 'case (n) says the reviewer never received the diffs' 'the reviewer never received their diffs'
+assert_says 'case (n) says the reviewer never received the diffs' 'nothing establishes that the reviewer received their diffs'
 assert_says 'case (n) every other check passed' '^vacuity-tier1: PASS$'
 assert_says 'case (n) review-completed still PASS' '^review-completed: PASS$'
 
@@ -2930,7 +2930,7 @@ run_wrapper "$work"
 assert_verdict 'case (x1)' FAIL 1
 assert_says 'case (x1) prompt-content names the uncovered code path' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
 assert_says 'case (x1) lists the missing file' '^  alpha\.rs$'
-assert_says 'case (x1) says the reviewer never received the diffs' 'the reviewer never received their diffs'
+assert_says 'case (x1) says the reviewer never received the diffs' 'nothing establishes that the reviewer received their diffs'
 assert_says 'case (x1) the range itself verified fine' '^sha-assert: PASS$'
 
 printf '== case (x3): a range anchored at the EMPTY TREE FAILs (two-positional form) ==\n'
@@ -3497,23 +3497,29 @@ assert_lacks '--help no longer documents a roborev-builtin source tag' '\[robore
 # The block's KEY CONTRACT is what readers grep, so --help must list exactly the keys the
 # wrapper emits.
 assert_says '--help still documents the prompt-content key' 'prompt-content'
-# #3312: the second diff-delivery mode is part of the documented contract — an operator reading
-# a `snapshot diff unusable:` FAIL must be able to learn from --help what the check now reads and
-# that the snapshot directory is transient.
-assert_says '--help documents BOTH diff-delivery modes' 'TWO DIFF-DELIVERY MODES'
-# C‴ (#3312): the documented CONTRACT changed with the verdict semantics, so --help must say that snapshot
-# mode is reported rather than certified, and must name the keys that carry the record instead.
-# C⁗ (#3312): the documented contract moved with the verdict semantics again — snapshot mode is now DETECTED
-# and reported, nothing is read, and the hang class must be described as unreachable rather than fixed.
-assert_says '--help says snapshot mode is detected and reported, not certified' \
-  'SNAPSHOT mode is DETECTED AND REPORTED, not certified'
-assert_says '--help states plainly what a snapshot-mode PASS does NOT assert' \
-  'does NOT.{0,3}\n?assert the reviewer received the census paths|does NOT$'
-assert_says '--help says nothing is read' 'NOTHING IS READ: no digest, no size, no stat'
-assert_says '--help describes the hang class as unreachable, NOT fixed' 'NOT REACHABLE rather than fixed'
-assert_says '--help says inline mode is unchanged' 'INLINE mode$|INLINE mode is certified exactly as before'
-assert_says '--help documents the snapshot record keys' 'snapshot-path/-containment/-expected'
-assert_says '--help says an unshaped path or the delegated tier is a named FAIL' 'is a named FAIL, not a NOTICE'
+# #3312 (owner ruling (4)): the CONTRACT --help documents is now the ONE QUESTION plus the waiver.
+# An operator reading an absence FAIL must be able to learn from --help what was asked, that the
+# machine cannot tell WHY the paths are absent, and exactly how a human may waive it — including the
+# limitation that authorship is not mechanically verified. Each of these is a promise to a reader, so
+# each is asserted rather than assumed.
+assert_says '--help documents the single question, with no delivery classifier' \
+  'ONE QUESTION, NO DELIVERY CLASSIFIER'
+assert_says '--help says absence is unconditionally a FAIL' \
+  'ABSENT is a FAIL, unconditionally, whatever caused it'
+assert_says '--help states the accepted cost: the two absences are indistinguishable' \
+  'IDENTICAL to the machine'
+assert_says '--help names the token accounting as the human evidence' '398k-649k input'
+assert_says '--help gives the waiver marker verbatim' \
+  'roborev-waive: prompt-content-absent sha=<40-hex head> reason=<why>'
+assert_says '--help says who may grant it, and that a worker may only request' \
+  'may REQUEST one'
+assert_says '--help says the waiver is sha-bound' 'SHA-BOUND: a push invalidates it'
+assert_says '--help says it excuses the absence verdict only' 'excuses the ABSENCE\n*verdict ONLY'
+assert_says '--help says the waived token is DISTINCT from PASS' 'a DISTINCT token'
+assert_says '--help states the authorship limitation, not an implied guarantee' \
+  'AUTHORSHIP IS PROCESS-ENFORCED WITH AN AUDIT TRAIL, NOT MECHANICALLY VERIFIED'
+assert_lacks '--help no longer documents the deleted snapshot record keys' 'snapshot-path/-containment/-expected'
+assert_lacks '--help no longer claims two delivery modes are treated differently' 'TWO DIFF-DELIVERY MODES'
 assert_never_enqueued '--help'
 
 printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
@@ -3608,10 +3614,10 @@ else
   ok 'structural: roborev-review-checks.sh does no diff --git scanning of its own'
 fi
 _coll_defs=$(grep -cE '^roborev_collect_prompt_headers\(\) \{' "$ORACLES" || true)
-if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_review_diff_headers "\$PROMPT_FILE"' "$CHECKS_FILE"; then
+if [ "${_coll_defs:-0}" -eq 1 ] && grep -qE '^ *roborev_collect_prompt_headers "\$PROMPT_FILE"' "$CHECKS_FILE"; then
   ok 'structural: the prompt headers (and their rename from/to lines) are collected by the oracles file'
 else
-  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not go through the oracles' diff-source resolver"
+  bad "structural: roborev_collect_prompt_headers is not the single collector (defs in oracles: ${_coll_defs:-0}) or prompt-content does not call it (#3312 ruling (4): the prompt is the only source there is)"
 fi
 # (6) C⁗ (#3312): WHAT MUST STILL BE TRUE NOW THAT NOTHING IS READ. The observer, the digest, the size, the
 #     bounded-read watchdog and the three-valued path-state helper are all DELETED by owner ruling, so the
@@ -3634,7 +3640,9 @@ for _gone in 'roborev_collect_review_diff_headers' 'roborev_prompt_snapshot_path
   'snapshot-unbound' 'unparseable-instruction' 'BLOCKRESET' 'BLOCKHDR' 'in_trailer' 'in_fence' \
   '_rx_delivery_hdrs' '_rx_snap_paths' 'SNAPSHOT_NOTICE' 'ROBOREV_SNAPSHOT_PATH' \
   'ROBOREV_SNAPSHOT_CONTAINMENT'; do
-  if grep -qF "$_gone" "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null; then
+  # EXECUTABLE LINES ONLY: a comment that RECORDS what was deleted (and why it may not come back) is
+  # the durable artifact of this ruling, so scanning prose would make the history itself a violation.
+  if grep -hv '^[[:space:]]*#' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null | grep -qF "$_gone"; then
     _classifier="$_classifier $_gone"
   fi
 done
@@ -3927,7 +3935,7 @@ else
   # edit could delete the positive arm while every behavioural case except cx28 stayed green.
   # Both halves are required: an allow-list whose fallthrough is permissive pins nothing.
   _scan_positive=$(printf '%s\n' "$_scan_block" \
-    | grep -E 'PASS\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' | head -1 || printf '')
+    | grep -E 'PASS\|WAIVED\|SKIP\|NOTICE\|UNAVAILABLE\|DEGRADED' | head -1 || printf '')
   if [ -n "$_scan_positive" ]; then
     ok 'structural: the verdict scan has a POSITIVE arm — the non-failing set is an allow-list, not "not-failing"'
   else
@@ -3936,7 +3944,7 @@ else
   # The `*)` fallback must SET failed=1. Read from the positive `case`'s own body: from the
   # allow-list line to the `esac` that closes it.
   _scan_fallthrough=$(printf '%s\n' "$_scan_block" \
-    | awk '/PASS\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
+    | awk '/PASS\|WAIVED\|SKIP\|NOTICE/ { inb = 1 } inb { print } inb && /esac/ { exit }' \
     | grep -A 3 -E '^[[:space:]]*\*\)' || printf '')
   if printf '%s\n' "$_scan_fallthrough" | grep -qE '^[[:space:]]*failed=1[[:space:]]*$'; then
     ok 'structural: the positive arm FAILS CLOSED on an unrecognised value (its *) sets failed=1)'
@@ -3978,17 +3986,22 @@ else
   if [ -z "$_aff_body" ]; then
     bad 'structural: could not locate the affirmation backstop case body to inspect for per-key exemptions'
   else
-    # C‴ (#3312) AUTHORISES EXACTLY ONE EXEMPTION BEYOND THE AFFIRMATIVE PASS, and this assert is what
-    # keeps it at one: the owner ruled that a snapshot-delivered diff is OBSERVED AND REPORTED rather than
-    # certified, so `prompt-content: NOTICE` is admitted — for THAT KEY ONLY, and ONLY when
-    # `SNAPSHOT_NOTICE=1`. A third arm, or a broader second one, is the per-key escape hatch #3229 forbade.
+    # EXACTLY ONE NON-`PASS` ADMISSION IS AUTHORISED, and it is the human-authorized absence waiver
+    # (owner ruling (4), #3312). It is NOT the retired per-key hatch: that one admitted a `NOTICE` for a
+    # named key in a machine-inferred mode, and both the mode and the inference are deleted. This one
+    # admits `WAIVED` only when the provenance is COMPLETE — a granted state, an authorizer, a reason,
+    # and a sha equal to the certified head — and is deliberately NOT keyed on `det_key`, so it cannot
+    # become the "which keys are exempt" argument again. A third `continue`, or a provenance-free
+    # admission, is the escape hatch #3229 forbade.
     _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
     if [ "$_aff_continues" -eq 2 ] &&
       printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;' &&
-      printf '%s\n' "$_aff_body" | grep -qF 'if [ "$det_key" = "prompt-content" ] && [ "${SNAPSHOT_NOTICE:-0}" -eq 1 ]; then continue; fi'; then
-      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the C‴ exemption, narrowed by key AND by mode'
+      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' &&
+      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SHA:-}" = "${HEAD_SHA:-}"' &&
+      ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
+      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on complete sha-matching provenance and not on the key'
     else
-      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s) and/or the C‴ exemption is not narrowed to prompt-content in snapshot mode — no other per-key escape hatch is authorised (#3229 owner ruling / #3312)"
+      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED without complete provenance, or is keyed on det_key — the per-key escape hatch #3229 forbade and ruling (4) deleted (#3312)"
     fi
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this
