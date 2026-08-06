@@ -883,7 +883,7 @@ done
 # whitespace, `)` or end) rather than merely occurring somewhere in the text.
 seam_audit=$(awk \
   -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
-  -v gatere='(^|[^A-Za-z0-9_])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
+  -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
   # TWO representations, because the two matches want different things (roborev round 6, Low).
   #   `code`  — comments stripped only. The SEAM match needs this: a seam is a VARIABLE REFERENCE
   #             and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so
@@ -952,7 +952,7 @@ fi
 # Same de-vacuuming as the seam audit above: comments stripped, gate matched in a command position.
 priv_audit=$(awk \
   -v privre='(for [a-z_]+ in (sudo|sysctl)|command -v .*(sudo|sysctl))' \
-  -v gatere='(^|[^A-Za-z0-9_])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
+  -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
   # TWO representations, because the two matches want different things (roborev round 6, Low).
   #   `code`  — comments stripped only. The SEAM match needs this: a seam is a VARIABLE REFERENCE
   #             and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so

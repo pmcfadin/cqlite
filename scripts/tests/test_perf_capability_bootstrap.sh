@@ -366,8 +366,9 @@ pwsudo_out=$(PATH="$pwsudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 pwsudo_rc=$?
 if [ "$pwsudo_rc" -eq 0 ] && [ -z "$(ls -A "$pwsudo_sysctl")" ] \
    && printf '%s' "$pwsudo_out" | grep -q 'sudo needs a password' \
-   && printf '%s' "$pwsudo_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
-   && ! printf '%s' "$pwsudo_out" | grep -q "no 'sudo' binary"; then
+   && printf '%s' "$pwsudo_out" | grep -q 'authenticate first, then re-run:.*sudo -v && bash scripts/bootstrap-agent-machine.sh --yes' \
+   && ! printf '%s' "$pwsudo_out" | grep -q "no 'sudo' binary" \
+   && ! printf '%s' "$pwsudo_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes'; then
   ok "perf section: a password-requiring sudo is diagnosed distinctly (not 'no sudo binary') with the interactive remedy, writes nothing, exits 0"
 else
   bad "perf section: password-requiring sudo mishandled (rc=$pwsudo_rc, dir='$(ls -A "$pwsudo_sysctl")')"
