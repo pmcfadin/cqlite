@@ -3910,6 +3910,64 @@ assert_lacks 'case (wv32) a hostile scanner cannot fabricate a grant' '^prompt-c
 assert_lacks 'case (wv32) and its fabricated author is never credited' 'attacker'
 reset_stub
 
+printf '== (wv33) JOB 28: a FENCED marker from an allowlisted author does NOT grant ==\n'
+# THE ACCIDENT THIS CLOSES, and the most likely spelling of the whole family: the anchor requires the
+# marker to BE its own line, which defeats indented, `>`-quoted, bulleted and mid-sentence copies — but a
+# Markdown FENCE preserves column zero. So an ALLOWLISTED human documenting the exact syntax, or pasting a
+# real example into a PR comment, granted the waiver by explaining it. In-model by our own boundary: this is
+# the ACCIDENT category, not a hostile invoker.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(FENCE_BASE="$w_base" FENCE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=documenting the form"
+          % (os.environ["FENCE_BASE"], os.environ["FENCE_HEAD"]))
+body = "Here is how the waiver marker looks:\n\n```\n" + marker + "\n```\n\nPost it as a top-level comment."
+print(json.dumps({"comments": [{"author": {"login": "pmcfadin"}, "body": body}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv33)' FAIL 1
+assert_says 'case (wv33) a fenced marker is data, not an authorization' \
+  '^waiver: NONE \(no anchored waiver line in a TOP-LEVEL PR comment for this review'
+assert_lacks 'case (wv33) documenting the syntax must not grant' '^prompt-content: WAIVED'
+assert_says 'case (wv33) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+reset_stub
+
+printf '== (wv33b) JOB 28: the SAME marker unfenced, same author, still grants (positive control) ==\n'
+# The control that makes wv33 meaningful: only the fence differs, so the case pins that the FENCE decided
+# it — not the author, the scope, the reason or some incidental fixture difference.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=documenting the form\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv33b)' PASS 0
+assert_says 'case (wv33b) the unfenced marker grants' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=documenting the form\)\$"
+reset_stub
+
+printf '== (wv33c) JOB 28: tilde fences and a marker AFTER a closed fence ==\n'
+# Both fence characters are tracked, and the region ENDS: a marker after a properly closed fence is a
+# genuine authorization and must still grant. A fence rule that swallowed the rest of the comment would be
+# fail-closed but would break the ordinary "here is the form, and here is my authorization" comment.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS_JSON=$(FENCE_BASE="$w_base" FENCE_HEAD="$w_head" python3 -c '
+import json, os
+marker = ("roborev-waive: prompt-content-absent base=%s head=%s job=4656 reason=token accounting checked"
+          % (os.environ["FENCE_BASE"], os.environ["FENCE_HEAD"]))
+body = "~~~\n" + marker.replace("token accounting checked", "just an example") + "\n~~~\n" + marker
+print(json.dumps({"comments": [{"author": {"login": "pmcfadin"}, "body": body}]}))
+')
+run_wrapper "$w_work"
+assert_verdict 'case (wv33c)' PASS 0
+assert_says 'case (wv33c) the tilde-fenced example is ignored and the real marker grants' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$w_base head=$w_head job=4656 reason=token accounting checked\)\$"
+reset_stub
+
 printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
@@ -4170,6 +4228,21 @@ if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${BAS
   ok 'structural: WAIVED is admitted only with a complete, sha-matching provenance, and the gate is not key-scoped'
 else
   bad 'structural: the affirmation backstop admits WAIVED without checking its provenance, or reintroduces a per-key escape hatch (#3312 ruling (4))'
+fi
+# ===== FENCED REGIONS ARE SKIPPED, IN THE SCANNER (#3312 job 28) =====
+# A fence preserves column zero, so the anchor alone did not stop a populated marker quoted inside one from
+# granting — the accidental bypass most likely to occur, since a fence is how a human documents a syntax.
+# The state machine must live in the SCANNER (one implementation of the parse) and must track both fence
+# characters; a shell-side copy is how the in-band channel of job 26 came back.
+_fence_ok=1
+grep -qF 'FENCE_CHARS = ("`", "~")' "$SCAN_TOOL" || _fence_ok=0
+grep -qF 'def fence_run(line):' "$SCAN_TOOL" || _fence_ok=0
+grep -qF 'everything inside a fence is DATA' "$SCAN_TOOL" || _fence_ok=0
+grep -q 'FENCE_CHARS\|fence_run' "$ORACLES" && _fence_ok=0
+if [ "$_fence_ok" -eq 1 ]; then
+  ok 'structural: fenced regions are skipped by the scanner (both fence characters), with no shell-side copy'
+else
+  bad 'structural: fenced markers are not excluded, or the fence logic leaked into the shell — a populated marker quoted in a code fence would grant, which is the accidental bypass the anti-accident guarantee forbids (#3312 job 28)'
 fi
 # ===== THE THREAT-MODEL BOUNDARY IS STATED, ON EVERY SURFACE (#3312) =====
 # Five consecutive rounds landed in the waiver's authorization path, so the boundary is recorded to get the

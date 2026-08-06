@@ -27,6 +27,10 @@ The fix is to remove the delimiter rather than choose a rarer one: `gh --json` a
 and body as SEPARATE FIELDS, so the association is carried by the DATA STRUCTURE and there is nothing
 to forge. Nothing a body can contain changes which object it sits in.
 
+Markers inside fenced/preformatted Markdown regions are IGNORED: a fence preserves column zero, so a
+populated marker quoted inside one would otherwise grant — the accidental bypass most likely to happen,
+since a fence is how a human documents an exact syntax (#3312 job 28).
+
 The whole decision lives here — shape, scope, reason and authorization — so the shell never associates
 an author with a body at all. Values are whitespace-collapsed on output for the same reason
 `roborev-job-facts.py` collapses its own: a newline inside a value would be a second in-band channel,
@@ -43,6 +47,36 @@ MARKER = re.compile(
     r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
 )
 PREFIX = "roborev-waive: prompt-content-absent "
+# ===== FENCED REGIONS ARE DATA, NOT MARKERS (#3312 job 28) =====
+# THE ACCIDENT THIS CLOSES, and it is the most likely spelling of all of them: the anchor requires the
+# marker to BE its own line, which correctly defeats indented, `>`-quoted, bulleted and mid-sentence
+# copies — but a Markdown FENCE preserves column zero, so a populated marker quoted inside ``` … ```
+# still matched. An allowlisted human documenting the exact syntax, or pasting a real example into a PR
+# comment, would therefore GRANT the waiver by explaining it. That contradicts the anti-accidental-bypass
+# guarantee we state, so fenced/preformatted regions are skipped entirely.
+#
+# CommonMark, bounded and deliberately minimal: a fence opens with 3+ backticks or 3+ tildes, indented up
+# to 3 spaces, and closes with a fence of the SAME character that is AT LEAST as long, also indented up to
+# 3 spaces, with nothing but whitespace after it. Indented (4-space) code blocks need no handling — the
+# column-zero anchor already excludes them. An UNCLOSED fence swallows the rest of the comment, which is
+# the fail-closed direction (a marker after it is ignored, never granted).
+FENCE_CHARS = ("`", "~")
+
+
+def fence_run(line):
+    """(char, length) when `line` is a fence delimiter, else None."""
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3:
+        return None
+    if not stripped or stripped[0] not in FENCE_CHARS:
+        return None
+    char = stripped[0]
+    run = len(stripped) - len(stripped.lstrip(char))
+    if run < 3:
+        return None
+    return char, run
+
+
 PLACEHOLDERS = {
     "why", "todo", "tbd", "tba", "reason", "n/a", "na", "none", "-", "placeholder",
 }
@@ -154,8 +188,19 @@ def main(argv):
         body = comment.get("body")
         if not isinstance(body, str):
             continue
+        fence = None  # (char, length) of the open fence, or None
         for raw in body.split("\n"):
             line = raw.rstrip("\r")
+            run = fence_run(line)
+            if fence is None:
+                if run is not None:
+                    fence = run
+                    continue
+            else:
+                # A closing fence uses the SAME character and is at least as long as the opener.
+                if run is not None and run[0] == fence[0] and run[1] >= fence[1]:
+                    fence = None
+                continue  # everything inside a fence is DATA, including a column-zero marker
             # ANCHORED: the marker must BE the line, so an indented, quoted, bulleted or
             # mid-sentence copy — the ways a human legitimately quotes the form — cannot match.
             if not line.startswith(PREFIX):
