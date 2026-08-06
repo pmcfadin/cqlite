@@ -212,10 +212,14 @@ dot-separated under the `cqlite.` root; units use UCUM annotations
 | `cqlite.read.bytes` | counter | `By` | `cqlite.sstable.format`, `cqlite.compression` |
 | `cqlite.read.partitions` | counter | `{partition}` | `cqlite.sstable.format` |
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` |
-| `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`, `cqlite.query.access_path`, `cqlite.sstable.format` |
+| `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`, `cqlite.read.lookup_route`, `cqlite.sstable.format` |
 | `cqlite.read.bloom.checks` | counter | `1` | `cqlite.result`, `cqlite.sstable.format` |
 | `cqlite.read.sstables_pruned` | counter | `{sstable}` | `cqlite.sstable.format` |
 | `cqlite.read.bloom.false_negatives` | counter | `1` | `cqlite.sstable.format` |
+| `cqlite.read.partition_access.distinct_partitions` | counter | `{partition}` | `cqlite.read.repeat_bucket`, `cqlite.read.size_source` |
+| `cqlite.read.partition_access.accesses` | counter | `1` | `cqlite.read.repeat_bucket` |
+| `cqlite.read.partition_access.bytes` | counter | `By` | `cqlite.read.repeat_bucket` |
+| `cqlite.read.partition_access.sample_denominator` | gauge | `1` | (none) |
 | `cqlite.storage.open.sstables` | counter | `{sstable}` | (none) |
 | `cqlite.storage.open.bytes` | counter | `By` | (none) |
 | `cqlite.storage.open.tables` | counter | `1` | (none) |
@@ -295,7 +299,9 @@ closed value space so cardinality stays bounded. Source:
 | `cqlite.compression` | `lz4`, `snappy`, `none`, … |
 | `cqlite.result` | `hit`, `miss` |
 | `cqlite.read.lookup_route` | `index`, `bti_trie` |
-| `cqlite.query.access_path` | `full_scan`, `partition_lookup`, `multi_partition_lookup`, `clustering_slice`, `fallback_full_scan` |
+| `cqlite.read.repeat_bucket` | `1`, `2`, `3-4`, `5-8`, `9-16`, `17+` (issue #2827) |
+| `cqlite.read.size_source` | `index`, `successor_gap`, `unavailable` (issue #2827) — `successor_gap` is a MEASURED on-disk extent, `index` an index-recorded size (no Cassandra 5.0 index format records one), `unavailable` a genuinely unknown extent contributing zero bytes |
+| `cqlite.query.access_path` | `full_scan`, `partition_lookup`, `multi_partition_lookup`, `streaming_partition_lookup`, `metadata_partition_lookup`, `clustering_slice`, `fallback_full_scan` — a plain full-PK equality point read reports **`streaming_partition_lookup`**, never bare `partition_lookup` |
 | `cqlite.query.fallback_reason` | `no_schema`, `partition_key_not_fully_constrained`, `partition_key_encoding_failed`, `metadata_scan_path`, `legacy_executor_path`, `tombstones_build_no_prune` |
 | `cqlite.query.plan_type` | `table_scan`, `point_lookup`, `index_scan`, `range_scan`, `aggregation` |
 | `cqlite.rpc.method` | fixed `FlightService` method set (`do_get`, `get_flight_info`, `get_schema`, `handshake`, …) |

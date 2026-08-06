@@ -381,7 +381,7 @@ fn instruments() -> &'static Instruments {
             read_partition_lookup: m
                 .u64_counter(catalog::READ_PARTITION_LOOKUP)
                 .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Total partition point lookups, keyed by {result, access_path}.")
+                .with_description("Total partition point lookups, keyed by {result, lookup_route, format}.")
                 .build(),
             read_bloom_checks: m
                 .u64_counter(catalog::READ_BLOOM_CHECKS)

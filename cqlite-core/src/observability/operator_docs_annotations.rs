@@ -61,7 +61,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         unit: catalog::unit::PARTITIONS,
         summary: "Distinct partitions per repeat-access bucket over one closed window of the default-OFF access-distribution probe (#2827) — the workload's concentration shape, with no per-key label.",
         attributes: &[attr::REPEAT_BUCKET, attr::SIZE_SOURCE],
-        interpretation: "Absent unless an operator enabled CQLITE_PARTITION_ACCESS_PROBE. Mass in bucket 1 is a uniform, cache-hostile pattern; mass in 9-16/17+ is a hot set. A non-zero size_source=unavailable share means the byte total beside it is incomplete.",
+        interpretation: "Absent unless an operator enabled CQLITE_PARTITION_ACCESS_PROBE. Mass in bucket 1 is a uniform, cache-hostile pattern; mass in 9-16/17+ is a hot set. size_source=successor_gap is a measured on-disk extent; a non-zero size_source=unavailable share means the byte total beside it is incomplete and the cache-sizing procedure refuses the window.",
         round_item: "—",
     },
     MetricDoc {
@@ -77,9 +77,9 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::READ_PARTITION_ACCESS_BYTES,
         kind: MetricKind::Counter,
         unit: catalog::unit::BYTES,
-        summary: "Distinct-partition on-disk bytes per repeat-access bucket over one closed probe window (#2827); a partition read ten times counts its bytes once.",
+        summary: "Distinct-partition on-disk bytes per repeat-access bucket over one closed probe window (#2827), measured as each partition's successor gap; a partition read ten times counts its bytes once.",
         attributes: &[attr::REPEAT_BUCKET],
-        interpretation: "Zero while every access reports size_source=unavailable — no Cassandra 5.0 index format records a per-partition size today, so this series stays empty until an authoritative extent is wired. Never an estimate.",
+        interpretation: "Non-zero on any window whose extents were measurable; uncompressed on-disk bytes, which is the correct input for a decoded-size multiplier. Zero only when every access reported size_source=unavailable. Never an estimate.",
         round_item: "—",
     },
     MetricDoc {
