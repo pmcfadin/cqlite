@@ -46,11 +46,11 @@ use cqlite_core::observability::{catalog, testing};
 use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::test_fixtures as fx;
 use futures::StreamExt;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 use tonic::Request;
 
 /// The probe's enable flag and window are process-global; both cases take this.
-static PROBE: Mutex<()> = Mutex::new(());
+static PROBE: Mutex<()> = Mutex::const_new(());
 
 const DDL: &str = "CREATE TABLE cassandra_easy_stress.keyvalue (key text PRIMARY KEY, value text)";
 
@@ -124,7 +124,7 @@ where
 /// Repeated keyed `do_get` point reads produce the histogram, on the keyed route.
 #[tokio::test]
 async fn repeated_keyed_point_reads_through_do_get_produce_the_histogram() {
-    let _guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = PROBE.lock().await;
     let capture = testing::metrics_capture();
     capture.reset();
     let (_temp, data_dir) = build_fixture().await;
@@ -201,7 +201,7 @@ async fn repeated_keyed_point_reads_through_do_get_produce_the_histogram() {
 /// With the probe unset, a keyed workload emits nothing and allocates nothing.
 #[tokio::test]
 async fn the_probe_is_off_by_default_and_costless_when_off() {
-    let _guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = PROBE.lock().await;
     let (_temp, data_dir) = build_fixture().await;
     let svc = CqliteFlightService::new(data_dir, fx::KEYVALUE_BATCH_SIZE);
 
