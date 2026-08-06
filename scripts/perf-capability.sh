@@ -336,6 +336,24 @@ perf_capability_env_guard() {
     }
     perf_capability_priv_tool_ok "$resolved" "$tool" || return 1
   done
+  # KNOWN, TRACKED, DELIBERATELY-UNFIXED RESIDUAL — recorded in **#3323** (the THIRTEENTH escape in
+  # this family; the twelfth, the ancestor-chain rename race, is recorded at the install site).
+  # THE DEFECT, in the reviewer's words: this validation "validates the current sudo/sysctl entries,
+  # discards their resolved paths, and later callers resolve them again through PATH. A writable test
+  # shim directory can replace a validated file with a symlink to the host binary after the guard,
+  # allowing test mode to execute real privileged tools."
+  # THE NAMED FIX, also verbatim, so nobody has to re-derive it: "require the shim directory to be
+  # owned by the executing identity and not group/world-writable, and invoke the exact validated
+  # executable paths rather than resolving their names again."
+  # WHY IT IS NOT FIXED HERE: this is the same validate-a-NAME-then-re-resolve shape as the twelve
+  # before it, and by owner ruling this family is CLOSED — thirteen escapes established the class is
+  # unbounded in shell, and the two authorized in-shell fixes (A-prime, and the `--install` surface)
+  # each produced further defects of their own. A fourteenth attempt is not authorized.
+  # CONSEQUENCE, SCOPED HONESTLY: a TEST-MODE containment escape (a real `sudo`/`sysctl` becoming
+  # reachable during tests on a box we own), not a production exposure — production never sets
+  # CQLITE_PERF_TEST_MODE, so this whole function returns early there. Same latency class as #3323's
+  # ancestor race. #3323 re-raises on EVIDENCE the boundary is reachable, and nothing else.
+  # Do NOT "just add a check here" — read #3323 first.
   # ...and every privileged tool PARKED in the declared shim dir, whether or not PATH happens to
   # reach it: one PATH-order change is all that separates "not resolved" from "executed", and the
   # loop above is driven by PATH. Only `sudo`/`sysctl` are swept — a shim dir legitimately holds
@@ -1130,12 +1148,6 @@ perf_capability_usage() {
   printf '                  prints "<result> identity=<state>" — rc 0 only when the state is unprivileged\n'
   printf '  --drop-in       print the canonical /etc/sysctl.d/99-cqlite-perf.conf bytes\n'
   printf '  --drop-in-path  print where that file belongs\n'
-  printf '  --install [priv-cmd...]\n'
-  printf '                  INSTALL the drop-in through the validated staged path (containment checks,\n'
-  printf '                  mktemp + atomic rename). Prefix tokens are the privilege command, e.g.\n'
-  printf '                  `--install sudo`; with none it writes directly (use from a root shell).\n'
-  printf '                  Prefer this over `--drop-in | sudo tee <path>` or `> <path>`: those open the\n'
-  printf '                  destination BY NAME and follow a symlink planted there (issue #3261).\n'
 }
 
 perf_capability_main() {
@@ -1159,19 +1171,6 @@ perf_capability_main() {
     # (or `> <path>` from a root shell) re-opens the destination BY NAME and follows a symlink
     # planted there, reintroducing precisely the write this issue hardened. Hardening the installer
     # while printing an unsafe command is worse than not hardening it — it reads as safe.
-    # ENV-GUARDED, LIKE EVERY OTHER PRIVILEGED CALLER (roborev round 6, Medium — a defect this
-    # entry point INTRODUCED). bootstrap runs perf_capability_env_guard before it ever reaches the
-    # installer (bootstrap-agent-machine.sh:423); this CLI did not, so `--install sudo` in test mode
-    # could execute a REAL privileged tool and walk straight past the AC4 hermetic-executable
-    # checks — a new public surface re-opening the hole AC4 had just closed. The guard is what
-    # validates the prefix executable (it requires every reachable real sudo/sysctl to be
-    # PATH-shimmed inside an absolute CQLITE_PERF_TEST_PRIV_DIR), so calling it here IS the prefix
-    # validation, not a second mechanism. Fails closed; outside test mode it is a no-op unless a
-    # seam is set, which is exactly the production behaviour.
-    --install)
-      shift
-      perf_capability_env_guard || return 1
-      perf_capability_dropin_install "$@" ;;
     # rc PROPAGATED, never masked by the trailing newline: an unsandboxed test mode can
     # resolve no path at all (R4-3), and that is a failure, not an empty success.
     --drop-in-path) perf_capability_dropin_path || return 1; printf '\n' ;;

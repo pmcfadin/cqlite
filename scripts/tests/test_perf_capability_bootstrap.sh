@@ -107,7 +107,7 @@ fi
 # unprofileable box until reboot — the very failure the functional verification
 # exists to prevent, on the path most people take (no --yes). Plus the AC5 posture
 # and the BPF caveat (#3217).
-if printf '%s' "$check_out" | grep -q 'perf-capability.sh --install sudo && sudo sysctl -q --system' \
+if printf '%s' "$check_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
    && printf '%s' "$check_out" | grep -q 're-run with --yes'; then
   ok "perf section: prints the complete WRITE-AND-APPLY remedy line instead of running it"
 else
@@ -333,8 +333,8 @@ nosudo_out=$(PATH="$nosudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 nosudo_rc=$?
 if [ "$nosudo_rc" -eq 0 ] && [ -z "$(ls -A "$nosudo_sysctl")" ] \
    && printf '%s' "$nosudo_out" | grep -q "no 'sudo' binary on this box" \
-   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*perf-capability.sh --install && sysctl -q --system' \
-   && ! printf '%s' "$nosudo_out" | grep -q 'perf-capability.sh --install sudo'; then
+   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*bootstrap-agent-machine.sh --yes' \
+   && ! printf '%s' "$nosudo_out" | grep -q 'perf-capability.sh --install'; then
   ok "perf section: a box with no sudo BINARY warns + prints the root-shell remedy (never a useless 'sudo tee'), writes nothing, exits 0"
 else
   bad "perf section: no-sudo box mishandled (rc=$nosudo_rc, dir='$(ls -A "$nosudo_sysctl")')"
@@ -366,7 +366,7 @@ pwsudo_out=$(PATH="$pwsudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 pwsudo_rc=$?
 if [ "$pwsudo_rc" -eq 0 ] && [ -z "$(ls -A "$pwsudo_sysctl")" ] \
    && printf '%s' "$pwsudo_out" | grep -q 'sudo needs a password' \
-   && printf '%s' "$pwsudo_out" | grep -q 'perf-capability.sh --install sudo && sudo sysctl -q --system' \
+   && printf '%s' "$pwsudo_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
    && ! printf '%s' "$pwsudo_out" | grep -q "no 'sudo' binary"; then
   ok "perf section: a password-requiring sudo is diagnosed distinctly (not 'no sudo binary') with the interactive remedy, writes nothing, exits 0"
 else
@@ -410,7 +410,7 @@ rootbox_out=$(PATH="$rootbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 rootbox_rc=$?
 rootbox_remedy=$(printf '%s\n' "$rootbox_out" | grep 'write + apply the drop-in' || true)
 if [ "$rootbox_rc" -eq 0 ] && [ -z "$(ls -A "$rootbox_d")" ] \
-   && printf '%s' "$rootbox_remedy" | grep -q 'perf-capability.sh --install && sysctl -q --system' \
+   && printf '%s' "$rootbox_remedy" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
    && ! printf '%s' "$rootbox_remedy" | grep -q 'sudo'; then
   ok "perf section: when ALREADY ROOT the printed write+apply remedy carries no 'sudo' prefix"
 else
