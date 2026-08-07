@@ -158,6 +158,105 @@ const BATCH_SIZE: usize = 128;
 /// `ws0/events/`). Unset = skip that case.
 const CORPUS_DIR_ENV: &str = "CQLITE_WS0_CORPUS_DIR";
 
+/// ===== THE MEASUREMENT-CORPUS EXPECTATIONS (#3272 round 9, F2) =====
+///
+/// # The finding
+///
+/// The measurement-corpus case checked that the producer and wire taps AGREED WITH EACH OTHER and
+/// then PRINTED the digest. So it exited successfully if BOTH ARMS DRIFTED TOGETHER to a value
+/// other than the one `ws0-corpus-gen` pins — and that crate's `ARROW_BUFFER_DIGEST` /
+/// `ARROW_BUFFER_BATCHES` were therefore compared against an actual full-corpus observation by
+/// NOTHING, EVER. A recorded value nobody checks, plus a self-consistency check standing in for an
+/// oracle: exactly #3042's lesson, and exactly the class this issue exists to remove.
+///
+/// # Why these arrive as env vars rather than as a dependency
+///
+/// `cqlite-flight` must NOT gain a dev-dependency on `ws0-corpus-gen` (this file's CI-fixture case
+/// is deliberately self-contained via `tests/support/ws0_fixture.rs`; depending on the corpus
+/// generator would pull the whole write path into a Flight test build). So the pinned values are
+/// passed in as EXPLICIT VALUES, emitted by
+/// `ws0_corpus_gen::measurement_corpus::operator_verify_digest` FROM the constants themselves — so
+/// the command an operator runs can never state a stale expectation — and validated here.
+///
+/// # FAIL-CLOSED, in both directions
+///
+/// A corpus dir supplied WITHOUT expectations is a HARD FAILURE, not a fallback to printing: an
+/// operator running the digest oracle over a real corpus and getting a green must have had
+/// something compared. And an expectation that cannot be PARSED is a failure too — never a
+/// silently-skipped comparison, which is the permissive branch on an unmeasured state.
+const EXPECT_DIGEST_ENV: &str = "CQLITE_WS0_EXPECT_ARROW_DIGEST";
+const EXPECT_BATCHES_ENV: &str = "CQLITE_WS0_EXPECT_ARROW_BATCHES";
+const EXPECT_ROWS_ENV: &str = "CQLITE_WS0_EXPECT_ARROW_ROWS";
+
+/// The pinned values the measurement-corpus case must compare its observation against.
+struct CorpusExpectations {
+    rows: u64,
+    batches: u64,
+    digest: u64,
+}
+
+/// Parse a `u64` expectation, accepting `0x`-prefixed hex (how a digest is written) and decimal.
+///
+/// Returns the REASON on failure rather than an `Option`, so the caller's refusal can name what was
+/// wrong with which variable — an unparseable expectation must not read like an absent one.
+fn parse_expectation(var: &str, raw: &str) -> Result<u64, String> {
+    let t = raw.trim();
+    let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => t.parse::<u64>(),
+    };
+    parsed.map_err(|e| format!("{var}={raw:?} is not a u64 (accepts decimal or 0x-hex): {e}"))
+}
+
+/// The expectations for a corpus-dir run — REQUIRED, all three, or the case FAILS.
+///
+/// This is the F2 fix's fail-closed half. A corpus dir with no expectations used to produce a
+/// printed digest and a green test; it now names the command that supplies them.
+fn required_corpus_expectations(dir: &str) -> CorpusExpectations {
+    let get = |var: &str| -> u64 {
+        let raw = std::env::var(var).unwrap_or_else(|_| {
+            panic!(
+                "{CORPUS_DIR_ENV}={dir} is set but {var} is NOT. The measurement-corpus case must \
+                 COMPARE its observation against the pinned constants — it used to only check that \
+                 the two taps agreed with EACH OTHER and print the value, so both arms drifting \
+                 together exited 0 and the pin was compared against nothing (#3272 round 9, F2). \
+                 Run the command \
+                 `ws0_corpus_gen::measurement_corpus::operator_verify_digest(<root>)` prints, which \
+                 emits all three expectations from the pinned constants; or unset \
+                 {CORPUS_DIR_ENV}."
+            )
+        });
+        parse_expectation(var, &raw).unwrap_or_else(|e| {
+            panic!(
+                "{e}. An expectation that cannot be parsed is a FAILURE, never a skipped \
+                 comparison — a skipped comparison prints exactly like a passing one (#3272)."
+            )
+        })
+    };
+    let expectations = CorpusExpectations {
+        rows: get(EXPECT_ROWS_ENV),
+        batches: get(EXPECT_BATCHES_ENV),
+        digest: get(EXPECT_DIGEST_ENV),
+    };
+    // A ZERO expectation would compare equal to an uninitialised fold or an empty stream, so it is
+    // refused rather than compared — the same rule `measurement_corpus.rs` applies to its own pin.
+    assert_ne!(
+        expectations.digest, 0,
+        "{EXPECT_DIGEST_ENV} is 0, which is indistinguishable from an unset/uninitialised fold"
+    );
+    assert_ne!(
+        expectations.digest, 0xcbf2_9ce4_8422_2325,
+        "{EXPECT_DIGEST_ENV} is the FNV-1a OFFSET BASIS — what the fold returns having folded \
+         NOTHING"
+    );
+    assert!(
+        expectations.rows > 0 && expectations.batches > 0,
+        "{EXPECT_ROWS_ENV}/{EXPECT_BATCHES_ENV} must be positive; a zero would make the comparison \
+         satisfiable by an empty stream"
+    );
+    expectations
+}
+
 /// ============================ THE PINNED DIGESTS ============================
 ///
 /// # Re-pin log
@@ -1056,6 +1155,11 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
                  with the rig re-anchored to issue #3272, or unset {CORPUS_DIR_ENV}",
                 table_dir.display()
             );
+            // REQUIRED before anything is measured (#3272 round 9, F2): a corpus dir supplied
+            // without the pinned expectations is refused, so a green over a real corpus always
+            // means something was compared. Read first so a missing expectation costs seconds
+            // rather than a full 4M-row fold.
+            let expect = required_corpus_expectations(&dir);
             let identity_path = root.join("corpus-identity.json");
             let expect_rows = std::fs::read_to_string(&identity_path)
                 .ok()
@@ -1076,18 +1180,56 @@ fn arrow_buffer_digest_is_arm_invariant_and_pinned() {
                 &mut failures,
             );
             if let Some(d) = d {
-                // The measurement corpus's digest is NOT pinned as a constant (it
-                // depends on the row count the operator generated); it is printed
-                // so a perf run can record it beside its numbers and compare it
-                // across levers.
+                // ASSERTED against the pinned constants, not merely printed (#3272 round 9, F2).
+                // `assert_arms_agree` above proved only that the two taps agree WITH EACH OTHER —
+                // so both arms drifting together to a new value used to exit 0, leaving
+                // `ws0-corpus-gen`'s pinned digest and batch count compared against nothing by
+                // anything. These four assertions are the comparison that was missing.
                 println!(
                     "measurement-corpus arrow-buffer digests = producer 0x{:016x} / wire \
-                     0x{:016x} over {} rows in {} batches",
+                     0x{:016x} over {} rows in {} batches (comparing against pinned \
+                     0x{:016x} / {} rows / {} batches)",
                     d.producer.digest.digest,
                     d.wire.digest.digest,
                     d.wire.digest.rows,
-                    d.wire.digest.batches
+                    d.wire.digest.batches,
+                    expect.digest,
+                    expect.rows,
+                    expect.batches
                 );
+                assert_eq!(
+                    d.wire.digest.rows, expect.rows,
+                    "measurement-corpus ROW COUNT moved: observed {}, pinned {}. The digest below \
+                     is folded over these rows, so a row-count change makes every comparison of it \
+                     meaningless — this is checked FIRST for that reason.",
+                    d.wire.digest.rows, expect.rows
+                );
+                assert_eq!(
+                    d.wire.digest.batches, expect.batches,
+                    "measurement-corpus BATCH COUNT moved: observed {}, pinned {}. The digest folds \
+                     in each batch's row count, so batching is part of what it pins.",
+                    d.wire.digest.batches, expect.batches
+                );
+                // BOTH taps, separately and by name. Comparing only one would leave the other free
+                // to drift — and the producer tap exists precisely because the wire digest cannot
+                // see a builder change an IPC round trip normalizes.
+                for (tap, observed) in [
+                    ("WIRE", d.wire.digest.digest),
+                    ("PRODUCER", d.producer.digest.digest),
+                ] {
+                    assert_eq!(
+                        observed, expect.digest,
+                        "the measurement corpus's {tap} Arrow-buffer digest changed: observed \
+                         0x{observed:016x}, pinned 0x{:016x} \
+                         (ws0_corpus_gen::measurement_corpus::ARROW_BUFFER_DIGEST). Every #3096 \
+                         Arrow-encode figure was measured over that value. This assertion is the \
+                         one thing that was MISSING: the case previously checked only that the two \
+                         taps agreed with EACH OTHER and printed the result, so both arms drifting \
+                         together exited 0 (#3272 round 9, F2). Report the divergence — do NOT \
+                         re-pin the constant to make it agree.",
+                        expect.digest
+                    );
+                }
             }
         }
     }

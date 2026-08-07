@@ -1,0 +1,733 @@
+//! `CorpusIdentity::compare` — every field reported, and the THIRD STATE for a field the
+//! recorded identity does not carry (issue #3096 review finding 3, #3272 review round 7 F1/F5).
+//!
+//! # Why these are an INTEGRATION test rather than an inline `mod tests`
+//!
+//! Split out of `src/identity.rs` under the campsite rule: with round 7's F1/F5 cases that file
+//! reached 925 lines against the ~800 source target, and the gate's `file-size` ratchet FAILED it
+//! (correctly — the cost being controlled is tokens-to-load when an agent reads the file before
+//! editing it). Source is now 445 lines and these tests are 500-odd, both comfortably inside
+//! their thresholds.
+//!
+//! The split cost NOTHING in visibility, which is what made it the right seam rather than a
+//! waiver: every item these tests touch (`Component`, `CorpusIdentity`, `IdentityComparison`,
+//! `IdentityVerdict`, and the two caveat constants) was ALREADY `pub`, because the binary and the
+//! measurement rig consume them. So no `pub(crate)` was widened to accommodate a test — the
+//! anti-pattern that makes "move it to tests/" a bad trade — and these tests now exercise
+//! exactly the surface an external caller has.
+//!
+//! # What is asserted here
+//!
+//! 1. Per-field divergence reporting, each case paired with a FROZEN REPLICA of the pre-review
+//!    comparison observed NOT to have reported it (#3096 finding 3: `diff` compared 4 of 15
+//!    fields and called the rest "reproduced exactly").
+//! 2. COVERAGE OF THE STRUCT, derived from the type via serde rather than counted by hand — the
+//!    F5 fix. `assert_eq!(mutations.len(), 15)` passed while R2's 16th field had no case at all,
+//!    so the mechanism meant to force a new field to acquire one could not.
+//! 3. The THIRD STATE (F1): a prior identity with no `schema_sha256` is `unverified`, never
+//!    `divergences` and never `Reproduced`.
+
+use std::collections::BTreeMap;
+
+use ws0_corpus_gen::identity::{
+    Component, CorpusIdentity, IdentityVerdict, DIFFERS_FROM_PRIOR_CORPUS, NOT_A_CORRECTNESS_ORACLE,
+};
+
+fn ident(sha: &str, rows: u64) -> CorpusIdentity {
+    let mut components = BTreeMap::new();
+    components.insert(
+        "nb-1-big-Data.db".to_string(),
+        Component {
+            name: "nb-1-big-Data.db".to_string(),
+            bytes: 100,
+            sha256: sha.to_string(),
+        },
+    );
+    CorpusIdentity {
+        issue: "#3096".to_string(),
+        seed: 1,
+        table: "ws0.events".to_string(),
+        rows,
+        partitions: 1,
+        rows_per_partition: rows,
+        cells_per_row: 12,
+        data_db_bytes: 100,
+        data_db_sha256: sha.to_string(),
+        bytes_per_row: 100.0 / rows as f64,
+        total_component_bytes: 100,
+        components,
+        compression_info_present: false,
+        not_a_correctness_oracle: NOT_A_CORRECTNESS_ORACLE.to_string(),
+        differs_from_prior_corpus: DIFFERS_FROM_PRIOR_CORPUS.to_string(),
+        schema_sha256: Some("cc".to_string()),
+    }
+}
+
+/// Every field name a [`CorpusIdentity`] actually carries, **DERIVED FROM THE STRUCT**
+/// through serde rather than counted by hand (#3272 review round 7, F5).
+///
+/// # Why the hand-written count had to go
+///
+/// The backstop below used to end in `assert_eq!(mutations.len(), 15)`, whose stated
+/// purpose (in the doc comment two paragraphs down) was to FORCE a future field to get a
+/// divergence case. R2 then added a 16th field, `schema_sha256`, and the count stayed at
+/// `15` — so the assert PASSED while the new field had no case at all. The mechanism meant
+/// to catch exactly that could not, because a hardcoded number is not a measurement of the
+/// struct: it is a second copy of a fact, free to drift from the first. Bumping it to `16`
+/// would reinstate the same shape for the 17th field.
+///
+/// serde's derived `Serialize` emits one key per field, so the serialized key set IS the
+/// field set — read from the type at runtime, with no reflection and no macro. A 17th field
+/// therefore appears here the moment it is added to the struct, and the coverage assertion
+/// below FAILS naming it.
+///
+/// This is a genuine derivation and not a cleverer enumeration: nothing in this function
+/// mentions any field name.
+fn corpus_identity_field_names() -> Vec<String> {
+    let value = serde_json::to_value(ident("aa", 10)).expect("an identity serializes");
+    let obj = value
+        .as_object()
+        .expect("CorpusIdentity serializes to a JSON object");
+    // A struct with no fields would make the coverage check below vacuous, so the subject
+    // is asserted non-empty rather than trusted — the same rule the rest of this issue
+    // applies to every other subject.
+    assert!(
+        !obj.is_empty(),
+        "the serialized identity carries NO keys, so the coverage check below would have \
+         an empty subject and pass having compared nothing"
+    );
+    obj.keys().cloned().collect()
+}
+
+#[test]
+fn identical_identities_diff_empty() {
+    let cmp = ident("aa", 10).compare(&ident("aa", 10));
+    assert!(cmp.divergences.is_empty(), "got {cmp:?}");
+    // ...and nothing UNVERIFIED either: two identities that both carry every field are
+    // fully compared, so the verdict must be the strong one.
+    assert_eq!(cmp.verdict(), IdentityVerdict::Reproduced, "got {cmp:?}");
+}
+
+/// A changed `Data.db` digest must be reported FIRST and by name — that is the
+/// determinism assertion the committed corpus rests on.
+#[test]
+fn a_changed_data_db_digest_is_reported() {
+    let d = ident("bb", 10).compare(&ident("aa", 10)).divergences;
+    assert!(d[0].starts_with("Data.db sha256:"), "got {d:?}");
+}
+
+#[test]
+fn a_changed_row_count_is_reported() {
+    let d = ident("aa", 11).compare(&ident("aa", 10)).divergences;
+    assert!(d.iter().any(|m| m.starts_with("rows:")), "got {d:?}");
+}
+
+/// A CHANGED schema digest is a DIVERGENCE (#3272 R2), and it is named.
+#[test]
+fn a_changed_schema_digest_is_reported() {
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = Some("dd".to_string());
+    let d = now.compare(&ident("aa", 10)).divergences;
+    assert!(
+        d.iter().any(|m| m.starts_with("ws0-events.cql sha256:")),
+        "got {d:?}"
+    );
+}
+
+/// THE THIRD STATE (#3272 review round 7, F1): a prior with NO schema digest is
+/// `unverified`, never `divergences`, and NEVER `Reproduced`.
+///
+/// This is the assertion whose absence would let the fail-open read ship: an `Option` field
+/// compared with `!=` would have made `None == None` read as agreement, and a `None` prior
+/// against a `Some` regeneration read as a divergence about a schema that never changed.
+#[test]
+fn a_prior_without_a_schema_digest_is_unverified_not_reproduced() {
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    let cmp = ident("aa", 10).compare(&prior);
+    assert!(
+        cmp.divergences.is_empty(),
+        "an absent recorded digest is not a DIVERGENCE — nothing disagreed; got {cmp:?}"
+    );
+    assert_eq!(
+        cmp.unverified.len(),
+        1,
+        "the absent schema digest must be reported as UNVERIFIED; got {cmp:?}"
+    );
+    assert!(
+        cmp.unverified[0].contains("NO `schema_sha256`"),
+        "the unverified entry must name what could not be compared; got {cmp:?}"
+    );
+    assert_eq!(
+        cmp.verdict(),
+        IdentityVerdict::PartialUnverified,
+        "a comparison that could not see a field must NOT read as Reproduced; got {cmp:?}"
+    );
+    // NON-VACUITY, stated as the failing alternative: had the field been compared with a
+    // plain `!=` on the `Option` (the smaller edit), `None` vs `None` would have compared
+    // EQUAL and the verdict would have been `Reproduced` — a schema that was never checked
+    // reported as reproduced. Driven here rather than argued.
+    let mut both_absent_prior = ident("aa", 10);
+    both_absent_prior.schema_sha256 = None;
+    let mut both_absent_now = ident("aa", 10);
+    both_absent_now.schema_sha256 = None;
+    assert_eq!(
+        both_absent_now.schema_sha256, both_absent_prior.schema_sha256,
+        "the pre-fix `!=` comparison really did see these two as EQUAL — which is why \
+         `None` had to become a third state rather than a compared value"
+    );
+    let cmp = both_absent_now.compare(&both_absent_prior);
+    assert_eq!(
+        cmp.verdict(),
+        IdentityVerdict::PartialUnverified,
+        "two identities that BOTH lack the digest are still UNVERIFIED, not reproduced"
+    );
+}
+
+/// A regenerated identity missing the digest a prior HAS is a divergence, not an
+/// unverified field: `generate()` always records it, so its absence means a hand-edited
+/// identity — a different fault with a different remedy.
+#[test]
+fn a_regenerated_identity_missing_the_schema_digest_is_a_divergence() {
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = None;
+    let cmp = now.compare(&ident("aa", 10));
+    assert!(
+        cmp.divergences
+            .iter()
+            .any(|m| m.contains("hand-edited rather than generated")),
+        "got {cmp:?}"
+    );
+    assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
+}
+
+/// THE SOURCE ORACLE (#3272 review round 9, F1): a prior with NO schema digest is VERIFIED
+/// against source, not left unverified — and the resulting `Reproduced` is a REAL pass.
+///
+/// # The defect this closes, which round 8's own fix created
+///
+/// Round 8 made an absent recorded `schema_sha256` a `PartialUnverified` with a non-zero exit.
+/// Right on its own terms. But the only artifact
+/// [`ws0_corpus_gen::measurement_corpus::operator_verify_corpus`] is ever pointed at was recorded
+/// before the field existed, so the documented verification command could NEVER succeed — over any
+/// corpus, however perfectly it reproduced. That is a broken instrument reached from the other
+/// side: an operator who cannot get a green stops running the command.
+///
+/// The schema does not need the artifact to carry it, because it has an oracle the artifact could
+/// only ever have RECORDED: `sha256(schema::DDL + "\n")`, computed from source. So the field is
+/// COMPARED — against something stronger — rather than skipped.
+#[test]
+fn a_prior_without_a_schema_digest_is_verified_against_source_and_reproduces() {
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    // The regenerated identity carries what `generate()` would have written: the digest of the
+    // file whose content is `DDL` + a newline.
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = Some(ws0_corpus_gen::schema::ddl_file_sha256());
+
+    // WITHOUT the oracle, this is exactly round 8's behaviour — kept as the non-vacuity control,
+    // so the improvement is measured rather than asserted.
+    let without = now.compare(&prior);
+    assert_eq!(
+        without.verdict(),
+        IdentityVerdict::PartialUnverified,
+        "without a source oracle the third state must STAND — round 8's fix is not being \
+         weakened, it is being given an oracle; got {without:?}"
+    );
+
+    let with = now.compare_with_source_oracles(&prior, &SourceOracles::from_source());
+    assert!(
+        with.divergences.is_empty(),
+        "the emitted schema IS the schema source produces, so nothing may diverge; got {with:?}"
+    );
+    assert!(
+        with.unverified.is_empty(),
+        "the schema was compared against a SOURCE oracle, so it is verified and must not be \
+         listed as unverified — that is the whole F1 fix; got {with:?}"
+    );
+    assert_eq!(
+        with.verdict(),
+        IdentityVerdict::Reproduced,
+        "a corpus that reproduces every recorded field, whose schema matches SOURCE, must yield a \
+         REAL pass — the documented operator command has to be able to succeed; got {with:?}"
+    );
+}
+
+/// The source oracle is an ORACLE, not a waiver: a schema that does NOT match source is a
+/// DIVERGENCE.
+///
+/// Without this the F1 fix would be indistinguishable from deleting the check — an oracle that
+/// accepts every value is the permissive branch under a better name.
+#[test]
+fn a_prior_without_a_schema_digest_still_diverges_when_source_disagrees() {
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    let mut now = ident("aa", 10);
+    // A digest that is NOT sha256(DDL + "\n") — i.e. the corpus emitted some other schema.
+    now.schema_sha256 = Some("f".repeat(64));
+
+    let cmp = now.compare_with_source_oracles(&prior, &SourceOracles::from_source());
+    assert!(
+        cmp.divergences
+            .iter()
+            .any(|m| m.contains("PINNED measurement schema digest")),
+        "a schema disagreeing with the PIN must be reported as a divergence naming the oracle; \
+         got {cmp:?}"
+    );
+    assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
+}
+
+/// THE ORACLE IS THE PINNED LITERAL, NOT A RECOMPUTATION FROM `DDL` (#3272 round 10, F-C).
+///
+/// # The mechanism found
+///
+/// Round 9 wired `SourceOracles::from_source()` as `schema::ddl_file_sha256()`. Trace the two
+/// operands of the comparison it feeds:
+///
+/// ```text
+/// operand A  now.schema_sha256  = sha256 of the file generate() wrote as format!("{DDL}\n")
+/// operand B  the "oracle"       = ddl_file_sha256() = sha256(format!("{DDL}\n"))
+/// ```
+///
+/// Same computation, same `DDL`, same build. They move TOGETHER under any edit to `DDL`, so the arm
+/// agreed for every possible value of it — and the case it runs in is precisely the one where the
+/// prior carries NO digest, i.e. where a `DDL` edited since the prior corpus was recorded is the
+/// only drift there is to find. A comparison that cannot fail, inside round 9's fix for
+/// comparisons that cannot fail.
+///
+/// # The non-vacuity assertion: what the PRE-FIX code ACCEPTED
+///
+/// This test reconstructs round 9's oracle exactly (`ddl_file_sha256()`) and perturbs `DDL` — the
+/// historical drift the arm exists to catch, modelled as "the emitted schema is the digest of a
+/// DIFFERENT DDL". Under the pre-fix oracle that perturbation is INVISIBLE, because the oracle is
+/// re-derived from the same perturbed input; under the pinned oracle it DIVERGES. Both directions
+/// are asserted in one test so the improvement is measured rather than claimed.
+#[test]
+fn the_schema_oracle_is_the_pin_and_therefore_can_fail() {
+    use sha2::{Digest, Sha256};
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    // A PERTURBED DDL: one column type changed. This stands for any DDL edit made after the prior
+    // identity was recorded — the case a prior with no `schema_sha256` cannot be checked for by
+    // comparison against the prior.
+    let perturbed_ddl = ws0_corpus_gen::schema::DDL.replace("metric_a int", "metric_a bigint");
+    assert_ne!(
+        perturbed_ddl,
+        ws0_corpus_gen::schema::DDL,
+        "the perturbation must actually change the DDL, or this test asserts nothing"
+    );
+    let digest_of = |s: &str| -> String {
+        let mut h = Sha256::new();
+        h.update(format!("{s}\n").as_bytes());
+        format!("{:x}", h.finalize())
+    };
+    // What `generate()` would record having emitted the perturbed schema.
+    let emitted_perturbed = digest_of(&perturbed_ddl);
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = Some(emitted_perturbed.clone());
+
+    // --- NON-VACUITY: round 9's oracle, reconstructed, ACCEPTS the perturbation ---------------
+    // `ddl_file_sha256()` recomputes from whatever `DDL` is, so in a build carrying the perturbed
+    // DDL the oracle equals the emitted digest and the arm reports agreement.
+    let prefix_oracle = SourceOracles {
+        schema_sha256: Some(emitted_perturbed.clone()),
+    };
+    let prefix_cmp = now.compare_with_source_oracles(&prior, &prefix_oracle);
+    assert!(
+        prefix_cmp.divergences.is_empty() && prefix_cmp.unverified.is_empty(),
+        "NON-VACUITY CONTROL: an oracle recomputed from the SAME DDL that produced the emitted \
+         schema agrees with it by construction, so a DDL edit is invisible — this is what the \
+         pre-fix code accepted; got {prefix_cmp:?}"
+    );
+    assert_eq!(
+        prefix_cmp.verdict(),
+        IdentityVerdict::Reproduced,
+        "the pre-fix wiring reported a full PASS over a CHANGED schema; got {prefix_cmp:?}"
+    );
+
+    // --- THE FIX: the PINNED oracle does not move with `DDL`, so it FAILS ----------------------
+    let cmp = now.compare_with_source_oracles(&prior, &SourceOracles::from_source());
+    assert!(
+        cmp.divergences
+            .iter()
+            .any(|m| m.contains("PINNED measurement schema digest")),
+        "the pinned oracle must DIVERGE on a perturbed DDL — that is the whole F-C fix, and the \
+         difference from the control above is that the pin is a literal; got {cmp:?}"
+    );
+    assert_eq!(cmp.verdict(), IdentityVerdict::Diverged, "got {cmp:?}");
+
+    // And the oracle really is the pin, by value — so a future edit cannot quietly re-point it at
+    // a recomputation while this test keeps passing on the perturbation case alone.
+    assert_eq!(
+        SourceOracles::from_source().schema_sha256.as_deref(),
+        Some(ws0_corpus_gen::measurement_corpus::SCHEMA_SHA256),
+        "the source oracle for the schema must BE measurement_corpus::SCHEMA_SHA256, the literal"
+    );
+}
+
+/// The pin and the current `DDL` must AGREE — the other half of what keeps F-C's fix honest.
+///
+/// A pinned oracle that has drifted from the DDL the generator writes would fail every honest
+/// corpus (the mirror-image broken instrument: a guard that always fires). The authoritative
+/// assertion of this lives in `measurement_corpus_pin.rs`; it is restated here because THIS file
+/// is where the oracle is wired, so a reader of the wiring sees both obligations together.
+#[test]
+fn the_pinned_oracle_agrees_with_the_ddl_this_build_writes() {
+    assert_eq!(
+        ws0_corpus_gen::measurement_corpus::SCHEMA_SHA256,
+        ws0_corpus_gen::schema::ddl_file_sha256(),
+        "the pinned schema digest and the DDL this build emits have DIVERGED. Re-pinning is a \
+         deliberate reviewable act: update measurement_corpus::SCHEMA_SHA256 in the same change \
+         that edits schema::DDL. Do NOT make the oracle recompute the digest — that was #3272 \
+         round 10's F-C, a comparison that could not fail."
+    );
+}
+
+/// `PartialUnverified` STAYS REACHABLE with the oracles in hand: a field with no oracle and no
+/// recorded value is still unverified.
+///
+/// This is the assertion that keeps the F1 fix honest. Supplying `SourceOracles` must not become a
+/// blanket "everything is fine" — it covers exactly the ONE field it has an oracle for, and an
+/// oracle-less absent field must still refuse to print `PASS`.
+#[test]
+fn the_third_state_survives_the_source_oracle() {
+    use ws0_corpus_gen::identity::SourceOracles;
+
+    let mut prior = ident("aa", 10);
+    prior.schema_sha256 = None;
+    let mut now = ident("aa", 10);
+    now.schema_sha256 = Some(ws0_corpus_gen::schema::ddl_file_sha256());
+
+    // An EMPTY oracle set is what "no oracle for this field" looks like, and it is the shape a
+    // future field with no source oracle will have.
+    let cmp = now.compare_with_source_oracles(&prior, &SourceOracles::default());
+    assert_eq!(
+        cmp.unverified.len(),
+        1,
+        "with no oracle for the field, the absent recorded digest must stay UNVERIFIED; got {cmp:?}"
+    );
+    assert!(
+        cmp.unverified[0].contains("NO source oracle was supplied"),
+        "the unverified entry must say that no oracle was available, so the reader knows WHICH of \
+         the two reasons applies; got {cmp:?}"
+    );
+    assert_eq!(
+        cmp.verdict(),
+        IdentityVerdict::PartialUnverified,
+        "got {cmp:?}"
+    );
+}
+
+/// The caveat travels IN the artifact — a reader of the JSON alone must see it.
+#[test]
+fn the_json_carries_the_performance_fixture_only_caveat() {
+    let json = ident("aa", 10).to_json().expect("serialize");
+    assert!(json.contains("PERFORMANCE FIXTURE ONLY"));
+    assert!(json.contains("3042"));
+    // And it must NOT assert the prior corpus's digest as this corpus's own.
+    assert!(!json.contains("\"data_db_sha256\": \"0185909de6da"));
+}
+
+/// The comparison `diff` performed BEFORE the issue-#3096 review (finding 3),
+/// kept as a **non-vacuity oracle** for the per-field tests below.
+///
+/// Each per-field test asserts BOTH halves: the current `diff` reports the
+/// divergence, AND this pre-fix comparison did NOT — i.e. the same input really
+/// did read as "reproduced exactly" before the fix. Without the second half a
+/// passing test proves nothing about whether the guard was ever broken.
+///
+/// This is a frozen historical replica. It must never be called by production
+/// code and must never be "kept in sync" with `diff`.
+fn diff_pre_review(now: &CorpusIdentity, prior: &CorpusIdentity) -> Vec<String> {
+    let mut out = Vec::new();
+    if now.data_db_sha256 != prior.data_db_sha256 {
+        out.push("Data.db sha256".to_string());
+    }
+    if now.rows != prior.rows {
+        out.push("rows".to_string());
+    }
+    if now.partitions != prior.partitions {
+        out.push("partitions".to_string());
+    }
+    if now.data_db_bytes != prior.data_db_bytes {
+        out.push("Data.db bytes".to_string());
+    }
+    for (name, prior_c) in &prior.components {
+        match now.components.get(name) {
+            None => out.push(format!("component {name} MISSING")),
+            Some(c) if c != prior_c => out.push(format!("component {name} changed")),
+            Some(_) => {}
+        }
+    }
+    for name in now.components.keys() {
+        if !prior.components.contains_key(name) {
+            out.push(format!("component {name} NEW"));
+        }
+    }
+    out
+}
+
+/// Mutate one field of an otherwise byte-identical identity and return
+/// `(current divergences, pre-review diff)` for it.
+fn diverge(mutate: impl FnOnce(&mut CorpusIdentity)) -> (Vec<String>, Vec<String>) {
+    let prior = ident("aa", 10);
+    let mut now = ident("aa", 10);
+    mutate(&mut now);
+    (
+        now.compare(&prior).divergences,
+        diff_pre_review(&now, &prior),
+    )
+}
+
+/// Every field the pre-review `diff` ignored is now reported — and each case
+/// proves its own non-vacuity: the pre-review comparison returned EMPTY, i.e.
+/// "reproduced exactly", for the very same divergence.
+///
+/// One test per field rather than a loop, so a failure names the field.
+macro_rules! previously_ignored_field {
+    ($test:ident, $prefix:literal, $mutate:expr) => {
+        #[test]
+        fn $test() {
+            let (now, pre) = diverge($mutate);
+            assert!(
+                now.iter().any(|m| m.starts_with($prefix)),
+                "diff must report a {} divergence; got {now:?}",
+                $prefix
+            );
+            assert!(
+                pre.is_empty(),
+                "NON-VACUITY: the pre-review diff must have reported this as \
+                 'reproduced exactly'; got {pre:?}"
+            );
+        }
+    };
+}
+
+previously_ignored_field!(
+    a_changed_seed_is_reported,
+    "seed:",
+    |i: &mut CorpusIdentity| i.seed = 2
+);
+previously_ignored_field!(
+    a_changed_table_is_reported,
+    "table:",
+    |i: &mut CorpusIdentity| { i.table = "ws0.other".to_string() }
+);
+previously_ignored_field!(
+    a_changed_issue_is_reported,
+    "issue:",
+    |i: &mut CorpusIdentity| { i.issue = "#0000".to_string() }
+);
+previously_ignored_field!(
+    a_changed_rows_per_partition_is_reported,
+    "rows_per_partition:",
+    |i: &mut CorpusIdentity| i.rows_per_partition = 7
+);
+previously_ignored_field!(
+    a_changed_cells_per_row_is_reported,
+    "cells_per_row:",
+    |i: &mut CorpusIdentity| i.cells_per_row = 11
+);
+previously_ignored_field!(
+    a_changed_bytes_per_row_is_reported,
+    "bytes_per_row:",
+    |i: &mut CorpusIdentity| i.bytes_per_row = 99.0
+);
+previously_ignored_field!(
+    a_changed_total_component_bytes_is_reported,
+    "total_component_bytes:",
+    |i: &mut CorpusIdentity| i.total_component_bytes = 101
+);
+// Issue #1406: the FLAG can disagree with the component set. That is an
+// internally inconsistent identity, and it used to read as reproduced exactly.
+previously_ignored_field!(
+    a_flipped_compression_info_flag_is_reported,
+    "compression_info_present:",
+    |i: &mut CorpusIdentity| i.compression_info_present = true
+);
+previously_ignored_field!(
+    an_edited_correctness_caveat_is_reported,
+    "not_a_correctness_oracle:",
+    |i: &mut CorpusIdentity| i.not_a_correctness_oracle = "it is fine actually".to_string()
+);
+previously_ignored_field!(
+    an_edited_prior_corpus_caveat_is_reported,
+    "differs_from_prior_corpus:",
+    |i: &mut CorpusIdentity| i.differs_from_prior_corpus = String::new()
+);
+
+/// One perturbation of an identity, applied to a single field.
+type FieldMutation = fn(&mut CorpusIdentity);
+
+/// One perturbation per field of [`CorpusIdentity`], KEYED BY THE FIELD'S SERDE NAME.
+///
+/// Separate from the assertions so BOTH the per-field property and the
+/// COVERAGE-OF-THE-STRUCT property can be driven from the same single source, rather than
+/// one list plus a hand-written count of it (#3272 review round 7, F5).
+fn single_field_mutations() -> Vec<(&'static str, FieldMutation)> {
+    vec![
+        ("issue", |i| i.issue = "#0000".to_string()),
+        ("seed", |i| i.seed = 2),
+        ("table", |i| i.table = "ws0.other".to_string()),
+        ("rows", |i| i.rows = 11),
+        ("partitions", |i| i.partitions = 2),
+        ("rows_per_partition", |i| i.rows_per_partition = 7),
+        ("cells_per_row", |i| i.cells_per_row = 11),
+        ("data_db_bytes", |i| i.data_db_bytes = 101),
+        ("data_db_sha256", |i| i.data_db_sha256 = "bb".to_string()),
+        ("bytes_per_row", |i| i.bytes_per_row = 99.0),
+        ("total_component_bytes", |i| i.total_component_bytes = 101),
+        ("components", |i| {
+            i.components.clear();
+        }),
+        ("compression_info_present", |i| {
+            i.compression_info_present = true
+        }),
+        ("not_a_correctness_oracle", |i| {
+            i.not_a_correctness_oracle = "nope".to_string()
+        }),
+        ("differs_from_prior_corpus", |i| {
+            i.differs_from_prior_corpus = "nope".to_string()
+        }),
+        // The R2 field. Its case was MISSING for a whole review round while the
+        // `mutations.len() == 15` assert passed (#3272 F5), which is why the coverage
+        // check below is now derived from the struct instead of counted here.
+        ("schema_sha256", |i| {
+            i.schema_sha256 = Some("dd".to_string())
+        }),
+    ]
+}
+
+/// EVERY field of [`CorpusIdentity`] has a divergence case — DERIVED FROM THE STRUCT.
+///
+/// # The mechanism, and why the count it replaces was the defect
+///
+/// This used to be `assert_eq!(mutations.len(), 15)` inside the per-field test, whose
+/// stated purpose was to force a NEW field to acquire a case. It could not: R2 added
+/// `schema_sha256` and left the number at 15, so the assert passed with the new field
+/// uncovered — the guard satisfied without covering its subject. Bumping the literal would
+/// reinstate exactly that for the 17th field.
+///
+/// So the subject is READ FROM THE TYPE ([`corpus_identity_field_names`], via serde's
+/// derived `Serialize`) and the mutation set is compared against it in BOTH directions:
+///
+///  * a field of the struct with NO mutation case FAILS, naming the field. This is the
+///    property the count was meant to have.
+///  * a mutation case naming a field the struct does not have FAILS too, so a rename
+///    leaves a case pointing at nothing rather than silently testing a field that is gone.
+///
+/// Nothing here mentions a field name or a count, so a 17th field cannot compile-and-pass.
+#[test]
+fn every_identity_field_has_a_divergence_case() {
+    let fields = corpus_identity_field_names();
+    let cases: Vec<&str> = single_field_mutations().iter().map(|(k, _)| *k).collect();
+
+    let uncovered: Vec<&String> = fields
+        .iter()
+        .filter(|f| !cases.contains(&f.as_str()))
+        .collect();
+    assert!(
+        uncovered.is_empty(),
+        "CorpusIdentity carries field(s) {uncovered:?} with NO divergence case in \
+         `single_field_mutations`. This subject is DERIVED from the struct via serde, \
+         precisely because the `mutations.len() == 15` assert it replaced passed while R2's \
+         `schema_sha256` had no case at all (#3272 F5). Add the case; do not relax this."
+    );
+
+    let stale: Vec<&&str> = cases
+        .iter()
+        .filter(|c| !fields.contains(&c.to_string()))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "`single_field_mutations` names field(s) {stale:?} that CorpusIdentity does not \
+         carry — a renamed or removed field leaves a case testing nothing"
+    );
+}
+
+/// The backstop property, stated directly: for EVERY field, a divergence in it alone must
+/// produce a non-empty divergence list. Coverage of the field set is asserted separately by
+/// [`every_identity_field_has_a_divergence_case`], which derives it from the struct.
+#[test]
+fn no_single_field_divergence_reads_as_reproduced_exactly() {
+    for (field, mutate) in single_field_mutations() {
+        let (now, _) = diverge(mutate);
+        assert!(
+            !now.is_empty(),
+            "a divergence in `{field}` alone read as 'reproduced exactly'"
+        );
+    }
+}
+
+/// NON-VACUITY for the coverage check above: it must FAIL on a field with no case.
+///
+/// Driven by SUBTRACTING a case from the real set and re-running the same comparison the
+/// assertion performs — so "the coverage check has teeth" is observed rather than asserted
+/// of the code. Without this, a `corpus_identity_field_names` that returned an empty vec
+/// (or a `contains` that always answered true) would leave the check green forever, which
+/// is the shape the count-assert died of.
+#[test]
+fn the_field_coverage_check_fires_on_an_uncovered_field() {
+    let fields = corpus_identity_field_names();
+    // Drop the R2 field's case — the exact state round 7 found in the tree.
+    let cases: Vec<&str> = single_field_mutations()
+        .iter()
+        .map(|(k, _)| *k)
+        .filter(|k| *k != "schema_sha256")
+        .collect();
+    let uncovered: Vec<&String> = fields
+        .iter()
+        .filter(|f| !cases.contains(&f.as_str()))
+        .collect();
+    assert_eq!(
+        uncovered.len(),
+        1,
+        "removing ONE case must leave exactly one field uncovered; got {uncovered:?}"
+    );
+    assert_eq!(
+        uncovered[0], "schema_sha256",
+        "the uncovered field must be NAMED, so the failure is actionable"
+    );
+    // ...and the positive control: with the case present, nothing is uncovered. A check
+    // that reported an uncovered field unconditionally would satisfy the half above.
+    let all: Vec<&str> = single_field_mutations().iter().map(|(k, _)| *k).collect();
+    assert!(
+        fields.iter().all(|f| all.contains(&f.as_str())),
+        "with every case present the check must find NOTHING uncovered"
+    );
+}
+
+/// A missing or extra component must be visible, so a component-set change
+/// (e.g. a stray `CompressionInfo.db`) cannot slip through as "Data.db matched".
+#[test]
+fn component_set_changes_are_reported() {
+    let prior = ident("aa", 10);
+    let mut now = ident("aa", 10);
+    now.components.insert(
+        "nb-1-big-CompressionInfo.db".to_string(),
+        Component {
+            name: "nb-1-big-CompressionInfo.db".to_string(),
+            bytes: 8,
+            sha256: "cc".to_string(),
+        },
+    );
+    let d = now.compare(&prior).divergences;
+    assert!(
+        d.iter().any(|m| m.contains("CompressionInfo.db: NEW")),
+        "got {d:?}"
+    );
+
+    let d = prior.compare(&now).divergences;
+    assert!(
+        d.iter()
+            .any(|m| m.contains("CompressionInfo.db: recorded, now MISSING")),
+        "got {d:?}"
+    );
+}

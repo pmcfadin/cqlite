@@ -306,6 +306,139 @@
 #                      test-only seams stand in for /proc and /etc/sysctl.d (and test
 #                      mode REFUSES to fall back to either production directory), every
 #                      privileged tool is a recording shim, asserted mutation-free.
+#                      Also runs scripts/tests/test_ws0_report_guards.sh (#3096/#3272) —
+#                      pins the MEASUREMENT-INTEGRITY guards of the WS0 rig
+#                      (scripts/perf/), every one of which was a real "instrument that
+#                      reports success without having measured" defect: a cold Flight rep
+#                      must be EXACTLY ONE full-corpus request (else requests 2..N are
+#                      WARM and blend into a figure labelled "cold"); a warm rep of
+#                      EITHER arm must record an untimed prewarm, and the cold arm's
+#                      `skipped-cold-arm` sentinel may satisfy a COLD rep ONLY (a warm rep
+#                      carrying it is an UNPREWARMED warm measurement passing the very
+#                      guard added to refuse one — and the bare scan is the DENOMINATOR of
+#                      the 1.3x ratio), while a COLD rep carrying ANY OTHER value —
+#                      `unrecorded` (no status file) included — is REFUSED rather than
+#                      captioned, because nothing then establishes it was not prewarmed and
+#                      a secretly-warm rep reported cold reads FASTER; the corpus identity
+#                      is REQUIRED, so the
+#                      full-corpus-per-request check can never be silently skipped while
+#                      the report's notes claim it ran; an absent, uncounted
+#                      (`<not counted>`/`<not supported>`) or unparseable perf counter is
+#                      an ERROR, never a fabricated 0 that would make "setup-subtracted" a
+#                      lie; --reps/--scan-passes/--port are validated positive (--reps 0
+#                      was a vacuous SUCCESS); completeness is judged against the STATED
+#                      selection, so an unselected arm is legitimately absent while a
+#                      selected-but-absent one stays fatal; durations parse as DECIMAL
+#                      (`010s` was octal 8s, `010000ms` snuck under the cold-step ceiling);
+#                      and the host sysctls the rig weakens (perf_event_paranoid,
+#                      kptr_restrict) are captured BEFORE mutation and RESTORED on
+#                      EXIT/INT/TERM/HUP. A broken instrument publishes a wrong number
+#                      rather than crashing, so these need a standing test — and per #3249
+#                      (a hardcoded `_PERF_STATE="ok"` survived 118/118 tests) the bar is
+#                      "OBSERVED TO FIRE", not "present": every case feeds rejectable input
+#                      and asserts the exit code AND the diagnostic, with the sysctl
+#                      restore checked BEHAVIOURALLY through a recording `sudo` shim plus a
+#                      real SIGINT probe on the driver's own trap wiring. Hermetic:
+#                      synthetic result dirs + synthetic perf CSVs, no
+#                      cargo/perf/sudo/corpus/network, never root.
+#                      Also runs scripts/tests/test_ws0_cpu_pinning_guards.sh (#3272
+#                      item 10) — the MEASUREMENT-APPARATUS half of the same rig, split
+#                      out because it asks whether the observations are of the RIGHT
+#                      THING (the reporter test asks what the rig does with them) and
+#                      uses disjoint fixtures. Two guards, both directions each: the
+#                      VERIFIED-SIBLING taskset check (driven over a FAKE 4-core/8-thread
+#                      sysfs tree via lib-cpu.sh's injectable topology root — it must
+#                      ACCEPT genuine sibling pairs and REFUSE two-different-cores, a
+#                      pair valid on another box's layout, a pair-plus-stray, a lone CPU,
+#                      a cross-core range, an empty spec and an unreadable entry; the
+#                      override itself fails closed in a measurement run, refusal asserted
+#                      to PRECEDE the pinning check, so it can never be the bypass), and
+#                      the SERVER-OWNERSHIP check — the same question about the right
+#                      PROGRAM, driven against the shipped lib-server.sh with a real
+#                      listener on a kernel-assigned port: a FOREIGN listener refused
+#                      naming its pid, our own accepted, a descendant accepted but a
+#                      SIBLING refused (the pgid check accepted those), a dead server and
+#                      a readiness TIMEOUT fatal, an unanswerable prober stopping the run.
+#                      Hermetic: fake sysfs + a loopback listener under $TMPDIR; no
+#                      perf/sudo/taskset/root/hardware.
+#                      Also runs scripts/tests/test_ws0_perf_invocation_lint.sh (#3272
+#                      item 10) — the THIRD structural guard, split out of the file above
+#                      under the campsite rule (it reached 1607 lines against the ~1500
+#                      test target) along a RESPONSIBILITY seam: that one asks which CPUs
+#                      and which PROGRAM, this one asks whether the COUNTING DOMAIN is the
+#                      one spec R2 mandates. Measured at the split the two shared NO helper
+#                      and NO fixture. The `perf stat -p` SELF-GREP's FIVE REAL BYPASSES
+#                      were all found by driving it: an ATTACHED `-p<pid>` (the pattern
+#                      needed a trailing space), ANY line mentioning "self-check" (the
+#                      `grep -v` discarded by CONTENT, so a comment suppressed the guard),
+#                      a SINGLE-QUOTED attached value, an invocation through a VARIABLE,
+#                      and a GLOBAL OPTION between `perf` and `stat`. Hence the mechanism
+#                      is an ALLOWLIST (one wrapper invokes perf; any other invocation line
+#                      must be marked) + a per-TOKEN option check + a RUNTIME argv check,
+#                      asking WHERE a line is rather than what it looks like. Subject is
+#                      the whole scripts/perf tree, DISCOVERED by glob and asserted against
+#                      `ls` (a hand-maintained list had already drifted past two libs).
+#                      Both directions, plus the lint's OWN vacuity states: an empty
+#                      subject, an absent/doubled/`-C`-less/empty wrapper, a variable
+#                      command word, an UNREADABLE rig file, a mode with no END assertions,
+#                      an awk dying under the driver's `set -e -o pipefail`, and the
+#                      false-positive direction (`perf_stat_c`/`perf_event_paranoid`/
+#                      `target/perf-…` identifiers must NOT flag). Hermetic: driver +
+#                      scripts/perf copies under $TMPDIR and a shimmed `perf` function.
+#                      Also runs scripts/tests/test_ws0_host_state_guards.sh (#3272
+#                      finding 3) — the HOST STATE half, split out of the reporter test
+#                      in review round 3 because it is the only part of the rig that
+#                      changes anything OUTSIDE its own process tree and the only part
+#                      whose failure is SECURITY-ADJACENT rather than a wrong number.
+#                      The rig weakens perf_event_paranoid + kptr_restrict and used to
+#                      NEVER restore them (its only trap was `trap stop_server EXIT`);
+#                      the first fix was itself PARTIAL (the success/warning split keyed
+#                      on 'was ANYTHING restored'), so both halves are per-knob and the
+#                      root cause is closed too — a knob whose prior could not be
+#                      CAPTURED is never MUTATED. Behavioural through a recording `sudo`
+#                      shim + a real SIGINT probe; no privileged call, no knob touched.
+#                      Also runs scripts/tests/test_ws0_hermeticity.sh (#3272 review round
+#                      3, B1) — the MECHANISM that keeps the three files above hermetic ON
+#                      LINUX, which is where the property matters and where it broke twice.
+#                      The WS0 driver has an argument-validation boundary; BELOW it, it
+#                      writes host sysctls via `sudo -n`, runs `cargo build --release`,
+#                      drops the page cache and takes 45s `perf stat` measurements. Round 1
+#                      ran the world from six accept call sites; round 2 added
+#                      `--validate-args-only` + recording shims and left ONE bare (the
+#                      cold-ceiling `--temp warm` case, which skips the ceiling and falls
+#                      straight past the boundary) — a MANUAL SWEEP MISSED IT TWICE. So the
+#                      contract is a STRUCTURAL LINT over every `test_ws0_*.sh` (subject
+#                      DISCOVERED by glob; an empty subject or an unreadable file is a
+#                      FINDING, not a clean tree), which flags any driver invocation not
+#                      routed through `ws0_driver_run`, by LOCATION rather than spelling.
+#                      Its discriminating power is MEASURED: six bare spellings must fire
+#                      ($DRIVER, ${DRIVER}, a literal path, a $copy, a PATH-prefixed call,
+#                      `sh`) and six ordinary lines must not. And the platform property is
+#                      OBSERVED end to end on a LINUX-SHAPED fixture (fake sysfs where the
+#                      default 2,10 really are siblings, readable non-`-1` sysctl priors,
+#                      recording shims): a POSITIVE CONTROL first proves the bare run DOES
+#                      write `kernel.perf_event_paranoid=-1` on it, then the same fixture
+#                      through `ws0_driver_run` leaves the recording file EMPTY and the
+#                      priors UNCHANGED. Hermetic everywhere; a check-count floor closes
+#                      the suite-level 0/0.
+#                      Also runs `cargo test -p ws0-corpus-gen` (#3272 items 8-9) — a
+#                      tools/* package NO other component and no CI lane compiles, so
+#                      without this hook the corpus determinism oracle would be a test
+#                      nothing executes (#1597/#1618 gate-wiring class). It REGENERATES
+#                      the corpus (two, then three, 1,000-row generations, ~0.3s) and
+#                      BYTE-COMPARES every emitted component off disk; corroborates the
+#                      generator's self-reported sha256 against an independent hash
+#                      (anti-circularity); proves the comparison can FAIL (different seed
+#                      diverges, a one-byte flip is reported at its offset, a
+#                      missing/extra component is reported); and asserts the in-source
+#                      measurement-corpus pin (4,000,000 rows / 40,000 partitions /
+#                      693.69 B/row / sha256 4a903f6f… / digest 0x0390bfbb81a23fa1 over
+#                      31,250 batches) equals the committed corpus-identity.json field for
+#                      field, with a per-field perturbation case proving THAT comparison
+#                      can fail. Measured non-vacuity: a wall-clock write timestamp, a
+#                      per-generation buffer-reuse tail, and a fabricated self-reported
+#                      digest each left all 34 pre-existing unit tests GREEN while these
+#                      FAIL. Hermetic: tempdir corpora, no datasets/network.
 #                      Also runs (no python3/network/datasets needed)
 #                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
 #                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
@@ -5556,6 +5689,671 @@ run_tooling_tests() {
     >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (unenforced constraint comment); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ROOT JUNK-FILE guard (#3272 review round 5, F5). An empty file named `0` was
+  # committed at the repo root of one branch THREE times — removed, re-added by a
+  # `git add -A`, removed again. No committed code produces it: it is the residue of an
+  # ad-hoc shell redirect typed during a fix round (`… 2>0`, a mistyped `2>&1`), which a
+  # later blanket `git add` swept up. Deleting the file is not the fix; this is.
+  #
+  # The VERDICT-BEARING subject is the TRACKED root only (#3272 round 8). It was both states
+  # until the LINUX gate of record failed this component on a file named `720` that was
+  # UNTRACKED, never committed, and already gone when the run was inspected — transient debris
+  # from a CONCURRENT STEP OF THE SAME GATE. A guard whose subject is the live working tree can
+  # be tripped by a peer step of the run it is certifying, i.e. it reds the gate at random over
+  # content no author can act on, and a guard people learn to waive is worse than no guard. So
+  # the subject was NARROWED (not given a settle/retry window, which would trade a wrong subject
+  # for a timing-dependent verdict): committed content is attributable to a diff and can ship;
+  # untracked debris is reported as a NON-FAILING notice.
+  #
+  # The predicate stays narrow on purpose: only a name that is ENTIRELY a file-descriptor
+  # number, an `&`-prefixed one, or bare redirect punctuation, at depth 1. Anything with a
+  # letter, dot, dash or underscore is a legitimate file and is not flagged (driven COMMITTED,
+  # which is now the only observable path: `2026-report.md`, `v2`, `0.14.0.md`, `0x`, `a0`, `_0`).
+  # `--self-test` OBSERVES the tracked half FAILING, the untracked half NOT failing while still
+  # being reported, and a tracked finding surviving concurrent untracked debris, in a throwaway
+  # git repo under $TMPDIR — then scans THIS checkout, so the hook cannot certify the probe while
+  # leaving the real root unexamined. git-only: no python3, no network, hence NO SKIP PATH to
+  # record a vacuous success.
+  echo ">>> [$name] bash scripts/ci/check-root-junk-files.sh --self-test"
+  if ! bash "$REPO_ROOT/scripts/ci/check-root-junk-files.sh" --self-test >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (TRACKED accidental-redirect artifact at the repo root, or its self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 measurement-rig integrity guards (#3096/#3272): hermetic (synthetic result
+  # dirs + synthetic perf CSVs — no cargo, perf, sudo, corpus or network, and never
+  # root; the driver is only ever reached at argument validation, and the sysctl
+  # restore is exercised through a recording `sudo` shim). Pins the rig's
+  # measurement-integrity guards, every one of which was a real defect of the same
+  # shape — an instrument that reports success without having measured:
+  #   * a COLD Flight rep must be EXACTLY ONE full-corpus request (requests 2..N are
+  #     WARM and were being blended into a figure labelled "cold");
+  #   * a WARM rep of EITHER arm must record an untimed prewarm, and the cold arm's
+  #     `skipped-cold-arm` sentinel may satisfy a COLD rep ONLY — a warm rep carrying
+  #     it is an UNPREWARMED warm measurement passing the guard added to refuse one,
+  #     and the bare scan is the DENOMINATOR of the 1.3x ratio. A COLD rep must carry
+  #     that sentinel EXACTLY: any other value (including `unrecorded` = no status file)
+  #     means nothing establishes the rep was not prewarmed, and unlike the warm
+  #     direction that bias is UNBOUNDED — a secretly-warm rep reported cold reads
+  #     FASTER — so it is a REFUSAL, not a captioned figure plus a verdict;
+  #   * the corpus identity is REQUIRED, so the full-corpus-per-request check can
+  #     never be skipped while the report's notes claim it ran;
+  #   * an absent, uncounted or unparseable perf counter is an ERROR, never a
+  #     fabricated 0 that would make "setup-subtracted" a lie;
+  #   * --reps/--scan-passes/--port are validated positive (--reps 0 was a vacuous
+  #     but SUCCESSFUL report);
+  #   * completeness is judged against the STATED selection;
+  #   * durations parse as DECIMAL (`010s` was octal 8s);
+  #   * and the host sysctls the rig weakens (perf_event_paranoid, kptr_restrict) are
+  #     captured before mutation and RESTORED on EXIT/INT/TERM/HUP.
+  # A broken measurement guard publishes a wrong number instead of failing, so it
+  # needs a standing test rather than a review round — and per #3249 the bar is
+  # "observed to fire", not "present".
+  echo ">>> [$name] bash scripts/tests/test_ws0_report_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 measurement-rig integrity guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 CELL-VOLUME guards — "rows were checked and CELLS were not" (#3272 round 17).
+  # Split out of the reporter suite above under the campsite rule (that file reached 1602 lines
+  # against the ~1500 test target) along a SUBJECT seam, and it must be wired here or the 11
+  # checks it carries become a test nothing executes — the #1597/#1618 gate-wiring class this
+  # rig has already paid for. The reporter suite asks whether a quantity was validly OBSERVED;
+  # this asks whether, given a session whose every quantity IS observed and internally
+  # consistent, the WORK the published figure divides by was actually done. A pass returning
+  # EVERY ROW WITH MISSING COLUMNS satisfies every check in the sibling suite — right pass count,
+  # every pass observing exactly the pinned corpus row count, recorded aggregates equal to the
+  # derived sums — while decoding materially less data, and its rows/s is the DENOMINATOR of the
+  # rig's only output. Different oracle (`cells_per_row` from the corpus identity, not the row
+  # count) and a different non-vacuity mutation site (`ws0_collect.py`'s per-pass requirement).
+  # Hermetic: synthetic session dirs under $TMPDIR driven through the shipped reporter; no cargo,
+  # perf, sudo, taskset, corpus, network or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_cell_volume_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cell_volume_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 cell-volume guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 CORPUS-BOUNDARY guards (#3272 round 21), its own suite under the campsite rule and WIRED
+  # HERE IN THE SAME CHANGE — an unwired suite is the same defect class as a fail-open guard.
+  # Subject: the pre-measurement pin COPIED `data_db_sha256` and the whole component map out of the
+  # corpus's own `corpus-identity.json` instead of hashing the files, so the pin and that sidecar
+  # agreed BY CONSTRUCTION however the bytes on disk differed — a claim restated, not a
+  # measurement, i.e. #3249's hardcoded `_PERF_STATE="ok"` with extra steps. MEASURED: a component
+  # MUTATED during measurement and RESTORED before reporting left the Data.db digest verified, all
+  # components verified and all PINNED components verified, while the reps on either side had
+  # measured different bytes — the failure biases TOWARD the claim. The pin now HASHES (and
+  # COMPARES the sidecar against the measured values), records `components_source` so a copied pin
+  # cannot pass as a measured one, and `verify_corpus_boundary` re-hashes the ACTUAL bytes at each
+  # measurement boundary against the PIN, refusing the rep and naming what changed — the half no
+  # pre/post pair can see. Hermetic: synthetic session dirs and component files under $TMPDIR
+  # through the shipped writer/verifier/reporter; no cargo, perf, sudo, corpus, network or driver.
+  echo ">>> [$name] bash scripts/tests/test_ws0_corpus_boundary_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_corpus_boundary_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 corpus-boundary guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 BOUNDARY-RECORD COMPLETENESS guards (#3272 round 25), split out of the corpus-boundary
+  # suite above under the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a
+  # test nothing executes, the #1597/#1618 gate-wiring class this rig has already paid for twice.
+  # The split follows the SAME SEAM the shipped code does (round 22 split the boundary question into
+  # a WRITER module and a READER module), so the two suites are one question each.
+  #
+  # Subject: round 22 wired `verify_boundary_observations` into the reporter, and the only thing
+  # that ever fed it was the fixtures' HEALTHY generator — so MISSING, DUPLICATE and UNEXPECTED were
+  # all UNOBSERVED, and a checker returning OK unconditionally would have been indistinguishable
+  # from the shipped one (#3249's `_PERF_STATE="ok"`, which survived 118/118 tests). All five
+  # directions now fire independently over the SHIPPED generator's record MUTATED — accept, missing,
+  # duplicate (with NOTHING missing, so an `observations >= expected` checker would have accepted
+  # it), unexpected, and absent/unparseable. Non-vacuity MEASURED for MISSING: the PRE-FIX reporter,
+  # reconstructed from `ws0_report.py`'s own text minus exactly its four consuming lines, PUBLISHES a
+  # 2.00x ratio over the same short-record session and writes a results.json with no completeness
+  # field while claiming the digest and every component verified. Hermetic: synthetic session dirs
+  # under $TMPDIR through the shipped fixture generator and reporter; no cargo, perf, sudo, corpus,
+  # network or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_boundary_record_completeness.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_boundary_record_completeness.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 boundary-record completeness guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 ERROR-CODE CROSS-CHECK guards (#3272 round 20), split out of the reporter suite under
+  # the campsite rule and WIRED HERE IN THE SAME CHANGE — an unwired suite is a test nothing
+  # executes, the #1597/#1618 gate-wiring class this rig has already paid for twice. Subject:
+  # `error_codes` was classified `ignored` on the ASSUMED invariant that the map is empty
+  # whenever `requests_error` is 0, which nothing enforced — so a record carrying
+  # `requests_error: 0` beside `error_codes: {"Internal": 1}` was accepted and published as a
+  # clean, failure-free scan with the failing code named nowhere in the output (MEASURED). The
+  # invariant now enforced is the SUM, the producer's own (`StepAgg::record_outcome`), which also
+  # catches a breakdown disagreeing at a NON-ZERO count. Different oracle from both siblings
+  # (another field of the SAME record) and a different non-vacuity mutation site
+  # (`ws0_error_codes.py`). Hermetic: synthetic session dirs under $TMPDIR driven through the
+  # shipped reporter; no cargo, perf, sudo, taskset, corpus, network or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_error_code_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_error_code_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 error-code guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 MEASUREMENT-APPARATUS guards (#3272, item 10): the sibling of the reporter
+  # test above, split out because it covers a different question over disjoint
+  # fixtures — that one asks what the rig DOES with its observations, this one asks
+  # whether the observations are of the right thing at all. Two guards, both
+  # directions each:
+  #   * the VERIFIED-SIBLING taskset check — the load-bearing assumption of the
+  #     whole same-session both-arm methodology. If the two pinned CPUs are not one
+  #     physical core's hyperthreads, `perf stat -C` counts two different cores and
+  #     every per-core figure is a figure of something else, silently. The check had
+  #     never been OBSERVED refusing anything (it read a hardcoded /sys path, so it
+  #     needed a particular CPU layout to test); lib-cpu.sh now takes an injectable
+  #     topology root and this drives it over a FAKE 4-core/8-thread sysfs tree: it
+  #     must ACCEPT genuine sibling pairs and REFUSE two-different-cores, a
+  #     valid-on-another-box pair, a pair-plus-stray, a lone CPU, a cross-core range,
+  #     an empty spec and an unreadable topology entry. The override itself fails
+  #     closed in a measurement run (asserted, incl. that the refusal PRECEDES the
+  #     pinning check), so it can never become the bypass.
+  #     Round 21 adds the CLIENT set, whose check used to fail OPEN: a
+  #     `verify_sibling_pair … || echo` swallowed EVERY failure rather than only the
+  #     sibling shape it meant to tolerate, so a nonexistent or OFFLINE CPU in the
+  #     list was accepted, sched_setaffinity silently reduced the affinity to the
+  #     valid subset, and the manifest recorded — and the report printed — CPUs that
+  #     never ran an instruction. `verify_cpus_online` now validates EACH expanded CPU
+  #     independently (present + online, three states distinguished) and refuses,
+  #     naming every unusable CPU, while still requiring NO sibling shape — measured
+  #     both ways, including the pre-fix compound's rc=0 on a mixed valid/absent list.
+  #   * the SERVER-OWNERSHIP check — the same question about the right PROGRAM.
+  #     Readiness used to be inferred solely from a connect probe succeeding, so a
+  #     failed bind plus a peer holding the port meant the load generator measured
+  #     THAT server while `perf stat -C` counted OUR CPUs. Driven against the shipped
+  #     lib-server.sh with a real listener on a kernel-assigned port, both directions
+  #     (a foreign listener refused naming its pid, our own accepted, a descendant
+  #     accepted but a SIBLING refused, a dead server and a readiness TIMEOUT fatal,
+  #     and an unanswerable prober stopping the run rather than passing vacuously).
+  # The THIRD guard — the three-layer perf-invocation lint — is its own component
+  # below (the campsite-rule split; this file reached 1607 lines against the ~1500
+  # test target, and the two subjects share no fixture and no helper).
+  # Hermetic: a fake sysfs tree + a loopback listener under $TMPDIR. No perf, sudo,
+  # taskset, root, real multi-socket hardware, corpus, network or cargo.
+  echo ">>> [$name] bash scripts/tests/test_ws0_cpu_pinning_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_cpu_pinning_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 cpu-pinning / server-ownership guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 PERF-INVOCATION LINT, all three layers (#3272, item 10; split out of the
+  # cpu-pinning suite above under the campsite rule, along a RESPONSIBILITY seam —
+  # that one asks which CPUs and which PROGRAM an observation is of, this one asks
+  # whether its COUNTING DOMAIN is the one spec R2 mandates). Per-process counting
+  # measured >2x observer cost, so the driver checks ITSELF at startup. Driving that
+  # guard over injected copies found FIVE REAL BYPASSES across two successive
+  # deny-list patterns: an ATTACHED `-p<pid>` (the pattern required a trailing
+  # space), ANY line mentioning "self-check" (the `grep -v` discarded by CONTENT, so
+  # a comment on a real invocation suppressed the guard), a SINGLE-QUOTED attached
+  # value, an invocation through a VARIABLE, and a GLOBAL OPTION between `perf` and
+  # `stat`. All five fire now, and the mechanism is no longer a deny-list: an
+  # ALLOWLIST (perf is invoked in ONE wrapper; any other invocation line must be
+  # explicitly marked) plus a per-TOKEN option check plus a RUNTIME argv check —
+  # which asks WHERE a line is rather than what it looks like, so a spelling nobody
+  # anticipated still fires. The subject is the WHOLE scripts/perf tree, DISCOVERED
+  # by glob and asserted against `ls` (a hand-maintained list had already drifted
+  # past two libraries). Both directions throughout: the shipped tree must be CLEAN,
+  # and the lint must NOT flag `perf_stat_c`/`perf_event_paranoid`/`target/perf-…`
+  # identifiers — a guard that reds on ordinary code is the one an operator deletes.
+  # Its OWN vacuity states are driven too (an empty subject, an absent or doubled or
+  # `-C`-less wrapper, a variable command word, an UNREADABLE rig file, a mode with
+  # no END assertions, and an awk that dies under the driver's `set -e -o pipefail`),
+  # each an instance of the rule this issue is about: never derive a positive verdict
+  # from the absence of a bad signal. Hermetic: driver and scripts/perf copies under
+  # $TMPDIR plus a shimmed `perf` function; no perf, sudo, taskset, root, corpus,
+  # network or cargo.
+  echo ">>> [$name] bash scripts/tests/test_ws0_perf_invocation_lint.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_perf_invocation_lint.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 perf-invocation lint guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 NO-FABRICATED-VALUE guards (#3272 AC3, review round 1). The third file of the
+  # rig's self-test set, for one subject: a counter or verdict that was not OBSERVED
+  # is an ERROR, never a default. Round 1's review found that rule stated in
+  # ws0_report.py's own docstring and then violated FIVE times in the same file, each
+  # time by an idiom that reads as harmless —
+  #   * `int(rec.get("requests_error", 0)) > 0`, so the "no failed requests" refusal
+  #     rested on a FABRICATED 0 and a record with no such key was reported CLEAN
+  #     (measured: exit 0 + a full five-line report, the error count never read);
+  #   * `block.get("prewarm_all_ok", True)`, a VERDICT key defaulting to the
+  #     PERMISSIVE value, so a block that lost the verdict suppressed the warning;
+  #   * `(hi-lo)/med*100 if med else 0.0`, printing the DEGENERATE series as the
+  #     TIGHTEST one (`0 rows/s [0..0, spread 0.0%]`);
+  #   * `scan_rps / fl_rps if fl_rps else float("inf")`, publishing `inf x` as the
+  #     bare/flight ratio for an arm that measured nothing;
+  #   * `rec = records[-1]`, silently DROPPING every earlier step record (measured: a
+  #     rep whose first record held 9 failed requests over a 37-row partial scan
+  #     published the second record's clean 250,000 rows/s).
+  # Plus the coercion class (a truncating `int()`, a boolean read as a count), the
+  # DERIVED flight throughput, and the two structural ast scans that keep a
+  # permissive-default idiom and a hand-written "complete inventory" out of the
+  # reporting path. The MEASUREMENT-PROVENANCE half — the corpus identity's BYTES, the
+  # complete component set, the pre-measurement pin and the manifest-read
+  # configuration — is its own component below (review round 6's campsite-rule split).
+  # Hermetic: synthetic session dirs, synthetic perf CSVs, and a few-KB synthetic
+  # Data.db whose real sha256 is computed with hashlib; no cargo, perf, sudo, corpus,
+  # network or root. python3 absence FAILS here (it is a hard requirement of the rig),
+  # never skips.
+  # ws0 SELF-TEST HERMETICITY, as a MECHANISM (#3272 review round 3, B1). The three files
+  # above must not, while testing the rig, RUN the rig: below its argument-validation
+  # boundary the driver writes host sysctls via `sudo -n`, runs `cargo build --release`,
+  # drops the page cache and takes 45-second `perf stat` measurements — inside this gate
+  # component, on this Linux box. Round 1 of the review found six such call sites; round 2
+  # introduced `--validate-args-only` + recording shims and left ONE bare, and a manual
+  # sweep missed it TWICE. So this is a STRUCTURAL LINT over every `test_ws0_*.sh` rather
+  # than a rule in a comment: any driver invocation not routed through `ws0_driver_run` is
+  # a finding, judged by LOCATION (the same posture as the perf lint's layer 1), with the
+  # subject DISCOVERED by glob so a fourth self-test cannot be added outside the contract.
+  # Both directions are measured (six bare spellings fire, six ordinary lines do not), and
+  # the platform property is OBSERVED on a LINUX-SHAPED fixture with a positive control
+  # proving the bare run really does mutate that host. Hermetic; sub-second.
+  # ws0 HOST STATE (#3272 finding 3, split out of the reporter test in review round 3). The
+  # rig weakens `kernel.perf_event_paranoid` and `kernel.kptr_restrict` so `perf stat -C` can
+  # count CPU-wide, and used to NEVER put them back: its only trap was `trap stop_server
+  # EXIT`, so a success, a FATAL and a Ctrl-C all left the host less hardened than the rig
+  # found it — permanently, for every subsequent process on a shared fleet machine, with
+  # nothing in the output saying so. The FIRST fix of that was itself PARTIAL (the
+  # success/warning split keyed on "was ANYTHING restored", so a partial restore printed the
+  # affirmative line and no warning), which is why the ROOT CAUSE is closed too: a knob whose
+  # prior could not be CAPTURED is never MUTATED. Behavioural, through a recording `sudo`
+  # shim plus a real SIGINT probe on the driver's trap wiring — no privileged call happens and
+  # no host knob is touched, and the exact `sysctl -w` argv the handler WOULD issue is
+  # asserted instead. A separate file from the reporter guards because this is the only part
+  # of the rig that changes anything OUTSIDE its own process tree, and the only part whose
+  # failure is SECURITY-ADJACENT rather than a wrong number.
+  echo ">>> [$name] bash scripts/tests/test_ws0_host_state_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_host_state_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 host-state restore guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  echo ">>> [$name] bash scripts/tests/test_ws0_hermeticity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_hermeticity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 self-test hermeticity); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  echo ">>> [$name] bash scripts/tests/test_ws0_fabrication_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_fabrication_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 no-fabricated-value guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 MEASUREMENT PROVENANCE (#3272 review round 6). Split out of the fabrication suite
+  # under the campsite rule, by SUBJECT: that suite asserts a property of a NUMBER (a counter
+  # or verdict not OBSERVED is an error, never a default), this one a property of the RUN the
+  # numbers came from — a report must identify the BYTES and the CONFIGURATION it describes.
+  # The two are orthogonal, which is the reason for the seam: every check in the fabrication
+  # suite is satisfiable by an artifact set that is internally consistent about the WRONG run.
+  # Four findings, each with its accept direction:
+  #   * F1 — reps/temps/arms/scan-passes and the CPU pins were the REPORTER'S arguments, tied
+  #     to nothing about the session, so a re-report could SUBSTITUTE a configuration and state
+  #     it had been verified (measured: a 3-rep session reported at `--reps 1` published rep 1
+  #     as the whole run, under CPU pins the session never used, beside a "verified
+  #     physical-core siblings" claim). The configuration is now READ FROM the pre-measurement
+  #     manifest and the flags are GONE — each is an argparse error, so the substitution cannot
+  #     be expressed rather than merely being detected.
+  #   * F3 — corpus verification checked ONLY `Data.db`, while a scan reads `Index.db` above
+  #     all plus the Statistics/Summary/Filter components that shape how it reads. Measured
+  #     with the fix reverted: rewriting `nb-1-big-Index.db` left the report at exit 0 with its
+  #     "the identity describes the bytes that were measured" line intact. All 5 recorded
+  #     components are now re-stat'ed and re-hashed, and the summary states the count.
+  #   * B6 — `corpus-identity.json` was validated for internal consistency and the `Data.db`
+  #     was NEVER OPENED, so a 4 KB file beside an identity claiming 700,000 bytes and an
+  #     unrelated sha256 exited 0 and printed that sha256 as the measured one. The digest is
+  #     skippable for a multi-GB corpus ONLY via --skip-corpus-digest, which STAMPS
+  #     `CORPUS DIGEST UNVERIFIED` into the summary and `sha256_verified: false` into
+  #     results.json — never a silent skip, and the cheap size half still fires under it.
+  #   * The PRE-MEASUREMENT PIN (round 4) — the report-time digest cannot see either sequence
+  #     that attributes figures to bytes nobody measured (re-reporting an old session against a
+  #     different corpus; a corpus regenerated mid-run), because BOTH are self-consistent AT
+  #     REPORT TIME. The driver stamps a pin BEFORE the first rep and the reporter REQUIRES it;
+  #     the driver-side wiring is asserted too, including that the stamp PRECEDES the
+  #     measurement loop.
+  # Hermetic: synthetic session dirs, synthetic perf CSVs, and synthetic few-KB Data.db files
+  # whose real sha256 is computed with hashlib; no cargo, perf, sudo, corpus, network or root.
+  # python3 absence FAILS here (it is a hard requirement of the rig), never skips, and a
+  # check-count floor closes the suite-level 0/0.
+  echo ">>> [$name] bash scripts/tests/test_ws0_provenance_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_provenance_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 measurement-provenance guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 OUTPUT-DIRECTORY EXCLUSIVITY (#3272 review round 13, campsite split). Split out of
+  # `test_ws0_provenance_guards.sh` (1606 lines against the ~1500 test target — the `file-size`
+  # ratchet is `.rs`-ONLY, so a shell file crosses it silently) along a responsibility seam: the
+  # parent's subject is WHICH BYTES AND WHICH CONFIGURATION a report describes; this file's is
+  # whether the DIRECTORY holding those artifacts belongs to exactly ONE session. Distinct because
+  # every parent check is satisfiable by a session whose corpus, components, schema, request and
+  # configuration are impeccably pinned and whose rep files were assembled from TWO RUNS that
+  # shared a directory — the reporter reads whatever rep files are present, and a pin identifies
+  # the corpus of the session that WROTE it, not the provenance of every sibling file beside it.
+  # Four findings share the subject, all over `scripts/perf/lib-outdir.sh`: round 6's R1
+  # (`mkdir -p` over a second-unique default name, and an explicit `--out` keeping a previous
+  # run's rep files), round 9's F4 (the used-dir enumeration's STATUS discarded, so a FAILED
+  # `find` was indistinguishable from an empty directory and took the permissive branch), round
+  # 7's F3 (R1 hardened the DEFAULT branch and left the EXPLICIT one on `mkdir -p`, so two
+  # concurrent runs given the same empty `--out` both proceeded) and the boundary placement both
+  # rest on (REFUSAL above `--validate-args-only`, CREATION below it). Hermetic: synthetic
+  # directories under $TMPDIR, the SHIPPED `lib-outdir.sh` sourced into subshells, driver
+  # invocations ONLY through `ws0_driver_run`; no cargo, perf, sudo, taskset, corpus, network or
+  # root. One case SKIPS as root (which bypasses the read bit the F4 trigger needs), with a stated
+  # reason rather than a pass.
+  echo ">>> [$name] bash scripts/tests/test_ws0_output_dir_exclusivity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_output_dir_exclusivity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 output-dir exclusivity guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 CANONICAL-CORPUS COMPARISON (#3272 review round 13, F3). The third campsite split off
+  # `test_ws0_provenance_guards.sh`, and a distinct SUBJECT: that file asks whether a report
+  # IDENTIFIES the bytes it describes; this asks whether those are the bytes a WS0 BASELINE is
+  # DEFINED as. Every provenance check is a SELF-CONSISTENCY check about whatever corpus was
+  # supplied — pin matches identity, components match pin, schema matches its digest, rows are an
+  # exact multiple of the pinned count — and ALL of it is equally true of a corpus generated with
+  # smoke-test row counts or a different seed. So such a corpus passed the driver AND the reporter
+  # as a WS0 BASELINE with nothing in the printed report to distinguish it. The canonical shape
+  # lives in RUST (`tools/ws0-corpus-gen/src/measurement_corpus.rs`) and NOTHING under `scripts/`
+  # referred to it (measured: zero grep hits), so the fix is a CROSS-LANGUAGE BRIDGE — a PARSE of
+  # the Rust source, because no gate component or hermetic self-test may `cargo build` and a
+  # committed generated copy would be a second copy of every value. A smoke corpus still RUNS,
+  # under an explicit `--non-baseline` mode that LABELS the manifest and the report in words
+  # (forbidding it would be the FOURTH documented operator command this issue broke). Both
+  # directions are measured, with three non-vacuity halves: the pre-fix pin observed accepting a
+  # 1000-row corpus uncompared, all 9 values asserted present in the Rust file's own text (so a
+  # hand-copied Python literal could not satisfy the check), and a renamed constant observed to be
+  # FATAL. Hermetic: synthetic corpora under $TMPDIR, the shipped oracle/writers called directly,
+  # driver invocations only through `ws0_driver_run`; the Rust pin is READ, never compiled.
+  echo ">>> [$name] bash scripts/tests/test_ws0_canonical_corpus.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_canonical_corpus.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 canonical-corpus guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 PER-REP ROUND METADATA (#3272 review round 4). Split out of the fabrication suite
+  # under the campsite rule, by SUBJECT: the driver's loop order, the four RECORDED per-rep
+  # fields, the artifact-set INTEGRITY refusals over them (same round set per arm, positions
+  # 1..n exactly once, arms_in_round matching, no duplicate instant, labels not contradicting
+  # instants, no arm at a fixed position), and — the reason it is its own subject — the
+  # assertion that NO INTERLEAVING OR ORDERING CLAIM is made on ANY session shape.
+  #
+  # That last property is a round-4 owner ruling. Earlier rounds had the reporter print "the
+  # reps were INTERLEAVED … OBSERVED FROM THE CLOCK …" and record `round_major_verified: true`;
+  # at the rig's default `--reps 1` there is ONE round, so `zip(ordered, ordered[1:])` is
+  # empty, ZERO orderings were compared, and the verdict was returned anyway — a positive
+  # verdict from an absent measurement, which is the defect the whole issue exists to remove.
+  # The claim and all 13 verdict fields were DELETED rather than re-worded a fourth time, and
+  # this component is what keeps them deleted: forbidden PHRASES over every session shape
+  # (one round, many rounds, a forged one), a shared key-walking assert over results.json
+  # (`scripts/tests/ws0_assert_no_verdict_fields.py`), and two structural scans of the
+  # reporter's ast-stripped executable code. Re-adding an OBSERVED drift control on real
+  # hardware is #3287/#3299. Hermetic: synthetic session dirs only.
+  echo ">>> [$name] bash scripts/tests/test_ws0_round_metadata.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_round_metadata.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 round-metadata / no-interleaving-claim guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 NUMERIC WRAPAROUND (#3272 review round 7, F2). Split out of the cpu-pinning suite
+  # under the campsite rule, along a responsibility seam: the cpu suite's subject is TOPOLOGY
+  # (is the pinning a real physical core?), this one's is ARITHMETIC — can a bound be defeated
+  # by the evaluator that checks it? Bash arithmetic is signed 64-bit and WRAPS SILENTLY, and
+  # that has now been the root cause of THREE findings in three places: round 4's
+  # `parse_duration_ms` (`2305843009213693956s` * 1000 -> 4000ms, UNDER the 5000ms cold-step
+  # ceiling, smuggling a blended cold measurement past that guard), round 4's
+  # `require_positive_int` (a 20-digit value range-checked as 7766279631452241919), and round
+  # 7's `cpu_range_validate` (`9223372036854775809-0` -> a NEGATIVE lo passing BOTH the index
+  # ceiling and the expansion cap, whose own `hi - lo + 1` wraps negative too, then driving a
+  # ~9.2e18-iteration array append — an OOM mid-measurement from an ACCEPTED argument).
+  # Three sites, one class, so the fix is a MECHANISM: `lib-args.sh` owns
+  # `decimal_normalize`/`decimal_le`, comparing canonical decimal STRINGS with no arithmetic at
+  # all — no digit cap to choose and nothing left to wrap. Every firing case here carries a
+  # NON-VACUITY half: a replica of the removed arithmetic, OBSERVED to have accepted the same
+  # input. The expansion-loop case runs under `timeout`, because the pre-fix failure mode is a
+  # hang and a hanging test is not a failing test. Hermetic: two sourced libraries plus a
+  # synthetic sysfs topology in $TMPDIR; sub-second.
+  echo ">>> [$name] bash scripts/tests/test_ws0_numeric_wraparound.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_numeric_wraparound.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 numeric-wraparound guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 PRIMARY-PATH ACCEPT DIRECTION (#3272 review round 11). The complement of the five suites
+  # above, and it exists because of a ROOT CAUSE rather than a sixth guard: review rounds 9, 10 and
+  # 11 each returned four findings, mostly living in the PREVIOUS round's fixes, and the shared
+  # cause is that EVERY fix tested its guard REJECTING bad input while NOTHING tested the ACCEPT
+  # direction of the primary command. Three documented commands were broken that way — round 9's F1
+  # (`--verify-against`), round 10's L1 (the digest-oracle command) and round 10's M2, which broke
+  # THE NORMAL MEASUREMENT COMMAND: the mtime-vs-HEAD staleness check was mode-blind on the premise
+  # that `cargo build` touches every artifact, and cargo does NOT rewrite an already-current one, so
+  # a script/docs-only commit plus a successful build left every mtime before HEAD and the driver
+  # refused (round 11's F1). The five reject suites are green throughout and cannot see this: a guard
+  # that refuses EVERYTHING satisfies all of them. What this asserts: the documented invocations
+  # (`--corpus DIR` alone, then --reps/--temp both/--arm both/--no-build/--out/--scan-passes/the
+  # durations/the CPU pins, and the full matrix in one command) reach `ARGUMENTS OK` having executed
+  # NOTHING; the staleness check ADMITS a freshly-built binary older than HEAD under `built` while
+  # still refusing it under `reused`; the SHIPPED writer's provenance record satisfies the SHIPPED
+  # reader (a round trip no fixture-fed reject case can establish); and the schema/ticket/session-pin
+  # verifiers admit a legitimate corpus written by the shipped writers. Each accept is paired with a
+  # NON-VACUITY half (the same harness refuses `--reps 0` and the illegal cold/scan-passes pair; the
+  # pre-fix mode-blind predicate is observed refusing the input now admitted). Hermetic: the driver
+  # runs ONLY through `ws0_driver_run` (`--validate-args-only` + recording shims, every shim OBSERVED
+  # to record), plus a throwaway git repo and a few KB under $TMPDIR — no cargo, perf, sudo, taskset,
+  # corpus, network or root. What it deliberately does NOT reach is stated in the file's own header.
+  echo ">>> [$name] bash scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 primary-path ACCEPT-direction guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 BINARY/BUILD PROVENANCE (#3272 review round 11, campsite split). Split out of
+  # `test_ws0_provenance_guards.sh` (which reached 1652 lines against the ~1500 test target — the
+  # `file-size` ratchet is `.rs`-ONLY, so a shell file crosses it silently) along a responsibility
+  # seam: the parent's subject is WHICH BYTES AND WHICH CONFIGURATION a report describes (corpus,
+  # components, schema, ticket, output dir, manifest); this file's is WHICH PROGRAMS produced the
+  # ratio. That is distinct because every parent check is satisfiable by a session whose corpus,
+  # schema, request and configuration are impeccably identified and whose two arms were DIFFERENT
+  # BUILDS — and this rig's whole output is a RATIO BETWEEN TWO BINARIES. Four findings share the
+  # subject: round 10's M2 (`--no-build` accepted any executable under target/release with neither
+  # revision nor digest recorded), round 11's F1 (M2's mtime-vs-HEAD check was mode-blind, so a
+  # successful `cargo build` after a script-only commit was refused — its ACCEPT half lives in the
+  # primary-path suite above, its "must still refuse under `reused`" half here beside the check), and
+  # round 11's F2 (digests taken once before a many-minute session while every rep ran from
+  # target/release, where a concurrent rebuild replaces them mid-session — the executables are now
+  # COPIED into the session's own measured-bin/ and the copies are what run), and round 21's F5 (F2's
+  # copies are SEQUENTIAL and taken after cargo releases its build lock, so a rebuild landing BETWEEN
+  # two of them left the session holding binaries from TWO BUILDS while EVERY destination digest still
+  # validated — a destination digest hashes what it WROTE, so it proves the copy succeeded and
+  # verifies the write against itself; `scripts/perf/ws0_binary_snapshot.py` now captures each source
+  # artifact's identity BEFORE the first copy, requires every copy to equal it, and RE-READS every
+  # source after the last copy, refusing and naming whichever moved). Hermetic: synthetic
+  # session dirs and perf CSVs, a few-KB Data.db hashed with hashlib, and a throwaway `git init` repo
+  # in $TMPDIR; no cargo, perf, sudo, taskset, corpus, network or root.
+  echo ">>> [$name] bash scripts/tests/test_ws0_binary_provenance.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_binary_provenance.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 binary/build-provenance guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 PREWARM COMPLETENESS — "was the measurement actually WARM?" (#3272 review round 12, F2).
+  # Split out of the reporter suite along a responsibility seam: this property is decided at
+  # MEASUREMENT time, in `lib-measure.sh`, by classifiers in `ws0_prewarm.py`, over artifacts the
+  # reporter never reads (it reads only the one-word `<tag>.prewarm.status` they produce) — so every
+  # check in the reporter suite is satisfiable by a session whose statuses all read `ok` and whose
+  # prewarms warmed 0.02% of the corpus. Two findings: round 10's F-A (a status taken from the
+  # loadgen's EXIT CODE while `--out /dev/null` discarded the only evidence) and round 12's F2 (F-A's
+  # replacement was `requests_ok >= 1 AND rows_total >= 1` — a NON-ZERO check where the property is a
+  # COMPLETENESS one, plus a bare-scan leg that trusted process success while discarding the bench's
+  # own row counts). Both legs now require a FULL corpus scan against the PINNED row count.
+  # Hermetic: synthetic prewarm artifacts, a few-KB Data.db hashed with hashlib, a session pin from
+  # the shipped writer; no cargo, perf, sudo, taskset, corpus, network, root or driver invocation.
+  echo ">>> [$name] bash scripts/tests/test_ws0_prewarm_completeness.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_prewarm_completeness.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 prewarm-completeness guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 CORPUS-GENERATOR determinism + measurement-corpus pin (#3272, items 8-9).
+  # `tools/*` package tests are run by NO other gate component and by no CI lane
+  # (ci.yml archives cqlite-core targets; pr-gate is cqlite-core-scoped), so
+  # without this hook the determinism oracle would be a test nothing executes —
+  # the #1597/#1618 gate-wiring class. What it pins:
+  #   * REGENERATE-AND-BYTE-COMPARE: two (and three) independent generations from
+  #     the recorded seed, byte-compared file by file over the RAW BYTES read off
+  #     disk. The committed corpus's "byte-identical across three generations"
+  #     claim was PROSE ONLY; `--verify-against` and the row-content unit tests are
+  #     invariant to a whole class of defects (measured: a wall-clock write
+  #     timestamp, and a per-generation buffer-reuse tail, each left all 34
+  #     pre-existing unit tests GREEN while this test FAILs).
+  #   * ANTI-CIRCULARITY: the generator's self-reported `data_db_sha256` is
+  #     corroborated against an independently computed hash of the file, so the pin
+  #     every future comparison rests on is not a number the generator asserted
+  #     about itself (measured: a fabricated constant digest also survived all 34).
+  #   * NON-VACUITY: a different SEED must diverge, a one-BYTE flip must be
+  #     reported at its offset, and a missing/extra component must be reported — so
+  #     the equality is not one that would pass on any two inputs.
+  #   * The MEASUREMENT-CORPUS PIN: the in-source constants (4,000,000 rows /
+  #     40,000 partitions / 693.69 B/row / sha256 4a903f6f… / digest
+  #     0x0390bfbb81a23fa1 over 31,250 batches) must equal the committed
+  #     corpus-identity.json field for field, with a perturbation case per field
+  #     proving that comparison can FAIL. The full-size verification is
+  #     #[ignore]d (it writes ~2.8 GB) and carries the operator command.
+  # Cheap and hermetic: 1,000-row corpora in tempdirs (~0.3s total), no datasets,
+  # no network. A build failure is a FAILURE, never a skip.
+  echo ">>> [$name] cargo test -p ws0-corpus-gen (determinism byte-compare + corpus pin)"
+  if ! (cd "$REPO_ROOT" && cargo test -q -p ws0-corpus-gen) >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 corpus determinism / pin); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

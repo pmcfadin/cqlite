@@ -201,9 +201,11 @@ untouched scan path — a ~10% drift with nothing changed on the measured path.*
 spread), so the second reading is the stable one and the first is not
 reproducible.
 
-**THE RULE, binding on every future use of this rig: same-session interleaved
-A/B/C with a drift control that is code-identical across arms, or NO
-COMPARISON.**
+**THE RULE, which every future use of this rig must satisfy MANUALLY: same-session
+interleaved A/B/C with a drift control that is code-identical across arms, or NO
+COMPARISON.** It is a requirement on the OPERATOR, not a control the committed rig
+implements or enforces — see **§3b.1** below, and do not read the steps that follow
+as describing what `scripts/perf/` does.
 
 Concretely, what a valid comparison looks like — the shape
 `abc-interleaved-2026-08-03.md` records:
@@ -226,6 +228,40 @@ Concretely, what a valid comparison looks like — the shape
 
 **Never** "re-baseline first, then compare across sessions", and never correct
 for drift after the fact.
+
+### 3b.1 STATUS: this control is NOT IMPLEMENTED OR ENFORCED by the committed rig
+
+**Amended 2026-08-05 (issue #3272 review round 4).** Everything above §3b.1 states
+what a valid comparison *requires*. It is a specification, not a description of the
+committed rig, and this subsection exists because the two were being conflated.
+
+* **The committed rig does not implement or enforce the interleaved drift control,
+  and it makes NO INTERLEAVING CLAIM.** `scripts/perf/ws0-baseline.sh` orders its
+  loop rounds-outside/arms-inside with the arm order rotated by round and the
+  bare-scan arm rotating as a peer — a reasonable ordering, but **nothing verifies
+  that a session ran that way**, so it is not the control step 1/step 2 describe.
+* **A claim to the contrary was removed rather than re-worded.** An earlier #3272
+  round had `ws0_report.py` print "the reps were INTERLEAVED … OBSERVED FROM THE
+  CLOCK …" and record `interleaving.verified` / `timing.round_major_verified` in
+  `results.json`. At the rig's default `--reps 1` there is a single round, so **zero
+  orderings were compared** while the verdict field still read `true` — a positive
+  verdict from an absent measurement. The claim and every verdict field were
+  **deleted**.
+* **What the rig does do with the round metadata** is integrity-check it and record
+  it: all four per-rep fields (`round`, `position`, `arms_in_round`,
+  `monotonic_ns`) are REQUIRED; a session is REFUSED when its arms cover different
+  round sets, when positions within a round are not `1..n` exactly once, when
+  `arms_in_round` disagrees with the arms present, when two reps share an instant, or
+  when the round labels contradict the recorded instants. The values are carried into
+  `results.json` under `recorded_round_metadata` as **inert recorded data** — nothing
+  derives a property from them.
+* **Therefore: read every cross-arm difference this rig prints as UNCONTROLLED FOR
+  DRIFT.** The per-round direction count remains the most readable signal it offers,
+  and the ~10% one-hour drift measured above is not accounted for by anything in the
+  rig.
+* **Re-adding an OBSERVED control on real hardware is tracked by #3287/#3299.** Until
+  one of those lands, steps 1–6 above are the manual procedure an operator must run
+  and record; they are not automated here.
 
 ---
 
@@ -264,8 +300,15 @@ count, and asserts the digest, row count and cells-per-row are identical under
 
 ```bash
 cargo test -p cqlite-flight --test issue_3096_arrow_buffer_digest            # CI fixture
-CQLITE_WS0_CORPUS_DIR=/data/ws0-3096 \
-  cargo test -p cqlite-flight --test issue_3096_arrow_buffer_digest -- --nocapture   # + the big corpus
+
+# + the big corpus. The oracle REQUIRES the three pinned expectations
+# (CQLITE_WS0_EXPECT_ARROW_ROWS/BATCHES/DIGEST) — a corpus dir supplied without them is
+# REFUSED, because the pre-#3272 oracle only checked its two taps agreed WITH EACH OTHER
+# and then printed the digest, so both arms drifting together exited 0. Do NOT retype the
+# expectations here: ask the pins for the command, so a re-pin cannot leave this stale
+# (#3272 L1 — this block set only CQLITE_WS0_CORPUS_DIR and therefore failed immediately).
+cargo run -q -p ws0-corpus-gen --bin ws0-verify-commands -- --digest /data/ws0-3096
+# ...then paste what it prints. `--all` also emits the ~2.8 GB regeneration/identity check.
 ```
 
 ## 6. Framing attribution

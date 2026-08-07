@@ -1,0 +1,757 @@
+#!/usr/bin/env python3
+"""Fail-closed validation for the WS0 measurement rig's reporting path (#3272).
+
+Split out of `ws0_report.py` under the campsite rule: the reporter aggregates,
+this module decides what it is allowed to aggregate. Every function here answers
+one question — "was this actually OBSERVED?" — and raises `Invalid` when the
+answer is no.
+
+The governing rule, from CQLite's no-heuristics / authoritative-metadata-only
+mandate applied to the reporting path (#3272 AC3):
+
+    **A counter that was not observed is an ERROR, never a fabricated `0`.**
+
+Every guard here exists because its absence was a REAL defect, and the shape of
+all of them is the same: *an instrument that reports success without having
+measured*. The four that came from #3272's review round:
+
+* `load_corpus_identity` — an absent `corpus-identity.json` used to yield
+  `corpus_rows=None`, which SILENTLY DISABLED the full-corpus-per-request assert
+  while the generated NOTES kept claiming the property had been verified. That is
+  fail-open inside the guard added to close the cold-blend defect, so the identity
+  is now REQUIRED and every field it must carry is checked.
+* `classify_prewarm` — the `skipped-cold-arm` sentinel used to count as a healthy
+  prewarm at ANY temperature, so an unprewarmed WARM rep reached
+  `prewarm_all_ok=true`: the prewarm guard satisfied by its own cold-arm sentinel.
+  A status is now valid only at the temperature it can arise at.
+* `read_perf_counters` — `.get("cycles", 0)` turned an absent or unparseable
+  counter into a zero, so a run was reported "SETUP-SUBTRACTED" with no
+  subtraction having happened. A perf CSV that does not carry a required event
+  (including perf's own `<not counted>` / `<not supported>` markers) is an error.
+* `positive_int` — `--reps 0` produced a vacuous but SUCCESSFUL report.
+
+There is deliberately **no environment variable that switches any of these off**.
+An escape hatch on a measurement guard can only ever buy a confident wrong number,
+which is the failure mode the whole rig is built against.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import pathlib
+import re
+
+# perf's own markers for "this event produced no value". They are the exact shape
+# of the silent-instrument failure: the CSV line EXISTS, the run EXITED ZERO, and
+# the number is absent — so they must never reach an arithmetic path.
+PERF_NOT_A_VALUE = ("<not counted>", "<not supported>", "<unsupported>", "")
+
+# The prewarm status each temperature can legitimately record. A status outside its
+# temperature's set is a STRUCTURAL inconsistency in the artifact set (the driver
+# cannot emit it), which is fatal — as distinct from an honestly-recorded
+# DEGRADATION (`unrecorded`, `FAILED-exit-N`), which is flagged loudly but reported.
+PREWARM_REQUIRED = {
+    "warm": "ok",
+    "cold": "skipped-cold-arm",
+}
+
+# Which temperatures may report an UNRECOGNISED status as an honest degradation (#3272 round 21).
+# Keyed AFFIRMATIVELY per temperature, and read as `is True`, so a temperature absent from this
+# table — a third temperature added later — REFUSES rather than inheriting the permissive branch.
+# That is the `== OK` shape this issue keeps having to re-apply: the pre-fix `classify_prewarm`
+# ended in a bare `return "degraded"`, so EVERY unrecognised value, INCLUDING `unrecorded` (the
+# sentinel `ws0_collect.read_prewarm` returns for an ABSENT status file), reached it.
+#
+# `warm: True` — a warm prewarm is a REAL OPERATION that can really fail, and its classifiers
+# (`ws0_prewarm.classify_prewarm_jsonl`/`_scan_json`) exist to emit a NAMED failure label rather
+# than raise, precisely so a rep can be kept and honestly flagged. The degradation is also
+# self-limiting in direction: an unprewarmed "warm" rep reads SLOWER, and the report prints a loud
+# PREWARM DEGRADED line beside its figure saying the separation is unverified.
+#
+# `cold: False` — a cold rep has NO PREWARM LEG AT ALL. `lib-measure.sh` initialises
+# `prewarm_status="skipped-cold-arm"`, enters the classifier only under `[[ "$temp" == "warm" ]]`,
+# and writes the status UNCONDITIONALLY, so `skipped-cold-arm` is the ONLY value a cold rep can
+# carry and there is no cold failure mode for a label to honestly describe. Any other value —
+# absent file, a truncated write, a hand edit, a future driver — means NOTHING ESTABLISHES THAT THIS
+# REP WAS NOT PREWARMED, i.e. that it is cold at all. Unlike the warm case that is UNBOUNDED IN
+# DIRECTION: a secretly-warm rep reported cold reads FASTER, so the unverified label can flatter the
+# figure it is attached to. So a cold figure whose temperature cannot be verified is refused, not
+# captioned.
+PREWARM_DEGRADATION_ADMITTED = {
+    "warm": True,
+    "cold": False,
+}
+
+# The two tables are keyed on the same closed set of temperatures, asserted at import rather than
+# left to drift: a temperature added to one and not the other would be exactly the missing-entry
+# case above, discovered as a refusal on somebody's real session instead of here.
+assert PREWARM_REQUIRED.keys() == PREWARM_DEGRADATION_ADMITTED.keys()
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# A CANONICAL decimal integer, and nothing else. NO surrounding whitespace at all (#3272 round
+# 16, L2 — `exact_int` used to `.strip()` first, so it accepted the `" 3 "` its own docstring
+# calls corrupt), no `+`, no `_` separators (`int("1_0")` is 10 in Python, which would read a
+# malformed artifact as a number), no fractional part, no exponent. A leading `-` is
+# admitted so a NEGATIVE counter reaches its domain check and is refused BY NAME rather
+# than as a format complaint — the two causes stay distinct, as the duration parser's do.
+#
+# `\Z`, NOT `$`: Python's `$` also matches BEFORE a final newline, so `^…$` accepted `"3\n"` —
+# the same permissiveness as the removed strip, one character wide, and the shape a value read
+# from a line-oriented artifact actually arrives in.
+_INT_RE = re.compile(r"^-?(0|[1-9][0-9]*)\Z")
+
+
+class Invalid(Exception):
+    """A property the report depends on was not observed. Always fatal."""
+
+
+# ===========================================================================
+# THE SHARED QUANTITY VALIDATOR (#3272 review round 3, B2 + B5)
+# ===========================================================================
+# Three rounds fixed this class PARTIALLY, each time at the site review named:
+#
+#   round 2 checked `cyc <= 0` after the setup subtraction, and `rows < 1`, and
+#   `arm_rps` finite-and-positive — and never checked `ins`, which is the SAME
+#   subtraction (`total["instructions"] - setup["instructions"]`) feeding
+#   `ipc.append(ins / cyc)`. `spread()` refuses a non-positive MEDIAN, which is a
+#   different property: one corrupt rep among three leaves the median positive and
+#   publishes `ipc.min` computed from a value that cannot exist. `collect_flight` had
+#   the identical gap on a perf CSV recording `instructions,0`.
+#
+#   and every coercion in the path was a bare `int()`, which SILENTLY TRUNCATES a
+#   float and ACCEPTS a bool: `requests_error: 0.9` reported CLEAN (0), `requests_ok:
+#   1.9` satisfied the exactly-one-cold-request guard (1), and `true` became 1.
+#
+# Fixing the cited line again would be the fourth partial fix, which is why the answer is a
+# shared validator rather than another site fix.
+#
+# The INVENTORY that used to sit here — 11 coercions and 17 derived quantities, listed by
+# hand — is DELETED (#3272 review round 4).
+#
+# It claimed to be "the complete inventory, enumerated MECHANICALLY", and it was neither
+# complete nor mechanically checked: `rows_per_scan_observed` (ws0_collect), `spread_pct_of_median`
+# (ws0_collect) and `within_round_span_ns` (ws0_rounds) were all absent from it. Prose that
+# claims an audited set and is wrong is worse than no prose, because a reader who trusts it
+# stops looking — the same shape as a guard that reports success without measuring.
+#
+# What replaced it is a MECHANISM, not a better list: `test_ws0_fabrication_guards.sh` walks the
+# `ast` of every `ws0_*.py` and FAILS on any bare `int()`/`float()` coercion of an artifact value
+# and on any defaulting `.get(k, <literal>)` in the reporting path. That check cannot go stale,
+# because it derives its subject from the code rather than restating it — which is the property
+# the deleted comment claimed and did not have.
+#
+# The RULE the list was trying to express, stated as a rule so it needs no enumeration: every
+# quantity in the reporting path goes through ONE of the functions below, each of which states
+# its VALIDITY DOMAIN in its name, and a new counter cannot be read without choosing one. The
+# only quantities deliberately UNCONSTRAINED in sign are DELTAS (a cycles/row delta may
+# legitimately be negative); their DIVISORS are validated, which is what needs the domain.
+#
+# There is deliberately no `lenient=` parameter and no env var. An escape hatch on a
+# measurement domain can only buy a confident wrong number.
+
+
+def _reject_bool(label: str, value: object, why: str = "") -> None:
+    """`True`/`False` is not a counter, even though `int(True) == 1`.
+
+    JSON `true` reaching a counter field means the artifact is not the artifact this
+    reporter models; silently reading it as 1 let `requests_ok: true` satisfy the
+    exactly-one-cold-request guard (#3272 review round 3, B5).
+    """
+    if isinstance(value, bool):
+        raise Invalid(
+            f"{label} is the boolean {value!r}, not a number. `int(True)` is 1, so a"
+            " bare int() would have read this as a count of one — a JSON boolean in a"
+            f" counter field means the artifact is not the one this reporter models."
+            f"{(' ' + why) if why else ''}"
+        )
+
+
+def exact_int(label: str, value: object, why: str = "") -> int:
+    """`value` as an int, refusing anything that is not EXACTLY an integer.
+
+    Accepted: a JSON integer, and a string whose whole content is a canonical decimal
+    integer (perf CSVs and `<tag>.round` files carry text).
+
+    REFUSED, where a bare `int()` would have silently converted (#3272 B5):
+
+    * a bool — `int(True) == 1`;
+    * a FLOAT with a fractional part — `int(0.9) == 0`, so `requests_error: 0.9` was
+      reported as a clean zero and `requests_ok: 1.9` satisfied the cold-rep guard;
+    * a float that is integral but not exact in the domain (`1e30`), and `inf`/`nan`;
+    * a string with surrounding junk or a fractional part — `int(" 3 ")` is 3, which
+      hides a malformed artifact, and `int("3.7")` raises where the caller wants a
+      NAMED refusal rather than a traceback. WHITESPACE IS JUNK: `" 3 "` is refused,
+      not stripped. Until #3272 round 16's L2 this function `.strip()`ed the string
+      before matching, so it accepted the padding its own docstring called corrupt —
+      i.e. it did exactly what the bare `int()` it replaces does. That is worse here
+      than in an ordinary validator, because `exact_int` is the SHARED facility every
+      counter and identity field is now routed through: one permissive line weakened
+      every caller at once, silently.
+
+    An integral float (`3.0`) IS accepted: `json` decodes `3.0` for a field a producer
+    wrote as an integer-valued double, and the value is exactly the integer. What is
+    refused is a value that is NOT the integer it would be read as.
+    """
+    _reject_bool(label, value, why)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise Invalid(
+                f"{label} is {value!r}, which is not a finite number."
+                f"{(' ' + why) if why else ''}"
+            )
+        if value != int(value):
+            raise Invalid(
+                f"{label} is the fractional value {value!r}. A bare int() would have"
+                f" TRUNCATED it to {int(value)} and reported that as the observed"
+                " quantity — a fabricated value, arrived at by rounding rather than by"
+                f" defaulting (#3272 AC3).{(' ' + why) if why else ''}"
+            )
+        return int(value)
+    if isinstance(value, str):
+        # NOT `.strip()`ed (#3272 round 16, L2). `_INT_RE` is anchored, so the ORIGINAL string
+        # is the subject: padding is junk, and stripping it first accepted `" 3 "` — the exact
+        # value the docstring above calls a corrupt artifact.
+        text = value
+        if not _INT_RE.match(text):
+            raise Invalid(
+                f"{label} must be an integer: {value!r} is an unparseable value, not a"
+                " canonical decimal integer. A fractional, padded or junk-bearing value is"
+                f" a corrupt artifact, not a number to be coerced.{(' ' + why) if why else ''}"
+            )
+        return int(text)
+    raise Invalid(
+        f"{label} must be an integer: {value!r} is a {type(value).__name__}."
+        f"{(' ' + why) if why else ''}"
+    )
+
+
+def non_negative_int(label: str, value: object, why: str = "") -> int:
+    """`exact_int`, and `>= 0`. The domain of every COUNT and every hardware counter.
+
+    `why` is the CALLER's sentence about what this particular quantity IS — appended to
+    the refusal so the diagnostic names the measurement rather than only the domain. The
+    coercion and domain rules are shared (they are the same for every counter); what a
+    number MEANS is local, and a shared validator that swallowed that would make every
+    refusal read the same and name nothing (#3272 review round 3, B2/B5).
+    """
+    n = exact_int(label, value, why)
+    if n < 0:
+        raise Invalid(
+            f"{label} is {n}, which is not a possible count. Counts and hardware"
+            " counters are non-negative; a negative one is a CORRUPT artifact, and"
+            " reading it as a small number publishes a figure that cannot exist"
+            f" (#3272 R6).{(' ' + why) if why else ''}"
+        )
+    return n
+
+
+def positive_int(label: str, value: object, why: str = "") -> int:
+    """`exact_int`, and `>= 1`. The domain of a DENOMINATOR and a 1-based index."""
+    n = exact_int(label, value, why)
+    if n < 1:
+        raise Invalid(
+            f"{label} is {n}, which is not a positive integer. It is a denominator or a"
+            " 1-based index; a non-positive value is refused rather than divided by or"
+            f" indexed with.{(' ' + why) if why else ''}"
+        )
+    return n
+
+
+def positive_finite_float(label: str, value: object, why: str = "") -> float:
+    """`value` as a float that is finite and `> 0`.
+
+    `inf`/`nan` are refused for the same reason a zero is: they are PRINTABLE numbers
+    standing in for an absent measurement, and they propagate silently through
+    `spread()` into the summary.
+    """
+    _reject_bool(label, value, why)
+    if isinstance(value, str):
+        value = value.strip()
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise Invalid(
+            f"{label} is {value!r}, which is not a number.{(' ' + why) if why else ''}"
+        ) from None
+    if not math.isfinite(f):
+        raise Invalid(
+            f"{label} is {f!r}, which is not a finite number. inf/nan are printable"
+            " values standing in for an absent measurement and would propagate into"
+            f" every figure derived from this one.{(' ' + why) if why else ''}"
+        )
+    if f <= 0:
+        raise Invalid(
+            f"{label} is {f!r}, which is not positive. A zero or negative rate,"
+            " window or size is not a small measurement — it is not a measurement."
+            f"{(' ' + why) if why else ''}"
+        )
+    return f
+
+
+def positive_derived(label: str, value: float, detail: str = "") -> float:
+    """A quantity COMPUTED here, required to be finite and `> 0`.
+
+    Distinct from `positive_finite_float` because the diagnostic is different: an
+    observed value out of domain is a corrupt artifact, while a DERIVED one out of
+    domain means the computation was not meaningful — a setup leg that cost more than
+    the full run, a perf window that counted nothing. `detail` carries the operands, so
+    the refusal names what was subtracted from what rather than only the result.
+    """
+    if not math.isfinite(value) or value <= 0:
+        raise Invalid(
+            f"{label} is {value!r}{(' (' + detail + ')') if detail else ''} — the"
+            " computation is not meaningful, so nothing derived from it may be"
+            " reported. A non-positive or non-finite derived quantity is refused"
+            " rather than divided by or printed (#3272 B2)."
+        )
+    return value
+
+
+# An upper bound on any count that drives a loop. Python ints are arbitrary-precision,
+# so an absurd `--reps` does not overflow — it HANGS: `range(1, 10**20)` iterates
+# essentially forever, statting a file per iteration, and a reporter that never
+# terminates produces no verdict at all. Measured before this bound:
+# `--reps 99999999999999999999` ran past a 10s timeout with no output. 100k is far
+# past any session anyone would run (the recorded #3096 sessions used 3).
+MAX_COUNT = 100_000
+
+
+def cli_count(name: str, value: object) -> int:
+    """A COMMAND-LINE count as an int in `1..MAX_COUNT`, or `Invalid`.
+
+    `--reps 0` used to run the whole reporter over an empty rep range and exit
+    ZERO with `measurements: []` — a report that measured nothing, indistinguishable
+    at the exit code from one that measured everything (#3272 finding 5). The upper
+    bound is the same class from the other end: not a wrong number but no number,
+    since an unbounded loop never reaches a verdict.
+
+    Named `cli_count` rather than `positive_int` since round 3 (#3272 B2): a CLI count
+    and an OBSERVED counter need different diagnostics — this one names a `--flag` an
+    operator can change, `positive_int` names an ARTIFACT FIELD that is corrupt — and a
+    shared name for both invites reaching for whichever is imported. Its argument is
+    always an argparse string, so it goes through `exact_int` for the bool/fractional
+    refusals and then applies the CLI bounds and the CLI wording.
+    """
+    n = exact_int(f"--{name}", value)
+    if n < 1:
+        raise Invalid(
+            f"--{name} must be at least 1 (got {n}). A run with {name}<1 measures"
+            " nothing, and a report over nothing is not a smaller version of the"
+            " requested claim — it is a vacuous success."
+        )
+    if n > MAX_COUNT:
+        raise Invalid(
+            f"--{name} is absurdly large ({n:,}; the cap is {MAX_COUNT:,}). Python"
+            " ints do not overflow, so this would not be a wrong number — it would"
+            " be a reporter that iterates for hours and never reaches a verdict."
+        )
+    return n
+
+
+def http_endpoint(label: str, value: object, why: str = "") -> str:
+    """An absolute `http[s]://<host>:<port>` endpoint URL, or `Invalid` (#3272 round 14, F2).
+
+    The SERVER IDENTITY validator. The Flight endpoint is pinned in the session manifest before
+    the first rep and compared EXACTLY against every loadgen record's `endpoint`, so it has to be
+    a value that CAN identify a server: a bare host (`127.0.0.1`) or a bare port (`18815`) names
+    a set of servers rather than one, and a trailing path (`http://h:1/x`) is a spelling the
+    loadgen never writes — it passes the endpoint through verbatim to
+    `Channel::from_shared(endpoint)` (tools/flight-loadgen/src/client.rs), so what the record
+    carries is what the driver's argv said, character for character.
+
+    Validated STRUCTURALLY rather than merely non-empty, and that distinction is the F6 lesson
+    this rig already paid for once: `server_cpus` sat in the manifest as an opaque non-empty
+    string and reached a "verified" claim having been checked by nothing. An opaque endpoint would
+    do the same one field over — a manifest reading `flight_endpoint: "the usual one"` would
+    compare unequal to every real record and refuse the whole session, so the error is caught at
+    the WRONG END, blaming the artifact for a mis-stamped pin.
+
+    NOT parsed with `urllib.parse` and then partially re-assembled: the comparison downstream is
+    an exact string equality against what the loadgen wrote, so anything that NORMALISED the
+    value here (a stripped default port, a lowercased host, a dropped empty path) would make the
+    manifest and the record differ for a difference that does not exist. This therefore only ever
+    ACCEPTS OR REFUSES the string; it never rewrites it.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise Invalid(
+            f"{label} is {value!r}, which is not a recorded endpoint. It names WHICH SERVER"
+            f" produced the measured rows, so it must have been observed. {why}".rstrip()
+        )
+    m = re.match(r"^https?://([^/:@\s]+):(\d{1,5})$", value)
+    if not m:
+        raise Invalid(
+            f"{label} is {value!r}, which is not an absolute `http://<host>:<port>` endpoint."
+            " A bare host or a bare port names a SET of servers rather than one, and a trailing"
+            " path is a spelling the load generator never writes — it passes --endpoint through"
+            " verbatim, so the recorded value is the driver's argv character for character."
+            f" {why}".rstrip()
+        )
+    port = int(m.group(2))
+    if not 1 <= port <= 65535:
+        raise Invalid(
+            f"{label} is {value!r}, whose port {port} is outside 1..65535, so no server could"
+            f" ever have been reached on it. {why}".rstrip()
+        )
+    return value
+
+
+def existing_dir(name: str, value: str) -> pathlib.Path:
+    """`value` as an existing directory, or `Invalid`."""
+    p = pathlib.Path(value)
+    if not p.is_dir():
+        raise Invalid(f"--{name} {value!r} is not an existing directory")
+    return p
+
+
+def nonempty_selection(name: str, value: str, allowed: tuple[str, ...]) -> list[str]:
+    """The whitespace-split selection, every member in `allowed`, or `Invalid`.
+
+    An empty `--temps`/`--arms` would silently produce a report with no
+    measurements and a zero exit, the same vacuous-green shape as `--reps 0`.
+    """
+    items = value.split()
+    if not items:
+        raise Invalid(f"--{name} is empty; expected one or more of {', '.join(allowed)}")
+    bad = [x for x in items if x not in allowed]
+    if bad:
+        raise Invalid(
+            f"--{name} carries unknown value(s) {', '.join(repr(b) for b in bad)};"
+            f" expected only {', '.join(allowed)}"
+        )
+    dupes = [x for x in set(items) if items.count(x) > 1]
+    if dupes:
+        raise Invalid(f"--{name} repeats {', '.join(sorted(dupes))}")
+    return items
+
+
+def read_perf_counters(
+    path: pathlib.Path, label: str, required: tuple[str, ...]
+) -> dict[str, int]:
+    """Sum a `perf stat -x,` CSV by event name, fail-closed on every gap.
+
+    Summed across the CPUs in the `-C` set: `perf stat -C a,b` emits one line per
+    event, already aggregated, but a `--per-core` variant would emit several — so
+    summing is correct in both shapes and never silently drops a line.
+
+    Four things are errors rather than a missing key that a caller would default
+    to `0` (#3272 finding 4):
+
+    * the file does not exist — the perf window never produced an artifact;
+    * a `required` event has no line — the counter was not multiplexed in;
+    * a value is one of perf's `<not counted>` / `<not supported>` markers — the
+      line exists but the measurement does not, which is the silent-instrument
+      failure in its purest form;
+    * a value is present but unparseable, fractional, or NEGATIVE — a corrupt artifact,
+      not a zero. The negative half is #3272 review round 3, B2: hardware counters are
+      non-negative by construction, and `int("-4")` used to sail through to become a
+      negative `cycles`/`instructions`, then a negative setup-subtracted `ins`, then a
+      negative IPC in `results.json`. Every value goes through `non_negative_int`, which
+      also refuses `4.7` (a bare `int()` would truncate it to 4 and report that).
+    """
+    if not path.exists():
+        raise Invalid(
+            f"{label}: no perf artifact at {path.name} — the counters for this leg"
+            " were never observed. A report cannot substitute a zero for a counter"
+            " it does not have; re-run the leg."
+        )
+    counters: dict[str, int] = {}
+    for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split(",")
+        if len(fields) <= 2:
+            continue
+        raw, event = fields[0].strip(), fields[2].strip()
+        if not event:
+            continue
+        if raw in PERF_NOT_A_VALUE:
+            raise Invalid(
+                f"{label}: {path.name} line {lineno} records event {event!r} as"
+                f" {raw!r} — perf did not count it. That is an unmeasured counter,"
+                " not a zero; re-run the leg (check event availability and"
+                " perf_event_paranoid)."
+            )
+        try:
+            value = non_negative_int(
+                f"{label}: {path.name} line {lineno} event {event!r}", raw
+            )
+        except Invalid as exc:
+            raise Invalid(
+                f"{path.name} line {lineno} has an unusable value {raw!r} for event"
+                f" {event!r}: {exc} A corrupt perf artifact is not a zero counter."
+            ) from None
+        counters[event] = counters.get(event, 0) + value
+    absent = [e for e in required if e not in counters]
+    if absent:
+        raise Invalid(
+            f"{label}: {path.name} carries no line for required event(s)"
+            f" {', '.join(absent)} (present: {', '.join(sorted(counters)) or '<none>'})."
+            " A counter that was not observed is an error, never a fabricated 0"
+            " (#3272 AC3)."
+        )
+    return counters
+
+
+# Every field the report prints or asserts on, WITH ITS VALIDITY DOMAIN (#3272 review
+# round 3, B2). Domains, not a flat tuple plus a second list of the ones that must be
+# positive: the pre-round-3 code coerced all five with a bare `int()` and then separately
+# range-checked four of them, so `seed` had no domain at all and a FRACTIONAL or BOOLEAN
+# value for any of the five was silently truncated (`rows: 0.9` -> 0, then refused for the
+# wrong reason; `cells_per_row: true` -> 1, accepted).
+IDENTITY_INT_FIELDS = {
+    # a seed of 0 is legitimate — it is an INPUT, not a measured quantity
+    "seed": "non_negative",
+    # the row DENOMINATOR of every cross-arm property the rig asserts
+    "rows": "positive",
+    "partitions": "positive",
+    "cells_per_row": "positive",
+    "data_db_bytes": "positive",
+}
+
+# The identity integers that are VALIDATED WHEN RECORDED but not REQUIRED (#3272 round 15, C).
+#
+# `rows_per_partition` and `total_component_bytes` had NO DOMAIN AT ALL: they were in neither this
+# map nor any other check, so they reached `ws0_canonical_corpus.divergences` unvalidated and its
+# bare `int()` TRUNCATED `rows_per_partition: 100.9` onto the canonical 100, reporting no
+# divergence. That is round 12's F5 defect (`int()` accepts bools and truncates floats) in a field
+# nobody had given a domain, so the fix is a domain here rather than a coercion at one call site.
+#
+# NOT MOVED INTO `IDENTITY_INT_FIELDS`, and the reason is a decision rather than a softening: that
+# map is REQUIRED-AND-COMPLETE, and the fields there are the ones the REPORT itself divides by. A
+# SMOKE corpus legitimately records neither of these two, and this rig's `--non-baseline` mode
+# exists precisely so such a corpus still runs (rounds 9/10/11 each shipped a fix that made a
+# documented operator command unable to succeed — requiring these here would be the fourth). Their
+# ABSENCE is already fail-closed where it decides something: `ws0_canonical_corpus.divergences`
+# reports an absent census field as `RECORDED NOTHING`, which refuses the corpus AS A BASELINE. So
+# absence is REFUSED by the check that cares, and what was missing — and is added here — is that a
+# value which IS recorded must be the exact integer it will be read as.
+IDENTITY_OPTIONAL_INT_FIELDS = {
+    # rows per partition: the canonical corpus's shape, compared against Rust's ROWS_PER_PARTITION
+    "rows_per_partition": "positive",
+    # the corpus's total component bytes, compared against Rust's TOTAL_COMPONENT_BYTES
+    "total_component_bytes": "positive",
+}
+
+
+def load_corpus_identity(corpus: pathlib.Path) -> dict:
+    """The corpus's recorded identity, or `Invalid`. Never a partial dict.
+
+    #3272 finding 1: this used to be `identity = json.loads(...) if exists else {}`,
+    and `corpus_rows = int(identity["rows"]) if identity.get("rows") else None`.
+    A `None` there **turned off** `check_request_count`'s
+    `rows == requests_ok x corpus_rows` assert — the property that catches a
+    request which did not scan the whole corpus — while the report's NOTES kept
+    stating that "every rep's rows [are] an exact multiple of the corpus row
+    count". The reader was told a check had run that had been skipped.
+
+    So the identity is REQUIRED, and required to be complete: the row count is the
+    denominator of the only cross-arm property the rig asserts, and a denominator
+    that might be `None` is not one.
+    """
+    idp = corpus / "corpus-identity.json"
+    if not idp.exists():
+        raise Invalid(
+            f"no corpus identity at {idp} — the corpus row count is UNKNOWN, so the"
+            " full-corpus-per-request property (every rep's rows == requests_ok x"
+            " corpus_rows) cannot be checked. This is refused rather than skipped:"
+            " skipping it silently while the report's NOTES claim it ran is how a"
+            " partial scan gets published as a full one (#3272 finding 1)."
+            " Regenerate the corpus with tools/ws0-corpus-gen, which writes this"
+            " file beside the data."
+        )
+    try:
+        identity = json.loads(idp.read_text())
+    except (OSError, ValueError) as exc:
+        raise Invalid(f"{idp} is not readable JSON: {exc}") from None
+    if not isinstance(identity, dict):
+        raise Invalid(f"{idp} must hold a JSON object, got {type(identity).__name__}")
+
+    for key, domain in IDENTITY_INT_FIELDS.items():
+        if key not in identity:
+            raise Invalid(f"{idp} carries no {key!r} — the corpus identity is incomplete")
+        label = f"{idp}: {key!r}"
+        if domain == "positive":
+            try:
+                identity[key] = positive_int(label, identity[key])
+            except Invalid as exc:
+                raise Invalid(
+                    f"{exc} A corpus with no {key} is not a measurable corpus."
+                ) from None
+        else:
+            identity[key] = non_negative_int(label, identity[key])
+
+    # ...and the OPTIONAL integers, validated WHEN RECORDED (#3272 round 15, C). See
+    # `IDENTITY_OPTIONAL_INT_FIELDS` for why absence is not refused here and where it IS refused.
+    # `100.9` for either was previously carried through unvalidated and truncated by the canonical
+    # comparison's bare `int()`, so a noncanonical corpus was classified canonical by rounding.
+    for key, domain in IDENTITY_OPTIONAL_INT_FIELDS.items():
+        if key not in identity:
+            continue
+        label = f"{idp}: {key!r}"
+        checker = positive_int if domain == "positive" else non_negative_int
+        identity[key] = checker(
+            label,
+            identity[key],
+            "It is compared against the canonical measurement corpus's pinned shape, so a"
+            " fractional or boolean value would be TRUNCATED onto the canonical integer and"
+            " report no divergence (#3272 round 15, C).",
+        )
+
+    sha = identity.get("data_db_sha256")
+    if not isinstance(sha, str) or not _SHA256_RE.match(sha):
+        raise Invalid(
+            f"{idp}: 'data_db_sha256' must be 64 lowercase hex characters (got"
+            f" {sha!r}). It is the corpus's determinism pin; a truncated or absent"
+            " digest cannot identify the bytes that were measured."
+        )
+
+    if "bytes_per_row" not in identity:
+        raise Invalid(f"{idp}: 'bytes_per_row' is absent or not a number")
+    # `positive_finite_float`, so `inf`/`nan`/0/negative are refused BEFORE the
+    # cross-check below compares against them — `abs(derived - inf)` is `inf`, which
+    # exceeds any tolerance and would report an INTERNAL INCONSISTENCY for what is
+    # really an unusable field, naming the wrong cause (#3272 B2 enumeration).
+    bpr = positive_finite_float(f"{idp}: 'bytes_per_row'", identity["bytes_per_row"])
+    # Cross-check rather than trust: an identity whose own fields disagree is not
+    # authoritative metadata, whichever field is the wrong one.
+    derived = identity["data_db_bytes"] / identity["rows"]
+    if abs(derived - bpr) > max(0.01, derived * 1e-6):
+        raise Invalid(
+            f"{idp} is internally inconsistent: bytes_per_row={bpr} but"
+            f" data_db_bytes/rows={derived:.6f}. One of the three is wrong, so none"
+            " of them can be reported."
+        )
+    identity["bytes_per_row"] = bpr
+    return identity
+
+
+def classify_prewarm(temp: str, status: str) -> str:
+    """`ok` | `degraded`, or `Invalid` for a status impossible at this temperature.
+
+    #3272 finding 2 — the direct bypass of #3096's prewarm fix. The acceptance set
+    used to be a flat tuple:
+
+        OK_PREWARM = ("ok", "skipped-cold-arm")
+        prewarm_all_ok = all(p["status"] in OK_PREWARM for p in prewarm)
+
+    which is temperature-BLIND, so a **WARM** rep whose status file read
+    `skipped-cold-arm` reached `prewarm_all_ok=true`. That is an UNPREWARMED WARM
+    measurement passing the very guard added to prevent one, using the cold arm's
+    own sentinel as the key.
+
+    Three outcomes, and the middle one is the point:
+
+    * the temperature's REQUIRED status (`warm`->`ok`, `cold`->`skipped-cold-arm`)
+      => `ok`.
+    * the OTHER temperature's required status => `Invalid`. The driver cannot emit
+      it, so the artifact set is inconsistent: either a warm rep was never
+      prewarmed while claiming a cold-arm skip, or a "cold" rep was prewarmed and
+      is therefore not cold. Both invalidate the claim the figure carries, and
+      neither is a degradation that could be honestly labelled.
+    * anything else — but ONLY where that temperature admits a degradation, which is
+      WARM alone (`PREWARM_DEGRADATION_ADMITTED`) => `degraded`. An honest record of a
+      real failure: flagged loudly in the summary and in `prewarm_all_ok`, but
+      reported, because a rep labelled `prewarm-failed` is more useful than a silently
+      dropped one. On a COLD rep the same value is `Invalid` — see below.
+
+    # #3272 round 21 — an UNVERIFIABLE COLD rep still got a cold figure AND a verdict
+
+    The final line used to be a bare `return "degraded"`, so EVERY unrecognised status
+    took it — including `unrecorded`, which is the sentinel
+    `ws0_collect.read_prewarm` returns for a **status file that is not there at all**.
+    A cold rep with no status file was therefore merely captioned, and the reporter went
+    on to publish its rows/s, its bare/flight ratio and its `[PASS]`/`[BELOW TARGET]`
+    verdict. MEASURED before the fix, on a cold-only session with its two
+    `*.prewarm.status` files deleted: `rc=0`, `500 rows/s` and `250 rows/s` printed, and
+    `ratio bare/flight = 2.00x ... [BELOW TARGET]`.
+
+    Nothing in that session established the reps were NOT prewarmed — i.e. that they
+    were cold at all — and the bias is UNBOUNDED IN DIRECTION: a secretly-warm rep
+    labelled cold reads FASTER, so an unverified cold label can flatter the very figure
+    it is attached to. (The warm direction is self-limiting, which is why warm still
+    degrades: an unprewarmed "warm" rep reads slower.)
+
+    This is the `!= BAD` shape rather than `== OK` — the permissive branch reached by
+    every value nobody enumerated — and it is the defect this issue has now corrected
+    most often. The fix is the affirmative form: a cold rep must carry EXACTLY
+    `skipped-cold-arm`, which the driver writes unconditionally
+    (`lib-measure.sh` initialises it and only a WARM rep enters the classifier), so
+    there is no legitimate cold run without it and no cold failure mode for a label to
+    honestly describe.
+    """
+    required = PREWARM_REQUIRED.get(temp)
+    if required is None:
+        raise Invalid(f"unknown temperature {temp!r} for a prewarm status")
+    if status == required:
+        return "ok"
+    other = {v: k for k, v in PREWARM_REQUIRED.items()}.get(status)
+    if other is not None and other != temp:
+        raise Invalid(
+            f"a {temp.upper()} rep recorded prewarm status {status!r}, which only a"
+            f" {other.upper()} rep can record. The driver cannot produce this"
+            " combination, so the artifact set is inconsistent and the temperature"
+            " label on this figure is not verified."
+            + (
+                " A warm rep carrying the cold arm's skip sentinel is an UNPREWARMED"
+                " WARM measurement — exactly what the prewarm guard exists to"
+                " refuse, so it may not satisfy it (#3272 finding 2)."
+                if temp == "warm"
+                else " A prewarmed rep is not cold, so a 'cold' figure may not carry"
+                " a successful prewarm."
+            )
+        )
+    # AFFIRMATIVE (`is True`), never `!= False` and never a `.get(temp, True)`: an absent
+    # entry is an unanswered question, and the whole class of defect here is a
+    # verdict-carrying key defaulting to its permissive value (#3272 round 21).
+    if PREWARM_DEGRADATION_ADMITTED.get(temp) is not True:
+        raise Invalid(
+            f"a {temp.upper()} rep recorded prewarm status {status!r}, which is not the"
+            f" required {required!r} and is not a degradation a {temp.upper()} rep can"
+            " have: it has NO PREWARM LEG to fail. lib-measure.sh writes"
+            f" {required!r} unconditionally for a {temp} rep and only a WARM rep runs a"
+            " prewarm at all, so this value means the status was NEVER RECORDED"
+            " (`unrecorded` = no <tag>.prewarm.status file), was truncated, or was"
+            " hand-edited."
+            f" NOTHING therefore establishes that this rep was not prewarmed — i.e."
+            f" that it is {temp} at all — so its figure carries an UNVERIFIED"
+            f" temperature and its rows/s, ratio and PASS/BELOW-TARGET verdict may not"
+            " be published. This is refused rather than captioned because the bias is"
+            " UNBOUNDED IN DIRECTION: a secretly-warm rep reported cold reads FASTER,"
+            " which flatters the figure (a degraded WARM rep reads slower, which is why"
+            " that direction is a labelled degradation instead). Re-run the rep, or"
+            f" restore its recorded {required!r} status if the run really was {temp}"
+            " (#3272 round 21)."
+        )
+    return "degraded"
+
+
+def require_complete(
+    label: str, per_rep: list, reps: int, missing: list[str]
+) -> None:
+    """FAIL unless all `reps` reps of a SELECTED (arm, temperature) were collected.
+
+    Every (arm, temperature) this is called for is one the CALLER SELECTED via
+    `--temps`/`--arms`; an unselected one is never iterated, so it is legitimately
+    absent and never reaches here (#3272 finding 6). Which makes the rule simple
+    and total: a selected combination must be complete.
+
+    The pre-#3272 version documented a second case — "`per_rep` empty AND nothing
+    missing -> this (arm, temperature) was never run; not an error" — that could
+    NEVER occur, because the collectors append EVERY absent expected artifact to
+    `missing` before reaching this call. So the branch was dead code guarding a
+    claim the code did not implement, and an intentionally narrow run exited
+    fatally anyway. The selection is now stated in `results.json` instead, where a
+    reader can see it, rather than inferred from which arms happened to be absent.
+    """
+    if len(per_rep) < reps:
+        raise Invalid(
+            f"{label} collected {len(per_rep)} of {reps} requested reps"
+            f" — missing artifacts: {', '.join(missing) or '<none named>'}."
+            " A median over fewer reps than requested is a different claim than the"
+            " one asked for; re-run the missing reps rather than reporting this."
+        )
