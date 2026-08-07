@@ -50,7 +50,11 @@ See the [Quickstart](quickstart.md) for the full walkthrough.
 > catalog is the source of truth; the names below are the recently-added families.
 
 - **`cqlite.flight.admission.*`** — 5 instruments for `do_get` admission control
-  (issue #2420): `limit` (gauge, configured `--max-concurrent-scans`), `in_use`
+  (issue #2420): `limit` (gauge, the effective `--max-concurrent-scans` — **derived
+  from available parallelism by default as of #3225**, `clamp(2 × P, 2, 64)`, so
+  reading it as "always 64 unless configured" is wrong; the startup log's
+  `max_concurrent_scans_source` says which of `flag`/`env`/`derived`/`derived-fallback`
+  produced it), `in_use`
   (gauge, permits held), `waiting` (gauge, requests queued for a permit),
   `rejected_total` (counter, timeout sheds — each a gRPC `UNAVAILABLE`), and
   `wait_seconds` (histogram, time spent queued before admission or rejection).

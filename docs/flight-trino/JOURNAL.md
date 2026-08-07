@@ -356,7 +356,10 @@ Format:
 
 - **What:** Added an application-level admission ceiling on `do_get`. An owned
   `tokio::sync::Semaphore` with `K` permits (`--max-concurrent-scans`, env
-  `CQLITE_MAX_CONCURRENT_SCANS`, default **64**) gates entry to the merge: a
+  `CQLITE_MAX_CONCURRENT_SCANS`, default **64** — *the constant default was
+  SUPERSEDED on 2026-08-07 by the core-derived `clamp(2 × P, 2, 64)`, where 64
+  becomes the ceiling; see the #3225 entry at the end of this journal*) gates
+  entry to the merge: a
   request acquires a permit BEFORE any SSTable is opened or any batch produced,
   holds it (RAII, moved into the response stream) for the scan's lifetime, and
   releases it on completion/disconnect/cancel. On saturation a request waits up to
@@ -739,3 +742,54 @@ Format:
   the 6 MiB figure this entry originally projected came from the superseded
   additive model, and 8 MiB was corrected in review because it clamped every
   full-size reservation).
+
+---
+
+## 2026-08-07 — the `--max-concurrent-scans` default becomes core-aware (issue #3225)
+
+- **What (BEHAVIOUR CHANGE):** `--max-concurrent-scans` no longer defaults to the
+  constant **64**. It now defaults to `clamp(2 × P, 2, 64)` where `P` is
+  `std::thread::available_parallelism()` — the hardware threads available to **this
+  process**, honouring the CPU affinity mask and the cgroup v1/v2 CPU quota (never
+  `/proc/cpuinfo`, never `num_cpus::get_physical()`, which applies neither). **64 is
+  retained as the CEILING**, so #2420's blocking-pool/fd sizing rationale survives
+  verbatim as the upper bound, the change is a strict no-op at `P ≥ 32`, and no
+  deployment is ever admitted more widely than before. Floor 2, because a single
+  permit serialises every scan. Provenance is now a value: the existing
+  `cqlite-flight starting` event carries `max_concurrent_scans_source`
+  (`flag` | `env` | `derived` | `derived-fallback`) and `available_parallelism`
+  (omitted when the oracle returned no answer — that case is `derived-fallback` and
+  resolves to 64, the pre-#3225 behaviour, never mislabelled `derived`).
+  Precedence is unchanged and explicit: flag → env → derived, and an explicit value
+  is never clamped toward the derived one.
+- **Why — measured, and it corrects the premise the issue was filed on.** #3217's
+  N ramp stopped at **16**, so it never measured the shipped default at any width and
+  two of its four peaks were censored (at the ramp top). #3225 re-measured five
+  widths over `1,2,4,8,16,24,32,64` (126 points, 3 reps × 120 s):
+  peak N is **2 / 8 / 12 / 16 / 24** at 1 / 2 / 3 / 4 / 6 physical cores, and the
+  constant 64 is **suboptimal at every one of them** — −21.5% (1 core) to −7.3%
+  (6 cores) of throughput, with per-scan p50 inflated 41.95× to 2.94×. The issue's
+  belief that wide servers were "already optimal at the default" held only for the
+  *misidentified* default of 16. `clamp(2 × P, 2, 64)` is exact at three widths,
+  −5.0% at the narrowest (an accepted minimax-regret miss: `available_parallelism`
+  cannot tell one SMT core from two non-SMT cores), and at the one out-of-fit width
+  (3 cores) it **beats** the value the coarse ramp had called that width's peak by
+  +1.73% within-run. At the widest width in scope the derived N=24 beats N=16 by
+  **+8.0%** and the shipped N=64 by **+7.9%**, with disjoint rep ranges — AC5 is an
+  improvement, not merely a no-regression.
+- **Files:** `cqlite-flight/src/{admission.rs,cli.rs}` + tests (the derivation, the
+  resolver, the provenance field); `cqlite-flight/README.md` (the measured sizing
+  section, both residuals, the override recipe); `docs/reports/ws0-3225-report.md`
+  + `docs/reports/ws0-3225-artifacts/**` (the measurement of record);
+  `docs/observability/README.md`, `docs/development/flight-doget-callgraph.md`,
+  `CHANGELOG.md`.
+- **Verified:** `docs/reports/ws0-3225-artifacts/results/analysis-3225.txt` — every
+  number above is emitted by `run/analyze-3225.py` and re-derivable from the
+  committed `results/` (126 points, `requests_unavailable` = 0, 0 errors, 0
+  client-saturated points, one corpus verified identical arm-to-arm by sha256).
+- **Two residuals, published rather than hidden:** the −5.0% at the narrowest width,
+  and the **unvalidated non-SMT extrapolation** — on a non-SMT host (Graviton, SMT
+  off) logical == physical, so the formula admits 2 scans per physical core instead
+  of the fitted 4, and **no non-SMT arm has ever been measured** (no such host was
+  available). Both are in `cqlite-flight/README.md` beside the override recipe.
+- **Next:** a non-SMT width is the highest-value follow-up measurement.

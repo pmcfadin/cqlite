@@ -1,0 +1,92 @@
+WS0 benchmark corpus -- PROVENANCE (CQLite issue #3225 §2)
+==========================================================
+STATUS: REGENERATION. #3217's corpus binaries are gitignored and were gone from
+this box (/data/ws0 held nothing but the harness' own scratch dirs). This is a
+fresh generation of the SAME #3026/#3100/#3217 recipe. It is NOT byte-identical
+and was never expected to be: cassandra-stress draws values from a
+non-deterministic seed stream, so the Data.db sha256 differs. The accepted bar is
+MATCHED GEOMETRY + a documented new sha -- see corpus-geometry.txt, which is
+GENERATED from the artifacts by compare-geometry.py, not typed by hand.
+
+Generated on        : 2026-08-06 (UTC), host ip-172-31-15-149, Intel Xeon Platinum 8488C,
+                      8 physical / 16 logical, 30 GiB RAM, no swap, /data on NVMe (ext4)
+Generator script    : docs/reports/ws0-3225-artifacts/corpus/regen-corpus.sh
+                      (path-parameterized adaptation of the committed
+                       docs/reports/ws0-3026-artifacts/ws0-corpus/gen-corpus.sh, whose
+                       hardcoded /home/ubuntu/ws0 root and JDK-17 path made it unrunnable
+                       here. Recipe, profile, stress arguments and compaction steps are
+                       UNCHANGED -- a different recipe would not be comparable to #3217.)
+Run log             : /data/ws0/logs/regen-corpus-3225.log  (machine-local, not committed)
+Wall time           : ~2.5 min total (4 load batches ~90 s, compact ~5 s, fullscan 13 s)
+
+Cassandra           : apache-cassandra-5.0.8 (binary tarball from archive.apache.org)
+  unpacked at       : /data/ws0/apache-cassandra-5.0.8
+JDK                 : OpenJDK 17.0.19 (/usr/lib/jvm/java-17-openjdk-amd64), installed for
+                      this run. (#3217 used JDK 11 because that box had only 11; #3100 used
+                      17. Cassandra 5.0 supports both; this run is back on #3100's JDK.)
+Daemon heap         : MAX_HEAP_SIZE=8G. Same deliberate non-stock deviation as every prior
+                      round: stock auto-sizing picks ~15.4 GiB on a 30 GiB no-swap box and
+                      gets OOM-killed (#3026 recorded that kill).
+cassandra.yaml      : stock except paths + listen/rpc addresses. Pristine copy kept at
+                      /data/ws0/apache-cassandra-5.0.8/conf/cassandra.yaml.stock.
+                      Structurally the same diff as the committed
+                      docs/reports/ws0-3026-artifacts/ws0-corpus/cassandra.yaml.diff,
+                      with the path root /home/ubuntu/ws0 -> /data/ws0:
+                        hints_directory        : /data/ws0/cassandra-data/hints
+                        data_file_directories  : [/data/ws0/cassandra-data/data]
+                        commitlog_directory    : /data/ws0/cassandra-data/commitlog
+                        saved_caches_directory : /data/ws0/cassandra-data/saved_caches
+                        listen_address / rpc_address : 127.0.0.1
+                      NOTE: all four directory keys ship COMMENTED OUT in stock 5.0.8 and
+                      default to $CASSANDRA_HOME-relative paths -- the default that bit
+                      #3100, whose corpus landed inside the tarball dir. regen-corpus.sh
+                      matches either spelling and FAILS CLOSED if a key is still commented
+                      after patching, then VERIFIES at runtime that the SSTables landed
+                      under /data/ws0/cassandra-data/data/ws0/events-*. They did.
+Generation command  : (inside regen-corpus.sh, constants not arguments)
+                      partitions=200000 payload=375B/pop6 blob_a=96B/pop3 blob_b=96B/pop16
+                      seq_cluster=2 event_time_cluster=10 threads=8 batch_partitions=50000
+  profile generated : /data/ws0/ws0-corpus/.gen-p200000-pl375x6-ba96x3-bb96x16-cl2x10.yaml
+                      (from the committed docs/reports/ws0-3026-artifacts/ws0-corpus/ws0-profile.yaml)
+  stress logs       : /data/ws0/ws0-corpus/.stress-*-b{1..4}.log -- 0 errors in all 4 batches
+Schema              : ws0.events, NO compression clause -> Cassandra 5.0 stock LZ4Compressor
+                      / chunk_length_in_kb=16, VERIFIED from the on-disk CompressionInfo.db
+                      header (corpus-measure.txt), not assumed.
+Compaction          : nodetool flush ws0 events per 50k-partition batch, then
+                      nodetool flush + nodetool compact -> exactly ONE SSTable. The script
+                      FAILS CLOSED if the post-compact Data.db count is not 1.
+
+Staged dataset      : /data/ws0/ws0-h2h/datasets/sstables
+  staged table dir  : /data/ws0/ws0-h2h/datasets/sstables/ws0/events-cad6dae091e611f1be35e1fe6aeebf7e
+                      (cp -p of all components; staged Data.db sha256 VERIFIED equal to source)
+  serve with        : cqlite-flight --data-dir /data/ws0/ws0-h2h/datasets/sstables
+  ticket template   : docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json (committed)
+
+sha256(Data.db)     : 704ed1f002f0c374504a0a3cbf66c0a55202700a4de8ca18e8386f8706a0402d
+  (#3217's was      : 3a4ee5cd5ef5937ae52a703cca0ee0359df8ecb959915dea66b3b89f9a9c7c1e -- DIFFERENT, as expected)
+All component shas  : corpus-sha-staged.txt
+
+Row-count oracles (two, deliberately different code paths)
+----------------------------------------------------------
+  primary     : sstablemetadata totalRows            = 3999890  (writer's on-disk stats header)
+  independent : CQL token-range full scan, 512 ranges = 3999890  (live server-side read via
+                the python driver; `SELECT count(*)` over the whole table server-side-times-out
+                at this size, which is why the ring is split -- documented in #3026's rerun.sh)
+  They agree EXACTLY, and both equal #3217's and #3100's 3999890.
+  (3,999,890 rather than the nominal 4,000,000: cassandra-stress' uniform clustering draws
+   collide on a small number of (seq, event_time) pairs. All three rounds landed on the
+   identical count.)
+
+Geometry vs #3217: see corpus-geometry.txt. Largest continuous divergence -0.032%
+(compressed and uncompressed sizes move together, i.e. it is a re-draw of the same
+shape, not a different shape). Every exact-match field is identical. VERDICT: no
+material divergence.
+
+Daemon state on completion: STOPPED. regen-corpus.sh terminates the daemon and then
+FAILS CLOSED if a CassandraDaemon is still running -- a live daemon on the sweep box
+would compete for the pinned cores with the very measurement the corpus is for.
+run-3225.sh independently refuses to start if one is running.
+
+NOT run (out of scope for #3225, unchanged from #3217's scoping)
+----------------------------------------------------------------
+  verify-claims.sh (#3026's bpftrace claim verification) -- the corpus is all this needs.

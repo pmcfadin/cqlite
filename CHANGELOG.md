@@ -89,6 +89,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Behaviour change (`cqlite-flight`): `--max-concurrent-scans` now DEFAULTS to a
+  core-derived value, `clamp(2 × P, 2, 64)`, instead of the constant 64 (#3225).**
+  `P` is `std::thread::available_parallelism()` — the hardware threads available to
+  **this process**, so the CPU affinity mask and the cgroup v1/v2 CPU quota are both
+  honoured and a container limited to 1 CPU on a 96-core node no longer derives from
+  96. **64 is retained as the CEILING** (#2420's blocking-pool/fd bound), so the
+  default is unchanged at `P ≥ 32` and no deployment is admitted more widely than
+  before; the floor is 2.
+  - **Why: the old constant was measured suboptimal at every server width.** #3225's
+    sweep (5 widths × ramp `1,2,4,8,16,24,32,64` × 3 reps, 126 points —
+    `docs/reports/ws0-3225-report.md`) puts the throughput-optimal concurrent-scan
+    count at **2 / 8 / 12 / 16 / 24** for 1 / 2 / 3 / 4 / 6 physical cores, and the
+    constant 64 costs **−21.5%** throughput at one core through **−7.3%** at six, with
+    per-scan p50 inflated **41.95× → 2.94×**. #3217's earlier "peak 16 at six cores"
+    was a **censoring artifact** of a ramp that stopped at 16; the true peak is 24, and
+    the derived default beats both N=16 (+8.0%) and the old N=64 (+7.9%) there.
+  - **Provenance is logged, so the change is backwards-observable.** The existing
+    `cqlite-flight starting` event gains `max_concurrent_scans_source`
+    (`flag` | `env` | `derived` | `derived-fallback`) and `available_parallelism`
+    (omitted when the oracle cannot answer — that case is `derived-fallback`, resolves
+    to 64, and is never reported as `derived`).
+  - **Restoring the previous behaviour is one flag:** `--max-concurrent-scans 64` (or
+    `CQLITE_MAX_CONCURRENT_SCANS=64`) reproduces the pre-#3225 ceiling exactly on any
+    host. Precedence is unchanged: flag → env → derived, and an explicit value is never
+    clamped toward the derived one.
+  - **Two residuals are documented in `cqlite-flight/README.md`**: the formula is
+    −5.0% against the measured peak at the narrowest width (an accepted
+    minimax-regret choice — `available_parallelism` cannot distinguish one SMT core
+    from two non-SMT cores), and the non-SMT case is an **unvalidated extrapolation**
+    (logical == physical there, so it admits 2 per physical core rather than the fitted
+    4; no non-SMT host has ever been measured).
+
 - **Breaking (API):** `storage::write_engine::build_single_partition_merger_from_readers`
   takes a required 5th argument,
   `PointAccessRecording::{Record, CallerRecords}`, selecting whether THAT call records

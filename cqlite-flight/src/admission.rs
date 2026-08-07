@@ -31,16 +31,52 @@ use cqlite_core::observability::{self as obs, catalog};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::Status;
 
-/// Default `do_get` admission ceiling.
+/// The **CAP** on the `do_get` admission ceiling — and the value used when the
+/// parallelism oracle cannot be consulted (issue #3225; was the unconditional
+/// compile-time default under #2420).
 ///
-/// Sized from the binding constraints (NOT `num_cpus` — CPU is not the limit):
-/// the Tokio blocking pool caps at 512 threads and each scan consumes ~2 (a setup
-/// `spawn_blocking` + the merge `spawn_blocking`), a ~256 ceiling; each scan also
-/// opens one fd per input SSTable against the ~1024 container `ulimit`, a
-/// `1024 / M`-SSTable ceiling. 64 sits well below both (≥4× blocking-pool
-/// headroom, ~64 fds at M≈16) while still absorbing bursty offered concurrency.
-/// Conservative pending WS1-ramp (WS8) validation before the default is locked.
+/// Sized from the binding resource constraints: the Tokio blocking pool caps at
+/// 512 threads and each scan consumes ~2 (a setup `spawn_blocking` + the merge
+/// `spawn_blocking`), a ~256 ceiling; each scan also opens one fd per input
+/// SSTable against the ~1024 container `ulimit`, a `1024 / M`-SSTable ceiling.
+/// 64 sits well below both (≥4× blocking-pool headroom, ~64 fds at M≈16).
+///
+/// **#3217 then measured what those resource ceilings could not see**: peak
+/// `do_get` throughput sits at a concurrency proportional to the server's
+/// hardware threads, far below 64 on a narrow host, and admitting past it costs
+/// 16.4% throughput and turns a 31 s p50 into 302 s at one core. So under #3225
+/// this constant is no longer the default; it is the **upper clamp** on the
+/// value [`derive_max_concurrent_scans`] derives from available parallelism,
+/// and the resolved value when that parallelism cannot be read
+/// ([`MaxConcurrentScansSource::DerivedFallback`]). The change is therefore
+/// one-directional: no host is admitted more widely than it was before #3225.
 pub const DEFAULT_MAX_CONCURRENT_SCANS: usize = 64;
+
+/// The FLOOR of the parallelism-derived admission default (issue #3225).
+///
+/// A one-permit server serialises every scan, and #3217 measured `N = 1` as the
+/// worst point at every width, so a hard one-CPU quota or affinity mask still
+/// derives 2 — never 1, never 0.
+pub const MIN_DERIVED_MAX_CONCURRENT_SCANS: usize = 2;
+
+/// Admitted concurrent scans per HARDWARE THREAD in the derived default
+/// (issue #3225).
+///
+/// Fitted to #3217's measured peak-throughput concurrency at the two uncensored
+/// widths (`docs/reports/ws0-3217-artifacts/results/partA-analysis.json`,
+/// report §3.1), converted to hardware threads on the SMT-on rig
+/// (`P = 2 × physical cores`, report §2.2): P=4 → 8 and P=8 → 16, both exact.
+/// #3225's own sweep confirmed it at every measured width (P=6 → 12 beat the
+/// ramp's apparent peak by +1.73%; P=12 → 24 exact), with one accepted
+/// minimax-regret miss at P=2 (−5.0% against that width's measured peak).
+///
+/// The basis is hardware threads, NOT physical cores: a non-SMT core is one
+/// hardware thread and delivers less concurrent throughput than an SMT core, and
+/// a fractional cgroup quota has no well-defined physical-core count at all. On
+/// a non-SMT host this therefore yields half the fitted per-physical-core value
+/// — an extrapolation #3217 has no arm for, published as a residual rather than
+/// hidden.
+pub const DERIVED_SCANS_PER_HARDWARE_THREAD: usize = 2;
 
 /// Default permit-wait timeout: how long a saturated `do_get` parks for a permit
 /// before it is shed with `UNAVAILABLE`. Long enough to absorb short bursts
@@ -52,6 +88,170 @@ pub const ENV_MAX_CONCURRENT_SCANS: &str = "CQLITE_MAX_CONCURRENT_SCANS";
 
 /// Environment variable backing `--admission-wait-timeout-ms`.
 pub const ENV_WAIT_TIMEOUT_MS: &str = "CQLITE_ADMISSION_WAIT_TIMEOUT_MS";
+
+/// The parallelism-derived admission default (issue #3225), as a **pure**
+/// function of `P` — the number of hardware threads available to this process:
+///
+/// ```text
+/// N_default(P) = clamp(DERIVED_SCANS_PER_HARDWARE_THREAD * P,
+///                      MIN_DERIVED_MAX_CONCURRENT_SCANS,
+///                      DEFAULT_MAX_CONCURRENT_SCANS)
+/// ```
+///
+/// Pure and separated from the act of probing `P`
+/// ([`probe_available_parallelism`]) precisely so it is exhaustively testable
+/// without a machine of the width under test. Monotone non-decreasing in `P`;
+/// the multiply saturates, so no `P` — including `usize::MAX` — can overflow it
+/// into a small ceiling.
+pub fn derive_max_concurrent_scans(p: usize) -> usize {
+    DERIVED_SCANS_PER_HARDWARE_THREAD.saturating_mul(p).clamp(
+        MIN_DERIVED_MAX_CONCURRENT_SCANS,
+        DEFAULT_MAX_CONCURRENT_SCANS,
+    )
+}
+
+/// The parallelism available to **this process**, or `None` when the platform
+/// cannot report it (issue #3225).
+///
+/// [`std::thread::available_parallelism`] is the container-correct oracle: on
+/// Linux it intersects the thread's `sched_getaffinity` mask and applies the
+/// cgroup v1 (`cpu.cfs_quota_us` / `cpu.cfs_period_us`) and cgroup v2
+/// (`cpu.max`) CPU quota, so a `taskset`-restricted process or a quota-limited
+/// pod reports ITS OWN width, not the host's. It counts logical CPUs (SMT
+/// siblings separately) and returns a `NonZeroUsize`, so it can never yield 0.
+/// Same API the core read path already uses for exactly this job
+/// (`cqlite-core/src/storage/sstable/reader/scan_admission.rs`).
+///
+/// **Never swap this for a host-topology read.** `num_cpus::get_physical()`
+/// parses `/proc/cpuinfo` and sums `cpu cores` per `physical id`
+/// (`num_cpus-1.17.0/src/linux.rs:59-97`), applying NEITHER the cgroup quota
+/// NOR the affinity mask: inside a container `/proc/cpuinfo` is the HOST's, so
+/// a pod limited to one CPU on a 96-core node would read 96 and derive the
+/// widest possible ceiling on the narrowest server. That is the precise failure
+/// issue #3225's AC2 exists to prevent, and
+/// `tests/issue_3225_derived_default.rs` asserts structurally that no file on
+/// this path reads host topology.
+///
+/// An `Err` is reported as `None` and resolves to
+/// [`MaxConcurrentScansSource::DerivedFallback`], never silently to a number
+/// that looks derived.
+pub fn probe_available_parallelism() -> Option<usize> {
+    std::thread::available_parallelism().ok().map(|p| p.get())
+}
+
+/// The admission ceiling this host defaults to with no explicit configuration:
+/// [`derive_max_concurrent_scans`] applied to [`probe_available_parallelism`],
+/// falling back to [`DEFAULT_MAX_CONCURRENT_SCANS`] when the oracle cannot be
+/// consulted (issue #3225).
+pub fn default_max_concurrent_scans() -> usize {
+    resolve_max_concurrent_scans(None, probe_available_parallelism()).value
+}
+
+/// Where an EXPLICITLY configured admission ceiling was supplied from.
+///
+/// Mapped from clap's `ValueSource` at the CLI boundary (`crate::cli`) so this
+/// module carries no clap dependency. Only the two operator-supplied routes are
+/// representable: "nobody configured anything" is the `None` case of
+/// [`resolve_max_concurrent_scans`]'s `explicit` argument, not a variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplicitScansOrigin {
+    /// `--max-concurrent-scans` given on the command line.
+    CommandLine,
+    /// [`ENV_MAX_CONCURRENT_SCANS`] set in the environment.
+    Environment,
+}
+
+/// The provenance of the effective admission ceiling, logged at startup so an
+/// operator can tell a derived ceiling from a configured one from the log alone
+/// (issue #3225, AC4). Exactly four values, no more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaxConcurrentScansSource {
+    /// `--max-concurrent-scans` on the command line.
+    Flag,
+    /// [`ENV_MAX_CONCURRENT_SCANS`] in the environment.
+    Env,
+    /// Nothing configured; derived from the parallelism this process may use.
+    Derived,
+    /// Nothing configured AND the parallelism oracle returned no answer, so the
+    /// pre-#3225 constant is used. Reported DISTINCTLY from
+    /// [`MaxConcurrentScansSource::Derived`]: the oracle that would justify a
+    /// derived value could not be consulted, and a verdict whose evidence was
+    /// unavailable must never be indistinguishable from one whose evidence was.
+    DerivedFallback,
+}
+
+impl MaxConcurrentScansSource {
+    /// The stable log/report spelling of this provenance value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Env => "env",
+            Self::Derived => "derived",
+            Self::DerivedFallback => "derived-fallback",
+        }
+    }
+}
+
+impl std::fmt::Display for MaxConcurrentScansSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The effective admission ceiling, where it came from, and the parallelism
+/// reading behind it (issue #3225, AC4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedMaxConcurrentScans {
+    /// The requested ceiling. Still subject to [`Admission::new`]'s pre-existing
+    /// `[1, Semaphore::MAX_PERMITS]` clamp — the LOGGED value is
+    /// [`Admission::limit`], post-clamp.
+    pub value: usize,
+    /// How `value` was chosen.
+    pub source: MaxConcurrentScansSource,
+    /// The `P` actually read, or `None` when the oracle returned no answer (the
+    /// startup log omits the field in that case).
+    pub available_parallelism: Option<usize>,
+}
+
+/// Resolve the effective admission ceiling and its provenance (issue #3225, AC4).
+///
+/// Precedence, highest first: **`--max-concurrent-scans` flag →
+/// [`ENV_MAX_CONCURRENT_SCANS`] → derived default**. An explicit value is
+/// returned AS GIVEN and is never clamped toward the derived one — the derived
+/// value is a default, not a cap — so `--max-concurrent-scans 64` reproduces the
+/// pre-#3225 ceiling on any host. The only bound that still applies to an
+/// explicit value is #2420's `[1, Semaphore::MAX_PERMITS]` clamp in
+/// [`Admission::new`], unchanged.
+///
+/// `available_parallelism` is passed in rather than probed here so every arm —
+/// including the oracle-unavailable one — is testable from its own input,
+/// without a platform on which the probe genuinely fails.
+pub fn resolve_max_concurrent_scans(
+    explicit: Option<(usize, ExplicitScansOrigin)>,
+    available_parallelism: Option<usize>,
+) -> ResolvedMaxConcurrentScans {
+    let (value, source) = match (explicit, available_parallelism) {
+        (Some((value, ExplicitScansOrigin::CommandLine)), _) => {
+            (value, MaxConcurrentScansSource::Flag)
+        }
+        (Some((value, ExplicitScansOrigin::Environment)), _) => {
+            (value, MaxConcurrentScansSource::Env)
+        }
+        (None, Some(p)) => (
+            derive_max_concurrent_scans(p),
+            MaxConcurrentScansSource::Derived,
+        ),
+        (None, None) => (
+            DEFAULT_MAX_CONCURRENT_SCANS,
+            MaxConcurrentScansSource::DerivedFallback,
+        ),
+    };
+    ResolvedMaxConcurrentScans {
+        value,
+        source,
+        available_parallelism,
+    }
+}
 
 /// The permit-wait budget: how long a saturated `do_get` may wait for an
 /// admission permit before it is rejected with `UNAVAILABLE`.
@@ -98,9 +298,13 @@ pub struct AdmissionConfig {
 }
 
 impl Default for AdmissionConfig {
+    /// The ceiling is the PARALLELISM-DERIVED default (issue #3225) — not the
+    /// [`DEFAULT_MAX_CONCURRENT_SCANS`] constant, which is now its cap — so a
+    /// caller that configures nothing gets a ceiling sized to the CPU this
+    /// process may actually use. See [`default_max_concurrent_scans`].
     fn default() -> Self {
         Self {
-            max_concurrent_scans: DEFAULT_MAX_CONCURRENT_SCANS,
+            max_concurrent_scans: default_max_concurrent_scans(),
             wait_budget: WaitBudget::Timeout(Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS)),
         }
     }
@@ -111,6 +315,11 @@ impl AdmissionConfig {
     /// present-but-unparseable value (or a zero ceiling) falls back to the default
     /// rather than failing startup. `max_concurrent_scans` is clamped to ≥1 by
     /// [`Admission::new`].
+    ///
+    /// Issue #3225 changed the FALLBACK TARGET only: an absent, unparseable or
+    /// zero `CQLITE_MAX_CONCURRENT_SCANS` now yields the parallelism-derived
+    /// default (via [`AdmissionConfig::default`]) instead of the 64 constant.
+    /// The never-fail-startup contract and the `>= 1` filter are unchanged.
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
         if let Some(k) = std::env::var(ENV_MAX_CONCURRENT_SCANS)
