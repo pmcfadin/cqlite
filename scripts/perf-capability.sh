@@ -834,12 +834,13 @@ perf_capability_proc_read() {
   eval "$__pcr_out="
   perf_capability_proc_dir_into __pcr_dir || return 1
   # THE CONTROL FILE ITSELF IS CHECKED, NOT JUST ITS DIRECTORY (roborev round 25, Medium). The
-  # directory gate proved the DIRECTORY is contained and symlink-free; it said nothing about the
-  # ENTRY. A regular contained PROC_DIR could hold `perf_event_paranoid` as a symlink to the host
-  # file, so the token read attacker-chosen or real values and fabricated `perf=ok` — the same
+  # directory gate proved the DIRECTORY contained and symlink-free; it said nothing about the ENTRY.
+  # A regular contained PROC_DIR could hold perf_event_paranoid as a symlink to the host file, so the
+  # token read attacker-chosen or real values and fabricated an ok capability -- the same
   # directory-is-not-its-entries lesson as the write path (AC1), one surface over. Fork-free, so the
-  # token path keeps its contract. In test mode containment is required too; in production the
-  # directory is the hardcoded literal, and a symlinked control file there is still refused.
+  # token path keeps its contract; in test mode containment is required too.
+  # NOTE: no backticks in this function comment on purpose -- the fork-free emit-path audit in
+  # test_agent_gate_summary.sh counts them WITHOUT stripping comments, so prose alone can red it.
   perf_capability_nosymlink "$__pcr_dir/$2" || return 1
   if perf_capability_test_mode; then
     perf_capability_sandbox_ok "$__pcr_dir/$2" || return 1
