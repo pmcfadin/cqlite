@@ -55,6 +55,27 @@ def grab2(text: str, pattern: str, what: str, cast=float):
     return tuple(cast(g) for g in m.groups())
 
 
+def grab_unique(text: str, pattern: str, what: str, cast=str):
+    """The ONE value a pattern matches — refusing when it matches several.
+
+    `re.search` returns the FIRST match, which silently answers a question about a
+    set with a statement about its first element. The staged corpus is required to
+    hold exactly one SSTable, so two `*-Data.db` lines in the shasum artifact is a
+    recipe violation; taking the first would have published one file's digest as
+    "the corpus sha256" and compared a two-SSTable corpus against a one-SSTable one.
+    """
+    found = re.findall(pattern, text, re.MULTILINE)
+    if not found:
+        raise SystemExit(f"FAIL: could not parse {what} (pattern {pattern!r}) — "
+                         "refusing to publish a table with an invented field")
+    distinct = sorted(set(found))
+    if len(distinct) > 1:
+        raise SystemExit(f"FAIL: {what} matched {len(distinct)} DISTINCT values "
+                         f"({', '.join(map(str, distinct))}) — the recipe requires exactly one "
+                         "staged SSTable, so this is a corpus defect, not a parse to pick from")
+    return cast(distinct[0])
+
+
 def fmt(v) -> str:
     """Display form: a composite tuple renders as `min / max`, matching its label."""
     if isinstance(v, tuple):
@@ -140,7 +161,8 @@ def main() -> int:
         "SSTable count": grab(old, r"^Data\.db count in dir    : (\d+)", "#3217 sstable count", int),
     }
 
-    new_sha = grab(sha_file, r"^([0-9a-f]{64})\s+\S*-Data\.db$", "this run's Data.db sha256", str)
+    new_sha = grab_unique(sha_file, r"^([0-9a-f]{64})\s+\S*-Data\.db$",
+                          "this run's Data.db sha256")
     old_sha = grab(old, r"^sha256\(Data\.db\)         : ([0-9a-f]{64})", "#3217 sha256", str)
 
     lines = []
@@ -165,6 +187,18 @@ def main() -> int:
     A("Field-by-field vs #3217 (tolerance for the continuous fields: %.2f%%)" % args.tolerance_pct)
     A("-" * 78)
     A("%-36s %-16s %-16s %-12s" % ("field", "#3225 (this run)", "#3217", "delta"))
+    # Compare the WHOLE labelled field set, or say so. Iterating `new` alone means a
+    # field present in the #3217 side but missing from this one is simply not compared,
+    # and the table still prints its "no material divergence" verdict — a comparison of
+    # a SUBSET reported as a comparison. Both directions are required to match.
+    if set(new) != set(oldv):
+        only_new = sorted(set(new) - set(oldv))
+        only_old = sorted(set(oldv) - set(new))
+        raise SystemExit(
+            "FAIL: the two field sets differ, so this table would compare a SUBSET while "
+            "claiming to compare the geometry: only in #3225=%s; only in #3217=%s"
+            % (only_new or "none", only_old or "none"))
+
     material = []
     for k in new:
         a, b = new[k], oldv[k]
@@ -209,7 +243,8 @@ def main() -> int:
     A("")
     A("Categorical fields (must match exactly)")
     A("-" * 78)
-    fmt_new = grab(sha_file, r"^[0-9a-f]{64}\s+\S*/(\S+)-Data\.db$", "this run's generation/format", str)
+    fmt_new = grab_unique(sha_file, r"^[0-9a-f]{64}\s+\S*/(\S+)-Data\.db$",
+                          "this run's generation/format")
     cats = [
         ("SSTable generation/format", fmt_new, "nb-16-big"),
         ("compressor", grab(meas, r"^compressor              : (\S+)", "compressor", str), "LZ4Compressor"),

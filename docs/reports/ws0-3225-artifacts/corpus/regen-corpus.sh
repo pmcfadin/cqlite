@@ -204,14 +204,34 @@ log "nodetool flush + compact -> exactly ONE SSTable"
 "$CAS/bin/nodetool" flush ws0 events
 time "$CAS/bin/nodetool" compact ws0 events
 
-SRC_DIR="$(dirname "$(ls -S "$DATA_ROOT"/data/ws0/events-*/*-Data.db 2>/dev/null | head -1)")"
+# The glob's EMPTY result must not look like a success: `dirname ""` is ".", and "." IS
+# a directory, so the -d check below would pass and the failure would surface later as
+# a confusing count. Resolve the file first and require it by name.
+LARGEST_DATA_DB="$(ls -S "$DATA_ROOT"/data/ws0/events-*/*-Data.db 2>/dev/null | head -1)"
+[ -n "$LARGEST_DATA_DB" ] || die "no *-Data.db under $DATA_ROOT/data/ws0/events-* — nothing was written"
+SRC_DIR="$(dirname "$LARGEST_DATA_DB")"
 [ -d "$SRC_DIR" ] || die "no ws0.events SSTable directory under $DATA_ROOT/data/ws0"
 NDATA="$(ls "$SRC_DIR"/*-Data.db | wc -l)"
 log "sstable dir: $SRC_DIR   Data.db count = $NDATA"
 [ "$NDATA" -eq 1 ] || die "expected exactly 1 Data.db after compact, found $NDATA — the recipe requires a single SSTable"
 DATA_DB="$(ls "$SRC_DIR"/*-Data.db)"
 GEN_FMT="$(basename "$DATA_DB" | sed 's/-Data\.db$//')"
-log "generation/format: $GEN_FMT   (recipe requires nb-16-big)"
+# The FORMAT is a hard requirement and is asserted: `nb` is the Cassandra 5.0 BIG
+# version this whole corpus recipe (and every downstream comparison against #3217)
+# assumes, and a different one is a different on-disk layout, not a variation.
+case "$GEN_FMT" in
+  nb-*-big) ;;
+  *) die "SSTable is '$GEN_FMT'; the recipe requires the Cassandra 5.0 BIG format nb-<gen>-big" ;;
+esac
+# The GENERATION NUMBER is deliberately NOT fatal: it counts flush/compaction events,
+# so it moves with the batching of the load and is not a property of the data. It is
+# recorded — and compared against #3217 by compare-geometry.py's categorical table,
+# which is where a divergence belongs, labelled rather than silently tolerated here.
+if [ "$GEN_FMT" != "nb-16-big" ]; then
+  log "NOTE: generation is $GEN_FMT, #3217 recorded nb-16-big. The generation number counts"
+  log "      flush/compact events, not content; compare-geometry.py labels it explicitly."
+fi
+log "generation/format: $GEN_FMT   (format nb-*-big asserted; #3217 recorded nb-16-big)"
 
 # ------------------------------------------------------- stage for the sweep --
 TABLE_DIR="$STAGE_ROOT/ws0/$(basename "$SRC_DIR")"
@@ -236,17 +256,39 @@ log "rows (sstablemetadata totalRows) = $ROWS_META"
 log "independent row-count oracle: fullscan.py 512 token ranges (this takes minutes)"
 "$PY" "$WORK/fullscan.py" 512 | tee "$HERE/corpus-fullscan.txt"
 ROWS_SCAN="$(awk -F': *' '/SCAN rows counted/ {print $2}' "$HERE/corpus-fullscan.txt" | tr -d ' ')"
+# An unparseable oracle is not an agreeing oracle. Without this, an empty ROWS_SCAN
+# would flow into the comparison below as "", which is only ever a disagreement — but
+# for the wrong reason, and the diagnostic would blame the data instead of the parse.
+[ -n "$ROWS_SCAN" ] || die "could not parse 'SCAN rows counted' from $HERE/corpus-fullscan.txt — the independent oracle produced no number"
 log "rows (fullscan oracle) = $ROWS_SCAN"
+# The two oracles disagreeing is a CORPUS defect, not a note. This used to log a
+# '***' line and carry on to exit 0, so a corpus whose independent row count did not
+# reproduce would be staged, swept and published as if it had. The report claims these
+# two agree exactly; that claim is now enforced by the script that produces them.
 if [ "$ROWS_META" != "$ROWS_SCAN" ]; then
-  log "*** ORACLE DISAGREEMENT: sstablemetadata=$ROWS_META fullscan=$ROWS_SCAN — reported, not smoothed ***"
+  die "ORACLE DISAGREEMENT: sstablemetadata=$ROWS_META fullscan=$ROWS_SCAN. These are independent code paths over the same table; a disagreement means the corpus is not what the recipe describes. Refusing to stage it."
 fi
+log "row-count oracles agree exactly: $ROWS_META"
 
 "$PY" "$WORK/measure-sstable.py" "$SRC_DIR"/*-CompressionInfo.db "$ROWS_META" \
   | tee "$HERE/corpus-measure.txt"
-"$CAS/tools/bin/sstablemetadata" "$DATA_DB" > "$HERE/corpus-sstablemetadata.txt" 2>/dev/null || true
-"$CAS/bin/nodetool" tablestats ws0.events > "$HERE/corpus-tablestats.txt" 2>/dev/null || true
-"$CAS/bin/nodetool" tablehistograms ws0.events > "$HERE/corpus-tablehistograms.txt" 2>/dev/null || true
-sha256sum "$TABLE_DIR"/* > "$HERE/corpus-sha-staged.txt"
+# These four are COMMITTED artifacts that compare-geometry.py and the report parse.
+# '|| true' plus '2>/dev/null' meant a failed tool published an EMPTY file and the run
+# still succeeded — absence of evidence rendered as evidence. Each must now produce a
+# non-empty file or the run stops.
+emit_artifact() { # <out-file> <command...>
+  local out="$1"; shift
+  "$@" > "$out" || die "failed to produce $out: $* exited non-zero"
+  [ -s "$out" ] || die "produced an EMPTY $out — a committed artifact with no content is not a measurement"
+}
+emit_artifact "$HERE/corpus-sstablemetadata.txt" "$CAS/tools/bin/sstablemetadata" "$DATA_DB"
+emit_artifact "$HERE/corpus-tablestats.txt" "$CAS/bin/nodetool" tablestats ws0.events
+emit_artifact "$HERE/corpus-tablehistograms.txt" "$CAS/bin/nodetool" tablehistograms ws0.events
+emit_artifact "$HERE/corpus-sha-staged.txt" sha256sum "$TABLE_DIR"/*
+# The one line every downstream consumer (analyze-3225.py, compare-geometry.py) reads.
+SHA_DATA_LINES="$(grep -c -- '-Data\.db$' "$HERE/corpus-sha-staged.txt" || true)"
+[ "$SHA_DATA_LINES" -eq 1 ] \
+  || die "corpus-sha-staged.txt names $SHA_DATA_LINES *-Data.db line(s); the recipe requires exactly 1"
 
 # ------------------------------------------------------------ stop the node --
 # A live Cassandra daemon on the sweep box would compete for CPU with the very
