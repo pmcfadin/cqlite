@@ -125,6 +125,61 @@ ARM_SPECS=(s1        s2        0-2,8-10  s4        s6)
 log()  { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die()  { printf '[%s] ERROR: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; exit 1; }
 
+# ---- the admission ceiling MUST cover the top of the ramp (checked, not hoped) --
+# WS0_MAX_CONCURRENT_SCANS is INHERITED whenever the caller exports it, so the ":-64"
+# default above guarantees nothing: an environment carrying the harness default of 16
+# would silently cap every N in {24,32,64} and the sweep would publish a THROTTLED
+# curve as C(N).
+#
+# And the rejection counter CANNOT detect that. WS0_ADMISSION_WAIT_TIMEOUT_MS is
+# 30000, so a request arriving over the ceiling does not fail — it WAITS for a permit
+# and then SUCCEEDS. `requests_unavailable` therefore stays 0 while every point above
+# the ceiling measures queueing at the gate. "0 rejections" is corroborating evidence
+# at best; it is NOT evidence that the ceiling did not bind.
+#
+# The only sound check is this one: read the ramp, read the ceiling, compare the two
+# numbers, and abort BEFORE the first arm starts. It costs a millisecond here and
+# saved a forensic reconstruction of six arms' server_flags afterwards.
+RAMP_MAX=0
+_ramp_count=0
+IFS=',' read -r -a _ramp_tokens <<< "$RAMP"
+for _tok in "${_ramp_tokens[@]}"; do
+  _tok="${_tok//[[:space:]]/}"
+  [ -n "$_tok" ] || continue
+  case "$_tok" in
+    *[!0-9]*) printf "ERROR: --ramp '%s' holds a non-integer N: '%s'\n" "$RAMP" "$_tok" >&2; exit 2 ;;
+  esac
+  [ "$_tok" -ge 1 ] || {
+    printf "ERROR: --ramp '%s' holds N=%s; every N must be >= 1\n" "$RAMP" "$_tok" >&2; exit 2; }
+  _ramp_count=$((_ramp_count + 1))
+  [ "$_tok" -gt "$RAMP_MAX" ] && RAMP_MAX="$_tok"
+done
+[ "$_ramp_count" -ge 1 ] || {
+  printf "ERROR: --ramp '%s' names no N at all — there is no sweep to run\n" "$RAMP" >&2; exit 2; }
+
+case "$WS0_MAX_CONCURRENT_SCANS" in
+  ''|*[!0-9]*)
+    printf "ERROR: WS0_MAX_CONCURRENT_SCANS='%s' is not a non-negative integer.\n" \
+      "$WS0_MAX_CONCURRENT_SCANS" >&2
+    printf "       The admission ceiling is the knob this whole issue is about; an unparseable\n" >&2
+    printf "       value cannot be compared against the ramp, so the sweep would be uncertified.\n" >&2
+    exit 2 ;;
+esac
+if [ "$WS0_MAX_CONCURRENT_SCANS" -lt "$RAMP_MAX" ]; then
+  printf "ERROR: admission ceiling %s < max(ramp) %s — REFUSING to sweep.\n" \
+    "$WS0_MAX_CONCURRENT_SCANS" "$RAMP_MAX" >&2
+  printf "       ramp=%s  WS0_MAX_CONCURRENT_SCANS=%s (inherited from the environment)\n" \
+    "$RAMP" "$WS0_MAX_CONCURRENT_SCANS" >&2
+  printf "       Every N above %s would measure the ADMISSION GATE, not the concurrency curve,\n" \
+    "$WS0_MAX_CONCURRENT_SCANS" >&2
+  printf "       and with WS0_ADMISSION_WAIT_TIMEOUT_MS=%s those requests WAIT and then SUCCEED,\n" \
+    "$WS0_ADMISSION_WAIT_TIMEOUT_MS" >&2
+  printf "       so requests_unavailable stays 0 and NOTHING downstream would notice.\n" >&2
+  printf "       Fix: unset WS0_MAX_CONCURRENT_SCANS (defaults to 64), export one >= %s,\n" "$RAMP_MAX" >&2
+  printf "       or lower the ramp with --ramp.\n" >&2
+  exit 2
+fi
+
 # ---- the EFFECTIVE arm labels, and --arms validated against them -------------
 # The label a caller must name is the one --label-suffix produces, not the one in
 # ARM_LABELS. That distinction is the whole defect: `--arms cn3225-s3` with
@@ -182,6 +237,8 @@ fi
 if [ "$LIST_ONLY" -eq 1 ]; then
   printf 'planned arms (ramp=%s step=%ss reps=%s client=%s max_concurrent_scans=%s):\n' \
     "$RAMP" "$STEP_SECS" "$REPS" "$CLIENT_CPUS" "$WS0_MAX_CONCURRENT_SCANS"
+  printf '  admission ceiling %s >= max(ramp) %s: OK (checked above; a lower ceiling aborts)\n' \
+    "$WS0_MAX_CONCURRENT_SCANS" "$RAMP_MAX"
   listed=0
   for i in "${!ARM_LABELS[@]}"; do
     label="${EFFECTIVE_LABELS[$i]}"
@@ -235,6 +292,99 @@ log "ramp=$RAMP step=${STEP_SECS}s reps=$REPS warm=${WS0_WARM_SECS}s settle=${WS
 log "client_cpus=$CLIENT_CPUS  max_concurrent_scans=$WS0_MAX_CONCURRENT_SCANS  client_sat_gate=$WS0_CLIENT_SAT_THRESHOLD"
 log "results -> $WS0_RESULTS   progress ledger -> $PROG"
 
+# ---- per-arm corpus digest + effective-ceiling stamp -------------------------
+# Two facts an arm's own artifacts did NOT record, and which cost forensics to
+# reconstruct afterwards:
+#   1. the EFFECTIVE admission ceiling. sweep.sh buries it inside the server_flags
+#      STRING of every point; nothing states it as a field, and run-config.json —
+#      the file whose whole job is "what was this arm configured with" — omitted it.
+#   2. a DIGEST of the bytes the arm actually read. corpus-basis.json records the
+#      stage path, the file count and the byte sizes; a different file of the same
+#      size at the same path is indistinguishable from the right one, so "all arms
+#      agree" was agreement about metadata, not about content.
+# Both are stamped here, per arm, from what is on disk AT THAT ARM'S TIME.
+corpus_digest_manifest() { # -> "<sha256>  <relpath>" per staged Data.db, sorted
+  ( cd "$WS0_STAGE" 2>/dev/null &&
+    find . -name '*-Data.db' -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum )
+}
+
+stamp_arm_provenance() { # arm-dir  digest-manifest-before  digest-manifest-after
+  python3 - "$1" "$2" "$3" \
+    "$WS0_MAX_CONCURRENT_SCANS" "$RAMP" "$RAMP_MAX" "$WS0_ADMISSION_WAIT_TIMEOUT_MS" <<'PY'
+import datetime, hashlib, json, os, sys
+
+arm_dir, before, after, ceiling, ramp, ramp_max, wait_ms = sys.argv[1:8]
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+errs = []
+
+
+def patch(name, fields):
+    path = os.path.join(arm_dir, name)
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        errs.append("%s: %s: %s" % (path, type(exc).__name__, exc))
+        return
+    doc.update(fields)
+    with open(path, "w") as fh:
+        fh.write(json.dumps(doc, indent=1) + "\n")
+
+
+patch("run-config.json", {
+    "max_concurrent_scans_effective": int(ceiling),
+    "admission_wait_timeout_ms_effective": int(wait_ms),
+    "ramp_max_N": int(ramp_max),
+    "admission_ceiling_covers_ramp": int(ceiling) >= int(ramp_max),
+    "provenance_stamped_by": "run-3225.sh (effective ceiling; sweep.sh records it only "
+                             "inside the server_flags string)",
+})
+
+# The digest is only a digest of THIS arm's bytes if the corpus did not move under
+# it. Measured before AND after; a disagreement is recorded as an error and NO
+# digest is written, because a single value would then name neither state.
+def parse(man):
+    out = {}
+    for line in man.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            out[parts[1].strip()] = parts[0]
+    return out
+
+
+b, a = parse(before), parse(after)
+if not b:
+    errs.append("no *-Data.db digest could be measured before the arm (empty manifest)")
+elif b != a:
+    patch("corpus-basis.json", {
+        "data_db_sha256_error":
+            "the staged corpus CHANGED during this arm: before=%r after=%r — no digest "
+            "is recorded, because neither value describes the whole arm" % (b, a),
+        "data_db_sha256_measured_utc": now,
+    })
+    errs.append("staged corpus changed DURING the arm (before != after)")
+else:
+    manifest = "".join("%s  %s\n" % (b[k], k) for k in sorted(b))
+    fields = {
+        "data_db_sha256_files": len(b),
+        "data_db_sha256_manifest": hashlib.sha256(manifest.encode()).hexdigest(),
+        "data_db_sha256_manifest_lines": [l for l in manifest.splitlines()],
+        "data_db_sha256_basis": "sha256 measured by run-3225.sh over every staged "
+                                "*-Data.db immediately BEFORE and AFTER this arm; the two "
+                                "measurements agreed",
+        "data_db_sha256_measured_utc": now,
+    }
+    if len(b) == 1:
+        fields["data_db_sha256"] = next(iter(b.values()))
+    patch("corpus-basis.json", fields)
+
+if errs:
+    for e in errs:
+        print("STAMP ERROR: %s" % e, file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # An arm is COMPLETE when its summary.json exists and parses. summarize-sweep.py
 # writes it only after the last rep, so its presence is the completion marker.
 arm_complete() {
@@ -261,6 +411,8 @@ run_arm() { # label  server-cpu-spec
 
   log "START $label (server_cpus=$spec)"
   echo "$(date -u +%FT%TZ) START $label" >> "$PROG"
+  local digest_before
+  digest_before="$(corpus_digest_manifest)"
   ( cd "$HARNESS" && bash ./sweep.sh "$label" "$spec" "$CLIENT_CPUS" "$RAMP" "$STEP_SECS" "$REPS" bypass ) \
     > "$DRIVER_LOGS/$label.out" 2>&1 < /dev/null
   # rc MUST be captured before ANY other command substitution: $(date ...) spawns a
@@ -270,14 +422,28 @@ run_arm() { # label  server-cpu-spec
   echo "$(date -u +%FT%TZ) END   $label rc=$rc" >> "$PROG"
   if [ "$rc" -ne 0 ]; then
     log "FAIL  $label rc=$rc — see $DRIVER_LOGS/$label.out (continuing to the next arm; re-run this script to retry it)"
+    return 0
+  fi
+  log "DONE  $label ($(wc -l < "$dir/points.jsonl" 2>/dev/null || echo 0) points)"
+
+  # Stamp AFTER the arm, with the digest measured on both sides of it. A stamp that
+  # cannot be written is reported and counted: the analysis fails closed on a missing
+  # digest, so a silent skip here would surface much later as an unexplained refusal.
+  local digest_after
+  digest_after="$(corpus_digest_manifest)"
+  if stamp_arm_provenance "$dir" "$digest_before" "$digest_after"; then
+    log "STAMPED $label — max_concurrent_scans=$WS0_MAX_CONCURRENT_SCANS (>= max ramp $RAMP_MAX), corpus digest recorded"
   else
-    log "DONE  $label ($(wc -l < "$dir/points.jsonl" 2>/dev/null || echo 0) points)"
+    STAMP_FAILED=$((STAMP_FAILED + 1))
+    log "STAMP FAIL $label — run-config/corpus-basis provenance NOT recorded (see above); the analysis will refuse this arm"
+    echo "$(date -u +%FT%TZ) STAMP-FAIL $label" >> "$PROG"
   fi
   return 0
 }
 
 FAILED=0
 ATTEMPTED=0
+STAMP_FAILED=0
 for i in "${!ARM_LABELS[@]}"; do
   label="${EFFECTIVE_LABELS[$i]}"
   spec="${ARM_SPECS[$i]}"
@@ -306,9 +472,14 @@ for i in "${!ARM_LABELS[@]}"; do
   fi
 done
 
-echo "$(date -u +%FT%TZ) ALL-ARMS-ATTEMPTED failed=$FAILED" >> "$PROG"
+echo "$(date -u +%FT%TZ) ALL-ARMS-ATTEMPTED failed=$FAILED stamp_failed=$STAMP_FAILED" >> "$PROG"
 if [ "$FAILED" -eq 1 ]; then
   log "SWEEP INCOMPLETE — at least one arm has no summary.json. Re-run this script (completed arms are skipped)."
+  exit 1
+fi
+if [ "$STAMP_FAILED" -gt 0 ]; then
+  log "SWEEP MEASURED BUT UNCERTIFIED — $STAMP_FAILED arm(s) carry no ceiling/corpus-digest stamp."
+  log "  The points are on disk; analyze-3225.py will refuse them until the stamp is repaired."
   exit 1
 fi
 log "SWEEP COMPLETE. Analyse with:"
