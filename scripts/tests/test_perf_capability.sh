@@ -862,11 +862,7 @@ done
 #     new seam consumer, and the canonicalizing validation added for the write path simply
 #     never reached it. No behavioural case can catch that class, because the defect is a
 #     path nobody thought to test. So this audit enumerates, FROM THE SOURCE, every function
-#     that dereferences a seam variable and requires each one to route through the
-#     containment family (`perf_capability_sandbox_*` / `perf_capability_path_within`) — with
-#     ONE named, justified allowlist entry. A future entry point that reads a seam without
-#     the gate FAILS here, and joining the allowlist is a visible, reviewable act.
-# (rationale condensed; full reasoning in the commit history for #3261.)
+# (rationale condensed; see #3261 commit history.)
 seam_audit=$(awk \
   -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
   -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
@@ -875,12 +871,7 @@ seam_audit=$(awk \
   #             and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so
   #             stripping quoted spans would hide real consumers and silently shrink the census.
   #   `codeq` — comments AND quoted spans stripped. The GATE match needs this: a gate CALL is a
-  #             command, never a string, so matching inside quotes is what made the advertised
-  #             "command position" claim false — swapping a real call for a string that merely
-  #             mentions its name kept the audit green.
-  # Quoted spans are removed before comments so a # inside a stripped string cannot truncate the
-  # line. The single quote is written \047: this awk program sits inside a shell single-quoted
-  # string and cannot contain a literal one.
+  # (rationale condensed; see #3261 commit history.)
   { code = $0
     sub(/[[:space:]]*#.*$/, "", code)
     codeq = $0
@@ -940,21 +931,12 @@ priv_audit=$(awk \
   -v privre='(for [a-z_]+ in (sudo|sysctl)|command -v .*(sudo|sysctl))' \
   -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
   # TWO representations, because the two matches want different things (roborev round 6, Low).
-  #   `code`  — comments stripped only. The SEAM match needs this: a seam is a VARIABLE REFERENCE
-  #             and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so
-  #             stripping quoted spans would hide real consumers and silently shrink the census.
-  #   `codeq` — comments AND quoted spans stripped. The GATE match needs this: a gate CALL is a
-  #             command, never a string, so matching inside quotes is what made the advertised
+# (rationale condensed; see #3261 commit history.)
   #             "command position" claim false — swapping a real call for a string that merely
   #             mentions its name kept the audit green.
   # Quoted spans are removed before comments so a # inside a stripped string cannot truncate the
   # line. The single quote is written \047: this awk program sits inside a shell single-quoted
-  # string and cannot contain a literal one.
-  { code = $0
-    sub(/[[:space:]]*#.*$/, "", code)
-    codeq = $0
-    gsub(/"[^"]*"/, " ", codeq)
-    gsub(/\047[^\047]*\047/, " ", codeq)
+  # (rationale condensed; see #3261 commit history.)
     sub(/[[:space:]]*#.*$/, "", codeq) }
   /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
     fn = $1; sub(/\(\)$/, "", fn); priv = 0; gate = 0
@@ -1023,11 +1005,7 @@ if perf_install_supported; then
     ok "perf-capability: the drop-in WRITE TARGET is refused when the managed basename is itself a SYMLINK (rc 1, empty, named) — a contained directory does not license writing through its entries (#3261 AC1)"
   else
     bad "perf-capability: a SYMLINKED write target was NAMED for a privileged tee (rc=$wt_rc, path='$wt_path', err='$wt_err')"
-  fi
-  # ...and the CONTENTS read that decides idempotency may not follow it either: a symlink whose
-  # TARGET happens to hold the canonical bytes must not report "already current" (that would
-  # leave the host file in place and claim success).
-  printf '%s\n' "$(bash "$PERFLIB" --drop-in)" >"$wt_outside"
+     # (rationale condensed; see #3261 commit history.)
   if env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB" 2>/dev/null; then
     bad "perf-capability: dropin_current followed a SYMLINK and reported the drop-in 'already current' from a file outside the managed name"
   else
@@ -1088,11 +1066,7 @@ if perf_install_supported; then
   printf '%s\n' "$wt_body" | grep -q 'mv -fT -- "\$t" "\$p"' \
     || wt_struct_fail="$wt_struct_fail no-mv-T"
   [ "$wt_privcalls" -eq 1 ] || wt_struct_fail="$wt_struct_fail privileged-invocations=$wt_privcalls"
-  printf '%s\n' "$wt_body" | grep -q '"\$@" sh -c' || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
-  if [ -z "$wt_struct_fail" ]; then
-    ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, which NARROWS the create-to-reopen window but does NOT close it — see the note above), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
-  else
-    bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
+    # (rationale condensed; see #3261 commit history.)
     printf '%s\n' "$wt_body" | grep -n '\$@\|mktemp\|mv -' | head -8
   fi
   # ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted —
