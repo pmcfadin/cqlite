@@ -136,7 +136,12 @@ def bracketed_seal(arms, sha_file, geometry_file, now_epoch=None):
     present = [(lab, cb) for lab, cb in bases if cb.get("present")]
     fields = ("stage_dir", "data_db_files", "ondisk_compressed_bytes")
     disagreeing = []
-    ref = present[0][1] if present else None
+    # `{}`, never None: every read below goes through ref.get(...), and today those are
+    # safe only because an earlier conjunct short-circuits first. That is exactly the
+    # kind of implicit protection this round is about — one reordering away from an
+    # AttributeError inside the check that is supposed to fail closed. An empty basis
+    # makes every affirmative sub-condition read None and refuse, which is the intent.
+    ref = present[0][1] if present else {}
     for lab, cb in present:
         for f in fields:
             if cb.get(f) is None:
@@ -154,13 +159,13 @@ def bracketed_seal(arms, sha_file, geometry_file, now_epoch=None):
         else "; ".join(disagreeing) or "not every arm published a corpus basis (%d of %d)"
                                        % (len(present), len(bases)))
 
-    stage_dir = ref.get("stage_dir") if ref else None
+    stage_dir = ref.get("stage_dir")
     data_dbs = sorted(glob.glob(os.path.join(stage_dir, "**", "*-Data.db"), recursive=True)) \
         if stage_dir else []
     ok_present = check(
         "staged-file-still-present",
         bool(stage_dir) and len(data_dbs) == 1 and ref.get("data_db_files") == 1,
-        ("%s" % data_dbs[0]) if len(data_dbs) == 1 and (ref or {}).get("data_db_files") == 1
+        ("%s" % data_dbs[0]) if len(data_dbs) == 1 and ref.get("data_db_files") == 1
         else "found %d *-Data.db under %r; the seal needs the ONE file the prep digest names"
              % (len(data_dbs), stage_dir))
     staged = data_dbs[0] if ok_present else None
@@ -168,7 +173,7 @@ def bracketed_seal(arms, sha_file, geometry_file, now_epoch=None):
     size = os.path.getsize(staged) if staged else None
     check("staged-bytes-match-the-recorded-basis",
           size is not None and size == ref.get("ondisk_compressed_bytes"),
-          "%s bytes on disk vs %s recorded" % (size, (ref or {}).get("ondisk_compressed_bytes")))
+          "%s bytes on disk vs %s recorded" % (size, ref.get("ondisk_compressed_bytes")))
 
     now_sha, sha_read_err = _sha256_file(staged) if staged else (None, "no staged file to read")
     check("current-sha-matches-prep",

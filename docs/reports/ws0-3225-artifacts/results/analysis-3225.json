@@ -2094,7 +2094,7 @@
     {
      "check": "seal-measured-after-the-last-arm",
      "ok": true,
-     "detail": "re-measured at 2026-08-07T08:57:12Z, after the last recorded point at 2026-08-07T07:37:02Z"
+     "detail": "re-measured at 2026-08-07T09:02:28Z, after the last recorded point at 2026-08-07T07:37:02Z"
     }
    ],
    "ok": true,
