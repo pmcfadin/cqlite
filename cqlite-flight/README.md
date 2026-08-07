@@ -96,7 +96,7 @@ cargo run -p cqlite-flight -- \
 | `--data-dir` | (required) | Root holding `<keyspace>/<table>[-<uuid>]/` SSTable dirs. |
 | `--listen` | `0.0.0.0:8815` | Flight gRPC listen address. |
 | `--batch-size` | `8192` | Max rows per Arrow record batch. |
-| `--max-concurrent-scans` (`CQLITE_MAX_CONCURRENT_SCANS`) | `64` | Admission-control cap on concurrent `do_get` scans (issue #2420). Sized from blocking-pool / fd ceilings, not core count. Clamped to `[1, Semaphore::MAX_PERMITS]` (an out-of-range value is clamped with an operator warning rather than failing startup). |
+| `--max-concurrent-scans` (`CQLITE_MAX_CONCURRENT_SCANS`) | **derived: `clamp(2 × P, 2, 64)`** where `P` = hardware threads available to this process (issue #3225) | Admission-control cap on concurrent `do_get` scans (issue #2420). **The default is core-aware as of #3225** — `64` is now the **ceiling**, retained from #2420's blocking-pool / fd sizing, not the value every host gets. Clamped to `[1, Semaphore::MAX_PERMITS]` (an out-of-range value is clamped with an operator warning rather than failing startup). See [sizing](#sizing---max-concurrent-scans-measured-3225). |
 
 `RUST_LOG=info` enables logging (per-SSTable reads, etc.).
 
@@ -111,6 +111,108 @@ connector's failover (never `RESOURCE_EXHAUSTED`). Malformed tickets fast-fail
 `INVALID_ARGUMENT` without consuming a permit. Queue time is visible in the
 `cqlite.rpc.phase` `admission` phase and the `cqlite.flight.admission.*` metrics
 (see [observability](../docs/observability/README.md)).
+
+### Sizing `--max-concurrent-scans` (measured, #3225)
+
+**Admitting more concurrent scans than the server has cores costs both throughput and
+latency.** This is measured, not folklore: full method, curves and residuals in
+[`docs/reports/ws0-3225-report.md`](../docs/reports/ws0-3225-report.md), raw artefacts under
+`docs/reports/ws0-3225-artifacts/`.
+
+#### The measured optimum moves with server width
+
+One box (Xeon 8488C, SMT on), one 4M-row single-SSTable corpus, full-scan `do_get`, ramp
+`1,2,4,8,16,24,32,64` × 3 reps × 120 s, 126 points. `S` = server physical cores pinned
+(both SMT siblings together), `P` = hardware threads = `2 × S` on that host:
+
+| S (physical cores) | P (hw threads) | measured peak N | rows/s at peak | derived default `clamp(2 × P, 2, 64)` |
+|---:|---:|---:|---:|---:|
+| 1 | 2 | 2 | 240,693 | 4 (−5.0% vs peak — see residuals) |
+| 2 | 4 | 8 | 432,360 | 8 ✔ exact |
+| 3 | 6 | 12 | 624,848 | 12 ✔ (beats N=16 by +1.73%) |
+| 4 | 8 | 16 | 815,748 | 16 ✔ exact |
+| 6 | 12 | 24 | 1,173,759 | 24 ✔ exact |
+
+Throughput is **aggregate rows/s**. In byte terms at the widest peak that is 813.5 MB/s
+**logical uncompressed** (693.07 B/row) = 230.1 MB/s **on-disk compressed** (196.03 B/row) —
+three different bases; the report never collapses them.
+
+#### What over-admission costs, in both currencies
+
+Against each width's own measured peak. `p50` is per-scan latency, and each request here is a
+full 4M-row scan, so read the **multiple**, not the absolute:
+
+| S | throughput at N=64 (the pre-#3225 default) | per-scan p50 at N=64 |
+|---:|---:|---:|
+| 1 | **−21.5%** | **41.95×** the p50 at peak (32.2 s → 22.5 min) |
+| 2 | −13.7% | 9.51× |
+| 3 | −10.0% | 4.55× |
+| 4 | −10.0% | 4.57× |
+| 6 | **−7.3%** | 2.94× |
+
+Two things to take from this table. **Latency degrades an order of magnitude faster than
+throughput** — a 7% throughput loss at 6 cores is already a 2.9× p50 — and **no width was
+optimal at the old constant 64**, not even the widest.
+
+#### The derived default, and how to override it
+
+```
+N_default(P) = clamp(2 × P, 2, 64)        P = std::thread::available_parallelism()
+```
+
+- `P` is **hardware threads available to this process** — it honours the CPU affinity mask and
+  the cgroup v1/v2 CPU quota, so a container limited to 1 CPU on a 96-core node derives from 1,
+  not 96. The host's `/proc/cpuinfo` is never read.
+- **`64` is the ceiling**, retained verbatim from #2420's blocking-pool (~256) and fd
+  (~1024/M) sizing. At `P ≥ 32` the derived default *is* 64, so the change is a strict no-op on
+  wide hosts and **no deployment is ever admitted more widely than before #3225**.
+- **`2` is the floor** — a single permit serialises every scan, and N=1 was the worst point at
+  every measured width.
+
+Provenance is logged at startup on the existing `cqlite-flight starting` event, so a log
+capture answers "why is this server admitting 16?":
+
+```
+max_concurrent_scans = 16                  # effective, post-clamp
+max_concurrent_scans_source = "derived"    # flag | env | derived | derived-fallback
+available_parallelism = 8                  # the P actually read; OMITTED when unavailable
+```
+
+`derived-fallback` means `available_parallelism()` could not answer; the value is then 64 — the
+pre-#3225 behaviour — and is labelled distinctly rather than reported as `derived`.
+
+**Overriding.** Precedence is `--max-concurrent-scans` flag → `CQLITE_MAX_CONCURRENT_SCANS` env
+→ derived. An explicit value is never clamped toward the derived one, and it logs `source=flag`
+or `source=env`. To restore **exactly** the pre-#3225 behaviour on any host:
+
+```bash
+cqlite-flight --data-dir /var/lib/cassandra/data --max-concurrent-scans 64
+# or: CQLITE_MAX_CONCURRENT_SCANS=64
+```
+
+If you tune by hand, tune toward `2 ×` the hardware threads the server process can actually
+use, and verify with the `cqlite.flight.admission.in_use` metric against the `limit` gauge.
+
+#### Two residuals — state them before you rely on the formula
+
+1. **The narrowest width is the formula's one miss: −5.0%.** At `P = 2` the formula gives 4
+   while the measured peak on **one SMT core** is 2 (228,657 vs 240,693 rows/s). This is a
+   deliberate minimax-regret choice, not an oversight: `P = 2` is reported by two physically
+   different machines `available_parallelism` cannot distinguish — one SMT core (measured peak 2)
+   and two non-SMT cores, whose closest measured proxy is the 2-physical-core curve above with
+   its peak at **N=8**. Choosing 2 would be far off on that machine (its N=2 point, 310,633, is
+   well below its 432,360 peak), while 4 is within ~5% of both. If you *know* you are on a single
+   SMT core, `--max-concurrent-scans 2` is worth ~5%.
+2. **The non-SMT extrapolation is UNVALIDATED.** The formula's basis is hardware threads, so on
+   an SMT-on host it admits 4 scans per physical core (the fitted value) but on a **non-SMT**
+   host (Graviton, most ARM instances, SMT disabled in firmware) logical == physical and it
+   admits **2 per physical core — half the fitted per-core value**. No non-SMT arm has ever been
+   measured (#3217 had none; #3225 had no non-SMT host available). On a non-SMT box, measure
+   before trusting the default, and `--max-concurrent-scans` is the lever.
+
+Everything above is one box, one corpus, one query shape (`full`), one read path (`bypass`).
+Cross-run absolute comparisons on that rig carry ~1.7% run-to-run uncertainty (measured — see
+the report's bridge-point section), so treat differences below ~2% as noise.
 
 ### Lazy Summary-guided index (operational note, #2412)
 

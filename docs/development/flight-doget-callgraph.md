@@ -38,7 +38,9 @@ CqliteFlightService::do_get                          service.rs:553   span + Rpc
    ├─ PhaseTimer::start("do_get")                                     phase: validate (#2162)
    ├─ validate_do_get_ticket → FlightTicket::from_bytes  :955         syntax only, pre-admission
    ├─ admission.acquire()                            :839             phase: admission (#2420)
-   │                                                                  --max-concurrent-scans;
+   │                                                                  --max-concurrent-scans; default is
+   │                                                                  DERIVED clamp(2xP,2,64) as of #3225,
+   │                                                                  64 is the ceiling, not the value
    │                                                                  sheds UNAVAILABLE, never a permit
    │                                                                  for a malformed ticket
    ├─ CancelFlag::new() + drop-guard                 :853             ONE flag spans setup + stream (#1476)
