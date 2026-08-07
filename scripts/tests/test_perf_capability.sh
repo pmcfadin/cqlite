@@ -1313,6 +1313,27 @@ done
 [ "$us_fail" -ne 0 ] || ok "perf-capability: a non-GNU host is reported as rc 2 UNSUPPORTED by name and writes nothing (broken stat -c and broken mv -T both), while an all-GNU host still installs (#3261 roborev-16/17)"
 fi
 
+# ...and a SYMLINKED CONTROL FILE inside a contained PROC_DIR must not be read (roborev round 25,
+# Medium). The directory gate proved the DIRECTORY contained and symlink-free and said nothing about its
+# ENTRIES, so `perf_event_paranoid` could be a link to the host file and the token would report a real or
+# attacker-chosen capability as if it came from the fixture. Same directory-is-not-its-entries lesson as
+# AC1, on the read path. The CONTROL is the identical tree with a REAL file, so the refusal cannot be
+# passing for an unrelated reason.
+pc_root=$(mktemp -d "$tmp/pc.XXXXXX"); : >"$pc_root/.cqlite-perf-sandbox"
+mkdir -p "$pc_root/proc"; chmod 0755 "$pc_root" "$pc_root/proc"
+printf '3\n' >"$pc_root/outside-paranoid"; printf '0\n' >"$pc_root/proc/kptr_restrict"
+ln -s "$pc_root/outside-paranoid" "$pc_root/proc/perf_event_paranoid"
+pc_link=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$pc_root" CQLITE_PERF_PROC_DIR="$pc_root/proc" \
+  bash -c '. "$1"; perf_capability_token' _ "$PERFLIB" 2>/dev/null)
+rm -f "$pc_root/proc/perf_event_paranoid"; printf '3\n' >"$pc_root/proc/perf_event_paranoid"
+pc_real=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$pc_root" CQLITE_PERF_PROC_DIR="$pc_root/proc" \
+  bash -c '. "$1"; perf_capability_token' _ "$PERFLIB" 2>/dev/null)
+if [ "$pc_link" = absent ] && [ "$pc_real" = paranoid-3 ]; then
+  ok "perf-capability: a SYMLINKED control file inside a contained PROC_DIR is refused (token 'absent', never a fabricated capability) while the same tree with a REAL file reads normally (#3261 roborev-25)"
+else
+  bad "perf-capability: symlinked control file handling wrong (symlinked token='$pc_link' expected absent; real token='$pc_real' expected paranoid-3)"
+fi
+
 # ...and LINE-SAFETY MUST BE JUDGED ON THE ORIGINAL PATH, not the canonicalized one (roborev round
 # 12, Medium). `$(cd -P -- "$p" && pwd -P)` STRIPS trailing newlines, so a directory whose name ends
 # in LF used to pass: the check only ever saw the stripped form, while every later caller emitted the
