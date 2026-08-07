@@ -1300,6 +1300,46 @@ done
 [ "$us_fail" -ne 0 ] || ok "perf-capability: a non-GNU host is reported as rc 2 UNSUPPORTED by name and writes nothing (broken stat -c and broken mv -T both), while an all-GNU host still installs (#3261 roborev-16/17)"
 fi
 
+# ...and an EXTRA_DIRS value whose FIRST LINE is VALID must still be refused (roborev round 31, Medium).
+# `read` consumes only the first line, so a value like "<contained-dir>\n/etc/sysctl.d" previously SUCCEEDED
+# while silently discarding the remainder -- the scan then reported on an incomplete set, which is the
+# falsely-reassuring answer the diagnostic exists to prevent. Round 3 validated the SPLIT ENTRIES and never
+# the value being split, so a newline HID entries rather than forging one. The baseline runs first, without
+# the newline, and must SUCCEED -- otherwise the refusal proves nothing.
+ed_root=$(mktemp -d "$tmp/ed.XXXXXX"); : >"$ed_root/.cqlite-perf-sandbox"
+mkdir -p "$ed_root/good" "$ed_root/primary"; chmod 0755 "$ed_root" "$ed_root/good" "$ed_root/primary"
+ed_fail=0
+ed_base_rc=0
+env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ed_root" CQLITE_PERF_SYSCTL_DIR="$ed_root/primary" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$ed_root/good" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" >/dev/null 2>&1 || ed_base_rc=$?
+[ "$ed_base_rc" -eq 0 ] \
+  || { bad "perf-capability: the single-line EXTRA_DIRS BASELINE failed (rc=$ed_base_rc) — the newline refusal below would prove nothing"; ed_fail=1; }
+ed_hidden="$ed_root/good"$'\n'"/etc/sysctl.d"
+ed_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ed_root" CQLITE_PERF_SYSCTL_DIR="$ed_root/primary" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$ed_hidden" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>&1); ed_rc=$?
+[ "$ed_rc" -ne 0 ] \
+  || { bad "perf-capability: an EXTRA_DIRS value hiding entries after a newline was ACCEPTED (rc=$ed_rc, out='$ed_out')"; ed_fail=1; }
+printf '%s\n' "$ed_out" | grep -qx -- /etc/sysctl.d \
+  && { bad "perf-capability: the host /etc/sysctl.d reached the search path through a newline-hidden EXTRA_DIRS entry"; ed_fail=1; }
+[ "$ed_fail" -ne 0 ] || ok "perf-capability: an EXTRA_DIRS value whose FIRST line is a valid contained directory is still REFUSED when a newline hides more entries after it, and the host /etc/sysctl.d never reaches the search path — while the same value without the newline succeeds (#3261 roborev-31)"
+
+# ...and a stamped sandbox root ending in '//' must behave IDENTICALLY to one with no trailing slash
+# (roborev round 31, Low). Only ONE trailing slash was stripped, so '<root>//' became '<root>/', passed the
+# '//' rejection, and then the fork-free containment pattern appended its own separator and refused EVERY
+# child -- while the RESOLVING write path still accepted the same root. Read and write disagreeing about
+# the same sandbox is worse than either answer alone, so all three spellings are asserted to agree.
+ts_root=$(mktemp -d "$tmp/ts.XXXXXX"); : >"$ts_root/.cqlite-perf-sandbox"
+mkdir -p "$ts_root/child"; chmod 0755 "$ts_root" "$ts_root/child"
+ts_fail=0
+for ts_spell in "$ts_root" "$ts_root/" "$ts_root//"; do
+  env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ts_spell" \
+    bash -c '. "$1"; perf_capability_sandbox_ok "$2"' _ "$PERFLIB" "$ts_root/child" 2>/dev/null \
+    || { bad "perf-capability: a contained child was REFUSED when the sandbox root was spelled '$ts_spell' (fork-free path disagrees with the resolving path)"; ts_fail=1; }
+done
+[ "$ts_fail" -ne 0 ] || ok "perf-capability: a stamped sandbox root spelled with no trailing slash, one, or two is normalised identically, so the fork-free and resolving paths cannot disagree about the same sandbox (#3261 roborev-31)"
+
 # ...and a SYMLINKED CONTROL FILE inside a contained PROC_DIR must not be read (roborev round 25,
 # Medium). The directory gate proved the DIRECTORY contained and symlink-free and said nothing about its
 # ENTRIES, so `perf_event_paranoid` could be a link to the host file and the token would report a real or

@@ -166,7 +166,13 @@ perf_capability_sandbox_root_into() {
   local __psr_v="${CQLITE_PERF_TEST_SANDBOX:-}"
   eval "$1="
   perf_capability_path_lines_ok "$__psr_v" || return 1
-  __psr_v="${__psr_v%/}"
+  # ALL trailing slashes, not one (roborev round 31, Low). Stripping a single `/` left a root ending in
+  # `//` as one ending in `/`, which passed the `//` rejection below -- and then the fork-free containment
+  # pattern appended its own separator and rejected EVERY child, while the resolving write path still
+  # accepted the same root. Read and write disagreeing about the same sandbox is worse than either
+  # answer alone. The length guard keeps `/` itself from collapsing to the empty string, which the
+  # `/?*` test below then refuses on its own merits.
+  while [ "${__psr_v%/}" != "$__psr_v" ] && [ "${#__psr_v}" -gt 1 ]; do __psr_v="${__psr_v%/}"; done
   case "$__psr_v" in *//*) return 1 ;; /?*) ;; *) return 1 ;; esac
   case "/$__psr_v/" in */../*|*/./*) return 1 ;; esac
   [ -d "$__psr_v" ] && [ -f "$__psr_v/$PERF_CAPABILITY_SANDBOX_STAMP" ] || return 1
@@ -678,6 +684,16 @@ perf_capability_sysctl_search_path() {
     __psp_d=$(perf_capability_sysctl_dir) || return 1
     printf '%s\n' "$__psp_d"
     local -a __psp_extra=()
+    # THE WHOLE UNSPLIT VALUE IS LINE-CHECKED FIRST (roborev round 31, Medium). `read` consumes only the
+    # FIRST LINE of its input, so an EXTRA_DIRS value whose first line is a perfectly valid contained
+    # directory succeeded while SILENTLY DISCARDING everything after the newline -- the scan then reported
+    # "no competing files" having never looked at the rest, which is the falsely-reassuring answer this
+    # diagnostic exists to prevent. The round-3 CR/LF work validated the SPLIT ENTRIES; it never validated
+    # the value being split, so a newline hid entries instead of forging one.
+    perf_capability_path_lines_ok "${CQLITE_PERF_SYSCTL_EXTRA_DIRS:-}" || {
+      printf 'perf-capability: REFUSING: CQLITE_PERF_SYSCTL_EXTRA_DIRS contains CR or LF, so a read would silently keep only its first line and the competing-file scan would report on an incomplete set.\n' >&2
+      return 1
+    }
     # `read -a` splits on IFS WITHOUT globbing (an unquoted `for x in $var` would glob).
     IFS=':' read -r -a __psp_extra <<<"${CQLITE_PERF_SYSCTL_EXTRA_DIRS:-}"
     for __psp_e in ${__psp_extra[@]+"${__psp_extra[@]}"}; do
