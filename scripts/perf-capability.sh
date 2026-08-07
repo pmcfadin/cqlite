@@ -642,19 +642,7 @@ perf_capability_dropin_content() {
 # silent attribution loss rather than an error.
 #
 # THE "99-" PREFIX IS LOAD-BEARING — DO NOT RENAME THIS FILE. sysctl.d drop-ins are
-# applied in lexicographic order of BASENAME and the LAST assignment wins. Stock Ubuntu
-# ships /etc/sysctl.d/10-kernel-hardening.conf containing `kernel.kptr_restrict = 1`,
-# so this file only wins because "99-cqlite-perf.conf" sorts after "10-...". Renaming it
-# to cqlite-perf.conf or any lower number silently hands kptr_restrict back to the
-# hardening drop-in at the next boot — the "it silently reverts" mystery in three
-# separate measurement reports.
-#
-# NOTE ON PRECEDENCE: /etc/sysctl.conf is applied AFTER every sysctl.d drop-in by
-# both `sysctl --system` and systemd-sysctl, so a stale perf_event_paranoid there
-# BEATS this file. Check it if the values do not take.
-#
-# This is a deliberate loosening. NOT for shared or multi-tenant hosts.
-# Rationale + verification: docs/development/fleet-runbook.md
+# (rationale condensed; see the #3261 commit history.)
 kernel.perf_event_paranoid = -1
 kernel.kptr_restrict = 0
 EOF
@@ -668,16 +656,7 @@ EOF
 #
 # TRAILING NEWLINES ARE PART OF THE BYTES (review R4-4). `$( )` strips EVERY trailing
 # newline, so comparing two command substitutions made a file missing its final newline —
-# or carrying extra trailing blank lines — compare EQUAL: "byte-exact" was a false claim
-# and such a file was never rewritten. The file side is read with `read -r -d ''`, which
-# consumes it verbatim (builtin, no `cat`/`diff` dependency), and the canonical side carries
-# an in-substitution sentinel so its own final newline survives the stripping.
-#
-# A NUL BYTE IS THE THIRD SPELLING OF "NOT EXACT" (review R5-3). `read -d ''` stops at a NUL
-# and returns SUCCESS with only the bytes BEFORE it, so canonical content + NUL + ARBITRARY
-# trailing bytes compared EQUAL and was judged current. Read's rc is therefore load-bearing:
-# rc 0 means a NUL was consumed — not our text drop-in, and the rest never even seen — so it
-# is NOT current; only rc != 0 (EOF, whole file in `got`) may be compared.
+# (rationale condensed; see the #3261 commit history.)
 perf_capability_dropin_current() {
   local path want got=''
   path=$(perf_capability_dropin_path) || return 1
@@ -706,20 +685,7 @@ perf_capability_dropin_current() {
 #            subsequent directories is ignored" — so /etc/sysctl.d/50-x.conf REPLACES
 #            /usr/lib/sysctl.d/50-x.conf outright, and reporting the masked one would name
 #            a file that is not in effect.
-#   ORDERING the survivors are applied in lexicographic BASENAME order regardless of which
-#            directory they came from; the LAST assignment wins. /etc/sysctl.conf is applied
-#            AFTER every drop-in, so it wins on grounds unrelated to its name and gets its
-#            own verdict rather than a sort comparison.
-# WHY THE WHOLE PATH (review R5-4). Scanning only /etc/sysctl.d meant a later-sorting file in
-# /run/sysctl.d or /usr/lib/sysctl.d could override our drop-in while bootstrap reported NO
-# competitor — recreating the "it silently reverts and nobody knows why" mystery this
-# diagnostic exists to end.
-#
-# In TEST MODE the path is the sandbox seam plus the optional colon-separated
-# CQLITE_PERF_SYSCTL_EXTRA_DIRS (lower-precedence stand-ins, same descending order): the real
-# /run and /usr/lib are never read. EVERY entry goes through the SAME RESOLVING gate as the
-# write path (R6-2 — this entry point once used the syntactic one, so a symlinked ancestor
-# could point a "sandboxed" scan at the host's real configuration).
+# (rationale condensed; see the #3261 commit history.)
 perf_capability_sysctl_search_path() {
   local __psp_d __psp_e __psp_ok
   if perf_capability_test_mode; then
@@ -763,16 +729,7 @@ perf_capability_file_sets_controls() {
 # `earlier` = ours wins; `last` = /etc/sysctl.conf, applied after every drop-in, so it
 # wins regardless of name.
 #
-# WHY THIS EXISTS. Three separate reports (ws0-3217, ws3-3029, the 2026-07-27 Cassandra
-# baseline) recorded a hand-set perf_event_paranoid/kptr_restrict "silently reverting" and
-# none identified the cause. The cause is a NAMED FILE: stock Ubuntu ships
-# /etc/sysctl.d/10-kernel-hardening.conf with `kernel.kptr_restrict = 1`, re-asserted at
-# every boot and by every `sysctl --system`. "It silently reverts" is unactionable;
-# "10-kernel-hardening.conf sets kptr_restrict = 1 and sorts BEFORE ours, so ours wins" is a
-# diagnosis. Ordering is lexicographic by BASENAME in BYTE order (what systemd-sysctl and
-# `sysctl --system` use) and `[ "$a" \> "$b" ]` is the right operator: the `[` builtin
-# compares with strcmp (verified: byte order even under a UTF-8 LC_ALL), whereas `[[ > ]]`
-# switches to locale collation and could mis-rank names differing only in punctuation.
+# (rationale condensed; see the #3261 commit history.)
 perf_capability_competing_files() {
   local base f name entry seen paths lf='
 '
