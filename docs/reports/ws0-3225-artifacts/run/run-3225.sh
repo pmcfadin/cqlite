@@ -22,7 +22,9 @@
 #     --root <dir>        WS0 root (default $WS0_ROOT, else /data/ws0)
 #     --stage <dir>       staged SSTable dir (default <root>/ws0-h2h/datasets/sstables)
 #     --worktree <dir>    repo checkout holding target/release (default: this file's repo)
-#     --arms "a b c"      subset of arm labels to run (default: all five)
+#     --arms "a b c"      subset of arm labels to run (default: all five). Matched
+#                         against the EFFECTIVE labels, i.e. AFTER --label-suffix; an
+#                         unknown label is a fatal usage error, never an empty run
 #     --ramp <list>       override the N ramp (dry runs only)
 #     --step <secs>       override the per-point hold (dry runs only)
 #     --reps <n>          override reps (dry runs only)
@@ -72,6 +74,8 @@ while [ $# -gt 0 ]; do
     --label-suffix) [ $# -ge 2 ] || { echo "ERROR: --label-suffix needs a value" >&2; exit 2; }; LABEL_SUFFIX="$2"; shift 2 ;;
     --force)        FORCE=1; shift ;;
     --list)         LIST_ONLY=1; shift ;;
+    # 2..50 is the header comment block; keep this in step with it (the last header
+    # line is the one immediately above `set -uo pipefail`) or --help truncates.
     -h|--help)      sed -n '2,50p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "ERROR: unrecognized argument '$1'" >&2; exit 2 ;;
   esac
@@ -121,19 +125,81 @@ ARM_SPECS=(s1        s2        0-2,8-10  s4        s6)
 log()  { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die()  { printf '[%s] ERROR: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; exit 1; }
 
+# ---- the EFFECTIVE arm labels, and --arms validated against them -------------
+# The label a caller must name is the one --label-suffix produces, not the one in
+# ARM_LABELS. That distinction is the whole defect: `--arms cn3225-s3` with
+# `--label-suffix -dryrun` in play matched NOTHING, so both the run loop and the
+# arm-status loop skipped every arm, FAILED stayed 0, and the driver printed
+# "SWEEP COMPLETE" and exited 0 having measured nothing. A benchmark that reports
+# success on zero measurements is worse than one that crashes — the crash gets fixed.
+# So: an unrecognised label is a fatal usage error naming what is valid, and an empty
+# selection is fatal too (never a vacuous success). Validated BEFORE --list as well as
+# before the run, so a typo costs a second rather than a six-hour window.
+EFFECTIVE_LABELS=()
+for i in "${!ARM_LABELS[@]}"; do
+  EFFECTIVE_LABELS+=("${ARM_LABELS[$i]}${LABEL_SUFFIX}")
+done
+
+# The ONE membership test every loop below asks. Three hand-rolled copies of this
+# `case` is how --list drifted out of step with the run loop in the first place.
+arm_requested() { # effective-label
+  [ -z "$ARMS_REQ" ] && return 0
+  local lab
+  for lab in $ARMS_REQ; do
+    [ "$lab" = "$1" ] && return 0
+  done
+  return 1
+}
+
+if [ -n "$ARMS_REQ" ]; then
+  UNKNOWN_ARMS=()
+  SELECTED_ARMS=()
+  for req in $ARMS_REQ; do
+    matched=0
+    for lab in "${EFFECTIVE_LABELS[@]}"; do
+      [ "$req" = "$lab" ] && { matched=1; break; }
+    done
+    if [ "$matched" -eq 1 ]; then SELECTED_ARMS+=("$req"); else UNKNOWN_ARMS+=("$req"); fi
+  done
+  if [ "${#UNKNOWN_ARMS[@]}" -gt 0 ]; then
+    printf 'ERROR: --arms names %d label(s) that no arm has: %s\n' \
+      "${#UNKNOWN_ARMS[@]}" "${UNKNOWN_ARMS[*]}" >&2
+    printf '       valid arm labels%s: %s\n' \
+      "$([ -n "$LABEL_SUFFIX" ] && printf ' (with --label-suffix %s applied)' "$LABEL_SUFFIX")" \
+      "${EFFECTIVE_LABELS[*]}" >&2
+    [ -n "$LABEL_SUFFIX" ] && printf '       NOTE: --label-suffix %s is in effect, so --arms must name the SUFFIXED label.\n' \
+      "$LABEL_SUFFIX" >&2
+    printf '       Refusing to run: an unmatched label selects no arm, and the sweep would then report itself complete over zero measurements.\n' >&2
+    exit 2
+  fi
+  if [ "${#SELECTED_ARMS[@]}" -eq 0 ]; then
+    printf 'ERROR: --arms %q selected NO arm (empty/whitespace-only selection).\n' "$ARMS_REQ" >&2
+    printf '       valid arm labels: %s\n' "${EFFECTIVE_LABELS[*]}" >&2
+    exit 2
+  fi
+fi
+
 if [ "$LIST_ONLY" -eq 1 ]; then
   printf 'planned arms (ramp=%s step=%ss reps=%s client=%s max_concurrent_scans=%s):\n' \
     "$RAMP" "$STEP_SECS" "$REPS" "$CLIENT_CPUS" "$WS0_MAX_CONCURRENT_SCANS"
+  listed=0
   for i in "${!ARM_LABELS[@]}"; do
-    label="${ARM_LABELS[$i]}${LABEL_SUFFIX}"
+    label="${EFFECTIVE_LABELS[$i]}"
     # --list MUST apply the same --arms filter the run loop applies. Printing the
     # unfiltered table while execution silently skips most of it makes the one
     # affordance whose whole job is "show me the plan before the 6-hour run" lie.
-    if [ -n "$ARMS_REQ" ]; then
-      case " $ARMS_REQ " in *" $label "*) ;; *) continue ;; esac
-    fi
+    arm_requested "$label" || continue
     printf '  %-20s server_cpus=%s\n' "$label" "${ARM_SPECS[$i]}"
+    listed=$((listed + 1))
   done
+  # Affirmative: a plan of zero arms is not a plan. Unreachable given the --arms
+  # validation above, so reaching it means the filter and the validator disagree.
+  if [ "$listed" -eq 0 ]; then
+    printf 'ERROR: the plan is EMPTY — no arm survived the --arms filter (arms=%q suffix=%q).\n' \
+      "$ARMS_REQ" "$LABEL_SUFFIX" >&2
+    exit 2
+  fi
+  printf '  (%d arm(s) planned)\n' "$listed"
   exit 0
 fi
 
@@ -211,22 +277,27 @@ run_arm() { # label  server-cpu-spec
 }
 
 FAILED=0
+ATTEMPTED=0
 for i in "${!ARM_LABELS[@]}"; do
-  label="${ARM_LABELS[$i]}${LABEL_SUFFIX}"
+  label="${EFFECTIVE_LABELS[$i]}"
   spec="${ARM_SPECS[$i]}"
-  if [ -n "$ARMS_REQ" ]; then
-    case " $ARMS_REQ " in *" $label "*) ;; *) continue ;; esac
-  fi
+  arm_requested "$label" || continue
   run_arm "$label" "$spec"
+  ATTEMPTED=$((ATTEMPTED + 1))
 done
+
+# The verdict below must never be reached vacuously. If the selection somehow ran
+# nothing, "SWEEP COMPLETE" would be a report about zero measurements.
+if [ "$ATTEMPTED" -eq 0 ]; then
+  echo "$(date -u +%FT%TZ) NO-ARM-ATTEMPTED arms=$ARMS_REQ suffix=$LABEL_SUFFIX" >> "$PROG"
+  die "no arm was attempted (arms='$ARMS_REQ' suffix='$LABEL_SUFFIX') — refusing to report a sweep verdict over zero arms"
+fi
 
 # Report, don't guess: an arm with no complete summary.json did not produce a curve.
 log "---- arm status ----"
 for i in "${!ARM_LABELS[@]}"; do
-  label="${ARM_LABELS[$i]}${LABEL_SUFFIX}"
-  if [ -n "$ARMS_REQ" ]; then
-    case " $ARMS_REQ " in *" $label "*) ;; *) continue ;; esac
-  fi
+  label="${EFFECTIVE_LABELS[$i]}"
+  arm_requested "$label" || continue
   if arm_complete "$WS0_RESULTS/$label"; then
     log "  COMPLETE   $label  ($(wc -l < "$WS0_RESULTS/$label/points.jsonl") points)"
   else
