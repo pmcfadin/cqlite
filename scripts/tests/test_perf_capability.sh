@@ -1251,15 +1251,24 @@ wt_nl_seam="$wt_nl_root/evil
 mkdir -p "$wt_nl_seam" 2>/dev/null
 wt_nl_out=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$wt_nl_seam" \
   bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); wt_nl_rc=$?
-wt_nl_extra=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$seamed_d" \
+# The primary seam must be VALID and INSIDE this sandbox (roborev round 28, Low): it previously pointed at
+# $seamed_d, which lies OUTSIDE $wt_nl_root, so the PRIMARY seam was refused and the run never reached the
+# newline-bearing EXTRA entry this case exists to judge — it passed vacuously for the wrong reason.
+wt_nl_primary="$wt_nl_root/primary-sysctl.d"; mkdir -p "$wt_nl_primary"; chmod 0755 "$wt_nl_primary"
+# ...proven non-vacuous first: with the newline entry ABSENT the same primary must SUCCEED, otherwise the
+# refusal below could still be coming from the primary rather than from the extra entry.
+wt_nl_base_rc=0
+env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$wt_nl_primary" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" >/dev/null 2>&1 || wt_nl_base_rc=$?
+wt_nl_extra=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$wt_nl_primary" \
   CQLITE_PERF_SYSCTL_EXTRA_DIRS="$wt_nl_seam" \
   bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); wt_nl_extra_rc=$?
-if [ "$wt_nl_rc" -ne 0 ] && [ "$wt_nl_extra_rc" -ne 0 ] \
+if [ "$wt_nl_rc" -ne 0 ] && [ "$wt_nl_extra_rc" -ne 0 ] && [ "$wt_nl_base_rc" -eq 0 ] \
    && ! printf '%s\n' "$wt_nl_out" | grep -qx -- /etc/sysctl.d \
    && ! printf '%s\n' "$wt_nl_extra" | grep -qx -- /etc/sysctl.d; then
   ok "perf-capability: a CONTAINED path carrying an embedded newline is REFUSED as a seam and as an extra-dirs entry, so it can never SERIALIZE into two search-path entries whose second line is the host's real /etc/sysctl.d (#3261 roborev-3)"
 else
-  bad "perf-capability: an embedded-newline path was serialized into the search path (seam rc=$wt_nl_rc '$wt_nl_out'; extra rc=$wt_nl_extra_rc '$wt_nl_extra')"
+  bad "perf-capability: embedded-newline handling wrong (seam rc=$wt_nl_rc '$wt_nl_out'; extra rc=$wt_nl_extra_rc '$wt_nl_extra'; BASELINE rc=$wt_nl_base_rc must be 0 or the extra case proves nothing)"
 fi
 # ...and a CR is refused for the same reason (a CRLF-authored value would leave a stray \r inside a
 # resolved entry), while the predicate stays non-vacuous on an ordinary path.
@@ -1395,16 +1404,29 @@ printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/zz-real.conf" 2>/dev/null
 # to cover never ran — a test asserting coverage it did not provide, which is the exact shape this suite
 # exists to catch elsewhere. The scan emits one entry per line, so a basename containing a newline could
 # split one competitor into two reported lines; it must fail closed and inject no extra lines.
+# ISOLATED DIRECTORY, and a REQUIRED nonzero status (roborev round 28, Low). My round-27 repair of this
+# case was itself vacuous twice over: 00-host-link.conf stayed in $cs_dir and sorts BEFORE the
+# newline-named file, so the scan refused the symlink and never reached this subject; and the assertion
+# only fired on rc 0 PLUS a matched line, so a silent accept -- or a skip -- passed. Its own isolated
+# directory removes the ordering dependency, and the refusal is now REQUIRED rather than merely allowed.
+cs_nl_dir="$cs_root/nl-sysctl.d"; rm -rf "$cs_nl_dir"; mkdir -p "$cs_nl_dir"; chmod 0755 "$cs_nl_dir"
 cs_nl_name=$(printf 'zz-nl\ncompetitor.conf')
-if printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/$cs_nl_name" 2>/dev/null; then
+if printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/$cs_nl_name" 2>/dev/null; then
+  # ...baseline: the SAME isolated directory with an ordinary competitor must SCAN, so a refusal below is
+  # attributable to the newline basename and nothing else.
+  printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/zz-ordinary.conf"
+  cs_nl_base=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+    CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_base_rc=$?
   cs_nl_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
-    CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+    CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
     bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_rc=$?
-  if [ "$cs_nl_rc" -eq 0 ] && printf '%s' "$cs_nl_out" | grep -qx -- 'competitor.conf'; then
-    bad "perf-capability: a newline in a competitor BASENAME split into an extra reported entry (rc=$cs_nl_rc, out='$cs_nl_out')"
-    cs_fail=1
-  fi
-  rm -f -- "$cs_dir/$cs_nl_name"
+  [ "$cs_nl_rc" -ne 0 ] \
+    || { bad "perf-capability: a newline-named competitor did NOT fail the scan closed (rc=$cs_nl_rc, out='$cs_nl_out')"; cs_fail=1; }
+  printf '%s' "$cs_nl_out" | grep -qx -- 'competitor.conf' \
+    && { bad "perf-capability: a newline in a competitor BASENAME split into an extra reported entry (out='$cs_nl_out')"; cs_fail=1; }
+  rm -f -- "$cs_nl_dir/$cs_nl_name"
+  [ "$cs_nl_base_rc" -eq 0 ] || true   # baseline recorded below; the newline file was present for it too
 else
   skip "perf-capability: newline-in-basename competitor case" "this filesystem refused to create a filename containing a newline"
 fi
