@@ -1388,9 +1388,26 @@ printf '%s' "$cs_out" | grep -q 'REFUSING to scan' \
 printf '%s' "$cs_out" | grep -q 'perf_event_paranoid = 2' \
   && { bad "perf-capability: the scan LEAKED host competitor content through a symlink"; cs_fail=1; }
 # ...the NEGATIVE CONTROL: a REAL file inside the sandbox is still scanned, so the check is not
-# refusing everything. A newline in the basename is included here because the scan is line-oriented.
-cs_nl=$(printf 'zz-real\ncompetitor.conf')
+# refusing everything.
 printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/zz-real.conf" 2>/dev/null
+# ...and the NEWLINE-BASENAME case, now actually EXERCISED (roborev round 27, Low). This block used to
+# assign cs_nl and then write a different, ordinary filename, so the line-oriented edge case it claimed
+# to cover never ran — a test asserting coverage it did not provide, which is the exact shape this suite
+# exists to catch elsewhere. The scan emits one entry per line, so a basename containing a newline could
+# split one competitor into two reported lines; it must fail closed and inject no extra lines.
+cs_nl_name=$(printf 'zz-nl\ncompetitor.conf')
+if printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/$cs_nl_name" 2>/dev/null; then
+  cs_nl_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+    CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_rc=$?
+  if [ "$cs_nl_rc" -eq 0 ] && printf '%s' "$cs_nl_out" | grep -qx -- 'competitor.conf'; then
+    bad "perf-capability: a newline in a competitor BASENAME split into an extra reported entry (rc=$cs_nl_rc, out='$cs_nl_out')"
+    cs_fail=1
+  fi
+  rm -f -- "$cs_dir/$cs_nl_name"
+else
+  skip "perf-capability: newline-in-basename competitor case" "this filesystem refused to create a filename containing a newline"
+fi
 cs_ok_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
   CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
   bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_ok_rc=$?

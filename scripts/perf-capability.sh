@@ -841,6 +841,11 @@ perf_capability_proc_read() {
   # token path keeps its contract; in test mode containment is required too.
   # NOTE: no backticks in this function comment on purpose -- the fork-free emit-path audit in
   # test_agent_gate_summary.sh counts them WITHOUT stripping comments, so prose alone can red it.
+  # RESIDUAL -- #3323 entry 4: these checks are CHECK-THEN-OPEN. A concurrent writer can replace the
+  # validated entry, or an ancestor, between the check and the redirection below, so the read can still
+  # land outside the sandbox; the competing-file scan shares the shape. Deliberately unfixed: the fix is
+  # fd-relative no-follow/beneath opens (openat2), not expressible in shell, and this escape class is
+  # CLOSED by owner ruling -- recorded, not re-attempted. Test-mode only. Read #3323 first.
   perf_capability_nosymlink "$__pcr_dir/$2" || return 1
   if perf_capability_test_mode; then
     perf_capability_sandbox_ok "$__pcr_dir/$2" || return 1
