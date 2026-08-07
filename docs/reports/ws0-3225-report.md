@@ -21,9 +21,23 @@ is hand-computed. Re-derive with:
 python3 docs/reports/ws0-3225-artifacts/run/analyze-3225.py docs/reports/ws0-3225-artifacts/results
 ```
 
-which reproduces the committed analysis byte-for-byte apart from two provenance lines that
-record WHEN it ran: `results:` and the bracketed seal's `seal-measured-after-the-last-arm`
-(§2.6). No measured value moves.
+Note it **rewrites `analysis-3225.{txt,json}` IN PLACE**, so run it on a clean tree and
+`git checkout --` both files afterwards if you only meant to check. Measured, the re-run reproduces
+the committed analysis exactly apart from three classes of **provenance-only** difference, none of
+which is a measured value:
+
+- **`.txt` — 2 lines.** `results:` (the results directory as you passed it: committed as the
+  measurement box's `/data/ws0/results`) and the bracketed seal's
+  `seal-measured-after-the-last-arm` timestamp, which records WHEN the seal was re-measured (§2.6).
+- **`.json` — the same 2, as `results_dir` and the seal check's `detail`.**
+- **`.json` — 13 additional `path` fields**, which the `.txt` has no counterpart for. Every arm's
+  `corpus-basis.json` and `run-config.json` (6 arms × 2 = 12) plus the partial arm's directory are
+  recorded by the path the analyzer was *given*, so a re-run from the checkout rewrites the
+  committed `/data/ws0/results/…` spellings to whatever root you passed (e.g.
+  `docs/reports/ws0-3225-artifacts/results/…`).
+
+That is 15 changed fields in the `.json` and 2 lines in the `.txt`. **No measured value moves** — no
+throughput, latency, dispersion, peak, verdict or digest differs.
 
 **Measurement round (tasks.md §2). It GATES the default flip (§3) and does not perform it.**
 
@@ -591,7 +605,110 @@ it is the top candidate for a follow-up measurement.
 
 ---
 
-## 10. Process lessons — two instances of "the test didn't test the thing"
+## 10. Scope boundary — what this change does NOT change
+
+§9 above is about **measurement limits** — what these 126 points do not license anyone to conclude.
+This section is a different statement: the **scope boundary of the change itself**, i.e. what the
+delivery leaves untouched regardless of how the measurement came out. It mirrors `proposal.md`'s
+Non-goals, the two spec deltas, and `tasks.md` §1, and is repeated here so the report cannot be read
+as claiming more territory than the change occupies.
+
+- **The admission MECHANISM (#2420) is untouched.** The semaphore, the permit lifetime, the RAII
+  permit drop, the `UNAVAILABLE` shed, the wait budget and the admission metrics are exactly as
+  #2420 shipped them. This change moves **one number** — the *default value* of
+  `--max-concurrent-scans` — and adds **startup log fields** (the derived ceiling, its
+  `max_concurrent_scans_source` provenance, and `available_parallelism`). Nothing in the admission
+  control flow itself is re-implemented, re-tuned or re-ordered.
+- **No read-path or encode-path work.** #3096 (Arrow encode) and #3058 stay untouched; nothing here
+  changes how a row is read, decoded or encoded.
+- **No change to `--batch-size`, `--max-batch-bytes`, `--max-inflight-egress-bytes`, or any channel
+  capacity.** Those are a separate axis (filed and held as #F2); every point in this round ran them
+  at their shipped values (§2.3), which is precisely why the curve is attributable to N.
+- **Not the glibc-arena single-stream phenomenon** — the single-stream slowdown as width grows,
+  which this round reproduces at N=1 (**216,298 rows/s at S=1 → 142,602 rows/s at S=6**, §3; the
+  same shape `proposal.md` records from #3217's numbers). It is a different investigation on a
+  different axis of the same matrix. This round records it as an observation and neither explains
+  nor fixes it.
+- **Not footprint-aware admission (#3306).** Admitting by measured LLC footprint is a different rule
+  over the same knob, gated on #3299 E1. The formula delivered here is deliberately a *sizing
+  default*, not a resource model, and is designed to be replaceable by #3306 without an
+  operator-visible break.
+- **No new tunable.** `clamp(2 × P, 2, 64)` is not itself configurable; the escape hatch is the flag
+  (and env var) that already exists.
+
+---
+
+## 11. Affinity conformance — what was captured, and what CI does not run
+
+AC2's container-correctness claim is that the derived ceiling follows the parallelism available to
+**this process**, not the host's CPU count. Two halves guard it:
+`cqlite-flight/tests/issue_3225_derived_default.rs` guards it **structurally** (no host-topology read
+on the derivation path), and `cqlite-flight/tests/issue_3225_affinity_conformance.rs` guards it
+**behaviourally** by starting the real server binary under a restricted CPU affinity mask and reading
+the derived ceiling back out of the startup log.
+
+### 11.1 The affinity arm — captured on this box
+
+Captured 2026-08-07 on the measurement box described at the head of this report (16 logical / 8
+physical cores), running the server binary under `taskset` with **neither** `--max-concurrent-scans`
+nor `CQLITE_MAX_CONCURRENT_SCANS` set, so the value must DERIVE. The startup lines as observed
+(ANSI stripped, otherwise verbatim):
+
+```text
+# taskset -c 0        (mask size 1)
+cqlite-flight starting listen=127.0.0.1:0 ... max_concurrent_scans=2  max_concurrent_scans_source="derived" available_parallelism=1  ...
+# taskset -c 0,1      (mask size 2)
+cqlite-flight starting listen=127.0.0.1:0 ... max_concurrent_scans=4  max_concurrent_scans_source="derived" available_parallelism=2  ...
+# no mask             (host: 16 logical CPUs)
+cqlite-flight starting listen=127.0.0.1:0 ... max_concurrent_scans=32 max_concurrent_scans_source="derived" available_parallelism=16 ...
+```
+
+| `taskset` mask | Mask size | Logged `available_parallelism` | Logged ceiling | `clamp(2 × mask, 2, 64)` | Provenance |
+|---|--:|--:|--:|--:|---|
+| `-c 0` | 1 | 1 | 2 | 2 (**floor binds**) | `derived` |
+| `-c 0,1` | 2 | 2 | 4 | 4 | `derived` |
+| *(none)* | 16 | 16 | 32 | 32 | `derived` |
+
+The **unmasked** row is what makes the other two evidence rather than tautology: on the same box the
+same binary reports 16 when unmasked, so the 1 and 2 readings are the *mask* being honoured, not a
+constant. `derive_max_concurrent_scans` is applied to the mask size in every case, and the one-CPU
+mask lands on the **floor of 2** rather than 1 — a single-permit server would serialise every scan,
+and #3217 measured N=1 as the worst point at every width.
+
+The two `#[ignore]`d tests reproducing this pass:
+
+```text
+cargo test -p cqlite-flight --test issue_3225_affinity_conformance -- --ignored --nocapture
+test a_one_cpu_mask_derives_the_floor ... ok
+test a_two_cpu_mask_derives_twice_the_mask_size ... ok
+test result: ok. 2 passed; 0 failed
+```
+
+### 11.2 The cgroup arm was NOT captured — stated plainly
+
+The **cgroup quota** half of the same claim (a CPU-quota-limited container deriving from its quota
+rather than from host topology) was **never captured**. There is no cgroup measurement in this report
+and no cgroup artefact under `ws0-3225-artifacts/`. `design.md` D8 sanctioned that: the gate runner's
+cgroup is not ours to control, so a test asserting on it would be asserting on whatever cgroup CI
+happens to hand us. The residual is recorded, not papered over — cgroup-quota derivation rests on
+`std::thread::available_parallelism`'s documented behaviour and on the structural test, not on a
+measurement taken here.
+
+### 11.3 Residual — no CI lane runs the affinity test
+
+`issue_3225_affinity_conformance` is `#[ignore]`d, and **no CI lane runs it**: `--ignored` appears in
+exactly one workflow, `.github/workflows/soak-resource-leak.yml`, and there it is scoped to
+`cargo test -p cqlite-core --test soak_resource_leak`, a different target. The agent gate does not
+run ignored tests either. So a behavioural regression in the affinity path — the server reading host
+topology instead of its own mask — is caught by **nothing automated**; only the structural test in
+`issue_3225_derived_default.rs` (which cannot see a runtime regression) and a manual run of the
+command above. `design.md` D8 sanctioned this form deliberately, because a test that spawns a process
+and binds a socket does not belong in the correctness gate. The point of recording it here is the
+**residual**, not a request to change the design.
+
+---
+
+## 12. Process lessons — two instances of "the test didn't test the thing"
 
 Recorded plainly, because both cost real time and both are the same failure shape.
 
@@ -614,7 +731,7 @@ overlap point whenever two runs will be compared.
 
 ---
 
-## 11. Artefact inventory
+## 13. Artefact inventory
 
 Everything below is **committed** under `docs/reports/ws0-3225-artifacts/`. Per CLAUDE.md the
 harness content here is **reviewed code**, not docs — the PR carrying it is not a docs-only change.

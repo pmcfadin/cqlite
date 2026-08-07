@@ -20,10 +20,25 @@
 //! cargo test -p cqlite-flight --test issue_3225_affinity_conformance -- --ignored --nocapture
 //! ```
 //!
-//! The **cgroup** arm of the same claim is recorded as evidence captured on the
-//! measurement box (see the #3225 report), not as a test: the gate runner's
-//! cgroup is not ours to control, so asserting on it here would only be
-//! asserting on whatever cgroup CI happens to hand us.
+//! The affinity arm above IS captured on the measurement box and recorded in
+//! the #3225 report (§11.1: the `taskset` masks, the logged
+//! `available_parallelism`, and the derived ceiling, with an unmasked row for
+//! contrast).
+//!
+//! The **cgroup** arm of the same claim was **NOT captured** — there is no
+//! cgroup evidence in the report or its artefacts, and this comment claims
+//! none. It is untested by design (`design.md` D8): the gate runner's cgroup is
+//! not ours to control, so asserting on it here would only be asserting on
+//! whatever cgroup CI happens to hand us. Cgroup-quota derivation therefore
+//! rests on `std::thread::available_parallelism`'s documented behaviour plus
+//! the structural guard in `tests/issue_3225_derived_default.rs`, not on a
+//! measurement.
+//!
+//! Residual: **no CI lane runs this file.** `--ignored` appears in exactly one
+//! workflow (`.github/workflows/soak-resource-leak.yml`), scoped to a different
+//! target, and the agent gate runs no ignored tests — so a runtime regression
+//! in the affinity path is caught only by running the command above by hand
+//! (#3225 report §11.3).
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
