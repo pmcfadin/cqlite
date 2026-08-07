@@ -161,19 +161,93 @@ def resolve_width(pts, arm_dir: str, fallback_topology):
     return None, "UNRESOLVED: no server_physical_cores_S stamp and no cpu-topology.json to derive from"
 
 
+# run-3225.sh QUARANTINES a failed/partial arm to "<arm>.partial-<utc>" and re-runs
+# that arm from rep 1. Such a directory is a DISCARDED ATTEMPT, not a measurement: its
+# points.jsonl is the truncated prefix of a run that was thrown away. Admitting one is
+# not merely a distorted curve — the bridge analysis pairs arms by `server_cpus`, and a
+# quarantined arm carries the SAME pinned set as the real arm that replaced it, so it
+# pairs as that arm's SUPPLEMENT and manufactures a cross-run bridge out of one run's
+# own discarded prefix. Matched on the marker rather than the full timestamp shape so a
+# hand-made or differently-stamped quarantine cannot slip past on a spelling.
+QUARANTINE_MARKER = ".partial-"
+
+
+def classify_result_dir(arm_dir: str):
+    """(accept, reason) for one candidate <results-dir>/<name> directory.
+
+    Fail closed, on AFFIRMATIVE evidence of a COMPLETED arm — never on the absence of
+    a bad signal. Three things must all hold: the name is not a quarantine name, the
+    points.jsonl is readable and yields at least one record, and a summary.json is
+    present and parses. That last one is the same completion marker run-3225.sh's
+    arm_complete() uses (summarize-sweep.py writes summary.json only after the final
+    rep), so "complete" means here exactly what it means to the driver. Every refusal
+    returns the reason, so the caller reports it by name instead of dropping it.
+    """
+    name = os.path.basename(arm_dir.rstrip(os.sep))
+    if QUARANTINE_MARKER in name:
+        return False, ("QUARANTINED partial arm (name contains %r) — a discarded attempt "
+                       "run-3225.sh moved aside and re-ran; its points are a truncated "
+                       "prefix, and it shares the real arm's server_cpus so it would "
+                       "also pair as that arm's supplement" % QUARANTINE_MARKER)
+
+    pj = os.path.join(arm_dir, "points.jsonl")
+    if not os.path.isfile(pj):
+        return False, "no points.jsonl — not a sweep arm directory"
+
+    summary = os.path.join(arm_dir, "summary.json")
+    if not os.path.isfile(summary):
+        return False, ("no summary.json — the arm never reached its final rep, so this is "
+                       "an INCOMPLETE arm, not a curve (run-3225.sh: summary.json is the "
+                       "completion marker)")
+    try:
+        with open(summary) as fh:
+            json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, "summary.json does not parse (%s: %s) — completion unverifiable" % (
+            type(exc).__name__, exc)
+
+    return True, "accepted: not quarantined, points.jsonl present, summary.json parses"
+
+
 def load_results(results_dir: str):
+    """({label: (points, arm_dir)}, [refusal records]) for one results directory.
+
+    Both halves are returned: an EXCLUSION IS A RESULT. A loader that quietly globbed
+    every */points.jsonl is what let a quarantined attempt enter the analysis as a real
+    arm, so every candidate directory is now either accepted with a stated basis or
+    refused with a stated reason, and the caller publishes the refusals.
+    """
     sweeps = {}
-    for pj in sorted(glob.glob(os.path.join(results_dir, "*", "points.jsonl"))):
-        label = os.path.basename(os.path.dirname(pj))
+    excluded = []
+    candidates = sorted(
+        d for d in glob.glob(os.path.join(results_dir, "*"))
+        if os.path.isdir(d))
+    for arm_dir in candidates:
+        label = os.path.basename(arm_dir)
+        ok, reason = classify_result_dir(arm_dir)
+        if not ok:
+            excluded.append({"dir": label, "path": arm_dir, "reason": reason})
+            continue
         pts = []
-        with open(pj) as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    pts.append(json.loads(line))
-        if pts:
-            sweeps[label] = (pts, os.path.dirname(pj))
-    return sweeps
+        try:
+            with open(os.path.join(arm_dir, "points.jsonl")) as fh:
+                for lineno, line in enumerate(fh, 1):
+                    line = line.strip()
+                    if line:
+                        pts.append(json.loads(line))
+        except (OSError, json.JSONDecodeError) as exc:
+            excluded.append({
+                "dir": label, "path": arm_dir,
+                "reason": "points.jsonl unreadable at line %d (%s: %s) — a partially "
+                          "parsed arm is not an arm" % (lineno, type(exc).__name__, exc)})
+            continue
+        if not pts:
+            excluded.append({
+                "dir": label, "path": arm_dir,
+                "reason": "points.jsonl holds no records — the arm measured nothing"})
+            continue
+        sweeps[label] = (pts, arm_dir)
+    return sweeps, excluded
 
 
 # -------------------------------------------------------------------- analysis --
@@ -770,9 +844,12 @@ def main() -> int:
         print("ERROR: results dir not found: %s" % results_dir, file=sys.stderr)
         return 1
 
-    sweeps = load_results(results_dir)
+    sweeps, excluded_dirs = load_results(results_dir)
+    for e in excluded_dirs:
+        print("EXCLUDED input dir %s: %s" % (e["dir"], e["reason"]), file=sys.stderr)
     if not sweeps:
-        print("ERROR: no <arm>/points.jsonl under %s — nothing to analyse" % results_dir,
+        print("ERROR: no COMPLETE <arm>/points.jsonl under %s (%d candidate dir(s) refused, "
+              "listed above) — nothing to analyse" % (results_dir, len(excluded_dirs)),
               file=sys.stderr)
         return 1
 
@@ -800,6 +877,11 @@ def main() -> int:
         "formula_under_test": "clamp(%d x P, %d, %d)" % (
             SCANS_PER_HW_THREAD, DERIVED_MIN, DERIVED_CEILING),
         "arms": arms,
+        # Published, not merely logged: which candidate directories this analysis
+        # REFUSED, and why. Named in the artifact so a reader can tell "the sweep wrote
+        # 7 directories and 6 are curves" from "the loader silently saw 6".
+        "input_dirs_accepted": sorted(sweeps),
+        "input_dirs_excluded": excluded_dirs,
         "arms_with_unresolved_width": [a["arm"] for a in arms if a["S_physical_cores"] is None],
         "supplement_arms": supp_labels,
         "bridges": bridges,

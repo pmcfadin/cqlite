@@ -1,6 +1,8 @@
 ==== #3225 §2: peak concurrency by server width ====
 schema: ws0-3225.analysis/v1
 results: /data/ws0/results
+input dirs: 6 accepted (cn3225-s1, cn3225-s2, cn3225-s3, cn3225-s3-n12supp, cn3225-s4, cn3225-s6), 1 refused
+  REFUSED cn3225-s3.partial-20260807T055535Z: QUARANTINED partial arm (name contains '.partial-') — a discarded attempt run-3225.sh moved aside and re-ran; its points are a truncated prefix, and it shares the real arm's server_cpus so it would also pair as that arm's supplement
 
 === cn3225-s1  (S=1 physical cores / P=2 hw threads, cpus=2,10, path=bypass) ===
   S resolution: sweep-stamped (s1|s2|s4|s6 shorthand)

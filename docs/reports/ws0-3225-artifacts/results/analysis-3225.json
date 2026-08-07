@@ -1614,6 +1614,21 @@
    }
   }
  ],
+ "input_dirs_accepted": [
+  "cn3225-s1",
+  "cn3225-s2",
+  "cn3225-s3",
+  "cn3225-s3-n12supp",
+  "cn3225-s4",
+  "cn3225-s6"
+ ],
+ "input_dirs_excluded": [
+  {
+   "dir": "cn3225-s3.partial-20260807T055535Z",
+   "path": "/data/ws0/results/cn3225-s3.partial-20260807T055535Z",
+   "reason": "QUARANTINED partial arm (name contains '.partial-') \u2014 a discarded attempt run-3225.sh moved aside and re-ran; its points are a truncated prefix, and it shares the real arm's server_cpus so it would also pair as that arm's supplement"
+  }
+ ],
  "arms_with_unresolved_width": [],
  "supplement_arms": [
   "cn3225-s3-n12supp"

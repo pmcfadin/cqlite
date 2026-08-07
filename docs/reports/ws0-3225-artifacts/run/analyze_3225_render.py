@@ -16,6 +16,16 @@ def render(out):
     A("==== #3225 §2: peak concurrency by server width ====")
     A("schema: %s" % out["schema"])
     A("results: %s" % out["results_dir"])
+    # An affirmative count of what was READ, and every candidate directory REFUSED with
+    # its reason. A silent glob is what let a quarantined partial arm in, so the accept
+    # side is stated too — "6 accepted" is a measurement; a blank is not.
+    accepted = out.get("input_dirs_accepted")
+    excluded = out.get("input_dirs_excluded")
+    if accepted is not None:
+        A("input dirs: %d accepted (%s), %d refused" % (
+            len(accepted), ", ".join(accepted) or "none", len(excluded or [])))
+        for e in excluded or []:
+            A("  REFUSED %s: %s" % (e["dir"], e["reason"]))
     A("")
 
     for arm in out["arms"]:
