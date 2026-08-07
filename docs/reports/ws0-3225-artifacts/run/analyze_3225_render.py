@@ -232,10 +232,35 @@ def render(out):
         A("  bytes          : on-disk compressed %s / logical uncompressed %s" % (
             ref.get("ondisk_compressed_bytes"), ref.get("logical_uncompressed_bytes")))
     A("  arms checked   : %d" % len(ci.get("per_arm", [])))
+    # The CONTENT half, per arm, always printed — including the arms that recorded
+    # nothing. An absent digest is a state to read, not a blank to skip past.
+    A("  per-arm digest of the bytes that arm read (metadata agreement is NOT byte identity:")
+    A("  a different file of the same size at the same path passes every metadata field):")
+    for r in ci.get("per_arm", []):
+        A("    %-18s %-64s %s" % (
+            r.get("arm"), r.get("data_db_sha256") or r.get("data_db_sha256_manifest")
+            or "NOT RECORDED", r.get("digest_state", "")))
+    if ci.get("digest_matches_artifact") is None:
+        A("  vs committed artifact: NOT COMPARED (no arm recorded a single-file digest)")
+    else:
+        A("  vs committed artifact: %s" % ("MATCHES" if ci["digest_matches_artifact"]
+                                           else "*** DIFFERS ***"))
     A("  VERDICT: %s" % ci.get("verdict", "not evaluated"))
     if out.get("smoke"):
         A("  (ADVISORY under --smoke: #3217's committed results predate the per-arm")
         A("   corpus-basis.json, so a FAIL here describes that input, not this round.)")
+    A("")
+
+    ac = out.get("admission_ceiling") or {}
+    A("=== ADMISSION CEILING vs THE RAMP (the sound form of the validity check) ===")
+    A("  %-18s %-10s %-10s %s" % ("arm", "ceiling", "max N", "covers the ramp?"))
+    for r in ac.get("per_arm", []):
+        A("  %-18s %-10s %-10s %s" % (
+            r.get("arm"), r.get("max_concurrent_scans", "UNREADABLE"),
+            r.get("ramp_max_N"), "YES" if r.get("covers_ramp") else "*** NO ***"))
+        if r.get("problem"):
+            A("      %s" % r["problem"])
+    A("  VERDICT: %s" % ac.get("verdict", "not evaluated"))
     A("")
 
     A("=== ADMISSION REJECTIONS (requests_unavailable) ACROSS EVERY POINT ===")
@@ -245,9 +270,12 @@ def render(out):
         tot += n
         A("  %-18s %d" % (arm["arm"], n))
     A("  TOTAL across all arms and all points: %d" % tot)
-    A("  A non-zero total means the admission ceiling BOUND during the sweep, so those points")
-    A("  measured the gate rather than the curve. Expected 0: the sweep runs with")
-    A("  --max-concurrent-scans 64 = the top of the ramp.")
+    A("  A non-zero total PROVES the ceiling bound: those points measured the gate, not the")
+    A("  curve. The converse does NOT hold, and must not be argued: the sweep runs with")
+    A("  --admission-wait-timeout-ms 30000, so a request arriving over the ceiling WAITS for a")
+    A("  permit and then SUCCEEDS. A fully throttled curve would still total 0 here. Zero is")
+    A("  therefore CORROBORATING, never probative — the probative check is the ceiling-vs-ramp")
+    A("  table above, which reads the ceiling each arm actually ran with.")
     A("")
 
     A("=== THE THREE BYTE BASES, AT EACH WIDTH'S PEAK (AC6) ===")

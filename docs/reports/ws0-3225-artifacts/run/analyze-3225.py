@@ -49,6 +49,7 @@ import statistics as st
 import sys
 
 from analyze_3225_render import render
+from analyze_3225_validity import admission_ceiling, corpus_identity
 
 SCHEMA = "ws0-3225.analysis/v1"
 
@@ -110,31 +111,6 @@ def load_corpus_basis(arm_dir: str):
     doc = dict(doc)
     doc.update({"present": True, "path": path})
     return doc
-
-
-def read_corpus_data_db_sha(sha_file: str):
-    """sha256 of the corpus Data.db, PARSED from the committed shasum artifact.
-
-    Fail-closed: an unreadable file, no `*-Data.db` line, or more than one
-    distinct Data.db digest is returned as an error rather than as a digest,
-    because AC6 requires naming the exact bytes every arm read.
-    """
-    try:
-        with open(sha_file) as fh:
-            lines = fh.read().splitlines()
-    except OSError as exc:
-        return None, "unreadable (%s: %s)" % (type(exc).__name__, exc)
-    digests = set()
-    for line in lines:
-        parts = line.split()
-        if len(parts) >= 2 and parts[-1].endswith("-Data.db"):
-            digests.add(parts[0])
-    if not digests:
-        return None, "no '*-Data.db' line in %s" % sha_file
-    if len(digests) > 1:
-        return None, "%d distinct Data.db digests in %s — the corpus is not one file" % (
-            len(digests), sha_file)
-    return digests.pop(), None
 
 
 def resolve_width(pts, arm_dir: str, fallback_topology):
@@ -355,7 +331,13 @@ def analyse_arm(label, pts, arm_dir, fallback_topology, ramp_top):
         "harness_commit_uniform": len(harness_commits) == 1,
         "corpus_basis": load_corpus_basis(arm_dir),
         "rows_per_scan_observed": pts[0].get("rows_per_scan_observed"),
+        # Read from EVERY point, not just the first: the admission ceiling lives inside
+        # this string, and one point configured differently is a different measurement.
+        # A "uniform" flag derived from all of them is what lets the ceiling check
+        # speak for the arm rather than for point 0.
         "server_flags": pts[0].get("server_flags"),
+        "server_flags_distinct": sorted({str(p.get("server_flags")) for p in pts}),
+        "server_flags_uniform_across_points": len({str(p.get("server_flags")) for p in pts}) == 1,
         "server_cpus": pts[0]["server_cpus"],
         "server_hw_threads_P": hw_threads,
         "client_cpus": pts[0]["client_cpus"],
@@ -648,57 +630,6 @@ def supplemented_formula(primary, supp, bridge):
     return out
 
 
-def corpus_identity(arms, sha_file):
-    """One corpus, or a named disagreement. AC6 needs the exact bytes named.
-
-    Every arm writes its own corpus-basis.json; if two arms disagree on the staged
-    bytes then their curves are not comparable and the peak table is meaningless.
-    Checked field-by-field and reported as FAIL rather than averaged away.
-    """
-    fields = ("stage_dir", "data_db_files", "ondisk_compressed_bytes",
-              "logical_uncompressed_bytes", "sstables_compressed", "sstables_uncompressed")
-    sha, sha_err = read_corpus_data_db_sha(sha_file)
-    out = {
-        "sha256_data_db": sha,
-        "sha256_source": sha_file,
-        "sha256_error": sha_err,
-        "per_arm": [],
-        "disagreements": [],
-        "missing_basis_arms": [a["arm"] for a in arms if not a["corpus_basis"].get("present")],
-    }
-    ref = None
-    for a in arms:
-        cb = a["corpus_basis"]
-        rec = {"arm": a["arm"], "present": cb.get("present", False),
-               "rows_per_scan_observed": a.get("rows_per_scan_observed")}
-        if cb.get("present"):
-            rec.update({k: cb.get(k) for k in fields})
-            if ref is None:
-                ref = rec
-            else:
-                for k in fields + ("rows_per_scan_observed",):
-                    if rec.get(k) != ref.get(k):
-                        out["disagreements"].append(
-                            "%s: %s = %r, but %s has %r" % (a["arm"], k, rec.get(k),
-                                                            ref["arm"], ref.get(k)))
-        else:
-            rec["reason"] = cb.get("reason")
-        out["per_arm"].append(rec)
-    out["reference"] = ref
-    out["ok"] = bool(ref) and not out["disagreements"] and not out["missing_basis_arms"] \
-        and sha is not None
-    out["verdict"] = ("PASS: every arm read the same staged corpus, named by sha256 above."
-                      if out["ok"] else
-                      "FAIL: " + "; ".join(filter(None, [
-                          sha_err,
-                          "arms without a corpus-basis.json: %s" % ", ".join(out["missing_basis_arms"])
-                          if out["missing_basis_arms"] else None,
-                          "; ".join(out["disagreements"]) or None,
-                          None if ref else "no arm published a corpus basis",
-                      ])))
-    return out
-
-
 def ac5_block(arms, supplement_labels, comparator_N=16):
     """AC5 at the widest width in scope: the derived default vs the alternatives.
 
@@ -897,6 +828,7 @@ def main() -> int:
              if b["cross_run_uncertainty_pct"] is not None], default=None),
         "ac5": ac5_block(arms, set(supp_labels)),
         "corpus_identity": corpus_identity(arms, corpus_sha_file),
+        "admission_ceiling": admission_ceiling(arms),
         "requests_unavailable_total_all_arms": sum(
             a["requests_unavailable_total_all_points"] for a in arms),
     }
@@ -916,12 +848,30 @@ def main() -> int:
         print("SMOKE: %d cross-check(s) did not match #3217's published values"
               % out["smoke"]["mismatched"], file=sys.stderr)
         return 1
-    if not args.smoke and not out["corpus_identity"]["ok"]:
-        # Fail closed: if the arms did not all read the same named bytes, the peak
-        # table compares curves from different corpora and AC6 cannot be answered.
+    if args.smoke:
+        # #3217's committed results predate BOTH per-arm checks below, so under --smoke
+        # they describe that input, not this round. Reported, never silently skipped.
+        print("SMOKE (advisory, describes #3217's input): corpus identity %s | admission "
+              "ceiling %s" % (out["corpus_identity"]["state"],
+                              "PASS" if out["admission_ceiling"]["ok"] else "FAIL"),
+              file=sys.stderr)
+        return 0
+
+    rc = 0
+    if not out["corpus_identity"]["ok"]:
+        # Fail closed on BOTH a contradiction and an absent measurement. If the arms did
+        # not all record the same bytes, the peak table may compare curves from different
+        # corpora; if no digest was recorded, nobody knows either way, and "nobody knows"
+        # is not the same claim as "they agree".
         print("CORPUS IDENTITY: %s" % out["corpus_identity"]["verdict"], file=sys.stderr)
-        return 1
-    return 0
+        rc = 1
+    if not out["admission_ceiling"]["ok"]:
+        # Fail closed: a ceiling below an arm's largest N means those points measured the
+        # admission gate. Nothing else in this analysis can see that — a throttled point
+        # reports 0 rejections, because over-ceiling requests wait and then succeed.
+        print("ADMISSION CEILING: %s" % out["admission_ceiling"]["verdict"], file=sys.stderr)
+        rc = 1
+    return rc
 
 
 if __name__ == "__main__":

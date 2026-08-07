@@ -164,7 +164,26 @@ is re-fitted (tasks.md §2). 'vs constant 64' is positive when the formula wins.
   staged         : /data/ws0/ws0-h2h/datasets/sstables (1 *-Data.db file(s))
   bytes          : on-disk compressed 784086629 / logical uncompressed 2772195010
   arms checked   : 6
-  VERDICT: PASS: every arm read the same staged corpus, named by sha256 above.
+  per-arm digest of the bytes that arm read (metadata agreement is NOT byte identity:
+  a different file of the same size at the same path passes every metadata field):
+    cn3225-s1          NOT RECORDED                                                     NOT RECORDED — this arm's corpus-basis.json carries no data_db_sha256. The arm predates the per-arm digest stamp, or the stamp failed. Its bytes are UNVERIFIED, not agreed.
+    cn3225-s2          NOT RECORDED                                                     NOT RECORDED — this arm's corpus-basis.json carries no data_db_sha256. The arm predates the per-arm digest stamp, or the stamp failed. Its bytes are UNVERIFIED, not agreed.
+    cn3225-s3          NOT RECORDED                                                     NOT RECORDED — this arm's corpus-basis.json carries no data_db_sha256. The arm predates the per-arm digest stamp, or the stamp failed. Its bytes are UNVERIFIED, not agreed.
+    cn3225-s3-n12supp  NOT RECORDED                                                     NOT RECORDED — this arm's corpus-basis.json carries no data_db_sha256. The arm predates the per-arm digest stamp, or the stamp failed. Its bytes are UNVERIFIED, not agreed.
+    cn3225-s4          NOT RECORDED                                                     NOT RECORDED — this arm's corpus-basis.json carries no data_db_sha256. The arm predates the per-arm digest stamp, or the stamp failed. Its bytes are UNVERIFIED, not agreed.
+    cn3225-s6          NOT RECORDED                                                     NOT RECORDED — this arm's corpus-basis.json carries no data_db_sha256. The arm predates the per-arm digest stamp, or the stamp failed. Its bytes are UNVERIFIED, not agreed.
+  vs committed artifact: NOT COMPARED (no arm recorded a single-file digest)
+  VERDICT: UNVERIFIED — NOT a pass: 6 arm(s) recorded NO sha256 of the bytes they read (cn3225-s1, cn3225-s2, cn3225-s3, cn3225-s3-n12supp, cn3225-s4, cn3225-s6). Their corpus-basis.json agrees with the others on stage path, file count and byte sizes, but those are metadata: a different file of the same size at the same path satisfies every one of them. Byte identity across these arms is therefore UNMEASURED. run-3225.sh now stamps the digest per arm; arms swept before that fix cannot be retro-certified, because a digest taken today records today's bytes, not the bytes that arm read.
+
+=== ADMISSION CEILING vs THE RAMP (the sound form of the validity check) ===
+  arm                ceiling    max N      covers the ramp?
+  cn3225-s1          64         64         YES
+  cn3225-s2          64         64         YES
+  cn3225-s3          64         64         YES
+  cn3225-s3-n12supp  64         16         YES
+  cn3225-s4          64         64         YES
+  cn3225-s6          64         64         YES
+  VERDICT: PASS: every arm recorded --max-concurrent-scans >= the largest N it drove, so the ceiling could not bind. This — not the rejection count — is the evidence: with a 30 s admission wait timeout a throttled point still reports 0 rejections.
 
 === ADMISSION REJECTIONS (requests_unavailable) ACROSS EVERY POINT ===
   cn3225-s1          0
@@ -174,9 +193,12 @@ is re-fitted (tasks.md §2). 'vs constant 64' is positive when the formula wins.
   cn3225-s4          0
   cn3225-s6          0
   TOTAL across all arms and all points: 0
-  A non-zero total means the admission ceiling BOUND during the sweep, so those points
-  measured the gate rather than the curve. Expected 0: the sweep runs with
-  --max-concurrent-scans 64 = the top of the ramp.
+  A non-zero total PROVES the ceiling bound: those points measured the gate, not the
+  curve. The converse does NOT hold, and must not be argued: the sweep runs with
+  --admission-wait-timeout-ms 30000, so a request arriving over the ceiling WAITS for a
+  permit and then SUCCEEDS. A fully throttled curve would still total 0 here. Zero is
+  therefore CORROBORATING, never probative — the probative check is the ceiling-vs-ramp
+  table above, which reads the ceiling each arm actually ran with.
 
 === THE THREE BYTE BASES, AT EACH WIDTH'S PEAK (AC6) ===
 arm                logical uncompressed   on-disk compressed     arrow wire CAPACITY   
