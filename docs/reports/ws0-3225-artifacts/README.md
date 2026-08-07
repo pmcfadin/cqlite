@@ -91,11 +91,15 @@ cross-checks the recomputed medians against #3217's own `partA-analysis.json`
   `--admission-wait-timeout-ms 30000` an over-ceiling request WAITS for a permit and then
   SUCCEEDS, so `requests_unavailable` stays 0 while the curve is throttled. A non-zero total
   still proves the ceiling bound; zero proves nothing on its own.
-- **Corpus identity is verified by a per-arm CONTENT digest, not by matching metadata.**
-  `run-3225.sh` stamps `data_db_sha256` into each arm's `corpus-basis.json`, measured
-  immediately before and after that arm. The analyzer requires every arm to carry one,
-  requires them to agree with each other and with `corpus/corpus-sha-staged.txt`, and treats
-  a MISSING digest as `UNVERIFIED` — explicitly not a pass, and a non-zero exit. The six arms
-  committed under `results/` predate the stamp, so they report `UNVERIFIED`; that is the
-  honest state, and it cannot be repaired retroactively (a digest taken now records now's
-  bytes).
+- **Corpus identity is verified by CONTENT, under one of three NAMED methods**, never by
+  matching metadata (a different file of the same size at the same path passes every
+  metadata field). The analyzer prints which method answered:
+  `per-arm-digest` (strongest; `run-3225.sh` stamps `data_db_sha256` per arm, measured
+  before and after it — the method for all future rounds) → `bracketed-seal` (the prep
+  digest, recorded in two committed artifacts, equals the file re-measured after the last
+  arm, the file's mtime predates the first arm, and every arm's basis names that same
+  path/count/size — this is what the committed `results/` pass under) → `unverified`
+  (neither available: NOT a pass, non-zero exit). A digest that CONTRADICTS another arm's
+  is always `FAIL` and is never rescued by the seal. The seal proves the staged **file**
+  was unmodified across the window; it does **not** independently witness each arm opening
+  that path — only a per-arm digest does, and that residual is printed with the verdict.

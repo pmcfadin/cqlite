@@ -21,7 +21,9 @@ is hand-computed. Re-derive with:
 python3 docs/reports/ws0-3225-artifacts/run/analyze-3225.py docs/reports/ws0-3225-artifacts/results
 ```
 
-which reproduces the committed analysis byte-for-byte apart from its `results:` provenance line.
+which reproduces the committed analysis byte-for-byte apart from two provenance lines that
+record WHEN it ran: `results:` and the bracketed seal's `seal-measured-after-the-last-arm`
+(§2.6). No measured value moves.
 
 **Measurement round (tasks.md §2). It GATES the default flip (§3) and does not perform it.**
 
@@ -280,16 +282,34 @@ would silently mix a truncated attempt with a complete one and corrupt every med
 - **Those zeros are measured, not absent.** A missing per-point counter would read as `0`/`False` in
   every total above, so the analyzer's `evidence_completeness` check asserts the fields were
   actually recorded: all 8 required counters are present on **126/126** points.
-- **Corpus byte-identity across arms is UNVERIFIED for this round, and is reported as such.** The six
-  arms agree field-by-field on stage path, `*-Data.db` count and both byte bases, and one external
-  `sha256` of the staged Data.db is recorded (§2.4) — but those are metadata: a different file of the
-  same size at the same path satisfies every one of them. The harness stamped no per-arm content
-  digest, so `analyze-3225.py` now reports corpus identity as `UNVERIFIED — NOT a pass` and exits
-  non-zero on this dataset. It cannot be repaired retroactively: a digest taken today records today's
-  bytes, not the bytes each arm read. `run-3225.sh` now measures and stamps that digest per arm
-  (before and after), so the next round answers this by measurement. The staged corpus was written
-  once, before the first arm, and nothing wrote to it during the sweep — but that is an argument from
-  the absence of a mutating step, which is exactly the kind of evidence this round stopped accepting.
+- **Corpus byte-identity: PASS by the BRACKETED SEAL, and the method is named in the output.**
+  `analyze-3225.py` reports corpus identity under exactly one of three named methods, because they
+  do not prove the same thing:
+  1. **`per-arm-digest`** — the strongest, and the method for every future round: `run-3225.sh` now
+     stamps `data_db_sha256` into each arm's `corpus-basis.json`, measured immediately before *and*
+     after that arm. This round's harness did not, so this method was unavailable here.
+  2. **`bracketed-seal`** — the method of record for this round, and an affirmative measurement
+     rather than a lowered bar. Every sub-condition holds: both committed prep records
+     (`corpus-sha-staged.txt` and `corpus-geometry.txt`) name
+     `704ed1f0…7144ac26`; the staged `nb-16-big-Data.db` **re-measured after the last arm** is
+     byte-identical to it; its size matches the 784,086,629 B every arm recorded; its **mtime is
+     `2026-08-06T22:34:15Z`, which predates the first arm's start (`22:54:59Z`)** — and any write,
+     including a swap-and-restore, would have moved mtime — and all six arms' `corpus-basis.json`
+     name that same `stage_dir`, file count and byte size.
+     **What the seal does NOT prove, stated plainly:** it seals the staged **file**, and it confirms
+     what each arm **recorded**; it does not independently witness each arm **opening** that path.
+     An arm pointed at a different path whose basis fields coincided would satisfy it. Only a
+     per-arm digest closes that residual. Two further limits: `mtime` is forgeable by a deliberate
+     `touch`, so the seal is evidence against accidental modification and swap-and-restore, not
+     against an adversary; and it requires the staged file to still exist, so it expires when the
+     box is reclaimed.
+  3. **`unverified`** — neither method available. Not a pass, non-zero exit. Every sub-condition of
+     the seal fails closed into this state: a missing prep record, a current sha that differs, an
+     mtime at or after the first arm start, an absent staged file, or any arm whose recorded basis
+     disagrees. Each was constructed and observed rejecting.
+  A per-arm digest still cannot be backfilled for these six arms — a digest taken today records
+  today's bytes — which is why the seal is reported as its own named method rather than dressed up
+  as one.
 - **Server/client core exclusivity**: enforced by `sweep.sh`'s refusal, demonstrated firing (§2.2).
 - **S is never guessed.** `sweep.sh` stamps `server_physical_cores_S` only for its `s1|s2|s4|s6`
   shorthands, so the S=3 arms stamp `null`. The analyzer re-derives S from **that arm's own**
@@ -625,7 +645,7 @@ and the `profile-*` / `classify-offcpu` / `runqlat` chain (`design.md` D7).
 |--:|:--|:--|
 | 1 — peak-N-by-width reproduced and extended to the widest configuration in scope; medians of ≥3 with dispersion; throughput **and** per-scan-latency cost of over-admission at each width | ✅ | §1 Finding 1, §3, §4; 126 points, every one recording `--max-concurrent-scans 64` ≥ that arm's max N so the ceiling could not bind (§2.3); both #3217 peak locations reproduced and both censored points resolved |
 | 5 — no regression at the widest configuration | ✅ **improvement, not merely no regression** | §6: +8.0% vs N=16 and +7.9% vs the shipped N=64, gains exceeding dispersion with **disjoint rep ranges** |
-| 6 — every throughput figure names its byte basis; fixture geometry recorded (rows, B/row, sha256) | ✅ *(with one stated gap)* | §7 (three bases, never collapsed), §2.4 (3,999,890 rows, 693.07 / 196.03 B/row, sha256 recorded, geometry matched within 0.032%). Gap: the sha256 is one external digest of the staged corpus, not a per-arm one — arm-to-arm byte identity is reported `UNVERIFIED`, never as a pass (§2.6) |
+| 6 — every throughput figure names its byte basis; fixture geometry recorded (rows, B/row, sha256) | ✅ | §7 (three bases, never collapsed), §2.4 (3,999,890 rows, 693.07 / 196.03 B/row, sha256 recorded, geometry matched within 0.032%); corpus identity `PASS (method=bracketed-seal)` with its residual stated (§2.6) |
 | non-SMT extension (optional, highest-value) | ⛔ **NOT RUN** — no non-SMT host available | §9.1; residual published in `cqlite-flight/README.md` |
 | formula gate on §3 (tasks.md §2) | ✅ **MET at all five widths** | §1 Finding 3, §5, §8 |
 

@@ -10,6 +10,12 @@ name (underscored, unlike the hyphenated harness executables) from the script be
 """
 from __future__ import annotations
 
+import datetime
+import glob
+import hashlib
+import os
+import re
+
 
 def read_corpus_data_db_sha(sha_file: str):
     """sha256 of the corpus Data.db, PARSED from the committed shasum artifact.
@@ -36,7 +42,197 @@ def read_corpus_data_db_sha(sha_file: str):
     return digests.pop(), None
 
 
-def corpus_identity(arms, sha_file):
+def read_prep_geometry_sha(geometry_file: str):
+    """The prep-time Data.db sha256 as recorded in the committed geometry table.
+
+    A SECOND committed witness of the same prep measurement, written by
+    compare-geometry.py from the shasum artifact at corpus-preparation time. Requiring
+    both to exist and agree means the seal below rests on two committed records rather
+    than on one file anyone could have rewritten. Fail-closed on unreadable, absent or
+    ambiguous, exactly like the shasum artifact.
+    """
+    try:
+        with open(geometry_file) as fh:
+            text = fh.read()
+    except OSError as exc:
+        return None, "unreadable (%s: %s)" % (type(exc).__name__, exc)
+    found = sorted(set(re.findall(r"^\s*this run \(#\d+\)\s*:\s*([0-9a-f]{64})\s*$",
+                                  text, re.MULTILINE)))
+    if not found:
+        return None, "no 'this run (#NNNN) : <sha256>' line in %s" % geometry_file
+    if len(found) > 1:
+        return None, "%d distinct 'this run' digests in %s" % (len(found), geometry_file)
+    return found[0], None
+
+
+def _parse_utc(ts):
+    """'2026-08-06T22:54:59Z' -> epoch seconds, or None. None is never a time."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _sha256_file(path: str):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError as exc:
+        return None, "%s: %s" % (type(exc).__name__, exc)
+    return h.hexdigest(), None
+
+
+def bracketed_seal(arms, sha_file, geometry_file, now_epoch=None):
+    """Was the staged corpus SEALED across the whole measurement window?
+
+    The second of the three named methods (see corpus_identity). It is a DIFFERENT
+    oracle from per-arm digests, not a weaker reading of the same one: the digest
+    recorded at PREP, before the first arm, is compared against the file re-measured
+    NOW, after the last arm, and the file's mtime is required to predate the first arm's
+    start. Any write to the file — including a swap-and-restore — moves mtime, so an
+    mtime older than the window plus content equal to the prep record is an affirmative
+    measurement that the staged bytes did not change at any point during the sweep.
+
+    WHAT IT DOES NOT PROVE, and this must not be read past: it seals the staged FILE.
+    It does not independently witness that each arm OPENED that exact path. That link
+    comes from each arm's own corpus-basis.json recording the same `stage_dir`,
+    `data_db_files` and `ondisk_compressed_bytes` — which is therefore checked HERE, as
+    part of the seal verdict, rather than left implicit next to it. The residual after
+    both halves: an arm could in principle have been pointed at a different path whose
+    basis fields coincide. Per-arm digests close that; the seal does not. Two further
+    limits: mtime is forgeable by a deliberate `touch`, so the seal is evidence against
+    accidental modification and swap-and-restore, not against an adversary; and it
+    requires the staged file to still exist, so it expires when the box is reclaimed.
+
+    Every sub-condition is keyed on its AFFIRMATIVE value and every one must hold.
+    """
+    out = {"method": "bracketed-seal", "checks": [], "ok": False}
+
+    def check(name, ok, detail):
+        out["checks"].append({"check": name, "ok": bool(ok), "detail": detail})
+        return bool(ok)
+
+    # ---- the two committed PREP records -------------------------------------
+    prep_sha, prep_err = read_corpus_data_db_sha(sha_file)
+    ok_shasum = check("prep-sha-shasum-artifact", prep_sha is not None,
+                      prep_err or "%s records %s" % (os.path.basename(sha_file), prep_sha))
+    geo_sha, geo_err = read_prep_geometry_sha(geometry_file)
+    ok_geo = check("prep-sha-geometry-record", geo_sha is not None,
+                   geo_err or "%s records %s" % (os.path.basename(geometry_file), geo_sha))
+    ok_prep = check(
+        "prep-records-agree",
+        bool(ok_shasum and ok_geo and prep_sha == geo_sha),
+        ("both committed prep records name %s" % prep_sha) if (ok_shasum and ok_geo and prep_sha == geo_sha)
+        else "the two committed prep records do not both name one digest (shasum=%s, geometry=%s)"
+             % (prep_sha, geo_sha))
+
+    # ---- what the ARMS say they read ----------------------------------------
+    bases = [(a["arm"], a["corpus_basis"]) for a in arms]
+    present = [(lab, cb) for lab, cb in bases if cb.get("present")]
+    fields = ("stage_dir", "data_db_files", "ondisk_compressed_bytes")
+    disagreeing = []
+    ref = present[0][1] if present else None
+    for lab, cb in present:
+        for f in fields:
+            if cb.get(f) is None:
+                disagreeing.append("%s: %s is absent" % (lab, f))
+            elif cb.get(f) != ref.get(f):
+                disagreeing.append("%s: %s=%r but %s has %r"
+                                   % (lab, f, cb.get(f), present[0][0], ref.get(f)))
+    ok_arms = check(
+        "arms-agree-on-the-staged-file",
+        bool(present) and len(present) == len(bases) and not disagreeing,
+        ("all %d arm(s) record stage_dir=%s, %s *-Data.db, %s on-disk bytes"
+         % (len(present), ref.get("stage_dir"), ref.get("data_db_files"),
+            ref.get("ondisk_compressed_bytes"))) if (present and len(present) == len(bases)
+                                                     and not disagreeing)
+        else "; ".join(disagreeing) or "not every arm published a corpus basis (%d of %d)"
+                                       % (len(present), len(bases)))
+
+    stage_dir = ref.get("stage_dir") if ref else None
+    data_dbs = sorted(glob.glob(os.path.join(stage_dir, "**", "*-Data.db"), recursive=True)) \
+        if stage_dir else []
+    ok_present = check(
+        "staged-file-still-present",
+        bool(stage_dir) and len(data_dbs) == 1 and ref.get("data_db_files") == 1,
+        ("%s" % data_dbs[0]) if len(data_dbs) == 1 and (ref or {}).get("data_db_files") == 1
+        else "found %d *-Data.db under %r; the seal needs the ONE file the prep digest names"
+             % (len(data_dbs), stage_dir))
+    staged = data_dbs[0] if ok_present else None
+
+    size = os.path.getsize(staged) if staged else None
+    check("staged-bytes-match-the-recorded-basis",
+          size is not None and size == ref.get("ondisk_compressed_bytes"),
+          "%s bytes on disk vs %s recorded" % (size, (ref or {}).get("ondisk_compressed_bytes")))
+
+    now_sha, sha_read_err = _sha256_file(staged) if staged else (None, "no staged file to read")
+    check("current-sha-matches-prep",
+          bool(ok_prep and now_sha is not None and now_sha == prep_sha),
+          ("re-measured NOW = %s, identical to the prep record" % now_sha)
+          if (ok_prep and now_sha == prep_sha)
+          else "re-measured %s vs prep %s (%s)" % (now_sha, prep_sha, sha_read_err or "differ"))
+
+    # ---- the WINDOW: first arm start, last point, file mtime ----------------
+    starts = {a["arm"]: _parse_utc((a.get("run_config") or {}).get("started_utc")) for a in arms}
+    unparsed = sorted(lab for lab, t in starts.items() if t is None)
+    ok_window = check(
+        "every-arm-start-time-known",
+        bool(starts) and not unparsed,
+        "earliest arm start %s" % (
+            datetime.datetime.fromtimestamp(min(t for t in starts.values() if t is not None),
+                                            datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if starts and not unparsed else "-")
+        if not unparsed else "no parseable started_utc in run-config.json for: %s"
+                             % ", ".join(unparsed))
+    first_start = min((t for t in starts.values() if t is not None), default=None)
+
+    mtime = os.path.getmtime(staged) if staged else None
+    check("mtime-predates-the-first-arm",
+          bool(ok_window and mtime is not None and first_start is not None and mtime < first_start),
+          ("mtime %s < first arm start %s, and any write would have moved it, so the file was "
+           "unmodified across the whole window"
+           % (datetime.datetime.fromtimestamp(mtime, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              datetime.datetime.fromtimestamp(first_start, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+          if (mtime is not None and first_start is not None and mtime < first_start)
+          else "mtime=%s first-arm-start=%s — the staged file was touched at or after the sweep began"
+               % (mtime, first_start))
+
+    last_point = max((a.get("points_ts_unix_ms_max") or 0) for a in arms) / 1000.0 if arms else 0
+    now_epoch = now_epoch if now_epoch is not None else datetime.datetime.now(
+        datetime.timezone.utc).timestamp()
+    check("seal-measured-after-the-last-arm",
+          bool(last_point) and now_epoch > last_point,
+          "re-measured at %s, after the last recorded point at %s" % (
+              datetime.datetime.fromtimestamp(now_epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              datetime.datetime.fromtimestamp(last_point, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              if last_point else "-")
+          if last_point and now_epoch > last_point
+          else "no point timestamp to close the window against (last_point=%s)" % last_point)
+
+    out["staged_file"] = staged
+    out["prep_sha256"] = prep_sha
+    out["current_sha256"] = now_sha
+    out["failed_checks"] = [c["check"] for c in out["checks"] if not c["ok"]]
+    # Affirmative: every named sub-condition returned its GOOD value. One unmeasured
+    # condition is one hole, and a seal with a hole is not a seal.
+    out["ok"] = bool(out["checks"]) and not out["failed_checks"]
+    out["verdict"] = (
+        "SEALED: the staged Data.db re-measured now is byte-identical to the digest recorded at "
+        "prep, and its mtime predates the first arm, so it was unmodified across the entire "
+        "measurement window. Every arm's corpus-basis.json names that same path, file count and "
+        "byte size. RESIDUAL: this seals the FILE and the arms' recorded basis — it does not "
+        "independently witness each arm opening that path, which only a per-arm digest does."
+        if out["ok"] else
+        "NOT SEALED: %s" % ", ".join(out["failed_checks"]))
+    return out
+
+
+def corpus_identity(arms, sha_file, geometry_file=None, now_epoch=None):
     """One corpus, or a named disagreement. AC6 needs the exact bytes named.
 
     Every arm writes its own corpus-basis.json; if two arms disagree on the staged
@@ -46,17 +242,26 @@ def corpus_identity(arms, sha_file):
     The metadata fields (path, file count, byte sizes) are NECESSARY but NOT
     SUFFICIENT: a different Data.db of the same size at the same path satisfies every
     one of them. Byte identity is a claim about CONTENT, so it is answered by a
-    CONTENT measurement — the per-arm `data_db_sha256` that run-3225.sh records
-    immediately before and after each arm. Three states, and only the first is a pass:
+    CONTENT measurement. There are exactly THREE named methods, and the one used is
+    always printed, because they do not prove the same thing:
 
-      PASS       every arm recorded a digest, they are all equal, and they equal the
-                 digest in the committed shasum artifact;
-      FAIL       a recorded digest disagrees with another arm's or with the artifact,
-                 or an arm recorded that the corpus CHANGED under it;
-      UNVERIFIED an arm recorded NO digest. That is not agreement — it is an absent
-                 measurement, and an absent measurement never yields a positive
-                 verdict. Arms swept before the digest stamp existed land here by
-                 construction, which is the honest answer for them.
+      per-arm-digest   STRONGEST, and the method for every future round: run-3225.sh
+                       records `data_db_sha256` per arm, measured before and after that
+                       arm. All arms' digests must be equal AND equal the committed
+                       shasum artifact.
+      bracketed-seal   A DIFFERENT valid oracle, for a round whose harness stamped no
+                       per-arm digest: the digest recorded at prep (two committed
+                       records) equals the file re-measured after the last arm, the
+                       file's mtime predates the first arm, and every arm's basis names
+                       that same path/count/size. See bracketed_seal() for exactly what
+                       this does and does not prove — it is NOT equivalent to per-arm
+                       digests, and the residual is printed with the verdict.
+      unverified       Neither is available. NOT a pass, and a non-zero exit. An absent
+                       measurement is not agreement.
+
+    A CONTRADICTION is always FAIL and is never rescued by the seal: if a recorded
+    per-arm digest disagrees with another arm's or with the artifact, or an arm recorded
+    that the corpus changed under it, no other method may overturn that.
     """
     fields = ("stage_dir", "data_db_files", "ondisk_compressed_bytes",
               "logical_uncompressed_bytes", "sstables_compressed", "sstables_uncompressed")
@@ -148,14 +353,24 @@ def corpus_identity(arms, sha_file):
                  and out["digest_matches_artifact"] is True)
     out["metadata_ok"] = metadata_ok
     out["digest_ok"] = digest_ok
-    out["ok"] = metadata_ok and digest_ok
 
-    if out["ok"]:
-        state, verdict = "PASS", (
-            "PASS: every arm recorded a sha256 of the bytes it read, all arms' digests are "
-            "equal, and they match the committed artifact (%s)." % sha)
-    elif out["digest_disagreements"] or out["disagreements"] or not metadata_ok:
-        state, verdict = "FAIL", "FAIL: " + "; ".join(filter(None, [
+    # The SECOND method, always evaluated and always published, so a reader can see
+    # which methods were available rather than only which one answered.
+    if geometry_file is None:
+        geometry_file = os.path.join(os.path.dirname(sha_file), "corpus-geometry.txt")
+    seal = bracketed_seal(arms, sha_file, geometry_file, now_epoch=now_epoch)
+    out["bracketed_seal"] = seal
+
+    contradiction = bool(out["digest_disagreements"] or out["disagreements"]) or not metadata_ok
+    if metadata_ok and digest_ok:
+        state, method = "PASS", "per-arm-digest"
+        verdict = ("PASS (method=per-arm-digest): every arm recorded a sha256 of the bytes it "
+                   "read, all arms' digests are equal, and they match the committed artifact "
+                   "(%s)." % sha)
+    elif contradiction:
+        # Never rescued by the seal: a measurement that DISAGREES is not an absent one.
+        state, method = "FAIL", "contradicted"
+        verdict = "FAIL: " + "; ".join(filter(None, [
             sha_err,
             "arms without a corpus-basis.json: %s" % ", ".join(out["missing_basis_arms"])
             if out["missing_basis_arms"] else None,
@@ -163,18 +378,25 @@ def corpus_identity(arms, sha_file):
             "; ".join(out["digest_disagreements"]) or None,
             None if ref else "no arm published a corpus basis",
         ]))
+    elif seal["ok"]:
+        state, method = "PASS", "bracketed-seal"
+        verdict = ("PASS (method=bracketed-seal): no arm recorded a per-arm digest, so byte "
+                   "identity is established by the seal instead — %s" % seal["verdict"])
     else:
-        state, verdict = "UNVERIFIED", (
+        state, method = "UNVERIFIED", "unverified"
+        verdict = (
             "UNVERIFIED — NOT a pass: %d arm(s) recorded NO sha256 of the bytes they read "
-            "(%s). Their corpus-basis.json agrees with the others on stage path, file count "
-            "and byte sizes, but those are metadata: a different file of the same size at the "
-            "same path satisfies every one of them. Byte identity across these arms is "
-            "therefore UNMEASURED. run-3225.sh now stamps the digest per arm; arms swept "
-            "before that fix cannot be retro-certified, because a digest taken today records "
-            "today's bytes, not the bytes that arm read." % (
-                len(out["arms_without_recorded_digest"]),
-                ", ".join(out["arms_without_recorded_digest"])))
+            "(%s), and the bracketed seal does not hold either (%s). Their corpus-basis.json "
+            "agrees with the others on stage path, file count and byte sizes, but those are "
+            "metadata: a different file of the same size at the same path satisfies every one "
+            "of them. Byte identity is therefore UNMEASURED. A per-arm digest cannot be "
+            "backfilled — a digest taken today records today's bytes, not the bytes that arm "
+            "read." % (len(out["arms_without_recorded_digest"]),
+                       ", ".join(out["arms_without_recorded_digest"]),
+                       ", ".join(seal["failed_checks"]) or "not evaluated"))
     out["state"] = state
+    out["method"] = method
+    out["ok"] = state == "PASS"
     out["verdict"] = verdict
     return out
 

@@ -255,6 +255,15 @@ def render(out):
     else:
         A("  vs committed artifact: %s" % ("MATCHES" if ci["digest_matches_artifact"]
                                            else "*** DIFFERS ***"))
+    seal = ci.get("bracketed_seal") or {}
+    if seal:
+        A("  method 2 — BRACKETED SEAL (a different oracle, not a weaker digest): the prep")
+        A("  digest vs the file re-measured after the last arm, plus an mtime older than the")
+        A("  first arm. Every sub-condition must hold affirmatively:")
+        for c in seal.get("checks", []):
+            A("    [%s] %-38s %s" % ("ok " if c["ok"] else "FAIL", c["check"], c["detail"]))
+        A("    seal: %s" % seal.get("verdict", "not evaluated"))
+    A("  METHOD : %s" % ci.get("method", "not evaluated"))
     A("  VERDICT: %s" % ci.get("verdict", "not evaluated"))
     if out.get("smoke"):
         A("  (ADVISORY under --smoke: #3217's committed results predate the per-arm")

@@ -114,6 +114,24 @@ def load_corpus_basis(arm_dir: str):
     return doc
 
 
+def load_run_config(arm_dir: str):
+    """The arm's run-config.json, or an explicit absence record.
+
+    Carries `started_utc` — the only record of WHEN this arm ran, which the bracketed
+    seal needs to bound the measurement window. Absence is returned as a named absence,
+    never as an empty dict that would read downstream as "no constraint".
+    """
+    path = os.path.join(arm_dir, "run-config.json")
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"present": False, "path": path, "reason": "%s: %s" % (type(exc).__name__, exc)}
+    doc = dict(doc)
+    doc.update({"present": True, "path": path})
+    return doc
+
+
 def resolve_width(pts, arm_dir: str, fallback_topology):
     """Physical-core width S for an arm, with the METHOD recorded.
 
@@ -331,6 +349,11 @@ def analyse_arm(label, pts, arm_dir, fallback_topology, ramp_top):
         "harness_commits": harness_commits,
         "harness_commit_uniform": len(harness_commits) == 1,
         "corpus_basis": load_corpus_basis(arm_dir),
+        "run_config": load_run_config(arm_dir),
+        # The arm's own measurement window, read from the points. Used to assert the
+        # seal was taken AFTER the sweep, not from a stale reading beside it.
+        "points_ts_unix_ms_max": max((p.get("ts_unix_ms") or 0) for p in pts),
+        "points_ts_unix_ms_min": min((p.get("ts_unix_ms") or 0) for p in pts),
         "rows_per_scan_observed": pts[0].get("rows_per_scan_observed"),
         # Read from EVERY point, not just the first: the admission ceiling lives inside
         # this string, and one point configured differently is a different measurement.
@@ -766,6 +789,10 @@ def main() -> int:
     ap.add_argument("--corpus-sha-file", default=None,
                     help="shasum artifact naming the corpus Data.db digest (AC6); default is the "
                          "committed ../corpus/corpus-sha-staged.txt beside this script")
+    ap.add_argument("--corpus-geometry-file", default=None,
+                    help="the geometry table holding the SECOND committed prep digest record, "
+                         "used by the bracketed-seal method; default is corpus-geometry.txt "
+                         "beside --corpus-sha-file")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -773,6 +800,9 @@ def main() -> int:
     corpus_sha_file = args.corpus_sha_file or os.path.join(
         here, "..", "corpus", "corpus-sha-staged.txt")
     corpus_sha_file = os.path.abspath(corpus_sha_file)
+    corpus_geometry_file = os.path.abspath(
+        args.corpus_geometry_file or os.path.join(os.path.dirname(corpus_sha_file),
+                                                  "corpus-geometry.txt"))
     partA_json = None
 
     if args.smoke:
@@ -841,7 +871,7 @@ def main() -> int:
             [b["cross_run_uncertainty_pct"] for b in bridges
              if b["cross_run_uncertainty_pct"] is not None], default=None),
         "ac5": ac5_block(arms, set(supp_labels)),
-        "corpus_identity": corpus_identity(arms, corpus_sha_file),
+        "corpus_identity": corpus_identity(arms, corpus_sha_file, corpus_geometry_file),
         "admission_ceiling": admission_ceiling(arms),
         "evidence_completeness": evidence_completeness(arms),
         "requests_unavailable_total_all_arms": sum(

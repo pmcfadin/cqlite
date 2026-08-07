@@ -25,6 +25,29 @@
     "present": true,
     "path": "/data/ws0/results/cn3225-s1/corpus-basis.json"
    },
+   "run_config": {
+    "label": "cn3225-s1",
+    "server_physical_cores_S": 1,
+    "server_cpus": "2,10",
+    "client_cpus": "6,7,14,15",
+    "ramp": "1,2,4,8,16,24,32,64",
+    "step_seconds": 120,
+    "reps": 3,
+    "merge_path": "bypass",
+    "seed": 42,
+    "stage": "/data/ws0/ws0-h2h/datasets/sstables",
+    "flight_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/cqlite-flight",
+    "loadgen_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/flight-loadgen",
+    "ticket_template": "/home/ubuntu/workspace/cqlite-wt/issue-3225/docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json",
+    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
+    "client_saturation_threshold": 0.7,
+    "harness_commit": "7b84ae65f",
+    "started_utc": "2026-08-06T22:54:59Z",
+    "present": true,
+    "path": "/data/ws0/results/cn3225-s1/run-config.json"
+   },
+   "points_ts_unix_ms_max": 1786065769934,
+   "points_ts_unix_ms_min": 1786056957527,
    "rows_per_scan_observed": 3999890.0,
    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
    "server_flags_distinct": [
@@ -347,6 +370,29 @@
     "present": true,
     "path": "/data/ws0/results/cn3225-s2/corpus-basis.json"
    },
+   "run_config": {
+    "label": "cn3225-s2",
+    "server_physical_cores_S": 2,
+    "server_cpus": "0,2,8,10",
+    "client_cpus": "6,7,14,15",
+    "ramp": "1,2,4,8,16,24,32,64",
+    "step_seconds": 120,
+    "reps": 3,
+    "merge_path": "bypass",
+    "seed": 42,
+    "stage": "/data/ws0/ws0-h2h/datasets/sstables",
+    "flight_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/cqlite-flight",
+    "loadgen_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/flight-loadgen",
+    "ticket_template": "/home/ubuntu/workspace/cqlite-wt/issue-3225/docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json",
+    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
+    "client_saturation_threshold": 0.7,
+    "harness_commit": "7b84ae65f",
+    "started_utc": "2026-08-07T01:45:20Z",
+    "present": true,
+    "path": "/data/ws0/results/cn3225-s2/run-config.json"
+   },
+   "points_ts_unix_ms_max": 1786072531698,
+   "points_ts_unix_ms_min": 1786067183978,
    "rows_per_scan_observed": 3999890.0,
    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
    "server_flags_distinct": [
@@ -653,6 +699,29 @@
     "present": true,
     "path": "/data/ws0/results/cn3225-s3/corpus-basis.json"
    },
+   "run_config": {
+    "label": "cn3225-s3",
+    "server_physical_cores_S": null,
+    "server_cpus": "0,1,2,8,9,10",
+    "client_cpus": "6,7,14,15",
+    "ramp": "1,2,4,8,16,24,32,64",
+    "step_seconds": 120,
+    "reps": 3,
+    "merge_path": "bypass",
+    "seed": 42,
+    "stage": "/data/ws0/ws0-h2h/datasets/sstables",
+    "flight_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/cqlite-flight",
+    "loadgen_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/flight-loadgen",
+    "ticket_template": "/home/ubuntu/workspace/cqlite-wt/issue-3225/docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json",
+    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
+    "client_saturation_threshold": 0.7,
+    "harness_commit": "fd212ff87",
+    "started_utc": "2026-08-07T05:55:35Z",
+    "present": true,
+    "path": "/data/ws0/results/cn3225-s3/run-config.json"
+   },
+   "points_ts_unix_ms_max": 1786086664852,
+   "points_ts_unix_ms_min": 1786082184659,
    "rows_per_scan_observed": 3999890.0,
    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
    "server_flags_distinct": [
@@ -948,6 +1017,29 @@
     "present": true,
     "path": "/data/ws0/results/cn3225-s3-n12supp/corpus-basis.json"
    },
+   "run_config": {
+    "label": "cn3225-s3-n12supp",
+    "server_physical_cores_S": null,
+    "server_cpus": "0,1,2,8,9,10",
+    "client_cpus": "6,7,14,15",
+    "ramp": "12,16",
+    "step_seconds": 120,
+    "reps": 3,
+    "merge_path": "bypass",
+    "seed": 42,
+    "stage": "/data/ws0/ws0-h2h/datasets/sstables",
+    "flight_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/cqlite-flight",
+    "loadgen_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/flight-loadgen",
+    "ticket_template": "/home/ubuntu/workspace/cqlite-wt/issue-3225/docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json",
+    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
+    "client_saturation_threshold": 0.7,
+    "harness_commit": "f5f631ece",
+    "started_utc": "2026-08-07T07:21:10Z",
+    "present": true,
+    "path": "/data/ws0/results/cn3225-s3-n12supp/run-config.json"
+   },
+   "points_ts_unix_ms_max": 1786088222094,
+   "points_ts_unix_ms_min": 1786087318695,
    "rows_per_scan_observed": 3999890.0,
    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
    "server_flags_distinct": [
@@ -1083,6 +1175,29 @@
     "present": true,
     "path": "/data/ws0/results/cn3225-s4/corpus-basis.json"
    },
+   "run_config": {
+    "label": "cn3225-s4",
+    "server_physical_cores_S": 4,
+    "server_cpus": "0,1,2,3,8,9,10,11",
+    "client_cpus": "6,7,14,15",
+    "ramp": "1,2,4,8,16,24,32,64",
+    "step_seconds": 120,
+    "reps": 3,
+    "merge_path": "bypass",
+    "seed": 42,
+    "stage": "/data/ws0/ws0-h2h/datasets/sstables",
+    "flight_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/cqlite-flight",
+    "loadgen_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/flight-loadgen",
+    "ticket_template": "/home/ubuntu/workspace/cqlite-wt/issue-3225/docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json",
+    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
+    "client_saturation_threshold": 0.7,
+    "harness_commit": "7b84ae65f",
+    "started_utc": "2026-08-07T03:30:28Z",
+    "present": true,
+    "path": "/data/ws0/results/cn3225-s4/run-config.json"
+   },
+   "points_ts_unix_ms_max": 1786077403591,
+   "points_ts_unix_ms_min": 1786073478167,
    "rows_per_scan_observed": 3999890.0,
    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
    "server_flags_distinct": [
@@ -1381,6 +1496,29 @@
     "present": true,
     "path": "/data/ws0/results/cn3225-s6/corpus-basis.json"
    },
+   "run_config": {
+    "label": "cn3225-s6",
+    "server_physical_cores_S": 6,
+    "server_cpus": "0,1,2,3,4,5,8,9,10,11,12,13",
+    "client_cpus": "6,7,14,15",
+    "ramp": "1,2,4,8,16,24,32,64",
+    "step_seconds": 120,
+    "reps": 3,
+    "merge_path": "bypass",
+    "seed": 42,
+    "stage": "/data/ws0/ws0-h2h/datasets/sstables",
+    "flight_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/cqlite-flight",
+    "loadgen_bin": "/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/flight-loadgen",
+    "ticket_template": "/home/ubuntu/workspace/cqlite-wt/issue-3225/docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json",
+    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
+    "client_saturation_threshold": 0.7,
+    "harness_commit": "7b84ae65f",
+    "started_utc": "2026-08-07T04:42:38Z",
+    "present": true,
+    "path": "/data/ws0/results/cn3225-s6/run-config.json"
+   },
+   "points_ts_unix_ms_max": 1786081726764,
+   "points_ts_unix_ms_min": 1786077814408,
    "rows_per_scan_observed": 3999890.0,
    "server_flags": "--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000",
    "server_flags_distinct": [
@@ -1905,9 +2043,71 @@
   "reference_digest": null,
   "metadata_ok": true,
   "digest_ok": false,
-  "ok": false,
-  "state": "UNVERIFIED",
-  "verdict": "UNVERIFIED \u2014 NOT a pass: 6 arm(s) recorded NO sha256 of the bytes they read (cn3225-s1, cn3225-s2, cn3225-s3, cn3225-s3-n12supp, cn3225-s4, cn3225-s6). Their corpus-basis.json agrees with the others on stage path, file count and byte sizes, but those are metadata: a different file of the same size at the same path satisfies every one of them. Byte identity across these arms is therefore UNMEASURED. run-3225.sh now stamps the digest per arm; arms swept before that fix cannot be retro-certified, because a digest taken today records today's bytes, not the bytes that arm read."
+  "bracketed_seal": {
+   "method": "bracketed-seal",
+   "checks": [
+    {
+     "check": "prep-sha-shasum-artifact",
+     "ok": true,
+     "detail": "corpus-sha-staged.txt records 704ed1f002f0c374504a0a3cbf66c0a55202700a4de8ca18e8386f8706a0402d"
+    },
+    {
+     "check": "prep-sha-geometry-record",
+     "ok": true,
+     "detail": "corpus-geometry.txt records 704ed1f002f0c374504a0a3cbf66c0a55202700a4de8ca18e8386f8706a0402d"
+    },
+    {
+     "check": "prep-records-agree",
+     "ok": true,
+     "detail": "both committed prep records name 704ed1f002f0c374504a0a3cbf66c0a55202700a4de8ca18e8386f8706a0402d"
+    },
+    {
+     "check": "arms-agree-on-the-staged-file",
+     "ok": true,
+     "detail": "all 6 arm(s) record stage_dir=/data/ws0/ws0-h2h/datasets/sstables, 1 *-Data.db, 784086629 on-disk bytes"
+    },
+    {
+     "check": "staged-file-still-present",
+     "ok": true,
+     "detail": "/data/ws0/ws0-h2h/datasets/sstables/ws0/events-cad6dae091e611f1be35e1fe6aeebf7e/nb-16-big-Data.db"
+    },
+    {
+     "check": "staged-bytes-match-the-recorded-basis",
+     "ok": true,
+     "detail": "784086629 bytes on disk vs 784086629 recorded"
+    },
+    {
+     "check": "current-sha-matches-prep",
+     "ok": true,
+     "detail": "re-measured NOW = 704ed1f002f0c374504a0a3cbf66c0a55202700a4de8ca18e8386f8706a0402d, identical to the prep record"
+    },
+    {
+     "check": "every-arm-start-time-known",
+     "ok": true,
+     "detail": "earliest arm start 2026-08-06T22:54:59Z"
+    },
+    {
+     "check": "mtime-predates-the-first-arm",
+     "ok": true,
+     "detail": "mtime 2026-08-06T22:34:15Z < first arm start 2026-08-06T22:54:59Z, and any write would have moved it, so the file was unmodified across the whole window"
+    },
+    {
+     "check": "seal-measured-after-the-last-arm",
+     "ok": true,
+     "detail": "re-measured at 2026-08-07T08:57:12Z, after the last recorded point at 2026-08-07T07:37:02Z"
+    }
+   ],
+   "ok": true,
+   "staged_file": "/data/ws0/ws0-h2h/datasets/sstables/ws0/events-cad6dae091e611f1be35e1fe6aeebf7e/nb-16-big-Data.db",
+   "prep_sha256": "704ed1f002f0c374504a0a3cbf66c0a55202700a4de8ca18e8386f8706a0402d",
+   "current_sha256": "704ed1f002f0c374504a0a3cbf66c0a55202700a4de8ca18e8386f8706a0402d",
+   "failed_checks": [],
+   "verdict": "SEALED: the staged Data.db re-measured now is byte-identical to the digest recorded at prep, and its mtime predates the first arm, so it was unmodified across the entire measurement window. Every arm's corpus-basis.json names that same path, file count and byte size. RESIDUAL: this seals the FILE and the arms' recorded basis \u2014 it does not independently witness each arm opening that path, which only a per-arm digest does."
+  },
+  "state": "PASS",
+  "method": "bracketed-seal",
+  "ok": true,
+  "verdict": "PASS (method=bracketed-seal): no arm recorded a per-arm digest, so byte identity is established by the seal instead \u2014 SEALED: the staged Data.db re-measured now is byte-identical to the digest recorded at prep, and its mtime predates the first arm, so it was unmodified across the entire measurement window. Every arm's corpus-basis.json names that same path, file count and byte size. RESIDUAL: this seals the FILE and the arms' recorded basis \u2014 it does not independently witness each arm opening that path, which only a per-arm digest does."
  },
  "admission_ceiling": {
   "per_arm": [
