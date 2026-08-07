@@ -1562,6 +1562,96 @@ else
   [ "$ac4_fail" -ne 0 ] || ok "perf-capability: every privileged executable the guard authorizes is validated by DESTINATION — a shim dir outside the sandbox ('/usr' shape), a symlink to a real tool inside a declared shim dir, and one merely PARKED there out of PATH reach are all refused, while a shim dir of real files inside the sandbox still works (#3261 AC4)"
 fi
 
+# 1c-iv. THE SEAM LIST IS COMPLETE, BY CENSUS (roborev round 32, Medium x2).
+# (full rationale: fleet-runbook.md, perf seam containment, seam-list-completeness)
+# perf_capability_seam_set named CQLITE_PERF_PROC_DIR and CQLITE_PERF_SYSCTL_DIR only, while the
+# file had grown three more test-only seams (TEST_SANDBOX, SYSCTL_EXTRA_DIRS, TEST_PRIV_DIR). Any
+# of those exported WITHOUT the marker sailed through the env guard, which is the marker-less
+# refusal failing open -- the same "denylist of names" shape this whole issue exists to close, and
+# my own doing: the round-6 audit policed WHICH FUNCTIONS may read a seam and never WHICH SEAMS the
+# list must name, so it could not see an omission. This audit is the other direction, and it is a
+# CENSUS rather than a hand-kept list: every CQLITE_PERF_* name the library reads must be named by
+# seam_set, minus the marker itself (which cannot gate its own absence). Adding a seam without
+# listing it now FAILS here instead of silently widening the production surface.
+seam_census_fail=0
+seam_set_body=$(awk '/^perf_capability_seam_set\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
+[ -n "$seam_set_body" ] \
+  || { bad "perf-capability: perf_capability_seam_set was not found — renamed without updating this census audit?"; seam_census_fail=1; }
+seam_census=$(grep -oE 'CQLITE_PERF_[A-Z_]+' "$PERFLIB" | sort -u | grep -v '^CQLITE_PERF_TEST_MODE$')
+[ -n "$seam_census" ] \
+  || { bad "perf-capability: the CQLITE_PERF_* census came back EMPTY, so this audit would pass vacuously"; seam_census_fail=1; }
+seam_census_n=0
+for seam_name in $seam_census; do
+  seam_census_n=$((seam_census_n+1))
+  printf '%s\n' "$seam_set_body" | grep -q -- "$seam_name" \
+    || { bad "perf-capability: $seam_name is read by the library but NOT named in perf_capability_seam_set, so exporting it without CQLITE_PERF_TEST_MODE=1 passes the marker-less refusal"; seam_census_fail=1; }
+done
+[ "$seam_census_n" -ge 5 ] \
+  || { bad "perf-capability: the seam census found only $seam_census_n name(s); the file is known to carry at least 5 non-marker seams, so the extraction is broken"; seam_census_fail=1; }
+[ "$seam_census_fail" -ne 0 ] || ok "perf-capability: every one of the $seam_census_n non-marker CQLITE_PERF_* seams the library reads is named by perf_capability_seam_set, so a new seam cannot escape the marker-less refusal (#3261 roborev-32)"
+
+# ...and the refusal is asserted BEHAVIOURALLY, per seam, not just structurally: a structural
+# audit can be satisfied by a name appearing in a comment.
+# (full rationale: fleet-runbook.md, perf seam containment, per-seam-markerless-refusal)
+seam_each_fail=0
+# BASELINE FIRST: with every seam unset the guard must SUCCEED, or the refusals below prove nothing.
+seam_base_rc=0
+env -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
+    -u CQLITE_PERF_TEST_SANDBOX -u CQLITE_PERF_SYSCTL_EXTRA_DIRS -u CQLITE_PERF_TEST_PRIV_DIR \
+  bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" >/dev/null 2>&1 || seam_base_rc=$?
+[ "$seam_base_rc" -eq 0 ] \
+  || { bad "perf-capability: the env guard REFUSED with no seam set at all (rc=$seam_base_rc) — the per-seam refusals below would prove nothing"; seam_each_fail=1; }
+for seam_name in $seam_census; do
+  seam_out=$(env -u CQLITE_PERF_TEST_MODE "$seam_name=$tmp/markerless-seam" \
+    bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); seam_rc=$?
+  [ "$seam_rc" -ne 0 ] \
+    || { bad "perf-capability: $seam_name set WITHOUT the marker was ACCEPTED by the env guard (rc=0, out='$seam_out') — a test-only seam is live on the production path"; seam_each_fail=1; }
+  printf '%s' "$seam_out" | grep -q 'REFUSING' \
+    || { bad "perf-capability: $seam_name without the marker failed (rc=$seam_rc) but printed no REFUSING diagnostic: '$seam_out'"; seam_each_fail=1; }
+done
+[ "$seam_each_fail" -ne 0 ] || ok "perf-capability: EACH of the $seam_census_n non-marker seams, set alone without CQLITE_PERF_TEST_MODE=1, is refused loudly by the env guard — while an entirely seam-free environment still succeeds (#3261 roborev-32)"
+
+# 1c-v. THE TWO CONTAINMENT PATHS AGREE ABOUT A SYMLINKED SANDBOX ROOT (roborev round 32, Medium).
+# (full rationale: fleet-runbook.md, perf seam containment, symlinked-sandbox-root)
+# sandbox_root_into advertised a "canonically spelled" root but never tested for symlinked
+# components. MEASURED on the same root and child: the fork-free perf_capability_sandbox_ok
+# returned 1 while the RESOLVING perf_capability_sandbox_ok_resolved returned 0 -- read and write
+# disagreeing about one sandbox, the same defect class as round 31's trailing-slash split.
+# Rejecting (not canonicalizing) is the only fix available here: sandbox_root_into is in the closed
+# fork-free audit set, and canonicalizing needs cd -P/pwd -P, i.e. a forked subshell.
+# THE ASSERTION IS AGREEMENT, not merely refusal: my first draft of this case asked only whether
+# the fork-free path refused, which it already did, so it passed with the defect fully present.
+# Both paths are therefore driven over the same fixtures, and the canonical control requires both
+# to ACCEPT -- a rule that refused everything would fail here just as loudly as one that accepts.
+sr_fail=0
+sr_real=$(mktemp -d "$tmp/sr-real.XXXXXX"); : >"$sr_real/.cqlite-perf-sandbox"
+mkdir -p "$sr_real/child"; chmod 0755 "$sr_real" "$sr_real/child"
+sr_link="$tmp/sr-link-$$"; ln -s "$sr_real" "$sr_link"
+sr_adir="$tmp/sr-anc-$$"; mkdir -p "$sr_adir/real"; chmod 0755 "$sr_adir" "$sr_adir/real"
+sr_alink="$tmp/sr-anclink-$$"; ln -s "$sr_adir" "$sr_alink"
+: >"$sr_adir/real/.cqlite-perf-sandbox"; mkdir -p "$sr_adir/real/child"; chmod 0755 "$sr_adir/real/child"
+sr_probe() {  # <fn> <root> <path> -> rc of that containment entry point
+  env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$2" \
+    bash -c '. "$1"; "$2" "$3"' _ "$PERFLIB" "$1" "$3" >/dev/null 2>&1
+}
+# NEGATIVE CONTROL: the canonical spelling of the same directory must be ACCEPTED by BOTH paths.
+for sr_fn in perf_capability_sandbox_ok perf_capability_sandbox_ok_resolved; do
+  sr_probe "$sr_fn" "$sr_real" "$sr_real/child" \
+    || { bad "perf-capability: $sr_fn refused the CANONICAL sandbox root, so the symlink cases below prove nothing"; sr_fail=1; }
+done
+# (a) the root ITSELF is a symlink to a stamped real directory; (b) an ANCESTOR of the root is a
+# symlink while the root's own final component is an ordinary name. Both must be refused by BOTH.
+for sr_case in "root-is-symlink:$sr_link:$sr_link/child" "symlinked-ancestor:$sr_alink/real:$sr_alink/real/child"; do
+  sr_label="${sr_case%%:*}"; sr_rest="${sr_case#*:}"
+  sr_root="${sr_rest%%:*}"; sr_path="${sr_rest#*:}"
+  for sr_fn in perf_capability_sandbox_ok perf_capability_sandbox_ok_resolved; do
+    ! sr_probe "$sr_fn" "$sr_root" "$sr_path" \
+      || { bad "perf-capability: $sr_fn ACCEPTED the $sr_label sandbox root ($sr_root) — the resolving and fork-free paths disagree about the same sandbox"; sr_fail=1; }
+  done
+done
+rm -f -- "$sr_link" "$sr_alink"
+[ "$sr_fail" -ne 0 ] || ok "perf-capability: a sandbox root that IS a symlink, and one reached through a symlinked ANCESTOR, are refused IDENTICALLY by the fork-free and the resolving containment paths, while the canonical spelling of the same directory is accepted by both (#3261 roborev-32)"
+
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
 perf_test_report

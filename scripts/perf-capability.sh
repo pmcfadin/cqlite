@@ -121,13 +121,24 @@ PERF_CAPABILITY_DROPIN_BASENAME='99-cqlite-perf.conf'
 # perf_capability_test_mode: rc 0 iff the explicit test marker is set.
 perf_capability_test_mode() { [ "${CQLITE_PERF_TEST_MODE:-}" = 1 ]; }
 
-# perf_capability_seam_set: rc 0 iff either test-only path seam is non-empty. The ONE
+# perf_capability_seam_set: rc 0 iff ANY test-only seam is non-empty. The ONE
 # seam reader outside the containment gate below, and deliberately so: it asks only
 # "was a seam handed to us at all" (for the marker-less refusal) and never uses the
 # VALUE as a path. The structural audit in test_perf_capability.sh allowlists it by
 # name, so a future function cannot join it silently.
+#
+# EVERY non-marker seam MUST be listed here (roborev round 32, Medium). This named only PROC_DIR
+# and SYSCTL_DIR while the file had grown three more, so any of those exported WITHOUT the marker
+# passed the guard — the marker-less refusal failing OPEN, which is the same incomplete-list-of-
+# names shape this whole file exists to avoid. The round-6 audit that was supposed to protect this
+# policed WHICH FUNCTIONS may read a seam, never WHICH SEAMS this list must name, so it was blind
+# to an omission by construction. The completeness direction is now enforced by CENSUS in
+# test_perf_capability.sh (1c-iv): every CQLITE_PERF_* name the library reads, minus the marker
+# itself, must appear below — so adding a seam without listing it here FAILS the suite.
 perf_capability_seam_set() {
-  [ -n "${CQLITE_PERF_PROC_DIR:-}" ] || [ -n "${CQLITE_PERF_SYSCTL_DIR:-}" ]
+  [ -n "${CQLITE_PERF_PROC_DIR:-}" ] || [ -n "${CQLITE_PERF_SYSCTL_DIR:-}" ] \
+    || [ -n "${CQLITE_PERF_TEST_SANDBOX:-}" ] || [ -n "${CQLITE_PERF_SYSCTL_EXTRA_DIRS:-}" ] \
+    || [ -n "${CQLITE_PERF_TEST_PRIV_DIR:-}" ]
 }
 
 # ---- ONE GATE: POSITIVE SANDBOX CONTAINMENT (review R6-1/R6-2) --------------------
@@ -179,6 +190,15 @@ perf_capability_sandbox_root_into() {
   while [ "${__psr_v%/}" != "$__psr_v" ] && [ "${#__psr_v}" -gt 1 ]; do __psr_v="${__psr_v%/}"; done
   case "$__psr_v" in *//*) return 1 ;; /?*) ;; *) return 1 ;; esac
   case "/$__psr_v/" in */../*|*/./*) return 1 ;; esac
+  # NO SYMLINKED COMPONENT, including the root's own final component (roborev round 32, Medium).
+  # Without this the function advertised a canonically spelled root while accepting one reached
+  # THROUGH a symlink, and the two containment paths then disagreed about the identical root and
+  # child: measured rc 1 from the fork-free sandbox_ok versus rc 0 from the resolving
+  # sandbox_ok_resolved. One sandbox must not be both contained and not contained. REJECTING rather
+  # than canonicalizing is forced, not preferred: this function is in the closed fork-free audit set
+  # and canonicalizing would need cd -P plus pwd -P, i.e. a forked subshell. A root must be spelled
+  # as its own destination -- the same rule the drop-in destination and the shim tools already obey.
+  perf_capability_nosymlink "$__psr_v" || return 1
   [ -d "$__psr_v" ] && [ -f "$__psr_v/$PERF_CAPABILITY_SANDBOX_STAMP" ] || return 1
   eval "$1=\$__psr_v"
 }
