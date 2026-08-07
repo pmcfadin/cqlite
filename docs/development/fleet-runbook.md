@@ -978,3 +978,96 @@ bootstrap execute a real `sysctl --system` and reconfigure the host kernel.
 sandbox root that holds tools named `sudo`/`sysctl`. Asserting against the literal
 /usr would make the case depend on whether this host happens to ship sudo there.
 ```
+
+### 1c-iii-b-the-containment-boundary-and-the-sand
+
+```
+1c-iii-b. THE CONTAINMENT BOUNDARY AND THE SANDBOX ROOT ITSELF (issue #3249 review
+R6-1/R6-2). Containment is only as good as its boundary and its root:
+* `/tmp/sandboxevil` must NOT count as inside `/tmp/sandbox` — a plain string
+prefix would accept it, which is why the `/` boundary is explicit;
+* a path genuinely inside the declared root must still WORK, so the guard is
+not vacuously refusing everything (the failure mode a negative-only test
+cannot see);
+* the ROOT must PROVE itself — unset, relative, `//`-spelled, non-existent, or
+an existing directory with no stamp are all refusals NAMING
+CQLITE_PERF_TEST_SANDBOX. Without that, `CQLITE_PERF_TEST_SANDBOX=/etc`
+would make containment vacuous, and the inversion would have bought nothing.
+```
+
+### 1f-the-gate-is-singular-and-unskippable-a-stru
+
+```
+1f. THE GATE IS SINGULAR AND UNSKIPPABLE — a STRUCTURAL audit (issue #3249 review R6-2).
+R6-2 was not a wrong check, it was a MISSING one: CQLITE_PERF_SYSCTL_EXTRA_DIRS was a
+new seam consumer, and the canonicalizing validation added for the write path simply
+never reached it. No behavioural case can catch that class, because the defect is a
+path nobody thought to test. So this audit enumerates, FROM THE SOURCE, every function
+that dereferences a seam variable and requires each one to route through the
+containment family (`perf_capability_sandbox_*` / `perf_capability_path_within`) — with
+ONE named, justified allowlist entry. A future entry point that reads a seam without
+the gate FAILS here, and joining the allowlist is a visible, reviewable act.
+(rationale condensed; full reasoning in the commit history for #3261.)
+```
+
+### two-representations-because-the-two-matches-wa
+
+```
+TWO representations, because the two matches want different things (roborev round 6, Low).
+`code`  — comments stripped only. The SEAM match needs this: a seam is a VARIABLE REFERENCE
+and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so
+stripping quoted spans would hide real consumers and silently shrink the census.
+`codeq` — comments AND quoted spans stripped. The GATE match needs this: a gate CALL is a
+command, never a string, so matching inside quotes is what made the advertised
+"command position" claim false — swapping a real call for a string that merely
+mentions its name kept the audit green.
+Quoted spans are removed before comments so a # inside a stripped string cannot truncate the
+line. The single quote is written \047: this awk program sits inside a shell single-quoted
+string and cannot contain a literal one.
+```
+
+### 1f-ii-the-same-audit-for-the-binaries-the-guar
+
+```
+1f-ii. THE SAME AUDIT FOR THE BINARIES THE GUARD AUTHORIZES (issue #3261 AC4). AC4 was the
+EIGHTH escape from this family and the first about an EXECUTABLE rather than a path:
+`CQLITE_PERF_TEST_PRIV_DIR=/usr` and a symlink-to-real-`sudo` inside a declared shim
+dir both passed a textual check, so a privileged test-mode bootstrap could run the
+host's real `sysctl --system`. Paths and executables are the same problem — a NAME is
+not a DESTINATION — so they get the same STRUCTURAL treatment: every function that
+resolves a privileged tool must route through the containment family, or be
+allowlisted by name with a reason. Floor + explicit expectations, same as above.
+Same de-vacuuming as the seam audit above: comments stripped, gate matched in a command position.
+```
+
+### two-representations-because-the-two-matches-wa
+
+```
+TWO representations, because the two matches want different things (roborev round 6, Low).
+`code`  — comments stripped only. The SEAM match needs this: a seam is a VARIABLE REFERENCE
+and legitimately appears inside double quotes ("${CQLITE_PERF_SYSCTL_DIR:-}"), so
+stripping quoted spans would hide real consumers and silently shrink the census.
+`codeq` — comments AND quoted spans stripped. The GATE match needs this: a gate CALL is a
+command, never a string, so matching inside quotes is what made the advertised
+"command position" claim false — swapping a real call for a string that merely
+mentions its name kept the audit green.
+Quoted spans are removed before comments so a # inside a stripped string cannot truncate the
+line. The single quote is written \047: this awk program sits inside a shell single-quoted
+string and cannot contain a literal one.
+```
+
+### and-the-newline-basename-case-now-actually-ex
+
+```
+...and the NEWLINE-BASENAME case, now actually EXERCISED (roborev round 27, Low). This block used to
+assign cs_nl and then write a different, ordinary filename, so the line-oriented edge case it claimed
+to cover never ran — a test asserting coverage it did not provide, which is the exact shape this suite
+exists to catch elsewhere. The scan emits one entry per line, so a basename containing a newline could
+split one competitor into two reported lines; it must fail closed and inject no extra lines.
+ISOLATED DIRECTORY, and a REQUIRED nonzero status (roborev round 28, Low). My round-27 repair of this
+case was itself vacuous twice over: 00-host-link.conf stayed in $cs_dir and sorts BEFORE the
+newline-named file, so the scan refused the symlink and never reached this subject; and the assertion
+only fired on rc 0 PLUS a matched line, so a silent accept -- or a skip -- passed. Its own isolated
+directory removes the ordering dependency, and the refusal is now REQUIRED rather than merely allowed.
+```
+
