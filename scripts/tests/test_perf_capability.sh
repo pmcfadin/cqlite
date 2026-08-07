@@ -1278,6 +1278,12 @@ fi
 # caller-side probe can check a different binary than the one that will run) and `mv -T` is EXERCISED
 # rather than grepped out of --help. The all-GNU control is what stops this passing by refusing always.
 us_fail=0
+# GUARDED like the staged-install cases (roborev round 21, Medium). This group's CONTROL case expects a
+# successful install using the HOST's own stat and mv, so on a non-GNU host the control necessarily
+# returns rc 2 and the suite fails — reintroducing exactly the macOS breakage the counted skip fixed.
+if ! perf_install_supported; then
+  skip "perf-capability: UNSUPPORTED-host reporting cases (rc 2 for broken stat -c / mv -T, with an all-GNU control)" "no GNU stat -c / mv --no-target-directory on this host, so the control case cannot install"
+else
 for us_break in '' mv stat; do
   us_root=$(mktemp -d "$tmp/us.XXXXXX"); : >"$us_root/.cqlite-perf-sandbox"
   mkdir -p "$us_root/sysctl.d"; chmod 0755 "$us_root" "$us_root/sysctl.d"
@@ -1305,6 +1311,7 @@ for us_break in '' mv stat; do
   fi
 done
 [ "$us_fail" -ne 0 ] || ok "perf-capability: a non-GNU host is reported as rc 2 UNSUPPORTED by name and writes nothing (broken stat -c and broken mv -T both), while an all-GNU host still installs (#3261 roborev-16/17)"
+fi
 
 # ...and LINE-SAFETY MUST BE JUDGED ON THE ORIGINAL PATH, not the canonicalized one (roborev round
 # 12, Medium). `$(cd -P -- "$p" && pwd -P)` STRIPS trailing newlines, so a directory whose name ends

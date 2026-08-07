@@ -588,13 +588,34 @@ perf_capability_dropin_install() {
     # probe name safe, so this does not need (and must not consume) mktemp. NOT consuming mktemp also
     # keeps it from pre-empting the staging entry checks below, which have their own cases.
     __x1="$d/.perfcap-probe.$$"; __x2="$__x1.b"
-    rm -f -- "$__x1" "$__x2"
-    if ! : >"$__x1" 2>/dev/null || ! mv -fT -- "$__x1" "$__x2" 2>/dev/null; then
-      rm -f -- "$__x1" "$__x2"
+    rm -f -- "$__x1" "$__x2" 2>/dev/null
+    # ABSENCE IS PROVEN, NOT ASSUMED (roborev round 21, High — a hazard THIS probe introduced). `rm`
+    # can fail (a read-only mount, an immutable entry) and its status was ignored; `: >` then FOLLOWS a
+    # symlink, so a leftover link at this predictable name could have truncated an arbitrary file under
+    # the privileged identity. The directory-mode precondition does not help: it proves nobody
+    # less-privileged can CREATE entries here, not that a pre-existing one was successfully removed.
+    if [ -e "$__x1" ] || [ -L "$__x1" ] || [ -e "$__x2" ] || [ -L "$__x2" ]; then
+      printf "perf-capability: REFUSING: probe entries under %s could not be cleared, so opening them could follow a leftover symlink under privilege.\n" "$d" >&2
+      exit 1
+    fi
+    # CREATION FAILURE IS ITS OWN OUTCOME, NOT "unsupported host" (roborev round 21, Low). These used to
+    # share one branch, so an unwritable directory was misreported as an incompatible `mv` — which made
+    # bootstrap suppress the retry remedy for a condition where retrying is exactly right. rc 1 REFUSED
+    # here; rc 2 UNSUPPORTED is reserved for an `mv` that genuinely lacks -T.
+    # SUBSHELL, and NOT the `:` builtin bare: `:` is a POSIX SPECIAL builtin, so a redirection failure
+    # on it makes a non-interactive shell EXIT — dash exits with status 2, which silently COLLIDED with
+    # the rc 2 UNSUPPORTED sentinel and reported a read-only directory as an incompatible `mv`. The
+    # subshell contains both the exit and the leaked shell diagnostic, so the caller sees rc 1 REFUSED.
+    if ! ( : >"$__x1" ) 2>/dev/null; then
+      printf "perf-capability: REFUSING: cannot create a probe entry in %s — the directory is not writable by the privileged writer.\n" "$d" >&2
+      exit 1
+    fi
+    if ! mv -fT -- "$__x1" "$__x2" 2>/dev/null; then
+      rm -f -- "$__x1" "$__x2" 2>/dev/null
       printf "perf-capability: UNSUPPORTED on this host: mv --no-target-directory (-T) does not work (GNU coreutils required), so the drop-in cannot be replaced atomically without risking a symlinked destination.\n" >&2
       exit 2
     fi
-    rm -f -- "$__x2"
+    rm -f -- "$__x2" 2>/dev/null
     t=$(mktemp -- "$d/.$b.XXXXXX") || exit 1
     # mktemp CREATED the entry, so mktemp is what must be checked, INSIDE this privileged shell and
     # fail-closed: it has to name a fresh regular file (never a symlink) directly in the directory
