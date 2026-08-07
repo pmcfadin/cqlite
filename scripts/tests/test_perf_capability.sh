@@ -276,11 +276,7 @@ guard_rejects_seam SYSCTL "$seamed_proc" "$symseam" || {
 guard_rejects_seam PROC "$symproc" "$seamed_d" || {
   bad "perf-capability: test mode ACCEPTED a proc seam that is a SYMLINK to /proc/sys/kernel"; badseam_fail=1; }
 # ...and the SPELLING is not the destination. `/tmp/../etc/sysctl.d`, `<symlink-to-/etc>/…`
-# and — the R6-1 escape — `//etc/sysctl.d` (POSIX leaves two leading slashes
-# implementation-defined and `pwd -P` may PRESERVE them, while on Linux `//etc` IS `/etc`)
-# each passed the textual checks of an earlier round. There is no per-spelling check any
-# more: containment refuses all of them, plus every future spelling, for the SAME reason.
-# An UNENTERABLE path resolves to nothing and is refused too — a write target must exist.
+# (full rationale: fleet-runbook.md, perf seam containment, and-the-spelling-is-not-the-destination-tmp-e)
 symanc="$tmp/symlinked-ancestor"; rm -f "$symanc"; ln -s /etc "$symanc"
 symout="$tmp/symlink-out-of-sandbox"; rm -f "$symout"; ln -s /tmp "$symout"
 for resolveseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d" "$tmp/./nonexistent-sandbox.d" \
@@ -953,21 +949,10 @@ else
 fi
 
 # ---- 1g. #3261: A NAME IS NOT A DESTINATION — the four remaining escapes ------------------
-# Positive containment closed the PATH SPELLINGS. These four are what containment of a
-# spelling still does not buy, and each is asserted BY ITS OWN OBSERVABLE CONSEQUENCE (a
-# followed write, a fabricated /proc verdict, a refused legitimate file, a real privileged
-# tool), never by an rc alone — this guard has several refusals and an rc-only check would let
-# the wrong one satisfy the case.
+# (full rationale: fleet-runbook.md, perf seam containment, 1g-3261-a-name-is-not-a-destination-the-four)
 
 # 1g-i. AC1 (High) — DIRECTORY containment is not WRITE-TARGET containment. `tee <path>` opens
-#       O_WRONLY|O_CREAT|O_TRUNC and FOLLOWS a symlink, so a symlink at the managed basename
-#       inside a perfectly-contained directory pointed the privileged write at the LINK'S
-#       TARGET — anywhere on the box. A contained directory says nothing about where its
-#       entries point. Two independent requirements, both asserted:
-#         * anything that merely NAMES the write target REFUSES (rc 1, empty, loud);
-#         * the WRITE ITSELF replaces the directory ENTRY (rename), so a symlink planted in
-#           the window between the check and the write is replaced, not written through.
-# (rationale condensed; full reasoning in the commit history for #3261.)
+# (full rationale: fleet-runbook.md, perf seam containment, 1g-i-ac1-high-directory-containment-is-not-wri)
 if perf_install_supported; then
   wt_d="$tmp/wt-sandbox.d"; mkdir -p "$wt_d"
   wt_outside="$tmp/wt-outside-target"; printf 'PRECIOUS-HOST-FILE\n' >"$wt_outside"
@@ -1006,13 +991,7 @@ if perf_install_supported; then
     bad "perf-capability: the atomic drop-in install did not replace a symlinked entry (rc=$wt_ins_rc, out='$wt_ins', link=$([ -L "$wt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$wt_leftover', outside-changed=$([ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && echo no || echo YES))"
   fi
   # ...and the STAGING entry is UNPREDICTABLE, created by `mktemp` (roborev finding 1 on #3261 — the
-  # NINTH escape, same shape as the other eight: a NAME trusted instead of a DESTINATION). A fixed
-  # staging path that is checked, cleared and only THEN opened by a privileged `tee` is a TOCTOU
-  # window: anyone who can create entries in the directory re-plants that KNOWN name as a symlink
-  # between the verify and the open, and root follows it. Two asserts, because neither alone is
-  # enough — a behavioural one (the previously-predictable name is planted as a symlink at a victim
-  # file and must be left strictly alone) and a structural one (unpredictability is a property of the
-  # NAME, which is gone by the time the write succeeds, so the source is the only place to see it).
+  # (full rationale: fleet-runbook.md, perf seam containment, and-the-staging-entry-is-unpredictable-create)
   wt_bait="$tmp/wt-staging-bait"; printf 'BAIT-MUST-NOT-BE-WRITTEN\n' >"$wt_bait"
   wt_bait_before=$(cat "$wt_bait")
   rm -f "$wt_d/.99-cqlite-perf.conf.new"; ln -s "$wt_bait" "$wt_d/.99-cqlite-perf.conf.new"
@@ -1217,11 +1196,7 @@ else
 fi
 
 # ...and an UNSUPPORTED HOST is reported as rc 2, distinct from rc 1 REFUSED (roborev rounds 16-17).
-# The staged install needs GNU `stat -c` and `mv -T`; bootstrap gates the perf section on
-# PLATFORM=linux, which is NOT the same as GNU, so a musl/busybox Linux host used to die on a raw tool
-# error. The tools are exercised INSIDE the privileged shell (sudo applies its own secure_path, so a
-# caller-side probe can check a different binary than the one that will run) and `mv -T` is EXERCISED
-# rather than grepped out of --help. The all-GNU control is what stops this passing by refusing always.
+# (full rationale: fleet-runbook.md, perf seam containment, and-an-unsupported-host-is-reported-as-rc-2-d)
 us_fail=0
 # GUARDED like the staged-install cases (roborev round 21, Medium): this group's CONTROL expects a
 # successful install using the HOST's stat/mv, so off GNU it necessarily returns rc 2 and the suite
@@ -1259,11 +1234,7 @@ done
 fi
 
 # ...and an EXTRA_DIRS value whose FIRST LINE is VALID must still be refused (roborev round 31, Medium).
-# `read` consumes only the first line, so a value like "<contained-dir>\n/etc/sysctl.d" previously SUCCEEDED
-# while silently discarding the remainder -- the scan then reported on an incomplete set, which is the
-# falsely-reassuring answer the diagnostic exists to prevent. Round 3 validated the SPLIT ENTRIES and never
-# the value being split, so a newline HID entries rather than forging one. The baseline runs first, without
-# the newline, and must SUCCEED -- otherwise the refusal proves nothing.
+# (full rationale: fleet-runbook.md, perf seam containment, and-an-extra-dirs-value-whose-first-line-is-v)
 ed_root=$(mktemp -d "$tmp/ed.XXXXXX"); : >"$ed_root/.cqlite-perf-sandbox"
 mkdir -p "$ed_root/good" "$ed_root/primary"; chmod 0755 "$ed_root" "$ed_root/good" "$ed_root/primary"
 ed_fail=0
@@ -1299,11 +1270,7 @@ done
 [ "$ts_fail" -ne 0 ] || ok "perf-capability: a stamped sandbox root spelled with no trailing slash, one, or two is normalised identically, so the fork-free and resolving paths cannot disagree about the same sandbox (#3261 roborev-31)"
 
 # ...and a SYMLINKED CONTROL FILE inside a contained PROC_DIR must not be read (roborev round 25,
-# Medium). The directory gate proved the DIRECTORY contained and symlink-free and said nothing about its
-# ENTRIES, so `perf_event_paranoid` could be a link to the host file and the token would report a real or
-# attacker-chosen capability as if it came from the fixture. Same directory-is-not-its-entries lesson as
-# AC1, on the read path. The CONTROL is the identical tree with a REAL file, so the refusal cannot be
-# passing for an unrelated reason.
+# (full rationale: fleet-runbook.md, perf seam containment, and-a-symlinked-control-file-inside-a-contain)
 pc_root=$(mktemp -d "$tmp/pc.XXXXXX"); : >"$pc_root/.cqlite-perf-sandbox"
 mkdir -p "$pc_root/proc"; chmod 0755 "$pc_root" "$pc_root/proc"
 printf '3\n' >"$pc_root/outside-paranoid"; printf '0\n' >"$pc_root/proc/kptr_restrict"
@@ -1320,11 +1287,7 @@ else
 fi
 
 # ...and LINE-SAFETY MUST BE JUDGED ON THE ORIGINAL PATH, not the canonicalized one (roborev round
-# 12, Medium). `$(cd -P -- "$p" && pwd -P)` STRIPS trailing newlines, so a directory whose name ends
-# in LF used to pass: the check only ever saw the stripped form, while every later caller emitted the
-# ORIGINAL spelling and split the one-per-line search path in two. Round 3 added the CR/LF guard for
-# exactly that split; it was running too late to see it. Both variants are pinned — a directory whose
-# name ends in LF, and a file whose PARENT ends in LF — because they canonicalize by different routes.
+# (full rationale: fleet-runbook.md, perf seam containment, and-line-safety-must-be-judged-on-the-origina)
 lf_root=$(mktemp -d "$tmp/lf.XXXXXX"); : >"$lf_root/.cqlite-perf-sandbox"
 lf_dir="$lf_root/evil"$'\n'
 lf_fail=0
@@ -1380,11 +1343,7 @@ printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/zz-real.conf" 2>/dev/null
 cs_nl_dir="$cs_root/nl-sysctl.d"; rm -rf "$cs_nl_dir"; mkdir -p "$cs_nl_dir"; chmod 0755 "$cs_nl_dir"
 cs_nl_name=$(printf 'zz-nl\ncompetitor.conf')
 # BASELINE FIRST, WITHOUT the newline file, and its status REQUIRED (roborev round 30, Low). My previous
-# version ran the "ordinary" baseline while the newline-named file was ALREADY present, making it identical
-# to the refusal case, and then discarded its status with `|| true` — so the negative control controlled
-# nothing. Three iterations of this one case have now been vacuous in a different way each time; the
-# pattern in my own work is that I fix the assertion and forget to re-check that it can still reach its
-# subject. Ordinary file only -> MUST scan (rc 0). Then add the newline file -> MUST fail closed.
+# (full rationale: fleet-runbook.md, perf seam containment, baseline-first-without-the-newline-file-and-it)
 printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/zz-ordinary.conf"
 cs_nl_base=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
   CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
@@ -1417,12 +1376,7 @@ fi
 [ "$cs_fail" -ne 0 ] || ok "perf-capability: the competing-file scan validates EVERY globbed file in test mode — a symlinked *.conf inside the sandbox fails the scan CLOSED by name and leaks no host content, while a real contained competitor is still reported (#3261 roborev-11)"
 
 # ...and a FAILING CONTENT GENERATOR must never look like success (roborev round 9, Medium). Both
-# call sites used to lose the generator's status: dropin_current ran a trailing sentinel `printf`
-# whose rc replaced it, so against an EMPTY file the compare was "X" == "X" and reported the drop-in
-# ALREADY CURRENT; dropin_install piped the generator into the privileged shell, so the pipeline's rc
-# was the last command's and a failure only surfaced if the CALLER had `pipefail`. Both are vacuous
-# positives from an unmeasured state. No GNU-only tooling is exercised here: each must fail BEFORE
-# any privileged command runs, which is the property under test.
+# (full rationale: fleet-runbook.md, perf seam containment, and-a-failing-content-generator-must-never-lo)
 cg_dir=$(mktemp -d "$tmp/cg.XXXXXX"); : >"$cg_dir/99-cqlite-perf.conf"
 cg_fail=0
 cg_cur_rc=0
@@ -1475,11 +1429,7 @@ else
 fi
 
 # 1g-iii. AC3 (Low) — a STRICTLY CONTAINED file was wrongly REFUSED. The file variant judged
-#         its PARENT with the strict-containment predicate, so `<root>/sysctl.conf` failed:
-#         the parent IS the root, and a root is not strictly inside itself. The judged path
-#         must be <canonical parent>/<basename>, which IS strictly inside. A guard that
-#         refuses legitimate input is the guard people learn to work around, so this is a
-#         correctness case, not a convenience.
+# (full rationale: fleet-runbook.md, perf seam containment, 1g-iii-ac3-low-a-strictly-contained-file-was-w)
 ac3_ok() { env CQLITE_PERF_TEST_SANDBOX="$1" \
   bash -c '. "$1"; perf_capability_sandbox_file_ok_resolved "$2"' _ "$PERFLIB" "$2"; }
 : >"$sbx/sysctl.conf"
@@ -1563,16 +1513,7 @@ else
 fi
 
 # 1c-iv. THE SEAM LIST IS COMPLETE, BY CENSUS (roborev round 32, Medium x2).
-# (full rationale: fleet-runbook.md, perf seam containment, seam-list-completeness)
-# perf_capability_seam_set named CQLITE_PERF_PROC_DIR and CQLITE_PERF_SYSCTL_DIR only, while the
-# file had grown three more test-only seams (TEST_SANDBOX, SYSCTL_EXTRA_DIRS, TEST_PRIV_DIR). Any
-# of those exported WITHOUT the marker sailed through the env guard, which is the marker-less
-# refusal failing open -- the same "denylist of names" shape this whole issue exists to close, and
-# my own doing: the round-6 audit policed WHICH FUNCTIONS may read a seam and never WHICH SEAMS the
-# list must name, so it could not see an omission. This audit is the other direction, and it is a
-# CENSUS rather than a hand-kept list: every CQLITE_PERF_* name the library reads must be named by
-# seam_set, minus the marker itself (which cannot gate its own absence). Adding a seam without
-# listing it now FAILS here instead of silently widening the production surface.
+# (full rationale: fleet-runbook.md, perf seam containment, 1c-iv-the-seam-list-is-complete-by-census-robo)
 seam_census_fail=0
 seam_set_body=$(awk '/^perf_capability_seam_set\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
 [ -n "$seam_set_body" ] \
@@ -1612,17 +1553,7 @@ done
 [ "$seam_each_fail" -ne 0 ] || ok "perf-capability: EACH of the $seam_census_n non-marker seams, set alone without CQLITE_PERF_TEST_MODE=1, is refused loudly by the env guard — while an entirely seam-free environment still succeeds (#3261 roborev-32)"
 
 # 1c-v. THE TWO CONTAINMENT PATHS AGREE ABOUT A SYMLINKED SANDBOX ROOT (roborev round 32, Medium).
-# (full rationale: fleet-runbook.md, perf seam containment, symlinked-sandbox-root)
-# sandbox_root_into advertised a "canonically spelled" root but never tested for symlinked
-# components. MEASURED on the same root and child: the fork-free perf_capability_sandbox_ok
-# returned 1 while the RESOLVING perf_capability_sandbox_ok_resolved returned 0 -- read and write
-# disagreeing about one sandbox, the same defect class as round 31's trailing-slash split.
-# Rejecting (not canonicalizing) is the only fix available here: sandbox_root_into is in the closed
-# fork-free audit set, and canonicalizing needs cd -P/pwd -P, i.e. a forked subshell.
-# THE ASSERTION IS AGREEMENT, not merely refusal: my first draft of this case asked only whether
-# the fork-free path refused, which it already did, so it passed with the defect fully present.
-# Both paths are therefore driven over the same fixtures, and the canonical control requires both
-# to ACCEPT -- a rule that refused everything would fail here just as loudly as one that accepts.
+# (full rationale: fleet-runbook.md, perf seam containment, 1c-v-the-two-containment-paths-agree-about-a-s)
 sr_fail=0
 sr_real=$(mktemp -d "$tmp/sr-real.XXXXXX"); : >"$sr_real/.cqlite-perf-sandbox"
 mkdir -p "$sr_real/child"; chmod 0755 "$sr_real" "$sr_real/child"

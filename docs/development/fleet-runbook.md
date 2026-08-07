@@ -1071,3 +1071,250 @@ only fired on rc 0 PLUS a matched line, so a silent accept -- or a skip -- passe
 directory removes the ordering dependency, and the refusal is now REQUIRED rather than merely allowed.
 ```
 
+### and-the-spelling-is-not-the-destination-tmp-e
+
+```
+...and the SPELLING is not the destination. `/tmp/../etc/sysctl.d`, `<symlink-to-/etc>/…`
+and — the R6-1 escape — `//etc/sysctl.d` (POSIX leaves two leading slashes
+implementation-defined and `pwd -P` may PRESERVE them, while on Linux `//etc` IS `/etc`)
+each passed the textual checks of an earlier round. There is no per-spelling check any
+more: containment refuses all of them, plus every future spelling, for the SAME reason.
+An UNENTERABLE path resolves to nothing and is refused too — a write target must exist.
+```
+
+### 1g-3261-a-name-is-not-a-destination-the-four
+
+```
+---- 1g. #3261: A NAME IS NOT A DESTINATION — the four remaining escapes ------------------
+Positive containment closed the PATH SPELLINGS. These four are what containment of a
+spelling still does not buy, and each is asserted BY ITS OWN OBSERVABLE CONSEQUENCE (a
+followed write, a fabricated /proc verdict, a refused legitimate file, a real privileged
+tool), never by an rc alone — this guard has several refusals and an rc-only check would let
+the wrong one satisfy the case.
+```
+
+### 1g-i-ac1-high-directory-containment-is-not-wri
+
+```
+1g-i. AC1 (High) — DIRECTORY containment is not WRITE-TARGET containment. `tee <path>` opens
+O_WRONLY|O_CREAT|O_TRUNC and FOLLOWS a symlink, so a symlink at the managed basename
+inside a perfectly-contained directory pointed the privileged write at the LINK'S
+TARGET — anywhere on the box. A contained directory says nothing about where its
+entries point. Two independent requirements, both asserted:
+* anything that merely NAMES the write target REFUSES (rc 1, empty, loud);
+* the WRITE ITSELF replaces the directory ENTRY (rename), so a symlink planted in
+the window between the check and the write is replaced, not written through.
+(rationale condensed; full reasoning in the commit history for #3261.)
+```
+
+### and-the-staging-entry-is-unpredictable-create
+
+```
+...and the STAGING entry is UNPREDICTABLE, created by `mktemp` (roborev finding 1 on #3261 — the
+NINTH escape, same shape as the other eight: a NAME trusted instead of a DESTINATION). A fixed
+staging path that is checked, cleared and only THEN opened by a privileged `tee` is a TOCTOU
+window: anyone who can create entries in the directory re-plants that KNOWN name as a symlink
+between the verify and the open, and root follows it. Two asserts, because neither alone is
+enough — a behavioural one (the previously-predictable name is planted as a symlink at a victim
+file and must be left strictly alone) and a structural one (unpredictability is a property of the
+NAME, which is gone by the time the write succeeds, so the source is the only place to see it).
+```
+
+### and-an-unsupported-host-is-reported-as-rc-2-d
+
+```
+...and an UNSUPPORTED HOST is reported as rc 2, distinct from rc 1 REFUSED (roborev rounds 16-17).
+The staged install needs GNU `stat -c` and `mv -T`; bootstrap gates the perf section on
+PLATFORM=linux, which is NOT the same as GNU, so a musl/busybox Linux host used to die on a raw tool
+error. The tools are exercised INSIDE the privileged shell (sudo applies its own secure_path, so a
+caller-side probe can check a different binary than the one that will run) and `mv -T` is EXERCISED
+rather than grepped out of --help. The all-GNU control is what stops this passing by refusing always.
+```
+
+### and-an-extra-dirs-value-whose-first-line-is-v
+
+```
+...and an EXTRA_DIRS value whose FIRST LINE is VALID must still be refused (roborev round 31, Medium).
+`read` consumes only the first line, so a value like "<contained-dir>\n/etc/sysctl.d" previously SUCCEEDED
+while silently discarding the remainder -- the scan then reported on an incomplete set, which is the
+falsely-reassuring answer the diagnostic exists to prevent. Round 3 validated the SPLIT ENTRIES and never
+the value being split, so a newline HID entries rather than forging one. The baseline runs first, without
+the newline, and must SUCCEED -- otherwise the refusal proves nothing.
+```
+
+### and-a-symlinked-control-file-inside-a-contain
+
+```
+...and a SYMLINKED CONTROL FILE inside a contained PROC_DIR must not be read (roborev round 25,
+Medium). The directory gate proved the DIRECTORY contained and symlink-free and said nothing about its
+ENTRIES, so `perf_event_paranoid` could be a link to the host file and the token would report a real or
+attacker-chosen capability as if it came from the fixture. Same directory-is-not-its-entries lesson as
+AC1, on the read path. The CONTROL is the identical tree with a REAL file, so the refusal cannot be
+passing for an unrelated reason.
+```
+
+### and-line-safety-must-be-judged-on-the-origina
+
+```
+...and LINE-SAFETY MUST BE JUDGED ON THE ORIGINAL PATH, not the canonicalized one (roborev round
+12, Medium). `$(cd -P -- "$p" && pwd -P)` STRIPS trailing newlines, so a directory whose name ends
+in LF used to pass: the check only ever saw the stripped form, while every later caller emitted the
+ORIGINAL spelling and split the one-per-line search path in two. Round 3 added the CR/LF guard for
+exactly that split; it was running too late to see it. Both variants are pinned — a directory whose
+name ends in LF, and a file whose PARENT ends in LF — because they canonicalize by different routes.
+```
+
+### baseline-first-without-the-newline-file-and-it
+
+```
+BASELINE FIRST, WITHOUT the newline file, and its status REQUIRED (roborev round 30, Low). My previous
+version ran the "ordinary" baseline while the newline-named file was ALREADY present, making it identical
+to the refusal case, and then discarded its status with `|| true` — so the negative control controlled
+nothing. Three iterations of this one case have now been vacuous in a different way each time; the
+pattern in my own work is that I fix the assertion and forget to re-check that it can still reach its
+subject. Ordinary file only -> MUST scan (rc 0). Then add the newline file -> MUST fail closed.
+```
+
+### and-a-failing-content-generator-must-never-lo
+
+```
+...and a FAILING CONTENT GENERATOR must never look like success (roborev round 9, Medium). Both
+call sites used to lose the generator's status: dropin_current ran a trailing sentinel `printf`
+whose rc replaced it, so against an EMPTY file the compare was "X" == "X" and reported the drop-in
+ALREADY CURRENT; dropin_install piped the generator into the privileged shell, so the pipeline's rc
+was the last command's and a failure only surfaced if the CALLER had `pipefail`. Both are vacuous
+positives from an unmeasured state. No GNU-only tooling is exercised here: each must fail BEFORE
+any privileged command runs, which is the property under test.
+```
+
+### 1g-iii-ac3-low-a-strictly-contained-file-was-w
+
+```
+1g-iii. AC3 (Low) — a STRICTLY CONTAINED file was wrongly REFUSED. The file variant judged
+its PARENT with the strict-containment predicate, so `<root>/sysctl.conf` failed:
+the parent IS the root, and a root is not strictly inside itself. The judged path
+must be <canonical parent>/<basename>, which IS strictly inside. A guard that
+refuses legitimate input is the guard people learn to work around, so this is a
+correctness case, not a convenience.
+```
+
+### 1c-iv-the-seam-list-is-complete-by-census-robo
+
+```
+1c-iv. THE SEAM LIST IS COMPLETE, BY CENSUS (roborev round 32, Medium x2).
+(full rationale: fleet-runbook.md, perf seam containment, seam-list-completeness)
+perf_capability_seam_set named CQLITE_PERF_PROC_DIR and CQLITE_PERF_SYSCTL_DIR only, while the
+file had grown three more test-only seams (TEST_SANDBOX, SYSCTL_EXTRA_DIRS, TEST_PRIV_DIR). Any
+of those exported WITHOUT the marker sailed through the env guard, which is the marker-less
+refusal failing open -- the same "denylist of names" shape this whole issue exists to close, and
+my own doing: the round-6 audit policed WHICH FUNCTIONS may read a seam and never WHICH SEAMS the
+list must name, so it could not see an omission. This audit is the other direction, and it is a
+CENSUS rather than a hand-kept list: every CQLITE_PERF_* name the library reads must be named by
+seam_set, minus the marker itself (which cannot gate its own absence). Adding a seam without
+listing it now FAILS here instead of silently widening the production surface.
+```
+
+### 1c-v-the-two-containment-paths-agree-about-a-s
+
+```
+1c-v. THE TWO CONTAINMENT PATHS AGREE ABOUT A SYMLINKED SANDBOX ROOT (roborev round 32, Medium).
+(full rationale: fleet-runbook.md, perf seam containment, symlinked-sandbox-root)
+sandbox_root_into advertised a "canonically spelled" root but never tested for symlinked
+components. MEASURED on the same root and child: the fork-free perf_capability_sandbox_ok
+returned 1 while the RESOLVING perf_capability_sandbox_ok_resolved returned 0 -- read and write
+disagreeing about one sandbox, the same defect class as round 31's trailing-slash split.
+Rejecting (not canonicalizing) is the only fix available here: sandbox_root_into is in the closed
+fork-free audit set, and canonicalizing needs cd -P/pwd -P, i.e. a forked subshell.
+THE ASSERTION IS AGREEMENT, not merely refusal: my first draft of this case asked only whether
+the fork-free path refused, which it already did, so it passed with the defect fully present.
+Both paths are therefore driven over the same fixtures, and the canonical control requires both
+to ACCEPT -- a rule that refused everything would fail here just as loudly as one that accepts.
+```
+
+### b4
+
+```
+
+WHY THIS FILE EXISTS. Agent/worker images ship `kernel.perf_event_paranoid = 4` and set
+it NOWHERE in /etc/sysctl.conf or /etc/sysctl.d — so every profiling run starts from a
+hard EACCES whose help text ("access limited") reads like a CAPABILITY verdict when it is
+a PERMISSION verdict. That has already cost two measurement cycles. The same three-line
+incantation was then copy-pasted into ad-hoc harnesses; it now lives here, is git-pinned,
+and is asserted by the gate's tooling-tests.
+
+WHY -1 AND NOT 1. perf_event_paranoid is CUMULATIVE — higher is MORE restrictive and
+each level keeps the ones below it: `>= 3` (an extra Debian/Ubuntu level) denies ALL
+unprivileged perf use, which is why the images' `4` kills even a plain `perf stat`;
+`>= 2` no kernel profiling; `>= 1` no CPU-WIDE access, which is exactly what
+`perf stat -C <cpu>` needs; `>= 0` no raw tracepoints; `-1` (almost) everything, and the
+perf mlock limit lifted too. CQLite's doctrine mandates per-CPU collection, so `1` is
+not "almost right", it is a hard denial. `kernel.kptr_restrict = 0` is a SEPARATE control
+for kernel SYMBOL resolution — without it kernel frames are unresolved addresses, a
+SILENT attribution loss rather than an error. Same rationale in the drop-in's own bytes.
+
+SECURITY POSTURE. A deliberate loosening, appropriate for DEDICATED SINGLE-TENANT
+measurement/agent boxes. Never apply it to a shared or multi-tenant host. See
+docs/development/fleet-runbook.md. BPF IS A DIFFERENT PERMISSION: a permissive
+perf_event_paranoid does NOT grant BPF map creation — bpftrace/bcc collectors still need
+sudo (#3217 finding).
+
+Sourceable AND executable. Source it ONCE (the gate does, at script scope) and call the
+functions; a per-use re-source re-reads 300+ lines for nothing. Sourcing has NO side
+effects: this file only defines `perf_capability_*` functions plus the four
+`PERF_CAPABILITY_*` constants (nothing runs, no shell options are changed, no variables
+outside those namespaces are touched). Every function is `set -u` safe.
+
+Usage when executed: `bash scripts/perf-capability.sh --help` (the modes are listed by
+perf_capability_usage below, so they are not duplicated here).
+
+```
+
+### perf-capability-dropin-install-priv-cmd-write
+
+```
+perf_capability_dropin_install [<priv-cmd>...]: write the managed drop-in as an ATOMIC
+DIRECTORY-ENTRY REPLACEMENT, so a pre-existing symlink at the managed name is REPLACED, never
+FOLLOWED (issue #3261 AC1). argv is the privilege prefix (empty when already root); rc 0 iff the
+managed bytes are in place at the managed path afterwards, verified by re-reading the file.
+
+Content goes to a fresh staging entry in the ALREADY-VALIDATED directory, then `mv -fT` —
+rename(2), which replaces the NAME and never dereferences the destination. Same directory, so the
+rename is same-filesystem and atomic.
+
+WHAT MAKES THIS SAFE IS THE PRECONDITION, NOT THE STAGING MECHANICS. Three successive fixes here
+were each defended with a claim that proved FALSE, so the reasoning is recorded rather than the
+conclusion alone (full history: #3261, roborev rounds 1-3):
+* a FIXED staging name, checked-then-opened, claimed safe because the race "cannot happen". It
+could: anyone able to create entries in the directory could re-plant that known name as a
+symlink between the check and the privileged open.
+* `mktemp` (O_CREAT|O_EXCL, 6 random chars, created under the SAME privilege that writes) closed
+the CREATE race — but mktemp returns a NAME and each later step REOPENS it, so the window moved
+rather than closing. A pid suffix would not have helped either; a pid is predictable.
+* grouping every step into ONE privileged `sh -c` was then defended with a claim THIS COMMENT
+ITSELF MADE AND WHICH IS FALSE: that no unprivileged process is scheduled between the steps.
+`sh -c` gives SEQUENCING WITHIN ONE PROCESS, never MUTUAL EXCLUSION against other processes,
+which run concurrently on other CPUs regardless of how we group our own commands. Consolidation
+is kept — it removes needless windows — but it is NOT what makes this safe.
+* what closes the class: REMOVE THE ATTACKER'S PRECONDITION. Every step of the race needs the
+ability to create or replace entries in the target directory, so the install REFUSES a target
+directory that anyone less privileged than the writer can write — it must be owned by the
+identity performing the privileged write and be neither group- nor world-writable. There is
+then no actor to race against, whatever the timing.
+The ownership/mode test runs INSIDE the privileged shell against `id -u` of that shell, so it tests
+the identity that will actually write (root in production, the shim under test mode) rather than
+whoever invoked us. Undeterminable ownership or mode is a REFUSAL, not an assumption. Deliberately
+conservative: group-writable is refused even with the sticky bit, because "arguably safe" is what
+already cost this function three review rounds.
+`chmod 0644` after the write is load-bearing: `mktemp` creates 0600, and the idempotency compare
+runs from an UNPRIVILEGED bootstrap process that could not read a root-owned 0600 file — every
+later run would see "not current" and rewrite. The old `tee` got 0644 from root's umask.
+The staging name begins with `.` and does not end in `.conf`, so the competing-file scan (which
+globs `*.conf`) can never mistake it for a rival drop-in.
+GNU-COREUTILS DEPENDENCY, STATED EXACTLY: `mv -fT` and `stat -c` are GNU-only. The PRODUCTION
+path is genuinely gated — bootstrap reaches this function only when PLATFORM=linux (set at :85,
+branch at :412, PERF_SECTION_OK initialised to 0 at :405 so no ambient export can steer it).
+NOT gated: scripts/tests/test_perf_capability.sh calls this DIRECTLY, so its staged-install cases
+are capability-probed and COUNTED-skipped off GNU (roborev round 5). Neither portability guard in
+the repo scans this file, so nothing mechanically protects the gate; recorded, not papered over.
+```
+

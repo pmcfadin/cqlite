@@ -3,38 +3,7 @@
 # perf-capability.sh — the ONE place that knows how a CQLite box is made
 # profileable, and how that is VERIFIED (issue #3249).
 #
-# WHY THIS FILE EXISTS. Agent/worker images ship `kernel.perf_event_paranoid = 4` and set
-# it NOWHERE in /etc/sysctl.conf or /etc/sysctl.d — so every profiling run starts from a
-# hard EACCES whose help text ("access limited") reads like a CAPABILITY verdict when it is
-# a PERMISSION verdict. That has already cost two measurement cycles. The same three-line
-# incantation was then copy-pasted into ad-hoc harnesses; it now lives here, is git-pinned,
-# and is asserted by the gate's tooling-tests.
-#
-# WHY -1 AND NOT 1. perf_event_paranoid is CUMULATIVE — higher is MORE restrictive and
-# each level keeps the ones below it: `>= 3` (an extra Debian/Ubuntu level) denies ALL
-# unprivileged perf use, which is why the images' `4` kills even a plain `perf stat`;
-# `>= 2` no kernel profiling; `>= 1` no CPU-WIDE access, which is exactly what
-# `perf stat -C <cpu>` needs; `>= 0` no raw tracepoints; `-1` (almost) everything, and the
-# perf mlock limit lifted too. CQLite's doctrine mandates per-CPU collection, so `1` is
-# not "almost right", it is a hard denial. `kernel.kptr_restrict = 0` is a SEPARATE control
-# for kernel SYMBOL resolution — without it kernel frames are unresolved addresses, a
-# SILENT attribution loss rather than an error. Same rationale in the drop-in's own bytes.
-#
-# SECURITY POSTURE. A deliberate loosening, appropriate for DEDICATED SINGLE-TENANT
-# measurement/agent boxes. Never apply it to a shared or multi-tenant host. See
-# docs/development/fleet-runbook.md. BPF IS A DIFFERENT PERMISSION: a permissive
-# perf_event_paranoid does NOT grant BPF map creation — bpftrace/bcc collectors still need
-# sudo (#3217 finding).
-#
-# Sourceable AND executable. Source it ONCE (the gate does, at script scope) and call the
-# functions; a per-use re-source re-reads 300+ lines for nothing. Sourcing has NO side
-# effects: this file only defines `perf_capability_*` functions plus the four
-# `PERF_CAPABILITY_*` constants (nothing runs, no shell options are changed, no variables
-# outside those namespaces are touched). Every function is `set -u` safe.
-#
-# Usage when executed: `bash scripts/perf-capability.sh --help` (the modes are listed by
-# perf_capability_usage below, so they are not duplicated here).
-#
+# (full rationale: fleet-runbook.md, perf seam containment, b4)
 # TEST-ONLY ENV SEAMS — INERT UNLESS CQLITE_PERF_TEST_MODE=1 (issue #3249 review).
 # The PRODUCTION paths below are HARDCODED LITERALS (/etc/sysctl.d, /proc/sys/kernel) because
 # bootstrap installs the drop-in through the STAGED installer below (mktemp + atomic rename, no
@@ -439,49 +408,7 @@ perf_capability_dropin_path() {
 }
 
 # perf_capability_dropin_install [<priv-cmd>...]: write the managed drop-in as an ATOMIC
-# DIRECTORY-ENTRY REPLACEMENT, so a pre-existing symlink at the managed name is REPLACED, never
-# FOLLOWED (issue #3261 AC1). argv is the privilege prefix (empty when already root); rc 0 iff the
-# managed bytes are in place at the managed path afterwards, verified by re-reading the file.
-#
-# Content goes to a fresh staging entry in the ALREADY-VALIDATED directory, then `mv -fT` —
-# rename(2), which replaces the NAME and never dereferences the destination. Same directory, so the
-# rename is same-filesystem and atomic.
-#
-# WHAT MAKES THIS SAFE IS THE PRECONDITION, NOT THE STAGING MECHANICS. Three successive fixes here
-# were each defended with a claim that proved FALSE, so the reasoning is recorded rather than the
-# conclusion alone (full history: #3261, roborev rounds 1-3):
-#   * a FIXED staging name, checked-then-opened, claimed safe because the race "cannot happen". It
-#     could: anyone able to create entries in the directory could re-plant that known name as a
-#     symlink between the check and the privileged open.
-#   * `mktemp` (O_CREAT|O_EXCL, 6 random chars, created under the SAME privilege that writes) closed
-#     the CREATE race — but mktemp returns a NAME and each later step REOPENS it, so the window moved
-#     rather than closing. A pid suffix would not have helped either; a pid is predictable.
-#   * grouping every step into ONE privileged `sh -c` was then defended with a claim THIS COMMENT
-#     ITSELF MADE AND WHICH IS FALSE: that no unprivileged process is scheduled between the steps.
-#     `sh -c` gives SEQUENCING WITHIN ONE PROCESS, never MUTUAL EXCLUSION against other processes,
-#     which run concurrently on other CPUs regardless of how we group our own commands. Consolidation
-#     is kept — it removes needless windows — but it is NOT what makes this safe.
-#   * what closes the class: REMOVE THE ATTACKER'S PRECONDITION. Every step of the race needs the
-#     ability to create or replace entries in the target directory, so the install REFUSES a target
-#     directory that anyone less privileged than the writer can write — it must be owned by the
-#     identity performing the privileged write and be neither group- nor world-writable. There is
-#     then no actor to race against, whatever the timing.
-# The ownership/mode test runs INSIDE the privileged shell against `id -u` of that shell, so it tests
-# the identity that will actually write (root in production, the shim under test mode) rather than
-# whoever invoked us. Undeterminable ownership or mode is a REFUSAL, not an assumption. Deliberately
-# conservative: group-writable is refused even with the sticky bit, because "arguably safe" is what
-# already cost this function three review rounds.
-#   `chmod 0644` after the write is load-bearing: `mktemp` creates 0600, and the idempotency compare
-#   runs from an UNPRIVILEGED bootstrap process that could not read a root-owned 0600 file — every
-#   later run would see "not current" and rewrite. The old `tee` got 0644 from root's umask.
-#   The staging name begins with `.` and does not end in `.conf`, so the competing-file scan (which
-#   globs `*.conf`) can never mistake it for a rival drop-in.
-#   GNU-COREUTILS DEPENDENCY, STATED EXACTLY: `mv -fT` and `stat -c` are GNU-only. The PRODUCTION
-#   path is genuinely gated — bootstrap reaches this function only when PLATFORM=linux (set at :85,
-#   branch at :412, PERF_SECTION_OK initialised to 0 at :405 so no ambient export can steer it).
-#   NOT gated: scripts/tests/test_perf_capability.sh calls this DIRECTLY, so its staged-install cases
-#   are capability-probed and COUNTED-skipped off GNU (roborev round 5). Neither portability guard in
-#   the repo scans this file, so nothing mechanically protects the gate; recorded, not papered over.
+# (full rationale: fleet-runbook.md, perf seam containment, perf-capability-dropin-install-priv-cmd-write)
 perf_capability_dropin_install() {
   local __pin_d __pin_p __pin_rc
   __pin_d=$(perf_capability_sysctl_dir) || return 1
