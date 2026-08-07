@@ -60,6 +60,11 @@ finding. Half of them here moved when the bound was lifted.
 | 4 | 16 | 815,748 | 734,228 | **−10.0%** | 4.57× |
 | 6 | 24 | 1,173,759 | 1,087,912 | **−7.3%** | 2.94× |
 
+Every row is a **within-arm** comparison (one run, one arm, 3 reps per N), which is why the S=3 row
+is stated against that arm's own peak N=16 rather than against the width's true peak N=12 — N=12 was
+measured in the supplement, so a comparison to it would be cross-run. §5.3 gives that figure with its
+caveat; it is *larger* than −10.0%, so this table understates the S=3 cost.
+
 **This corrects the issue's framing.** The issue body reasons that 4- and 6-core servers are
 "already optimal at the default" — a premise that is true only of the *misidentified* default of
 **16**, which is #3217's ramp top, not the shipped constant. Against the actual shipped default of
@@ -67,11 +72,20 @@ finding. Half of them here moved when the bound was lifted.
 monotonically worse the narrower the server. The narrow-server case is the worst case, but it is not
 the only case.
 
-The issue's headline **16.4%-at-1-core is CONFIRMED, as a lower bound**: at S=1 the cost at N=16 —
-#3217's last measured point, which is where 16.4% came from — reproduces here as **−13.3%**
-(208,696 vs 240,693) in the same shape, and the cost at the **actual** default 64 is **−21.5%**. The
-latency pair the issue quotes as "31 s → 302 s" reproduces as **32.2 s (peak, N=2) → 301 s (N=16)**
-and extends to **1,350.6 s (22.5 min) at N=64**.
+The issue's headline **16.4%-at-1-core is CONFIRMED as a lower bound, and the confirmation is about
+the DEFAULT, not about the number 16.4**. Stated precisely, because the distinction matters:
+
+- At the **same N** the issue's figure came from (N=16, #3217's last measured point), this round
+  measures **−13.3%** (208,696 vs 240,693) — the same shape, 3.1 pp shallower. That gap is a
+  cross-round difference (regenerated corpus, different run; cf. the ~1.7% within-rig cross-run
+  offset in §5), so **16.4% does not reproduce to the decimal and this report does not claim it
+  does.**
+- At the **actual shipped default** (N=64, which #3217 never measured) the cost is **−21.5%**. That
+  is the claim "lower bound" was making, and it holds by a wide margin: the true 1-core cost of the
+  default is about **5 pp worse** than the figure the issue quotes.
+
+The latency pair the issue quotes as "31 s → 302 s" reproduces as **32.2 s (peak, N=2) → 301 s
+(N=16)** and extends to **1,350.6 s (22.5 min) at N=64**.
 
 ### Finding 3 — `clamp(2 × P, 2, 64)` holds at all five widths, and the one out-of-fit width CONFIRMS it
 
@@ -585,7 +599,8 @@ field, and the operator documentation) and are evidenced there, not here.
 - **The issue's framing is corrected, not confirmed.** Its premise that wide servers are "already
   optimal at the default" was true of the *misidentified* default 16; against the shipped 64 no width
   is optimal. The 16.4%-at-1-core figure is confirmed **as a lower bound** — the true cost at the
-  shipped default is −21.5%.
+  shipped default is −21.5% — but it does **not** reproduce to the decimal at its own N (−13.3% at
+  N=16 here); §1 Finding 2 states which half of that claim the data supports.
 - **Six arms, five widths.** `cn3225-s3-n12supp` is a **supplement** to `cn3225-s3` over the same
   CPUs, not a sixth width; the analyzer labels it `SUPPLEMENT` in the peak table for exactly that
   reason, and its peak must be read through §5's bridge analysis rather than as an independent
