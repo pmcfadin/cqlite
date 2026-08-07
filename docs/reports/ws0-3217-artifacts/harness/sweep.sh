@@ -164,7 +164,12 @@ ovr = "${WS0_LOGICAL_BYTES_PER_ROW:-}"
 json.dump({
  "label": "$LABEL", "ts_unix_ms": int(float("$T0") * 1000),
  "harness_commit": "$HARNESS_COMMIT",
- "server_physical_cores_S": $S_JSON,
+ # S_JSON is a bare number for the s1|s2|s4|s6 shorthands and the literal token `null` for a
+ # custom CPU list. `null` is valid JSON but is NOT a Python name, so interpolating it raw here
+ # raised NameError and killed the arm at the warm pre-pass (#3225, the S=3 arm). Parse it as JSON
+ # instead: json.loads("6") == 6 for every value #3217 ever ran, so this is behaviour-identical
+ # for the shorthands and merely correct for a custom set.
+ "server_physical_cores_S": json.loads('''$S_JSON'''),
  "server_cpus": "$SERVER_CPUS", "server_cpu_count": $N_SRV,
  "client_cpus": "$CLIENT_CPUS", "client_cpu_count": $N_CLI,
  "merge_path": "$MERGE_PATH", "N": $N, "rep": $rep, "reps_total": $REPS,
