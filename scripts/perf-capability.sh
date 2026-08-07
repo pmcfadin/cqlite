@@ -589,23 +589,20 @@ perf_capability_dropin_install() {
     # keeps it from pre-empting the staging entry checks below, which have their own cases.
     __x1="$d/.perfcap-probe.$$"; __x2="$__x1.b"
     rm -f -- "$__x1" "$__x2" 2>/dev/null
-    # ABSENCE IS PROVEN, NOT ASSUMED (roborev round 21, High — a hazard THIS probe introduced). `rm`
-    # can fail (a read-only mount, an immutable entry) and its status was ignored; `: >` then FOLLOWS a
-    # symlink, so a leftover link at this predictable name could have truncated an arbitrary file under
-    # the privileged identity. The directory-mode precondition does not help: it proves nobody
-    # less-privileged can CREATE entries here, not that a pre-existing one was successfully removed.
+    # ABSENCE IS PROVEN, NOT ASSUMED (roborev round 21, High). `rm` can fail (read-only mount) and its
+    # status was ignored, and `: >` FOLLOWS a symlink — so a leftover link at this predictable name
+    # could truncate an arbitrary file under privilege. The mode precondition proves nobody
+    # less-privileged can CREATE entries here, not that a pre-existing one was removed.
     if [ -e "$__x1" ] || [ -L "$__x1" ] || [ -e "$__x2" ] || [ -L "$__x2" ]; then
       printf "perf-capability: REFUSING: probe entries under %s could not be cleared, so opening them could follow a leftover symlink under privilege.\n" "$d" >&2
       exit 1
     fi
-    # CREATION FAILURE IS ITS OWN OUTCOME, NOT "unsupported host" (roborev round 21, Low). These used to
-    # share one branch, so an unwritable directory was misreported as an incompatible `mv` — which made
-    # bootstrap suppress the retry remedy for a condition where retrying is exactly right. rc 1 REFUSED
-    # here; rc 2 UNSUPPORTED is reserved for an `mv` that genuinely lacks -T.
-    # SUBSHELL, and NOT the `:` builtin bare: `:` is a POSIX SPECIAL builtin, so a redirection failure
-    # on it makes a non-interactive shell EXIT — dash exits with status 2, which silently COLLIDED with
-    # the rc 2 UNSUPPORTED sentinel and reported a read-only directory as an incompatible `mv`. The
-    # subshell contains both the exit and the leaked shell diagnostic, so the caller sees rc 1 REFUSED.
+    # CREATION FAILURE IS ITS OWN OUTCOME (roborev round 21, Low): sharing one branch with the `mv`
+    # test reported an unwritable directory as an unsupported host, making bootstrap suppress the retry
+    # remedy exactly where retrying is right. rc 1 REFUSED here; rc 2 is reserved for `mv` lacking -T.
+    # SUBSHELL because `:` is a POSIX SPECIAL builtin: a redirection failure on it makes a
+    # non-interactive shell EXIT, and dash exits 2 — silently colliding with the rc 2 sentinel. The
+    # subshell contains both the exit and the leaked diagnostic, so the caller sees rc 1.
     if ! ( : >"$__x1" ) 2>/dev/null; then
       printf "perf-capability: REFUSING: cannot create a probe entry in %s — the directory is not writable by the privileged writer.\n" "$d" >&2
       exit 1

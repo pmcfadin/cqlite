@@ -1278,9 +1278,9 @@ fi
 # caller-side probe can check a different binary than the one that will run) and `mv -T` is EXERCISED
 # rather than grepped out of --help. The all-GNU control is what stops this passing by refusing always.
 us_fail=0
-# GUARDED like the staged-install cases (roborev round 21, Medium). This group's CONTROL case expects a
-# successful install using the HOST's own stat and mv, so on a non-GNU host the control necessarily
-# returns rc 2 and the suite fails — reintroducing exactly the macOS breakage the counted skip fixed.
+# GUARDED like the staged-install cases (roborev round 21, Medium): this group's CONTROL expects a
+# successful install using the HOST's stat/mv, so off GNU it necessarily returns rc 2 and the suite
+# fails — reintroducing the macOS breakage the counted skip fixed.
 if ! perf_install_supported; then
   skip "perf-capability: UNSUPPORTED-host reporting cases (rc 2 for broken stat -c / mv -T, with an all-GNU control)" "no GNU stat -c / mv --no-target-directory on this host, so the control case cannot install"
 else
