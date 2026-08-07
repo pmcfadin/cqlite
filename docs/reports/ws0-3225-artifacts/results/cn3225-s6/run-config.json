@@ -1,0 +1,6 @@
+{"label":"cn3225-s6","server_physical_cores_S":6,"server_cpus":"0,1,2,3,4,5,8,9,10,11,12,13",
+ "client_cpus":"6,7,14,15","ramp":"1,2,4,8,16,24,32,64","step_seconds":120,"reps":3,
+ "merge_path":"bypass","seed":42,"stage":"/data/ws0/ws0-h2h/datasets/sstables",
+ "flight_bin":"/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/cqlite-flight","loadgen_bin":"/home/ubuntu/workspace/cqlite-wt/issue-3225/target/release/flight-loadgen","ticket_template":"/home/ubuntu/workspace/cqlite-wt/issue-3225/docs/reports/ws0-3100-artifacts/ws0-h2h/ws0-events-template.json",
+ "server_flags":"--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 64 --admission-wait-timeout-ms 30000","client_saturation_threshold":0.70,
+ "harness_commit":"7b84ae65f","started_utc":"2026-08-07T04:42:38Z"}

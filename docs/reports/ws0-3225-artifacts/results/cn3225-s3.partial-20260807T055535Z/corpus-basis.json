@@ -1,0 +1,12 @@
+{
+ "schema": "ws0-3217.corpus-basis/v1",
+ "stage_dir": "/data/ws0/ws0-h2h/datasets/sstables",
+ "data_db_files": 1,
+ "ondisk_compressed_bytes": 784086629,
+ "ondisk_compressed_bytes_basis": "exact: sum of every *-Data.db file size",
+ "sstables_uncompressed": 0,
+ "sstables_compressed": 1,
+ "logical_uncompressed_bytes": 2772195010,
+ "logical_uncompressed_bytes_basis": "sum of CompressionInfo.db dataLength (self-validated against the offsets array); uncompressed SSTables contribute their Data.db size. layout=with_max_compressed_length",
+ "arrow_wire_bytes_basis": "NOT measurable from the corpus: comes from flight-loadgen bytes_per_s, which is Arrow buffer CAPACITY bytes, not compressed gRPC-on-the-wire bytes"
+}

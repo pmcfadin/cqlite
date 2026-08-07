@@ -1,0 +1,17 @@
+==== WS0 #3217 C(N) SWEEP SUMMARY ====
+label: cn3225-s3-n12supp   S=None   server_cpus=0,1,2,8,9,10   client_cpus=6,7,14,15   merge_path=bypass
+points: 6 total, 0 excluded (client-saturated)   admission_clean: YES
+
+N    rep  rows/s min    rows/s med    rows/s max    spr%    rows/s/strm   speedup  margeff  srvUtl  cliUtl  cs/s     
+12   3    624723.5      624848.4      626682.0      0.3     52070.7       n/a      n/a      0.995   0.058   126662   
+16   3    613765.6      614209.0      614925.1      0.2     38388.1       n/a      n/a      0.999   0.058   117227   
+
+byte bases (median, AC6 - never a bare MB/s):
+N    logical-uncomp B/s     on-disk-comp B/s       arrow-wire-cap B/s    
+12   433062323.0            122487190.0            7617750828.7          
+16   425688471.6            120401572.6            7488041639.8          
+
+scheduler cost per N (AC5):
+N    cs/s (cpu-wide)  vol cs/s (proc)  nonvol cs/s (proc)
+12   126662           0.0              0.0             
+16   117227           0.0              0.0             

@@ -11,9 +11,18 @@ Adapted from docs/reports/ws0-3217-artifacts/partA-run/analyze-partA.py. #3217 a
   3. the over-admission cost in BOTH currencies: throughput % lost,
      and the p50 latency MULTIPLE                                     (AC5)
   4. the admission-rejection total across every point                 (validity)
-  5. the three named byte bases                                       (AC6)
+  5. the three named byte bases, plus the corpus identity every arm ran
+     against (one sha256, cross-checked arm-to-arm)                   (AC6)
   6. clamp(2 x P, 2, 64) evaluated per width, as a % of that width's
      MEASURED peak                                                    (gates §3)
+  7. the CROSS-RUN BRIDGE analysis for a supplement arm: a width whose
+     predicted N was absent from the first ramp is closed by a second
+     run, and the N the two runs SHARE measures the run-to-run offset.
+     Every cross-run delta smaller than that offset is reported as an
+     ARTIFACT, and the width's formula verdict is taken from the
+     WITHIN-run pair instead                                          (gates §3)
+  8. the widest-width AC5 block, and the harness_commit provenance of
+     every arm, read from the points rather than from prose           (AC5)
 
 Dropped from #3217's version: the per-TID context-switch sidecar (that round's AC5;
 this round does not run the sampler), the merge-vs-bypass reference, and the #3100
@@ -82,6 +91,49 @@ def load_topology(path: str):
     if not pairs:
         return None
     return [set(int(x) for x in p) for p in pairs]
+
+
+def load_corpus_basis(arm_dir: str):
+    """The arm's committed corpus-basis.json, or an explicit absence record.
+
+    The basis is written per ARM by the sweep, not stamped into each point, so a
+    reader that looks for it on the point silently gets None. Absence is reported
+    by name here rather than rendering as a blank cell.
+    """
+    path = os.path.join(arm_dir, "corpus-basis.json")
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"present": False, "path": path, "reason": "%s: %s" % (type(exc).__name__, exc)}
+    doc = dict(doc)
+    doc.update({"present": True, "path": path})
+    return doc
+
+
+def read_corpus_data_db_sha(sha_file: str):
+    """sha256 of the corpus Data.db, PARSED from the committed shasum artifact.
+
+    Fail-closed: an unreadable file, no `*-Data.db` line, or more than one
+    distinct Data.db digest is returned as an error rather than as a digest,
+    because AC6 requires naming the exact bytes every arm read.
+    """
+    try:
+        with open(sha_file) as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return None, "unreadable (%s: %s)" % (type(exc).__name__, exc)
+    digests = set()
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1].endswith("-Data.db"):
+            digests.add(parts[0])
+    if not digests:
+        return None, "no '*-Data.db' line in %s" % sha_file
+    if len(digests) > 1:
+        return None, "%d distinct Data.db digests in %s — the corpus is not one file" % (
+            len(digests), sha_file)
+    return digests.pop(), None
 
 
 def resolve_width(pts, arm_dir: str, fallback_topology):
@@ -209,10 +261,21 @@ def analyse_arm(label, pts, arm_dir, fallback_topology, ramp_top):
         for p in pts if p.get("client_saturated")
     ]
 
+    # Harness provenance, read from the POINTS: two arms of this round ran under
+    # different harness revisions (a sweep.sh fix and a --list fix), so the report
+    # states the split from the stamps instead of from memory. More than one stamp
+    # inside ONE arm would mean the arm was written by two revisions — recorded.
+    harness_commits = sorted({p.get("harness_commit") for p in pts if p.get("harness_commit")})
+
     arm = {
         "arm": label,
         "S_physical_cores": S,
         "S_resolution_method": S_method,
+        "harness_commits": harness_commits,
+        "harness_commit_uniform": len(harness_commits) == 1,
+        "corpus_basis": load_corpus_basis(arm_dir),
+        "rows_per_scan_observed": pts[0].get("rows_per_scan_observed"),
+        "server_flags": pts[0].get("server_flags"),
         "server_cpus": pts[0]["server_cpus"],
         "server_hw_threads_P": hw_threads,
         "client_cpus": pts[0]["client_cpus"],
@@ -332,7 +395,6 @@ def analyse_arm(label, pts, arm_dir, fallback_topology, ramp_top):
         arm["formula_evaluation"] = entry
 
     # ---- the three byte bases, at the peak ----------------------------------
-    basis = pts[0].get("corpus_basis") or {}
     arm["byte_bases_at_peak"] = {
         "logical_uncompressed_bytes_per_s": by_n[peak["N"]]["bytes_per_s_logical_uncompressed_median"],
         "ondisk_compressed_bytes_per_s": by_n[peak["N"]]["bytes_per_s_ondisk_compressed_median"],
@@ -344,9 +406,288 @@ def analyse_arm(label, pts, arm_dir, fallback_topology, ramp_top):
             "on-disk compressed = rows/s x the summed *-Data.db basis; "
             "arrow-wire = flight-loadgen Arrow buffer CAPACITY, NOT gRPC-on-the-wire bytes. "
             "The three are DIFFERENT quantities and are never mixed into one 'MB/s'."),
-        "corpus_sha256_data_db": basis.get("sha256_data_db") or basis.get("data_db_sha256"),
     }
     return arm
+
+
+# ------------------------------------------------------- cross-run bridging --
+def pair_supplements(arms):
+    """(primary, supplement) pairs: two arms measuring the SAME server pinned set.
+
+    A width whose predicted N was absent from the first ramp is closed by a second,
+    shorter run over the same CPUs. The arm with more measured N values is the
+    PRIMARY curve; the others are SUPPLEMENTS to it. Derived from the recorded
+    `server_cpus`, never from the arm's name.
+    """
+    groups: dict[str, list] = {}
+    for a in arms:
+        groups.setdefault(str(a["server_cpus"]), []).append(a)
+    pairs = []
+    for _cpus, members in sorted(groups.items()):
+        if len(members) < 2:
+            continue
+        primary = max(members, key=lambda a: len(a["ramp_measured"]))
+        for supp in members:
+            if supp is not primary:
+                pairs.append((primary, supp))
+    return pairs
+
+
+def _valid_by_n(arm):
+    return {r["N"]: r for r in arm["per_N"] if r.get("reps_valid")}
+
+
+def analyse_bridge(primary, supp):
+    """What the SHARED N says about comparing the two runs at all.
+
+    A supplement is only spliceable into the primary curve if the N they BOTH
+    measured reproduces. When the between-run offset at that N is larger than
+    either run's own dispersion, run-to-run variation dominates and no cross-run
+    absolute delta of that size is evidence of anything — including the splice the
+    supplement was run to enable.
+    """
+    p_by, s_by = _valid_by_n(primary), _valid_by_n(supp)
+    shared = sorted(set(p_by) & set(s_by))
+    out = {
+        "primary_arm": primary["arm"],
+        "supplement_arm": supp["arm"],
+        "S_physical_cores": primary["S_physical_cores"],
+        "server_cpus": primary["server_cpus"],
+        "primary_harness_commits": primary["harness_commits"],
+        "supplement_harness_commits": supp["harness_commits"],
+        "bridge_N": shared,
+        "bridge_points": [],
+    }
+    if not shared:
+        out.update({
+            "splice_safe": False,
+            "cross_run_uncertainty_pct": None,
+            "verdict": "NO BRIDGE POINT: the two runs share no N, so nothing measures the "
+                       "between-run offset and NO cross-run comparison may be made.",
+        })
+        return out
+
+    for n in shared:
+        pr, sr = p_by[n], s_by[n]
+        offset = (sr["rows_per_s_median"] - pr["rows_per_s_median"]) / pr["rows_per_s_median"] * 100
+        within = max(abs(pr["dispersion_pct_of_median"] or 0.0),
+                     abs(sr["dispersion_pct_of_median"] or 0.0))
+        out["bridge_points"].append({
+            "N": n,
+            "primary_rows_per_s_median": pr["rows_per_s_median"],
+            "primary_dispersion_pct": pr["dispersion_pct_of_median"],
+            "supplement_rows_per_s_median": sr["rows_per_s_median"],
+            "supplement_dispersion_pct": sr["dispersion_pct_of_median"],
+            "offset_pct_supplement_vs_primary": offset,
+            "within_run_dispersion_pct_max": within,
+            "offset_exceeds_within_run_dispersion": abs(offset) > within,
+        })
+
+    worst = max(out["bridge_points"], key=lambda b: abs(b["offset_pct_supplement_vs_primary"]))
+    out["cross_run_uncertainty_pct"] = abs(worst["offset_pct_supplement_vs_primary"])
+    out["cross_run_uncertainty_at_N"] = worst["N"]
+    out["splice_safe"] = not any(b["offset_exceeds_within_run_dispersion"]
+                                for b in out["bridge_points"])
+    out["verdict"] = (
+        "BRIDGE REPRODUCES: at every shared N the between-run offset is within that N's own "
+        "dispersion, so a cross-run splice is empirically supported."
+        if out["splice_safe"] else
+        "BRIDGE DISAGREES: the between-run offset at N=%d is %+.2f%%, LARGER than the %.1f%% "
+        "within-run dispersion there. Run-to-run variation therefore exceeds within-run "
+        "dispersion: any cross-run absolute delta below ~%.2f%% is an ARTIFACT, and this "
+        "width's formula verdict must come from a WITHIN-run pair." % (
+            worst["N"], worst["offset_pct_supplement_vs_primary"],
+            worst["within_run_dispersion_pct_max"], out["cross_run_uncertainty_pct"]))
+    return out
+
+
+def supplemented_formula(primary, supp, bridge):
+    """This width's formula verdict, taken from WITHIN the supplement run.
+
+    The primary ramp omitted the predicted N, so the primary arm could not evaluate
+    the formula at all (`deviation_pct_of_measured_peak: None`). The supplement
+    measured the predicted N AND the primary's apparent peak in the SAME run, which
+    is the comparison the bridge licenses. The naive cross-run splice is computed
+    too — and labelled REJECTED when the bridge showed the offset dominates it —
+    so the number that would have been reported is visible next to the reason it
+    was not.
+    """
+    f = supp.get("formula_evaluation") or {}
+    pred = f.get("predicted_N")
+    p_peak = (primary.get("peak") or {}).get("N")
+    p_by, s_by = _valid_by_n(primary), _valid_by_n(supp)
+    out = {
+        "width_S": primary["S_physical_cores"],
+        "P_hw_threads": f.get("P_hw_threads"),
+        "predicted_N": pred,
+        "primary_apparent_peak_N": p_peak,
+        "primary_arm": primary["arm"],
+        "supplement_arm": supp["arm"],
+    }
+    if pred is None or pred not in s_by or p_peak is None or p_peak not in s_by:
+        out["resolved"] = False
+        out["reason"] = (
+            "the supplement measured %s; a WITHIN-run verdict needs BOTH the predicted N (%s) "
+            "and the primary's apparent peak N (%s) in that same run." % (
+                ",".join(str(n) for n in sorted(s_by)), pred, p_peak))
+        return out
+
+    s_pred, s_cmp = s_by[pred], s_by[p_peak]
+    within = (s_pred["rows_per_s_median"] - s_cmp["rows_per_s_median"]) / s_cmp["rows_per_s_median"] * 100
+    naive = (s_pred["rows_per_s_median"] - p_by[p_peak]["rows_per_s_median"]) \
+        / p_by[p_peak]["rows_per_s_median"] * 100
+    out.update({
+        "resolved": True,
+        "within_run": {
+            "arm": supp["arm"],
+            "predicted_N_rows_per_s_median": s_pred["rows_per_s_median"],
+            "predicted_N_dispersion_pct": s_pred["dispersion_pct_of_median"],
+            "comparator_N": p_peak,
+            "comparator_rows_per_s_median": s_cmp["rows_per_s_median"],
+            "comparator_dispersion_pct": s_cmp["dispersion_pct_of_median"],
+            "predicted_vs_comparator_pct": within,
+            "formula_wins": within > 0,
+        },
+        "naive_cross_run_splice": {
+            "predicted_N_rows_per_s_median_from_supplement": s_pred["rows_per_s_median"],
+            "comparator_rows_per_s_median_from_primary": p_by[p_peak]["rows_per_s_median"],
+            "delta_pct": naive,
+            "accepted": bool(bridge.get("splice_safe")),
+            "why": ("the bridge reproduced, so the splice is supported"
+                    if bridge.get("splice_safe") else
+                    "REJECTED: |%+.2f%%| is below the %.2f%% between-run offset the bridge "
+                    "measured, so it carries no information" % (
+                        naive, bridge.get("cross_run_uncertainty_pct") or 0.0)),
+        },
+        "verdict": (
+            "WITHIN-run at %s: predicted N=%d is %+.2f%% against N=%d, the value the coarse ramp "
+            "had called this width's peak. The formula %s." % (
+                supp["arm"], pred, within, p_peak,
+                "BEATS that peak" if within > 0 else "is below that peak")),
+    })
+    return out
+
+
+def corpus_identity(arms, sha_file):
+    """One corpus, or a named disagreement. AC6 needs the exact bytes named.
+
+    Every arm writes its own corpus-basis.json; if two arms disagree on the staged
+    bytes then their curves are not comparable and the peak table is meaningless.
+    Checked field-by-field and reported as FAIL rather than averaged away.
+    """
+    fields = ("stage_dir", "data_db_files", "ondisk_compressed_bytes",
+              "logical_uncompressed_bytes", "sstables_compressed", "sstables_uncompressed")
+    sha, sha_err = read_corpus_data_db_sha(sha_file)
+    out = {
+        "sha256_data_db": sha,
+        "sha256_source": sha_file,
+        "sha256_error": sha_err,
+        "per_arm": [],
+        "disagreements": [],
+        "missing_basis_arms": [a["arm"] for a in arms if not a["corpus_basis"].get("present")],
+    }
+    ref = None
+    for a in arms:
+        cb = a["corpus_basis"]
+        rec = {"arm": a["arm"], "present": cb.get("present", False),
+               "rows_per_scan_observed": a.get("rows_per_scan_observed")}
+        if cb.get("present"):
+            rec.update({k: cb.get(k) for k in fields})
+            if ref is None:
+                ref = rec
+            else:
+                for k in fields + ("rows_per_scan_observed",):
+                    if rec.get(k) != ref.get(k):
+                        out["disagreements"].append(
+                            "%s: %s = %r, but %s has %r" % (a["arm"], k, rec.get(k),
+                                                            ref["arm"], ref.get(k)))
+        else:
+            rec["reason"] = cb.get("reason")
+        out["per_arm"].append(rec)
+    out["reference"] = ref
+    out["ok"] = bool(ref) and not out["disagreements"] and not out["missing_basis_arms"] \
+        and sha is not None
+    out["verdict"] = ("PASS: every arm read the same staged corpus, named by sha256 above."
+                      if out["ok"] else
+                      "FAIL: " + "; ".join(filter(None, [
+                          sha_err,
+                          "arms without a corpus-basis.json: %s" % ", ".join(out["missing_basis_arms"])
+                          if out["missing_basis_arms"] else None,
+                          "; ".join(out["disagreements"]) or None,
+                          None if ref else "no arm published a corpus basis",
+                      ])))
+    return out
+
+
+def ac5_block(arms, supplement_labels, comparator_N=16):
+    """AC5 at the widest width in scope: the derived default vs the alternatives.
+
+    Compared against DISPERSION rather than against a bare percentage: the claim is
+    only that the derived default wins if the gain exceeds the run's own spread. The
+    strongest available form is also reported — whether the two N's REP RANGES are
+    disjoint, which no dispersion average can fake.
+    """
+    primaries = [a for a in arms
+                 if a["arm"] not in supplement_labels and a["S_physical_cores"] is not None]
+    if not primaries:
+        return {"resolved": False, "reason": "no primary arm with a resolved width S"}
+    widest = max(primaries, key=lambda a: a["S_physical_cores"])
+    f = widest.get("formula_evaluation") or {}
+    by_n = _valid_by_n(widest)
+    pred = f.get("predicted_N")
+    out = {
+        "arm": widest["arm"],
+        "S_physical_cores": widest["S_physical_cores"],
+        "P_hw_threads": widest["server_hw_threads_P"],
+        "derived_N": pred,
+        "why_widest_in_scope": (
+            "the client needs 2 exclusive PHYSICAL cores on the same box and sweep.sh refuses a "
+            "server set overlapping the client's, so 6 of the 8 physical cores is the widest "
+            "server this rig can measure. It is NOT 'the whole box'."),
+    }
+    if pred is None or pred not in by_n:
+        out["resolved"] = False
+        out["reason"] = "the derived N (%s) is not in this arm's ramp (%s)" % (
+            pred, ",".join(str(n) for n in sorted(by_n)))
+        return out
+
+    def cmp_rec(n, role):
+        if n not in by_n:
+            return {"N": n, "role": role, "measured": False,
+                    "reason": "N=%d is not in this arm's ramp" % n}
+        d, c = by_n[pred], by_n[n]
+        gain = (d["rows_per_s_median"] - c["rows_per_s_median"]) / c["rows_per_s_median"] * 100
+        spread = max(abs(d["dispersion_pct_of_median"] or 0.0),
+                     abs(c["dispersion_pct_of_median"] or 0.0))
+        return {
+            "N": n, "role": role, "measured": True,
+            "rows_per_s_median": c["rows_per_s_median"],
+            "rows_per_s_min": c["rows_per_s_min"], "rows_per_s_max": c["rows_per_s_max"],
+            "dispersion_pct": c["dispersion_pct_of_median"],
+            "derived_gain_pct": gain,
+            "max_dispersion_of_the_pair_pct": spread,
+            "gain_exceeds_dispersion": gain > spread,
+            "rep_ranges_disjoint": d["rows_per_s_min"] > c["rows_per_s_max"],
+        }
+
+    d = by_n[pred]
+    out.update({
+        "resolved": True,
+        "derived_point": {
+            "N": pred,
+            "rows_per_s_median": d["rows_per_s_median"],
+            "rows_per_s_min": d["rows_per_s_min"], "rows_per_s_max": d["rows_per_s_max"],
+            "dispersion_pct": d["dispersion_pct_of_median"],
+            "latency_p50_ms_median": d["latency_p50_ms_median"],
+            "server_cpu_util_of_pinned_set_median": d["server_cpu_util_of_pinned_set_median"],
+            "reps_valid": d["reps_valid"],
+        },
+        "comparisons": [cmp_rec(comparator_N, "#3217's censored peak / the misidentified default"),
+                        cmp_rec(DERIVED_CEILING, "the SHIPPED default")],
+    })
+    out["regression_free"] = all(c.get("derived_gain_pct", 0) > 0
+                                 for c in out["comparisons"] if c["measured"])
+    return out
 
 
 def render(out):
@@ -386,32 +727,36 @@ def render(out):
         A("")
 
     A("=== PEAK N BY WIDTH (the deliverable) ===")
-    A("%-14s %-3s %-4s %-6s %-11s %-14s %-9s %-8s" % (
-        "arm", "S", "P", "peak N", "censored?", "rows/s median", "spr%", "srvUtl"))
+    supp_labels = set(out.get("supplement_arms") or [])
+    A("%-18s %-3s %-4s %-11s %-6s %-11s %-14s %-9s %-8s" % (
+        "arm", "S", "P", "role", "peak N", "censored?", "rows/s median", "spr%", "srvUtl"))
     for arm in out["arms"]:
+        role = "SUPPLEMENT" if arm["arm"] in supp_labels else "primary"
         pk = arm.get("peak")
         if not pk:
-            A("%-14s %-3s %-4s  -- %s" % (arm["arm"], arm["S_physical_cores"],
-                                          arm["server_hw_threads_P"],
-                                          arm.get("peak_unavailable_reason", "no peak")))
+            A("%-18s %-3s %-4s %-11s -- %s" % (arm["arm"], arm["S_physical_cores"],
+                                               arm["server_hw_threads_P"], role,
+                                               arm.get("peak_unavailable_reason", "no peak")))
             continue
-        A("%-14s %-3s %-4s %-6d %-11s %-14.0f %-9.1f %-8.3f" % (
-            arm["arm"], arm["S_physical_cores"], arm["server_hw_threads_P"], pk["N"],
+        A("%-18s %-3s %-4s %-11s %-6d %-11s %-14.0f %-9.1f %-8.3f" % (
+            arm["arm"], arm["S_physical_cores"], arm["server_hw_threads_P"], role, pk["N"],
             "CENSORED" if pk["censored"] else "uncensored",
             pk["rows_per_s_median"], pk["dispersion_pct_of_median"] or 0.0,
             pk["server_cpu_util_of_pinned_set_median"] or 0.0))
     A("CENSORED = the peak sits at the top of the measured ramp, so it is a LOWER BOUND on the")
     A("           true optimum for that width. It is NOT the same claim as an uncensored peak.")
+    A("SUPPLEMENT = a second, shorter run over the SAME cpus as its primary; it does not add a")
+    A("           width. Read its peak only through the bridge analysis below.")
     A("")
 
     A("=== OVER-ADMISSION COST, BOTH CURRENCIES (relative to each width's own peak) ===")
-    A("%-14s %-4s %-14s %-16s %-11s %-12s" % (
+    A("%-18s %-4s %-14s %-16s %-11s %-12s" % (
         "arm", "N", "rows/s median", "throughput vs pk", "p50 ms", "p50 x peak"))
     any_cost = False
     for arm in out["arms"]:
         for c in arm.get("over_admission_cost_vs_peak", []):
             any_cost = True
-            A("%-14s %-4d %-14.0f %-16s %-11s %-12s" % (
+            A("%-18s %-4d %-14.0f %-16s %-11s %-12s" % (
                 arm["arm"], c["N"], c["rows_per_s_median"],
                 "%+.1f%%" % c["throughput_pct_vs_peak"],
                 ("%.1f" % c["latency_p50_ms_median"]) if c["latency_p50_ms_median"] is not None else "n/a",
@@ -421,16 +766,16 @@ def render(out):
     A("")
 
     A("=== THE SHIPPED DEFAULT (--max-concurrent-scans 64) AS A MEASURED POINT ===")
-    A("%-14s %-9s %-14s %-16s %-11s %-12s" % (
+    A("%-18s %-9s %-14s %-16s %-11s %-12s" % (
         "arm", "measured?", "rows/s median", "throughput vs pk", "p50 ms", "p50 x peak"))
     for arm in out["arms"]:
         s = arm.get("shipped_default_64")
         if not s:
             continue
         if not s["measured"]:
-            A("%-14s %-9s %s" % (arm["arm"], "NO", s["reason"]))
+            A("%-18s %-9s %s" % (arm["arm"], "NO", s["reason"]))
             continue
-        A("%-14s %-9s %-14.0f %-16s %-11s %-12s" % (
+        A("%-18s %-9s %-14.0f %-16s %-11s %-12s" % (
             arm["arm"], "yes", s["rows_per_s_median"],
             "%+.1f%%" % s["throughput_pct_vs_peak"],
             ("%.1f" % s["latency_p50_ms_median"]) if s["latency_p50_ms_median"] is not None else "n/a",
@@ -438,19 +783,19 @@ def render(out):
     A("")
 
     A("=== FORMULA UNDER TEST: clamp(2 x P, 2, 64), deviation as % of that width's MEASURED peak ===")
-    A("%-14s %-4s %-8s %-8s %-16s %-14s %-16s" % (
+    A("%-18s %-4s %-8s %-8s %-16s %-14s %-16s" % (
         "arm", "P", "pred N", "peak N", "rows/s @ pred", "dev vs peak", "vs constant 64"))
     for arm in out["arms"]:
         f = arm.get("formula_evaluation")
         if not f:
             continue
         if not f["predicted_N_measured"]:
-            A("%-14s %-4d %-8d %-8d %s" % (
+            A("%-18s %-4d %-8d %-8d %s" % (
                 arm["arm"], f["P_hw_threads"], f["predicted_N"],
                 f["measured_peak_N"], f["unmeasured_note"]))
             continue
         gain = f.get("gain_vs_shipped_constant_64_pct_points")
-        A("%-14s %-4d %-8d %-8d %-16.0f %-14s %-16s" % (
+        A("%-18s %-4d %-8d %-8d %-16.0f %-14s %-16s" % (
             arm["arm"], f["P_hw_threads"], f["predicted_N"], f["measured_peak_N"],
             f["rows_per_s_median_at_predicted_N"],
             "%+.1f%%" % f["deviation_pct_of_measured_peak"],
@@ -459,12 +804,116 @@ def render(out):
     A("is re-fitted (tasks.md §2). 'vs constant 64' is positive when the formula wins.")
     A("")
 
+    for br in out.get("bridges", []):
+        A("=== CROSS-RUN BRIDGE: %s (primary) vs %s (supplement), S=%s ==="
+          % (br["primary_arm"], br["supplement_arm"], br["S_physical_cores"]))
+        A("  harness: primary %s | supplement %s"
+          % (",".join(br["primary_harness_commits"]) or "unstamped",
+             ",".join(br["supplement_harness_commits"]) or "unstamped"))
+        if not br["bridge_points"]:
+            A("  %s" % br["verdict"])
+            A("")
+            continue
+        A("  %-5s %-16s %-9s %-16s %-9s %-11s %-10s" % (
+            "N", "primary med", "spr%", "supplement med", "spr%", "offset", "exceeds spr?"))
+        for b in br["bridge_points"]:
+            A("  %-5d %-16.0f %-9.1f %-16.0f %-9.1f %-11s %-10s" % (
+                b["N"], b["primary_rows_per_s_median"], b["primary_dispersion_pct"] or 0.0,
+                b["supplement_rows_per_s_median"], b["supplement_dispersion_pct"] or 0.0,
+                "%+.2f%%" % b["offset_pct_supplement_vs_primary"],
+                "YES" if b["offset_exceeds_within_run_dispersion"] else "no"))
+        A("  run-to-run uncertainty: %.2f%% (at N=%s)" % (
+            br["cross_run_uncertainty_pct"] or 0.0, br.get("cross_run_uncertainty_at_N")))
+        A("  VERDICT: %s" % br["verdict"])
+        A("")
+
+    for wf in out.get("supplemented_formula_verdicts", []):
+        A("=== WITHIN-RUN FORMULA VERDICT AT S=%s (the out-of-fit falsification width) ==="
+          % wf["width_S"])
+        if not wf.get("resolved"):
+            A("  UNRESOLVED: %s" % wf.get("reason"))
+            A("")
+            continue
+        w, nv = wf["within_run"], wf["naive_cross_run_splice"]
+        A("  predicted N=%d (P=%s): %.0f rows/s (spr %.1f%%) in %s" % (
+            wf["predicted_N"], wf["P_hw_threads"], w["predicted_N_rows_per_s_median"],
+            w["predicted_N_dispersion_pct"] or 0.0, w["arm"]))
+        A("  comparator N=%d in the SAME run: %.0f rows/s (spr %.1f%%)" % (
+            w["comparator_N"], w["comparator_rows_per_s_median"],
+            w["comparator_dispersion_pct"] or 0.0))
+        A("  WITHIN-RUN deviation: %+.2f%%   <- the number of record for this width" %
+          w["predicted_vs_comparator_pct"])
+        A("  naive cross-run splice (%s N=%d vs %s N=%d): %+.2f%%  [%s]" % (
+            w["arm"], wf["predicted_N"], wf["primary_arm"], w["comparator_N"],
+            nv["delta_pct"], "ACCEPTED" if nv["accepted"] else "REJECTED"))
+        A("    %s" % nv["why"])
+        A("  VERDICT: %s" % wf["verdict"])
+        A("")
+
+    ac5 = out.get("ac5") or {}
+    A("=== AC5 — THE WIDEST WIDTH IN SCOPE ===")
+    if not ac5.get("resolved"):
+        A("  UNRESOLVED: %s" % ac5.get("reason", "no widest-width arm"))
+    else:
+        A("  arm %s: S=%s physical cores / P=%s hw threads. Widest IN SCOPE because %s" % (
+            ac5["arm"], ac5["S_physical_cores"], ac5["P_hw_threads"], ac5["why_widest_in_scope"]))
+        d = ac5["derived_point"]
+        A("  derived default N=%d: median %.0f rows/s  (min %.0f / max %.0f, spr %.1f%%, %d reps, "
+          "p50 %.1f ms, srvUtl %.3f)" % (
+              d["N"], d["rows_per_s_median"], d["rows_per_s_min"], d["rows_per_s_max"],
+              d["dispersion_pct"] or 0.0, d["reps_valid"], d["latency_p50_ms_median"] or 0.0,
+              d["server_cpu_util_of_pinned_set_median"] or 0.0))
+        A("  %-5s %-14s %-9s %-12s %-14s %-12s %s" % (
+            "vs N", "median", "spr%", "derived gain", "> dispersion?", "reps disjoint?", "role"))
+        for c in ac5["comparisons"]:
+            if not c["measured"]:
+                A("  %-5d %s" % (c["N"], c["reason"]))
+                continue
+            A("  %-5d %-14.0f %-9.1f %-12s %-14s %-12s %s" % (
+                c["N"], c["rows_per_s_median"], c["dispersion_pct"] or 0.0,
+                "%+.1f%%" % c["derived_gain_pct"],
+                "YES (%.1f%%)" % c["max_dispersion_of_the_pair_pct"]
+                if c["gain_exceeds_dispersion"] else "NO",
+                "YES" if c["rep_ranges_disjoint"] else "no", c["role"]))
+        A("  REGRESSION-FREE: %s" % ("yes — the derived default beats every measured alternative "
+                                     "at this width" if ac5["regression_free"] else
+                                     "NO — see the negative gain above"))
+    A("")
+
+    A("=== HARNESS PROVENANCE (read from each point's harness_commit stamp) ===")
+    A("  %-18s %-14s %s" % ("arm", "harness", "uniform within the arm?"))
+    for arm in out["arms"]:
+        A("  %-18s %-14s %s" % (arm["arm"], ",".join(arm["harness_commits"]) or "unstamped",
+                                "yes" if arm["harness_commit_uniform"] else
+                                "NO — this arm was written by more than one revision"))
+    A("")
+
+    ci = out.get("corpus_identity") or {}
+    A("=== CORPUS IDENTITY — one staged corpus, named (AC6) ===")
+    A("  sha256(Data.db): %s" % (ci.get("sha256_data_db") or "UNAVAILABLE"))
+    A("  source         : %s" % ci.get("sha256_source"))
+    if ci.get("sha256_error"):
+        A("  sha256 error   : %s" % ci["sha256_error"])
+    ref = ci.get("reference") or {}
+    if ref:
+        A("  rows per scan  : %s" % ref.get("rows_per_scan_observed"))
+        A("  staged         : %s (%s *-Data.db file(s))" % (ref.get("stage_dir"),
+                                                            ref.get("data_db_files")))
+        A("  bytes          : on-disk compressed %s / logical uncompressed %s" % (
+            ref.get("ondisk_compressed_bytes"), ref.get("logical_uncompressed_bytes")))
+    A("  arms checked   : %d" % len(ci.get("per_arm", [])))
+    A("  VERDICT: %s" % ci.get("verdict", "not evaluated"))
+    if out.get("smoke"):
+        A("  (ADVISORY under --smoke: #3217's committed results predate the per-arm")
+        A("   corpus-basis.json, so a FAIL here describes that input, not this round.)")
+    A("")
+
     A("=== ADMISSION REJECTIONS (requests_unavailable) ACROSS EVERY POINT ===")
     tot = 0
     for arm in out["arms"]:
         n = arm["requests_unavailable_total_all_points"]
         tot += n
-        A("  %-14s %d" % (arm["arm"], n))
+        A("  %-18s %d" % (arm["arm"], n))
     A("  TOTAL across all arms and all points: %d" % tot)
     A("  A non-zero total means the admission ceiling BOUND during the sweep, so those points")
     A("  measured the gate rather than the curve. Expected 0: the sweep runs with")
@@ -472,14 +921,14 @@ def render(out):
     A("")
 
     A("=== THE THREE BYTE BASES, AT EACH WIDTH'S PEAK (AC6) ===")
-    A("%-14s %-22s %-22s %-22s" % (
+    A("%-18s %-22s %-22s %-22s" % (
         "arm", "logical uncompressed", "on-disk compressed", "arrow wire CAPACITY"))
     for arm in out["arms"]:
         b = arm.get("byte_bases_at_peak")
         if not b:
             continue
         fmt = lambda v: ("%.1f MB/s" % (v / 1e6)) if v else "n/a"  # noqa: E731
-        A("%-14s %-22s %-22s %-22s" % (
+        A("%-18s %-22s %-22s %-22s" % (
             arm["arm"], fmt(b["logical_uncompressed_bytes_per_s"]),
             fmt(b["ondisk_compressed_bytes_per_s"]),
             fmt(b["arrow_wire_capacity_bytes_per_s"])))
@@ -543,10 +992,16 @@ def main() -> int:
                          "(default: the largest N actually measured in each arm)")
     ap.add_argument("--smoke", action="store_true",
                     help="run against #3217's committed results and cross-check its partA-analysis.json")
+    ap.add_argument("--corpus-sha-file", default=None,
+                    help="shasum artifact naming the corpus Data.db digest (AC6); default is the "
+                         "committed ../corpus/corpus-sha-staged.txt beside this script")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
     repo = os.path.abspath(os.path.join(here, "..", "..", "..", ".."))
+    corpus_sha_file = args.corpus_sha_file or os.path.join(
+        here, "..", "corpus", "corpus-sha-staged.txt")
+    corpus_sha_file = os.path.abspath(corpus_sha_file)
     partA_json = None
 
     if args.smoke:
@@ -588,6 +1043,10 @@ def main() -> int:
     # sorts to the end rather than colliding with a real width.
     arms.sort(key=lambda a: (a["S_physical_cores"] is None, a["S_physical_cores"] or 0, a["arm"]))
 
+    pairs = pair_supplements(arms)
+    bridges = [analyse_bridge(p, s) for p, s in pairs]
+    supp_labels = [s["arm"] for _p, s in pairs]
+
     out = {
         "schema": SCHEMA,
         "results_dir": os.path.abspath(results_dir),
@@ -595,6 +1054,15 @@ def main() -> int:
             SCANS_PER_HW_THREAD, DERIVED_MIN, DERIVED_CEILING),
         "arms": arms,
         "arms_with_unresolved_width": [a["arm"] for a in arms if a["S_physical_cores"] is None],
+        "supplement_arms": supp_labels,
+        "bridges": bridges,
+        "supplemented_formula_verdicts": [
+            supplemented_formula(p, s, br) for (p, s), br in zip(pairs, bridges)],
+        "cross_run_uncertainty_pct_max": max(
+            [b["cross_run_uncertainty_pct"] for b in bridges
+             if b["cross_run_uncertainty_pct"] is not None], default=None),
+        "ac5": ac5_block(arms, set(supp_labels)),
+        "corpus_identity": corpus_identity(arms, corpus_sha_file),
         "requests_unavailable_total_all_arms": sum(
             a["requests_unavailable_total_all_points"] for a in arms),
     }
@@ -613,6 +1081,11 @@ def main() -> int:
     if args.smoke and out["smoke"]["mismatched"]:
         print("SMOKE: %d cross-check(s) did not match #3217's published values"
               % out["smoke"]["mismatched"], file=sys.stderr)
+        return 1
+    if not args.smoke and not out["corpus_identity"]["ok"]:
+        # Fail closed: if the arms did not all read the same named bytes, the peak
+        # table compares curves from different corpora and AC6 cannot be answered.
+        print("CORPUS IDENTITY: %s" % out["corpus_identity"]["verdict"], file=sys.stderr)
         return 1
     return 0
 
