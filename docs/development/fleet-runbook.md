@@ -832,3 +832,80 @@ reports the counter. Deciding WHOSE capability was measured is the caller's job,
 the caller owns the verdict.
 
 ```
+
+### perf-capability-dropin-current-rc-0-iff-the
+
+```
+perf_capability_dropin_current: rc 0 iff the drop-in exists with EXACTLY the managed
+bytes (the idempotency test — a matching file means write nothing). The compare is an
+in-shell string compare, NOT `diff -q`: on a box without diffutils `diff` exits 127,
+which reads as "different" on every run — so bootstrap would re-write the file each time
+AND then report it could not write it.
+
+TRAILING NEWLINES ARE PART OF THE BYTES (review R4-4). `$( )` strips EVERY trailing
+newline, so comparing two command substitutions made a file missing its final newline —
+or carrying extra trailing blank lines — compare EQUAL: "byte-exact" was a false claim
+and such a file was never rewritten. The file side is read with `read -r -d ''`, which
+consumes it verbatim (builtin, no `cat`/`diff` dependency), and the canonical side carries
+an in-substitution sentinel so its own final newline survives the stripping.
+
+A NUL BYTE IS THE THIRD SPELLING OF "NOT EXACT" (review R5-3). `read -d ''` stops at a NUL
+and returns SUCCESS with only the bytes BEFORE it, so canonical content + NUL + ARBITRARY
+trailing bytes compared EQUAL and was judged current. Read's rc is therefore load-bearing:
+rc 0 means a NUL was consumed — not our text drop-in, and the rest never even seen — so it
+is NOT current; only rc != 0 (EOF, whole file in `got`) may be compared.
+```
+
+### the-sentinel-must-not-swallow-the-generator
+
+```
+# THE SENTINEL MUST NOT SWALLOW THE GENERATOR'S STATUS (roborev round 9, Medium). `printf X`
+# exists so a trailing newline survives command substitution, but it also RAN LAST, so the
+# substitution reported ITS status and a failed content generator looked like success: `want`
+# became bare "X", and against an empty file `${got}X` is also "X" — equal, so a broken
+# generator reported the drop-in ALREADY CURRENT. A positive verdict from an unmeasured state,
+# which is the exact shape this repo has a standing rule against. The rc is now captured
+# BEFORE the sentinel and re-raised as the subshell's exit status, so both properties hold.
+```
+
+### perf-capability-proc-read-outvar-name-the-cu
+
+```
+perf_capability_proc_read <outvar> <name>: the CURRENT kernel value read straight from
+/proc/sys/kernel/<name> into <outvar> (rc 1 + <outvar> emptied when unreadable). NEVER
+trust a `sysctl -w`/`--system` return code — a write can report success while the value
+does not take (container, read-only sysfs, a competing drop-in applied later), and it can
+report FAILURE for an unrelated entry while ours applied fine. Read back.
+Fully fork-free: `read` is a builtin, the directory comes back through a variable, and
+nothing here is wrapped in `$( )` — this sits in the gate's summary path, which may not
+grow a process for a diagnostic line. `read` returns non-zero at EOF on a file with no
+trailing newline yet still assigns, so emptiness — not read's rc — is the failure test. It
+also propagates the test-mode sandbox refusal (R4-3): with no seam inside the sandbox there
+is no directory to read, and that is rc 1, never the real /proc.
+
+```
+
+### b951
+
+```
+
+WHY (review R4-2). `runuser -u <name>` / `sudo -u <name>` drop to whatever the NAME
+resolves to, not to the numeric ids we validated, and SUDO_USER/SUDO_UID are independent
+environment strings: `SUDO_UID=1000 SUDO_USER=root` (stale or hand-set) would run the probe
+AS ROOT while the code reported a successful drop — a false VERIFIED again. So a name is
+usable only once the passwd database confirms it IS the validated uid/gid. The shape check
+is equally load-bearing: the prefix is word-split by the caller, so a name containing
+whitespace or glob characters could inject extra argv tokens.
+```
+
+### event-name-matching-must-accept-a-qualified
+
+```
+# Event-name matching must accept a QUALIFIED cycle event: on a hybrid-PMU CPU (Intel
+# 12th-gen+ P/E cores) perf emits one row per PMU (`cpu_core/cycles/`, `cpu_atom/cycles/`),
+# commonly with `<not supported>` on the sibling that did not run — so a parser keyed on a
+# literal leading `cycles` reports `no-cycles-row` on a perfectly good collection. Normalise
+# the event field (drop PMU prefix, trailing `/`, any `:u`/`:k` modifier) and take the FIRST
+# row with a positive numeric count; keep the first matching row's raw field as the fallback
+# so the `<not supported>` / zero diagnostics below still fire when none is positive.
+```
