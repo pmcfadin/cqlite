@@ -488,19 +488,7 @@ perf_capability_dropin_install() {
     # having done it. Same reason the mktemp answer is re-checked here rather than trusted.
     while [ "${d%/}" != "$d" ] && [ "${#d}" -gt 1 ]; do d="${d%/}"; done
     # TOOL COMPATIBILITY IS EXERCISED HERE, IN THE PRIVILEGED SHELL (roborev round 17, Medium — a
-    # defect in the round-16 fix). The previous probe ran in the CALLERS PATH, but this shell is
-    # entered through sudo, which applies its own secure_path: the two can resolve DIFFERENT stat and
-    # mv binaries, so a caller-side check could pass while the privileged tools are incompatible, or
-    # refuse while they would have worked. Same lesson already applied to mktemp here — the block
-    # holding privilege re-checks rather than trusting what someone else established.
-    # And the flags are EXERCISED, not grepped: reading mv --help proves a help string mentions
-    # --no-target-directory, not that rename-over-a-name behaves. Two throwaway entries in the
-    # already-validated directory are renamed one over the other, which is exactly the operation the
-    # install depends on. rc 2 = UNSUPPORTED HOST, distinct from rc 1 = REFUSED.
-    # Probed on `/`, a KNOWN-VALID operand, not on $d (roborev round 23, Medium): statting the
-    # DESTINATION here conflated "no GNU stat" with "destination missing", so an absent /etc/sysctl.d
-    # returned rc 2 and bootstrap suppressed a remedy that would have helped. Destination problems are
-    # rc 1, reported by the owner/mode read further down; rc 2 means the TOOL is incompatible.
+    # (rationale relocated: docs/development/fleet-runbook.md, "perf seam containment — why", tool-compatibility-is-exercised-here-in-the-priv.)
     stat -c '%a' -- / >/dev/null 2>&1 || {
       printf "perf-capability: UNSUPPORTED on this host: stat -c is unavailable (GNU coreutils required), so ownership and mode cannot be established before a privileged write.\n" >&2
       exit 2; }
@@ -698,16 +686,7 @@ perf_capability_dropin_current() {
 #   MASKING  "once a file of a given filename is loaded, any file of the same name in
 #            subsequent directories is ignored" — so /etc/sysctl.d/50-x.conf REPLACES
 #            /usr/lib/sysctl.d/50-x.conf outright, and reporting the masked one would name
-#            a file that is not in effect.
-#   ORDERING the survivors are applied in lexicographic BASENAME order regardless of which
-#            directory they came from; the LAST assignment wins. /etc/sysctl.conf is applied
-#            AFTER every drop-in, so it wins on grounds unrelated to its name and gets its
-#            own verdict rather than a sort comparison.
-# WHY THE WHOLE PATH (review R5-4). Scanning only /etc/sysctl.d meant a later-sorting file in
-# /run/sysctl.d or /usr/lib/sysctl.d could override our drop-in while bootstrap reported NO
-# competitor — recreating the "it silently reverts and nobody knows why" mystery this
-# diagnostic exists to end.
-#
+# (rationale relocated: docs/development/fleet-runbook.md, "perf seam containment — why", usr-lib-sysctl-d-50-x-conf-outright-and-reporti.)
 # In TEST MODE the path is the sandbox seam plus the optional colon-separated
 # CQLITE_PERF_SYSCTL_EXTRA_DIRS (lower-precedence stand-ins, same descending order): the real
 # /run and /usr/lib are never read. EVERY entry goes through the SAME RESOLVING gate as the
@@ -790,19 +769,7 @@ perf_capability_competing_files() {
     [ -d "$entry" ] && [ -r "$entry" ] || return 1
     for f in "$entry"/*.conf; do
       # EVERY GLOBBED FILE IS VALIDATED IN TEST MODE, NOT JUST ITS DIRECTORY (roborev round 11,
-      # Medium). The scan validated the containing DIRECTORY and then trusted whatever the glob
-      # produced inside it — but `[ -f ]` and `grep` both FOLLOW symlinks, so a link sitting inside a
-      # perfectly contained sandbox directory and pointing at a real host `*.conf` was read, and its
-      # contents fabricated "a competitor sets these keys" diagnostics out of HOST state. That is a
-      # hermeticity escape in the DIAGNOSTIC path: the numbers a test asserts on would come from the
-      # box rather than the fixture. Same lesson as the write path, one surface over — a contained
-      # directory says nothing about where its ENTRIES point.
-      # `perf_capability_sandbox_file_ok_resolved` is the AC3 predicate, reused rather than
-      # reimplemented: it refuses a symlink outright and requires the canonical parent-plus-basename
-      # to be strictly inside the declared sandbox. FAILS THE SCAN CLOSED, because a competitor we
-      # declined to examine is exactly the UNKNOWN this diagnostic exists to report rather than hide.
-      # Production is untouched: without CQLITE_PERF_TEST_MODE there is no sandbox and the real
-      # /etc/sysctl.d files are the legitimate subject.
+      # (rationale relocated: docs/development/fleet-runbook.md, "perf seam containment — why", every-globbed-file-is-validated-in-test-mode-not.)
       if perf_capability_test_mode && [ -e "$f" ] \
          && ! perf_capability_sandbox_file_ok_resolved "$f"; then
         printf 'perf-capability: REFUSING to scan %s — CQLITE_PERF_TEST_MODE=1 and it does not resolve to a real file strictly inside the declared sandbox (a symlink, or a path leading outside it), so scanning it would fabricate diagnostics from HOST state.\n' \
@@ -1033,15 +1000,7 @@ perf_capability_drop_target_into() {
 #   root-no-unprivileged-target   root, and no unprivileged identity is resolvable (rc 1)
 #   root-no-drop-mechanism        root, target known, but no usable setpriv/runuser/sudo (rc 1)
 # Mechanism order: `setpriv` (util-linux; a plain setresuid — no PAM, no session, no shell),
-# then `runuser`, then `sudo -n -u`. Two of the three take the VALIDATED NUMERIC ids and
-# never a name — `setpriv --reuid/--regid` and `sudo -u '#<uid>'` (sudo's documented
-# numeric-uid form) — so no name has to be trusted (R4-2); `runuser` accepts only a name and
-# is used ONLY with a passwd-confirmed one. The `#<uid>` token survives the caller's
-# word-split intact: `#` starts a comment only while TOKENISING a source line, and this value
-# arrives by EXPANSION afterwards. The prefix holds only literal tokens plus a validated
-# numeric uid/gid or a confirmed name, so the caller may word-split it. A non-zero rc is NOT
-# an error to fail on: it is the caller's cue to label the functional result as what it is —
-# not evidence about an unprivileged process — and to let the /proc token be the authority.
+# (rationale relocated: docs/development/fleet-runbook.md, "perf seam containment — why", mechanism-order-setpriv-util-linux-a-plain-setre.)
 perf_capability_drop_prefix_into() {
   local __pdp_u='' __pdp_g='' __pdp_n='' __pdp_self=''
   eval "$1="
@@ -1074,17 +1033,7 @@ perf_capability_drop_prefix_into() {
 }
 
 # perf_capability_verify [prefix-word...]: the FUNCTIONAL verification (AC2). A bootstrap
-# that silently leaves a box unprofileable is the failure mode being fixed, so the verdict
-# comes from RUNNING the collection the doctrine mandates — `perf stat -C 0 -e cycles` — and
-# requires BOTH exit 0 AND a non-zero cycle count: `perf stat` exits 0 while printing
-# `<not supported>`/`<not counted>` (and a virtualised PMU can report a flat 0), so an
-# rc-only check is exactly the false green this exists to prevent.
-#
-# Any arguments are a command prefix the collection runs under — the privilege-dropping
-# prefix above. This function makes NO claim about identity: it runs what it is given and
-# reports the counter. Deciding WHOSE capability was measured is the caller's job, because
-# the caller owns the verdict.
-#
+# (rationale relocated: docs/development/fleet-runbook.md, "perf seam containment — why", perf-capability-verify-prefix-word-the-functiona.)
 # CSV mode (`-x,`) is parsed rather than the human table: the human renderer is
 # locale-formatted (`1.234.567`) and its column layout has changed across perf releases,
 # while the CSV shape `<count>,<unit>,<event>,...` is stable. Prints a short
