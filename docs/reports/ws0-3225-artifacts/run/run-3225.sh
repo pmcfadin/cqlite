@@ -125,7 +125,14 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   printf 'planned arms (ramp=%s step=%ss reps=%s client=%s max_concurrent_scans=%s):\n' \
     "$RAMP" "$STEP_SECS" "$REPS" "$CLIENT_CPUS" "$WS0_MAX_CONCURRENT_SCANS"
   for i in "${!ARM_LABELS[@]}"; do
-    printf '  %-16s server_cpus=%s\n' "${ARM_LABELS[$i]}${LABEL_SUFFIX}" "${ARM_SPECS[$i]}"
+    label="${ARM_LABELS[$i]}${LABEL_SUFFIX}"
+    # --list MUST apply the same --arms filter the run loop applies. Printing the
+    # unfiltered table while execution silently skips most of it makes the one
+    # affordance whose whole job is "show me the plan before the 6-hour run" lie.
+    if [ -n "$ARMS_REQ" ]; then
+      case " $ARMS_REQ " in *" $label "*) ;; *) continue ;; esac
+    fi
+    printf '  %-20s server_cpus=%s\n' "$label" "${ARM_SPECS[$i]}"
   done
   exit 0
 fi
