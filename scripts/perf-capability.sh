@@ -489,6 +489,7 @@ perf_capability_dropin_install() {
     while [ "${d%/}" != "$d" ] && [ "${#d}" -gt 1 ]; do d="${d%/}"; done
     # TOOL COMPATIBILITY IS EXERCISED HERE, IN THE PRIVILEGED SHELL (roborev round 17, Medium — a
     # (rationale relocated: docs/development/fleet-runbook.md, "perf seam containment — why", tool-compatibility-is-exercised-here-in-the-priv.)
+    # `/` NOT "$d": statting the destination conflated "no GNU stat" with "destination missing" (r23).
     stat -c '%a' -- / >/dev/null 2>&1 || {
       printf "perf-capability: UNSUPPORTED on this host: stat -c is unavailable (GNU coreutils required), so ownership and mode cannot be established before a privileged write.\n" >&2
       exit 2; }
