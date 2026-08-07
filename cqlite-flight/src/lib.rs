@@ -19,6 +19,13 @@ pub mod batch_bytes;
 // forced-path seam, and the single-generation scan row source.
 pub mod bypass;
 pub mod cancel;
+// The server binary's clap surface (issue #3225): the argument definitions, the
+// parse entry point that also yields the `ArgMatches`, the admission-ceiling
+// provenance resolution (flag > env > derived) and the startup log event. In
+// the LIBRARY rather than `main.rs` so AC4's precedence/provenance contract is
+// asserted through the REAL parser from an integration test — a binary target's
+// `Args` is unreachable from `tests/`.
+pub mod cli;
 // Per-stream in-flight egress capacity-byte credit governor (issue #2821): the
 // reserve-before-materialize credit pool, its RAII permit, the `CreditedBatch`
 // channel element, and the `--max-inflight-egress-bytes` constants.

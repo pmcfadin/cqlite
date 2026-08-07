@@ -1,98 +1,15 @@
 //! `cqlite-flight` — Arrow Flight server exposing on-the-fly compacted SSTable
 //! data. Runs co-located with a Cassandra node and reads its local SSTables.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-
 use arrow_flight::flight_service_server::FlightServiceServer;
-use clap::Parser;
 use tonic::transport::Server;
 
-use cqlite_flight::admission::{
-    Admission, AdmissionConfig, WaitBudget, DEFAULT_MAX_CONCURRENT_SCANS, DEFAULT_WAIT_TIMEOUT_MS,
-    ENV_MAX_CONCURRENT_SCANS, ENV_WAIT_TIMEOUT_MS,
-};
-use cqlite_flight::batch_bytes::{DEFAULT_MAX_BATCH_BYTES, ENV_MAX_BATCH_BYTES};
-use cqlite_flight::egress_credit::{
-    EgressBudget, DEFAULT_MAX_INFLIGHT_EGRESS_BYTES, ENV_MAX_INFLIGHT_EGRESS_BYTES,
-};
+use cqlite_flight::admission::{Admission, AdmissionConfig, WaitBudget};
+use cqlite_flight::cli::{self, Args};
+use cqlite_flight::egress_credit::EgressBudget;
 use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::shutdown::shutdown_signal;
 use std::time::Duration;
-
-/// Command-line arguments.
-#[derive(Parser, Debug)]
-#[command(
-    name = "cqlite-flight",
-    about = "Arrow Flight server for compacted CQLite SSTables"
-)]
-struct Args {
-    /// Root directory holding `<keyspace>/<table>[-<uuid>]/` SSTable dirs.
-    #[arg(long)]
-    data_dir: PathBuf,
-
-    /// Address to listen on.
-    #[arg(long, default_value = "0.0.0.0:8815")]
-    listen: SocketAddr,
-
-    /// Maximum rows per Arrow record batch.
-    #[arg(long, default_value_t = 8192)]
-    batch_size: usize,
-
-    /// Maximum concurrently admitted `do_get` scans (issue #2420, WS4). A `do_get`
-    /// acquires a permit before opening any SSTable; past this ceiling requests
-    /// wait up to `--admission-wait-timeout-ms`, then are shed with gRPC
-    /// `UNAVAILABLE` (retry-safe for the connector's replica failover). Sized from
-    /// the blocking-pool (~256) / fd (~1024÷SSTables) ceilings, not core count.
-    #[arg(long, env = ENV_MAX_CONCURRENT_SCANS, default_value_t = DEFAULT_MAX_CONCURRENT_SCANS)]
-    max_concurrent_scans: usize,
-
-    /// How long a saturated `do_get` waits for an admission permit before it is
-    /// rejected with `UNAVAILABLE` (issue #2420, WS4). Short bursts under this
-    /// budget are absorbed transparently with no client-visible error.
-    #[arg(long, env = ENV_WAIT_TIMEOUT_MS, default_value_t = DEFAULT_WAIT_TIMEOUT_MS)]
-    admission_wait_timeout_ms: u64,
-
-    /// Maximum Arrow PAYLOAD bytes per record batch (issue #2825, T4). A batch is
-    /// finished on whichever of `--batch-size` or this cap trips FIRST, so a wide
-    /// (blob/text) schema can no longer produce an unbounded
-    /// `batch_size x row_width` batch. Denominated in payload bytes (the sum of
-    /// Arrow buffer lengths), NOT `get_array_memory_size()`, which reports buffer
-    /// capacity and runs up to `BATCH_BYTES_CAPACITY_FACTOR` (2x) higher; a
-    /// consumer budgeting resident memory uses
-    /// `cqlite_flight::batch_bytes::worst_case_batch_capacity_bytes`. The 4 MiB
-    /// default leaves the row-cap binding on every narrow shape, so narrow-path
-    /// batch boundaries are unchanged. A single row wider than the cap is still
-    /// delivered, as a one-row batch; `0` and `1` degrade to one row per batch.
-    #[arg(long, env = ENV_MAX_BATCH_BYTES, default_value_t = DEFAULT_MAX_BATCH_BYTES)]
-    max_batch_bytes: usize,
-
-    /// Maximum Arrow CAPACITY bytes in flight on ONE streaming `do_get` (issue
-    /// #2821). Credit for a batch is reserved BEFORE the batch is materialized
-    /// and released when it has left the stream, so per-stream egress residency
-    /// is bounded in BYTES rather than by a batch count multiplied by an
-    /// unbounded row width. Denominated in `RecordBatch::get_array_memory_size()`
-    /// (buffer CAPACITY) — a DIFFERENT currency from `--max-batch-bytes`, which
-    /// is Arrow PAYLOAD bytes; convert between them only with
-    /// `cqlite_flight::batch_bytes::worst_case_batch_capacity_bytes`. A single
-    /// batch may exceed the whole ceiling and is still delivered (it takes the
-    /// whole pool), so the guaranteed bound is `max(ceiling, one maximum batch)`
-    /// = max(12 MiB, ~8.4 MiB) = 12 MiB PER STREAM at the shipped defaults —
-    /// size a deployment against that, not against the 8 MiB one-batch figure.
-    /// The bound is over SERVER-SIDE residency: bytes this process holds on the
-    /// egress path. It covers GOVERNED EGRESS CAPACITY only, so it is a floor
-    /// for sizing rather than a per-stream total: the row buffer and the
-    /// encoder's queued `FlightData` (~4 MiB at defaults) are additional
-    /// server-side memory on the same stream and are not counted here. Batches a client retains after receiving them are the
-    /// client's memory and are deliberately not charged here. `0` degrades to
-    /// strict one-batch-at-a-time egress, never a hang.
-    #[arg(
-        long,
-        env = ENV_MAX_INFLIGHT_EGRESS_BYTES,
-        default_value_t = DEFAULT_MAX_INFLIGHT_EGRESS_BYTES
-    )]
-    max_inflight_egress_bytes: usize,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -126,19 +43,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // say why. Make the inert-vs-active state visible instead.
     log_observability_status(obs_enabled, &obs_endpoint);
 
-    let args = Args::parse();
+    // Parse WITH the `ArgMatches` (issue #3225): the admission ceiling's
+    // provenance — flag vs env vs derived — is a property of the parse, and
+    // only `ArgMatches::value_source` can report it.
+    let (args, matches) = Args::parse_with_matches();
     let listen = args.listen;
+    // The effective ceiling and where it came from. With nothing configured this
+    // is `clamp(2 x available_parallelism, 2, 64)` (issue #3225) rather than the
+    // flat 64 constant, so a narrow server or a CPU-quota-limited container is
+    // not admitted past its measured peak-throughput concurrency.
+    let scans = cli::resolve_max_concurrent_scans(&args, &matches);
     // Admission control (issue #2420, WS4): the owned Semaphore is the real,
     // observable, cancel-releasable ceiling.
     let admission = Admission::new(AdmissionConfig {
-        max_concurrent_scans: args.max_concurrent_scans,
+        max_concurrent_scans: scans.value,
         wait_budget: WaitBudget::Timeout(Duration::from_millis(args.admission_wait_timeout_ms)),
     });
     let admission_limit = admission.limit();
     // Keep a copy of the data-dir for the saturation sampler's readdir-only
     // table-discovery walk (issue #2684) before the service takes ownership.
     let sampler_data_dir = args.data_dir.clone();
-    let service = CqliteFlightService::with_admission(args.data_dir, args.batch_size, admission)
+    let service =
+        CqliteFlightService::with_admission(args.data_dir.clone(), args.batch_size, admission)
         // Issue #2825: the byte-cap half of the dual batch boundary.
         .with_max_batch_bytes(args.max_batch_bytes)
         // Issue #2821: the per-stream in-flight egress capacity-byte ceiling.
@@ -154,16 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .saturating_mul(4)
         .max(1024);
 
-    tracing::info!(
-        %listen,
-        batch_size = args.batch_size,
-        max_batch_bytes = args.max_batch_bytes,
-        max_inflight_egress_bytes = args.max_inflight_egress_bytes,
-        max_concurrent_scans = admission_limit,
-        admission_wait_timeout_ms = args.admission_wait_timeout_ms,
-        max_concurrent_streams,
-        "cqlite-flight starting"
-    );
+    cli::log_startup(&args, &scans, admission_limit, max_concurrent_streams);
     // Saturation instrumentation (issue #2419, WS2): spawn the background sampler
     // that drives the `cqlite.proc.*` OS-resource gauges (thread/fd/RSS) on a ~2s
     // cadence. It takes its OWN `shutdown_signal()` future — the same SIGTERM /
