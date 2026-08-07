@@ -866,15 +866,7 @@ done
 #     containment family (`perf_capability_sandbox_*` / `perf_capability_path_within`) — with
 #     ONE named, justified allowlist entry. A future entry point that reads a seam without
 #     the gate FAILS here, and joining the allowlist is a visible, reviewable act.
-#
-#     Same shape as the fork-free audit in test_agent_gate_summary.sh: parse the function
-#     bodies (a column-0 `name() {` … column-0 `}`), and treat FINDING NOTHING as a failure,
-#     so a parser that stops matching can never pass this vacuously.
-#
-#     EXTENDED TO THE PRIVILEGE SHIM (issue #3261 AC4). The guard authorizes EXECUTABLES as
-#     well as paths, and CQLITE_PERF_TEST_PRIV_DIR was read TEXTUALLY — so it joins the seam
-#     regex below, and a second pass audits every function that RESOLVES a privileged tool.
-# CODE ONLY, AND CALL SITES ONLY — see the code/codeq note in the awk below for why.
+# (rationale condensed; full reasoning in the commit history for #3261.)
 seam_audit=$(awk \
   -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
   -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
@@ -1017,14 +1009,7 @@ fi
 #         * anything that merely NAMES the write target REFUSES (rc 1, empty, loud);
 #         * the WRITE ITSELF replaces the directory ENTRY (rename), so a symlink planted in
 #           the window between the check and the write is replaced, not written through.
-# ---- STAGED-INSTALL CASES: GNU-ONLY TOOLCHAIN, LOUDLY AND COUNTABLY SKIPPED ELSEWHERE ----------
-# (issue #3261, roborev round 5 Medium.) Everything from here to the matching `fi` drives
-# perf_capability_dropin_install, which needs GNU `stat -c` and `mv --no-target-directory`. macOS is a
-# FIRST-CLASS gate host here, so invoking these unconditionally red-ed the gate on the TOOLCHAIN
-# rather than on behaviour. The probe is AFFIRMATIVE (it runs the flags) rather than a `uname` guess,
-# and the non-GNU branch emits one COUNTED skip per case group so a green macOS run shows them
-# skipped-with-reason instead of silently absent. Production is unaffected on either branch:
-# bootstrap gates the whole perf section on PLATFORM=linux.
+# (rationale condensed; full reasoning in the commit history for #3261.)
 if perf_install_supported; then
   wt_d="$tmp/wt-sandbox.d"; mkdir -p "$wt_d"
   wt_outside="$tmp/wt-outside-target"; printf 'PRECIOUS-HOST-FILE\n' >"$wt_outside"

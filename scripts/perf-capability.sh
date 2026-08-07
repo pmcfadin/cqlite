@@ -142,17 +142,7 @@ perf_capability_seam_set() {
 # FIVE thin functions, ONE predicate — everything ends in perf_capability_path_within:
 #   sandbox_root_into O        the declared root, validated; rc 1 + empty when unproven
 #   path_within P R            THE predicate (below)
-#   sandbox_ok P               FORK-FREE entry point (the gate's emit-time token chain, which
-#                              may not fork): judges the SPELLING — sound there for the reason
-#                              in the fail-open audit's second residual above
-#   sandbox_ok_resolved P      every path WRITTEN, or whose CONTENTS are read: canonicalizes
-#                              candidate AND root, then the SAME predicate. An unenterable
-#                              path resolves to nothing and is refused — fail-closed, and
-#                              correct for a write target, which must exist to be written into
-#   sandbox_file_ok_resolved F the FILE form (the optional `sysctl.conf` entry): judged by
-#                              canonicalizing its PARENT, plus a plain-basename check
-# `cd -P` + `pwd -P` is the canonicalizer: one subshell, no external binary, correct on bash
-# 3.2 (no `realpath`, no `readlink -f` — absent or non-GNU on some supported hosts).
+# (rationale condensed; full reasoning in the commit history for #3261.)
 PERF_CAPABILITY_SANDBOX_STAMP='.cqlite-perf-sandbox'
 # A literal LF and CR, for the line-safety predicate below. Spelled as a literal newline inside
 # single quotes rather than `$'\n'` so this stays correct on bash 3.2 (a supported gate host).
@@ -219,12 +209,7 @@ perf_capability_path_within() {
 #
 # WHY (issue #3261 AC2). Containment of a SPELLING is not containment of a DESTINATION. The
 # inversion to positive containment made the fork-free read check purely textual and thereby
-# REGRESSED a protection the denylist rounds had: a symlink INSIDE the proven sandbox pointing at
-# the real /proc/sys/kernel satisfies path_within, so the run reported a capability token derived
-# from the HOST's real controls while claiming to have read a stand-in. A FABRICATED verdict is
-# strictly worse than a refusal — measured before the fix, the suite's stand-in seam produced
-# `paranoid-4` straight out of the live /proc. Rejecting per component (rather than resolving)
-# is what keeps the token path fork-free while judging the destination.
+# (rationale condensed; full reasoning in the commit history for #3261.)
 perf_capability_nosymlink() {
   local __pns_rest="${1:-}" __pns_acc='' __pns_seg
   case "$__pns_rest" in /*) ;; *) return 1 ;; esac
@@ -391,14 +376,7 @@ perf_capability_priv_tool_ok() {
 # `_into <outvar>` core assigning through a caller-named variable, and the stdout-printing
 # form is a thin wrapper for CLI/bootstrap ergonomics — the wrapper is the ONLY place a fork
 # is paid, and it is not on the gate's path. Assignment is `eval "$1=\$var"`, NOT a
-# `local -n` nameref: bash 3.2 (macOS /bin/bash, a supported gate host) has none. The RHS is
-# an assignment, so no word-splitting or globbing applies; <outvar> must be a plain
-# identifier (every caller passes a literal, and the `__pcd_`/`__pcr_`/`__pct_` prefixes
-# keep a caller-named variable from colliding with an internal one).
-#   In TEST MODE the seam is MANDATORY and gated (R4-3): a value not provably inside the
-#   declared sandbox is rc 1 with an empty answer, never a silent fallback to the real /proc
-#   or /etc/sysctl.d. Every caller propagates that rc, so an unsandboxed test run reads
-#   nothing and writes nothing.
+# (rationale condensed; full reasoning in the commit history for #3261.)
 perf_capability_proc_dir_into() {
   eval "$1="
   if perf_capability_test_mode; then
