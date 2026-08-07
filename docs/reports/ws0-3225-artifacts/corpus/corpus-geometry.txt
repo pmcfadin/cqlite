@@ -31,7 +31,7 @@ chunk count (16 KiB chunks)          169203           169257           -0.032%
 chunk_length (bytes)                 16384            16384            +0          
 Space used (live, bytes)             790523035        790771553        -0.031%     
 Estimated droppable tombstones       0.0              0.0              +0.000%     
-TTL min / max                        0                0                +0          
+TTL min / max                        0 / 0            0 / 0            identical   
 SSTable count                        1                1                +0          
 
 Categorical fields (must match exactly)

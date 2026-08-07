@@ -39,6 +39,29 @@ def grab(text: str, pattern: str, what: str, cast=float):
     return cast(m.group(1))
 
 
+def grab2(text: str, pattern: str, what: str, cast=float):
+    """Both capture groups of a COMPOSITE field, as a tuple.
+
+    A field the table labels `min / max` must be READ as min and max. Parsing one
+    component and printing a two-component heading is how a changed maximum TTL scored
+    an "exact match": the comparison could not see the half it never read. Same
+    fail-closed contract as grab() — an unparseable pattern refuses to publish.
+    """
+    m = re.search(pattern, text, re.MULTILINE)
+    if not m or m.re.groups < 2:
+        raise SystemExit(f"FAIL: could not parse BOTH components of {what} "
+                         f"(pattern {pattern!r}) — refusing to publish a composite field "
+                         "from one half of it")
+    return tuple(cast(g) for g in m.groups())
+
+
+def fmt(v) -> str:
+    """Display form: a composite tuple renders as `min / max`, matching its label."""
+    if isinstance(v, tuple):
+        return " / ".join(str(x) for x in v)
+    return str(v)
+
+
 def read(path: str) -> str:
     try:
         with open(path) as fh:
@@ -84,7 +107,10 @@ def main() -> int:
         "Space used (live, bytes)": grab(stats, r"Space used \(live\):\s*(\d+)", "space used", int),
         "Estimated droppable tombstones": grab(
             meta, r"^Estimated droppable tombstones:\s*([\d.]+)", "droppable tombstones"),
-        "TTL min / max": grab(meta, r"^TTL min:\s*(\d+)", "TTL min", int),
+        # BOTH components, compared as a tuple. sstablemetadata prints them on separate
+        # lines, so they are grabbed separately and paired here.
+        "TTL min / max": (grab(meta, r"^TTL min:\s*(\d+)", "TTL min", int),
+                          grab(meta, r"^TTL max:\s*(\d+)", "TTL max", int)),
         "SSTable count": grab(stats, r"SSTable count:\s*(\d+)", "sstable count", int),
     }
 
@@ -109,7 +135,8 @@ def main() -> int:
             old, r"^Space used \(live, all components\)  : (\d+) bytes", "#3217 space used", int),
         "Estimated droppable tombstones": grab(
             old, r"^Estimated droppable tombstones     : ([\d.]+)", "#3217 droppable"),
-        "TTL min / max": grab(old, r"^TTL min/max                        : (\d+) / \d+", "#3217 TTL", int),
+        "TTL min / max": grab2(
+            old, r"^TTL min/max                        : (\d+) / (\d+)", "#3217 TTL min/max", int),
         "SSTable count": grab(old, r"^Data\.db count in dir    : (\d+)", "#3217 sstable count", int),
     }
 
@@ -141,10 +168,24 @@ def main() -> int:
     material = []
     for k in new:
         a, b = new[k], oldv[k]
-        if isinstance(a, int) and isinstance(b, int) and k in (
+        if isinstance(a, tuple) or isinstance(b, tuple):
+            # A COMPOSITE exact-match field: EVERY component must match, and a shape
+            # mismatch (different component counts) is itself a divergence, not a
+            # comparison to paper over. Component-wise, so a changed maximum can no
+            # longer hide behind an unchanged minimum.
+            same = (isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b)
+                    and all(x == y for x, y in zip(a, b)))
+            if same:
+                delta = "identical"
+            else:
+                delta = "DIFFERS"
+                material.append((k, fmt(a), fmt(b), delta,
+                                 "COMPOSITE EXACT-MATCH FIELD DIVERGED (compared component-wise)"))
+        elif isinstance(a, int) and isinstance(b, int) and k in (
                 "rows (sstablemetadata totalRows)", "rows (independent fullscan oracle)",
                 "totalColumnsSet", "partitions (tablestats estimate)", "chunk_length (bytes)",
-                "SSTable count", "TTL min / max"):
+                # "TTL min / max" is NOT here: it is a composite, handled above.
+                "SSTable count"):
             delta = "%+d" % (a - b)
             exact = (a == b)
             if not exact:
@@ -163,7 +204,7 @@ def main() -> int:
             delta = "%+.3f%%" % pct
             if abs(pct) > args.tolerance_pct:
                 material.append((k, a, b, delta, "exceeds %.2f%% tolerance" % args.tolerance_pct))
-        A("%-36s %-16s %-16s %-12s" % (k, a, b, delta))
+        A("%-36s %-16s %-16s %-12s" % (k, fmt(a), fmt(b), delta))
 
     A("")
     A("Categorical fields (must match exactly)")
