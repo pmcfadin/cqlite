@@ -58,6 +58,13 @@ command -v python3 >/dev/null 2>&1 || {
   exit 1
 }
 
+# The reporter formats every count with python's `{n:,}` (`ws0_collect.py`), which groups in
+# thousands with commas UNCONDITIONALLY — it does not consult the locale. Bash `printf "%'d"`
+# groups only under a grouping locale, so on the gate's `LANG=C.UTF-8` worker it emits NO comma
+# and the expected string stops matching the reporter's real output (#3272). Reproduce the
+# reporter's exact grouping locale-independently, via the python3 this suite already requires.
+group() { python3 -c 'import sys; print(f"{int(sys.argv[1]):,}")' "$1"; }
+
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -126,8 +133,8 @@ make_thin_scan_rep "$d" "$CELLS_SHORT"
 make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
 out=$(run_report "$d" "$TMP/corpus" warm); rc=$?
 # BOTH quantities must be named — an operator has to see what was emitted and what was required.
-if [ "$rc" -ne 0 ] && grep -q "emitted $(printf "%'d" "$CELLS_SHORT") cells" <<<"$out" \
-   && grep -q "$(printf "%'d" "$CELLS_FULL")" <<<"$out"; then
+if [ "$rc" -ne 0 ] && grep -q "emitted $(group "$CELLS_SHORT") cells" <<<"$out" \
+   && grep -q "$(group "$CELLS_FULL")" <<<"$out"; then
   pass "OBSERVED (round 17): a pass returning EVERY ROW with MISSING COLUMNS is REFUSED, naming both the emitted cell count and the pinned requirement"
 else
   fail "round 17: a cell-short pass must be refused naming both counts (rc=$rc, out: $out)"
@@ -214,7 +221,7 @@ else
 fi
 # ...and the shortfall is INVISIBLE in that output: neither the emitted cell count nor the pinned
 # requirement is named anywhere. Stronger than "unchecked" — a report naming it would be honest.
-if ! grep -q "$(printf "%'d" "$CELLS_SHORT")" <<<"$r17_out" \
+if ! grep -q "$(group "$CELLS_SHORT")" <<<"$r17_out" \
    && ! grep -qi 'cells' <<<"$r17_out"; then
   pass "round 17 NON-VACUITY: that accepted report never mentions cells at all (the shortfall was INVISIBLE, not merely unchecked)"
 else
