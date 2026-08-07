@@ -18,7 +18,23 @@
 # perf mlock limit lifted too. CQLite's doctrine mandates per-CPU collection, so `1` is
 # not "almost right", it is a hard denial. `kernel.kptr_restrict = 0` is a SEPARATE control
 # for kernel SYMBOL resolution — without it kernel frames are unresolved addresses, a
-# (rationale condensed; see #3261 commit history.)
+# SILENT attribution loss rather than an error. Same rationale in the drop-in's own bytes.
+#
+# SECURITY POSTURE. A deliberate loosening, appropriate for DEDICATED SINGLE-TENANT
+# measurement/agent boxes. Never apply it to a shared or multi-tenant host. See
+# docs/development/fleet-runbook.md. BPF IS A DIFFERENT PERMISSION: a permissive
+# perf_event_paranoid does NOT grant BPF map creation — bpftrace/bcc collectors still need
+# sudo (#3217 finding).
+#
+# Sourceable AND executable. Source it ONCE (the gate does, at script scope) and call the
+# functions; a per-use re-source re-reads 300+ lines for nothing. Sourcing has NO side
+# effects: this file only defines `perf_capability_*` functions plus the four
+# `PERF_CAPABILITY_*` constants (nothing runs, no shell options are changed, no variables
+# outside those namespaces are touched). Every function is `set -u` safe.
+#
+# Usage when executed: `bash scripts/perf-capability.sh --help` (the modes are listed by
+# perf_capability_usage below, so they are not duplicated here).
+#
 # TEST-ONLY ENV SEAMS — INERT UNLESS CQLITE_PERF_TEST_MODE=1 (issue #3249 review).
 # The PRODUCTION paths below are HARDCODED LITERALS (/etc/sysctl.d, /proc/sys/kernel) because
 # bootstrap installs the drop-in through the STAGED installer below (mktemp + atomic rename, no
@@ -63,7 +79,14 @@
 #   token = ok                  both /proc values READ (non-empty) from the resolved dir AND
 #                               both `is_int`-validated AND paranoid <= 0 AND kptr == 0.
 #                               Whitespace trimmed, never TRUNCATED — `0 1` stays malformed.
-# (rationale condensed; see #3261 commit history.)
+#   verify -> cycles=<n>, rc 0  `perf` present, collection rc 0, a cycles row whose count is a
+#                               positive integer by BOTH awk's `^[0-9]+$` and `is_int` + `-le
+#                               0`. `<not supported>`/`<not counted>`/empty/oversized/malformed
+#                               all return 1.
+#   state = self-unprivileged   `self_uid_into` succeeded (an `id -u` that EXISTS, exits 0 and
+#                               prints a validated non-negative int) AND that uid != 0; an
+#                               unusable `id -u` => identity-unknown, rc 1.
+#   state = dropped:setpriv     numeric uid+gid, both validated ints AND both > 0.
 #   state = dropped:runuser     the same numerics PLUS a `SUDO_USER` the passwd database
 #                               confirms IS that non-zero uid/gid, with characters safe for
 #                               the caller's word-split.
@@ -680,7 +703,15 @@ perf_capability_dropin_current() {
   # THE SENTINEL MUST NOT SWALLOW THE GENERATOR'S STATUS (roborev round 9, Medium). `printf X`
   # exists so a trailing newline survives command substitution, but it also RAN LAST, so the
   # substitution reported ITS status and a failed content generator looked like success: `want`
-# (rationale condensed; see #3261 commit history.)
+  # became bare "X", and against an empty file `${got}X` is also "X" — equal, so a broken
+  # generator reported the drop-in ALREADY CURRENT. A positive verdict from an unmeasured state,
+  # which is the exact shape this repo has a standing rule against. The rc is now captured
+  # BEFORE the sentinel and re-raised as the subshell's exit status, so both properties hold.
+  want=$(perf_capability_dropin_content; __pdc_rc=$?; printf 'X'; exit "$__pdc_rc") || return 1
+  if IFS= read -r -d '' got <"$path"; then
+    return 1
+  fi
+  [ "$want" = "${got}X" ]
 }
 
 # perf_capability_sysctl_search_path: the COMPLETE set of locations `sysctl --system`
