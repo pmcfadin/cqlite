@@ -65,10 +65,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sampler_data_dir = args.data_dir.clone();
     let service =
         CqliteFlightService::with_admission(args.data_dir.clone(), args.batch_size, admission)
-        // Issue #2825: the byte-cap half of the dual batch boundary.
-        .with_max_batch_bytes(args.max_batch_bytes)
-        // Issue #2821: the per-stream in-flight egress capacity-byte ceiling.
-        .with_egress_budget(EgressBudget::bytes(args.max_inflight_egress_bytes));
+            // Issue #2825: the byte-cap half of the dual batch boundary.
+            .with_max_batch_bytes(args.max_batch_bytes)
+            // Issue #2821: the per-stream in-flight egress capacity-byte ceiling.
+            .with_egress_budget(EgressBudget::bytes(args.max_inflight_egress_bytes));
 
     // A coarse tonic transport backstop, generously ABOVE the admission ceiling:
     // it guards the HTTP/2 accept loop / stream table from a client opening far

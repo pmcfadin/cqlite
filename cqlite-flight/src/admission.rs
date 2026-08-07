@@ -104,9 +104,10 @@ pub const ENV_WAIT_TIMEOUT_MS: &str = "CQLITE_ADMISSION_WAIT_TIMEOUT_MS";
 /// the multiply saturates, so no `P` — including `usize::MAX` — can overflow it
 /// into a small ceiling.
 pub fn derive_max_concurrent_scans(p: usize) -> usize {
-    DERIVED_SCANS_PER_HARDWARE_THREAD
-        .saturating_mul(p)
-        .clamp(MIN_DERIVED_MAX_CONCURRENT_SCANS, DEFAULT_MAX_CONCURRENT_SCANS)
+    DERIVED_SCANS_PER_HARDWARE_THREAD.saturating_mul(p).clamp(
+        MIN_DERIVED_MAX_CONCURRENT_SCANS,
+        DEFAULT_MAX_CONCURRENT_SCANS,
+    )
 }
 
 /// The parallelism available to **this process**, or `None` when the platform

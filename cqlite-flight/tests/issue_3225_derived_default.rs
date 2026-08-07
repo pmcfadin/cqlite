@@ -94,8 +94,14 @@ fn the_floor_binds_so_a_one_cpu_quota_never_serialises_every_scan() {
     // the WORST point at every width. P=0 is not reachable through
     // `available_parallelism` (it returns a `NonZeroUsize`) but the pure
     // function must still be total.
-    assert_eq!(derive_max_concurrent_scans(0), MIN_DERIVED_MAX_CONCURRENT_SCANS);
-    assert_eq!(derive_max_concurrent_scans(1), MIN_DERIVED_MAX_CONCURRENT_SCANS);
+    assert_eq!(
+        derive_max_concurrent_scans(0),
+        MIN_DERIVED_MAX_CONCURRENT_SCANS
+    );
+    assert_eq!(
+        derive_max_concurrent_scans(1),
+        MIN_DERIVED_MAX_CONCURRENT_SCANS
+    );
     assert_eq!(MIN_DERIVED_MAX_CONCURRENT_SCANS, 2);
 }
 
@@ -111,7 +117,10 @@ fn the_ceiling_binds_so_the_change_is_one_directional() {
             "derived {derived} at P={p} must not exceed the {DEFAULT_MAX_CONCURRENT_SCANS} ceiling"
         );
     }
-    assert_eq!(derive_max_concurrent_scans(usize::MAX), DEFAULT_MAX_CONCURRENT_SCANS);
+    assert_eq!(
+        derive_max_concurrent_scans(usize::MAX),
+        DEFAULT_MAX_CONCURRENT_SCANS
+    );
     assert_eq!(DEFAULT_MAX_CONCURRENT_SCANS, 64);
     assert_eq!(DERIVED_SCANS_PER_HARDWARE_THREAD, 2);
 }
@@ -226,8 +235,9 @@ mod host_topology_guard {
         let mut offences = Vec::new();
         for relative in DERIVATION_PATH {
             let path = crate_root.join(relative);
-            let source = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("derivation-path file {} is unreadable: {e}", path.display()));
+            let source = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!("derivation-path file {} is unreadable: {e}", path.display())
+            });
             for (index, line) in source.lines().enumerate() {
                 if is_comment_line(line) {
                     continue;
