@@ -1070,15 +1070,7 @@ if perf_install_supported; then
   fi
   rm -f "$wt_d/.99-cqlite-perf.conf.new"
   # ...structurally: the staging entry is created by `mktemp` with a random-suffix template, no
-  # hardcoded staging literal survives, the rename carries `-T`, and the WHOLE staged install is ONE
-  # privileged invocation (issue #3261 roborev round 2).
-  #   THE LAST PROPERTY IS HYGIENE, NOT THE FIX, and this comment previously said otherwise. roborev
-  #   round 3 corrected it: a single `sh -c` sequences ONE PROCESS's commands and is not mutual
-  #   exclusion against other processes, which run concurrently on other CPUs regardless of how we
-  #   grouped ours. Consolidation NARROWS the create-to-reopen window; it does not close it. It is
-  #   still worth pinning — a split back into `mktemp` in one privileged call and the write in another
-  #   would re-widen the window while every behavioural assert stayed green, which no after-the-fact
-  #   observation can catch — but it is pinned as hygiene, not as the guarantee.
+  # (rationale: fleet-runbook.md, perf seam containment, structurally-the-staging-entry-is-created-b)
   wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
   wt_privcalls=$(printf '%s\n' "$wt_body" | grep -c '"\$@"')
   wt_struct_fail=''
@@ -1134,14 +1126,7 @@ if perf_install_supported; then
   fi
   rm -f "$wt_d/99-cqlite-perf.conf"
   # ...and THE PRECONDITION THAT ACTUALLY CLOSES THE STAGING RACE (issue #3261, roborev round 3): a
-  # drop-in directory writable by anyone less privileged than the writer is REFUSED before anything is
-  # staged. Three rounds of this defect were each answered by trying to make the race unwinnable
-  # (unpredictable name, then one privileged invocation); neither works, because a single `sh -c`
-  # sequences OUR commands and says nothing about other processes on other CPUs. Removing the
-  # attacker's precondition does work — with no one able to create or replace entries in the
-  # directory, there is no actor to race, whatever the timing.
-  # The negative control is the whole point of the group: a check that refuses everything would pass
-  # the two refusal cases and be useless, so a correctly-owned 0755 directory must still install.
+  # (rationale: fleet-runbook.md, perf seam containment, and-the-precondition-that-actually-closes-t)
   wt_perm_d="$tmp/wt-perm.d"
   wt_perm_fail=0
   for wt_mode in 0775 0777 0757; do
@@ -1185,14 +1170,7 @@ if perf_install_supported; then
     wt_perm_fail=1
   fi
   # ...a SHORT MODE from `stat -c %a` must not bypass the write-bit check (roborev round 5, High).
-  # WHY A SHIM AND NOT A REAL chmod: `%a` only drops below three digits when the OWNER digit is 0,
-  # and a directory its owner cannot enter fails containment long before the mode check — so the real
-  # bypass is NOT reachable through an actual chmod under test mode. It IS reachable as root in
-  # production, where root ignores permission bits and enters a mode-0033 /etc/sysctl.d happily while
-  # group and other retain write. So the honest reproduction is to feed the parser the short string a
-  # root `stat` would really print, against an enterable directory. Without the zero-padding this
-  # reports "33", the suffix-strip leaves the permission field EMPTY, no write-bit pattern matches,
-  # and a group- AND world-writable directory is ACCEPTED.
+  # (rationale: fleet-runbook.md, perf seam containment, a-short-mode-from-stat-c-a-must-not-bypass)
   wt_short="$tmp/wt-shortmode"; mkdir -p "$wt_short"
   for st in bash sh cat printf tee mv rm chmod env grep mktemp id ls; do
     s=$(command -v "$st" 2>/dev/null) && ln -sf "$s" "$wt_short/$st"
@@ -1478,12 +1456,7 @@ else
 fi
 
 # 1g-ii. AC2 (Medium) — the inversion REGRESSED symlink rejection on the READ path. The
-#        fork-free proc check judges the SPELLING, so a symlink INSIDE the sandbox pointing at
-#        the real /proc/sys/kernel satisfies containment: the run then reports a capability
-#        token derived from the HOST's real controls while claiming to have read a stand-in.
-#        That is a FABRICATED verdict, which is worse than a refusal, and it is a regression
-#        against the pre-inversion behaviour. The token path is contractually fork-free, so the
-#        fix must reject symlinked COMPONENTS with builtins only.
+# (rationale: fleet-runbook.md, perf seam containment, 1g-ii-ac2-medium-the-inversion-regressed-sym)
 ac2_fail=0
 ac2_link="$tmp/ac2-proc-is-a-symlink"; rm -f "$ac2_link"; ln -s /proc/sys/kernel "$ac2_link"
 ac2_dirlink="$tmp/ac2-ancestor-link"; rm -f "$ac2_dirlink"; ln -s /proc/sys "$ac2_dirlink"
@@ -1539,14 +1512,7 @@ else
 fi
 
 # 1g-iv. AC4 (High) — the guard authorizes EXECUTABLES, and never resolved them. Two escapes,
-#        one shape: an absolute shim dir that is not in the sandbox at all (`/usr` — it does
-#        contain the real /usr/bin/sudo, so the textual "inside the declared dir" check
-#        PASSED), and a SYMLINK to the real tool sitting inside a genuine shim dir (spelled
-#        locally, resolving to the host's binary). Either one let a privileged test-mode
-#        bootstrap execute a real `sysctl --system` and reconfigure the host kernel.
-#        `$ac4_sys` stands in for `/usr` PORTABLY: an absolute directory OUTSIDE the declared
-#        sandbox root that holds tools named `sudo`/`sysctl`. Asserting against the literal
-#        /usr would make the case depend on whether this host happens to ship sudo there.
+# (rationale: fleet-runbook.md, perf seam containment, 1g-iv-ac4-high-the-guard-authorizes-executab)
 ac4_sys=''
 if ac4_sys=$(mktemp -d "${TMPDIR:-/tmp}/perf-cap-outside.XXXXXX") && [ -d "$ac4_sys" ]; then
   trap 'rm -rf "$tmp" "$ac4_sys"' EXIT
