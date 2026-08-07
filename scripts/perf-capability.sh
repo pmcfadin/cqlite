@@ -497,7 +497,11 @@ perf_capability_dropin_install() {
     # --no-target-directory, not that rename-over-a-name behaves. Two throwaway entries in the
     # already-validated directory are renamed one over the other, which is exactly the operation the
     # install depends on. rc 2 = UNSUPPORTED HOST, distinct from rc 1 = REFUSED.
-    stat -c '%a' -- "$d" >/dev/null 2>&1 || {
+    # Probed on `/`, a KNOWN-VALID operand, not on $d (roborev round 23, Medium): statting the
+    # DESTINATION here conflated "no GNU stat" with "destination missing", so an absent /etc/sysctl.d
+    # returned rc 2 and bootstrap suppressed a remedy that would have helped. Destination problems are
+    # rc 1, reported by the owner/mode read further down; rc 2 means the TOOL is incompatible.
+    stat -c '%a' -- / >/dev/null 2>&1 || {
       printf "perf-capability: UNSUPPORTED on this host: stat -c is unavailable (GNU coreutils required), so ownership and mode cannot be established before a privileged write.\n" >&2
       exit 2; }
     # THE PRECONDITION (roborev round 3): nobody less privileged than this shell may be able to
