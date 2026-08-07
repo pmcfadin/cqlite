@@ -229,6 +229,10 @@ def load_results(results_dir: str):
             excluded.append({"dir": label, "path": arm_dir, "reason": reason})
             continue
         pts = []
+        # Initialised so the handler can name a line even when open() itself raised —
+        # otherwise the diagnostic for an unreadable file is a NameError on lineno,
+        # i.e. the refusal path crashes instead of refusing.
+        lineno = 0
         try:
             with open(os.path.join(arm_dir, "points.jsonl")) as fh:
                 for lineno, line in enumerate(fh, 1):
@@ -236,10 +240,11 @@ def load_results(results_dir: str):
                     if line:
                         pts.append(json.loads(line))
         except (OSError, json.JSONDecodeError) as exc:
+            where = "at line %d" % lineno if lineno else "before the first line (open failed)"
             excluded.append({
                 "dir": label, "path": arm_dir,
-                "reason": "points.jsonl unreadable at line %d (%s: %s) — a partially "
-                          "parsed arm is not an arm" % (lineno, type(exc).__name__, exc)})
+                "reason": "points.jsonl unreadable %s (%s: %s) — a partially parsed arm "
+                          "is not an arm" % (where, type(exc).__name__, exc)})
             continue
         if not pts:
             excluded.append({
