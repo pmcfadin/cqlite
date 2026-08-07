@@ -1389,13 +1389,19 @@ printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/zz-real.conf" 2>/dev/null
 # directory removes the ordering dependency, and the refusal is now REQUIRED rather than merely allowed.
 cs_nl_dir="$cs_root/nl-sysctl.d"; rm -rf "$cs_nl_dir"; mkdir -p "$cs_nl_dir"; chmod 0755 "$cs_nl_dir"
 cs_nl_name=$(printf 'zz-nl\ncompetitor.conf')
+# BASELINE FIRST, WITHOUT the newline file, and its status REQUIRED (roborev round 30, Low). My previous
+# version ran the "ordinary" baseline while the newline-named file was ALREADY present, making it identical
+# to the refusal case, and then discarded its status with `|| true` — so the negative control controlled
+# nothing. Three iterations of this one case have now been vacuous in a different way each time; the
+# pattern in my own work is that I fix the assertion and forget to re-check that it can still reach its
+# subject. Ordinary file only -> MUST scan (rc 0). Then add the newline file -> MUST fail closed.
+printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/zz-ordinary.conf"
+cs_nl_base=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_base_rc=$?
+[ "$cs_nl_base_rc" -eq 0 ] \
+  || { bad "perf-capability: the ordinary-competitor BASELINE failed (rc=$cs_nl_base_rc, out='$cs_nl_base') — the newline refusal below would prove nothing"; cs_fail=1; }
 if printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/$cs_nl_name" 2>/dev/null; then
-  # ...baseline: the SAME isolated directory with an ordinary competitor must SCAN, so a refusal below is
-  # attributable to the newline basename and nothing else.
-  printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/zz-ordinary.conf"
-  cs_nl_base=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
-    CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
-    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_base_rc=$?
   cs_nl_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
     CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
     bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_rc=$?
@@ -1404,7 +1410,6 @@ if printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/$cs_nl_name" 2>/dev/null; th
   printf '%s' "$cs_nl_out" | grep -qx -- 'competitor.conf' \
     && { bad "perf-capability: a newline in a competitor BASENAME split into an extra reported entry (out='$cs_nl_out')"; cs_fail=1; }
   rm -f -- "$cs_nl_dir/$cs_nl_name"
-  [ "$cs_nl_base_rc" -eq 0 ] || true   # baseline recorded below; the newline file was present for it too
 else
   skip "perf-capability: newline-in-basename competitor case" "this filesystem refused to create a filename containing a newline"
 fi
