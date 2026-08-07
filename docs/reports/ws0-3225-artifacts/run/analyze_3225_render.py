@@ -263,6 +263,17 @@ def render(out):
     A("  VERDICT: %s" % ac.get("verdict", "not evaluated"))
     A("")
 
+    ec = out.get("evidence_completeness") or {}
+    A("=== EVIDENCE COMPLETENESS — were the counters actually RECORDED? ===")
+    A("  A missing per-point field reads as 0/False in every summation below, so an")
+    A("  unstamped counter would publish as a clean result. Checked, per arm, per field.")
+    for r in ec.get("per_arm", []):
+        A("  %-18s %s point(s): %s" % (
+            r.get("arm"), r.get("points"),
+            r.get("problem") or "every required counter present on every point"))
+    A("  VERDICT: %s" % ec.get("verdict", "not evaluated"))
+    A("")
+
     A("=== ADMISSION REJECTIONS (requests_unavailable) ACROSS EVERY POINT ===")
     tot = 0
     for arm in out["arms"]:

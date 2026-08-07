@@ -49,7 +49,8 @@ import statistics as st
 import sys
 
 from analyze_3225_render import render
-from analyze_3225_validity import admission_ceiling, corpus_identity
+from analyze_3225_validity import (admission_ceiling, corpus_identity,
+                                   evidence_completeness)
 
 SCHEMA = "ws0-3225.analysis/v1"
 
@@ -351,6 +352,19 @@ def analyse_arm(label, pts, arm_dir, fallback_topology, ramp_top):
         "excluded_client_saturated_count": len(excluded),
         "requests_unavailable_total_all_points": sum(
             p.get("requests_unavailable") or 0 for p in pts),
+        # Every validity claim in this analysis rests on counters that must actually BE
+        # on each point. A missing one reads as 0 / False everywhere above — an
+        # unrecorded quantity would present as a clean result, and "0 rejections over
+        # 126 points" would be a statement about points that never reported. Counted,
+        # so evidence_completeness() can refuse rather than infer.
+        "points_total": len(pts),
+        "point_fields_missing": {
+            f: sum(1 for p in pts if p.get(f) is None)
+            for f in ("requests_unavailable", "requests_error", "client_saturated",
+                      "client_cpu_utilization_of_pinned_set", "client_saturation_threshold",
+                      "server_flags", "rows_per_s_aggregate", "target_concurrency_N")
+            if sum(1 for p in pts if p.get(f) is None)
+        },
     }
 
     if peak is None:
@@ -829,6 +843,7 @@ def main() -> int:
         "ac5": ac5_block(arms, set(supp_labels)),
         "corpus_identity": corpus_identity(arms, corpus_sha_file),
         "admission_ceiling": admission_ceiling(arms),
+        "evidence_completeness": evidence_completeness(arms),
         "requests_unavailable_total_all_arms": sum(
             a["requests_unavailable_total_all_points"] for a in arms),
     }
@@ -852,8 +867,10 @@ def main() -> int:
         # #3217's committed results predate BOTH per-arm checks below, so under --smoke
         # they describe that input, not this round. Reported, never silently skipped.
         print("SMOKE (advisory, describes #3217's input): corpus identity %s | admission "
-              "ceiling %s" % (out["corpus_identity"]["state"],
-                              "PASS" if out["admission_ceiling"]["ok"] else "FAIL"),
+              "ceiling %s | evidence completeness %s"
+              % (out["corpus_identity"]["state"],
+                 "PASS" if out["admission_ceiling"]["ok"] else "FAIL",
+                 "PASS" if out["evidence_completeness"]["ok"] else "FAIL"),
               file=sys.stderr)
         return 0
 
@@ -870,6 +887,12 @@ def main() -> int:
         # admission gate. Nothing else in this analysis can see that — a throttled point
         # reports 0 rejections, because over-ceiling requests wait and then succeed.
         print("ADMISSION CEILING: %s" % out["admission_ceiling"]["verdict"], file=sys.stderr)
+        rc = 1
+    if not out["evidence_completeness"]["ok"]:
+        # Fail closed: a counter that was never stamped reads as a clean zero in every
+        # summation above, so an absent field would publish as a passing validity claim.
+        print("EVIDENCE COMPLETENESS: %s" % out["evidence_completeness"]["verdict"],
+              file=sys.stderr)
         rc = 1
     return rc
 

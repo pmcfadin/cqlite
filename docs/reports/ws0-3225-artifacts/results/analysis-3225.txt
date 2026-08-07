@@ -185,6 +185,17 @@ is re-fitted (tasks.md §2). 'vs constant 64' is positive when the formula wins.
   cn3225-s6          64         64         YES
   VERDICT: PASS: every arm recorded --max-concurrent-scans >= the largest N it drove, so the ceiling could not bind. This — not the rejection count — is the evidence: with a 30 s admission wait timeout a throttled point still reports 0 rejections.
 
+=== EVIDENCE COMPLETENESS — were the counters actually RECORDED? ===
+  A missing per-point field reads as 0/False in every summation below, so an
+  unstamped counter would publish as a clean result. Checked, per arm, per field.
+  cn3225-s1          24 point(s): every required counter present on every point
+  cn3225-s2          24 point(s): every required counter present on every point
+  cn3225-s3          24 point(s): every required counter present on every point
+  cn3225-s3-n12supp  6 point(s): every required counter present on every point
+  cn3225-s4          24 point(s): every required counter present on every point
+  cn3225-s6          24 point(s): every required counter present on every point
+  VERDICT: PASS: every point in every arm carries the counters the validity claims read, so the zeros reported above are measured zeros, not absent fields.
+
 === ADMISSION REJECTIONS (requests_unavailable) ACROSS EVERY POINT ===
   cn3225-s1          0
   cn3225-s2          0

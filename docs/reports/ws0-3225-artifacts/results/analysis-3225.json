@@ -239,6 +239,8 @@
    "excluded_client_saturated": [],
    "excluded_client_saturated_count": 0,
    "requests_unavailable_total_all_points": 0,
+   "points_total": 24,
+   "point_fields_missing": {},
    "over_admission_cost_vs_peak": [
     {
      "N": 4,
@@ -559,6 +561,8 @@
    "excluded_client_saturated": [],
    "excluded_client_saturated_count": 0,
    "requests_unavailable_total_all_points": 0,
+   "points_total": 24,
+   "point_fields_missing": {},
    "over_admission_cost_vs_peak": [
     {
      "N": 16,
@@ -863,6 +867,8 @@
    "excluded_client_saturated": [],
    "excluded_client_saturated_count": 0,
    "requests_unavailable_total_all_points": 0,
+   "points_total": 24,
+   "point_fields_missing": {},
    "over_admission_cost_vs_peak": [
     {
      "N": 24,
@@ -1018,6 +1024,8 @@
    "excluded_client_saturated": [],
    "excluded_client_saturated_count": 0,
    "requests_unavailable_total_all_points": 0,
+   "points_total": 6,
+   "point_fields_missing": {},
    "over_admission_cost_vs_peak": [
     {
      "N": 16,
@@ -1289,6 +1297,8 @@
    "excluded_client_saturated": [],
    "excluded_client_saturated_count": 0,
    "requests_unavailable_total_all_points": 0,
+   "points_total": 24,
+   "point_fields_missing": {},
    "over_admission_cost_vs_peak": [
     {
      "N": 24,
@@ -1585,6 +1595,8 @@
    "excluded_client_saturated": [],
    "excluded_client_saturated_count": 0,
    "requests_unavailable_total_all_points": 0,
+   "points_total": 24,
+   "point_fields_missing": {},
    "over_admission_cost_vs_peak": [
     {
      "N": 32,
@@ -1969,6 +1981,43 @@
   "problems": [],
   "ok": true,
   "verdict": "PASS: every arm recorded --max-concurrent-scans >= the largest N it drove, so the ceiling could not bind. This \u2014 not the rejection count \u2014 is the evidence: with a 30 s admission wait timeout a throttled point still reports 0 rejections."
+ },
+ "evidence_completeness": {
+  "per_arm": [
+   {
+    "arm": "cn3225-s1",
+    "points": 24,
+    "fields_missing": {}
+   },
+   {
+    "arm": "cn3225-s2",
+    "points": 24,
+    "fields_missing": {}
+   },
+   {
+    "arm": "cn3225-s3",
+    "points": 24,
+    "fields_missing": {}
+   },
+   {
+    "arm": "cn3225-s3-n12supp",
+    "points": 6,
+    "fields_missing": {}
+   },
+   {
+    "arm": "cn3225-s4",
+    "points": 24,
+    "fields_missing": {}
+   },
+   {
+    "arm": "cn3225-s6",
+    "points": 24,
+    "fields_missing": {}
+   }
+  ],
+  "problems": [],
+  "ok": true,
+  "verdict": "PASS: every point in every arm carries the counters the validity claims read, so the zeros reported above are measured zeros, not absent fields."
  },
  "requests_unavailable_total_all_arms": 0
 }

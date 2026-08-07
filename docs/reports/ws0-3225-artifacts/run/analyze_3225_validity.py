@@ -243,3 +243,36 @@ def admission_ceiling(arms):
         "FAIL: " + ("; ".join(out["problems"]) if out["problems"]
                     else "no arm was checked, so the ceiling is unverified"))
     return out
+
+
+def evidence_completeness(arms):
+    """Were the counters the validity claims rest on actually RECORDED on every point?
+
+    Every "0 rejections", "0 client-saturated reps" and "the ceiling was 64" statement
+    reads a per-point field. Python renders a missing field as None, and None flows
+    through `or 0`, `x == 0` and `if p.get(...)` as the CLEAN answer — so an unstamped
+    counter and a counter that measured zero are indistinguishable downstream. This
+    check is the difference: it asserts the fields were PRESENT, so the zeros above are
+    measurements rather than absences. Fails closed, per arm, naming the field.
+    """
+    out = {"per_arm": [], "problems": []}
+    for a in arms:
+        missing = a.get("point_fields_missing") or {}
+        rec = {"arm": a["arm"], "points": a.get("points_total"), "fields_missing": missing}
+        if not a.get("points_total"):
+            rec["problem"] = "%s: no points at all" % a["arm"]
+        elif missing:
+            rec["problem"] = "%s: %s" % (a["arm"], "; ".join(
+                "%s absent on %d of %d point(s)" % (f, n, a["points_total"])
+                for f, n in sorted(missing.items())))
+        if rec.get("problem"):
+            out["problems"].append(rec["problem"])
+        out["per_arm"].append(rec)
+    out["ok"] = bool(out["per_arm"]) and not out["problems"]
+    out["verdict"] = (
+        "PASS: every point in every arm carries the counters the validity claims read, so "
+        "the zeros reported above are measured zeros, not absent fields."
+        if out["ok"] else
+        "FAIL: " + ("; ".join(out["problems"]) if out["problems"]
+                    else "no arm was checked, so evidence completeness is unverified"))
+    return out
