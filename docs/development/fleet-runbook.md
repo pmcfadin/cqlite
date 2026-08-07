@@ -680,3 +680,69 @@ machine + heartbeat age (issue #2089). Interpretation:
 
 *Written 2026-07-06 from the agentic-workflow audit. Update this page in the same change whenever
 flow-* doctrine changes (doctrine-current rule).*
+
+## perf seam containment — why (relocated from `scripts/perf-capability.sh`)
+
+These rationales were moved out of the script's comments so the reviewed diff stays under
+roborev's inline limit (#3257) — the information is preserved verbatim, and each code site keeps
+a short pointer here. Boundary statements, residual pointers (#3323) and retraction records were
+deliberately NOT moved: those must be met at the code site.
+
+### line-safety-serialization
+
+```
+perf_capability_path_lines_ok: rc 0 iff <path> contains NO CR and NO LF.
+
+WHY A SEPARATE PROPERTY FROM CONTAINMENT (issue #3261, roborev round 3). This one is not a
+containment defect at all — the path IS contained — it is a SERIALIZATION defect, which is why
+nine rounds of containment work never touched it. `perf_capability_sysctl_search_path` emits its
+answer ONE ENTRY PER LINE and `perf_capability_competing_files` reads it line-wise, so a directory
+legitimately inside the sandbox but NAMED with an embedded newline —
+`<root>/name<LF>/etc/sysctl.d` — passes every containment check and is then SPLIT into two
+entries, the second of which is the host's real `/etc/sysctl.d`. One contained path became two
+paths, one of them production.
+The repo already knows this class: CLAUDE.md records the roborev guard's own `-z` invariant for
+exactly this reason — a newline-delimited path set is not a safe representation of paths, and the
+fix there was to stop using one. Here the answer is the cheaper half of the same lesson: REJECT
+the characters at the boundary rather than escape them downstream or re-plumb every consumer to
+NUL. A path with a newline in it has no legitimate use as a perf seam, so refusing it costs
+nothing and removes the ambiguity at its source. CR is rejected with LF because a CRLF host file
+would otherwise leave a stray `\r` inside a resolved entry.
+```
+
+### priv-tool-destination
+
+```
+perf_capability_priv_tool_ok <resolved-path> <tool-name>: rc 0 iff this privileged executable's
+RESOLVED destination is positively contained beneath the PROVEN sandbox root. Refuses loudly.
+
+WHY (issue #3261 AC4 — the EIGHTH escape from this guard family, and the first about an
+executable rather than a path). The shim dir was trusted TEXTUALLY: `/usr` is absolute and
+genuinely CONTAINS `/usr/bin/sudo`, so "inside the declared shim dir" passed; and a SYMLINK to
+the real `sudo`/`sysctl` placed inside a genuine shim dir is spelled locally while resolving to
+the host's binary. Either one let a privileged test-mode bootstrap run a real
+`sysctl --system` and reconfigure the host kernel — the exact mutation the marker promises
+cannot happen. Same discipline as the paths: the declared NAME is not the DESTINATION, so the
+destination is what is judged, positively, against a root that had to prove itself. The FILE
+form does the work (canonical parent + basename, and a symlinked final component is refused),
+which is also why a `/usr` shim dir fails: /usr/bin is not inside the sandbox.
+```
+
+### dropin-path-write-target
+
+```
+perf_capability_dropin_path: the path a root `tee` is pointed at. The DIRECTORY's gate lives in
+perf_capability_sysctl_dir (the single source of that directory) and RESOLVES the destination,
+so there is deliberately no second copy of it here — one gate, not a prohibition a future entry
+point could skip (R6-2).
+
+BUT DIRECTORY CONTAINMENT IS NOT WRITE-TARGET CONTAINMENT (issue #3261 AC1). A contained
+directory says nothing about where its ENTRIES point, and `tee <path>` opens
+O_WRONLY|O_CREAT|O_TRUNC and FOLLOWS a symlink — so a symlink at the managed basename inside a
+perfectly-contained directory aimed the privileged write at the LINK'S TARGET, anywhere on the
+box. The write TARGET is therefore validated too, as an O_NOFOLLOW-equivalent refusal: a
+symlink at the managed name is rc 1 + empty + a named reason, for every consumer at once
+(this function is the single source of the path). The complementary half is
+perf_capability_dropin_install, which REPLACES the directory entry instead of writing through
+it, closing the window between this check and the write.
+```
