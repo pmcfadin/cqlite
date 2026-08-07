@@ -10,6 +10,16 @@ hyphenated harness executables) from the script beside it.
 from __future__ import annotations
 
 
+def _num(v, spec="%.1f", na="n/a"):
+    """A measurement, or the fact that there is none — never a stand-in zero.
+
+    `v or 0.0` renders an ABSENT dispersion as 0.0%, i.e. as PERFECT reproducibility:
+    the best possible value, printed precisely because nothing was measured. Same for
+    an absent utilisation, which reads as an idle server. Absence gets its own token.
+    """
+    return na if v is None else spec % v
+
+
 def render(out):
     L = []
     A = L.append
@@ -40,13 +50,13 @@ def render(out):
             if not r.get("reps_valid"):
                 A("  %-4d %-5s %s" % (r["N"], "0/%d" % r["reps_total"], r["excluded"]))
                 continue
-            A("  %-4d %-5s %-12.0f %-12.0f %-12.0f %-7.1f %-12.0f %-10s %-8.3f %-8.3f %-6d" % (
+            A("  %-4d %-5s %-12.0f %-12.0f %-12.0f %-7s %-12s %-10s %-8s %-8s %-6d" % (
                 r["N"], "%d/%d" % (r["reps_valid"], r["reps_total"]),
                 r["rows_per_s_min"], r["rows_per_s_median"], r["rows_per_s_max"],
-                r["dispersion_pct_of_median"] or 0.0, r["rows_per_s_per_stream_median"] or 0.0,
-                ("%.1f" % r["latency_p50_ms_median"]) if r["latency_p50_ms_median"] is not None else "n/a",
-                r["server_cpu_util_of_pinned_set_median"] or 0.0,
-                r["client_cpu_util_of_pinned_set_median"] or 0.0,
+                _num(r["dispersion_pct_of_median"]), _num(r["rows_per_s_per_stream_median"], "%.0f"),
+                _num(r["latency_p50_ms_median"]),
+                _num(r["server_cpu_util_of_pinned_set_median"], "%.3f"),
+                _num(r["client_cpu_util_of_pinned_set_median"], "%.3f"),
                 r["requests_unavailable_total"]))
         if arm["excluded_client_saturated"]:
             A("  !!! EXCLUDED — CLIENT SATURATED (%d rep(s)); these measured the CLIENT, not the engine:"
@@ -68,11 +78,11 @@ def render(out):
                                                arm["server_hw_threads_P"], role,
                                                arm.get("peak_unavailable_reason", "no peak")))
             continue
-        A("%-18s %-3s %-4s %-11s %-6d %-11s %-14.0f %-9.1f %-8.3f" % (
+        A("%-18s %-3s %-4s %-11s %-6d %-11s %-14.0f %-9s %-8s" % (
             arm["arm"], arm["S_physical_cores"], arm["server_hw_threads_P"], role, pk["N"],
             "CENSORED" if pk["censored"] else "uncensored",
-            pk["rows_per_s_median"], pk["dispersion_pct_of_median"] or 0.0,
-            pk["server_cpu_util_of_pinned_set_median"] or 0.0))
+            pk["rows_per_s_median"], _num(pk["dispersion_pct_of_median"]),
+            _num(pk["server_cpu_util_of_pinned_set_median"], "%.3f")))
     A("CENSORED = the peak sits at the top of the measured ramp, so it is a LOWER BOUND on the")
     A("           true optimum for that width. It is NOT the same claim as an uncensored peak.")
     A("SUPPLEMENT = a second, shorter run over the SAME cpus as its primary; it does not add a")
@@ -147,9 +157,9 @@ def render(out):
         A("  %-5s %-16s %-9s %-16s %-9s %-11s %-10s" % (
             "N", "primary med", "spr%", "supplement med", "spr%", "offset", "exceeds spr?"))
         for b in br["bridge_points"]:
-            A("  %-5d %-16.0f %-9.1f %-16.0f %-9.1f %-11s %-10s" % (
-                b["N"], b["primary_rows_per_s_median"], b["primary_dispersion_pct"] or 0.0,
-                b["supplement_rows_per_s_median"], b["supplement_dispersion_pct"] or 0.0,
+            A("  %-5d %-16.0f %-9s %-16.0f %-9s %-11s %-10s" % (
+                b["N"], b["primary_rows_per_s_median"], _num(b["primary_dispersion_pct"]),
+                b["supplement_rows_per_s_median"], _num(b["supplement_dispersion_pct"]),
                 "%+.2f%%" % b["offset_pct_supplement_vs_primary"],
                 "YES" if b["offset_exceeds_within_run_dispersion"] else "no"))
         A("  run-to-run uncertainty: %.2f%% (at N=%s)" % (
@@ -165,12 +175,12 @@ def render(out):
             A("")
             continue
         w, nv = wf["within_run"], wf["naive_cross_run_splice"]
-        A("  predicted N=%d (P=%s): %.0f rows/s (spr %.1f%%) in %s" % (
+        A("  predicted N=%d (P=%s): %.0f rows/s (spr %s%%) in %s" % (
             wf["predicted_N"], wf["P_hw_threads"], w["predicted_N_rows_per_s_median"],
-            w["predicted_N_dispersion_pct"] or 0.0, w["arm"]))
-        A("  comparator N=%d in the SAME run: %.0f rows/s (spr %.1f%%)" % (
+            _num(w["predicted_N_dispersion_pct"]), w["arm"]))
+        A("  comparator N=%d in the SAME run: %.0f rows/s (spr %s%%)" % (
             w["comparator_N"], w["comparator_rows_per_s_median"],
-            w["comparator_dispersion_pct"] or 0.0))
+            _num(w["comparator_dispersion_pct"])))
         A("  WITHIN-RUN deviation: %+.2f%%   <- the number of record for this width" %
           w["predicted_vs_comparator_pct"])
         A("  naive cross-run splice (%s N=%d vs %s N=%d): %+.2f%%  [%s]" % (
@@ -188,19 +198,19 @@ def render(out):
         A("  arm %s: S=%s physical cores / P=%s hw threads. Widest IN SCOPE because %s" % (
             ac5["arm"], ac5["S_physical_cores"], ac5["P_hw_threads"], ac5["why_widest_in_scope"]))
         d = ac5["derived_point"]
-        A("  derived default N=%d: median %.0f rows/s  (min %.0f / max %.0f, spr %.1f%%, %d reps, "
-          "p50 %.1f ms, srvUtl %.3f)" % (
+        A("  derived default N=%d: median %.0f rows/s  (min %.0f / max %.0f, spr %s%%, %d reps, "
+          "p50 %s ms, srvUtl %s)" % (
               d["N"], d["rows_per_s_median"], d["rows_per_s_min"], d["rows_per_s_max"],
-              d["dispersion_pct"] or 0.0, d["reps_valid"], d["latency_p50_ms_median"] or 0.0,
-              d["server_cpu_util_of_pinned_set_median"] or 0.0))
+              _num(d["dispersion_pct"]), d["reps_valid"], _num(d["latency_p50_ms_median"]),
+              _num(d["server_cpu_util_of_pinned_set_median"], "%.3f")))
         A("  %-5s %-14s %-9s %-12s %-14s %-12s %s" % (
             "vs N", "median", "spr%", "derived gain", "> dispersion?", "reps disjoint?", "role"))
         for c in ac5["comparisons"]:
             if not c["measured"]:
                 A("  %-5d %s" % (c["N"], c["reason"]))
                 continue
-            A("  %-5d %-14.0f %-9.1f %-12s %-14s %-12s %s" % (
-                c["N"], c["rows_per_s_median"], c["dispersion_pct"] or 0.0,
+            A("  %-5d %-14.0f %-9s %-12s %-14s %-12s %s" % (
+                c["N"], c["rows_per_s_median"], _num(c["dispersion_pct"]),
                 "%+.1f%%" % c["derived_gain_pct"],
                 "YES (%.1f%%)" % c["max_dispersion_of_the_pair_pct"]
                 if c["gain_exceeds_dispersion"] else "NO",
