@@ -166,12 +166,16 @@ perf_capability_sandbox_root_into() {
   local __psr_v="${CQLITE_PERF_TEST_SANDBOX:-}"
   eval "$1="
   perf_capability_path_lines_ok "$__psr_v" || return 1
-  # ALL trailing slashes, not one (roborev round 31, Low). Stripping a single `/` left a root ending in
-  # `//` as one ending in `/`, which passed the `//` rejection below -- and then the fork-free containment
-  # pattern appended its own separator and rejected EVERY child, while the resolving write path still
-  # accepted the same root. Read and write disagreeing about the same sandbox is worse than either
-  # answer alone. The length guard keeps `/` itself from collapsing to the empty string, which the
-  # `/?*` test below then refuses on its own merits.
+  # ALL trailing slashes, not one (roborev round 31, Low). Stripping a single slash left a root ending
+  # in two slashes as one ending in one, which passed the doubled-slash rejection below -- and then the
+  # fork-free containment pattern appended its own separator and rejected EVERY child, while the
+  # resolving write path still accepted the same root. Read and write disagreeing about the same sandbox
+  # is worse than either answer alone. The length guard keeps a bare root slash from collapsing to the
+  # empty string, which the absolute-path test below then refuses on its own merits.
+  # NO BACKTICKS ANYWHERE IN THIS FUNCTION, comments included: it is in the closed fork-free audit set
+  # of scripts/tests/test_agent_gate_summary.sh, which COUNTS backticks over the whole function text and
+  # cannot tell a quoted path spelling in prose from a real command substitution. Twelve of them here
+  # reddened the gate's tooling-tests component; quote path spellings in words instead.
   while [ "${__psr_v%/}" != "$__psr_v" ] && [ "${#__psr_v}" -gt 1 ]; do __psr_v="${__psr_v%/}"; done
   case "$__psr_v" in *//*) return 1 ;; /?*) ;; *) return 1 ;; esac
   case "/$__psr_v/" in */../*|*/./*) return 1 ;; esac
