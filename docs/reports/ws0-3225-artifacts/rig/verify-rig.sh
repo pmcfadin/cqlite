@@ -34,6 +34,18 @@ emit() { printf '%s\n' "$*"; }
 PROBE_DIR="$(mktemp -d -t ws0-3225-rig-probe-XXXXXX)"
 trap 'rm -rf "$PROBE_DIR"' EXIT
 
+# The report body below runs inside a `{ ... } | tee` pipeline, i.e. in a SUBSHELL, so
+# a variable set in it cannot be read afterwards — which is why the failure verdicts
+# used to be printed and then dropped, leaving the script exiting 0 while announcing
+# that the validity guard was broken. Failures are recorded in a FILE instead, and the
+# exit status is derived from it after the pipeline. A verdict nothing acts on is not
+# a verdict.
+FAILED_CHECKS="$PROBE_DIR/failed-checks.txt"
+: > "$FAILED_CHECKS"
+fail_check() { # one-line description
+  printf '%s\n' "$1" >> "$FAILED_CHECKS"
+}
+
 {
 emit "CQLite issue #3225 §2 — MEASUREMENT RIG VERIFICATION"
 emit "===================================================="
@@ -144,6 +156,8 @@ if [ "$OVERLAP_RC" -ne 0 ] && printf '%s' "$OVERLAP_OUT" | grep -q 'CPU sets ove
   emit "  VERDICT: REFUSAL FIRED (non-zero exit + explicit overlap diagnostic naming {5,13})"
 else
   emit "  VERDICT: *** REFUSAL DID NOT FIRE — THE VALIDITY GUARD IS BROKEN, DO NOT SWEEP ***"
+  fail_check "overlap refusal did NOT fire (exit=$OVERLAP_RC, overlap diagnostic $(
+    printf '%s' "$OVERLAP_OUT" | grep -q 'CPU sets overlap' && echo present || echo absent))"
 fi
 emit ""
 emit "Control: the NON-overlapping S=3 literal-CPU-list form is accepted by the same check."
@@ -155,11 +169,33 @@ S3_OUT="$(cd "$HARNESS_DIR" && WS0_DRY_RUN=1 WS0_RESULTS="$PROBE_DIR/results" WS
   bash ./sweep.sh s3-form-probe 0-2,8-10 6,7,14,15 1,2,4,8,16,24,32,64 120 3 bypass 2>&1)"
 S3_RC=$?
 set -e
+# The control cannot be keyed on the ABSENCE of the overlap diagnostic alone: a probe
+# that died BEFORE the overlap check ever ran (moved sweep.sh, bad argument arity, no
+# python3) also produces no diagnostic, and would be read as "the check accepted this
+# set". So the pass needs AFFIRMATIVE evidence that execution got PAST the gate.
+# sweep.sh creates its output directory at the step immediately after the overlap
+# refusal, so that directory existing is exactly that evidence — and the overlap probe,
+# which dies AT the gate, must NOT have created one.
+S3_PROBE_OUTDIR="$PROBE_DIR/results/s3-form-probe"
+OVERLAP_PROBE_OUTDIR="$PROBE_DIR/results/overlap-probe"
 if printf '%s' "$S3_OUT" | grep -q 'CPU sets overlap'; then
   emit "  VERDICT: *** S=3 literal form was rejected as overlapping — the sweep matrix is wrong ***"
+  fail_check "the S=3 literal cpu-list form (0-2,8-10) was refused as overlapping the client set"
+elif [ ! -d "$S3_PROBE_OUTDIR" ]; then
+  emit "  VERDICT: *** INCONCLUSIVE — the probe produced no overlap diagnostic, but it also never"
+  emit "           reached the step AFTER the gate (no $S3_PROBE_OUTDIR). It may have died before"
+  emit "           the overlap check ran, so this is NOT evidence the check accepted the S=3 set."
+  emit "  last line: $(printf '%s\n' "$S3_OUT" | tail -1)"
+  fail_check "S=3 control inconclusive: execution never demonstrably reached past the overlap gate"
 else
   emit "  VERDICT: no overlap refusal for the S=3 literal form (correct); run reached exit $S3_RC"
+  emit "  evidence it got PAST the gate: sweep.sh created $S3_PROBE_OUTDIR, which it does only"
+  emit "    after the overlap refusal point (and the overlapping probe above created no such dir:"
+  emit "    $([ -d "$OVERLAP_PROBE_OUTDIR" ] && echo 'IT DID — the gate fired late' || echo 'confirmed absent'))"
   emit "  last line: $(printf '%s\n' "$S3_OUT" | tail -1)"
+  if [ -d "$OVERLAP_PROBE_OUTDIR" ]; then
+    fail_check "the overlapping probe created $OVERLAP_PROBE_OUTDIR — it ran past the gate before refusing"
+  fi
   emit "  NOTE: sweep.sh records server_physical_cores_S=null for a LITERAL cpu-list arm (only the"
   emit "        s1|s2|s4|s6 shorthands set it). analyze-3225.py therefore derives S from each arm's"
   emit "        cpu-topology.json sibling groups intersected with server_cpus — it never trusts a"
@@ -195,7 +231,24 @@ emit "from the #3217 record, if any, are listed here:"
 emit "  - kernel: this box $(uname -r); #3217 recorded 6.17 — record only, no measurement effect."
 emit "  - #3217's /data/ws0 corpus binaries are GONE (gitignored, never committed);"
 emit "    the corpus is regenerated for #3225. See ../corpus/corpus-geometry.txt."
+emit ""
+if [ -s "$FAILED_CHECKS" ]; then
+  emit "RIG VERIFICATION: *** FAILED *** — $(wc -l < "$FAILED_CHECKS") check(s) below did not hold."
+  emit "This script EXITS NON-ZERO. Do not sweep on this rig until each is resolved."
+  while IFS= read -r line; do emit "  - $line"; done < "$FAILED_CHECKS"
+else
+  emit "RIG VERIFICATION: all checked guards held (overlap refusal fired on an overlapping set,"
+  emit "and the S=3 literal form was demonstrably evaluated and accepted). Exit status 0."
+fi
 } | tee "$OUT"
 
 echo "" >&2
 echo "wrote $OUT" >&2
+
+# The verdict must MOVE something. Reading the marker file here is what turns the
+# printed "THE VALIDITY GUARD IS BROKEN" line into a non-zero exit an automation can
+# act on; previously the report said it and the script exited 0 regardless.
+if [ -s "$FAILED_CHECKS" ]; then
+  echo "RIG VERIFICATION FAILED: $(wc -l < "$FAILED_CHECKS") check(s) — see the '-- 8. Verdict' section of $OUT" >&2
+  exit 1
+fi
