@@ -12,12 +12,12 @@ instead of against two uncensored points. §2 **gates** §3 — do not ship the 
 
 | Path | What |
 |---|---|
-| `rig/verify-rig.sh` → `rig/rig-verification.txt` | CPU/topology/SMT/NUMA read from sysfs, competing load, `/data` capacity, and a **live demonstration** that `sweep.sh`'s server/client core-overlap refusal fires. |
+| `rig/verify-rig.sh` → `rig/rig-verification.txt` | CPU/topology/SMT/NUMA read from sysfs, competing load, `/data` capacity, and a **live demonstration** that `sweep.sh`'s server/client core-overlap refusal fires. **Exits non-zero** if any demonstrated guard does not hold. |
 | `corpus/regen-corpus.sh` | Regenerates the `ws0.events` corpus (path-parameterized adaptation of #3026's `gen-corpus.sh`). ~2.5 min. |
 | `corpus/compare-geometry.py` → `corpus/corpus-geometry.txt` | Field-by-field geometry vs #3217, every number **parsed** from a committed artifact. Exits non-zero on a material divergence. |
 | `corpus/corpus-provenance.txt` | How the corpus was made, and every deviation from #3217's recipe. |
 | `run/run-3225.sh` | The five-arm sweep driver. Restartable per arm. |
-| `run/analyze-3225.py` | Peak-N by width, over-admission cost in both currencies, formula deviation, admission rejections, three byte bases. |
+| `run/analyze-3225.py` (+ `analyze_3225_render.py`, `analyze_3225_validity.py`) | Peak-N by width, over-admission cost in both currencies, formula deviation, three byte bases, and the three fail-closed validity checks: corpus identity (per-arm content digest), admission ceiling vs ramp, evidence completeness. |
 
 Reused **unchanged** from `../ws0-3217-artifacts/harness/`: `common.sh`, `sweep.sh`,
 `emit-point.py`, `summarize-sweep.py`, `corpus-basis.py`, `selftest.sh`.
@@ -81,7 +81,21 @@ cross-checks the recomputed medians against #3217's own `partA-analysis.json`
   intersected with `server_cpus`, records **which method it used**, and reports an
   unresolvable arm as `UNRESOLVED` rather than guessing.
 - **`--max-concurrent-scans` is raised to 64 for the sweep.** `common.sh` defaults it to
-  16, at which every `N > 16` point would measure the admission gate shedding rather than
-  the concurrency curve. 64 is both the shipped default and the top of the ramp, so the
-  ceiling never binds. `analyze-3225.py` totals `requests_unavailable` across every point;
-  a non-zero total means it *did* bind and those points are not curve measurements.
+  16, at which every `N > 16` point would measure the admission gate rather than the
+  concurrency curve. 64 is both the shipped default and the top of the ramp, so the ceiling
+  could not bind — and *that* is the evidence: `analyze-3225.py`'s `admission_ceiling` check
+  reads `--max-concurrent-scans` out of every point's `server_flags` and compares it against
+  the largest N that arm drove, failing closed if any arm's ceiling is lower. `run-3225.sh`
+  refuses to start when an inherited `WS0_MAX_CONCURRENT_SCANS` is below `max(ramp)`.
+  **The rejection count cannot substitute for that check.** With
+  `--admission-wait-timeout-ms 30000` an over-ceiling request WAITS for a permit and then
+  SUCCEEDS, so `requests_unavailable` stays 0 while the curve is throttled. A non-zero total
+  still proves the ceiling bound; zero proves nothing on its own.
+- **Corpus identity is verified by a per-arm CONTENT digest, not by matching metadata.**
+  `run-3225.sh` stamps `data_db_sha256` into each arm's `corpus-basis.json`, measured
+  immediately before and after that arm. The analyzer requires every arm to carry one,
+  requires them to agree with each other and with `corpus/corpus-sha-staged.txt`, and treats
+  a MISSING digest as `UNVERIFIED` — explicitly not a pass, and a non-zero exit. The six arms
+  committed under `results/` predate the stamp, so they report `UNVERIFIED`; that is the
+  honest state, and it cannot be repaired retroactively (a digest taken now records now's
+  bytes).

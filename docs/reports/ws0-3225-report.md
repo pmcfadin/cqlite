@@ -153,6 +153,13 @@ new validity gate, new client-headroom baseline). The refusal is **demonstrated,
 `server and client CPU sets overlap on {5,13}` for a deliberately overlapping set, and the
 non-overlapping S=3 literal-CPU-list form passing the same check.
 
+That committed record is the pre-sweep capture (`2026-08-06T22:51Z`, three minutes before the first
+arm) and is deliberately **not** regenerated: its competing-load section is only meaningful at sweep
+time. `verify-rig.sh` has since been strengthened — a non-firing guard now makes it **exit non-zero**
+instead of printing a failure and exiting 0, and the S=3 control now requires affirmative evidence
+that execution reached past the overlap gate rather than merely lacking the diagnostic. Neither
+changes any field of that run: both verdicts in the committed record are the passing ones.
+
 The client is a **constant** across every width, so no arm buys throughput by taking client cores.
 Measured client utilisation of its pinned set never exceeded **0.131** (S=6, N=24) against the
 harness's 0.70 saturation gate — ~5× headroom — and **zero** points were excluded as
@@ -174,11 +181,23 @@ Server flags, identical at every point (stamped into every record as `server_fla
 ```
 
 `--max-concurrent-scans 64` is deliberate and load-bearing. The harness's `common.sh` defaults it to
-**16**, at which every `N > 16` point would measure the admission gate **shedding** rather than the
-concurrency curve. 64 is both the shipped default and the top of the ramp, so the ceiling never
-binds — and that is **verified, not assumed**: `analyze-3225.py` totals `requests_unavailable` over
-every point in every arm, and the total is **0** (also 0 errors). A non-zero total would have meant
-those points measured the gate.
+**16**, at which every `N > 16` point would measure the admission gate rather than the concurrency
+curve. 64 is both the shipped default and the top of the ramp, so the ceiling **could not bind**.
+
+That is **verified, not assumed** — but the verification is the ceiling itself, not the rejection
+count. Every point stamps its `server_flags`, and `analyze-3225.py`'s `admission_ceiling` check
+reads `--max-concurrent-scans` out of each point and compares it against the largest `N` that arm
+actually drove: **64 ≥ 64** in all five primary arms and **64 ≥ 16** in the supplement, uniformly
+across all 126 points. Since no point ever asked for more concurrent scans than the ceiling allowed,
+the gate had nothing to act on.
+
+**The zero rejection count does NOT show this, and this report no longer argues that it does.** The
+sweep runs with `--admission-wait-timeout-ms 30000`: a request arriving over the ceiling does not
+fail, it **waits** for a permit and then **succeeds**. A fully throttled curve would therefore still
+report `requests_unavailable = 0`. The measured zero (§2.6) is **corroborating** — a non-zero total
+would have been proof the ceiling bound — but it is not probative of the converse. The driver now
+also refuses to start when an inherited `WS0_MAX_CONCURRENT_SCANS` is below `max(ramp)`, which is
+where this should be caught: before the six-hour run, not in forensics afterwards.
 
 Read path: `bypass` (the merge path is out of scope for this round). Sweep parameters: ramp
 `1,2,4,8,16,24,32,64`, **120 s** steps, **3 reps**, 45 s warm, 5 s settle, seed 42, `shape=full`.
@@ -250,8 +269,27 @@ would silently mix a truncated attempt with a complete one and corrupt every med
 
 ### 2.6 Validity controls actually enforced
 
-- **Admission never bound**: `requests_unavailable` totalled **0** across all 126 points; 0 errors.
+- **The admission ceiling could not bind** — evidenced by the ceiling, not by the rejection count.
+  Every point's `server_flags` records `--max-concurrent-scans 64`, uniformly across all 126 points,
+  which is `>= max(N)` in every arm (64 in the five primaries, 16 in the supplement). The gate was
+  therefore never asked for a permit it could refuse. `requests_unavailable` did total **0** (and 0
+  errors), and that is worth recording — but it is **corroborating, not probative**: with
+  `--admission-wait-timeout-ms 30000` an over-ceiling request waits and then succeeds, so a
+  throttled curve would report 0 too. See §2.3.
 - **Client never saturated**: 0 points excluded; max client util 0.131 vs a 0.70 gate.
+- **Those zeros are measured, not absent.** A missing per-point counter would read as `0`/`False` in
+  every total above, so the analyzer's `evidence_completeness` check asserts the fields were
+  actually recorded: all 8 required counters are present on **126/126** points.
+- **Corpus byte-identity across arms is UNVERIFIED for this round, and is reported as such.** The six
+  arms agree field-by-field on stage path, `*-Data.db` count and both byte bases, and one external
+  `sha256` of the staged Data.db is recorded (§2.4) — but those are metadata: a different file of the
+  same size at the same path satisfies every one of them. The harness stamped no per-arm content
+  digest, so `analyze-3225.py` now reports corpus identity as `UNVERIFIED — NOT a pass` and exits
+  non-zero on this dataset. It cannot be repaired retroactively: a digest taken today records today's
+  bytes, not the bytes each arm read. `run-3225.sh` now measures and stamps that digest per arm
+  (before and after), so the next round answers this by measurement. The staged corpus was written
+  once, before the first arm, and nothing wrote to it during the sweep — but that is an argument from
+  the absence of a mutating step, which is exactly the kind of evidence this round stopped accepting.
 - **Server/client core exclusivity**: enforced by `sweep.sh`'s refusal, demonstrated firing (§2.2).
 - **S is never guessed.** `sweep.sh` stamps `server_physical_cores_S` only for its `s1|s2|s4|s6`
   shorthands, so the S=3 arms stamp `null`. The analyzer re-derives S from **that arm's own**
@@ -585,9 +623,9 @@ and the `profile-*` / `classify-offcpu` / `runqlat` chain (`design.md` D7).
 
 | AC | Status | Evidence |
 |--:|:--|:--|
-| 1 — peak-N-by-width reproduced and extended to the widest configuration in scope; medians of ≥3 with dispersion; throughput **and** per-scan-latency cost of over-admission at each width | ✅ | §1 Finding 1, §3, §4; 126 points, `requests_unavailable`=0; both #3217 peak locations reproduced and both censored points resolved |
+| 1 — peak-N-by-width reproduced and extended to the widest configuration in scope; medians of ≥3 with dispersion; throughput **and** per-scan-latency cost of over-admission at each width | ✅ | §1 Finding 1, §3, §4; 126 points, every one recording `--max-concurrent-scans 64` ≥ that arm's max N so the ceiling could not bind (§2.3); both #3217 peak locations reproduced and both censored points resolved |
 | 5 — no regression at the widest configuration | ✅ **improvement, not merely no regression** | §6: +8.0% vs N=16 and +7.9% vs the shipped N=64, gains exceeding dispersion with **disjoint rep ranges** |
-| 6 — every throughput figure names its byte basis; fixture geometry recorded (rows, B/row, sha256) | ✅ | §7 (three bases, never collapsed), §2.4 (3,999,890 rows, 693.07 / 196.03 B/row, sha256 recorded, geometry matched within 0.032%) |
+| 6 — every throughput figure names its byte basis; fixture geometry recorded (rows, B/row, sha256) | ✅ *(with one stated gap)* | §7 (three bases, never collapsed), §2.4 (3,999,890 rows, 693.07 / 196.03 B/row, sha256 recorded, geometry matched within 0.032%). Gap: the sha256 is one external digest of the staged corpus, not a per-arm one — arm-to-arm byte identity is reported `UNVERIFIED`, never as a pass (§2.6) |
 | non-SMT extension (optional, highest-value) | ⛔ **NOT RUN** — no non-SMT host available | §9.1; residual published in `cqlite-flight/README.md` |
 | formula gate on §3 (tasks.md §2) | ✅ **MET at all five widths** | §1 Finding 3, §5, §8 |
 
