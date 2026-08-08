@@ -1468,3 +1468,132 @@ ROOT process look unprivileged, so its root perf run was accepted as unprivilege
 and printed a false VERIFIED — the R3-1 defect, through the detector written to prevent it.
 ```
 
+### test-mode-a-proven-sandbox-root-plus-both-seam
+
+```
+test mode: a PROVEN sandbox root plus BOTH seams RESOLVING
+strictly inside it, plus every reachable sudo/sysctl inside
+an absolute declared shim dir.
+dropin_path rc 0            its directory came from `sysctl_dir`, i.e. RESOLVES inside the
+sandbox — the single gate between the bytes and a root `tee`.
+dropin_current rc 0         a BYTE-exact compare (trailing newlines included) against the
+canonical content from a read that reached EOF — a
+NUL-delimited read is NOT current (R5-3).
+```
+
+### no-symlinked-component-including-the-root-s-ow
+
+```
+NO SYMLINKED COMPONENT, including the root's own final component (roborev round 32, Medium).
+Without this the function advertised a canonically spelled root while accepting one reached
+THROUGH a symlink, and the two containment paths then disagreed about the identical root and
+child: measured rc 1 from the fork-free sandbox_ok versus rc 0 from the resolving
+sandbox_ok_resolved. One sandbox must not be both contained and not contained. REJECTING rather
+than canonicalizing is forced, not preferred: this function is in the closed fork-free audit set
+and canonicalizing would need cd -P plus pwd -P, i.e. a forked subshell. A root must be spelled
+as its own destination -- the same rule the drop-in destination and the shim tools already obey.
+```
+
+### the-containment-predicate-and-the-only-place-a
+
+```
+THE containment predicate, and the only place a path is ever judged: rc 0 iff <path> is
+absolute, canonically spelled (no `.`, `..` or `//` component — `//etc` IS `/etc`, R6-1),
+free of CR/LF (so a contained path can never SERIALIZE into two entries, roborev round 3)
+and STRICTLY inside <root>, with the `/` boundary explicit so `/tmp/sandboxevil` is NOT
+inside `/tmp/sandbox`. An empty root refuses; it is never a wildcard.
+The line check lives HERE, in the one predicate every entry point ends in, for the same reason
+containment does: one choke point cannot be skipped by a future consumer.
+```
+
+### perf-capability-nosymlink-rc-0-iff-path-is-abs
+
+```
+perf_capability_nosymlink: rc 0 iff <path> is absolute and NO path component — the final one
+INCLUDED — is a symlink. FORK-FREE: `[ -L ]` is a shell builtin test, so this is usable on the
+gate's contractually fork-free token path, where `cd -P`/`pwd -P` (a subshell, i.e. a process)
+is not.
+
+WHY (issue #3261 AC2). Containment of a SPELLING is not containment of a DESTINATION. The
+inversion to positive containment made the fork-free read check purely textual and thereby
+(rationale condensed; full reasoning in the commit history for #3261.)
+```
+
+### the-file-variant-judged-as-canonical-parent-ba
+
+```
+The FILE variant. Judged as <CANONICAL PARENT>/<basename> (issue #3261 AC3): canonicalizing the
+parent and asking whether THE PARENT is contained refused `<sandbox-root>/sysctl.conf`, because
+the parent there IS the root and a root is not STRICTLY inside itself — a legitimate,
+strictly-contained file rejected, which is how a guard teaches people to route around it. The
+assembled path is the thing being authorized, so it is the thing judged.
+The final component may not be a SYMLINK (the AC1 lesson, here on a read whose CONTENTS are
+consumed): a symlinked `sysctl.conf` inside the sandbox would feed the competing-file scan the
+host's real configuration.
+```
+
+### the-into-outvar-convention-the-gate-s-summary
+
+```
+THE `*_into <outvar>` CONVENTION. The gate's summary path calls the token chain below and
+is contractually FREE — no external process AND no command substitution (each `$( )` forks
+a subshell, which is a process too). A function that answers on stdout therefore CANNOT be
+on that path: its caller must fork to read it. So every function the gate touches has an
+`_into <outvar>` core assigning through a caller-named variable, and the stdout-printing
+form is a thin wrapper for CLI/bootstrap ergonomics — the wrapper is the ONLY place a fork
+is paid, and it is not on the gate's path. Assignment is `eval "$1=\$var"`, NOT a
+(rationale condensed; full reasoning in the commit history for #3261.)
+```
+
+### normalise-before-the-gate-exactly-as-the-sandb
+
+```
+NORMALISE BEFORE THE GATE, exactly as the sandbox root does (roborev round 33, Low). Stripping
+after the containment check left the two halves inconsistent: the ROOT accepted a "//" trailing
+spelling while PROC_DIR refused the identical one, because the gate saw the raw value. Callers
+join with "/$name", so an unnormalised trailing slash also built a "//" entry path that the
+entry-level check then refused -- surfacing as the capability verdict "absent" rather than as a
+refusal, i.e. a mere spelling became a definite negative claim about the host, in the one
+function the gate's perf= token comes from. INTERIOR "//" stays refused: only trailing
+separators are normalised, and a non-canonical spelling is still not a destination.
+```
+
+### trailing-slashes-are-stripped-before-any-check
+
+```
+TRAILING SLASHES ARE STRIPPED BEFORE ANY CHECK OR PATH CONSTRUCTION (roborev round 10, Low).
+`[ -L "$d" ]` FOLLOWS a trailing slash: for a symlinked directory `link`, `[ -L link ]` is true
+but `[ -L link/ ]` and `[ -L link// ]` are FALSE, so the destination-symlink refusal this
+function explicitly promises could be walked past with one extra character. Stripping is the
+right shape here and NOT another spelling denylist: normalising the input to ONE canonical form
+makes the affirmative check total, whereas enumerating bad spellings is the unbounded game this
+family lost eleven times. The length guard keeps `/` itself from becoming the empty string —
+a root destination then fails the ownership/writability precondition on its own merits rather
+than by accident.
+```
+
+### content-is-generated-and-checked-before-any-pr
+
+```
+CONTENT IS GENERATED AND CHECKED **BEFORE** ANY PRIVILEGED COMMAND RUNS (roborev round 9,
+Medium). This used to pipe the generator straight into the privileged shell, so the pipeline's
+status was the LAST command's and a failed generator was invisible unless the CALLER happened to
+have `pipefail` set — a correctness property no library function should delegate to its caller.
+Worse, the privileged write would already have started on empty or partial content. Generating
+first means a generator failure returns before privilege is acquired at all. Same sentinel trick
+as dropin_current, for the same reason: `$( )` strips trailing newlines, and the drop-in's final
+newline is part of the canonical bytes the idempotency compare comes back for.
+```
+
+### zero-pad-before-taking-the-last-three-digits-s
+
+```
+ZERO-PAD BEFORE TAKING THE LAST THREE DIGITS. `stat -c %a` drops leading zeros, so mode 0033
+arrives as "33" — and `${dmode%???}` cannot match a 2-character string, leaving `dperm` EMPTY,
+matching none of the write-bit patterns below, and PASSING a group- AND world-writable
+directory. That was a real bypass of this very precondition (roborev round 5, High), and it
+survived a hand audit that reasoned about the 3- and 4-digit cases and never considered a
+SHORTER one. The suffix-strip idiom is only safe once the string is known to be long enough,
+so the padding is not cosmetic: it is what makes the check below total.
+```
+

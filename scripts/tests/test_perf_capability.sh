@@ -1648,6 +1648,39 @@ else
   skip "perf-capability: install-probe cases (no rm before the absence proof; a working-but-failing mv is rc 1, not UNSUPPORTED)" "no GNU stat -c / mv --no-target-directory on this host"
 fi
 
+# 1c-viii. THE RESOLVING VALIDATORS REQUIRE AN ABSOLUTE, CANONICAL SPELLING (roborev round 35, Medium).
+# They judged only the canonicalized result while consumers keep the ORIGINAL argument, so a RELATIVE
+# candidate was authorized against THIS shell's cwd and re-resolved against a different one later --
+# the privileged installer runs its own shell. What remains after this fix (a verdict returned while
+# the resolved path is discarded, so the name is resolved twice) is #3323 entry 5, the closed family.
+rs_fail=0
+rs_root=$(mktemp -d "$tmp/rs.XXXXXX"); : >"$rs_root/.cqlite-perf-sandbox"
+mkdir -p "$rs_root/inside"; chmod 0755 "$rs_root" "$rs_root/inside"
+: >"$rs_root/inside/file.conf"
+rs_probe() {  # <fn> <candidate> [cwd] -> rc
+  ( [ -n "${3:-}" ] && cd -- "$3" || true
+    env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$rs_root" \
+      bash -c '. "$1"; "$2" "$3"' _ "$PERFLIB" "$1" "$2" >/dev/null 2>&1 )
+}
+# CONTROL: the absolute canonical spellings must be ACCEPTED, or the refusals below prove nothing.
+rs_probe perf_capability_sandbox_ok_resolved "$rs_root/inside" \
+  || { bad "perf-capability: sandbox_ok_resolved refused the absolute canonical directory, so the cases below prove nothing"; rs_fail=1; }
+rs_probe perf_capability_sandbox_file_ok_resolved "$rs_root/inside/file.conf" \
+  || { bad "perf-capability: sandbox_file_ok_resolved refused the absolute canonical file, so the cases below prove nothing"; rs_fail=1; }
+# (a) a RELATIVE candidate that resolves INSIDE the sandbox from the current cwd must still be refused
+! rs_probe perf_capability_sandbox_ok_resolved "inside" "$rs_root" \
+  || { bad "perf-capability: sandbox_ok_resolved ACCEPTED the relative spelling 'inside' because it resolved inside the sandbox from this cwd — the same spelling means a different directory from another cwd"; rs_fail=1; }
+! rs_probe perf_capability_sandbox_file_ok_resolved "inside/file.conf" "$rs_root" \
+  || { bad "perf-capability: sandbox_file_ok_resolved ACCEPTED the relative spelling 'inside/file.conf'"; rs_fail=1; }
+# (b) and a NON-CANONICAL absolute spelling, which resolves inside but is not spelled as a destination
+! rs_probe perf_capability_sandbox_ok_resolved "$rs_root/./inside" \
+  || { bad "perf-capability: sandbox_ok_resolved ACCEPTED a '/./' spelling"; rs_fail=1; }
+! rs_probe perf_capability_sandbox_ok_resolved "$rs_root/inside/../inside" \
+  || { bad "perf-capability: sandbox_ok_resolved ACCEPTED a '/../' spelling"; rs_fail=1; }
+! rs_probe perf_capability_sandbox_file_ok_resolved "$rs_root/./inside/file.conf" \
+  || { bad "perf-capability: sandbox_file_ok_resolved ACCEPTED a '/./' spelling"; rs_fail=1; }
+[ "$rs_fail" -ne 0 ] || ok "perf-capability: both RESOLVING validators refuse a relative candidate (even one resolving inside the sandbox from the current cwd) and a non-canonical './' or '../' absolute spelling, while accepting the absolute canonical spelling of the same directory and file (#3261 roborev-35)"
+
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
 perf_test_report

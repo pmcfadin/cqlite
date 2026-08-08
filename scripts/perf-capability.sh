@@ -38,13 +38,7 @@
 #   state = dropped:sudo        numeric uid only (sudo's `#<uid>` form) — no name trusted.
 #   env_guard rc 0              production: NO test seam set (paths are hardcoded literals).
 #                               test mode: a PROVEN sandbox root plus BOTH seams RESOLVING
-#                               strictly inside it, plus every reachable sudo/sysctl inside
-#                               an absolute declared shim dir.
-#   dropin_path rc 0            its directory came from `sysctl_dir`, i.e. RESOLVES inside the
-#                               sandbox — the single gate between the bytes and a root `tee`.
-#   dropin_current rc 0         a BYTE-exact compare (trailing newlines included) against the
-#                               canonical content from a read that reached EOF — a
-#                               NUL-delimited read is NOT current (R5-3).
+# (full rationale: fleet-runbook.md, perf seam containment, test-mode-a-proven-sandbox-root-plus-both-seam)
 # KNOWN RESIDUALS, deliberately not papered over:
 #   * "dropped:<mech>" asserts the mechanism was INVOKED; it cannot prove the kernel changed
 # (full rationale: fleet-runbook.md, perf seam containment, dropped-mech-asserts-the-mechanism-was-invoke)
@@ -103,25 +97,14 @@ perf_capability_sandbox_root_into() {
   case "$__psr_v" in *//*) return 1 ;; /?*) ;; *) return 1 ;; esac
   case "/$__psr_v/" in */../*|*/./*) return 1 ;; esac
   # NO SYMLINKED COMPONENT, including the root's own final component (roborev round 32, Medium).
-  # Without this the function advertised a canonically spelled root while accepting one reached
-  # THROUGH a symlink, and the two containment paths then disagreed about the identical root and
-  # child: measured rc 1 from the fork-free sandbox_ok versus rc 0 from the resolving
-  # sandbox_ok_resolved. One sandbox must not be both contained and not contained. REJECTING rather
-  # than canonicalizing is forced, not preferred: this function is in the closed fork-free audit set
-  # and canonicalizing would need cd -P plus pwd -P, i.e. a forked subshell. A root must be spelled
-  # as its own destination -- the same rule the drop-in destination and the shim tools already obey.
+  # (full rationale: fleet-runbook.md, perf seam containment, no-symlinked-component-including-the-root-s-ow)
   perf_capability_nosymlink "$__psr_v" || return 1
   [ -d "$__psr_v" ] && [ -f "$__psr_v/$PERF_CAPABILITY_SANDBOX_STAMP" ] || return 1
   eval "$1=\$__psr_v"
 }
 
 # THE containment predicate, and the only place a path is ever judged: rc 0 iff <path> is
-# absolute, canonically spelled (no `.`, `..` or `//` component — `//etc` IS `/etc`, R6-1),
-# free of CR/LF (so a contained path can never SERIALIZE into two entries, roborev round 3)
-# and STRICTLY inside <root>, with the `/` boundary explicit so `/tmp/sandboxevil` is NOT
-# inside `/tmp/sandbox`. An empty root refuses; it is never a wildcard.
-# The line check lives HERE, in the one predicate every entry point ends in, for the same reason
-# containment does: one choke point cannot be skipped by a future consumer.
+# (full rationale: fleet-runbook.md, perf seam containment, the-containment-predicate-and-the-only-place-a)
 perf_capability_path_within() {
   [ -n "${2:-}" ] || return 1
   perf_capability_path_lines_ok "${1:-}" || return 1
@@ -133,13 +116,7 @@ perf_capability_path_within() {
 }
 
 # perf_capability_nosymlink: rc 0 iff <path> is absolute and NO path component — the final one
-# INCLUDED — is a symlink. FORK-FREE: `[ -L ]` is a shell builtin test, so this is usable on the
-# gate's contractually fork-free token path, where `cd -P`/`pwd -P` (a subshell, i.e. a process)
-# is not.
-#
-# WHY (issue #3261 AC2). Containment of a SPELLING is not containment of a DESTINATION. The
-# inversion to positive containment made the fork-free read check purely textual and thereby
-# (rationale condensed; full reasoning in the commit history for #3261.)
+# (full rationale: fleet-runbook.md, perf seam containment, perf-capability-nosymlink-rc-0-iff-path-is-abs)
 perf_capability_nosymlink() {
   local __pns_rest="${1:-}" __pns_acc='' __pns_seg
   case "$__pns_rest" in /*) ;; *) return 1 ;; esac
@@ -171,6 +148,14 @@ perf_capability_sandbox_ok_resolved() {
   # one-per-line search path into two entries. The CR/LF guard was added in round 3 for exactly that
   # split; it was simply running too late to see it. Order matters more than the predicate here.
   perf_capability_path_lines_ok "${1:-}" || return 1
+  # THE ORIGINAL SPELLING MUST BE ABSOLUTE AND CANONICAL (roborev round 35, Medium). These validators
+  # judged only the CANONICALIZED result while every consumer keeps using the ORIGINAL argument, so a
+  # RELATIVE candidate was authorized against the cwd of this shell and then re-resolved against a
+  # different cwd later -- the privileged installer runs its own shell, and a command prefix that
+  # changes directory changes what the same spelling means. Same rule sandbox_root_into has always
+  # enforced for the root: a path is a DESTINATION only if it is spelled as one.
+  case "${1:-}" in /*) ;; *) return 1 ;; esac
+  case "/${1:-}/" in */../*|*/./*) return 1 ;; esac
   perf_capability_sandbox_root_into __pdr_root || return 1
 # RESIDUAL — #3323 entry 3: bind mounts defeat lexical containment. `cd -P`/`pwd -P` resolve
 # symlinks but not MOUNTS, so a bind-mounted sandbox path looks contained. Deliberately unfixed:
@@ -178,22 +163,24 @@ perf_capability_sandbox_ok_resolved() {
 # escape class is CLOSED by owner ruling. Read #3323 before widening this trust.
   __pdr_root=$(cd -P -- "$__pdr_root" 2>/dev/null && pwd -P) || return 1
   __pdr_real=$(cd -P -- "${1:-/dev/null/never}" 2>/dev/null && pwd -P) || return 1
+  # RESIDUAL — #3323 entry 5: with the spelling now pinned absolute+canonical, what REMAINS is that
+  # this function returns a VERDICT and discards the resolved path, so consumers re-resolve the same
+  # name and a component swapped in between can move the destination. That is the validate-name /
+  # re-resolve family, CLOSED by owner ruling — recorded here, not re-attempted. The fix is to return
+  # the canonical path and hold it (ultimately fd-relative opens), not another name-based check.
   perf_capability_path_within "$__pdr_real" "${__pdr_root%/}"
 }
 
 # The FILE variant. Judged as <CANONICAL PARENT>/<basename> (issue #3261 AC3): canonicalizing the
-# parent and asking whether THE PARENT is contained refused `<sandbox-root>/sysctl.conf`, because
-# the parent there IS the root and a root is not STRICTLY inside itself — a legitimate,
-# strictly-contained file rejected, which is how a guard teaches people to route around it. The
-# assembled path is the thing being authorized, so it is the thing judged.
-# The final component may not be a SYMLINK (the AC1 lesson, here on a read whose CONTENTS are
-# consumed): a symlinked `sysctl.conf` inside the sandbox would feed the competing-file scan the
-# host's real configuration.
+# (full rationale: fleet-runbook.md, perf seam containment, the-file-variant-judged-as-canonical-parent-ba)
 perf_capability_sandbox_file_ok_resolved() {
   # Same ordering fix as the directory variant (roborev round 12, Medium): checked on the ORIGINAL
   # argument, so a file whose PARENT ends in LF cannot launder the newline through `pwd -P`.
   perf_capability_path_lines_ok "${1:-}" || return 1
-  case "${1:-}" in */?*) ;; *) return 1 ;; esac
+  # Absolute + canonical on the ORIGINAL argument, for the reason given in the directory variant
+  # above (roborev round 35, Medium): a relative spelling means different files from different cwds.
+  case "${1:-}" in /*/?*) ;; *) return 1 ;; esac
+  case "/${1:-}/" in */../*|*/./*) return 1 ;; esac
   local __pfr_base="${1##*/}" __pfr_root='' __pfr_parent=''
   case "$__pfr_base" in ''|.|..) return 1 ;; esac
   if [ -L "$1" ]; then return 1; fi
@@ -292,24 +279,12 @@ perf_capability_priv_tool_ok() {
 
 # ---- resolved locations (the seams apply ONLY in test mode) -------------------
 # THE `*_into <outvar>` CONVENTION. The gate's summary path calls the token chain below and
-# is contractually FREE — no external process AND no command substitution (each `$( )` forks
-# a subshell, which is a process too). A function that answers on stdout therefore CANNOT be
-# on that path: its caller must fork to read it. So every function the gate touches has an
-# `_into <outvar>` core assigning through a caller-named variable, and the stdout-printing
-# form is a thin wrapper for CLI/bootstrap ergonomics — the wrapper is the ONLY place a fork
-# is paid, and it is not on the gate's path. Assignment is `eval "$1=\$var"`, NOT a
-# (rationale condensed; full reasoning in the commit history for #3261.)
+# (full rationale: fleet-runbook.md, perf seam containment, the-into-outvar-convention-the-gate-s-summary)
 perf_capability_proc_dir_into() {
   eval "$1="
   if perf_capability_test_mode; then
     # NORMALISE BEFORE THE GATE, exactly as the sandbox root does (roborev round 33, Low). Stripping
-    # after the containment check left the two halves inconsistent: the ROOT accepted a "//" trailing
-    # spelling while PROC_DIR refused the identical one, because the gate saw the raw value. Callers
-    # join with "/$name", so an unnormalised trailing slash also built a "//" entry path that the
-    # entry-level check then refused -- surfacing as the capability verdict "absent" rather than as a
-    # refusal, i.e. a mere spelling became a definite negative claim about the host, in the one
-    # function the gate's perf= token comes from. INTERIOR "//" stays refused: only trailing
-    # separators are normalised, and a non-canonical spelling is still not a destination.
+    # (full rationale: fleet-runbook.md, perf seam containment, normalise-before-the-gate-exactly-as-the-sandb)
     local __ppd_v="${CQLITE_PERF_PROC_DIR:-}"
     while [ "${__ppd_v%/}" != "$__ppd_v" ] && [ "${#__ppd_v}" -gt 1 ]; do __ppd_v="${__ppd_v%/}"; done
     perf_capability_sandbox_ok "$__ppd_v" || {
@@ -366,24 +341,11 @@ perf_capability_dropin_install() {
   local __pin_d __pin_p __pin_rc
   __pin_d=$(perf_capability_sysctl_dir) || return 1
   # TRAILING SLASHES ARE STRIPPED BEFORE ANY CHECK OR PATH CONSTRUCTION (roborev round 10, Low).
-  # `[ -L "$d" ]` FOLLOWS a trailing slash: for a symlinked directory `link`, `[ -L link ]` is true
-  # but `[ -L link/ ]` and `[ -L link// ]` are FALSE, so the destination-symlink refusal this
-  # function explicitly promises could be walked past with one extra character. Stripping is the
-  # right shape here and NOT another spelling denylist: normalising the input to ONE canonical form
-  # makes the affirmative check total, whereas enumerating bad spellings is the unbounded game this
-  # family lost eleven times. The length guard keeps `/` itself from becoming the empty string —
-  # a root destination then fails the ownership/writability precondition on its own merits rather
-  # than by accident.
+  # (full rationale: fleet-runbook.md, perf seam containment, trailing-slashes-are-stripped-before-any-check)
   while [ "${__pin_d%/}" != "$__pin_d" ] && [ "${#__pin_d}" -gt 1 ]; do __pin_d="${__pin_d%/}"; done
   __pin_p="$__pin_d/$PERF_CAPABILITY_DROPIN_BASENAME"
   # CONTENT IS GENERATED AND CHECKED **BEFORE** ANY PRIVILEGED COMMAND RUNS (roborev round 9,
-  # Medium). This used to pipe the generator straight into the privileged shell, so the pipeline's
-  # status was the LAST command's and a failed generator was invisible unless the CALLER happened to
-  # have `pipefail` set — a correctness property no library function should delegate to its caller.
-  # Worse, the privileged write would already have started on empty or partial content. Generating
-  # first means a generator failure returns before privilege is acquired at all. Same sentinel trick
-  # as dropin_current, for the same reason: `$( )` strips trailing newlines, and the drop-in's final
-  # newline is part of the canonical bytes the idempotency compare comes back for.
+  # (full rationale: fleet-runbook.md, perf seam containment, content-is-generated-and-checked-before-any-pr)
   local __pin_c
   __pin_c=$(perf_capability_dropin_content; __pdc_rc=$?; printf 'X'; exit "$__pdc_rc") || return 1
   __pin_c=${__pin_c%X}
@@ -430,12 +392,7 @@ perf_capability_dropin_install() {
       exit 1; }
     downer=${dinfo%% *}; dmode=${dinfo##* }
     # ZERO-PAD BEFORE TAKING THE LAST THREE DIGITS. `stat -c %a` drops leading zeros, so mode 0033
-    # arrives as "33" — and `${dmode%???}` cannot match a 2-character string, leaving `dperm` EMPTY,
-    # matching none of the write-bit patterns below, and PASSING a group- AND world-writable
-    # directory. That was a real bypass of this very precondition (roborev round 5, High), and it
-    # survived a hand audit that reasoned about the 3- and 4-digit cases and never considered a
-    # SHORTER one. The suffix-strip idiom is only safe once the string is known to be long enough,
-    # so the padding is not cosmetic: it is what makes the check below total.
+    # (full rationale: fleet-runbook.md, perf seam containment, zero-pad-before-taking-the-last-three-digits-s)
     case "$dmode" in
       ?)   dperm="00$dmode" ;;
       ??)  dperm="0$dmode" ;;
