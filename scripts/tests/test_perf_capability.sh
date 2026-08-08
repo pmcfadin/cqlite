@@ -1608,6 +1608,46 @@ for ps_spell in "$ps_proc/" "$ps_proc//"; do
 done
 [ "$ps_fail" -ne 0 ] || ok "perf-capability: a contained PROC_DIR spelled with one or two trailing slashes yields the SAME capability token as its unslashed spelling, so a spelling can no longer become a definite 'absent' claim about the host (#3261 roborev-33)"
 
+# 1c-vii. THE PROBE DELETES NOTHING IT DID NOT CREATE, and a WORKING mv that FAILS is not an
+# (full rationale: fleet-runbook.md, perf seam containment, 1c-vii-the-probe-deletes-nothing-it-did-not-cr)
+if perf_install_supported; then
+  pb_fail=0
+  # (a) A PRE-EXISTING probe entry must be REFUSED, and must SURVIVE. The name embeds the PID of the
+  # privileged shell, which the harness cannot predict, so the shim mv creates the collision itself:
+  # it plants the sibling name on its first call, which is the probe rename.
+  pb_root=$(mktemp -d "$tmp/pb.XXXXXX"); : >"$pb_root/.cqlite-perf-sandbox"
+  pb_d="$pb_root/sysctl.d"; mkdir -p "$pb_d"; chmod 0755 "$pb_root" "$pb_d"
+  pb_victim="$pb_d/.perfcap-probe.victim"; printf 'PRECIOUS\n' >"$pb_victim"
+  # A self-contained shim dir, the same shape the UNSUPPORTED cases use: it is both PATH and the
+  # declared TEST_PRIV_DIR, so the guard's privileged-tool containment is satisfied by construction.
+  pb_bin=$(mktemp -d "$tmp/pbbin.XXXXXX")
+  for pb_t in bash sh cat printf tee rm chmod env grep mktemp id ls stat; do
+    pb_p=$(command -v "$pb_t" 2>/dev/null) && ln -sf "$pb_p" "$pb_bin/$pb_t"
+  done
+  # An mv that ADVERTISES -T and then fails the rename: the Low half's subject.
+  printf '%s\n' '#!/bin/sh' 'case "$1" in --help) printf -- "--no-target-directory\n"; exit 0 ;; esac' 'exit 1' \
+    >"$pb_bin/mv"; chmod +x "$pb_bin/mv"
+  pb_out=$(env PATH="$pb_bin" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$pb_root" \
+    CQLITE_PERF_SYSCTL_DIR="$pb_d" CQLITE_PERF_PROC_DIR="$pb_root" \
+    CQLITE_PERF_TEST_PRIV_DIR="$pb_bin" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); pb_rc=$?
+  [ "$pb_rc" -eq 1 ] \
+    || { bad "perf-capability: an mv that ADVERTISES --no-target-directory but fails the rename gave rc=$pb_rc, not rc 1 — a working-but-failing mv is being reported as an unsupported host, which suppresses the retry remedy (out='$pb_out')"; pb_fail=1; }
+  printf '%s' "$pb_out" | grep -q 'NOT an unsupported host' \
+    || { bad "perf-capability: the rename-probe failure did not say it is NOT an unsupported host: '$pb_out'"; pb_fail=1; }
+  [ "$(cat "$pb_victim" 2>/dev/null)" = PRECIOUS ] \
+    || { bad "perf-capability: a pre-existing .perfcap-probe.* entry was DELETED or truncated by the probe"; pb_fail=1; }
+  # (b) STRUCTURAL, because the PID collision itself cannot be staged from outside: the probe must
+  # carry no delete before its absence proof. The rm that remains must sit AFTER the proof.
+  pb_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
+  pb_before=$(printf '%s\n' "$pb_body" | awk '/\[ -e "\$__x1" \]/{exit} /rm -f -- "\$__x1"/{c++} END{print c+0}')
+  [ "$pb_before" -eq 0 ] \
+    || { bad "perf-capability: the probe deletes \$__x1/\$__x2 ($pb_before time(s)) BEFORE proving they are absent — after PID reuse that destroys an unrelated file under privilege"; pb_fail=1; }
+  [ "$pb_fail" -ne 0 ] || ok "perf-capability: the install probe deletes no entry it did not create (no rm before the absence proof, and a pre-existing probe-named file survives untouched), and an mv that advertises -T but fails the rename is rc 1 with a retry-worthy diagnostic rather than rc 2 UNSUPPORTED (#3261 roborev-34)"
+else
+  skip "perf-capability: install-probe cases (no rm before the absence proof; a working-but-failing mv is rc 1, not UNSUPPORTED)" "no GNU stat -c / mv --no-target-directory on this host"
+fi
+
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
 perf_test_report

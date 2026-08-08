@@ -1369,3 +1369,102 @@ test_perf_capability.sh (1c-iv): every CQLITE_PERF_* name the library reads, min
 itself, must appear below — so adding a seam without listing it here FAILS the suite.
 ```
 
+### 1c-vii-the-probe-deletes-nothing-it-did-not-cr
+
+```
+1c-vii. THE PROBE DELETES NOTHING IT DID NOT CREATE, and a WORKING mv that FAILS is not an
+unsupported host (roborev round 34: Medium + Low). The probe used to rm -f its predictable
+".perfcap-probe.<pid>" names before proving absence, so a stale entry -- or, after PID reuse, an
+unrelated file -- was silently deleted under privilege; the round-21 absence proof closed the
+symlink-truncation hazard but left the delete itself. And every rename failure was reported as
+rc 2 UNSUPPORTED, so a filesystem or mount-policy failure suppressed the retry remedy precisely
+where retrying is right. These cases need GNU staging, so they ride the same capability gate.
+```
+
+### the-production-paths-below-are-hardcoded-liter
+
+```
+The PRODUCTION paths below are HARDCODED LITERALS (/etc/sysctl.d, /proc/sys/kernel) because
+bootstrap installs the drop-in through the STAGED installer below (mktemp + atomic rename, no
+`tee <path>`): were that path env-derived, one stray
+export (say CQLITE_PERF_SYSCTL_DIR=/etc/sudoers.d) would make ROOT write an
+attacker/accident-chosen file while the real drop-in was never installed — and an unparsable
+sudoers entry can wedge `sudo` outright. Likewise an env-chosen /proc stand-in would let a
+paranoid-4 box print a FABRICATED "verified" verdict. So the seams take effect ONLY under
+the explicit marker, and the marker is itself hermetic: with it set, a REAL `sudo`/`sysctl`
+reachable on PATH is a hard refusal (the suite PATH-shims both and declares the shim
+directory), so test mode can never reach a real privileged tool.
+CQLITE_PERF_TEST_MODE=1     the marker; without it every seam below is INERT
+CQLITE_PERF_TEST_SANDBOX    THE SANDBOX ROOT — the one absolute directory every other
+seam must be provably INSIDE (test mode only)
+```
+
+### dropped-mech-asserts-the-mechanism-was-invoke
+
+```
+* "dropped:<mech>" asserts the mechanism was INVOKED; it cannot prove the kernel changed
+uid. Harmless by construction: the caller's verdict is `token = ok` AND the functional
+pass, and a box whose /proc says ok IS profileable unprivileged, so a mislabelled drop
+cannot manufacture a capability that is absent.
+* the READ-side containment check is SYNTACTIC (fork-free, gate contract) while every
+write / host-config read canonicalizes — SAME predicate, different input form. The read
+side judges the spelling, so a symlinked ancestor INSIDE the sandbox could still steer a
+test-mode /proc STAND-IN read. Bounded by that path's whole contract: the seams are
+honoured only under the test marker, which is never set in production, and nothing there
+writes — so the worst case is a read of a caller-chosen file reported as
+`absent`/`unknown`, never a fabricated capability.
+
+```
+
+### one-gate-positive-sandbox-containment-review
+
+```
+---- ONE GATE: POSITIVE SANDBOX CONTAINMENT (review R6-1/R6-2) --------------------
+THE sandbox root is caller-declared (CQLITE_PERF_TEST_SANDBOX) and must PROVE itself: an
+absolute, canonically spelled, existing directory carrying the stamp file below. The stamp is
+what makes the declaration unforgeable by environment alone — a stray
+CQLITE_PERF_TEST_SANDBOX=/etc cannot turn /etc into a sandbox, because the proof lives on the
+FILESYSTEM and writing it into a system directory already needs the privilege this guard
+protects. No denylist appears below: a path is usable because it is provably INSIDE the
+sandbox, never because it failed to look like somewhere forbidden.
+
+FIVE thin functions, ONE predicate — everything ends in perf_capability_path_within:
+sandbox_root_into O        the declared root, validated; rc 1 + empty when unproven
+path_within P R            THE predicate (below)
+(rationale condensed; full reasoning in the commit history for #3261.)
+```
+
+### mv-t-is-exercised-here-after-the-ownership-pre
+
+```
+mv -T IS EXERCISED HERE, AFTER the ownership precondition and BEFORE the real staging entry.
+Placement is deliberate on both sides. AFTER the precondition, because that is what establishes
+no less-privileged actor can create entries in $d — which is precisely what makes a PREDICTABLE
+probe name safe, so this does not need (and must not consume) mktemp. NOT consuming mktemp also
+keeps it from pre-empting the staging entry checks below, which have their own cases.
+-T SUPPORT IS QUERIED, NEVER INFERRED FROM A FAILED RENAME (roborev round 34, Low). Treating
+every probe-rename failure as "no GNU mv" misdiagnosed filesystem errors, mount policy and
+transient conditions as an unsupported HOST, which made bootstrap suppress the retry remedy in
+exactly the cases where retrying is the right advice. Capability and outcome are now separate
+questions: this asks whether -T exists, the rename below asks whether it works here.
+```
+
+### arguably-the-most-likely-one-since-installing
+
+```
+(arguably the most likely one, since installing the drop-in needs root). A root-run
+functional check reported as "perf capability verified" is therefore a FALSE verification
+of an unprofileable box: the failure mode the functional check exists to remove,
+reintroduced through the privilege dimension. The property under test is "an UNPRIVILEGED
+process can collect CPU-WIDE cycles", which a root-run probe cannot demonstrate — so the
+probe DROPS PRIVILEGE when it can and SAYS SO when it cannot, and the caller then
+subordinates the functional result to the identity-independent /proc token.
+
+perf_capability_self_uid_into <outvar>: THIS process's uid, rc 0 ONLY when genuinely known
+— `id -u` must EXIST, exit 0, and print a validated non-negative integer. rc 1 (<outvar>
+emptied) means "identity unknown", which is NOT "unprivileged" (review R4-1). The previous
+shape, `$(id -u 2>/dev/null || echo 1000)`, FAILED OPEN: a missing or broken `id` made a
+ROOT process look unprivileged, so its root perf run was accepted as unprivileged evidence
+and printed a false VERIFIED — the R3-1 defect, through the detector written to prevent it.
+```
+

@@ -6,18 +6,7 @@
 # (full rationale: fleet-runbook.md, perf seam containment, b4)
 # TEST-ONLY ENV SEAMS — INERT UNLESS CQLITE_PERF_TEST_MODE=1 (issue #3249 review).
 # The PRODUCTION paths below are HARDCODED LITERALS (/etc/sysctl.d, /proc/sys/kernel) because
-# bootstrap installs the drop-in through the STAGED installer below (mktemp + atomic rename, no
-# `tee <path>`): were that path env-derived, one stray
-# export (say CQLITE_PERF_SYSCTL_DIR=/etc/sudoers.d) would make ROOT write an
-# attacker/accident-chosen file while the real drop-in was never installed — and an unparsable
-# sudoers entry can wedge `sudo` outright. Likewise an env-chosen /proc stand-in would let a
-# paranoid-4 box print a FABRICATED "verified" verdict. So the seams take effect ONLY under
-# the explicit marker, and the marker is itself hermetic: with it set, a REAL `sudo`/`sysctl`
-# reachable on PATH is a hard refusal (the suite PATH-shims both and declares the shim
-# directory), so test mode can never reach a real privileged tool.
-#   CQLITE_PERF_TEST_MODE=1     the marker; without it every seam below is INERT
-#   CQLITE_PERF_TEST_SANDBOX    THE SANDBOX ROOT — the one absolute directory every other
-#                               seam must be provably INSIDE (test mode only)
+# (full rationale: fleet-runbook.md, perf seam containment, the-production-paths-below-are-hardcoded-liter)
 #   CQLITE_PERF_PROC_DIR        stand-in for /proc/sys/kernel   (test mode only)
 #   CQLITE_PERF_SYSCTL_DIR      stand-in for /etc/sysctl.d      (test mode only)
 #   CQLITE_PERF_SYSCTL_EXTRA_DIRS  colon-separated stand-ins for the LOWER-precedence
@@ -58,17 +47,7 @@
 #                               NUL-delimited read is NOT current (R5-3).
 # KNOWN RESIDUALS, deliberately not papered over:
 #   * "dropped:<mech>" asserts the mechanism was INVOKED; it cannot prove the kernel changed
-#     uid. Harmless by construction: the caller's verdict is `token = ok` AND the functional
-#     pass, and a box whose /proc says ok IS profileable unprivileged, so a mislabelled drop
-#     cannot manufacture a capability that is absent.
-#   * the READ-side containment check is SYNTACTIC (fork-free, gate contract) while every
-#     write / host-config read canonicalizes — SAME predicate, different input form. The read
-#     side judges the spelling, so a symlinked ancestor INSIDE the sandbox could still steer a
-#     test-mode /proc STAND-IN read. Bounded by that path's whole contract: the seams are
-#     honoured only under the test marker, which is never set in production, and nothing there
-#     writes — so the worst case is a read of a caller-chosen file reported as
-#     `absent`/`unknown`, never a fabricated capability.
-#
+# (full rationale: fleet-runbook.md, perf seam containment, dropped-mech-asserts-the-mechanism-was-invoke)
 # ---- production locations: HARDCODED. Never env-derived outside test mode. ----
 PERF_CAPABILITY_PROC_DIR_DEFAULT='/proc/sys/kernel'
 PERF_CAPABILITY_SYSCTL_DIR_DEFAULT='/etc/sysctl.d'
@@ -86,18 +65,7 @@ perf_capability_seam_set() {
 }
 
 # ---- ONE GATE: POSITIVE SANDBOX CONTAINMENT (review R6-1/R6-2) --------------------
-# THE sandbox root is caller-declared (CQLITE_PERF_TEST_SANDBOX) and must PROVE itself: an
-# absolute, canonically spelled, existing directory carrying the stamp file below. The stamp is
-# what makes the declaration unforgeable by environment alone — a stray
-# CQLITE_PERF_TEST_SANDBOX=/etc cannot turn /etc into a sandbox, because the proof lives on the
-# FILESYSTEM and writing it into a system directory already needs the privilege this guard
-# protects. No denylist appears below: a path is usable because it is provably INSIDE the
-# sandbox, never because it failed to look like somewhere forbidden.
-#
-# FIVE thin functions, ONE predicate — everything ends in perf_capability_path_within:
-#   sandbox_root_into O        the declared root, validated; rc 1 + empty when unproven
-#   path_within P R            THE predicate (below)
-# (rationale condensed; full reasoning in the commit history for #3261.)
+# (full rationale: fleet-runbook.md, perf seam containment, one-gate-positive-sandbox-containment-review)
 PERF_CAPABILITY_SANDBOX_STAMP='.cqlite-perf-sandbox'
 # A literal LF and CR, for the line-safety predicate below. Spelled as a literal newline inside
 # single quotes rather than `$'\n'` so this stays correct on bash 3.2 (a supported gate host).
@@ -489,18 +457,18 @@ perf_capability_dropin_install() {
         exit 1 ;;
     esac
     # mv -T IS EXERCISED HERE, AFTER the ownership precondition and BEFORE the real staging entry.
-    # Placement is deliberate on both sides. AFTER the precondition, because that is what establishes
-    # no less-privileged actor can create entries in $d — which is precisely what makes a PREDICTABLE
-    # probe name safe, so this does not need (and must not consume) mktemp. NOT consuming mktemp also
-    # keeps it from pre-empting the staging entry checks below, which have their own cases.
+    # (full rationale: fleet-runbook.md, perf seam containment, mv-t-is-exercised-here-after-the-ownership-pre)
+    if ! mv --help 2>&1 | grep -q -- '--no-target-directory'; then
+      printf "perf-capability: UNSUPPORTED on this host: mv --no-target-directory (-T) is unavailable (GNU coreutils required), so the drop-in cannot be replaced atomically without risking a symlinked destination.\n" >&2
+      exit 2
+    fi
     __x1="$d/.perfcap-probe.$$"; __x2="$__x1.b"
-    rm -f -- "$__x1" "$__x2" 2>/dev/null
     # ABSENCE IS PROVEN, NOT ASSUMED (roborev round 21, High). `rm` can fail (read-only mount) and its
     # status was ignored, and `: >` FOLLOWS a symlink — so a leftover link at this predictable name
     # could truncate an arbitrary file under privilege. The mode precondition proves nobody
     # less-privileged can CREATE entries here, not that a pre-existing one was removed.
     if [ -e "$__x1" ] || [ -L "$__x1" ] || [ -e "$__x2" ] || [ -L "$__x2" ]; then
-      printf "perf-capability: REFUSING: probe entries under %s could not be cleared, so opening them could follow a leftover symlink under privilege.\n" "$d" >&2
+      printf "perf-capability: REFUSING: a probe entry already exists at %s (or its .b sibling). Nothing here deletes an entry it did not create: this name embeds a PID, so after PID reuse it can belong to an unrelated file, and a leftover SYMLINK there would be followed under privilege. Inspect it and remove it yourself.\n" "$__x1" >&2
       exit 1
     fi
     # CREATION FAILURE IS ITS OWN OUTCOME (roborev round 21, Low): sharing one branch with the `mv`
@@ -514,9 +482,11 @@ perf_capability_dropin_install() {
       exit 1
     fi
     if ! mv -fT -- "$__x1" "$__x2" 2>/dev/null; then
+      # Both names were created by THIS invocation (absence was proven above), so removing them here
+      # cannot destroy anything it did not make -- the property the refusal above protects.
       rm -f -- "$__x1" "$__x2" 2>/dev/null
-      printf "perf-capability: UNSUPPORTED on this host: mv --no-target-directory (-T) does not work (GNU coreutils required), so the drop-in cannot be replaced atomically without risking a symlinked destination.\n" >&2
-      exit 2
+      printf "perf-capability: REFUSING: the atomic-rename probe in %s failed even though this mv advertises --no-target-directory, so this is an ordinary installation failure (filesystem error, mount policy or a transient condition), NOT an unsupported host. Retrying may help.\n" "$d" >&2
+      exit 1
     fi
     rm -f -- "$__x2" 2>/dev/null
     t=$(mktemp -- "$d/.$b.XXXXXX") || exit 1
@@ -844,19 +814,7 @@ perf_capability_token() {
 # unprivileged agent process still gets EACCES — and `sudo bash
 # scripts/bootstrap-agent-machine.sh` is a completely normal provisioning invocation
 # (arguably the most likely one, since installing the drop-in needs root). A root-run
-# functional check reported as "perf capability verified" is therefore a FALSE verification
-# of an unprofileable box: the failure mode the functional check exists to remove,
-# reintroduced through the privilege dimension. The property under test is "an UNPRIVILEGED
-# process can collect CPU-WIDE cycles", which a root-run probe cannot demonstrate — so the
-# probe DROPS PRIVILEGE when it can and SAYS SO when it cannot, and the caller then
-# subordinates the functional result to the identity-independent /proc token.
-#
-# perf_capability_self_uid_into <outvar>: THIS process's uid, rc 0 ONLY when genuinely known
-# — `id -u` must EXIST, exit 0, and print a validated non-negative integer. rc 1 (<outvar>
-# emptied) means "identity unknown", which is NOT "unprivileged" (review R4-1). The previous
-# shape, `$(id -u 2>/dev/null || echo 1000)`, FAILED OPEN: a missing or broken `id` made a
-# ROOT process look unprivileged, so its root perf run was accepted as unprivileged evidence
-# and printed a false VERIFIED — the R3-1 defect, through the detector written to prevent it.
+# (full rationale: fleet-runbook.md, perf seam containment, arguably-the-most-likely-one-since-installing)
 perf_capability_self_uid_into() {
   local __psu_v=''
   eval "$1="
