@@ -1542,8 +1542,12 @@ env -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
   bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" >/dev/null 2>&1 || seam_base_rc=$?
 [ "$seam_base_rc" -eq 0 ] \
   || { bad "perf-capability: the env guard REFUSED with no seam set at all (rc=$seam_base_rc) — the per-seam refusals below would prove nothing"; seam_each_fail=1; }
+# EVERY seam is unset per iteration, not just the marker (roborev round 33, Low, and it was RIGHT).
+# (full rationale: fleet-runbook.md, perf seam containment, every-seam-is-unset-per-iteration-not-just-the)
 for seam_name in $seam_census; do
-  seam_out=$(env -u CQLITE_PERF_TEST_MODE "$seam_name=$tmp/markerless-seam" \
+  seam_out=$(env -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
+    -u CQLITE_PERF_TEST_SANDBOX -u CQLITE_PERF_SYSCTL_EXTRA_DIRS -u CQLITE_PERF_TEST_PRIV_DIR \
+    "$seam_name=$tmp/markerless-seam" \
     bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); seam_rc=$?
   [ "$seam_rc" -ne 0 ] \
     || { bad "perf-capability: $seam_name set WITHOUT the marker was ACCEPTED by the env guard (rc=0, out='$seam_out') — a test-only seam is live on the production path"; seam_each_fail=1; }
@@ -1582,6 +1586,27 @@ for sr_case in "root-is-symlink:$sr_link:$sr_link/child" "symlinked-ancestor:$sr
 done
 rm -f -- "$sr_link" "$sr_alink"
 [ "$sr_fail" -ne 0 ] || ok "perf-capability: a sandbox root that IS a symlink, and one reached through a symlinked ANCESTOR, are refused IDENTICALLY by the fork-free and the resolving containment paths, while the canonical spelling of the same directory is accepted by both (#3261 roborev-32)"
+
+# 1c-vi. A TRAILING-SLASH PROC_DIR READS, rather than reporting the host "absent" (roborev round 33).
+# Callers join with "/$name", so "<dir>/" became "<dir>//perf_event_paranoid": contained by the
+# directory gate, refused by the entry gate, and surfaced as the capability verdict absent -- a
+# spelling turned into a definite negative claim about the host, in the one function the gate's perf=
+# token comes from. The control asserts the SAME sandbox without the slash gives the same answer.
+ps_fail=0
+ps_root=$(mktemp -d "$tmp/ps.XXXXXX"); : >"$ps_root/.cqlite-perf-sandbox"
+ps_proc="$ps_root/proc"; mkdir -p "$ps_proc"; chmod 0755 "$ps_root" "$ps_proc"
+printf '0\n' >"$ps_proc/perf_event_paranoid"; printf '0\n' >"$ps_proc/kptr_restrict"
+ps_plain=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ps_root" \
+  CQLITE_PERF_PROC_DIR="$ps_proc" bash "$PERFLIB" --token 2>/dev/null)
+[ "$ps_plain" = ok ] \
+  || { bad "perf-capability: the unslashed PROC_DIR control did not yield token 'ok' (got '$ps_plain'), so the trailing-slash case below proves nothing"; ps_fail=1; }
+for ps_spell in "$ps_proc/" "$ps_proc//"; do
+  ps_tok=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ps_root" \
+    CQLITE_PERF_PROC_DIR="$ps_spell" bash "$PERFLIB" --token 2>/dev/null)
+  [ "$ps_tok" = "$ps_plain" ] \
+    || { bad "perf-capability: PROC_DIR spelled '$ps_spell' yielded token '$ps_tok' but the same directory unslashed yielded '$ps_plain' — a trailing slash changed a capability verdict"; ps_fail=1; }
+done
+[ "$ps_fail" -ne 0 ] || ok "perf-capability: a contained PROC_DIR spelled with one or two trailing slashes yields the SAME capability token as its unslashed spelling, so a spelling can no longer become a definite 'absent' claim about the host (#3261 roborev-33)"
 
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean

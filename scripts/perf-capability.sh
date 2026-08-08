@@ -26,20 +26,7 @@
 #                               optional, test mode only
 #   CQLITE_PERF_TEST_PRIV_DIR   absolute dir holding the suite's sudo/sysctl shims
 #
-# POSITIVE CONTAINMENT, NOT A LIST OF FORBIDDEN PLACES (review R6-1/R6-2). Four rounds each
-# closed ONE MORE SPELLING of "the production directory": the raw path (B3), a symlinked seam,
-# `..` (R5-1), then `//etc` (R6-1 — POSIX leaves two leading slashes implementation-defined,
-# `pwd -P` may PRESERVE them, and on Linux `//etc` IS `/etc`). A denylist over path spellings
-# cannot be completed — `.`, `..`, symlinks, `//`, trailing slashes, bind mounts,
-# `/proc/self/root/…` all name the same directory — and scattered prohibitions also let a NEW
-# entry point silently miss them (R6-2). So the rule is INVERTED and there is exactly ONE: a
-# seam is usable IFF it is strictly contained in the declared sandbox root. Every spelling of
-# "somewhere else", including every future one, fails that single check for the same reason.
-# TEST MODE HAS NO FALLBACK (R4-3). Under the marker the sandbox root and BOTH path seams are
-# MANDATORY. The earlier shape — marker set, seam unset, fall back to the real directory —
-# meant test mode could pass the env guard (sudo/sysctl absent, or present as declared shims)
-# and a subsequent root `--yes` run would `tee` the REAL /etc/sysctl.d, mutating the host from
-# a test run. "Hermetic" cannot be a claim that depends on a variable being set.
+# (full rationale: fleet-runbook.md, perf seam containment, b27)
 
 # FAIL-OPEN AUDIT — every path that can reach a POSITIVE verdict, and what validates it
 # (review round 4; four findings in this file were one defect class: "identity/state unknown
@@ -91,19 +78,7 @@ PERF_CAPABILITY_DROPIN_BASENAME='99-cqlite-perf.conf'
 perf_capability_test_mode() { [ "${CQLITE_PERF_TEST_MODE:-}" = 1 ]; }
 
 # perf_capability_seam_set: rc 0 iff ANY test-only seam is non-empty. The ONE
-# seam reader outside the containment gate below, and deliberately so: it asks only
-# "was a seam handed to us at all" (for the marker-less refusal) and never uses the
-# VALUE as a path. The structural audit in test_perf_capability.sh allowlists it by
-# name, so a future function cannot join it silently.
-#
-# EVERY non-marker seam MUST be listed here (roborev round 32, Medium). This named only PROC_DIR
-# and SYSCTL_DIR while the file had grown three more, so any of those exported WITHOUT the marker
-# passed the guard — the marker-less refusal failing OPEN, which is the same incomplete-list-of-
-# names shape this whole file exists to avoid. The round-6 audit that was supposed to protect this
-# policed WHICH FUNCTIONS may read a seam, never WHICH SEAMS this list must name, so it was blind
-# to an omission by construction. The completeness direction is now enforced by CENSUS in
-# test_perf_capability.sh (1c-iv): every CQLITE_PERF_* name the library reads, minus the marker
-# itself, must appear below — so adding a seam without listing it here FAILS the suite.
+# (full rationale: fleet-runbook.md, perf seam containment, perf-capability-seam-set-rc-0-iff-any-test-onl)
 perf_capability_seam_set() {
   [ -n "${CQLITE_PERF_PROC_DIR:-}" ] || [ -n "${CQLITE_PERF_SYSCTL_DIR:-}" ] \
     || [ -n "${CQLITE_PERF_TEST_SANDBOX:-}" ] || [ -n "${CQLITE_PERF_SYSCTL_EXTRA_DIRS:-}" ] \
@@ -359,12 +334,22 @@ perf_capability_priv_tool_ok() {
 perf_capability_proc_dir_into() {
   eval "$1="
   if perf_capability_test_mode; then
-    perf_capability_sandbox_ok "${CQLITE_PERF_PROC_DIR:-}" || {
+    # NORMALISE BEFORE THE GATE, exactly as the sandbox root does (roborev round 33, Low). Stripping
+    # after the containment check left the two halves inconsistent: the ROOT accepted a "//" trailing
+    # spelling while PROC_DIR refused the identical one, because the gate saw the raw value. Callers
+    # join with "/$name", so an unnormalised trailing slash also built a "//" entry path that the
+    # entry-level check then refused -- surfacing as the capability verdict "absent" rather than as a
+    # refusal, i.e. a mere spelling became a definite negative claim about the host, in the one
+    # function the gate's perf= token comes from. INTERIOR "//" stays refused: only trailing
+    # separators are normalised, and a non-canonical spelling is still not a destination.
+    local __ppd_v="${CQLITE_PERF_PROC_DIR:-}"
+    while [ "${__ppd_v%/}" != "$__ppd_v" ] && [ "${#__ppd_v}" -gt 1 ]; do __ppd_v="${__ppd_v%/}"; done
+    perf_capability_sandbox_ok "$__ppd_v" || {
       printf 'perf-capability: REFUSING to read /proc: CQLITE_PERF_TEST_MODE=1 with CQLITE_PERF_PROC_DIR (%s) not INSIDE the declared sandbox %s — test mode never falls back to %s.\n' \
         "'${CQLITE_PERF_PROC_DIR:-<unset>}'" "'${CQLITE_PERF_TEST_SANDBOX:-<unset>}'" "$PERF_CAPABILITY_PROC_DIR_DEFAULT" >&2
       return 1
     }
-    eval "$1=\$CQLITE_PERF_PROC_DIR"
+    eval "$1=\$__ppd_v"
     return 0
   fi
   eval "$1=\$PERF_CAPABILITY_PROC_DIR_DEFAULT"

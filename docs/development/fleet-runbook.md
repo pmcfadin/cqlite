@@ -1318,3 +1318,54 @@ are capability-probed and COUNTED-skipped off GNU (roborev round 5). Neither por
 the repo scans this file, so nothing mechanically protects the gate; recorded, not papered over.
 ```
 
+### every-seam-is-unset-per-iteration-not-just-the
+
+```
+EVERY seam is unset per iteration, not just the marker (roborev round 33, Low, and it was RIGHT).
+perf-capability-test-lib.sh:156 EXPORTS CQLITE_PERF_TEST_SANDBOX suite-wide, so leaving it set made
+seam_set answer true through the INHERITED variable no matter which seam was under test. It was
+invisible for the worst possible reason: before the fix seam_set did not NAME that seam, so the loop
+measured correctly and went red for exactly the three missing ones -- the very fix that turned it
+green is what would have made it vacuous. A negative control confirmed the repair: with seam_set
+reverted to its two-name form, this loop fails again on those three seams.
+```
+
+### b27
+
+```
+
+POSITIVE CONTAINMENT, NOT A LIST OF FORBIDDEN PLACES (review R6-1/R6-2). Four rounds each
+closed ONE MORE SPELLING of "the production directory": the raw path (B3), a symlinked seam,
+`..` (R5-1), then `//etc` (R6-1 — POSIX leaves two leading slashes implementation-defined,
+`pwd -P` may PRESERVE them, and on Linux `//etc` IS `/etc`). A denylist over path spellings
+cannot be completed — `.`, `..`, symlinks, `//`, trailing slashes, bind mounts,
+`/proc/self/root/…` all name the same directory — and scattered prohibitions also let a NEW
+entry point silently miss them (R6-2). So the rule is INVERTED and there is exactly ONE: a
+seam is usable IFF it is strictly contained in the declared sandbox root. Every spelling of
+"somewhere else", including every future one, fails that single check for the same reason.
+TEST MODE HAS NO FALLBACK (R4-3). Under the marker the sandbox root and BOTH path seams are
+MANDATORY. The earlier shape — marker set, seam unset, fall back to the real directory —
+meant test mode could pass the env guard (sudo/sysctl absent, or present as declared shims)
+and a subsequent root `--yes` run would `tee` the REAL /etc/sysctl.d, mutating the host from
+a test run. "Hermetic" cannot be a claim that depends on a variable being set.
+```
+
+### perf-capability-seam-set-rc-0-iff-any-test-onl
+
+```
+perf_capability_seam_set: rc 0 iff ANY test-only seam is non-empty. The ONE
+seam reader outside the containment gate below, and deliberately so: it asks only
+"was a seam handed to us at all" (for the marker-less refusal) and never uses the
+VALUE as a path. The structural audit in test_perf_capability.sh allowlists it by
+name, so a future function cannot join it silently.
+
+EVERY non-marker seam MUST be listed here (roborev round 32, Medium). This named only PROC_DIR
+and SYSCTL_DIR while the file had grown three more, so any of those exported WITHOUT the marker
+passed the guard — the marker-less refusal failing OPEN, which is the same incomplete-list-of-
+names shape this whole file exists to avoid. The round-6 audit that was supposed to protect this
+policed WHICH FUNCTIONS may read a seam, never WHICH SEAMS this list must name, so it was blind
+to an omission by construction. The completeness direction is now enforced by CENSUS in
+test_perf_capability.sh (1c-iv): every CQLITE_PERF_* name the library reads, minus the marker
+itself, must appear below — so adding a seam without listing it here FAILS the suite.
+```
+
